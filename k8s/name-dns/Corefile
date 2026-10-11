@@ -1,0 +1,11 @@
+${DOMAIN}:53 {
+    bind ${PLATFORM_IP}
+    template IN A ${DOMAIN} {
+        answer "{{ .Name }} 60 IN A ${PLATFORM_IP}"
+    }
+    template IN AAAA ${DOMAIN} {
+        rcode NOERROR
+    }
+    health 127.0.0.1:8054
+    errors
+}

@@ -1,0 +1,25 @@
+# Shared by the three oauth2-proxy releases (node-red and portal in
+# deploy-infra.sh, config in apps/frontend/deploy.sh). Bitnami chart 8.0.2,
+# official oauth2-proxy image. Per-release values (client, secrets, hostnames,
+# TLS host list) stay as --set in the scripts.
+image:
+  registry: quay.io
+  repository: oauth2-proxy/oauth2-proxy
+  tag: v7.6.0
+global:
+  security:
+    allowInsecureImages: true
+redis:
+  enabled: false
+# Explicit: unset resources fall back to Bitnami's "nano" preset.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+ingress:
+  enabled: true
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "4"

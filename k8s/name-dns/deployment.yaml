@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: name-dns
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  # Two pods cannot both bind PLATFORM_IP:53 on the host network.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: name-dns
+  template:
+    metadata:
+      labels:
+        app: name-dns
+      annotations:
+        medcea/corefile: "${_COREFILE_SUM}"
+    spec:
+      hostNetwork: true
+      dnsPolicy: Default
+      containers:
+      - name: coredns
+        image: coredns/coredns:1.11.3
+        args: ["-conf", "/etc/coredns/Corefile"]
+        securityContext:
+          capabilities:
+            add: ["NET_BIND_SERVICE"]
+        readinessProbe:
+          httpGet:
+            host: 127.0.0.1
+            path: /health
+            port: 8054
+          periodSeconds: 5
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 64Mi}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/coredns
+      volumes:
+      - name: config
+        configMap:
+          name: name-dns

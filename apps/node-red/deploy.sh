@@ -19,6 +19,7 @@ if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     exit 1
 fi
 source "$REPO_ROOT/config.env"
+source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 
 NAMESPACE="${NAMESPACE:-medcea}"
 NR_LOCAL_PORT="${NR_LOCAL_PORT:-1880}"
@@ -45,21 +46,22 @@ echo "==> [1/3] Applying database schema..."
 # ---------------------------------------------------------------------------
 echo "==> [2/3] Setting up Node-RED port-forward..."
 
-NR_POD=$(microk8s kubectl get pod \
+NR_POD=$($KUBECTL get pod \
     -n "$NAMESPACE" \
     -l "app.kubernetes.io/name=node-red" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    -o jsonpath='{.items[0].metadata.name}' || true)
+# stderr kept, failure tolerated: see apps/database/deploy.sh (silent set -e exit).
 
 if [[ -z "$NR_POD" ]]; then
     echo "ERROR: No Node-RED pod found in namespace $NAMESPACE" >&2
-    echo "       Check: sudo microk8s kubectl get pods -n $NAMESPACE" >&2
+    echo "       Check: microk8s kubectl get pods -n $NAMESPACE" >&2
     exit 1
 fi
 
 echo "    Pod: $NR_POD"
 
 # Start port-forward in background; kill it on exit
-microk8s kubectl port-forward \
+$KUBECTL port-forward \
     -n "$NAMESPACE" \
     "pod/$NR_POD" \
     "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log &

@@ -7,6 +7,7 @@
 # Usage:
 #   ./deploy-apps.sh           # interactive checkbox menu
 #   ./deploy-apps.sh --all     # install all without prompting
+#   ./deploy-apps.sh --uninstall [--purge-data] [component ...]
 #   ./deploy-apps.sh --help
 
 set -euo pipefail
@@ -29,17 +30,112 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<EOF
-Usage: ./deploy-apps.sh [--all | --help]
+Usage: ./deploy-apps.sh [--all | --uninstall [--purge-data] [component ...] | --help]
 
   (no args)   Interactive checkbox menu — toggle components, then confirm
   --all       Install all components without prompting
+  --uninstall Remove app components (all, or the ones named) by running each
+              apps/<component>/uninstall.sh. Infrastructure keeps running and
+              database contents are kept.
+  --purge-data  With --uninstall of database (or of everything): also drop
+              medcea_db and its roles. Asks for the project name to confirm.
   --help      Show this message
+
+Components: $(find "$APPS_DIR" -mindepth 2 -maxdepth 2 -name deploy.sh -printf '%h\n' | xargs -n1 basename | sort | tr '\n' ' ')
 EOF
     exit 0
 fi
 
 INSTALL_ALL=false
 [[ "${1:-}" == "--all" ]] && INSTALL_ALL=true
+UNINSTALL=false
+PURGE_DATA=false
+declare -a UNINSTALL_ONLY=()
+if [[ "${1:-}" == "--uninstall" ]]; then
+    UNINSTALL=true
+    shift
+    for _a in "$@"; do
+        case "$_a" in
+            --purge-data) PURGE_DATA=true ;;
+            -*) echo "Unknown option: $_a (see --help)" >&2; exit 1 ;;
+            *)  UNINSTALL_ONLY+=("$_a") ;;
+        esac
+    done
+fi
+
+# Host packages (curl, python3, ...) — the same check deploy-infra.sh runs, for
+# when apps are deployed on their own. Before logging, so the prompt is not teed.
+source "$REPO_ROOT/infra/lib-prereqs.sh"
+check_prereqs
+
+# ---------------------------------------------------------------------------
+# Uninstall — each component's apps/<component>/uninstall.sh, in reverse
+# install order (install is alphabetical, so database goes last: the apps that
+# use it are gone before it is dropped).
+# ---------------------------------------------------------------------------
+if $UNINSTALL; then
+    declare -a TARGETS=()
+    while IFS= read -r _u; do
+        TARGETS+=("$(basename "$(dirname "$_u")")")
+    done < <(find "$APPS_DIR" -mindepth 2 -maxdepth 2 -name "uninstall.sh" | sort -r)
+    if [[ ${#UNINSTALL_ONLY[@]} -gt 0 ]]; then
+        for _c in "${UNINSTALL_ONLY[@]}"; do
+            [[ -f "$APPS_DIR/$_c/uninstall.sh" ]] \
+                || { echo -e "${RED}Unknown component '$_c'. Components with an uninstall: ${TARGETS[*]}${NC}" >&2; exit 1; }
+        done
+        declare -a _kept=()
+        for _c in "${TARGETS[@]}"; do
+            printf '%s\n' "${UNINSTALL_ONLY[@]}" | grep -qx "$_c" && _kept+=("$_c")
+        done
+        TARGETS=("${_kept[@]}")
+    fi
+    _db=false; printf '%s\n' "${TARGETS[@]}" | grep -qx database && _db=true
+    if $PURGE_DATA && ! $_db; then
+        echo -e "${RED}--purge-data only applies when 'database' is uninstalled too.${NC}" >&2; exit 1
+    fi
+
+    echo -e "${BOLD}This removes these app components:${NC} ${TARGETS[*]}"
+    echo "  Infrastructure (Postgres, Keycloak, Grafana, Node-RED, portal, ...) keeps running."
+    if $PURGE_DATA; then
+        echo -e "  ${RED}--purge-data: database '${POSTGRES_DB:-medcea_db}' and ALL its data are dropped permanently.${NC}"
+    elif $_db; then
+        echo "  Database contents are kept (add --purge-data to drop them)."
+    fi
+    # install.sh asks once and sets MEDCEA_CONFIRMED; standalone use asks here.
+    if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
+        [[ -t 0 ]] || { echo -e "${RED}Refusing to uninstall without a terminal to confirm on.${NC}" >&2; exit 1; }
+        read -r -p "Type 'apps' to confirm: " _ok || exit 1
+        [[ "$_ok" == "apps" ]] || { echo "Aborted."; exit 0; }
+        if $PURGE_DATA; then
+            source "$REPO_ROOT/config.env"
+            read -r -p "Type the project name ('$PROJECT_NAME') to drop the database: " _ok || exit 1
+            [[ "$_ok" == "$PROJECT_NAME" ]] || { echo "Aborted."; exit 0; }
+        fi
+    fi
+
+    LOG_DIR="$REPO_ROOT/logs"; mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/uninstall-apps-$(date +%Y%m%d-%H%M%S).log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+    echo "Log: $LOG_FILE"
+
+    FAILED=()
+    for component in "${TARGETS[@]}"; do
+        echo ""
+        echo -e "${YELLOW}━━━ Removing: $component ━━━${NC}"
+        _args=(); [[ "$component" == "database" ]] && $PURGE_DATA && _args=(--purge-data)
+        if bash "$APPS_DIR/$component/uninstall.sh" "${_args[@]}"; then
+            echo -e "${GREEN}✓ $component removed${NC}"
+        else
+            echo -e "${RED}✗ $component FAILED${NC}"; FAILED+=("$component")
+        fi
+    done
+    echo ""
+    if [[ ${#FAILED[@]} -gt 0 ]]; then
+        echo -e "${RED}Failed: ${FAILED[*]} — see $LOG_FILE. Re-running is safe.${NC}"; exit 1
+    fi
+    echo -e "${GREEN}Apps removed. Reinstall with: ./install.sh --apps-only${NC}"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Logging — tee all output to logs/deploy-apps-<timestamp>.log

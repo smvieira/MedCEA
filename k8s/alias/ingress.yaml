@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${ALIAS_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    medcea/alias: "true"
+  annotations:
+    nginx.ingress.kubernetes.io/permanent-redirect: "${ALIAS_TARGET}"
+spec:
+  ingressClassName: public
+  tls:
+  - hosts: [${ALIAS_HOST}]
+    secretName: cea-tls
+  rules:
+  - host: ${ALIAS_HOST}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: portal
+            port:
+              number: 80

@@ -1,0 +1,130 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: recipe-fileserver
+  namespace: ${NAMESPACE}
+data:
+  server.py: |
+    import os, json, socket, time
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import unquote
+
+    RECIPES_DIR    = '/recipes'
+    DEVICES_DIR    = '/devices'
+    UNITS_DIR      = '/units'
+    LOCATIONS_DIR  = '/locations'
+
+    def _resolve(path):
+        """Returns (base_dir, fname_or_None, is_list)."""
+        if path.startswith('/devices'):
+            rest = path[len('/devices'):]
+            if rest in ('', '/'):
+                return DEVICES_DIR, None, True
+            fname = unquote(rest.lstrip('/'))
+            if '/' in fname or not fname.endswith('.json'):
+                return DEVICES_DIR, None, False  # invalid
+            return DEVICES_DIR, fname, False
+        elif path.startswith('/locations'):
+            rest = path[len('/locations'):]
+            if rest in ('', '/'):
+                return LOCATIONS_DIR, None, True
+            fname = unquote(rest.lstrip('/'))
+            if '/' in fname or not fname.endswith('.json'):
+                return LOCATIONS_DIR, None, False  # invalid
+            return LOCATIONS_DIR, fname, False
+        elif path.startswith('/units'):
+            rest = path[len('/units'):]
+            if rest in ('', '/'):
+                return UNITS_DIR, None, True
+            fname = unquote(rest.lstrip('/'))
+            if '/' in fname or not fname.endswith('.json'):
+                return UNITS_DIR, None, False  # invalid
+            return UNITS_DIR, fname, False
+        else:
+            if path.rstrip('/') == '' or path == '/':
+                return RECIPES_DIR, None, True
+            fname = unquote(path.lstrip('/'))
+            if '/' in fname or not fname.endswith('.json'):
+                return RECIPES_DIR, None, False  # invalid
+            return RECIPES_DIR, fname, False
+
+    def check_host(host, port=None, timeout=3):
+        """ICMP ping via subprocess. Returns (online, latency_ms, error)."""
+        import subprocess
+        t0 = time.monotonic()
+        try:
+            r = subprocess.run(
+                ['ping', '-c', '1', '-W', str(timeout), host],
+                capture_output=True, timeout=timeout + 1
+            )
+            ms = round((time.monotonic() - t0) * 1000)
+            if r.returncode == 0:
+                return True, ms, None
+            else:
+                return False, None, 'unreachable'
+        except subprocess.TimeoutExpired:
+            return False, None, 'timeout'
+        except Exception as e:
+            # Fallback: TCP connect to port 80
+            try:
+                sock = socket.create_connection((host, 80), timeout=timeout)
+                sock.close()
+                ms = round((time.monotonic() - t0) * 1000)
+                return True, ms, None
+            except socket.timeout:
+                return False, None, 'timeout'
+            except OSError as e2:
+                return False, None, str(e2)
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def _send(self, code, body=b'', ct='application/json'):
+            self.send_response(code)
+            self.send_header('Content-Type', ct)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        def do_OPTIONS(self):
+            self._send(204)
+        def do_GET(self):
+            # Device online check: GET /check/<hostname>[/<port>]
+            if self.path.startswith('/check/'):
+                parts = unquote(self.path[len('/check/'):]).split('/')
+                host = parts[0]
+                port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 80
+                if not host:
+                    self._send(400, b'{"error":"missing host"}'); return
+                online, ms, err = check_host(host, port)
+                result = {'online': online}
+                if ms is not None: result['ms'] = ms
+                if err: result['error'] = err
+                self._send(200, json.dumps(result).encode())
+                return
+            base, fname, is_list = _resolve(self.path)
+            if is_list:
+                os.makedirs(base, exist_ok=True)
+                files = sorted(f for f in os.listdir(base) if f.endswith('.json'))
+                self._send(200, json.dumps(files).encode())
+            elif not fname:
+                self._send(400, b'{"error":"invalid filename"}')
+            else:
+                p = os.path.join(base, fname)
+                if not os.path.exists(p):
+                    self._send(404, b'{"error":"not found"}'); return
+                with open(p, 'rb') as f:
+                    self._send(200, f.read())
+        def do_PUT(self):
+            base, fname, _ = _resolve(self.path)
+            if not fname:
+                self._send(400, b'{"error":"invalid filename"}'); return
+            n = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(n)
+            try: json.loads(body)
+            except: self._send(400, b'{"error":"invalid json"}'); return
+            os.makedirs(base, exist_ok=True)
+            with open(os.path.join(base, fname), 'wb') as f:
+                f.write(body)
+            self._send(200, b'{"ok":true}')
+
+    HTTPServer(('', 8081), H).serve_forever()

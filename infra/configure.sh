@@ -80,11 +80,13 @@ ask() {
     printf -v "$__var" '%s' "${__ans:-$__def}"
 }
 
+# Not named __ans: ask() declares that local itself, and printf -v would then
+# write ask's copy and leave this one empty forever.
 ask_yn() {
-    local __ans
+    local _yn
     while true; do
-        ask __ans "$1 (y/n)" "$2"
-        case "${__ans,,}" in
+        ask _yn "$1 (y/n)" "$2"
+        case "${_yn,,}" in
             y|yes) return 0 ;;
             n|no)  return 1 ;;
         esac
@@ -123,7 +125,7 @@ ask_password() {
             if [[ -n "$__cur" ]]; then return; fi
             __a="$(gen_password)"
             cfg_set "$__var" "$__a"
-            info "${GREEN}Generated:${NC} ${BOLD}${__a}${NC}  (saved in $CONFIG_FILE — note it down)"
+            info "${GREEN}Generated:${NC} ${BOLD}${__a}${NC}  (also listed in the credentials file shown at the end of the install)"
             return
         fi
         if [[ ! "$__a" =~ $PASS_RE ]]; then
@@ -137,6 +139,10 @@ ask_password() {
         return
     done
 }
+
+# --- Host tools ---------------------------------------------------------------
+# check_prereqs: the packages a clean Ubuntu may lack (curl, python3-venv, ...).
+source "$SCRIPT_DIR/lib-prereqs.sh"
 
 # --- Tailscale ----------------------------------------------------------------
 
@@ -186,12 +192,30 @@ tailscale_help() {
 }
 
 # Do the step tailscale_help describes for this state. Returns non-zero if it failed.
+# Each step is checked on its own: `curl ... | sh` reports sh's status, and sh
+# "succeeds" on the empty script it gets when curl is missing or offline.
 tailscale_fix() {
-    case "$1" in
-        missing) curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up ;;
-        daemon)  sudo systemctl enable --now tailscaled && sudo tailscale up ;;
-        login)   sudo tailscale up ;;
-    esac
+    local tmp
+    if [[ "$1" == "missing" ]]; then
+        tmp="$(mktemp)"
+        info "Downloading the Tailscale install script..."
+        if ! curl -fsSL --max-time 60 https://tailscale.com/install.sh -o "$tmp" || [[ ! -s "$tmp" ]]; then
+            rm -f "$tmp"
+            info "${RED}Could not download https://tailscale.com/install.sh — check the internet connection.${NC}"
+            return 1
+        fi
+        sh "$tmp"; local rc=$?
+        rm -f "$tmp"
+        if [[ $rc -ne 0 ]] || ! command -v tailscale >/dev/null 2>&1; then
+            info "${RED}The install script did not install tailscale (exit $rc).${NC}"
+            return 1
+        fi
+    fi
+    if ! systemctl is-active --quiet tailscaled 2>/dev/null; then
+        sudo systemctl enable --now tailscaled || { info "${RED}Could not start the tailscaled service.${NC}"; return 1; }
+    fi
+    info "Connecting. Open the login URL printed below in a browser; this waits until you log in."
+    sudo tailscale up || { info "${RED}tailscale up did not complete.${NC}"; return 1; }
 }
 
 # Runs on every invocation, complete config or not. USE_TAILSCALE records
@@ -208,7 +232,7 @@ check_tailscale() {
         ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
         echo -e "${GREEN}Tailscale is connected (${ts_ip}).${NC}"
         if [[ -z "$want" ]]; then
-            [[ "$(cfg_get DOMAIN)" == "${ts_ip}.nip.io" ]] && cfg_set USE_TAILSCALE "true"
+            [[ "$(cfg_get DOMAIN)" == "${ts_ip}.nip.io" || "$(cfg_get LOCAL_DNS)" == "true" ]] && cfg_set USE_TAILSCALE "true"
         fi
         return
     fi
@@ -252,7 +276,7 @@ check_tailscale() {
             ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
             echo -e "${GREEN}Tailscale is connected (${ts_ip}).${NC}"
             # The domain question offers this IP; ask it when DOMAIN does not use it yet.
-            [[ "$(cfg_get DOMAIN)" == "${ts_ip}.nip.io" ]] || FORCE_DOMAIN=1
+            [[ "$(cfg_get DOMAIN)" == "${ts_ip}.nip.io" || "$(cfg_get LOCAL_DNS)" == "true" ]] || FORCE_DOMAIN=1
             return
         fi
     done
@@ -295,6 +319,7 @@ fi
 # It is about to hold every platform password.
 chmod 600 "$CONFIG_FILE"
 
+check_prereqs
 check_tailscale
 
 if [[ "$MODE" == "missing" ]]; then
@@ -333,7 +358,9 @@ fi
 if wanted DOMAIN || [[ -n "$FORCE_DOMAIN" ]]; then
     section "Domain"
     info "Every web UI is served at <service>.<DOMAIN>, e.g. keycloak.<DOMAIN>."
-    info "nip.io resolves <anything>.<IP>.nip.io to <IP>, so no DNS setup is needed."
+    info "A name (ai-workbench.medcea) is easiest to use; the platform answers the DNS for it and"
+    info "Tailscale split DNS points your devices at it (one setting, shown at the end of the install)."
+    info "nip.io resolves <anything>.<IP>.nip.io to <IP> with no setup at all."
     _ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
     _lan_ip="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
     _cur="$(cfg_get DOMAIN)"
@@ -341,11 +368,16 @@ if wanted DOMAIN || [[ -n "$FORCE_DOMAIN" ]]; then
     info "Changing DOMAIN after deployment means re-running ./deploy-infra.sh (certificates and SSO redirects use it)."
     echo ""
     _opts=(); _vals=()
+    _name="$(cfg_get PROJECT_NAME)"
+    # The name needs Tailscale: split DNS is what makes every device ask the platform.
+    if [[ -n "$_ts_ip" && "$_cur" != "$_name" ]]; then
+        _opts+=("name              ${_name}  (ai-workbench.${_name}, on every tailnet device)"); _vals+=("$_name")
+    fi
     # After "continue without Tailscale", the current Tailscale-based domain is not an option.
     [[ "$(cfg_get USE_TAILSCALE)" == "false" && -z "$_ts_ip" && "$_cur" =~ ^100\. ]] && _cur=""
     [[ -n "$_cur" ]]    && { _opts+=("keep current      ${_cur}");       _vals+=("$_cur"); }
-    [[ -n "$_ts_ip" ]]  && { _opts+=("Tailscale IP      ${_ts_ip}.nip.io"); _vals+=("${_ts_ip}.nip.io"); }
-    [[ -n "$_lan_ip" ]] && { _opts+=("LAN IP            ${_lan_ip}.nip.io (local network only)"); _vals+=("${_lan_ip}.nip.io"); }
+    [[ -n "$_ts_ip"  && "${_ts_ip}.nip.io"  != "$_cur" ]] && { _opts+=("Tailscale IP      ${_ts_ip}.nip.io"); _vals+=("${_ts_ip}.nip.io"); }
+    [[ -n "$_lan_ip" && "${_lan_ip}.nip.io" != "$_cur" ]] && { _opts+=("LAN IP            ${_lan_ip}.nip.io (local network only)"); _vals+=("${_lan_ip}.nip.io"); }
     _opts+=("custom domain     (you provide DNS or /etc/hosts entries)"); _vals+=("")
     for i in "${!_opts[@]}"; do info "  $((i+1))) ${_opts[$i]}"; done
     while true; do
@@ -357,10 +389,20 @@ if wanted DOMAIN || [[ -n "$FORCE_DOMAIN" ]]; then
         ask _v "Domain (e.g. medcea.lab.example.org)" ""
     done
     cfg_update DOMAIN "$_v"
-    if [[ -n "$_ts_ip" && "$(cfg_get DOMAIN)" == "${_ts_ip}.nip.io" ]]; then
+    # LOCAL_DNS: the platform serves DNS for a name of our own, on the Tailscale IP.
+    if [[ -n "$_ts_ip" && "$_v" == "$_name" ]]; then
+        cfg_set LOCAL_DNS "true"
+    elif [[ "$_v" != "$_cur" ]]; then
+        cfg_set LOCAL_DNS "false"
+    fi
+    if [[ -n "$_ts_ip" && ( "$(cfg_get DOMAIN)" == "${_ts_ip}.nip.io" || "$(cfg_get LOCAL_DNS)" == "true" ) ]]; then
         cfg_set USE_TAILSCALE "true"
     else
         cfg_set USE_TAILSCALE "false"
+    fi
+    if [[ "$(cfg_get LOCAL_DNS)" == "true" ]]; then
+        info "Open services as ${BOLD}https://ai-workbench.$(cfg_get DOMAIN)${NC} — type the https:// the first time;"
+        info "browsers treat a one-word ending as a search until they have visited it."
     fi
 fi
 
@@ -472,7 +514,7 @@ fi
 
 # --- Summary ------------------------------------------------------------------
 section "Saved to $CONFIG_FILE"
-for v in PROJECT_NAME DOMAIN USE_TAILSCALE ADMIN_USER POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
+for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
     printf '  %-18s %s\n' "$v" "$(cfg_get "$v")"
 done
 for v in ADMIN_PASS POSTGRES_PASS DOCKERHUB_PAT; do

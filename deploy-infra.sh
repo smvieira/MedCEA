@@ -10,6 +10,11 @@
 # but locating a sibling script by path rather than by cwd is one less thing to
 # get wrong.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# render FILE VAR... — the manifests are templates under k8s/ (infra/lib-render.sh).
+source "$SCRIPT_DIR/infra/lib-render.sh"
+# MicroK8s and Juju live in /snap/bin, which a shell started before snapd was
+# installed (a clean minimal image) does not have on PATH.
+case ":$PATH:" in *:/snap/bin:*) ;; *) PATH="$PATH:/snap/bin" ;; esac
 if microk8s status --timeout 5 >/dev/null 2>&1; then
     MK8S="microk8s"
 else
@@ -24,17 +29,53 @@ NC='\033[0m'
 # BANNER
 # =============================================================================
 _print_banner() {
+    # Herb on the left, mushroom on the right: the two crops MedCEA grows.
+    # Strings are $'...' so the backslashes and the backtick in the "d" stay literal;
+    # printf %s prints them uninterpreted (echo -e would read \c, \b, ... as escapes).
+    local -a plant=(
+        $'   .--.  .--.'
+        $'  (    \\/    )'
+        $'   \'--.||.--\''
+        $' .--.  ||  .--.'
+        $'(    \\_||_/    )'
+        $' \'--.__||__.--\''
+        $'       ||'
+        $'   ____||____'
+        $'   \\        /'
+        $'    \\______/'
+    )
+    local -a title=(
+        ''
+        ''
+        $' __  __            _   ____  _____     _'
+        $'|  \\/  |  ___   __| | / ___|| ____|   / \\'
+        $'| |\\/| | / _ \\ / _` || |    |  _|    / _ \\'
+        $'| |  | ||  __/| (_| || |___ | |___  / ___ \\'
+        $'|_|  |_| \\___| \\__,_| \\____||_____|/_/   \\_\\'
+        ''
+        $' Medical Controlled Environment Agriculture'
+        ''
+    )
+    local -a mush=(
+        ''
+        ''
+        $'      .-~~~~-.'
+        $'   .-\' o   .  \'-.'
+        $'  /  .    O   o  \\'
+        $' (  o   .     .   )'
+        $'  \'-.__________.-\''
+        $'       |    |'
+        $'       |    |'
+        $'    ,,,|____|,,,'
+    )
+    local B='\033[1m' CY='\033[0;36m' RD='\033[0;31m' i pc tc mc
     echo ""
-    echo -e "${GREEN}     *            ${YELLOW}╔══════════════════════════════════╗${NC}       _____"
-    echo -e "${GREEN}    \|/           ${YELLOW}║                                  ║${NC}      /     \\"
-    echo -e "${GREEN}   --*--          ${YELLOW}║   ___  ___   _                   ║${NC}     / o * o \\"
-    echo -e "${GREEN}    /|\           ${YELLOW}║  / __|| __| /_\                  ║${NC}    |   ~~~   |"
-    echo -e "${GREEN}   ( ' )          ${YELLOW}║ | /__ | _| / _ \                 ║${NC}    |_________|"
-    echo -e "${GREEN}  (  .  )         ${YELLOW}║  \___||___/_/ \_\                ║${NC}         |"
-    echo -e "${GREEN}   ( ' )          ${YELLOW}║                                  ║${NC}        (|)"
-    echo -e "${GREEN}    |||           ${YELLOW}║   I o T   P l a t f o r m        ║${NC}    ~~~(|)~~~"
-    echo -e "${GREEN}    |||           ${YELLOW}╚══════════════════════════════════╝${NC}"
-    echo -e "${GREEN}  ~~|||~~${NC}"
+    for i in "${!plant[@]}"; do
+        pc="$GREEN"; (( i >= 7 )) && pc="$YELLOW"        # leaves / pot
+        tc="$B$GREEN"; [[ "${title[$i]}" == *Medical* ]] && tc="$CY"
+        mc="$RD"; (( i >= 7 )) && mc="$NC"; (( i == 9 )) && mc="$GREEN"  # cap / stem / grass
+        printf " ${pc}%-16s${NC}  ${tc}%-44s${NC}  ${mc}%s${NC}\n" "${plant[$i]}" "${title[$i]}" "${mush[$i]}"
+    done
     echo ""
 }
 
@@ -85,10 +126,13 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  - MicroK8s and all cluster data (PersistentVolumes, namespaces, pods)"
     echo "  - kubeconfig (~/.kube)"
     echo ""
-    read -p "Type 'yes' to confirm uninstall: " _CONFIRM
-    if [[ "$_CONFIRM" != "yes" ]]; then
-        echo "Aborted."
-        exit 0
+    # install.sh --uninstall-all has already listed everything and asked.
+    if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
+        read -p "Type 'yes' to confirm uninstall: " _CONFIRM
+        if [[ "$_CONFIRM" != "yes" ]]; then
+            echo "Aborted."
+            exit 0
+        fi
     fi
 
     echo -e "${YELLOW}Removing Juju...${NC}"
@@ -108,6 +152,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     else
         echo "  MicroK8s not installed — skipping."
     fi
+
+    # The /etc/hosts entries for a name-based domain (infra/lib-dns.sh).
+    source "$SCRIPT_DIR/infra/lib-dns.sh"
+    hosts_block && echo "  Removed the MedCEA block from /etc/hosts (if there was one)."
 
     echo -e "${GREEN}Uninstall complete.${NC}"
     exit 0
@@ -143,8 +191,11 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo "  - MicroK8s itself is KEPT, so images stay cached and the rebuild is fast"
     [[ "${2:-}" == "--secrets" ]] && echo "  - the generated secrets in config.env (--secrets)"
     echo ""
-    read -p "Type 'reset' to confirm: " _CONFIRM
-    [[ "$_CONFIRM" == "reset" ]] || { echo "Aborted."; exit 0; }
+    # install.sh --uninstall-infra has already listed everything and asked.
+    if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
+        read -p "Type 'reset' to confirm: " _CONFIRM
+        [[ "$_CONFIRM" == "reset" ]] || { echo "Aborted."; exit 0; }
+    fi
 
     echo -e "${YELLOW}Uninstalling Helm releases...${NC}"
     for _rel in $($MK8S helm3 list -n "$NAMESPACE" -q 2>/dev/null); do
@@ -239,7 +290,8 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 MISSING_VARS=()
 for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
            STORAGE_SIZE KEYCLOAK_DOMAIN KEYCLOAK_REALM GRAFANA_DOMAIN NODE_RED_DOMAIN \
-           WORKBENCH_DOMAIN PGADMIN_DOMAIN PORTAL_DOMAIN MQTTX_DOMAIN; do
+           WORKBENCH_DOMAIN PGADMIN_DOMAIN PORTAL_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN DBMGMT_DOMAIN \
+           SCHEDULER_DOMAIN MONITOR_DOMAIN PLATFORM_IP; do
     if [[ -z "${!var}" ]]; then
         MISSING_VARS+=("$var")
     fi
@@ -286,11 +338,17 @@ DOCKER_CERTS_DIR="/var/snap/microk8s/current/args/certs.d/docker.io"
 # followed by a containerd restart that briefly disrupts every running pod. Skip
 # both when the credentials are already in place: re-running the deployment
 # should not cost an outage for a file that is not changing.
-if [ -r "$DOCKER_CERTS_DIR/hosts.toml" ] && \
-   grep -q "username = \"${DOCKERHUB_USER}\"" "$DOCKER_CERTS_DIR/hosts.toml" 2>/dev/null; then
+#
+# The directory is root-only, so the check itself needs sudo: a plain [ -r ]
+# test always failed, which re-wrote the file and restarted containerd on every
+# run — and stopped at a bare password prompt that never reaches the log. The
+# custom prompt says why the password is wanted.
+_SUDO_PROMPT="[sudo] password for %u (MicroK8s registry credentials): "
+if sudo -p "$_SUDO_PROMPT" grep -qsF "username = \"${DOCKERHUB_USER}\"" "$DOCKER_CERTS_DIR/hosts.toml" && \
+   sudo -p "$_SUDO_PROMPT" grep -qsF "password = \"${DOCKERHUB_PASS}\"" "$DOCKER_CERTS_DIR/hosts.toml"; then
     echo -e "${GREEN}  Docker Hub credentials already configured — skipping (no containerd restart).${NC}"
 else
-sudo mkdir -p "$DOCKER_CERTS_DIR"
+sudo -p "$_SUDO_PROMPT" mkdir -p "$DOCKER_CERTS_DIR"
 sudo tee "$DOCKER_CERTS_DIR/hosts.toml" > /dev/null <<EOF
 server = "https://registry-1.docker.io"
 
@@ -320,6 +378,12 @@ echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \
 #
 # Without this, JupyterHub disables its XSRF checks over plain HTTP and every
 # session cookie crosses the network in clear.
+# The namespace first: the TLS secret and CA ConfigMap below live in it. On a
+# clean machine it does not exist yet, and creating it later failed the deploy
+# with 'namespaces "medcea" not found'.
+$MK8S kubectl create namespace "$NAMESPACE" \
+  --dry-run=client -o yaml | $MK8S kubectl apply -f -
+
 echo -e "\n${GREEN}[TLS] Platform CA and wildcard certificate...${NC}"
 CA_DIR="$SCRIPT_DIR/.ca"; mkdir -p "$CA_DIR"; chmod 700 "$CA_DIR"
 if [ ! -f "$CA_DIR/ca.key" ]; then
@@ -332,10 +396,25 @@ else
 fi
 # Reissued every run so a changed DOMAIN is picked up. Cheap, and the CA is stable.
 openssl ecparam -name prime256v1 -genkey -noout -out "$CA_DIR/server.key"
-openssl req -new -key "$CA_DIR/server.key" -subj "/CN=*.${DOMAIN}" -out "$CA_DIR/server.csr"
+# Every service hostname is listed explicitly. A wildcard alone was enough for
+# <ip>.nip.io, but browsers reject a wildcard sitting directly on a one-label
+# name (*.medcea), so a name-based DOMAIN needs each host as its own SAN. The
+# alias (old IP) domain is included so its redirects are served over valid TLS.
+_SVC_DOMAINS=()
+for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
+          SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN; do
+    [[ -n "${!_v:-}" ]] && _SVC_DOMAINS+=("${!_v}")
+done
+_ALIAS_ON=false
+[[ -n "${ALIAS_DOMAIN:-}" && "$ALIAS_DOMAIN" != "$DOMAIN" ]] && _ALIAS_ON=true
+_SANS="DNS:${DOMAIN}"
+[[ "$DOMAIN" == *.* ]] && _SANS+=",DNS:*.${DOMAIN}"
+for _d in "${_SVC_DOMAINS[@]}"; do _SANS+=",DNS:${_d}"; done
+$_ALIAS_ON && _SANS+=",DNS:${ALIAS_DOMAIN},DNS:*.${ALIAS_DOMAIN}"
+openssl req -new -key "$CA_DIR/server.key" -subj "/CN=${DOMAIN}" -out "$CA_DIR/server.csr"
 openssl x509 -req -in "$CA_DIR/server.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
   -CAcreateserial -days 825 -sha256 -out "$CA_DIR/server.crt" \
-  -extfile <(printf "subjectAltName=DNS:*.%s,DNS:%s\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n" "$DOMAIN" "$DOMAIN")
+  -extfile <(printf "subjectAltName=%s\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n" "$_SANS")
 chmod 600 "$CA_DIR"/*.key
 $MK8S kubectl create secret tls cea-tls -n "$NAMESPACE" \
   --cert="$CA_DIR/server.crt" --key="$CA_DIR/server.key" \
@@ -345,10 +424,42 @@ $MK8S kubectl create configmap cea-ca -n "$NAMESPACE" \
   --from-file=ca.crt="$CA_DIR/ca.crt" \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
 
-echo -e "\n${GREEN}--- Deploying MedCEA to $NAMESPACE ---${NC}"
+# =============================================================================
+# NAME-BASED DOMAIN (LOCAL_DNS=true): DNS server + this machine's /etc/hosts
+# =============================================================================
+# name-dns answers every <anything>.$DOMAIN with PLATFORM_IP, bound to
+# PLATFORM_IP:53 only (systemd-resolved keeps 127.0.0.53). Tailscale split DNS
+# sends tailnet devices' lookups for $DOMAIN here — set once in the admin
+# console; the end of this script checks it and prints the steps. It runs in the
+# cluster rather than as a host package: nothing to apt-get, --reset removes it,
+# and kubelet restarts it if Tailscale comes up after it.
+source "$SCRIPT_DIR/infra/lib-dns.sh"
+if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
+    echo -e "\n${GREEN}[DNS] Name server for '$DOMAIN' on $PLATFORM_IP:53...${NC}"
+    # $(…) drops the file's trailing newline, so the string — and its checksum,
+    # which restarts name-dns when the config changes — match the old inline one.
+    _COREFILE="$(render "$SCRIPT_DIR/k8s/name-dns/Corefile" DOMAIN PLATFORM_IP)"
+    $MK8S kubectl create configmap name-dns -n "$NAMESPACE" \
+      --from-literal=Corefile="$_COREFILE" --dry-run=client -o yaml | $MK8S kubectl apply -f -
+    _COREFILE_SUM="$(printf '%s' "$_COREFILE" | sha256sum | cut -c1-16)"
+    render "$SCRIPT_DIR/k8s/name-dns/deployment.yaml" NAMESPACE _COREFILE_SUM | $MK8S kubectl apply -f -
+    $MK8S kubectl rollout status deployment/name-dns -n "$NAMESPACE" --timeout=5m
+    if [[ "$(dns_query "$PLATFORM_IP" "portal.$DOMAIN")" == "$PLATFORM_IP" ]]; then
+        echo -e "${GREEN}  portal.$DOMAIN → $PLATFORM_IP (answered by name-dns)${NC}"
+    else
+        echo -e "${RED}  name-dns is running but did not answer for portal.$DOMAIN on $PLATFORM_IP:53.${NC}"
+        echo "  Check: $MK8S kubectl logs -n $NAMESPACE deploy/name-dns"
+    fi
+    echo -e "${YELLOW}  Mapping $DOMAIN names to $PLATFORM_IP in /etc/hosts (this machine)...${NC}"
+    hosts_block "$DOMAIN" "${_SVC_DOMAINS[@]}" "$PLATFORM_IP"
+else
+    # Switched back to an IP or external domain: take the name server down and
+    # the managed hosts entries out, so nothing answers for a stale name.
+    $MK8S kubectl delete deployment,configmap name-dns -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+    hosts_block
+fi
 
-$MK8S kubectl create namespace "$NAMESPACE" \
-  --dry-run=client -o yaml | $MK8S kubectl apply -f -
+echo -e "\n${GREEN}--- Deploying MedCEA to $NAMESPACE ---${NC}"
 
 # =============================================================================
 # 2. Postgres + Keycloak
@@ -367,8 +478,32 @@ $MK8S helm3 upgrade --install rdbms \
   --set global.postgresql.auth.password="$POSTGRES_PASS" \
   --set global.postgresql.auth.database="$POSTGRES_DB" \
   --set primary.persistence.size="$STORAGE_SIZE" \
+  --set primary.resources.requests.cpu=250m \
+  --set primary.resources.requests.memory=512Mi \
+  --set primary.resources.limits.memory=2Gi \
+  --set readReplicas.resources.requests.cpu=250m \
+  --set readReplicas.resources.requests.memory=512Mi \
+  --set readReplicas.resources.limits.memory=2Gi \
   --timeout 20m \
   --wait
+# Resources are explicit because unset ones fall back to Bitnami's "nano"
+# preset: a 192Mi / 150m limit on the one database that serves Keycloak,
+# Grafana, PostgREST, the scheduler and Node-RED. No CPU limit on purpose (on one
+# PC a limit only throttles; the request guarantees the share), a memory limit so
+# a runaway query cannot starve the host. readReplicas is not deployed
+# (standalone); it is set only so nothing is left on a preset.
+
+# Keycloak's own database. It used to share medcea_db (tables in public), so
+# apps/database/uninstall.sh --purge-data — DROP DATABASE medcea_db — would have
+# wiped every realm, user and client along with the app data. On an install
+# that predates this, Keycloak starts once on the empty database and the realm
+# step below recreates realm, clients, roles and users; old Keycloak tables left
+# in medcea_db.public are unused.
+_PG_EXEC=($MK8S kubectl exec -n "$NAMESPACE" rdbms-postgresql-0 -- env PGPASSWORD="$POSTGRES_PASS" psql -U "$POSTGRES_USER" -d postgres -tAc)
+if [[ "$("${_PG_EXEC[@]}" "SELECT 1 FROM pg_database WHERE datname='keycloak'" | tr -d '[:space:]')" != "1" ]]; then
+    echo -e "${YELLOW}  Creating database 'keycloak'...${NC}"
+    "${_PG_EXEC[@]}" "CREATE DATABASE keycloak ENCODING 'UTF8' TEMPLATE template0"
+fi
 
 # Keycloak
 # Image: quay.io/keycloak/keycloak:26.0 (official, free)
@@ -378,128 +513,7 @@ echo -e "\n${GREEN}[2/10] Deploying Keycloak...${NC}"
 # Clean up any previous Helm-managed Keycloak release (idempotent)
 $MK8S helm3 uninstall keycloak --namespace "$NAMESPACE" 2>/dev/null || true
 
-$MK8S kubectl apply -n "$NAMESPACE" -f - <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: keycloak
-  namespace: $NAMESPACE
-  labels:
-    app: keycloak
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: keycloak
-  template:
-    metadata:
-      labels:
-        app: keycloak
-    spec:
-      containers:
-      - name: keycloak
-        image: quay.io/keycloak/keycloak:26.0
-        args:
-        - start
-        env:
-        - name: KEYCLOAK_ADMIN
-          value: "$ADMIN_USER"
-        - name: KEYCLOAK_ADMIN_PASSWORD
-          value: "$ADMIN_PASS"
-        - name: KC_DB
-          value: postgres
-        - name: KC_DB_URL
-          value: "jdbc:postgresql://rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432/$POSTGRES_DB"
-        - name: KC_DB_USERNAME
-          value: "$POSTGRES_USER"
-        - name: KC_DB_PASSWORD
-          value: "$POSTGRES_PASS"
-        - name: KC_HTTP_ENABLED
-          value: "true"
-        - name: KC_PROXY_HEADERS
-          value: xforwarded
-        - name: KC_HOSTNAME
-          # https, because the browser now reaches Keycloak over TLS and the
-          # issuer in every token has to match what the browser used. A mismatch
-          # here is the "500 on portal login" failure from the deployment notes.
-          value: "https://$KEYCLOAK_DOMAIN"
-        - name: KC_HOSTNAME_STRICT
-          value: "false"
-        - name: KC_HEALTH_ENABLED
-          value: "true"
-        ports:
-        - containerPort: 8080
-          name: http
-        - containerPort: 9000
-          name: management
-        readinessProbe:
-          httpGet:
-            path: /health/ready
-            port: 9000
-          initialDelaySeconds: 60
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 18
-        livenessProbe:
-          httpGet:
-            path: /health/live
-            port: 9000
-          initialDelaySeconds: 120
-          periodSeconds: 30
-          timeoutSeconds: 5
-          failureThreshold: 3
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
-            cpu: "1000m"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: keycloak
-  namespace: $NAMESPACE
-spec:
-  selector:
-    app: keycloak
-  ports:
-  - name: http
-    port: 80
-    targetPort: 8080
-  type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: keycloak
-  namespace: $NAMESPACE
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
-    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
-spec:
-  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
-  # plain HTTP here with a 308, which is why every registered redirect URI had
-  # to move to https in the same change.
-  tls:
-  - hosts: [$KEYCLOAK_DOMAIN]
-    secretName: cea-tls
-  ingressClassName: nginx
-  rules:
-  - host: $KEYCLOAK_DOMAIN
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: keycloak
-            port:
-              number: 80
-EOF
+render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 echo -e "${YELLOW}Waiting for Keycloak to be ready (up to 10 min)...${NC}"
 $MK8S kubectl rollout status deployment/keycloak -n "$NAMESPACE" --timeout=10m
@@ -661,7 +675,9 @@ echo -e "${YELLOW}  Creating client 'portal'...${NC}"
 _PORTAL_SECRET=$(_create_client "portal" "https://${PORTAL_DOMAIN}/oauth2/callback")
 echo -e "${YELLOW}  Creating client 'config'...${NC}"
 _CONFIG_SECRET=$(_create_client "config" "https://${CONFIG_DOMAIN}/oauth2/callback")
-_CONFIG_COOKIE_SECRET=$(openssl rand -base64 24)
+# Cookie secrets are kept once generated: a new one on every run made every
+# deploy log everybody out (existing cookies no longer decrypt).
+_CONFIG_COOKIE_SECRET="${CONFIG_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 echo -e "${YELLOW}  Creating client 'edge-wizard'...${NC}"
 # The edge provisioning wizard (edge/flash-device.sh --ui) runs on this host and
 # is opened from a laptop over SSH, so register every address it can answer on.
@@ -673,8 +689,10 @@ e = os.environ; port = e['EW_PORT']
 hosts = ['127.0.0.1', 'localhost'] + [h for h in (e.get('EW_LAN'), e.get('EW_TS')) if h]
 print(json.dumps(['http://%s:%s/oauth2/callback' % (h, port) for h in hosts]))")"
 _EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS")
-_COOKIE_SECRET=$(openssl rand -base64 24)  # 24 bytes → 32-char base64 → valid AES-256 key for oauth2-proxy
-_PORTAL_COOKIE_SECRET=$(openssl rand -base64 24)
+# 24 bytes → 32-char base64 → valid AES-256 key for oauth2-proxy. Kept once
+# generated (see _CONFIG_COOKIE_SECRET above).
+_COOKIE_SECRET="${OAUTH2_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+_PORTAL_COOKIE_SECRET="${PORTAL_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 
 # Helper: create a realm role (idempotent — 409 = already exists)
 _create_realm_role() {
@@ -745,6 +763,16 @@ echo -e "${YELLOW}  Assigning roles to Grafana users...${NC}"
 _assign_realm_role "$_GF_ADMIN_USER" "grafana_admin"
 _assign_realm_role "$_GF_DEV_USER"   "grafana_developer"
 _assign_realm_role "$_GF_VIEW_USER"  "grafana_viewer"
+
+# The platform admin (portal, Node-RED, workbench admin, credentials file) is
+# ADMIN_USER. It only existed in the realm because ADMIN_USER defaults to
+# "admin" = GRAFANA_ADMIN_USER; with any other name the documented login did
+# not exist. Create it explicitly unless it is the same user.
+if [[ "$ADMIN_USER" != "$_GF_ADMIN_USER" ]]; then
+    echo -e "${YELLOW}  Creating platform admin user '$ADMIN_USER'...${NC}"
+    _create_kc_user "$ADMIN_USER" "Platform" "Administrator" "${ADMIN_USER}@cea.com" "$ADMIN_PASS"
+    _assign_realm_role "$ADMIN_USER" "grafana_admin"
+fi
 
 # --- Add realm-role mapper to grafana client so roles[] appears in userinfo ---
 echo -e "${YELLOW}  Adding realm-role mapper to Grafana client...${NC}"
@@ -823,89 +851,7 @@ source config.env
 #    ClusterIP 1883  → internal Kubernetes services (Node-RED etc.)
 # =============================================================================
 echo -e "\n${GREEN}[4/10] Deploying Mosquitto MQTT broker...${NC}"
-$MK8S kubectl apply -f - <<EOF
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mosquitto-config
-  namespace: $NAMESPACE
-data:
-  mosquitto.conf: |
-    listener 1883
-    allow_anonymous true
-    persistence true
-    persistence_location /mosquitto/data/
-    log_dest stdout
-    listener 9001
-    protocol websockets
-    allow_anonymous true
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mosquitto-data
-  namespace: $NAMESPACE
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: microk8s-hostpath
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: mosquitto
-  namespace: $NAMESPACE
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mosquitto
-  template:
-    metadata:
-      labels:
-        app: mosquitto
-    spec:
-      containers:
-      - name: mosquitto
-        image: eclipse-mosquitto:2.0
-        ports:
-        - containerPort: 1883
-        - containerPort: 9001
-        volumeMounts:
-        - name: config
-          mountPath: /mosquitto/config
-        - name: data
-          mountPath: /mosquitto/data
-      volumes:
-      - name: config
-        configMap:
-          name: mosquitto-config
-      - name: data
-        persistentVolumeClaim:
-          claimName: mosquitto-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mosquitto
-  namespace: $NAMESPACE
-spec:
-  type: NodePort
-  selector:
-    app: mosquitto
-  ports:
-  - name: mqtt
-    port: 1883
-    targetPort: 1883
-    nodePort: 31883
-  - name: websocket
-    port: 9001
-    targetPort: 9001
-    nodePort: 31901
-EOF
+render "$SCRIPT_DIR/k8s/mosquitto/mosquitto.yaml" NAMESPACE | $MK8S kubectl apply -f -
 
 $MK8S kubectl wait deployment/mosquitto \
     -n "$NAMESPACE" --for=condition=Available --timeout=5m
@@ -953,27 +899,7 @@ $MK8S kubectl rollout status deployment/node-red \
 #    Image:  docker.io/grafana/grafana (Docker Hub Official — NO auth needed)
 # =============================================================================
 echo -e "\n${GREEN}Pre-wiring Grafana Postgres datasource...${NC}"
-$MK8S kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: grafana-datasource
-  namespace: $NAMESPACE
-stringData:
-  datasources.yaml: |
-    apiVersion: 1
-    datasources:
-    - name: IoT Postgres
-      type: postgres
-      url: rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432
-      database: $POSTGRES_DB
-      user: $POSTGRES_USER
-      secureJsonData:
-        password: "$POSTGRES_PASS"
-      jsonData:
-        sslmode: disable
-        postgresVersion: 1500
-EOF
+render "$SCRIPT_DIR/k8s/grafana/datasource-secret.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS | $MK8S kubectl apply -f -
 
 echo -e "\n${GREEN}[6/10] Deploying Grafana...${NC}"
 # grafana.ini with dotted section names (auth.generic_oauth) is unparseable by the chart
@@ -981,27 +907,7 @@ echo -e "\n${GREEN}[6/10] Deploying Grafana...${NC}"
 # equivalent and supported by the chart's env: map.
 # The datasource secret is mounted via extraSecretMounts into the provisioning directory.
 _GF_VALUES=$(mktemp /tmp/grafana-values-XXXXXX.yaml)
-cat > "$_GF_VALUES" <<EOF
-env:
-  GF_SERVER_ROOT_URL: "https://$GRAFANA_DOMAIN"
-  GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
-  GF_AUTH_GENERIC_OAUTH_NAME: "Keycloak"
-  GF_AUTH_GENERIC_OAUTH_CLIENT_ID: "grafana"
-  GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: "$GRAFANA_OAUTH_SECRET"
-  GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email roles"
-  GF_AUTH_GENERIC_OAUTH_AUTH_URL: "https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/protocol/openid-connect/auth"
-  GF_AUTH_GENERIC_OAUTH_TOKEN_URL: "http://keycloak.$NAMESPACE.svc.cluster.local/realms/$KEYCLOAK_REALM/protocol/openid-connect/token"
-  GF_AUTH_GENERIC_OAUTH_API_URL: "http://keycloak.$NAMESPACE.svc.cluster.local/realms/$KEYCLOAK_REALM/protocol/openid-connect/userinfo"
-  GF_AUTH_GENERIC_OAUTH_TLS_SKIP_VERIFY_INSECURE: "false"
-  GF_AUTH_GENERIC_OAUTH_SKIP_ORG_ROLE_SYNC: "false"
-  GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(roles[*], 'grafana_admin') && 'Admin' || contains(roles[*], 'grafana_developer') && 'Editor' || 'Viewer'"
-extraSecretMounts:
-- name: datasource-secret
-  secretName: grafana-datasource
-  defaultMode: 0440
-  mountPath: /etc/grafana/provisioning/datasources
-  readOnly: true
-EOF
+render "$SCRIPT_DIR/k8s/grafana/values.yaml" GRAFANA_DOMAIN GRAFANA_OAUTH_SECRET KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_GF_VALUES"
 $MK8S helm3 upgrade --install grafana \
   grafana/grafana \
   --version 7.3.12 \
@@ -1025,60 +931,20 @@ rm -f "$_GF_VALUES"
 # =============================================================================
 echo -e "\n${GREEN}[7/10] Deploying OAuth2 Proxy (Node-RED SSO gateway)...${NC}"
 _OP2_VALUES=$(mktemp /tmp/oauth2proxy-values-XXXXXX.yaml)
-cat > "$_OP2_VALUES" <<EOF
-configuration:
-  content: |
-    provider = "oidc"
-    provider_display_name = "Keycloak"
-    email_domains = ["*"]
-    # The connection is TLS now, so the session cookie must not travel over
-    # plain HTTP. Left false, a downgrade to http would still carry the cookie.
-    cookie_secure = true
-    # Discovery is fetched from the issuer above, which our own CA signs. The
-    # proxy runs in-cluster on a private network talking to our own Keycloak;
-    # trusting that specific chain is what this allows, not the open internet.
-    ssl_insecure_skip_verify = true
-    # Without these two, a session outlives Keycloak entirely: the cookie
-    # defaults to 168h and cookie_refresh defaults to disabled, so oauth2-proxy
-    # never asks Keycloak whether the session still exists. Signing out, an
-    # admin killing the session, or disabling the user would all have no effect
-    # for up to a week.
-    #
-    # cookie_refresh makes the proxy re-check with Keycloak on this cadence,
-    # using the refresh token — if the SSO session is gone the refresh fails and
-    # the user is bounced to the login page. Keep it below Keycloak's access
-    # token lifespan (5 min by default). cookie_expire is the hard ceiling and
-    # should not exceed the realm's SSO Session Max.
-    cookie_refresh = "4m"
-    cookie_expire = "8h"
-    skip_provider_button = false
-    skip_oidc_discovery = true
-    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
-    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
-    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
-    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
-    upstreams = ["http://node-red.${NAMESPACE}.svc.cluster.local:1880"]
-EOF
+render "$SCRIPT_DIR/k8s/oauth2-proxy/values-node-red.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_OP2_VALUES"
 $MK8S helm3 upgrade --install oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \
   --namespace "$NAMESPACE" \
+  --values "$SCRIPT_DIR/k8s/oauth2-proxy/values-common.yaml" \
   --values "$_OP2_VALUES" \
-  --set image.registry=quay.io \
-  --set image.repository=oauth2-proxy/oauth2-proxy \
-  --set image.tag=v7.6.0 \
-  --set global.security.allowInsecureImages=true \
-  --set redis.enabled=false \
   --set configuration.clientID="node-red" \
   --set configuration.clientSecret="$OAUTH2_PROXY_SECRET" \
   --set configuration.cookieSecret="$OAUTH2_COOKIE_SECRET" \
   --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
-  --set ingress.enabled=true \
   --set ingress.hostname="$NODE_RED_DOMAIN" \
   --set "ingress.extraTls[0].hosts[0]=$NODE_RED_DOMAIN" \
   --set "ingress.extraTls[0].secretName=cea-tls" \
-  --set "ingress.annotations.nginx\.ingress\.kubernetes\.io/proxy-buffer-size=16k" \
-  --set-string "ingress.annotations.nginx\.ingress\.kubernetes\.io/proxy-buffers-number=4" \
   --timeout 5m
 rm -f "$_OP2_VALUES"
 
@@ -1107,152 +973,13 @@ $MK8S kubectl rollout status deployment/oauth2-proxy \
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
 echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
-$MK8S kubectl apply -n "$NAMESPACE" -f - <<EOF
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: pgadmin-servers
-  namespace: $NAMESPACE
-data:
-  servers.json: |
-    {
-      "Servers": {
-        "1": {
-          "Name": "IoT Postgres",
-          "Group": "MedCEA",
-          "Host": "rdbms-postgresql.$NAMESPACE.svc.cluster.local",
-          "Port": 5432,
-          "MaintenanceDB": "$POSTGRES_DB",
-          "Username": "$POSTGRES_USER",
-          "PassFile": "/pgpassfile",
-          "SSLMode": "disable"
-        }
-      }
-    }
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pgadmin-pgpassfile
-  namespace: $NAMESPACE
-stringData:
-  pgpassfile: "rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432:*:$POSTGRES_USER:$POSTGRES_PASS"
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: pgadmin
-  namespace: $NAMESPACE
-  labels:
-    app: pgadmin
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: pgadmin
-  template:
-    metadata:
-      labels:
-        app: pgadmin
-    spec:
-      initContainers:
-      - name: fix-pgpassfile-perms
-        image: busybox:1.36
-        command: ["sh", "-c", "cp /pgpassfile-src/pgpassfile /pgpassfile-rw/pgpassfile && chmod 0600 /pgpassfile-rw/pgpassfile"]
-        volumeMounts:
-        - name: pgpassfile-src
-          mountPath: /pgpassfile-src
-        - name: pgpassfile-rw
-          mountPath: /pgpassfile-rw
-      containers:
-      - name: pgadmin
-        image: dpage/pgadmin4:9
-        env:
-        - name: PGADMIN_DEFAULT_EMAIL
-          value: "${ADMIN_USER}@cea.com"
-        - name: PGADMIN_DEFAULT_PASSWORD
-          value: "$ADMIN_PASS"
-        - name: PGADMIN_SERVER_JSON_FILE
-          value: "/pgadmin4/servers.json"
-        - name: PGPASSFILE
-          value: "/pgpassfile"
-        ports:
-        - containerPort: 80
-          name: http
-        readinessProbe:
-          httpGet:
-            path: /misc/ping
-            port: 80
-          initialDelaySeconds: 20
-          periodSeconds: 10
-          failureThreshold: 6
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-        volumeMounts:
-        - name: servers-config
-          mountPath: /pgadmin4/servers.json
-          subPath: servers.json
-        - name: pgpassfile-rw
-          mountPath: /pgpassfile
-          subPath: pgpassfile
-      volumes:
-      - name: servers-config
-        configMap:
-          name: pgadmin-servers
-      - name: pgpassfile-src
-        secret:
-          secretName: pgadmin-pgpassfile
-      - name: pgpassfile-rw
-        emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: pgadmin
-  namespace: $NAMESPACE
-spec:
-  selector:
-    app: pgadmin
-  ports:
-  - name: http
-    port: 80
-    targetPort: 80
-  type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: pgadmin
-  namespace: $NAMESPACE
-spec:
-  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
-  # plain HTTP here with a 308, which is why every registered redirect URI had
-  # to move to https in the same change.
-  tls:
-  - hosts: [$PGADMIN_DOMAIN]
-    secretName: cea-tls
-  ingressClassName: nginx
-  rules:
-  - host: $PGADMIN_DOMAIN
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: pgadmin
-            port:
-              number: 80
-EOF
+render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS ADMIN_USER ADMIN_PASS PGADMIN_DOMAIN | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
+# 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config
+# database before gunicorn starts, which took ~5.5 min on a clean install (pod
+# created 10:36, Ready 10:42) and failed a 5m wait on a pod that was healthy.
 $MK8S kubectl rollout status deployment/pgadmin \
-  -n "$NAMESPACE" --timeout=5m
+  -n "$NAMESPACE" --timeout=10m
 
 # =============================================================================
 # 9. SERVICE PORTAL
@@ -1287,248 +1014,14 @@ print(urllib.parse.quote(inner, safe=''))
 
 
 echo -e "\n${GREEN}[9/10] Deploying Service Portal...${NC}"
-$MK8S kubectl apply -n "$NAMESPACE" -f - <<EOF
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: portal-html
-  namespace: $NAMESPACE
-data:
-  index.html: |
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>MedCEA Platform</title>
-      <style>
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
-        #bg { position: fixed; inset: 0; z-index: 0; opacity: .22; background-size: cover; background-position: center; pointer-events: none; }
-        #app { position: relative; z-index: 1; min-height: 100vh; }
-        .view { display: none; }
-        .view.active { display: block; }
-        .page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 72px 24px 48px; position: relative; }
-        .hdr-btns { position: absolute; top: 20px; right: 20px; display: flex; gap: 10px; }
-        .btn { display: inline-flex; align-items: center; gap: 7px; background: #1e293b; border: 1px solid #2a364e; color: #94a3b8; padding: 8px 16px; border-radius: 8px; cursor: pointer; font: 500 .875rem 'Segoe UI',system-ui,sans-serif; text-decoration: none; transition: background .15s, color .15s; }
-        .btn:hover { background: #2a364e; color: #e2e8f0; }
-        .ph { text-align: center; margin-bottom: 60px; }
-        .ph-title { font-size: clamp(1.6rem,4vw,2.1rem); font-weight: 700; color: #fff; display: flex; align-items: center; justify-content: center; gap: 14px; letter-spacing: -.02em; }
-        .ph-sub { margin-top: 10px; font-size: .9rem; color: #94a3b8; }
-        .grid { width: 100%; max-width: 1100px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 22px; }
-        .card { background: #1e2532; border: 1px solid #2a364e; border-radius: 12px; padding: 26px; text-decoration: none; color: inherit; display: flex; flex-direction: column; cursor: pointer; transition: border-color .25s, background .25s, box-shadow .25s, transform .2s; box-shadow: 0 4px 24px rgba(0,0,0,.4); }
-        .card:hover { border-color: rgba(59,130,246,.5); background: #232d3d; box-shadow: 0 8px 32px rgba(30,60,120,.2); transform: translateY(-2px); }
-        .card-dis { cursor: default; opacity: .5; pointer-events: none; }
-        .ci { margin-bottom: 14px; }
-        .ci svg { width: 38px; height: 38px; }
-        .cl { font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #475569; margin-bottom: 7px; }
-        .ct { font-size: 1.15rem; font-weight: 600; color: #fff; margin-bottom: 10px; }
-        .cd { font-size: .875rem; color: #94a3b8; line-height: 1.6; flex: 1; margin-bottom: 18px; }
-        .ck { font-size: .78rem; color: #60a5fa; display: flex; align-items: center; gap: 4px; margin-top: auto; }
-        .card:hover .ck { color: #93c5fd; }
-        .ck-a { opacity: 0; transform: translateX(-4px); transition: opacity .2s, transform .2s; }
-        .card:hover .ck-a { opacity: 1; transform: none; }
-        .pfooter { margin-top: 72px; text-align: center; font-size: .75rem; color: #334155; display: flex; flex-direction: column; align-items: center; gap: 14px; }
-        .iscte-lbl { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: #94a3b8; margin-bottom: 8px; }
-        .iscte-w { background: #fff; padding: 10px 16px; border-radius: 10px; display: inline-block; transition: transform .2s; }
-        .iscte-w:hover { transform: scale(1.05); }
-        .iscte-w img { height: 34px; display: block; }
-      </style>
-    </head>
-    <body>
-      <div id="bg" style="${_PORTAL_BG_STYLE}"></div>
-      <div id="app">
-        <!-- MAIN PORTAL -->
-        <div id="v-portal" class="view active">
-          <div class="page">
-            <div class="hdr-btns">
-              <a href="/oauth2/sign_out?rd=${_PORTAL_LOGOUT_RD}" class="btn">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-                Sign Out
-              </a>
-            </div>
-            <div class="ph">
-              <h1 class="ph-title">
-                <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" style="width:54px;height:54px">
-                  <path d="M2 21h20" stroke="#cbd5e1" stroke-width="1.5"/><path d="M4 21V8l4 3V8l4 3v9" stroke="#cbd5e1" stroke-width="1.5"/>
-                  <path d="M6 18h2M10 18h2" stroke="#cbd5e1" stroke-width="1.5"/>
-                  <path d="M18.5 21v-4" stroke="#fbbf24" stroke-width="2"/>
-                  <path d="M15.5 17c0-3 6-3 6 0H15.5z" stroke="#fbbf24" stroke-width="1.5" fill="#fbbf24" fill-opacity=".2"/>
-                  <path d="M14 21v-6c0-1.5-1-2.5-2.5-2.5" stroke="#4ade80" stroke-width="1.5"/>
-                  <path d="M11.5 12.5c-1.5-1.5-3.5-.5-3.5 1.5s2 1.5 3.5.5Z" stroke="#4ade80" stroke-width="1.5" fill="#4ade80" fill-opacity=".2"/>
-                  <path d="M11.5 12.5c0-1.5 1.5-2.5 2.5-1.5" stroke="#4ade80" stroke-width="1.5"/>
-                </svg>
-                MedCEA Platform
-              </h1>
-              <p class="ph-sub">Connected Environments &amp; Analytics &mdash; Service Catalog</p>
-            </div>
-            <div class="grid">
-              <a class="card" href="https://$GRAFANA_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
-                <div class="cl">Grafana</div><div class="ct">MedCEA Dashboard</div>
-                <div class="cd">Visualize IoT sensor data, telemetry metrics, and analytics in real time.</div>
-                <div class="ck">https://$GRAFANA_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-              <a class="card" href="https://$WORKBENCH_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5a2.5 2.5 0 0 0-4.96-.46 2.5 2.5 0 0 0-1.98 3 2.5 2.5 0 0 0-1.32 4.24 3 3 0 0 0 .34 5.58 2.5 2.5 0 0 0 2.96 3.08 2.5 2.5 0 0 0 4.91.05L12 20V4.5Z"/><path d="M16 8V5c0-1.1.9-2 2-2"/><path d="M12 13h4"/><path d="M12 18h6a2 2 0 0 1 2 2v1"/><path d="M12 8h8"/><circle cx="20.5" cy="8" r=".5" fill="#c084fc"/><circle cx="16.5" cy="13" r=".5" fill="#c084fc"/><circle cx="20.5" cy="21" r=".5" fill="#c084fc"/><circle cx="18.5" cy="3" r=".5" fill="#c084fc"/></svg></div>
-                <div class="cl">JupyterHub</div><div class="ct">AI Workbench</div>
-                <div class="cd">Notebooks and VS Code on your IoT data. Sign in with your platform account; each user gets their own workspace.</div>
-                <div class="ck">https://$WORKBENCH_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-              <div class="card" onclick="show('management')">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></div>
-                <div class="cl">Administration</div><div class="ct">Platform Management</div>
-                <div class="cd">Access backend services, database, system configuration, and recipe management.</div>
-                <div class="ck">Open <span class="ck-a">&rarr;</span></div>
-              </div>
-            </div>
-            <div class="pfooter">
-              <p>MedCEA &mdash; Powered by Keycloak, JupyterHub &amp; MicroK8s</p>
-              <div>
-                <p class="iscte-lbl">Developed by</p>
-                <a href="https://ciencia.iscte-iul.pt/centres/it-iul/groups/research-group-38" target="_blank" rel="noopener" class="iscte-w">
-                  <img src="https://gci.iscte-iul.pt/2022/identidade/files/brand_v2/escolas/rgb/ista/en/small/horizontal/main/rgb_ista_en_small_horizontal_main.svg" alt="ISCTE-IUL" onerror="this.outerHTML='<span style=color:#1e293b;font-weight:700;padding:0 8px>ISCTE-IUL</span>'">
-                </a>
-              </div>
-            </div>
-          </div>
-        </div>
-        <!-- MANAGEMENT SUB-PORTAL -->
-        <div id="v-management" class="view">
-          <div class="page">
-            <div class="hdr-btns">
-              <button class="btn" onclick="show('portal')">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
-                Back
-              </button>
-              <a href="/oauth2/sign_out?rd=${_PORTAL_LOGOUT_RD}" class="btn">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-                Sign Out
-              </a>
-            </div>
-            <div class="ph">
-              <h1 class="ph-title">
-                <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" style="width:46px;height:46px">
-                  <path d="M2 21h20" stroke="#cbd5e1" stroke-width="1.5"/><path d="M4 21V8l4 3V8l4 3v9" stroke="#cbd5e1" stroke-width="1.5"/>
-                  <path d="M6 18h2M10 18h2" stroke="#cbd5e1" stroke-width="1.5"/>
-                  <path d="M18.5 21v-4" stroke="#fbbf24" stroke-width="2"/>
-                  <path d="M15.5 17c0-3 6-3 6 0H15.5z" stroke="#fbbf24" stroke-width="1.5" fill="#fbbf24" fill-opacity=".2"/>
-                  <path d="M14 21v-6c0-1.5-1-2.5-2.5-2.5" stroke="#4ade80" stroke-width="1.5"/>
-                  <path d="M11.5 12.5c-1.5-1.5-3.5-.5-3.5 1.5s2 1.5 3.5.5Z" stroke="#4ade80" stroke-width="1.5" fill="#4ade80" fill-opacity=".2"/>
-                  <path d="M11.5 12.5c0-1.5 1.5-2.5 2.5-1.5" stroke="#4ade80" stroke-width="1.5"/>
-                </svg>
-                Platform Management
-              </h1>
-              <p class="ph-sub">Administration, Database, and System Configuration</p>
-            </div>
-            <div class="grid">
-              <a class="card" href="https://$NODE_RED_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></svg></div>
-                <div class="cl">Node-RED</div><div class="ct">Data Flow</div>
-                <div class="cd">Build and manage data flows connecting sensors, APIs, and MQTT services.</div>
-                <div class="ck">https://$NODE_RED_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-              <a class="card" href="https://$DBMGMT_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg></div>
-                <div class="cl">Database</div><div class="ct">Management</div>
-                <div class="cd">Explore and manage the database, export DDL and data for medcea schema objects.</div>
-                <div class="ck">https://$DBMGMT_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-              <a class="card" href="https://$MQTTX_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.4"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.4"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg></div>
-                <div class="cl">MQTT Explorer</div><div class="ct">MQTT Explorer</div>
-                <div class="cd">Browse, publish and subscribe to MQTT topics on Mosquitto.</div>
-                <div class="ck">https://$MQTTX_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-              <a class="card" href="https://$CONFIG_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg></div>
-                <div class="cl">Configuration</div><div class="ct">System Configuration</div>
-                <div class="cd">Manage production units, add and update recipes, and oversee device management.</div>
-                <div class="ck">https://$CONFIG_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-              <a class="card" href="https://$SCHEDULER_DOMAIN" target="_blank" rel="noopener">
-                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4M8 2v4M3 10h5"/><path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/></svg></div>
-                <div class="cl">Scheduling</div><div class="ct">Recipe Schedule Manager</div>
-                <div class="cd">Schedule and manage recipe execution timelines across production units.</div>
-                <div class="ck">https://$SCHEDULER_DOMAIN <span class="ck-a">&rarr;</span></div>
-              </a>
-            </div>
-            <div class="pfooter">
-              <p>MedCEA &mdash; Powered by Keycloak, JupyterHub &amp; MicroK8s</p>
-            </div>
-          </div>
-        </div>
-      </div>
-      <script>
-        function show(v) {
-          document.querySelectorAll('.view').forEach(function(el) { el.classList.remove('active'); });
-          document.getElementById('v-' + v).classList.add('active');
-          window.scrollTo(0, 0);
-        }
-      </script>
-    </body>
-    </html>
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: portal
-  namespace: $NAMESPACE
-  labels:
-    app: portal
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: portal
-  template:
-    metadata:
-      labels:
-        app: portal
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:1.27-alpine
-        ports:
-        - containerPort: 80
-          name: http
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        resources:
-          requests:
-            memory: "32Mi"
-            cpu: "50m"
-          limits:
-            memory: "64Mi"
-            cpu: "200m"
-        volumeMounts:
-        - name: html
-          mountPath: /usr/share/nginx/html/index.html
-          subPath: index.html
-      volumes:
-      - name: html
-        configMap:
-          name: portal-html
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: portal
-  namespace: $NAMESPACE
-spec:
-  selector:
-    app: portal
-  ports:
-  - name: http
-    port: 80
-    targetPort: 80
-  type: ClusterIP
-EOF
+# The background is a ~200 KB data URI — over the 128 KiB limit for one
+# environment string, so render (envsubst) cannot carry it. It goes in through
+# a file and a placeholder instead.
+_PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN \
+  | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
+  | $MK8S kubectl apply -n "$NAMESPACE" -f -
+rm -f "$_PORTAL_BG_TMP"
 
 # The HTML is mounted with subPath, and a subPath ConfigMap mount does NOT
 # update in a running pod — kubelet only refreshes whole-directory mounts. So an
@@ -1540,61 +1033,21 @@ $MK8S kubectl rollout status deployment/portal \
 
 # Portal OAuth2 Proxy (Keycloak client: portal)
 _POP2_VALUES=$(mktemp /tmp/portal-oauth2proxy-values-XXXXXX.yaml)
-cat > "$_POP2_VALUES" <<VALEOF
-configuration:
-  content: |
-    provider = "oidc"
-    provider_display_name = "Keycloak"
-    email_domains = ["*"]
-    # The connection is TLS now, so the session cookie must not travel over
-    # plain HTTP. Left false, a downgrade to http would still carry the cookie.
-    cookie_secure = true
-    # Discovery is fetched from the issuer above, which our own CA signs. The
-    # proxy runs in-cluster on a private network talking to our own Keycloak;
-    # trusting that specific chain is what this allows, not the open internet.
-    ssl_insecure_skip_verify = true
-    # Without these two, a session outlives Keycloak entirely: the cookie
-    # defaults to 168h and cookie_refresh defaults to disabled, so oauth2-proxy
-    # never asks Keycloak whether the session still exists. Signing out, an
-    # admin killing the session, or disabling the user would all have no effect
-    # for up to a week.
-    #
-    # cookie_refresh makes the proxy re-check with Keycloak on this cadence,
-    # using the refresh token — if the SSO session is gone the refresh fails and
-    # the user is bounced to the login page. Keep it below Keycloak's access
-    # token lifespan (5 min by default). cookie_expire is the hard ceiling and
-    # should not exceed the realm's SSO Session Max.
-    cookie_refresh = "4m"
-    cookie_expire = "8h"
-    skip_provider_button = false
-    skip_oidc_discovery = true
-    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
-    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
-    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
-    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
-    upstreams = ["http://portal.${NAMESPACE}.svc.cluster.local:80"]
-VALEOF
+render "$SCRIPT_DIR/k8s/oauth2-proxy/values-portal.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_POP2_VALUES"
 $MK8S helm3 upgrade --install portal-oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \
   --namespace "$NAMESPACE" \
+  --values "$SCRIPT_DIR/k8s/oauth2-proxy/values-common.yaml" \
   --values "$_POP2_VALUES" \
-  --set image.registry=quay.io \
-  --set image.repository=oauth2-proxy/oauth2-proxy \
-  --set image.tag=v7.6.0 \
-  --set global.security.allowInsecureImages=true \
-  --set redis.enabled=false \
   --set configuration.clientID="portal" \
   --set configuration.clientSecret="$PORTAL_OAUTH2_PROXY_SECRET" \
   --set configuration.cookieSecret="$PORTAL_COOKIE_SECRET" \
   --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
   --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
-  --set ingress.enabled=true \
   --set ingress.hostname="$PORTAL_DOMAIN" \
   --set "ingress.extraTls[0].hosts[0]=$PORTAL_DOMAIN" \
   --set "ingress.extraTls[0].secretName=cea-tls" \
-  --set "ingress.annotations.nginx\.ingress\.kubernetes\.io/proxy-buffer-size=16k" \
-  --set-string "ingress.annotations.nginx\.ingress\.kubernetes\.io/proxy-buffers-number=4" \
   --timeout 5m
 rm -f "$_POP2_VALUES"
 
@@ -1603,35 +1056,7 @@ $MK8S kubectl rollout restart deployment/portal-oauth2-proxy -n "$NAMESPACE"
 # Redirect bare domain ($DOMAIN with no subdomain) to the portal so visitors
 # don't see a raw nginx 404. Requires its own ingress because nginx-ingress
 # matches by Host header — there's no implicit fallback.
-$MK8S kubectl apply -f - <<EOF
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: bare-domain-redirect
-  namespace: $NAMESPACE
-  annotations:
-    nginx.ingress.kubernetes.io/permanent-redirect: https://${PORTAL_DOMAIN}/
-    nginx.ingress.kubernetes.io/permanent-redirect-code: "302"
-spec:
-  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
-  # plain HTTP here with a 308, which is why every registered redirect URI had
-  # to move to https in the same change.
-  tls:
-  - hosts: [${DOMAIN}]
-    secretName: cea-tls
-  ingressClassName: public
-  rules:
-  - host: ${DOMAIN}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: portal
-            port:
-              number: 80
-EOF
+render "$SCRIPT_DIR/k8s/portal/bare-domain-redirect.yaml" NAMESPACE PORTAL_DOMAIN DOMAIN | $MK8S kubectl apply -f -
 
 echo -e "${YELLOW}Waiting for Portal OAuth2 Proxy to be ready (up to 10 min)...${NC}"
 $MK8S kubectl rollout status deployment/portal-oauth2-proxy \
@@ -1653,153 +1078,13 @@ $MK8S kubectl rollout status deployment/portal-oauth2-proxy \
 # =============================================================================
 echo -e "\n${GREEN}[10/10] Deploying MQTT Explorer...${NC}"
 
-# Tailscale IP is stable (assigned by Tailscale, not the home router).
-# Derive it from DOMAIN instead of running tailscale at this point.
-_TAILSCALE_IP="${DOMAIN%.nip.io}"
+# Tailscale IP is stable (assigned by Tailscale, not the home router). Taken
+# from PLATFORM_IP, never from DOMAIN: DOMAIN may be a name (medcea).
+_TAILSCALE_IP="$PLATFORM_IP"
 
 # Write HTML to temp file using single-quote heredoc (no shell expansion),
 # then substitute the Tailscale IP placeholder with sed.
-cat > /tmp/mqtt-explorer.html << 'HTMLEOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MQTT Explorer</title>
-  <script src="https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js"></script>
-  <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-header { background: #1e293b; border-bottom: 1px solid #334155; padding: 10px 20px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-header h1 { font-size: 1rem; font-weight: 600; color: #f1f5f9; }
-#st { font-size: 0.78rem; padding: 3px 10px; border-radius: 10px; background: #334155; color: #94a3b8; }
-#st.ok { background: #064e3b; color: #34d399; }
-#st.err { background: #7f1d1d; color: #f87171; }
-.broker { font-size: 0.75rem; color: #475569; margin-left: auto; }
-.main { display: flex; flex: 1; overflow: hidden; }
-.topics { width: 280px; min-width: 180px; border-right: 1px solid #334155; overflow-y: auto; padding: 10px; flex-shrink: 0; }
-.topics h2 { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; margin-bottom: 8px; }
-.tr { padding: 5px 8px; border-radius: 6px; cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; }
-.tr:hover { background: #1e293b; }
-.tr.active { background: #1e293b; border-color: #334155; }
-.tn { font-size: 0.78rem; color: #38bdf8; word-break: break-all; }
-.tv { font-size: 0.7rem; color: #94a3b8; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 230px; }
-.detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.msgs { flex: 1; overflow-y: auto; padding: 12px; }
-.msgs h2 { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; margin-bottom: 8px; }
-.msg { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
-.mt { font-size: 0.7rem; color: #38bdf8; margin-bottom: 2px; }
-.mp { font-size: 0.82rem; color: #e2e8f0; word-break: break-all; white-space: pre-wrap; }
-.ms { font-size: 0.68rem; color: #475569; margin-top: 2px; }
-.pub { background: #1e293b; border-top: 1px solid #334155; padding: 12px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
-.pub h2 { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; }
-.pr { display: flex; gap: 8px; }
-input, textarea { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; width: 100%; font-family: inherit; }
-input:focus, textarea:focus { outline: none; border-color: #38bdf8; }
-textarea { height: 48px; resize: none; }
-button { background: #0ea5e9; color: #fff; border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 0.82rem; font-weight: 600; white-space: nowrap; }
-button:hover { background: #38bdf8; }
-button:disabled { background: #334155; color: #64748b; cursor: default; }
-.empty { color: #475569; font-size: 0.82rem; font-style: italic; }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>&#128225; MQTT Explorer</h1>
-    <span id="st">Connecting&hellip;</span>
-    <span class="broker">ws://__WS_HOST__:31901</span>
-  </header>
-  <div class="main">
-    <div class="topics">
-      <h2>Topics (<span id="tc">0</span>)</h2>
-      <div id="tl"></div>
-    </div>
-    <div class="detail">
-      <div class="msgs">
-        <h2>Messages</h2>
-        <div id="ml"><p class="empty">Select a topic to see messages</p></div>
-      </div>
-      <div class="pub">
-        <h2>Publish</h2>
-        <div class="pr">
-          <input id="pt" type="text" placeholder="topic/path">
-          <button id="pb" onclick="pub()" disabled>Send</button>
-        </div>
-        <textarea id="pp" placeholder="payload (text or JSON)"></textarea>
-      </div>
-    </div>
-  </div>
-<script>
-var WS = 'ws://__WS_HOST__:31901/mqtt';
-var MAX = 100;
-var topics = {};
-var sel = null;
-var cli = null;
-var st = document.getElementById('st');
-var tl = document.getElementById('tl');
-var tc = document.getElementById('tc');
-var ml = document.getElementById('ml');
-var pb = document.getElementById('pb');
-
-function connect() {
-  cli = mqtt.connect(WS, { clientId: 'explorer-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
-  cli.on('connect', function() { st.textContent = 'Connected'; st.className = 'ok'; pb.disabled = false; cli.subscribe('#'); });
-  cli.on('offline', function() { st.textContent = 'Reconnecting\u2026'; st.className = ''; pb.disabled = true; });
-  cli.on('error', function() { st.textContent = 'Error'; st.className = 'err'; });
-  cli.on('message', function(topic, payload) {
-    var v = payload.toString();
-    var t = new Date().toLocaleTimeString();
-    if (!topics[topic]) topics[topic] = { v: v, t: t, msgs: [] };
-    else { topics[topic].v = v; topics[topic].t = t; }
-    topics[topic].msgs.unshift({ v: v, t: t });
-    if (topics[topic].msgs.length > MAX) topics[topic].msgs.pop();
-    renderTopics();
-    if (sel === topic) renderMsgs(topic);
-  });
-}
-
-function renderTopics() {
-  tc.textContent = Object.keys(topics).length;
-  tl.innerHTML = Object.keys(topics).sort().map(function(k) {
-    return '<div class="tr' + (k === sel ? ' active' : '') + '" onclick="pick(\'' + k.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">'
-      + '<div class="tn">' + esc(k) + '</div>'
-      + '<div class="tv">' + esc(topics[k].v) + '</div>'
-      + '</div>';
-  }).join('');
-}
-
-function pick(topic) {
-  sel = topic;
-  document.getElementById('pt').value = topic;
-  renderTopics();
-  renderMsgs(topic);
-}
-
-function renderMsgs(topic) {
-  var msgs = (topics[topic] || {}).msgs || [];
-  if (!msgs.length) { ml.innerHTML = '<p class="empty">No messages yet</p>'; return; }
-  ml.innerHTML = msgs.map(function(m) {
-    return '<div class="msg"><div class="mt">' + esc(topic) + '</div>'
-      + '<div class="mp">' + esc(m.v) + '</div>'
-      + '<div class="ms">' + m.t + '</div></div>';
-  }).join('');
-}
-
-function pub() {
-  var topic = document.getElementById('pt').value.trim();
-  var payload = document.getElementById('pp').value;
-  if (topic && cli) cli.publish(topic, payload);
-}
-
-function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-connect();
-</script>
-</body>
-</html>
-HTMLEOF
+cp "$SCRIPT_DIR/k8s/mqtt-explorer/index.html" /tmp/mqtt-explorer.html   # __WS_HOST__ is filled below
 
 sed -i "s|__WS_HOST__|${_TAILSCALE_IP}|g" /tmp/mqtt-explorer.html
 
@@ -1813,85 +1098,7 @@ $MK8S kubectl create configmap mqtt-explorer-html \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
 rm -f /tmp/mqtt-explorer.html
 
-$MK8S kubectl apply -n "$NAMESPACE" -f - <<EOF
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: mqtt-explorer
-  namespace: $NAMESPACE
-  labels:
-    app: mqtt-explorer
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mqtt-explorer
-  template:
-    metadata:
-      labels:
-        app: mqtt-explorer
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:1.27-alpine
-        ports:
-        - containerPort: 80
-        resources:
-          requests:
-            memory: "32Mi"
-            cpu: "50m"
-          limits:
-            memory: "64Mi"
-            cpu: "200m"
-        volumeMounts:
-        - name: html
-          mountPath: /usr/share/nginx/html/index.html
-          subPath: index.html
-      volumes:
-      - name: html
-        configMap:
-          name: mqtt-explorer-html
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mqtt-explorer
-  namespace: $NAMESPACE
-spec:
-  selector:
-    app: mqtt-explorer
-  ports:
-  - name: http
-    port: 80
-    targetPort: 80
-  type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: mqtt-explorer
-  namespace: $NAMESPACE
-spec:
-  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
-  # plain HTTP here with a 308, which is why every registered redirect URI had
-  # to move to https in the same change.
-  tls:
-  - hosts: [$MQTTX_DOMAIN]
-    secretName: cea-tls
-  ingressClassName: nginx
-  rules:
-  - host: $MQTTX_DOMAIN
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mqtt-explorer
-            port:
-              number: 80
-EOF
+render "$SCRIPT_DIR/k8s/mqtt-explorer/mqtt-explorer.yaml" NAMESPACE MQTTX_DOMAIN | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 $MK8S kubectl rollout status deployment/mqtt-explorer \
   -n "$NAMESPACE" --timeout=5m
@@ -2030,6 +1237,31 @@ fi
 echo -e "\n${GREEN}Deployment complete.${NC}"
 
 # =============================================================================
+# ALIAS REDIRECTS — the previous IP domain forwards to $DOMAIN
+# =============================================================================
+# After a switch to a name, <svc>.<ip>.nip.io bookmarks keep working: each old
+# host answers with a 301 to the same path on the new one. Sign-in stays on one
+# domain, which is the only setup Keycloak, oauth2-proxy, Grafana and JupyterHub
+# support with their single configured URL. The certificate carries the alias
+# names (see TLS), so the redirect itself is served over valid HTTPS.
+# Includes app hosts (config, dbmgmt, monitor, scheduler): a redirect to a host
+# deploy-apps.sh has not moved yet is harmless and fixes itself when it runs.
+$MK8S kubectl delete ingress -n "$NAMESPACE" -l medcea/alias=true --ignore-not-found >/dev/null 2>&1 || true
+if $_ALIAS_ON; then
+    echo -e "\n${GREEN}[ALIAS] Redirecting *.${ALIAS_DOMAIN} → *.${DOMAIN}...${NC}"
+    _alias_ingress() {   # _alias_ingress NAME HOST TARGET
+        local ALIAS_NAME="$1" ALIAS_HOST="$2" ALIAS_TARGET="$3"
+        render "$SCRIPT_DIR/k8s/alias/ingress.yaml" ALIAS_NAME NAMESPACE ALIAS_TARGET ALIAS_HOST | $MK8S kubectl apply -f - >/dev/null
+    }
+    for _d in "${_SVC_DOMAINS[@]}"; do
+        _sub="${_d%."$DOMAIN"}"
+        _alias_ingress "alias-${_sub}" "${_sub}.${ALIAS_DOMAIN}" "https://${_d}\$request_uri"
+    done
+    _alias_ingress "alias-root" "${ALIAS_DOMAIN}" "https://${PORTAL_DOMAIN}/"
+    echo -e "${GREEN}  ${#_SVC_DOMAINS[@]} hosts + the bare domain redirect.${NC}"
+fi
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 echo -e "\n${GREEN}=================================================${NC}"
@@ -2039,31 +1271,31 @@ echo ""
 echo -e "${GREEN}  START HERE${NC}"
 echo -e "${GREEN}  ----------${NC}"
 echo -e "  Service Portal:  https://$PORTAL_DOMAIN"
-echo -e "    Login:         Keycloak SSO ($ADMIN_USER / $ADMIN_PASS)"
+echo -e "    Login:         Keycloak SSO ($ADMIN_USER — password in the credentials file below)"
 echo -e "    Shows:         Grafana · Node-RED · Kubeflow · pgAdmin · MQTTX Web"
 echo ""
 echo -e "${GREEN}  DIRECT SERVICE ACCESS${NC}"
 echo -e "${GREEN}  ---------------------${NC}"
 echo -e "  Grafana:         https://$GRAFANA_DOMAIN"
-echo -e "    SSO:           $_GF_ADMIN_USER / $_GF_ADMIN_PASS  (Admin)"
-echo -e "                   $_GF_DEV_USER / $_GF_DEV_PASS      (Editor)"
-echo -e "                   $_GF_VIEW_USER / $_GF_VIEW_PASS    (Viewer)"
+echo -e "    SSO:           $_GF_ADMIN_USER  (Admin)"
+echo -e "                   $_GF_DEV_USER  (Editor)"
+echo -e "                   $_GF_VIEW_USER  (Viewer)"
 echo ""
 echo -e "  Node-RED:        https://$NODE_RED_DOMAIN"
-echo -e "    SSO:           $ADMIN_USER / $ADMIN_PASS"
+echo -e "    SSO:           $ADMIN_USER"
 echo ""
 echo -e "  AI Workbench:    https://$WORKBENCH_DOMAIN   (JupyterHub — sign in with Keycloak)"
-echo -e "    SSO:           $ADMIN_USER / $ADMIN_PASS"
+echo -e "    SSO:           $ADMIN_USER"
 echo -e "    Note:          First login — enter a profile namespace name (e.g. 'admin')"
 echo ""
 echo -e "  pgAdmin:         https://$PGADMIN_DOMAIN"
-echo -e "    Login:         ${ADMIN_USER}@cea.com / $ADMIN_PASS"
+echo -e "    Login:         ${ADMIN_USER}@cea.com"
 echo -e "    DB:            'IoT Postgres' server pre-configured (no setup needed)"
 echo ""
 echo -e "${GREEN}  ADMIN${NC}"
 echo -e "${GREEN}  -----${NC}"
 echo -e "  Keycloak:        https://$KEYCLOAK_DOMAIN/admin"
-echo -e "    Login:         $ADMIN_USER / $ADMIN_PASS"
+echo -e "    Login:         $ADMIN_USER"
 echo -e "    Realm:         $KEYCLOAK_REALM  (all SSO users managed here)"
 echo -e "    User portal:   https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/account"
 echo ""
@@ -2080,3 +1312,92 @@ echo -e "        IoT devices can also use $(hostname).local:31883 (mDNS via Avah
 echo -e "  Postgres:        rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432"
 echo -e "    DB / User:     $POSTGRES_DB / $POSTGRES_USER"
 echo ""
+
+# =============================================================================
+# TAILSCALE SPLIT DNS — the one step that needs a person
+# =============================================================================
+# 100.100.100.100 is Tailscale's resolver on this node: if it already answers
+# for $DOMAIN, the admin console setting is in place for every device.
+if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
+    echo ""
+    if [[ "$(dns_query 100.100.100.100 "portal.$DOMAIN" 2>/dev/null)" == "$PLATFORM_IP" ]]; then
+        echo -e "${GREEN}  ✓ Tailscale split DNS is active: every tailnet device resolves *.$DOMAIN.${NC}"
+    else
+        echo -e "${YELLOW}=================================================${NC}"
+        echo -e "${YELLOW} ONE STEP LEFT: make *.$DOMAIN work on your other devices${NC}"
+        echo -e "${YELLOW}=================================================${NC}"
+        echo "  This machine already resolves the names (/etc/hosts). For laptops and phones"
+        echo "  on your tailnet, tell Tailscale to ask this server about '$DOMAIN':"
+        echo ""
+        echo "  1. Open https://login.tailscale.com/admin/dns"
+        echo "  2. Nameservers → Add nameserver → Custom..."
+        echo "  3. Nameserver: $PLATFORM_IP"
+        echo "     Turn on 'Restrict to domain' (Split DNS), domain: $DOMAIN → Save"
+        echo "  4. Each device needs 'Use Tailscale DNS settings' on (the default)."
+        echo "     Linux devices: sudo tailscale set --accept-dns=true"
+        echo ""
+        echo "  Test from any device:  nslookup portal.$DOMAIN   → $PLATFORM_IP"
+        echo "  Then open https://portal.$DOMAIN — type the https:// the first time;"
+        echo "  browsers read a one-word ending like .$DOMAIN as a search until visited."
+        echo "  Re-running ./deploy-infra.sh reports ✓ once the setting is in place."
+    fi
+fi
+
+# =============================================================================
+# CREDENTIALS FILE
+# =============================================================================
+# Every password a person needs, in one file readable only by its owner. The
+# content goes to the terminal through /dev/tty, never through stdout: stdout is
+# teed into logs/, and that log must not hold the passwords. The summary above
+# names users only, for the same reason.
+CRED_FILE="$SCRIPT_DIR/credentials-$(date +%Y%m%d-%H%M%S).txt"
+(
+umask 077
+cat > "$CRED_FILE" <<CREDS
+MedCEA platform credentials
+Generated by deploy-infra.sh on $(date '+%Y-%m-%d %H:%M') for $(hostname) — project '$PROJECT_NAME'
+
+Save these in a password manager, then delete this file.
+config.env keeps a copy (re-deploys need it); it is readable only by $(id -un).
+
+PLATFORM ADMIN (Keycloak SSO: portal, Node-RED, AI workbench)
+  Service portal      https://$PORTAL_DOMAIN
+  Username            $ADMIN_USER
+  Password            $ADMIN_PASS
+
+KEYCLOAK ADMIN CONSOLE
+  URL                 https://$KEYCLOAK_DOMAIN/admin
+  Username            $ADMIN_USER
+  Password            $ADMIN_PASS
+
+GRAFANA (Keycloak SSO)
+  URL                 https://$GRAFANA_DOMAIN
+  Admin               $_GF_ADMIN_USER / $_GF_ADMIN_PASS
+  Editor              $_GF_DEV_USER / $_GF_DEV_PASS
+  Viewer              $_GF_VIEW_USER / $_GF_VIEW_PASS
+
+PGADMIN
+  URL                 https://$PGADMIN_DOMAIN
+  Username            ${ADMIN_USER}@cea.com
+  Password            $ADMIN_PASS
+
+POSTGRESQL SUPERUSER (cluster-internal)
+  Host                rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432
+  Database            $POSTGRES_DB
+  Username            $POSTGRES_USER
+  Password            $POSTGRES_PASS
+
+Not listed: your Docker Hub token (yours, not the platform's) and the OAuth
+client and cookie secrets (used only by services; they stay in config.env).
+CREDS
+)
+
+# install.sh shows the box itself once the apps are deployed too, so that it is
+# the last thing on screen; a standalone run shows it here.
+source "$SCRIPT_DIR/infra/lib-credentials.sh"
+if [[ "${MEDCEA_INSTALLER:-}" == "1" ]]; then
+    echo "Credentials written to $CRED_FILE — shown at the end of ./install.sh."
+else
+    show_ca_trust "$CA_DIR/ca.crt" "$PLATFORM_IP" "$PORTAL_DOMAIN"
+    show_credentials "$CRED_FILE"
+fi

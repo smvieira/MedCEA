@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: monitor}
+  template:
+    metadata:
+      labels: {app: monitor}
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        - name: nginx-conf
+          mountPath: /etc/nginx/conf.d
+      - name: api
+        image: python:3.11-slim
+        command:
+        - bash
+        - -c
+        - |
+          pip install --quiet flask psycopg2-binary &&           python /scripts/monitor-api.py
+        ports:
+        - containerPort: 8082
+        env:
+        - name: PG_HOST
+          value: rdbms-postgresql.${NAMESPACE}.svc.cluster.local
+        - name: PG_DATABASE
+          value: medcea_db
+        - name: PG_USER
+          value: postgres
+        - name: PG_PASSWORD
+          value: "${POSTGRES_PASS}"
+        volumeMounts:
+        - name: api-script
+          mountPath: /scripts
+      volumes:
+      - name: html
+        configMap:
+          name: monitor-html
+      - name: nginx-conf
+        configMap:
+          name: monitor-nginx
+      - name: api-script
+        configMap:
+          name: monitor-api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitor
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: monitor}
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitor
+  namespace: ${NAMESPACE}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  tls:
+  - hosts: [${MONITOR_DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: nginx
+  rules:
+  - host: ${MONITOR_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: monitor
+            port: {number: 80}

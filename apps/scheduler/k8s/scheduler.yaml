@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: scheduler}
+  template:
+    metadata:
+      labels: {app: scheduler}
+    spec:
+      containers:
+      # --- nginx: serves the HTML SPA ---
+      - name: nginx
+        image: nginx:1.27-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        - name: nginx-conf
+          mountPath: /etc/nginx/conf.d
+      # --- scheduler-api: Flask + APScheduler ---
+      - name: api
+        image: python:3.11-slim
+        command:
+        - bash
+        - -c
+        - |
+          pip install --quiet flask apscheduler             paho-mqtt python-dotenv pandas pytz psycopg2-binary requests dnspython &&           python /scripts/scheduler-api.py
+        ports:
+        - containerPort: 8082
+        env:
+        - name: PG_HOST
+          value: rdbms-postgresql.${NAMESPACE}.svc.cluster.local
+        - name: PG_DATABASE
+          value: medcea_db
+        - name: PG_USER
+          value: postgres
+        - name: PG_PASSWORD
+          value: "${POSTGRES_PASS}"
+        - name: MQTT_URL
+          value: mosquitto.${NAMESPACE}.svc.cluster.local
+        - name: MQTT_PORT
+          value: "1883"
+        - name: PROJECT_NAME
+          value: "${PROJECT_NAME}"
+        - name: SCHD_DIR
+          value: /schd
+        - name: LOG_DIR
+          value: /logs
+        volumeMounts:
+        - name: api-script
+          mountPath: /scripts
+        - name: schd
+          mountPath: /schd
+        - name: logs
+          mountPath: /logs
+      volumes:
+      - name: html
+        configMap:
+          name: scheduler-html
+      - name: nginx-conf
+        configMap:
+          name: scheduler-nginx
+      - name: api-script
+        configMap:
+          name: scheduler-api
+      - name: schd
+        hostPath:
+          path: ${REPO_ROOT}/schd
+          type: Directory
+      - name: logs
+        hostPath:
+          path: ${REPO_ROOT}/logs
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scheduler
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: scheduler}
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scheduler
+  namespace: ${NAMESPACE}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  tls:
+  - hosts: [${SCHEDULER_DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: nginx
+  rules:
+  - host: ${SCHEDULER_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: scheduler
+            port: {number: 80}

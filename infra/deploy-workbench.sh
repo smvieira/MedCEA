@@ -42,6 +42,7 @@ cd "$REPO_ROOT"
 source config.env
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib-wait.sh"
+source "$SCRIPT_DIR/lib-render.sh"
 
 # When deploy-infra.sh calls this, $MK8S is already set; standalone it is not.
 if [[ -z "${MK8S:-}" ]]; then
@@ -59,6 +60,10 @@ die() { echo -e "\033[0;31m[workbench] ERROR:\033[0m $*" >&2; exit 1; }
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-medcea}"
 WORKBENCH_DOMAIN="${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}"
 WORKBENCH_IMAGE="${WORKBENCH_IMAGE:-quay.io/jupyter/scipy-notebook:latest}"
+# Split here: the values template (k8s/workbench/values.yaml) is filled by
+# envsubst, which cannot do ${VAR%:*} itself.
+WORKBENCH_IMAGE_NAME="${WORKBENCH_IMAGE%:*}"
+WORKBENCH_IMAGE_TAG="${WORKBENCH_IMAGE##*:}"
 WORKBENCH_STORAGE="${WORKBENCH_STORAGE:-10Gi}"
 
 [[ -n "${WORKBENCH_SECRET:-}" ]] || die "WORKBENCH_SECRET is not set in config.env.
@@ -82,74 +87,7 @@ $HELM repo update jupyterhub >/dev/null 2>&1 || true
 VALUES=$(mktemp /tmp/workbench-values-XXXXXX.yaml)
 trap 'rm -f "$VALUES"' EXIT
 
-cat > "$VALUES" <<VALEOF
-hub:
-  config:
-    JupyterHub:
-      authenticator_class: generic-oauth
-      admin_access: true
-    Authenticator:
-      admin_users: ["${ADMIN_USER}"]
-      # Any authenticated realm user may sign in. To restrict, create a realm
-      # role and switch to allowed_groups with a groups claim mapper.
-      allow_all: true
-    GenericOAuthenticator:
-      client_id: workbench
-      client_secret: "${WORKBENCH_SECRET}"
-      oauth_callback_url: https://${WORKBENCH_DOMAIN}/hub/oauth_callback
-      authorize_url: https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth
-      token_url: http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token
-      userdata_url: http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo
-      login_service: "Keycloak"
-      username_claim: preferred_username
-      scope: ["openid", "profile", "email"]
-
-proxy:
-  service:
-    type: ClusterIP          # the nginx ingress fronts this; no LoadBalancer, no MetalLB
-
-singleuser:
-  image:
-    name: ${WORKBENCH_IMAGE%:*}
-    tag: ${WORKBENCH_IMAGE##*:}
-  storage:
-    capacity: ${WORKBENCH_STORAGE}
-  memory: { guarantee: 512M, limit: 4G }
-  cpu: { guarantee: 0.1, limit: 2 }
-  defaultUrl: "/lab"
-  # Installed into the user's persistent home, so only the first start pays for
-  # it. Baking these into an image is the better answer at scale — see the
-  # infra/workbench.Dockerfile — but this keeps the deployment to one Helm
-  # release with no registry to run.
-  lifecycleHooks:
-    postStart:
-      exec:
-        command:
-          - "sh"
-          - "-c"
-          - >
-            test -x "\$HOME/.local/bin/code-server" ||
-            (pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy &&
-             curl -fsSL https://code-server.dev/install.sh |
-               sh -s -- --method=standalone --prefix="\$HOME/.local" ) || true
-
-cull:
-  enabled: true
-  timeout: 3600            # reclaim a user pod after an hour idle
-  every: 300
-
-ingress:
-  enabled: true
-  ingressClassName: nginx
-  hosts: ["${WORKBENCH_DOMAIN}"]
-  tls:
-    - hosts: ["${WORKBENCH_DOMAIN}"]
-      secretName: cea-tls
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "0"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-VALEOF
+render "$REPO_ROOT/k8s/workbench/values.yaml" ADMIN_USER WORKBENCH_SECRET WORKBENCH_DOMAIN KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE WORKBENCH_IMAGE_NAME WORKBENCH_IMAGE_TAG WORKBENCH_STORAGE > "$VALUES"
 
 $HELM upgrade --install workbench jupyterhub/jupyterhub \
   --version "$CHART_VERSION" \

@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: ${NAMESPACE}
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:26.0
+        args:
+        - start
+        env:
+        # Keycloak 26 names (KEYCLOAK_ADMIN* are deprecated). Only used when the
+        # database has no admin yet, i.e. on the first start.
+        - name: KC_BOOTSTRAP_ADMIN_USERNAME
+          value: "${ADMIN_USER}"
+        - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+          value: "${ADMIN_PASS}"
+        - name: KC_DB
+          value: postgres
+        - name: KC_DB_URL
+          value: "jdbc:postgresql://rdbms-postgresql.${NAMESPACE}.svc.cluster.local:5432/keycloak"
+        - name: KC_DB_USERNAME
+          value: "${POSTGRES_USER}"
+        - name: KC_DB_PASSWORD
+          value: "${POSTGRES_PASS}"
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_PROXY_HEADERS
+          value: xforwarded
+        - name: KC_HOSTNAME
+          # https, because the browser now reaches Keycloak over TLS and the
+          # issuer in every token has to match what the browser used. A mismatch
+          # here is the "500 on portal login" failure from the deployment notes.
+          value: "https://${KEYCLOAK_DOMAIN}"
+        - name: KC_HOSTNAME_STRICT
+          value: "false"
+        - name: KC_HEALTH_ENABLED
+          value: "true"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9000
+          name: management
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 9000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 18
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 9000
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: keycloak
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: ${NAMESPACE}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+spec:
+  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
+  # plain HTTP here with a 308, which is why every registered redirect URI had
+  # to move to https in the same change.
+  tls:
+  - hosts: [${KEYCLOAK_DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: nginx
+  rules:
+  - host: ${KEYCLOAK_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: keycloak
+            port:
+              number: 80

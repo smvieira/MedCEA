@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MQTT Explorer</title>
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js"></script>
+  <style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+header { background: #1e293b; border-bottom: 1px solid #334155; padding: 10px 20px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+header h1 { font-size: 1rem; font-weight: 600; color: #f1f5f9; }
+#st { font-size: 0.78rem; padding: 3px 10px; border-radius: 10px; background: #334155; color: #94a3b8; }
+#st.ok { background: #064e3b; color: #34d399; }
+#st.err { background: #7f1d1d; color: #f87171; }
+.broker { font-size: 0.75rem; color: #475569; margin-left: auto; }
+.main { display: flex; flex: 1; overflow: hidden; }
+.topics { width: 280px; min-width: 180px; border-right: 1px solid #334155; overflow-y: auto; padding: 10px; flex-shrink: 0; }
+.topics h2 { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; margin-bottom: 8px; }
+.tr { padding: 5px 8px; border-radius: 6px; cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; }
+.tr:hover { background: #1e293b; }
+.tr.active { background: #1e293b; border-color: #334155; }
+.tn { font-size: 0.78rem; color: #38bdf8; word-break: break-all; }
+.tv { font-size: 0.7rem; color: #94a3b8; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 230px; }
+.detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.msgs { flex: 1; overflow-y: auto; padding: 12px; }
+.msgs h2 { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; margin-bottom: 8px; }
+.msg { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
+.mt { font-size: 0.7rem; color: #38bdf8; margin-bottom: 2px; }
+.mp { font-size: 0.82rem; color: #e2e8f0; word-break: break-all; white-space: pre-wrap; }
+.ms { font-size: 0.68rem; color: #475569; margin-top: 2px; }
+.pub { background: #1e293b; border-top: 1px solid #334155; padding: 12px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.pub h2 { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; }
+.pr { display: flex; gap: 8px; }
+input, textarea { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; width: 100%; font-family: inherit; }
+input:focus, textarea:focus { outline: none; border-color: #38bdf8; }
+textarea { height: 48px; resize: none; }
+button { background: #0ea5e9; color: #fff; border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 0.82rem; font-weight: 600; white-space: nowrap; }
+button:hover { background: #38bdf8; }
+button:disabled { background: #334155; color: #64748b; cursor: default; }
+.empty { color: #475569; font-size: 0.82rem; font-style: italic; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>&#128225; MQTT Explorer</h1>
+    <span id="st">Connecting&hellip;</span>
+    <span class="broker">ws://__WS_HOST__:31901</span>
+  </header>
+  <div class="main">
+    <div class="topics">
+      <h2>Topics (<span id="tc">0</span>)</h2>
+      <div id="tl"></div>
+    </div>
+    <div class="detail">
+      <div class="msgs">
+        <h2>Messages</h2>
+        <div id="ml"><p class="empty">Select a topic to see messages</p></div>
+      </div>
+      <div class="pub">
+        <h2>Publish</h2>
+        <div class="pr">
+          <input id="pt" type="text" placeholder="topic/path">
+          <button id="pb" onclick="pub()" disabled>Send</button>
+        </div>
+        <textarea id="pp" placeholder="payload (text or JSON)"></textarea>
+      </div>
+    </div>
+  </div>
+<script>
+var WS = 'ws://__WS_HOST__:31901/mqtt';
+var MAX = 100;
+var topics = {};
+var sel = null;
+var cli = null;
+var st = document.getElementById('st');
+var tl = document.getElementById('tl');
+var tc = document.getElementById('tc');
+var ml = document.getElementById('ml');
+var pb = document.getElementById('pb');
+
+function connect() {
+  cli = mqtt.connect(WS, { clientId: 'explorer-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
+  cli.on('connect', function() { st.textContent = 'Connected'; st.className = 'ok'; pb.disabled = false; cli.subscribe('#'); });
+  cli.on('offline', function() { st.textContent = 'Reconnecting\u2026'; st.className = ''; pb.disabled = true; });
+  cli.on('error', function() { st.textContent = 'Error'; st.className = 'err'; });
+  cli.on('message', function(topic, payload) {
+    var v = payload.toString();
+    var t = new Date().toLocaleTimeString();
+    if (!topics[topic]) topics[topic] = { v: v, t: t, msgs: [] };
+    else { topics[topic].v = v; topics[topic].t = t; }
+    topics[topic].msgs.unshift({ v: v, t: t });
+    if (topics[topic].msgs.length > MAX) topics[topic].msgs.pop();
+    renderTopics();
+    if (sel === topic) renderMsgs(topic);
+  });
+}
+
+function renderTopics() {
+  tc.textContent = Object.keys(topics).length;
+  tl.innerHTML = Object.keys(topics).sort().map(function(k) {
+    return '<div class="tr' + (k === sel ? ' active' : '') + '" onclick="pick(\'' + k.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">'
+      + '<div class="tn">' + esc(k) + '</div>'
+      + '<div class="tv">' + esc(topics[k].v) + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function pick(topic) {
+  sel = topic;
+  document.getElementById('pt').value = topic;
+  renderTopics();
+  renderMsgs(topic);
+}
+
+function renderMsgs(topic) {
+  var msgs = (topics[topic] || {}).msgs || [];
+  if (!msgs.length) { ml.innerHTML = '<p class="empty">No messages yet</p>'; return; }
+  ml.innerHTML = msgs.map(function(m) {
+    return '<div class="msg"><div class="mt">' + esc(topic) + '</div>'
+      + '<div class="mp">' + esc(m.v) + '</div>'
+      + '<div class="ms">' + m.t + '</div></div>';
+  }).join('');
+}
+
+function pub() {
+  var topic = document.getElementById('pt').value.trim();
+  var payload = document.getElementById('pp').value;
+  if (topic && cli) cli.publish(topic, payload);
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+connect();
+</script>
+</body>
+</html>

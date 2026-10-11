@@ -1,0 +1,32 @@
+configuration:
+  content: |
+    provider = "oidc"
+    provider_display_name = "Keycloak"
+    email_domains = ["*"]
+    # The connection is TLS now, so the session cookie must not travel over
+    # plain HTTP. Left false, a downgrade to http would still carry the cookie.
+    cookie_secure = true
+    # Discovery is fetched from the issuer above, which our own CA signs. The
+    # proxy runs in-cluster on a private network talking to our own Keycloak;
+    # trusting that specific chain is what this allows, not the open internet.
+    ssl_insecure_skip_verify = true
+    # Without these two, a session outlives Keycloak entirely: the cookie
+    # defaults to 168h and cookie_refresh defaults to disabled, so oauth2-proxy
+    # never asks Keycloak whether the session still exists. Signing out, an
+    # admin killing the session, or disabling the user would all have no effect
+    # for up to a week.
+    #
+    # cookie_refresh makes the proxy re-check with Keycloak on this cadence,
+    # using the refresh token — if the SSO session is gone the refresh fails and
+    # the user is bounced to the login page. Keep it below Keycloak's access
+    # token lifespan (5 min by default). cookie_expire is the hard ceiling and
+    # should not exceed the realm's SSO Session Max.
+    cookie_refresh = "4m"
+    cookie_expire = "8h"
+    skip_provider_button = false
+    skip_oidc_discovery = true
+    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
+    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+    upstreams = ["http://portal.${NAMESPACE}.svc.cluster.local:80"]

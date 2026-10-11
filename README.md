@@ -35,6 +35,7 @@ All services authenticate through Keycloak using OIDC. Re-running either deploy 
 - 16 GB RAM minimum (24 GB comfortable with the AI workbench in use)
 - 100 GB disk
 - Internet access
+- Nothing else needs to be installed beforehand. Both `./deploy-infra.sh` and `./deploy-apps.sh` first check for the host packages a clean Ubuntu may lack: `curl` (missing on 24.04 desktop), `ca-certificates`, `openssl`, `python3`, `python3-venv` (needed by `edge/flash-device.sh`), `iproute2` and `snapd`. They list what is missing and why, and offer to `apt-get install` it.
 - A free [Docker Hub](https://hub.docker.com) account — needed to pull the Bitnami Helm charts and avoid Docker Hub rate limits. You don't need to prepare anything: the installer links to sign-up and token creation, says which permission to pick, and checks the token.
 - (Optional, recommended) [Tailscale](https://tailscale.com) — a fixed address reachable from any of your devices, at home or away, with no DNS or router setup. The installer checks for it on every run, prints the steps if it is missing, stopped or not logged in, and can run them for you. You can also continue LAN-only.
 
@@ -49,11 +50,24 @@ git clone <repo-url> MedCEA
 cd MedCEA
 ```
 
-### 2. Deploy infrastructure
+### 2. Install
 
 ```bash
-./deploy-infra.sh
+./install.sh
 ```
+
+One command installs everything: the infrastructure, then the applications, then a health check. `./install.sh --help` lists every option:
+
+| Command | Does |
+|---|---|
+| `./install.sh` | install or update everything (safe to re-run) |
+| `./install.sh --configure` | review every setting first, then install |
+| `./install.sh --infra-only` / `--apps-only` | one half only |
+| `./install.sh --uninstall-apps [component ...]` | remove application components; data kept (`--purge-data` drops the database) |
+| `./install.sh --uninstall-infra` | remove every service and all data; keep MicroK8s |
+| `./install.sh --uninstall-all` | total uninstall, MicroK8s included |
+
+If a stage fails, the installer names it and its log; fix the cause and run `./install.sh` again.
 
 **It starts by asking for its settings.** There is no file to edit by hand: on the first run it creates `config.env` from [config.env.example](config.env.example) and asks for each setting, with the default in `[brackets]` (press Enter to accept):
 
@@ -61,7 +75,7 @@ cd MedCEA
 |---|---|
 | Tailscale | checked on every run. If it is missing, stopped or not logged in, the installer prints the steps (with links), then lets you re-check, run them for you, or continue LAN-only |
 | Project name | `medcea` |
-| Domain | your Tailscale IP, or LAN IP, + `.nip.io` |
+| Domain | with Tailscale: the name `medcea` (`https://ai-workbench.medcea`); otherwise your LAN IP + `.nip.io` |
 | Admin username / password | `admin` / generated if you press Enter (shown once — note it down) |
 | PostgreSQL password, volume size | generated / `10Gi` |
 | Docker Hub username + access token | none: the installer links to sign-up and token creation and checks the pair |
@@ -78,11 +92,29 @@ On later runs only required values that are still empty are asked, so a complete
 
 Each run rebuilds `config.env` from the template and keeps your values, so variables added to the template later show up automatically. The previous file is saved as `config.env.bak`. If `DOMAIN` uses the Tailscale IP and Tailscale is down, the deploy stops rather than quietly switching to the LAN IP.
 
-> **Domain:** nip.io resolves every `<service>.<IP>.nip.io` to that IP, so no DNS setup is needed. Changing `DOMAIN` after deployment means re-running `./deploy-infra.sh` (certificates and SSO redirects use it).
+> **Domain:** with the name option, services are `https://<service>.medcea`; see [Name-based access](#name-based-access-servicemedcea) for the one Tailscale setting it needs. The nip.io option resolves every `<service>.<IP>.nip.io` to that IP with no setup at all. Changing `DOMAIN` after deployment means re-running `./install.sh` (certificates and SSO redirects use it).
+
+#### Name-based access (`<service>.medcea`)
+
+Choosing the name option in the installer sets `DOMAIN="medcea"` and `LOCAL_DNS="true"`. The install then:
+
+- runs a small DNS server (`name-dns`, CoreDNS) on this machine's Tailscale IP, port 53, answering every `*.medcea` name with that IP;
+- maps the names in this machine's `/etc/hosts`, so the server itself resolves them straight away;
+- issues the certificate with every service name listed explicitly, because browsers reject a wildcard like `*.medcea` directly on a one-word name;
+- turns the old `<service>.<IP>.nip.io` addresses into permanent redirects to the new names (`ALIAS_DOMAIN`), so bookmarks keep working.
+
+**One manual step, once per tailnet:** tell Tailscale to send lookups for `medcea` to this server. The installer checks whether this is in place and prints these steps if not:
+
+1. Open <https://login.tailscale.com/admin/dns>.
+2. Nameservers → **Add nameserver** → **Custom…**
+3. Nameserver: this machine's Tailscale IP (`tailscale ip -4`). Turn on **Restrict to domain** (Split DNS), domain `medcea`, then **Save**.
+4. Devices need **Use Tailscale DNS settings** turned on, which is the default. On Linux: `sudo tailscale set --accept-dns=true`.
+
+Test from any device with `nslookup portal.medcea`, then open `https://portal.medcea`. Type the `https://` the first time: browsers treat a one-word ending as a search until they have visited it.
 
 > **TLS:** every service is served over HTTPS with a certificate the platform issues itself. See [Trust the platform certificate](#4-trust-the-platform-certificate) — without it browsers show "Not secure".
 
-After the settings, the same command does everything else:
+After the settings, the infrastructure stage (`deploy-infra.sh`) does:
 
 
 1. **Bootstraps MicroK8s** — installs the snap, enables addons (dns, ingress, helm3, hostpath-storage, rbac), exports kubeconfig
@@ -97,17 +129,15 @@ After the settings, the same command does everything else:
 10. **Deploys the Service Portal** (service catalog, Keycloak SSO) and **MQTT Explorer** (browser MQTT tool, auto-connected to Mosquitto)
 11. **Deploys the AI Workbench** (JupyterHub, authenticated directly against Keycloak) unless `WORKBENCH_ENABLED=false`
 
-Progress is logged to `logs/deploy-infra-<timestamp>.log`.
+Then the applications stage (`deploy-apps.sh --all`, next section) and `health-check.sh` run. Progress is logged to `logs/deploy-infra-<timestamp>.log` and `logs/deploy-apps-<timestamp>.log`.
+
+**At the very end it shows your credentials.** Every password a person needs (platform admin, Keycloak, Grafana users, pgAdmin, PostgreSQL) is written to `credentials-<timestamp>.txt` in the repository root, readable only by you. Its content is shown on the terminal, never in the log. **Save it in a password manager, then delete the file**; the installer prints the exact `rm` command and lists any files left over from earlier runs. `config.env` keeps its own copy, because re-deploys need it.
 
 > **Note:** Charmed Kubeflow was retired — it cost 37 Juju charm units and nothing in the codebase used it. JupyterHub replaced it and authenticates against Keycloak directly, which also removed Dex, oidc-gatekeeper, Istio, MetalLB and the static LAN IP.
 
-### 3. Deploy application content
+### 3. Application components
 
-```bash
-./deploy-apps.sh
-```
-
-An interactive menu lets you choose which application components to install:
+`./install.sh` installs all of them. To pick components by hand, run `./deploy-apps.sh`: an interactive menu lets you choose which application components to install:
 
 ```
   [ ] 1. Database
@@ -120,6 +150,8 @@ An interactive menu lets you choose which application components to install:
 
 Toggle items by number, confirm with Enter. Use `./deploy-apps.sh --all` to skip the menu and install everything.
 
+Each component has an `uninstall.sh` next to its `deploy.sh`, which removes exactly what that deploy created. Use `./install.sh --uninstall-apps monitor scheduler` (or `./deploy-apps.sh --uninstall …`); reinstall with `./install.sh --apps-only`. Uninstalling greys out the component's portal card, and reinstalling restores it.
+
 Currently available components:
 
 | Component | What it installs |
@@ -127,6 +159,7 @@ Currently available components:
 | **database** | `medcea` schema, measurement table, and DB migrations (control algorithms, permissions, algorithm state) |
 | **frontend** | System Configuration UI and Database Management portal |
 | **node-red** | `node-red-contrib-postgresql` package + MQTT→PostgreSQL flow |
+| **monitor** | Run Monitor dashboard (live recipe runs) |
 | **report** | Grafana dashboard definitions |
 | **scheduler** | Recipe Schedule Manager Flask API and browser UI |
 
@@ -170,7 +203,16 @@ key stays in `.ca/ca.key` on the server.
 
 #### Windows — Chrome and Edge
 
-Both use the Windows certificate store. In **PowerShell as Administrator**:
+Both use the Windows certificate store.
+
+Just for your Windows user (no admin needed, any PowerShell). Windows asks to confirm: check the fingerprint, then click **Yes**:
+
+```powershell
+certutil -user -addstore Root .\cea-ca.crt
+certutil -user -store Root | Select-String "CEA Platform CA"
+```
+
+For every user on the PC, in **PowerShell as Administrator** (Win+X → Terminal (Admin)). In a normal window this fails with `0x80070005 ERROR_ACCESS_DENIED`:
 
 ```powershell
 certutil -addstore -f "Root" .\cea-ca.crt
@@ -195,10 +237,24 @@ websites"**.
 
 #### Linux
 
+System store, used by `curl` and most command-line tools:
+
 ```bash
 sudo cp cea-ca.crt /usr/local/share/ca-certificates/cea-platform.crt
 sudo update-ca-certificates
 ```
+
+Chrome and Chromium ignore that store on Linux and keep their own (NSS):
+
+```bash
+sudo apt install -y libnss3-tools
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "MedCEA Platform CA" -i cea-ca.crt
+# snap Chromium: certutil -d sql:$HOME/snap/chromium/current/.pki/nssdb ...
+```
+
+Then quit Chrome completely and reopen it.
+
+`./install.sh` prints all of these at the end, with this installation's host, path and fingerprint filled in.
 
 #### macOS
 
@@ -620,19 +676,30 @@ Removes MicroK8s and all cluster data. Prompts for confirmation. This is destruc
 ## Script layout
 
 ```
-deploy-infra.sh          # Main infrastructure deployer (run from repo root)
-deploy-apps.sh           # Application content installer (interactive)
+install.sh               # One entry point: install, update, uninstall (--help)
+deploy-infra.sh          # Infrastructure stage (run from repo root)
+deploy-apps.sh           # Application stage (interactive, --all, --uninstall)
+k8s/                     # Kubernetes manifests and Helm values as templates
+├── keycloak/  mosquitto/  pgadmin/  portal/  mqtt-explorer/
+├── name-dns/            # DNS server for a name-based domain (+ Corefile)
+├── alias/               # redirects from the old IP domain
+├── grafana/  workbench/ # Helm values (+ Grafana datasource Secret)
+└── oauth2-proxy/        # values-common.yaml + per-release values
 infra/
 ├── bootstrap-infra.sh     # Called by deploy-infra.sh — MicroK8s bootstrap
+├── configure.sh           # config.env questions (template: config.env.example)
 ├── deploy-workbench.sh    # JupyterHub (AI workbench), called by deploy-infra.sh
-├── lib-wait.sh            # readiness helpers — never claim a service is up until it answers
+├── lib-render.sh          # render FILE VAR... — fills the k8s/ templates
+├── lib-mk8s.sh lib-prereqs.sh lib-dns.sh lib-portal.sh lib-credentials.sh lib-wait.sh
 └── patch-dex-keycloak.sh  # Recovery: re-apply Keycloak connector to dex-auth
 apps/
 ├── database/            # PostgreSQL schema and migrations
 ├── frontend/            # System Configuration UI + Database Management portal
+├── monitor/             # Run Monitor dashboard
 ├── node-red/            # Node-RED packages and flows
 ├── report/              # Grafana dashboards
 └── scheduler/           # Recipe Schedule Manager API + UI
+                         # each app: deploy.sh, uninstall.sh, k8s/ (its manifests)
 schd/
 ├── run_recipe.py            # Recipe execution entry point (spawned per recipe run)
 └── cea/
@@ -669,9 +736,8 @@ Both scripts are idempotent:
 To **reinstall from scratch** (wipes all data):
 
 ```bash
-./deploy-infra.sh --uninstall
-./deploy-infra.sh
-./deploy-apps.sh
+./install.sh --uninstall-infra   # or --uninstall-all to remove MicroK8s too
+./install.sh
 ```
 
 ---
@@ -686,7 +752,10 @@ Key variables:
 |---|---|---|
 | `PROJECT_NAME` | `medcea` | Project identifier: MQTT topic root (`medcea/<UNIT>/<ZONE>/…`), and the source of `NAMESPACE` and `KEYCLOAK_REALM` |
 | `NAMESPACE` | `$PROJECT_NAME` (`medcea`) | Kubernetes namespace for all services |
-| `DOMAIN` | auto (nip.io) | Base domain for ingress hostnames |
+| `DOMAIN` | `${PLATFORM_IP}.nip.io`; the installer offers `medcea` | Base domain for ingress hostnames |
+| `PLATFORM_IP` | Tailscale IP, else LAN IP | The address every service name points to; also the MQTT WebSocket host and the onboarding wizard address |
+| `LOCAL_DNS` | `false` | `true`: the platform serves DNS for `DOMAIN` (`name-dns`) and maps the names in `/etc/hosts` |
+| `ALIAS_DOMAIN` | `${PLATFORM_IP}.nip.io` | The old IP domain, kept as redirects to `DOMAIN`; inactive when equal to it |
 | `USE_TAILSCALE` | set by the installer | `true`: `DOMAIN` uses the Tailscale IP, and a deploy stops if Tailscale is down. `false`: LAN only, never asked again. Empty: not decided yet |
 | `ADMIN_USER` | `admin` | Admin username for Keycloak and Grafana |
 | `KEYCLOAK_REALM` | `$PROJECT_NAME` (`medcea`) | Keycloak realm name |
@@ -713,11 +782,13 @@ what you actually need to rebuild.
 
 | Level | Command | Removes | Keeps | Time |
 |---|---|---|---|---|
-| **Apps** | `./deploy-apps.sh` | nothing — re-applies app content | everything | seconds |
-| **Platform** | `./deploy-infra.sh --reset` then `./deploy-infra.sh && ./deploy-apps.sh --all` | the `$NAMESPACE` namespace and every Helm release in it, including all PVCs and therefore **all data** | MicroK8s, every cached image, `config.env` | ~1–2 min |
-| **Everything** | `./deploy-infra.sh --uninstall` then `./deploy-infra.sh` | MicroK8s itself, `/var/snap/microk8s`, `~/.kube` | only `config.env` and the repo | ~15 min + image pulls |
+| **Apps** | `./install.sh --uninstall-apps` then `./install.sh --apps-only` | app components (Deployments, ConfigMaps, dashboards, flows); `--purge-data` also drops `medcea_db` | infrastructure, database contents | ~1 min |
+| **Platform** | `./install.sh --uninstall-infra` then `./install.sh` | the `$NAMESPACE` namespace and every Helm release in it, including all PVCs and therefore **all data** | MicroK8s, every cached image, `config.env`, the CA | ~1–2 min + install |
+| **Everything** | `./install.sh --uninstall-all` then `./install.sh` | MicroK8s itself, `/var/snap/microk8s`, `~/.kube`, the onboarding wizard service, `edge/.venv`, `logs/`, credentials files; optionally `config.env` and `.ca/` | `edge/provisioned/` (audit trail), `edge/firmware/`, the repo | ~15 min + image pulls |
 
-`--reset` is the one you almost always want. `--uninstall` re-downloads every
+Under the hood these are `deploy-apps.sh --uninstall`, `deploy-infra.sh --reset` and `deploy-infra.sh --uninstall`, which still work on their own.
+
+`--uninstall-infra` is the one you almost always want. `--uninstall-all` re-downloads every
 container image, which on this platform is roughly 10 GB.
 
 ### What survives a reset, and whether that is correct

@@ -22,9 +22,9 @@ source "$REPO_ROOT/config.env"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/infra/lib-wait.sh"
 
-KUBECTL="microk8s kubectl"
+source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 NAMESPACE="${NAMESPACE:-medcea}"
-GRAFANA_URL="https://grafana.${DOMAIN}"
+GRAFANA_URL="https://${GRAFANA_DOMAIN:-grafana.$DOMAIN}"
 # Grafana is behind TLS from the platform CA now; every curl below must trust it
 # or the dashboard push fails on certificate verification rather than on content.
 CA_ARGS=(); [[ -f "$REPO_ROOT/.ca/ca.crt" ]] && CA_ARGS=(--cacert "$REPO_ROOT/.ca/ca.crt")
@@ -37,15 +37,7 @@ log() { echo -e "${GREEN}[report]${NC} $*"; }
 log "Creating dashboard provider ConfigMap..."
 $KUBECTL create configmap grafana-dashboard-provider \
     -n "$NAMESPACE" \
-    --from-literal="provider.yaml=apiVersion: 1
-providers:
-- name: default
-  type: file
-  disableDeletion: false
-  updateIntervalSeconds: 30
-  allowUiUpdates: true
-  options:
-    path: /var/lib/grafana/dashboards" \
+    --from-file=provider.yaml="$SCRIPT_DIR/k8s/dashboard-provider.yaml" \
     --dry-run=client -o yaml | $KUBECTL apply -f -
 
 # ── 2. Dashboard JSON ConfigMaps (one per .json file in dashboards/) ──────────

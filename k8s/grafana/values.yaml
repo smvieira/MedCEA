@@ -1,0 +1,19 @@
+env:
+  GF_SERVER_ROOT_URL: "https://${GRAFANA_DOMAIN}"
+  GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+  GF_AUTH_GENERIC_OAUTH_NAME: "Keycloak"
+  GF_AUTH_GENERIC_OAUTH_CLIENT_ID: "grafana"
+  GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: "${GRAFANA_OAUTH_SECRET}"
+  GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email roles"
+  GF_AUTH_GENERIC_OAUTH_AUTH_URL: "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+  GF_AUTH_GENERIC_OAUTH_TOKEN_URL: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+  GF_AUTH_GENERIC_OAUTH_API_URL: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+  GF_AUTH_GENERIC_OAUTH_TLS_SKIP_VERIFY_INSECURE: "false"
+  GF_AUTH_GENERIC_OAUTH_SKIP_ORG_ROLE_SYNC: "false"
+  GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(roles[*], 'grafana_admin') && 'Admin' || contains(roles[*], 'grafana_developer') && 'Editor' || 'Viewer'"
+extraSecretMounts:
+- name: datasource-secret
+  secretName: grafana-datasource
+  defaultMode: 0440
+  mountPath: /etc/grafana/provisioning/datasources
+  readOnly: true

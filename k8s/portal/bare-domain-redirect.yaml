@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bare-domain-redirect
+  namespace: ${NAMESPACE}
+  annotations:
+    nginx.ingress.kubernetes.io/permanent-redirect: https://${PORTAL_DOMAIN}/
+    nginx.ingress.kubernetes.io/permanent-redirect-code: "302"
+spec:
+  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
+  # plain HTTP here with a 308, which is why every registered redirect URI had
+  # to move to https in the same change.
+  tls:
+  - hosts: [${DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: public
+  rules:
+  - host: ${DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: portal
+            port:
+              number: 80

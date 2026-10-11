@@ -21,7 +21,7 @@ if [[ ! -f "$REPO_ROOT/config.env" ]]; then
 fi
 source "$REPO_ROOT/config.env"
 
-KUBECTL="microk8s kubectl"
+source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 NAMESPACE="${NAMESPACE:-medcea}"
 PG_RELEASE="${PG_RELEASE:-rdbms}"
 PG_USER="${POSTGRES_USER:-postgres}"
@@ -35,7 +35,9 @@ log() { echo -e "${GREEN}[database]${NC} $*"; }
 # ── Find postgres pod ─────────────────────────────────────────────────────────
 PG_POD=$($KUBECTL get pod -n "$NAMESPACE" \
     -l "app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=$PG_RELEASE" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    -o jsonpath='{.items[0].metadata.name}' || true)
+# stderr is kept and failure tolerated on purpose: under set -e a failing lookup
+# used to exit right here, silently, before the error below could explain it.
 
 if [[ -z "$PG_POD" ]]; then
     echo "ERROR: No PostgreSQL pod found (instance=$PG_RELEASE, namespace=$NAMESPACE)" >&2

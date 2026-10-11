@@ -1,0 +1,141 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgadmin-servers
+  namespace: ${NAMESPACE}
+data:
+  servers.json: |
+    {
+      "Servers": {
+        "1": {
+          "Name": "IoT Postgres",
+          "Group": "MedCEA",
+          "Host": "rdbms-postgresql.${NAMESPACE}.svc.cluster.local",
+          "Port": 5432,
+          "MaintenanceDB": "${POSTGRES_DB}",
+          "Username": "${POSTGRES_USER}",
+          "PassFile": "/pgpassfile",
+          "SSLMode": "disable"
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgadmin-pgpassfile
+  namespace: ${NAMESPACE}
+stringData:
+  pgpassfile: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local:5432:*:${POSTGRES_USER}:${POSTGRES_PASS}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgadmin
+  namespace: ${NAMESPACE}
+  labels:
+    app: pgadmin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pgadmin
+  template:
+    metadata:
+      labels:
+        app: pgadmin
+    spec:
+      initContainers:
+      - name: fix-pgpassfile-perms
+        image: busybox:1.36
+        command: ["sh", "-c", "cp /pgpassfile-src/pgpassfile /pgpassfile-rw/pgpassfile && chmod 0600 /pgpassfile-rw/pgpassfile"]
+        volumeMounts:
+        - name: pgpassfile-src
+          mountPath: /pgpassfile-src
+        - name: pgpassfile-rw
+          mountPath: /pgpassfile-rw
+      containers:
+      - name: pgadmin
+        image: dpage/pgadmin4:9
+        env:
+        - name: PGADMIN_DEFAULT_EMAIL
+          value: "${ADMIN_USER}@cea.com"
+        - name: PGADMIN_DEFAULT_PASSWORD
+          value: "${ADMIN_PASS}"
+        - name: PGADMIN_SERVER_JSON_FILE
+          value: "/pgadmin4/servers.json"
+        - name: PGPASSFILE
+          value: "/pgpassfile"
+        ports:
+        - containerPort: 80
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /misc/ping
+            port: 80
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 6
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: servers-config
+          mountPath: /pgadmin4/servers.json
+          subPath: servers.json
+        - name: pgpassfile-rw
+          mountPath: /pgpassfile
+          subPath: pgpassfile
+      volumes:
+      - name: servers-config
+        configMap:
+          name: pgadmin-servers
+      - name: pgpassfile-src
+        secret:
+          secretName: pgadmin-pgpassfile
+      - name: pgpassfile-rw
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgadmin
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: pgadmin
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pgadmin
+  namespace: ${NAMESPACE}
+spec:
+  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
+  # plain HTTP here with a 308, which is why every registered redirect URI had
+  # to move to https in the same change.
+  tls:
+  - hosts: [${PGADMIN_DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: nginx
+  rules:
+  - host: ${PGADMIN_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: pgadmin
+            port:
+              number: 80
