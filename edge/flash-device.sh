@@ -1571,6 +1571,7 @@ if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
     REG_JSON="$(
       SLOT_DNS="$SLOT_DNS" ROLE="$ROLE" ZONE_ID="$ZONE_ID" MAC="$MAC" \
       CHIP_DESC="$CHIP_DESC" DB_COMPONENTS="$DB_COMPONENTS" \
+      NET_HOSTNAME="${HOSTNAME_OK:-$HOSTNAME}" \
       python3 -c '
 import json, os, re
 e = os.environ
@@ -1580,6 +1581,10 @@ e = os.environ
 serial = re.sub(r"[^0-9a-fA-F]", "", e["MAC"]).lower()
 print(json.dumps({
     "dns_name": e["SLOT_DNS"],
+    # What the config UI pings: dns_name has underscores and never resolves.
+    # The name the board actually reported if it was verified, else the one
+    # it was given.
+    "hostname": e["NET_HOSTNAME"] or None,
     "device_type": e["ROLE"],
     "zone_id": int(e["ZONE_ID"]),
     "serial_number": serial,

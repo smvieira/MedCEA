@@ -254,7 +254,7 @@ def register(base, spec):
     dns = spec["dns_name"]
     row = {k: spec[k] for k in (
         "zone_id", "device_type", "model", "manufacturer", "serial_number",
-        "connection_type", "dns_name") if spec.get(k) is not None}
+        "connection_type", "dns_name", "hostname") if spec.get(k) is not None}
     row.setdefault("is_active", "Y")
     if spec.get("installation_date"):
         row["installation_date"] = spec["installation_date"]

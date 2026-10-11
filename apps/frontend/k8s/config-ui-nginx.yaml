@@ -40,5 +40,9 @@ data:
       location / {
         root /usr/share/nginx/html;
         index index.html;
+        # The page is the app: without this, browsers cache it by heuristic
+        # and keep running old JavaScript after a redeploy. no-cache still
+        # caches, but revalidates — an unchanged page costs a 304 (ETag).
+        add_header Cache-Control "no-cache" always;
       }
     }

@@ -109,3 +109,19 @@ COMMENT ON COLUMN medcea.algorithm_state.algorithm  IS 'Algorithm code matching 
 COMMENT ON COLUMN medcea.algorithm_state.channel    IS 'Sensor channel the state applies to (e.g. air_temperature, co2, air_humidity, substrate_temperature). Each channel has an independent state.';
 COMMENT ON COLUMN medcea.algorithm_state.state      IS 'Serialised algorithm state as JSON. For Q_LEARNING: {"q_table": {...}, "epsilon": 0.15}. Loaded at cycle start, saved at cycle end.';
 COMMENT ON COLUMN medcea.algorithm_state.updated_at IS 'Timestamp of the last state save. Used to detect stale state after hardware changes.';
+
+-- ── Migration 004: Network hostname on device ───────────────────────────────
+-- dns_name is the platform identifier (UNIT02_CONTROL_ZONE02) and, with its
+-- underscores, not a resolvable name; the config UI's Online check pinged it and
+-- always failed. The DHCP hostname (u02-c-z02) is compressed against every unit
+-- code at flash time, so adding a unit later could change a recomputed one: it
+-- is stored by edge/flash-device.sh at registration instead.
+
+ALTER TABLE medcea.device
+    ADD COLUMN IF NOT EXISTS hostname VARCHAR(63);
+
+COMMENT ON COLUMN medcea.device.hostname IS 'Network hostname the board registers with DHCP (e.g. u02-c-z02; mDNS u02-c-z02.local). Written at onboarding; what the Online check pings. NULL for devices added by hand without one.';
+
+-- PostgREST caches the schema; without this a new column is invisible to the
+-- API until config-api restarts.
+NOTIFY pgrst, 'reload schema';

@@ -797,6 +797,7 @@
           <div class="fg"><label>Device Type <span class="req">*</span></label><input name="device_type" required placeholder="e.g. Sensor, Controller"></div>
           <div class="fg"><label>Serial Number <span class="req">*</span></label><input name="serial_number" required placeholder="SN-XXXXXX"></div>
           <div class="fg"><label>DNS / IP <span class="req">*</span></label><input name="dns_name" required placeholder="dev01.local or 192.168.1.x"></div>
+          <div class="fg"><label>Hostname</label><input name="hostname" maxlength="63" placeholder="u01-s-z01 (what the Online check pings)"></div>
           <div class="fg">
             <label>Connection <span class="req">*</span></label>
             <input name="connection_type" required placeholder="WiFi" list="conn-types">
@@ -1142,7 +1143,9 @@
           + '</tr></thead><tbody>';
         devs.forEach(d => {
           h += '<tr>'
-            + '<td><strong>' + esc(d.dns_name) + '</strong></td>'
+            + '<td><strong>' + esc(d.dns_name) + '</strong>'
+          + (d.hostname ? '<div style="font-size:.75rem;color:#64748b">' + esc(d.hostname) + '</div>' : '')
+          + '</td>'
             + '<td>' + esc(d.device_type) + '</td>'
             + '<td>' + esc(d.model || '—') + '</td>'
             + '<td style="font-size:.75rem;color:#64748b">' + esc(d.serial_number) + '</td>'
@@ -1303,8 +1306,8 @@
           + '<td style="font-size:.78rem;color:#64748b">' + esc(d.serial_number) + '</td>'
           + '<td><span class="badge badge-' + (d.is_active === 'Y' ? 'y' : 'n') + '">' + (d.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
           + '<td style="text-align:center">'
-          + '<span id="online-' + d.device_id + '" data-dns="' + esc(d.dns_name) + '" style="color:#475569" title="Not checked">—</span>'
-          + ' <button onclick="checkDeviceOnline(' + d.device_id + ',\'' + esc(d.dns_name) + '\')" title="Check now" style="background:none;border:none;cursor:pointer;color:#64748b;font-size:.85rem;padding:0 2px">⟳</button>'
+          + '<span id="online-' + d.device_id + '" data-dns="' + esc(pingTarget(d)) + '" style="color:#475569" title="Not checked">—</span>'
+          + ' <button onclick="checkDeviceOnline(' + d.device_id + ',\'' + esc(pingTarget(d)) + '\')" title="Check now" style="background:none;border:none;cursor:pointer;color:#64748b;font-size:.85rem;padding:0 2px">⟳</button>'
           + '</td>'
           + '<td style="white-space:nowrap">'
           + '<button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button>'
@@ -1326,6 +1329,13 @@
 
 
     // ── Device Online Check (server-side TCP — works on LAN) ─────
+    // What to ping: the network hostname written at onboarding (u02-c-z02,
+    // which the router's DNS answers for pods). dns_name is the platform
+    // identifier — UNIT02_CONTROL_ZONE02 has underscores and never resolves —
+    // so it is only the fallback for hand-added rows that put an IP or a real
+    // name in it.
+    function pingTarget(d) { return d.hostname || d.dns_name; }
+
     async function checkDeviceOnline(deviceId, dnsName) {
       const cell = document.getElementById('online-' + deviceId);
       if (!cell) return;
@@ -1440,7 +1450,7 @@
         api('GET', '/device?device_id=eq.' + deviceId).then(async rows => {
           const d = rows[0];
           if (!d) return;
-          ['device_type','model','manufacturer','serial_number','connection_type','dns_name','is_active'].forEach(k => {
+          ['device_type','model','manufacturer','serial_number','connection_type','dns_name','hostname','is_active'].forEach(k => {
             const el = form.elements[k]; if (el && d[k] != null) el.value = d[k];
           });
           if (d.installation_date) form.elements['installation_date'].value = d.installation_date.slice(0, 10);

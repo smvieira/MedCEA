@@ -80,7 +80,18 @@ if [ "$INSTALL_MK8S" = true ]; then
     # as it starts, and snap rolls the install back.
     kill_orphan_pods
     echo -e "${YELLOW}Installing MicroK8s (${K8S_CHANNEL})...${NC}"
-    sudo snap install microk8s --channel="${K8S_CHANNEL}" --classic
+    # A removal that left containerd-shims in containerd's unit gets the next
+    # containerd SIGKILLed at start (see infra/lib-mk8s-remove.sh), and snapd
+    # rolls the install back. remove_microk8s no longer does that, but an
+    # older removal may have. The failed attempt clears systemd's stale unit,
+    # so a second attempt goes through: one retry, after a cleanup.
+    if ! sudo snap install microk8s --channel="${K8S_CHANNEL}" --classic; then
+        echo -e "${YELLOW}MicroK8s install rolled back — clearing leftovers and retrying once...${NC}"
+        sudo systemctl reset-failed 'snap.microk8s.*' 2>/dev/null || true
+        kill_orphan_pods
+        sleep 5
+        sudo snap install microk8s --channel="${K8S_CHANNEL}" --classic
+    fi
 
     echo -e "${YELLOW}Configuring user permissions...${NC}"
     sudo usermod -a -G microk8s "$USER"
