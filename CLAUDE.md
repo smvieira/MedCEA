@@ -19,11 +19,9 @@ This repo was forked from `pfplatform` (@2032725) as the baseline for the MedCEA
 All scripts must be run from the repository root; they call each other via relative paths and source `config.env` from the current directory.
 
 ```bash
-# 0. One-time setup
-cp config.env.example config.env
-# Edit config.env: set ADMIN_PASS, POSTGRES_PASS, METALLB_RANGE, KUBEFLOW_IP, and domain names.
-
-# 1. Deploy infrastructure (safe to re-run — bootstrap is skipped if already done):
+# 1. Deploy infrastructure (safe to re-run — bootstrap is skipped if already done).
+#    The first run creates config.env from config.env.example by Q&A (infra/configure.sh);
+#    later runs ask only for empty required values. Review all: ./deploy-infra.sh --configure
 ./deploy-infra.sh
 
 # Help text (does not require config.env to be present)
@@ -40,6 +38,7 @@ cp config.env.example config.env
 ## Script Roles
 
 - **`bootstrap-infra.sh`** — Called by `deploy-infra.sh`. Handles: K3s cleanup, MicroK8s snap install/wipe (interactive prompt, also removes Juju on wipe), MicroK8s addon enablement (dns:8.8.8.8, hostpath-storage, rbac, ingress, helm3, metallb), inotify limit tuning, kubeconfig export, Juju 3.6/stable install, Charmed Kubeflow 1.9 deployment via `juju deploy kubeflow --trust`, dex-auth/oidc-gatekeeper initial configuration, and pod-count readiness wait.
+- **`infra/configure.sh`** — Fills `config.env` by Q&A. It is called by `deploy-infra.sh` before logging starts, so answers and generated passwords stay out of `logs/`. `config.env.example` is always the base: on each run the file is rebuilt from the template with existing values carried over line for line, and keys only the old file had are kept at the end. It checks Tailscale on every run, before the early exit for a complete file. `USE_TAILSCALE` records whether `DOMAIN` depends on it: `true` makes a down Tailscale fatal, because the `DOMAIN` expression would quietly fall back to the LAN IP; `false` means LAN-only on purpose and is not raised again. Pressing Enter leaves a line untouched, so expressions like `DOMAIN="$(tailscale ip ...)"` stay expressions. Passwords are limited to `[A-Za-z0-9._~-]` because they are spliced unencoded into YAML, a `postgres://` URL, `helm --set` and a curl form body.
 - **`deploy-infra.sh`** — Top-level infrastructure orchestrator. Also deploys the AI workbench (`infra/deploy-workbench.sh`, JupyterHub) unless `WORKBENCH_ENABLED=false` — it is a platform service, and infra already owns its Keycloak client, portal card and URL. Validates config (including METALLB_RANGE and KUBEFLOW_IP), prompts for Docker Hub credentials, calls `bootstrap-infra.sh`, then deploys Postgres → Keycloak → Mosquitto → (Node-RED + Grafana + OAuth2 Proxy) via Helm.
 - **`deploy-apps.sh`** — Interactive app content installer. Discovers components under `apps/<component>/deploy.sh` and presents a checkbox menu. Use `--all` to skip the prompt.
 - **`infra/deploy-workbench.sh`** — JupyterHub, authenticated against Keycloak with `GenericOAuthenticator`. Replaced Charmed Kubeflow, which `bootstrap-infra.sh` used to deploy. Runnable standalone to redeploy just the workbench.

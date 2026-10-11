@@ -1,5 +1,8 @@
 # Contains real credentials — never commit
 config.env
+config.env.bak
+config.env.merged
+config.env.tmp
 logs/
 
 # Python bytecode

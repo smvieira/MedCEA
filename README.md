@@ -35,33 +35,19 @@ All services authenticate through Keycloak using OIDC. Re-running either deploy 
 - 16 GB RAM minimum (24 GB comfortable with the AI workbench in use)
 - 100 GB disk
 - Internet access
-- A [Docker Hub](https://hub.docker.com) account with a Personal Access Token (PAT) — needed to pull Bitnami Helm charts and avoid Docker Hub rate limits
-- (Optional) [Tailscale](https://tailscale.com) — enables access from any device on your Tailnet without touching DNS
+- A free [Docker Hub](https://hub.docker.com) account — needed to pull the Bitnami Helm charts and avoid Docker Hub rate limits. You don't need to prepare anything: the installer links to sign-up and token creation, says which permission to pick, and checks the token.
+- (Optional, recommended) [Tailscale](https://tailscale.com) — a fixed address reachable from any of your devices, at home or away, with no DNS or router setup. The installer checks for it on every run, prints the steps if it is missing, stopped or not logged in, and can run them for you. You can also continue LAN-only.
 
 ---
 
 ## Installation
 
-### 1. Clone and configure
+### 1. Clone
 
 ```bash
 git clone <repo-url> MedCEA
 cd MedCEA
-cp config.env.example config.env
 ```
-
-Edit `config.env` and fill in:
-
-| Variable | Description |
-|---|---|
-| `ADMIN_PASS` | Password for the `admin` account (Keycloak, Grafana) |
-| `POSTGRES_PASS` | PostgreSQL superuser password |
-| `DOCKERHUB_USER` | Docker Hub username |
-| `DOCKERHUB_PAT` | Docker Hub Personal Access Token |
-
-> **Domain:** By default, `DOMAIN` is set automatically from your Tailscale IP (or LAN IP) using [nip.io](https://nip.io), so all subdomains resolve without any DNS setup. Override it in `config.env` if needed.
-
-> **TLS:** every service is served over HTTPS with a certificate the platform issues itself. See [Trust the platform certificate](#4-trust-the-platform-certificate) — without it browsers show "Not secure".
 
 ### 2. Deploy infrastructure
 
@@ -69,7 +55,35 @@ Edit `config.env` and fill in:
 ./deploy-infra.sh
 ```
 
-This single command does everything:
+**It starts by asking for its settings.** There is no file to edit by hand: on the first run it creates `config.env` from [config.env.example](config.env.example) and asks for each setting, with the default in `[brackets]` (press Enter to accept):
+
+| Asked | Default |
+|---|---|
+| Tailscale | checked on every run. If it is missing, stopped or not logged in, the installer prints the steps (with links), then lets you re-check, run them for you, or continue LAN-only |
+| Project name | `medcea` |
+| Domain | your Tailscale IP, or LAN IP, + `.nip.io` |
+| Admin username / password | `admin` / generated if you press Enter (shown once — note it down) |
+| PostgreSQL password, volume size | generated / `10Gi` |
+| Docker Hub username + access token | none: the installer links to sign-up and token creation and checks the pair |
+| Timezone, AI workbench on/off | system timezone / on |
+
+Passwords may use only letters, digits and `. _ ~ -`, because they are written unescaped into URLs and YAML. Service secrets (OAuth clients, cookies) are generated later in the run, with no questions.
+
+On later runs only required values that are still empty are asked, so a complete `config.env` deploys straight through. To review or change settings:
+
+```bash
+./deploy-infra.sh --configure   # all questions, current values as defaults, then deploy
+./infra/configure.sh            # all questions only, no deploy
+```
+
+Each run rebuilds `config.env` from the template and keeps your values, so variables added to the template later show up automatically. The previous file is saved as `config.env.bak`. If `DOMAIN` uses the Tailscale IP and Tailscale is down, the deploy stops rather than quietly switching to the LAN IP.
+
+> **Domain:** nip.io resolves every `<service>.<IP>.nip.io` to that IP, so no DNS setup is needed. Changing `DOMAIN` after deployment means re-running `./deploy-infra.sh` (certificates and SSO redirects use it).
+
+> **TLS:** every service is served over HTTPS with a certificate the platform issues itself. See [Trust the platform certificate](#4-trust-the-platform-certificate) — without it browsers show "Not secure".
+
+After the settings, the same command does everything else:
+
 
 1. **Bootstraps MicroK8s** — installs the snap, enables addons (dns, ingress, helm3, hostpath-storage, rbac), exports kubeconfig
 2. **Issues the platform CA** and a wildcard certificate for `*.$DOMAIN`, and publishes it as the `cea-tls` secret
@@ -664,7 +678,7 @@ To **reinstall from scratch** (wipes all data):
 
 ## Configuration reference
 
-All settings are in `config.env` (not committed — listed in `.gitignore`). See [config.env.example](config.env.example) for the full variable list with comments.
+All settings are in `config.env` (not committed — listed in `.gitignore`), written by the installer's questions. Change them with `./deploy-infra.sh --configure`, or edit the file directly; the next run keeps your edits. See [config.env.example](config.env.example) for the full variable list with comments.
 
 Key variables:
 
@@ -673,11 +687,12 @@ Key variables:
 | `PROJECT_NAME` | `medcea` | Project identifier: MQTT topic root (`medcea/<UNIT>/<ZONE>/…`), and the source of `NAMESPACE` and `KEYCLOAK_REALM` |
 | `NAMESPACE` | `$PROJECT_NAME` (`medcea`) | Kubernetes namespace for all services |
 | `DOMAIN` | auto (nip.io) | Base domain for ingress hostnames |
+| `USE_TAILSCALE` | set by the installer | `true`: `DOMAIN` uses the Tailscale IP, and a deploy stops if Tailscale is down. `false`: LAN only, never asked again. Empty: not decided yet |
 | `ADMIN_USER` | `admin` | Admin username for Keycloak and Grafana |
 | `KEYCLOAK_REALM` | `$PROJECT_NAME` (`medcea`) | Keycloak realm name |
 | `K8S_CHANNEL` | `1.29/stable` | MicroK8s snap channel |
 | `WORKBENCH_ENABLED` | `true` | Deploy the JupyterHub workbench with the infrastructure |
-| `NODE_RED_TZ` | `Europe/London` | Timezone for Node-RED |
+| `NODE_RED_TZ` | system timezone | Timezone for Node-RED |
 | `WORKBENCH_DOMAIN` | `ai-workbench.$DOMAIN` | Hostname for the AI workbench |
 
 ---

@@ -43,7 +43,7 @@ _print_banner() {
 # =============================================================================
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "${GREEN}Usage:${NC}"
-    echo "  ./deploy-infra.sh [--help|--reset [--secrets]|--uninstall]"
+    echo "  ./deploy-infra.sh [--help|--configure|--reset [--secrets]|--uninstall]"
     echo ""
     echo -e "${GREEN}Description:${NC}"
     echo "  Deploys the full MedCEA IoT stack onto MicroK8s:"
@@ -51,12 +51,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "  ...and the AI workbench (JupyterHub), unless WORKBENCH_ENABLED=false."
     echo ""
     echo -e "${GREEN}First-time setup:${NC}"
-    echo "  1. Copy config.env.example to config.env and fill in the required fields."
-    echo "  2. Run:  ./deploy-infra.sh"
-    echo "     → Bootstraps MicroK8s, deploys all services, creates the"
-    echo "       Keycloak realm '\$KEYCLOAK_REALM' and OAuth clients automatically."
-    echo "  3. Run:  ./infra/patch-dex-keycloak.sh"
-    echo "     → Creates the Keycloak realm and OAuth clients for every service."
+    echo "  1. Run:  ./deploy-infra.sh"
+    echo "     → Asks for the settings it needs (defaults in [brackets]), writes"
+    echo "       config.env from config.env.example, then bootstraps MicroK8s,"
+    echo "       deploys all services and creates the Keycloak realm and OAuth"
+    echo "       clients automatically."
+    echo "  2. Run:  ./deploy-apps.sh --all"
     echo ""
     echo -e "${GREEN}Re-runs are safe:${NC}"
     echo "  If MicroK8s is already set up, bootstrap is skipped."
@@ -64,6 +64,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo ""
     echo -e "${GREEN}Configuration:${NC}"
     echo "  All settings are read from config.env (see config.env.example)."
+    echo "  Only empty required values are asked on later runs. To review them all:"
+    echo "  ./deploy-infra.sh --configure     (or ./infra/configure.sh on its own)"
     echo ""
     echo -e "${GREEN}Uninstall:${NC}"
     echo "  ./deploy-infra.sh --reset            # wipe the namespace, keep MicroK8s (fast)"
@@ -124,6 +126,9 @@ fi
 # returns for the recreated clients. With it, anything that fails to regenerate
 # fails loudly instead of silently reusing a value that no longer means anything.
 if [[ "${1:-}" == "--reset" ]]; then
+    # The namespace comes from PROJECT_NAME, so read it before naming it.
+    [[ -f config.env ]] && source config.env
+    NAMESPACE="${NAMESPACE:-medcea}"
     # Log the reset too. It was previously above the logging setup, so the most
     # destructive operation in the script was the one leaving no record — which
     # made a half-rebuilt platform hard to explain after the fact.
@@ -140,8 +145,6 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo ""
     read -p "Type 'reset' to confirm: " _CONFIRM
     [[ "$_CONFIRM" == "reset" ]] || { echo "Aborted."; exit 0; }
-
-    NAMESPACE="${NAMESPACE:-medcea}"
 
     echo -e "${YELLOW}Uninstalling Helm releases...${NC}"
     for _rel in $($MK8S helm3 list -n "$NAMESPACE" -q 2>/dev/null); do
@@ -181,6 +184,18 @@ if [[ "${1:-}" == "--reset" ]]; then
     exit 0
 fi
 
+# =============================================================================
+# CONFIGURATION — Q&A into config.env (template: config.env.example)
+# =============================================================================
+# Before logging starts, so the answers and any generated password stay out of
+# logs/. --configure reviews every setting; otherwise only empty required ones
+# are asked, and a complete config.env asks nothing.
+if [[ "${1:-}" == "--configure" ]]; then
+    bash "$SCRIPT_DIR/infra/configure.sh" || exit 1
+else
+    bash "$SCRIPT_DIR/infra/configure.sh" --missing || exit 1
+fi
+
 mkdir -p logs
 LOG_FILE="logs/deploy-infra-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee "$LOG_FILE") 2>&1
@@ -190,12 +205,7 @@ _print_banner
 source config.env
 set -e
 
-# Use Docker Hub credentials from config.env if set; otherwise prompt interactively.
-if [[ -z "${DOCKERHUB_USER:-}" || -z "${DOCKERHUB_PAT:-}" ]]; then
-    read -p "👤 Docker Hub username: " DOCKERHUB_USER
-    read -s -p "🔑 Docker Hub password/PAT: " DOCKERHUB_PAT
-    echo ""
-fi
+# Docker Hub credentials were asked for by infra/configure.sh if they were empty.
 DOCKERHUB_PASS="$DOCKERHUB_PAT"
 export DOCKERHUB_USER DOCKERHUB_PASS
 
@@ -216,7 +226,7 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 #   node-red:     node-red/node-red (0.40.0) — schwarzit
 #   oauth2-proxy: oci://registry-1.docker.io/bitnamicharts/oauth2-proxy (8.0.2)
 #
-# Docker Hub login (DOCKERHUB_USER/PAT from config.env, or prompted) handles both:
+# Docker Hub login (DOCKERHUB_USER/PAT from config.env) handles both:
 #   - Helm OCI chart pulls (bitnamicharts)
 #   - docker.io image pulls (avoids 429 rate limit)
 # =============================================================================
@@ -227,7 +237,7 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 
 # Validate essential configuration variables
 MISSING_VARS=()
-for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB \
+for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
            STORAGE_SIZE KEYCLOAK_DOMAIN KEYCLOAK_REALM GRAFANA_DOMAIN NODE_RED_DOMAIN \
            WORKBENCH_DOMAIN PGADMIN_DOMAIN PORTAL_DOMAIN MQTTX_DOMAIN; do
     if [[ -z "${!var}" ]]; then
