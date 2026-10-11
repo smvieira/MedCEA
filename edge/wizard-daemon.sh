@@ -71,6 +71,7 @@ cd "$REPO_ROOT"
 # shellcheck source=/dev/null
 [ -f config.env ] && source config.env
 PORT="${PORT:-${EDGE_WIZARD_PORT:-8088}}"
+ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-${DOMAIN:+onboard-device.$DOMAIN}}"
 
 [ -n "${EDGE_WIZARD_SECRET:-}" ] || {
   echo "EDGE_WIZARD_SECRET is not set in config.env." >&2
@@ -102,11 +103,14 @@ _lan="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"
 _ts="$(tailscale ip -4 2>/dev/null | head -1 || true)"
 HOST_ARGS=()
 for h in ${_lan:+$_lan} ${_ts:+$_ts} 127.0.0.1 localhost; do HOST_ARGS+=(--allowed-host "$h:$PORT"); done
+# The name the config UI links to, forwarded here by the ingress (apps/edge-wizard).
+[ -n "${ONBOARD_DOMAIN:-}" ] && HOST_ARGS+=(--allowed-host "https://$ONBOARD_DOMAIN")
 
 ROLE_ARGS=()
 [ -n "${EDGE_WIZARD_ROLE:-}" ] && ROLE_ARGS=(--required-role "$EDGE_WIZARD_ROLE")
 
 echo "CEA edge onboarding wizard on port $PORT — sign in with Keycloak realm ${KEYCLOAK_REALM:-medcea}"
+[ -n "${ONBOARD_DOMAIN:-}" ] && echo "  https://$ONBOARD_DOMAIN/"
 for h in ${_lan:+$_lan} ${_ts:+$_ts} 127.0.0.1; do echo "  http://$h:$PORT/"; done
 
 exec python3 "$SCRIPT_DIR/src/host/wizard_server.py" \

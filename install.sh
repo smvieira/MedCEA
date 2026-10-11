@@ -23,13 +23,14 @@ Install / update
   --configure            Review every setting (current values as defaults), then install.
   --infra-only           Only the infrastructure (MicroK8s, Postgres, Keycloak, Grafana,
                          Node-RED, portal, AI workbench).
-  --apps-only            Only the applications (database schema, config UI, scheduler,
-                         monitor, reports, Node-RED flows). Needs the infrastructure.
+  --apps-only            Only the applications (database schema, onboarding wizard,
+                         config UI, scheduler, monitor, reports, Node-RED flows).
+                         Needs the infrastructure.
 
 Uninstall
   --uninstall-apps [component ...]
                          Remove application components — all, or the ones named
-                         (database frontend monitor node-red report scheduler).
+                         (database edge-wizard frontend monitor node-red report scheduler).
                          The infrastructure keeps running; database contents are kept.
       --purge-data       ...and drop the database medcea_db with all its data.
   --uninstall-infra      Remove every platform service, every application and ALL data
@@ -171,7 +172,7 @@ uninstall-infra)
 uninstall-all)
     echo -e "${RED}${BOLD}TOTAL UNINSTALL — this permanently removes:${NC}"
     echo "  - every platform service, application and ALL data"
-    echo "  - MicroK8s, Juju, all cluster data and ~/.kube"
+    echo "  - MicroK8s (and Juju, if an old install left it), all cluster data and ~/.kube"
     echo "  - the onboarding wizard user service (cea-edge-wizard), edge/.venv"
     echo "  - the MedCEA block in /etc/hosts (name-based domain)"
     echo "  - logs/ and credentials-*.txt"

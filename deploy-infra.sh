@@ -144,13 +144,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     fi
 
     echo -e "${YELLOW}Removing MicroK8s...${NC}"
+    source "$SCRIPT_DIR/infra/lib-mk8s-remove.sh"
     if snap list 2>/dev/null | grep -q microk8s; then
-        $MK8S stop || true
-        $MK8S reset --destroy-storage || true
-        sudo snap remove microk8s --purge
-        sudo rm -rf ~/.kube /var/snap/microk8s
+        remove_microk8s
     else
         echo "  MicroK8s not installed — skipping."
+        kill_orphan_pods
     fi
 
     # The /etc/hosts entries for a name-based domain (infra/lib-dns.sh).
@@ -401,8 +400,10 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$CA_DIR/server.key"
 # name (*.medcea), so a name-based DOMAIN needs each host as its own SAN. The
 # alias (old IP) domain is included so its redirects are served over valid TLS.
 _SVC_DOMAINS=()
+ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"   # older config.env files lack it
 for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
-          SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN; do
+          SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN \
+          ONBOARD_DOMAIN; do
     [[ -n "${!_v:-}" ]] && _SVC_DOMAINS+=("${!_v}")
 done
 _ALIAS_ON=false
@@ -683,11 +684,13 @@ echo -e "${YELLOW}  Creating client 'edge-wizard'...${NC}"
 # is opened from a laptop over SSH, so register every address it can answer on.
 _EW_PORT="${EDGE_WIZARD_PORT:-8088}"
 _EW_TS="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-_EW_URIS="$(EW_PORT="$_EW_PORT" EW_LAN="${_LAN_IP:-}" EW_TS="$_EW_TS" python3 -c "
+_EW_URIS="$(EW_PORT="$_EW_PORT" EW_LAN="${_LAN_IP:-}" EW_TS="$_EW_TS" EW_ONBOARD="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}" python3 -c "
 import json, os
 e = os.environ; port = e['EW_PORT']
 hosts = ['127.0.0.1', 'localhost'] + [h for h in (e.get('EW_LAN'), e.get('EW_TS')) if h]
-print(json.dumps(['http://%s:%s/oauth2/callback' % (h, port) for h in hosts]))")"
+uris = ['http://%s:%s/oauth2/callback' % (h, port) for h in hosts]
+if e.get('EW_ONBOARD'): uris.append('https://%s/oauth2/callback' % e['EW_ONBOARD'])
+print(json.dumps(uris))")"
 _EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS")
 # 24 bytes → 32-char base64 → valid AES-256 key for oauth2-proxy. Kept once
 # generated (see _CONFIG_COOKIE_SECRET above).

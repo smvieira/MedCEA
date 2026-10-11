@@ -25,11 +25,26 @@ echo -e "${GREEN}--- Ubuntu PC: Environment Validation for $NAMESPACE (MicroK8s)
 # thing bootstrap did. Juju is retired, so a running MicroK8s is now the whole
 # condition — otherwise this would keep short-circuiting for as long as the old
 # juju snap happened to still be installed.
+# The API answering is not enough: a run that died between install and step 6
+# leaves a live cluster with no ingress or storage, and skipping would make that
+# permanent. Require the addons too.
+_addons_done() {
+    local st
+    st=$($MK8S status --format short 2>/dev/null) || return 1
+    for a in dns hostpath-storage rbac ingress helm3; do
+        grep -q "/$a: enabled" <<<"$st" || return 1
+    done
+}
 if snap list 2>/dev/null | grep -q microk8s && \
-   $MK8S kubectl cluster-info &>/dev/null; then
+   $MK8S kubectl cluster-info &>/dev/null && _addons_done; then
     echo -e "${GREEN}MicroK8s already up — skipping bootstrap.${NC}"
     exit 0
 fi
+
+# Everything below installs, starts, configures or wipes MicroK8s, which needs a
+# sudo that honours -E. Restored when this script exits, however it exits.
+source "$REPO_ROOT/infra/lib-sudo.sh"
+classic_sudo_begin
 
 # --- 1. CLEANUP LEGACY KUBERNETES ---
 if [ -f /usr/local/bin/k3s-uninstall.sh ]; then
@@ -39,6 +54,7 @@ if [ -f /usr/local/bin/k3s-uninstall.sh ]; then
 fi
 
 INSTALL_MK8S=false
+source "$REPO_ROOT/infra/lib-mk8s-remove.sh"
 
 # --- 2. MICROK8S RESET LOGIC ---
 if snap list | grep -q microk8s; then
@@ -51,10 +67,7 @@ if snap list | grep -q microk8s; then
             sudo rm -rf ~/.local/share/juju
         fi
         echo -e "${RED}Uninstalling MicroK8s...${NC}"
-        $MK8S stop || true
-        $MK8S reset --destroy-storage || true
-        sudo snap remove microk8s --purge
-        sudo rm -rf ~/.kube /var/snap/microk8s
+        remove_microk8s
         INSTALL_MK8S=true
     fi
 else
@@ -63,6 +76,9 @@ fi
 
 # --- 3. MICROK8S INSTALLATION ---
 if [ "$INSTALL_MK8S" = true ]; then
+    # Pods an earlier removal left running get the new containerd SIGKILLed
+    # as it starts, and snap rolls the install back.
+    kill_orphan_pods
     echo -e "${YELLOW}Installing MicroK8s (${K8S_CHANNEL})...${NC}"
     sudo snap install microk8s --channel="${K8S_CHANNEL}" --classic
 
@@ -72,7 +88,10 @@ if [ "$INSTALL_MK8S" = true ]; then
     sudo chown -f -R "$USER" "$HOME/.kube"
 
     echo -e "${YELLOW}Starting MicroK8s...${NC}"
-    $MK8S start
+    # snapd's CLI rather than `microk8s start`: one less step through the
+    # wrapper's `sudo -E` (infra/lib-sudo.sh). Same effect on a fresh install.
+    sudo snap start --enable microk8s
+    sudo rm -f /var/snap/microk8s/current/var/lock/stopped.lock
 
     echo -e "${YELLOW}Waiting 15s for daemon to initialize...${NC}"
     sleep 15

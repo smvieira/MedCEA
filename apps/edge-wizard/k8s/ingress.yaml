@@ -1,0 +1,50 @@
+# https://${ONBOARD_DOMAIN} → the onboarding wizard on the host.
+#
+# The wizard is not a pod (it needs the host's USB port), so the Service has no
+# selector and its one endpoint is the host itself, ${PLATFORM_IP}:${EDGE_WIZARD_PORT}
+# — the node's InternalIP, which pods reach directly. nginx keeps the Host
+# header, so the wizard builds its Keycloak redirect_uri as https://${ONBOARD_DOMAIN}.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-wizard
+  namespace: ${NAMESPACE}
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: ${EDGE_WIZARD_PORT}
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: edge-wizard
+  namespace: ${NAMESPACE}
+subsets:
+- addresses:
+  - ip: ${PLATFORM_IP}
+  ports:
+  - name: http
+    port: ${EDGE_WIZARD_PORT}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge-wizard
+  namespace: ${NAMESPACE}
+spec:
+  tls:
+  - hosts: [${ONBOARD_DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: nginx
+  rules:
+  - host: ${ONBOARD_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: edge-wizard
+            port:
+              number: 80

@@ -54,10 +54,10 @@ render "$SCRIPT_DIR/k8s/config-ui-nginx.yaml" NAMESPACE | $KUBECTL apply -n "$NA
 log "Creating config UI HTML..."
 
 # Onboarding runs on the platform host, not in the cluster: it needs the USB
-# port. PLATFORM_IP is the address a browser on the tailnet reaches the wizard
-# daemon on — and one of the hosts its Keycloak client allows. Never derive it
-# from DOMAIN, which may be a name (medcea).
-_EDGE_WIZARD_URL="http://${PLATFORM_IP:-$(tailscale ip -4 2>/dev/null | head -1)}:${EDGE_WIZARD_PORT:-8088}/"
+# port. apps/edge-wizard publishes it at https://$ONBOARD_DOMAIN through the
+# ingress, so the link is a name on the platform certificate like every other
+# service (and HTTPS is what lets the wizard's copy buttons use the clipboard).
+_EDGE_WIZARD_URL="https://${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}/"
 log "Onboarding wizard link: $_EDGE_WIZARD_URL"
 
 # Full RP-initiated logout: without client_id and post_logout_redirect_uri,
@@ -246,15 +246,14 @@ echo -e "  ${BOLD}Frontend deployed${NC}"
 wait_for_http "https://$CONFIG_DOMAIN/" 120 "Config UI" || exit 1
 
 # The Devices tab links to the onboarding wizard, which runs on the host rather
-# than in the cluster (it needs the USB port). Nothing here deploys it, so a
-# stopped daemon shows up as "refused to connect" only when somebody clicks the
-# button. Check it at deploy time instead, and say exactly how to fix it.
-if ! curl -s -o /dev/null -m 5 "$_EDGE_WIZARD_URL" 2>/dev/null; then
+# than in the cluster (it needs the USB port). apps/edge-wizard deploys it and
+# sorts before this component; a stopped daemon would otherwise show up as
+# "refused to connect" only when somebody clicks the button.
+if ! curl -s -o /dev/null -m 5 --cacert "$REPO_ROOT/.ca/ca.crt" "$_EDGE_WIZARD_URL" 2>/dev/null; then
     log "WARNING: the onboarding wizard is not answering at $_EDGE_WIZARD_URL"
     log "         The 'Onboard Device' button on the Devices tab will not work."
-    log "         Start it with:"
-    log "           systemctl --user enable --now cea-edge-wizard"
-    log "         (create the unit first: ./edge/wizard-daemon.sh --install-unit)"
+    log "         Install or restart it with: ./apps/edge-wizard/deploy.sh"
+    log "         Status and logs:  systemctl --user status cea-edge-wizard"
 fi
 wait_for_http "https://$DBMGMT_DOMAIN/" 120 "DB Mgmt"   || exit 1
 

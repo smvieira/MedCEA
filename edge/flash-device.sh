@@ -860,13 +860,9 @@ fi
 
 # ---------------------------------------------------- 1. toolchain ------------
 step "Toolchain"
-[ -x "$VENV_DIR/bin/python" ] || {
-  info "creating $VENV_DIR"
-  python3 -m venv "$VENV_DIR" || die "python3 -m venv failed. Install python3-venv."
-}
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
-"$VENV_DIR/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt" \
-  || die "pip install failed — see $SCRIPT_DIR/requirements.txt"
+source "$SCRIPT_DIR/lib-venv.sh"
+[ -x "$VENV_DIR/bin/python" ] || info "creating $VENV_DIR"
+ensure_edge_venv || die "could not build the toolchain in $VENV_DIR (see above)"
 
 # esptool 5.x installs as `esptool`; 4.x as `esptool.py`. Accept either.
 if   [ -x "$VENV_DIR/bin/esptool.py" ]; then ESPTOOL="$VENV_DIR/bin/esptool.py"

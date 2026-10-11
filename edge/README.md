@@ -49,18 +49,19 @@ a link. For the config UI to offer onboarding, the wizard has to be there before
 anyone asks — so it also runs as a daemon:
 
 ```bash
+./apps/edge-wizard/deploy.sh               # what ./install.sh runs: the service
 ./edge/wizard-daemon.sh                    # foreground, for a one-off
-./edge/wizard-daemon.sh --install-unit > ~/.config/systemd/user/cea-edge-wizard.service
-systemctl --user daemon-reload
-systemctl --user enable --now cea-edge-wizard
-loginctl enable-linger "$USER"             # so it survives logout and reboot
 ```
 
-**Install it as a service.** The Devices tab in the config UI links to this
-daemon, so if it is not running the "Onboard Device" button gives
-`ERR_CONNECTION_REFUSED`. `loginctl enable-linger` is the part people forget —
-without it the service stops the moment you log out and does not come back after
-a reboot. `apps/frontend/deploy.sh` warns if the wizard is not answering.
+**The install sets it up as a service.** The Devices tab in the config UI links
+to this daemon, so if it is not running the "Onboard Device" button gives
+`ERR_CONNECTION_REFUSED`. `apps/edge-wizard/deploy.sh` (run by `./install.sh` and
+`./deploy-apps.sh --all`) builds `edge/.venv`, writes the `cea-edge-wizard`
+user unit from `wizard-daemon.sh --install-unit`, restarts it, publishes it at
+`https://onboard-device.<domain>` through the cluster ingress (the daemon itself stays on
+`http://<ip>:8088`) and enables linger — without linger the service stops the moment you log out and does not
+come back after a reboot. `./health-check.sh` and `apps/frontend/deploy.sh` both
+check that it answers.
 
 Same server, same Keycloak login, same prompts. The difference is a lifecycle:
 it stays up, shows a catalogue of device types, and spawns that type's script

@@ -46,7 +46,7 @@ STATE = {
     "client_id": None, "client_secret": None,
     "required_role": None,
     "ssl_ctx": None,
-    "hosts": set(),           # Host: values we will build a redirect_uri from
+    "hosts": {},              # Host: value -> scheme we build a redirect_uri with
     "sessions": {},           # sid -> {"user":..., "exp":...}
     "daemon": False,          # long-lived: start runs on demand instead of mirroring one
     "repo_root": None,
@@ -546,6 +546,32 @@ async function startDevice(id, el) {
   tick();
 }
 
+// navigator.clipboard exists only in a secure context (HTTPS or localhost), and
+// the daemon is reached as http://<LAN or Tailscale IP>:8088 — so there it is
+// undefined and the button silently did nothing. Fall back to execCommand on a
+// hidden textarea, which still works over plain HTTP, and say what happened.
+function copyText(v, btn) {
+  const said = ok => {
+    btn.textContent = ok ? "copied" : "select & Ctrl+C";
+    setTimeout(() => { btn.textContent = "copy"; }, 1500);
+  };
+  const fallback = () => {
+    const t = document.createElement("textarea");
+    t.value = v; t.setAttribute("readonly", "");
+    t.style.position = "fixed"; t.style.opacity = "0";
+    document.body.appendChild(t); t.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(t);
+    said(ok);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(v).then(() => said(true), fallback);
+  } else {
+    fallback();
+  }
+}
+
 function renderDone(d) {
   if (!d) { $("donecard").hidden = true; return; }
   $("donecard").hidden = false;
@@ -556,7 +582,7 @@ function renderDone(d) {
     const dt = document.createElement("dt"); dt.textContent = k;
     const dd = document.createElement("dd"); dd.textContent = v; if (big) dd.className = "big";
     const c = document.createElement("button"); c.className = "copy"; c.textContent = "copy";
-    c.onclick = () => navigator.clipboard && navigator.clipboard.writeText(v);
+    c.onclick = () => copyText(v, c);
     dd.appendChild(c);
     dl.appendChild(dt); dl.appendChild(dd);
   });
@@ -622,9 +648,10 @@ class Handler(BaseHTTPRequestHandler):
         and this refuses it one step earlier.
         """
         host = self.headers.get("Host", "")
-        if host not in STATE["hosts"]:
+        scheme = STATE["hosts"].get(host)
+        if scheme is None:
             return None
-        return "http://%s" % host
+        return "%s://%s" % (scheme, host)
 
     def _auth(self):
         if STATE["auth"] == "token":
@@ -875,7 +902,8 @@ def main():
     ap.add_argument("--required-role", default="",
                     help="realm role a user must hold to provision hardware")
     ap.add_argument("--allowed-host", action="append", default=[],
-                    help="host:port the browser may reach this on; repeatable")
+                    help="host:port the browser may reach this on directly, or "
+                         "https://host when it comes through a TLS proxy; repeatable")
     ap.add_argument("--daemon", action="store_true",
                     help="stay up and start flash runs on demand instead of mirroring one")
     ap.add_argument("--repo-root", default="",
@@ -895,7 +923,14 @@ def main():
     STATE["client_id"] = a.client_id
     STATE["client_secret"] = a.client_secret
     STATE["required_role"] = a.required_role or None
-    STATE["hosts"] = set(a.allowed_host)
+    # "host:port" is reached directly over http; "https://host" through the
+    # TLS ingress (apps/edge-wizard), which keeps the Host header.
+    STATE["hosts"] = {}
+    for h in a.allowed_host:
+        if h.startswith("https://"):
+            STATE["hosts"][h[len("https://"):].rstrip("/")] = "https"
+        else:
+            STATE["hosts"][h] = "http"
     STATE["daemon"] = a.daemon
     STATE["repo_root"] = a.repo_root or os.getcwd()
     STATE["flash_args"] = a.flash_arg
