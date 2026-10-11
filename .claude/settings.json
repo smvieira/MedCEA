@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source /home/svieira/MedCEA/config.env)",
+      "Bash(source config.env)",
+      "Bash(bash apps/dbmgmt/deploy.sh)",
+      "Bash(curl -m 5 \"http://keycloak.172.211.242.176.nip.io/realms/medcea\")",
+      "Bash(sudo ss:*)",
+      "Bash(sudo microk8s:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(curl -s http://keycloak.172.211.242.176.nip.io/realms/medcea/.well-known/openid-configuration)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''issuer:'''', d[''''issuer'''']\\); print\\(''''auth:'''', d[''''authorization_endpoint'''']\\)\")",
+      "Bash(curl -sv \"http://portal.172.211.242.176.nip.io/oauth2/start\")",
+      "Bash(python3 -c \"import sys,json; [print\\(a\\) for a in json.loads\\(sys.stdin.read\\(\\)\\)]\")",
+      "Bash(python3 -c \"import sys,json; d=json.loads\\(sys.stdin.read\\(\\)\\); [print\\(f''''=== {k} ===\\\\n{v}''''\\) for k,v in d.items\\(\\)]\")"
+    ],
+    "additionalDirectories": [
+      "/home/svieira/MedCEA/apps/frontend/html"
+    ]
+  }
+}

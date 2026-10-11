@@ -1,0 +1,379 @@
+{
+  "_comment": [
+    "CONTROL board template. The operator assigns a GPIO to each equipment",
+    "function the chamber actually has; the wizard generates the board's",
+    "actuator_config.json from those assignments and drops every actuator whose",
+    "equipment is not fitted. That is why the pin list is the only question \u2014",
+    "the command tables below are derived, not typed.",
+    "",
+    "  functions[]  one relay channel each. 'default_pin': null = not fitted.",
+    "  actuators    what the scheduler can ask for. 'set' names functions, not",
+    "               pins; the wizard resolves them and skips unassigned ones.",
+    "  needs        the equipment a branch cannot fake. If none of these is",
+    "               assigned the branch is DROPPED, not shipped as a no-op \u2014",
+    "               'turn the UV lamp on' must never mean 'turn the red one off'",
+    "               and report success. A branch with no 'needs' works with",
+    "               whatever is fitted (every OFF, and DARK).",
+    "",
+    "Values in 'set' are LOGICAL (1 = equipment running). active_low inverts",
+    "them on the way to the pin, because these relay boards close on a low."
+  ],
+  "role": "CONTROL",
+  "family": "esp32",
+  "component_type": "ACTUATOR",
+  "model": "ESP32",
+  "binding": {
+    "kind": "gpio",
+    "field": "pin",
+    "label": "GPIO",
+    "descriptions_key": "pin_descriptions",
+    "address_kind": "int",
+    "placeholder": "GPIO",
+    "hint": "The ESP32-S3 pin the relay channel is wired to.",
+    "_comment": [
+      "The silicon table lives in esp32-gpio.json: which GPIOs each ESP32",
+      "variant has, and what else already wants them. It is shared by every",
+      "esp32-* template and is what the form's board selector and pin",
+      "reference are built from."
+    ],
+    "variants_from": "esp32-gpio.json"
+  },
+  "manufacturer": "Espressif",
+  "multi": false,
+  "drivers": [
+    {
+      "id": "relay8",
+      "name": "8/16-channel relay board",
+      "subtitle": "One GPIO per piece of equipment, driven by the scheduler over MQTT",
+      "model": "8 channels relay",
+      "manufacturer": "generic",
+      "active_low": true,
+      "functions": [
+        {
+          "id": "light_red",
+          "label": "RED grow light",
+          "default_pin": 3
+        },
+        {
+          "id": "light_blue",
+          "label": "BLUE grow light",
+          "default_pin": 14
+        },
+        {
+          "id": "light_uv",
+          "label": "UV light",
+          "default_pin": 46
+        },
+        {
+          "id": "air_heater",
+          "label": "Air heater pad",
+          "default_pin": 9
+        },
+        {
+          "id": "air_cooler",
+          "label": "Air cooler",
+          "default_pin": 13
+        },
+        {
+          "id": "air_humidifier",
+          "label": "Humidifier",
+          "default_pin": 7
+        },
+        {
+          "id": "air_flow_fan",
+          "label": "Air flow fan",
+          "default_pin": 10
+        },
+        {
+          "id": "co2_fan",
+          "label": "CO2 fan",
+          "default_pin": 12
+        },
+        {
+          "id": "co2_steriliser",
+          "label": "CO2 flow steriliser",
+          "default_pin": 11
+        },
+        {
+          "id": "substrate_heater",
+          "label": "Substrate heater",
+          "default_pin": 8
+        }
+      ],
+      "actuators": {
+        "light": {
+          "kind": "types",
+          "comment": "Light recipes. Turning one colour ON turns the others OFF, so a recipe line cannot leave two lamps lit.",
+          "types": {
+            "DARK": {
+              "ON": {
+                "description": "Turn DARK ON",
+                "set": {
+                  "light_uv": 0,
+                  "light_red": 0,
+                  "light_blue": 0
+                }
+              },
+              "OFF": {
+                "description": "Turn DARK OFF",
+                "set": {
+                  "light_uv": 0,
+                  "light_red": 0,
+                  "light_blue": 0
+                }
+              }
+            },
+            "RED": {
+              "ON": {
+                "description": "Turn RED light ON",
+                "set": {
+                  "light_uv": 0,
+                  "light_red": 1,
+                  "light_blue": 0
+                },
+                "needs": [
+                  "light_red"
+                ]
+              },
+              "OFF": {
+                "description": "Turn RED light OFF",
+                "set": {
+                  "light_red": 0
+                },
+                "needs": [
+                  "light_red"
+                ]
+              }
+            },
+            "BLUE": {
+              "ON": {
+                "description": "Turn BLUE light ON",
+                "set": {
+                  "light_uv": 0,
+                  "light_red": 0,
+                  "light_blue": 1
+                },
+                "needs": [
+                  "light_blue"
+                ]
+              },
+              "OFF": {
+                "description": "Turn BLUE light OFF",
+                "set": {
+                  "light_blue": 0
+                },
+                "needs": [
+                  "light_blue"
+                ]
+              }
+            },
+            "UV": {
+              "ON": {
+                "description": "Turn UV light ON",
+                "set": {
+                  "light_uv": 1,
+                  "light_red": 0,
+                  "light_blue": 0
+                },
+                "needs": [
+                  "light_uv"
+                ]
+              },
+              "OFF": {
+                "description": "Turn UV light OFF",
+                "set": {
+                  "light_uv": 0
+                },
+                "needs": [
+                  "light_uv"
+                ]
+              }
+            }
+          }
+        },
+        "air_temperature": {
+          "kind": "commands",
+          "comment": "Heat or cool the chamber air. UP and DOWN are mutually exclusive by construction.",
+          "commands": {
+            "UP": {
+              "description": "Activate air heater",
+              "set": {
+                "air_heater": 1,
+                "air_cooler": 0,
+                "air_flow_fan": 0
+              },
+              "needs": [
+                "air_heater"
+              ]
+            },
+            "DOWN": {
+              "description": "Activate air cooler",
+              "set": {
+                "air_heater": 0,
+                "air_cooler": 1,
+                "air_flow_fan": 1
+              },
+              "needs": [
+                "air_cooler",
+                "air_flow_fan"
+              ]
+            },
+            "OFF": {
+              "description": "Air heating and cooling off",
+              "set": {
+                "air_heater": 0,
+                "air_cooler": 0,
+                "air_flow_fan": 0
+              }
+            }
+          }
+        },
+        "air_humidity": {
+          "kind": "commands",
+          "comment": "Humidify, or dry the chamber by moving air through it.",
+          "commands": {
+            "UP": {
+              "description": "Activate humidifier",
+              "set": {
+                "air_humidifier": 1,
+                "air_flow_fan": 1
+              },
+              "needs": [
+                "air_humidifier"
+              ]
+            },
+            "DOWN": {
+              "description": "Dehumidify with the air flow fan",
+              "set": {
+                "air_humidifier": 0,
+                "air_flow_fan": 1
+              },
+              "needs": [
+                "air_flow_fan"
+              ]
+            },
+            "OFF": {
+              "description": "Humidifier and air flow fan off",
+              "set": {
+                "air_humidifier": 0,
+                "air_flow_fan": 0
+              }
+            }
+          }
+        },
+        "co2": {
+          "kind": "commands",
+          "comment": "CO2 exchange: the fan moves it, the steriliser conditions it.",
+          "commands": {
+            "UP": {
+              "description": "Activate CO2 fan and steriliser",
+              "set": {
+                "co2_fan": 1,
+                "co2_steriliser": 1
+              },
+              "needs": [
+                "co2_fan",
+                "co2_steriliser"
+              ]
+            },
+            "DOWN": {
+              "description": "Deactivate CO2 fan and steriliser",
+              "set": {
+                "co2_fan": 0,
+                "co2_steriliser": 0
+              }
+            },
+            "OFF": {
+              "description": "Deactivate CO2 fan and steriliser",
+              "set": {
+                "co2_fan": 0,
+                "co2_steriliser": 0
+              }
+            }
+          }
+        },
+        "substrate_temperature": {
+          "kind": "commands",
+          "comment": "Substrate heat mat, with the air flow fan as the only way down.",
+          "commands": {
+            "UP": {
+              "description": "Activate substrate heater",
+              "set": {
+                "substrate_heater": 1,
+                "air_flow_fan": 0
+              },
+              "needs": [
+                "substrate_heater"
+              ]
+            },
+            "DOWN": {
+              "description": "Cool the substrate with air flow",
+              "set": {
+                "substrate_heater": 0,
+                "air_flow_fan": 1
+              },
+              "needs": [
+                "air_flow_fan"
+              ]
+            },
+            "OFF": {
+              "description": "Substrate heater and air flow off",
+              "set": {
+                "substrate_heater": 0,
+                "air_flow_fan": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "device_params": [
+    {
+      "name": "poll_ms",
+      "kind": "int",
+      "default": 100,
+      "label": "Command poll interval (ms)",
+      "advanced": true,
+      "hint": "How often the board checks for a new MQTT command. check_msg() does not block, so this is pure latency: 100ms is a tenth of a second between the scheduler asking and a relay moving."
+    }
+  ],
+  "inferred": [
+    {
+      "name": "mqtt_server",
+      "from": "config.env",
+      "note": "LAN address of the Mosquitto NodePort"
+    },
+    {
+      "name": "mqtt_port",
+      "from": "config.env",
+      "note": "31883, the Mosquitto NodePort"
+    },
+    {
+      "name": "topic_sub",
+      "from": "slot",
+      "note": "<root>/<unit>/<zone>/control/# \u2014 what the scheduler publishes to"
+    },
+    {
+      "name": "topic_pub",
+      "from": "slot",
+      "note": "<root>/<unit>/<zone>/control_setpoint \u2014 what the board did, per pin"
+    },
+    {
+      "name": "client_id",
+      "from": "slot + MAC"
+    },
+    {
+      "name": "unit_code",
+      "from": "slot"
+    },
+    {
+      "name": "zone_code",
+      "from": "slot"
+    },
+    {
+      "name": "device_dns",
+      "from": "slot"
+    }
+  ]
+}

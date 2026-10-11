@@ -1,0 +1,70 @@
+{
+  "recipe_name": "Pleurotus ostreatus",
+  "recipe_description": "Recipe for Pleurotus ostreatus",
+  "steps": [
+    {
+      "recipe_item_seq_id": 1,
+      "recipe_item_seq_name": "Sanitation",
+      "cycle_number": 1,
+      "light_type": "UV",
+      "light_on_minutes": 120,
+      "light_off_minutes": 10,
+      "air_temperature_lower_limit": 20,
+      "air_temperature_upper_limit": 24,
+      "co2_lower_limit": 0,
+      "co2_upper_limit": 12000,
+      "hr_lower_limit": 0,
+      "hr_upper_limit": 100,
+      "substrate_temperature_lower_limit": 15,
+      "substrate_temperature_upper_limit": 30
+    },
+    {
+      "recipe_item_seq_id": 2,
+      "recipe_item_seq_name": "Spawn Run",
+      "cycle_number": 2,
+      "light_type": "DARK",
+      "light_on_minutes": 1,
+      "light_off_minutes": 1,
+      "air_temperature_lower_limit": 20,
+      "air_temperature_upper_limit": 25,
+      "co2_lower_limit": 1000,
+      "co2_upper_limit": 5000,
+      "hr_lower_limit": 90,
+      "hr_upper_limit": 95,
+      "substrate_temperature_lower_limit": 21,
+      "substrate_temperature_upper_limit": 24
+    },
+    {
+      "recipe_item_seq_id": 3,
+      "recipe_item_seq_name": "Primordia Formation",
+      "cycle_number": 4,
+      "light_type": "BLUE",
+      "light_on_minutes": 1,
+      "light_off_minutes": 1,
+      "air_temperature_lower_limit": 10,
+      "air_temperature_upper_limit": 18,
+      "co2_lower_limit": 500,
+      "co2_upper_limit": 1000,
+      "hr_lower_limit": 85,
+      "hr_upper_limit": 90,
+      "substrate_temperature_lower_limit": 13,
+      "substrate_temperature_upper_limit": 16
+    },
+    {
+      "recipe_item_seq_id": 4,
+      "recipe_item_seq_name": "Fruiting",
+      "cycle_number": 8,
+      "light_type": "RED",
+      "light_on_minutes": 1,
+      "light_off_minutes": 1,
+      "air_temperature_lower_limit": 10,
+      "air_temperature_upper_limit": 21,
+      "co2_lower_limit": 500,
+      "co2_upper_limit": 1000,
+      "hr_lower_limit": 80,
+      "hr_upper_limit": 85,
+      "substrate_temperature_lower_limit": 16,
+      "substrate_temperature_upper_limit": 18
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+# MicroPython images are large binaries fetched from micropython.org — pinned by
+# name and checksum in firmware/README.md, not stored in git.
+firmware/*.bin
+firmware/*.uf2
+
+# Per-device provisioning records. These contain the generated WebREPL password
+# and the WiFi PSK — never commit them.
+provisioned/
+
+# Toolchain venv
+.venv/
+
+# Byte-compiled host tools. src/app/ is copied to the board, never imported
+# here, so a stray __pycache__ under it means something ran it on the host.
+__pycache__/
+*.pyc

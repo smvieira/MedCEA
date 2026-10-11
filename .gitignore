@@ -1,0 +1,11 @@
+# Contains real credentials — never commit
+config.env
+logs/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Platform CA — private key must never be committed
+.ca/

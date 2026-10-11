@@ -1,0 +1,8 @@
+paho-mqtt==2.1.0
+python-dotenv==1.0.1
+pandas==2.2.3
+#influxdb-client==1.36.0
+dnspython
+netifaces
+psycopg2-binary # requires sudo apt install libpq-dev python3-dev
+requests

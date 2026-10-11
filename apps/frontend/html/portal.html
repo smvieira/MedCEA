@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MedCEA Platform</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    #bg { position: fixed; inset: 0; z-index: 0; opacity: .22; background-size: cover; background-position: center; pointer-events: none; }
+    #app { position: relative; z-index: 1; min-height: 100vh; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 72px 24px 48px; position: relative; }
+    .hdr-btns { position: absolute; top: 20px; right: 20px; display: flex; gap: 10px; }
+    .btn { display: inline-flex; align-items: center; gap: 7px; background: #1e293b; border: 1px solid #2a364e; color: #94a3b8; padding: 8px 16px; border-radius: 8px; cursor: pointer; font: 500 .875rem 'Segoe UI',system-ui,sans-serif; text-decoration: none; transition: background .15s, color .15s; }
+    .btn:hover { background: #2a364e; color: #e2e8f0; }
+    .ph { text-align: center; margin-bottom: 60px; }
+    .ph-title { font-size: clamp(1.6rem,4vw,2.1rem); font-weight: 700; color: #fff; display: flex; align-items: center; justify-content: center; gap: 14px; letter-spacing: -.02em; }
+    .ph-sub { margin-top: 10px; font-size: .9rem; color: #94a3b8; }
+    .grid { width: 100%; max-width: 1100px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 22px; }
+    .card { background: #1e2532; border: 1px solid #2a364e; border-radius: 12px; padding: 26px; text-decoration: none; color: inherit; display: flex; flex-direction: column; cursor: pointer; transition: border-color .25s, background .25s, box-shadow .25s, transform .2s; box-shadow: 0 4px 24px rgba(0,0,0,.4); }
+    .card:hover { border-color: rgba(59,130,246,.5); background: #232d3d; box-shadow: 0 8px 32px rgba(30,60,120,.2); transform: translateY(-2px); }
+    .card-dis { cursor: default; opacity: .5; pointer-events: none; }
+    .ci { margin-bottom: 14px; }
+    .ci svg { width: 38px; height: 38px; }
+    .cl { font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #475569; margin-bottom: 7px; }
+    .ct { font-size: 1.15rem; font-weight: 600; color: #fff; margin-bottom: 10px; }
+    .cd { font-size: .875rem; color: #94a3b8; line-height: 1.6; flex: 1; margin-bottom: 18px; }
+    .ck { font-size: .78rem; color: #60a5fa; display: flex; align-items: center; gap: 4px; margin-top: auto; }
+    .card:hover .ck { color: #93c5fd; }
+    .ck-a { opacity: 0; transform: translateX(-4px); transition: opacity .2s, transform .2s; }
+    .card:hover .ck-a { opacity: 1; transform: none; }
+    .pfooter { margin-top: 72px; text-align: center; font-size: .75rem; color: #334155; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+    .iscte-lbl { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: #94a3b8; margin-bottom: 8px; }
+    .iscte-w { background: #fff; padding: 10px 16px; border-radius: 10px; display: inline-block; transition: transform .2s; }
+    .iscte-w:hover { transform: scale(1.05); }
+    .iscte-w img { height: 34px; display: block; }
+  </style>
+</head>
+<body>
+  <div id="bg" style="${_PORTAL_BG_STYLE}"></div>
+  <div id="app">
+    <!-- MAIN PORTAL -->
+    <div id="v-portal" class="view active">
+      <div class="page">
+        <div class="hdr-btns">
+          <a href="/oauth2/sign_out" class="btn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+            Sign Out
+          </a>
+        </div>
+        <div class="ph">
+          <h1 class="ph-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" style="width:54px;height:54px">
+              <path d="M2 21h20" stroke="#cbd5e1" stroke-width="1.5"/><path d="M4 21V8l4 3V8l4 3v9" stroke="#cbd5e1" stroke-width="1.5"/>
+              <path d="M6 18h2M10 18h2" stroke="#cbd5e1" stroke-width="1.5"/>
+              <path d="M18.5 21v-4" stroke="#fbbf24" stroke-width="2"/>
+              <path d="M15.5 17c0-3 6-3 6 0H15.5z" stroke="#fbbf24" stroke-width="1.5" fill="#fbbf24" fill-opacity=".2"/>
+              <path d="M14 21v-6c0-1.5-1-2.5-2.5-2.5" stroke="#4ade80" stroke-width="1.5"/>
+              <path d="M11.5 12.5c-1.5-1.5-3.5-.5-3.5 1.5s2 1.5 3.5.5Z" stroke="#4ade80" stroke-width="1.5" fill="#4ade80" fill-opacity=".2"/>
+              <path d="M11.5 12.5c0-1.5 1.5-2.5 2.5-1.5" stroke="#4ade80" stroke-width="1.5"/>
+            </svg>
+            MedCEA Platform
+          </h1>
+          <p class="ph-sub">Connected Environments &amp; Analytics &mdash; Service Catalog</p>
+        </div>
+        <div class="grid">
+          <div class="card" onclick="show('reporting')">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
+            <div class="cl">Reporting</div><div class="ct">Analytics &amp; Monitoring</div>
+            <div class="cd">Visualize sensor data, telemetry metrics, and monitor live recipe run progress.</div>
+            <div class="ck">Open <span class="ck-a">&rarr;</span></div>
+          </div>
+          <a class="card" href="http://$KUBEFLOW_IP" target="_blank" rel="noopener">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5a2.5 2.5 0 0 0-4.96-.46 2.5 2.5 0 0 0-1.98 3 2.5 2.5 0 0 0-1.32 4.24 3 3 0 0 0 .34 5.58 2.5 2.5 0 0 0 2.96 3.08 2.5 2.5 0 0 0 4.91.05L12 20V4.5Z"/><path d="M16 8V5c0-1.1.9-2 2-2"/><path d="M12 13h4"/><path d="M12 18h6a2 2 0 0 1 2 2v1"/><path d="M12 8h8"/><circle cx="20.5" cy="8" r=".5" fill="#c084fc"/><circle cx="16.5" cy="13" r=".5" fill="#c084fc"/><circle cx="20.5" cy="21" r=".5" fill="#c084fc"/><circle cx="18.5" cy="3" r=".5" fill="#c084fc"/></svg></div>
+            <div class="cl">Kubeflow</div><div class="ct">AI Workbench</div>
+            <div class="cd">Build, train and deploy machine learning models on your IoT data.</div>
+            <div class="ck">http://$KUBEFLOW_IP <span class="ck-a">&rarr;</span></div>
+          </a>
+          <div class="card" onclick="show('management')">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></div>
+            <div class="cl">Administration</div><div class="ct">Platform Management</div>
+            <div class="cd">Access backend services, database, system configuration, and recipe management.</div>
+            <div class="ck">Open <span class="ck-a">&rarr;</span></div>
+          </div>
+        </div>
+        <div class="pfooter">
+          <p>MedCEA &mdash; Powered by Keycloak, Kubeflow &amp; MicroK8s</p>
+          <div>
+            <p class="iscte-lbl">Developed by</p>
+            <a href="https://ciencia.iscte-iul.pt/centres/it-iul/groups/research-group-38" target="_blank" rel="noopener" class="iscte-w">
+              <img src="https://gci.iscte-iul.pt/2022/identidade/files/brand_v2/escolas/rgb/ista/en/small/horizontal/main/rgb_ista_en_small_horizontal_main.svg" alt="ISCTE-IUL" onerror="this.outerHTML='<span style=color:#1e293b;font-weight:700;padding:0 8px>ISCTE-IUL</span>'">
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- REPORTING SUB-PORTAL -->
+    <div id="v-reporting" class="view">
+      <div class="page">
+        <div class="hdr-btns">
+          <button class="btn" onclick="show('portal')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+            Back
+          </button>
+          <a href="/oauth2/sign_out" class="btn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+            Sign Out
+          </a>
+        </div>
+        <div class="ph">
+          <h1 class="ph-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" style="width:46px;height:46px">
+              <path d="M3 3v18h18" stroke="#60a5fa" stroke-width="1.8"/>
+              <path d="m19 9-5 5-4-4-3 3" stroke="#60a5fa" stroke-width="1.8"/>
+            </svg>
+            Reporting
+          </h1>
+          <p class="ph-sub">Analytics, Dashboards &amp; Live Run Monitoring</p>
+        </div>
+        <div class="grid">
+          <a class="card" href="http://$GRAFANA_DOMAIN" target="_blank" rel="noopener">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
+            <div class="cl">Grafana</div><div class="ct">Self-Service Analytics</div>
+            <div class="cd">Explore IoT sensor data, telemetry metrics, and build custom dashboards in real time.</div>
+            <div class="ck">http://$GRAFANA_DOMAIN <span class="ck-a">&rarr;</span></div>
+          </a>
+          <div class="card card-dis">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+            <div class="cl">Operations</div><div class="ct">Run Monitor</div>
+            <div class="cd">Live view of active recipe runs, cycle progress, and sensor readings vs limits.</div>
+            <div class="ck" style="color:#475569">Coming soon</div>
+          </div>
+        </div>
+        <div class="pfooter">
+          <p>MedCEA &mdash; Powered by Keycloak, Kubeflow &amp; MicroK8s</p>
+        </div>
+      </div>
+    </div>
+    <!-- MANAGEMENT SUB-PORTAL -->
+    <div id="v-management" class="view">
+      <div class="page">
+        <div class="hdr-btns">
+          <button class="btn" onclick="show('portal')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+            Back
+          </button>
+          <a href="/oauth2/sign_out" class="btn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+            Sign Out
+          </a>
+        </div>
+        <div class="ph">
+          <h1 class="ph-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" style="width:46px;height:46px">
+              <path d="M2 21h20" stroke="#cbd5e1" stroke-width="1.5"/><path d="M4 21V8l4 3V8l4 3v9" stroke="#cbd5e1" stroke-width="1.5"/>
+              <path d="M6 18h2M10 18h2" stroke="#cbd5e1" stroke-width="1.5"/>
+              <path d="M18.5 21v-4" stroke="#fbbf24" stroke-width="2"/>
+              <path d="M15.5 17c0-3 6-3 6 0H15.5z" stroke="#fbbf24" stroke-width="1.5" fill="#fbbf24" fill-opacity=".2"/>
+              <path d="M14 21v-6c0-1.5-1-2.5-2.5-2.5" stroke="#4ade80" stroke-width="1.5"/>
+              <path d="M11.5 12.5c-1.5-1.5-3.5-.5-3.5 1.5s2 1.5 3.5.5Z" stroke="#4ade80" stroke-width="1.5" fill="#4ade80" fill-opacity=".2"/>
+              <path d="M11.5 12.5c0-1.5 1.5-2.5 2.5-1.5" stroke="#4ade80" stroke-width="1.5"/>
+            </svg>
+            Platform Management
+          </h1>
+          <p class="ph-sub">Administration, Database, and System Configuration</p>
+        </div>
+        <div class="grid">
+          <a class="card" href="http://$NODE_RED_DOMAIN" target="_blank" rel="noopener">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></svg></div>
+            <div class="cl">Node-RED</div><div class="ct">Data Flow</div>
+            <div class="cd">Build and manage data flows connecting sensors, APIs, and MQTT services.</div>
+            <div class="ck">http://$NODE_RED_DOMAIN <span class="ck-a">&rarr;</span></div>
+          </a>
+          <a class="card" href="http://$PGADMIN_DOMAIN" target="_blank" rel="noopener">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg></div>
+            <div class="cl">pgAdmin</div><div class="ct">Database</div>
+            <div class="cd">Explore and manage the shared PostgreSQL database with a full-featured web UI.</div>
+            <div class="ck">http://$PGADMIN_DOMAIN <span class="ck-a">&rarr;</span></div>
+          </a>
+          <a class="card" href="http://$MQTTX_DOMAIN" target="_blank" rel="noopener">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.4"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.4"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg></div>
+            <div class="cl">MQTT Explorer</div><div class="ct">MQTT Explorer</div>
+            <div class="cd">Browse, publish and subscribe to MQTT topics on Mosquitto.</div>
+            <div class="ck">http://$MQTTX_DOMAIN <span class="ck-a">&rarr;</span></div>
+          </a>
+          <div class="card card-dis">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg></div>
+            <div class="cl">Configuration</div><div class="ct">System Configuration</div>
+            <div class="cd">Manage production units, add and update recipes, and oversee device management.</div>
+            <div class="ck" style="color:#475569">Coming soon</div>
+          </div>
+          <div class="card card-dis">
+            <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4M8 2v4M3 10h5"/><path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/></svg></div>
+            <div class="cl">Scheduling</div><div class="ct">Recipe Schedule Manager</div>
+            <div class="cd">Schedule and manage recipe execution timelines across production units.</div>
+            <div class="ck" style="color:#475569">Coming soon</div>
+          </div>
+        </div>
+        <div class="pfooter">
+          <p>MedCEA &mdash; Powered by Keycloak, Kubeflow &amp; MicroK8s</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    function show(v) {
+      document.querySelectorAll('.view').forEach(function(el) { el.classList.remove('active'); });
+      document.getElementById('v-' + v).classList.add('active');
+      window.scrollTo(0, 0);
+    }
+  </script>
+</body>
+</html>

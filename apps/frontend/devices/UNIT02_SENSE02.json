@@ -1,0 +1,53 @@
+{
+  "serial_number": "8cbfea8771b4",
+  "device_type": "SENSE",
+  "model": "ESP32S3",
+  "manufacturer": "Expressif",
+  "dns_name": "UNIT02_SENSE02",
+  "connection_type": "Wifi",
+  "installation_date": "2025-05-04",
+  "is_active": "Y",
+  "components": [
+    {
+      "component_type": "SENSE",
+      "model": "ESP32",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": [
+        {
+          "tag": "co2",
+          "value": 703,
+          "zone_code": "ZONE01",
+          "UoM": "ppm",
+          "timestamp": "2025-05-04 15:28:15",
+          "msg_type": "AP",
+          "unit_code": "UNIT02",
+          "device_id": "8cbfea8771b4",
+          "device_dns": "UNIT02_SENSE01"
+        },
+        {
+          "tag": "air_temperature",
+          "value": 26.23,
+          "zone_code": "ZONE01",
+          "UoM": "C",
+          "timestamp": "2025-05-04 15:29:45",
+          "msg_type": "AP",
+          "unit_code": "UNIT02",
+          "device_id": "8cbfea8771b4",
+          "device_dns": "UNIT02_SENSE01"
+        },
+        {
+          "tag": "air_humidity",
+          "value": 46.57,
+          "zone_code": "ZONE01",
+          "UoM": "RH%",
+          "timestamp": "2025-05-04 15:29:45",
+          "msg_type": "AP",
+          "unit_code": "UNIT02",
+          "device_id": "8cbfea8771b4",
+          "device_dns": "UNIT02_SENSE01"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "serial_number": "a7f3b01c9d5e",
+  "device_type": "SENSE",
+  "model": "ESP32S3",
+  "manufacturer": "Expressif",
+  "dns_name": "UNIT01_ZONE01_CAM",
+  "connection_type": "Wifi",
+  "installation_date": "2025-03-25",
+  "is_active": "Y",
+  "components": [
+    {
+      "component_type": "SENSE",
+      "model": "ov2640",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": [
+        {
+          "rest api": "http://unit01_zone01_cam/capture"
+        }
+      ]
+    }
+  ]
+}

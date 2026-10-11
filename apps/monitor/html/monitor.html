@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Run Monitor</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+#bg{position:fixed;inset:0;z-index:0;opacity:.18;background-size:cover;background-position:center;pointer-events:none}
+#app{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:28px 24px 64px}
+
+/* Header */
+.hdr{display:flex;align-items:center;gap:16px;margin-bottom:28px;flex-wrap:wrap}
+.hdr h1{font-size:1.4rem;font-weight:700;color:#f8fafc;letter-spacing:.3px}
+.live-dot{width:10px;height:10px;border-radius:50%;background:#22c55e;flex-shrink:0;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.hdr-meta{font-size:.82rem;color:#64748b;margin-left:auto}
+.btn-refresh{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:.82rem;transition:background .15s}
+.btn-refresh:hover{background:#273344;color:#e2e8f0}
+
+/* Empty state */
+.empty{text-align:center;padding:80px 0;color:#475569;font-size:1rem}
+
+/* Unit card */
+.unit-card{background:#141824;border:1px solid #1e293b;border-radius:12px;margin-bottom:22px;overflow:hidden}
+.unit-hdr{display:flex;align-items:center;gap:12px;padding:14px 18px;background:#161d2e;border-bottom:1px solid #1e293b;flex-wrap:wrap;gap:8px}
+.unit-code{font-weight:700;font-size:1rem;color:#f1f5f9}
+.unit-type{font-size:.78rem;color:#64748b;padding:2px 8px;border-radius:4px;background:#1e293b}
+.run-id{font-size:.78rem;color:#94a3b8}
+.run-since{font-size:.78rem;color:#64748b}
+.status-badge{padding:3px 10px;border-radius:12px;font-size:.75rem;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.s-R{background:#1d3557;color:#60a5fa}
+.s-S{background:#1e293b;color:#94a3b8}
+.s-F{background:#3b1515;color:#f87171}
+.s-C{background:#14291e;color:#4ade80}
+
+/* Three-panel layout */
+.unit-body{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0}
+@media(max-width:1100px){.unit-body{grid-template-columns:1fr 1fr}}
+@media(max-width:780px){.unit-body{grid-template-columns:1fr}}
+.panel{padding:16px 18px}
+.panel-left{border-right:1px solid #1e293b}
+.panel-mid{border-right:1px solid #1e293b}
+.panel-title{font-size:.75rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px}
+
+/* Steps table */
+.steps-tbl{width:100%;border-collapse:collapse;font-size:.82rem}
+.steps-tbl th{text-align:left;color:#475569;font-weight:500;padding:4px 8px 6px;border-bottom:1px solid #1e293b}
+.steps-tbl td{padding:5px 8px;border-bottom:1px solid #1a2235;vertical-align:middle}
+.steps-tbl tr:last-child td{border-bottom:none}
+.steps-tbl tr.active-row td{background:#1a2440}
+.step-status{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;font-size:.78rem;font-weight:700}
+.ss-R{background:#1d3557;color:#60a5fa}
+.ss-C{background:#14291e;color:#4ade80}
+.ss-F{background:#3b1515;color:#f87171}
+.ss-S{background:#1e293b;color:#94a3b8}
+.ss-none{color:#334155}
+.cyc{color:#94a3b8;font-size:.78rem}
+.cyc-done{color:#4ade80}
+
+/* Measurements / gauges */
+.gauges{display:flex;flex-direction:column;gap:12px}
+.gauge-row{display:flex;flex-direction:column;gap:4px}
+.gauge-label-row{display:flex;justify-content:space-between;align-items:baseline;font-size:.82rem}
+.gauge-label{color:#94a3b8}
+.gauge-val{font-weight:600;font-size:.95rem;color:#f1f5f9}
+.gauge-uom{font-size:.75rem;color:#64748b;margin-left:2px}
+.gauge-bar-wrap{height:7px;background:#1e293b;border-radius:4px;overflow:hidden}
+.gauge-bar{height:100%;border-radius:4px;transition:width .4s}
+.bar-ok{background:#22c55e}
+.bar-out{background:#ef4444}
+.bar-norange{background:#eab308}
+.gauge-range{font-size:.72rem;color:#475569;margin-top:1px}
+.tag-val-only{font-size:.82rem;color:#94a3b8;display:flex;justify-content:space-between}
+.tag-val-only .tv-name{color:#64748b}
+.no-data{color:#334155;font-size:.82rem;font-style:italic}
+.loading{color:#334155;font-size:.82rem}
+/* Actions panel */
+.actions{display:flex;flex-direction:column;gap:8px}
+.action-row{display:flex;justify-content:space-between;align-items:center;font-size:.82rem;padding:4px 0;border-bottom:1px solid #1a2235}
+.action-row:last-child{border-bottom:none}
+.action-tag{color:#94a3b8;text-transform:capitalize}
+.action-val{font-weight:600;color:#f1f5f9;text-align:right;max-width:55%;word-break:break-word}
+.action-time{font-size:.7rem;color:#475569;margin-top:1px;text-align:right}
+</style>
+</head>
+<body>
+<div id="bg" style="__BG_STYLE__"></div>
+<div id="app">
+  <div class="hdr">
+    <h1>Run Monitor</h1>
+    <div class="live-dot" id="live-dot"></div>
+    <span id="last-update" class="hdr-meta"></span>
+    <button class="btn-refresh" onclick="refresh()">&#8635; Refresh</button>
+  </div>
+  <div id="content"><div class="empty">Loading&hellip;</div></div>
+</div>
+<script>
+// -------------------------------------------------------------------
+// Tag → recipe_line limit column mapping (client-side config)
+// -------------------------------------------------------------------
+const TAG_MAP = {
+  air_temperature:       { low: 'air_temperature_lower_limit', high: 'air_temperature_upper_limit', label: 'Air Temp',      unit: '\u00b0C'  },
+  co2:                   { low: 'co2_lower_limit',             high: 'co2_upper_limit',             label: 'CO\u2082',      unit: 'ppm'  },
+  air_humidity:          { low: 'hr_lower_limit',              high: 'hr_upper_limit',              label: 'Humidity',      unit: '%'    },
+  substrate_temperature: { low: 'substrate_temperature_lower_limit', high: 'substrate_temperature_upper_limit', label: 'Substrate Temp', unit: '\u00b0C' },
+};
+
+// -------------------------------------------------------------------
+// State
+// -------------------------------------------------------------------
+let _runs = [];
+const _steps    = {};   // run_id -> step array
+const _measures = {};   // unit_code -> measurement array
+const _actions  = {};   // unit_code -> action array
+let _timer = null;
+
+// -------------------------------------------------------------------
+// Fetch helpers
+// -------------------------------------------------------------------
+async function apiFetch(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+
+async function loadRuns() {
+  _runs = await apiFetch('/api/runs');
+}
+
+async function loadRunDetail(run_id) {
+  _steps[run_id] = await apiFetch(`/api/run/${run_id}`);
+}
+
+async function loadMeasurements(unit_code) {
+  _measures[unit_code] = await apiFetch(`/api/measurements/${unit_code}`);
+}
+
+async function loadActions(unit_code) {
+  _actions[unit_code] = await apiFetch(`/api/actions/${unit_code}`);
+}
+
+// -------------------------------------------------------------------
+// Status helpers
+// -------------------------------------------------------------------
+function statusLabel(s) {
+  const map = { R: 'Running', S: 'Scheduled', F: 'Failed', C: 'Completed' };
+  return map[s] || s || '—';
+}
+
+function stepIcon(s) {
+  if (s === 'R') return { cls: 'ss-R', icon: '&#9654;' };
+  if (s === 'C') return { cls: 'ss-C', icon: '&#10003;' };
+  if (s === 'F') return { cls: 'ss-F', icon: '&#10007;' };
+  if (s === 'S') return { cls: 'ss-S', icon: '&#9675;' };
+  return { cls: 'ss-none', icon: '&mdash;' };
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+
+// -------------------------------------------------------------------
+// Gauge rendering
+// -------------------------------------------------------------------
+function renderGauge(tag, value, uom, step) {
+  const cfg = TAG_MAP[tag];
+  if (!cfg) {
+    // Unknown tag: value only
+    return `<div class="tag-val-only"><span class="tv-name">${tag}</span><span>${value != null ? value : '—'} ${uom || ''}</span></div>`;
+  }
+
+  const low  = step ? step[cfg.low]  : null;
+  const high = step ? step[cfg.high] : null;
+  const val  = value != null ? parseFloat(value) : null;
+
+  let barHtml = '';
+  if (val != null && low != null && high != null) {
+    const range = high - low;
+    const pct   = range > 0 ? Math.max(0, Math.min(1, (val - low) / range)) * 100 : 50;
+    const inRange = val >= low && val <= high;
+    const cls   = inRange ? 'bar-ok' : 'bar-out';
+    barHtml = `
+      <div class="gauge-bar-wrap"><div class="gauge-bar ${cls}" style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="gauge-range">[${low} &ndash; ${high}]</div>`;
+  } else if (val != null) {
+    barHtml = `<div class="gauge-bar-wrap"><div class="gauge-bar bar-norange" style="width:50%"></div></div>
+      <div class="gauge-range">no limits set</div>`;
+  }
+
+  const dispVal = val != null ? val : '—';
+  return `<div class="gauge-row">
+    <div class="gauge-label-row">
+      <span class="gauge-label">${cfg.label}</span>
+      <span><span class="gauge-val">${dispVal}</span><span class="gauge-uom">${cfg.unit}</span></span>
+    </div>
+    ${barHtml}
+  </div>`;
+}
+
+// -------------------------------------------------------------------
+// Actions rendering
+// -------------------------------------------------------------------
+function actionValue(action) {
+  const msg = action.msg || {};
+  const cmd = (action.command != null && action.command !== '') ? action.command : null;
+  const val = msg.value != null ? String(msg.value) : null;
+
+  // Combine subtype (msg.value) + command when both exist: e.g. "UV ON"
+  if (val && cmd) return `${val} ${cmd}`;
+  if (cmd) return cmd;
+  if (val) return val;
+
+  // Fall back to other common keys in the msg JSON
+  for (const k of ['state', 'status', 'intensity', 'level', 'mode', 'on']) {
+    if (msg[k] != null) return String(msg[k]);
+  }
+  // Last resort: show all non-standard keys
+  const skip = new Set(['unit_code', 'zone_code', 'tag', 'command', 'timestamp']);
+  const parts = Object.entries(msg)
+    .filter(([k]) => !skip.has(k))
+    .map(([k, v]) => `${k}:${v}`);
+  return parts.length ? parts.join(' | ') : '—';
+}
+
+function renderActions(actions) {
+  if (!actions) return '<div class="loading">Loading actions&hellip;</div>';
+  if (actions.length === 0) return '<div class="no-data">No actions recorded.</div>';
+
+  const rows = actions.map(a => {
+    const label = (a.tag || '—').replace(/_/g, ' ');
+    const val   = actionValue(a);
+    const ts    = a.measure_timestamp
+      ? new Date(a.measure_timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})
+      : '';
+    return `<div class="action-row">
+      <span class="action-tag">${label}</span>
+      <div style="text-align:right">
+        <div class="action-val">${val}</div>
+        ${ts ? `<div class="action-time">${ts}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<div class="actions">${rows}</div>`;
+}
+
+// -------------------------------------------------------------------
+// Current active step for a run
+// -------------------------------------------------------------------
+function activeStep(steps) {
+  if (!steps || !steps.length) return null;
+  // Running step first, then Scheduled, then last step
+  return steps.find(s => s.step_status === 'R')
+      || steps.find(s => s.step_status === 'S')
+      || steps[steps.length - 1];
+}
+
+// -------------------------------------------------------------------
+// Render
+// -------------------------------------------------------------------
+function renderUnit(run) {
+  const rid      = run.recipe_run_id;
+  const steps    = _steps[rid]    || null;
+  const meas     = _measures[run.unit_code] || null;
+  const acts     = _actions[run.unit_code]  !== undefined ? _actions[run.unit_code] : null;
+  const curStep  = activeStep(steps);
+
+  // Steps panel
+  let stepsHtml = '<div class="loading">Loading steps&hellip;</div>';
+  if (steps !== null) {
+    if (steps.length === 0) {
+      stepsHtml = '<div class="no-data">No steps found.</div>';
+    } else {
+      const rows = steps.map((s, i) => {
+        const si   = stepIcon(s.step_status);
+        const isCur = curStep && s.recipe_item_seq_id === curStep.recipe_item_seq_id;
+        const cycCls = s.completed_cycles >= s.total_cycles ? 'cyc-done' : 'cyc';
+        return `<tr${isCur ? ' class="active-row"' : ''}>
+          <td>${i + 1}</td>
+          <td>${s.recipe_item_seq_name || '—'}</td>
+          <td><span class="step-status ${si.cls}">${si.icon}</span></td>
+          <td><span class="${cycCls}">${s.completed_cycles}/${s.total_cycles}</span></td>
+        </tr>`;
+      }).join('');
+      stepsHtml = `<table class="steps-tbl">
+        <thead><tr><th>#</th><th>Step</th><th>St</th><th>Cyc</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+  }
+
+  // Measurements panel
+  let measHtml = '<div class="loading">Loading measurements&hellip;</div>';
+  if (meas !== null) {
+    if (meas.length === 0) {
+      measHtml = '<div class="no-data">No measurements available.</div>';
+    } else {
+      // Order: TAG_MAP tags first (in declaration order), then remaining
+      const tagged = Object.keys(TAG_MAP);
+      const ordered = [
+        ...meas.filter(m => tagged.includes(m.tag)),
+        ...meas.filter(m => !tagged.includes(m.tag)),
+      ];
+      // Sort tagged by TAG_MAP order
+      ordered.sort((a, b) => {
+        const ia = tagged.indexOf(a.tag);
+        const ib = tagged.indexOf(b.tag);
+        if (ia === -1 && ib === -1) return a.tag.localeCompare(b.tag);
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
+      });
+
+      measHtml = `<div class="gauges">${
+        ordered.map(m => renderGauge(m.tag, m.value, m.unit_of_measurement, curStep)).join('')
+      }</div>`;
+    }
+  }
+
+  return `<div class="unit-card">
+    <div class="unit-hdr">
+      <span class="unit-code">${run.unit_code}</span>
+      ${run.unit_type ? `<span class="unit-type">${run.unit_type}</span>` : ''}
+      <span class="run-id">Run #${rid} &middot; ${run.recipe_name}</span>
+      <span class="status-badge s-${run.recipe_run_status}">${statusLabel(run.recipe_run_status)}</span>
+      <span class="run-since">since ${fmtDate(run.recipe_run_start)}</span>
+    </div>
+    <div class="unit-body">
+      <div class="panel panel-left">
+        <div class="panel-title">Steps</div>
+        ${stepsHtml}
+      </div>
+      <div class="panel panel-mid">
+        <div class="panel-title">Live Measurements</div>
+        ${measHtml}
+      </div>
+      <div class="panel panel-right">
+        <div class="panel-title">Actions</div>
+        ${renderActions(acts)}
+      </div>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const content = document.getElementById('content');
+  if (_runs.length === 0) {
+    content.innerHTML = '<div class="empty">No active runs at this time.</div>';
+    return;
+  }
+  content.innerHTML = _runs.map(renderUnit).join('');
+}
+
+// -------------------------------------------------------------------
+// Main refresh cycle
+// -------------------------------------------------------------------
+async function refresh() {
+  document.getElementById('live-dot').style.opacity = '1';
+  try {
+    await loadRuns();
+    render();  // show unit headers immediately while detail loads
+
+    // Load steps + measurements + actions in parallel for all runs
+    const promises = [];
+    for (const run of _runs) {
+      promises.push(loadRunDetail(run.recipe_run_id).then(() => render()));
+      promises.push(loadMeasurements(run.unit_code).then(() => render()));
+      promises.push(loadActions(run.unit_code).then(() => render()));
+    }
+    await Promise.allSettled(promises);
+    render();
+
+    const now = new Date();
+    document.getElementById('last-update').textContent =
+      'Last: ' + now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  } catch (e) {
+    document.getElementById('content').innerHTML =
+      `<div class="empty" style="color:#f87171">Error: ${e.message}</div>`;
+  }
+
+  // Schedule next
+  if (_timer) clearTimeout(_timer);
+  _timer = setTimeout(refresh, 30000);
+}
+
+refresh();
+</script>
+</body>
+</html>

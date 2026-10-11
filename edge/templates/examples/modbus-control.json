@@ -1,0 +1,124 @@
+{
+  "_comment": [
+    "NOT LOADED BY THE WIZARD. This directory is outside templates/, so",
+    "device_template.families() does not see it and no operator can pick it by",
+    "accident. It is here to answer one question: what does a CONTROL device that",
+    "has no pins look like?",
+    "",
+    "Everything the platform does with a CONTROL device -- ask which equipment is",
+    "fitted, derive the command table, prune the branches the chamber cannot",
+    "perform, validate the result, render the file, write the component rows -- is",
+    "driven by the `binding` block below. There is no modbus code anywhere in this",
+    "repo, and this template still renders and validates correctly through the",
+    "same device_template.py and the same browser editor, correctly labelled",
+    "'Coil' rather than 'GPIO'.",
+    "",
+    "To make it real you would add:",
+    "  1. templates/modbus-control.json      (this file, moved up one directory)",
+    "  2. a transport in the board/gateway    something that writes a coil, the way",
+    "                                         cea_control.py drives a GPIO",
+    "  3. a provisioning path in flash-device.sh -- a Modbus device is not flashed",
+    "     over USB, so step 1-5 of that script do not apply to it. THIS is the part",
+    "     the binding abstraction does not solve for you.",
+    "",
+    "Select a family with CEA_DEVICE_FAMILY=modbus once the file is in templates/."
+  ],
+  "role": "CONTROL",
+  "family": "modbus",
+  "component_type": "ACTUATOR",
+  "model": "RTU relay",
+  "manufacturer": "generic",
+  "multi": false,
+  "binding": {
+    "kind": "modbus_coil",
+    "field": "coil",
+    "label": "Coil",
+    "descriptions_key": "coil_descriptions",
+    "address_kind": "string",
+    "placeholder": "unit:coil",
+    "hint": "Slave id and coil number, e.g. 3:0012.",
+    "pattern": "^[0-9]{1,3}:[0-9]{1,5}$",
+    "_comment": [
+      "address_kind 'string' with a pattern is what makes this not a pin.",
+      "The editor validates against the same regex the renderer uses."
+    ],
+    "rules": [
+      {
+        "pattern": "^0:",
+        "level": "error",
+        "message": "Coil {addr} targets slave 0, which is the Modbus broadcast address. A write there is unacknowledged and hits every slave on the bus."
+      }
+    ]
+  },
+  "drivers": [
+    {
+      "id": "rtu16",
+      "name": "16-coil RTU relay board",
+      "subtitle": "One coil per piece of equipment, over RS-485",
+      "model": "16 coil RTU",
+      "manufacturer": "generic",
+      "active_low": false,
+      "functions": [
+        {
+          "id": "air_heater",
+          "label": "Air heater",
+          "default_pin": "3:0001"
+        },
+        {
+          "id": "air_cooler",
+          "label": "Air cooler",
+          "default_pin": "3:0002"
+        },
+        {
+          "id": "air_flow_fan",
+          "label": "Air flow fan",
+          "default_pin": "3:0003"
+        }
+      ],
+      "actuators": {
+        "air_temperature": {
+          "kind": "commands",
+          "comment": "Heat or cool the chamber air.",
+          "commands": {
+            "UP": {
+              "description": "Activate air heater",
+              "set": {
+                "air_heater": 1,
+                "air_cooler": 0
+              },
+              "needs": [
+                "air_heater"
+              ]
+            },
+            "DOWN": {
+              "description": "Activate air cooler",
+              "set": {
+                "air_heater": 0,
+                "air_cooler": 1,
+                "air_flow_fan": 1
+              },
+              "needs": [
+                "air_cooler"
+              ]
+            },
+            "OFF": {
+              "description": "Air heating and cooling off",
+              "set": {
+                "air_heater": 0,
+                "air_cooler": 0,
+                "air_flow_fan": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "device_params": [],
+  "inferred": [
+    {
+      "name": "topic_sub",
+      "from": "slot"
+    }
+  ]
+}

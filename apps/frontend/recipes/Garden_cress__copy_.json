@@ -1,0 +1,23 @@
+{
+  "recipe_name": "Garden cress (copy)",
+  "recipe_description": "Recipe for garden cress (Lepidium sativum) aka in Portuguese agrião do jardim",
+  "steps": [
+    {
+      "recipe_item_seq_id": 1,
+      "recipe_item_seq_name": "Growth Cycle",
+      "cycle_number": 10,
+      "light_type": "BLUE",
+      "light_on_minutes": 840,
+      "light_off_minutes": 600,
+      "air_temperature_lower_limit": 15,
+      "air_temperature_upper_limit": 22,
+      "co2_lower_limit": 400,
+      "co2_upper_limit": 1500,
+      "hr_lower_limit": 60,
+      "hr_upper_limit": 80,
+      "substrate_temperature_lower_limit": 15,
+      "substrate_temperature_upper_limit": 20,
+      "notes": "Standard recipe for Lepidium sativum (Garden Cress)"
+    }
+  ]
+}

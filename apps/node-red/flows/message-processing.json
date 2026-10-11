@@ -1,0 +1,198 @@
+[
+    {
+        "id": "9d9546577d74092f",
+        "type": "tab",
+        "label": "Message Processing and routing",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "cea_root_mqtt_in",
+        "type": "mqtt in",
+        "z": "9d9546577d74092f",
+        "name": "__TOPIC_ROOT__/# (onboarded devices)",
+        "topic": "__TOPIC_ROOT__/#",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "c77be2892e7ae4eb",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 220,
+        "y": 320,
+        "wires": [
+            [
+                "7a4d2b4b6f0c828c"
+            ]
+        ]
+    },
+    {
+        "id": "72cdb2e409846a13",
+        "type": "debug",
+        "z": "9d9546577d74092f",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1060,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "7a4d2b4b6f0c828c",
+        "type": "function",
+        "z": "9d9546577d74092f",
+        "name": "Stringify JSON",
+        "func": "msg.payload.fullmsg = JSON.stringify(msg.payload);\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 500,
+        "y": 340,
+        "wires": [
+            [
+                "189630c72c0f3dac",
+                "65b0eadb83ec59c6"
+            ]
+        ]
+    },
+    {
+        "id": "189630c72c0f3dac",
+        "type": "debug",
+        "z": "9d9546577d74092f",
+        "name": "debug 2",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 580,
+        "y": 500,
+        "wires": []
+    },
+    {
+        "id": "560632fef721fbcf",
+        "type": "comment",
+        "z": "9d9546577d74092f",
+        "name": "# Message Processing and Routing ## This component subscribe topic root and copies the payload to  ## Measurement database entity ",
+        "info": "# Message Processing and Routing\n## This component subscribe topic root and copies the payload to \n## Measurement database entity ",
+        "x": 590,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "fd975bb5dbda3134",
+        "type": "comment",
+        "z": "9d9546577d74092f",
+        "name": "Subscribe __TOPIC_ROOT__/# — the topic root is PROJECT_NAME, substituted at deploy and baked into every board the onboarding wizard flashes. Feeds the payload->measurement path.",
+        "info": "",
+        "x": 230,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "40514e18119aae86",
+        "type": "comment",
+        "z": "9d9546577d74092f",
+        "name": "Prepare payload",
+        "info": "",
+        "x": 480,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "7dc3468489b91dd9",
+        "type": "comment",
+        "z": "9d9546577d74092f",
+        "name": "Insert payload into Measurement entity",
+        "info": "",
+        "x": 850,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "65b0eadb83ec59c6",
+        "type": "postgresql",
+        "z": "9d9546577d74092f",
+        "name": "INSERT",
+        "query": "INSERT INTO medcea.measurement(\n\t\t\tmeasure_timestamp, device_id, device_dns, msg_type, msg\n\t\t\t)\n\tVALUES ('{{msg.payload.timestamp}}',\n\t\t\t'{{msg.payload.device_id}}',\n\t\t\t'{{msg.payload.device_dns}}',\n\t\t\t'{{msg.payload.msg_type}}',\n\t\t\t'{{{msg.payload.fullmsg}}}'\n\t\t\t);\n\t\n",
+        "postgreSQLConfig": "0567a4b9e2fe7c5d",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 820,
+        "y": 340,
+        "wires": [
+            [
+                "72cdb2e409846a13"
+            ]
+        ]
+    },
+    {
+        "id": "c77be2892e7ae4eb",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "__MQTT_HOST__",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "0567a4b9e2fe7c5d",
+        "type": "postgreSQLConfig",
+        "name": "PostgreSQL DB",
+        "host": "__PG_HOST__",
+        "hostFieldType": "str",
+        "port": "__PG_PORT__",
+        "portFieldType": "num",
+        "database": "__PG_DB__",
+        "databaseFieldType": "str",
+        "ssl": "false",
+        "sslFieldType": "bool",
+        "applicationName": "",
+        "applicationNameType": "str",
+        "max": "10",
+        "maxFieldType": "num",
+        "idle": "1000",
+        "idleFieldType": "num",
+        "connectionTimeout": "10000",
+        "connectionTimeoutFieldType": "num",
+        "user": "__PG_USER__",
+        "userFieldType": "str",
+        "password": "__PG_PASS__",
+        "passwordFieldType": "str"
+    }
+]

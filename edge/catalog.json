@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "Device types the onboarding wizard can provision. The landing page renders",
+    "one tile per entry, so adding a supported device is adding an entry here —",
+    "not editing the server or the page.",
+    "",
+    "  id          stable slug; what /api/start is called with",
+    "  status      'available' renders a working tile; anything else renders",
+    "              disabled with the status as its label",
+    "  script      path relative to the repo root, executable, run with",
+    "              --ui-spool <dir> appended",
+    "  connection  how the device attaches during onboarding (shown on the tile)",
+    "  roles       what the script can onboard the device AS. The role is chosen",
+    "              inside the run, not here: it is the wizard's first question,",
+    "              because a unit/zone holds one and only one SENSE and one and",
+    "              only one CONTROL and the free slots differ per role.",
+    "",
+    "The 'planned' entries below are illustrative placeholders. Delete them or",
+    "replace them with real ones; nothing depends on them existing."
+  ],
+  "devices": [
+    {
+      "id": "esp32-micropython",
+      "name": "ESP32 / ESP32-S3",
+      "subtitle": "MicroPython SENSE or CONTROL board",
+      "icon": "⚡",
+      "status": "available",
+      "connection": "USB",
+      "vendor": "Espressif",
+      "roles": [
+        "SENSE",
+        "CONTROL"
+      ],
+      "description": "Erases the board, flashes a pinned MicroPython build, joins it to WiFi from its own radio scan, gives it a unit/zone slot from the platform database, ships the application for its role with the pins you choose, and registers it as the device in that slot.",
+      "script": "edge/flash-device.sh"
+    },
+    {
+      "id": "esp32-cam",
+      "name": "ESP32-S3 + OV2640",
+      "subtitle": "Zone camera",
+      "icon": "📷",
+      "status": "planned",
+      "connection": "USB",
+      "vendor": "Espressif",
+      "roles": [
+        "CAM"
+      ],
+      "description": "Needs a vendor firmware build with the camera driver compiled in — the generic MicroPython image has no camera module.",
+      "script": null
+    },
+    {
+      "id": "modbus-gateway",
+      "name": "Modbus RTU gateway",
+      "subtitle": "Third-party sensors and drives",
+      "icon": "🔌",
+      "status": "planned",
+      "connection": "Serial / TCP",
+      "vendor": "various",
+      "roles": [
+        "SENSE",
+        "CONTROL"
+      ],
+      "description": "Onboards equipment that speaks Modbus rather than MQTT, by registering a polling profile instead of flashing firmware.",
+      "script": null
+    }
+  ]
+}

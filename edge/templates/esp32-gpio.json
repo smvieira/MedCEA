@@ -1,0 +1,190 @@
+{
+  "_comment": [
+    "GPIO reference for the ESP32 family. Loaded by the CONTROL template's",
+    "binding block, which names this file in `variants_from`.",
+    "",
+    "SOURCE: Espressif's own ESP-IDF 'GPIO & RTC GPIO' page per target, plus the",
+    "ESP32-P4 hardware design guidelines for that chip's UART0. Retrieved",
+    "2026-09-05. Where Espressif does not publish a number, this file says so",
+    "rather than guessing -- see esp32p4.flash_note.",
+    "",
+    "SCOPE: this describes what a pin can be asked to DRIVE, because that is what",
+    "the actuator map needs. ADC, touch and DAC capability are deliberately NOT",
+    "here: they do not affect whether a relay channel works, and half-checked",
+    "analog data in a file that looks authoritative is worse than no data.",
+    "",
+    "Each group's `level` is what the validator does with it:",
+    "  error  the pin cannot drive a relay here, or driving it breaks the board",
+    "  warn   it will probably work, but something else wants the pin",
+    "  (none) shown in the reference table, never flagged",
+    "A pin can be in several groups; the table shows all of them, and validation",
+    "reports each one that carries a level."
+  ],
+
+  "default": "esp32s3",
+
+  "variants": {
+    "esp32": {
+      "label": "ESP32",
+      "subtitle": "The original dual-core Xtensa — WROOM-32, WROVER, D0WD",
+      "ranges": [[0, 19], [21, 23], [25, 27], [32, 39]],
+      "absent_note": "GPIO20, GPIO24 and GPIO28-31 are not bonded out.",
+      "groups": [
+        { "id": "input_only", "label": "Input only", "pins": [34, 35, 36, 37, 38, 39],
+          "level": "error",
+          "note": "GPIO{addr} is input-only on the ESP32: no output driver and no software pull-up or pull-down. A relay wired here can never be switched." },
+        { "id": "flash", "label": "SPI flash", "pins": [6, 7, 8, 9, 10, 11],
+          "level": "error",
+          "note": "GPIO{addr} is wired to the module's SPI flash. Driving it crashes the board." },
+        { "id": "psram", "label": "PSRAM", "pins": [16, 17],
+          "level": "warn",
+          "note": "GPIO{addr} carries PSRAM on WROVER modules. Free on a plain WROOM, taken on anything with PSRAM." },
+        { "id": "strapping", "label": "Strapping", "pins": [0, 2, 5, 12, 15],
+          "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting — GPIO12 in particular selects flash voltage and can brick a 3.3V module if pulled high." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [1], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the flashing line. Using it means no serial log and a harder reflash." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [3], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the flashing line. Using it means no serial log and a harder reflash." },
+        { "id": "jtag", "label": "JTAG", "pins": [12, 13, 14, 15] }
+      ]
+    },
+
+    "esp32s2": {
+      "label": "ESP32-S2",
+      "subtitle": "Single-core Xtensa, native USB, no radio beyond WiFi",
+      "ranges": [[0, 21], [26, 46]],
+      "absent_note": "GPIO22-25 are not bonded out.",
+      "groups": [
+        { "id": "input_only", "label": "Input only", "pins": [46], "level": "error",
+          "note": "GPIO{addr} is fixed pull-down and input-only. A relay wired here can never be switched." },
+        { "id": "flash", "label": "SPI flash / PSRAM", "pins": [26, 27, 28, 29, 30, 31, 32],
+          "level": "error",
+          "note": "GPIO{addr} is used by SPI flash and PSRAM. Driving it crashes the board." },
+        { "id": "strapping", "label": "Strapping", "pins": [0, 45, 46], "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting." },
+        { "id": "usb", "label": "USB", "pins": [19, 20], "level": "warn",
+          "note": "GPIO{addr} is the native USB pair. Using it disables USB." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [43], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the flashing line." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [44], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the flashing line." },
+        { "id": "jtag", "label": "JTAG", "pins": [39, 40, 41, 42] }
+      ]
+    },
+
+    "esp32s3": {
+      "label": "ESP32-S3",
+      "subtitle": "Dual-core Xtensa with USB-JTAG — what this fleet runs",
+      "ranges": [[0, 21], [26, 48]],
+      "absent_note": "GPIO22-25 are not bonded out.",
+      "groups": [
+        { "id": "flash", "label": "SPI flash / PSRAM", "pins": [26, 27, 28, 29, 30, 31, 32],
+          "level": "error",
+          "note": "GPIO{addr} is wired to the SPI flash and PSRAM. Driving it crashes the board." },
+        { "id": "octal", "label": "Octal flash / PSRAM", "pins": [33, 34, 35, 36, 37],
+          "level": "warn",
+          "note": "GPIO{addr} carries SPIIO4-SPIIO7 and SPIDQS on modules with octal flash or octal PSRAM. This board reports 8MB PSRAM, so treat it as taken." },
+        { "id": "strapping", "label": "Strapping", "pins": [0, 3, 45, 46], "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting." },
+        { "id": "usb_jtag", "label": "USB-JTAG", "pins": [19, 20], "level": "warn",
+          "note": "GPIO{addr} is the USB-JTAG pair. Using it costs you the USB serial console this wizard flashes over." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [43], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the flashing line." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [44], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the flashing line." }
+      ]
+    },
+
+    "esp32c3": {
+      "label": "ESP32-C3",
+      "subtitle": "Single-core RISC-V, WiFi + BLE",
+      "ranges": [[0, 21]],
+      "groups": [
+        { "id": "flash", "label": "SPI flash", "pins": [12, 13, 14, 15, 16, 17],
+          "level": "error",
+          "note": "GPIO{addr} is used by the SPI flash. Driving it crashes the board." },
+        { "id": "strapping", "label": "Strapping", "pins": [2, 8, 9], "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting — GPIO9 is the download-mode select." },
+        { "id": "usb_jtag", "label": "USB-JTAG", "pins": [18, 19], "level": "warn",
+          "note": "GPIO{addr} is the USB-JTAG pair. Using it costs you the USB serial console." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [21], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the flashing line." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [20], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the flashing line." }
+      ]
+    },
+
+    "esp32c6": {
+      "label": "ESP32-C6",
+      "subtitle": "RISC-V with WiFi 6, BLE, Zigbee and Thread",
+      "ranges": [[0, 30]],
+      "groups": [
+        { "id": "flash", "label": "SPI flash", "pins": [24, 25, 26, 27, 28, 29, 30],
+          "level": "error",
+          "note": "GPIO{addr} is used by the SPI flash. Driving it crashes the board." },
+        { "id": "sip", "label": "Not bonded out (SiP)", "pins": [10, 11, 14], "level": "warn",
+          "note": "GPIO{addr} is not available on package variants with in-package flash. Check which C6 you actually have before wiring it." },
+        { "id": "strapping", "label": "Strapping", "pins": [4, 5, 8, 9, 15], "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting." },
+        { "id": "usb_jtag", "label": "USB-JTAG", "pins": [12, 13], "level": "warn",
+          "note": "GPIO{addr} is the USB-JTAG pair. Using it costs you the USB serial console." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [16], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the flashing line." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [17], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the flashing line." }
+      ]
+    },
+
+    "esp32h2": {
+      "label": "ESP32-H2",
+      "subtitle": "RISC-V, BLE + Zigbee + Thread, no WiFi",
+      "ranges": [[0, 27]],
+      "no_wifi": true,
+      "groups": [
+        { "id": "flash", "label": "SPI flash", "pins": [15, 16, 17, 18, 19, 20, 21],
+          "level": "error",
+          "note": "GPIO{addr} is used by the SPI flash. Driving it crashes the board." },
+        { "id": "sip", "label": "Not bonded out (SiP)", "pins": [6, 7], "level": "warn",
+          "note": "GPIO{addr} is not fanned out on variants with in-package flash." },
+        { "id": "strapping", "label": "Strapping", "pins": [2, 3, 8, 9, 25], "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting." },
+        { "id": "usb_jtag", "label": "USB-JTAG", "pins": [26, 27], "level": "warn",
+          "note": "GPIO{addr} is the USB-Serial-JTAG pair. Using it costs you the USB serial console." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [24], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the flashing line." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [23], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the flashing line." }
+      ]
+    },
+
+    "esp32p4": {
+      "label": "ESP32-P4",
+      "subtitle": "Dual-core RISC-V application processor — no radio at all",
+      "ranges": [[0, 54]],
+      "no_wifi": true,
+      "flash_note": "The P4's flash sits on dedicated FLASH_* package pins, not on GPIOs, and its PSRAM is in-package and not pinned out — so unlike every other chip here, no GPIO is lost to memory. Espressif does not publish GPIO numbers for those signals because there are none.",
+      "groups": [
+        { "id": "strapping", "label": "Strapping", "pins": [34, 35, 36, 37, 38], "level": "warn",
+          "note": "GPIO{addr} is a strapping pin. A relay holding it at reset can stop the board booting." },
+        { "id": "usb_jtag", "label": "USB-JTAG", "pins": [24, 25], "level": "warn",
+          "note": "GPIO{addr} is the USB-JTAG pair. Using it costs you the USB serial console." },
+        { "id": "uart0_tx", "label": "UART0 TX", "pins": [37], "level": "warn",
+          "note": "GPIO{addr} is UART0 TX — the console and the download line — and a strapping pin as well." },
+        { "id": "uart0_rx", "label": "UART0 RX", "pins": [38], "level": "warn",
+          "note": "GPIO{addr} is UART0 RX — the console and the download line — and a strapping pin as well." }
+      ]
+    }
+  },
+
+  "_esptool_map": {
+    "_comment": "What `esptool chip_id` prints, lowercased and stripped, mapped to a variant above. flash-device.sh reads the chip off the silicon at step 3 and re-checks the map against it.",
+    "esp32": "esp32",
+    "esp32-s2": "esp32s2",
+    "esp32-s3": "esp32s3",
+    "esp32-c3": "esp32c3",
+    "esp32-c6": "esp32c6",
+    "esp32-h2": "esp32h2",
+    "esp32-p4": "esp32p4"
+  }
+}

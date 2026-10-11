@@ -1,0 +1,48 @@
+{
+  "serial_number": "3c61052ff5cc",
+  "device_type": "SENSE",
+  "model": "ESP32",
+  "manufacturer": "Expressif",
+  "dns_name": "UNIT01_SENSE01",
+  "connection_type": "Wifi",
+  "installation_date": "2025-03-25",
+  "is_active": "Y",
+  "components": [
+    {
+      "component_type": "SENSE",
+      "model": "ESP32",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": [
+        {
+          "topic": "/UNIT01/ZONE01/water_level",
+          "payload": {
+            "unit_zone": "ZONE01",
+            "tag": "water_level",
+            "value": 0,
+            "UoM": "%",
+            "timestamp": "2025-03-25 12:48:35",
+            "msg_type": "AP",
+            "unit_code": "UNIT01",
+            "device_id": "3c61053e1458",
+            "device_dns": "UNIT01_SENSE02"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/ground_temperature",
+          "payload": {
+            "unit_zone": "ZONE01",
+            "tag": "ground_temperature",
+            "value": 23.3125,
+            "UoM": "C",
+            "timestamp": "2025-03-25 12:51:13",
+            "msg_type": "AP",
+            "unit_code": "UNIT01",
+            "device_id": "3c61053e1458",
+            "device_dns": "UNIT01_SENSE02"
+          }
+        }
+      ]
+    }
+  ]
+}

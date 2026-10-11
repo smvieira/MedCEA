@@ -1,0 +1,361 @@
+{
+  "serial_number": "3c6105315630",
+  "device_type": "CONTROL",
+  "model": "ESP32",
+  "manufacturer": "Expressif",
+  "dns_name": "UNIT01_CONTROL01",
+  "connection_type": "Wifi",
+  "installation_date": "2025-03-25",
+  "is_active": "Y",
+  "components": [
+    {
+      "component_type": "LOG",
+      "model": "ESP32",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": [
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "o2_fan",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "o2_uv",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "fan",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "uv_light",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "heat_mat",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "nebulizer",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/CONTROL_SETPOINT",
+          "payload": {
+            "tag": "light",
+            "unit_code": "UNIT01",
+            "unit_zone": "ZONE01",
+            "timestamp": "2025-03-25 11:51:46",
+            "msg_type": "SP",
+            "device_dns": "UNIT01_CONTROL01",
+            "value": 0,
+            "device_id": "3c6105315630"
+          }
+        }
+      ]
+    },
+    {
+      "component_type": "ACTUATOR",
+      "model": "8 channels relay",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": {
+        "pin_descriptions": {
+          "12": "UV Light Pin",
+          "14": "Red Light Pin",
+          "16": "Blue Light Pin",
+          "21": "Cooler Pad Pin",
+          "25": "Air Flow fan Pin",
+          "26": "Humidifier Pin",
+          "27": "Heater Pad Pin",
+          "32": "O2 flow steriliser Pin",
+          "33": "O2 fan Pin"
+        },
+        "actuator_definitions": {
+          "light": {
+            "comment": "Mappings for different light types and commands",
+            "types": {
+              "RED": {
+                "ON": {
+                  "description": "Turn RED light ON",
+                  "actions": [
+                    {
+                      "pin": 14,
+                      "value": 1
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn RED light OFF",
+                  "actions": [
+                    {
+                      "pin": 14,
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "BLUE": {
+                "ON": {
+                  "description": "Turn BLUE light ON",
+                  "actions": [
+                    {
+                      "pin": 16,
+                      "value": 1
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn BLUE light OFF",
+                  "actions": [
+                    {
+                      "pin": 16,
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "UV": {
+                "ON": {
+                  "description": "Turn UV light ON",
+                  "actions": [
+                    {
+                      "pin": 12,
+                      "value": 1
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn UV light OFF",
+                  "actions": [
+                    {
+                      "pin": 12,
+                      "value": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "air_temperature": {
+            "comment": "Mappings for Air heating(27)/cooling(21) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate Air Heater",
+                "actions": [
+                  {
+                    "pin": 27,
+                    "value": 1
+                  },
+                  {
+                    "pin": 21,
+                    "value": 0
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Activate Air Cooler",
+                "actions": [
+                  {
+                    "pin": 27,
+                    "value": 0
+                  },
+                  {
+                    "pin": 21,
+                    "value": 1
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate both Air Heater and Air Cooler",
+                "actions": [
+                  {
+                    "pin": 27,
+                    "value": 0
+                  },
+                  {
+                    "pin": 21,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          },
+          "co2": {
+            "comment": "Mappings for O2 system (fan/steriliser) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate O2 fan and steriliser",
+                "actions": [
+                  {
+                    "pin": 33,
+                    "value": 1
+                  },
+                  {
+                    "pin": 32,
+                    "value": 1
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Deactivate O2 fan and steriliser",
+                "actions": [
+                  {
+                    "pin": 33,
+                    "value": 0
+                  },
+                  {
+                    "pin": 32,
+                    "value": 0
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate O2 fan and steriliser",
+                "actions": [
+                  {
+                    "pin": 33,
+                    "value": 0
+                  },
+                  {
+                    "pin": 32,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          },
+          "air_humidity": {
+            "comment": "Mappings for Air Humidifier(26)/Airflow(25) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate Air Humidifier",
+                "actions": [
+                  {
+                    "pin": 26,
+                    "value": 1
+                  },
+                  {
+                    "pin": 25,
+                    "value": 0
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Dehumidify using Air Flow Fan",
+                "actions": [
+                  {
+                    "pin": 26,
+                    "value": 0
+                  },
+                  {
+                    "pin": 25,
+                    "value": 1
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate Air Humidifier and Air Flow Fan",
+                "actions": [
+                  {
+                    "pin": 26,
+                    "value": 0
+                  },
+                  {
+                    "pin": 25,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          },
+          "substrate_temperature": {
+            "comment": "Mappings for Substrate Heater (27) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate Substrate Heater",
+                "actions": [
+                  {
+                    "pin": 27,
+                    "value": 1
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Activate Air Cooler",
+                "actions": [
+                  {
+                    "pin": 27,
+                    "value": 0
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate both Air Heater and Air Cooler",
+                "actions": [
+                  {
+                    "pin": 27,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

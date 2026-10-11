@@ -1,0 +1,149 @@
+<title>Chamber Relay Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Token names match wizard_server.py's page, so channelmap.css — which reads
+   them through var(--x, fallback) — themes itself identically in both hosts. */
+:root{
+  --ground:#F6F8F5; --surface:#FFFFFF; --surface-2:#EDF1EC;
+  --line:#D5DED6; --ink:#16211C; --ink-2:#4A5A50; --muted:#74857A;
+  --accent:#12715A; --accent-soft:#E2EFE9;
+  --ok:#1F7A4D; --warn:#8A5D0A; --warn-soft:#FAEFD9; --crit:#A32E1E;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  --disp:"Archivo","IBM Plex Sans",system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#0E1512; --surface:#151E1A; --surface-2:#1C2723;
+  --line:#2A3833; --ink:#DEE7E1; --ink-2:#9FB0A6; --muted:#75867C;
+  --accent:#4FC49E; --accent-soft:#16302A;
+  --ok:#4FC49E; --warn:#E0A94A; --warn-soft:#312611; --crit:#E8705C;
+}}
+:root[data-theme="dark"]{
+  --ground:#0E1512; --surface:#151E1A; --surface-2:#1C2723;
+  --line:#2A3833; --ink:#DEE7E1; --ink-2:#9FB0A6; --muted:#75867C;
+  --accent:#4FC49E; --accent-soft:#16302A;
+  --ok:#4FC49E; --warn:#E0A94A; --warn-soft:#312611; --crit:#E8705C;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;padding-bottom:2rem}
+.wrap{max-width:64rem;margin:0 auto;padding:0 1.5rem}
+header{background:var(--surface);border-bottom:1px solid var(--line);margin-bottom:1.5rem}
+.mast{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:flex-end;
+  justify-content:space-between;padding:1.5rem 0 1.3rem}
+h1{font-family:var(--disp);font-size:1.8rem;font-weight:700;letter-spacing:-.02em;
+  margin:0;line-height:1.1;text-wrap:balance}
+.eyebrow{font-family:var(--disp);font-size:.68rem;font-weight:600;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--muted)}
+.sub{color:var(--ink-2);max-width:62ch;margin:.45rem 0 0}
+code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);
+  padding:.05em .3em;border-radius:3px;border:1px solid var(--line)}
+.acts{display:flex;gap:.5rem;flex-wrap:wrap}
+button.top{font:inherit;font-size:.83rem;cursor:pointer;border-radius:5px;
+  border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:.4rem .7rem}
+button.top:hover{border-color:var(--accent)}
+button.top.go{background:var(--accent);border-color:var(--accent);color:#08221B}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]) button.top.go{color:#fff}}
+:root[data-theme="light"] button.top.go{color:#fff}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.hint{background:var(--accent-soft);border:1px solid var(--accent);border-left-width:3px;
+  border-radius:5px;padding:.7rem .9rem;color:var(--ink-2);font-size:.85rem;margin-bottom:1.2rem}
+.hint b{color:var(--ink)}
+dialog{border:1px solid var(--line);border-radius:8px;background:var(--surface);
+  color:var(--ink);padding:0;max-width:min(42rem,92vw);width:100%}
+dialog::backdrop{background:rgba(10,20,16,.55)}
+.dlg{padding:1rem}
+.dlg textarea{font-family:var(--mono);font-size:.78rem;min-height:15rem;width:100%;
+  resize:vertical;background:var(--surface-2);color:var(--ink);
+  border:1px solid var(--line);border-radius:5px;padding:.6rem}
+.dlg .err{color:var(--crit);font-size:.82rem;min-height:1.2rem;margin-top:.5rem}
+.dlgfoot{display:flex;justify-content:flex-end;gap:.5rem;padding:.8rem 1rem;
+  border-top:1px solid var(--line);background:var(--surface-2)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+__CHANNELMAP_CSS__
+</style>
+
+<header><div class="wrap mast">
+  <div>
+    <div class="eyebrow">__FAMILY__ &middot; __ROLE__ &middot; __DRIVER__</div>
+    <h1>Chamber Relay Map</h1>
+    <p class="sub">Assign a channel to each piece of equipment, then say what every
+      scheduler command does to those channels. Output is the device's
+      <code>actuator_config.json</code>, read at boot by <code>cea_control.py</code>.</p>
+  </div>
+  <div class="acts">
+    <button class="top" id="b-paste">Paste JSON&hellip;</button>
+    <button class="top" id="b-ship">Chamber map</button>
+    <button class="top" id="b-ref">Reference wiring</button>
+    <button class="top go" id="b-copy">Copy JSON</button>
+  </div>
+</div></header>
+
+<div class="wrap">
+  <div class="hint">
+    <b>Values are logical, not electrical.</b> <code>1</code> means the equipment is
+    running. These relay boards close on a low, so
+    <code>cea_control.pin_value_convert()</code> inverts every value on the way to
+    the pin when <code>ACTIVE_LOW</code> is set. Storing the inverted value here
+    energises the whole chamber at boot.
+  </div>
+  <div id="editor"></div>
+</div>
+
+<dialog id="dlg"><div class="dlg">
+  <label for="paste" class="eyebrow">Paste an existing actuator_config.json</label>
+  <textarea id="paste" spellcheck="false"></textarea>
+  <div class="err" id="perr"></div>
+</div><div class="dlgfoot">
+  <button class="top" id="d-cancel">Cancel</button>
+  <button class="top go" id="d-load">Load</button>
+</div></dialog>
+
+<script>__CHANNELMAP_JS__</script>
+<script>
+"use strict";
+// Both documents are baked in at build time by edge/tools/build-editor.sh, so
+// this page needs no server and no network: SPEC is what
+// `device_template.py channelmap CONTROL relay8` printed, SHIPPED is the file
+// actually running in the chambers today.
+const SPEC = __SPEC__;
+const SHIPPED = __SHIPPED__;
+
+const $ = s => document.getElementById(s);
+// Opens on the real chamber map rather than the clean reference, because the
+// point of the validator is what it finds in a file someone already shipped.
+const ctl = ChannelMap.mount({ el: $("editor"), spec: SPEC, initial: SHIPPED });
+
+$("b-ship").onclick = () => ctl.reset(SHIPPED);
+$("b-ref").onclick  = () => ctl.reset(SPEC.reference);
+$("b-copy").onclick = async e => {
+  const t = e.target, txt = JSON.stringify(ctl.value(), null, 2);
+  try {
+    await navigator.clipboard.writeText(txt);
+    t.textContent = "Copied";
+  } catch (_) {
+    // Clipboard access is refused in some embedded viewers; select it instead
+    // so the keyboard still works.
+    const r = document.createRange();
+    r.selectNodeContents(document.querySelector("#editor .cm-out"));
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    t.textContent = "Press ⌘/Ctrl+C";
+  }
+  setTimeout(() => { t.textContent = "Copy JSON"; }, 1600);
+};
+
+const dlg = $("dlg");
+$("b-paste").onclick = () => { $("perr").textContent = ""; $("paste").value = ""; dlg.showModal(); };
+$("d-cancel").onclick = () => dlg.close();
+$("d-load").onclick = () => {
+  let o;
+  try { o = JSON.parse($("paste").value); }
+  catch (err) { $("perr").textContent = "That is not valid JSON — " + err.message; return; }
+  if (!o || typeof o !== "object" || Array.isArray(o)) {
+    $("perr").textContent = "Expected a JSON object with actuator_definitions."; return;
+  }
+  ctl.reset(o); dlg.close(); scrollTo({ top: 0, behavior: "smooth" });
+};
+</script>

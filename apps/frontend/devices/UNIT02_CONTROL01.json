@@ -1,0 +1,340 @@
+{
+  "serial_number": "8cbfea8770ac",
+  "device_type": "CONTROL",
+  "model": "ESP32S3",
+  "manufacturer": "Expressif",
+  "dns_name": "UNIT02_CONTROL01",
+  "connection_type": "Wifi",
+  "installation_date": "2025-05-04",
+  "is_active": "Y",
+  "components": [
+    {
+      "component_type": "ACTUATOR",
+      "model": "8 channels relay",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": {
+        "pin_descriptions": {
+          "3": "RED Light Pin-placeholder",
+          "7": "Humidifier Pin - placehoder",
+          "9": "Heater Pad Pin -placeholder",
+          "10": "Air Flow fan Pin",
+          "11": "CO2 flow steriliser Pin",
+          "12": "CO2 fan Pin",
+          "13": "Cooler Pin",
+          "14": "Blue Light Pin",
+          "46": "UV Light Pin- placeholder"
+        },
+        "actuator_definitions": {
+          "light": {
+            "comment": "Mappings for different light types and commands",
+            "types": {
+              "DARK": {
+                "ON": {
+                  "description": "Turn DARK ON",
+                  "actions": [
+                    {
+                      "pin": 46,
+                      "value": 0
+                    },
+                    {
+                      "pin": 3,
+                      "value": 0
+                    },
+                    {
+                      "pin": 14,
+                      "value": 0
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn DARK OFF",
+                  "actions": [
+                    {
+                      "pin": 46,
+                      "value": 0
+                    },
+                    {
+                      "pin": 3,
+                      "value": 0
+                    },
+                    {
+                      "pin": 14,
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "UV": {
+                "ON": {
+                  "description": "Turn UV light ON",
+                  "actions": [
+                    {
+                      "pin": 46,
+                      "value": 1
+                    },
+                    {
+                      "pin": 3,
+                      "value": 0
+                    },
+                    {
+                      "pin": 14,
+                      "value": 0
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn UV light OFF",
+                  "actions": [
+                    {
+                      "pin": 46,
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "RED": {
+                "ON": {
+                  "description": "Turn RED light ON",
+                  "actions": [
+                    {
+                      "pin": 46,
+                      "value": 0
+                    },
+                    {
+                      "pin": 3,
+                      "value": 1
+                    },
+                    {
+                      "pin": 14,
+                      "value": 0
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn RED light OFF",
+                  "actions": [
+                    {
+                      "pin": 13,
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "BLUE": {
+                "ON": {
+                  "description": "Turn BLUE light ON",
+                  "actions": [
+                    {
+                      "pin": 46,
+                      "value": 0
+                    },
+                    {
+                      "pin": 3,
+                      "value": 0
+                    },
+                    {
+                      "pin": 14,
+                      "value": 1
+                    }
+                  ]
+                },
+                "OFF": {
+                  "description": "Turn BLUE light OFF",
+                  "actions": [
+                    {
+                      "pin": 14,
+                      "value": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "air_temperature": {
+            "comment": "Mappings for Air heating(27)/cooling(23) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate Air Heater",
+                "actions": [
+                  {
+                    "pin": 10,
+                    "value": 0
+                  },
+                  {
+                    "pin": 9,
+                    "value": 1
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Activate Air Cooler",
+                "actions": [
+                  {
+                    "pin": 10,
+                    "value": 1
+                  },
+                  {
+                    "pin": 9,
+                    "value": 0
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate both Air Heater and Air Cooler",
+                "actions": [
+                  {
+                    "pin": 10,
+                    "value": 0
+                  },
+                  {
+                    "pin": 9,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          },
+          "co2": {
+            "comment": "Mappings for CO2 system (fan/steriliser) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate CO2 fan and steriliser",
+                "actions": [
+                  {
+                    "pin": 12,
+                    "value": 1
+                  },
+                  {
+                    "pin": 11,
+                    "value": 1
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Deactivate O2 fan and steriliser",
+                "actions": [
+                  {
+                    "pin": 12,
+                    "value": 0
+                  },
+                  {
+                    "pin": 11,
+                    "value": 0
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate O2 fan and steriliser",
+                "actions": [
+                  {
+                    "pin": 12,
+                    "value": 0
+                  },
+                  {
+                    "pin": 11,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          },
+          "air_humidity": {
+            "comment": "Mappings for Air Humidifier(26)/Airflow(25) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate Air Humidifier",
+                "actions": [
+                  {
+                    "pin": 7,
+                    "value": 1
+                  },
+                  {
+                    "pin": 10,
+                    "value": 1
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Dehumidify using Air Flow Fan",
+                "actions": [
+                  {
+                    "pin": 7,
+                    "value": 0
+                  },
+                  {
+                    "pin": 10,
+                    "value": 1
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate Air Humidifier and Air Flow Fan",
+                "actions": [
+                  {
+                    "pin": 7,
+                    "value": 0
+                  },
+                  {
+                    "pin": 10,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          },
+          "substrate_temperature": {
+            "comment": "Mappings for Substrate Heater (27) commands",
+            "commands": {
+              "UP": {
+                "description": "Activate Substrate Heater",
+                "actions": [
+                  {
+                    "pin": 8,
+                    "value": 1
+                  },
+                  {
+                    "pin": 10,
+                    "value": 0
+                  }
+                ]
+              },
+              "DOWN": {
+                "description": "Activate Air Cooler",
+                "actions": [
+                  {
+                    "pin": 8,
+                    "value": 0
+                  },
+                  {
+                    "pin": 10,
+                    "value": 1
+                  }
+                ]
+              },
+              "OFF": {
+                "description": "Deactivate both Air Heater and Air Cooler",
+                "actions": [
+                  {
+                    "pin": 8,
+                    "value": 0
+                  },
+                  {
+                    "pin": 10,
+                    "value": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "component_type": "LOG",
+      "model": "ESP32",
+      "manufacturer": "Expressif",
+      "is_active": "Y"
+    }
+  ]
+}

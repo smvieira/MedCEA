@@ -1,0 +1,9 @@
+# Edge provisioning toolchain — installed into edge/.venv by flash-device.sh.
+#
+# Ranges rather than exact pins: esptool 5.x renamed every subcommand from
+# write_flash to write-flash (the underscore forms still work, with a warning),
+# so the <5 bound keeps the CLI this script speaks stable. mpremote tracks the
+# MicroPython release line. The script records the resolved versions in each
+# provisioning record, so what actually flashed a board is always recoverable.
+esptool>=4.8,<5
+mpremote>=1.24,<2

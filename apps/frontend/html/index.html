@@ -1,0 +1,2906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>System Configuration — MedCEA Platform</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    .hdr-signout { margin-left: auto; color: #94a3b8; text-decoration: none; font-size: 13px;
+      border: 1px solid rgba(148,163,184,.35); border-radius: 6px; padding: 5px 12px; }
+    .hdr-signout:hover { color: #e2e8f0; border-color: rgba(148,163,184,.7); }
+    #bg { position: fixed; inset: 0; z-index: 0; opacity: .22; background: url('/images/cea-background.png') center/cover no-repeat; pointer-events: none; }
+    #app { position: relative; z-index: 1; min-height: 100vh; }
+    .hdr { background: #1e2532; border-bottom: 1px solid #2a364e; padding: 14px 24px; display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 10; }
+    .hdr-title { font-size: 1rem; font-weight: 600; color: #fff; }
+    .back-link { color: #94a3b8; text-decoration: none; display: flex; align-items: center; gap: 6px; font-size: .875rem; white-space: nowrap; }
+    .back-link:hover { color: #e2e8f0; }
+    .sep { width: 1px; height: 20px; background: #2a364e; }
+    .tabs { display: flex; padding: 0 24px; background: #1e2532; border-bottom: 1px solid #2a364e; }
+    .tab { background: none; border: none; border-bottom: 2px solid transparent; padding: 12px 22px; color: #94a3b8; cursor: pointer; font: 500 .9rem 'Segoe UI',system-ui; transition: .15s; }
+    .tab:hover { color: #e2e8f0; }
+    .tab.active { color: #60a5fa; border-bottom-color: #60a5fa; }
+    .content { padding: 28px 24px; max-width: 1100px; margin: 0 auto; }
+    .panel { background: #1e2532; border: 1px solid #2a364e; border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+    .panel-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+    .panel-title { font-size: 1rem; font-weight: 600; color: #fff; }
+    .tbl { width: 100%; border-collapse: collapse; font-size: .875rem; }
+    .tbl th { text-align: left; padding: 10px 12px; color: #475569; font-size: .72rem; text-transform: uppercase; letter-spacing: .09em; border-bottom: 1px solid #2a364e; }
+    .tbl td { padding: 11px 12px; border-bottom: 1px solid #1a2130; vertical-align: middle; }
+    .tbl tr:last-child td { border-bottom: none; }
+    .tbl tbody tr.unit-row:hover td { background: #212d40; }
+    .badge { padding: 2px 9px; border-radius: 4px; font-size: .72rem; font-weight: 700; letter-spacing: .04em; }
+    .badge-y { background: #14532d; color: #86efac; }
+    .badge-n { background: #450a0a; color: #fca5a5; }
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; font: 500 .875rem 'Segoe UI',system-ui; transition: .15s; text-decoration: none; white-space: nowrap; }
+    .btn-primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-ghost { background: #1e293b; border-color: #2a364e; color: #94a3b8; }
+    .btn-ghost:hover { background: #2a364e; color: #e2e8f0; }
+    .btn-teal { background: #134e4a; border-color: #0f766e; color: #5eead4; }
+    .btn-teal:hover { background: #0f766e; }
+    .btn-danger { background: #7f1d1d; border-color: #991b1b; color: #fca5a5; }
+    .btn-danger:hover { background: #991b1b; color: #fecaca; }
+    .btn-sm { padding: 5px 12px; font-size: .8rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+    .fg { display: flex; flex-direction: column; gap: 6px; }
+    .fg.full { grid-column: 1 / -1; }
+    .fg label { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: #64748b; }
+    input, select, textarea { background: #0d1321; border: 1px solid #2a364e; border-radius: 8px; color: #e2e8f0; padding: 9px 12px; font: .9rem 'Segoe UI',system-ui; width: 100%; transition: border-color .15s; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: #3b82f6; }
+    input::placeholder { color: #334155; }
+    textarea { resize: vertical; min-height: 76px; }
+    select option { background: #1e2532; }
+    .form-actions { display: flex; gap: 10px; margin-top: 20px; padding-top: 20px; border-top: 1px solid #2a364e; flex-wrap: wrap; }
+    .form-actions .spacer { flex: 1; }
+    .loc-row { display: flex; gap: 8px; align-items: flex-end; }
+    .loc-row .fg { flex: 1; margin: 0; }
+    /* Expandable sub-rows (zones and components) */
+    .zones-row > td { padding: 0 !important; border-bottom: 2px solid #2a364e !important; background: #111827; }
+    .zones-content { padding: 14px 16px 16px 48px; }
+    .zones-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+    .zones-label { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; color: #475569; }
+    .ztbl { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    .ztbl th { text-align: left; padding: 7px 10px; color: #334155; font-size: .68rem; text-transform: uppercase; letter-spacing: .09em; border-bottom: 1px solid #1e2532; }
+    .ztbl td { padding: 8px 10px; border-bottom: 1px solid #1a2130; vertical-align: middle; }
+    .ztbl tr:last-child td { border-bottom: none; }
+    .ztbl tbody tr:hover td { background: #161f30; }
+    .zone-empty { padding: 14px 10px; color: #334155; font-size: .82rem; }
+    /* Warning banner */
+    .warn-banner { background: #451a03; border: 1px solid #92400e; border-radius: 8px; padding: 10px 14px; font-size: .82rem; color: #fed7aa; display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    /* Device management */
+    .dev-unit-bar { display: flex; align-items: center; gap: 12px; flex: 1; flex-wrap: wrap; }
+    .dev-unit-bar select { max-width: 320px; }
+    /* Modal */
+    .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 50; align-items: center; justify-content: center; padding: 20px; }
+    .modal-bg.open { display: flex; }
+    .modal { background: #1e2532; border: 1px solid #2a364e; border-radius: 14px; padding: 28px; width: 100%; max-width: 620px; max-height: 90vh; overflow-y: auto; }
+    .modal-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; }
+    .modal-title { font-size: 1.05rem; font-weight: 600; color: #fff; }
+    /* Toast */
+    .toast { position: fixed; bottom: 24px; right: 24px; padding: 11px 20px; border-radius: 10px; font-size: .875rem; font-weight: 500; z-index: 100; opacity: 0; transition: opacity .3s; pointer-events: none; }
+    .toast.show { opacity: 1; }
+    .toast-ok { background: #14532d; color: #86efac; border: 1px solid #166534; }
+    .toast-err { background: #450a0a; color: #fca5a5; border: 1px solid #991b1b; }
+    .empty { text-align: center; padding: 44px 20px; color: #475569; font-size: .875rem; }
+    .hidden { display: none !important; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .req { color: #ef4444; }
+    .algo-badge { display:inline-block; background:#1e293b; border:1px solid #334155; color:#a5b4fc; border-radius:4px; padding:1px 7px; font-size:.72rem; font-weight:600; letter-spacing:.04em; }
+    .btn-purple { background:#3b0764; border-color:#6d28d9; color:#c4b5fd; }
+    .btn-purple:hover { background:#4c1d95; }
+    .algo-panel-table td { padding:10px 12px; vertical-align:top; }
+    .algo-panel-table textarea { width:100%; background:#0f172a; border:1px solid #2a364e; border-radius:6px; color:#e2e8f0; padding:6px 8px; font:0.78rem/1.5 monospace; min-height:54px; resize:vertical; }
+  </style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="app">
+  <header class="hdr">
+    <a href="http://$PORTAL_DOMAIN" class="back-link">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+      Portal
+    </a>
+    <div class="sep"></div>
+    <svg viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;flex-shrink:0"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg>
+    <span class="hdr-title">System Configuration</span>
+    <!-- Sign out ends BOTH sessions: rd= sends the browser on to Keycloak's
+         end_session endpoint after oauth2-proxy clears its own cookie. Without
+         it, only the proxy cookie goes and the next visit is signed straight
+         back in from the still-live SSO session, with no credentials asked. -->
+    <a class="hdr-signout" href="/oauth2/sign_out?rd=$KEYCLOAK_LOGOUT_URL"
+       title="Sign out of the configuration UI and of Keycloak">Sign out</a>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('locations')" id="tb-locations">Locations</button>
+    <button class="tab" onclick="showTab('units')" id="tb-units">Units</button>
+    <button class="tab" onclick="showTab('devices')" id="tb-devices">Devices</button>
+    <button class="tab" onclick="showTab('sysconfig')" id="tb-sysconfig">Control Models</button>
+    <button class="tab" onclick="showTab('recipes')" id="tb-recipes">Recipes</button>
+  </div>
+
+  <!-- ══ LOCATIONS TAB ══════════════════════════════════════ -->
+  <div id="tab-locations" class="content">
+    <div id="loc-list-panel" class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">Locations</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="openLocImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" onclick="openExportAllLocsChoice()">↓ Export All</button>
+          <button class="btn btn-primary btn-sm" onclick="openLocForm(null)">+ New Location</button>
+        </div>
+      </div>
+      <div id="loc-table-wrap"><div class="empty">Loading…</div></div>
+    </div>
+    <div id="loc-form-panel" class="panel hidden">
+      <div class="panel-hdr">
+        <span class="panel-title" id="loc-form-title">New Location</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeLocForm()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+          Back to list
+        </button>
+      </div>
+      <form id="loc-form" onsubmit="submitLocForm(event)">
+        <div class="form-grid">
+          <div class="fg"><label>Name <span class="req">*</span></label><input name="name" required placeholder="e.g. Lisbon Facility"></div>
+          <div class="fg"><label>Address</label><input name="address" placeholder="Street, City"></div>
+          <div class="fg"><label>Contact Person</label><input name="contact_person" placeholder="Full name"></div>
+          <div class="fg"><label>Contact Info</label><input name="contact_info" placeholder="Email or phone"></div>
+          <div class="fg"><label>Latitude</label><input name="latitude" type="number" step="any" placeholder="38.7169"></div>
+          <div class="fg"><label>Longitude</label><input name="longitude" type="number" step="any" placeholder="-9.1399"></div>
+          <div class="fg full"><label>Description</label><textarea name="description" placeholder="Optional notes"></textarea></div>
+          <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Save Location</button>
+          <button type="button" class="btn btn-ghost" onclick="closeLocForm()">Cancel</button>
+          <div class="spacer"></div>
+          <button type="button" class="btn btn-danger hidden" id="loc-del-btn" onclick="deleteLoc()">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+    <!-- Hidden file input for location import -->
+    <input type="file" id="loc-import-input" accept=".json,application/json" style="display:none" onchange="importLocFile(event)">
+
+    <!-- Location Import source choice modal -->
+    <div class="modal-bg" id="loc-import-choice-bg" onclick="if(event.target===this)closeLocImportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Import Location</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeLocImportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeLocImportChoice();document.getElementById('loc-import-input').click()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            From Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeLocImportChoice();openLocPlatformLibrary()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            From Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Location Export destination choice modal -->
+    <div class="modal-bg" id="loc-export-choice-bg" onclick="if(event.target===this)closeLocExportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export Location</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeLocExportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeLocExportChoice();exportLoc(currentLocExportId,'local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeLocExportChoice();exportLoc(currentLocExportId,'platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Location Export All destination choice modal -->
+    <div class="modal-bg" id="loc-export-all-choice-bg" onclick="if(event.target===this)closeExportAllLocsChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export All Locations</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeExportAllLocsChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllLocsChoice();exportAllLocs('local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllLocsChoice();exportAllLocs('platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Location Platform Library modal -->
+    <div class="modal-bg" id="loc-platform-lib-bg" onclick="if(event.target===this)closeLocPlatformLibrary()">
+      <div class="modal" style="max-width:560px">
+        <div class="modal-hdr">
+          <span class="modal-title">Platform Location Library</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeLocPlatformLibrary()" style="padding:4px 10px">✕</button>
+        </div>
+        <div id="loc-platform-lib-content" style="min-height:80px"><div class="empty" style="padding:20px">Loading…</div></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:12px">
+          <button class="btn btn-ghost btn-sm" onclick="closeLocPlatformLibrary()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="importSelectedLocs()">↑ Import Selected</button>
+        </div>
+      </div>
+    </div>
+
+  <!-- ══ UNITS TAB ══════════════════════════════════════════ -->
+  <div id="tab-units" class="content hidden">
+    <div id="unit-list-panel" class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">Production Units</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="openUnitImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" onclick="openExportAllUnitsChoice()">↓ Export All</button>
+          <button class="btn btn-primary btn-sm" onclick="openUnitForm(null)">+ New Unit</button>
+        </div>
+      </div>
+      <div id="unit-table-wrap"><div class="empty">Loading…</div></div>
+    </div>
+    <div id="unit-form-panel" class="panel hidden">
+      <div class="panel-hdr">
+        <span class="panel-title" id="unit-form-title">New Unit</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeUnitForm()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+          Back to list
+        </button>
+      </div>
+      <form id="unit-form" onsubmit="submitUnitForm(event)">
+        <div class="form-grid">
+          <div class="fg">
+            <label>Unit Code <span class="req">*</span> <small style="color:#334155;text-transform:none;font-weight:400">(max 10)</small></label>
+            <input name="unit_code" required maxlength="10" placeholder="e.g. GRN-001">
+          </div>
+          <div class="fg">
+            <label>Unit Type <span class="req">*</span></label>
+            <select name="unit_type" required>
+              <option value="">— Select —</option>
+              <option value="Greens">Greens</option>
+              <option value="Mushrooms">Mushrooms</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="fg full">
+            <label>Location <span class="req">*</span></label>
+            <div class="loc-row">
+              <div class="fg"><select name="location_id" id="unit-loc-sel" required><option value="">— Select location —</option></select></div>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="openLocModal()">+ New</button>
+            </div>
+          </div>
+          <div class="fg"><label>Area (m²)</label><input name="area" type="number" step="any" min="0" placeholder="0.0"></div>
+          <div class="fg"><label>Height (m)</label><input name="height" type="number" step="any" min="0" placeholder="0.0"></div>
+          <div class="fg full"><label>Description</label><input name="description" placeholder="Optional notes"></div>
+          <div class="fg"><label>Status <span class="req">*</span></label><select name="is_active" required><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Save Unit</button>
+          <button type="button" class="btn btn-ghost" onclick="closeUnitForm()">Cancel</button>
+          <div class="spacer"></div>
+          <button type="button" class="btn btn-danger hidden" id="unit-del-btn" onclick="deleteUnit()">Delete</button>
+        </div>
+      </form>
+    </div>
+    <!-- ── Recipe ↔ Unit Permissions ── -->
+    <div class="panel" id="perm-matrix-panel">
+      <div class="panel-hdr">
+        <span class="panel-title">Recipe ↔ Unit Permissions</span>
+        <span style="font-size:.82rem;color:#94a3b8">Check a cell to allow that recipe to run on that unit. Grey = inactive.</span>
+      </div>
+      <div id="security-table-wrap" style="overflow:auto"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+    <!-- Permission Algorithm Modal -->
+    <div class="modal-bg" id="perm-algo-modal-bg" onclick="if(event.target===this)closePermAlgoModal()">
+      <div class="modal" style="max-width:420px">
+        <div class="modal-hdr">
+          <span class="modal-title" id="perm-algo-modal-title">Permission Settings</span>
+          <button class="btn btn-ghost btn-sm" onclick="closePermAlgoModal()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <label style="display:block;font-size:.82rem;color:#94a3b8;margin-bottom:6px">Default Algorithm</label>
+            <select id="perm-algo-select" onchange="updatePermAlgoUI()" style="width:100%;background:#0f172a;border:1px solid #2a364e;border-radius:6px;color:#e2e8f0;padding:8px 10px;font-size:.9rem">
+              <option value="">— IF_THEN_ELSE (system default) —</option>
+            </select>
+          </div>
+          <div id="perm-algo-params-row" style="display:none">
+            <label style="display:block;font-size:.82rem;color:#94a3b8;margin-bottom:6px">Parameter Overrides (JSON)</label>
+            <textarea id="perm-algo-params" rows="3" placeholder='{"kp":1.0,"ki":0.1}' style="width:100%;background:#0f172a;border:1px solid #2a364e;border-radius:6px;color:#e2e8f0;padding:8px 10px;font:0.82rem/1.5 monospace;resize:vertical"></textarea>
+            <div id="perm-algo-hint" style="font-size:.78rem;color:#64748b;margin-top:4px"></div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:space-between;margin-top:4px">
+            <button class="btn btn-danger btn-sm" onclick="revokePermission()">Revoke Permission</button>
+            <button class="btn btn-primary" onclick="savePermAlgo()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hidden file input for unit import -->
+    <input type="file" id="unit-import-input" accept=".json,application/json" style="display:none" onchange="importUnitFile(event)">
+
+    <!-- Unit Import source choice modal -->
+    <div class="modal-bg" id="unit-import-choice-bg" onclick="if(event.target===this)closeUnitImportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Import Unit</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeUnitImportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeUnitImportChoice();document.getElementById('unit-import-input').click()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            From Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeUnitImportChoice();openUnitPlatformLibrary()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            From Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unit Export destination choice modal -->
+    <div class="modal-bg" id="unit-export-choice-bg" onclick="if(event.target===this)closeUnitExportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export Unit</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeUnitExportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeUnitExportChoice();exportUnit(currentUnitExportId,'local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeUnitExportChoice();exportUnit(currentUnitExportId,'platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unit Export All destination choice modal -->
+    <div class="modal-bg" id="unit-export-all-choice-bg" onclick="if(event.target===this)closeExportAllUnitsChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export All Units</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeExportAllUnitsChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllUnitsChoice();exportAllUnits('local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllUnitsChoice();exportAllUnits('platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unit Platform Library modal -->
+    <div class="modal-bg" id="unit-platform-lib-bg" onclick="if(event.target===this)closeUnitPlatformLibrary()">
+      <div class="modal" style="max-width:560px">
+        <div class="modal-hdr">
+          <span class="modal-title">Platform Unit Library</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeUnitPlatformLibrary()" style="padding:4px 10px">✕</button>
+        </div>
+        <div id="unit-platform-lib-content" style="min-height:80px"><div class="empty" style="padding:20px">Loading…</div></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:12px">
+          <button class="btn btn-ghost btn-sm" onclick="closeUnitPlatformLibrary()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="importSelectedUnits()">↑ Import Selected</button>
+        </div>
+      </div>
+    </div>
+
+  <!-- ══ DEVICES TAB ════════════════════════════════════════ -->
+  <div id="tab-devices" class="content hidden">
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">Devices</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="openDeviceImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" onclick="openExportAllDevicesChoice()">↓ Export All</button>
+          <button class="btn btn-ghost btn-sm" onclick="openDeviceModal(null)">+ Add Record</button>
+          <a class="btn btn-primary btn-sm" href="$EDGE_WIZARD_URL" target="_blank" rel="noopener"
+             title="Flash and onboard a board plugged into the platform host over USB">⚡ Onboard Device</a>
+        </div>
+      </div>
+      <div style="padding:8px 14px;font-size:12px;color:var(--muted,#8a8a8a);border-bottom:1px solid rgba(128,128,128,.18)">
+        <b>Add Record</b> creates an inventory entry only.
+        <b>Onboard Device</b> flashes real hardware: plug the ESP32 into the machine running the
+        platform over USB, then follow the wizard. It opens in a new tab and asks you to sign in.
+      </div>
+      <div id="dev-content"><div class="empty" style="padding:30px">Loading…</div></div>
+    </div>
+  </div>
+
+
+    <!-- Hidden file input for device import -->
+    <input type="file" id="device-import-input" accept=".json,application/json" style="display:none" onchange="importDeviceFile(event)">
+
+    <!-- Device Import source choice modal -->
+    <div class="modal-bg" id="dev-import-choice-bg" onclick="if(event.target===this)closeDeviceImportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Import Device</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeDeviceImportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeDeviceImportChoice();document.getElementById('device-import-input').click()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            From Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeDeviceImportChoice();openDevicePlatformLibrary()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            From Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Device Export destination choice modal -->
+    <div class="modal-bg" id="dev-export-choice-bg" onclick="if(event.target===this)closeDeviceExportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export Device</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeDeviceExportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeDeviceExportChoice();exportDevice(currentDeviceExportId,'local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeDeviceExportChoice();exportDevice(currentDeviceExportId,'platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Device Export All destination choice modal -->
+    <div class="modal-bg" id="dev-export-all-choice-bg" onclick="if(event.target===this)closeExportAllDevicesChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export All Devices</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeExportAllDevicesChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllDevicesChoice();exportAllDevices('local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllDevicesChoice();exportAllDevices('platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Device Platform Library modal -->
+    <div class="modal-bg" id="dev-platform-lib-bg" onclick="if(event.target===this)closeDevicePlatformLibrary()">
+      <div class="modal" style="max-width:560px">
+        <div class="modal-hdr">
+          <span class="modal-title">Platform Device Library</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeDevicePlatformLibrary()" style="padding:4px 10px">✕</button>
+        </div>
+        <div id="dev-platform-lib-content" style="min-height:80px"><div class="empty" style="padding:20px">Loading…</div></div>
+      </div>
+    </div>
+
+  <!-- ══ SYSTEM CONFIGURATION TAB ══════════════════════════════════════ -->
+  <div id="tab-sysconfig" class="content hidden">
+
+    <!-- Control Algorithms -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title" style="display:flex;align-items:center;gap:8px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          Control Algorithms
+        </span>
+        <button class="btn btn-ghost btn-sm" onclick="loadAlgorithms()">↻ Refresh</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl algo-panel-table">
+          <thead><tr>
+            <th style="width:120px">Code</th><th>Name</th><th>Description</th><th style="width:280px">Default Params (JSON)</th><th style="width:90px">Actions</th>
+          </tr></thead>
+          <tbody id="algo-tbody"><tr><td colspan="5" class="empty" style="padding:28px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <p style="font-size:.8rem;color:#475569;margin-top:8px">Edit default params to tune global algorithm defaults. Per-schedule and per-permission overrides take precedence.</p>
+    </div>
+
+    <!-- Production Units -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title" style="display:flex;align-items:center;gap:8px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          Production Units
+        </span>
+        <button class="btn btn-ghost btn-sm" onclick="loadUnitMemory()">↻ Refresh</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr><th>Unit</th><th>Allowed Recipes</th><th>Learned State</th><th>Actions</th></tr></thead>
+          <tbody id="units-memory-tbody"><tr><td colspan="4" class="empty" style="padding:28px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ RECIPES TAB ══════════════════════════════════════ -->
+  <div id="tab-recipes" class="content hidden">
+    <!-- Recipe list -->
+    <div id="recipe-list-panel" class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">Recipes</span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="openImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" onclick="openExportAllChoice()">↓ Export All</button>
+          <button class="btn btn-primary btn-sm" onclick="openRecipeForm(null)">+ New Recipe</button>
+        </div>
+      </div>
+      <div id="recipe-table-wrap"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- Hidden file input for local import -->
+    <input type="file" id="local-import-input" accept=".json,application/json" style="display:none" onchange="importRecipe(event)">
+
+    <!-- Import source choice modal -->
+    <div class="modal-bg" id="import-choice-bg" onclick="if(event.target===this)closeImportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Import Recipe</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeImportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeImportChoice();document.getElementById('local-import-input').click()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            From Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeImportChoice();openPlatformLibrary()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            From Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Export destination choice modal -->
+    <div class="modal-bg" id="export-choice-bg" onclick="if(event.target===this)closeExportChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export Recipe</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeExportChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportChoice();exportRecipe(currentRecipeId,'local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportChoice();exportRecipe(currentRecipeId,'platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Export All destination choice modal -->
+    <div class="modal-bg" id="export-all-choice-bg" onclick="if(event.target===this)closeExportAllChoice()">
+      <div class="modal" style="max-width:380px">
+        <div class="modal-hdr">
+          <span class="modal-title">Export All Recipes</span>
+          <button class="btn btn-ghost btn-sm" onclick="closeExportAllChoice()" style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0">
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllChoice();exportAllRecipes('local')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download to Local Machine
+          </button>
+          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+            onclick="closeExportAllChoice();exportAllRecipes('platform')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Save to Platform Library
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Platform Library modal -->
+    <div class="modal-bg" id="platform-lib-bg" onclick="if(event.target===this)closePlatformLibrary()">
+      <div class="modal" style="max-width:560px">
+        <div class="modal-hdr">
+          <span class="modal-title">Platform Recipe Library</span>
+          <button class="btn btn-ghost btn-sm" onclick="closePlatformLibrary()" style="padding:4px 10px">✕</button>
+        </div>
+        <div id="platform-lib-content" style="min-height:80px"><div class="empty" style="padding:20px">Loading…</div></div>
+      </div>
+    </div>
+
+    <!-- Recipe detail (hidden until a recipe is selected) -->
+    <div id="recipe-detail-panel" class="panel hidden">
+      <div class="panel-hdr">
+        <span id="recipe-detail-title" class="panel-title">Recipe</span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="openExportChoice()">↓ Export</button>
+          <button class="btn btn-ghost btn-sm" onclick="copyRecipe()">⎘ Copy</button>
+          <button class="btn btn-danger btn-sm" id="recipe-del-btn" onclick="deleteRecipe()">Delete</button>
+          <button class="btn btn-ghost btn-sm" onclick="closeRecipeDetail()">← Back</button>
+        </div>
+      </div>
+      <!-- Inline edit form for recipe header -->
+      <form id="recipe-header-form" onsubmit="submitRecipeHeader(event)" style="margin-bottom:20px">
+        <div class="form-grid">
+          <div class="fg"><label>Name <span class="req">*</span></label><input name="recipe_name" required placeholder="e.g. Lettuce 21-day"></div>
+          <div class="fg full"><label>Description</label><textarea name="recipe_description" rows="2" placeholder="Optional description"></textarea></div>
+          <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+        </div>
+        <div style="margin-top:14px;display:flex;gap:8px">
+          <button type="submit" class="btn btn-primary btn-sm">Save</button>
+        </div>
+      </form>
+      <!-- Recipe lines -->
+      <div class="panel-hdr" style="margin-top:8px;margin-bottom:14px;border-top:1px solid #2a364e;padding-top:18px">
+        <span class="panel-title" style="font-size:.9rem">Steps</span>
+        <button class="btn btn-primary btn-sm" onclick="openRecipeLineModal(null)">+ Add Step</button>
+      </div>
+      <div id="recipe-lines-wrap"><div class="empty">No steps yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ══ RECIPE LINE MODAL ══════════════════════════════════ -->
+  <div class="modal-bg" id="rline-modal-bg" onclick="if(event.target===this)closeRecipeLineModal()">
+    <div class="modal" style="max-width:700px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="rline-modal-title">Add Step</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeRecipeLineModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <form id="rline-form" onsubmit="submitRecipeLineForm(event)">
+        <div class="form-grid">
+          <div class="fg"><label>Step # <span class="req">*</span></label><input name="recipe_item_seq_id" type="number" min="1" required placeholder="e.g. 1"></div>
+          <div class="fg"><label>Step Name <span class="req">*</span></label><input name="recipe_item_seq_name" required placeholder="e.g. Germination"></div>
+          <div class="fg"><label>Cycles <span class="req">*</span></label><input name="cycle_number" type="number" min="1" required placeholder="e.g. 7"></div>
+          <div class="fg"><label>Light Type <span class="req">*</span></label>
+            <select name="light_type" required>
+              <option value="">— Select —</option>
+              <option value="UV">UV</option>
+              <option value="BLUE">BLUE</option>
+              <option value="RED">RED</option>
+              <option value="DARK">DARK</option>
+            </select>
+          </div>
+          <div class="fg"><label>Light ON (min) <span class="req">*</span></label><input name="light_on_minutes" type="number" min="0" required placeholder="e.g. 960"></div>
+          <div class="fg"><label>Light OFF (min) <span class="req">*</span></label><input name="light_off_minutes" type="number" min="0" required placeholder="e.g. 480"></div>
+          <div class="fg"><label>Air Temp Min °C <span class="req">*</span></label><input name="air_temperature_lower_limit" type="number" required placeholder="e.g. 18"></div>
+          <div class="fg"><label>Air Temp Max °C <span class="req">*</span></label><input name="air_temperature_upper_limit" type="number" required placeholder="e.g. 24"></div>
+          <div class="fg"><label>CO₂ Min (ppm) <span class="req">*</span></label><input name="co2_lower_limit" type="number" min="0" required placeholder="e.g. 400"></div>
+          <div class="fg"><label>CO₂ Max (ppm) <span class="req">*</span></label><input name="co2_upper_limit" type="number" min="0" required placeholder="e.g. 1200"></div>
+          <div class="fg"><label>Humidity Min % <span class="req">*</span></label><input name="hr_lower_limit" type="number" min="0" max="100" required placeholder="e.g. 60"></div>
+          <div class="fg"><label>Humidity Max % <span class="req">*</span></label><input name="hr_upper_limit" type="number" min="0" max="100" required placeholder="e.g. 80"></div>
+          <div class="fg"><label>Substrate Temp Min °C</label><input name="substrate_temperature_lower_limit" type="number" placeholder="optional"></div>
+          <div class="fg"><label>Substrate Temp Max °C</label><input name="substrate_temperature_upper_limit" type="number" placeholder="optional"></div>
+          <div class="fg full"><label>Notes</label><textarea name="notes" rows="2" placeholder="Optional notes for this step"></textarea></div>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-danger btn-sm hidden" id="rline-del-btn" onclick="deleteRecipeLine()">Delete Step</button>
+          <span class="spacer"></span>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="closeRecipeLineModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary btn-sm">Save Step</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ══ QUICK-ADD LOCATION MODAL ══════════════════════════ -->
+  <div class="modal-bg" id="modal-bg" onclick="if(event.target===this)closeLocModal()">
+    <div class="modal">
+      <div class="modal-hdr">
+        <span class="modal-title">New Location</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeLocModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <form id="modal-loc-form" onsubmit="submitModalLoc(event)">
+        <div class="form-grid">
+          <div class="fg"><label>Name <span class="req">*</span></label><input name="name" required placeholder="e.g. Lisbon Facility"></div>
+          <div class="fg"><label>Address</label><input name="address" placeholder="Street, City"></div>
+          <div class="fg"><label>Contact Person</label><input name="contact_person" placeholder="Full name"></div>
+          <div class="fg"><label>Contact Info</label><input name="contact_info" placeholder="Email or phone"></div>
+          <div class="fg full"><label>Description</label><textarea name="description" placeholder="Optional notes" style="min-height:60px"></textarea></div>
+          <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Create &amp; Select</button>
+          <button type="button" class="btn btn-ghost" onclick="closeLocModal()">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ══ ZONE MODAL ══════════════════════════════════════════ -->
+  <div class="modal-bg" id="zone-modal-bg" onclick="if(event.target===this)closeZoneModal()">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="zone-modal-title">New Zone</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeZoneModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <form id="zone-form" onsubmit="submitZoneForm(event)">
+        <div class="form-grid">
+          <div class="fg"><label>Zone Code <span class="req">*</span></label><input name="zone_code" required placeholder="e.g. Z-001"></div>
+          <div class="fg"><label>Status <span class="req">*</span></label><select name="is_active" required><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+          <div class="fg full"><label>Description</label><input name="zone_description" placeholder="e.g. Left shelf, Row A"></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Save Zone</button>
+          <button type="button" class="btn btn-ghost" onclick="closeZoneModal()">Cancel</button>
+          <div class="spacer"></div>
+          <button type="button" class="btn btn-danger hidden" id="zone-del-btn" onclick="deleteZone()">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ══ DEVICE MODAL ════════════════════════════════════════ -->
+  <div class="modal-bg" id="device-modal-bg" onclick="if(event.target===this)closeDeviceModal()">
+    <div class="modal">
+      <div class="modal-hdr">
+        <span class="modal-title" id="device-modal-title">New Device</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeDeviceModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <form id="device-form" onsubmit="submitDeviceForm(event)">
+        <div class="form-grid">
+          <div class="fg"><label>Device Type <span class="req">*</span></label><input name="device_type" required placeholder="e.g. Sensor, Controller"></div>
+          <div class="fg"><label>Serial Number <span class="req">*</span></label><input name="serial_number" required placeholder="SN-XXXXXX"></div>
+          <div class="fg"><label>DNS / IP <span class="req">*</span></label><input name="dns_name" required placeholder="dev01.local or 192.168.1.x"></div>
+          <div class="fg">
+            <label>Connection <span class="req">*</span></label>
+            <input name="connection_type" required placeholder="WiFi" list="conn-types">
+            <datalist id="conn-types"><option value="WiFi"><option value="Ethernet"><option value="Serial"><option value="Bluetooth"><option value="MQTT"><option value="Other"></datalist>
+          </div>
+          <div class="fg"><label>Model</label><input name="model" placeholder="Device model"></div>
+          <div class="fg"><label>Manufacturer</label><input name="manufacturer" placeholder="Manufacturer name"></div>
+          <div class="fg"><label>Installation Date</label><input name="installation_date" type="date"></div>
+          <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+          <div class="fg">
+            <label>Unit</label>
+            <select id="modal-dev-unit" onchange="onModalDevUnitChange(this.value)">
+              <option value="">— Unassigned —</option>
+            </select>
+          </div>
+          <div class="fg">
+            <label>Zone</label>
+            <select id="modal-dev-zone">
+              <option value="">— Unassigned —</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Save Device</button>
+          <button type="button" class="btn btn-ghost" onclick="closeDeviceModal()">Cancel</button>
+          <div class="spacer"></div>
+          <button type="button" class="btn btn-danger hidden" id="device-del-btn" onclick="deleteDevice()">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ══ COMPONENT MODAL ════════════════════════════════════ -->
+  <div class="modal-bg" id="component-modal-bg" onclick="if(event.target===this)closeComponentModal()">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="component-modal-title">New Component</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeComponentModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <form id="component-form" onsubmit="submitComponentForm(event)">
+        <div class="form-grid">
+          <div class="fg">
+            <label>Type <small style="color:#334155;text-transform:none;font-weight:400">(max 8)</small></label>
+            <input name="component_type" maxlength="8" placeholder="AP / CT / SP" list="comp-types">
+            <datalist id="comp-types"><option value="AP"><option value="CT"><option value="SP"><option value="Sensor"><option value="Actuator"></datalist>
+          </div>
+          <div class="fg"><label>Model</label><input name="model" placeholder="Component model"></div>
+          <div class="fg full"><label>Manufacturer</label><input name="manufacturer" placeholder="Manufacturer name"></div>
+          <div class="fg full">
+            <label>Parameters (JSON)</label>
+            <textarea name="parameters" placeholder='{"key": "value"}' style="min-height:90px;font-family:monospace;font-size:.82rem"></textarea>
+          </div>
+          <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Save Component</button>
+          <button type="button" class="btn btn-ghost" onclick="closeComponentModal()">Cancel</button>
+          <div class="spacer"></div>
+          <button type="button" class="btn btn-danger hidden" id="component-del-btn" onclick="deleteComponent()">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const API = '/api';
+    let locations = [], units = [], unitZoneCounts = {};
+    let editLocId = null, editUnitId = null;
+    let zoneModal    = { unitId: null, zoneId: null };
+    let deviceModal  = { deviceId: null };
+    let componentModal = { deviceId: null, componentId: null };
+
+    // ── Tabs ──────────────────────────────────────────────────
+    function showTab(name) {
+      ['locations','units','devices','sysconfig','recipes'].forEach(n => {
+        document.getElementById('tab-' + n).classList.toggle('hidden', n !== name);
+        document.getElementById('tb-' + n).classList.toggle('active', n === name);
+      });
+      if (name === 'locations') loadLocations();
+      if (name === 'units')     { loadLocations(); loadUnits(); loadPermissionMatrix(); }
+      if (name === 'devices')   loadAllDevices();
+      if (name === 'sysconfig') { loadAlgorithms(); loadUnitMemory(); }
+      if (name === 'recipes')   loadRecipes();
+    }
+
+    // Switch to Devices tab (from Units/Zones panel — just navigate)
+    function switchToDevices(unitId, zoneId) {
+      showTab('devices');
+    }
+
+    // ── Toast ─────────────────────────────────────────────────
+    function toast(msg, ok = true) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+      clearTimeout(el._t);
+      el._t = setTimeout(() => el.classList.remove('show'), 3500);
+    }
+
+    // ── API helpers ───────────────────────────────────────────
+    async function api(method, path, body, extraHeaders) {
+      const opts = { method, headers: { 'Accept': 'application/json' } };
+      if (body !== undefined) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.headers['Prefer'] = 'return=representation';
+        if (extraHeaders) Object.assign(opts.headers, extraHeaders);
+        opts.body = JSON.stringify(body);
+      }
+      const r = await fetch(API + path, opts);
+      // oauth2-proxy answers an unauthenticated API call with a bare 403 and an
+      // empty JSON body, not a login redirect — because the Accept header says
+      // this is not a browser navigation. The page therefore cannot tell that
+      // the session has gone, and every tab shows "Request failed" until
+      // somebody reloads by hand. Send them through the login flow instead.
+      if (r.status === 401 || r.status === 403) {
+        if (!sessionStorage.getItem('cfgReauth')) {
+          sessionStorage.setItem('cfgReauth', '1');
+          location.href = '/oauth2/start?rd=' +
+            encodeURIComponent(location.pathname + location.search);
+          throw new Error('session expired — signing in again');
+        }
+        // Already came back from a login and still refused: a real permission
+        // problem, not an expired session. Stop, rather than loop.
+        throw new Error('signed in, but this request was refused (403)');
+      }
+      sessionStorage.removeItem('cfgReauth');
+      if (!r.ok) {
+        let msg = 'Request failed';
+        try { const e = await r.json(); msg = e.message || e.detail || msg; } catch(_) {}
+        throw new Error(msg);
+      }
+      const text = await r.text();
+      return text ? JSON.parse(text) : null;
+    }
+
+    // ── Locations ─────────────────────────────────────────────
+    async function loadLocations() {
+      try {
+        locations = await api('GET', '/cea_location?order=name');
+        renderLocTable(); fillLocDropdown();
+      } catch(e) { toast('Load locations failed: ' + e.message, false); }
+    }
+
+    function renderLocTable() {
+      const w = document.getElementById('loc-table-wrap');
+      if (!locations.length) { w.innerHTML = '<div class="empty">No locations yet.</div>'; return; }
+      w.innerHTML = '<table class="tbl"><thead><tr><th>Name</th><th>Address</th><th>Contact</th><th>Status</th><th></th></tr></thead><tbody>'
+        + locations.map(l => '<tr>'
+          + '<td><strong>' + esc(l.name) + '</strong></td>'
+          + '<td>' + esc(l.address || '—') + '</td>'
+          + '<td>' + esc(l.contact_person || '—') + '</td>'
+          + '<td><span class="badge badge-' + (l.is_active === 'Y' ? 'y' : 'n') + '">' + (l.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+          + '<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="openLocForm(' + l.location_id + ')">Edit</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="openLocExportChoiceFor(' + l.location_id + ')">↓ Export</button></td>'
+          + '</tr>').join('') + '</tbody></table>';
+    }
+
+    function fillLocDropdown(selectId) {
+      const sel = document.getElementById('unit-loc-sel');
+      const keep = selectId != null ? String(selectId) : sel.value;
+      sel.innerHTML = '<option value="">— Select location —</option>'
+        + locations.map(l => '<option value="' + l.location_id + '"' + (String(l.location_id) === keep ? ' selected' : '') + '>' + esc(l.name) + '</option>').join('');
+    }
+
+    function openLocForm(id) {
+      editLocId = id;
+      document.getElementById('loc-list-panel').classList.add('hidden');
+      document.getElementById('loc-form-panel').classList.remove('hidden');
+      const form = document.getElementById('loc-form');
+      form.reset();
+      if (id) {
+        document.getElementById('loc-form-title').textContent = 'Edit Location';
+        document.getElementById('loc-del-btn').classList.remove('hidden');
+        const loc = locations.find(l => l.location_id === id);
+        if (loc) Object.entries(loc).forEach(([k, v]) => { const el = form.elements[k]; if (el && v != null) el.value = v; });
+      } else {
+        document.getElementById('loc-form-title').textContent = 'New Location';
+        document.getElementById('loc-del-btn').classList.add('hidden');
+      }
+    }
+
+    function closeLocForm() {
+      document.getElementById('loc-form-panel').classList.add('hidden');
+      document.getElementById('loc-list-panel').classList.remove('hidden');
+    }
+
+    async function submitLocForm(e) {
+      e.preventDefault();
+      const data = formData(e.target, ['latitude','longitude']);
+      try {
+        if (editLocId) { await api('PATCH', '/cea_location?location_id=eq.' + editLocId, data); toast('Location updated'); }
+        else           { await api('POST',  '/cea_location', data); toast('Location created'); }
+        await loadLocations(); closeLocForm();
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteLoc() {
+      if (!confirm('Delete this location?\nFails if units are assigned to it.')) return;
+      try { await api('DELETE', '/cea_location?location_id=eq.' + editLocId); toast('Location deleted'); await loadLocations(); closeLocForm(); }
+      catch(err) { toast(err.message, false); }
+    }
+
+    // ── Units ─────────────────────────────────────────────────
+    async function loadUnits() {
+      try {
+        const [unitData, zoneData] = await Promise.all([
+          api('GET', '/cea_unit?order=unit_code'),
+          api('GET', '/cea_zone?select=unit_id')
+        ]);
+        units = unitData;
+        unitZoneCounts = {};
+        zoneData.forEach(z => { unitZoneCounts[z.unit_id] = (unitZoneCounts[z.unit_id] || 0) + 1; });
+        renderUnitTable();
+      } catch(e) { toast('Load units failed: ' + e.message, false); }
+    }
+
+    function locName(id) { const l = locations.find(l => l.location_id === id); return l ? l.name : '—'; }
+
+    function renderUnitTable() {
+      const w = document.getElementById('unit-table-wrap');
+      if (!units.length) { w.innerHTML = '<div class="empty">No units yet. Create one to get started.</div>'; return; }
+      let html = '<table class="tbl"><thead><tr>'
+        + '<th>Code</th><th>Type</th><th>Location</th><th>Area</th><th>Height</th><th>Status</th><th></th>'
+        + '</tr></thead>';
+      units.forEach(u => {
+        const hasNoZones = !(unitZoneCounts[u.unit_id] > 0);
+        const warnIcon = hasNoZones
+          ? ' <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5" style="vertical-align:middle;margin-left:2px" title="No zones configured"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><circle cx="12" cy="17" r="1" fill="#f59e0b"/></svg>' : '';
+        html += '<tbody>'
+          + '<tr class="unit-row">'
+          + '<td><strong>' + esc(u.unit_code) + '</strong></td>'
+          + '<td>' + esc(u.unit_type) + '</td>'
+          + '<td>' + esc(locName(u.location_id)) + '</td>'
+          + '<td>' + (u.area   != null ? u.area   + ' m²' : '—') + '</td>'
+          + '<td>' + (u.height != null ? u.height + ' m'  : '—') + '</td>'
+          + '<td><span class="badge badge-' + (u.is_active === 'Y' ? 'y' : 'n') + '">' + (u.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+          + '<td style="white-space:nowrap">'
+          + '<button class="btn btn-ghost btn-sm" onclick="openUnitForm(' + u.unit_id + ')">Edit</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="openUnitExportChoiceFor(' + u.unit_id + ')">↓ Export</button>'
+          + ' <button class="btn btn-ghost btn-sm" id="ztb-' + u.unit_id + '" onclick="toggleZones(' + u.unit_id + ', this)">'
+          + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>'
+          + ' Zones' + warnIcon + '</button>'
+          + '</td></tr>'
+          + '<tr class="zones-row hidden" id="zr-' + u.unit_id + '">'
+          + '<td colspan="7"><div class="zones-content" id="zc-' + u.unit_id + '"><div style="padding:8px;color:#475569;font-size:.82rem">Loading…</div></div></td>'
+          + '</tr>'
+          + '</tbody>';
+      });
+      w.innerHTML = html + '</table>';
+    }
+
+    async function toggleZones(unitId, btn) {
+      const row = document.getElementById('zr-' + unitId);
+      if (!row.classList.contains('hidden')) {
+        row.classList.add('hidden');
+        const warnIcon = !(unitZoneCounts[unitId] > 0) ? ' <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5" style="vertical-align:middle;margin-left:2px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><circle cx="12" cy="17" r="1" fill="#f59e0b"/></svg>' : '';
+        btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg> Zones' + warnIcon;
+        return;
+      }
+      row.classList.remove('hidden');
+      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg> Zones';
+      await refreshZonesPanel(unitId);
+    }
+
+    async function refreshZonesPanel(unitId) {
+      const panel = document.getElementById('zc-' + unitId);
+      if (!panel) return;
+      try {
+        const zones = await api('GET', '/cea_zone?unit_id=eq.' + unitId + '&order=zone_code');
+        unitZoneCounts[unitId] = zones.length;
+        // Fetch device counts per zone (zone_id now correctly refs cea_zone)
+        let devByZone = {};
+        if (zones.length) {
+          const zIds = zones.map(z => z.zone_id).join(',');
+          const devs = await api('GET', '/device?zone_id=in.(' + zIds + ')&select=zone_id,device_id,serial_number,dns_name,device_type,is_active&order=dns_name');
+          devs.forEach(d => { if (!devByZone[d.zone_id]) devByZone[d.zone_id] = []; devByZone[d.zone_id].push(d); });
+        }
+        renderZonesPanel(panel, unitId, zones, devByZone);
+      } catch(e) {
+        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">Failed to load zones</div>';
+      }
+    }
+
+    function renderZonesPanel(panel, unitId, zones, devByZone) {
+      let html = '<div class="zones-hdr">'
+        + '<span class="zones-label">Zones (' + zones.length + ')</span>'
+        + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+        + '<button class="btn btn-ghost btn-sm" onclick="openZoneModal(' + unitId + ', null)" style="font-size:.78rem">+ Add Zone</button>'
+        + '</div></div>';
+
+      if (zones.length) {
+        html += '<table class="ztbl"><thead><tr><th>Code</th><th>Description</th><th>Status</th><th></th></tr></thead><tbody>';
+        zones.forEach(z => {
+          const zoneDev = devByZone[z.zone_id] || [];
+          const devWarn = zoneDev.length === 0
+            ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5" style="vertical-align:middle;margin-left:2px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><circle cx="12" cy="17" r="1" fill="#f59e0b"/></svg>' : '';
+          html += '<tr>'
+            + '<td><strong>' + esc(z.zone_code) + '</strong></td>'
+            + '<td>' + esc(z.zone_description || '—') + '</td>'
+            + '<td><span class="badge badge-' + (z.is_active === 'Y' ? 'y' : 'n') + '">' + (z.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+            + '<td style="white-space:nowrap">'
+            + '<button class="btn btn-ghost btn-sm" onclick="openZoneModal(' + unitId + ',' + z.zone_id + ')">Edit</button>'
+            + ' <button class="btn btn-ghost btn-sm" id="zdtb-' + z.zone_id + '" onclick="toggleZoneDevices(' + z.zone_id + ', this)">'
+            + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>'
+            + ' Devices (' + zoneDev.length + ')' + devWarn + '</button>'
+            + '</td></tr>'
+            + '<tr class="zones-row hidden" id="zdr-' + z.zone_id + '">'
+            + '<td colspan="4" style="padding:0!important;border-bottom:2px solid #2a364e!important;background:#0d131f">'
+            + '<div id="zdc-' + z.zone_id + '" style="padding:10px 16px 14px 48px"></div>'
+            + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      } else {
+        html += '<div class="zone-empty">No zones yet for this unit.</div>';
+      }
+      panel.innerHTML = html;
+    }
+
+    async function toggleZoneDevices(zoneId, btn) {
+      const row = document.getElementById('zdr-' + zoneId);
+      const open = !row.classList.contains('hidden');
+      row.classList.toggle('hidden', open);
+      const chevRight = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>';
+      const chevDown  = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>';
+      const label = btn.dataset.label || btn.textContent.trim().replace(/^\S+\s*/, '');
+      btn.dataset.label = label;
+      btn.innerHTML = (open ? chevRight : chevDown) + ' ' + label;
+      if (!open) await refreshZoneDevices(zoneId);
+    }
+    async function refreshZoneDevices(zoneId) {
+      const panel = document.getElementById('zdc-' + zoneId);
+      if (!panel) return;
+      try {
+        const devs = await api('GET', '/device?zone_id=eq.' + zoneId + '&order=dns_name');
+        if (!devs.length) {
+          panel.innerHTML = '<div style="color:#f59e0b;font-size:.82rem;padding:6px 0">⚠ No devices assigned to this zone.</div>';
+          return;
+        }
+        let h = '<table class="ztbl" style="margin-top:4px"><thead><tr>'
+          + '<th>DNS / IP</th><th>Type</th><th>Model</th><th>Serial</th><th>Status</th><th></th>'
+          + '</tr></thead><tbody>';
+        devs.forEach(d => {
+          h += '<tr>'
+            + '<td><strong>' + esc(d.dns_name) + '</strong></td>'
+            + '<td>' + esc(d.device_type) + '</td>'
+            + '<td>' + esc(d.model || '—') + '</td>'
+            + '<td style="font-size:.75rem;color:#64748b">' + esc(d.serial_number) + '</td>'
+            + '<td><span class="badge badge-' + (d.is_active === 'Y' ? 'y' : 'n') + '">' + (d.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+            + '<td><button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button></td>'
+            + '</tr>';
+        });
+        h += '</tbody></table>';
+        panel.innerHTML = h;
+      } catch(e) {
+        panel.innerHTML = '<div style="color:#fca5a5;font-size:.82rem;padding:6px 0">Failed to load devices: ' + e.message + '</div>';
+      }
+    }
+
+    // ── Zone modal ────────────────────────────────────────────
+    function openZoneModal(unitId, zoneId) {
+      zoneModal = { unitId, zoneId };
+      const form = document.getElementById('zone-form');
+      form.reset();
+      document.getElementById('zone-modal-title').textContent = zoneId ? 'Edit Zone' : 'New Zone';
+      document.getElementById('zone-del-btn').classList.toggle('hidden', !zoneId);
+      if (zoneId) {
+        api('GET', '/cea_zone?zone_id=eq.' + zoneId).then(rows => {
+          const z = rows[0];
+          if (z) { form.elements['zone_code'].value = z.zone_code; form.elements['zone_description'].value = z.zone_description || ''; form.elements['is_active'].value = z.is_active; }
+        });
+      }
+      document.getElementById('zone-modal-bg').classList.add('open');
+    }
+
+    function closeZoneModal() { document.getElementById('zone-modal-bg').classList.remove('open'); }
+
+    async function submitZoneForm(e) {
+      e.preventDefault();
+      const data = formData(e.target);
+      data.unit_id = zoneModal.unitId;
+      try {
+        if (zoneModal.zoneId) { await api('PATCH', '/cea_zone?zone_id=eq.' + zoneModal.zoneId, data); toast('Zone updated'); }
+        else                  { await api('POST',  '/cea_zone', data); toast('Zone created'); }
+        closeZoneModal();
+        unitZoneCounts[zoneModal.unitId] = (unitZoneCounts[zoneModal.unitId] || 0) + (zoneModal.zoneId ? 0 : 1);
+        await refreshZonesPanel(zoneModal.unitId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteZone() {
+      if (!confirm('Delete this zone?')) return;
+      try {
+        await api('DELETE', '/cea_zone?zone_id=eq.' + zoneModal.zoneId);
+        toast('Zone deleted');
+        closeZoneModal();
+        if (unitZoneCounts[zoneModal.unitId] > 0) unitZoneCounts[zoneModal.unitId]--;
+        await refreshZonesPanel(zoneModal.unitId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    // ── Unit form ─────────────────────────────────────────────
+    function openUnitForm(id) {
+      editUnitId = id;
+      document.getElementById('unit-list-panel').classList.add('hidden');
+      document.getElementById('unit-form-panel').classList.remove('hidden');
+      const form = document.getElementById('unit-form');
+      form.reset(); fillLocDropdown();
+      if (id) {
+        document.getElementById('unit-form-title').textContent = 'Edit Unit';
+        document.getElementById('unit-del-btn').classList.remove('hidden');
+        const u = units.find(u => u.unit_id === id);
+        if (u) Object.entries(u).forEach(([k, v]) => { const el = form.elements[k]; if (el && v != null) el.value = v; });
+      } else {
+        document.getElementById('unit-form-title').textContent = 'New Unit';
+        document.getElementById('unit-del-btn').classList.add('hidden');
+      }
+    }
+
+    function closeUnitForm() {
+      document.getElementById('unit-form-panel').classList.add('hidden');
+      document.getElementById('unit-list-panel').classList.remove('hidden');
+      loadUnits();
+    }
+
+    async function submitUnitForm(e) {
+      e.preventDefault();
+      const data = formData(e.target, ['area','height'], ['location_id']);
+      try {
+        if (editUnitId) { await api('PATCH', '/cea_unit?unit_id=eq.' + editUnitId, data); toast('Unit updated'); }
+        else            { await api('POST',  '/cea_unit', data); toast('Unit created'); }
+        await loadUnits(); closeUnitForm();
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteUnit() {
+      if (!confirm('Delete this unit?\nAll zones and devices will also be deleted.')) return;
+      try { await api('DELETE', '/cea_unit?unit_id=eq.' + editUnitId); toast('Unit deleted'); await loadUnits(); closeUnitForm(); }
+      catch(err) { toast(err.message, false); }
+    }
+
+    // ── Quick-add location modal ──────────────────────────────
+    function openLocModal() { document.getElementById('modal-loc-form').reset(); document.getElementById('modal-bg').classList.add('open'); }
+    function closeLocModal() { document.getElementById('modal-bg').classList.remove('open'); }
+
+    async function submitModalLoc(e) {
+      e.preventDefault();
+      const data = formData(e.target, ['latitude','longitude']);
+      try {
+        const created = await api('POST', '/cea_location', data);
+        const newId = Array.isArray(created) ? created[0]?.location_id : created?.location_id;
+        await loadLocations();
+        if (newId) fillLocDropdown(newId);
+        closeLocModal();
+        toast('Location "' + data.name + '" created and selected');
+      } catch(err) { toast(err.message, false); }
+    }
+
+    // ── Device Management ─────────────────────────────────────
+    // allZones: flat list of all zones (cached when devices tab loads)
+    let allZones = [];
+
+    async function loadAllDevices() {
+      document.getElementById('dev-content').innerHTML = '<div class="empty" style="padding:30px">Loading…</div>';
+      try {
+        if (!units.length) await loadUnits();
+        const [devices, zones] = await Promise.all([
+          api('GET', '/device?order=serial_number'),
+          api('GET', '/cea_zone?order=zone_code&select=zone_id,zone_code,zone_description,unit_id')
+        ]);
+        allZones = zones;
+        renderDevContent(devices);
+      } catch(e) {
+        document.getElementById('dev-content').innerHTML = '<div style="color:#fca5a5;padding:20px">Failed: ' + e.message + '</div>';
+      }
+    }
+
+    function zoneLabel(zoneId) {
+      const z = allZones.find(z => z.zone_id === zoneId);
+      if (!z) return zoneId != null ? 'Zone ' + zoneId : '—';
+      const u = units.find(u => u.unit_id === z.unit_id);
+      return (u ? esc(u.unit_code) + ' / ' : '') + esc(z.zone_code);
+    }
+
+    function renderDevContent(devices) {
+      if (!devices.length) {
+        document.getElementById('dev-content').innerHTML = '<div class="empty" style="padding:30px">No devices yet. Click "+ Add Device" to get started.</div>';
+        return;
+      }
+      const checkAllBtn = '<button onclick="checkAllDevicesOnline()" title="Check all devices" style="margin-left:6px;background:none;border:none;cursor:pointer;color:#64748b;font-size:.85rem;padding:0 2px" id="check-all-btn">⟳</button>';
+      let html = '<table class="tbl"><thead><tr>'
+        + '<th>DNS / IP</th><th>Type</th><th>Unit / Zone</th><th>Model</th><th>Serial No.</th><th>Status</th>'
+        + '<th style="white-space:nowrap">Online' + checkAllBtn + '</th>'
+        + '<th></th><th></th>'
+        + '</tr></thead>';
+      devices.forEach(d => {
+        html += '<tbody>'
+          + '<tr class="unit-row">'
+          + '<td><strong>' + esc(d.dns_name) + '</strong></td>'
+          + '<td>' + esc(d.device_type) + '</td>'
+          + '<td><span style="font-size:.82rem;color:#94a3b8">' + zoneLabel(d.zone_id) + '</span></td>'
+          + '<td>' + esc(d.model || '—') + '</td>'
+          + '<td style="font-size:.78rem;color:#64748b">' + esc(d.serial_number) + '</td>'
+          + '<td><span class="badge badge-' + (d.is_active === 'Y' ? 'y' : 'n') + '">' + (d.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+          + '<td style="text-align:center">'
+          + '<span id="online-' + d.device_id + '" data-dns="' + esc(d.dns_name) + '" style="color:#475569" title="Not checked">—</span>'
+          + ' <button onclick="checkDeviceOnline(' + d.device_id + ',\'' + esc(d.dns_name) + '\')" title="Check now" style="background:none;border:none;cursor:pointer;color:#64748b;font-size:.85rem;padding:0 2px">⟳</button>'
+          + '</td>'
+          + '<td style="white-space:nowrap">'
+          + '<button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button>'
+          + '</td>'
+          + '<td style="white-space:nowrap">'
+          + '<button class="btn btn-ghost btn-sm" id="ctb-' + d.device_id + '" onclick="toggleComponents(' + d.device_id + ', this)">'
+          + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>'
+          + ' Components</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="openDeviceExportChoiceFor(' + d.device_id + ')" title="Export device">↓ Export</button>'
+          + '</td></tr>'
+          + '<tr class="zones-row hidden" id="cr-' + d.device_id + '">'
+          + '<td colspan="10"><div class="zones-content" id="cc-' + d.device_id + '"><div style="padding:8px;color:#475569;font-size:.82rem">Loading…</div></div></td>'
+          + '</tr>'
+          + '</tbody>';
+      });
+      html += '</table>';
+      document.getElementById('dev-content').innerHTML = html;
+    }
+
+
+    // ── Device Online Check (server-side TCP — works on LAN) ─────
+    async function checkDeviceOnline(deviceId, dnsName) {
+      const cell = document.getElementById('online-' + deviceId);
+      if (!cell) return;
+      cell.innerHTML = '<span style="color:#94a3b8;animation:spin 1s linear infinite;display:inline-block">⟳</span>';
+      cell.title = 'Checking…';
+      try {
+        const r = await fetch('/platform-api/check/' + encodeURIComponent(dnsName));
+        if (!r.ok) throw new Error('sidecar error ' + r.status);
+        const result = await r.json();
+        if (result.online) {
+          const ms = result.ms != null ? ' ' + result.ms + 'ms' : '';
+          cell.innerHTML = '<span style="color:#22c55e;font-size:1rem">●</span>';
+          cell.title = 'Online' + ms;
+        } else {
+          const label = result.error === 'timeout' ? 'Timeout' : (result.error || 'Unreachable');
+          cell.innerHTML = '<span style="color:#ef4444;font-size:1rem">●</span>';
+          cell.title = label;
+        }
+      } catch(e) {
+        cell.innerHTML = '<span style="color:#f59e0b;font-size:1rem">●</span>';
+        cell.title = 'Check failed: ' + e.message;
+      }
+    }
+
+    async function checkAllDevicesOnline() {
+      const btn = document.getElementById('check-all-btn');
+      if (btn) { btn.style.opacity = '0.4'; btn.disabled = true; }
+      const cells = document.querySelectorAll('[id^="online-"]');
+      await Promise.all([...cells].map(cell => {
+        const id = parseInt(cell.id.replace('online-', ''));
+        const dns = cell.dataset.dns;
+        return checkDeviceOnline(id, dns);
+      }));
+      if (btn) { btn.style.opacity = ''; btn.disabled = false; }
+    }
+
+    // Populate unit dropdown in the device modal
+    function fillModalDevUnits(keepUnitId) {
+      const sel = document.getElementById('modal-dev-unit');
+      sel.innerHTML = '<option value="">— Unassigned —</option>'
+        + units.map(u => '<option value="' + u.unit_id + '"' + (u.unit_id === keepUnitId ? ' selected' : '') + '>'
+          + esc(u.unit_code) + ' — ' + esc(u.unit_type) + '</option>').join('');
+    }
+
+    async function onModalDevUnitChange(val) {
+      const zoneSel = document.getElementById('modal-dev-zone');
+      zoneSel.innerHTML = '<option value="">— Unassigned —</option>';
+      if (!val) return;
+      try {
+        const zones = await api('GET', '/cea_zone?unit_id=eq.' + val + '&order=zone_code');
+        zoneSel.innerHTML = '<option value="">— Unassigned —</option>'
+          + zones.map(z => '<option value="' + z.zone_id + '">'
+            + esc(z.zone_code) + (z.zone_description ? ' — ' + esc(z.zone_description) : '') + '</option>').join('');
+      } catch(_) {}
+    }
+
+    async function toggleComponents(deviceId, btn) {
+      const row = document.getElementById('cr-' + deviceId);
+      if (!row.classList.contains('hidden')) {
+        row.classList.add('hidden');
+        btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg> Components';
+        return;
+      }
+      row.classList.remove('hidden');
+      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg> Components';
+      await refreshComponentsPanel(deviceId);
+    }
+
+    async function refreshComponentsPanel(deviceId) {
+      const panel = document.getElementById('cc-' + deviceId);
+      if (!panel) return;
+      try {
+        const comps = await api('GET', '/component?device_id=eq.' + deviceId + '&order=component_id');
+        renderComponentsPanel(panel, deviceId, comps);
+      } catch(e) {
+        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">Failed to load components</div>';
+      }
+    }
+
+    function renderComponentsPanel(panel, deviceId, comps) {
+      let html = '<div class="zones-hdr"><span class="zones-label">Components (' + comps.length + ')</span>'
+        + '<button class="btn btn-ghost btn-sm" onclick="openComponentModal(' + deviceId + ', null)" style="font-size:.78rem">+ Add Component</button></div>';
+      if (comps.length) {
+        html += '<table class="ztbl"><thead><tr><th>Type</th><th>Model</th><th>Manufacturer</th><th>Status</th><th></th></tr></thead><tbody>';
+        comps.forEach(c => {
+          html += '<tr>'
+            + '<td><strong>' + esc(c.component_type || '—') + '</strong></td>'
+            + '<td>' + esc(c.model || '—') + '</td>'
+            + '<td>' + esc(c.manufacturer || '—') + '</td>'
+            + '<td><span class="badge badge-' + (c.is_active === 'Y' ? 'y' : 'n') + '">' + (c.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+            + '<td><button class="btn btn-ghost btn-sm" onclick="openComponentModal(' + deviceId + ',' + c.component_id + ')">Edit</button></td>'
+            + '</tr>';
+        });
+        html += '</tbody></table>';
+      } else {
+        html += '<div class="zone-empty">No components configured for this device.</div>';
+      }
+      panel.innerHTML = html;
+    }
+
+    // ── Device modal ──────────────────────────────────────────
+    async function openDeviceModal(deviceId) {
+      deviceModal.deviceId = deviceId;
+      const form = document.getElementById('device-form');
+      form.reset();
+      document.getElementById('device-modal-title').textContent = deviceId ? 'Edit Device' : 'New Device';
+      document.getElementById('device-del-btn').classList.toggle('hidden', !deviceId);
+      if (!units.length) await loadUnits();
+      fillModalDevUnits(null);
+      document.getElementById('modal-dev-zone').innerHTML = '<option value="">— Unassigned —</option>';
+      if (deviceId) {
+        api('GET', '/device?device_id=eq.' + deviceId).then(async rows => {
+          const d = rows[0];
+          if (!d) return;
+          ['device_type','model','manufacturer','serial_number','connection_type','dns_name','is_active'].forEach(k => {
+            const el = form.elements[k]; if (el && d[k] != null) el.value = d[k];
+          });
+          if (d.installation_date) form.elements['installation_date'].value = d.installation_date.slice(0, 10);
+          // Pre-populate unit → zone
+          const z = allZones.find(z => z.zone_id === d.zone_id);
+          if (z) {
+            fillModalDevUnits(z.unit_id);
+            document.getElementById('modal-dev-unit').value = z.unit_id;
+            await onModalDevUnitChange(String(z.unit_id));
+            document.getElementById('modal-dev-zone').value = d.zone_id;
+          }
+        });
+      }
+      document.getElementById('device-modal-bg').classList.add('open');
+    }
+
+    function closeDeviceModal() { document.getElementById('device-modal-bg').classList.remove('open'); }
+
+    async function submitDeviceForm(e) {
+      e.preventDefault();
+      const data = formData(e.target);
+      const zoneId = document.getElementById('modal-dev-zone').value;
+      data.zone_id = zoneId ? parseInt(zoneId) : null;
+      try {
+        if (deviceModal.deviceId) { await api('PATCH', '/device?device_id=eq.' + deviceModal.deviceId, data); toast('Device updated'); }
+        else                      { await api('POST',  '/device', data); toast('Device created'); }
+        closeDeviceModal();
+        await loadAllDevices();
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteDevice() {
+      if (!confirm('Delete this device? All components will also be deleted.')) return;
+      try {
+        await api('DELETE', '/component?device_id=eq.' + deviceModal.deviceId);
+        await api('DELETE', '/device?device_id=eq.' + deviceModal.deviceId);
+        toast('Device deleted');
+        closeDeviceModal();
+        await loadAllDevices();
+      } catch(err) { toast(err.message, false); }
+    }
+
+    // ── Component modal ───────────────────────────────────────
+    function openComponentModal(deviceId, componentId) {
+      componentModal = { deviceId, componentId };
+      const form = document.getElementById('component-form');
+      form.reset();
+      document.getElementById('component-modal-title').textContent = componentId ? 'Edit Component' : 'New Component';
+      document.getElementById('component-del-btn').classList.toggle('hidden', !componentId);
+      if (componentId) {
+        api('GET', '/component?component_id=eq.' + componentId).then(rows => {
+          const c = rows[0];
+          if (!c) return;
+          ['component_type','model','manufacturer','is_active'].forEach(k => {
+            const el = form.elements[k]; if (el && c[k] != null) el.value = c[k];
+          });
+          if (c.parameters) form.elements['parameters'].value = JSON.stringify(c.parameters, null, 2);
+        });
+      }
+      document.getElementById('component-modal-bg').classList.add('open');
+    }
+
+    function closeComponentModal() { document.getElementById('component-modal-bg').classList.remove('open'); }
+
+    async function submitComponentForm(e) {
+      e.preventDefault();
+      const data = formData(e.target);
+      data.device_id = componentModal.deviceId;
+      if (data.parameters) {
+        try { data.parameters = JSON.parse(data.parameters); }
+        catch(_) { toast('Parameters must be valid JSON', false); return; }
+      }
+      try {
+        if (componentModal.componentId) { await api('PATCH', '/component?component_id=eq.' + componentModal.componentId, data); toast('Component updated'); }
+        else                            { await api('POST',  '/component', data); toast('Component created'); }
+        closeComponentModal();
+        await refreshComponentsPanel(componentModal.deviceId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteComponent() {
+      if (!confirm('Delete this component?')) return;
+      try {
+        await api('DELETE', '/component?component_id=eq.' + componentModal.componentId);
+        toast('Component deleted');
+        closeComponentModal();
+        await refreshComponentsPanel(componentModal.deviceId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────
+    function formData(form, floats = [], ints = []) {
+      const d = {};
+      for (const [k, v] of new FormData(form).entries()) if (v !== '') d[k] = v;
+      floats.forEach(k => { if (d[k] !== undefined) d[k] = parseFloat(d[k]); });
+      ints.forEach(k =>   { if (d[k] !== undefined) d[k] = parseInt(d[k]); });
+      return d;
+    }
+    function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+    // ── Recipes ───────────────────────────────────────────────
+    let recipes = [];
+    let currentRecipeId = null;
+    let recipeLineModal = { recipeId: null, seqId: null }; // seqId=null means new
+
+    async function loadRecipes() {
+      try {
+        recipes = await api('GET', '/recipe?order=recipe_name');
+        renderRecipeTable();
+      } catch(e) { toast('Load recipes failed: ' + e.message, false); }
+    }
+
+    function renderRecipeTable() {
+      const w = document.getElementById('recipe-table-wrap');
+      if (!recipes.length) { w.innerHTML = '<div class="empty">No recipes yet. Create one to get started.</div>'; return; }
+      w.innerHTML = '<table class="tbl"><thead><tr>'
+        + '<th>Name</th><th>Description</th><th>Status</th><th>Created</th><th></th>'
+        + '</tr></thead><tbody>'
+        + recipes.map(r => '<tr>'
+          + '<td><strong>' + esc(r.recipe_name) + '</strong></td>'
+          + '<td>' + esc(r.recipe_description || '—') + '</td>'
+          + '<td><span class="badge badge-' + (r.is_active === 'Y' ? 'y' : 'n') + '">' + (r.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+          + '<td>' + (r.timestamp_cre ? r.timestamp_cre.slice(0,10) : '—') + '</td>'
+          + '<td style="white-space:nowrap">'
+          + '<button class="btn btn-ghost btn-sm" onclick="openRecipeForm(' + r.recipe_id + ')">Edit</button>'
+          + ' <button class="btn btn-teal btn-sm" onclick="openRecipeDetail(' + r.recipe_id + ')">Steps →</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="copyRecipeById(' + r.recipe_id + ')" title="Duplicate this recipe">⎘ Copy</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="openExportChoiceFor(' + r.recipe_id + ')" title="Export this recipe">↓ Export</button>'
+          + '</td></tr>').join('')
+        + '</tbody></table>';
+    }
+
+    function openRecipeForm(id) {
+      currentRecipeId = id;
+      const form = document.getElementById('recipe-header-form');
+      form.reset();
+      document.getElementById('recipe-del-btn').classList.toggle('hidden', !id);
+      if (id) {
+        const r = recipes.find(r => r.recipe_id === id);
+        if (r) {
+          form.elements['recipe_name'].value = r.recipe_name;
+          form.elements['recipe_description'].value = r.recipe_description || '';
+          form.elements['is_active'].value = r.is_active || 'Y';
+        }
+        openRecipeDetail(id);
+      } else {
+        // New recipe — show detail panel with empty form
+        currentRecipeId = null;
+        document.getElementById('recipe-detail-title').textContent = 'New Recipe';
+        document.getElementById('recipe-del-btn').classList.add('hidden');
+        document.getElementById('recipe-list-panel').classList.add('hidden');
+        document.getElementById('recipe-detail-panel').classList.remove('hidden');
+        document.getElementById('recipe-lines-wrap').innerHTML = '<div class="empty">Save the recipe first, then add steps.</div>';
+      }
+    }
+
+    async function openRecipeDetail(id) {
+      currentRecipeId = id;
+      const r = recipes.find(r => r.recipe_id === id);
+      document.getElementById('recipe-detail-title').textContent = r ? r.recipe_name : 'Recipe';
+      document.getElementById('recipe-del-btn').classList.remove('hidden');
+      const form = document.getElementById('recipe-header-form');
+      form.reset();
+      if (r) {
+        form.elements['recipe_name'].value = r.recipe_name;
+        form.elements['recipe_description'].value = r.recipe_description || '';
+        form.elements['is_active'].value = r.is_active || 'Y';
+      }
+      document.getElementById('recipe-list-panel').classList.add('hidden');
+      document.getElementById('recipe-detail-panel').classList.remove('hidden');
+      await loadRecipeLines(id);
+    }
+
+    function closeRecipeDetail() {
+      currentRecipeId = null;
+      document.getElementById('recipe-detail-panel').classList.add('hidden');
+      document.getElementById('recipe-list-panel').classList.remove('hidden');
+    }
+
+    async function submitRecipeHeader(e) {
+      e.preventDefault();
+      const data = {};
+      data.recipe_name = e.target.elements['recipe_name'].value.trim();
+      const desc = e.target.elements['recipe_description'].value.trim();
+      if (desc) data.recipe_description = desc;
+      data.is_active = e.target.elements['is_active'].value;
+      try {
+        if (currentRecipeId) {
+          await api('PATCH', '/recipe?recipe_id=eq.' + currentRecipeId, data);
+          toast('Recipe saved');
+        } else {
+          const rows = await api('POST', '/recipe', data);
+          currentRecipeId = rows[0].recipe_id;
+          toast('Recipe created');
+        }
+        await loadRecipes();
+        await openRecipeDetail(currentRecipeId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteRecipe() {
+      if (!confirm('Delete this recipe and all its steps?')) return;
+      try {
+        await api('DELETE', '/recipe_line?recipe_id=eq.' + currentRecipeId);
+        await api('DELETE', '/recipe?recipe_id=eq.' + currentRecipeId);
+        toast('Recipe deleted');
+        closeRecipeDetail();
+        await loadRecipes();
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function loadRecipeLines(recipeId) {
+      const w = document.getElementById('recipe-lines-wrap');
+      try {
+        const lines = await api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id');
+        renderRecipeLines(lines);
+      } catch(e) {
+        w.innerHTML = '<div style="color:#fca5a5;padding:16px">Failed to load steps: ' + e.message + '</div>';
+      }
+    }
+
+    function renderRecipeLines(lines) {
+      const w = document.getElementById('recipe-lines-wrap');
+      if (!lines.length) { w.innerHTML = '<div class="empty">No steps yet. Add the first step above.</div>'; return; }
+      const lightBadge = lt => {
+        const colors = { UV:'#312e81:#a5b4fc', BLUE:'#1e3a5f:#93c5fd', RED:'#450a0a:#fca5a5', DARK:'#1e293b:#94a3b8' };
+        const [bg, fg] = (colors[lt] || '#1e293b:#94a3b8').split(':');
+        return '<span class="badge" style="background:' + bg + ';color:' + fg + '">' + esc(lt) + '</span>';
+      };
+      w.innerHTML = '<table class="tbl"><thead><tr>'
+        + '<th>#</th><th>Name</th><th>Cycles</th><th>Light</th><th>Light ON/OFF (min)</th>'
+        + '<th>Air Temp °C</th><th>CO₂ ppm</th><th>Humidity %</th><th></th>'
+        + '</tr></thead><tbody>'
+        + lines.map(l => '<tr>'
+          + '<td><strong>' + l.recipe_item_seq_id + '</strong></td>'
+          + '<td>' + esc(l.recipe_item_seq_name) + '</td>'
+          + '<td>' + l.cycle_number + '</td>'
+          + '<td>' + lightBadge(l.light_type) + '</td>'
+          + '<td>' + l.light_on_minutes + ' / ' + l.light_off_minutes + '</td>'
+          + '<td>' + l.air_temperature_lower_limit + '–' + l.air_temperature_upper_limit + '</td>'
+          + '<td>' + l.co2_lower_limit + '–' + l.co2_upper_limit + '</td>'
+          + '<td>' + l.hr_lower_limit + '–' + l.hr_upper_limit + '</td>'
+          + '<td><button class="btn btn-ghost btn-sm" onclick="openRecipeLineModal(' + l.recipe_item_seq_id + ')">Edit</button></td>'
+          + '</tr>').join('')
+        + '</tbody></table>';
+    }
+
+    function openRecipeLineModal(seqId) {
+      recipeLineModal = { recipeId: currentRecipeId, seqId };
+      const form = document.getElementById('rline-form');
+      form.reset();
+      document.getElementById('rline-modal-title').textContent = seqId ? 'Edit Step' : 'Add Step';
+      document.getElementById('rline-del-btn').classList.toggle('hidden', !seqId);
+      if (seqId) {
+        api('GET', '/recipe_line?recipe_id=eq.' + currentRecipeId + '&recipe_item_seq_id=eq.' + seqId).then(rows => {
+          const l = rows[0];
+          if (!l) return;
+          ['recipe_item_seq_id','recipe_item_seq_name','cycle_number','light_type',
+           'light_on_minutes','light_off_minutes','air_temperature_lower_limit',
+           'air_temperature_upper_limit','co2_lower_limit','co2_upper_limit',
+           'hr_lower_limit','hr_upper_limit','substrate_temperature_lower_limit',
+           'substrate_temperature_upper_limit','notes'].forEach(k => {
+            const el = form.elements[k]; if (el && l[k] != null) el.value = l[k];
+          });
+        });
+      } else {
+        // Auto-suggest next seq id
+        const w = document.getElementById('recipe-lines-wrap');
+        const rows = w.querySelectorAll('tbody tr');
+        form.elements['recipe_item_seq_id'].value = rows.length + 1;
+      }
+      document.getElementById('rline-modal-bg').classList.add('open');
+    }
+
+    function closeRecipeLineModal() { document.getElementById('rline-modal-bg').classList.remove('open'); }
+
+    async function submitRecipeLineForm(e) {
+      e.preventDefault();
+      const ints = ['recipe_item_seq_id','cycle_number','light_on_minutes','light_off_minutes',
+                    'air_temperature_lower_limit','air_temperature_upper_limit',
+                    'co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit',
+                    'substrate_temperature_lower_limit','substrate_temperature_upper_limit'];
+      const data = formData(e.target, [], ints);
+      data.recipe_id = recipeLineModal.recipeId;
+      try {
+        if (recipeLineModal.seqId) {
+          await api('PATCH',
+            '/recipe_line?recipe_id=eq.' + recipeLineModal.recipeId + '&recipe_item_seq_id=eq.' + recipeLineModal.seqId,
+            data);
+          toast('Step updated');
+        } else {
+          await api('POST', '/recipe_line', data);
+          toast('Step added');
+        }
+        closeRecipeLineModal();
+        await loadRecipeLines(recipeLineModal.recipeId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    async function deleteRecipeLine() {
+      if (!confirm('Delete this step?')) return;
+      try {
+        await api('DELETE',
+          '/recipe_line?recipe_id=eq.' + recipeLineModal.recipeId + '&recipe_item_seq_id=eq.' + recipeLineModal.seqId);
+        toast('Step deleted');
+        closeRecipeLineModal();
+        await loadRecipeLines(recipeLineModal.recipeId);
+      } catch(err) { toast(err.message, false); }
+    }
+
+    // ── Recipe Import / Export ────────────────────────────────
+    const PLATFORM_API = '/platform-api/';
+
+    async function buildRecipePayload(recipeId) {
+      const [recipeRows, lines] = await Promise.all([
+        api('GET', '/recipe?recipe_id=eq.' + recipeId),
+        api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id')
+      ]);
+      const r = recipeRows[0];
+      if (!r) throw new Error('Recipe not found');
+      const fields = ['recipe_item_seq_id','recipe_item_seq_name','cycle_number',
+        'light_type','light_on_minutes','light_off_minutes',
+        'air_temperature_lower_limit','air_temperature_upper_limit',
+        'co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit',
+        'substrate_temperature_lower_limit','substrate_temperature_upper_limit','notes'];
+      return {
+        recipe_name: r.recipe_name,
+        recipe_description: r.recipe_description || null,
+        steps: lines.map(l => {
+          const s = {};
+          fields.forEach(k => { if (l[k] != null) s[k] = l[k]; });
+          return s;
+        })
+      };
+    }
+
+    async function exportRecipe(recipeId, target) {
+      try {
+        const payload = await buildRecipePayload(recipeId);
+        const json = JSON.stringify(payload, null, 2);
+        if (target === 'local') {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = payload.recipe_name.replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+          a.click();
+          URL.createObjectURL(a.href);
+          toast('Downloaded "' + payload.recipe_name + '"');
+        } else {
+          const fname = payload.recipe_name.replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+          const chk = await fetch(PLATFORM_API + encodeURIComponent(fname));
+          if (chk.ok && !confirm('"' + fname + '" already exists in the platform library.\nOverwrite?')) return;
+          const r = await fetch(PLATFORM_API + encodeURIComponent(fname), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+            body: json
+          });
+          if (!r.ok) throw new Error('Server error ' + r.status);
+          toast('Saved "' + fname + '" to platform library');
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    async function importPayload(payload) {
+      if (!payload.recipe_name) throw new Error('JSON missing recipe_name');
+      if (!Array.isArray(payload.steps)) throw new Error('JSON missing steps array');
+      const required = ['recipe_item_seq_id','recipe_item_seq_name','cycle_number','light_type',
+        'light_on_minutes','light_off_minutes','air_temperature_lower_limit',
+        'air_temperature_upper_limit','co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit'];
+      for (const step of payload.steps) {
+        for (const f of required) {
+          if (step[f] == null) throw new Error('Step ' + (step.recipe_item_seq_id || '?') + ' missing field: ' + f);
+        }
+      }
+      const rows = await api('POST', '/recipe', {
+        recipe_name: payload.recipe_name,
+        recipe_description: payload.recipe_description || null
+      });
+      const newId = rows[0].recipe_id;
+      if (payload.steps.length) {
+        const sorted = [...payload.steps].sort((a, b) => a.recipe_item_seq_id - b.recipe_item_seq_id);
+        await api('POST', '/recipe_line', sorted.map(s => ({ ...s, recipe_id: newId })));
+      }
+      return newId;
+    }
+
+    async function importRecipe(event) {
+      const file = event.target.files[0];
+      event.target.value = '';
+      if (!file) return;
+      let payload;
+      try { payload = JSON.parse(await file.text()); }
+      catch(_) { toast('Invalid JSON file', false); return; }
+      try {
+        const newId = await importPayload(payload);
+        toast('Imported "' + payload.recipe_name + '" (' + payload.steps.length + ' steps)');
+        await loadRecipes();
+        await openRecipeDetail(newId);
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+    // ── Copy Recipe ───────────────────────────────────────────
+    async function copyRecipe() { await copyRecipeById(currentRecipeId); }
+
+    async function copyRecipeById(recipeId) {
+      const src = recipes.find(r => r.recipe_id === recipeId);
+      if (!src) return;
+      const newName = prompt('Copy recipe as:', src.recipe_name + ' (copy)');
+      if (!newName || !newName.trim()) return;
+      try {
+        const lines = await api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id');
+        const rows = await api('POST', '/recipe', {
+          recipe_name: newName.trim(),
+          recipe_description: src.recipe_description || null
+        });
+        const newId = rows[0].recipe_id;
+        if (lines.length) {
+          const fields = ['recipe_item_seq_id','recipe_item_seq_name','cycle_number',
+            'light_type','light_on_minutes','light_off_minutes',
+            'air_temperature_lower_limit','air_temperature_upper_limit',
+            'co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit',
+            'substrate_temperature_lower_limit','substrate_temperature_upper_limit','notes'];
+          await api('POST', '/recipe_line', lines.map(l => {
+            const s = { recipe_id: newId };
+            fields.forEach(k => { if (l[k] != null) s[k] = l[k]; });
+            return s;
+          }));
+        }
+        toast('Copied as "' + newName.trim() + '"');
+        await loadRecipes();
+        await openRecipeDetail(newId);
+      } catch(e) { toast('Copy failed: ' + e.message, false); }
+    }
+
+    // ── Import / Export choice modals ────────────────────────
+    function openExportChoiceFor(id) { currentRecipeId = id; openExportChoice(); }
+    function openImportChoice()    { document.getElementById('import-choice-bg').classList.add('open'); }
+    function closeImportChoice()   { document.getElementById('import-choice-bg').classList.remove('open'); }
+    function openExportChoice()    { document.getElementById('export-choice-bg').classList.add('open'); }
+    function closeExportChoice()   { document.getElementById('export-choice-bg').classList.remove('open'); }
+    function openExportAllChoice() { document.getElementById('export-all-choice-bg').classList.add('open'); }
+    function closeExportAllChoice(){ document.getElementById('export-all-choice-bg').classList.remove('open'); }
+
+    async function exportAllRecipes(target) {
+      if (!recipes || recipes.length === 0) { toast('No recipes to export', false); return; }
+      try {
+        toast('Exporting ' + recipes.length + ' recipe' + (recipes.length !== 1 ? 's' : '') + '…');
+        const payloads = await Promise.all(recipes.map(r => buildRecipePayload(r.recipe_id)));
+        if (target === 'local') {
+          const json = JSON.stringify(payloads, null, 2);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = 'recipes-all.json';
+          a.click();
+          toast('Downloaded ' + payloads.length + ' recipe' + (payloads.length !== 1 ? 's' : ''));
+        } else {
+          // Check which files already exist in the library
+          const entries = await Promise.all(payloads.map(async payload => {
+            const fname = payload.recipe_name.replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+            const chk   = await fetch(PLATFORM_API + encodeURIComponent(fname));
+            return { payload, fname, exists: chk.ok };
+          }));
+          const existing = entries.filter(e => e.exists);
+          let overwriteExisting = false;
+          if (existing.length > 0) {
+            const names = existing.map(e => '  • ' + e.fname).join('\n');
+            overwriteExisting = confirm(
+              existing.length + ' recipe' + (existing.length !== 1 ? 's' : '') +
+              ' already exist' + (existing.length === 1 ? 's' : '') + ' in the platform library:\n\n' +
+              names + '\n\nOverwrite ' + (existing.length === 1 ? 'it' : 'them') + '?'
+            );
+          }
+          let saved = 0, skipped = 0;
+          for (const { payload, fname, exists } of entries) {
+            if (exists && !overwriteExisting) { skipped++; continue; }
+            const json = JSON.stringify(payload, null, 2);
+            const r = await fetch(PLATFORM_API + encodeURIComponent(fname), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+              body: json
+            });
+            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            saved++;
+          }
+          const msg = 'Saved ' + saved + ' to platform library' + (skipped ? ' (' + skipped + ' skipped)' : '');
+          toast(msg);
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    // ── Platform Library ──────────────────────────────────────
+    async function openPlatformLibrary() {
+      document.getElementById('platform-lib-bg').classList.add('open');
+      await refreshPlatformLibrary();
+    }
+
+    function closePlatformLibrary() {
+      document.getElementById('platform-lib-bg').classList.remove('open');
+    }
+
+    async function refreshPlatformLibrary() {
+      const el = document.getElementById('platform-lib-content');
+      el.innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+      try {
+        const r = await fetch(PLATFORM_API);
+        if (!r.ok) throw new Error('Status ' + r.status);
+        const files = await r.json();
+        if (!files.length) {
+          el.innerHTML = '<div class="empty" style="padding:20px">No recipes in platform library yet.<br>Use "↑ Save to Platform" from a recipe to add one.</div>';
+          return;
+        }
+        el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:0 4px">'
+          + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem;color:#94a3b8">'
+          + '<input type="checkbox" id="recipe-lib-all" onchange="toggleAllRecipeLib(this.checked)"> Select all</label>'
+          + '<button class="btn btn-primary btn-sm" id="recipe-lib-import-btn" onclick="importSelectedRecipes()" style="margin-left:auto">Import Selected</button>'
+          + '</div>'
+          + '<table class="tbl"><thead><tr>'
+          + '<th style="width:32px"><input type="checkbox" id="recipe-lib-all2" onchange="toggleAllRecipeLib(this.checked)"></th>'
+          + '<th>File</th></tr></thead><tbody>'
+          + files.map(f => '<tr>'
+            + '<td><input type="checkbox" class="recipe-lib-chk" value="' + esc(f) + '"></td>'
+            + '<td>' + esc(f) + '</td>'
+            + '</tr>').join('')
+          + '</tbody></table>';
+      } catch(e) {
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+      }
+    }
+
+    function toggleAllRecipeLib(checked) {
+      document.querySelectorAll('.recipe-lib-chk').forEach(cb => cb.checked = checked);
+      const other = checked ? document.getElementById('recipe-lib-all2') : document.getElementById('recipe-lib-all');
+      if (other) other.checked = checked;
+    }
+
+    async function importSelectedRecipes() {
+      const checked = [...document.querySelectorAll('.recipe-lib-chk:checked')].map(cb => cb.value);
+      if (!checked.length) { toast('Select at least one recipe', false); return; }
+      let ok = 0, skip = 0, lastId = null;
+      for (const fname of checked) {
+        try {
+          const r = await fetch(PLATFORM_API + encodeURIComponent(fname));
+          if (!r.ok) throw new Error('Status ' + r.status);
+          const payload = await r.json();
+          const existing = recipes.find(rx => rx.recipe_name === payload.recipe_name);
+          if (existing) {
+            payload.recipe_name = payload.recipe_name + ' (copy)';
+          }
+          lastId = await importPayload(payload);
+          ok++;
+        } catch(e) { skip++; }
+      }
+      await loadRecipes();
+      closePlatformLibrary();
+      toast('Imported ' + ok + (skip ? ', ' + skip + ' failed' : '') + ' recipe' + (ok !== 1 ? 's' : ''));
+      if (lastId && ok === 1) await openRecipeDetail(lastId);
+    }
+
+    async function importFromPlatform(fname) {
+      try {
+        const r = await fetch(PLATFORM_API + encodeURIComponent(fname));
+        if (!r.ok) throw new Error('Status ' + r.status);
+        const payload = await r.json();
+        const existing = recipes.find(rx => rx.recipe_name === payload.recipe_name);
+        if (existing) {
+          const newName = prompt(
+            '"' + payload.recipe_name + '" already exists in the database.\nImport as a copy with a different name:',
+            payload.recipe_name + ' (copy)'
+          );
+          if (!newName) return;
+          payload.recipe_name = newName.trim();
+        }
+        const newId = await importPayload(payload);
+        toast('Imported "' + payload.recipe_name + '" (' + payload.steps.length + ' steps)');
+        closePlatformLibrary();
+        await loadRecipes();
+        await openRecipeDetail(newId);
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+
+    // ── Location Import / Export ─────────────────────────────
+    const LOC_API = '/platform-api/locations/';
+    let currentLocExportId = null;
+
+    function openLocImportChoice()     { document.getElementById('loc-import-choice-bg').classList.add('open'); }
+    function closeLocImportChoice()    { document.getElementById('loc-import-choice-bg').classList.remove('open'); }
+    function openLocExportChoice()     { document.getElementById('loc-export-choice-bg').classList.add('open'); }
+    function closeLocExportChoice()    { document.getElementById('loc-export-choice-bg').classList.remove('open'); }
+    function openExportAllLocsChoice() { document.getElementById('loc-export-all-choice-bg').classList.add('open'); }
+    function closeExportAllLocsChoice(){ document.getElementById('loc-export-all-choice-bg').classList.remove('open'); }
+    function openLocExportChoiceFor(id){ currentLocExportId = id; openLocExportChoice(); }
+
+    function openLocPlatformLibrary()  {
+      document.getElementById('loc-platform-lib-bg').classList.add('open');
+      loadLocPlatformLibrary();
+    }
+    function closeLocPlatformLibrary() { document.getElementById('loc-platform-lib-bg').classList.remove('open'); }
+
+    async function loadLocPlatformLibrary() {
+      const el = document.getElementById('loc-platform-lib-content');
+      try {
+        const r = await fetch(LOC_API);
+        if (!r.ok) throw new Error('Status ' + r.status);
+        const files = await r.json();
+        if (!files.length) {
+          el.innerHTML = '<div class="empty" style="padding:20px">No locations in platform library yet.<br>Use "↓ Export" from a location row to add one.</div>';
+          return;
+        }
+        el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:0 4px">'
+          + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem;color:#94a3b8">'
+          + '<input type="checkbox" id="loc-lib-all" onchange="toggleAllLocLib(this.checked)"> Select all</label></div>'
+          + '<table class="tbl"><thead><tr><th></th><th>File</th></tr></thead><tbody>'
+          + files.map(f => '<tr>'
+            + '<td><input type="checkbox" class="loc-lib-chk" value="' + esc(f) + '"></td>'
+            + '<td>' + esc(f) + '</td>'
+            + '</tr>').join('')
+          + '</tbody></table>';
+      } catch(e) {
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+      }
+    }
+
+    function toggleAllLocLib(checked) {
+      document.querySelectorAll('.loc-lib-chk').forEach(cb => cb.checked = checked);
+    }
+
+    async function importSelectedLocs() {
+      const selected = [...document.querySelectorAll('.loc-lib-chk:checked')].map(cb => cb.value);
+      if (!selected.length) { toast('Select at least one file', false); return; }
+      let imported = 0;
+      try {
+        for (const fname of selected) {
+          const r = await fetch(LOC_API + encodeURIComponent(fname));
+          if (!r.ok) throw new Error('Could not fetch ' + fname);
+          const payload = await r.json();
+          const payloads = Array.isArray(payload) ? payload : [payload];
+          for (const p of payloads) await importLocPayload(p);
+          imported++;
+        }
+        toast('Imported ' + imported + ' location' + (imported !== 1 ? 's' : ''));
+        closeLocPlatformLibrary();
+        await loadLocations();
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+    async function importLocFile(event) {
+      const file = event.target.files[0];
+      event.target.value = '';
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const payloads = Array.isArray(data) ? data : [data];
+        for (const p of payloads) await importLocPayload(p);
+        toast('Imported ' + payloads.length + ' location' + (payloads.length !== 1 ? 's' : ''));
+        await loadLocations();
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+    async function importLocPayload(payload) {
+      if (!payload.name) throw new Error('JSON missing name');
+      const fields = ['name','address','contact_person','contact_info','latitude','longitude','description','is_active'];
+      const d = {};
+      fields.forEach(k => { if (payload[k] != null) d[k] = payload[k]; });
+      await api('POST', '/cea_location', d);
+    }
+
+    function buildLocPayload(locId) {
+      const loc = locations.find(l => l.location_id === locId);
+      if (!loc) throw new Error('Location not found');
+      const fields = ['name','address','contact_person','contact_info','latitude','longitude','description','is_active'];
+      const payload = {};
+      fields.forEach(k => { if (loc[k] != null) payload[k] = loc[k]; });
+      return payload;
+    }
+
+    async function exportLoc(locId, target) {
+      try {
+        const payload = buildLocPayload(locId);
+        const json = JSON.stringify(payload, null, 2);
+        const fname = (payload.name || 'location').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+        if (target === 'local') {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = fname;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          toast('Downloaded location "' + payload.name + '"');
+        } else {
+          const chk = await fetch(LOC_API + encodeURIComponent(fname));
+          if (chk.ok && !confirm('"' + fname + '" already exists in the platform library.\nOverwrite?')) return;
+          const r = await fetch(LOC_API + encodeURIComponent(fname), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+            body: json
+          });
+          if (!r.ok) throw new Error('Server error ' + r.status);
+          toast('Saved "' + fname + '" to platform location library');
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    async function exportAllLocs(target) {
+      try {
+        if (!locations.length) { toast('No locations to export', false); return; }
+        const payloads = locations.map(l => buildLocPayload(l.location_id));
+        if (target === 'local') {
+          const json = JSON.stringify(payloads, null, 2);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = 'locations-all.json';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          toast('Downloaded ' + payloads.length + ' location' + (payloads.length !== 1 ? 's' : ''));
+        } else {
+          const entries = await Promise.all(payloads.map(async payload => {
+            const fname = (payload.name || 'location').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+            const chk   = await fetch(LOC_API + encodeURIComponent(fname));
+            return { payload, fname, exists: chk.ok };
+          }));
+          const existing = entries.filter(e => e.exists);
+          let overwriteExisting = false;
+          if (existing.length > 0) {
+            const names = existing.map(e => '  • ' + e.fname).join('\n');
+            overwriteExisting = confirm(
+              existing.length + ' location' + (existing.length !== 1 ? 's' : '') +
+              ' already exist' + (existing.length === 1 ? 's' : '') + ' in the platform library:\n\n' +
+              names + '\n\nOverwrite ' + (existing.length === 1 ? 'it' : 'them') + '?'
+            );
+          }
+          let saved = 0, skipped = 0;
+          for (const { payload, fname, exists } of entries) {
+            if (exists && !overwriteExisting) { skipped++; continue; }
+            const json = JSON.stringify(payload, null, 2);
+            const r = await fetch(LOC_API + encodeURIComponent(fname), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+              body: json
+            });
+            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            saved++;
+          }
+          const msg = 'Saved ' + saved + ' to platform location library' + (skipped ? ' (' + skipped + ' skipped)' : '');
+          toast(msg);
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    // ── Unit Import / Export ──────────────────────────────────
+    const UNIT_API = '/platform-api/units/';
+    let currentUnitExportId = null;
+
+    function openUnitImportChoice()     { document.getElementById('unit-import-choice-bg').classList.add('open'); }
+    function closeUnitImportChoice()    { document.getElementById('unit-import-choice-bg').classList.remove('open'); }
+    function openUnitExportChoice()     { document.getElementById('unit-export-choice-bg').classList.add('open'); }
+    function closeUnitExportChoice()    { document.getElementById('unit-export-choice-bg').classList.remove('open'); }
+    function openExportAllUnitsChoice() { document.getElementById('unit-export-all-choice-bg').classList.add('open'); }
+    function closeExportAllUnitsChoice(){ document.getElementById('unit-export-all-choice-bg').classList.remove('open'); }
+    function openUnitExportChoiceFor(id){ currentUnitExportId = id; openUnitExportChoice(); }
+
+    function openUnitPlatformLibrary()  {
+      document.getElementById('unit-platform-lib-bg').classList.add('open');
+      loadUnitPlatformLibrary();
+    }
+    function closeUnitPlatformLibrary() { document.getElementById('unit-platform-lib-bg').classList.remove('open'); }
+
+    async function loadUnitPlatformLibrary() {
+      const el = document.getElementById('unit-platform-lib-content');
+      try {
+        const r = await fetch(UNIT_API);
+        if (!r.ok) throw new Error('Status ' + r.status);
+        const files = await r.json();
+        if (!files.length) {
+          el.innerHTML = '<div class="empty" style="padding:20px">No units in platform library yet.<br>Use "↓ Export" from a unit row to add one.</div>';
+          return;
+        }
+        el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:0 4px">'
+          + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem;color:#94a3b8">'
+          + '<input type="checkbox" id="unit-lib-all" onchange="toggleAllUnitLib(this.checked)"> Select all</label></div>'
+          + '<table class="tbl"><thead><tr><th></th><th>File</th></tr></thead><tbody>'
+          + files.map(f => '<tr>'
+            + '<td><input type="checkbox" class="unit-lib-chk" value="' + esc(f) + '"></td>'
+            + '<td>' + esc(f) + '</td>'
+            + '</tr>').join('')
+          + '</tbody></table>';
+      } catch(e) {
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+      }
+    }
+
+    function toggleAllUnitLib(checked) {
+      document.querySelectorAll('.unit-lib-chk').forEach(cb => cb.checked = checked);
+    }
+
+    async function importSelectedUnits() {
+      const selected = [...document.querySelectorAll('.unit-lib-chk:checked')].map(cb => cb.value);
+      if (!selected.length) { toast('Select at least one file', false); return; }
+      let imported = 0;
+      try {
+        for (const fname of selected) {
+          const r = await fetch(UNIT_API + encodeURIComponent(fname));
+          if (!r.ok) throw new Error('Could not fetch ' + fname);
+          const payload = await r.json();
+          if (Array.isArray(payload)) {
+            for (const p of payload) await importUnitPayload(p);
+          } else {
+            await importUnitPayload(payload);
+          }
+          imported++;
+        }
+        toast('Imported ' + imported + ' unit' + (imported !== 1 ? 's' : ''));
+        closeUnitPlatformLibrary();
+        await loadUnits();
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+    async function importUnitFile(event) {
+      const file = event.target.files[0];
+      event.target.value = '';
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const payloads = Array.isArray(data) ? data : [data];
+        for (const p of payloads) await importUnitPayload(p);
+        toast('Imported ' + payloads.length + ' unit' + (payloads.length !== 1 ? 's' : ''));
+        await loadUnits();
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+    async function importUnitPayload(payload) {
+      if (!payload.unit_code) throw new Error('JSON missing unit_code');
+      // Resolve location by name
+      let locationId = null;
+      if (payload.location_name) {
+        if (!locations.length) await loadLocations();
+        const loc = locations.find(l => l.name === payload.location_name);
+        if (loc) locationId = loc.location_id;
+      }
+      const unitFields = ['unit_code','unit_type','area','height','description','is_active'];
+      const d = {};
+      unitFields.forEach(k => { if (payload[k] != null) d[k] = payload[k]; });
+      if (locationId) d.location_id = locationId;
+      const resp = await api('POST', '/cea_unit', d);
+      const newId = resp[0]?.unit_id;
+      if (!newId) throw new Error('Could not get new unit ID');
+      if (Array.isArray(payload.zones) && payload.zones.length) {
+        for (const z of payload.zones) {
+          await api('POST', '/cea_zone', { unit_id: newId, zone_code: z.zone_code, zone_description: z.zone_description || null, is_active: z.is_active || 'Y' });
+        }
+      }
+      return newId;
+    }
+
+    async function buildUnitPayload(unitId) {
+      const [unitRows, zones] = await Promise.all([
+        api('GET', '/cea_unit?unit_id=eq.' + unitId),
+        api('GET', '/cea_zone?unit_id=eq.' + unitId + '&order=zone_code')
+      ]);
+      const u = unitRows[0];
+      if (!u) throw new Error('Unit not found');
+      const unitFields = ['unit_code','unit_type','area','height','description','is_active'];
+      const payload = {};
+      unitFields.forEach(k => { if (u[k] != null) payload[k] = u[k]; });
+      payload.location_name = locName(u.location_id);
+      payload.zones = zones.map(z => {
+        const zf = {};
+        ['zone_code','zone_description','is_active'].forEach(k => { if (z[k] != null) zf[k] = z[k]; });
+        return zf;
+      });
+      return payload;
+    }
+
+    async function exportUnit(unitId, target) {
+      try {
+        const payload = await buildUnitPayload(unitId);
+        const json = JSON.stringify(payload, null, 2);
+        const fname = (payload.unit_code || 'unit').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+        if (target === 'local') {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = fname;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          toast('Downloaded unit "' + payload.unit_code + '"');
+        } else {
+          const chk = await fetch(UNIT_API + encodeURIComponent(fname));
+          if (chk.ok && !confirm('"' + fname + '" already exists in the platform library.\nOverwrite?')) return;
+          const r = await fetch(UNIT_API + encodeURIComponent(fname), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+            body: json
+          });
+          if (!r.ok) throw new Error('Server error ' + r.status);
+          toast('Saved "' + fname + '" to platform unit library');
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    async function exportAllUnits(target) {
+      try {
+        const unitRows = await api('GET', '/cea_unit?order=unit_code');
+        if (!unitRows || unitRows.length === 0) { toast('No units to export', false); return; }
+        toast('Exporting ' + unitRows.length + ' unit' + (unitRows.length !== 1 ? 's' : '') + '…');
+        const payloads = await Promise.all(unitRows.map(u => buildUnitPayload(u.unit_id)));
+        if (target === 'local') {
+          const json = JSON.stringify(payloads, null, 2);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = 'units-all.json';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          toast('Downloaded ' + payloads.length + ' unit' + (payloads.length !== 1 ? 's' : ''));
+        } else {
+          const entries = await Promise.all(payloads.map(async payload => {
+            const fname = (payload.unit_code || 'unit').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+            const chk   = await fetch(UNIT_API + encodeURIComponent(fname));
+            return { payload, fname, exists: chk.ok };
+          }));
+          const existing = entries.filter(e => e.exists);
+          let overwriteExisting = false;
+          if (existing.length > 0) {
+            const names = existing.map(e => '  • ' + e.fname).join('\n');
+            overwriteExisting = confirm(
+              existing.length + ' unit' + (existing.length !== 1 ? 's' : '') +
+              ' already exist' + (existing.length === 1 ? 's' : '') + ' in the platform library:\n\n' +
+              names + '\n\nOverwrite ' + (existing.length === 1 ? 'it' : 'them') + '?'
+            );
+          }
+          let saved = 0, skipped = 0;
+          for (const { payload, fname, exists } of entries) {
+            if (exists && !overwriteExisting) { skipped++; continue; }
+            const json = JSON.stringify(payload, null, 2);
+            const r = await fetch(UNIT_API + encodeURIComponent(fname), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+              body: json
+            });
+            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            saved++;
+          }
+          const msg = 'Saved ' + saved + ' to platform unit library' + (skipped ? ' (' + skipped + ' skipped)' : '');
+          toast(msg);
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    // ── Device Import / Export ────────────────────────────────
+    const DEVICE_API = '/platform-api/devices/';
+    let currentDeviceExportId = null;
+
+    function openDeviceImportChoice()  { document.getElementById('dev-import-choice-bg').classList.add('open'); }
+    function closeDeviceImportChoice() { document.getElementById('dev-import-choice-bg').classList.remove('open'); }
+    function openDeviceExportChoiceFor(deviceId) { currentDeviceExportId = deviceId; document.getElementById('dev-export-choice-bg').classList.add('open'); }
+    function closeDeviceExportChoice() { document.getElementById('dev-export-choice-bg').classList.remove('open'); }
+    async function openDevicePlatformLibrary() {
+      document.getElementById('dev-platform-lib-bg').classList.add('open');
+      await refreshDevicePlatformLibrary();
+    }
+    function closeDevicePlatformLibrary() { document.getElementById('dev-platform-lib-bg').classList.remove('open'); }
+
+    async function buildDevicePayload(deviceId) {
+      const [devRows, comps] = await Promise.all([
+        api('GET', '/device?device_id=eq.' + deviceId),
+        api('GET', '/component?device_id=eq.' + deviceId)
+      ]);
+      const d = devRows[0];
+      if (!d) throw new Error('Device not found');
+      const devFields = ['serial_number','device_type','model','manufacturer','dns_name','connection_type','installation_date','is_active'];
+      const payload = {};
+      devFields.forEach(k => { if (d[k] != null) payload[k] = d[k]; });
+      payload.components = comps.map(c => {
+        const cf = {};
+        ['component_type','model','manufacturer','is_active','parameters'].forEach(k => { if (c[k] != null) cf[k] = c[k]; });
+        return cf;
+      });
+      return payload;
+    }
+
+    async function exportDevice(deviceId, target) {
+      try {
+        const payload = await buildDevicePayload(deviceId);
+        const json = JSON.stringify(payload, null, 2);
+        if (target === 'local') {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = (payload.dns_name || payload.serial_number || 'device').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          toast('Downloaded device "' + (payload.serial_number || deviceId) + '"');
+        } else {
+          const fname = (payload.dns_name || payload.serial_number || 'device').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+          const chk = await fetch(DEVICE_API + encodeURIComponent(fname));
+          if (chk.ok && !confirm('"' + fname + '" already exists in the platform library.\nOverwrite?')) return;
+          const r = await fetch(DEVICE_API + encodeURIComponent(fname), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+            body: json
+          });
+          if (!r.ok) throw new Error('Server error ' + r.status);
+          toast('Saved "' + fname + '" to platform device library');
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    function openExportAllDevicesChoice()  { document.getElementById('dev-export-all-choice-bg').classList.add('open'); }
+    function closeExportAllDevicesChoice() { document.getElementById('dev-export-all-choice-bg').classList.remove('open'); }
+
+    async function exportAllDevices(target) {
+      try {
+        const deviceRows = await api('GET', '/device?order=serial_number');
+        if (!deviceRows || deviceRows.length === 0) { toast('No devices to export', false); return; }
+        toast('Exporting ' + deviceRows.length + ' device' + (deviceRows.length !== 1 ? 's' : '') + '…');
+        const payloads = await Promise.all(deviceRows.map(d => buildDevicePayload(d.device_id)));
+        if (target === 'local') {
+          const json = JSON.stringify(payloads, null, 2);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+          a.download = 'devices-all.json';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          toast('Downloaded ' + payloads.length + ' device' + (payloads.length !== 1 ? 's' : ''));
+        } else {
+          // Check which files already exist in the library
+          const entries = await Promise.all(payloads.map(async payload => {
+            const fname = (payload.dns_name || payload.serial_number || 'device').replace(/[^a-z0-9_\-]/gi, '_') + '.json';
+            const chk   = await fetch(DEVICE_API + encodeURIComponent(fname));
+            return { payload, fname, exists: chk.ok };
+          }));
+          const existing = entries.filter(e => e.exists);
+          let overwriteExisting = false;
+          if (existing.length > 0) {
+            const names = existing.map(e => '  • ' + e.fname).join('\n');
+            overwriteExisting = confirm(
+              existing.length + ' device' + (existing.length !== 1 ? 's' : '') +
+              ' already exist' + (existing.length === 1 ? 's' : '') + ' in the platform library:\n\n' +
+              names + '\n\nOverwrite ' + (existing.length === 1 ? 'it' : 'them') + '?'
+            );
+          }
+          let saved = 0, skipped = 0;
+          for (const { payload, fname, exists } of entries) {
+            if (exists && !overwriteExisting) { skipped++; continue; }
+            const json = JSON.stringify(payload, null, 2);
+            const r = await fetch(DEVICE_API + encodeURIComponent(fname), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
+              body: json
+            });
+            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            saved++;
+          }
+          const msg = 'Saved ' + saved + ' to platform device library' + (skipped ? ' (' + skipped + ' skipped)' : '');
+          toast(msg);
+        }
+      } catch(e) { toast('Export failed: ' + e.message, false); }
+    }
+
+    async function importDevicePayload(payload) {
+      if (!payload.serial_number) throw new Error('JSON missing serial_number');
+      const d = { serial_number: payload.serial_number };
+      ['device_type','model','manufacturer','dns_name','connection_type','installation_date','is_active'].forEach(k => {
+        if (payload[k] != null) d[k] = payload[k];
+      });
+      const resp = await api('POST', '/device', d);
+      const newId = resp[0]?.device_id ?? (await api('GET', '/device?serial_number=eq.' + encodeURIComponent(payload.serial_number) + '&order=device_id.desc&limit=1'))[0]?.device_id;
+      if (!newId) throw new Error('Could not get new device ID');
+      if (Array.isArray(payload.components) && payload.components.length) {
+        for (const c of payload.components) {
+          const cd = { ...c, device_id: newId };
+          await api('POST', '/component', cd);
+        }
+      }
+      return newId;
+    }
+
+    async function importDeviceFile(event) {
+      const file = event.target.files[0]; event.target.value = '';
+      if (!file) return;
+      try {
+        const payload = JSON.parse(await file.text());
+        const existing = await api('GET', '/device?serial_number=eq.' + encodeURIComponent(payload.serial_number));
+        if (existing.length) {
+          const newSN = prompt('"' + payload.serial_number + '" already exists.\nImport with a different serial number:', payload.serial_number + '-copy');
+          if (!newSN) return;
+          payload.serial_number = newSN.trim();
+        }
+        await importDevicePayload(payload);
+        toast('Imported device "' + payload.serial_number + '"');
+        await loadAllDevices();
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+    async function refreshDevicePlatformLibrary() {
+      const el = document.getElementById('dev-platform-lib-content');
+      el.innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+      try {
+        const r = await fetch(DEVICE_API);
+        if (!r.ok) throw new Error('Status ' + r.status);
+        const files = await r.json();
+        if (!files.length) {
+          el.innerHTML = '<div class="empty" style="padding:20px">No devices in platform library yet.<br>Use "↓ Export" → "Save to Platform" from a device row.</div>';
+          return;
+        }
+        el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:0 4px">'
+          + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem;color:#94a3b8">'
+          + '<input type="checkbox" id="dev-lib-all" onchange="toggleAllDeviceLib(this.checked)"> Select all</label>'
+          + '<button class="btn btn-primary btn-sm" id="dev-lib-import-btn" onclick="importSelectedDevices()" style="margin-left:auto">Import Selected</button>'
+          + '</div>'
+          + '<table class="tbl"><thead><tr>'
+          + '<th style="width:32px"><input type="checkbox" id="dev-lib-all2" onchange="toggleAllDeviceLib(this.checked)"></th>'
+          + '<th>File</th></tr></thead><tbody>'
+          + files.map(f => '<tr>'
+            + '<td><input type="checkbox" class="dev-lib-chk" value="' + esc(f) + '"></td>'
+            + '<td>' + esc(f) + '</td>'
+            + '</tr>').join('')
+          + '</tbody></table>';
+      } catch(e) {
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+      }
+    }
+
+    function toggleAllDeviceLib(checked) {
+      document.querySelectorAll('.dev-lib-chk').forEach(cb => cb.checked = checked);
+      const other = checked ? document.getElementById('dev-lib-all2') : document.getElementById('dev-lib-all');
+      if (other) other.checked = checked;
+    }
+
+    async function importSelectedDevices() {
+      const checked = [...document.querySelectorAll('.dev-lib-chk:checked')].map(cb => cb.value);
+      if (!checked.length) { toast('Select at least one device', false); return; }
+      let ok = 0, skip = 0, skipped = [];
+      for (const fname of checked) {
+        try {
+          const r = await fetch(DEVICE_API + encodeURIComponent(fname));
+          if (!r.ok) throw new Error('Status ' + r.status);
+          const payload = await r.json();
+          const existing = await api('GET', '/device?serial_number=eq.' + encodeURIComponent(payload.serial_number));
+          if (existing.length) { skip++; skipped.push(payload.serial_number); continue; }
+          await importDevicePayload(payload);
+          ok++;
+        } catch(e) { skip++; }
+      }
+      await loadAllDevices();
+      closeDevicePlatformLibrary();
+      let msg = 'Imported ' + ok + ' device' + (ok !== 1 ? 's' : '');
+      if (skipped.length) msg += ' — ' + skipped.length + ' skipped (already exist): ' + skipped.join(', ');
+      toast(msg, skip === 0 || ok > 0);
+    }
+
+    async function importDeviceFromPlatform(fname) {
+      try {
+        const r = await fetch(DEVICE_API + encodeURIComponent(fname));
+        if (!r.ok) throw new Error('Status ' + r.status);
+        const payload = await r.json();
+        const existing = await api('GET', '/device?serial_number=eq.' + encodeURIComponent(payload.serial_number));
+        if (existing.length) {
+          const newSN = prompt('"' + payload.serial_number + '" already exists.\nImport with a different serial number:', payload.serial_number + '-copy');
+          if (!newSN) return;
+          payload.serial_number = newSN.trim();
+        }
+        await importDevicePayload(payload);
+        toast('Imported device "' + payload.serial_number + '"');
+        closeDevicePlatformLibrary();
+        await loadAllDevices();
+      } catch(e) { toast('Import failed: ' + e.message, false); }
+    }
+
+
+    // ── Permission Matrix ─────────────────────────────────────
+    let permRecipes = [], permUnits = [], permAlgos = [];
+    let permMap = new Map(); // key "recipeId:unitId" -> {allowed, algorithm_id, algorithm_params}
+    let _permModalRecipeId = null, _permModalUnitId = null;
+
+    async function loadPermissionMatrix() {
+      const w = document.getElementById('security-table-wrap');
+      w.innerHTML = '<div class="empty">Loading…</div>';
+      try {
+        const [recs, units, perms, algos] = await Promise.all([
+          api('GET', '/recipe?order=recipe_name'),
+          api('GET', '/cea_unit?order=unit_code'),
+          api('GET', '/recipe_unit_permission'),
+          api('GET', '/control_algorithm?is_active=eq.Y&order=algorithm_id')
+        ]);
+        permRecipes = recs;
+        permUnits = units;
+        permAlgos = algos;
+        permMap = new Map(perms.map(p => [p.recipe_id + ':' + p.unit_id,
+          {allowed: p.allowed, algorithm_id: p.algorithm_id, algorithm_params: p.algorithm_params}]));
+        renderPermMatrix();
+      } catch(e) { w.innerHTML = '<div class="empty">Load failed: ' + e.message + '</div>'; }
+    }
+
+    function renderPermMatrix() {
+      const w = document.getElementById('security-table-wrap');
+      if (!permRecipes.length || !permUnits.length) {
+        w.innerHTML = '<div class="empty">No recipes or units defined.</div>';
+        return;
+      }
+      let html = '<table class="tbl" style="border-collapse:collapse">'
+        + '<thead><tr><th style="min-width:180px;position:sticky;left:0;background:#1e2532;z-index:2">Recipe</th>';
+      permUnits.forEach(u => {
+        const inactive = u.is_active !== 'Y';
+        html += '<th style="text-align:center;white-space:nowrap;min-width:100px'
+          + (inactive ? ';color:#475569' : '') + '" title="' + (inactive ? 'Inactive' : 'Active') + '">'
+          + '<span style="' + (inactive ? 'text-decoration:line-through;color:#475569' : '') + '">'
+          + esc(u.unit_code) + '</span></th>';
+      });
+      html += '</tr></thead><tbody>';
+
+      permRecipes.forEach(r => {
+        const recInactive = r.is_active !== 'Y';
+        html += '<tr style="' + (recInactive ? 'opacity:.45' : '') + '">'
+          + '<td style="font-weight:500;position:sticky;left:0;background:#1e2532;z-index:1'
+          + (recInactive ? ';text-decoration:line-through;color:#64748b' : '') + '">'
+          + esc(r.recipe_name)
+          + (recInactive ? ' <span style="font-size:.72rem;color:#ef4444">(inactive)</span>' : '')
+          + '</td>';
+        permUnits.forEach(u => {
+          const unitInactive = u.is_active !== 'Y';
+          const key = r.recipe_id + ':' + u.unit_id;
+          const perm = permMap.get(key) || {};
+          const allowed = perm.allowed === true;
+          const algoId = perm.algorithm_id;
+          const algoObj = algoId ? permAlgos.find(a => a.algorithm_id === algoId) : null;
+          const disabled = recInactive || unitInactive;
+          html += '<td style="text-align:center;padding:4px 2px">';
+          if (disabled) {
+            html += '<span style="color:#334155;font-size:1.1rem" title="' + (recInactive ? 'Recipe inactive' : 'Unit inactive') + '">—</span>';
+          } else if (allowed) {
+            html += '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+              + '<button onclick="openPermAlgoModal(' + r.recipe_id + ',' + u.unit_id + ')"'
+              + ' title="Allowed — click to edit algorithm" style="background:none;border:none;cursor:pointer;font-size:1.25rem;line-height:1;padding:2px 4px;border-radius:4px">'
+              + '<span style="color:#22c55e">✓</span></button>'
+              + '<span style="font-size:.68rem;color:' + (algoObj ? '#a78bfa' : '#475569') + ';white-space:nowrap">'
+              + (algoObj ? algoObj.algorithm_code : 'IF_THEN_ELSE') + '</span>'
+              + '</div>';
+          } else {
+            html += '<button onclick="grantPermission(' + r.recipe_id + ',' + u.unit_id + ')"'
+              + ' title="Not allowed — click to grant"'
+              + ' style="background:none;border:none;cursor:pointer;font-size:1.25rem;line-height:1;padding:2px 4px;border-radius:4px">'
+              + '<span style="color:#334155">○</span></button>';
+          }
+          html += '</td>';
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      w.innerHTML = html;
+    }
+
+    async function grantPermission(recipeId, unitId) {
+      const key = recipeId + ':' + unitId;
+      try {
+        await api('POST', '/recipe_unit_permission',
+          {recipe_id: recipeId, unit_id: unitId, allowed: true},
+          {'Prefer': 'resolution=merge-duplicates,return=minimal'});
+        permMap.set(key, {allowed: true, algorithm_id: null, algorithm_params: null});
+        renderPermMatrix();
+        openPermAlgoModal(recipeId, unitId);
+      } catch(e) { toast('Permission update failed: ' + e.message, false); }
+    }
+
+    async function revokePermission() {
+      const recipeId = _permModalRecipeId, unitId = _permModalUnitId;
+      if (!recipeId || !unitId) return;
+      const key = recipeId + ':' + unitId;
+      try {
+        await api('POST', '/recipe_unit_permission',
+          {recipe_id: recipeId, unit_id: unitId, allowed: false, algorithm_id: null, algorithm_params: null},
+          {'Prefer': 'resolution=merge-duplicates,return=minimal'});
+        permMap.set(key, {allowed: false, algorithm_id: null, algorithm_params: null});
+        closePermAlgoModal();
+        renderPermMatrix();
+      } catch(e) { toast('Revoke failed: ' + e.message, false); }
+    }
+
+    function openPermAlgoModal(recipeId, unitId) {
+      _permModalRecipeId = recipeId;
+      _permModalUnitId = unitId;
+      const recipe = permRecipes.find(r => r.recipe_id === recipeId);
+      const unit   = permUnits.find(u => u.unit_id === unitId);
+      document.getElementById('perm-algo-modal-title').textContent =
+        (unit ? unit.unit_code : unitId) + ' × ' + (recipe ? recipe.recipe_name : recipeId);
+
+      // Populate algorithm dropdown
+      const sel = document.getElementById('perm-algo-select');
+      sel.innerHTML = '<option value="">— IF_THEN_ELSE (system default) —</option>'
+        + permAlgos.map(a => `<option value="${a.algorithm_id}">${a.algorithm_name} (${a.algorithm_code})</option>`).join('');
+
+      const perm = permMap.get(recipeId + ':' + unitId) || {};
+      sel.value = perm.algorithm_id || '';
+      const params = perm.algorithm_params ? JSON.stringify(perm.algorithm_params, null, 2) : '';
+      document.getElementById('perm-algo-params').value = params;
+      updatePermAlgoUI();
+      document.getElementById('perm-algo-modal-bg').classList.add('open');
+    }
+
+    function closePermAlgoModal() {
+      document.getElementById('perm-algo-modal-bg').classList.remove('open');
+      _permModalRecipeId = null;
+      _permModalUnitId = null;
+    }
+
+    function updatePermAlgoUI() {
+      const algoId = document.getElementById('perm-algo-select').value;
+      const paramsRow = document.getElementById('perm-algo-params-row');
+      paramsRow.style.display = algoId ? '' : 'none';
+      if (algoId) {
+        const algo = permAlgos.find(a => a.algorithm_id === parseInt(algoId));
+        const paramsVal = document.getElementById('perm-algo-params').value;
+        let effective = {};
+        try { effective = {...(algo?.default_params||{}), ...(paramsVal ? JSON.parse(paramsVal) : {})}; } catch(e) {}
+        document.getElementById('perm-algo-hint').textContent = 'Effective: ' + JSON.stringify(effective);
+      }
+    }
+
+    async function savePermAlgo() {
+      const recipeId = _permModalRecipeId, unitId = _permModalUnitId;
+      if (!recipeId || !unitId) return;
+      const algoId = parseInt(document.getElementById('perm-algo-select').value) || null;
+      let algoParams = null;
+      const paramsRaw = document.getElementById('perm-algo-params').value.trim();
+      if (paramsRaw) {
+        try { algoParams = JSON.parse(paramsRaw); }
+        catch(e) { toast('Invalid JSON in params', false); return; }
+      }
+      try {
+        await api('POST', '/recipe_unit_permission',
+          {recipe_id: recipeId, unit_id: unitId, allowed: true,
+           algorithm_id: algoId, algorithm_params: algoParams},
+          {'Prefer': 'resolution=merge-duplicates,return=minimal'});
+        permMap.set(recipeId + ':' + unitId,
+          {allowed: true, algorithm_id: algoId, algorithm_params: algoParams});
+        closePermAlgoModal();
+        renderPermMatrix();
+        toast('Saved');
+      } catch(e) { toast('Save failed: ' + e.message, false); }
+    }
+
+    // ── System Configuration ───────────────────────────────────
+    const SCHED_API = '/scheduler-api';
+
+    async function loadAlgorithms() {
+      const res = await fetch(`${SCHED_API}/algorithms`);
+      const algorithms = await res.json();
+      const tb = document.getElementById('algo-tbody');
+      if (!algorithms.length) {
+        tb.innerHTML = '<tr><td colspan="5" class="empty" style="padding:28px">No algorithms found.</td></tr>';
+        return;
+      }
+      tb.innerHTML = algorithms.map(a => {
+        const params = JSON.stringify(a.default_params || {}, null, 2);
+        return `<tr>
+          <td><span class="algo-badge">${a.algorithm_code}</span></td>
+          <td style="font-weight:600;color:#e2e8f0">${a.algorithm_name}</td>
+          <td style="font-size:.82rem;color:#94a3b8">${a.description || ''}</td>
+          <td><textarea id="algo-params-${a.algorithm_id}">${params}</textarea></td>
+          <td><button class="btn btn-sm btn-purple" onclick="saveAlgorithm(${a.algorithm_id})">Save</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function saveAlgorithm(aid) {
+      const ta = document.getElementById(`algo-params-${aid}`);
+      let params;
+      try { params = JSON.parse(ta.value); } catch(e) { toast('Invalid JSON in params', false); return; }
+      const res = await fetch(`${SCHED_API}/algorithms/${aid}`, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({default_params: params}),
+      });
+      if (res.ok) { toast('Algorithm defaults saved'); loadAlgorithms(); }
+      else { toast('Error saving algorithm defaults', false); }
+    }
+
+    async function loadUnitMemory() {
+      const res = await fetch(`${SCHED_API}/units`);
+      const units = await res.json();
+      const tb = document.getElementById('units-memory-tbody');
+      if (!units.length) { tb.innerHTML = '<tr><td colspan="4" class="empty" style="padding:28px">No units found.</td></tr>'; return; }
+      const rows = [];
+      units.forEach(u => {
+        const states = u.algorithm_states || {};
+        const algos  = Object.keys(states);
+        if (algos.length === 0) {
+          rows.push(`<tr>
+            <td><strong>${u.unit_code}</strong></td>
+            <td>${u.recipe_count}</td>
+            <td><span style="color:#475569">none</span></td>
+            <td></td>
+          </tr>`);
+        } else {
+          algos.forEach((algo, i) => {
+            const cnt = states[algo];
+            rows.push(`<tr>
+              <td>${i === 0 ? `<strong>${u.unit_code}</strong>` : ''}</td>
+              <td>${i === 0 ? u.recipe_count : ''}</td>
+              <td><span class="algo-badge">${algo}</span> <a href="#" style="color:#a5b4fc;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" onclick="event.preventDefault();openAlgoStateModal(${u.unit_id},'${u.unit_code}','${algo}')">${cnt} record${cnt!==1?'s':''}</a></td>
+              <td><button class="btn btn-sm btn-danger" onclick="clearAlgorithmState(${u.unit_id},'${u.unit_code}','${algo}')">
+                Clear
+              </button></td>
+            </tr>`);
+          });
+        }
+      });
+      tb.innerHTML = rows.join('');
+    }
+
+    async function clearAlgorithmState(uid, ucode, algo) {
+      if (!confirm(`Reset ${algo} memory for ${ucode}?\nThe algorithm will cold-start on the next run.`)) return;
+      const res = await fetch(`${SCHED_API}/units/${uid}/algorithm-state/${algo}`, {method:'DELETE'});
+      if (res.ok) {
+        const d = await res.json();
+        toast(`${algo} memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)`);
+        loadUnitMemory();
+      } else {
+        toast('Failed to clear memory', false);
+      }
+    }
+
+    // ── Algorithm State Modal ─────────────────────────────────
+    async function openAlgoStateModal(uid, ucode, algo) {
+      document.getElementById('algo-state-modal-title').textContent = `${ucode} — ${algo} Learned State`;
+      document.getElementById('algo-state-modal-body').innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+      document.getElementById('algo-state-modal-bg').classList.add('open');
+      try {
+        const rows = await (await fetch(`${SCHED_API}/units/${uid}/algorithm-state/${algo}`)).json();
+        if (!rows.length) {
+          document.getElementById('algo-state-modal-body').innerHTML = '<div class="empty" style="padding:20px">No records found.</div>';
+          return;
+        }
+        document.getElementById('algo-state-modal-body').innerHTML = `
+          <table class="tbl" style="margin-top:4px">
+            <thead><tr><th>Channel</th><th>State</th><th>Last Updated</th></tr></thead>
+            <tbody>${rows.map(r => `<tr>
+              <td><span class="algo-badge">${r.channel}</span></td>
+              <td><pre style="margin:0;background:#0d1321;border:1px solid #1e293b;border-radius:6px;padding:8px 10px;font-size:.75rem;color:#a5b4fc;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto">${JSON.stringify(r.state, null, 2)}</pre></td>
+              <td style="white-space:nowrap;color:#64748b;font-size:.8rem">${r.updated_at ? new Date(r.updated_at).toLocaleString() : '—'}</td>
+            </tr>`).join('')}</tbody>
+          </table>`;
+      } catch(e) { document.getElementById('algo-state-modal-body').innerHTML = `<div class="empty" style="padding:20px;color:#f87171">Failed to load: ${e.message}</div>`; }
+    }
+
+    function closeAlgoStateModal() {
+      document.getElementById('algo-state-modal-bg').classList.remove('open');
+    }
+
+    // ── Init ──────────────────────────────────────────────────
+    loadLocations();
+  </script>
+  <!-- Algorithm State Records Modal -->
+  <div class="modal-bg" id="algo-state-modal-bg" onclick="if(event.target===this)closeAlgoStateModal()">
+    <div class="modal" style="max-width:680px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="algo-state-modal-title">Learned State</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeAlgoStateModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <div id="algo-state-modal-body" style="min-height:60px"></div>
+    </div>
+  </div>
+
+  </div><!-- #app -->
+</body>
+</html>

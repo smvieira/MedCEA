@@ -1,0 +1,15 @@
+{
+  "unit_code": "UNIT02",
+  "unit_type": "Greens",
+  "area": 0.5,
+  "height": 0.3,
+  "is_active": "Y",
+  "location_name": "Helenelund",
+  "zones": [
+    {
+      "zone_code": "ZONE01",
+      "zone_description": "there is only one zone",
+      "is_active": "Y"
+    }
+  ]
+}

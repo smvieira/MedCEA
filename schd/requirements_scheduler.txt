@@ -1,0 +1,9 @@
+#paho-mqtt==2.1.0
+paho-mqtt
+#threading
+python-dotenv==1.0.1
+psycopg2
+#pandas==2.2.3
+#influxdb-client==1.36.0
+#dnspython
+#netifaces

@@ -1,0 +1,267 @@
+{
+  "_comment": [
+    "SENSE board template. One entry per sensor driver the board can carry;",
+    "the wizard offers this list, asks only for the fields under 'params', and",
+    "infers everything else (MQTT host and port, topic, client id, unit, zone,",
+    "device_dns) from the slot the operator picked and from config.env.",
+    "",
+    "  params[].kind   pin | int | float | bool | choice",
+    "  params[].infer  present = not asked; the wizard fills it in",
+    "  tags[]          what the driver publishes: one MQTT sub-topic each",
+    "",
+    "Adding a sensor the fleet already supports is adding an entry here plus a",
+    "read_<id> function in edge/src/app/cea_sensors.py. Nothing else changes.",
+    "Defaults are the wiring of the reference build, not arbitrary values."
+  ],
+  "role": "SENSE",
+  "family": "esp32",
+  "component_type": "SENSE",
+  "model": "ESP32",
+  "manufacturer": "Espressif",
+  "multi": true,
+  "drivers": [
+    {
+      "id": "scd4x",
+      "name": "Sensirion SCD40 / SCD41",
+      "subtitle": "CO2, air temperature, air humidity over I2C",
+      "model": "SCD4x",
+      "manufacturer": "Sensirion",
+      "tags": [
+        {
+          "tag": "co2",
+          "uom": "ppm"
+        },
+        {
+          "tag": "air_temperature",
+          "uom": "C"
+        },
+        {
+          "tag": "air_humidity",
+          "uom": "RH%"
+        }
+      ],
+      "params": [
+        {
+          "name": "scl_pin",
+          "kind": "pin",
+          "default": 5,
+          "label": "SCL pin (I2C clock)",
+          "hint": "GPIO the sensor's SCL line is on. YELLOW on the reference build."
+        },
+        {
+          "name": "sda_pin",
+          "kind": "pin",
+          "default": 4,
+          "label": "SDA pin (I2C data)",
+          "hint": "GPIO the sensor's SDA line is on. GREEN on the reference build."
+        },
+        {
+          "name": "i2c_id",
+          "kind": "choice",
+          "default": 0,
+          "label": "I2C bus",
+          "options": [
+            {
+              "value": 0,
+              "label": "I2C0"
+            },
+            {
+              "value": 1,
+              "label": "I2C1"
+            }
+          ],
+          "hint": "Hardware I2C peripheral. Either works with any GPIO on an S3."
+        },
+        {
+          "name": "i2c_freq",
+          "kind": "int",
+          "default": 400000,
+          "label": "I2C frequency (Hz)",
+          "advanced": true,
+          "hint": "400 kHz is the SCD4x maximum. Drop to 50000 on long wiring."
+        },
+        {
+          "name": "altitude_masl",
+          "kind": "int",
+          "default": 160,
+          "label": "Altitude (m above sea level)",
+          "hint": "The SCD4x corrects CO2 for air pressure. A wrong value biases every reading."
+        },
+        {
+          "name": "disable_auto_cal",
+          "kind": "bool",
+          "default": true,
+          "label": "Disable automatic self-calibration",
+          "hint": "ASC assumes the sensor sees fresh air weekly. In a sealed chamber it does not, so leave this on."
+        }
+      ]
+    },
+    {
+      "id": "scd30",
+      "name": "Sensirion SCD30",
+      "subtitle": "CO2, air temperature, air humidity over I2C",
+      "model": "SCD30",
+      "manufacturer": "Sensirion",
+      "tags": [
+        {
+          "tag": "co2",
+          "uom": "ppm"
+        },
+        {
+          "tag": "air_temperature",
+          "uom": "C"
+        },
+        {
+          "tag": "air_humidity",
+          "uom": "RH%"
+        }
+      ],
+      "params": [
+        {
+          "name": "scl_pin",
+          "kind": "pin",
+          "default": 5,
+          "label": "SCL pin (I2C clock)",
+          "hint": "GPIO the sensor's SCL line is on."
+        },
+        {
+          "name": "sda_pin",
+          "kind": "pin",
+          "default": 4,
+          "label": "SDA pin (I2C data)",
+          "hint": "GPIO the sensor's SDA line is on."
+        }
+      ]
+    },
+    {
+      "id": "ground_temperature",
+      "name": "DS18B20 substrate probe",
+      "subtitle": "Substrate temperature over 1-Wire",
+      "model": "DS18B20",
+      "manufacturer": "Maxim",
+      "tags": [
+        {
+          "tag": "ground_temperature",
+          "uom": "C"
+        }
+      ],
+      "params": [
+        {
+          "name": "data_pin",
+          "kind": "pin",
+          "default": 17,
+          "label": "1-Wire data pin",
+          "hint": "The probe's yellow/white line. Needs a 4.7k pull-up to 3V3."
+        }
+      ]
+    },
+    {
+      "id": "water_level",
+      "name": "Analogue water level probe",
+      "subtitle": "Reservoir level on an ADC pin, powered only while reading",
+      "model": "analog level probe",
+      "manufacturer": "generic",
+      "tags": [
+        {
+          "tag": "water_level",
+          "uom": "%"
+        }
+      ],
+      "params": [
+        {
+          "name": "signal_pin",
+          "kind": "pin",
+          "default": 34,
+          "label": "Signal pin (ADC)",
+          "hint": "Must be an ADC-capable GPIO. On a classic ESP32 use ADC1: GPIO32-39."
+        },
+        {
+          "name": "power_pin",
+          "kind": "pin",
+          "default": 25,
+          "label": "Power pin",
+          "hint": "Drives the probe. Held low between readings \u2014 a continuously powered probe corrodes."
+        },
+        {
+          "name": "max_water_level",
+          "kind": "int",
+          "default": 1500,
+          "label": "ADC reading at 100%",
+          "hint": "Raw ADC count with the reservoir full. Calibrate once per install."
+        },
+        {
+          "name": "uart_id",
+          "kind": "int",
+          "default": 1,
+          "label": "UART id",
+          "advanced": true,
+          "hint": "Only used by probe variants that also report over serial."
+        },
+        {
+          "name": "tx_pin",
+          "kind": "pin",
+          "default": 16,
+          "label": "UART TX pin",
+          "advanced": true
+        },
+        {
+          "name": "rx_pin",
+          "kind": "pin",
+          "default": 17,
+          "label": "UART RX pin",
+          "advanced": true
+        },
+        {
+          "name": "baudrate",
+          "kind": "int",
+          "default": 115200,
+          "label": "UART baud rate",
+          "advanced": true
+        }
+      ]
+    }
+  ],
+  "device_params": [
+    {
+      "name": "message_interval",
+      "kind": "int",
+      "default": 30,
+      "label": "Publish interval (seconds)",
+      "hint": "How often the board reads its sensors and publishes. 30s matches the existing fleet."
+    }
+  ],
+  "inferred": [
+    {
+      "name": "mqtt_server",
+      "from": "config.env",
+      "note": "LAN address of the Mosquitto NodePort"
+    },
+    {
+      "name": "mqtt_port",
+      "from": "config.env",
+      "note": "31883, the Mosquitto NodePort"
+    },
+    {
+      "name": "topic_pub",
+      "from": "slot",
+      "note": "<root>/<unit>/<zone>/sense, one sub-topic per tag"
+    },
+    {
+      "name": "client_id",
+      "from": "slot + MAC",
+      "note": "unique per board, so two boards cannot evict each other"
+    },
+    {
+      "name": "unit_code",
+      "from": "slot"
+    },
+    {
+      "name": "zone_code",
+      "from": "slot"
+    },
+    {
+      "name": "device_dns",
+      "from": "slot"
+    }
+  ]
+}

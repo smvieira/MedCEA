@@ -1,0 +1,1319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recipe Schedule Manager</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    #bg { position: fixed; inset: 0; z-index: 0; opacity: .22; background-size: cover; background-position: center; pointer-events: none; }
+    #app { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 32px 24px 64px; }
+
+    .hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 36px; flex-wrap: wrap; gap: 12px; }
+    .hdr-left { display: flex; align-items: center; gap: 14px; }
+    .hdr-left svg { width: 40px; height: 40px; flex-shrink: 0; }
+    .hdr-title { font-size: 1.6rem; font-weight: 700; color: #fff; letter-spacing: -.02em; }
+    .hdr-sub { font-size: .85rem; color: #64748b; margin-top: 3px; }
+    .hdr-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+    .btn { display: inline-flex; align-items: center; gap: 7px; background: #1e293b; border: 1px solid #2a364e; color: #94a3b8; padding: 8px 16px; border-radius: 8px; cursor: pointer; font: 500 .875rem 'Segoe UI',system-ui,sans-serif; text-decoration: none; transition: background .15s, color .15s; white-space: nowrap; }
+    .btn:hover { background: #2a364e; color: #e2e8f0; }
+    .btn-primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-green { background: #14532d; border-color: #166534; color: #4ade80; }
+    .btn-green:hover { background: #166534; }
+    .btn-danger { background: #7f1d1d; border-color: #991b1b; color: #fca5a5; }
+    .btn-danger:hover { background: #991b1b; }
+    .btn-sm { padding: 5px 10px; font-size: .8rem; }
+    .btn:disabled { opacity: .45; cursor: default; pointer-events: none; }
+
+    .section { background: #1e2532; border: 1px solid #2a364e; border-radius: 12px; margin-bottom: 24px; overflow: hidden; }
+    .section-hdr { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #2a364e; }
+    .section-title { font-size: 1rem; font-weight: 600; color: #e2e8f0; display: flex; align-items: center; gap: 8px; }
+    .section-title svg { width: 18px; height: 18px; }
+    .algo-badge { display:inline-block; background:#1e293b; border:1px solid #334155; color:#a5b4fc; border-radius:4px; padding:1px 7px; font-size:.72rem; font-weight:600; letter-spacing:.04em; }
+    .param-hint { font-size:.72rem; color:#64748b; margin-top:4px; font-family:monospace; word-break:break-all; }
+    .algo-panel-table td { padding:10px 12px; vertical-align:top; }
+    .algo-panel-table textarea { width:100%; background:#0f172a; border:1px solid #2a364e; border-radius:6px; color:#e2e8f0; padding:6px 8px; font:0.78rem/1.5 monospace; min-height:54px; resize:vertical; }
+    .btn-purple { background:#3b0764; border-color:#6d28d9; color:#c4b5fd; }
+    .btn-purple:hover { background:#4c1d95; }
+    .badge { font-size: .7rem; background: #1e293b; border: 1px solid #334155; color: #94a3b8; padding: 2px 8px; border-radius: 99px; }
+    .badge-active { background: #14532d33; border-color: #14532d; color: #4ade80; }
+
+    .tbl-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+    th { text-align: left; padding: 10px 16px; font-size: .7rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #475569; background: #161e2e; }
+    td { padding: 12px 16px; border-top: 1px solid #1e293b; color: #cbd5e1; vertical-align: middle; }
+    tr:hover td { background: #1a2235; }
+    .empty-row td { text-align: center; color: #475569; padding: 28px; }
+
+    .st { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; font-size: .75rem; font-weight: 600; }
+    .st-R { background: #14532d33; color: #4ade80; border: 1px solid #14532d; }
+    .st-C { background: #1e3a5f33; color: #60a5fa; border: 1px solid #1e3a5f; }
+    .st-F { background: #7f1d1d33; color: #f87171; border: 1px solid #7f1d1d; }
+    .st-S { background: #78350f33; color: #fbbf24; border: 1px solid #78350f; }
+    .st-on  { background: #14532d33; color: #4ade80; border: 1px solid #14532d; }
+    .st-off { background: #1e293b; color: #64748b; border: 1px solid #334155; }
+
+    .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; padding: 16px; overflow-y: auto; }
+    .modal-bg.open { display: flex; }
+    .modal { background: #1e2532; border: 1px solid #2a364e; border-radius: 14px; width: 100%; max-width: 540px; padding: 28px; margin: auto; }
+    .modal h2 { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 20px; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+
+    .form-row { margin-bottom: 16px; }
+    label { display: block; font-size: .78rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+    select, input[type=text], input[type=date], input[type=number], textarea { width: 100%; background: #0d1321; border: 1px solid #2a364e; color: #e2e8f0; padding: 9px 12px; border-radius: 8px; font-size: .9rem; outline: none; transition: border-color .15s; }
+    select:focus, input[type=text]:focus, input[type=date]:focus, input[type=number]:focus, textarea:focus { border-color: #3b82f6; }
+    input[type=date]::-webkit-calendar-picker-indicator { filter: invert(0.6); }
+    select.inline { width: auto; display: inline-block; padding: 7px 10px; }
+    input[type=number].inline { width: 80px; display: inline-block; padding: 7px 10px; text-align: center; }
+
+    .toggle-row { display: flex; align-items: center; gap: 10px; }
+    .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; inset: 0; background: #334155; border-radius: 99px; cursor: pointer; transition: background .2s; }
+    .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+    .toggle input:checked + .toggle-slider { background: #1d4ed8; }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+    .freq-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+    .freq-btn { background: #0d1321; border: 1px solid #2a364e; border-radius: 8px; padding: 10px 8px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+    .freq-btn:hover { border-color: #3b82f6; background: #1a2235; }
+    .freq-btn.active { border-color: #3b82f6; background: #1e3a5f33; color: #60a5fa; }
+    .freq-icon { font-size: 1.3rem; display: block; margin-bottom: 4px; }
+    .freq-label { font-size: .75rem; font-weight: 600; color: #94a3b8; }
+    .freq-btn.active .freq-label { color: #60a5fa; }
+
+    .time-row { display: flex; align-items: center; gap: 8px; }
+    .time-sep { color: #475569; font-size: 1.1rem; font-weight: 700; }
+
+    .dow-grid { display: flex; gap: 6px; flex-wrap: wrap; }
+    .dow-btn { background: #0d1321; border: 1px solid #2a364e; border-radius: 6px; padding: 6px 10px; font-size: .8rem; font-weight: 600; color: #64748b; cursor: pointer; transition: border-color .15s, background .15s, color .15s; user-select: none; }
+    .dow-btn.active { border-color: #3b82f6; background: #1e3a5f33; color: #60a5fa; }
+
+    .cron-preview { background: #0d1321; border: 1px solid #2a364e; border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; }
+    .cron-expr { font-family: monospace; font-size: .9rem; color: #a5b4fc; white-space: nowrap; }
+    .cron-human { font-size: .82rem; color: #64748b; }
+
+    .log-modal { max-width: 780px; }
+    .log-modal-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .log-modal-hdr h2 { margin-bottom: 0; }
+    .log-meta { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+    .log-meta span { font-size: .8rem; color: #94a3b8; }
+    .log-meta strong { color: #e2e8f0; }
+    pre { background: #0d1321; border: 1px solid #1e293b; border-radius: 8px; padding: 14px; font-size: .78rem; color: #94a3b8; overflow-x: auto; white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow-y: auto; }
+
+    .live-badge { display: inline-flex; align-items: center; gap: 5px; background: #14532d33; border: 1px solid #14532d; color: #4ade80; padding: 3px 10px; border-radius: 99px; font-size: .75rem; font-weight: 600; }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #4ade80; animation: live-pulse 1.2s ease-in-out infinite; }
+    @keyframes live-pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+    /* Log Management section */
+    .logmgmt-body { padding: 20px; }
+    .logmgmt-stats { font-size: .85rem; color: #64748b; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .logmgmt-stats strong { color: #94a3b8; }
+    .logmgmt-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .logmgmt-row label { margin-bottom: 0; white-space: nowrap; }
+    .logmgmt-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+
+    #toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; border: 1px solid #2a364e; color: #e2e8f0; padding: 12px 20px; border-radius: 10px; font-size: .875rem; display: none; z-index: 200; box-shadow: 0 4px 24px rgba(0,0,0,.5); }
+    #toast.err { border-color: #991b1b; color: #fca5a5; }
+
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+    .dot-green { background: #4ade80; } .dot-red { background: #f87171; }
+    .dot-yellow { background: #fbbf24; } .dot-blue { background: #60a5fa; }
+
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .conflict-msg { font-size: .78rem; color: #f87171; margin-top: 6px; display: none; }
+
+    .expand-btn { background: none; border: none; cursor: pointer; color: #64748b; font-size: .85rem; padding: 2px 4px; line-height: 1; transition: color .15s; }
+    .expand-btn:hover { color: #a5b4fc; }
+    .cycle-detail-row td { background: #141c2e; padding: 0 !important; border-top: none; }
+    .cycle-detail-row:hover td { background: #141c2e; }
+    .cycle-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    .cycle-table th { text-transform: none; font-size: .72rem; color: #475569; background: #0f1623; padding: 6px 14px; letter-spacing: .04em; }
+    .cycle-table td { padding: 7px 14px; border-top: 1px solid #1a2235; color: #94a3b8; }
+    .cycle-table tr:last-child td { border-bottom: 2px solid #2a364e; }
+    .cycle-params { font-family: monospace; font-size: .75rem; color: #7c8fa8; word-break: break-all; }
+  </style>
+</head>
+<body>
+<div id="bg" style="__BG_STYLE__"></div>
+<div id="app">
+
+  <div class="hdr">
+    <div class="hdr-left">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/>
+        <path d="M16 2v4M8 2v4M3 10h5"/>
+        <path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/>
+      </svg>
+      <div>
+        <div class="hdr-title">Recipe Schedule Manager</div>
+        <div class="hdr-sub">Schedule and monitor recipe execution across production units</div>
+      </div>
+    </div>
+    <div class="hdr-right">
+      <a href="http://$PORTAL_DOMAIN" class="btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+        Portal
+      </a>
+      <button class="btn btn-green" onclick="openRunNowModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Run Now
+      </button>
+      <button class="btn btn-primary" onclick="openScheduleModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Schedule
+      </button>
+    </div>
+  </div>
+
+  <!-- Current Runs -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Current Runs
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="badge badge-active" id="active-count">—</span>
+        <button class="btn btn-sm" onclick="loadActive()">↻ Refresh</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th></th><th>Run ID</th><th>Unit</th><th>Recipe</th><th>Algorithm</th><th>Status</th><th>Started</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="active-tbody"><tr class="empty-row"><td colspan="8">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Scheduled Jobs -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        Scheduled Jobs
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="badge" id="sched-count">—</span>
+        <button class="btn btn-sm" onclick="loadSchedules()">↻ Refresh</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Unit</th><th>Recipe</th><th>Schedule</th><th>Status</th><th>Next Run (UTC)</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="sched-tbody"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Completed Runs -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Completed Runs
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="badge" id="runs-count">—</span>
+        <button class="btn btn-sm" onclick="loadRuns()">↻ Refresh</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th></th><th>Run ID</th><th>Unit</th><th>Recipe</th><th>Status</th><th>Started</th><th>Ended</th><th>Log</th>
+        </tr></thead>
+        <tbody id="runs-tbody"><tr class="empty-row"><td colspan="8">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Log Management -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        Log Management
+      </div>
+      <button class="btn btn-sm" onclick="loadLogConfig()">↻ Refresh</button>
+    </div>
+    <div class="logmgmt-body">
+      <div class="logmgmt-stats" id="logmgmt-stats">Loading stats…</div>
+
+      <div class="logmgmt-row">
+        <label style="min-width:200px">Compress logs older than</label>
+        <input type="number" class="inline" id="lm-compress-days" min="0" value="7">
+        <span style="font-size:.85rem;color:#64748b">days</span>
+        <button class="btn btn-sm" onclick="compressLogs()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Compress Now
+        </button>
+      </div>
+
+      <div class="logmgmt-row">
+        <label style="min-width:200px">Delete logs older than</label>
+        <input type="number" class="inline" id="lm-delete-days" min="0" value="30">
+        <span style="font-size:.85rem;color:#64748b">days</span>
+        <button class="btn btn-sm btn-danger" onclick="deleteLogs()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          Delete Now
+        </button>
+      </div>
+
+      <div class="logmgmt-actions">
+        <button class="btn btn-sm btn-primary" onclick="saveLogDefaults()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          Save as Defaults
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Run Now Modal -->
+<div class="modal-bg" id="runnow-modal">
+  <div class="modal">
+    <h2>Run Now</h2>
+    <div class="form-row">
+      <label>Production Unit</label>
+      <select id="rn-unit" onchange="onRnUnitChange()"><option value="">— select unit —</option></select>
+    </div>
+    <div id="rn-conflict" class="conflict-msg"></div>
+    <div class="form-row">
+      <label>Recipe</label>
+      <select id="rn-recipe" onchange="onRnRecipeChange()"><option value="">— select unit first —</option></select>
+    </div>
+    <div class="form-row">
+      <label>Algorithm</label>
+      <select id="rn-algorithm-id" onchange="onRnAlgoChange()"><option value="">— default from recipe/unit —</option></select>
+      <div class="param-hint" id="rn-algo-hint"></div>
+    </div>
+    <div class="form-row" id="rn-params-row" style="display:none">
+      <label>Param Overrides (JSON)</label>
+      <textarea id="rn-algo-params" placeholder='leave blank for defaults, e.g. {"kp":2.0}'></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeRunNowModal()">Cancel</button>
+      <button class="btn btn-green" id="rn-submit" onclick="submitRunNow()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Start Run
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Retry Modal -->
+<div class="modal-bg" id="retry-modal">
+  <div class="modal">
+    <h2 id="retry-modal-title">Retry Run</h2>
+    <input type="hidden" id="retry-run-id">
+    <div class="form-row">
+      <label>Algorithm</label>
+      <select id="retry-algorithm-id" onchange="onRetryAlgoChange()"><option value="">— default from recipe/unit —</option></select>
+      <div class="param-hint" id="retry-algo-hint"></div>
+    </div>
+    <div class="form-row" id="retry-params-row" style="display:none">
+      <label>Param Overrides (JSON)</label>
+      <textarea id="retry-algo-params" placeholder='leave blank for defaults, e.g. {"kp":2.0}'></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeRetryModal()">Cancel</button>
+      <button class="btn btn-green" onclick="submitRetry()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.75"/></svg>
+        Retry
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Schedule Modal -->
+<div class="modal-bg" id="sched-modal">
+  <div class="modal">
+    <h2 id="sched-modal-title">New Schedule</h2>
+    <input type="hidden" id="sched-id">
+    <input type="hidden" id="sched-cron">
+
+    <div class="form-row">
+      <label>Production Unit</label>
+      <select id="sched-unit" onchange="onUnitChange()"><option value="">— select unit —</option></select>
+    </div>
+    <div class="form-row">
+      <label>Recipe</label>
+      <select id="sched-recipe"><option value="">— select unit first —</option></select>
+    </div>
+
+    <div class="form-row">
+      <label>Frequency</label>
+      <div class="freq-grid">
+        <div class="freq-btn active" id="freq-daily"   onclick="setFreq('daily')">  <span class="freq-icon">📅</span><span class="freq-label">Daily</span></div>
+        <div class="freq-btn"        id="freq-weekly"  onclick="setFreq('weekly')"> <span class="freq-icon">📆</span><span class="freq-label">Weekly</span></div>
+        <div class="freq-btn"        id="freq-monthly" onclick="setFreq('monthly')"><span class="freq-icon">🗓️</span><span class="freq-label">Monthly</span></div>
+        <div class="freq-btn"        id="freq-hourly"  onclick="setFreq('hourly')"> <span class="freq-icon">⏱️</span><span class="freq-label">Hourly</span></div>
+        <div class="freq-btn"        id="freq-once"    onclick="setFreq('once')">   <span class="freq-icon">🎯</span><span class="freq-label">Run Once</span></div>
+      </div>
+    </div>
+
+    <div class="form-row" id="row-interval" style="display:none">
+      <label>Every</label>
+      <div class="time-row">
+        <select class="inline" id="sched-interval" onchange="buildCron()">
+          <option value="1">1 hour</option><option value="2">2 hours</option>
+          <option value="3">3 hours</option><option value="4">4 hours</option>
+          <option value="6">6 hours</option><option value="8">8 hours</option>
+          <option value="12">12 hours</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row" id="row-date" style="display:none">
+      <label>Date (UTC)</label>
+      <input type="date" id="sched-date" onchange="buildCron()">
+    </div>
+
+    <div class="form-row" id="row-time">
+      <label>Time (UTC)</label>
+      <div class="time-row">
+        <select class="inline" id="sched-hour" onchange="buildCron()"></select>
+        <span class="time-sep">:</span>
+        <select class="inline" id="sched-min" onchange="buildCron()">
+          <option value="0">00</option><option value="15">15</option>
+          <option value="30">30</option><option value="45">45</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row" id="row-dow" style="display:none">
+      <label>Days</label>
+      <div class="dow-grid" id="dow-grid">
+        <div class="dow-btn active" data-dow="1" onclick="toggleDow(this)">Mon</div>
+        <div class="dow-btn" data-dow="2" onclick="toggleDow(this)">Tue</div>
+        <div class="dow-btn" data-dow="3" onclick="toggleDow(this)">Wed</div>
+        <div class="dow-btn" data-dow="4" onclick="toggleDow(this)">Thu</div>
+        <div class="dow-btn" data-dow="5" onclick="toggleDow(this)">Fri</div>
+        <div class="dow-btn" data-dow="6" onclick="toggleDow(this)">Sat</div>
+        <div class="dow-btn" data-dow="0" onclick="toggleDow(this)">Sun</div>
+      </div>
+    </div>
+
+    <div class="form-row" id="row-dom" style="display:none">
+      <label>Day of Month</label>
+      <select class="inline" id="sched-dom" onchange="buildCron()"></select>
+    </div>
+
+    <div class="form-row">
+      <label>Generated Schedule</label>
+      <div class="cron-preview">
+        <code class="cron-expr" id="cron-expr-display">—</code>
+        <span class="cron-human" id="cron-human-display">—</span>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>Algorithm</label>
+      <select id="sched-algorithm-id" onchange="onSchedAlgoChange()"><option value="">— use recipe/unit default —</option></select>
+      <div class="param-hint" id="sched-algo-hint"></div>
+    </div>
+    <div class="form-row" id="sched-params-row" style="display:none">
+      <label>Param Overrides (JSON)</label>
+      <textarea id="sched-algo-params" placeholder='leave blank for defaults, e.g. {"deadband_fraction":0.08}'></textarea>
+    </div>
+    <div class="form-row">
+      <label>Description (optional)</label>
+      <textarea id="sched-desc" rows="2" placeholder="e.g. Basil grow cycle — UNIT01"></textarea>
+    </div>
+    <div class="form-row">
+      <label>Enabled</label>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="sched-enabled" checked><span class="toggle-slider"></span></label>
+        <span style="font-size:.875rem;color:#94a3b8">Schedule is active</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeScheduleModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSchedule()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Log Modal -->
+<div class="modal-bg" id="log-modal">
+  <div class="modal log-modal">
+    <div class="log-modal-hdr">
+      <h2>Run Log</h2>
+      <span class="live-badge" id="live-badge" style="display:none">
+        <span class="live-dot"></span> Live
+      </span>
+    </div>
+    <div class="log-meta">
+      <span><strong id="log-run-id">—</strong> Run ID</span>
+      <span><strong id="log-unit">—</strong></span>
+      <span><strong id="log-recipe">—</strong></span>
+      <span id="log-status-badge"></span>
+    </div>
+    <pre id="log-content">Loading…</pre>
+    <div class="modal-footer">
+      <label style="display:flex;align-items:center;gap:6px;color:#94a3b8;font-size:.85rem;cursor:pointer;margin-right:auto;">
+        <input type="checkbox" id="log-full-checkbox" onchange="toggleLogFull()" style="cursor:pointer;accent-color:#3b82f6;">
+        Full log
+      </label>
+      <button class="btn" onclick="closeLogModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '/api';
+let _units = [], _algorithms = [], _editSid = null, _freq = 'daily';
+let _logPollInterval = null;
+let _logPollOffset = 0;
+let _logPollRunId = null;
+let _logIsLive = false;
+
+// ---- Toast ----------------------------------------------------------------
+function toast(msg, isErr=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = isErr ? 'err' : '';
+  t.style.display = 'block';
+  clearTimeout(t._tid);
+  t._tid = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+// ---- Status helpers -------------------------------------------------------
+const STATUS_LABEL = {R:'Running', C:'Completed', F:'Failed', S:'Queued'};
+const STATUS_DOT   = {R:'dot-green', C:'dot-blue', F:'dot-red', S:'dot-yellow'};
+
+function statusBadge(s) {
+  return `<span class="st st-${s}"><span class="dot ${STATUS_DOT[s]||''}"></span>${STATUS_LABEL[s]||s}</span>`;
+}
+
+function fmtTime(iso) {
+  return iso ? iso.replace('T',' ').slice(0,19) : '—';
+}
+
+// ---- Current Runs ---------------------------------------------------------
+async function loadActive() {
+  const res = await fetch(`${API}/runs/active`);
+  const rows = await res.json();
+  const badge = document.getElementById('active-count');
+  badge.textContent = rows.length;
+  badge.className = 'badge' + (rows.length ? ' badge-active' : '');
+  const tb = document.getElementById('active-tbody');
+  if (!rows.length) {
+    tb.innerHTML = '<tr class="empty-row"><td colspan="8">No active runs.</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(r => {
+    const actions = [];
+    if (r.recipe_run_status === 'S') {
+      actions.push(`<button class="btn btn-sm btn-green" onclick="executeRun(${r.recipe_run_id})">▶ Execute</button>`);
+    }
+    if (r.recipe_run_status === 'R') {
+      actions.push(`<button class="btn btn-sm btn-danger" onclick="stopRun(${r.recipe_run_id})">■ Stop</button>`);
+    }
+    if (r.recipe_run_status === 'F') {
+      actions.push(`<button class="btn btn-sm" onclick="openRetryModal(${r.recipe_run_id})">↺ Retry</button>`);
+    }
+    // Log button always shown for all statuses
+    const isLive = r.recipe_run_status === 'R';
+    actions.push(`<button class="btn btn-sm" onclick="openLog(${r.recipe_run_id}, ${isLive})">📋 Log</button>`);
+    const pidLabel = r.pid ? `<div style="font-size:.7rem;color:#475569;margin-top:3px">pid ${r.pid}</div>` : '';
+    return `<tr>
+      <td style="padding:12px 8px;width:28px"><button class="expand-btn" onclick="toggleCycles(${r.recipe_run_id}, this)">▶</button></td>
+      <td><code style="color:#a5b4fc">#${r.recipe_run_id}</code></td>
+      <td><strong>${r.unit_code}</strong></td>
+      <td>${r.recipe_name}</td>
+      <td>${r.control_algorithm ? `<span class="algo-badge">${r.control_algorithm}</span>` : '<span style="color:#475569">—</span>'}</td>
+      <td>${statusBadge(r.recipe_run_status)}${pidLabel}</td>
+      <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_start)}</td>
+      <td><div class="actions">${actions.join('')}</div></td>
+    </tr>`;
+  }).join('');
+
+  // If live log is open for one of these runs, update the status badge
+  if (_logPollRunId !== null) {
+    const liveRun = rows.find(r => r.recipe_run_id === _logPollRunId);
+    if (liveRun) {
+      document.getElementById('log-status-badge').innerHTML = statusBadge(liveRun.recipe_run_status);
+    }
+  }
+}
+
+async function executeRun(runId) {
+  const res = await fetch(`${API}/runs/${runId}/execute`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+  if (res.ok) { toast('Execution started'); loadActive(); }
+  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast(e.error, true); }
+}
+
+async function resetRun(runId) {
+  const res = await fetch(`${API}/runs/${runId}/status`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:'S'})
+  });
+  if (res.ok) { toast('Run reset to Queued'); loadActive(); }
+  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast(e.error, true); }
+}
+
+async function openRetryModal(runId) {
+  await _ensureAlgorithms();
+  document.getElementById('retry-run-id').value = runId;
+  document.getElementById('retry-modal-title').textContent = `Retry Run #${runId}`;
+  document.getElementById('retry-algo-params').value = '';
+  document.getElementById('retry-params-row').style.display = 'none';
+  document.getElementById('retry-algo-hint').textContent = '';
+  _populateAlgoSelect('retry-algorithm-id', '');
+  document.getElementById('retry-modal').classList.add('open');
+}
+
+function closeRetryModal() { document.getElementById('retry-modal').classList.remove('open'); }
+
+function onRetryAlgoChange() {
+  const aid = document.getElementById('retry-algorithm-id').value;
+  document.getElementById('retry-params-row').style.display = aid ? '' : 'none';
+  document.getElementById('retry-algo-hint').textContent = _algoHint(aid, document.getElementById('retry-algo-params').value);
+}
+
+async function submitRetry() {
+  const runId  = parseInt(document.getElementById('retry-run-id').value);
+  const algoId = parseInt(document.getElementById('retry-algorithm-id').value) || null;
+  const algoRaw = document.getElementById('retry-algo-params').value.trim();
+  let algo_params = {};
+  if (algoId && algoRaw) {
+    try { algo_params = JSON.parse(algoRaw); } catch(e) { toast('Invalid JSON in params', true); return; }
+  }
+  const algo_obj  = _algorithms.find(a => a.algorithm_id === algoId);
+  const algo_code = algo_obj ? algo_obj.algorithm_code : 'IF_THEN_ELSE';
+
+  const resetRes = await fetch(`${API}/runs/${runId}/status`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:'S'})
+  });
+  if (!resetRes.ok) { const e = await resetRes.json().catch(()=>({error:'Unknown'})); toast(e.error, true); return; }
+
+  const execRes = await fetch(`${API}/runs/${runId}/execute`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({control_algorithm: algo_code, control_algorithm_params: algo_params})
+  });
+  if (execRes.ok) { toast(`Run #${runId} retried with ${algo_code}`); }
+  else { toast('Reset but failed to start — check Current Runs', true); }
+  closeRetryModal();
+  loadActive();
+}
+
+async function stopRun(runId) {
+  if (!confirm(`Stop run #${runId}? The process will be terminated and the run marked as Failed.`)) return;
+  const res = await fetch(`${API}/runs/${runId}/stop`, {method:'POST'});
+  if (res.ok) {
+    const d = await res.json();
+    toast(`Run #${runId} stopped (pid ${d.pid})`);
+    loadActive();
+    loadRuns();
+  } else {
+    const e = await res.json().catch(()=>({error:'Unknown'}));
+    toast(e.error, true);
+  }
+}
+
+// ---- Run Now Modal --------------------------------------------------------
+async function openRunNowModal() {
+  document.getElementById('rn-conflict').style.display = 'none';
+  document.getElementById('rn-recipe').innerHTML = '<option value="">— select unit first —</option>';
+  document.getElementById('rn-submit').disabled = false;
+  document.getElementById('rn-algo-params').value = '';
+  document.getElementById('rn-params-row').style.display = 'none';
+  document.getElementById('rn-algo-hint').textContent = 'Effective: IF_THEN_ELSE (system default)';
+  await Promise.all([loadRnUnits(), _ensureAlgorithms()]);
+  _populateAlgoSelect('rn-algorithm-id', '');
+  document.getElementById('runnow-modal').classList.add('open');
+}
+
+function closeRunNowModal() { document.getElementById('runnow-modal').classList.remove('open'); }
+
+async function loadRnUnits() {
+  const [unitRes, activeRes] = await Promise.all([
+    fetch(`${API}/units`), fetch(`${API}/runs/active`)
+  ]);
+  const units  = await unitRes.json();
+  const active = await activeRes.json();
+  const busyUnits = new Set(active.map(r => r.unit_id));
+
+  const sel = document.getElementById('rn-unit');
+  sel.innerHTML = '<option value="">— select unit —</option>'
+    + units.map(u => {
+        const busy = busyUnits.has(u.unit_id);
+        return `<option value="${u.unit_id}" data-busy="${busy}" ${busy ? 'style="color:#f87171"' : ''}>
+          ${u.unit_code}${busy ? ' (active run)' : ''}
+        </option>`;
+      }).join('');
+}
+
+async function onRnUnitChange() {
+  const sel = document.getElementById('rn-unit');
+  const opt = sel.options[sel.selectedIndex];
+  const busy = opt && opt.dataset.busy === 'true';
+  const conflict = document.getElementById('rn-conflict');
+  const submit = document.getElementById('rn-submit');
+
+  if (busy) {
+    conflict.textContent = '⚠ This unit already has an active run. Finish or cancel it first.';
+    conflict.style.display = 'block';
+    submit.disabled = true;
+    document.getElementById('rn-recipe').innerHTML = '<option value="">—</option>';
+    return;
+  }
+  conflict.style.display = 'none';
+  submit.disabled = false;
+
+  const uid = sel.value;
+  if (uid) {
+    const res = await fetch(`${API}/recipes?unit_id=${uid}`);
+    const recipes = await res.json();
+    document.getElementById('rn-recipe').innerHTML = '<option value="">— select recipe —</option>'
+      + recipes.map(r => `<option value="${r.recipe_id}">${r.recipe_name}</option>`).join('');
+  } else {
+    document.getElementById('rn-recipe').innerHTML = '<option value="">— select unit first —</option>';
+  }
+}
+
+async function submitRunNow() {
+  const unit_id   = parseInt(document.getElementById('rn-unit').value);
+  const recipe_id = parseInt(document.getElementById('rn-recipe').value);
+  if (!unit_id || !recipe_id) { toast('Select a unit and recipe', true); return; }
+
+  const algoId  = parseInt(document.getElementById('rn-algorithm-id').value) || null;
+  const algoRaw = document.getElementById('rn-algo-params').value.trim();
+  let algo_params = {};
+  if (algoId && algoRaw) {
+    try { algo_params = JSON.parse(algoRaw); } catch(e) { toast('Invalid JSON in algorithm params', true); return; }
+  }
+  const algo_obj = _algorithms.find(a => a.algorithm_id === algoId);
+  const algo_code = algo_obj ? algo_obj.algorithm_code : 'IF_THEN_ELSE';
+
+  const createRes = await fetch(`${API}/runs`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({unit_id, recipe_id})
+  });
+  if (!createRes.ok) {
+    const e = await createRes.json().catch(()=>({error:'Unknown'}));
+    toast(e.error, true); return;
+  }
+  const run = await createRes.json();
+
+  const execRes = await fetch(`${API}/runs/${run.recipe_run_id}/execute`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({control_algorithm: algo_code, control_algorithm_params: algo_params})
+  });
+  if (execRes.ok) {
+    toast('Run started!');
+    closeRunNowModal();
+    loadActive();
+  } else {
+    toast('Run created but failed to start — check Current Runs', true);
+    closeRunNowModal();
+    loadActive();
+  }
+}
+
+// ---- Scheduled Jobs -------------------------------------------------------
+async function loadSchedules() {
+  const res = await fetch(`${API}/schedules`);
+  const rows = await res.json();
+  document.getElementById('sched-count').textContent = rows.length;
+  const tb = document.getElementById('sched-tbody');
+  if (!rows.length) {
+    tb.innerHTML = '<tr class="empty-row"><td colspan="6">No schedules yet — click New Schedule to add one.</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(r => `
+    <tr>
+      <td><strong>${r.unit_code}</strong></td>
+      <td>${r.recipe_name}</td>
+      <td>
+        <div style="font-size:.82rem;color:#e2e8f0">${cronToHuman(r.cron_expression)}</div>
+        <code style="font-size:.72rem;color:#475569">${r.cron_expression}</code>
+        ${r.description ? `<div style="font-size:.75rem;color:#64748b;margin-top:2px">${r.description}</div>` : ''}
+        ${r.algorithm_code ? `<span class="algo-badge" style="margin-top:3px">${r.algorithm_code}</span>` : ''}
+      </td>
+      <td><span class="st ${r.enabled ? 'st-on' : 'st-off'}">
+        <span class="dot ${r.enabled ? 'dot-green' : 'dot-red'}"></span>
+        ${r.enabled ? 'Enabled' : 'Disabled'}
+      </span></td>
+      <td style="font-size:.8rem;color:#94a3b8">${r.next_run ? r.next_run.replace('T',' ').replace('+00:00','') : '—'}</td>
+      <td><div class="actions">
+        <button class="btn btn-sm btn-green" onclick="runFromSchedule(${r.schedule_id})">▶ Run Now</button>
+        <button class="btn btn-sm" onclick="editSchedule(${r.schedule_id})">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteSchedule(${r.schedule_id})">Delete</button>
+      </div></td>
+    </tr>`).join('');
+}
+
+async function runFromSchedule(sid) {
+  const res = await fetch(`${API}/schedules/${sid}/trigger`, {method:'POST'});
+  if (res.ok) { toast('Recipe triggered — check Current Runs'); setTimeout(loadActive, 1500); }
+  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast(e.error, true); }
+}
+
+async function deleteSchedule(sid) {
+  if (!confirm('Delete this schedule?')) return;
+  await fetch(`${API}/schedules/${sid}`, {method:'DELETE'});
+  toast('Schedule deleted'); loadSchedules();
+}
+
+async function editSchedule(sid) {
+  const res = await fetch(`${API}/schedules`);
+  const rows = await res.json();
+  const r = rows.find(x => x.schedule_id === sid);
+  if (!r) return;
+  _editSid = sid;
+  document.getElementById('sched-modal-title').textContent = 'Edit Schedule';
+  document.getElementById('sched-id').value = sid;
+  await Promise.all([loadUnits(), _ensureAlgorithms()]);
+  document.getElementById('sched-unit').value = r.unit_id;
+  await loadRecipesForUnit(r.unit_id);
+  document.getElementById('sched-recipe').value = r.recipe_id;
+  document.getElementById('sched-desc').value = r.description || '';
+  document.getElementById('sched-enabled').checked = r.enabled;
+  _populateAlgoSelect('sched-algorithm-id', r.algorithm_id || '');
+  const paramsVal = r.algorithm_params ? JSON.stringify(r.algorithm_params, null, 2) : '';
+  document.getElementById('sched-algo-params').value = paramsVal;
+  document.getElementById('sched-params-row').style.display = r.algorithm_id ? '' : 'none';
+  document.getElementById('sched-algo-hint').textContent = _algoHint(r.algorithm_id, paramsVal);
+  parseCronIntoBuilder(r.cron_expression);
+  document.getElementById('sched-modal').classList.add('open');
+}
+
+// ---- Schedule Modal -------------------------------------------------------
+async function openScheduleModal() {
+  _editSid = null;
+  document.getElementById('sched-modal-title').textContent = 'New Schedule';
+  document.getElementById('sched-id').value = '';
+  document.getElementById('sched-desc').value = '';
+  document.getElementById('sched-enabled').checked = true;
+  await Promise.all([loadUnits(), _ensureAlgorithms()]);
+  _populateAlgoSelect('sched-algorithm-id', '');
+  document.getElementById('sched-algo-params').value = '';
+  document.getElementById('sched-params-row').style.display = 'none';
+  document.getElementById('sched-algo-hint').textContent = 'Effective: IF_THEN_ELSE (system default)';
+  document.getElementById('sched-recipe').innerHTML = '<option value="">— select unit first —</option>';
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1);
+  document.getElementById('sched-date').value = tomorrow.toISOString().slice(0,10);
+  document.getElementById('sched-hour').value = 6;
+  document.getElementById('sched-min').value  = 0;
+  document.querySelectorAll('#dow-grid .dow-btn').forEach((el,i) => el.classList.toggle('active', i===0));
+  setFreq('daily');
+  document.getElementById('sched-modal').classList.add('open');
+}
+
+function closeScheduleModal() { document.getElementById('sched-modal').classList.remove('open'); }
+
+async function loadUnits() {
+  const res = await fetch(`${API}/units`);
+  _units = await res.json();
+  const sel = document.getElementById('sched-unit');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— select unit —</option>'
+    + _units.map(u => `<option value="${u.unit_id}">${u.unit_code} (${u.recipe_count} recipes)</option>`).join('');
+  if (prev) sel.value = prev;
+}
+
+async function onUnitChange() {
+  const uid = document.getElementById('sched-unit').value;
+  if (uid) await loadRecipesForUnit(uid);
+  else document.getElementById('sched-recipe').innerHTML = '<option value="">— select unit first —</option>';
+}
+
+async function loadRecipesForUnit(uid) {
+  const res = await fetch(`${API}/recipes?unit_id=${uid}`);
+  const recipes = await res.json();
+  const sel = document.getElementById('sched-recipe');
+  sel.innerHTML = '<option value="">— select recipe —</option>'
+    + recipes.map(r => `<option value="${r.recipe_id}">${r.recipe_name}</option>`).join('');
+}
+
+async function saveSchedule() {
+  const unit_id   = parseInt(document.getElementById('sched-unit').value);
+  const recipe_id = parseInt(document.getElementById('sched-recipe').value);
+  const cron_expression = document.getElementById('sched-cron').value.trim();
+  const description     = document.getElementById('sched-desc').value.trim();
+  const enabled         = document.getElementById('sched-enabled').checked;
+  if (!unit_id || !recipe_id || !cron_expression)
+    { toast('Unit, recipe and schedule are required', true); return; }
+  const algoId    = parseInt(document.getElementById('sched-algorithm-id').value) || null;
+  const algoRaw   = document.getElementById('sched-algo-params').value.trim();
+  let algorithm_params = null;
+  if (algoId && algoRaw) {
+    try { algorithm_params = JSON.parse(algoRaw); } catch(e) { toast('Invalid JSON in algorithm params', true); return; }
+  }
+  const body = {unit_id, recipe_id, cron_expression, description, enabled,
+                algorithm_id: algoId, algorithm_params};
+  const sid = _editSid;
+  const res = await fetch(sid ? `${API}/schedules/${sid}` : `${API}/schedules`, {
+    method: sid ? 'PUT' : 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (res.ok) { toast(sid ? 'Schedule updated' : 'Schedule created'); closeScheduleModal(); loadSchedules(); }
+  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast('Error: '+e.error, true); }
+}
+
+// ---- Cron builder ---------------------------------------------------------
+const DOW_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function pad(n) { return String(n).padStart(2,'0'); }
+
+function initSelects() {
+  const h = document.getElementById('sched-hour');
+  h.innerHTML = Array.from({length:24},(_,i)=>`<option value="${i}">${pad(i)}:00</option>`).join('');
+  h.value = 6;
+  const d = document.getElementById('sched-dom');
+  d.innerHTML = Array.from({length:28},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('');
+  d.value = 1;
+}
+
+function setFreq(f) {
+  _freq = f;
+  ['daily','weekly','monthly','hourly','once'].forEach(x =>
+    document.getElementById('freq-'+x).classList.toggle('active', x===f));
+  document.getElementById('row-interval').style.display = f==='hourly'  ? '' : 'none';
+  document.getElementById('row-date').style.display     = f==='once'    ? '' : 'none';
+  document.getElementById('row-time').style.display     = f==='hourly'  ? 'none' : '';
+  document.getElementById('row-dow').style.display      = f==='weekly'  ? '' : 'none';
+  document.getElementById('row-dom').style.display      = f==='monthly' ? '' : 'none';
+  buildCron();
+}
+
+function toggleDow(el) {
+  const active = document.querySelectorAll('#dow-grid .dow-btn.active');
+  if (el.classList.contains('active') && active.length === 1) return;
+  el.classList.toggle('active');
+  buildCron();
+}
+
+function buildCron() {
+  const min  = document.getElementById('sched-min').value;
+  const hour = document.getElementById('sched-hour').value;
+  const dom  = document.getElementById('sched-dom').value;
+  const intv = document.getElementById('sched-interval').value;
+  const dows = [...document.querySelectorAll('#dow-grid .dow-btn.active')]
+                 .map(el=>el.dataset.dow).sort((a,b)=>a-b).join(',');
+  const date = document.getElementById('sched-date').value;
+
+  let expr='', human='';
+  switch (_freq) {
+    case 'daily':   expr=`${min} ${hour} * * *`;       human=`Every day at ${pad(hour)}:${pad(min)} UTC`; break;
+    case 'weekly':  expr=`${min} ${hour} * * ${dows}`; human=`Every ${dows.split(',').map(d=>DOW_NAMES[d]).join(', ')} at ${pad(hour)}:${pad(min)} UTC`; break;
+    case 'monthly': expr=`${min} ${hour} ${dom} * *`;  human=`Day ${dom} of each month at ${pad(hour)}:${pad(min)} UTC`; break;
+    case 'hourly':  expr=`0 */${intv} * * *`;          human=`Every ${intv} hour${intv>1?'s':''}`; break;
+    case 'once':
+      if (date) { expr=`once ${date}T${pad(hour)}:${pad(min)}`; human=`Once on ${date} at ${pad(hour)}:${pad(min)} UTC`; }
+      else { human='Pick a date above'; }
+      break;
+  }
+  document.getElementById('sched-cron').value          = expr;
+  document.getElementById('cron-expr-display').textContent = expr || '—';
+  document.getElementById('cron-human-display').textContent = human || '—';
+}
+
+function cronToHuman(expr) {
+  if (!expr) return '—';
+  if (expr.startsWith('once ')) return `Once on ${expr.slice(5).replace('T',' ')} UTC`;
+  const p = expr.trim().split(/\s+/);
+  if (p.length !== 5) return expr;
+  const [min, hr, dom, , dow] = p;
+  if (hr.startsWith('*/'))       return `Every ${hr.slice(2)} hours`;
+  if (dow !== '*' && dom === '*') return `${dow.split(',').map(d=>DOW_NAMES[+d]||d).join(', ')} at ${pad(hr)}:${pad(min)} UTC`;
+  if (dom !== '*' && dow === '*') return `Day ${dom}/month at ${pad(hr)}:${pad(min)} UTC`;
+  return `Daily ${pad(hr)}:${pad(min)} UTC`;
+}
+
+function parseCronIntoBuilder(expr) {
+  if (expr.startsWith('once ')) {
+    const [date, time] = expr.slice(5).split('T');
+    const [hr, mn] = (time||'06:00').split(':');
+    setFreq('once');
+    document.getElementById('sched-date').value = date;
+    document.getElementById('sched-hour').value = parseInt(hr);
+    document.getElementById('sched-min').value  = parseInt(mn);
+    buildCron(); return;
+  }
+  const p = expr.trim().split(/\s+/);
+  if (p.length !== 5) { setFreq('daily'); return; }
+  const [min, hr, dom, , dow] = p;
+  if (hr.startsWith('*/')) {
+    setFreq('hourly'); document.getElementById('sched-interval').value = hr.slice(2);
+  } else if (dow !== '*') {
+    setFreq('weekly');
+    document.getElementById('sched-hour').value = hr;
+    document.getElementById('sched-min').value  = min;
+    const sel = new Set(dow.split(',').map(Number));
+    document.querySelectorAll('#dow-grid .dow-btn').forEach(el => el.classList.toggle('active', sel.has(+el.dataset.dow)));
+  } else if (dom !== '*') {
+    setFreq('monthly');
+    document.getElementById('sched-hour').value = hr;
+    document.getElementById('sched-min').value  = min;
+    document.getElementById('sched-dom').value  = dom;
+  } else {
+    setFreq('daily');
+    document.getElementById('sched-hour').value = hr;
+    document.getElementById('sched-min').value  = min;
+  }
+  buildCron();
+}
+
+// ---- Completed Runs -------------------------------------------------------
+async function loadRuns() {
+  const res = await fetch(`${API}/runs?limit=50`);
+  const rows = await res.json();
+  document.getElementById('runs-count').textContent = rows.length;
+  const tb = document.getElementById('runs-tbody');
+  if (!rows.length) { tb.innerHTML = '<tr class="empty-row"><td colspan="8">No completed runs yet.</td></tr>'; return; }
+  tb.innerHTML = rows.map(r => `
+    <tr>
+      <td style="padding:12px 8px;width:28px"><button class="expand-btn" onclick="toggleCycles(${r.recipe_run_id}, this)">▶</button></td>
+      <td><code style="color:#a5b4fc">#${r.recipe_run_id}</code></td>
+      <td>${r.unit_code}</td>
+      <td>${r.recipe_name}</td>
+      <td>${statusBadge(r.recipe_run_status)}</td>
+      <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_start)}</td>
+      <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_end)}</td>
+      <td><button class="btn btn-sm" onclick="openLog(${r.recipe_run_id}, false)">View Log</button></td>
+    </tr>`).join('');
+}
+
+// ---- Cycle detail expand --------------------------------------------------
+const _cycleCache = {};
+
+async function toggleCycles(runId, btn) {
+  const detailRowId = `cycles-${runId}`;
+  const existing = document.getElementById(detailRowId);
+  if (existing) {
+    const hidden = existing.style.display === 'none';
+    existing.style.display = hidden ? '' : 'none';
+    btn.textContent = hidden ? '▼' : '▶';
+    return;
+  }
+  btn.textContent = '…';
+  try {
+    const data = _cycleCache[runId] ?? await fetch(`${API}/runs/${runId}/cycles`).then(r => r.json());
+    _cycleCache[runId] = data;
+    const parentRow = btn.closest('tr');
+    const colspan = parentRow.cells.length;
+    const tr = document.createElement('tr');
+    tr.id = detailRowId;
+    tr.className = 'cycle-detail-row';
+    tr.innerHTML = `<td colspan="${colspan}">${buildCycleTable(data)}</td>`;
+    parentRow.insertAdjacentElement('afterend', tr);
+    btn.textContent = '▼';
+  } catch (e) {
+    btn.textContent = '▶';
+    toast('Failed to load cycle data', true);
+  }
+}
+
+function buildCycleTable(cycles) {
+  if (!cycles.length) return '<div style="padding:10px 14px;color:#475569;font-size:.82rem">No cycle data recorded for this run.</div>';
+  const STATUS_LABEL = {R:'Running', C:'Completed', F:'Failed', S:'Queued'};
+  const rows = cycles.map(c => `
+    <tr>
+      <td>${c.recipe_item_seq_cycle_num}</td>
+      <td>${c.recipe_item_seq_name ?? '—'}</td>
+      <td>${fmtTime(c.recipe_line_seq_cycle_run_start)}</td>
+      <td>${fmtTime(c.recipe_line_seq_cycle_run_end)}</td>
+      <td>${statusBadge(c.recipe_line_cycle_run_status)}</td>
+      <td class="cycle-params">${c.run_params ? JSON.stringify(c.run_params) : '—'}</td>
+    </tr>`).join('');
+  return `<table class="cycle-table">
+    <thead><tr>
+      <th>Cycle #</th><th>Step</th><th>Started</th><th>Ended</th><th>Status</th><th>Params</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ---- Log Modal ------------------------------------------------------------
+function _stopLogPoll() {
+  if (_logPollInterval !== null) {
+    clearInterval(_logPollInterval);
+    _logPollInterval = null;
+  }
+  _logPollRunId = null;
+  _logPollOffset = 0;
+  document.getElementById('live-badge').style.display = 'none';
+}
+
+async function openLog(runId, isLive) {
+  _stopLogPoll();
+  _logIsLive = isLive;
+  document.getElementById('log-content').textContent = 'Loading…';
+  document.getElementById('log-run-id').textContent = '#' + runId;
+  document.getElementById('log-unit').textContent = '…';
+  document.getElementById('log-recipe').textContent = '…';
+  document.getElementById('log-status-badge').innerHTML = '';
+  document.getElementById('log-modal').classList.add('open');
+
+  const fullLog = document.getElementById('log-full-checkbox').checked;
+  await _loadLogContent(runId, fullLog);
+
+  if (isLive) {
+    _logPollRunId = runId;
+    document.getElementById('live-badge').style.display = '';
+    _logPollInterval = setInterval(async () => {
+      if (_logPollRunId === null) return;
+      try {
+        const res = await fetch(`${API}/runs/${_logPollRunId}/log?offset=${_logPollOffset}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.content) {
+          const pre = document.getElementById('log-content');
+          pre.textContent += data.content;
+          pre.scrollTop = pre.scrollHeight;
+        }
+        _logPollOffset = data.next_offset;
+        document.getElementById('log-status-badge').innerHTML = statusBadge(data.status);
+        if (data.status !== 'R') _stopLogPoll();
+      } catch (_) {}
+    }, 3000);
+  }
+}
+
+async function _loadLogContent(runId, fullLog) {
+  const pre = document.getElementById('log-content');
+  if (fullLog) {
+    // Full mode: fetch entire log via /api/runs/<id>
+    const res = await fetch(`${API}/runs/${runId}`);
+    if (!res.ok) { pre.textContent = 'Failed to load.'; return; }
+    const r = await res.json();
+    document.getElementById('log-unit').textContent = r.unit_code;
+    document.getElementById('log-recipe').textContent = r.recipe_name;
+    document.getElementById('log-status-badge').innerHTML = statusBadge(r.recipe_run_status);
+    pre.textContent = r.log || '(no output yet)';
+    _logPollOffset = new TextEncoder().encode(r.log || '').length;
+    pre.scrollTop = pre.scrollHeight;
+  } else {
+    // Tail mode: fetch last 50 lines via ?tail=50
+    const res = await fetch(`${API}/runs/${runId}/log?tail=50`);
+    if (!res.ok) { pre.textContent = 'Failed to load.'; return; }
+    const data = await res.json();
+    document.getElementById('log-unit').textContent = data.unit_code;
+    document.getElementById('log-recipe').textContent = data.recipe_name;
+    document.getElementById('log-status-badge').innerHTML = statusBadge(data.status);
+    pre.textContent = data.content || '(no output yet)';
+    _logPollOffset = data.next_offset;
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function toggleLogFull() {
+  const runIdText = document.getElementById('log-run-id').textContent;
+  if (!runIdText || runIdText === '—') return;
+  const runId = parseInt(runIdText.replace('#', ''), 10);
+  await openLog(runId, _logIsLive);
+}
+
+function closeLogModal() {
+  _stopLogPoll();
+  document.getElementById('log-modal').classList.remove('open');
+}
+
+document.querySelectorAll('.modal-bg').forEach(bg =>
+  bg.addEventListener('click', e => { if (e.target === bg) { if (bg.id === 'log-modal') closeLogModal(); else bg.classList.remove('open'); } }));
+
+// ---- Log Management -------------------------------------------------------
+async function loadLogConfig() {
+  const res = await fetch(`${API}/config/logs`);
+  if (!res.ok) return;
+  const d = await res.json();
+  document.getElementById('lm-compress-days').value = d.compress_days;
+  document.getElementById('lm-delete-days').value   = d.delete_days;
+
+  const sizeStr = d.log_size_bytes > 1048576
+    ? (d.log_size_bytes / 1048576).toFixed(1) + ' MB'
+    : d.log_size_bytes > 1024
+    ? (d.log_size_bytes / 1024).toFixed(1) + ' KB'
+    : d.log_size_bytes + ' B';
+  const oldestStr = d.oldest_mtime
+    ? d.oldest_mtime.replace('T', ' ').slice(0, 10)
+    : 'n/a';
+  document.getElementById('logmgmt-stats').innerHTML =
+    `<strong>${d.log_count}</strong> log file${d.log_count !== 1 ? 's' : ''} &nbsp;·&nbsp; `
+    + `<strong>${sizeStr}</strong> total &nbsp;·&nbsp; oldest: <strong>${oldestStr}</strong>`;
+}
+
+async function saveLogDefaults() {
+  const compress_days = parseInt(document.getElementById('lm-compress-days').value);
+  const delete_days   = parseInt(document.getElementById('lm-delete-days').value);
+  if (isNaN(compress_days) || isNaN(delete_days)) { toast('Enter valid day counts', true); return; }
+  const res = await fetch(`${API}/config/logs`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({compress_days, delete_days}),
+  });
+  if (res.ok) toast('Defaults saved');
+  else toast('Failed to save defaults', true);
+}
+
+async function compressLogs() {
+  const days = parseInt(document.getElementById('lm-compress-days').value);
+  if (isNaN(days)) { toast('Enter a valid number of days', true); return; }
+  const res = await fetch(`${API}/logs/compress?days=${days}`, {method:'POST'});
+  if (res.ok) {
+    const d = await res.json();
+    toast(`Compressed ${d.compressed} file${d.compressed !== 1 ? 's' : ''} (${d.skipped} skipped)`);
+    loadLogConfig();
+  } else {
+    toast('Compression failed', true);
+  }
+}
+
+async function deleteLogs() {
+  const days = parseInt(document.getElementById('lm-delete-days').value);
+  if (isNaN(days)) { toast('Enter a valid number of days', true); return; }
+  if (!confirm(`Delete all log files older than ${days} day${days !== 1 ? 's' : ''}?`)) return;
+  const res = await fetch(`${API}/logs/delete?days=${days}`, {method:'POST'});
+  if (res.ok) {
+    const d = await res.json();
+    toast(`Deleted ${d.deleted} file${d.deleted !== 1 ? 's' : ''} (${d.skipped} skipped)`);
+    loadLogConfig();
+  } else {
+    toast('Delete failed', true);
+  }
+}
+
+// ---- Control Algorithms panel ---------------------------------------------
+async function loadAlgorithms() {
+  const res = await fetch(`${API}/algorithms`);
+  _algorithms = await res.json();
+  const tb = document.getElementById('algo-tbody');
+  if (!_algorithms.length) {
+    tb.innerHTML = '<tr class="empty-row"><td colspan="5">No algorithms found.</td></tr>';
+    return;
+  }
+  tb.innerHTML = _algorithms.map(a => {
+    const params = JSON.stringify(a.default_params || {}, null, 2);
+    return `<tr>
+      <td><span class="algo-badge">${a.algorithm_code}</span></td>
+      <td style="font-weight:600;color:#e2e8f0">${a.algorithm_name}</td>
+      <td style="font-size:.82rem;color:#94a3b8">${a.description || ''}</td>
+      <td><textarea id="algo-params-${a.algorithm_id}" style="width:100%;background:#0f172a;border:1px solid #2a364e;border-radius:6px;color:#e2e8f0;padding:6px 8px;font:0.75rem/1.5 monospace;min-height:54px;resize:vertical">${params}</textarea></td>
+      <td><button class="btn btn-sm btn-purple" onclick="saveAlgorithm(${a.algorithm_id})">Save</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function saveAlgorithm(aid) {
+  const ta = document.getElementById(`algo-params-${aid}`);
+  let params;
+  try { params = JSON.parse(ta.value); } catch(e) { toast('Invalid JSON in params', true); return; }
+  const res = await fetch(`${API}/algorithms/${aid}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({default_params: params}),
+  });
+  if (res.ok) { toast('Algorithm defaults saved'); loadAlgorithms(); }
+  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast('Error: '+e.error, true); }
+}
+
+function _populateAlgoSelect(selId, selectedId) {
+  const sel = document.getElementById(selId);
+  const prev = selectedId !== undefined ? selectedId : (sel.value || '');
+  sel.innerHTML = '<option value="">— use recipe/unit default —</option>'
+    + _algorithms.map(a => `<option value="${a.algorithm_id}">${a.algorithm_name} (${a.algorithm_code})</option>`).join('');
+  if (prev) sel.value = prev;
+}
+
+// ---- Units & Control Memory -----------------------------------------------
+async function loadUnitMemory() {
+  const res = await fetch(`${API}/units`);
+  const units = await res.json();
+  const tb = document.getElementById('units-memory-tbody');
+  if (!units.length) { tb.innerHTML = '<tr class="empty-row"><td colspan="4">No units found.</td></tr>'; return; }
+  tb.innerHTML = units.map(u => {
+    const hasState = u.algorithm_state_count > 0;
+    return `<tr>
+      <td><strong>${u.unit_code}</strong></td>
+      <td>${u.recipe_count}</td>
+      <td>${hasState ? `<span style="color:#a5b4fc">${u.algorithm_state_count} record${u.algorithm_state_count!==1?'s':''}</span>` : '<span style="color:#475569">none</span>'}</td>
+      <td><button class="btn btn-sm btn-danger" ${hasState?'':'disabled style="opacity:.4;cursor:not-allowed"'} onclick="clearAlgorithmState(${u.unit_id},'${u.unit_code}')">
+        Clear Control Memory
+      </button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function clearAlgorithmState(uid, ucode) {
+  if (!confirm(`Reset learned control memory for ${ucode}?\nThis will clear Q-Learning history — the algorithm will cold-start next run.`)) return;
+  const res = await fetch(`${API}/units/${uid}/algorithm-state`, {method:'DELETE'});
+  if (res.ok) {
+    const d = await res.json();
+    toast(`Control memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)`);
+    loadUnitMemory();
+  } else {
+    toast('Failed to clear memory', true);
+  }
+}
+
+// ---- Algorithm helpers for modals -----------------------------------------
+async function _ensureAlgorithms() {
+  if (!_algorithms.length) await loadAlgorithms();
+}
+
+async function _getPermissionAlgorithm(unit_id, recipe_id) {
+  // Fetch permission algo + name for the unit/recipe combination
+  if (!unit_id || !recipe_id) return null;
+  try {
+    const res = await fetch(`${API}/schedules`);
+    // We don't have a direct permission endpoint — use the defaults from algo list
+    // The hint is best-effort; the server resolves the chain authoritatively.
+    return null;
+  } catch(e) { return null; }
+}
+
+function _algoHint(algoId, paramsJson) {
+  if (!algoId) return 'Effective: IF_THEN_ELSE (system default)';
+  const a = _algorithms.find(x => x.algorithm_id === parseInt(algoId));
+  if (!a) return '';
+  let params = {};
+  try { params = paramsJson ? JSON.parse(paramsJson) : {}; } catch(e) {}
+  const effective = {...(a.default_params||{}), ...params};
+  return `Effective: ${a.algorithm_code} ${JSON.stringify(effective)}`;
+}
+
+// ---- Schedule modal — algorithm fields ------------------------------------
+function onSchedAlgoChange() {
+  const aid = document.getElementById('sched-algorithm-id').value;
+  document.getElementById('sched-params-row').style.display = aid ? '' : 'none';
+  document.getElementById('sched-algo-hint').textContent = _algoHint(aid, document.getElementById('sched-algo-params').value);
+}
+
+// ---- Run Now modal — algorithm fields -------------------------------------
+function onRnRecipeChange() {
+  onRnAlgoChange();
+}
+
+function onRnAlgoChange() {
+  const aid = document.getElementById('rn-algorithm-id').value;
+  document.getElementById('rn-params-row').style.display = aid ? '' : 'none';
+  document.getElementById('rn-algo-hint').textContent = _algoHint(aid, document.getElementById('rn-algo-params').value);
+}
+
+// ---- Init -----------------------------------------------------------------
+initSelects();
+setFreq('daily');
+loadActive();
+loadSchedules();
+loadRuns();
+loadLogConfig();
+loadAlgorithms();
+loadUnitMemory();
+setInterval(loadActive, 10000);
+setInterval(loadRuns, 30000);
+setInterval(loadSchedules, 30000);
+</script>
+</body>
+</html>

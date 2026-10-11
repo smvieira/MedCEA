@@ -1,0 +1,62 @@
+{
+  "serial_number": "3c61053e1458",
+  "device_type": "SENSE",
+  "model": "ESP32",
+  "manufacturer": "Expressif",
+  "dns_name": "UNIT01_SENSE02",
+  "connection_type": "Wifi",
+  "installation_date": "2025-03-25",
+  "is_active": "Y",
+  "components": [
+    {
+      "component_type": "SENSE",
+      "model": "ESP32",
+      "manufacturer": "Expressif",
+      "is_active": "Y",
+      "parameters": [
+        {
+          "topic": "/UNIT01/ZONE01/CO2",
+          "payload": {
+            "unit_zone": "ZONE01",
+            "tag": "co2",
+            "value": "953.9",
+            "UoM": "ppm",
+            "timestamp": "2025-03-25 12:38:36",
+            "msg_type": "AP",
+            "unit_code": "UNIT01",
+            "device_id": "3c61052ff5cc",
+            "device_dns": "UNIT01_SENSE01"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/temperature",
+          "payload": {
+            "unit_zone": "ZONE01",
+            "tag": "temperature",
+            "value": "27.8",
+            "UoM": "C",
+            "timestamp": "2025-03-25 12:38:36",
+            "msg_type": "AP",
+            "unit_code": "UNIT01",
+            "device_id": "3c61052ff5cc",
+            "device_dns": "UNIT01_SENSE01"
+          }
+        },
+        {
+          "topic": "/UNIT01/ZONE01/humidity",
+          "payload": {
+            "unit_zone": "ZONE01",
+            "tag": "humidity",
+            "value": "42.3",
+            "UoM": "RH%",
+            "timestamp": "2025-03-25 12:41:21",
+            "msg_type": "AP",
+            "unit_code": "UNIT01",
+            "device_id": "3c61052ff5cc",
+            "device_dns": "UNIT01_SENSE01"
+          }
+        }
+      ]
+    }
+  ]
+}
