@@ -6,7 +6,7 @@ platform database gave it, and present in the Devices tab as the device in its
 slot.
 
 ```
-UNIT01_SENSE_ZONE01     unit, role, zone — the device_dns
+unit01-s-zone01     lower(unit) - s|c - lower(zone): the board's one name
 ```
 
 The unit and the zone are **chosen, not typed**. They come from `medcea.cea_unit`
@@ -18,8 +18,7 @@ opportunity to get them wrong.
 
 `--unregistered` still does the old thing — bring the board up on WiFi with no
 platform identity at all, for a bench with no platform deployed. That board is
-visibly unregistered in both its names (`CEA_DEV_UNREG_*` in the record,
-`cea-un-*` on the network) and has no MQTT credential, so it can talk to
+visibly unregistered by its name (`cea-un-<mac6>`) and has no MQTT credential, so it can talk to
 nothing. Onboarding it again later gives it a slot; nothing has to be undone.
 
 ```bash
@@ -159,7 +158,7 @@ it. `--ui-port 0` picks a free port if 8088 is taken.
 
 The page shows the live log, the current step, whichever question the script is
 waiting on, and a summary card at the end. That card now carries the slot as
-well as the credentials: `device_dns`, unit/zone, role, the broker, the topics
+well as the credentials: the hostname, unit/zone, role, the broker, the topics
 the board will use, and whether the `medcea.device` row was actually written. The
 link in the header goes to `$CONFIG_DOMAIN/#devices`, where the board it just
 onboarded now appears.
@@ -302,7 +301,7 @@ some boards.
 | 2 | Pick the serial port | Autodetects; prompts when several are present; detects the `dialout` problem and says so |
 | 3 | `flash_id` — read chip family and MAC | Runs *before* firmware selection: the family determines the offset (`0x0` for S3/C3/C6, `0x1000` for classic ESP32 and S2) **and** which upstream board page is relevant |
 | 4 | Pick the firmware, local or upstream | Local images for this board, newest first and default; plus whatever micropython.org publishes. Downloads on request and hashes into `SHA256SUMS` |
-| 5 | Derive the identity | `UNIT01_SENSE_ZONE01` from the slot, `u01-s-z01` for DHCP. With `--unregistered`: `CEA_DEV_UNREG_<ts>_<MAC6>` and `cea-un-<mac6>` |
+| 5 | Derive the identity | `unit01-s-zone01` from the slot — one name for DHCP, `dns_name` and the payloads. With `--unregistered`: `cea-un-<mac6>` |
 | 6 | `erase_flash` then `write_flash` | 460800 baud, falls back to 115200 |
 | 7 | Wait for the REPL | Handles both the bridge and native-USB re-enumeration cases |
 | 8 | **Scan WiFi from the board's own radio** | Menu sorted by signal, with manual entry for hidden SSIDs |
@@ -329,8 +328,8 @@ the platform knows about.
 Each unit/zone holds exactly two boards:
 
 ```
-UNIT01 / ZONE01  ->  UNIT01_SENSE_ZONE01      reads the chamber
-                     UNIT01_CONTROL_ZONE01    drives the chamber
+UNIT01 / ZONE01  ->  unit01-s-zone01      reads the chamber
+                     unit01-c-zone01      drives the chamber
 ```
 
 That rule is read from the live `medcea.device` table on every run, not remembered:
@@ -346,7 +345,7 @@ The wizard asks for what only the operator can know, and derives the rest:
 | | |
 |---|---|
 | **Asked** | role; unit/zone slot; which sensors are wired up and to which GPIO (or, for CONTROL, which relay channel drives which piece of equipment); WiFi network and passphrase |
-| **Inferred** | MQTT host and port from `config.env`; topic root from `PROJECT_NAME`; topics, client id and `device_dns` from the slot; pin defaults from the reference build |
+| **Inferred** | MQTT host and port from `config.env`; topic root from `PROJECT_NAME`; topics, client id and the hostname from the slot; pin defaults from the reference build |
 
 The questions themselves are data, in `edge/templates/esp32-sense.json` and
 `edge/templates/esp32-control.json` — **adding a supported sensor is adding an
@@ -545,47 +544,44 @@ the strongest reading when an SSID appears on several APs or bands.
 If a network you expect is missing, the usual cause is that it is **5 GHz only**.
 The ESP32 and ESP32-S3 have 2.4 GHz radios and cannot see a 5 GHz SSID at all.
 
-### Two names, and the address you should actually use
+### One name, and the address you should actually use
 
 ```
-device_dns   UNIT01_SENSE_ZONE01     platform identifier
-hostname     u01-s-z01               what DHCP registers
-ip address   192.168.1.122           <- use this
+hostname     unit01-s-zone01         DHCP name, dns_name, payload device_dns
+ip address   192.168.1.122           <- always works
 ```
 
-The underscore form is the platform's identifier: it is what goes in
-`medcea.device.dns_name`, in every MQTT payload, and in the provisioning record. It
-is **not a legal hostname** — RFC 1123 permits letters, digits and hyphens only,
-and DHCP servers quietly drop or mangle names containing underscores.
+A board has **one name**: `lower(unit_code)-<s|c>-lower(zone_code)`, built from
+the codes in the database at onboarding. It is what DHCP registers,
+`medcea.device.dns_name`, the `device_dns` field in every MQTT payload, what the
+config UI's Online check pings, and the provisioning record's file name.
+Lowercasing is the only transformation — the unit and zone codes are already
+human-chosen, so the name stays readable and is the same every time the slot is
+onboarded.
 
-**The hostname must also be short.** MicroPython caps the hostname length and
-raises on anything longer. The first version of this script asked for a
-35-character name; the board refused it, silently kept MicroPython's default
-`mpy-esp32s3`, and registered *that* with DHCP — so every name the script
-printed was a fiction. `unit01-sense-zone01` is 19 characters and would fail the
-same way.
+**The codes must make a legal hostname.** RFC 1123 permits letters, digits and
+hyphens only (no leading or trailing hyphen), and DHCP servers quietly drop or
+mangle anything else. **It must also fit MicroPython's hostname buffer**, 32
+characters (`MICROPY_PY_NETWORK_HOSTNAME_MAX_LEN`). The first version of this
+script asked for a 35-character name; the board refused it, silently kept
+MicroPython's default `mpy-esp32s3`, and registered *that* with DHCP. A slot whose
+codes break either rule is listed as **not offered, with the reason** — rename
+the code in the Units tab. There is no fallback name. The script also reads the
+hostname back off the board after boot and says so loudly if what stuck is not
+what was asked for.
 
-So the network name is a **compressed form of the same slot**, not a different
-identity:
+**Unique by construction.** Unit codes are unique ignoring case, and zone codes
+are unique within their unit ignoring case (database indexes, migration 005);
+the role letter separates the two boards of a zone.
 
-```
-UNIT01  ->  u01     the alphabetic part, shortened; the number kept
-SENSE   ->  s       the closed set, so one letter is unambiguous
-ZONE01  ->  z01
-```
+An **unregistered** board is `cea-un-<mac6>`: unique by MAC, and `un` says at a
+glance that it has no slot.
 
-The alphabetic part is shortened only as far as it can go while staying
-unambiguous against every other unit code in the database — `MUSHROOMBAY` and
-`MUSHROOMLAB` become `mushroomb` and `mushrooml`, not two boards both called
-`mus`. A slot whose codes cannot be compressed into something a hostname may
-legally hold falls back to `cea-<mac6>`, with a warning; the `device_dns` is
-never affected.
-
-An **unregistered** board keeps the older pair, `CEA_DEV_UNREG_<ts>_<MAC6>` and
-`cea-un-<mac6>`, joined by the MAC suffix. Both names say the board has no slot.
-
-The script reads the hostname back off the board after boot and says so loudly
-if what stuck is not what was asked for.
+This replaced two earlier names: `UNIT01_SENSE_ZONE01` (the old `dns_name`, not a
+legal hostname, so it never resolved) and `u01-s-z01` (a compressed form that
+changed whenever another unit was added). A board flashed before the change keeps
+its old names until it is onboarded again; onboarding the slot updates the same
+`medcea.device` row.
 
 ### `.local` does not work — the board runs no mDNS responder
 

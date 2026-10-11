@@ -7,7 +7,8 @@
 # carrying its role's application, publishing to the platform under an identity
 # the platform database gave it, and registered as the device in that slot.
 #
-#     UNIT01_SENSE_ZONE01     unit, role, zone - the device_dns
+#     unit01-s-zone01     lower(unit) - s|c - lower(zone): the board's one name —
+#                         DHCP hostname, medcea.device.dns_name, MQTT device_dns
 #
 # The unit and the zone are CHOSEN, not typed: they come from medcea.cea_unit and
 # medcea.cea_zone, and a unit/zone holds one and only one SENSE and one and only
@@ -38,14 +39,12 @@ Usage: ./edge/flash-device.sh [options]
 
 Flashes MicroPython onto one ESP32/ESP32-S3 over USB, gives it a slot from the
 platform database, ships its role's application, and registers it as the device
-in that slot. The identity has two forms, because a hostname cannot be as long
-as a platform identifier:
+in that slot. The board has one name, built from the slot's codes lowercased:
 
-  UNIT01_SENSE_ZONE01   platform identifier - device_dns, MQTT payloads, the
-                        medcea.device row
-  u01-s-z01             network name, what DHCP registers
+  unit01-s-zone01       lower(unit) - s|c - lower(zone): the DHCP hostname, the
+                        medcea.device dns_name and device_dns in MQTT payloads
 
-  (--unregistered instead gives CEA_DEV_UNREG_<ts>_<MAC6> / cea-un-<mac6>)
+  (--unregistered instead gives cea-un-<mac6>)
 
 Options:
       --role ROLE       SENSE or CONTROL, instead of being asked
@@ -110,7 +109,7 @@ What gets asked, and what does not:
   Asked      role, unit/zone slot, which sensors or relay channels are wired
              up and to which GPIO, WiFi network and passphrase.
   Inferred   MQTT host and port from config.env; topics, client id and
-             device_dns from the slot; pin defaults from the reference build.
+             the hostname from the slot; pin defaults from the reference build.
   The questions live in edge/templates/<role>.json. Adding a supported sensor
   is adding an entry there, not editing this script.
 
@@ -119,7 +118,7 @@ Outputs:
                  CONTROL board actuator_config.json built from the pins chosen.
   In the platform  a medcea.device row plus one medcea.component row per sensor, or
                  one for the relay board.
-  edge/provisioned/<DEVICE_DNS>.json   chmod 600 — MAC, firmware hash, WiFi
+  edge/provisioned/<hostname>.json     chmod 600 — MAC, firmware hash, WiFi
                                        SSID, WebREPL password, tool versions.
 EOF
 }
@@ -556,7 +555,7 @@ fi
 #
 # A device's identity is not typed, it is CHOSEN from the platform database:
 #
-#   UNIT01_SENSE_ZONE01     unit, role, zone — the device_dns
+#   unit01-s-zone01     lower(unit) - s|c - lower(zone): the board's one name
 #
 # and a unit/zone has one and only one SENSE and one and only one CONTROL, so a
 # slot that is already filled is not offered. Nothing here asks for an MQTT
@@ -564,7 +563,7 @@ fi
 # and an operator retyping them is only an opportunity to get them wrong.
 PLATDB="$SRC_HOST/platform_db.py"
 TEMPLATE_TOOL="$SRC_HOST/device_template.py"
-UNIT_CODE=""; ZONE_CODE=""; ZONE_ID=""; SHORT_HOST=""; SLOT_DNS=""
+UNIT_CODE=""; ZONE_CODE=""; ZONE_ID=""; SLOT_DNS=""
 SENSORS_TSV=""; CONTROL_PINS_TSV=""; CONTROL_DRIVER="relay8"
 MESSAGE_INTERVAL=""; POLL_MS=""
 
@@ -578,7 +577,7 @@ if [ "$UNREGISTERED" != 1 ]; then
     echo "    cannot be given a slot. It can still be brought up unregistered."
     ui_waiting
     prompt_confirm 'Continue without a platform identity?' \
-      "The board will come up as CEA_DEV_UNREG_* with no MQTT credential, no unit and no zone — the same as --unregistered. Onboard it again once the platform is reachable."
+      "The board will come up as cea-un-<mac6> with no MQTT credential, no unit and no zone — the same as --unregistered. Onboard it again once the platform is reachable."
     [ "$ANSWER" = "y" ] || die "aborted: no platform database, and you chose not to continue unregistered"
     UNREGISTERED=1
   fi
@@ -603,12 +602,22 @@ if [ "$UNREGISTERED" != 1 ]; then
   # rejected entry is worse than one that only holds valid answers.
   mapfile -t FREE < <(awk -F'\t' -v r="$ROLE" '$1=="SLOT" && $5==r && $6=="free"' <<<"$SLOTS")
   mapfile -t BUSY < <(awk -F'\t' -v r="$ROLE" '$1=="SLOT" && $5==r && $6=="taken"' <<<"$SLOTS")
+  mapfile -t UNNAMED < <(awk -F'\t' -v r="$ROLE" '$1=="SLOT" && $5==r && $6=="unnamed"' <<<"$SLOTS")
 
   if [ "${#BUSY[@]}" -gt 0 ]; then
     info "${DIM}already has a $ROLE:${N}"
     for b in "${BUSY[@]}"; do
       IFS=$'\t' read -r _ bu bz _ _ _ _ _ bocc _ <<<"$b"
       info "  ${DIM}$bu / $bz  ->  ${bocc}${N}"
+    done
+  fi
+
+  # Slots whose codes cannot form a hostname are not offered: the name is the
+  # codes lowercased and nothing else, so the fix is renaming the code.
+  if [ "${#UNNAMED[@]}" -gt 0 ] && [ -n "${UNNAMED[0]:-}" ]; then
+    for b in "${UNNAMED[@]}"; do
+      IFS=$'\t' read -r _ _ _ _ _ _ _ _ breason _ <<<"$b"
+      warn "not offered: $breason"
     done
   fi
 
@@ -629,7 +638,7 @@ if [ "$UNREGISTERED" != 1 ]; then
 
   if [ "${#FREE[@]}" -eq 1 ]; then
     SLOT_LINE="${FREE[0]}"
-    IFS=$'\t' read -r _ UNIT_CODE ZONE_CODE ZONE_ID _ _ SLOT_DNS SHORT_HOST _ _ _ <<<"$SLOT_LINE"
+    IFS=$'\t' read -r _ UNIT_CODE ZONE_CODE ZONE_ID _ _ SLOT_DNS _ _ _ _ <<<"$SLOT_LINE"
     info "only one free $ROLE slot: ${B}$UNIT_CODE / $ZONE_CODE${N}"
   else
     menu_reset
@@ -641,18 +650,12 @@ if [ "$UNREGISTERED" != 1 ]; then
     menu_ask "Which unit and zone is this board going into?" \
       "Only free $ROLE slots are listed. Each is one physical zone of one chamber."
     SLOT_LINE="${FREE[$((ANSWER-1))]}"
-    IFS=$'\t' read -r _ UNIT_CODE ZONE_CODE ZONE_ID _ _ SLOT_DNS SHORT_HOST _ _ _ <<<"$SLOT_LINE"
+    IFS=$'\t' read -r _ UNIT_CODE ZONE_CODE ZONE_ID _ _ SLOT_DNS _ _ _ _ <<<"$SLOT_LINE"
   fi
 
-  [ -n "$SLOT_DNS" ] || die "internal: the platform returned a slot with no device_dns"
-  if [ -z "$SHORT_HOST" ]; then
-    # platform_db could not compress the unit/zone codes into something a
-    # hostname may hold. Say so rather than shipping a name the board refuses.
-    warn "'$UNIT_CODE / $ZONE_CODE' does not compress into a legal hostname."
-    warn "Falling back to the MAC form; the device_dns is unaffected."
-  fi
-  info "device_dns : ${B}$SLOT_DNS${N}"
-  info "hostname   : ${SHORT_HOST:-<from MAC>}   ${DIM}(what DHCP registers)${N}"
+  [ -n "$SLOT_DNS" ] || die "internal: the platform returned a free slot with no hostname"
+  # One name: the DHCP hostname, which is also dns_name and the payload's device_dns.
+  info "hostname   : ${B}$SLOT_DNS${N}   ${DIM}(DHCP name, dns_name and MQTT device_dns)${N}"
 fi
 
 # ------------------------------------------------- 0.6 what is wired up -------
@@ -973,6 +976,41 @@ esac
 info "chip:   $CHIP_DESC"
 info "mac:    $MAC"
 
+# Is this board already registered somewhere else? serial_number (the MAC) is
+# unique, so a board moved to another slot cannot get a second row; registering
+# would be refused at the very end, after the erase and the flash. Ask now,
+# before anything is written: the slot was chosen before the board was probed,
+# and this is the first moment both are known. Yes moves the board's own row to
+# the new slot (platform_db.register, move_device_id) and frees the old one.
+MOVE_FROM_ID=""
+if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
+  _serial="$(tr -d ':' <<<"$MAC" | tr '[:upper:]' '[:lower:]')"
+  if _b="$(python3 "$PLATDB" board "$_serial" 2>&1)"; then
+    if [ -n "$_b" ]; then
+      IFS=$'\t' read -r _ b_id b_dns b_zone b_role b_active b_unit b_zonecode <<<"$_b"
+      if [ "$b_zone" = "$ZONE_ID" ] && [ "$b_role" = "$ROLE" ]; then
+        info "already registered in this slot as $b_dns — its row is updated in place"
+      else
+        _where="${b_unit:-?} / ${b_zonecode:-?} ($b_role)"
+        [ "$b_active" = "Y" ] || _where="$_where, inactive"
+        warn "this board is already registered as $b_dns — $_where."
+        if [ "$ASSUME_YES" = 1 ]; then
+          die "not moving a registered board without asking: onboard it interactively, or delete $b_dns in the Devices tab first"
+        fi
+        ui_waiting
+        prompt_confirm "Move this board from $b_dns to $UNIT_CODE / $ZONE_CODE?" \
+          "Its database row moves to the new slot: the name becomes $SLOT_DNS, the components are replaced, and $_where becomes free. No: nothing is erased or written, and onboarding stops."
+        [ "$ANSWER" = "y" ] || die "stopped before flashing: $b_dns keeps this board. Nothing was written."
+        MOVE_FROM_ID="$b_id"
+        info "will move device $b_id ($b_dns) to $SLOT_DNS"
+      fi
+    fi
+  else
+    warn "could not check whether this board is registered elsewhere:"
+    printf '%s\n' "$_b" | while IFS= read -r l; do warn "  $l"; done
+  fi
+fi
+
 # The wiring question is asked before the board is ever probed — an operator
 # picks a slot and a pin map while the ESP32 is still just a thing on a bench.
 # This is where the two meet: the map was validated against a board the operator
@@ -1155,56 +1193,24 @@ case "$CHIP" in
 esac
 
 # ---------------------------------------------------- 5. identity -------------
-# The name is the point of this stage: a claim that this board has no platform
-# identity yet. It must be impossible to confuse with a real device_dns, and
-# unique so two boards on the bench never collide.
-#
-# It takes TWO forms, because one string cannot be both a platform identifier and
-# a legal, length-capped hostname. They are the same marker at two lengths and
-# are tied together by the MAC suffix:
-#
-#   CEA_DEV_UNREG_<ts>_<MAC6>   platform identifier — the record, device_cfg.py
-#   cea-un-<mac6>               network name — what DHCP registers
-#
-# Anything reading one and expecting the other must match on the MAC suffix.
+# One name per board, and it is the DHCP hostname. A board with a slot is
+# lower(unit)-<s|c>-lower(zone) (platform_db.slot_hostname): its network name,
+# its dns_name and the device_dns in every payload. An unregistered board is
+# cea-un-<mac6> — unique by MAC, and 'un' says at a glance it has no slot.
+# Both are legal RFC 1123 hostnames, and no longer than MicroPython accepts;
+# the name is read back off the board after boot (below), because a name the
+# board refuses is silently replaced by its default ('mpy-esp32s3') — which is
+# exactly what DHCP would then register.
 step "Identity"
 TS="$(date -u +%Y%m%d%H%M%S)"
 MAC6="$(tr -d ':' <<<"$MAC" | tr '[:upper:]' '[:lower:]' | tail -c 7)"
-DEVICE_DNS="CEA_DEV_UNREG_${TS}_$(tr '[:lower:]' '[:upper:]' <<<"$MAC6")"
-
-# The underscore form is the platform identifier. It is NOT a legal hostname:
-# RFC 1123 allows letters, digits and hyphens only, and DHCP servers quietly
-# drop or mangle names with underscores. So the network name is a separate,
-# hyphenated, lowercased twin.
-#
-# And it must be SHORT. MicroPython caps the hostname length and raises on
-# anything longer; the first version of this script asked for a 35-character
-# name, the board refused it, kept MicroPython's default 'mpy-esp32s3', and
-# registered THAT with DHCP — so every name printed below was a fiction. 13
-# characters is comfortably inside any documented limit, still unique by MAC,
-# and 'cea-un-' still reads as an unregistered CEA device at a glance.
-#
-# That length cap is why the two names differ at all: CEA_DEV_UNREG_ alone is
-# 14 characters before the timestamp starts.
-HOSTNAME="cea-un-${MAC6}"
-
-# A board with a slot uses the slot's names instead. The unregistered pair is
-# still computed above, because it is the fallback when the unit and zone codes
-# cannot be compressed into something a hostname may legally hold.
 if [ "$UNREGISTERED" != 1 ]; then
-  DEVICE_DNS="$SLOT_DNS"
-  if [ -n "$SHORT_HOST" ]; then
-    HOSTNAME="$SHORT_HOST"
-  else
-    warn "using the MAC-derived hostname '$HOSTNAME' for $DEVICE_DNS"
-  fi
+  HOSTNAME="$SLOT_DNS"
+else
+  HOSTNAME="cea-un-${MAC6}"
 fi
-
-if [ "${#HOSTNAME}" -gt 15 ]; then
-  warn "hostname '$HOSTNAME' is ${#HOSTNAME} chars — MicroPython may refuse it"
-fi
-info "device_dns : $DEVICE_DNS   ${DIM}(platform identifier)${N}"
-info "hostname   : $HOSTNAME   ${DIM}(${#HOSTNAME} chars — what DHCP registers)${N}"
+DEVICE_DNS="$HOSTNAME"
+info "hostname   : $HOSTNAME   ${DIM}(${#HOSTNAME} chars — DHCP name and device identity)${N}"
 
 # ---------------------------------------------------- 6. flash ----------------
 step "Flash"
@@ -1349,7 +1355,7 @@ if [ "$UNREGISTERED" = 1 ]; then
   # No slot, so nothing to render from a template: the board gets an identity
   # that says it has none, and no application at all. main.py still ships, and
   # parks at "UNREGISTERED" rather than looping on a broker it cannot reach.
-  DEVICE_DNS="$DEVICE_DNS" HOSTNAME="$HOSTNAME" SSID="$SSID" PSK="$PSK" \
+  HOSTNAME="$HOSTNAME" SSID="$SSID" PSK="$PSK" \
   FW_NAME="$FW_NAME" FW_SHA="$FW_SHA" MAC="$MAC" TS="$TS" STAGE="$STAGE" \
   TOPIC_ROOT="$TOPIC_ROOT" \
   "$VENV_DIR/bin/python" - <<'PY'
@@ -1363,7 +1369,6 @@ with open(os.path.join(e["STAGE"], "device_cfg.py"), "w") as f:
 
 STATE            = "UNREGISTERED"
 ROLE             = "UNREGISTERED"
-DEVICE_DNS       = {q("DEVICE_DNS")}
 HOSTNAME         = {q("HOSTNAME")}
 UNIT_CODE        = ""
 ZONE_CODE        = ""
@@ -1385,7 +1390,7 @@ else
   # cannot disagree about which pin drives what.
   RENDER_OUT="$(
     STAGE="$STAGE" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" ZONE_CODE="$ZONE_CODE" \
-    ZONE_ID="$ZONE_ID" SLOT_DNS="$SLOT_DNS" HOSTNAME="$HOSTNAME" \
+    ZONE_ID="$ZONE_ID" HOSTNAME="$HOSTNAME" \
     SSID="$SSID" PSK="$PSK" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" \
     TOPIC_ROOT="$TOPIC_ROOT" MESSAGE_INTERVAL="${MESSAGE_INTERVAL:-30}" \
     POLL_MS="${POLL_MS:-100}" CONTROL_DRIVER="$CONTROL_DRIVER" \
@@ -1400,7 +1405,7 @@ spec = {
     "out_dir": e["STAGE"], "role": e["ROLE"],
     "unit_code": e["UNIT_CODE"], "zone_code": e["ZONE_CODE"],
     "zone_id": int(e["ZONE_ID"]) if e["ZONE_ID"] else None,
-    "device_dns": e["SLOT_DNS"], "hostname": e["HOSTNAME"],
+    "hostname": e["HOSTNAME"],
     "wifi_ssid": e["SSID"], "wifi_psk": e["PSK"],
     "mqtt_host": e["MQTT_HOST"], "mqtt_port": int(e["MQTT_PORT"]),
     "topic_root": e["TOPIC_ROOT"],
@@ -1571,7 +1576,7 @@ if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
     REG_JSON="$(
       SLOT_DNS="$SLOT_DNS" ROLE="$ROLE" ZONE_ID="$ZONE_ID" MAC="$MAC" \
       CHIP_DESC="$CHIP_DESC" DB_COMPONENTS="$DB_COMPONENTS" \
-      NET_HOSTNAME="${HOSTNAME_OK:-$HOSTNAME}" \
+      MOVE_FROM_ID="$MOVE_FROM_ID" \
       python3 -c '
 import json, os, re
 e = os.environ
@@ -1580,11 +1585,10 @@ e = os.environ
 # the network.
 serial = re.sub(r"[^0-9a-fA-F]", "", e["MAC"]).lower()
 print(json.dumps({
+    # The slot hostname (unit02-c-zone02): the one name of the device, what the
+    # config UI pings. register() finds the row by slot, so a renamed unit or
+    # zone code renames the row here instead of creating a second one.
     "dns_name": e["SLOT_DNS"],
-    # What the config UI pings: dns_name has underscores and never resolves.
-    # The name the board actually reported if it was verified, else the one
-    # it was given.
-    "hostname": e["NET_HOSTNAME"] or None,
     "device_type": e["ROLE"],
     "zone_id": int(e["ZONE_ID"]),
     "serial_number": serial,
@@ -1593,6 +1597,8 @@ print(json.dumps({
     "connection_type": "WiFi",
     "is_active": "Y",
     "components": json.loads(e["DB_COMPONENTS"]),
+    # Set when the operator agreed to move this board from another slot.
+    "move_device_id": int(e["MOVE_FROM_ID"]) if e["MOVE_FROM_ID"] else None,
 }))')"
 
     if [ "$ASSUME_YES" != 1 ]; then
@@ -1611,7 +1617,9 @@ import json, os; print(len(json.loads(os.environ["ANSWER"])))')"
       # bookkeeping, and re-running the wizard for the same slot updates the row
       # in place rather than creating a second one.
       warn "the board is up, but the platform database refused the registration:"
-      printf '%s\n' "$REG_OUT" | sed 's/^/       /' >&2
+      # Through warn, not a bare printf to stderr: the wizard's log is fed by
+      # ui_append, and the reason used to arrive there as an empty line.
+      while IFS= read -r l; do warn "  $l"; done <<<"$REG_OUT"
       warn "Add it by hand in the Devices tab, or onboard again once fixed."
     fi
   fi
@@ -1646,7 +1654,6 @@ rec = {
     "mqtt": None if unreg else {"host": e["MQTT_HOST"], "port": int(e["MQTT_PORT"]),
                                 "topic_root": e["TOPIC_ROOT"]},
     "components": json.loads(e["DB_COMPONENTS"] or "[]"),
-    "device_dns": e["DEVICE_DNS"],
     "hostname": e["HOSTNAME"],
     "hostname_verified": e["HOSTNAME_OK"] or None,
     "resolves_as": e["RESOLVES"] or None,
@@ -1692,7 +1699,7 @@ unreg = e["UNREGISTERED"] == "1"
 ip = e["IP"] or "not connected"
 f = [["ip address", ip, True]]
 if not unreg:
-    f += [["device_dns", e["DEVICE_DNS"], True],
+    f += [["hostname", e["HOSTNAME"], True],
           ["unit / zone", "%s / %s" % (e["UNIT_CODE"], e["ZONE_CODE"]), False],
           ["role", e["ROLE"], False],
           ["broker", "%s:%s" % (e["MQTT_HOST"], e["MQTT_PORT"]), False]]
@@ -1704,10 +1711,10 @@ if not unreg:
     f += [["registered as", ("medcea.device %s" % e["REGISTERED_ID"]) if e["REGISTERED_ID"]
                             else "NOT REGISTERED - see the log", False]]
 else:
-    f += [["device_dns", e["DEVICE_DNS"], False]]
+    f += [["hostname", e["HOSTNAME"], False]]
 f += [["webrepl", "ws://%s:8266/" % ip, True],
       ["webrepl password", e["WEBREPL_PASS"], True],
-      ["hostname", e["HOSTNAME_ACTUAL"] or "unknown", False],
+      ["board reports", e["HOSTNAME_ACTUAL"] or "unknown", False],
       ["resolves as", e["RESOLVES"] or "nothing - this build runs no mDNS responder", False],
       ["mac", e["MAC"], False],
       ["chip", e["CHIP_DESC"], False],
@@ -1765,8 +1772,8 @@ ${B} $TITLE${N}
 ${B}────────────────────────────────────────────────────────────────${N}
 
   ip address   ${B}${IP:-<not connected>}${N}   ${DIM}<- use this${N}
-  device_dns   ${B}$DEVICE_DNS${N}
-  hostname     ${HOSTNAME_ACTUAL:-<unknown>}${HOSTNAME_NOTE}
+  hostname     ${B}$HOSTNAME${N}
+  reports      ${HOSTNAME_ACTUAL:-<unknown>}${HOSTNAME_NOTE}
   resolves as  ${RESOLVES:-nothing — this MicroPython build runs no mDNS responder}
   mac          $MAC
   chip         $CHIP_DESC
@@ -1825,10 +1832,8 @@ if [ "$UNREGISTERED" = 1 ]; then
   cat <<EOF
 
 ${B} Next${N}
-  This board has no MQTT credential and no place in the fleet, and both of
-  its names say so — CEA_DEV_UNREG_* in the platform record, cea-un-* on
-  the network. They are the same marker at two lengths, tied together by
-  the MAC suffix $MAC6, because a hostname has to stay short.
+  This board has no MQTT credential and no place in the fleet, and its
+  name says so: cea-un-$MAC6 ('un' for unregistered, then the MAC suffix).
 
   Onboard it again with the platform reachable to give it a unit, a zone
   and a role. That run rewrites device_cfg.py, ships the application for

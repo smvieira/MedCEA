@@ -8,8 +8,8 @@
 #
 # WebREPL is started here deliberately, with a password generated per board and
 # never committed. On an unregistered board that is a bounded exposure for
-# bring-up: the board carries the marker in both its names (DEVICE_DNS is
-# CEA_DEV_UNREG_<ts>_<MAC6>, HOSTNAME is cea-un-<mac6>) and has no MQTT
+# bring-up: the board carries the marker in its name (HOSTNAME is
+# cea-un-<mac6>) and has no MQTT
 # credential, so it can talk to nothing. On a registered board it stays on
 # because a device in a grow chamber is not somewhere anyone wants to bring a
 # USB cable — and it is tracked as a known exposure in edge/README.md.
@@ -21,7 +21,7 @@ print()
 print("=" * 58)
 print("state      :", cfg.STATE)
 print("role       :", cfg.ROLE)
-print("device_dns :", cfg.device_dns)
+print("hostname   :", cfg.hostname)
 
 _ifc = ef.connect_wifi(cfg.wifi_ssid, cfg.wifi_pwd, cfg.hostname)
 

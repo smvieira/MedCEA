@@ -147,6 +147,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA medcea
 ALTER DEFAULT PRIVILEGES IN SCHEMA medcea
   GRANT USAGE, SELECT                  ON SEQUENCES TO anon;
 GRANT anon TO authenticator;
+-- Append-only history (migration 006): the blanket grant above includes it, so
+-- take writes back. Its trigger runs SECURITY DEFINER and still appends.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON medcea.device_slot_history FROM anon;
 SQLEOF
 $KUBECTL cp "$_GRANTS_SQL" "$NAMESPACE/$PG_POD:/tmp/cea_grants.sql"
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- \

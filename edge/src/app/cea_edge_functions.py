@@ -57,10 +57,9 @@ def _read_hostname(w):
 def connect_wifi(ssid, password, hostname=None, timeout=30):
   """Join a network under a name the router will actually register.
 
-  Do NOT pass device_dns here. It is UNIT01_SENSE_ZONE01: underscores, which
-  RFC 1123 forbids in a hostname and which DHCP servers quietly drop or mangle.
-  cfg.hostname is the short hyphenated twin the wizard generated for exactly
-  this reason, and it is what belongs in this argument.
+  Pass cfg.hostname (unit01-s-zone01): letters, digits and hyphens only, as
+  RFC 1123 requires — DHCP servers quietly drop or mangle anything else. It is
+  the board's one name, so it is also the device_dns in its payloads.
 
   Returns the ifconfig tuple, or None if the board did not associate.
   """

@@ -14,7 +14,7 @@ import config as cfg
 
 esp.osdebug(None)
 
-print("\n%s  %s  role=%s" % (cfg.device_dns, cfg.hostname, cfg.ROLE))
+print("\n%s  role=%s" % (cfg.hostname, cfg.ROLE))
 
 if cfg.ROLE == "SENSE":
     import cea_sense

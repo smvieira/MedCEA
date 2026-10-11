@@ -20,8 +20,11 @@ ROLE        = _d.ROLE                 # SENSE | CONTROL | UNREGISTERED
 STATE       = getattr(_d, "STATE", "REGISTERED")
 unit_code   = getattr(_d, "UNIT_CODE", "")
 zone_code   = getattr(_d, "ZONE_CODE", "")
-device_dns  = _d.DEVICE_DNS           # UNIT01_SENSE_ZONE01
-hostname    = _d.HOSTNAME             # u01-s-z01 — what DHCP registers
+# One name: the DHCP hostname (unit01-s-zone01). It is what DHCP registers and
+# the device_dns in every payload. (This file and device_cfg.py ship together, so
+# a board flashed before the single name keeps its own pair of both.)
+hostname    = _d.HOSTNAME
+device_dns  = hostname
 
 # The MAC, not the slot. Two boards must never present the same client id to the
 # broker: MQTT evicts the older session on a duplicate, so a copied identity

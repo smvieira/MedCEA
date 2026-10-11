@@ -110,18 +110,150 @@ COMMENT ON COLUMN medcea.algorithm_state.channel    IS 'Sensor channel the state
 COMMENT ON COLUMN medcea.algorithm_state.state      IS 'Serialised algorithm state as JSON. For Q_LEARNING: {"q_table": {...}, "epsilon": 0.15}. Loaded at cycle start, saved at cycle end.';
 COMMENT ON COLUMN medcea.algorithm_state.updated_at IS 'Timestamp of the last state save. Used to detect stale state after hardware changes.';
 
--- ── Migration 004: Network hostname on device ───────────────────────────────
--- dns_name is the platform identifier (UNIT02_CONTROL_ZONE02) and, with its
--- underscores, not a resolvable name; the config UI's Online check pinged it and
--- always failed. The DHCP hostname (u02-c-z02) is compressed against every unit
--- code at flash time, so adding a unit later could change a recomputed one: it
--- is stored by edge/flash-device.sh at registration instead.
+-- ── Migration 004: Network hostname on device — superseded by 005 ─────────────
+-- Added a separate medcea.device.hostname for the Online check. Migration 005
+-- made dns_name itself the hostname and drops that column, so 004 no longer adds
+-- it (it would be re-added and dropped again on every deploy).
 
-ALTER TABLE medcea.device
-    ADD COLUMN IF NOT EXISTS hostname VARCHAR(63);
+-- ── Migration 005: One device name — the DHCP hostname ──────────────────────
+-- A device's name is lower(unit_code)-<s|c>-lower(zone_code), e.g.
+-- unit02-c-zone02: its DHCP hostname, its dns_name here and the device_dns in
+-- its MQTT payloads. It replaces both UNIT02_CONTROL_ZONE02 (not a resolvable
+-- name) and the compressed u02-c-z02 (which changed whenever another unit was
+-- added). edge/src/host/platform_db.py builds it the same way.
+--
+-- The name is unique only if the codes are, ignoring case: enforce that.
 
-COMMENT ON COLUMN medcea.device.hostname IS 'Network hostname the board registers with DHCP (e.g. u02-c-z02; mDNS u02-c-z02.local). Written at onboarding; what the Online check pings. NULL for devices added by hand without one.';
+DO $$
+DECLARE dup text;
+BEGIN
+    SELECT string_agg(c, ', ') INTO dup FROM (
+        SELECT lower(unit_code) AS c FROM medcea.cea_unit
+        GROUP BY lower(unit_code) HAVING count(*) > 1) x;
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'unit codes that differ only in case: % — rename one in the Units tab, then redeploy the database', dup;
+    END IF;
+    SELECT string_agg(c, ', ') INTO dup FROM (
+        SELECT u.unit_code || '/' || lower(z.zone_code) AS c
+        FROM medcea.cea_zone z JOIN medcea.cea_unit u USING (unit_id)
+        GROUP BY u.unit_code, lower(z.zone_code) HAVING count(*) > 1) x;
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'zone codes repeated within a unit: % — rename one in the Units tab, then redeploy the database', dup;
+    END IF;
+END $$;
 
--- PostgREST caches the schema; without this a new column is invisible to the
--- API until config-api restarts.
+CREATE UNIQUE INDEX IF NOT EXISTS cea_unit_code_ci_uk ON medcea.cea_unit (lower(unit_code));
+CREATE UNIQUE INDEX IF NOT EXISTS cea_zone_unit_code_ci_uk ON medcea.cea_zone (unit_id, lower(zone_code));
+
+-- Rename slot devices to the rule. dns_name is unique, so when a slot holds more
+-- than one row (a replaced board left in place), only the most recent row takes
+-- the plain name; older ones keep it with their device_id appended.
+UPDATE medcea.device d
+SET dns_name = n.name
+FROM (
+    SELECT d2.device_id,
+           lower(u.unit_code) || '-' || lower(left(d2.device_type, 1)) || '-' || lower(z.zone_code)
+           || CASE WHEN row_number() OVER (PARTITION BY d2.zone_id, d2.device_type
+                                           ORDER BY d2.device_id DESC) = 1
+                   THEN '' ELSE '-' || d2.device_id END AS name
+    FROM medcea.device d2
+    JOIN medcea.cea_zone z ON z.zone_id = d2.zone_id
+    JOIN medcea.cea_unit u ON u.unit_id = z.unit_id
+    WHERE d2.device_type IN ('SENSE', 'CONTROL')
+) n
+WHERE d.device_id = n.device_id AND d.dns_name IS DISTINCT FROM n.name;
+
+-- Migration 004's separate hostname column is now the same value as dns_name.
+ALTER TABLE medcea.device DROP COLUMN IF EXISTS hostname;
+
+COMMENT ON COLUMN medcea.device.dns_name IS 'DHCP hostname, lower(unit_code)-s|c-lower(zone_code) (e.g. unit02-c-zone02): the device''s network name, what the Online check pings, and device_dns in its MQTT payloads.';
+
+NOTIFY pgrst, 'reload schema';
+
+-- ── Migration 006: Device placement history (append-only) ──────────────────
+-- Where each board has been. A row in medcea.device is one board (serial_number,
+-- the MAC, is unique) and it follows the board when it moves to another slot
+-- (edge/src/host/platform_db.py register, move_device_id) or when someone
+-- changes its zone in the config UI. This keeps every placement:
+--   placed    a device row was created
+--   moved     its slot changed (zone_id and/or device_type)
+--   renamed   only its name changed (a unit or zone code was renamed)
+--   replaced  a different board (serial_number) took over the row
+--   removed   the row was deleted
+-- Written only by the trigger below. The API role may read it but not write,
+-- update or delete it (see the grants in apps/database/deploy.sh), and there
+-- is no foreign key, so the history outlives a deleted device row.
+
+CREATE TABLE IF NOT EXISTS medcea.device_slot_history (
+    event_id          BIGSERIAL PRIMARY KEY,
+    device_id         INTEGER NOT NULL,
+    event             VARCHAR(10) NOT NULL
+                      CHECK (event IN ('placed', 'moved', 'renamed', 'replaced', 'removed')),
+    serial_number     VARCHAR(255),
+    from_serial       VARCHAR(255),
+    from_zone_id      INTEGER,
+    from_device_type  VARCHAR(255),
+    from_dns_name     VARCHAR(255),
+    to_zone_id        INTEGER,
+    to_device_type    VARCHAR(255),
+    to_dns_name       VARCHAR(255),
+    changed_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS device_slot_history_device_idx
+    ON medcea.device_slot_history (device_id, changed_at);
+CREATE INDEX IF NOT EXISTS device_slot_history_serial_idx
+    ON medcea.device_slot_history (serial_number, changed_at);
+
+-- SECURITY DEFINER: runs as the table owner, so the trigger can append even
+-- though the API role has no INSERT on the history table.
+CREATE OR REPLACE FUNCTION medcea.log_device_slot() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE ev varchar(10);
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO medcea.device_slot_history
+            (device_id, event, serial_number, to_zone_id, to_device_type, to_dns_name)
+        VALUES (NEW.device_id, 'placed', NEW.serial_number, NEW.zone_id, NEW.device_type, NEW.dns_name);
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO medcea.device_slot_history
+            (device_id, event, serial_number, from_zone_id, from_device_type, from_dns_name)
+        VALUES (OLD.device_id, 'removed', OLD.serial_number, OLD.zone_id, OLD.device_type, OLD.dns_name);
+        RETURN OLD;
+    END IF;
+    IF NEW.serial_number IS DISTINCT FROM OLD.serial_number THEN
+        ev := 'replaced';
+    ELSIF NEW.zone_id IS DISTINCT FROM OLD.zone_id
+       OR NEW.device_type IS DISTINCT FROM OLD.device_type THEN
+        ev := 'moved';
+    ELSIF NEW.dns_name IS DISTINCT FROM OLD.dns_name THEN
+        ev := 'renamed';
+    ELSE
+        RETURN NEW;            -- a re-flash in place, or an unrelated field
+    END IF;
+    INSERT INTO medcea.device_slot_history
+        (device_id, event, serial_number, from_serial,
+         from_zone_id, from_device_type, from_dns_name,
+         to_zone_id, to_device_type, to_dns_name)
+    VALUES (NEW.device_id, ev, NEW.serial_number, OLD.serial_number,
+            OLD.zone_id, OLD.device_type, OLD.dns_name,
+            NEW.zone_id, NEW.device_type, NEW.dns_name);
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS device_slot_history_trg ON medcea.device;
+CREATE TRIGGER device_slot_history_trg
+    AFTER INSERT OR UPDATE OR DELETE ON medcea.device
+    FOR EACH ROW EXECUTE FUNCTION medcea.log_device_slot();
+
+-- Start the history where each existing device is now (once per device).
+INSERT INTO medcea.device_slot_history
+    (device_id, event, serial_number, to_zone_id, to_device_type, to_dns_name)
+SELECT d.device_id, 'placed', d.serial_number, d.zone_id, d.device_type, d.dns_name
+FROM medcea.device d
+WHERE NOT EXISTS (SELECT 1 FROM medcea.device_slot_history h WHERE h.device_id = d.device_id);
+
+COMMENT ON TABLE medcea.device_slot_history IS 'Append-only placement history of devices: placed, moved (slot changed), renamed, replaced (another board took the row), removed. Written by trigger device_slot_history_trg only; read-only to the API.';
+
 NOTIFY pgrst, 'reload schema';

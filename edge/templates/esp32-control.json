@@ -372,8 +372,9 @@
       "from": "slot"
     },
     {
-      "name": "device_dns",
-      "from": "slot"
+      "name": "hostname",
+      "from": "slot",
+      "note": "lower(unit)-s|c-lower(zone): DHCP name, dns_name and payload device_dns"
     }
   ]
 }

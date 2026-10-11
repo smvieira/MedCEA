@@ -3,7 +3,7 @@
     "SENSE board template. One entry per sensor driver the board can carry;",
     "the wizard offers this list, asks only for the fields under 'params', and",
     "infers everything else (MQTT host and port, topic, client id, unit, zone,",
-    "device_dns) from the slot the operator picked and from config.env.",
+    "hostname) from the slot the operator picked and from config.env.",
     "",
     "  params[].kind   pin | int | float | bool | choice",
     "  params[].infer  present = not asked; the wizard fills it in",
@@ -260,8 +260,9 @@
       "from": "slot"
     },
     {
-      "name": "device_dns",
-      "from": "slot"
+      "name": "hostname",
+      "from": "slot",
+      "note": "lower(unit)-s|c-lower(zone): DHCP name, dns_name and payload device_dns"
     }
   ]
 }

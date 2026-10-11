@@ -13,10 +13,11 @@ oauth2-proxy, no port-forward. The address is looked up with kubectl at call
 time rather than cached in config.env, because a redeployed Service gets a new
 one and a stale address would fail long after the deploy that caused it.
 
-Two commands, both line-oriented so the shell stays the engine:
+Three commands, all line-oriented so the shell stays the engine:
 
-    slots      one line per (unit, zone, role) slot, free or taken
-    register   read a device description on stdin, write it to the database
+    slots           one line per (unit, zone, role) slot, free or taken
+    board SERIAL    where a board (by serial = MAC hex) is registered, if anywhere
+    register        read a device description on stdin, write it to the database
 
 A unit/zone has one and only one SENSE and one and only one CONTROL. That rule
 is enforced here, against the live table, rather than in the wizard's head.
@@ -33,13 +34,16 @@ import urllib.request
 
 TIMEOUT = 10
 ROLES = ("SENSE", "CONTROL")
-# The device_dns convention: UNIT01_SENSE_ZONE01. Unit first because that is how
-# the fleet is walked, role in the middle because it is the closed-set field.
-DNS_FMT = "{unit}_{role}_{zone}"
-# MicroPython keeps a fixed-size hostname buffer and silently falls back to its
-# own default when a name is too long — so a name that does not fit here is not
-# a cosmetic problem, it is a board that registers the wrong name with DHCP.
-HOSTNAME_MAX = 15
+# A device has one name: its DHCP hostname, lower(unit)-<s|c>-lower(zone), e.g.
+# unit02-c-zone02. It is dns_name in the database, device_dns in every MQTT
+# payload and what DHCP registers. Built from the codes as they are in the
+# database at onboarding; lowercasing is the only transformation, so a code a
+# hostname cannot hold is refused with a reason rather than rewritten.
+HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+# MicroPython's network hostname buffer (MICROPY_PY_NETWORK_HOSTNAME_MAX_LEN).
+# Over it, the board keeps its default name and registers THAT with DHCP;
+# flash-device.sh reads the name back after boot, so a wrong cap shows up loudly.
+HOSTNAME_MAX = 32
 
 
 class PlatformError(Exception):
@@ -123,53 +127,25 @@ def _request(base, path, method="GET", body=None, prefer=None):
         raise PlatformError("the platform database returned unparseable JSON") from e
 
 
-# ------------------------------------------------------------- short names ----
-def _split_code(code):
-    """Split UNIT01 into ('unit', '01') — the readable part and the number."""
-    m = re.match(r"^(.*?)(\d*)$", re.sub(r"[^A-Za-z0-9]", "", code or "").lower())
-    return m.group(1), m.group(2)
+# ---------------------------------------------------------------- hostname ----
+def slot_hostname(unit_code, role, zone_code):
+    """(hostname, None) for a slot, or (None, reason) when the codes cannot form one.
 
-
-def _shortest_unambiguous(code, others):
-    """Shortest prefix of `code`'s alpha part that no other code shares.
-
-    The hostname is derived from the slot rather than the MAC, so it has to
-    survive two units whose codes start alike: MUSHROOMBAY and MUSHROOMLAB must
-    not both compress to 'mus'. Widening the prefix one character at a time is
-    the smallest thing that keeps the name both readable and unique; a code that
-    cannot be made unique inside the length budget falls back to the MAC form.
+    UNIT02 + CONTROL + ZONE02 -> unit02-c-zone02. Unique without any collision
+    check: unit codes are unique ignoring case, zone codes are unique per unit
+    ignoring case (migration 005), and the role letter tells SENSE from CONTROL.
     """
-    word, num = _split_code(code)
-    if not word:
-        return num or "x"
-    rivals = []
-    for o in others:
-        if o == code:
-            continue
-        w, n = _split_code(o)
-        if n == num:          # only a same-numbered rival can actually collide
-            rivals.append(w)
-    for n in range(1, len(word) + 1):
-        p = word[:n]
-        if not any(r.startswith(p) for r in rivals):
-            return p + num
-    return word + num
-
-
-def short_hostname(unit_code, zone_code, role, all_units, zones_in_unit):
-    """A DHCP-registrable name for this slot, or None if it cannot be made to fit.
-
-    UNIT01 + SENSE + ZONE01 -> u01-s-z01. The platform identifier stays
-    UNIT01_SENSE_ZONE01; this is the same slot at hostname length, which is a
-    separate string because RFC 1123 forbids the underscores and MicroPython
-    caps the length.
-    """
-    u = _shortest_unambiguous(unit_code, all_units)
-    z = _shortest_unambiguous(zone_code, zones_in_unit)
-    name = "%s-%s-%s" % (u, role[0].lower(), z)
-    if len(name) > HOSTNAME_MAX or not re.match(r"^[a-z][a-z0-9-]*$", name):
-        return None
-    return name
+    name = "%s-%s-%s" % ((unit_code or "").lower(), role[0].lower(),
+                         (zone_code or "").lower())
+    if not HOSTNAME_RE.match(name):
+        return None, ("'%s / %s' gives '%s', which is not a legal hostname (letters, digits and "
+                      "inner hyphens only): rename the code in the Units tab"
+                      % (unit_code, zone_code, name))
+    if len(name) > HOSTNAME_MAX:
+        return None, ("'%s / %s' gives '%s', %d characters; a board accepts at most %d: "
+                      "shorten the code in the Units tab"
+                      % (unit_code, zone_code, name, len(name), HOSTNAME_MAX))
+    return name, None
 
 
 # ------------------------------------------------------------------- slots ----
@@ -189,7 +165,6 @@ def slots(base):
     units = [u for u in units if (u.get("is_active") or "Y") == "Y"]
     zones = [z for z in zones if (z.get("is_active") or "Y") == "Y"]
     by_unit = {u["unit_id"]: u for u in units}
-    all_unit_codes = [u["unit_code"] for u in units]
 
     # Who already holds each (zone, role). Inactive devices do not hold a slot —
     # that is how a retired board is replaced without editing the database first.
@@ -206,11 +181,9 @@ def slots(base):
         u = by_unit.get(z["unit_id"])
         if u is None:
             continue
-        siblings = [x["zone_code"] for x in zones if x["unit_id"] == z["unit_id"]]
         for role in ROLES:
             occupant = held.get((z["zone_id"], role))
-            host = short_hostname(u["unit_code"], z["zone_code"], role,
-                                  all_unit_codes, siblings)
+            host, why = slot_hostname(u["unit_code"], role, z["zone_code"])
             out.append({
                 "unit_id": u["unit_id"],
                 "unit_code": u["unit_code"],
@@ -219,11 +192,12 @@ def slots(base):
                 "zone_code": z["zone_code"],
                 "zone_description": z.get("zone_description") or "",
                 "role": role,
-                "state": "taken" if occupant else "free",
-                "occupant": (occupant or {}).get("dns_name") or "",
+                # "unnamed": the codes cannot form a hostname; occupant carries
+                # the reason, so the wizard can say what to rename.
+                "state": "taken" if occupant else ("free" if host else "unnamed"),
+                "occupant": (occupant or {}).get("dns_name") or (why or ""),
                 "occupant_serial": (occupant or {}).get("serial_number") or "",
-                "device_dns": DNS_FMT.format(unit=u["unit_code"], role=role,
-                                             zone=z["zone_code"]),
+                "device_dns": host or "",
                 "hostname": host or "",
             })
     return out
@@ -247,28 +221,55 @@ def register(base, spec):
     """Insert or update one device and replace its components.
 
     Re-flashing a board must not create a second row for the same slot, so this
-    keys on dns_name and updates in place. Components are replaced wholesale
+    keys on the SLOT — zone_id + device_type, the most recent row, active or not —
+    and updates it in place, dns_name included. Not on dns_name: that is built from
+    the unit and zone codes, so renaming a code would make the next onboarding miss
+    the slot's row and insert a second one. dns_name is the fallback for a spec
+    without a zone. Components are replaced wholesale
     rather than merged: the pins the operator just chose ARE the component, and
     a half-updated pin map is worse than either version of it.
     """
     dns = spec["dns_name"]
     row = {k: spec[k] for k in (
         "zone_id", "device_type", "model", "manufacturer", "serial_number",
-        "connection_type", "dns_name", "hostname") if spec.get(k) is not None}
+        "connection_type", "dns_name") if spec.get(k) is not None}
     row.setdefault("is_active", "Y")
     if spec.get("installation_date"):
         row["installation_date"] = spec["installation_date"]
 
-    existing = _request(base, "/device?select=device_id&dns_name=eq." + _q(dns))
-    if existing:
-        device_id = existing[0]["device_id"]
+    slot = spec.get("zone_id") is not None and spec.get("device_type")
+    move_id = int(spec["move_device_id"]) if spec.get("move_device_id") else None
+
+    if move_id:
+        # A board moving to another slot (the operator said yes in the wizard):
+        # its own row follows it, because serial_number is unique and a second
+        # row for the same board is not an option. An older, inactive row still
+        # in the target slot steps aside — renamed <name>-<id>, since dns_name
+        # is unique too — so the moved row can take the slot's name.
+        if slot:
+            for o in _request(base, "/device?select=device_id,dns_name&zone_id=eq.%d"
+                                    "&device_type=eq.%s&device_id=neq.%d"
+                              % (int(spec["zone_id"]), _q(spec["device_type"]), move_id)):
+                if o.get("dns_name") == dns:
+                    _request(base, "/device?device_id=eq.%d" % o["device_id"], "PATCH",
+                             {"dns_name": "%s-%d" % (dns, o["device_id"]), "is_active": "N"})
+        target, action = move_id, "moved"
+    else:
+        found = []
+        if slot:
+            found = _request(base, "/device?select=device_id&zone_id=eq.%d&device_type=eq.%s"
+                                   "&order=device_id.desc&limit=1"
+                             % (int(spec["zone_id"]), _q(spec["device_type"])))
+        if not found:
+            found = _request(base, "/device?select=device_id&dns_name=eq." + _q(dns))
+        target, action = (found[0]["device_id"], "updated") if found else (None, "created")
+
+    if target is not None:
+        device_id = target
         _request(base, "/device?device_id=eq.%d" % device_id, "PATCH", row)
         _request(base, "/component?device_id=eq.%d" % device_id, "DELETE")
-        action = "updated"
     else:
-        got = _insert_device(base, row)
-        device_id = got["device_id"]
-        action = "created"
+        device_id = _insert_device(base, row)["device_id"]
 
     for c in spec.get("components", []):
         comp = {k: v for k, v in c.items() if k in (
@@ -277,6 +278,25 @@ def register(base, spec):
         comp.setdefault("is_active", "Y")
         _insert_component(base, comp)
     return device_id, action
+
+
+def board(base, serial):
+    """Where the board with this serial (MAC hex) is registered, or None."""
+    rows = _request(base, "/device?select=device_id,dns_name,zone_id,device_type,is_active"
+                          "&serial_number=eq." + _q(serial.lower()))
+    if not rows:
+        return None
+    d = rows[0]
+    unit = zone = ""
+    if d.get("zone_id") is not None:
+        z = _request(base, "/cea_zone?select=zone_code,unit_id&zone_id=eq.%d" % d["zone_id"])
+        if z:
+            zone = z[0]["zone_code"]
+            u = _request(base, "/cea_unit?select=unit_code&unit_id=eq.%d" % z[0]["unit_id"])
+            unit = u[0]["unit_code"] if u else ""
+    return {"device_id": d["device_id"], "dns_name": d.get("dns_name") or "",
+            "zone_id": d.get("zone_id"), "role": (d.get("device_type") or "").upper(),
+            "is_active": d.get("is_active") or "Y", "unit_code": unit, "zone_code": zone}
 
 
 def _q(v):
@@ -346,6 +366,16 @@ def main(argv):
             return 0
         if cmd == "slots":
             return print_slots(base)
+        if cmd == "board":
+            if len(argv) < 3:
+                print("usage: board SERIAL", file=sys.stderr)
+                return 2
+            b = board(base, argv[2])
+            if b:
+                print("BOARD\t%s" % "\t".join(str(b[k] if b[k] is not None else "") for k in (
+                    "device_id", "dns_name", "zone_id", "role", "is_active",
+                    "unit_code", "zone_code")))
+            return 0
         if cmd == "register":
             spec = json.load(sys.stdin)
             device_id, action = register(base, spec)

@@ -8,8 +8,8 @@ edge/templates/<role>.json, this module turns them into questions and then into
 the files that go on the board.
 
 Everything else is INFERRED and never asked: the MQTT host and port come from
-config.env, the topics and the client id from the slot, the device_dns from the
-unit, role and zone. Asking an operator to retype a topic is how a board ends up
+config.env, the topics and the client id from the slot, the hostname (the
+board's one name) from the unit, role and zone. Asking an operator to retype a topic is how a board ends up
 publishing where nothing is listening.
 
     drivers    ROLE                what this role can carry
@@ -426,7 +426,8 @@ def render(spec):
     cfg = {
         "STATE": spec.get("state", "REGISTERED"),
         "ROLE": role,
-        "DEVICE_DNS": spec["device_dns"],
+        # The board's one name (unit02-c-zone02): DHCP hostname and the
+        # device_dns in its payloads. config.py reads HOSTNAME for both.
         "HOSTNAME": spec["hostname"],
         "UNIT_CODE": unit,
         "ZONE_CODE": zone,
