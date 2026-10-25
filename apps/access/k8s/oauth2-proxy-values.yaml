@@ -1,0 +1,35 @@
+configuration:
+  content: |
+    provider = "oidc"
+    provider_display_name = "Keycloak"
+    email_domains = ["*"]
+    cookie_secure = true
+    ssl_insecure_skip_verify = true
+    # Same session limits as the portal proxy (k8s/oauth2-proxy/values-portal.yaml):
+    # re-check with Keycloak every 4 minutes, so removing someone's admin role
+    # or session takes effect quickly.
+    cookie_refresh = "4m"
+    cookie_expire = "8h"
+    # The User Manager is an admin tool: go straight to the Keycloak login.
+    skip_provider_button = true
+    # Admins only. deploy-infra.sh maps realm roles into a "groups" claim on the
+    # access client; oauth2-proxy answers 403 to anyone signed in without
+    # realm role admin.
+    oidc_groups_claim = "groups"
+    allowed_groups = ["admin"]
+    # access-api.py records the decision against X-Forwarded-Preferred-Username
+    # (iam.access_request.decided_by and the history table), so pass it on.
+    pass_user_headers = true
+    pass_basic_auth = false
+    pass_authorization_header = false
+    pass_access_token = false
+    # Explicit in-cluster URLs; pods cannot resolve a name-based domain (see the
+    # portal and config proxies).
+    skip_oidc_discovery = true
+    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
+    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+    # /_account/ is the user menu and profile (apps/access, :8082), mounted on
+    # every signed-in host so it acts for whoever this proxy signed in.
+    upstreams = ["http://access-admin.${NAMESPACE}.svc.cluster.local:80", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/"]

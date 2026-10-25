@@ -401,9 +401,10 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$CA_DIR/server.key"
 # alias (old IP) domain is included so its redirects are served over valid TLS.
 _SVC_DOMAINS=()
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"   # older config.env files lack it
+ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"             # likewise
 for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
           SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN \
-          ONBOARD_DOMAIN; do
+          ONBOARD_DOMAIN ACCESS_DOMAIN; do
     [[ -n "${!_v:-}" ]] && _SVC_DOMAINS+=("${!_v}")
 done
 _ALIAS_ON=false
@@ -453,6 +454,14 @@ if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
     fi
     echo -e "${YELLOW}  Mapping $DOMAIN names to $PLATFORM_IP in /etc/hosts (this machine)...${NC}"
     hosts_block "$DOMAIN" "${_SVC_DOMAINS[@]}" "$PLATFORM_IP"
+    # Said now as well as at the end: this machine resolves through /etc/hosts
+    # either way, so a stale route only shows on other devices, and a deploy
+    # that stops halfway would never reach the summary.
+    _SPLIT_DNS_TARGET="$(split_dns_target "$DOMAIN" | paste -sd ' ')"
+    if [[ -n "$_SPLIT_DNS_TARGET" && "$_SPLIT_DNS_TARGET" != "$PLATFORM_IP" ]]; then
+        echo -e "${RED}  Tailscale split DNS sends '$DOMAIN' to $_SPLIT_DNS_TARGET, not to this server ($PLATFORM_IP).${NC}"
+        echo -e "${RED}  Other devices cannot resolve *.$DOMAIN until it is changed (steps at the end).${NC}"
+    fi
 else
     # Switched back to an IP or external domain: take the name server down and
     # the managed hosts entries out, so nothing answers for a stale name.
@@ -514,7 +523,22 @@ echo -e "\n${GREEN}[2/10] Deploying Keycloak...${NC}"
 # Clean up any previous Helm-managed Keycloak release (idempotent)
 $MK8S helm3 uninstall keycloak --namespace "$NAMESPACE" 2>/dev/null || true
 
-render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN | $MK8S kubectl apply -n "$NAMESPACE" -f -
+# The medcea login theme: the one sign-in / request-access page of the platform.
+# Only theme.properties is rendered — the .ftl files are FreeMarker, whose
+# ${...} must reach Keycloak untouched. The background is the portal's (152 KB;
+# a ConfigMap holds 1 MiB, so the 1.7 MB PNG fallback the portal uses cannot).
+_KC_THEME="$SCRIPT_DIR/k8s/keycloak/theme/medcea/login"
+_KC_THEME_TMP="$(mktemp -d)"
+render "$_KC_THEME/theme.properties" ACCESS_DOMAIN PORTAL_DOMAIN > "$_KC_THEME_TMP/theme.properties"
+if [[ -f "$SCRIPT_DIR/apps/portal/bg.jpg" ]]; then cp "$SCRIPT_DIR/apps/portal/bg.jpg" "$_KC_THEME_TMP/bg.jpg"; else : > "$_KC_THEME_TMP/bg.jpg"; fi
+$MK8S kubectl create configmap keycloak-theme -n "$NAMESPACE" \
+  --from-file="$_KC_THEME_TMP/theme.properties" --from-file="$_KC_THEME/template.ftl" --from-file="$_KC_THEME/login.ftl" \
+  --from-file="$_KC_THEME/messages/messages_en.properties" --from-file="$_KC_THEME/resources/css/medcea.css" \
+  --from-file="$_KC_THEME_TMP/bg.jpg" --dry-run=client -o yaml | $MK8S kubectl apply -f -
+_KC_THEME_SUM="$(cat "$_KC_THEME_TMP"/* "$_KC_THEME"/*.ftl "$_KC_THEME"/messages/* "$_KC_THEME"/resources/css/* | sha256sum | cut -c1-16)"
+rm -rf "$_KC_THEME_TMP"
+
+render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN _KC_THEME_SUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 echo -e "${YELLOW}Waiting for Keycloak to be ready (up to 10 min)...${NC}"
 $MK8S kubectl rollout status deployment/keycloak -n "$NAMESPACE" --timeout=10m
@@ -581,10 +605,23 @@ else
     exit 1
 fi
 
+# Realm look. loginTheme=medcea is the platform's own sign-in page
+# (k8s/keycloak/theme). Mail (smtpServer, resetPasswordAllowed) is deliberately
+# not set here: the User Manager owns it (apps/access, E-mail settings) and
+# pushes it to the realm, and a value written here would undo that on every run.
+echo -e "${YELLOW}  Applying login theme...${NC}"
+curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}" \
+  -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+  -d '{"loginTheme":"medcea","displayName":"MedCEA Platform","rememberMe":true}' || true
+
 # Create a confidential client and echo its secret (captured by caller via $())
 _create_client() {
     local CLIENT_ID="$1"
     local REDIRECT_URI="$2"
+    # Always stated: Keycloak reads a PUT that leaves serviceAccountsEnabled out
+    # as "off", deletes the service-account user and makes a new one — and the
+    # roles granted to the old one (the access client's) are gone.
+    local SA_ENABLED="${3:-false}"
     local TOK
     # Keycloak 18+ will not end a session from a plain GET to the logout
     # endpoint — it shows a "Do you want to log out?" confirmation instead, so
@@ -599,7 +636,7 @@ _create_client() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"redirectUris\":[\"${REDIRECT_URI}\"],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
+      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
 
     # Look up internal UUID
     local UUID
@@ -612,6 +649,8 @@ _create_client() {
         return 1
     fi
 
+    # ${ORIGIN}/_account/* is where the user menu's Change password returns
+    # (kc_action=UPDATE_PASSWORD, apps/access) — harmless on clients without it.
     # Re-apply the redirect URI on every run. The POST above returns 409 for an
     # existing client and changes nothing, so without this a client created once
     # keeps its original URI forever — which is why moving the platform to https
@@ -621,7 +660,7 @@ _create_client() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${UUID}" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"redirectUris\":[\"${REDIRECT_URI}\"],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
+      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
 
     # Retrieve the generated secret
     curl -sf \
@@ -692,6 +731,39 @@ uris = ['http://%s:%s/oauth2/callback' % (h, port) for h in hosts]
 if e.get('EW_ONBOARD'): uris.append('https://%s/oauth2/callback' % e['EW_ONBOARD'])
 print(json.dumps(uris))")"
 _EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS")
+echo -e "${YELLOW}  Creating client 'access'...${NC}"
+# Two jobs, one client: the browser login for the User Manager (its oauth2-proxy)
+# and the service account apps/access uses to create, enable, role-map and
+# delete users. The PUT in _create_client leaves serviceAccountsEnabled alone,
+# so setting it once here survives later runs.
+_ACCESS_SECRET=$(_create_client "access" "https://${ACCESS_DOMAIN}/oauth2/callback" true)
+_ACCESS_COOKIE_SECRET="${ACCESS_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+_ACCESS_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=access" \
+  -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
+if [[ -n "$_ACCESS_UUID" ]]; then
+    curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_ACCESS_UUID}" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+      -d '{"clientId":"access","serviceAccountsEnabled":true}' || true
+    # manage-users: create disabled, enable, map realm roles, delete on rejection.
+    # view-users/query-users: duplicate checks and the admin e-mail list.
+    # manage-realm: the User Manager's e-mail settings also become the realm's
+    # SMTP server, so Keycloak's "Forgot password?" mail uses the same account.
+    _SA_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_ACCESS_UUID}/service-account-user" \
+      -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+    _RM_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=realm-management" \
+      -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
+    _RM_ROLES=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RM_UUID}/roles" \
+      -H "Authorization: Bearer $(_kc_token)" | python3 -c "
+import sys, json
+print(json.dumps([r for r in json.load(sys.stdin) if r['name'] in ('manage-users', 'view-users', 'query-users', 'manage-realm')]))" 2>/dev/null || echo "")
+    if [[ -n "$_SA_ID" && -n "$_RM_UUID" && "$_RM_ROLES" == \[*\] ]]; then
+        curl -s -o /dev/null -X POST \
+          "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_SA_ID}/role-mappings/clients/${_RM_UUID}" \
+          -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_RM_ROLES" || true
+    else
+        echo -e "${RED}  Could not grant user-management roles to the 'access' service account.${NC}" >&2
+    fi
+fi
 # 24 bytes → 32-char base64 → valid AES-256 key for oauth2-proxy. Kept once
 # generated (see _CONFIG_COOKIE_SECRET above).
 _COOKIE_SECRET="${OAUTH2_COOKIE_SECRET:-$(openssl rand -base64 24)}"
@@ -777,6 +849,68 @@ if [[ "$ADMIN_USER" != "$_GF_ADMIN_USER" ]]; then
     _assign_realm_role "$ADMIN_USER" "grafana_admin"
 fi
 
+# --- Platform realm roles (docs/architecture.md, RBAC) ---
+# The portal admits only these (allowed_groups in values-portal.yaml), the User
+# Manager only admin. People get them through an access request (apps/access);
+# the built-in users get one here so the gate never locks them out.
+echo -e "${YELLOW}  Creating platform roles (operator, qa, auditor, admin)...${NC}"
+for _r in operator qa auditor admin; do _create_realm_role "$_r"; done
+_assign_realm_role "$ADMIN_USER"     "admin"
+_assign_realm_role "$_GF_ADMIN_USER" "admin"
+_assign_realm_role "$_GF_DEV_USER"   "operator"
+_assign_realm_role "$_GF_VIEW_USER"  "auditor"
+
+# "organisation" as a declared user-profile attribute: Keycloak 26 drops any
+# attribute the realm's user profile does not declare, so without this the
+# registration form's and the profile page's organisation would vanish.
+_UP_JSON=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/profile" -H "Authorization: Bearer $(_kc_token)" | python3 -c '
+import json, sys
+up = json.load(sys.stdin)
+if any(a["name"] == "organisation" for a in up.get("attributes", [])):
+    sys.exit(0)
+up["attributes"].append({"name": "organisation", "displayName": "Organisation",
+    "validations": {"length": {"max": 200}},
+    "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]}, "multivalued": False})
+print(json.dumps(up))' 2>/dev/null || true)
+if [[ -n "$_UP_JSON" ]]; then
+    curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/profile" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_UP_JSON" || true
+fi
+
+# Realm roles as a "groups" claim, which is what oauth2-proxy's allowed_groups
+# reads. It has to be a client SCOPE named "groups", not just a mapper: with
+# allowed_groups set, oauth2-proxy adds "groups" to the scopes it requests, and
+# Keycloak refuses a login that asks for a scope it does not know
+# (invalid_scope — every portal login failed until this existed).
+curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" \
+  -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+  -d '{"name":"groups","protocol":"openid-connect","description":"Realm roles as the groups claim (oauth2-proxy allowed_groups)",
+       "attributes":{"include.in.token.scope":"true","display.on.consent.screen":"false"}}' || true
+_GS_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+  | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='groups'))" 2>/dev/null || echo "")
+if [[ -n "$_GS_ID" ]]; then
+    curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_GS_ID}/protocol-mappers/models" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+      -d '{"name":"realm-roles-as-groups","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper",
+           "config":{"claim.name":"groups","jsonType.label":"String","multivalued":"true",
+                     "id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+    for _c in portal access; do
+        _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
+          -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
+        [[ -n "$_C_UUID" ]] || continue
+        curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_C_UUID}/default-client-scopes/${_GS_ID}" \
+          -H "Authorization: Bearer $(_kc_token)" || true
+        # An earlier deploy put the same mapper on the client itself; one source only.
+        _OLD_MAPPER=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_C_UUID}/protocol-mappers/models" \
+          -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(next((m['id'] for m in json.load(sys.stdin) if m['name']=='realm-roles-as-groups'),''))" 2>/dev/null || echo "")
+        [[ -n "$_OLD_MAPPER" ]] && curl -s -o /dev/null -X DELETE \
+          "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_C_UUID}/protocol-mappers/models/${_OLD_MAPPER}" \
+          -H "Authorization: Bearer $(_kc_token)" || true
+    done
+else
+    echo -e "${RED}  Could not create the 'groups' client scope — portal logins will fail with invalid_scope.${NC}" >&2
+fi
+
 # --- Add realm-role mapper to grafana client so roles[] appears in userinfo ---
 echo -e "${YELLOW}  Adding realm-role mapper to Grafana client...${NC}"
 _GF_UUID=$(curl -sf \
@@ -824,7 +958,8 @@ fi
 sed -i "s|^OAUTH2_COOKIE_SECRET=.*|OAUTH2_COOKIE_SECRET=\"${_COOKIE_SECRET}\"|" config.env
 sed -i "s|^PORTAL_OAUTH2_PROXY_SECRET=.*|PORTAL_OAUTH2_PROXY_SECRET=\"${_PORTAL_SECRET}\"|" config.env
 sed -i "s|^PORTAL_COOKIE_SECRET=.*|PORTAL_COOKIE_SECRET=\"${_PORTAL_COOKIE_SECRET}\"|" config.env
-for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=${_CONFIG_COOKIE_SECRET}"; do
+for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=${_CONFIG_COOKIE_SECRET}" \
+           "ACCESS_CLIENT_SECRET=${_ACCESS_SECRET}" "ACCESS_COOKIE_SECRET=${_ACCESS_COOKIE_SECRET}"; do
     _k="${_kv%%=*}"
     if grep -q "^${_k}=" config.env; then
         sed -i "s|^${_k}=.*|${_k}=\"${_kv#*=}\"|" config.env
@@ -1021,7 +1156,7 @@ echo -e "\n${GREEN}[9/10] Deploying Service Portal...${NC}"
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
 _PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
-render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN \
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
   | $MK8S kubectl apply -n "$NAMESPACE" -f -
 rm -f "$_PORTAL_BG_TMP"
@@ -1033,6 +1168,13 @@ rm -f "$_PORTAL_BG_TMP"
 $MK8S kubectl rollout restart deployment/portal -n "$NAMESPACE"
 $MK8S kubectl rollout status deployment/portal \
   -n "$NAMESPACE" --timeout=3m
+
+# The portal proxy's error page (mainly the 403 for a user without a platform
+# role), in the platform's look. Mounted at /templates, see values-portal.yaml.
+$MK8S kubectl delete configmap portal-signin -n "$NAMESPACE" --ignore-not-found >/dev/null
+render "$SCRIPT_DIR/k8s/portal/error.html" _PORTAL_LOGOUT_RD \
+  | $MK8S kubectl create configmap portal-templates -n "$NAMESPACE" --from-file=error.html=/dev/stdin \
+      --dry-run=client -o yaml | $MK8S kubectl apply -f -
 
 # Portal OAuth2 Proxy (Keycloak client: portal)
 _POP2_VALUES=$(mktemp /tmp/portal-oauth2proxy-values-XXXXXX.yaml)
@@ -1301,6 +1443,9 @@ echo -e "  Keycloak:        https://$KEYCLOAK_DOMAIN/admin"
 echo -e "    Login:         $ADMIN_USER"
 echo -e "    Realm:         $KEYCLOAK_REALM  (all SSO users managed here)"
 echo -e "    User portal:   https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/account"
+echo -e "  User Manager:    https://$ACCESS_DOMAIN   (access requests — role admin; ./deploy-apps.sh installs it)"
+echo -e "    Register:      https://$ACCESS_DOMAIN/register   (the portal sign-in page links here)"
+echo -e "    Portal gate:   realm roles operator / qa / auditor / admin"
 echo ""
 echo -e "${GREEN}  INTERNAL (cluster-only)${NC}"
 echo -e "${GREEN}  -----------------------${NC}"
@@ -1325,6 +1470,23 @@ if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
     echo ""
     if [[ "$(dns_query 100.100.100.100 "portal.$DOMAIN" 2>/dev/null)" == "$PLATFORM_IP" ]]; then
         echo -e "${GREEN}  ✓ Tailscale split DNS is active: every tailnet device resolves *.$DOMAIN.${NC}"
+    elif [[ -n "$_SPLIT_DNS_TARGET" && "$_SPLIT_DNS_TARGET" != "$PLATFORM_IP" ]]; then
+        # Typically a rebuilt server: new Tailscale IP, the old route left behind.
+        echo -e "${RED}=================================================${NC}"
+        echo -e "${RED} TAILSCALE SPLIT DNS POINTS AT ANOTHER SERVER${NC}"
+        echo -e "${RED}=================================================${NC}"
+        echo "  '$DOMAIN' is routed to $_SPLIT_DNS_TARGET; this server is $PLATFORM_IP."
+        _OLD_NODE="$(tailscale status 2>/dev/null | awk -v ip="${_SPLIT_DNS_TARGET%% *}" '$1 == ip { s = $2; if (match($0, /offline[^,]*(, last seen [^,]*)?/)) s = s " (" substr($0, RSTART, RLENGTH) ")"; print s; exit }')"
+        [[ -n "$_OLD_NODE" ]] && echo "  $_SPLIT_DNS_TARGET is: $_OLD_NODE"
+        echo "  This machine still resolves the names (/etc/hosts); every other device does not."
+        echo ""
+        echo "  1. Open https://login.tailscale.com/admin/dns"
+        echo "  2. Nameservers → the entry restricted to '$DOMAIN' → Edit"
+        echo "  3. Change $_SPLIT_DNS_TARGET to $PLATFORM_IP → Save"
+        echo "     (If the old server is gone for good, remove it under Machines too.)"
+        echo ""
+        echo "  Test from any device:  nslookup portal.$DOMAIN   → $PLATFORM_IP"
+        echo "  Re-running ./deploy-infra.sh reports ✓ once the setting is in place."
     else
         echo -e "${YELLOW}=================================================${NC}"
         echo -e "${YELLOW} ONE STEP LEFT: make *.$DOMAIN work on your other devices${NC}"

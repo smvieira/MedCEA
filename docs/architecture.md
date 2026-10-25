@@ -68,7 +68,7 @@ publish events into it. They hold no credentials that let them update or delete 
 | **GS1 EPCIS 2.0 event publisher** | A service that consumes operational events (MQTT/DB changes) and emits EPCIS JSON-LD ObjectEvents and TransformationEvents with CBV business steps. SGTIN for units, LGTIN for lots. Consider OpenEPCIS as the repository. |
 | **Immutable audit trail** | Its own schema and DB role. Append-only (no UPDATE/DELETE grants). Each record carries `prev_hash` and `hash = H(prev_hash ‖ payload)`. Periodic anchoring of the chain head. |
 | **Electronic Batch Record generator** | Compiles telemetry, the recipe execution log, controller segments, genotype identity and analytical results per lot into a reviewable, signed record. |
-| **RBAC** | Keycloak realm roles `operator`, `qa`, `admin`, `auditor`, enforced at the API and DB-role level. Data creation and data review are separated (Annex 11). |
+| **RBAC** | Keycloak realm roles `operator`, `qa`, `admin`, `auditor`, enforced at the API and DB-role level. Data creation and data review are separated (Annex 11). **Partly done:** the roles exist and the portal admits only them; people obtain one through a self-service access request reviewed by an admin in the User Manager (`apps/access`), with every request and decision in the append-only `iam.access_request_history`. **Still TODO:** per-role permissions inside each service (Grafana, Node-RED, config API, scheduler) and DB roles per realm role. |
 | **Read-only regulator interface** | A query API and UI for auditors and Layer 4, with no write paths. It is the basis of the Exp 3 inspection simulation. |
 
 ## Runtime identifiers

@@ -8,6 +8,8 @@ hub:
       # Any authenticated realm user may sign in. To restrict, create a realm
       # role and switch to allowed_groups with a groups claim mapper.
       allow_all: true
+      # No "Sign in with Keycloak" page: straight to the platform login.
+      auto_login: true
     GenericOAuthenticator:
       client_id: workbench
       client_secret: "${WORKBENCH_SECRET}"

@@ -18,7 +18,9 @@ configuration:
     # should not exceed the realm's SSO Session Max.
     cookie_refresh = "4m"
     cookie_expire = "8h"
-    skip_provider_button = false
+    # Straight to the platform login page (the medcea Keycloak theme): one
+    # login screen for every service instead of a "Sign in with Keycloak" stop.
+    skip_provider_button = true
     # PostgREST sits behind this proxy at /api/ and reads the Authorization
     # header, expecting "Bearer <JWT>". oauth2-proxy defaults pass_basic_auth to
     # TRUE, which injects "Authorization: Basic <base64>" into every upstream
@@ -41,4 +43,6 @@ configuration:
     redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
     oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
     profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
-    upstreams = ["http://config-ui.${NAMESPACE}.svc.cluster.local:80"]
+    # /_account/ is the user menu and profile (apps/access, :8082), mounted on
+    # every signed-in host so it acts for whoever this proxy signed in.
+    upstreams = ["http://config-ui.${NAMESPACE}.svc.cluster.local:80", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/"]

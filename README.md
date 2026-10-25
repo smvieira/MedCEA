@@ -156,6 +156,7 @@ Currently available components:
 
 | Component | What it installs |
 |---|---|
+| **access** | Self-service access requests: the public *Request access* form and the admin **User Manager** (see below) |
 | **database** | `medcea` schema, measurement table, and DB migrations (control algorithms, permissions, algorithm state) |
 | **frontend** | System Configuration UI and Database Management portal |
 | **node-red** | `node-red-contrib-postgresql` package + MQTT→PostgreSQL flow |
@@ -195,8 +196,23 @@ Note that SHA-256 fingerprint — it is unique to your installation — and conf
 it matches after importing. Then copy the file to the machine you browse from:
 
 ```bash
-scp <user>@<platform-host>:~/MedCEA/.ca/ca.crt ./cea-ca.crt
+scp <user>@<platform-host>:<repo-path>/.ca/ca.crt ./cea-ca.crt
 ```
+
+In case `scp` stops with `REMOTE HOST IDENTIFICATION HAS CHANGED`: the name or
+IP you used belonged to an earlier server (a rebuild, or a Tailscale machine
+renamed to take over the name). Your SSH client remembers the old server's key
+in `~/.ssh/known_hosts` and refuses the new one. Forget it and retry:
+
+```bash
+ssh-keygen -R <platform-host>      # the same name or IP you gave scp
+```
+
+It removes only that one entry (a backup is kept as `known_hosts.old`). On the
+retry, accept the new key only if its fingerprint matches the server's, which
+you can read on the platform host with
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. The install summary prints it
+next to the `scp` command.
 
 The file is the public half of the CA. It is safe to copy around; the private
 key stays in `.ca/ca.key` on the server.
@@ -277,6 +293,66 @@ instead of "Not secure".
 > point it at the host and use a DNS-01 ACME challenge, which keeps the current
 > subdomain layout and gives publicly trusted certificates.
 
+### User access: requests, roles and e-mail
+
+The portal admits only users who hold one of the platform realm roles
+**operator**, **qa**, **auditor** or **admin** (the RBAC roles in
+[docs/architecture.md](docs/architecture.md)). New people get one by asking:
+
+1. On the platform sign-in page (every service sends you there; it is the
+   `medcea` Keycloak theme in [k8s/keycloak/theme/](k8s/keycloak/theme/)) they
+   open the **Request access** tab and fill in name,
+   e-mail, username, password, the **role they need** and a **business
+   justification**. Their Keycloak account is created **disabled**, so they
+   cannot sign in yet.
+2. Every admin (each enabled user with realm role `admin`, plus
+   `ACCESS_NOTIFY_EMAIL`) gets an e-mail with a link to the **User Manager**
+   (`https://access.<domain>`, also a card under Platform Management).
+3. The admin approves with the requested role, approves with a **different**
+   role, or rejects. Notes are optional for an approval and required for a
+   rejection; they are included in the e-mail.
+4. The applicant gets one of three e-mails: *approved*, *approved with role
+   reassigned* (requested vs granted role), or *rejected*. Approval enables the
+   account with the granted role. Rejection deletes the disabled account, so
+   the person can apply again.
+
+Every request and decision is kept in `iam.access_request_history`
+(who, when, requested vs granted role, notes). It is append-only: the service
+can read it but cannot change or delete it.
+
+**Deactivating someone**: User Manager → **Users** lists every account with its
+role. *Deactivate account* needs a reason, signs the person out everywhere at
+once and blocks sign-in until *Activate account*; role and data are kept.
+The same panel changes an account's **role** (one platform role per account; a
+reason is required; it takes effect within a few minutes without signing out).
+You cannot deactivate yourself or the last active admin, and an account still
+awaiting approval is decided under Requests instead. Every change is kept in
+the account's history, which cannot be edited.
+
+**E-mail is managed in the User Manager**, not in `config.env`:
+
+- **E-mail settings**: the Gmail address and its **app password**
+  (<https://myaccount.google.com/apppasswords>, needs 2-Step Verification), the
+  sender name and extra people to notify about new requests. *Save and verify*
+  logs in to Gmail before storing anything; *Send test e-mail to me* proves
+  delivery. The same account becomes Keycloak's mail server, so the sign-in
+  page's **Forgot password?** works too. Until it is set, decisions still work
+  and the messages go to the service log.
+- **Templates**: the four messages (new request, approved, approved with role
+  reassigned, rejected), with clickable placeholders such as `$first_name`,
+  `$granted_role_label` and `$notes_block`. *Reset to default* returns to the
+  files in [apps/access/templates/](apps/access/templates/).
+- **In each decision** the applicant's e-mail is pre-filled from the matching
+  template and follows the decision, role and notes as you change them. Edit it
+  freely before sending, or untick *Send e-mail*. What was sent is stored with
+  the decision.
+- **Change log**: every change to the settings or templates, and who made it
+  (the password itself is never logged).
+
+Users that existed before this feature and have none of the four roles get a
+403 from the portal. Grant one in the Keycloak console (Realm roles → *role* →
+Users in role), or have them file a request.
+
 ---
 
 ## Service URLs
@@ -285,6 +361,8 @@ After deployment the summary section of the log shows all URLs. The pattern is:
 
 ```
 Portal:        https://portal.<domain>          (start here — Keycloak SSO)
+User Manager:  https://access.<domain>          (access requests — realm role admin)
+Request access: https://access.<domain>/register (opens the Request access tab of the sign-in page)
 Keycloak:      https://keycloak.<domain>       (admin / <ADMIN_PASS>)
 Grafana:       https://grafana.<domain>         (login via Keycloak)
 Node-RED:      http://data-flow.<domain>       (login via Keycloak)

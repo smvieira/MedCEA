@@ -1,6 +1,9 @@
 env:
   GF_SERVER_ROOT_URL: "https://${GRAFANA_DOMAIN}"
   GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+  # Skip Grafana's own login page; the platform login (Keycloak theme medcea) is
+  # the only one. The local admin is still reachable at /login?disableAutoLogin.
+  GF_AUTH_OAUTH_AUTO_LOGIN: "true"
   GF_AUTH_GENERIC_OAUTH_NAME: "Keycloak"
   GF_AUTH_GENERIC_OAUTH_CLIENT_ID: "grafana"
   GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: "${GRAFANA_OAUTH_SECRET}"

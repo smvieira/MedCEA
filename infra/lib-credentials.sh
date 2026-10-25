@@ -48,10 +48,12 @@ show_credentials() {
 # fingerprint filled in. stdout on purpose: nothing here is secret (ca.crt is
 # the public half; the key stays in .ca/ca.key), so it may land in the log.
 show_ca_trust() {
-    local ca="$1" ip="$2" portal="$3" fp
+    local ca="$1" ip="$2" portal="$3" fp hostfp
     local Y='\033[0;33m' B='\033[1m' N='\033[0m'
     [[ -f "$ca" ]] || return 0
     fp="$(openssl x509 -in "$ca" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)"
+    # Host public keys are world-readable; this is what scp shows on first contact.
+    hostfp="$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null | awk '{print $2}')"
     echo ""
     echo -e "${Y}=================================================${N}"
     echo -e "${Y} TRUST THE PLATFORM CERTIFICATE (once per device)${N}"
@@ -64,6 +66,10 @@ show_ca_trust() {
     echo ""
     echo -e "  ${B}1. Copy the certificate to the device you browse from:${N}"
     echo "    scp $(id -un)@${ip}:${ca} ./medcea-ca.crt"
+    echo "  In case scp stops with \"REMOTE HOST IDENTIFICATION HAS CHANGED\": the name or IP"
+    echo "  belonged to an earlier server (a rebuild or reinstall). Forget the old key, then retry:"
+    echo "    ssh-keygen -R ${ip}        (or the name, if you used one instead of the IP)"
+    [[ -n "$hostfp" ]] && echo "  Accept the new key only if it is this server's: ED25519 ${hostfp}"
     echo ""
     echo -e "  ${B}2. Import it:${N}"
     echo "  Windows — Chrome and Edge, just for you (no admin needed, any PowerShell):"

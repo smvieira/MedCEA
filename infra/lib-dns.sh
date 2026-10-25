@@ -8,6 +8,13 @@
 #   dns_query SERVER NAME    print the first A record SERVER returns for NAME;
 #                            non-zero when there is none. Plain python3 UDP:
 #                            clean Ubuntu has no dig/nslookup.
+#   split_dns_target DOMAIN  print the nameserver(s) Tailscale split DNS sends
+#                            DOMAIN to, one per line; nothing when there is no
+#                            route or `tailscale dns status` is unavailable.
+#
+# split_dns_target exists because a rebuilt server gets a new Tailscale IP while
+# the admin console keeps routing the domain to the old one: this machine still
+# resolves through /etc/hosts, and every other device quietly gets no answer.
 #
 # Why /etc/hosts as well as the name-dns server: this machine has to resolve
 # keycloak.<domain> & co. during its own deploy (wait_for_http, health checks,
@@ -79,4 +86,14 @@ for _ in range(answers):
     i += rlen
 sys.exit(1)
 PYEOF
+}
+
+split_dns_target() {
+    command -v tailscale >/dev/null 2>&1 || return 0
+    # "Split DNS Routes:" lists "  - <domain>[.]   -> <ip>"; the format is
+    # marked preliminary, so match loosely and print nothing on a surprise.
+    tailscale dns status 2>/dev/null | awk -v d="$1" '
+        /^Split DNS Routes:/ { on = 1; next }
+        on && !/^[[:space:]]*-/ { on = 0 }
+        on && $1 == "-" && ($2 == d || $2 == d ".") && $3 == "->" { print $4 }'
 }

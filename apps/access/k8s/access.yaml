@@ -1,0 +1,125 @@
+# Access requests service (apps/access). One Python process, two ports:
+#   access-public  :8080  registration form — exposed by the Ingress below
+#   access-admin   :8081  User Manager — only the access-oauth2-proxy upstream
+#   access-profile :8082  user menu + profile, /_account/ on every signed-in host
+# Secrets (DB password, Keycloak client secret) come from the access-secrets
+# Secret that deploy.sh writes. Mail settings live in the database (User Manager).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: access
+  namespace: ${NAMESPACE}
+  labels: {app: access}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: access}
+  template:
+    metadata:
+      labels: {app: access}
+    spec:
+      containers:
+      - name: api
+        image: python:3.12-alpine
+        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 && exec python -u /app/access-api.py"]
+        ports:
+        - {name: public, containerPort: 8080}
+        - {name: admin, containerPort: 8081}
+        - {name: profile, containerPort: 8082}
+        env:
+        - {name: PG_HOST, value: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local"}
+        - {name: PG_DATABASE, value: "${POSTGRES_DB}"}
+        - {name: PG_USER, value: access_svc}
+        - {name: KC_URL, value: "http://keycloak.${NAMESPACE}.svc.cluster.local"}
+        - {name: KC_REALM, value: "${KEYCLOAK_REALM}"}
+        - {name: KC_CLIENT_ID, value: access}
+        - {name: ACCESS_URL, value: "https://${ACCESS_DOMAIN}"}
+        - {name: PORTAL_URL, value: "https://${PORTAL_DOMAIN}"}
+        - {name: LOGIN_ORIGIN, value: "https://${KEYCLOAK_DOMAIN}"}
+        - {name: KC_PUBLIC_URL, value: "https://${KEYCLOAK_DOMAIN}"}
+        - {name: HOST_CLIENTS, value: "${HOST_CLIENTS}"}
+        envFrom:
+        - secretRef: {name: access-secrets}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8081}
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        resources:
+          requests: {cpu: 10m, memory: 48Mi}
+          limits: {memory: 192Mi}
+        volumeMounts:
+        - {name: code, mountPath: /app/access-api.py, subPath: access-api.py}
+        - {name: html, mountPath: /app/html}
+        - {name: templates, mountPath: /app/templates}
+      volumes:
+      - name: code
+        configMap: {name: access-api}
+      - name: html
+        configMap: {name: access-html}
+      - name: templates
+        configMap: {name: access-templates}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: access-public
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: access}
+  ports:
+  - {port: 80, targetPort: public}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: access-admin
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: access}
+  ports:
+  - {port: 80, targetPort: admin}
+---
+# The user menu and profile (/_account/), reached only as an extra upstream of
+# the portal, config and access oauth2-proxies — never from an Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: access-profile
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: access}
+  ports:
+  - {port: 80, targetPort: profile}
+---
+# Only the registration paths are public (the Keycloak login page posts its
+# Request access tab to /api/register, cross-origin). Everything else on this host —
+# including / (the User Manager) and /oauth2/* — is the access-oauth2-proxy's
+# Ingress (created by its Helm release); nginx-ingress picks the longest prefix.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: access-public
+  namespace: ${NAMESPACE}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "64k"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts: [${ACCESS_DOMAIN}]
+    secretName: cea-tls
+  rules:
+  - host: ${ACCESS_DOMAIN}
+    http:
+      paths:
+      - path: /register
+        pathType: Prefix
+        backend:
+          service: {name: access-public, port: {number: 80}}
+      - path: /api/register
+        pathType: Prefix
+        backend:
+          service: {name: access-public, port: {number: 80}}

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Request Access — MedCEA</title>
+  <!-- The form itself is the Request access tab of the platform login page (the
+       medcea Keycloak theme). The portal sends a visitor there, and browsers keep
+       the #register fragment across those redirects, so the tab opens directly. -->
+  <meta http-equiv="refresh" content="0; url=https://${PORTAL_DOMAIN}/#register">
+  <style>body{background:#0d1321;color:#94a3b8;font:15px 'Segoe UI',system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}a{color:#60a5fa}</style>
+</head>
+<body>
+  <p>Opening the <a href="https://${PORTAL_DOMAIN}/#register">MedCEA sign-in page</a>&hellip;</p>
+  <script>location.replace('https://${PORTAL_DOMAIN}/#register');</script>
+</body>
+</html>

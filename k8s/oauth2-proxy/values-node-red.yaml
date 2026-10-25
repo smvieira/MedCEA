@@ -23,7 +23,9 @@ configuration:
     # should not exceed the realm's SSO Session Max.
     cookie_refresh = "4m"
     cookie_expire = "8h"
-    skip_provider_button = false
+    # Straight to the platform login page (the medcea Keycloak theme): one
+    # login screen for every service instead of a "Sign in with Keycloak" stop.
+    skip_provider_button = true
     skip_oidc_discovery = true
     login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
     redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"

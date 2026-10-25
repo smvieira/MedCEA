@@ -23,10 +23,32 @@ configuration:
     # should not exceed the realm's SSO Session Max.
     cookie_refresh = "4m"
     cookie_expire = "8h"
-    skip_provider_button = false
+    # Straight to the platform login page (the medcea Keycloak theme): one
+    # login screen for every service instead of a "Sign in with Keycloak" stop.
+    skip_provider_button = true
+    # Only people with a platform role get in. A signed-in user without one
+    # (e.g. created by hand in Keycloak) gets oauth2-proxy's 403 page. The
+    # "groups" claim is the realm-role mapper deploy-infra.sh adds to the
+    # portal client; roles are granted through access requests (apps/access).
+    oidc_groups_claim = "groups"
+    allowed_groups = ["operator", "qa", "auditor", "admin"]
+    # error.html from the portal-templates ConfigMap: the 403 above explained in
+    # the platform's look, with a real sign-out. sign_in.html is never shown
+    # (skip_provider_button), so oauth2-proxy keeps its own.
+    custom_templates_dir = "/templates"
     skip_oidc_discovery = true
     login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
     redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
     oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
     profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
-    upstreams = ["http://portal.${NAMESPACE}.svc.cluster.local:80"]
+    # /_account/ is the user menu and profile (apps/access, :8082), mounted on
+    # every signed-in host so it acts for whoever this proxy signed in.
+    upstreams = ["http://portal.${NAMESPACE}.svc.cluster.local:80", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/"]
+extraVolumes:
+  - name: templates
+    configMap:
+      name: portal-templates
+extraVolumeMounts:
+  - name: templates
+    mountPath: /templates
+    readOnly: true

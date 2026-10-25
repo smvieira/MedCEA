@@ -14,12 +14,33 @@ spec:
     metadata:
       labels:
         app: keycloak
+      annotations:
+        # Changes with the theme files, so a theme edit restarts Keycloak (it
+        # caches themes in production mode and never re-reads the mount).
+        medcea/theme-checksum: "${_KC_THEME_SUM}"
     spec:
+      volumes:
+      # The medcea login theme (k8s/keycloak/theme/). ConfigMap keys are flat,
+      # so items rebuild the directory tree Keycloak expects.
+      - name: theme
+        configMap:
+          name: keycloak-theme
+          items:
+          - {key: theme.properties, path: login/theme.properties}
+          - {key: template.ftl, path: login/template.ftl}
+          - {key: login.ftl, path: login/login.ftl}
+          - {key: messages_en.properties, path: login/messages/messages_en.properties}
+          - {key: medcea.css, path: login/resources/css/medcea.css}
+          - {key: bg.jpg, path: login/resources/img/bg.jpg}
       containers:
       - name: keycloak
         image: quay.io/keycloak/keycloak:26.0
         args:
         - start
+        volumeMounts:
+        - name: theme
+          mountPath: /opt/keycloak/themes/medcea
+          readOnly: true
         env:
         # Keycloak 26 names (KEYCLOAK_ADMIN* are deprecated). Only used when the
         # database has no admin yet, i.e. on the first start.
@@ -71,10 +92,10 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            memory: "512Mi"
+            memory: "1Gi"
             cpu: "250m"
           limits:
-            memory: "1Gi"
+            memory: "2Gi"
             cpu: "1000m"
 ---
 apiVersion: v1

@@ -1,0 +1,83 @@
+/* MedCEA login theme — same palette and type as the service portal. */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { min-height: 100%; }
+body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+.bg { position: fixed; inset: 0; z-index: 0; opacity: .28; background-size: cover; background-position: center; pointer-events: none; }
+.shell { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 16px; }
+
+.brand { display: flex; align-items: center; gap: 14px; margin-bottom: 26px; }
+.brand svg { width: 52px; height: 52px; flex: none; }
+.brand-name { font-size: 1.6rem; font-weight: 700; color: #fff; letter-spacing: -.02em; }
+.brand-sub { font-size: .8rem; color: #94a3b8; margin-top: 2px; }
+
+.card { width: 100%; max-width: 460px; background: rgba(30, 37, 50, .92); backdrop-filter: blur(8px); border: 1px solid #2a364e; border-radius: 16px; padding: 28px 28px 24px; box-shadow: 0 12px 40px rgba(0, 0, 0, .5); }
+.card:has(#pane-register:not([hidden])) { max-width: 560px; }
+.card-head { margin-bottom: 20px; }
+.title { font-size: 1.3rem; font-weight: 700; color: #fff; }
+.attempted { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #0f172a; border: 1px solid #2a364e; border-radius: 8px; padding: 9px 12px; font-size: .9rem; }
+.attempted a { font-size: .78rem; color: #60a5fa; text-decoration: none; }
+
+.tabs { display: grid; grid-template-columns: 1fr 1fr; background: #0f172a; border: 1px solid #2a364e; border-radius: 10px; padding: 4px; gap: 4px; }
+.tab { background: transparent; border: 0; color: #94a3b8; padding: 9px 10px; border-radius: 7px; font: 600 .9rem 'Segoe UI', system-ui, sans-serif; cursor: pointer; transition: background .15s, color .15s; }
+.tab:hover { color: #e2e8f0; }
+.tab.on { background: #2563eb; color: #fff; }
+
+.form { display: flex; flex-direction: column; gap: 14px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 520px) { .row { grid-template-columns: 1fr; } .card { padding: 22px 18px; } }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.label { font-size: .78rem; font-weight: 600; color: #cbd5e1; }
+.opt { font-weight: 400; color: #64748b; margin-left: 4px; }
+.input { width: 100%; background: #0f172a; border: 1px solid #2a364e; border-radius: 8px; color: #e2e8f0; padding: 11px 12px; font: .92rem 'Segoe UI', system-ui, sans-serif; transition: border-color .15s, box-shadow .15s; }
+.input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, .2); }
+.input[aria-invalid="true"] { border-color: #ef4444; }
+textarea.input { resize: vertical; min-height: 96px; line-height: 1.5; }
+select.input { appearance: auto; }
+.input-group { position: relative; display: flex; }
+.input-group .input { padding-right: 62px; }
+.pw-toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: transparent; border: 0; color: #60a5fa; font: 600 .75rem 'Segoe UI', system-ui, sans-serif; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
+.pw-toggle:hover { background: #1e293b; }
+.field-error { font-size: .8rem; color: #fca5a5; }
+.count { text-align: right; font-size: .72rem; color: #64748b; }
+.muted { font-size: .85rem; color: #64748b; }
+.hp { position: absolute; left: -9999px; width: 1px; height: 1px; }
+
+.roles { display: grid; gap: 8px; }
+.role { display: flex; gap: 10px; align-items: flex-start; background: #0f172a; border: 1px solid #2a364e; border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+.role:hover { border-color: #3b82f6; }
+.role:has(input:checked) { border-color: #3b82f6; background: #13203a; }
+.role input { margin-top: 3px; accent-color: #3b82f6; }
+.role-t { display: block; font-size: .88rem; font-weight: 600; color: #fff; }
+.role-d { display: block; font-size: .8rem; color: #94a3b8; margin-top: 1px; }
+
+.options { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: .84rem; color: #94a3b8; }
+.check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.check input { accent-color: #3b82f6; }
+.link, .card a { color: #60a5fa; text-decoration: none; }
+.link:hover, .card a:hover { color: #93c5fd; }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; padding: 12px 16px; font: 600 .95rem 'Segoe UI', system-ui, sans-serif; cursor: pointer; border: 1px solid transparent; text-decoration: none; transition: background .15s, border-color .15s; }
+.card a.btn-primary, .btn-primary { background: #2563eb; color: #fff; }
+.btn-primary:hover { background: #1d4ed8; }
+.card a.btn-secondary, .btn-secondary { background: transparent; border-color: #2a364e; color: #cbd5e1; }
+.btn-secondary:hover { border-color: #3b82f6; color: #fff; }
+.btn-block { width: 100%; }
+.btn:disabled { opacity: .6; cursor: default; }
+.buttons { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+/* base pages put the submit button in kcFormButtonsClass and links in kcFormOptionsWrapperClass */
+.options-right { margin-left: auto; }
+.form input[type="submit"] { width: 100%; border: 0; border-radius: 8px; padding: 12px 16px; background: #2563eb; color: #fff; font: 600 .95rem 'Segoe UI', system-ui, sans-serif; cursor: pointer; }
+.form input[type="submit"]:hover { background: #1d4ed8; }
+
+.alert { border-radius: 8px; padding: 11px 14px; font-size: .86rem; line-height: 1.5; margin-bottom: 16px; border: 1px solid; }
+.form .alert { margin-bottom: 0; }
+.alert-error { background: #3b1219; border-color: #7f1d1d; color: #fecaca; }
+.alert-warning { background: #3a2a0c; border-color: #854d0e; color: #fde68a; }
+.alert-success { background: #0f2e1d; border-color: #166534; color: #bbf7d0; }
+.alert-info { background: #10213f; border-color: #1e3a8a; color: #bfdbfe; }
+
+.hint { margin-top: 18px; text-align: center; font-size: .84rem; color: #94a3b8; }
+.info { margin-top: 18px; text-align: center; font-size: .84rem; color: #94a3b8; }
+.social { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; padding-top: 18px; border-top: 1px solid #2a364e; }
+#kc-select-try-another-way-form { margin-top: 14px; text-align: center; font-size: .84rem; }
+.foot { margin-top: 24px; font-size: .76rem; color: #94a3b8; text-shadow: 0 1px 2px rgba(0, 0, 0, .6); }

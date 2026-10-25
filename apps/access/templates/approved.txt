@@ -1,0 +1,15 @@
+Subject: [MedCEA] Your access request was approved
+
+Hello $first_name,
+
+Your request for access to the $platform has been approved.
+
+  Username: $username
+  Role:     $granted_role_label
+
+You can sign in now with the password you chose when you registered:
+$portal_url
+
+$notes_block
+Regards,
+The $platform administrators

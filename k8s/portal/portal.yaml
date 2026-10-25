@@ -20,7 +20,7 @@ data:
         .view { display: none; }
         .view.active { display: block; }
         .page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 72px 24px 48px; position: relative; }
-        .hdr-btns { position: absolute; top: 20px; right: 20px; display: flex; gap: 10px; }
+        .hdr-btns { position: absolute; top: 20px; left: 20px; display: flex; gap: 10px; }
         .btn { display: inline-flex; align-items: center; gap: 7px; background: #1e293b; border: 1px solid #2a364e; color: #94a3b8; padding: 8px 16px; border-radius: 8px; cursor: pointer; font: 500 .875rem 'Segoe UI',system-ui,sans-serif; text-decoration: none; transition: background .15s, color .15s; }
         .btn:hover { background: #2a364e; color: #e2e8f0; }
         .ph { text-align: center; margin-bottom: 60px; }
@@ -52,12 +52,6 @@ data:
         <!-- MAIN PORTAL -->
         <div id="v-portal" class="view active">
           <div class="page">
-            <div class="hdr-btns">
-              <a href="/oauth2/sign_out?rd=${_PORTAL_LOGOUT_RD}" class="btn">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-                Sign Out
-              </a>
-            </div>
             <div class="ph">
               <h1 class="ph-title">
                 <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" style="width:54px;height:54px">
@@ -112,10 +106,6 @@ data:
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
                 Back
               </button>
-              <a href="/oauth2/sign_out?rd=${_PORTAL_LOGOUT_RD}" class="btn">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-                Sign Out
-              </a>
             </div>
             <div class="ph">
               <h1 class="ph-title">
@@ -169,6 +159,12 @@ data:
                 <div class="cd">Live view of active recipe runs, cycle progress, and sensor readings vs limits.</div>
                 <div class="ck">https://${MONITOR_DOMAIN} <span class="ck-a">&rarr;</span></div>
               </a>
+              <a class="card" href="https://${ACCESS_DOMAIN}" target="_blank" rel="noopener">
+                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#e879f9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m16 11 2 2 4-4"/></svg></div>
+                <div class="cl">Administration</div><div class="ct">User Manager</div>
+                <div class="cd">Review access requests, grant or reassign roles, and keep the decision record. Administrators only.</div>
+                <div class="ck">https://${ACCESS_DOMAIN} <span class="ck-a">&rarr;</span></div>
+              </a>
             </div>
             <div class="pfooter">
               <p>MedCEA &mdash; Powered by Keycloak, JupyterHub &amp; MicroK8s</p>
@@ -183,6 +179,10 @@ data:
           window.scrollTo(0, 0);
         }
       </script>
+      <!-- The signed-in person's name → Profile / Sign out (apps/access, served
+           at /_account/ through this host's oauth2-proxy). It pins itself
+           top-right; without apps/access it falls back to a plain Sign out. -->
+      <script src="/_account/user-menu.js" defer></script>
     </body>
     </html>
 ---

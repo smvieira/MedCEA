@@ -1,0 +1,13 @@
+Subject: [MedCEA] Your access request was not approved
+
+Hello $first_name,
+
+Your request for access to the $platform as $requested_role_label
+was not approved.
+
+$notes_block
+No account has been kept. You are welcome to submit a new request at any time
+if your circumstances change.
+
+Regards,
+The $platform administrators

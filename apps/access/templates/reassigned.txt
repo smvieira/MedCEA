@@ -1,0 +1,19 @@
+Subject: [MedCEA] Your access request was approved with a different role
+
+Hello $first_name,
+
+Your request for access to the $platform has been approved, with a different
+role from the one you asked for.
+
+  Username:        $username
+  Requested role:  $requested_role_label
+  Granted role:    $granted_role_label
+
+$notes_block
+You can sign in now with the password you chose when you registered:
+$portal_url
+
+If the granted role does not cover what you need, reply to this e-mail.
+
+Regards,
+The $platform administrators

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Profile — MedCEA</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    .top { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; }
+    .back { display: inline-flex; align-items: center; gap: 7px; color: #94a3b8; text-decoration: none; font-size: .875rem; }
+    .back:hover { color: #fff; }
+    .page { max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; }
+    .head { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+    .av { width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, #2563eb, #16a34a); color: #fff; display: flex; align-items: center; justify-content: center; font: 700 1.4rem 'Segoe UI', system-ui, sans-serif; flex: none; }
+    h1 { font-size: 1.6rem; font-weight: 700; color: #fff; letter-spacing: -.02em; }
+    .sub { font-size: .85rem; color: #94a3b8; margin-top: 3px; }
+    .card { background: #1e2532; border: 1px solid #2a364e; border-radius: 14px; padding: 24px; box-shadow: 0 4px 24px rgba(0,0,0,.4); margin-bottom: 18px; }
+    h2 { font-size: .74rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #64748b; margin-bottom: 14px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+    label { display: block; font-size: .78rem; font-weight: 600; color: #cbd5e1; margin: 12px 0 6px; }
+    input { width: 100%; background: #0f172a; border: 1px solid #2a364e; border-radius: 8px; color: #e2e8f0; padding: 10px 12px; font: .9rem 'Segoe UI', system-ui, sans-serif; }
+    input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
+    input[readonly] { color: #94a3b8; background: #131c2e; }
+    .hint { font-size: .76rem; color: #64748b; margin-top: 5px; }
+    .acts { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; border-radius: 8px; padding: 10px 18px; font: 600 .9rem 'Segoe UI', system-ui, sans-serif; cursor: pointer; text-decoration: none; border: 1px solid transparent; }
+    .pri { background: #2563eb; color: #fff; } .pri:hover { background: #1d4ed8; }
+    .sec { background: transparent; border-color: #2a364e; color: #cbd5e1; } .sec:hover { border-color: #3b82f6; color: #fff; }
+    .btn:disabled { opacity: .6; cursor: default; }
+    .msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: .86rem; display: none; }
+    .msg.ok { display: block; background: #0f2e1d; border: 1px solid #166534; color: #bbf7d0; }
+    .msg.bad { display: block; background: #3b1219; border: 1px solid #7f1d1d; color: #fecaca; }
+    .pw { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .pw p { font-size: .88rem; color: #94a3b8; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <a class="back" id="back" href="/">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+      <span id="back-t">Back</span>
+    </a>
+    <div id="user-menu"></div>
+  </div>
+  <main class="page">
+    <div class="head">
+      <div class="av" id="av">…</div>
+      <div><h1 id="name">Profile</h1><div class="sub">Your MedCEA account</div></div>
+    </div>
+    <div id="pwdone" class="msg">Your password was changed.</div>
+
+    <form class="card" id="f">
+      <h2>Personal details</h2>
+      <div class="row">
+        <div><label for="first_name">First name</label><input id="first_name" required maxlength="100" autocomplete="given-name"></div>
+        <div><label for="last_name">Last name</label><input id="last_name" required maxlength="100" autocomplete="family-name"></div>
+      </div>
+      <label for="organisation">Organisation</label>
+      <input id="organisation" maxlength="200" autocomplete="organization">
+      <div class="row">
+        <div><label for="username">Username</label><input id="username" readonly></div>
+        <div><label for="email">E-mail</label><input id="email" readonly></div>
+      </div>
+      <div class="hint">Username and e-mail identify your account; ask an administrator to change them.</div>
+      <div class="acts"><button class="btn pri" id="save" type="submit">Save changes</button></div>
+      <div class="msg" id="msg"></div>
+    </form>
+
+    <div class="card">
+      <h2>Password</h2>
+      <div class="pw">
+        <p>Change the password you sign in with.<br>You may be asked for your current one first.</p>
+        <a class="btn sec" id="pw" href="#">Change password</a>
+      </div>
+    </div>
+  </main>
+  <script src="/_account/user-menu.js" defer></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var f = $('f'), msg = $('msg');
+  function note(ok, text) { msg.className = 'msg ' + (ok ? 'ok' : 'bad'); msg.textContent = text; }
+  function paint(me) {
+    $('name').textContent = me.display_name;
+    var p = me.display_name.trim().split(/\s+/);
+    $('av').textContent = ((p[0] || '?')[0] + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
+    ['first_name', 'last_name', 'organisation', 'username', 'email'].forEach(function (k) { $(k).value = me[k] || ''; });
+    if (me.change_password) $('pw').href = me.change_password; else $('pw').style.display = 'none';
+  }
+  // Back to where the menu was opened (same host), else this host's home.
+  if (document.referrer && new URL(document.referrer).host === location.host && !/\/_account\//.test(document.referrer)) {
+    $('back').href = document.referrer;
+  }
+  $('back-t').textContent = 'Back to ' + location.host.split('.')[0];
+  if (/[?&]password=updated/.test(location.search)) {
+    $('pwdone').className = 'msg ok';
+    history.replaceState(null, '', '/_account/');
+  }
+  fetch('/_account/api/me').then(function (r) { return r.json(); }).then(paint)
+    .catch(function () { note(false, 'Could not load your profile.'); });
+  f.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var b = $('save'); b.disabled = true;
+    fetch('/_account/api/me', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ first_name: $('first_name').value, last_name: $('last_name').value, organisation: $('organisation').value }) })
+      .then(function (r) { return r.json().then(function (b) { return [r.ok, b]; }); })
+      .then(function (rb) {
+        if (!rb[0]) throw new Error(rb[1].error || 'not saved');
+        paint(Object.assign({}, rb[1], { change_password: $('pw').href }));
+        note(true, 'Saved.');
+        var nm = document.querySelector('.um-nm'); if (nm) nm.textContent = rb[1].display_name;
+      })
+      .catch(function (err) { note(false, err.message); })
+      .finally(function () { b.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

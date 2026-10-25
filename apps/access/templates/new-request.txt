@@ -1,0 +1,17 @@
+Subject: [MedCEA] Access request from $first_name $last_name ($requested_role)
+
+A new access request is waiting for review.
+
+  Name:           $first_name $last_name
+  Username:       $username
+  E-mail:         $email
+  Organisation:   $organisation
+  Requested role: $requested_role_label
+
+Business justification:
+$justification
+
+Review it in the User Manager:
+$admin_url
+
+The account stays disabled until an administrator approves it.
