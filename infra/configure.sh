@@ -211,11 +211,31 @@ tailscale_fix() {
             return 1
         fi
     fi
-    if ! systemctl is-active --quiet tailscaled 2>/dev/null; then
+    if ! systemctl is-active --quiet tailscaled 2>/dev/null || ! systemctl is-enabled --quiet tailscaled 2>/dev/null; then
         sudo systemctl enable --now tailscaled || { info "${RED}Could not start the tailscaled service.${NC}"; return 1; }
     fi
     info "Connecting. Open the login URL printed below in a browser; this waits until you log in."
     sudo tailscale up || { info "${RED}tailscale up did not complete.${NC}"; return 1; }
+}
+
+# Connected now is not connected after a reboot. tailscaled must be enabled
+# (a plain `systemctl start` lasts until the next boot), and the node key must
+# not expire, or the server drops off the tailnet and every DOMAIN on its
+# 100.x address goes with it. `tailscale up` is remembered (WantRunning), so
+# an enabled daemon reconnects by itself. Key expiry is an admin-console
+# setting with no CLI, so that one can only be reported.
+tailscale_persist() {
+    local expiry
+    if command -v systemctl >/dev/null 2>&1 && ! systemctl is-enabled --quiet tailscaled 2>/dev/null; then
+        echo -e "${YELLOW}tailscaled is not enabled at boot — enabling it, or Tailscale would be down after a restart.${NC}"
+        sudo -p "[sudo] password for %u (to enable tailscaled at boot): " systemctl enable tailscaled \
+            || info "${RED}Could not enable tailscaled. Run: sudo systemctl enable tailscaled${NC}"
+    fi
+    expiry="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("KeyExpiry",""))' 2>/dev/null)"
+    if [[ -n "$expiry" ]]; then
+        echo -e "${YELLOW}This server's Tailscale key expires ${expiry%%T*}; after that it drops off the tailnet until someone logs it in again.${NC}"
+        info "Disable key expiry: https://login.tailscale.com/admin/machines  → this machine → ⋯ → Disable key expiry"
+    fi
 }
 
 # Runs on every invocation, complete config or not. USE_TAILSCALE records
@@ -234,6 +254,7 @@ check_tailscale() {
         if [[ -z "$want" ]]; then
             [[ "$(cfg_get DOMAIN)" == "${ts_ip}.nip.io" || "$(cfg_get LOCAL_DNS)" == "true" ]] && cfg_set USE_TAILSCALE "true"
         fi
+        [[ "$(cfg_get USE_TAILSCALE)" == "false" ]] || tailscale_persist
         return
     fi
     if [[ "$want" == "false" ]]; then
@@ -275,6 +296,7 @@ check_tailscale() {
         if [[ "$state" == "up" ]]; then
             ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
             echo -e "${GREEN}Tailscale is connected (${ts_ip}).${NC}"
+            tailscale_persist
             # The domain question offers this IP; ask it when DOMAIN does not use it yet.
             [[ "$(cfg_get DOMAIN)" == "${ts_ip}.nip.io" || "$(cfg_get LOCAL_DNS)" == "true" ]] || FORCE_DOMAIN=1
             return
