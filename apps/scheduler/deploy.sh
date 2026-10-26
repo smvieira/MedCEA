@@ -5,7 +5,7 @@
 #   1. medcea.schedule table migration
 #   2. scheduler-api  (Flask + APScheduler, port 8082)
 #   3. scheduler-ui   (nginx SPA, port 80)
-#   4. Ingress on $SCHEDULER_DOMAIN
+#   4. oauth2-proxy on $SCHEDULER_DOMAIN (Keycloak SSO, any platform role)
 #   5. Updates portal card (Scheduling — "Coming soon" → live link)
 #
 # Idempotent: safe to re-run.
@@ -23,8 +23,14 @@ source "$REPO_ROOT/config.env"
 
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are in k8s/
+source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
+source "$REPO_ROOT/infra/lib-wait.sh"
 NAMESPACE="${NAMESPACE:-medcea}"
 SCHEDULER_DOMAIN="${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}"
+if [[ -z "${MQTT_SCHEDULER_PASS:-}" ]]; then
+    echo "ERROR: MQTT_SCHEDULER_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
+    exit 1
+fi
 
 GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 log() { echo -e "${GREEN}[scheduler]${NC} $*"; }
@@ -86,12 +92,29 @@ $KUBECTL create configmap scheduler-api -n "$NAMESPACE" \
 # 5. Deployment
 # =============================================================================
 log "Deploying scheduler..."
-render "$SCRIPT_DIR/k8s/scheduler.yaml" NAMESPACE POSTGRES_PASS PROJECT_NAME REPO_ROOT SCHEDULER_DOMAIN | $KUBECTL apply -f -
+# The broker's "scheduler" service account; the pod gets it as MQTT_USER/MQTT_PASS.
+$KUBECTL create secret generic scheduler-secrets -n "$NAMESPACE" \
+  --from-literal=MQTT_USER=scheduler --from-literal=MQTT_PASS="$MQTT_SCHEDULER_PASS" \
+  --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
+# The plain Ingress from before the SSO gate: its host now belongs to the proxy.
+$KUBECTL delete ingress scheduler -n "$NAMESPACE" --ignore-not-found
+render "$SCRIPT_DIR/k8s/scheduler.yaml" NAMESPACE POSTGRES_PASS PROJECT_NAME REPO_ROOT | $KUBECTL apply -f -
 
 log "Restarting scheduler to pick up new ConfigMaps..."
 $KUBECTL rollout restart deployment/scheduler -n "$NAMESPACE"
 log "Waiting for scheduler rollout..."
 $KUBECTL rollout status deployment/scheduler -n "$NAMESPACE" --timeout=3m
+
+# =============================================================================
+# 5b. Sign-in: oauth2-proxy owns $SCHEDULER_DOMAIN (any platform role)
+# =============================================================================
+log "Deploying scheduler-oauth2-proxy (Keycloak SSO)..."
+_VALUES=$(mktemp /tmp/scheduler-oauth2proxy-values-XXXXXX.yaml)
+APP_SERVICE=scheduler render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE > "$_VALUES"
+deploy_oauth2_proxy scheduler-oauth2-proxy scheduler "${SCHEDULER_CLIENT_SECRET:-}" "${SCHEDULER_COOKIE_SECRET:-}" "$SCHEDULER_DOMAIN" "$_VALUES"
+rm -f "$_VALUES"
+$KUBECTL rollout status deployment/scheduler-oauth2-proxy -n "$NAMESPACE" --timeout=4m
+wait_for_http "https://$SCHEDULER_DOMAIN/" 120 "Scheduler" || exit 1
 
 # =============================================================================
 # 6. Portal card

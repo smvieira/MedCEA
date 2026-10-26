@@ -16,7 +16,8 @@ data:
           "MaintenanceDB": "${POSTGRES_DB}",
           "Username": "${POSTGRES_USER}",
           "PassFile": "/pgpassfile",
-          "SSLMode": "disable"
+          "SSLMode": "disable",
+          "Shared": true
         }
       }
     }
@@ -46,6 +47,13 @@ spec:
       labels:
         app: pgadmin
     spec:
+      # The pod resolves names through cluster DNS, which knows nothing of a
+      # name-based domain like keycloak.medcea. pgAdmin talks to Keycloak by its
+      # public URL (the issuer in the tokens must match), so point that one name
+      # at the node, whose ingress serves it.
+      hostAliases:
+      - ip: "${PLATFORM_IP}"
+        hostnames: ["${KEYCLOAK_DOMAIN}"]
       initContainers:
       - name: fix-pgpassfile-perms
         image: busybox:1.36
@@ -67,6 +75,31 @@ spec:
           value: "/pgadmin4/servers.json"
         - name: PGPASSFILE
           value: "/pgpassfile"
+        # Sign-in through Keycloak only, admins only. PGADMIN_CONFIG_* values
+        # are written verbatim into config_distro.py, so they are Python
+        # literals: strings quoted, True/False capitalised. The default e-mail
+        # above is the admin's Keycloak e-mail too, so their SSO login lands on
+        # the account that owns the preconfigured server; other admins are
+        # created on first login and see it because it is "Shared".
+        # Break-glass if Keycloak is down:
+        #   kubectl set env deployment/pgadmin PGADMIN_CONFIG_AUTHENTICATION_SOURCES="['internal']"
+        - name: PGADMIN_CONFIG_AUTHENTICATION_SOURCES
+          value: "['oauth2']"
+        - name: PGADMIN_CONFIG_OAUTH2_AUTO_CREATE_USER
+          value: "True"
+        - name: PGADMIN_CONFIG_OAUTH2_CONFIG
+          value: >-
+            [{'OAUTH2_NAME': 'keycloak', 'OAUTH2_DISPLAY_NAME': 'MedCEA sign-in',
+            'OAUTH2_CLIENT_ID': 'pgadmin', 'OAUTH2_CLIENT_SECRET': '${PGADMIN_OAUTH_SECRET}',
+            'OAUTH2_TOKEN_URL': 'https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token',
+            'OAUTH2_AUTHORIZATION_URL': 'https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth',
+            'OAUTH2_API_BASE_URL': 'https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/',
+            'OAUTH2_USERINFO_ENDPOINT': 'userinfo',
+            'OAUTH2_SERVER_METADATA_URL': 'https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration',
+            'OAUTH2_SCOPE': 'openid email profile',
+            'OAUTH2_ICON': 'fa-key', 'OAUTH2_BUTTON_COLOR': '#2563eb',
+            'OAUTH2_SSL_CERT_VERIFICATION': False,
+            'OAUTH2_ADDITIONAL_CLAIMS': {'groups': ['admin']}}]
         ports:
         - containerPort: 80
           name: http

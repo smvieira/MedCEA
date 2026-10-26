@@ -77,6 +77,8 @@
   </a>
   <span class="hdr-sep">|</span>
   <span class="hdr-title">Database Management</span>
+  <!-- Name → Profile / Sign out (apps/access user menu, /_account/ via this host's oauth2-proxy) -->
+  <div id="user-menu" style="margin-left:auto"></div>
 </div>
 <div class="wrap">
   <div class="ph">Database Management</div>
@@ -240,5 +242,6 @@ document.getElementById('fname').value = defaultFilename();
 loadObjects();
 </script>
 </div><!-- #app -->
+<script src="/_account/user-menu.js" defer></script>
 </body>
 </html>

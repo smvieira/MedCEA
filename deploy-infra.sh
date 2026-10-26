@@ -221,6 +221,10 @@ if [[ "${1:-}" == "--reset" ]]; then
         for _v in OAUTH2_PROXY_SECRET GRAFANA_OAUTH_SECRET OAUTH2_COOKIE_SECRET \
                   PORTAL_OAUTH2_PROXY_SECRET PORTAL_COOKIE_SECRET \
                   CONFIG_OAUTH2_PROXY_SECRET CONFIG_COOKIE_SECRET \
+                  ACCESS_CLIENT_SECRET ACCESS_COOKIE_SECRET \
+                  MONITOR_CLIENT_SECRET MONITOR_COOKIE_SECRET SCHEDULER_CLIENT_SECRET SCHEDULER_COOKIE_SECRET \
+                  DBMGMT_CLIENT_SECRET DBMGMT_COOKIE_SECRET MQTTX_CLIENT_SECRET MQTTX_COOKIE_SECRET \
+                  PGADMIN_OAUTH_SECRET MQTT_NODE_RED_PASS MQTT_SCHEDULER_PASS MQTT_EXPLORER_PASS MQTT_AUTH_DB_PASS \
                   WORKBENCH_SECRET EDGE_WIZARD_SECRET; do
             sed -i "s|^${_v}=.*|${_v}=\"\"|" config.env
         done
@@ -718,6 +722,30 @@ _CONFIG_SECRET=$(_create_client "config" "https://${CONFIG_DOMAIN}/oauth2/callba
 # Cookie secrets are kept once generated: a new one on every run made every
 # deploy log everybody out (existing cookies no longer decrypt).
 _CONFIG_COOKIE_SECRET="${CONFIG_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+# Every remaining web UI gets its own oauth2-proxy (apps/*/deploy.sh) and so
+# its own client; the proxies share k8s/oauth2-proxy/values-app.yaml.
+echo -e "${YELLOW}  Creating clients 'monitor', 'scheduler', 'dbmgmt', 'mqtt-explorer'...${NC}"
+_MONITOR_SECRET=$(_create_client "monitor" "https://${MONITOR_DOMAIN}/oauth2/callback")
+_SCHEDULER_SECRET=$(_create_client "scheduler" "https://${SCHEDULER_DOMAIN}/oauth2/callback")
+_DBMGMT_SECRET=$(_create_client "dbmgmt" "https://${DBMGMT_DOMAIN}/oauth2/callback")
+_MQTTX_SECRET=$(_create_client "mqtt-explorer" "https://${MQTTX_DOMAIN}/oauth2/callback")
+_MONITOR_COOKIE_SECRET="${MONITOR_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+_SCHEDULER_COOKIE_SECRET="${SCHEDULER_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+_DBMGMT_COOKIE_SECRET="${DBMGMT_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+_MQTTX_COOKIE_SECRET="${MQTTX_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+# pgAdmin signs in with Keycloak itself (k8s/pgadmin/pgadmin.yaml): its
+# callback is /oauth2/authorize, not oauth2-proxy's /oauth2/callback.
+echo -e "${YELLOW}  Creating client 'pgadmin'...${NC}"
+_PGADMIN_SECRET=$(_create_client "pgadmin" "https://${PGADMIN_DOMAIN}/oauth2/authorize")
+# MQTT: the broker admits nobody anonymously. These are the platform's own
+# service accounts (hashed into the Secret mosquitto-service-auth below) and
+# the password of mqtt_auth, the DB role the broker's auth sidecar reads device
+# credentials with. Generated once and kept, like the cookie secrets; hex only,
+# so they are safe in sed, YAML and a .env file.
+_MQTT_NODE_RED_PASS="${MQTT_NODE_RED_PASS:-$(openssl rand -hex 20)}"
+_MQTT_SCHEDULER_PASS="${MQTT_SCHEDULER_PASS:-$(openssl rand -hex 20)}"
+_MQTT_EXPLORER_PASS="${MQTT_EXPLORER_PASS:-$(openssl rand -hex 20)}"
+_MQTT_AUTH_DB_PASS="${MQTT_AUTH_DB_PASS:-$(openssl rand -hex 20)}"
 echo -e "${YELLOW}  Creating client 'edge-wizard'...${NC}"
 # The edge provisioning wizard (edge/flash-device.sh --ui) runs on this host and
 # is opened from a laptop over SSH, so register every address it can answer on.
@@ -894,7 +922,7 @@ if [[ -n "$_GS_ID" ]]; then
       -d '{"name":"realm-roles-as-groups","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper",
            "config":{"claim.name":"groups","jsonType.label":"String","multivalued":"true",
                      "id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
-    for _c in portal access; do
+    for _c in portal access config monitor scheduler dbmgmt mqtt-explorer pgadmin; do
         _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
           -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
         [[ -n "$_C_UUID" ]] || continue
@@ -940,7 +968,9 @@ fi
 
 kill $_KC_PF_PID 2>/dev/null || true
 
-if [[ -z "$_NODE_RED_SECRET" || -z "$_GRAFANA_SECRET" || -z "$_WORKBENCH_SECRET" || -z "$_PORTAL_SECRET" ]]; then
+if [[ -z "$_NODE_RED_SECRET" || -z "$_GRAFANA_SECRET" || -z "$_WORKBENCH_SECRET" || -z "$_PORTAL_SECRET" \
+      || -z "$_CONFIG_SECRET" || -z "$_ACCESS_SECRET" || -z "$_MONITOR_SECRET" || -z "$_SCHEDULER_SECRET" \
+      || -z "$_DBMGMT_SECRET" || -z "$_MQTTX_SECRET" || -z "$_PGADMIN_SECRET" ]]; then
     echo -e "${RED}ERROR: One or more client secrets could not be retrieved.${NC}"
     exit 1
 fi
@@ -959,7 +989,14 @@ sed -i "s|^OAUTH2_COOKIE_SECRET=.*|OAUTH2_COOKIE_SECRET=\"${_COOKIE_SECRET}\"|" 
 sed -i "s|^PORTAL_OAUTH2_PROXY_SECRET=.*|PORTAL_OAUTH2_PROXY_SECRET=\"${_PORTAL_SECRET}\"|" config.env
 sed -i "s|^PORTAL_COOKIE_SECRET=.*|PORTAL_COOKIE_SECRET=\"${_PORTAL_COOKIE_SECRET}\"|" config.env
 for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=${_CONFIG_COOKIE_SECRET}" \
-           "ACCESS_CLIENT_SECRET=${_ACCESS_SECRET}" "ACCESS_COOKIE_SECRET=${_ACCESS_COOKIE_SECRET}"; do
+           "ACCESS_CLIENT_SECRET=${_ACCESS_SECRET}" "ACCESS_COOKIE_SECRET=${_ACCESS_COOKIE_SECRET}" \
+           "MONITOR_CLIENT_SECRET=${_MONITOR_SECRET}" "MONITOR_COOKIE_SECRET=${_MONITOR_COOKIE_SECRET}" \
+           "SCHEDULER_CLIENT_SECRET=${_SCHEDULER_SECRET}" "SCHEDULER_COOKIE_SECRET=${_SCHEDULER_COOKIE_SECRET}" \
+           "DBMGMT_CLIENT_SECRET=${_DBMGMT_SECRET}" "DBMGMT_COOKIE_SECRET=${_DBMGMT_COOKIE_SECRET}" \
+           "MQTTX_CLIENT_SECRET=${_MQTTX_SECRET}" "MQTTX_COOKIE_SECRET=${_MQTTX_COOKIE_SECRET}" \
+           "PGADMIN_OAUTH_SECRET=${_PGADMIN_SECRET}" \
+           "MQTT_NODE_RED_PASS=${_MQTT_NODE_RED_PASS}" "MQTT_SCHEDULER_PASS=${_MQTT_SCHEDULER_PASS}" \
+           "MQTT_EXPLORER_PASS=${_MQTT_EXPLORER_PASS}" "MQTT_AUTH_DB_PASS=${_MQTT_AUTH_DB_PASS}"; do
     _k="${_kv%%=*}"
     if grep -q "^${_k}=" config.env; then
         sed -i "s|^${_k}=.*|${_k}=\"${_kv#*=}\"|" config.env
@@ -984,15 +1021,43 @@ source config.env
 
 # =============================================================================
 # 4. MOSQUITTO
-#    Image:  eclipse-mosquitto:2.0 (Docker Hub Official — NO auth needed)
-#    NodePort 31883 → external IoT devices
-#    ClusterIP 1883  → internal Kubernetes services (Node-RED etc.)
+#    Image:  eclipse-mosquitto:2.0 (Docker Hub Official — no registry auth needed)
+#    NodePort 31883 → boards on the LAN (per-device credentials from onboarding)
+#    ClusterIP 1883 → in-cluster services; 9001 (WebSocket) → the MQTT Explorer's
+#    oauth2-proxy only. Nobody connects anonymously: the mqtt-auth-sync sidecar
+#    merges the service accounts below with medcea.mqtt_credential (apps stage)
+#    into the broker's passwd/acl files and reloads it. The Secret is re-hashed
+#    (new salt) on every run, which costs one harmless reload.
 # =============================================================================
 echo -e "\n${GREEN}[4/10] Deploying Mosquitto MQTT broker...${NC}"
-render "$SCRIPT_DIR/k8s/mosquitto/mosquitto.yaml" NAMESPACE | $MK8S kubectl apply -f -
+_H_NR=$(printf '%s' "$MQTT_NODE_RED_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
+_H_SC=$(printf '%s' "$MQTT_SCHEDULER_PASS" | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
+_H_EX=$(printf '%s' "$MQTT_EXPLORER_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
+# node-red only subscribes (its flows have no mqtt out node); the scheduler
+# reads telemetry and writes setpoints; the explorer is the operator's tool.
+# A subscription wider than these lines is accepted, but only messages the
+# ACL allows are delivered — the filter is applied per message (tested on 2.0.22).
+$MK8S kubectl create secret generic mosquitto-service-auth -n "$NAMESPACE" --dry-run=client -o yaml \
+  --from-literal=service-passwd="node-red:${_H_NR}
+scheduler:${_H_SC}
+mqtt-explorer:${_H_EX}" \
+  --from-literal=service-acl="user node-red
+topic read ${PROJECT_NAME}/#
 
-$MK8S kubectl wait deployment/mosquitto \
-    -n "$NAMESPACE" --for=condition=Available --timeout=5m
+user scheduler
+topic read ${PROJECT_NAME}/+/+/sense/#
+topic write ${PROJECT_NAME}/+/+/control/#
+
+user mqtt-explorer
+topic readwrite ${PROJECT_NAME}/#" \
+  --from-literal=db-password="$MQTT_AUTH_DB_PASS" | $MK8S kubectl apply -f -
+$MK8S kubectl create configmap mqtt-auth-sync -n "$NAMESPACE" \
+  --from-file=mqtt-auth-sync.py="$SCRIPT_DIR/k8s/mosquitto/mqtt-auth-sync.py" \
+  --dry-run=client -o yaml | $MK8S kubectl apply -f -
+render "$SCRIPT_DIR/k8s/mosquitto/mosquitto.yaml" NAMESPACE POSTGRES_DB | $MK8S kubectl apply -f -
+# The sidecar reads its script once at start: restart so a changed script runs.
+$MK8S kubectl rollout restart deployment/mosquitto -n "$NAMESPACE"
+$MK8S kubectl rollout status deployment/mosquitto -n "$NAMESPACE" --timeout=5m
 
 # Node-RED (schwarzit — HTTP repo, no auth)
 $MK8S helm3 repo add node-red \
@@ -1111,7 +1176,8 @@ $MK8S kubectl rollout status deployment/oauth2-proxy \
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
 echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
-render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS ADMIN_USER ADMIN_PASS PGADMIN_DOMAIN | $MK8S kubectl apply -n "$NAMESPACE" -f -
+render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS ADMIN_USER ADMIN_PASS PGADMIN_DOMAIN \
+       KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 # 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config
 # database before gunicorn starts, which took ~5.5 min on a clean install (pod
@@ -1151,7 +1217,7 @@ print(urllib.parse.quote(inner, safe=''))
 " "$KEYCLOAK_DOMAIN" "$KEYCLOAK_REALM" "$PORTAL_DOMAIN")
 
 
-echo -e "\n${GREEN}[9/10] Deploying Service Portal...${NC}"
+echo -e "\n${GREEN}[9/9] Deploying Service Portal...${NC}"
 # The background is a ~200 KB data URI — over the 128 KiB limit for one
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
@@ -1214,39 +1280,8 @@ $MK8S kubectl rollout status deployment/portal-oauth2-proxy \
     exit 1
   }
 
-# =============================================================================
-# 10. MQTT EXPLORER
-#    Custom lightweight MQTT explorer: nginx + HTML ConfigMap (no Docker Hub image).
-#    Auto-connects to Mosquitto WebSocket using the Tailscale IP (stable — does
-#    not change when the home router reassigns LAN IPs).
-#    Uses mqtt.js@4 from CDN. No auth required — it's a read/write MQTT tool.
-# =============================================================================
-echo -e "\n${GREEN}[10/10] Deploying MQTT Explorer...${NC}"
-
-# Tailscale IP is stable (assigned by Tailscale, not the home router). Taken
-# from PLATFORM_IP, never from DOMAIN: DOMAIN may be a name (medcea).
-_TAILSCALE_IP="$PLATFORM_IP"
-
-# Write HTML to temp file using single-quote heredoc (no shell expansion),
-# then substitute the Tailscale IP placeholder with sed.
-cp "$SCRIPT_DIR/k8s/mqtt-explorer/index.html" /tmp/mqtt-explorer.html   # __WS_HOST__ is filled below
-
-sed -i "s|__WS_HOST__|${_TAILSCALE_IP}|g" /tmp/mqtt-explorer.html
-
-# Clean up old mqttx-web resources from previous deploy (renamed to mqtt-explorer)
-$MK8S kubectl delete deployment/mqttx-web service/mqttx-web ingress/mqttx-web \
-  -n "$NAMESPACE" 2>/dev/null || true
-
-$MK8S kubectl create configmap mqtt-explorer-html \
-  -n "$NAMESPACE" \
-  --from-file=index.html=/tmp/mqtt-explorer.html \
-  --dry-run=client -o yaml | $MK8S kubectl apply -f -
-rm -f /tmp/mqtt-explorer.html
-
-render "$SCRIPT_DIR/k8s/mqtt-explorer/mqtt-explorer.yaml" NAMESPACE MQTTX_DOMAIN | $MK8S kubectl apply -n "$NAMESPACE" -f -
-
-$MK8S kubectl rollout status deployment/mqtt-explorer \
-  -n "$NAMESPACE" --timeout=5m
+# (MQTT Explorer moved to apps/mqtt-explorer: it needs the Keycloak client
+#  secret written above and an oauth2-proxy, like the other app UIs.)
 
 # =============================================================================
 # WIRE KUBEFLOW DEX -> KEYCLOAK   [RETIRED]
@@ -1417,7 +1452,7 @@ echo -e "${GREEN}  START HERE${NC}"
 echo -e "${GREEN}  ----------${NC}"
 echo -e "  Service Portal:  https://$PORTAL_DOMAIN"
 echo -e "    Login:         Keycloak SSO ($ADMIN_USER — password in the credentials file below)"
-echo -e "    Shows:         Grafana · Node-RED · Kubeflow · pgAdmin · MQTTX Web"
+echo -e "    Shows:         Grafana · AI Workbench · Node-RED · Config · Scheduler · Monitor · DB Mgmt · MQTT Explorer · User Manager"
 echo ""
 echo -e "${GREEN}  DIRECT SERVICE ACCESS${NC}"
 echo -e "${GREEN}  ---------------------${NC}"
@@ -1434,7 +1469,7 @@ echo -e "    SSO:           $ADMIN_USER"
 echo -e "    Note:          First login — enter a profile namespace name (e.g. 'admin')"
 echo ""
 echo -e "  pgAdmin:         https://$PGADMIN_DOMAIN"
-echo -e "    Login:         ${ADMIN_USER}@cea.com"
+echo -e "    Login:         Keycloak SSO (realm role admin only)"
 echo -e "    DB:            'IoT Postgres' server pre-configured (no setup needed)"
 echo ""
 echo -e "${GREEN}  ADMIN${NC}"
@@ -1449,11 +1484,11 @@ echo -e "    Portal gate:   realm roles operator / qa / auditor / admin"
 echo ""
 echo -e "${GREEN}  INTERNAL (cluster-only)${NC}"
 echo -e "${GREEN}  -----------------------${NC}"
-echo -e "  MQTT Explorer:   https://$MQTTX_DOMAIN"
-echo -e "    Auto-connect:  ws://${_TAILSCALE_IP}:31901  (Tailscale IP — stable)"
-echo -e "  Mosquitto MQTT:  mqtt://$_LAN_IP:31883  (LAN NodePort — IoT devices)"
-echo -e "                   ws://${_TAILSCALE_IP}:31901  (WebSocket — browsers, Tailscale-stable)"
-echo -e "                   mqtt://mosquitto.$NAMESPACE.svc.cluster.local:1883  (in-cluster)"
+echo -e "  MQTT Explorer:   https://$MQTTX_DOMAIN  (Keycloak SSO; ./deploy-apps.sh installs it)"
+echo -e "  Mosquitto MQTT:  mqtt://$_LAN_IP:31883  (LAN NodePort — boards, per-device credentials from onboarding)"
+echo -e "                   mqtt://mosquitto.$NAMESPACE.svc.cluster.local:1883  (in-cluster, service accounts)"
+echo -e "                   wss://$MQTTX_DOMAIN/mqtt  (browsers, through the explorer's sign-in)"
+echo -e "    Auth:          required for every client — service passwords MQTT_*_PASS in config.env"
 echo -e "  MQTT topic root: ${PROJECT_NAME}/<UNIT>/<ZONE>/{sense,control,control_setpoint}/...  (PROJECT_NAME)"
 echo -e "  ${YELLOW}Note:${NC} If LAN IP changes (router DHCP), re-run deploy or set a DHCP reservation."
 echo -e "        IoT devices can also use $(hostname).local:31883 (mDNS via Avahi)."
@@ -1541,10 +1576,12 @@ GRAFANA (Keycloak SSO)
   Editor              $_GF_DEV_USER / $_GF_DEV_PASS
   Viewer              $_GF_VIEW_USER / $_GF_VIEW_PASS
 
-PGADMIN
+PGADMIN (Keycloak SSO — platform role admin only)
   URL                 https://$PGADMIN_DOMAIN
-  Username            ${ADMIN_USER}@cea.com
-  Password            $ADMIN_PASS
+
+MQTT BROKER (every client authenticates)
+  Service accounts    node-red / scheduler / mqtt-explorer — passwords MQTT_*_PASS in config.env
+  Boards              one credential each, minted at onboarding (edge/provisioned/<name>.json)
 
 POSTGRESQL SUPERUSER (cluster-internal)
   Host                rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432

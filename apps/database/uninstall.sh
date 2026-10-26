@@ -38,13 +38,14 @@ if [[ -z "$PG_POD" ]]; then
     exit 0
 fi
 
-log "Dropping database '$CEA_DB' and roles anon, authenticator..."
+log "Dropping database '$CEA_DB' and roles anon, authenticator, mqtt_auth..."
 # WITH (FORCE) ends any session still connected (PostgreSQL 13+). The roles go
 # after the database because its default privileges reference anon.
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
     psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres \
     -c "DROP DATABASE IF EXISTS \"$CEA_DB\" WITH (FORCE);" \
     -c "DROP ROLE IF EXISTS authenticator;" \
-    -c "DROP ROLE IF EXISTS anon;"
+    -c "DROP ROLE IF EXISTS anon;" \
+    -c "DROP ROLE IF EXISTS mqtt_auth;"
 
 log "Database '$CEA_DB' dropped."

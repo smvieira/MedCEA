@@ -71,6 +71,8 @@ def run_recipe(unit_code, recipe_name):
         mqtt_topic_prefix_to_clear = f"{mqtt_rootname}/{unit_code}/#"
         client_id = f"{mqtt_rootname}-orchestrator-clean-retained-msg-{unit_code}"
         client = mqtt.Client(client_id=client_id)
+        if os.getenv('MQTT_USER'):      # the broker admits nobody anonymously
+            client.username_pw_set(os.getenv('MQTT_USER'), os.getenv('MQTT_PASS', ''))
         
         # Maybe not needed to clear retained messages
         # mqtt_topic_prefix_cleared = cea.clear_retained_messages(

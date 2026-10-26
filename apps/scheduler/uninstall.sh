@@ -24,6 +24,10 @@ log() { echo -e "${GREEN}[scheduler]${NC} $*"; }
 
 portal_card disable "https://$SCHEDULER_DOMAIN"
 
+log "Removing scheduler-oauth2-proxy (owns the $SCHEDULER_DOMAIN ingress)..."
+$MK8S helm3 uninstall scheduler-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
+$KUBECTL delete secret scheduler-secrets -n "$NAMESPACE" --ignore-not-found
+
 log "Removing Deployment, Service, Ingress and ConfigMaps..."
 $KUBECTL delete deployment,service,ingress scheduler -n "$NAMESPACE" --ignore-not-found
 $KUBECTL delete configmap scheduler-nginx scheduler-html scheduler-api -n "$NAMESPACE" --ignore-not-found

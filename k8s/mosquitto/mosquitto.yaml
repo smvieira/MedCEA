@@ -5,15 +5,21 @@ metadata:
   name: mosquitto-config
   namespace: ${NAMESPACE}
 data:
+  # Every client authenticates: boards with the per-device credential minted at
+  # onboarding (medcea.mqtt_credential), platform services with the accounts in
+  # the Secret mosquitto-service-auth. Both files are assembled by the
+  # mqtt-auth-sync sidecar below and re-read on SIGHUP.
   mosquitto.conf: |
-    listener 1883
-    allow_anonymous true
+    per_listener_settings false
+    allow_anonymous false
+    password_file /mosquitto/auth/passwd
+    acl_file /mosquitto/auth/acl
     persistence true
     persistence_location /mosquitto/data/
     log_dest stdout
+    listener 1883
     listener 9001
     protocol websockets
-    allow_anonymous true
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -34,6 +40,9 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   replicas: 1
+  # One broker on one RWO volume: never two instances during a rollout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: mosquitto
@@ -42,9 +51,14 @@ spec:
       labels:
         app: mosquitto
     spec:
+      # The sidecar signals the broker (SIGHUP) to reload the auth files.
+      shareProcessNamespace: true
       containers:
       - name: mosquitto
         image: eclipse-mosquitto:2.0
+        # Mosquitto refuses to start without its password file; the sidecar
+        # writes it within seconds of starting.
+        command: ["sh", "-c", "until [ -s /mosquitto/auth/passwd ]; do sleep 1; done; exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf"]
         ports:
         - containerPort: 1883
         - containerPort: 9001
@@ -53,6 +67,30 @@ spec:
           mountPath: /mosquitto/config
         - name: data
           mountPath: /mosquitto/data
+        - name: auth
+          mountPath: /mosquitto/auth
+          readOnly: true
+      - name: mqtt-auth-sync
+        image: python:3.12-alpine
+        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 && exec python -u /app/mqtt-auth-sync.py"]
+        env:
+        - {name: PG_HOST, value: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local"}
+        - {name: PG_DATABASE, value: "${POSTGRES_DB}"}
+        - {name: PG_USER, value: mqtt_auth}
+        - name: PG_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: mosquitto-service-auth, key: db-password}
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {memory: 96Mi}
+        volumeMounts:
+        - name: auth
+          mountPath: /mosquitto/auth
+        - name: service-auth
+          mountPath: /secrets
+          readOnly: true
+        - name: sync-script
+          mountPath: /app
       volumes:
       - name: config
         configMap:
@@ -60,6 +98,14 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: mosquitto-data
+      - name: auth
+        emptyDir: {}
+      - name: service-auth
+        secret:
+          secretName: mosquitto-service-auth
+      - name: sync-script
+        configMap:
+          name: mqtt-auth-sync
 ---
 apiVersion: v1
 kind: Service
@@ -71,11 +117,26 @@ spec:
   selector:
     app: mosquitto
   ports:
+  # 1883 on the LAN NodePort for the boards. The WebSocket listener is on its
+  # own ClusterIP Service below: a port in a NodePort Service always gets a
+  # node port, and the old 31901 is gone on purpose — browsers reach the
+  # broker as wss://<MQTTX_DOMAIN>/mqtt through the MQTT Explorer's
+  # oauth2-proxy only.
   - name: mqtt
     port: 1883
     targetPort: 1883
     nodePort: 31883
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mosquitto-ws
+  namespace: ${NAMESPACE}
+spec:
+  type: ClusterIP
+  selector:
+    app: mosquitto
+  ports:
   - name: websocket
     port: 9001
     targetPort: 9001
-    nodePort: 31901

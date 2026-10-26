@@ -111,6 +111,8 @@ log "Deploying access service..."
 # Signed-in hosts and their Keycloak clients: the user menu's sign-out and
 # change-password links need the client each host logs in with.
 HOST_CLIENTS="${PORTAL_DOMAIN}=portal,${CONFIG_DOMAIN:-config.$DOMAIN}=config,${ACCESS_DOMAIN}=access"
+HOST_CLIENTS+=",${MONITOR_DOMAIN:-monitor.$DOMAIN}=monitor,${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}=scheduler"
+HOST_CLIENTS+=",${DBMGMT_DOMAIN:-dbmgmt.$DOMAIN}=dbmgmt,${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}=mqtt-explorer"
 render "$SCRIPT_DIR/k8s/access.yaml" NAMESPACE POSTGRES_DB KEYCLOAK_REALM KEYCLOAK_DOMAIN ACCESS_DOMAIN PORTAL_DOMAIN HOST_CLIENTS \
   | $KUBECTL apply -f -
 $KUBECTL rollout restart deployment/access -n "$NAMESPACE"

@@ -1,0 +1,46 @@
+# Shared values for every role-gated application host (config, monitor,
+# scheduler, dbmgmt — the explorer has its own copy with a WebSocket upstream).
+# Rendered with KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE and passed
+# to deploy_oauth2_proxy (infra/lib-oauth2-proxy.sh) after values-common.yaml.
+configuration:
+  content: |
+    provider = "oidc"
+    provider_display_name = "Keycloak"
+    email_domains = ["*"]
+    cookie_secure = true
+    ssl_insecure_skip_verify = true
+    # Without these two, a session outlives Keycloak entirely: the cookie
+    # defaults to 168h and cookie_refresh defaults to disabled, so oauth2-proxy
+    # never asks Keycloak whether the session still exists. cookie_refresh
+    # re-checks (and re-reads the groups claim, so a role change lands) every
+    # 4 minutes; cookie_expire is the hard ceiling.
+    cookie_refresh = "4m"
+    cookie_expire = "8h"
+    # Straight to the platform login page (the medcea Keycloak theme).
+    skip_provider_button = true
+    # Only people with a platform role get in, the same gate as the portal
+    # (k8s/oauth2-proxy/values-portal.yaml). The "groups" claim is the realm
+    # client scope deploy-infra.sh attaches to every client it creates;
+    # oauth2-proxy also asks for the scope by that name, so a client without
+    # it fails with invalid_scope.
+    oidc_groups_claim = "groups"
+    allowed_groups = ["operator", "qa", "auditor", "admin"]
+    # Nothing behind these proxies wants an Authorization header, and some
+    # upstreams (PostgREST behind config) reject the Basic one oauth2-proxy
+    # would inject by default.
+    pass_basic_auth = false
+    pass_authorization_header = false
+    pass_access_token = false
+    # X-Forwarded-User / -Email / -Preferred-Username: what the profile
+    # service (/_account/) and any audit trail attribute a request to.
+    pass_user_headers = true
+    # Explicit URLs instead of discovery: pods use cluster DNS (forwarding to
+    # 8.8.8.8), which does not resolve a name-based domain like keycloak.medcea.
+    skip_oidc_discovery = true
+    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
+    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+    # The app itself, plus the user menu and profile (apps/access, :8082) at
+    # /_account/, so the page's name menu acts for whoever this proxy signed in.
+    upstreams = ["http://${APP_SERVICE}.${NAMESPACE}.svc.cluster.local:80", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/"]

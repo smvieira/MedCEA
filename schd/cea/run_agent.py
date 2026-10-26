@@ -88,6 +88,8 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
         client_id = mqtt_rootname+f'-orchestrator-feedback-control-loop-{random.randint(0, 100)}'
 
         client = mqtt.Client(client_id=client_id)
+        if os.getenv('MQTT_USER'):      # the broker admits nobody anonymously
+            client.username_pw_set(os.getenv('MQTT_USER'), os.getenv('MQTT_PASS', ''))
         # Clear retained messages for the topic prefix
         stop_event = threading.Event()  # create event here.
         instance_shared_data ={}  # Initialize shared data dictionary

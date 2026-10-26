@@ -257,3 +257,50 @@ WHERE NOT EXISTS (SELECT 1 FROM medcea.device_slot_history h WHERE h.device_id =
 COMMENT ON TABLE medcea.device_slot_history IS 'Append-only placement history of devices: placed, moved (slot changed), renamed, replaced (another board took the row), removed. Written by trigger device_slot_history_trg only; read-only to the API.';
 
 NOTIFY pgrst, 'reload schema';
+
+-- ── Migration 007: MQTT credentials (Mosquitto authentication, one per device) ─
+-- The broker admits nobody anonymously. A board's username is its dns_name and
+-- its password is minted by onboarding (edge/flash-device.sh), which stores the
+-- Mosquitto hash here through register_mqtt_credential and the plaintext only on
+-- the board. The mqtt-auth-sync sidecar in the Mosquitto pod reads this table
+-- (role mqtt_auth, SELECT only), writes the broker's passwd/acl files and
+-- reloads it. The API role (anon) cannot read the table at all — see the
+-- REVOKE in apps/database/deploy.sh — it may only call the function.
+CREATE TABLE IF NOT EXISTS medcea.mqtt_credential (
+    username      text PRIMARY KEY,                       -- medcea.device.dns_name
+    password_hash text NOT NULL,                          -- mosquitto $7$ (PBKDF2-SHA512), never plaintext
+    device_id     integer NOT NULL REFERENCES medcea.device(device_id) ON DELETE CASCADE,
+    role          text NOT NULL CHECK (role IN ('SENSE', 'CONTROL')),
+    topic_base    text NOT NULL,                          -- <root>/<UNIT>/<ZONE>, codes as the board uses them
+    active        boolean NOT NULL DEFAULT true,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mqtt_credential_device_uq ON medcea.mqtt_credential (device_id);
+
+CREATE OR REPLACE FUNCTION medcea.register_mqtt_credential(
+    p_username text, p_password_hash text, p_device_id integer, p_role text, p_topic_base text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    IF p_password_hash !~ '^\$7\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$' THEN
+        RAISE EXCEPTION 'password_hash must be a mosquitto $7$ hash, not a password';
+    END IF;
+    -- mosquitto's files are line based: ':' splits a passwd line, whitespace an acl line
+    IF p_username ~ '[:\s]' OR p_topic_base ~ '\s' OR p_username = '' THEN
+        RAISE EXCEPTION 'username/topic_base cannot be empty or contain ":" or whitespace';
+    END IF;
+    -- a board re-onboarded under a new name keeps one credential
+    DELETE FROM medcea.mqtt_credential WHERE device_id = p_device_id AND username <> p_username;
+    INSERT INTO medcea.mqtt_credential (username, password_hash, device_id, role, topic_base)
+    VALUES (p_username, p_password_hash, p_device_id, upper(p_role), p_topic_base)
+    ON CONFLICT (username) DO UPDATE
+       SET password_hash = EXCLUDED.password_hash, device_id = EXCLUDED.device_id,
+           role = EXCLUDED.role, topic_base = EXCLUDED.topic_base,
+           active = true, updated_at = now();
+END $$;
+REVOKE ALL ON FUNCTION medcea.register_mqtt_credential(text, text, integer, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION medcea.register_mqtt_credential(text, text, integer, text, text) TO anon;
+
+COMMENT ON TABLE medcea.mqtt_credential IS 'Mosquitto credentials, one per board (username = dns_name). Written only through register_mqtt_credential (onboarding); read by the mqtt-auth-sync sidecar as role mqtt_auth. Not readable by the API role.';
+
+NOTIFY pgrst, 'reload schema';

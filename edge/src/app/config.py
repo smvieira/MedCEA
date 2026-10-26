@@ -44,6 +44,11 @@ wifi_pwd    = _d.WIFI_PSK
 
 mqtt_server = _d.MQTT_HOST
 mqtt_port   = _d.MQTT_PORT
+# The broker admits nobody anonymously: one credential per board, minted at
+# onboarding. The username is this board's name (device_dns). A board flashed
+# before credentials existed has neither and cannot connect until re-onboarded.
+mqtt_user   = getattr(_d, "MQTT_USER", "") or None
+mqtt_pass   = getattr(_d, "MQTT_PASS", "") or None
 
 # ---- topics -----------------------------------------------------------------
 # <root>/<unit>/<zone>/<sense|control>. Derived rather than stored so a board

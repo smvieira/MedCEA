@@ -436,6 +436,11 @@ def render(spec):
         "WIFI_PSK": spec.get("wifi_psk", ""),
         "MQTT_HOST": spec.get("mqtt_host", ""),
         "MQTT_PORT": int(spec.get("mqtt_port", 1883)),
+        # The board's own broker credential. Only here (and in the provisioned
+        # record): the component rows below carry host/port but never this,
+        # because the API role can read them.
+        "MQTT_USER": spec.get("mqtt_user", ""),
+        "MQTT_PASS": spec.get("mqtt_pass", ""),
         "TOPIC_ROOT": root,
         "MAC": spec.get("mac", ""),
         "FIRMWARE": spec.get("firmware", ""),

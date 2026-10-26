@@ -152,9 +152,12 @@ def connect_mqtt():
         client = connect_mqtt()  # Establishes the MQTT connection
     """
     global client_id, mqtt_server
+    # user/password: this board's own broker credential (device_cfg.py). A
+    # refused CONNACK raises OSError, the caller restarts the board, and the
+    # retry lands once the credential row has reached the broker (seconds).
     client = MQTTClient(cfg.client_id, cfg.mqtt_server, cfg.mqtt_port,
+                        user=cfg.mqtt_user, password=cfg.mqtt_pass,
                         keepalive=max(60, 3 * cfg.message_interval))
-  #client = MQTTClient(client_id, mqtt_server, user=your_username, password=your_password)
     client.connect()
     print('Connected to %s MQTT broker' % (cfg.mqtt_server))
     return client

@@ -23,6 +23,7 @@ source "$REPO_ROOT/infra/lib-wait.sh"
 
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are in k8s/
+source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # deploy_oauth2_proxy — one SSO gate per host
 APP_DIR="$SCRIPT_DIR"   # the app directory, as the k8s/ templates call it (hostPath mounts)
 NAMESPACE="${NAMESPACE:-medcea}"
 CONFIG_DOMAIN="config.$DOMAIN"
@@ -111,28 +112,14 @@ fi
 # Remove any pre-existing unauthenticated Ingress from an earlier deploy.
 $KUBECTL delete ingress config-ui -n "$NAMESPACE" --ignore-not-found
 
+# The shared role-gated values (k8s/oauth2-proxy/values-app.yaml): any of the
+# four platform roles, the same rule as the portal. Before, any Keycloak
+# account got in, role or not. upstreams live inside configuration.content
+# there: the content block overrides the configuration.upstreams helm value.
 _CFG_VALUES=$(mktemp /tmp/config-oauth2proxy-values-XXXXXX.yaml)
-render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_CFG_VALUES"
-# upstreams must live inside configuration.content: the content block overrides
-# the configuration.upstreams helm value entirely.
-
-$MK8S helm3 upgrade --install config-oauth2-proxy \
-  oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
-  --version 8.0.2 \
-  --namespace "$NAMESPACE" \
-  --values "$REPO_ROOT/k8s/oauth2-proxy/values-common.yaml" \
-  --values "$_CFG_VALUES" \
-  --set configuration.clientID="config" \
-  --set configuration.clientSecret="$CONFIG_OAUTH2_PROXY_SECRET" \
-  --set configuration.cookieSecret="$CONFIG_COOKIE_SECRET" \
-  --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
-  --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
-  --set ingress.hostname="$CONFIG_DOMAIN" \
-  --set "ingress.extraTls[0].hosts[0]=$CONFIG_DOMAIN" \
-  --set "ingress.extraTls[0].secretName=cea-tls" \
-  --timeout 5m
+APP_SERVICE=config-ui render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE > "$_CFG_VALUES"
+deploy_oauth2_proxy config-oauth2-proxy config "$CONFIG_OAUTH2_PROXY_SECRET" "$CONFIG_COOKIE_SECRET" "$CONFIG_DOMAIN" "$_CFG_VALUES"
 rm -f "$_CFG_VALUES"
-$KUBECTL rollout restart deployment/config-oauth2-proxy -n "$NAMESPACE"
 
 # =============================================================================
 # 7. Wait for rollouts
@@ -180,11 +167,20 @@ $KUBECTL create configmap dbmgmt-api -n "$NAMESPACE" \
   --dry-run=client -o yaml | $KUBECTL apply -f -
 
 log "Deploying dbmgmt..."
-render "$SCRIPT_DIR/k8s/dbmgmt.yaml" NAMESPACE POSTGRES_PASS APP_DIR REPO_ROOT DBMGMT_DOMAIN | $KUBECTL apply -f -
+# The plain Ingress from before the SSO gate: its host now belongs to the proxy.
+$KUBECTL delete ingress dbmgmt -n "$NAMESPACE" --ignore-not-found
+render "$SCRIPT_DIR/k8s/dbmgmt.yaml" NAMESPACE POSTGRES_PASS APP_DIR REPO_ROOT | $KUBECTL apply -f -
 
 log "Waiting for dbmgmt rollout..."
 $KUBECTL rollout restart deployment/dbmgmt -n "$NAMESPACE"
 $KUBECTL rollout status deployment/dbmgmt -n "$NAMESPACE" --timeout=120s
+
+log "Deploying dbmgmt-oauth2-proxy (Keycloak SSO)..."
+_DB_VALUES=$(mktemp /tmp/dbmgmt-oauth2proxy-values-XXXXXX.yaml)
+APP_SERVICE=dbmgmt render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE > "$_DB_VALUES"
+deploy_oauth2_proxy dbmgmt-oauth2-proxy dbmgmt "${DBMGMT_CLIENT_SECRET:-}" "${DBMGMT_COOKIE_SECRET:-}" "$DBMGMT_DOMAIN" "$_DB_VALUES"
+rm -f "$_DB_VALUES"
+$KUBECTL rollout status deployment/dbmgmt-oauth2-proxy -n "$NAMESPACE" --timeout=4m
 
 # =============================================================================
 # 5. Portal: nginx config, images mount and background (card is in the infra page)

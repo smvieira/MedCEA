@@ -654,10 +654,12 @@ and two of its properties are findings in the fleet assessment:
   WebREPL safe to leave running, and a registered board leaves it running.
 - **The WiFi PSK lands in plaintext on the device filesystem**, readable with
   `esptool read_flash` by anyone holding the board, until flash encryption is on.
-- **MQTT is unauthenticated.** Mosquitto is deployed with `allow_anonymous true`,
-  so the board's "credential" is its client id and nothing more. A per-device
-  MQTT credential, and an image with no WebREPL and no PSK compiled into it, are
-  what would close these — none of that exists yet.
+- **MQTT is authenticated per board.** Onboarding mints a password for the board
+  (username = its name), writes it into `device_cfg.py` and the provisioned
+  record, and registers only its hash with the platform; the broker's ACL keeps
+  the board to its own slot's topics, and deactivating the device revokes it.
+  The password sits in plaintext on the board's filesystem like the PSK, so the
+  remaining gaps are flash encryption and an image without WebREPL.
 
 What onboarding *does* bound is blast radius by identity: a board publishes only
 under its own slot's topic, and the one-SENSE-one-CONTROL rule means a second

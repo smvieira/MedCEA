@@ -146,6 +146,7 @@
         "broker": "__MQTT_HOST__",
         "port": 1883,
         "clientid": "",
+        "credentials": {"user": "__MQTT_USER__", "password": "__MQTT_PASS__"},
         "autoConnect": true,
         "usetls": false,
         "protocolVersion": 4,

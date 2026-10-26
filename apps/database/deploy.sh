@@ -28,6 +28,11 @@ PG_USER="${POSTGRES_USER:-postgres}"
 PG_PASS="${POSTGRES_PASS}"
 CEA_DB="${POSTGRES_DB:-medcea_db}"
 DDL_FILE="$SCRIPT_DIR/medcea_db_ddl.sql"
+# Role mqtt_auth (Mosquitto auth sidecar) is created below with this password.
+if [[ -z "${MQTT_AUTH_DB_PASS:-}" ]]; then
+    echo "ERROR: MQTT_AUTH_DB_PASS is not set in config.env — run ./deploy-infra.sh first (it generates it)." >&2
+    exit 1
+fi
 
 GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 log() { echo -e "${GREEN}[database]${NC} $*"; }
@@ -111,6 +116,20 @@ BEGIN
   END IF;
 END\$\$;
 
+-- mqtt_auth: the Mosquitto auth sidecar (k8s/mosquitto/mqtt-auth-sync.py).
+-- SELECT on mqtt_credential and device only (grants below); the password is
+-- MQTT_AUTH_DB_PASS, generated once by deploy-infra.sh into config.env and
+-- handed to the pod through the Secret mosquitto-service-auth.
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mqtt_auth') THEN
+    CREATE ROLE mqtt_auth NOINHERIT LOGIN PASSWORD '$MQTT_AUTH_DB_PASS';
+  ELSE
+    ALTER ROLE mqtt_auth PASSWORD '$MQTT_AUTH_DB_PASS';
+  END IF;
+END\$\$;
+GRANT CONNECT ON DATABASE $CEA_DB TO mqtt_auth;
+
 -- search_path: PostgREST authenticator sees medcea schema tables directly.
 -- NOTE: Do NOT set this on postgres — Keycloak uses postgres and has tables
 -- in public; putting medcea first causes its schema resolution to break.
@@ -150,6 +169,12 @@ GRANT anon TO authenticator;
 -- Append-only history (migration 006): the blanket grant above includes it, so
 -- take writes back. Its trigger runs SECURITY DEFINER and still appends.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON medcea.device_slot_history FROM anon;
+-- MQTT credentials (migration 007): hashes are not for the API role. It may
+-- only call register_mqtt_credential (SECURITY DEFINER). The broker sidecar
+-- reads them as mqtt_auth.
+REVOKE ALL ON medcea.mqtt_credential FROM anon;
+GRANT USAGE ON SCHEMA medcea TO mqtt_auth;
+GRANT SELECT ON medcea.mqtt_credential, medcea.device TO mqtt_auth;
 SQLEOF
 $KUBECTL cp "$_GRANTS_SQL" "$NAMESPACE/$PG_POD:/tmp/cea_grants.sql"
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- \

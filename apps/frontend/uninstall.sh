@@ -32,6 +32,8 @@ portal_card disable "https://$DBMGMT_DOMAIN"
 
 log "Removing config-oauth2-proxy (owns the $CONFIG_DOMAIN ingress)..."
 $MK8S helm3 uninstall config-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
+log "Removing dbmgmt-oauth2-proxy (owns the $DBMGMT_DOMAIN ingress)..."
+$MK8S helm3 uninstall dbmgmt-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
 
 log "Removing Deployments, Services, Ingresses and ConfigMaps..."
 $KUBECTL delete deployment config-api config-ui dbmgmt -n "$NAMESPACE" --ignore-not-found

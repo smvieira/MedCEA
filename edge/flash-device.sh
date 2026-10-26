@@ -852,7 +852,14 @@ print("%d channel(s), %d actuator(s) from the editor"
 
   # --- what was inferred, said out loud -------------------------------------
   TOPIC_BASE="$TOPIC_ROOT/$UNIT_CODE/$ZONE_CODE"
-  info "mqtt       : $MQTT_HOST:$MQTT_PORT"
+  # The broker admits nobody anonymously: this board gets its own credential.
+  # Username = its one name; a fresh password on every onboarding (re-flashing
+  # rotates it). The board gets the plaintext, the platform only the mosquitto
+  # hash (registered in step 10 through register_mqtt_credential).
+  MQTT_USER="$SLOT_DNS"
+  MQTT_PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+  MQTT_PASS_HASH="$(printf '%s' "$MQTT_PASS" | python3 "$REPO_ROOT/infra/mqtt-passwd.py")"
+  info "mqtt       : $MQTT_HOST:$MQTT_PORT as $MQTT_USER"
   if [ "$ROLE" = "SENSE" ]; then
     info "publishes  : $TOPIC_BASE/sense/<tag>"
   else
@@ -1377,6 +1384,8 @@ WIFI_SSID        = {q("SSID")}
 WIFI_PSK         = {q("PSK")}
 MQTT_HOST        = ""
 MQTT_PORT        = 0
+MQTT_USER        = ""
+MQTT_PASS        = ""
 TOPIC_ROOT       = {q("TOPIC_ROOT")}
 MAC              = {q("MAC")}
 FIRMWARE         = {q("FW_NAME")}
@@ -1392,6 +1401,7 @@ else
     STAGE="$STAGE" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" ZONE_CODE="$ZONE_CODE" \
     ZONE_ID="$ZONE_ID" HOSTNAME="$HOSTNAME" \
     SSID="$SSID" PSK="$PSK" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" \
+    MQTT_USER="$MQTT_USER" MQTT_PASS="$MQTT_PASS" \
     TOPIC_ROOT="$TOPIC_ROOT" MESSAGE_INTERVAL="${MESSAGE_INTERVAL:-30}" \
     POLL_MS="${POLL_MS:-100}" CONTROL_DRIVER="$CONTROL_DRIVER" \
     MAC="$MAC" FW_NAME="$FW_NAME" FW_SHA="$FW_SHA" TS="$TS" \
@@ -1408,6 +1418,7 @@ spec = {
     "hostname": e["HOSTNAME"],
     "wifi_ssid": e["SSID"], "wifi_psk": e["PSK"],
     "mqtt_host": e["MQTT_HOST"], "mqtt_port": int(e["MQTT_PORT"]),
+    "mqtt_user": e["MQTT_USER"], "mqtt_pass": e["MQTT_PASS"],
     "topic_root": e["TOPIC_ROOT"],
     "message_interval": int(e["MESSAGE_INTERVAL"]),
     "poll_ms": int(e["POLL_MS"]), "driver": e["CONTROL_DRIVER"],
@@ -1577,6 +1588,7 @@ if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
       SLOT_DNS="$SLOT_DNS" ROLE="$ROLE" ZONE_ID="$ZONE_ID" MAC="$MAC" \
       CHIP_DESC="$CHIP_DESC" DB_COMPONENTS="$DB_COMPONENTS" \
       MOVE_FROM_ID="$MOVE_FROM_ID" \
+      MQTT_USER="$MQTT_USER" MQTT_PASS_HASH="$MQTT_PASS_HASH" TOPIC_BASE="$TOPIC_BASE" \
       python3 -c '
 import json, os, re
 e = os.environ
@@ -1599,6 +1611,10 @@ print(json.dumps({
     "components": json.loads(e["DB_COMPONENTS"]),
     # Set when the operator agreed to move this board from another slot.
     "move_device_id": int(e["MOVE_FROM_ID"]) if e["MOVE_FROM_ID"] else None,
+    # The broker credential: only the hash leaves this host.
+    "mqtt_username": e["MQTT_USER"],
+    "mqtt_password_hash": e["MQTT_PASS_HASH"],
+    "topic_base": e["TOPIC_BASE"],
 }))')"
 
     if [ "$ASSUME_YES" != 1 ]; then
@@ -1620,7 +1636,8 @@ import json, os; print(len(json.loads(os.environ["ANSWER"])))')"
       # Through warn, not a bare printf to stderr: the wizard's log is fed by
       # ui_append, and the reason used to arrive there as an empty line.
       while IFS= read -r l; do warn "  $l"; done <<<"$REG_OUT"
-      warn "Add it by hand in the Devices tab, or onboard again once fixed."
+      warn "Until it is registered the broker refuses this board's credential, so it"
+      warn "cannot publish. Onboard it again once fixed (the slot's row is updated in place)."
     fi
   fi
 fi
@@ -1636,6 +1653,7 @@ ESPTOOL_VER="$ESPTOOL_VER" MPREMOTE_VER="$MPREMOTE_VER" RECORD="$RECORD" \
 UNREGISTERED="$UNREGISTERED" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" \
 ZONE_CODE="$ZONE_CODE" ZONE_ID="$ZONE_ID" REGISTERED_ID="$REGISTERED_ID" \
 MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" TOPIC_ROOT="$TOPIC_ROOT" \
+MQTT_USER="${MQTT_USER:-}" MQTT_PASS="${MQTT_PASS:-}" \
 DB_COMPONENTS="$DB_COMPONENTS" \
 "$VENV_DIR/bin/python" - <<'PY'
 import datetime, getpass, json, os, socket
@@ -1651,8 +1669,11 @@ rec = {
     # the difference between "the platform knows about this board" and "a board
     # exists that nothing has a record of".
     "platform_device_id": int(e["REGISTERED_ID"]) if e["REGISTERED_ID"] else None,
+    # The board's broker credential sits here in plaintext like its Wi-Fi PSK
+    # (this file is mode 600 in a 700 directory); the platform keeps only a hash.
     "mqtt": None if unreg else {"host": e["MQTT_HOST"], "port": int(e["MQTT_PORT"]),
-                                "topic_root": e["TOPIC_ROOT"]},
+                                "topic_root": e["TOPIC_ROOT"],
+                                "username": e["MQTT_USER"], "password": e["MQTT_PASS"]},
     "components": json.loads(e["DB_COMPONENTS"] or "[]"),
     "hostname": e["HOSTNAME"],
     "hostname_verified": e["HOSTNAME_OK"] or None,
@@ -1788,7 +1809,7 @@ if [ "$UNREGISTERED" != 1 ]; then
 ${B} Platform${N}
   unit / zone  ${B}$UNIT_CODE / $ZONE_CODE${N}   ${DIM}(zone_id $ZONE_ID)${N}
   role         $ROLE
-  broker       $MQTT_HOST:$MQTT_PORT
+  broker       $MQTT_HOST:$MQTT_PORT  (as $MQTT_USER)
 EOF
   if [ "$ROLE" = "CONTROL" ]; then
     echo "  subscribes   $TOPIC_BASE/control/#"
@@ -1850,7 +1871,8 @@ ${B} Next${N}
   The board is running its own program. Watch it work:
 
       $MPREMOTE connect $PORT repl          ${DIM}(Ctrl-] exits, Ctrl-D reboots)${N}
-      mosquitto_sub -h $MQTT_HOST -p $MQTT_PORT -t '$TOPIC_BASE/#' -v
+      mosquitto_sub -h $MQTT_HOST -p $MQTT_PORT -u mqtt-explorer -P "\$MQTT_EXPLORER_PASS" -t '$TOPIC_BASE/#' -v
+                                    ${DIM}(MQTT_EXPLORER_PASS is in config.env; or open https://mqtt-explorer.<domain>)${N}
 
   It appears in the Devices tab under $UNIT_CODE / $ZONE_CODE. Re-running
   this wizard for the same slot updates that row in place; it never

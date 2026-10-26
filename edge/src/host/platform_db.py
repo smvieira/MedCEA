@@ -277,6 +277,19 @@ def register(base, spec):
         comp["device_id"] = device_id
         comp.setdefault("is_active", "Y")
         _insert_component(base, comp)
+
+    # The board's broker credential (migration 007). Only the mosquitto hash
+    # travels; the plaintext is on the board. The RPC is the one write path the
+    # API role has to that table, and a failure here is a registration failure:
+    # a board the broker refuses is not onboarded.
+    if spec.get("mqtt_password_hash"):
+        _request(base, "/rpc/register_mqtt_credential", "POST", {
+            "p_username": spec["mqtt_username"],
+            "p_password_hash": spec["mqtt_password_hash"],
+            "p_device_id": device_id,
+            "p_role": spec["device_type"],
+            "p_topic_base": spec["topic_base"],
+        })
     return device_id, action
 
 

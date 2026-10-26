@@ -51,6 +51,10 @@ spec:
           value: /schd
         - name: LOG_DIR
           value: /logs
+        # MQTT_USER / MQTT_PASS: the broker's "scheduler" service account
+        # (read sense, write control), from the Secret deploy.sh writes.
+        envFrom:
+        - secretRef: {name: scheduler-secrets}
         volumeMounts:
         - name: api-script
           mountPath: /scripts
@@ -87,26 +91,6 @@ spec:
   ports:
   - port: 80
     targetPort: 80
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: scheduler
-  namespace: ${NAMESPACE}
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-spec:
-  tls:
-  - hosts: [${SCHEDULER_DOMAIN}]
-    secretName: cea-tls
-  ingressClassName: nginx
-  rules:
-  - host: ${SCHEDULER_DOMAIN}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: scheduler
-            port: {number: 80}
+# No Ingress here: the host ${SCHEDULER_DOMAIN} belongs to the scheduler's
+# oauth2-proxy (deploy.sh), which upstreams to the Service above. The Service
+# itself stays plain — the Config UI calls it in-cluster at /scheduler-api/.

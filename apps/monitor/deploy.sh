@@ -6,7 +6,7 @@
 #   2. HTML ConfigMap  (monitor.html with background image)
 #   3. API ConfigMap   (monitor-api.py)
 #   4. Deployment: nginx:1.27-alpine + python:3.11-slim
-#   5. Service + Ingress on $MONITOR_DOMAIN
+#   5. Service, and oauth2-proxy on $MONITOR_DOMAIN (Keycloak SSO, any platform role)
 #   6. Updates portal card (Run Monitor)
 #
 # Idempotent: safe to re-run.
@@ -24,6 +24,8 @@ source "$REPO_ROOT/config.env"
 
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are in k8s/
+source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
+source "$REPO_ROOT/infra/lib-wait.sh"
 NAMESPACE="${NAMESPACE:-medcea}"
 MONITOR_DOMAIN="${MONITOR_DOMAIN:-monitor.$DOMAIN}"
 
@@ -77,12 +79,22 @@ $KUBECTL create configmap monitor-api -n "$NAMESPACE" \
 # 4. Deployment + Service + Ingress
 # =============================================================================
 log "Deploying monitor..."
-render "$SCRIPT_DIR/k8s/monitor.yaml" NAMESPACE POSTGRES_PASS MONITOR_DOMAIN | $KUBECTL apply -f -
+# The plain Ingress from before the SSO gate: its host now belongs to the proxy.
+$KUBECTL delete ingress monitor -n "$NAMESPACE" --ignore-not-found
+render "$SCRIPT_DIR/k8s/monitor.yaml" NAMESPACE POSTGRES_PASS | $KUBECTL apply -f -
 
 log "Restarting monitor to pick up new ConfigMaps..."
 $KUBECTL rollout restart deployment/monitor -n "$NAMESPACE"
 log "Waiting for monitor rollout..."
 $KUBECTL rollout status deployment/monitor -n "$NAMESPACE" --timeout=3m
+
+log "Deploying monitor-oauth2-proxy (Keycloak SSO)..."
+_VALUES=$(mktemp /tmp/monitor-oauth2proxy-values-XXXXXX.yaml)
+APP_SERVICE=monitor render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE > "$_VALUES"
+deploy_oauth2_proxy monitor-oauth2-proxy monitor "${MONITOR_CLIENT_SECRET:-}" "${MONITOR_COOKIE_SECRET:-}" "$MONITOR_DOMAIN" "$_VALUES"
+rm -f "$_VALUES"
+$KUBECTL rollout status deployment/monitor-oauth2-proxy -n "$NAMESPACE" --timeout=4m
+wait_for_http "https://$MONITOR_DOMAIN/" 120 "Run Monitor" || exit 1
 
 # =============================================================================
 # 5. Portal card

@@ -93,6 +93,8 @@ body{background:#0f1117;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-seri
     <div class="live-dot" id="live-dot"></div>
     <span id="last-update" class="hdr-meta"></span>
     <button class="btn-refresh" onclick="refresh()">&#8635; Refresh</button>
+    <!-- Name → Profile / Sign out (apps/access user menu, /_account/ via this host's oauth2-proxy) -->
+    <div id="user-menu" style="margin-left:12px"></div>
   </div>
   <div id="content"><div class="empty">Loading&hellip;</div></div>
 </div>
@@ -389,5 +391,6 @@ async function refresh() {
 
 refresh();
 </script>
+<script src="/_account/user-menu.js" defer></script>
 </body>
 </html>

@@ -45,7 +45,9 @@ button:disabled { background: #334155; color: #64748b; cursor: default; }
   <header>
     <h1>&#128225; MQTT Explorer</h1>
     <span id="st">Connecting&hellip;</span>
-    <span class="broker">ws://__WS_HOST__:31901</span>
+    <span class="broker" id="broker"></span>
+    <!-- Name → Profile / Sign out (apps/access user menu, /_account/ via this host's oauth2-proxy) -->
+    <div id="user-menu" style="margin-left:12px"></div>
   </header>
   <div class="main">
     <div class="topics">
@@ -68,7 +70,13 @@ button:disabled { background: #334155; color: #64748b; cursor: default; }
     </div>
   </div>
 <script>
-var WS = 'ws://__WS_HOST__:31901/mqtt';
+// Through this page's own host: the oauth2-proxy in front of it routes /mqtt to
+// the broker's WebSocket listener, so the socket is wss:// (no mixed content)
+// and only reachable signed in. The broker still checks its own credential —
+// the "mqtt-explorer" service account, readwrite on the topic root only.
+var WS = 'wss://' + location.host + '/mqtt';
+var ROOT = '__TOPIC_ROOT__';
+document.getElementById('broker').textContent = WS;
 var MAX = 100;
 var topics = {};
 var sel = null;
@@ -80,10 +88,15 @@ var ml = document.getElementById('ml');
 var pb = document.getElementById('pb');
 
 function connect() {
-  cli = mqtt.connect(WS, { clientId: 'explorer-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
-  cli.on('connect', function() { st.textContent = 'Connected'; st.className = 'ok'; pb.disabled = false; cli.subscribe('#'); });
+  cli = mqtt.connect(WS, { clientId: 'explorer-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000,
+                           username: '__MQTT_USER__', password: '__MQTT_PASS__',
+                           // under ingress-nginx's idle timeout even when nothing is published
+                           keepalive: 30 });
+  // ROOT/#: everything this account may read. A bare '#' would be accepted but
+  // deliver the same (the broker filters per message against the ACL).
+  cli.on('connect', function() { st.textContent = 'Connected'; st.className = 'ok'; pb.disabled = false; cli.subscribe(ROOT + '/#'); });
   cli.on('offline', function() { st.textContent = 'Reconnecting\u2026'; st.className = ''; pb.disabled = true; });
-  cli.on('error', function() { st.textContent = 'Error'; st.className = 'err'; });
+  cli.on('error', function(e) { st.textContent = 'Error' + (e && e.message ? ': ' + e.message : ''); st.className = 'err'; });
   cli.on('message', function(topic, payload) {
     var v = payload.toString();
     var t = new Date().toLocaleTimeString();
@@ -135,5 +148,6 @@ function esc(s) {
 
 connect();
 </script>
+<script src="/_account/user-menu.js" defer></script>
 </body>
 </html>

@@ -1,0 +1,34 @@
+# MQTT Explorer's sign-in gate. Same rules as k8s/oauth2-proxy/values-app.yaml
+# (any platform role), plus a third upstream: /mqtt goes to the broker's
+# WebSocket listener, so the browser's socket is wss://<MQTTX_DOMAIN>/mqtt —
+# same origin, only after sign-in. oauth2-proxy passes the WebSocket upgrade
+# through; the Ingress timeouts below keep an idle socket open past
+# ingress-nginx's 60 s default.
+configuration:
+  content: |
+    provider = "oidc"
+    provider_display_name = "Keycloak"
+    email_domains = ["*"]
+    cookie_secure = true
+    ssl_insecure_skip_verify = true
+    cookie_refresh = "4m"
+    cookie_expire = "8h"
+    skip_provider_button = true
+    oidc_groups_claim = "groups"
+    allowed_groups = ["operator", "qa", "auditor", "admin"]
+    pass_basic_auth = false
+    pass_authorization_header = false
+    pass_access_token = false
+    pass_user_headers = true
+    skip_oidc_discovery = true
+    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
+    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+    upstreams = ["http://mqtt-explorer.${NAMESPACE}.svc.cluster.local:80", "http://mosquitto-ws.${NAMESPACE}.svc.cluster.local:9001/mqtt", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/"]
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"

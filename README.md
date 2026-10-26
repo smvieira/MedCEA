@@ -13,9 +13,10 @@ An IoT platform deployer for Ubuntu. Two commands install and wire together a co
 |---|---|---|
 | **Keycloak** | SSO / Identity Provider (realm: `medcea`) | `https://keycloak.<domain>` |
 | **Portal** | Service catalog landing page (SSO) | `https://portal.<domain>` |
+| **User Manager** | Access requests, users, roles, e-mail (admins) | `https://access.<domain>` |
 | **Grafana** | Dashboards — reads from Postgres | `https://grafana.<domain>` |
-| **Node-RED** | Flow-based IoT logic (behind SSO) | `https://data-flow.<domain>` |
-| **Mosquitto** | MQTT broker for IoT devices | `mqtt://<LAN-IP>:31883` / `ws://<Tailscale-IP>:31901` |
+| **Node-RED** | Flow-based IoT logic (behind SSO) | `https://node-red.<domain>` |
+| **Mosquitto** | MQTT broker (every client authenticates) | `mqtt://<LAN-IP>:31883` |
 | **MQTT Explorer** | Browser-based MQTT topic browser | `https://mqtt-explorer.<domain>` |
 | **AI Workbench** | JupyterHub — notebooks and VS Code, per-user (SSO) | `https://ai-workbench.<domain>` |
 | **Recipe Schedule Manager** | Schedule grow recipes, manage unit permissions, run/stop cycles | `https://scheduler.<domain>` |
@@ -25,7 +26,14 @@ An IoT platform deployer for Ubuntu. Two commands install and wire together a co
 | **pgAdmin** | PostgreSQL web UI | `https://pgadmin.<domain>` |
 | **PostgreSQL** | Shared database | internal only |
 
-All services authenticate through Keycloak using OIDC. Re-running either deploy script is safe — work already done is detected and skipped.
+**Sign-in.** Every web UI signs in through Keycloak, on one platform sign-in page
+(in the platform's own theme): see [Users and access](#users-and-access). Any
+platform role opens the services; the User Manager and **pgAdmin** need the
+`admin` role. The **MQTT broker** admits nobody anonymously either: each board
+has its own credential from onboarding, and each platform service its own
+account — see [Connecting IoT devices to MQTT](#connecting-iot-devices-to-mqtt).
+
+Re-running either deploy script is safe — work already done is detected and skipped.
 
 ---
 
@@ -110,6 +118,10 @@ Choosing the name option in the installer sets `DOMAIN="medcea"` and `LOCAL_DNS=
 3. Nameserver: this machine's Tailscale IP (`tailscale ip -4`). Turn on **Restrict to domain** (Split DNS), domain `medcea`, then **Save**.
 4. Devices need **Use Tailscale DNS settings** turned on, which is the default. On Linux: `sudo tailscale set --accept-dns=true`.
 
+After **rebuilding the server** it gets a new Tailscale IP, but the entry above
+keeps pointing at the old one: edit it to the new IP. The deploy warns when the
+two differ and prints the exact change.
+
 Test from any device with `nslookup portal.medcea`, then open `https://portal.medcea`. Type the `https://` the first time: browsers treat a one-word ending as a search until they have visited it.
 
 > **TLS:** every service is served over HTTPS with a certificate the platform issues itself. See [Trust the platform certificate](#4-trust-the-platform-certificate) — without it browsers show "Not secure".
@@ -118,15 +130,15 @@ After the settings, the infrastructure stage (`deploy-infra.sh`) does:
 
 
 1. **Bootstraps MicroK8s** — installs the snap, enables addons (dns, ingress, helm3, hostpath-storage, rbac), exports kubeconfig
-2. **Issues the platform CA** and a wildcard certificate for `*.$DOMAIN`, and publishes it as the `cea-tls` secret
+2. **Issues the platform CA** and a certificate listing every service name, and publishes it as the `cea-tls` secret
 3. **Deploys PostgreSQL** (Bitnami Helm chart)
-4. **Deploys Keycloak** (official `quay.io/keycloak/keycloak:26.0` image, HTTPS ingress)
-5. **Creates Keycloak realm `medcea`** and confidential OAuth2 clients for `node-red`, `grafana`, `workbench`, `portal`, `config` and `edge-wizard` — client secrets are written automatically to `config.env`
-6. **Deploys Mosquitto** (MQTT broker — TCP port 31883 for IoT devices, WebSocket port 31901 for browsers)
+4. **Deploys Keycloak** (official `quay.io/keycloak/keycloak:26.0` image, HTTPS ingress) with the `medcea` login theme
+5. **Creates Keycloak realm `medcea`**: confidential OAuth2 clients for `node-red`, `grafana`, `workbench`, `portal`, `config`, `access` and `edge-wizard` (secrets written to `config.env`), the platform roles `operator` / `qa` / `auditor` / `admin`, the `groups` scope the portal checks, and the `organisation` profile field
+6. **Deploys Mosquitto** (MQTT broker — TCP port 31883 for the boards; password + ACL authentication kept in sync from the database by a sidecar)
 7. **Deploys Node-RED** behind OAuth2 Proxy (Keycloak SSO)
 8. **Deploys Grafana** with Keycloak SSO and PostgreSQL datasource pre-wired
-9. **Deploys pgAdmin** with PostgreSQL connection pre-configured
-10. **Deploys the Service Portal** (service catalog, Keycloak SSO) and **MQTT Explorer** (browser MQTT tool, auto-connected to Mosquitto)
+9. **Deploys pgAdmin** with PostgreSQL connection pre-configured and Keycloak sign-in (admins only)
+10. **Deploys the Service Portal** (service catalog, Keycloak SSO)
 11. **Deploys the AI Workbench** (JupyterHub, authenticated directly against Keycloak) unless `WORKBENCH_ENABLED=false`
 
 Then the applications stage (`deploy-apps.sh --all`, next section) and `health-check.sh` run. Progress is logged to `logs/deploy-infra-<timestamp>.log` and `logs/deploy-apps-<timestamp>.log`.
@@ -156,11 +168,13 @@ Currently available components:
 
 | Component | What it installs |
 |---|---|
-| **access** | Self-service access requests: the public *Request access* form and the admin **User Manager** (see below) |
+| **access** | Access requests, the **User Manager**, the user menu and Profile — see [Users and access](#users-and-access) |
 | **database** | `medcea` schema, measurement table, and DB migrations (control algorithms, permissions, algorithm state) |
+| **edge-wizard** | The device onboarding wizard as a host service (`https://onboard-device.<domain>`), for flashing boards over USB |
 | **frontend** | System Configuration UI and Database Management portal |
 | **node-red** | `node-red-contrib-postgresql` package + MQTT→PostgreSQL flow |
 | **monitor** | Run Monitor dashboard (live recipe runs) |
+| **mqtt-explorer** | Browser MQTT tool, behind sign-in; talks to the broker as its own service account |
 | **report** | Grafana dashboard definitions |
 | **scheduler** | Recipe Schedule Manager Flask API and browser UI |
 
@@ -293,66 +307,6 @@ instead of "Not secure".
 > point it at the host and use a DNS-01 ACME challenge, which keeps the current
 > subdomain layout and gives publicly trusted certificates.
 
-### User access: requests, roles and e-mail
-
-The portal admits only users who hold one of the platform realm roles
-**operator**, **qa**, **auditor** or **admin** (the RBAC roles in
-[docs/architecture.md](docs/architecture.md)). New people get one by asking:
-
-1. On the platform sign-in page (every service sends you there; it is the
-   `medcea` Keycloak theme in [k8s/keycloak/theme/](k8s/keycloak/theme/)) they
-   open the **Request access** tab and fill in name,
-   e-mail, username, password, the **role they need** and a **business
-   justification**. Their Keycloak account is created **disabled**, so they
-   cannot sign in yet.
-2. Every admin (each enabled user with realm role `admin`, plus
-   `ACCESS_NOTIFY_EMAIL`) gets an e-mail with a link to the **User Manager**
-   (`https://access.<domain>`, also a card under Platform Management).
-3. The admin approves with the requested role, approves with a **different**
-   role, or rejects. Notes are optional for an approval and required for a
-   rejection; they are included in the e-mail.
-4. The applicant gets one of three e-mails: *approved*, *approved with role
-   reassigned* (requested vs granted role), or *rejected*. Approval enables the
-   account with the granted role. Rejection deletes the disabled account, so
-   the person can apply again.
-
-Every request and decision is kept in `iam.access_request_history`
-(who, when, requested vs granted role, notes). It is append-only: the service
-can read it but cannot change or delete it.
-
-**Deactivating someone**: User Manager → **Users** lists every account with its
-role. *Deactivate account* needs a reason, signs the person out everywhere at
-once and blocks sign-in until *Activate account*; role and data are kept.
-The same panel changes an account's **role** (one platform role per account; a
-reason is required; it takes effect within a few minutes without signing out).
-You cannot deactivate yourself or the last active admin, and an account still
-awaiting approval is decided under Requests instead. Every change is kept in
-the account's history, which cannot be edited.
-
-**E-mail is managed in the User Manager**, not in `config.env`:
-
-- **E-mail settings**: the Gmail address and its **app password**
-  (<https://myaccount.google.com/apppasswords>, needs 2-Step Verification), the
-  sender name and extra people to notify about new requests. *Save and verify*
-  logs in to Gmail before storing anything; *Send test e-mail to me* proves
-  delivery. The same account becomes Keycloak's mail server, so the sign-in
-  page's **Forgot password?** works too. Until it is set, decisions still work
-  and the messages go to the service log.
-- **Templates**: the four messages (new request, approved, approved with role
-  reassigned, rejected), with clickable placeholders such as `$first_name`,
-  `$granted_role_label` and `$notes_block`. *Reset to default* returns to the
-  files in [apps/access/templates/](apps/access/templates/).
-- **In each decision** the applicant's e-mail is pre-filled from the matching
-  template and follows the decision, role and notes as you change them. Edit it
-  freely before sending, or untick *Send e-mail*. What was sent is stored with
-  the decision.
-- **Change log**: every change to the settings or templates, and who made it
-  (the password itself is never logged).
-
-Users that existed before this feature and have none of the four roles get a
-403 from the portal. Grant one in the Keycloak console (Realm roles → *role* →
-Users in role), or have them file a request.
-
 ---
 
 ## Service URLs
@@ -363,42 +317,153 @@ After deployment the summary section of the log shows all URLs. The pattern is:
 Portal:        https://portal.<domain>          (start here — Keycloak SSO)
 User Manager:  https://access.<domain>          (access requests — realm role admin)
 Request access: https://access.<domain>/register (opens the Request access tab of the sign-in page)
+Profile:       https://<any signed-in host>/_account/  (also from the name in the top-right)
 Keycloak:      https://keycloak.<domain>       (admin / <ADMIN_PASS>)
 Grafana:       https://grafana.<domain>         (login via Keycloak)
-Node-RED:      http://data-flow.<domain>       (login via Keycloak)
+Node-RED:      https://node-red.<domain>        (login via Keycloak)
 AI Workbench:  https://ai-workbench.<domain>   (JupyterHub — login via Keycloak)
 Run Monitor:   https://monitor.<domain>         (live run progress + sensor readings)
 Config UI:     https://config.<domain>          (locations, units, devices, recipes)
 DB Mgmt:       https://dbmgmt.<domain>          (browse/export medcea schema)
-pgAdmin:       https://pgadmin.<domain>         (admin@cea.com / <ADMIN_PASS>)
-MQTT Explorer: https://mqtt-explorer.<domain>   (open access — browser MQTT tool)
-Mosquitto:     mqtt://<LAN-IP>:31883           (IoT devices on LAN)
-               ws://<Tailscale-IP>:31901       (WebSocket — browser clients)
+Scheduler:     https://scheduler.<domain>       (recipe schedules)
+Onboarding:    https://onboard-device.<domain>  (device wizard, runs on the host — login via Keycloak)
+pgAdmin:       https://pgadmin.<domain>         (Keycloak sign-in, role admin)
+MQTT Explorer: https://mqtt-explorer.<domain>   (browser MQTT tool; its broker socket is wss://…/mqtt)
+Mosquitto:     mqtt://<LAN-IP>:31883           (boards on the LAN, per-device credentials)
 Postgres:      rdbms-postgresql.medcea.svc.cluster.local:5432  (internal)
 ```
 
 With the default nip.io setup and a Tailscale IP of `100.94.119.12`, for example:
 
 ```
-Portal:        http://portal.100.94.119.12.nip.io
+Portal:        https://portal.100.94.119.12.nip.io
 Keycloak:      https://keycloak.100.94.119.12.nip.io
-Grafana:       http://grafana.100.94.119.12.nip.io
-Node-RED:      http://data-flow.100.94.119.12.nip.io
-MQTT Explorer: http://mqtt-explorer.100.94.119.12.nip.io
+Grafana:       https://grafana.100.94.119.12.nip.io
+Node-RED:      https://node-red.100.94.119.12.nip.io
+MQTT Explorer: https://mqtt-explorer.100.94.119.12.nip.io
 ```
+
+---
+
+## Users and access
+
+### Signing in
+
+Every signed-in service sends you to **one sign-in page** — Keycloak, wearing the
+platform's look (the `medcea` theme in [k8s/keycloak/theme/](k8s/keycloak/theme/)).
+It has two tabs: **Sign in** and **Request access**. *Forgot password?* appears
+once e-mail is set up (below).
+
+On the portal, the System Configuration UI and the User Manager, your **name**
+sits in the top-right corner. It opens:
+
+- **Profile** — change your first name, last name and organisation (username
+  and e-mail are fixed; an admin changes those), and **Change password**, which
+  uses Keycloak's own page in the same look, so no password passes through the
+  platform's code.
+- **Sign out** — ends the session everywhere, not only on that page.
+
+Node-RED, Grafana and JupyterHub keep their own built-in user menus.
+
+### Roles
+
+Each account holds **one** platform role:
+
+| Role | Meant for |
+|---|---|
+| `operator` | running recipes and day-to-day cultivation |
+| `qa` | reviewing data and releasing batches |
+| `auditor` | read-only access to records and audit trails |
+| `admin` | managing the platform and its users |
+
+Today a role is checked in two places: **the portal admits only these four roles**
+(anyone else gets "No access yet"), and **the User Manager admits only `admin`**.
+Finer permissions inside each service (Grafana, Node-RED, Config UI, scheduler) are
+still to be built — see the RBAC row in [docs/architecture.md](docs/architecture.md).
+The built-in accounts get one at install: `admin` → admin, `developer` →
+operator, `viewer` → auditor.
+
+### Getting access
+
+1. The person opens **Request access** on the sign-in page and gives name, e-mail,
+   organisation, username, password, the **role they need** and a **business
+   justification**. Their account is created **disabled**: they cannot sign in yet.
+2. Every admin (every enabled user with role `admin`, plus the extra addresses in
+   E-mail settings) gets an e-mail linking to the User Manager.
+3. In **User Manager → Requests** the admin approves with the requested role,
+   approves with a **different** role, or rejects. Notes are optional for an
+   approval and required for a rejection.
+4. The applicant's e-mail is pre-filled from the matching template, follows the
+   decision as it changes, and can be edited before sending (or not sent).
+   Approval enables the account with the granted role; rejection deletes the
+   disabled account, so the person can apply again.
+
+### Managing users
+
+**User Manager → Users** lists every account with its role and status (Active,
+Inactive, Awaiting approval), with search. For a selected person:
+
+- **Deactivate account** — needs a reason; signs them out everywhere at once and
+  blocks sign-in. Role and data are kept. **Activate account** reverses it.
+- **Change role** — one role replaces the other; needs a reason; takes effect
+  within about four minutes, without signing out.
+
+You cannot deactivate or change the role of your own account, nor leave the
+platform without an active admin. An account still awaiting approval is decided
+under **Requests**.
+
+### E-mail
+
+E-mail is configured in the **User Manager**, not in `config.env`:
+
+- **E-mail settings** — the Gmail address and its **app password**
+  (<https://myaccount.google.com/apppasswords>; needs 2-Step Verification), the
+  sender name and extra people to notify about new requests. *Save and verify*
+  logs in to Gmail before storing anything; *Send test e-mail to me* proves
+  delivery. The same account becomes Keycloak's mail server, which is what turns
+  on *Forgot password?*. Until it is set, decisions still work and the messages
+  go to the service log (`microk8s kubectl logs -n medcea deploy/access`).
+- **Templates** — the four messages (new request, approved, approved with role
+  reassigned, rejected), with click-to-insert placeholders such as `$first_name`,
+  `$granted_role_label` and `$notes_block`. *Reset to default* returns to the
+  files in [apps/access/templates/](apps/access/templates/).
+
+### What is recorded
+
+Every action above leaves a record that the platform can add to but never edit
+or delete (the Compliance Plane rule):
+
+| Record | Holds |
+|---|---|
+| `iam.access_request_history` | each request and decision: who, when, requested vs granted role, notes |
+| `iam.access_request` | the request itself, plus the exact e-mail sent with the decision |
+| `iam.user_status_history` | deactivations, activations and role changes: who, whose account, from/to, why |
+| `iam.config_history` | changes to e-mail settings and templates (never the password) — **Change log** tab |
 
 ---
 
 ## Connecting IoT devices to MQTT
 
-Mosquitto is exposed on two ports:
+**Every MQTT client authenticates.** The broker has no anonymous access:
 
-| Transport | Address | Port | Use case |
+| Client | Username | Password | May |
 |---|---|---|---|
-| MQTT (TCP) | `<server-LAN-IP>` | `31883` | IoT devices, microcontrollers, MQTT clients |
-| WebSocket | `<server-Tailscale-IP>` | `31901` | Browser clients, MQTT Explorer |
+| A board | its name, e.g. `unit01-s-zone01` | minted at onboarding, written to the board and to `edge/provisioned/<name>.json` | SENSE: publish `<root>/<UNIT>/<ZONE>/sense/#`; CONTROL: receive `…/control/#`, publish `…/control_setpoint/#` |
+| Node-RED | `node-red` | `MQTT_NODE_RED_PASS` (config.env) | read `<root>/#` |
+| Scheduler | `scheduler` | `MQTT_SCHEDULER_PASS` | read `…/sense/#`, publish `…/control/#` |
+| MQTT Explorer | `mqtt-explorer` | `MQTT_EXPLORER_PASS` | read and publish `<root>/#` |
 
-Both listeners allow **anonymous connections** — no username or password is needed. QoS 0, 1, and 2 are supported.
+The root is `PROJECT_NAME` (`medcea`). Board credentials come only from the
+onboarding wizard, which registers the password's hash in the database;
+re-onboarding a board gives it a new password. **Marking a device inactive in
+the Config UI locks it out of the broker within about 15 seconds.** Boards
+flashed before broker authentication have no credential: re-onboard them.
+
+| Transport | Address | Port | Use |
+|---|---|---|---|
+| MQTT (TCP) | `<server-LAN-IP>` | `31883` | boards on the LAN |
+| MQTT (TCP) | `mosquitto.medcea.svc.cluster.local` | `1883` | services in the cluster |
+| WebSocket | `wss://mqtt-explorer.<domain>/mqtt` | 443 | only through the MQTT Explorer's sign-in |
 
 ### Finding the server address
 
@@ -407,82 +472,58 @@ Both listeners allow **anonymous connections** — no username or password is ne
 ip route get 8.8.8.8 | awk '/src/{print $7}'  # run on the server
 ```
 
-**Tailscale IP** (stable, does not change when the router reassigns IPs):
-```bash
-tailscale ip -4  # run on the server
-```
-
 > **Stability tip:** The LAN IP can change if your router reassigns it via DHCP. To avoid breakage, set a **DHCP reservation** in your router for the server's MAC address. Alternatively, IoT devices on the LAN can resolve the server by hostname: `<hostname>.local:31883` (requires Avahi/mDNS, which is installed by default on Ubuntu Desktop).
 
 ### Connection examples
 
-**ESP32 / Arduino (PubSubClient)**
-
-```cpp
-#include <PubSubClient.h>
-
-const char* mqtt_server = "192.168.1.102";  // server LAN IP
-const int   mqtt_port   = 31883;
-
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-void setup() {
-    client.setServer(mqtt_server, mqtt_port);
-}
-
-void loop() {
-    if (!client.connected()) {
-        client.connect("esp32-sensor-01");  // unique client ID
-    }
-    client.publish("sensors/temperature", "22.5");
-    client.loop();
-}
-```
+The platform's own boards are configured by the onboarding wizard; these are for
+other clients. Use a credential with the topics it is allowed (table above).
 
 **MicroPython (umqtt.simple)**
 
 ```python
 from umqtt.simple import MQTTClient
 
-client = MQTTClient("micropython-01", "192.168.1.102", port=31883)
+client = MQTTClient("unit01-s-zone01-test", "192.168.1.102", port=31883,
+                    user="unit01-s-zone01", password="<from edge/provisioned/unit01-s-zone01.json>")
 client.connect()
-client.publish(b"sensors/humidity", b"65")
+client.publish(b"medcea/UNIT01/ZONE01/sense/humidity", b"65")
 client.disconnect()
 ```
 
-**Python (paho-mqtt)**
+**Python (paho-mqtt)** — e.g. from the AI Workbench, read-only as Node-RED's account:
 
 ```python
 import paho.mqtt.client as mqtt
 
-client = mqtt.Client(client_id="python-client")
-client.connect("192.168.1.102", 31883)
+client = mqtt.Client(client_id="notebook-reader")
+client.username_pw_set("node-red", "<MQTT_NODE_RED_PASS from config.env>")
+client.connect("mosquitto.medcea.svc.cluster.local", 1883)
 
-# Publish
-client.publish("sensors/temperature", "22.5")
-
-# Subscribe
 def on_message(client, userdata, msg):
     print(f"{msg.topic}: {msg.payload.decode()}")
 
-client.subscribe("#")          # subscribe to all topics
+client.subscribe("medcea/#")
 client.on_message = on_message
 client.loop_forever()
 ```
 
-**Node-RED (MQTT node)**
+**Command line**
 
-In Node-RED, add an **mqtt in** or **mqtt out** node and configure the broker:
-- Server: `mosquitto.medcea.svc.cluster.local` (in-cluster, no port needed — port 1883)
-- Port: `1883`
-- Client ID: leave blank (auto-generated)
+```bash
+mosquitto_sub -h <server-LAN-IP> -p 31883 -u mqtt-explorer -P "$MQTT_EXPLORER_PASS" -t 'medcea/#' -v
+```
 
-> **Note:** Node-RED runs inside the cluster, so it connects to Mosquitto via the Kubernetes service name, not the LAN IP or NodePort.
+**Node-RED** — the platform flow's broker node is configured by
+`apps/node-red/deploy.sh` (server `mosquitto.medcea.svc.cluster.local:1883`,
+user `node-red`). A new flow can reuse that broker node.
 
 ### Browser-based MQTT Explorer
 
-Open **[http://mqtt-explorer.\<domain\>](http://mqtt-explorer.100.94.119.12.nip.io)** — it automatically connects to Mosquitto's WebSocket endpoint at `ws://<Tailscale-IP>:31901` and subscribes to all topics. Click any topic to see its message history. Use the Publish panel at the bottom to send messages.
+Open **https://mqtt-explorer.\<domain\>** (sign-in required). It connects to the
+broker over `wss://mqtt-explorer.<domain>/mqtt` as the `mqtt-explorer` account
+and shows everything under the topic root. Click any topic to see its message
+history; use the Publish panel at the bottom to send messages.
 
 ### Recommended topic structure
 
@@ -734,7 +775,7 @@ Two things do not go through the ingress and use raw ports:
 | Service | Address | Note |
 |---|---|---|
 | Mosquitto (IoT devices) | `mqtt://<lan-ip>:31883` | LAN NodePort — set a DHCP reservation |
-| Onboarding wizard | `http://<host>:8088` | Runs on the host; needs the USB port |
+| Onboarding wizard | `https://onboard-device.<domain>` | Runs on the host (port 8088 behind the ingress); needs the USB port |
 
 Remember that each browsing device also needs the platform CA installed — see
 [Trust the platform certificate](#4-trust-the-platform-certificate).
@@ -758,7 +799,8 @@ install.sh               # One entry point: install, update, uninstall (--help)
 deploy-infra.sh          # Infrastructure stage (run from repo root)
 deploy-apps.sh           # Application stage (interactive, --all, --uninstall)
 k8s/                     # Kubernetes manifests and Helm values as templates
-├── keycloak/  mosquitto/  pgadmin/  portal/  mqtt-explorer/
+├── keycloak/  mosquitto/  pgadmin/  portal/
+│   └── keycloak/theme/  # the platform sign-in page (Keycloak login theme "medcea")
 ├── name-dns/            # DNS server for a name-based domain (+ Corefile)
 ├── alias/               # redirects from the old IP domain
 ├── grafana/  workbench/ # Helm values (+ Grafana datasource Secret)
@@ -768,10 +810,13 @@ infra/
 ├── configure.sh           # config.env questions (template: config.env.example)
 ├── deploy-workbench.sh    # JupyterHub (AI workbench), called by deploy-infra.sh
 ├── lib-render.sh          # render FILE VAR... — fills the k8s/ templates
-├── lib-mk8s.sh lib-prereqs.sh lib-dns.sh lib-portal.sh lib-credentials.sh lib-wait.sh
-└── patch-dex-keycloak.sh  # Recovery: re-apply Keycloak connector to dex-auth
+├── lib-mk8s.sh lib-mk8s-remove.sh lib-prereqs.sh lib-dns.sh lib-portal.sh
+├── lib-credentials.sh lib-wait.sh lib-sudo.sh
+└── patch-dex-keycloak.sh  # Legacy (Kubeflow/Dex, retired) — not used by the install
 apps/
+├── access/              # Access requests, User Manager, user menu + Profile (schema iam)
 ├── database/            # PostgreSQL schema and migrations
+├── edge-wizard/         # Device onboarding wizard as a host service
 ├── frontend/            # System Configuration UI + Database Management portal
 ├── monitor/             # Run Monitor dashboard
 ├── node-red/            # Node-RED packages and flows
@@ -831,7 +876,7 @@ Key variables:
 | `PROJECT_NAME` | `medcea` | Project identifier: MQTT topic root (`medcea/<UNIT>/<ZONE>/…`), and the source of `NAMESPACE` and `KEYCLOAK_REALM` |
 | `NAMESPACE` | `$PROJECT_NAME` (`medcea`) | Kubernetes namespace for all services |
 | `DOMAIN` | `${PLATFORM_IP}.nip.io`; the installer offers `medcea` | Base domain for ingress hostnames |
-| `PLATFORM_IP` | Tailscale IP, else LAN IP | The address every service name points to; also the MQTT WebSocket host and the onboarding wizard address |
+| `PLATFORM_IP` | Tailscale IP, else LAN IP | The address every service name points to; also the onboarding wizard address |
 | `LOCAL_DNS` | `false` | `true`: the platform serves DNS for `DOMAIN` (`name-dns`) and maps the names in `/etc/hosts` |
 | `ALIAS_DOMAIN` | `${PLATFORM_IP}.nip.io` | The old IP domain, kept as redirects to `DOMAIN`; inactive when equal to it |
 | `USE_TAILSCALE` | set by the installer | `true`: `DOMAIN` uses the Tailscale IP, and a deploy stops if Tailscale is down. `false`: LAN only, never asked again. Empty: not decided yet |
@@ -841,13 +886,16 @@ Key variables:
 | `WORKBENCH_ENABLED` | `true` | Deploy the JupyterHub workbench with the infrastructure |
 | `NODE_RED_TZ` | system timezone | Timezone for Node-RED |
 | `WORKBENCH_DOMAIN` | `ai-workbench.$DOMAIN` | Hostname for the AI workbench |
+| `ACCESS_DOMAIN` | `access.$DOMAIN` | Hostname for the User Manager and the registration redirect |
+
+E-mail (Gmail account, app password, templates) is **not** in `config.env`: it is set in the User Manager.
 
 ---
 
 ## Architecture notes
 
 - **No public certificates are possible** for `*.nip.io` on a CGNAT or LAN address: Let's Encrypt cannot reach the host for HTTP-01 and the DNS is not ours for DNS-01. Hence the platform CA.
-- **Keycloak uses HTTPS** — production mode sets `SameSite=None; Secure` on cookies. A self-signed TLS cert is generated for the Keycloak ingress. Other services skip TLS verification when talking to Keycloak internally.
+- **Keycloak uses HTTPS** — production mode sets `SameSite=None; Secure` on cookies. Its ingress uses the platform certificate (signed by the platform CA). Services talk to Keycloak inside the cluster over plain HTTP, by its service name.
 - **Keycloak image** — uses `quay.io/keycloak/keycloak:26.0` (official, free). The Bitnami Keycloak chart has been behind a paywall since August 2025.
 - **The AI workbench** is JupyterHub, deployed by `infra/deploy-workbench.sh` from `deploy-infra.sh`. It authenticates against Keycloak with `GenericOAuthenticator` — no Dex, no service mesh. Per-user notebook pods are culled when idle.
 - **Docker Hub credentials** are required only for Helm OCI chart pulls (`bitnamicharts`) and to avoid the anonymous image pull rate limit. Runtime images for Keycloak (Quay), Node-RED (GHCR), OAuth2 Proxy (Quay), and Mosquitto (Docker Hub Official) do not require auth.

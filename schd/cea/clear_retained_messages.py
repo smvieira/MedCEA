@@ -16,6 +16,7 @@ def clear_retained_messages(client,mqtt_url, mqtt_port, topic_prefix, timeout=10
         list: A sorted list of discovered MQTT topics under the specified prefix.
               Exits the program if no topics are discovered within the timeout.
     """
+    import os
     import subprocess
     import time
     import paho.mqtt.client as mqtt
@@ -44,6 +45,7 @@ def clear_retained_messages(client,mqtt_url, mqtt_port, topic_prefix, timeout=10
             "mosquitto_pub",
             "-h", mqtt_url,
             "-p", str(mqtt_port),
+            *(["-u", os.getenv('MQTT_USER'), "-P", os.getenv('MQTT_PASS', '')] if os.getenv('MQTT_USER') else []),
             "-t", msg.topic,
             "-n",  # Null payload
             "-r"   # Retain flag

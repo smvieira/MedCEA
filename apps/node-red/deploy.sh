@@ -26,6 +26,13 @@ NR_LOCAL_PORT="${NR_LOCAL_PORT:-1880}"
 
 # K8s service names (stable in-cluster DNS, independent of IP changes)
 MQTT_HOST="mosquitto.${NAMESPACE}.svc.cluster.local"
+# The broker admits nobody anonymously: Node-RED signs in as the service
+# account "node-red" (read-only on the topic root). The password is generated
+# once by deploy-infra.sh and hashed into the Secret mosquitto-service-auth.
+if [[ -z "${MQTT_NODE_RED_PASS:-}" ]]; then
+    echo "ERROR: MQTT_NODE_RED_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
+    exit 1
+fi
 PG_RELEASE_NAME="${PG_RELEASE:-rdbms}"
 PG_HOST="${PG_RELEASE_NAME}-postgresql.${NAMESPACE}.svc.cluster.local"
 PG_PORT="5432"
@@ -140,6 +147,8 @@ for flow_file in "$SCRIPT_DIR/flows/"*.json; do
     sed \
         -e "s|__TOPIC_ROOT__|${PROJECT_NAME:-medcea}|g" \
         -e "s|__MQTT_HOST__|${MQTT_HOST}|g" \
+        -e "s|__MQTT_USER__|node-red|g" \
+        -e "s|__MQTT_PASS__|${MQTT_NODE_RED_PASS}|g" \
         -e "s|__PG_HOST__|${PG_HOST}|g" \
         -e "s|__PG_PORT__|${PG_PORT}|g" \
         -e "s|__PG_DB__|${PG_DB}|g" \
@@ -185,4 +194,4 @@ done
 
 echo ""
 echo "==> Deployment complete"
-echo "    Node-RED: http://data-flow.${DOMAIN:-<domain>}"
+echo "    Node-RED: https://node-red.${DOMAIN:-<domain>}"

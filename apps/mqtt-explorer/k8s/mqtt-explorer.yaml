@@ -50,28 +50,6 @@ spec:
     port: 80
     targetPort: 80
   type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: mqtt-explorer
-  namespace: ${NAMESPACE}
-spec:
-  # TLS from the platform CA. Adding this also makes nginx-ingress redirect
-  # plain HTTP here with a 308, which is why every registered redirect URI had
-  # to move to https in the same change.
-  tls:
-  - hosts: [${MQTTX_DOMAIN}]
-    secretName: cea-tls
-  ingressClassName: nginx
-  rules:
-  - host: ${MQTTX_DOMAIN}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mqtt-explorer
-            port:
-              number: 80
+# No Ingress here: the host ${MQTTX_DOMAIN} belongs to mqttx-oauth2-proxy
+# (deploy.sh), which upstreams to this Service and, at /mqtt, to the broker's
+# WebSocket listener (Service mosquitto-ws).

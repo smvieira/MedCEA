@@ -71,26 +71,5 @@ spec:
   ports:
   - port: 80
     targetPort: 80
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: dbmgmt
-  namespace: ${NAMESPACE}
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-spec:
-  tls:
-  - hosts: [${DBMGMT_DOMAIN}]
-    secretName: cea-tls
-  ingressClassName: nginx
-  rules:
-  - host: ${DBMGMT_DOMAIN}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: dbmgmt
-            port: {number: 80}
+# No Ingress here: the host ${DBMGMT_DOMAIN} belongs to dbmgmt-oauth2-proxy
+# (apps/frontend/deploy.sh), which upstreams to the Service above.

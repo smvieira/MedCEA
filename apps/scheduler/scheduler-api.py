@@ -50,6 +50,8 @@ SCHD_DIR  = os.getenv('SCHD_DIR',  '/schd')
 LOG_DIR   = os.getenv('LOG_DIR',   '/logs')
 MQTT_URL  = os.getenv('MQTT_URL',  'localhost')
 MQTT_PORT = os.getenv('MQTT_PORT', '1883')
+MQTT_USER = os.getenv('MQTT_USER', '')      # the broker's "scheduler" service account
+MQTT_PASS = os.getenv('MQTT_PASS', '')
 PROJECT   = os.getenv('PROJECT_NAME', 'medcea')
 
 # In-memory PID registry: run_id -> pid of the active run_recipe.py subprocess
@@ -98,6 +100,8 @@ def _write_dotenv():
         f.write(f"DB_PASS={DB['password']}\n")
         f.write(f"MQTT_URL={MQTT_URL}\n")
         f.write(f"MQTT_PORT={MQTT_PORT}\n")
+        f.write(f"MQTT_USER={MQTT_USER}\n")
+        f.write(f"MQTT_PASS={MQTT_PASS}\n")
         f.write(f"PROJECT_NAME={PROJECT}\n")
     log.info('Wrote /installer/.env')
 

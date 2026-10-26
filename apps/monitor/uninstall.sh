@@ -21,6 +21,9 @@ log() { echo -e "${GREEN}[monitor]${NC} $*"; }
 
 portal_card disable "https://$MONITOR_DOMAIN"
 
+log "Removing monitor-oauth2-proxy (owns the $MONITOR_DOMAIN ingress)..."
+$MK8S helm3 uninstall monitor-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
+
 log "Removing Deployment, Service, Ingress and ConfigMaps..."
 $KUBECTL delete deployment,service,ingress monitor -n "$NAMESPACE" --ignore-not-found
 $KUBECTL delete configmap monitor-nginx monitor-html monitor-api -n "$NAMESPACE" --ignore-not-found
