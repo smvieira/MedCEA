@@ -1,0 +1,1121 @@
+# MedCEA IAM default policy — schema_version 2
+#
+# The one source of access rights on the platform. apps/iam/compiler/ turns it into
+# PostgreSQL grants, oauth2-proxy allowed_groups, the Grafana / JupyterHub / Node-RED /
+# edge-wizard / pgAdmin role settings, Mosquitto ACL rows and the route table every
+# service enforces. The Policy UI shows every help text below and, under "See more", the
+# concrete objects the compiler derives from a cell — so what is explained is what is
+# enforced.
+#
+# Bootstrap (plan Section 3.4): on first install apps/iam/deploy.sh applies this file as
+# version 1 under the deploy lock and records a 'bootstrap_applied' event; the first qa
+# person then confirms version 1 like any later version. Afterwards the file is only the
+# "Reset to defaults" template.
+# Keys (roles, levels, groups, members, constraints, invariants) are stable identifiers;
+# the UI edits cells, never keys. A key added here later reaches an existing install as a
+# schema migration that adds N cells and a history event (plan Section 3.4, item 4).
+#
+# Cell syntax (matrix.<group>.<role>):
+#   [R, X]                                    levels held, written closed under `implies`
+#   {levels: [R, C, U], constraint: draft_only, applies_to: [U]}
+#                                             a named constraint narrows the listed levels
+# A role not listed in a group's row holds N there.
+
+schema_version: 2
+policy_version: 1
+title: MedCEA default access policy
+
+about: >
+  Who may do what on the MedCEA platform. Rows are resource groups (a set of tables,
+  API routes, web pages and MQTT topics that belong together); columns are platform
+  roles; a cell lists the access levels the role holds on the group. Every account has
+  exactly one platform role. Changes are drafted by an administrator, approved by a
+  different person holding qa, and applied on the platform host; every step is kept in
+  an append-only, hash-chained history.
+
+# ── Access levels ─────────────────────────────────────────────────────────────────────
+# One scale, interpreted per resource type. `implies` is the only implication rule: every
+# compiler (grants, proxies, routes, explain) expands a cell with it. `meaning` has a key
+# for exactly the resource types that support the level (resource_types.*.levels).
+levels:
+  N:
+    name: None
+    implies: []
+    summary: No access. The role does not see the resource at all.
+    help: >
+      The default for every cell. The role gets no database privilege, the API answers
+      403, the web page is not offered and no MQTT topic is readable.
+    meaning: {}
+  R:
+    name: Read
+    implies: []
+    summary: See the resource, change nothing.
+    help: >
+      Read rows, call GET routes and open the page. Reads of regulated data through the
+      Monitor and the export are logged.
+    meaning:
+      data: SELECT
+      api: GET routes of the group
+      ui: admitted to the host (unless the host admits only higher levels)
+      mqtt: topic read, through the person's own MQTT Explorer credential
+      idp: list accounts and their roles (names, e-mail addresses)
+      code: read the files in git
+  X:
+    name: Read and export
+    implies: [R]
+    summary: Read, and take a copy out of the platform.
+    help: >
+      Everything R gives, plus the Database Management export for this group. An export
+      covers exactly the groups where the person holds X, and each export writes one row
+      to iam_policy.export_log naming who exported which objects and when.
+    meaning:
+      data: SELECT (as R; the export service adds the group to the person's exportable set)
+      api: export routes
+      ui: admitted to the host
+  C:
+    name: Create
+    implies: [R]
+    summary: Add new records; never change existing ones.
+    help: >
+      Insert new rows and call create routes. Existing records stay untouched, which is
+      why C is the level used for appending to regulated data and audit trails.
+    meaning:
+      data: INSERT (+ USAGE on the sequence)
+      api: POST on create routes
+      ui: admitted to the host
+      mqtt: topic write (publish), through the person's own MQTT Explorer credential
+      idp: create a disabled account (access request path)
+  U:
+    name: Update
+    implies: [C, R]
+    summary: Create and change records, within the group's constraint.
+    help: >
+      Insert and update. On configuration with an approval step (recipes, controllers)
+      an update is possible only while the record is a draft. Removing a configuration
+      record is an update to status 'retired', never a DELETE. Never granted to a person
+      on regulated or history data (invariant I1).
+    meaning:
+      data: INSERT, UPDATE (rows the constraint allows)
+      api: PUT / PATCH on edit routes, and retire routes
+      ui: admitted to the host
+      mqtt: as C
+      idp: update account attributes and role mapping
+      code: change the files (through a reviewed merge)
+  A:
+    name: Approve
+    implies: [R]
+    summary: Approve or release another person's work.
+    help: >
+      Record an approval through the group's approval function, called with the
+      person's own verified token (never by a service on its own). The approver must be
+      a different person from the author (constraint not_own_author). In this version an
+      approval is an attributable, time-stamped record, NOT a 21 CFR Part 11 electronic
+      signature: re-authentication and signature manifestation arrive with Section 7 of
+      the plan.
+    meaning:
+      data: EXECUTE on the group's approval function, through PostgREST as the person's own role
+      api: approve routes (policy and account decisions)
+      ui: admitted to the host
+      idp: confirm an account decision (qa_dual_control)
+      code: approve a merge
+  O:
+    name: Operate
+    implies: [R]
+    summary: Start, stop or trigger a process; no change to its definition.
+    help: >
+      Run equipment and processes: execute a run, stop it, trigger a schedule. Kept apart
+      from A so that stopping a run is never mistaken for releasing it, and apart from U
+      so that operating never means editing a recipe.
+    meaning:
+      data: EXECUTE on medcea.start_run() and medcea.set_run_status()
+      api: POST on operate routes (execute, stop, trigger)
+      ui: admitted to the host
+  K:
+    name: Configure
+    implies: []
+    summary: Administer the tool; what that includes depends on the tool — see the meaning per type.
+    help: >
+      Administrative settings without the content the tool holds, with one exception
+      that is stated rather than hidden: on accounts (idp) administering means reading and
+      changing account records, which are personal data. On the AI workbench K is hub
+      administration with admin_access disabled, so an administrator cannot enter other
+      people's notebook servers. Held only by admin (invariant I13); on regulated or
+      history data K never compiles to a privilege (invariant I2).
+    meaning:
+      api: admin routes of the group
+      ui: admitted to the host; tool administration (JupyterHub admin without admin_access)
+      idp: read, create, change and deactivate accounts and their roles (every grant confirmed by qa)
+      infra: run the locked host scripts (break-glass, see break_glass)
+  D:
+    name: Delete
+    implies: []
+    summary: Remove platform components.
+    help: >
+      Remove components and releases on the platform host. Never data: no DELETE grant is
+      compiled for any person (records are retired, not deleted). Held only by admin, on
+      platform administration (invariant I13).
+    meaning:
+      api: DELETE routes of platform administration
+      infra: remove releases and components (break-glass)
+
+# Which levels can mean something for each member type. A level in a cell must apply to
+# at least one member of its group (invariant I14); "See more" names the members it does
+# not apply to.
+resource_types:
+  data:
+    label: Database table, view or function
+    enforced_by: PostgreSQL GRANT per role (rr_* for people through PostgREST, svc_* for services), row-level security for constraints, triggers for immutability
+    levels: [N, R, X, C, U, A, O]
+    help: The strongest gate, because it holds even when an application has a bug.
+  api:
+    label: Service route
+    enforced_by: medcea_iam.check() in each service, against the compiled route table, on an identity taken from a verified access token
+    levels: [N, R, X, C, U, A, O, K, D]
+    help: Each route belongs to exactly one group and needs exactly one level; a route missing from the table is refused.
+  ui:
+    label: Web host behind Keycloak sign-in
+    enforced_by: oauth2-proxy allowed_groups per host, or the tool's own OIDC role setting (Grafana, JupyterHub, pgAdmin, edge wizard)
+    levels: [N, R, X, C, U, A, O, K]
+    help: A coarse front gate; what a person may do on the page is decided by the API and the database.
+  mqtt:
+    label: Broker topic class
+    enforced_by: Mosquitto ACL rows written by the auth sidecar from medcea.mqtt_credential and medcea.mqtt_service_acl
+    levels: [N, R, C, U]
+    help: People reach topics only through per-person, short-lived MQTT Explorer credentials that mirror their cells.
+  idp:
+    label: Keycloak account operation
+    enforced_by: the access service's Keycloak service account, acting only after the route check and qa_dual_control
+    levels: [N, R, C, U, A, K]
+    help: Account changes are made by the User Manager, never directly in the Keycloak console (that is break-glass).
+  infra:
+    label: Host and cluster
+    enforced_by: host accounts, sudo, kubeconfig and the deploy lock (documented control, not compiled)
+    levels: [N, K, D]
+    help: Shown for completeness; host access is break-glass and is not compiled.
+  code:
+    label: Files in git
+    enforced_by: branch protection and change control (documented control, not compiled)
+    levels: [N, R, U, A]
+    help: Seed files and flows kept in git; the database row is the record.
+
+# ── Data classes ─────────────────────────────────────────────────────────────────────
+# A group has exactly one class (resource_groups.<g>.class). The class drives the invariants.
+classes:
+  regulated:
+    label: Regulated data
+    help: Records produced while making product (runs, telemetry, controller state, logs, lab results). Created once, never changed or deleted by anyone; corrections are new records.
+  history:
+    label: Audit history
+    help: Append-only trails of who did what, including approval records and export logs. Written by functions and triggers only; readable by reviewers.
+  personal:
+    label: Personal data
+    help: Accounts, names, e-mail addresses, zone assignments and access decisions. Administered by admin, confirmed by qa, readable by reviewers.
+  config:
+    label: Configuration
+    help: Master data, recipes, controllers, schedules, settings, dashboards and tools. Changed under the group's approval rule.
+
+# ── Hosts ────────────────────────────────────────────────────────────────────────────
+# Which services each signed-in host exposes. A host's allowed_groups is the set of roles
+# holding, on any group with a member served there, a level the member admits (any level
+# but N, unless the ui member says `admit:`). Names are config.env variables. `clients`
+# are the Keycloak clients whose tokens the host's services accept (azp check).
+hosts:
+  PORTAL_DOMAIN:    {label: Service portal,          client: portal,        serves: [portal]}
+  CONFIG_DOMAIN:    {label: Configuration UI,        client: config,        serves: [config-api, platform-api, scheduler]}
+  SCHEDULER_DOMAIN: {label: Scheduler,               client: scheduler,     serves: [scheduler]}
+  MONITOR_DOMAIN:   {label: Monitor,                 client: monitor,       serves: [monitor]}
+  DBMGMT_DOMAIN:    {label: Database Management,     client: dbmgmt,        serves: [dbmgmt]}
+  ACCESS_DOMAIN:    {label: User Manager,            client: access,        serves: [access]}
+  POLICY_DOMAIN:    {label: Access Policy,           client: policy,        serves: [iam]}
+  MQTTX_DOMAIN:     {label: MQTT Explorer,           client: mqtt-explorer, serves: [mqtt-explorer, iam-mqttx]}
+  NODE_RED_DOMAIN:  {label: Node-RED,                client: node-red,      serves: [node-red]}
+  GRAFANA_DOMAIN:   {label: Grafana,                 client: grafana,       serves: [grafana]}
+  WORKBENCH_DOMAIN: {label: AI Workbench,            client: workbench,     serves: [jupyterhub]}
+  ONBOARD_DOMAIN:   {label: Device onboarding,       client: edge-wizard,   serves: [edge-wizard, config-api]}
+  PGADMIN_DOMAIN:   {label: pgAdmin,                 client: pgadmin,       serves: [pgadmin]}
+
+# Upstreams mounted on every signed-in host. They never count towards a host's admission
+# (otherwise the profile, which every role may use, would open every host to every role),
+# and they accept tokens from every client in `hosts`.
+shared_upstreams:
+  - {service: access-profile, path: /_account/, why: the user menu and the person's own profile on every signed-in host}
+
+# Routes that need no platform role: health probes and the public access request. They
+# are listed so that "a route missing from the table is refused" has no silent exceptions.
+public_routes:
+  - {service: "*", route: "GET /healthz", why: liveness probe; reveals nothing}
+  - {service: access-public, route: "GET /register", why: redirect to the request-access tab of the login page}
+  - {service: access-public, route: "GET /api/register/roles", why: roles a person may request}
+  - {service: access-public, route: "POST /api/register", why: creates a disabled account and a pending request (CORS from the Keycloak origin only)}
+
+# Functions every authenticated path needs. Granted by rule, not by the matrix (plan
+# Appendix B, step 5); the catalog check I15 verifies exactly these grants.
+infrastructure_functions:
+  - {function: "medcea_auth.pre_request()", execute: [anon, authenticator], why: "PostgREST calls it as db-anon-role before switching. SECURITY INVOKER (SET ROLE is refused inside a definer function) and reads no table: apply.sh compiles the platform roles, their composites and the allowed clients into its body. It takes the person's own role from the verified groups claim, exactly one, else RAISE. The single exception to I9."}
+  - {function: "medcea_auth.set_actor(text, text, text, text)", execute: [svc_ingest, svc_scheduler, svc_monitor, svc_grafana, svc_dbexport, access_svc, iam_svc], why: "A service records the person (sub, person_id, name, role) whose token it verified, or a system actor it resolves from a schedule or run id."}
+  - {function: "medcea.stamp_actor()", execute: [], why: "Trigger function; runs as the table owner. Falls back to request.jwt.claims only for rr_ sessions."}
+  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [access_svc, iam_svc], why: "The only writer of the hash chain."}
+  - {function: "iam_policy.verify_chain()", execute: [], why: "Run by health-check.sh as postgres on the host."}
+
+# ── Roles ────────────────────────────────────────────────────────────────────────────
+roles:
+  # key = Keycloak realm role. One platform role per account (apps/access rule). Dual
+  # control compares persons (person_id token claim), never accounts. includes = Keycloak
+  # composite roles; each inherited cell keeps its own constraint. medcea_auth.pre_request()
+  # picks db_role from the verified groups claim — never from a user attribute.
+  operator:
+    label: Cultivation Operator
+    spec_role: R1
+    availability: prototype
+    db_role: rr_operator
+    includes: []
+    description: Runs the cultivation day to day in the zones assigned to them.
+    responsibilities:
+      - Execute and stop runs a production manager prepared for their zone
+      - Watch telemetry and run logs of their own zones in the Monitor
+      - Read recipes and schedules to know what is coming
+  production_manager:
+    label: Production Manager (Process Owner)
+    spec_role: R2
+    availability: prototype
+    db_role: rr_production_manager
+    includes: [operator]
+    description: Owns production planning; prepares and starts runs, assigns approved recipes and parameter sets to units.
+    responsibilities:
+      - Create runs and schedules, start and stop runs
+      - Assign approved recipes and approved parameter sets to units (never edit them)
+      - Everything an operator may do, in every zone
+  maintenance:
+    label: Maintenance and Calibration
+    spec_role: R3
+    availability: prototype
+    db_role: rr_maintenance
+    includes: []
+    description: Replaces and calibrates boards and sensors in existing slots.
+    responsibilities:
+      - Re-onboard a board into a slot that already exists (never create a new slot)
+      - Read telemetry, runs and device history to diagnose faults
+  qc:
+    label: Quality Control Analyst
+    spec_role: R4
+    availability: later
+    db_role: rr_qc
+    includes: []
+    description: Tests product and records lab results (lab results arrive with the L4 entities).
+    responsibilities:
+      - Read runs and telemetry of the batches under test
+  qa:
+    label: Quality Assurance
+    spec_role: R5
+    availability: prototype
+    db_role: rr_qa
+    includes: [auditor]
+    description: Independent approver of configuration, access decisions and policy changes.
+    responsibilities:
+      - Approve recipes, controllers, settings, master data and device changes made by someone else
+      - Confirm every account grant, role widening and zone assignment an administrator makes
+      - Approve every change to this policy
+      - Sign off the quarterly access review; review audit trails and export evidence
+  qp:
+    label: Qualified / Responsible Person
+    spec_role: R6
+    availability: later
+    db_role: rr_qp
+    includes: []
+    description: Releases the output of a completed run; creates and changes nothing.
+    responsibilities:
+      - Release completed runs they neither created nor executed
+      - Read and export the run record and its histories
+  engineer:
+    label: Automation Engineer
+    spec_role: R7
+    availability: prototype
+    db_role: rr_engineer
+    includes: []
+    description: Builds and maintains the automation — master data, devices, recipes, controllers, flows and dashboards — as drafts that qa approves.
+    responsibilities:
+      - Draft recipes, controllers, parameter sets and master data; onboard devices
+      - Maintain Node-RED flows and Grafana dashboards
+      - Commission units over MQTT while a unit is flagged for commissioning
+  bio_scientist:
+    label: Bio-process Scientist
+    spec_role: R8
+    availability: prototype
+    db_role: rr_bio_scientist
+    includes: []
+    description: Studies the biology; reads recipes and controllers and works in the research workbench.
+    responsibilities:
+      - Read recipes and controllers to understand production
+      - Analyse data in the AI workbench
+  control_scientist:
+    label: Control and AI Scientist
+    spec_role: R9
+    availability: prototype
+    db_role: rr_control_scientist
+    includes: []
+    description: Designs control algorithms; reads recipes and controllers and works in the research workbench.
+    responsibilities:
+      - Read controller definitions and parameter sets
+      - Develop and evaluate algorithms in the AI workbench
+  admin:
+    label: System Administrator
+    spec_role: R10
+    availability: prototype
+    db_role: rr_admin
+    includes: []
+    description: Keeps the platform running and administers accounts and this policy, without access to regulated or history content (MHRA GxP data integrity 6.16). In the prototype the same person operates the host, which is break-glass access (see break_glass).
+    responsibilities:
+      - Administer accounts and zone assignments (every grant confirmed by qa)
+      - Draft policy and settings changes (approved by qa) and run apply.sh on the host
+      - Administer the workbench hub; view the schema and configuration in pgAdmin
+  auditor:
+    label: Auditor / Inspector
+    spec_role: R11
+    availability: prototype
+    db_role: rr_auditor
+    includes: []
+    description: Reads and exports everything an inspection needs; changes nothing.
+    responsibilities:
+      - Read and export records, configuration and audit trails
+
+# ── Service identities ───────────────────────────────────────────────────────────────
+# Non-human identities. `ceiling` is the most each may hold; the compiler renders their
+# grants from it and the catalog invariants (I10, I15) check the database against it after
+# every apply. Approvals of records in medcea are made by people through PostgREST as
+# their own rr_ role, so no service holds A there. The exceptions are the account, zone and
+# policy approvals, which access-api and iam-api record for a person whose token they
+# verified: their approval functions refuse system actors, and apply.sh re-checks every
+# approver against Keycloak from the host before anything is applied.
+service_identities:
+  svc_ingest:
+    label: Node-RED ingest flow
+    description: Stores telemetry from the broker. Reads every topic; inserts measurement rows only.
+    db_role: svc_ingest
+    mqtt_user: node-red
+    ceiling: {master_data: [R], devices: [R], measurements: [R, C], mqtt_sense: [R], mqtt_control: [R]}
+  svc_scheduler:
+    label: scheduler-api.py and the runner it spawns
+    description: >
+      One identity: run_recipe.py and run_agent.py run as subprocesses inside the
+      scheduler pod with its environment, so they cannot hold a separate credential.
+      Splitting the runner into its own pod is listed in plan Section 7.
+    db_role: svc_scheduler
+    mqtt_user: scheduler
+    ceiling: {master_data: [R], zones: [R], recipes: [R], controllers: [R, C, U], controllers_state: [R, C, U], schedules: [R, C, U], scheduler_settings: [R, C, U], runs: [R, C, O], run_logs: [R], mqtt_sense: [R], mqtt_control: [R, C]}
+  svc_monitor:
+    label: monitor-api.py
+    description: Shows runs and telemetry, filtered to the person's zones for operators.
+    db_role: svc_monitor
+    ceiling: {master_data: [R], devices: [R], zones: [R], measurements: [R], runs: [R]}
+  svc_grafana:
+    label: Grafana datasource
+    description: Serves dashboards; reads telemetry and runs of every zone.
+    db_role: svc_grafana
+    ceiling: {master_data: [R], measurements: [R], runs: [R]}
+  svc_dbexport:
+    label: dbmgmt-api.py
+    description: Exports exactly the groups where the signed-in person holds X, and logs each export.
+    db_role: svc_dbexport
+    ceiling: {master_data: [R, X], devices: [R, X], device_history: [R, X], recipes: [R, X], controllers: [R, X], controllers_state: [R, X], runs: [R, X], schedules: [R, X], scheduler_settings: [R, X], measurements: [R, X], iam_users: [R, X], zones: [R, X], iam_policy: [R, X], audit_histories: [R, X, C]}
+  svc_mqtt_auth:
+    label: Mosquitto auth sidecar
+    description: Builds the broker's password and ACL files from board and person credentials.
+    db_role: mqtt_auth
+    ceiling: {master_data: [R], devices: [R], runs: [R], mqtt_explorer: [R]}
+  svc_access:
+    label: access-api.py (User Manager and profile)
+    description: Account requests, decisions, role and status changes, mail settings; revokes MQTT credentials of a deactivated account.
+    db_role: access_svc
+    ceiling: {iam_users: [R, C, U, A, K], zones: [R, A], mqtt_explorer: [R, U], audit_histories: [R, C]}
+  svc_iam:
+    label: iam-api.py (Policy UI and MQTT Explorer credentials)
+    description: Policy drafts, submissions and approvals; per-person MQTT Explorer credentials.
+    db_role: iam_svc
+    ceiling: {iam_policy: [R, C, U, A], zones: [R, C], iam_users: [R], mqtt_explorer: [R, C, U], audit_histories: [R, C]}
+
+# ── Resource groups ──────────────────────────────────────────────────────────────────
+# Every table in medcea, iam and iam_policy is a member of exactly one group (I14, I15).
+# Member forms:
+#   {type: data, object: medcea.table, service_only: true?}      tables and views; a service_only
+#                                                                member gets grants from service
+#                                                                ceilings only, never from a person's
+#                                                                cell (its writes go through functions)
+#   {type: data, object: x, written_by: functions}              people get SELECT for R/X, but their
+#                                                                C/U/A compile only to EXECUTE on the
+#                                                                group's function members, never to DML
+# An approval rule's function is granted (EXECUTE) to the holders of A on every group whose
+# rule names it, so one function can serve several groups.
+#   {type: data, function: "medcea.fn()", on: A}                   EXECUTE for holders of that level
+#   {type: api,  service: <name>, routes: {"METHOD /path": LEVEL}}
+#   {type: ui,   host: <hosts key>, admit: [levels]?}             admit defaults to every level but N
+#   {type: mqtt, topic: <pattern>}
+#   {type: idp | infra | code, object: <text>}
+# `reaches` lists what a tool lets its user touch beyond its own members (with the tool's
+# own credential); `mirrors` marks a tool that acts with the person's own cells only.
+resource_groups:
+  portal:
+    label: Service portal and profile
+    class: config
+    description: The landing page with the service cards, and the user menu with the person's own profile.
+    why_this_class: Navigation and self-service; holds no records of others.
+    risk: None beyond knowing which services exist. The profile acts on the signed-in person's own account only.
+    members:
+      - {type: ui, host: PORTAL_DOMAIN}
+      - {type: api, service: access-profile, routes: {"GET /_account/": R, "GET /_account/user-menu.js": R, "GET /_account/api/me": R, "POST /_account/api/me": R}}
+
+  master_data:
+    label: Master data (locations, units, zones, components)
+    class: config
+    description: The physical plant as the platform knows it — sites, cultivation units, zones and installed components.
+    why_this_class: Defines the plant; changes are configuration, reviewed by qa.
+    risk: A wrong unit or zone code misroutes telemetry and commands. Setting a unit's commissioning flag opens MQTT write to it, so that one change waits for qa.
+    approval:
+      record: medcea.approval (table, row id, row hash, approver)
+      function: medcea.approve_change()
+      effect: review
+      help: QA confirms each change after the fact; an unconfirmed change is listed on the QA queue but blocks nothing — except cea_unit.commissioning, which takes effect only after qa confirms it.
+    members:
+      - {type: data, object: medcea.cea_location}
+      - {type: data, object: medcea.cea_unit}
+      - {type: data, object: medcea.cea_zone}
+      - {type: data, object: medcea.component}
+      - {type: data, function: "medcea.approve_change(regclass, bigint, text)", on: A}
+      - type: api
+        service: platform-api
+        routes: {"GET /locations": R, "GET /locations/<file>": R, "PUT /locations/<file>": U, "GET /units": R, "GET /units/<file>": R, "PUT /units/<file>": U}
+      - {type: code, object: "apps/frontend/locations/*.json, apps/frontend/units/*.json (seed files served by platform-api)"}
+      - {type: api, service: scheduler, routes: {"GET /api/units": R}}
+
+  devices:
+    label: Devices and provisioning
+    class: config
+    description: The boards in each slot and their MQTT identity.
+    why_this_class: Configuration of the fleet; the credential hashes are readable by the broker only.
+    risk: A board in the wrong slot publishes another zone's telemetry; a stolen credential forges telemetry.
+    approval:
+      record: medcea.approval
+      function: medcea.approve_change()
+      effect: review
+      help: QA confirms each onboarding or move after the fact.
+    members:
+      - {type: data, object: medcea.device}
+      - {type: data, object: medcea.mqtt_credential, service_only: true}
+      - {type: data, function: "medcea.register_mqtt_credential(int, text, text)", on: C, note: "takes the device id, the board's serial and the hash; refuses unless the serial equals the device row's, and derives user, role and topic from the row"}
+      - type: api
+        service: platform-api
+        routes: {"GET /devices": R, "GET /devices/<file>": R, "PUT /devices/<file>": U, "GET /check/<host>": R, "GET /check/<host>/<port>": R}
+      - {type: code, object: "apps/frontend/devices/*.json (seed files served by platform-api)"}
+
+  onboarding:
+    label: Device onboarding (edge wizard)
+    class: config
+    description: The browser wizard that flashes a board over USB and registers it in a slot.
+    why_this_class: A tool for devices; the records it writes belong to devices.
+    risk: Flashing erases a board before anything is registered, so the page is offered only to people who may register boards.
+    members:
+      - {type: ui, host: ONBOARD_DOMAIN, admit: [C, U]}
+
+  device_history:
+    label: Device placement history
+    class: history
+    description: Every placement, move, rename and removal of a board, written by trigger.
+    why_this_class: Audit trail of the fleet.
+    risk: None if append-only; losing it loses provenance of telemetry.
+    members:
+      - {type: data, object: medcea.device_slot_history}
+
+  recipes:
+    label: Recipes and recipe-to-unit assignment
+    class: config
+    description: Growth recipes, their lines, and which approved recipe may run on which unit with which approved parameter set.
+    why_this_class: Process definition; approved before use.
+    risk: An unapproved or altered recipe changes product conditions.
+    approval:
+      record: medcea.recipe.status (draft → approved → in_use → retired)
+      function: medcea.approve_recipe()
+      effect: blocking
+      help: The scheduler refuses to assign or run a recipe that is not approved; an approved recipe cannot be edited.
+    members:
+      - {type: data, object: medcea.recipe}
+      - {type: data, object: medcea.recipe_line}
+      - {type: data, object: medcea.recipe_unit_permission}
+      - {type: data, function: "medcea.approve_recipe(int)", on: A}
+      - {type: api, service: scheduler, routes: {"GET /api/recipes": R}}
+      - {type: api, service: platform-api, routes: {"GET /": R, "GET /<file>": R, "PUT /<file>": U}}
+      - {type: code, object: apps/frontend/recipes/*.json}
+
+  controllers:
+    label: Controllers and parameter sets
+    class: config
+    description: The control-algorithm catalogue and the approved parameter sets that recipe assignments and schedules point to.
+    why_this_class: Process definition; approved before use.
+    risk: A changed parameter changes how the chamber is driven.
+    approval:
+      record: medcea.control_algorithm.status, medcea.unit_algorithm_params.status
+      function: medcea.approve_algorithm(), medcea.approve_params()
+      effect: blocking
+      help: A run uses only approved algorithms and approved parameter sets; schedules and assignments reference a parameter set, never inline parameters.
+    members:
+      - {type: data, object: medcea.control_algorithm}
+      - {type: data, object: medcea.unit_algorithm_params, note: "replaces recipe_unit_permission.algorithm_params and schedule.algorithm_params (migration 008)"}
+      - {type: data, function: "medcea.approve_algorithm(int)", on: A}
+      - {type: data, function: "medcea.approve_params(int)", on: A}
+      - {type: api, service: scheduler, routes: {"GET /api/algorithms": R, "PUT /api/algorithms/<id>": U}}
+      - {type: code, object: schd/cea/algorithms/*}
+
+  controllers_state:
+    label: Persisted controller state (Q-tables)
+    class: regulated
+    description: What a learning controller learnt during production, kept between runs.
+    why_this_class: Produced during a batch; it shapes how the next batch is driven.
+    risk: Editing or deleting it silently changes process behaviour.
+    approval:
+      record: medcea.algorithm_state_event ('retired', append-only)
+      function: medcea.retire_algorithm_state()
+      effect: blocking
+      help: Retiring state is an approved, recorded event; the next run starts cold. Nothing is deleted.
+    members:
+      - {type: data, object: medcea.algorithm_state}
+      - {type: data, object: medcea.algorithm_state_event}
+      - {type: data, function: "medcea.retire_algorithm_state(int, text)", on: A}
+      - {type: api, service: scheduler, routes: {"GET /api/units/<id>/algorithm-state/<algorithm>": R}}
+
+  runs:
+    label: Recipe runs and cycle runs
+    class: regulated
+    description: Every execution of a recipe on a unit, each of its cycles, and its release.
+    why_this_class: The production record.
+    risk: A forged or edited run breaks the batch record.
+    approval:
+      record: medcea.run_release
+      function: medcea.release_run()
+      effect: blocking
+      help: Release of a completed run by a person who neither created nor executed it.
+    members:
+      - {type: data, object: medcea.recipe_run}
+      - {type: data, object: medcea.recipe_line_cycle_run}
+      - {type: data, object: medcea.run_release}
+      - {type: data, object: medcea.run_history, note: "view, security_invoker"}
+      - {type: data, object: medcea.run_watch, note: "view, security_invoker"}
+      - {type: data, function: "medcea.start_run(int)", on: O}
+      - {type: data, function: "medcea.set_run_status(int, text)", on: O}
+      - {type: data, function: "medcea.finish_run(int, text)", on: C, service_only: true}
+      - {type: data, function: "medcea.record_cycle(int, jsonb)", on: C, service_only: true}
+      - {type: data, function: "medcea.release_run(int)", on: A}
+      - type: api
+        service: scheduler
+        routes:
+          "GET /api/runs": R
+          "GET /api/runs/active": R
+          "GET /api/runs/<id>": R
+          "GET /api/runs/<id>/cycles": R
+          "POST /api/runs": C
+          "POST /api/runs/<id>/execute": O
+          "POST /api/runs/<id>/stop": O
+          "PATCH /api/runs/<id>/status": O
+          "POST /api/schedules/<id>/trigger": O
+      - {type: api, service: monitor, routes: {"GET /api/runs": R, "GET /api/run/<id>": R}}
+
+  schedules:
+    label: Schedules
+    class: config
+    description: When runs are created and started automatically, with which approved parameter set.
+    why_this_class: Planning configuration.
+    risk: A wrong schedule starts a run at the wrong time.
+    members:
+      - {type: data, object: medcea.schedule}
+      - type: api
+        service: scheduler
+        routes:
+          "GET /api/schedules": R
+          "POST /api/schedules": C
+          "PUT /api/schedules/<id>": U
+          "DELETE /api/schedules/<id>": U
+      - {type: ui, host: SCHEDULER_DOMAIN}
+
+  scheduler_settings:
+    label: Scheduler settings (log retention)
+    class: config
+    description: How long run logs are kept and when they are compressed.
+    why_this_class: Configuration of how regulated logs are retained.
+    risk: A shorter retention destroys run logs. The minimum retention is a database CHECK, and every change waits for qa.
+    approval:
+      record: medcea.approval
+      function: medcea.approve_change()
+      effect: blocking
+      help: A new retention setting applies only after a qa person other than its author confirms it.
+    members:
+      - {type: data, object: medcea.scheduler_config, written_by: functions}
+      - {type: data, function: "medcea.propose_setting(text, jsonb)", on: U, note: "a pending setting; it applies after approve_change()"}
+      - {type: api, service: scheduler, routes: {"GET /api/config/logs": R, "PUT /api/config/logs": U}}
+
+  measurements:
+    label: Telemetry
+    class: regulated
+    description: Every sensor reading, setpoint and control action stored by the ingest flow, stamped at insert with the zone of the board that sent it.
+    why_this_class: The primary production record.
+    risk: Edited telemetry falsifies the batch record.
+    members:
+      - {type: data, object: medcea.measurement}
+      - {type: data, object: medcea.backup_remote_to_insert_measurement, service_only: true}
+      - {type: data, object: medcea.msg_actual_points, note: "view, security_invoker"}
+      - {type: data, object: medcea.msg_set_points, note: "view, security_invoker"}
+      - {type: data, object: medcea.msg_controls, note: "view, security_invoker"}
+      - {type: data, object: medcea.v_ap_measurements, note: "view, security_invoker"}
+      - {type: data, object: medcea.v_sp_measurements, note: "view, security_invoker"}
+      - {type: data, object: medcea.v_ct_measurements, note: "view, security_invoker"}
+      - {type: api, service: monitor, routes: {"GET /api/measurements/<unit>": R, "GET /api/actions/<unit>": R}}
+      - {type: ui, host: MONITOR_DOMAIN}
+
+  run_logs:
+    label: Run logs
+    class: regulated
+    description: The runner's log file per run, kept and compressed by the scheduler according to scheduler_settings.
+    why_this_class: Part of the run record.
+    risk: A deleted log loses evidence of what the controller did. No person can delete or compress logs; the scheduler does it as a system job.
+    members:
+      - {type: api, service: scheduler, routes: {"GET /api/runs/<id>/log": R}}
+
+  dashboards:
+    label: Grafana dashboards
+    class: config
+    description: Production dashboards over telemetry and runs.
+    why_this_class: Presentation configuration.
+    risk: Dashboards read regulated data through Grafana's own database account, so a dashboard viewer reads telemetry of every zone.
+    reaches: {measurements: [R], runs: [R]}
+    members:
+      - {type: ui, host: GRAFANA_DOMAIN}
+      - {type: code, object: apps/report/dashboards/*.json}
+
+  flows:
+    label: Node-RED flows
+    class: config
+    description: The ingest flow and any other Node-RED flow, edited in the Node-RED editor.
+    why_this_class: Integration configuration.
+    risk: The editor runs code with the ingest account, so an editor reads all topics and can write telemetry rows.
+    reaches: {mqtt_sense: [R], mqtt_control: [R], measurements: [R, C]}
+    members:
+      - {type: ui, host: NODE_RED_DOMAIN}
+      - {type: code, object: apps/node-red/flows/*.json}
+
+  mqtt_sense:
+    label: Telemetry topics
+    class: regulated
+    description: "<root>/<unit>/<zone>/sense/# — what the boards publish."
+    why_this_class: Live production data in transit.
+    risk: Reading reveals production data; publishing forges it.
+    members:
+      - {type: mqtt, topic: "medcea/+/+/sense/#"}
+
+  mqtt_control:
+    label: Command and setpoint topics
+    class: regulated
+    description: "<root>/<unit>/<zone>/control/# and control_setpoint/# — commands to equipment and what it reports back."
+    why_this_class: Drives the equipment during production.
+    risk: Publishing switches relays in a live chamber.
+    members:
+      - {type: mqtt, topic: "medcea/+/+/control/#"}
+      - {type: mqtt, topic: "medcea/+/+/control_setpoint/#"}
+
+  mqtt_explorer:
+    label: MQTT Explorer
+    class: config
+    description: The browser MQTT tool and the per-person credentials it connects with.
+    why_this_class: A tool; the data it shows belongs to the topic groups.
+    risk: None beyond the person's own topic rights. The credential mirrors the person's mqtt_sense and mqtt_control cells, is rebuilt on every broker sync, and dies at once when the account is deactivated, the role changes or the unit leaves commissioning.
+    mirrors: [mqtt_sense, mqtt_control]
+    members:
+      - {type: ui, host: MQTTX_DOMAIN}
+      - {type: api, service: iam-mqttx, routes: {"POST /_mqtt-credential": R}}
+      - {type: data, object: medcea.mqtt_service_credential, service_only: true}
+      - {type: data, object: medcea.mqtt_service_acl, service_only: true}
+
+  db_export:
+    label: Database Management export
+    class: config
+    description: Lists database objects and exports their definition and data.
+    why_this_class: A tool; the data it exports belongs to the groups it covers.
+    risk: An export takes a copy out of the platform. It covers exactly the groups where the person holds X, and every export is logged.
+    mirrors: [master_data, devices, device_history, recipes, controllers, controllers_state, runs, schedules, scheduler_settings, measurements, iam_users, zones, iam_policy, audit_histories]
+    members:
+      - {type: api, service: dbmgmt, routes: {"GET /objects": X, "POST /export": X}}
+      - {type: ui, host: DBMGMT_DOMAIN}
+
+  iam_users:
+    label: Accounts, roles and access requests
+    class: personal
+    description: Keycloak accounts, their platform role and person, access requests and decisions, and the User Manager's mail settings.
+    why_this_class: Personal data and the keys to the platform.
+    risk: A wrong role or zone grants access to regulated data; a missed deactivation leaves a leaver inside.
+    approval:
+      record: iam.account_decision (pending_qa → confirmed)
+      function: iam.confirm_decision()
+      effect: blocking
+      help: >
+        A grant, a role change that adds any (group, level) pair the old role did not
+        have, a new zone assignment or a person_id change takes effect only when a qa
+        person confirms it who is neither the administrator who made it nor its subject.
+        Deactivation, a pure narrowing and the removal of a zone act at once and are
+        reviewed afterwards.
+    members:
+      - {type: idp, object: "keycloak realm users, realm-role mappings and the person_id attribute"}
+      - {type: data, object: iam.access_request}
+      - {type: data, object: iam.account_decision}
+      - {type: data, object: iam.mail_settings, service_only: true}
+      - {type: data, object: iam.mail_template, note: "reset to default is an UPDATE to the default text, not a DELETE"}
+      - {type: data, function: "iam.confirm_decision(int, text)", on: A}
+      - type: api
+        service: access
+        routes:
+          "GET /": [R, K]
+          "GET /api/me": [R, K]
+          "GET /api/decisions": [R, K]
+          "GET /api/users": K
+          "GET /api/requests": K
+          "POST /api/requests/<id>/decision": K
+          "POST /api/users/<id>/status": K
+          "POST /api/users/<id>/role": K
+          "POST /api/users/<id>/person": K
+          "GET /api/settings": K
+          "POST /api/settings": K
+          "POST /api/settings/test": K
+          "GET /api/templates": K
+          "POST /api/templates/<name>": K
+          "POST /api/templates/<name>/reset": K
+          "POST /api/decisions/<id>/confirm": A
+      - {type: ui, host: ACCESS_DOMAIN}
+
+  zones:
+    label: Zone assignments
+    class: personal
+    description: Which zones each person works in; the own_zone constraint reads it.
+    why_this_class: A per-person access attribute.
+    risk: A new zone gives an operator telemetry and run execution in that zone, so assignments wait for qa; removals act at once.
+    approval:
+      record: iam.account_decision (pending_qa → confirmed)
+      function: iam.confirm_decision()
+      effect: blocking
+      help: A new zone assignment takes effect when a qa person who is neither the maker nor the subject confirms it.
+    members:
+      - {type: data, object: iam_policy.user_zone, written_by: functions}
+      - {type: data, function: "iam_policy.propose_zone(uuid, int, text)", on: C, service_only: true, note: "called by iam-api for an admin holding K; records a pending decision; removal is immediate"}
+      - {type: api, service: iam, routes: {"GET /api/zones": [R, K], "PUT /api/zones": K}}
+
+  iam_policy:
+    label: Access policy
+    class: config
+    description: This policy and its versions.
+    why_this_class: Configuration of access; every change needs qa approval.
+    risk: A policy change can open any group to any role.
+    approval:
+      record: iam_policy.version.status (draft → submitted → approved → applied)
+      function: iam_policy.approve()
+      effect: blocking
+      help: apply.sh applies only an approved version; the approver is a different person from the submitter, and the version must not widen the approver's own role.
+    members:
+      - {type: data, object: iam_policy.version, written_by: functions}
+      - {type: data, object: iam_policy.entry, written_by: functions}
+      - {type: data, object: iam_policy.waiver, written_by: functions}
+      - {type: data, function: "iam_policy.new_draft(int, text)", on: C}
+      - {type: data, function: "iam_policy.save_entry(int, text, text, text[], text, text[], text)", on: U}
+      - {type: data, function: "iam_policy.submit(int, text)", on: U}
+      - {type: data, function: "iam_policy.approve(int, text)", on: A}
+      - {type: data, object: iam_policy.role, service_only: true}
+      - {type: data, object: iam_policy.resource_group, service_only: true}
+      - {type: data, object: iam_policy.member, service_only: true}
+      - {type: data, object: iam_policy.effective_route, service_only: true}
+      - type: api
+        service: iam
+        routes:
+          "GET /api/policy/<v>": R
+          "GET /api/policy/<v>/explain": R
+          "GET /api/policy/<v>/diff": R
+          "GET /api/policy/who-can": R
+          "POST /api/policy/draft": C
+          "PUT /api/policy/<v>/entry": U
+          "POST /api/policy/<v>/submit": U
+          "POST /api/policy/<v>/approve": A
+      - {type: ui, host: POLICY_DOMAIN}
+
+  audit_histories:
+    label: Audit histories and approval records
+    class: history
+    description: Append-only trails — access requests, account status and role changes, mail configuration, policy changes, approvals, exports and access reviews.
+    why_this_class: The audit trail.
+    risk: None if append-only; losing it loses attributability.
+    members:
+      - {type: data, object: iam.access_request_history, written_by: functions}
+      - {type: data, object: iam.user_status_history, written_by: functions}
+      - {type: data, object: iam.config_history, written_by: functions}
+      - {type: data, object: iam.access_review, written_by: functions}
+      - {type: data, object: iam_policy.history, written_by: functions}
+      - {type: data, object: iam_policy.export_log, written_by: functions}
+      - {type: data, object: medcea.approval, written_by: functions}
+      - {type: data, function: "iam.sign_off_review(int, text)", on: C}
+      - type: api
+        service: access
+        routes:
+          "GET /api/users/<id>/history": R
+          "GET /api/requests/<id>/history": R
+          "GET /api/config-history": R
+          "GET /api/review": R
+          "POST /api/review/<id>/sign-off": C
+      - {type: api, service: iam, routes: {"GET /api/policy/history": R}}
+
+  research_workbench:
+    label: AI Workbench (JupyterHub)
+    class: config
+    description: Notebooks for analysis and algorithm development.
+    why_this_class: Research environment, outside the production record.
+    risk: Notebooks run code; their pods are isolated by NetworkPolicy, so the workbench reaches no platform service or database.
+    members:
+      - {type: ui, host: WORKBENCH_DOMAIN}
+
+  platform_admin:
+    label: Platform administration
+    class: config
+    description: The schema and configuration, viewed in pgAdmin with the administrator's own database role; the host-side deploy scripts.
+    why_this_class: Infrastructure configuration.
+    risk: pgAdmin connects as rr_admin_login (a member of rr_admin), which owns nothing and reads only what the admin column grants; schema changes happen only as migrations run by the locked deploy scripts.
+    members:
+      - {type: ui, host: PGADMIN_DOMAIN}
+      - {type: data, object: medcea.platform_setting, service_only: true, note: "the MQTT topic root (PROJECT_NAME), written by apps/database/deploy.sh"}
+      - {type: infra, object: "microk8s, helm, config.env, .ca/, deploy scripts under medcea_lock (break-glass)"}
+
+# Identities that sit outside the matrix on purpose. In the prototype the admin person also
+# operates the host, so their host access reaches every one of these: that is stated here,
+# not hidden, and every use is logged. Separating the host operator from the admin role is
+# plan Section 7.
+break_glass:
+  - {identity: "postgres (superuser)", used_by: "deploy scripts and apply.sh on the host", logged_by: "ALTER ROLE postgres IN DATABASE medcea_db SET log_statement = 'all' (Keycloak's own database is not affected); logs/ of every locked script"}
+  - {identity: "Keycloak master-realm admin", used_by: "deploy-infra.sh and recovery", logged_by: "Keycloak admin events, enabled by deploy-infra.sh; role mappings not made through the User Manager are flagged by health-check.sh"}
+  - {identity: "Grafana local admin", used_by: "recovery only", logged_by: "Grafana server log"}
+  - {identity: "pgAdmin internal admin (PGADMIN_DEFAULT_EMAIL)", used_by: "recovery when Keycloak is down (internal authentication switched on by hand)", logged_by: "pgAdmin log"}
+  - {identity: "host sudo / kubeconfig", used_by: "deploy scripts", logged_by: "logs/ of every locked script"}
+
+# ── Default matrix ───────────────────────────────────────────────────────────────────
+# Cells are written closed under `implies` (I16), so a reader sees every level held.
+# qa also holds everything auditor holds (composite); its own cells list what it adds.
+matrix:
+  portal:
+    operator: [R]
+    production_manager: [R]
+    maintenance: [R]
+    qc: [R]
+    qa: [R]
+    qp: [R]
+    engineer: [R]
+    bio_scientist: [R]
+    control_scientist: [R]
+    admin: [R]
+    auditor: [R]
+  master_data:
+    operator: [R]
+    production_manager: [R]
+    maintenance: [R]
+    qc: [R]
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    qp: [R]
+    engineer: [R, C, U]
+    bio_scientist: [R]
+    control_scientist: [R]
+    admin: [R]
+    auditor: [R, X]
+  devices:
+    operator: [R]
+    production_manager: [R]
+    maintenance: {levels: [R, C, U], constraint: existing_slot, applies_to: [C, U]}
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    engineer: [R, C, U]
+    admin: [R]
+    auditor: [R, X]
+  onboarding:
+    maintenance: {levels: [R, C, U], constraint: existing_slot, applies_to: [C, U]}
+    engineer: [R, C, U]
+  device_history:
+    maintenance: [R]
+    engineer: [R]
+    auditor: [R, X]
+  recipes:
+    operator: [R]
+    production_manager: {levels: [R, C, U], constraint: assign_only, applies_to: [C, U]}
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    engineer: {levels: [R, C, U], constraint: draft_only, applies_to: [U]}
+    bio_scientist: [R]
+    control_scientist: [R]
+    auditor: [R, X]
+  controllers:
+    production_manager: [R]
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    engineer: {levels: [R, C, U], constraint: draft_only, applies_to: [U]}
+    bio_scientist: [R]
+    control_scientist: [R]
+    auditor: [R, X]
+  controllers_state:
+    production_manager: [R]
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    engineer: [R]
+    auditor: [R, X]
+  runs:
+    operator: {levels: [R, O], constraint: assigned_run, applies_to: [O]}
+    production_manager: [R, C, O]
+    maintenance: [R]
+    qc: [R]
+    qp: {levels: [R, X, A], constraint: not_own_author, applies_to: [A]}
+    engineer: [R]
+    auditor: [R, X]
+  schedules:
+    operator: [R]
+    production_manager: [R, C, U]
+    engineer: [R]
+    auditor: [R, X]
+  scheduler_settings:
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    engineer: [R]
+    admin: [R, C, U]
+    auditor: [R, X]
+  measurements:
+    operator: {levels: [R], constraint: own_zone}
+    production_manager: [R]
+    maintenance: [R]
+    qc: [R]
+    qp: [R, X]
+    engineer: [R]
+    auditor: [R, X]
+  run_logs:
+    operator: {levels: [R], constraint: own_zone}
+    production_manager: [R]
+    engineer: [R]
+    auditor: [R, X]
+  dashboards:
+    production_manager: [R]
+    maintenance: [R]
+    qc: [R]
+    qa: [R]
+    qp: [R]
+    engineer: [R, C, U]
+    auditor: [R]
+  flows:
+    engineer: [R, C, U]
+  mqtt_sense:
+    engineer: [R]
+  mqtt_control:
+    engineer: {levels: [R, C], constraint: commissioning_unit, applies_to: [C]}
+  mqtt_explorer:
+    engineer: [R]
+  db_export:
+    qp: [R, X]
+    auditor: [R, X]
+  iam_users:
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    admin: {levels: [K], constraint: qa_dual_control}
+    auditor: [R, X]
+  zones:
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    admin: {levels: [K], constraint: qa_dual_control}
+    auditor: [R, X]
+  iam_policy:
+    qa: {levels: [R, A], constraint: not_own_author, applies_to: [A]}
+    admin: [R, C, U]
+    auditor: [R, X]
+  audit_histories:
+    qa: [R, C]
+    qp: [R, X]
+    auditor: [R, X]
+  research_workbench:
+    qa: [R]
+    engineer: [R]
+    bio_scientist: [R, C, U]
+    control_scientist: [R, C, U]
+    admin: [K]
+  platform_admin:
+    admin: [K, D]
+
+# ── Constraints ──────────────────────────────────────────────────────────────────────
+# Named attribute rules that narrow the levels a cell lists in applies_to. Evaluated per
+# cell: a person passes if ANY of their effective roles holds the level without a
+# constraint, or with a constraint that holds.
+constraints:
+  own_zone:
+    summary: Only the zones assigned to the person.
+    effect: Telemetry and run logs are limited to the zones in iam_policy.user_zone. Each measurement row carries the zone of the board that sent it, stamped at insert, so a board moved later does not move its history.
+    enforced_by: ["RLS policy TO rr_operator on medcea.measurement.zone_id (other roles have explicit permissive policies)", "monitor and scheduler log route filter by zone"]
+    help: Zone assignments are personal-data changes made in the User Manager or the Zones tab and confirmed by qa. A person with no assigned zone sees no telemetry.
+  assigned_run:
+    summary: Execute only a run someone else prepared for your zone.
+    effect: An operator may execute or stop a run only when another person created it while holding production_manager (or a schedule such a person created triggered it), and its unit is in the operator's zone.
+    enforced_by: ["medcea.start_run() and set_run_status() compare created_by_person and created_by_role", "scheduler route check"]
+    help: Separates preparing a run from starting it.
+  assign_only:
+    summary: Assign approved recipes and parameter sets to units; never edit them.
+    effect: INSERT/UPDATE on recipe_unit_permission only, pointing at approved recipes and approved parameter sets; nothing on recipe, recipe_line or unit_algorithm_params.
+    enforced_by: ["table-level GRANT", "foreign key + trigger: the referenced recipe and parameter set must be approved"]
+    help: Lets the production manager plan with approved definitions without being able to change them.
+  draft_only:
+    summary: Edit drafts only.
+    effect: UPDATE is refused by trigger on any recipe, recipe line, algorithm or parameter set whose status is not draft.
+    enforced_by: ["trigger medcea.reject_non_draft_update() on recipe, recipe_line, control_algorithm, unit_algorithm_params"]
+    help: Once qa approves it, a definition is frozen; a change starts a new draft.
+  existing_slot:
+    summary: Re-onboard into an existing slot only.
+    effect: A board may be registered only into a slot that already has an inactive or replaced device; creating a new slot is refused.
+    enforced_by: ["BEFORE INSERT/UPDATE trigger on medcea.device keyed on the caller's role", "the onboarding host admits only C and U holders"]
+    help: Replacing a broken board is maintenance; adding a new slot is engineering.
+  commissioning_unit:
+    summary: Command only a unit flagged for commissioning.
+    effect: The engineer's MQTT Explorer credential gets write rows only for units with commissioning = true and no active run. The sidecar re-derives the rows on every sync, and start_run() refuses a unit that is still flagged.
+    enforced_by: ["iam-api credential issue", "mqtt-auth-sync re-derives ACL rows each sync", "medcea.start_run()"]
+    help: Prevents commanding a chamber that is in production.
+  not_own_author:
+    summary: Approve only another person's work.
+    effect: The approval function refuses when the approver's person_id equals the author's, the submitter's, the creator's, the executor's or (for account decisions) the subject's, or when the approver's own role is widened by the change.
+    enforced_by: ["approval functions compare person_id stored on the record with the person_id claim of the approver's verified token"]
+    help: Compares persons, not accounts. person_id is a token claim that only a qa-confirmed decision can set or change.
+  qa_dual_control:
+    summary: Account grants wait for qa.
+    effect: >
+      A grant, any role change that adds a (group, level) pair the old role did not hold,
+      a new zone assignment or a person_id change stays pending_qa until a qa person who
+      is neither the maker nor the subject confirms it. Deactivation, pure narrowing and
+      zone removal act at once and are reviewed by qa afterwards.
+    enforced_by: ["access-api and iam-api write iam.account_decision", "the Keycloak change is made only on confirmation", "widening computed by the compiler from the effective matrix"]
+    help: Two people for every grant; no delay for removing access.
+
+# ── Waivers ──────────────────────────────────────────────────────────────────────────
+# Accepted deviations, shown amber in the UI with their rationale and compensating
+# controls. Only I10 and I11 can be waived (a CHECK on iam_policy.waiver.invariant and a
+# compiler rule); a waiver names exactly one subject, group and set of levels, carries a
+# review date, and is approved with the version like any change.
+waivers:
+  - {id: W1, invariant: I11, subject: engineer, group: flows, target: measurements, levels: [C], review_by: "2027-10-27",
+     rationale: "The Node-RED editor runs code with the ingest account, which must insert telemetry. Node-RED has no narrower mechanism.",
+     controls: "Flows are deployed from git (apps/node-red/flows); health-check.sh diffs the editor's flows against git; measurement rows carry the ingest identity."}
+  - {id: W2, invariant: I10, subject: svc_scheduler, group: controllers_state, target: controllers_state, levels: [U], review_by: "2027-10-27",
+     rationale: "A learning controller updates its Q-table during a run; that update is the record of what it learnt.",
+     controls: "Every update appends a medcea.algorithm_state_event row with the run id; retirement is an approved event, never a delete."}
+
+# ── Invariants ───────────────────────────────────────────────────────────────────────
+# kind: matrix   — on every save of a draft, on the effective matrix (composites, implies and
+#                  reaches expanded; a mirroring tool acts with the person's own cells, so it
+#                  adds nothing); one Python checker, called by iam-api and by apply.sh
+#       workflow — by the approval functions in the database and again by apply.sh
+#       catalog  — inside apply.sh's database transaction, before anything else changes
+waivable: [I10, I11]
+invariants:
+  - {code: I1, kind: matrix, rule: "No role holds U or D on a group of class regulated or history.", rationale: "Regulated records and audit trails are created once and never changed or deleted.", cites: "EU GMP Annex 11 §9; 21 CFR 11.10(e)"}
+  - {code: I2, kind: matrix, rule: "admin holds nothing but K on groups of class regulated, history or personal, including what it reaches through tools.", rationale: "Administrators keep the system running and have no interest in the data.", cites: "MHRA GxP data integrity §6.16"}
+  - {code: I3, kind: matrix, rule: "auditor holds only R or X.", rationale: "An inspector changes nothing.", cites: "Annex 11 §12"}
+  - {code: I4, kind: matrix, rule: "On a group with an approval rule, no role holds both (C or U or O) and A.", rationale: "Whoever produces or executes cannot approve.", cites: "PIC/S PI 041-1 §9.3"}
+  - {code: I5, kind: matrix, rule: "bio_scientist and control_scientist hold N on runs, schedules, measurements, mqtt_sense, mqtt_control and controllers_state, including through tools.", rationale: "Research stays outside the production record until the research sandbox exists.", cites: "MedCEA concept, research/production separation"}
+  - {code: I6, kind: matrix, rule: "operator and production_manager hold N on research_workbench; engineer holds at most R there.", rationale: "Production roles do not run unvalidated code.", cites: "Annex 11 §4"}
+  - {code: I7, kind: matrix, rule: "qp holds no C, U or O anywhere, and holds A on runs.", rationale: "The QP releases and does nothing else.", cites: "EU GMP Annex 16"}
+  - {code: I11, kind: matrix, rule: "A tool cannot widen a role's access: for each group a tool reaches, the role must hold the reached levels on that group directly and without a constraint, unless waiver covers it. A mirroring tool acts with the person's own cells and cannot widen by construction.", rationale: "Access through Grafana, Node-RED or an export is still access to the data.", cites: "Annex 11 §12"}
+  - {code: I12, kind: matrix, rule: "At least one role other than admin holds A on iam_policy and on iam_users; admin never holds A on either.", rationale: "The policy cannot be changed so that nobody independent can approve it.", cites: "Annex 11 §12"}
+  - {code: I13, kind: matrix, rule: "Only admin holds K or D; D only on platform_admin.", rationale: "Administration and removal stay with one accountable role.", cites: "MHRA §6.16"}
+  - {code: I14, kind: matrix, rule: "Every level in a cell applies to at least one member of its group; every A sits on a group with an approval rule; every constraint names levels the cell holds; every member and route belongs to one group only; waivers name only waivable invariants.", rationale: "A cell that compiles to nothing, or an escape hatch on a core rule, misleads the reader.", cites: "—"}
+  - {code: I16, kind: matrix, rule: "Cells are closed under implies (U lists C and R).", rationale: "What the reader sees is what the compiler grants.", cites: "—"}
+  - {code: I8, kind: workflow, rule: "A policy version is applied only after approval by a person holding A on iam_policy in the applied version who is not the submitter and whose own role the version does not widen.", rationale: "Every access change has two people behind it.", cites: "Annex 11 §12; PIC/S PI 041-1 §9.3"}
+  - {code: I17, kind: workflow, rule: "No person holds an admin account and a qa account at the same time.", rationale: "The administrator and the independent approver are different people.", cites: "PIC/S PI 041-1 §9.3"}
+  - {code: I9, kind: catalog, rule: "anon and PUBLIC hold no privilege on any object in schemas medcea, iam and iam_policy, and anon holds only USAGE on schema medcea_auth and EXECUTE on medcea_auth.pre_request().", rationale: "Nothing is reachable without a verified identity.", cites: "21 CFR 11.10(d)"}
+  - {code: I10, kind: catalog, rule: "Every service role's grants are within its ceiling; no service holds A except svc_access on iam_users and zones and svc_iam on iam_policy (whose approval functions refuse system actors); no service holds U or D on a regulated or history table unless a waiver covers it.", rationale: "A compromised service cannot rewrite the record or approve on its own.", cites: "21 CFR 11.10(e)"}
+  - {code: I15, kind: catalog, rule: "The privileges in pg_catalog equal what the version compiles to (matrix, ceilings, infrastructure_functions), and every table in medcea, iam and iam_policy is a member of a group.", rationale: "Detects grants made outside the policy and tables nobody classified.", cites: "Annex 11 §12"}

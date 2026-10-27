@@ -16,3 +16,6 @@ __pycache__/
 
 # Platform CA — private key must never be committed
 .ca/
+
+# Local planning notes
+codeplan/
