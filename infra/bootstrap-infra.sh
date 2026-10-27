@@ -10,6 +10,7 @@ else
 fi
 set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-infra.sh
 source "$REPO_ROOT/config.env"
 
 # Colors

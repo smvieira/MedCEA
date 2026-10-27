@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
 [[ -f "$REPO_ROOT/config.env" ]] || { echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2; exit 1; }
 source "$REPO_ROOT/config.env"
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
@@ -29,7 +30,7 @@ if [[ -z "$NR_POD" ]]; then
 fi
 
 # Port-forward bypasses the oauth2-proxy ingress, as in deploy.sh.
-$KUBECTL port-forward -n "$NAMESPACE" "pod/$NR_POD" "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log &
+$KUBECTL port-forward -n "$NAMESPACE" "pod/$NR_POD" "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log 9>&- &
 PF_PID=$!
 trap 'kill "$PF_PID" 2>/dev/null || true; rm -f /tmp/nr-current-flows.json /tmp/nr-pruned-flows.json' EXIT
 

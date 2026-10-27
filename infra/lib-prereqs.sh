@@ -26,6 +26,7 @@ _PREREQS=(
     "python3 -c 'import ensurepip' 2>/dev/null|python3-venv|edge/flash-device.sh (builds its esptool/mpremote venv)"
     "command -v envsubst|gettext-base|filling the manifest templates in k8s/ (infra/lib-render.sh)"
     "command -v ip|iproute2|LAN IP detection"
+    "command -v flock|util-linux|one deploy at a time (infra/lib-lock.sh)"
     "command -v snap|snapd|installing MicroK8s"
 )
 

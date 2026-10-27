@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
 
 # ---------------------------------------------------------------------------
 # Config
@@ -71,7 +72,7 @@ echo "    Pod: $NR_POD"
 $KUBECTL port-forward \
     -n "$NAMESPACE" \
     "pod/$NR_POD" \
-    "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log &
+    "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log 9>&- &
 PF_PID=$!
 trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
 

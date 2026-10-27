@@ -63,6 +63,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     done
 fi
 
+# One deploy at a time; the component scripts inherit the lock (infra/lib-lock.sh).
+source "$REPO_ROOT/infra/lib-lock.sh"
+medcea_lock
+
 # Host packages (curl, python3, ...) — the same check deploy-infra.sh runs, for
 # when apps are deployed on their own. Before logging, so the prompt is not teed.
 source "$REPO_ROOT/infra/lib-prereqs.sh"

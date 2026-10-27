@@ -116,6 +116,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     exit 0
 fi
 
+# One deploy at a time — before --uninstall/--reset and before configure.sh
+# (infra/lib-lock.sh).
+source "$SCRIPT_DIR/infra/lib-lock.sh"
+medcea_lock
+
 # =============================================================================
 # --uninstall
 # =============================================================================
@@ -291,7 +296,7 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 
 # Validate essential configuration variables
 MISSING_VARS=()
-for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
+for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
            STORAGE_SIZE KEYCLOAK_DOMAIN KEYCLOAK_REALM GRAFANA_DOMAIN NODE_RED_DOMAIN \
            WORKBENCH_DOMAIN PGADMIN_DOMAIN PORTAL_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN DBMGMT_DOMAIN \
            SCHEDULER_DOMAIN MONITOR_DOMAIN PLATFORM_IP; do
@@ -557,7 +562,7 @@ echo -e "\n${GREEN}[3/10] Configuring Keycloak realm '${KEYCLOAK_REALM}' and OAu
 # Kill any stale port-forward on 18080 from a previous run
 fuser -k 18080/tcp &>/dev/null || true
 sleep 1
-$MK8S kubectl port-forward svc/keycloak 18080:80 -n "$NAMESPACE" &>/dev/null &
+$MK8S kubectl port-forward svc/keycloak 18080:80 -n "$NAMESPACE" &>/dev/null 9>&- &
 _KC_PF_PID=$!
 sleep 5
 
@@ -820,6 +825,35 @@ _create_kc_user() {
       -d "{\"username\":\"${USERNAME}\",\"firstName\":\"${FIRSTNAME}\",\"lastName\":\"${LASTNAME}\",\"email\":\"${EMAIL}\",\"enabled\":true,\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"${PASSWORD}\",\"temporary\":false}]}" || true
 }
 
+# Helper: set an existing user's e-mail, read-modify-write (a partial PUT would
+# drop the rest of the representation). With ONLY_IF_SUFFIX, a user whose
+# current address does not end in it is left alone.
+_set_kc_email() {
+    local USERNAME="$1" EMAIL="$2" ONLY_IF_SUFFIX="${3:-}"
+    local USER_JSON
+    USER_JSON=$(curl -sf \
+      "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users?username=${USERNAME}&exact=true" \
+      -H "Authorization: Bearer $(_kc_token)" \
+      | EMAIL="$EMAIL" SUFFIX="$ONLY_IF_SUFFIX" python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+if not d:
+    sys.exit(0)
+u, email, suffix = d[0], os.environ["EMAIL"], os.environ["SUFFIX"]
+cur = u.get("email") or ""
+if cur == email or (suffix and not cur.endswith(suffix)):
+    sys.exit(0)
+u["email"], u["emailVerified"] = email, True
+print(json.dumps(u))' 2>/dev/null || true)
+    [[ -z "$USER_JSON" ]] && return 0
+    echo -e "${YELLOW}  Setting ${USERNAME}'s e-mail to ${EMAIL}...${NC}"
+    curl -s -o /dev/null -X PUT \
+      "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$USER_JSON")" \
+      -H "Authorization: Bearer $(_kc_token)" \
+      -H "Content-Type: application/json" \
+      -d "$USER_JSON" || true
+}
+
 # Helper: assign a realm role to a user by username
 _assign_realm_role() {
     local USERNAME="$1" ROLE="$2"
@@ -857,10 +891,18 @@ _GF_DEV_PASS="${GRAFANA_DEVELOPER_PASS:-$ADMIN_PASS}"
 _GF_VIEW_USER="${GRAFANA_VIEWER_USER:-viewer}"
 _GF_VIEW_PASS="${GRAFANA_VIEWER_PASS:-$ADMIN_PASS}"
 
+# Only ADMIN_USER has a real address. The demo users still need one — oauth2-proxy
+# rejects a session without an email claim, and Keycloak 26's user profile asks
+# for it at login — so they get <user>@<project>.invalid, which RFC 2606 keeps
+# undeliverable. They used to be <user>@cea.com, a domain someone else owns.
+_demo_email() { echo "${1}@${PROJECT_NAME}.invalid"; }
+_GF_ADMIN_EMAIL=$(_demo_email "$_GF_ADMIN_USER")
+[[ "$_GF_ADMIN_USER" == "$ADMIN_USER" ]] && _GF_ADMIN_EMAIL="$ADMIN_EMAIL"
+
 echo -e "${YELLOW}  Creating Grafana users...${NC}"
-_create_kc_user "$_GF_ADMIN_USER" "Platform" "Admin"     "${_GF_ADMIN_USER}@cea.com" "$_GF_ADMIN_PASS"
-_create_kc_user "$_GF_DEV_USER"   "Platform" "Developer" "${_GF_DEV_USER}@cea.com"   "$_GF_DEV_PASS"
-_create_kc_user "$_GF_VIEW_USER"  "Platform" "Viewer"    "${_GF_VIEW_USER}@cea.com"  "$_GF_VIEW_PASS"
+_create_kc_user "$_GF_ADMIN_USER" "Platform" "Admin"     "$_GF_ADMIN_EMAIL"                 "$_GF_ADMIN_PASS"
+_create_kc_user "$_GF_DEV_USER"   "Platform" "Developer" "$(_demo_email "$_GF_DEV_USER")"   "$_GF_DEV_PASS"
+_create_kc_user "$_GF_VIEW_USER"  "Platform" "Viewer"    "$(_demo_email "$_GF_VIEW_USER")"  "$_GF_VIEW_PASS"
 
 echo -e "${YELLOW}  Assigning roles to Grafana users...${NC}"
 _assign_realm_role "$_GF_ADMIN_USER" "grafana_admin"
@@ -873,9 +915,17 @@ _assign_realm_role "$_GF_VIEW_USER"  "grafana_viewer"
 # not exist. Create it explicitly unless it is the same user.
 if [[ "$ADMIN_USER" != "$_GF_ADMIN_USER" ]]; then
     echo -e "${YELLOW}  Creating platform admin user '$ADMIN_USER'...${NC}"
-    _create_kc_user "$ADMIN_USER" "Platform" "Administrator" "${ADMIN_USER}@cea.com" "$ADMIN_PASS"
+    _create_kc_user "$ADMIN_USER" "Platform" "Administrator" "$ADMIN_EMAIL" "$ADMIN_PASS"
     _assign_realm_role "$ADMIN_USER" "grafana_admin"
 fi
+
+# _create_kc_user never touches an existing user. The admin's address follows
+# ADMIN_EMAIL, because pgAdmin's default account must match it; a demo user's
+# is replaced only while it is still the old @cea.com placeholder.
+_set_kc_email "$ADMIN_USER" "$ADMIN_EMAIL"
+[[ "$_GF_ADMIN_USER" != "$ADMIN_USER" ]] && _set_kc_email "$_GF_ADMIN_USER" "$_GF_ADMIN_EMAIL" "@cea.com"
+_set_kc_email "$_GF_DEV_USER"  "$(_demo_email "$_GF_DEV_USER")"  "@cea.com"
+_set_kc_email "$_GF_VIEW_USER" "$(_demo_email "$_GF_VIEW_USER")" "@cea.com"
 
 # --- Platform realm roles (docs/architecture.md, RBAC) ---
 # The portal admits only these (allowed_groups in values-portal.yaml), the User
@@ -1176,7 +1226,7 @@ $MK8S kubectl rollout status deployment/oauth2-proxy \
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
 echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
-render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS ADMIN_USER ADMIN_PASS PGADMIN_DOMAIN \
+render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN \
        KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 # 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config

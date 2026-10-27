@@ -64,7 +64,7 @@
                     <div class="field"><label class="label" for="r_pw2">Repeat password</label><input class="input" id="r_pw2" type="password" autocomplete="new-password" required></div>
                 </div>
                 <div class="field"><span class="label">Role you need</span><div class="roles" id="r_roles"><div class="muted">Loading roles…</div></div></div>
-                <div class="field"><label class="label" for="r_just">Business justification <span class="opt">what you will use the platform for</span></label>
+                <div class="field"><label class="label" for="r_just">Business justification <span class="opt">what you will use the platform for, 20+ characters</span></label>
                     <textarea class="input" id="r_just" name="justification" required minlength="20" maxlength="2000" rows="4"></textarea>
                     <div class="count"><span id="r_jc">0</span> / 2000</div></div>
                 <input class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
@@ -136,6 +136,18 @@
                 var m = $('r_msg'); m.hidden = false; m.className = 'alert alert-' + kind;
                 m.querySelector('.alert-text').textContent = text;
             }
+            // What is wrong with a field, from the browser's own verdict, so the
+            // message never disagrees with the minlength/pattern in the markup.
+            function why(el) {
+                var v = el.validity, n = el.value.length;
+                if (v.valueMissing) return 'required';
+                if (v.tooShort) return 'at least ' + el.minLength + ' characters (you have ' + n + ')';
+                if (v.tooLong) return 'at most ' + el.maxLength + ' characters (you have ' + n + ')';
+                if (v.typeMismatch) return 'not a valid e-mail address';
+                var hint = el.labels && el.labels[0] && el.labels[0].querySelector('.opt');
+                if (v.patternMismatch && hint) return 'use ' + hint.textContent;
+                return 'not valid';
+            }
             $('reg').addEventListener('submit', function (e) {
                 e.preventDefault();
                 var f = e.target, go = $('r_go');
@@ -145,7 +157,7 @@
                 if (!f.checkValidity()) {
                     var bad = f.querySelector(':invalid'); bad.focus();
                     var lab = bad.labels && bad.labels[0] ? bad.labels[0].firstChild.textContent.trim() : bad.name;
-                    return note('error', 'Check this field: ' + lab + '.');
+                    return note('error', lab + ': ' + why(bad) + '.');
                 }
                 go.disabled = true; go.textContent = 'Submitting…';
                 fetch(ACCESS + '/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) })

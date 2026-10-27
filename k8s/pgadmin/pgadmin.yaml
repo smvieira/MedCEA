@@ -68,7 +68,7 @@ spec:
         image: dpage/pgadmin4:9
         env:
         - name: PGADMIN_DEFAULT_EMAIL
-          value: "${ADMIN_USER}@cea.com"
+          value: "${ADMIN_EMAIL}"
         - name: PGADMIN_DEFAULT_PASSWORD
           value: "${ADMIN_PASS}"
         - name: PGADMIN_SERVER_JSON_FILE

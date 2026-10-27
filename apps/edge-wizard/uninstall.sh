@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
 [[ -f "$REPO_ROOT/config.env" ]] && source "$REPO_ROOT/config.env"
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # $KUBECTL (sudo fallback)
 NAMESPACE="${NAMESPACE:-medcea}"

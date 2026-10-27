@@ -27,9 +27,11 @@ CONFIG_FILE="${CONFIG_FILE:-config.env}"
 EXAMPLE_FILE="$SCRIPT_DIR/../config.env.example"
 MODE="all"
 [[ "${1:-}" == "--missing" ]] && MODE="missing"
+# One run at a time: config.env is rewritten below (infra/lib-lock.sh).
+source "$SCRIPT_DIR/lib-lock.sh"; medcea_lock
 
 # Values the deploy cannot start without and that nothing generates for you.
-REQUIRED=(PROJECT_NAME DOMAIN ADMIN_USER ADMIN_PASS POSTGRES_PASS DOCKERHUB_USER DOCKERHUB_PAT)
+REQUIRED=(PROJECT_NAME DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS POSTGRES_PASS DOCKERHUB_USER DOCKERHUB_PAT)
 
 die() { echo -e "${RED}ERROR: $*${NC}" >&2; exit 1; }
 
@@ -429,10 +431,11 @@ if wanted DOMAIN || [[ -n "$FORCE_DOMAIN" ]]; then
 fi
 
 # --- 3. Administrator ---------------------------------------------------------
-if wanted ADMIN_USER || wanted ADMIN_PASS; then
+if wanted ADMIN_USER || wanted ADMIN_EMAIL || wanted ADMIN_PASS; then
     section "Administrator"
     info "The platform admin: Keycloak console, Grafana, Node-RED and the portal."
     info "Grafana's demo users (developer, viewer) get the same password unless you set GRAFANA_*_PASS."
+    info "Its e-mail is a real one you read: Keycloak password resets go there, and it is the pgAdmin login."
 fi
 if wanted ADMIN_USER; then
     while true; do
@@ -441,6 +444,17 @@ if wanted ADMIN_USER; then
         info "${RED}Lowercase letters, digits, . _ - (starting with a letter).${NC}"
     done
     cfg_update ADMIN_USER "$_v"
+fi
+# A real address: Keycloak sends password resets to it once e-mail is set up in
+# the User Manager. The character set is narrow because the value is spliced
+# into JSON, YAML and a pgAdmin Python literal.
+if wanted ADMIN_EMAIL; then
+    while true; do
+        ask _v "Admin e-mail" "$(cfg_get ADMIN_EMAIL)"
+        [[ "$_v" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && break
+        info "${RED}An e-mail address, e.g. you@example.org.${NC}"
+    done
+    cfg_update ADMIN_EMAIL "$_v"
 fi
 wanted ADMIN_PASS && ask_password ADMIN_PASS "Admin password"
 
@@ -536,7 +550,7 @@ fi
 
 # --- Summary ------------------------------------------------------------------
 section "Saved to $CONFIG_FILE"
-for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
+for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER ADMIN_EMAIL POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
     printf '  %-18s %s\n' "$v" "$(cfg_get "$v")"
 done
 for v in ADMIN_PASS POSTGRES_PASS DOCKERHUB_PAT; do

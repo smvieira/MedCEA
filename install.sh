@@ -68,6 +68,10 @@ done
 [[ -n "$PURGE" && "$MODE" != "uninstall-apps" ]] && { echo -e "${RED}--purge-data goes with --uninstall-apps.${NC}" >&2; exit 1; }
 [[ -n "$CONFIGURE" && "$MODE" != "install" && "$MODE" != "infra" ]] && { echo -e "${RED}--configure goes with an install.${NC}" >&2; exit 1; }
 
+# One deploy at a time; the stages below inherit the lock (infra/lib-lock.sh).
+source "$SCRIPT_DIR/infra/lib-lock.sh"
+medcea_lock
+
 # deploy-infra.sh leaves the credentials box to us (see infra/lib-credentials.sh).
 export MEDCEA_INSTALLER=1
 

@@ -9,8 +9,13 @@ data:
   # onboarding (medcea.mqtt_credential), platform services with the accounts in
   # the Secret mosquitto-service-auth. Both files are assembled by the
   # mqtt-auth-sync sidecar below and re-read on SIGHUP.
+  # websockets_headers_size: the explorer's socket arrives through its
+  # oauth2-proxy with the browser's session cookie (several KB of tokens);
+  # libwebsockets' default (~1 KB) silently drops that upgrade, which the
+  # proxy reports as a 502 "proxy error: EOF".
   mosquitto.conf: |
     per_listener_settings false
+    websockets_headers_size 16384
     allow_anonymous false
     password_file /mosquitto/auth/passwd
     acl_file /mosquitto/auth/acl

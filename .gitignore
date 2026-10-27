@@ -6,6 +6,8 @@ config.env.tmp
 # Written at the end of deploy-infra.sh — save, then delete
 credentials-*.txt
 logs/
+# infra/lib-lock.sh — one deploy at a time
+.medcea.lock
 
 # Python bytecode
 __pycache__/
