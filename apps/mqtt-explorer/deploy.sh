@@ -74,6 +74,7 @@ $KUBECTL rollout status deployment/mqtt-explorer -n "$NAMESPACE" --timeout=3m
 log "Deploying mqttx-oauth2-proxy (Keycloak SSO)..."
 _VALUES=$(mktemp /tmp/mqttx-oauth2proxy-values-XXXXXX.yaml)
 ALLOWED_GROUPS="$(policy_groups MQTTX_DOMAIN)"
+gate_error_page mqttx-oauth2-proxy MQTTX_DOMAIN "$ALLOWED_GROUPS"
 render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_VALUES"
 deploy_oauth2_proxy mqttx-oauth2-proxy mqtt-explorer "${MQTTX_CLIENT_SECRET:-}" "${MQTTX_COOKIE_SECRET:-}" "$MQTTX_DOMAIN" "$_VALUES"
 rm -f "$_VALUES"

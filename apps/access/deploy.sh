@@ -28,6 +28,7 @@ source "$REPO_ROOT/config.env"
 
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are in k8s/
+source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # gate_error_page / gate_helm_args — the 403 page
 NAMESPACE="${NAMESPACE:-medcea}"
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"   # older config.env files lack it
 POSTGRES_DB="${POSTGRES_DB:-medcea_db}"
@@ -124,6 +125,9 @@ $KUBECTL rollout restart deployment/access -n "$NAMESPACE"
 log "Deploying access-oauth2-proxy (realm role admin only)..."
 _AOP_VALUES=$(mktemp /tmp/access-oauth2proxy-values-XXXXXX.yaml)
 render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_AOP_VALUES"
+# Not compiled yet (admin only until IAM Phase 2.7), so the page names admin only.
+gate_error_page access-oauth2-proxy ACCESS_DOMAIN '["admin"]'
+mapfile -t _AOP_GATE_ARGS < <(gate_helm_args access-oauth2-proxy)
 $MK8S helm3 upgrade --install access-oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \
@@ -138,6 +142,7 @@ $MK8S helm3 upgrade --install access-oauth2-proxy \
   --set ingress.hostname="$ACCESS_DOMAIN" \
   --set "ingress.extraTls[0].hosts[0]=$ACCESS_DOMAIN" \
   --set "ingress.extraTls[0].secretName=cea-tls" \
+  "${_AOP_GATE_ARGS[@]}" \
   --timeout 5m
 rm -f "$_AOP_VALUES"
 $KUBECTL rollout restart deployment/access-oauth2-proxy -n "$NAMESPACE"

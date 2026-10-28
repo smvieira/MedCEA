@@ -1342,6 +1342,8 @@ REPO_ROOT="$SCRIPT_DIR"
 source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"
 ALLOWED_GROUPS="$(policy_groups NODE_RED_DOMAIN)"
 render "$SCRIPT_DIR/k8s/oauth2-proxy/values-node-red.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_OP2_VALUES"
+gate_error_page oauth2-proxy NODE_RED_DOMAIN "$ALLOWED_GROUPS"
+mapfile -t _OP2_GATE_ARGS < <(gate_helm_args oauth2-proxy)
 $MK8S helm3 upgrade --install oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \
@@ -1352,9 +1354,11 @@ $MK8S helm3 upgrade --install oauth2-proxy \
   --set configuration.clientSecret="$OAUTH2_PROXY_SECRET" \
   --set configuration.cookieSecret="$OAUTH2_COOKIE_SECRET" \
   --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
+  --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
   --set ingress.hostname="$NODE_RED_DOMAIN" \
   --set "ingress.extraTls[0].hosts[0]=$NODE_RED_DOMAIN" \
   --set "ingress.extraTls[0].secretName=cea-tls" \
+  "${_OP2_GATE_ARGS[@]}" \
   --timeout 5m
 rm -f "$_OP2_VALUES"
 

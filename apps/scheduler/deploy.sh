@@ -112,6 +112,7 @@ $KUBECTL rollout status deployment/scheduler -n "$NAMESPACE" --timeout=3m
 log "Deploying scheduler-oauth2-proxy (Keycloak SSO)..."
 _VALUES=$(mktemp /tmp/scheduler-oauth2proxy-values-XXXXXX.yaml)
 ALLOWED_GROUPS="$(policy_groups SCHEDULER_DOMAIN)"
+gate_error_page scheduler-oauth2-proxy SCHEDULER_DOMAIN "$ALLOWED_GROUPS"
 APP_SERVICE=scheduler render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_VALUES"
 deploy_oauth2_proxy scheduler-oauth2-proxy scheduler "${SCHEDULER_CLIENT_SECRET:-}" "${SCHEDULER_COOKIE_SECRET:-}" "$SCHEDULER_DOMAIN" "$_VALUES"
 rm -f "$_VALUES"

@@ -17,6 +17,8 @@ configuration:
     oidc_groups_claim = "groups"
     # Compiled from the access policy for MQTTX_DOMAIN (policy_groups).
     allowed_groups = ${ALLOWED_GROUPS}
+    # The 403 page, as in k8s/oauth2-proxy/values-app.yaml.
+    custom_templates_dir = "/templates"
     pass_basic_auth = false
     pass_authorization_header = false
     pass_access_token = false

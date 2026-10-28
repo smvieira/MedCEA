@@ -17,6 +17,8 @@ configuration:
     # realm role admin.
     oidc_groups_claim = "groups"
     allowed_groups = ["admin"]
+    # The 403 page, as in k8s/oauth2-proxy/values-app.yaml.
+    custom_templates_dir = "/templates"
     # access-api.py records the decision against X-Forwarded-Preferred-Username
     # (iam.access_request.decided_by and the history table), so pass it on.
     pass_user_headers = true

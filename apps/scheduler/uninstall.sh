@@ -27,6 +27,7 @@ portal_card disable "https://$SCHEDULER_DOMAIN"
 
 log "Removing scheduler-oauth2-proxy (owns the $SCHEDULER_DOMAIN ingress)..."
 $MK8S helm3 uninstall scheduler-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
+$MK8S kubectl delete configmap scheduler-oauth2-proxy-templates -n "$NAMESPACE" --ignore-not-found >/dev/null  # its 403 page
 $KUBECTL delete secret scheduler-secrets -n "$NAMESPACE" --ignore-not-found
 
 log "Removing Deployment, Service, Ingress and ConfigMaps..."

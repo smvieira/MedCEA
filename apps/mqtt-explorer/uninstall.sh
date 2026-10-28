@@ -25,6 +25,7 @@ portal_card disable "https://$MQTTX_DOMAIN"
 
 log "Removing mqttx-oauth2-proxy (owns the $MQTTX_DOMAIN ingress)..."
 $MK8S helm3 uninstall mqttx-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
+$MK8S kubectl delete configmap mqttx-oauth2-proxy-templates -n "$NAMESPACE" --ignore-not-found >/dev/null  # its 403 page
 
 log "Removing Deployment, Service, Ingress and ConfigMap..."
 $KUBECTL delete deployment,service mqtt-explorer -n "$NAMESPACE" --ignore-not-found

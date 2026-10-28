@@ -119,6 +119,7 @@ $KUBECTL delete ingress config-ui -n "$NAMESPACE" --ignore-not-found
 # there: the content block overrides the configuration.upstreams helm value.
 _CFG_VALUES=$(mktemp /tmp/config-oauth2proxy-values-XXXXXX.yaml)
 ALLOWED_GROUPS="$(policy_groups CONFIG_DOMAIN)"
+gate_error_page config-oauth2-proxy CONFIG_DOMAIN "$ALLOWED_GROUPS"
 APP_SERVICE=config-ui render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_CFG_VALUES"
 deploy_oauth2_proxy config-oauth2-proxy config "$CONFIG_OAUTH2_PROXY_SECRET" "$CONFIG_COOKIE_SECRET" "$CONFIG_DOMAIN" "$_CFG_VALUES"
 rm -f "$_CFG_VALUES"
@@ -180,6 +181,7 @@ $KUBECTL rollout status deployment/dbmgmt -n "$NAMESPACE" --timeout=120s
 log "Deploying dbmgmt-oauth2-proxy (Keycloak SSO)..."
 _DB_VALUES=$(mktemp /tmp/dbmgmt-oauth2proxy-values-XXXXXX.yaml)
 ALLOWED_GROUPS="$(policy_groups DBMGMT_DOMAIN)"
+gate_error_page dbmgmt-oauth2-proxy DBMGMT_DOMAIN "$ALLOWED_GROUPS"
 APP_SERVICE=dbmgmt render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_DB_VALUES"
 deploy_oauth2_proxy dbmgmt-oauth2-proxy dbmgmt "${DBMGMT_CLIENT_SECRET:-}" "${DBMGMT_COOKIE_SECRET:-}" "$DBMGMT_DOMAIN" "$_DB_VALUES"
 rm -f "$_DB_VALUES"

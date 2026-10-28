@@ -6,7 +6,9 @@
 # Phase 2.7), it checks on the running cluster:
 #   gate     the allowed_groups in the proxy's rendered config equals `policy_groups HOST`
 #            (as sets; IAM_GATES=false expects the pre-policy list instead)
-#   live     the proxy's pod started after that config was last written
+#   page     the proxy serves a custom 403 page; on every host but the portal it names
+#            the host and exactly the roles the live gate admits (cli.py describe-gate)
+#   live     the proxy's pod started after that config and page were last written
 #   sign-in  signed out, the host redirects to Keycloak, and Keycloak accepts the scopes
 #            the proxy asks for (a missing `groups` client scope is invalid_scope)
 #   reach    at least one enabled account holds a role the gate admits (composites
@@ -20,7 +22,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -107,9 +109,39 @@ while IFS= read -r line; do
         fi
     fi
 
+    # The 403 page: the proxy reads /templates, a ConfigMap is mounted there, and it
+    # names this host and exactly the roles the live gate admits. The portal has its
+    # own page (no platform role at all), so only its presence is checked there.
+    page_cm="$release-templates"; [[ "$var" == "PORTAL_DOMAIN" ]] && page_cm="portal-templates"
+    mounted="$($KUBECTL get deployment "$release" -n "$NAMESPACE" \
+        -o jsonpath='{range .spec.template.spec.volumes[*]}{.configMap.name}{"\n"}{end}' 2>/dev/null)"
+    page="$($KUBECTL get configmap "$page_cm" -n "$NAMESPACE" -o jsonpath='{.data.error\.html}' 2>/dev/null)"
+    if ! grep -qE '^[[:space:]]*custom_templates_dir[[:space:]]*=[[:space:]]*"/templates"' <<<"$cfg"; then
+        fail page "$release does not read custom templates: oauth2-proxy's bare 403 is shown"
+    elif ! grep -qxF "$page_cm" <<<"$mounted"; then
+        fail page "$release does not mount ConfigMap $page_cm"
+    elif [[ -z "$page" ]]; then
+        fail page "ConfigMap $page_cm has no error.html"
+    elif [[ "$var" == "PORTAL_DOMAIN" ]]; then
+        grep -qF "No access yet" <<<"$page" && pass page "portal's own 403 page" \
+            || fail page "$page_cm is not the portal's 403 page"
+    else
+        live_json="[$(for r in $have; do printf '"%s",' "$r"; done | sed 's/,$//')]"
+        desc="$(python3 apps/iam/compiler/cli.py describe-gate "$var" "$live_json" 2>&1)"
+        svc="${desc%%$'\t'*}" labels="${desc#*$'\t'}"
+        if grep -qF "No access to $svc</h1>" <<<"$page" && grep -qF ">$labels</span>" <<<"$page"; then
+            pass page "403 names $svc and the roles it admits"
+        else
+            fail page "$page_cm does not match the live gate (want $svc: $labels)"
+        fi
+    fi
+
     # The chart mounts the config; a pod older than its last write runs the old gate.
-    cfg_time="$($KUBECTL get configmap "$release" -n "$NAMESPACE" \
-        -o jsonpath='{range .metadata.managedFields[*]}{.time}{"\n"}{end}' | sort | tail -1)"
+    cfg_time="$({ $KUBECTL get configmap "$release" -n "$NAMESPACE" \
+                    -o jsonpath='{range .metadata.managedFields[*]}{.time}{"\n"}{end}'
+                  $KUBECTL get configmap "$page_cm" -n "$NAMESPACE" \
+                    -o jsonpath='{range .metadata.managedFields[*]}{.time}{"\n"}{end}' 2>/dev/null
+                } | sort | tail -1)"
     pod_time="$($KUBECTL get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$release" \
         --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.status.startTime}{"\n"}{end}' | sort | head -1)"
     if [[ -z "$pod_time" ]]; then

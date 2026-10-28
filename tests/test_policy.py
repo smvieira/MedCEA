@@ -151,6 +151,45 @@ class WiringTest(unittest.TestCase):
                 for line in renders:
                     self.assertIn("ALLOWED_GROUPS", line.split(">")[0], f"{script}: render of {template} misses ALLOWED_GROUPS")
 
+    def test_every_gate_explains_its_403(self):
+        # Every gated proxy reads /templates; every host but the portal (own page)
+        # gets its page from gate_error_page with the list its gate is deployed with.
+        for values in ("k8s/oauth2-proxy/values-portal.yaml", "k8s/oauth2-proxy/values-app.yaml",
+                       "k8s/oauth2-proxy/values-node-red.yaml",
+                       "apps/mqtt-explorer/k8s/oauth2-proxy-values.yaml", "apps/access/k8s/oauth2-proxy-values.yaml"):
+            self.assertIn('custom_templates_dir = "/templates"', self.read(values), values)
+        pages = {"apps/frontend/deploy.sh": [("config-oauth2-proxy", "CONFIG_DOMAIN"), ("dbmgmt-oauth2-proxy", "DBMGMT_DOMAIN")],
+                 "apps/monitor/deploy.sh": [("monitor-oauth2-proxy", "MONITOR_DOMAIN")],
+                 "apps/scheduler/deploy.sh": [("scheduler-oauth2-proxy", "SCHEDULER_DOMAIN")],
+                 "apps/mqtt-explorer/deploy.sh": [("mqttx-oauth2-proxy", "MQTTX_DOMAIN")],
+                 "deploy-infra.sh": [("oauth2-proxy", "NODE_RED_DOMAIN")],
+                 "apps/access/deploy.sh": [("access-oauth2-proxy", "ACCESS_DOMAIN")]}
+        for script, gates in pages.items():
+            src = self.read(script)
+            for release, host in gates:
+                self.assertRegex(src, rf"gate_error_page {re.escape(release)} {host} ", f"{script}: {host}")
+        uninstalls = {"apps/frontend/uninstall.sh": ["config-oauth2-proxy", "dbmgmt-oauth2-proxy"],
+                      "apps/monitor/uninstall.sh": ["monitor-oauth2-proxy"], "apps/scheduler/uninstall.sh": ["scheduler-oauth2-proxy"],
+                      "apps/mqtt-explorer/uninstall.sh": ["mqttx-oauth2-proxy"], "apps/access/uninstall.sh": ["access-oauth2-proxy"]}
+        for script, releases in uninstalls.items():
+            for release in releases:
+                self.assertIn(f"delete configmap {release}-templates", self.read(script), script)
+
+    def test_gate_page_names_the_deployed_roles(self):
+        p = self.policy
+        label, roles = proxies.describe(p, "MONITOR_DOMAIN", proxies.admitted(p, "MONITOR_DOMAIN"))
+        self.assertEqual(label, "Monitor")
+        self.assertEqual(roles, [p.roles[r]["label"] for r in p.roles if r in proxies.admitted(p, "MONITOR_DOMAIN")])
+        self.assertEqual(proxies.describe(p, "ACCESS_DOMAIN", ["admin"])[1], [p.roles["admin"]["label"]])
+        with self.assertRaises(KeyError):
+            proxies.describe(p, "MONITOR_DOMAIN", ["no_such_role"])
+        # the template's variables are the ones gate_error_page renders
+        tpl = self.read("k8s/oauth2-proxy/error.html")
+        self.assertEqual(set(re.findall(r"\$\{([A-Z_]+)\}", tpl)),
+                         {"GATE_SERVICE", "GATE_ROLES", "GATE_PORTAL_URL", "GATE_LOGOUT_RD"})
+        lib = self.read("infra/lib-oauth2-proxy.sh")
+        self.assertIn("error.html\" GATE_SERVICE GATE_ROLES GATE_PORTAL_URL GATE_LOGOUT_RD", lib)
+
     def test_offered_roles_are_platform_roles_the_database_accepts(self):
         src = self.read("apps/access/access-api.py")
         offered = ast.literal_eval(re.search(r"^ROLES = (\{.*?^\})", src, re.S | re.M).group(1))

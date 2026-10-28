@@ -26,6 +26,10 @@ configuration:
     # it fails with invalid_scope.
     oidc_groups_claim = "groups"
     allowed_groups = ${ALLOWED_GROUPS}
+    # The 403 page (k8s/oauth2-proxy/error.html, ConfigMap <release>-templates,
+    # mounted by gate_helm_args): which roles may open this host, and "ask an
+    # administrator". sign_in.html is never shown (skip_provider_button).
+    custom_templates_dir = "/templates"
     # Nothing behind these proxies wants an Authorization header, and some
     # upstreams (PostgREST behind config) reject the Basic one oauth2-proxy
     # would inject by default.

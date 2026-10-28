@@ -54,3 +54,15 @@ def admitted(p, host):
 def toml_list(roles):
     """The oauth2-proxy alpha-config spelling: ["a", "b"]."""
     return "[" + ", ".join(f'"{r}"' for r in roles) + "]"
+
+
+def describe(p, host, roles):
+    """(host label, role labels in the policy's order) for a gate's error page. `roles`
+    is the list the gate was deployed with, not recomputed, so the page names exactly
+    the roles that gate admits (IAM_GATES=false or a fixed list included)."""
+    if host not in p.hosts:
+        raise KeyError(f"unknown host variable {host}; known: {', '.join(p.hosts)}")
+    unknown = sorted(set(roles) - set(p.roles))
+    if unknown:
+        raise KeyError(f"unknown role(s) {', '.join(unknown)}")
+    return p.hosts[host]["label"], [p.roles[r]["label"] for r in p.roles if r in roles]

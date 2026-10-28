@@ -33,6 +33,7 @@ portal_card disable "https://$ACCESS_DOMAIN"
 
 log "Removing access-oauth2-proxy..."
 $MK8S helm3 uninstall access-oauth2-proxy -n "$NAMESPACE" 2>/dev/null || true
+$MK8S kubectl delete configmap access-oauth2-proxy-templates -n "$NAMESPACE" --ignore-not-found >/dev/null  # its 403 page
 
 log "Removing Deployment, Services, Ingress, ConfigMaps and Secret..."
 $KUBECTL delete deployment access -n "$NAMESPACE" --ignore-not-found

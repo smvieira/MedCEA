@@ -5,12 +5,17 @@
   cli.py compile proxy HOST [--file F]  allowed_groups for a host variable, e.g. CONFIG_DOMAIN,
                                         printed as ["a", "b"] for an oauth2-proxy values file
   cli.py hosts [--file F]               every host and the roles it admits (for review)
+  cli.py describe-gate HOST ROLES       for a gate's 403 page: the host's label, a tab, and the
+                                        labels of ROLES (the deployed list, ["a", "b"]),
+                                        HTML-escaped
 
 Reads apps/iam/policy/defaults.yaml unless --file is given. From Phase 1 on it reads the
 applied version from the database when one exists (plan Section 3.3); until then the
 defaults are the policy in force.
 """
 import argparse
+import html
+import json
 import os
 import sys
 
@@ -25,6 +30,9 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
     sub.add_parser("hosts")
+    desc = sub.add_parser("describe-gate")
+    desc.add_argument("host")
+    desc.add_argument("roles")
     comp = sub.add_parser("compile")
     comp.add_argument("target", choices=["proxy"])
     comp.add_argument("host")
@@ -48,6 +56,15 @@ def main(argv=None):
         for h in p.hosts:
             status = proxies.ENFORCEMENT.get(h, "unknown")
             print(f"{h:18} [{status}] {' '.join(proxies.admitted(p, h))}")
+        return 0
+
+    if args.cmd == "describe-gate":
+        try:
+            label, roles = proxies.describe(p, args.host, json.loads(args.roles))
+        except (KeyError, ValueError) as e:
+            print(f"ERROR: {e.args[0]}", file=sys.stderr)
+            return 2
+        print(html.escape(label) + "\t" + html.escape(", ".join(roles)))
         return 0
 
     if args.cmd == "compile" and args.target == "proxy":

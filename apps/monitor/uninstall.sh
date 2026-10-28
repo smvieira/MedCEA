@@ -24,6 +24,7 @@ portal_card disable "https://$MONITOR_DOMAIN"
 
 log "Removing monitor-oauth2-proxy (owns the $MONITOR_DOMAIN ingress)..."
 $MK8S helm3 uninstall monitor-oauth2-proxy -n "$NAMESPACE" --wait --timeout 3m >/dev/null 2>&1 || true
+$MK8S kubectl delete configmap monitor-oauth2-proxy-templates -n "$NAMESPACE" --ignore-not-found >/dev/null  # its 403 page
 
 log "Removing Deployment, Service, Ingress and ConfigMaps..."
 $KUBECTL delete deployment,service,ingress monitor -n "$NAMESPACE" --ignore-not-found

@@ -1,0 +1,53 @@
+{{define "error.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Title}} — MedCEA Platform</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #0d1321; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
+    .box { width: 100%; max-width: 480px; background: rgba(30,37,50,.92); border: 1px solid #2a364e; border-radius: 16px; padding: 36px 32px; box-shadow: 0 12px 40px rgba(0,0,0,.5); text-align: center; }
+    .code { font-size: .72rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #64748b; }
+    h1 { font-size: 1.4rem; font-weight: 700; color: #fff; margin: 8px 0 12px; }
+    p { font-size: .9rem; color: #94a3b8; line-height: 1.6; }
+    p + p { margin-top: 10px; }
+    .roles { color: #cbd5e1; }
+    .acts { display: flex; gap: 10px; justify-content: center; margin-top: 26px; flex-wrap: wrap; }
+    a { display: inline-block; padding: 10px 18px; border-radius: 8px; font: 600 .9rem 'Segoe UI', system-ui, sans-serif; text-decoration: none; }
+    .pri { background: #2563eb; color: #fff; } .pri:hover { background: #1d4ed8; }
+    .sec { border: 1px solid #2a364e; color: #cbd5e1; } .sec:hover { border-color: #3b82f6; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="code">Error {{.StatusCode}}</div>
+    {{/* The error page of every role-gated host but the portal (which has its own,
+         k8s/portal/error.html: there a 403 means no platform role at all). Rendered
+         per host by gate_error_page (infra/lib-oauth2-proxy.sh) with the host's
+         label and the roles its deployed allowed_groups admits.
+         A 403 carrying oauth2-proxy's default message is the role check. A failed
+         login is also a 403, but with its own "Login Failed: ..." message — show
+         that one as it is, or a broken login reads like a missing role. */}}
+    {{ if and (eq .StatusCode 403) (eq .Message "You do not have permission to access this resource.") }}
+    <h1>No access to ${GATE_SERVICE}</h1>
+    <p>You are signed in, but your role does not include ${GATE_SERVICE}.</p>
+    <p>${GATE_SERVICE} is open to: <span class="roles">${GATE_ROLES}</span>.</p>
+    <p>If you need it for your work, ask an administrator to change your role.</p>
+    <div class="acts">
+      <a class="pri" href="${GATE_PORTAL_URL}">Back to the portal</a>
+      <a class="sec" href="{{.ProxyPrefix}}/sign_out?rd=${GATE_LOGOUT_RD}">Sign out</a>
+    </div>
+    {{ else }}
+    <h1>{{.Title}}</h1>
+    <p>{{.Message}}</p>
+    <div class="acts">
+      <a class="pri" href="/">Try again</a>
+      <a class="sec" href="{{.ProxyPrefix}}/sign_out?rd=${GATE_LOGOUT_RD}">Sign out</a>
+    </div>
+    {{ end }}
+  </div>
+</body>
+</html>
+{{end}}
