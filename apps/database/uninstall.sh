@@ -2,8 +2,9 @@
 # apps/database/uninstall.sh — the platform database (medcea_db).
 #
 #   ./apps/database/uninstall.sh                 does nothing: the data is kept
-#   ./apps/database/uninstall.sh --purge-data    DROP DATABASE medcea_db and the
-#                                                PostgREST roles anon/authenticator
+#   ./apps/database/uninstall.sh --purge-data    DROP DATABASE medcea_db, the
+#                                                PostgREST roles anon/authenticator,
+#                                                mqtt_auth and medcea_owner
 #
 # Uninstalling the apps must not silently destroy recorded runs, recipes and
 # device registrations, so dropping them is a separate, explicit flag (and
@@ -39,7 +40,7 @@ if [[ -z "$PG_POD" ]]; then
     exit 0
 fi
 
-log "Dropping database '$CEA_DB' and roles anon, authenticator, mqtt_auth..."
+log "Dropping database '$CEA_DB' and roles anon, authenticator, mqtt_auth, medcea_owner..."
 # WITH (FORCE) ends any session still connected (PostgreSQL 13+). The roles go
 # after the database because its default privileges reference anon.
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
@@ -47,6 +48,7 @@ $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
     -c "DROP DATABASE IF EXISTS \"$CEA_DB\" WITH (FORCE);" \
     -c "DROP ROLE IF EXISTS authenticator;" \
     -c "DROP ROLE IF EXISTS anon;" \
-    -c "DROP ROLE IF EXISTS mqtt_auth;"
+    -c "DROP ROLE IF EXISTS mqtt_auth;" \
+    -c "DROP ROLE IF EXISTS medcea_owner;"
 
 log "Database '$CEA_DB' dropped."

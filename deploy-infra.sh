@@ -394,6 +394,23 @@ echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \
 $MK8S kubectl create namespace "$NAMESPACE" \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
 
+# The access policy's route table (codeplan IAM plan 1.1): ConfigMap
+# medcea-iam-lib, mounted by every service at /iam/. Here, because this script
+# runs before every app component. It is compiled from defaults.yaml: the
+# applied version in iam_policy is read instead once Phase 4 creates one. A
+# policy that fails its invariants stops the deploy rather than shipping a table
+# — unless IAM_GATES=false (the rollback), which leaves the ConfigMap as it is.
+echo -e "\n${GREEN}[IAM] Route table (ConfigMap medcea-iam-lib)...${NC}"
+if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)"; then
+    IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
+    render "$SCRIPT_DIR/k8s/iam/iam-lib.yaml" NAMESPACE IAM_ROUTES_DIGEST IAM_ROUTES_JSON | $MK8S kubectl apply -f -
+elif [[ "${IAM_GATES:-true}" == "false" ]]; then
+    echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
+else
+    echo -e "${RED}ERROR: the access policy did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
+    exit 1
+fi
+
 echo -e "\n${GREEN}[TLS] Platform CA and wildcard certificate...${NC}"
 CA_DIR="$SCRIPT_DIR/.ca"; mkdir -p "$CA_DIR"; chmod 700 "$CA_DIR"
 if [ ! -f "$CA_DIR/ca.key" ]; then

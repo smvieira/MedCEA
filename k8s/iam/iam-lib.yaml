@@ -1,0 +1,21 @@
+# ConfigMap medcea-iam-lib — the compiled access policy every service checks
+# requests against (codeplan IAM plan 3.2). Written by deploy-infra.sh, which
+# runs before every app component; later by apps/iam/apply.sh on each apply.
+# Each service mounts it optional at /iam/ and answers 503 while it is missing
+# (Phase 1.2). A mounted ConfigMap is updated in place by the kubelet (within
+# about a minute), so a changed table reaches running pods without a restart;
+# the digest annotation only names the table, for tests/iam-schema.sh and
+# /healthz. Rolling the services by checksum arrives with apply.sh (Phase 4).
+#   routes.json   apps/iam/compiler/routes.py (`cli.py compile routes`)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: medcea-iam-lib
+  namespace: ${NAMESPACE}
+  labels:
+    medcea/iam-lib: "true"
+  annotations:
+    medcea/routes-digest: "${IAM_ROUTES_DIGEST}"
+data:
+  routes.json: |
+    ${IAM_ROUTES_JSON}

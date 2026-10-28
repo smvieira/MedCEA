@@ -42,6 +42,9 @@ spec:
         volumeMounts:
         - name: api-script
           mountPath: /scripts
+        - name: iam-lib          # access policy route table (IAM plan 1.1); optional
+          mountPath: /iam
+          readOnly: true
       volumes:
       - name: html
         configMap:
@@ -52,6 +55,10 @@ spec:
       - name: api-script
         configMap:
           name: monitor-api
+      - name: iam-lib
+        configMap:
+          name: medcea-iam-lib
+          optional: true
 ---
 apiVersion: v1
 kind: Service

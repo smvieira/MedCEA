@@ -55,6 +55,7 @@ spec:
         - {name: code, mountPath: /app/access-api.py, subPath: access-api.py}
         - {name: html, mountPath: /app/html}
         - {name: templates, mountPath: /app/templates}
+        - {name: iam-lib, mountPath: /iam, readOnly: true}   # access policy route table (IAM plan 1.1)
       volumes:
       - name: code
         configMap: {name: access-api}
@@ -62,6 +63,8 @@ spec:
         configMap: {name: access-html}
       - name: templates
         configMap: {name: access-templates}
+      - name: iam-lib
+        configMap: {name: medcea-iam-lib, optional: true}
 ---
 apiVersion: v1
 kind: Service

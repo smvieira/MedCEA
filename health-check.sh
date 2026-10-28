@@ -68,6 +68,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "  ${CYAN}tcp${NC}    TCP port: HOST:PORT"
     echo -e "         e.g. localhost:31883"
     echo ""
+    echo -e "  ${CYAN}iamchain${NC} the access policy history's hash chain: DATABASE"
+    echo -e "         e.g. \$POSTGRES_DB   (iam_policy.verify_chain(); SKIP before migration 008a)"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -211,6 +214,36 @@ check_http() {
         _record OK "$name" "HTTP ${http_code} — ${url}"
     else
         _record WARN "$name" "HTTP ${http_code} (expected ${expect}) — ${url}"
+    fi
+}
+
+# =============================================================================
+# Check: the access policy's hash-chained history
+# target: DATABASE (iam_policy.verify_chain(), migration 008a). Runs as postgres
+# inside the PostgreSQL pod; the password is read there, never on a command line.
+# =============================================================================
+check_iamchain() {
+    local name="$1" db="$2" out exit_code=0
+    # The SQL comes from the here-document, not the loop's stdin (the config file).
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -U postgres -d "$0" -tA -F "|"' "$db" 2>&1 <<'SQL'
+SELECT CASE WHEN to_regprocedure('iam_policy.verify_chain()') IS NULL THEN 'absent' ELSE 'present' END;
+SELECT ok, events, first_bad_event, detail FROM iam_policy.verify_chain();
+SQL
+) || exit_code=$?
+    if grep -qx absent <<<"$out"; then   # stderr may come first: match the line
+        _record SKIP "$name" "iam_policy.verify_chain() not in ${db} yet (migration 008a: ./apps/database/deploy.sh)"
+        return
+    fi
+    out="$(grep -E '^[tf]\|' <<<"$out" || tail -1 <<<"$out")"
+    local ok events bad detail
+    IFS='|' read -r ok events bad detail <<<"$out"
+    if [[ $exit_code -ne 0 || ( "$ok" != "t" && "$ok" != "f" ) ]]; then
+        _record FAIL "$name" "verify_chain() did not run: ${out:0:120}"
+    elif [[ "$ok" == "t" ]]; then
+        _record OK "$name" "hash chain intact, ${events} event(s)"
+    else
+        _record FAIL "$name" "hash chain broken at event ${bad}: ${detail}"
     fi
 }
 
@@ -371,6 +404,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         http) check_http "$name" "$target" "$options" ;;
         tcp)  check_tcp  "$name" "$target" ;;
         juju) check_juju "$name" "$target" ;;
+        iamchain) check_iamchain "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

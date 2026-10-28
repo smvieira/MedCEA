@@ -242,3 +242,119 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON iam.config_history FROM access_svc;
 GRANT SELECT, INSERT ON iam.user_status_history TO access_svc;
 GRANT USAGE, SELECT ON SEQUENCE iam.user_status_history_event_id_seq TO access_svc;
 REVOKE UPDATE, DELETE, TRUNCATE ON iam.user_status_history FROM access_svc;
+
+-- ── Account decisions and access reviews (codeplan IAM plan 3.7, 3.10) ──────
+-- Created in Phase 1 so later phases can record into them; nothing writes them
+-- yet. Phase 2.7 adds their writers (the User Manager's decisions, qa's
+-- confirm screen, iam.confirm_decision(), iam.sign_off_review()).
+--
+-- account_decision: every grant, role change, zone assignment or removal,
+-- person_id change and (de)activation an administrator makes. A widening
+-- (qa_dual_control) waits as pending_qa until a qa person who is neither the
+-- maker nor the subject confirms or refuses it; a narrowing acts at once
+-- (applied) and is reviewed afterwards. What was decided never changes; only
+-- the confirmation or review is added, once. No DELETE, for anyone.
+CREATE TABLE IF NOT EXISTS iam.account_decision (
+    decision_id        BIGSERIAL PRIMARY KEY,
+    kind               VARCHAR(16)  NOT NULL
+                       CHECK (kind IN ('grant', 'role_change', 'zone_assign', 'zone_remove',
+                                       'person_id', 'deactivate', 'activate')),
+    keycloak_user_id   VARCHAR(64)  NOT NULL,
+    username           VARCHAR(255) NOT NULL,
+    subject_person     TEXT,
+    from_role          VARCHAR(32),
+    to_role            VARCHAR(32),
+    zone_id            INTEGER,           -- medcea.cea_zone, another schema: no FK
+    new_person_id      TEXT,
+    widens             BOOLEAN      NOT NULL,
+    status             VARCHAR(16)  NOT NULL
+                       CHECK (status IN ('pending_qa', 'confirmed', 'refused', 'applied', 'reviewed')),
+    reason             TEXT         NOT NULL CHECK (btrim(reason) <> ''),
+    made_by_sub        VARCHAR(64),       -- NULL for system:deploy (bootstrap)
+    made_by_person     TEXT,
+    made_by_name       VARCHAR(255) NOT NULL,
+    made_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    checked_by_sub     VARCHAR(64),       -- the qa person who confirmed, refused or reviewed
+    checked_by_person  TEXT,
+    checked_by_name    VARCHAR(255),
+    checked_at         TIMESTAMP WITH TIME ZONE,
+    check_note         TEXT,
+    CHECK (widens = (status IN ('pending_qa', 'confirmed', 'refused'))),
+    CHECK ((checked_at IS NULL) = (status IN ('pending_qa', 'applied'))),
+    CHECK ((checked_at IS NULL) = (checked_by_name IS NULL)),
+    CHECK (checked_at IS NOT NULL OR (checked_by_sub IS NULL AND checked_by_person IS NULL AND check_note IS NULL)),
+    CHECK (checked_by_person IS NULL OR checked_by_person IS DISTINCT FROM made_by_person),
+    CHECK (checked_by_person IS NULL OR checked_by_person IS DISTINCT FROM subject_person)
+);
+CREATE INDEX IF NOT EXISTS account_decision_status_idx ON iam.account_decision (status, made_at);
+CREATE INDEX IF NOT EXISTS account_decision_user_idx ON iam.account_decision (keycloak_user_id, made_at);
+
+-- access_review: the quarterly snapshot of accounts, roles, persons, zones,
+-- last logins, pending decisions, waivers and enforcement switches, signed off
+-- by a qa person. The snapshot is frozen at creation; sign-off is added once.
+CREATE TABLE IF NOT EXISTS iam.access_review (
+    review_id            BIGSERIAL PRIMARY KEY,
+    period               VARCHAR(16)  NOT NULL UNIQUE,   -- e.g. 2026-Q4
+    snapshot             JSONB        NOT NULL,
+    created_by           VARCHAR(255) NOT NULL,
+    created_at           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    signed_off_by_sub    VARCHAR(64),
+    signed_off_by_person TEXT,
+    signed_off_by_name   VARCHAR(255),
+    signed_off_at        TIMESTAMP WITH TIME ZONE,
+    sign_off_note        TEXT,
+    CHECK ((signed_off_at IS NULL) = (signed_off_by_name IS NULL)),
+    CHECK (signed_off_at IS NOT NULL OR (signed_off_by_sub IS NULL AND signed_off_by_person IS NULL AND sign_off_note IS NULL))
+);
+
+-- What a decision or a review says is final; the check / sign-off columns are
+-- filled once, from their empty state, all in the one UPDATE that sets
+-- checked_at / signed_off_at — so the person recorded as checker is the one who
+-- closed it, not a value left by an earlier write. No DELETE or TRUNCATE.
+CREATE OR REPLACE FUNCTION iam.freeze_record() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = iam, pg_temp AS $$
+DECLARE
+    added text[] := CASE TG_TABLE_NAME
+        WHEN 'account_decision' THEN ARRAY['status', 'checked_by_sub', 'checked_by_person',
+                                           'checked_by_name', 'checked_at', 'check_note']
+        ELSE ARRAY['signed_off_by_sub', 'signed_off_by_person', 'signed_off_by_name',
+                   'signed_off_at', 'sign_off_note'] END;
+    closer text := CASE TG_TABLE_NAME WHEN 'account_decision' THEN 'checked_at' ELSE 'signed_off_at' END;
+    done boolean := to_jsonb(OLD) ->> closer IS NOT NULL;
+BEGIN
+    IF TG_OP <> 'UPDATE' THEN
+        RAISE EXCEPTION 'iam.% is append-only: % refused', TG_TABLE_NAME, TG_OP
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF done THEN
+        RAISE EXCEPTION 'iam.% row is final', TG_TABLE_NAME USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF (to_jsonb(NEW) - added) IS DISTINCT FROM (to_jsonb(OLD) - added) THEN
+        RAISE EXCEPTION 'iam.%: only the check or sign-off may be added', TG_TABLE_NAME
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF to_jsonb(NEW) ->> closer IS NULL AND to_jsonb(NEW) IS DISTINCT FROM to_jsonb(OLD) THEN
+        RAISE EXCEPTION 'iam.%: the check or sign-off is added in one update, with %', TG_TABLE_NAME, closer
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS account_decision_freeze_trg ON iam.account_decision;
+CREATE TRIGGER account_decision_freeze_trg BEFORE UPDATE OR DELETE ON iam.account_decision
+    FOR EACH ROW EXECUTE FUNCTION iam.freeze_record();
+DROP TRIGGER IF EXISTS account_decision_truncate_trg ON iam.account_decision;
+CREATE TRIGGER account_decision_truncate_trg BEFORE TRUNCATE ON iam.account_decision
+    FOR EACH STATEMENT EXECUTE FUNCTION iam.freeze_record();
+DROP TRIGGER IF EXISTS access_review_freeze_trg ON iam.access_review;
+CREATE TRIGGER access_review_freeze_trg BEFORE UPDATE OR DELETE ON iam.access_review
+    FOR EACH ROW EXECUTE FUNCTION iam.freeze_record();
+DROP TRIGGER IF EXISTS access_review_truncate_trg ON iam.access_review;
+CREATE TRIGGER access_review_truncate_trg BEFORE TRUNCATE ON iam.access_review
+    FOR EACH STATEMENT EXECUTE FUNCTION iam.freeze_record();
+
+COMMENT ON TABLE iam.account_decision IS 'Account decisions (grant, role change, zones, person_id, (de)activation): pending_qa -> confirmed | refused for a widening, applied -> reviewed otherwise. Final once checked; no DELETE.';
+COMMENT ON TABLE iam.access_review IS 'Quarterly access review snapshots, signed off once by a qa person. Append-only.';
+
+-- Read-only to the service until Phase 2.7 gives it its writers.
+GRANT SELECT ON iam.account_decision, iam.access_review TO access_svc;

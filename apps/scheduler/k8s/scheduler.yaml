@@ -62,6 +62,9 @@ spec:
           mountPath: /schd
         - name: logs
           mountPath: /logs
+        - name: iam-lib          # access policy route table (IAM plan 1.1); optional
+          mountPath: /iam
+          readOnly: true
       volumes:
       - name: html
         configMap:
@@ -80,6 +83,10 @@ spec:
         hostPath:
           path: ${REPO_ROOT}/logs
           type: DirectoryOrCreate
+      - name: iam-lib
+        configMap:
+          name: medcea-iam-lib
+          optional: true
 ---
 apiVersion: v1
 kind: Service

@@ -7,6 +7,7 @@
 #   - Applies post-DDL migrations (idempotent ALTER / CREATE IF NOT EXISTS)
 #   - Configures search_path for Grafana/PostgREST access
 #   - Grants anon role access for PostgREST
+#   - Records platform settings (medcea.platform_setting: the MQTT topic root)
 #
 # Idempotent: safe to re-run against an existing database.
 
@@ -176,12 +177,26 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON medcea.device_slot_history FROM anon;
 REVOKE ALL ON medcea.mqtt_credential FROM anon;
 GRANT USAGE ON SCHEMA medcea TO mqtt_auth;
 GRANT SELECT ON medcea.mqtt_credential, medcea.device TO mqtt_auth;
+-- Platform settings (migration 008a) are service_only in the access policy.
+REVOKE ALL ON medcea.platform_setting FROM anon;
 SQLEOF
 $KUBECTL cp "$_GRANTS_SQL" "$NAMESPACE/$PG_POD:/tmp/cea_grants.sql"
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- \
     env PGPASSWORD="$PG_PASS" psql -U "$PG_USER" -d "$CEA_DB" -f /tmp/cea_grants.sql
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- rm /tmp/cea_grants.sql
 rm -f "$_GRANTS_SQL"
+
+# ── 6. Platform settings ─────────────────────────────────────────────────────
+# The MQTT topic root is PROJECT_NAME; the database reads it from here (Phase 2
+# register_mqtt_credential) rather than from a literal. Passed as a psql
+# variable, so the value is quoted by psql, not by this script.
+log "Recording platform settings (mqtt_topic_root=$PROJECT_NAME)..."
+$KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- \
+    env PGPASSWORD="$PG_PASS" psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$CEA_DB" \
+        -v root="$PROJECT_NAME" -f - <<'SQLEOF'
+INSERT INTO medcea.platform_setting (key, value) VALUES ('mqtt_topic_root', :'root')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+SQLEOF
 
 log "Schema deployed successfully."
 echo ""

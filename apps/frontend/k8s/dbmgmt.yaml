@@ -42,6 +42,9 @@ spec:
           mountPath: /scripts
         - name: db-exports
           mountPath: /exports
+        - name: iam-lib          # access policy route table (IAM plan 1.1); optional
+          mountPath: /iam
+          readOnly: true
       volumes:
       - name: html
         configMap:
@@ -60,6 +63,10 @@ spec:
         hostPath:
           path: ${REPO_ROOT}/apps/database
           type: Directory
+      - name: iam-lib
+        configMap:
+          name: medcea-iam-lib
+          optional: true
 ---
 apiVersion: v1
 kind: Service

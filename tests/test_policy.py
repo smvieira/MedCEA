@@ -7,6 +7,8 @@ Read-only; needs python3-yaml (infra/lib-prereqs.sh). No cluster, no lock.
 """
 import ast
 import copy
+import hashlib
+import json
 import os
 import re
 import sys
@@ -15,7 +17,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
-from compiler import invariants, model, proxies  # noqa: E402
+from compiler import invariants, model, proxies, routes  # noqa: E402
 
 
 def _set(path, value):
@@ -113,6 +115,69 @@ class PolicyTest(unittest.TestCase):
             self.assertTrue(proxies.admitted(p, host), f"{host} admits nobody")
 
 
+class RoutesTest(unittest.TestCase):
+    """compiler/routes.py: the route table in ConfigMap medcea-iam-lib (Phase 1.1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+        cls.doc = routes.compile(cls.policy)
+
+    def test_deterministic_and_digest_covers_body(self):
+        again = routes.compile(model.load())
+        self.assertEqual(routes.dumps(self.doc), routes.dumps(again))
+        body = {k: v for k, v in self.doc.items() if k != "digest"}
+        self.assertEqual(self.doc["digest"], hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+
+    def test_every_api_route_is_in_its_service_table(self):
+        n = 0
+        for g, gd in self.policy.groups.items():
+            for m in gd["members"]:
+                if m["type"] != "api":
+                    continue
+                for route, lv in m["routes"].items():
+                    n += 1
+                    entry = self.doc["services"][m["service"]]["routes"][route]
+                    self.assertEqual(entry["group"], g, route)
+                    self.assertEqual(entry["levels"], lv if isinstance(lv, list) else [lv], route)
+        self.assertEqual(n, sum(len(s["routes"]) for s in self.doc["services"].values()))
+
+    def test_every_route_is_open_to_some_role(self):
+        for svc, sd in self.doc["services"].items():
+            for route, e in sd["routes"].items():
+                self.assertTrue(e["roles"], f"{svc} {route}: no role may call it")
+                self.assertTrue(set(e["roles"]) <= set(self.policy.roles), route)
+
+    def test_roles_and_constraints(self):
+        sched = self.doc["services"]["scheduler"]["routes"]
+        self.assertEqual(sched["POST /api/runs/<id>/execute"]["roles"],
+                         {"operator": ["assigned_run"], "production_manager": None})
+        mon = self.doc["services"]["monitor"]["routes"]["GET /api/measurements/<unit>"]["roles"]
+        self.assertEqual(mon["operator"], ["own_zone"])
+        self.assertIsNone(mon["qa"])                    # through the auditor composite
+        self.assertNotIn("admin", mon)                  # I2
+        self.assertEqual(self.doc["services"]["access"]["routes"]["POST /api/decisions/<id>/confirm"]["roles"],
+                         {"qa": ["not_own_author"]})
+
+    def test_clients_and_public(self):
+        every = sorted({h["client"] for h in self.policy.hosts.values()})
+        self.assertEqual(self.doc["services"]["access-profile"]["clients"], every)
+        self.assertEqual(self.doc["services"]["scheduler"]["clients"], ["config", "scheduler"])
+        self.assertIn("GET /healthz", self.doc["public"]["*"])
+        self.assertIn("POST /api/register", self.doc["public"]["access-public"])
+
+    def test_refuses_bad_tables(self):
+        bad = copy.deepcopy(self.policy.data)
+        bad["resource_groups"]["run_logs"]["members"][0]["routes"]["fetch /x"] = "R"
+        with self.assertRaisesRegex(routes.RouteError, "not 'METHOD /path'"):
+            routes.compile(model.Policy(bad))
+        clash = copy.deepcopy(self.policy.data)
+        clash["public_routes"].append({"service": "scheduler", "route": "GET /api/runs", "why": "x"})
+        with self.assertRaisesRegex(routes.RouteError, "public and in group runs"):
+            routes.compile(model.Policy(clash))
+
+
 class WiringTest(unittest.TestCase):
     """The places outside the compiler that must agree with the policy."""
 
@@ -189,6 +254,19 @@ class WiringTest(unittest.TestCase):
                          {"GATE_SERVICE", "GATE_ROLES", "GATE_PORTAL_URL", "GATE_LOGOUT_RD"})
         lib = self.read("infra/lib-oauth2-proxy.sh")
         self.assertIn("error.html\" GATE_SERVICE GATE_ROLES GATE_PORTAL_URL GATE_LOGOUT_RD", lib)
+
+    def test_route_table_reaches_every_service(self):
+        # deploy-infra.sh renders the ConfigMap with every variable the template uses,
+        # and each Python service mounts it optional (it is absent until deploy-infra runs).
+        tpl = self.read("k8s/iam/iam-lib.yaml")
+        self.assertEqual(set(re.findall(r"\$\{([A-Z_]+)\}", tpl)), {"NAMESPACE", "IAM_ROUTES_DIGEST", "IAM_ROUTES_JSON"})
+        self.assertIn("iam-lib.yaml\" NAMESPACE IAM_ROUTES_DIGEST IAM_ROUTES_JSON", self.read("deploy-infra.sh"))
+        for manifest in ("apps/scheduler/k8s/scheduler.yaml", "apps/monitor/k8s/monitor.yaml",
+                         "apps/frontend/k8s/dbmgmt.yaml", "apps/frontend/k8s/config-ui.yaml",
+                         "apps/access/k8s/access.yaml"):
+            src = self.read(manifest)
+            self.assertRegex(src, r"name: medcea-iam-lib,?\s+optional: true", manifest)
+            self.assertRegex(src, r"name: iam-lib,? +(# .*\n +)?mountPath: /iam", manifest)
 
     def test_offered_roles_are_platform_roles_the_database_accepts(self):
         src = self.read("apps/access/access-api.py")

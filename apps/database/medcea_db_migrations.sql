@@ -304,3 +304,285 @@ GRANT EXECUTE ON FUNCTION medcea.register_mqtt_credential(text, text, integer, t
 COMMENT ON TABLE medcea.mqtt_credential IS 'Mosquitto credentials, one per board (username = dns_name). Written only through register_mqtt_credential (onboarding); read by the mqtt-auth-sync sidecar as role mqtt_auth. Not readable by the API role.';
 
 NOTIFY pgrst, 'reload schema';
+
+-- ── Migration 008a: the access policy's schemas and its hash-chained history ─
+-- (codeplan IAM plan, Phase 1.1, Section 3.5.) Additive: nothing existing reads
+-- these yet. Phase 2 (008b) moves every medcea object to medcea_owner and adds
+-- the per-role grants; Phase 4 fills iam_policy with version 1.
+--
+--   medcea_owner   NOLOGIN; owns what this migration creates. Nobody logs in as
+--                  it, and its SECURITY DEFINER functions are the only writers
+--                  of the history.
+--   medcea_auth    pre_request() and set_actor() arrive in Phase 2. PostgREST's
+--                  anon will get USAGE here and nowhere else.
+--   iam_policy     not in schema iam, which apps/access --purge-data drops.
+--
+-- The history (iam_policy.history) is a hash chain: each row stores the hash of
+-- the one before it and hash = sha256(canonical JSON of the row, prev_hash
+-- included). append_history() is its one writer; verify_chain() re-computes it.
+-- Triggers refuse UPDATE, DELETE and TRUNCATE for every role, the owner
+-- included. verify_chain() catches any edit that does not rebuild the chain; a
+-- superuser who disables the triggers can still drop the newest events, or
+-- rewrite one and re-hash everything after it. Only anchoring the head outside
+-- the database (plan Section 7, not built) detects that.
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'medcea_owner') THEN
+        CREATE ROLE medcea_owner NOLOGIN;
+    END IF;
+END $$;
+
+CREATE SCHEMA IF NOT EXISTS medcea_auth AUTHORIZATION medcea_owner;
+CREATE SCHEMA IF NOT EXISTS iam_policy AUTHORIZATION medcea_owner;
+ALTER SCHEMA medcea_auth OWNER TO medcea_owner;
+ALTER SCHEMA iam_policy OWNER TO medcea_owner;
+REVOKE ALL ON SCHEMA medcea_auth, iam_policy FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS iam_policy.role (
+    code      text PRIMARY KEY,
+    db_role   text UNIQUE NOT NULL,
+    includes  text[] NOT NULL DEFAULT '{}',
+    retired   boolean NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.resource_group (
+    code        text PRIMARY KEY,
+    data_class  text NOT NULL CHECK (data_class IN ('regulated', 'history', 'config', 'personal'))
+);
+
+-- regprocedure keeps a member pointing at a real function; note that pg_upgrade
+-- refuses reg* columns other than regclass/regtype/regrole, so a major upgrade
+-- of this database goes through dump and restore (as the Bitnami chart does).
+CREATE TABLE IF NOT EXISTS iam_policy.member (
+    member_id   serial PRIMARY KEY,
+    group_code  text NOT NULL REFERENCES iam_policy.resource_group,
+    mtype       text NOT NULL,
+    object      regclass,
+    func        regprocedure,
+    on_level    char(1),
+    locator     text,
+    UNIQUE (mtype, locator)
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.version (
+    version              int PRIMARY KEY,
+    status               text NOT NULL CHECK (status IN ('draft', 'submitted', 'approved', 'applied', 'superseded')),
+    reason               text NOT NULL,
+    created_by_sub       uuid,
+    submitted_by_person  text,
+    approved_by_person   text,
+    approved_by_sub      uuid,
+    approved_at          timestamptz,
+    applied_at           timestamptz,
+    confirmed_by_person  text,          -- the bootstrap version only (plan 3.4)
+    confirmed_at         timestamptz,
+    checker_verdict      boolean,
+    checker_digest       text,
+    artefact_digest      text,
+    CHECK (approved_by_person IS NULL OR approved_by_person <> submitted_by_person)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_applied ON iam_policy.version ((true)) WHERE status = 'applied';
+
+CREATE TABLE IF NOT EXISTS iam_policy.entry (
+    version          int REFERENCES iam_policy.version,
+    role             text REFERENCES iam_policy.role,
+    group_code       text REFERENCES iam_policy.resource_group,
+    levels           char(1)[] NOT NULL CHECK (levels <@ ARRAY['R','X','C','U','A','O','K','D']::char(1)[]),
+    constraint_name  text,
+    applies_to       char(1)[],
+    PRIMARY KEY (version, role, group_code)
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.waiver (
+    version     int REFERENCES iam_policy.version,
+    id          text,
+    invariant   text NOT NULL CHECK (invariant IN ('I10', 'I11')),
+    subject     text,
+    group_code  text,
+    target      text,
+    levels      char(1)[],
+    review_by   date,
+    rationale   text NOT NULL,
+    controls    text NOT NULL,
+    PRIMARY KEY (version, id)
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.user_zone (
+    person_sub  uuid,
+    zone_id     int REFERENCES medcea.cea_zone,
+    PRIMARY KEY (person_sub, zone_id)
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.effective_route (
+    version     int,
+    service     text,
+    method      text,
+    path        text,
+    group_code  text,
+    level       char(1),
+    PRIMARY KEY (version, service, method, path)
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.export_log (
+    export_id     bigserial PRIMARY KEY,
+    at            timestamptz DEFAULT now(),
+    actor_sub     uuid,
+    actor_person  text,
+    actor_name    text,
+    groups        text[],
+    objects       text[]
+);
+
+CREATE TABLE IF NOT EXISTS iam_policy.history (
+    event_id      bigserial PRIMARY KEY,
+    at            timestamptz DEFAULT now(),
+    actor_sub     uuid,
+    actor_person  text,
+    actor_name    text,
+    event         text NOT NULL,
+    version       int,
+    reason        text,
+    payload       jsonb NOT NULL,
+    prev_hash     text NOT NULL,
+    hash          text NOT NULL
+);
+
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['role', 'resource_group', 'member', 'version', 'entry', 'waiver',
+                             'user_zone', 'effective_route', 'export_log', 'history'] LOOP
+        EXECUTE format('ALTER TABLE iam_policy.%I OWNER TO medcea_owner', t);
+    END LOOP;
+END $$;
+
+-- Append-only, for the owner too: the records cannot be changed, only added to.
+CREATE OR REPLACE FUNCTION iam_policy.refuse_change() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = iam_policy, pg_temp AS $$
+BEGIN
+    RAISE EXCEPTION '%.% is append-only: % refused', TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_OP
+        USING ERRCODE = 'insufficient_privilege';
+END $$;
+ALTER FUNCTION iam_policy.refuse_change() OWNER TO medcea_owner;
+REVOKE ALL ON FUNCTION iam_policy.refuse_change() FROM PUBLIC;
+
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['history', 'export_log'] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON iam_policy.%I', t || '_append_only', t);
+        EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON iam_policy.%I '
+                       'FOR EACH ROW EXECUTE FUNCTION iam_policy.refuse_change()', t || '_append_only', t);
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON iam_policy.%I', t || '_no_truncate', t);
+        EXECUTE format('CREATE TRIGGER %I BEFORE TRUNCATE ON iam_policy.%I '
+                       'FOR EACH STATEMENT EXECUTE FUNCTION iam_policy.refuse_change()', t || '_no_truncate', t);
+    END LOOP;
+END $$;
+
+-- The canonical text a history row is hashed over. One function, so the writer
+-- and the verifier cannot drift apart. Time in UTC at microsecond precision
+-- (the session's TimeZone must not change the hash); jsonb's text form sorts
+-- keys and normalises spacing, so the same row always gives the same text.
+CREATE OR REPLACE FUNCTION iam_policy.history_record(
+    p_event_id bigint, p_at timestamptz, p_actor_sub uuid, p_actor_person text, p_actor_name text,
+    p_event text, p_version int, p_reason text, p_payload jsonb, p_prev_hash text)
+RETURNS text LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object(
+        'event_id', p_event_id,
+        'at', to_char(p_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+        'actor_sub', p_actor_sub, 'actor_person', p_actor_person, 'actor_name', p_actor_name,
+        'event', p_event, 'version', p_version, 'reason', p_reason,
+        'payload', p_payload, 'prev_hash', p_prev_hash)::text
+$$;
+ALTER FUNCTION iam_policy.history_record(bigint, timestamptz, uuid, text, text, text, int, text, jsonb, text) OWNER TO medcea_owner;
+REVOKE ALL ON FUNCTION iam_policy.history_record(bigint, timestamptz, uuid, text, text, text, int, text, jsonb, text) FROM PUBLIC;
+
+-- append_history(event, payload, reason) → event_id. The only writer of the
+-- chain (infrastructure_functions in defaults.yaml: EXECUTE for access_svc and
+-- iam_svc, granted in Phase 2). The advisory lock serialises writers, so two
+-- transactions never chain onto the same head; the head is read after the lock
+-- is held, which READ COMMITTED guarantees and a snapshot-per-transaction
+-- isolation level does not — so those are refused rather than allowed to fork
+-- the chain. The actor is the database login until set_actor() (Phase 2)
+-- records the person; `version` is taken from payload.version when present.
+CREATE OR REPLACE FUNCTION iam_policy.append_history(p_event text, p_payload jsonb, p_reason text)
+RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam_policy, pg_temp AS $$
+DECLARE
+    v_id      bigint;
+    v_at      timestamptz := now();
+    v_name    text := 'db:' || session_user;
+    v_version int;
+    v_prev    text;
+BEGIN
+    IF coalesce(btrim(p_event), '') = '' THEN
+        RAISE EXCEPTION 'append_history: event is required';
+    END IF;
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'append_history needs READ COMMITTED (is %): a transaction snapshot could miss the head',
+            current_setting('transaction_isolation');
+    END IF;
+    p_payload := coalesce(p_payload, '{}'::jsonb);
+    IF jsonb_typeof(p_payload -> 'version') = 'number' THEN
+        v_version := (p_payload ->> 'version')::int;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtext('iam_policy.history'));
+    SELECT h.hash INTO v_prev FROM iam_policy.history h ORDER BY h.event_id DESC LIMIT 1;
+    v_prev := coalesce(v_prev, repeat('0', 64));
+    v_id := nextval(pg_get_serial_sequence('iam_policy.history', 'event_id'));
+    INSERT INTO iam_policy.history
+        (event_id, at, actor_sub, actor_person, actor_name, event, version, reason, payload, prev_hash, hash)
+    VALUES (v_id, v_at, NULL, NULL, v_name, p_event, v_version, p_reason, p_payload, v_prev,
+            encode(sha256(convert_to(iam_policy.history_record(
+                v_id, v_at, NULL, NULL, v_name, p_event, v_version, p_reason, p_payload, v_prev), 'UTF8')), 'hex'));
+    RETURN v_id;
+END $$;
+ALTER FUNCTION iam_policy.append_history(text, jsonb, text) OWNER TO medcea_owner;
+REVOKE ALL ON FUNCTION iam_policy.append_history(text, jsonb, text) FROM PUBLIC;
+
+-- verify_chain() → one row: ok, events, the first event that breaks the chain
+-- (NULL when ok), why, and the head hash. Run by health-check.sh as postgres.
+CREATE OR REPLACE FUNCTION iam_policy.verify_chain(
+    OUT ok boolean, OUT events bigint, OUT first_bad_event bigint, OUT detail text, OUT head text)
+LANGUAGE plpgsql STABLE SET search_path = iam_policy, pg_temp AS $$
+DECLARE
+    r     record;
+    prev  text := repeat('0', 64);
+BEGIN
+    ok := true; events := 0;
+    FOR r IN SELECT * FROM iam_policy.history ORDER BY event_id LOOP
+        events := events + 1;
+        IF r.prev_hash <> prev THEN
+            ok := false; first_bad_event := r.event_id;
+            detail := 'prev_hash does not match the hash of the event before it';
+            RETURN;
+        END IF;
+        IF r.hash <> encode(sha256(convert_to(iam_policy.history_record(
+                r.event_id, r.at, r.actor_sub, r.actor_person, r.actor_name, r.event,
+                r.version, r.reason, r.payload, r.prev_hash), 'UTF8')), 'hex') THEN
+            ok := false; first_bad_event := r.event_id;
+            detail := 'hash does not match the event''s contents';
+            RETURN;
+        END IF;
+        prev := r.hash;
+    END LOOP;
+    head := CASE WHEN events = 0 THEN NULL ELSE prev END;
+END $$;
+ALTER FUNCTION iam_policy.verify_chain() OWNER TO medcea_owner;
+REVOKE ALL ON FUNCTION iam_policy.verify_chain() FROM PUBLIC;
+
+-- Platform settings the database needs to know: today the MQTT topic root
+-- (PROJECT_NAME), written by apps/database/deploy.sh and read in Phase 2 by
+-- register_mqtt_credential() instead of a literal. service_only in the policy:
+-- deploy.sh revokes the API role's blanket grant on it.
+CREATE TABLE IF NOT EXISTS medcea.platform_setting (
+    key    text PRIMARY KEY,
+    value  text NOT NULL
+);
+COMMENT ON TABLE medcea.platform_setting IS 'Deploy-time platform settings (mqtt_topic_root = PROJECT_NAME). Written by apps/database/deploy.sh; not readable by the API role.';
+
+COMMENT ON SCHEMA iam_policy IS 'The access policy: versions, entries, waivers, zone assignments, compiled routes, export log and the hash-chained history (codeplan IAM plan 3.5).';
+COMMENT ON SCHEMA medcea_auth IS 'PostgREST role selection and the actor of a service session (Phase 2).';
+COMMENT ON TABLE iam_policy.history IS 'Hash-chained, append-only history of the access policy. Written only by iam_policy.append_history(); checked by iam_policy.verify_chain().';
+COMMENT ON TABLE iam_policy.export_log IS 'Append-only log of Database Management exports (Phase 2.6).';
+
+NOTIFY pgrst, 'reload schema';

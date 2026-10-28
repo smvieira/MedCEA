@@ -4,6 +4,7 @@
   cli.py check [--file F]               matrix invariants; exit 1 on any violation
   cli.py compile proxy HOST [--file F]  allowed_groups for a host variable, e.g. CONFIG_DOMAIN,
                                         printed as ["a", "b"] for an oauth2-proxy values file
+  cli.py compile routes [--file F]      the route table (routes.json of ConfigMap medcea-iam-lib)
   cli.py hosts [--file F]               every host and the roles it admits (for review)
   cli.py describe-gate HOST ROLES       for a gate's 403 page: the host's label, a tab, and the
                                         labels of ROLES (the deployed list, ["a", "b"]),
@@ -21,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler import invariants, model, proxies  # noqa: E402
+from compiler import invariants, model, proxies, routes  # noqa: E402
 
 
 def main(argv=None):
@@ -34,8 +35,8 @@ def main(argv=None):
     desc.add_argument("host")
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
-    comp.add_argument("target", choices=["proxy"])
-    comp.add_argument("host")
+    comp.add_argument("target", choices=["proxy", "routes"])
+    comp.add_argument("host", nargs="?")
     args = ap.parse_args(argv)
 
     p = model.load(args.file)
@@ -67,11 +68,22 @@ def main(argv=None):
         print(html.escape(label) + "\t" + html.escape(", ".join(roles)))
         return 0
 
-    if args.cmd == "compile" and args.target == "proxy":
+    if args.cmd == "compile":
         errors, _ = invariants.check(p)
         if errors:
             print(f"refusing to compile: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
             return 1
+    if args.cmd == "compile" and args.target == "routes":
+        try:
+            print(routes.dumps(routes.compile(p, os.path.basename(args.file) if args.file else "defaults.yaml")))
+        except routes.RouteError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "compile" and args.target == "proxy":
+        if not args.host:
+            print("ERROR: compile proxy needs a host variable, e.g. CONFIG_DOMAIN", file=sys.stderr)
+            return 2
         try:
             print(proxies.toml_list(proxies.admitted(p, args.host)))
         except KeyError as e:
