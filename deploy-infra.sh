@@ -760,14 +760,24 @@ _create_client() {
 # Same as _create_client but takes a JSON array of redirect URIs. The edge
 # wizard runs on the platform host itself and is opened on whichever address the
 # operator can reach — LAN, Tailscale or loopback — so one URI is not enough.
+# DEVICE_GRANT (third argument, default false) turns on the OAuth 2.0 device
+# authorization grant, which is how flash-device.sh signs a person in from a
+# terminal (IAM 1.5): an SSH session has no browser to receive a redirect. The
+# client is confidential, so only someone who holds config.env can start a code,
+# and it is the same client, so the token's azp stays edge-wizard — what Phase 2's
+# PostgREST check admits.
+# POST and PUT send the same full body. serviceAccountsEnabled is always sent
+# (false): a PUT that omits it toggles the service account and recreates its
+# user (CLAUDE.md pitfall). Password and implicit grants are off explicitly.
 _create_client_multi() {
-    local CLIENT_ID="$1" REDIRECT_JSON="$2" TOK UUID
+    local CLIENT_ID="$1" REDIRECT_JSON="$2" DEVICE_GRANT="${3:-false}" TOK UUID BODY
+    BODY="{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"implicitFlowEnabled\":false,\"serviceAccountsEnabled\":false,\"redirectUris\":${REDIRECT_JSON},\"attributes\":{\"post.logout.redirect.uris\":\"+\",\"oauth2.device.authorization.grant.enabled\":\"${DEVICE_GRANT}\"}}"
     TOK=$(_kc_token)
     curl -s -o /dev/null -X POST \
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"redirectUris\":${REDIRECT_JSON},\"attributes\":{\"post.logout.redirect.uris\":\"+\"}}" || true
+      -d "$BODY" || true
 
     UUID=$(curl -sf \
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${CLIENT_ID}" \
@@ -783,7 +793,7 @@ _create_client_multi() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${UUID}" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"redirectUris\":${REDIRECT_JSON},\"attributes\":{\"post.logout.redirect.uris\":\"+\"}}" || true
+      -d "$BODY" || true
 
     curl -sf \
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${UUID}/client-secret" \
@@ -842,7 +852,7 @@ hosts = ['127.0.0.1', 'localhost'] + [h for h in (e.get('EW_LAN'), e.get('EW_TS'
 uris = ['http://%s:%s/oauth2/callback' % (h, port) for h in hosts]
 if e.get('EW_ONBOARD'): uris.append('https://%s/oauth2/callback' % e['EW_ONBOARD'])
 print(json.dumps(uris))")"
-_EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS")
+_EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS" true)
 echo -e "${YELLOW}  Creating client 'access'...${NC}"
 # Two jobs, one client: the browser login for the User Manager (its oauth2-proxy)
 # and the service account apps/access uses to create, enable, role-map and

@@ -21,13 +21,26 @@ Three commands, all line-oriented so the shell stays the engine:
 
 A unit/zone has one and only one SENSE and one and only one CONTROL. That rule
 is enforced here, against the live table, rather than in the wizard's head.
+
+Who is asking (IAM plan 1.5): flash-device.sh hands each call the operator's
+access token on fd 3 (its platdb() helper), and only when PLATFORM_DB_TOKEN_FD=3
+is set — never in argv, where any account on the host can read it, nor in the
+environment. Phase 1 sends nothing: config-api has no jwt-secret yet, so a
+Bearer token would be refused with PGRST300, and any other header would only
+land in PostgREST's request.headers setting for nobody to check. With
+IAM_POSTGREST_JWT=true (Phase 2, set by deploy-infra.sh together with
+config-api's JWT key) the token goes as Authorization: Bearer, and a call
+without a usable one is refused here, before any request is made.
 """
 
+import base64
 import json
 import os
 import re
+import select
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +61,100 @@ HOSTNAME_MAX = 32
 
 class PlatformError(Exception):
     """The platform database could not be reached or refused the write."""
+
+
+# ------------------------------------------------------------------ token ----
+# Invariant: on success this module writes nothing to stderr. The shell merges
+# 2>&1 and reads the first line (`board` prints nothing when the board is
+# unknown, so one stray note would read as "registered"), which is why a
+# missing token in Phase 1 is reported by the shell, which knows why. The token
+# itself never appears in output or in an exception message.
+_TOKEN = None
+TOKEN_MAX = 16384
+TOKEN_WAIT = 5
+
+
+def _token():
+    """The access token from fd 3, read once; "" when there is none.
+
+    Read only when PLATFORM_DB_TOKEN_FD=3, so an fd 3 this process inherited
+    for some other reason is never consumed. Up to EOF, with a guard: a writer
+    that never writes must not hang an onboarding run.
+    """
+    global _TOKEN
+    if _TOKEN is not None:
+        return _TOKEN
+    _TOKEN = ""
+    if os.environ.get("PLATFORM_DB_TOKEN_FD") != "3":
+        return _TOKEN
+    data, deadline = b"", time.monotonic() + TOKEN_WAIT
+    try:
+        while len(data) <= TOKEN_MAX:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([3], [], [], left)[0]:
+                return _TOKEN           # no EOF in time: a partial token is no token
+            chunk = os.read(3, TOKEN_MAX + 1 - len(data))
+            if not chunk:
+                _TOKEN = data.decode("ascii", "replace").strip()
+                return _TOKEN
+            data += chunk
+    except (OSError, ValueError):
+        return _TOKEN
+    finally:
+        try:
+            os.close(3)
+        except OSError:
+            pass
+    return _TOKEN
+
+
+def _phase2():
+    return os.environ.get("IAM_POSTGREST_JWT", "false").strip().lower() == "true"
+
+
+def _claims(tok):
+    try:
+        p = tok.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+    except (ValueError, IndexError):
+        return {}
+
+
+def _auth_headers(method, path):
+    """The credential for one request: none in Phase 1, the Bearer token in Phase 2."""
+    if not _phase2():
+        return {}
+    tok = _token()
+    if not tok:
+        raise PlatformError(
+            "no valid sign-in token: run ./edge/flash-device.sh again and sign in (IAM "
+            "Phase 2: the database no longer accepts anonymous writes)")
+    exp = _claims(tok).get("exp")
+    if not isinstance(exp, (int, float)) or exp < time.time() + 15:
+        raise PlatformError(
+            "the sign-in token expired before the call — re-run; the slot's row is "
+            "updated in place")
+    return {"Authorization": "Bearer " + tok}
+
+
+def _phase2_error(code, detail):
+    """A PostgREST refusal of the token, said in terms of what to do; else None."""
+    try:
+        body = json.loads(detail)
+    except ValueError:
+        body = {}
+    pg = (body.get("code") or "") if isinstance(body, dict) else ""
+    msg = ((body.get("message") or "") if isinstance(body, dict) else "") or detail
+    if code == 401 and pg == "PGRST301":
+        return ("the sign-in token expired during the request — re-run; the slot's row is "
+                "updated in place")
+    if code == 401 and pg in ("PGRST300", "PGRST302"):
+        return "config-api has no JWT key — run ./deploy-infra.sh"
+    if code == 403 and "permission denied" in msg:
+        who = _claims(_token()).get("preferred_username") or "this account"
+        return ("%s's role may not onboard boards — ask an administrator in the User Manager"
+                % who)
+    return None
 
 
 # ------------------------------------------------------------------ endpoint --
@@ -110,12 +217,16 @@ def _request(base, path, method="GET", body=None, prefer=None):
         headers["Content-Type"] = "application/json"
     if prefer:
         headers["Prefer"] = prefer
+    headers.update(_auth_headers(method, path))     # raises before any network I/O
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             raw = r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:400]
+        said = _phase2_error(e.code, detail) if _phase2() else None
+        if said:
+            raise PlatformError("%s %s -> HTTP %d: %s" % (method, path, e.code, said)) from None
         raise PlatformError("%s %s -> HTTP %d %s" % (method, path, e.code, detail)) from e
     except (urllib.error.URLError, OSError) as e:
         raise PlatformError("cannot reach the platform database at %s: %s" % (url, e)) from e
@@ -371,6 +482,9 @@ def main(argv):
         print(__doc__)
         return 0
     cmd = argv[1]
+    # Before api_base(): fd 3 is drained and closed first, so kubectl never
+    # inherits it and the writer is never left blocked.
+    _token()
     try:
         base = api_base()
         if cmd == "ping":

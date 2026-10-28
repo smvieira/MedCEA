@@ -110,15 +110,18 @@ ROLE_ARGS=()
 [ -n "${EDGE_WIZARD_ROLE:-}" ] && ROLE_ARGS=(--required-role "$EDGE_WIZARD_ROLE")
 
 echo "CEA edge onboarding wizard on port $PORT — sign in with Keycloak realm ${KEYCLOAK_REALM:-medcea}"
+echo "  runs act as the person who presses Start"
 [ -n "${ONBOARD_DOMAIN:-}" ] && echo "  https://$ONBOARD_DOMAIN/"
 for h in ${_lan:+$_lan} ${_ts:+$_ts} 127.0.0.1; do echo "  http://$h:$PORT/"; done
 
-exec python3 "$SCRIPT_DIR/src/host/wizard_server.py" \
+# The secret goes in the environment of this one process, not on its command
+# line: argv is readable by every account on the host (/proc/<pid>/cmdline), and
+# wizard_server pops it, so the flash runs it starts do not inherit it either.
+EDGE_WIZARD_SECRET="$EDGE_WIZARD_SECRET" exec python3 "$SCRIPT_DIR/src/host/wizard_server.py" \
   --dir "$SPOOL" --token unused --port "$PORT" --bind "$BIND" \
   --daemon --repo-root "$REPO_ROOT" \
   --onboard-url "https://${CONFIG_DOMAIN:-config.example.invalid}/#devices" \
   --auth keycloak \
   --issuer "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM:-medcea}" \
   --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}" \
-  --client-secret "$EDGE_WIZARD_SECRET" \
   --oidc-insecure "${ROLE_ARGS[@]}" "${HOST_ARGS[@]}"

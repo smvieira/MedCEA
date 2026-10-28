@@ -91,6 +91,22 @@ Browser UI:
       --ui-spool DIR    Join a spool directory owned by an already-running
                         wizard daemon instead of starting a server. Set by
                         edge/wizard-daemon; not usually typed by hand.
+      --token-fd N      With --ui-spool only: the descriptor on which the
+                        daemon hands out the operator's access tokens. Set by
+                        the daemon, never typed.
+
+Signing in:
+  Registering a board reads and writes the platform database as the person
+  running it. The browser modes (--ui, the wizard daemon) use the wizard's
+  Keycloak sign-in. A terminal run shows a code to enter at
+  https://keycloak.<domain>/realms/<realm>/device from any device with a
+  browser. --unregistered needs no sign-in. Until IAM Phase 2 a run without a
+  sign-in still works and says what would be refused — a code nobody entered
+  included, and --yes without a terminal does not wait for one; only a sign-in
+  denied in the browser, or an account without EDGE_WIZARD_ROLE, stops the
+  run. From Phase 2 registering needs one. With --ui, open the address the
+  terminal prints (it carries the run's token): a sign-in from the bare address
+  gets a browser session but does not act for the run.
 
 Firmware selection:
   The chip family is read off the silicon first, then edge/firmware/ is scanned
@@ -129,13 +145,14 @@ ROLE=""; UNIT_WANTED=""; ZONE_WANTED=""; UNREGISTERED=0; DO_REGISTER=1
 ASK_ADVANCED=0; MQTT_HOST=""; MQTT_PORT=""; TOPIC_ROOT=""
 CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
 UI=0; UI_PORT=8088; UI_BIND="0.0.0.0"; UI_DIR=""; UI_PID=""; UI_TOKEN=""; STAGE=""
-UI_INSECURE=0; UI_MANAGED=0
+UI_INSECURE=0; UI_MANAGED=0; TOKEN_FD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)     usage; exit 0 ;;
     --ui)          UI=1;             shift ;;
     --ui-insecure) UI=1; UI_INSECURE=1; shift ;;
     --ui-spool)    UI=1; UI_MANAGED=1; UI_DIR="${2:-}"; shift 2 ;;
+    --token-fd)    TOKEN_FD="${2:-}"; shift 2 ;;
     --ui-port)     UI_PORT="${2:-}"; shift 2 ;;
     --ui-bind)     UI_BIND="${2:-}"; shift 2 ;;
     --offline)     OFFLINE=1;         shift ;;
@@ -159,6 +176,11 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown option: $1" >&2; echo >&2; usage >&2; exit 2 ;;
   esac
 done
+if [ -n "$TOKEN_FD" ]; then
+  [[ "$TOKEN_FD" =~ ^[0-9]+$ ]] || { echo "--token-fd: not a descriptor number: $TOKEN_FD" >&2; exit 2; }
+  [ "$UI_MANAGED" = 1 ] || { echo "--token-fd is only for --ui-spool (set by the wizard daemon)" >&2; exit 2; }
+  { : >&"$TOKEN_FD"; } 2>/dev/null || { echo "--token-fd $TOKEN_FD is not open" >&2; exit 2; }
+fi
 
 set -e
 
@@ -302,6 +324,178 @@ print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
 }
 ui_waiting() { ui_on && info "${DIM}→ answer in the browser${N}" || true; }
 
+# --- who this run acts as (IAM 1.5) -------------------------------------------
+# A holder — wizard_server (daemon or --ui) or the edge_auth.py agent (terminal)
+# — keeps the refresh token and the client secret. This shell only ever asks it
+# for an access token, right before each platform_db call, so every call has a
+# token with time left however long the wiring questions took. TOK_R/TOK_W are
+# the channel: the daemon's socketpair fd (both the same), or a coproc's saved
+# fds (bash unsets the coproc array when it exits, and children never inherit
+# them). None of these is exported.
+TOK_R=""; TOK_W=""; AUTH_PID=""; EDGE_TOKEN=""; EDGE_USER=""; EDGE_NAME=""; EDGE_ROLE=""
+EDGE_AUTH_CODE=""; EDGE_AUTH_MSG=""
+# Phase 2 of the IAM plan: config-api verifies the token, so a missing one is a
+# refusal rather than a note. deploy-infra.sh sets it with config-api's JWT key.
+phase2() { [ "${IAM_POSTGREST_JWT:-false}" = true ]; }
+
+# The device-code box. Terminal only: the code is a credential for the next few
+# minutes, and the browser log is readable by whoever watches the wizard page.
+token_show_device() { # uri code expires_in
+  local mins=$(( (${3:-600} + 59) / 60 ))
+  printf '\n    %sThis run reads and writes the platform database as you.%s\n' "$B" "$N"
+  printf '    On any device with a browser open:  %s%s%s\n' "$B" "$1" "$N"
+  printf '    and enter the code   %s%s%s\n' "$B" "$2" "$N"
+  printf '    Waiting — the code expires in %s min. Ctrl-C stops; nothing has been written.\n\n' "$mins"
+  ui_append "    sign in: open $1 and enter the code shown in the terminal"
+}
+
+# token_get MIN_TTL WHY -> EDGE_TOKEN, EDGE_USER, EDGE_NAME, EDGE_ROLE, or
+# EDGE_AUTH_CODE/EDGE_AUTH_MSG and status 1. Sets globals like the prompts do,
+# and for the same reason is never called inside $(…): a wait for a sign-in can
+# be long, and a trap cannot run while a command substitution blocks.
+# One reply is one write of at most 4096 bytes, but `read -t` returns whatever
+# had arrived when it timed out, so a partial read is kept and continued.
+token_get() {
+  local _buf="" _part="" _rc=0 _line kind f1 f2 f3 f4 f5
+  EDGE_TOKEN=""; EDGE_AUTH_CODE=""; EDGE_AUTH_MSG=""
+  if [ -z "$TOK_R" ] || [ -z "$TOK_W" ]; then
+    EDGE_AUTH_CODE=no_session; EDGE_AUTH_MSG="not signed in"; return 1
+  fi
+  # SIGPIPE is ignored for this one write: a holder whose end has closed (the
+  # daemon's serve thread ended, a coproc not yet reaped) would otherwise kill
+  # this shell on the spot — exit 141, no EXIT trap, so no cleanup, no record,
+  # no `finished` — instead of failing the write into the branch below. Only
+  # around the write, because children inherit an ignored SIGPIPE.
+  trap '' PIPE
+  { printf 'token\t%s\t%s\n' "$1" "${2//$'\t'/ }" >&"$TOK_W"; } 2>/dev/null
+  _rc=$?
+  trap - PIPE
+  if [ "$_rc" -ne 0 ]; then
+    token_close
+    EDGE_AUTH_CODE=no_session; EDGE_AUTH_MSG="the sign-in helper stopped"; return 1
+  fi
+  while :; do
+    _part=""
+    if IFS= read -r -t 1 _part <&"$TOK_R"; then
+      _line="$_buf$_part"; _buf=""
+      IFS=$'\t' read -r kind f1 f2 f3 f4 f5 <<<"$_line"
+      case "$kind" in
+        WAIT)
+          case "$f1" in
+            device) token_show_device "$f2" "$f3" "$f4" ;;
+            retry)  warn "$f2" ;;
+            *)      info "$f2" ;;
+          esac ;;
+        OK)
+          EDGE_TOKEN="$f5"; EDGE_USER="$f2"; EDGE_NAME="$f3"; EDGE_ROLE="$f4"
+          [ "$EDGE_NAME" = - ] && EDGE_NAME="$EDGE_USER"
+          return 0 ;;
+        ERR)
+          EDGE_AUTH_CODE="$f1"; EDGE_AUTH_MSG="$f2"; return 1 ;;
+        *)
+          EDGE_AUTH_CODE=no_session; EDGE_AUTH_MSG="the sign-in helper sent something unexpected"
+          return 1 ;;
+      esac
+    else
+      _rc=$?
+      if [ "$_rc" -gt 128 ]; then
+        _buf="$_buf$_part"
+        # A holder that died mid-request would otherwise leave this waiting for
+        # ever. The daemon has no pid here; its end of the socket closes instead.
+        if { [ -n "$AUTH_PID" ] && ! kill -0 "$AUTH_PID" 2>/dev/null; } \
+           || { [ "$UI_MANAGED" != 1 ] && [ -n "$UI_PID" ] && ! kill -0 "$UI_PID" 2>/dev/null; }; then
+          token_close
+          EDGE_AUTH_CODE=no_session; EDGE_AUTH_MSG="the sign-in helper stopped"; return 1
+        fi
+        continue
+      fi
+      # EOF: the holder is gone for good. Closing the channel makes every later
+      # call return at once instead of writing into a dead socket.
+      token_close
+      EDGE_AUTH_CODE=no_session; EDGE_AUTH_MSG="the sign-in helper stopped"; return 1
+    fi
+  done
+}
+
+# Every platform_db call goes through this, with the token on fd 3.
+#  - printf is a builtin, so the token is never in any process's argv;
+#  - <(…) is always a pipe; never "simplify" it to 3<<<, which bash may back
+#    with a temporary file on disk;
+#  - 3< shadows any fd 3 this shell inherited, for this one command.
+# PLATFORM_DB_TOKEN_FD is empty without a token, so platform_db reads nothing.
+platdb() {
+  PLATFORM_DB_TOKEN_FD=${EDGE_TOKEN:+3} IAM_POSTGREST_JWT="${IAM_POSTGREST_JWT:-false}" \
+    python3 "$PLATDB" "$@" 3< <(printf '%s' "$EDGE_TOKEN")
+}
+
+# After this nothing in the run can obtain a token: the channel is closed, the
+# agent (which wipes its tokens on EOF or SIGTERM) is stopped. The --ui server
+# only drops the run's tokens on EOF and keeps serving the summary.
+token_close() {
+  EDGE_TOKEN=""
+  # No 2>/dev/null on these: on a bare `exec` it would redirect the whole
+  # script's stderr for good, and closing an fd with >&- cannot fail anyway.
+  if [ -n "$TOK_W" ]; then exec {TOK_W}>&-; fi
+  if [ -n "$TOK_R" ] && [ "$TOK_R" != "$TOK_W" ]; then exec {TOK_R}<&-; fi
+  TOK_R=""; TOK_W=""
+  if [ -n "$AUTH_PID" ]; then kill "$AUTH_PID" 2>/dev/null || true; AUTH_PID=""; fi
+}
+
+# The terminal holder: edge_auth.py agent, signing in with the device grant.
+# Lazy — it does nothing until the first token request. The secret reaches it
+# in its environment only (argv is world-readable), and it pops it.
+auth_start_agent() {
+  local _iss="https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM:-medcea}"
+  coproc EDGEAUTH { EDGE_WIZARD_SECRET="$EDGE_WIZARD_SECRET" exec python3 "$SRC_HOST/edge_auth.py" agent \
+      --issuer "$_iss" --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}" --oidc-insecure \
+      ${EDGE_WIZARD_ROLE:+--required-role "$EDGE_WIZARD_ROLE"}; }
+  AUTH_PID=$EDGEAUTH_PID; TOK_R=${EDGEAUTH[0]}; TOK_W=${EDGEAUTH[1]}
+}
+
+# What a failed token_get means for STEP (signin, board, erase, register).
+# Returns 0 to carry on without a token, 1 to skip the step (register), or dies.
+# Phase 1 is report-only: only an explicit decision — a sign-in denied in the
+# browser, a missing role — stops the run. A device code nobody entered (an
+# unattended run, no browser at hand, a pending account) is reported like any
+# other missing sign-in. The role is the wizard's own gate, enforced in every
+# phase; lost mid-run it stops the run before the erase and skips register.
+auth_report() {
+  local _msg="${EDGE_AUTH_MSG:-no valid sign-in}"
+  EDGE_TOKEN=""
+  if [ "$EDGE_AUTH_CODE" = role ]; then
+    token_close
+    case "$1" in
+      signin|board|erase) die "$_msg" ;;
+      register) warn "$_msg"; return 1 ;;
+    esac
+  fi
+  case "$1" in
+    signin)
+      [ "$EDGE_AUTH_CODE" = denied ] && die "$_msg"
+      if ! phase2; then
+        warn "$_msg — platform calls are anonymous, refused from IAM Phase 2"
+        return 0
+      fi
+      warn "$_msg"
+      ui_waiting
+      prompt_confirm 'Continue without a platform identity?' \
+        "The board will come up as cea-un-<mac6> with no MQTT credential, no unit and no zone — the same as --unregistered. Onboard it again once you can sign in."
+      [ "$ANSWER" = "y" ] || die "aborted: no sign-in, and you chose not to continue unregistered"
+      UNREGISTERED=1; token_close
+      return 0 ;;
+    board|erase)
+      if phase2; then
+        die "$_msg. Nothing was erased."
+      fi
+      warn "no valid sign-in ($_msg) — this step would be refused from IAM Phase 2"
+      return 0 ;;
+    register)
+      warn "no valid sign-in ($_msg) — this step would be refused from IAM Phase 2"
+      phase2 && return 1
+      return 0 ;;
+  esac
+}
+
 # --- menus -------------------------------------------------------------------
 # A numbered list, printed the same way in both surfaces. The browser gets the
 # entries as CHOICES and returns an index; the terminal prints them and reads
@@ -426,6 +620,7 @@ cleanup() {
       : > "$UI_DIR/stop" 2>/dev/null || true
     fi
   fi
+  token_close 2>/dev/null || true
   [ -n "$UI_PID" ] && kill "$UI_PID" 2>/dev/null || true
   [ -n "$STAGE" ]  && rm -rf "$STAGE" 2>/dev/null || true
   # Only remove the spool if this run created it. Under --ui-spool the daemon
@@ -451,6 +646,12 @@ if [ "$UI" = 1 ] && [ "$UI_MANAGED" = 1 ]; then
   [ -d "$UI_DIR" ] || { echo "--ui-spool: no such directory: $UI_DIR" >&2; exit 2; }
   step "Browser UI"
   info "attached to the wizard daemon's session"
+  if [ -n "$TOKEN_FD" ]; then
+    TOK_R=$TOKEN_FD; TOK_W=$TOKEN_FD
+  elif [ "$UNREGISTERED" != 1 ]; then
+    phase2 && die "started without a sign-in channel: restart cea-edge-wizard (apps/edge-wizard/deploy.sh)"
+    warn "the wizard daemon predates IAM 1.5 (no sign-in channel): platform calls are anonymous — restart cea-edge-wizard"
+  fi
 elif [ "$UI" = 1 ]; then
   UI_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cea-wizard.XXXXXX")"
   chmod 700 "$UI_DIR"
@@ -480,9 +681,10 @@ elif [ "$UI" = 1 ]; then
        against a fixed port. Use --ui-port ${EDGE_WIZARD_PORT:-8088}."
     fi
     _iss="https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM:-medcea}"
+    # No secret here: it goes in the server's environment (argv is world-readable).
     _kc_args=(--auth keycloak --issuer "$_iss"
-              --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}"
-              --client-secret "$EDGE_WIZARD_SECRET" --oidc-insecure)
+              --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}" --oidc-insecure
+              --token-channel stdio)
     [ -n "${EDGE_WIZARD_ROLE:-}" ] && _kc_args+=(--required-role "$EDGE_WIZARD_ROLE")
   fi
 
@@ -509,10 +711,21 @@ elif [ "$UI" = 1 ]; then
   _host_args=(); for h in "${_hosts[@]}"; do _host_args+=(--allowed-host "$h"); done
 
   UI_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-  python3 "$SRC_HOST/wizard_server.py" --dir "$UI_DIR" --token "$UI_TOKEN" \
-      --port "$UI_PORT" --bind "$UI_BIND" --onboard-url "$ONBOARD_URL" \
-      --parent-pid $$ "${_kc_args[@]}" "${_host_args[@]}" &
-  UI_PID=$!
+  if [ "$UI_AUTH" = keycloak ]; then
+    # A coproc, so the server is also this run's token holder: the first
+    # Keycloak sign-in through the link printed below (it carries $UI_TOKEN)
+    # binds the run (--token-channel stdio).
+    coproc WIZ { EDGE_WIZARD_SECRET="$EDGE_WIZARD_SECRET" exec python3 "$SRC_HOST/wizard_server.py" \
+        --dir "$UI_DIR" --token "$UI_TOKEN" \
+        --port "$UI_PORT" --bind "$UI_BIND" --onboard-url "$ONBOARD_URL" \
+        --parent-pid $$ "${_kc_args[@]}" "${_host_args[@]}"; }
+    UI_PID=$WIZ_PID; TOK_R=${WIZ[0]}; TOK_W=${WIZ[1]}
+  else
+    python3 "$SRC_HOST/wizard_server.py" --dir "$UI_DIR" --token "$UI_TOKEN" \
+        --port "$UI_PORT" --bind "$UI_BIND" --onboard-url "$ONBOARD_URL" \
+        --parent-pid $$ "${_host_args[@]}" &
+    UI_PID=$!
+  fi
 
   for _ in $(seq 1 60); do [ -s "$UI_DIR/server.port" ] && break; sleep 0.1; done
   if ! kill -0 "$UI_PID" 2>/dev/null || [ ! -s "$UI_DIR/server.port" ]; then
@@ -523,17 +736,23 @@ elif [ "$UI" = 1 ]; then
   build_hosts        # now with the port the server actually bound
 
   step "Browser UI"
-  _q=""; [ "$UI_AUTH" = token ] && _q="/?t=$UI_TOKEN"
-  _urls=(); for h in "${_hosts[@]}"; do
+  # Under Keycloak the token no longer admits anyone; it marks the sign-in that
+  # binds the run (wizard_server _auth), so it goes to the terminal only. The
+  # browser log is readable by every signed-in session, and a link copied from
+  # it would let anyone bind the run.
+  _q="/?t=$UI_TOKEN"
+  _urls=(); _logurls=(); for h in "${_hosts[@]}"; do
     case "$h" in localhost:*) continue ;; esac      # 127.0.0.1 already covers it
-    _urls+=("http://$h${_q:-/}")
+    _urls+=("http://$h$_q")
+    if [ "$UI_AUTH" = keycloak ]; then _logurls+=("http://$h/"); else _logurls+=("http://$h$_q"); fi
   done
   if [ "$UI_AUTH" = keycloak ]; then
-    info "Open this and sign in with Keycloak:"
+    info "Open this exact link and sign in with Keycloak — the run acts as whoever does:"
   else
     info "Open this — the token is required:"
   fi
-  for u in "${_urls[@]}"; do printf '      %s%s%s\n' "$B" "$u" "$N"; ui_append "      $u"; done
+  for u in "${_urls[@]}"; do printf '      %s%s%s\n' "$B" "$u" "$N"; done
+  for u in "${_logurls[@]}"; do ui_append "      $u"; done
   if [ "$UI_AUTH" = keycloak ]; then
     info "${DIM}realm ${KEYCLOAK_REALM:-medcea} at ${KEYCLOAK_DOMAIN}${N}"
     [ -n "${EDGE_WIZARD_ROLE:-}" ] && info "${DIM}requires the '${EDGE_WIZARD_ROLE}' realm role${N}"
@@ -567,10 +786,38 @@ UNIT_CODE=""; ZONE_CODE=""; ZONE_ID=""; SLOT_DNS=""
 SENSORS_TSV=""; CONTROL_PINS_TSV=""; CONTROL_DRIVER="relay8"
 MESSAGE_INTERVAL=""; POLL_MS=""
 
+# --- sign in -------------------------------------------------------------------
+# Before the first database call: the slots are read, and later written, as the
+# person onboarding the board. The browser modes already have a holder; a
+# terminal run starts the device-grant agent here.
+if [ "$UNREGISTERED" != 1 ]; then
+  step "Sign in"
+  if [ -z "$TOK_W" ] && [ "$UI_MANAGED" != 1 ]; then
+    if [ "$ASSUME_YES" = 1 ] && [ ! -t 0 ] && ! phase2; then
+      # A scripted run: nobody is there to enter a device code, and waiting the
+      # code's ten minutes out would only delay the same anonymous run.
+      warn "not signed in: --yes without a terminal — platform calls are anonymous (refused from IAM Phase 2)"
+    elif [ -n "${EDGE_WIZARD_SECRET:-}" ] && [ -n "${KEYCLOAK_DOMAIN:-}" ]; then
+      auth_start_agent
+    elif phase2; then
+      die "registered onboarding needs a Keycloak sign-in: run ./deploy-infra.sh, or use --unregistered"
+    else
+      warn "not signed in: EDGE_WIZARD_SECRET is not in config.env — platform calls are anonymous (refused from IAM Phase 2)"
+    fi
+  fi
+  if [ -n "$TOK_W" ]; then
+    if token_get 120 "read the free slots"; then
+      info "signed in as ${B}$EDGE_NAME${N} ($EDGE_USER, $EDGE_ROLE) — this run acts as this person"
+    else
+      auth_report signin
+    fi
+  fi
+fi
+
 if [ "$UNREGISTERED" != 1 ]; then
   step "Platform slot"
   SLOTS=""
-  if ! SLOTS="$(python3 "$PLATDB" slots 2>&1)" || ! grep -q '^SLOT' <<<"$SLOTS"; then
+  if ! SLOTS="$(platdb slots 2>&1)" || ! grep -q '^SLOT' <<<"$SLOTS"; then
     warn "the platform database did not answer:"
     printf '%s\n' "$SLOTS" | sed 's/^/       /' >&2
     echo "    Units and zones live in the database, so without it this board"
@@ -580,6 +827,7 @@ if [ "$UNREGISTERED" != 1 ]; then
       "The board will come up as cea-un-<mac6> with no MQTT credential, no unit and no zone — the same as --unregistered. Onboard it again once the platform is reachable."
     [ "$ANSWER" = "y" ] || die "aborted: no platform database, and you chose not to continue unregistered"
     UNREGISTERED=1
+    token_close
   fi
 fi
 
@@ -992,7 +1240,8 @@ info "mac:    $MAC"
 MOVE_FROM_ID=""
 if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
   _serial="$(tr -d ':' <<<"$MAC" | tr '[:upper:]' '[:lower:]')"
-  if _b="$(python3 "$PLATDB" board "$_serial" 2>&1)"; then
+  token_get 120 "check this board" || auth_report board
+  if _b="$(platdb board "$_serial" 2>&1)"; then
     if [ -n "$_b" ]; then
       IFS=$'\t' read -r _ b_id b_dns b_zone b_role b_active b_unit b_zonecode <<<"$_b"
       if [ "$b_zone" = "$ZONE_ID" ] && [ "$b_role" = "$ROLE" ]; then
@@ -1223,6 +1472,12 @@ info "hostname   : $HOSTNAME   ${DIM}(${#HOSTNAME} chars — DHCP name and devic
 step "Flash"
 echo "    About to write $FW_NAME to $CHIP_DESC at $MAC."
 [ "$DO_ERASE" = 1 ] && echo "    ${YEL}erase_flash wipes the entire chip — filesystem, NVS, any stored credential.${N}"
+# A forced refresh (330 s > the realm's 300 s lifespan) while the board is still
+# intact: a sign-in that ended during the wiring questions is found now, not at
+# register, after the erase.
+if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
+  token_get 330 "erase the board" || auth_report erase
+fi
 if [ "$ASSUME_YES" != 1 ]; then
   ui_waiting
   _hint="Writes $FW_NAME to $CHIP_DESC at $MAC."
@@ -1577,7 +1832,7 @@ fi
 #
 # Deliberately after the verify: registering a board that never joined the
 # network would fill a slot with something that is not there.
-REGISTERED_ID=""
+REGISTERED_ID=""; REGISTERED_BY=""
 if [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ]; then
   step "Registering with the platform"
   if [ -z "$IP" ]; then
@@ -1625,9 +1880,16 @@ import json, os; print(len(json.loads(os.environ["ANSWER"])))')"
       info "$_n component row(s)"
     fi
 
-    if REG_OUT="$(printf '%s' "$REG_JSON" | python3 "$PLATDB" register 2>&1)"; then
+    _reg_go=1
+    token_get 330 "record the board" || auth_report register || _reg_go=0
+    if [ "$_reg_go" != 1 ]; then
+      warn "the board is up, but it was not registered: no valid sign-in."
+      warn "Until it is registered the broker refuses this board's credential, so it"
+      warn "cannot publish. Onboard it again once signed in (the slot's row is updated in place)."
+    elif REG_OUT="$(printf '%s' "$REG_JSON" | platdb register 2>&1)"; then
       IFS=$'\t' read -r REG_ACTION REGISTERED_ID <<<"$REG_OUT"
       info "${GRN}$REG_ACTION device $REGISTERED_ID${N} — the slot is now taken"
+      [ -n "$EDGE_TOKEN" ] && REGISTERED_BY="$EDGE_USER"
     else
       # Not fatal. The board is flashed, online and running; what failed is the
       # bookkeeping, and re-running the wizard for the same slot updates the row
@@ -1641,6 +1903,8 @@ import json, os; print(len(json.loads(os.environ["ANSWER"])))')"
     fi
   fi
 fi
+# The run needs no further token: end the channel (and the agent's refresh token).
+token_close
 
 # ---------------------------------------------------- 11. record --------------
 mkdir -p "$OUT_DIR"; chmod 700 "$OUT_DIR"
@@ -1654,7 +1918,7 @@ UNREGISTERED="$UNREGISTERED" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" \
 ZONE_CODE="$ZONE_CODE" ZONE_ID="$ZONE_ID" REGISTERED_ID="$REGISTERED_ID" \
 MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" TOPIC_ROOT="$TOPIC_ROOT" \
 MQTT_USER="${MQTT_USER:-}" MQTT_PASS="${MQTT_PASS:-}" \
-DB_COMPONENTS="$DB_COMPONENTS" \
+DB_COMPONENTS="$DB_COMPONENTS" REGISTERED_BY="$REGISTERED_BY" \
 "$VENV_DIR/bin/python" - <<'PY'
 import datetime, getpass, json, os, socket
 e = os.environ
@@ -1669,6 +1933,9 @@ rec = {
     # the difference between "the platform knows about this board" and "a board
     # exists that nothing has a record of".
     "platform_device_id": int(e["REGISTERED_ID"]) if e["REGISTERED_ID"] else None,
+    # The Keycloak account the registration was made as (IAM 1.5), or None when
+    # it was made anonymously or not at all. flashed_by below is the host login.
+    "registered_by": e["REGISTERED_BY"] or None,
     # The board's broker credential sits here in plaintext like its Wi-Fi PSK
     # (this file is mode 600 in a 700 directory); the platform keeps only a hash.
     "mqtt": None if unreg else {"host": e["MQTT_HOST"], "port": int(e["MQTT_PORT"]),
@@ -1712,6 +1979,7 @@ if ui_on; then
   RECORD="$RECORD" ONBOARD_URL="${ONBOARD_URL:-}" UI_DIR="$UI_DIR" \
   UNREGISTERED="$UNREGISTERED" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" \
   ZONE_CODE="$ZONE_CODE" REGISTERED_ID="$REGISTERED_ID" \
+  REGISTERED_BY_NAME="${REGISTERED_BY:+$EDGE_NAME ($REGISTERED_BY)}" \
   TOPIC_BASE="${TOPIC_BASE:-}" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" \
   python3 -c '
 import json, os
@@ -1731,6 +1999,8 @@ if not unreg:
         f += [["publishes", e["TOPIC_BASE"] + "/sense/<tag>", False]]
     f += [["registered as", ("medcea.device %s" % e["REGISTERED_ID"]) if e["REGISTERED_ID"]
                             else "NOT REGISTERED - see the log", False]]
+    if e["REGISTERED_BY_NAME"]:
+        f += [["recorded by", e["REGISTERED_BY_NAME"], False]]
 else:
     f += [["hostname", e["HOSTNAME"], False]]
 f += [["webrepl", "ws://%s:8266/" % ip, True],

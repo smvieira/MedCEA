@@ -18,6 +18,13 @@ Every request requires the token from the URL. The page carries a WiFi PSK field
 and displays a WebREPL password, and it binds to a LAN address by default, so
 the token is the only thing between it and the rest of the network. It is
 single-run: the server dies with the script.
+
+Under --auth keycloak it is also the holder of the run's tokens (edge_auth.py):
+the code exchange keeps the access and refresh tokens in the session, a run gets
+its own copy when it starts, and flash-device.sh asks for a fresh access token
+before each platform database call — on the --token-fd socket in daemon mode, on
+stdin/stdout under --token-channel stdio. No token ever goes into a response,
+the spool or a log line.
 """
 
 import argparse
@@ -27,6 +34,7 @@ import os
 import posixpath
 import secrets
 import shutil
+import socket
 import subprocess
 import ssl
 import sys
@@ -36,6 +44,9 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import edge_auth  # noqa: E402  (same directory; stdlib only)
 
 STATE = {
     "dir": None, "token": None, "onboard_url": None,
@@ -47,21 +58,31 @@ STATE = {
     "required_role": None,
     "ssl_ctx": None,
     "hosts": {},              # Host: value -> scheme we build a redirect_uri with
-    "sessions": {},           # sid -> {"user":..., "exp":...}
+    "sessions": {},           # sid -> {"user", "sub", "exp", "id_token", "tok": TokenSet}
     "daemon": False,          # long-lived: start runs on demand instead of mirroring one
     "repo_root": None,
     "flash_args": [],
     "catalog": [],            # device types this wizard can provision
     "run": None,              # subprocess.Popen of the current flash run
     "pending": {},            # oauth state -> {"exp":..., "redirect_uri":...}
+    # The current run's edge_auth.Holder, or None. Its TokenSet is a COPY taken
+    # from the session that pressed Start, so a closed tab or an expired cookie
+    # does not stop the run.
+    "run_auth": None,
+    # {"sub", "user"} of the person the current run acts as: the session that
+    # pressed Start, or (--token-channel stdio) the sign-in that bound the run.
+    # Only they may answer its prompts, since every answer is acted on with
+    # their token and recorded under their name.
+    "run_owner": None,
     "lock": threading.Lock(),
 }
 
-# A provisioning session should not outlive the work. Short, because this
-# session is not revocable mid-life: it is an in-memory map, so unlike
-# oauth2-proxy (which re-checks Keycloak every cookie_refresh) nothing here
-# notices a Keycloak logout until the entry expires. Expiry is the only control,
-# so keep it tight.
+# How long a BROWSER session lasts. It is still not re-checked against Keycloak
+# mid-life (an in-memory map; oauth2-proxy re-checks every cookie_refresh, this
+# does not), so a deactivation reaches the page only when the entry expires —
+# keep it tight. A RUN's authority is different since IAM 1.5: it comes from the
+# refresh token, is refreshed before every database call, and ends when the
+# Keycloak session ends, not at SESSION_TTL.
 SESSION_TTL = 60 * 60
 COOKIE = "cea_wizard_sid"
 
@@ -111,21 +132,53 @@ def catalog_public():
     return [{k: v for k, v in e.items() if not k.startswith("_")} for e in STATE["catalog"]]
 
 
-def start_run(user, device_id):
-    """Spawn one provisioning run against this spool directory.
+def start_run(sess, device_id):
+    """Spawn one provisioning run against this spool directory: (http status, error).
 
     The command comes from the catalogue entry, never from the request — the
     request only names an id. The daemon owns the spool and the HTTP server; the
     script writes prompts and log lines into it exactly as it does when it starts
     its own server. Keeping one implementation is the whole point.
+
+    Under Keycloak the run gets its own copy of the session's tokens, refreshed
+    here first (the plan's "refresh before spawning": a session that has ended is
+    found now, with nothing started), and a socketpair whose child end is the
+    script's --token-fd. The run asks on it for a fresh access token before every
+    database call; the refresh token and the secret stay in this process.
     """
     if run_active():
-        return False, "a device is already being provisioned"
+        return 409, "a device is already being provisioned"
     entry = next((e for e in STATE["catalog"] if e["id"] == device_id), None)
     if entry is None:
-        return False, "unknown device type %r" % device_id
+        return 409, "unknown device type %r" % device_id
     if entry["status"] != "available" or not entry["_script"]:
-        return False, "%s is not available yet" % entry["name"]
+        return 409, "%s is not available yet" % entry["name"]
+    user = (sess or {}).get("user", "operator")
+
+    ts = None
+    if STATE["auth"] == "keycloak":
+        tok = (sess or {}).get("tok")
+        kind, msg = "reauth", None
+        if tok is not None:
+            # The SESSION's own set is refreshed, and the run takes a copy of the
+            # result. Refreshing only a copy left the session holding the refresh
+            # token from its sign-in, which Keycloak refuses once the idle timeout
+            # (30 min) has passed since it was issued, however busy the session
+            # was since: a second Start after a long first run said "login required".
+            kind, msg = edge_auth.fresh(tok, STATE["oidc"], STATE["client_id"],
+                                        STATE["client_secret"], STATE["ssl_ctx"],
+                                        edge_auth.FORCE_TTL,
+                                        required_role=STATE["required_role"])
+        if kind == "role":
+            drop_sessions(sid=(sess or {}).get("sid"))
+            return 403, msg
+        if kind != "ok":
+            # The page answers a 401 by reloading, which is a silent SSO sign-in
+            # while Keycloak's session lives, and the login form once it has not.
+            drop_sessions(sid=(sess or {}).get("sid"))
+            return 401, "login required"
+        ts = tok.copy()
+
     d = STATE["dir"]
     for name in ("log", "prompt.json", "answer", "done.json", "finished", "phase"):
         try:
@@ -134,16 +187,79 @@ def start_run(user, device_id):
             pass
     with open(os.path.join(d, "log"), "w") as f:
         f.write("%s — started by %s\n" % (entry["name"], user))
-    cmd = [entry["_script"], "--ui-spool", d] + STATE["flash_args"]
+    STATE["run_owner"] = {"sub": ts.sub, "user": ts.user} if ts is not None else None
+    cmd = [entry["_script"], "--ui-spool", d]
+    parent = child = None
+    if ts is not None:
+        parent, child = socket.socketpair()
+        cmd += ["--token-fd", str(child.fileno())]
+    cmd += STATE["flash_args"]
     try:
         STATE["run"] = subprocess.Popen(
             cmd, cwd=STATE["repo_root"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+            # close_fds stays on: exactly the one socket end is passed.
+            pass_fds=(child.fileno(),) if child is not None else (),
             start_new_session=True)
     except OSError as e:
-        return False, str(e)
-    return True, None
+        if parent is not None:
+            parent.close()
+            child.close()
+            ts.wipe()
+        return 409, str(e)
+    if child is None:
+        return 200, None
+    child.close()
+    holder = edge_auth.Holder(STATE["oidc"], STATE["ssl_ctx"], STATE["client_id"],
+                              STATE["client_secret"], STATE["required_role"],
+                              waiter=BrowserWaiter(), ts=ts)
+    STATE["run_auth"] = holder
+
+    def channel():
+        try:
+            edge_auth.serve(parent.fileno(), parent.fileno(), holder, alive=run_active)
+        finally:
+            parent.close()
+    threading.Thread(target=channel, daemon=True, name="token-channel").start()
+    return 200, None
+
+
+class BrowserWaiter(edge_auth.Waiter):
+    """A run whose sign-in comes from the browser (daemon, or --token-channel stdio).
+
+    No page change is needed for a re-sign-in: dropping the owner's local
+    sessions makes their next /api/state a 401, the page reloads into Keycloak's
+    login, and the callback hands the new tokens to the run (Holder.offer).
+    """
+
+    def wait_bind(self, holder, why, emit):
+        need = holder.required_role
+        emit(edge_auth.fmt_wait("browser", "waiting for a sign-in%s at the address printed "
+                                "above — that exact link: a sign-in from the bare address "
+                                "does not act for this run"
+                                % (" with the '%s' role" % need if need else "")))
+        if not holder.wait_until(lambda: holder.ts is not None, edge_auth.REAUTH_WAIT):
+            raise edge_auth.AuthError("timeout", "nobody signed in within %d min — re-run"
+                                      % (edge_auth.REAUTH_WAIT // 60))
+
+    def wait_reauth(self, holder, why, emit):
+        ts = holder.ts
+        emit(edge_auth.fmt_wait("browser", "Your sign-in has ended (signed out, or the account "
+                                "was deactivated). Sign in again as %s in the browser to %s. "
+                                "The run is paused; nothing is lost." % (ts.user, why)))
+        if not holder.wait_until(lambda: ts.state == "ok", edge_auth.REAUTH_WAIT):
+            raise edge_auth.AuthError("timeout", "%s did not sign in again within %d min — "
+                                      "re-run" % (ts.user, edge_auth.REAUTH_WAIT // 60))
+
+    def on_reauth(self, holder):
+        if holder.ts is not None and holder.ts.sub:
+            drop_sessions(sub=holder.ts.sub)
+
+    def on_close(self, holder):
+        with STATE["lock"]:
+            if STATE["run_auth"] is holder:
+                STATE["run_auth"] = None
 
 
 # --------------------------------------------------------------- OIDC --------
@@ -159,42 +275,50 @@ def oidc_discover(issuer, ctx):
     return _http_json(issuer.rstrip("/") + "/.well-known/openid-configuration")
 
 
-def _claims_from_id_token(tok):
-    """Read the ID token payload without verifying its signature.
-
-    That is safe *here* and only here: the token did not come from the browser,
-    it came back on a direct back-channel request this process made to the
-    token endpoint, authenticated with the client secret. There is no untrusted
-    party in that exchange to forge it. A token accepted from a browser would
-    have to be signature-verified against the JWKS.
-    """
-    import base64
-    try:
-        payload = tok.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "replace"))
-    except (ValueError, IndexError, UnicodeDecodeError):
-        return {}
+# Back-channel tokens only: see edge_auth.claims for why no signature check.
+_claims_from_id_token = edge_auth.claims
 
 
-def _roles(claims):
-    out = set(claims.get("realm_access", {}).get("roles", []) or [])
-    for _c, v in (claims.get("resource_access") or {}).items():
-        out.update(v.get("roles", []) or [])
-    return out
-
-
-def new_session(claims, id_token=""):
+def new_session(claims, id_token="", tokset=None):
     sid = secrets.token_urlsafe(32)
     with STATE["lock"]:
         STATE["sessions"][sid] = {
+            "sid": sid,
             "user": claims.get("preferred_username") or claims.get("sub") or "unknown",
             "name": claims.get("name") or "",
+            "sub": claims.get("sub") or "",
             "exp": time.time() + SESSION_TTL,
             # Kept so logout can prove to Keycloak which session to end.
             "id_token": id_token,
+            # The access and refresh tokens (IAM plan Section 2, "Wizard"): a run
+            # started from this session takes a copy of them.
+            "tok": tokset,
         }
     return sid
+
+
+def offer_run(ts, may_bind):
+    """Hand a fresh browser sign-in to the run's holder, if there is one."""
+    ra = STATE["run_auth"]
+    if ra is None or ts is None:
+        return
+    unbound = ra.ts is None
+    taken, why = ra.offer(ts, may_bind=may_bind)
+    if taken and unbound:
+        STATE["run_owner"] = {"sub": ts.sub, "user": ts.user}
+    if why:
+        # The reason goes to stderr, never a token.
+        print("wizard: run not bound or resumed: %s" % why, file=sys.stderr)
+
+
+def drop_sessions(sid=None, sub=None):
+    """Forget local sessions by id or by person, wiping the tokens they held."""
+    with STATE["lock"]:
+        for k in [k for k, v in STATE["sessions"].items()
+                  if (sid is not None and k == sid) or (sub and v.get("sub") == sub)]:
+            s = STATE["sessions"].pop(k)
+            if s.get("tok") is not None:
+                s["tok"].wipe()
 
 
 def get_session(sid):
@@ -206,6 +330,8 @@ def get_session(sid):
             return None
         if s["exp"] < time.time():
             STATE["sessions"].pop(sid, None)
+            if s.get("tok") is not None:
+                s["tok"].wipe()
             return None
         return s
 
@@ -478,6 +604,12 @@ function send() {
   api("/api/answer", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, value: String(p) })
+  }).then(async r => {
+    // Someone else's run: the prompt comes back on the next poll, unanswered.
+    if (r.status === 403) {
+      const j = await r.json().catch(() => ({}));
+      alert(j.error || "not your run");
+    }
   });
 }
 $("psend").onclick = send;
@@ -661,10 +793,17 @@ class Handler(BaseHTTPRequestHandler):
                 return False
             return True
 
-        # keycloak
+        # keycloak. The URL token no longer admits anyone here, but it still
+        # marks the sign-in that may BIND an unbound run (--token-channel stdio):
+        # only the terminal printed it, so whoever merely reaches the port first
+        # cannot become the run's identity.
+        t = (parse_qs(urlparse(self.path).query).get("t") or [""])[0]
+        bind = bool(t) and bool(STATE["token"]) and secrets.compare_digest(t, STATE["token"])
         sess = get_session(self._cookie(COOKIE))
         if sess:
             self.session = sess
+            if bind:
+                offer_run(sess.get("tok"), may_bind=True)
             return True
 
         path = posixpath.normpath(urlparse(self.path).path)
@@ -683,7 +822,8 @@ class Handler(BaseHTTPRequestHandler):
         state = secrets.token_urlsafe(24)
         redirect_uri = base + "/oauth2/callback"
         with STATE["lock"]:
-            STATE["pending"][state] = {"exp": time.time() + 600, "redirect_uri": redirect_uri}
+            STATE["pending"][state] = {"exp": time.time() + 600, "redirect_uri": redirect_uri,
+                                       "bind": bind}
         url = STATE["oidc"]["authorization_endpoint"] + "?" + urlencode({
             "client_id": STATE["client_id"],
             "response_type": "code",
@@ -728,14 +868,29 @@ class Handler(BaseHTTPRequestHandler):
         if not claims:
             return self._send(502, "text/plain", b"keycloak returned no usable id_token\n")
 
+        # Roles from the ACCESS token: Keycloak puts realm_access there only, so
+        # reading it off the ID token refused everyone once a role was required.
+        access = edge_auth.claims(tok.get("access_token", ""))
+        lack = edge_auth.check_access_claims(access, azp=STATE["client_id"])
+        if lack:
+            return self._send(502, "text/plain",
+                              ("%s tokens lack %s — run ./deploy-infra.sh\n"
+                               % (STATE["client_id"], lack)).encode())
         need = STATE["required_role"]
-        if need and need not in _roles(claims):
+        if need and not edge_auth.has_role(access, need):
             who = claims.get("preferred_username", "?")
             return self._send(403, "text/plain",
                               ("%s is signed in but does not have the '%s' role, which is "
-                               "required to provision hardware.\n" % (who, need)).encode())
+                               "required to provision hardware. Ask an administrator to "
+                               "change your role in the User Manager, then reload.\n"
+                               % (who, need)).encode())
 
-        sid = new_session(claims, tok.get("id_token", ""))
+        tokset = edge_auth.TokenSet.from_response(tok, time.time())
+        sid = new_session(claims, tok.get("id_token", ""), tokset)
+        # A run waiting for its first sign-in (--token-channel stdio, and only
+        # from the terminal's link) or for its owner to sign in again takes
+        # these tokens. Anyone else just gets a browser session.
+        offer_run(tokset, may_bind=bool(pend.get("bind")))
         self.send_response(302)
         self.send_header("Location", "/")
         self.send_header("Set-Cookie",
@@ -755,6 +910,13 @@ class Handler(BaseHTTPRequestHandler):
         sid = self._cookie(COOKIE)
         with STATE["lock"]:
             sess = STATE["sessions"].pop(sid, None) or {}
+        if sess.get("tok") is not None:
+            sess["tok"].wipe()
+        # The Keycloak logout below invalidates the run's refresh token anyway;
+        # this stops the run's cached access token from being served meanwhile.
+        ra = STATE["run_auth"]
+        if ra is not None and sess.get("sub"):
+            ra.end_session(sess["sub"])
         dest = "/"
         end = (STATE["oidc"] or {}).get("end_session_endpoint")
         if end:
@@ -839,15 +1001,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/start":
             if not STATE["daemon"]:
                 return self._send(404, "text/plain", b"not a daemon\n")
-            who = (getattr(self, "session", None) or {}).get("user", "operator")
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n).decode()) if n else {}
             except (ValueError, OSError):
                 body = {}
-            ok, err = start_run(who, body.get("device"))
-            if not ok:
-                return self._send(409, "application/json",
+            status, err = start_run(getattr(self, "session", None), body.get("device"))
+            if status != 200:
+                return self._send(status, "application/json",
                                   json.dumps({"error": err}).encode())
             return self._send(200, "application/json", b'{"ok":true}')
         if path != "/api/answer":
@@ -872,6 +1033,14 @@ class Handler(BaseHTTPRequestHandler):
             cur_id = None
         if cur_id is None or payload.get("id") != cur_id:
             return self._send(409, "text/plain", b"stale prompt\n")
+        # Every answer is acted on with the run owner's token and recorded under
+        # their name, so nobody else may give one. Others still see the run.
+        owner = STATE["run_owner"]
+        if STATE["auth"] == "keycloak" and owner and \
+                (getattr(self, "session", None) or {}).get("sub") != owner["sub"]:
+            return self._send(403, "application/json", json.dumps({
+                "error": "this run belongs to %s — only they can answer its questions"
+                         % owner["user"]}).encode())
 
         value = str(payload.get("value", ""))
         tmp = spool("answer.tmp")
@@ -898,7 +1067,8 @@ def main():
     ap.add_argument("--auth", choices=("token", "keycloak"), default="token")
     ap.add_argument("--issuer", default="", help="e.g. http://keycloak.<domain>/realms/medcea")
     ap.add_argument("--client-id", default="edge-wizard")
-    ap.add_argument("--client-secret", default="")
+    ap.add_argument("--client-secret", default="",
+                    help="deprecated: visible in ps; pass EDGE_WIZARD_SECRET in the environment")
     ap.add_argument("--required-role", default="",
                     help="realm role a user must hold to provision hardware")
     ap.add_argument("--allowed-host", action="append", default=[],
@@ -914,14 +1084,31 @@ def main():
                     help="extra argument passed to each flash-device.sh run; repeatable")
     ap.add_argument("--oidc-insecure", action="store_true",
                     help="skip TLS verification to Keycloak (self-signed ingress cert)")
+    ap.add_argument("--token-channel", choices=("none", "stdio"), default="none",
+                    help="stdio: hold one run's tokens and answer its token requests on "
+                         "stdin/stdout (flash-device.sh --ui runs this as a coproc)")
     a = ap.parse_args()
+
+    # The secret comes from the environment and is popped, so no child (the
+    # flash runs) inherits it; argv is readable by every account on the host.
+    secret = os.environ.pop("EDGE_WIZARD_SECRET", "")
+    if a.client_secret:
+        print("deprecated: --client-secret is visible in ps; pass EDGE_WIZARD_SECRET in the "
+              "environment", file=sys.stderr)
+        secret = secret or a.client_secret
+    # stdout is the token channel under stdio: nothing else may ever write to it.
+    proto_out = None
+    if a.token_channel == "stdio":
+        proto_out = os.dup(1)
+        os.dup2(2, 1)
+        sys.stdout = sys.stderr
 
     STATE["dir"] = a.dir
     STATE["token"] = a.token
     STATE["onboard_url"] = a.onboard_url
     STATE["auth"] = a.auth
     STATE["client_id"] = a.client_id
-    STATE["client_secret"] = a.client_secret
+    STATE["client_secret"] = secret
     STATE["required_role"] = a.required_role or None
     # "host:port" is reached directly over http; "https://host" through the
     # TLS ingress (apps/edge-wizard), which keeps the Host header.
@@ -950,8 +1137,9 @@ def main():
               % (len(STATE["catalog"]), len(avail), ", ".join(avail)), file=sys.stderr)
 
     if a.auth == "keycloak":
-        if not a.issuer or not a.client_secret:
-            print("--auth keycloak needs --issuer and --client-secret", file=sys.stderr)
+        if not a.issuer or not secret:
+            print("--auth keycloak needs --issuer and EDGE_WIZARD_SECRET in the environment",
+                  file=sys.stderr)
             return 2
         ctx = None
         if a.oidc_insecure:
@@ -974,6 +1162,29 @@ def main():
         f.write(str(srv.server_address[1]))
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
+
+    # One run, its own holder: the first browser sign-in binds it. EOF here
+    # means the script closed its end (after register, or on exit): the tokens
+    # are wiped, and the server stays up for the summary until `stop`.
+    if proto_out is not None:
+        if a.auth != "keycloak":
+            os.close(proto_out)
+        else:
+            holder = edge_auth.Holder(STATE["oidc"], STATE["ssl_ctx"], STATE["client_id"],
+                                      secret, STATE["required_role"], waiter=BrowserWaiter())
+            STATE["run_auth"] = holder
+            def channel():
+                try:
+                    edge_auth.serve(0, proto_out, holder)
+                finally:
+                    # Close both ends, so a holder that stopped while the script
+                    # still runs is an EOF there, not a request nobody reads.
+                    for fd in (0, proto_out):
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+            threading.Thread(target=channel, daemon=True, name="token-channel").start()
     # Exit when the shell says stop, removes the spool directory, or dies. The
     # parent check is what covers SIGKILL, where the shell's trap never runs and
     # nothing else would ever shut this down.

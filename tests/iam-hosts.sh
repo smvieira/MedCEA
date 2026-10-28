@@ -14,6 +14,8 @@
 #   reach    at least one enabled account holds a role the gate admits (composites
 #            expanded), so no host is left that nobody can open
 # Hosts whose gate is not compiled yet are listed as SKIP with the phase that adds it.
+# Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
+# account, and the realm's discovery document lists device_authorization_endpoint.
 #
 # Read-only: no lock, no Keycloak account, no change to the cluster. It proves the
 # configured gates, not a sign-in per role; that matrix is a Phase 1 test.
@@ -22,7 +24,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -176,6 +178,37 @@ while IFS= read -r line; do
         fi
     fi
 done <<<"$HOSTS"
+
+# The edge wizard signs a terminal in with the device grant (flash-device.sh,
+# edge/src/host/edge_auth.py). Read from Keycloak's database like the holders above.
+echo ""
+echo -e "${BOLD}edge-wizard client${NC}  (terminal sign-in for flash-device.sh)"
+_ew="$($KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+    'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -F " " -v realm="$0"' \
+    "$KEYCLOAK_REALM" 2>/dev/null <<'SQL'
+SELECT c.service_accounts_enabled,
+       coalesce((SELECT a.value FROM client_attributes a
+                  WHERE a.client_id = c.id AND a.name = 'oauth2.device.authorization.grant.enabled'), '-')
+  FROM client c JOIN realm r ON r.id = c.realm_id AND r.name = :'realm'
+ WHERE c.client_id = 'edge-wizard';
+SQL
+)" || _ew=""
+read -r _ew_sa _ew_dev <<<"$_ew"
+if [[ -z "$_ew" ]]; then
+    fail client "edge-wizard not found in Keycloak's database (or it is not readable) — run ./deploy-infra.sh"
+elif [[ "$_ew_dev" != "true" ]]; then
+    fail client "edge-wizard has oauth2.device.authorization.grant.enabled=${_ew_dev}: a terminal cannot sign in — run ./deploy-infra.sh"
+elif [[ "$_ew_sa" != "f" ]]; then
+    fail client "edge-wizard has a service account (serviceAccountsEnabled=true) — run ./deploy-infra.sh"
+else
+    pass client "device grant on, no service account"
+fi
+if curl -sk -m 10 "https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/.well-known/openid-configuration" \
+        | grep -q '"device_authorization_endpoint"'; then
+    pass device "the realm's discovery document lists device_authorization_endpoint"
+else
+    fail device "no device_authorization_endpoint in https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM discovery — run ./deploy-infra.sh"
+fi
 
 echo ""
 if [[ $FAILS -eq 0 ]]; then
