@@ -914,7 +914,7 @@ class Admin(Base):
             return self.send(200, {'ok': True})
         if not self.actor():
             return self.send(401, {'error': 'not signed in'})
-        if p.path in ('/', '/index.html'):
+        if p.path == '/':
             return self.page('admin.html')
         if p.path == '/api/me':
             return self.guarded(lambda: (200, {
@@ -997,7 +997,7 @@ class Profile(Base):
         user = self.username()
         if not user:
             return self.send(401, {'error': 'not signed in'})
-        if p in ('', '/', '/index.html'):
+        if p in ('', '/'):
             return self.page('profile.html')
         if p == '/api/me':
             def me():
