@@ -432,6 +432,34 @@ else
     exit 1
 fi
 
+# NetworkPolicies of the application pods (IAM plan 1.4), compiled from `network:`
+# in the access policy: each pod admits only its proxy, the listed in-cluster hops
+# and the node itself (kubelet probes, the edge wizard). The node's addresses are
+# read now, because host traffic arrives from them. IAM_NETPOL=false removes them.
+echo -e "\n${GREEN}[IAM] Network policies of the application pods...${NC}"
+if [[ "${IAM_NETPOL:-true}" == "false" ]]; then
+    $MK8S kubectl delete netpol -n "$NAMESPACE" -l medcea/iam-netpol=true --ignore-not-found
+    echo -e "${YELLOW}  IAM_NETPOL=false: application pods accept connections from anywhere in the cluster.${NC}"
+else
+    _NODE_IPS=()
+    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
+        _NODE_IPS+=(--node-ip "${_ip%/*}")
+    done
+    if _NETPOL="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --namespace "$NAMESPACE" "${_NODE_IPS[@]}")"; then
+        $MK8S kubectl apply -f - <<<"$_NETPOL"
+        # A pod dropped from `network:` keeps no stale policy.
+        _WANT="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_NETPOL")"
+        for _np in $($MK8S kubectl get netpol -n "$NAMESPACE" -l medcea/iam-netpol=true -o jsonpath='{.items[*].metadata.name}'); do
+            [[ " $_WANT " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$NAMESPACE" "$_np"
+        done
+    elif [[ "${IAM_GATES:-true}" == "false" ]]; then
+        echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — network policies left as they are.${NC}" >&2
+    else
+        echo -e "${RED}ERROR: the network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
+        exit 1
+    fi
+fi
+
 echo -e "\n${GREEN}[TLS] Platform CA and wildcard certificate...${NC}"
 CA_DIR="$SCRIPT_DIR/.ca"; mkdir -p "$CA_DIR"; chmod 700 "$CA_DIR"
 if [ ! -f "$CA_DIR/ca.key" ]; then

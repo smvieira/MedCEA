@@ -249,6 +249,79 @@ public_routes:
   - {service: access-public, route: "POST /api/register", why: creates a disabled account and a pending request (CORS from the Keycloak origin only)}
   - {service: access-public, route: "OPTIONS /api/register", why: the browser's CORS preflight for the POST above; it carries no credentials and changes nothing}
 
+# ── Network ──────────────────────────────────────────────────────────────────────────
+# Who may open a connection to each application pod (IAM plan 1.4). compiler/netpol.py
+# turns this into one Kubernetes NetworkPolicy per pod (label medcea/iam-netpol=true),
+# which Calico enforces: anything not listed here cannot reach the pod — another pod in
+# the cluster, a notebook, a forged request. Ingress only; egress is not restricted.
+# Sources:
+#   proxy:<HOST>   that host's oauth2-proxy (network.proxies: release name; its pods carry
+#                  app.kubernetes.io/instance=<release>)
+#   pod:<name>     another pod of this section
+#   ingress        ingress-nginx (namespace network.ingress_namespace), for routes that are
+#                  public on purpose
+#   node           the node's own addresses, rendered at deploy time: kubelet probes and
+#                  the host services (edge wizard, edge/src/host/platform_db.py)
+# `carries` maps the route-table services a pod serves to their container port. The
+# checker requires, port by port:
+#   - every host that serves one of them reaches it: from its proxy, or through one pod
+#     its proxy reaches (the Config UI's nginx in front of config-api and the scheduler);
+#     a host in `unproxied` reaches it as the given source instead (the edge wizard runs
+#     on the node, not behind a proxy);
+#   - every proxy reaches each shared upstream (/_account/), except the hosts listed in
+#     `no_shared_upstreams`, whose proxies do not mount it;
+#   - a host that serves a carried service is in `proxies` or `unproxied`.
+network:
+  ingress_namespace: ingress
+  unproxied:
+    ONBOARD_DOMAIN: node
+  no_shared_upstreams: [NODE_RED_DOMAIN]
+  proxies:
+    PORTAL_DOMAIN:    portal-oauth2-proxy
+    CONFIG_DOMAIN:    config-oauth2-proxy
+    SCHEDULER_DOMAIN: scheduler-oauth2-proxy
+    MONITOR_DOMAIN:   monitor-oauth2-proxy
+    DBMGMT_DOMAIN:    dbmgmt-oauth2-proxy
+    ACCESS_DOMAIN:    access-oauth2-proxy
+    MQTTX_DOMAIN:     mqttx-oauth2-proxy
+    NODE_RED_DOMAIN:  oauth2-proxy
+  pods:
+    scheduler:
+      selector: {app: scheduler}
+      carries: {scheduler: 80}
+      ingress:
+        - {port: 80, from: ["proxy:SCHEDULER_DOMAIN", "pod:config-ui"], why: "the Scheduler UI; the Config UI calls /scheduler-api/ in-cluster"}
+    monitor:
+      selector: {app: monitor}
+      carries: {monitor: 80}
+      ingress:
+        - {port: 80, from: ["proxy:MONITOR_DOMAIN"], why: the Monitor UI}
+    dbmgmt:
+      selector: {app: dbmgmt}
+      carries: {dbmgmt: 80}
+      ingress:
+        - {port: 80, from: ["proxy:DBMGMT_DOMAIN"], why: the Database Management UI}
+    config-ui:
+      selector: {app: config-ui}
+      carries: {platform-api: 80}
+      ingress:
+        - {port: 80, from: ["proxy:CONFIG_DOMAIN", node], why: the Config UI; kubelet readiness probe}
+        - {port: 8081, from: [node], why: "kubelet readiness probe of platform-api (nginx reaches it on localhost)"}
+    config-api:
+      selector: {app: config-api}
+      carries: {config-api: 3000}
+      ingress:
+        - {port: 3000, from: ["pod:config-ui", node], why: "PostgREST behind the Config UI's /api/; the edge wizard and platform_db.py on the host; kubelet probe"}
+    access:
+      selector: {app: access}
+      carries: {access: 8081, access-profile: 8082, access-public: 8080}
+      ingress:
+        - {port: 8081, from: ["proxy:ACCESS_DOMAIN", node], why: the User Manager; kubelet liveness probe}
+        - {port: 8082, from: ["proxy:PORTAL_DOMAIN", "proxy:CONFIG_DOMAIN", "proxy:SCHEDULER_DOMAIN", "proxy:MONITOR_DOMAIN",
+                              "proxy:DBMGMT_DOMAIN", "proxy:ACCESS_DOMAIN", "proxy:MQTTX_DOMAIN"],
+           why: "/_account/ (user menu and profile) on every host that mounts it; not Node-RED's"}
+        - {port: 8080, from: [ingress, node], why: the public access request form; kubelet readiness probe}
+
 # Functions every authenticated path needs. Granted by rule, not by the matrix (plan
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants.
 infrastructure_functions:

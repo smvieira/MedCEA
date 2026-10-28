@@ -17,7 +17,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
-from compiler import invariants, model, proxies, routes  # noqa: E402
+from compiler import invariants, model, netpol, proxies, routes  # noqa: E402
 
 
 def _set(path, value):
@@ -75,6 +75,20 @@ MUTATIONS = {
     "D on a data group": (_set(["matrix", "schedules", "admin"], ["D"]), "I13"),
     "shared upstream opens a host": (_append(["hosts", "ACCESS_DOMAIN", "serves"], "access-profile"), "shared upstream"),
     "admin approves accounts": (_set(["matrix", "iam_users", "admin"], ["R", "A", "K"]), "I2"),
+    "config proxy cut off from its UI": (_set(["network", "pods", "config-ui", "ingress", 0, "from"], ["node"]),
+                                         "CONFIG_DOMAIN serves platform-api"),
+    "config-api unreachable through the UI": (_set(["network", "pods", "config-api", "ingress", 0, "from"], ["node"]),
+                                              "CONFIG_DOMAIN serves config-api"),
+    "unknown network source": (_append(["network", "pods", "monitor", "ingress", 0, "from"], "pod:grafana"), "unknown source"),
+    "service carried twice": (_set(["network", "pods", "monitor", "carries", "scheduler"], 80), "carried by both"),
+    "portal's /_account/ moved to the admin port": (
+        lambda d: (d["network"]["pods"]["access"]["ingress"][1]["from"].remove("proxy:PORTAL_DOMAIN"),
+                   d["network"]["pods"]["access"]["ingress"][0]["from"].append("proxy:PORTAL_DOMAIN")),
+        "proxy:PORTAL_DOMAIN cannot reach shared upstream access-profile"),
+    "gated host without a network entry": (_pop(["network", "proxies", "MONITOR_DOMAIN"]),
+                                           "MONITOR_DOMAIN serves monitor but is in neither"),
+    "wizard cut off from config-api": (_set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui"]),
+                                       "ONBOARD_DOMAIN serves config-api"),
 }
 
 
@@ -178,6 +192,42 @@ class RoutesTest(unittest.TestCase):
             routes.compile(model.Policy(clash))
 
 
+class NetpolTest(unittest.TestCase):
+    """compiler/netpol.py: the application pods' NetworkPolicies (Phase 1.4)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+        cls.doc = netpol.compile(cls.policy, "medcea", ["192.168.1.7", "10.1.0.1", "192.168.1.7"])
+        cls.by = {i["metadata"]["name"]: i for i in cls.doc["items"]}
+
+    def peers(self, name, port):
+        rule = next(r for r in self.by[name]["spec"]["ingress"] if r["ports"] == [{"protocol": "TCP", "port": port}])
+        return rule["from"]
+
+    def test_one_labelled_policy_per_pod(self):
+        self.assertEqual(set(self.by), {f"iam-{n}" for n in self.policy.data["network"]["pods"]})
+        for i in self.doc["items"]:
+            self.assertEqual(i["metadata"]["labels"], {netpol.LABEL: "true"})
+            self.assertEqual(i["spec"]["policyTypes"], ["Ingress"])
+
+    def test_peers(self):
+        self.assertEqual(self.peers("iam-monitor", 80),
+                         [{"podSelector": {"matchLabels": {"app.kubernetes.io/instance": "monitor-oauth2-proxy"}}}])
+        self.assertIn({"podSelector": {"matchLabels": {"app": "config-ui"}}}, self.peers("iam-scheduler", 80))
+        node = [p for p in self.peers("iam-config-api", 3000) if "ipBlock" in p]
+        self.assertEqual(node, [{"ipBlock": {"cidr": "10.1.0.1/32"}}, {"ipBlock": {"cidr": "192.168.1.7/32"}}])
+        self.assertIn({"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress"}}},
+                      self.peers("iam-access", 8080))
+        profile = self.peers("iam-access", 8082)
+        self.assertEqual(len(profile), 7)                 # every proxy with /_account/ …
+        self.assertNotIn({"podSelector": {"matchLabels": {"app.kubernetes.io/instance": "oauth2-proxy"}}}, profile)  # … not Node-RED's
+
+    def test_node_addresses_required(self):
+        with self.assertRaisesRegex(ValueError, "no node address"):
+            netpol.compile(self.policy, "medcea", [])
+
+
 class WiringTest(unittest.TestCase):
     """The places outside the compiler that must agree with the policy."""
 
@@ -264,6 +314,8 @@ class WiringTest(unittest.TestCase):
         for key in ("routes.json=", "settings.json=", "medcea_iam.py=\"$SCRIPT_DIR/apps/iam/lib/medcea_iam.py\""):
             self.assertIn(f"--from-file={key}", infra)
         self.assertIn("create secret generic medcea-jwks", infra)
+        self.assertIn('cli.py" compile netpol --namespace "$NAMESPACE" "${_NODE_IPS[@]}"', infra)
+        self.assertIn("delete netpol -n \"$NAMESPACE\" -l medcea/iam-netpol=true", infra)
         services = {  # manifest -> (source, how it calls the check)
             "apps/scheduler/k8s/scheduler.yaml": ("apps/scheduler/scheduler-api.py", ["flask_check('scheduler')"]),
             "apps/monitor/k8s/monitor.yaml": ("apps/monitor/monitor-api.py", ["flask_check('monitor')"]),
