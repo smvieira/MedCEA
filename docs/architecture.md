@@ -71,6 +71,33 @@ publish events into it. They hold no credentials that let them update or delete 
 | **RBAC** | Keycloak realm roles `operator`, `qa`, `admin`, `auditor`, enforced at the API and DB-role level. Data creation and data review are separated (Annex 11). **Partly done:** the roles exist and the portal admits only them; people obtain one through a self-service access request reviewed by an admin in the User Manager (`apps/access`), with every request and decision in the append-only `iam.access_request_history`. **Still TODO:** per-role permissions inside each service (Grafana, Node-RED, config API, scheduler) and DB roles per realm role. |
 | **Read-only regulator interface** | A query API and UI for auditors and Layer 4, with no write paths. It is the basis of the Exp 3 inspection simulation. |
 
+## User journeys
+
+### Quality Assurance (`qa`) — mostly TODO
+
+The roles split a lot's quality work three ways (`apps/iam/policy/defaults.yaml`):
+- **QC (`qc`)** tests product and records the analytical results (HPLC-MS, ICP-MS, β-glucan).
+- **QA (`qa`)** reviews and approves what someone else recorded or changed. It never enters results itself, because data creation and data review stay separate (Annex 11).
+- **QP (`qp`)** releases the lot.
+
+| # | What QA does | Status |
+|---|---|---|
+| 1 | Signs in and reads everything an auditor reads: portal, Config UI, Scheduler, Monitor, Database Management | **Done** (IAM Phase 0 gates) |
+| 2 | Approves recipes, controllers and their parameter sets, settings, master data and device changes made by someone else | **Planned**, IAM Phase 2 (`medcea.approval`, `approve_recipe()`, status columns). Today there is no approval step: a saved change is live. |
+| 3 | Confirms every account grant, role change and zone assignment an administrator makes | **Planned**, IAM Phase 2.7 (QA confirm screen in the User Manager) |
+| 4 | Approves every access-policy change | **Planned**, IAM Phase 4 (Policy UI) |
+| 5 | Reviews the analytical results QC recorded for a lot against its specification; accepts them or raises a deviation | **TODO, not yet planned.** Needs the Layer 3/4 entities, none of which exists in `medcea_db`: lot/batch (genotype, substrate, linked cycle runs), sample, analytical result (method, analyte, value, unit, LoQ, lab, CoA document), specification, deviation. A QC entry or import path (lab CSV, CoA PDF) is needed too. |
+| 6 | Reviews the lot's Electronic Batch Record (telemetry, recipe execution log, controller segments, genotype, analytical results, deviations) and passes it to QP | **TODO, not implemented.** The EBR generator (Compliance Plane) depends on step 5, the hash-chained audit trail, and run attribution (`created_by_*`, IAM Phase 2). |
+| 7 | Signs off the quarterly access review, reviews audit trails, exports evidence | **Planned**, IAM Phases 2.7 and 5 |
+
+**Order of work for steps 5–6:**
+1. The lot/batch entity linked to cycle runs.
+2. Analytical results, specifications and deviations, with QC entry.
+3. The EBR generator.
+4. Electronic signatures for QA approval and QP release. These are out of scope in the IAM plan (§7); until they exist, an approval is an attributable record, not a signature.
+
+The new tables join the access policy as new resource groups (IAM plan §7, "the L4 entities").
+
 ## Runtime identifiers
 
 `PROJECT_NAME="medcea"` in `config.env` is the single project identifier. It is the MQTT topic root
