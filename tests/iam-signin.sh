@@ -8,7 +8,11 @@
 # and a random password, so Keycloak asks for nothing before signing in — and deletes them
 # all on exit, also on Ctrl-C or failure. tests/iam_signin_flow.py then signs each one in
 # the way a browser does (host → Keycloak's form → the proxy's callback), so this tests the
-# real gates, sessions and 403 pages without changing any proxy setting.
+# real gates, sessions and 403 pages without changing any proxy setting. Where an account
+# gets in, it also calls one read-only API per service behind the host, and the services'
+# logs must hold a "would refuse" (enforcing: "refused") line for exactly the calls the
+# route table refuses, and every service must refuse one path in no table (a hook that
+# never loaded fails) (medcea_iam.check(), IAM plan 1.2).
 #
 # Takes the deploy lock (it creates accounts). Calls the Keycloak admin API as the deploy
 # scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a Keycloak login event in the
@@ -105,11 +109,20 @@ echo "Created ${#CREATED[@]} test account(s): test-<role>-$SUFFIX"
 echo ""
 
 CACERT=null; [[ -f .ca/ca.crt ]] && CACERT="\"$REPO_ROOT/.ca/ca.crt\""
-python3 tests/iam_signin_flow.py <<<"{\"users\": $USERS_JSON, \"cacert\": $CACERT}"
+PROBES="$(mktemp)"; LOGS="$(mktemp)"
+T0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 tests/iam_signin_flow.py <<<"{\"users\": $USERS_JSON, \"cacert\": $CACERT, \"probes_out\": \"$PROBES\"}"
 rc=$?
 echo ""
+sleep 2   # the services flush each line, but give the log pipeline a moment
+for dc in scheduler:api monitor:api dbmgmt:api config-ui:recipe-fileserver access:api; do
+    $KUBECTL logs -n "$NAMESPACE" "deployment/${dc%%:*}" -c "${dc#*:}" --since-time="$T0" 2>/dev/null
+done > "$LOGS"
+python3 tests/iam_signin_flow.py --compare "$PROBES" "$LOGS" || rc=1
+rm -f "$PROBES" "$LOGS"
+echo ""
 if [[ $rc -eq 0 ]]; then
-    echo -e "${GREEN}${BOLD}Every role gets in exactly where the policy says.${NC}"
+    echo -e "${GREEN}${BOLD}Every role gets in exactly where the policy says, and every service's check agrees.${NC}"
 else
     echo -e "${RED}${BOLD}Sign-in does not match the policy.${NC}"
 fi

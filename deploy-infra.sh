@@ -394,16 +394,37 @@ echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \
 $MK8S kubectl create namespace "$NAMESPACE" \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
 
-# The access policy's route table (codeplan IAM plan 1.1): ConfigMap
-# medcea-iam-lib, mounted by every service at /iam/. Here, because this script
-# runs before every app component. It is compiled from defaults.yaml: the
-# applied version in iam_policy is read instead once Phase 4 creates one. A
-# policy that fails its invariants stops the deploy rather than shipping a table
-# — unless IAM_GATES=false (the rollback), which leaves the ConfigMap as it is.
-echo -e "\n${GREEN}[IAM] Route table (ConfigMap medcea-iam-lib)...${NC}"
+# The access policy's check (codeplan IAM plan 1.1/1.2): ConfigMap medcea-iam-lib,
+# mounted by every service at /iam/ — the route table, the check library
+# (apps/iam/lib/medcea_iam.py) and its settings (issuer, audience, IAM_ENFORCE).
+# Here, because this script runs before every app component. The table is
+# compiled from defaults.yaml: the applied version in iam_policy is read instead
+# once Phase 4 creates one. A policy that fails its invariants stops the deploy
+# rather than shipping a table — unless IAM_GATES=false (the rollback), which
+# leaves the ConfigMap as it is. Services re-read the mount when the kubelet
+# updates it (about a minute), so a change here needs no restart.
+echo -e "\n${GREEN}[IAM] Access check (ConfigMap medcea-iam-lib)...${NC}"
 if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)"; then
     IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
-    render "$SCRIPT_DIR/k8s/iam/iam-lib.yaml" NAMESPACE IAM_ROUTES_DIGEST IAM_ROUTES_JSON | $MK8S kubectl apply -f -
+    _IAM_DIR="$(mktemp -d)"
+    printf '%s\n' "$IAM_ROUTES_JSON" > "$_IAM_DIR/routes.json"
+    ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" python3 -c '
+import json, os
+print(json.dumps({"issuer": os.environ["ISSUER"], "audience": "medcea-api",
+                  "enforce": os.environ["ENFORCE"] == "true"}, sort_keys=True))' > "$_IAM_DIR/settings.json"
+    chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
+    $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
+        --from-file=routes.json="$_IAM_DIR/routes.json" \
+        --from-file=settings.json="$_IAM_DIR/settings.json" \
+        --from-file=medcea_iam.py="$SCRIPT_DIR/apps/iam/lib/medcea_iam.py" \
+        --dry-run=client -o yaml \
+      | $MK8S kubectl label --local -f - medcea/iam-lib=true -o yaml \
+      | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" -o yaml \
+      | $MK8S kubectl apply -f -
+    rm -rf "$_IAM_DIR"
+    [[ "${IAM_ENFORCE:-false}" == "true" ]] \
+        && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow.${NC}" \
+        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (Phase 1).${NC}"
 elif [[ "${IAM_GATES:-true}" == "false" ]]; then
     echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
 else
@@ -1131,6 +1152,21 @@ if [[ -n "$_GS_ID" ]]; then
     done
 else
     echo -e "${RED}  Could not create the 'groups' client scope — portal logins will fail with invalid_scope.${NC}" >&2
+fi
+
+# The realm's public signing keys, for medcea_iam.check() in every service (IAM
+# plan 3.1: one key source, no runtime fetch). Secret medcea-jwks, mounted
+# optional at /jwks/; the kubelet updates the mount in place, and the check
+# re-reads it on an unknown key id, so after a key rotation in Keycloak a re-run
+# of this script is all it takes. Only keys, nothing secret, but kept a Secret
+# as the plan says so PostgREST (Phase 2) can take it as its jwt-secret file.
+echo -e "${YELLOW}  Publishing the realm's signing keys (Secret medcea-jwks)...${NC}"
+_JWKS="$(curl -sf "http://localhost:18080/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs" || true)"
+if python3 -c 'import json, sys; sys.exit(0 if any(k.get("alg") == "RS256" and k.get("use") == "sig" for k in json.load(sys.stdin)["keys"]) else 1)' <<<"$_JWKS" 2>/dev/null; then
+    printf '%s' "$_JWKS" | $MK8S kubectl create secret generic medcea-jwks -n "$NAMESPACE" \
+        --from-file=jwks.json=/dev/stdin --dry-run=client -o yaml | $MK8S kubectl apply -f - >/dev/null
+else
+    echo -e "${RED}  Could not read an RS256 signing key from realm '${KEYCLOAK_REALM}' — services cannot verify tokens.${NC}" >&2
 fi
 
 # --- Add realm-role mapper to grafana client so roles[] appears in userinfo ---

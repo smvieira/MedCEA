@@ -24,7 +24,10 @@ configuration:
     pass_user_headers = true
     pass_basic_auth = false
     pass_authorization_header = false
-    pass_access_token = false
+    # X-Forwarded-Access-Token: the token medcea_iam.check() verifies in every
+    # service behind this proxy, /_account/ included (IAM plan 1.3). Not as
+    # Authorization, which PostgREST would try to verify before Phase 2.
+    pass_access_token = true
     # Explicit in-cluster URLs; pods cannot resolve a name-based domain (see the
     # portal and config proxies).
     skip_oidc_discovery = true

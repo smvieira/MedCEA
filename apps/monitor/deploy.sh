@@ -82,7 +82,7 @@ $KUBECTL create configmap monitor-api -n "$NAMESPACE" \
 log "Deploying monitor..."
 # The plain Ingress from before the SSO gate: its host now belongs to the proxy.
 $KUBECTL delete ingress monitor -n "$NAMESPACE" --ignore-not-found
-render "$SCRIPT_DIR/k8s/monitor.yaml" NAMESPACE POSTGRES_PASS | $KUBECTL apply -f -
+render "$SCRIPT_DIR/k8s/monitor.yaml" NAMESPACE POSTGRES_PASS IAM_ENFORCE | $KUBECTL apply -f -
 
 log "Restarting monitor to pick up new ConfigMaps..."
 $KUBECTL rollout restart deployment/monitor -n "$NAMESPACE"

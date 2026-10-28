@@ -24,7 +24,7 @@ the files in templates/). The approver sees the applicant's e-mail pre-filled
 from its template and may edit it; what was sent is stored with the decision.
 Changes to either are logged in the append-only iam.config_history.
 """
-import json, os, re, smtplib, ssl, string, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import importlib.util, json, os, re, smtplib, ssl, string, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -787,9 +787,49 @@ def update_profile(username, body):
     return 200, profile_of(kc_user_by_username(username))
 
 
+# ── Access policy check (IAM plan 1.2) ──────────────────────────────────────
+# medcea_iam.py and the route table come from ConfigMap medcea-iam-lib at /iam/.
+# Loaded from the mount and reloaded when it changes, so a ConfigMap that appears
+# later heals and a new library needs no restart. While IAM_ENFORCE is false the
+# check only logs "would refuse ..." (stderr); nothing is refused.
+_IAM = {'mtime': None, 'mod': None, 'warned': False}
+
+
+def _medcea_iam():
+    path = '/iam/medcea_iam.py'
+    try:
+        mtime = os.stat(path).st_mtime
+        if mtime != _IAM['mtime']:
+            spec = importlib.util.spec_from_file_location('medcea_iam', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _IAM.update(mtime=mtime, mod=mod)
+    except Exception as e:  # noqa: BLE001 — a missing mount must not stop the service
+        if not _IAM['warned']:
+            print('medcea_iam: not loaded (%s); requests are not checked' % e, file=sys.stderr, flush=True)
+            _IAM['warned'] = True
+    return _IAM['mod']
+
+
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 class Base(BaseHTTPRequestHandler):
     server_version = 'medcea-access'
+    IAM_SERVICE = None   # the route-table service of each port, set below
+
+    def parse_request(self):
+        # Before any do_*: the raw path, /_account/ prefix and all, is what the
+        # route table keys on (Profile.route() strips it later).
+        if not super().parse_request():
+            return False
+        iam = _medcea_iam()
+        if iam:
+            return iam.http_check(self, self.IAM_SERVICE)
+        # No library: fail closed under enforcement (IAM_ENFORCE is also in the
+        # pod's environment for this case), report-only otherwise.
+        if os.environ.get('IAM_ENFORCE') == 'true' and self.path.split('?')[0] != '/healthz':
+            self.send_error(503, 'access policy not loaded')
+            return False
+        return True
 
     def log_message(self, fmt, *args):
         if not self.path.startswith('/healthz'):
@@ -826,6 +866,7 @@ class Base(BaseHTTPRequestHandler):
 
 
 class Public(Base):
+    IAM_SERVICE = 'access-public'
     # CORS for the login page only. Not credentialed: registration needs no
     # cookie, and nothing on this port answers for a signed-in user.
     def end_headers(self):
@@ -860,6 +901,7 @@ class Public(Base):
 
 
 class Admin(Base):
+    IAM_SERVICE = 'access'
     def actor(self):
         # Set by oauth2-proxy (pass_user_headers). This port is only reachable
         # through that proxy, which admits realm role 'admin' only.
@@ -932,6 +974,7 @@ class Admin(Base):
 
 
 class Profile(Base):
+    IAM_SERVICE = 'access-profile'
     """Mounted at /_account/ on every signed-in host by that host's oauth2-proxy."""
     def username(self):
         return (self.headers.get('X-Forwarded-Preferred-Username') or '').strip()

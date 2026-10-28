@@ -99,7 +99,7 @@ $KUBECTL create secret generic scheduler-secrets -n "$NAMESPACE" \
   --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
 # The plain Ingress from before the SSO gate: its host now belongs to the proxy.
 $KUBECTL delete ingress scheduler -n "$NAMESPACE" --ignore-not-found
-render "$SCRIPT_DIR/k8s/scheduler.yaml" NAMESPACE POSTGRES_PASS PROJECT_NAME REPO_ROOT | $KUBECTL apply -f -
+render "$SCRIPT_DIR/k8s/scheduler.yaml" NAMESPACE POSTGRES_PASS PROJECT_NAME REPO_ROOT IAM_ENFORCE | $KUBECTL apply -f -
 
 log "Restarting scheduler to pick up new ConfigMaps..."
 $KUBECTL rollout restart deployment/scheduler -n "$NAMESPACE"

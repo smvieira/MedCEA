@@ -255,18 +255,44 @@ class WiringTest(unittest.TestCase):
         lib = self.read("infra/lib-oauth2-proxy.sh")
         self.assertIn("error.html\" GATE_SERVICE GATE_ROLES GATE_PORTAL_URL GATE_LOGOUT_RD", lib)
 
-    def test_route_table_reaches_every_service(self):
-        # deploy-infra.sh renders the ConfigMap with every variable the template uses,
-        # and each Python service mounts it optional (it is absent until deploy-infra runs).
-        tpl = self.read("k8s/iam/iam-lib.yaml")
-        self.assertEqual(set(re.findall(r"\$\{([A-Z_]+)\}", tpl)), {"NAMESPACE", "IAM_ROUTES_DIGEST", "IAM_ROUTES_JSON"})
-        self.assertIn("iam-lib.yaml\" NAMESPACE IAM_ROUTES_DIGEST IAM_ROUTES_JSON", self.read("deploy-infra.sh"))
-        for manifest in ("apps/scheduler/k8s/scheduler.yaml", "apps/monitor/k8s/monitor.yaml",
-                         "apps/frontend/k8s/dbmgmt.yaml", "apps/frontend/k8s/config-ui.yaml",
-                         "apps/access/k8s/access.yaml"):
-            src = self.read(manifest)
-            self.assertRegex(src, r"name: medcea-iam-lib,?\s+optional: true", manifest)
-            self.assertRegex(src, r"name: iam-lib,? +(# .*\n +)?mountPath: /iam", manifest)
+    def test_access_check_reaches_every_service(self):
+        # deploy-infra.sh ships the library, the table and the settings in one ConfigMap,
+        # and publishes the realm's keys; each Python service mounts both (optional: they
+        # are absent until deploy-infra runs), installs PyJWT and checks every request
+        # under its own route-table name.
+        infra = self.read("deploy-infra.sh")
+        for key in ("routes.json=", "settings.json=", "medcea_iam.py=\"$SCRIPT_DIR/apps/iam/lib/medcea_iam.py\""):
+            self.assertIn(f"--from-file={key}", infra)
+        self.assertIn("create secret generic medcea-jwks", infra)
+        services = {  # manifest -> (source, how it calls the check)
+            "apps/scheduler/k8s/scheduler.yaml": ("apps/scheduler/scheduler-api.py", ["flask_check('scheduler')"]),
+            "apps/monitor/k8s/monitor.yaml": ("apps/monitor/monitor-api.py", ["flask_check('monitor')"]),
+            "apps/frontend/k8s/dbmgmt.yaml": ("apps/frontend/html/dbmgmt-api.py", ["http_check(self, 'dbmgmt')"]),
+            "apps/frontend/k8s/config-ui.yaml": ("apps/frontend/k8s/recipe-fileserver.yaml", ["http_check(self, 'platform-api')"]),
+            "apps/access/k8s/access.yaml": ("apps/access/access-api.py", [
+                "http_check(self, self.IAM_SERVICE)", "IAM_SERVICE = 'access-public'",
+                "IAM_SERVICE = 'access'", "IAM_SERVICE = 'access-profile'"]),
+        }
+        doc = routes.compile(self.policy)
+        table = set(doc["services"]) | set(doc["public"])
+        for manifest, (source, calls) in services.items():
+            m, src = self.read(manifest), self.read(source)
+            self.assertRegex(m, r"name: medcea-iam-lib,?\s+optional: true", manifest)
+            self.assertRegex(m, r"secretName: medcea-jwks,?\s+optional: true", manifest)
+            self.assertRegex(m, r"name: iam-lib,? +(# .*\n +)?mountPath: /iam", manifest)
+            self.assertRegex(m, r"name: jwks,? +(# .*\n +)?mountPath: /jwks", manifest)
+            for call in calls:
+                self.assertIn(call, src, source)
+                for name in re.findall(r"'([a-z-]+)'", call):
+                    self.assertIn(name, table, f"{source}: {name} is not a route-table service")
+            self.assertIn("/iam/medcea_iam.py", src, source)
+            self.assertIn("pyjwt[crypto]", m + src, f"{manifest}: PyJWT is not installed")
+        # Every proxy with a Python upstream passes the token; Node-RED's never does.
+        for values in ("k8s/oauth2-proxy/values-app.yaml", "k8s/oauth2-proxy/values-portal.yaml",
+                       "apps/mqtt-explorer/k8s/oauth2-proxy-values.yaml", "apps/access/k8s/oauth2-proxy-values.yaml"):
+            self.assertIn("pass_access_token = true", self.read(values), values)
+            self.assertIn("pass_authorization_header = false", self.read(values), values)
+        self.assertIn("pass_access_token = false", self.read("k8s/oauth2-proxy/values-node-red.yaml"))
 
     def test_offered_roles_are_platform_roles_the_database_accepts(self):
         src = self.read("apps/access/access-api.py")

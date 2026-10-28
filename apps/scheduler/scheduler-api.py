@@ -23,7 +23,7 @@ Endpoints:
   POST /api/logs/delete?days=N         — delete .log/.log.gz files older than N days
 """
 
-import os, sys, signal, logging, subprocess, threading, gzip, shutil, json
+import os, sys, signal, logging, subprocess, threading, gzip, shutil, json, importlib.util
 from datetime import timezone, timedelta
 import psycopg2, psycopg2.extras
 from flask import Flask, jsonify, request
@@ -36,6 +36,41 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# ── Access policy check (IAM plan 1.2) ──────────────────────────────────────
+# medcea_iam.py and the route table come from ConfigMap medcea-iam-lib at /iam/.
+# Loaded from the mount and reloaded when it changes, so a ConfigMap that appears
+# later heals and a new library needs no restart. While IAM_ENFORCE is false the
+# check only logs "would refuse ..." (stderr); nothing is refused.
+_IAM = {'mtime': None, 'mod': None, 'warned': False}
+
+
+def _medcea_iam():
+    path = '/iam/medcea_iam.py'
+    try:
+        mtime = os.stat(path).st_mtime
+        if mtime != _IAM['mtime']:
+            spec = importlib.util.spec_from_file_location('medcea_iam', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _IAM.update(mtime=mtime, mod=mod)
+    except Exception as e:  # noqa: BLE001 — a missing mount must not stop the service
+        if not _IAM['warned']:
+            print('medcea_iam: not loaded (%s); requests are not checked' % e, file=sys.stderr, flush=True)
+            _IAM['warned'] = True
+    return _IAM['mod']
+
+
+@app.before_request
+def _access_check():
+    iam = _medcea_iam()
+    if iam:
+        return iam.flask_check('scheduler')
+    # No library: fail closed under enforcement (IAM_ENFORCE is also in the pod's
+    # environment for this case), report-only otherwise.
+    if os.environ.get('IAM_ENFORCE') == 'true' and request.path != '/healthz':
+        return jsonify(error='access policy not loaded'), 503
+    return None
 
 # ---------------------------------------------------------------------------
 # Config from env vars (injected by deploy.sh)

@@ -93,7 +93,7 @@ log "Deploying config-ui..."
 RECIPES_HOST_PATH="$SCRIPT_DIR/recipes"
 mkdir -p "$RECIPES_HOST_PATH"
 
-render "$SCRIPT_DIR/k8s/config-ui.yaml" NAMESPACE RECIPES_HOST_PATH APP_DIR | $KUBECTL apply -n "$NAMESPACE" -f -
+render "$SCRIPT_DIR/k8s/config-ui.yaml" NAMESPACE RECIPES_HOST_PATH APP_DIR IAM_ENFORCE | $KUBECTL apply -n "$NAMESPACE" -f -
 
 # =============================================================================
 # 6b. Config UI authentication
@@ -172,7 +172,7 @@ $KUBECTL create configmap dbmgmt-api -n "$NAMESPACE" \
 log "Deploying dbmgmt..."
 # The plain Ingress from before the SSO gate: its host now belongs to the proxy.
 $KUBECTL delete ingress dbmgmt -n "$NAMESPACE" --ignore-not-found
-render "$SCRIPT_DIR/k8s/dbmgmt.yaml" NAMESPACE POSTGRES_PASS APP_DIR REPO_ROOT | $KUBECTL apply -f -
+render "$SCRIPT_DIR/k8s/dbmgmt.yaml" NAMESPACE POSTGRES_PASS APP_DIR REPO_ROOT IAM_ENFORCE | $KUBECTL apply -f -
 
 log "Waiting for dbmgmt rollout..."
 $KUBECTL rollout restart deployment/dbmgmt -n "$NAMESPACE"

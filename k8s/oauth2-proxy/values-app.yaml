@@ -35,7 +35,10 @@ configuration:
     # would inject by default.
     pass_basic_auth = false
     pass_authorization_header = false
-    pass_access_token = false
+    # X-Forwarded-Access-Token: the token medcea_iam.check() verifies in every
+    # service behind this proxy, /_account/ included (IAM plan 1.3). Not as
+    # Authorization, which PostgREST would try to verify before Phase 2.
+    pass_access_token = true
     # X-Forwarded-User / -Email / -Preferred-Username: what the profile
     # service (/_account/) and any audit trail attribute a request to.
     pass_user_headers = true

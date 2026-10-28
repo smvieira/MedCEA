@@ -247,6 +247,7 @@ public_routes:
   - {service: access-public, route: "GET /register", why: redirect to the request-access tab of the login page}
   - {service: access-public, route: "GET /api/register/roles", why: roles a person may request}
   - {service: access-public, route: "POST /api/register", why: creates a disabled account and a pending request (CORS from the Keycloak origin only)}
+  - {service: access-public, route: "OPTIONS /api/register", why: the browser's CORS preflight for the POST above; it carries no credentials and changes nothing}
 
 # Functions every authenticated path needs. Granted by rule, not by the matrix (plan
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants.

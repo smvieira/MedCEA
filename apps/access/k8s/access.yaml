@@ -21,7 +21,7 @@ spec:
       containers:
       - name: api
         image: python:3.12-alpine
-        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 && exec python -u /app/access-api.py"]
+        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 'pyjwt[crypto]' && exec python -u /app/access-api.py"]
         ports:
         - {name: public, containerPort: 8080}
         - {name: admin, containerPort: 8081}
@@ -38,6 +38,7 @@ spec:
         - {name: LOGIN_ORIGIN, value: "https://${KEYCLOAK_DOMAIN}"}
         - {name: KC_PUBLIC_URL, value: "https://${KEYCLOAK_DOMAIN}"}
         - {name: HOST_CLIENTS, value: "${HOST_CLIENTS}"}
+        - {name: IAM_ENFORCE, value: "${IAM_ENFORCE}"}   # also in /iam/settings.json; covers a missing mount
         envFrom:
         - secretRef: {name: access-secrets}
         readinessProbe:
@@ -55,7 +56,8 @@ spec:
         - {name: code, mountPath: /app/access-api.py, subPath: access-api.py}
         - {name: html, mountPath: /app/html}
         - {name: templates, mountPath: /app/templates}
-        - {name: iam-lib, mountPath: /iam, readOnly: true}   # access policy route table (IAM plan 1.1)
+        - {name: iam-lib, mountPath: /iam, readOnly: true}   # access check, route table, settings (IAM plan 1.1/1.2)
+        - {name: jwks, mountPath: /jwks, readOnly: true}     # the realm's signing keys (Secret medcea-jwks)
       volumes:
       - name: code
         configMap: {name: access-api}
@@ -65,6 +67,8 @@ spec:
         configMap: {name: access-templates}
       - name: iam-lib
         configMap: {name: medcea-iam-lib, optional: true}
+      - name: jwks
+        secret: {secretName: medcea-jwks, optional: true}
 ---
 apiVersion: v1
 kind: Service

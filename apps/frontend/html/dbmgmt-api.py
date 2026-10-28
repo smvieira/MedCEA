@@ -1,4 +1,4 @@
-import json, http.server, os, datetime, decimal
+import json, http.server, os, sys, datetime, decimal, importlib.util
 
 PG_HOST = os.environ.get('PG_HOST', 'rdbms-postgresql.medcea.svc.cluster.local')
 PG_PORT = int(os.environ.get('PG_PORT', '5432'))
@@ -252,8 +252,45 @@ def build_export(selections):
     con.close()
     return ''.join(parts)
 
+# ── Access policy check (IAM plan 1.2) ──────────────────────────────────────
+# medcea_iam.py and the route table come from ConfigMap medcea-iam-lib at /iam/.
+# Loaded from the mount and reloaded when it changes, so a ConfigMap that appears
+# later heals and a new library needs no restart. While IAM_ENFORCE is false the
+# check only logs "would refuse ..." (stderr); nothing is refused.
+_IAM = {'mtime': None, 'mod': None, 'warned': False}
+
+
+def _medcea_iam():
+    path = '/iam/medcea_iam.py'
+    try:
+        mtime = os.stat(path).st_mtime
+        if mtime != _IAM['mtime']:
+            spec = importlib.util.spec_from_file_location('medcea_iam', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _IAM.update(mtime=mtime, mod=mod)
+    except Exception as e:  # noqa: BLE001 — a missing mount must not stop the service
+        if not _IAM['warned']:
+            print('medcea_iam: not loaded (%s); requests are not checked' % e, file=sys.stderr, flush=True)
+            _IAM['warned'] = True
+    return _IAM['mod']
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass  # suppress access log
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        iam = _medcea_iam()
+        if iam:
+            return iam.http_check(self, 'dbmgmt')
+        # No library: fail closed under enforcement (IAM_ENFORCE is also in the
+        # pod's environment for this case), report-only otherwise.
+        if os.environ.get('IAM_ENFORCE') == 'true' and self.path.split('?')[0] != '/healthz':
+            self.send_error(503, 'access policy not loaded')
+            return False
+        return True
 
     def send_json(self, code, obj):
         body = json.dumps(obj).encode()
@@ -306,5 +343,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 import subprocess, sys
 subprocess.run([sys.executable, '-m', 'pip', 'install', 'pg8000', '--quiet', '--no-cache-dir'],
                check=True, capture_output=True)
+# PyJWT for the access check; without it the check reports every request as
+# unverifiable instead of the service failing to start.
+subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyjwt[crypto]', '--quiet', '--no-cache-dir'],
+               check=False, capture_output=True)
 print('pg8000 ready — listening on :8081', flush=True)
 http.server.HTTPServer(('0.0.0.0', 8081), Handler).serve_forever()

@@ -37,13 +37,18 @@ spec:
           value: postgres
         - name: PG_PASSWORD
           value: "${POSTGRES_PASS}"
+        - name: IAM_ENFORCE        # also in /iam/settings.json; this copy covers a missing mount
+          value: "${IAM_ENFORCE}"
         volumeMounts:
         - name: api-script
           mountPath: /scripts
         - name: db-exports
           mountPath: /exports
-        - name: iam-lib          # access policy route table (IAM plan 1.1); optional
+        - name: iam-lib          # access check, route table, settings (IAM plan 1.1/1.2); optional
           mountPath: /iam
+          readOnly: true
+        - name: jwks             # the realm's signing keys (Secret medcea-jwks); optional
+          mountPath: /jwks
           readOnly: true
       volumes:
       - name: html
@@ -66,6 +71,10 @@ spec:
       - name: iam-lib
         configMap:
           name: medcea-iam-lib
+          optional: true
+      - name: jwks
+        secret:
+          secretName: medcea-jwks
           optional: true
 ---
 apiVersion: v1

@@ -10,6 +10,7 @@ as routes.json and medcea_iam.check() reads (plan Section 3.2). Per service:
             composites and implies expanded, so check() needs no matrix logic of its own.
   public    routes that need no platform role (`public_routes`); "*" applies to every
             service
+  roles     the platform roles: check() keeps only these from a token's groups claim
 A route missing from the table is refused. The body is canonical JSON, and `digest` is
 its SHA-256, so two compiles of one policy are byte-identical.
 """
@@ -17,7 +18,7 @@ import hashlib
 import json
 import re
 
-METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 _ROUTE = re.compile(r"^(%s) (/[^\s]*)$" % "|".join(METHODS))
 SCHEMA = 1
 
@@ -98,6 +99,7 @@ def compile(p, source="defaults.yaml"):
         "schema": SCHEMA,
         "policy_version": p.data.get("policy_version"),
         "source": source,
+        "roles": sorted(p.roles),
         "services": {s: {"clients": sorted(clients.get(s, ())), "routes": t} for s, t in services.items()},
         "public": {s: sorted(r) for s, r in public.items()},
     }

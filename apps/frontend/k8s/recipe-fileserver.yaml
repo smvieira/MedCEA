@@ -5,7 +5,7 @@ metadata:
   namespace: ${NAMESPACE}
 data:
   server.py: |
-    import os, json, socket, time
+    import os, sys, json, socket, time, importlib.util
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from urllib.parse import unquote
 
@@ -15,8 +15,10 @@ data:
     LOCATIONS_DIR  = '/locations'
 
     def _resolve(path):
-        """Returns (base_dir, fname_or_None, is_list)."""
-        if path.startswith('/devices'):
+        """Returns (base_dir, fname_or_None, is_list). Dispatch on a whole first
+        segment, as the route table does: /devicesX.json is a recipe file, not a
+        device file (the access check and this function must agree)."""
+        if path == '/devices' or path.startswith('/devices/'):
             rest = path[len('/devices'):]
             if rest in ('', '/'):
                 return DEVICES_DIR, None, True
@@ -24,7 +26,7 @@ data:
             if '/' in fname or not fname.endswith('.json'):
                 return DEVICES_DIR, None, False  # invalid
             return DEVICES_DIR, fname, False
-        elif path.startswith('/locations'):
+        elif path == '/locations' or path.startswith('/locations/'):
             rest = path[len('/locations'):]
             if rest in ('', '/'):
                 return LOCATIONS_DIR, None, True
@@ -32,7 +34,7 @@ data:
             if '/' in fname or not fname.endswith('.json'):
                 return LOCATIONS_DIR, None, False  # invalid
             return LOCATIONS_DIR, fname, False
-        elif path.startswith('/units'):
+        elif path == '/units' or path.startswith('/units/'):
             rest = path[len('/units'):]
             if rest in ('', '/'):
                 return UNITS_DIR, None, True
@@ -76,8 +78,44 @@ data:
             except OSError as e2:
                 return False, None, str(e2)
 
+    # ── Access policy check (IAM plan 1.2) ──────────────────────────────────────
+    # medcea_iam.py and the route table come from ConfigMap medcea-iam-lib at /iam/.
+    # Loaded from the mount and reloaded when it changes, so a ConfigMap that appears
+    # later heals and a new library needs no restart. While IAM_ENFORCE is false the
+    # check only logs "would refuse ..." (stderr); nothing is refused.
+    _IAM = {'mtime': None, 'mod': None, 'warned': False}
+
+
+    def _medcea_iam():
+        path = '/iam/medcea_iam.py'
+        try:
+            mtime = os.stat(path).st_mtime
+            if mtime != _IAM['mtime']:
+                spec = importlib.util.spec_from_file_location('medcea_iam', path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _IAM.update(mtime=mtime, mod=mod)
+        except Exception as e:  # noqa: BLE001 — a missing mount must not stop the service
+            if not _IAM['warned']:
+                print('medcea_iam: not loaded (%s); requests are not checked' % e, file=sys.stderr, flush=True)
+                _IAM['warned'] = True
+        return _IAM['mod']
+
+
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a): pass
+        def parse_request(self):
+            if not super().parse_request():
+                return False
+            iam = _medcea_iam()
+            if iam:
+                return iam.http_check(self, 'platform-api')
+            # No library: fail closed under enforcement (IAM_ENFORCE is also in the
+            # pod's environment for this case), report-only otherwise.
+            if os.environ.get('IAM_ENFORCE') == 'true' and self.path.split('?')[0] != '/healthz':
+                self.send_error(503, 'access policy not loaded')
+                return False
+            return True
         def _send(self, code, body=b'', ct='application/json'):
             self.send_response(code)
             self.send_header('Content-Type', ct)
