@@ -32,3 +32,8 @@ configuration:
     oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
     profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
     upstreams = ["http://node-red.${NAMESPACE}.svc.cluster.local:1880"]
+    # The Node-RED editor runs code with the ingest account, so it is open only
+    # to the roles the access policy admits here (group flows; ALLOWED_GROUPS is
+    # compiled by policy_groups). Needs the "groups" client scope on node-red.
+    oidc_groups_claim = "groups"
+    allowed_groups = ${ALLOWED_GROUPS}

@@ -367,21 +367,47 @@ Node-RED, Grafana and JupyterHub keep their own built-in user menus.
 
 ### Roles
 
-Each account holds **one** platform role:
+Each account holds **one** platform role. The access policy
+([apps/iam/policy/defaults.yaml](apps/iam/policy/defaults.yaml)) defines eleven;
+the request form and the User Manager offer these five for now, the rest once
+the services enforce the policy themselves:
 
 | Role | Meant for |
 |---|---|
-| `operator` | running recipes and day-to-day cultivation |
-| `qa` | reviewing data and releasing batches |
+| `operator` | running recipes and day-to-day cultivation in your zones |
+| `engineer` | devices, recipes, controllers, flows and dashboards (drafts that qa approves) |
+| `qa` | approving others' work, confirming account grants and policy changes |
 | `auditor` | read-only access to records and audit trails |
-| `admin` | managing the platform and its users |
+| `admin` | managing the platform and its users — without access to production data |
 
-Today a role is checked in two places: **the portal admits only these four roles**
-(anyone else gets "No access yet"), and **the User Manager admits only `admin`**.
-Finer permissions inside each service (Grafana, Node-RED, Config UI, scheduler) are
-still to be built — see the RBAC row in [docs/architecture.md](docs/architecture.md).
-The built-in accounts get one at install: `admin` → admin, `developer` →
-operator, `viewer` → auditor.
+Which role reaches which service is **compiled from the policy** into the sign-in
+gates of the portal, Config UI, scheduler, Monitor, Database Management, MQTT
+Explorer and Node-RED. `python3 apps/iam/compiler/cli.py hosts` lists every host
+with the roles it admits and whether that gate is enforced yet; Grafana, the AI
+Workbench, onboarding and the User Manager (admin only) follow in later phases.
+Finer permissions inside each service are the next steps of the IAM plan.
+
+**Existing accounts after this change** keep their role and its meaning, but
+some lose services the policy does not give them:
+
+| Account | Role | Loses | Still reaches |
+|---|---|---|---|
+| `admin` (platform) | admin | Monitor, Database Management, MQTT Explorer, Node-RED | portal, Config UI, scheduler, User Manager, pgAdmin, Grafana, Workbench |
+| `developer` | operator | Database Management, MQTT Explorer, Node-RED | portal, Config UI, scheduler, Monitor |
+| `viewer` | auditor | MQTT Explorer, Node-RED | portal, Config UI, scheduler, Monitor, Database Management |
+| `QA_USER` (new) | qa | — | as auditor, plus approvals |
+| `ENGINEER_USER` (new) | engineer | — | Node-RED, MQTT Explorer and everything an engineer drafts |
+
+The install creates two people from `config.env`, each with a temporary password
+(and no name yet — Keycloak asks for both at first sign-in): the first **qa
+person** (`QA_USER`), because every account grant and every policy change is
+confirmed by someone holding qa who is not the administrator; and the first
+**engineer** (`ENGINEER_USER`), because only engineers reach Node-RED and the
+MQTT Explorer. If you are the administrator and also the one editing flows, the
+engineer is your second account, with its own username and e-mail (Gmail:
+`name+engineer@gmail.com`). **Keycloak's own console** (`https://keycloak.<domain>/admin`) has a
+separate break-glass account, `kc-breakglass`, listed in the credentials file; it
+is for recovery only, and every use of it is recorded.
 
 ### Getting access
 

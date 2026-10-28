@@ -18,13 +18,14 @@ configuration:
     cookie_expire = "8h"
     # Straight to the platform login page (the medcea Keycloak theme).
     skip_provider_button = true
-    # Only people with a platform role get in, the same gate as the portal
-    # (k8s/oauth2-proxy/values-portal.yaml). The "groups" claim is the realm
+    # Only the roles the access policy admits on this host get in:
+    # ALLOWED_GROUPS is compiled per host by policy_groups (infra/lib-oauth2-proxy.sh)
+    # from apps/iam/policy/defaults.yaml. The "groups" claim is the realm
     # client scope deploy-infra.sh attaches to every client it creates;
     # oauth2-proxy also asks for the scope by that name, so a client without
     # it fails with invalid_scope.
     oidc_groups_claim = "groups"
-    allowed_groups = ["operator", "qa", "auditor", "admin"]
+    allowed_groups = ${ALLOWED_GROUPS}
     # Nothing behind these proxies wants an Authorization header, and some
     # upstreams (PostgREST behind config) reject the Basic one oauth2-proxy
     # would inject by default.

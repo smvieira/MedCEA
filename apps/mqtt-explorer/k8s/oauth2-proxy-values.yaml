@@ -15,7 +15,8 @@ configuration:
     cookie_expire = "8h"
     skip_provider_button = true
     oidc_groups_claim = "groups"
-    allowed_groups = ["operator", "qa", "auditor", "admin"]
+    # Compiled from the access policy for MQTTX_DOMAIN (policy_groups).
+    allowed_groups = ${ALLOWED_GROUPS}
     pass_basic_auth = false
     pass_authorization_header = false
     pass_access_token = false

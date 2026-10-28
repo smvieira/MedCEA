@@ -1336,7 +1336,12 @@ rm -f "$_GF_VALUES"
 # =============================================================================
 echo -e "\n${GREEN}[7/10] Deploying OAuth2 Proxy (Node-RED SSO gateway)...${NC}"
 _OP2_VALUES=$(mktemp /tmp/oauth2proxy-values-XXXXXX.yaml)
-render "$SCRIPT_DIR/k8s/oauth2-proxy/values-node-red.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_OP2_VALUES"
+# allowed_groups compiled from the access policy for this host (policy_groups,
+# infra/lib-oauth2-proxy.sh); IAM_GATES=false renders the pre-policy list.
+REPO_ROOT="$SCRIPT_DIR"
+source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"
+ALLOWED_GROUPS="$(policy_groups NODE_RED_DOMAIN)"
+render "$SCRIPT_DIR/k8s/oauth2-proxy/values-node-red.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_OP2_VALUES"
 $MK8S helm3 upgrade --install oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \
@@ -1446,7 +1451,8 @@ render "$SCRIPT_DIR/k8s/portal/error.html" _PORTAL_LOGOUT_RD \
 
 # Portal OAuth2 Proxy (Keycloak client: portal)
 _POP2_VALUES=$(mktemp /tmp/portal-oauth2proxy-values-XXXXXX.yaml)
-render "$SCRIPT_DIR/k8s/oauth2-proxy/values-portal.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_POP2_VALUES"
+ALLOWED_GROUPS="$(policy_groups PORTAL_DOMAIN)"
+render "$SCRIPT_DIR/k8s/oauth2-proxy/values-portal.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_POP2_VALUES"
 $MK8S helm3 upgrade --install portal-oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \

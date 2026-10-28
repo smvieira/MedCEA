@@ -91,7 +91,8 @@ $KUBECTL rollout status deployment/monitor -n "$NAMESPACE" --timeout=3m
 
 log "Deploying monitor-oauth2-proxy (Keycloak SSO)..."
 _VALUES=$(mktemp /tmp/monitor-oauth2proxy-values-XXXXXX.yaml)
-APP_SERVICE=monitor render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE > "$_VALUES"
+ALLOWED_GROUPS="$(policy_groups MONITOR_DOMAIN)"
+APP_SERVICE=monitor render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_VALUES"
 deploy_oauth2_proxy monitor-oauth2-proxy monitor "${MONITOR_CLIENT_SECRET:-}" "${MONITOR_COOKIE_SECRET:-}" "$MONITOR_DOMAIN" "$_VALUES"
 rm -f "$_VALUES"
 $KUBECTL rollout status deployment/monitor-oauth2-proxy -n "$NAMESPACE" --timeout=4m
