@@ -114,6 +114,19 @@ COMMENT ON TABLE iam.access_request_history IS 'Append-only log of access reques
 ALTER TABLE iam.access_request ADD COLUMN IF NOT EXISTS email_subject TEXT;
 ALTER TABLE iam.access_request ADD COLUMN IF NOT EXISTS email_body    TEXT;
 
+-- ── The eleven platform roles of the access policy ──────────────────────────
+-- (apps/iam/policy/defaults.yaml). The table accepts all of them; which ones
+-- the service offers is ROLES in access-api.py. Re-created rather than altered:
+-- the original CHECKs are inline, so an existing install keeps the old list.
+ALTER TABLE iam.access_request DROP CONSTRAINT IF EXISTS access_request_requested_role_check;
+ALTER TABLE iam.access_request ADD CONSTRAINT access_request_requested_role_check
+    CHECK (requested_role IN ('operator', 'production_manager', 'maintenance', 'qc', 'qa', 'qp',
+                              'engineer', 'bio_scientist', 'control_scientist', 'admin', 'auditor'));
+ALTER TABLE iam.access_request DROP CONSTRAINT IF EXISTS access_request_granted_role_check;
+ALTER TABLE iam.access_request ADD CONSTRAINT access_request_granted_role_check
+    CHECK (granted_role IN ('operator', 'production_manager', 'maintenance', 'qc', 'qa', 'qp',
+                            'engineer', 'bio_scientist', 'control_scientist', 'admin', 'auditor'));
+
 -- ── E-mail settings and templates, managed in the User Manager ──────────────
 -- One row. smtp_pass is the Gmail app password: readable by access_svc (it has
 -- to log in with it) and never returned by the API.

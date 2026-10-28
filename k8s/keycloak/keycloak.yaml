@@ -37,17 +37,24 @@ spec:
         image: quay.io/keycloak/keycloak:26.0
         args:
         - start
+        # No one acts as someone else: dual control and attribution assume the
+        # account that signed in is the person who did it.
+        - --features-disabled=impersonation
         volumeMounts:
         - name: theme
           mountPath: /opt/keycloak/themes/medcea
           readOnly: true
         env:
         # Keycloak 26 names (KEYCLOAK_ADMIN* are deprecated). Only used when the
-        # database has no admin yet, i.e. on the first start.
+        # database has no admin yet, i.e. on the first start: the console account
+        # is the break-glass identity, never the platform admin's name or password
+        # (infra/lib-keycloak-admin.sh migrates installs made before the split).
+        # From Secret keycloak-bootstrap (deploy-infra.sh), so the password is
+        # not readable from the Deployment spec or its ReplicaSet history.
         - name: KC_BOOTSTRAP_ADMIN_USERNAME
-          value: "${ADMIN_USER}"
+          valueFrom: {secretKeyRef: {name: keycloak-bootstrap, key: username}}
         - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-          value: "${ADMIN_PASS}"
+          valueFrom: {secretKeyRef: {name: keycloak-bootstrap, key: password}}
         - name: KC_DB
           value: postgres
         - name: KC_DB_URL

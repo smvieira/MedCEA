@@ -31,7 +31,7 @@ MODE="all"
 source "$SCRIPT_DIR/lib-lock.sh"; medcea_lock
 
 # Values the deploy cannot start without and that nothing generates for you.
-REQUIRED=(PROJECT_NAME DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS POSTGRES_PASS DOCKERHUB_USER DOCKERHUB_PAT)
+REQUIRED=(PROJECT_NAME DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS QA_USER QA_EMAIL ENGINEER_USER ENGINEER_EMAIL POSTGRES_PASS DOCKERHUB_USER DOCKERHUB_PAT)
 
 die() { echo -e "${RED}ERROR: $*${NC}" >&2; exit 1; }
 
@@ -346,6 +346,15 @@ chmod 600 "$CONFIG_FILE"
 check_prereqs
 check_tailscale
 
+# Generated, never asked — so filled before the early exit below, on every run:
+# the qa person's initial password (shown once in the credentials box, replaced
+# at first sign-in) and Keycloak's break-glass console account (its own name and
+# password, never the platform admin's; infra/lib-keycloak-admin.sh).
+[[ -n "$(cfg_get QA_INITIAL_PASS)" ]] || cfg_set QA_INITIAL_PASS "$(gen_password)"
+[[ -n "$(cfg_get ENGINEER_INITIAL_PASS)" ]] || cfg_set ENGINEER_INITIAL_PASS "$(gen_password)"
+[[ -n "$(cfg_get KC_BREAKGLASS_USER)" ]] || cfg_set KC_BREAKGLASS_USER "kc-breakglass"
+[[ -n "$(cfg_get KC_BREAKGLASS_PASS)" ]] || cfg_set KC_BREAKGLASS_PASS "$(gen_password)"
+
 if [[ "$MODE" == "missing" ]]; then
     MISSING=()
     for v in "${REQUIRED[@]}"; do [[ -n "$(cfg_get "$v")" ]] || MISSING+=("$v"); done
@@ -458,6 +467,62 @@ if wanted ADMIN_EMAIL; then
 fi
 wanted ADMIN_PASS && ask_password ADMIN_PASS "Admin password"
 
+# --- 3b. First qa person and first engineer ------------------------------------
+# Seeded accounts are real people's: each needs its own username (not the admin,
+# the demo users or another seeded person) and its own e-mail address (Keycloak
+# refuses a second account with the same one).
+_taken_users() { printf '%s\n' "$(cfg_get ADMIN_USER)" "$(cfg_get GRAFANA_ADMIN_USER)" \
+    "$(cfg_get GRAFANA_DEVELOPER_USER)" "$(cfg_get GRAFANA_VIEWER_USER)" developer viewer "$@"; }
+_taken_emails() { printf '%s\n' "$(cfg_get ADMIN_EMAIL)" "$@" | tr '[:upper:]' '[:lower:]'; }
+# ask_person VAR "Question" taken... — a username nobody else in the list has
+ask_person_user() {
+    local var="$1" q="$2"; shift 2
+    while true; do
+        ask _pv "$q" "$(cfg_get "$var")"
+        if [[ ! "$_pv" =~ ^[a-z][a-z0-9._-]{1,30}$ ]]; then
+            info "${RED}Lowercase letters, digits, . _ - (starting with a letter).${NC}"
+        elif _taken_users "$@" | grep -qxF "$_pv"; then
+            info "${RED}That account is already the administrator, a demo user or another seeded person.${NC}"
+        else
+            break
+        fi
+    done
+    cfg_update "$var" "$_pv"
+}
+ask_person_email() {
+    local var="$1" q="$2"; shift 2
+    while true; do
+        ask _pv "$q" "$(cfg_get "$var")"
+        if [[ ! "$_pv" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            info "${RED}An e-mail address, e.g. name@example.org.${NC}"
+        elif _taken_emails "$@" | grep -qxF "${_pv,,}"; then
+            info "${RED}Another seeded account already uses that address (Gmail: name+role@gmail.com is a separate address).${NC}"
+        else
+            break
+        fi
+    done
+    cfg_update "$var" "$_pv"
+}
+# Every grant and every policy change is confirmed by a person holding qa who is
+# not the administrator (the access policy's invariant I17), so the install
+# creates one. A different person: a different username and e-mail address.
+if wanted QA_USER || wanted QA_EMAIL; then
+    section "Quality Assurance"
+    info "The first person with role qa: confirms account grants and approves policy changes."
+    info "Must be someone other than the administrator. They choose their own password at first sign-in."
+fi
+wanted QA_USER  && ask_person_user  QA_USER  "QA username" "$(cfg_get ENGINEER_USER)"
+wanted QA_EMAIL && ask_person_email QA_EMAIL "QA e-mail"   "$(cfg_get ENGINEER_EMAIL)"
+
+if wanted ENGINEER_USER || wanted ENGINEER_EMAIL; then
+    section "Automation Engineer"
+    info "The first person with role engineer: the only role the access policy admits to"
+    info "Node-RED, MQTT Explorer and device onboarding. May be the administrator's own second"
+    info "account, but with its own username and e-mail address."
+fi
+wanted ENGINEER_USER  && ask_person_user  ENGINEER_USER  "Engineer username" "$(cfg_get QA_USER)"
+wanted ENGINEER_EMAIL && ask_person_email ENGINEER_EMAIL "Engineer e-mail"   "$(cfg_get QA_EMAIL)"
+
 # --- 4. PostgreSQL ------------------------------------------------------------
 if wanted POSTGRES_PASS; then
     section "PostgreSQL"
@@ -550,7 +615,7 @@ fi
 
 # --- Summary ------------------------------------------------------------------
 section "Saved to $CONFIG_FILE"
-for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER ADMIN_EMAIL POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
+for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER ADMIN_EMAIL QA_USER QA_EMAIL ENGINEER_USER ENGINEER_EMAIL POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
     printf '  %-18s %s\n' "$v" "$(cfg_get "$v")"
 done
 for v in ADMIN_PASS POSTGRES_PASS DOCKERHUB_PAT; do

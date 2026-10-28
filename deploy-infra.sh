@@ -296,7 +296,9 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 
 # Validate essential configuration variables
 MISSING_VARS=()
-for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
+for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS QA_USER QA_EMAIL QA_INITIAL_PASS \
+           ENGINEER_USER ENGINEER_EMAIL ENGINEER_INITIAL_PASS \
+           KC_BREAKGLASS_USER KC_BREAKGLASS_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
            STORAGE_SIZE KEYCLOAK_DOMAIN KEYCLOAK_REALM GRAFANA_DOMAIN NODE_RED_DOMAIN \
            WORKBENCH_DOMAIN PGADMIN_DOMAIN PORTAL_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN DBMGMT_DOMAIN \
            SCHEDULER_DOMAIN MONITOR_DOMAIN PLATFORM_IP; do
@@ -547,7 +549,12 @@ $MK8S kubectl create configmap keycloak-theme -n "$NAMESPACE" \
 _KC_THEME_SUM="$(cat "$_KC_THEME_TMP"/* "$_KC_THEME"/*.ftl "$_KC_THEME"/messages/* "$_KC_THEME"/resources/css/* | sha256sum | cut -c1-16)"
 rm -rf "$_KC_THEME_TMP"
 
-render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE ADMIN_USER ADMIN_PASS POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN _KC_THEME_SUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
+# The bootstrap credentials of the break-glass console account live in a Secret,
+# not as literal values in the Deployment (readable by anyone who can get it).
+$MK8S kubectl create secret generic keycloak-bootstrap -n "$NAMESPACE" --dry-run=client -o yaml \
+  --from-literal=username="$KC_BREAKGLASS_USER" --from-literal=password="$KC_BREAKGLASS_PASS" \
+  | $MK8S kubectl apply -f - >/dev/null
+render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN _KC_THEME_SUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 echo -e "${YELLOW}Waiting for Keycloak to be ready (up to 10 min)...${NC}"
 $MK8S kubectl rollout status deployment/keycloak -n "$NAMESPACE" --timeout=10m
@@ -566,25 +573,22 @@ $MK8S kubectl port-forward svc/keycloak 18080:80 -n "$NAMESPACE" &>/dev/null 9>&
 _KC_PF_PID=$!
 sleep 5
 
-# Helper: get a fresh admin token (Keycloak tokens expire in ~60s)
-_kc_token() {
-    curl -sf -X POST \
-      "http://localhost:18080/realms/master/protocol/openid-connect/token" \
-      -d "client_id=admin-cli" \
-      -d "username=${ADMIN_USER}" \
-      -d "password=${ADMIN_PASS}" \
-      -d "grant_type=password" \
-      | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || echo ""
-}
+# Helper: get a fresh admin token (Keycloak tokens expire in ~60s). Who the
+# script is to Keycloak — the medcea-deployer client, the break-glass account or,
+# on an install from before the split, the legacy admin — is decided once by
+# kc_admin_select (infra/lib-keycloak-admin.sh).
+source "$SCRIPT_DIR/infra/lib-keycloak-admin.sh"
+_kc_token() { kc_admin_token; }
 
 # Retry up to 12 times (60s) in case the port-forward needs extra time
 _KC_TOKEN=""
 for _i in $(seq 1 12); do
-    _KC_TOKEN=$(_kc_token)
+    kc_admin_select && _KC_TOKEN=$(_kc_token)
     [[ -n "$_KC_TOKEN" ]] && break
     echo -e "${YELLOW}  Waiting for Keycloak Admin API... (${_i}/12)${NC}"
     sleep 5
 done
+[[ -n "$_KC_TOKEN" ]] && echo -e "${GREEN}  Keycloak admin API as: ${KC_ADMIN_MODE}${NC}"
 if [[ -z "$_KC_TOKEN" ]]; then
     echo -e "${RED}ERROR: Could not authenticate to Keycloak Admin API. Check Keycloak logs.${NC}"
     kill $_KC_PF_PID 2>/dev/null || true
@@ -613,6 +617,15 @@ else
     kill $_KC_PF_PID 2>/dev/null || true
     exit 1
 fi
+
+# Master-realm identities: the break-glass console account and the deployer
+# client the scripts use from now on; the legacy admin is disabled once both
+# work. Login and admin events on in both realms, so every change is recorded.
+echo -e "${YELLOW}  Ensuring the break-glass console account and the deployer client...${NC}"
+if ! kc_ensure_master_identities; then
+    echo -e "${RED}  Master-realm identities incomplete — continuing as '${KC_ADMIN_MODE}'.${NC}" >&2
+fi
+kc_enable_events "$KEYCLOAK_REALM"
 
 # Realm look. loginTheme=medcea is the platform's own sign-in page
 # (k8s/keycloak/theme). Mail (smtpServer, resetPasswordAllowed) is deliberately
@@ -813,16 +826,26 @@ _create_realm_role() {
       -d "{\"name\":\"${ROLE}\"}" || true
 }
 
-# Helper: create a user with a temporary=false password (idempotent — 409 = already exists)
+# Helper: create a user with a temporary=false password (idempotent — 409 = already exists).
+# Sets _KC_CREATED=1 when this call created the account, so a caller can do a
+# one-time step (a first role) without redoing it on every deploy.
 _create_kc_user() {
     local USERNAME="$1" FIRSTNAME="$2" LASTNAME="$3" EMAIL="$4" PASSWORD="$5"
-    local TOK
+    # TEMPORARY=true: Keycloak makes the person choose their own at first sign-in.
+    local TEMPORARY="${6:-false}"
+    local TOK CODE
     TOK=$(_kc_token)
-    curl -s -o /dev/null -X POST \
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"username\":\"${USERNAME}\",\"firstName\":\"${FIRSTNAME}\",\"lastName\":\"${LASTNAME}\",\"email\":\"${EMAIL}\",\"enabled\":true,\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"${PASSWORD}\",\"temporary\":false}]}" || true
+      -d "{\"username\":\"${USERNAME}\",\"firstName\":\"${FIRSTNAME}\",\"lastName\":\"${LASTNAME}\",\"email\":\"${EMAIL}\",\"enabled\":true,\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"${PASSWORD}\",\"temporary\":${TEMPORARY}}]}" || true)
+    _KC_CREATED=0
+    [[ "$CODE" == 201 ]] && _KC_CREATED=1
+    if [[ "$CODE" != 201 && "$CODE" != 409 ]]; then
+        echo -e "${RED}  Could not create Keycloak user '${USERNAME}' (HTTP ${CODE}).${NC}" >&2
+    fi
+    return 0
 }
 
 # Helper: set an existing user's e-mail, read-modify-write (a partial PUT would
@@ -927,33 +950,108 @@ _set_kc_email "$ADMIN_USER" "$ADMIN_EMAIL"
 _set_kc_email "$_GF_DEV_USER"  "$(_demo_email "$_GF_DEV_USER")"  "@cea.com"
 _set_kc_email "$_GF_VIEW_USER" "$(_demo_email "$_GF_VIEW_USER")" "@cea.com"
 
-# --- Platform realm roles (docs/architecture.md, RBAC) ---
-# The portal admits only these (allowed_groups in values-portal.yaml), the User
-# Manager only admin. People get them through an access request (apps/access);
-# the built-in users get one here so the gate never locks them out.
-echo -e "${YELLOW}  Creating platform roles (operator, qa, auditor, admin)...${NC}"
-for _r in operator qa auditor admin; do _create_realm_role "$_r"; done
+# --- Platform realm roles (apps/iam/policy/defaults.yaml) ---
+# The eleven roles of the access policy; the host gates are compiled from it
+# (policy_groups). People get a role through an access request (apps/access); the
+# built-in users get one here so the gate never locks them out. Two composites
+# make the groups claim carry inherited roles: production_manager contains
+# operator, qa contains auditor (the policy's roles.*.includes).
+echo -e "${YELLOW}  Creating the eleven platform roles and their composites...${NC}"
+for _r in operator production_manager maintenance qc qa qp engineer bio_scientist control_scientist admin auditor; do
+    _create_realm_role "$_r"
+done
+# Helper: make PARENT a composite that contains CHILD (idempotent).
+_add_composite() {
+    local child
+    child=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/roles/$2" -H "Authorization: Bearer $(_kc_token)") || return 0
+    curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/roles/$1/composites" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "[${child}]" || true
+}
+_add_composite production_manager operator
+_add_composite qa auditor
 _assign_realm_role "$ADMIN_USER"     "admin"
 _assign_realm_role "$_GF_ADMIN_USER" "admin"
 _assign_realm_role "$_GF_DEV_USER"   "operator"
 _assign_realm_role "$_GF_VIEW_USER"  "auditor"
 
+# The first qa person and the first engineer (infra/configure.sh asks for both).
+# Every account grant and every policy change is confirmed by a qa person who is
+# not the administrator, and only engineers reach Node-RED, MQTT Explorer and
+# device onboarding — an install without them could approve nothing and edit no
+# flow. Each is created once, with a temporary password, and gets its role only
+# then: a later role change in the User Manager is never undone by a deploy.
+# No first or last name: these are real people, and Keycloak asks them for their
+# own name at first sign-in along with the new password, so every record they
+# make carries their name, not a placeholder.
+_seed_person() {   # USER EMAIL PASSWORD ROLE LABEL
+    [[ -n "$1" ]] || return 0
+    _create_kc_user "$1" "" "" "$2" "$3" true
+    if [[ "$_KC_CREATED" == 1 ]]; then
+        _assign_realm_role "$1" "$4"
+        echo -e "${GREEN}  Created '$1' with role $4 (temporary password in the credentials file).${NC}"
+    fi
+}
+echo -e "${YELLOW}  Ensuring the first qa person and the first engineer...${NC}"
+_seed_person "${QA_USER:-}"       "${QA_EMAIL:-}"       "${QA_INITIAL_PASS:-}"       qa       "Quality Assurance"
+_seed_person "${ENGINEER_USER:-}" "${ENGINEER_EMAIL:-}" "${ENGINEER_INITIAL_PASS:-}" engineer "Automation Engineer"
+
 # "organisation" as a declared user-profile attribute: Keycloak 26 drops any
 # attribute the realm's user profile does not declare, so without this the
 # registration form's and the profile page's organisation would vanish.
+# "person_id" likewise, but visible and editable by realm administrators only:
+# dual control compares persons, not accounts (the access policy's not_own_author
+# and I17), so a person must never be able to set their own. It defaults to the
+# account's own id (below) and reaches tokens through the medcea-identity scope.
 _UP_JSON=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/profile" -H "Authorization: Bearer $(_kc_token)" | python3 -c '
 import json, sys
 up = json.load(sys.stdin)
-if any(a["name"] == "organisation" for a in up.get("attributes", [])):
-    sys.exit(0)
-up["attributes"].append({"name": "organisation", "displayName": "Organisation",
-    "validations": {"length": {"max": 200}},
-    "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]}, "multivalued": False})
-print(json.dumps(up))' 2>/dev/null || true)
+have = {a["name"] for a in up.get("attributes", [])}
+changed = False
+if "organisation" not in have:
+    up["attributes"].append({"name": "organisation", "displayName": "Organisation",
+        "validations": {"length": {"max": 200}},
+        "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]}, "multivalued": False})
+    changed = True
+if "person_id" not in have:
+    up["attributes"].append({"name": "person_id", "displayName": "Person",
+        "validations": {"length": {"max": 64}},
+        "permissions": {"view": ["admin"], "edit": ["admin"]}, "multivalued": False})
+    changed = True
+if changed:
+    print(json.dumps(up))' 2>/dev/null || true)
 if [[ -n "$_UP_JSON" ]]; then
     curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/profile" \
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_UP_JSON" || true
 fi
+
+# Every account without a person_id gets its own id, so no two accounts share a
+# person by accident; linking two accounts of one person is an admin decision
+# confirmed by qa (apps/access). Read-modify-write: a partial PUT would drop the
+# rest of the representation. Service-account users are skipped.
+echo -e "${YELLOW}  Setting person_id on accounts that have none...${NC}"
+_PID_N=0
+for _uid in $(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users?max=10000&briefRepresentation=true" \
+        -H "Authorization: Bearer $(_kc_token)" | python3 -c '
+import json, sys
+for u in json.load(sys.stdin):
+    if not u["username"].startswith("service-account-"):
+        print(u["id"])' 2>/dev/null); do
+    _U_JSON=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_uid}" -H "Authorization: Bearer $(_kc_token)" | python3 -c '
+import json, sys
+u = json.load(sys.stdin)
+attrs = u.get("attributes") or {}
+if attrs.get("person_id"):
+    sys.exit(0)
+attrs["person_id"] = [u["id"]]
+u["attributes"] = attrs
+print(json.dumps(u))' 2>/dev/null || true)
+    if [[ -n "$_U_JSON" ]]; then
+        curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_uid}" \
+          -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_U_JSON" || true
+        _PID_N=$((_PID_N + 1))
+    fi
+done
+[[ $_PID_N -gt 0 ]] && echo -e "${GREEN}  person_id set on ${_PID_N} account(s).${NC}"
 
 # Realm roles as a "groups" claim, which is what oauth2-proxy's allowed_groups
 # reads. It has to be a client SCOPE named "groups", not just a mapper: with
@@ -966,17 +1064,46 @@ curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REA
        "attributes":{"include.in.token.scope":"true","display.on.consent.screen":"false"}}' || true
 _GS_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
   | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='groups'))" 2>/dev/null || echo "")
+
+# "medcea-identity": what a service needs to trust a token (IAM plan, 3.1) — the
+# person behind the account (person_id) and the audience every platform service
+# checks (medcea-api). Only the access token carries the audience; the ID token's
+# audience stays the client, which is what each oauth2-proxy verifies.
+curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" \
+  -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+  -d '{"name":"medcea-identity","protocol":"openid-connect","description":"person_id claim and the medcea-api audience (apps/iam)",
+       "attributes":{"include.in.token.scope":"false","display.on.consent.screen":"false"}}' || true
+_IS_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+  | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='medcea-identity'))" 2>/dev/null || echo "")
+if [[ -n "$_IS_ID" ]]; then
+    curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_IS_ID}/protocol-mappers/models" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+      -d '{"name":"person_id","protocol":"openid-connect","protocolMapper":"oidc-usermodel-attribute-mapper",
+           "config":{"user.attribute":"person_id","claim.name":"person_id","jsonType.label":"String",
+                     "id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+    curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_IS_ID}/protocol-mappers/models" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+      -d '{"name":"medcea-api-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper",
+           "config":{"included.custom.audience":"medcea-api","access.token.claim":"true","id.token.claim":"false"}}' || true
+else
+    echo -e "${RED}  Could not create the 'medcea-identity' client scope.${NC}" >&2
+fi
 if [[ -n "$_GS_ID" ]]; then
     curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_GS_ID}/protocol-mappers/models" \
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
       -d '{"name":"realm-roles-as-groups","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper",
            "config":{"claim.name":"groups","jsonType.label":"String","multivalued":"true",
                      "id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
-    for _c in portal access config monitor scheduler dbmgmt mqtt-explorer pgadmin; do
+    # Every client of the access policy's hosts (apps/iam/policy/defaults.yaml);
+    # a client asking for "groups" without having the scope gets invalid_scope.
+    for _c in portal access config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana; do
         _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
           -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
         [[ -n "$_C_UUID" ]] || continue
         curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_C_UUID}/default-client-scopes/${_GS_ID}" \
+          -H "Authorization: Bearer $(_kc_token)" || true
+        [[ -n "$_IS_ID" ]] && curl -s -o /dev/null -X PUT \
+          "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_C_UUID}/default-client-scopes/${_IS_ID}" \
           -H "Authorization: Bearer $(_kc_token)" || true
         # An earlier deploy put the same mapper on the client itself; one source only.
         _OLD_MAPPER=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_C_UUID}/protocol-mappers/models" \
@@ -1016,6 +1143,30 @@ if [[ -n "$_GF_UUID" ]]; then
     echo -e "${GREEN}  Grafana role mapper added.${NC}"
 fi
 
+# What the credentials file may show for each Keycloak password config.env holds.
+# A person can change their own (user menu → Change password) and _create_kc_user
+# never overwrites one, so a stale value must not be printed as if it worked. The
+# answer comes from the admin API (kc_password_status: the password credential's
+# date), never from signing in as the person — that would put a login they did
+# not make on their record, and on the break-glass account's.
+#   _shown_pass REALM USER PASS → the password, or why it is not shown
+_shown_pass() {
+    case "$(kc_password_status "$1" "$2")" in
+        ok)        printf '%s' "$3" ;;
+        temporary) printf '%s' "$3  (temporary: a new one is chosen at first sign-in)" ;;
+        changed)   printf '%s' "(changed since the account was created; config.env's copy no longer works)" ;;
+        *)         printf '%s' "(no such account yet)" ;;
+    esac
+}
+_CRED_ADMIN_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$ADMIN_USER" "$ADMIN_PASS")"
+_CRED_MASTER_PASS="$(_shown_pass master "$KC_BREAKGLASS_USER" "$KC_BREAKGLASS_PASS")"
+_CRED_QA_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$QA_USER" "$QA_INITIAL_PASS")"
+_CRED_ENG_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$ENGINEER_USER" "$ENGINEER_INITIAL_PASS")"
+_CRED_GF_ADMIN_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$_GF_ADMIN_USER" "$_GF_ADMIN_PASS")"
+_CRED_GF_DEV_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$_GF_DEV_USER" "$_GF_DEV_PASS")"
+_CRED_GF_VIEW_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$_GF_VIEW_USER" "$_GF_VIEW_PASS")"
+
+kc_admin_done
 kill $_KC_PF_PID 2>/dev/null || true
 
 if [[ -z "$_NODE_RED_SECRET" || -z "$_GRAFANA_SECRET" || -z "$_WORKBENCH_SECRET" || -z "$_PORTAL_SECRET" \
@@ -1046,7 +1197,8 @@ for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=
            "MQTTX_CLIENT_SECRET=${_MQTTX_SECRET}" "MQTTX_COOKIE_SECRET=${_MQTTX_COOKIE_SECRET}" \
            "PGADMIN_OAUTH_SECRET=${_PGADMIN_SECRET}" \
            "MQTT_NODE_RED_PASS=${_MQTT_NODE_RED_PASS}" "MQTT_SCHEDULER_PASS=${_MQTT_SCHEDULER_PASS}" \
-           "MQTT_EXPLORER_PASS=${_MQTT_EXPLORER_PASS}" "MQTT_AUTH_DB_PASS=${_MQTT_AUTH_DB_PASS}"; do
+           "MQTT_EXPLORER_PASS=${_MQTT_EXPLORER_PASS}" "MQTT_AUTH_DB_PASS=${_MQTT_AUTH_DB_PASS}" \
+           "KC_DEPLOYER_SECRET=${KC_DEPLOYER_SECRET:-}"; do
     _k="${_kv%%=*}"
     if grep -q "^${_k}=" config.env; then
         sed -i "s|^${_k}=.*|${_k}=\"${_kv#*=}\"|" config.env
@@ -1524,8 +1676,8 @@ echo -e "    DB:            'IoT Postgres' server pre-configured (no setup neede
 echo ""
 echo -e "${GREEN}  ADMIN${NC}"
 echo -e "${GREEN}  -----${NC}"
-echo -e "  Keycloak:        https://$KEYCLOAK_DOMAIN/admin"
-echo -e "    Login:         $ADMIN_USER"
+echo -e "  Keycloak:        https://$KEYCLOAK_DOMAIN/admin   (break-glass only)"
+echo -e "    Login:         $KC_BREAKGLASS_USER   (realm master; password in the credentials file)"
 echo -e "    Realm:         $KEYCLOAK_REALM  (all SSO users managed here)"
 echo -e "    User portal:   https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/account"
 echo -e "  User Manager:    https://$ACCESS_DOMAIN   (access requests — role admin; ./deploy-apps.sh installs it)"
@@ -1601,6 +1753,9 @@ fi
 # teed into logs/, and that log must not hold the passwords. The summary above
 # names users only, for the same reason.
 CRED_FILE="$SCRIPT_DIR/credentials-$(date +%Y%m%d-%H%M%S).txt"
+
+# _CRED_* were worked out in the Keycloak section (_shown_pass), from the admin
+# API, while it was still reachable.
 (
 umask 077
 cat > "$CRED_FILE" <<CREDS
@@ -1613,18 +1768,30 @@ config.env keeps a copy (re-deploys need it); it is readable only by $(id -un).
 PLATFORM ADMIN (Keycloak SSO: portal, Node-RED, AI workbench)
   Service portal      https://$PORTAL_DOMAIN
   Username            $ADMIN_USER
-  Password            $ADMIN_PASS
+  Password            $_CRED_ADMIN_PASS
 
-KEYCLOAK ADMIN CONSOLE
+FIRST QA PERSON (confirms account grants, approves policy changes)
+  Service portal      https://$PORTAL_DOMAIN
+  Username            $QA_USER
+  Password            $_CRED_QA_PASS
+
+FIRST ENGINEER (Node-RED, MQTT Explorer, device onboarding)
+  Service portal      https://$PORTAL_DOMAIN
+  Username            $ENGINEER_USER
+  Password            $_CRED_ENG_PASS
+
+KEYCLOAK ADMIN CONSOLE — BREAK-GLASS ONLY (realm master)
+  For recovery when the platform's own tools cannot do the job. Every use is
+  recorded in Keycloak's admin events. Not the platform admin's account.
   URL                 https://$KEYCLOAK_DOMAIN/admin
-  Username            $ADMIN_USER
-  Password            $ADMIN_PASS
+  Username            $KC_BREAKGLASS_USER
+  Password            $_CRED_MASTER_PASS
 
 GRAFANA (Keycloak SSO)
   URL                 https://$GRAFANA_DOMAIN
-  Admin               $_GF_ADMIN_USER / $_GF_ADMIN_PASS
-  Editor              $_GF_DEV_USER / $_GF_DEV_PASS
-  Viewer              $_GF_VIEW_USER / $_GF_VIEW_PASS
+  Admin               $_GF_ADMIN_USER / $_CRED_GF_ADMIN_PASS
+  Editor              $_GF_DEV_USER / $_CRED_GF_DEV_PASS
+  Viewer              $_GF_VIEW_USER / $_CRED_GF_VIEW_PASS
 
 PGADMIN (Keycloak SSO — platform role admin only)
   URL                 https://$PGADMIN_DOMAIN

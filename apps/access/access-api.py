@@ -49,9 +49,14 @@ KC_PUBLIC = E.get('KC_PUBLIC_URL', '').rstrip('/')       # https://keycloak.<dom
 # sign-out and change-password links (portal.medcea=portal,config.medcea=config).
 HOST_CLIENTS = dict(p.split('=', 1) for p in E.get('HOST_CLIENTS', '').split(',') if '=' in p)
 
-# The realm roles of docs/architecture.md (RBAC). Order is the form's order.
+# The platform roles this service offers, in the form's order. The access policy
+# (apps/iam/policy/defaults.yaml) has eleven; the rest are offered once the
+# services enforce it (IAM plan, Phase 2.6). engineer is offered from Phase 0
+# because the policy admits only engineers to Node-RED, MQTT Explorer and
+# device onboarding.
 ROLES = {
     'operator': 'Operator — runs recipes and day-to-day cultivation',
+    'engineer': 'Automation Engineer — devices, recipes, controllers, flows and dashboards (drafts that QA approves)',
     'qa':       'Quality Assurance — reviews data and releases batches',
     'auditor':  'Auditor — read-only access to records and audit trails',
     'admin':    'Administrator — manages the platform and its users',
