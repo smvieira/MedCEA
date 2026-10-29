@@ -36,25 +36,34 @@ KC_ADMIN_MODE=""
 # private file (removed by kc_admin_done) because callers use $(_kc_token).
 KC_TOKEN_CACHE=""
 
-_kc_master_token() {   # grant-args... → token or empty
-    curl -sf -X POST "$KC_URL/realms/master/protocol/openid-connect/token" "$@" \
+# Secrets never reach a process's argv (any account on the host can read
+# /proc/<pid>/cmdline): the grant's secret goes to curl on stdin
+# (--data-urlencode NAME@-), the bearer token as a header file on a pipe
+# (-H @<(...)), a request body on stdin (--data-binary @-). printf is a builtin.
+_kc_master_token() {   # SECRET grant-args... (one of them NAME@- for the secret) → token or empty
+    local secret="$1"; shift
+    printf '%s' "$secret" \
+      | curl -sf -X POST "$KC_URL/realms/master/protocol/openid-connect/token" "$@" \
       | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || true
 }
 
 _kc_token_as() {
     case "$1" in
-        deployer)   _kc_master_token -d grant_type=client_credentials \
-                        --data-urlencode "client_id=$KC_DEPLOYER_CLIENT" --data-urlencode "client_secret=${KC_DEPLOYER_SECRET:-}" ;;
-        breakglass) _kc_master_token -d grant_type=password -d client_id=admin-cli \
-                        --data-urlencode "username=${KC_BREAKGLASS_USER:-}" --data-urlencode "password=${KC_BREAKGLASS_PASS:-}" ;;
-        legacy)     _kc_master_token -d grant_type=password -d client_id=admin-cli \
-                        --data-urlencode "username=${ADMIN_USER:-}" --data-urlencode "password=${ADMIN_PASS:-}" ;;
+        deployer)   _kc_master_token "${KC_DEPLOYER_SECRET:-}" -d grant_type=client_credentials \
+                        --data-urlencode "client_id=$KC_DEPLOYER_CLIENT" --data-urlencode "client_secret@-" ;;
+        breakglass) _kc_master_token "${KC_BREAKGLASS_PASS:-}" -d grant_type=password -d client_id=admin-cli \
+                        --data-urlencode "username=${KC_BREAKGLASS_USER:-}" --data-urlencode "password@-" ;;
+        legacy)     _kc_master_token "${ADMIN_PASS:-}" -d grant_type=password -d client_id=admin-cli \
+                        --data-urlencode "username=${ADMIN_USER:-}" --data-urlencode "password@-" ;;
     esac
 }
 
+# _kc_bearer TOKEN → the Authorization header line, for curl -H @<(_kc_bearer …)
+_kc_bearer() { printf 'Authorization: Bearer %s\n' "$1"; }
+
 # Does this token carry master-realm admin authority (not merely sign-in)?
 _kc_is_admin() {
-    [[ -n "$1" ]] && curl -sf -o /dev/null "$KC_URL/admin/realms/master/users?max=1" -H "Authorization: Bearer $1"
+    [[ -n "$1" ]] && curl -sf -o /dev/null "$KC_URL/admin/realms/master/users?max=1" -H @<(_kc_bearer "$1")
 }
 
 kc_admin_select() {
@@ -90,10 +99,15 @@ _kc_use() { KC_ADMIN_MODE="$1"; [[ -n "$KC_TOKEN_CACHE" ]] && : > "$KC_TOKEN_CAC
 kc_admin_done() { [[ -n "$KC_TOKEN_CACHE" ]] && rm -f "$KC_TOKEN_CACHE"; KC_TOKEN_CACHE=""; }
 
 # GET/send helpers. _kc_get takes a full admin path (realms/<r>/...).
-_kc_get() { curl -sf "$KC_URL/admin/$1" -H "Authorization: Bearer $(kc_admin_token)"; }
-_kc_send() {   # METHOD PATH [JSON] → HTTP code
-    curl -s -o /dev/null -w '%{http_code}' -X "$1" "$KC_URL/admin/$2" \
-      -H "Authorization: Bearer $(kc_admin_token)" -H "Content-Type: application/json" ${3:+-d "$3"}
+_kc_get() { curl -sf "$KC_URL/admin/$1" -H @<(_kc_bearer "$(kc_admin_token)"); }
+_kc_send() {   # METHOD PATH [JSON] → HTTP code; the body (it may hold a password) on stdin
+    if [[ -n "${3:-}" ]]; then
+        printf '%s' "$3" | curl -s -o /dev/null -w '%{http_code}' -X "$1" "$KC_URL/admin/$2" \
+          -H @<(_kc_bearer "$(kc_admin_token)") -H "Content-Type: application/json" --data-binary @-
+    else
+        curl -s -o /dev/null -w '%{http_code}' -X "$1" "$KC_URL/admin/$2" \
+          -H @<(_kc_bearer "$(kc_admin_token)") -H "Content-Type: application/json"
+    fi
 }
 _kc_user_id() {   # REALM USER
     _kc_get "realms/$1/users?username=$2&exact=true" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')" 2>/dev/null || true

@@ -153,9 +153,13 @@ def _cells(p, err):
                     err(f"I14 {g}.{r}: level {l} compiles to no member type of the group ({sorted(member_types)})")
             if "A" in lv and "approval" not in gd:
                 err(f"I14 {g}.{r}: A on a group without an approval rule")
+            raw = row[r]
+            if isinstance(raw, dict) and isinstance(raw.get("constraint"), dict) and "applies_to" in raw:
+                err(f"{g}.{r}: a per-level constraint map takes no applies_to")
             if con:
-                if con not in p.constraints:
-                    err(f"{g}.{r}: unknown constraint {con}")
+                for cn in sorted(set(con.values())):
+                    if cn not in p.constraints:
+                        err(f"{g}.{r}: unknown constraint {cn}")
                 if not applies <= lv:
                     err(f"I14 {g}.{r}: constraint applies to levels the cell does not hold")
 

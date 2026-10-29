@@ -385,6 +385,9 @@ CREATE TABLE IF NOT EXISTS iam_policy.version (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_applied ON iam_policy.version ((true)) WHERE status = 'applied';
 
+-- One constraint_name + applies_to per cell: the per-level form of a cell
+-- ({R: own_unit, O: assigned_run}, IAM 2.8) does not fit. Nothing writes entry
+-- yet; 4.3's save_entry() needs a jsonb map or one row per level.
 CREATE TABLE IF NOT EXISTS iam_policy.entry (
     version          int REFERENCES iam_policy.version,
     role             text REFERENCES iam_policy.role,
@@ -582,7 +585,7 @@ CREATE TABLE IF NOT EXISTS medcea.platform_setting (
 );
 COMMENT ON TABLE medcea.platform_setting IS 'Deploy-time platform settings (mqtt_topic_root = PROJECT_NAME). Written by apps/database/deploy.sh; not readable by the API role.';
 
-COMMENT ON SCHEMA iam_policy IS 'The access policy: versions, entries, waivers, zone assignments, compiled routes, export log and the hash-chained history (codeplan IAM plan 3.5).';
+COMMENT ON SCHEMA iam_policy IS 'The access policy: versions, entries, waivers, unit assignments (user_unit; user_zone retired, kept for history), compiled routes, export log and the hash-chained history (codeplan IAM plan 3.5).';
 COMMENT ON SCHEMA medcea_auth IS 'PostgREST role selection and the actor of a service session (Phase 2).';
 COMMENT ON TABLE iam_policy.history IS 'Hash-chained, append-only history of the access policy. Written only by iam_policy.append_history(); checked by iam_policy.verify_chain().';
 COMMENT ON TABLE iam_policy.export_log IS 'Append-only log of Database Management exports (Phase 2.6).';
@@ -881,20 +884,47 @@ BEGIN
     PERFORM medcea_auth._actor_put(p_name, v_person, p_name, v_role, 'system', p_kind, p_id);
 END $$;
 
--- my_zones(): the zones assigned to the person behind the request (own_zone RLS).
+-- my_zones(): every zone of the units assigned to the person behind the request
+-- (own_unit RLS on medcea.measurement); zones added to a unit later are included,
+-- and so are its inactive ones (their old telemetry stays visible). The policy
+-- uses the initplan form `zone_id = ANY ((SELECT my_zones())::integer[])`, like the run
+-- tables' `= ANY ((SELECT my_units())::integer[])`: a bare STABLE plpgsql call in an RLS qual
+-- is evaluated once per row wherever it is a filter rather than an index condition
+-- (a sequential or primary-key-ordered scan of measurement). The expression change
+-- renames the policy (its name hashes the expression); the bundle drops the stale one.
 CREATE OR REPLACE FUNCTION medcea_auth.my_zones() RETURNS integer[]
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea_auth, pg_temp AS $$
 DECLARE
     s text := (medcea_auth.request_actor()).sub;
-    z integer[];
+    v integer[];
 BEGIN
     IF s IS NULL OR s !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
         RETURN '{}'::integer[];
     END IF;
-    SELECT coalesce(pg_catalog.array_agg(u.zone_id ORDER BY u.zone_id), '{}') INTO z
-      FROM iam_policy.user_zone u WHERE u.person_sub = s::uuid;
-    RETURN z;
+    SELECT coalesce(pg_catalog.array_agg(cz.zone_id ORDER BY cz.zone_id), '{}') INTO v
+      FROM medcea.cea_zone cz JOIN iam_policy.user_unit uu ON uu.unit_id = cz.unit_id
+     WHERE uu.person_sub = s::uuid;
+    RETURN v;
 END $$;
+REVOKE ALL ON FUNCTION medcea_auth.my_zones() FROM PUBLIC;
+
+-- my_units(): the units assigned to the person behind the request (own_unit RLS
+-- on the run tables). Both bodies are resolved when they run, so they may
+-- precede B15, which creates iam_policy.user_unit.
+CREATE OR REPLACE FUNCTION medcea_auth.my_units() RETURNS integer[]
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea_auth, pg_temp AS $$
+DECLARE
+    s text := (medcea_auth.request_actor()).sub;
+    v integer[];
+BEGIN
+    IF s IS NULL OR s !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+        RETURN '{}'::integer[];
+    END IF;
+    SELECT coalesce(pg_catalog.array_agg(uu.unit_id ORDER BY uu.unit_id), '{}') INTO v
+      FROM iam_policy.user_unit uu WHERE uu.person_sub = s::uuid;
+    RETURN v;
+END $$;
+REVOKE ALL ON FUNCTION medcea_auth.my_units() FROM PUBLIC;
 
 -- The content of a row for digests and change logs: without the stamps
 -- (*_by_*), timestamps (timestamp_*) and, for a digest, status and retired_at.
@@ -1413,7 +1443,7 @@ BEGIN
     RETURN v_id;
 END $$;
 
--- ── B15. Zone assignments are audited in the hash chain ─────────────────────
+-- ── B15. Zone and unit assignments are audited in the hash chain ────────────
 CREATE OR REPLACE FUNCTION iam_policy.log_user_zone() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam_policy, pg_temp AS $$
 BEGIN
@@ -1433,6 +1463,48 @@ BEGIN
                                                          AND tgname = 'user_zone_audit_trg') THEN
         CREATE TRIGGER user_zone_audit_trg AFTER INSERT OR UPDATE OR DELETE ON iam_policy.user_zone
             FOR EACH ROW EXECUTE FUNCTION iam_policy.log_user_zone();
+    END IF;
+END $$;
+
+-- IAM 2.8: operators are assigned units (own_unit), every zone of a unit
+-- included. user_zone above stays, unused: the history names it. Written only
+-- by apps/iam/units.sh (as postgres) and, from 2.7, iam_policy.propose_unit()
+-- and confirm_decision(). The FK keeps the default RESTRICT: deleting a unit
+-- that is still assigned fails (23503) rather than drop an assignment without
+-- an account decision.
+CREATE TABLE IF NOT EXISTS iam_policy.user_unit (
+    person_sub  uuid,
+    unit_id     int REFERENCES medcea.cea_unit,
+    PRIMARY KEY (person_sub, unit_id)
+);
+REVOKE ALL ON iam_policy.user_unit FROM PUBLIC, anon, authenticator;
+-- (composite key: no sequence; ownership: the 008b normalisation below)
+
+CREATE OR REPLACE FUNCTION iam_policy.log_user_unit() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam_policy, pg_temp AS $$
+BEGIN
+    IF TG_OP IN ('DELETE', 'UPDATE') THEN
+        PERFORM iam_policy.append_history('unit_removed',
+            jsonb_build_object('person_sub', OLD.person_sub, 'unit_id', OLD.unit_id), NULL);
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        PERFORM iam_policy.append_history('unit_assigned',
+            jsonb_build_object('person_sub', NEW.person_sub, 'unit_id', NEW.unit_id), NULL);
+    END IF;
+    RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION iam_policy.log_user_unit() FROM PUBLIC;
+-- ENABLE ALWAYS: an assignment is audited under session_replication_role=replica too.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = 'iam_policy.user_unit'::regclass
+                                                         AND tgname = 'user_unit_audit_trg') THEN
+        CREATE TRIGGER user_unit_audit_trg AFTER INSERT OR UPDATE OR DELETE ON iam_policy.user_unit
+            FOR EACH ROW EXECUTE FUNCTION iam_policy.log_user_unit();
+    END IF;
+    IF (SELECT tgenabled FROM pg_catalog.pg_trigger WHERE tgrelid = 'iam_policy.user_unit'::regclass
+                                                      AND tgname = 'user_unit_audit_trg') <> 'A' THEN
+        ALTER TABLE iam_policy.user_unit ENABLE ALWAYS TRIGGER user_unit_audit_trg;
     END IF;
 END $$;
 
@@ -2331,8 +2403,19 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION medcea._check_run_params(integer, integer, integer, integer) FROM PUBLIC;
 
+-- _refuse_hidden_run(): the one answer an operator (O under assigned_run) gets for
+-- a run outside their units AND for a run that does not exist, so start_run and
+-- set_run_status (SECURITY DEFINER, past the RLS) cannot be used to list other
+-- units' runs, their status, or whether a unit is running. Policy.
+CREATE OR REPLACE FUNCTION medcea._refuse_hidden_run(p_run_id integer) RETURNS void
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    PERFORM medcea_auth.policy_refuse(format('assigned_run: run %s is not one of your units'' runs', p_run_id));
+END $$;
+REVOKE ALL ON FUNCTION medcea._refuse_hidden_run(integer) FROM PUBLIC;
+
 -- assigned_run: an operator executes only a run another person prepared while
--- holding C on runs freely, in one of the operator's zones. Policy.
+-- holding C on runs freely, in one of the operator's units. Policy.
 CREATE OR REPLACE FUNCTION medcea._check_assigned_run(r medcea.recipe_run, p_sub text, p_person text, p_role text) RETURNS void
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 DECLARE how text := medcea_auth.policy_holds(p_role, 'runs', 'O');
@@ -2344,16 +2427,18 @@ BEGIN
     IF how <> 'assigned_run' THEN
         RETURN;
     END IF;
+    -- the unit first: the run tables' RLS hides other units' runs from an operator,
+    -- so nothing about such a run (its creator, status, unit) may decide the answer
+    IF p_sub IS NULL OR p_sub !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       OR NOT EXISTS (SELECT 1 FROM iam_policy.user_unit u
+                       WHERE u.unit_id = r.unit_id AND u.person_sub = p_sub::uuid) THEN
+        PERFORM medcea._refuse_hidden_run(r.recipe_run_id);
+    END IF;
     IF r.created_by_person IS NOT DISTINCT FROM p_person THEN
         PERFORM medcea_auth.policy_refuse(format('assigned_run: run %s was created by the same person', r.recipe_run_id));
     END IF;
     IF medcea_auth.policy_holds(r.created_by_role, 'runs', 'C') IS DISTINCT FROM 'free' THEN
         PERFORM medcea_auth.policy_refuse(format('assigned_run: run %s was not prepared by a role that creates runs', r.recipe_run_id));
-    END IF;
-    IF p_sub !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-       OR NOT EXISTS (SELECT 1 FROM medcea.cea_zone z JOIN iam_policy.user_zone u ON u.zone_id = z.zone_id
-                       WHERE z.unit_id = r.unit_id AND u.person_sub = p_sub::uuid) THEN
-        PERFORM medcea_auth.policy_refuse(format('assigned_run: unit %s is in none of your zones', r.unit_id));
     END IF;
 END $$;
 
@@ -2370,8 +2455,14 @@ BEGIN
     END IF;
     SELECT * INTO r FROM medcea.recipe_run WHERE recipe_run_id = p_run_id FOR UPDATE;
     IF NOT FOUND THEN
+        IF medcea_auth.policy_holds(a.role, 'runs', 'O') IS NOT DISTINCT FROM 'assigned_run' THEN
+            PERFORM medcea._refuse_hidden_run(p_run_id);   -- same answer as another unit's run
+        END IF;
         RAISE EXCEPTION 'start_run: no run %', p_run_id USING ERRCODE = '22023';
     END IF;
+    -- policy before structure: assigned_run (the unit first) precedes every
+    -- status, transition, running-run and parameter check
+    PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
     IF r.recipe_run_status <> 'S' THEN
         RAISE EXCEPTION 'start_run: run % is %, not S', p_run_id, r.recipe_run_status USING ERRCODE = '22023';
     END IF;
@@ -2380,7 +2471,6 @@ BEGIN
         RAISE EXCEPTION 'start_run: unit % already has a running run', r.unit_id USING ERRCODE = '22023';
     END IF;
     PERFORM medcea._check_run_params(r.unit_id, r.recipe_id, r.params_id, r.schedule_id);
-    PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
     IF (SELECT u.commissioning FROM medcea.cea_unit u WHERE u.unit_id = r.unit_id) THEN
         PERFORM medcea_auth.policy_refuse(format('commissioning: unit %s is flagged for commissioning', r.unit_id));
     END IF;
@@ -2413,12 +2503,17 @@ BEGIN
     END IF;
     SELECT * INTO r FROM medcea.recipe_run WHERE recipe_run_id = p_run_id FOR UPDATE;
     IF NOT FOUND THEN
+        IF medcea_auth.policy_holds(a.role, 'runs', 'O') IS NOT DISTINCT FROM 'assigned_run' THEN
+            PERFORM medcea._refuse_hidden_run(p_run_id);   -- same answer as another unit's run
+        END IF;
         RAISE EXCEPTION 'set_run_status: no run %', p_run_id USING ERRCODE = '22023';
     END IF;
+    -- policy before structure: assigned_run (the unit first) precedes every
+    -- status, transition, running-run and parameter check
+    PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
     IF NOT ((r.recipe_run_status, p_status) IN (('S', 'F'), ('R', 'F'), ('F', 'S'))) THEN
         RAISE EXCEPTION 'set_run_status: % -> % is not a transition', r.recipe_run_status, p_status USING ERRCODE = '22023';
     END IF;
-    PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
     PERFORM medcea_auth._owner_write(true);
     UPDATE medcea.recipe_run SET recipe_run_status = p_status, timestamp_upd = now(),
            recipe_run_end = CASE WHEN p_status = 'F' THEN now() WHEN p_status = 'S' THEN NULL ELSE recipe_run_end END

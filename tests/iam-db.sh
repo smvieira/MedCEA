@@ -18,7 +18,9 @@
 #   writes       W1 false-mode regression (today's callers), W2 always-on guards,
 #                W3 flag-only probes, W4 true-mode workflow, W5 register v2,
 #                W6 the scheduler's functions (2.4: retire, re-save, cycles, the
-#                schedule's algorithm, the internal actor, e97aab6's scheduler SQL)
+#                schedule's algorithm, the internal actor, e97aab6's scheduler SQL),
+#                W7 unit assignments (apps/iam/units.sql, IAM 2.8); the own_unit RLS
+#                probes run in W4
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
 #
@@ -181,7 +183,8 @@ SELECT 'stamp', count(*) FROM pg_trigger WHERE tgname = 'stamp_actor_trg';
 SELECT 'rowchange', count(*) FROM pg_trigger WHERE tgname = 'row_change_trg';
 SELECT 'guard', count(*) FROM pg_trigger WHERE tgname = 'status_guard_trg';
 SELECT 'single', string_agg(n, ',') FROM unnest(ARRAY['measurement_zone_trg', 'device_serial_change_trg', 'mqtt_service_acl_root_trg',
-       'algorithm_state_event_trg', 'algorithm_state_before_trg', 'user_zone_audit_trg', 'schedule_retired_guard_trg']) n
+       'algorithm_state_event_trg', 'algorithm_state_before_trg', 'user_zone_audit_trg', 'user_unit_audit_trg',
+       'schedule_retired_guard_trg']) n
  WHERE NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = n);
 SELECT 'definer', string_agg(p.oid::regprocedure::text, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
  WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy') AND p.prosecdef
@@ -196,6 +199,7 @@ SELECT 'public', count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronam
 SELECT 'iamtrg', count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
  WHERE c.relnamespace = 'medcea'::regnamespace AND t.tgname LIKE 'iam\_%';
 SELECT 'rls', count(*) FROM pg_class WHERE relnamespace = 'medcea'::regnamespace AND relrowsecurity;
+SELECT 'unitalways', tgenabled FROM pg_trigger WHERE tgname = 'user_unit_audit_trg';
 SELECT 'chain', ok FROM iam_policy.verify_chain();
 SQL
 )"
@@ -210,18 +214,20 @@ SQL
     [[ "$(get stamp)" == 14 && "$(get rowchange)" == 14 ]] && pass catalog "stamp_actor_trg and row_change_trg on the 14 tables" \
         || fail catalog "stamp_actor_trg on $(get stamp), row_change_trg on $(get rowchange) table(s) (want 14)"
     [[ "$(get guard)" == 8 ]] && pass catalog "status_guard_trg on 8 tables" || fail catalog "status_guard_trg on $(get guard) table(s) (want 8)"
-    [[ -z "$(get single)" ]] && pass catalog "zone, serial, ACL root, Q-table and zone-audit triggers present" || fail catalog "missing: $(get single)"
+    [[ -z "$(get single)" ]] && pass catalog "zone, serial, ACL root, Q-table, zone- and unit-audit triggers present" || fail catalog "missing: $(get single)"
     [[ -z "$(get definer)" ]] && pass catalog "every SECURITY DEFINER function pins search_path ... pg_temp" || fail catalog "definer without search_path: $(get definer)"
     [[ -z "$(get invokerfn)" ]] && pass catalog "the current_user guards are SECURITY INVOKER" || fail catalog "SECURITY DEFINER guards: $(get invokerfn)"
     [[ "$(get prereq)" == "false/" ]] && pass catalog "pre_request() is INVOKER without a SET clause" || fail catalog "pre_request(): $(get prereq)"
     [[ "$(get public)" == 0 ]] && pass catalog "PUBLIC executes no function in the three schemas" || fail catalog "PUBLIC executes $(get public) function(s)"
     if [[ "$MODE" == true ]]; then
-        [[ "$(get iamtrg)" -ge 14 && "$(get rls)" -ge 1 ]] && pass catalog "iam_* triggers ($(get iamtrg)) and RLS present (mode true)" \
+        [[ "$(get iamtrg)" -ge 14 && "$(get rls)" -ge 4 ]] && pass catalog "iam_* triggers ($(get iamtrg)) and RLS present (mode true)" \
             || fail catalog "mode true but iam_* triggers $(get iamtrg), RLS tables $(get rls)"
     else
         [[ "$(get iamtrg)" == 0 && "$(get rls)" == 0 ]] && pass catalog "no iam_* trigger and no RLS (mode false)" \
             || fail catalog "mode false but iam_* triggers $(get iamtrg), RLS tables $(get rls)"
     fi
+    [[ "$(get unitalways)" == A ]] && pass catalog "user_unit_audit_trg is ENABLE ALWAYS" \
+        || fail catalog "user_unit_audit_trg: tgenabled '$(get unitalways)' (want A)"
     [[ "$(get chain)" == t ]] && pass catalog "iam_policy.verify_chain() ok" || fail catalog "verify_chain: $(get chain)"
 fi
 
@@ -636,15 +642,14 @@ SQL
         T_EN="$(claims engineer "$UUID_EN" p-en)"; T_EN2="$(claims engineer "$UUID_EN2" p-en2)"
         T_QAEN2="$(claims qa "$UUID_QA2" p-en2)"; T_AD="$(claims admin "$UUID_AD" p-ad)"
         run_setup="
-INSERT INTO iam_policy.user_zone (person_sub, zone_id)
-SELECT '$UUID_OP'::uuid, z.zone_id FROM medcea.cea_zone z JOIN medcea.cea_unit u USING (unit_id) WHERE u.unit_code = 'IAMT01' AND z.zone_code = 'Z01';
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT01';
 SELECT p.params_id AS set1 FROM medcea.recipe_unit_permission p JOIN medcea.recipe r USING (recipe_id) JOIN medcea.cea_unit u USING (unit_id)
  WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT01' \\gset
 $(as_token "$T_PM")
 INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active, params_id)
 SELECT r.recipe_id, u.unit_id, now(), 'R', 'Y', :set1 FROM medcea.recipe r, medcea.cea_unit u
  WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT01' RETURNING recipe_run_id AS run \\gset"
-        probe W4 "control: an operator starts a run a production manager prepared in their zone" ok <<SQL
+        probe W4 "control: an operator starts a run a production manager prepared for their unit" ok <<SQL
 $run_setup
 $(as_token "$T_OP")
 SELECT medcea.start_run(:run);
@@ -652,7 +657,7 @@ SELECT medcea.start_run(:run);
 SELECT 'CHECK|running, executed by the operator', recipe_run_status = 'R' AND executed_by_person = 'p-op' AND created_by_role = 'production_manager'
   FROM medcea.recipe_run WHERE recipe_run_id = :run;
 SQL
-        probe W4 "an operator outside the run's zone" "42501:none of your zones" <<SQL
+        probe W4 "an operator without the run's unit" "42501:not one of your units" <<SQL
 $run_setup
 $(as_token "$T_OP2")
 SELECT medcea.start_run(:run);
@@ -709,7 +714,7 @@ SELECT medcea.set_run_status(:run, 'F');
 $(as_token "$T_PM")
 SELECT medcea.set_run_status(:run, 'S');
 $(as_postgres)
-INSERT INTO iam_policy.user_zone (person_sub, zone_id) SELECT '$UUID_OP2'::uuid, zone_id FROM iam_policy.user_zone WHERE person_sub = '$UUID_OP';
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP2'::uuid, unit_id FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP';
 $(as_token "$T_OP2")
 SELECT medcea.start_run(:run);
 $(as_postgres)
@@ -797,32 +802,111 @@ SQL
         }
         retention 30 ok
         retention 29 "42501:retention"
-        # RLS: every compiled reader of medcea.measurement; only rr_operator is filtered
-        for r in $(python3 "$CLI" compile grants --format json | python3 -c '
-import json, sys
+        # RLS (own_unit): every compiled reader of the four RLS tables sees every row;
+        # only rr_operator is filtered, to the units in iam_policy.user_unit.
+        # run_full: a run of IAMT01 with a cycle and a release, so no RLS table is empty
+        # (an empty table passes every count check whatever the policy says)
+        run_full="
+SELECT recipe_id AS r1 FROM medcea.recipe WHERE recipe_name = 'IAMTEST-R1' \\gset
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.start_run(:run);
+$(as_postgres)
+SET SESSION AUTHORIZATION svc_scheduler;
+SELECT medcea_auth.set_system_actor('system:scheduler', 'run', :run);
+SELECT medcea.record_cycle(:run, jsonb_build_object('recipe_id', :r1, 'recipe_item_seq_id', 1, 'recipe_item_seq_cycle_num', 1, 'status', 'R', 'run_params', '[{\"x\": 1}]'::jsonb));
+SELECT medcea.record_cycle(:run, jsonb_build_object('recipe_id', :r1, 'recipe_item_seq_id', 1, 'recipe_item_seq_cycle_num', 1, 'status', 'C', 'end', now()));
+SELECT medcea.finish_run(:run, 'C');
+$(as_postgres)
+DELETE FROM pg_temp.medcea_actor WHERE kind = 'actor';
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run);
+$(as_postgres)"
+        for obj in medcea.measurement medcea.recipe_run medcea.recipe_line_cycle_run medcea.run_release; do
+            for r in $(python3 "$CLI" compile grants --format json | OBJ="$obj" python3 -c '
+import json, os, sys
 d = json.load(sys.stdin)
-print(" ".join(sorted({g for g, k, o, p in d["privileges"] if o == "medcea.measurement" and p == "SELECT"})))'); do
-            if [[ "$r" == rr_operator ]]; then
-                probe RLS "rr_operator sees only its zones' telemetry" ok <<SQL
-INSERT INTO iam_policy.user_zone (person_sub, zone_id)
-SELECT '$UUID_OP'::uuid, z.zone_id FROM medcea.cea_zone z JOIN medcea.cea_unit u USING (unit_id) WHERE u.unit_code = 'IAMT02' AND z.zone_code = 'Z01';
-SELECT count(*) AS total, count(*) FILTER (WHERE zone_id = (SELECT z.zone_id FROM medcea.cea_zone z JOIN medcea.cea_unit u USING (unit_id)
-       WHERE u.unit_code = 'IAMT02' AND z.zone_code = 'Z01')) AS mine FROM medcea.measurement \gset
+print(" ".join(sorted({g for g, k, o, p in d["privileges"] if o == os.environ["OBJ"] and p == "SELECT"})))'); do
+                [[ "$r" == rr_operator ]] && continue
+                probe RLS "$r sees every row of $obj" ok <<SQL
+$run_full
+SELECT count(*) AS total FROM $obj \gset
+SET ROLE $r;
+SELECT count(*) AS seen FROM $obj \gset
+--CHECKS
+SELECT 'CHECK|unfiltered (' || :seen || ' of ' || :total || ')', :seen = :total AND :total > 0;
+SQL
+            done
+        done
+        probe RLS "rr_operator sees only its units' telemetry" ok <<SQL
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+SELECT count(*) AS total, count(*) FILTER (WHERE zone_id IN (SELECT z.zone_id FROM medcea.cea_zone z JOIN medcea.cea_unit u USING (unit_id)
+       WHERE u.unit_code = 'IAMT02')) AS mine FROM medcea.measurement \gset
 $(as_token "$T_OP")
 SELECT count(*) AS seen FROM medcea.measurement \gset
 --CHECKS
 SELECT 'CHECK|filtered (' || :seen || ' of ' || :total || ')', :seen = :mine AND :seen < :total;
 SQL
-            else
-                probe RLS "$r sees every row" ok <<SQL
-SELECT count(*) AS total FROM medcea.measurement \gset
-SET ROLE $r;
-SELECT count(*) AS seen FROM medcea.measurement \gset
+        probe RLS "a zone added to an assigned unit is visible" ok <<SQL
+SELECT medcea_auth._set_internal_actor('system:iam-db') \g /dev/null
+INSERT INTO medcea.cea_zone (unit_id, zone_code, is_active) SELECT unit_id, 'ZNEW', 'Y' FROM medcea.cea_unit
+ WHERE unit_code = 'IAMT02' RETURNING zone_id AS newz \gset
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+-- the internal actor that created the zone outranks the token's claims for this transaction
+DELETE FROM pg_temp.medcea_actor WHERE kind = 'actor';
+$(as_token "$T_OP")
+SELECT :newz = ANY (medcea_auth.my_zones()) AS sees \gset
 --CHECKS
-SELECT 'CHECK|unfiltered', :seen = :total;
+SELECT 'CHECK|my_zones() has the new zone', :'sees'::boolean;
 SQL
-            fi
-        done
+        # cross-unit: the second operator holds IAMT02, so my_units() is not empty and
+        # only the policy expressions keep IAMT01's run, cycles and release from them
+        probe RLS "rr_operator sees only its units' runs" ok <<SQL
+$run_full
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP2'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+$(as_token "$T_OP")
+SELECT (SELECT count(*) FROM medcea.recipe_run WHERE recipe_run_id = :run) AS own_run,
+       (SELECT count(*) FROM medcea.recipe_line_cycle_run WHERE recipe_run_id = :run) AS own_cyc,
+       (SELECT count(*) FROM medcea.run_release WHERE recipe_run_id = :run) AS own_rel,
+       (SELECT count(*) FROM medcea.run_history WHERE recipe_run_id = :run) AS own_hist \gset
+$(as_token "$T_OP2")
+SELECT (SELECT count(*) FROM medcea.recipe_run WHERE recipe_run_id = :run) AS o_run,
+       (SELECT count(*) FROM medcea.recipe_line_cycle_run WHERE recipe_run_id = :run) AS o_cyc,
+       (SELECT count(*) FROM medcea.run_release WHERE recipe_run_id = :run) AS o_rel,
+       (SELECT count(*) FROM medcea.run_history WHERE recipe_run_id = :run) AS o_hist,
+       medcea_auth.my_units() <> '{}' AS o_has_unit \gset
+$(as_token "$T_PM")
+SELECT count(*) AS pm FROM medcea.recipe_run WHERE recipe_run_id = :run \gset
+--CHECKS
+SELECT 'CHECK|the operator of IAMT01 sees its run, cycles, release and history (' || :own_run || '/' || :own_cyc || '/' || :own_rel || '/' || :own_hist || ')',
+       :own_run = 1 AND :own_cyc > 0 AND :own_rel = 1 AND :own_hist > 0;
+SELECT 'CHECK|the second operator holds a unit', :'o_has_unit'::boolean;
+SELECT 'CHECK|the operator of IAMT02 sees none of them (' || :o_run || '/' || :o_cyc || '/' || :o_rel || '/' || :o_hist || ')',
+       :o_run = 0 AND :o_cyc = 0 AND :o_rel = 0 AND :o_hist = 0;
+SELECT 'CHECK|the production manager sees it', :pm = 1;
+SQL
+        # start_run/set_run_status are SECURITY DEFINER (past the RLS): a run of another
+        # unit and a run that does not exist get the same refusal, before any status check
+        hidden="
+$run_full
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP2'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+$(as_token "$T_OP2")"
+        probe W4 "start_run on another unit's completed run says only 'not one of your units'" "42501:not one of your units" <<SQL
+$hidden
+SELECT medcea.start_run(:run);
+SQL
+        probe W4 "set_run_status on another unit's run says only 'not one of your units'" "42501:not one of your units" <<SQL
+$hidden
+SELECT medcea.set_run_status(:run, 'X');
+SQL
+        probe W4 "start_run on a run that does not exist says the same" "42501:not one of your units" <<SQL
+$hidden
+SELECT medcea.start_run(2147483000);
+SQL
+        probe W4 "set_run_status on a run that does not exist says the same" "42501:not one of your units" <<SQL
+$hidden
+SELECT medcea.set_run_status(2147483000, 'F');
+SQL
     fi
 
     # W5: register_mqtt_credential v2 (as an engineer's role; every refusal structural)
@@ -1070,6 +1154,67 @@ UPDATE medcea.recipe_run SET recipe_run_status='F', recipe_run_end=CURRENT_TIMES
 SELECT 'CHECK|failed, never executed by anyone', recipe_run_status = 'F' AND executed_by_sub IS NULL FROM medcea.recipe_run WHERE recipe_run_id = :run;
 SQL
         fi
+    fi
+    # W7: unit assignments (IAM 2.8): apps/iam/units.sql as apps/iam/units.sh runs it
+    # (as postgres, one transaction), and nobody else writes iam_policy.user_unit
+    if [[ "$MODE" != legacy ]]; then
+        UNITS_SQL="$(cat "$REPO_ROOT/apps/iam/units.sql")"
+        units_vars() {  # ASSIGN
+            cat <<SQL
+SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \gset
+\set assign $1
+\set sub '$UUID_OP'
+\set username test-op
+\set person p-op
+\set units :uid
+\set reason 'iam-db probe'
+SQL
+        }
+        probe W7 "an operator cannot write user_unit" "42501:permission denied" <<SQL
+$(as_token "$(claims operator "$UUID_OP" p-op)")
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, 1;
+SQL
+        probe W7 "units.sql assign: in effect, decision pending_qa, chain event; a re-run writes nothing" ok <<SQL
+$(units_vars true)
+$UNITS_SQL
+$UNITS_SQL
+--CHECKS
+SELECT 'CHECK|assigned', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
+SELECT 'CHECK|one pending_qa unit_assign by system:deploy', count(*) = 1
+          AND bool_and(widens AND status = 'pending_qa' AND made_by_name = 'system:deploy' AND made_by_sub IS NULL
+                       AND unit_id = :uid AND subject_person = 'p-op' AND checked_at IS NULL)
+  FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_assign';
+SELECT 'CHECK|latest chain event unit_assigned by system:deploy', event = 'unit_assigned' AND actor_name = 'system:deploy'
+          AND payload ->> 'person_sub' = '$UUID_OP'
+  FROM iam_policy.history ORDER BY event_id DESC LIMIT 1;
+SELECT 'CHECK|one unit_assigned event', count(*) = 1 FROM iam_policy.history
+ WHERE event = 'unit_assigned' AND payload ->> 'person_sub' = '$UUID_OP';
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+        probe W7 "units.sql remove: applied at once; a second remove writes nothing" ok <<SQL
+$(units_vars true)
+$UNITS_SQL
+\set assign false
+$UNITS_SQL
+$UNITS_SQL
+--CHECKS
+SELECT 'CHECK|removed', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
+SELECT 'CHECK|one applied unit_remove', count(*) = 1 AND bool_and(NOT widens AND status = 'applied' AND unit_id = :uid)
+  FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_remove';
+SELECT 'CHECK|one unit_removed event', count(*) = 1 FROM iam_policy.history
+ WHERE event = 'unit_removed' AND payload ->> 'person_sub' = '$UUID_OP';
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+        probe W7 "a unit decision is final: UPDATE" "42501:only the check or sign-off may be added" <<SQL
+$(units_vars true)
+$UNITS_SQL
+UPDATE iam.account_decision SET reason = 'x' WHERE kind = 'unit_assign';
+SQL
+        probe W7 "a unit decision is final: DELETE" "42501:append-only: DELETE refused" <<SQL
+$(units_vars true)
+$UNITS_SQL
+DELETE FROM iam.account_decision WHERE kind = 'unit_assign';
+SQL
     fi
 elif want writes; then
     note writes "skipped (read-only; --write-probes runs them on medcea-iamtest only)"

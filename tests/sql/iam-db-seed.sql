@@ -104,7 +104,10 @@ VALUES (:u1, :r1, '0 6 * * *', 'iamtest: inherits the assignment');
 INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, description, algorithm_id, algorithm_params)
 VALUES (:u2, :r1, '0 7 * * *', 'iamtest: algorithm differs from the assignment', :flc, '{"deadband_fraction": 0.2}');
 
--- the runner's operator: IAMT01/Z02 (W4 assigns its own operators to Z01)
+-- the runner's operator, as before unit assignments (IAM 2.8): IAMT01/Z02. Harmless and
+-- unused: the seed runs before this tree's migrations, so iam_policy.user_unit does not
+-- exist yet here; tests/runner/iam_runner_flow.py assigns the operator unit IAMT01, and
+-- tests/iam-db.sh W4 assigns its own operators.
 INSERT INTO iam_policy.user_zone (person_sub, zone_id) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', :z1b);
 
 -- the policy history, appended as 008a does

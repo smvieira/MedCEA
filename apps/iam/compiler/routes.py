@@ -53,7 +53,7 @@ def _who(p, group, levels):
             if not con or hit - applies:
                 free = True
             else:
-                cons.add(con)
+                cons |= {con[l] for l in hit}
         if free:
             out[r] = None
         elif cons:

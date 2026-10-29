@@ -16,7 +16,7 @@ route table, mounted at /iam/; standard library plus PyJWT (pyjwt[crypto]).
      in the service's table (literal segments beat <placeholders>); a route missing from
      the table is refused;
   5. allowed if one of the person's roles may call the route. A route whose only grant
-     to them carries a constraint (own_zone, assigned_run …) passes here: the constraint
+     to them carries a constraint (own_unit, assigned_run …) passes here: the constraint
      is enforced where the data is (Phase 2), and Decision.constraints names it.
 
 Decision.allow is the verdict. While enforce is false (IAM_ENFORCE, Phase 1) the wrappers

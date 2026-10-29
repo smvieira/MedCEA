@@ -183,6 +183,17 @@ PREV_DB_ROLES="$(_dba_psql "$CEA_DB" -tAq -c "SELECT coalesce(current_setting('m
                  | tr -d '[:space:]' || true)"
 db_apply "$NAMESPACE" "$PG_POD" "$IAM_DB_ROLES"
 
+# ── Unit assignments (IAM 2.8): a warning, never a refusal ───────────────────
+# Under IAM_DB_ROLES=true an operator sees the telemetry and runs of their units
+# only (own_unit) and starts runs only there. A missing assignment fails closed,
+# so this does not block a re-deploy; the database cannot ask Keycloak who the
+# operators are, so it checks only that anyone has a unit (per account:
+# apps/iam/units.sh list). The apply above created iam_policy.user_unit.
+if [[ "$IAM_DB_ROLES" == "true" ]]; then
+    _uu="$(_dba_psql "$CEA_DB" -tAq -c "SELECT count(*) FROM iam_policy.user_unit" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "${_uu:-0}" =~ ^[1-9] ]] || warn "IAM_DB_ROLES=true and no unit is assigned to anyone: operators see no telemetry or runs and can start none. Assign them: apps/iam/units.sh assign <user> <UNIT>... (check: apps/iam/units.sh list)"
+fi
+
 # ── A mode flip reaches PostgREST only through new sessions ──────────────────
 # pre_request() reads medcea.iam_db_roles, an ALTER DATABASE setting that open
 # sessions never see; config-api's pool keeps them up to 30 min. Without a

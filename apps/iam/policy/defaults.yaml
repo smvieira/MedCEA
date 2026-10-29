@@ -19,6 +19,8 @@
 #   [R, X]                                    levels held, written closed under `implies`
 #   {levels: [R, C, U], constraint: draft_only, applies_to: [U]}
 #                                             a named constraint narrows the listed levels
+#   {levels: [R, O], constraint: {R: own_unit, O: assigned_run}}
+#                                             one constraint per level (no applies_to)
 # A role not listed in a group's row holds N there.
 
 schema_version: 2
@@ -209,7 +211,7 @@ classes:
     help: Append-only trails of who did what, including approval records and export logs. Written by functions and triggers only; readable by reviewers.
   personal:
     label: Personal data
-    help: Accounts, names, e-mail addresses, zone assignments and access decisions. Administered by admin, confirmed by qa, readable by reviewers.
+    help: Accounts, names, e-mail addresses, unit assignments and access decisions. Administered by admin, confirmed by qa, readable by reviewers.
   config:
     label: Configuration
     help: Master data, recipes, controllers, schedules, settings, dashboards and tools. Changed under the group's approval rule.
@@ -332,7 +334,8 @@ infrastructure_functions:
   - {function: "medcea_auth.pre_request()", execute: [anon], why: "PostgREST calls it as db-anon-role before switching. SECURITY INVOKER (SET ROLE is refused inside a definer function) and reads no table: grants.py compiles the platform roles, their composites and the allowed clients into its body. A no-op unless the database setting medcea.iam_db_roles is true, so a database-only rollback never breaks PostgREST. It takes the person's own role from the verified groups claim, exactly one, else RAISE. The single exception to I9."}
   - {function: "medcea_auth.set_actor(text, text, text, text)", execute: [svc_ingest, svc_scheduler, svc_monitor, svc_grafana, svc_dbexport, iam_svc], why: "A service records the person (sub, person_id, name, role) whose token it verified. The sub must be a uuid and the role a platform role; the source is recorded as 'person via <service login>'."}
   - {function: "medcea_auth.set_system_actor(text, text, bigint)", execute: [svc_scheduler], why: "A triggered run acts as system:scheduler with the person and role of the schedule's (or run's) creator, looked up by id; refused when that creator is not a person."}
-  - {function: "medcea_auth.my_zones()", rule: own_zone, why: "The zones of the person behind the request; read by the own_zone row-level security policy, so every role whose cell carries own_zone executes it."}
+  - {function: "medcea_auth.my_units()", rule: own_unit, why: "The units assigned to the person behind the request (iam_policy.user_unit); read by the own_unit row-level security policies on the run tables."}
+  - {function: "medcea_auth.my_zones()", rule: own_unit, why: "Every zone of the units assigned to the person (iam_policy.user_unit), zones added later included; read by the own_unit row-level security policy on medcea.measurement."}
   - {function: "medcea_auth.request_actor()", execute: [], why: "The verified actor of the transaction (set_actor/set_system_actor, or the token's claims when the session is PostgREST's authenticator); read by triggers and functions."}
   - {function: "medcea_auth._set_internal_actor(text)", execute: [], why: "migration:* and system:* actors of the deploy scripts, which run as postgres."}
   - {function: "medcea_auth.enforcing()", execute: [], why: "IAM_DB_ROLES as recorded in medcea.platform_setting."}
@@ -373,10 +376,10 @@ roles:
     availability: prototype
     db_role: rr_operator
     includes: []
-    description: Runs the cultivation day to day in the zones assigned to them.
+    description: Runs the cultivation day to day in the units assigned to them.
     responsibilities:
-      - Execute and stop runs a production manager prepared for their zone
-      - Watch telemetry and run logs of their own zones in the Monitor
+      - Execute and stop runs a production manager prepared for their unit
+      - Watch telemetry, runs and run logs of their own units in the Monitor
       - Read recipes and schedules to know what is coming
   production_manager:
     label: Production Manager (Process Owner)
@@ -388,7 +391,7 @@ roles:
     responsibilities:
       - Create runs and schedules, start and stop runs
       - Assign approved recipes and approved parameter sets to units (never edit them)
-      - Everything an operator may do, in every zone
+      - Everything an operator may do, in every unit
   maintenance:
     label: Maintenance and Calibration
     spec_role: R3
@@ -417,7 +420,7 @@ roles:
     description: Independent approver of configuration, access decisions and policy changes.
     responsibilities:
       - Approve recipes, controllers, settings, master data and device changes made by someone else
-      - Confirm every account grant, role widening and zone assignment an administrator makes
+      - Confirm every account grant, role widening and unit assignment an administrator makes
       - Approve every change to this policy
       - Sign off the quarterly access review; review audit trails and export evidence
   qp:
@@ -469,7 +472,7 @@ roles:
     includes: []
     description: Keeps the platform running and administers accounts and this policy, without access to regulated or history content (MHRA GxP data integrity 6.16). In the prototype the same person operates the host, which is break-glass access (see break_glass).
     responsibilities:
-      - Administer accounts and zone assignments (every grant confirmed by qa)
+      - Administer accounts and unit assignments (every grant confirmed by qa)
       - Draft policy and settings changes (approved by qa) and run apply.sh on the host
       - Administer the workbench hub; view the schema and configuration in pgAdmin
   auditor:
@@ -486,7 +489,7 @@ roles:
 # Non-human identities. `ceiling` is the most each may hold; the compiler renders their
 # grants from it and the catalog invariants (I10, I15) check the database against it after
 # every apply. Approvals of records in medcea are made by people through PostgREST as
-# their own rr_ role, so no service holds A there. The exceptions are the account, zone and
+# their own rr_ role, so no service holds A there. The exceptions are the account, unit and
 # policy approvals, which access-api and iam-api record for a person whose token they
 # verified: their approval functions refuse system actors, and apply.sh re-checks every
 # approver against Keycloak from the host before anything is applied.
@@ -512,13 +515,13 @@ service_identities:
     ceiling: {master_data: [R], devices: [R], zones: [R], recipes: [R], controllers: [R, C, U], controllers_state: [R, C, U], schedules: [R, C, U], scheduler_settings: [R, C, U], runs: [R, C, O], run_logs: [R], mqtt_sense: [R], mqtt_control: [R, C]}
   svc_monitor:
     label: monitor-api.py
-    description: Shows runs and telemetry, filtered to the person's zones for operators.
+    description: Shows runs and telemetry, filtered to the person's units for operators.
     db_role: svc_monitor
     db_password: SVC_MONITOR_DB_PASS
     ceiling: {master_data: [R], devices: [R], zones: [R], recipes: [R], measurements: [R], runs: [R]}
   svc_grafana:
     label: Grafana datasource
-    description: Serves dashboards; reads telemetry and runs of every zone.
+    description: Serves dashboards; reads telemetry and runs of every unit.
     db_role: svc_grafana
     db_password: SVC_GRAFANA_DB_PASS
     ceiling: {master_data: [R], measurements: [R], runs: [R]}
@@ -802,7 +805,7 @@ resource_groups:
     class: config
     description: Production dashboards over telemetry and runs.
     why_this_class: Presentation configuration.
-    risk: Dashboards read regulated data through Grafana's own database account, so a dashboard viewer reads telemetry of every zone.
+    risk: Dashboards read regulated data through Grafana's own database account, so a dashboard viewer reads telemetry of every unit.
     reaches: {measurements: [R], runs: [R]}
     members:
       - {type: ui, host: GRAFANA_DOMAIN}
@@ -867,16 +870,16 @@ resource_groups:
     class: personal
     description: Keycloak accounts, their platform role and person, access requests and decisions, and the User Manager's mail settings.
     why_this_class: Personal data and the keys to the platform.
-    risk: A wrong role or zone grants access to regulated data; a missed deactivation leaves a leaver inside.
+    risk: A wrong role or unit grants access to regulated data; a missed deactivation leaves a leaver inside.
     approval:
       record: iam.account_decision (pending_qa → confirmed)
       functions: ["iam.confirm_decision(int, text)"]
       effect: blocking
       help: >
         A grant, a role change that adds any (group, level) pair the old role did not
-        have, a new zone assignment or a person_id change takes effect only when a qa
+        have, a new unit assignment or a person_id change takes effect only when a qa
         person confirms it who is neither the administrator who made it nor its subject.
-        Deactivation, a pure narrowing and the removal of a zone act at once and are
+        Deactivation, a pure narrowing and the removal of a unit act at once and are
         reviewed afterwards.
     members:
       - {type: idp, object: "keycloak realm users, realm-role mappings and the person_id attribute"}
@@ -907,19 +910,20 @@ resource_groups:
       - {type: ui, host: ACCESS_DOMAIN}
 
   zones:
-    label: Zone assignments
+    label: Unit assignments
     class: personal
-    description: Which zones each person works in; the own_zone constraint reads it.
+    description: Which units each operator works in; the own_unit constraint reads it (every zone of an assigned unit, zones added later included).
     why_this_class: A per-person access attribute.
-    risk: A new zone gives an operator telemetry and run execution in that zone, so assignments wait for qa; removals act at once.
+    risk: A new unit gives an operator telemetry, runs and run execution in that unit, so assignments wait for qa; removals act at once.
     approval:
       record: iam.account_decision (pending_qa → confirmed)
       functions: ["iam.confirm_decision(int, text)"]
       effect: blocking
-      help: A new zone assignment takes effect when a qa person who is neither the maker nor the subject confirms it.
+      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it. Bootstrap exception (IAM 2.8, like the policy's --bootstrap) — apps/iam/units.sh applies an assignment at once and records it as pending_qa; IAM 2.7's confirm screen confirms or refuses it, and a refusal removes the unit.
     members:
-      - {type: data, object: iam_policy.user_zone, written_by: functions}
-      - {type: data, function: "iam_policy.propose_zone(uuid, int, text)", level: C, service_only: [svc_iam], note: "called by iam-api for an admin holding K; records a pending decision; removal is immediate"}
+      - {type: data, object: iam_policy.user_unit, written_by: functions}
+      - {type: data, object: iam_policy.user_zone, written_by: functions, note: "unused since unit assignments; kept for the history that names it"}
+      - {type: data, function: "iam_policy.propose_unit(uuid, int, text)", level: C, service_only: [svc_iam], note: "called by iam-api for an admin holding K; records a pending decision; removal is immediate"}
       - {type: api, service: iam, routes: {"GET /api/zones": [R, K], "PUT /api/zones": K}}
 
   iam_policy:
@@ -1081,7 +1085,7 @@ matrix:
     engineer: [R]
     auditor: [R, X]
   runs:
-    operator: {levels: [R, O], constraint: assigned_run, applies_to: [O]}
+    operator: {levels: [R, O], constraint: {R: own_unit, O: assigned_run}}
     production_manager: [R, C, O]
     maintenance: [R]
     qc: [R]
@@ -1099,7 +1103,7 @@ matrix:
     admin: [R, C, U]
     auditor: [R, X]
   measurements:
-    operator: {levels: [R], constraint: own_zone}
+    operator: {levels: [R], constraint: own_unit}
     production_manager: [R]
     maintenance: [R]
     qc: [R]
@@ -1107,7 +1111,7 @@ matrix:
     engineer: [R]
     auditor: [R, X]
   run_logs:
-    operator: {levels: [R], constraint: own_zone}
+    operator: {levels: [R], constraint: own_unit}
     production_manager: [R]
     engineer: [R]
     auditor: [R, X]
@@ -1156,20 +1160,34 @@ matrix:
     admin: [K, D]
 
 # ── Constraints ──────────────────────────────────────────────────────────────────────
-# Named attribute rules that narrow the levels a cell lists in applies_to. Evaluated per
+# Named attribute rules that narrow the levels a cell lists in applies_to (or, in the
+# per-level form, the levels its constraint map names). Evaluated per
 # cell: a person passes if ANY of their effective roles holds the level without a
 # constraint, or with a constraint that holds.
 constraints:
-  own_zone:
-    summary: Only the zones assigned to the person.
-    effect: Telemetry and run logs are limited to the zones in iam_policy.user_zone. Each measurement row carries the zone of the board that sent it, stamped at insert, so a board moved later does not move its history.
-    enforced_by: ["RLS policy TO rr_operator on medcea.measurement.zone_id (other roles have explicit permissive policies)", "monitor and scheduler log route filter by zone"]
-    rls: {objects: [medcea.measurement], using: "zone_id = ANY (medcea_auth.my_zones())"}
-    help: Zone assignments are personal-data changes made in the User Manager or the Zones tab and confirmed by qa. A person with no assigned zone sees no telemetry.
+  own_unit:
+    summary: Only the units assigned to the person.
+    effect: >
+      Telemetry, runs and run logs are limited to the units in iam_policy.user_unit — every
+      zone of an assigned unit, zones added later included. A measurement row carries the
+      zone of the board that sent it, stamped at insert, and is filtered by that zone's
+      current unit, so moving a zone to another unit moves its history with it. Such a move
+      (an UPDATE of medcea.cea_zone.unit_id, which engineers hold) widens the new unit's
+      operators without an account decision; it is recorded only in medcea.row_change — a
+      qa_dual_control gap left to IAM 2.6/2.7.
+    enforced_by: ["RLS policies TO rr_operator on medcea.measurement (zone_id ∈ my_zones()), medcea.recipe_run (unit_id ∈ my_units()), medcea.recipe_line_cycle_run and medcea.run_release (through their run); other roles have explicit permissive policies", "monitor and scheduler routes filter by unit (2.6)"]
+    rls:
+      objects: [medcea.measurement, medcea.recipe_run, medcea.recipe_line_cycle_run, medcea.run_release]
+      using:
+        medcea.measurement: "zone_id = ANY ((SELECT medcea_auth.my_zones())::integer[])"
+        medcea.recipe_run: "unit_id = ANY ((SELECT medcea_auth.my_units())::integer[])"
+        medcea.recipe_line_cycle_run: "recipe_run_id IN (SELECT r.recipe_run_id FROM medcea.recipe_run r WHERE r.unit_id = ANY ((SELECT medcea_auth.my_units())::integer[]))"
+        medcea.run_release: "recipe_run_id IN (SELECT r.recipe_run_id FROM medcea.recipe_run r WHERE r.unit_id = ANY ((SELECT medcea_auth.my_units())::integer[]))"
+    help: Units are assigned with apps/iam/units.sh (IAM 2.8, recorded pending_qa until 2.7's confirm screen) and later in the User Manager. An operator with no unit sees no telemetry and no runs, and can start none. Moving a zone to another unit moves its telemetry to that unit's operators.
   assigned_run:
-    summary: Execute only a run someone else prepared for your zone.
-    effect: An operator may execute or stop a run only when another person created it while holding production_manager (or a schedule such a person created triggered it), and its unit is in the operator's zone.
-    enforced_by: ["medcea.start_run() and set_run_status() compare created_by_person and created_by_role", "scheduler route check"]
+    summary: Execute only a run someone else prepared for one of your units.
+    effect: An operator may execute or stop a run only when another person created it while holding production_manager (or a schedule such a person created triggered it), and its unit is one of the operator's units (iam_policy.user_unit).
+    enforced_by: ["medcea.start_run() and set_run_status() check the unit first (a run of another unit and a missing run get the same refusal, before any status check, since both functions read past the RLS), then compare created_by_person and created_by_role", "scheduler route check"]
     help: Separates preparing a run from starting it.
   assign_only:
     summary: Assign approved recipes and parameter sets to units; never edit them.
@@ -1202,9 +1220,11 @@ constraints:
     summary: Account grants wait for qa.
     effect: >
       A grant, any role change that adds a (group, level) pair the old role did not hold,
-      a new zone assignment or a person_id change stays pending_qa until a qa person who
+      a new unit assignment or a person_id change stays pending_qa until a qa person who
       is neither the maker nor the subject confirms it. Deactivation, pure narrowing and
-      zone removal act at once and are reviewed by qa afterwards.
+      unit removal act at once and are reviewed by qa afterwards. Bootstrap exceptions:
+      the policy's --bootstrap, and apps/iam/units.sh (IAM 2.8), whose assignments act at
+      once and wait as pending_qa for confirmation or refusal (a refusal removes the unit).
     enforced_by: ["access-api and iam-api write iam.account_decision", "the Keycloak change is made only on confirmation", "widening computed by the compiler from the effective matrix"]
     help: Two people for every grant; no delay for removing access.
 

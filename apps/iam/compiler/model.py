@@ -39,14 +39,24 @@ class Policy:
 
     # ── cells ───────────────────────────────────────────────────────────────────
     def cell(self, group, role):
-        """(levels, constraint, applies_to) of a direct cell, or None for N."""
+        """(levels, {level: constraint}, constrained levels) of a direct cell, or None for N.
+
+        `constraint: X, applies_to: [...]` narrows the listed levels (default: all of them)
+        with X; `constraint: {R: X, O: Y}` names one constraint per level."""
         c = self.matrix.get(group, {}).get(role)
         if c is None:
             return None
         if isinstance(c, list):
-            return set(c), None, set()
+            return set(c), {}, set()
         lv = set(c["levels"])
-        return lv, c.get("constraint"), set(c.get("applies_to", lv))
+        con = c.get("constraint")
+        if isinstance(con, dict):
+            cons = dict(con)
+        elif con:
+            cons = {l: con for l in c.get("applies_to", lv)}
+        else:
+            cons = {}
+        return lv, cons, set(cons)
 
     def effective_roles(self, role):
         """The role and every role it includes (Keycloak composites), transitively."""
@@ -70,7 +80,7 @@ class Policy:
             lv, con, applies = c
             lv = self.closure(lv)
             held |= lv
-            free |= (lv - applies) if con else lv
+            free |= lv - applies
         return held, free
 
     def reach(self, tool, role):

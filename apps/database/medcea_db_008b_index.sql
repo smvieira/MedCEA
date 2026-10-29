@@ -3,7 +3,7 @@
 -- CREATE INDEX CONCURRENTLY cannot run in a transaction, and the backfill
 -- commits every batch so ingest never waits behind one long lock.
 --
---   1. an index for the own_zone filter: (zone_id, measure_timestamp); an
+--   1. an index for the own_unit filter: (zone_id, measure_timestamp); an
 --      INVALID one left by an interrupted build is dropped and rebuilt;
 --   2. backfill, once (marker 008b:measurement_zone_backfilled), the zone of
 --      rows stored before measurement_zone_trg existed. A row's board is

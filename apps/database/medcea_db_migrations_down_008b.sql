@@ -113,6 +113,10 @@ GRANT USAGE ON SCHEMA medcea TO mqtt_auth;
 GRANT SELECT ON medcea.mqtt_credential, medcea.device TO mqtt_auth;
 -- Platform settings (migration 008a) are service_only in the access policy.
 REVOKE ALL ON medcea.platform_setting FROM anon;
+-- Unit assignments (IAM 2.8) are in iam_policy, outside the blanket grant (IN
+-- SCHEMA medcea); revoked here by the rule for a new table, a no-op in the catalog.
+DO $$ BEGIN IF pg_catalog.to_regclass('iam_policy.user_unit') IS NOT NULL THEN
+    REVOKE ALL ON iam_policy.user_unit FROM anon, authenticator; END IF; END $$;
 -- register_mqtt_credential v1: the edge wizard's call before Phase 2b (moved
 -- here from migration 007, so a migration re-run cannot re-grant it)
 GRANT EXECUTE ON FUNCTION medcea.register_mqtt_credential(text, text, integer, text, text) TO anon;
@@ -205,7 +209,8 @@ BEGIN
                  OR (c.relnamespace = 'medcea'::regnamespace AND c.relname IN
                         ('approval', 'pending_change', 'run_release', 'algorithm_state_event', 'row_change',
                          'device_slot_history') AND t.tgname LIKE '%\_append\_only')
-                 OR (c.oid = 'iam_policy.user_zone'::regclass AND t.tgname = 'user_zone_audit_trg')) LOOP
+                 OR (c.oid = 'iam_policy.user_zone'::regclass AND t.tgname = 'user_zone_audit_trg')
+                 OR (c.oid = pg_catalog.to_regclass('iam_policy.user_unit') AND t.tgname = 'user_unit_audit_trg')) LOOP
         EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', r.tgname, r.rel);
     END LOOP;
     -- 008a's append-only triggers go back to plain ENABLE
@@ -239,11 +244,11 @@ DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), me
     medcea.approve_algorithm(integer), medcea.approve_params(integer), medcea.approve_change(text, bigint, text),
     medcea.propose_setting(text, jsonb), medcea.propose_commissioning(integer, boolean, text),
     medcea._check_run_params(integer, integer, integer), medcea._check_run_params(integer, integer, integer, integer),
-    medcea._check_assigned_run(medcea.recipe_run, text, text, text),
+    medcea._check_assigned_run(medcea.recipe_run, text, text, text), medcea._refuse_hidden_run(integer),
     medcea.start_run(integer), medcea.set_run_status(integer, text), medcea.finish_run(integer, text),
     medcea.record_cycle(integer, jsonb), medcea.release_run(integer), medcea.retire_schedule(integer),
     medcea.retire_algorithm_state(integer, text, text), medcea.register_mqtt_credential(integer, text, text),
-    iam_policy.log_user_zone(), iam_policy.log_export(text[], text[]);
+    iam_policy.log_user_zone(), iam_policy.log_user_unit(), iam_policy.log_export(text[], text[]);
 CREATE OR REPLACE FUNCTION medcea.register_mqtt_credential(
     p_username text, p_password_hash text, p_device_id integer, p_role text, p_topic_base text)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
@@ -331,7 +336,7 @@ END $$;
 -- the actor store and the medcea_auth functions 008b added (pre_request stays:
 -- anon may still execute it, and it is a no-op while the setting is false)
 DROP FUNCTION IF EXISTS medcea_auth.set_actor(text, text, text, text), medcea_auth.set_system_actor(text, text, bigint),
-    medcea_auth.my_zones(), medcea_auth._authors(text, jsonb), medcea_auth._lock_row(text, jsonb), medcea_auth._approver(text),
+    medcea_auth.my_zones(), medcea_auth.my_units(), medcea_auth._authors(text, jsonb), medcea_auth._lock_row(text, jsonb), medcea_auth._approver(text),
     medcea_auth._is_approved(text, jsonb), medcea_auth.row_digest(text, jsonb), medcea_auth._content(jsonb, boolean),
     medcea_auth.policy_refuse(text), medcea_auth.enforcing(), medcea_auth._set_internal_actor(text),
     medcea_auth.request_actor(), medcea_auth._is_owner_write(), medcea_auth._owner_write(boolean),

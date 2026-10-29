@@ -374,7 +374,7 @@ the services enforce the policy themselves:
 
 | Role | Meant for |
 |---|---|
-| `operator` | running recipes and day-to-day cultivation in your zones |
+| `operator` | running recipes and day-to-day cultivation in your units |
 | `engineer` | devices, recipes, controllers, flows and dashboards (drafts that qa approves) |
 | `qa` | approving others' work, confirming account grants and policy changes |
 | `auditor` | read-only access to records and audit trails |
@@ -398,6 +398,21 @@ pgAdmin each log in with their own database role instead of the superuser, while
 nothing else is enforced yet. Turn it on, then run `./deploy-apps.sh --all` and
 `./deploy-infra.sh`; pgAdmin can then only read, so schema changes go through
 psql in the PostgreSQL pod.
+
+Under `IAM_DB_ROLES=true` an operator sees the telemetry, runs and run logs of
+the units assigned to them only (every zone of the unit, zones added later
+included), and starts or stops runs only there. **Assign units before turning it
+on**, or operators see nothing:
+
+```bash
+apps/iam/units.sh assign <username> UNIT01 UNIT02   # takes effect at once, waits for qa (IAM 2.7)
+apps/iam/units.sh remove <username> UNIT02
+apps/iam/units.sh list                              # who has which units; operators without one
+```
+
+Each change is recorded as an account decision; an assignment widens access, so it
+stays *pending qa confirmation* until the qa confirm screen (IAM 2.7) confirms or
+refuses it.
 
 **Existing accounts after this change** keep their role and its meaning, but
 some lose services the policy does not give them:
@@ -477,6 +492,8 @@ or delete (the Compliance Plane rule):
 | `iam.access_request` | the request itself, plus the exact e-mail sent with the decision |
 | `iam.user_status_history` | deactivations, activations and role changes: who, whose account, from/to, why |
 | `iam.config_history` | changes to e-mail settings and templates (never the password) — **Change log** tab |
+| `iam.account_decision` | account decisions — today the unit assignments and removals made with `apps/iam/units.sh`: whose account, which unit, why, and whether qa has confirmed it |
+| `iam_policy.history` | the hash-chained history of the access policy, including every unit assignment (`unit_assigned`) and removal (`unit_removed`) |
 | `medcea.row_change` | every change to recipes, algorithms, parameter sets, schedules, runs and devices, with the actor stamped on the row (`created_by_*`/`updated_by_*`): the person whose token was verified, `system:scheduler` for a schedule firing (attributed to the person who created it), or `db:<login>` when no person is known |
 
 ---

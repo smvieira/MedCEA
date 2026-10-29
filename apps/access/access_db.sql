@@ -248,8 +248,9 @@ REVOKE UPDATE, DELETE, TRUNCATE ON iam.user_status_history FROM access_svc;
 -- yet. Phase 2.7 adds their writers (the User Manager's decisions, qa's
 -- confirm screen, iam.confirm_decision(), iam.sign_off_review()).
 --
--- account_decision: every grant, role change, zone assignment or removal,
--- person_id change and (de)activation an administrator makes. A widening
+-- account_decision: every grant, role change, unit assignment or removal
+-- (zone_* kept for old rows), person_id change and (de)activation an
+-- administrator makes. A widening
 -- (qa_dual_control) waits as pending_qa until a qa person who is neither the
 -- maker nor the subject confirms or refuses it; a narrowing acts at once
 -- (applied) and is reviewed afterwards. What was decided never changes; only
@@ -289,7 +290,25 @@ CREATE TABLE IF NOT EXISTS iam.account_decision (
 CREATE INDEX IF NOT EXISTS account_decision_status_idx ON iam.account_decision (status, made_at);
 CREATE INDEX IF NOT EXISTS account_decision_user_idx ON iam.account_decision (keycloak_user_id, made_at);
 
--- access_review: the quarterly snapshot of accounts, roles, persons, zones,
+-- Unit assignments (IAM 2.8): operators are assigned units (iam_policy.user_unit),
+-- not zones. Re-created rather than altered, like the role CHECKs above: the
+-- original kind CHECK is inline. Bootstrap exception (like the policy's
+-- --bootstrap): apps/iam/units.sh writes unit_assign rows as pending_qa while the
+-- assignment is already in effect, and unit_remove rows as applied. When 2.7's
+-- confirm_decision refuses a unit_assign, it must DELETE the iam_policy.user_unit
+-- row in the same transaction — but only if that decision is the latest unit_*
+-- decision for its (keycloak_user_id, unit_id): after assign, remove, assign the
+-- older pending row must not remove the current assignment, which has its own.
+ALTER TABLE iam.account_decision ADD COLUMN IF NOT EXISTS unit_id INTEGER;   -- medcea.cea_unit, another schema: no FK
+ALTER TABLE iam.account_decision DROP CONSTRAINT IF EXISTS account_decision_kind_check;
+ALTER TABLE iam.account_decision ADD CONSTRAINT account_decision_kind_check
+    CHECK (kind IN ('grant', 'role_change', 'zone_assign', 'zone_remove', 'unit_assign', 'unit_remove',
+                    'person_id', 'deactivate', 'activate'));
+ALTER TABLE iam.account_decision DROP CONSTRAINT IF EXISTS account_decision_unit_chk;
+ALTER TABLE iam.account_decision ADD CONSTRAINT account_decision_unit_chk
+    CHECK (kind NOT IN ('unit_assign', 'unit_remove') OR unit_id IS NOT NULL);
+
+-- access_review: the quarterly snapshot of accounts, roles, persons, units,
 -- last logins, pending decisions, waivers and enforcement switches, signed off
 -- by a qa person. The snapshot is frozen at creation; sign-off is added once.
 CREATE TABLE IF NOT EXISTS iam.access_review (
@@ -353,7 +372,7 @@ DROP TRIGGER IF EXISTS access_review_truncate_trg ON iam.access_review;
 CREATE TRIGGER access_review_truncate_trg BEFORE TRUNCATE ON iam.access_review
     FOR EACH STATEMENT EXECUTE FUNCTION iam.freeze_record();
 
-COMMENT ON TABLE iam.account_decision IS 'Account decisions (grant, role change, zones, person_id, (de)activation): pending_qa -> confirmed | refused for a widening, applied -> reviewed otherwise. Final once checked; no DELETE.';
+COMMENT ON TABLE iam.account_decision IS 'Account decisions (grant, role change, units, person_id, (de)activation): pending_qa -> confirmed | refused for a widening, applied -> reviewed otherwise. Final once checked; no DELETE.';
 COMMENT ON TABLE iam.access_review IS 'Quarterly access review snapshots, signed off once by a qa person. Append-only.';
 
 -- Read-only to the service until Phase 2.7 gives it its writers.

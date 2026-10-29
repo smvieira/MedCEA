@@ -215,6 +215,12 @@
   [
    "iam_svc",
    "table",
+   "iam_policy.user_unit",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
    "iam_policy.user_zone",
    "SELECT"
   ],
@@ -468,6 +474,12 @@
    "rr_auditor",
    "table",
    "iam_policy.history",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam_policy.user_unit",
    "SELECT"
   ],
   [
@@ -1229,6 +1241,12 @@
   [
    "rr_operator",
    "function",
+   "medcea_auth.my_units()",
+   "EXECUTE"
+  ],
+  [
+   "rr_operator",
+   "function",
    "medcea_auth.my_zones()",
    "EXECUTE"
   ],
@@ -1632,6 +1650,12 @@
    "rr_qa",
    "table",
    "iam_policy.history",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam_policy.user_unit",
    "SELECT"
   ],
   [
@@ -2129,6 +2153,12 @@
   [
    "svc_dbexport",
    "table",
+   "iam_policy.user_unit",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
    "iam_policy.user_zone",
    "SELECT"
   ],
@@ -2573,6 +2603,12 @@
   [
    "svc_monitor",
    "table",
+   "iam_policy.user_unit",
+   "SELECT"
+  ],
+  [
+   "svc_monitor",
+   "table",
    "iam_policy.user_zone",
    "SELECT"
   ],
@@ -2761,6 +2797,12 @@
    "schema",
    "medcea_auth",
    "USAGE"
+  ],
+  [
+   "svc_scheduler",
+   "table",
+   "iam_policy.user_unit",
+   "SELECT"
   ],
   [
    "svc_scheduler",
@@ -2973,10 +3015,10 @@
   {
    "check": null,
    "cmd": "SELECT",
-   "name": "iam_s_rr_operator_5801ecf1",
+   "name": "iam_s_rr_operator_ca91626c",
    "object": "medcea.measurement",
    "role": "rr_operator",
-   "using": "zone_id = ANY (medcea_auth.my_zones())"
+   "using": "zone_id = ANY ((SELECT medcea_auth.my_zones())::integer[])"
   },
   {
    "check": null,
@@ -3040,6 +3082,334 @@
    "name": "iam_s_svc_monitor_0ebc343a",
    "object": "medcea.measurement",
    "role": "svc_monitor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_mqtt_auth_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "mqtt_auth",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_auditor_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_auditor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_engineer_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_engineer",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_maintenance_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_maintenance",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_operator_1634bb77",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_operator",
+   "using": "recipe_run_id IN (SELECT r.recipe_run_id FROM medcea.recipe_run r WHERE r.unit_id = ANY ((SELECT medcea_auth.my_units())::integer[]))"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_production_manager_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_production_manager",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qa_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_qa",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qc_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_qc",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qp_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "rr_qp",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_dbexport_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "svc_dbexport",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_grafana_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "svc_grafana",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_monitor_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "svc_monitor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_scheduler_0ebc343a",
+   "object": "medcea.recipe_line_cycle_run",
+   "role": "svc_scheduler",
+   "using": "true"
+  },
+  {
+   "check": "true",
+   "cmd": "INSERT",
+   "name": "iam_i_rr_production_manager_b84692bd",
+   "object": "medcea.recipe_run",
+   "role": "rr_production_manager",
+   "using": null
+  },
+  {
+   "check": "true",
+   "cmd": "INSERT",
+   "name": "iam_i_svc_scheduler_b84692bd",
+   "object": "medcea.recipe_run",
+   "role": "svc_scheduler",
+   "using": null
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_mqtt_auth_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "mqtt_auth",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_auditor_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_auditor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_engineer_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_engineer",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_maintenance_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_maintenance",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_operator_0a25dcfa",
+   "object": "medcea.recipe_run",
+   "role": "rr_operator",
+   "using": "unit_id = ANY ((SELECT medcea_auth.my_units())::integer[])"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_production_manager_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_production_manager",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qa_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_qa",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qc_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_qc",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qp_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "rr_qp",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_dbexport_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "svc_dbexport",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_grafana_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "svc_grafana",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_monitor_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "svc_monitor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_scheduler_0ebc343a",
+   "object": "medcea.recipe_run",
+   "role": "svc_scheduler",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_mqtt_auth_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "mqtt_auth",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_auditor_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_auditor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_engineer_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_engineer",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_maintenance_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_maintenance",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_operator_1634bb77",
+   "object": "medcea.run_release",
+   "role": "rr_operator",
+   "using": "recipe_run_id IN (SELECT r.recipe_run_id FROM medcea.recipe_run r WHERE r.unit_id = ANY ((SELECT medcea_auth.my_units())::integer[]))"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_production_manager_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_production_manager",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qa_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_qa",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qc_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_qc",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_qp_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "rr_qp",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_dbexport_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "svc_dbexport",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_grafana_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "svc_grafana",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_monitor_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "svc_monitor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_scheduler_0ebc343a",
+   "object": "medcea.run_release",
+   "role": "svc_scheduler",
    "using": "true"
   }
  ]

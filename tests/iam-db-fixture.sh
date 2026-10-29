@@ -176,6 +176,10 @@ cmd_load() {
     grep 'ERROR' <<<"$out" | grep -v 'already exists' && fail load "roles" || pass load "roles (without postgres)"
     out="$(fx postgres -q < "$IAMTEST_DIR/schema.sql" 2>&1)"
     if grep 'ERROR' <<<"$out" | grep -v 'already exists'; then fail load "schema"; else pass load "schema"; fi
+    # this tree's access_db.sql, as apps/access/deploy.sh applies it: production's dump
+    # may predate its idempotent ALTERs (IAM 2.8: account_decision.unit_id, unit_* kinds)
+    out="$({ echo "SET log_statement = 'none';"; printf '\\set access_pw %s\n' "$(openssl rand -hex 20)"; cat apps/access/access_db.sql; } \
+           | fx "$CEA_DB" -q -v ON_ERROR_STOP=1 -f - 2>&1)" && pass load "access_db.sql" || { echo "$out" | head; fail load "access_db.sql"; }
     out="$(fx "$CEA_DB" -q -v ON_ERROR_STOP=1 < "$IAMTEST_DIR/data.sql" 2>&1)" && pass load "medcea data" || { echo "$out" | head; fail load "data"; }
     out="$(fx "$CEA_DB" -q < tests/sql/iam-db-seed.sql 2>&1)" && pass load "seed" || { echo "$out" | head; fail load "seed"; }
     snapshot "$CEA_DB" "$IAMTEST_DIR/B0.txt" && pass load "catalog snapshot B0 ($(wc -l < "$IAMTEST_DIR/B0.txt") lines)"
@@ -232,6 +236,9 @@ probes() {  # MODE
 
 # The declared difference between production's catalog before 2a (B0) and after
 # apply false (A), for anon, authenticator, mqtt_auth, access_svc and PUBLIC.
+# Production may run IAM_DB_SERVICE_ROLES=true (2.5): its service roles and
+# rr_admin_login then log in, and rr_admin_login inherits rr_admin, in B0 only —
+# the fixture's apply false runs without the service logins.
 DELTA='^[<>] owner\|
 ^[<>] secdef\|
 ^[<>] trigger\|
@@ -244,6 +251,8 @@ DELTA='^[<>] owner\|
 ^> reloption\|.*security_invoker=true
 ^> dbsetting\|\*\|medcea\.iam_db_roles=false
 ^> role\|(rr_|svc_|iam_svc)
+^< role\|(rr_|svc_|iam_svc)
+^< member\|rr_admin\|rr_admin_login\|
 ^> constraint\|'
 # every fact but the grants of roles outside the comparison (the managed roles are
 # compared exactly by the bundle's own assertions)
@@ -306,9 +315,9 @@ cmd_fulldown() {
     # 2.4's functions go with 008b's (the down file's drop list)
     left="$(fx medcea_db -q -tA -c "SELECT string_agg(f, ', ') FROM unnest(ARRAY['medcea.retire_schedule(integer)',
               'medcea._check_run_params(integer,integer,integer,integer)', 'medcea._check_run_params(integer,integer,integer)',
-              'medcea.schedule_retired_guard()']) f
+              'medcea.schedule_retired_guard()', 'medcea._refuse_hidden_run(integer)']) f
              WHERE pg_catalog.to_regprocedure(f) IS NOT NULL")"
-    [[ -z "$left" ]] && pass fulldown "retire_schedule, _check_run_params and schedule_retired_guard gone after the full down" \
+    [[ -z "$left" ]] && pass fulldown "retire_schedule, _check_run_params, schedule_retired_guard and _refuse_hidden_run gone after the full down" \
         || fail fulldown "still there after the full down: $left"
     out="$(git show "$PREV_REV:apps/database/medcea_db_ddl.sql" | fx medcea_db -q 2>&1 | grep ERROR | grep -v 'already exists\|multiple primary keys')"
     [[ -z "$out" ]] && pass fulldown "previous DDL" || { echo "$out" | head; fail fulldown "previous DDL"; }

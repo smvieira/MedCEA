@@ -46,7 +46,7 @@ NOT_BUILT = {
     "iam_policy.save_entry(integer,text,text,text[],text,text[],text)": "4.3",
     "iam_policy.submit(integer,text)": "4.3",
     "iam_policy.approve(integer,text)": "4.3",
-    "iam_policy.propose_zone(uuid,integer,text)": "2.7",
+    "iam_policy.propose_unit(uuid,integer,text)": "2.7",
     "iam.confirm_decision(integer,text)": "2.7",
     "iam.sign_off_review(integer,text)": "2.7",
 }
@@ -157,9 +157,9 @@ def _person_levels(p, g, role):
         if not c:
             continue
         lv, con, applies = c
-        lim = p.constraints.get(con, {}).get("limits_dml_to") if con else None
         for l in p.closure(lv):
-            restr = set(lim) if (con and lim and l in applies) else None
+            lim = p.constraints.get(con[l], {}).get("limits_dml_to") if l in con else None
+            restr = set(lim) if lim else None
             if l not in out:
                 out[l] = restr
             elif out[l] is None or restr is None:
@@ -198,8 +198,8 @@ def policy_holds_table(p):
                 if l in free:
                     out.append((r, g, l, "free"))
                     continue
-                cons = sorted({p.cell(g, e)[1] for e in p.effective_roles(r)
-                               if p.cell(g, e) and p.cell(g, e)[1] and l in p.closure(p.cell(g, e)[0])})
+                cons = sorted({p.cell(g, e)[1][l] for e in p.effective_roles(r)
+                               if p.cell(g, e) and l in p.cell(g, e)[1]})
                 out.append((r, g, l, ",".join(cons)))
     return out
 
@@ -211,7 +211,7 @@ def _constrained_readers(p, rule):
         for g in p.groups:
             held, free = p.direct(g, r)
             if "R" in held and "R" not in free:
-                if any(p.cell(g, e) and p.cell(g, e)[1] == rule for e in p.effective_roles(r)):
+                if any(p.cell(g, e) and p.cell(g, e)[1].get("R") == rule for e in p.effective_roles(r)):
                     out.add(r)
     return out
 
@@ -342,7 +342,7 @@ def rls(p):
                     if gr in ppl_rev:
                         held, free = p.direct(group, ppl_rev[gr])
                         if "R" not in free:
-                            using = spec["using"]
+                            using = spec["using"][obj] if isinstance(spec["using"], dict) else spec["using"]
                     cmd, expr = "SELECT", using
                 else:
                     cmd, expr = "INSERT", "true"
@@ -1013,7 +1013,7 @@ def check(p):
     for c, cd in p.constraints.items():
         lim = cd.get("limits_dml_to")
         if lim is not None:
-            groups = {g for g, row in p.matrix.items() for r in row if isinstance(row[r], dict) and row[r].get("constraint") == c}
+            groups = {g for g in p.matrix for r in p.matrix[g] if p.cell(g, r) and c in p.cell(g, r)[1].values()}
             for o in lim:
                 if members.get(o) not in groups:
                     err(f"constraint {c}: limits_dml_to names {o}, not a member of a group the constraint is used on")
@@ -1022,8 +1022,11 @@ def check(p):
             for o in spec.get("objects", []):
                 if o not in members:
                     err(f"constraint {c}: rls object {o} is not a member")
-            if not spec.get("using"):
+            u = spec.get("using")
+            if not u:
                 err(f"constraint {c}: rls needs `using`")
+            elif isinstance(u, dict) and set(u) != set(spec.get("objects", [])):
+                err(f"constraint {c}: rls `using` must name exactly its objects")
     for w in p.waivers:
         for o in w.get("objects") or []:
             if members.get(o) != w["target"]:

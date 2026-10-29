@@ -79,7 +79,7 @@ class CheckTest(unittest.TestCase):
     def test_composite_and_constraint(self):
         d = self.check("monitor", "GET", "/api/measurements/UNIT01", self.token(["operator"], azp="monitor"))
         self.assertTrue(d.allow)
-        self.assertEqual(d.constraints, ["own_zone"])
+        self.assertEqual(d.constraints, ["own_unit"])
         self.assertTrue(self.check("monitor", "GET", "/api/runs", self.token(["qa"], azp="monitor")).allow)
         self.assertFalse(self.check("monitor", "GET", "/api/runs", self.token(["admin"], azp="monitor")).allow)
 

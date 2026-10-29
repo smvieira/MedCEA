@@ -59,7 +59,7 @@ PG = dict(host=os.environ.get("PG_HOST", "rdbms-postgresql"), dbname=os.environ.
 ISSUER = "https://keycloak.iamtest.invalid/realms/medcea"
 UNIT, UNIT2, R0, R1 = "IAMT01", "IAMT02", "IAMTEST-R0", "IAMTEST-R1"
 UUID_PM = "22222222-2222-4222-8222-222222222222"
-UUID_OP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"   # tests/sql/iam-db-seed.sql: IAMT01/Z02
+UUID_OP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"   # assigned unit IAMT01 in main() (IAM 2.8)
 FAILS = 0
 PASSES = 0
 
@@ -323,6 +323,9 @@ def main():
     want_db = "false" if mode == "false-svc" else mode
     if not ok("setup", f"the database is in mode {want_db}", db_mode == want_db, db_mode):
         return
+    # the operator's unit (own_unit, assigned_run); the trigger logs unit_assigned
+    owner("INSERT INTO iam_policy.user_unit (person_sub, unit_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+          (UUID_OP, i["u1"]))
     # enforce: IAM_DB_ROLES=true. svc: the scheduler on svc_scheduler (true, or
     # false-svc = IAM_DB_SERVICE_ROLES, IAM 2.5). strict: writes go through the
     # functions only — the scheduler holds no direct DML for them off superuser.

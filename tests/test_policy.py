@@ -73,7 +73,7 @@ def _pop(path):
 MUTATIONS = {
     "admin reads telemetry": (_set(["matrix", "measurements", "admin"], ["R"]), "I2"),
     "scientist on dashboards (reach)": (_set(["matrix", "dashboards", "bio_scientist"], ["R"]), "I5"),
-    "operator on dashboards (own_zone bypass)": (_set(["matrix", "dashboards", "operator"], ["R"]), "I11"),
+    "operator on dashboards (own_unit bypass)": (_set(["matrix", "dashboards", "operator"], ["R"]), "I11"),
     "admin in Node-RED": (_set(["matrix", "flows", "admin"], ["R"]), "I2"),
     "production manager creates and releases runs": (_set(["matrix", "runs", "production_manager"], ["R", "C", "O", "A"]), "I4"),
     "auditor creates": (_set(["matrix", "recipes", "auditor"], ["R", "X", "C"]), "I3"),
@@ -109,6 +109,10 @@ MUTATIONS = {
                                            "MONITOR_DOMAIN serves monitor but is in neither"),
     "wizard cut off from config-api": (_set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui"]),
                                        "ONBOARD_DOMAIN serves config-api"),
+    "unknown per-level constraint": (_set(["matrix", "runs", "operator", "constraint"], {"R": "own_unit", "O": "nope"}),
+                                     "unknown constraint nope"),
+    "per-level constraint map with applies_to": (_set(["matrix", "runs", "operator", "applies_to"], ["O"]),
+                                                 "per-level constraint map takes no applies_to"),
     # grants.check (database side, Phase 2a)
     "`on` key on a function member": (_with_member("runs", "function", "medcea.start_run(int)",
                                                    lambda m: (m.pop("level"), m.__setitem__(True, "O"))), "uses the key `on`"),
@@ -123,7 +127,9 @@ MUTATIONS = {
                                             "is not a function member"),
     "infrastructure function for an unknown role": (_set(["infrastructure_functions", 0, "execute"], ["svc_nobody"]),
                                                    "not a database role"),
-    "rls on a non-member": (_set(["constraints", "own_zone", "rls", "objects"], ["medcea.nothing"]), "rls object medcea.nothing"),
+    "rls on a non-member": (_set(["constraints", "own_unit", "rls", "objects"], ["medcea.nothing"]), "rls object medcea.nothing"),
+    "rls using map misses an object": (_set(["constraints", "own_unit", "rls", "using"], {"medcea.measurement": "true"}),
+                                       "rls `using` must name exactly its objects"),
     "service without a password": (lambda d: d["service_identities"]["svc_monitor"].pop("db_password"), "db_password"),
     "one function under two spellings": (_append(["resource_groups", "recipes", "members"],
                                                  {"type": "data", "function": "medcea.start_run(integer)", "level": "O"}), "I14"),
@@ -162,7 +168,7 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(proxies.admitted(p, "PGADMIN_DOMAIN"), ["admin"])
         self.assertNotIn("admin", proxies.admitted(p, "MONITOR_DOMAIN"))       # I2 through tools
         self.assertNotIn("admin", proxies.admitted(p, "NODE_RED_DOMAIN"))
-        self.assertNotIn("operator", proxies.admitted(p, "GRAFANA_DOMAIN"))    # own_zone
+        self.assertNotIn("operator", proxies.admitted(p, "GRAFANA_DOMAIN"))    # own_unit
         for host in p.hosts:
             self.assertTrue(proxies.admitted(p, host), f"{host} admits nobody")
 
@@ -206,7 +212,14 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(sched["POST /api/runs/<id>/execute"]["roles"],
                          {"operator": ["assigned_run"], "production_manager": None})
         mon = self.doc["services"]["monitor"]["routes"]["GET /api/measurements/<unit>"]["roles"]
-        self.assertEqual(mon["operator"], ["own_zone"])
+        self.assertEqual(mon["operator"], ["own_unit"])
+        for r in ("GET /api/runs", "GET /api/runs/<id>"):
+            self.assertEqual(sched[r]["roles"]["operator"], ["own_unit"], r)
+        self.assertEqual(self.doc["services"]["monitor"]["routes"]["GET /api/runs"]["roles"]["operator"], ["own_unit"])
+        held = set(grants.policy_holds_table(self.policy))
+        for row in (("operator", "runs", "R", "own_unit"), ("operator", "runs", "O", "assigned_run"),
+                    ("operator", "measurements", "R", "own_unit")):
+            self.assertIn(row, held)
         self.assertIsNone(mon["qa"])                    # through the auditor composite
         self.assertNotIn("admin", mon)                  # I2
         self.assertEqual(self.doc["services"]["access"]["routes"]["POST /api/decisions/<id>/confirm"]["roles"],
@@ -335,6 +348,9 @@ class GrantsTest(unittest.TestCase):
         self.assertEqual(self.holders("medcea.platform_setting"), set())
         self.assertEqual(self.holders("medcea.algorithm_state", "UPDATE"), {"svc_scheduler"})  # W2's objects
         self.assertEqual(self.holders("medcea_auth.my_zones()"), {"rr_operator"})
+        self.assertEqual(self.holders("medcea_auth.my_units()"), {"rr_operator"})
+        self.assertEqual(self.holders("iam_policy.user_unit"),
+                         {"iam_svc", "rr_auditor", "rr_qa", "svc_dbexport", "svc_monitor", "svc_scheduler"})
         self.assertEqual(self.holders("medcea.release_run(integer)"), {"rr_qp"})
         self.assertEqual(self.holders("medcea.approve_change(text,bigint,text)"), {"rr_qa"})
         self.assertEqual(self.holders("iam_policy.append_history(text,jsonb,text)"), {"iam_svc"})
@@ -371,12 +387,16 @@ class GrantsTest(unittest.TestCase):
                 self.assertEqual({p for _, _, o, p in self.privs if o == m["object"]} - {"SELECT"}, set(), m["object"])
 
     def test_rls_and_memberships(self):
-        pols = {(x["role"], x["cmd"]): x for x in self.doc["rls"]}
-        self.assertIn("my_zones", pols[("rr_operator", "SELECT")]["using"])
-        self.assertEqual(pols[("rr_production_manager", "SELECT")]["using"], "true")
-        self.assertEqual(pols[("svc_ingest", "INSERT")]["check"], "true")
-        readers = {g for g, k, o, p in self.privs if o == "medcea.measurement" and p == "SELECT"}
-        self.assertEqual({r for r, c in pols if c == "SELECT"}, readers)
+        pols = {(x["object"], x["role"], x["cmd"]): x for x in self.doc["rls"]}
+        self.assertIn("my_zones", pols[("medcea.measurement", "rr_operator", "SELECT")]["using"])
+        for o in ("medcea.recipe_run", "medcea.recipe_line_cycle_run", "medcea.run_release"):
+            self.assertIn("my_units", pols[(o, "rr_operator", "SELECT")]["using"])
+            self.assertEqual(pols[(o, "rr_production_manager", "SELECT")]["using"], "true")
+        self.assertEqual(pols[("medcea.measurement", "rr_production_manager", "SELECT")]["using"], "true")
+        self.assertEqual(pols[("medcea.measurement", "svc_ingest", "INSERT")]["check"], "true")
+        for o in ("medcea.measurement", "medcea.recipe_run", "medcea.recipe_line_cycle_run", "medcea.run_release"):
+            readers = {g for g, k, ob, p in self.privs if ob == o and p == "SELECT"}
+            self.assertEqual({r for (ob, r, c) in pols if ob == o and c == "SELECT"}, readers, o)
         mem = {(r, m): (i, st) for r, m, i, st in grants.memberships(self.policy)}
         self.assertEqual(mem[("rr_admin", "rr_admin_login")], (True, False))
         self.assertEqual(mem[("rr_operator", "authenticator")], (False, True))

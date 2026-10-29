@@ -89,6 +89,12 @@ SELECT 'tables', count(*) FILTER (WHERE pg_get_userbyid(c.relowner) = 'medcea_ow
 SELECT 'setting', coalesce((SELECT value FROM medcea.platform_setting WHERE key = 'mqtt_topic_root'), '<none>'), '';
 SELECT 'access', count(*), '' FROM pg_class
  WHERE oid IN (to_regclass('iam.account_decision'), to_regclass('iam.access_review'));
+SELECT 'unitdec', count(*), '' FROM (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'iam' AND table_name = 'account_decision' AND column_name = 'unit_id'
+    UNION ALL
+    SELECT 1 FROM pg_constraint WHERE conname = 'account_decision_kind_check'
+       AND conrelid = to_regclass('iam.account_decision') AND pg_get_constraintdef(oid) LIKE '%unit_assign%') x;
 SELECT 'anon', count(*), string_agg(what, ', ') FROM (
     SELECT 'medcea.platform_setting' AS what WHERE has_table_privilege('anon', 'medcea.platform_setting', 'SELECT,INSERT,UPDATE,DELETE')
     UNION ALL SELECT 'USAGE on iam_policy' WHERE has_schema_privilege('anon', 'iam_policy', 'USAGE')
@@ -117,12 +123,14 @@ else
     while IFS='|' read -r what a b; do
         case "$what" in
             schema)  [[ "$b" == medcea_owner ]] && pass schema "schema $a owned by medcea_owner" || fail schema "schema $a owned by $b" ;;
-            tables)  [[ "$b" == 10 && "$a" == 10 ]] && pass schema "10 iam_policy tables, all owned by medcea_owner" \
-                         || fail schema "iam_policy has $b table(s), $a owned by medcea_owner (want 10)" ;;
+            tables)  [[ "$b" == 11 && "$a" == 11 ]] && pass schema "11 iam_policy tables, all owned by medcea_owner" \
+                         || fail schema "iam_policy has $b table(s), $a owned by medcea_owner (want 11)" ;;
             setting) [[ "$a" == "$PROJECT_NAME" ]] && pass schema "platform_setting mqtt_topic_root = $a" \
                          || fail schema "platform_setting mqtt_topic_root is $a, PROJECT_NAME is $PROJECT_NAME" ;;
             access)  [[ "$a" == 2 ]] && pass schema "iam.account_decision and iam.access_review exist" \
                          || fail schema "iam.account_decision / iam.access_review missing (./apps/access/deploy.sh)" ;;
+            unitdec) [[ "$a" == 2 ]] && pass schema "iam.account_decision records unit decisions (unit_id, unit_assign/unit_remove)" \
+                         || fail schema "iam.account_decision has no unit_id or unit_* kinds (./apps/access/deploy.sh)" ;;
             anon)    [[ "$a" == 0 ]] && pass grants "anon: nothing in iam_policy, only USAGE on medcea_auth and EXECUTE on pre_request()" \
                          || fail grants "anon: $b" ;;
             exec)    [[ "$a" == 0 ]] && pass grants "iam_policy functions: append_history to iam_svc, log_export to svc_dbexport, nothing else" \
