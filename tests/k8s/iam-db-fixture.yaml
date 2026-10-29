@@ -1,0 +1,70 @@
+# tests/k8s/iam-db-fixture.yaml — the throwaway PostgreSQL of tests/iam-db-fixture.sh.
+# One pod from the production image digest, configured like rdbms-postgresql-0
+# (password file, client_min_messages=error, pgaudit, FIPS, read-only root
+# filesystem, the same database name) so what passes here passes there.
+# Rendered with: render tests/k8s/iam-db-fixture.yaml FIXTURE_NS FIXTURE_IMAGE
+# The Secret `pg` (key postgres-password) is created by the script from a random
+# value on stdin, never from this file. Data lives in an emptyDir: deleting the
+# namespace deletes everything.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pg
+  namespace: ${FIXTURE_NS}
+  labels:
+    app: iam-db-fixture
+spec:
+  restartPolicy: Never
+  securityContext:
+    fsGroup: 1001
+    fsGroupChangePolicy: Always
+  containers:
+    - name: postgresql
+      image: ${FIXTURE_IMAGE}
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsGroup: 1001
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile: {type: RuntimeDefault}
+      env:
+        - {name: BITNAMI_DEBUG, value: "false"}
+        - {name: POSTGRESQL_PORT_NUMBER, value: "5432"}
+        - {name: POSTGRESQL_VOLUME_DIR, value: /bitnami/postgresql}
+        - {name: OPENSSL_FIPS, value: "yes"}
+        - {name: PGDATA, value: /bitnami/postgresql/data}
+        - {name: POSTGRES_PASSWORD_FILE, value: /opt/bitnami/postgresql/secrets/postgres-password}
+        - {name: POSTGRES_DATABASE, value: medcea_db}
+        - {name: POSTGRESQL_ENABLE_LDAP, value: "no"}
+        - {name: POSTGRESQL_ENABLE_TLS, value: "no"}
+        - {name: POSTGRESQL_LOG_HOSTNAME, value: "false"}
+        - {name: POSTGRESQL_LOG_CONNECTIONS, value: "false"}
+        - {name: POSTGRESQL_LOG_DISCONNECTIONS, value: "false"}
+        - {name: POSTGRESQL_PGAUDIT_LOG_CATALOG, value: "off"}
+        - {name: POSTGRESQL_CLIENT_MIN_MESSAGES, value: error}
+        - {name: POSTGRESQL_SHARED_PRELOAD_LIBRARIES, value: pgaudit}
+      ports:
+        - {containerPort: 5432, name: tcp-postgresql}
+      readinessProbe:
+        exec:
+          command: [/bin/sh, -c, -e, 'exec pg_isready -U postgres -d "dbname=medcea_db" -h 127.0.0.1 -p 5432']
+        periodSeconds: 5
+      resources:
+        requests: {cpu: 500m, memory: 1Gi}
+        limits: {cpu: 500m, memory: 1Gi}
+      volumeMounts:
+        - {name: empty-dir, mountPath: /tmp, subPath: tmp-dir}
+        - {name: empty-dir, mountPath: /opt/bitnami/postgresql/conf, subPath: app-conf-dir}
+        - {name: empty-dir, mountPath: /opt/bitnami/postgresql/tmp, subPath: app-tmp-dir}
+        - {name: pg-password, mountPath: /opt/bitnami/postgresql/secrets/}
+        - {name: dshm, mountPath: /dev/shm}
+        - {name: data, mountPath: /bitnami/postgresql}
+  volumes:
+    - {name: empty-dir, emptyDir: {}}
+    - {name: pg-password, secret: {secretName: pg}}
+    - {name: dshm, emptyDir: {medium: Memory}}
+    - {name: data, emptyDir: {}}

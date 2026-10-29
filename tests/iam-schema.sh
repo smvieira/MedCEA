@@ -8,8 +8,11 @@
 #   schema   migration 008a: schemas medcea_auth and iam_policy owned by medcea_owner,
 #            the iam_policy tables, medcea.platform_setting with the MQTT topic root,
 #            and iam.account_decision / iam.access_review (apps/access)
-#   grants   the API role (anon) reaches none of it; no role but the owner may
-#            execute an iam_policy function (superusers bypass ACLs)
+#   grants   the API role (anon) reaches nothing in iam_policy and holds, in both
+#            IAM_DB_ROLES modes, USAGE on medcea_auth and EXECUTE on pre_request()
+#            only there; the iam_policy functions are executable exactly by the roles
+#            infrastructure_functions and the policy members name (append_history:
+#            iam_svc, log_export: svc_dbexport; superusers bypass ACLs)
 #   chain    iam_policy.verify_chain() passes on the live history, and inside a
 #            transaction that is rolled back: two appends chain, verify, and an
 #            UPDATE, DELETE and TRUNCATE are each refused
@@ -88,13 +91,24 @@ SELECT 'access', count(*), '' FROM pg_class
  WHERE oid IN (to_regclass('iam.account_decision'), to_regclass('iam.access_review'));
 SELECT 'anon', count(*), string_agg(what, ', ') FROM (
     SELECT 'medcea.platform_setting' AS what WHERE has_table_privilege('anon', 'medcea.platform_setting', 'SELECT,INSERT,UPDATE,DELETE')
-    UNION ALL SELECT 'USAGE on ' || s FROM unnest(ARRAY['iam_policy', 'medcea_auth']) s WHERE has_schema_privilege('anon', s, 'USAGE')
+    UNION ALL SELECT 'USAGE on iam_policy' WHERE has_schema_privilege('anon', 'iam_policy', 'USAGE')
+    UNION ALL SELECT 'no USAGE on medcea_auth' WHERE NOT has_schema_privilege('anon', 'medcea_auth', 'USAGE')
+    UNION ALL SELECT 'no EXECUTE on pre_request()' WHERE to_regprocedure('medcea_auth.pre_request()') IS NULL
+       OR NOT has_function_privilege('anon', 'medcea_auth.pre_request()', 'EXECUTE')
+    UNION ALL SELECT 'EXECUTE on medcea_auth.' || p.proname FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+     WHERE p.pronamespace = 'medcea_auth'::regnamespace AND a.grantee = 'anon'::regrole AND p.proname <> 'pre_request'
 ) x;
-SELECT 'exec', count(*), string_agg(p.proname || ' to ' || CASE a.grantee WHEN 0 THEN 'PUBLIC'
-                                    ELSE pg_get_userbyid(a.grantee) END, ', ')
-  FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
- WHERE p.pronamespace = 'iam_policy'::regnamespace
-   AND a.privilege_type = 'EXECUTE' AND a.grantee <> p.proowner;
+SELECT 'exec', count(*), string_agg(x, ', ') FROM (
+    (SELECT p.proname || ' to ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS x
+       FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+      WHERE p.pronamespace = 'iam_policy'::regnamespace AND a.privilege_type = 'EXECUTE' AND a.grantee <> p.proowner
+     EXCEPT SELECT unnest(ARRAY['append_history to iam_svc', 'log_export to svc_dbexport']))
+    UNION ALL
+    (SELECT unnest(ARRAY['append_history to iam_svc', 'log_export to svc_dbexport'])
+     EXCEPT SELECT p.proname || ' to ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
+       FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+      WHERE p.pronamespace = 'iam_policy'::regnamespace AND a.privilege_type = 'EXECUTE' AND a.grantee <> p.proowner)
+) y;
 SQL
 )"
 if grep -q '^ERROR\|^psql' <<<"$out"; then
@@ -109,10 +123,10 @@ else
                          || fail schema "platform_setting mqtt_topic_root is $a, PROJECT_NAME is $PROJECT_NAME" ;;
             access)  [[ "$a" == 2 ]] && pass schema "iam.account_decision and iam.access_review exist" \
                          || fail schema "iam.account_decision / iam.access_review missing (./apps/access/deploy.sh)" ;;
-            anon)    [[ "$a" == 0 ]] && pass grants "anon reaches no iam_policy, medcea_auth or platform setting" \
-                         || fail grants "anon has: $b" ;;
-            exec)    [[ "$a" == 0 ]] && pass grants "no iam_policy function is executable by anyone but its owner" \
-                         || fail grants "executable by others: $b" ;;
+            anon)    [[ "$a" == 0 ]] && pass grants "anon: nothing in iam_policy, only USAGE on medcea_auth and EXECUTE on pre_request()" \
+                         || fail grants "anon: $b" ;;
+            exec)    [[ "$a" == 0 ]] && pass grants "iam_policy functions: append_history to iam_svc, log_export to svc_dbexport, nothing else" \
+                         || fail grants "iam_policy EXECUTE differs (missing or extra): $b" ;;
         esac
     done <<<"$out"
     grep -q '^schema|medcea_auth' <<<"$out" || fail schema "schema medcea_auth missing"

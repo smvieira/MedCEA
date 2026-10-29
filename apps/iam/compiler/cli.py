@@ -7,6 +7,11 @@
   cli.py compile routes [--file F]      the route table (routes.json of ConfigMap medcea-iam-lib)
   cli.py compile netpol --namespace NS --node-ip IP [--node-ip IP ...]
                                         the NetworkPolicies of `network:` as a JSON List
+  cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
+                                        the database side (grants.py): the psql text the IAM_DB_ROLES
+                                        bundle of apps/database/lib-db-apply.sh runs, or its JSON form
+  cli.py db-roles --names|--passwords   the database roles grants.py manages (plus mqtt_auth), or
+                                        "<role> <config.env variable>" for each generated password
   cli.py hosts [--file F]               every host and the roles it admits (for review)
   cli.py describe-gate HOST ROLES       for a gate's 403 page: the host's label, a tab, and the
                                         labels of ROLES (the deployed list, ["a", "b"]),
@@ -24,7 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler import invariants, model, netpol, proxies, routes  # noqa: E402
+from compiler import grants, invariants, model, netpol, proxies, routes  # noqa: E402
 
 
 def main(argv=None):
@@ -37,10 +42,18 @@ def main(argv=None):
     desc.add_argument("host")
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
-    comp.add_argument("target", choices=["proxy", "routes", "netpol"])
+    comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
     comp.add_argument("--node-ip", action="append", default=[])
+    comp.add_argument("--mode", choices=["additive", "enforce", "verify"])
+    comp.add_argument("--format", choices=["sql", "json"], default="sql")
+    comp.add_argument("--part", choices=["body", "assert", "all", "functions"], default="all")
+    comp.add_argument("--smoke", action="store_true", help="accept the iam-test client's tokens (IAM_SMOKE)")
+    dbr = sub.add_parser("db-roles")
+    g = dbr.add_mutually_exclusive_group(required=True)
+    g.add_argument("--names", action="store_true")
+    g.add_argument("--passwords", action="store_true")
     args = ap.parse_args(argv)
 
     p = model.load(args.file)
@@ -72,6 +85,13 @@ def main(argv=None):
         print(html.escape(label) + "\t" + html.escape(", ".join(roles)))
         return 0
 
+    if args.cmd == "db-roles":
+        if args.names:
+            print("\n".join(grants.managed(p) + ["mqtt_auth"]))
+        else:
+            print("\n".join(f"{r} {v}" for r, v in grants.passwords(p)))
+        return 0
+
     if args.cmd == "compile":
         errors, _ = invariants.check(p)
         if errors:
@@ -84,6 +104,19 @@ def main(argv=None):
         try:
             print(json.dumps(netpol.compile(p, args.namespace, args.node_ip), indent=1))
         except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "compile" and args.target == "grants":
+        try:
+            if args.format == "json":
+                print(json.dumps(grants.document(p, args.smoke), indent=1, sort_keys=True))
+            elif not args.mode:
+                print("ERROR: compile grants needs --mode additive|enforce|verify", file=sys.stderr)
+                return 2
+            else:
+                print(grants.sql(p, args.mode, args.smoke, args.part), end="")
+        except grants.GrantsError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         return 0

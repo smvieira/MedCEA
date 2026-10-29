@@ -2,9 +2,17 @@
 # apps/database/uninstall.sh — the platform database (medcea_db).
 #
 #   ./apps/database/uninstall.sh                 does nothing: the data is kept
-#   ./apps/database/uninstall.sh --purge-data    DROP DATABASE medcea_db, the
-#                                                PostgREST roles anon/authenticator,
-#                                                mqtt_auth and medcea_owner
+#   ./apps/database/uninstall.sh --purge-data    DROP DATABASE medcea_db, then every
+#                                                database role the platform created
+#                                                (purge.sql: `cli.py db-roles --names` —
+#                                                rr_*, rr_admin_login, svc_*, iam_svc,
+#                                                mqtt_auth — plus medcea_owner,
+#                                                authenticator and anon) and the
+#                                                Secrets db-<role> (label medcea/db-role)
+#
+# Roles are instance-wide: they are dropped only after the database that holds
+# their grants is gone. The keycloak database is never touched; access_svc is
+# dropped by apps/access/uninstall.sh.
 #
 # Uninstalling the apps must not silently destroy recorded runs, recipes and
 # device registrations, so dropping them is a separate, explicit flag (and
@@ -40,15 +48,16 @@ if [[ -z "$PG_POD" ]]; then
     exit 0
 fi
 
-log "Dropping database '$CEA_DB' and roles anon, authenticator, mqtt_auth, medcea_owner..."
+_ROLES="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" db-roles --names | paste -sd, -),medcea_owner,authenticator,anon"
+log "Dropping database '$CEA_DB', then roles ${_ROLES//,/, }..."
 # WITH (FORCE) ends any session still connected (PostgreSQL 13+). The roles go
-# after the database because its default privileges reference anon.
+# after the database because its grants and default privileges reference them.
 $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
     psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres \
-    -c "DROP DATABASE IF EXISTS \"$CEA_DB\" WITH (FORCE);" \
-    -c "DROP ROLE IF EXISTS authenticator;" \
-    -c "DROP ROLE IF EXISTS anon;" \
-    -c "DROP ROLE IF EXISTS mqtt_auth;" \
-    -c "DROP ROLE IF EXISTS medcea_owner;"
+    -c "DROP DATABASE IF EXISTS \"$CEA_DB\" WITH (FORCE);"
+{ printf "\\set roles '%s'\n" "$_ROLES"; cat "$SCRIPT_DIR/purge.sql"; } \
+    | $KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
+        psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -f -
+$KUBECTL delete secret -n "$NAMESPACE" -l medcea/db-role=true --ignore-not-found >/dev/null
 
-log "Database '$CEA_DB' dropped."
+log "Database '$CEA_DB', its roles and the db-<role> Secrets dropped."

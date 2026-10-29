@@ -2,8 +2,10 @@
 """tests/test_policy.py — the access policy passes its own invariants, and the checker
 catches every kind of violation it claims to.
 
-Run from the repository root:  python3 tests/test_policy.py
+Run from the repository root:  python3 tests/test_policy.py [--update-golden]
 Read-only; needs python3-yaml (infra/lib-prereqs.sh). No cluster, no lock.
+--update-golden rewrites tests/iam-grants.golden.json from the policy (the compiled
+database privileges), so every change of the matrix shows up in review as a diff.
 """
 import ast
 import copy
@@ -17,7 +19,12 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
-from compiler import invariants, model, netpol, proxies, routes  # noqa: E402
+from compiler import grants, invariants, model, netpol, proxies, routes  # noqa: E402
+
+GOLDEN = os.path.join(REPO, "tests", "iam-grants.golden.json")
+UPDATE_GOLDEN = "--update-golden" in sys.argv
+if UPDATE_GOLDEN:
+    sys.argv.remove("--update-golden")
 
 
 def _set(path, value):
@@ -36,6 +43,19 @@ def _append(path, value):
         for k in path:
             node = node[k]
         node.append(value)
+    return apply
+
+
+def _member(group, key, value):
+    """The member of `group` whose `key` is `value` (for mutations)."""
+    def find(d):
+        return next(m for m in d["resource_groups"][group]["members"] if m.get(key) == value)
+    return find
+
+
+def _with_member(group, key, value, fn):
+    def apply(d):
+        fn(_member(group, key, value)(d))
     return apply
 
 
@@ -89,6 +109,24 @@ MUTATIONS = {
                                            "MONITOR_DOMAIN serves monitor but is in neither"),
     "wizard cut off from config-api": (_set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui"]),
                                        "ONBOARD_DOMAIN serves config-api"),
+    # grants.check (database side, Phase 2a)
+    "`on` key on a function member": (_with_member("runs", "function", "medcea.start_run(int)",
+                                                   lambda m: (m.pop("level"), m.__setitem__(True, "O"))), "uses the key `on`"),
+    "service_only not a list": (_with_member("devices", "object", "medcea.mqtt_credential",
+                                             lambda m: m.__setitem__("service_only", True)), "must be a list"),
+    "limits_dml_to names a non-member": (_set(["constraints", "assign_only", "limits_dml_to"], ["medcea.recipe_run"]),
+                                         "limits_dml_to names medcea.recipe_run"),
+    "waiver object outside its group": (_set(["waivers", 1, "objects"], ["medcea.recipe"]), "not a member of its target group"),
+    "written_by missing on a table a function writes": (
+        _with_member("runs", "object", "medcea.recipe_line_cycle_run", lambda m: m.pop("written_by")), "written_by missing"),
+    "approval function that is no member": (_set(["resource_groups", "recipes", "approval", "functions"], ["medcea.approve_nothing(int)"]),
+                                            "is not a function member"),
+    "infrastructure function for an unknown role": (_set(["infrastructure_functions", 0, "execute"], ["svc_nobody"]),
+                                                   "not a database role"),
+    "rls on a non-member": (_set(["constraints", "own_zone", "rls", "objects"], ["medcea.nothing"]), "rls object medcea.nothing"),
+    "service without a password": (lambda d: d["service_identities"]["svc_monitor"].pop("db_password"), "db_password"),
+    "one function under two spellings": (_append(["resource_groups", "recipes", "members"],
+                                                 {"type": "data", "function": "medcea.start_run(integer)", "level": "O"}), "I14"),
 }
 
 
@@ -228,6 +266,208 @@ class NetpolTest(unittest.TestCase):
             netpol.compile(self.policy, "medcea", [])
 
 
+class GrantsTest(unittest.TestCase):
+    """compiler/grants.py: the database privileges (IAM plan Phase 2a, Appendix B)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+        cls.privs = grants.privileges(cls.policy)
+        cls.doc = grants.document(cls.policy)
+
+    def holders(self, obj, priv=None):
+        return {g for g, k, o, p in self.privs if o == obj and (priv is None or p == priv)}
+
+    def test_pre_request_switches_to_the_db_role(self):
+        # pre_request() must SET ROLE to roles.<r>.db_role, the name every grant uses,
+        # not to 'rr_' || the key
+        p = copy.deepcopy(self.policy)
+        p.roles["operator"]["db_role"] = "rr_grower"
+        fn = grants.compiled_functions(p)
+        self.assertIn("WHEN 'operator' THEN 'rr_grower'", fn)
+        self.assertNotIn("'rr_' || own", fn)
+        for r, d in grants.people(self.policy).items():
+            self.assertIn(f"WHEN '{r}' THEN '{d}'", grants.compiled_functions(self.policy))
+
+    def test_golden(self):
+        body = {"privileges": self.doc["privileges"], "memberships": self.doc["memberships"], "rls": self.doc["rls"]}
+        if UPDATE_GOLDEN:
+            with open(GOLDEN, "w") as f:
+                json.dump(body, f, indent=1, sort_keys=True)
+                f.write("\n")
+        with open(GOLDEN) as f:
+            self.assertEqual(json.load(f), json.loads(json.dumps(body)),
+                             "the compiled grants changed: review, then python3 tests/test_policy.py --update-golden")
+
+    def test_deterministic(self):
+        again = grants.document(model.load())
+        self.assertEqual(again["digest"], self.doc["digest"])
+        for mode in ("additive", "enforce", "verify"):
+            self.assertEqual(grants.sql(self.policy, mode), grants.sql(model.load(), mode))
+
+    def test_anon_holds_only_its_two_items(self):
+        anon = {(k, o, p) for g, k, o, p in self.privs if g == "anon"}
+        self.assertEqual(anon, {("function", "medcea_auth.pre_request()", "EXECUTE"), ("schema", "medcea_auth", "USAGE")})
+
+    def test_hand_written_negatives(self):
+        self.assertEqual(self.holders("medcea.mqtt_credential"), {"mqtt_auth"})
+        self.assertEqual(self.holders("medcea.recipe_run", "UPDATE"), set())
+        self.assertEqual(self.holders("medcea.recipe_line_cycle_run", "UPDATE"), set())
+        self.assertNotIn("svc_scheduler", self.holders("medcea.recipe_line_cycle_run", "INSERT"))
+        self.assertNotIn("rr_engineer", self.holders("medcea.recipe_unit_permission", "UPDATE"))
+        self.assertIn("rr_engineer", self.holders("medcea.recipe", "UPDATE"))               # draft_only, by trigger
+        self.assertEqual(self.holders("medcea.recipe_unit_permission", "UPDATE"), {"rr_production_manager"})
+        self.assertNotIn("rr_production_manager", self.holders("medcea.recipe", "UPDATE"))   # assign_only
+        for t in ("medcea.mqtt_service_credential", "medcea.mqtt_service_acl"):
+            self.assertEqual(self.holders(t), {"mqtt_auth", "iam_svc"}, t)
+        self.assertEqual(self.holders("medcea.platform_setting"), set())
+        self.assertEqual(self.holders("medcea.algorithm_state", "UPDATE"), {"svc_scheduler"})  # W2's objects
+        self.assertEqual(self.holders("medcea_auth.my_zones()"), {"rr_operator"})
+        self.assertEqual(self.holders("medcea.release_run(integer)"), {"rr_qp"})
+        self.assertEqual(self.holders("medcea.approve_change(text,bigint,text)"), {"rr_qa"})
+        self.assertEqual(self.holders("iam_policy.append_history(text,jsonb,text)"), {"iam_svc"})
+        self.assertEqual(self.holders("iam_policy.log_export(text[],text[])"), {"svc_dbexport"})
+        for g, k, o, p in self.privs:
+            self.assertNotIn(p, grants.NEVER, (g, o))
+            self.assertFalse(o.startswith("iam."), f"schema iam is deferred to 2.7: {o}")
+            self.assertNotEqual(g, "access_svc", "access_svc is deferred to 2.7")
+            self.assertTrue(g in grants.managed(self.policy) or g in ("anon", "mqtt_auth"), g)
+        # nothing for people on a service_only member
+        for g, k, o, p in self.privs:
+            if o in ("medcea.mqtt_credential", "medcea.backup_remote_to_insert_measurement"):
+                self.assertFalse(g.startswith("rr_"), (g, o))
+
+    def test_written_by_functions_is_select_only(self):
+        for g, m in grants._data_members(self.policy):
+            if m.get("written_by") == "functions" or m.get("view"):
+                self.assertEqual({p for _, _, o, p in self.privs if o == m["object"]} - {"SELECT"}, set(), m["object"])
+
+    def test_rls_and_memberships(self):
+        pols = {(x["role"], x["cmd"]): x for x in self.doc["rls"]}
+        self.assertIn("my_zones", pols[("rr_operator", "SELECT")]["using"])
+        self.assertEqual(pols[("rr_production_manager", "SELECT")]["using"], "true")
+        self.assertEqual(pols[("svc_ingest", "INSERT")]["check"], "true")
+        readers = {g for g, k, o, p in self.privs if o == "medcea.measurement" and p == "SELECT"}
+        self.assertEqual({r for r, c in pols if c == "SELECT"}, readers)
+        mem = {(r, m): (i, st) for r, m, i, st in grants.memberships(self.policy)}
+        self.assertEqual(mem[("rr_admin", "rr_admin_login")], (True, False))
+        self.assertEqual(mem[("rr_operator", "authenticator")], (False, True))
+        self.assertEqual(len([1 for r, m in mem if m == "authenticator"]), len(self.policy.roles) + 1)
+
+    def test_modes(self):
+        add = grants.sql(self.policy, "additive")
+        enf = grants.sql(self.policy, "enforce")
+        self.assertNotRegex(add, r"(?<!NO)LOGIN NOSUPERUSER")
+        self.assertNotIn("ROW LEVEL SECURITY", add)
+        self.assertNotIn("CREATE POLICY", add)
+        self.assertNotIn("REVOKE CONNECT", add)
+        for label in ("I9", "I10", "I15"):
+            self.assertIn(label, enf)
+        self.assertIn("CREATE POLICY", enf)
+        self.assertIn("ENABLE ROW LEVEL SECURITY", enf)
+        self.assertIn("ALTER ROLE svc_scheduler LOGIN", enf)
+        self.assertIn("ALTER ROLE rr_operator NOLOGIN", enf)          # people never log in
+        self.assertNotIn("ALTER ROLE authenticator PASSWORD", add + enf)  # its password is 2b's
+        ver = grants.sql(self.policy, "verify")
+        for word in ("GRANT ", "REVOKE ", "CREATE ", "ALTER ", "INSERT ", "UPDATE ", "DELETE "):
+            self.assertNotIn(word, ver.replace("NOT INSERT", ""), f"verify must be read-only: {word}")
+
+    def test_not_built_is_not_created(self):
+        src = (self.read("apps/database/medcea_db_migrations.sql") + grants.compiled_functions(self.policy))
+        for sig in grants.NOT_BUILT:
+            name = sig.split("(")[0]
+            self.assertNotRegex(src, rf"FUNCTION {re.escape(name)}\s*\(", sig)
+
+    @staticmethod
+    def _created_signatures(src):
+        """Normalised signatures of every CREATE FUNCTION in `src` (IN arguments only,
+        names and defaults dropped), as to_regprocedure() resolves them."""
+        out = set()
+        for m in re.finditer(r"CREATE (?:OR REPLACE )?FUNCTION ([a-z_]+\.[a-z_]+)\s*\(", src):
+            i, depth = m.end(), 1
+            while depth:
+                depth += {"(": 1, ")": -1}.get(src[i], 0)
+                i += 1
+            args = []
+            for a in re.split(r",(?![^(]*\))", src[m.end():i - 1]):
+                a = re.sub(r"\s+DEFAULT\s+.*$", "", a.strip(), flags=re.S)
+                if not a or a.split()[0].upper() == "OUT":
+                    continue
+                words = a.split()
+                if words[0].upper() in ("IN", "INOUT"):
+                    words = words[1:]
+                if len(words) > 1:          # a named argument: drop the name
+                    words = words[1:]
+                args.append(re.sub(r"\(.*\)", "", " ".join(words)))
+            out.add(grants.norm_sig(f"{m.group(1)}({', '.join(args)})"))
+        return out
+
+    def test_every_compiled_function_is_created(self):
+        # full signatures, not names: a changed argument list must fail here, not
+        # silently drop out of the grant and of I15
+        src = (self.read("apps/database/medcea_db_migrations.sql") + grants.compiled_functions(self.policy))
+        made = self._created_signatures(src)
+        for g, k, o, p in self.privs:
+            if k == "function":
+                self.assertIn(o, made, o)
+        for o in grants.declared_functions(self.policy):
+            self.assertIn(o, made, o)
+
+    @staticmethod
+    def _quoted(text):
+        return re.findall(r"'([a-z_]+)'", text)
+
+    def test_enforce_file_attaches_the_checked_triggers(self):
+        # parse the two lists the enforce file actually loops over, not the whole file:
+        # a table named elsewhere in it must not stand in for a missing trigger
+        enf = self.read("apps/database/medcea_db_migrations_008b_enforce.sql")
+        spec = re.search(r"spec text\[\]\[\] := ARRAY\[(.*?)\];", enf, re.S)
+        self.assertIsNotNone(spec, "the enforce file's trigger spec")
+        rows = re.findall(r"\['([a-z_]+)',\s*'([a-z_]+)'", spec.group(1))
+        trunc = re.search(r"FOREACH t IN ARRAY ARRAY\[([^\]]*)\] LOOP\s+IF NOT EXISTS[^;]*?tgname = 'iam_no_truncate_trg'",
+                          enf, re.S)
+        self.assertIsNotNone(trunc, "the enforce file's truncate-trigger loop")
+        have = {("medcea." + t, n) for t, n in rows} | {("medcea." + t, "iam_no_truncate_trg")
+                                                        for t in self._quoted(trunc.group(1))}
+        self.assertEqual(have, set(grants.ENFORCE_TRIGGERS))
+        self.assertEqual(len(rows), len(set(rows)), "a trigger is listed twice")
+
+    def test_legacy_list_matches_down_file(self):
+        # parse the down file's revoke loop, its explicit REVOKEs and its sequence list
+        down = self.read("apps/database/medcea_db_migrations_down_008b.sql")
+        loop = re.search(r"FOREACH t IN ARRAY ARRAY\[([^\]]*)\] LOOP\s+IF pg_catalog.to_regclass\('medcea\.' \|\| t\) IS NOT NULL THEN\s+"
+                         r"EXECUTE pg_catalog.format\('REVOKE ALL ON medcea.%I FROM anon', t\)", down)
+        self.assertIsNotNone(loop, "the down file's anon revoke loop")
+        explicit = re.findall(r"^REVOKE ALL ON medcea\.([a-z_]+) FROM anon;", down, re.M)
+        revoked = self._quoted(loop.group(1)) + explicit
+        self.assertEqual(sorted(revoked), sorted(set(revoked)), "a table is revoked twice")
+        self.assertEqual(set(revoked), set(grants.LEGACY_ANON_EXCLUDED))
+        seq = re.search(r"AND t\.relname IN \(([^)]*)\) LOOP\s+EXECUTE pg_catalog.format\('REVOKE ALL ON SEQUENCE %s FROM anon'", down)
+        self.assertIsNotNone(seq, "the down file's sequence revoke list")
+        self.assertEqual(set(self._quoted(seq.group(1))), set(grants.LEGACY_ANON_EXCLUDED))
+        for t in grants.LEGACY_ANON_READ_ONLY:
+            self.assertRegex(down, rf"(?m)^REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON medcea\.{t} FROM anon;")
+
+    def test_down_file_locks_out_the_managed_roles(self):
+        # run by hand straight after true, the down file must not leave a LOGIN role
+        # with its enforce-mode grants: it hands CONNECT back to PUBLIC, so section 1
+        # sets every managed role NOLOGIN and the full section revokes their privileges
+        down = self.read("apps/database/medcea_db_migrations_down_008b.sql")
+        full = down.index("\\if :{?full}")
+        sec1 = down[:full]
+        self.assertLess(sec1.index("GRANT CONNECT ON DATABASE %I TO PUBLIC"), sec1.index("ALTER ROLE %I NOLOGIN"))
+        self.assertIn("rolcanlogin", sec1)
+        self.assertIn("REVOKE ALL ON ALL TABLES    IN SCHEMA medcea, medcea_auth, iam_policy FROM %I", down[full:])
+        pat = re.compile(r"rolname LIKE 'rr\\_%' OR rolname LIKE 'svc\\_%' OR rolname = 'iam_svc'")
+        for r in grants.managed(model.load()):
+            self.assertTrue(r.startswith(("rr_", "svc_")) or r == "iam_svc", r)
+        self.assertGreaterEqual(len(pat.findall(down)), 2)
+
+    def read(self, rel):
+        with open(os.path.join(REPO, rel)) as f:
+            return f.read()
+
+
 class WiringTest(unittest.TestCase):
     """The places outside the compiler that must agree with the policy."""
 
@@ -356,6 +596,48 @@ class WiringTest(unittest.TestCase):
             self.assertIsNotNone(m, f"no re-created CHECK for {column}")
             accepted = set(re.findall(r"'([a-z_]+)'", m.group(1)))
             self.assertEqual(accepted, set(self.policy.roles), column)
+
+
+    def test_database_wiring_phase_2a(self):
+        deploy = self.read("apps/database/deploy.sh") + self.read("apps/database/lib-db-apply.sh")
+        migrations = self.read("apps/database/medcea_db_migrations.sql")
+        self.assertNotRegex(deploy, r"GRANT [A-Z, ]+ ON ALL TABLES IN SCHEMA medcea TO anon")
+        self.assertNotRegex(migrations, r"\bTO anon\b")
+        self.assertIn("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA medcea TO anon",
+                      self.read("apps/database/medcea_db_migrations_down_008b.sql"))
+        sched = self.read("apps/scheduler/scheduler-api.py")
+        self.assertNotIn("GRANT", sched)
+        self.assertNotIn("CREATE TABLE", sched)
+        for f in ("medcea_db_migrations_down_008b.sql", "medcea_db_migrations_008b_enforce.sql", "medcea_db_008b_data.sql",
+                  "medcea_db_008b_index.sql", "purge.sql", "medcea_db_owner.sql", "lib-db-apply.sh", "k8s/db-role-secret.yaml"):
+            self.assertTrue(os.path.isfile(os.path.join(REPO, "apps", "database", f)), f)
+        example, configure = self.read("config.env.example"), self.read("infra/configure.sh")
+        self.assertIn('IAM_DB_ROLES="false"', example)
+        early_exit = configure.index("&& exit 0")
+        for role, var in grants.passwords(self.policy):
+            self.assertIn(f'{var}=""', example, var)
+            self.assertLess(configure.index(var), early_exit, f"{var} must be generated before configure.sh's early exit")
+        ddl = self.read("apps/database/medcea_db_ddl.sql")
+        self.assertNotIn("databasechangeloglock", ddl)
+        self.assertNotIn("OWNER TO postgres", ddl)
+        self.assertIn("SET log_statement = 'none'", self.read("apps/access/deploy.sh"))
+        self.assertIn("SET log_statement = 'none'", self.read("apps/database/lib-db-apply.sh"))
+        # 008b is one transaction that writes the nonce deploy.sh reads back
+        tail = migrations[migrations.index("Migration 008b"):]
+        self.assertEqual((tail.count("BEGIN;"), tail.count("COMMIT;")), (1, 1))
+        self.assertIn("'008b:last_nonce', :'deploy_nonce'", tail)
+        # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own
+        for f in ("medcea_db_migrations_down_008b.sql", "medcea_db_migrations_008b_enforce.sql"):
+            self.assertNotRegex(self.read("apps/database/" + f), r"(?m)^(BEGIN|COMMIT);", f)
+        # psql does not interpolate :'var' inside a dollar-quoted body
+        for f in ("medcea_db_migrations_down_008b.sql", "medcea_db_migrations_008b_enforce.sql",
+                  "medcea_db_008b_data.sql", "medcea_db_008b_index.sql", "purge.sql"):
+            for body in re.findall(r"\$(\w*)\$(.*?)\$\1\$", self.read("apps/database/" + f), re.S):
+                self.assertNotRegex(body[1], r":'[a-z_]+'", f)
+        render = [l for l in self.read("apps/database/deploy.sh").splitlines() if "db-role-secret.yaml" in l]
+        self.assertTrue(any("SECRET_NAME DB_ROLE DB_PASS" in l for l in render))
+        self.assertIn("db-roles --names", self.read("apps/database/uninstall.sh"))
+        self.assertIn("purge.sql", self.read("apps/database/uninstall.sh"))
 
 
 if __name__ == "__main__":

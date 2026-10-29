@@ -923,50 +923,23 @@ def _startup_recovery():
                 log.error(f'Startup recovery: failed to mark run_id={run_id} as Failed: {e}')
 
 # ---------------------------------------------------------------------------
-# Schema migration — runs at startup
+# Schema presence — checked at startup (read-only)
 # ---------------------------------------------------------------------------
-def _ensure_schema():
-    conn = get_db()
+def _check_schema():
+    """medcea.schedule and medcea.scheduler_config are created by migration 008b
+    (apps/database/deploy.sh); the scheduler runs no DDL and grants nothing, so its
+    database role needs no ownership and cannot re-grant what the access policy
+    revoked. Missing tables are logged, not created."""
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS medcea.schedule (
-                schedule_id      serial       PRIMARY KEY,
-                unit_id          integer      NOT NULL REFERENCES medcea.cea_unit(unit_id)  ON DELETE CASCADE,
-                recipe_id        integer      NOT NULL REFERENCES medcea.recipe(recipe_id)  ON DELETE CASCADE,
-                cron_expression  varchar(100) NOT NULL,
-                enabled          boolean      NOT NULL DEFAULT true,
-                description      text,
-                timestamp_cre    timestamptz  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                timestamp_upd    timestamptz
-            )
-        """)
-        # Add algorithm selection columns to medcea.schedule (idempotent)
-        cur.execute("""
-            ALTER TABLE medcea.schedule
-                ADD COLUMN IF NOT EXISTS algorithm_id     INTEGER REFERENCES medcea.control_algorithm(algorithm_id),
-                ADD COLUMN IF NOT EXISTS algorithm_params JSONB DEFAULT NULL
-        """)
-        cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON medcea.schedule TO authenticator")
-        cur.execute("GRANT USAGE, SELECT ON SEQUENCE medcea.schedule_schedule_id_seq TO authenticator")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS medcea.scheduler_config (
-                key   varchar(100) PRIMARY KEY,
-                value text NOT NULL
-            )
-        """)
-        cur.execute("""
-            INSERT INTO medcea.scheduler_config (key, value)
-            VALUES ('log_compress_days', '7'), ('log_delete_days', '30')
-            ON CONFLICT (key) DO NOTHING
-        """)
-        conn.commit()
-        log.info('Schema ready (medcea.schedule, medcea.scheduler_config)')
+        row = query("SELECT to_regclass('medcea.schedule') AS schedule, "
+                    "to_regclass('medcea.scheduler_config') AS scheduler_config", fetchall=False)
+        missing = [k for k, v in (row or {}).items() if v is None]
+        if missing:
+            log.error('Schema check: missing medcea.%s — run ./apps/database/deploy.sh' % ', medcea.'.join(missing))
+        else:
+            log.info('Schema ready (medcea.schedule, medcea.scheduler_config)')
     except Exception as e:
-        log.error(f'Schema migration failed: {e}')
-        conn.rollback()
-    finally:
-        conn.close()
+        log.error(f'Schema check failed: {e}')
 
 # ---------------------------------------------------------------------------
 # Startup
@@ -974,7 +947,7 @@ def _ensure_schema():
 if __name__ == '__main__':
     _write_dotenv()
     sys.path.insert(0, SCHD_DIR)
-    _ensure_schema()
+    _check_schema()
     _startup_recovery()
     scheduler.start()
     _reload_schedules()

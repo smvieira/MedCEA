@@ -58,7 +58,9 @@ _DB_PW="$($KUBECTL get secret access-secrets -n "$NAMESPACE" -o jsonpath='{.data
 log "Applying schema iam (access requests, append-only history)..."
 # The password goes in on stdin as a psql variable, not on the command line,
 # so it is not visible in the pod's process list.
-if ! _OUT=$({ printf '\\set access_pw %s\n' "$_DB_PW"; cat "$SCRIPT_DIR/access_db.sql"; } \
+# log_statement='none' first: with IAM_DB_ROLES=true postgres's statements are
+# logged in this database (break-glass), and these sessions carry passwords.
+if ! _OUT=$({ echo "SET log_statement = 'none';"; printf '\\set access_pw %s\n' "$_DB_PW"; cat "$SCRIPT_DIR/access_db.sql"; } \
         | $KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- \
             env PGPASSWORD="$POSTGRES_PASS" psql -q -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" -d "$POSTGRES_DB" -f - 2>&1); then
     echo "$_OUT" >&2
@@ -71,7 +73,7 @@ grep -v 'NOTICE' <<<"$_OUT" || true
 # SMTP_USER / SMTP_PASS in config.env. Copy them in while the UI settings are
 # still empty; from then on the UI is the only place they are changed.
 if [[ -n "${SMTP_USER:-}" && -n "${SMTP_PASS:-}" ]]; then
-    { printf '\\set u %s\n\\set p %s\n' "$SMTP_USER" "${SMTP_PASS// /}"
+    { echo "SET log_statement = 'none';"; printf '\\set u %s\n\\set p %s\n' "$SMTP_USER" "${SMTP_PASS// /}"
       echo "UPDATE iam.mail_settings SET smtp_user = :'u', smtp_pass = :'p', updated_by = 'config.env (one-time import)', updated_at = now()"
       echo " WHERE id = 1 AND smtp_user = '' AND smtp_pass = '';"; } \
       | $KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- \

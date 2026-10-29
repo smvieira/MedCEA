@@ -26,7 +26,7 @@ SET row_security = off;
 CREATE SCHEMA medcea;
 
 
-ALTER SCHEMA medcea OWNER TO postgres;
+ALTER SCHEMA medcea OWNER TO medcea_owner;
 
 --
 -- Name: is_active; Type: DOMAIN; Schema: medcea; Owner: postgres
@@ -36,7 +36,7 @@ CREATE DOMAIN medcea.is_active AS character varying
 	CONSTRAINT is_active_check CHECK ((((VALUE)::text ~ 'Y'::text) OR ((VALUE)::text ~ 'N'::text)));
 
 
-ALTER DOMAIN medcea.is_active OWNER TO postgres;
+ALTER DOMAIN medcea.is_active OWNER TO medcea_owner;
 
 --
 -- Name: light_types; Type: DOMAIN; Schema: medcea; Owner: postgres
@@ -46,7 +46,7 @@ CREATE DOMAIN medcea.light_types AS character varying
 	CONSTRAINT light_types_check CHECK ((((VALUE)::text ~ 'UV'::text) OR ((VALUE)::text ~ 'BLUE'::text) OR ((VALUE)::text ~ 'RED'::text) OR ((VALUE)::text ~ 'DARK'::text)));
 
 
-ALTER DOMAIN medcea.light_types OWNER TO postgres;
+ALTER DOMAIN medcea.light_types OWNER TO medcea_owner;
 
 --
 -- Name: msg_type; Type: DOMAIN; Schema: medcea; Owner: postgres
@@ -56,7 +56,7 @@ CREATE DOMAIN medcea.msg_type AS character varying(2)
 	CONSTRAINT msg_type_check CHECK ((((VALUE)::text ~ 'AP'::text) OR ((VALUE)::text ~ 'CT'::text) OR ((VALUE)::text ~ 'SP'::text)));
 
 
-ALTER DOMAIN medcea.msg_type OWNER TO postgres;
+ALTER DOMAIN medcea.msg_type OWNER TO medcea_owner;
 
 --
 -- Name: run_status; Type: DOMAIN; Schema: medcea; Owner: postgres
@@ -66,7 +66,7 @@ CREATE DOMAIN medcea.run_status AS character varying
 	CONSTRAINT run_status_check CHECK ((((VALUE)::text ~ 'F'::text) OR ((VALUE)::text ~ 'R'::text) OR ((VALUE)::text ~ 'S'::text) OR ((VALUE)::text ~ 'C'::text)));
 
 
-ALTER DOMAIN medcea.run_status OWNER TO postgres;
+ALTER DOMAIN medcea.run_status OWNER TO medcea_owner;
 
 --
 -- Name: unit_type; Type: DOMAIN; Schema: medcea; Owner: postgres
@@ -76,7 +76,7 @@ CREATE DOMAIN medcea.unit_type AS character varying(10)
 	CONSTRAINT unit_type_check CHECK ((((VALUE)::text ~ 'Greens'::text) OR ((VALUE)::text ~ 'Mushrooms'::text) OR ((VALUE)::text ~ 'Other'::text)));
 
 
-ALTER DOMAIN medcea.unit_type OWNER TO postgres;
+ALTER DOMAIN medcea.unit_type OWNER TO medcea_owner;
 
 SET default_tablespace = '';
 
@@ -96,7 +96,7 @@ CREATE TABLE medcea.backup_remote_to_insert_measurement (
 );
 
 
-ALTER TABLE medcea.backup_remote_to_insert_measurement OWNER TO postgres;
+ALTER TABLE medcea.backup_remote_to_insert_measurement OWNER TO medcea_owner;
 
 --
 -- Name: cea_location; Type: TABLE; Schema: medcea; Owner: postgres
@@ -115,7 +115,7 @@ CREATE TABLE medcea.cea_location (
 );
 
 
-ALTER TABLE medcea.cea_location OWNER TO postgres;
+ALTER TABLE medcea.cea_location OWNER TO medcea_owner;
 
 --
 -- Name: TABLE cea_location; Type: COMMENT; Schema: medcea; Owner: postgres
@@ -193,7 +193,7 @@ CREATE SEQUENCE medcea.cea_location_location_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.cea_location_location_id_seq OWNER TO postgres;
+ALTER SEQUENCE medcea.cea_location_location_id_seq OWNER TO medcea_owner;
 
 --
 -- Name: cea_location_location_id_seq; Type: SEQUENCE OWNED BY; Schema: medcea; Owner: postgres
@@ -219,7 +219,7 @@ CREATE TABLE medcea.cea_unit (
 );
 
 
-ALTER TABLE medcea.cea_unit OWNER TO postgres;
+ALTER TABLE medcea.cea_unit OWNER TO medcea_owner;
 
 --
 -- Name: COLUMN cea_unit.unit_id; Type: COMMENT; Schema: medcea; Owner: postgres
@@ -269,7 +269,7 @@ CREATE SEQUENCE medcea.cea_unit_unit_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.cea_unit_unit_id_seq OWNER TO postgres;
+ALTER SEQUENCE medcea.cea_unit_unit_id_seq OWNER TO medcea_owner;
 
 --
 -- Name: cea_unit_unit_id_seq; Type: SEQUENCE OWNED BY; Schema: medcea; Owner: postgres
@@ -290,7 +290,8 @@ CREATE SEQUENCE medcea.cea_zone_zone_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.cea_zone_zone_id_seq OWNER TO postgres;
+-- Owner and OWNED BY: medcea_db_owner.sql (an ALTER SEQUENCE OWNER here fails
+-- once the sequence is linked to its column and the table belongs to postgres).
 
 --
 -- Name: cea_zone; Type: TABLE; Schema: medcea; Owner: postgres
@@ -306,7 +307,7 @@ CREATE TABLE medcea.cea_zone (
 );
 
 
-ALTER TABLE medcea.cea_zone OWNER TO postgres;
+ALTER TABLE medcea.cea_zone OWNER TO medcea_owner;
 
 --
 -- Name: component; Type: TABLE; Schema: medcea; Owner: postgres
@@ -324,7 +325,7 @@ CREATE TABLE medcea.component (
 );
 
 
-ALTER TABLE medcea.component OWNER TO postgres;
+ALTER TABLE medcea.component OWNER TO medcea_owner;
 
 --
 -- Name: TABLE component; Type: COMMENT; Schema: medcea; Owner: postgres
@@ -395,7 +396,7 @@ CREATE SEQUENCE medcea.component_component_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.component_component_id_seq OWNER TO postgres;
+ALTER SEQUENCE medcea.component_component_id_seq OWNER TO medcea_owner;
 
 --
 -- Name: component_component_id_seq; Type: SEQUENCE OWNED BY; Schema: medcea; Owner: postgres
@@ -403,20 +404,6 @@ ALTER SEQUENCE medcea.component_component_id_seq OWNER TO postgres;
 
 ALTER SEQUENCE medcea.component_component_id_seq OWNED BY medcea.component.component_id;
 
-
---
--- Name: databasechangeloglock; Type: TABLE; Schema: medcea; Owner: postgres
---
-
-CREATE TABLE medcea.databasechangeloglock (
-    id integer NOT NULL,
-    locked boolean NOT NULL,
-    lockgranted timestamp without time zone,
-    lockedby character varying(255)
-);
-
-
-ALTER TABLE medcea.databasechangeloglock OWNER TO postgres;
 
 --
 -- Name: device; Type: TABLE; Schema: medcea; Owner: postgres
@@ -436,7 +423,7 @@ CREATE TABLE medcea.device (
 );
 
 
-ALTER TABLE medcea.device OWNER TO postgres;
+ALTER TABLE medcea.device OWNER TO medcea_owner;
 
 --
 -- Name: TABLE device; Type: COMMENT; Schema: medcea; Owner: postgres
@@ -528,7 +515,7 @@ CREATE SEQUENCE medcea.device_device_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.device_device_id_seq OWNER TO postgres;
+ALTER SEQUENCE medcea.device_device_id_seq OWNER TO medcea_owner;
 
 --
 -- Name: device_device_id_seq; Type: SEQUENCE OWNED BY; Schema: medcea; Owner: postgres
@@ -551,7 +538,7 @@ CREATE TABLE medcea.measurement (
 );
 
 
-ALTER TABLE medcea.measurement OWNER TO postgres;
+ALTER TABLE medcea.measurement OWNER TO medcea_owner;
 
 --
 -- Name: COLUMN measurement.device_dns; Type: COMMENT; Schema: medcea; Owner: postgres
@@ -580,7 +567,7 @@ CREATE VIEW medcea.msg_actual_points AS
   WHERE ((msg_type)::text = 'AP'::text);
 
 
-ALTER VIEW medcea.msg_actual_points OWNER TO postgres;
+ALTER VIEW medcea.msg_actual_points OWNER TO medcea_owner;
 
 --
 -- Name: msg_controls; Type: VIEW; Schema: medcea; Owner: postgres
@@ -600,7 +587,7 @@ CREATE VIEW medcea.msg_controls AS
   WHERE (((measurement.msg_type)::text = 'CT'::text) AND (json_each.key <> ALL (ARRAY['unit_code'::text, 'unit_zone'::text, 'timestamp'::text, 'msg_type'::text, 'device_dns'::text, 'device_id'::text])));
 
 
-ALTER VIEW medcea.msg_controls OWNER TO postgres;
+ALTER VIEW medcea.msg_controls OWNER TO medcea_owner;
 
 --
 -- Name: msg_set_points; Type: VIEW; Schema: medcea; Owner: postgres
@@ -621,7 +608,7 @@ CREATE VIEW medcea.msg_set_points AS
   WHERE ((msg_type)::text = 'SP'::text);
 
 
-ALTER VIEW medcea.msg_set_points OWNER TO postgres;
+ALTER VIEW medcea.msg_set_points OWNER TO medcea_owner;
 
 --
 -- Name: recipe_recipe_id_seq; Type: SEQUENCE; Schema: medcea; Owner: postgres
@@ -635,7 +622,8 @@ CREATE SEQUENCE medcea.recipe_recipe_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.recipe_recipe_id_seq OWNER TO postgres;
+-- Owner and OWNED BY: medcea_db_owner.sql (an ALTER SEQUENCE OWNER here fails
+-- once the sequence is linked to its column and the table belongs to postgres).
 
 --
 -- Name: recipe; Type: TABLE; Schema: medcea; Owner: postgres
@@ -651,7 +639,7 @@ CREATE TABLE medcea.recipe (
 );
 
 
-ALTER TABLE medcea.recipe OWNER TO postgres;
+ALTER TABLE medcea.recipe OWNER TO medcea_owner;
 
 --
 -- Name: recipe_line; Type: TABLE; Schema: medcea; Owner: postgres
@@ -679,7 +667,7 @@ CREATE TABLE medcea.recipe_line (
 );
 
 
-ALTER TABLE medcea.recipe_line OWNER TO postgres;
+ALTER TABLE medcea.recipe_line OWNER TO medcea_owner;
 
 --
 -- Name: recipe_line_cycle_run; Type: TABLE; Schema: medcea; Owner: postgres
@@ -700,7 +688,7 @@ CREATE TABLE medcea.recipe_line_cycle_run (
 );
 
 
-ALTER TABLE medcea.recipe_line_cycle_run OWNER TO postgres;
+ALTER TABLE medcea.recipe_line_cycle_run OWNER TO medcea_owner;
 
 --
 -- Name: recipe_line_cycle_run_recipe_line_cycle_run_id_seq; Type: SEQUENCE; Schema: medcea; Owner: postgres
@@ -715,7 +703,7 @@ CREATE SEQUENCE medcea.recipe_line_cycle_run_recipe_line_cycle_run_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.recipe_line_cycle_run_recipe_line_cycle_run_id_seq OWNER TO postgres;
+ALTER SEQUENCE medcea.recipe_line_cycle_run_recipe_line_cycle_run_id_seq OWNER TO medcea_owner;
 
 --
 -- Name: recipe_line_cycle_run_recipe_line_cycle_run_id_seq; Type: SEQUENCE OWNED BY; Schema: medcea; Owner: postgres
@@ -741,7 +729,7 @@ CREATE TABLE medcea.recipe_run (
 );
 
 
-ALTER TABLE medcea.recipe_run OWNER TO postgres;
+ALTER TABLE medcea.recipe_run OWNER TO medcea_owner;
 
 --
 -- Name: recipe_run_recipe_run_id_seq; Type: SEQUENCE; Schema: medcea; Owner: postgres
@@ -756,7 +744,7 @@ CREATE SEQUENCE medcea.recipe_run_recipe_run_id_seq
     CACHE 1;
 
 
-ALTER SEQUENCE medcea.recipe_run_recipe_run_id_seq OWNER TO postgres;
+ALTER SEQUENCE medcea.recipe_run_recipe_run_id_seq OWNER TO medcea_owner;
 
 --
 -- Name: recipe_run_recipe_run_id_seq; Type: SEQUENCE OWNED BY; Schema: medcea; Owner: postgres
@@ -776,7 +764,7 @@ CREATE TABLE medcea.recipe_unit_permission (
 );
 
 
-ALTER TABLE medcea.recipe_unit_permission OWNER TO postgres;
+ALTER TABLE medcea.recipe_unit_permission OWNER TO medcea_owner;
 
 --
 -- Name: run_history; Type: VIEW; Schema: medcea; Owner: postgres
@@ -812,7 +800,7 @@ CREATE VIEW medcea.run_history AS
   ORDER BY rl.recipe_id, rl.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num;
 
 
-ALTER VIEW medcea.run_history OWNER TO postgres;
+ALTER VIEW medcea.run_history OWNER TO medcea_owner;
 
 --
 -- Name: run_watch; Type: VIEW; Schema: medcea; Owner: postgres
@@ -849,7 +837,7 @@ CREATE VIEW medcea.run_watch AS
   ORDER BY rl.recipe_id, rl.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num;
 
 
-ALTER VIEW medcea.run_watch OWNER TO postgres;
+ALTER VIEW medcea.run_watch OWNER TO medcea_owner;
 
 --
 -- Name: v_ap_measurements; Type: VIEW; Schema: medcea; Owner: postgres
@@ -872,7 +860,7 @@ CREATE VIEW medcea.v_ap_measurements AS
   WHERE ((msg_type)::text = 'AP'::text);
 
 
-ALTER VIEW medcea.v_ap_measurements OWNER TO postgres;
+ALTER VIEW medcea.v_ap_measurements OWNER TO medcea_owner;
 
 --
 -- Name: v_ct_measurements; Type: VIEW; Schema: medcea; Owner: postgres
@@ -894,7 +882,7 @@ CREATE VIEW medcea.v_ct_measurements AS
   WHERE ((msg_type)::text = 'CT'::text);
 
 
-ALTER VIEW medcea.v_ct_measurements OWNER TO postgres;
+ALTER VIEW medcea.v_ct_measurements OWNER TO medcea_owner;
 
 --
 -- Name: v_sp_measurements; Type: VIEW; Schema: medcea; Owner: postgres
@@ -917,7 +905,7 @@ CREATE VIEW medcea.v_sp_measurements AS
   WHERE ((msg_type)::text = 'SP'::text);
 
 
-ALTER VIEW medcea.v_sp_measurements OWNER TO postgres;
+ALTER VIEW medcea.v_sp_measurements OWNER TO medcea_owner;
 
 --
 -- Name: cea_location location_id; Type: DEFAULT; Schema: medcea; Owner: postgres
@@ -991,14 +979,6 @@ ALTER TABLE ONLY medcea.cea_zone
 
 ALTER TABLE ONLY medcea.component
     ADD CONSTRAINT component_pkey PRIMARY KEY (component_id);
-
-
---
--- Name: databasechangeloglock databasechangeloglock_pkey; Type: CONSTRAINT; Schema: medcea; Owner: postgres
---
-
-ALTER TABLE ONLY medcea.databasechangeloglock
-    ADD CONSTRAINT databasechangeloglock_pkey PRIMARY KEY (id);
 
 
 --

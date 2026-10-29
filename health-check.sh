@@ -71,6 +71,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "  ${CYAN}iamchain${NC} the access policy history's hash chain: DATABASE"
     echo -e "         e.g. \$POSTGRES_DB   (iam_policy.verify_chain(); SKIP before migration 008a)"
     echo ""
+    echo -e "  ${CYAN}iamdbroles${NC} IAM_DB_ROLES (Phase 2): DATABASE"
+    echo -e "         WARN while it is false (the database still serves the pre-policy grants),"
+    echo -e "         so a default install does not print \"All checks passed\" — on purpose"
+    echo ""
+    echo -e "  ${CYAN}iamgrants${NC} the database's grants equal the compiled policy: DATABASE"
+    echo -e "         (cli.py compile grants --mode verify, in a read-only transaction; drift is a FAIL)"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -248,6 +255,51 @@ SQL
 }
 
 # =============================================================================
+# Check: IAM_DB_ROLES (Phase 2) — the mode the database records, against config.env
+# =============================================================================
+check_iamdbroles() {
+    local name="$1" db="$2" out
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -U postgres -d "$0" -tA' "$db" 2>&1 <<'SQL'
+SELECT 'mode=' || coalesce((SELECT value FROM medcea.platform_setting WHERE key = 'iam_db_roles'), 'unset');
+SQL
+) || true
+    local mode
+    mode="$(grep -o 'mode=[a-z]*' <<<"$out" | head -1 | cut -d= -f2)"
+    if [[ -z "$mode" ]]; then
+        _record FAIL "$name" "could not read medcea.platform_setting: ${out:0:120}"
+    elif [[ "$mode" == "unset" ]]; then
+        _record SKIP "$name" "IAM_DB_ROLES not recorded yet (migration 008b: ./apps/database/deploy.sh)"
+    elif [[ "$mode" != "${IAM_DB_ROLES:-false}" ]]; then
+        _record FAIL "$name" "the database records IAM_DB_ROLES=$mode, config.env says ${IAM_DB_ROLES:-false} (./apps/database/deploy.sh)"
+    elif [[ "$mode" == "false" ]]; then
+        _record WARN "$name" "IAM_DB_ROLES=false: per-role database grants are compiled but not in force (IAM Phase 2)"
+    else
+        _record OK "$name" "IAM_DB_ROLES=true: per-role grants, RLS and guard triggers in force"
+    fi
+}
+
+# =============================================================================
+# Check: the database's grants equal the compiled access policy (read-only)
+# =============================================================================
+check_iamgrants() {
+    local name="$1" db="$2" sql out exit_code=0
+    sql="$(python3 "${SCRIPT_DIR}/apps/iam/compiler/cli.py" compile grants --mode verify 2>&1)" || {
+        _record FAIL "$name" "cli.py compile grants failed: ${sql:0:120}"; return; }
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA' "$db" \
+        2>&1 <<<"$sql") || exit_code=$?
+    if grep -q 'medcea.platform_setting" does not exist\|function medcea_auth' <<<"$out" && [[ $exit_code -ne 0 ]]; then
+        _record SKIP "$name" "migration 008b not applied yet (./apps/database/deploy.sh)"
+    elif [[ $exit_code -eq 0 ]] && grep -q 'grants verified' <<<"$out"; then
+        _record OK "$name" "database grants equal the compiled policy"
+    else
+        _record FAIL "$name" "grant drift: $(grep -m1 -E 'ERROR|DETAIL' <<<"$out" | cut -c1-200)"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -405,6 +457,8 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         tcp)  check_tcp  "$name" "$target" ;;
         juju) check_juju "$name" "$target" ;;
         iamchain) check_iamchain "$name" "$target" ;;
+        iamdbroles) check_iamdbroles "$name" "$target" ;;
+        iamgrants)  check_iamgrants "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

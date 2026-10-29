@@ -354,6 +354,12 @@ check_tailscale
 [[ -n "$(cfg_get ENGINEER_INITIAL_PASS)" ]] || cfg_set ENGINEER_INITIAL_PASS "$(gen_password)"
 [[ -n "$(cfg_get KC_BREAKGLASS_USER)" ]] || cfg_set KC_BREAKGLASS_USER "kc-breakglass"
 [[ -n "$(cfg_get KC_BREAKGLASS_PASS)" ]] || cfg_set KC_BREAKGLASS_PASS "$(gen_password)"
+# The database roles' passwords (IAM plan 3.6; apps/database/deploy.sh writes them
+# into Secrets db-<role>). Generated, never asked, never shown.
+for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
+          SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS; do
+    [[ -n "$(cfg_get "$_v")" ]] || cfg_set "$_v" "$(gen_password)"
+done
 
 if [[ "$MODE" == "missing" ]]; then
     MISSING=()

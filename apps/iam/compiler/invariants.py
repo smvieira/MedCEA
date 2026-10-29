@@ -18,7 +18,13 @@ SERVICE_APPROVERS = {("svc_access", "iam_users"), ("svc_access", "zones"), ("svc
 def _member_keys(m):
     if m["type"] == "api":
         return [("api", m["service"], route) for route in m["routes"]]
-    return [(m["type"], m.get("object") or m.get("function") or m.get("host") or m.get("topic"))]
+    if m.get("function"):
+        from compiler import grants  # normalised, so int/integer spellings cannot hide a duplicate
+        try:
+            return [(m["type"], grants.norm_sig(m["function"]))]
+        except grants.GrantsError:
+            return [(m["type"], m["function"])]
+    return [(m["type"], m.get("object") or m.get("host") or m.get("topic"))]
 
 
 def _route_levels(lv):
@@ -226,12 +232,13 @@ def _matrix_invariants(p, err, note):
 
 def check(p):
     """(errors, notes) for a loaded Policy."""
-    from compiler import netpol  # the network section's own checker
+    from compiler import grants, netpol  # the database and network sections' own checkers
     errors, notes = [], []
     _structure(p, errors.append)
     if errors:
         return errors, notes  # the rest assumes a well-formed file
     errors.extend(netpol.check(p))
+    errors.extend(grants.check(p))
     _help(p, errors.append)
     _members(p, errors.append)
     _cells(p, errors.append)
