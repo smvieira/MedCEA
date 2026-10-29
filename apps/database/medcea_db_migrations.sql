@@ -833,21 +833,25 @@ END $$;
 
 -- set_system_actor('system:scheduler', 'schedule'|'run', id): a triggered run
 -- acts with the person and role of whoever created the schedule (or the run,
--- falling back to its schedule). Refused when that creator is not a person.
+-- falling back to its schedule). A schedule whose creator is no person
+-- (migration:008, db:<login>) falls back to its last editor, but only one who
+-- edited it as a verified person (source token or 'person via …') while holding
+-- C on runs freely — a re-save by a production manager, never by a system
+-- actor. Refused otherwise.
 CREATE OR REPLACE FUNCTION medcea_auth.set_system_actor(p_name text, p_kind text, p_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea_auth, pg_temp AS $$
 DECLARE
     v_person text; v_name text; v_role text; v_sched integer;
+    s record;
 BEGIN
     IF p_name IS DISTINCT FROM 'system:scheduler' THEN
         RAISE EXCEPTION 'set_system_actor: unknown system actor %', p_name USING ERRCODE = '22023';
     END IF;
     IF p_kind = 'schedule' THEN
-        SELECT s.created_by_person, s.created_by_name, s.created_by_role INTO v_person, v_name, v_role
-          FROM medcea.schedule s WHERE s.schedule_id = p_id;
-        IF NOT FOUND THEN
+        IF NOT EXISTS (SELECT 1 FROM medcea.schedule x WHERE x.schedule_id = p_id) THEN
             RAISE EXCEPTION 'set_system_actor: no schedule %', p_id USING ERRCODE = '22023';
         END IF;
+        v_sched := p_id;
     ELSIF p_kind = 'run' THEN
         SELECT r.created_by_person, r.created_by_name, r.created_by_role, r.schedule_id
           INTO v_person, v_name, v_role, v_sched
@@ -855,15 +859,23 @@ BEGIN
         IF NOT FOUND THEN
             RAISE EXCEPTION 'set_system_actor: no run %', p_id USING ERRCODE = '22023';
         END IF;
-        IF v_person IS NULL AND v_sched IS NOT NULL THEN
-            SELECT s.created_by_person, s.created_by_name, s.created_by_role INTO v_person, v_name, v_role
-              FROM medcea.schedule s WHERE s.schedule_id = v_sched;
-        END IF;
     ELSE
         RAISE EXCEPTION 'set_system_actor: kind must be schedule or run, not %', p_kind USING ERRCODE = '22023';
     END IF;
+    IF v_person IS NULL AND v_sched IS NOT NULL THEN
+        SELECT x.created_by_person, x.created_by_name, x.created_by_role,
+               x.updated_by_person, x.updated_by_name, x.updated_by_role, x.updated_by_source
+          INTO s FROM medcea.schedule x WHERE x.schedule_id = v_sched;
+        IF s.created_by_person IS NOT NULL THEN
+            v_person := s.created_by_person; v_name := s.created_by_name; v_role := s.created_by_role;
+        ELSIF s.updated_by_person IS NOT NULL
+              AND (s.updated_by_source = 'token' OR s.updated_by_source LIKE 'person via %')
+              AND medcea_auth.policy_holds(s.updated_by_role, 'runs', 'C') IS NOT DISTINCT FROM 'free' THEN
+            v_person := s.updated_by_person; v_name := s.updated_by_name; v_role := s.updated_by_role;
+        END IF;
+    END IF;
     IF v_person IS NULL OR v_role IS NULL THEN
-        RAISE EXCEPTION 'set_system_actor: % % has no person-attributed creator (re-save it as a person first)', p_kind, p_id
+        RAISE EXCEPTION 'set_system_actor: % % has no person-attributed creator; no run is triggered from it until a person who holds C on runs re-saves it', p_kind, p_id
             USING ERRCODE = '42501';
     END IF;
     PERFORM medcea_auth._actor_put(p_name, v_person, p_name, v_role, 'system', p_kind, p_id);
@@ -1525,7 +1537,8 @@ END $$;
 --             change of an approved row demotes it to draft (a WARNING) — and a
 --             recipe line change demotes its recipe (OLD and NEW parent);
 --   control   cea_unit.commissioning, schedule.retired_at and recipe_run.params_id
---             (after insert) change only through functions; recipe_unit_permission
+--             (after insert) change only through functions (a retired schedule
+--             not at all: schedule_retired_guard()); recipe_unit_permission
 --             and schedule params_id too while the database setting
 --             medcea.iam_db_roles is not 'true' (in enforce, assign_only and
 --             start_run check what they point to).
@@ -1613,6 +1626,8 @@ BEGIN
                 USING ERRCODE = '42501';
         END IF;
     ELSIF TG_TABLE_NAME = 'schedule' THEN
+        -- a retired schedule is never edited: schedule_retired_guard() below (its
+        -- own trigger, so a reverted migration file cannot take it away)
         IF (TG_OP = 'INSERT' AND NEW.retired_at IS NOT NULL)
            OR (TG_OP = 'UPDATE' AND NEW.retired_at IS DISTINCT FROM OLD.retired_at) THEN
             RAISE EXCEPTION 'schedule.retired_at is set by a function only' USING ERRCODE = '42501';
@@ -1835,6 +1850,39 @@ BEGIN
     END IF;
 END $$;
 
+-- schedule_retired_guard(): a retired schedule is history. Nobody but the owner
+-- (retire_schedule() itself) updates it, so a scheduler that does not know about
+-- retirement (the code before 2.4, after a revert) cannot re-enable one, edit it
+-- or make it fire again. Its own function and trigger, never folded into
+-- guard_control_columns(): the migration file before 2.4 re-creates that
+-- function on every deploy and would drop the check with it; it never touches
+-- this one. SECURITY INVOKER (current_user is the writer), calls no function,
+-- ENABLE ALWAYS (session_replication_role does not bypass it). The full down
+-- (medcea_db_migrations_down_008b.sql -v full=1) drops both.
+CREATE OR REPLACE FUNCTION medcea.schedule_retired_guard() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = medcea, pg_temp AS $$
+BEGIN
+    IF current_user = 'medcea_owner' THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.retired_at IS NOT NULL THEN
+        RAISE EXCEPTION 'schedule % is retired', OLD.schedule_id USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = 'medcea.schedule'::regclass
+                                                         AND tgname = 'schedule_retired_guard_trg') THEN
+        CREATE TRIGGER schedule_retired_guard_trg BEFORE UPDATE ON medcea.schedule
+            FOR EACH ROW EXECUTE FUNCTION medcea.schedule_retired_guard();
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = 'medcea.schedule'::regclass
+                                                     AND tgname = 'schedule_retired_guard_trg' AND tgenabled <> 'A') THEN
+        ALTER TABLE medcea.schedule ENABLE ALWAYS TRIGGER schedule_retired_guard_trg;
+    END IF;
+END $$;
+
 -- Append-only triggers fire in replica mode too (session_replication_role
 -- does not bypass them), including 008a's on the policy history.
 DO $$
@@ -1850,13 +1898,23 @@ BEGIN
 END $$;
 
 -- ── B4 (listing). Schedules nobody can trigger runs from once IAM_DB_ROLES=true ─
+-- The predicate is set_system_actor()'s own: no person created the schedule
+-- (migration:008, or db:<login> — written without an actor, e.g. by the scheduler
+-- before 2.4 or without a verified person under false) and its last editor is not
+-- a verified person (source token or 'person via …') who holds C on runs freely.
+-- Before grants.py has compiled policy_holds() (a first deploy) its stub answers
+-- NULL, so every person-less schedule is listed: over-reporting, never under.
 DO $$
 DECLARE l text;
 BEGIN
-    SELECT string_agg(schedule_id::text, ', ' ORDER BY schedule_id) INTO l FROM medcea.schedule
-     WHERE created_by_sub = 'migration:008' AND retired_at IS NULL;
+    SELECT string_agg(pg_catalog.format('%s (%s)', schedule_id, coalesce(created_by_sub, '?')), ', ' ORDER BY schedule_id)
+      INTO l FROM medcea.schedule
+     WHERE created_by_person IS NULL AND retired_at IS NULL
+       AND NOT (updated_by_person IS NOT NULL
+                AND (updated_by_source = 'token' OR updated_by_source LIKE 'person via %')
+                AND medcea_auth.policy_holds(updated_by_role, 'runs', 'C') IS NOT DISTINCT FROM 'free');
     IF l IS NOT NULL THEN
-        RAISE WARNING 'schedules created before attribution (migration:008): % — once IAM_DB_ROLES=true their triggered runs cannot be executed by an operator (assigned_run) until a production manager re-saves them', l;
+        RAISE WARNING 'schedules with no person behind them (migration:008 or db:<login>): % — once IAM_DB_ROLES=true no run is triggered from them (set_system_actor) until a person who holds C on runs (a production manager) re-saves them', l;
     END IF;
 END $$;
 
@@ -2235,10 +2293,12 @@ BEGIN
 END $$;
 
 -- H9: a run's parameter set belongs to its unit (or any unit) and runs the
--- algorithm the recipe is assigned with on that unit. Structural.
-CREATE OR REPLACE FUNCTION medcea._check_run_params(p_unit integer, p_recipe integer, p_params integer) RETURNS void
-    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
-DECLARE s medcea.unit_algorithm_params; alg integer;
+-- algorithm the run was planned with: its schedule's (the schedule's set's
+-- algorithm, else schedule.algorithm_id) when it was triggered by a schedule
+-- that names one, else the recipe's assignment on that unit. Structural.
+CREATE OR REPLACE FUNCTION medcea._check_run_params(p_unit integer, p_recipe integer, p_params integer, p_schedule integer)
+RETURNS void LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE s medcea.unit_algorithm_params; alg integer; src text := 'the recipe is assigned to this unit with';
 BEGIN
     IF p_params IS NULL THEN
         RETURN;
@@ -2250,15 +2310,26 @@ BEGIN
     IF s.unit_id IS NOT NULL AND s.unit_id <> p_unit THEN
         RAISE EXCEPTION 'parameter set % belongs to unit %, not %', p_params, s.unit_id, p_unit USING ERRCODE = '22023';
     END IF;
-    SELECT coalesce(us.algorithm_id, p.algorithm_id) INTO alg
-      FROM medcea.recipe_unit_permission p
-      LEFT JOIN medcea.unit_algorithm_params us ON us.params_id = p.params_id
-     WHERE p.recipe_id = p_recipe AND p.unit_id = p_unit;
+    IF p_schedule IS NOT NULL THEN
+        SELECT coalesce(ss.algorithm_id, sc.algorithm_id) INTO alg
+          FROM medcea.schedule sc
+          LEFT JOIN medcea.unit_algorithm_params ss ON ss.params_id = sc.params_id
+         WHERE sc.schedule_id = p_schedule;
+        src := 'its schedule runs';
+    END IF;
+    IF alg IS NULL THEN
+        SELECT coalesce(us.algorithm_id, p.algorithm_id) INTO alg
+          FROM medcea.recipe_unit_permission p
+          LEFT JOIN medcea.unit_algorithm_params us ON us.params_id = p.params_id
+         WHERE p.recipe_id = p_recipe AND p.unit_id = p_unit;
+        src := 'the recipe is assigned to this unit with';
+    END IF;
     IF alg IS NOT NULL AND alg <> s.algorithm_id THEN
-        RAISE EXCEPTION 'parameter set % is for algorithm %, but the recipe is assigned to this unit with algorithm %',
-            p_params, s.algorithm_id, alg USING ERRCODE = '22023';
+        RAISE EXCEPTION 'parameter set % is for algorithm %, but % algorithm %',
+            p_params, s.algorithm_id, src, alg USING ERRCODE = '22023';
     END IF;
 END $$;
+REVOKE ALL ON FUNCTION medcea._check_run_params(integer, integer, integer, integer) FROM PUBLIC;
 
 -- assigned_run: an operator executes only a run another person prepared while
 -- holding C on runs freely, in one of the operator's zones. Policy.
@@ -2308,7 +2379,7 @@ BEGIN
                                                    AND x.recipe_run_id <> p_run_id) THEN
         RAISE EXCEPTION 'start_run: unit % already has a running run', r.unit_id USING ERRCODE = '22023';
     END IF;
-    PERFORM medcea._check_run_params(r.unit_id, r.recipe_id, r.params_id);
+    PERFORM medcea._check_run_params(r.unit_id, r.recipe_id, r.params_id, r.schedule_id);
     PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
     IF (SELECT u.commissioning FROM medcea.cea_unit u WHERE u.unit_id = r.unit_id) THEN
         PERFORM medcea_auth.policy_refuse(format('commissioning: unit %s is flagged for commissioning', r.unit_id));
@@ -2377,12 +2448,44 @@ BEGIN
     PERFORM medcea_auth._owner_write(false);
 END $$;
 
+-- retire_schedule(schedule): the schedule stops firing and is kept (a schedule
+-- is never deleted). Its last row stays as it was: schedule_retired_guard()
+-- refuses any later edit of a retired schedule. Level U on schedules (checked:
+-- a policy refusal, a WARNING while IAM_DB_ROLES=false).
+CREATE OR REPLACE FUNCTION medcea.retire_schedule(p_schedule_id integer) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE a record; v_retired timestamptz;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.sub IS NULL THEN
+        RAISE EXCEPTION 'retire_schedule: no actor' USING ERRCODE = '42501';
+    END IF;
+    SELECT s.retired_at INTO v_retired FROM medcea.schedule s WHERE s.schedule_id = p_schedule_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'retire_schedule: no schedule %', p_schedule_id USING ERRCODE = '22023';
+    END IF;
+    IF v_retired IS NOT NULL THEN
+        RAISE EXCEPTION 'retire_schedule: schedule % is already retired', p_schedule_id USING ERRCODE = '22023';
+    END IF;
+    -- the actor's role must hold U on schedules (a person, or the creator a
+    -- system actor acts for); an internal actor has no role: a WARNING while
+    -- false, refused while true
+    IF medcea_auth.policy_holds(a.role, 'schedules', 'U') IS NULL THEN
+        PERFORM medcea_auth.policy_refuse(format('retire_schedule: role %s holds no U on schedules', coalesce(a.role, '<none>')));
+    END IF;
+    PERFORM medcea_auth._owner_write(true);
+    UPDATE medcea.schedule SET retired_at = now(), enabled = false, timestamp_upd = now()
+     WHERE schedule_id = p_schedule_id;
+    PERFORM medcea_auth._owner_write(false);
+END $$;
+
 -- record_cycle(run, cycle): insert or close one cycle of a running run.
 -- cycle = {recipe_id, recipe_item_seq_id, recipe_item_seq_cycle_num, status,
---          start?, end?, run_params?}. Service only.
+--          start?, end?, run_params?}. A completed cycle (C) is never reopened.
+-- Service only.
 CREATE OR REPLACE FUNCTION medcea.record_cycle(p_run_id integer, p_cycle jsonb) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
-DECLARE a record; st text; v_id integer;
+DECLARE a record; st text; v_id integer; cst text;
 BEGIN
     SELECT * INTO a FROM medcea_auth.request_actor();
     IF a.sub IS NULL THEN
@@ -2397,6 +2500,16 @@ BEGIN
        OR p_cycle ->> 'status' IS NULL THEN
         RAISE EXCEPTION 'record_cycle: recipe_id, recipe_item_seq_id, recipe_item_seq_cycle_num and status are required'
             USING ERRCODE = '22023';
+    END IF;
+    -- the existing cycle, locked: a completed one stays completed
+    SELECT c.recipe_line_cycle_run_status INTO cst FROM medcea.recipe_line_cycle_run c
+     WHERE c.recipe_run_id = p_run_id AND c.recipe_id = (p_cycle ->> 'recipe_id')::integer
+       AND c.recipe_item_seq_id = (p_cycle ->> 'recipe_item_seq_id')::integer
+       AND c.recipe_item_seq_cycle_num = (p_cycle ->> 'recipe_item_seq_cycle_num')::integer
+       FOR UPDATE;
+    IF cst = 'C' THEN
+        RAISE EXCEPTION 'record_cycle: cycle % of line % of run % is complete', p_cycle ->> 'recipe_item_seq_cycle_num',
+            p_cycle ->> 'recipe_item_seq_id', p_run_id USING ERRCODE = '22023';
     END IF;
     PERFORM medcea_auth._owner_write(true);
     INSERT INTO medcea.recipe_line_cycle_run AS c
@@ -2639,9 +2752,13 @@ BEGIN
     NEW.recipe_run_status := 'S';
     NEW.executed_by_sub := NULL; NEW.executed_by_person := NULL; NEW.executed_by_name := NULL;
     NEW.executed_by_role := NULL; NEW.executed_by_source := NULL;
-    PERFORM medcea._check_run_params(NEW.unit_id, NEW.recipe_id, NEW.params_id);
+    PERFORM medcea._check_run_params(NEW.unit_id, NEW.recipe_id, NEW.params_id, NEW.schedule_id);
     RETURN NEW;
 END $$;
+
+-- The 3-argument _check_run_params of the first 2a build: both callers above
+-- now pass the run's schedule.
+DROP FUNCTION IF EXISTS medcea._check_run_params(integer, integer, integer);
 
 -- Q-tables: the owner may do anything; svc_scheduler may change state and
 -- updated_at only (a state write clears retired_at through

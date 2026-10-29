@@ -212,6 +212,18 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.doc["services"]["access"]["routes"]["POST /api/decisions/<id>/confirm"]["roles"],
                          {"qa": ["not_own_author"]})
 
+    def test_role_includes_and_scheduler_routes_2_4(self):
+        # medcea_iam.actor_role() reads role_includes: the database's _own_role() rule
+        inc = self.doc["role_includes"]
+        self.assertEqual(set(inc), set(self.policy.roles))
+        for r in self.policy.roles:
+            self.assertEqual(inc[r], sorted(self.policy.effective_roles(r) - {r}), r)
+        self.assertEqual(inc["production_manager"], ["operator"])
+        sched = self.doc["services"]["scheduler"]["routes"]
+        self.assertEqual(sched["GET /api/param-sets"]["group"], "controllers")
+        # DELETE on a schedule retires it (medcea.retire_schedule): still level U
+        self.assertEqual(sched["DELETE /api/schedules/<id>"]["levels"], ["U"])
+
     def test_clients_and_public(self):
         every = sorted({h["client"] for h in self.policy.hosts.values()})
         self.assertEqual(self.doc["services"]["access-profile"]["clients"], every)
@@ -336,6 +348,22 @@ class GrantsTest(unittest.TestCase):
         for g, k, o, p in self.privs:
             if o in ("medcea.mqtt_credential", "medcea.backup_remote_to_insert_measurement"):
                 self.assertFalse(g.startswith("rr_"), (g, o))
+
+    def test_scheduler_2_4(self):
+        # DELETE /api/schedules/<id> retires through medcea.retire_schedule (U on schedules)
+        self.assertEqual(self.holders("medcea.retire_schedule(integer)"), {"rr_production_manager", "svc_scheduler"})
+        # the runner reads a unit's actuators (device, component), never the credentials
+        self.assertIn("svc_scheduler", self.holders("medcea.device", "SELECT"))
+        self.assertEqual({p for g, k, o, p in self.privs if g == "svc_scheduler" and o == "medcea.device"}, {"SELECT"})
+        self.assertNotIn("svc_scheduler", self.holders("medcea.mqtt_credential"))
+        self.assertNotIn("svc_scheduler", self.holders("medcea.schedule", "DELETE"))
+        for fn in ("medcea.start_run(integer)", "medcea.set_run_status(integer,text)", "medcea.finish_run(integer,text)",
+                   "medcea.record_cycle(integer,jsonb)", "medcea.propose_setting(text,jsonb)",
+                   "medcea_auth.set_actor(text,text,text,text)", "medcea_auth.set_system_actor(text,text,bigint)"):
+            self.assertIn("svc_scheduler", self.holders(fn), fn)
+        # the internal actor is the deploy scripts' only (superuser): the scheduler
+        # uses it under IAM_DB_ROLES=false as postgres, never as svc_scheduler
+        self.assertEqual(self.holders("medcea_auth._set_internal_actor(text)"), set())
 
     def test_written_by_functions_is_select_only(self):
         for g, m in grants._data_members(self.policy):

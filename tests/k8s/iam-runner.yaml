@@ -1,0 +1,67 @@
+# tests/k8s/iam-runner.yaml — the scheduler and its runner (IAM plan 2.4) against the
+# throwaway PostgreSQL of tests/iam-db-fixture.sh. Started and deleted by
+# tests/iam-runner.sh; never in production's namespace.
+# Rendered with: render tests/k8s/iam-runner.yaml RUNNER_NS
+# The code under test arrives as ConfigMap iam-runner-src (src.tgz: schd/, the
+# scheduler API, medcea_iam.py and tests/runner/; prev.tgz: the schd/ to compare
+# with; routes.json compiled from this checkout's policy). The passwords come from
+# Secrets: pg (the fixture's postgres) and iam-runner-db (svc_scheduler's, written
+# by the script from stdin). The image and packages are the scheduler pod's.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iam-runner
+  namespace: ${RUNNER_NS}
+  labels:
+    app: iam-runner
+  annotations:
+    # containerd's default profile (cri-containerd.apparmor.d stacked on unconfined)
+    # refuses kill() even on the container's own child here, so Stop (R5) got EPERM
+    # and the run it could not end kept the unit busy (R14). k8s 1.29: annotation,
+    # not securityContext.appArmorProfile.
+    container.apparmor.security.beta.kubernetes.io/runner: unconfined
+spec:
+  restartPolicy: Never
+  containers:
+    - name: runner
+      image: python:3.11-slim
+      command:
+        - bash
+        - -c
+        - |
+          set -e
+          pip install --quiet flask 'pyjwt[crypto]' apscheduler python-dotenv pandas pytz \
+              psycopg2-binary requests python-dateutil
+          mkdir -p /work/cur /work/prev /schd /logs /iam /jwks
+          tar xzf /src/src.tgz -C /work/cur
+          if [ -s /src/prev.tgz ]; then tar xzf /src/prev.tgz -C /work/prev; fi
+          touch /tmp/ready
+          exec sleep 3600
+      env:
+        - {name: PG_HOST, value: "rdbms-postgresql.${RUNNER_NS}.svc.cluster.local"}
+        - {name: PG_DATABASE, value: medcea_db}
+        - name: PG_SU_PASSWORD
+          valueFrom: {secretKeyRef: {name: pg, key: postgres-password}}
+        - name: PG_SVC_PASSWORD
+          valueFrom: {secretKeyRef: {name: iam-runner-db, key: password, optional: true}}
+        - {name: MQTT_URL, value: 127.0.0.1}
+        - {name: MQTT_PORT, value: "1883"}
+        - {name: PROJECT_NAME, value: medcea}
+        - {name: SCHD_DIR, value: /schd}
+        - {name: LOG_DIR, value: /logs}
+        - {name: IAM_ENFORCE, value: "false"}
+        - {name: PYTHONPATH, value: /work/cur/tests/runner/stub}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+      readinessProbe:
+        exec:
+          command: [test, -f, /tmp/ready]
+        periodSeconds: 3
+      resources:
+        requests: {cpu: 250m, memory: 512Mi}
+        limits: {cpu: "1", memory: 1Gi}
+      volumeMounts:
+        - {name: src, mountPath: /src, readOnly: true}
+  volumes:
+    - name: src
+      configMap:
+        name: iam-runner-src

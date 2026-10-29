@@ -697,10 +697,17 @@ kc_enable_events "$KEYCLOAK_REALM"
 # (k8s/keycloak/theme). Mail (smtpServer, resetPasswordAllowed) is deliberately
 # not set here: the User Manager owns it (apps/access, E-mail settings) and
 # pushes it to the realm, and a value written here would undo that on every run.
+# accessTokenLifespan is pinned at Keycloak's default (300 s) because PostgREST
+# (IAM_POSTGREST_JWT=true) refuses an expired token with 401 instead of falling
+# back to anon: every oauth2-proxy refreshes its session at cookie_refresh = 4m
+# (k8s/oauth2-proxy/values-app.yaml, the config proxy's), so the token it forwards
+# has >= 60 s left.
+# Keep cookie_refresh + 30 s below this value (tests/test_postgrest.py checks it),
+# and never override access.token.lifespan per client.
 echo -e "${YELLOW}  Applying login theme...${NC}"
 curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}" \
   -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
-  -d '{"loginTheme":"medcea","displayName":"MedCEA Platform","rememberMe":true}' || true
+  -d '{"loginTheme":"medcea","displayName":"MedCEA Platform","rememberMe":true,"accessTokenLifespan":300}' || true
 
 # Create a confidential client and echo its secret (captured by caller via $())
 _create_client() {
@@ -1200,12 +1207,28 @@ fi
 # as the plan says so PostgREST (Phase 2) can take it as its jwt-secret file.
 echo -e "${YELLOW}  Publishing the realm's signing keys (Secret medcea-jwks)...${NC}"
 _JWKS="$(curl -sf "http://localhost:18080/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs" || true)"
-if python3 -c 'import json, sys; sys.exit(0 if any(k.get("alg") == "RS256" and k.get("use") == "sig" for k in json.load(sys.stdin)["keys"]) else 1)' <<<"$_JWKS" 2>/dev/null; then
-    printf '%s' "$_JWKS" | $MK8S kubectl create secret generic medcea-jwks -n "$NAMESPACE" \
-        --from-file=jwks.json=/dev/stdin --dry-run=client -o yaml | $MK8S kubectl apply -f - >/dev/null
+# Two keys: jwks.json, the realm's set as published (medcea_iam.py), and
+# jwks-sig.json, only the RS256 signing keys in a byte-stable form
+# (infra/jwks-sig.py), which config-api reads as its jwt-secret when
+# IAM_POSTGREST_JWT=true. PostgREST reads it only at start, so a changed set
+# restarts config-api (pgrst_roll_if_changed). After rotating or removing a realm
+# key, re-run this script; health-check.sh (postgrest) FAILs until then.
+_JWKS_TMP="$(mktemp -d)"; chmod 700 "$_JWKS_TMP"
+trap 'rm -rf "$_JWKS_TMP"' EXIT
+if printf '%s' "$_JWKS" > "$_JWKS_TMP/jwks.json" \
+   && python3 "$SCRIPT_DIR/infra/jwks-sig.py" < "$_JWKS_TMP/jwks.json" > "$_JWKS_TMP/jwks-sig.json"; then
+    $MK8S kubectl create secret generic medcea-jwks -n "$NAMESPACE" \
+        --from-file=jwks.json="$_JWKS_TMP/jwks.json" --from-file=jwks-sig.json="$_JWKS_TMP/jwks-sig.json" \
+        --dry-run=client -o yaml | $MK8S kubectl apply -f - >/dev/null
+    KUBECTL="$MK8S kubectl" REPO_ROOT="$SCRIPT_DIR"
+    source "$SCRIPT_DIR/infra/lib-postgrest.sh"
+    pgrst_roll_if_changed "$NAMESPACE" || echo -e "${RED}  Could not restart config-api for the new realm keys.${NC}" >&2
 else
-    echo -e "${RED}  Could not read an RS256 signing key from realm '${KEYCLOAK_REALM}' — services cannot verify tokens.${NC}" >&2
+    echo -e "${RED}  Could not read an RS256 signing key from realm '${KEYCLOAK_REALM}' — services cannot verify tokens;${NC}" >&2
+    echo -e "${RED}  Secret medcea-jwks left as it was.${NC}" >&2
 fi
+rm -rf "$_JWKS_TMP"
+trap - EXIT
 
 # --- Add realm-role mapper to grafana client so roles[] appears in userinfo ---
 echo -e "${YELLOW}  Adding realm-role mapper to Grafana client...${NC}"

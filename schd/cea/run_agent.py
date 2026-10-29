@@ -1,6 +1,6 @@
-def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
+def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn, run_id=None, algorithm=None):
     """
-    run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn)
+    run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn, run_id=None, algorithm=None)
     =============================================================================
     Runs the MQTT agent with separate threads for subscription and control logic.
     This function initializes and manages the MQTT agent for a specific unit, 
@@ -16,6 +16,15 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
         The start time of the recipe line sequence cycle.
     conn : object
         Database connection object used to fetch feedback control loop parameters.
+    run_id : int, optional
+        A run started by the scheduler API (RECIPE_RUN_ID, IAM plan 2.4). Then: the
+        algorithm comes from `algorithm` when given; the transaction is ended before
+        the cycle's wait (no idle transaction for hours); the Q-table state is saved
+        acting for the run; and SIGTERM/SIGINT stops the threads, sends STOP and
+        raises cea.RunStopped (the stop route has already marked the run F).
+        Without run_id the behaviour is exactly the legacy one.
+    algorithm : (str, dict), optional
+        (algorithm code, parameters) for a run_id run, overriding run_params.
     Raises
     ------
     SystemExit
@@ -55,6 +64,15 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
         # stop_event.set()  # Make sure stop_event is defined and accessible here
         sys.exit(0)
 
+    _stop_holder = {}
+
+    def stop_handler(sig, frame):
+        """A run_id run: SIGTERM from the scheduler's stop route (or Ctrl+C)."""
+        print("Stop signal received. Stopping agent...")
+        if _stop_holder.get('event') is not None:
+            _stop_holder['event'].set()
+        raise cea.RunStopped()
+
     # Assuming get_feedback_control_loop_params returns a list of dictionaries
     feedback_control_loop_params = cea.get_feedback_control_loop_params(unit_code, conn)  # get list of topics
 
@@ -63,6 +81,9 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
     _rp_dict         = (_rp[0] if _rp and isinstance(_rp, list) else {}) or {}
     _control_algo    = (_rp_dict.get('control_algorithm',        'IF_THEN_ELSE') or 'IF_THEN_ELSE').upper()
     _algo_params     = _rp_dict.get('control_algorithm_params', {}) or {}
+    if run_id is not None and algorithm is not None:
+        _control_algo = (algorithm[0] or 'IF_THEN_ELSE').upper()
+        _algo_params  = algorithm[1] or {}
     _unit_id         = cea.get_unit_id_from_code(unit_code, conn)
 
     # Pre-load persisted algorithm state so stateful algorithms warm-start
@@ -111,8 +132,13 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
         )
 
         # Register signal handler for graceful shutdown
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
+        if run_id is None:
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+        else:
+            _stop_holder['event'] = stop_event
+            signal.signal(signal.SIGINT, stop_handler)
+            signal.signal(signal.SIGTERM, stop_handler)
 
         # Start threads
         all_threads = [mqtt_thread, control_thread]  #  List of threads
@@ -121,7 +147,23 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
             thread.start()
 
         run_for_n_min = cea.calculate_minutes_to_run(run_params, recipe_line_seq_cycle_run_start)
-        time.sleep(run_for_n_min * 60)  # Run for specified minutes
+        if run_id is None:
+            time.sleep(run_for_n_min * 60)  # Run for specified minutes
+        else:
+            conn.rollback()  # end the read transaction: nothing waits on it for the cycle's length
+            try:
+                time.sleep(run_for_n_min * 60)
+            except cea.RunStopped:
+                stop_event.set()
+                for thread in all_threads:
+                    thread.join(timeout=30)
+                try:
+                    cea.mqtt_publish_control_message(client, topic=mqtt_topics, payload={"command": "STOP", "value": 0}, publish_type="finished")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Published shutdown message to {mqtt_topics}")
+                    client.disconnect()
+                except Exception as e:  # noqa: BLE001 — stopping must not fail on the broker
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Could not publish STOP: {e}", file=sys.stderr)
+                raise
         stop_event.set()  # signal stop to both threads
 
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Stopping threads...")
@@ -147,7 +189,10 @@ def run_agent(unit_code, run_params, recipe_line_seq_cycle_run_start, conn):
             # Persist stateful algorithm state for next run
             if _control_algo in _STATEFUL_ALGORITHMS and _unit_id and _result_states:
                 for _ch, _state in _result_states.items():
-                    cea.save_algorithm_state(_unit_id, _control_algo, _ch, _state, conn)
+                    if run_id is None:
+                        cea.save_algorithm_state(_unit_id, _control_algo, _ch, _state, conn)
+                    else:
+                        cea.save_algorithm_state(_unit_id, _control_algo, _ch, _state, conn, run_id=run_id)
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {_control_algo} state saved for {len(_result_states)} channel(s).")
 
             for topic in [mqtt_topics]: # <to correct> attention to correct when support multiple zones.

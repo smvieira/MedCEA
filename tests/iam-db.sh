@@ -16,7 +16,9 @@
 #   actor        spoofed actor table, forged claims in a service / rr_admin_login
 #                session, token actors, set_actor's argument checks
 #   writes       W1 false-mode regression (today's callers), W2 always-on guards,
-#                W3 flag-only probes, W4 true-mode workflow, W5 register v2
+#                W3 flag-only probes, W4 true-mode workflow, W5 register v2,
+#                W6 the scheduler's functions (2.4: retire, re-save, cycles, the
+#                schedule's algorithm, the internal actor, e97aab6's scheduler SQL)
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
 #
@@ -34,7 +36,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -170,7 +172,8 @@ SELECT 'changelog', count(*) FROM pg_class WHERE oid = to_regclass('medcea.datab
 SELECT 'invoker', count(*) FROM pg_class c WHERE c.relnamespace = 'medcea'::regnamespace AND c.relkind = 'v'
    AND NOT coalesce('security_invoker=true' = ANY (c.reloptions), false);
 SELECT 'always', string_agg(c.relname || '.' || t.tgname, ',') FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
- WHERE (t.tgname LIKE '%\_append\_only' OR t.tgname LIKE '%\_no\_truncate') AND t.tgenabled <> 'A'
+ WHERE (t.tgname LIKE '%\_append\_only' OR t.tgname LIKE '%\_no\_truncate' OR t.tgname = 'schedule_retired_guard_trg')
+   AND t.tgenabled <> 'A'
    AND c.relnamespace IN ('medcea'::regnamespace, 'iam_policy'::regnamespace);
 SELECT 'appendonly', count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
  WHERE t.tgname LIKE '%\_append\_only' AND c.relnamespace IN ('medcea'::regnamespace, 'iam_policy'::regnamespace);
@@ -178,14 +181,14 @@ SELECT 'stamp', count(*) FROM pg_trigger WHERE tgname = 'stamp_actor_trg';
 SELECT 'rowchange', count(*) FROM pg_trigger WHERE tgname = 'row_change_trg';
 SELECT 'guard', count(*) FROM pg_trigger WHERE tgname = 'status_guard_trg';
 SELECT 'single', string_agg(n, ',') FROM unnest(ARRAY['measurement_zone_trg', 'device_serial_change_trg', 'mqtt_service_acl_root_trg',
-       'algorithm_state_event_trg', 'algorithm_state_before_trg', 'user_zone_audit_trg']) n
+       'algorithm_state_event_trg', 'algorithm_state_before_trg', 'user_zone_audit_trg', 'schedule_retired_guard_trg']) n
  WHERE NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = n);
 SELECT 'definer', string_agg(p.oid::regprocedure::text, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
  WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy') AND p.prosecdef
    AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%pg_temp');
 SELECT 'invokerfn', string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
  WHERE n.nspname = 'medcea' AND p.prosecdef
-   AND p.proname IN ('guard_control_columns', 'reject_non_draft_update', 'immutable_row', 'algorithm_state_guard', 'algorithm_state_before');
+   AND p.proname IN ('guard_control_columns', 'schedule_retired_guard', 'reject_non_draft_update', 'immutable_row', 'algorithm_state_guard', 'algorithm_state_before');
 SELECT 'prereq', p.prosecdef || '/' || coalesce(array_to_string(p.proconfig, ','), '') FROM pg_proc p WHERE p.oid = 'medcea_auth.pre_request()'::regprocedure;
 SELECT 'public', count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
  CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
@@ -318,6 +321,20 @@ SQL
 SET SESSION AUTHORIZATION authenticator;
 SET ROLE anon;
 SELECT medcea_auth.pre_request();
+SQL
+        # what PostgREST 12 really sends without a token: claims holding only the anon
+        # role, never NULL (the probe above alone let a broken check pass)
+        pre "no token (claims hold only role anon)" "28000:no token" '{"role":"anon"}'
+        probe prerequest "no token on GET / (the readiness probe) stays anon" ok <<'SQL'
+SET SESSION AUTHORIZATION authenticator;
+SET ROLE anon;
+SELECT set_config('request.jwt.claims', '{"role":"anon"}', true) \g /dev/null
+SELECT set_config('request.method', 'GET', true) \g /dev/null
+SELECT set_config('request.path', '/', true) \g /dev/null
+SELECT medcea_auth.pre_request();
+SELECT current_user = 'anon' AS ok \gset
+--CHECKS
+SELECT 'CHECK|current_user is anon', :'ok'::boolean;
 SQL
     else
         probe prerequest "false mode: pre_request() is a no-op, the role stays anon" ok <<SQL
@@ -826,6 +843,233 @@ SET ROLE rr_engineer;
 SELECT medcea.register_mqtt_credential((SELECT device_id FROM medcea.device WHERE dns_name = 'iamt-wild'), 'iamt-wild', '\$7\$101\$c2FsdA==\$aGFzaA==');
 SQL
         reg "a password instead of a hash" "22023:mosquitto" iamt02-s-z01 iamt-aa:bb:cc:00:00:01 not-a-hash
+    fi
+    # W6: the scheduler's functions and fixes (IAM plan 2.4): retire_schedule and the
+    # retired-row guard, set_system_actor's re-save fallback, record_cycle never
+    # reopening a completed cycle, the schedule's algorithm in _check_run_params, the
+    # internal actor out of a service's reach; and (false) the SQL of the scheduler
+    # before 2.4 (e97aab6) still working against this database
+    if [[ "$MODE" != legacy ]]; then
+        S1="(SELECT schedule_id FROM medcea.schedule WHERE description LIKE 'iamtest: inherits the assignment%')"
+        S2="(SELECT schedule_id FROM medcea.schedule WHERE description = 'iamtest: algorithm differs from the assignment')"
+        UNVERIFIED="SELECT medcea_auth._set_internal_actor('system:scheduler-unverified');"
+        PM_ACTOR="SELECT medcea_auth.set_actor('$UUID_PM', 'p-pm', 'test-pm', 'production_manager');"
+        W6_PM="$(claims production_manager "$UUID_PM" p-pm)"
+        # who retires in the probes below: retire_schedule checks U on schedules, which
+        # an internal actor (no role) passes only as a WARNING while false
+        if [[ "$MODE" == true ]]; then RETIRER="$PM_ACTOR"; RETIRER_SUB="$UUID_PM"
+        else RETIRER="$UNVERIFIED"; RETIRER_SUB="system:scheduler-unverified"; fi
+        probe W6 "retire_schedule without an actor" "42501:no actor" <<SQL
+SELECT medcea.retire_schedule($S1);
+SQL
+        probe W6 "control: retire_schedule keeps the schedule, disabled" ok <<SQL
+$RETIRER
+SELECT medcea.retire_schedule($S1);
+--CHECKS
+SELECT 'CHECK|retired and disabled', retired_at IS NOT NULL AND NOT enabled FROM medcea.schedule WHERE schedule_id = $S1;
+SELECT 'CHECK|logged as the actor', EXISTS (SELECT 1 FROM medcea.row_change WHERE target = 'medcea.schedule'
+       AND row_key = jsonb_build_array($S1) AND actor_sub = '$RETIRER_SUB' AND new_values ? 'enabled');
+SQL
+        probe W6 "retire_schedule twice" "22023:already retired" <<SQL
+$RETIRER
+SELECT medcea.retire_schedule($S1);
+SELECT medcea.retire_schedule($S1);
+SQL
+        probe W6 "retire_schedule of a missing schedule" "22023:no schedule" <<SQL
+$RETIRER
+SELECT medcea.retire_schedule(-1);
+SQL
+        # retire_schedule checks the actor's role: an operator holds R on schedules only
+        if [[ "$MODE" == true ]]; then
+            probe W6 "an operator retires a schedule (U on schedules)" "42501:holds no U on schedules" <<SQL
+SET SESSION AUTHORIZATION svc_scheduler;
+SELECT medcea_auth.set_actor('$UUID_OP', 'p-op', 'test-op', 'operator');
+SELECT medcea.retire_schedule($S1);
+SQL
+        else
+            probe W6 "an operator retires a schedule: a WARNING while false" ok <<SQL
+SELECT medcea_auth.set_actor('$UUID_OP', 'p-op', 'test-op', 'operator');
+SELECT medcea.retire_schedule($S1);
+--CHECKS
+SELECT 'CHECK|retired (advisory refusal only)', retired_at IS NOT NULL FROM medcea.schedule WHERE schedule_id = $S1;
+SQL
+        fi
+        if [[ "$MODE" == true ]]; then
+            probe W6 "svc_scheduler edits a retired schedule (T6)" "42501:is retired" <<SQL
+$RETIRER
+SELECT medcea.retire_schedule($S1);
+SET SESSION AUTHORIZATION svc_scheduler;
+$PM_ACTOR
+UPDATE medcea.schedule SET enabled = true WHERE schedule_id = $S1;
+SQL
+        else
+            probe W6 "postgres edits a retired schedule (T6)" "42501:is retired" <<SQL
+$UNVERIFIED
+SELECT medcea.retire_schedule($S1);
+UPDATE medcea.schedule SET enabled = true WHERE schedule_id = $S1;
+SQL
+        fi
+        probe W6 "set_system_actor: a migration:008 schedule nobody re-saved" "42501:no person-attributed creator" <<SQL
+SELECT medcea_auth.set_system_actor('system:scheduler', 'schedule', $S1);
+SQL
+        probe W6 "control: re-saved by a production manager, it fires as that person" ok <<SQL
+$PM_ACTOR
+UPDATE medcea.schedule SET description = description || ' (re-saved)' WHERE schedule_id = $S1;
+SELECT medcea_auth.set_system_actor('system:scheduler', 'schedule', $S1);
+--CHECKS
+SELECT 'CHECK|acts as the re-saving production manager', a.person = 'p-pm' AND a.role = 'production_manager' AND a.source = 'system'
+  FROM medcea_auth.request_actor() a;
+SQL
+        probe W6 "re-saved by a role without C on runs (S6)" "42501:no person-attributed creator" <<SQL
+SELECT medcea_auth.set_actor('$UUID_OP', 'p-op', 'test-op', 'operator');
+UPDATE medcea.schedule SET description = description || ' (re-saved)' WHERE schedule_id = $S1;
+SELECT medcea_auth.set_system_actor('system:scheduler', 'schedule', $S1);
+SQL
+        probe W6 "re-saved by a system actor carrying a person (S6)" "42501:no person-attributed creator" <<SQL
+$PM_ACTOR
+INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, description)
+SELECT u.unit_id, r.recipe_id, '0 4 * * *', 'iamtest: W6 pm schedule' FROM medcea.cea_unit u, medcea.recipe r
+ WHERE u.unit_code = 'IAMT01' AND r.recipe_name = 'IAMTEST-R1' RETURNING schedule_id AS spm \gset
+SELECT medcea_auth.set_system_actor('system:scheduler', 'schedule', :spm);
+UPDATE medcea.schedule SET description = description || ' (re-saved)' WHERE schedule_id = $S1;
+SELECT medcea_auth.set_system_actor('system:scheduler', 'schedule', $S1);
+SQL
+        probe W6 "a service sets the IAM_DB_ROLES setting, then the internal actor (S8)" "42501:permission denied" <<'SQL'
+SET SESSION AUTHORIZATION svc_scheduler;
+SET medcea.iam_db_roles = 'false';
+SELECT medcea_auth._set_internal_actor('system:scheduler');
+SQL
+        # a run in R on IAMT01 for the cycle probes: false as postgres with the
+        # unverified actor; true created by a production manager's token and run by
+        # svc_scheduler acting for it
+        if [[ "$MODE" == true ]]; then
+            cyc_setup="
+SELECT p.params_id AS set1 FROM medcea.recipe_unit_permission p JOIN medcea.recipe r USING (recipe_id) JOIN medcea.cea_unit u USING (unit_id)
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT01' \\gset
+$(as_token "$W6_PM")
+INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active, params_id)
+SELECT r.recipe_id, u.unit_id, now(), 'S', 'Y', :set1 FROM medcea.recipe r, medcea.cea_unit u
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT01' RETURNING recipe_run_id AS run \\gset
+SELECT medcea.start_run(:run);
+$(as_postgres)
+SET SESSION AUTHORIZATION svc_scheduler;
+SELECT medcea_auth.set_system_actor('system:scheduler', 'run', :run);"
+        else
+            cyc_setup="
+$UNVERIFIED
+INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active)
+SELECT r.recipe_id, u.unit_id, now(), 'S', 'Y' FROM medcea.recipe r, medcea.cea_unit u
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT01' RETURNING recipe_run_id AS run \\gset
+SELECT medcea.start_run(:run);"
+        fi
+        cyc="SELECT recipe_id AS r1 FROM medcea.recipe WHERE recipe_name = 'IAMTEST-R1' \\gset
+$cyc_setup
+SELECT medcea.record_cycle(:run, jsonb_build_object('recipe_id', :r1, 'recipe_item_seq_id', 1, 'recipe_item_seq_cycle_num', 1, 'status', 'R', 'run_params', '[{\"x\": 1}]'::jsonb));
+SELECT medcea.record_cycle(:run, jsonb_build_object('recipe_id', :r1, 'recipe_item_seq_id', 1, 'recipe_item_seq_cycle_num', 1, 'status', 'C', 'end', now()));"
+        probe W6 "control: a cycle recorded R, then C" ok <<SQL
+$cyc
+--CHECKS
+SELECT 'CHECK|completed, run_params a list', recipe_line_cycle_run_status = 'C' AND json_typeof(run_params) = 'array'
+  FROM medcea.recipe_line_cycle_run WHERE recipe_run_id = :run;
+SQL
+        probe W6 "a completed cycle is not reopened (S7)" "22023:is complete" <<SQL
+$cyc
+SELECT medcea.record_cycle(:run, jsonb_build_object('recipe_id', :r1, 'recipe_item_seq_id', 1, 'recipe_item_seq_cycle_num', 1, 'status', 'R'));
+SQL
+        # B1: a run triggered by a schedule runs the schedule's algorithm (S2: FLC, while
+        # its assignment says PID); the same set on a run without the schedule is refused
+        if [[ "$MODE" == true ]]; then b1_writer="$(as_token "$W6_PM")"; else b1_writer="$UNVERIFIED"; fi
+        b1="SELECT params_id AS s2set FROM medcea.schedule WHERE schedule_id = $S2 \\gset
+SELECT $S2 AS s2 \\gset
+$b1_writer"
+        probe W6 "control: a schedule's run with the schedule's parameter set starts (B1)" ok <<SQL
+$b1
+INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active, params_id, schedule_id)
+SELECT r.recipe_id, u.unit_id, now(), 'S', 'Y', :s2set, :s2 FROM medcea.recipe r, medcea.cea_unit u
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT02' RETURNING recipe_run_id AS run \gset
+SELECT medcea.start_run(:run);
+--CHECKS
+SELECT 'CHECK|running', recipe_run_status = 'R' FROM medcea.recipe_run WHERE recipe_run_id = :run;
+SQL
+        probe W6 "the schedule's set on a run without the schedule (B1)" "22023:is for algorithm" <<SQL
+$b1
+INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active, params_id)
+SELECT r.recipe_id, u.unit_id, now(), 'S', 'Y', :s2set FROM medcea.recipe r, medcea.cea_unit u
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT02' RETURNING recipe_run_id AS run \gset
+SELECT medcea.start_run(:run);
+SQL
+        if [[ "$MODE" == false ]]; then
+            # T1: what the scheduler of e97aab6 sends, as postgres without an actor
+            probe W6 "legacy scheduler (e97aab6): schedule PUT with inline parameters" ok <<SQL
+UPDATE medcea.schedule
+SET unit_id=unit_id, recipe_id=recipe_id, cron_expression='0 5 * * *', enabled=true, description=description,
+    algorithm_id=NULL, algorithm_params='{"x": 2}'::jsonb, timestamp_upd=CURRENT_TIMESTAMP
+WHERE schedule_id=$S1;
+--CHECKS
+SELECT 'CHECK|stamped db:postgres', updated_by_sub = 'db:postgres' FROM medcea.schedule WHERE schedule_id = $S1;
+SQL
+            # B4: the deploy-time listing uses set_system_actor()'s predicate, so a
+            # schedule written without an actor (db:postgres) is listed, and one
+            # re-saved by a production manager's token is not (rolled back)
+            b4_sql="$(awk '/^-- ── B4 \(listing\)/,/^END \$\$;/' "$REPO_ROOT/apps/database/medcea_db_migrations.sql")"
+            b4_out="$({
+                echo "BEGIN;"
+                echo "INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, description)
+                      SELECT u.unit_id, r.recipe_id, '0 6 * * *', 'iamtest: B4 db:postgres' FROM medcea.cea_unit u, medcea.recipe r
+                       WHERE u.unit_code = 'IAMT01' AND r.recipe_name = 'IAMTEST-R1' RETURNING schedule_id AS sb4 \\gset"
+                echo "$PM_ACTOR"
+                echo "INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, description)
+                      SELECT u.unit_id, r.recipe_id, '0 7 * * *', 'iamtest: B4 by a person' FROM medcea.cea_unit u, medcea.recipe r
+                       WHERE u.unit_code = 'IAMT01' AND r.recipe_name = 'IAMTEST-R1' RETURNING schedule_id AS spm4 \\gset"
+                echo "$b4_sql"
+                echo "SELECT 'B4IDS|' || :sb4 || '|' || :spm4;"
+                echo "ROLLBACK;"
+            } | db rw)"
+            IFS='|' read -r _ b4_db b4_pm <<<"$(grep -m1 '^B4IDS|' <<<"$b4_out")"
+            b4_warn="$(grep -m1 'schedules with no person behind them' <<<"$b4_out")"
+            if [[ -z "$b4_db" || -z "$b4_sql" ]]; then
+                fail W6 "B4 listing: setup failed: $(grep -m1 ERROR <<<"$b4_out")"
+            elif [[ "$b4_warn" == *"$b4_db (db:postgres)"* && "$b4_warn" != *"$b4_pm ("* ]]; then
+                pass W6 "B4 listing names a db:postgres schedule, not a person's"
+            else
+                fail W6 "B4 listing: want $b4_db (db:postgres) and not $b4_pm in: ${b4_warn:-no warning}"
+            fi
+            # T6 survives a revert: the migration file before 2.4 re-creates
+            # guard_control_columns() (without the check) on every deploy
+            prev_guard="$(git -C "$REPO_ROOT" show e97aab6:apps/database/medcea_db_migrations.sql 2>/dev/null \
+              | awk '/^CREATE OR REPLACE FUNCTION medcea.guard_control_columns\(\)/,/^END \$\$;/')"
+            if [[ "$prev_guard" != *"END \$\$;"* ]]; then
+                fail W6 "retired-row guard after a revert: e97aab6's guard_control_columns() not found in git"
+            else
+                probe W6 "retired-row guard after e97aab6's guard_control_columns()" "42501:is retired" <<SQL
+$prev_guard
+$UNVERIFIED
+SELECT medcea.retire_schedule($S1);
+UPDATE medcea.schedule SET enabled = true WHERE schedule_id = $S1;
+SQL
+            fi
+            probe W6 "legacy scheduler (e97aab6): PUT on a schedule retired since" "42501:is retired" <<SQL
+$UNVERIFIED
+SELECT medcea.retire_schedule($S1);
+UPDATE medcea.schedule
+SET unit_id=unit_id, recipe_id=recipe_id, cron_expression='0 5 * * *', enabled=true, description=description,
+    algorithm_id=NULL, algorithm_params=NULL, timestamp_upd=CURRENT_TIMESTAMP
+WHERE schedule_id=$S1;
+SQL
+            probe W6 "legacy scheduler (e97aab6): run, stop (F) and startup recovery" ok <<'SQL'
+INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active)
+SELECT r.recipe_id, u.unit_id, CURRENT_TIMESTAMP, 'S', 'Y' FROM medcea.recipe r, medcea.cea_unit u
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT02' RETURNING recipe_run_id AS run \gset
+UPDATE medcea.recipe_run SET recipe_run_status = 'R', timestamp_upd = now() WHERE recipe_run_id = :run;
+UPDATE medcea.recipe_run SET recipe_run_status = 'F', timestamp_upd = now() WHERE recipe_run_id = :run;
+UPDATE medcea.recipe_run SET recipe_run_end = CURRENT_TIMESTAMP WHERE recipe_run_id = :run;
+UPDATE medcea.recipe_run SET recipe_run_status='S', recipe_run_end=NULL, timestamp_upd=CURRENT_TIMESTAMP WHERE recipe_run_id=:run;
+UPDATE medcea.recipe_run SET recipe_run_status='F', recipe_run_end=CURRENT_TIMESTAMP, timestamp_upd=CURRENT_TIMESTAMP
+ WHERE recipe_run_id=:run AND recipe_run_status IN ('R','S');
+--CHECKS
+SELECT 'CHECK|failed, never executed by anyone', recipe_run_status = 'F' AND executed_by_sub IS NULL FROM medcea.recipe_run WHERE recipe_run_id = :run;
+SQL
+        fi
     fi
 elif want writes; then
     note writes "skipped (read-only; --write-probes runs them on medcea-iamtest only)"

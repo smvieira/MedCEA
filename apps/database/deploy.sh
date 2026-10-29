@@ -38,6 +38,7 @@ source "$REPO_ROOT/config.env"
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh"
 source "$SCRIPT_DIR/lib-db-apply.sh"
+source "$REPO_ROOT/infra/lib-postgrest.sh"   # pgrst_live_mode: which password authenticator gets
 NAMESPACE="${NAMESPACE:-medcea}"
 PG_RELEASE="${PG_RELEASE:-rdbms}"
 CEA_DB="${POSTGRES_DB:-medcea_db}"
@@ -78,9 +79,12 @@ if [[ "$IAM_DB_ROLES" == "true" ]]; then
     if [[ -z "${AUTHENTICATOR_DB_PASS:-}" || "${AUTHENTICATOR_DB_PASS:-}" == "${POSTGRES_PASS:-}" ]]; then
         refuse+=("AUTHENTICATOR_DB_PASS is empty or equals POSTGRES_PASS (authenticator would SET ROLE to every rr_ role with the superuser's password)")
     fi
-    _env="$($KUBECTL get deployment config-api -n "$NAMESPACE" -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null || true)"
-    grep -qx 'PGRST_DB_PRE_REQUEST=medcea_auth.pre_request' <<<"$_env" || refuse+=("config-api has no PGRST_DB_PRE_REQUEST=medcea_auth.pre_request (2b)")
-    grep -q '^PGRST_JWT_SECRET=' <<<"$_env" || refuse+=("config-api has no PGRST_JWT_SECRET (2b)")
+    # contract C1 of 2b: the env names and Secret keys of config-api-jwt.yaml
+    _env="$($KUBECTL get deployment config-api -n "$NAMESPACE" -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{.valueFrom.secretKeyRef.name}/{.valueFrom.secretKeyRef.key}{"\n"}{end}' 2>/dev/null || true)"
+    grep -qx 'PGRST_DB_PRE_REQUEST=medcea_auth.pre_request/' <<<"$_env" || refuse+=("config-api has no PGRST_DB_PRE_REQUEST=medcea_auth.pre_request (2b: IAM_POSTGREST_JWT=true, ./apps/frontend/deploy.sh)")
+    grep -qx 'PGRST_JWT_SECRET=medcea-jwks/jwks-sig.json' <<<"$_env" || refuse+=("config-api's PGRST_JWT_SECRET is not Secret medcea-jwks key jwks-sig.json (2b)")
+    grep -qx 'AUTHENTICATOR_PASSWORD=db-authenticator/password' <<<"$_env" || refuse+=("config-api does not log in with Secret db-authenticator (2b)")
+    grep -qx 'PGRST_JWT_AUD=medcea-api/' <<<"$_env" || refuse+=("config-api has no PGRST_JWT_AUD=medcea-api (2b)")
     for _dep in scheduler monitor dbmgmt; do
         _u="$($KUBECTL get deployment "$_dep" -n "$NAMESPACE" -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="PG_USER")]}{.value}{"\n"}{end}' 2>/dev/null || true)"
         if [[ -z "$_u" ]] || grep -qx 'postgres' <<<"$_u"; then
@@ -112,9 +116,17 @@ EOF
 fi
 
 # ── Passwords: the generated ones, as DBPW_<role> for db_apply ───────────────
-# authenticator keeps POSTGRES_PASS until Phase 2b switches config-api's URI to
-# AUTHENTICATOR_DB_PASS in the same step.
-DBPW_authenticator="${POSTGRES_PASS}"
+# authenticator's password follows what config-api runs now, never config.env
+# alone (IAM plan 2b): legacy config-api logs in with POSTGRES_PASS, the JWT one
+# with Secret db-authenticator, which apps/frontend/deploy.sh owns while it runs
+# (it switches the manifest and the password together, infra/lib-postgrest.sh).
+# Before config-api exists the flag decides. Refused only while two pod templates
+# are live (the password would match one of them); a single unready pod — e.g.
+# after --purge-data dropped authenticator — is its template's mode, and this
+# deploy is what makes it ready again. The choice is pgrst_db_auth_pass, which
+# tests/iam-postgrest.sh exercises against live config-api modes.
+pgrst_db_auth_pass "$NAMESPACE" "${IAM_POSTGREST_JWT:-false}" || exit 1
+DBPW_authenticator="$_PGRST_DB_AUTH_PASS"
 DBPW_mqtt_auth="${MQTT_AUTH_DB_PASS}"
 _missing=()
 while read -r _role _var; do
@@ -166,6 +178,9 @@ _secret_for() {   # role -> Secret name
 }
 while read -r _role _var; do
     [[ -n "${!_var:-}" ]] || continue
+    # the JWT config-api reads this one at start: apps/frontend/deploy.sh owns it
+    # then (written here only when it is missing, from AUTHENTICATOR_DB_PASS)
+    [[ "$_role" == authenticator && "$_PGRST_DB_WRITE_SECRET" != true ]] && continue
     SECRET_NAME="$(_secret_for "$_role")" DB_ROLE="$_role" DB_PASS="${!_var}" \
         render "$SCRIPT_DIR/k8s/db-role-secret.yaml" SECRET_NAME DB_ROLE DB_PASS \
         | $KUBECTL apply -n "$NAMESPACE" -f - >/dev/null

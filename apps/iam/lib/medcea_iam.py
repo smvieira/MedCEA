@@ -23,6 +23,11 @@ Decision.allow is the verdict. While enforce is false (IAM_ENFORCE, Phase 1) the
 let every request through and log "would refuse …"; when true they answer 401/403/503.
 Nothing logged contains a token.
 
+actor_role(decision) is the person's own platform role for the database actor
+(medcea_auth.set_actor): the roles in the token minus every role another one of them
+includes (routes.json role_includes, the database's _own_role() rule) — exactly one, or
+None (no role, two own roles, or a route table without role_includes).
+
 Wrappers, called by each service on every request (the service loads this file itself
 from /iam/ and reloads it when the mount changes, so a missing ConfigMap heals and a new
 version needs no restart):
@@ -228,6 +233,21 @@ def _check(service, method, path, headers):
         return Decision(True, 200, "allowed", who, key, route["group"])
     cons = sorted({c for g in grants for c in g})
     return Decision(True, 200, f"allowed subject to {', '.join(cons)}", who, key, route["group"], cons)
+
+
+def actor_role(decision):
+    """The one own platform role of a verified person, or None. Composites collapse to
+    the including role (production_manager + operator -> production_manager); two own
+    roles, no role, or a table compiled before role_includes give None."""
+    who = getattr(decision, "who", None) or {}
+    roles = set(who.get("roles") or [])
+    table = _load(ROUTES_FILE) or {}
+    includes = table.get("role_includes")
+    if not roles or not isinstance(includes, dict):
+        return None
+    covered = {inc for r in roles for inc in (includes.get(r) or [])}
+    own = sorted(roles - covered)
+    return own[0] if len(own) == 1 else None
 
 
 def _log(service, method, path, d, enforced):

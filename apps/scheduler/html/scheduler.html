@@ -119,6 +119,7 @@
 
     #toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; border: 1px solid #2a364e; color: #e2e8f0; padding: 12px 20px; border-radius: 10px; font-size: .875rem; display: none; z-index: 200; box-shadow: 0 4px 24px rgba(0,0,0,.5); }
     #toast.err { border-color: #991b1b; color: #fca5a5; }
+    #note { position: fixed; bottom: 80px; right: 24px; max-width: 460px; background: #1e293b; border: 1px solid #92400e; color: #fcd34d; padding: 12px 20px; border-radius: 10px; font-size: .82rem; display: none; z-index: 200; box-shadow: 0 4px 24px rgba(0,0,0,.5); }
 
     .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
     .dot-green { background: #4ade80; } .dot-red { background: #f87171; }
@@ -420,6 +421,11 @@
     </div>
 
     <div class="form-row">
+      <label>Parameter set</label>
+      <select id="sched-params-id"><option value="">— none —</option></select>
+      <div class="param-hint" id="sched-set-hint"></div>
+    </div>
+    <div class="form-row" id="sched-algo-row">
       <label>Algorithm</label>
       <select id="sched-algorithm-id" onchange="onSchedAlgoChange()"><option value="">— use recipe/unit default —</option></select>
       <div class="param-hint" id="sched-algo-hint"></div>
@@ -473,6 +479,7 @@
 </div>
 
 <div id="toast"></div>
+<div id="note" role="status"></div>
 
 <script>
 const API = '/api';
@@ -489,6 +496,33 @@ function toast(msg, isErr=false) {
   t.style.display = 'block';
   clearTimeout(t._tid);
   t._tid = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+// ---- API answers (IAM plan 2.4) -------------------------------------------
+// `warnings` in an answer are the database's advisories (e.g. "IAM_DB_ROLES=false,
+// would refuse: …", or an approved definition that became a draft): shown as a note,
+// never as an error. A refusal names its reason.
+let _iamDbRoles = false;   // X-Medcea-Iam-Db-Roles of /api/param-sets
+function advisory(d) {
+  if (!d || !Array.isArray(d.warnings) || !d.warnings.length) return;
+  const n = document.getElementById('note');
+  n.textContent = 'Advisory, not an error: ' + d.warnings.join(' · ');
+  n.style.display = 'block';
+  clearTimeout(n._tid);
+  n._tid = setTimeout(() => { n.style.display = 'none'; }, 9000);
+}
+async function apiOk(res) {
+  const d = await res.json().catch(() => ({}));
+  advisory(d);
+  return d;
+}
+async function apiFail(res, prefix) {
+  const d = await res.json().catch(() => ({}));
+  const e = d.error || res.statusText || 'Unknown error';
+  const why = {400: 'Not accepted', 401: 'Sign in again — the scheduler needs to know who you are',
+               403: 'Not allowed', 404: 'Not found', 409: 'Not possible now'}[res.status];
+  toast((prefix ? prefix + ': ' : '') + (why ? why + ': ' : '') + e, true);
+  return d;
 }
 
 // ---- Status helpers -------------------------------------------------------
@@ -553,16 +587,16 @@ async function loadActive() {
 
 async function executeRun(runId) {
   const res = await fetch(`${API}/runs/${runId}/execute`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
-  if (res.ok) { toast('Execution started'); loadActive(); }
-  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast(e.error, true); }
+  if (res.ok) { await apiOk(res); toast('Execution started'); loadActive(); }
+  else await apiFail(res);
 }
 
 async function resetRun(runId) {
   const res = await fetch(`${API}/runs/${runId}/status`, {
     method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:'S'})
   });
-  if (res.ok) { toast('Run reset to Queued'); loadActive(); }
-  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast(e.error, true); }
+  if (res.ok) { await apiOk(res); toast('Run reset to Queued'); loadActive(); }
+  else await apiFail(res);
 }
 
 async function openRetryModal(runId) {
@@ -598,14 +632,15 @@ async function submitRetry() {
   const resetRes = await fetch(`${API}/runs/${runId}/status`, {
     method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:'S'})
   });
-  if (!resetRes.ok) { const e = await resetRes.json().catch(()=>({error:'Unknown'})); toast(e.error, true); return; }
+  if (!resetRes.ok) { await apiFail(resetRes); return; }
+  await apiOk(resetRes);
 
   const execRes = await fetch(`${API}/runs/${runId}/execute`, {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({control_algorithm: algo_code, control_algorithm_params: algo_params})
   });
-  if (execRes.ok) { toast(`Run #${runId} retried with ${algo_code}`); }
-  else { toast('Reset but failed to start — check Current Runs', true); }
+  if (execRes.ok) { const d = await apiOk(execRes); toast(`Run #${runId} retried with ${d.algorithm || algo_code}`); }
+  else await apiFail(execRes, 'Reset but not started');
   closeRetryModal();
   loadActive();
 }
@@ -614,13 +649,12 @@ async function stopRun(runId) {
   if (!confirm(`Stop run #${runId}? The process will be terminated and the run marked as Failed.`)) return;
   const res = await fetch(`${API}/runs/${runId}/stop`, {method:'POST'});
   if (res.ok) {
-    const d = await res.json();
-    toast(`Run #${runId} stopped (pid ${d.pid})`);
+    const d = await apiOk(res);
+    toast(d.pid ? `Run #${runId} stopped (pid ${d.pid})` : `Run #${runId} stopped`);
     loadActive();
     loadRuns();
   } else {
-    const e = await res.json().catch(()=>({error:'Unknown'}));
-    toast(e.error, true);
+    await apiFail(res);
   }
 }
 
@@ -703,22 +737,20 @@ async function submitRunNow() {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({unit_id, recipe_id})
   });
-  if (!createRes.ok) {
-    const e = await createRes.json().catch(()=>({error:'Unknown'}));
-    toast(e.error, true); return;
-  }
-  const run = await createRes.json();
+  if (!createRes.ok) { await apiFail(createRes); return; }
+  const run = await apiOk(createRes);
 
   const execRes = await fetch(`${API}/runs/${run.recipe_run_id}/execute`, {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({control_algorithm: algo_code, control_algorithm_params: algo_params})
   });
   if (execRes.ok) {
+    await apiOk(execRes);
     toast('Run started!');
     closeRunNowModal();
     loadActive();
   } else {
-    toast('Run created but failed to start — check Current Runs', true);
+    await apiFail(execRes, 'Run created but not started — check Current Runs');
     closeRunNowModal();
     loadActive();
   }
@@ -752,21 +784,49 @@ async function loadSchedules() {
       <td><div class="actions">
         <button class="btn btn-sm btn-green" onclick="runFromSchedule(${r.schedule_id})">▶ Run Now</button>
         <button class="btn btn-sm" onclick="editSchedule(${r.schedule_id})">Edit</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteSchedule(${r.schedule_id})">Delete</button>
+        <button class="btn btn-sm btn-danger" onclick="retireSchedule(${r.schedule_id})" title="Stops firing; kept in the record">Retire</button>
       </div></td>
     </tr>`).join('');
 }
 
 async function runFromSchedule(sid) {
   const res = await fetch(`${API}/schedules/${sid}/trigger`, {method:'POST'});
-  if (res.ok) { toast('Recipe triggered — check Current Runs'); setTimeout(loadActive, 1500); }
-  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast(e.error, true); }
+  if (res.ok) { await apiOk(res); toast('Recipe triggered — check Current Runs'); setTimeout(loadActive, 1500); }
+  else await apiFail(res);
 }
 
-async function deleteSchedule(sid) {
-  if (!confirm('Delete this schedule?')) return;
-  await fetch(`${API}/schedules/${sid}`, {method:'DELETE'});
-  toast('Schedule deleted'); loadSchedules();
+// A schedule is retired, never deleted: it stops firing, stays in the record, and
+// a retired schedule cannot be edited or re-enabled (make a new one).
+async function retireSchedule(sid) {
+  if (!confirm('Retire this schedule?\n\nIt stops firing and is kept in the record. '
+               + 'A retired schedule cannot be edited or re-enabled; create a new one instead.')) return;
+  const res = await fetch(`${API}/schedules/${sid}`, {method:'DELETE'});
+  if (res.ok) { await apiOk(res); toast('Schedule retired'); loadSchedules(); }
+  else await apiFail(res);
+}
+
+// ---- Parameter sets: required once the database enforces (IAM_DB_ROLES=true) ----
+async function loadParamSets(unitId, selected) {
+  const sel = document.getElementById('sched-params-id');
+  const hint = document.getElementById('sched-set-hint');
+  let sets = [];
+  try {
+    const res = await fetch(`${API}/param-sets` + (unitId ? `?unit_id=${unitId}` : ''));
+    if (res.ok) {
+      _iamDbRoles = res.headers.get('X-Medcea-Iam-Db-Roles') === 'true';
+      sets = await res.json();
+    }
+  } catch (e) { /* the selector stays empty */ }
+  sel.innerHTML = `<option value="">${_iamDbRoles ? '— choose an approved set —' : '— none (inline settings below) —'}</option>`
+    + sets.map(x => `<option value="${x.params_id}" ${x.status !== 'approved' ? 'data-draft="1"' : ''}>`
+                    + `${x.name} · ${x.algorithm_code}${x.status !== 'approved' ? ' (' + x.status + ')' : ''}</option>`).join('');
+  sel.value = selected || '';
+  sel.disabled = !_iamDbRoles;
+  hint.textContent = _iamDbRoles
+    ? 'Required: the schedule runs this approved parameter set (its algorithm and parameters).'
+    : 'For information: until the database enforces approvals (IAM_DB_ROLES=true), the schedule runs the algorithm and overrides below.';
+  document.getElementById('sched-algo-row').style.display = _iamDbRoles ? 'none' : '';
+  if (_iamDbRoles) document.getElementById('sched-params-row').style.display = 'none';
 }
 
 async function editSchedule(sid) {
@@ -788,6 +848,7 @@ async function editSchedule(sid) {
   document.getElementById('sched-algo-params').value = paramsVal;
   document.getElementById('sched-params-row').style.display = r.algorithm_id ? '' : 'none';
   document.getElementById('sched-algo-hint').textContent = _algoHint(r.algorithm_id, paramsVal);
+  await loadParamSets(r.unit_id, r.params_id);
   parseCronIntoBuilder(r.cron_expression);
   document.getElementById('sched-modal').classList.add('open');
 }
@@ -811,6 +872,7 @@ async function openScheduleModal() {
   document.getElementById('sched-min').value  = 0;
   document.querySelectorAll('#dow-grid .dow-btn').forEach((el,i) => el.classList.toggle('active', i===0));
   setFreq('daily');
+  await loadParamSets(null, '');
   document.getElementById('sched-modal').classList.add('open');
 }
 
@@ -830,6 +892,7 @@ async function onUnitChange() {
   const uid = document.getElementById('sched-unit').value;
   if (uid) await loadRecipesForUnit(uid);
   else document.getElementById('sched-recipe').innerHTML = '<option value="">— select unit first —</option>';
+  await loadParamSets(uid || null, document.getElementById('sched-params-id').value);
 }
 
 async function loadRecipesForUnit(uid) {
@@ -854,16 +917,23 @@ async function saveSchedule() {
   if (algoId && algoRaw) {
     try { algorithm_params = JSON.parse(algoRaw); } catch(e) { toast('Invalid JSON in algorithm params', true); return; }
   }
-  const body = {unit_id, recipe_id, cron_expression, description, enabled,
-                algorithm_id: algoId, algorithm_params};
+  const body = {unit_id, recipe_id, cron_expression, description, enabled};
+  if (_iamDbRoles) {
+    const params_id = parseInt(document.getElementById('sched-params-id').value) || null;
+    if (!params_id) { toast('Choose an approved parameter set', true); return; }
+    body.params_id = params_id;
+  } else {
+    body.algorithm_id = algoId;
+    body.algorithm_params = algorithm_params;
+  }
   const sid = _editSid;
   const res = await fetch(sid ? `${API}/schedules/${sid}` : `${API}/schedules`, {
     method: sid ? 'PUT' : 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify(body),
   });
-  if (res.ok) { toast(sid ? 'Schedule updated' : 'Schedule created'); closeScheduleModal(); loadSchedules(); }
-  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast('Error: '+e.error, true); }
+  if (res.ok) { await apiOk(res); toast(sid ? 'Schedule updated' : 'Schedule created'); closeScheduleModal(); loadSchedules(); }
+  else await apiFail(res, 'Not saved');
 }
 
 // ---- Cron builder ---------------------------------------------------------
@@ -1157,8 +1227,12 @@ async function saveLogDefaults() {
     method: 'PUT', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({compress_days, delete_days}),
   });
-  if (res.ok) toast('Defaults saved');
-  else toast('Failed to save defaults', true);
+  if (res.status === 202) {
+    const d = await apiOk(res);
+    toast(d.pending ? 'Proposed — pending qa approval (a retention change applies once a different qa person approves it)'
+                    : 'Nothing changed');
+  } else if (res.ok) { await apiOk(res); toast('Defaults saved'); }
+  else await apiFail(res, 'Defaults not saved');
 }
 
 async function compressLogs() {
@@ -1200,7 +1274,7 @@ async function loadAlgorithms() {
   tb.innerHTML = _algorithms.map(a => {
     const params = JSON.stringify(a.default_params || {}, null, 2);
     return `<tr>
-      <td><span class="algo-badge">${a.algorithm_code}</span></td>
+      <td><span class="algo-badge">${a.algorithm_code}</span>${a.status && a.status !== 'approved' ? `<div style="font-size:.72rem;color:#fbbf24;margin-top:3px">${a.status}</div>` : ''}</td>
       <td style="font-weight:600;color:#e2e8f0">${a.algorithm_name}</td>
       <td style="font-size:.82rem;color:#94a3b8">${a.description || ''}</td>
       <td><textarea id="algo-params-${a.algorithm_id}" style="width:100%;background:#0f172a;border:1px solid #2a364e;border-radius:6px;color:#e2e8f0;padding:6px 8px;font:0.75rem/1.5 monospace;min-height:54px;resize:vertical">${params}</textarea></td>
@@ -1217,8 +1291,8 @@ async function saveAlgorithm(aid) {
     method:'PUT', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({default_params: params}),
   });
-  if (res.ok) { toast('Algorithm defaults saved'); loadAlgorithms(); }
-  else { const e = await res.json().catch(()=>({error:'Unknown'})); toast('Error: '+e.error, true); }
+  if (res.ok) { await apiOk(res); toast('Algorithm defaults saved'); loadAlgorithms(); }
+  else await apiFail(res, 'Not saved');
 }
 
 function _populateAlgoSelect(selId, selectedId) {
@@ -1252,11 +1326,11 @@ async function clearAlgorithmState(uid, ucode) {
   if (!confirm(`Reset learned control memory for ${ucode}?\nThis will clear Q-Learning history — the algorithm will cold-start next run.`)) return;
   const res = await fetch(`${API}/units/${uid}/algorithm-state`, {method:'DELETE'});
   if (res.ok) {
-    const d = await res.json();
+    const d = await apiOk(res);
     toast(`Control memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)`);
     loadUnitMemory();
   } else {
-    toast('Failed to clear memory', true);
+    await apiFail(res, 'Memory not cleared');   // 403 once Q-tables are retired, not deleted
   }
 }
 

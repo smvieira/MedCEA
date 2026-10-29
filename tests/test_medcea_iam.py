@@ -114,6 +114,30 @@ class CheckTest(unittest.TestCase):
             self.assertTrue(self.check("access-profile", "GET", "/_account/api/me",
                                        self.token(["bio_scientist"], azp=azp)).allow, azp)
 
+    def test_actor_role(self):
+        # the own role the scheduler passes to medcea_auth.set_actor (the database's
+        # _own_role rule): composites collapse to the including role
+        def role(roles):
+            return self.iam.actor_role(self.check("scheduler", "GET", "/api/runs", self.token(roles)))
+        self.assertEqual(role(["operator"]), "operator")
+        self.assertEqual(role(["production_manager", "operator"]), "production_manager")
+        self.assertEqual(role(["qa", "auditor"]), "qa")
+        self.assertIsNone(role(["engineer", "qa"]))                 # two own roles
+        self.assertIsNone(role([]))                                 # no platform role
+        self.assertIsNone(self.iam.actor_role(self.check("scheduler", "GET", "/api/runs")))   # no token
+        self.assertIsNone(self.iam.actor_role(None))
+        # a route table compiled before role_includes: None, never a guess
+        tmp = tempfile.mkdtemp()
+        doc = routes.compile(model.load())
+        doc.pop("role_includes")
+        with open(os.path.join(tmp, "routes.json"), "w") as f:
+            json.dump(doc, f)
+        old = _load_lib(tmp)
+        d = self.iam.Decision(True, 200, "allowed", who={"sub": "u-1", "roles": ["operator"]})
+        self.assertIsNone(old.actor_role(d))
+        self.assertEqual(self.iam.actor_role(d), "operator")
+        _load_lib(self.tmp)
+
     def test_missing_files_fail_closed(self):
         # Without a route table every request is refused with 503; whether that refusal
         # is enforced comes from IAM_ENFORCE in the pod when settings.json is missing too.

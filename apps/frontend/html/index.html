@@ -2793,6 +2793,19 @@
     // ── System Configuration ───────────────────────────────────
     const SCHED_API = '/scheduler-api';
 
+    // The scheduler's answers (IAM plan 2.4): `warnings` are the database's
+    // advisories (an approved algorithm became a draft; "IAM_DB_ROLES=false, would
+    // refuse: …") and are shown as information, never as an error; a refusal names
+    // its reason.
+    function schedAdvisory(d) {
+      return d && Array.isArray(d.warnings) && d.warnings.length ? ' — advisory: ' + d.warnings.join(' · ') : '';
+    }
+    async function schedRefusal(res, what) {
+      const d = await res.json().catch(() => ({}));
+      const why = {401: 'sign in again', 403: 'not allowed', 409: 'not possible now'}[res.status];
+      toast(`${what}${why ? ' (' + why + ')' : ''}: ${d.error || res.statusText || 'unknown error'}`, false);
+    }
+
     async function loadAlgorithms() {
       const res = await fetch(`${SCHED_API}/algorithms`);
       const algorithms = await res.json();
@@ -2804,7 +2817,7 @@
       tb.innerHTML = algorithms.map(a => {
         const params = JSON.stringify(a.default_params || {}, null, 2);
         return `<tr>
-          <td><span class="algo-badge">${a.algorithm_code}</span></td>
+          <td><span class="algo-badge">${a.algorithm_code}</span>${a.status && a.status !== 'approved' ? `<div style="font-size:.72rem;color:#fbbf24;margin-top:3px" title="Runs use approved definitions only once the database enforces approvals">${a.status}</div>` : ''}</td>
           <td style="font-weight:600;color:#e2e8f0">${a.algorithm_name}</td>
           <td style="font-size:.82rem;color:#94a3b8">${a.description || ''}</td>
           <td><textarea id="algo-params-${a.algorithm_id}">${params}</textarea></td>
@@ -2821,8 +2834,11 @@
         method:'PUT', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({default_params: params}),
       });
-      if (res.ok) { toast('Algorithm defaults saved'); loadAlgorithms(); }
-      else { toast('Error saving algorithm defaults', false); }
+      if (res.ok) {
+        const d = await res.json().catch(() => ({}));
+        toast('Algorithm defaults saved' + schedAdvisory(d));
+        loadAlgorithms();
+      } else await schedRefusal(res, 'Algorithm defaults not saved');
     }
 
     async function loadUnitMemory() {
@@ -2863,10 +2879,11 @@
       const res = await fetch(`${SCHED_API}/units/${uid}/algorithm-state/${algo}`, {method:'DELETE'});
       if (res.ok) {
         const d = await res.json();
-        toast(`${algo} memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)`);
+        toast(`${algo} memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)` + schedAdvisory(d));
         loadUnitMemory();
       } else {
-        toast('Failed to clear memory', false);
+        // IAM_DB_ROLES=true: a Q-table is retired by an approver, never deleted (403)
+        await schedRefusal(res, 'Memory not cleared');
       }
     }
 

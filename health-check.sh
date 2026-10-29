@@ -78,6 +78,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "  ${CYAN}iamgrants${NC} the database's grants equal the compiled policy: DATABASE"
     echo -e "         (cli.py compile grants --mode verify, in a read-only transaction; drift is a FAIL)"
     echo ""
+    echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
+    echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
+    echo -e "         Secret medcea-jwks, every key id there is still published by the realm"
+    echo -e "         (else FAIL: run ./deploy-infra.sh), and a forged token gets 401; false: WARN"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -300,6 +305,70 @@ check_iamgrants() {
 }
 
 # =============================================================================
+# Check: config-api verifies tokens (IAM plan Phase 2b) — read-only
+# target: NAMESPACE (default $NAMESPACE)
+# =============================================================================
+check_postgrest() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" envs mode want problems=() sum ann b64 realm ip code
+    envs="$(timeout "$TIMEOUT" $KUBECTL get deployment config-api -n "$ns" \
+        -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{.valueFrom.secretKeyRef.name}/{.valueFrom.secretKeyRef.key}{"\n"}{end}' 2>&1)" \
+        || { _record FAIL "$name" "cannot read deployment config-api: ${envs:0:120}"; return; }
+    mode=legacy; grep -q '^PGRST_JWT_SECRET=' <<<"$envs" && mode=jwt
+    want=legacy; [[ "${IAM_POSTGREST_JWT:-false}" == "true" ]] && want=jwt
+    if [[ "$mode" != "$want" ]]; then
+        _record FAIL "$name" "config-api runs $mode, config.env says IAM_POSTGREST_JWT=${IAM_POSTGREST_JWT:-false} (./apps/frontend/deploy.sh)"
+        return
+    fi
+    if [[ "$mode" == legacy ]]; then
+        _record WARN "$name" "IAM_POSTGREST_JWT=false: config-api does not verify tokens (IAM Phase 2b)"
+        return
+    fi
+    # contract C1 (apps/frontend/k8s/config-api-jwt.yaml)
+    local line
+    for line in 'PGRST_JWT_SECRET=medcea-jwks/jwks-sig.json' 'AUTHENTICATOR_PASSWORD=db-authenticator/password' \
+                'PGRST_JWT_AUD=medcea-api/' 'PGRST_JWT_ROLE_CLAIM_KEY=.medcea_pgrst_role/' \
+                'PGRST_DB_PRE_REQUEST=medcea_auth.pre_request/'; do
+        grep -qxF "$line" <<<"$envs" || problems+=("env ${line%%=*} is not ${line#*=}")
+    done
+    grep -q '^PGRST_DB_URI=postgres://authenticator:\$(AUTHENTICATOR_PASSWORD)@' <<<"$envs" \
+        || problems+=("PGRST_DB_URI does not take AUTHENTICATOR_PASSWORD")
+    sum="$($KUBECTL get secret medcea-jwks -n "$ns" -o jsonpath='{.data.jwks-sig\.json}' 2>/dev/null | base64 -d 2>/dev/null | sha256sum | cut -c1-64)"
+    ann="$($KUBECTL get deployment config-api -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.medcea/jwks-checksum}' 2>/dev/null)"
+    [[ -n "$ann" && "$ann" == "$sum" ]] || problems+=("config-api runs other keys than Secret medcea-jwks (./deploy-infra.sh rolls it)")
+    # the pod's password is read at start: the template names the Secret version it was made for
+    ann="$($KUBECTL get deployment config-api -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.medcea/auth-secret-version}' 2>/dev/null)"
+    sum="$($KUBECTL get secret db-authenticator -n "$ns" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null)"
+    [[ -n "$ann" && "$ann" == "$sum" ]] || problems+=("Secret db-authenticator changed since config-api started (./apps/frontend/deploy.sh)")
+    # every key id we hand out must still be published by the realm
+    ip="$($KUBECTL get svc keycloak -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
+    realm="$(curl -s -m "$TIMEOUT" "http://${ip}/realms/${KEYCLOAK_REALM:-medcea}/protocol/openid-connect/certs" 2>/dev/null)"
+    local k stale=""
+    for k in jwks-sig.json jwks.json; do
+        b64="$($KUBECTL get secret medcea-jwks -n "$ns" -o jsonpath="{.data.${k//./\\.}}" 2>/dev/null)"
+        stale+="$(REALM="$realm" python3 -c '
+import json, os, sys
+try:
+    live = {k.get("kid") for k in json.loads(os.environ["REALM"])["keys"]}
+    ours = {k.get("kid") for k in json.loads(sys.stdin.read())["keys"]}
+except Exception:
+    print(" unreadable(" + sys.argv[1] + ")"); sys.exit()
+gone = sorted(x for x in ours - live if x)
+print("".join(" %s:%s" % (sys.argv[1], g) for g in gone) or ("" if ours else " empty(" + sys.argv[1] + ")"))
+' "$k" < <(base64 -d <<<"$b64" 2>/dev/null))"
+    done
+    [[ -z "$stale" ]] || problems+=("key ids the realm no longer publishes or unreadable:${stale} (./deploy-infra.sh)")
+    # a forged token must be refused, never served as anon
+    ip="$($KUBECTL get svc config-api -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
+    code="$(curl -s -o /dev/null -w '%{http_code}' -m "$TIMEOUT" -H 'Authorization: Bearer x.y.z' "http://${ip}:3000/cea_unit?limit=1" 2>/dev/null)"
+    [[ "$code" == 401 ]] || problems+=("a forged Bearer token got HTTP ${code:-no answer}, not 401")
+    if [[ ${#problems[@]} -eq 0 ]]; then
+        _record OK "$name" "config-api verifies tokens; keys current; forged token refused"
+    else
+        local IFS=';'; _record FAIL "$name" "${problems[*]}"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -459,6 +528,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamchain) check_iamchain "$name" "$target" ;;
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
+        postgrest)  check_postgrest "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

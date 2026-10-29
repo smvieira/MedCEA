@@ -19,6 +19,8 @@ from .clear_retained_messages import clear_retained_messages
 from .algorithms import get_algorithm, ALGORITHM_NAMES
 from .load_algorithm_state import load_algorithm_state
 from .save_algorithm_state import save_algorithm_state
+from .actor import RunStopped, acting, has_008b, enforcing, is_superuser
+from .runs import run_context, run_status, record_cycle, finish
 
 __all__ = [
     "connect_to_db",
@@ -42,6 +44,15 @@ __all__ = [
     "ALGORITHM_NAMES",
     "load_algorithm_state",
     "save_algorithm_state",
+    "RunStopped",
+    "acting",
+    "has_008b",
+    "enforcing",
+    "is_superuser",
+    "run_context",
+    "run_status",
+    "record_cycle",
+    "finish",
     sys
 ]
 

@@ -1373,6 +1373,12 @@
   [
    "rr_production_manager",
    "function",
+   "medcea.retire_schedule(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_production_manager",
+   "function",
    "medcea.set_run_status(integer,text)",
    "EXECUTE"
   ],
@@ -2711,6 +2717,12 @@
   [
    "svc_scheduler",
    "function",
+   "medcea.retire_schedule(integer)",
+   "EXECUTE"
+  ],
+  [
+   "svc_scheduler",
+   "function",
    "medcea.set_run_status(integer,text)",
    "EXECUTE"
   ],
@@ -2821,6 +2833,12 @@
    "table",
    "medcea.control_algorithm",
    "UPDATE"
+  ],
+  [
+   "svc_scheduler",
+   "table",
+   "medcea.device",
+   "SELECT"
   ],
   [
    "svc_scheduler",

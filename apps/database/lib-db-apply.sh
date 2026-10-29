@@ -145,8 +145,11 @@ SQL
     _dba_report "$out"
 
     # ── 5. passwords of the roles PostgREST and the broker log in as ──────────
-    # authenticator keeps POSTGRES_PASS until 2b moves config-api to
-    # AUTHENTICATOR_DB_PASS together with it; anon never logs in.
+    # DBPW_authenticator is whatever config-api logs in with right now: the caller
+    # decides (apps/database/deploy.sh by pgrst_db_auth_pass: POSTGRES_PASS for the
+    # legacy config-api, Secret db-authenticator for the JWT one, IAM plan 2b). The
+    # switch itself is apps/frontend/deploy.sh's (infra/lib-postgrest.sh), which sets
+    # this password in the same step as the manifest. anon never logs in.
     {
         echo "SET log_statement = 'none';"
         for r in authenticator mqtt_auth; do

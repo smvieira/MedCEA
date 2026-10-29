@@ -197,7 +197,8 @@ BEGIN
                AND ((c.relnamespace = 'medcea'::regnamespace
                      AND t.tgname IN ('stamp_actor_trg', 'status_guard_trg', 'row_change_trg', 'measurement_zone_trg',
                                       'algorithm_state_event_trg', 'algorithm_state_before_trg',
-                                      'device_serial_change_trg', 'mqtt_service_acl_root_trg'))
+                                      'device_serial_change_trg', 'mqtt_service_acl_root_trg',
+                                      'schedule_retired_guard_trg'))
                  OR (c.relnamespace = 'medcea'::regnamespace AND c.relname IN
                         ('approval', 'pending_change', 'run_release', 'algorithm_state_event', 'row_change',
                          'device_slot_history') AND t.tgname LIKE '%\_no\_truncate')
@@ -229,7 +230,7 @@ END $$;
 
 -- 008b's functions (the 008a ones and the two register_mqtt_credential
 -- versions' v1 stay; v1's body is migration 007's again).
-DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), medcea.log_row_change(),
+DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), medcea.schedule_retired_guard(), medcea.log_row_change(),
     medcea.stamp_measurement_zone(), medcea.device_serial_change(), medcea.mqtt_service_acl_root(),
     medcea.log_algorithm_state(), medcea.algorithm_state_before(), medcea.refuse_change(),
     medcea.reject_non_draft_update(), medcea.immutable_row(), medcea.new_run_defaults(),
@@ -237,10 +238,10 @@ DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), me
     medcea._approve_definition(text, integer, text, text), medcea.approve_recipe(integer),
     medcea.approve_algorithm(integer), medcea.approve_params(integer), medcea.approve_change(text, bigint, text),
     medcea.propose_setting(text, jsonb), medcea.propose_commissioning(integer, boolean, text),
-    medcea._check_run_params(integer, integer, integer),
+    medcea._check_run_params(integer, integer, integer), medcea._check_run_params(integer, integer, integer, integer),
     medcea._check_assigned_run(medcea.recipe_run, text, text, text),
     medcea.start_run(integer), medcea.set_run_status(integer, text), medcea.finish_run(integer, text),
-    medcea.record_cycle(integer, jsonb), medcea.release_run(integer),
+    medcea.record_cycle(integer, jsonb), medcea.release_run(integer), medcea.retire_schedule(integer),
     medcea.retire_algorithm_state(integer, text, text), medcea.register_mqtt_credential(integer, text, text),
     iam_policy.log_user_zone(), iam_policy.log_export(text[], text[]);
 CREATE OR REPLACE FUNCTION medcea.register_mqtt_credential(

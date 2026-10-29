@@ -9,6 +9,10 @@
 --   • unit codes containing a space and '+', for the code CHECK listing
 --   • an existing board credential (serial backfill)
 --   • two iam_policy.history events appended with 008a's function
+--   • for the runner (tests/iam-runner.sh, IAM plan 2.4): an ACTUATOR on the CONTROL
+--     board of IAMT01/Z02, so a run on IAMT01 starts its agent; recipe IAMTEST-R0,
+--     one 0-minute line of two cycles, assigned to IAMT01 (a run ends at once); and
+--     an operator (UUID aaaaaaaa-…) assigned to IAMT01/Z02 for assigned_run
 -- Everything is named IAMT* / iamt*, on its own site. Statements run one by one
 -- (autocommit), so the slot history and the readings get distinct timestamps.
 \set ON_ERROR_STOP on
@@ -47,6 +51,10 @@ INSERT INTO medcea.device (zone_id, device_type, serial_number, dns_name, is_act
 VALUES (:z1b, 'CONTROL', 'iamt-aa:bb:cc:00:00:02', 'iamt01-c-z02', 'Y') RETURNING device_id AS dctl \gset
 INSERT INTO medcea.mqtt_credential (username, password_hash, device_id, role, topic_base)
 VALUES ('iamt01-c-z02', '$7$101$c2VlZHNhbHQ=$c2VlZGhhc2g=', :dctl, 'CONTROL', 'medcea/IAMT01/Z02');
+-- its relay: get_feedback_control_loop_params finds a unit's actuators
+INSERT INTO medcea.component (component_id, device_id, component_type, model, parameters, is_active)
+VALUES (nextval('medcea.component_component_id_seq'), :dctl, 'ACTUATOR', 'iamt-relay',
+        '{"pin_descriptions": {}, "seed": "tests/sql/iam-db-seed.sql"}', 'Y');
 
 -- recipes and their lines
 INSERT INTO medcea.recipe (recipe_name, recipe_description) VALUES ('IAMTEST-R1', 'iamtest recipe 1') RETURNING recipe_id AS r1 \gset
@@ -56,6 +64,12 @@ INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_n
     co2_lower_limit, co2_upper_limit, hr_lower_limit, hr_upper_limit)
 VALUES (:r1, 1, 'IAMT step 1', 1, 18, 24, 'BLUE', 60, 60, 400, 1200, 70, 90),
        (:r2, 1, 'IAMT step 1', 1, 18, 24, 'RED', 60, 60, 400, 1200, 70, 90);
+-- R0: a run of it finishes at once (two cycles of 0 + 0 minutes)
+INSERT INTO medcea.recipe (recipe_name, recipe_description) VALUES ('IAMTEST-R0', 'iamtest: 0-minute runner recipe') RETURNING recipe_id AS r0 \gset
+INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
+    air_temperature_lower_limit, air_temperature_upper_limit, light_type, light_on_minutes, light_off_minutes,
+    co2_lower_limit, co2_upper_limit, hr_lower_limit, hr_upper_limit)
+VALUES (:r0, 1, 'IAMT zero', 2, 18, 24, 'BLUE', 0, 0, 400, 1200, 70, 90);
 
 -- assignments (recipe x unit) and schedules
 SELECT algorithm_id AS pid FROM medcea.control_algorithm WHERE algorithm_code = 'PID' \gset
@@ -66,6 +80,9 @@ VALUES (:r1, :u1, true, NULL, '{"x": 1}');
 -- R1/U2: PID, not allowed — its params are still merged into the schedule's
 INSERT INTO medcea.recipe_unit_permission (recipe_id, unit_id, allowed, algorithm_id, algorithm_params)
 VALUES (:r1, :u2, false, :pid, '{"kp": 2}');
+-- R0/U1: IF_THEN_ELSE with its own parameters (a set of its own, for the runner)
+INSERT INTO medcea.recipe_unit_permission (recipe_id, unit_id, allowed, algorithm_id, algorithm_params)
+VALUES (:r0, :u1, true, NULL, '{"iamt_runner": 0}');
 -- R2/U1: params that are not a JSON object: listed and skipped
 INSERT INTO medcea.recipe_unit_permission (recipe_id, unit_id, allowed, algorithm_id, algorithm_params)
 VALUES (:r2, :u1, true, :pid, '[1, 2]');
@@ -75,6 +92,9 @@ VALUES (:u1, :r1, '0 6 * * *', 'iamtest: inherits the assignment');
 -- S2 on U2/R1: FLC, while the assignment says PID -> FLC defaults || {"kp": 2} || own
 INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, description, algorithm_id, algorithm_params)
 VALUES (:u2, :r1, '0 7 * * *', 'iamtest: algorithm differs from the assignment', :flc, '{"deadband_fraction": 0.2}');
+
+-- the runner's operator: IAMT01/Z02 (W4 assigns its own operators to Z01)
+INSERT INTO iam_policy.user_zone (person_sub, zone_id) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', :z1b);
 
 -- the policy history, appended as 008a does
 SELECT iam_policy.append_history('fixture_seed', '{"n": 1}', 'tests/sql/iam-db-seed.sql');

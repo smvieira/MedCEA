@@ -411,7 +411,16 @@ BEGIN
         RETURN;
     END IF;
     c := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;
-    IF c IS NULL THEN
+    -- without a token PostgREST 12 still sets the claims, to role = the anon role only
+    IF c IS NULL OR c - 'role' = '{{}}'::jsonb THEN
+        -- PostgREST runs the pre-request for its OpenAPI root too, and config-api's
+        -- readiness probe is an anonymous GET /: refused, the pod never became
+        -- Ready. It stays anon, which holds nothing here but USAGE on medcea_auth,
+        -- so the document lists nothing (Phase 2b, P15).
+        IF pg_catalog.current_setting('request.method', true) = 'GET'
+           AND pg_catalog.current_setting('request.path', true) = '/' THEN
+            RETURN;
+        END IF;
         RAISE EXCEPTION 'no token' USING ERRCODE = '28000';
     END IF;
     IF (c ->> 'typ') IS DISTINCT FROM 'Bearer' THEN

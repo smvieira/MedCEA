@@ -387,6 +387,13 @@ with the roles it admits and whether that gate is enforced yet; Grafana, the AI
 Workbench, onboarding and the User Manager (admin only) follow in later phases.
 Finer permissions inside each service are the next steps of the IAM plan.
 
+Two database-side enforcement points exist but are off by default. With
+`IAM_POSTGREST_JWT=true` (Phase 2b) the config API (PostgREST) verifies the
+person's token on every Config UI and onboarding call. A forged or expired token
+is refused, and writes are attributed to the person. `IAM_DB_ROLES=true`
+(Phase 2a) gives each realm role its own database role; it needs Phase 2b and
+the services on their own roles (Phase 2.5) first.
+
 **Existing accounts after this change** keep their role and its meaning, but
 some lose services the policy does not give them:
 
@@ -465,6 +472,7 @@ or delete (the Compliance Plane rule):
 | `iam.access_request` | the request itself, plus the exact e-mail sent with the decision |
 | `iam.user_status_history` | deactivations, activations and role changes: who, whose account, from/to, why |
 | `iam.config_history` | changes to e-mail settings and templates (never the password) — **Change log** tab |
+| `medcea.row_change` | every change to recipes, algorithms, parameter sets, schedules, runs and devices, with the actor stamped on the row (`created_by_*`/`updated_by_*`): the person whose token was verified, `system:scheduler` for a schedule firing (attributed to the person who created it), or `db:<login>` when no person is known |
 
 ---
 

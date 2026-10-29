@@ -37,18 +37,59 @@ log() { echo -e "${GREEN}[frontend]${NC} $*"; }
 
 
 # =============================================================================
-# 1. config-api (PostgREST)
+# 1. config-api (PostgREST) and authenticator's password, one step
 # =============================================================================
-log "Deploying config-api (PostgREST)..."
+# IAM_POSTGREST_JWT=true (IAM plan Phase 2b): PostgREST verifies the person's
+# token (config-api-jwt.yaml) and authenticator logs in with AUTHENTICATOR_DB_PASS
+# from Secret db-authenticator; false renders today's config-api.yaml, with
+# authenticator on POSTGRES_PASS. infra/lib-postgrest.sh (pgrst_deploy) changes the
+# manifest and the role's password together and undoes a failed switch, so this
+# is also the rollback: IAM_POSTGREST_JWT=false, then this script.
+IAM_POSTGREST_JWT="${IAM_POSTGREST_JWT:-false}"
+if [[ "$IAM_POSTGREST_JWT" != "true" && "$IAM_POSTGREST_JWT" != "false" ]]; then
+    echo "ERROR: IAM_POSTGREST_JWT must be true or false, not '$IAM_POSTGREST_JWT'." >&2
+    exit 1
+fi
+source "$REPO_ROOT/apps/database/lib-db-apply.sh"   # _dba_psql, _dba_scram (authenticator's password)
+source "$REPO_ROOT/infra/lib-postgrest.sh"          # pgrst_deploy
+CEA_DB="${POSTGRES_DB:-medcea_db}"
+# Empty when the database component is not installed yet: pgrst_deploy then
+# leaves the password to apps/database/deploy.sh, which follows the live mode.
+PG_POD=$($KUBECTL get pod -n "$NAMESPACE" \
+    -l "app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=${PG_RELEASE:-rdbms}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-render "$SCRIPT_DIR/k8s/config-api.yaml" NAMESPACE POSTGRES_PASS | $KUBECTL apply -n "$NAMESPACE" -f -
+# Order matters for the browser: a JWT config-api accepts a request without a
+# token (anon, as today), but a legacy one answers a Bearer token with 500
+# PGRST300. So true switches config-api before nginx starts sending the token,
+# and false stops nginx sending it (new ConfigMap, config-ui restarted: the conf
+# is a subPath mount, never updated in place) before config-api goes back.
+_nginx_conf() {
+    log "Creating nginx config..."
+    if [[ "$IAM_POSTGREST_JWT" == "true" ]]; then
+        render "$SCRIPT_DIR/k8s/config-ui-nginx-jwt.yaml" NAMESPACE | $KUBECTL apply -n "$NAMESPACE" -f -
+    else
+        render "$SCRIPT_DIR/k8s/config-ui-nginx.yaml" NAMESPACE | $KUBECTL apply -n "$NAMESPACE" -f -
+    fi
+}
+if [[ "$IAM_POSTGREST_JWT" == "false" ]] && [[ "$(pgrst_template_mode "$NAMESPACE" || echo unknown)" != "legacy" ]] \
+   && $KUBECTL get deployment config-ui -n "$NAMESPACE" >/dev/null 2>&1; then
+    _nginx_conf
+    log "Restarting config-ui so it stops sending tokens before config-api stops verifying them..."
+    $KUBECTL rollout restart deployment/config-ui -n "$NAMESPACE" >/dev/null
+    $KUBECTL rollout status deployment/config-ui -n "$NAMESPACE" --timeout=6m >/dev/null \
+        || log "WARNING: config-ui did not finish restarting; continuing (section 7 restarts it again)"
+fi
+
+log "Deploying config-api (PostgREST), IAM_POSTGREST_JWT=$IAM_POSTGREST_JWT..."
+pgrst_deploy "$IAM_POSTGREST_JWT" "$NAMESPACE" "$PG_POD" "$CEA_DB"
 
 # =============================================================================
 # 3. config-ui nginx ConfigMap
 # =============================================================================
-log "Creating nginx config..."
-
-render "$SCRIPT_DIR/k8s/config-ui-nginx.yaml" NAMESPACE | $KUBECTL apply -n "$NAMESPACE" -f -
+# The JWT variant passes the proxy's X-Forwarded-Access-Token to /api/ as
+# Authorization: Bearer and drops the cookie and identity headers there.
+_nginx_conf
 
 # =============================================================================
 # 4. config-ui HTML ConfigMap

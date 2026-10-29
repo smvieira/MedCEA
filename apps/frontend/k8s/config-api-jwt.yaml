@@ -1,0 +1,104 @@
+# config-api with token verification (IAM plan Phase 2b), rendered instead of
+# config-api.yaml when IAM_POSTGREST_JWT=true by infra/lib-postgrest.sh
+# (pgrst_deploy): render FILE NAMESPACE JWKS_CHECKSUM AUTH_SECRET_VERSION.
+#
+# - PostgREST verifies a Bearer token (RS256) against the realm's signing keys,
+#   Secret medcea-jwks key jwks-sig.json (the JWKS filtered to RS256 "sig" keys by
+#   infra/jwks-sig.py: PostgREST would trip over Keycloak's RSA-OAEP key). A
+#   secretKeyRef env is read only at container start, so the pod annotation
+#   carries the key set's checksum and deploy-infra.sh re-rolls the pod when the
+#   realm's keys change (pgrst_roll_if_changed).
+# - The audience must contain medcea-api; an invalid or expired token is a 401,
+#   never a fall back to anon.
+# - The role claim is a key Keycloak never issues, so a verified token always
+#   runs as PGRST_DB_ANON_ROLE first: with IAM_DB_ROLES=false that is today's
+#   anon (stamp_actor still records the person from the verified claims), with
+#   true pre_request() picks the person's rr_<role> or refuses (403).
+# - authenticator logs in with its own password (AUTHENTICATOR_DB_PASS, Secret
+#   db-authenticator), no longer the superuser's; pgrst_deploy changes the role's
+#   password in the same step. The pod annotation medcea/auth-secret-version is
+#   that Secret's resourceVersion, so a changed password starts a new pod (the
+#   env is read only at start). AUTHENTICATOR_PASSWORD must come before
+#   PGRST_DB_URI: Kubernetes expands $(VAR) only from variables listed earlier.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-api
+  namespace: ${NAMESPACE}
+  labels:
+    app: config-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: config-api
+  template:
+    metadata:
+      labels:
+        app: config-api
+      annotations:
+        medcea/jwks-checksum: "${JWKS_CHECKSUM}"
+        medcea/auth-secret-version: "${AUTH_SECRET_VERSION}"
+    spec:
+      containers:
+      - name: postgrest
+        image: postgrest/postgrest:v12.2.3
+        env:
+        - name: AUTHENTICATOR_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-authenticator
+              key: password
+        - name: PGRST_DB_URI
+          value: "postgres://authenticator:$(AUTHENTICATOR_PASSWORD)@rdbms-postgresql.${NAMESPACE}.svc.cluster.local:5432/medcea_db"
+        - name: PGRST_DB_SCHEMAS
+          value: "medcea"
+        - name: PGRST_DB_ANON_ROLE
+          value: "anon"
+        - name: PGRST_JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: medcea-jwks
+              key: jwks-sig.json
+        - name: PGRST_JWT_AUD
+          value: "medcea-api"
+        - name: PGRST_JWT_ROLE_CLAIM_KEY
+          value: ".medcea_pgrst_role"
+        - name: PGRST_DB_PRE_REQUEST
+          value: "medcea_auth.pre_request"
+        - name: PGRST_SERVER_PORT
+          value: "3000"
+        - name: PGRST_LOG_LEVEL
+          value: "warn"
+        ports:
+        - containerPort: 3000
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        # PostgREST builds its schema cache at start and on every reload; under
+        # a 128Mi limit it was OOM-killed in a loop (the kernel prints each kill
+        # on the console). No CPU limit, as for rdbms: it only throttles that load.
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: config-api
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: config-api
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: ClusterIP

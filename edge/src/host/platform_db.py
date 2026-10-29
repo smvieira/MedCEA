@@ -28,9 +28,9 @@ is set — never in argv, where any account on the host can read it, nor in the
 environment. Phase 1 sends nothing: config-api has no jwt-secret yet, so a
 Bearer token would be refused with PGRST300, and any other header would only
 land in PostgREST's request.headers setting for nobody to check. With
-IAM_POSTGREST_JWT=true (Phase 2, set by deploy-infra.sh together with
-config-api's JWT key) the token goes as Authorization: Bearer, and a call
-without a usable one is refused here, before any request is made.
+IAM_POSTGREST_JWT=true (Phase 2b, config.env; apps/frontend/deploy.sh then
+gives config-api the realm's keys) the token goes as Authorization: Bearer, and
+a call without a usable one is refused here, before any request is made.
 """
 
 import base64
@@ -138,22 +138,46 @@ def _auth_headers(method, path):
 
 
 def _phase2_error(code, detail):
-    """A PostgREST refusal of the token, said in terms of what to do; else None."""
+    """A PostgREST refusal of the token, said in terms of what to do; else None.
+
+    PostgREST v12: PGRST300 (no jwt-secret configured) is HTTP 500; PGRST301 (the
+    token cannot be decoded or its signature fails) and PGRST303 (a claim fails:
+    expired, wrong audience) are 401; PGRST302 is an anonymous request where none
+    is allowed. pre_request() refuses with SQLSTATE 28000, which PostgREST answers
+    with 403 and the function's own message.
+    """
     try:
         body = json.loads(detail)
     except ValueError:
         body = {}
     pg = (body.get("code") or "") if isinstance(body, dict) else ""
     msg = ((body.get("message") or "") if isinstance(body, dict) else "") or detail
-    if code == 401 and pg == "PGRST301":
-        return ("the sign-in token expired during the request — re-run; the slot's row is "
-                "updated in place")
-    if code == 401 and pg in ("PGRST300", "PGRST302"):
-        return "config-api has no JWT key — run ./deploy-infra.sh"
-    if code == 403 and "permission denied" in msg:
+    if code == 500 and pg == "PGRST300":
+        return ("config-api has no JWT key — run ./deploy-infra.sh, then "
+                "./apps/frontend/deploy.sh")
+    if code == 401 and pg == "PGRST302":
+        return ("config-api refused an anonymous request — sign in again "
+                "(./edge/flash-device.sh)")
+    if code == 401 and pg in ("PGRST301", "PGRST303"):
+        if "expired" in msg.lower():
+            return ("the sign-in token expired during the request — re-run; the slot's "
+                    "row is updated in place")
+        return "the sign-in token was refused (%s)" % msg
+    if code == 403:
         who = _claims(_token()).get("preferred_username") or "this account"
-        return ("%s's role may not onboard boards — ask an administrator in the User Manager"
-                % who)
+        if "no platform role" in msg:
+            return ("%s has no platform role — ask an administrator in the User Manager"
+                    % who)
+        if "two own roles" in msg:
+            return ("%s holds two platform roles; the database accepts one — ask an "
+                    "administrator in the User Manager" % who)
+        if "may not use the API" in msg:
+            return ("this sign-in's client may not use the platform database (%s)" % msg)
+        if "not an access token" in msg:
+            return "the token sent is not an access token — sign in again"
+        if "permission denied" in msg:
+            return ("%s's role may not onboard boards — ask an administrator in the "
+                    "User Manager" % who)
     return None
 
 

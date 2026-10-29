@@ -5,7 +5,9 @@
 # Rendered with: render tests/k8s/iam-db-fixture.yaml FIXTURE_NS FIXTURE_IMAGE
 # The Secret `pg` (key postgres-password) is created by the script from a random
 # value on stdin, never from this file. Data lives in an emptyDir: deleting the
-# namespace deletes everything.
+# namespace deletes everything. Service rdbms-postgresql gives the pod the name
+# config-api's templates connect to (tests/iam-postgrest.sh deploys config-api here)
+# and the TCP endpoint of tests/iam-runner.sh.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -68,3 +70,15 @@ spec:
     - {name: pg-password, secret: {secretName: pg}}
     - {name: dshm, emptyDir: {medium: Memory}}
     - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rdbms-postgresql
+  namespace: ${FIXTURE_NS}
+spec:
+  selector:
+    app: iam-db-fixture
+  ports:
+    - {name: tcp-postgresql, port: 5432, targetPort: 5432}
+  type: ClusterIP

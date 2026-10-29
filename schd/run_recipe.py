@@ -2,6 +2,7 @@ import sys
 import time
 import os
 import json
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 import cea  # Assuming this is a local module
@@ -53,6 +54,14 @@ def run_recipe(unit_code, recipe_name):
             sys.exit(1)
 
         print("Connected to database.")
+
+        # The legacy path writes recipe_run and its cycles directly: refused once the
+        # database enforces (IAM_DB_ROLES=true), where only the run functions may.
+        if cea.has_008b(conn) and cea.enforcing(conn):
+            print("Refused: IAM_DB_ROLES=true — a run is started through the scheduler "
+                  "(medcea.start_run), which hands it to this script as RECIPE_RUN_ID.", file=sys.stderr)
+            sys.exit(1)
+        conn.rollback()
 
         # Check unit availability and create/retrieve recipe run ID.
         recipe_run_df = cea.check_unit_availability(recipe_name=recipe_name, unit_code=unit_code, conn=conn)
@@ -191,6 +200,136 @@ def run_recipe(unit_code, recipe_name):
             conn.close()
             print("Connection closed.")
 
+def run_recipe_by_id(run_id, unit_code, recipe_name):
+    """
+    Executes run `run_id`, which the scheduler API has already started
+    (medcea.start_run: S -> R, executed_by recorded) — IAM plan 2.4.
+
+    Every write goes through migration 008b's functions, each in its own
+    transaction acting as system:scheduler for the run's creator (cea.actor):
+    per cycle record_cycle(R) -> agent -> record_cycle(C, end), then
+    finish_run(C). Cycles already completed (a re-executed run) are skipped,
+    and a completed cycle is never reopened.
+
+    The algorithm: IAM_DB_ROLES=true — the run's parameter set (params_id);
+    false — CONTROL_ALGORITHM / CONTROL_ALGORITHM_PARAMS from the scheduler
+    (its execute body or the schedule's inline settings, as before).
+
+    A stop (SIGTERM from the stop route, which has already marked the run F)
+    exits 0 and writes nothing. Any other failure marks the current cycle and
+    the run F while the run is still R, and exits 1.
+    """
+    load_dotenv('../installer/.env', override=True)
+    db_config = {
+        "host": os.getenv('DB_HOST'),
+        "database": os.getenv('DB_NAME'),
+        "user": os.getenv('DB_USER'),
+        "password": os.getenv('DB_PASS')
+    }
+    conn = cea.connect_to_db(db_config)
+    if not conn:
+        print("Failed to connect to database.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Connected to database. Recipe run ID: {run_id}")
+
+    # Preconditions: nothing is written when they fail (the scheduler ends a run it
+    # spawned and that is still R once this process exits).
+    try:
+        if not cea.has_008b(conn):
+            raise RuntimeError("RECIPE_RUN_ID needs migration 008b (./apps/database/deploy.sh)")
+        ctx = cea.run_context(conn, run_id)
+        if ctx is None:
+            raise RuntimeError(f"no run {run_id}")
+        if ctx['recipe_run_status'] != 'R':
+            raise RuntimeError(f"run {run_id} is {ctx['recipe_run_status']}, not R (medcea.start_run first)")
+        if ctx['unit_code'] != unit_code or ctx['recipe_name'] != recipe_name:
+            raise RuntimeError(f"run {run_id} is {ctx['recipe_name']!r} on {ctx['unit_code']!r}, "
+                               f"not {recipe_name!r} on {unit_code!r}")
+        enforce = cea.enforcing(conn)
+        conn.rollback()
+        if enforce:
+            if ctx['params_id'] is None or not ctx['set_algorithm']:
+                raise RuntimeError(f"run {run_id} has no parameter set (IAM_DB_ROLES=true)")
+            algo = ctx['set_algorithm'].upper()
+            params = ctx['set_params'] or {}
+            if isinstance(params, str):
+                params = json.loads(params)
+            if os.getenv('CONTROL_ALGORITHM'):
+                print("CONTROL_ALGORITHM ignored: the run uses its parameter set.")
+        else:
+            algo = (os.getenv('CONTROL_ALGORITHM', 'IF_THEN_ELSE') or 'IF_THEN_ELSE').upper()
+            params = json.loads(os.getenv('CONTROL_ALGORITHM_PARAMS', '{}') or '{}')
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        conn.close()
+        sys.exit(1)
+
+    print(f"Unit code: {unit_code}")
+    print(f"Recipe name: {recipe_name}")
+    print(f"Algorithm: {algo} (params_id {ctx['params_id']})")
+
+    current = None          # (recipe_id, seq_id, cycle) of the cycle in progress
+    stopped = False
+    rc = 0
+    try:
+        status_df = cea.get_recipe_run_status(run_id, conn=conn)
+        conn.rollback()
+        for _, row in status_df.drop_duplicates(subset=['recipe_id', 'recipe_item_seq_id', 'recipe_run_id']).iterrows():
+            recipe_id = int(row['recipe_id'])
+            seq_id = int(row['recipe_item_seq_id'])
+            cycles = int(row['cycle_number'])
+            run_params = json.loads(cea.get_recipe_line_item_seq_details(recipe_id, seq_id, conn=conn))
+            conn.rollback()
+            # the algorithm and its parameters go into the cycle's run_params (audit trail)
+            if run_params and isinstance(run_params, list):
+                run_params[0]['control_algorithm'] = algo
+                run_params[0]['control_algorithm_params'] = params
+            print(f"Processing recipe: {recipe_name}, item seq ID {seq_id} with {cycles} cycles (algo={algo})")
+            for cycle_num in range(1, cycles + 1):
+                done = status_df[(status_df['recipe_id'] == recipe_id) &
+                                 (status_df['recipe_item_seq_id'] == seq_id) &
+                                 (status_df['recipe_item_seq_cycle_num'] == cycle_num) &
+                                 (status_df['recipe_line_cycle_run_status'] == 'C')]
+                if not done.empty:
+                    print(f"    Skipping cycle {cycle_num} of item seq {seq_id}. Already completed.")
+                    continue
+                current = (recipe_id, seq_id, cycle_num)
+                cycle_id = cea.record_cycle(conn, run_id, recipe_id, seq_id, cycle_num, 'R', run_params=run_params)
+                print(f"    Running: {cycle_id}")
+                cycle_start = cea.get_recipe_line_seq_cycle_run_start(cycle_id, conn)
+                conn.rollback()
+                cea.run_agent(unit_code, json.dumps(run_params), cycle_start, conn,
+                              run_id=run_id, algorithm=(algo, params))
+                cea.record_cycle(conn, run_id, recipe_id, seq_id, cycle_num, 'C',
+                                 end=datetime.now(timezone.utc).isoformat())
+                print(f"    Completed: {cycle_id}")
+                current = None
+        if cea.finish(conn, run_id, 'C'):
+            print(f"Recipe {recipe_name} in unit {unit_code} completed! Recipe Run Id {run_id} updated to Completed (C)")
+        else:
+            print(f"Recipe run {run_id} is no longer R (stopped meanwhile); not completed.")
+    except cea.RunStopped:
+        stopped = True
+    except BaseException as e:      # SystemExit and KeyboardInterrupt included: the run must not stay R
+        print(f"Error: {e!r}", file=sys.stderr)
+        rc = 1
+        try:
+            if cea.run_status(conn, run_id) == 'R':
+                if current is not None:
+                    cea.record_cycle(conn, run_id, *current, 'F')
+                cea.finish(conn, run_id, 'F')
+                print(f"Recipe run {run_id} marked Failed (F).", file=sys.stderr)
+        except BaseException as e2:
+            print(f"Error marking run {run_id} Failed: {e2!r}", file=sys.stderr)
+    finally:
+        conn.close()
+        print("Connection closed.")
+    if stopped:
+        print(f"Recipe run {run_id} stopped (already marked F by the scheduler).")
+        sys.exit(0)
+    sys.exit(rc)
+
+
 if __name__ == "__main__":
     # Check if the required arguments are provided by the shell script
     if len(sys.argv) != 3:
@@ -201,5 +340,9 @@ if __name__ == "__main__":
     unit_code = sys.argv[1]
     recipe_name = sys.argv[2]
 
-    # Run the recipe with the provided parameters
-    run_recipe(unit_code, recipe_name)
+    # RECIPE_RUN_ID: a run the scheduler API created and started (IAM plan 2.4).
+    # Without it, the legacy command-line path (finds or creates the unit's run).
+    if os.getenv('RECIPE_RUN_ID'):
+        run_recipe_by_id(int(os.environ['RECIPE_RUN_ID']), unit_code, recipe_name)
+    else:
+        run_recipe(unit_code, recipe_name)

@@ -11,6 +11,10 @@ as routes.json and medcea_iam.check() reads (plan Section 3.2). Per service:
   public    routes that need no platform role (`public_routes`); "*" applies to every
             service
   roles     the platform roles: check() keeps only these from a token's groups claim
+  role_includes
+            {role: [the roles it includes, transitively]} (Keycloak composites):
+            medcea_iam.actor_role() takes a person's own role the way the database's
+            _own_role() does — the held roles minus every role another held one includes
 A route missing from the table is refused. The body is canonical JSON, and `digest` is
 its SHA-256, so two compiles of one policy are byte-identical.
 """
@@ -100,6 +104,7 @@ def compile(p, source="defaults.yaml"):
         "policy_version": p.data.get("policy_version"),
         "source": source,
         "roles": sorted(p.roles),
+        "role_includes": {r: sorted(p.effective_roles(r) - {r}) for r in sorted(p.roles)},
         "services": {s: {"clients": sorted(clients.get(s, ())), "routes": t} for s, t in services.items()},
         "public": {s: sorted(r) for s, r in public.items()},
     }

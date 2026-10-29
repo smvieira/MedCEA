@@ -143,6 +143,24 @@ before Keycloak would refuse it.
 `--ui-insecure` falls back to the URL token for a bench with no platform
 deployed. It warns, and it is never the default.
 
+**When config-api checks the token** (`IAM_POSTGREST_JWT=true`, IAM Phase 2b),
+`platform_db.py` sends the operator's token as `Authorization: Bearer` and refuses
+locally without one. The row it writes is then attributed to that person. A
+refusal from config-api is reported as what to do, not as a raw HTTP error:
+
+| config-api answers | The wizard says |
+|---|---|
+| 500 `PGRST300` | config-api has no JWT key: run `./deploy-infra.sh`, then `./apps/frontend/deploy.sh` |
+| 401 `PGRST302` | anonymous request refused: sign in again |
+| 401 `PGRST301`/`PGRST303` with "expired" | the token expired during the request: re-run (the slot's row is updated in place) |
+| 401 `PGRST301`/`PGRST303`, anything else | the sign-in token was refused, with PostgREST's message |
+| 403 "no platform role" / "two own roles" | ask an administrator in the User Manager |
+| 403 "may not use the API" / "not an access token" | this client or token is not accepted: sign in again |
+| 403 "permission denied" | this role may not onboard boards |
+
+The 403 messages come from `medcea_auth.pre_request()`, which acts only once
+`IAM_DB_ROLES=true`. Until then a verified token runs as `anon`, as before.
+
 ```
 ==> Browser UI
     Open this and sign in with Keycloak:

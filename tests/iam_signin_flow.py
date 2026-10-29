@@ -25,6 +25,13 @@ medcea_iam.check(). The calls go to "probes_out" with whether the route table le
 role call the route; `iam_signin_flow.py --compare PROBES LOGS` then checks the services'
 logs: a "would refuse" (or, enforcing, "refused") line naming the account for exactly the
 calls the table refuses, and none saying the token could not be verified (IAM plan 1.2).
+
+With IAM_POSTGREST_JWT=true (Phase 2b) every account the Config UI admits also reads
+/api/cea_unit?limit=1 through it, so its access token reaches PostgREST as Bearer: 200 is
+expected, a 401 means the proxy forwarded a stale token (cookie_refresh vs the realm's
+access token lifespan). Once per account the same call carries forged credentials — a
+client Authorization and X-Forwarded-Access-Token, X-Forwarded-Preferred-Username and
+-Groups headers — which the proxy and nginx must replace or drop: still 200, never 401.
 """
 import html
 import http.cookiejar
@@ -93,10 +100,10 @@ def opener(cacert):
                                        urllib.request.HTTPSHandler(context=ctx))
 
 
-def fetch(op, url, data=None):
+def fetch(op, url, data=None, headers=None):
     """(status, final url, body) — following redirects; an HTTP error is a result, not a raise."""
     try:
-        with op.open(urllib.request.Request(url, data=data), timeout=20) as r:
+        with op.open(urllib.request.Request(url, data=data, headers=headers or {}), timeout=20) as r:
             return r.status, r.geturl(), r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.geturl(), e.read().decode("utf-8", "replace")
@@ -163,6 +170,27 @@ def compare(probes_file, logs_file):
     return 1 if bad or not probes else 0
 
 
+FORGED = {"Authorization": "Bearer x.y.z", "X-Forwarded-Access-Token": "x.y.z",
+          "X-Forwarded-Preferred-Username": "mallory", "X-Forwarded-Groups": "admin"}
+
+
+def postgrest_probes(op, domain, role):
+    """Phase 2b: PostgREST behind the Config UI answers with the proxy's fresh token."""
+    out = []
+    url = f"https://{domain}/api/cea_unit?limit=1"
+    status, _, body = fetch(op, url)
+    if status == 401:
+        out.append(f"{role:18} {domain}/api/cea_unit: 401 — the proxy forwarded an expired or "
+                   f"unverifiable token (freshness: cookie_refresh vs accessTokenLifespan): {body[:100]}")
+    elif status != 200:
+        out.append(f"{role:18} {domain}/api/cea_unit: HTTP {status}, expected 200: {body[:100]}")
+    status, _, body = fetch(op, url, headers=FORGED)
+    if status != 200:
+        out.append(f"{role:18} {domain}/api/cea_unit with forged Authorization/identity headers: "
+                   f"HTTP {status}, expected 200 (the proxy and nginx replace them): {body[:100]}")
+    return out
+
+
 def main():
     if sys.argv[1:2] == ["--compare"]:
         return compare(sys.argv[2], sys.argv[3])
@@ -185,6 +213,8 @@ def main():
                 fails.append(f"{u['role']:18} {domain:24} expected {expect}, got {got}" + (f": {why}" if why else ""))
             if got != "in":
                 continue
+            if var == "CONFIG_DOMAIN" and os.environ.get("IAM_POSTGREST_JWT", "false") == "true":
+                fails.extend(postgrest_probes(op, domain, u["role"]))
             for path, service, seen in PROBES.get(var, []):
                 status, _, _ = fetch(op, f"https://{domain}{path}")
                 svc = table["services"][service]

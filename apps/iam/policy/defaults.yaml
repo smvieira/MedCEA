@@ -503,11 +503,13 @@ service_identities:
     description: >
       One identity: run_recipe.py and run_agent.py run as subprocesses inside the
       scheduler pod with its environment, so they cannot hold a separate credential.
-      Splitting the runner into its own pod is listed in plan Section 7.
+      Splitting the runner into its own pod is listed in plan Section 7. devices R:
+      the runner finds a unit's actuators through medcea.device and medcea.component
+      (get_feedback_control_loop_params); never the credential table (service_only).
     db_role: svc_scheduler
     db_password: SVC_SCHEDULER_DB_PASS
     mqtt_user: scheduler
-    ceiling: {master_data: [R], zones: [R], recipes: [R], controllers: [R, C, U], controllers_state: [R, C, U], schedules: [R, C, U], scheduler_settings: [R, C, U], runs: [R, C, O], run_logs: [R], mqtt_sense: [R], mqtt_control: [R, C]}
+    ceiling: {master_data: [R], devices: [R], zones: [R], recipes: [R], controllers: [R, C, U], controllers_state: [R, C, U], schedules: [R, C, U], scheduler_settings: [R, C, U], runs: [R, C, O], run_logs: [R], mqtt_sense: [R], mqtt_control: [R, C]}
   svc_monitor:
     label: monitor-api.py
     description: Shows runs and telemetry, filtered to the person's zones for operators.
@@ -678,7 +680,7 @@ resource_groups:
       - {type: data, object: medcea.unit_algorithm_params, note: "replaces recipe_unit_permission.algorithm_params and schedule.algorithm_params (migration 008)"}
       - {type: data, function: "medcea.approve_algorithm(int)", level: A}
       - {type: data, function: "medcea.approve_params(int)", level: A}
-      - {type: api, service: scheduler, routes: {"GET /api/algorithms": R, "PUT /api/algorithms/<id>": U}}
+      - {type: api, service: scheduler, routes: {"GET /api/algorithms": R, "PUT /api/algorithms/<id>": U, "GET /api/param-sets": R}}
       - {type: code, object: schd/cea/algorithms/*}
 
   controllers_state:
@@ -742,6 +744,7 @@ resource_groups:
     risk: A wrong schedule starts a run at the wrong time.
     members:
       - {type: data, object: medcea.schedule}
+      - {type: data, function: "medcea.retire_schedule(int)", level: U, note: "DELETE /api/schedules/<id> retires: the schedule stops firing and is kept; a retired schedule cannot be edited"}
       - type: api
         service: scheduler
         routes:

@@ -335,7 +335,8 @@ ui_waiting() { ui_on && info "${DIM}→ answer in the browser${N}" || true; }
 TOK_R=""; TOK_W=""; AUTH_PID=""; EDGE_TOKEN=""; EDGE_USER=""; EDGE_NAME=""; EDGE_ROLE=""
 EDGE_AUTH_CODE=""; EDGE_AUTH_MSG=""
 # Phase 2 of the IAM plan: config-api verifies the token, so a missing one is a
-# refusal rather than a note. deploy-infra.sh sets it with config-api's JWT key.
+# refusal rather than a note. config.env sets it; ./apps/frontend/deploy.sh gives
+# config-api the JWT key in the same step.
 phase2() { [ "${IAM_POSTGREST_JWT:-false}" = true ]; }
 
 # The device-code box. Terminal only: the code is a credential for the next few

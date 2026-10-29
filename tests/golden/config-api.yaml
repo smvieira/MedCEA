@@ -1,0 +1,63 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-api
+  namespace: medcea
+  labels:
+    app: config-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: config-api
+  template:
+    metadata:
+      labels:
+        app: config-api
+    spec:
+      containers:
+      - name: postgrest
+        image: postgrest/postgrest:v12.2.3
+        env:
+        - name: PGRST_DB_URI
+          value: "postgres://authenticator:DUMMYPASS@rdbms-postgresql.medcea.svc.cluster.local:5432/medcea_db"
+        - name: PGRST_DB_SCHEMAS
+          value: "medcea"
+        - name: PGRST_DB_ANON_ROLE
+          value: "anon"
+        - name: PGRST_SERVER_PORT
+          value: "3000"
+        - name: PGRST_LOG_LEVEL
+          value: "warn"
+        ports:
+        - containerPort: 3000
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        # PostgREST builds its schema cache at start and on every reload; under
+        # a 128Mi limit it was OOM-killed in a loop (the kernel prints each kill
+        # on the console). No CPU limit, as for rdbms: it only throttles that load.
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: config-api
+  namespace: medcea
+spec:
+  selector:
+    app: config-api
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: ClusterIP

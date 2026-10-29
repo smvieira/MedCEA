@@ -2,7 +2,7 @@
 # apps/scheduler/deploy.sh — Recipe Schedule Manager
 #
 # Deploys:
-#   1. medcea.schedule table migration
+#   1. a read-only check that migration 008b's functions are there (retire_schedule, start_run)
 #   2. scheduler-api  (Flask + APScheduler, port 8082)
 #   3. scheduler-ui   (nginx SPA, port 80)
 #   4. oauth2-proxy on $SCHEDULER_DOMAIN (Keycloak SSO, any platform role)
@@ -37,12 +37,30 @@ GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 log() { echo -e "${GREEN}[scheduler]${NC} $*"; }
 
 # =============================================================================
-# 1. Database schema — owned by the app, not by this script
+# 1. Database schema — owned by apps/database/deploy.sh (migration 008b)
 # =============================================================================
-# medcea.schedule, its algorithm_* columns, medcea.scheduler_config and their
-# grants are created by _ensure_schema() in scheduler-api.py at every start.
-# The psql heredoc that used to sit here never ran: `kubectl exec` without -i
-# does not pass stdin, so it was a silent no-op. Removed so there is one owner.
+# medcea.schedule, medcea.scheduler_config and the run functions come from
+# migration 008b; the scheduler runs no DDL. This API retires schedules through
+# medcea.retire_schedule() and starts runs through medcea.start_run() (IAM plan
+# 2.4), so it refuses to deploy onto a database without them. Read-only check.
+PG_RELEASE="${PG_RELEASE:-rdbms}"
+CEA_DB="${POSTGRES_DB:-medcea_db}"
+PG_POD=$($KUBECTL get pod -n "$NAMESPACE" \
+    -l "app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=$PG_RELEASE" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [[ -z "$PG_POD" ]]; then
+    echo "ERROR: no PostgreSQL pod (instance=$PG_RELEASE, namespace=$NAMESPACE) — run ./deploy-infra.sh, then ./apps/database/deploy.sh" >&2
+    exit 1
+fi
+_HAVE_FNS=$($KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- \
+    env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" \
+    sh -c 'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -tA -U postgres -d "$0"' "$CEA_DB" \
+    <<<"SELECT to_regprocedure('medcea.retire_schedule(integer)') IS NOT NULL AND to_regprocedure('medcea.start_run(integer)') IS NOT NULL;" \
+    2>/dev/null || true)
+if [[ "$_HAVE_FNS" != "t" ]]; then
+    echo "ERROR: database $CEA_DB has no medcea.retire_schedule()/medcea.start_run() — run ./apps/database/deploy.sh first" >&2
+    exit 1
+fi
 
 # =============================================================================
 # 2. nginx ConfigMap

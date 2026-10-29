@@ -6,7 +6,8 @@ def load_algorithm_state(unit_id: int, algorithm: str, channel: str, conn) -> di
     Load persisted algorithm state from medcea.algorithm_state.
 
     Returns the stored state dict, or {} if no row exists yet
-    (first run / state was purged).
+    (first run / state was purged) or, once migration 008b is loaded, if the
+    state was retired (medcea.retire_algorithm_state: the next run starts cold).
 
     Parameters
     ----------
@@ -15,6 +16,8 @@ def load_algorithm_state(unit_id: int, algorithm: str, channel: str, conn) -> di
     channel   : str   — sensor channel, e.g. 'air_temperature'
     conn      : psycopg2 connection (caller owns transaction / commit)
     """
+    from .actor import has_008b
+    retired = "AND  retired_at IS NULL" if has_008b(conn) else ""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -23,7 +26,7 @@ def load_algorithm_state(unit_id: int, algorithm: str, channel: str, conn) -> di
             WHERE  unit_id   = %s
               AND  algorithm = %s
               AND  channel   = %s
-            """,
+              """ + retired,
             (unit_id, algorithm, channel),
         )
         row = cur.fetchone()

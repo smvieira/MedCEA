@@ -2,12 +2,14 @@
 # tests/iam-db-fixture.sh — IAM Phase 2a on a throwaway PostgreSQL, end to end.
 #
 #   tests/iam-db-fixture.sh up | load | fresh | apply MODE | cycle | logins MODE
+#                           | preflight | postgrest MODE | pgrst-flip | runner MODE
 #                           | fulldown | serverlog | purge | down | run [--keep]
 #
 #   up        namespace medcea-iamtest, Secret pg (a random password, on stdin), one
 #             pod from production's image digest configured like rdbms-postgresql-0
-#             (tests/k8s/iam-db-fixture.yaml); records the fresh image's roles; makes
-#             one random password per database role (never printed)
+#             and Service rdbms-postgresql (tests/k8s/iam-db-fixture.yaml); records
+#             the fresh image's roles; makes one random password per database role,
+#             plus authenticator_legacy (the legacy config-api's, Phase 2b) (never printed)
 #   load      under medcea_lock, only while it reads production: pg_dump --schema-only
 #             --create, pg_dumpall --roles-only --no-role-passwords and pg_dump
 #             --data-only --disable-triggers --schema=medcea (without the credential
@@ -20,19 +22,31 @@
 #             true twice equal; false = A; true = the earlier true
 #   logins M  every svc_* role and rr_admin_login logs in over TCP with its password
 #             (M=true), or cannot (M=false)
+#   preflight infra/lib-postgrest.sh pgrst_preflight against the database as it is:
+#             before 008b IAM_POSTGREST_JWT=true is refused; with 008b and false it
+#             passes (realm keys published first); with IAM_DB_ROLES=true false is refused
+#   postgrest M  tests/iam-postgrest.sh --mode M: config-api verifying tokens (P1–P16)
+#   pgrst-flip   tests/iam-postgrest.sh --flip: the legacy/JWT switches and their undo
+#   runner M  tests/iam-runner.sh --mode M (false|true|legacy, IAM Phase 2.4) with this
+#             tree's schd/ and e97aab6's (extracted with git archive); a NOTE when the
+#             script is not there
 #   fulldown  from true: medcea_db_migrations_down_008b.sql by hand (no logins), then
-#             with -v full=1 (no logins, the managed roles hold nothing), then the
-#             previous commit's DDL, migrations and grants (PREV_REV, default HEAD:
-#             Phase 2a uncommitted); W1 must still pass (tests/iam-db.sh --mode legacy)
+#             with -v full=1 (no logins, the managed roles hold nothing, 008b's and
+#             2.4's functions gone), then the code before Phase 2a's commit (PREV_REV,
+#             default 9ef9852: its DDL, migrations and step-5 grants — an empty grants
+#             extract is a FAIL); W1 must still pass (tests/iam-db.sh --mode legacy)
 #   fresh     an empty database (medcea_fresh): apply false twice, then true; its
 #             catalog must match the upgraded fixture's, apart from the seed
 #   serverlog the pod's log holds none of the generated passwords
 #   purge     drop the databases, run apps/database/purge.sql: pg_roles must equal the
 #             fresh image's
 #   down      delete the namespace
-#   run       up, load, apply false, probes, logins false, apply true, probes, logins
-#             true, apply false, probes (W1 again), cycle, fulldown, fresh, purge, the
-#             server log holds no generated password, down (on exit, unless --keep)
+#   run       up, load, runner legacy, preflight;
+#             apply false, probes, logins false, preflight, postgrest false, runner false,
+#             pgrst-flip;
+#             apply true, probes, logins true, preflight, postgrest true, runner true;
+#             apply false, probes (W1 again), cycle, fulldown, fresh, serverlog, purge,
+#             down (on exit, unless --keep)
 #
 # Production is only read (the dumps and the image lookup). Dumps, snapshots and the
 # generated passwords live in $IAMTEST_DIR (default $TMPDIR/medcea-iamtest, mode 700).
@@ -41,7 +55,7 @@
 set -uo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
-    sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -54,6 +68,7 @@ source infra/lib-mk8s.sh
 source infra/lib-render.sh
 source infra/lib-lock.sh
 source apps/database/lib-db-apply.sh
+source infra/lib-postgrest.sh   # pgrst_preflight (preflight)
 
 FX_NS="medcea-iamtest"
 FX_POD="pg"
@@ -63,7 +78,8 @@ PROD_DB="${POSTGRES_DB:-medcea_db}"
 CEA_DB="medcea_db"
 PROJECT_NAME="${PROJECT_NAME:-medcea}"
 IAMTEST_DIR="${IAMTEST_DIR:-${TMPDIR:-/tmp}/medcea-iamtest}"
-PREV_REV="${PREV_REV:-HEAD}"
+PREV_REV="${PREV_REV:-9ef9852}"   # the last commit before Phase 2a (e97aab6)
+PREV_SCHD_REV="${PREV_SCHD_REV:-e97aab6}"   # the scheduler code before 2.4
 CLI="$REPO_ROOT/apps/iam/compiler/cli.py"
 KEEP=false
 for a in "$@"; do [[ "$a" == --keep ]] && KEEP=true; done
@@ -133,9 +149,11 @@ cmd_up() {
     fx postgres -q -tA -c "SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY 1" > "$IAMTEST_DIR/roles-baseline.txt"
     if [[ ! -f "$IAMTEST_DIR/passwords" ]]; then
         ( umask 077
-          { python3 "$CLI" db-roles --passwords | awk '{print $1}'; echo mqtt_auth; } | sort -u \
+          { python3 "$CLI" db-roles --passwords | awk '{print $1}'; echo mqtt_auth; echo authenticator_legacy; } | sort -u \
             | while read -r r; do printf '%s %s\n' "$r" "$(openssl rand -hex 16)"; done > "$IAMTEST_DIR/passwords" )
     fi
+    grep -q '^authenticator_legacy ' "$IAMTEST_DIR/passwords" \
+        || ( umask 077; printf 'authenticator_legacy %s\n' "$(openssl rand -hex 16)" >> "$IAMTEST_DIR/passwords" )
     pass up "pod $FX_POD ready ($image)"
 }
 
@@ -281,12 +299,25 @@ cmd_fulldown() {
     left="$(managed_grants)"
     [[ -z "$left" ]] && pass fulldown "the managed roles hold nothing after the full down" \
         || { fail fulldown "managed roles still hold $(wc -l <<<"$left") privilege(s):"; sed 's/^/        /' <<<"$left" | head -20; }
+    # 2.4's functions go with 008b's (the down file's drop list)
+    left="$(fx medcea_db -q -tA -c "SELECT string_agg(f, ', ') FROM unnest(ARRAY['medcea.retire_schedule(integer)',
+              'medcea._check_run_params(integer,integer,integer,integer)', 'medcea._check_run_params(integer,integer,integer)',
+              'medcea.schedule_retired_guard()']) f
+             WHERE pg_catalog.to_regprocedure(f) IS NOT NULL")"
+    [[ -z "$left" ]] && pass fulldown "retire_schedule, _check_run_params and schedule_retired_guard gone after the full down" \
+        || fail fulldown "still there after the full down: $left"
     out="$(git show "$PREV_REV:apps/database/medcea_db_ddl.sql" | fx medcea_db -q 2>&1 | grep ERROR | grep -v 'already exists\|multiple primary keys')"
     [[ -z "$out" ]] && pass fulldown "previous DDL" || { echo "$out" | head; fail fulldown "previous DDL"; }
     out="$(git show "$PREV_REV:apps/database/medcea_db_migrations.sql" | fx medcea_db -q 2>&1 | grep ERROR)"
     [[ -z "$out" ]] && pass fulldown "previous migrations" || { echo "$out" | head; fail fulldown "previous migrations"; }
-    out="$(git show "$PREV_REV:apps/database/deploy.sh" | sed -n "/cat > \"\$_GRANTS_SQL\" << 'SQLEOF'/,/^SQLEOF/p" | sed '1d;$d' \
-           | fx medcea_db -q -v ON_ERROR_STOP=1 2>&1)" && pass fulldown "previous step-5 grants" || { echo "$out" | head; fail fulldown "previous grants"; }
+    local grants_sql
+    grants_sql="$(git show "$PREV_REV:apps/database/deploy.sh" | sed -n "/cat > \"\$_GRANTS_SQL\" << 'SQLEOF'/,/^SQLEOF/p" | sed '1d;$d')"
+    if [[ -z "${grants_sql//[[:space:]]/}" ]]; then
+        fail fulldown "no step-5 grants in $PREV_REV:apps/database/deploy.sh (PREV_REV must predate Phase 2a)"
+    else
+        out="$(fx medcea_db -q -v ON_ERROR_STOP=1 2>&1 <<<"$grants_sql")" && pass fulldown "previous step-5 grants ($PREV_REV)" \
+            || { echo "$out" | head; fail fulldown "previous grants"; }
+    fi
     tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --mode legacy --write-probes --section writes || FAILS=$((FAILS + 1))
 }
 
@@ -296,6 +327,15 @@ cmd_fresh() {
     cmd_apply false medcea_fresh
     cmd_apply true medcea_fresh
     snapshot medcea_fresh "$IAMTEST_DIR/F.txt"
+    local f got
+    for f in 'medcea.retire_schedule(integer)' 'medcea._check_run_params(integer,integer,integer,integer)'; do
+        if ! grep -q "${f%%(*}" apps/database/medcea_db_migrations.sql || ! grep -q 'retire_schedule' apps/database/medcea_db_migrations.sql; then
+            echo "        NOTE  $f is not in this tree's migrations (2.4 not merged): not checked"
+            continue
+        fi
+        got="$(fx medcea_fresh -q -tA -c "SELECT pg_catalog.to_regprocedure('$f') IS NOT NULL")"
+        [[ "$got" == t ]] && pass fresh "$f exists on a fresh install" || fail fresh "$f missing on a fresh install"
+    done
     cmd_apply true medcea_db
     snapshot medcea_db "$IAMTEST_DIR/T4.txt"
     # apart from the seed and production's own history: schema iam (apps/access),
@@ -332,6 +372,69 @@ cmd_serverlog() {
     [[ $n -eq 0 ]] && pass serverlog "no generated password in the server log"
 }
 
+cmd_preflight() {
+    step "preflight: infra/lib-postgrest.sh pgrst_preflight against the database as it is"
+    local out rc
+    load_passwords
+    # the fixture's authenticator passwords, as apps/frontend/deploy.sh would see config.env
+    local AUTHENTICATOR_DB_PASS="$DBPW_authenticator" POSTGRES_PASS="$DBPW_authenticator_legacy"
+    if ! pgrst_db_present "$FX_NS" "$FX_POD" "$CEA_DB"; then
+        out="$(pgrst_preflight true "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)"; rc=$?
+        [[ $rc -ne 0 ]] && grep -q 'pre_request' <<<"$out" \
+            && pass preflight "before 008b: IAM_POSTGREST_JWT=true refused (no pre_request)" \
+            || { echo "$out" | sed 's/^/        /'; fail preflight "before 008b: true was not refused for the missing pre_request"; }
+        return
+    fi
+    # realm keys published as deploy-infra.sh does, so only the database decides
+    tests/iam-postgrest.sh --namespace "$FX_NS" --keys --dir "$IAMTEST_DIR" >/dev/null 2>&1 \
+        || { fail preflight "could not publish the test realm keys"; return; }
+    if pgrst_db_enforcing "$FX_NS" "$FX_POD" "$CEA_DB"; then
+        out="$(pgrst_preflight false "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)"; rc=$?
+        [[ $rc -ne 0 ]] && grep -q 'IAM_DB_ROLES=true' <<<"$out" \
+            && pass preflight "IAM_DB_ROLES=true: IAM_POSTGREST_JWT=false refused" \
+            || { echo "$out" | sed 's/^/        /'; fail preflight "IAM_DB_ROLES=true: false was not refused"; }
+        out="$(pgrst_preflight true "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)" \
+            && pass preflight "IAM_DB_ROLES=true: IAM_POSTGREST_JWT=true passes" \
+            || { echo "$out" | sed 's/^/        /'; fail preflight "IAM_DB_ROLES=true: true refused"; }
+    else
+        out="$(pgrst_preflight true "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)" \
+            && pass preflight "008b, IAM_DB_ROLES=false: IAM_POSTGREST_JWT=true passes" \
+            || { echo "$out" | sed 's/^/        /'; fail preflight "008b: true refused"; }
+        out="$(pgrst_preflight false "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)" \
+            && pass preflight "008b, IAM_DB_ROLES=false: IAM_POSTGREST_JWT=false passes" \
+            || { echo "$out" | sed 's/^/        /'; fail preflight "008b: false refused"; }
+        out="$(AUTHENTICATOR_DB_PASS="" pgrst_preflight true "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)" \
+            && fail preflight "an empty AUTHENTICATOR_DB_PASS was not refused" \
+            || pass preflight "an empty AUTHENTICATOR_DB_PASS is refused"
+    fi
+}
+
+cmd_postgrest() {  # MODE
+    step "tests/iam-postgrest.sh --mode $1"
+    tests/iam-postgrest.sh --namespace "$FX_NS" --mode "$1" --dir "$IAMTEST_DIR" || FAILS=$((FAILS + 1))
+}
+
+cmd_pgrst_flip() {
+    step "tests/iam-postgrest.sh --flip"
+    tests/iam-postgrest.sh --namespace "$FX_NS" --flip --dir "$IAMTEST_DIR" || FAILS=$((FAILS + 1))
+}
+
+cmd_runner() {  # MODE (contract C2 of the Phase 2b/2.4 spec)
+    step "tests/iam-runner.sh --mode $1"
+    if [[ ! -x tests/iam-runner.sh ]]; then
+        echo "        NOTE  tests/iam-runner.sh is not in this tree (IAM Phase 2.4): skipped"
+        return
+    fi
+    local prev="$IAMTEST_DIR/prev-$PREV_SCHD_REV"
+    if [[ ! -d "$prev/schd" ]]; then
+        mkdir -p "$prev"
+        git archive "$PREV_SCHD_REV" schd apps/scheduler apps/iam | tar -x -C "$prev" \
+            || { fail runner "cannot extract $PREV_SCHD_REV's schd/"; return; }
+    fi
+    tests/iam-runner.sh --namespace "$FX_NS" --mode "$1" --dir "$IAMTEST_DIR" \
+        --schd "$REPO_ROOT/schd" --prev-schd "$prev/schd" || FAILS=$((FAILS + 1))
+}
+
 cmd_down() {
     step "down"
     $KUBECTL delete namespace "$FX_NS" --ignore-not-found --wait=true >/dev/null && pass down "namespace $FX_NS deleted"
@@ -342,6 +445,10 @@ case "$1" in
     load) cmd_load ;;
     apply) cmd_apply "${2:?apply false|true}" "${3:-medcea_db}" ;;
     logins) cmd_logins "${2:?logins false|true}" ;;
+    preflight) cmd_preflight ;;
+    postgrest) cmd_postgrest "${2:?postgrest false|true}" ;;
+    pgrst-flip) cmd_pgrst_flip ;;
+    runner) cmd_runner "${2:?runner false|true|legacy}" ;;
     cycle) cmd_cycle ;;
     fulldown) cmd_fulldown ;;
     fresh) cmd_fresh ;;
@@ -350,9 +457,12 @@ case "$1" in
     down) cmd_down ;;
     run)
         [[ "$KEEP" == true ]] || trap cmd_down EXIT
-        cmd_up; cmd_load
-        cmd_apply false; probes false; cmd_logins false
-        cmd_apply true; probes true; cmd_logins true
+        cmd_up; cmd_load; cmd_runner legacy
+        cmd_preflight
+        cmd_apply false; probes false; cmd_logins false; cmd_preflight
+        cmd_postgrest false; cmd_runner false; cmd_pgrst_flip
+        cmd_apply true; probes true; cmd_logins true; cmd_preflight
+        cmd_postgrest true; cmd_runner true
         cmd_apply false; probes false
         cmd_cycle
         cmd_fulldown

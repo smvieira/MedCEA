@@ -5,28 +5,55 @@ Flask + APScheduler. Runs as a container sidecar alongside the scheduler-ui ngin
 
 Endpoints:
   GET  /api/units                      — active units with allowed recipe count
-  GET  /api/recipes?unit_id=X          — recipes allowed for a unit
-  GET  /api/schedules                  — all schedules + APScheduler next_run
+  GET  /api/recipes?unit_id=X          — recipes allowed for a unit (+ status, params_id)
+  GET  /api/algorithms                 — control algorithms (+ status)
+  PUT  /api/algorithms/<id>            — edit an algorithm (an approved one becomes a draft)
+  GET  /api/param-sets?unit_id=&algorithm_id=
+                                       — parameter sets a schedule or run may point to
+  GET  /api/schedules                  — live (not retired) schedules + APScheduler next_run
   POST /api/schedules                  — create schedule
-  PUT  /api/schedules/<id>             — update schedule
-  DEL  /api/schedules/<id>             — delete schedule
+  PUT  /api/schedules/<id>             — update schedule (a retired one: 409)
+  DEL  /api/schedules/<id>             — RETIRE schedule (medcea.retire_schedule; kept, never deleted)
   POST /api/schedules/<id>/trigger     — run immediately (background thread)
   GET  /api/runs?limit=N               — recent completed recipe_run rows
   GET  /api/runs/active                — runs with status != C
   GET  /api/runs/<id>                  — single run + full log content
   GET  /api/runs/<id>/log?offset=N     — incremental log tail (live polling)
-  POST /api/runs/<id>/execute          — start execution of a queued run
+  POST /api/runs/<id>/execute          — start execution of a queued run (medcea.start_run)
+  POST /api/runs/<id>/stop             — stop a run (medcea.set_run_status F, then SIGTERM)
   PATCH /api/runs/<id>/status          — reset run to S (retry)
   GET  /api/config/logs                — log management thresholds + stats
-  PUT  /api/config/logs                — save log management thresholds
+  PUT  /api/config/logs                — save thresholds (IAM_DB_ROLES=true: a proposal for qa, 202)
   POST /api/logs/compress?days=N       — gzip .log files older than N days
   POST /api/logs/delete?days=N         — delete .log/.log.gz files older than N days
+
+Who is recorded (IAM plan 2.4). Every regulated write runs in one transaction with
+its actor (the actor lasts one transaction):
+  person    the person whose token medcea_iam verified (g.medcea_iam.who), through
+            medcea_auth.set_actor(sub, person_id or sub, username, own role);
+  system    a schedule firing, a runner that died, the run-once retire: through
+            medcea_auth.set_system_actor('system:scheduler', 'schedule'|'run', id),
+            i.e. the schedule's or run's creator;
+  neither   only while IAM_DB_ROLES=false and as a superuser (postgres, until 2.5):
+            plain DML gets no actor (stamp_actor writes the honest db:postgres); a
+            function that needs an actor gets system:scheduler-unverified (a request
+            without a verified person) or system:scheduler (a background job). Each
+            such fallback is logged with method, path and reason. Under true a request
+            without a person is refused (401) and a system actor without a person
+            creator is refused.
+IAM_DB_ROLES is read from the database setting medcea.iam_db_roles; it only picks the
+code path, the database stays authoritative (medcea.platform_setting, the triggers).
+While false, runs carry no params_id and the algorithm is chosen exactly as before
+(the execute body, else IF_THEN_ELSE; a schedule's inline settings); while true a run
+uses its approved parameter set (params_id) and inline parameters are refused.
+Database WARNINGs (e.g. "IAM_DB_ROLES=false, would refuse: …", a demoted approval) are
+returned in the response as `warnings` — advisory, not errors.
 """
 
-import os, sys, signal, logging, subprocess, threading, gzip, shutil, json, importlib.util
+import os, sys, re, signal, logging, subprocess, threading, gzip, shutil, json, importlib.util, contextlib
 from datetime import timezone, timedelta
 import psycopg2, psycopg2.extras
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g, has_request_context
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -144,9 +171,12 @@ def _write_dotenv():
 # DB helpers
 # ---------------------------------------------------------------------------
 def get_db():
-    return psycopg2.connect(**DB)
+    # rdbms sets client_min_messages=error for every session: ask for the WARNINGs,
+    # which become the answers' advisory `warnings` (tx())
+    return psycopg2.connect(options='-c client_min_messages=warning', **DB)
 
 def query(sql, params=None, *, fetchall=True):
+    """A read in its own connection (no actor: reads are not stamped)."""
     conn = get_db()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -157,16 +187,232 @@ def query(sql, params=None, *, fetchall=True):
     finally:
         conn.close()
 
-def execute(sql, params=None, *, returning=False):
+
+def _note(msg):
+    """An advisory line for the response's `warnings` (logged outside a request)."""
+    if has_request_context():
+        if not hasattr(g, 'db_warnings'):
+            g.db_warnings = []
+        if msg not in g.db_warnings:
+            g.db_warnings.append(msg)
+    else:
+        log.warning('advisory: %s', msg)
+
+
+@contextlib.contextmanager
+def tx():
+    """One connection, one transaction: commit on success, rollback on any error.
+    The database's WARNINGs of a committed transaction become `warnings`."""
     conn = get_db()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params)
-        row = dict(cur.fetchone()) if returning and cur.rowcount else None
+        yield cur
         conn.commit()
-        return row
+        for n in conn.notices:
+            if n.startswith('WARNING:'):
+                _note(n.split(':', 1)[1].strip())
+    except BaseException:
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            pass
+        raise
     finally:
         conn.close()
+
+
+@app.after_request
+def _attach_warnings(resp):
+    w = getattr(g, 'db_warnings', None)
+    if w and resp.is_json:
+        body = resp.get_json(silent=True)
+        if isinstance(body, dict) and 'warnings' not in body:
+            body['warnings'] = w
+            resp.set_data(json.dumps(body))
+    return resp
+
+
+class Refused(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+@app.errorhandler(Refused)
+def _refused(e):
+    return jsonify(error=e.message), e.status
+
+
+@app.errorhandler(psycopg2.Error)
+def _db_error(e):
+    """The database's refusals keep their primary message (42501: 403, or 409 for an
+    approval state; 22023 and 23505: 409); anything else is 'database error', with the
+    SQLSTATE logged (never the statement's parameters or the DSN)."""
+    code = getattr(e, 'pgcode', None)
+    diag = getattr(e, 'diag', None)
+    primary = getattr(diag, 'message_primary', None) if diag else None
+    if code == '42501':
+        status = 409 if primary and ('draft_only' in primary or 'approved' in primary) else 403
+    elif code in ('22023', '23505'):
+        status = 409
+    else:
+        log.error('database error on %s %s: %s %s', request.method, request.path, code or '-', type(e).__name__)
+        return jsonify(error='database error'), 500
+    return jsonify(error=primary or 'refused by the database'), status
+
+
+def _body():
+    return request.get_json(silent=True) or {}
+
+
+# ── IAM_DB_ROLES and the actor ──────────────────────────────────────────────
+# coalesce(current_setting(...)) only picks this client's code path; it grants
+# nothing (a session could SET it). The database decides through
+# medcea.platform_setting, and _set_internal_actor is executable by superusers only.
+def _enforcing(cur):
+    cur.execute("SELECT coalesce(current_setting('medcea.iam_db_roles', true), '') = 'true' AS v")
+    return bool(cur.fetchone()['v'])
+
+
+def _superuser(cur):
+    cur.execute("SELECT coalesce((SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user), false) AS v")
+    return bool(cur.fetchone()['v'])
+
+
+_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
+
+def _decision():
+    return getattr(g, 'medcea_iam', None) if has_request_context() else None
+
+
+def _person():
+    """(sub, person, name, role) of the verified person behind this request, or None.
+    Only g.medcea_iam.who counts (set after the token's signature, issuer, audience
+    and azp were verified); never an X-Forwarded-* header."""
+    d = _decision()
+    who = getattr(d, 'who', None) or {}
+    sub = who.get('sub')
+    if not sub or not _UUID.match(str(sub)):
+        return None
+    iam = _medcea_iam()
+    if iam is not None and hasattr(iam, 'actor_role'):
+        role = iam.actor_role(d)
+    else:                               # a library from before actor_role
+        roles = who.get('roles') or []
+        role = roles[0] if len(roles) == 1 else None
+    if not role:
+        return None
+    return (sub, who.get('person_id') or sub, who.get('username'), role)
+
+
+def _why_no_person():
+    d = _decision()
+    if d is None:
+        return 'access library not loaded'
+    who = getattr(d, 'who', None)
+    if not who:
+        return getattr(d, 'reason', None) or 'no verified token'
+    if not who.get('sub') or not _UUID.match(str(who.get('sub'))):
+        return 'the token has no account uuid'
+    return 'no single own platform role in %s' % (who.get('roles') or '[]')
+
+
+def _act_person(cur, need_fn=False):
+    """Set this transaction's actor to the verified person. Without one: 401 under
+    IAM_DB_ROLES=true; under false, no actor (plain DML is stamped db:<login>), or
+    system:scheduler-unverified when a function needs an actor (superuser only).
+
+    A person the route table refused (d.allow false: an auditor on POST /api/runs)
+    is never made the actor under IAM_DB_ROLES=true, even while IAM_ENFORCE=false
+    only logs the refusal: svc_scheduler holds the table grants for every
+    scheduler write, and the database checks the person's role only inside some
+    functions, so the route decision is the check for plain DML. Under false the
+    write goes on as today (report-only), attributed to that person."""
+    p = _person()
+    d = _decision()
+    if p and d is not None and not getattr(d, 'allow', False):
+        if _enforcing(cur):
+            raise Refused(getattr(d, 'status', None) or 403,
+                          f"refused (IAM_DB_ROLES=true): {getattr(d, 'reason', None) or 'the route check refused this request'}")
+        log.warning('actor: %s %s by %s, whom the route check refused (%s): allowed while IAM_DB_ROLES=false',
+                    request.method, request.path, p[2] or p[0], getattr(d, 'reason', None) or '-')
+    if p:
+        cur.execute("SELECT medcea_auth.set_actor(%s, %s, %s, %s)", p)
+        return p
+    why = _why_no_person()
+    if _enforcing(cur):
+        raise Refused(401, f'a verified person is required (IAM_DB_ROLES=true): {why}')
+    if need_fn:
+        if not _superuser(cur):
+            raise Refused(401, f'a verified person is required: {why}')
+        cur.execute("SELECT medcea_auth._set_internal_actor('system:scheduler-unverified')")
+    log.warning('actor: %s %s without a verified person (%s): %s', request.method, request.path, why,
+                'system:scheduler-unverified' if need_fn else 'no actor, stamped db:%s' % DB['user'])
+    return None
+
+
+def _act_system(cur, kind, ident, need_fn=False):
+    """Set the actor to system:scheduler acting for the creator of schedule/run
+    `ident`. A creator that is no person is refused (42501): re-raised under true or
+    for a non-superuser; under false, no actor, or the internal system:scheduler
+    actor when a function needs one. True when the creator's actor was set."""
+    cur.execute("SAVEPOINT medcea_actor")
+    try:
+        cur.execute("SELECT medcea_auth.set_system_actor('system:scheduler', %s, %s)", (kind, ident))
+        cur.execute("RELEASE SAVEPOINT medcea_actor")
+        return True
+    except psycopg2.Error as e:
+        cur.execute("ROLLBACK TO SAVEPOINT medcea_actor")
+        if e.pgcode != '42501' or _enforcing(cur) or not _superuser(cur):
+            raise
+        log.warning('actor: %s %s has no person-attributed creator (IAM_DB_ROLES=false): %s', kind, ident,
+                    'system:scheduler' if need_fn else 'no actor, stamped db:%s' % DB['user'])
+        if need_fn:
+            cur.execute("SELECT medcea_auth._set_internal_actor('system:scheduler')")
+        return False
+
+
+def _algo_of_set(cur, params_id):
+    if params_id is None:
+        return None
+    cur.execute("SELECT a.algorithm_code FROM medcea.unit_algorithm_params s "
+                "JOIN medcea.control_algorithm a ON a.algorithm_id = s.algorithm_id WHERE s.params_id = %s",
+                (params_id,))
+    row = cur.fetchone()
+    return row['algorithm_code'] if row else None
+
+
+def _insert_run(cur, unit_id, recipe_id, schedule_id=None, params_id=None):
+    cur.execute("""
+        INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active,
+                                       schedule_id, params_id)
+        VALUES (%s, %s, CURRENT_TIMESTAMP, 'S', 'Y', %s, %s)
+        RETURNING recipe_run_id
+    """, (recipe_id, unit_id, schedule_id, params_id))
+    return cur.fetchone()['recipe_run_id']
+
+
+def _active_run(cur, unit_id):
+    cur.execute("SELECT recipe_run_id FROM medcea.recipe_run "
+                "WHERE unit_id=%s AND recipe_run_status IN ('S','R') AND is_active='Y'", (unit_id,))
+    row = cur.fetchone()
+    return row['recipe_run_id'] if row else None
+
+
+def _fail_run(run_id, why):
+    """A background job ends a run the runner left R or S (system actor)."""
+    try:
+        with tx() as cur:
+            cur.execute("SELECT recipe_run_status AS s FROM medcea.recipe_run WHERE recipe_run_id=%s", (run_id,))
+            row = cur.fetchone()
+            if not row or row['s'] not in ('R', 'S'):
+                return
+            _act_system(cur, 'run', run_id, need_fn=True)
+            cur.execute("SELECT medcea.set_run_status(%s, 'F')", (run_id,))
+        log.warning(f'run_id={run_id} was still {row["s"]} ({why}): marked F')
+    except Exception as e:  # noqa: BLE001 — logged, the next recovery tries again
+        log.error(f'run_id={run_id}: could not mark F ({why}): {type(e).__name__} {getattr(e, "pgcode", "")}')
 
 # ---------------------------------------------------------------------------
 # Run recipe as subprocess
@@ -187,79 +433,89 @@ def _find_log_path(unit_code, recipe_name, run_id):
         return legacy
     return path  # return new-style path even if missing (for error messages)
 
-def _run_recipe(unit_code, recipe_name, run_id=None, schedule_id=None,
-                control_algorithm=None, control_algorithm_params=None):
+
+def _spawn(run_id, unit_code, recipe_name, legacy=None, once_sid=None, label=None):
+    """Start run_recipe.py for a run already in R (medcea.start_run). The runner reads
+    RECIPE_RUN_ID; `legacy` = (algorithm, params) only while IAM_DB_ROLES=false (the
+    runner then takes them from CONTROL_ALGORITHM(_PARAMS)); under true it reads the
+    run's parameter set. Popen errors reach the caller; the wait is a thread."""
     log_file = _log_path(unit_code, recipe_name, run_id)
     os.makedirs(LOG_DIR, exist_ok=True)
-    algo = (control_algorithm or 'IF_THEN_ELSE').upper()
-    log.info(f'Triggering run_recipe.py unit={unit_code} recipe="{recipe_name}" run_id={run_id} algo={algo} log={log_file}')
     env = os.environ.copy()
-    env['CONTROL_ALGORITHM']        = algo
-    env['CONTROL_ALGORITHM_PARAMS'] = json.dumps(control_algorithm_params or {})
+    env['RECIPE_RUN_ID'] = str(run_id)
+    env.pop('CONTROL_ALGORITHM', None)
+    env.pop('CONTROL_ALGORITHM_PARAMS', None)
+    algo = label or 'PARAMETER_SET'
+    if legacy is not None:
+        algo = (legacy[0] or 'IF_THEN_ELSE').upper()
+        env['CONTROL_ALGORITHM'] = algo
+        env['CONTROL_ALGORITHM_PARAMS'] = json.dumps(legacy[1] or {})
+    log.info(f'Triggering run_recipe.py unit={unit_code} recipe="{recipe_name}" run_id={run_id} algo={algo} log={log_file}')
     with open(log_file, 'a') as lf:
-        proc = subprocess.Popen(
-            [sys.executable, '-u', os.path.join(SCHD_DIR, 'run_recipe.py'), unit_code, recipe_name],
-            stdout=lf, stderr=subprocess.STDOUT,
-            cwd=SCHD_DIR, env=env,
-        )
-        if run_id is not None:
-            with _active_pids_lock:
-                _active_pids[run_id] = {'pid': proc.pid, 'algo': algo}
-            _write_pid_file(run_id, proc.pid)
-        proc.wait()
-    if run_id is not None:
+        # the pid file in the same lock as Popen: a recovery or a stop never sees a
+        # running child without it
         with _active_pids_lock:
-            _active_pids.pop(run_id, None)
-        _delete_pid_file(run_id)
-    log.info(f'run_recipe.py finished (rc={proc.returncode}) unit={unit_code} run_id={run_id}')
-    # Auto-delete run-once schedules after they fire
-    if schedule_id is not None:
-        try:
-            execute("DELETE FROM medcea.schedule WHERE schedule_id=%s", (schedule_id,))
-            log.info(f'Run-once schedule {schedule_id} deleted after execution')
-        except Exception as e:
-            log.error(f'Failed to delete run-once schedule {schedule_id}: {e}')
+            proc = subprocess.Popen(
+                [sys.executable, '-u', os.path.join(SCHD_DIR, 'run_recipe.py'), unit_code, recipe_name],
+                stdout=lf, stderr=subprocess.STDOUT,
+                cwd=SCHD_DIR, env=env,
+            )
+            _active_pids[run_id] = {'pid': proc.pid, 'algo': algo}
+            _write_pid_file(run_id, proc.pid)
+    threading.Thread(target=_reap, args=(proc, run_id, unit_code, once_sid), daemon=True).start()
+    return proc.pid
 
-def trigger_in_thread(unit_code, recipe_name, run_id=None, schedule_id=None,
-                      control_algorithm=None, control_algorithm_params=None):
-    t = threading.Thread(
-        target=_run_recipe,
-        args=(unit_code, recipe_name, run_id, schedule_id,
-              control_algorithm, control_algorithm_params),
-        daemon=True,
-    )
-    t.start()
+
+def _reap(proc, run_id, unit_code, once_sid):
+    rc = proc.wait()
+    with _active_pids_lock:
+        _active_pids.pop(run_id, None)
+    _delete_pid_file(run_id)
+    log.info(f'run_recipe.py finished (rc={rc}) unit={unit_code} run_id={run_id}')
+    # a runner that died (kill -9, a crash before its own error handling) leaves its
+    # run R: end it here, so the unit is not blocked
+    _fail_run(run_id, f'run_recipe.py exited with rc={rc}')
+    # run-once schedules are retired (never deleted) after they fire
+    if once_sid is not None:
+        try:
+            with tx() as cur:
+                _act_system(cur, 'schedule', once_sid, need_fn=True)
+                cur.execute("SELECT medcea.retire_schedule(%s)", (once_sid,))
+            log.info(f'Run-once schedule {once_sid} retired after execution')
+        except Exception as e:  # noqa: BLE001
+            log.error(f'Failed to retire run-once schedule {once_sid}: {type(e).__name__} {getattr(e, "pgcode", "")}')
 
 # ---------------------------------------------------------------------------
 # APScheduler
 # ---------------------------------------------------------------------------
 scheduler = BackgroundScheduler(timezone='UTC')
 
-def _schedule_trigger_job(schedule_id, unit_id, recipe_id, unit_code, recipe_name,
-                           once_schedule_id=None,
-                           control_algorithm=None, control_algorithm_params=None):
-    """Called by APScheduler. Pre-creates a recipe_run record then fires the subprocess."""
-    conflict = query(
-        "SELECT recipe_run_id FROM medcea.recipe_run WHERE unit_id=%s AND recipe_run_status IN ('S','R') AND is_active='Y'",
-        (unit_id,))
-    if conflict:
-        log.warning(f'Skipping scheduled trigger for {unit_code}/{recipe_name}: unit has active run {conflict[0]["recipe_run_id"]}')
-        return
-    row = execute("""
-        INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active)
-        VALUES (%s, %s, CURRENT_TIMESTAMP, 'S', 'Y')
-        RETURNING recipe_run_id
-    """, (recipe_id, unit_id), returning=True)
-    if not row:
-        log.error(f'Failed to create recipe_run for scheduled trigger {schedule_id}')
-        return
-    trigger_in_thread(unit_code, recipe_name, run_id=row['recipe_run_id'],
-                      schedule_id=once_schedule_id,
-                      control_algorithm=control_algorithm,
-                      control_algorithm_params=control_algorithm_params)
+# A schedule with what a run needs: its unit, recipe, inline algorithm settings
+# (IAM_DB_ROLES=false), its parameter set and the assignment's (true).
+_SCHEDULE_SQL = """
+    SELECT s.schedule_id, s.unit_id, s.recipe_id, s.cron_expression, s.enabled, s.retired_at,
+           s.params_id,
+           s.algorithm_id     AS sched_algo_id,
+           s.algorithm_params AS sched_algo_params,
+           p.algorithm_id     AS perm_algo_id,
+           p.algorithm_params AS perm_algo_params,
+           p.params_id        AS perm_params_id,
+           ca_s.algorithm_code AS sched_algo_code, ca_s.default_params AS sched_defaults,
+           ca_p.algorithm_code AS perm_algo_code,  ca_p.default_params AS perm_defaults,
+           u.unit_code, r.recipe_name
+    FROM medcea.schedule s
+    JOIN medcea.cea_unit u  ON s.unit_id   = u.unit_id
+    JOIN medcea.recipe   r  ON s.recipe_id = r.recipe_id
+    LEFT JOIN medcea.recipe_unit_permission p
+           ON p.unit_id=s.unit_id AND p.recipe_id=s.recipe_id
+    LEFT JOIN medcea.control_algorithm ca_s ON s.algorithm_id = ca_s.algorithm_id
+    LEFT JOIN medcea.control_algorithm ca_p ON p.algorithm_id = ca_p.algorithm_id
+"""
+
 
 def _resolve_algorithm(row):
-    """Resolve effective algorithm code + params from schedule → permission → default chain."""
+    """IAM_DB_ROLES=false only: effective algorithm code + params from the schedule →
+    permission → default chain (what migration 008b copies into parameter sets)."""
     algo_code = row.get('sched_algo_code') or row.get('perm_algo_code') or 'IF_THEN_ELSE'
     defaults  = row.get('sched_defaults') or row.get('perm_defaults') or {}
     params    = {
@@ -270,25 +526,51 @@ def _resolve_algorithm(row):
     return algo_code, params
 
 
+def _schedule_trigger_job(schedule_id):
+    """Called by APScheduler. Everything is read when the schedule fires: a run is
+    created and started (S -> R) as system:scheduler for the schedule's creator, in
+    one transaction, then the runner is spawned. A refusal makes no run."""
+    try:
+        with tx() as cur:
+            cur.execute(_SCHEDULE_SQL + " WHERE s.schedule_id = %s", (schedule_id,))
+            row = cur.fetchone()
+            if not row or row['retired_at'] is not None or not row['enabled']:
+                log.info(f'Schedule {schedule_id} fired but is gone, retired or disabled: skipped')
+                return
+            busy = _active_run(cur, row['unit_id'])
+            if busy:
+                log.warning(f'Skipping scheduled trigger for {row["unit_code"]}/{row["recipe_name"]}: unit has active run {busy}')
+                return
+            enforce = _enforcing(cur)
+            _act_system(cur, 'schedule', schedule_id, need_fn=True)
+            params_id = (row['params_id'] or row['perm_params_id']) if enforce else None
+            run_id = _insert_run(cur, row['unit_id'], row['recipe_id'], schedule_id, params_id)
+            cur.execute("SELECT medcea.start_run(%s)", (run_id,))
+            label = _algo_of_set(cur, params_id) if enforce else None
+    except psycopg2.Error as e:
+        primary = getattr(getattr(e, 'diag', None), 'message_primary', None)
+        log.error(f'Schedule {schedule_id}: no run ({e.pgcode} {primary})')
+        return
+    except Exception as e:  # noqa: BLE001
+        log.error(f'Schedule {schedule_id}: no run ({type(e).__name__})')
+        return
+    once = row['cron_expression'].startswith('once ')
+    try:
+        _spawn(run_id, row['unit_code'], row['recipe_name'],
+               legacy=None if enforce else _resolve_algorithm(row),
+               once_sid=schedule_id if once else None, label=label)
+    except OSError as e:
+        log.error(f'Schedule {schedule_id}: run_recipe.py did not start ({e})')
+        _fail_run(run_id, 'run_recipe.py did not start')
+
+
 def _reload_schedules():
     rows = query("""
-        SELECT s.schedule_id, s.unit_id, s.recipe_id, s.cron_expression, s.enabled,
-               s.algorithm_id     AS sched_algo_id,
-               s.algorithm_params AS sched_algo_params,
-               p.algorithm_id     AS perm_algo_id,
-               p.algorithm_params AS perm_algo_params,
-               ca_s.algorithm_code AS sched_algo_code, ca_s.default_params AS sched_defaults,
-               ca_p.algorithm_code AS perm_algo_code,  ca_p.default_params AS perm_defaults,
-               u.unit_code, r.recipe_name
+        SELECT s.schedule_id, s.cron_expression, s.enabled
         FROM medcea.schedule s
-        JOIN medcea.cea_unit u  ON s.unit_id   = u.unit_id
-        JOIN medcea.recipe   r  ON s.recipe_id = r.recipe_id
-        LEFT JOIN medcea.recipe_unit_permission p
-               ON p.unit_id=s.unit_id AND p.recipe_id=s.recipe_id
-        LEFT JOIN medcea.control_algorithm ca_s ON s.algorithm_id = ca_s.algorithm_id
-        LEFT JOIN medcea.control_algorithm ca_p ON p.algorithm_id = ca_p.algorithm_id
+        WHERE s.retired_at IS NULL
     """)
-    # Remove jobs that are no longer in DB
+    # Remove jobs that are no longer in DB (or were retired)
     db_ids = {f"sched_{r['schedule_id']}" for r in rows}
     for job in scheduler.get_jobs():
         if job.id not in db_ids:
@@ -299,7 +581,6 @@ def _reload_schedules():
         if r['enabled']:
             try:
                 expr = r['cron_expression']
-                algo_code, algo_params = _resolve_algorithm(r)
                 if expr.startswith('once '):
                     dt = datetime.fromisoformat(expr[5:]).replace(tzinfo=timezone.utc)
                     if dt <= datetime.now(timezone.utc):
@@ -311,10 +592,7 @@ def _reload_schedules():
                     _schedule_trigger_job,
                     trigger,
                     id=jid, replace_existing=True,
-                    args=[r['schedule_id'], r['unit_id'], r['recipe_id'],
-                          r['unit_code'], r['recipe_name'],
-                          r['schedule_id'] if expr.startswith('once ') else None,
-                          algo_code, algo_params],
+                    args=[r['schedule_id']],
                 )
             except Exception as e:
                 log.error(f'Bad expression for schedule {r["schedule_id"]}: {e}')
@@ -329,7 +607,7 @@ def _next_run(schedule_id):
     return None
 
 # ---------------------------------------------------------------------------
-# Routes — units / recipes
+# Routes — units / recipes / algorithms / parameter sets
 # ---------------------------------------------------------------------------
 @app.route('/api/units')
 def get_units():
@@ -340,7 +618,7 @@ def get_units():
                    (SELECT jsonb_object_agg(algorithm, cnt)
                     FROM (SELECT algorithm, COUNT(*) AS cnt
                           FROM medcea.algorithm_state
-                          WHERE unit_id = u.unit_id
+                          WHERE unit_id = u.unit_id AND retired_at IS NULL
                           GROUP BY algorithm) t),
                    '{}'::jsonb
                ) AS algorithm_states
@@ -353,16 +631,21 @@ def get_units():
     return jsonify(rows)
 
 
+def _delete_algorithm_state(where, args):
+    """Removed by IAM plan 2.6 (retire_algorithm_state replaces it). Under
+    IAM_DB_ROLES=true a Q-table is never deleted: 403."""
+    with tx() as cur:
+        _act_person(cur)
+        if _enforcing(cur):
+            raise Refused(403, 'a Q-table is retired, never deleted (IAM_DB_ROLES=true): '
+                               'medcea.retire_algorithm_state, by a person holding A on controllers_state')
+        cur.execute("DELETE FROM medcea.algorithm_state WHERE " + where, args)
+        return cur.rowcount
+
+
 @app.route('/api/units/<int:uid>/algorithm-state', methods=['DELETE'])
 def delete_unit_algorithm_state(uid):
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM medcea.algorithm_state WHERE unit_id=%s", (uid,))
-        purged = cur.rowcount
-        conn.commit()
-    finally:
-        conn.close()
+    purged = _delete_algorithm_state("unit_id=%s", (uid,))
     return jsonify({'purged': purged, 'unit_id': uid})
 
 
@@ -371,7 +654,7 @@ def get_unit_algorithm_state(uid, algorithm):
     rows = query("""
         SELECT channel, state, updated_at
         FROM medcea.algorithm_state
-        WHERE unit_id = %s AND algorithm = %s
+        WHERE unit_id = %s AND algorithm = %s AND retired_at IS NULL
         ORDER BY channel
     """, (uid, algorithm.upper()))
     return jsonify(rows)
@@ -379,22 +662,14 @@ def get_unit_algorithm_state(uid, algorithm):
 
 @app.route('/api/units/<int:uid>/algorithm-state/<algorithm>', methods=['DELETE'])
 def delete_unit_algorithm_state_by_algo(uid, algorithm):
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM medcea.algorithm_state WHERE unit_id=%s AND algorithm=%s",
-                    (uid, algorithm.upper()))
-        purged = cur.rowcount
-        conn.commit()
-    finally:
-        conn.close()
+    purged = _delete_algorithm_state("unit_id=%s AND algorithm=%s", (uid, algorithm.upper()))
     return jsonify({'purged': purged, 'unit_id': uid, 'algorithm': algorithm.upper()})
 
 @app.route('/api/algorithms')
 def get_algorithms():
     rows = query("""
         SELECT algorithm_id, algorithm_code, algorithm_name, description,
-               default_params, is_active
+               default_params, is_active, status
         FROM medcea.control_algorithm
         WHERE is_active = 'Y'
         ORDER BY algorithm_id
@@ -404,27 +679,27 @@ def get_algorithms():
 
 @app.route('/api/algorithms/<int:aid>', methods=['PUT'])
 def update_algorithm(aid):
-    d = request.json
-    if 'default_params' in d:
-        try:
-            # Validate it's a JSON object
-            if not isinstance(d['default_params'], dict):
-                return jsonify({'error': 'default_params must be a JSON object'}), 400
-        except Exception:
-            return jsonify({'error': 'invalid default_params'}), 400
-    row = execute("""
-        UPDATE medcea.control_algorithm
-        SET algorithm_name  = COALESCE(%s, algorithm_name),
-            description     = COALESCE(%s, description),
-            default_params  = COALESCE(%s::jsonb, default_params)
-        WHERE algorithm_id = %s
-        RETURNING algorithm_id, algorithm_code, algorithm_name, description, default_params, is_active
-    """, (d.get('algorithm_name'), d.get('description'),
-          json.dumps(d['default_params']) if 'default_params' in d else None,
-          aid), returning=True)
+    d = _body()
+    if 'default_params' in d and not isinstance(d['default_params'], dict):
+        return jsonify({'error': 'default_params must be a JSON object'}), 400
+    with tx() as cur:
+        _act_person(cur)
+        # an approved algorithm becomes a draft (a WARNING) while IAM_DB_ROLES=false;
+        # under true draft_only refuses the edit (409)
+        cur.execute("""
+            UPDATE medcea.control_algorithm
+            SET algorithm_name  = COALESCE(%s, algorithm_name),
+                description     = COALESCE(%s, description),
+                default_params  = COALESCE(%s::jsonb, default_params)
+            WHERE algorithm_id = %s
+            RETURNING algorithm_id, algorithm_code, algorithm_name, description, default_params, is_active, status
+        """, (d.get('algorithm_name'), d.get('description'),
+              json.dumps(d['default_params']) if 'default_params' in d else None,
+              aid))
+        row = cur.fetchone()
     if not row:
         return jsonify({'error': 'not found'}), 404
-    return jsonify(row)
+    return jsonify(dict(row))
 
 
 @app.route('/api/recipes')
@@ -432,7 +707,7 @@ def get_recipes():
     unit_id = request.args.get('unit_id', type=int)
     if unit_id:
         rows = query("""
-            SELECT r.recipe_id, r.recipe_name
+            SELECT r.recipe_id, r.recipe_name, r.status, p.params_id
             FROM medcea.recipe r
             JOIN medcea.recipe_unit_permission p ON r.recipe_id = p.recipe_id
             WHERE p.unit_id = %s AND p.allowed = true AND r.is_active = 'Y'
@@ -440,121 +715,217 @@ def get_recipes():
         """, (unit_id,))
     else:
         rows = query("""
-            SELECT recipe_id, recipe_name FROM medcea.recipe
+            SELECT recipe_id, recipe_name, status FROM medcea.recipe
             WHERE is_active = 'Y' ORDER BY recipe_name
         """)
     return jsonify(rows)
 
+
+@app.route('/api/param-sets')
+def get_param_sets():
+    """Parameter sets a schedule or a run may point to (not retired): for one unit
+    (its own and the any-unit sets) and/or one algorithm. Header
+    X-Medcea-Iam-Db-Roles says whether a schedule must name one."""
+    where, args = ["s.status <> 'retired'"], []
+    unit_id = request.args.get('unit_id', type=int)
+    algorithm_id = request.args.get('algorithm_id', type=int)
+    if unit_id:
+        where.append("(s.unit_id IS NULL OR s.unit_id = %s)")
+        args.append(unit_id)
+    if algorithm_id:
+        where.append("s.algorithm_id = %s")
+        args.append(algorithm_id)
+    with tx() as cur:
+        enforce = _enforcing(cur)
+        cur.execute("""
+            SELECT s.params_id, s.name, s.algorithm_id, a.algorithm_code, s.unit_id, s.params, s.status
+            FROM medcea.unit_algorithm_params s
+            JOIN medcea.control_algorithm a ON a.algorithm_id = s.algorithm_id
+            WHERE """ + " AND ".join(where) + """
+            ORDER BY a.algorithm_code, s.name
+        """, tuple(args))
+        rows = [dict(r) for r in cur.fetchall()]
+    resp = jsonify(rows)
+    # the UI's schedule form: the set is required under IAM_DB_ROLES=true, shown for
+    # information while false (no route of its own for one flag)
+    resp.headers['X-Medcea-Iam-Db-Roles'] = 'true' if enforce else 'false'
+    return resp
+
 # ---------------------------------------------------------------------------
 # Routes — schedules
 # ---------------------------------------------------------------------------
+_SCHEDULE_COLS = """schedule_id, unit_id, recipe_id, cron_expression, enabled, description,
+                    algorithm_id, algorithm_params, params_id"""
+
+
 @app.route('/api/schedules', methods=['GET'])
 def list_schedules():
     rows = query("""
         SELECT s.schedule_id, s.unit_id, s.recipe_id,
                s.cron_expression, s.enabled, s.description,
-               s.algorithm_id, s.algorithm_params,
+               s.algorithm_id, s.algorithm_params, s.params_id,
+               s.created_by_name, s.updated_by_name,
                u.unit_code, r.recipe_name,
                ca.algorithm_code AS algorithm_code
         FROM medcea.schedule s
         JOIN medcea.cea_unit  u  ON s.unit_id   = u.unit_id
         JOIN medcea.recipe    r  ON s.recipe_id = r.recipe_id
         LEFT JOIN medcea.control_algorithm ca ON s.algorithm_id = ca.algorithm_id
+        WHERE s.retired_at IS NULL
         ORDER BY s.schedule_id DESC
     """)
     for r in rows:
         r['next_run'] = _next_run(r['schedule_id'])
     return jsonify(rows)
 
+
+def _schedule_algorithm(cur, d, enforce):
+    """(algorithm_id, algorithm_params json, params_id) a schedule is saved with.
+    true: an approved parameter set is required (params_id) and decides the
+    algorithm; inline parameters are refused. The inline columns get the set's copy,
+    so a rollback to false runs what the set says. false: the inline settings as
+    before; params_id is never written (the guard reserves it to migration 008b)."""
+    if enforce:
+        if d.get('algorithm_params') not in (None, {}):
+            raise Refused(400, 'inline algorithm_params are not accepted (IAM_DB_ROLES=true): choose a parameter set (params_id)')
+        pid = d.get('params_id')
+        if not pid:
+            raise Refused(400, 'params_id is required (IAM_DB_ROLES=true): a schedule runs an approved parameter set')
+        cur.execute("SELECT algorithm_id, params FROM medcea.unit_algorithm_params WHERE params_id = %s", (pid,))
+        s = cur.fetchone()
+        if not s:
+            raise Refused(400, f'no parameter set {pid}')
+        if d.get('algorithm_id') not in (None, s['algorithm_id']):
+            _note('algorithm_id ignored: the parameter set decides the algorithm')
+        return s['algorithm_id'], json.dumps(s['params']), pid
+    if d.get('params_id') is not None:
+        _note('params_id is not stored while IAM_DB_ROLES=false: the schedule runs its inline algorithm settings')
+    ap = d.get('algorithm_params')
+    return d.get('algorithm_id'), (json.dumps(ap) if ap is not None else None), None
+
+
+def _schedule_fields(d):
+    try:
+        return d['unit_id'], d['recipe_id'], d['cron_expression']
+    except KeyError as e:
+        raise Refused(400, f'{e.args[0]} is required')
+
+
 @app.route('/api/schedules', methods=['POST'])
 def create_schedule():
-    d = request.json
-    algo_params = d.get('algorithm_params')
-    row = execute("""
-        INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, enabled, description,
-                                   algorithm_id, algorithm_params)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-        RETURNING schedule_id, unit_id, recipe_id, cron_expression, enabled, description,
-                  algorithm_id, algorithm_params
-    """, (d['unit_id'], d['recipe_id'], d['cron_expression'],
-          d.get('enabled', True), d.get('description', ''),
-          d.get('algorithm_id'), json.dumps(algo_params) if algo_params is not None else None),
-         returning=True)
+    d = _body()
+    unit_id, recipe_id, cron = _schedule_fields(d)
+    with tx() as cur:
+        enforce = _enforcing(cur)
+        _act_person(cur)
+        algo_id, algo_params, params_id = _schedule_algorithm(cur, d, enforce)
+        if enforce:
+            cur.execute(f"""
+                INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, enabled, description,
+                                             algorithm_id, algorithm_params, params_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                RETURNING {_SCHEDULE_COLS}
+            """, (unit_id, recipe_id, cron, d.get('enabled', True), d.get('description', ''),
+                  algo_id, algo_params, params_id))
+        else:
+            cur.execute(f"""
+                INSERT INTO medcea.schedule (unit_id, recipe_id, cron_expression, enabled, description,
+                                             algorithm_id, algorithm_params)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                RETURNING {_SCHEDULE_COLS}
+            """, (unit_id, recipe_id, cron, d.get('enabled', True), d.get('description', ''),
+                  algo_id, algo_params))
+        row = dict(cur.fetchone())
     _reload_schedules()
     row['next_run'] = _next_run(row['schedule_id'])
     return jsonify(row), 201
 
 @app.route('/api/schedules/<int:sid>', methods=['PUT'])
 def update_schedule(sid):
-    d = request.json
-    algo_params = d.get('algorithm_params')
-    row = execute("""
-        UPDATE medcea.schedule
-        SET unit_id=%s, recipe_id=%s, cron_expression=%s, enabled=%s, description=%s,
-            algorithm_id=%s, algorithm_params=%s::jsonb,
-            timestamp_upd=CURRENT_TIMESTAMP
-        WHERE schedule_id=%s
-        RETURNING schedule_id, unit_id, recipe_id, cron_expression, enabled, description,
-                  algorithm_id, algorithm_params
-    """, (d['unit_id'], d['recipe_id'], d['cron_expression'],
-          d.get('enabled', True), d.get('description', ''),
-          d.get('algorithm_id'), json.dumps(algo_params) if algo_params is not None else None,
-          sid), returning=True)
-    if not row:
-        return jsonify({'error': 'not found'}), 404
+    d = _body()
+    unit_id, recipe_id, cron = _schedule_fields(d)
+    with tx() as cur:
+        cur.execute("SELECT retired_at FROM medcea.schedule WHERE schedule_id=%s", (sid,))
+        cur_row = cur.fetchone()
+        if not cur_row:
+            return jsonify({'error': 'not found'}), 404
+        if cur_row['retired_at'] is not None:
+            return jsonify({'error': f'schedule {sid} is retired; create a new one'}), 409
+        enforce = _enforcing(cur)
+        _act_person(cur)
+        algo_id, algo_params, params_id = _schedule_algorithm(cur, d, enforce)
+        set_pid = ", params_id=%s" if enforce else ""
+        args = [unit_id, recipe_id, cron, d.get('enabled', True), d.get('description', ''), algo_id, algo_params]
+        if enforce:
+            args.append(params_id)
+        cur.execute(f"""
+            UPDATE medcea.schedule
+            SET unit_id=%s, recipe_id=%s, cron_expression=%s, enabled=%s, description=%s,
+                algorithm_id=%s, algorithm_params=%s::jsonb{set_pid},
+                timestamp_upd=CURRENT_TIMESTAMP
+            WHERE schedule_id=%s
+            RETURNING {_SCHEDULE_COLS}
+        """, args + [sid])
+        row = dict(cur.fetchone())
     _reload_schedules()
     row['next_run'] = _next_run(sid)
     return jsonify(row)
 
 @app.route('/api/schedules/<int:sid>', methods=['DELETE'])
 def delete_schedule(sid):
-    execute("DELETE FROM medcea.schedule WHERE schedule_id=%s", (sid,))
+    """Retires the schedule (medcea.retire_schedule): it stops firing and is kept.
+    Already retired: 200 and nothing written."""
+    with tx() as cur:
+        cur.execute("SELECT retired_at FROM medcea.schedule WHERE schedule_id=%s", (sid,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'not found'}), 404
+        if row['retired_at'] is None:
+            _act_person(cur, need_fn=True)
+            cur.execute("SELECT medcea.retire_schedule(%s)", (sid,))
     _reload_schedules()
-    return jsonify({'deleted': sid})
+    return jsonify({'retired': sid})
 
 @app.route('/api/schedules/<int:sid>/trigger', methods=['POST'])
 def trigger_schedule(sid):
-    row = query("""
-        SELECT s.unit_id, s.recipe_id,
-               s.algorithm_id     AS sched_algo_id,
-               s.algorithm_params AS sched_algo_params,
-               p.algorithm_id     AS perm_algo_id,
-               p.algorithm_params AS perm_algo_params,
-               ca_s.algorithm_code AS sched_algo_code, ca_s.default_params AS sched_defaults,
-               ca_p.algorithm_code AS perm_algo_code,  ca_p.default_params AS perm_defaults,
-               u.unit_code, r.recipe_name
-        FROM medcea.schedule s
-        JOIN medcea.cea_unit u  ON s.unit_id   = u.unit_id
-        JOIN medcea.recipe   r  ON s.recipe_id = r.recipe_id
-        LEFT JOIN medcea.recipe_unit_permission p
-               ON p.unit_id=s.unit_id AND p.recipe_id=s.recipe_id
-        LEFT JOIN medcea.control_algorithm ca_s ON s.algorithm_id = ca_s.algorithm_id
-        LEFT JOIN medcea.control_algorithm ca_p ON p.algorithm_id = ca_p.algorithm_id
-        WHERE s.schedule_id = %s
-    """, (sid,), fetchall=False)
-    if not row:
-        return jsonify({'error': 'not found'}), 404
-    unit_id, recipe_id = row['unit_id'], row['recipe_id']
-    conflict = query(
-        "SELECT recipe_run_id FROM medcea.recipe_run WHERE unit_id=%s AND recipe_run_status IN ('S','R') AND is_active='Y'",
-        (unit_id,))
-    if conflict:
-        return jsonify({'error': 'Unit already has an active run', 'run_id': conflict[0]['recipe_run_id']}), 409
-    algo_code, algo_params = _resolve_algorithm(row)
-    run_row = execute("""
-        INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active)
-        VALUES (%s, %s, CURRENT_TIMESTAMP, 'S', 'Y')
-        RETURNING recipe_run_id
-    """, (recipe_id, unit_id), returning=True)
-    run_id = run_row['recipe_run_id']
-    trigger_in_thread(row['unit_code'], row['recipe_name'], run_id=run_id,
-                      control_algorithm=algo_code, control_algorithm_params=algo_params)
+    """Run a schedule now: the run is created as the schedule's (system:scheduler for
+    its creator) and started (S -> R) by the person who pressed the button."""
+    with tx() as cur:
+        cur.execute(_SCHEDULE_SQL + " WHERE s.schedule_id = %s", (sid,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'not found'}), 404
+        if row['retired_at'] is not None:
+            return jsonify({'error': f'schedule {sid} is retired'}), 409
+        busy = _active_run(cur, row['unit_id'])
+        if busy:
+            return jsonify({'error': 'Unit already has an active run', 'run_id': busy}), 409
+        enforce = _enforcing(cur)
+        _act_system(cur, 'schedule', sid)
+        params_id = (row['params_id'] or row['perm_params_id']) if enforce else None
+        run_id = _insert_run(cur, row['unit_id'], row['recipe_id'], sid, params_id)
+        _act_person(cur, need_fn=True)
+        cur.execute("SELECT medcea.start_run(%s)", (run_id,))
+        label = _algo_of_set(cur, params_id) if enforce else None
+    legacy = None if enforce else _resolve_algorithm(row)
+    algo_code = legacy[0] if legacy else (label or 'PARAMETER_SET')
+    try:
+        _spawn(run_id, row['unit_code'], row['recipe_name'], legacy=legacy, label=label)
+    except OSError as e:
+        _fail_run(run_id, 'run_recipe.py did not start')
+        return jsonify({'error': f'run_recipe.py did not start: {e}', 'run_id': run_id}), 500
     return jsonify({'triggered': True, 'run_id': run_id, 'algorithm': algo_code,
                     'log': _log_path(row['unit_code'], row['recipe_name'], run_id)})
 
 # ---------------------------------------------------------------------------
 # Routes — runs
 # ---------------------------------------------------------------------------
+_RUN_COLS = """rr.recipe_run_id, rr.recipe_run_status,
+               rr.recipe_run_start, rr.recipe_run_end,
+               rr.params_id, rr.schedule_id,
+               rr.created_by_name, rr.executed_by_name"""
+
+
 def _fmt_runs(rows):
     for r in rows:
         r['recipe_run_start'] = r['recipe_run_start'].isoformat() if r['recipe_run_start'] else None
@@ -563,9 +934,8 @@ def _fmt_runs(rows):
 
 @app.route('/api/runs/active')
 def list_active_runs():
-    rows = query("""
-        SELECT rr.recipe_run_id, rr.recipe_run_status,
-               rr.recipe_run_start, rr.recipe_run_end,
+    rows = query(f"""
+        SELECT {_RUN_COLS},
                u.unit_id, u.unit_code, r.recipe_id, r.recipe_name
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
@@ -584,9 +954,8 @@ def list_active_runs():
 @app.route('/api/runs')
 def list_runs():
     limit = request.args.get('limit', 50, type=int)
-    rows = query("""
-        SELECT rr.recipe_run_id, rr.recipe_run_status,
-               rr.recipe_run_start, rr.recipe_run_end,
+    rows = query(f"""
+        SELECT {_RUN_COLS},
                u.unit_code, r.recipe_name
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
@@ -599,38 +968,69 @@ def list_runs():
 
 @app.route('/api/runs', methods=['POST'])
 def create_run():
-    d = request.json
-    unit_id, recipe_id = d['unit_id'], d['recipe_id']
-    conflict = query(
-        "SELECT recipe_run_id FROM medcea.recipe_run WHERE unit_id=%s AND recipe_run_status IN ('S','R') AND is_active='Y'",
-        (unit_id,))
-    if conflict:
-        return jsonify({'error': 'Unit already has an active run', 'run_id': conflict[0]['recipe_run_id']}), 409
-    row = execute("""
-        INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active)
-        VALUES (%s, %s, CURRENT_TIMESTAMP, 'S', 'Y')
-        RETURNING recipe_run_id
-    """, (recipe_id, unit_id), returning=True)
-    return jsonify(row), 201
+    d = _body()
+    try:
+        unit_id, recipe_id = d['unit_id'], d['recipe_id']
+    except KeyError as e:
+        return jsonify({'error': f'{e.args[0]} is required'}), 400
+    with tx() as cur:
+        busy = _active_run(cur, unit_id)
+        if busy:
+            return jsonify({'error': 'Unit already has an active run', 'run_id': busy}), 409
+        enforce = _enforcing(cur)
+        _act_person(cur)
+        params_id = None
+        if enforce:
+            # the body's set, else the assignment's; start_run refuses a run without one
+            params_id = d.get('params_id')
+            if params_id is None:
+                cur.execute("SELECT params_id FROM medcea.recipe_unit_permission WHERE unit_id=%s AND recipe_id=%s",
+                            (unit_id, recipe_id))
+                p = cur.fetchone()
+                params_id = p['params_id'] if p else None
+        elif d.get('params_id') is not None:
+            _note('params_id is not stored while IAM_DB_ROLES=false: the run is executed with the algorithm chosen at execute')
+        run_id = _insert_run(cur, unit_id, recipe_id, None, params_id)
+    return jsonify({'recipe_run_id': run_id}), 201
 
 @app.route('/api/runs/<int:run_id>/status', methods=['PATCH'])
 def set_run_status(run_id):
-    d = request.json
-    new_status = d.get('status')
-    if new_status != 'S':
+    """Reset a run to S (retry). S: nothing to do. R: 409. F: medcea.set_run_status.
+    C: reopening a completed run is refused once it is released or under
+    IAM_DB_ROLES=true; before that it is a direct update, reported as a warning."""
+    d = _body()
+    if d.get('status') != 'S':
         return jsonify({'error': 'Only reset to S is supported'}), 400
-    current = query("SELECT recipe_run_status FROM medcea.recipe_run WHERE recipe_run_id=%s", (run_id,), fetchall=False)
-    if not current:
-        return jsonify({'error': 'not found'}), 404
-    if current['recipe_run_status'] == 'R':
-        return jsonify({'error': 'Cannot modify a currently running recipe'}), 409
-    execute("UPDATE medcea.recipe_run SET recipe_run_status='S', recipe_run_end=NULL, timestamp_upd=CURRENT_TIMESTAMP WHERE recipe_run_id=%s", (run_id,))
+    with tx() as cur:
+        cur.execute("SELECT recipe_run_status AS s FROM medcea.recipe_run WHERE recipe_run_id=%s", (run_id,))
+        current = cur.fetchone()
+        if not current:
+            return jsonify({'error': 'not found'}), 404
+        st = current['s']
+        if st == 'S':
+            return jsonify({'updated': run_id, 'status': 'S'})
+        if st == 'R':
+            return jsonify({'error': 'Cannot modify a currently running recipe'}), 409
+        if st == 'F':
+            _act_person(cur, need_fn=True)
+            cur.execute("SELECT medcea.set_run_status(%s, 'S')", (run_id,))
+            return jsonify({'updated': run_id, 'status': 'S'})
+        # C
+        cur.execute("SELECT 1 AS x FROM medcea.run_release WHERE recipe_run_id=%s", (run_id,))
+        if cur.fetchone():
+            return jsonify({'error': f'run {run_id} is released; a released run is never reopened'}), 409
+        if _enforcing(cur):
+            return jsonify({'error': f'run {run_id} is completed; a completed run is not reopened (IAM_DB_ROLES=true)'}), 409
+        _act_person(cur)
+        cur.execute("UPDATE medcea.recipe_run SET recipe_run_status='S', recipe_run_end=NULL, "
+                    "timestamp_upd=CURRENT_TIMESTAMP WHERE recipe_run_id=%s", (run_id,))
+        _note(f'IAM_DB_ROLES=false, would refuse: reopening completed run {run_id}')
     return jsonify({'updated': run_id, 'status': 'S'})
 
 @app.route('/api/runs/<int:run_id>/execute', methods=['POST'])
 def execute_run(run_id):
     row = query("""
-        SELECT u.unit_code, r.recipe_name, rr.recipe_run_status
+        SELECT u.unit_code, r.recipe_name, rr.recipe_run_status, rr.params_id
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
@@ -659,20 +1059,47 @@ def execute_run(run_id):
                 'error': f'Unit {row["unit_code"]} already has a running recipe',
                 'run_id': busy[0]['recipe_run_id']
             }), 409
-    d = request.json or {}
-    algo   = (d.get('control_algorithm') or 'IF_THEN_ELSE').upper()
-    params = d.get('control_algorithm_params') or {}
-    trigger_in_thread(row['unit_code'], row['recipe_name'], run_id=run_id,
-                      control_algorithm=algo, control_algorithm_params=params)
+    d = _body()
+    with tx() as cur:
+        enforce = _enforcing(cur)
+        _act_person(cur, need_fn=True)
+        cur.execute("SELECT medcea.start_run(%s)", (run_id,))
+        label = _algo_of_set(cur, row['params_id']) if enforce else None
+    if enforce:
+        legacy = None
+        if d.get('control_algorithm') or d.get('control_algorithm_params'):
+            _note('control_algorithm(_params) ignored (IAM_DB_ROLES=true): the run uses its parameter set')
+        algo = label or 'PARAMETER_SET'
+    else:
+        legacy = ((d.get('control_algorithm') or 'IF_THEN_ELSE').upper(), d.get('control_algorithm_params') or {})
+        algo = legacy[0]
+    try:
+        _spawn(run_id, row['unit_code'], row['recipe_name'], legacy=legacy, label=label)
+    except OSError as e:
+        with tx() as cur:
+            _act_person(cur, need_fn=True)
+            cur.execute("SELECT medcea.set_run_status(%s, 'F')", (run_id,))
+        return jsonify({'error': f'run_recipe.py did not start: {e}'}), 500
     return jsonify({'executing': True, 'unit': row['unit_code'], 'recipe': row['recipe_name'],
                     'algorithm': algo})
 
 @app.route('/api/runs/<int:run_id>/stop', methods=['POST'])
 def stop_run(run_id):
+    """R or S: medcea.set_run_status(F) as the person, then SIGTERM (a refusal kills
+    nothing). F: already stopped; SIGTERM if a process is still tracked. C: 409."""
+    with tx() as cur:
+        cur.execute("SELECT recipe_run_status AS s FROM medcea.recipe_run WHERE recipe_run_id=%s", (run_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'not found'}), 404
+        if row['s'] == 'C':
+            return jsonify({'error': f'run {run_id} is completed'}), 409
+        if row['s'] in ('R', 'S'):
+            _act_person(cur, need_fn=True)
+            cur.execute("SELECT medcea.set_run_status(%s, 'F')", (run_id,))
     with _active_pids_lock:
         entry = _active_pids.get(run_id)
         pid = entry['pid'] if entry else None
-    # Send SIGTERM if we have a tracked PID; otherwise just update DB (e.g. after pod restart)
     if pid:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -684,30 +1111,14 @@ def stop_run(run_id):
         with _active_pids_lock:
             _active_pids.pop(run_id, None)
     else:
-        log.info(f'No tracked pid for run_id={run_id} — marking stopped in DB only')
-    # Update DB
-    conn = get_db()
-    try:
-        sys.path.insert(0, SCHD_DIR)
-        from cea.update_recipe_run import update_recipe_run
-        update_recipe_run(run_id, 'F', conn)  # commits internally
-        execute(
-            "UPDATE medcea.recipe_run SET recipe_run_end = CURRENT_TIMESTAMP WHERE recipe_run_id = %s",
-            (run_id,)
-        )
-        log.info(f'run_id={run_id} marked F (stopped) in DB')
-    except Exception as e:
-        log.error(f'DB update after stop failed for run_id={run_id}: {e}')
-        return jsonify({'error': f'DB update failed: {e}'}), 500
-    finally:
-        conn.close()
+        log.info(f'No tracked pid for run_id={run_id} — marked stopped in DB only')
+    log.info(f'run_id={run_id} marked F (stopped) in DB')
     return jsonify({'stopped': True, 'run_id': run_id, 'pid': pid})
 
 @app.route('/api/runs/<int:run_id>')
 def get_run(run_id):
-    row = query("""
-        SELECT rr.recipe_run_id, rr.recipe_run_status,
-               rr.recipe_run_start, rr.recipe_run_end,
+    row = query(f"""
+        SELECT {_RUN_COLS},
                u.unit_code, r.recipe_name
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
@@ -828,15 +1239,36 @@ def get_log_config():
 
 @app.route('/api/config/logs', methods=['PUT'])
 def put_log_config():
-    d = request.json
+    """false: saved at once, as the person. true: retention changes wait for qa —
+    one medcea.propose_setting per changed key, answered 202 with the change ids."""
+    d = _body()
+    wanted = []
     for key, val in [('log_compress_days', d.get('compress_days')),
                      ('log_delete_days',   d.get('delete_days'))]:
         if val is not None:
-            execute("""
+            try:
+                wanted.append((key, int(val)))
+            except (TypeError, ValueError):
+                return jsonify({'error': f'{key} must be a whole number of days'}), 400
+    with tx() as cur:
+        if _enforcing(cur):
+            _act_person(cur, need_fn=True)
+            ids = []
+            for key, val in wanted:
+                cur.execute("SELECT value FROM medcea.scheduler_config WHERE key=%s", (key,))
+                now = cur.fetchone()
+                if now and str(now['value']) == str(val):
+                    continue
+                cur.execute("SELECT medcea.propose_setting(%s, %s::jsonb) AS id", (key, json.dumps(val)))
+                ids.append(cur.fetchone()['id'])
+            return jsonify({'pending': bool(ids), 'change_ids': ids}), 202
+        _act_person(cur)
+        for key, val in wanted:
+            cur.execute("""
                 INSERT INTO medcea.scheduler_config (key, value)
                 VALUES (%s, %s)
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """, (key, str(int(val))))
+            """, (key, str(val)))
     return jsonify({'saved': True})
 
 @app.route('/api/logs/compress', methods=['POST'])
@@ -894,11 +1326,14 @@ def delete_logs():
 # Startup recovery — re-register or reap orphaned run_recipe.py processes
 # ---------------------------------------------------------------------------
 def _startup_recovery():
+    """A pid file whose process is gone: its run is ended (F). So is a run in R that
+    this API started (executed_by_sub is set by medcea.start_run only) with no pid
+    file left. Runs started from the command line (legacy path, no executed_by) are
+    not touched."""
     import glob
     pid_files = glob.glob(os.path.join(SCHD_DIR, 'run_*.pid'))
-    if not pid_files:
-        return
-    log.info(f'Startup recovery: found {len(pid_files)} PID file(s)')
+    if pid_files:
+        log.info(f'Startup recovery: found {len(pid_files)} PID file(s)')
     for pf in pid_files:
         try:
             run_id = int(os.path.basename(pf).replace('run_', '').replace('.pid', ''))
@@ -912,32 +1347,39 @@ def _startup_recovery():
         else:
             log.info(f'Startup recovery: run_id={run_id} pid={pid} dead — marking Failed')
             _delete_pid_file(run_id)
-            try:
-                execute(
-                    "UPDATE medcea.recipe_run SET recipe_run_status='F', "
-                    "recipe_run_end=CURRENT_TIMESTAMP, timestamp_upd=CURRENT_TIMESTAMP "
-                    "WHERE recipe_run_id=%s AND recipe_run_status IN ('R','S')",
-                    (run_id,)
-                )
-            except Exception as e:
-                log.error(f'Startup recovery: failed to mark run_id={run_id} as Failed: {e}')
+            _fail_run(run_id, 'startup recovery: its process is gone')
+    try:
+        orphans = query("SELECT recipe_run_id FROM medcea.recipe_run "
+                        "WHERE recipe_run_status = 'R' AND executed_by_sub IS NOT NULL")
+    except Exception as e:  # noqa: BLE001
+        log.error(f'Startup recovery: cannot list running runs: {type(e).__name__}')
+        return
+    for o in orphans:
+        rid = o['recipe_run_id']
+        with _active_pids_lock:
+            tracked = rid in _active_pids
+        if not tracked and not os.path.exists(_pid_file(rid)):
+            _fail_run(rid, 'startup recovery: started by the API, no runner left')
 
 # ---------------------------------------------------------------------------
 # Schema presence — checked at startup (read-only)
 # ---------------------------------------------------------------------------
 def _check_schema():
-    """medcea.schedule and medcea.scheduler_config are created by migration 008b
-    (apps/database/deploy.sh); the scheduler runs no DDL and grants nothing, so its
-    database role needs no ownership and cannot re-grant what the access policy
-    revoked. Missing tables are logged, not created."""
+    """medcea.schedule, medcea.scheduler_config and the run functions are created by
+    migration 008b (apps/database/deploy.sh); the scheduler runs no DDL and grants
+    nothing, so its database role needs no ownership and cannot re-grant what the
+    access policy revoked. Anything missing is logged, not created."""
     try:
-        row = query("SELECT to_regclass('medcea.schedule') AS schedule, "
-                    "to_regclass('medcea.scheduler_config') AS scheduler_config", fetchall=False)
-        missing = [k for k, v in (row or {}).items() if v is None]
+        row = query("SELECT to_regclass('medcea.schedule') IS NOT NULL AS schedule, "
+                    "to_regclass('medcea.scheduler_config') IS NOT NULL AS scheduler_config, "
+                    "to_regprocedure('medcea.start_run(integer)') IS NOT NULL AS start_run, "
+                    "to_regprocedure('medcea.retire_schedule(integer)') IS NOT NULL AS retire_schedule",
+                    fetchall=False)
+        missing = [k for k, v in (row or {}).items() if not v]
         if missing:
             log.error('Schema check: missing medcea.%s — run ./apps/database/deploy.sh' % ', medcea.'.join(missing))
         else:
-            log.info('Schema ready (medcea.schedule, medcea.scheduler_config)')
+            log.info('Schema ready (medcea.schedule, medcea.scheduler_config, start_run, retire_schedule)')
     except Exception as e:
         log.error(f'Schema check failed: {e}')
 

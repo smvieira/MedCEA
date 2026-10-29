@@ -48,6 +48,17 @@ if [[ -z "$PG_POD" ]]; then
     exit 0
 fi
 
+# A JWT config-api (IAM_POSTGREST_JWT=true) logs in with Secret db-authenticator,
+# which this deletes with the role: a warning, not a refusal, because the
+# uninstall order removes frontend first and a standalone purge is deliberate.
+source "$REPO_ROOT/infra/lib-postgrest.sh"   # pgrst_template_mode
+if [[ "$(pgrst_template_mode "$NAMESPACE" 2>/dev/null || true)" == jwt ]]; then
+    echo -e "${YELLOW}[database] config-api still runs with token verification and logs in as authenticator;${NC}" >&2
+    echo -e "${YELLOW}           after this purge it cannot connect until ./apps/database/deploy.sh has run again${NC}" >&2
+    echo -e "${YELLOW}           (it rewrites the Secret from AUTHENTICATOR_DB_PASS); then ./apps/frontend/deploy.sh${NC}" >&2
+    echo -e "${YELLOW}           restarts config-api on it. Or ./apps/frontend/uninstall.sh first.${NC}" >&2
+fi
+
 _ROLES="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" db-roles --names | paste -sd, -),medcea_owner,authenticator,anon"
 log "Dropping database '$CEA_DB', then roles ${_ROLES//,/, }..."
 # WITH (FORCE) ends any session still connected (PostgreSQL 13+). The roles go
