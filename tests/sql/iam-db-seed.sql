@@ -17,6 +17,17 @@
 -- (autocommit), so the slot history and the readings get distinct timestamps.
 \set ON_ERROR_STOP on
 
+-- the code CHECKs are added only once no code violates them, and production may
+-- have them by now: drop them here so 008b meets a database from before they
+-- existed (it lists the bad codes below and leaves the CHECKs out while they exist)
+ALTER TABLE medcea.cea_unit DROP CONSTRAINT IF EXISTS cea_unit_code_chk;
+ALTER TABLE medcea.cea_zone DROP CONSTRAINT IF EXISTS cea_zone_code_chk;
+-- likewise 008b's one-shot data steps: production has run them by now, so clear
+-- their markers and the first apply grandfathers this seed's definitions and
+-- parameter sets, as on a database from before 008b (the step skips anything that
+-- already has an approval with the same digest, i.e. production's own)
+DELETE FROM medcea.platform_setting WHERE key IN ('008b:definitions_grandfathered', '008b:params_grandfathered');
+
 INSERT INTO medcea.cea_location (name, description, is_active) VALUES ('IAMTEST site', 'tests/iam-db-fixture.sh', 'Y')
 RETURNING location_id AS loc \gset
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
@@ -99,3 +110,14 @@ INSERT INTO iam_policy.user_zone (person_sub, zone_id) VALUES ('aaaaaaaa-aaaa-4a
 -- the policy history, appended as 008a does
 SELECT iam_policy.append_history('fixture_seed', '{"n": 1}', 'tests/sql/iam-db-seed.sql');
 SELECT iam_policy.append_history('fixture_seed', '{"n": 2}', 'tests/sql/iam-db-seed.sql');
+
+-- 008b added recipe.status with DEFAULT 'approved' for the rows it found, then
+-- 'draft' for new ones. Inserted after 008b (production has it by now), the seed's
+-- recipes are drafts; make them what they would have been, as the owner (whom the
+-- status guard exempts), so the first apply grandfathers them.
+BEGIN;
+SELECT medcea_auth._set_internal_actor('migration:008') WHERE pg_catalog.to_regprocedure('medcea_auth._set_internal_actor(text)') IS NOT NULL;
+SET LOCAL ROLE medcea_owner;
+UPDATE medcea.recipe SET status = 'approved'
+ WHERE recipe_name LIKE 'IAMTEST-%' AND status = 'draft';
+COMMIT;

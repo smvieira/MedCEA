@@ -2,7 +2,7 @@
 # tests/iam-db-fixture.sh — IAM Phase 2a on a throwaway PostgreSQL, end to end.
 #
 #   tests/iam-db-fixture.sh up | load | fresh | apply MODE | cycle | logins MODE
-#                           | preflight | postgrest MODE | pgrst-flip | runner MODE
+#                           | preflight | postgrest MODE | pgrst-flip | services | runner MODE
 #                           | fulldown | serverlog | purge | down | run [--keep]
 #
 #   up        namespace medcea-iamtest, Secret pg (a random password, on stdin), one
@@ -27,7 +27,11 @@
 #             passes (realm keys published first); with IAM_DB_ROLES=true false is refused
 #   postgrest M  tests/iam-postgrest.sh --mode M: config-api verifying tokens (P1–P16)
 #   pgrst-flip   tests/iam-postgrest.sh --flip: the legacy/JWT switches and their undo
-#   runner M  tests/iam-runner.sh --mode M (false|true|legacy, IAM Phase 2.4) with this
+#   services  IAM Phase 2.5 (IAM_DB_SERVICE_ROLES): apply false with every login role
+#             allowed to log in, logins svc, the services' own statements run as their
+#             roles (svcprobes), runner false-svc, then apply false without them and
+#             logins false again (the roles NOLOGIN once more)
+#   runner M  tests/iam-runner.sh --mode M (false|false-svc|true|legacy, IAM 2.4) with this
 #             tree's schd/ and e97aab6's (extracted with git archive); a NOTE when the
 #             script is not there
 #   fulldown  from true: medcea_db_migrations_down_008b.sql by hand (no logins), then
@@ -43,7 +47,7 @@
 #   down      delete the namespace
 #   run       up, load, runner legacy, preflight;
 #             apply false, probes, logins false, preflight, postgrest false, runner false,
-#             pgrst-flip;
+#             pgrst-flip, services;
 #             apply true, probes, logins true, preflight, postgrest true, runner true;
 #             apply false, probes (W1 again), cycle, fulldown, fresh, serverlog, purge,
 #             down (on exit, unless --keep)
@@ -177,9 +181,9 @@ cmd_load() {
     snapshot "$CEA_DB" "$IAMTEST_DIR/B0.txt" && pass load "catalog snapshot B0 ($(wc -l < "$IAMTEST_DIR/B0.txt") lines)"
 }
 
-cmd_apply() {  # MODE [DB]
+cmd_apply() {  # MODE [DB] — DBA_SERVICE_LOGINS (env): login roles allowed to log in (2.5)
     local mode="$1" db="${2:-medcea_db}" out events
-    step "apply IAM_DB_ROLES=$mode on $db"
+    step "apply IAM_DB_ROLES=$mode on $db${DBA_SERVICE_LOGINS:+ (service logins: $DBA_SERVICE_LOGINS)}"
     load_passwords
     out="$(CEA_DB="$db" db_apply "$FX_NS" "$FX_POD" "$mode" 2>&1)"
     local rc=$?
@@ -204,7 +208,7 @@ cmd_apply() {  # MODE [DB]
     fi
 }
 
-cmd_logins() {  # MODE
+cmd_logins() {  # MODE: false | true | svc (false with the service logins, 2.5)
     local mode="$1" r p out ok=0 bad=0
     step "logins with IAM_DB_ROLES=$mode"
     load_passwords
@@ -212,13 +216,13 @@ cmd_logins() {  # MODE
         [[ "$r" == svc_* || "$r" == iam_svc || "$r" == rr_admin_login ]] || continue
         out="$(printf '%s\n' "$p" | $KUBECTL exec -i -n "$FX_NS" "$FX_POD" -- sh -c \
             'read -r PGPASSWORD; export PGPASSWORD; exec psql -X -h 127.0.0.1 -U "$0" -d medcea_db -tAc "SELECT current_user"' "$r" 2>&1)"
-        if [[ "$mode" == true && "$out" == "$r" ]] || [[ "$mode" == false && "$out" != "$r" ]]; then
+        if [[ "$mode" != false && "$out" == "$r" ]] || [[ "$mode" == false && "$out" != "$r" ]]; then
             ok=$((ok + 1))
         else
             bad=$((bad + 1)); fail logins "$r: ${out:0:120}"
         fi
     done < "$IAMTEST_DIR/passwords"
-    [[ $bad -eq 0 ]] && pass logins "$ok role(s) $([[ "$mode" == true ]] && echo 'log in' || echo 'cannot log in')"
+    [[ $bad -eq 0 ]] && pass logins "$ok role(s) $([[ "$mode" != false ]] && echo 'log in' || echo 'cannot log in')"
 }
 
 probes() {  # MODE
@@ -414,6 +418,82 @@ cmd_postgrest() {  # MODE
     tests/iam-postgrest.sh --namespace "$FX_NS" --mode "$1" --dir "$IAMTEST_DIR" || FAILS=$((FAILS + 1))
 }
 
+# svcprobe ROLE LABEL WANT — SQL on stdin, as ROLE (SET SESSION AUTHORIZATION, so
+# rr_admin_login inherits rr_admin as when it logs in), in BEGIN … ROLLBACK.
+# WANT: ok, or "denied" (a permission error expected).
+svcprobe() {
+    local role="$1" label="$2" want="$3" out
+    out="$( { echo "BEGIN;"; echo "SET SESSION AUTHORIZATION $role;"; cat; echo "SELECT 'probe-done';"; echo "ROLLBACK;"; } \
+            | fx medcea_db -q -tA -v ON_ERROR_STOP=1 -f - 2>&1)"
+    if [[ "$want" == ok ]]; then
+        grep -q 'probe-done' <<<"$out" && pass svc "$role: $label" || fail svc "$role: $label: $(grep -m1 ERROR <<<"$out")"
+    else
+        grep -q 'permission denied' <<<"$out" && pass svc "$role: $label (refused)" \
+            || fail svc "$role: $label: expected permission denied, got: $(grep -m1 -E 'ERROR|probe-done' <<<"$out")"
+    fi
+}
+
+# Each service's own statements (the 2.5 inventory: monitor-api.py, dbmgmt-api.py,
+# Node-RED's INSERT, the Grafana dashboard, pgAdmin's rr_admin), as its role. The
+# scheduler's are tests/iam-runner.sh --mode false-svc.
+cmd_svcprobes() {
+    step "the services' statements as their own roles (IAM 2.5)"
+    svcprobe svc_monitor "runs, cycles, telemetry views" ok <<'SQL'
+SELECT count(*) FROM medcea.recipe_run r JOIN medcea.cea_unit u ON u.unit_id = r.unit_id JOIN medcea.recipe c ON c.recipe_id = r.recipe_id;
+SELECT count(*) FROM medcea.recipe_line l, medcea.recipe_line_cycle_run x WHERE x.recipe_run_id IS NOT NULL LIMIT 1;
+SELECT count(*) FROM medcea.v_ap_measurements;
+SELECT count(*) FROM medcea.v_ct_measurements;
+SQL
+    svcprobe svc_dbexport "every listed table and view, every sequence's definition" ok <<'SQL'
+DO $$
+DECLARE r record; n int := 0;
+BEGIN
+    FOR r IN SELECT table_name FROM information_schema.tables WHERE table_schema = 'medcea'
+             UNION SELECT table_name FROM information_schema.views WHERE table_schema = 'medcea' LOOP
+        EXECUTE format('SELECT 1 FROM medcea.%I LIMIT 1', r.table_name);
+        n := n + 1;
+    END LOOP;
+    IF n < 20 THEN RAISE EXCEPTION 'only % objects listed', n; END IF;
+    IF (SELECT count(*) FROM pg_catalog.pg_sequence s JOIN pg_catalog.pg_class c ON c.oid = s.seqrelid
+         WHERE c.relnamespace = 'medcea'::regnamespace) = 0 THEN
+        RAISE EXCEPTION 'no sequence readable through pg_catalog';
+    END IF;
+END $$;
+SQL
+    svcprobe svc_dbexport "a credential table" denied <<'SQL'
+SELECT 1 FROM medcea.mqtt_credential LIMIT 1;
+SQL
+    svcprobe svc_ingest "Node-RED's INSERT of a reading" ok <<'SQL'
+INSERT INTO medcea.measurement (measure_timestamp, device_id, device_dns, msg_type, msg)
+VALUES (clock_timestamp(), 'iamt-aa:bb:cc:00:00:01', 'iamt02-s-z01', 'AP', '{"tag": "air_temperature", "value": 1}');
+SQL
+    svcprobe svc_ingest "changing a reading" denied <<'SQL'
+UPDATE medcea.measurement SET msg = msg WHERE device_id = 'iamt-aa:bb:cc:00:00:01';
+SQL
+    svcprobe svc_grafana "the dashboard's queries" ok <<'SQL'
+SELECT DISTINCT unit_code FROM medcea.msg_actual_points ORDER BY unit_code;
+SELECT zone_code, device_dns, MAX(CASE WHEN tag = 'air_temperature' THEN ROUND(value::numeric, 1) END), MAX(record_timestamp)
+  FROM medcea.msg_actual_points WHERE unit_code = 'IAMT02' GROUP BY zone_code, device_dns ORDER BY zone_code;
+SQL
+    svcprobe rr_admin_login "pgAdmin reads master data through rr_admin" ok <<'SQL'
+SELECT count(*) FROM medcea.cea_unit;
+SELECT count(*) FROM medcea.device;
+SQL
+    svcprobe rr_admin_login "pgAdmin writing master data" denied <<'SQL'
+UPDATE medcea.cea_unit SET unit_code = unit_code;
+SQL
+}
+
+cmd_services() {
+    step "IAM Phase 2.5: IAM_DB_SERVICE_ROLES (database still IAM_DB_ROLES=false)"
+    DBA_SERVICE_LOGINS="$(python3 apps/iam/compiler/cli.py db-roles --logins | paste -sd, -)" cmd_apply false
+    cmd_logins svc
+    cmd_svcprobes
+    cmd_runner false-svc
+    cmd_apply false
+    cmd_logins false
+}
+
 cmd_pgrst_flip() {
     step "tests/iam-postgrest.sh --flip"
     tests/iam-postgrest.sh --namespace "$FX_NS" --flip --dir "$IAMTEST_DIR" || FAILS=$((FAILS + 1))
@@ -448,6 +528,8 @@ case "$1" in
     preflight) cmd_preflight ;;
     postgrest) cmd_postgrest "${2:?postgrest false|true}" ;;
     pgrst-flip) cmd_pgrst_flip ;;
+    services) cmd_services ;;
+    svcprobes) cmd_svcprobes ;;
     runner) cmd_runner "${2:?runner false|true|legacy}" ;;
     cycle) cmd_cycle ;;
     fulldown) cmd_fulldown ;;
@@ -461,6 +543,7 @@ case "$1" in
         cmd_preflight
         cmd_apply false; probes false; cmd_logins false; cmd_preflight
         cmd_postgrest false; cmd_runner false; cmd_pgrst_flip
+        cmd_services
         cmd_apply true; probes true; cmd_logins true; cmd_preflight
         cmd_postgrest true; cmd_runner true
         cmd_apply false; probes false

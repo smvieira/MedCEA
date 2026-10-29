@@ -56,10 +56,12 @@ def run_recipe(unit_code, recipe_name):
         print("Connected to database.")
 
         # The legacy path writes recipe_run and its cycles directly: refused once the
-        # database enforces (IAM_DB_ROLES=true), where only the run functions may.
-        if cea.has_008b(conn) and cea.enforcing(conn):
-            print("Refused: IAM_DB_ROLES=true — a run is started through the scheduler "
-                  "(medcea.start_run), which hands it to this script as RECIPE_RUN_ID.", file=sys.stderr)
+        # database enforces (IAM_DB_ROLES=true), where only the run functions may, and
+        # on svc_scheduler (IAM 2.5), which holds no UPDATE on recipe_run or its cycles.
+        if cea.has_008b(conn) and (cea.enforcing(conn) or not cea.is_superuser(conn)):
+            print("Refused: IAM_DB_ROLES=true or the scheduler's own database role — a run is started "
+                  "through the scheduler (medcea.start_run), which hands it to this script as RECIPE_RUN_ID.",
+                  file=sys.stderr)
             sys.exit(1)
         conn.rollback()
 

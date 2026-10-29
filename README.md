@@ -387,12 +387,17 @@ with the roles it admits and whether that gate is enforced yet; Grafana, the AI
 Workbench, onboarding and the User Manager (admin only) follow in later phases.
 Finer permissions inside each service are the next steps of the IAM plan.
 
-Two database-side enforcement points exist but are off by default. With
+Three database-side steps exist but are off by default. With
 `IAM_POSTGREST_JWT=true` (Phase 2b) the config API (PostgREST) verifies the
 person's token on every Config UI and onboarding call. A forged or expired token
 is refused, and writes are attributed to the person. `IAM_DB_ROLES=true`
 (Phase 2a) gives each realm role its own database role; it needs Phase 2b and
-the services on their own roles (Phase 2.5) first.
+the services on their own roles first. `IAM_DB_SERVICE_ROLES=true` (Phase 2.5)
+does that: the scheduler, monitor, Database Management, Node-RED, Grafana and
+pgAdmin each log in with their own database role instead of the superuser, while
+nothing else is enforced yet. Turn it on, then run `./deploy-apps.sh --all` and
+`./deploy-infra.sh`; pgAdmin can then only read, so schema changes go through
+psql in the PostgreSQL pod.
 
 **Existing accounts after this change** keep their role and its meaning, but
 some lose services the policy does not give them:

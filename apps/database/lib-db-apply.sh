@@ -3,6 +3,8 @@
 # ownership, migration 008b's data steps, passwords and the IAM_DB_ROLES bundle).
 #
 #   db_apply NS POD MODE      MODE: false | true (IAM_DB_ROLES)
+#                             DBA_SERVICE_LOGINS (env, optional): comma-separated login
+#                             roles that may log in while MODE is false (IAM Phase 2.5)
 #
 # Needs: KUBECTL, REPO_ROOT, PROJECT_NAME, CEA_DB. Optional: DBPW_<role> (plaintext
 # passwords: DBPW_authenticator, DBPW_mqtt_auth, DBPW_svc_ingest, … — each sent only as
@@ -168,7 +170,9 @@ SQL
     fi
     _dba_log "IAM_DB_ROLES=$mode: $(basename "$down_or_enforce") + grants --mode $grants_mode, one transaction..."
     local body asserts
-    body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part body)" || return 1
+    local logins=()
+    [[ "$grants_mode" == additive && -n "${DBA_SERVICE_LOGINS:-}" ]] && logins=(--service-logins "$DBA_SERVICE_LOGINS")
+    body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part body "${logins[@]}")" || return 1
     asserts="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part assert)" || return 1
     out="$({
         echo "SET log_statement = 'none';"

@@ -589,14 +589,23 @@ def _legacy_cte():
         UNION ALL SELECT 'mqtt_auth', 'table', 'medcea.device', 'SELECT')"""
 
 
-def _role_ddl(p, mode):
+def service_logins_ok(p, roles):
+    """The roles IAM_DB_SERVICE_ROLES may let log in while IAM_DB_ROLES is false: the
+    login roles (services and rr_admin_login), never a person's rr_ role."""
+    bad = sorted(set(roles) - set(login_roles(p)))
+    if bad:
+        raise GrantsError(f"--service-logins: not a login role: {', '.join(bad)}")
+    return sorted(set(roles))
+
+
+def _role_ddl(p, mode, service_logins=()):
     lines = []
     for r in managed(p):
         lines.append(f"DO $r$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = {_lit(r)}) "
                      f"THEN CREATE ROLE {_q(r)} NOLOGIN NOINHERIT; END IF; END $r$;")
     logins = set(login_roles(p))
     for r in managed(p):
-        login = mode == "enforce" and r in logins
+        login = r in logins and (mode == "enforce" or r in service_logins)
         lines.append(f"ALTER ROLE {_q(r)} {'LOGIN' if login else 'NOLOGIN'} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;")
     for r, d in sorted(p.data.get("db_roles", {}).items()):
         if r.startswith("rr_") and d.get("member_of"):
@@ -605,6 +614,12 @@ def _role_ddl(p, mode):
         if r not in managed(p):
             continue      # authenticator: its own password is applied in Phase 2b
         lines.append(f"\\if :{{?pw_{r}}}\nALTER ROLE {_q(r)} PASSWORD :'pw_{r}';\n\\endif")
+    if mode == "additive":
+        # pgAdmin's login holds nothing itself: while it may log in it inherits rr_admin
+        # (the down file revoked every membership earlier in the same transaction)
+        for role, member, inherit, setopt in memberships(p):
+            if member in service_logins and member != "authenticator":
+                lines.append(f"GRANT {_q(role)} TO {_q(member)} WITH INHERIT {str(inherit).upper()}, SET {str(setopt).upper()};")
     return "\n".join(lines)
 
 
@@ -767,6 +782,10 @@ BEGIN
 END $a$;"""
 
 
+def _admin_login_role(p):
+    return next(role for role, member, _i, _s in memberships(p) if member == "rr_admin_login")
+
+
 def _additive_asserts(p):
     mgd = managed(p)
     return "\n".join([
@@ -782,12 +801,23 @@ BEGIN
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'I9: anon may execute %', bad;
     END IF;
-    -- the enforce-only memberships (authenticator -> rr_*, rr_admin_login -> rr_admin) are gone
+    -- the enforce-only memberships (authenticator -> rr_*) are gone; rr_admin_login ->
+    -- rr_admin (INHERIT, no SET) only while it may log in (IAM_DB_SERVICE_ROLES)
     SELECT pg_catalog.string_agg(pg_catalog.pg_get_userbyid(m.member) || ' -> ' || pg_catalog.pg_get_userbyid(m.roleid), ', ')
       INTO bad FROM pg_catalog.pg_auth_members m
-     WHERE pg_catalog.pg_get_userbyid(m.roleid) = ANY ({_array(sorted(people(p).values()))});
+     WHERE pg_catalog.pg_get_userbyid(m.roleid) = ANY ({_array(sorted(people(p).values()))})
+       AND NOT (pg_catalog.pg_get_userbyid(m.member) = 'rr_admin_login'
+                AND pg_catalog.pg_get_userbyid(m.roleid) = {_lit(_admin_login_role(p))}
+                AND m.inherit_option AND NOT m.set_option
+                AND (SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'rr_admin_login'));
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'IAM_DB_ROLES=false: rr_ roles have members (%)', bad;
+    END IF;
+    -- only a login role may log in, never a person's rr_ role
+    SELECT pg_catalog.string_agg(rolname, ', ') INTO bad FROM pg_catalog.pg_roles
+     WHERE rolcanlogin AND rolname = ANY ({_array(mgd)}) AND rolname <> ALL ({_array(login_roles(p))});
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'IAM_DB_ROLES=false: managed roles that are no login role may log in (%)', bad;
     END IF;
 END $a$;"""])
 
@@ -894,9 +924,12 @@ SELECT coalesce((SELECT value FROM medcea.platform_setting WHERE key = 'iam_db_r
 SELECT 'grants verified' AS result;"""
 
 
-def sql(p, mode, smoke=False, part="all"):
+def sql(p, mode, smoke=False, part="all", service_logins=()):
     if mode not in ("additive", "enforce", "verify"):
         raise GrantsError(f"unknown mode {mode}")
+    if service_logins and mode != "additive":
+        raise GrantsError("--service-logins applies to --mode additive only (enforce: every login role logs in)")
+    service_logins = service_logins_ok(p, service_logins)
     doc = document(p, smoke)
     head = (f"-- grants.py --mode {mode}{' --smoke' if smoke else ''}  digest {doc['digest']}\n"
             f"-- Generated from apps/iam/policy/defaults.yaml; do not edit. Runs inside the\n"
@@ -906,12 +939,12 @@ def sql(p, mode, smoke=False, part="all"):
     if part == "functions":   # the compiled functions alone (lib-db-apply.sh step 4a: 008b's data steps need them)
         return head + compiled_functions(p, smoke)
     body, asserts = [], []
-    body.append("-- 1. roles\n" + _role_ddl(p, mode))
+    body.append("-- 1. roles\n" + _role_ddl(p, mode, service_logins))
     body.append("-- 2. compiled functions" + compiled_functions(p, smoke))
     if mode == "additive":
         body.append("-- 3. revokes (managed roles only; anon, authenticator and mqtt_auth keep the legacy set)\n"
                     + _revoke_from(managed(p)))
-        body.append(_grant_block(p, set(managed(p)), "4. grants of the managed roles (all NOLOGIN while IAM_DB_ROLES=false)"))
+        body.append(_grant_block(p, set(managed(p)), "4. grants of the managed roles (NOLOGIN while IAM_DB_ROLES=false, but for --service-logins)"))
         body.append(_grant_block(p, {"anon"}, "4b. anon: USAGE on medcea_auth, EXECUTE on pre_request() (both modes)"))
         asserts.append(_additive_asserts(p))
     else:

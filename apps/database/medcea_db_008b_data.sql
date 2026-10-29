@@ -8,7 +8,8 @@
 --
 --   1. grandfather, once (marker 008b:definitions_grandfathered): every recipe
 --      and control algorithm that 008b found in use (status approved) gets an
---      approval row with action 'grandfather' and its current digest;
+--      approval row with action 'grandfather' and its current digest, unless
+--      one with that digest exists (a re-run, e.g. the fixture's seed, adds none);
 --   2. parameter sets: copy the inline algorithm_params of recipe_unit_permission
 --      and schedule into medcea.unit_algorithm_params, mirroring
 --      scheduler-api.py _resolve_algorithm() exactly:
@@ -53,12 +54,16 @@ BEGIN
            'in use before migration 008b', 'migration:008', 'migration:008', 'migration',
            (SELECT x.last_change FROM medcea_auth._authors('medcea.recipe', jsonb_build_array(r.recipe_id)) x)
       FROM medcea.recipe r WHERE r.status = 'approved'
+       AND NOT EXISTS (SELECT 1 FROM medcea.approval x WHERE x.target = 'medcea.recipe' AND x.row_key = jsonb_build_array(r.recipe_id)
+                          AND x.row_hash = medcea_auth.row_digest('medcea.recipe', jsonb_build_array(r.recipe_id)))
     UNION ALL
     SELECT 'medcea.control_algorithm', jsonb_build_array(a.algorithm_id),
            medcea_auth.row_digest('medcea.control_algorithm', jsonb_build_array(a.algorithm_id)), 'controllers', 'grandfather',
            'in use before migration 008b', 'migration:008', 'migration:008', 'migration',
            (SELECT x.last_change FROM medcea_auth._authors('medcea.control_algorithm', jsonb_build_array(a.algorithm_id)) x)
-      FROM medcea.control_algorithm a WHERE a.status = 'approved';
+      FROM medcea.control_algorithm a WHERE a.status = 'approved'
+       AND NOT EXISTS (SELECT 1 FROM medcea.approval x WHERE x.target = 'medcea.control_algorithm' AND x.row_key = jsonb_build_array(a.algorithm_id)
+                          AND x.row_hash = medcea_auth.row_digest('medcea.control_algorithm', jsonb_build_array(a.algorithm_id)));
     INSERT INTO medcea.platform_setting (key, value) VALUES ('008b:definitions_grandfathered', now()::text);
 END $$;
 

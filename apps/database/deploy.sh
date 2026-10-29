@@ -39,6 +39,7 @@ source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback
 source "$REPO_ROOT/infra/lib-render.sh"
 source "$SCRIPT_DIR/lib-db-apply.sh"
 source "$REPO_ROOT/infra/lib-postgrest.sh"   # pgrst_live_mode: which password authenticator gets
+source "$REPO_ROOT/infra/lib-db-roles.sh"    # db_clients_live, db_role_secret (IAM Phase 2.5)
 NAMESPACE="${NAMESPACE:-medcea}"
 PG_RELEASE="${PG_RELEASE:-rdbms}"
 CEA_DB="${POSTGRES_DB:-medcea_db}"
@@ -85,16 +86,19 @@ if [[ "$IAM_DB_ROLES" == "true" ]]; then
     grep -qx 'PGRST_JWT_SECRET=medcea-jwks/jwks-sig.json' <<<"$_env" || refuse+=("config-api's PGRST_JWT_SECRET is not Secret medcea-jwks key jwks-sig.json (2b)")
     grep -qx 'AUTHENTICATOR_PASSWORD=db-authenticator/password' <<<"$_env" || refuse+=("config-api does not log in with Secret db-authenticator (2b)")
     grep -qx 'PGRST_JWT_AUD=medcea-api/' <<<"$_env" || refuse+=("config-api has no PGRST_JWT_AUD=medcea-api (2b)")
-    for _dep in scheduler monitor dbmgmt; do
-        _u="$($KUBECTL get deployment "$_dep" -n "$NAMESPACE" -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="PG_USER")]}{.value}{"\n"}{end}' 2>/dev/null || true)"
-        if [[ -z "$_u" ]] || grep -qx 'postgres' <<<"$_u"; then
-            refuse+=("deployment $_dep still connects as postgres, or could not be read (2.5)")
-        fi
+    [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" ]] || refuse+=("IAM_DB_SERVICE_ROLES is not true (every service must run on its own role first, 2.5)")
+    # every database client on its own role (a client that is not deployed is skipped)
+    _seen=""
+    mapfile -t _live < <(db_clients_live "$NAMESPACE")
+    for _cu in "${_live[@]}"; do
+        read -r _c _u <<<"$_cu"
+        _seen+="$_c "
+        [[ "$_u" == "$(db_client_role "$_c")" ]] \
+            || refuse+=("$_c logs in as ${_u/#\?/an unreadable user}, not $(db_client_role "$_c") (2.5: IAM_DB_SERVICE_ROLES=true, then deploy it again)")
     done
-    _nr="$($KUBECTL exec -n "$NAMESPACE" deployment/node-red -- cat /data/flows.json 2>/dev/null || true)"
-    if [[ -z "$_nr" ]] || grep -Eq '"user" *: *"postgres"' <<<"$_nr"; then
-        refuse+=("Node-RED's database connection still uses postgres, or its flows could not be read (2.5)")
-    fi
+    for _c in scheduler node-red; do   # the two that write regulated data must exist
+        [[ " $_seen " == *" $_c "* ]] || refuse+=("$_c is not deployed, or could not be read (2.5)")
+    done
     for _var in $(python3 "$CLI" db-roles --passwords | awk '{print $2}'); do
         [[ -n "${!_var:-}" ]] || refuse+=("$_var is empty (run ./deploy-infra.sh, which runs infra/configure.sh)")
     done
@@ -141,6 +145,36 @@ if [[ ${#_missing[@]} -gt 0 ]]; then
     warn "no password for ${_missing[*]} (run ./deploy-infra.sh, which generates them): those roles stay NOLOGIN without one"
 fi
 
+# ── Service logins (IAM Phase 2.5): who may log in while IAM_DB_ROLES=false ──
+# IAM_DB_SERVICE_ROLES=true: every login role with a password (the services move
+# to them as they are deployed next, infra/lib-db-roles.sh). false: only the roles
+# a live client still uses, so turning the flag off never locks out a service that
+# has not been deployed back onto postgres yet; the next deploy after it has been
+# makes the role NOLOGIN. Under IAM_DB_ROLES=true every login role logs in anyway.
+DBA_SERVICE_LOGINS=""
+if [[ "$IAM_DB_ROLES" != "true" ]]; then
+    _sl=()
+    if [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" ]]; then
+        while read -r _role; do
+            _v="DBPW_$_role"; [[ -n "${!_v:-}" ]] && _sl+=("$_role")
+        done < <(python3 "$CLI" db-roles --logins)
+    else
+        # an array, not `while read < <(…)`: db_role_can_login's kubectl exec -i
+        # would read the rest of the list as its stdin
+        mapfile -t _live < <(db_clients_live "$NAMESPACE")
+        for _cu in "${_live[@]}"; do
+            read -r _c _u <<<"$_cu"
+            _role="$(db_client_role "$_c")"
+            if [[ "$_u" == "$_role" ]] || { [[ "$_u" == "?" ]] && db_role_can_login "$NAMESPACE" "$_role"; }; then
+                _sl+=("$_role")
+                warn "IAM_DB_SERVICE_ROLES=false, but $_c still logs in as $_role: the role keeps its login until $_c is deployed back onto postgres; run this deploy again after that"
+            fi
+        done
+    fi
+    DBA_SERVICE_LOGINS="$(IFS=,; echo "${_sl[*]}")"
+    [[ -z "$DBA_SERVICE_LOGINS" ]] || log "Roles that may log in (IAM_DB_SERVICE_ROLES=${IAM_DB_SERVICE_ROLES:-false}): ${DBA_SERVICE_LOGINS//,/, }"
+fi
+
 # ── Apply ─────────────────────────────────────────────────────────────────────
 log "Deploying database '$CEA_DB' with IAM_DB_ROLES=$IAM_DB_ROLES..."
 # The mode a new session sees now (empty on a first deploy): read-only.
@@ -165,23 +199,14 @@ if [[ "${PREV_DB_ROLES:-false}" != "$IAM_DB_ROLES" ]] && [[ -n "$PREV_DB_ROLES" 
     fi
 fi
 
-# ── Secrets: one per database role, for 2.5 (nothing mounts them in 2a) ──────
+# ── Secrets: one per database role; each service reads its own (2.5, infra/lib-db-roles.sh) ──
 log "Writing Secrets db-<role> (label medcea/db-role=true)..."
-_secret_for() {   # role -> Secret name
-    case "$1" in
-        svc_*)          echo "db-${1//_/-}" ;;
-        iam_svc)        echo "db-iam-svc" ;;
-        rr_admin_login) echo "db-rr-admin-login" ;;
-        authenticator)  echo "db-authenticator" ;;
-        *)              echo "db-${1//_/-}" ;;
-    esac
-}
 while read -r _role _var; do
     [[ -n "${!_var:-}" ]] || continue
     # the JWT config-api reads this one at start: apps/frontend/deploy.sh owns it
     # then (written here only when it is missing, from AUTHENTICATOR_DB_PASS)
     [[ "$_role" == authenticator && "$_PGRST_DB_WRITE_SECRET" != true ]] && continue
-    SECRET_NAME="$(_secret_for "$_role")" DB_ROLE="$_role" DB_PASS="${!_var}" \
+    SECRET_NAME="$(db_role_secret "$_role")" DB_ROLE="$_role" DB_PASS="${!_var}" \
         render "$SCRIPT_DIR/k8s/db-role-secret.yaml" SECRET_NAME DB_ROLE DB_PASS \
         | $KUBECTL apply -n "$NAMESPACE" -f - >/dev/null
 done < <(python3 "$CLI" db-roles --passwords)

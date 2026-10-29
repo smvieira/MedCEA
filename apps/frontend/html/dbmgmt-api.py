@@ -10,6 +10,11 @@ def connect():
     import pg8000.dbapi as pg
     return pg.connect(user=PG_USER, host=PG_HOST, port=PG_PORT, database=PG_DB, password=PG_PASS)
 
+# Tables and views come from information_schema, which lists only what this login
+# may read: on svc_dbexport (IAM 2.5) the credential and settings tables drop out,
+# on purpose. Sequences and types come from pg_catalog, which every role may read,
+# because svc_dbexport holds no privilege on a sequence and information_schema
+# would hide every one of them.
 def list_objects():
     con = connect()
     cur = con.cursor()
@@ -22,9 +27,10 @@ def list_objects():
         FROM information_schema.views
         WHERE table_schema = 'medcea'
         UNION ALL
-        SELECT sequence_name, 'sequence'
-        FROM information_schema.sequences
-        WHERE sequence_schema = 'medcea'
+        SELECT c.relname::text, 'sequence'
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'medcea' AND c.relkind = 'S'
         UNION ALL
         SELECT t.typname,
                CASE t.typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain' ELSE 'type' END
@@ -150,9 +156,11 @@ def get_view_ddl(cur, name):
 
 def get_sequence_ddl(cur, name):
     cur.execute("""
-        SELECT start_value, minimum_value, maximum_value, increment, cycle_option
-        FROM information_schema.sequences
-        WHERE sequence_schema = 'medcea' AND sequence_name = %s
+        SELECT s.seqstart, s.seqmin, s.seqmax, s.seqincrement, CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END
+        FROM pg_catalog.pg_sequence s
+        JOIN pg_catalog.pg_class c ON c.oid = s.seqrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'medcea' AND c.relname = %s
     """, (name,))
     row = cur.fetchone()
     if not row:
@@ -232,10 +240,17 @@ def get_data_inserts(cur, name):
 
 def build_export(selections):
     parts = ['-- medcea_db export\n-- Generated: ' + str(datetime.datetime.utcnow()) + ' UTC\n']
+    # only what /objects lists: a name goes into SQL text below, and an object this
+    # login may not read would fail the whole export
+    listed = {(o['name'], o['type']) for o in list_objects()}
     con = connect()
     cur = con.cursor()
     for sel in selections:
         name, kind = sel['name'], sel['type']
+        if (name, kind) not in listed:
+            shown = ''.join(ch if ch.isalnum() or ch in '_-. ' else '?' for ch in f'{kind} {name}'[:80])
+            parts.append(f'\n-- skipped: {shown} is not an object this export can read\n')
+            continue
         if sel.get('ddl'):
             parts.append('\n')
             if kind == 'table':

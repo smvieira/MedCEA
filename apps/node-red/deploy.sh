@@ -21,6 +21,7 @@ if [[ ! -f "$REPO_ROOT/config.env" ]]; then
 fi
 source "$REPO_ROOT/config.env"
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
+source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client (IAM 2.5)
 
 NAMESPACE="${NAMESPACE:-medcea}"
 NR_LOCAL_PORT="${NR_LOCAL_PORT:-1880}"
@@ -38,8 +39,10 @@ PG_RELEASE_NAME="${PG_RELEASE:-rdbms}"
 PG_HOST="${PG_RELEASE_NAME}-postgresql.${NAMESPACE}.svc.cluster.local"
 PG_PORT="5432"
 PG_DB="${POSTGRES_DB:-postgres}"
-PG_USER="${POSTGRES_USER:-postgres}"
-PG_PASS="${POSTGRES_PASS}"
+# postgres, or svc_ingest once IAM_DB_SERVICE_ROLES=true and the role may log in (IAM 2.5)
+db_client "$NAMESPACE" svc_ingest
+PG_USER="$DBC_USER"
+PG_PASS="$DBC_PASS"
 
 NR_BASE="http://localhost:${NR_LOCAL_PORT}"
 

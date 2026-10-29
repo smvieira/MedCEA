@@ -8,10 +8,13 @@
   cli.py compile netpol --namespace NS --node-ip IP [--node-ip IP ...]
                                         the NetworkPolicies of `network:` as a JSON List
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
+                         [--service-logins ROLE,...]  (additive: login roles allowed to log in, IAM Phase 2.5)
                                         the database side (grants.py): the psql text the IAM_DB_ROLES
                                         bundle of apps/database/lib-db-apply.sh runs, or its JSON form
-  cli.py db-roles --names|--passwords   the database roles grants.py manages (plus mqtt_auth), or
-                                        "<role> <config.env variable>" for each generated password
+  cli.py db-roles --names|--passwords|--logins
+                                        the database roles grants.py manages (plus mqtt_auth),
+                                        "<role> <config.env variable>" for each generated password, or
+                                        the login roles (services and rr_admin_login, IAM Phase 2.5)
   cli.py hosts [--file F]               every host and the roles it admits (for review)
   cli.py describe-gate HOST ROLES       for a gate's 403 page: the host's label, a tab, and the
                                         labels of ROLES (the deployed list, ["a", "b"]),
@@ -50,10 +53,13 @@ def main(argv=None):
     comp.add_argument("--format", choices=["sql", "json"], default="sql")
     comp.add_argument("--part", choices=["body", "assert", "all", "functions"], default="all")
     comp.add_argument("--smoke", action="store_true", help="accept the iam-test client's tokens (IAM_SMOKE)")
+    comp.add_argument("--service-logins", default="",
+                      help="grants --mode additive: comma-separated login roles that may log in (IAM_DB_SERVICE_ROLES)")
     dbr = sub.add_parser("db-roles")
     g = dbr.add_mutually_exclusive_group(required=True)
     g.add_argument("--names", action="store_true")
     g.add_argument("--passwords", action="store_true")
+    g.add_argument("--logins", action="store_true")
     args = ap.parse_args(argv)
 
     p = model.load(args.file)
@@ -88,6 +94,8 @@ def main(argv=None):
     if args.cmd == "db-roles":
         if args.names:
             print("\n".join(grants.managed(p) + ["mqtt_auth"]))
+        elif args.logins:
+            print("\n".join(grants.login_roles(p)))
         else:
             print("\n".join(f"{r} {v}" for r, v in grants.passwords(p)))
         return 0
@@ -115,7 +123,8 @@ def main(argv=None):
                 print("ERROR: compile grants needs --mode additive|enforce|verify", file=sys.stderr)
                 return 2
             else:
-                print(grants.sql(p, args.mode, args.smoke, args.part), end="")
+                print(grants.sql(p, args.mode, args.smoke, args.part,
+                                 [r for r in args.service_logins.split(",") if r]), end="")
         except grants.GrantsError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

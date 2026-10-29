@@ -382,6 +382,33 @@ class GrantsTest(unittest.TestCase):
         self.assertEqual(mem[("rr_operator", "authenticator")], (False, True))
         self.assertEqual(len([1 for r, m in mem if m == "authenticator"]), len(self.policy.roles) + 1)
 
+    def test_service_logins(self):
+        # IAM Phase 2.5 (IAM_DB_SERVICE_ROLES): the listed login roles log in while
+        # IAM_DB_ROLES is false; nobody else does, and a person's rr_ role never
+        add = grants.sql(self.policy, "additive", service_logins=["svc_scheduler", "rr_admin_login"])
+        self.assertIn("ALTER ROLE svc_scheduler LOGIN", add)
+        self.assertIn("ALTER ROLE rr_admin_login LOGIN", add)
+        self.assertIn("ALTER ROLE svc_monitor NOLOGIN", add)
+        self.assertIn("ALTER ROLE rr_admin NOLOGIN", add)
+        # pgAdmin's login inherits rr_admin while it may log in, and only then
+        self.assertIn("GRANT rr_admin TO rr_admin_login WITH INHERIT TRUE, SET FALSE;", add)
+        self.assertNotIn("GRANT rr_admin TO rr_admin_login",
+                         grants.sql(self.policy, "additive", service_logins=["svc_scheduler"]))
+        self.assertNotIn("TO authenticator WITH", add)                # its memberships are enforce's
+        for bad in (["rr_operator"], ["authenticator"], ["anon"]):
+            with self.assertRaises(grants.GrantsError):
+                grants.sql(self.policy, "additive", service_logins=bad)
+        with self.assertRaises(grants.GrantsError):
+            grants.sql(self.policy, "enforce", service_logins=["svc_scheduler"])
+        # the privileges do not depend on who may log in
+        self.assertEqual(grants.sql(self.policy, "additive", part="assert"),
+                         grants.sql(self.policy, "additive", part="assert", service_logins=["svc_ingest"]))
+        # the assertions read the state, so verify (health-check) needs no parameter:
+        # rr_admin_login -> rr_admin only while it may log in; no other managed role logs in
+        a = grants.sql(self.policy, "verify")
+        self.assertIn("rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'rr_admin_login'", a)
+        self.assertIn("managed roles that are no login role may log in", a)
+
     def test_modes(self):
         add = grants.sql(self.policy, "additive")
         enf = grants.sql(self.policy, "enforce")

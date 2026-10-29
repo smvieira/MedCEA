@@ -34,7 +34,8 @@ its actor (the actor lasts one transaction):
   system    a schedule firing, a runner that died, the run-once retire: through
             medcea_auth.set_system_actor('system:scheduler', 'schedule'|'run', id),
             i.e. the schedule's or run's creator;
-  neither   only while IAM_DB_ROLES=false and as a superuser (postgres, until 2.5):
+  neither   only while IAM_DB_ROLES=false and as a superuser (postgres; on svc_scheduler,
+            IAM_DB_SERVICE_ROLES=true, a creator that is no person is refused as under true):
             plain DML gets no actor (stamp_actor writes the honest db:postgres); a
             function that needs an actor gets system:scheduler-unverified (a request
             without a verified person) or system:scheduler (a background job). Each
@@ -277,6 +278,14 @@ def _enforcing(cur):
 def _superuser(cur):
     cur.execute("SELECT coalesce((SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user), false) AS v")
     return bool(cur.fetchone()['v'])
+
+
+def _functions_only(cur):
+    """True when a write must take the IAM_DB_ROLES=true path even while the database
+    is false: on its own role (svc_scheduler, IAM 2.5) the scheduler holds no DELETE on
+    algorithm_state, no UPDATE on recipe_run and only SELECT on scheduler_config, so
+    the direct DML of the false path would be "permission denied"."""
+    return _enforcing(cur) or not _superuser(cur)
 
 
 _UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
@@ -636,9 +645,9 @@ def _delete_algorithm_state(where, args):
     IAM_DB_ROLES=true a Q-table is never deleted: 403."""
     with tx() as cur:
         _act_person(cur)
-        if _enforcing(cur):
-            raise Refused(403, 'a Q-table is retired, never deleted (IAM_DB_ROLES=true): '
-                               'medcea.retire_algorithm_state, by a person holding A on controllers_state')
+        if _functions_only(cur):
+            raise Refused(403, 'a Q-table is retired, never deleted (IAM_DB_ROLES=true, or the scheduler on its own '
+                               'database role): medcea.retire_algorithm_state, by a person holding A on controllers_state')
         cur.execute("DELETE FROM medcea.algorithm_state WHERE " + where, args)
         return cur.rowcount
 
@@ -1019,8 +1028,9 @@ def set_run_status(run_id):
         cur.execute("SELECT 1 AS x FROM medcea.run_release WHERE recipe_run_id=%s", (run_id,))
         if cur.fetchone():
             return jsonify({'error': f'run {run_id} is released; a released run is never reopened'}), 409
-        if _enforcing(cur):
-            return jsonify({'error': f'run {run_id} is completed; a completed run is not reopened (IAM_DB_ROLES=true)'}), 409
+        if _functions_only(cur):
+            return jsonify({'error': f'run {run_id} is completed; a completed run is not reopened '
+                                     '(IAM_DB_ROLES=true, or the scheduler on its own database role)'}), 409
         _act_person(cur)
         cur.execute("UPDATE medcea.recipe_run SET recipe_run_status='S', recipe_run_end=NULL, "
                     "timestamp_upd=CURRENT_TIMESTAMP WHERE recipe_run_id=%s", (run_id,))
@@ -1251,7 +1261,7 @@ def put_log_config():
             except (TypeError, ValueError):
                 return jsonify({'error': f'{key} must be a whole number of days'}), 400
     with tx() as cur:
-        if _enforcing(cur):
+        if _functions_only(cur):   # a proposal, applied once approved (A on scheduler_settings)
             _act_person(cur, need_fn=True)
             ids = []
             for key, val in wanted:

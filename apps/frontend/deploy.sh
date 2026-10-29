@@ -52,6 +52,7 @@ if [[ "$IAM_POSTGREST_JWT" != "true" && "$IAM_POSTGREST_JWT" != "false" ]]; then
 fi
 source "$REPO_ROOT/apps/database/lib-db-apply.sh"   # _dba_psql, _dba_scram (authenticator's password)
 source "$REPO_ROOT/infra/lib-postgrest.sh"          # pgrst_deploy
+source "$REPO_ROOT/infra/lib-db-roles.sh"           # db_client: dbmgmt on postgres or svc_dbexport (IAM 2.5)
 CEA_DB="${POSTGRES_DB:-medcea_db}"
 # Empty when the database component is not installed yet: pgrst_deploy then
 # leaves the password to apps/database/deploy.sh, which follows the live mode.
@@ -213,7 +214,9 @@ $KUBECTL create configmap dbmgmt-api -n "$NAMESPACE" \
 log "Deploying dbmgmt..."
 # The plain Ingress from before the SSO gate: its host now belongs to the proxy.
 $KUBECTL delete ingress dbmgmt -n "$NAMESPACE" --ignore-not-found
-render "$SCRIPT_DIR/k8s/dbmgmt.yaml" NAMESPACE POSTGRES_PASS APP_DIR REPO_ROOT IAM_ENFORCE | $KUBECTL apply -f -
+db_client "$NAMESPACE" svc_dbexport
+PG_USER="$DBC_USER" PG_SECRET="$DBC_SECRET" PG_SECRET_KEY="$DBC_SECRET_KEY" \
+    render "$SCRIPT_DIR/k8s/dbmgmt.yaml" NAMESPACE PG_USER PG_SECRET PG_SECRET_KEY APP_DIR REPO_ROOT IAM_ENFORCE | $KUBECTL apply -f -
 
 log "Waiting for dbmgmt rollout..."
 $KUBECTL rollout restart deployment/dbmgmt -n "$NAMESPACE"

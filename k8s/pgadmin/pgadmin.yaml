@@ -14,7 +14,7 @@ data:
           "Host": "rdbms-postgresql.${NAMESPACE}.svc.cluster.local",
           "Port": 5432,
           "MaintenanceDB": "${POSTGRES_DB}",
-          "Username": "${POSTGRES_USER}",
+          "Username": "${PGA_DB_USER}",
           "PassFile": "/pgpassfile",
           "SSLMode": "disable",
           "Shared": true
@@ -28,7 +28,7 @@ metadata:
   name: pgadmin-pgpassfile
   namespace: ${NAMESPACE}
 stringData:
-  pgpassfile: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local:5432:*:${POSTGRES_USER}:${POSTGRES_PASS}"
+  pgpassfile: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local:5432:*:${PGA_DB_USER}:${PGA_DB_PASS}"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,6 +46,10 @@ spec:
     metadata:
       labels:
         app: pgadmin
+      annotations:
+        # servers.json is imported at start only: a new login starts a new pod
+        # (postgres, or rr_admin_login under IAM_DB_SERVICE_ROLES, IAM 2.5)
+        medcea/db-user: "${PGA_DB_USER}"
     spec:
       # The pod resolves names through cluster DNS, which knows nothing of a
       # name-based domain like keycloak.medcea. pgAdmin talks to Keycloak by its

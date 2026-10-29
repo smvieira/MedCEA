@@ -26,6 +26,7 @@ source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback
 source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are in k8s/
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
 source "$REPO_ROOT/infra/lib-wait.sh"
+source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client: postgres or the service's own role (IAM 2.5)
 NAMESPACE="${NAMESPACE:-medcea}"
 SCHEDULER_DOMAIN="${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}"
 if [[ -z "${MQTT_SCHEDULER_PASS:-}" ]]; then
@@ -117,7 +118,9 @@ $KUBECTL create secret generic scheduler-secrets -n "$NAMESPACE" \
   --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
 # The plain Ingress from before the SSO gate: its host now belongs to the proxy.
 $KUBECTL delete ingress scheduler -n "$NAMESPACE" --ignore-not-found
-render "$SCRIPT_DIR/k8s/scheduler.yaml" NAMESPACE POSTGRES_PASS PROJECT_NAME REPO_ROOT IAM_ENFORCE | $KUBECTL apply -f -
+db_client "$NAMESPACE" svc_scheduler   # the runner it spawns inherits the same login
+PG_USER="$DBC_USER" PG_SECRET="$DBC_SECRET" PG_SECRET_KEY="$DBC_SECRET_KEY" \
+    render "$SCRIPT_DIR/k8s/scheduler.yaml" NAMESPACE PG_USER PG_SECRET PG_SECRET_KEY PROJECT_NAME REPO_ROOT IAM_ENFORCE | $KUBECTL apply -f -
 
 log "Restarting scheduler to pick up new ConfigMaps..."
 $KUBECTL rollout restart deployment/scheduler -n "$NAMESPACE"

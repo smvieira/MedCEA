@@ -1418,7 +1418,14 @@ $MK8S kubectl rollout status deployment/node-red \
 #    Image:  docker.io/grafana/grafana (Docker Hub Official — NO auth needed)
 # =============================================================================
 echo -e "\n${GREEN}Pre-wiring Grafana Postgres datasource...${NC}"
-render "$SCRIPT_DIR/k8s/grafana/datasource-secret.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS | $MK8S kubectl apply -f -
+# postgres, or svc_grafana once IAM_DB_SERVICE_ROLES=true and the role may log in
+# (IAM 2.5). Grafana reads the datasource at start only: a changed user restarts it.
+KUBECTL="$MK8S kubectl"; REPO_ROOT="$SCRIPT_DIR"
+source "$SCRIPT_DIR/infra/lib-db-roles.sh"
+_GF_PREV_USER="$(db_clients_live "$NAMESPACE" | awk '$1 == "grafana" {print $2}')"
+db_client "$NAMESPACE" svc_grafana
+DS_USER="$DBC_USER"; DS_PASS="$DBC_PASS"
+render "$SCRIPT_DIR/k8s/grafana/datasource-secret.yaml" NAMESPACE POSTGRES_DB DS_USER DS_PASS | $MK8S kubectl apply -f -
 
 echo -e "\n${GREEN}[6/10] Deploying Grafana...${NC}"
 # grafana.ini with dotted section names (auth.generic_oauth) is unparseable by the chart
@@ -1442,6 +1449,12 @@ $MK8S helm3 upgrade --install grafana \
   --timeout 10m \
   --wait
 rm -f "$_GF_VALUES"
+if [[ -n "$_GF_PREV_USER" && "$_GF_PREV_USER" != "$DS_USER" ]]; then
+    echo "  Grafana's datasource now logs in as $DS_USER (was $_GF_PREV_USER): restarting Grafana..."
+    $MK8S kubectl rollout restart deployment/grafana -n "$NAMESPACE"
+    $MK8S kubectl rollout status deployment/grafana -n "$NAMESPACE" --timeout=5m
+fi
+DS_PASS=""
 
 # =============================================================================
 # 7. OAUTH2 PROXY
@@ -1501,7 +1514,11 @@ $MK8S kubectl rollout status deployment/oauth2-proxy \
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
 echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
-render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB POSTGRES_USER POSTGRES_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN \
+# its server entry: postgres, or rr_admin_login (IAM 2.5); the pod annotation
+# medcea/db-user restarts it when that changes
+db_client "$NAMESPACE" rr_admin_login
+PGA_DB_USER="$DBC_USER"; PGA_DB_PASS="$DBC_PASS"
+render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN \
        KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 # 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config

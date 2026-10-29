@@ -5,7 +5,7 @@ against the throwaway database of tests/iam-db-fixture.sh.
 Runs INSIDE the iam-runner pod that tests/iam-runner.sh starts (never on the host, never
 against production):
 
-    python3 /work/cur/tests/runner/iam_runner_flow.py --mode false|true|legacy
+    python3 /work/cur/tests/runner/iam_runner_flow.py --mode false|false-svc|true|legacy
 
 The real apps/scheduler/scheduler-api.py is loaded as a module and driven through
 Flask's test client, as postgres (IAM_DB_ROLES=false) or svc_scheduler (true). Its
@@ -188,13 +188,13 @@ def role_for(routes, route, prefer):
 
 
 # ── the API under test ──────────────────────────────────────────────────────────────
-def load_api(mode, cur_dir):
+def load_api(svc, cur_dir):
     if os.path.isdir("/schd"):
         for name in os.listdir("/schd"):
             p = os.path.join("/schd", name)
             shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
     shutil.copytree(os.path.join(cur_dir, "schd"), "/schd", dirs_exist_ok=True)
-    if mode == "true":
+    if svc:
         os.environ["PG_USER"], os.environ["PG_PASSWORD"] = "svc_scheduler", os.environ.get("PG_SVC_PASSWORD", "")
     else:
         os.environ["PG_USER"], os.environ["PG_PASSWORD"] = "postgres", os.environ["PG_SU_PASSWORD"]
@@ -265,10 +265,11 @@ def approved_set(alg_code, unit_id, name):
 
 
 # ── legacy: before 008b, the new runner's command-line path ─────────────────────────
-def run_legacy_cli(schd_dir, i, env_extra=None):
+def run_legacy_cli(schd_dir, i, env_extra=None, svc=False):
     """The old API's run row, then run_recipe.py without RECIPE_RUN_ID (exit code, run id).
     The command-line path refuses a unit with a failed run that is still active
-    (check_unit_availability), so earlier cases' F runs are deactivated first."""
+    (check_unit_availability), so earlier cases' F runs are deactivated first. svc: as
+    svc_scheduler, the login the scheduler pod hands its runner (false-svc, true)."""
     owner("UPDATE medcea.recipe_run SET is_active = 'N' WHERE unit_id = %s AND recipe_run_status = 'F' AND is_active = 'Y'",
           (i["u1"],))
     run_id = q("""INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_status, is_active)
@@ -277,7 +278,8 @@ def run_legacy_cli(schd_dir, i, env_extra=None):
     dotenv = os.path.join(schd_dir, "..", "installer", ".env")
     with open(dotenv, "w") as f:
         os.chmod(dotenv, 0o600)
-        f.write(f"DB_HOST={PG['host']}\nDB_NAME={PG['dbname']}\nDB_USER=postgres\nDB_PASS={os.environ['PG_SU_PASSWORD']}\n"
+        user, pw = ("svc_scheduler", os.environ.get("PG_SVC_PASSWORD", "")) if svc else ("postgres", os.environ["PG_SU_PASSWORD"])
+        f.write(f"DB_HOST={PG['host']}\nDB_NAME={PG['dbname']}\nDB_USER={user}\nDB_PASS={pw}\n"
                 f"MQTT_URL=127.0.0.1\nMQTT_PORT=1883\nPROJECT_NAME=medcea\n")
     env = {k: v for k, v in os.environ.items() if k != "RECIPE_RUN_ID"}
     env.update({"CONTROL_ALGORITHM": "IF_THEN_ELSE", "CONTROL_ALGORITHM_PARAMS": json.dumps({"iamt_runner": 0})})
@@ -306,7 +308,7 @@ def case_legacy(i):
 # ── the cases ───────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", required=True, choices=["false", "true", "legacy"])
+    ap.add_argument("--mode", required=True, choices=["false", "false-svc", "true", "legacy"])
     a = ap.parse_args()
     mode = a.mode
     i = ids()
@@ -318,12 +320,18 @@ def main():
         ok("setup", "migration 008b is loaded", False)
         return
     db_mode = q("SELECT coalesce((SELECT value FROM medcea.platform_setting WHERE key = 'iam_db_roles'), '') AS v", one=True)["v"]
-    if not ok("setup", f"the database is in mode {mode}", db_mode == mode, db_mode):
+    want_db = "false" if mode == "false-svc" else mode
+    if not ok("setup", f"the database is in mode {want_db}", db_mode == want_db, db_mode):
         return
+    # enforce: IAM_DB_ROLES=true. svc: the scheduler on svc_scheduler (true, or
+    # false-svc = IAM_DB_SERVICE_ROLES, IAM 2.5). strict: writes go through the
+    # functions only — the scheduler holds no direct DML for them off superuser.
     enforce = mode == "true"
+    svc = mode in ("true", "false-svc")
+    strict = enforce or svc
     routes = setup_iam("/work/cur")
     tok = Tokens()
-    api = load_api(mode, "/work/cur")
+    api = load_api(svc, "/work/cur")
     # paused: next_run is computed, but no schedule fires by itself during the test
     api.scheduler.start(paused=True)
     c = api.app.test_client()
@@ -338,7 +346,7 @@ def main():
     T_ALG = tok([alg_role], "55555555-5555-4555-8555-555555555555", "p-alg", "test-alg")
     log_role = role_for(routes, "PUT /api/config/logs", ["admin", "production_manager"])
     T_LOG = tok([log_role], "77777777-7777-4777-8777-777777777777", "p-log", "test-log")
-    who = "svc_scheduler" if enforce else "postgres"
+    who = "svc_scheduler" if svc else "postgres"
     set_r0 = q("SELECT params_id FROM medcea.recipe_unit_permission WHERE recipe_id = %s AND unit_id = %s",
                (i["r0"], i["u1"]), one=True)["params_id"]
     end_open_runs()
@@ -475,8 +483,8 @@ def main():
     ok("R6", "F -> S through set_run_status", r.status_code == 200 and run_row(rid6)["recipe_run_status"] == "S", r.get_json())
     end_open_runs()
     r = c.patch(f"/api/runs/{rid_flc}/status", json={"status": "S"}, headers=H(T_PM))   # completed in R2 (B1)
-    if enforce:
-        ok("R6", "true: reopening a completed run is 409", r.status_code == 409, r.get_json())
+    if strict:
+        ok("R6", f"{mode}: reopening a completed run is 409", r.status_code == 409, r.get_json())
     else:
         ok("R6", "false: reopening a completed run works, with an advisory",
            r.status_code == 200 and any("reopening" in w for w in (r.get_json() or {}).get("warnings", [])), r.get_json())
@@ -512,7 +520,7 @@ def main():
     ok("R7", "a retired schedule is not triggered: 409", r.status_code == 409, r.get_json())
 
     # R8 ───────────────────────────────────────────────────────────────────────────
-    if not enforce and os.path.isfile("/work/prev/schd/run_recipe.py") and rid3:
+    if not strict and os.path.isfile("/work/prev/schd/run_recipe.py") and rid3:
         end_open_runs()
         prev_root = "/work/prev-run"
         shutil.rmtree(prev_root, ignore_errors=True)
@@ -530,6 +538,8 @@ def main():
         note("R8", f"expected differences — run actors: previous {sorted(old_actors)}, now {sorted(new_actors)}; "
                    "executed_by is set only by start_run")
         end_open_runs()
+    elif svc and not enforce:
+        note("R8", "false-svc: the previous commit's runner writes recipe_run directly, which svc_scheduler may not: skipped")
     elif not enforce:
         note("R8", "no previous schd/ (--prev-schd) or no R3 run: skipped")
 
@@ -561,8 +571,9 @@ def main():
 
     ok("R9", "a migration:008 schedule has no person to fire as", not fires(sid9))
     r = c.post(f"/api/schedules/{sid9}/trigger", headers=H(T_OP))
-    if enforce:
-        ok("R9", "true: triggering it is refused (403)", r.status_code == 403, r.get_json())
+    if svc:
+        # only a superuser had the internal-actor fallback (_set_internal_actor)
+        ok("R9", f"{mode}: triggering it is refused (403)", r.status_code == 403, r.get_json())
     else:
         ok("R9", "false: it is triggered (the run is stamped db:postgres)", r.status_code == 200, r.get_json())
         rid9 = (r.get_json() or {}).get("run_id")
@@ -606,10 +617,10 @@ def main():
     want = {"compress_days": 6, "delete_days": int(before.get("log_delete_days", 30)) + 1}
     r = c.put("/api/config/logs", json=want, headers=H(T_LOG))
     after = {x["key"]: x["value"] for x in q("SELECT key, value FROM medcea.scheduler_config")}
-    if enforce:
+    if strict:
         d = r.get_json() or {}
-        ok("R11", "true: a proposal for qa, 202 with its change ids", r.status_code == 202 and d.get("pending") and d.get("change_ids"), d)
-        ok("R11", "true: nothing applied yet", after == before, (before, after))
+        ok("R11", f"{mode}: a proposal for qa, 202 with its change ids", r.status_code == 202 and d.get("pending") and d.get("change_ids"), d)
+        ok("R11", f"{mode}: nothing applied yet", after == before, (before, after))
     else:
         ok("R11", "false: saved at once", r.status_code == 200 and after.get("log_compress_days") == "6", (r.get_json(), after))
         s = q("SELECT updated_by_name FROM medcea.scheduler_config WHERE key = 'log_compress_days'", one=True)
@@ -621,8 +632,8 @@ def main():
         ok("R12", "true: a request without a person is 401", r.status_code == 401, r.get_json())
     else:
         rid12 = (r.get_json() or {}).get("recipe_run_id")
-        ok("R12", "false: accepted and stamped db:postgres", r.status_code == 201 and rid12
-           and run_row(rid12)["created_by_sub"] == "db:postgres", r.get_json())
+        ok("R12", f"{mode}: accepted and stamped db:{who}", r.status_code == 201 and rid12
+           and run_row(rid12)["created_by_sub"] == f"db:{who}", r.get_json())
     end_open_runs()
 
     # R17 ──────────────────────────────────────────────────────────────────────────
@@ -689,8 +700,8 @@ def main():
             ok("R15", "old library, composite token (two roles): no person, 401", r.status_code == 401, r.get_json())
         else:
             rid15 = (r.get_json() or {}).get("recipe_run_id")
-            ok("R15", "old library, composite token (two roles): no person, stamped db:postgres",
-               r.status_code == 201 and run_row(rid15)["created_by_sub"] == "db:postgres", r.get_json())
+            ok("R15", f"old library, composite token (two roles): no person, stamped db:{who}",
+               r.status_code == 201 and run_row(rid15)["created_by_sub"] == f"db:{who}", r.get_json())
         end_open_runs()
         r = c.post("/api/runs", json={"unit_id": i["u1"], "recipe_id": i["r0"]}, headers=H(T_PM1))
         rid15 = (r.get_json() or {}).get("recipe_run_id")
@@ -701,9 +712,9 @@ def main():
     end_open_runs()
 
     # the new runner's command-line path with 008b: works while false, refused while true
-    p, rid_cli = run_legacy_cli("/schd", i)
-    if enforce:
-        ok("legacy", "true: run_recipe.py without RECIPE_RUN_ID refuses", p.returncode == 1 and "Refused" in p.stderr, p.stderr[-300:])
+    p, rid_cli = run_legacy_cli("/schd", i, svc=svc)
+    if strict:
+        ok("legacy", f"{mode}: run_recipe.py without RECIPE_RUN_ID refuses", p.returncode == 1 and "Refused" in p.stderr, p.stderr[-300:])
     else:
         ok("legacy", "false: run_recipe.py without RECIPE_RUN_ID still completes a run", p.returncode == 0
            and run_row(rid_cli)["recipe_run_status"] == "C", p.stderr[-300:])

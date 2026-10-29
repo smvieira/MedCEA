@@ -75,6 +75,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         WARN while it is false (the database still serves the pre-policy grants),"
     echo -e "         so a default install does not print \"All checks passed\" — on purpose"
     echo ""
+    echo -e "  ${CYAN}dbclients${NC} which role each database client logs in as (IAM_DB_SERVICE_ROLES, Phase 2.5)"
+    echo -e "         WARN while a client disagrees with the flag (deploy it again)"
+    echo ""
     echo -e "  ${CYAN}iamgrants${NC} the database's grants equal the compiled policy: DATABASE"
     echo -e "         (cli.py compile grants --mode verify, in a read-only transaction; drift is a FAIL)"
     echo ""
@@ -281,6 +284,40 @@ SQL
         _record WARN "$name" "IAM_DB_ROLES=false: per-role database grants are compiled but not in force (IAM Phase 2)"
     else
         _record OK "$name" "IAM_DB_ROLES=true: per-role grants, RLS and guard triggers in force"
+    fi
+}
+
+# =============================================================================
+# Check: IAM_DB_SERVICE_ROLES (Phase 2.5) — which role each database client logs in as
+# =============================================================================
+check_dbclients() {
+    local name="$1" cu c u want on_role=() off=() unreadable=()
+    REPO_ROOT="$SCRIPT_DIR"
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/infra/lib-db-roles.sh"
+    local live=()
+    mapfile -t live < <(db_clients_live "$NAMESPACE" 2>/dev/null)
+    if [[ ${#live[@]} -eq 0 ]]; then
+        _record SKIP "$name" "no database client is deployed"; return
+    fi
+    for cu in "${live[@]}"; do
+        read -r c u <<<"$cu"
+        want="$(db_client_role "$c")"
+        if [[ "$u" == "?" ]]; then unreadable+=("$c")
+        elif [[ "$u" == "$want" ]]; then on_role+=("$c")
+        else off+=("$c")
+        fi
+    done
+    if [[ ${#unreadable[@]} -gt 0 ]]; then
+        _record WARN "$name" "cannot read the database user of: ${unreadable[*]}"
+    elif [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" && ${#off[@]} -gt 0 ]]; then
+        _record WARN "$name" "IAM_DB_SERVICE_ROLES=true, still on postgres: ${off[*]} (deploy them again; Grafana and pgAdmin: ./deploy-infra.sh)"
+    elif [[ "${IAM_DB_SERVICE_ROLES:-false}" != "true" && ${#on_role[@]} -gt 0 ]]; then
+        _record WARN "$name" "IAM_DB_SERVICE_ROLES=false, still on their own role: ${on_role[*]} (deploy them again, then ./apps/database/deploy.sh)"
+    elif [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" ]]; then
+        _record OK "$name" "all ${#on_role[@]} on their own role (IAM Phase 2.5)"
+    else
+        _record OK "$name" "all ${#off[@]} on postgres (IAM_DB_SERVICE_ROLES=false)"
     fi
 }
 
@@ -528,6 +565,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamchain) check_iamchain "$name" "$target" ;;
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
+        dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;

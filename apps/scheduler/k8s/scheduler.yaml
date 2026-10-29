@@ -37,10 +37,13 @@ spec:
           value: rdbms-postgresql.${NAMESPACE}.svc.cluster.local
         - name: PG_DATABASE
           value: medcea_db
-        - name: PG_USER
-          value: postgres
+        - name: PG_USER          # postgres, or the service's own role (IAM 2.5, infra/lib-db-roles.sh)
+          value: "${PG_USER}"
         - name: PG_PASSWORD
-          value: "${POSTGRES_PASS}"
+          valueFrom:
+            secretKeyRef:
+              name: ${PG_SECRET}
+              key: ${PG_SECRET_KEY}
         - name: MQTT_URL
           value: mosquitto.${NAMESPACE}.svc.cluster.local
         - name: MQTT_PORT
