@@ -201,7 +201,9 @@ uninstall-all)
         rm -rf .ca && echo "  removed .ca/"
     fi
     if [[ -f config.env ]] && ask_delete "Delete config.env (all settings and passwords)?"; then
-        rm -f config.env config.env.bak && echo "  removed config.env"
+        # guide.sh's backups (config.env.guide-*.bak) and any temp file it left are full
+        # copies of config.env, passwords included.
+        rm -f config.env config.env.bak config.env.guide-*.bak config.env.guide.* && echo "  removed config.env (and guide.sh's backups of it)"
     fi
     echo ""
     echo -e "${GREEN}Total uninstall complete.${NC} Reinstall with: ${BOLD}./install.sh${NC}"

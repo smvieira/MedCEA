@@ -77,6 +77,8 @@ One command installs everything: the infrastructure, then the applications, then
 
 If a stage fails, the installer names it and its log; fix the cause and run `./install.sh` again.
 
+Not sure which command you need? `./guide.sh` asks what you want to do (install, an application, an operator's units, an IAM switch, a test, a board), asks for the values, shows the exact command and what it changes, and runs it once you confirm. `./guide.sh --dry-run` only shows.
+
 **It starts by asking for its settings.** There is no file to edit by hand: on the first run it creates `config.env` from [config.env.example](config.env.example) and asks for each setting, with the default in `[brackets]` (press Enter to accept):
 
 | Asked | Default |
