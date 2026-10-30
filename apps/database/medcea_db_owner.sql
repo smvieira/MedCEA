@@ -1,12 +1,19 @@
--- medcea_db_owner.sql — every object in medcea, medcea_auth and iam_policy is
--- owned by medcea_owner (IAM plan 3.6). Run by apps/database/lib-db-apply.sh
+-- medcea_db_owner.sql — every object in medcea, medcea_auth, iam_policy and iam
+-- is owned by medcea_owner (IAM plan 3.6). Run by apps/database/lib-db-apply.sh
 -- (step 4) in one transaction as postgres, after the DDL and the migrations;
 -- migration 008b runs the same normalisation inside its own transaction so its
 -- SECURITY DEFINER functions (owned by medcea_owner) never meet a table they
 -- cannot read. Idempotent: only objects whose owner differs are altered, so the
 -- first deploy takes the ACCESS EXCLUSIVE locks and later deploys take none.
 --
--- Schema iam stays with postgres until IAM Phase 2.7 (apps/access owns it).
+-- Schema iam (apps/access/access_db.sql) since IAM 2.7, when it exists: its
+-- tables, sequences and functions, the trigger functions included, so the
+-- decision functions are SECURITY DEFINER as medcea_owner and freeze_record()'s
+-- owner rule holds. 008b's own copy of this normalisation leaves iam out on
+-- purpose: 008b must not depend on the access component, and this file runs
+-- after it on every deploy. A later CREATE OR REPLACE by the access deploy (as
+-- postgres) keeps the owner; a function it adds is postgres's until the next
+-- database deploy, and holds no grant until then either.
 -- medcea_owner is NOLOGIN and has no members: nobody acts as the owner except
 -- through its SECURITY DEFINER functions and the migrations (SET ROLE, postgres).
 
@@ -17,7 +24,7 @@ DECLARE
     r       record;
     v_owner oid := 'medcea_owner'::regrole;
     schemas oid[] := ARRAY(SELECT oid FROM pg_catalog.pg_namespace
-                            WHERE nspname IN ('medcea', 'medcea_auth', 'iam_policy'));
+                            WHERE nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam'));
 BEGIN
     FOR r IN SELECT nspname FROM pg_catalog.pg_namespace
               WHERE oid = ANY (schemas) AND nspowner <> v_owner LOOP

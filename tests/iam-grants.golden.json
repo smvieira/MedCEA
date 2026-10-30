@@ -81,6 +81,240 @@
  ],
  "privileges": [
   [
+   "access_svc",
+   "function",
+   "iam.confirm_decision(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "iam.create_review(jsonb)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "iam.record_decision(text,text,text,text,text,text,text,text,bigint)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "iam.refuse_decision(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "iam.review_decision(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "iam.sign_off_review(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "iam.withdraw_decision(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "medcea.revoke_person_mqtt(uuid,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "medcea_auth.set_actor(text,text,text,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "schema",
+   "iam",
+   "USAGE"
+  ],
+  [
+   "access_svc",
+   "schema",
+   "iam_policy",
+   "USAGE"
+  ],
+  [
+   "access_svc",
+   "schema",
+   "medcea",
+   "USAGE"
+  ],
+  [
+   "access_svc",
+   "schema",
+   "medcea_auth",
+   "USAGE"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.access_request",
+   "INSERT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.access_request",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.access_request",
+   "UPDATE"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.access_request_history",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.access_review",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.account_decision",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.config_history",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_settings",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_settings_pending",
+   "INSERT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_settings_pending",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_settings_pending",
+   "UPDATE"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_template",
+   "INSERT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_template",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.mail_template",
+   "UPDATE"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam.user_status_history",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam_policy.export_log",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam_policy.history",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam_policy.user_unit",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "iam_policy.user_zone",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.approval",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.cea_location",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.cea_unit",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.cea_zone",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.component",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.pending_change",
+   "SELECT"
+  ],
+  [
+   "access_svc",
+   "table",
+   "medcea.row_change",
+   "SELECT"
+  ],
+  [
    "anon",
    "function",
    "medcea_auth.pre_request()",
@@ -107,6 +341,12 @@
   [
    "iam_svc",
    "schema",
+   "iam",
+   "USAGE"
+  ],
+  [
+   "iam_svc",
+   "schema",
    "iam_policy",
    "USAGE"
   ],
@@ -121,6 +361,48 @@
    "schema",
    "medcea_auth",
    "USAGE"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.access_request",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.access_request_history",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.access_review",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.account_decision",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.config_history",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.mail_template",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam.user_status_history",
+   "SELECT"
   ],
   [
    "iam_svc",
@@ -449,6 +731,12 @@
   [
    "rr_auditor",
    "schema",
+   "iam",
+   "USAGE"
+  ],
+  [
+   "rr_auditor",
+   "schema",
    "iam_policy",
    "USAGE"
   ],
@@ -457,6 +745,48 @@
    "schema",
    "medcea",
    "USAGE"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.access_request",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.access_request_history",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.access_review",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.account_decision",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.config_history",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.mail_template",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam.user_status_history",
+   "SELECT"
   ],
   [
    "rr_auditor",
@@ -1625,6 +1955,12 @@
   [
    "rr_qa",
    "schema",
+   "iam",
+   "USAGE"
+  ],
+  [
+   "rr_qa",
+   "schema",
    "iam_policy",
    "USAGE"
   ],
@@ -1633,6 +1969,48 @@
    "schema",
    "medcea",
    "USAGE"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.access_request",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.access_request_history",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.access_review",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.account_decision",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.config_history",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.mail_template",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam.user_status_history",
+   "SELECT"
   ],
   [
    "rr_qa",
@@ -1967,6 +2345,12 @@
   [
    "rr_qp",
    "schema",
+   "iam",
+   "USAGE"
+  ],
+  [
+   "rr_qp",
+   "schema",
    "iam_policy",
    "USAGE"
   ],
@@ -1975,6 +2359,30 @@
    "schema",
    "medcea",
    "USAGE"
+  ],
+  [
+   "rr_qp",
+   "table",
+   "iam.access_request_history",
+   "SELECT"
+  ],
+  [
+   "rr_qp",
+   "table",
+   "iam.access_review",
+   "SELECT"
+  ],
+  [
+   "rr_qp",
+   "table",
+   "iam.config_history",
+   "SELECT"
+  ],
+  [
+   "rr_qp",
+   "table",
+   "iam.user_status_history",
+   "SELECT"
   ],
   [
    "rr_qp",
@@ -2117,6 +2525,12 @@
   [
    "svc_dbexport",
    "schema",
+   "iam",
+   "USAGE"
+  ],
+  [
+   "svc_dbexport",
+   "schema",
    "iam_policy",
    "USAGE"
   ],
@@ -2131,6 +2545,48 @@
    "schema",
    "medcea_auth",
    "USAGE"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.access_request",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.access_request_history",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.access_review",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.account_decision",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.config_history",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.mail_template",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam.user_status_history",
+   "SELECT"
   ],
   [
    "svc_dbexport",

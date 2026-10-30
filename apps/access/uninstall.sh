@@ -4,6 +4,8 @@
 #   ./apps/access/uninstall.sh                 service, proxy, Ingress, ConfigMaps,
 #                                              Secret; the request records are kept
 #   ./apps/access/uninstall.sh --purge-data    also DROP SCHEMA iam and role access_svc
+#                                              (warns while iam_policy.user_unit has rows:
+#                                              the assignments survive, their decisions not)
 #
 # The request and decision history is an access-control record (Annex 11), so it
 # is only dropped with the explicit flag, like the database component's data.
@@ -59,6 +61,19 @@ _psql() { $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$POSTGRES_P
 # database/uninstall.sh --purge-data runs before this one (reverse alphabetical
 # order) and may already have dropped medcea_db with the schema in it.
 if [[ "$(_psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB'")" == "1" ]]; then
+    # Unit assignments live in iam_policy (the database component's) and survive;
+    # their account decisions go with schema iam. The next access deploy records
+    # each surviving assignment again as a pending_qa decision without a maker.
+    # Two queries: a missing relation fails at parse time, inside any CASE.
+    _UU=0
+    if [[ "$(_psql -d "$POSTGRES_DB" -tAc "SELECT to_regclass('iam_policy.user_unit') IS NOT NULL" 2>/dev/null)" == t ]]; then
+        _UU="$(_psql -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM iam_policy.user_unit" 2>/dev/null || echo "?")"
+    fi
+    if [[ "$_UU" != 0 ]]; then
+        { echo -e "\033[0;33m[access] WARNING: iam_policy.user_unit holds ${_UU} unit assignment(s); they stay in effect, but their"
+          echo -e "         account decisions are dropped with schema iam. The next ./apps/access/deploy.sh records each"
+          echo -e "         one again as pending_qa for a qa person (apps/iam/units.sh list shows them).\033[0m"; } >&2
+    fi
     log "Dropping schema iam..."
     _psql -d "$POSTGRES_DB" -c "DROP SCHEMA IF EXISTS iam CASCADE;" \
           -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'access_svc') THEN DROP OWNED BY access_svc; END IF; END \$\$;"

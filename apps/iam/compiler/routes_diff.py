@@ -54,11 +54,6 @@ REMOVED = {
 NOT_BUILT = {
     ("iam", None): "4.1",
     ("iam-mqttx", None): "3.5",
-    ("access", "GET /api/decisions"): "2.7",
-    ("access", "POST /api/decisions/<id>/confirm"): "2.7",
-    ("access", "GET /api/review"): "2.7",
-    ("access", "POST /api/review/<id>/sign-off"): "2.7",
-    ("access", "POST /api/users/<id>/person"): "2.7",
 }
 
 _PH = re.compile(r"<(?:[^<>:]+:)?([^<>]+)>")

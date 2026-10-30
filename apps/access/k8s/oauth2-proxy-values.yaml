@@ -10,17 +10,25 @@ configuration:
     # or session takes effect quickly.
     cookie_refresh = "4m"
     cookie_expire = "8h"
-    # The User Manager is an admin tool: go straight to the Keycloak login.
+    # Go straight to the Keycloak login.
     skip_provider_button = true
-    # Admins only. deploy-infra.sh maps realm roles into a "groups" claim on the
-    # access client; oauth2-proxy answers 403 to anyone signed in without
-    # realm role admin.
+    # The roles the access policy compiles for ACCESS_DOMAIN (admin, qa, qp,
+    # auditor), rendered by apps/access/deploy.sh only once every access pod has
+    # proved it enforces its route table; ["admin"] until then, and under
+    # IAM_GATES=false (IAM 2.7, invariant W). deploy-infra.sh maps realm roles
+    # into a "groups" claim on the access client; oauth2-proxy answers 403 to
+    # anyone signed in without one of them.
     oidc_groups_claim = "groups"
-    allowed_groups = ["admin"]
+    allowed_groups = ${ALLOWED_GROUPS}
+    # CSRF: the session cookie is not sent on a cross-site POST. Lax, not
+    # Strict: Strict would drop it on the top-level return from Keycloak's login.
+    # access-api also requires application/json and a same-origin Origin.
+    cookie_samesite = "lax"
     # The 403 page, as in k8s/oauth2-proxy/values-app.yaml.
     custom_templates_dir = "/templates"
-    # access-api.py records the decision against X-Forwarded-Preferred-Username
-    # (iam.access_request.decided_by and the history table), so pass it on.
+    # access-api.py takes the person from the verified access token (IAM 2.7),
+    # never from these headers; the profile upstream (/_account/) still reads
+    # X-Forwarded-Preferred-Username, which oauth2-proxy strips from the client.
     pass_user_headers = true
     pass_basic_auth = false
     pass_authorization_header = false

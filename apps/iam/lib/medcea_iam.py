@@ -28,12 +28,24 @@ actor_role(decision) is the person's own platform role for the database actor
 includes (routes.json role_includes, the database's _own_role() rule) — exactly one, or
 None (no role, two own roles, or a route table without role_includes).
 
+Read-only questions about the table, for the User Manager (IAM 2.7), none of them a check:
+    widening(old, new)          [[group, level], ...] a role change adds (routes.json
+                                `widening`; old None = no role), [] for none, None when the
+                                table has no widening (compiled before 2.7: never "narrowing")
+    roles_including(role)       the roles whose composites include `role` (role_includes inverted)
+    allows(roles, service, method, path)
+                                whether these roles may call the route: check()'s route match
+                                and role test without a token (the page's capabilities)
+
 Wrappers, called by each service on every request (the service loads this file itself
 from /iam/ and reloads it when the mount changes, so a missing ConfigMap heals and a new
 version needs no restart):
     flask_check(service)                    from a before_request hook; None or a response
-    http_check(handler, service) -> bool    from BaseHTTPRequestHandler.parse_request;
-                                            False means a refusal has been sent
+    http_check(handler, service, enforce=None) -> bool
+                                            from BaseHTTPRequestHandler.parse_request;
+                                            False means a refusal has been sent. enforce=True
+                                            refuses whatever IAM_ENFORCE says (the User
+                                            Manager's admin port); None follows enforcing()
 """
 import json
 import os
@@ -250,6 +262,47 @@ def actor_role(decision):
     return own[0] if len(own) == 1 else None
 
 
+def widening(old, new):
+    """[[group, level], ...] that changing from role `old` (None: no role) to `new` adds, from
+    routes.json `widening`; [] when it adds nothing; None when the table has no widening, so
+    a caller never reads an old table as "narrowing"."""
+    table = _load(ROUTES_FILE) or {}
+    w = table.get("widening")
+    if not isinstance(w, dict):
+        return None
+    return list((w.get("-" if old is None else old) or {}).get(new) or [])
+
+
+def roles_including(role):
+    """Sorted roles that include `role` through their composites (role_includes inverted);
+    [] for a table without role_includes."""
+    includes = (_load(ROUTES_FILE) or {}).get("role_includes")
+    if not isinstance(includes, dict):
+        return []
+    return sorted(r for r, inc in includes.items() if role in (inc or []))
+
+
+def allows(roles, service, method, path):
+    """Whether a person holding `roles` may call METHOD path on `service`: check()'s public
+    routes, route match and role test, without a token. A constrained grant counts (as in
+    check()). False for a missing table, an unknown service or a route not in it."""
+    table = _load(ROUTES_FILE)
+    if table is None:
+        return False
+    public = table.get("public", {})
+    for scope in ("*", service):
+        if match({r: 1 for r in public.get(scope, [])}, method, path):
+            return True
+    svc = table.get("services", {}).get(service)
+    if svc is None:
+        return False
+    key = match(svc["routes"], method, path)
+    if key is None:
+        return False
+    held = set(roles or []) & set(table.get("roles", []))
+    return any(r in svc["routes"][key]["roles"] for r in held)
+
+
 def _log(service, method, path, d, enforced):
     user = (d.who or {}).get("username") or "-"
     verb = "refused" if enforced else "would refuse"
@@ -273,13 +326,14 @@ def flask_check(service):
     return None
 
 
-def http_check(handler, service):
-    """For BaseHTTPRequestHandler.do_*: True to go on; False when a refusal was sent."""
+def http_check(handler, service, enforce=None):
+    """For BaseHTTPRequestHandler.do_*: True to go on; False when a refusal was sent.
+    enforce=None follows enforcing(); True or False overrides it (one log line either way)."""
     d = check(service, handler.command, handler.path, handler.headers)
     handler.medcea_iam = d
     if d.allow:
         return True
-    enforced = enforcing()
+    enforced = enforcing() if enforce is None else bool(enforce)
     _log(service, handler.command, handler.path, d, enforced)
     if not enforced:
         return True

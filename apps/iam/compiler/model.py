@@ -101,6 +101,41 @@ class Policy:
     def group_class(self, group):
         return self.groups[group]["class"]
 
+    # ── widening (qa_dual_control) ──────────────────────────────────────────────────
+    def holds(self, role):
+        """{(group, level): 'free' | frozenset(constraints)} over effective() — composites,
+        implies and tool reach expanded. Reach-only levels count as free. role None -> {}."""
+        if role is None:
+            return {}
+        out = {}
+        for g in self.groups:
+            held, free = self.direct(g, role)
+            for l in held:
+                if l in free:
+                    out[(g, l)] = "free"
+                else:
+                    out[(g, l)] = frozenset(self.cell(g, e)[1][l] for e in self.effective_roles(role)
+                                            if self.cell(g, e) and l in self.cell(g, e)[1])
+        for tool in self.groups:
+            for g, lv in self.reach(tool, role).items():
+                for l in lv:
+                    out[(g, l)] = "free"
+        return out
+
+    def widening(self, old, new):
+        """Sorted [(group, level)] new holds that old does not hold as freely: old lacks the pair,
+        or new holds it free and old only constrained, or new's constraint set is not a subset of
+        old's (alternative constraints OR together, so more alternatives is wider)."""
+        before, after = self.holds(old), self.holds(new)
+        out = []
+        for pair, v in after.items():
+            o = before.get(pair)
+            if o is None:
+                out.append(pair)
+            elif o != "free" and (v == "free" or not v <= o):
+                out.append(pair)
+        return sorted(out)
+
 
 def load(path=None):
     """Load the policy file (the defaults unless a path is given)."""

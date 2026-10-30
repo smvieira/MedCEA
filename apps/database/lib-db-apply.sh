@@ -20,11 +20,11 @@
 # stalling ingest; re-run it).
 #
 #   0  role shells: medcea_owner, anon (NOLOGIN), authenticator, mqtt_auth (LOGIN NOINHERIT)
-#   1  CREATE DATABASE if missing
+#   1  CREATE DATABASE if missing; then dba_iam_flag: is schema iam (apps/access) compiled?
 #   2  medcea_db_ddl.sql (no ON_ERROR_STOP; "already exists" filtered, as before)
 #   3  medcea_db_migrations.sql with -v deploy_nonce; 008b must have committed it
 #   3a recipe_recipe_id_seq fix (was deploy.sh step 4)
-#   4  medcea_db_owner.sql                         (-1, ON_ERROR_STOP)
+#   4  medcea_db_owner.sql (iam too, IAM 2.7)       (-1, ON_ERROR_STOP)
 #   4a the policy's compiled functions              (-1, ON_ERROR_STOP)
 #   4b medcea_db_008b_data.sql                      (-1, ON_ERROR_STOP; skipped while enforcing)
 #   4c medcea_db_008b_index.sql                     (autocommit; CONCURRENTLY, batched backfill)
@@ -34,6 +34,9 @@
 #        true:  medcea_db_migrations_008b_enforce.sql + grants --mode enforce
 #      then the settings (mqtt_topic_root, iam_db_roles, the database setting, the
 #      enforcement_* event on a transition) and the grants assertions, last.
+#   Every `compile grants` call (4a, 6) gets dba_iam_flag's answer: schema iam and
+#   access_svc compiled like the rest, or --without-iam when the access component
+#   is absent (IAM 2.7).
 
 _DBA_GREEN='\033[0;32m'; _DBA_YELLOW='\033[0;33m'; _DBA_NC='\033[0m'
 _dba_log()  { echo -e "${_DBA_GREEN}[database]${_DBA_NC} $*"; }
@@ -60,8 +63,44 @@ _dba_report() {
     grep -E '^(psql:[^ ]* )?WARNING:|^WARNING:' <<<"$out" | sed 's/^psql:[^ ]* //' >&2 || true
 }
 
+# dba_iam_flag NS POD DB — how `cli.py compile grants` treats schema iam (IAM 2.7):
+#   prints nothing          schema iam, role access_svc and the 2.7 functions exist:
+#                           iam is compiled like the rest
+#   prints --without-iam    schema iam is absent (no access component, or after
+#                           access --purge-data / database --purge-data); a leftover
+#                           role access_svc is left alone and holds nothing compiled
+#   exit 3, message         a half-present access component: schema iam without role
+#                           access_svc, or without iam.confirm_decision (the IAM 2.7
+#                           access deploy has not run): run ./apps/access/deploy.sh first
+#   exit 1                  the query failed: callers abort or FAIL, never default
+# Used by db_apply, health-check.sh (iamgrants) and tests/iam-db.sh. Reads only.
+dba_iam_flag() {
+    local row s r f
+    _DBA_NS="$1"; _DBA_POD="$2"
+    row="$(_dba_psql "$3" -tAq -v ON_ERROR_STOP=1 -F'|' -c "SELECT pg_catalog.to_regnamespace('iam') IS NOT NULL,
+               EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'access_svc'),
+               pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL")" \
+        || { echo "dba_iam_flag: cannot read schema iam and role access_svc in '$3'" >&2; return 1; }
+    IFS='|' read -r s r f <<<"$(tr -d '[:space:]' <<<"$row")"
+    if [[ ! "$s|$r|$f" =~ ^[tf]\|[tf]\|[tf]$ ]]; then
+        echo "dba_iam_flag: unexpected answer from '$3': $row" >&2
+        return 1
+    fi
+    if [[ "$s" == f ]]; then
+        echo "--without-iam"
+    elif [[ "$r" == f ]]; then
+        echo "schema iam exists but role access_svc does not: run ./apps/access/deploy.sh first (IAM 2.7)" >&2
+        return 3
+    elif [[ "$f" == f ]]; then
+        echo "schema iam has no iam.confirm_decision: run ./apps/access/deploy.sh first (IAM 2.7)" >&2
+        return 3
+    fi
+    return 0
+}
+
 db_apply() {
-    local ns="$1" pod="$2" mode="$3" out nonce got grants_mode down_or_enforce verifier r
+    local ns="$1" pod="$2" mode="$3" out nonce got grants_mode down_or_enforce verifier r flag
+    local iam_flag=()
     _DBA_NS="$ns"; _DBA_POD="$pod"
     [[ "$mode" == "false" || "$mode" == "true" ]] || { echo "db_apply: MODE must be false or true" >&2; return 2; }
     [[ "$PROJECT_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || { echo "db_apply: PROJECT_NAME is not ^[a-z][a-z0-9-]{1,30}$" >&2; return 2; }
@@ -88,6 +127,13 @@ SQL
         _dba_psql postgres -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$CEA_DB\" ENCODING 'UTF8' TEMPLATE template0;" || return 1
     else
         _dba_log "Database '$CEA_DB' already exists."
+    fi
+
+    # ── 1a. schema iam: compiled, or --without-iam (before anything is written) ─
+    flag="$(dba_iam_flag "$ns" "$pod" "$CEA_DB")" || return 1
+    if [[ -n "$flag" ]]; then
+        iam_flag=("$flag")
+        _dba_log "Schema iam is absent (no access component): the grants are compiled $flag."
     fi
 
     # ── 2. DDL ────────────────────────────────────────────────────────────────
@@ -126,14 +172,14 @@ END$$;
 SQL
 
     # ── 4. ownership ──────────────────────────────────────────────────────────
-    _dba_log "Ownership: medcea, medcea_auth and iam_policy belong to medcea_owner..."
+    _dba_log "Ownership: medcea, medcea_auth, iam_policy and iam belong to medcea_owner..."
     _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - < "$dir/medcea_db_owner.sql" || return 1
 
     # ── 4a. the compiled functions (policy_holds, object_group, pre_request, …) ─
     # before the data steps, which digest rows through object_group(); the bundle
     # re-creates them in step 6 from the same policy
     _dba_log "Compiled policy functions..."
-    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode additive --part functions \
+    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode additive --part functions "${iam_flag[@]}" \
         | _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - >/dev/null || return 1
 
     # ── 4b/4c. 008b data steps ────────────────────────────────────────────────
@@ -172,8 +218,8 @@ SQL
     local body asserts
     local logins=()
     [[ "$grants_mode" == additive && -n "${DBA_SERVICE_LOGINS:-}" ]] && logins=(--service-logins "$DBA_SERVICE_LOGINS")
-    body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part body "${logins[@]}")" || return 1
-    asserts="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part assert)" || return 1
+    body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part body "${logins[@]}" "${iam_flag[@]}")" || return 1
+    asserts="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part assert "${iam_flag[@]}")" || return 1
     out="$({
         echo "SET log_statement = 'none';"
         printf "\\\\set root '%s'\n" "$PROJECT_NAME"

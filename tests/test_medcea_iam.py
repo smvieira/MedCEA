@@ -152,5 +152,90 @@ class CheckTest(unittest.TestCase):
         self.assertFalse(self.iam.enforcing())       # settings.json says false: it wins
 
 
+class TableQueriesTest(unittest.TestCase):
+    """widening(), roles_including(), allows() and http_check(enforce=) (IAM 2.7): read the
+    route table only, so no PyJWT is needed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+        cls.tmp = tempfile.mkdtemp()
+        with open(os.path.join(cls.tmp, "routes.json"), "w") as f:
+            f.write(routes.dumps(routes.compile(cls.policy)))
+        with open(os.path.join(cls.tmp, "settings.json"), "w") as f:
+            json.dump({"issuer": ISSUER, "audience": "medcea-api", "enforce": False}, f)
+        cls.iam = _load_lib(cls.tmp)
+
+    def test_widening(self):
+        w = self.iam.widening("operator", "production_manager")
+        self.assertEqual(w, [list(x) for x in self.policy.widening("operator", "production_manager")])
+        self.assertEqual(len(w), 12)
+        self.assertEqual(self.iam.widening("production_manager", "operator"), [])
+        self.assertEqual(len(self.iam.widening(None, "operator")), 9)
+        self.assertEqual(self.iam.widening("qa", "qa"), [])
+        # a table compiled before 2.7 has no widening: None, never "narrowing"
+        tmp = tempfile.mkdtemp()
+        doc = routes.compile(self.policy)
+        doc.pop("widening")
+        with open(os.path.join(tmp, "routes.json"), "w") as f:
+            json.dump(doc, f)
+        old = _load_lib(tmp)
+        self.assertIsNone(old.widening("production_manager", "operator"))
+        self.assertIsNone(_load_lib(tempfile.mkdtemp()).widening(None, "operator"))
+        _load_lib(self.tmp)
+
+    def test_roles_including(self):
+        self.assertEqual(self.iam.roles_including("auditor"), ["qa"])
+        self.assertEqual(self.iam.roles_including("operator"), ["production_manager"])
+        self.assertEqual(self.iam.roles_including("admin"), [])
+        self.assertEqual(self.iam.roles_including("nonesuch"), [])
+
+    def test_allows(self):
+        a = self.iam.allows
+        for role in ("admin", "qa", "qp", "auditor"):
+            self.assertTrue(a([role], "access", "GET", "/"), role)
+            self.assertTrue(a([role, "default-roles-medcea"], "access", "GET", "/api/me"), role)
+        self.assertFalse(a(["operator"], "access", "GET", "/"))
+        self.assertTrue(a(["qa"], "access", "POST", "/api/decisions/7/confirm"))       # constrained: counts
+        self.assertFalse(a(["admin"], "access", "POST", "/api/decisions/7/confirm"))
+        self.assertTrue(a(["admin"], "access", "POST", "/api/decisions/7/withdraw"))
+        self.assertFalse(a(["admin"], "access", "GET", "/api/config-history"))          # I2
+        self.assertTrue(a(["qp"], "access", "GET", "/api/review/3"))
+        self.assertFalse(a(["qa"], "access", "GET", "/api/users"))
+        self.assertFalse(a(["admin"], "access", "GET", "/api/nonesuch"))
+        self.assertFalse(a(["admin"], "nonesuch", "GET", "/"))
+        self.assertFalse(a([], "access", "GET", "/"))
+        self.assertTrue(a([], "access", "GET", "/healthz"))                              # public
+        self.assertFalse(_load_lib(tempfile.mkdtemp()).allows(["admin"], "access", "GET", "/"))
+        _load_lib(self.tmp)
+
+    def _handler(self, method, path):
+        import io
+
+        class H:
+            pass
+        h = H()
+        h.command, h.path, h.headers, h.wfile, h.sent = method, path, {}, io.BytesIO(), []
+        h.send_response = lambda code: h.sent.append(code)
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        return h
+
+    def test_http_check_enforce(self):
+        import contextlib
+        import io
+        for enforce, sent, ok in ((True, [401], False), (None, [], True), (False, [], True)):
+            h, err = self._handler("GET", "/api/users"), io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIs(self.iam.http_check(h, "access", enforce=enforce), ok, enforce)
+            self.assertEqual(h.sent, sent, enforce)
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, lines)                   # exactly one log line
+            self.assertIn("medcea_iam: refused" if enforce else "medcea_iam: would refuse", lines[0])
+        h = self._handler("GET", "/healthz")                        # public: no log, no refusal
+        self.assertTrue(self.iam.http_check(h, "access", enforce=True))
+        self.assertEqual(h.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

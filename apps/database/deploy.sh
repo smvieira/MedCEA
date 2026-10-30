@@ -4,7 +4,11 @@
 # Deploys (apps/database/lib-db-apply.sh, db_apply):
 #   - role shells (medcea_owner, anon, authenticator, mqtt_auth) and medcea_db
 #   - the schema (medcea_db_ddl.sql) and the post-DDL migrations, 008b included
-#   - ownership of medcea, medcea_auth and iam_policy by medcea_owner
+#   - ownership of medcea, medcea_auth, iam_policy and (IAM 2.7) iam by medcea_owner
+#   - the grants of schema iam and access_svc, compiled like the rest; without the
+#     access component (no schema iam) they are compiled --without-iam, and a schema
+#     iam without IAM 2.7's functions is refused: run ./apps/access/deploy.sh first
+#     (it runs this deploy itself when access_svc lacks its grants)
 #   - migration 008b's one-shot data steps (grandfathering, parameter sets,
 #     measurement.zone_id) while IAM_DB_ROLES=false
 #   - the IAM_DB_ROLES bundle, one transaction:
@@ -191,7 +195,7 @@ db_apply "$NAMESPACE" "$PG_POD" "$IAM_DB_ROLES"
 # apps/iam/units.sh list). The apply above created iam_policy.user_unit.
 if [[ "$IAM_DB_ROLES" == "true" ]]; then
     _uu="$(_dba_psql "$CEA_DB" -tAq -c "SELECT count(*) FROM iam_policy.user_unit" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ "${_uu:-0}" =~ ^[1-9] ]] || warn "IAM_DB_ROLES=true and no unit is assigned to anyone: operators see no telemetry or runs and can start none. Assign them: apps/iam/units.sh assign <user> <UNIT>... (check: apps/iam/units.sh list)"
+    [[ "${_uu:-0}" =~ ^[1-9] ]] || warn "IAM_DB_ROLES=true and no unit is assigned to anyone: operators see no telemetry or runs and can start none. Assign them: apps/iam/units.sh assign <user> <UNIT>... --by <your username> (check: apps/iam/units.sh list)"
 fi
 
 # ── A mode flip reaches PostgREST only through new sessions ──────────────────

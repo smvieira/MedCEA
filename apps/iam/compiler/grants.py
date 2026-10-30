@@ -8,8 +8,9 @@ compile-time model
   rls(p)               [{object, name, cmd, role, using, check}] row-level security policies
   compiled_functions(p, smoke)
                        CREATE OR REPLACE text of pre_request(), _own_role(), platform_roles(),
-                       policy_holds(), object_group() and _token_clients()
-  sql(p, mode, smoke, part)
+                       policy_holds(), object_group(), _token_clients() and role_widening()
+                       (the last stamped with the route table's digest, which `verify` compares)
+  sql(p, mode, smoke, part, without_iam=False)
                        the psql script apps/database/lib-db-apply.sh runs inside the mode
                        bundle's transaction; mode additive (IAM_DB_ROLES=false), enforce (true)
                        or verify (read-only: the assertions of the mode recorded in
@@ -23,13 +24,17 @@ Rules (one place, so the Policy UI's explain and the database cannot drift):
   services   the closure of their ceiling; `service_only: [svc...]` members only for those
   R, X       SELECT          C   INSERT (+ USAGE on the table's sequences)    U   UPDATE
   O, A       EXECUTE on function members of that level, and on every approval function of
-             a group where the role holds A
-  never      DELETE, TRUNCATE, REFERENCES, TRIGGER; nothing for K or D
+             a group where the role holds A (unless the function's member is service_only)
+  K          EXECUTE on `service_only` function members only (check() refuses a K function
+             member without it: admin, and pgAdmin's rr_admin_login, would execute it)
+  never      DELETE, TRUNCATE, REFERENCES, TRIGGER; nothing for D
   views      SELECT only     written_by: functions   SELECT only, for everyone
   regulated  a service's U compiles only on the `objects` of a waiver that covers it
   infra      infrastructure_functions by their `execute` list or `rule`
-Out of scope until IAM Phase 2.7 (DEFERRED): schema iam and role access_svc — nothing is
-compiled, revoked or compared there, except that I9 still asserts anon and PUBLIC hold
+Schema iam and access_svc (apps/access) are compiled like the rest since IAM 2.7.
+`without_iam` (`cli.py compile grants --without-iam`) leaves every iam.* object and the
+grantee access_svc out of the compiled set, the revokes and the comparisons, for a database
+deployed without the access component; I9 then still asserts that anon and PUBLIC hold
 nothing in iam. Functions in NOT_BUILT do not exist yet and are skipped; every other
 function the policy names must exist (asserted in both modes and in `verify`).
 """
@@ -37,18 +42,19 @@ import hashlib
 import json
 import re
 
-SCHEMAS = ("medcea", "medcea_auth", "iam_policy")
+from compiler import routes as _routes
+
+SCHEMAS = ("medcea", "medcea_auth", "iam_policy", "iam")
 MEMBER_SCHEMAS = ("medcea", "iam_policy", "iam")
-DEFERRED = {"schema iam": "2.7", "role access_svc": "2.7"}
-DEFERRED_ROLES = {"access_svc"}
+# What --without-iam leaves out: the schema apps/access/access_db.sql creates and its role.
+IAM_SCHEMA = "iam"
+IAM_ROLES = ("access_svc",)
 NOT_BUILT = {
     "iam_policy.new_draft(integer,text)": "4.3",
     "iam_policy.save_entry(integer,text,text,text[],text,text[],text)": "4.3",
     "iam_policy.submit(integer,text)": "4.3",
     "iam_policy.approve(integer,text)": "4.3",
-    "iam_policy.propose_unit(uuid,integer,text)": "2.7",
-    "iam.confirm_decision(integer,text)": "2.7",
-    "iam.sign_off_review(integer,text)": "2.7",
+    "iam_policy.propose_unit(uuid,integer,text)": "4.3",
 }
 # The legacy grants of IAM_DB_ROLES=false (medcea_db_migrations_down_008b.sql): tables the
 # blanket anon grant is taken back from. tests/test_policy.py checks the down file names
@@ -105,8 +111,23 @@ def _lit(s):
     return "'" + str(s).replace("'", "''") + "'"
 
 
-def _deferred(obj):
-    return _schema(obj) == "iam"
+def _iam(obj):
+    return _schema(obj) == IAM_SCHEMA
+
+
+def schemas(without_iam=False):
+    """The schemas grants.py revokes in and compares: iam unless --without-iam."""
+    return tuple(s for s in SCHEMAS if not (without_iam and s == IAM_SCHEMA))
+
+
+def member_schemas(without_iam=False):
+    return tuple(s for s in MEMBER_SCHEMAS if not (without_iam and s == IAM_SCHEMA))
+
+
+def iam_roles(without_iam=False):
+    """The roles outside managed() whose privileges are compiled (access_svc): their deploy
+    owns the role shell and password, grants.py everything else. Empty under --without-iam."""
+    return [] if without_iam else list(IAM_ROLES)
 
 
 # ── roles ────────────────────────────────────────────────────────────────────────────
@@ -115,11 +136,11 @@ def people(p):
     return {r: rd.get("db_role", "rr_" + r) for r, rd in p.roles.items()}
 
 
-def services(p, *, deferred=False):
-    """{service key: db role}; access_svc (deferred) only when asked."""
+def services(p, without_iam=False):
+    """{service key: db role}; access_svc left out under --without-iam."""
     out = {}
     for s, sd in p.services.items():
-        if sd["db_role"] in DEFERRED_ROLES and not deferred:
+        if without_iam and sd["db_role"] in IAM_ROLES:
             continue
         out[s] = sd["db_role"]
     return out
@@ -229,12 +250,22 @@ def member_objects(p):
     return {m["object"]: g for g, m in _data_members(p) if "object" in m}
 
 
-def privileges(p):
+def _function_members(p):
+    """{normalised signature: member} of every function member."""
+    out = {}
+    for _, m in _data_members(p):
+        if "function" in m:
+            out[norm_sig(m["function"])] = m
+    return out
+
+
+def privileges(p, without_iam=False):
     out = set()
-    ppl, svc = people(p), services(p)
+    ppl, svc = people(p), services(p, without_iam)
+    fmembers = _function_members(p)
 
     def add(grantee, kind, obj, priv):
-        if _deferred(obj) or grantee in DEFERRED_ROLES:
+        if without_iam and (_iam(obj) or grantee in IAM_ROLES):
             return
         if kind == "function":
             obj = norm_sig(obj)
@@ -279,9 +310,12 @@ def privileges(p):
                     continue
                 if level in _service_levels(p, s, g):
                     add(dbr, "function", fn, "EXECUTE")
-    # approval functions: the holders of A on every group whose rule names them
+    # approval functions: the holders of A on every group whose rule names them, unless the
+    # function is service_only (the account decisions: access_svc calls them for the person)
     for g, gd in p.groups.items():
         for fn in (gd.get("approval") or {}).get("functions", []):
+            if (fmembers.get(norm_sig(fn)) or {}).get("service_only") is not None:
+                continue
             for r, dbr in ppl.items():
                 if "A" in _person_levels(p, g, r):
                     add(dbr, "function", fn, "EXECUTE")
@@ -298,9 +332,9 @@ def privileges(p):
     return sorted(out)
 
 
-def declared_functions(p):
+def declared_functions(p, without_iam=False):
     """Every function signature the policy names (group members, approval functions,
-    infrastructure_functions), normalised, minus NOT_BUILT and the deferred schema iam.
+    infrastructure_functions), normalised, minus NOT_BUILT (and schema iam under --without-iam).
     Each must exist: a signature that no longer resolves would otherwise drop out of the
     grant, of I15's comparison and of the matrix test without a word."""
     sigs = set()
@@ -311,7 +345,7 @@ def declared_functions(p):
         sigs.update((gd.get("approval") or {}).get("functions", []))
     for f in p.data.get("infrastructure_functions", []):
         sigs.add(f["function"])
-    out = {norm_sig(x) for x in sigs if not _deferred(x)}
+    out = {norm_sig(x) for x in sigs if not (without_iam and _iam(x))}
     return sorted(out - set(NOT_BUILT))
 
 
@@ -360,10 +394,10 @@ def token_clients(p, smoke=False):
     return out + (["iam-test"] if smoke else [])
 
 
-def document(p, smoke=False):
-    body = {"privileges": [list(x) for x in privileges(p)],
+def document(p, smoke=False, without_iam=False):
+    body = {"privileges": [list(x) for x in privileges(p, without_iam)],
             "memberships": [list(x) for x in memberships(p)],
-            "rls": rls(p), "not_built": NOT_BUILT, "deferred": DEFERRED,
+            "rls": rls(p), "not_built": NOT_BUILT, "without_iam": without_iam,
             "token_clients": token_clients(p, smoke)}
     body["digest"] = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return body
@@ -388,10 +422,56 @@ def _own_role_sql(p):
             f"                        WHERE {incl});")
 
 
-def compiled_functions(p, smoke=False):
+def widening_rows(p):
+    """[(old or None, new, group, level)]: every pair a change of role adds (model.Policy.widening,
+    the rule routes.json `widening` is compiled from)."""
+    out = []
+    for old in [None] + sorted(p.roles):
+        for new in sorted(p.roles):
+            out += [(old, new, g, l) for g, l in p.widening(old, new)]
+    return out
+
+
+def policy_digest(p, source="defaults.yaml"):
+    """The route table's digest (routes.json), which role_widening() carries as its comment:
+    a matrix change deployed to only one of deploy-infra.sh and the database is visible."""
+    return _routes.compile(p, source)["digest"]
+
+
+def _role_widening_sql(p, source):
+    rows = ",\n        ".join("(" + ", ".join("NULL" if x is None else _lit(x) for x in r) + ")" for r in widening_rows(p))
+    rows = rows or "(NULL, NULL, NULL, NULL)"
+    roles = _array(sorted(p.roles))
+    return f"""
+-- role_widening(old, new): the (group, level) pairs a change from `old` (NULL: no role) to
+-- `new` adds, as [[group, level], ...], or '[]' for a pure narrowing. Compiled from
+-- model.Policy.widening (routes.json `widening`), whose digest it carries as its comment.
+-- The migrations' stub raises instead, so an uncompiled database never says "narrowing".
+CREATE OR REPLACE FUNCTION medcea_auth.role_widening(p_old text, p_new text) RETURNS jsonb
+    LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $w$
+DECLARE w jsonb;
+BEGIN
+    IF p_new IS NULL OR NOT (p_new = ANY ({roles})) OR (p_old IS NOT NULL AND NOT (p_old = ANY ({roles}))) THEN
+        RAISE EXCEPTION 'role_widening: % -> % is not a change between platform roles',
+            coalesce(p_old, '(none)'), coalesce(p_new, '(none)') USING ERRCODE = '22023';
+    END IF;
+    SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(t.g, t.l) ORDER BY t.g, t.l), '[]'::jsonb) INTO w
+      FROM (VALUES
+        {rows}
+    ) t(o, n, g, l) WHERE t.o IS NOT DISTINCT FROM p_old AND t.n = p_new;
+    RETURN w;
+END $w$;
+ALTER FUNCTION medcea_auth.role_widening(text, text) OWNER TO medcea_owner;
+REVOKE ALL ON FUNCTION medcea_auth.role_widening(text, text) FROM PUBLIC;
+COMMENT ON FUNCTION medcea_auth.role_widening(text, text) IS {_lit("policy " + policy_digest(p, source))};
+"""
+
+
+def compiled_functions(p, smoke=False, without_iam=False, source="defaults.yaml"):
     clients = token_clients(p, smoke)
     holds = ",\n        ".join(f"({_lit(r)}, {_lit(g)}, {_lit(l)}, {_lit(v)})" for r, g, l, v in policy_holds_table(p))
-    groups = ",\n        ".join(f"({_lit(o)}, {_lit(g)})" for o, g in sorted(member_objects(p).items()) if not _deferred(o))
+    groups = ",\n        ".join(f"({_lit(o)}, {_lit(g)})" for o, g in sorted(member_objects(p).items())
+                               if not (without_iam and _iam(o)))
     own = _own_role_sql(p)
     dbrole_cases = "\n        ".join(f"WHEN {_lit(r)} THEN {_lit(d)}" for r, d in sorted(people(p).items()))
     return f"""
@@ -491,7 +571,7 @@ CREATE OR REPLACE FUNCTION medcea_auth.object_group(p_object text) RETURNS text
 $g$;
 ALTER FUNCTION medcea_auth.object_group(text) OWNER TO medcea_owner;
 REVOKE ALL ON FUNCTION medcea_auth.object_group(text) FROM PUBLIC;
-"""
+""" + _role_widening_sql(p, source)
 
 
 # ── SQL ──────────────────────────────────────────────────────────────────────────────
@@ -499,10 +579,10 @@ def _values(rows):
     return ",\n        ".join("(" + ", ".join(_lit(x) for x in r) + ")" for r in rows)
 
 
-def _expected_cte(p, grantees):
+def _expected_cte(p, grantees, without_iam=False):
     """CTE `expected(g, k, o, p)`: the compiled privileges of `grantees`, resolved to the
     objects that exist (normalised names), plus the sequences of the tables they INSERT into."""
-    rows = [r for r in privileges(p) if r[0] in grantees]
+    rows = [r for r in privileges(p, without_iam) if r[0] in grantees]
     vals = _values(rows) or "(NULL, NULL, NULL, NULL)"
     return f"""compiled(g, k, o, p) AS (VALUES
         {vals}),
@@ -552,8 +632,12 @@ _ACTUAL_CTE = """actual AS (
          WHERE n.nspname IN (%(schemas)s) AND a.grantee <> n.nspowner)"""
 
 
-def _actual_cte(schemas=SCHEMAS):
-    return _ACTUAL_CTE % {"schemas": ", ".join(_lit(s) for s in schemas)}
+def _in_list(names):
+    return ", ".join(_lit(s) for s in names)
+
+
+def _actual_cte(without_iam=False, only=None):
+    return _ACTUAL_CTE % {"schemas": _in_list(only or schemas(without_iam))}
 
 
 def _legacy_cte():
@@ -623,8 +707,8 @@ def _role_ddl(p, mode, service_logins=()):
     return "\n".join(lines)
 
 
-def _grant_block(p, grantees, privs_label):
-    rows = [r for r in privileges(p) if r[0] in grantees]
+def _grant_block(p, grantees, privs_label, without_iam=False):
+    rows = [r for r in privileges(p, without_iam) if r[0] in grantees]
     vals = _values(rows)
     if not vals:
         return ""
@@ -654,24 +738,25 @@ BEGIN
 END $grant$;"""
 
 
-def _revoke_from(roles, public=False):
+def _revoke_from(roles, public=False, without_iam=False):
     arr = _array(roles)
-    pub = """
-    REVOKE ALL ON ALL TABLES IN SCHEMA medcea, medcea_auth, iam_policy FROM PUBLIC;
-    REVOKE ALL ON ALL SEQUENCES IN SCHEMA medcea, medcea_auth, iam_policy FROM PUBLIC;
-    REVOKE ALL ON SCHEMA medcea, medcea_auth, iam_policy FROM PUBLIC;""" if public else ""
+    sch = ", ".join(schemas(without_iam))
+    pub = f"""
+    REVOKE ALL ON ALL TABLES IN SCHEMA {sch} FROM PUBLIC;
+    REVOKE ALL ON ALL SEQUENCES IN SCHEMA {sch} FROM PUBLIC;
+    REVOKE ALL ON SCHEMA {sch} FROM PUBLIC;""" if public else ""
     return f"""DO $revoke$
 DECLARE g text;
 BEGIN
     FOREACH g IN ARRAY {arr} LOOP
         CONTINUE WHEN NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = g);
-        EXECUTE pg_catalog.format('REVOKE ALL ON ALL TABLES IN SCHEMA medcea, medcea_auth, iam_policy FROM %I', g);
-        EXECUTE pg_catalog.format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA medcea, medcea_auth, iam_policy FROM %I', g);
-        EXECUTE pg_catalog.format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA medcea, medcea_auth, iam_policy FROM %I', g);
-        EXECUTE pg_catalog.format('REVOKE ALL ON SCHEMA medcea, medcea_auth, iam_policy FROM %I', g);
+        EXECUTE pg_catalog.format('REVOKE ALL ON ALL TABLES IN SCHEMA {sch} FROM %I', g);
+        EXECUTE pg_catalog.format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA {sch} FROM %I', g);
+        EXECUTE pg_catalog.format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA {sch} FROM %I', g);
+        EXECUTE pg_catalog.format('REVOKE ALL ON SCHEMA {sch} FROM %I', g);
     END LOOP;
     -- PUBLIC executes nothing here, in both modes (trigger firing never checks EXECUTE)
-    REVOKE ALL ON ALL FUNCTIONS IN SCHEMA medcea, medcea_auth, iam_policy FROM PUBLIC;{pub}
+    REVOKE ALL ON ALL FUNCTIONS IN SCHEMA {sch} FROM PUBLIC;{pub}
 END $revoke$;"""
 
 
@@ -717,8 +802,8 @@ def _membership_sql(p):
     return "\n".join(out)
 
 
-def _connect_sql(p):
-    logins = _array(login_roles(p) + ["authenticator", "mqtt_auth"])
+def _connect_sql(p, without_iam=False):
+    logins = _array(login_roles(p) + ["authenticator", "mqtt_auth"] + iam_roles(without_iam))
     return f"""DO $c$
 DECLARE g text;
 BEGIN
@@ -730,13 +815,13 @@ BEGIN
 END $c$;"""
 
 
-def _assert_equal(label, expected_cte, scope_sql):
+def _assert_equal(label, expected_cte, scope_sql, without_iam=False):
     """A DO block raising when the catalog differs from `expected` for grantees in scope."""
     return f"""DO $a$
 DECLARE missing text; extra text;
 BEGIN
     WITH {expected_cte},
-    {_actual_cte()}
+    {_actual_cte(without_iam)}
     SELECT (SELECT pg_catalog.string_agg(g || ' ' || p || ' ' || k || ' ' || o, '; ' ORDER BY g, o, p)
               FROM (SELECT * FROM expected EXCEPT SELECT * FROM actual WHERE {scope_sql}) x),
            (SELECT pg_catalog.string_agg(g || ' ' || p || ' ' || k || ' ' || o, '; ' ORDER BY g, o, p)
@@ -750,9 +835,10 @@ BEGIN
 END $a$;"""
 
 
-def _common_asserts(p):
-    mgd = _array(managed(p))
-    fns = _array(declared_functions(p))
+def _common_asserts(p, without_iam=False, source="defaults.yaml"):
+    mgd = _array(managed(p) + iam_roles(without_iam))
+    fns = _array(declared_functions(p, without_iam))
+    rw = "medcea_auth.role_widening(text,text)"
     return f"""DO $a$
 DECLARE bad text;
 BEGIN
@@ -767,13 +853,21 @@ BEGIN
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'medcea_owner has members (%): nobody may act as the owner', bad;
     END IF;
-    WITH {_actual_cte()}
+    -- role_widening() was compiled from the policy routes.json was (same digest), so the
+    -- database and the User Manager agree on which change waits for qa
+    IF pg_catalog.to_regprocedure({_lit(rw)}) IS NOT NULL
+       AND pg_catalog.obj_description(pg_catalog.to_regprocedure({_lit(rw)}), 'pg_proc')
+           IS DISTINCT FROM {_lit("policy " + policy_digest(p, source))} THEN
+        RAISE EXCEPTION 'medcea_auth.role_widening is stale (%): run ./apps/database/deploy.sh',
+            coalesce(pg_catalog.obj_description(pg_catalog.to_regprocedure({_lit(rw)}), 'pg_proc'), 'no digest');
+    END IF;
+    WITH {_actual_cte(without_iam)}
     SELECT pg_catalog.string_agg(o, ', ') INTO bad FROM actual
      WHERE g = 'PUBLIC' AND k = 'function';
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'PUBLIC may execute %', bad;
     END IF;
-    WITH {_actual_cte()}
+    WITH {_actual_cte(without_iam)}
     SELECT pg_catalog.string_agg(g || ' ' || p || ' ' || o, ', ') INTO bad FROM actual
      WHERE g = ANY ({mgd}) AND p IN ('DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER');
     IF bad IS NOT NULL THEN
@@ -786,15 +880,17 @@ def _admin_login_role(p):
     return next(role for role, member, _i, _s in memberships(p) if member == "rr_admin_login")
 
 
-def _additive_asserts(p):
+def _additive_asserts(p, without_iam=False, source="defaults.yaml"):
     mgd = managed(p)
+    scope = mgd + iam_roles(without_iam)
     return "\n".join([
-        _common_asserts(p),
-        _assert_equal("I15 (managed roles)", _expected_cte(p, set(mgd)), f"g = ANY ({_array(mgd)})"),
+        _common_asserts(p, without_iam, source),
+        _assert_equal("I15 (managed roles)", _expected_cte(p, set(scope), without_iam), f"g = ANY ({_array(scope)})",
+                      without_iam),
         f"""DO $a$
 DECLARE bad text;
 BEGIN
-    WITH {_actual_cte()}
+    WITH {_actual_cte(without_iam)}
     SELECT pg_catalog.string_agg(o, ', ') INTO bad FROM actual
      WHERE g = 'anon' AND k = 'function'
        AND o NOT IN ('medcea_auth.pre_request()', 'medcea.register_mqtt_credential(text, text, integer, text, text)');
@@ -823,11 +919,12 @@ END $a$;"""])
 
 
 def _i9_iam():
+    """I9 for schema iam under --without-iam, where the main comparison leaves iam out."""
     return """DO $a$
 DECLARE bad text;
 BEGIN
     IF pg_catalog.to_regnamespace('iam') IS NULL THEN RETURN; END IF;
-    WITH """ + _actual_cte(("iam",)) + """
+    WITH """ + _actual_cte(only=(IAM_SCHEMA,)) + """
     SELECT pg_catalog.string_agg(g || ' ' || p || ' ' || o, ', ') INTO bad FROM actual WHERE g IN ('anon', 'PUBLIC');
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'I9: anon/PUBLIC hold % in schema iam', bad;
@@ -835,23 +932,27 @@ BEGIN
 END $a$;"""
 
 
-def _enforce_asserts(p):
-    # every grantee but the owner and the deferred access_svc is in scope
-    every = set(managed(p)) | {"anon", "authenticator", "mqtt_auth", "PUBLIC"}
-    members = _array(sorted(member_objects(p)))
+def _enforce_asserts(p, without_iam=False, source="defaults.yaml"):
+    # every grantee but the owner is in scope (access_svc too, unless --without-iam)
+    every = set(managed(p)) | {"anon", "authenticator", "mqtt_auth", "PUBLIC"} | set(iam_roles(without_iam))
+    members = _array(sorted(o for o in member_objects(p) if not (without_iam and _iam(o))))
     want = _values([(r, m, str(i).lower(), str(s).lower()) for r, m, i, s in memberships(p)])
     rr = _array(sorted(people(p).values()) + ["anon", "rr_admin_login"])
+    sch = _in_list(schemas(without_iam))
     return "\n".join([
-        _common_asserts(p),
-        _assert_equal("I15/I10/I9", _expected_cte(p, every), f"g <> ALL ({_array(sorted(DEFERRED_ROLES))})"),
-        _i9_iam(),
+        _common_asserts(p, without_iam, source),
+        # every grantee is in scope; under --without-iam a left-over access_svc holding
+        # anything outside iam is drift too (lib-db-apply.sh passes the flag only when the
+        # schema and the role are both gone)
+        _assert_equal("I15/I10/I9", _expected_cte(p, every, without_iam), "true", without_iam),
+        _i9_iam() if without_iam else "",
         f"""DO $a$
 DECLARE bad text;
 BEGIN
     -- I15: every relation in the member schemas is a member of a group
     SELECT pg_catalog.string_agg(pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname), ', ') INTO bad
       FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname IN ({", ".join(_lit(s) for s in MEMBER_SCHEMAS)}) AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+     WHERE n.nspname IN ({_in_list(member_schemas(without_iam))}) AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
        AND NOT (c.oid = ANY (SELECT pg_catalog.to_regclass(x) FROM pg_catalog.unnest({members}) x WHERE pg_catalog.to_regclass(x) IS NOT NULL));
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'I15: not a member of any group: %', bad;
@@ -860,7 +961,7 @@ BEGIN
     SELECT pg_catalog.string_agg(c.relname || '.' || a.attname, ', ') INTO bad
       FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy') AND a.attacl IS NOT NULL;
+     WHERE n.nspname IN ({sch}) AND a.attacl IS NOT NULL;
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'I15: column privileges on %', bad;
     END IF;
@@ -895,7 +996,7 @@ BEGIN
     have AS (SELECT pg_catalog.quote_ident(ns.nspname) || '.' || pg_catalog.quote_ident(c.relname) AS t, po.polname::text AS n
                FROM pg_catalog.pg_policy po JOIN pg_catalog.pg_class c ON c.oid = po.polrelid
                JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
-              WHERE ns.nspname IN ('medcea', 'medcea_auth', 'iam_policy'))
+              WHERE ns.nspname IN ({sch}))
     SELECT pg_catalog.string_agg(x, '; ') INTO bad FROM (
         SELECT 'missing ' || t || ' ' || n AS x FROM (SELECT * FROM want WHERE t IS NOT NULL EXCEPT SELECT * FROM have) a
         UNION ALL SELECT 'extra ' || t || ' ' || n FROM (SELECT * FROM have EXCEPT SELECT * FROM want) b
@@ -907,56 +1008,63 @@ BEGIN
 END $a$;"""])
 
 
-def _legacy_asserts():
+def _legacy_asserts(without_iam=False):
     return _assert_equal("IAM_DB_ROLES=false legacy grants (down file)", _legacy_cte().replace("legacy AS", "expected AS", 1),
-                         "g IN ('anon', 'authenticator', 'mqtt_auth')")
+                         "g IN ('anon', 'authenticator', 'mqtt_auth')", without_iam)
 
 
-def _verify_sql(p):
+def _verify_sql(p, without_iam=False, source="defaults.yaml"):
     return f"""-- verify: read-only; the assertions of the mode recorded in medcea.platform_setting
 SELECT coalesce((SELECT value FROM medcea.platform_setting WHERE key = 'iam_db_roles'), 'false') = 'true' AS iam_enforcing \\gset
 \\if :iam_enforcing
-{_enforce_asserts(p)}
+{_enforce_asserts(p, without_iam, source)}
 \\else
-{_additive_asserts(p)}
-{_legacy_asserts()}
+{_additive_asserts(p, without_iam, source)}
+{_legacy_asserts(without_iam)}
 \\endif
 SELECT 'grants verified' AS result;"""
 
 
-def sql(p, mode, smoke=False, part="all", service_logins=()):
+def sql(p, mode, smoke=False, part="all", service_logins=(), without_iam=False, source="defaults.yaml"):
+    """`source` is the policy file's name as `cli.py compile routes` records it: the route
+    table's digest, which role_widening() carries and `verify` compares, covers it."""
     if mode not in ("additive", "enforce", "verify"):
         raise GrantsError(f"unknown mode {mode}")
     if service_logins and mode != "additive":
         raise GrantsError("--service-logins applies to --mode additive only (enforce: every login role logs in)")
     service_logins = service_logins_ok(p, service_logins)
-    doc = document(p, smoke)
-    head = (f"-- grants.py --mode {mode}{' --smoke' if smoke else ''}  digest {doc['digest']}\n"
+    doc = document(p, smoke, without_iam)
+    head = (f"-- grants.py --mode {mode}{' --smoke' if smoke else ''}{' --without-iam' if without_iam else ''}"
+            f"  digest {doc['digest']}\n"
             f"-- Generated from apps/iam/policy/defaults.yaml; do not edit. Runs inside the\n"
             f"-- IAM_DB_ROLES bundle's transaction (apps/database/lib-db-apply.sh).\n")
     if mode == "verify":
-        return head + _verify_sql(p) + "\n"
+        return head + _verify_sql(p, without_iam, source) + "\n"
     if part == "functions":   # the compiled functions alone (lib-db-apply.sh step 4a: 008b's data steps need them)
-        return head + compiled_functions(p, smoke)
+        return head + compiled_functions(p, smoke, without_iam, source)
     body, asserts = [], []
+    iam = iam_roles(without_iam)
     body.append("-- 1. roles\n" + _role_ddl(p, mode, service_logins))
-    body.append("-- 2. compiled functions" + compiled_functions(p, smoke))
+    body.append("-- 2. compiled functions" + compiled_functions(p, smoke, without_iam, source))
     if mode == "additive":
-        body.append("-- 3. revokes (managed roles only; anon, authenticator and mqtt_auth keep the legacy set)\n"
-                    + _revoke_from(managed(p)))
-        body.append(_grant_block(p, set(managed(p)), "4. grants of the managed roles (NOLOGIN while IAM_DB_ROLES=false, but for --service-logins)"))
-        body.append(_grant_block(p, {"anon"}, "4b. anon: USAGE on medcea_auth, EXECUTE on pre_request() (both modes)"))
-        asserts.append(_additive_asserts(p))
+        who = "managed roles" + "".join(f" and {r}" for r in iam)
+        body.append(f"-- 3. revokes ({who}; anon, authenticator and mqtt_auth keep the legacy set)\n"
+                    + _revoke_from(managed(p) + iam, without_iam=without_iam))
+        body.append(_grant_block(p, set(managed(p) + iam), f"4. grants of the {who} "
+                                 "(managed roles NOLOGIN while IAM_DB_ROLES=false, but for --service-logins)", without_iam))
+        body.append(_grant_block(p, {"anon"}, "4b. anon: USAGE on medcea_auth, EXECUTE on pre_request() (both modes)", without_iam))
+        asserts.append(_additive_asserts(p, without_iam, source))
     else:
-        every = managed(p) + ["anon", "authenticator", "mqtt_auth"]
-        body.append("-- 3. revokes (plan Appendix B, step 2; schema iam deferred to 2.7)\n" + _revoke_from(every, public=True)
+        every = managed(p) + ["anon", "authenticator", "mqtt_auth"] + iam
+        body.append(f"-- 3. revokes (plan Appendix B, step 2; schemas {', '.join(schemas(without_iam))})\n"
+                    + _revoke_from(every, public=True, without_iam=without_iam)
                     + "\nALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA medcea REVOKE ALL ON TABLES FROM anon;"
                     + "\nALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA medcea REVOKE ALL ON SEQUENCES FROM anon;\n"
-                    + _connect_sql(p))
-        body.append(_grant_block(p, set(every), "4. the compiled set"))
+                    + _connect_sql(p, without_iam))
+        body.append(_grant_block(p, set(every), "4. the compiled set", without_iam))
         body.append("-- 5. memberships\n" + _membership_sql(p))
         body.append("-- 6. row-level security\n" + _rls_sql(p))
-        asserts.append(_enforce_asserts(p))
+        asserts.append(_enforce_asserts(p, without_iam, source))
     text = head
     if part in ("all", "body"):
         text += "\n\n".join(b for b in body if b) + "\n"
@@ -987,6 +1095,9 @@ def check(p):
                 err(f"group {g}: {e}")
             if m.get("level") not in p.levels:
                 err(f"group {g}: function {m['function']} has no level")
+            if m.get("level") == "K" and m.get("service_only") is None:
+                err(f"group {g}: function {m['function']} at level K needs service_only "
+                    f"(admin, and pgAdmin's rr_admin_login, would execute it)")
             for t in m.get("writes") or []:
                 if t not in members:
                     err(f"group {g}: {m['function']} writes {t}, which is not a member")

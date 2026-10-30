@@ -15,6 +15,11 @@ as routes.json and medcea_iam.check() reads (plan Section 3.2). Per service:
             {role: [the roles it includes, transitively]} (Keycloak composites):
             medcea_iam.actor_role() takes a person's own role the way the database's
             _own_role() does — the held roles minus every role another held one includes
+  widening  {old role or "-": {new role: [[group, level], ...]}}: what a role change adds
+            (model.Policy.widening, qa_dual_control), non-empty entries only. The database
+            decides with medcea_auth.role_widening(), compiled from the same rule (grants.py)
+            and stamped with this document's digest; the User Manager shows "waits for qa"
+  waivers   [{id, invariant, subject, target, levels, review}] for the access review snapshot
 A route missing from the table is refused. The body is canonical JSON, and `digest` is
 its SHA-256, so two compiles of one policy are byte-identical.
 """
@@ -72,6 +77,21 @@ def _clients(p):
     return clients
 
 
+def widening_table(p):
+    """{old or "-": {new: [[group, level], ...]}} over every pair of platform roles, from
+    model.Policy.widening; an empty change is left out (missing means "adds nothing")."""
+    out = {}
+    for old in [None] + sorted(p.roles):
+        row = {}
+        for new in sorted(p.roles):
+            w = p.widening(old, new)
+            if w:
+                row[new] = [[g, l] for g, l in w]
+        if row:
+            out["-" if old is None else old] = row
+    return out
+
+
 def compile(p, source="defaults.yaml"):
     """The route table document for a loaded Policy. Raises RouteError on a malformed
     route or a route that is both public and in a group."""
@@ -107,6 +127,9 @@ def compile(p, source="defaults.yaml"):
         "role_includes": {r: sorted(p.effective_roles(r) - {r}) for r in sorted(p.roles)},
         "services": {s: {"clients": sorted(clients.get(s, ())), "routes": t} for s, t in services.items()},
         "public": {s: sorted(r) for s, r in public.items()},
+        "widening": widening_table(p),
+        "waivers": [{"id": w["id"], "invariant": w["invariant"], "subject": w["subject"], "target": w["target"],
+                     "levels": list(w["levels"]), "review": w.get("review_by")} for w in p.waivers],
     }
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
     body["digest"] = hashlib.sha256(canon.encode()).hexdigest()

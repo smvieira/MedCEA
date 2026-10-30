@@ -9,6 +9,7 @@
                                         the NetworkPolicies of `network:` as a JSON List
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
                          [--service-logins ROLE,...]  (additive: login roles allowed to log in, IAM Phase 2.5)
+                         [--without-iam]  (schema iam and access_svc absent: leave both out, IAM 2.7)
                                         the database side (grants.py): the psql text the IAM_DB_ROLES
                                         bundle of apps/database/lib-db-apply.sh runs, or its JSON form
   cli.py db-roles --names|--passwords|--logins
@@ -55,6 +56,8 @@ def main(argv=None):
     comp.add_argument("--smoke", action="store_true", help="accept the iam-test client's tokens (IAM_SMOKE)")
     comp.add_argument("--service-logins", default="",
                       help="grants --mode additive: comma-separated login roles that may log in (IAM_DB_SERVICE_ROLES)")
+    comp.add_argument("--without-iam", action="store_true",
+                      help="grants: leave schema iam and access_svc out (the access component is not installed)")
     dbr = sub.add_parser("db-roles")
     g = dbr.add_mutually_exclusive_group(required=True)
     g.add_argument("--names", action="store_true")
@@ -118,13 +121,15 @@ def main(argv=None):
     if args.cmd == "compile" and args.target == "grants":
         try:
             if args.format == "json":
-                print(json.dumps(grants.document(p, args.smoke), indent=1, sort_keys=True))
+                print(json.dumps(grants.document(p, args.smoke, args.without_iam), indent=1, sort_keys=True))
             elif not args.mode:
                 print("ERROR: compile grants needs --mode additive|enforce|verify", file=sys.stderr)
                 return 2
             else:
+                # the same source name as `compile routes`, so role_widening() carries routes.json's digest
                 print(grants.sql(p, args.mode, args.smoke, args.part,
-                                 [r for r in args.service_logins.split(",") if r]), end="")
+                                 [r for r in args.service_logins.split(",") if r], args.without_iam,
+                                 os.path.basename(args.file) if args.file else "defaults.yaml"), end="")
         except grants.GrantsError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

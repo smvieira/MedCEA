@@ -15,8 +15,7 @@ ANY = None  # admit any level but N
 ENFORCEMENT = {
     "PORTAL_DOMAIN": "compiled", "CONFIG_DOMAIN": "compiled", "SCHEDULER_DOMAIN": "compiled",
     "MONITOR_DOMAIN": "compiled", "DBMGMT_DOMAIN": "compiled", "MQTTX_DOMAIN": "compiled",
-    "NODE_RED_DOMAIN": "compiled",
-    "ACCESS_DOMAIN": "admin only until Phase 2.7",
+    "NODE_RED_DOMAIN": "compiled", "ACCESS_DOMAIN": "compiled",
     "GRAFANA_DOMAIN": "not yet (Phase 3.1)", "WORKBENCH_DOMAIN": "not yet (Phase 3.2)",
     "ONBOARD_DOMAIN": "not yet (Phase 3.4; EDGE_WIZARD_ROLE)", "PGADMIN_DOMAIN": "admin (pgAdmin's own OAuth2)",
     "POLICY_DOMAIN": "not deployed (Phase 4)",

@@ -328,11 +328,12 @@ network:
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants. `execute`
 # names database roles (db_roles below, or a role's or service's db_role); `rule:` derives
 # the grantees from the policy instead. Everything else in medcea_auth and every trigger
-# function is executable by its owner only. access_svc is left out until IAM Phase 2.7
-# (grants.DEFERRED): schema iam is still managed by apps/access/access_db.sql.
+# function is executable by its owner only. Since IAM 2.7 schema iam and access_svc are
+# compiled like the rest; `cli.py compile grants --without-iam` leaves both out while the
+# access component is not installed (apps/database/lib-db-apply.sh dba_iam_flag).
 infrastructure_functions:
   - {function: "medcea_auth.pre_request()", execute: [anon], why: "PostgREST calls it as db-anon-role before switching. SECURITY INVOKER (SET ROLE is refused inside a definer function) and reads no table: grants.py compiles the platform roles, their composites and the allowed clients into its body. A no-op unless the database setting medcea.iam_db_roles is true, so a database-only rollback never breaks PostgREST. It takes the person's own role from the verified groups claim, exactly one, else RAISE. The single exception to I9."}
-  - {function: "medcea_auth.set_actor(text, text, text, text)", execute: [svc_ingest, svc_scheduler, svc_monitor, svc_grafana, svc_dbexport, iam_svc], why: "A service records the person (sub, person_id, name, role) whose token it verified. The sub must be a uuid and the role a platform role; the source is recorded as 'person via <service login>'."}
+  - {function: "medcea_auth.set_actor(text, text, text, text)", execute: [svc_ingest, svc_scheduler, svc_monitor, svc_grafana, svc_dbexport, iam_svc, access_svc], why: "A service records the person (sub, person_id, name, role) whose token it verified. The sub must be a uuid and the role a platform role; the source is recorded as 'person via <service login>'."}
   - {function: "medcea_auth.set_system_actor(text, text, bigint)", execute: [svc_scheduler], why: "A triggered run acts as system:scheduler with the person and role of the schedule's (or run's) creator, looked up by id; refused when that creator is not a person."}
   - {function: "medcea_auth.my_units()", rule: own_unit, why: "The units assigned to the person behind the request (iam_policy.user_unit); read by the own_unit row-level security policies on the run tables."}
   - {function: "medcea_auth.my_zones()", rule: own_unit, why: "Every zone of the units assigned to the person (iam_policy.user_unit), zones added later included; read by the own_unit row-level security policy on medcea.measurement."}
@@ -351,8 +352,10 @@ infrastructure_functions:
   - {function: "medcea_auth._lock_row(text, jsonb)", execute: [], why: "The approval functions' row locks (the row, a recipe's lines, a run's cycles), taken before _authors() so authorship is read in commit order."}
   - {function: "medcea.stamp_actor()", execute: [], why: "Trigger function; runs as the table owner and overwrites created_by_*/updated_by_* with the verified actor."}
   - {function: "medcea.register_mqtt_credential(text, text, integer, text, text)", execute: [], why: "Version 1, called by the edge wizard as anon before Phase 2b. The legacy grant to anon lives in medcea_db_migrations_down_008b.sql only (IAM_DB_ROLES=false); enforce revokes it."}
-  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [iam_svc], why: "The only writer of the hash chain. access_svc gets it with IAM Phase 2.7."}
+  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [iam_svc], why: "The only writer of the hash chain. access_svc never calls it: the iam definer functions do."}
   - {function: "iam_policy.verify_chain()", execute: [], why: "Run by health-check.sh as postgres on the host."}
+  - {function: "medcea_auth._account_actor(text, text)", execute: [], why: "The one who-may rule for account decisions (a person via the User Manager holding a level on a group); called by the iam definer functions and revoke_person_mqtt."}
+  - {function: "medcea_auth.role_widening(text, text)", execute: [], why: "Compiled from the matrix (model.Policy.widening, the same table as routes.json widening, stamped with its digest); called by iam.record_decision."}
 
 # Database roles that are not a platform role or a service identity. grants.py creates
 # rr_admin_login and compiles every role's privileges; medcea_owner, anon and
@@ -539,10 +542,10 @@ service_identities:
     ceiling: {master_data: [R], devices: [R], runs: [R], mqtt_explorer: [R]}
   svc_access:
     label: access-api.py (User Manager and profile)
-    description: Account requests, decisions, role and status changes, mail settings; revokes MQTT credentials of a deactivated account.
+    description: Account requests, decisions, role and status changes, mail settings; revokes MQTT credentials of a deactivated account. master_data R shows unit codes on the qa screen.
     db_role: access_svc
-    managed_by: "apps/access/deploy.sh (access_db.sql) until IAM Phase 2.7"
-    ceiling: {iam_users: [R, C, U, A, K], zones: [R, A], mqtt_explorer: [R, U], audit_histories: [R, C]}
+    managed_by: "apps/access/deploy.sh (role shell and password; its grants are compiled from this ceiling)"
+    ceiling: {master_data: [R], iam_users: [R, C, U, A, K], zones: [R, A], mqtt_explorer: [R, U], audit_histories: [R, C]}
   svc_iam:
     label: iam-api.py (Policy UI and MQTT Explorer credentials)
     description: Policy drafts, submissions and approvals; per-person MQTT Explorer credentials.
@@ -584,6 +587,15 @@ resource_groups:
     members:
       - {type: ui, host: PORTAL_DOMAIN}
       - {type: api, service: access-profile, routes: {"GET /_account/": R, "GET /_account/user-menu.js": R, "GET /_account/api/me": R, "POST /_account/api/me": R}}
+
+  user_manager:
+    label: User Manager page
+    class: config
+    description: The User Manager's page and the signed-in person's own capabilities. Every list and action is a route of iam_users, zones or audit_histories.
+    why_this_class: Navigation; holds no records.
+    risk: None; it shows which tabs exist.
+    members:
+      - {type: api, service: access, routes: {"GET /": R, "GET /api/me": R}}
 
   master_data:
     label: Master data (locations, units, zones, components)
@@ -853,6 +865,7 @@ resource_groups:
       - {type: api, service: iam-mqttx, routes: {"POST /_mqtt-credential": R}}
       - {type: data, object: medcea.mqtt_service_credential, service_only: [svc_mqtt_auth, svc_iam]}
       - {type: data, object: medcea.mqtt_service_acl, service_only: [svc_mqtt_auth, svc_iam]}
+      - {type: data, function: "medcea.revoke_person_mqtt(uuid, text)", level: U, service_only: [svc_access], note: "deactivation and a pure narrowing set the person's credentials inactive in the same transaction; an owner definer, so access_svc reads no credential (no `writes:`: svc_iam keeps its DML)"}
 
   db_export:
     label: Database Management export
@@ -872,27 +885,32 @@ resource_groups:
     why_this_class: Personal data and the keys to the platform.
     risk: A wrong role or unit grants access to regulated data; a missed deactivation leaves a leaver inside.
     approval:
-      record: iam.account_decision (pending_qa → confirmed)
-      functions: ["iam.confirm_decision(int, text)"]
+      record: iam.account_decision (pending_qa → confirmed | refused; applied → reviewed)
+      functions: ["iam.confirm_decision(int, text)", "iam.refuse_decision(int, text)", "iam.review_decision(int, text)"]
       effect: blocking
       help: >
         A grant, a role change that adds any (group, level) pair the old role did not
-        have, a new unit assignment or a person_id change takes effect only when a qa
+        have, any activation (an enabled account reaches the hosts not yet gated by
+        role, Grafana until IAM 3.1, even without a platform role), a new unit assignment, a
+        person_id change or a change of the mail settings takes effect only when a qa
         person confirms it who is neither the administrator who made it nor its subject.
         Deactivation, a pure narrowing and the removal of a unit act at once and are
         reviewed afterwards.
     members:
       - {type: idp, object: "keycloak realm users, realm-role mappings and the person_id attribute"}
       - {type: data, object: iam.access_request}
-      - {type: data, object: iam.account_decision}
-      - {type: data, object: iam.mail_settings, service_only: [svc_access]}
-      - {type: data, object: iam.mail_template, note: "reset to default is an UPDATE to the default text, not a DELETE"}
-      - {type: data, function: "iam.confirm_decision(int, text)", level: A}
+      - {type: data, object: iam.account_decision, written_by: functions}
+      - {type: data, object: iam.mail_settings, service_only: [svc_access], written_by: functions, note: "changed only by iam.confirm_decision (a qa-confirmed mail_settings decision); access_svc reads it to send"}
+      - {type: data, object: iam.mail_settings_pending, service_only: [svc_access], note: "a mail settings change waiting for qa; moved to iam.mail_settings (or deleted) by the decision functions"}
+      - {type: data, object: iam.mail_template, note: "reset to default is an UPDATE to the default text (is_default), not a DELETE"}
+      - {type: data, function: "iam.record_decision(text, text, text, text, text, text, text, text, bigint)", level: K, service_only: [svc_access], writes: [iam.account_decision, iam.user_status_history], note: "an admin's proposal; pending_qa when it widens (medcea_auth.role_widening), else applied"}
+      - {type: data, function: "iam.withdraw_decision(int, text)", level: K, service_only: [svc_access], writes: [iam.account_decision]}
+      - {type: data, function: "iam.confirm_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam.user_status_history, iam.mail_settings]}
+      - {type: data, function: "iam.refuse_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam_policy.user_unit], note: "refusing a unit_assign deletes the user_unit row, only while it is the latest unit decision"}
+      - {type: data, function: "iam.review_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision]}
       - type: api
         service: access
         routes:
-          "GET /": [R, K]
-          "GET /api/me": [R, K]
           "GET /api/decisions": [R, K]
           "GET /api/users": K
           "GET /api/requests": K
@@ -907,6 +925,9 @@ resource_groups:
           "POST /api/templates/<name>": K
           "POST /api/templates/<name>/reset": K
           "POST /api/decisions/<id>/confirm": A
+          "POST /api/decisions/<id>/refuse": A
+          "POST /api/decisions/<id>/review": A
+          "POST /api/decisions/<id>/withdraw": K
       - {type: ui, host: ACCESS_DOMAIN}
 
   zones:
@@ -916,14 +937,14 @@ resource_groups:
     why_this_class: A per-person access attribute.
     risk: A new unit gives an operator telemetry, runs and run execution in that unit, so assignments wait for qa; removals act at once.
     approval:
-      record: iam.account_decision (pending_qa → confirmed)
-      functions: ["iam.confirm_decision(int, text)"]
+      record: iam.account_decision (pending_qa → confirmed | refused; applied → reviewed)
+      functions: ["iam.confirm_decision(int, text)", "iam.refuse_decision(int, text)", "iam.review_decision(int, text)"]
       effect: blocking
-      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it. Bootstrap exception (IAM 2.8, like the policy's --bootstrap) — apps/iam/units.sh applies an assignment at once and records it as pending_qa; IAM 2.7's confirm screen confirms or refuses it, and a refusal removes the unit.
+      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it. Bootstrap exception (IAM 2.8, like the policy's --bootstrap) — apps/iam/units.sh --by <username> applies an assignment at once and records it as pending_qa; the User Manager's Decisions tab confirms or refuses it, and a refusal removes the unit while it is the latest decision for that user and unit.
     members:
       - {type: data, object: iam_policy.user_unit, written_by: functions}
       - {type: data, object: iam_policy.user_zone, written_by: functions, note: "unused since unit assignments; kept for the history that names it"}
-      - {type: data, function: "iam_policy.propose_unit(uuid, int, text)", level: C, service_only: [svc_iam], note: "called by iam-api for an admin holding K; records a pending decision; removal is immediate"}
+      - {type: data, function: "iam_policy.propose_unit(uuid, int, text)", level: C, service_only: [svc_iam], note: "IAM 4.3: called by iam-api for an admin holding K; records a pending decision; removal is immediate. Until then apps/iam/units.sh is the only assigner"}
       - {type: api, service: iam, routes: {"GET /api/zones": [R, K], "PUT /api/zones": K}}
 
   iam_policy:
@@ -979,7 +1000,8 @@ resource_groups:
       - {type: data, object: medcea.pending_change, written_by: functions, note: "blocking changes waiting for approve_change() (retention, commissioning)"}
       - {type: data, object: medcea.row_change, written_by: functions, note: "every change to the 14 attributed tables; not_own_author reads it"}
       - {type: data, function: "iam_policy.log_export(text[], text[])", level: C, service_only: [svc_dbexport], writes: [iam_policy.export_log]}
-      - {type: data, function: "iam.sign_off_review(int, text)", level: C}
+      - {type: data, function: "iam.create_review(jsonb)", level: C, service_only: [svc_access], writes: [iam.access_review], note: "the quarter's snapshot; the database adds units, decisions, the switches it holds and the chain verdict itself"}
+      - {type: data, function: "iam.sign_off_review(int, text)", level: C, service_only: [svc_access], writes: [iam.access_review], note: "the creator may sign off (one qa person: a known single-person control)"}
       - type: api
         service: access
         routes:
@@ -987,6 +1009,8 @@ resource_groups:
           "GET /api/requests/<id>/history": R
           "GET /api/config-history": R
           "GET /api/review": R
+          "GET /api/review/<id>": R
+          "POST /api/review": C
           "POST /api/review/<id>/sign-off": C
       - {type: api, service: iam, routes: {"GET /api/policy/history": R}}
 
@@ -1035,6 +1059,10 @@ matrix:
     engineer: [R]
     bio_scientist: [R]
     control_scientist: [R]
+    admin: [R]
+    auditor: [R]
+  user_manager:
+    qp: [R]
     admin: [R]
     auditor: [R]
   master_data:
@@ -1174,7 +1202,7 @@ constraints:
       current unit, so moving a zone to another unit moves its history with it. Such a move
       (an UPDATE of medcea.cea_zone.unit_id, which engineers hold) widens the new unit's
       operators without an account decision; it is recorded only in medcea.row_change — a
-      qa_dual_control gap left to IAM 2.6/2.7.
+      qa_dual_control gap still open after IAM 2.7 (plan risk R9).
     enforced_by: ["RLS policies TO rr_operator on medcea.measurement (zone_id ∈ my_zones()), medcea.recipe_run (unit_id ∈ my_units()), medcea.recipe_line_cycle_run and medcea.run_release (through their run); other roles have explicit permissive policies", "monitor and scheduler routes filter by unit (2.6)"]
     rls:
       objects: [medcea.measurement, medcea.recipe_run, medcea.recipe_line_cycle_run, medcea.run_release]
@@ -1183,7 +1211,7 @@ constraints:
         medcea.recipe_run: "unit_id = ANY ((SELECT medcea_auth.my_units())::integer[])"
         medcea.recipe_line_cycle_run: "recipe_run_id IN (SELECT r.recipe_run_id FROM medcea.recipe_run r WHERE r.unit_id = ANY ((SELECT medcea_auth.my_units())::integer[]))"
         medcea.run_release: "recipe_run_id IN (SELECT r.recipe_run_id FROM medcea.recipe_run r WHERE r.unit_id = ANY ((SELECT medcea_auth.my_units())::integer[]))"
-    help: Units are assigned with apps/iam/units.sh (IAM 2.8, recorded pending_qa until 2.7's confirm screen) and later in the User Manager. An operator with no unit sees no telemetry and no runs, and can start none. Moving a zone to another unit moves its telemetry to that unit's operators.
+    help: Units are assigned with apps/iam/units.sh --by <username> (IAM 2.8; recorded pending_qa for the User Manager's Decisions tab) and, from IAM 4.3, in the User Manager. An operator with no unit sees no telemetry and no runs, and can start none. Moving a zone to another unit moves its telemetry to that unit's operators.
   assigned_run:
     summary: Execute only a run someone else prepared for one of your units.
     effect: An operator may execute or stop a run only when another person created it while holding production_manager (or a schedule such a person created triggered it), and its unit is one of the operator's units (iam_policy.user_unit).
@@ -1213,19 +1241,22 @@ constraints:
     help: Prevents commanding a chamber that is in production.
   not_own_author:
     summary: Approve only another person's work.
-    effect: The approval function refuses when the approver's person_id equals the author's, the submitter's, the creator's, the executor's or (for account decisions) the subject's, or when the approver's own role is widened by the change.
-    enforced_by: ["approval functions compare person_id stored on the record with the person_id claim of the approver's verified token"]
-    help: Compares persons, not accounts. person_id is a token claim that only a qa-confirmed decision can set or change.
+    effect: The approval function refuses when the approver's person_id equals the author's, the submitter's, the creator's, the executor's or (for account decisions) the subject's or the new person_id, or when the approver's own role is widened by the change. Account decisions also compare accounts (sub) with the maker and the subject, and a bootstrap unit decision without a subject person_id is compared by account only.
+    enforced_by: ["approval functions compare person_id stored on the record with the person_id claim of the approver's verified token", "iam.confirm_decision, refuse_decision and review_decision (medcea_auth._account_actor) and access-api's live check of the subject's person_id in Keycloak"]
+    help: Compares persons, not accounts. person_id is a token claim, set to the account's own id on first enable; a change is a qa-confirmed decision.
   qa_dual_control:
     summary: Account grants wait for qa.
     effect: >
       A grant, any role change that adds a (group, level) pair the old role did not hold,
-      a new unit assignment or a person_id change stays pending_qa until a qa person who
-      is neither the maker nor the subject confirms it. Deactivation, pure narrowing and
-      unit removal act at once and are reviewed by qa afterwards. Bootstrap exceptions:
-      the policy's --bootstrap, and apps/iam/units.sh (IAM 2.8), whose assignments act at
-      once and wait as pending_qa for confirmation or refusal (a refusal removes the unit).
-    enforced_by: ["access-api and iam-api write iam.account_decision", "the Keycloak change is made only on confirmation", "widening computed by the compiler from the effective matrix"]
+      the activation of an account that holds a role (a widening from none), a new unit
+      assignment, a mail settings change or a person_id change (always) stays pending_qa
+      until a qa person who is neither the maker nor the subject confirms it.
+      Deactivation, pure narrowing and unit removal act at once and are reviewed by qa
+      afterwards; deactivation and pure narrowing revoke the person's MQTT credentials in
+      the same transaction (medcea.revoke_person_mqtt). Bootstrap exceptions: the
+      policy's --bootstrap, and apps/iam/units.sh (IAM 2.8), whose assignments act at once
+      and wait as pending_qa for confirmation or refusal (a refusal removes the unit).
+    enforced_by: ["access-api and iam-api write iam.account_decision (iam.record_decision)", "the Keycloak change is made only on confirmation", "widening computed by the compiler from the effective matrix (medcea_auth.role_widening, routes.json widening)"]
     help: Two people for every grant; no delay for removing access.
 
 # ── Waivers ──────────────────────────────────────────────────────────────────────────
@@ -1264,7 +1295,7 @@ invariants:
   - {code: I14, kind: matrix, rule: "Every level in a cell applies to at least one member of its group; every A sits on a group with an approval rule; every constraint names levels the cell holds; every member and route belongs to one group only; waivers name only waivable invariants.", rationale: "A cell that compiles to nothing, or an escape hatch on a core rule, misleads the reader.", cites: "—"}
   - {code: I16, kind: matrix, rule: "Cells are closed under implies (U lists C and R).", rationale: "What the reader sees is what the compiler grants.", cites: "—"}
   - {code: I8, kind: workflow, rule: "A policy version is applied only after approval by a person holding A on iam_policy in the applied version who is not the submitter and whose own role the version does not widen.", rationale: "Every access change has two people behind it.", cites: "Annex 11 §12; PIC/S PI 041-1 §9.3"}
-  - {code: I17, kind: workflow, rule: "No person holds an admin account and a qa account at the same time.", rationale: "The administrator and the independent approver are different people.", cites: "PIC/S PI 041-1 §9.3"}
+  - {code: I17, kind: workflow, rule: "No person holds an admin account and a qa account at the same time; checked by access-api against Keycloak on every role change and person_id change, at proposal and at confirmation.", rationale: "The administrator and the independent approver are different people.", cites: "PIC/S PI 041-1 §9.3"}
   - {code: I9, kind: catalog, rule: "anon and PUBLIC hold no privilege on any object in schemas medcea, iam and iam_policy, and anon holds only USAGE on schema medcea_auth and EXECUTE on medcea_auth.pre_request().", rationale: "Nothing is reachable without a verified identity.", cites: "21 CFR 11.10(d)"}
   - {code: I10, kind: catalog, rule: "Every service role's grants are within its ceiling; no service holds A except svc_access on iam_users and zones and svc_iam on iam_policy (whose approval functions refuse system actors); no service holds U or D on a regulated or history table unless a waiver covers it.", rationale: "A compromised service cannot rewrite the record or approve on its own.", cites: "21 CFR 11.10(e)"}
   - {code: I15, kind: catalog, rule: "The privileges in pg_catalog equal what the version compiles to (matrix, ceilings, infrastructure_functions), and every table in medcea, iam and iam_policy is a member of a group.", rationale: "Detects grants made outside the policy and tables nobody classified.", cites: "Annex 11 §12"}

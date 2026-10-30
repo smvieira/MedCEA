@@ -88,6 +88,13 @@
     th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #2a364e; vertical-align: top; }
     th { color: #64748b; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
     td { color: #cbd5e1; overflow-wrap: anywhere; }
+    .drift { background: #3b1219; border: 1px solid #7f1d1d; color: #fecaca; border-radius: 8px; padding: 10px 14px; font-size: .85rem; margin-bottom: 16px; }
+    .drift ul { margin: 6px 0 0 18px; }
+    .p-confirmed, .p-reviewed { background: #0f2e1d; color: #86efac; } .p-refused { background: #3b1219; color: #fca5a5; }
+    .p-applied, .p-withdrawn { background: #2a2f3a; color: #94a3b8; } .p-pending_qa { background: #3a2a0c; color: #fcd34d; }
+    .tag { font-size: .7rem; font-weight: 600; border-radius: 6px; padding: 1px 7px; margin-left: 4px; background: #2a2f3a; color: #cbd5e1; }
+    .tag.flag { background: #3a2a0c; color: #fcd34d; }
+    .pairs { font-size: .82rem; color: #cbd5e1; margin-left: 18px; }
   </style>
 </head>
 <body>
@@ -95,23 +102,26 @@
   <div class="top">
     <div>
       <h1>User Manager</h1>
-      <div class="sub">Access requests, roles and the e-mail that goes with them.</div>
+      <div class="sub" id="subtitle">Access requests, roles, account decisions and the access review.</div>
     </div>
     <!-- Name → Profile / Sign out: the shared user menu (/_account/user-menu.js). -->
     <div id="user-menu"></div>
   </div>
   <div id="warn" class="warn">E-mail is not set up yet — decisions still work, but nothing is sent (messages go to the service log). <a href="#" data-go="settings">Open E-mail settings</a></div>
 
+  <!-- Tabs are shown per /api/me can: each one is a route the person's role may call. -->
   <div class="nav" id="nav">
-    <button class="on" data-v="requests">Requests<span class="badge" id="npend" hidden></span></button>
-    <button data-v="users">Users</button>
-    <button data-v="settings">E-mail settings</button>
-    <button data-v="templates">Templates</button>
-    <button data-v="log">Change log</button>
+    <button data-v="requests" hidden>Requests<span class="badge" id="npend" hidden></span></button>
+    <button data-v="users" hidden>Users</button>
+    <button data-v="decisions" hidden>Decisions<span class="badge" id="ndec" hidden></span></button>
+    <button data-v="settings" hidden>E-mail settings</button>
+    <button data-v="templates" hidden>Templates</button>
+    <button data-v="review" hidden>Access review</button>
+    <button data-v="log" hidden>Change log</button>
   </div>
 
   <!-- REQUESTS -->
-  <section class="view on" id="v-requests">
+  <section class="view" id="v-requests">
     <div class="tabs" id="tabs">
       <button class="tab on" data-s="pending">Pending</button>
       <button class="tab" data-s="approved">Approved</button>
@@ -139,12 +149,27 @@
     </div>
   </section>
 
+  <!-- DECISIONS -->
+  <section class="view" id="v-decisions">
+    <div id="drift" class="drift" hidden></div>
+    <div class="tabs" id="dtabs">
+      <button class="tab on" data-d="pending_qa">Waiting for qa</button>
+      <button class="tab" data-d="applied">To review</button>
+      <button class="tab" data-d="all">All</button>
+    </div>
+    <div class="layout">
+      <div class="panel list" id="dlist"><div class="empty">Loading…</div></div>
+      <div class="panel pad" id="ddetail"><div class="empty">Select a decision.</div></div>
+    </div>
+  </section>
+
   <!-- E-MAIL SETTINGS -->
   <section class="view" id="v-settings">
     <div class="layout">
       <div class="panel pad">
         <h2>Sending account</h2>
         <div id="st-status" style="margin:8px 0 4px"></div>
+        <div id="st-pending"></div>
         <form id="st-form" autocomplete="off">
           <label for="st-user">Gmail address</label>
           <input type="email" id="st-user" placeholder="medcea.platform@gmail.com">
@@ -158,8 +183,10 @@
             <div class="row2"><div><label for="st-host">SMTP host</label><input type="text" id="st-host"></div>
             <div><label for="st-port">Port</label><input type="number" id="st-port" min="1" max="65535"></div></div>
           </details>
+          <label for="st-reason">Note <span class="opt">optional — added after the change itself, which the record states</span></label>
+          <input type="text" id="st-reason" maxlength="2000">
           <div class="acts">
-            <button class="btn pri" type="submit" id="st-save">Save and verify</button>
+            <button class="btn pri" type="submit" id="st-save">Verify and propose (waits for qa)</button>
             <button class="btn" type="button" id="st-test">Send test e-mail to me</button>
             <button class="btn" type="button" id="st-clear">Remove password</button>
           </div>
@@ -175,7 +202,7 @@
           <li>Open <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a>, name it <code>medcea</code>, and create it.</li>
           <li>Copy the 16 letters into <b>App password</b> here (spaces are fine) and save. The login is checked before it is stored.</li>
         </ol>
-        <p style="margin-top:12px">The same account sends Keycloak's <b>Forgot password?</b> e-mails, so saving here also switches that link on. The password is stored in the platform database and is never shown again; changes are listed under <b>Change log</b>.</p>
+        <p style="margin-top:12px">The same account sends Keycloak's <b>Forgot password?</b> e-mails, so a change here could redirect password resets. That is why every change waits for a qa person's confirmation before it is used; until then the current account keeps sending. The password is stored in the platform database and is never shown again.</p>
       </div>
     </div>
   </section>
@@ -188,6 +215,15 @@
     </div>
   </section>
 
+  <!-- ACCESS REVIEW -->
+  <section class="view" id="v-review">
+    <div class="acts" id="rv-acts" style="margin:0 0 14px"></div>
+    <div class="layout">
+      <div class="panel list" id="rvlist"><div class="empty">Loading…</div></div>
+      <div class="panel pad" id="rvdetail"><div class="empty">Select a review.</div></div>
+    </div>
+  </section>
+
   <!-- CHANGE LOG -->
   <section class="view" id="v-log">
     <div class="panel" style="overflow-x:auto"><table><thead><tr><th>When</th><th>What</th><th>Change</th><th>By</th></tr></thead><tbody id="log"></tbody></table></div>
@@ -196,7 +232,7 @@
 
 <script src="/_account/user-menu.js" defer></script>
 <script>
-let ME = {}, ROLES = [], TEMPLATES = [], status = 'pending', current = null;
+let ME = { can: {} }, ROLES = [], TEMPLATES = [], status = 'pending', current = null;
 const $ = id => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const fmt = s => s ? new Date(s).toLocaleString() : '—';
@@ -204,43 +240,75 @@ const roleName = id => (ROLES.find(r => r.id === id) || { label: id || '—' }).
 const TPL_TITLES = { 'new-request': 'New request (to admins)', approved: 'Approved', reassigned: 'Approved, role reassigned', rejected: 'Rejected' };
 const VARS = ['first_name', 'last_name', 'username', 'email', 'organisation', 'requested_role', 'requested_role_label',
               'granted_role', 'granted_role_label', 'justification', 'notes', 'notes_block', 'decided_by', 'portal_url', 'admin_url', 'platform', 'request_id'];
+const WAIT = n => 'Recorded as decision #' + n + ' — waiting for a qa person.';
 
+// A 401 is an expired session: through the login once, back to this page. Twice in a
+// row is a real refusal, not an expired session — stop rather than loop.
 async function api(path, opts) {
   const r = await fetch(path, opts);
+  if (r.status === 401) {
+    let again = false;
+    try { again = !!sessionStorage.getItem('umReauth'); sessionStorage.setItem('umReauth', '1'); } catch (_) {}
+    if (!again) { location.href = '/oauth2/start?rd=' + encodeURIComponent(location.pathname + location.search); throw new Error('session expired — signing in again'); }
+  } else {
+    try { sessionStorage.removeItem('umReauth'); } catch (_) {}
+  }
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || body.detail || ('HTTP ' + r.status));
+  if (!r.ok) { const e = new Error(body.error || body.detail || ('HTTP ' + r.status)); e.status = r.status; e.body = body; throw e; }
+  body.__status = r.status;
   return body;
 }
+// JSON, same origin: the admin port refuses any other POST (CSRF).
 const post = (path, data) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) });
 
 // Same rules as Python's string.Template.safe_substitute: $name or ${name}; unknown stays as is; $$ is $.
 function fill(text, v) {
   return text.replace(/\$(?:\$|\{(\w+)\}|(\w+))/g, (m, a, b) => { const k = a || b; if (!k) return '$'; return k in v ? String(v[k]) : m; });
 }
+// The (group, level) pairs a role change adds, from routes.json (the database decides).
+function widens(from, to) { const w = (ME.widening || {})[from || '-'] || {}; return w[to] || []; }
 
+const VIEWS = { requests: 'requests', users: 'users', decisions: 'decisions_read', settings: 'settings', templates: 'templates', review: 'review_read', log: 'histories' };
 function show(view) {
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === view));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + view));
+  if (view === 'requests') load();
   if (view === 'settings') loadSettings();
   if (view === 'templates') loadTemplates();
   if (view === 'log') loadLog();
   if (view === 'users') loadUsers();
+  if (view === 'decisions') loadDecisions();
+  if (view === 'review') loadReviews();
 }
 
 async function init() {
   ME = await api('/api/me');
   ROLES = ME.roles;
-  $('warn').style.display = ME.smtp ? 'none' : 'block';
-  TEMPLATES = await api('/api/templates');
+  const can = ME.can || {};
+  document.querySelectorAll('#nav button').forEach(b => { b.hidden = !can[VIEWS[b.dataset.v]]; });
+  $('warn').style.display = (!can.settings || ME.smtp) ? 'none' : 'block';
+  if (!ME.has_person) $('subtitle').textContent = 'Your sign-in carries no person_id: you cannot make or check account decisions. Ask an administrator.';
+  if (can.templates) TEMPLATES = await api('/api/templates');
   $('nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) show(b.dataset.v); });
   document.querySelectorAll('[data-go]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); show(a.dataset.go); }));
   $('tabs').addEventListener('click', e => {
     if (!e.target.dataset.s) return;
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t === e.target));
+    document.querySelectorAll('#tabs .tab').forEach(t => t.classList.toggle('on', t === e.target));
     status = e.target.dataset.s; load();
   });
-  load();
+  $('dtabs').addEventListener('click', e => {
+    if (!e.target.dataset.d) return;
+    document.querySelectorAll('#dtabs .tab').forEach(t => t.classList.toggle('on', t === e.target));
+    dfilter = e.target.dataset.d; loadDecisions();
+  });
+  const first = [...document.querySelectorAll('#nav button')].find(b => !b.hidden);
+  if (!first) { $('list').replaceChildren(el('div', 'empty', 'Your role has nothing to do here.')); return; }
+  show(first.dataset.v);
+  if (can.requests && first.dataset.v !== 'requests') api('/api/requests?status=pending').then(badgeRequests).catch(() => {});
+  if (can.decisions_read && first.dataset.v !== 'decisions') api('/api/decisions?status=pending_qa').then(d => badgeDecisions(d.decisions)).catch(() => {});
 }
+function badgeRequests(rows) { $('npend').hidden = !rows.length; $('npend').textContent = rows.length; }
+function badgeDecisions(rows) { const n = rows.filter(d => d.status === 'pending_qa').length; $('ndec').hidden = !n; $('ndec').textContent = n; }
 
 // ── Requests ──────────────────────────────────────────────────────────────────
 async function load(keepId) {
@@ -248,18 +316,24 @@ async function load(keepId) {
   let rows;
   try { rows = await api('/api/requests?status=' + status); }
   catch (e) { list.replaceChildren(el('div', 'empty', 'Could not load requests: ' + e.message)); return; }
-  if (status === 'pending') { $('npend').hidden = !rows.length; $('npend').textContent = rows.length; }
+  if (status === 'pending') badgeRequests(rows);
   list.replaceChildren();
   if (!rows.length) list.append(el('div', 'empty', status === 'pending' ? 'No requests waiting for review.' : 'Nothing here.'));
   rows.forEach(r => {
     const it = el('div', 'item'); it.dataset.id = r.request_id;
     it.append(el('div', 'nm', r.first_name + ' ' + r.last_name + ' · ' + r.username), el('span', 'pill p-' + r.status, r.status));
-    it.append(el('div', 'meta', r.email + ' — ' + (r.status === 'approved' ? 'granted ' + r.granted_role : 'requested ' + r.requested_role) + ' — ' + fmt(r.created_at)));
+    it.append(el('div', 'meta', r.email + ' — ' + (r.status === 'approved' ? 'granted ' + r.granted_role + grantState(r) : 'requested ' + r.requested_role) + ' — ' + fmt(r.created_at)));
     it.onclick = () => select(r);
     list.append(it);
   });
   const again = keepId && rows.find(r => r.request_id === keepId);
   if (again) select(again);
+}
+// An approval is a grant decision: the account is enabled only when qa confirms it.
+function grantState(r) {
+  if (!r.grant_decision_id) return '';
+  const s = { pending_qa: 'waiting for qa', confirmed: 'confirmed by qa', refused: 'refused by qa', withdrawn: 'withdrawn' }[r.grant_status] || r.grant_status;
+  return ' (' + s + ', decision #' + r.grant_decision_id + ')';
 }
 
 function select(r) {
@@ -272,17 +346,18 @@ function select(r) {
   add('Username', r.username); add('E-mail', r.email); add('Organisation', r.organisation || '—');
   add('Requested role', roleName(r.requested_role)); add('Submitted', fmt(r.created_at));
   if (r.status !== 'pending') {
-    add('Decision', r.status + (r.granted_role ? ' — ' + roleName(r.granted_role) : ''));
+    add('Decision', r.status + (r.granted_role ? ' — ' + roleName(r.granted_role) : '') + grantState(r));
     add('Decided by', (r.decided_by || '—') + ', ' + fmt(r.decided_at));
   }
   d.append(dl, el('h3', null, 'Business justification'), el('div', 'box', r.justification));
   if (r.status !== 'pending') {
     if (r.admin_notes) d.append(el('h3', null, 'Administrator notes'), el('div', 'box', r.admin_notes));
-    d.append(el('h3', null, 'E-mail sent to the applicant'));
-    d.append(r.email_body ? el('div', 'box', 'Subject: ' + r.email_subject + '\n\n' + r.email_body) : el('div', 'note', 'No e-mail was sent with this decision.'));
+    d.append(el('h3', null, r.status === 'approved' && r.grant_status === 'pending_qa' ? 'E-mail to send when qa confirms' : 'E-mail to the applicant'));
+    d.append(r.email_body ? el('div', 'box', 'Subject: ' + r.email_subject + '\n\n' + r.email_body) : el('div', 'note', 'No e-mail with this decision.'));
   } else {
     composer(d, r);
   }
+  if (!ME.can.histories) return;
   const ul = el('ul', 'hist');
   d.append(el('h3', null, 'History'), ul);
   api('/api/requests/' + r.request_id + '/history').then(rows => rows.forEach(h => {
@@ -313,7 +388,8 @@ function composer(d, r) {
   const ta = el('textarea'); ta.id = 'notes'; ta.maxLength = 4000;
   d.append(roleWrap, l2, ta);
 
-  // The e-mail to the applicant: pre-filled from the template, editable.
+  // The e-mail to the applicant: pre-filled from the template, editable. An approval's
+  // e-mail is stored and sent when qa confirms; a rejection's goes out at once.
   const box = el('div', 'compose');
   const head = el('div', 'compose-h');
   const t = el('span', 't');
@@ -345,7 +421,7 @@ function composer(d, r) {
   function refresh(force) {
     const name = tplName(), tpl = TEMPLATES.find(x => x.name === name);
     t.textContent = 'E-mail — template: ' + TPL_TITLES[name];
-    if (!edited || force) {
+    if (tpl && (!edited || force)) {
       subj.value = fill(tpl.subject, values()).trim();
       body.value = fill(tpl.body, values()).trim() + '\n';
       edited = false;
@@ -354,11 +430,12 @@ function composer(d, r) {
     reload.hidden = !edited;
     const re = decision === 'approve' && sel.value !== r.requested_role;
     hint.className = 'note' + (re ? ' re' : '');
-    hint.textContent = re ? 'Role reassigned: they asked for ' + r.requested_role + '. Explain why in the notes — the e-mail includes them.' : '';
+    hint.textContent = (re ? 'Role reassigned: they asked for ' + r.requested_role + '. Explain why in the notes — the e-mail includes them. ' : '') +
+                       (decision === 'approve' ? 'The account is enabled, and the e-mail sent, when a qa person confirms.' : '');
     roleWrap.hidden = decision === 'reject';
     l2.replaceChildren(document.createTextNode('Notes '), el('span', 'opt', decision === 'reject' ? 'required — recorded and put in the e-mail as $notes_block' : 'optional — recorded and put in the e-mail as $notes_block'));
     go.className = 'go' + (decision === 'reject' ? ' r' : '');
-    go.textContent = decision === 'reject' ? 'Reject request' + (send.checked ? ' and send e-mail' : '') : 'Approve as ' + sel.value + (send.checked ? ' and send e-mail' : '');
+    go.textContent = decision === 'reject' ? 'Reject request' + (send.checked ? ' and send e-mail' : '') : 'Approve as ' + sel.value + ' (waits for qa)';
     [ls, subj, lb, body, foot].forEach(x => x.style.opacity = send.checked ? 1 : .45);
   }
   bA.onclick = () => { decision = 'approve'; bA.className = 'on a'; bR.className = 'r'; refresh(); };
@@ -376,15 +453,20 @@ function composer(d, r) {
     if (send.checked && (!subj.value.trim() || !body.value.trim())) { res.className = 'res bad'; res.textContent = 'The e-mail needs a subject and a message, or untick "Send e-mail".'; return; }
     const who = r.first_name + ' ' + r.last_name;
     const q = decision === 'reject' ? 'Reject the request from ' + who + '? Their pending account is deleted.'
-            : 'Grant ' + who + ' the role "' + sel.value + '" and enable the account?';
+            : 'Approve ' + who + ' as "' + sel.value + '"? The account is enabled only when a qa person confirms.';
     if (!confirm(q)) return;
     go.disabled = true;
     try {
       const out = await post('/api/requests/' + r.request_id + '/decision', {
         decision, role: decision === 'approve' ? sel.value : null, notes: ta.value,
         send_email: send.checked, email_subject: subj.value, email_body: body.value });
-      res.className = 'res ' + (out.email.sent || !send.checked ? 'good' : 'bad');
-      res.textContent = 'Saved: ' + out.request.status + (out.request.granted_role ? ' as ' + out.request.granted_role : '') + '. E-mail: ' + out.email.detail + '.';
+      if (out.decision) {
+        res.className = 'res good';
+        res.textContent = 'Approved — the account is enabled when a qa person confirms decision #' + out.decision.decision_id + '; the e-mail goes out then.';
+      } else {
+        res.className = 'res ' + (out.email.sent || !send.checked ? 'good' : 'bad');
+        res.textContent = 'Saved: ' + out.request.status + '. E-mail: ' + out.email.detail + '.';
+      }
       setTimeout(() => load(r.request_id), 1500);
     } catch (e) {
       res.className = 'res bad'; res.textContent = 'Not saved: ' + e.message; go.disabled = false;
@@ -392,7 +474,7 @@ function composer(d, r) {
   }
 }
 
-// ── Users ────────────────────────────────────────────────────────────────────
+// ── Users (admin) ────────────────────────────────────────────────────────────
 let USERS = [], ufilter = 'active', ucurrent = null;
 async function loadUsers(keepId) {
   try { USERS = await api('/api/users'); }
@@ -412,6 +494,7 @@ function paintUsers() {
     const it = el('div', 'item'); it.dataset.id = u.id;
     const nm = el('div', 'nm', u.display_name);
     u.roles.forEach(r => nm.append(el('span', 'roletag', r)));
+    if (u.pending_decision) nm.append(el('span', 'tag flag', u.pending_decision.kind + ' #' + u.pending_decision.id + ' waits for qa'));
     const st = userState(u);
     it.append(nm, el('span', 'pill p-' + st, st === 'pending' ? 'awaiting approval' : st));
     it.append(el('div', 'meta', u.username + ' · ' + (u.email || 'no e-mail') + (u.organisation ? ' · ' + u.organisation : '')));
@@ -419,6 +502,16 @@ function paintUsers() {
     list.append(it);
   });
   if (ucurrent) document.querySelectorAll('#ulist .item').forEach(i => i.classList.toggle('sel', i.dataset.id === ucurrent.id));
+}
+// Reason textarea + button + result line, in the house style.
+function actionForm(d, id, label, required, btnText, btnCls) {
+  const l = el('label'); l.htmlFor = id;
+  l.append(document.createTextNode(label + ' '), el('span', 'opt', required ? 'required — recorded with the decision' : 'optional — recorded with the decision'));
+  const ta = el('textarea'); ta.id = id; ta.maxLength = 2000; ta.style.minHeight = '64px';
+  const go = el('button', btnCls, btnText), res = el('div', 'res');
+  const acts = el('div', 'acts'); acts.append(go);
+  d.append(l, ta, acts, res);
+  return { ta, go, res };
 }
 function selectUser(u) {
   ucurrent = u;
@@ -429,83 +522,129 @@ function selectUser(u) {
   const dl = el('dl'); const add = (k, v) => dl.append(el('dt', null, k), el('dd', null, v));
   add('Username', u.username); add('E-mail', u.email || '—'); add('Organisation', u.organisation || '—');
   add('Platform role', u.roles.length ? u.roles.map(roleName).join(', ') : 'none (cannot use the portal)');
+  add('person_id', u.person_id || '— (the account itself)');
   add('Account created', u.created ? new Date(u.created).toLocaleString() : '—');
   if (u.last_event) add('Last change', u.last_event.action + ' by ' + u.last_event.actor + ', ' + fmt(u.last_event.occurred_at));
+  if (u.pending_decision) add('Waiting for qa', u.pending_decision.kind + ' — decision #' + u.pending_decision.id);
   d.append(dl);
 
-  const res = el('div', 'res');
+  const mine = u.id === ME.sub;
   if (st === 'pending') {
     const p = el('div', 'note', 'This account is waiting for its access request. Approve or reject it under Requests; it cannot be activated here.');
     const b = el('button', 'btn', 'Open the request'); b.onclick = () => { show('requests'); };
     d.append(el('h3', null, 'Status'), p, el('div', 'acts'));
     d.lastChild.append(b);
-  } else if (u.username === ME.user) {
-    d.append(el('h3', null, 'Status'), el('div', 'note', 'This is your own account — another administrator would have to deactivate it.'));
+  } else if (mine) {
+    d.append(el('h3', null, 'Status'), el('div', 'note', 'This is your own account — another administrator would have to change it.'));
   } else {
-    d.append(el('h3', null, u.enabled ? 'Deactivate account' : 'Activate account'));
-    d.append(el('div', 'help', u.enabled
-      ? 'The person is signed out everywhere at once and cannot sign in again until the account is activated. Their data, role and history are kept.'
-      : 'The person can sign in again with their existing password and role.'));
-    const l = el('label'); l.htmlFor = 'ureason';
-    l.append(document.createTextNode('Reason '), el('span', 'opt', u.enabled ? 'required — recorded in the account history' : 'optional — recorded in the account history'));
-    const ta = el('textarea'); ta.id = 'ureason'; ta.maxLength = 2000;
-    const go = el('button', 'go' + (u.enabled ? ' r' : ''), u.enabled ? 'Deactivate account' : 'Activate account');
-    const acts = el('div', 'acts'); acts.append(go);
-    d.append(l, ta, acts, res);
-    go.onclick = async () => {
-      if (u.enabled && !ta.value.trim()) { res.className = 'res bad'; res.textContent = 'Give a reason for the deactivation.'; ta.focus(); return; }
-      if (!confirm((u.enabled ? 'Deactivate' : 'Activate') + ' the account of ' + u.display_name + '?')) return;
-      go.disabled = true;
+    if (u.pending_decision && ME.can.decisions_withdraw) withdrawSection(d, u.pending_decision.id, () => loadUsers(u.id));
+    // Deactivation is always possible, also on a disabled account: it withdraws every
+    // decision still waiting for qa (an approved applicant who has left, say).
+    const deact = u.enabled || u.pending_decision;
+    d.append(el('h3', null, deact ? 'Deactivate account' : 'Activate account'));
+    d.append(el('div', 'help', deact
+      ? (u.enabled ? 'The person is signed out everywhere at once and cannot sign in again until the account is activated. Their MQTT person credentials are revoked. Their data, role and history are kept.'
+                   : 'The account is already disabled; deactivating records that and withdraws the decision waiting for qa.')
+      : 'Activating an account waits for a qa person to confirm — also one with no role, which would still reach Grafana.'));
+    const f = actionForm(d, 'ureason', 'Reason', deact, deact ? 'Deactivate account' : 'Activate (waits for qa)', 'go' + (deact ? ' r' : ''));
+    f.go.onclick = async () => {
+      if (deact && !f.ta.value.trim()) { f.res.className = 'res bad'; f.res.textContent = 'Give a reason for the deactivation.'; f.ta.focus(); return; }
+      if (!confirm((deact ? 'Deactivate' : 'Activate') + ' the account of ' + u.display_name + '?')) return;
+      f.go.disabled = true;
       try {
-        await post('/api/users/' + u.id + '/status', { active: !u.enabled, reason: ta.value });
-        res.className = 'res good'; res.textContent = u.enabled ? 'Deactivated and signed out.' : 'Activated.';
+        const out = await post('/api/users/' + u.id + '/status', { active: !deact, reason: f.ta.value });
+        f.res.className = 'res ' + (out.warning ? 'bad' : 'good');
+        f.res.textContent = out.__status === 202 ? WAIT(out.decision.decision_id)
+          : deact ? 'Deactivated' + (u.enabled ? ' and signed out' : '') + (out.decision && out.decision.withdrawn.length ? '; withdrew decision #' + out.decision.withdrawn.join(', #') : '') + '.' + (out.warning ? ' ' + out.warning : '')
+          : 'Activated.';
         setTimeout(() => loadUsers(u.id), 900);
-      } catch (e) { res.className = 'res bad'; res.textContent = 'Not changed: ' + e.message; go.disabled = false; }
+      } catch (e) { f.res.className = 'res bad'; f.res.textContent = 'Not changed: ' + e.message; f.go.disabled = false; }
     };
   }
-  if (st !== 'pending' && u.username !== ME.user) roleSection(d, u);
+  if (st !== 'pending' && !mine) { roleSection(d, u); personSection(d, u); }
+  if (ME.can.decisions_read) {
+    const ul = el('ul', 'hist');
+    d.append(el('h3', null, 'Decisions about this account'), ul);
+    api('/api/decisions?status=all&user=' + u.id).then(out => {
+      if (!out.decisions.length) ul.append(el('li', 'when', 'No account decisions recorded.'));
+      out.decisions.forEach(x => { const li = el('li'); li.append(el('div', null, '#' + x.decision_id + ' ' + kindLabel(x) + ' — ' + x.status + ', by ' + x.made_by_name), el('div', 'when', fmt(x.made_at))); if (x.reason) li.append(el('div', 'n', x.reason)); ul.append(li); });
+    }).catch(() => ul.append(el('li', null, 'Decisions unavailable.')));
+  }
+  if (!ME.can.histories) return;
   const ul = el('ul', 'hist');
   d.append(el('h3', null, 'Account history'), ul);
   api('/api/users/' + u.id + '/history').then(rows => {
     if (!rows.length) ul.append(el('li', 'when', 'No activations or deactivations recorded.'));
     rows.forEach(h => {
       const what = h.action === 'role_changed' ? 'Role changed: ' + (h.from_role || 'none') + ' → ' + h.to_role
-                 : (h.action === 'deactivated' ? 'Deactivated' : 'Activated');
-      const li = el('li'); li.append(el('div', null, what + ' — by ' + h.actor), el('div', 'when', fmt(h.occurred_at)));
+                 : (h.action === 'deactivated' ? 'Deactivated' : 'Activated' + (h.to_role ? ' as ' + h.to_role : ''));
+      const li = el('li'); li.append(el('div', null, what + ' — by ' + h.actor + (h.decision_id ? ' (decision #' + h.decision_id + ')' : '')), el('div', 'when', fmt(h.occurred_at)));
       if (h.reason) li.append(el('div', 'n', h.reason));
       ul.append(li);
     });
   }).catch(() => ul.append(el('li', null, 'History unavailable.')));
 }
+function withdrawSection(d, id, after) {
+  d.append(el('h3', null, 'Withdraw decision #' + id));
+  d.append(el('div', 'help', 'The change has not been applied; withdrawing closes it without qa.'));
+  const f = actionForm(d, 'wreason' + id, 'Reason', true, 'Withdraw decision #' + id, 'btn');
+  f.go.onclick = async () => {
+    if (!f.ta.value.trim()) { f.res.className = 'res bad'; f.res.textContent = 'Give a reason for withdrawing.'; f.ta.focus(); return; }
+    if (!confirm('Withdraw decision #' + id + '? Nothing it proposed is applied.')) return;
+    f.go.disabled = true;
+    try { await post('/api/decisions/' + id + '/withdraw', { reason: f.ta.value }); f.res.className = 'res good'; f.res.textContent = 'Withdrawn.'; setTimeout(after, 900); }
+    catch (e) { f.res.className = 'res bad'; f.res.textContent = 'Not withdrawn: ' + e.message; f.go.disabled = false; }
+  };
+}
 function roleSection(d, u) {
   d.append(el('h3', null, 'Platform role'));
   const cur = u.roles.length ? u.roles.join(', ') : 'none';
+  const from = u.roles.length === 1 ? u.roles[0] : null;    // none or several: a change from none
   const sel = el('select'); sel.id = 'urole';
   ROLES.forEach(x => { const o = el('option', null, x.label); o.value = x.id; if (u.roles[0] === x.id) o.selected = true; sel.append(o); });
   const hint = el('div', 'note');
-  const l = el('label'); l.htmlFor = 'urreason';
-  l.append(document.createTextNode('Reason '), el('span', 'opt', 'required — recorded in the account history'));
-  const ta = el('textarea'); ta.id = 'urreason'; ta.maxLength = 2000; ta.style.minHeight = '64px';
-  const go = el('button', 'btn pri', 'Change role'), res = el('div', 'res');
-  const acts = el('div', 'acts'); acts.append(go);
   const lr = el('label', null, 'Role'); lr.htmlFor = 'urole';
-  d.append(lr, sel, hint, l, ta, acts, res);
+  d.append(lr, sel, hint);
+  const f = actionForm(d, 'urreason', 'Reason', true, 'Change role', 'btn pri');
   function refresh() {
     const same = u.roles.length === 1 && sel.value === u.roles[0];
-    go.disabled = same;
+    const w = same ? [] : widens(from, sel.value);
+    f.go.disabled = same || !!u.pending_decision;
+    f.go.textContent = w.length ? 'Change (waits for qa)' : 'Change role';
     hint.className = 'note' + (same ? '' : ' re');
-    hint.textContent = same ? 'Current role.' : 'Changes ' + cur + ' → ' + sel.value + '. Takes effect within a few minutes, without signing out.';
+    hint.textContent = u.pending_decision ? 'Decision #' + u.pending_decision.id + ' is waiting for qa — withdraw it first.'
+      : same ? 'Current role.'
+      : w.length ? 'Changes ' + cur + ' → ' + sel.value + '. It adds ' + w.map(p => p[0] + ' · ' + p[1]).join(', ') + ', so it waits for a qa person.'
+      : 'Changes ' + cur + ' → ' + sel.value + '. A narrowing: applied at once (MQTT person credentials revoked), takes effect within a few minutes, without signing out.';
   }
   sel.onchange = refresh; refresh();
-  go.onclick = async () => {
-    if (!ta.value.trim()) { res.className = 'res bad'; res.textContent = 'Give a reason for the role change.'; ta.focus(); return; }
+  f.go.onclick = async () => {
+    if (!f.ta.value.trim()) { f.res.className = 'res bad'; f.res.textContent = 'Give a reason for the role change.'; f.ta.focus(); return; }
     if (!confirm('Change the role of ' + u.display_name + ' from ' + cur + ' to ' + sel.value + '?')) return;
-    go.disabled = true;
+    f.go.disabled = true;
     try {
-      const out = await post('/api/users/' + u.id + '/role', { role: sel.value, reason: ta.value });
-      res.className = 'res good'; res.textContent = 'Role changed: ' + (out.from || 'none') + ' → ' + out.role + '.';
+      const out = await post('/api/users/' + u.id + '/role', { role: sel.value, reason: f.ta.value });
+      f.res.className = 'res good';
+      f.res.textContent = out.__status === 202 ? WAIT(out.decision.decision_id) : 'Role changed: ' + (out.from || 'none') + ' → ' + out.role + '.';
       setTimeout(() => loadUsers(u.id), 900);
-    } catch (e) { res.className = 'res bad'; res.textContent = 'Not changed: ' + e.message; go.disabled = false; }
+    } catch (e) { f.res.className = 'res bad'; f.res.textContent = 'Not changed: ' + e.message; f.go.disabled = false; }
+  };
+}
+function personSection(d, u) {
+  d.append(el('h3', null, 'Person'));
+  d.append(el('div', 'help', 'Which person this account belongs to. Dual control compares persons: nobody confirms a change to their own person, and nobody holds both an admin and a qa account. A change always waits for qa.'));
+  const lp = el('label', null, 'New person_id'); lp.htmlFor = 'uperson';
+  const inp = el('input'); inp.type = 'text'; inp.id = 'uperson'; inp.maxLength = 64; inp.value = u.person_id || '';
+  d.append(lp, inp);
+  const f = actionForm(d, 'upreason', 'Reason', true, 'Propose (waits for qa)', 'btn pri');
+  f.go.disabled = !!u.pending_decision;
+  f.go.onclick = async () => {
+    if (!inp.value.trim() || !f.ta.value.trim()) { f.res.className = 'res bad'; f.res.textContent = 'Give the person_id and a reason.'; return; }
+    if (!confirm('Propose person_id "' + inp.value.trim() + '" for ' + u.display_name + '? A qa person must confirm it.')) return;
+    f.go.disabled = true;
+    try { const out = await post('/api/users/' + u.id + '/person', { person_id: inp.value.trim(), reason: f.ta.value });
+          f.res.className = 'res good'; f.res.textContent = WAIT(out.decision.decision_id); setTimeout(() => loadUsers(u.id), 900); }
+    catch (e) { f.res.className = 'res bad'; f.res.textContent = 'Not recorded: ' + e.message; f.go.disabled = false; }
   };
 }
 $('utabs').addEventListener('click', e => {
@@ -515,6 +654,153 @@ $('utabs').addEventListener('click', e => {
 });
 $('usearch').addEventListener('input', paintUsers);
 
+// ── Decisions (qa confirms, refuses, reviews; admin and auditor read) ────────
+let DECISIONS = [], dfilter = 'pending_qa', dcurrent = null, ATTEST = '';
+function unitName(x) { return x.unit_code || ('unit #' + x.unit_id); }
+function kindLabel(x) {
+  return ({ grant: 'Grant: ' + x.to_role, role_change: 'Role: ' + (x.from_role || 'none') + ' → ' + x.to_role,
+            activate: 'Activate' + (x.from_role ? ' (' + x.from_role + ')' : ''), deactivate: 'Deactivated',
+            person_id: 'person_id → ' + x.new_person_id, mail_settings: 'Mail settings',
+            unit_assign: 'Unit: ' + unitName(x) + ' assigned', unit_remove: 'Unit: ' + unitName(x) + ' removed',
+            zone_assign: 'Zone #' + x.zone_id + ' assigned', zone_remove: 'Zone #' + x.zone_id + ' removed' })[x.kind] || x.kind;
+}
+const BOOT = x => /^system:deploy/.test(x.made_by_name || '') && /^unit_/.test(x.kind);
+async function loadDecisions(keepId) {
+  let out;
+  try { out = await api('/api/decisions?status=' + dfilter); }
+  catch (e) { $('dlist').replaceChildren(el('div', 'empty', 'Could not load decisions: ' + e.message)); return; }
+  DECISIONS = out.decisions; ATTEST = out.attestation || '';
+  if (dfilter === 'pending_qa') badgeDecisions(DECISIONS);
+  const dr = $('drift'); dr.replaceChildren();
+  const drift = out.drift || [];
+  dr.hidden = !drift.length && !out.live_error;
+  if (out.live_error) dr.append(el('div', null, 'Live Keycloak state unavailable: ' + out.live_error));
+  if (drift.length) {
+    dr.append(el('b', null, 'Keycloak differs from the decisions (' + drift.length + ')'));
+    const ul = el('ul'); drift.forEach(x => ul.append(el('li', null, x.detail))); dr.append(ul);
+  }
+  const list = $('dlist'); list.replaceChildren();
+  if (!DECISIONS.length) list.append(el('div', 'empty', dfilter === 'pending_qa' ? 'Nothing is waiting for qa.' : 'Nothing here.'));
+  DECISIONS.forEach(x => {
+    const it = el('div', 'item'); it.dataset.id = x.decision_id;
+    const nm = el('div', 'nm', '#' + x.decision_id + ' ' + kindLabel(x));
+    if (x.superseded) nm.append(el('span', 'tag', 'superseded'));
+    if (x.subject && !x.subject.enabled && x.kind !== 'grant' && x.kind !== 'activate') nm.append(el('span', 'tag', 'account inactive'));
+    it.append(nm, el('span', 'pill p-' + x.status, x.status === 'pending_qa' ? 'waiting for qa' : x.status));
+    it.append(el('div', 'meta', x.username + ' — by ' + x.made_by_name + ', ' + fmt(x.made_at)));
+    it.onclick = () => selectDecision(x);
+    list.append(it);
+  });
+  const again = keepId && DECISIONS.find(x => x.decision_id === keepId);
+  if (again) selectDecision(again);
+}
+function effectText(x) {
+  return ({ grant: x.username + ' gets ' + x.to_role + ' access and the account is enabled',
+            role_change: x.username + "'s role becomes " + x.to_role,
+            activate: x.username + "'s account is enabled with its role " + (x.from_role || ''),
+            person_id: x.username + ' is recorded as person ' + x.new_person_id,
+            mail_settings: 'the new sending account is used, also for Forgot password? e-mails',
+            unit_assign: x.username + ' keeps ' + unitName(x) })[x.kind] || 'the decision is closed';
+}
+function selectDecision(x) {
+  dcurrent = x;
+  document.querySelectorAll('#dlist .item').forEach(i => i.classList.toggle('sel', +i.dataset.id === x.decision_id));
+  const d = $('ddetail'); d.replaceChildren();
+  d.append(el('h2', null, '#' + x.decision_id + ' ' + kindLabel(x)), el('span', 'pill p-' + x.status, x.status === 'pending_qa' ? 'waiting for qa' : x.status));
+  const dl = el('dl'); const add = (k, v) => dl.append(el('dt', null, k), el('dd', null, v));
+  add('Account', x.username); add('Made by', x.made_by_name + ', ' + fmt(x.made_at));
+  if (x.subject) add('Live state', (x.subject.enabled ? 'enabled' : 'disabled') + ', role ' + (x.subject.role || 'none') + (x.subject.person_id ? ', person ' + x.subject.person_id : ''));
+  if (x.checked_by_name) add('Checked by', x.checked_by_name + ', ' + fmt(x.checked_at));
+  if (x.withdrawn_by_name) add('Withdrawn by', x.withdrawn_by_name + ', ' + fmt(x.withdrawn_at));
+  d.append(dl, el('h3', null, 'Reason'), el('div', 'box', x.reason));
+  if (x.check_note) d.append(el('h3', null, 'qa note'), el('div', 'box', x.check_note));
+  if (x.withdraw_reason) d.append(el('h3', null, 'Why withdrawn'), el('div', 'box', x.withdraw_reason));
+  if (x.kind === 'mail_settings' && x.mail_settings) {
+    const m = x.mail_settings;
+    d.append(el('h3', null, 'The new mail settings'));
+    const ml = el('dl'); const ma = (k, v) => ml.append(el('dt', null, k), el('dd', null, v));
+    ma('Sending account', m.smtp_user || 'none'); ma('Replaces', m.current_user || 'none');
+    ma('Server', m.smtp_host + ':' + m.smtp_port); ma('From name', m.from_name);
+    ma('Also notify', m.notify_emails || '—'); ma('App password', m.password);
+    d.append(ml, el('div', 'note re', 'Password-reset e-mails go through this account. Confirm only if it belongs to the platform, not to a person.'));
+  }
+  if ((x.widening || []).length) {
+    d.append(el('h3', null, 'Access it adds'));
+    const ul = el('ul', 'pairs'); x.widening.forEach(p => ul.append(el('li', null, p[0] + ' · ' + p[1]))); d.append(ul);
+  }
+  if (BOOT(x)) d.append(el('div', 'note re', x.kind === 'unit_assign'
+    ? (x.superseded ? 'Applied at once by units.sh (bootstrap); refusing does not remove it: a later decision (#' + x.superseded_by + ') governs this unit.'
+                    : 'Applied at once by units.sh (bootstrap); refusing removes the unit.')
+    : 'Applied at once by units.sh.'));
+  if (x.applicant) {
+    const a = x.applicant;
+    d.append(el('h3', null, 'Applicant'));
+    const al = el('dl'); const aa = (k, v) => al.append(el('dt', null, k), el('dd', null, v));
+    aa('Name', a.first_name + ' ' + a.last_name); aa('E-mail', a.email); aa('Organisation', a.organisation || '—'); aa('Registered', fmt(a.registered_at));
+    d.append(al);
+    if ((x.lookalikes || []).length) {
+      d.append(el('h3', null, 'Existing admin and qa accounts'));
+      const ul = el('ul', 'hist');
+      x.lookalikes.forEach(l => { const li = el('li'); const t = el('div', null, l.username + ' (' + l.roles + ') — ' + (l.name || '—') + ', ' + (l.email || 'no e-mail'));
+        l.flags.forEach(f => t.append(el('span', 'tag flag', f))); li.append(t); ul.append(li); });
+      d.append(ul);
+      if (x.lookalikes.some(l => l.flags.length)) d.append(el('div', 'note re', 'Flagged: check that the applicant is not a second identity of an existing admin or qa person.'));
+    }
+  }
+  const res = el('div', 'res');
+  const open = x.status === 'pending_qa' || x.status === 'applied';
+  if (ME.can.decisions_check && open) {
+    if (!x.can_check) { d.append(el('div', 'note re', 'You cannot check this decision: ' + x.why_not)); }
+    else {
+      d.append(el('h3', null, x.status === 'pending_qa' ? 'Confirm or refuse' : 'Review'));
+      const ln = el('label'); ln.htmlFor = 'dnote';
+      ln.append(document.createTextNode('Note '), el('span', 'opt', x.status === 'pending_qa' ? 'optional to confirm, required to refuse' : 'optional'));
+      const ta = el('textarea'); ta.id = 'dnote'; ta.maxLength = 4000; ta.style.minHeight = '64px';
+      d.append(ln, ta);
+      let att = null;
+      if (x.needs_attestation) {
+        const l = el('label', 'chk'); att = el('input'); att.type = 'checkbox';
+        l.append(att, document.createTextNode('I did not run units.sh for this assignment.')); d.append(el('div', 'note', x.made_by_sub ? 'units.sh recorded ' + x.made_by_name + ' as its maker, which it cannot verify. Confirming needs your attestation.' : 'Nobody recorded who ran units.sh for this row. Confirming needs your attestation.'), l);
+      }
+      const acts = el('div', 'acts');
+      const run = async (verb, path, body, q) => {
+        if (!confirm(q)) return;
+        acts.querySelectorAll('button').forEach(b => b.disabled = true);
+        try {
+          const out = await post('/api/decisions/' + x.decision_id + '/' + path, body);
+          res.className = 'res good';
+          res.textContent = verb + '.' + (out.email ? ' E-mail: ' + out.email.detail + '.' : '') + (out.removed_unit ? ' The unit was removed.' : '');
+          setTimeout(() => loadDecisions(x.decision_id), 1200);
+        } catch (e) {
+          res.className = 'res bad'; res.textContent = 'Not done: ' + e.message + (e.body && e.body.drift ? ' Keycloak may be wider than the record: see the red banner.' : '');
+          acts.querySelectorAll('button').forEach(b => b.disabled = false);
+        }
+      };
+      if (x.status === 'pending_qa') {
+        const bc = el('button', 'go', 'Confirm'), br = el('button', 'go r', 'Refuse');
+        if (att) { bc.disabled = true; att.onchange = () => { bc.disabled = !att.checked; }; }
+        if (x.superseded && /^unit_/.test(x.kind)) { bc.disabled = true; bc.title = 'superseded: refuse or review it instead'; }
+        bc.onclick = () => run('Confirmed', 'confirm', { note: (att && att.checked ? ATTEST + ' ' : '') + ta.value }, 'Confirm: ' + effectText(x) + '.');
+        br.onclick = () => {
+          if (!ta.value.trim()) { res.className = 'res bad'; res.textContent = 'A refusal needs a note.'; ta.focus(); return; }
+          const q = x.kind === 'grant' ? 'Refuse: the pending account of ' + x.username + ' is deleted (they may apply again).'
+                  : x.kind === 'unit_assign' && !x.superseded ? 'Refuse: ' + unitName(x) + ' is removed from ' + x.username + ' now.'
+                  : 'Refuse decision #' + x.decision_id + '? Nothing it proposed is applied.';
+          run('Refused', 'refuse', { note: ta.value }, q);
+        };
+        acts.append(bc, br);
+      } else {
+        const bv = el('button', 'go', 'Mark reviewed');
+        bv.onclick = () => run('Reviewed', 'review', { note: ta.value }, 'Mark decision #' + x.decision_id + ' as reviewed?');
+        acts.append(bv);
+      }
+      d.append(acts, res);
+    }
+  }
+  if (ME.can.decisions_withdraw && x.status === 'pending_qa' && !/^unit_|^zone_/.test(x.kind))
+    withdrawSection(d, x.decision_id, () => loadDecisions(x.decision_id));
+}
+
 // ── E-mail settings ──────────────────────────────────────────────────────────
 function paintStatus(st) {
   const s = $('st-status'); s.replaceChildren();
@@ -522,11 +808,17 @@ function paintStatus(st) {
   if (st.updated_by) s.append(el('div', 'note', 'Last changed by ' + st.updated_by + ', ' + fmt(st.updated_at)));
   $('st-pass-hint').textContent = st.pass_set ? '— stored; leave empty to keep it' : '';
   $('warn').style.display = st.ready ? 'none' : 'block';
+  const p = $('st-pending'); p.replaceChildren();
+  if (st.pending) {
+    p.append(el('div', 'note re', 'Waiting for qa (decision #' + st.pending.decision_id + '): ' + (st.pending.smtp_user || 'no account') + ' on ' + st.pending.smtp_host + ', proposed by ' + (st.pending.updated_by || '—') + '.'));
+    if (ME.can.decisions_withdraw) withdrawSection(p, st.pending.decision_id, loadSettings);
+  }
+  $('st-save').disabled = !!st.pending; $('st-clear').disabled = !!st.pending;
 }
 async function loadSettings() {
   const st = await api('/api/settings');
   $('st-user').value = st.smtp_user; $('st-from').value = st.from_name; $('st-notify').value = st.notify_emails;
-  $('st-host').value = st.smtp_host; $('st-port').value = st.smtp_port; $('st-pass').value = '';
+  $('st-host').value = st.smtp_host; $('st-port').value = st.smtp_port; $('st-pass').value = ''; $('st-reason').value = '';
   paintStatus(st);
 }
 function stResult(ok, text) { const r = $('st-res'); r.className = 'res ' + (ok ? 'good' : 'bad'); r.textContent = text; }
@@ -534,11 +826,12 @@ $('st-form').addEventListener('submit', async e => {
   e.preventDefault(); const b = $('st-save'); b.disabled = true; b.textContent = 'Verifying with Gmail…';
   try {
     const out = await post('/api/settings', { smtp_user: $('st-user').value, smtp_pass: $('st-pass').value, from_name: $('st-from').value,
-      notify_emails: $('st-notify').value, smtp_host: $('st-host').value, smtp_port: $('st-port').value });
-    $('st-pass').value = ''; paintStatus(out.settings);
-    stResult(true, 'Saved. ' + (out.settings.ready ? 'Gmail accepted the login. ' : '') + out.keycloak + '.');
-  } catch (err) { stResult(false, 'Not saved: ' + err.message); }
-  b.disabled = false; b.textContent = 'Save and verify';
+      notify_emails: $('st-notify').value, smtp_host: $('st-host').value, smtp_port: $('st-port').value, reason: $('st-reason').value });
+    $('st-pass').value = '';
+    stResult(true, 'Recorded as decision #' + out.decision.decision_id + ' — the new account is used once a qa person confirms.');
+    await loadSettings();
+  } catch (err) { stResult(false, 'Not saved: ' + err.message); b.disabled = false; }
+  b.textContent = 'Verify and propose (waits for qa)';
 });
 $('st-test').onclick = async () => {
   const b = $('st-test'); b.disabled = true;
@@ -547,11 +840,12 @@ $('st-test').onclick = async () => {
   b.disabled = false;
 };
 $('st-clear').onclick = async () => {
-  if (!confirm('Remove the stored app password? E-mail stops until a new one is saved.')) return;
+  if (!confirm('Propose removing the stored app password? Once a qa person confirms, e-mail stops until a new one is saved.')) return;
   try {
     const out = await post('/api/settings', { smtp_user: $('st-user').value, from_name: $('st-from').value, notify_emails: $('st-notify').value,
-      smtp_host: $('st-host').value, smtp_port: $('st-port').value, clear_pass: true });
-    paintStatus(out.settings); stResult(true, 'Password removed. ' + out.keycloak + '.');
+      smtp_host: $('st-host').value, smtp_port: $('st-port').value, clear_pass: true, reason: $('st-reason').value || 'remove the app password' });
+    stResult(true, 'Recorded as decision #' + out.decision.decision_id + ' — the password is removed once a qa person confirms.');
+    await loadSettings();
   } catch (err) { stResult(false, err.message); }
 };
 
@@ -596,6 +890,81 @@ function editTemplate(t) {
     try { await post('/api/templates/' + t.name + '/reset'); await loadTemplates(t.name); }
     catch (e) { res.className = 'res bad'; res.textContent = e.message; }
   };
+}
+
+// ── Access review (qa creates and signs off; auditor and qp read) ────────────
+async function loadReviews(keepId) {
+  let out;
+  try { out = await api('/api/review'); }
+  catch (e) { $('rvlist').replaceChildren(el('div', 'empty', 'Could not load reviews: ' + e.message)); return; }
+  const acts = $('rv-acts'); acts.replaceChildren();
+  if (ME.can.review_write && !out.reviews.some(r => r.period === out.period)) {
+    const b = el('button', 'btn pri', "Create this quarter's review (" + out.period + ')'), res = el('div', 'res');
+    b.onclick = async () => {
+      if (!confirm('Create the ' + out.period + ' review? The snapshot of accounts, roles, units, decisions and switches is taken now and never changes.')) return;
+      b.disabled = true;
+      try { const r = await post('/api/review', {}); await loadReviews(r.review); }
+      catch (e) { res.className = 'res bad'; res.textContent = 'Not created: ' + e.message; b.disabled = false; }
+    };
+    acts.append(b, res);
+  }
+  const list = $('rvlist'); list.replaceChildren();
+  if (!out.reviews.length) list.append(el('div', 'empty', 'No reviews yet.'));
+  out.reviews.forEach(r => {
+    const it = el('div', 'item'); it.dataset.id = r.review_id;
+    it.append(el('div', 'nm', r.period), el('span', 'pill ' + (r.signed_off_at ? 'p-active' : 'p-pending'), r.signed_off_at ? 'signed off' : 'open'));
+    it.append(el('div', 'meta', 'created by ' + r.created_by + ', ' + fmt(r.created_at) + (r.signed_off_by_name ? ' · signed by ' + r.signed_off_by_name : '')));
+    it.onclick = () => selectReview(r.review_id);
+    list.append(it);
+  });
+  if (keepId) selectReview(keepId);
+}
+function table(cols, rows) {
+  const t = el('table'), tr = el('tr'); cols.forEach(c => tr.append(el('th', null, c[0]))); const th = el('thead'); th.append(tr); t.append(th);
+  const tb = el('tbody'); rows.forEach(r => { const row = el('tr'); cols.forEach(c => row.append(el('td', null, c[1](r)))); tb.append(row); }); t.append(tb);
+  const w = el('div'); w.style.overflowX = 'auto'; w.append(t); return w;
+}
+async function selectReview(id) {
+  document.querySelectorAll('#rvlist .item').forEach(i => i.classList.toggle('sel', +i.dataset.id === id));
+  const d = $('rvdetail'); d.replaceChildren(el('div', 'empty', 'Loading…'));
+  let r;
+  try { r = await api('/api/review/' + id); } catch (e) { d.replaceChildren(el('div', 'empty', e.message)); return; }
+  const s = r.snapshot || {};
+  d.replaceChildren(el('h2', null, 'Access review ' + r.period));
+  const dl = el('dl'); const add = (k, v) => dl.append(el('dt', null, k), el('dd', null, v));
+  add('Created', r.created_by + ', ' + fmt(r.created_at));
+  add('Signed off', r.signed_off_at ? r.signed_off_by_name + ', ' + fmt(r.signed_off_at) : 'not yet');
+  if (s.policy) add('Policy', (s.policy.version || '—') + ' · ' + String(s.policy.digest || '').slice(0, 12));
+  const chain = s.policy_chain || {};
+  add('Policy chain', Object.keys(chain).length ? Object.entries(chain).map(([k, v]) => k + ': ' + v).join(', ') : '—');
+  d.append(dl);
+  if (r.sign_off_note) d.append(el('h3', null, 'Sign-off note'), el('div', 'box', r.sign_off_note));
+  const accts = s.accounts || [];
+  d.append(el('h3', null, 'Accounts (' + accts.length + ')'), table(
+    [['User', a => a.username], ['Enabled', a => a.enabled ? 'yes' : 'no'], ['Role', a => a.role || '—'], ['person_id', a => a.person_id || '—'],
+     ['Last login', a => a.last_login ? new Date(a.last_login).toLocaleString() : 'no retained login event']], accts));
+  d.append(el('h3', null, 'Units'), table([['Account', u => u.person_sub], ['Unit', u => u.unit_code]], s.units || []));
+  d.append(el('h3', null, 'Unexplained at the time of the review'), table([['Account', x => x.username || '—'], ['Kind', x => x.kind], ['Detail', x => x.detail]], s.drift || []));
+  if ((s.drift || []).some(x => x.kind === 'unexplained_role') && !r.signed_off_at) d.append(el('div', 'note re', 'Signing off accepts the unexplained roles listed above: the drift banner stops showing them until a later change.'));
+  d.append(el('h3', null, 'Waiting for qa'), table([['#', x => String(x.id || x.decision_id)], ['Kind', x => x.kind], ['Account', x => x.username || '—'], ['By', x => x.made_by_name || '—']], s.pending_decisions || []));
+  d.append(el('h3', null, 'Decisions since the last review'), table([['#', x => String(x.id || x.decision_id)], ['Kind', x => x.kind], ['Status', x => x.status], ['Account', x => x.username || '—'], ['By', x => x.made_by_name || '—'], ['Checked by', x => x.checked_by_name || '—']], s.decisions_since || []));
+  d.append(el('h3', null, 'Waivers'), table([['Id', w => w.id], ['Invariant', w => w.invariant], ['Subject', w => w.subject], ['Target', w => w.target], ['Levels', w => (w.levels || []).join(', ')], ['Review by', w => w.review || w.review_by || '—']], s.waivers || []));
+  const sw = Object.entries(s.switches || {}).map(([k, v]) => [k, v.value, v.source]);
+  sw.push(['IAM_DB_ROLES', s.iam_db_roles, 'database (live)']);
+  Object.entries(s.service_logins || {}).forEach(([k, v]) => sw.push([k + ' can log in', v, 'pg_roles (live)']));
+  d.append(el('h3', null, 'Switches'), table([['Switch', x => x[0]], ['Value', x => JSON.stringify(x[1])], ['Source', x => x[2]]], sw));
+  if (ME.can.review_write && !r.signed_off_at) {
+    d.append(el('h3', null, 'Sign off'));
+    const ta = el('textarea'); ta.maxLength = 4000; ta.style.minHeight = '64px'; ta.placeholder = 'Optional note';
+    const b = el('button', 'go', 'Sign off ' + r.period), res = el('div', 'res'), acts = el('div', 'acts'); acts.append(b);
+    d.append(ta, acts, res);
+    b.onclick = async () => {
+      if (!confirm('Sign off the ' + r.period + ' access review? It cannot be undone.')) return;
+      b.disabled = true;
+      try { await post('/api/review/' + id + '/sign-off', { note: ta.value }); await loadReviews(id); }
+      catch (e) { res.className = 'res bad'; res.textContent = 'Not signed: ' + e.message; b.disabled = false; }
+    };
+  }
 }
 
 // ── Change log ───────────────────────────────────────────────────────────────

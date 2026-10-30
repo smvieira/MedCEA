@@ -27,6 +27,11 @@ ALTER TABLE medcea.cea_zone DROP CONSTRAINT IF EXISTS cea_zone_code_chk;
 -- parameter sets, as on a database from before 008b (the step skips anything that
 -- already has an approval with the same digest, i.e. production's own)
 DELETE FROM medcea.platform_setting WHERE key IN ('008b:definitions_grandfathered', '008b:params_grandfathered');
+-- and production may enforce by now (IAM_DB_ROLES=true): the seed's writes are made
+-- the way they were before enforcement, so policy refusals are WARNINGs here; the
+-- first apply sets the flag again
+UPDATE medcea.platform_setting SET value = 'false' WHERE key = 'iam_db_roles';
+SELECT format('ALTER DATABASE %I RESET "medcea.iam_db_roles"', current_database()) \gexec
 
 INSERT INTO medcea.cea_location (name, description, is_active) VALUES ('IAMTEST site', 'tests/iam-db-fixture.sh', 'Y')
 RETURNING location_id AS loc \gset

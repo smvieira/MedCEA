@@ -2,10 +2,12 @@
 # tests/iam-hosts.sh — each signed-in host's live gate admits exactly the roles the
 # access policy compiles for it (IAM plan, Phase 0 tests).
 #
-# For every host `cli.py hosts` marks [compiled], plus ACCESS_DOMAIN (admin only until
-# Phase 2.7), it checks on the running cluster:
+# For every host `cli.py hosts` marks [compiled] (ACCESS_DOMAIN too, since IAM 2.7), it
+# checks on the running cluster:
 #   gate     the allowed_groups in the proxy's rendered config equals `policy_groups HOST`
-#            (as sets; IAM_GATES=false expects the pre-policy list instead)
+#            (as sets; IAM_GATES=false expects the pre-policy list instead — for
+#            ACCESS_DOMAIN ["admin"], which apps/access/deploy.sh also deploys until every
+#            access pod has proved it enforces)
 #   page     the proxy serves a custom 403 page; on every host but the portal it names
 #            the host and exactly the roles the live gate admits (cli.py describe-gate)
 #   live     the proxy's pod started after that config and page were last written
@@ -85,8 +87,12 @@ while IFS= read -r line; do
     echo ""
     echo -e "${BOLD}${var}${NC}  ${host:-<unset>}"
     case "$status" in
-        compiled)              expected="$(policy_groups "$var" 2>/dev/null)" || { fail gate "policy_groups $var failed"; continue; } ;;
-        "admin only until"*)   expected='["admin"]' ;;
+        compiled)
+            if [[ "$var" == ACCESS_DOMAIN && "${IAM_GATES:-true}" == false ]]; then
+                expected='["admin"]'
+            else
+                expected="$(policy_groups "$var" 2>/dev/null)" || { fail gate "policy_groups $var failed"; continue; }
+            fi ;;
         *)                     skip gate "$status"; continue ;;
     esac
     if [[ -z "$host" ]]; then fail gate "$var is not set in config.env"; continue; fi

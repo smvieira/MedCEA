@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # apps/iam/units.sh — which units an operator works in (IAM plan 2.8, own_unit)
 #
-#   apps/iam/units.sh assign <username> <UNIT>... [--reason TEXT]
-#   apps/iam/units.sh remove <username> <UNIT>... [--reason TEXT]
-#   apps/iam/units.sh remove --sub <uuid> <UNIT>... [--reason TEXT]
+#   apps/iam/units.sh assign <username> <UNIT>... --by <your username> [--reason TEXT]
+#   apps/iam/units.sh remove <username> <UNIT>... --by <your username> [--reason TEXT]
+#   apps/iam/units.sh remove --sub <uuid> <UNIT>... --by <your username> [--reason TEXT]
 #   apps/iam/units.sh list [<username>]
 #
 # Under IAM_DB_ROLES=true an operator sees the telemetry, runs and run logs of every zone
@@ -11,24 +11,27 @@
 # unit they see nothing. Assign units before turning IAM_DB_ROLES on.
 #
 # Each change writes iam_policy.user_unit and one iam.account_decision row per unit, in one
-# transaction, as system:deploy (made_by_sub NULL); the policy hash chain gets a
-# unit_assigned / unit_removed event. An assignment is a widening and, as a bootstrap
-# exception like the policy's --bootstrap, takes effect at once while it is recorded
-# pending_qa: IAM 2.7's confirm screen confirms or refuses it, and a refusal removes the
-# unit. A removal is a narrowing: applied at once. Idempotent: a unit already assigned (or
-# not assigned) writes nothing. Units are unit codes, case-insensitive. The account is
-# found through Keycloak's admin API (infra/lib-keycloak-admin.sh, realm $KEYCLOAK_REALM);
-# only operator accounts are filtered by units, so another role is warned about and
-# recorded anyway. remove --sub removes the units of an account that no longer exists in
+# transaction, as system:deploy; --by names the person running it (your own Keycloak
+# account in realm $KEYCLOAK_REALM), recorded as the decision's maker ("system:deploy (by
+# <username>)"), so you cannot confirm it yourself in the User Manager (IAM 2.7). The policy
+# hash chain gets a unit_assigned / unit_removed event. An assignment is a widening and, as a
+# bootstrap exception like the policy's --bootstrap, takes effect at once while it is
+# recorded pending_qa: a qa person confirms or refuses it in the User Manager's Decisions
+# tab, and a refusal removes the unit. A removal is a narrowing: applied at once, reviewed
+# there afterwards. Idempotent: a unit already assigned (or not assigned) writes nothing.
+# Units are unit codes, case-insensitive. The account is found through Keycloak's admin
+# API (infra/lib-keycloak-admin.sh, realm $KEYCLOAK_REALM); only operator accounts are
+# filtered by units, so another role is warned about and recorded anyway. remove --sub removes the units of an account that no longer exists in
 # Keycloak (list prints the command). Takes the deploy lock; not run by deploy-apps.sh.
 #
-# Exit 0 on success (also when nothing changed); 1 for an unknown user or unit, an SQL
-# failure, or another deploy holding the lock; 2 for a usage error, a database or access
-# deploy that has not been run yet, or Keycloak unreachable.
+# Exit 0 on success (also when nothing changed); 1 for an unknown user (--by included) or
+# unit, an SQL failure, or another deploy holding the lock; 2 for a usage error (a missing
+# --by included), a database or access deploy that has not been run yet, or Keycloak
+# unreachable.
 # Run from anywhere:  apps/iam/units.sh list
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || -z "${1:-}" ]]; then
-    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
     [[ -n "${1:-}" ]] && exit 0
     exit 2   # no arguments is a usage error
 fi
@@ -42,7 +45,7 @@ UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 
 # ── Arguments (before the lock, so a usage error needs none) ─────────────────
 CMD="$1"; shift
-USER_ARG=""; SUB_ARG=""; REASON=""; REASON_SET=0; CODES=()
+USER_ARG=""; SUB_ARG=""; BY_ARG=""; REASON=""; REASON_SET=0; CODES=()
 case "$CMD" in
     assign|remove|list) ;;
     *) usage "unknown command '$CMD'" ;;
@@ -52,6 +55,10 @@ while [[ $# -gt 0 ]]; do
         --reason)
             [[ $# -ge 2 ]] || usage "--reason needs a text"
             REASON="$2"; REASON_SET=1; shift 2 ;;
+        --by)
+            [[ "$CMD" != list ]] || usage "--by is for assign and remove"
+            [[ $# -ge 2 && -n "${2//[[:space:]]/}" ]] || usage "--by needs your Keycloak username"
+            BY_ARG="$2"; shift 2 ;;
         --sub)
             [[ "$CMD" == remove ]] || usage "--sub is for remove only"
             [[ $# -ge 2 && "$2" =~ $UUID_RE ]] || usage "--sub needs a Keycloak user id (uuid)"
@@ -73,10 +80,12 @@ done
 if [[ "$CMD" != list ]]; then
     [[ -n "$USER_ARG" || -n "$SUB_ARG" ]] || usage "$CMD needs a username"
     [[ ${#CODES[@]} -gt 0 ]] || usage "$CMD needs at least one unit code"
+    # IAM 2.7: the decision names the person who made it (not_own_author)
+    [[ -n "$BY_ARG" ]] || usage "$CMD needs --by <your Keycloak username>: the decision records who made it"
     if [[ $REASON_SET == 1 ]]; then
         [[ -n "${REASON//[[:space:]]/}" ]] || usage "--reason must not be empty"
     elif [[ "$CMD" == assign ]]; then
-        REASON="IAM 2.8: unit assigned with apps/iam/units.sh (awaiting qa confirmation, IAM 2.7)"
+        REASON="IAM 2.8: unit assigned with apps/iam/units.sh (awaiting qa confirmation)"
     else
         REASON="IAM 2.8: unit removed with apps/iam/units.sh"
     fi
@@ -252,7 +261,7 @@ SQL
         _code="$(kc "realms/$R/users/$_s")"
         if [[ "$_code" == 404 ]]; then
             printf '%s\t%s\t%s\t%s\t%s\n' "(no such account)" "-" "-" "${UNITS[$_s]:--}" "${PENDING[$_s]:-0}"
-            warn "account $_s no longer exists; remove its units with: apps/iam/units.sh remove --sub $_s ${UNITS[$_s]//,/ }"
+            warn "account $_s no longer exists; remove its units with: apps/iam/units.sh remove --sub $_s ${UNITS[$_s]//,/ } --by <your username>"
             continue
         fi
         [[ "$_code" == 200 ]] || die 2 "Keycloak admin API: GET realms/$R/users/$_s answered HTTP $_code."
@@ -281,6 +290,15 @@ else
     IFS=$'\t' read -r SUB NAME ENABLED PID <<<"$_f"
 fi
 [[ "$PID" == "-" ]] && PID=""
+# --by: who runs this, as an account of the realm (its person_id, else its id: the
+# person_id it gets on first enable). Nothing proves the runner holds that account, so
+# confirming a units.sh row needs the qa person's attestation all the same (rule 6).
+_f="$(find_user "$BY_ARG")"
+[[ -n "$_f" ]] || die 1 "--by: no account '$BY_ARG' in realm $R."
+IFS=$'\t' read -r BY_SUB BY_NAME _by_en BY_PID <<<"$_f"
+[[ "$BY_PID" == "-" ]] && BY_PID="$BY_SUB"
+[[ "$_by_en" == true ]] || warn "--by $BY_NAME is a disabled account; recorded anyway"
+[[ "$BY_SUB" != "$SUB" ]] || warn "--by $BY_NAME is the account whose units change; recorded anyway (a qa person other than you confirms it)"
 if [[ "$NAME" != "(deleted)" ]]; then
     ROLE="$(platform_role "$SUB")"
     [[ "$ROLE" == operator ]] \
@@ -292,11 +310,12 @@ fi
 ASSIGN=false; [[ "$CMD" == assign ]] && ASSIGN=true
 OUT="$(_dba_psql "$DB" -qtA -F'|' -1 -v ON_ERROR_STOP=1 -v assign="$ASSIGN" \
         -v sub="$SUB" -v username="$NAME" -v person="$PID" -v units="$UNIT_IDS" -v reason="$REASON" \
+        -v by_sub="$BY_SUB" -v by_person="$BY_PID" -v by_name="$BY_NAME" \
         -f - < apps/iam/units.sql)" || die 1 "The change was refused by the database; nothing was written."
 while IFS='|' read -r _act _unit _dec; do
     [[ -n "$_act" ]] || continue
     case "$_act" in
-        assigned)  echo "assigned $_unit to $NAME — decision #$_dec, pending qa confirmation (IAM 2.7)" ;;
+        assigned)  echo "assigned $_unit to $NAME — decision #$_dec, in effect, pending qa confirmation (User Manager → Decisions)" ;;
         removed)   echo "removed $_unit from $NAME — decision #$_dec" ;;
         unchanged) if [[ "$CMD" == assign ]]; then echo "$_unit: already assigned to $NAME — nothing written"
                    else echo "$_unit: not assigned to $NAME — nothing written"; fi ;;

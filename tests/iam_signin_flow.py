@@ -7,7 +7,7 @@ which creates the accounts and passes them on stdin as JSON:
    "probes_out": PATH-or-null}
 
 Host names come from the environment (config.env, exported). For every host the compiler
-marks [compiled] (plus ACCESS_DOMAIN, admin only until Phase 2.7) and every role:
+marks [compiled] (ACCESS_DOMAIN too, since IAM 2.7) and every role:
   open https://<host>/ → Keycloak's login form → post the credentials → follow the
   redirects back through the proxy's callback.
 One cookie jar per account, so after the first host Keycloak's session signs it in without
@@ -66,7 +66,13 @@ PROBES = {
                        (f"/api/{SENTINEL}", "monitor", f"/api/{SENTINEL}")],
     "DBMGMT_DOMAIN": [("/api/objects", "dbmgmt", "/objects"),
                       (f"/api/{SENTINEL}", "dbmgmt", f"/{SENTINEL}")],
+    # IAM 2.7: every admitted role (admin, qa, qp, auditor) opens the page; the Decisions
+    # and review lists and the Users list are refused per route (the Admin port enforces
+    # always, so its log says "refused")
     "ACCESS_DOMAIN": [("/api/me", "access", "/api/me"),
+                      ("/api/decisions", "access", "/api/decisions"),
+                      ("/api/review", "access", "/api/review"),
+                      ("/api/users", "access", "/api/users"),
                       (f"/api/{SENTINEL}", "access", f"/api/{SENTINEL}")],
     "MQTTX_DOMAIN": [("/_account/api/me", "access-profile", "/_account/api/me")],
 }
@@ -77,12 +83,13 @@ def gated_hosts(p):
     """[(VAR, domain, label, expected roles)] for the hosts whose gate is deployed."""
     out = []
     for var, status in proxies.ENFORCEMENT.items():
-        if status == "compiled":
-            want = PRE_POLICY if os.environ.get("IAM_GATES", "true") == "false" else proxies.admitted(p, var)
-        elif status.startswith("admin only until"):
-            want = ["admin"]
-        else:
+        if status != "compiled":
             continue
+        if os.environ.get("IAM_GATES", "true") == "false":
+            # apps/access/deploy.sh: admin only, never the portal's pre-policy list
+            want = ["admin"] if var == "ACCESS_DOMAIN" else PRE_POLICY
+        else:
+            want = proxies.admitted(p, var)
         domain = os.environ.get(var, "")
         if domain:
             out.append((var, domain, p.hosts[var]["label"], set(want)))

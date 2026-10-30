@@ -6,9 +6,11 @@
 #   tests/iam-db.sh [--namespace NS] [--pod POD] [--db DB] [--mode auto|false|true|legacy]
 #                   [--write-probes] [--section NAME]...
 #
-#   catalog      ownership, the always-on triggers (append-only ones ENABLE ALWAYS),
-#                security_invoker views, SECURITY DEFINER and search_path of the
-#                functions, no PUBLIC EXECUTE, iam_* triggers and RLS iff mode true
+#   catalog      ownership (schema iam too, IAM 2.7), the always-on triggers
+#                (append-only ones ENABLE ALWAYS; iam's freeze and history triggers
+#                too), security_invoker views, SECURITY DEFINER and search_path of
+#                the functions, no PUBLIC EXECUTE, iam_* triggers and RLS iff mode
+#                true, the EXECUTE holders of the iam functions equal the golden
 #   matrix       has_table_privilege / has_function_privilege for every compiled
 #                privilege and the hand-written negatives; authenticator's
 #                memberships (true); then `grants --mode verify`
@@ -21,8 +23,16 @@
 #                schedule's algorithm, the internal actor, e97aab6's scheduler SQL),
 #                W7 unit assignments (apps/iam/units.sql, IAM 2.8); the own_unit RLS
 #                probes run in W4
+#   access       (not in the default set; write probes) IAM 2.7's account decisions,
+#                D1-D18: record, withdraw, confirm, refuse, review as access_svc with
+#                set_actor; the who-may rules, units.sql refusals, the attestation,
+#                append-only histories, role_widening's stub, the review, template
+#                reset, MQTT revocation, rr_qa without EXECUTE
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
+#
+# Every `compile grants` call gets dba_iam_flag's answer (apps/database/lib-db-apply.sh):
+# --without-iam while schema iam is absent; a half-present access component aborts.
 #
 # Read-only by default: every session runs with default_transaction_read_only=on and
 # the write sections are skipped. --write-probes runs them, each inside
@@ -38,7 +48,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -85,6 +95,15 @@ if [[ "$MODE" == auto ]]; then
     [[ "$MODE" == true || "$MODE" == false || "$MODE" == legacy ]] || { echo "cannot read the mode: $MODE" >&2; exit 2; }
 fi
 echo -e "${BOLD}IAM Phase 2a database checks${NC} (namespace $NS, pod $POD, database $DB, mode $MODE, write probes $WRITES)"
+
+# Schema iam compiled like the rest, or --without-iam: what the database deploy would
+# decide (dba_iam_flag, IAM 2.7). An unreadable or half-present answer aborts.
+IAM_FLAG=()
+if [[ "$MODE" != legacy ]]; then
+    source apps/database/lib-db-apply.sh
+    _flag="$(dba_iam_flag "$NS" "$POD" "$DB")" || { echo "dba_iam_flag failed (above): cannot tell how schema iam is compiled" >&2; exit 2; }
+    [[ -n "$_flag" ]] && IAM_FLAG=("$_flag") && echo "  schema iam absent: grants compiled $_flag"
+fi
 
 UUID_OP="11111111-1111-4111-8111-111111111111"; UUID_PM="22222222-2222-4222-8222-222222222222"
 UUID_QA="33333333-3333-4333-8333-333333333333"; UUID_QP="44444444-4444-4444-8444-444444444444"
@@ -164,11 +183,28 @@ if want catalog && [[ "$MODE" != legacy ]]; then
     out="$(db <<'SQL'
 SELECT 'owner', count(*) FROM (
     SELECT c.relowner AS o FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy') AND c.relkind IN ('r', 'v', 'm', 'p', 'S', 'f')
+     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam') AND c.relkind IN ('r', 'v', 'm', 'p', 'S', 'f')
     UNION ALL SELECT p.proowner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy')
-    UNION ALL SELECT nspowner FROM pg_namespace WHERE nspname IN ('medcea', 'medcea_auth', 'iam_policy')) x
+     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam')
+    UNION ALL SELECT nspowner FROM pg_namespace WHERE nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam')) x
  WHERE o <> 'medcea_owner'::regrole;
+SELECT 'iamschema', count(*) FROM pg_namespace WHERE nspname = 'iam';
+-- IAM 2.7: the freeze triggers (account_decision, access_review) and the append-only
+-- triggers of the three iam histories: every BEFORE trigger on those tables ALWAYS
+SELECT 'iamalways', count(*) FILTER (WHERE t.tgenabled <> 'A'), count(*),
+       coalesce(string_agg(c.relname || '.' || t.tgname, ',') FILTER (WHERE t.tgenabled <> 'A'), '')
+  FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE c.relnamespace = to_regnamespace('iam') AND NOT t.tgisinternal AND (t.tgtype & 2) <> 0
+   AND c.relname IN ('account_decision', 'access_review', 'user_status_history', 'access_request_history', 'config_history');
+SELECT 'iamhist', count(DISTINCT c.relname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE c.relnamespace = to_regnamespace('iam') AND NOT t.tgisinternal AND (t.tgtype & 2) <> 0
+   AND c.relname IN ('user_status_history', 'access_request_history', 'config_history');
+-- who may execute each iam function, besides its owner (compared with the golden below)
+SELECT 'iamexec', r.rolname || ' ' || replace(p.oid::regprocedure::text, ' ', '')
+  FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+  JOIN pg_roles r ON r.oid = a.grantee
+ WHERE p.pronamespace = to_regnamespace('iam') AND a.privilege_type = 'EXECUTE' AND a.grantee <> p.proowner
+ ORDER BY 2;
 SELECT 'members', count(*) FROM pg_auth_members WHERE roleid = 'medcea_owner'::regrole;
 SELECT 'changelog', count(*) FROM pg_class WHERE oid = to_regclass('medcea.databasechangeloglock');
 SELECT 'invoker', count(*) FROM pg_class c WHERE c.relnamespace = 'medcea'::regnamespace AND c.relkind = 'v'
@@ -187,7 +223,7 @@ SELECT 'single', string_agg(n, ',') FROM unnest(ARRAY['measurement_zone_trg', 'd
        'schedule_retired_guard_trg']) n
  WHERE NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = n);
 SELECT 'definer', string_agg(p.oid::regprocedure::text, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
- WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy') AND p.prosecdef
+ WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam') AND p.prosecdef
    AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%pg_temp');
 SELECT 'invokerfn', string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
  WHERE n.nspname = 'medcea' AND p.prosecdef
@@ -204,8 +240,28 @@ SELECT 'chain', ok FROM iam_policy.verify_chain();
 SQL
 )"
     get() { grep -m1 "^$1|" <<<"$out" | cut -d'|' -f2; }
-    [[ "$(get owner)" == 0 ]] && pass catalog "every object in medcea, medcea_auth, iam_policy is owned by medcea_owner" \
+    [[ "$(get owner)" == 0 ]] && pass catalog "every object in medcea, medcea_auth, iam_policy$([[ "$(get iamschema)" == 1 ]] && echo ', iam') is owned by medcea_owner" \
         || fail catalog "$(get owner) object(s) not owned by medcea_owner"
+    if [[ "$(get iamschema)" == 1 ]]; then
+        IFS='|' read -r _ n_off n_all off_list <<<"$(grep -m1 '^iamalways|' <<<"$out")"
+        [[ "$n_off" == 0 && "${n_all:-0}" -ge 7 && "$(get iamhist)" == 3 ]] \
+            && pass catalog "iam: $n_all freeze and append-only triggers (the three histories included), all ENABLE ALWAYS" \
+            || fail catalog "iam triggers: ${n_all:-0} BEFORE trigger(s), not ALWAYS: ${off_list:-none}; histories with one: $(get iamhist) of 3"
+        want_exec="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print("\n".join(sorted("%s %s" % (g, o.replace(" ", "")) for g, k, o, p in d["privileges"]
+                        if k == "function" and o.startswith("iam.") and p == "EXECUTE")))' tests/iam-grants.golden.json | sort)"
+        got_exec="$(grep '^iamexec|' <<<"$out" | cut -d'|' -f2 | sort)"
+        if [[ "$got_exec" == "$want_exec" ]]; then
+            pass catalog "the EXECUTE holders of the iam functions equal the golden ($(grep -c . <<<"$want_exec"))"
+        else
+            fail catalog "iam EXECUTE holders differ from tests/iam-grants.golden.json:"
+            diff <(echo "$want_exec") <(echo "$got_exec") | grep '^[<>]' | sed 's/^</        golden only:/; s/^>/        database only:/' | head -20
+        fi
+    else
+        note catalog "schema iam absent (no access component): its checks skipped"
+    fi
     [[ "$(get members)" == 0 ]] && pass catalog "medcea_owner has no members" || fail catalog "medcea_owner has $(get members) member(s)"
     [[ "$(get changelog)" == 0 ]] && pass catalog "medcea.databasechangeloglock is gone" || fail catalog "databasechangeloglock still exists"
     [[ "$(get invoker)" == 0 ]] && pass catalog "every medcea view is security_invoker" || fail catalog "$(get invoker) view(s) without security_invoker"
@@ -234,10 +290,10 @@ fi
 # ── matrix ───────────────────────────────────────────────────────────────────────
 if want matrix && [[ "$MODE" != legacy ]]; then
     echo ""
-    sql="$(python3 - "$CLI" "$MODE" <<'PY'
+    sql="$(python3 - "$CLI" "$MODE" "${IAM_FLAG[@]}" <<'PY'
 import json, subprocess, sys
-cli, mode = sys.argv[1], sys.argv[2]
-doc = json.loads(subprocess.check_output([sys.executable, cli, "compile", "grants", "--format", "json"]))
+cli, mode, flag = sys.argv[1], sys.argv[2], sys.argv[3:]
+doc = json.loads(subprocess.check_output([sys.executable, cli, "compile", "grants", "--format", "json"] + flag))
 mgd = set(subprocess.check_output([sys.executable, cli, "db-roles", "--names"], text=True).split())
 q = lambda s: "'" + s.replace("'", "''") + "'"
 lines = []
@@ -282,7 +338,7 @@ PY
         [[ "$n_mem" == 0 ]] && pass matrix "authenticator: SET without INHERIT on every rr_ role and anon; rr_admin_login inherits rr_admin" \
             || fail matrix "memberships: $(grep '^member|' <<<"$out" | cut -d'|' -f2 | tr '\n' ' ')"
     fi
-    vout="$(python3 "$CLI" compile grants --mode verify | db)"
+    vout="$(python3 "$CLI" compile grants --mode verify "${IAM_FLAG[@]}" | db)"
     grep -q 'grants verified' <<<"$vout" && ! grep -q ERROR <<<"$vout" && pass matrix "grants --mode verify passes" \
         || fail matrix "verify: $(grep -m2 -E 'ERROR|DETAIL' <<<"$vout" | tr '\n' ' ' | cut -c1-300)"
 fi
@@ -527,10 +583,14 @@ INSERT INTO medcea.scheduler_config (key, value) VALUES ('log_compress_days', '5
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 UPDATE medcea.control_algorithm SET default_params = '{"kp": 1.5, "ki": 0.1, "kd": 0.05}' WHERE algorithm_code = 'PID';
 SQL
-        probe W1 "access service (access_svc): a request and a status record" ok <<'SQL'
+        probe W1 "access service (access_svc): an access request" ok <<'SQL'
 SET ROLE access_svc;
 INSERT INTO iam.access_request (username, email, first_name, last_name, requested_role, justification)
 VALUES ('iamt-probe', 'iamt-probe@medcea.invalid', 'I', 'T', 'operator', 'iam-db probe');
+SQL
+        # IAM 2.7: status records are written by the decision functions only
+        probe W1 "access service (access_svc): a status record written directly" "42501:user_status_history" <<'SQL'
+SET ROLE access_svc;
 INSERT INTO iam.user_status_history (keycloak_user_id, username, action, reason, actor)
 VALUES ('00000000-0000-4000-8000-000000000000', 'iamt-probe', 'deactivated', 'probe', 'iam-db');
 SQL
@@ -823,7 +883,7 @@ $(as_token "$T_QP")
 SELECT medcea.release_run(:run);
 $(as_postgres)"
         for obj in medcea.measurement medcea.recipe_run medcea.recipe_line_cycle_run medcea.run_release; do
-            for r in $(python3 "$CLI" compile grants --format json | OBJ="$obj" python3 -c '
+            for r in $(python3 "$CLI" compile grants --format json "${IAM_FLAG[@]}" | OBJ="$obj" python3 -c '
 import json, os, sys
 d = json.load(sys.stdin)
 print(" ".join(sorted({g for g, k, o, p in d["privileges"] if o == os.environ["OBJ"] and p == "SELECT"})))'); do
@@ -1168,6 +1228,9 @@ SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \gset
 \set person p-op
 \set units :uid
 \set reason 'iam-db probe'
+\set by_sub '$UUID_AD'
+\set by_person p-ad
+\set by_name test-ad
 SQL
         }
         probe W7 "an operator cannot write user_unit" "42501:permission denied" <<SQL
@@ -1180,8 +1243,9 @@ $UNITS_SQL
 $UNITS_SQL
 --CHECKS
 SELECT 'CHECK|assigned', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
-SELECT 'CHECK|one pending_qa unit_assign by system:deploy', count(*) = 1
-          AND bool_and(widens AND status = 'pending_qa' AND made_by_name = 'system:deploy' AND made_by_sub IS NULL
+SELECT 'CHECK|one pending_qa unit_assign by system:deploy (by the --by person, IAM 2.7)', count(*) = 1
+          AND bool_and(widens AND status = 'pending_qa' AND made_by_name LIKE 'system:deploy (by %)'
+                       AND made_by_sub = '$UUID_AD' AND made_by_person = 'p-ad'
                        AND unit_id = :uid AND subject_person = 'p-op' AND checked_at IS NULL)
   FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_assign';
 SELECT 'CHECK|latest chain event unit_assigned by system:deploy', event = 'unit_assigned' AND actor_name = 'system:deploy'
@@ -1205,7 +1269,7 @@ SELECT 'CHECK|one unit_removed event', count(*) = 1 FROM iam_policy.history
  WHERE event = 'unit_removed' AND payload ->> 'person_sub' = '$UUID_OP';
 SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
 SQL
-        probe W7 "a unit decision is final: UPDATE" "42501:only the check or sign-off may be added" <<SQL
+        probe W7 "a unit decision is final: UPDATE" "42501:may be added" <<SQL
 $(units_vars true)
 $UNITS_SQL
 UPDATE iam.account_decision SET reason = 'x' WHERE kind = 'unit_assign';
@@ -1220,10 +1284,435 @@ elif want writes; then
     note writes "skipped (read-only; --write-probes runs them on medcea-iamtest only)"
 fi
 
+# ── access ───────────────────────────────────────────────────────────────────────
+# IAM 2.7: the account decision functions in schema iam (D1-D18 of the spec, 8.2), as
+# access-api runs them: SET SESSION AUTHORIZATION access_svc (session_user access_svc,
+# so set_actor records 'person via access_svc'), then set_actor for the person of the
+# token. Fresh accounts and persons each run: A (admin), Q and Q2 (qa), S (the subject).
+if want access && [[ "$WRITES" == true && "$MODE" != legacy ]]; then
+    echo ""
+    _u() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+    A="$(_u)"; Q="$(_u)"; Q2="$(_u)"; S="$(_u)"; X="$(_u)"
+    _h="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
+    PA="p-a-$_h"; PQ="p-q-$_h"; PQ2="p-q2-$_h"; PS="p-s-$_h"; PX="p-x-$_h"
+    ATTEST='attest: I did not run units.sh for this assignment.'
+    sqlq() { if [[ -n "${1:-}" ]]; then printf "'%s'" "${1//\'/\'\'}"; else printf 'NULL'; fi; }
+    # as_um SUB PERSON NAME ROLE — the User Manager acting for that person
+    as_um() {
+        printf 'RESET ROLE;\nRESET SESSION AUTHORIZATION;\nSET SESSION AUTHORIZATION access_svc;\n'
+        echo "SELECT medcea_auth.set_actor('$1', $(sqlq "$2"), '$3', '$4') \\g /dev/null"
+    }
+    um_admin() { as_um "$A" "$PA" test-a admin; }
+    um_qa()    { as_um "$Q" "$PQ" test-q qa; }
+    um_qa2()   { as_um "$Q2" "$PQ2" test-q2 qa; }
+    # rec VAR KIND FROM TO [NEW_PERSON_ID] — record_decision on S; sets :VAR, :VAR_st, :VAR_nw, :VAR_wd
+    rec() {
+        echo "SELECT decision_id AS $1, status AS ${1}_st, jsonb_array_length(widening) AS ${1}_nw, withdrawn AS ${1}_wd
+  FROM iam.record_decision('$2', '$S', 'test-s', '$PS', $(sqlq "$3"), $(sqlq "$4"), $(sqlq "${5:-}"), 'iam-db probe', NULL) \\gset"
+    }
+    pending_d1() { um_admin; rec d1 role_change operator production_manager; }   # D1's row
+    unit_id_sql="SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \\gset"
+    UNITS_SQL="$(cat "$REPO_ROOT/apps/iam/units.sql")"
+    # units BY_SUB BY_PERSON BY_NAME ASSIGN — apps/iam/units.sql on S's unit IAMT01, as postgres
+    units() {
+        as_postgres
+        cat <<SQL
+\\set assign $4
+\\set sub '$S'
+\\set username test-s
+\\set person '$PS'
+\\set units :uid
+\\set reason 'iam-db probe'
+\\set by_sub '$1'
+\\set by_person '$2'
+\\set by_name $3
+$UNITS_SQL
+SQL
+    }
+    # a bootstrap unit_assign written by postgres: no maker, and no subject person
+    bootstrap_row() {
+        as_postgres
+        cat <<SQL
+SELECT medcea_auth._set_internal_actor('system:deploy') \\g /dev/null
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) VALUES ('$S'::uuid, :uid) ON CONFLICT DO NOTHING;
+INSERT INTO iam.account_decision (kind, keycloak_user_id, username, subject_person, unit_id, widens, status, reason,
+                                  made_by_sub, made_by_person, made_by_name)
+VALUES ('unit_assign', '$S', 'test-s', NULL, :uid, true, 'pending_qa', 'iam-db probe', NULL, NULL, 'system:deploy')
+RETURNING decision_id AS bd \\gset
+SQL
+    }
+
+    # D1 / D2 — a widening waits, a narrowing applies with its status history
+    probe D1 "operator -> production_manager: pending_qa with 12 widening pairs" ok <<SQL
+$(pending_d1)
+--CHECKS
+SELECT 'CHECK|pending_qa', :'d1_st' = 'pending_qa';
+SELECT 'CHECK|12 pairs', :d1_nw = 12;
+SELECT 'CHECK|the row', widens AND made_by_sub = '$A' AND made_by_person = '$PA' AND from_role = 'operator'
+          AND to_role = 'production_manager' AND checked_at IS NULL
+  FROM iam.account_decision WHERE decision_id = :d1;
+SELECT 'CHECK|no status history while pending', NOT EXISTS (SELECT 1 FROM iam.user_status_history WHERE decision_id = :d1);
+SQL
+    probe D2 "production_manager -> operator: applied, no pairs, status history with the decision" ok <<SQL
+$(um_admin)
+$(rec d2 role_change production_manager operator)
+--CHECKS
+SELECT 'CHECK|applied', :'d2_st' = 'applied';
+SELECT 'CHECK|no pairs', :d2_nw = 0;
+SELECT 'CHECK|role_changed by A as a person', count(*) = 1 FROM iam.user_status_history
+ WHERE decision_id = :d2 AND action = 'role_changed' AND actor_sub = '$A' AND actor_person = '$PA'
+   AND from_role = 'production_manager' AND to_role = 'operator';
+SQL
+    # an enabled account reaches Grafana (not gated by role until IAM 3.1) with no platform role
+    probe D2 "activate an account with no platform role: pending_qa, no pairs" ok <<SQL
+$(um_admin)
+$(rec d2 activate '' '')
+--CHECKS
+SELECT 'CHECK|pending_qa', :'d2_st' = 'pending_qa';
+SELECT 'CHECK|no pairs', :d2_nw = 0;
+SELECT 'CHECK|no status history while pending', NOT EXISTS (SELECT 1 FROM iam.user_status_history WHERE decision_id = :d2);
+SQL
+    # D3 — one open decision per account; deactivation is always allowed and withdraws it
+    probe D3 "a second decision while D1 waits" "22023:is waiting for qa" <<SQL
+$(pending_d1)
+$(rec d3 person_id '' '' "p-new-$_h")
+SQL
+    probe D3 "a deactivation while D1 waits: allowed, D1 withdrawn" ok <<SQL
+$(pending_d1)
+$(rec d3 deactivate operator '')
+--CHECKS
+SELECT 'CHECK|applied', :'d3_st' = 'applied';
+SELECT 'CHECK|returns D1 as withdrawn', :d1 = ANY (:'d3_wd'::bigint[]);
+SELECT 'CHECK|D1 withdrawn by A', status = 'withdrawn' AND withdrawn_by_sub = '$A' AND withdrawn_at IS NOT NULL
+          AND withdraw_reason LIKE 'withdrawn by deactivation #%'
+  FROM iam.account_decision WHERE decision_id = :d1;
+SELECT 'CHECK|deactivated in the status history', EXISTS (SELECT 1 FROM iam.user_status_history WHERE decision_id = :d3 AND action = 'deactivated');
+SQL
+    # D4 — who may propose: admin through the User Manager only
+    probe D4 "record_decision as a qa person" "42501:holds no K on iam_users" <<SQL
+$(um_qa)
+$(rec d role_change operator engineer)
+SQL
+    probe D4 "record_decision without set_actor" "42501:made in the User Manager" <<SQL
+SET SESSION AUTHORIZATION access_svc;
+$(rec d role_change operator engineer)
+SQL
+    probe D4 "record_decision as postgres with the deploy's internal actor" "42501:not by system" <<SQL
+SELECT medcea_auth._set_internal_actor('system:deploy') \\g /dev/null
+$(rec d role_change operator engineer)
+SQL
+    probe D4 "access_svc cannot take the deploy's internal actor" "42501:permission denied for function" <<SQL
+SET SESSION AUTHORIZATION access_svc;
+SELECT medcea_auth._set_internal_actor('system:deploy');
+SQL
+    # D5 — who may confirm (rules 3-5)
+    probe D5 "confirm as an admin" "42501:role admin holds no A on iam_users" <<SQL
+$(pending_d1)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db probe');
+SQL
+    probe D5 "confirm by the subject's own account" "42501:you are its subject" <<SQL
+$(pending_d1)
+$(as_um "$S" "$PX" test-s qa)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db probe');
+SQL
+    probe D5 "confirm by the subject's person on another account" "42501:same person as the subject" <<SQL
+$(pending_d1)
+$(as_um "$Q" "$PS" test-q qa)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db probe');
+SQL
+    probe D5 "confirm with a token without person_id" "42501:no person_id" <<SQL
+$(pending_d1)
+$(as_um "$Q" "" test-q qa)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db probe');
+SQL
+    probe D5 "confirm a row whose maker is the same person (written by postgres)" "42501:same person as the maker" <<SQL
+INSERT INTO iam.account_decision (kind, keycloak_user_id, username, subject_person, from_role, to_role, widens, status,
+                                  reason, made_by_sub, made_by_person, made_by_name)
+VALUES ('role_change', '$S', 'test-s', '$PS', 'operator', 'engineer', true, 'pending_qa', 'iam-db probe', '$X', '$PQ', 'test-x')
+RETURNING decision_id AS dm \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:dm, 'iam-db probe');
+SQL
+    # D6 / D7 — confirm, once
+    probe D6 "qa confirms D1" ok <<SQL
+$(pending_d1)
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db D6') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|confirmed by Q', status = 'confirmed' AND checked_by_sub = '$Q' AND checked_by_person = '$PQ' AND check_note = 'iam-db D6'
+  FROM iam.account_decision WHERE decision_id = :d1;
+SELECT 'CHECK|role_changed by Q', count(*) = 1 FROM iam.user_status_history
+ WHERE decision_id = :d1 AND action = 'role_changed' AND actor_sub = '$Q' AND actor_person = '$PQ';
+SQL
+    probe D7 "confirm D1 again" "22023:already confirmed" <<SQL
+$(pending_d1)
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db D7') \\g /dev/null
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db D7');
+SQL
+    # D8 / D9 / D9b — refusing a unit assignment removes it, only while it is the latest
+    probe D8 "units.sql assign, then qa refuses it: the unit is removed, both events chained" ok <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT removed AS rm FROM iam.refuse_decision(:du, 'iam-db D8') \\gset
+--CHECKS
+SELECT 'CHECK|removed = true', :'rm'::boolean;
+SELECT 'CHECK|user_unit row gone', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|refused by Q', status = 'refused' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :du;
+SELECT 'CHECK|unit_removed with Q as the actor', EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'unit_removed' AND actor_sub = '$Q'::uuid AND payload ->> 'person_sub' = '$S');
+SELECT 'CHECK|account_decision_refused, removed', EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'account_decision_refused' AND (payload ->> 'decision_id')::bigint = :du AND (payload ->> 'removed')::boolean);
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D9 "assign, remove, assign; refusing the first assign removes nothing" ok <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+$(units "$A" "$PA" test-a false)
+$(units "$A" "$PA" test-a true)
+SELECT min(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT removed AS rm FROM iam.refuse_decision(:du, 'iam-db D9') \\gset
+--CHECKS
+SELECT 'CHECK|removed = false', NOT :'rm'::boolean;
+SELECT 'CHECK|user_unit row still there', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|account_decision_refused, not removed', EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'account_decision_refused' AND (payload ->> 'decision_id')::bigint = :du AND NOT (payload ->> 'removed')::boolean);
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D9b "assign, remove; confirming the first assign" "22023:superseded" <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+$(units "$A" "$PA" test-a false)
+SELECT min(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, 'iam-db D9b');
+SQL
+    # D10 — a bootstrap row without a maker or subject person (the production rows)
+    probe D10 "bootstrap row: confirm without the attestation" "42501:needs the attestation" <<SQL
+$unit_id_sql
+$(bootstrap_row)
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:bd, 'looks right');
+SQL
+    probe D10 "bootstrap row: confirm with the attestation, compared by account" ok <<SQL
+$unit_id_sql
+$(bootstrap_row)
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:bd, '$ATTEST') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|confirmed', status = 'confirmed' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :bd;
+SELECT 'CHECK|the note holds the attestation and the account suffix', check_note LIKE '$ATTEST%'
+          AND check_note LIKE '%[subject has no person_id: compared by account]'
+  FROM iam.account_decision WHERE decision_id = :bd;
+SELECT 'CHECK|account_decision_confirmed chained', EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'account_decision_confirmed' AND (payload ->> 'decision_id')::bigint = :bd);
+SQL
+    probe D10 "bootstrap row: confirm by the subject's account" "42501:you are its subject" <<SQL
+$unit_id_sql
+$(bootstrap_row)
+$(as_um "$S" "$PX" test-s qa)
+SELECT * FROM iam.confirm_decision(:bd, '$ATTEST');
+SQL
+    probe D10 "units.sql --by the qa person: that person cannot confirm it" "42501:you made this decision" <<SQL
+$unit_id_sql
+$(units "$Q" "$PQ" test-q true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, 'iam-db D10');
+SQL
+    # --by names an account the script cannot prove its runner holds: the attestation still applies
+    probe D10 "units.sql --by another account: confirm without the attestation" "42501:needs the attestation" <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, 'looks right');
+SQL
+    probe D10 "units.sql --by another account: confirm with the attestation" ok <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, '$ATTEST') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|confirmed by Q', status = 'confirmed' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :du;
+SQL
+    # D11 — review an applied decision
+    probe D11 "qa reviews D2 (applied)" ok <<SQL
+$(um_admin)
+$(rec d2 role_change production_manager operator)
+$(um_qa)
+SELECT iam.review_decision(:d2, NULL) \\g /dev/null
+--CHECKS
+SELECT 'CHECK|reviewed by Q', status = 'reviewed' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :d2;
+SQL
+    probe D11 "review a pending decision" "22023:only an applied decision is reviewed" <<SQL
+$(pending_d1)
+$(um_qa)
+SELECT iam.review_decision(:d1, NULL);
+SQL
+    # D12 — access_svc writes the decision tables and histories only through the functions
+    for stmt in "UPDATE iam.account_decision SET status = 'confirmed' WHERE false" \
+                "INSERT INTO iam.account_decision (kind, keycloak_user_id, username, widens, status, reason, made_by_name) VALUES ('deactivate', '$S', 'x', false, 'applied', 'x', 'x')" \
+                "DELETE FROM iam.account_decision WHERE false" \
+                "UPDATE iam.user_status_history SET reason = reason WHERE false" "DELETE FROM iam.user_status_history WHERE false" \
+                "UPDATE iam.access_request_history SET notes = notes WHERE false" "DELETE FROM iam.access_request_history WHERE false" \
+                "UPDATE iam.config_history SET detail = detail WHERE false" "DELETE FROM iam.config_history WHERE false"; do
+        probe D12 "access_svc: ${stmt%% WHERE*}" "42501:permission denied" <<SQL
+SET SESSION AUTHORIZATION access_svc;
+$stmt;
+SQL
+    done
+    # D13 — postgres too: closing a record is the functions', the histories are append-only
+    probe D13 "postgres closes a decision by UPDATE" "42501:close a record" <<SQL
+$(pending_d1)
+$(as_postgres)
+UPDATE iam.account_decision SET status = 'confirmed', checked_at = now(), checked_by_name = 'x' WHERE decision_id = :d1;
+SQL
+    hist_rows="$(um_admin; rec d2 role_change production_manager operator; as_postgres)
+INSERT INTO iam.access_request (username, email, first_name, last_name, requested_role, justification)
+VALUES ('test-s-$_h', 'test-s-$_h@iamtest.invalid', 'T', 'S', 'operator', 'iam-db probe');
+UPDATE iam.mail_settings SET from_name = 'IAMT probe $_h', updated_by = 'iam-db' WHERE id = 1;"
+    for t in user_status_history access_request_history config_history; do
+        for op in "UPDATE iam.$t SET event_id = event_id" "DELETE FROM iam.$t" "TRUNCATE iam.$t"; do
+            probe D13 "postgres: ${op%% SET*}" "42501:append-only" <<SQL
+$hist_rows
+$op;
+SQL
+        done
+    done
+    # D13b — the stub role_widening of the migrations never answers
+    stub="$(python3 - "$REPO_ROOT/apps/database/medcea_db_migrations.sql" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"\n(\s*)IF pg_catalog\.to_regprocedure\('medcea_auth\.role_widening\(text, ?text\)'\) IS NULL THEN\n.*?\n\1END IF;", src, re.S)
+print(m.group(0) if m else "")
+PY
+)"
+    if [[ -n "$stub" ]]; then
+        probe D13b "the uncompiled stub role_widening" "55000:not compiled" <<SQL
+DROP FUNCTION medcea_auth.role_widening(text, text);
+DO \$stub\$ BEGIN
+$stub
+END \$stub\$;
+SELECT medcea_auth.role_widening('operator', 'qa');
+SQL
+    else
+        fail D13b "the role_widening stub is not in apps/database/medcea_db_migrations.sql"
+    fi
+    # D13c — withdraw
+    probe D13c "an admin withdraws D1" ok <<SQL
+$(pending_d1)
+SELECT iam.withdraw_decision(:d1, 'iam-db D13c') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|withdrawn by A', status = 'withdrawn' AND withdrawn_by_sub = '$A' AND withdraw_reason = 'iam-db D13c'
+  FROM iam.account_decision WHERE decision_id = :d1;
+SQL
+    probe D13c "withdraw an applied decision" "22023:already applied" <<SQL
+$(um_admin)
+$(rec d2 role_change production_manager operator)
+SELECT iam.withdraw_decision(:d2, 'iam-db D13c');
+SQL
+    probe D13c "withdraw as qa" "42501:holds no K on iam_users" <<SQL
+$(pending_d1)
+$(um_qa)
+SELECT iam.withdraw_decision(:d1, 'iam-db D13c');
+SQL
+    # D14 / D15 — the quarterly review
+    probe D14 "qa creates this quarter's review" ok <<SQL
+$(um_qa)
+SELECT iam.create_review('{}'::jsonb) AS rv \\gset
+--CHECKS
+SELECT 'CHECK|snapshot keys', snapshot ?& ARRAY['units', 'pending_decisions', 'decisions_since', 'policy_chain', 'iam_db_roles']
+  FROM iam.access_review WHERE review_id = :rv;
+SELECT 'CHECK|created by Q', created_by_sub = '$Q' AND created_by_person = '$PQ' FROM iam.access_review WHERE review_id = :rv;
+SQL
+    probe D14 "a second review this quarter" "23505:exists" <<SQL
+$(um_qa)
+SELECT iam.create_review('{}'::jsonb) \\g /dev/null
+SELECT iam.create_review('{}'::jsonb);
+SQL
+    probe D15 "sign-off as an auditor" "42501:holds no C on audit_histories" <<SQL
+$(um_qa)
+SELECT iam.create_review('{}'::jsonb) AS rv \\gset
+$(as_um "$X" "$PX" test-x auditor)
+SELECT iam.sign_off_review(:rv, NULL);
+SQL
+    probe D15 "qa signs off (the creator may), once" ok <<SQL
+$(um_qa)
+SELECT iam.create_review('{}'::jsonb) AS rv \\gset
+SELECT iam.sign_off_review(:rv, 'iam-db D15') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|signed off by Q', signed_off_by_sub = '$Q' AND signed_off_at IS NOT NULL FROM iam.access_review WHERE review_id = :rv;
+SQL
+    probe D15 "sign off twice" "22023:already signed off" <<SQL
+$(um_qa)
+SELECT iam.create_review('{}'::jsonb) AS rv \\gset
+SELECT iam.sign_off_review(:rv, NULL) \\g /dev/null
+$(um_qa2)
+SELECT iam.sign_off_review(:rv, NULL);
+SQL
+    # D16 — a template reset is an UPDATE, logged as reset
+    probe D16 "access_svc resets a template by UPDATE" ok <<SQL
+SET SESSION AUTHORIZATION access_svc;
+INSERT INTO iam.mail_template (name, subject, body, updated_by, is_default) VALUES ('approved', 'IAMT', 'IAMT body', 'test-a', false)
+ON CONFLICT (name) DO UPDATE SET subject = 'IAMT', body = 'IAMT body', updated_by = 'test-a', is_default = false;
+UPDATE iam.mail_template SET subject = 'default', body = 'default body', is_default = true, updated_by = 'test-a-$_h', updated_at = now()
+ WHERE name = 'approved' AND NOT is_default;
+--CHECKS
+SELECT 'CHECK|reset logged', EXISTS (SELECT 1 FROM iam.config_history WHERE item = 'template:approved' AND action = 'reset' AND actor = 'test-a-$_h');
+SELECT 'CHECK|is_default', is_default FROM iam.mail_template WHERE name = 'approved';
+SQL
+    # D17 — MQTT person credentials, on deactivation and on a pure narrowing
+    cred="$(as_postgres)
+INSERT INTO medcea.mqtt_service_credential (username, password_hash, person_sub, expires_at)
+VALUES ('iamt-person-$_h', '\$7\$101\$aaaa\$bbbb', '$S', now() + interval '1 day');"
+    probe D17 "deactivate: revoke_person_mqtt in the same transaction" ok <<SQL
+$cred
+$(um_admin)
+$(rec d3 deactivate operator '')
+SELECT medcea.revoke_person_mqtt('$S'::uuid, 'deactivated') AS n \\gset
+--CHECKS
+SELECT 'CHECK|one credential revoked', :n = 1;
+SELECT 'CHECK|inactive', NOT active FROM medcea.mqtt_service_credential WHERE username = 'iamt-person-$_h';
+SQL
+    probe D17 "narrowing (applied): revoke_person_mqtt in the same transaction" ok <<SQL
+$cred
+$(um_admin)
+$(rec d2 role_change production_manager operator)
+SELECT medcea.revoke_person_mqtt('$S'::uuid, 'role narrowed') AS n \\gset
+--CHECKS
+SELECT 'CHECK|applied', :'d2_st' = 'applied';
+SELECT 'CHECK|one credential revoked', :n = 1;
+SQL
+    probe D17 "revoke_person_mqtt as a qa person" "42501:holds no K on iam_users" <<SQL
+$cred
+$(um_qa)
+SELECT medcea.revoke_person_mqtt('$S'::uuid, 'x');
+SQL
+    # D18 — rr_qa (a qa token through PostgREST) executes no iam function
+    if [[ "$MODE" == true ]]; then
+        probe D18 "a qa token through PostgREST calls confirm_decision" "42501:permission denied" <<SQL
+$(as_token "$(claims qa "$Q" "$PQ")")
+SELECT * FROM iam.confirm_decision(1, 'x');
+SQL
+    else
+        probe D18 "rr_qa calls confirm_decision" "42501:permission denied" <<SQL
+SET SESSION AUTHORIZATION rr_qa;
+SELECT * FROM iam.confirm_decision(1, 'x');
+SQL
+    fi
+elif want access; then
+    note access "skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
+fi
+
 # ── drift ────────────────────────────────────────────────────────────────────────
 if want drift && [[ "$WRITES" == true && "$MODE" != legacy ]]; then
     echo ""
-    VERIFY="$(python3 "$CLI" compile grants --mode verify)"
+    VERIFY="$(python3 "$CLI" compile grants --mode verify "${IAM_FLAG[@]}")"
     drift() {  # NAME SQL
         probe drift "$1" "P0001:differ" <<SQL
 $2

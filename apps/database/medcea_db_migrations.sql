@@ -742,6 +742,15 @@ BEGIN
         CREATE FUNCTION medcea_auth.object_group(p_object text) RETURNS text
             LANGUAGE plpgsql IMMUTABLE AS $f$ BEGIN RETURN NULL; END $f$;
     END IF;
+    -- IAM 2.7: never '[]' uncompiled, so an uncompiled database never calls a
+    -- widening a narrowing (iam.record_decision fails instead)
+    IF pg_catalog.to_regprocedure('medcea_auth.role_widening(text, text)') IS NULL THEN
+        CREATE FUNCTION medcea_auth.role_widening(p_old text, p_new text) RETURNS jsonb
+            LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $f$
+        BEGIN
+            RAISE EXCEPTION 'role_widening is not compiled: run ./apps/database/deploy.sh' USING ERRCODE = '55000';
+        END $f$;
+    END IF;
     IF pg_catalog.to_regprocedure('medcea_auth.pre_request()') IS NULL THEN
         CREATE FUNCTION medcea_auth.pre_request() RETURNS void LANGUAGE plpgsql AS $f$
         BEGIN
@@ -1468,8 +1477,8 @@ END $$;
 
 -- IAM 2.8: operators are assigned units (own_unit), every zone of a unit
 -- included. user_zone above stays, unused: the history names it. Written only
--- by apps/iam/units.sh (as postgres) and, from 2.7, iam_policy.propose_unit()
--- and confirm_decision(). The FK keeps the default RESTRICT: deleting a unit
+-- by apps/iam/units.sh (as postgres) and iam.refuse_decision() (IAM 2.7: a
+-- refused assignment is removed); iam_policy.propose_unit() follows in 4.3. The FK keeps the default RESTRICT: deleting a unit
 -- that is still assigned fails (23503) rather than drop an assignment without
 -- an account decision.
 CREATE TABLE IF NOT EXISTS iam_policy.user_unit (
@@ -2143,6 +2152,57 @@ BEGIN
         RAISE EXCEPTION 'role % holds no approval on %', a.role, p_group USING ERRCODE = '42501';
     END IF;
     sub := a.sub; person := a.person; name := a.name; role := a.role; source := a.source;
+END $$;
+
+-- _account_actor(group, level): the actor of an account decision (IAM 2.7): a
+-- person signed in to the User Manager (set_actor by access_svc, so the source
+-- is 'person via access_svc'), whose token carries a person_id and whose role
+-- holds the level on the group. Never a system, migration, db:<login> or
+-- PostgREST actor. The one copy of this rule: the iam.* decision functions
+-- (apps/access/access_db.sql) and medcea.revoke_person_mqtt() call it.
+-- SECURITY INVOKER: its callers are definer functions owned by medcea_owner.
+CREATE OR REPLACE FUNCTION medcea_auth._account_actor(p_group text, p_level text,
+    OUT sub text, OUT person text, OUT name text, OUT role text)
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+DECLARE a record;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.source IS DISTINCT FROM 'person via access_svc' THEN
+        RAISE EXCEPTION 'account decisions are made in the User Manager by a signed-in person, not by %',
+            coalesce(a.source, 'an unknown actor') USING ERRCODE = '42501';
+    END IF;
+    IF a.person IS NULL OR btrim(a.person) = '' THEN
+        RAISE EXCEPTION 'your token carries no person_id' USING ERRCODE = '42501';
+    END IF;
+    IF medcea_auth.policy_holds(a.role, p_group, p_level) IS NULL THEN
+        RAISE EXCEPTION 'role % holds no % on %', a.role, p_level, p_group USING ERRCODE = '42501';
+    END IF;
+    sub := a.sub; person := a.person; name := a.name; role := a.role;
+END $$;
+
+-- revoke_person_mqtt(sub, reason): every MQTT person credential of an account
+-- inactive (IAM 2.7, qa_dual_control): called by access-api in the transaction
+-- of a deactivation or a pure narrowing, after iam.record_decision. The broker's
+-- auth sidecar drops them at its next sync (~15 s). Explorer person credentials
+-- arrive in IAM 3.5, so today this changes 0 rows. An owner definer: access_svc
+-- holds EXECUTE only and reads no credential.
+CREATE OR REPLACE FUNCTION medcea.revoke_person_mqtt(p_sub uuid, p_reason text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE n integer;
+BEGIN
+    PERFORM medcea_auth._account_actor('iam_users', 'K');
+    IF p_sub IS NULL THEN
+        RAISE EXCEPTION 'revoke_person_mqtt: the account is required' USING ERRCODE = '22023';
+    END IF;
+    IF coalesce(btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'revoke_person_mqtt: a reason is required' USING ERRCODE = '22023';
+    END IF;
+    PERFORM medcea_auth._owner_write(true);
+    UPDATE medcea.mqtt_service_credential c SET active = false
+     WHERE c.person_sub = p_sub AND c.active;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    PERFORM medcea_auth._owner_write(false);
+    RETURN n;
 END $$;
 
 -- _is_approved(target, key): status approved and unchanged since its last
@@ -2998,11 +3058,13 @@ BEGIN
             EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO medcea_owner', f);
         END IF;
     END LOOP;
-    -- schema iam belongs to apps/access until 2.7; only its trigger functions
-    -- lose PUBLIC EXECUTE (trigger firing never checks it)
+    -- schema iam (apps/access/access_db.sql): every function loses PUBLIC EXECUTE
+    -- (trigger firing never checks it; the decision functions are granted by the
+    -- compiled policy). Its ownership is medcea_db_owner.sql's (IAM 2.7), not
+    -- 008b's: 008b does not depend on the access component.
     IF pg_catalog.to_regnamespace('iam') IS NOT NULL THEN
         FOR f IN SELECT p.oid::regprocedure FROM pg_catalog.pg_proc p
-                  WHERE p.pronamespace = 'iam'::regnamespace AND p.prorettype = 'trigger'::regtype LOOP
+                  WHERE p.pronamespace = 'iam'::regnamespace LOOP
             EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         END LOOP;
     END IF;

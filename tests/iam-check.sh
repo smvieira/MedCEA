@@ -9,7 +9,8 @@
 #   forged   a request sent inside the pod straight to the service's port, past the
 #            proxy, with forged X-Forwarded-Preferred-Username/-Groups (admin) and a
 #            forged access token, leaves a "would refuse" line (IAM_ENFORCE=false) or a
-#            "refused" line and a 401 (true) in the service's log
+#            "refused" line and a 401 (true) in the service's log; the access Admin port
+#            always a "refused" line and a 401/403 (IAM 2.7: it enforces regardless)
 # Real sessions through every proxy are tests/iam-signin.sh.
 #
 # Read-only: no lock; the forged requests are GETs. Run from the repository root:
@@ -95,10 +96,13 @@ PY
             | grep -m1 "medcea_iam: \(would refuse\|refused\) GET $path on $svc")"
     if [[ -z "$line" ]]; then
         fail forged "GET $path with forged headers (answered $code) left no refusal in the log"
+    elif [[ "$svc" == access && ( "$line" == *"would refuse"* || ( "$code" != 401 && "$code" != 403 ) ) ]]; then
+        # IAM 2.7: the User Manager's Admin port enforces whatever IAM_ENFORCE says
+        fail forged "the access Admin port must refuse for real (\"refused\" and 401/403), got $code: ${line:0:120}"
     elif [[ "$line" == *"would refuse"* ]]; then
         pass forged "GET $path with forged headers: ${line#*: would refuse GET $path on $svc for }"
-    elif [[ "$code" == 401 ]]; then
-        pass forged "GET $path with forged headers refused with 401"
+    elif [[ "$code" == 401 || ( "$svc" == access && "$code" == 403 ) ]]; then
+        pass forged "GET $path with forged headers refused with $code"
     else
         fail forged "logged a refusal but answered $code: $line"
     fi

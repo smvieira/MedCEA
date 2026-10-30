@@ -24,8 +24,10 @@
 --      enforcement_disabled event when the chain's last IAM_DB_ROLES event is
 --      not already one
 -- Every statement is idempotent and guarded by a catalog check, so a
--- steady-state false deploy takes no strong lock. Schema iam and access_svc
--- are not touched (IAM Phase 2.7). Statements only: no BEGIN/COMMIT here.
+-- steady-state false deploy takes no strong lock. Schema iam is not touched
+-- here: its grants, access_svc's included, are compiled (IAM 2.7), and section
+-- 4 takes back only what access_svc holds outside iam. A rollback of 2.7 alone
+-- is apps/access/rollback-2.7.sql. Statements only: no BEGIN/COMMIT here.
 
 SET LOCAL lock_timeout = '5s';
 
@@ -190,6 +192,14 @@ BEGIN
         EXECUTE pg_catalog.format('REVOKE ALL ON SCHEMA medcea, medcea_auth, iam_policy FROM %I', r.rolname);
         EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM %I', current_database(), r.rolname);
     END LOOP;
+    -- access_svc (IAM 2.7) keeps CONNECT and its grants in schema iam, which the
+    -- reverted apps/access/access_db.sql re-grants; nothing outside iam
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'access_svc') THEN
+        REVOKE ALL ON ALL TABLES    IN SCHEMA medcea, medcea_auth, iam_policy FROM access_svc;
+        REVOKE ALL ON ALL SEQUENCES IN SCHEMA medcea, medcea_auth, iam_policy FROM access_svc;
+        REVOKE ALL ON ALL FUNCTIONS IN SCHEMA medcea, medcea_auth, iam_policy FROM access_svc;
+        REVOKE ALL ON SCHEMA medcea, medcea_auth, iam_policy FROM access_svc;
+    END IF;
 END $$;
 DO $$
 DECLARE r record;
@@ -248,6 +258,7 @@ DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), me
     medcea.start_run(integer), medcea.set_run_status(integer, text), medcea.finish_run(integer, text),
     medcea.record_cycle(integer, jsonb), medcea.release_run(integer), medcea.retire_schedule(integer),
     medcea.retire_algorithm_state(integer, text, text), medcea.register_mqtt_credential(integer, text, text),
+    medcea.revoke_person_mqtt(uuid, text),
     iam_policy.log_user_zone(), iam_policy.log_user_unit(), iam_policy.log_export(text[], text[]);
 CREATE OR REPLACE FUNCTION medcea.register_mqtt_credential(
     p_username text, p_password_hash text, p_device_id integer, p_role text, p_topic_base text)
@@ -335,7 +346,8 @@ BEGIN
 END $$;
 -- the actor store and the medcea_auth functions 008b added (pre_request stays:
 -- anon may still execute it, and it is a no-op while the setting is false)
-DROP FUNCTION IF EXISTS medcea_auth.set_actor(text, text, text, text), medcea_auth.set_system_actor(text, text, bigint),
+DROP FUNCTION IF EXISTS medcea_auth._account_actor(text, text), medcea_auth.role_widening(text, text),
+    medcea_auth.set_actor(text, text, text, text), medcea_auth.set_system_actor(text, text, bigint),
     medcea_auth.my_zones(), medcea_auth.my_units(), medcea_auth._authors(text, jsonb), medcea_auth._lock_row(text, jsonb), medcea_auth._approver(text),
     medcea_auth._is_approved(text, jsonb), medcea_auth.row_digest(text, jsonb), medcea_auth._content(jsonb, boolean),
     medcea_auth.policy_refuse(text), medcea_auth.enforcing(), medcea_auth._set_internal_actor(text),

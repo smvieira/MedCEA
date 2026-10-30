@@ -79,7 +79,15 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         WARN while a client disagrees with the flag (deploy it again)"
     echo ""
     echo -e "  ${CYAN}iamgrants${NC} the database's grants equal the compiled policy: DATABASE"
-    echo -e "         (cli.py compile grants --mode verify, in a read-only transaction; drift is a FAIL)"
+    echo -e "         (cli.py compile grants --mode verify, in a read-only transaction; drift is a FAIL;"
+    echo -e "         --without-iam while schema iam is absent, from dba_iam_flag; a stale"
+    echo -e "         medcea_auth.role_widening digest is drift too)"
+    echo ""
+    echo -e "  ${CYAN}iamdecisions${NC} account decisions waiting for qa (IAM 2.7): DATABASE"
+    echo -e "         SKIP without schema iam or role access_svc; FAIL without iam.confirm_decision"
+    echo -e "         (./apps/access/deploy.sh) or when access_svc may not execute it"
+    echo -e "         (./apps/database/deploy.sh); WARN on a decision pending for over 7 days"
+    echo -e "         or a pending mail settings change"
     echo ""
     echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
     echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
@@ -325,8 +333,18 @@ check_dbclients() {
 # Check: the database's grants equal the compiled access policy (read-only)
 # =============================================================================
 check_iamgrants() {
-    local name="$1" db="$2" sql out exit_code=0
-    sql="$(python3 "${SCRIPT_DIR}/apps/iam/compiler/cli.py" compile grants --mode verify 2>&1)" || {
+    local name="$1" db="$2" sql out exit_code=0 flag rc=0
+    # --without-iam exactly when the database deploy would compile it so (IAM 2.7):
+    # the one helper decides, and an unreadable answer is a FAIL, never a default.
+    # (dba_iam_flag, apps/database/lib-db-apply.sh, in a child bash that timeout bounds)
+    out="$(timeout "$TIMEOUT" bash -c 'REPO_ROOT="$0"; KUBECTL="$1"; source "$0/apps/database/lib-db-apply.sh"
+                                       dba_iam_flag "$2" rdbms-postgresql-0 "$3"' \
+                "$SCRIPT_DIR" "$KUBECTL" "$NAMESPACE" "$db" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record FAIL "$name" "cannot tell whether schema iam is compiled (exit $rc): $(tail -1 <<<"$out" | cut -c1-160)"; return
+    fi
+    flag="$(grep -x -- '--without-iam' <<<"$out" || true)"
+    sql="$(python3 "${SCRIPT_DIR}/apps/iam/compiler/cli.py" compile grants --mode verify $flag 2>&1)" || {
         _record FAIL "$name" "cli.py compile grants failed: ${sql:0:120}"; return; }
     out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
         env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
@@ -335,9 +353,61 @@ check_iamgrants() {
     if grep -q 'medcea.platform_setting" does not exist\|function medcea_auth' <<<"$out" && [[ $exit_code -ne 0 ]]; then
         _record SKIP "$name" "migration 008b not applied yet (./apps/database/deploy.sh)"
     elif [[ $exit_code -eq 0 ]] && grep -q 'grants verified' <<<"$out"; then
-        _record OK "$name" "database grants equal the compiled policy"
+        _record OK "$name" "database grants equal the compiled policy${flag:+ ($flag: no access component)}"
     else
         _record FAIL "$name" "grant drift: $(grep -m1 -E 'ERROR|DETAIL' <<<"$out" | cut -c1-200)"
+    fi
+}
+
+# =============================================================================
+# Check: account decisions waiting for qa (IAM 2.7) — read-only, no Keycloak
+# target: DATABASE. Drift between Keycloak and the decisions is not computed here
+# (that would mint admin tokens): the User Manager's Decisions tab shows it.
+# =============================================================================
+check_iamdecisions() {
+    local name="$1" db="$2" out exit_code=0
+    # each step only after the guards before it, so no query names a missing object
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' "$db" 2>&1 <<'SQL'
+SELECT pg_catalog.to_regnamespace('iam') IS NOT NULL AND EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'access_svc') AS present,
+       pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL AS built \gset
+\if :present
+\if :built
+SELECT 'exec|' || pg_catalog.has_function_privilege('access_svc', 'iam.confirm_decision(integer,text)', 'EXECUTE');
+SELECT 'stale|' || count(*) || '|' || coalesce(min(decision_id)::text, '-')
+  FROM iam.account_decision WHERE status = 'pending_qa' AND made_at < now() - interval '7 days';
+SELECT 'mail|' || count(*) || '|' || coalesce(min(decision_id)::text, '-')
+  FROM iam.account_decision WHERE status = 'pending_qa' AND kind = 'mail_settings';
+SELECT 'pending|' || count(*) FROM iam.account_decision WHERE status = 'pending_qa';
+\else
+SELECT 'state|unbuilt';
+\endif
+\else
+SELECT 'state|absent';
+\endif
+SQL
+) || exit_code=$?
+    local state can_exec stale stale_id mail mail_id pending
+    state="$(grep -m1 '^state|' <<<"$out" | cut -d'|' -f2)"
+    can_exec="$(grep -m1 '^exec|' <<<"$out" | cut -d'|' -f2)"
+    IFS='|' read -r _ stale stale_id <<<"$(grep -m1 '^stale|' <<<"$out")"
+    IFS='|' read -r _ mail mail_id <<<"$(grep -m1 '^mail|' <<<"$out")"
+    pending="$(grep -m1 '^pending|' <<<"$out" | cut -d'|' -f2)"
+    if [[ "$state" == absent ]]; then
+        _record SKIP "$name" "schema iam or role access_svc absent (./apps/access/deploy.sh installs them)"
+    elif [[ "$state" == unbuilt ]]; then
+        _record FAIL "$name" "schema iam has no iam.confirm_decision: run ./apps/access/deploy.sh (IAM 2.7)"
+    elif [[ $exit_code -ne 0 || -z "$can_exec" || -z "$pending" ]]; then
+        _record FAIL "$name" "could not read the account decisions: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"
+    elif [[ "$can_exec" != t ]]; then
+        _record FAIL "$name" "access_svc may not execute iam.confirm_decision: run ./apps/database/deploy.sh"
+    elif [[ "$stale" -gt 0 ]]; then
+        _record WARN "$name" "${stale} decision(s) waiting for qa for over 7 days (oldest #${stale_id}): User Manager → Decisions"
+    elif [[ "$mail" -gt 0 ]]; then
+        _record WARN "$name" "a mail settings change waits for qa (decision #${mail_id}): the realm still sends with the old account"
+    else
+        _record OK "$name" "${pending} decision(s) waiting for qa, none older than 7 days"
     fi
 }
 
@@ -565,6 +635,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamchain) check_iamchain "$name" "$target" ;;
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
+        iamdecisions) check_iamdecisions "$name" "$target" ;;
         dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)

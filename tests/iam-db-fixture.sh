@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # tests/iam-db-fixture.sh — IAM Phase 2a on a throwaway PostgreSQL, end to end.
 #
-#   tests/iam-db-fixture.sh up | load | fresh | apply MODE | cycle | logins MODE
+#   tests/iam-db-fixture.sh up | load | fresh | apply MODE | access MODE | cycle | logins MODE
 #                           | preflight | postgrest MODE | pgrst-flip | services | runner MODE
-#                           | fulldown | serverlog | purge | down | run [--keep]
+#                           | fulldown | purge-access | rollback-27 | serverlog | purge | down
+#                           | run [--keep]
 #
 #   up        namespace medcea-iamtest, Secret pg (a random password, on stdin), one
 #             pod from production's image digest configured like rdbms-postgresql-0
@@ -17,7 +18,13 @@
 #             tests/sql/iam-db-seed.sql, then snapshots the catalog as B0
 #   apply M   apps/database/lib-db-apply.sh db_apply with IAM_DB_ROLES=M (false|true),
 #             exactly what apps/database/deploy.sh runs; any psql ERROR fails it; the
-#             hash chain must verify and an enforcement_* event appear on a transition only
+#             hash chain must verify and an enforcement_* event appear on a transition only;
+#             schema iam belongs to medcea_owner and access_svc lost its legacy direct
+#             grants (IAM 2.7)
+#   access M  IAM 2.7's account decisions: tests/iam-db.sh --section access (D1-D18,
+#             as access_svc with set_actor), then access_db.sql applied a second time
+#             as apps/access/deploy.sh does, and the catalog (triggers still ALWAYS) and
+#             matrix sections again
 #   cycle     false -> A; B0 vs A differs only by the declared delta; false = A;
 #             true twice equal; false = A; true = the earlier true
 #   logins M  every svc_* role and rr_admin_login logs in over TCP with its password
@@ -39,18 +46,29 @@
 #             2.4's functions gone), then the code before Phase 2a's commit (PREV_REV,
 #             default 9ef9852: its DDL, migrations and step-5 grants — an empty grants
 #             extract is a FAIL); W1 must still pass (tests/iam-db.sh --mode legacy)
-#   fresh     an empty database (medcea_fresh): apply false twice, then true; its
-#             catalog must match the upgraded fixture's, apart from the seed
+#   fresh     an empty database (medcea_fresh): apply false twice (--without-iam: no
+#             schema iam), then this tree's access_db.sql and apply true (with iam); its
+#             catalog must match the upgraded fixture's, apart from the seed; a database
+#             with PREV27_REV's (b65cb2d) access_db.sql — schema iam without IAM 2.7's
+#             functions — is refused by db_apply ("run ./apps/access/deploy.sh first")
+#   purge-access  apps/access/uninstall.sh --purge-data's SQL with a unit assigned:
+#             apply false passes --without-iam; access_db.sql + unit_backfill.sql then
+#             record a pending_qa decision for the surviving assignment; apply true again
+#   rollback-27  one mail_settings decision committed, then apps/access/rollback-2.7.sql
+#             and PREV27_REV's access_db.sql apply cleanly; access_svc then holds nothing
+#             outside schema iam and the managed roles nothing in it; this tree's
+#             access_db.sql then brings the parked decision back
 #   serverlog the pod's log holds none of the generated passwords
 #   purge     drop the databases, run apps/database/purge.sql: pg_roles must equal the
 #             fresh image's
 #   down      delete the namespace
 #   run       up, load, runner legacy, preflight;
-#             apply false, probes, logins false, preflight, postgrest false, runner false,
-#             pgrst-flip, services;
-#             apply true, probes, logins true, preflight, postgrest true, runner true;
-#             apply false, probes (W1 again), cycle, fulldown, fresh, serverlog, purge,
-#             down (on exit, unless --keep)
+#             apply false, probes, access false, logins false, preflight, postgrest false,
+#             runner false, pgrst-flip, services;
+#             apply true, probes, access true, logins true, preflight, postgrest true,
+#             runner true;
+#             apply false, probes (W1 again), cycle, fulldown, fresh, purge-access,
+#             rollback-27, serverlog, purge, down (on exit, unless --keep)
 #
 # Production is only read (the dumps and the image lookup). Dumps, snapshots and the
 # generated passwords live in $IAMTEST_DIR (default $TMPDIR/medcea-iamtest, mode 700).
@@ -59,7 +77,7 @@
 set -uo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
-    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -84,6 +102,7 @@ PROJECT_NAME="${PROJECT_NAME:-medcea}"
 IAMTEST_DIR="${IAMTEST_DIR:-${TMPDIR:-/tmp}/medcea-iamtest}"
 PREV_REV="${PREV_REV:-9ef9852}"   # the last commit before Phase 2a (e97aab6)
 PREV_SCHD_REV="${PREV_SCHD_REV:-e97aab6}"   # the scheduler code before 2.4
+PREV27_REV="${PREV27_REV:-b65cb2d}"   # the access component before IAM 2.7
 CLI="$REPO_ROOT/apps/iam/compiler/cli.py"
 KEEP=false
 for a in "$@"; do [[ "$a" == --keep ]] && KEEP=true; done
@@ -120,6 +139,12 @@ load_passwords() {
     local r p
     [[ -f "$IAMTEST_DIR/passwords" ]] || { echo "no passwords: run '$0 up' first" >&2; exit 2; }
     while read -r r p; do printf -v "DBPW_$r" '%s' "$p"; done < "$IAMTEST_DIR/passwords"
+}
+
+# access_sql — this tree's access_db.sql as apps/access/deploy.sh feeds it (a throwaway
+# access_svc password; the fixture never logs in as access_svc). Apply with -1.
+access_sql() {
+    echo "SET log_statement = 'none';"; printf '\\set access_pw %s\n' "$(openssl rand -hex 20)"; cat apps/access/access_db.sql
 }
 
 cmd_up() {
@@ -178,10 +203,12 @@ cmd_load() {
     if grep 'ERROR' <<<"$out" | grep -v 'already exists'; then fail load "schema"; else pass load "schema"; fi
     # this tree's access_db.sql, as apps/access/deploy.sh applies it: production's dump
     # may predate its idempotent ALTERs (IAM 2.8: account_decision.unit_id, unit_* kinds)
-    out="$({ echo "SET log_statement = 'none';"; printf '\\set access_pw %s\n' "$(openssl rand -hex 20)"; cat apps/access/access_db.sql; } \
-           | fx "$CEA_DB" -q -v ON_ERROR_STOP=1 -f - 2>&1)" && pass load "access_db.sql" || { echo "$out" | head; fail load "access_db.sql"; }
+    out="$(access_sql | fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" && pass load "access_db.sql (one transaction)" || { echo "$out" | head; fail load "access_db.sql"; }
     out="$(fx "$CEA_DB" -q -v ON_ERROR_STOP=1 < "$IAMTEST_DIR/data.sql" 2>&1)" && pass load "medcea data" || { echo "$out" | head; fail load "data"; }
-    out="$(fx "$CEA_DB" -q < tests/sql/iam-db-seed.sql 2>&1)" && pass load "seed" || { echo "$out" | head; fail load "seed"; }
+    # production's IAM_DB_ROLES, before the seed resets it (cmd_cycle picks its baseline by it)
+    fx "$CEA_DB" -q -tA -c "SELECT coalesce((SELECT value FROM medcea.platform_setting WHERE key = 'iam_db_roles'), 'false')" \
+        > "$IAMTEST_DIR/prod-mode" 2>/dev/null || echo false > "$IAMTEST_DIR/prod-mode"
+    out="$(fx "$CEA_DB" -q < tests/sql/iam-db-seed.sql 2>&1)" && pass load "seed" || { echo "$out" | grep -E "ERROR|DETAIL|CONTEXT|HINT|LINE" | head -20; fail load "seed"; }
     snapshot "$CEA_DB" "$IAMTEST_DIR/B0.txt" && pass load "catalog snapshot B0 ($(wc -l < "$IAMTEST_DIR/B0.txt") lines)"
 }
 
@@ -210,6 +237,34 @@ cmd_apply() {  # MODE [DB] — DBA_SERVICE_LOGINS (env): login roles allowed to 
     else
         fail chain "repeated enforcement_* events: $events"
     fi
+    # IAM 2.7: schema iam normalised to medcea_owner, access_svc's grants compiled
+    # (I15 compares them exactly), and the legacy direct grants gone
+    # two statements: a cast to an absent schema fails at parse time, in any branch
+    out="$(fx "$db" -q -tA -c "SELECT to_regnamespace('iam') IS NULL" 2>&1)"
+    [[ "$out" == t ]] && out=absent || out="$(fx "$db" -q -tA -c "SELECT
+              (SELECT count(*) FROM (SELECT c.relowner AS o FROM pg_class c WHERE c.relnamespace = 'iam'::regnamespace
+                                      UNION ALL SELECT p.proowner FROM pg_proc p WHERE p.pronamespace = 'iam'::regnamespace
+                                      UNION ALL SELECT nspowner FROM pg_namespace WHERE nspname = 'iam') x
+                WHERE x.o <> 'medcea_owner'::regrole)::text
+              || '|' || has_table_privilege('access_svc', 'iam.mail_template', 'DELETE')
+              || '|' || has_table_privilege('access_svc', 'iam.user_status_history', 'INSERT')" 2>&1)"
+    if [[ "$out" == absent ]]; then
+        echo "        schema iam absent (--without-iam)"
+    elif [[ "$out" == "0|false|false" ]]; then
+        pass apply "schema iam owned by medcea_owner; access_svc has no DELETE on mail_template, no INSERT on user_status_history"
+    else
+        fail apply "schema iam: objects not owned by medcea_owner | DELETE mail_template | INSERT user_status_history = $out"
+    fi
+}
+
+cmd_access() {  # MODE (after apply MODE)
+    step "IAM 2.7 account decisions (mode $1)"
+    tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --mode "$1" --write-probes --section access || FAILS=$((FAILS + 1))
+    # D13: a second access deploy replaces the triggers and leaves them ALWAYS
+    local out
+    out="$(access_sql | fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        && pass access "access_db.sql applied a second time (one transaction)" || { echo "$out" | head; fail access "second access_db.sql"; }
+    tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --mode "$1" --section catalog --section matrix || FAILS=$((FAILS + 1))
 }
 
 cmd_logins() {  # MODE: false | true | svc (false with the service logins, 2.5)
@@ -235,10 +290,14 @@ probes() {  # MODE
 }
 
 # The declared difference between production's catalog before 2a (B0) and after
-# apply false (A), for anon, authenticator, mqtt_auth, access_svc and PUBLIC.
+# apply false (A), for anon, authenticator, mqtt_auth, access_svc and PUBLIC. Since
+# IAM 2.7 every acl line of access_svc may change: production's legacy iam grants
+# (and none elsewhere) become the compiled set.
 # Production may run IAM_DB_SERVICE_ROLES=true (2.5): its service roles and
 # rr_admin_login then log in, and rr_admin_login inherits rr_admin, in B0 only —
 # the fixture's apply false runs without the service logins.
+# Production may run IAM_DB_ROLES=true: B0 is then compared with the first apply
+# true (T1) instead, and the seed has reset the database setting the flag lives in.
 DELTA='^[<>] owner\|
 ^[<>] secdef\|
 ^[<>] trigger\|
@@ -249,11 +308,12 @@ DELTA='^[<>] owner\|
 ^> acl\|anon\|function\|medcea_auth\.pre_request\(\)\|EXECUTE
 ^< acl\|PUBLIC\|function\|
 ^> reloption\|.*security_invoker=true
-^> dbsetting\|\*\|medcea\.iam_db_roles=false
+^> dbsetting\|\*\|medcea\.iam_db_roles=(false|true)
 ^> role\|(rr_|svc_|iam_svc)
 ^< role\|(rr_|svc_|iam_svc)
 ^< member\|rr_admin\|rr_admin_login\|
-^> constraint\|'
+^> constraint\|
+^[<>] acl\|access_svc\|'
 # every fact but the grants of roles outside the comparison (the managed roles are
 # compared exactly by the bundle's own assertions)
 scoped() { grep -vE '^acl\|' "$1"; grep -E '^acl\|(anon|authenticator|mqtt_auth|access_svc|PUBLIC)\|' "$1"; }
@@ -261,15 +321,24 @@ scoped() { grep -vE '^acl\|' "$1"; grep -E '^acl\|(anon|authenticator|mqtt_auth|
 cmd_cycle() {
     step "cycle"
     cmd_apply false; snapshot medcea_db "$IAMTEST_DIR/A.txt"
-    local left
-    left="$(diff <(scoped "$IAMTEST_DIR/B0.txt") <(scoped "$IAMTEST_DIR/A.txt") | grep -E '^[<>]' | grep -vEf <(printf '%s\n' "$DELTA"))"
-    if [[ -z "$left" ]]; then pass cycle "B0 -> A differs only by the declared delta"
-    else fail cycle "B0 -> A, undeclared differences:"; sed 's/^/        /' <<<"$left" | head -40; fi
+    # production before 2a, or still false, is compared with A; an enforcing one with T1
+    local prod_mode left
+    prod_mode="$(cat "$IAMTEST_DIR/prod-mode" 2>/dev/null || echo false)"
+    if [[ "$prod_mode" != true ]]; then
+        left="$(diff <(scoped "$IAMTEST_DIR/B0.txt") <(scoped "$IAMTEST_DIR/A.txt") | grep -E '^[<>]' | grep -vEf <(printf '%s\n' "$DELTA"))"
+        if [[ -z "$left" ]]; then pass cycle "B0 -> A differs only by the declared delta"
+        else fail cycle "B0 -> A, undeclared differences:"; sed 's/^/        /' <<<"$left" | head -40; fi
+    fi
     grep -q '^trigger|.*|iam_' "$IAMTEST_DIR/A.txt" && fail cycle "A has iam_* triggers" || pass cycle "A has no iam_* trigger"
     cmd_apply false; snapshot medcea_db "$IAMTEST_DIR/A2.txt"
     diff -q "$IAMTEST_DIR/A.txt" "$IAMTEST_DIR/A2.txt" >/dev/null && pass cycle "apply false twice: identical" \
         || { fail cycle "apply false twice differs"; diff "$IAMTEST_DIR/A.txt" "$IAMTEST_DIR/A2.txt" | head -20; }
     cmd_apply true; snapshot medcea_db "$IAMTEST_DIR/T1.txt"
+    if [[ "$prod_mode" == true ]]; then
+        left="$(diff <(scoped "$IAMTEST_DIR/B0.txt") <(scoped "$IAMTEST_DIR/T1.txt") | grep -E '^[<>]' | grep -vEf <(printf '%s\n' "$DELTA"))"
+        if [[ -z "$left" ]]; then pass cycle "B0 (production enforcing) -> T1 differs only by the declared delta"
+        else fail cycle "B0 (production enforcing) -> T1, undeclared differences:"; sed 's/^/        /' <<<"$left" | head -40; fi
+    fi
     cmd_apply true; snapshot medcea_db "$IAMTEST_DIR/T2.txt"
     diff -q "$IAMTEST_DIR/T1.txt" "$IAMTEST_DIR/T2.txt" >/dev/null && pass cycle "apply true twice: identical" \
         || { fail cycle "apply true twice differs"; diff "$IAMTEST_DIR/T1.txt" "$IAMTEST_DIR/T2.txt" | head -20; }
@@ -281,8 +350,9 @@ cmd_cycle() {
         || { fail cycle "false -> true differs"; diff "$IAMTEST_DIR/T1.txt" "$IAMTEST_DIR/T3.txt" | head -20; }
 }
 
-# managed_grants — privileges the managed roles (rr_*, svc_*, iam_svc) hold in the
-# three schemas, their objects and the database, one per line
+# managed_grants — privileges the managed roles (rr_*, svc_*, iam_svc) and, since IAM 2.7,
+# access_svc hold in the three schemas, their objects and the database, one per line
+# (access_svc's CONNECT, which access_db.sql grants, apart)
 managed_grants() {
     fx medcea_db -q -tA -c "
       WITH o AS (
@@ -295,7 +365,8 @@ managed_grants() {
         UNION ALL SELECT d.datacl, 'database ' || d.datname FROM pg_database d WHERE d.datname = current_database())
       SELECT r.rolname || ' ' || x.privilege_type || ' ' || o.obj
         FROM o CROSS JOIN LATERAL aclexplode(o.acl) x JOIN pg_roles r ON r.oid = x.grantee
-       WHERE r.rolname ~ '^(rr_|svc_)' OR r.rolname = 'iam_svc' ORDER BY 1"
+       WHERE (r.rolname ~ '^(rr_|svc_)' OR r.rolname IN ('iam_svc', 'access_svc'))
+         AND NOT (r.rolname = 'access_svc' AND o.obj LIKE 'database %') ORDER BY 1"
 }
 
 cmd_fulldown() {
@@ -336,10 +407,36 @@ cmd_fulldown() {
 
 cmd_fresh() {
     step "fresh: an empty database"
+    local flag out rc
     cmd_apply false medcea_fresh
+    # no access component in this database (the role access_svc is cluster-wide and exists)
+    flag="$(dba_iam_flag "$FX_NS" "$FX_POD" medcea_fresh 2>&1)"
+    [[ "$flag" == "--without-iam" ]] && pass fresh "without schema iam the grants are compiled --without-iam" \
+        || fail fresh "dba_iam_flag without schema iam: '${flag}'"
     cmd_apply false medcea_fresh
+    # then the access component (as apps/access/deploy.sh: access_db.sql, one transaction)
+    out="$(access_sql | fx medcea_fresh -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        && pass fresh "access_db.sql on the fresh database" || { echo "$out" | head; fail fresh "access_db.sql on the fresh database"; }
     cmd_apply true medcea_fresh
+    flag="$(dba_iam_flag "$FX_NS" "$FX_POD" medcea_fresh 2>&1)"
+    [[ -z "$flag" ]] && pass fresh "with IAM 2.7's schema iam the grants are compiled with iam" || fail fresh "dba_iam_flag with schema iam: '$flag'"
     snapshot medcea_fresh "$IAMTEST_DIR/F.txt"
+    # the access component before IAM 2.7: schema iam without its functions is refused,
+    # before anything is written (db_apply step 1a)
+    fx postgres -q -c 'DROP DATABASE IF EXISTS medcea_old27 WITH (FORCE);' -c "CREATE DATABASE medcea_old27 ENCODING 'UTF8' TEMPLATE template0;" >/dev/null
+    out="$({ echo "SET log_statement = 'none';"; printf '\\set access_pw %s\n' "$(openssl rand -hex 20)"
+             git show "$PREV27_REV:apps/access/access_db.sql"; } | fx medcea_old27 -q -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        || { echo "$out" | head; fail fresh "$PREV27_REV's access_db.sql on an empty database"; }
+    load_passwords
+    out="$(CEA_DB=medcea_old27 db_apply "$FX_NS" "$FX_POD" false 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q 'run ./apps/access/deploy.sh first' <<<"$out"; then
+        pass fresh "schema iam from $PREV27_REV (no IAM 2.7 functions): db_apply refuses"
+    else
+        fail fresh "db_apply with $PREV27_REV's schema iam: exit $rc, $(grep -m1 -E 'ERROR|access' <<<"$out")"
+    fi
+    out="$(fx medcea_old27 -q -tA -c "SELECT to_regnamespace('medcea') IS NULL")"
+    [[ "$out" == t ]] && pass fresh "the refusal wrote nothing (no schema medcea)" || fail fresh "the refused db_apply created schema medcea"
+    fx postgres -q -c 'DROP DATABASE IF EXISTS medcea_old27 WITH (FORCE);' >/dev/null
     local f got
     for f in 'medcea.retire_schedule(integer)' 'medcea._check_run_params(integer,integer,integer,integer)'; do
         if ! grep -q "${f%%(*}" apps/database/medcea_db_migrations.sql || ! grep -q 'retire_schedule' apps/database/medcea_db_migrations.sql; then
@@ -360,10 +457,103 @@ cmd_fresh() {
         || { fail fresh "fresh vs upgraded:"; sed 's/^/        /' <<<"$left" | head -40; }
 }
 
+# apps/access/uninstall.sh --purge-data with a unit still assigned, then the database
+# and access deploys again (IAM 2.7, spec 7.2 step 3)
+cmd_purge_access() {
+    step "purge-access: access --purge-data with a unit assigned, then both deploys"
+    local out n flag
+    # medcea_fresh (step fresh) holds grants of access_svc, which DROP ROLE would refuse
+    fx postgres -q -c 'DROP DATABASE IF EXISTS medcea_fresh WITH (FORCE);' >/dev/null
+    # one assignment, committed, as apps/iam/units.sh makes it (--by an admin account)
+    out="$(fx "$CEA_DB" -q -1 -tA -v ON_ERROR_STOP=1 -f - 2>&1 <<SQL
+SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \\gset
+\\set assign true
+\\set sub '11111111-1111-4111-8111-1111111127a7'
+\\set username test-purge
+\\set person p-purge
+\\set units :uid
+\\set reason 'iam-db-fixture purge-access'
+\\set by_sub '77777777-7777-4777-8777-7777777727a7'
+\\set by_person p-ad-purge
+\\set by_name test-ad-purge
+$(cat apps/iam/units.sql)
+SQL
+)" || { echo "$out" | head; fail purge-access "units.sql assign"; return; }
+    # what uninstall.sh --purge-data runs
+    out="$(fx "$CEA_DB" -q -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS iam CASCADE;" \
+              -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'access_svc') THEN DROP OWNED BY access_svc; END IF; END \$\$;" 2>&1 \
+           && fx postgres -q -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS access_svc;" 2>&1)" \
+        || { echo "$out" | head; fail purge-access "the purge"; return; }
+    n="$(fx "$CEA_DB" -q -tA -c "SELECT count(*) FROM iam_policy.user_unit")"
+    [[ "$n" -ge 1 ]] && pass purge-access "$n unit assignment(s) survive the purge" || fail purge-access "no assignment survived: $n"
+    flag="$(dba_iam_flag "$FX_NS" "$FX_POD" "$CEA_DB" 2>&1)"
+    [[ "$flag" == "--without-iam" ]] && pass purge-access "after the purge: --without-iam" || fail purge-access "dba_iam_flag after the purge: '$flag'"
+    cmd_apply false
+    # the access deploy: access_db.sql, then the backfill
+    out="$(access_sql | fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        && pass purge-access "access_db.sql after the purge" || { echo "$out" | head; fail purge-access "access_db.sql after the purge"; return; }
+    out="$(fx "$CEA_DB" -q -1 -tA -v ON_ERROR_STOP=1 -f - < apps/access/unit_backfill.sql 2>&1)" \
+        || { echo "$out" | head; fail purge-access "unit_backfill.sql"; return; }
+    [[ "$(grep -c '^backfilled|' <<<"$out")" == "$n" ]] && pass purge-access "unit_backfill.sql recorded $n decision(s)" \
+        || fail purge-access "unit_backfill.sql printed $(grep -c '^backfilled|' <<<"$out") line(s) for $n assignment(s)"
+    out="$(fx "$CEA_DB" -q -tA -c "SELECT count(*) FROM iam_policy.user_unit uu WHERE NOT EXISTS (
+              SELECT 1 FROM iam.account_decision d WHERE d.keycloak_user_id = uu.person_sub::text AND d.unit_id = uu.unit_id
+                 AND d.kind = 'unit_assign' AND d.status = 'pending_qa' AND d.made_by_sub IS NULL AND d.subject_person IS NULL
+                 AND d.made_by_name = 'system:deploy (backfill)')")"
+    [[ "$out" == 0 ]] && pass purge-access "every surviving assignment has a pending_qa bootstrap decision" \
+        || fail purge-access "$out assignment(s) without their backfilled decision"
+    out="$(fx "$CEA_DB" -q -1 -tA -v ON_ERROR_STOP=1 -f - < apps/access/unit_backfill.sql 2>&1)"
+    grep -q '^backfilled|' <<<"$out" && fail purge-access "a second backfill recorded again" || pass purge-access "a second backfill records nothing"
+    cmd_apply true
+}
+
+# IAM 2.7's rollback (spec 7.4 steps 2-3) with a mail_settings decision committed
+cmd_rollback27() {
+    step "rollback-27: apps/access/rollback-2.7.sql, then $PREV27_REV's access_db.sql"
+    local out left
+    [[ -f apps/access/rollback-2.7.sql ]] || { fail rollback-27 "apps/access/rollback-2.7.sql is not in this tree"; return; }
+    out="$(fx "$CEA_DB" -q -1 -tA -v ON_ERROR_STOP=1 -f - 2>&1 <<'SQL'
+SET SESSION AUTHORIZATION access_svc;
+SELECT medcea_auth.set_actor('77777777-7777-4777-8777-7777777727a8', 'p-ad-rollback', 'test-ad-rollback', 'admin') \g /dev/null
+SELECT decision_id AS d FROM iam.record_decision('mail_settings', NULL, NULL, NULL, NULL, NULL, NULL, 'iam-db-fixture rollback-27', NULL) \gset
+INSERT INTO iam.mail_settings_pending (smtp_user, smtp_pass, decision_id) VALUES ('iamt@example.invalid', 'x', :d);
+SQL
+)" && pass rollback-27 "a mail_settings decision committed" || { echo "$out" | head; fail rollback-27 "the mail_settings decision"; return; }
+    out="$(fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - < apps/access/rollback-2.7.sql 2>&1)" \
+        && pass rollback-27 "rollback-2.7.sql" || { echo "$out" | grep -E 'ERROR|DETAIL' | head; fail rollback-27 "rollback-2.7.sql"; return; }
+    out="$({ echo "SET log_statement = 'none';"; printf '\\set access_pw %s\n' "$(openssl rand -hex 20)"
+             git show "$PREV27_REV:apps/access/access_db.sql"; } | fx "$CEA_DB" -q -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        && pass rollback-27 "$PREV27_REV's access_db.sql applies after it" || { echo "$out" | grep -E 'ERROR|DETAIL' | head; fail rollback-27 "$PREV27_REV's access_db.sql"; }
+    left="$(fx "$CEA_DB" -q -tA -c "
+      WITH o AS (
+        SELECT c.relacl AS acl, c.oid::regclass::text AS obj, c.relnamespace AS ns FROM pg_class c
+        UNION ALL SELECT p.proacl, p.oid::regprocedure::text, p.pronamespace FROM pg_proc p
+        UNION ALL SELECT n.nspacl, 'schema ' || n.nspname, n.oid FROM pg_namespace n)
+      SELECT r.rolname || ' ' || x.privilege_type || ' ' || o.obj
+        FROM o CROSS JOIN LATERAL aclexplode(o.acl) x JOIN pg_roles r ON r.oid = x.grantee
+       WHERE (r.rolname = 'access_svc' AND o.ns::regnamespace::text IN ('medcea', 'medcea_auth', 'iam_policy'))
+          OR ((r.rolname ~ '^(rr_|svc_)' OR r.rolname = 'iam_svc') AND o.ns = to_regnamespace('iam'))
+       ORDER BY 1")"
+    [[ -z "$left" ]] && pass rollback-27 "access_svc holds nothing outside iam, the managed roles nothing in iam" \
+        || { fail rollback-27 "still held after the rollback:"; sed 's/^/        /' <<<"$left" | head -20; }
+    out="$(fx "$CEA_DB" -q -tA -c "SELECT count(*) FROM iam.account_decision WHERE kind = 'mail_settings'" 2>&1)"
+    [[ "$out" == 0 ]] && pass rollback-27 "the mail_settings decision is parked (not in iam.account_decision)" \
+        || fail rollback-27 "iam.account_decision still holds $out mail_settings decision(s)"
+    # and forward again: this tree's access_db.sql brings the parked rows back
+    out="$(access_sql | fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        && pass rollback-27 "this tree's access_db.sql applies after the rollback" || { echo "$out" | grep -E 'ERROR|DETAIL' | head; fail rollback-27 "access_db.sql after the rollback"; return; }
+    out="$(fx "$CEA_DB" -q -tA -c "SELECT (SELECT count(*) FROM iam.account_decision WHERE kind = 'mail_settings' AND status = 'pending_qa')
+                                    || '|' || (SELECT count(*) FROM iam.mail_settings_pending)
+                                    || '|' || (to_regnamespace('iam_retired_27') IS NULL)" 2>&1)"
+    [[ "$out" == "1|1|true" ]] && pass rollback-27 "the parked decision and its staged settings are back; iam_retired_27 is gone" \
+        || fail rollback-27 "after re-applying access_db.sql: decisions|staged|retired schema gone = $out (want 1|1|true)"
+}
+
 cmd_purge() {
     step "purge"
     local roles out
-    fx postgres -q -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS medcea_db WITH (FORCE);' -c 'DROP DATABASE IF EXISTS medcea_fresh WITH (FORCE);' >/dev/null
+    fx postgres -q -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS medcea_db WITH (FORCE);' -c 'DROP DATABASE IF EXISTS medcea_fresh WITH (FORCE);' \
+        -c 'DROP DATABASE IF EXISTS medcea_old27 WITH (FORCE);' >/dev/null
     fx postgres -q -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'access_svc') THEN DROP ROLE access_svc; END IF; END \$\$;" >/dev/null
     roles="$(python3 "$CLI" db-roles --names | paste -sd, -),medcea_owner,authenticator,anon"
     out="$({ printf "\\\\set roles '%s'\n" "$roles"; cat apps/database/purge.sql; } | fx postgres -q -v ON_ERROR_STOP=1 2>&1)" \
@@ -533,6 +723,9 @@ case "$1" in
     up) cmd_up ;;
     load) cmd_load ;;
     apply) cmd_apply "${2:?apply false|true}" "${3:-medcea_db}" ;;
+    access) cmd_access "${2:?access false|true}" ;;
+    purge-access) cmd_purge_access ;;
+    rollback-27) cmd_rollback27 ;;
     logins) cmd_logins "${2:?logins false|true}" ;;
     preflight) cmd_preflight ;;
     postgrest) cmd_postgrest "${2:?postgrest false|true}" ;;
@@ -550,15 +743,17 @@ case "$1" in
         [[ "$KEEP" == true ]] || trap cmd_down EXIT
         cmd_up; cmd_load; cmd_runner legacy
         cmd_preflight
-        cmd_apply false; probes false; cmd_logins false; cmd_preflight
+        cmd_apply false; probes false; cmd_access false; cmd_logins false; cmd_preflight
         cmd_postgrest false; cmd_runner false; cmd_pgrst_flip
         cmd_services
-        cmd_apply true; probes true; cmd_logins true; cmd_preflight
+        cmd_apply true; probes true; cmd_access true; cmd_logins true; cmd_preflight
         cmd_postgrest true; cmd_runner true
         cmd_apply false; probes false
         cmd_cycle
         cmd_fulldown
         cmd_fresh
+        cmd_purge_access
+        cmd_rollback27
         cmd_serverlog
         cmd_purge
         ;;

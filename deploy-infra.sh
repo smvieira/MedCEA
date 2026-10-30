@@ -408,10 +408,19 @@ if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile rou
     IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
     _IAM_DIR="$(mktemp -d)"
     printf '%s\n' "$IAM_ROUTES_JSON" > "$_IAM_DIR/routes.json"
-    ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" python3 -c '
-import json, os
-print(json.dumps({"issuer": os.environ["ISSUER"], "audience": "medcea-api",
-                  "enforce": os.environ["ENFORCE"] == "true"}, sort_keys=True))' > "$_IAM_DIR/settings.json"
+    # switches: the other IAM flags as this run set them, with the time, for the
+    # quarterly access review's record (IAM 2.7) — labelled there "as of
+    # deploy-infra <written_at>", since only enforce is read live from this file.
+    ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" \
+    SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" python3 -c '
+import datetime, json, os
+e = os.environ
+print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
+                  "enforce": e["ENFORCE"] == "true",
+                  "switches": {"IAM_GATES": e["SW_GATES"] != "false", "IAM_NETPOL": e["SW_NETPOL"] != "false",
+                               "IAM_POSTGREST_JWT": e["SW_JWT"] == "true",
+                               "written_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}},
+                 sort_keys=True))' > "$_IAM_DIR/settings.json"
     chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
     $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
         --from-file=routes.json="$_IAM_DIR/routes.json" \
@@ -877,6 +886,8 @@ if [[ -n "$_ACCESS_UUID" ]]; then
     # view-users/query-users: duplicate checks and the admin e-mail list.
     # manage-realm: the User Manager's e-mail settings also become the realm's
     # SMTP server, so Keycloak's "Forgot password?" mail uses the same account.
+    # view-events: each account's last login in the quarterly access review
+    # (GET /events?type=LOGIN, IAM 2.7).
     _SA_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_ACCESS_UUID}/service-account-user" \
       -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
     _RM_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=realm-management" \
@@ -884,7 +895,7 @@ if [[ -n "$_ACCESS_UUID" ]]; then
     _RM_ROLES=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RM_UUID}/roles" \
       -H "Authorization: Bearer $(_kc_token)" | python3 -c "
 import sys, json
-print(json.dumps([r for r in json.load(sys.stdin) if r['name'] in ('manage-users', 'view-users', 'query-users', 'manage-realm')]))" 2>/dev/null || echo "")
+print(json.dumps([r for r in json.load(sys.stdin) if r['name'] in ('manage-users', 'view-users', 'query-users', 'manage-realm', 'view-events')]))" 2>/dev/null || echo "")
     if [[ -n "$_SA_ID" && -n "$_RM_UUID" && "$_RM_ROLES" == \[*\] ]]; then
         curl -s -o /dev/null -X POST \
           "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_SA_ID}/role-mappings/clients/${_RM_UUID}" \
@@ -1006,9 +1017,14 @@ _GF_ADMIN_EMAIL=$(_demo_email "$_GF_ADMIN_USER")
 [[ "$_GF_ADMIN_USER" == "$ADMIN_USER" ]] && _GF_ADMIN_EMAIL="$ADMIN_EMAIL"
 
 echo -e "${YELLOW}  Creating Grafana users...${NC}"
+# _*_NEW: whether this run created the account; only a new account gets its
+# platform role below (IAM 2.7: a role change is an account decision).
 _create_kc_user "$_GF_ADMIN_USER" "Platform" "Admin"     "$_GF_ADMIN_EMAIL"                 "$_GF_ADMIN_PASS"
+_GF_ADMIN_NEW=$_KC_CREATED
 _create_kc_user "$_GF_DEV_USER"   "Platform" "Developer" "$(_demo_email "$_GF_DEV_USER")"   "$_GF_DEV_PASS"
+_GF_DEV_NEW=$_KC_CREATED
 _create_kc_user "$_GF_VIEW_USER"  "Platform" "Viewer"    "$(_demo_email "$_GF_VIEW_USER")"  "$_GF_VIEW_PASS"
+_GF_VIEW_NEW=$_KC_CREATED
 
 echo -e "${YELLOW}  Assigning roles to Grafana users...${NC}"
 _assign_realm_role "$_GF_ADMIN_USER" "grafana_admin"
@@ -1019,9 +1035,11 @@ _assign_realm_role "$_GF_VIEW_USER"  "grafana_viewer"
 # ADMIN_USER. It only existed in the realm because ADMIN_USER defaults to
 # "admin" = GRAFANA_ADMIN_USER; with any other name the documented login did
 # not exist. Create it explicitly unless it is the same user.
+_ADMIN_NEW=$_GF_ADMIN_NEW
 if [[ "$ADMIN_USER" != "$_GF_ADMIN_USER" ]]; then
     echo -e "${YELLOW}  Creating platform admin user '$ADMIN_USER'...${NC}"
     _create_kc_user "$ADMIN_USER" "Platform" "Administrator" "$ADMIN_EMAIL" "$ADMIN_PASS"
+    _ADMIN_NEW=$_KC_CREATED
     _assign_realm_role "$ADMIN_USER" "grafana_admin"
 fi
 
@@ -1036,7 +1054,8 @@ _set_kc_email "$_GF_VIEW_USER" "$(_demo_email "$_GF_VIEW_USER")" "@cea.com"
 # --- Platform realm roles (apps/iam/policy/defaults.yaml) ---
 # The eleven roles of the access policy; the host gates are compiled from it
 # (policy_groups). People get a role through an access request (apps/access); the
-# built-in users get one here so the gate never locks them out. Two composites
+# built-in users get one here when this run creates them, so the gate never locks
+# them out. Two composites
 # make the groups claim carry inherited roles: production_manager contains
 # operator, qa contains auditor (the policy's roles.*.includes).
 echo -e "${YELLOW}  Creating the eleven platform roles and their composites...${NC}"
@@ -1052,10 +1071,38 @@ _add_composite() {
 }
 _add_composite production_manager operator
 _add_composite qa auditor
-_assign_realm_role "$ADMIN_USER"     "admin"
-_assign_realm_role "$_GF_ADMIN_USER" "admin"
-_assign_realm_role "$_GF_DEV_USER"   "operator"
-_assign_realm_role "$_GF_VIEW_USER"  "auditor"
+# Only to an account this run created (IAM 2.7). Every later change of a platform
+# role is an account decision in the User Manager, which a qa person confirms when
+# it widens: re-granting on every run would silently undo an applied narrowing,
+# with no decision, and could leave an account with two platform roles.
+[[ "$_ADMIN_NEW" == 1 ]] && _assign_realm_role "$ADMIN_USER" "admin"
+if [[ "$_GF_ADMIN_NEW" == 1 && "$_GF_ADMIN_USER" != "$ADMIN_USER" ]]; then _assign_realm_role "$_GF_ADMIN_USER" "admin"; fi
+[[ "$_GF_DEV_NEW" == 1 ]] && _assign_realm_role "$_GF_DEV_USER" "operator"
+[[ "$_GF_VIEW_NEW" == 1 ]] && _assign_realm_role "$_GF_VIEW_USER" "auditor"
+
+# _enabled_holders ROLE → how many enabled accounts hold realm role ROLE directly
+# (qa and admin are no other role's composite children); empty when unreadable.
+_enabled_holders() {
+    curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/roles/$1/users?briefRepresentation=true&max=2000" \
+      -H "Authorization: Bearer $(_kc_token)" \
+      | python3 -c 'import json, sys; print(sum(1 for u in json.load(sys.stdin) if u.get("enabled")))' 2>/dev/null || true
+}
+# Break-glass: no enabled account holds admin, so nobody can open the User Manager
+# to fix it. ADMIN_USER gets admin back, outside the account decisions: the qa
+# screen's drift banner shows the mapping until a qa person has seen it.
+_N_ADMINS="$(_enabled_holders admin)"
+if [[ "$_N_ADMINS" == 0 ]]; then
+    echo -e "${RED}  BREAK-GLASS: no enabled account holds realm role admin. Granting admin to '$ADMIN_USER'${NC}" >&2
+    echo -e "${RED}  outside the account decisions; the User Manager's Decisions tab reports it as drift until qa sees it.${NC}" >&2
+    _assign_realm_role "$ADMIN_USER" "admin" || true
+    _ADMIN_ENABLED="$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users?username=${ADMIN_USER}&exact=true" \
+        -H "Authorization: Bearer $(_kc_token)" \
+        | python3 -c 'import json, sys; d = json.load(sys.stdin); print(str(bool(d and d[0].get("enabled"))).lower())' 2>/dev/null || echo unknown)"
+    [[ "$_ADMIN_ENABLED" == true ]] \
+        || echo -e "${RED}  '$ADMIN_USER' is disabled: enable it in the Keycloak console ($KC_BREAKGLASS_USER, realm $KEYCLOAK_REALM) and record why.${NC}" >&2
+elif [[ -z "$_N_ADMINS" ]]; then
+    echo -e "${YELLOW}  Could not count the enabled admin accounts; the admin break-glass was not checked.${NC}" >&2
+fi
 
 # The first qa person and the first engineer (infra/configure.sh asks for both).
 # Every account grant and every policy change is confirmed by a qa person who is
@@ -1077,6 +1124,15 @@ _seed_person() {   # USER EMAIL PASSWORD ROLE LABEL
 echo -e "${YELLOW}  Ensuring the first qa person and the first engineer...${NC}"
 _seed_person "${QA_USER:-}"       "${QA_EMAIL:-}"       "${QA_INITIAL_PASS:-}"       qa       "Quality Assurance"
 _seed_person "${ENGINEER_USER:-}" "${ENGINEER_EMAIL:-}" "${ENGINEER_INITIAL_PASS:-}" engineer "Automation Engineer"
+# No enabled qa person: every account decision that waits for qa — the grant of a
+# new qa person included — can never be confirmed (IAM 2.7). Break-glass is a new
+# QA_USER (a person who never held an account here) and another run of this
+# script: _seed_person above then creates it with role qa, outside the account
+# decisions (the drift banner shows it; record it in the operations log).
+if [[ "$(_enabled_holders qa)" == 0 ]]; then
+    echo -e "${RED}  No enabled account holds realm role qa: no account decision can be confirmed.${NC}" >&2
+    echo -e "${RED}  Break-glass: set QA_USER and QA_EMAIL in config.env to a new person and run ./deploy-infra.sh again.${NC}" >&2
+fi
 
 # "organisation" as a declared user-profile attribute: Keycloak 26 drops any
 # attribute the realm's user profile does not declare, so without this the
@@ -1107,23 +1163,26 @@ if [[ -n "$_UP_JSON" ]]; then
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_UP_JSON" || true
 fi
 
-# Every account without a person_id gets its own id, so no two accounts share a
-# person by accident; linking two accounts of one person is an admin decision
-# confirmed by qa (apps/access). Read-modify-write: a partial PUT would drop the
-# rest of the representation. Service-account users are skipped.
-echo -e "${YELLOW}  Setting person_id on accounts that have none...${NC}"
+# Every enabled account without a person_id gets its own id, so no two accounts
+# share a person by accident; linking two accounts of one person is an admin
+# decision confirmed by qa (apps/access). The IAM Phase 0.2 bootstrap: disabled
+# accounts are left alone, because a registrant gets person_id = its id when qa
+# confirms its grant, and that confirmation must be the only writer while the
+# account waits (this loop holds no database lock). Read-modify-write: a partial
+# PUT would drop the rest of the representation. Service-account users are skipped.
+echo -e "${YELLOW}  Setting person_id on enabled accounts that have none...${NC}"
 _PID_N=0
 for _uid in $(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users?max=10000&briefRepresentation=true" \
         -H "Authorization: Bearer $(_kc_token)" | python3 -c '
 import json, sys
 for u in json.load(sys.stdin):
-    if not u["username"].startswith("service-account-"):
+    if u.get("enabled") and not u["username"].startswith("service-account-"):
         print(u["id"])' 2>/dev/null); do
     _U_JSON=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_uid}" -H "Authorization: Bearer $(_kc_token)" | python3 -c '
 import json, sys
 u = json.load(sys.stdin)
 attrs = u.get("attributes") or {}
-if attrs.get("person_id"):
+if attrs.get("person_id") or not u.get("enabled"):
     sys.exit(0)
 attrs["person_id"] = [u["id"]]
 u["attributes"] = attrs
@@ -1821,7 +1880,7 @@ echo -e "  Keycloak:        https://$KEYCLOAK_DOMAIN/admin   (break-glass only)"
 echo -e "    Login:         $KC_BREAKGLASS_USER   (realm master; password in the credentials file)"
 echo -e "    Realm:         $KEYCLOAK_REALM  (all SSO users managed here)"
 echo -e "    User portal:   https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/account"
-echo -e "  User Manager:    https://$ACCESS_DOMAIN   (access requests — role admin; ./deploy-apps.sh installs it)"
+echo -e "  User Manager:    https://$ACCESS_DOMAIN   (requests and users: admin; decisions and review: qa; ./deploy-apps.sh installs it)"
 echo -e "    Register:      https://$ACCESS_DOMAIN/register   (the portal sign-in page links here)"
 echo -e "    Portal gate:   realm roles operator / qa / auditor / admin"
 echo ""

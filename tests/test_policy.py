@@ -133,6 +133,10 @@ MUTATIONS = {
     "service without a password": (lambda d: d["service_identities"]["svc_monitor"].pop("db_password"), "db_password"),
     "one function under two spellings": (_append(["resource_groups", "recipes", "members"],
                                                  {"type": "data", "function": "medcea.start_run(integer)", "level": "O"}), "I14"),
+    # IAM 2.7: a K function member compiles EXECUTE for admin (and pgAdmin's login) unless service_only
+    "K function member without service_only": (
+        _with_member("iam_users", "function", "iam.withdraw_decision(int, text)", lambda m: m.pop("service_only")),
+        "at level K needs service_only"),
 }
 
 
@@ -148,7 +152,7 @@ class PolicyTest(unittest.TestCase):
     def test_counts(self):
         p = self.policy
         self.assertEqual(len(p.roles), 11)
-        self.assertEqual(len(p.groups), 25)
+        self.assertEqual(len(p.groups), 26)
 
     def test_mutations_are_caught(self):
         for name, (mutate, expected) in MUTATIONS.items():
@@ -169,6 +173,7 @@ class PolicyTest(unittest.TestCase):
         self.assertNotIn("admin", proxies.admitted(p, "MONITOR_DOMAIN"))       # I2 through tools
         self.assertNotIn("admin", proxies.admitted(p, "NODE_RED_DOMAIN"))
         self.assertNotIn("operator", proxies.admitted(p, "GRAFANA_DOMAIN"))    # own_unit
+        self.assertEqual(proxies.admitted(p, "ACCESS_DOMAIN"), ["admin", "auditor", "qa", "qp"])
         for host in p.hosts:
             self.assertTrue(proxies.admitted(p, host), f"{host} admits nobody")
 
@@ -225,6 +230,37 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.doc["services"]["access"]["routes"]["POST /api/decisions/<id>/confirm"]["roles"],
                          {"qa": ["not_own_author"]})
 
+    def test_access_host_compiled(self):
+        # IAM 2.7: ACCESS_DOMAIN is compiled; GET / and /api/me (group user_manager) open the
+        # page to every role the gate admits, each seeing the tabs its routes allow
+        self.assertEqual(proxies.ENFORCEMENT["ACCESS_DOMAIN"], "compiled")
+        admitted = proxies.admitted(self.policy, "ACCESS_DOMAIN")
+        self.assertEqual(admitted, ["admin", "auditor", "qa", "qp"])
+        access = self.doc["services"]["access"]["routes"]
+        for r in ("GET /", "GET /api/me"):
+            self.assertEqual(access[r]["group"], "user_manager", r)
+            self.assertEqual(sorted(access[r]["roles"]), admitted, r)
+        for r, level in (("POST /api/decisions/<id>/refuse", ["A"]), ("POST /api/decisions/<id>/review", ["A"]),
+                         ("POST /api/decisions/<id>/withdraw", ["K"])):
+            self.assertEqual((access[r]["group"], access[r]["levels"]), ("iam_users", level), r)
+        self.assertEqual(access["POST /api/decisions/<id>/withdraw"]["roles"], {"admin": ["qa_dual_control"]})
+        self.assertEqual(access["POST /api/review"]["roles"], {"qa": None})
+        self.assertEqual(sorted(access["GET /api/review/<id>"]["roles"]), ["auditor", "qa", "qp"])
+        self.assertNotIn("admin", access["GET /api/config-history"]["roles"])      # I2 (Q4)
+
+    def test_routes_widening_table(self):
+        p = self.policy
+        w = self.doc["widening"]
+        for old in [None] + sorted(p.roles):
+            for new in sorted(p.roles):
+                want = [[g, l] for g, l in p.widening(old, new)]
+                self.assertEqual(w.get("-" if old is None else old, {}).get(new, []), want, (old, new))
+        for row in w.values():
+            self.assertTrue(row and all(row.values()), "empty entries are left out")
+        self.assertEqual(self.doc["waivers"], [
+            {"id": x["id"], "invariant": x["invariant"], "subject": x["subject"], "target": x["target"],
+             "levels": x["levels"], "review": x["review_by"]} for x in p.waivers])
+
     def test_role_includes_and_scheduler_routes_2_4(self):
         # medcea_iam.actor_role() reads role_includes: the database's _own_role() rule
         inc = self.doc["role_includes"]
@@ -253,6 +289,94 @@ class RoutesTest(unittest.TestCase):
         clash["public_routes"].append({"service": "scheduler", "route": "GET /api/runs", "why": "x"})
         with self.assertRaisesRegex(routes.RouteError, "public and in group runs"):
             routes.compile(model.Policy(clash))
+
+
+class WideningTest(unittest.TestCase):
+    """model.Policy.widening (qa_dual_control, IAM 2.7) and its two compiled copies."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+
+    def test_widening_values(self):
+        p = self.policy
+        w = p.widening("operator", "production_manager")
+        self.assertEqual(len(w), 12)
+        # operator held runs R under own_unit and O under assigned_run; production_manager holds both free
+        self.assertIn(("runs", "R"), w)
+        self.assertIn(("runs", "O"), w)
+        self.assertEqual(p.widening("production_manager", "operator"), [])
+        self.assertEqual(p.widening("qa", "auditor"), [])
+        self.assertEqual(p.widening("engineer", "maintenance"), [])
+        self.assertEqual(len(p.widening("auditor", "qa")), 11)
+        self.assertEqual(len(p.widening(None, "operator")), 9)
+        for r in p.roles:
+            self.assertEqual(p.widening(r, r), [], r)
+        self.assertEqual(p.holds(None), {})
+        h = p.holds("operator")
+        self.assertEqual(h[("runs", "R")], frozenset({"own_unit"}))
+        self.assertEqual(h[("portal", "R")], "free")
+
+    def test_widening_constraint_rules(self):
+        d = copy.deepcopy(self.policy.data)
+        # more alternative constraints OR together: wider; a subset is not
+        # (schedules: no tool reaches it, and a reached level counts as free)
+        d["matrix"]["schedules"]["maintenance"] = {"levels": ["R"], "constraint": "commissioning_unit"}
+        d["matrix"]["schedules"]["qc"] = {"levels": ["R"], "constraint": "own_unit"}
+        d["matrix"]["schedules"]["qp"] = {"levels": ["R"], "constraint": {"R": "own_unit"}}
+        q = model.Policy(d)
+        self.assertIn(("schedules", "R"), q.widening("qc", "maintenance"))       # another constraint
+        self.assertIn(("schedules", "R"), q.widening("qc", "engineer"))          # constrained -> free
+        self.assertNotIn(("schedules", "R"), q.widening("engineer", "qc"))       # free -> constrained
+        self.assertNotIn(("schedules", "R"), q.widening("qc", "qp"))             # the same constraint
+        # a role holding both alternatives (composite) is wider than one holding either
+        q.roles["qc"] = dict(q.roles["qc"], includes=["maintenance"])
+        self.assertIn(("schedules", "R"), q.widening("maintenance", "qc"))
+        self.assertNotIn(("schedules", "R"), q.widening("qc", "maintenance"))
+
+    def _compiled_rows(self, sql):
+        body = re.search(r"FUNCTION medcea_auth\.role_widening\(p_old text, p_new text\).*?\(VALUES\s*(.*?)\n\s*\) t\(o, n, g, l\)",
+                         sql, re.S)
+        self.assertIsNotNone(body, "role_widening's VALUES")
+        rows = set()
+        for m in re.finditer(r"\((NULL|'[a-z_]+'), '([a-z_]+)', '([a-z_]+)', '([A-Z])'\)", body.group(1)):
+            rows.add((None if m.group(1) == "NULL" else m.group(1).strip("'"), m.group(2), m.group(3), m.group(4)))
+        return rows
+
+    def test_widening_compiled_matches_model(self):
+        p = self.policy
+        rows = self._compiled_rows(grants.compiled_functions(p))
+        want = {(old, new, g, l) for old in [None] + list(p.roles) for new in p.roles for g, l in p.widening(old, new)}
+        self.assertEqual(rows, want)
+
+    def test_role_widening_digest(self):
+        doc = routes.compile(self.policy)
+        fn = grants.compiled_functions(self.policy)
+        self.assertIn(f"COMMENT ON FUNCTION medcea_auth.role_widening(text, text) IS 'policy {doc['digest']}';", fn)
+        # verify (health-check iamgrants, tests/iam-schema.sh) compares the comment
+        self.assertIn(f"'policy {doc['digest']}'", grants.sql(self.policy, "verify"))
+        # a policy file given by name changes the route table's source, so both follow it
+        other = routes.compile(self.policy, "v7.yaml")["digest"]
+        self.assertIn(f"'policy {other}'", grants.sql(self.policy, "verify", source="v7.yaml"))
+
+    def test_role_widening_stub_raises(self):
+        # compiled: 22023 on a NULL or unknown new role and on an unknown old role
+        fn = grants.compiled_functions(self.policy)
+        body = fn[fn.index("FUNCTION medcea_auth.role_widening"):]
+        body = body[:body.index("$w$;")]
+        self.assertRegex(body, r"IF p_new IS NULL OR NOT \(p_new = ANY .*\(p_old IS NOT NULL AND NOT \(p_old = ANY ")
+        self.assertIn("ERRCODE = '22023'", body)
+        self.assertIn("IMMUTABLE SET search_path = pg_catalog", body)
+        self.assertIn("ALTER FUNCTION medcea_auth.role_widening(text, text) OWNER TO medcea_owner;", fn)
+        self.assertIn("REVOKE ALL ON FUNCTION medcea_auth.role_widening(text, text) FROM PUBLIC;", fn)
+        # the migrations' stub raises (never '[]': an uncompiled database must not say "narrowing")
+        with open(os.path.join(REPO, "apps", "database", "medcea_db_migrations.sql")) as f:
+            mig = f.read()
+        m = re.search(r"FUNCTION medcea_auth\.role_widening\s*\((.*?)\$[a-z_]*\$\s*;", mig, re.S)
+        self.assertIsNotNone(m, "the migrations define no role_widening stub")
+        self.assertIn("not compiled", m.group(1))
+        self.assertRegex(m.group(1), r"RAISE EXCEPTION")
+        self.assertNotIn("'[]'", m.group(1))
 
 
 class NetpolTest(unittest.TestCase):
@@ -350,20 +474,86 @@ class GrantsTest(unittest.TestCase):
         self.assertEqual(self.holders("medcea_auth.my_zones()"), {"rr_operator"})
         self.assertEqual(self.holders("medcea_auth.my_units()"), {"rr_operator"})
         self.assertEqual(self.holders("iam_policy.user_unit"),
-                         {"iam_svc", "rr_auditor", "rr_qa", "svc_dbexport", "svc_monitor", "svc_scheduler"})
+                         {"access_svc", "iam_svc", "rr_auditor", "rr_qa", "svc_dbexport", "svc_monitor", "svc_scheduler"})
         self.assertEqual(self.holders("medcea.release_run(integer)"), {"rr_qp"})
         self.assertEqual(self.holders("medcea.approve_change(text,bigint,text)"), {"rr_qa"})
         self.assertEqual(self.holders("iam_policy.append_history(text,jsonb,text)"), {"iam_svc"})
         self.assertEqual(self.holders("iam_policy.log_export(text[],text[])"), {"svc_dbexport"})
         for g, k, o, p in self.privs:
             self.assertNotIn(p, grants.NEVER, (g, o))
-            self.assertFalse(o.startswith("iam."), f"schema iam is deferred to 2.7: {o}")
-            self.assertNotEqual(g, "access_svc", "access_svc is deferred to 2.7")
-            self.assertTrue(g in grants.managed(self.policy) or g in ("anon", "mqtt_auth"), g)
+            self.assertTrue(g in grants.managed(self.policy) or g in ("anon", "mqtt_auth", "access_svc"), g)
         # nothing for people on a service_only member
         for g, k, o, p in self.privs:
             if o in ("medcea.mqtt_credential", "medcea.backup_remote_to_insert_measurement"):
                 self.assertFalse(g.startswith("rr_"), (g, o))
+
+    def test_access_2_7(self):
+        # the account decisions and the review: access_svc only (service_only), never rr_qa
+        # through the approval rule, never svc_dbexport/iam_svc through audit_histories C
+        for fn in ("iam.record_decision(text,text,text,text,text,text,text,text,bigint)",
+                   "iam.withdraw_decision(integer,text)", "iam.confirm_decision(integer,text)",
+                   "iam.refuse_decision(integer,text)", "iam.review_decision(integer,text)",
+                   "iam.create_review(jsonb)", "iam.sign_off_review(integer,text)",
+                   "medcea.revoke_person_mqtt(uuid,text)"):
+            self.assertEqual(self.holders(fn), {"access_svc"}, fn)
+        self.assertIn("access_svc", self.holders("medcea_auth.set_actor(text,text,text,text)"))
+        self.assertEqual(self.holders("medcea_auth.role_widening(text,text)"), set())
+        self.assertEqual(self.holders("medcea_auth._account_actor(text,text)"), set())
+        self.assertEqual(self.holders("iam_policy.append_history(text,jsonb,text)"), {"iam_svc"})
+        self.assertFalse({o for g, k, o, p in self.privs if g == "rr_qa" and k == "function" and o.startswith("iam.")})
+        # access_svc reads no MQTT credential: revoke_person_mqtt is an owner definer
+        self.assertNotIn("access_svc", self.holders("medcea.mqtt_service_credential"))
+        # the decision record and the histories are written by the functions only
+        for t in ("iam.account_decision", "iam.user_status_history", "iam.access_request_history",
+                  "iam.config_history", "iam.access_review"):
+            self.assertEqual({p for g, k, o, p in self.privs if o == t}, {"SELECT"}, t)
+        self.assertEqual({p for g, k, o, p in self.privs if g == "access_svc" and o == "iam.mail_settings_pending"},
+                         {"SELECT", "INSERT", "UPDATE"})
+        self.assertIn("access_svc", self.holders("medcea.cea_unit", "SELECT"))            # Q7: unit codes
+        self.assertNotIn("iam_policy.propose_unit(uuid,integer,text)", {o for g, k, o, p in self.privs})
+        self.assertEqual(grants.NOT_BUILT["iam_policy.propose_unit(uuid,integer,text)"], "4.3")
+        for sig in ("iam.confirm_decision(integer,text)", "iam.sign_off_review(integer,text)"):
+            self.assertNotIn(sig, grants.NOT_BUILT)
+
+    def test_no_iam_delete(self):
+        for g, k, o, p in self.privs:
+            if o.startswith("iam.") or o.startswith("iam_policy."):
+                self.assertIn(p, ("SELECT", "INSERT", "UPDATE", "EXECUTE"), (g, o, p))
+        # the access deploy grants nothing itself any more (the compiler does), CONNECT aside
+        sql = self.read("apps/access/access_db.sql")
+        self.assertNotRegex(sql, r"(?m)^\s*GRANT\s+(?!CONNECT\b)[A-Z, ]*\bON\b")
+        self.assertNotRegex(sql, r"(?m)^\s*GRANT\b[^;]*\bDELETE\b")
+
+    def test_sign_off_service_only(self):
+        for fn in ("iam.sign_off_review(integer,text)", "iam.create_review(jsonb)"):
+            self.assertFalse(self.holders(fn) & {"svc_dbexport", "iam_svc", "rr_qa"}, fn)
+
+    def test_without_iam(self):
+        # --without-iam: no iam.* object and no access_svc anywhere, as DEFERRED was
+        priv = grants.privileges(self.policy, without_iam=True)
+        self.assertFalse([x for x in priv if x[2].startswith("iam.") or x[2] == "iam" or x[0] == "access_svc"])
+        self.assertEqual(set(priv), {x for x in self.privs if not (x[2].startswith("iam.") or x[2] == "iam"
+                                                                   or x[0] == "access_svc")})
+        for mode in ("additive", "enforce", "verify"):
+            text = grants.sql(self.policy, mode, without_iam=True)
+            self.assertNotRegex(text, r"(?<![a-z_])iam\.[a-z_]+", mode)
+            self.assertNotIn("access_svc", text, mode)
+            self.assertNotRegex(text, r"IN SCHEMA [a-z_, ]*\biam\b(?!_)", mode)
+            full = grants.sql(self.policy, mode)
+            self.assertIn("access_svc", full, mode)
+            self.assertRegex(full, r"\biam\.account_decision\b", mode)
+        # its I9 still asserts anon and PUBLIC hold nothing in iam
+        enf = grants.sql(self.policy, "enforce", without_iam=True)
+        self.assertIn("I9: anon/PUBLIC hold % in schema iam", enf)
+        self.assertNotIn("I9: anon/PUBLIC hold % in schema iam", grants.sql(self.policy, "enforce"))
+        self.assertIn("medcea, medcea_auth, iam_policy, iam FROM %I", grants.sql(self.policy, "enforce"))
+        self.assertIn("medcea, medcea_auth, iam_policy FROM %I", enf)
+        # access_svc connects and is in the I15 scope in both modes with iam
+        self.assertRegex(grants.sql(self.policy, "enforce"), r"FOREACH g IN ARRAY ARRAY\[[^]]*'access_svc'[^]]*\]::text\[\] LOOP\s+"
+                                                            r"CONTINUE WHEN NOT EXISTS \(SELECT FROM pg_catalog.pg_roles WHERE rolname = g\);\s+"
+                                                            r"EXECUTE pg_catalog.format\('GRANT CONNECT")
+        self.assertNotIn("access_svc", grants.managed(self.policy))
+        self.assertNotIn("access_svc", grants.login_roles(self.policy))
 
     def test_scheduler_2_4(self):
         # DELETE /api/schedules/<id> retires through medcea.retire_schedule (U on schedules)
@@ -448,7 +638,8 @@ class GrantsTest(unittest.TestCase):
             self.assertNotIn(word, ver.replace("NOT INSERT", ""), f"verify must be read-only: {word}")
 
     def test_not_built_is_not_created(self):
-        src = (self.read("apps/database/medcea_db_migrations.sql") + grants.compiled_functions(self.policy))
+        src = (self.read("apps/database/medcea_db_migrations.sql") + self.read("apps/access/access_db.sql")
+               + grants.compiled_functions(self.policy))
         for sig in grants.NOT_BUILT:
             name = sig.split("(")[0]
             self.assertNotRegex(src, rf"FUNCTION {re.escape(name)}\s*\(", sig)
@@ -480,7 +671,8 @@ class GrantsTest(unittest.TestCase):
     def test_every_compiled_function_is_created(self):
         # full signatures, not names: a changed argument list must fail here, not
         # silently drop out of the grant and of I15
-        src = (self.read("apps/database/medcea_db_migrations.sql") + grants.compiled_functions(self.policy))
+        src = (self.read("apps/database/medcea_db_migrations.sql") + self.read("apps/access/access_db.sql")
+               + grants.compiled_functions(self.policy))
         made = self._created_signatures(src)
         for g, k, o, p in self.privs:
             if k == "function":
@@ -567,6 +759,7 @@ class WiringTest(unittest.TestCase):
                                                  ("apps/frontend/deploy.sh", "DBMGMT_DOMAIN"),
                                                  ("apps/monitor/deploy.sh", "MONITOR_DOMAIN"),
                                                  ("apps/scheduler/deploy.sh", "SCHEDULER_DOMAIN")],
+            "apps/access/k8s/oauth2-proxy-values.yaml": [("apps/access/deploy.sh", "ACCESS_DOMAIN")],
         }
         compiled = {h for h, st in proxies.ENFORCEMENT.items() if st == "compiled"}
         self.assertEqual(compiled, {h for v in wiring.values() for _, h in v})
@@ -574,7 +767,10 @@ class WiringTest(unittest.TestCase):
             self.assertIn("allowed_groups = ${ALLOWED_GROUPS}", self.read(template), template)
             for script, host in users:
                 src = self.read(script)
-                self.assertIn(f'ALLOWED_GROUPS="$(policy_groups {host})"', src, f"{script}: {host}")
+                # (the access deploy compiles it before it changes anything, into _COMPILED_GROUPS,
+                # and narrows to ["admin"] until every pod is proven to enforce: spec §4.6)
+                self.assertRegex(src, rf'(?m)^\s*(ALLOWED_GROUPS|_COMPILED_GROUPS)="\$\(policy_groups {host}\)"',
+                                 f"{script}: {host}")
                 # envsubst leaves an unlisted ${VAR} as literal text (lib-render.sh)
                 renders = [l for l in src.splitlines() if os.path.basename(template) in l and "render " in l]
                 self.assertTrue(renders, f"{script} does not render {template}")
@@ -610,7 +806,9 @@ class WiringTest(unittest.TestCase):
         label, roles = proxies.describe(p, "MONITOR_DOMAIN", proxies.admitted(p, "MONITOR_DOMAIN"))
         self.assertEqual(label, "Monitor")
         self.assertEqual(roles, [p.roles[r]["label"] for r in p.roles if r in proxies.admitted(p, "MONITOR_DOMAIN")])
-        self.assertEqual(proxies.describe(p, "ACCESS_DOMAIN", ["admin"])[1], [p.roles["admin"]["label"]])
+        self.assertEqual(proxies.describe(p, "ACCESS_DOMAIN", ["admin"])[1], [p.roles["admin"]["label"]])  # the narrow fallback
+        self.assertEqual(proxies.describe(p, "ACCESS_DOMAIN", proxies.admitted(p, "ACCESS_DOMAIN"))[1],
+                         [p.roles[r]["label"] for r in p.roles if r in ("admin", "auditor", "qa", "qp")])
         with self.assertRaises(KeyError):
             proxies.describe(p, "MONITOR_DOMAIN", ["no_such_role"])
         # the template's variables are the ones gate_error_page renders
@@ -637,7 +835,10 @@ class WiringTest(unittest.TestCase):
             "apps/frontend/k8s/dbmgmt.yaml": ("apps/frontend/html/dbmgmt-api.py", ["http_check(self, 'dbmgmt')"]),
             "apps/frontend/k8s/config-ui.yaml": ("apps/frontend/k8s/recipe-fileserver.yaml", ["http_check(self, 'platform-api')"]),
             "apps/access/k8s/access.yaml": ("apps/access/access-api.py", [
-                "http_check(self, self.IAM_SERVICE)", "IAM_SERVICE = 'access-public'",
+                # IAM 2.7: the admin port enforces whatever IAM_ENFORCE says (spec §5.1),
+                # through medcea_iam.http_check(..., enforce=True)
+                "http_check(self, iam, self.IAM_SERVICE, self.ENFORCE_ALWAYS)", "ENFORCE_ALWAYS = True",
+                "enforce=True", "IAM_SERVICE = 'access-public'",
                 "IAM_SERVICE = 'access'", "IAM_SERVICE = 'access-profile'"]),
         }
         doc = routes.compile(self.policy)
