@@ -67,11 +67,11 @@ ACCESS_VERSION = '2.7'
 # offered from Phase 0 because the policy admits only engineers to Node-RED, MQTT
 # Explorer and device onboarding.
 ROLES = {
-    'operator': 'Operator — runs recipes and day-to-day cultivation',
+    'operator': 'Operator — runs recipes and day-to-day cultivation in the units assigned to them',
     'engineer': 'Automation Engineer — devices, recipes, controllers, flows and dashboards (drafts that QA approves)',
-    'qa':       'Quality Assurance — reviews data and releases batches',
+    'qa':       'Quality Assurance — independently approves recipes, settings, account changes and policy made by someone else',
     'auditor':  'Auditor — read-only access to records and audit trails',
-    'admin':    'Administrator — manages the platform and its users',
+    'admin':    'Administrator — manages the platform and its accounts (QA confirms every grant); no access to production data',
 }
 
 USERNAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{2,31}$')
