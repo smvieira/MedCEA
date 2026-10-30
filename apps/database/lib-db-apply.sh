@@ -79,7 +79,7 @@ dba_iam_flag() {
     _DBA_NS="$1"; _DBA_POD="$2"
     row="$(_dba_psql "$3" -tAq -v ON_ERROR_STOP=1 -F'|' -c "SELECT pg_catalog.to_regnamespace('iam') IS NOT NULL,
                EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'access_svc'),
-               pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL")" \
+               pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL" </dev/null)" \
         || { echo "dba_iam_flag: cannot read schema iam and role access_svc in '$3'" >&2; return 1; }
     IFS='|' read -r s r f <<<"$(tr -d '[:space:]' <<<"$row")"
     if [[ ! "$s|$r|$f" =~ ^[tf]\|[tf]\|[tf]$ ]]; then

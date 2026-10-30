@@ -374,7 +374,8 @@ SELECT pg_catalog.to_regnamespace('iam') IS NOT NULL AND EXISTS (SELECT FROM pg_
        pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL AS built \gset
 \if :present
 \if :built
-SELECT 'exec|' || pg_catalog.has_function_privilege('access_svc', 'iam.confirm_decision(integer,text)', 'EXECUTE');
+SELECT 'exec|' || CASE WHEN pg_catalog.has_function_privilege('access_svc', 'iam.confirm_decision(integer,text)', 'EXECUTE')
+                       THEN 't' ELSE 'f' END;   -- text || boolean is 'true', not 't'
 SELECT 'stale|' || count(*) || '|' || coalesce(min(decision_id)::text, '-')
   FROM iam.account_decision WHERE status = 'pending_qa' AND made_at < now() - interval '7 days';
 SELECT 'mail|' || count(*) || '|' || coalesce(min(decision_id)::text, '-')
