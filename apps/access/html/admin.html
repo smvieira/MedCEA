@@ -685,6 +685,7 @@ async function loadDecisions(keepId) {
     const it = el('div', 'item'); it.dataset.id = x.decision_id;
     const nm = el('div', 'nm', '#' + x.decision_id + ' ' + kindLabel(x));
     if (x.superseded) nm.append(el('span', 'tag', 'superseded'));
+    if (x.status === 'pending_qa' && x.in_effect) nm.append(el('span', 'tag', 'in effect before the check'));
     if (x.subject && !x.subject.enabled && x.kind !== 'grant' && x.kind !== 'activate') nm.append(el('span', 'tag', 'account inactive'));
     it.append(nm, el('span', 'pill p-' + x.status, x.status === 'pending_qa' ? 'waiting for qa' : x.status));
     it.append(el('div', 'meta', x.username + ' — by ' + x.made_by_name + ', ' + fmt(x.made_at)));
@@ -700,7 +701,7 @@ function effectText(x) {
             activate: x.username + "'s account is enabled with its role " + (x.from_role || ''),
             person_id: x.username + ' is recorded as person ' + x.new_person_id,
             mail_settings: 'the new sending account is used, also for Forgot password? e-mails',
-            unit_assign: x.username + ' keeps ' + unitName(x) })[x.kind] || 'the decision is closed';
+            unit_assign: x.in_effect ? x.username + ' keeps ' + unitName(x) : x.username + ' gets ' + unitName(x) })[x.kind] || 'the decision is closed';
 }
 function selectDecision(x) {
   dcurrent = x;
@@ -728,9 +729,13 @@ function selectDecision(x) {
     d.append(el('h3', null, 'Access it adds'));
     const ul = el('ul', 'pairs'); x.widening.forEach(p => ul.append(el('li', null, p[0] + ' · ' + p[1]))); d.append(ul);
   }
+  // A unit_assign takes effect when confirmed; in effect before the check only for a
+  // units.sh --bootstrap row, a backfilled one, or one made before assignments waited.
   if (BOOT(x)) d.append(el('div', 'note re', x.kind === 'unit_assign'
-    ? (x.superseded ? 'Applied at once by units.sh (bootstrap); refusing does not remove it: a later decision (#' + x.superseded_by + ') governs this unit.'
-                    : 'Applied at once by units.sh (bootstrap); refusing removes the unit.')
+    ? (x.status !== 'pending_qa' ? 'Recorded by units.sh.'
+       : x.superseded ? 'Superseded: decision #' + x.superseded_by + ' governs this unit now; refuse this one, which changes nothing.'
+       : x.in_effect ? 'In effect before the check; refusing removes the unit.'
+       : 'Not in effect: ' + unitName(x) + ' is assigned when you confirm; refusing applies nothing.')
     : 'Applied at once by units.sh.'));
   if (x.applicant) {
     const a = x.applicant;
@@ -769,7 +774,7 @@ function selectDecision(x) {
         try {
           const out = await post('/api/decisions/' + x.decision_id + '/' + path, body);
           res.className = 'res good';
-          res.textContent = verb + '.' + (out.email ? ' E-mail: ' + out.email.detail + '.' : '') + (out.removed_unit ? ' The unit was removed.' : '');
+          res.textContent = verb + '.' + (out.message ? ' ' + out.message + '.' : '') + (out.email ? ' E-mail: ' + out.email.detail + '.' : '') + (out.removed_unit ? ' The unit was removed.' : '');
           setTimeout(() => loadDecisions(x.decision_id), 1200);
         } catch (e) {
           res.className = 'res bad'; res.textContent = 'Not done: ' + e.message + (e.body && e.body.drift ? ' Keycloak may be wider than the record: see the red banner.' : '');
@@ -784,7 +789,9 @@ function selectDecision(x) {
         br.onclick = () => {
           if (!ta.value.trim()) { res.className = 'res bad'; res.textContent = 'A refusal needs a note.'; ta.focus(); return; }
           const q = x.kind === 'grant' ? 'Refuse: the pending account of ' + x.username + ' is deleted (they may apply again).'
-                  : x.kind === 'unit_assign' && !x.superseded ? 'Refuse: ' + unitName(x) + ' is removed from ' + x.username + ' now.'
+                  : x.kind === 'unit_assign' && !x.superseded
+                    ? (x.in_effect ? 'Refuse: ' + unitName(x) + ' is removed from ' + x.username + ' now.'
+                                   : 'Refuse: ' + x.username + ' does not get ' + unitName(x) + '.')
                   : 'Refuse decision #' + x.decision_id + '? Nothing it proposed is applied.';
           run('Refused', 'refuse', { note: ta.value }, q);
         };

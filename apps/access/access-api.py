@@ -1008,10 +1008,25 @@ def confirm_decision(did, body, who, role):
         d['request_id'], d['subject_person'] = (extra or (None, None))[:2]
         # The decision's locks are held from here: Keycloak is read after them.
         u = _live_checks(who, d)
-        if d['kind'] in UNIT_KINDS:              # bootstrap: already in effect
+        if d['kind'] in UNIT_KINDS:
+            # confirm_decision inserted the iam_policy.user_unit row (a no-op for a row in
+            # effect before the check: bootstrap, backfill, or made before 2.8 waited).
+            # An account Keycloak no longer has gets no assignment: leaving the block
+            # rolls the insert back, as for every other kind.
+            if u is None and d['kind'] == 'unit_assign':
+                raise Refused(409, 'the account no longer exists: refuse this decision')
+            applied = []
+            if d['kind'] == 'unit_assign':
+                cur.execute('SELECT unit_code FROM medcea.cea_unit WHERE unit_id = %s', (d['unit_id'],))
+                code = (cur.fetchone() or ('unit #%s' % d['unit_id'],))[0]
+                applied = ['%s assigned to %s' % (code, d['username'])]
             con.commit()
-            log('decision %s (%s) confirmed by %s' % (did, d['kind'], who.get('username')))
-            return 200, {'decision': d, 'applied': []}
+            log('decision %s (%s) confirmed by %s%s' % (did, d['kind'], who.get('username'),
+                                                       '; ' + applied[0] if applied else ''))
+            out = {'decision': d, 'applied': applied}
+            if applied:
+                out['message'] = applied[0]
+            return 200, out
         if d['kind'] == 'mail_settings':
             # confirm_decision moved the staged row into iam.mail_settings; the realm
             # follows, last, so a refusal there rolls the move back.
@@ -1207,8 +1222,16 @@ def list_decisions(q, who):
     sql = ('SELECT ' + ', '.join('d.' + c for c in DEC_COLS) + ', u.unit_code,'
            ' (SELECT max(l.decision_id) FROM iam.account_decision l WHERE l.keycloak_user_id = d.keycloak_user_id'
            '   AND l.decision_id > d.decision_id AND ((d.kind IN %s AND l.kind IN %s AND l.unit_id = d.unit_id)'
-           '   OR (d.kind NOT IN %s AND l.kind NOT IN %s))) AS superseded_by'
-           ' FROM iam.account_decision d LEFT JOIN medcea.cea_unit u ON u.unit_id = d.unit_id' % (units, units, units, units))
+           '   OR (d.kind NOT IN %s AND l.kind NOT IN %s))) AS superseded_by,'
+           # a unit_assign in effect: confirmed, or in effect before the check (bootstrap,
+           # backfill, or made before 2.8 waited for qa); a new one waits without its row.
+           # Only the latest unit decision for (user, unit) can be what put the row there:
+           # a superseded one is never in effect, whatever a later decision did.
+           " (d.kind = 'unit_assign' AND EXISTS (SELECT 1 FROM iam_policy.user_unit uu"
+           '   WHERE uu.person_sub::text = lower(d.keycloak_user_id) AND uu.unit_id = d.unit_id)'
+           '   AND NOT EXISTS (SELECT 1 FROM iam.account_decision l WHERE l.keycloak_user_id = d.keycloak_user_id'
+           '   AND l.decision_id > d.decision_id AND l.kind IN %s AND l.unit_id = d.unit_id)) AS in_effect'
+           ' FROM iam.account_decision d LEFT JOIN medcea.cea_unit u ON u.unit_id = d.unit_id' % (units, units, units, units, units))
     if where:
         sql += ' WHERE ' + ' AND '.join(where)
     sql += " ORDER BY (d.status = 'pending_qa') DESC, d.made_at DESC, d.decision_id DESC LIMIT %s"
@@ -1216,7 +1239,7 @@ def list_decisions(q, who):
     try:
         cur = con.cursor()
         cur.execute(sql, tuple(args) + (limit,))
-        rows = [row_dict(DEC_COLS + ('unit_code', 'superseded_by'), r) for r in cur.fetchall()]
+        rows = [row_dict(DEC_COLS + ('unit_code', 'superseded_by', 'in_effect'), r) for r in cur.fetchall()]
         staged = {}
         if any(r['kind'] == 'mail_settings' for r in rows):
             now = mail_settings(cur)

@@ -905,7 +905,7 @@ resource_groups:
       - {type: data, object: iam.mail_template, note: "reset to default is an UPDATE to the default text (is_default), not a DELETE"}
       - {type: data, function: "iam.record_decision(text, text, text, text, text, text, text, text, bigint)", level: K, service_only: [svc_access], writes: [iam.account_decision, iam.user_status_history], note: "an admin's proposal; pending_qa when it widens (medcea_auth.role_widening), else applied"}
       - {type: data, function: "iam.withdraw_decision(int, text)", level: K, service_only: [svc_access], writes: [iam.account_decision]}
-      - {type: data, function: "iam.confirm_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam.user_status_history, iam.mail_settings]}
+      - {type: data, function: "iam.confirm_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam.user_status_history, iam.mail_settings, iam_policy.user_unit], note: "confirming a unit_assign inserts the user_unit row (a no-op for one already in effect: bootstrap, backfill)"}
       - {type: data, function: "iam.refuse_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam_policy.user_unit], note: "refusing a unit_assign deletes the user_unit row, only while it is the latest unit decision"}
       - {type: data, function: "iam.review_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision]}
       - type: api
@@ -940,7 +940,7 @@ resource_groups:
       record: iam.account_decision (pending_qa → confirmed | refused; applied → reviewed)
       functions: ["iam.confirm_decision(int, text)", "iam.refuse_decision(int, text)", "iam.review_decision(int, text)"]
       effect: blocking
-      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it. Bootstrap exception (IAM 2.8, like the policy's --bootstrap) — apps/iam/units.sh --by <username> applies an assignment at once and records it as pending_qa; the User Manager's Decisions tab confirms or refuses it, and a refusal removes the unit while it is the latest decision for that user and unit.
+      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it — apps/iam/units.sh assign --by <username> records it as pending_qa, and the User Manager's Decisions tab confirms it (the unit is assigned then) or refuses it (nothing is applied); units.sh remove withdraws one still waiting. Bootstrap exception (like the policy's --bootstrap) — units.sh assign --bootstrap, allowed only while no other enabled qa account could confirm, applies the assignment at once and records it as pending_qa; a refusal then removes the unit while it is the latest decision for that user and unit.
     members:
       - {type: data, object: iam_policy.user_unit, written_by: functions}
       - {type: data, object: iam_policy.user_zone, written_by: functions, note: "unused since unit assignments; kept for the history that names it"}
@@ -1254,8 +1254,9 @@ constraints:
       Deactivation, pure narrowing and unit removal act at once and are reviewed by qa
       afterwards; deactivation and pure narrowing revoke the person's MQTT credentials in
       the same transaction (medcea.revoke_person_mqtt). Bootstrap exceptions: the
-      policy's --bootstrap, and apps/iam/units.sh (IAM 2.8), whose assignments act at once
-      and wait as pending_qa for confirmation or refusal (a refusal removes the unit).
+      policy's --bootstrap, and apps/iam/units.sh assign --bootstrap (only while no other
+      enabled qa account could confirm), whose assignments act at once and wait as
+      pending_qa for confirmation or refusal (a refusal removes the unit).
     enforced_by: ["access-api and iam-api write iam.account_decision (iam.record_decision)", "the Keycloak change is made only on confirmation", "widening computed by the compiler from the effective matrix (medcea_auth.role_widening, routes.json widening)"]
     help: Two people for every grant; no delay for removing access.
 

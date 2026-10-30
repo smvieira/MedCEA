@@ -15,7 +15,8 @@
 -- postgres) keeps the owner; a function it adds is postgres's until the next
 -- database deploy, and holds no grant until then either.
 -- medcea_owner is NOLOGIN and has no members: nobody acts as the owner except
--- through its SECURITY DEFINER functions and the migrations (SET ROLE, postgres).
+-- through its SECURITY DEFINER functions, the migrations and apps/iam/units.sql's
+-- withdrawal of a waiting unit assignment (SET ROLE, postgres).
 
 SET LOCAL lock_timeout = '5s';
 

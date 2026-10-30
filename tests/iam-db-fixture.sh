@@ -464,10 +464,12 @@ cmd_purge_access() {
     local out n flag
     # medcea_fresh (step fresh) holds grants of access_svc, which DROP ROLE would refuse
     fx postgres -q -c 'DROP DATABASE IF EXISTS medcea_fresh WITH (FORCE);' >/dev/null
-    # one assignment, committed, as apps/iam/units.sh makes it (--by an admin account)
+    # one assignment in effect, committed, as apps/iam/units.sh assign --bootstrap makes it
+    # (--by an admin account); a plain assign would only wait for qa, with nothing to survive
     out="$(fx "$CEA_DB" -q -1 -tA -v ON_ERROR_STOP=1 -f - 2>&1 <<SQL
 SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \\gset
 \\set assign true
+\\set bootstrap true
 \\set sub '11111111-1111-4111-8111-1111111127a7'
 \\set username test-purge
 \\set person p-purge

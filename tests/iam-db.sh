@@ -21,7 +21,8 @@
 #                W3 flag-only probes, W4 true-mode workflow, W5 register v2,
 #                W6 the scheduler's functions (2.4: retire, re-save, cycles, the
 #                schedule's algorithm, the internal actor, e97aab6's scheduler SQL),
-#                W7 unit assignments (apps/iam/units.sql, IAM 2.8); the own_unit RLS
+#                W7 unit assignments (apps/iam/units.sql, IAM 2.8: assign waits for
+#                qa, --bootstrap acts at once, remove withdraws a waiting one); the own_unit RLS
 #                probes run in W4
 #   access       (not in the default set; write probes) IAM 2.7's account decisions,
 #                D1-D18: record, withdraw, confirm, refuse, review as access_svc with
@@ -48,7 +49,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -1216,13 +1217,16 @@ SQL
         fi
     fi
     # W7: unit assignments (IAM 2.8): apps/iam/units.sql as apps/iam/units.sh runs it
-    # (as postgres, one transaction), and nobody else writes iam_policy.user_unit
+    # (as postgres, one transaction): assign waits for qa (iam.confirm_decision inserts the
+    # row, access section D8), --bootstrap and remove write iam_policy.user_unit, and no
+    # person may write it directly
     if [[ "$MODE" != legacy ]]; then
         UNITS_SQL="$(cat "$REPO_ROOT/apps/iam/units.sql")"
-        units_vars() {  # ASSIGN
+        units_vars() {  # ASSIGN [BOOTSTRAP]
             cat <<SQL
 SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \gset
 \set assign $1
+\set bootstrap ${2:-false}
 \set sub '$UUID_OP'
 \set username test-op
 \set person p-op
@@ -1237,14 +1241,29 @@ SQL
 $(as_token "$(claims operator "$UUID_OP" p-op)")
 INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, 1;
 SQL
-        probe W7 "units.sql assign: in effect, decision pending_qa, chain event; a re-run writes nothing" ok <<SQL
+        probe W7 "units.sql assign: decision pending_qa, not in effect, no chain event; a re-run writes nothing" ok <<SQL
 $(units_vars true)
 $UNITS_SQL
 $UNITS_SQL
 --CHECKS
-SELECT 'CHECK|assigned', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
+SELECT 'CHECK|not assigned (waits for qa)', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
 SELECT 'CHECK|one pending_qa unit_assign by system:deploy (by the --by person, IAM 2.7)', count(*) = 1
-          AND bool_and(widens AND status = 'pending_qa' AND made_by_name LIKE 'system:deploy (by %)'
+          AND bool_and(widens AND status = 'pending_qa' AND made_by_name = 'system:deploy (by test-ad)'
+                       AND made_by_sub = '$UUID_AD' AND made_by_person = 'p-ad'
+                       AND unit_id = :uid AND subject_person = 'p-op' AND checked_at IS NULL)
+  FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_assign';
+SELECT 'CHECK|no unit_assigned event', NOT EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'unit_assigned' AND payload ->> 'person_sub' = '$UUID_OP');
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+        probe W7 "units.sql assign --bootstrap: in effect, decision pending_qa, chain event; a re-run writes nothing" ok <<SQL
+$(units_vars true true)
+$UNITS_SQL
+$UNITS_SQL
+--CHECKS
+SELECT 'CHECK|assigned', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
+SELECT 'CHECK|one pending_qa unit_assign by system:deploy (bootstrap, by the --by person)', count(*) = 1
+          AND bool_and(widens AND status = 'pending_qa' AND made_by_name = 'system:deploy (bootstrap, by test-ad)'
                        AND made_by_sub = '$UUID_AD' AND made_by_person = 'p-ad'
                        AND unit_id = :uid AND subject_person = 'p-op' AND checked_at IS NULL)
   FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_assign';
@@ -1255,10 +1274,21 @@ SELECT 'CHECK|one unit_assigned event', count(*) = 1 FROM iam_policy.history
  WHERE event = 'unit_assigned' AND payload ->> 'person_sub' = '$UUID_OP';
 SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
 SQL
-        probe W7 "units.sql remove: applied at once; a second remove writes nothing" ok <<SQL
+        probe W7 "units.sql assign --bootstrap while an assignment waits: nothing written" ok <<SQL
 $(units_vars true)
 $UNITS_SQL
+\set bootstrap true
+$UNITS_SQL
+--CHECKS
+SELECT 'CHECK|not assigned', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP' AND unit_id = :uid);
+SELECT 'CHECK|still one unit_assign, not a bootstrap one', count(*) = 1 AND bool_and(made_by_name = 'system:deploy (by test-ad)')
+  FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_assign';
+SQL
+        probe W7 "units.sql remove: applied at once; a second remove writes nothing" ok <<SQL
+$(units_vars true true)
+$UNITS_SQL
 \set assign false
+\set bootstrap false
 $UNITS_SQL
 $UNITS_SQL
 --CHECKS
@@ -1267,6 +1297,28 @@ SELECT 'CHECK|one applied unit_remove', count(*) = 1 AND bool_and(NOT widens AND
   FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_remove';
 SELECT 'CHECK|one unit_removed event', count(*) = 1 FROM iam_policy.history
  WHERE event = 'unit_removed' AND payload ->> 'person_sub' = '$UUID_OP';
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+        probe W7 "units.sql remove of a waiting assignment: withdrawn and chained; a second remove writes nothing" ok <<SQL
+$(units_vars true)
+$UNITS_SQL
+\set assign false
+$UNITS_SQL
+$UNITS_SQL
+DO \$\$ BEGIN IF current_user <> 'postgres' THEN RAISE EXCEPTION 'units.sql left the role at %', current_user; END IF; END \$\$;
+--CHECKS
+SELECT 'CHECK|withdrawn by the --by person', count(*) = 1
+          AND bool_and(status = 'withdrawn' AND withdrawn_by_sub = '$UUID_AD' AND withdrawn_by_person = 'p-ad'
+                       AND withdrawn_by_name = 'system:deploy (by test-ad)' AND withdraw_reason = 'iam-db probe'
+                       AND withdrawn_at IS NOT NULL AND checked_at IS NULL)
+  FROM iam.account_decision WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_assign';
+SELECT 'CHECK|no unit_remove decision', NOT EXISTS (SELECT 1 FROM iam.account_decision
+        WHERE keycloak_user_id = '$UUID_OP' AND kind = 'unit_remove');
+SELECT 'CHECK|one account_decision_withdrawn event by system:deploy', count(*) = 1 AND bool_and(actor_name = 'system:deploy')
+  FROM iam_policy.history WHERE event = 'account_decision_withdrawn' AND payload ->> 'keycloak_user_id' = '$UUID_OP'
+   AND (payload ->> 'unit_id')::int = :uid;
+SELECT 'CHECK|no unit event', NOT EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event IN ('unit_assigned', 'unit_removed') AND payload ->> 'person_sub' = '$UUID_OP');
 SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
 SQL
         probe W7 "a unit decision is final: UPDATE" "42501:may be added" <<SQL
@@ -1313,11 +1365,12 @@ if want access && [[ "$WRITES" == true && "$MODE" != legacy ]]; then
     pending_d1() { um_admin; rec d1 role_change operator production_manager; }   # D1's row
     unit_id_sql="SELECT unit_id AS uid FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \\gset"
     UNITS_SQL="$(cat "$REPO_ROOT/apps/iam/units.sql")"
-    # units BY_SUB BY_PERSON BY_NAME ASSIGN — apps/iam/units.sql on S's unit IAMT01, as postgres
+    # units BY_SUB BY_PERSON BY_NAME ASSIGN [BOOTSTRAP] — apps/iam/units.sql on S's unit IAMT01, as postgres
     units() {
         as_postgres
         cat <<SQL
 \\set assign $4
+\\set bootstrap ${5:-false}
 \\set sub '$S'
 \\set username test-s
 \\set person '$PS'
@@ -1450,10 +1503,45 @@ $(um_qa)
 SELECT * FROM iam.confirm_decision(:d1, 'iam-db D7') \\g /dev/null
 SELECT * FROM iam.confirm_decision(:d1, 'iam-db D7');
 SQL
-    # D8 / D9 / D9b — refusing a unit assignment removes it, only while it is the latest
-    probe D8 "units.sql assign, then qa refuses it: the unit is removed, both events chained" ok <<SQL
+    # D8 / D9 / D9b — a unit assignment takes effect when qa confirms it; refusing one
+    # applies nothing, and refusing one in effect before the check (bootstrap) removes
+    # it, only while it is the latest
+    probe D8 "units.sql assign, then qa confirms it: the unit is assigned, unit_assigned with Q as the actor" ok <<SQL
 $unit_id_sql
 $(units "$A" "$PA" test-a true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+SELECT NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid) AS pre \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, '$ATTEST') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|not in effect before the confirm', :'pre'::boolean;
+SELECT 'CHECK|user_unit row made by the confirm', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|confirmed by Q', status = 'confirmed' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :du;
+SELECT 'CHECK|unit_assigned with Q as the actor', count(*) = 1 AND bool_and(actor_sub = '$Q'::uuid AND actor_person = '$PQ')
+  FROM iam_policy.history WHERE event = 'unit_assigned' AND payload ->> 'person_sub' = '$S';
+SELECT 'CHECK|account_decision_confirmed chained', EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'account_decision_confirmed' AND (payload ->> 'decision_id')::bigint = :du);
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D8 "units.sql assign, then qa refuses it: nothing was in effect, nothing removed" ok <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT removed AS rm FROM iam.refuse_decision(:du, 'iam-db D8') \\gset
+--CHECKS
+SELECT 'CHECK|removed = false', NOT :'rm'::boolean;
+SELECT 'CHECK|no user_unit row', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|refused by Q', status = 'refused' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :du;
+SELECT 'CHECK|no unit event', NOT EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event IN ('unit_assigned', 'unit_removed') AND payload ->> 'person_sub' = '$S');
+SELECT 'CHECK|account_decision_refused, not removed', EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event = 'account_decision_refused' AND (payload ->> 'decision_id')::bigint = :du AND NOT (payload ->> 'removed')::boolean);
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D8 "units.sql assign --bootstrap, then qa refuses it: the unit is removed, both events chained" ok <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true true)
 SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
 $(um_qa)
 SELECT removed AS rm FROM iam.refuse_decision(:du, 'iam-db D8') \\gset
@@ -1467,11 +1555,27 @@ SELECT 'CHECK|account_decision_refused, removed', EXISTS (SELECT 1 FROM iam_poli
         WHERE event = 'account_decision_refused' AND (payload ->> 'decision_id')::bigint = :du AND (payload ->> 'removed')::boolean);
 SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
 SQL
-    probe D9 "assign, remove, assign; refusing the first assign removes nothing" ok <<SQL
+    probe D8 "confirm an assignment whose unit no longer exists" "22023:no longer exists" <<SQL
+INSERT INTO iam.account_decision (kind, keycloak_user_id, username, subject_person, unit_id, widens, status, reason,
+                                  made_by_sub, made_by_person, made_by_name)
+VALUES ('unit_assign', '$S', 'test-s', '$PS', -1, true, 'pending_qa', 'iam-db probe', '$A', '$PA', 'system:deploy (by test-a)')
+RETURNING decision_id AS du \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, '$ATTEST');
+SQL
+    probe D9 "assign, remove: the waiting assign is withdrawn; refusing it" "22023:already withdrawn" <<SQL
 $unit_id_sql
 $(units "$A" "$PA" test-a true)
 $(units "$A" "$PA" test-a false)
-$(units "$A" "$PA" test-a true)
+SELECT min(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT removed AS rm FROM iam.refuse_decision(:du, 'iam-db D9');
+SQL
+    probe D9 "assign --bootstrap, remove, assign --bootstrap; refusing the first assign removes nothing" ok <<SQL
+$unit_id_sql
+$(units "$A" "$PA" test-a true true)
+$(units "$A" "$PA" test-a false)
+$(units "$A" "$PA" test-a true true)
 SELECT min(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
 $(um_qa)
 SELECT removed AS rm FROM iam.refuse_decision(:du, 'iam-db D9') \\gset
@@ -1482,9 +1586,9 @@ SELECT 'CHECK|account_decision_refused, not removed', EXISTS (SELECT 1 FROM iam_
         WHERE event = 'account_decision_refused' AND (payload ->> 'decision_id')::bigint = :du AND NOT (payload ->> 'removed')::boolean);
 SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
 SQL
-    probe D9b "assign, remove; confirming the first assign" "22023:superseded" <<SQL
+    probe D9b "assign --bootstrap, remove; confirming the first assign" "22023:superseded" <<SQL
 $unit_id_sql
-$(units "$A" "$PA" test-a true)
+$(units "$A" "$PA" test-a true true)
 $(units "$A" "$PA" test-a false)
 SELECT min(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
 $(um_qa)

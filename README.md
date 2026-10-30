@@ -401,18 +401,20 @@ psql in the PostgreSQL pod.
 
 Under `IAM_DB_ROLES=true` an operator sees the telemetry, runs and run logs of
 the units assigned to them only (every zone of the unit, zones added later
-included), and starts or stops runs only there. **Assign units before turning it
-on**, or operators see nothing:
+included), and starts or stops runs only there. **Assign units, and have a qa
+person confirm them, before turning it on**, or operators see nothing:
 
 ```bash
-apps/iam/units.sh assign <username> UNIT01 UNIT02   # takes effect at once, waits for qa (IAM 2.7)
-apps/iam/units.sh remove <username> UNIT02
-apps/iam/units.sh list                              # who has which units; operators without one
+apps/iam/units.sh assign <username> UNIT01 UNIT02 --by <you>   # waits for qa; not in effect until confirmed
+apps/iam/units.sh remove <username> UNIT02 --by <you>          # at once; withdraws one still waiting
+apps/iam/units.sh list                                         # units in effect, units waiting for qa
 ```
 
-Each change is recorded as an account decision; an assignment widens access, so it
-stays *pending qa confirmation* until the qa confirm screen (IAM 2.7) confirms or
-refuses it.
+Each change is recorded as an account decision. An assignment widens access, so it
+waits *pending qa* and takes effect only when a qa person other than you confirms
+it in the User Manager's Decisions tab; a refusal applies nothing. Only when no
+other qa account exists, `assign --bootstrap` puts the unit in effect at once and
+still leaves the decision for qa.
 
 **Existing accounts after this change** keep their role and its meaning, but
 some lose services the policy does not give them:

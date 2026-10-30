@@ -1,37 +1,47 @@
 #!/usr/bin/env bash
 # apps/iam/units.sh — which units an operator works in (IAM plan 2.8, own_unit)
 #
-#   apps/iam/units.sh assign <username> <UNIT>... --by <your username> [--reason TEXT]
+#   apps/iam/units.sh assign <username> <UNIT>... --by <your username> [--reason TEXT] [--bootstrap]
 #   apps/iam/units.sh remove <username> <UNIT>... --by <your username> [--reason TEXT]
 #   apps/iam/units.sh remove --sub <uuid> <UNIT>... --by <your username> [--reason TEXT]
 #   apps/iam/units.sh list [<username>]
 #
 # Under IAM_DB_ROLES=true an operator sees the telemetry, runs and run logs of every zone
 # of their units (zones added later included) and starts or stops runs only there; with no
-# unit they see nothing. Assign units before turning IAM_DB_ROLES on.
+# unit they see nothing. Assign units, and have them confirmed, before turning
+# IAM_DB_ROLES on.
 #
-# Each change writes iam_policy.user_unit and one iam.account_decision row per unit, in one
-# transaction, as system:deploy; --by names the person running it (your own Keycloak
-# account in realm $KEYCLOAK_REALM), recorded as the decision's maker ("system:deploy (by
-# <username>)"), so you cannot confirm it yourself in the User Manager (IAM 2.7). The policy
-# hash chain gets a unit_assigned / unit_removed event. An assignment is a widening and, as a
-# bootstrap exception like the policy's --bootstrap, takes effect at once while it is
-# recorded pending_qa: a qa person confirms or refuses it in the User Manager's Decisions
-# tab, and a refusal removes the unit. A removal is a narrowing: applied at once, reviewed
-# there afterwards. Idempotent: a unit already assigned (or not assigned) writes nothing.
+# Each change writes one iam.account_decision row per unit, in one transaction, as
+# system:deploy; --by names the person running it (your own Keycloak account in realm
+# $KEYCLOAK_REALM), recorded as the decision's maker ("system:deploy (by <username>)"), so
+# you cannot confirm it yourself in the User Manager (IAM 2.7). An assignment is a
+# widening: it waits for qa (pending_qa) and is NOT in effect until a qa person other than
+# you confirms it in the User Manager's Decisions tab, which writes iam_policy.user_unit
+# (the policy hash chain gets unit_assigned); a refusal applies nothing. A removal is a
+# narrowing: the unit goes at once (unit_removed on the chain), reviewed there afterwards;
+# removing a unit still waiting for qa withdraws that decision instead. Idempotent: a unit
+# already assigned (or not assigned, and not waiting) writes nothing, and assigning a unit
+# that already waits reports the waiting decision.
+# --bootstrap: only while no enabled qa account but yours (and the subject's) exists, so
+# nobody could ever confirm: the unit is in effect at once, before any check, and its
+# decision ("system:deploy (bootstrap, by <username>)") still waits for qa; a refusal then
+# removes the unit. Refused (exit 2) when another qa person could confirm instead.
 # Units are unit codes, case-insensitive. The account is found through Keycloak's admin
 # API (infra/lib-keycloak-admin.sh, realm $KEYCLOAK_REALM); only operator accounts are
-# filtered by units, so another role is warned about and recorded anyway. remove --sub removes the units of an account that no longer exists in
-# Keycloak (list prints the command). Takes the deploy lock; not run by deploy-apps.sh.
+# filtered by units, so another role is warned about and recorded anyway. remove --sub
+# removes the units of an account that no longer exists in Keycloak (list prints the
+# command). list: UNITS are in effect (* = in effect before the check, its decision still
+# waiting for qa), WAITING_QA are waiting for qa and not in effect. Takes the deploy lock;
+# not run by deploy-apps.sh.
 #
 # Exit 0 on success (also when nothing changed); 1 for an unknown user (--by included) or
 # unit, an SQL failure, or another deploy holding the lock; 2 for a usage error (a missing
-# --by included), a database or access deploy that has not been run yet, or Keycloak
-# unreachable.
+# --by included), --bootstrap while another qa person could confirm, a database or access
+# deploy that has not been run yet, or Keycloak unreachable.
 # Run from anywhere:  apps/iam/units.sh list
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || -z "${1:-}" ]]; then
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n "2,$(grep -n '^# Run from anywhere' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'
     [[ -n "${1:-}" ]] && exit 0
     exit 2   # no arguments is a usage error
 fi
@@ -45,7 +55,7 @@ UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 
 # ── Arguments (before the lock, so a usage error needs none) ─────────────────
 CMD="$1"; shift
-USER_ARG=""; SUB_ARG=""; BY_ARG=""; REASON=""; REASON_SET=0; CODES=()
+USER_ARG=""; SUB_ARG=""; BY_ARG=""; REASON=""; REASON_SET=0; CODES=(); BOOTSTRAP=false
 case "$CMD" in
     assign|remove|list) ;;
     *) usage "unknown command '$CMD'" ;;
@@ -59,6 +69,9 @@ while [[ $# -gt 0 ]]; do
             [[ "$CMD" != list ]] || usage "--by is for assign and remove"
             [[ $# -ge 2 && -n "${2//[[:space:]]/}" ]] || usage "--by needs your Keycloak username"
             BY_ARG="$2"; shift 2 ;;
+        --bootstrap)
+            [[ "$CMD" == assign ]] || usage "--bootstrap is for assign only"
+            BOOTSTRAP=true; shift ;;
         --sub)
             [[ "$CMD" == remove ]] || usage "--sub is for remove only"
             [[ $# -ge 2 && "$2" =~ $UUID_RE ]] || usage "--sub needs a Keycloak user id (uuid)"
@@ -86,6 +99,7 @@ if [[ "$CMD" != list ]]; then
         [[ -n "${REASON//[[:space:]]/}" ]] || usage "--reason must not be empty"
     elif [[ "$CMD" == assign ]]; then
         REASON="IAM 2.8: unit assigned with apps/iam/units.sh (awaiting qa confirmation)"
+        [[ "$BOOTSTRAP" == false ]] || REASON="IAM 2.8: unit assigned with apps/iam/units.sh --bootstrap (no other qa person could confirm; in effect before the check)"
     else
         REASON="IAM 2.8: unit removed with apps/iam/units.sh"
     fi
@@ -228,26 +242,39 @@ if [[ "$CMD" == list ]]; then
         [[ -n "$_f" ]] || die 1 "No account '$USER_ARG' in realm $R."
         ONLY="${_f%%$'\t'*}"
     fi
-    # pending: a unit_assign still pending_qa that is the latest unit_* decision for a
-    # unit still assigned (assign, remove, assign leaves an older pending row behind)
+    # waits: a unit_assign still pending_qa that is the latest unit_* decision for its
+    # (user, unit) (assign, remove, assign leaves an older pending row behind). In effect:
+    # the user_unit row, '*' while its decision still waits (bootstrap, backfill, or made
+    # before assignments waited for qa); WAITING_QA: waiting and not in effect yet.
     ROWS="$(q <<'SQL'
-SELECT a.person_sub, string_agg(u.unit_code, ',' ORDER BY u.unit_code),
-       count(*) FILTER (WHERE EXISTS (
-           SELECT 1 FROM iam.account_decision d
-            WHERE d.keycloak_user_id = a.person_sub::text AND d.unit_id = a.unit_id
-              AND d.kind = 'unit_assign' AND d.status = 'pending_qa'
-              AND NOT EXISTS (SELECT 1 FROM iam.account_decision l
-                               WHERE l.keycloak_user_id = d.keycloak_user_id AND l.unit_id = d.unit_id
-                                 AND l.kind IN ('unit_assign', 'unit_remove') AND l.decision_id > d.decision_id)))
-  FROM iam_policy.user_unit a JOIN medcea.cea_unit u USING (unit_id)
+WITH latest AS (
+    SELECT DISTINCT ON (d.keycloak_user_id, d.unit_id) d.keycloak_user_id, d.unit_id, d.kind, d.status
+      FROM iam.account_decision d WHERE d.kind IN ('unit_assign', 'unit_remove')
+     ORDER BY d.keycloak_user_id, d.unit_id, d.decision_id DESC),
+waits AS (SELECT l.keycloak_user_id AS sub, l.unit_id FROM latest l
+           WHERE l.kind = 'unit_assign' AND l.status = 'pending_qa'),
+ent AS (
+    SELECT a.person_sub::text AS sub, a.unit_id, true AS in_effect,
+           EXISTS (SELECT 1 FROM waits w WHERE w.sub = a.person_sub::text AND w.unit_id = a.unit_id) AS pending
+      FROM iam_policy.user_unit a
+    UNION ALL
+    SELECT w.sub, w.unit_id, false, true FROM waits w
+     WHERE NOT EXISTS (SELECT 1 FROM iam_policy.user_unit a
+                        WHERE a.person_sub::text = w.sub AND a.unit_id = w.unit_id))
+SELECT e.sub,
+       coalesce(string_agg(coalesce(u.unit_code, '#' || e.unit_id) || CASE WHEN e.pending THEN '*' ELSE '' END, ','
+                           ORDER BY u.unit_code) FILTER (WHERE e.in_effect), ''),
+       coalesce(string_agg(coalesce(u.unit_code, '#' || e.unit_id), ',' ORDER BY u.unit_code)
+                FILTER (WHERE NOT e.in_effect), '')
+  FROM ent e LEFT JOIN medcea.cea_unit u USING (unit_id)
  GROUP BY 1 ORDER BY 1
 SQL
 )" || die 1 "Cannot read iam_policy.user_unit."
-    declare -A UNITS=() PENDING=()
+    declare -A UNITS=() WAITING=()
     SUBS=()
-    while IFS='|' read -r _s _u _n; do
+    while IFS='|' read -r _s _u _w; do
         [[ -n "$_s" ]] || continue
-        UNITS[$_s]="$_u"; PENDING[$_s]="$_n"; SUBS+=("$_s")
+        UNITS[$_s]="$_u"; WAITING[$_s]="$_w"; SUBS+=("$_s")
     done <<<"$ROWS"
     # accounts that hold operator directly, with or without a unit
     _opsjson="$(kc_ok "realms/$R/roles/operator/users?first=0&max=1000")"
@@ -255,23 +282,48 @@ SQL
     for _s in "${_ops[@]}"; do
         [[ -n "${UNITS[$_s]+x}" ]] || SUBS+=("$_s")
     done
-    printf 'USERNAME\tROLE\tENABLED\tUNITS\tPENDING_QA\n'
+    # _wgone (set per account below) → one warning naming the account
+    gone_warn() {
+        [[ -z "$_wgone" ]] || warn "$1: waiting assignment(s) of unit(s) that no longer exist (${_wgone}): a qa person refuses those decisions in the User Manager (Decisions); units.sh cannot withdraw them, and confirming them fails"
+    }
+    _star=0
+    printf 'USERNAME\tROLE\tENABLED\tUNITS\tWAITING_QA\n'
     for _s in "${SUBS[@]}"; do
         [[ -z "$ONLY" || "$_s" == "$ONLY" ]] || continue
+        _u="${UNITS[$_s]:-}"; _w="${WAITING[$_s]:-}"
+        [[ "$_u" != *'*'* ]] || _star=1
+        # '#<id>': a waiting assignment whose unit was deleted since (account_decision has
+        # no foreign key; only user_unit's RESTRICT stops a delete). Neither remove nor
+        # confirm can act on it (22023): qa refuses it in the User Manager.
+        _wok=""; _wgone=""
+        IFS=, read -r -a _wl <<<"$_w"
+        for _x in "${_wl[@]}"; do
+            [[ -n "$_x" ]] || continue
+            if [[ "$_x" == '#'* ]]; then _wgone+="${_wgone:+, }$_x"; else _wok+="${_wok:+,}$_x"; fi
+        done
         _code="$(kc "realms/$R/users/$_s")"
         if [[ "$_code" == 404 ]]; then
-            printf '%s\t%s\t%s\t%s\t%s\n' "(no such account)" "-" "-" "${UNITS[$_s]:--}" "${PENDING[$_s]:-0}"
-            warn "account $_s no longer exists; remove its units with: apps/iam/units.sh remove --sub $_s ${UNITS[$_s]//,/ } --by <your username>"
+            printf '%s\t%s\t%s\t%s\t%s\n' "(no such account)" "-" "-" "${_u:--}" "${_w:--}"
+            gone_warn "account $_s"
+            _all="${_u//\*/}${_u:+${_wok:+,}}$_wok"
+            [[ -n "$_all" ]] || continue
+            warn "account $_s no longer exists; remove its units (and withdraw any waiting) with: apps/iam/units.sh remove --sub $_s ${_all//,/ } --by <your username>"
             continue
         fi
         [[ "$_code" == 200 ]] || die 2 "Keycloak admin API: GET realms/$R/users/$_s answered HTTP $_code."
         IFS=$'\t' read -r _id _name _en _pid < <(user_fields < "$TMP/body")
         _role="$(platform_role "$_s")"
-        printf '%s\t%s\t%s\t%s\t%s\n' "$_name" "$_role" "$_en" "${UNITS[$_s]:--}" "${PENDING[$_s]:-0}"
-        if [[ "$_role" == operator && "$_en" == true && -z "${UNITS[$_s]:-}" ]]; then
-            warn "$_name: no unit — sees no telemetry or runs under IAM_DB_ROLES=true"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$_name" "$_role" "$_en" "${_u:--}" "${_w:--}"
+        gone_warn "$_name"
+        if [[ "$_role" == operator && "$_en" == true && -z "$_u" ]]; then
+            if [[ -n "$_wok" ]]; then
+                warn "$_name: no unit in effect — sees no telemetry or runs under IAM_DB_ROLES=true until a qa person confirms ${_wok//,/, } (User Manager → Decisions)"
+            else
+                warn "$_name: no unit — sees no telemetry or runs under IAM_DB_ROLES=true"
+            fi
         fi
     done
+    [[ $_star == 0 ]] || echo "(* in effect before the check: its decision still waits for qa — bootstrap, backfill or made before assignments waited)" >&2
     exit 0
 fi
 
@@ -307,17 +359,52 @@ if [[ "$NAME" != "(deleted)" ]]; then
     [[ -n "$PID" ]] || warn "$NAME has no person_id: recorded with subject_person empty"
 fi
 
+# --bootstrap: only when no qa person but the one running this (and the subject, who
+# may not confirm their own units) could ever confirm. Direct holders of realm role qa:
+# no role includes qa. Another account of the same person (person_id) cannot confirm
+# either (rule 5), so it does not count as someone else. Each holder is read in full by
+# its id (attributes included, whatever the role listing returns); the filter is
+# apps/iam/units_bootstrap.py (tests/test_units_bootstrap.py).
+if [[ "$BOOTSTRAP" == true ]]; then
+    _qaids="$(kc_ok "realms/$R/roles/qa/users?first=0&max=1000" \
+        | python3 -c 'import json, sys; [print(u["id"]) for u in json.load(sys.stdin)]')"
+    _qafull="["
+    for _q in $_qaids; do
+        [[ "$_q" =~ $UUID_RE ]] || die 2 "Keycloak admin API: unexpected user id '$_q' in role qa."
+        [[ "$_qafull" == "[" ]] || _qafull+=","
+        _qafull+="$(kc_ok "realms/$R/users/$_q")"
+    done
+    _qafull+="]"
+    _others="$(BY="$BY_SUB" BYP="$BY_PID" SUBJ="$SUB" SUBP="${PID:-$SUB}" \
+        python3 apps/iam/units_bootstrap.py <<<"$_qafull")" || die 2 "Cannot check the qa accounts for --bootstrap."
+    if [[ -n "$_others" ]]; then
+        die 2 "--bootstrap refused: these enabled qa accounts can confirm the assignment instead: $(paste -sd, <<<"$_others" | sed 's/,/, /g'). Run assign without --bootstrap and ask one of them to confirm it in the User Manager (Decisions)."
+    fi
+fi
+
 ASSIGN=false; [[ "$CMD" == assign ]] && ASSIGN=true
-OUT="$(_dba_psql "$DB" -qtA -F'|' -1 -v ON_ERROR_STOP=1 -v assign="$ASSIGN" \
+OUT="$(_dba_psql "$DB" -qtA -F'|' -1 -v ON_ERROR_STOP=1 -v assign="$ASSIGN" -v bootstrap="$BOOTSTRAP" \
         -v sub="$SUB" -v username="$NAME" -v person="$PID" -v units="$UNIT_IDS" -v reason="$REASON" \
         -v by_sub="$BY_SUB" -v by_person="$BY_PID" -v by_name="$BY_NAME" \
         -f - < apps/iam/units.sql)" || die 1 "The change was refused by the database; nothing was written."
+_boot=0
 while IFS='|' read -r _act _unit _dec; do
     [[ -n "$_act" ]] || continue
     case "$_act" in
-        assigned)  echo "assigned $_unit to $NAME — decision #$_dec, in effect, pending qa confirmation (User Manager → Decisions)" ;;
+        proposed)  echo "$_unit: waiting for qa (decision #$_dec) — not in effect until a qa person other than you confirms it in the User Manager (Decisions)" ;;
+        waiting)   if [[ "$CMD" == assign && "$BOOTSTRAP" == true ]]; then
+                       echo "$_unit: decision #$_dec already waits for qa — nothing written; to bootstrap it, withdraw it first: apps/iam/units.sh remove $NAME $_unit --by $BY_NAME"
+                   else
+                       echo "$_unit: already waiting for qa (decision #$_dec) — nothing written; not in effect until a qa person confirms it"
+                   fi ;;
+        assigned)  _boot=1
+                   echo "assigned $_unit to $NAME — decision #$_dec, IN EFFECT BEFORE ANY CHECK (bootstrap), pending qa confirmation (User Manager → Decisions)" ;;
         removed)   echo "removed $_unit from $NAME — decision #$_dec" ;;
+        withdrawn) echo "$_unit: was waiting for qa, never in effect — decision #$_dec withdrawn" ;;
         unchanged) if [[ "$CMD" == assign ]]; then echo "$_unit: already assigned to $NAME — nothing written"
-                   else echo "$_unit: not assigned to $NAME — nothing written"; fi ;;
+                   else echo "$_unit: not assigned to $NAME and not waiting — nothing written"; fi ;;
     esac
 done <<<"$OUT"
+if [[ $_boot == 1 ]]; then
+    warn "--bootstrap: no other enabled qa account exists, so nobody else could confirm. The unit(s) above are IN EFFECT NOW, before any check; each decision still waits for qa, and a refusal removes the unit. Have a second qa person confirm or refuse them as soon as one exists."
+fi

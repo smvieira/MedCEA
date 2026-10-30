@@ -195,7 +195,7 @@ db_apply "$NAMESPACE" "$PG_POD" "$IAM_DB_ROLES"
 # apps/iam/units.sh list). The apply above created iam_policy.user_unit.
 if [[ "$IAM_DB_ROLES" == "true" ]]; then
     _uu="$(_dba_psql "$CEA_DB" -tAq -c "SELECT count(*) FROM iam_policy.user_unit" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ "${_uu:-0}" =~ ^[1-9] ]] || warn "IAM_DB_ROLES=true and no unit is assigned to anyone: operators see no telemetry or runs and can start none. Assign them: apps/iam/units.sh assign <user> <UNIT>... --by <your username> (check: apps/iam/units.sh list)"
+    [[ "${_uu:-0}" =~ ^[1-9] ]] || warn "IAM_DB_ROLES=true and no unit is assigned to anyone: operators see no telemetry or runs and can start none. Assign them: apps/iam/units.sh assign <user> <UNIT>... --by <your username>, and have a qa person confirm each in the User Manager (check: apps/iam/units.sh list)"
 fi
 
 # ── A mode flip reaches PostgREST only through new sessions ──────────────────

@@ -1477,8 +1477,10 @@ END $$;
 
 -- IAM 2.8: operators are assigned units (own_unit), every zone of a unit
 -- included. user_zone above stays, unused: the history names it. Written only
--- by apps/iam/units.sh (as postgres) and iam.refuse_decision() (IAM 2.7: a
--- refused assignment is removed); iam_policy.propose_unit() follows in 4.3. The FK keeps the default RESTRICT: deleting a unit
+-- by iam.confirm_decision() (a qa-confirmed assignment is inserted),
+-- iam.refuse_decision() (a refused one in effect before the check is removed) and
+-- apps/iam/units.sh (as postgres: remove, and assign --bootstrap);
+-- iam_policy.propose_unit() follows in 4.3. The FK keeps the default RESTRICT: deleting a unit
 -- that is still assigned fails (23503) rather than drop an assignment without
 -- an account decision.
 CREATE TABLE IF NOT EXISTS iam_policy.user_unit (

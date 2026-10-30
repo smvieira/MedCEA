@@ -785,11 +785,14 @@ class Reads(Base):
                    reason='r', made_by_sub=A, made_by_person='pA', made_by_name='alice')
         mine = dict(row, decision_id=71, made_by_sub=Q, made_by_person='pQ', made_by_name='quinn')
         self.w.on('FROM iam.account_decision d LEFT JOIN',
-                  [tuple(r[c] for c in API.DEC_COLS) + (None, None) for r in (row, mine)])
+                  [tuple(r[c] for c in API.DEC_COLS) + (None, None, False) for r in (row, mine)])
         self.as_(QA)
         status, body = self.call('GET', '/api/decisions?status=pending_qa')
         self.assertEqual(status, 200, body)
         a, b = body['decisions']
+        self.assertIs(a['in_effect'], False)
+        sql = next(q for q in self.w.sql() if 'FROM iam.account_decision d LEFT JOIN' in q)
+        self.assertIn('FROM iam_policy.user_unit uu', sql)                   # in effect before the check
         self.assertTrue(a['can_check'])
         self.assertEqual(a['subject'], {'enabled': True, 'role': 'operator', 'person_id': 'pS'})
         self.assertFalse(b['can_check'])
@@ -966,9 +969,45 @@ class LiveChecks(Base):
         self.assertNotIn(('commit',), self.w.events)
 
     def test_unit_confirm_deleted_subject(self):
+        # confirm_decision inserts the user_unit row now: an account Keycloak no longer
+        # has (kc_user 404) gets none — 409, and the insert is rolled back
         self.unit_row()
         status, body = self.call('POST', '/api/decisions/30/confirm', {'note': API.ATTEST})
+        self.assertEqual(status, 409, body)
+        self.assertIn('no longer exists', body['error'])
+        self.assertNotIn(('commit',), self.w.events)
+        self.assertIn(('rollback',), self.w.events)
+
+    def test_unit_refuse_deleted_subject(self):
+        # refusing stays possible for an account Keycloak no longer has
+        self.w.on('SELECT from_role, to_role FROM iam.account_decision', [(None, None)])
+        self.w.on('iam.refuse_decision', [(30, 'unit_assign', S, 3, False)])
+        status, body = self.call('POST', '/api/decisions/30/refuse', {'note': 'gone'})
         self.assertEqual(status, 200, body)
+        self.assertIn(('commit',), self.w.events)
+
+    def test_unit_confirm_assigns_the_unit(self):
+        # IAM 2.8: confirm_decision inserts the user_unit row; the answer names the unit
+        self.w.user(S, 'op2', roles=['operator'], person='pS')
+        self.unit_row('pS')
+        self.w.on('FROM medcea.cea_unit WHERE unit_id', [('UNIT03',)])
+        status, body = self.call('POST', '/api/decisions/30/confirm', {'note': API.ATTEST})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['message'], 'UNIT03 assigned to op2')
+        self.assertEqual(body['applied'], ['UNIT03 assigned to op2'])
+        self.order('medcea_auth.set_actor', 'iam.confirm_decision', 'FROM medcea.cea_unit WHERE unit_id', 'commit')
+        self.assertEqual(self.w.kc_writes(), [])
+
+    def test_unit_confirm_a_deleted_unit_is_refused(self):
+        # iam.confirm_decision raises 22023 when the unit is gone (FK 23503 on the insert)
+        self.w.user(S, 'op2', roles=['operator'], person='pS')
+        self.w.on('SELECT request_id, subject_person FROM iam.account_decision', [(None, 'pS')])
+        self.w.on('iam.confirm_decision', error=PgErr('22023', 'unit 3 no longer exists: refuse decision #30'))
+        status, body = self.call('POST', '/api/decisions/30/confirm', {'note': API.ATTEST})
+        self.assertEqual(status, 409, body)
+        self.assertIn('no longer exists: refuse decision #30', body['error'])
+        self.assertNotIn(('commit',), self.w.events)
+        self.assertEqual(self.w.kc_writes(), [])
 
     def test_refuse_and_review_check_the_approver(self):
         self.w.user(S, 'op2', roles=['operator'], person='pS')
@@ -1030,7 +1069,7 @@ class ReviewFixes(Base):
         row.update(decision_id=50, kind='mail_settings', keycloak_user_id='realm', username='realm mail settings',
                    subject_person='realm', widens=True, widening=[], status='pending_qa', reason='r',
                    made_by_sub=A, made_by_person='pA', made_by_name='alice')
-        self.w.on('FROM iam.account_decision d LEFT JOIN', [tuple(row[c] for c in API.DEC_COLS) + (None, None)])
+        self.w.on('FROM iam.account_decision d LEFT JOIN', [tuple(row[c] for c in API.DEC_COLS) + (None, None, False)])
         self.w.on('FROM iam.mail_settings WHERE id = 1',
                   [('smtp.gmail.com', 587, 'old@x.org', 'oldpw', 'MedCEA', '', 'alice', None)])
         self.w.on('FROM iam.mail_settings_pending',

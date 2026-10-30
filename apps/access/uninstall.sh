@@ -72,7 +72,8 @@ if [[ "$(_psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$POS
     if [[ "$_UU" != 0 ]]; then
         { echo -e "\033[0;33m[access] WARNING: iam_policy.user_unit holds ${_UU} unit assignment(s); they stay in effect, but their"
           echo -e "         account decisions are dropped with schema iam. The next ./apps/access/deploy.sh records each"
-          echo -e "         one again as pending_qa for a qa person (apps/iam/units.sh list shows them).\033[0m"; } >&2
+          echo -e "         one again as pending_qa for a qa person (apps/iam/units.sh list shows them). Assignments still"
+          echo -e "         waiting for qa (not in effect) are dropped with them: assign those again.\033[0m"; } >&2
     fi
     log "Dropping schema iam..."
     _psql -d "$POSTGRES_DB" -c "DROP SCHEMA IF EXISTS iam CASCADE;" \

@@ -5,10 +5,13 @@
 -- After ./apps/access/uninstall.sh --purge-data the assignments (iam_policy.user_unit, the
 -- database component's) survive while their decisions (schema iam) are gone, so qa would
 -- have nothing to confirm or refuse. Each gets a pending_qa unit_assign as a bootstrap row
--- without a maker or subject person: confirming it needs the attestation (spec 2.5 rule 6),
--- refusing it removes the unit. The username is the account id: the deploy does not call
--- Keycloak. Nothing happens while iam_policy does not exist yet (a fresh install deploys
--- this component before the database component). Prints backfilled|decision|account|unit.
+-- without a maker or subject person, in effect before the check like a units.sh --bootstrap
+-- row: confirming it needs the attestation (spec 2.5 rule 6) and inserts nothing,
+-- refusing it removes the unit. (Assignments that were still waiting for qa had no
+-- user_unit row, so they went with schema iam and are not backfilled.) The username is
+-- the account id: the deploy does not call Keycloak. Nothing happens while iam_policy
+-- does not exist yet (a fresh install deploys this component before the database
+-- component). Prints backfilled|decision|account|unit.
 SELECT pg_catalog.to_regclass('iam_policy.user_unit') IS NOT NULL AS have_units \gset
 \if :have_units
 WITH orphan AS (

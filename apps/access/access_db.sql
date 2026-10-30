@@ -343,13 +343,17 @@ CREATE INDEX IF NOT EXISTS account_decision_user_idx ON iam.account_decision (ke
 
 -- Unit assignments (IAM 2.8): operators are assigned units (iam_policy.user_unit),
 -- not zones. Re-created rather than altered, like the role CHECKs above: the
--- original kind CHECK is inline. Bootstrap exception (like the policy's
--- --bootstrap): apps/iam/units.sh writes unit_assign rows as pending_qa while the
--- assignment is already in effect, and unit_remove rows as applied. When
--- iam.refuse_decision refuses a unit_assign it DELETEs the iam_policy.user_unit
--- row in the same transaction — but only if that decision is the latest unit_*
--- decision for its (keycloak_user_id, unit_id): after assign, remove, assign the
--- older pending row must not remove the current assignment, which has its own.
+-- original kind CHECK is inline. apps/iam/units.sh writes a unit_assign as
+-- pending_qa and nothing else: iam.confirm_decision inserts the iam_policy.user_unit
+-- row, and a refusal applies nothing. unit_remove rows are applied (the row is
+-- deleted at once). Rows already in effect while pending — made before the
+-- assignment waited for qa, by units.sh assign --bootstrap (no other qa account),
+-- or by apps/access/unit_backfill.sql — are confirmed as they are (the insert is a
+-- no-op), and when iam.refuse_decision refuses one it DELETEs the user_unit row in
+-- the same transaction — but only if that decision is the latest unit_* decision
+-- for its (keycloak_user_id, unit_id): after assign, remove, assign the older
+-- pending row must not remove the current assignment, which has its own. A waiting
+-- assignment is withdrawn by units.sh remove.
 -- IAM 2.7 adds kind mail_settings (one per realm: keycloak_user_id 'realm').
 ALTER TABLE iam.account_decision ADD COLUMN IF NOT EXISTS unit_id INTEGER;   -- medcea.cea_unit, another schema: no FK
 ALTER TABLE iam.account_decision DROP CONSTRAINT IF EXISTS account_decision_kind_check;
@@ -902,8 +906,12 @@ $$;
 -- (grant, role_change, activate) in this transaction; access-api then makes the
 -- Keycloak change inside it and commits only if that succeeded. A mail_settings
 -- decision moves the staged account into iam.mail_settings (access-api pushes it
--- to the realm). A unit_assign is already in effect (bootstrap): confirming it
--- records the check and a chain event.
+-- to the realm). A unit_assign takes effect here: the iam_policy.user_unit row is
+-- inserted (its trigger chains unit_assigned with the qa person as the actor,
+-- whom access-api set with set_actor), unless the row is already there — a row in
+-- effect before the check (bootstrap, backfill, or made before assignments waited
+-- for qa), for which the insert is a no-op. A unit deleted meanwhile is 22023:
+-- refuse the decision. Either way the chain gets account_decision_confirmed.
 CREATE OR REPLACE FUNCTION iam.confirm_decision(p_decision integer, p_note text)
 RETURNS TABLE (decision_id bigint, kind text, keycloak_user_id text, username text, from_role text,
                to_role text, new_person_id text, unit_id integer)
@@ -955,6 +963,14 @@ BEGIN
                 USING ERRCODE = '22023';
         END IF;
         DELETE FROM iam.mail_settings_pending p WHERE p.decision_id = d.decision_id;
+    ELSIF d.kind = 'unit_assign' THEN
+        BEGIN
+            INSERT INTO iam_policy.user_unit (person_sub, unit_id)
+            VALUES (d.keycloak_user_id::uuid, d.unit_id) ON CONFLICT DO NOTHING;
+        EXCEPTION WHEN foreign_key_violation THEN
+            RAISE EXCEPTION 'unit % no longer exists: refuse decision #%', d.unit_id, d.decision_id
+                USING ERRCODE = '22023';
+        END;
     END IF;
     PERFORM medcea_auth._owner_write(false);
     IF d.kind IN ('unit_assign', 'unit_remove') THEN
@@ -970,10 +986,12 @@ END $$;
 -- refuse_decision: a qa person refuses a waiting decision (note required). No
 -- Keycloak change is undone here: nothing was applied, and access-api's
 -- reconcile makes Keycloak match (a refused grant deletes the account). A
--- unit_assign (in effect since units.sh) is removed — only while it is the
--- latest unit decision for its (user, unit); the user_unit trigger appends
--- unit_removed to the chain with the qa person as actor, and the chain gets
--- account_decision_refused. A mail_settings decision's staged row is deleted.
+-- unit_assign waiting for qa is not in effect: nothing to remove (removed =
+-- false). One that is (bootstrap, backfill, or made before assignments waited for
+-- qa) is removed — only while it is the latest unit decision for its (user, unit);
+-- the user_unit trigger appends unit_removed to the chain with the qa person as
+-- actor. The chain gets account_decision_refused either way. A mail_settings
+-- decision's staged row is deleted.
 CREATE OR REPLACE FUNCTION iam.refuse_decision(p_decision integer, p_note text)
 RETURNS TABLE (decision_id bigint, kind text, keycloak_user_id text, unit_id integer, removed boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam, pg_temp AS $$
