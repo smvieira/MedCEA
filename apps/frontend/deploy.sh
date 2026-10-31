@@ -29,7 +29,6 @@ APP_DIR="$SCRIPT_DIR"   # the app directory, as the k8s/ templates call it (host
 NAMESPACE="${NAMESPACE:-medcea}"
 CONFIG_DOMAIN="config.$DOMAIN"
 DBMGMT_DOMAIN="${DBMGMT_DOMAIN:-dbmgmt.$DOMAIN}"
-PGADMIN_URL="https://${PGADMIN_DOMAIN}"
 PORTAL_URL="https://${PORTAL_DOMAIN}"
 
 GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
@@ -73,6 +72,15 @@ _nginx_conf() {
         render "$SCRIPT_DIR/k8s/config-ui-nginx.yaml" NAMESPACE | $KUBECTL apply -n "$NAMESPACE" -f -
     fi
 }
+# The notebooks' platform hops close before config-api stops verifying tokens (IAM
+# 3.2b): a legacy config-api serves anyone as anon, which then holds the legacy grants.
+if [[ "$IAM_POSTGREST_JWT" == "false" ]]; then
+    _closed="$(workbench_egress_close "$NAMESPACE")" || {
+        echo "ERROR: could not close the AI workbench notebooks' hops to config-api and Keycloak (NetworkPolicy singleuser); nothing was changed. Run ./infra/deploy-workbench.sh, then this deploy again." >&2
+        exit 1
+    }
+    [[ "$_closed" == 0 ]] || log "IAM_POSTGREST_JWT=false: closed the AI workbench notebooks' $_closed platform hop(s); run ./infra/deploy-workbench.sh to bring its values in line"
+fi
 if [[ "$IAM_POSTGREST_JWT" == "false" ]] && [[ "$(pgrst_template_mode "$NAMESPACE" || echo unknown)" != "legacy" ]] \
    && $KUBECTL get deployment config-ui -n "$NAMESPACE" >/dev/null 2>&1; then
     _nginx_conf
@@ -198,7 +206,7 @@ $KUBECTL create configmap dbmgmt-nginx -n "$NAMESPACE" --dry-run=client -o yaml 
 # 2. HTML SPA ConfigMap
 # =============================================================================
 log "Creating HTML ConfigMap..."
-sed -e "s|\${PORTAL_URL}|$PORTAL_URL|g" -e "s|\${PGADMIN_URL}|$PGADMIN_URL|g" "$SCRIPT_DIR/html/dbmgmt.html" \
+sed -e "s|\${PORTAL_URL}|$PORTAL_URL|g" "$SCRIPT_DIR/html/dbmgmt.html" \
   | $KUBECTL create configmap dbmgmt-html -n "$NAMESPACE" \
     --from-file=index.html=/dev/stdin \
     --dry-run=client -o yaml | $KUBECTL apply -f -

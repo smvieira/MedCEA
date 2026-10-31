@@ -29,6 +29,9 @@
 #            admin_access false, delete_pvc false, no auth_state (IAM_GATES=false:
 #            allow_all true); SKIP while WORKBENCH_ENABLED is not true
 #   live     the running hub pod carries the Deployment's checksum/secret
+#   notebooks (IAM 3.2b) the singleuser egress equals `policy_workbench_egress` (Keycloak
+#            and config-api only while IAM_POSTGREST_JWT and IAM_DB_ROLES are true, else
+#            none), private addresses still closed, and the pod environment names no secret
 #   sign-in  /hub/login (auto_login → /hub/oauth_login) reaches Keycloak's login page
 #   reach    some enabled account holds a role the hub admits
 # The onboarding wizard and pgAdmin [tool (…)] (ONBOARD_DOMAIN, PGADMIN_DOMAIN, IAM 3.4):
@@ -41,7 +44,9 @@
 #   reach    some enabled account holds a role the tool admits
 # Hosts whose gate is not compiled yet are listed as SKIP with the phase that adds it.
 # Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
-# account, and the realm's discovery document lists device_authorization_endpoint.
+# account, and the realm's discovery document lists device_authorization_endpoint; and
+# the workbench-notebook client (IAM 3.2b): public, device grant only (no browser flow,
+# no password grant, no service account), default scopes groups and medcea-identity.
 #
 # Read-only: no lock, no Keycloak account, no change to the cluster. It proves the
 # configured gates, not a sign-in per role; that matrix is a Phase 1 test.
@@ -50,7 +55,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -167,7 +172,7 @@ print(max((m.get("time", "") for m in mf if m.get("subresource") != "status"), d
 # JupyterHub signs people in itself (IAM 3.2): its gate is the hub's own settings.
 check_workbench() {
     local host="$1" roles="$2" live k x
-    local WORKBENCH_ALLOW_ALL WORKBENCH_ADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE
+    local WORKBENCH_ALLOW_ALL WORKBENCH_ADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE WORKBENCH_EGRESS
     if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then skip gate "WORKBENCH_ENABLED is not true"; return; fi
     policy_workbench 2>/dev/null || { fail gate "policy_workbench failed (cli.py check)"; return; }
     # the values hold the client secret: parsed on stdin, only the gate's fields printed
@@ -184,7 +189,16 @@ for k, x in (("allow_all", a.get("allow_all")), ("admin_users", sorted(a.get("ad
              ("safe", (c.get("JupyterHub") or {}).get("admin_access") is False
                       and (c.get("KubeSpawner") or {}).get("delete_pvc") is False
                       and a.get("enable_auth_state") is not True)):
-    print(f"{k}\t{json.dumps(x)}")')" || { fail gate "no hub Secret in $NAMESPACE"; return; }
+    print(f"{k}\t{json.dumps(x)}")
+s = v.get("singleuser") or {}
+np = s.get("networkPolicy") or {}
+eg = np.get("egressAllowRules") or {}
+print("egress\t" + json.dumps(np.get("egress") or [], sort_keys=True, separators=(",", ":")))
+print("closed\t" + json.dumps(np.get("enabled") is True and eg.get("privateIPs") is False))
+env = s.get("extraEnv") or {}
+names = list(env) if isinstance(env, dict) else [e.get("name", "") for e in env]
+print("envsecret\t" + json.dumps(sorted(n for n in names if any(w in n.upper() for w in ("SECRET", "PASS", "TOKEN")))))')" \
+        || { fail gate "no hub Secret in $NAMESPACE"; return; }
     declare -A L=()
     while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
     local sorted_list='import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))'
@@ -212,6 +226,24 @@ for k, x in (("allow_all", a.get("allow_all")), ("admin_users", sorted(a.get("ad
         pass live "the hub pod runs the deployed values"
     else
         fail live "the running hub pod does not carry the Deployment's checksum/secret (rollout pending?)"
+    fi
+
+    local want_egress
+    if ! policy_workbench_egress 2>/dev/null; then
+        fail notebooks "policy_workbench_egress failed (cli.py check)"
+    else
+        want_egress="$(python3 -c 'import json, sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":")))' "$WORKBENCH_EGRESS")"
+        if [[ "${L[closed]}" != true ]]; then
+            fail notebooks "the notebooks' NetworkPolicy is off or allows private addresses"
+        elif [[ "${L[egress]}" != "$want_egress" ]]; then
+            fail notebooks "the notebooks' egress ${L[egress]:0:120} is not the compiled one for IAM_POSTGREST_JWT=${IAM_POSTGREST_JWT:-false}/IAM_DB_ROLES=${IAM_DB_ROLES:-false} (./infra/deploy-workbench.sh)"
+        elif [[ "${L[envsecret]}" != "[]" ]]; then
+            fail notebooks "the notebook environment names ${L[envsecret]}: no credential may reach a notebook pod"
+        elif [[ "$want_egress" == "[]" ]]; then
+            pass notebooks "no platform hop (IAM_POSTGREST_JWT and IAM_DB_ROLES are not both true)"
+        else
+            pass notebooks "Keycloak and config-api only, with each person's own sign-in"
+        fi
     fi
 
     local out code url
@@ -446,6 +478,35 @@ elif [[ "$_ew_sa" != "f" ]]; then
     fail client "edge-wizard has a service account (serviceAccountsEnabled=true) — run ./deploy-infra.sh"
 else
     pass client "device grant on, no service account"
+fi
+
+# A notebook signs its person in on workbench-notebook (IAM 3.2b,
+# k8s/workbench/examples/medcea_data.py): public, device grant only.
+echo ""
+echo -e "${BOLD}workbench-notebook client${NC}  (device sign-in from a notebook)"
+_wn="$($KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+    'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -F " " -v realm="$0"' \
+    "$KEYCLOAK_REALM" 2>/dev/null <<'SQL'
+SELECT c.public_client, c.standard_flow_enabled, c.direct_access_grants_enabled, c.service_accounts_enabled,
+       coalesce((SELECT a.value FROM client_attributes a
+                  WHERE a.client_id = c.id AND a.name = 'oauth2.device.authorization.grant.enabled'), '-'),
+       (SELECT count(*) FROM client_scope_client d JOIN client_scope s ON s.id = d.scope_id
+         WHERE d.client_id = c.id AND d.default_scope AND s.name IN ('groups', 'medcea-identity'))
+  FROM client c JOIN realm r ON r.id = c.realm_id AND r.name = :'realm'
+ WHERE c.client_id = 'workbench-notebook';
+SQL
+)" || _wn=""
+read -r _wn_pub _wn_std _wn_pw _wn_sa _wn_dev _wn_scopes <<<"$_wn"
+if [[ -z "$_wn" ]]; then
+    fail client "workbench-notebook not found in Keycloak's database (or it is not readable) — run ./deploy-infra.sh"
+elif [[ "$_wn_pub" != "t" || "$_wn_std" != "f" || "$_wn_pw" != "f" || "$_wn_sa" != "f" ]]; then
+    fail client "workbench-notebook is not public device-only (public=$_wn_pub standard=$_wn_std password=$_wn_pw service=$_wn_sa) — run ./deploy-infra.sh"
+elif [[ "$_wn_dev" != "true" ]]; then
+    fail client "workbench-notebook has oauth2.device.authorization.grant.enabled=${_wn_dev} — run ./deploy-infra.sh"
+elif [[ "$_wn_scopes" != "2" ]]; then
+    fail client "workbench-notebook lacks the default scopes groups and medcea-identity — run ./deploy-infra.sh"
+else
+    pass client "public, device grant only, groups and medcea-api audience"
 fi
 if curl -sk -m 10 "https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/.well-known/openid-configuration" \
         | grep -q '"device_authorization_endpoint"'; then

@@ -59,6 +59,11 @@ source "$REPO_ROOT/infra/lib-mk8s-remove.sh"
 
 # --- 2. MICROK8S RESET LOGIC ---
 if snap list | grep -q microk8s; then
+    # A wipe deletes every AI workbench home (claim-<name>, under SNAP_COMMON): say
+    # which, and how to keep them, before asking (IAM 3.2b). A cluster too unwell to
+    # answer gets the short "could not list … answer no" warning instead.
+    source "$REPO_ROOT/infra/lib-workbench-homes.sh"
+    KUBECTL="$MK8S kubectl" workbench_homes_warn "${NAMESPACE:-medcea}"
     read -p "🚨 Fully wipe MicroK8s and reinstall? (y/N): " K8S_WIPE
     if [[ "$K8S_WIPE" =~ ^[Yy]$ ]]; then
         # Remove Juju first so it doesn't leave orphaned controller state

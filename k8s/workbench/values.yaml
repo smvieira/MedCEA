@@ -51,10 +51,46 @@ proxy:
 
 singleuser:
   image:
+    # Pinned (WORKBENCH_IMAGE): JupyterLab 4.6 with the git panel (@jupyterlab/git 0.55)
+    # and nbdime come with the image; a moving tag would change them under people.
     name: ${WORKBENCH_IMAGE_NAME}
     tag: ${WORKBENCH_IMAGE_TAG}
   storage:
+    # claim-<name> keeps the person's home across server restarts and hub-user removals
+    # (delete_pvc false). Deleting the namespace deletes it: every uninstall path warns
+    # first (infra/lib-workbench-homes.sh). Not backed up.
     capacity: ${WORKBENCH_STORAGE}
+    # The example notebooks, read-only inside the home (ConfigMap workbench-examples,
+    # from k8s/workbench/examples/): a person copies one to change it.
+    extraVolumes:
+      - name: medcea-examples
+        configMap:
+          name: workbench-examples
+    extraVolumeMounts:
+      - name: medcea-examples
+        mountPath: /home/jovyan/medcea-examples
+        readOnly: true
+  # Where a notebook signs its person in and reads platform data (medcea_data.py, IAM
+  # 3.2b). Endpoints only: no secret, no token, no database password in the pod.
+  extraEnv:
+    MEDCEA_KEYCLOAK: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}"
+    MEDCEA_API: "http://config-api.${NAMESPACE}.svc.cluster.local:3000"
+    MEDCEA_CLIENT_ID: "workbench-notebook"
+    MEDCEA_NOTEBOOK_REPO: "${WORKBENCH_NOTEBOOK_REPO}"
+    PYTHONPATH: "/home/jovyan/medcea-examples"
+  networkPolicy:
+    enabled: true
+    # No private address (no platform service, no database) and no cloud metadata, as
+    # the chart's defaults, stated so health-check iamworkbench can compare them; the
+    # internet stays reachable (pip, GitHub).
+    egressAllowRules:
+      privateIPs: false
+      cloudMetadataServer: false
+      nonPrivateIPs: true
+    # The only platform hops: Keycloak (device sign-in) and config-api (PostgREST with the
+    # person's own token), compiled from the access policy's network.clients.notebooks by
+    # policy_workbench_egress; [] unless IAM_POSTGREST_JWT and IAM_DB_ROLES are true.
+    egress: ${WORKBENCH_EGRESS}
   memory: { guarantee: 512M, limit: 4G }
   cpu: { guarantee: 0.1, limit: 2 }
   defaultUrl: "/lab"
@@ -62,6 +98,15 @@ singleuser:
   # it. Baking these into an image is the better answer at scale — see the
   # infra/workbench.Dockerfile — but this keeps the deployment to one Helm
   # release with no registry to run.
+  # Every start (idempotent) also makes nbstripout the global git filter for *.ipynb,
+  # so a commit never stores cell outputs (telemetry values), and sets git's credential
+  # store (the person's GitHub token stays in their home) unless they chose another
+  # helper. Fail closed (IAM 3.2b): the filter's attribute, its clean command and
+  # `required` are written even when the pip install fails, so git then refuses to
+  # stage a notebook rather than store it whole; and the global core.hooksPath (unless
+  # the person set one) runs medcea-examples/nb_output_guard.py as pre-commit, which
+  # refuses a staged notebook still holding outputs — a repository's own .gitattributes
+  # can turn the filter off, not that hook. A failure never stops the server.
   lifecycleHooks:
     postStart:
       exec:
@@ -69,10 +114,32 @@ singleuser:
           - "sh"
           - "-c"
           - >
-            test -x "$HOME/.local/bin/code-server" ||
-            (pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy &&
-             curl -fsSL https://code-server.dev/install.sh |
-               sh -s -- --method=standalone --prefix="$HOME/.local" ) || true
+            (test -x "$HOME/.local/bin/code-server" ||
+             (pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy &&
+              curl -fsSL https://code-server.dev/install.sh |
+                sh -s -- --method=standalone --prefix="$HOME/.local" )) ;
+            (python3 -c "import nbstripout" 2>/dev/null || pip install --quiet --user nbstripout) ;
+            (python3 -m nbstripout --is-installed --global ||
+             python3 -m nbstripout --install --global) ;
+            (git config --global --get filter.nbstripout.clean >/dev/null ||
+             git config --global filter.nbstripout.clean "python3 -m nbstripout") ;
+            git config --global filter.nbstripout.required true ;
+            ATTRS="$(git config --global --path --get core.attributesFile)" ;
+            [ -n "$ATTRS" ] || { ATTRS="$HOME/.config/git/attributes" ;
+              git config --global core.attributesFile "$ATTRS" ; } ;
+            mkdir -p "$(dirname "$ATTRS")" ;
+            (grep -qx '*.ipynb filter=nbstripout' "$ATTRS" 2>/dev/null ||
+             echo '*.ipynb filter=nbstripout' >> "$ATTRS") ;
+            HOOKS="$HOME/.config/git/hooks" ;
+            (git config --global --get core.hooksPath >/dev/null ||
+             git config --global core.hooksPath "$HOOKS") ;
+            if [ "$(git config --global --path --get core.hooksPath)" = "$HOOKS" ]; then
+              mkdir -p "$HOOKS" &&
+              printf '#!/bin/sh\nexec python3 /home/jovyan/medcea-examples/nb_output_guard.py\n' > "$HOOKS/pre-commit" &&
+              chmod +x "$HOOKS/pre-commit" ; fi ;
+            (git config --global --get credential.helper >/dev/null ||
+             git config --global credential.helper store) ;
+            true
 
 cull:
   enabled: true

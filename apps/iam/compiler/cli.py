@@ -7,6 +7,10 @@
   cli.py compile routes [--file F]      the route table (routes.json of ConfigMap medcea-iam-lib)
   cli.py compile netpol --namespace NS --node-ip IP [--node-ip IP ...]
                                         the NetworkPolicies of `network:` as a JSON List
+  cli.py compile egress CLIENT [--file F]
+                                        the egress hops of network.clients.CLIENT, a JSON list of
+                                        NetworkPolicyEgressRules on one line (the workbench chart's
+                                        singleuser.networkPolicy.egress for `notebooks`, IAM 3.2b)
   cli.py compile grafana [--file F]     Grafana's role_attribute_path (Editor, Viewer or '' = refused,
                                         role_attribute_strict) from the dashboards group's `tool:` block
   cli.py compile jupyterhub --setting allowed_groups|admin_groups [--file F]
@@ -56,7 +60,7 @@ def main(argv=None):
     desc.add_argument("host")
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
-    comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants", "grafana", "jupyterhub", "node-red",
+    comp.add_argument("target", choices=["proxy", "routes", "netpol", "egress", "grants", "grafana", "jupyterhub", "node-red",
                                          "edge-wizard", "pgadmin", "mqtt"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
@@ -129,6 +133,13 @@ def main(argv=None):
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+        return 0
+    if args.cmd == "compile" and args.target == "egress":
+        try:
+            print(json.dumps(netpol.egress(p, args.host or ""), sort_keys=True, separators=(",", ":")))
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
         return 0
     if args.cmd == "compile" and args.target == "grants":
         try:

@@ -30,15 +30,15 @@
 </tbody>
 </table></div>
 <h4>Web applications</h4>
-<p>The Portal is the start page. It shows three cards: Grafana, JupyterHub (AI Workbench) and Administration. The Administration card opens the Platform Management page, which holds the cards for Node-RED, Database Management, MQTT Explorer, System Configuration, Recipe Schedule Manager, Run Monitor and User Manager. pgAdmin and the device onboarding wizard have no Portal card; the table says where to find them.</p>
+<p>The Portal is the start page. It shows three cards: Grafana, JupyterHub (AI Workbench) and Administration. The Administration card opens the Platform Management page, which holds the cards for Node-RED, Database Management, MQTT Explorer, System Configuration, Recipe Schedule Manager, Run Monitor, User Manager and pgAdmin. The device onboarding wizard has no Portal card; the table says where to find it.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Application</th><th>What you do there</th></tr></thead>
 <tbody>
 <tr><td>System Configuration (Config UI)</td><td>Manage locations, production units, zones, devices, recipes and their steps, control models, and which recipes each unit may run. Its tabs are Locations, Units, Devices, Control Models and Recipes. The Onboard Device button on the Devices tab opens the device onboarding wizard.</td></tr>
 <tr><td>Recipe Schedule Manager (Scheduler)</td><td>Start a run now (Run Now), schedule runs (once, hourly, daily, weekly, monthly), stop or retry runs, read run logs.</td></tr>
 <tr><td>Run Monitor</td><td>Live view of active runs, cycle progress, and sensor readings against the step's limits.</td></tr>
-<tr><td>Database Management</td><td>Export the definition and data of the database objects in the groups your role may export; every export is logged. It also links to pgAdmin.</td></tr>
-<tr><td>pgAdmin</td><td>A PostgreSQL web console, for the <span class="role">admin</span> role only. Reached from Database Management.</td></tr>
+<tr><td>Database Management</td><td>Export the definition and data of the database objects in the groups your role may export; every export is logged.</td></tr>
+<tr><td>pgAdmin</td><td>A PostgreSQL web console, for the <span class="role">admin</span> role only. It shows the schema and the configuration, not production data. Reached from the Platform Management page.</td></tr>
 <tr><td>User Manager</td><td>Tabs Requests, Users, Decisions, E-mail settings, Templates, Access review and Change log. Each person sees only the tabs their role may use.</td></tr>
 <tr><td>MQTT Explorer</td><td>Browse, publish and subscribe to MQTT topics in the browser.</td></tr>
 <tr><td>Node-RED editor</td><td>Build and change data flows.</td></tr>

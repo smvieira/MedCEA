@@ -42,6 +42,7 @@ import hashlib
 import json
 import re
 
+from compiler import netpol as _netpol
 from compiler import routes as _routes
 
 SCHEMAS = ("medcea", "medcea_auth", "iam_policy", "iam")
@@ -389,9 +390,17 @@ def rls(p):
 
 
 def token_clients(p, smoke=False):
-    """The clients whose tokens PostgREST accepts: those of the hosts serving config-api."""
-    out = sorted({hd["client"] for hd in p.hosts.values() if "config-api" in hd["serves"]})
+    """The clients whose tokens PostgREST accepts: those of the hosts serving config-api, and
+    the token_client of each network client that reaches it (workbench-notebook, IAM 3.2b)."""
+    out = sorted({hd["client"] for hd in p.hosts.values() if "config-api" in hd["serves"]}
+                 | set(_netpol.token_clients(p, "config-api")))
     return out + (["iam-test"] if smoke else [])
+
+
+def read_only_clients(p):
+    """The token clients whose tokens only read (network.clients.<c>.read_only: the
+    workbench's notebooks, IAM 3.2b): pre_request serves them GET/HEAD only, read-only."""
+    return _netpol.token_clients(p, "config-api", read_only=True)
 
 
 def document(p, smoke=False, without_iam=False):
@@ -469,6 +478,7 @@ COMMENT ON FUNCTION medcea_auth.role_widening(text, text) IS {_lit("policy " + p
 
 def compiled_functions(p, smoke=False, without_iam=False, source="defaults.yaml"):
     clients = token_clients(p, smoke)
+    readers = read_only_clients(p)
     holds = ",\n        ".join(f"({_lit(r)}, {_lit(g)}, {_lit(l)}, {_lit(v)})" for r, g, l, v in policy_holds_table(p))
     groups = ",\n        ".join(f"({_lit(o)}, {_lit(g)})" for o, g in sorted(member_objects(p).items())
                                if not (without_iam and _iam(o)))
@@ -508,6 +518,15 @@ BEGIN
     END IF;
     IF NOT coalesce((c ->> 'azp') = ANY ({_array(clients)}), false) THEN
         RAISE EXCEPTION 'client % may not use the API', c ->> 'azp' USING ERRCODE = '28000';
+    END IF;
+    -- A read-only client (network.clients.<c>.read_only: notebook code, which nobody
+    -- validates) only reads, whatever its person's role may change elsewhere: no write,
+    -- no RPC by POST, and a read-only transaction under whatever GET reaches.
+    IF (c ->> 'azp') = ANY ({_array(readers)}) THEN
+        IF pg_catalog.current_setting('request.method', true) NOT IN ('GET', 'HEAD') THEN
+            RAISE EXCEPTION 'client % may only read', c ->> 'azp' USING ERRCODE = '28000';
+        END IF;
+        SET LOCAL transaction_read_only = on;
     END IF;
     IF NOT coalesce(c -> 'aud' = '"medcea-api"'::jsonb
                     OR (pg_catalog.jsonb_typeof(c -> 'aud') = 'array' AND (c -> 'aud') ? 'medcea-api'), false) THEN

@@ -117,6 +117,18 @@ confirm() {
     export MEDCEA_CONFIRMED=1
 }
 
+# workbench_homes NS — before an uninstall that deletes the namespace: list each AI
+# workbench home it would delete and how to keep it (infra/lib-workbench-homes.sh).
+# Never asks for sudo: without the microk8s group it tries `sudo -n` and otherwise
+# prints a short warning.
+workbench_homes() {
+    source "$SCRIPT_DIR/infra/lib-workbench-homes.sh"
+    command -v microk8s >/dev/null 2>&1 || return 0
+    local k="sudo -n microk8s kubectl"
+    microk8s status --timeout 5 >/dev/null 2>&1 && k="microk8s kubectl"
+    KUBECTL="$k" workbench_homes_warn "${1:-medcea}"
+}
+
 ask_delete() {   # ask_delete "question" → 0 = delete, 1 = keep (the default)
     local ans
     read -r -p "$1 (y/N): " ans || return 1
@@ -167,15 +179,18 @@ uninstall-infra)
     echo "    pgAdmin, portal, MQTT broker and explorer, AI workbench"
     echo "  - every application (config UI, scheduler, monitor, reports, flows)"
     echo "  - ALL data: the database, Keycloak users, Grafana settings, workbench homes"
+    echo "    (each person's notebooks; not backed up)"
     echo "  Kept: MicroK8s (cached images make reinstalling fast), config.env, the platform CA."
     echo ""
+    workbench_homes "$NS"
     confirm reset
     run_stage "Uninstall infrastructure" deploy-infra-reset ./deploy-infra.sh --reset
     echo -e "Reinstall with: ${BOLD}./install.sh${NC}"
     ;;
 uninstall-all)
     echo -e "${RED}${BOLD}TOTAL UNINSTALL — this permanently removes:${NC}"
-    echo "  - every platform service, application and ALL data"
+    echo "  - every platform service, application and ALL data (the AI workbench homes, each"
+    echo "    person's notebooks, included; not backed up)"
     echo "  - MicroK8s (and Juju, if an old install left it), all cluster data and ~/.kube"
     echo "  - the onboarding wizard user service (cea-edge-wizard), edge/.venv"
     echo "  - the MedCEA block in /etc/hosts (name-based domain)"
@@ -184,6 +199,7 @@ uninstall-all)
     echo "  Kept: edge/provisioned/ (the board provisioning audit trail) and edge/firmware/ (download cache)."
     echo "  Not touched: Tailscale, packages installed by the prerequisite check, dialout group membership."
     echo ""
+    workbench_homes "$( (source ./config.env; echo "$NAMESPACE") 2>/dev/null)"
     confirm uninstall
     run_stage "Remove MicroK8s and everything in it" deploy-infra ./deploy-infra.sh --uninstall
 

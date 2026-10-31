@@ -10,7 +10,7 @@
 <tr><td>Portal</td><td><code>portal.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
 <tr><td>Configuration UI (System Configuration)</td><td><code>config.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
 <tr><td>Scheduler (Recipe Schedule Manager)</td><td><code>scheduler.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
-<tr><td>Run Monitor</td><td><code>monitor.&lt;domain&gt;</code></td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Run Monitor</td><td><code>monitor.&lt;domain&gt;</code></td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> for telemetry only (no runs)</td></tr>
 <tr><td>Database Management</td><td><code>dbmgmt.&lt;domain&gt;</code></td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
 <tr><td>User Manager</td><td><code>access.&lt;domain&gt;</code></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
 <tr><td>MQTT Explorer</td><td><code>mqtt-explorer.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
@@ -258,7 +258,7 @@
 
 <h3 id="apps-monitor">Run Monitor</h3>
 <p>The Run Monitor is a live view of every run that has not completed: running, queued (shown as Scheduled) and failed runs. Each run gets its own card. The Monitor is for watching. It has no buttons that change anything.</p>
-<p>The roles admitted are <span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span> and <span class="role">auditor</span>. An <span class="role">operator</span> sees only the units assigned to them, under the same rule as in the Scheduler: runs, readings and actions of other units are not shown, and a reading that carries no zone is never shown to an operator.</p>
+<p>The roles admitted are <span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span> and <span class="role">auditor</span>, and since IAM 3.2b <span class="role">bio_scientist</span> and <span class="role">control_scientist</span>, who may read telemetry but not runs: the Monitor lists runs, so for them it shows "No active runs at this time." or a refusal, and they read telemetry in the <a href="#apps-workbench-data">AI Workbench</a> instead. An <span class="role">operator</span> sees only the units assigned to them, under the same rule as in the Scheduler: runs, readings and actions of other units are not shown, and a reading that carries no zone is never shown to an operator.</p>
 <p>Each card shows the unit code and type, the run number, the recipe, the status and the start time, with three panels:</p>
 <ul>
 <li><strong>Steps</strong>: each step of the recipe, its status and the cycles completed out of the total. The current step is highlighted.</li>
@@ -275,7 +275,6 @@
 <li><span class="role">qp</span> may export runs, telemetry and the audit histories.</li>
 </ul>
 <p>The page offers only the platform's own data tables and views. The account records, unit assignments and access policy that belong to the same groups are not offered here, and the audit histories offered are the platform's approvals, pending changes and row-change log. Sequences and types hold no rows and are offered as definitions to everyone who can open the page.</p>
-<p>The card <strong>pgAdmin</strong> at the top links to pgAdmin, which only <span class="role">admin</span> can use (see <a href="#apps-pgadmin">pgAdmin</a>).</p>
 <ol class="steps">
 <li>In <strong>DDL &amp; Data Export</strong>, tick <strong>DDL</strong> (the table definition) and/or <strong>Data</strong> (the rows) for each object you need. <strong>All DDL</strong>, <strong>All Data</strong> and <strong>Clear</strong> set or clear every box. For views, sequences and types the Data box is disabled; only their definition is exported.</li>
 <li>Keep or change the <strong>File Name</strong>.</li>
@@ -416,13 +415,14 @@ The snapshot never changes afterwards.</li>
 <li>no sign-in for every other role (<span class="role">operator</span>, <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>) and for an account without a platform role.</li>
 </ul>
 <p>A person Grafana refuses sees Grafana's own sign-in page with a message that the login was denied, not the platform's "No access" page. Nobody gets Grafana Admin through the platform sign-in: only Grafana's local break-glass account holds it (see <a href="#admin-credentials">Credentials</a>).</p>
+<p>A Grafana session lasts one hour from sign-in. Then Grafana sends you through the platform sign-in again, usually without asking for your password, and your role is checked again; a tab left open may need a reload.</p>
 <p>The platform's dashboards change only through the repository (<code>apps/report/dashboards/</code>) and the report deploy. An Editor who changes one of them in the browser cannot save it. An Editor can still create a new dashboard, or copy one with "Save as"; such a dashboard is visible to other Grafana users until Grafana restarts, then it is gone. It is not part of the record: put a dashboard that should stay in the repository.</p>
 <div class="warn"><p>Dashboards read through Grafana's own database account, so a viewer sees telemetry of every unit; that is why an <span class="role">operator</span>, who sees only their own units in the Run Monitor, has no Grafana. A viewer can also send Grafana any query that account may run, even though the Explore screen is hidden from Viewers: what limits a viewer is the database account's read access (master data, measurements and runs), not the dashboards.</p></div>
 
 <h3 id="apps-workbench">AI Workbench (JupyterHub)</h3>
 <p>The AI Workbench is JupyterHub: notebooks for data analysis and for developing control algorithms. It is meant for <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> work.</p>
 <ul>
-<li>Each person gets their own workspace with persistent storage. It starts when you sign in and is stopped after an hour without activity; your files are kept.</li>
+<li>Each person gets their own workspace with persistent storage (a home folder of its own). It starts when you sign in and is stopped after an hour without activity; your files are kept. Nothing backs them up: see <a href="#apps-workbench-git">Saving your notebooks to git</a>.</li>
 <li>The workspace opens in JupyterLab, and VS Code is available inside it.</li>
 <li>The first start of a workspace takes longer, because it installs VS Code into your home folder.</li>
 </ul>
@@ -434,8 +434,36 @@ The snapshot never changes afterwards.</li>
 <p>The administrator (<span class="role">admin</span>) is the hub's administrator. From the hub's admin page the administrator can list the workspaces, start and stop them and remove a person from the hub, but cannot open your workspace or your notebooks. Removing a person from the hub, or a role that no longer includes the workbench, keeps your home folder: your files come back if access is restored.</p>
 <p>A workspace you are signed in to lasts an hour at most before the sign-in runs again. If your role changes meanwhile, a tab left open longer may ask you to reload.</p>
 
+<h4 id="apps-workbench-data">Reading platform data from a notebook</h4>
+<p>Every workspace has a read-only folder <code>medcea-examples</code> in its home folder, kept up to date by the platform:</p>
+<ul>
+<li><code>01-connect.ipynb</code>: signs you in and lists the units and zones your role may see.</li>
+<li><code>02-air-temperature.ipynb</code>: a line chart of one zone's air temperature over the last minutes. The unit, the zone and the number of minutes are set at the top.</li>
+<li><code>SAVE_TO_GIT.md</code>: how to keep your notebooks in the research repository (below).</li>
+<li><code>medcea_data.py</code>: the small library the notebooks use (<code>import medcea_data as md</code> works in any notebook).</li>
+<li><code>nb_output_guard.py</code>: the check git runs before each commit (see <a href="#apps-workbench-git">Saving your notebooks to git</a>); you do not run it yourself.</li>
+</ul>
+<p>To change a notebook, copy it into your home folder first (right-click, <strong>Copy</strong>, then <strong>Paste</strong> in your folder, or <strong>File &gt; Save Notebook As</strong>).</p>
+<ol class="steps">
+<li>Open <code>01-connect.ipynb</code> and run the first cell. It shows a link and a short code.</li>
+<li>Open the link in a browser tab, sign in if asked, and confirm the code. The cell finishes once you have; the code is valid for about ten minutes.</li>
+<li>Run the other cells. <code>md.units()</code>, <code>md.zones()</code> and <code>md.measurements(unit, zone, tag="air_temperature", minutes=60)</code> return tables (pandas DataFrames). <code>md.measurements</code> returns at most 50,000 readings, the most recent ones; when the window holds more, it warns, and the chart's title says "latest N readings". Shorten the minutes, or pass a larger <code>limit=</code>.</li>
+</ol>
+<p>The notebook reads <strong>as you</strong>: every request carries your own sign-in, and the database applies your role and its row rules. You read exactly what your role may read in the database, nothing more: <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> read master data, recipes, controllers and telemetry (no runs, no export). A notebook only reads: the database refuses any change made with a notebook sign-in ("may only read"), whatever your role may change in the Configuration UI. A refusal because your role may not read a table says so ("your role may not read this"); signing in again does not change it. The sign-in lives only in the notebook's memory; it is renewed while you work and is gone when the kernel stops or your platform session ends (deactivation ends it within five minutes). Then run <code>md.sign_in()</code> again. Nothing in your workspace holds a platform password.</p>
+<p>The notebooks reach the platform only while the platform verifies each person's sign-in at the database (<code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> both true). Otherwise <code>md.sign_in()</code> says it cannot reach the platform. A workspace started before the administrator turned this on must be stopped and started again (<strong>File &gt; Hub Control Panel</strong>).</p>
+<div class="warn"><p>Telemetry is regulated data, and the scientist roles may read it, not export it. Keep it on the platform: do not copy values into a code or text cell, a file you download, or a message. When you commit a notebook to git, its outputs are removed automatically (below); code and text cells are not checked.</p></div>
+
+<h4 id="apps-workbench-git">Saving your notebooks to git</h4>
+<p>Your home folder is kept when your workspace stops, when the administrator removes you from the hub and when your role loses the workbench, but <strong>nothing backs it up</strong>, and uninstalling the platform deletes it. Keep work that matters in the research repository on GitHub that the administrator set up (<code>WORKBENCH_NOTEBOOK_REPO</code>; a terminal in your workspace prints it with <code>echo "$MEDCEA_NOTEBOOK_REPO"</code>). <code>SAVE_TO_GIT.md</code> has the details.</p>
+<ol class="steps">
+<li>Once: set your name and e-mail for commits (<code>git config --global user.name</code> and <code>user.email</code>), create a fine-grained personal access token on GitHub for that repository only (<em>Contents: Read and write</em>, with an expiry date), and clone the repository into your home folder from a terminal. Git asks for your GitHub username and the token, and keeps the token in your home folder only (<code>~/.git-credentials</code>).</li>
+<li>Save your notebooks inside the cloned folder.</li>
+<li>In the <strong>Git</strong> panel on the left: stage the changed files (<strong>+</strong>), write a message, <strong>Commit</strong>, then <strong>Push</strong>. <strong>Pull</strong> brings in your colleagues' work.</li>
+</ol>
+<p>Each workspace has <code>nbstripout</code> set up as a git filter at every start: a committed notebook keeps its code and text but none of its outputs (tables, charts, printed values), while the notebook on disk keeps them. If <code>nbstripout</code> could not be installed, git refuses to commit a notebook rather than store its outputs. Behind the filter, a check runs before every commit and refuses it while a notebook still holds outputs (for example in a repository whose own settings turn the filter off): the commit fails with "Commit refused" and the file names. Clear the outputs (<strong>Edit &gt; Clear Outputs of All Cells</strong>), save, stage the file again and commit. If you set your own git hooks folder (<code>core.hooksPath</code>), the workspace leaves it alone and this check does not run. Commits carry your own name and GitHub account; the platform holds no GitHub credential.</p>
+
 <h3 id="apps-pgadmin">pgAdmin</h3>
-<p>pgAdmin is a database browser for the administrator, who uses it to see the database schema and the configuration. Only accounts holding <span class="role">admin</span> can sign in, through the <strong>MedCEA sign-in</strong> button; the access policy decides this. Anyone else is sent back to pgAdmin's login page with a message that they are not authorized. pgAdmin checks the role only at sign-in. The portal has no card for it, so open <code>https://pgadmin.&lt;domain&gt;</code> directly.</p>
+<p>pgAdmin is a database browser for the administrator, who uses it to see the database schema and the configuration. Only accounts holding <span class="role">admin</span> can sign in, through the <strong>MedCEA sign-in</strong> button; the access policy decides this. Anyone else is sent back to pgAdmin's login page with a message that they are not authorized. pgAdmin checks the role only at sign-in. Open it from the <strong>pgAdmin</strong> card on the portal's Platform Management page (every role sees the card; only <span class="role">admin</span> gets in), or at <code>https://pgadmin.&lt;domain&gt;</code>.</p>
 <p>pgAdmin uses one of two database logins:</p>
 <ul>
 <li>While the services use their own database roles (<code>IAM_DB_SERVICE_ROLES=true</code>), it connects as <code>rr_admin_login</code>. That login owns nothing and reads only what the <span class="role">admin</span> role may read. It cannot change regulated data or the histories.</li>

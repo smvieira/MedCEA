@@ -1,0 +1,81 @@
+# Node-RED (chart schwarzit/node-red 0.40.0), rendered by deploy-infra.sh with
+#   render k8s/node-red/values.yaml NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM NODE_RED_DOMAIN
+#          NODE_RED_TZ NR_SETTINGS_CHECKSUM
+# into a mktemp file (lib-render.sh). It holds no secret: the client secret and the deploy
+# token come from Secrets node-red-oidc and node-red-admin-tokens.
+image:
+  registry: docker.io
+  repository: nodered/node-red
+  tag: 3.1.9
+# /data on a volume (IAM 3.3 decision): the flows, flows_cred.json and its key, the palette
+# modules and the editor sessions survive a restart. Before, /data was an emptyDir and every
+# restart emptied Node-RED until ./apps/node-red/deploy.sh ran again. Flows edited in the
+# editor now survive too; health-check.sh noderedflows reports where they differ from git.
+# The rolling update keeps its default (RollingUpdate): helm cannot switch a live deployment
+# to Recreate, and hostpath storage lets the old and new pod share the volume for a moment.
+persistence:
+  enabled: true
+  storageClass: microk8s-hostpath
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+# settings.js from ConfigMap node-red-settings (k8s/node-red/settings.js). The chart mounts
+# it by subPath, which never updates in a running pod, so its checksum is on the pod and a
+# change rolls it.
+settings:
+  name: settings
+  configMapName: node-red-settings
+podAnnotations:
+  medcea/settings-checksum: "${NR_SETTINGS_CHECKSUM}"
+
+env:
+  - name: TZ
+    value: "${NODE_RED_TZ}"
+  # adminAuth (settings.js). "off" only by hand, as break-glass: kubectl set env.
+  - name: NR_ADMIN_AUTH
+    value: "on"
+  - name: NR_OIDC_ISSUER
+    value: "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}"
+  - name: NR_OIDC_AUTH_URL
+    value: "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+  - name: NR_OIDC_TOKEN_URL
+    value: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+  - name: NR_OIDC_USERINFO_URL
+    value: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+  - name: NR_OIDC_CALLBACK
+    value: "https://${NODE_RED_DOMAIN}/auth/strategy/callback"
+  - name: NR_OIDC_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef: {name: node-red-oidc, key: client-secret}
+  - name: NR_DEPLOY_TOKEN
+    valueFrom:
+      secretKeyRef: {name: node-red-admin-tokens, key: deploy}
+
+# The OIDC strategy is not in the image: installed at every start into an emptyDir that
+# Node-RED mounts read-only, so code in the editor cannot change it. Without the npm
+# registry the install fails, settings.js finds no module and the editor fails closed
+# (ingest keeps running; health-check.sh noderedauth FAILs).
+initContainers:
+  - name: nr-auth
+    image: docker.io/nodered/node-red:3.1.9
+    command: ["sh", "-c"]
+    args:
+      - >-
+        npm install --prefix /opt/nr-auth --cache /tmp/npm-cache --no-audit --no-fund --omit=dev
+        passport-openidconnect@0.1.2 || echo "nr-auth: npm install failed; the editor will refuse everyone"
+    securityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+    volumeMounts:
+      - {name: nr-auth, mountPath: /opt/nr-auth}
+extraVolumes:
+  - name: nr-auth
+    emptyDir: {}
+  # permissions.json, compiled from the policy. A directory mount, not subPath, so the
+  # kubelet brings a policy change into the running pod (within about a minute).
+  - name: auth-policy
+    configMap: {name: node-red-auth, optional: true}
+extraVolumeMounts:
+  - {name: nr-auth, mountPath: /opt/nr-auth, readOnly: true}
+  - {name: auth-policy, mountPath: /auth-policy, readOnly: true}

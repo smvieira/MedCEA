@@ -515,14 +515,14 @@ a_uninstall_infra() {
     CMD=(./install.sh --uninstall-infra)
     EFFECT="removes every platform service, every application and ALL data (the whole namespace, PVCs included); keeps MicroK8s, config.env and .ca/"
     LOCK=yes; LEVEL=destroy; SUDO=mk8s
-    NOTES=("install.sh then asks you to type 'reset'." "Reinstall: ./install.sh")
+    NOTES=("install.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Reinstall: ./install.sh")
     plan_run
 }
 a_uninstall_all() {
     CMD=(./install.sh --uninstall-all)
     EFFECT="removes MicroK8s and all cluster data, ~/.kube, the /etc/hosts block, the wizard service, edge/.venv, logs/ and credentials files; asks about .ca/ and config.env (with guide.sh's backups of it)"
     LOCK=yes; LEVEL=destroy; SUDO="yes (snap remove, /etc/hosts)"
-    NOTES=("install.sh then asks you to type 'uninstall'. edge/provisioned/ and edge/firmware/ are kept.")
+    NOTES=("install.sh then asks you to type 'uninstall'. edge/provisioned/ and edge/firmware/ are kept." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
     plan_run
 }
 
@@ -551,9 +551,10 @@ a_configure_only() {
 }
 a_workbench() {
     CMD=(./infra/deploy-workbench.sh)
-    EFFECT="cluster (the JupyterHub Helm release)"
+    EFFECT="cluster (the JupyterHub Helm release, ConfigMap workbench-examples); keeps every home volume"
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Needs WORKBENCH_SECRET in config.env (written by ./deploy-infra.sh)."
+           "Notebooks reach Keycloak and config-api (each person's own sign-in) only while IAM_POSTGREST_JWT and IAM_DB_ROLES are true. WORKBENCH_NOTEBOOK_REPO (OWNER/REPO) is the research repository the git guide names; WORKBENCH_IMAGE is pinned."
            "Who may sign in, and who is hub administrator, come from the access policy (IAM_GATES=false: any realm account); a policy that does not compile stops the deploy and leaves the running hub as it is.")
     plan_run
 }
@@ -565,14 +566,14 @@ a_infra_reset() {
         CMD+=(--secrets); EFFECT+="; blanks generated secrets in config.env"
     fi
     LOCK=yes; LEVEL=destroy; SUDO=mk8s
-    NOTES=("deploy-infra.sh then asks you to type 'reset'." "Afterwards both: ./deploy-infra.sh && ./deploy-apps.sh --all")
+    NOTES=("deploy-infra.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Afterwards both: ./deploy-infra.sh && ./deploy-apps.sh --all")
     plan_run
 }
 a_infra_uninstall() {
     CMD=(./deploy-infra.sh --uninstall)
     EFFECT="removes MicroK8s (and Juju), all cluster data, ~/.kube and the /etc/hosts block; keeps config.env, .ca/, edge/.venv, logs"
     LOCK=yes; LEVEL=destroy; SUDO="yes (snap remove, /etc/hosts)"
-    NOTES=("deploy-infra.sh then asks you to type 'yes'. Reinstalling is slow (images are pulled again).")
+    NOTES=("deploy-infra.sh then asks you to type 'yes'. Reinstalling is slow (images are pulled again)." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
     plan_run
 }
 a_infra_help() {
@@ -769,9 +770,22 @@ dep_switch() {   # dep_switch KEY → DEP (true|false); status 1 with REFUSE set
     esac
 }
 
+# The AI workbench notebooks' hops to config-api and Keycloak follow IAM_POSTGREST_JWT and
+# IAM_DB_ROLES, and only ./infra/deploy-workbench.sh renders them (IAM 3.2b): the recipes
+# that change IAM_DB_ROLES run it — first on a rollback (the hop closes before anon gets
+# its grants back), last on an enable. Not while WORKBENCH_ENABLED is false: it would
+# install a workbench nobody asked for.
+workbench_on() {   # leaves CFG_LINE/CFG_VAL as the caller had them
+    local line="$CFG_LINE" val="$CFG_VAL" rc=0
+    cfg_check_one WORKBENCH_ENABLED quiet && [[ "$CFG_VAL" == false ]] && rc=1
+    CFG_LINE="$line"; CFG_VAL="$val"
+    return "$rc"
+}
+
 recipe() {
-    local key="$1" dir="$2" dbroles="" jwt="" svc=""
+    local key="$1" dir="$2" dbroles="" jwt="" svc="" wb=()
     PRE=(); STEPS=(); AFTER=(); REFUSE=""
+    workbench_on && wb=("run ./infra/deploy-workbench.sh")
     case "$key:$dir" in
         IAM_POSTGREST_JWT:rollback|IAM_DB_SERVICE_ROLES:rollback)
             dep_switch IAM_DB_ROLES || return 0; dbroles="$DEP" ;;
@@ -824,8 +838,9 @@ recipe() {
                    "After rotating or removing a realm key, run ./deploy-infra.sh again.") ;;
         IAM_POSTGREST_JWT:rollback)
             if [[ "$dbroles" == true ]]; then
-                STEPS=("set IAM_DB_ROLES false" "run ./apps/database/deploy.sh")
+                STEPS=("set IAM_DB_ROLES false" "${wb[@]}" "run ./apps/database/deploy.sh")
                 AFTER=("IAM_DB_ROLES is true, so it goes back to false first (config-api refuses legacy mode while the database enforces).")
+                (( ${#wb[@]} )) && AFTER+=("The workbench deploy first closes the notebooks' hop to config-api; reading platform data from a notebook stops until both switches are true again.")
             fi
             STEPS+=("set IAM_POSTGREST_JWT false" "run ./apps/frontend/deploy.sh")
             AFTER+=("config-api serves nothing for 0 to ~15 s during the switch, by design."
@@ -844,12 +859,14 @@ recipe() {
             PRE=("Operators have their units, confirmed by qa: ./apps/iam/units.sh list shows no enabled operator without a unit (without one they see nothing and start nothing)."
                  "Every database client logs in as its own role: ./health-check.sh shows dbclients OK."
                  "AUTHENTICATOR_DB_PASS is set and differs from POSTGRES_PASS.")
-            STEPS=("set IAM_DB_ROLES true" "run ./apps/database/deploy.sh")
+            STEPS=("set IAM_DB_ROLES true" "run ./apps/database/deploy.sh" "${wb[@]}")
             AFTER=("If the database deploy refuses, it says 'nothing was changed' but config.env already says true: restore it as shown."
-                   "The deploy restarts config-api itself.") ;;
+                   "The deploy restarts config-api itself.")
+            (( ${#wb[@]} )) && AFTER+=("The workbench deploy, last, opens the notebooks' hop to config-api and Keycloak: scientists, engineers and qa can then read platform data in a notebook with their own sign-in (read only). A running server needs a stop and start for the endpoints.") ;;
         IAM_DB_ROLES:rollback)
-            STEPS=("set IAM_DB_ROLES false" "run ./apps/database/deploy.sh")
+            STEPS=("set IAM_DB_ROLES false" "${wb[@]}" "run ./apps/database/deploy.sh")
             AFTER=("The deploy restarts config-api. health-check iamdbroles WARNs while false, by design."
+                   "The AI workbench notebooks' hop to config-api closes before the database gives anon its old grants back (the database deploy closes it on a running workbench; the workbench deploy brings its settings in line). Reading platform data from a notebook stops until both switches are true again."
                    "While IAM_ENFORCE is true, nothing checks an operator's assigned_run any more (health-check iamenforce FAILs): roll IAM_ENFORCE back too unless this is brief."
                    "While false, nobody can retire a Q-table from the Config UI (config-api runs every token as anon, which may execute no function). If one must start cold meanwhile: medcea.retire_algorithm_state in psql in the PostgreSQL pod, which records no person."
                    "Before a git revert of the Phase 2 code, also run medcea_db_migrations_down_008b.sql with -v full=1 as postgres (by hand; see CLAUDE.md).") ;;

@@ -130,9 +130,13 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  - All deployed services (Postgres, Keycloak, Node-RED, Grafana, JupyterHub)"
     echo "  - MicroK8s and all cluster data (PersistentVolumes, namespaces, pods)"
     echo "  - kubeconfig (~/.kube)"
+    echo "  - every AI workbench home (each person's notebooks; not backed up)"
     echo ""
     # install.sh --uninstall-all has already listed everything and asked.
     if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
+        [[ -f config.env ]] && source config.env
+        source "$SCRIPT_DIR/infra/lib-workbench-homes.sh"
+        KUBECTL="$MK8S kubectl" workbench_homes_warn "${NAMESPACE:-medcea}"
         read -p "Type 'yes' to confirm uninstall: " _CONFIRM
         if [[ "$_CONFIRM" != "yes" ]]; then
             echo "Aborted."
@@ -191,12 +195,15 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo "  - every Helm release in the namespace (Postgres, Keycloak, Grafana,"
     echo "    Node-RED, the oauth2-proxies, JupyterHub)"
     echo "  - the namespace itself: all pods, services, ingresses, ConfigMaps,"
-    echo "    Secrets, and every PersistentVolumeClaim (so: all data)"
+    echo "    Secrets, and every PersistentVolumeClaim (so: all data, the AI workbench"
+    echo "    homes with each person's notebooks included; they are not backed up)"
     echo "  - MicroK8s itself is KEPT, so images stay cached and the rebuild is fast"
     [[ "${2:-}" == "--secrets" ]] && echo "  - the generated secrets in config.env (--secrets)"
     echo ""
     # install.sh --uninstall-infra has already listed everything and asked.
     if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
+        source "$SCRIPT_DIR/infra/lib-workbench-homes.sh"
+        KUBECTL="$MK8S kubectl" workbench_homes_warn "$NAMESPACE"
         read -p "Type 'reset' to confirm: " _CONFIRM
         [[ "$_CONFIRM" == "reset" ]] || { echo "Aborted."; exit 0; }
     fi
@@ -875,6 +882,31 @@ _create_client_multi() {
       | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])" 2>/dev/null || echo ""
 }
 
+# A public client that allows only the device authorization grant (RFC 8628): a
+# notebook in the AI workbench signs its person in with a code shown in the
+# notebook (k8s/workbench/examples/medcea_data.py), so no secret ever sits in a
+# notebook pod or file. No redirect URI, no browser flow, no password grant, no
+# service account; its tokens get the groups claim and the medcea-api audience
+# from the default scopes below, and config-api accepts its azp because the
+# access policy's network.clients.notebooks names it (IAM 3.2b).
+_create_public_device_client() {
+    local CLIENT_ID="$1" TOK UUID BODY
+    BODY="{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":false,\"directAccessGrantsEnabled\":false,\"implicitFlowEnabled\":false,\"serviceAccountsEnabled\":false,\"redirectUris\":[],\"webOrigins\":[],\"attributes\":{\"oauth2.device.authorization.grant.enabled\":\"true\"}}"
+    TOK=$(_kc_token)
+    curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients" \
+      -H "Authorization: Bearer ${TOK}" -H "Content-Type: application/json" -d "$BODY" || true
+    UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${CLIENT_ID}" \
+      -H "Authorization: Bearer ${TOK}" \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null || echo "")
+    if [[ -z "$UUID" ]]; then
+        echo -e "${RED}ERROR: Could not get UUID for client '${CLIENT_ID}'.${NC}" >&2
+        return 1
+    fi
+    # Same full body on every run: an existing client is brought back to it.
+    curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${UUID}" \
+      -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$BODY" || true
+}
+
 echo -e "${YELLOW}  Creating client 'node-red'...${NC}"
 # Two callbacks: the proxy's, and Node-RED's own editor sign-in (adminAuth, IAM 3.3).
 _NODE_RED_SECRET=$(_create_client "node-red" "https://${NODE_RED_DOMAIN}/oauth2/callback" false \
@@ -885,6 +917,9 @@ echo -e "${YELLOW}  Creating client 'workbench'...${NC}"
 # JupyterHub's GenericOAuthenticator talks to Keycloak directly — there is no Dex
 # in between any more, so the callback is the hub's own, not /dex/callback.
 _WORKBENCH_SECRET=$(_create_client "workbench" "https://${WORKBENCH_DOMAIN}/hub/oauth_callback")
+echo -e "${YELLOW}  Creating public client 'workbench-notebook' (device sign-in from a notebook)...${NC}"
+_create_public_device_client "workbench-notebook" \
+    || echo -e "${RED}  Notebooks cannot sign in to read platform data until this client exists.${NC}" >&2
 echo -e "${YELLOW}  Creating client 'portal'...${NC}"
 _PORTAL_SECRET=$(_create_client "portal" "https://${PORTAL_DOMAIN}/oauth2/callback")
 echo -e "${YELLOW}  Creating client 'config'...${NC}"
@@ -1315,7 +1350,8 @@ if [[ -n "$_GS_ID" ]]; then
                      "id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
     # Every client of the access policy's hosts (apps/iam/policy/defaults.yaml);
     # a client asking for "groups" without having the scope gets invalid_scope.
-    for _c in portal access config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana; do
+    # workbench-notebook has no host: it is network.clients.notebooks' token_client.
+    for _c in portal access config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana workbench-notebook; do
         _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
           -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
         [[ -n "$_C_UUID" ]] || continue
@@ -1818,7 +1854,7 @@ echo -e "\n${GREEN}[9/9] Deploying Service Portal...${NC}"
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
 _PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
-render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN \
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
   | $MK8S kubectl apply -n "$NAMESPACE" -f -
 rm -f "$_PORTAL_BG_TMP"

@@ -678,7 +678,8 @@ out = {"allow_all": a.get("allow_all"), "admin_users": sorted(a.get("admin_users
        "allowed": sorted(g.get("allowed_groups") or []), "admins": sorted(g.get("admin_groups") or []),
        "key": g.get("auth_state_groups_key"), "admin_access": (c.get("JupyterHub") or {}).get("admin_access"),
        "delete_pvc": (c.get("KubeSpawner") or {}).get("delete_pvc"),
-       "netpol": np.get("enabled"), "private": eg.get("privateIPs"), "metadata": eg.get("cloudMetadataServer")}
+       "netpol": np.get("enabled"), "private": eg.get("privateIPs"), "metadata": eg.get("cloudMetadataServer"),
+       "egress": json.dumps(np.get("egress") or [], sort_keys=True, separators=(",", ":"))}
 for k, x in out.items():
     print(f"{k}\t{json.dumps(x)}")')" || { _record SKIP "$name" "no hub Secret in $ns (workbench not deployed)"; return; }
     declare -A L=()
@@ -690,6 +691,16 @@ for k, x in out.items():
     [[ "${L[existing]}" != true ]] || problems+=("allow_existing_users is true: every user in the hub database gets in")
     [[ "${L[netpol]}" == true && "${L[private]}" == false && "${L[metadata]}" == false ]] \
         || problems+=("the notebooks' NetworkPolicy is off or allows private addresses")
+    # The notebooks' platform hops (IAM 3.2b): exactly the compiled ones, and none
+    # unless IAM_POSTGREST_JWT and IAM_DB_ROLES are true (policy_workbench_egress).
+    local WORKBENCH_EGRESS="" want_egress
+    if REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh" && REPO_ROOT="$SCRIPT_DIR" policy_workbench_egress 2>/dev/null; then
+        want_egress="$(python3 -c 'import json, sys; print(json.dumps(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":"))))' "$WORKBENCH_EGRESS")"
+        [[ "${L[egress]}" == "$want_egress" ]] \
+            || problems+=("the notebooks' egress hops are not the compiled ones for this IAM_POSTGREST_JWT/IAM_DB_ROLES (./infra/deploy-workbench.sh)")
+    else
+        problems+=("cannot compile the notebooks' egress hops (python3 apps/iam/compiler/cli.py check)")
+    fi
     local tmpl pod
     tmpl="$($KUBECTL get deployment hub -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
     pod="$($KUBECTL get pods -n "$ns" -l component=hub --field-selector=status.phase=Running \

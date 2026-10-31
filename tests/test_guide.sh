@@ -34,6 +34,9 @@
 #  20  IAM_MQTT_PERSON enable and rollback: set, (enable: the iam deploy, which refuses
 #      without iam-api before the broker changes), the infra deploy, then the Explorer's
 #      deploy, in that order, dry
+#  21  IAM_DB_ROLES enable (the database deploy, then the workbench deploy that opens the
+#      notebooks' hop) and rollback (the workbench deploy before the database deploy);
+#      with WORKBENCH_ENABLED=false no workbench step, dry
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -146,9 +149,10 @@ guide $'5\n4\n2\ny\nq\n'
 rc_is "quits with 0" 0
 has   "shows the current value" 'Now: IAM_POSTGREST_JWT="true"'
 has   "step 1 rolls IAM_DB_ROLES back" '1. config.env: IAM_DB_ROLES="false"'
-has   "step 2 is the database deploy" '2. ./apps/database/deploy.sh'
-has   "step 3 sets the switch" '3. config.env: IAM_POSTGREST_JWT="false"'
-has   "step 4 is the frontend deploy" '4. ./apps/frontend/deploy.sh'
+has   "step 2 closes the notebooks' hop" '2. ./infra/deploy-workbench.sh'
+has   "step 3 is the database deploy" '3. ./apps/database/deploy.sh'
+has   "step 4 sets the switch" '4. config.env: IAM_POSTGREST_JWT="false"'
+has   "step 5 is the frontend deploy" '5. ./apps/frontend/deploy.sh'
 has   "prints the config.env change" 'would set'
 has   "with the old and new value" 'IAM_DB_ROLES="true" → IAM_DB_ROLES="false"'
 has   "prints the deploy it would run" '[dry run] would run: ./apps/frontend/deploy.sh'
@@ -358,6 +362,28 @@ has   "step 1 sets the switch back" '1. config.env: IAM_MQTT_PERSON="false"'
 has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
 has   "step 3 is the Explorer's deploy" '3. ./apps/mqtt-explorer/deploy.sh'
 has   "the shared account comes back" "The shared mqtt-explorer account (MQTT_EXPLORER_PASS) is back"
+no_stub
+
+echo "21 IAM_DB_ROLES and the notebooks' hop"
+mkcfg false true
+sed -i 's/^IAM_DB_SERVICE_ROLES=.*/IAM_DB_SERVICE_ROLES="true"/' "$T/config.env"
+guide $'5\n6\n1\ny\ny\nq\n'
+rc_is "quits with 0" 0
+has   "step 1 sets the switch" '1. config.env: IAM_DB_ROLES="true"'
+has   "step 2 is the database deploy" '2. ./apps/database/deploy.sh'
+has   "step 3 opens the notebooks' hop" '3. ./infra/deploy-workbench.sh'
+no_stub
+mkcfg true true
+guide $'5\n6\n2\ny\nq\n'
+rc_is "quits with 0" 0
+has   "step 1 sets the switch back" '1. config.env: IAM_DB_ROLES="false"'
+has   "step 2 closes the notebooks' hop first" '2. ./infra/deploy-workbench.sh'
+has   "step 3 is the database deploy" '3. ./apps/database/deploy.sh'
+no_stub
+sed -i 's/^WORKBENCH_ENABLED=.*/WORKBENCH_ENABLED="false"/' "$T/config.env"
+guide $'5\n6\n2\ny\nq\n'
+has   "no workbench: step 2 is the database deploy" '2. ./apps/database/deploy.sh'
+hasnt "no workbench deploy" 'deploy-workbench.sh'
 no_stub
 
 echo "10 the real config.env"

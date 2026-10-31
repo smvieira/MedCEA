@@ -30,6 +30,11 @@ env:
   # Explore stays Editor-only; a Viewer never edits and an Editor never administers.
   GF_USERS_VIEWERS_CAN_EDIT: "false"
   GF_USERS_EDITORS_CAN_ADMIN: "false"
+  # A Grafana session ends after one hour, used or not; the next visit signs in
+  # through Keycloak again, so a removed role or a deactivation reaches Grafana
+  # within the hour (Grafana does not see Keycloak session ends by itself).
+  GF_AUTH_LOGIN_MAXIMUM_LIFETIME_DURATION: "1h"
+  GF_AUTH_LOGIN_MAXIMUM_INACTIVE_LIFETIME_DURATION: "1h"
 extraSecretMounts:
 - name: datasource-secret
   secretName: grafana-datasource

@@ -92,6 +92,59 @@ print(json.dumps(f"No access to {service}. It is open to: {roles}. Ask an admini
     WORKBENCH_ALLOW_ALL=false WORKBENCH_ADMIN_USERS='[]'
 }
 
+#   policy_workbench_egress || exit 1
+#
+# The notebooks' platform hops (IAM 3.2b): WORKBENCH_EGRESS, the workbench chart's
+# singleuser.networkPolicy.egress, compiled from the access policy's
+# network.clients.notebooks (`cli.py compile egress notebooks`: Keycloak for the
+# device sign-in, config-api for the person's own reads). Only while
+# IAM_POSTGREST_JWT and IAM_DB_ROLES are both true: before that a verified token
+# runs as anon, which still holds the legacy grants on medcea. Otherwise '[]' (no
+# platform hop, as before). A policy that does not compile returns 1.
+policy_workbench_egress() {
+    if [[ "${IAM_POSTGREST_JWT:-false}" == "true" && "${IAM_DB_ROLES:-false}" == "true" ]]; then
+        WORKBENCH_EGRESS="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile egress notebooks)" || return 1
+        [[ "$WORKBENCH_EGRESS" == \[*\] ]] || return 1
+    else
+        WORKBENCH_EGRESS='[]'
+    fi
+}
+
+#   n="$(workbench_egress_close NS)" || exit 1
+#
+# Closes the notebooks' platform hops on the running workbench at once (IAM 3.2b):
+# removes from its NetworkPolicy `singleuser` every egress rule that names a hop of
+# network.clients.notebooks (config-api, Keycloak) and prints how many it removed (0:
+# none open, or no workbench). apps/database/deploy.sh and apps/frontend/deploy.sh call
+# it whenever IAM_DB_ROLES or IAM_POSTGREST_JWT is not true, before they change the
+# database or config-api: only deploy-workbench.sh renders the hops, and a rollback that
+# left them open would let notebook code reach config-api while anon holds the legacy
+# grants. The chart's values keep the hops until ./infra/deploy-workbench.sh renders []
+# (health-check iamworkbench FAILs until then). Returns 1 when the NetworkPolicy or the
+# policy cannot be read, or the patch fails. Needs $KUBECTL and REPO_ROOT.
+workbench_egress_close() {
+    local ns="$1" live hops ops
+    live="$($KUBECTL get networkpolicy singleuser -n "$ns" --ignore-not-found -o json </dev/null)" || return 1
+    if [[ -z "$live" ]]; then echo 0; return 0; fi
+    hops="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile egress notebooks)" || return 1
+    ops="$(python3 -c '
+import json, sys
+key = lambda sel: json.dumps(sel or {}, sort_keys=True)
+hops = {key(peer["podSelector"]["matchLabels"]) for rule in json.loads(sys.argv[1]) for peer in rule["to"]}
+ops = []
+rules = (json.load(sys.stdin).get("spec") or {}).get("egress") or []
+for i in reversed(range(len(rules))):
+    peers = rules[i].get("to") or []
+    if any("podSelector" in p and "namespaceSelector" not in p
+           and key((p["podSelector"] or {}).get("matchLabels")) in hops for p in peers):
+        ops += [{"op": "test", "path": "/spec/egress/%d" % i, "value": rules[i]},
+                {"op": "remove", "path": "/spec/egress/%d" % i}]
+print(json.dumps(ops))' "$hops" <<<"$live")" || return 1
+    if [[ "$ops" == "[]" ]]; then echo 0; return 0; fi
+    $KUBECTL patch networkpolicy singleuser -n "$ns" --type=json -p "$ops" >/dev/null </dev/null || return 1
+    python3 -c 'import json, sys; print(len(json.loads(sys.argv[1])) // 2)' "$ops"
+}
+
 #   gate_error_page RELEASE HOST_VAR ALLOWED_GROUPS
 #
 # The proxy's 403 page: "No access to <service>", the roles that may open it and

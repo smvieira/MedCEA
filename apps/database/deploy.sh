@@ -26,6 +26,9 @@
 # restarts config-api: pre_request() reads the database setting
 # medcea.iam_db_roles, which only new sessions see, and PostgREST keeps pooled
 # sessions for up to 30 min. By hand: kubectl rollout restart deployment/config-api.
+# Under IAM_DB_ROLES=false it first closes the AI workbench notebooks' hops to
+# config-api and Keycloak (workbench_egress_close, IAM 3.2b); ./infra/deploy-workbench.sh
+# opens them again only while both switches are true, live.
 
 set -euo pipefail
 
@@ -44,6 +47,7 @@ source "$REPO_ROOT/infra/lib-render.sh"
 source "$SCRIPT_DIR/lib-db-apply.sh"
 source "$REPO_ROOT/infra/lib-postgrest.sh"   # pgrst_live_mode: which password authenticator gets
 source "$REPO_ROOT/infra/lib-db-roles.sh"    # db_clients_live, db_role_secret (IAM Phase 2.5)
+source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # workbench_egress_close (IAM 3.2b)
 NAMESPACE="${NAMESPACE:-medcea}"
 PG_RELEASE="${PG_RELEASE:-rdbms}"
 CEA_DB="${POSTGRES_DB:-medcea_db}"
@@ -179,6 +183,20 @@ if [[ "$IAM_DB_ROLES" != "true" ]]; then
     [[ -z "$DBA_SERVICE_LOGINS" ]] || log "Roles that may log in (IAM_DB_SERVICE_ROLES=${IAM_DB_SERVICE_ROLES:-false}): ${DBA_SERVICE_LOGINS//,/, }"
 fi
 
+# ── The notebooks' platform hops close before the database relaxes (IAM 3.2b) ──
+# Under IAM_DB_ROLES=false config-api runs every request as anon, which the bundle
+# below gives the legacy grants on medcea again: the AI workbench's notebooks must not
+# reach config-api by then. deploy-workbench.sh opens the hops only while both switches
+# are true, but nothing else re-renders them, so this closes them on the running
+# workbench itself (./infra/deploy-workbench.sh then brings its values in line).
+if [[ "$IAM_DB_ROLES" != "true" ]]; then
+    _closed="$(workbench_egress_close "$NAMESPACE")" || {
+        echo "ERROR: could not close the AI workbench notebooks' hops to config-api and Keycloak (NetworkPolicy singleuser); nothing was changed. Run ./infra/deploy-workbench.sh (IAM_DB_ROLES=false renders none), then this deploy again." >&2
+        exit 1
+    }
+    [[ "$_closed" == 0 ]] || warn "IAM_DB_ROLES=false: closed the AI workbench notebooks' $_closed platform hop(s) (config-api, Keycloak); run ./infra/deploy-workbench.sh to bring its values in line"
+fi
+
 # ── Apply ─────────────────────────────────────────────────────────────────────
 log "Deploying database '$CEA_DB' with IAM_DB_ROLES=$IAM_DB_ROLES..."
 # The mode a new session sees now (empty on a first deploy): read-only.
@@ -212,6 +230,9 @@ if [[ "${PREV_DB_ROLES:-false}" != "$IAM_DB_ROLES" ]] && [[ -n "$PREV_DB_ROLES" 
     else
         log "IAM_DB_ROLES changed (${PREV_DB_ROLES:-unset} -> $IAM_DB_ROLES); config-api is not deployed, nothing to restart."
     fi
+    # the notebooks' hops open only once deploy-workbench sees both switches live (IAM 3.2b)
+    [[ "$IAM_DB_ROLES" != "true" || "${WORKBENCH_ENABLED:-true}" != "true" ]] \
+        || log "To let the AI workbench's notebooks read platform data with each person's sign-in: ./infra/deploy-workbench.sh"
 fi
 
 # ── Secrets: one per database role; each service reads its own (2.5, infra/lib-db-roles.sh) ──

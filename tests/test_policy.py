@@ -109,6 +109,19 @@ MUTATIONS = {
                                            "MONITOR_DOMAIN serves monitor but is in neither"),
     "wizard cut off from config-api": (_set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui"]),
                                        "ONBOARD_DOMAIN serves config-api"),
+    "scientist exports telemetry": (_set(["matrix", "measurements", "bio_scientist"], ["R", "X"]), "I5"),
+    "notebooks reach config-api, which does not admit them": (
+        _set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui", "node"]),
+        "which does not admit client:notebooks"),
+    "config-api admits notebooks without their egress hop": (
+        lambda d: d["network"]["clients"]["notebooks"]["egress"].pop(0), "which has no egress hop there"),
+    "notebook token client is a host's client": (_set(["network", "clients", "notebooks", "token_client"], "config"),
+                                                 "is a host's client"),
+    "notebook token client without read_only": (_pop(["network", "clients", "notebooks", "read_only"]),
+                                                "needs read_only: true or false"),
+    "notebook hop with pod and selector": (
+        lambda d: d["network"]["clients"]["notebooks"]["egress"][1].__setitem__("pod", "config-api"),
+        "names either pod or selector"),
     "unknown per-level constraint": (_set(["matrix", "runs", "operator", "constraint"], {"R": "own_unit", "O": "nope"}),
                                      "unknown constraint nope"),
     "per-level constraint map with applies_to": (_set(["matrix", "runs", "operator", "applies_to"], ["O"]),
@@ -710,6 +723,21 @@ class GrantsTest(unittest.TestCase):
         self.assertNotIn("'rr_' || own", fn)
         for r, d in grants.people(self.policy).items():
             self.assertIn(f"WHEN '{r}' THEN '{d}'", grants.compiled_functions(self.policy))
+
+    def test_notebook_tokens_only_read(self):
+        # IAM 3.2b review: notebook code is unvalidated; its tokens read, never write
+        self.assertEqual(grants.read_only_clients(self.policy), ["workbench-notebook"])
+        fn = grants.compiled_functions(self.policy)
+        pre = fn[fn.index("FUNCTION medcea_auth.pre_request()"):fn.index("$pre$;")]
+        self.assertIn("(c ->> 'azp') = ANY (ARRAY['workbench-notebook']::text[])", pre)
+        self.assertIn("NOT IN ('GET', 'HEAD')", pre)
+        self.assertIn("'client % may only read'", pre)
+        self.assertIn("SET LOCAL transaction_read_only = on;", pre)
+        # checked before the role is taken, so no write runs as the person's role
+        self.assertLess(pre.index("may only read"), pre.index("SET LOCAL ROLE"))
+        for c in grants.token_clients(self.policy):
+            if c != "workbench-notebook":
+                self.assertNotIn(c, grants.read_only_clients(self.policy))
 
     def test_golden(self):
         body = {"privileges": self.doc["privileges"], "memberships": self.doc["memberships"], "rls": self.doc["rls"]}

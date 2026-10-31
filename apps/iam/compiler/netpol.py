@@ -10,15 +10,25 @@ it on every check):
     config-api); an `unproxied` host as its given source (the edge wizard: node)
   - every proxy but `no_shared_upstreams` reaches each shared upstream (/_account/)
   - a host serving a carried service is in `proxies` or `unproxied`
+  - every `clients` entry has a selector and egress hops; a `pod:` hop names a pod of the
+    section that admits client:<name> on that port; a pod admitting client:<name> is a
+    hop of that client (both sides agree); a `token_client` is not a host's client, and
+    a client with one says `read_only` (true or false)
 
 compile(policy, namespace, node_ips) returns a Kubernetes List of NetworkPolicies, named
 iam-<pod> and labelled medcea/iam-netpol=true, so `kubectl delete netpol -l
 medcea/iam-netpol=true` removes them all (the rollback of IAM plan 1.4). Ingress only:
 a pod selected by one admits exactly the listed sources on the listed ports.
+
+egress(policy, client) returns the NetworkPolicyEgressRules of one `clients` entry, for the
+chart that owns those pods (the workbench's singleuser.networkPolicy.egress, IAM 3.2b).
+token_clients(policy, service) returns the `token_client`s of the clients that reach the
+pod carrying `service` (grants.token_clients: config-api's azp list); read_only=True only
+those whose client says `read_only: true` (pre_request serves them reads only).
 """
 
 LABEL = "medcea/iam-netpol"
-KINDS = ("proxy:", "pod:")
+KINDS = ("proxy:", "pod:", "client:")
 
 
 def _sources(net):
@@ -54,6 +64,8 @@ def check(p):
         if src.startswith("proxy:") and src[6:] in proxies:
             continue
         if src.startswith("pod:") and src[4:] in pods:
+            continue
+        if src.startswith("client:") and src[7:] in (net.get("clients") or {}):
             continue
         errors.append(f"network: pod {name} port {rule.get('port')}: unknown source {src!r}")
 
@@ -97,6 +109,33 @@ def check(p):
             if me.startswith("proxy:") and any(admits(front, me) and admits(pod, f"pod:{front}", port) for front in pods):
                 continue
             errors.append(f"network: {h} serves {svc}, but pod {pod} port {port} admits neither {me} nor a pod {me} reaches")
+    host_clients = {hd["client"] for hd in p.hosts.values()}
+    for c, cd in (net.get("clients") or {}).items():
+        if not cd.get("selector"):
+            errors.append(f"network: client {c} has no selector")
+        if not cd.get("egress"):
+            errors.append(f"network: client {c} opens nothing (no egress hops)")
+        if cd.get("token_client") in host_clients:
+            errors.append(f"network: client {c}: token_client {cd['token_client']} is a host's client")
+        if cd.get("token_client") and not isinstance(cd.get("read_only"), bool):
+            errors.append(f"network: client {c}: a token_client needs read_only: true or false")
+        hops = set()
+        for hop in cd.get("egress") or []:
+            if not isinstance(hop.get("port"), int):
+                errors.append(f"network: client {c}: port {hop.get('port')!r} is not an integer")
+            if ("pod" in hop) == ("selector" in hop):
+                errors.append(f"network: client {c}: a hop names either pod or selector")
+            elif "pod" in hop:
+                if hop["pod"] not in pods:
+                    errors.append(f"network: client {c}: unknown pod {hop['pod']}")
+                elif not admits(hop["pod"], f"client:{c}", hop.get("port")):
+                    errors.append(f"network: client {c} reaches pod {hop['pod']} port {hop.get('port')}, "
+                                  f"which does not admit client:{c}")
+                hops.add((hop["pod"], hop.get("port")))
+        for name, rule, src in _sources(net):
+            if src == f"client:{c}" and (name, rule.get("port")) not in hops:
+                errors.append(f"network: pod {name} port {rule.get('port')} admits client:{c}, "
+                              f"which has no egress hop there")
     skip = set(net.get("no_shared_upstreams") or [])
     for u in p.data.get("shared_upstreams", []):
         if u["service"] not in carrier:
@@ -113,6 +152,8 @@ def _peer(net, src, node_ips):
         return [{"podSelector": {"matchLabels": {"app.kubernetes.io/instance": net["proxies"][src[6:]]}}}]
     if src.startswith("pod:"):
         return [{"podSelector": {"matchLabels": dict(net["pods"][src[4:]]["selector"])}}]
+    if src.startswith("client:"):
+        return [{"podSelector": {"matchLabels": dict(net["clients"][src[7:]]["selector"])}}]
     if src == "ingress":
         return [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": net["ingress_namespace"]}}}]
     if src == "node":
@@ -140,3 +181,27 @@ def compile(p, namespace, node_ips):
                      "ingress": rules},
         })
     return {"apiVersion": "v1", "kind": "List", "items": items}
+
+
+def egress(p, client):
+    """The NetworkPolicyEgressRules of network.clients.<client>: one per hop, TCP only."""
+    net = p.data.get("network") or {}
+    cd = (net.get("clients") or {}).get(client)
+    if cd is None:
+        raise ValueError(f"no network client {client!r}; known: {', '.join(net.get('clients') or {}) or 'none'}")
+    rules = []
+    for hop in cd["egress"]:
+        sel = net["pods"][hop["pod"]]["selector"] if "pod" in hop else hop["selector"]
+        rules.append({"to": [{"podSelector": {"matchLabels": dict(sel)}}],
+                      "ports": [{"protocol": "TCP", "port": hop["port"]}]})
+    return rules
+
+
+def token_clients(p, service, read_only=False):
+    """The token_client of every network client with a hop to the pod carrying `service`;
+    read_only: only the clients that say `read_only: true`."""
+    net = p.data.get("network") or {}
+    carriers = {name for name, pd in (net.get("pods") or {}).items() if service in (pd.get("carries") or {})}
+    return sorted({cd["token_client"] for cd in (net.get("clients") or {}).values()
+                   if cd.get("token_client") and any(h.get("pod") in carriers for h in cd.get("egress") or [])
+                   and (cd.get("read_only") is True or not read_only)})

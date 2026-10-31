@@ -19,6 +19,8 @@
 #   P1–P11, P15  tests/iam_postgrest_flow.py against config-api's ClusterIP: anon and
 #                refusals, signatures, audience, expiry, algorithm confusion, the role
 #                claim, attribution of writes, azp/role/typ refusals, the readiness probe
+#   P17          (true) a notebook token (azp workbench-notebook) only reads: PATCH and
+#                POST /rpc are 403 'may only read' for a role that may write, GET is served
 #   P16          the same through nginx:1.27-alpine with config-ui-nginx-jwt.yaml:
 #                forged Authorization, identity headers and cookie never reach SQL
 #                (a probe RPC medcea.iamtest_whoami(), created here, dropped on exit)

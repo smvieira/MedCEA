@@ -259,11 +259,13 @@ public_routes:
 # Who may open a connection to each application pod (IAM plan 1.4). compiler/netpol.py
 # turns this into one Kubernetes NetworkPolicy per pod (label medcea/iam-netpol=true),
 # which Calico enforces: anything not listed here cannot reach the pod — another pod in
-# the cluster, a notebook, a forged request. Ingress only; egress is not restricted.
+# the cluster, a notebook, a forged request. Ingress only; egress is not restricted, except
+# for the pods in `clients` (below), whose own chart restricts it.
 # Sources:
 #   proxy:<HOST>   that host's oauth2-proxy (network.proxies: release name; its pods carry
 #                  app.kubernetes.io/instance=<release>)
 #   pod:<name>     another pod of this section
+#   client:<name>  pods of `clients` (below): calling pods this section does not cover
 #   ingress        ingress-nginx (namespace network.ingress_namespace), for routes that are
 #                  public on purpose
 #   node           the node's own addresses, rendered at deploy time: kubelet probes and
@@ -277,6 +279,14 @@ public_routes:
 #   - every proxy reaches each shared upstream (/_account/), except the hosts listed in
 #     `no_shared_upstreams`, whose proxies do not mount it;
 #   - a host that serves a carried service is in `proxies` or `unproxied`.
+# `clients` are pods outside this section that call its pods (their NetworkPolicy is
+# their own chart's): `selector` picks them, `egress` lists every hop they may open —
+# `pod: <name>` (a pod of this section, which must admit client:<name> on that port) or
+# `selector:` (a pod outside it) — and `cli.py compile egress <name>` renders the list
+# into that chart. `token_client` is the Keycloak client their people sign in on; its
+# tokens are accepted by config-api (medcea_auth.pre_request's azp list) when a hop
+# reaches the pod that carries it; such a client says `read_only: true` (pre_request then
+# serves its tokens GET/HEAD only, in a read-only transaction) or `false`.
 network:
   ingress_namespace: ingress
   unproxied:
@@ -317,7 +327,7 @@ network:
       selector: {app: config-api}
       carries: {config-api: 3000}
       ingress:
-        - {port: 3000, from: ["pod:config-ui", node], why: "PostgREST behind the Config UI's /api/; the edge wizard and platform_db.py on the host; kubelet probe"}
+        - {port: 3000, from: ["pod:config-ui", node, "client:notebooks"], why: "PostgREST behind the Config UI's /api/; the edge wizard and platform_db.py on the host; kubelet probe; workbench notebooks with the person's own token (IAM 3.2b)"}
     access:
       selector: {app: access}
       carries: {access: 8081, access-profile: 8082, access-public: 8080}
@@ -337,6 +347,23 @@ network:
       carries: {}
       ingress:
         - {port: 1880, from: ["proxy:NODE_RED_DOMAIN", node], why: "the Node-RED editor (IAM 3.3); kubelet probes; health-check.sh from the host (deploy.sh's port-forward enters inside the pod)"}
+  clients:
+    notebooks:
+      # The AI workbench's notebook servers (KubeSpawner's labels; release = the helm
+      # release `workbench`). Their chart's singleuser NetworkPolicy allows no private
+      # address; infra/deploy-workbench.sh adds exactly these hops, and only while
+      # IAM_POSTGREST_JWT and IAM_DB_ROLES are true (before, a verified token would run
+      # as anon, which then holds the legacy grants).
+      selector: {app: jupyterhub, component: singleuser-server, release: workbench}
+      token_client: workbench-notebook
+      # Notebook code is unvalidated code: its tokens only read (pre_request refuses any
+      # method but GET/HEAD and makes the transaction read-only), whatever the person's
+      # role may change in the Config UI (IAM 3.2b review).
+      read_only: true
+      egress:
+        - {pod: config-api, port: 3000, why: "PostgREST with the person's own token: the database applies their rr_ role and row security"}
+        - {selector: {app: keycloak}, port: 8080, why: "the device-code sign-in and token refresh (Service keycloak, client workbench-notebook)"}
+      why: "Reading platform data from a notebook, per person (IAM 3.2b; manual: AI workbench)"
 
 # Functions every authenticated path needs. Granted by rule, not by the matrix (plan
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants. `execute`
@@ -1121,9 +1148,16 @@ resource_groups:
     why_this_class: Research environment, outside the production record.
     risk: >
       Notebooks run code. Their pods are isolated by the chart's NetworkPolicy (no egress to
-      private addresses), so the workbench reaches no platform service or database. A hub
-      administrator can stop another person's server or remove their hub user, never open
-      the server, and removing a hub user keeps the person's home volume.
+      private addresses) except for two hops compiled from network.clients.notebooks:
+      Keycloak, for a device-code sign-in on the public client workbench-notebook, and
+      config-api (PostgREST), which a notebook calls with that person's own token, so the
+      database applies the person's rr_ role and row security, nothing more; both open only
+      while IAM_POSTGREST_JWT and IAM_DB_ROLES are true. No pod holds a database password or
+      a stored token. What a person reads into a notebook can still leave through the
+      notebook's own internet access or git (outputs are stripped on commit; code and text
+      cells are not checked). A hub administrator can stop another person's server or
+      remove their hub user, never open the server, and removing a hub user keeps the
+      person's home volume.
     members:
       - {type: ui, host: WORKBENCH_DOMAIN}
     tool:
@@ -1265,6 +1299,8 @@ matrix:
     qc: [R]
     qp: [R, X]
     engineer: [R]
+    bio_scientist: [R]
+    control_scientist: [R]
     auditor: [R, X]
   run_logs:
     operator: {levels: [R], constraint: own_unit}
@@ -1416,7 +1452,7 @@ invariants:
   - {code: I2, kind: matrix, rule: "admin holds nothing but K on groups of class regulated, history or personal, including what it reaches through tools.", rationale: "Administrators keep the system running and have no interest in the data.", cites: "MHRA GxP data integrity §6.16"}
   - {code: I3, kind: matrix, rule: "auditor holds only R or X.", rationale: "An inspector changes nothing.", cites: "Annex 11 §12"}
   - {code: I4, kind: matrix, rule: "On a group with an approval rule, no role holds both (C or U or O) and A.", rationale: "Whoever produces or executes cannot approve.", cites: "PIC/S PI 041-1 §9.3"}
-  - {code: I5, kind: matrix, rule: "bio_scientist and control_scientist hold N on runs, schedules, measurements, mqtt_sense, mqtt_control and controllers_state, including through tools.", rationale: "Research stays outside the production record until the research sandbox exists.", cites: "MedCEA concept, research/production separation"}
+  - {code: I5, kind: matrix, rule: "bio_scientist and control_scientist hold N on runs, schedules, mqtt_sense, mqtt_control and controllers_state, and at most R (never X, C or U) on measurements, including through tools.", rationale: "Research stays outside the production record until the research sandbox exists. Reading telemetry in a notebook with the person's own token is allowed by decision (IAM 3.2b, 2026-10-31); exporting it or writing it is not.", cites: "MedCEA concept, research/production separation"}
   - {code: I6, kind: matrix, rule: "operator and production_manager hold N on research_workbench; engineer holds at most R there.", rationale: "Production roles do not run unvalidated code.", cites: "Annex 11 §4"}
   - {code: I7, kind: matrix, rule: "qp holds no C, U or O anywhere, and holds A on runs.", rationale: "The QP releases and does nothing else.", cites: "EU GMP Annex 16"}
   - {code: I11, kind: matrix, rule: "A tool cannot widen a role's access: for each group a tool reaches, the role must hold the reached levels on that group directly and without a constraint, unless waiver covers it. A mirroring tool acts with the person's own cells and cannot widen by construction.", rationale: "Access through Grafana, Node-RED or an export is still access to the data.", cites: "Annex 11 §12"}

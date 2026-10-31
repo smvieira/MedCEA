@@ -11,6 +11,10 @@ pg_catalog and run in apply.sh; the static part of I10 (ceilings vs waivers) run
 PRODUCER = {"C", "U", "O"}
 SCIENTISTS = ("bio_scientist", "control_scientist")
 I5_GROUPS = ("runs", "schedules", "measurements", "mqtt_sense", "mqtt_control", "controllers_state")
+# The most a scientist may hold on an I5 group (default nothing). measurements R, by decision
+# (IAM 3.2b, 2026-10-31): telemetry is read in a notebook with the person's own token; no X,
+# so nothing is exported through Database Management.
+I5_ALLOWED = {"measurements": {"R"}}
 # The only services that record an approval for a person whose token they verified (I10).
 SERVICE_APPROVERS = {("svc_access", "iam_users"), ("svc_access", "zones"), ("svc_iam", "iam_policy")}
 
@@ -194,7 +198,7 @@ def _matrix_invariants(p, err, note):
                 err(f"I3 auditor holds {sorted(lv - {'R', 'X'})} on {g}")
             if g in approval and lv & PRODUCER and "A" in lv:
                 err(f"I4 {r} holds producer {sorted(lv & PRODUCER)} and A on {g}")
-            if r in SCIENTISTS and g in I5_GROUPS and lv:
+            if r in SCIENTISTS and g in I5_GROUPS and lv - I5_ALLOWED.get(g, set()):
                 err(f"I5 {r} holds {sorted(lv)} on {g}")
             if r in ("operator", "production_manager") and g == "research_workbench" and lv:
                 err(f"I6 {r} holds {sorted(lv)} on research_workbench")

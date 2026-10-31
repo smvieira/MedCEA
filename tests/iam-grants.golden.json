@@ -1049,6 +1049,30 @@
   [
    "rr_bio_scientist",
    "table",
+   "medcea.measurement",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
+   "medcea.msg_actual_points",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
+   "medcea.msg_controls",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
+   "medcea.msg_set_points",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
    "medcea.recipe",
    "SELECT"
   ],
@@ -1068,6 +1092,24 @@
    "rr_bio_scientist",
    "table",
    "medcea.unit_algorithm_params",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
+   "medcea.v_ap_measurements",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
+   "medcea.v_ct_measurements",
+   "SELECT"
+  ],
+  [
+   "rr_bio_scientist",
+   "table",
+   "medcea.v_sp_measurements",
    "SELECT"
   ],
   [
@@ -1109,6 +1151,30 @@
   [
    "rr_control_scientist",
    "table",
+   "medcea.measurement",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
+   "medcea.msg_actual_points",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
+   "medcea.msg_controls",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
+   "medcea.msg_set_points",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
    "medcea.recipe",
    "SELECT"
   ],
@@ -1128,6 +1194,24 @@
    "rr_control_scientist",
    "table",
    "medcea.unit_algorithm_params",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
+   "medcea.v_ap_measurements",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
+   "medcea.v_ct_measurements",
+   "SELECT"
+  ],
+  [
+   "rr_control_scientist",
+   "table",
+   "medcea.v_sp_measurements",
    "SELECT"
   ],
   [
@@ -3450,6 +3534,22 @@
    "name": "iam_s_rr_auditor_0ebc343a",
    "object": "medcea.measurement",
    "role": "rr_auditor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_bio_scientist_0ebc343a",
+   "object": "medcea.measurement",
+   "role": "rr_bio_scientist",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_rr_control_scientist_0ebc343a",
+   "object": "medcea.measurement",
+   "role": "rr_control_scientist",
    "using": "true"
   },
   {

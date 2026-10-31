@@ -9,7 +9,7 @@ appended to DIR/token-sigs (mode 600) so the shell can prove no log holds one.
   keygen DIR NAME                  DIR/NAME.pem (mode 600) and DIR/NAME.jwks.json: a
                                    Keycloak-shaped set (the RS256 key with x5c, plus an
                                    RSA-OAEP "enc" key that infra/jwks-sig.py drops)
-  cases MODE BASE DIR NAME [NGINX] P1–P11, P15 and, with NGINX (the JWT nginx in front of
+  cases MODE BASE DIR NAME [NGINX] P1–P11, P15, P17 and, with NGINX (the JWT nginx in front of
                                    config-api), P16; MODE = IAM_DB_ROLES (false|true)
   rotated BASE DIR NEW OLD         P14: a token of NEW is served, one of OLD refused
   get BASE PATH [DIR NAME]         "STATUS CODE" of one GET, with a valid token of NAME
@@ -272,6 +272,18 @@ def cases(mode, base, d, name, nginx=None):
         check("P11", st == 200 and row.get("updated_by_role") == "production_manager"
               and row.get("updated_by_source") == "token" and row.get("updated_by_sub") == claims["sub"],
               "production_manager + operator: stamped as production_manager (source token)", "%s %s" % (st, b))
+
+    # P17: a notebook token (azp workbench-notebook, IAM 3.2b) only reads: a role that may
+    # write master data is refused a PATCH and an RPC by POST, and still reads
+    if enforcing and writer:
+        tok, _ = s.token((writer,), azp="workbench-notebook")
+        st, b = req(base, "/cea_unit?unit_code=eq.%s" % UNIT, tok, method="PATCH", body={"description": "x"})
+        check("P17", st == 403 and "may only read" in message(b),
+              "notebook token, %s: PATCH 403 'may only read'" % writer, "%s %s" % (st, b))
+        st, b = req(base, "/rpc/iamtest_whoami", tok, method="POST", body={})
+        check("P17", st == 403 and "may only read" in message(b), "notebook token: POST /rpc 403", "%s %s" % (st, b))
+        st, b = req(base, q, tok)
+        check("P17", st == 200, "notebook token: GET served", "%s %s" % (st, str(b)[:80]))
 
     # P15: the readiness probe's anonymous GET / is answered in both modes
     st, b = req(base, "/")
