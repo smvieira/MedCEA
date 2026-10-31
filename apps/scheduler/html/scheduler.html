@@ -265,8 +265,8 @@
       </div>
 
       <div class="logmgmt-note" id="logmgmt-job"></div>
-      <!-- A retention proposal sent from this browser, until its value is in force:
-           where it stands is in the Configuration UI's Approvals tab (My proposals). -->
+      <!-- A reminder of the signed-in person's retention proposal from this browser, until
+           its value is in force: where it stands is in the Configuration UI's Approvals tab. -->
       <div class="logmgmt-note" id="logmgmt-pending" style="display:none;color:#fbbf24"></div>
 
       <div class="logmgmt-actions">
@@ -1243,6 +1243,7 @@ async function saveLogDefaults() {
     toast(d.pending ? 'Proposed — pending qa approval (a retention change applies once a different qa person approves it)'
                     : 'Nothing changed');
     if (d.pending) {
+      await _retentionUserReady;
       rememberRetentionProposal({ ids: d.change_ids || [], compress_days, delete_days, at: new Date().toISOString() });
       loadLogConfig();
     }
@@ -1250,33 +1251,47 @@ async function saveLogDefaults() {
   else await apiFail(res, 'Defaults not saved');
 }
 
-// The proposal the 202 named (change ids), kept in this browser only as a reminder:
-// the scheduler cannot read pending changes, the Configuration UI's Approvals tab
-// shows where each stands (applied, returned, withdrawn, waiting). Cleared once the
-// proposed values are in force or the person dismisses it.
+// The proposal the 202 named (change ids), kept in this browser only as a reminder
+// for the person who sent it (the key carries their username, from the user menu's
+// /_account/api/me; unknown: no reminder). The scheduler cannot read pending
+// changes, so the reminder claims no status: the Configuration UI's Approvals tab
+// (My proposals) shows whether it was applied, returned or withdrawn. Cleared once
+// the proposed values are in force or the person dismisses it.
 const RETENTION_KEY = 'medcea.retentionProposal';
+let _retentionUser = null;
+const _retentionUserReady = fetch('/_account/api/me', { credentials: 'same-origin' })
+  .then(r => r.ok ? r.json() : null)
+  .then(me => { _retentionUser = (me && me.username) || null; })
+  .catch(() => {});
+try { localStorage.removeItem(RETENTION_KEY); } catch (_) {}   // the unkeyed entry of the first build
+function retentionKey() { return _retentionUser ? RETENTION_KEY + ':' + _retentionUser : null; }
 function rememberRetentionProposal(p) {
-  try { localStorage.setItem(RETENTION_KEY, JSON.stringify(p)); } catch (_) {}
+  const k = retentionKey();
+  if (!k) return;
+  try { localStorage.setItem(k, JSON.stringify(p)); } catch (_) {}
 }
 function forgetRetentionProposal() {
-  try { localStorage.removeItem(RETENTION_KEY); } catch (_) {}
+  const k = retentionKey();
+  if (k) { try { localStorage.removeItem(k); } catch (_) {} }
   showRetentionProposal(null);
 }
-function showRetentionProposal(cfg) {
+async function showRetentionProposal(cfg) {
+  await _retentionUserReady;
   const el = document.getElementById('logmgmt-pending');
+  const k = retentionKey();
   let p = null;
-  try { p = JSON.parse(localStorage.getItem(RETENTION_KEY) || 'null'); } catch (_) {}
+  if (k) { try { p = JSON.parse(localStorage.getItem(k) || 'null'); } catch (_) {} }
   if (p && cfg && cfg.compress_days === p.compress_days && (p.delete_days === null || cfg.delete_days === p.delete_days)) {
-    try { localStorage.removeItem(RETENTION_KEY); } catch (_) {}
+    try { localStorage.removeItem(k); } catch (_) {}
     p = null;   // approved: the proposed values are in force
   }
   if (!p) { el.style.display = 'none'; el.innerHTML = ''; return; }
   const esc = v => String(v).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
   const ids = (p.ids || []).map(i => '#' + i).join(', ');
-  el.innerHTML = `Pending: your proposal ${esc(ids)} (compress after ${esc(String(p.compress_days))} days`
+  el.innerHTML = `Reminder: on ${esc(new Date(p.at).toLocaleString())} you proposed ${esc(ids)} (compress after ${esc(String(p.compress_days))} days`
     + (p.delete_days !== null && p.delete_days !== undefined ? `, retention ${esc(String(p.delete_days))} days` : '')
-    + `, sent ${esc(new Date(p.at).toLocaleString())}) waits for a qa person other than you; the values above stay in force until then. `
-    + `<a href="https://$CONFIG_DOMAIN/#approvals" target="_blank" rel="noopener" style="color:#fbbf24">See it in the Approvals queue</a>`
+    + `). The values above are the ones in force. A proposal applies once a qa person other than you approves it; qa may also return it, and you may withdraw it. `
+    + `<a href="https://$CONFIG_DOMAIN/#approvals" target="_blank" rel="noopener" style="color:#fbbf24">See where it stands in the Approvals tab</a>`
     + ` · <a href="#" style="color:#94a3b8" onclick="event.preventDefault();forgetRetentionProposal()">Dismiss</a>`;
   el.style.display = '';
 }

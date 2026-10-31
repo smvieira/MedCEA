@@ -394,7 +394,7 @@ cmd_fulldown() {
     left="$(fx medcea_db -q -tA -c "SELECT string_agg(f, ', ') FROM unnest(ARRAY['medcea.approve_recipe(integer,text)',
               'medcea.approve_algorithm(integer,text)', 'medcea.approve_params(integer,text)', 'medcea.return_change(text,bigint,text)',
               'medcea.withdraw_change(bigint,text)', 'medcea.approval_queue(boolean)', 'medcea.my_approvals()',
-              'medcea.unit_commissioning()', 'medcea._unit_busy(integer)', 'medcea._pending_lock(bigint)',
+              'medcea.unit_commissioning()', 'medcea._unit_busy(integer)', 'medcea._unit_schedulable(integer)', 'medcea._pending_lock(bigint)',
               'medcea.log_commissioning()', 'medcea_auth._changes_since(text,jsonb)']) f
              WHERE pg_catalog.to_regprocedure(f) IS NOT NULL
              UNION ALL SELECT 'trigger commissioning_history_trg' FROM pg_catalog.pg_trigger WHERE tgname = 'commissioning_history_trg'")"

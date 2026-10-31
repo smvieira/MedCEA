@@ -255,7 +255,7 @@ DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), me
     medcea.propose_setting(text, jsonb), medcea.propose_commissioning(integer, boolean, text),
     medcea.approve_recipe(integer, text), medcea.approve_algorithm(integer, text), medcea.approve_params(integer, text),
     medcea.return_change(text, bigint, text), medcea.withdraw_change(bigint, text), medcea.approval_queue(boolean),
-    medcea.my_approvals(), medcea.unit_commissioning(), medcea._unit_busy(integer),
+    medcea.my_approvals(), medcea.unit_commissioning(), medcea._unit_busy(integer), medcea._unit_schedulable(integer),
     medcea._pending_lock(bigint), medcea._pending_open(medcea.pending_change), medcea.log_commissioning(),
     medcea._check_run_params(integer, integer, integer), medcea._check_run_params(integer, integer, integer, integer),
     medcea._check_assigned_run(medcea.recipe_run, text, text, text), medcea._refuse_hidden_run(integer),

@@ -74,6 +74,10 @@ REFUSALS = [
      "'parameter set %: its algorithm % is not approved'", "Approve its control algorithm first."),
     ("medcea.recipe 5 is approved, not a draft",
      "'% % is %, not a draft'", "Already approved or retired meanwhile"),
+    ("approve_change: no pending change 12",
+     "'approve_change: no pending change %'", "no longer exists; the list was refreshed"),
+    ("return_change: no pending change 12",
+     "'return_change: no pending change %'", "no longer exists; the list was refreshed"),
     ("approve_change: change 12 is no longer pending",
      "'approve_change: change % is no longer pending'", "already applied, returned, withdrawn or replaced"),
     ("withdraw_change: change 12 is no longer pending",
@@ -153,6 +157,22 @@ out.ps = [paramSetPayload({ name: ' PID gentle ', algorithm_id: '2', unit_id: ''
           paramSetPayload({ name: 'x', algorithm_id: '', unit_id: '', params: '{}' }),
           paramSetPayload({ name: 'x', algorithm_id: '2', unit_id: '', params: '[1]' }),
           paramSetPayload({ name: 'x', algorithm_id: '2', unit_id: '', params: '{bad' })];
+out.psDup = [paramSetPayload({ name: 'PID gentle', algorithm_id: '2', unit_id: '', params: '{}' }, input.sets, null),
+             paramSetPayload({ name: 'PID gentle', algorithm_id: '2', unit_id: '', params: '{}' }, input.sets, 3),
+             paramSetPayload({ name: 'pid gentle', algorithm_id: '2', unit_id: '', params: '{}' }, input.sets, null),
+             paramSetPayload({ name: 'x'.repeat(121), algorithm_id: '2', unit_id: '', params: '{}' }, [], null),
+             paramSetPayload({ name: 'x'.repeat(120), algorithm_id: '2', unit_id: '', params: '{}' }, [], null)];
+out.copyName = [paramSetCopyName('PID gentle', ['PID gentle']),
+                paramSetCopyName('PID gentle', ['PID gentle', 'PID gentle (copy)', 'PID gentle (copy 2)']),
+                paramSetCopyName('y'.repeat(118), [])];
+out.unitOpts = [paramSetUnitOptions([{ unit_id: 1, unit_code: 'U01' }], 7),
+                paramSetUnitOptions([{ unit_id: 1, unit_code: 'U01' }], 1),
+                paramSetUnitOptions([{ unit_id: 1, unit_code: 'U01' }], null)];
+out.count = [approvalCount(
+  [{ may_approve: true, state: 'waiting' }, { may_approve: true, state: 'returned', kind: 'recipe' },
+   { may_approve: false, state: 'waiting' }, { may_approve: true, state: 'review', kind: 'commissioning' }],
+  [{ state: 'returned', kind: 'recipe' }, { state: 'returned', kind: 'setting' }, { state: 'returned', kind: 'commissioning' },
+   { state: 'waiting', kind: 'params' }]), approvalCount(null, null)];
 out.pending = [pendingSummary({ kind: 'commissioning', state: 'waiting', detail: { current: false, proposed: true } }),
                pendingSummary({ kind: 'commissioning', state: 'waiting', detail: { current: true, proposed: true } }),
                pendingSummary({ kind: 'setting', state: 'waiting', detail: { current: '7', proposed: 14 } })];
@@ -181,7 +201,7 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
             f.write(logic_block(html) + "\n" + friendly_db_error(html) + "\n" + HARNESS)
         data = os.path.join(tmp, "input.json")
         with open(data, "w", encoding="utf-8") as f:
-            json.dump({"rows": RPC_ROWS, "refusals": [r[0] for r in REFUSALS], "codes": cls.codes, "changes": CHANGES,
+            json.dump({"sets": [{"params_id": 3, "name": "PID gentle"}], "rows": RPC_ROWS, "refusals": [r[0] for r in REFUSALS], "codes": cls.codes, "changes": CHANGES,
                        "dbMessages": ["approvals are made by a person signed in through the API, not by db",
                                       "role engineer holds no approval on controllers_state",
                                       "permission denied for function retire_algorithm_state"]}, f)
@@ -274,6 +294,31 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
         self.assertEqual(ok2["body"]["params"], {})
         for r in (noname, noalg, arr, bad):
             self.assertIn("error", r)
+
+    def test_param_set_name_rules(self):
+        dup, own, case, long, edge = self.out["psDup"]
+        self.assertIn("already exists", dup["error"])
+        self.assertEqual(own["body"]["name"], "PID gentle")           # its own name, editing itself
+        self.assertEqual(case["body"]["name"], "pid gentle")         # UNIQUE compares as stored
+        self.assertIn("at most 120", long["error"])
+        self.assertEqual(len(edge["body"]["name"]), 120)
+        first, third, cut = self.out["copyName"]
+        self.assertEqual(first, "PID gentle (copy)")
+        self.assertEqual(third, "PID gentle (copy 3)")
+        self.assertEqual(len(cut), 120)
+        self.assertTrue(cut.endswith(" (copy)"))
+        self.assertIn("uap_name_uk", self.mig)
+
+    def test_param_set_unit_kept(self):
+        gone, present, anyu = self.out["unitOpts"]
+        self.assertEqual(gone[-1], {"value": "7", "label": "#7 (deleted unit)"})
+        self.assertEqual(present, [{"value": "", "label": "Any unit"}, {"value": "1", "label": "U01"}])
+        self.assertEqual(anyu, present)
+
+    def test_approval_count(self):
+        # queue: the approvable waiting row and the review, not the returned draft;
+        # mine: the returned draft, never a returned (closed) proposal
+        self.assertEqual(self.out["count"], [3, 0])
 
     def test_pending_and_states(self):
         self.assertEqual(self.out["pending"], ["commissioning off → on", "no change (already on)", "7 → 14 days"])
@@ -382,10 +427,26 @@ class ApprovalsStatic(unittest.TestCase):
         self.assertIn("location.hash === '#approvals'", self.html)
         self.assertIn("'approvals'].forEach", self.html)
 
+    def test_return_confirm_and_badge(self):
+        self.assertNotIn("leaves the queue until its author changes it", self.html)
+        self.assertIn("stays in the queue, marked returned, until its author changes it", self.html)
+        self.assertIn("const n = approvalCount(queue, mine);", self.html)
+        self.assertIn("paramSetPayload({ name: f['name'].value", self.html)
+        self.assertIn("}, paramSets, psModal.id);", self.html)
+        self.assertIn("paramSetUnitOptions(psUnits, src ? src.unit_id : null)", self.html)
+        self.assertIn("paramSetCopyName(src.name, paramSets.map(x => x.name))", self.html)
+        self.assertNotIn("src.name + ' (copy)'", self.html)
+        self.assertIn("A parameter set with that name already exists.", friendly_db_error(self.html))
+
     def test_scheduler_links_the_queue(self):
         sched = read(os.path.join(ROOT, "apps", "scheduler", "html", "scheduler.html"))
         self.assertIn("https://$CONFIG_DOMAIN/#approvals", sched)
         self.assertIn("showRetentionProposal(d)", sched)
+        # a reminder per signed-in person that claims no live status
+        self.assertIn("RETENTION_KEY + ':' + _retentionUser", sched)
+        self.assertIn("fetch('/_account/api/me'", sched)
+        self.assertNotIn("waits for a qa person other than you; the values above stay in force", sched)
+        self.assertNotIn("localStorage.setItem(RETENTION_KEY,", sched)
         deploy = read(os.path.join(ROOT, "apps", "scheduler", "deploy.sh"))
         self.assertIn("html.replace('\\$CONFIG_DOMAIN', sys.argv[4])", deploy)
 

@@ -66,6 +66,8 @@ REFUSALS = [
      "commissioning: unit UNIT01 has run 7 in S"),
     ("approve_change: unit 4 no longer exists",
      "'approve_change: unit % no longer exists'", "no longer exists"),
+    ("approve_change: no pending change 12",
+     "'approve_change: no pending change %'", "This proposal no longer exists"),
     ("not_own_author: p-qa proposed change 12",
      "'not_own_author: % proposed change %'", "You proposed this change. Another qa person"),
     ("approve_change: change 12 is no longer pending",
@@ -277,6 +279,16 @@ class CommissioningStatic(unittest.TestCase):
         self.assertIn("withdrawRpc(changeId, reason)", self.html)
         f = self.html[self.html.index("async function refreshAfterApproval() {"):]
         self.assertIn("loadUnits()", f[:f.index("\n    }\n")])
+
+    def test_review_refusals_through_commissioning_error(self):
+        f = self.html[self.html.index("function approvalRefusal(r, e) {"):]
+        f = f[:f.index("\n    }\n")]
+        self.assertIn("r.kind === 'commissioning' ? commissioningError(m) : friendlyApprovalError(m)", f)
+        for fn in ("async function approveCurrent()", "async function returnCurrent()"):
+            body = self.html[self.html.index(fn):]
+            body = body[:body.index("\n    }\n")]
+            self.assertIn("approvalRefusal(r, e)", body, fn)
+            self.assertNotIn("friendlyApprovalError(", body, fn)
 
     def test_never_writes_the_flag(self):
         self.assertNotRegex(self.html, r'name="commissioning"')

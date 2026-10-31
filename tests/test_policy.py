@@ -1514,8 +1514,8 @@ class ApproveCommissionTest(unittest.TestCase):
     NEW = ("medcea.approve_recipe(integer,text)", "medcea.approve_algorithm(integer,text)",
            "medcea.approve_params(integer,text)", "medcea.return_change(text,bigint,text)",
            "medcea.withdraw_change(bigint,text)", "medcea.approval_queue(boolean)", "medcea.my_approvals()",
-           "medcea.unit_commissioning()", "medcea._unit_busy(integer)", "medcea._pending_lock(bigint)",
-           "medcea._pending_open(medcea.pending_change)", "medcea.log_commissioning()",
+           "medcea.unit_commissioning()", "medcea._unit_busy(integer)", "medcea._unit_schedulable(integer)",
+           "medcea._pending_lock(bigint)", "medcea._pending_open(medcea.pending_change)", "medcea.log_commissioning()",
            "medcea_auth._changes_since(text,jsonb)")
 
     @classmethod
@@ -1563,8 +1563,8 @@ class ApproveCommissionTest(unittest.TestCase):
             self.assertIn(fn, created, fn)
             self.assertIn(fn, dropped, f"{fn} is not in the down file's -v full=1 DROP list")
             self.assertIn(fn, grants.declared_functions(self.policy) + [
-                "medcea._unit_busy(integer)", "medcea._pending_lock(bigint)", "medcea.log_commissioning()",
-                "medcea._pending_open(medcea.pending_change)"], fn)
+                "medcea._unit_busy(integer)", "medcea._unit_schedulable(integer)", "medcea._pending_lock(bigint)",
+                "medcea.log_commissioning()", "medcea._pending_open(medcea.pending_change)"], fn)
         self.assertIn("'commissioning_history_trg'", self.down)
 
     def test_noted_overloads_have_no_default(self):
@@ -1610,6 +1610,25 @@ class ApproveCommissionTest(unittest.TestCase):
         # every flag change is in the policy hash chain, ENABLE ALWAYS
         self.assertIn("'commissioning_enabled' ELSE 'commissioning_disabled'", self.mig)
         self.assertIn("ALTER TABLE medcea.cea_unit ENABLE ALWAYS TRIGGER commissioning_history_trg", self.mig)
+        # the other half: a run is never scheduled (S) on a flagged unit, and its unit row
+        # is read FOR SHARE first, so approve_change's _unit_busy() sees it
+        sch = self.body("FUNCTION medcea._unit_schedulable(")
+        self.assertIn("FOR SHARE", sch)
+        self.assertIn("schedule its run once commissioning ends", sch)
+        self.assertIn("medcea_auth.policy_refuse(", sch)
+        nrd = self.body("FUNCTION medcea.new_run_defaults(")
+        self.assertLess(nrd.index("medcea._unit_schedulable(NEW.unit_id)"), nrd.index("NEW.recipe_run_status := 'S'"))
+        srs = self.body("FUNCTION medcea.set_run_status(")
+        self.assertIn("IF p_status = 'S' THEN\n        PERFORM medcea._unit_schedulable(r.unit_id);", srs)
+        self.assertLess(srs.index("is not a transition"), srs.index("_unit_schedulable"))
+        self.assertLess(srs.index("_unit_schedulable"), srs.index("_owner_write(true)"))
+        # a log-setting proposal is closed by qa or its proposer only, like commissioning
+        ps = self.body("FUNCTION medcea.propose_setting(")
+        self.assertIn("your token carries no person_id", ps)
+        self.assertIn("pg_advisory_xact_lock(hashtextextended('medcea.scheduler_config:' || p_key, 0))", ps)
+        self.assertIn("waiting.proposed_by_person IS DISTINCT FROM a.person", ps)
+        self.assertIn("already waits for qa", ps)
+        self.assertLess(ps.index("pg_advisory_xact_lock"), ps.index("medcea._pending_open(waiting)"))
         uc = self.body("FUNCTION medcea.unit_commissioning(")
         self.assertIn("medcea_auth.policy_holds(a.role, 'runs', 'R') IS NOT DISTINCT FROM 'free'", uc)
         self.assertIn("last_approved_by := CASE WHEN hist THEN", uc)

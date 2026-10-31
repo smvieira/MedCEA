@@ -945,8 +945,22 @@ SELECT count(*) FILTER (WHERE kind IN ('recipe', 'algorithm', 'params', 'setting
 SELECT 'CHECK|no recipe, controller or setting rows (' || :other || ')', :other = 0;
 SELECT 'CHECK|the commissioning proposal, no_role', :comm = 1;
 SQL
+        # settings_clear: production's data may hold a waiting log-setting proposal of
+        # another person, which propose_setting() now refuses to replace; close each
+        # open one (a withdraw by its proposer, written as the owner; rolled back)
+        settings_clear="
+$(as_postgres)
+SET ROLE medcea_owner;
+INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
+                             approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source)
+SELECT 'medcea.pending_change', jsonb_build_array(pc.change_id), 'iam-db', 'scheduler_settings', 'withdraw',
+       'iam-db: cleared for the probe', array_remove(ARRAY[pc.proposed_by_person], NULL), pc.proposed_by_sub,
+       pc.proposed_by_person, pc.proposed_by_name, pc.proposed_by_role, pc.proposed_by_source
+  FROM medcea.pending_change pc WHERE pc.target = 'medcea.scheduler_config' AND medcea._pending_open(pc);
+RESET ROLE;"
         retention_queue() {  # VALUE
             probe W4 "approval_queue: log_delete_days = $1 reads retention_minimum" ok <<SQL
+$settings_clear
 $(as_token "$T_AD")
 SELECT medcea.propose_setting('log_delete_days', '"$1"') AS chg \gset
 $(as_token "$T_QA")
@@ -986,6 +1000,46 @@ SQL
 $recipe_setup
 $(as_token "$T_QA")
 SELECT medcea.return_change('medcea.recipe', :ra, '  ');
+SQL
+        probe W4 "return of an approved recipe" "22023:not a draft" <<SQL
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.recipe', recipe_id, 'iam-db') FROM medcea.recipe WHERE recipe_name = 'IAMTEST-R1';
+SQL
+        probe W4 "return of a target return_change does not handle" "22023:is not returned by return_change()" <<SQL
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.cea_unit', 1, 'iam-db');
+SQL
+        # a log-setting proposal is closed only by qa or its proposer (review fix): another
+        # person's proposal for the same key is refused while one waits
+        probe W4 "control: an admin replaces their own waiting log-setting proposal" ok <<SQL
+$settings_clear
+$(as_token "$T_AD")
+SELECT medcea.propose_setting('log_delete_days', '90') AS c1 \gset
+SELECT medcea.propose_setting('log_delete_days', '365') AS c2 \gset
+SELECT state AS st1 FROM medcea.my_approvals() WHERE id = :c1 AND kind = 'setting' \gset
+--CHECKS
+SELECT 'CHECK|the first reads superseded', :'st1' = 'superseded';
+SELECT 'CHECK|the second waits', medcea._pending_open(pc) FROM medcea.pending_change pc WHERE change_id = :c2;
+SQL
+        probe W4 "another person's log-setting proposal while one waits" "22023:already waits for qa" <<SQL
+$settings_clear
+$(as_token "$T_AD")
+SELECT medcea.propose_setting('log_delete_days', '90');
+$(as_token "$(claims admin "$UUID_EN2" p-ad2)")
+SELECT medcea.propose_setting('log_delete_days', '365');
+SQL
+        probe W4 "control: another person proposes once qa returned the waiting one" ok <<SQL
+$settings_clear
+$(as_token "$T_AD")
+SELECT medcea.propose_setting('log_delete_days', '90') AS c1 \gset
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.pending_change', :c1, 'iam-db: not now');
+$(as_token "$(claims admin "$UUID_EN2" p-ad2)")
+SELECT medcea.propose_setting('log_delete_days', '365');
+SQL
+        probe W4 "a log-setting proposal from a token without person_id" "42501:carries no person_id" <<SQL
+$(as_token "$(claims admin "$UUID_AD" p-ad | sed 's/"person_id":"p-ad",//')")
+SELECT medcea.propose_setting('log_delete_days', '90');
 SQL
         probe W4 "an engineer cannot return" "42501:permission denied for function return_change" <<SQL
 $recipe_setup
@@ -1085,6 +1139,7 @@ SELECT medcea.retire_algorithm_state(unit_id, 'Q_LEARNING', 'iam-db probe') FROM
 SQL
         retention() {  # VALUE EXPECT
             probe W4 "approve_change: log_delete_days = $1" "$2" <<SQL
+$settings_clear
 $(as_token "$T_AD")
 SELECT medcea.propose_setting('log_delete_days', '"$1"') AS chg \gset
 $(as_token "$T_QA")
@@ -1652,6 +1707,18 @@ SELECT medcea.propose_commissioning(:cu, true, 'iam-db') AS chg \gset
 $(as_token "$T_QAEN2")
 SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
 SQL
+        probe W8 "the proposer's person on a qa account returns" "42501:withdraw it instead" <<SQL
+$new_unit
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, true, 'iam-db') AS chg \gset
+$(as_token "$T_QAEN2")
+SELECT medcea.return_change('medcea.pending_change', :chg, 'iam-db: my own');
+SQL
+        probe W8 "a token without person_id proposes" "42501:carries no person_id" <<SQL
+$new_unit
+$(as_token "$(claims engineer "$UUID_EN" p-en | sed 's/"person_id":"p-en",//')")
+SELECT medcea.propose_commissioning(:cu, true, 'iam-db');
+SQL
         probe W8 "an engineer token cannot approve" "42501:permission denied for function approve_change" <<SQL
 $propose_on
 $(as_token "$T_EN2")
@@ -1722,13 +1789,51 @@ $run_setup
 $(as_token "$T_QA")
 SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
 SQL
-        probe W8 "start_run on a flagged unit" "42501:flagged for commissioning" <<SQL
+        # the other half (review fix): nothing schedules a run on a flagged unit, and the
+        # unit row is read FOR SHARE first (_unit_schedulable), so a scheduling in flight
+        # and approve_change's _unit_busy() are serialised
+        flag_t01="
 $(as_token "$T_EN")
-SELECT medcea.propose_commissioning(unit_id, true, 'iam-db') AS chg FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \gset
+SELECT medcea.propose_commissioning(unit_id, true, 'iam-db') AS chg FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \\gset
 $(as_token "$T_QA")
-SELECT medcea.approve_change('medcea.pending_change', :chg, NULL) \g /dev/null
-$(as_postgres)
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL) \\g /dev/null
+$(as_postgres)"
+        probe W8 "a new run on a flagged unit" "42501:schedule its run once commissioning ends" <<SQL
+$flag_t01
 $run_setup
+SQL
+        probe W8 "a failed run back to S on a flagged unit" "42501:schedule its run once commissioning ends" <<SQL
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.set_run_status(:run, 'F');
+$(as_postgres)
+$flag_t01
+$(as_token "$T_OP")
+SELECT medcea.set_run_status(:run, 'S');
+SQL
+        probe W8 "control: F -> S on an unflagged unit" ok <<SQL
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.set_run_status(:run, 'F');
+SELECT medcea.set_run_status(:run, 'S');
+--CHECKS
+SELECT 'CHECK|back in S', recipe_run_status = 'S' FROM medcea.recipe_run WHERE recipe_run_id = :run;
+SQL
+        probe W8 "control: _unit_schedulable reads the unit FOR SHARE" ok <<SQL
+RESET ROLE;
+SELECT pg_get_functiondef('medcea._unit_schedulable(integer)'::regprocedure) ~ 'FOR SHARE' AS fs,
+       pg_get_functiondef('medcea.new_run_defaults()'::regprocedure) ~ '_unit_schedulable' AS nrd,
+       pg_get_functiondef('medcea.set_run_status(integer, text)'::regprocedure) ~ '_unit_schedulable' AS srs \gset
+--CHECKS
+SELECT 'CHECK|FOR SHARE, called by new_run_defaults and set_run_status', :'fs'::boolean AND :'nrd'::boolean AND :'srs'::boolean;
+SQL
+        # start_run keeps its own check, for a unit flagged with a run already in S
+        # (a flag set by hand by the owner, or before this rule)
+        probe W8 "start_run on a flagged unit" "42501:is flagged for commissioning" <<SQL
+$run_setup
+$(as_postgres)
+SET ROLE medcea_owner;
+UPDATE medcea.cea_unit SET commissioning = true WHERE unit_code = 'IAMT01';
 $(as_token "$T_OP")
 SELECT medcea.start_run(:run);
 SQL

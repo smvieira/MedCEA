@@ -1122,6 +1122,7 @@
       if (/cea_zone_unit_code_ci_uk/.test(msg)) return 'A zone with that code already exists in this unit (codes are compared ignoring case).';
       if (/cea_unit_code_ci_uk|unit_code_uk/.test(msg)) return 'A unit with that code already exists (codes are compared ignoring case).';
       if (/dns_name_uk/.test(msg)) return 'Another device already has that hostname.';
+      if (/uap_name_uk/.test(msg)) return 'A parameter set with that name already exists.';
       // Only the function's own name: the _approver() texts ("approvals are made by a
       // person signed in…", "holds no approval on …") are shared by every approval, so
       // retireAlgorithmState() maps them itself (retireError) and the Approvals tab
@@ -1261,6 +1262,7 @@
       if (/its algorithm \d+ is not approved/.test(m)) return 'Approve its control algorithm first.';
       if (/is (approved|retired), not a draft/.test(m)) return 'Already approved or retired meanwhile; the list was refreshed.';
       if (/was returned and has not changed since/.test(m)) return 'Already returned; it has not changed since.';
+      if (/(approve|return)_change: no pending change \d+/.test(m)) return 'This proposal no longer exists; the list was refreshed.';
       if (/no longer pending/.test(m)) return 'This proposal was already applied, returned, withdrawn or replaced by a newer one; the list was refreshed.';
       if (/applied at once; review it/.test(m)) return 'This change already applied (a narrowing): mark it reviewed instead of returning it.';
       if (/applied at once; propose the opposite/.test(m)) return 'This change already applied; propose the opposite to undo it.';
@@ -1379,10 +1381,48 @@
       return (kind || a.target) + ' #' + (a.row_key || []).join('/');
     }
 
+    // The Approvals tab's count: what the viewer can act on. In the queue, what they may
+    // approve, less the drafts qa returned (they wait for their author); in their own
+    // work, their returned drafts only (a returned proposal is closed for good: its
+    // proposer proposes again, which is a new row).
+    function approvalCount(queue, mine) {
+      return (queue || []).filter(r => r.may_approve && r.state !== 'returned').length
+           + (mine || []).filter(r => r.state === 'returned' && !PENDING_KINDS.includes(r.kind)).length;
+    }
+
+    // unit_algorithm_params.name: varchar(120), UNIQUE (uap_name_uk, compared as stored).
+    const PARAM_SET_NAME_MAX = 120;
+    // A free name for "Copy to a new draft": "<name> (copy)", then "(copy 2)", … ,
+    // the base shortened so the whole stays within PARAM_SET_NAME_MAX.
+    function paramSetCopyName(name, taken) {
+      const used = new Set((taken || []).map(String));
+      const base = String(name || '').trim();
+      for (let i = 1; ; i++) {
+        const suffix = i === 1 ? ' (copy)' : ' (copy ' + i + ')';
+        const cand = base.slice(0, PARAM_SET_NAME_MAX - suffix.length).trimEnd() + suffix;
+        if (!used.has(cand)) return cand;
+      }
+    }
+    // The unit <select> of the parameter-set form: any unit, then the units that exist,
+    // and the set's own unit when it no longer exists (unit_id has no foreign key, by
+    // design), so saving never widens the set to "any unit" behind the user's back.
+    function paramSetUnitOptions(units, keepId) {
+      const out = [{ value: '', label: 'Any unit' }];
+      (units || []).forEach(u => out.push({ value: String(u.unit_id), label: u.unit_code }));
+      if (keepId !== null && keepId !== undefined && keepId !== ''
+          && !(units || []).some(u => String(u.unit_id) === String(keepId)))
+        out.push({ value: String(keepId), label: '#' + keepId + ' (deleted unit)' });
+      return out;
+    }
+
     // The parameter-set form → a row for POST/PATCH /unit_algorithm_params, or the error.
-    function paramSetPayload(f) {
+    // others: the sets loaded on the page; selfId: the set being edited (null: a new one).
+    function paramSetPayload(f, others, selfId) {
       const name = String(f.name || '').trim();
       if (!name) return { error: 'Give the parameter set a name.' };
+      if (name.length > PARAM_SET_NAME_MAX) return { error: 'The name is ' + name.length + ' characters long; at most ' + PARAM_SET_NAME_MAX + '.' };
+      if ((others || []).some(p => p.name === name && p.params_id !== selfId))
+        return { error: 'A parameter set with that name already exists.' };
       const alg = parseInt(f.algorithm_id, 10);
       if (!Number.isInteger(alg)) return { error: 'Choose its algorithm.' };
       let unit = null;
@@ -3769,11 +3809,11 @@
         + psAlgorithms.filter(a => a.status !== 'retired' || (src && a.algorithm_id === src.algorithm_id))
             .map(a => '<option value="' + a.algorithm_id + '">' + esc(a.algorithm_code + ' — ' + a.algorithm_name)
                       + (a.status !== 'approved' ? ' (' + a.status + ')' : '') + '</option>').join('');
-      form.elements['unit_id'].innerHTML = '<option value="">Any unit</option>'
-        + psUnits.map(u => '<option value="' + u.unit_id + '">' + esc(u.unit_code) + '</option>').join('');
+      form.elements['unit_id'].innerHTML = paramSetUnitOptions(psUnits, src ? src.unit_id : null)
+        .map(o => '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join('');
       const filt = document.getElementById('ps-filter-algo').value;
       if (src) {
-        form.elements['name'].value = copyFrom ? src.name + ' (copy)' : src.name;
+        form.elements['name'].value = copyFrom ? paramSetCopyName(src.name, paramSets.map(x => x.name)) : src.name;
         form.elements['algorithm_id'].value = src.algorithm_id;
         form.elements['unit_id'].value = src.unit_id ?? '';
         form.elements['params'].value = JSON.stringify(src.params || {}, null, 2);
@@ -3817,7 +3857,7 @@
       e.preventDefault();
       const f = e.target.elements;
       const r = paramSetPayload({ name: f['name'].value, algorithm_id: f['algorithm_id'].value,
-                                  unit_id: f['unit_id'].value, params: f['params'].value });
+                                  unit_id: f['unit_id'].value, params: f['params'].value }, paramSets, psModal.id);
       if (r.error) { toast(r.error, false); return; }
       try {
         if (psModal.id) {
@@ -3881,7 +3921,7 @@
     }
 
     function setApprovalCount(queue, mine) {
-      const n = (queue || []).filter(r => r.may_approve).length + (mine || []).filter(r => r.state === 'returned').length;
+      const n = approvalCount(queue, mine);
       document.getElementById('appr-count').textContent = n ? '(' + n + ')' : '';
     }
 
@@ -4026,6 +4066,13 @@
       loadRecipes(); loadParamSets(); loadAlgorithms().catch(() => {}); loadUnits();
     }
 
+    // A refusal of the open review: a commissioning change's own texts first (the unit
+    // may be gone meanwhile), which fall back to friendlyApprovalError.
+    function approvalRefusal(r, e) {
+      const m = e.raw || e.message;
+      return r.kind === 'commissioning' ? commissioningError(m) : friendlyApprovalError(m);
+    }
+
     async function approveCurrent() {
       const r = apprCurrent;
       if (!r) return;
@@ -4038,7 +4085,7 @@
         toast(verb + ': ' + approvalLabel(r) + ' (approval #' + id + ')');
         closeApprovalModal();
       } catch(e) {
-        toast('Not approved: ' + friendlyApprovalError(e.raw || e.message), false);
+        toast('Not approved: ' + approvalRefusal(r, e), false);
         closeApprovalModal();
       }
       await refreshAfterApproval();
@@ -4050,7 +4097,7 @@
       const reason = document.getElementById('appr-note').value.trim();
       if (!reason) { toast('Give the reason for returning it in the note field', false); document.getElementById('appr-note').focus(); return; }
       const what = PENDING_KINDS.includes(r.kind) ? 'The proposal is closed and never applies; its proposer may propose again.'
-                                                  : 'The draft stays an editable draft and leaves the queue until its author changes it.';
+                                                  : 'The draft stays an editable draft and stays in the queue, marked returned, until its author changes it.';
       if (!confirm('Return ' + approvalLabel(r) + '?\n\n' + what + '\nThe reason is recorded and shown to the author.')) return;
       const { path, body } = returnRpc(r, reason);
       try {
@@ -4058,7 +4105,7 @@
         toast('Returned: ' + approvalLabel(r) + ' (record #' + id + ')');
         closeApprovalModal();
       } catch(e) {
-        toast('Not returned: ' + friendlyApprovalError(e.raw || e.message), false);
+        toast('Not returned: ' + approvalRefusal(r, e), false);
         closeApprovalModal();
       }
       await refreshAfterApproval();

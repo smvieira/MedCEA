@@ -2365,19 +2365,36 @@ BEGIN
 END $$;
 
 -- propose_setting(key, value): a log-retention change, applied by approve_change().
+-- Like a commissioning proposal, it is closed only by qa (approve_change,
+-- return_change) or by its proposer (withdraw_change): while another person's
+-- proposal for the key waits, a new one is refused. The proposer may replace their
+-- own (the earlier one then reads 'superseded'). A per-key advisory lock
+-- serialises two proposals for the same key.
 CREATE OR REPLACE FUNCTION medcea.propose_setting(p_key text, p_value jsonb) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
-DECLARE a record; v_id bigint;
+DECLARE a record; v_id bigint; waiting medcea.pending_change;
 BEGIN
     SELECT * INTO a FROM medcea_auth.request_actor();
     IF a.sub IS NULL THEN
         RAISE EXCEPTION 'propose_setting: no actor' USING ERRCODE = '42501';
+    END IF;
+    IF a.person IS NULL THEN
+        RAISE EXCEPTION 'propose_setting: your token carries no person_id' USING ERRCODE = '42501';
     END IF;
     IF p_key NOT IN ('log_compress_days', 'log_delete_days') THEN
         RAISE EXCEPTION 'propose_setting: unknown setting %', p_key USING ERRCODE = '22023';
     END IF;
     IF p_value IS NULL OR jsonb_typeof(p_value) NOT IN ('number', 'string') THEN
         RAISE EXCEPTION 'propose_setting: % must be a number', p_key USING ERRCODE = '22023';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('medcea.scheduler_config:' || p_key, 0));
+    SELECT pc.* INTO waiting FROM medcea.pending_change pc
+     WHERE pc.target = 'medcea.scheduler_config' AND pc.row_key = jsonb_build_array(p_key) AND pc.column_name = 'value'
+     ORDER BY pc.change_id DESC LIMIT 1;
+    IF waiting.change_id IS NOT NULL AND medcea._pending_open(waiting)
+       AND waiting.proposed_by_person IS DISTINCT FROM a.person THEN
+        RAISE EXCEPTION 'propose_setting: change % for % already waits for qa', waiting.change_id, p_key
+            USING ERRCODE = '22023';
     END IF;
     INSERT INTO medcea.pending_change (target, row_key, column_name, new_value, reason,
         proposed_by_sub, proposed_by_person, proposed_by_name, proposed_by_role, proposed_by_source)
@@ -2397,6 +2414,24 @@ CREATE OR REPLACE FUNCTION medcea._unit_busy(p_unit_id integer, OUT run_id integ
      ORDER BY r.recipe_run_status = 'R' DESC, r.recipe_run_id LIMIT 1
 $$;
 REVOKE ALL ON FUNCTION medcea._unit_busy(integer) FROM PUBLIC;
+
+-- _unit_schedulable(unit): a run is about to be scheduled (S) on the unit: a new
+-- run (new_run_defaults) or F -> S (set_run_status). The unit row is read FOR
+-- SHARE, as start_run reads it, so a commissioning proposal or approval in flight
+-- (FOR NO KEY UPDATE) finishes first and one that follows sees this run in S
+-- (_unit_busy); a flagged unit refuses it, the other half of "no flag while a run
+-- is running or scheduled". A missing unit is left to the foreign key.
+CREATE OR REPLACE FUNCTION medcea._unit_schedulable(p_unit_id integer) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE flagged boolean; code text;
+BEGIN
+    SELECT u.commissioning, u.unit_code INTO flagged, code FROM medcea.cea_unit u WHERE u.unit_id = p_unit_id FOR SHARE;
+    IF flagged THEN
+        PERFORM medcea_auth.policy_refuse(format('commissioning: unit %s is flagged for commissioning; schedule its run once commissioning ends',
+                                                 code));
+    END IF;
+END $$;
+REVOKE ALL ON FUNCTION medcea._unit_schedulable(integer) FROM PUBLIC;
 
 -- propose_commissioning(unit, on, reason). On waits for a qa person other than the
 -- proposer (approve_change); it is a policy refusal while the unit has a run in R
@@ -3244,6 +3279,9 @@ BEGIN
     IF NOT ((r.recipe_run_status, p_status) IN (('S', 'F'), ('R', 'F'), ('F', 'S'))) THEN
         RAISE EXCEPTION 'set_run_status: % -> % is not a transition', r.recipe_run_status, p_status USING ERRCODE = '22023';
     END IF;
+    IF p_status = 'S' THEN
+        PERFORM medcea._unit_schedulable(r.unit_id);
+    END IF;
     PERFORM medcea_auth._owner_write(true);
     UPDATE medcea.recipe_run SET recipe_run_status = p_status, timestamp_upd = now(),
            recipe_run_end = CASE WHEN p_status = 'F' THEN now() WHEN p_status = 'S' THEN NULL ELSE recipe_run_end END
@@ -3574,6 +3612,7 @@ END $$;
 CREATE OR REPLACE FUNCTION medcea.new_run_defaults() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 BEGIN
+    PERFORM medcea._unit_schedulable(NEW.unit_id);
     NEW.recipe_run_status := 'S';
     NEW.executed_by_sub := NULL; NEW.executed_by_person := NULL; NEW.executed_by_name := NULL;
     NEW.executed_by_role := NULL; NEW.executed_by_source := NULL;
