@@ -36,6 +36,10 @@ hub:
       # `groups` is a default client scope of client workbench, so the claim arrives
       # in the userinfo response without being requested.
       scope: ["openid", "profile", "email"]
+      # OAuthenticator 17 (hub image k8s-hub 4.4.1): allowed_groups, admin_groups and
+      # auth_state_groups_key need manage_groups. The groups come from this sign-in's
+      # auth_model (in memory), so enable_auth_state stays false.
+      manage_groups: true
       auth_state_groups_key: "oauth_user.groups"
       allowed_groups: ${WORKBENCH_ALLOWED_GROUPS}
       admin_groups: ${WORKBENCH_ADMIN_GROUPS}

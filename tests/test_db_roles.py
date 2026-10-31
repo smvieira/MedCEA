@@ -42,6 +42,7 @@ fake_kubectl() {
         "get configmap pgadmin-servers -n "*"-o jsonpath"*) printf '%s' "${FAKE_SERVERS:-}" ;;
         "get configmap pgadmin-servers -n "*) [[ -n "${FAKE_SERVERS+x}" ]] ;;
         "get deployment node-red -n "*) [[ -n "${FAKE_FLOWS+x}" ]] ;;
+        "exec -n "*"deployment/node-red -- sh -c "*) if [[ -n "${FAKE_NOFLOWS:-}" ]]; then echo no; else echo yes; fi ;;
         "exec -n "*"deployment/node-red -- cat /data/flows.json") printf '%s' "${FAKE_FLOWS:-}" ;;
         "get deployment "*"-o jsonpath"*)
             v="FAKE_DEPLOY_${3//-/_}"; [[ -n "${!v+x}" ]] || return 1; printf '%s\n' "${!v}" ;;
@@ -131,6 +132,15 @@ class ClientsLive(unittest.TestCase):
                          FAKE_SERVERS="{}")
         self.assertEqual(rc, 0)
         self.assertEqual(out.splitlines(), ["dbmgmt ?", "node-red ?", "pgadmin ?"])
+
+    def test_node_red_without_flows_is_not_a_client(self):
+        # ./deploy-infra.sh gives Node-RED a fresh persistent /data (IAM 3.3); until
+        # ./apps/node-red/deploy.sh loads the flows it opens no database connection,
+        # and the database deploy (which node-red's deploy runs first) must not refuse.
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_FLOWS="", FAKE_NOFLOWS="1",
+                         FAKE_DEPLOY_scheduler="svc_scheduler")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.splitlines(), ["scheduler svc_scheduler"])
 
     def test_kubectl_down_prints_nothing(self):
         rc, out, _ = lib("db_clients_live medcea-x; echo end", strict=True, FAKE_FAIL="1")

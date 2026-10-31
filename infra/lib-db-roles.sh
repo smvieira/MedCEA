@@ -113,13 +113,20 @@ db_clients_live() {
         echo "$d ${u:-?}"
     done
     if $KUBECTL get deployment node-red -n "$ns" >/dev/null 2>&1; then
+        # A Node-RED with no flows deployed yet (a fresh persistent /data after
+        # ./deploy-infra.sh, before ./apps/node-red/deploy.sh) opens no database
+        # connection: not a live client. "?" stays for a pod that cannot be asked.
+        f="$($KUBECTL exec -n "$ns" deployment/node-red -- sh -c 'test -f /data/flows.json && echo yes || echo no' 2>/dev/null)" || f=""
+        if [[ "$f" == no ]]; then :; else
         u="$($KUBECTL exec -n "$ns" deployment/node-red -- cat /data/flows.json 2>/dev/null \
             | python3 -c 'import json,sys
 try:
     print(next(n.get("user", "") for n in json.load(sys.stdin) if n.get("type") == "postgreSQLConfig"))
 except Exception:
     pass' 2>/dev/null)" || u=""
+        [[ "$f" == yes ]] || u=""
         echo "node-red ${u:-?}"
+        fi
     fi
     if $KUBECTL get secret grafana-datasource -n "$ns" >/dev/null 2>&1; then
         u="$($KUBECTL get secret grafana-datasource -n "$ns" -o jsonpath='{.data.datasources\.yaml}' 2>/dev/null \

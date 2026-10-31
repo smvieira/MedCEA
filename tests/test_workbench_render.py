@@ -84,6 +84,9 @@ class RenderTest(unittest.TestCase):
         self.assertIs(hub["Authenticator"]["allow_existing_users"], False)
         self.assertIs(hub["Authenticator"]["enable_auth_state"], False)
         self.assertEqual(hub["GenericOAuthenticator"]["auth_state_groups_key"], "oauth_user.groups")
+        # OAuthenticator 17 refuses to start (ValueError) with group keys but no
+        # manage_groups: the hub crash-looped on 2026-10-31 without it.
+        self.assertIs(hub["GenericOAuthenticator"]["manage_groups"], True)
         self.assertEqual(hub["GenericOAuthenticator"]["client_secret"], "s3cret")
         left = set(re.findall(r"\$\{?[A-Za-z_]+", text))
         self.assertEqual(left, {"$HOME", "$ATTRS", "$HOOKS"}, "an unrendered variable, or the postStart's shell variables were eaten")
