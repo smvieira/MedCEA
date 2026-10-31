@@ -108,7 +108,8 @@ function showRights(c) {
   var list = function(a) { return a.length ? a.map(function(t) { return '<code>' + esc(t) + '</code>'; }).join(' ') : 'none'; };
   r.innerHTML = '<b>Your rights</b> (from your role; ends ' + esc(new Date(c.expires_at).toLocaleString()) + ')<br>'
     + 'Read: ' + list(c.read) + '<br>Send: ' + list(c.write)
-    + (c.write.length ? '<br>Sending works only to a unit flagged for commissioning with no run in progress (' + esc(c.write_rule) + ').' : '')
+    + (c.write.length ? '<br>Sending works only to a unit flagged for commissioning with no run in progress (' + esc(c.write_rule) + ').'
+                        + ' These are patterns: send to one topic they match, with no + or #.' : '')
     + '<br>A message the broker does not allow is dropped silently: no error appears here.';
   r.hidden = false;
 }
@@ -207,6 +208,8 @@ function renderMsgs(topic) {
 function pub() {
   var topic = document.getElementById('pt').value.trim();
   var payload = document.getElementById('pp').value;
+  // + and # only match topics: Mosquitto closes a connection that publishes to one
+  if (/[+#]/.test(topic)) { status('Not sent: + and # only match topics; send to one, e.g. ' + ROOT + '/UNIT01/ZONE01/control/<tag>', 'err'); return; }
   if (topic && cli && canWrite) cli.publish(topic, payload);
 }
 
