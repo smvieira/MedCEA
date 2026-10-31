@@ -28,6 +28,12 @@ for Editor only (a viewer cannot open Explore). IAM_GATES=false: every enabled a
 in, as Viewer (the test accounts hold no grafana_* role). The role "none" (iam-signin.sh's
 account without a platform role) is refused everywhere, Grafana included.
 
+Node-RED (IAM 3.3) keeps its proxy gate; past it, each admitted account completes the
+editor's own sign-in (/auth/strategy, silent through the Keycloak session), and GET
+/settings with the editor token must show the rights cli.py compile node-red gives its role,
+and POST /nodes (a palette install) must be 401. The token is revoked, never printed.
+IAM_GATES=false keeps Node-RED's and the MQTT Explorer's compiled lists.
+
 The AI workbench (IAM 3.2, JupyterHub, also [tool …]) starts at
 /hub/login?next=/hub/home, so the flow never follows a redirect into /hub/spawn or /user/
 and starts no server: "in" is 200 on /hub/home, "refused" JupyterHub's 403 page with the
@@ -108,7 +114,9 @@ def gated_hosts(p):
         if os.environ.get("IAM_GATES", "true") == "false":
             # apps/access/deploy.sh: admin only, never the portal's pre-policy list;
             # Grafana's pre-3.1 setting: any enabled account, with or without a role
+            # Node-RED and the MQTT Explorer keep their compiled list (IAM 3.3 decision)
             want = (["admin"] if var == "ACCESS_DOMAIN" else
+                    proxies.admitted(p, var) if var in ("NODE_RED_DOMAIN", "MQTTX_DOMAIN") else
                     list(p.roles) + ["none"] if status.startswith("tool") else PRE_POLICY)
         else:
             want = proxies.admitted(p, var)
@@ -202,6 +210,33 @@ def grafana_checks(op, domain, p, user_role, got_role):
         return out
     if explore != (got_role == "Editor"):
         out.append(f"{user_role:18} {domain:24} {got_role} {'may' if explore else 'may not'} open Explore")
+    return out
+
+
+def node_red_checks(op, domain, p, user_role):
+    """IAM 3.3: past the proxy, Node-RED's editor signs the account in again (adminAuth,
+    autoLogin, silent through the Keycloak session) and gives the compiled rights. The
+    editor token is never printed, and is revoked afterwards."""
+    status, url, _ = fetch(op, f"https://{domain}/auth/strategy")
+    parts = urllib.parse.urlsplit(url)
+    token = (urllib.parse.parse_qs(parts.query).get("access_token") or [None])[0]
+    if not token:
+        return [f"{user_role:18} {domain:24} Node-RED's own sign-in gave no editor token (HTTP {status} at {parts.path})"]
+    bearer = {"Authorization": f"Bearer {token}"}
+    out = []
+    code, _, body = fetch(op, f"https://{domain}/settings", headers=bearer)
+    try:
+        got = (json.loads(body).get("user") or {}).get("permissions")
+    except ValueError:
+        got = f"HTTP {code}"
+    want = tools.node_red_permissions(p)["permissions"].get(user_role)
+    if sorted(got or []) != sorted(want or []):
+        out.append(f"{user_role:18} {domain:24} Node-RED editor rights {got}, the policy gives {want}")
+    code, _, _ = fetch(op, f"https://{domain}/nodes", data=b'{"module":"__iam_probe__"}',
+                       headers={**bearer, "Content-Type": "application/json"})
+    if code != 401:
+        out.append(f"{user_role:18} {domain:24} installing a palette module answered {code}, not 401 (packages.txt only)")
+    fetch(op, f"https://{domain}/auth/revoke", data=urllib.parse.urlencode({"token": token}).encode(), headers=bearer)
     return out
 
 
@@ -330,6 +365,8 @@ def main():
             if var == "GRAFANA_DOMAIN":
                 fails.extend(grafana_checks(op, domain, p, u["role"], gf_role))
                 continue
+            if var == "NODE_RED_DOMAIN":
+                fails.extend(node_red_checks(op, domain, p, u["role"]))
             if var == "CONFIG_DOMAIN" and os.environ.get("IAM_POSTGREST_JWT", "false") == "true":
                 fails.extend(postgrest_probes(op, domain, u["role"]))
             for path, service, seen in PROBES.get(var, []):

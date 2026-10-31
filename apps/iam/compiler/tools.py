@@ -1,7 +1,7 @@
 """apps/iam/compiler/tools.py — a tool's own role setting, compiled from a group's `tool:` block.
 
-A tool that signs people in itself (Grafana in IAM 3.1, JupyterHub in 3.2; Node-RED, the
-edge wizard and pgAdmin extend KINDS in 3.3-3.4) cannot read the route table, so its role
+A tool that signs people in itself (Grafana in IAM 3.1, JupyterHub in 3.2, Node-RED's
+editor in 3.3; the edge wizard and pgAdmin extend KINDS in 3.4) cannot read the route table, so its role
 setting is compiled here. The level-to-setting mapping is policy data under the group
 (schema_version 3), not a constant in this file:
 
@@ -23,11 +23,17 @@ from compiler import proxies
 
 # kind -> the settings the policy may name. Grafana's Admin and GrafanaAdmin are left out on
 # purpose: only the local break-glass account holds them (allow_assign_grafana_admin false).
-KINDS = {"grafana": {"Editor", "Viewer"}, "jupyterhub": {"admin", "user"}}
+KINDS = {"grafana": {"Editor", "Viewer"}, "jupyterhub": {"admin", "user"}, "node-red": {"editor"}}
 # (kind, setting) -> the only levels that may give it. JupyterHub's admin is administration
 # (K, which I13 keeps with admin): a hub admin given by R would be every notebook user.
-SETTING_LEVELS = {("jupyterhub", "admin"): {"K"}}
-SERVICE_IDENTITY = {"grafana"}   # kinds that read the platform with their own credential
+# Node-RED's editor deploys code that runs with svc_ingest: Update, never Read.
+SETTING_LEVELS = {("jupyterhub", "admin"): {"K"}, ("node-red", "editor"): {"U"}}
+SERVICE_IDENTITY = {"grafana", "node-red"}   # kinds that read the platform with their own credential
+# Node-RED adminAuth permissions per setting: every editor scope but nodes.write, so palette
+# modules arrive only from apps/node-red/packages.txt in git (IAM 3.3 decision). Node-RED's
+# own "read" is no setting on purpose: GET /flows returns the postgreSQLConfig password.
+NODE_RED_PERMISSIONS = {"editor": ["read", "flows.write", "context.write", "library.write",
+                                   "settings.write", "inject.write", "debug.write"]}
 KEYS = {"kind", "host", "service_identity", "settings", "otherwise", "help"}
 ROLE_NAME = re.compile(r"^[a-z_]+$")   # spliced into JMESPath (Grafana) and config files
 
@@ -80,6 +86,15 @@ def jupyterhub_groups(p, which):
     if which == "admin_groups":
         return sorted(r for s, rs in given if s == "admin" for r in rs)
     raise ValueError(f"unknown JupyterHub setting {which}; known: allowed_groups, admin_groups")
+
+
+def node_red_permissions(p):
+    """ConfigMap node-red-auth's permissions.json: {"group", "policy_version", "permissions":
+    {role: [scope, ...]}, "default": null}. k8s/node-red/settings.js reads it at every editor
+    login; a role not listed gets no editor (adminAuth has no default user)."""
+    g = _one(p, "node-red")
+    perms = {r: NODE_RED_PERMISSIONS[s] for s, roles in settings(p, g) for r in roles}
+    return {"group": g, "policy_version": p.data.get("policy_version"), "permissions": perms, "default": None}
 
 
 def check(p):

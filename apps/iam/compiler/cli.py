@@ -11,6 +11,8 @@
                                         role_attribute_strict) from the dashboards group's `tool:` block
   cli.py compile jupyterhub --setting allowed_groups|admin_groups [--file F]
                                         the AI workbench's JupyterHub setting, as ["a", "b"] (IAM 3.2)
+  cli.py compile node-red [--file F]    Node-RED adminAuth's permissions.json (ConfigMap node-red-auth,
+                                        IAM 3.3) from the flows group's `tool:` block
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
                          [--service-logins ROLE,...]  (additive: login roles allowed to log in, IAM Phase 2.5)
                          [--without-iam]  (schema iam and access_svc absent: leave both out, IAM 2.7)
@@ -50,7 +52,7 @@ def main(argv=None):
     desc.add_argument("host")
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
-    comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants", "grafana", "jupyterhub"])
+    comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants", "grafana", "jupyterhub", "node-red"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
     comp.add_argument("--setting", choices=["allowed_groups", "admin_groups"], help="compile jupyterhub: which list")
@@ -152,6 +154,13 @@ def main(argv=None):
             return 2
         try:
             print(proxies.toml_list(tools.jupyterhub_groups(p, args.setting)))
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "compile" and args.target == "node-red":
+        try:
+            print(json.dumps(tools.node_red_permissions(p), sort_keys=True))
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

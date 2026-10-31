@@ -89,7 +89,7 @@ while read -r _r _n; do [[ -n "$_r" ]] && HOLDERS[$_r]=$_n; done <<<"$_holders"
 
 echo -e "${BOLD}IAM host gates${NC} (namespace $NAMESPACE, realm $KEYCLOAK_REALM)"
 [[ "${IAM_GATES:-true}" == "false" ]] && \
-    echo -e "${YELLOW}IAM_GATES=false: expecting the pre-policy list on every compiled host.${NC}"
+    echo -e "${YELLOW}IAM_GATES=false: expecting the pre-policy list on every compiled host but Node-RED and the MQTT Explorer.${NC}"
 $HOLDERS_OK || echo -e "${YELLOW}Keycloak's database is not readable; the reach check is skipped.${NC}"
 
 # Grafana signs people in itself (IAM 3.1): its gate is its own role setting.

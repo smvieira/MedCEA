@@ -22,9 +22,18 @@
 # compiled from the access policy (apps/iam/policy/defaults.yaml), printed as
 # ["a", "b"] for the values file's ${ALLOWED_GROUPS}. IAM_GATES=false in
 # config.env renders the pre-policy list instead (the rollback of the IAM plan's
-# Phase 0). A broken policy fails the deploy rather than opening a host.
+# Phase 0), except on Node-RED and the MQTT Explorer: they reach telemetry and
+# device control, so they keep the compiled list (["engineer"] if the policy is
+# broken) rather than open to admin (IAM 3.3 decision). A broken policy fails the
+# deploy rather than opening a host.
 policy_groups() {
     if [[ "${IAM_GATES:-true}" == "false" ]]; then
+        case "$1" in
+            NODE_RED_DOMAIN|MQTTX_DOMAIN)
+                echo -e "\033[0;33mWARNING: IAM_GATES=false — $1 keeps the compiled role list (it reaches telemetry).\033[0m" >&2
+                python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile proxy "$1" 2>/dev/null || echo '["engineer"]'
+                return 0 ;;
+        esac
         echo -e "\033[0;33mWARNING: IAM_GATES=false — $1 gets the pre-policy role list, not the access policy.\033[0m" >&2
         echo '["operator", "qa", "auditor", "admin"]'
         return 0

@@ -642,6 +642,75 @@ for k, x in out.items():
 }
 
 # =============================================================================
+# Check: the flows Node-RED runs against git (IAM 3.3, waiver W1's control) — read-only
+# target: NAMESPACE. Reads /data/flows.json as dbclients does; apps/node-red/flows_diff.py
+# prints ids, types, names and key names, never a value (the ingest password is in it).
+# FAIL: a git node missing or changed, or no flows; WARN: nodes or keys outside git.
+# =============================================================================
+check_noderedflows() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" out rc
+    timeout "$TIMEOUT" $KUBECTL get deployment node-red -n "$ns" >/dev/null 2>&1 \
+        || { _record SKIP "$name" "no Node-RED deployment in $ns"; return; }
+    REPO_ROOT="$SCRIPT_DIR"
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/infra/lib-node-red.sh"
+    out="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/node-red -- cat /data/flows.json 2>/dev/null \
+        | python3 -I "$SCRIPT_DIR/apps/node-red/flows_diff.py" diff --git "$SCRIPT_DIR/apps/node-red/flows" \
+            --values <(nr_flow_values "$ns") 2>/dev/null)"; rc=$?
+    out="$(sed 's/^\(OK\|WARN\|FAIL\|UNREADABLE\) //' <<<"$out" | paste -sd ';' | cut -c1-300)"
+    case "$rc" in
+        0) _record OK   "$name" "$out" ;;
+        1) _record WARN "$name" "$out (review them; W1 covers only flows from git)" ;;
+        2) [[ "$out" == *deploy.sh* ]] || out+=" — ./apps/node-red/deploy.sh puts git's flows back; or commit the change to git"
+           _record FAIL "$name" "$out" ;;
+        *) _record FAIL "$name" "cannot read Node-RED's flows ($out)" ;;
+    esac
+}
+
+# =============================================================================
+# Check: Node-RED's editor rights are the policy's (IAM 3.3) — read-only
+# target: NAMESPACE. adminAuth on, ConfigMap node-red-auth = `cli.py compile node-red`,
+# the running settings.js = k8s/node-red/settings.js, the OIDC module installed, and the
+# admin API refuses an unauthenticated call from the host (401). IAM_GATES=false changes
+# nothing: Node-RED keeps its compiled rights.
+# =============================================================================
+check_noderedauth() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" auth live want sum tmpl pod ip code problems=()
+    auth="$(timeout "$TIMEOUT" $KUBECTL get deployment node-red -n "$ns" \
+        -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="NR_ADMIN_AUTH")]}{.value}{end}' 2>/dev/null)" \
+        || { _record SKIP "$name" "no Node-RED deployment in $ns"; return; }
+    if [[ "$auth" != "on" ]]; then
+        _record FAIL "$name" "adminAuth is '${auth:-not set}': any pod and anyone the proxy admits has full editor rights (./deploy-infra.sh)"
+        return
+    fi
+    live="$($KUBECTL get configmap node-red-auth -n "$ns" -o jsonpath='{.data.permissions\.json}' 2>/dev/null)"
+    if ! want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile node-red 2>/dev/null)"; then
+        problems+=("cannot compile the editor rights (python3 apps/iam/compiler/cli.py check)")
+    elif [[ "$(python3 -c 'import json, sys; print(json.loads(sys.argv[1]) == json.loads(sys.argv[2]))' "$live" "$want" 2>/dev/null)" != True ]]; then
+        problems+=("ConfigMap node-red-auth is not the compiled policy (./deploy-infra.sh)")
+    fi
+    REPO_ROOT="$SCRIPT_DIR"
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/infra/lib-node-red.sh"
+    sum="$(nr_settings_checksum)"
+    tmpl="$($KUBECTL get deployment node-red -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.medcea/settings-checksum}' 2>/dev/null)"
+    pod="$($KUBECTL get pods -n "$ns" -l app.kubernetes.io/name=node-red --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.metadata.annotations.medcea/settings-checksum}{"\n"}{end}' 2>/dev/null | sort -u)"
+    [[ "$tmpl" == "$sum" && "$pod" == "$sum" ]] || problems+=("the running settings.js is not k8s/node-red/settings.js (./deploy-infra.sh)")
+    timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/node-red -- \
+        test -f /opt/nr-auth/node_modules/passport-openidconnect/package.json 2>/dev/null \
+        || problems+=("the OIDC module is missing (init container nr-auth: npm registry?): the editor refuses everyone")
+    ip="$($KUBECTL get svc node-red -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
+    code="$(curl -s -o /dev/null -m "$TIMEOUT" -w '%{http_code}' "http://${ip}:1880/flows" 2>/dev/null)"
+    [[ "$code" == 401 ]] || problems+=("GET /flows without a token answered ${code:-nothing}, not 401")
+    if [[ ${#problems[@]} -eq 0 ]]; then
+        _record OK "$name" "adminAuth on; editor rights from the access policy; the admin API refuses anonymous calls"
+    else
+        local IFS=';'; _record FAIL "$name" "${problems[*]}"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -807,6 +876,8 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamenforce)   check_iamenforce "$name" "$target" ;;
         grafanarole)  check_grafanarole "$name" "$target" ;;
         iamworkbench) check_iamworkbench "$name" "$target" ;;
+        noderedflows) check_noderedflows "$name" "$target" ;;
+        noderedauth)  check_noderedauth "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

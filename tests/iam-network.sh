@@ -4,12 +4,13 @@
 #
 #   blocked   a throwaway pod (busybox, no platform labels) cannot reach any application
 #             pod: not through its Services, and not on the pods' internal ports
-#             (Flask on :8082, the file server on :8081) — every attempt times out
+#             (Flask on :8082, the file server on :8081), nor Node-RED's editor and admin
+#             API on :1880 (IAM 3.3) — every attempt times out
 #   control   the same pod does reach Keycloak (no policy of ours), so "blocked" is the
 #             policy and not a pod without a network
 #   allowed   the Config UI's nginx reaches config-api and the scheduler; the host reaches
 #             config-api (edge wizard, platform_db.py); ingress-nginx serves the public
-#             access request form
+#             access request form; the host gets 401 from Node-RED's admin API (adminAuth)
 # Real sessions through every proxy are tests/iam-signin.sh.
 #
 # Takes the deploy lock (it starts a pod, deleted on exit). Run from the repository root:
@@ -18,7 +19,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -74,6 +75,10 @@ podip() {
     local ip; ip="$($KUBECTL get pod -n "$NS" -l "app=$1" -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
     echo "${ip:-no-pod-for-app-$1}"
 }
+nr_podip() {
+    local ip; ip="$($KUBECTL get pod -n "$NS" -l app.kubernetes.io/name=node-red -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
+    echo "${ip:-no-node-red-pod}"
+}
 
 echo ""
 for url in http://scheduler.$NS/ http://monitor.$NS/ http://dbmgmt.$NS/ http://config-ui.$NS/ \
@@ -81,7 +86,8 @@ for url in http://scheduler.$NS/ http://monitor.$NS/ http://dbmgmt.$NS/ http://c
            http://access-public.$NS/register \
            "http://$(podip scheduler):8082/api/runs" "http://$(podip monitor):8082/api/runs" \
            "http://$(podip dbmgmt):8081/objects" "http://$(podip config-ui):8081/devices/" \
-           "http://$(podip access):8080/register" "http://$(podip access):8081/healthz" "http://$(podip access):8082/_account/"; do
+           "http://$(podip access):8080/register" "http://$(podip access):8081/healthz" "http://$(podip access):8082/_account/" \
+           "http://node-red.$NS:1880/flows" "http://$(nr_podip):1880/flows"; do
     r="$(reach "pod/$PROBE" "$PROBE" "$url")"
     case "$r" in
         blocked) pass blocked "$url" ;;
@@ -104,6 +110,10 @@ api_ip="$($KUBECTL get svc -n "$NS" config-api -o jsonpath='{.spec.clusterIP}')"
 code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$api_ip:3000/")"
 [[ "$code" =~ ^[2-4] ]] && pass allowed "host → config-api ($code; the edge wizard's path)" \
     || fail allowed "host cannot reach config-api ($code): onboarding cannot register boards"
+nr_ip="$($KUBECTL get svc -n "$NS" node-red -o jsonpath='{.spec.clusterIP}')"
+code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$nr_ip:1880/flows")"
+[[ "$code" == 401 ]] && pass allowed "host → node-red:1880 (401 without a token: health-check, kubelet)" \
+    || fail allowed "host → node-red:1880/flows answered $code, not 401"
 code="$(curl -sk -o /dev/null -m 6 -w '%{http_code}' "https://$ACCESS_DOMAIN/register")"
 [[ "$code" == 200 ]] && pass allowed "ingress → access-public (https://$ACCESS_DOMAIN/register: $code)" \
     || fail allowed "https://$ACCESS_DOMAIN/register answered $code: the request form is down"

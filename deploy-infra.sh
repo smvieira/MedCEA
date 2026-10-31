@@ -748,6 +748,8 @@ _create_client() {
     # as "off", deletes the service-account user and makes a new one — and the
     # roles granted to the old one (the access client's) are gone.
     local SA_ENABLED="${3:-false}"
+    # A fourth argument adds one more redirect URI (Node-RED's own editor sign-in).
+    local EXTRA_URI="${4:+,\"$4\"}"
     local TOK
     # Keycloak 18+ will not end a session from a plain GET to the logout
     # endpoint — it shows a "Do you want to log out?" confirmation instead, so
@@ -762,7 +764,7 @@ _create_client() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
+      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"${EXTRA_URI}],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
 
     # Look up internal UUID
     local UUID
@@ -786,7 +788,7 @@ _create_client() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${UUID}" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
+      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"${EXTRA_URI}],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
 
     # Retrieve the generated secret
     curl -sf \
@@ -840,7 +842,9 @@ _create_client_multi() {
 }
 
 echo -e "${YELLOW}  Creating client 'node-red'...${NC}"
-_NODE_RED_SECRET=$(_create_client "node-red" "https://${NODE_RED_DOMAIN}/oauth2/callback")
+# Two callbacks: the proxy's, and Node-RED's own editor sign-in (adminAuth, IAM 3.3).
+_NODE_RED_SECRET=$(_create_client "node-red" "https://${NODE_RED_DOMAIN}/oauth2/callback" false \
+  "https://${NODE_RED_DOMAIN}/auth/strategy/callback")
 echo -e "${YELLOW}  Creating client 'grafana'...${NC}"
 _GRAFANA_SECRET=$(_create_client "grafana" "https://${GRAFANA_DOMAIN}/login/generic_oauth")
 echo -e "${YELLOW}  Creating client 'workbench'...${NC}"
@@ -1506,15 +1510,49 @@ $MK8S helm3 repo update
 #    Image:  docker.io/nodered/node-red:3.1.9 (Docker Hub official — auth configured)
 # =============================================================================
 echo -e "\n${GREEN}[5/10] Deploying Node-RED...${NC}"
+# The editor signs people in a second time (adminAuth, k8s/node-red/settings.js, IAM 3.3):
+# through Keycloak (client node-red), with the rights `cli.py compile node-red` compiles
+# from group flows into ConfigMap node-red-auth. settings.js reads that file at every
+# login, so a policy change needs this ConfigMap only, no restart. IAM_GATES=false changes
+# nothing here: Node-RED keeps its compiled rights, as its proxy keeps its compiled list
+# (policy_groups). The client secret and the deploy scripts' token (Secret
+# node-red-admin-tokens, kept across runs) go to kubectl on stdin, never in argv.
+KUBECTL="$MK8S kubectl"; REPO_ROOT="$SCRIPT_DIR"
+source "$SCRIPT_DIR/infra/lib-node-red.sh"
+NS="$NAMESPACE" NR_SECRET="$OAUTH2_PROXY_SECRET" python3 -c '
+import json, os
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                  "metadata": {"name": "node-red-oidc", "namespace": os.environ["NS"]},
+                  "stringData": {"client-secret": os.environ["NR_SECRET"]}}))' | $KUBECTL apply -f - >/dev/null
+if ! $KUBECTL get secret node-red-admin-tokens -n "$NAMESPACE" >/dev/null 2>&1; then
+    NS="$NAMESPACE" python3 -c '
+import json, os, secrets
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                  "metadata": {"name": "node-red-admin-tokens", "namespace": os.environ["NS"]},
+                  "stringData": {"deploy": secrets.token_hex(32)}}))' | $KUBECTL apply -f - >/dev/null
+fi
+if _NR_PERMS="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile node-red)"; then
+    $KUBECTL create configmap node-red-auth -n "$NAMESPACE" --from-literal=permissions.json="$_NR_PERMS" \
+      --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
+elif [[ "${IAM_GATES:-true}" == "false" ]]; then
+    echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap node-red-auth left as it is.${NC}" >&2
+else
+    echo -e "${RED}ERROR: cannot compile Node-RED's editor rights (python3 apps/iam/compiler/cli.py check).${NC}" >&2
+    exit 1
+fi
+$KUBECTL create configmap node-red-settings -n "$NAMESPACE" --from-file=settings.js="$SCRIPT_DIR/k8s/node-red/settings.js" \
+  --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
+NR_SETTINGS_CHECKSUM="$(nr_settings_checksum)"
+_NR_VALUES=$(mktemp /tmp/node-red-values-XXXXXX.yaml)
+render "$SCRIPT_DIR/k8s/node-red/values.yaml" NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM NODE_RED_DOMAIN \
+  NODE_RED_TZ NR_SETTINGS_CHECKSUM > "$_NR_VALUES"
 $MK8S helm3 upgrade --install node-red \
   node-red/node-red \
   --version 0.40.0 \
   --namespace "$NAMESPACE" \
-  --set image.registry=docker.io \
-  --set image.repository=nodered/node-red \
-  --set image.tag=3.1.9 \
-  --set timezone="$NODE_RED_TZ" \
+  --values "$_NR_VALUES" \
   --timeout 5m
+rm -f "$_NR_VALUES"
 
 echo -e "${YELLOW}Waiting for Node-RED to be ready (up to 20 min)...${NC}"
 $MK8S kubectl rollout status deployment/node-red \
@@ -1526,6 +1564,13 @@ $MK8S kubectl rollout status deployment/node-red \
       -n "$NAMESPACE" | tail -40
     exit 1
 }
+# /data is a volume since IAM 3.3, so a restart keeps the flows; the first deploy onto
+# the new volume (and a fresh install) starts empty, and ingest stops until the flows
+# are deployed. install.sh runs the app deploys next; a standalone run must do it.
+if ! $KUBECTL exec -n "$NAMESPACE" deployment/node-red -- cat /data/flows.json 2>/dev/null \
+        | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin) else 1)' 2>/dev/null; then
+    echo -e "${YELLOW}Node-RED runs no flows: telemetry is not stored until ./apps/node-red/deploy.sh runs.${NC}"
+fi
 
 # =============================================================================
 # 6. GRAFANA

@@ -788,8 +788,8 @@ recipe() {
             STEPS=("run env IAM_GATES=false ./apps/access/deploy.sh" "set IAM_GATES false"
                    "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("Every gate goes back to operator, qa, auditor, admin; the User Manager to admin only. Each deploy warns while false."
-                   "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until IAM_GATES is true again."
-                   "Node-RED is not exact: before Phase 0 it admitted any signed-in user."
+                   "Node-RED and the MQTT Explorer keep their compiled list (engineer): they reach telemetry and device control. Node-RED's editor keeps its rights from the policy (adminAuth)."
+                   "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every other gated host until IAM_GATES is true again."
                    "Grafana goes back to any enabled account (at least Viewer); the grafana_* roles are re-created, so Editor/Admin only for the built-in accounts that still exist."
                    "The AI workbench goes back to any realm account, with ADMIN_USER as hub admin (it still cannot open others' servers, and removing a hub user still keeps the home).") ;;
         IAM_NETPOL:enable)
@@ -861,7 +861,7 @@ recipe() {
 
 switch_purpose() {
     case "$1" in
-        IAM_GATES)            echo "Each sign-in gate, Grafana's role setting and the AI workbench's hub admit the roles the policy compiles for their host (false: the pre-policy lists)." ;;
+        IAM_GATES)            echo "Each sign-in gate, Grafana's role setting and the AI workbench's hub admit the roles the policy compiles for their host (false: the pre-policy lists; Node-RED and the MQTT Explorer keep theirs)." ;;
         IAM_NETPOL)           echo "One NetworkPolicy per application pod: only its listed callers can connect." ;;
         IAM_ENFORCE)          echo "Python services refuse what the route table does not allow (false: they only log 'would refuse')." ;;
         IAM_POSTGREST_JWT)    echo "config-api (PostgREST) verifies the person's token (Phase 2b)." ;;

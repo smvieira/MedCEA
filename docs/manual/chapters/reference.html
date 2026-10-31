@@ -14,7 +14,7 @@
 <tr><td><code>DBMGMT_DOMAIN</code></td><td><code>dbmgmt.$DOMAIN</code></td><td>Database Management (export)</td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td><td>Compiled from the policy</td></tr>
 <tr><td><code>ACCESS_DOMAIN</code></td><td><code>access.$DOMAIN</code></td><td>User Manager; <code>/register</code> is the public "Request access" form</td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span>; the form needs no account</td><td>Compiled from the policy</td></tr>
 <tr><td><code>MQTTX_DOMAIN</code></td><td><code>mqtt-explorer.$DOMAIN</code></td><td>MQTT Explorer</td><td><span class="role">engineer</span></td><td>Compiled from the policy</td></tr>
-<tr><td><code>NODE_RED_DOMAIN</code></td><td><code>node-red.$DOMAIN</code></td><td>Node-RED</td><td><span class="role">engineer</span></td><td>Compiled from the policy</td></tr>
+<tr><td><code>NODE_RED_DOMAIN</code></td><td><code>node-red.$DOMAIN</code></td><td>Node-RED</td><td><span class="role">engineer</span></td><td>Compiled from the policy; the editor's own rights too</td></tr>
 <tr><td><code>GRAFANA_DOMAIN</code></td><td><code>grafana.$DOMAIN</code></td><td>Grafana</td><td><span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td><td>Compiled into Grafana's own role setting (IAM Phase 3.1): <span class="role">engineer</span> is Editor, the others Viewer; any other role cannot sign in. Nobody gets Grafana Admin through the sign-in.</td></tr>
 <tr><td><code>WORKBENCH_DOMAIN</code></td><td><code>ai-workbench.$DOMAIN</code></td><td>AI Workbench (JupyterHub)</td><td><span class="role">engineer</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">admin</span></td><td>Compiled into JupyterHub's own sign-in setting (IAM Phase 3.2): the roles listed may sign in; <span class="role">admin</span> is hub administrator and cannot open anyone's workspace.</td></tr>
 <tr><td><code>ONBOARD_DOMAIN</code></td><td><code>onboard-device.$DOMAIN</code></td><td>Device onboarding (edge wizard)</td><td><span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not compiled yet (IAM Phase 3.4). Any signed-in account, unless <code>EDGE_WIZARD_ROLE</code> names a required role.</td></tr>
@@ -90,7 +90,7 @@
 <tr><td><code>measurements</code></td><td>Telemetry</td><td>regulated</td></tr>
 <tr><td><code>run_logs</code></td><td>Run logs</td><td>regulated</td></tr>
 <tr><td><code>dashboards</code></td><td>Grafana dashboards</td><td>config</td></tr>
-<tr><td><code>flows</code></td><td>Node-RED flows</td><td>config</td></tr>
+<tr><td><code>flows</code></td><td>Node-RED flows (Update gives the editor's rights; no read-only setting)</td><td>config</td></tr>
 <tr><td><code>mqtt_sense</code></td><td>Telemetry topics</td><td>regulated</td></tr>
 <tr><td><code>mqtt_control</code></td><td>Command and setpoint topics</td><td>regulated</td></tr>
 <tr><td><code>mqtt_explorer</code></td><td>MQTT Explorer</td><td>config</td></tr>
@@ -153,7 +153,7 @@
 <tr><td><code>POSTGRES_USER</code></td><td><code>postgres</code></td><td>Database superuser name.</td></tr>
 <tr><td><code>POSTGRES_DB</code></td><td><code>medcea_db</code></td><td>Database name.</td></tr>
 <tr><td><code>STORAGE_SIZE</code></td><td><code>10Gi</code></td><td>Database volume size.</td></tr>
-<tr><td><code>NODE_RED_TZ</code></td><td><code>Europe/London</code></td><td>Node-RED time zone.</td></tr>
+<tr><td><code>NODE_RED_TZ</code></td><td><code>Europe/London</code></td><td>Node-RED time zone (its log, debug output and local times in flows). Applied by <code>./deploy-infra.sh</code>.</td></tr>
 <tr><td><code>KEYCLOAK_REALM</code></td><td><code>$PROJECT_NAME</code></td><td>The Keycloak realm that holds every platform account.</td></tr>
 <tr><td><code>WORKBENCH_ENABLED</code></td><td><code>true</code></td><td><code>false</code> skips the AI workbench in <code>./deploy-infra.sh</code> (about 2 GB of images).</td></tr>
 <tr><td><code>WORKBENCH_IMAGE</code></td><td><code>quay.io/jupyter/scipy-notebook:latest</code></td><td>Notebook image for each workbench user.</td></tr>
@@ -207,6 +207,8 @@
 <tr><td>Grafana UI, pgAdmin UI</td><td>The application's own health page answers.</td></tr>
 <tr><td>Grafana roles</td><td>Grafana's role setting is the one compiled from the access policy, refuses roles without a setting, and cannot give Grafana Admin. FAIL on any difference (run <code>./deploy-infra.sh</code>); WARN while <code>IAM_GATES</code> is <code>false</code>.</td></tr>
 <tr><td>AI Workbench gate</td><td>The AI workbench admits exactly the roles compiled from the access policy, its administrator cannot open others' workspaces, removing a person from the hub keeps their files, and notebooks cannot reach private addresses. FAIL on any difference (run <code>./infra/deploy-workbench.sh</code>); WARN while <code>IAM_GATES</code> is <code>false</code>; SKIP while <code>WORKBENCH_ENABLED</code> is not <code>true</code>.</td></tr>
+<tr><td>Node-RED flows vs git</td><td>The flows Node-RED runs against the flows in the repository. FAIL when a repository node was changed or deleted, or no flows run (run <code>./apps/node-red/deploy.sh</code>); WARN on flows or settings that exist only in the editor.</td></tr>
+<tr><td>Node-RED editor rights</td><td>The editor's own sign-in is on, with the rights compiled from the access policy, and its admin interface refuses a call without a sign-in. FAIL on any difference (run <code>./deploy-infra.sh</code>).</td></tr>
 <tr><td>Mosquitto MQTT (TCP)</td><td>The broker port for boards (<code>31883</code>) is open.</td></tr>
 <tr><td>Onboarding wizard</td><td>The wizard service on the host (<code>$PLATFORM_IP:$EDGE_WIZARD_PORT</code>) answers.</td></tr>
 <tr><td>Access policy history</td><td>The hash chain of the access policy history is intact (FAIL names the first broken event).</td></tr>

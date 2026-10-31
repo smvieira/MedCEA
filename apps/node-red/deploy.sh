@@ -22,29 +22,28 @@ fi
 source "$REPO_ROOT/config.env"
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client (IAM 2.5)
+source "$REPO_ROOT/infra/lib-node-red.sh"   # nr_curl / nr_flow_values (IAM 3.3)
 
 NAMESPACE="${NAMESPACE:-medcea}"
 NR_LOCAL_PORT="${NR_LOCAL_PORT:-1880}"
 
-# K8s service names (stable in-cluster DNS, independent of IP changes)
-MQTT_HOST="mosquitto.${NAMESPACE}.svc.cluster.local"
-# The broker admits nobody anonymously: Node-RED signs in as the service
+# The flows' host names, topic root and database come from nr_flow_values, which
+# health-check.sh noderedflows reads too. The broker admits nobody anonymously: Node-RED signs in as the service
 # account "node-red" (read-only on the topic root). The password is generated
 # once by deploy-infra.sh and hashed into the Secret mosquitto-service-auth.
 if [[ -z "${MQTT_NODE_RED_PASS:-}" ]]; then
     echo "ERROR: MQTT_NODE_RED_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
     exit 1
 fi
-PG_RELEASE_NAME="${PG_RELEASE:-rdbms}"
-PG_HOST="${PG_RELEASE_NAME}-postgresql.${NAMESPACE}.svc.cluster.local"
-PG_PORT="5432"
-PG_DB="${POSTGRES_DB:-postgres}"
 # postgres, or svc_ingest once IAM_DB_SERVICE_ROLES=true and the role may log in (IAM 2.5)
 db_client "$NAMESPACE" svc_ingest
 PG_USER="$DBC_USER"
 PG_PASS="$DBC_PASS"
 
 NR_BASE="http://localhost:${NR_LOCAL_PORT}"
+# Node-RED's admin API wants the deploy token since IAM 3.3 (adminAuth); nr_curl sends
+# it as a header from a pipe. Read once here, so the $(nr_curl ...) calls reuse it.
+nr_token "$NAMESPACE"
 
 # ---------------------------------------------------------------------------
 # Step 1: Apply database schema (prerequisite)
@@ -53,7 +52,7 @@ echo "==> [1/3] Applying database schema..."
 "$SCRIPT_DIR/../database/deploy.sh"
 
 # ---------------------------------------------------------------------------
-# Step 2: Port-forward to Node-RED (bypasses oauth2-proxy ingress)
+# Step 2: Port-forward to Node-RED (bypasses oauth2-proxy ingress, not adminAuth)
 # ---------------------------------------------------------------------------
 echo "==> [2/3] Setting up Node-RED port-forward..."
 
@@ -82,7 +81,7 @@ trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
 # Wait for Node-RED to be reachable
 echo -n "    Waiting for Node-RED"
 for i in $(seq 1 30); do
-    if curl -sf "$NR_BASE/flows" -o /dev/null 2>/dev/null; then
+    if nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" -o /dev/null 2>/dev/null; then
         echo " ready"
         break
     fi
@@ -106,13 +105,13 @@ while IFS= read -r pkg || [[ -n "$pkg" ]]; do
 
     echo -n "    Package $pkg: "
 
-    STATUS=$(curl -sf "$NR_BASE/nodes/$pkg" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+    STATUS=$(nr_curl "$NAMESPACE" -sf "$NR_BASE/nodes/$pkg" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
     if [[ "$STATUS" == "200" ]]; then
         echo "already installed"
         continue
     fi
 
-    HTTP=$(curl -sf -X POST "$NR_BASE/nodes" \
+    HTTP=$(nr_curl "$NAMESPACE" -sf -X POST "$NR_BASE/nodes" \
         -H "Content-Type: application/json" \
         -d "{\"module\":\"$pkg\"}" \
         -o /tmp/nr-pkg.log \
@@ -130,7 +129,7 @@ while IFS= read -r pkg || [[ -n "$pkg" ]]; do
     sleep 5
     echo -n "    Waiting for Node-RED to reload"
     for i in $(seq 1 20); do
-        if curl -sf "$NR_BASE/flows" -o /dev/null 2>/dev/null; then
+        if nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" -o /dev/null 2>/dev/null; then
             echo " ready"
             break
         fi
@@ -145,23 +144,15 @@ for flow_file in "$SCRIPT_DIR/flows/"*.json; do
     flow_name="$(basename "$flow_file" .json)"
     echo "    Deploying flow: $flow_name"
 
-    # Substitute connection placeholders into a temp file
-    # __TOPIC_ROOT__ is the root the onboarding wizard configures on every board
-    # it flashes (edge/flash-device.sh --topic-root, default PROJECT_NAME).
-    sed \
-        -e "s|__TOPIC_ROOT__|${PROJECT_NAME:-medcea}|g" \
-        -e "s|__MQTT_HOST__|${MQTT_HOST}|g" \
-        -e "s|__MQTT_USER__|node-red|g" \
-        -e "s|__MQTT_PASS__|${MQTT_NODE_RED_PASS}|g" \
-        -e "s|__PG_HOST__|${PG_HOST}|g" \
-        -e "s|__PG_PORT__|${PG_PORT}|g" \
-        -e "s|__PG_DB__|${PG_DB}|g" \
-        -e "s|__PG_USER__|${PG_USER}|g" \
-        -e "s|__PG_PASS__|${PG_PASS}|g" \
-        "$flow_file" > /tmp/nr-new-flow.json
+    # Fill the placeholders: the non-secret ones from nr_flow_values (health-check.sh
+    # noderedflows diffs against the same), the passwords and the database user through
+    # flows_diff.py's environment, never on a command line.
+    NR_MQTT_PASS="$MQTT_NODE_RED_PASS" NR_PG_USER="$PG_USER" NR_PG_PASS="$PG_PASS" \
+        python3 "$SCRIPT_DIR/flows_diff.py" render "$flow_file" \
+        < <(nr_flow_values "$NAMESPACE") > /tmp/nr-new-flow.json
 
     # Get current flows from Node-RED
-    curl -sf "$NR_BASE/flows" > /tmp/nr-current-flows.json 2>/dev/null
+    nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" > /tmp/nr-current-flows.json 2>/dev/null
 
     # Merge: drop any nodes whose IDs appear in the new flow, then append new nodes
     python3 << 'PYEOF'
@@ -181,7 +172,7 @@ with open('/tmp/nr-merged-flows.json', 'w') as f:
     json.dump(merged, f)
 PYEOF
 
-    HTTP=$(curl -sf -X POST "$NR_BASE/flows" \
+    HTTP=$(nr_curl "$NAMESPACE" -sf -X POST "$NR_BASE/flows" \
         -H "Content-Type: application/json" \
         -d @/tmp/nr-merged-flows.json \
         -o /tmp/nr-deploy.log \

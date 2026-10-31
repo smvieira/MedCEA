@@ -157,6 +157,16 @@ MUTATIONS = {
     "unknown tool kind": (_set(["resource_groups", "research_workbench", "tool", "kind"], "zeppelin"), "unknown kind zeppelin"),
     "notebook with a platform credential": (_set(["resource_groups", "research_workbench", "tool", "service_identity"],
                                                  "svc_grafana"), "no service_identity"),
+    # IAM 3.3: Node-RED's editor rights (adminAuth)
+    "Node-RED editor by R": (_set(["resource_groups", "flows", "tool", "settings", 0, "levels"], ["R"]),
+                             "cannot give node-red's editor"),
+    "Node-RED read-only setting": (_set(["resource_groups", "flows", "tool", "settings", 0, "setting"], "read"),
+                                   "is not one the policy may give for node-red"),
+    "constrained flows cell": (_set(["matrix", "flows", "engineer"], {"levels": ["R", "C", "U"], "constraint": "own_unit"}),
+                               "cannot evaluate"),
+    "Node-RED reaches less than svc_ingest": (_set(["resource_groups", "flows", "reaches"],
+                                                   {"mqtt_sense": ["R"], "mqtt_control": ["R"], "measurements": ["R", "C"]}),
+                                              "svc_ingest"),
 }
 
 
@@ -245,6 +255,22 @@ class ToolsTest(unittest.TestCase):
             self.assertNotIn(refused, allowed)
         with self.assertRaises(ValueError):
             tools.jupyterhub_groups(p, "admin_users")
+
+    def test_node_red_permissions(self):
+        """IAM 3.3: engineer gets every editor scope but nodes.write; nobody else gets any."""
+        p = self.policy
+        doc = tools.node_red_permissions(p)
+        self.assertEqual(doc["group"], "flows")
+        self.assertIsNone(doc["default"])
+        self.assertEqual(set(doc["permissions"]), {"engineer"})
+        self.assertEqual(sorted(doc["permissions"]), proxies.admitted(p, "NODE_RED_DOMAIN"))
+        scopes = doc["permissions"]["engineer"]
+        self.assertIn("flows.write", scopes)
+        self.assertNotIn("nodes.write", scopes)   # palette modules only from packages.txt
+        self.assertNotIn("*", scopes)
+        self.assertNotIn("read", tools.KINDS["node-red"])   # GET /flows shows the ingest password
+        for g, lv in p.services["svc_ingest"]["ceiling"].items():
+            self.assertLessEqual(set(lv), p.closure(p.groups["flows"]["reaches"].get(g, [])), g)
 
     def test_tool_block_does_not_change_route_digest(self):
         # a tool block is not in the route table: no database deploy, role_widening() unchanged
@@ -1156,6 +1182,46 @@ class WiringTest(unittest.TestCase):
         lib = self.read("infra/lib-oauth2-proxy.sh")
         self.assertIn("compile jupyterhub --setting allowed_groups", lib)
         self.assertIn("compile jupyterhub --setting admin_groups", lib)
+
+    def test_node_red_wiring(self):
+        """IAM 3.3: Node-RED's adminAuth is rendered from the policy; tokens never in argv."""
+        infra = self.read("deploy-infra.sh")
+        self.assertIn('cli.py" compile node-red)', infra)
+        self.assertIn("create configmap node-red-auth", infra)
+        self.assertIn("auth/strategy/callback", infra)
+        self.assertNotIn("--set timezone", infra)   # chart 0.40.0 has no such value: TZ in env
+        values = self.read("k8s/node-red/values.yaml")
+        call = re.search(r'render "\$SCRIPT_DIR/k8s/node-red/values.yaml"(.*?)>', infra, re.S).group(1)
+        used = set(re.findall(r"\$\{([A-Z_]+)\}", values))
+        self.assertEqual(used - set(call.replace("\\", " ").split()), set())
+        self.assertIn("NR_SETTINGS_CHECKSUM", used)
+        for line in ("configMapName: node-red-settings", "name: node-red-auth, optional: true",
+                     "mountPath: /auth-policy", "passport-openidconnect@0.1.2", "storageClass: microk8s-hostpath",
+                     "name: node-red-oidc, key: client-secret", "name: node-red-admin-tokens, key: deploy"):
+            self.assertIn(line, values)
+        self.assertNotRegex(values, r"subPath: permissions")   # a directory mount follows the ConfigMap
+        js = self.read("k8s/node-red/settings.js")
+        for text in ("/auth-policy/permissions.json", "audit: true", "autoLogin: true", "functionExternalModules: false",
+                     "timingSafeEqual", "type: 'credentials', users: []"):
+            self.assertIn(text, js)
+        self.assertNotRegex(js, r"(?m)^\s*httpNodeAuth")
+        self.assertNotRegex(js, r"(?m)^\s*default:")
+        # nine parameters: Node-RED 3.1 copies the arity, passport-openidconnect then passes the claims
+        self.assertRegex(js, r"verify: function \((\w+, ){8}done\)")
+        for script in ("apps/node-red/deploy.sh", "apps/node-red/uninstall.sh"):
+            src = self.read(script)
+            self.assertIn("lib-node-red.sh", src, script)
+            self.assertNotRegex(src, r'(?<!nr_)\bcurl [^\n]*\$NR_BASE', script)
+            self.assertNotIn("__PG_PASS__|", src, script)   # no password through sed's argv
+        lib = self.read("infra/lib-node-red.sh")
+        self.assertIn("-H @<(printf 'Authorization: Bearer %s\\n'", lib)
+        self.assertNotRegex(lib + self.read("apps/node-red/deploy.sh"), r'-H "Authorization: Bearer \$')
+        lib_op = self.read("infra/lib-oauth2-proxy.sh")
+        self.assertRegex(lib_op, r"NODE_RED_DOMAIN\|MQTTX_DOMAIN\)")   # keep the compiled list under false
+        conf, hc = self.read("health-checks.conf"), self.read("health-check.sh")
+        for kind in ("noderedflows", "noderedauth"):
+            self.assertRegex(conf, rf"\| {kind} +\|")
+            self.assertIn(f"{kind}) ", hc)
 
     def test_2_6_scheduler_routes_removed(self):
         """No person compresses or deletes a run log, nothing deletes a Q-table (IAM 2.6)."""

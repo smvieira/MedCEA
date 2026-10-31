@@ -327,6 +327,11 @@ network:
                               "proxy:DBMGMT_DOMAIN", "proxy:ACCESS_DOMAIN", "proxy:MQTTX_DOMAIN"],
            why: "/_account/ (user menu and profile) on every host that mounts it; not Node-RED's"}
         - {port: 8080, from: [ingress, node], why: the public access request form; kubelet readiness probe}
+    node-red:
+      selector: {app.kubernetes.io/name: node-red}
+      carries: {}
+      ingress:
+        - {port: 1880, from: ["proxy:NODE_RED_DOMAIN", node], why: "the Node-RED editor (IAM 3.3); kubelet probes; health-check.sh from the host (deploy.sh's port-forward enters inside the pod)"}
 
 # Functions every authenticated path needs. Granted by rule, not by the matrix (plan
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants. `execute`
@@ -588,6 +593,8 @@ service_identities:
 #    settings: [{setting: S, levels: [L]}, ...], otherwise: refuse, help: <text>}
 #   {kind: jupyterhub, host: ..., settings: [{setting: admin, levels: [K]}, {setting: user, ...}],
 #    otherwise: refuse, help: <text>}   (no service_identity: a notebook holds no platform credential)
+#   {kind: node-red, host: ..., service_identity: svc_ingest, settings: [{setting: editor, levels: [U]}],
+#    otherwise: refuse, help: <text>}   (Node-RED adminAuth; `cli.py compile node-red`, IAM 3.3)
 # A role gets the first setting whose levels it holds unconstrained; every role the host
 # admits must get one, and nobody else. `reaches` must cover the service identity's ceiling.
 resource_groups:
@@ -866,10 +873,25 @@ resource_groups:
     description: The ingest flow and any other Node-RED flow, edited in the Node-RED editor.
     why_this_class: Integration configuration.
     risk: The editor runs code with the ingest account, so an editor reads all topics and can write telemetry rows.
-    reaches: {mqtt_sense: [R], mqtt_control: [R], measurements: [R, C]}
+    reaches: {master_data: [R], devices: [R], mqtt_sense: [R], mqtt_control: [R], measurements: [R, C]}
     members:
       - {type: ui, host: NODE_RED_DOMAIN}
       - {type: code, object: apps/node-red/flows/*.json}
+    tool:
+      kind: node-red
+      host: NODE_RED_DOMAIN
+      service_identity: svc_ingest    # the flows' database login; its ceiling must be covered by reaches
+      settings:                       # first match wins
+        - {setting: editor, levels: [U]}   # adminAuth: every editor permission but nodes.write
+      otherwise: refuse               # adminAuth has no default user: no setting, no editor
+      help: >
+        Node-RED's editor signs people in a second time (adminAuth, silent through the
+        platform sign-in) and gives its rights from this group: U gives the editor
+        (change and deploy flows, inject, debug, context, library). Nobody installs palette
+        modules from the editor; they come only from apps/node-red/packages.txt in git and
+        apps/node-red/deploy.sh. Node-RED's read-only mode shows the ingest password, so
+        the group is held with U or not at all (R alone would admit to an editor that gives
+        nothing). Every deploy is logged with the person's name.
 
   mqtt_sense:
     label: Telemetry topics
@@ -1325,7 +1347,7 @@ constraints:
 waivers:
   - {id: W1, invariant: I11, subject: engineer, group: flows, target: measurements, levels: [C], objects: [medcea.measurement], review_by: "2027-10-27",
      rationale: "The Node-RED editor runs code with the ingest account, which must insert telemetry. Node-RED has no narrower mechanism.",
-     controls: "Flows are deployed from git (apps/node-red/flows); health-check.sh diffs the editor's flows against git; measurement rows carry the ingest identity."}
+     controls: "Flows are deployed from git (apps/node-red/flows) by apps/node-red/deploy.sh; health-check.sh `noderedflows` diffs the running flows against git; the editor admits only the roles the policy gives `flows` (oauth2-proxy and Node-RED adminAuth, IAM 3.3) and logs every deploy with the person (Node-RED audit log); the deploy script's token (system:deploy, Secret node-red-admin-tokens) is a host-operator credential like the port-forward it travels over; measurement rows carry the ingest identity."}
   - {id: W2, invariant: I10, subject: svc_scheduler, group: controllers_state, target: controllers_state, levels: [U], objects: [medcea.algorithm_state], review_by: "2027-10-27",
      rationale: "A learning controller updates its Q-table during a run; that update is the record of what it learnt.",
      controls: "Every update appends a medcea.algorithm_state_event row with the run id; retirement is an approved event, never a delete."}
