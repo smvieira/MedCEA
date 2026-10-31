@@ -60,7 +60,7 @@ levels:
       Read rows, call GET routes and open the page. Reads of regulated data through the
       Monitor and the export are logged.
     meaning:
-      data: SELECT
+      data: SELECT; EXECUTE on the group's read functions (function members of level R)
       api: GET routes of the group
       ui: admitted to the host (unless the host admits only higher levels)
       mqtt: topic read, through the person's own MQTT Explorer credential
@@ -388,7 +388,8 @@ infrastructure_functions:
   - {function: "medcea_auth._own_role(jsonb)", execute: [], why: "Compiled: the one own role in a groups claim, or NULL."}
   - {function: "medcea_auth._token_clients()", execute: [], why: "Compiled: the clients whose tokens PostgREST accepts (azp)."}
   - {function: "medcea_auth.row_digest(text, jsonb)", execute: [], why: "sha256 of a member row's content, compared with its last approval."}
-  - {function: "medcea_auth._authors(text, jsonb)", execute: [], why: "The persons who changed a row since its last approval, from medcea.row_change."}
+  - {function: "medcea_auth._authors(text, jsonb)", execute: [], why: "The persons who changed a row since its last approval, from medcea_auth._changes_since()."}
+  - {function: "medcea_auth._changes_since(text, jsonb)", execute: [], why: "The changes to a row (a recipe with its lines) since its last approval, from medcea.row_change; status/retired_at/commissioning-only changes make nobody an author. Read by _authors and medcea.approval_queue."}
   - {function: "medcea_auth._approver(text)", execute: [], why: "The token-sourced person holding A on a group, or an error."}
   - {function: "medcea_auth._lock_row(text, jsonb)", execute: [], why: "The approval functions' row locks (the row, a recipe's lines, a run's cycles), taken before _authors() so authorship is read in commit order."}
   - {function: "medcea.stamp_actor()", execute: [], why: "Trigger function; runs as the table owner and overwrites created_by_*/updated_by_* with the verified actor."}
@@ -648,6 +649,8 @@ resource_groups:
     members:
       - {type: ui, host: PORTAL_DOMAIN}
       - {type: api, service: access-profile, routes: {"GET /_account/": R, "GET /_account/user-menu.js": R, "GET /_account/api/me": R, "POST /_account/api/me": R}}
+      - {type: data, function: "medcea.my_approvals()", level: R, note: "the caller's own proposals and the drafts they changed since the last approval, with where each stands (waiting, returned with qa's reason, applied, withdrawn, ...); no approver names or approval notes; nothing for a caller without a person_id"}
+      - {type: data, function: "medcea.withdraw_change(bigint, text)", level: R, note: "the proposer takes their own waiting proposal back (by person_id; any other caller is refused), like the profile's own-account POST; recorded as approval action 'withdraw'"}
 
   user_manager:
     label: User Manager page
@@ -666,16 +669,25 @@ resource_groups:
     risk: A wrong unit or zone code misroutes telemetry and commands. Setting a unit's commissioning flag opens MQTT write to it, so that one change waits for qa.
     approval:
       record: medcea.approval (table, row id, row hash, approver)
-      functions: ["medcea.approve_change(text, bigint, text)"]
+      functions: ["medcea.approve_change(text, bigint, text)", "medcea.return_change(text, bigint, text)"]
       effect: review
-      help: QA confirms each change after the fact; an unconfirmed change is listed on the QA queue but blocks nothing — except cea_unit.commissioning, which takes effect only after qa confirms it.
+      help: >
+        QA confirms each change after the fact (approve_change on the row); such reviews are
+        not listed in the Configuration UI's Approvals tab yet and block nothing. The exception
+        is cea_unit.commissioning: an engineer proposes it with a reason, and flagging a unit
+        takes effect only after a qa person other than the proposer approves it in the
+        Approvals tab (refused while the unit has a run running or scheduled); ending it
+        applies at once and waits there for qa's review. qa may return a proposal with a
+        reason; its proposer may withdraw it.
     members:
       - {type: data, object: medcea.cea_location}
       - {type: data, object: medcea.cea_unit}
       - {type: data, object: medcea.cea_zone}
       - {type: data, object: medcea.component}
       - {type: data, function: "medcea.approve_change(text, bigint, text)", level: A, note: "a review of a master_data or devices row (row id), or the approval of a pending_change (its id), which applies it"}
-      - {type: data, function: "medcea.propose_commissioning(int, boolean, text)", level: U, writes: [medcea.pending_change], note: "cea_unit.commissioning changes only through approve_change()"}
+      - {type: data, function: "medcea.propose_commissioning(int, boolean, text)", level: U, writes: [medcea.pending_change], note: "cea_unit.commissioning changes only through this and approve_change(): on waits for qa (refused while a run is in R or S), off applies at once and waits for qa's review"}
+      - {type: data, function: "medcea.return_change(text, bigint, text)", level: A, note: "qa sends a waiting proposal (medcea.pending_change) or a draft (recipe, control algorithm, parameter set) back with a reason; recorded as approval action 'return', which no approval rule counts"}
+      - {type: data, function: "medcea.unit_commissioning()", level: R, note: "each unit's commissioning flag, the waiting proposal, an off waiting for review, the last change and the caller's rights; the blocking run only for roles reading every unit's runs; proposers' names and reasons only for engineer, qa, qp, auditor and the proposer, the approver's name only for audit_histories readers"}
       - type: api
         service: platform-api
         routes: {"GET /locations": R, "GET /locations/<file>": R, "PUT /locations/<file>": U, "GET /units": R, "GET /units/<file>": R, "PUT /units/<file>": U}
@@ -749,14 +761,15 @@ resource_groups:
     risk: An unapproved or altered recipe changes product conditions.
     approval:
       record: medcea.recipe.status (draft → approved → in_use → retired)
-      functions: ["medcea.approve_recipe(int)"]
+      functions: ["medcea.approve_recipe(int)", "medcea.approve_recipe(int, text)", "medcea.return_change(text, bigint, text)"]
       effect: blocking
-      help: The scheduler refuses to assign or run a recipe that is not approved; an approved recipe cannot be edited.
+      help: The scheduler refuses to assign or run a recipe that is not approved; an approved recipe cannot be edited. qa approves (with an optional note) or returns a draft with a reason in the Configuration UI's Approvals tab.
     members:
       - {type: data, object: medcea.recipe}
       - {type: data, object: medcea.recipe_line}
       - {type: data, object: medcea.recipe_unit_permission}
       - {type: data, function: "medcea.approve_recipe(int)", level: A}
+      - {type: data, function: "medcea.approve_recipe(int, text)", level: A, note: "the same approval with a note (Configuration UI, Approvals tab)"}
       - {type: api, service: scheduler, routes: {"GET /api/recipes": R}}
       # platform-api writes any recipe file and cannot evaluate draft_only/assign_only, so
       # no role may PUT one until it does (IAM 2.6): the Config UI's "save to the platform
@@ -772,14 +785,17 @@ resource_groups:
     risk: A changed parameter changes how the chamber is driven.
     approval:
       record: medcea.control_algorithm.status, medcea.unit_algorithm_params.status
-      functions: ["medcea.approve_algorithm(int)", "medcea.approve_params(int)"]
+      functions: ["medcea.approve_algorithm(int)", "medcea.approve_params(int)", "medcea.approve_algorithm(int, text)",
+                  "medcea.approve_params(int, text)", "medcea.return_change(text, bigint, text)"]
       effect: blocking
-      help: A run uses only approved algorithms and approved parameter sets; schedules and assignments reference a parameter set, never inline parameters.
+      help: A run uses only approved algorithms and approved parameter sets; schedules and assignments reference a parameter set, never inline parameters. qa approves (with an optional note) or returns a draft with a reason in the Configuration UI's Approvals tab.
     members:
       - {type: data, object: medcea.control_algorithm}
       - {type: data, object: medcea.unit_algorithm_params, note: "replaces recipe_unit_permission.algorithm_params and schedule.algorithm_params (migration 008)"}
       - {type: data, function: "medcea.approve_algorithm(int)", level: A}
       - {type: data, function: "medcea.approve_params(int)", level: A}
+      - {type: data, function: "medcea.approve_algorithm(int, text)", level: A, note: "the same approval with a note"}
+      - {type: data, function: "medcea.approve_params(int, text)", level: A, note: "the same approval with a note"}
       - {type: api, service: scheduler, routes: {"GET /api/algorithms": R, "PUT /api/algorithms/<id>": U, "GET /api/param-sets": R}}
       - {type: code, object: schd/cea/algorithms/*}
 
@@ -862,9 +878,9 @@ resource_groups:
     risk: A shorter retention destroys run logs. The minimum retention is a database CHECK, and every change waits for qa.
     approval:
       record: medcea.approval
-      functions: ["medcea.approve_change(text, bigint, text)"]
+      functions: ["medcea.approve_change(text, bigint, text)", "medcea.return_change(text, bigint, text)"]
       effect: blocking
-      help: A new retention setting applies only after a qa person other than its author confirms it.
+      help: A new retention setting applies only after a qa person other than its author confirms it in the Configuration UI's Approvals tab; qa may return it with a reason, and its proposer may withdraw it.
     members:
       - {type: data, object: medcea.scheduler_config, written_by: functions}
       - {type: data, function: "medcea.propose_setting(text, jsonb)", level: U, writes: [medcea.pending_change], note: "a pending setting; it applies after approve_change()"}
@@ -1126,6 +1142,7 @@ resource_groups:
       - {type: data, object: medcea.approval, written_by: functions}
       - {type: data, object: medcea.pending_change, written_by: functions, note: "blocking changes waiting for approve_change() (retention, commissioning)"}
       - {type: data, object: medcea.row_change, written_by: functions, note: "every change to the 14 attributed tables; not_own_author reads it"}
+      - {type: data, function: "medcea.approval_queue(boolean)", level: R, note: "drafts and open pending changes of the groups where the caller holds R, with the changes since the last approval and an advisory may_approve; refuses any actor but a person's own token, so the services' EXECUTE through their ceiling is inert"}
       - {type: data, function: "iam_policy.log_export(text[], text[])", level: C, service_only: [svc_dbexport], writes: [iam_policy.export_log]}
       - {type: data, function: "iam.create_review(jsonb)", level: C, service_only: [svc_access], writes: [iam.access_review], note: "the quarter's snapshot; the database adds units, decisions, the switches it holds and the chain verdict itself"}
       - {type: data, function: "iam.sign_off_review(int, text)", level: C, service_only: [svc_access], writes: [iam.access_review], note: "the creator may sign off (one qa person: a known single-person control)"}

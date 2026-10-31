@@ -125,7 +125,19 @@
   [
    "access_svc",
    "function",
+   "medcea.approval_queue(boolean)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
    "medcea.revoke_person_mqtt(uuid,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
+   "medcea.unit_commissioning()",
    "EXECUTE"
   ],
   [
@@ -335,6 +347,12 @@
   [
    "iam_svc",
    "function",
+   "medcea.approval_queue(boolean)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
    "medcea_auth.set_actor(text,text,text,text)",
    "EXECUTE"
   ],
@@ -574,6 +592,12 @@
   ],
   [
    "mqtt_auth",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "mqtt_auth",
    "schema",
    "medcea",
    "USAGE"
@@ -659,7 +683,25 @@
   [
    "rr_admin",
    "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_admin",
+   "function",
    "medcea.propose_setting(text,jsonb)",
+   "EXECUTE"
+  ],
+  [
+   "rr_admin",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_admin",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -727,6 +769,30 @@
    "table",
    "medcea.scheduler_config",
    "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "medcea.approval_queue(boolean)",
+   "EXECUTE"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
+   "EXECUTE"
   ],
   [
    "rr_auditor",
@@ -1012,6 +1078,24 @@
   ],
   [
    "rr_bio_scientist",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_bio_scientist",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_bio_scientist",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_bio_scientist",
    "schema",
    "medcea",
    "USAGE"
@@ -1114,6 +1198,24 @@
   ],
   [
    "rr_control_scientist",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_control_scientist",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_control_scientist",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_control_scientist",
    "schema",
    "medcea",
    "USAGE"
@@ -1213,6 +1315,12 @@
    "table",
    "medcea.v_sp_measurements",
    "SELECT"
+  ],
+  [
+   "rr_engineer",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
   ],
   [
    "rr_engineer",
@@ -1224,6 +1332,18 @@
    "rr_engineer",
    "function",
    "medcea.register_mqtt_credential(integer,text,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_engineer",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_engineer",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -1511,7 +1631,25 @@
   [
    "rr_maintenance",
    "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_maintenance",
+   "function",
    "medcea.register_mqtt_credential(integer,text,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_maintenance",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_maintenance",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -1643,6 +1781,12 @@
   [
    "rr_operator",
    "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_operator",
+   "function",
    "medcea.set_run_status(integer,text)",
    "EXECUTE"
   ],
@@ -1650,6 +1794,18 @@
    "rr_operator",
    "function",
    "medcea.start_run(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_operator",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_operator",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -1805,6 +1961,12 @@
   [
    "rr_production_manager",
    "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_production_manager",
+   "function",
    "medcea.retire_schedule(integer)",
    "EXECUTE"
   ],
@@ -1818,6 +1980,18 @@
    "rr_production_manager",
    "function",
    "medcea.start_run(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_production_manager",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_production_manager",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -2009,7 +2183,19 @@
   [
    "rr_qa",
    "function",
+   "medcea.approval_queue(boolean)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
    "medcea.approve_algorithm(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.approve_algorithm(integer,text)",
    "EXECUTE"
   ],
   [
@@ -2027,13 +2213,49 @@
   [
    "rr_qa",
    "function",
+   "medcea.approve_params(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
    "medcea.approve_recipe(integer)",
    "EXECUTE"
   ],
   [
    "rr_qa",
    "function",
+   "medcea.approve_recipe(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
    "medcea.retire_algorithm_state(integer,text,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.return_change(text,bigint,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -2320,6 +2542,24 @@
   ],
   [
    "rr_qc",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qc",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qc",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qc",
    "schema",
    "medcea",
    "USAGE"
@@ -2423,7 +2663,31 @@
   [
    "rr_qp",
    "function",
+   "medcea.approval_queue(boolean)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qp",
+   "function",
+   "medcea.my_approvals()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qp",
+   "function",
    "medcea.release_run(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qp",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qp",
+   "function",
+   "medcea.withdraw_change(bigint,text)",
    "EXECUTE"
   ],
   [
@@ -2603,6 +2867,18 @@
   [
    "svc_dbexport",
    "function",
+   "medcea.approval_queue(boolean)",
+   "EXECUTE"
+  ],
+  [
+   "svc_dbexport",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "svc_dbexport",
+   "function",
    "medcea_auth.set_actor(text,text,text,text)",
    "EXECUTE"
   ],
@@ -2897,6 +3173,12 @@
   [
    "svc_grafana",
    "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "svc_grafana",
+   "function",
    "medcea_auth.set_actor(text,text,text,text)",
    "EXECUTE"
   ],
@@ -3011,6 +3293,12 @@
   [
    "svc_ingest",
    "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "svc_ingest",
+   "function",
    "medcea_auth.set_actor(text,text,text,text)",
    "EXECUTE"
   ],
@@ -3115,6 +3403,12 @@
    "table",
    "medcea.v_sp_measurements",
    "SELECT"
+  ],
+  [
+   "svc_monitor",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
   ],
   [
    "svc_monitor",
@@ -3306,6 +3600,12 @@
    "svc_scheduler",
    "function",
    "medcea.start_run(integer)",
+   "EXECUTE"
+  ],
+  [
+   "svc_scheduler",
+   "function",
+   "medcea.unit_commissioning()",
    "EXECUTE"
   ],
   [

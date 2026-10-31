@@ -936,11 +936,13 @@ END $$;
 REVOKE ALL ON FUNCTION medcea_auth.my_units() FROM PUBLIC;
 
 -- The content of a row for digests and change logs: without the stamps
--- (*_by_*), timestamps (timestamp_*) and, for a digest, status and retired_at.
+-- (*_by_*), timestamps (timestamp_*) and, for a digest, status, retired_at and
+-- commissioning (changed only under dual control, like status; the same keys
+-- _changes_since() leaves out of authorship).
 CREATE OR REPLACE FUNCTION medcea_auth._content(j jsonb, p_digest boolean) RETURNS jsonb
     LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
     SELECT coalesce(jsonb_object_agg(k, v), '{}'::jsonb) FROM jsonb_each(j) x(k, v)
-     WHERE NOT (k LIKE '%\_by\_%' OR k LIKE 'timestamp\_%' OR (p_digest AND k IN ('status', 'retired_at')))
+     WHERE NOT (k LIKE '%\_by\_%' OR k LIKE 'timestamp\_%' OR (p_digest AND k IN ('status', 'retired_at', 'commissioning')))
 $$;
 
 -- row_digest(target, key): sha256 of a member row's content; a recipe with its
@@ -1185,7 +1187,7 @@ CREATE TABLE IF NOT EXISTS medcea.approval (
     row_hash             text NOT NULL,                 -- medcea_auth.row_digest() when approved
     group_name           text NOT NULL,
     action               text NOT NULL CONSTRAINT approval_action_chk
-                         CHECK (action IN ('approve', 'review', 'apply', 'release', 'retire', 'grandfather')),
+                         CHECK (action IN ('approve', 'review', 'apply', 'release', 'retire', 'grandfather', 'return', 'withdraw')),
     note                 text,
     author_persons       text[] NOT NULL DEFAULT '{}',
     approved_by_sub      text NOT NULL,
@@ -1209,6 +1211,20 @@ BEGIN
         ALTER TABLE medcea.approval ADD COLUMN last_change_id bigint;
     END IF;
 END $$;
+-- 'return' (qa sends a draft or a proposal back, with a reason) and 'withdraw' (the
+-- proposer takes a proposal back) close nothing an approval counts: _authors() and
+-- _is_approved() read approve/review/grandfather only. Guarded: the ALTER takes the
+-- table's lock, so a steady-state deploy skips it.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+                    WHERE conrelid = 'medcea.approval'::regclass AND conname = 'approval_action_chk'
+                      AND pg_catalog.pg_get_constraintdef(oid) LIKE '%''withdraw''%') THEN
+        ALTER TABLE medcea.approval DROP CONSTRAINT IF EXISTS approval_action_chk;
+        ALTER TABLE medcea.approval ADD CONSTRAINT approval_action_chk
+            CHECK (action IN ('approve', 'review', 'apply', 'release', 'retire', 'grandfather', 'return', 'withdraw'));
+    END IF;
+END $$;
 REVOKE ALL ON TABLE medcea.approval FROM PUBLIC, anon, authenticator;
 REVOKE ALL ON SEQUENCE medcea.approval_approval_id_seq FROM PUBLIC, anon, authenticator;
 -- Guarded: CREATE INDEX IF NOT EXISTS takes its SHARE lock before it checks
@@ -1220,7 +1236,8 @@ BEGIN
     END IF;
 END $$;
 
--- medcea.pending_change: a blocking change waiting for approve_change().
+-- medcea.pending_change: a blocking change waiting for approve_change(), or (applied_at)
+-- a narrowing that applied at once and waits for qa's review.
 CREATE TABLE IF NOT EXISTS medcea.pending_change (
     change_id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     target               text NOT NULL CONSTRAINT pending_change_target_chk
@@ -1234,8 +1251,16 @@ CREATE TABLE IF NOT EXISTS medcea.pending_change (
     proposed_by_name     text,
     proposed_by_role     varchar(40),
     proposed_by_source   text,
-    proposed_at          timestamptz NOT NULL DEFAULT now()
+    proposed_at          timestamptz NOT NULL DEFAULT now(),
+    applied_at           timestamptz          -- set when the change applied at once (a narrowing: commissioning off); qa reviews it after
 );
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                    WHERE attrelid = 'medcea.pending_change'::regclass AND attname = 'applied_at' AND NOT attisdropped) THEN
+        ALTER TABLE medcea.pending_change ADD COLUMN applied_at timestamptz;
+    END IF;
+END $$;
 REVOKE ALL ON TABLE medcea.pending_change FROM PUBLIC, anon, authenticator;
 REVOKE ALL ON SEQUENCE medcea.pending_change_change_id_seq FROM PUBLIC, anon, authenticator;
 DO $$
@@ -2041,17 +2066,51 @@ END $$;
 
 -- ── B20. Functions: approvals, runs, proposals, credentials, enforce triggers ─
 
--- _authors(target, key): the persons who changed the row (a recipe: and its
--- lines; a run: and its cycles) since its last approval, review or
--- grandfathering — or since creation — and how many of those changes have no
--- person (other than migration:008's). Changes of status/retired_at alone
--- (approving, retiring) make nobody an author. last_change is the newest
--- matching row_change; the caller stores it in approval.last_change_id.
+-- _changes_since(target, key): the changes to the row (a recipe: and its lines;
+-- a run: and its cycles) since its last approval, review or grandfathering — or
+-- since creation — oldest first. authors is false for a change of
+-- status/retired_at/commissioning alone (approving, retiring, a commissioning flag
+-- applied under dual control): those make nobody an author. The one copy of the
+-- "since the last approval" rule: _authors() and medcea.approval_queue() read it.
+-- LANGUAGE sql: its output columns share row_change's names, which a PL/pgSQL
+-- body would read as ambiguous.
 --
 -- "Since" is commit order: change_id > the approval's last_change_id. An
 -- approval from before that column (NULL) falls back to its timestamp. The
--- callers lock the row (and its lines or cycles) first, so every change made
--- before the approval has committed and no later one can commit before it.
+-- approval functions lock the row (and its lines or cycles) first, so every change
+-- made before the approval has committed and no later one can commit before it.
+CREATE OR REPLACE FUNCTION medcea_auth._changes_since(p_target text, p_key jsonb)
+RETURNS TABLE (change_id bigint, target text, row_key jsonb, op text, old_values jsonb, new_values jsonb,
+               actor_sub text, actor_person text, actor_name text, actor_role text, actor_source text,
+               at timestamptz, authors boolean)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = medcea_auth, pg_temp AS $$
+    WITH s AS (
+        SELECT ap.approved_at AS since, ap.last_change_id AS since_id FROM medcea.approval ap
+         WHERE ap.target = p_target AND ap.row_key = p_key AND ap.action IN ('approve', 'review', 'grandfather')
+         ORDER BY ap.approval_id DESC LIMIT 1),
+    m AS (
+        SELECT c.* FROM medcea.row_change c
+         WHERE (c.target = p_target AND c.row_key = p_key)
+            OR (p_target = 'medcea.recipe' AND c.target = 'medcea.recipe_line'
+                AND (c.row_key -> 0 = p_key -> 0 OR c.old_values -> 'recipe_id' = p_key -> 0
+                     OR c.new_values -> 'recipe_id' = p_key -> 0))
+            OR (p_target = 'medcea.recipe_run' AND c.target = 'medcea.recipe_line_cycle_run'
+                AND (c.row_key ->> 0)::bigint IN (SELECT x.recipe_line_cycle_run_id FROM medcea.recipe_line_cycle_run x
+                                                   WHERE x.recipe_run_id = (p_key ->> 0)::integer)))
+    SELECT m.change_id, m.target, m.row_key, m.op::text, m.old_values, m.new_values,
+           m.actor_sub, m.actor_person, m.actor_name, m.actor_role::text, m.actor_source, m.at,
+           NOT (m.op = 'U' AND (SELECT coalesce(bool_and(k IN ('status', 'retired_at', 'commissioning')), true)
+                                  FROM jsonb_object_keys(coalesce(m.new_values, '{}'::jsonb)) k))
+      FROM m LEFT JOIN s ON true
+     WHERE CASE WHEN s.since_id IS NOT NULL THEN m.change_id > s.since_id
+                ELSE s.since IS NULL OR m.at > s.since END
+     ORDER BY m.change_id
+$$;
+
+-- _authors(target, key): the persons among _changes_since()'s authors, and how
+-- many of those changes have no person (other than migration:008's). last_change
+-- is the newest matching row_change, authoring or not; the caller stores it in
+-- approval.last_change_id.
 -- An _authors() without last_change (an earlier 2a build) cannot be replaced
 -- in place: its result type changes. Callers are PL/pgSQL, so nothing depends on it.
 DO $$
@@ -2067,30 +2126,15 @@ CREATE OR REPLACE FUNCTION medcea_auth._authors(p_target text, p_key jsonb,
     OUT persons text[], OUT unattributed integer, OUT last_change bigint)
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea_auth, pg_temp AS $$
 DECLARE
-    since     timestamptz;
     since_id  bigint;
 BEGIN
-    SELECT ap.approved_at, ap.last_change_id INTO since, since_id FROM medcea.approval ap
+    SELECT ap.last_change_id INTO since_id FROM medcea.approval ap
      WHERE ap.target = p_target AND ap.row_key = p_key AND ap.action IN ('approve', 'review', 'grandfather')
      ORDER BY ap.approval_id DESC LIMIT 1;
-    WITH m AS (
-        SELECT c.* FROM medcea.row_change c
-         WHERE (c.target = p_target AND c.row_key = p_key)
-            OR (p_target = 'medcea.recipe' AND c.target = 'medcea.recipe_line'
-                AND (c.row_key -> 0 = p_key -> 0 OR c.old_values -> 'recipe_id' = p_key -> 0
-                     OR c.new_values -> 'recipe_id' = p_key -> 0))
-            OR (p_target = 'medcea.recipe_run' AND c.target = 'medcea.recipe_line_cycle_run'
-                AND (c.row_key ->> 0)::bigint IN (SELECT x.recipe_line_cycle_run_id FROM medcea.recipe_line_cycle_run x
-                                                   WHERE x.recipe_run_id = (p_key ->> 0)::integer))),
-    ch AS (
-        SELECT m.* FROM m
-         WHERE CASE WHEN since_id IS NOT NULL THEN m.change_id > since_id
-                    ELSE since IS NULL OR m.at > since END
-           AND NOT (m.op = 'U' AND (SELECT coalesce(bool_and(k IN ('status', 'retired_at')), true)
-                                      FROM jsonb_object_keys(coalesce(m.new_values, '{}'::jsonb)) k)))
     SELECT coalesce(array_agg(DISTINCT ch.actor_person) FILTER (WHERE ch.actor_person IS NOT NULL), '{}'),
            count(*) FILTER (WHERE ch.actor_person IS NULL AND coalesce(ch.actor_source, '') <> 'migration')
-      INTO persons, unattributed FROM ch;
+      INTO persons, unattributed
+      FROM medcea_auth._changes_since(p_target, p_key) ch WHERE ch.authors;
     SELECT max(m2.change_id) INTO last_change FROM medcea.row_change m2
      WHERE (m2.target = p_target AND m2.row_key = p_key)
         OR (p_target = 'medcea.recipe' AND m2.target = 'medcea.recipe_line'
@@ -2273,19 +2317,25 @@ BEGIN
     RETURN v_id;
 END $$;
 
-CREATE OR REPLACE FUNCTION medcea.approve_recipe(p_recipe_id integer) RETURNS bigint
+-- approve_recipe / approve_algorithm / approve_params (id, note): the approval
+-- with an optional note, recorded in approval.note. No DEFAULT on the note: a
+-- default would make the 1-argument call ambiguous (PostgREST picks the overload
+-- by the argument names it is sent). The 1-argument versions call these.
+CREATE OR REPLACE FUNCTION medcea.approve_recipe(p_recipe_id integer, p_note text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 BEGIN
-    RETURN medcea._approve_definition('medcea.recipe', p_recipe_id, 'recipes', NULL);
+    RETURN medcea._approve_definition('medcea.recipe', p_recipe_id, 'recipes', nullif(btrim(p_note), ''));
 END $$;
 
-CREATE OR REPLACE FUNCTION medcea.approve_algorithm(p_algorithm_id integer) RETURNS bigint
+CREATE OR REPLACE FUNCTION medcea.approve_algorithm(p_algorithm_id integer, p_note text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 BEGIN
-    RETURN medcea._approve_definition('medcea.control_algorithm', p_algorithm_id, 'controllers', NULL);
+    RETURN medcea._approve_definition('medcea.control_algorithm', p_algorithm_id, 'controllers', nullif(btrim(p_note), ''));
 END $$;
 
-CREATE OR REPLACE FUNCTION medcea.approve_params(p_params_id integer) RETURNS bigint
+-- The algorithm check comes first (before the approver's own checks), as it always
+-- has; approval_queue() reports algorithm_not_approved first for a parameter set too.
+CREATE OR REPLACE FUNCTION medcea.approve_params(p_params_id integer, p_note text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 DECLARE alg integer;
 BEGIN
@@ -2293,7 +2343,25 @@ BEGIN
     IF alg IS NOT NULL AND NOT medcea_auth._is_approved('medcea.control_algorithm', jsonb_build_array(alg)) THEN
         RAISE EXCEPTION 'parameter set %: its algorithm % is not approved', p_params_id, alg USING ERRCODE = '42501';
     END IF;
-    RETURN medcea._approve_definition('medcea.unit_algorithm_params', p_params_id, 'controllers', NULL);
+    RETURN medcea._approve_definition('medcea.unit_algorithm_params', p_params_id, 'controllers', nullif(btrim(p_note), ''));
+END $$;
+
+CREATE OR REPLACE FUNCTION medcea.approve_recipe(p_recipe_id integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    RETURN medcea.approve_recipe(p_recipe_id, NULL::text);
+END $$;
+
+CREATE OR REPLACE FUNCTION medcea.approve_algorithm(p_algorithm_id integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    RETURN medcea.approve_algorithm(p_algorithm_id, NULL::text);
+END $$;
+
+CREATE OR REPLACE FUNCTION medcea.approve_params(p_params_id integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    RETURN medcea.approve_params(p_params_id, NULL::text);
 END $$;
 
 -- propose_setting(key, value): a log-retention change, applied by approve_change().
@@ -2319,34 +2387,118 @@ BEGIN
     RETURN v_id;
 END $$;
 
--- propose_commissioning(unit, on, reason): commissioning waits for qa.
+-- _unit_busy(unit): a run of the unit that is running (R) or scheduled (S), the
+-- running one first, or nothing. Commissioning is refused while there is one: a
+-- flagged unit opens MQTT write to engineers and start_run refuses it.
+CREATE OR REPLACE FUNCTION medcea._unit_busy(p_unit_id integer, OUT run_id integer, OUT run_status text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+    SELECT r.recipe_run_id, r.recipe_run_status::text FROM medcea.recipe_run r
+     WHERE r.unit_id = p_unit_id AND r.recipe_run_status IN ('R', 'S')
+     ORDER BY r.recipe_run_status = 'R' DESC, r.recipe_run_id LIMIT 1
+$$;
+REVOKE ALL ON FUNCTION medcea._unit_busy(integer) FROM PUBLIC;
+
+-- propose_commissioning(unit, on, reason). On waits for a qa person other than the
+-- proposer (approve_change); it is a policy refusal while the unit has a run in R
+-- or S, here and again at approval. Off is a narrowing: it applies at once and
+-- waits for qa's review afterwards (pending_change.applied_at; approve_change
+-- records the review). A proposal that changes nothing is refused, and so is a
+-- second "on" while one waits: the proposer withdraws (withdraw_change) or qa
+-- returns it (return_change) — nobody replaces another person's proposal.
+-- The unit row is locked (FOR NO KEY UPDATE), as approve_change locks it and
+-- start_run reads the flag FOR SHARE, so a flag and a run start are serialised.
 CREATE OR REPLACE FUNCTION medcea.propose_commissioning(p_unit_id integer, p_value boolean, p_reason text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
-DECLARE a record; v_id bigint;
+DECLARE a record; v_id bigint; cur boolean; code text; busy record; waiting bigint;
 BEGIN
     SELECT * INTO a FROM medcea_auth.request_actor();
     IF a.sub IS NULL THEN
         RAISE EXCEPTION 'propose_commissioning: no actor' USING ERRCODE = '42501';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM medcea.cea_unit WHERE unit_id = p_unit_id) OR p_value IS NULL THEN
+    IF a.person IS NULL THEN
+        RAISE EXCEPTION 'propose_commissioning: your token carries no person_id' USING ERRCODE = '42501';
+    END IF;
+    SELECT u.commissioning, u.unit_code INTO cur, code FROM medcea.cea_unit u WHERE u.unit_id = p_unit_id FOR NO KEY UPDATE;
+    IF NOT FOUND OR p_value IS NULL THEN
         RAISE EXCEPTION 'propose_commissioning: no unit %', p_unit_id USING ERRCODE = '22023';
     END IF;
     IF coalesce(btrim(p_reason), '') = '' THEN
         RAISE EXCEPTION 'propose_commissioning: a reason is required' USING ERRCODE = '22023';
     END IF;
+    IF p_value IS NOT DISTINCT FROM coalesce(cur, false) THEN
+        RAISE EXCEPTION 'propose_commissioning: unit % is already %', code, CASE WHEN p_value THEN 'on' ELSE 'off' END
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_value THEN
+        SELECT pc.change_id INTO waiting FROM medcea.pending_change pc
+         WHERE pc.target = 'medcea.cea_unit' AND pc.row_key = jsonb_build_array(p_unit_id) AND pc.column_name = 'commissioning'
+           AND pc.applied_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM medcea.approval ap WHERE ap.target = 'medcea.pending_change'
+                                                              AND ap.row_key = jsonb_build_array(pc.change_id))
+           AND NOT EXISTS (SELECT 1 FROM medcea.pending_change x WHERE x.target = pc.target AND x.row_key = pc.row_key
+                                                                    AND x.column_name = pc.column_name AND x.change_id > pc.change_id)
+         ORDER BY pc.change_id DESC LIMIT 1;
+        IF waiting IS NOT NULL THEN
+            RAISE EXCEPTION 'propose_commissioning: change % for unit % already waits for qa', waiting, code
+                USING ERRCODE = '22023';
+        END IF;
+        SELECT * INTO busy FROM medcea._unit_busy(p_unit_id);
+        IF busy.run_id IS NOT NULL THEN
+            PERFORM medcea_auth.policy_refuse(format('commissioning: unit %s has run %s in %s; flag it when no run is running or scheduled',
+                                                     code, busy.run_id, busy.run_status));
+        END IF;
+    END IF;
     INSERT INTO medcea.pending_change (target, row_key, column_name, new_value, reason,
-        proposed_by_sub, proposed_by_person, proposed_by_name, proposed_by_role, proposed_by_source)
+        proposed_by_sub, proposed_by_person, proposed_by_name, proposed_by_role, proposed_by_source, applied_at)
     VALUES ('medcea.cea_unit', jsonb_build_array(p_unit_id), 'commissioning', to_jsonb(p_value), p_reason,
-            a.sub, a.person, a.name, a.role, a.source)
+            a.sub, a.person, a.name, a.role, a.source, CASE WHEN p_value THEN NULL ELSE now() END)
     RETURNING change_id INTO v_id;
+    IF NOT p_value THEN
+        PERFORM set_config('medcea.commissioning_change', v_id::text, true);
+        PERFORM medcea_auth._owner_write(true);
+        UPDATE medcea.cea_unit SET commissioning = false WHERE unit_id = p_unit_id;
+        PERFORM medcea_auth._owner_write(false);
+        PERFORM set_config('medcea.commissioning_change', '', true);
+    END IF;
     RETURN v_id;
 END $$;
 
+-- _pending_lock(change): approve_change, return_change and withdraw_change close a
+-- pending change under this lock, so two of them never both close it. A
+-- commissioning change's unit row is locked before it (the order propose takes).
+CREATE OR REPLACE FUNCTION medcea._pending_lock(p_id bigint, OUT pc medcea.pending_change)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE u integer;
+BEGIN
+    SELECT CASE WHEN x.target = 'medcea.cea_unit' THEN (x.row_key ->> 0)::integer END INTO u
+      FROM medcea.pending_change x WHERE x.change_id = p_id;
+    IF u IS NOT NULL THEN
+        PERFORM 1 FROM medcea.cea_unit c WHERE c.unit_id = u FOR NO KEY UPDATE;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('medcea.pending_change:' || p_id, 0));
+    SELECT * INTO pc FROM medcea.pending_change x WHERE x.change_id = p_id;
+END $$;
+REVOKE ALL ON FUNCTION medcea._pending_lock(bigint) FROM PUBLIC;
+
+-- _pending_open(change): no approval, return or withdrawal closed it, and (unless it
+-- applied at once and only waits for its review) no later proposal replaced it.
+CREATE OR REPLACE FUNCTION medcea._pending_open(pc medcea.pending_change) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+    SELECT NOT EXISTS (SELECT 1 FROM medcea.approval ap WHERE ap.target = 'medcea.pending_change'
+                                                          AND ap.row_key = jsonb_build_array(pc.change_id))
+       AND (pc.applied_at IS NOT NULL
+            OR NOT EXISTS (SELECT 1 FROM medcea.pending_change x WHERE x.target = pc.target AND x.row_key = pc.row_key
+                                                                   AND x.column_name = pc.column_name AND x.change_id > pc.change_id))
+$$;
+REVOKE ALL ON FUNCTION medcea._pending_open(medcea.pending_change) FROM PUBLIC;
+
 -- approve_change(target, id, note):
 --   target 'medcea.pending_change', id = change_id: approves and applies a
---     blocking change (retention: scheduler_settings; commissioning: master_data);
+--     blocking change (retention: scheduler_settings; commissioning: master_data),
+--     or reviews one that applied at once (commissioning off: action 'review');
 --   target a master_data or devices table, id = the row's id: a review.
--- Rejection is not modelled (a later proposal supersedes a pending one).
+-- qa sends a proposal back with return_change(); its proposer withdraws it with
+-- withdraw_change(); either closes it, like an approval.
 CREATE OR REPLACE FUNCTION medcea.approve_change(p_target text, p_id bigint, p_note text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 DECLARE
@@ -2357,15 +2509,16 @@ DECLARE
     k      jsonb;
     v_id   bigint;
     v      integer;
+    cur    boolean;
+    code   text;
+    busy   record;
 BEGIN
     IF p_target = 'medcea.pending_change' THEN
-        SELECT * INTO pc FROM medcea.pending_change WHERE change_id = p_id;
-        IF NOT FOUND THEN
+        SELECT * INTO pc FROM medcea._pending_lock(p_id);
+        IF pc.change_id IS NULL THEN
             RAISE EXCEPTION 'approve_change: no pending change %', p_id USING ERRCODE = '22023';
         END IF;
-        IF EXISTS (SELECT 1 FROM medcea.approval WHERE target = 'medcea.pending_change' AND row_key = jsonb_build_array(p_id))
-           OR EXISTS (SELECT 1 FROM medcea.pending_change x WHERE x.target = pc.target AND x.row_key = pc.row_key
-                         AND x.column_name = pc.column_name AND x.change_id > pc.change_id) THEN
+        IF NOT medcea._pending_open(pc) THEN
             RAISE EXCEPTION 'approve_change: change % is no longer pending', p_id USING ERRCODE = '22023';
         END IF;
         grp := CASE pc.target WHEN 'medcea.scheduler_config' THEN 'scheduler_settings' ELSE 'master_data' END;
@@ -2376,7 +2529,16 @@ BEGIN
         IF pc.proposed_by_person = ap.person THEN
             RAISE EXCEPTION 'not_own_author: % proposed change %', ap.person, p_id USING ERRCODE = '42501';
         END IF;
-        PERFORM medcea_auth._owner_write(true);
+        IF pc.applied_at IS NOT NULL THEN
+            -- applied at once (a narrowing): this is qa's review of it, nothing changes
+            INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
+                                         approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source)
+            VALUES ('medcea.pending_change', jsonb_build_array(p_id),
+                    encode(sha256(convert_to(to_jsonb(pc)::text, 'UTF8')), 'hex'), grp, 'review', p_note,
+                    ARRAY[pc.proposed_by_person], ap.sub, ap.person, ap.name, ap.role, ap.source)
+            RETURNING approval_id INTO v_id;
+            RETURN v_id;
+        END IF;
         IF pc.target = 'medcea.scheduler_config' THEN
             v := CASE WHEN (pc.new_value #>> '{}') ~ '^\d{1,9}$' THEN (pc.new_value #>> '{}')::integer END;
             IF v IS NULL OR (pc.row_key ->> 0 = 'log_compress_days' AND v < 1)
@@ -2384,13 +2546,33 @@ BEGIN
                 PERFORM medcea_auth.policy_refuse(format('retention: %s = %s is below the minimum (log_compress_days >= 1, log_delete_days >= 30)',
                                                          pc.row_key ->> 0, pc.new_value #>> '{}'));
             END IF;
+            PERFORM medcea_auth._owner_write(true);
             INSERT INTO medcea.scheduler_config (key, value) VALUES (pc.row_key ->> 0, pc.new_value #>> '{}')
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+            PERFORM medcea_auth._owner_write(false);
         ELSE
+            SELECT u.commissioning, u.unit_code INTO cur, code FROM medcea.cea_unit u WHERE u.unit_id = (pc.row_key ->> 0)::integer;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'approve_change: unit % no longer exists', pc.row_key ->> 0 USING ERRCODE = '22023';
+            END IF;
+            IF (pc.new_value #>> '{}')::boolean IS NOT DISTINCT FROM coalesce(cur, false) THEN
+                RAISE EXCEPTION 'approve_change: change % changes nothing: unit % is already %', p_id, code,
+                    CASE WHEN cur THEN 'on' ELSE 'off' END USING ERRCODE = '22023';
+            END IF;
+            IF (pc.new_value #>> '{}')::boolean THEN
+                SELECT * INTO busy FROM medcea._unit_busy((pc.row_key ->> 0)::integer);
+                IF busy.run_id IS NOT NULL THEN
+                    PERFORM medcea_auth.policy_refuse(format('commissioning: unit %s has run %s in %s; flag it when no run is running or scheduled',
+                                                             code, busy.run_id, busy.run_status));
+                END IF;
+            END IF;
+            PERFORM set_config('medcea.commissioning_change', p_id::text, true);
+            PERFORM medcea_auth._owner_write(true);
             UPDATE medcea.cea_unit SET commissioning = (pc.new_value #>> '{}')::boolean
              WHERE unit_id = (pc.row_key ->> 0)::integer;
+            PERFORM medcea_auth._owner_write(false);
+            PERFORM set_config('medcea.commissioning_change', '', true);
         END IF;
-        PERFORM medcea_auth._owner_write(false);
         INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
                                      approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source)
         VALUES ('medcea.pending_change', jsonb_build_array(p_id),
@@ -2424,6 +2606,488 @@ BEGIN
             ap.sub, ap.person, ap.name, ap.role, ap.source, au.last_change)
     RETURNING approval_id INTO v_id;
     RETURN v_id;
+END $$;
+
+-- return_change(target, id, reason): qa sends work back, with a reason (level A on
+-- the item's group, the approver rule of _approver()). A pending change
+-- (target 'medcea.pending_change') is closed: it never applies, and its proposer
+-- proposes again if still wanted. A draft (medcea.recipe, control_algorithm,
+-- unit_algorithm_params) stays an editable draft; approval_queue() and
+-- my_approvals() show it as returned until it is changed again. Recorded as
+-- approval action 'return', which no approval rule counts. The proposer of a
+-- change withdraws it instead (withdraw_change). A change that applied at once
+-- is reviewed, not returned.
+CREATE OR REPLACE FUNCTION medcea.return_change(p_target text, p_id bigint, p_reason text) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE
+    pc     medcea.pending_change;
+    ap     record;
+    au     record;
+    grp    text;
+    k      jsonb := jsonb_build_array(p_id);
+    st     text;
+    col    text := CASE p_target WHEN 'medcea.recipe' THEN 'recipe_id'
+                                 WHEN 'medcea.control_algorithm' THEN 'algorithm_id'
+                                 WHEN 'medcea.unit_algorithm_params' THEN 'params_id' END;
+    v_id   bigint;
+BEGIN
+    IF p_target = 'medcea.pending_change' THEN
+        SELECT * INTO pc FROM medcea._pending_lock(p_id);
+        IF pc.change_id IS NULL THEN
+            RAISE EXCEPTION 'return_change: no pending change %', p_id USING ERRCODE = '22023';
+        END IF;
+        grp := CASE pc.target WHEN 'medcea.scheduler_config' THEN 'scheduler_settings' ELSE 'master_data' END;
+    ELSIF col IS NOT NULL THEN
+        grp := medcea_auth.object_group(p_target);
+    ELSE
+        RAISE EXCEPTION 'return_change: % is not returned by return_change()', p_target USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO ap FROM medcea_auth._approver(grp);
+    IF coalesce(btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'return_change: a reason is required' USING ERRCODE = '22023';
+    END IF;
+    IF p_target = 'medcea.pending_change' THEN
+        IF NOT medcea._pending_open(pc) THEN
+            RAISE EXCEPTION 'return_change: change % is no longer pending', p_id USING ERRCODE = '22023';
+        END IF;
+        IF pc.applied_at IS NOT NULL THEN
+            RAISE EXCEPTION 'return_change: change % applied at once; review it (approve_change)', p_id USING ERRCODE = '22023';
+        END IF;
+        IF pc.proposed_by_person = ap.person THEN
+            RAISE EXCEPTION 'not_own_author: % proposed change %; withdraw it instead', ap.person, p_id USING ERRCODE = '42501';
+        END IF;
+        INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
+                                     approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source)
+        VALUES ('medcea.pending_change', k, encode(sha256(convert_to(to_jsonb(pc)::text, 'UTF8')), 'hex'), grp, 'return',
+                btrim(p_reason), array_remove(ARRAY[pc.proposed_by_person], NULL), ap.sub, ap.person, ap.name, ap.role, ap.source)
+        RETURNING approval_id INTO v_id;
+        RETURN v_id;
+    END IF;
+    EXECUTE format('SELECT t.status FROM %s t WHERE t.%I = $1 FOR UPDATE', p_target::regclass, col) INTO st USING p_id::integer;
+    IF st IS NULL THEN
+        RAISE EXCEPTION '% % does not exist', p_target, p_id USING ERRCODE = '22023';
+    END IF;
+    IF st <> 'draft' THEN
+        RAISE EXCEPTION '% % is %, not a draft', p_target, p_id, st USING ERRCODE = '22023';
+    END IF;
+    PERFORM medcea_auth._lock_row(p_target, k);
+    SELECT * INTO au FROM medcea_auth._authors(p_target, k);
+    IF EXISTS (SELECT 1 FROM medcea.approval r
+                WHERE r.target = p_target AND r.row_key = k AND r.action = 'return'
+                  AND r.last_change_id IS NOT DISTINCT FROM au.last_change
+                  AND NOT EXISTS (SELECT 1 FROM medcea.approval x WHERE x.target = r.target AND x.row_key = r.row_key
+                                                                     AND x.approval_id > r.approval_id
+                                                                     AND x.action IN ('approve', 'review', 'grandfather'))) THEN
+        RAISE EXCEPTION 'return_change: % % was returned and has not changed since', p_target, p_id USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
+                                 approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source,
+                                 last_change_id)
+    VALUES (p_target, k, medcea_auth.row_digest(p_target, k), grp, 'return', btrim(p_reason), au.persons,
+            ap.sub, ap.person, ap.name, ap.role, ap.source, au.last_change)
+    RETURNING approval_id INTO v_id;
+    RETURN v_id;
+END $$;
+
+-- withdraw_change(change, reason): the proposer takes their own waiting proposal
+-- back (any role; only the person who proposed it — by person_id, whichever of
+-- their accounts or services proposed it). Recorded as approval action 'withdraw'
+-- with the withdrawer as approved_by_*; the reason is optional. A change that
+-- applied at once cannot be withdrawn: propose the opposite.
+CREATE OR REPLACE FUNCTION medcea.withdraw_change(p_id bigint, p_reason text) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE a record; pc medcea.pending_change; v_id bigint;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.sub IS NULL THEN
+        RAISE EXCEPTION 'withdraw_change: no actor' USING ERRCODE = '42501';
+    END IF;
+    IF a.person IS NULL THEN
+        RAISE EXCEPTION 'withdraw_change: your token carries no person_id' USING ERRCODE = '42501';
+    END IF;
+    SELECT * INTO pc FROM medcea._pending_lock(p_id);
+    -- one answer for a change that does not exist and another person's: nothing
+    -- here tells a caller what others proposed
+    IF pc.change_id IS NULL OR pc.proposed_by_person IS DISTINCT FROM a.person THEN
+        RAISE EXCEPTION 'withdraw_change: change % is not a proposal of yours', p_id USING ERRCODE = '42501';
+    END IF;
+    IF NOT medcea._pending_open(pc) THEN
+        RAISE EXCEPTION 'withdraw_change: change % is no longer pending', p_id USING ERRCODE = '22023';
+    END IF;
+    IF pc.applied_at IS NOT NULL THEN
+        RAISE EXCEPTION 'withdraw_change: change % applied at once; propose the opposite instead', p_id USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
+                                 approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source)
+    VALUES ('medcea.pending_change', jsonb_build_array(p_id), encode(sha256(convert_to(to_jsonb(pc)::text, 'UTF8')), 'hex'),
+            CASE pc.target WHEN 'medcea.scheduler_config' THEN 'scheduler_settings' ELSE 'master_data' END,
+            'withdraw', nullif(btrim(p_reason), ''), ARRAY[pc.proposed_by_person],
+            a.sub, a.person, a.name, a.role, a.source)
+    RETURNING approval_id INTO v_id;
+    RETURN v_id;
+END $$;
+
+-- approval_queue(changes): what waits for qa, for the Configuration UI's Approvals
+-- tab. Read-only; it writes nothing. Drafts (recipes, control algorithms,
+-- parameter sets) with their content, the persons who changed them since their
+-- last approval (_changes_since(), the approve functions' own rule) and, unless
+-- p_changes is false (the tab's count), those changes (newest first, at most 200);
+-- then the open pending changes (log settings, commissioning: state 'waiting', or
+-- 'review' for one that applied at once). Rows only from the groups where the
+-- caller holds R. may_approve and why_not_code/why_not are advisory, computed in the
+-- approve functions' order without their locks; the database still decides at
+-- approval. A draft qa returned reads state 'returned' until it changes again.
+-- Only a person's own token (source 'token'): the services that inherit EXECUTE
+-- through audit_histories R get a refusal.
+CREATE OR REPLACE FUNCTION medcea.approval_queue(p_changes boolean DEFAULT true)
+RETURNS TABLE (kind text, target text, id bigint, group_name text, label text, state text, detail jsonb,
+               authors text[], author_names text[], unattributed integer,
+               last_approval_id bigint, last_approved_at timestamptz, last_approved_by text,
+               changes jsonb, changes_total integer,
+               reason text, proposed_by text, proposed_at timestamptz,
+               returned_at timestamptz, returned_by text, return_reason text,
+               may_approve boolean, may_return boolean, why_not_code text, why_not text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+#variable_conflict use_column
+DECLARE
+    a     record;
+    d     record;
+    p     medcea.pending_change;
+    la    record;
+    rt    record;
+    cs    record;
+    b_run integer;
+    b_st  text;
+    rk    jsonb;
+    g     text;
+    cur   jsonb;
+    v     integer;
+    holds boolean;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.source IS DISTINCT FROM 'token' THEN
+        RAISE EXCEPTION 'approval_queue: read it in the Configuration UI with your own sign-in' USING ERRCODE = '42501';
+    END IF;
+    FOR d IN
+        SELECT 'recipe' AS d_kind, 'medcea.recipe' AS d_target, x.recipe_id::bigint AS d_id, 'recipes' AS d_group,
+               x.recipe_name::text AS d_label, NULL::integer AS d_alg,
+               to_jsonb(x) || jsonb_build_object('lines',
+                   (SELECT coalesce(jsonb_agg(to_jsonb(l) ORDER BY l.recipe_item_seq_id), '[]'::jsonb)
+                      FROM medcea.recipe_line l WHERE l.recipe_id = x.recipe_id)) AS d_detail
+          FROM medcea.recipe x WHERE x.status = 'draft'
+        UNION ALL
+        SELECT 'algorithm', 'medcea.control_algorithm', x.algorithm_id::bigint, 'controllers', x.algorithm_code::text,
+               NULL::integer, to_jsonb(x)
+          FROM medcea.control_algorithm x WHERE x.status = 'draft'
+        UNION ALL
+        SELECT 'params', 'medcea.unit_algorithm_params', x.params_id::bigint, 'controllers', x.name::text, x.algorithm_id,
+               to_jsonb(x) || jsonb_build_object('algorithm_code', ca.algorithm_code, 'unit_code', cu.unit_code)
+          FROM medcea.unit_algorithm_params x
+          JOIN medcea.control_algorithm ca ON ca.algorithm_id = x.algorithm_id
+          LEFT JOIN medcea.cea_unit cu ON cu.unit_id = x.unit_id
+         WHERE x.status = 'draft'
+    LOOP
+        CONTINUE WHEN medcea_auth.policy_holds(a.role, d.d_group, 'R') IS NULL;
+        rk := jsonb_build_array(d.d_id);
+        kind := d.d_kind; target := d.d_target; id := d.d_id; group_name := d.d_group; label := d.d_label;
+        detail := d.d_detail;
+        SELECT ap.approval_id, ap.approved_at, ap.approved_by_name INTO la FROM medcea.approval ap
+         WHERE ap.target = d.d_target AND ap.row_key = rk AND ap.action IN ('approve', 'review', 'grandfather')
+         ORDER BY ap.approval_id DESC LIMIT 1;
+        last_approval_id := la.approval_id; last_approved_at := la.approved_at; last_approved_by := la.approved_by_name;
+        SELECT coalesce(array_agg(DISTINCT c.actor_person) FILTER (WHERE c.authors AND c.actor_person IS NOT NULL), '{}') AS persons,
+               coalesce(array_agg(DISTINCT c.actor_name) FILTER (WHERE c.authors AND c.actor_person IS NOT NULL), '{}') AS names,
+               (count(*) FILTER (WHERE c.authors AND c.actor_person IS NULL AND coalesce(c.actor_source, '') <> 'migration'))::integer AS unattr,
+               count(*)::integer AS total,
+               max(c.change_id) FILTER (WHERE c.authors) AS last_authoring
+          INTO cs FROM medcea_auth._changes_since(d.d_target, rk) c;
+        authors := cs.persons; author_names := cs.names; unattributed := cs.unattr; changes_total := cs.total;
+        changes := NULL;
+        IF p_changes THEN
+            SELECT coalesce(jsonb_agg(jsonb_build_object(
+                       'change_id', c.change_id, 'target', c.target, 'row_key', c.row_key, 'op', c.op,
+                       'old', c.old_values, 'new', c.new_values, 'by_name', c.actor_name, 'by_person', c.actor_person,
+                       'by_role', c.actor_role, 'by_source', c.actor_source, 'at', c.at, 'authors', c.authors)
+                       ORDER BY c.change_id DESC), '[]'::jsonb)
+              INTO changes
+              FROM (SELECT c0.* FROM medcea_auth._changes_since(d.d_target, rk) c0 ORDER BY c0.change_id DESC LIMIT 200) c;
+        END IF;
+        SELECT r.approval_id, r.approved_at, r.approved_by_name, r.note, r.last_change_id INTO rt FROM medcea.approval r
+         WHERE r.target = d.d_target AND r.row_key = rk AND r.action = 'return'
+         ORDER BY r.approval_id DESC LIMIT 1;
+        IF rt.approval_id IS NOT NULL AND rt.approval_id > coalesce(la.approval_id, 0)
+           AND (cs.last_authoring IS NULL OR cs.last_authoring <= coalesce(rt.last_change_id, 0)) THEN
+            state := 'returned'; returned_at := rt.approved_at; returned_by := rt.approved_by_name; return_reason := rt.note;
+        ELSE
+            state := 'waiting'; returned_at := NULL; returned_by := NULL; return_reason := NULL;
+        END IF;
+        reason := NULL; proposed_by := NULL; proposed_at := NULL;
+        holds := a.person IS NOT NULL AND medcea_auth.policy_holds(a.role, d.d_group, 'A') IS NOT NULL;
+        why_not_code := CASE
+            WHEN d.d_alg IS NOT NULL AND NOT medcea_auth._is_approved('medcea.control_algorithm', jsonb_build_array(d.d_alg))
+                THEN 'algorithm_not_approved'
+            WHEN a.person IS NULL THEN 'no_person'
+            WHEN NOT holds THEN 'no_role'
+            WHEN a.person = ANY (cs.persons) THEN 'own_author'
+            WHEN cs.unattr > 0 THEN 'unattributed' END;
+        why_not := CASE why_not_code
+            WHEN 'algorithm_not_approved' THEN format('its control algorithm %s is not approved', d.d_alg)
+            WHEN 'no_person' THEN 'your token carries no person_id'
+            WHEN 'no_role' THEN format('role %s holds no approval on %s', a.role, d.d_group)
+            WHEN 'own_author' THEN 'you changed it since its last approval'
+            WHEN 'unattributed' THEN format('%s change(s) have no person; re-create it to approve it', cs.unattr) END;
+        may_approve := why_not_code IS NULL;
+        may_return := holds AND state = 'waiting';
+        RETURN NEXT;
+    END LOOP;
+    FOR p IN SELECT x.* FROM medcea.pending_change x WHERE medcea._pending_open(x) ORDER BY x.change_id LOOP
+        g := CASE p.target WHEN 'medcea.scheduler_config' THEN 'scheduler_settings' ELSE 'master_data' END;
+        CONTINUE WHEN medcea_auth.policy_holds(a.role, g, 'R') IS NULL;
+        b_run := NULL; b_st := NULL; cur := NULL; v := NULL;
+        IF p.target = 'medcea.scheduler_config' THEN
+            kind := 'setting'; label := p.row_key ->> 0;
+            SELECT to_jsonb(sc.value) INTO cur FROM medcea.scheduler_config sc WHERE sc.key = p.row_key ->> 0;
+            v := CASE WHEN (p.new_value #>> '{}') ~ '^\d{1,9}$' THEN (p.new_value #>> '{}')::integer END;
+        ELSE
+            kind := 'commissioning';
+            SELECT cu.unit_code::text, to_jsonb(coalesce(cu.commissioning, false)) INTO label, cur
+              FROM medcea.cea_unit cu WHERE cu.unit_id = (p.row_key ->> 0)::integer;
+            IF p.applied_at IS NULL AND p.new_value = 'true'::jsonb THEN
+                SELECT ub.run_id, ub.run_status INTO b_run, b_st FROM medcea._unit_busy((p.row_key ->> 0)::integer) ub;
+            END IF;
+        END IF;
+        target := 'medcea.pending_change'; id := p.change_id; group_name := g;
+        state := CASE WHEN p.applied_at IS NOT NULL THEN 'review' ELSE 'waiting' END;
+        detail := jsonb_build_object('target', p.target, 'row_key', p.row_key, 'column', p.column_name,
+                                     'current', cur, 'proposed', p.new_value, 'applied_at', p.applied_at,
+                                     'blocking_run_id', b_run, 'blocking_run_status', b_st);
+        authors := array_remove(ARRAY[p.proposed_by_person], NULL);
+        author_names := array_remove(ARRAY[p.proposed_by_name], NULL);
+        unattributed := CASE WHEN p.proposed_by_person IS NULL THEN 1 ELSE 0 END;
+        SELECT ap.approval_id, ap.approved_at, ap.approved_by_name INTO la
+          FROM medcea.approval ap JOIN medcea.pending_change y ON ap.row_key = jsonb_build_array(y.change_id)
+         WHERE ap.target = 'medcea.pending_change' AND ap.action IN ('apply', 'review')
+           AND y.target = p.target AND y.row_key = p.row_key AND y.column_name = p.column_name
+         ORDER BY ap.approval_id DESC LIMIT 1;
+        last_approval_id := la.approval_id; last_approved_at := la.approved_at; last_approved_by := la.approved_by_name;
+        changes := NULL; changes_total := 0;
+        reason := p.reason; proposed_by := p.proposed_by_name; proposed_at := p.proposed_at;
+        returned_at := NULL; returned_by := NULL; return_reason := NULL;
+        holds := a.person IS NOT NULL AND medcea_auth.policy_holds(a.role, g, 'A') IS NOT NULL;
+        why_not_code := CASE
+            WHEN a.person IS NULL THEN 'no_person'
+            WHEN NOT holds THEN 'no_role'
+            WHEN p.proposed_by_person IS NULL THEN 'unattributed'
+            WHEN p.proposed_by_person = a.person THEN 'own_author'
+            WHEN p.applied_at IS NOT NULL THEN NULL
+            WHEN kind = 'setting' AND (v IS NULL OR (p.row_key ->> 0 = 'log_compress_days' AND v < 1)
+                                                 OR (p.row_key ->> 0 = 'log_delete_days' AND v < 30)) THEN 'retention_minimum'
+            WHEN kind = 'commissioning' AND p.new_value = cur THEN 'no_change'
+            WHEN kind = 'commissioning' AND b_run IS NOT NULL THEN 'run_in_progress' END;
+        why_not := CASE why_not_code
+            WHEN 'no_person' THEN 'your token carries no person_id'
+            WHEN 'no_role' THEN format('role %s holds no approval on %s', a.role, g)
+            WHEN 'unattributed' THEN 'the proposal has no person behind it'
+            WHEN 'own_author' THEN 'you proposed it'
+            WHEN 'retention_minimum' THEN 'not a whole number of days, or below the minimum (log_compress_days >= 1, log_delete_days >= 30)'
+            WHEN 'no_change' THEN 'it would change nothing'
+            WHEN 'run_in_progress' THEN format('run %s is in %s on this unit', b_run, b_st) END;
+        may_approve := why_not_code IS NULL;
+        may_return := holds AND state = 'waiting' AND p.proposed_by_person IS DISTINCT FROM a.person;
+        RETURN NEXT;
+    END LOOP;
+END $$;
+
+-- my_approvals(): the caller's own work and where it stands (level R on portal:
+-- every person reads only their own). Their proposals (newest 100: waiting,
+-- applied, applied_review_pending, reviewed, returned, withdrawn, superseded),
+-- and the drafts they changed since the last approval (waiting or returned).
+-- Approvers' names and approval notes are not shown; a return's reason is (it is
+-- addressed to the author). A caller without a person_id gets nothing.
+CREATE OR REPLACE FUNCTION medcea.my_approvals()
+RETURNS TABLE (kind text, target text, id bigint, label text, state text, detail jsonb, reason text,
+               changed_at timestamptz, closed_at timestamptz, return_reason text, may_withdraw boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+#variable_conflict use_column
+DECLARE
+    a    record;
+    p    medcea.pending_change;
+    d    record;
+    cl   record;
+    cs   record;
+    rt   record;
+    rk   jsonb;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.person IS NULL THEN
+        RETURN;
+    END IF;
+    FOR p IN SELECT x.* FROM medcea.pending_change x WHERE x.proposed_by_person = a.person
+              ORDER BY x.change_id DESC LIMIT 100 LOOP
+        SELECT ap.action, ap.approved_at, ap.note INTO cl FROM medcea.approval ap
+         WHERE ap.target = 'medcea.pending_change' AND ap.row_key = jsonb_build_array(p.change_id)
+         ORDER BY ap.approval_id DESC LIMIT 1;
+        kind := CASE WHEN p.target = 'medcea.scheduler_config' THEN 'setting' ELSE 'commissioning' END;
+        target := 'medcea.pending_change'; id := p.change_id;
+        label := CASE WHEN p.target = 'medcea.scheduler_config' THEN p.row_key ->> 0
+                      ELSE (SELECT cu.unit_code::text FROM medcea.cea_unit cu WHERE cu.unit_id = (p.row_key ->> 0)::integer) END;
+        state := CASE cl.action WHEN 'apply' THEN 'applied' WHEN 'review' THEN 'reviewed' WHEN 'return' THEN 'returned'
+                                WHEN 'withdraw' THEN 'withdrawn'
+                 ELSE CASE WHEN p.applied_at IS NOT NULL THEN 'applied_review_pending'
+                           WHEN NOT medcea._pending_open(p) THEN 'superseded'
+                           ELSE 'waiting' END END;
+        detail := jsonb_build_object('target', p.target, 'row_key', p.row_key, 'column', p.column_name,
+                                     'proposed', p.new_value, 'applied_at', p.applied_at);
+        reason := p.reason; changed_at := p.proposed_at; closed_at := cl.approved_at;
+        return_reason := CASE WHEN cl.action = 'return' THEN cl.note END;
+        may_withdraw := state = 'waiting';
+        RETURN NEXT;
+    END LOOP;
+    FOR d IN
+        SELECT 'recipe' AS d_kind, 'medcea.recipe' AS d_target, x.recipe_id::bigint AS d_id, x.recipe_name::text AS d_label
+          FROM medcea.recipe x WHERE x.status = 'draft'
+        UNION ALL
+        SELECT 'algorithm', 'medcea.control_algorithm', x.algorithm_id::bigint, x.algorithm_code::text
+          FROM medcea.control_algorithm x WHERE x.status = 'draft'
+        UNION ALL
+        SELECT 'params', 'medcea.unit_algorithm_params', x.params_id::bigint, x.name::text
+          FROM medcea.unit_algorithm_params x WHERE x.status = 'draft'
+    LOOP
+        rk := jsonb_build_array(d.d_id);
+        SELECT coalesce(array_agg(DISTINCT c.actor_person) FILTER (WHERE c.authors AND c.actor_person IS NOT NULL), '{}') AS persons,
+               max(c.change_id) FILTER (WHERE c.authors) AS last_authoring,
+               max(c.at) FILTER (WHERE c.authors) AS last_at
+          INTO cs FROM medcea_auth._changes_since(d.d_target, rk) c;
+        CONTINUE WHEN NOT (a.person = ANY (cs.persons));
+        SELECT r.approval_id, r.approved_at, r.note, r.last_change_id INTO rt FROM medcea.approval r
+         WHERE r.target = d.d_target AND r.row_key = rk AND r.action = 'return'
+           AND NOT EXISTS (SELECT 1 FROM medcea.approval x WHERE x.target = r.target AND x.row_key = r.row_key
+                                                              AND x.approval_id > r.approval_id
+                                                              AND x.action IN ('approve', 'review', 'grandfather'))
+         ORDER BY r.approval_id DESC LIMIT 1;
+        kind := d.d_kind; target := d.d_target; id := d.d_id; label := d.d_label; detail := NULL; reason := NULL;
+        changed_at := cs.last_at;
+        IF rt.approval_id IS NOT NULL AND (cs.last_authoring IS NULL OR cs.last_authoring <= coalesce(rt.last_change_id, 0)) THEN
+            state := 'returned'; closed_at := rt.approved_at; return_reason := rt.note;
+        ELSE
+            state := 'waiting'; closed_at := NULL; return_reason := NULL;
+        END IF;
+        may_withdraw := false;
+        RETURN NEXT;
+    END LOOP;
+END $$;
+
+-- unit_commissioning(): every unit's commissioning flag for the Units tab (level R
+-- on master_data), with the waiting "on" proposal, an "off" that applied at once
+-- and waits for qa's review, the last applied change, and what the caller may do.
+-- A definer function reads past the run tables' row security, so the run that
+-- blocks commissioning (R or S) is returned only to roles reading every unit's
+-- runs (an operator must not learn another unit's run state, as _refuse_hidden_run).
+-- Proposers' names and reasons go to engineer, qa, qp and auditor (U on master_data
+-- or R on audit_histories) and to the proposer; the approver's name to the
+-- audit_histories readers only. Everyone else (services included) sees the flag and
+-- that a proposal waits.
+CREATE OR REPLACE FUNCTION medcea.unit_commissioning()
+RETURNS TABLE (unit_id integer, unit_code text, commissioning boolean,
+               blocking_run_id integer, blocking_run_status text,
+               pending_change_id bigint, pending_value boolean, pending_reason text, pending_by text,
+               pending_at timestamptz, pending_mine boolean, review_change_id bigint,
+               last_change_id bigint, last_value boolean, last_changed_at timestamptz,
+               last_proposed_by text, last_approved_by text,
+               can_propose boolean, can_approve boolean, can_read_history boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+#variable_conflict use_column
+DECLARE
+    a       record;
+    u       record;
+    pc      medcea.pending_change;
+    lc      record;
+    busy    record;
+    person  boolean;
+    sees    boolean;
+    hist    boolean;
+    runs    boolean;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    person := a.person IS NOT NULL AND (a.source = 'token' OR a.source LIKE 'person via %');
+    hist := person AND medcea_auth.policy_holds(a.role, 'audit_histories', 'R') IS NOT NULL;
+    sees := hist OR (person AND medcea_auth.policy_holds(a.role, 'master_data', 'U') IS NOT NULL);
+    runs := medcea_auth.policy_holds(a.role, 'runs', 'R') IS NOT DISTINCT FROM 'free';
+    can_propose := person AND medcea_auth.policy_holds(a.role, 'master_data', 'U') IS NOT NULL;
+    can_approve := a.source IS NOT DISTINCT FROM 'token' AND a.person IS NOT NULL
+                   AND medcea_auth.policy_holds(a.role, 'master_data', 'A') IS NOT NULL;
+    can_read_history := hist;
+    FOR u IN SELECT cu.unit_id AS u_id, cu.unit_code::text AS u_code, coalesce(cu.commissioning, false) AS u_flag
+               FROM medcea.cea_unit cu ORDER BY cu.unit_code LOOP
+        unit_id := u.u_id; unit_code := u.u_code; commissioning := u.u_flag;
+        pc := NULL;
+        SELECT x.* INTO pc FROM medcea.pending_change x
+         WHERE x.target = 'medcea.cea_unit' AND x.row_key = jsonb_build_array(u.u_id) AND x.column_name = 'commissioning'
+           AND x.applied_at IS NULL AND medcea._pending_open(x)
+         ORDER BY x.change_id DESC LIMIT 1;
+        pending_change_id := pc.change_id; pending_value := (pc.new_value #>> '{}')::boolean;
+        pending_mine := pc.change_id IS NOT NULL AND a.person IS NOT NULL AND pc.proposed_by_person = a.person;
+        pending_at := pc.proposed_at;
+        pending_reason := CASE WHEN sees OR pending_mine THEN pc.reason END;
+        pending_by := CASE WHEN sees OR pending_mine THEN pc.proposed_by_name END;
+        SELECT max(x.change_id) INTO review_change_id FROM medcea.pending_change x
+         WHERE x.target = 'medcea.cea_unit' AND x.row_key = jsonb_build_array(u.u_id) AND x.column_name = 'commissioning'
+           AND x.applied_at IS NOT NULL AND medcea._pending_open(x);
+        SELECT y.change_id AS c_id, (y.new_value #>> '{}')::boolean AS c_value, coalesce(ap.approved_at, y.applied_at) AS c_at,
+               y.proposed_by_name AS c_by, ap.approved_by_name AS c_approver INTO lc
+          FROM medcea.pending_change y
+          LEFT JOIN medcea.approval ap ON ap.target = 'medcea.pending_change' AND ap.row_key = jsonb_build_array(y.change_id)
+                                      AND ap.action = 'apply'
+         WHERE y.target = 'medcea.cea_unit' AND y.row_key = jsonb_build_array(u.u_id) AND y.column_name = 'commissioning'
+           AND (ap.approval_id IS NOT NULL OR y.applied_at IS NOT NULL)
+         ORDER BY coalesce(ap.approved_at, y.applied_at) DESC, y.change_id DESC LIMIT 1;
+        last_change_id := lc.c_id; last_value := lc.c_value; last_changed_at := lc.c_at;
+        last_proposed_by := CASE WHEN sees THEN lc.c_by END;
+        last_approved_by := CASE WHEN hist THEN lc.c_approver END;
+        blocking_run_id := NULL; blocking_run_status := NULL;
+        IF runs THEN
+            SELECT * INTO busy FROM medcea._unit_busy(u.u_id);
+            blocking_run_id := busy.run_id; blocking_run_status := busy.run_status;
+        END IF;
+        RETURN NEXT;
+    END LOOP;
+END $$;
+
+-- log_commissioning(): every change of cea_unit.commissioning is appended to the
+-- tamper-evident policy history (commissioning_enabled / commissioning_disabled),
+-- like unit assignments, because the flag opens engineers' MQTT write to the
+-- unit. The actor is the request's (qa applying an "on", the engineer whose "off"
+-- applied at once); the change and its reason come from the pending_change the
+-- function names in medcea.commissioning_change. SECURITY DEFINER (append_history
+-- is the owner's); ENABLE ALWAYS, so session_replication_role does not skip it.
+CREATE OR REPLACE FUNCTION medcea.log_commissioning() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE pc medcea.pending_change; cid text := nullif(current_setting('medcea.commissioning_change', true), '');
+BEGIN
+    IF cid ~ '^\d+$' THEN
+        SELECT * INTO pc FROM medcea.pending_change x WHERE x.change_id = cid::bigint;
+    END IF;
+    PERFORM iam_policy.append_history(
+        CASE WHEN NEW.commissioning THEN 'commissioning_enabled' ELSE 'commissioning_disabled' END,
+        jsonb_build_object('unit_id', NEW.unit_id, 'unit_code', NEW.unit_code, 'change_id', pc.change_id,
+                           'proposed_by_person', pc.proposed_by_person, 'proposed_by_role', pc.proposed_by_role,
+                           'applied_at_once', pc.applied_at IS NOT NULL),
+        pc.reason);
+    RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION medcea.log_commissioning() FROM PUBLIC;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = 'medcea.cea_unit'::regclass
+                                                         AND tgname = 'commissioning_history_trg') THEN
+        CREATE TRIGGER commissioning_history_trg AFTER UPDATE OF commissioning ON medcea.cea_unit
+            FOR EACH ROW WHEN (OLD.commissioning IS DISTINCT FROM NEW.commissioning)
+            EXECUTE FUNCTION medcea.log_commissioning();
+    END IF;
+    IF (SELECT tgenabled FROM pg_catalog.pg_trigger WHERE tgrelid = 'medcea.cea_unit'::regclass
+                                                      AND tgname = 'commissioning_history_trg') <> 'A' THEN
+        ALTER TABLE medcea.cea_unit ENABLE ALWAYS TRIGGER commissioning_history_trg;
+    END IF;
 END $$;
 
 -- H9: a run's parameter set belongs to its unit (or any unit) and runs the
@@ -2533,6 +3197,10 @@ BEGIN
         RAISE EXCEPTION 'start_run: unit % already has a running run', r.unit_id USING ERRCODE = '22023';
     END IF;
     PERFORM medcea._check_run_params(r.unit_id, r.recipe_id, r.params_id, r.schedule_id);
+    -- FOR SHARE: waits for a commissioning change in flight on the unit (propose and
+    -- approve_change lock its row FOR NO KEY UPDATE), and holds one off until this
+    -- run is R, which they then see (_unit_busy)
+    PERFORM 1 FROM medcea.cea_unit u WHERE u.unit_id = r.unit_id FOR SHARE;
     IF (SELECT u.commissioning FROM medcea.cea_unit u WHERE u.unit_id = r.unit_id) THEN
         PERFORM medcea_auth.policy_refuse(format('commissioning: unit %s is flagged for commissioning', r.unit_id));
     END IF;
@@ -3074,9 +3742,9 @@ END $$;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE medcea_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
-COMMENT ON TABLE medcea.approval IS 'Append-only approvals: approve, review, apply, release, retire and the one-time grandfather of definitions in use before 008b. Written by the approval functions only.';
+COMMENT ON TABLE medcea.approval IS 'Append-only approvals: approve, review, apply, release, retire and the one-time grandfather of definitions in use before 008b; return (qa sends work back) and withdraw (the proposer takes a proposal back), which no approval rule counts. Written by the approval functions only.';
 COMMENT ON TABLE medcea.row_change IS 'Append-only log of every change to the 14 attributed tables, with the verified actor; not_own_author reads it.';
-COMMENT ON TABLE medcea.pending_change IS 'Append-only blocking changes (log retention, commissioning) waiting for approve_change().';
+COMMENT ON TABLE medcea.pending_change IS 'Append-only blocking changes (log retention, commissioning) waiting for approve_change(), or (applied_at) a commissioning off that applied at once and waits for qa''s review; closed by an approval row (apply, review, return, withdraw).';
 COMMENT ON TABLE medcea.run_release IS 'Append-only release of completed runs by a person who neither created, changed nor executed them.';
 COMMENT ON TABLE medcea.algorithm_state_event IS 'Append-only events of the controller state (Q-tables): writes as hashes, retirement and deletion with the full state.';
 

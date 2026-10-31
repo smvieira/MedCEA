@@ -23,6 +23,9 @@ Rules (one place, so the Policy UI's explain and the database cannot drift):
              membership); a constraint's `limits_dml_to` narrows its levels' DML
   services   the closure of their ceiling; `service_only: [svc...]` members only for those
   R, X       SELECT          C   INSERT (+ USAGE on the table's sequences)    U   UPDATE
+  R, C, U    also EXECUTE on function members of that level (R: a group's read functions,
+             e.g. medcea.approval_queue(); a definer function that reads past a grant
+             decides itself what each caller sees)
   O, A       EXECUTE on function members of that level, and on every approval function of
              a group where the role holds A (unless the function's member is service_only)
   K          EXECUTE on `service_only` function members only (check() refuses a K function

@@ -1487,5 +1487,133 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(routes_diff.REMOVED, {})
 
 
+def _created_functions(sql):
+    """{normalised signature} of every CREATE [OR REPLACE] FUNCTION in an SQL text (IN
+    arguments only, names dropped, as grants.norm_sig writes them)."""
+    out = set()
+    for m in re.finditer(r"CREATE (?:OR REPLACE )?FUNCTION ([a-z_]+\.[a-z_]+)\(", sql):
+        depth, i = 1, m.end()
+        while depth:
+            depth += {"(": 1, ")": -1}.get(sql[i], 0)
+            i += 1
+        args = []
+        for a in re.split(r",(?![^(]*\))", sql[m.end():i - 1]):
+            a = re.sub(r"\s+DEFAULT\s+.*$", "", " ".join(a.split()), flags=re.S)
+            if not a or a.startswith("OUT "):
+                continue
+            words = a.split(" ")
+            args.append(" ".join(words[1:]) if len(words) > 1 and not words[0].startswith("medcea") else a)
+        out.add(grants.norm_sig(f"{m.group(1)}({', '.join(args)})"))
+    return out
+
+
+class ApproveCommissionTest(unittest.TestCase):
+    """The Approve action and the commissioning screen's database side (2026-10-31): the
+    noted approvals, return and withdraw, the read functions, commissioning rules."""
+
+    NEW = ("medcea.approve_recipe(integer,text)", "medcea.approve_algorithm(integer,text)",
+           "medcea.approve_params(integer,text)", "medcea.return_change(text,bigint,text)",
+           "medcea.withdraw_change(bigint,text)", "medcea.approval_queue(boolean)", "medcea.my_approvals()",
+           "medcea.unit_commissioning()", "medcea._unit_busy(integer)", "medcea._pending_lock(bigint)",
+           "medcea._pending_open(medcea.pending_change)", "medcea.log_commissioning()",
+           "medcea_auth._changes_since(text,jsonb)")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+        cls.privs = grants.privileges(cls.policy)
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
+            cls.mig = f.read()
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008b.sql")) as f:
+            cls.down = f.read()
+
+    def holders(self, obj, priv="EXECUTE"):
+        return {g for g, k, o, p in self.privs if o == obj and p == priv}
+
+    def body(self, sig_start):
+        i = self.mig.index(sig_start)
+        return self.mig[i:self.mig.index("END $$;", i)]
+
+    def test_who_holds_what(self):
+        people = set(grants.people(self.policy).values())
+        for fn in ("medcea.approve_recipe(integer,text)", "medcea.approve_algorithm(integer,text)",
+                   "medcea.approve_params(integer,text)", "medcea.approve_recipe(integer)",
+                   "medcea.approve_algorithm(integer)", "medcea.approve_params(integer)",
+                   "medcea.return_change(text,bigint,text)", "medcea.approve_change(text,bigint,text)"):
+            self.assertEqual(self.holders(fn), {"rr_qa"}, fn)
+        # audit_histories R: qa, qp, auditor, and services whose call the function refuses
+        self.assertEqual(self.holders("medcea.approval_queue(boolean)"),
+                         {"rr_qa", "rr_qp", "rr_auditor", "svc_dbexport", "iam_svc", "access_svc"})
+        self.assertIn("'approval_queue: read it in the Configuration UI with your own sign-in'", self.mig)
+        # portal R: every person, no service (own records only)
+        for fn in ("medcea.my_approvals()", "medcea.withdraw_change(bigint,text)"):
+            self.assertEqual(self.holders(fn), people, fn)
+        self.assertTrue(people <= self.holders("medcea.unit_commissioning()"))
+        self.assertEqual(self.holders("medcea.propose_commissioning(integer,boolean,text)"), {"rr_engineer"})
+        # the proposer still reads no audit record directly
+        for t in ("medcea.pending_change", "medcea.approval", "medcea.row_change"):
+            self.assertNotIn("rr_engineer", self.holders(t, "SELECT"), t)
+            self.assertNotIn("rr_admin", self.holders(t, "SELECT"), t)
+
+    def test_created_and_dropped_by_the_full_down(self):
+        created = _created_functions(self.mig)
+        drops = " ".join(re.findall(r"DROP FUNCTION IF EXISTS (.*?);", self.down, re.S))
+        dropped = {grants.norm_sig(x.strip()) for x in re.split(r",\s*(?=[a-z_]+\.[a-z_]+\()", drops)}
+        for fn in self.NEW:
+            self.assertIn(fn, created, fn)
+            self.assertIn(fn, dropped, f"{fn} is not in the down file's -v full=1 DROP list")
+            self.assertIn(fn, grants.declared_functions(self.policy) + [
+                "medcea._unit_busy(integer)", "medcea._pending_lock(bigint)", "medcea.log_commissioning()",
+                "medcea._pending_open(medcea.pending_change)"], fn)
+        self.assertIn("'commissioning_history_trg'", self.down)
+
+    def test_noted_overloads_have_no_default(self):
+        # a DEFAULT would make the 1-argument PostgREST call ambiguous (PGRST203)
+        for f in ("approve_recipe(p_recipe_id integer, p_note text)", "approve_algorithm(p_algorithm_id integer, p_note text)",
+                  "approve_params(p_params_id integer, p_note text)"):
+            self.assertIn(f"FUNCTION medcea.{f} RETURNS bigint", self.mig)
+        for f, arg in (("approve_recipe", "p_recipe_id"), ("approve_algorithm", "p_algorithm_id"),
+                       ("approve_params", "p_params_id")):
+            self.assertIn(f"RETURN medcea.{f}({arg}, NULL::text);", self.body(f"FUNCTION medcea.{f}({arg} integer) RETURNS"))
+
+    def test_return_and_withdraw_count_as_no_approval(self):
+        for chk in re.findall(r"CHECK \(action IN \(([^)]*)\)\)", self.mig):
+            self.assertIn("'return'", chk)
+            self.assertIn("'withdraw'", chk)
+        for fn in ("FUNCTION medcea_auth._changes_since(", "FUNCTION medcea_auth._authors(", "FUNCTION medcea_auth._is_approved("):
+            i = self.mig.index(fn)
+            seg = self.mig[i:self.mig.index("$$;", self.mig.index("AS $$", i) + 5)]
+            self.assertNotIn("'return'", seg, fn)
+            self.assertNotIn("'withdraw'", seg, fn)
+        self.assertIn("FROM medcea_auth._changes_since(p_target, p_key) ch WHERE ch.authors", self.mig)
+        # commissioning alone makes nobody an author, and is out of the digest
+        self.assertIn("bool_and(k IN ('status', 'retired_at', 'commissioning'))", self.mig)
+        self.assertIn("(p_digest AND k IN ('status', 'retired_at', 'commissioning'))", self.mig)
+
+    def test_commissioning_rules(self):
+        prop = self.body("FUNCTION medcea.propose_commissioning(")
+        self.assertIn("FOR NO KEY UPDATE", prop)
+        self.assertIn("medcea._unit_busy(p_unit_id)", prop)
+        self.assertIn("medcea_auth.policy_refuse(format('commissioning: unit %s has run %s in %s", prop)
+        self.assertIn("CASE WHEN p_value THEN NULL ELSE now() END", prop)          # off applies at once
+        self.assertIn("is already %", prop)
+        self.assertIn("already waits for qa", prop)
+        busy = self.mig[self.mig.index("FUNCTION medcea._unit_busy("):]
+        self.assertIn("r.recipe_run_status IN ('R', 'S')", busy[:600])
+        appr = self.body("FUNCTION medcea.approve_change(")
+        self.assertIn("medcea._unit_busy((pc.row_key ->> 0)::integer)", appr)
+        self.assertIn("'review', p_note", appr)                                   # the review of an off
+        self.assertLess(appr.index("medcea._pending_lock(p_id)"), appr.index("medcea._pending_open(pc)"))
+        lock = self.body("FUNCTION medcea._pending_lock(")
+        self.assertLess(lock.index("FOR NO KEY UPDATE"), lock.index("pg_advisory_xact_lock"))
+        self.assertIn("WHERE u.unit_id = r.unit_id FOR SHARE;", self.body("FUNCTION medcea.start_run("))
+        # every flag change is in the policy hash chain, ENABLE ALWAYS
+        self.assertIn("'commissioning_enabled' ELSE 'commissioning_disabled'", self.mig)
+        self.assertIn("ALTER TABLE medcea.cea_unit ENABLE ALWAYS TRIGGER commissioning_history_trg", self.mig)
+        uc = self.body("FUNCTION medcea.unit_commissioning(")
+        self.assertIn("medcea_auth.policy_holds(a.role, 'runs', 'R') IS NOT DISTINCT FROM 'free'", uc)
+        self.assertIn("last_approved_by := CASE WHEN hist THEN", uc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

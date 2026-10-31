@@ -212,7 +212,7 @@ BEGIN
                      AND t.tgname IN ('stamp_actor_trg', 'status_guard_trg', 'row_change_trg', 'measurement_zone_trg',
                                       'algorithm_state_event_trg', 'algorithm_state_before_trg',
                                       'device_serial_change_trg', 'mqtt_service_acl_root_trg',
-                                      'schedule_retired_guard_trg'))
+                                      'schedule_retired_guard_trg', 'commissioning_history_trg'))
                  OR (c.relnamespace = 'medcea'::regnamespace AND c.relname IN
                         ('approval', 'pending_change', 'run_release', 'algorithm_state_event', 'row_change',
                          'device_slot_history') AND t.tgname LIKE '%\_no\_truncate')
@@ -253,6 +253,10 @@ DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), me
     medcea._approve_definition(text, integer, text, text), medcea.approve_recipe(integer),
     medcea.approve_algorithm(integer), medcea.approve_params(integer), medcea.approve_change(text, bigint, text),
     medcea.propose_setting(text, jsonb), medcea.propose_commissioning(integer, boolean, text),
+    medcea.approve_recipe(integer, text), medcea.approve_algorithm(integer, text), medcea.approve_params(integer, text),
+    medcea.return_change(text, bigint, text), medcea.withdraw_change(bigint, text), medcea.approval_queue(boolean),
+    medcea.my_approvals(), medcea.unit_commissioning(), medcea._unit_busy(integer),
+    medcea._pending_lock(bigint), medcea._pending_open(medcea.pending_change), medcea.log_commissioning(),
     medcea._check_run_params(integer, integer, integer), medcea._check_run_params(integer, integer, integer, integer),
     medcea._check_assigned_run(medcea.recipe_run, text, text, text), medcea._refuse_hidden_run(integer),
     medcea.start_run(integer), medcea.set_run_status(integer, text), medcea.finish_run(integer, text),
@@ -348,7 +352,7 @@ END $$;
 -- anon may still execute it, and it is a no-op while the setting is false)
 DROP FUNCTION IF EXISTS medcea_auth._account_actor(text, text), medcea_auth.role_widening(text, text),
     medcea_auth.set_actor(text, text, text, text), medcea_auth.set_system_actor(text, text, bigint),
-    medcea_auth.my_zones(), medcea_auth.my_units(), medcea_auth._authors(text, jsonb), medcea_auth._lock_row(text, jsonb), medcea_auth._approver(text),
+    medcea_auth.my_zones(), medcea_auth.my_units(), medcea_auth._authors(text, jsonb), medcea_auth._changes_since(text, jsonb), medcea_auth._lock_row(text, jsonb), medcea_auth._approver(text),
     medcea_auth._is_approved(text, jsonb), medcea_auth.row_digest(text, jsonb), medcea_auth._content(jsonb, boolean),
     medcea_auth.policy_refuse(text), medcea_auth.enforcing(), medcea_auth._set_internal_actor(text),
     medcea_auth.request_actor(), medcea_auth._is_owner_write(), medcea_auth._owner_write(boolean),

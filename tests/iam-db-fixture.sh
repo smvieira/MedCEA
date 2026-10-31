@@ -390,6 +390,16 @@ cmd_fulldown() {
              WHERE pg_catalog.to_regprocedure(f) IS NOT NULL")"
     [[ -z "$left" ]] && pass fulldown "retire_schedule, _check_run_params, schedule_retired_guard and _refuse_hidden_run gone after the full down" \
         || fail fulldown "still there after the full down: $left"
+    # the Approve action's and the commissioning screen's functions and trigger (2026-10-31)
+    left="$(fx medcea_db -q -tA -c "SELECT string_agg(f, ', ') FROM unnest(ARRAY['medcea.approve_recipe(integer,text)',
+              'medcea.approve_algorithm(integer,text)', 'medcea.approve_params(integer,text)', 'medcea.return_change(text,bigint,text)',
+              'medcea.withdraw_change(bigint,text)', 'medcea.approval_queue(boolean)', 'medcea.my_approvals()',
+              'medcea.unit_commissioning()', 'medcea._unit_busy(integer)', 'medcea._pending_lock(bigint)',
+              'medcea.log_commissioning()', 'medcea_auth._changes_since(text,jsonb)']) f
+             WHERE pg_catalog.to_regprocedure(f) IS NOT NULL
+             UNION ALL SELECT 'trigger commissioning_history_trg' FROM pg_catalog.pg_trigger WHERE tgname = 'commissioning_history_trg'")"
+    [[ -z "${left//[[:space:]|]/}" ]] && pass fulldown "the approval queue, return/withdraw, commissioning functions and trigger gone after the full down" \
+        || fail fulldown "still there after the full down: $left"
     out="$(git show "$PREV_REV:apps/database/medcea_db_ddl.sql" | fx medcea_db -q 2>&1 | grep ERROR | grep -v 'already exists\|multiple primary keys')"
     [[ -z "$out" ]] && pass fulldown "previous DDL" || { echo "$out" | head; fail fulldown "previous DDL"; }
     out="$(git show "$PREV_REV:apps/database/medcea_db_migrations.sql" | fx medcea_db -q 2>&1 | grep ERROR)"

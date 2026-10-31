@@ -23,7 +23,10 @@
 #                schedule's algorithm, the internal actor, e97aab6's scheduler SQL),
 #                W7 unit assignments (apps/iam/units.sql, IAM 2.8: assign waits for
 #                qa, --bootstrap acts at once, remove withdraws a waiting one); the own_unit RLS
-#                probes run in W4
+#                probes run in W4, and so do the Approve action's (noted approvals,
+#                approval_queue() against the approve functions, return, my_approvals());
+#                W8 commissioning (propose, approve, return, withdraw, off at once with
+#                qa's review, runs in R/S, unit_commissioning() per role, the chain events)
 #   access       (not in the default set; write probes) IAM 2.7's account decisions,
 #                D1-D19: record, withdraw, confirm, refuse, review as access_svc with
 #                set_actor; the who-may rules, units.sql refusals, the attestation,
@@ -49,7 +52,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -221,7 +224,7 @@ SELECT 'rowchange', count(*) FROM pg_trigger WHERE tgname = 'row_change_trg';
 SELECT 'guard', count(*) FROM pg_trigger WHERE tgname = 'status_guard_trg';
 SELECT 'single', string_agg(n, ',') FROM unnest(ARRAY['measurement_zone_trg', 'device_serial_change_trg', 'mqtt_service_acl_root_trg',
        'algorithm_state_event_trg', 'algorithm_state_before_trg', 'user_zone_audit_trg', 'user_unit_audit_trg',
-       'schedule_retired_guard_trg']) n
+       'schedule_retired_guard_trg', 'commissioning_history_trg']) n
  WHERE NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = n);
 SELECT 'definer', string_agg(p.oid::regprocedure::text, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
  WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam') AND p.prosecdef
@@ -237,6 +240,7 @@ SELECT 'iamtrg', count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
  WHERE c.relnamespace = 'medcea'::regnamespace AND t.tgname LIKE 'iam\_%';
 SELECT 'rls', count(*) FROM pg_class WHERE relnamespace = 'medcea'::regnamespace AND relrowsecurity;
 SELECT 'unitalways', tgenabled FROM pg_trigger WHERE tgname = 'user_unit_audit_trg';
+SELECT 'commalways', tgenabled FROM pg_trigger WHERE tgname = 'commissioning_history_trg';
 SELECT 'chain', ok FROM iam_policy.verify_chain();
 SQL
 )"
@@ -285,6 +289,8 @@ print("\n".join(sorted("%s %s" % (g, o.replace(" ", "")) for g, k, o, p in d["pr
     fi
     [[ "$(get unitalways)" == A ]] && pass catalog "user_unit_audit_trg is ENABLE ALWAYS" \
         || fail catalog "user_unit_audit_trg: tgenabled '$(get unitalways)' (want A)"
+    [[ "$(get commalways)" == A ]] && pass catalog "commissioning_history_trg is ENABLE ALWAYS" \
+        || fail catalog "commissioning_history_trg: tgenabled '$(get commalways)' (want A)"
     [[ "$(get chain)" == t ]] && pass catalog "iam_policy.verify_chain() ok" || fail catalog "verify_chain: $(get chain)"
 fi
 
@@ -834,6 +840,157 @@ $(as_postgres)
 UPDATE medcea.recipe SET recipe_description = 'edited by postgres' WHERE recipe_id = :ra;
 $(as_token "$T_QA")
 SELECT medcea.approve_recipe(:ra);
+SQL
+        # The Approve action (2026-10-31): the noted overloads, approval_queue()'s advisory
+        # may_approve against the approve functions' own refusals, return and my_approvals()
+        # a unit of its own, created by an engineer token (so the engineer is its only author,
+        # and no run of the seed or of the runner fixture stands on it)
+        new_unit="
+$(as_token "$T_EN")
+INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
+SELECT 'Mushrooms', 'iam-db commissioning probe', location_id, 'Y', 'IAMTC1' FROM medcea.cea_location
+ WHERE name = 'IAMTEST site' RETURNING unit_id AS cu \\gset"
+        line_by_en2="
+$(as_token "$T_EN2")
+INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
+    air_temperature_lower_limit, air_temperature_upper_limit, light_type, light_on_minutes, light_off_minutes,
+    co2_lower_limit, co2_upper_limit, hr_lower_limit, hr_upper_limit)
+VALUES (:ra, 1, 'iam-db step', 1, 18, 24, 'BLUE', 60, 60, 400, 1200, 70, 90);"
+        probe W4 "control: qa approves with a note (2-argument overload)" ok <<SQL
+$recipe_setup
+$(as_token "$T_QA")
+SELECT medcea.approve_recipe(:ra, ' iam-db note ');
+--CHECKS
+SELECT 'CHECK|note recorded (trimmed)', note = 'iam-db note' AND approved_by_source = 'token'
+  FROM medcea.approval WHERE target = 'medcea.recipe' AND row_key = jsonb_build_array(:ra) AND action = 'approve';
+SQL
+        probe W4 "control: approval_queue lists an engineer's draft, may_approve for qa" ok <<SQL
+$recipe_setup
+$(as_token "$T_QA")
+SELECT state AS st, may_approve AS ma, may_return AS mr, array_to_string(authors, ',') AS au, changes_total AS n,
+       jsonb_array_length(changes) AS nc FROM medcea.approval_queue() WHERE target = 'medcea.recipe' AND id = :ra \gset
+SELECT changes IS NULL AS brief FROM medcea.approval_queue(false) WHERE target = 'medcea.recipe' AND id = :ra \gset
+--CHECKS
+SELECT 'CHECK|waiting, may approve and return', :'st' = 'waiting' AND :'ma'::boolean AND :'mr'::boolean;
+SELECT 'CHECK|authors {p-en}', :'au' = 'p-en';
+SELECT 'CHECK|its changes listed (' || :n || ')', :n >= 1 AND :nc = :n;
+SELECT 'CHECK|approval_queue(false) leaves the changes out', :'brief'::boolean;
+SELECT 'CHECK|_authors() equals _changes_since() authors', (SELECT persons FROM medcea_auth._authors('medcea.recipe', jsonb_build_array(:ra)))
+       = (SELECT coalesce(array_agg(DISTINCT actor_person) FILTER (WHERE actor_person IS NOT NULL), '{}')
+            FROM medcea_auth._changes_since('medcea.recipe', jsonb_build_array(:ra)) WHERE authors);
+SQL
+        probe W4 "approval_queue: a line editor reads own_author, with the line in the changes" ok <<SQL
+$recipe_setup
+$line_by_en2
+$(as_token "$T_QAEN2")
+SELECT why_not_code AS wn, may_approve AS ma,
+       EXISTS (SELECT 1 FROM jsonb_array_elements(changes) c WHERE c ->> 'target' = 'medcea.recipe_line' AND c ->> 'by_person' = 'p-en2') AS line
+  FROM medcea.approval_queue() WHERE target = 'medcea.recipe' AND id = :ra \gset
+--CHECKS
+SELECT 'CHECK|own_author, not may_approve', :'wn' = 'own_author' AND NOT :'ma'::boolean;
+SELECT 'CHECK|the recipe_line change is listed', :'line'::boolean;
+SQL
+        probe W4 "parity: the line editor approves" "42501:not_own_author" <<SQL
+$recipe_setup
+$line_by_en2
+$(as_token "$T_QAEN2")
+SELECT medcea.approve_recipe(:ra, 'parity');
+SQL
+        probe W4 "approval_queue: an unattributed change reads unattributed" ok <<SQL
+$recipe_setup
+$(as_postgres)
+UPDATE medcea.recipe SET recipe_description = 'edited by postgres' WHERE recipe_id = :ra;
+$(as_token "$T_QA")
+SELECT why_not_code AS wn FROM medcea.approval_queue() WHERE target = 'medcea.recipe' AND id = :ra \gset
+--CHECKS
+SELECT 'CHECK|unattributed', :'wn' = 'unattributed';
+SQL
+        params_setup="
+$(as_token "$T_EN")
+INSERT INTO medcea.control_algorithm (algorithm_code, algorithm_name) VALUES ('IAMTDRAFT', 'iam-db draft algorithm')
+RETURNING algorithm_id AS da \\gset
+INSERT INTO medcea.unit_algorithm_params (algorithm_id, name, params) VALUES (:da, 'iam-db set of a draft', '{}')
+RETURNING params_id AS dp \\gset"
+        probe W4 "approval_queue: a parameter set of a draft algorithm reads algorithm_not_approved" ok <<SQL
+$params_setup
+$(as_token "$T_QA")
+SELECT why_not_code AS wn FROM medcea.approval_queue() WHERE target = 'medcea.unit_algorithm_params' AND id = :dp \gset
+SELECT coalesce(why_not_code, 'none') AS wa FROM medcea.approval_queue() WHERE target = 'medcea.control_algorithm' AND id = :da \gset
+--CHECKS
+SELECT 'CHECK|params: algorithm_not_approved', :'wn' = 'algorithm_not_approved';
+SELECT 'CHECK|the algorithm itself may be approved', :'wa' = 'none';
+SQL
+        probe W4 "parity: approve_params on a draft algorithm" "42501:its algorithm" <<SQL
+$params_setup
+$(as_token "$T_QA")
+SELECT medcea.approve_params(:dp, NULL);
+SQL
+        probe W4 "an engineer token reads no approval_queue" "42501:permission denied for function approval_queue" <<SQL
+$(as_token "$T_EN")
+SELECT count(*) FROM medcea.approval_queue();
+SQL
+        probe W4 "svc_dbexport holds EXECUTE on approval_queue, which refuses it" "42501:with your own sign-in" <<SQL
+SET SESSION AUTHORIZATION svc_dbexport;
+SELECT count(*) FROM medcea.approval_queue();
+SQL
+        probe W4 "approval_queue for qp: master_data rows only, without approval" ok <<SQL
+$recipe_setup
+$new_unit
+SELECT medcea.propose_commissioning(:cu, true, 'iam-db: qp view') AS chg \gset
+$(as_token "$T_QP")
+SELECT count(*) FILTER (WHERE kind IN ('recipe', 'algorithm', 'params', 'setting')) AS other,
+       count(*) FILTER (WHERE kind = 'commissioning' AND id = :chg AND why_not_code = 'no_role' AND NOT may_approve) AS comm
+  FROM medcea.approval_queue() \gset
+--CHECKS
+SELECT 'CHECK|no recipe, controller or setting rows (' || :other || ')', :other = 0;
+SELECT 'CHECK|the commissioning proposal, no_role', :comm = 1;
+SQL
+        retention_queue() {  # VALUE
+            probe W4 "approval_queue: log_delete_days = $1 reads retention_minimum" ok <<SQL
+$(as_token "$T_AD")
+SELECT medcea.propose_setting('log_delete_days', '"$1"') AS chg \gset
+$(as_token "$T_QA")
+SELECT why_not_code AS wn FROM medcea.approval_queue() WHERE target = 'medcea.pending_change' AND id = :chg \gset
+--CHECKS
+SELECT 'CHECK|retention_minimum', :'wn' = 'retention_minimum';
+SQL
+        }
+        retention_queue 29
+        retention_queue abc
+        probe W4 "control: qa returns a draft with a reason; the author sees it" ok <<SQL
+$recipe_setup
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.recipe', :ra, 'iam-db: fix step 1');
+SELECT state AS st, return_reason AS rr FROM medcea.approval_queue() WHERE target = 'medcea.recipe' AND id = :ra \gset
+$(as_token "$T_EN")
+SELECT state AS mst, return_reason AS mrr FROM medcea.my_approvals() WHERE target = 'medcea.recipe' AND id = :ra \gset
+UPDATE medcea.recipe SET recipe_description = 'fixed' WHERE recipe_id = :ra;
+$(as_token "$T_QA")
+SELECT state AS st2 FROM medcea.approval_queue() WHERE target = 'medcea.recipe' AND id = :ra \gset
+--CHECKS
+SELECT 'CHECK|still a draft', status = 'draft' FROM medcea.recipe WHERE recipe_id = :ra;
+SELECT 'CHECK|approval action return with the reason', EXISTS (SELECT 1 FROM medcea.approval WHERE target = 'medcea.recipe'
+       AND row_key = jsonb_build_array(:ra) AND action = 'return' AND note = 'iam-db: fix step 1' AND approved_by_person = 'p-qa');
+SELECT 'CHECK|queue: returned', :'st' = 'returned' AND :'rr' = 'iam-db: fix step 1';
+SELECT 'CHECK|my_approvals: returned with the reason', :'mst' = 'returned' AND :'mrr' = 'iam-db: fix step 1';
+SELECT 'CHECK|waiting again after the edit', :'st2' = 'waiting';
+SELECT 'CHECK|a return is no approval (authors unchanged)', (SELECT persons FROM medcea_auth._authors('medcea.recipe', jsonb_build_array(:ra))) = '{p-en}';
+SQL
+        probe W4 "a draft returned twice without a change" "22023:has not changed since" <<SQL
+$recipe_setup
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.recipe', :ra, 'once');
+SELECT medcea.return_change('medcea.recipe', :ra, 'twice');
+SQL
+        probe W4 "a return needs a reason" "22023:a reason is required" <<SQL
+$recipe_setup
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.recipe', :ra, '  ');
+SQL
+        probe W4 "an engineer cannot return" "42501:permission denied for function return_change" <<SQL
+$recipe_setup
+$(as_token "$T_EN")
+SELECT medcea.return_change('medcea.recipe', :ra, 'x');
 SQL
         probe W4 "an engineer edits an approved recipe" "42501:draft_only" <<SQL
 $(as_token "$T_EN")
@@ -1392,6 +1549,239 @@ SQL
 $(units_vars true)
 $UNITS_SQL
 DELETE FROM iam.account_decision WHERE kind = 'unit_assign';
+SQL
+    fi
+    # W8: commissioning (2026-10-31): on waits for a qa person other than the proposer
+    # and is refused while the unit has a run in R or S; off applies at once and waits
+    # for qa's review; return, withdraw, unit_commissioning()'s per-role view, the
+    # _authors exclusion and the hash-chain events. The tokens are W4's.
+    if [[ "$MODE" == true ]]; then
+        propose_on="
+$new_unit
+SELECT medcea.propose_commissioning(:cu, true, 'iam-db: commission it') AS chg \\gset"
+        flag_on="
+$propose_on
+$(as_token "$T_QA")
+SELECT medcea.approve_change('medcea.pending_change', :chg, 'iam-db: flag') \\g /dev/null"
+        probe W8 "control: an engineer proposes commissioning" ok <<SQL
+$propose_on
+--CHECKS
+SELECT 'CHECK|pending, attributed to p-en by token', proposed_by_person = 'p-en' AND proposed_by_source = 'token' AND applied_at IS NULL
+  FROM medcea.pending_change WHERE change_id = :chg;
+SELECT 'CHECK|the flag is still off', NOT commissioning FROM medcea.cea_unit WHERE unit_id = :cu;
+SQL
+        probe W8 "a proposal needs a reason" "22023:a reason is required" <<SQL
+$new_unit
+SELECT medcea.propose_commissioning(:cu, true, ' ');
+SQL
+        probe W8 "a qa token cannot propose" "42501:permission denied for function propose_commissioning" <<SQL
+$new_unit
+$(as_token "$T_QA")
+SELECT medcea.propose_commissioning(:cu, true, 'x');
+SQL
+        probe W8 "an operator token cannot propose" "42501:permission denied for function propose_commissioning" <<SQL
+$new_unit
+$(as_token "$T_OP")
+SELECT medcea.propose_commissioning(:cu, true, 'x');
+SQL
+        probe W8 "a proposal that changes nothing" "22023:is already off" <<SQL
+$new_unit
+SELECT medcea.propose_commissioning(:cu, false, 'x');
+SQL
+        probe W8 "a second 'on' while one waits (nobody replaces another's proposal)" "22023:already waits for qa" <<SQL
+$propose_on
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, true, 'mine instead');
+SQL
+        probe W8 "control: a qa person applies it" ok <<SQL
+$flag_on
+--CHECKS
+SELECT 'CHECK|flag on', commissioning FROM medcea.cea_unit WHERE unit_id = :cu;
+SELECT 'CHECK|approval apply, master_data, author p-en, by token', count(*) = 1 FROM medcea.approval
+ WHERE target = 'medcea.pending_change' AND row_key = jsonb_build_array(:chg) AND action = 'apply' AND group_name = 'master_data'
+   AND author_persons = '{p-en}' AND approved_by_person = 'p-qa' AND approved_by_source = 'token' AND note = 'iam-db: flag';
+SELECT 'CHECK|row_change by p-qa', EXISTS (SELECT 1 FROM medcea.row_change WHERE target = 'medcea.cea_unit'
+       AND row_key = jsonb_build_array(:cu) AND new_values -> 'commissioning' = 'true' AND actor_person = 'p-qa');
+SELECT 'CHECK|commissioning_enabled in the hash chain with the change and its reason', EXISTS (SELECT 1 FROM iam_policy.history
+       WHERE event = 'commissioning_enabled' AND (payload ->> 'unit_id')::int = :cu AND (payload ->> 'change_id')::bigint = :chg
+         AND reason = 'iam-db: commission it' AND actor_person = 'p-qa');
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+        probe W8 "the proposer's person on a qa account approves" "42501:not_own_author" <<SQL
+$new_unit
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, true, 'iam-db') AS chg \gset
+$(as_token "$T_QAEN2")
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
+SQL
+        probe W8 "an engineer token cannot approve" "42501:permission denied for function approve_change" <<SQL
+$propose_on
+$(as_token "$T_EN2")
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
+SQL
+        probe W8 "approved twice" "22023:no longer pending" <<SQL
+$flag_on
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
+SQL
+        probe W8 "control: ending commissioning applies at once and waits for qa's review" ok <<SQL
+$flag_on
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, false, 'iam-db: done') AS off \gset
+$(as_token "$T_QA")
+SELECT state AS st, may_approve AS ma FROM medcea.approval_queue() WHERE target = 'medcea.pending_change' AND id = :off \gset
+$(as_token "$T_EN2")
+SELECT state AS mst, may_withdraw AS mw FROM medcea.my_approvals() WHERE id = :off AND kind = 'commissioning' \gset
+--CHECKS
+SELECT 'CHECK|flag off at once', NOT commissioning FROM medcea.cea_unit WHERE unit_id = :cu;
+SELECT 'CHECK|recorded as applied at once', applied_at IS NOT NULL FROM medcea.pending_change WHERE change_id = :off;
+SELECT 'CHECK|commissioning_disabled by p-en2', EXISTS (SELECT 1 FROM iam_policy.history WHERE event = 'commissioning_disabled'
+       AND (payload ->> 'change_id')::bigint = :off AND actor_person = 'p-en2' AND (payload ->> 'applied_at_once')::boolean);
+SELECT 'CHECK|queued for review, qa may review it', :'st' = 'review' AND :'ma'::boolean;
+SELECT 'CHECK|the proposer reads applied_review_pending, no withdraw', :'mst' = 'applied_review_pending' AND NOT :'mw'::boolean;
+SQL
+        probe W8 "control: qa reviews the off; nothing changes" ok <<SQL
+$flag_on
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, false, 'iam-db: done') AS off \gset
+$(as_token "$T_QA")
+SELECT medcea.approve_change('medcea.pending_change', :off, 'seen');
+--CHECKS
+SELECT 'CHECK|a review, not an apply', action = 'review' AND note = 'seen' FROM medcea.approval
+ WHERE target = 'medcea.pending_change' AND row_key = jsonb_build_array(:off);
+SELECT 'CHECK|still off', NOT commissioning FROM medcea.cea_unit WHERE unit_id = :cu;
+SQL
+        probe W8 "an off that applied at once cannot be withdrawn" "22023:applied at once" <<SQL
+$flag_on
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, false, 'iam-db: done') AS off \gset
+SELECT medcea.withdraw_change(:off, NULL);
+SQL
+        probe W8 "an off that applied at once cannot be returned" "22023:applied at once" <<SQL
+$flag_on
+$(as_token "$T_EN2")
+SELECT medcea.propose_commissioning(:cu, false, 'iam-db: done') AS off \gset
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.pending_change', :off, 'no');
+SQL
+        # a run of IAMT01: S from the production manager, R once the operator starts it
+        probe W8 "a run in S refuses the proposal" "42501:in S; flag it when no run" <<SQL
+$run_setup
+$(as_token "$T_EN")
+SELECT medcea.propose_commissioning(unit_id, true, 'iam-db') FROM medcea.cea_unit WHERE unit_code = 'IAMT01';
+SQL
+        probe W8 "a run in R refuses the proposal" "42501:in R; flag it when no run" <<SQL
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.start_run(:run);
+$(as_token "$T_EN")
+SELECT medcea.propose_commissioning(unit_id, true, 'iam-db') FROM medcea.cea_unit WHERE unit_code = 'IAMT01';
+SQL
+        probe W8 "a run scheduled after the proposal refuses the approval" "42501:in S; flag it when no run" <<SQL
+$(as_token "$T_EN")
+SELECT medcea.propose_commissioning(unit_id, true, 'iam-db') AS chg FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \gset
+$(as_postgres)
+$run_setup
+$(as_token "$T_QA")
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
+SQL
+        probe W8 "start_run on a flagged unit" "42501:flagged for commissioning" <<SQL
+$(as_token "$T_EN")
+SELECT medcea.propose_commissioning(unit_id, true, 'iam-db') AS chg FROM medcea.cea_unit WHERE unit_code = 'IAMT01' \gset
+$(as_token "$T_QA")
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL) \g /dev/null
+$(as_postgres)
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.start_run(:run);
+SQL
+        probe W8 "control: qa returns a proposal; it never applies and can be proposed again" ok <<SQL
+$propose_on
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.pending_change', :chg, 'iam-db: not this week');
+$(as_token "$T_EN")
+SELECT state AS mst, return_reason AS mrr FROM medcea.my_approvals() WHERE id = :chg AND kind = 'commissioning' \gset
+SELECT medcea.propose_commissioning(:cu, true, 'iam-db: again') AS again \gset
+--CHECKS
+SELECT 'CHECK|approval action return', action = 'return' AND note = 'iam-db: not this week' FROM medcea.approval
+ WHERE target = 'medcea.pending_change' AND row_key = jsonb_build_array(:chg);
+SELECT 'CHECK|the proposer reads returned with the reason', :'mst' = 'returned' AND :'mrr' = 'iam-db: not this week';
+SELECT 'CHECK|still off', NOT commissioning FROM medcea.cea_unit WHERE unit_id = :cu;
+SQL
+        probe W8 "a returned proposal cannot be approved" "22023:no longer pending" <<SQL
+$propose_on
+$(as_token "$T_QA")
+SELECT medcea.return_change('medcea.pending_change', :chg, 'no');
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
+SQL
+        probe W8 "control: the proposer withdraws" ok <<SQL
+$propose_on
+SELECT medcea.withdraw_change(:chg, 'iam-db: changed my mind');
+SELECT state AS mst FROM medcea.my_approvals() WHERE id = :chg AND kind = 'commissioning' \gset
+--CHECKS
+SELECT 'CHECK|approval action withdraw by p-en', action = 'withdraw' AND approved_by_person = 'p-en' AND note = 'iam-db: changed my mind'
+  FROM medcea.approval WHERE target = 'medcea.pending_change' AND row_key = jsonb_build_array(:chg);
+SELECT 'CHECK|my_approvals: withdrawn', :'mst' = 'withdrawn';
+SQL
+        probe W8 "another person withdraws" "42501:not a proposal of yours" <<SQL
+$propose_on
+$(as_token "$T_EN2")
+SELECT medcea.withdraw_change(:chg, NULL);
+SQL
+        probe W8 "a withdrawn proposal cannot be approved" "22023:no longer pending" <<SQL
+$propose_on
+SELECT medcea.withdraw_change(:chg, NULL);
+$(as_token "$T_QA")
+SELECT medcea.approve_change('medcea.pending_change', :chg, NULL);
+SQL
+        probe W8 "control: unit_commissioning per role" ok <<SQL
+$propose_on
+$(as_token "$T_EN")
+SELECT pending_change_id = :chg AS en_pend, pending_mine AS en_mine, pending_reason AS en_reason, can_propose AS en_prop,
+       can_approve AS en_appr FROM medcea.unit_commissioning() WHERE unit_id = :cu \gset
+$(as_token "$T_EN2")
+SELECT pending_reason AS en2_reason, NOT pending_mine AS en2_notmine FROM medcea.unit_commissioning() WHERE unit_id = :cu \gset
+$(as_token "$T_PM")
+SELECT pending_change_id = :chg AS pm_pend, pending_reason IS NULL AND pending_by IS NULL AS pm_hidden,
+       NOT can_propose AND NOT can_approve AS pm_none FROM medcea.unit_commissioning() WHERE unit_id = :cu \gset
+$(as_token "$T_QA")
+SELECT can_approve AND can_read_history AS qa_can, pending_by = 'test-p-en' AS qa_by FROM medcea.unit_commissioning() WHERE unit_id = :cu \gset
+$(as_postgres)
+$run_setup
+$(as_token "$T_OP")
+SELECT count(*) FILTER (WHERE blocking_run_id IS NOT NULL) AS op_runs FROM medcea.unit_commissioning() \gset
+$(as_token "$T_PM")
+SELECT blocking_run_id = :run AS pm_run FROM medcea.unit_commissioning() WHERE unit_code = 'IAMT01' \gset
+--CHECKS
+SELECT 'CHECK|engineer: own pending with its reason, may propose, not approve',
+       :'en_pend'::boolean AND :'en_mine'::boolean AND :'en_reason' = 'iam-db: commission it' AND :'en_prop'::boolean AND NOT :'en_appr'::boolean;
+SELECT 'CHECK|another engineer sees the reason (decision), not as theirs', :'en2_reason' = 'iam-db: commission it' AND :'en2_notmine'::boolean;
+SELECT 'CHECK|production manager: waiting, no name or reason, no action', :'pm_pend'::boolean AND :'pm_hidden'::boolean AND :'pm_none'::boolean;
+SELECT 'CHECK|qa: may approve and read the history, sees the proposer', :'qa_can'::boolean AND :'qa_by'::boolean;
+SELECT 'CHECK|operator: no unit''s run state', :op_runs = 0;
+SELECT 'CHECK|production manager: the blocking run', :'pm_run'::boolean;
+SQL
+        probe W8 "the qa person who applied the flag still reviews the unit (commissioning makes no author)" ok <<SQL
+$flag_on
+SELECT medcea.approve_change('medcea.cea_unit', :cu, 'iam-db: master data review');
+--CHECKS
+SELECT 'CHECK|review authored by p-en only', author_persons = '{p-en}' FROM medcea.approval
+ WHERE target = 'medcea.cea_unit' AND row_key = jsonb_build_array(:cu) AND action = 'review';
+SQL
+    fi
+    if [[ "$MODE" == false ]]; then
+        for fn in "medcea.unit_commissioning()" "medcea.approval_queue()" "medcea.my_approvals()"; do
+            probe W8 "anon cannot execute $fn while false" "42501:permission denied for function" <<SQL
+$(as_anon)
+SELECT count(*) FROM $fn;
+SQL
+        done
+        probe W8 "anon cannot withdraw while false" "42501:permission denied for function withdraw_change" <<SQL
+$(as_anon)
+SELECT medcea.withdraw_change(1, NULL);
+SQL
+        probe W8 "anon cannot return while false" "42501:permission denied for function return_change" <<SQL
+$(as_anon)
+SELECT medcea.return_change('medcea.pending_change', 1, 'x');
 SQL
     fi
 elif want writes; then
