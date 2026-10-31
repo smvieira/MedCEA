@@ -31,6 +31,14 @@
 #   live     the running hub pod carries the Deployment's checksum/secret
 #   sign-in  /hub/login (auto_login → /hub/oauth_login) reaches Keycloak's login page
 #   reach    some enabled account holds a role the hub admits
+# The onboarding wizard and pgAdmin [tool (…)] (ONBOARD_DOMAIN, PGADMIN_DOMAIN, IAM 3.4):
+#   gate     the running wizard's --required-role equals `policy_tool edge-wizard`, and
+#            pgAdmin's live OAUTH2_ADDITIONAL_CLAIMS (read on stdin: the same value holds
+#            the client secret, and only the claims are printed) equals `policy_tool
+#            pgadmin` (IAM_GATES=false: EDGE_WIZARD_ROLE, and {'groups': ['admin']})
+#   sign-in  signed out, the host redirects to Keycloak (the wizard) or shows pgAdmin's
+#            MedCEA sign-in button (pgAdmin)
+#   reach    some enabled account holds a role the tool admits
 # Hosts whose gate is not compiled yet are listed as SKIP with the phase that adds it.
 # Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
 # account, and the realm's discovery document lists device_authorization_endpoint.
@@ -42,7 +50,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -56,6 +64,7 @@ fi
 source config.env
 source infra/lib-mk8s.sh
 source infra/lib-oauth2-proxy.sh
+source infra/lib-policy-tools.sh
 
 FAILS=0
 pass() { printf "  ${GREEN}PASS${NC}  %-8s %s\n" "$1" "$2"; }
@@ -228,6 +237,71 @@ for k, x in (("allow_all", a.get("allow_all")), ("admin_users", sorted(a.get("ad
     fi
 }
 
+# Some enabled account holds one of ROLES (space-separated), or FAIL: nobody can open HOST.
+reach_of() {
+    local host="$1" roles="$2" who="" r
+    $HOLDERS_OK || return 0
+    for r in $roles; do [[ -n "${HOLDERS[$r]:-}" ]] && who+="$r:${HOLDERS[$r]} "; done
+    if [[ -n "$who" ]]; then
+        pass reach "enabled accounts by role: ${who% }"
+    else
+        fail reach "no enabled account holds any of [$roles]: nobody can open $host"
+    fi
+}
+
+# The onboarding wizard (IAM 3.4): its gate is the daemon's --required-role.
+check_onboard() {
+    local host="$1" want argv have first code url
+    want="$(policy_tool edge-wizard 2>/dev/null)" || { fail gate "policy_tool edge-wizard failed (cli.py check)"; return; }
+    argv="$(pgrep -af '[w]izard_server.py .*--daemon' | head -1)"
+    have="$(sed -n 's/.* --required-role \([^ ]*\).*/\1/p' <<<"$argv")"
+    if [[ -z "$argv" ]]; then
+        fail gate "no onboarding wizard daemon runs (./apps/edge-wizard/deploy.sh)"
+    elif [[ "$have" != "$want" ]]; then
+        fail gate "the wizard admits ${have:-any signed-in account}, want ${want:-any signed-in account}"
+    elif [[ -z "$want" ]]; then
+        pass gate "IAM_GATES=false: EDGE_WIZARD_ROLE empty, any signed-in account"
+    else
+        pass gate "--required-role $want, from the policy"
+    fi
+    first="$(curl -sk -o /dev/null -m 10 -w '%{http_code} %{redirect_url}' "https://$host/")"
+    code="${first%% *}" url="${first#* }"
+    if [[ "$code" == 302 && "$url" == "https://$KEYCLOAK_DOMAIN/"* ]]; then
+        pass sign-in "signed out, the wizard redirects to Keycloak"
+    else
+        fail sign-in "signed out, https://$host/ answered $code ${url:0:80} (want 302 to $KEYCLOAK_DOMAIN)"
+    fi
+    if [[ -z "$want" ]]; then skip reach "any signed-in account gets in"; else reach_of "$host" "${want//,/ }"; fi
+}
+
+# pgAdmin (IAM 3.4): its gate is OAUTH2_ADDITIONAL_CLAIMS. The env value also holds
+# the client secret: python reads it on stdin and prints only the claims.
+check_pgadmin() {
+    local host="$1" want have same page
+    want="$(policy_tool pgadmin 2>/dev/null)" || { fail gate "policy_tool pgadmin failed (cli.py check)"; return; }
+    have="$($KUBECTL get deployment pgadmin -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PGADMIN_CONFIG_OAUTH2_CONFIG")].value}' 2>/dev/null \
+        | python3 -c '
+import ast, sys
+try:
+    print(repr(ast.literal_eval(sys.stdin.read())[0].get("OAUTH2_ADDITIONAL_CLAIMS")))
+except Exception:
+    print("unreadable")')"
+    same="$(python3 -c 'import ast, sys; print(ast.literal_eval(sys.argv[1]) == ast.literal_eval(sys.argv[2]))' "$have" "$want" 2>/dev/null)"
+    if [[ "$same" == True ]]; then
+        pass gate "OAUTH2_ADDITIONAL_CLAIMS $want"
+    else
+        fail gate "OAUTH2_ADDITIONAL_CLAIMS is $have, want $want (./deploy-infra.sh)"
+    fi
+    page="$(curl -sk -L -m 15 "https://$host/login")"
+    if grep -q '"OAUTH2_NAME": "keycloak"' <<<"$page"; then
+        pass sign-in "pgAdmin's login page offers the MedCEA sign-in"
+    else
+        fail sign-in "pgAdmin's login page has no keycloak sign-in button"
+    fi
+    reach_of "$host" "$(python3 -c 'import ast, sys; print(" ".join(ast.literal_eval(sys.argv[1])["groups"]))' "$want")"
+}
+
 HOSTS="$(python3 apps/iam/compiler/cli.py hosts)" || { echo "cli.py hosts failed" >&2; exit 2; }
 INGRESSES="$($KUBECTL get ingress -n "$NAMESPACE" -o \
     jsonpath='{range .items[*]}{.spec.rules[0].host}{" "}{.metadata.labels.app\.kubernetes\.io/instance}{"\n"}{end}')"
@@ -243,6 +317,10 @@ while IFS= read -r line; do
             if [[ -z "$host" ]]; then fail gate "$var is not set in config.env"; continue; fi
             if [[ "$var" == WORKBENCH_DOMAIN ]]; then
                 check_workbench "$host" "${line##*]}"
+            elif [[ "$var" == ONBOARD_DOMAIN ]]; then
+                check_onboard "$host"
+            elif [[ "$var" == PGADMIN_DOMAIN ]]; then
+                check_pgadmin "$host"
             else
                 check_grafana "$host" "${line##*]}"
             fi

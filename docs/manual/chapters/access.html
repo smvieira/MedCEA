@@ -85,10 +85,10 @@
 <tr><td>User Manager</td><td><code>access.</code></td><td><span class="role">admin</span>, <span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Checked</td></tr>
 <tr><td>MQTT Explorer</td><td><code>mqtt-explorer.</code></td><td><span class="role">engineer</span></td><td>Checked</td></tr>
 <tr><td>Node-RED</td><td><code>node-red.</code></td><td><span class="role">engineer</span></td><td>Checked; the rights inside the editor also come from the policy (Node-RED's own sign-in)</td></tr>
-<tr><td>pgAdmin</td><td><code>pgadmin.</code></td><td><span class="role">admin</span></td><td>Checked by pgAdmin's own sign-in setting</td></tr>
+<tr><td>pgAdmin</td><td><code>pgadmin.</code></td><td><span class="role">admin</span></td><td>From the policy, checked by pgAdmin's own sign-in</td></tr>
 <tr><td>Grafana</td><td><code>grafana.</code></td><td><span class="role">auditor</span>, <span class="role">engineer</span>, <span class="role">maintenance</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span></td><td>Checked by Grafana's own sign-in setting: <span class="role">engineer</span> is Editor, the others Viewer; any other role cannot sign in</td></tr>
 <tr><td>AI Workbench</td><td><code>ai-workbench.</code></td><td><span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span></td><td>Checked by JupyterHub's own sign-in setting; <span class="role">admin</span> is hub administrator, but cannot open anyone's workspace</td></tr>
-<tr><td>Device onboarding</td><td><code>onboard-device.</code></td><td>Policy: <span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not yet checked (planned for IAM Phase 3.4, through the <code>EDGE_WIZARD_ROLE</code> setting)</td></tr>
+<tr><td>Device onboarding</td><td><code>onboard-device.</code></td><td><span class="role">engineer</span>, <span class="role">maintenance</span></td><td>From the policy, checked by the wizard at sign-in and at every renewal of the sign-in during a run</td></tr>
 <tr><td>Access Policy</td><td>not deployed</td><td>Policy: <span class="role">admin</span>, <span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Not deployed yet (IAM Phase 4)</td></tr>
 </tbody>
 </table></div>
@@ -152,6 +152,7 @@
 <li>after a deactivation, your sessions end at once, and a page you still have open stops working within about 4 minutes, at the next check.</li>
 </ul>
 <p>The AI Workbench checks your role each time you sign in to it, and a workbench session lasts at most an hour before the sign-in runs again (without a password while your platform session is open). So a role that no longer includes the workbench, or a deactivation, reaches it within an hour; a notebook tab left open stops working by then too. Your files are kept, and come back if access is restored.</p>
+<p>The device onboarding wizard checks your role when you sign in and again each time it renews your sign-in during a run (at least every five minutes). If you lose <span class="role">engineer</span> or <span class="role">maintenance</span> during a run, it stops before the board is erased. pgAdmin checks your role only when you sign in: a pgAdmin session you already have open stays open after a role change until it ends.</p>
 <div class="record"><p>Every role change, activation and deactivation is kept as an account decision, with the reason, who made it, who confirmed it when confirmation is needed, and the times. Each one that takes effect is also added to the account's status history, with the old and new role for a role change. These histories can only be added to, never edited.</p></div>
 
 <h3 id="access-noaccess">Why can't I open an app</h3>

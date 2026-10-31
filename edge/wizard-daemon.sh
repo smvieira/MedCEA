@@ -106,11 +106,28 @@ for h in ${_lan:+$_lan} ${_ts:+$_ts} 127.0.0.1 localhost; do HOST_ARGS+=(--allow
 # The name the config UI links to, forwarded here by the ingress (apps/edge-wizard).
 [ -n "${ONBOARD_DOMAIN:-}" ] && HOST_ARGS+=(--allowed-host "https://$ONBOARD_DOMAIN")
 
+# Who may onboard comes from the access policy (IAM 3.4: the onboarding group's
+# roles holding C or U, comma-separated; any one admits), re-checked by the
+# server at sign-in and on every refreshed token. Not a secret, so argv is fine
+# (health-check onboardroles reads it there). A policy that does not compile
+# stops the daemon before it serves anything. Empty only under IAM_GATES=false
+# with EDGE_WIZARD_ROLE empty: the pre-policy "any signed-in account".
+# shellcheck source=/dev/null
+source "$REPO_ROOT/infra/lib-policy-tools.sh"
+_roles="$(policy_tool edge-wizard)" || {
+  echo "cannot compile the onboarding roles from the access policy (python3 apps/iam/compiler/cli.py check) — refusing to start" >&2
+  exit 1
+}
 ROLE_ARGS=()
-[ -n "${EDGE_WIZARD_ROLE:-}" ] && ROLE_ARGS=(--required-role "$EDGE_WIZARD_ROLE")
+[ -n "$_roles" ] && ROLE_ARGS=(--required-role "$_roles")
 
 echo "CEA edge onboarding wizard on port $PORT — sign in with Keycloak realm ${KEYCLOAK_REALM:-medcea}"
 echo "  runs act as the person who presses Start"
+if [ -n "$_roles" ]; then
+  echo "  admits: $_roles"
+else
+  echo "  any signed-in account may onboard (IAM_GATES=false, EDGE_WIZARD_ROLE empty)"
+fi
 [ -n "${ONBOARD_DOMAIN:-}" ] && echo "  https://$ONBOARD_DOMAIN/"
 for h in ${_lan:+$_lan} ${_ts:+$_ts} 127.0.0.1; do echo "  http://$h:$PORT/"; done
 

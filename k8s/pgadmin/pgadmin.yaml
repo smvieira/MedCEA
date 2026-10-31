@@ -79,7 +79,10 @@ spec:
           value: "/pgadmin4/servers.json"
         - name: PGPASSFILE
           value: "/pgpassfile"
-        # Sign-in through Keycloak only, admins only. PGADMIN_CONFIG_* values
+        # Sign-in through Keycloak only. The roles it admits come from the
+        # access policy (platform_admin's tool block: `cli.py compile pgadmin`,
+        # policy_tool in infra/lib-policy-tools.sh, rendered as PGADMIN_OAUTH2_CLAIMS);
+        # pgAdmin checks them only at sign-in. PGADMIN_CONFIG_* values
         # are written verbatim into config_distro.py, so they are Python
         # literals: strings quoted, True/False capitalised. The default e-mail
         # above is the admin's Keycloak e-mail too, so their SSO login lands on
@@ -103,7 +106,7 @@ spec:
             'OAUTH2_SCOPE': 'openid email profile',
             'OAUTH2_ICON': 'fa-key', 'OAUTH2_BUTTON_COLOR': '#2563eb',
             'OAUTH2_SSL_CERT_VERIFICATION': False,
-            'OAUTH2_ADDITIONAL_CLAIMS': {'groups': ['admin']}}]
+            'OAUTH2_ADDITIONAL_CLAIMS': ${PGADMIN_OAUTH2_CLAIMS}}]
         ports:
         - containerPort: 80
           name: http

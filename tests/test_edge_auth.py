@@ -245,6 +245,51 @@ DEVICE_OK = (200, {"device_code": "DC", "user_code": "WXYZ-1234",
                    "verification_uri": "https://kc/device", "expires_in": 600, "interval": 5})
 
 
+class RolesTests(unittest.TestCase):
+    """IAM 3.4: --required-role is the access policy's onboarding list; any one admits."""
+
+    def test_roles_of(self):
+        self.assertIsNone(edge_auth.roles_of(None))
+        self.assertIsNone(edge_auth.roles_of(""))
+        self.assertIsNone(edge_auth.roles_of(" , "))
+        self.assertEqual(edge_auth.roles_of("engineer"), ("engineer",))
+        self.assertEqual(edge_auth.roles_of("engineer,maintenance"), ("engineer", "maintenance"))
+        self.assertEqual(edge_auth.roles_of(["engineer", "maintenance"]), ("engineer", "maintenance"))
+        self.assertEqual(edge_auth.roles_of(("engineer",)), ("engineer",))
+
+    def test_roles_text(self):
+        self.assertEqual(edge_auth.roles_text("engineer"), "the 'engineer' role")
+        self.assertEqual(edge_auth.roles_text("engineer,maintenance"),
+                         "one of the roles 'engineer', 'maintenance'")
+
+    def test_has_role_is_any_of(self):
+        need = ("engineer", "maintenance")
+        self.assertTrue(edge_auth.has_role({"realm_access": {"roles": ["maintenance"]}}, need))
+        self.assertTrue(edge_auth.has_role({"groups": ["engineer"]}, "engineer,maintenance"))
+        self.assertFalse(edge_auth.has_role({"realm_access": {"roles": ["operator"]},
+                                             "groups": ["operator"]}, need))
+        self.assertFalse(edge_auth.has_role({"realm_access": {"roles": ["engineer"]}}, None))
+
+    def test_fresh_with_two_roles(self):
+        need = ("engineer", "maintenance")
+        ts = tokenset(exp_in=10, roles=("maintenance",), groups=("maintenance",))
+        post = Poster((200, token_response(roles=("maintenance",), groups=("maintenance",))))
+        self.assertEqual(edge_auth.fresh(ts, OIDC, CLIENT, SECRET, None, 120, post=post,
+                                         required_role=need)[0], "ok")
+        ts = tokenset(exp_in=10, roles=("engineer",))
+        post = Poster((200, token_response(roles=("operator",))))
+        kind, msg = edge_auth.fresh(ts, OIDC, CLIENT, SECRET, None, 120, post=post,
+                                    required_role=need)
+        self.assertEqual(kind, "role")
+        self.assertIn("'engineer', 'maintenance'", msg)
+        self.assertIn("which is required to onboard boards", msg)
+
+    def test_holder_takes_the_comma_list(self):
+        h = edge_auth.Holder(None, None, CLIENT, SECRET, required_role="engineer,maintenance")
+        self.assertEqual(h.required_role, ("engineer", "maintenance"))
+        self.assertIsNone(edge_auth.Holder(None, None, CLIENT, SECRET, required_role="").required_role)
+
+
 class DeviceLoginTests(unittest.TestCase):
     def login(self, *answers, role=None):
         clk, emitted = Clock(), []
@@ -741,6 +786,17 @@ class WizardTests(unittest.TestCase):
         status, body = self.callback(token_response(aud="account"))
         self.assertEqual(status, 502)
         self.assertIn(b"./deploy-infra.sh", body)
+
+    def test_callback_with_the_policy_list(self):
+        # IAM 3.4: STATE holds the tuple main() makes of "engineer,maintenance"
+        need = self.ws.edge_auth.roles_of("engineer,maintenance")
+        self.assertEqual(need, ("engineer", "maintenance"))
+        status, body = self.callback(token_response(roles=("operator",)), role=need)
+        self.assertEqual(status, 403)
+        self.assertIn(b"required to provision hardware", body)   # iam_signin_flow.py classifies on it
+        self.assertIn(b"'engineer', 'maintenance'", body)
+        status, _ = self.callback(token_response(roles=("maintenance",), groups=("maintenance",)), role=need)
+        self.assertEqual(status, 302)
 
 
 if __name__ == "__main__":

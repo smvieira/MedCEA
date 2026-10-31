@@ -595,8 +595,14 @@ service_identities:
 #    otherwise: refuse, help: <text>}   (no service_identity: a notebook holds no platform credential)
 #   {kind: node-red, host: ..., service_identity: svc_ingest, settings: [{setting: editor, levels: [U]}],
 #    otherwise: refuse, help: <text>}   (Node-RED adminAuth; `cli.py compile node-red`, IAM 3.3)
+#   {kind: edge-wizard, host: ONBOARD_DOMAIN, settings: [{setting: onboard, levels: [C, U]}],
+#    constraint_enforced_by: <text>, otherwise: refuse, help: <text>}   (--required-role, IAM 3.4)
+#   {kind: pgadmin, host: PGADMIN_DOMAIN, settings: [{setting: sign_in, levels: [K]}],
+#    otherwise: refuse, help: <text>}   (OAUTH2_ADDITIONAL_CLAIMS, IAM 3.4)
 # A role gets the first setting whose levels it holds unconstrained; every role the host
 # admits must get one, and nobody else. `reaches` must cover the service identity's ceiling.
+# `constraint_enforced_by` (a tool with no service identity: it acts with the person's own
+# token) lets a constrained level count too, and says where the constraint is enforced.
 resource_groups:
   portal:
     label: Service portal and profile
@@ -669,9 +675,27 @@ resource_groups:
     class: config
     description: The browser wizard that flashes a board over USB and registers it in a slot.
     why_this_class: A tool for devices; the records it writes belong to devices.
-    risk: Flashing erases a board before anything is registered, so the page is offered only to people who may register boards.
+    risk: >
+      Flashing erases a board before anything is registered, so the page is offered only to
+      people who may register boards. The wizard does not evaluate existing_slot: maintenance
+      can choose an empty slot, and the board is then erased and flashed before the database
+      refuses the registration.
     members:
       - {type: ui, host: ONBOARD_DOMAIN, admit: [C, U]}
+    tool:
+      kind: edge-wizard
+      host: ONBOARD_DOMAIN
+      settings:                       # first match wins
+        - {setting: onboard, levels: [C, U]}   # --required-role: any one of the roles admits
+      constraint_enforced_by: >
+        the database, at registration: the run writes with the person's own token, and
+        medcea.existing_slot() refuses maintenance a new slot (the erase before it is not checked)
+      otherwise: refuse               # the wizard's 403 at sign-in, and the run stops at a refresh
+      help: >
+        The onboarding wizard admits the roles holding C or U here, at sign-in and again at
+        every token refresh, so a run stops before the erase when the person loses the role.
+        maintenance holds them only for existing slots; the database enforces that when the
+        board is registered. EDGE_WIZARD_ROLE in config.env is used only with IAM_GATES=false.
 
   device_history:
     label: Device placement history
@@ -1109,6 +1133,16 @@ resource_groups:
       - {type: ui, host: PGADMIN_DOMAIN}
       - {type: data, object: medcea.platform_setting, service_only: [], note: "the MQTT topic root (PROJECT_NAME), written by apps/database/deploy.sh"}
       - {type: infra, object: "microk8s, helm, config.env, .ca/, deploy scripts under medcea_lock (break-glass)"}
+    tool:
+      kind: pgadmin
+      host: PGADMIN_DOMAIN
+      settings:                       # first match wins
+        - {setting: sign_in, levels: [K]}   # OAUTH2_ADDITIONAL_CLAIMS {'groups': [...]}
+      otherwise: refuse               # pgAdmin refuses the sign-in: "not authorized ... claims"
+      help: >
+        pgAdmin admits the roles holding K here, and nobody else. It checks the role only at
+        sign-in: someone who loses it keeps an open pgAdmin session until it ends or pgAdmin
+        restarts. Inside, it connects with the administrator's own database login.
 
 # Identities that sit outside the matrix on purpose. In the prototype the admin person also
 # operates the host, so their host access reaches every one of these: that is stated here,

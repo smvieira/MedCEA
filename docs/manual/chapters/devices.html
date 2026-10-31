@@ -66,7 +66,7 @@ UNIT02 + CONTROL + ZONE02  -&gt;  unit02-c-zone02</code></pre>
 <tr><td><span class="role">qc</span>, <span class="role">qp</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span></td><td>No access to device records.</td><td>None</td></tr>
 </tbody>
 </table></div>
-<p>The platform database enforces these rights (with <code>IAM_DB_ROLES=true</code>, as on this platform). The wizard reads and writes the platform database as the person who signed in. A person without onboarding rights can open the wizard and sign in, but the database refuses the registration. The wizard then reports that this role may not onboard boards. An administrator can also set <code>EDGE_WIZARD_ROLE</code> in <code>config.env</code> to require one realm role before anyone may use the wizard at all. It is empty by default.</p>
+<p>The platform database enforces these rights (with <code>IAM_DB_ROLES=true</code>, as on this platform). The wizard reads and writes the platform database as the person who signed in. Only <span class="role">engineer</span> and <span class="role">maintenance</span> can sign in to the wizard; the access policy decides this. Anyone else who signs in gets a page saying that one of these roles is required to provision hardware, and is never offered Start. A terminal run refuses them in the same way, before anything is touched. For <span class="role">maintenance</span> the wizard does not itself check that the slot already exists: if a <span class="role">maintenance</span> person chooses an empty slot, the board is erased and flashed, and only then does the database refuse the registration. Choose an existing slot.</p>
 
 <h3 id="devices-before">Before the first onboarding</h3>
 <p>These are one-time tasks for the administrator of the platform host.</p>
@@ -75,7 +75,7 @@ UNIT02 + CONTROL + ZONE02  -&gt;  unit02-c-zone02</code></pre>
 <pre><code>sudo usermod -aG dialout "$USER"
 sudo systemctl restart "user@$(id -u)"</code></pre>
 The second command matters: the wizard service keeps its old group list until its user service manager restarts. Confirm with <code>id -nG</code>.</li>
-<li><strong>The wizard service.</strong> <code>./install.sh</code> and <code>./deploy-apps.sh --all</code> run <code>./apps/edge-wizard/deploy.sh</code>. It installs the <code>cea-edge-wizard</code> service on the host and publishes it at <code>https://onboard-device.&lt;domain&gt;</code>. If the service is not running, the Onboard Device button gives a connection error. <code>./health-check.sh</code> checks that it answers.</li>
+<li><strong>The wizard service.</strong> <code>./install.sh</code> and <code>./deploy-apps.sh --all</code> run <code>./apps/edge-wizard/deploy.sh</code>. It installs the <code>cea-edge-wizard</code> service on the host and publishes it at <code>https://onboard-device.&lt;domain&gt;</code>. If the service is not running, the Onboard Device button gives a connection error. <code>./health-check.sh</code> checks that it answers. It restarts the service, so it refuses while an onboarding run started from the wizard is in progress; run it again when the run has finished. It prints the roles the wizard admits.</li>
 <li><strong>Sign-in.</strong> <code>./deploy-infra.sh</code> creates the Keycloak client <code>edge-wizard</code> and writes <code>EDGE_WIZARD_SECRET</code> into <code>config.env</code>. Without it the wizard cannot sign anyone in.</li>
 <li><strong>Units and zones.</strong> Create them in the Units tab, with codes that make legal names.</li>
 <li><strong>Firmware.</strong> Nothing to do. <code>edge/firmware/</code> may start empty: the run offers MicroPython images for the detected chip and downloads one on request.</li>
@@ -105,6 +105,7 @@ The second command matters: the wizard service keeps its old group list until it
 On any device with a browser open:  https://keycloak.&lt;domain&gt;/realms/medcea/device
 and enter the code   XXXX-XXXX</code></pre>
 <p>Open that address on any phone or computer, sign in, and enter the code. The code expires after about ten minutes. Once you are signed in, the script prints "signed in as &lt;name&gt; (&lt;user&gt;, &lt;role&gt;)" and every database call in the run acts as you. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> while it waits to stop without writing anything. The device code appears only in the terminal and is never shown on a web page.</p>
+<p>Only an account holding <span class="role">engineer</span> or <span class="role">maintenance</span> may onboard. Any other account is refused right after the sign-in with a message naming those roles, and nothing is touched.</p>
 <p>Useful options (<code>./edge/flash-device.sh --help</code> lists all of them):</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Option</th><th>Effect</th></tr></thead>
@@ -242,5 +243,5 @@ Move this board from unit01-s-zone01 to UNIT01 / ZONE02?</code></pre>
 </tbody>
 </table></div>
 <p>The run checks your sign-in again when it checks the board, just before the erase and just before the registration. If your session has ended (you signed out, or your account was deactivated), the run pauses and asks the same person to sign in again: the browser page sends you to the sign-in page, and a terminal run shows a new code. The run waits up to 15 minutes. If nobody signs in by then, a run that has not yet erased the board stops with "Nothing was erased".</p>
-<p>If an administrator has set <code>EDGE_WIZARD_ROLE</code> and you no longer hold that role, the run stops before the erase. After the erase it skips the registration instead, and the board stays unregistered.</p>
+<p>If you no longer hold <span class="role">engineer</span> or <span class="role">maintenance</span> (the roles the access policy admits to onboarding), the run stops before the erase. After the erase it skips the registration instead, and the board stays unregistered.</p>
 </section>

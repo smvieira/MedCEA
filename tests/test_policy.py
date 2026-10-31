@@ -167,6 +167,18 @@ MUTATIONS = {
     "Node-RED reaches less than svc_ingest": (_set(["resource_groups", "flows", "reaches"],
                                                    {"mqtt_sense": ["R"], "mqtt_control": ["R"], "measurements": ["R", "C"]}),
                                               "svc_ingest"),
+    # IAM 3.4: the onboarding wizard's --required-role and pgAdmin's OAUTH2_ADDITIONAL_CLAIMS
+    "onboarding by R": (_set(["resource_groups", "onboarding", "tool", "settings", 0, "levels"], ["R"]),
+                        "cannot give edge-wizard's onboard"),
+    "maintenance's existing_slot with nobody enforcing it": (_pop(["resource_groups", "onboarding", "tool", "constraint_enforced_by"]),
+                                                             "cannot evaluate"),
+    "constraint passed on by a tool with its own credential": (
+        _set(["resource_groups", "dashboards", "tool", "constraint_enforced_by"], "the database"),
+        "constraint_enforced_by on a tool with its own credential"),
+    "pgAdmin sign-in by R": (_set(["resource_groups", "platform_admin", "tool", "settings", 0, "levels"], ["R"]),
+                             "cannot give pgadmin's sign_in"),
+    "role admitted to pgAdmin without the claim": (_set(["matrix", "platform_admin", "qa"], ["R"]),
+                                                   "PGADMIN_DOMAIN admits"),
 }
 
 
@@ -209,7 +221,8 @@ class PolicyTest(unittest.TestCase):
 
 
 class ToolsTest(unittest.TestCase):
-    """compiler/tools.py: Grafana's role setting from the dashboards group (IAM 3.1)."""
+    """compiler/tools.py: each tool's own role setting (Grafana 3.1, JupyterHub 3.2,
+    Node-RED 3.3, the onboarding wizard and pgAdmin 3.4)."""
 
     EXPECTED_PATH = ("(contains(groups[*], 'engineer')) && 'Editor' || (contains(groups[*], 'auditor') || "
                      "contains(groups[*], 'maintenance') || contains(groups[*], 'production_manager') || "
@@ -271,6 +284,37 @@ class ToolsTest(unittest.TestCase):
         self.assertNotIn("read", tools.KINDS["node-red"])   # GET /flows shows the ingest password
         for g, lv in p.services["svc_ingest"]["ceiling"].items():
             self.assertLessEqual(set(lv), p.closure(p.groups["flows"]["reaches"].get(g, [])), g)
+
+    def test_edge_wizard_roles(self):
+        """IAM 3.4: the wizard admits the holders of C or U on onboarding, maintenance
+        included (existing_slot is the database's, at registration)."""
+        p = self.policy
+        self.assertEqual(tools.groups(p, "edge-wizard"), ["onboarding"])
+        self.assertEqual(tools.edge_wizard_roles(p), ["engineer", "maintenance"])
+        self.assertEqual(tools.edge_wizard_roles(p), proxies.admitted(p, "ONBOARD_DOMAIN"))
+        self.assertTrue(p.groups["onboarding"]["tool"]["constraint_enforced_by"])
+
+    def test_pgadmin_claims(self):
+        p = self.policy
+        self.assertEqual(tools.pgadmin_claims(p), "{'groups': ['admin']}")
+        self.assertEqual(ast.literal_eval(tools.pgadmin_claims(p)), {"groups": proxies.admitted(p, "PGADMIN_DOMAIN")})
+
+    def test_tool_lists_fail_closed(self):
+        # an empty --required-role admits any signed-in account: never compiled
+        for group, fn in (("onboarding", tools.edge_wizard_roles), ("platform_admin", tools.pgadmin_claims)):
+            d = copy.deepcopy(self.policy.data)
+            d["matrix"][group] = {}
+            with self.assertRaises(ValueError, msg=group):
+                fn(model.Policy(d))
+
+    def test_compile_tool_cli(self):
+        import subprocess
+        cli = [sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"), "compile"]
+        out = subprocess.run(cli + ["edge-wizard"], capture_output=True, text=True)
+        self.assertEqual((out.returncode, out.stdout), (0, "engineer,maintenance\n"))
+        out = subprocess.run(cli + ["pgadmin"], capture_output=True, text=True)
+        self.assertEqual((out.returncode, out.stdout), (0, "{'groups': ['admin']}\n"))
+        self.assertEqual(subprocess.run(cli + ["zeppelin"], capture_output=True).returncode, 2)
 
     def test_tool_block_does_not_change_route_digest(self):
         # a tool block is not in the route table: no database deploy, role_widening() unchanged
@@ -1182,6 +1226,99 @@ class WiringTest(unittest.TestCase):
         lib = self.read("infra/lib-oauth2-proxy.sh")
         self.assertIn("compile jupyterhub --setting allowed_groups", lib)
         self.assertIn("compile jupyterhub --setting admin_groups", lib)
+
+    def test_onboarding_and_pgadmin_wiring(self):
+        """IAM 3.4: the wizard's --required-role and pgAdmin's claims come from policy_tool."""
+        self.assertEqual({h for h, st in proxies.ENFORCEMENT.items() if st.startswith("tool")},
+                         {"GRAFANA_DOMAIN", "WORKBENCH_DOMAIN", "ONBOARD_DOMAIN", "PGADMIN_DOMAIN"})
+        tmpl = self.read("k8s/pgadmin/pgadmin.yaml")
+        self.assertIn("'OAUTH2_ADDITIONAL_CLAIMS': ${PGADMIN_OAUTH2_CLAIMS}}]", tmpl)
+        self.assertNotIn("{'groups': [", tmpl)
+        infra = self.read("deploy-infra.sh")
+        self.assertIn('PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin)"', infra)
+        # envsubst leaves an unlisted ${VAR} as literal text; the call spans two lines
+        call = re.search(r'render "\$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml"(.*?)\|', infra, re.S).group(1)
+        used = set(re.findall(r"\$\{([A-Z_]+)\}", tmpl))
+        self.assertEqual(used - set(call.replace("\\", " ").split()), set())
+        self.assertLess(infra.index("policy_tool pgadmin"), infra.index('render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml"'))
+        self.assertIn("compile \"$1\"", self.read("infra/lib-policy-tools.sh"))
+        deploy = self.read("apps/edge-wizard/deploy.sh")
+        self.assertIn("policy_tool edge-wizard", deploy)
+        self.assertLess(deploy.index("unit_flash_runs | xargs"), deploy.index('systemctl --user restart "$UNIT"'))
+        self.assertLess(deploy.index("policy_tool edge-wizard"), deploy.index('systemctl --user restart "$UNIT"'))
+        # the deployment's env holds the client secret: on stdin only, never an argument
+        for script in ("health-check.sh", "tests/iam-hosts.sh"):
+            src = self.read(script)
+            self.assertIn('PGADMIN_CONFIG_OAUTH2_CONFIG")].value}', src, script)
+            self.assertNotRegex(src, r'python3 -c [^\n]*"\$(cfg|have_env|oauth)"', script)
+        self.assertIn("pgadminroles", self.read("health-checks.conf"))
+        self.assertIn("onboardroles", self.read("health-checks.conf"))
+
+    def _health_fn(self, fn, setup, kubectl_out, env=None):
+        """Run one health-check function with a fake kubectl/pgrep; its _record line."""
+        import subprocess
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        for name, body in (("kubectl", f"#!/bin/sh\ncat <<'EOF'\n{kubectl_out}\nEOF\n"),
+                           ("pgrep", "#!/bin/sh\nprintf '%s\\n' \"$FAKE_PGREP\"\n")):
+            path = os.path.join(tmp, name)
+            with open(path, "w") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+        src = self.read("health-check.sh")
+        body = re.search(rf"(?ms)^{fn}\(\) \{{.*?^\}}", src).group(0)
+        script = (f'_record() {{ echo "$1|$2|$3"; }}\nSCRIPT_DIR={REPO}\nTIMEOUT=5\nKUBECTL=kubectl\n'
+                  f"{body}\n{setup}\n")
+        e = dict(os.environ, PATH=tmp + ":" + os.environ["PATH"], **(env or {}))
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e).stdout.strip()
+
+    def test_health_pgadminroles(self):
+        secret = "S3CRET-pgadmin-client"
+        live = ("[{'OAUTH2_NAME': 'keycloak', 'OAUTH2_CLIENT_SECRET': '%s', "
+                "'OAUTH2_ADDITIONAL_CLAIMS': {'groups': ['admin']}}]" % secret)
+        out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea', live)
+        self.assertTrue(out.startswith("OK|"), out)
+        self.assertNotIn(secret, out)
+        out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea',
+                              live.replace("['admin']", "['admin', 'qa']"))
+        self.assertTrue(out.startswith("FAIL|"), out)
+        self.assertNotIn(secret, out)
+        out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea', live,
+                              {"IAM_GATES": "false"})
+        self.assertTrue(out.startswith("WARN|"), out)
+
+    def test_health_onboardroles(self):
+        daemon = "42 python3 edge/src/host/wizard_server.py --dir /tmp/x --daemon --auth keycloak"
+        run = lambda argv, **env: self._health_fn(  # noqa: E731
+            "check_onboardroles", 'check_onboardroles "Onboarding roles"', "", dict(FAKE_PGREP=argv, **env))
+        self.assertTrue(run(daemon + " --required-role engineer,maintenance --allowed-host x").startswith("OK|"))
+        self.assertTrue(run(daemon + " --required-role engineer").startswith("FAIL|"))
+        self.assertTrue(run(daemon).startswith("FAIL|"))
+        self.assertTrue(run("").startswith("SKIP|"))
+        self.assertTrue(run(daemon, IAM_GATES="false", EDGE_WIZARD_ROLE="").startswith("WARN|"))
+
+    def test_policy_tool_shell(self):
+        """infra/lib-policy-tools.sh: compiled under IAM_GATES=true, pre-policy under false."""
+        import subprocess
+
+        def run(tool, env, repo=REPO):
+            e = dict(os.environ, REPO_ROOT=repo, **env)
+            return subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-policy-tools.sh"; policy_tool {tool}'],
+                                  capture_output=True, text=True, env=e)
+        r = run("edge-wizard", {"IAM_GATES": "true", "EDGE_WIZARD_ROLE": ""})
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "engineer,maintenance\n", ""))
+        r = run("edge-wizard", {"IAM_GATES": "true", "EDGE_WIZARD_ROLE": "operator"})
+        self.assertEqual(r.stdout, "engineer,maintenance\n")
+        self.assertIn("is ignored", r.stderr)
+        r = run("edge-wizard", {"IAM_GATES": "false", "EDGE_WIZARD_ROLE": "operator"})
+        self.assertEqual(r.stdout, "operator\n")
+        self.assertIn("IAM_GATES=false", r.stderr)
+        self.assertEqual(run("edge-wizard", {"IAM_GATES": "false", "EDGE_WIZARD_ROLE": ""}).stdout, "\n")
+        self.assertEqual(run("pgadmin", {"IAM_GATES": "false"}).stdout, "{'groups': ['admin']}\n")
+        r = run("edge-wizard", {"IAM_GATES": "true"}, repo="/nonexistent")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(run("zeppelin", {}).returncode, 2)
 
     def test_node_red_wiring(self):
         """IAM 3.3: Node-RED's adminAuth is rendered from the policy; tokens never in argv."""

@@ -1695,7 +1695,12 @@ echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
 # medcea/db-user restarts it when that changes
 db_client "$NAMESPACE" rr_admin_login
 PGA_DB_USER="$DBC_USER"; PGA_DB_PASS="$DBC_PASS"
-render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN \
+# its sign-in roles (IAM 3.4): OAUTH2_ADDITIONAL_CLAIMS compiled from the policy;
+# a policy that does not compile stops here and the running pgAdmin stays
+source "$SCRIPT_DIR/infra/lib-policy-tools.sh"
+PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin)" \
+    || { echo -e "${RED}ERROR: cannot compile pgAdmin's sign-in roles from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }
+render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
        KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 # 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config

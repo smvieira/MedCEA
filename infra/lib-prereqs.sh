@@ -27,6 +27,7 @@ _PREREQS=(
     "command -v envsubst|gettext-base|filling the manifest templates in k8s/ (infra/lib-render.sh)"
     "command -v ip|iproute2|LAN IP detection"
     "command -v flock|util-linux|one deploy at a time (infra/lib-lock.sh)"
+    "command -v pgrep|procps|process checks (health-check onboardroles, the edge-wizard deploy)"
     "python3 -c 'import yaml' 2>/dev/null|python3-yaml|the access-policy compiler (apps/iam/compiler)"
     "command -v snap|snapd|installing MicroK8s"
 )

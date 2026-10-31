@@ -103,8 +103,8 @@ Signing in:
   browser. --unregistered needs no sign-in. Until IAM Phase 2 a run without a
   sign-in still works and says what would be refused — a code nobody entered
   included, and --yes without a terminal does not wait for one; only a sign-in
-  denied in the browser, or an account without EDGE_WIZARD_ROLE, stops the
-  run. From Phase 2 registering needs one. With --ui, open the address the
+  denied in the browser, or an account the access policy does not admit to
+  onboarding (engineer, maintenance by default), stops the run. From Phase 2 registering needs one. With --ui, open the address the
   terminal prints (it carries the run's token): a sign-in from the bare address
   gets a browser session but does not act for the run.
 
@@ -442,14 +442,29 @@ token_close() {
   if [ -n "$AUTH_PID" ]; then kill "$AUTH_PID" 2>/dev/null || true; AUTH_PID=""; fi
 }
 
+# Who may onboard (IAM 3.4): the access policy's onboarding roles, comma-separated,
+# any one admits (infra/lib-policy-tools.sh; EDGE_WIZARD_ROLE only under
+# IAM_GATES=false). Computed only where this script signs in itself — the
+# terminal agent and --ui with Keycloak — never for --ui-spool (the daemon's
+# holder checks), --ui-insecure or --unregistered. A policy that does not
+# compile stops the run before anything is touched.
+ONBOARD_ROLES=""
+onboard_roles() {
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/infra/lib-policy-tools.sh"
+  ONBOARD_ROLES="$(policy_tool edge-wizard)" \
+    || die "cannot compile the onboarding roles from the access policy (python3 apps/iam/compiler/cli.py check). Nothing was touched."
+}
+
 # The terminal holder: edge_auth.py agent, signing in with the device grant.
 # Lazy — it does nothing until the first token request. The secret reaches it
 # in its environment only (argv is world-readable), and it pops it.
 auth_start_agent() {
   local _iss="https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM:-medcea}"
+  onboard_roles
   coproc EDGEAUTH { EDGE_WIZARD_SECRET="$EDGE_WIZARD_SECRET" exec python3 "$SRC_HOST/edge_auth.py" agent \
       --issuer "$_iss" --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}" --oidc-insecure \
-      ${EDGE_WIZARD_ROLE:+--required-role "$EDGE_WIZARD_ROLE"}; }
+      ${ONBOARD_ROLES:+--required-role "$ONBOARD_ROLES"}; }
   AUTH_PID=$EDGEAUTH_PID; TOK_R=${EDGEAUTH[0]}; TOK_W=${EDGEAUTH[1]}
 }
 
@@ -686,7 +701,8 @@ elif [ "$UI" = 1 ]; then
     _kc_args=(--auth keycloak --issuer "$_iss"
               --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}" --oidc-insecure
               --token-channel stdio)
-    [ -n "${EDGE_WIZARD_ROLE:-}" ] && _kc_args+=(--required-role "$EDGE_WIZARD_ROLE")
+    onboard_roles
+    [ -n "$ONBOARD_ROLES" ] && _kc_args+=(--required-role "$ONBOARD_ROLES")
   fi
 
   # Addresses the browser may legitimately reach this on. Each is also a
@@ -756,7 +772,7 @@ elif [ "$UI" = 1 ]; then
   for u in "${_logurls[@]}"; do ui_append "      $u"; done
   if [ "$UI_AUTH" = keycloak ]; then
     info "${DIM}realm ${KEYCLOAK_REALM:-medcea} at ${KEYCLOAK_DOMAIN}${N}"
-    [ -n "${EDGE_WIZARD_ROLE:-}" ] && info "${DIM}requires the '${EDGE_WIZARD_ROLE}' realm role${N}"
+    [ -n "$ONBOARD_ROLES" ] && info "${DIM}requires one of: ${ONBOARD_ROLES}${N}"
   fi
   case "$UI_BIND" in
     127.0.0.1|localhost)

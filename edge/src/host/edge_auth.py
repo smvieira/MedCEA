@@ -98,19 +98,43 @@ def claims(tok):
         return {}
 
 
+def roles_of(need):
+    """The required roles as a tuple, or None when nothing is required.
+
+    `need` is None, '', a comma-separated str ("engineer,maintenance": the list
+    the access policy compiles, `cli.py compile edge-wizard`) or an iterable.
+    A single name still works as before IAM 3.4.
+    """
+    if not need:
+        return None
+    if isinstance(need, str):
+        need = need.split(",")
+    names = tuple(n.strip() for n in need if n and n.strip())
+    return names or None
+
+
+def roles_text(need):
+    """"the 'engineer' role" or "one of the roles 'engineer', 'maintenance'"."""
+    names = roles_of(need) or ()
+    if len(names) == 1:
+        return "the '%s' role" % names[0]
+    return "one of the roles %s" % ", ".join("'%s'" % n for n in names)
+
+
 def has_role(c, need):
-    """True if the realm role, a client role or the groups claim holds `need`.
+    """True if the realm role, a client role or the groups claim holds any one
+    of the roles in `need` (see roles_of).
 
     Read from the ACCESS token. Keycloak's default realm-roles mapper puts
     realm_access in the access token only, so a check on the ID token (what the
     wizard did before) refuses everyone as soon as a role is required.
     """
-    if need in ((c.get("realm_access") or {}).get("roles") or []):
-        return True
+    names = roles_of(need) or ()
+    held = set((c.get("realm_access") or {}).get("roles") or [])
     for v in (c.get("resource_access") or {}).values():
-        if need in ((v or {}).get("roles") or []):
-            return True
-    return need in (c.get("groups") or [])
+        held.update((v or {}).get("roles") or [])
+    held.update(c.get("groups") or [])
+    return any(n in held for n in names)
 
 
 def platform_role(c):
@@ -279,9 +303,9 @@ def fresh(ts, oidc, client_id, secret, ctx, min_ttl, now=time.time, post=None,
             if why:
                 return "client", "%s tokens lack %s — run ./deploy-infra.sh" % (client_id, why)
             if required_role and not has_role(c, required_role):
-                ended = ("role", "%s no longer has the '%s' role, which is required to onboard "
+                ended = ("role", "%s no longer has %s, which is required to onboard "
                          "boards — the run stops here. Ask an administrator in the User "
-                         "Manager." % (ts.user, required_role))
+                         "Manager." % (ts.user, roles_text(required_role)))
                 ts.wipe(ended)
                 return ended
             if ts.access_exp - t < MIN_SERVE:
@@ -378,7 +402,7 @@ class Holder:
         self.ctx = ctx
         self.client_id = client_id
         self.secret = secret
-        self.required_role = required_role or None
+        self.required_role = roles_of(required_role)
         self.waiter = waiter or Waiter()
         self.sleep, self.now, self.post = sleep, now, post
         self.alive = lambda: True
@@ -637,10 +661,10 @@ def device_login(oidc, client_id, secret, ctx, emit, required_role=None,
     if why:
         raise AuthError("client", "%s tokens lack %s — run ./deploy-infra.sh" % (client_id, why))
     if required_role and not has_role(c, required_role):
-        raise AuthError("role", "%s is signed in but does not have the '%s' role, which is "
+        raise AuthError("role", "%s is signed in but does not have %s, which is "
                         "required to onboard boards. Ask an administrator to change it in "
                         "the User Manager, then re-run. Nothing was written."
-                        % (ts.user, required_role))
+                        % (ts.user, roles_text(required_role)))
     return ts
 
 
@@ -718,7 +742,8 @@ def main(argv=None):
     ag = sub.add_parser("agent", help="hold one terminal run's tokens on stdin/stdout")
     ag.add_argument("--issuer", required=True)
     ag.add_argument("--client-id", default="edge-wizard")
-    ag.add_argument("--required-role", default="")
+    ag.add_argument("--required-role", default="",
+                    help="comma-separated roles, any one admits (the access policy's onboarding list)")
     ag.add_argument("--oidc-insecure", action="store_true")
     a = ap.parse_args(argv)
 

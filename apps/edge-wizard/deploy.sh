@@ -4,6 +4,10 @@
 # The Devices tab's "Onboard Device" button opens edge/wizard-daemon.sh at
 # https://$ONBOARD_DOMAIN/. It runs on the host, not in the
 # cluster, because onboarding is over USB. This makes it part of the install:
+#   0. refuse while a flash run is active in the unit: a restart kills its whole
+#      control group, a board mid-erase included; log who may onboard (the
+#      access policy's onboarding roles, IAM 3.4 — a policy that does not
+#      compile fails the deploy before the restart)
 #   1. edge/.venv — the esptool/mpremote toolchain (edge/lib-venv.sh)
 #   2. systemd --user unit cea-edge-wizard, from `wizard-daemon.sh --install-unit`
 #   3. enable + restart — restart, not just start: a --reset recreates the
@@ -31,6 +35,7 @@ source "$REPO_ROOT/infra/lib-wait.sh"   # wait_for_http
 source "$REPO_ROOT/edge/lib-venv.sh"    # ensure_edge_venv
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh" # render FILE VAR...
+source "$REPO_ROOT/infra/lib-policy-tools.sh" # policy_tool edge-wizard
 NAMESPACE="${NAMESPACE:-medcea}"
 EDGE_WIZARD_PORT="${EDGE_WIZARD_PORT:-8088}"
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"
@@ -57,6 +62,28 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
     exit 0   # the ingress would only point at nothing, so leave it for that run
 fi
 
+# Only the unit's own control group: a restart kills nothing outside it, so a
+# terminal run, an editor or a pager naming flash-device.sh does not block.
+unit_flash_runs() {
+    local cg pid
+    cg="$(systemctl --user show -p ControlGroup --value "$UNIT" 2>/dev/null)"
+    [[ -n "$cg" && -r "/sys/fs/cgroup$cg/cgroup.procs" ]] || return 0
+    while read -r pid; do
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'flash-device\.sh' && echo "$pid"
+    done < "/sys/fs/cgroup$cg/cgroup.procs"
+    return 0
+}
+_runs="$(unit_flash_runs | xargs)"
+if [[ -n "$_runs" ]]; then
+    echo "ERROR: an onboarding run is in progress (PID $_runs); restarting the wizard would kill it mid-flash. Re-run when it has finished." >&2
+    exit 1
+fi
+ONBOARD_ROLES="$(policy_tool edge-wizard)" || {
+    echo "ERROR: cannot compile the onboarding roles from the access policy (python3 apps/iam/compiler/cli.py check); the running wizard is left as it is." >&2
+    exit 1
+}
+log "Onboarding admits: ${ONBOARD_ROLES:-any signed-in account (IAM_GATES=false, EDGE_WIZARD_ROLE empty)}"
+
 log "Building the provisioning toolchain (edge/.venv)..."
 ensure_edge_venv
 
@@ -81,6 +108,12 @@ log "Waiting for the wizard to answer..."
 if ! wait_for_http "http://127.0.0.1:$PORT/" 60 "Onboarding wizard"; then
     journalctl --user -u "$UNIT" -n 20 --no-pager >&2 || true
     exit 1
+fi
+# The running daemon's gate (argv: not a secret). An edge/ tree from before
+# IAM 3.4 still passes EDGE_WIZARD_ROLE: say so rather than fail the install.
+_argv="$(pgrep -af '[w]izard_server.py .*--daemon' | head -1)"
+if [[ -n "$ONBOARD_ROLES" && "$_argv" != *"--required-role $ONBOARD_ROLES"* ]]; then
+    warn "The running wizard does not pass --required-role $ONBOARD_ROLES (edge/ older than IAM 3.4?): health-check onboardroles will FAIL."
 fi
 
 log "Publishing it at $URL..."

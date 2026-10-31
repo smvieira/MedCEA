@@ -111,6 +111,15 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         values (./infra/deploy-workbench.sh); WARN while IAM_GATES=false; SKIP while"
     echo -e "         WORKBENCH_ENABLED is not true or there is no hub"
     echo ""
+    echo -e "  ${CYAN}onboardroles${NC} the onboarding wizard admits the access policy's roles (IAM 3.4): -"
+    echo -e "         FAIL when the running daemon's --required-role differs from policy_tool edge-wizard"
+    echo -e "         (./apps/edge-wizard/deploy.sh) or is missing while IAM_GATES=true; WARN while"
+    echo -e "         IAM_GATES=false; SKIP when no daemon runs (the http check reports it)"
+    echo ""
+    echo -e "  ${CYAN}pgadminroles${NC} pgAdmin admits the access policy's roles (IAM 3.4): NAMESPACE"
+    echo -e "         FAIL when the deployment's OAUTH2_ADDITIONAL_CLAIMS differs from policy_tool pgadmin"
+    echo -e "         (./deploy-infra.sh); WARN while IAM_GATES=false; SKIP without the deployment"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -642,6 +651,74 @@ for k, x in out.items():
 }
 
 # =============================================================================
+# Check: the onboarding wizard's roles are the policy's (IAM 3.4) — read-only
+# Compares the running daemon's --required-role (argv: a role list, no secret)
+# with policy_tool edge-wizard (infra/lib-policy-tools.sh), the list
+# edge/wizard-daemon.sh passes.
+# =============================================================================
+check_onboardroles() {
+    local name="$1" argv have want
+    argv="$(pgrep -af '[w]izard_server.py .*--daemon' | head -1)"
+    if [[ -z "$argv" ]]; then
+        _record SKIP "$name" "no onboarding wizard daemon runs (systemctl --user status cea-edge-wizard)"
+        return
+    fi
+    have="$(sed -n 's/.* --required-role \([^ ]*\).*/\1/p' <<<"$argv")"
+    # shellcheck source=/dev/null
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-policy-tools.sh" \
+            || ! want="$(REPO_ROOT="$SCRIPT_DIR" policy_tool edge-wizard 2>/dev/null)"; then
+        _record FAIL "$name" "cannot compile the onboarding roles (python3 apps/iam/compiler/cli.py check)"
+        return
+    fi
+    if [[ "${IAM_GATES:-true}" == "false" ]]; then
+        if [[ "$have" == "$want" ]]; then
+            _record WARN "$name" "IAM_GATES=false: the wizard admits ${want:-any signed-in account} (EDGE_WIZARD_ROLE, pre-policy)"
+        else
+            _record FAIL "$name" "the wizard admits ${have:-any signed-in account}, EDGE_WIZARD_ROLE says ${want:-any} (./apps/edge-wizard/deploy.sh)"
+        fi
+    elif [[ -z "$have" ]]; then
+        _record FAIL "$name" "the wizard runs without --required-role: any signed-in account may erase a board (./apps/edge-wizard/deploy.sh)"
+    elif [[ "$have" != "$want" ]]; then
+        _record FAIL "$name" "the wizard admits $have, the policy compiles $want (./apps/edge-wizard/deploy.sh, no run active)"
+    else
+        _record OK "$name" "admits $want from the access policy"
+    fi
+}
+
+# =============================================================================
+# Check: pgAdmin's sign-in roles are the policy's (IAM 3.4) — read-only
+# target: NAMESPACE. PGADMIN_CONFIG_OAUTH2_CONFIG also holds the client secret:
+# it reaches python on stdin, which prints only OAUTH2_ADDITIONAL_CLAIMS.
+# =============================================================================
+check_pgadminroles() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" have want same
+    timeout "$TIMEOUT" $KUBECTL get deployment pgadmin -n "$ns" >/dev/null 2>&1 \
+        || { _record SKIP "$name" "no pgAdmin deployment in $ns"; return; }
+    have="$($KUBECTL get deployment pgadmin -n "$ns" \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PGADMIN_CONFIG_OAUTH2_CONFIG")].value}' 2>/dev/null \
+        | python3 -c '
+import ast, sys
+try:
+    print(repr(ast.literal_eval(sys.stdin.read())[0].get("OAUTH2_ADDITIONAL_CLAIMS")))
+except Exception:
+    print("unreadable")')"
+    # shellcheck source=/dev/null
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-policy-tools.sh" \
+            || ! want="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin 2>/dev/null)"; then
+        _record FAIL "$name" "cannot compile pgAdmin's roles (python3 apps/iam/compiler/cli.py check)"
+        return
+    fi
+    same="$(python3 -c 'import ast, sys; print(ast.literal_eval(sys.argv[1]) == ast.literal_eval(sys.argv[2]))' "$have" "$want" 2>/dev/null)"
+    if [[ "$same" != True ]]; then
+        _record FAIL "$name" "OAUTH2_ADDITIONAL_CLAIMS is $have, the policy compiles $want (./deploy-infra.sh)"
+    elif [[ "${IAM_GATES:-true}" == "false" ]]; then
+        _record WARN "$name" "IAM_GATES=false: pgAdmin keeps the pre-policy $want"
+    else
+        _record OK "$name" "admits $want from the access policy (checked at sign-in only)"
+    fi
+}
+
+# =============================================================================
 # Check: the flows Node-RED runs against git (IAM 3.3, waiver W1's control) — read-only
 # target: NAMESPACE. Reads /data/flows.json as dbclients does; apps/node-red/flows_diff.py
 # prints ids, types, names and key names, never a value (the ingest password is in it).
@@ -878,6 +955,8 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamworkbench) check_iamworkbench "$name" "$target" ;;
         noderedflows) check_noderedflows "$name" "$target" ;;
         noderedauth)  check_noderedauth "$name" "$target" ;;
+        onboardroles) check_onboardroles "$name" ;;
+        pgadminroles) check_pgadminroles "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

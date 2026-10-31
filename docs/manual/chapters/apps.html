@@ -17,7 +17,7 @@
 <tr><td>Node-RED</td><td><code>node-red.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
 <tr><td>Grafana</td><td><code>grafana.&lt;domain&gt;</code></td><td><span class="role">engineer</span> (Editor); <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span> (Viewer). Checked by Grafana's own sign-in setting</td></tr>
 <tr><td>AI Workbench (JupyterHub)</td><td><code>ai-workbench.&lt;domain&gt;</code></td><td><span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span>, checked by the workbench's own sign-in</td></tr>
-<tr><td>pgAdmin</td><td><code>pgadmin.&lt;domain&gt;</code></td><td><span class="role">admin</span> only, checked by pgAdmin's own sign-in</td></tr>
+<tr><td>pgAdmin</td><td><code>pgadmin.&lt;domain&gt;</code></td><td><span class="role">admin</span> only, from the access policy, checked by pgAdmin's own sign-in</td></tr>
 </tbody>
 </table></div>
 <p>The addresses are the defaults from <code>config.env.example</code>. An installation can change them in <code>config.env</code>. How to obtain a role is described in the <a href="#access">access chapter</a>.</p>
@@ -424,7 +424,7 @@ The snapshot never changes afterwards.</li>
 <p>A workspace you are signed in to lasts an hour at most before the sign-in runs again. If your role changes meanwhile, a tab left open longer may ask you to reload.</p>
 
 <h3 id="apps-pgadmin">pgAdmin</h3>
-<p>pgAdmin is a database browser for the administrator, who uses it to see the database schema and the configuration. Only accounts holding <span class="role">admin</span> can sign in, through the <strong>MedCEA sign-in</strong> button. The portal has no card for it, so open <code>https://pgadmin.&lt;domain&gt;</code> directly.</p>
+<p>pgAdmin is a database browser for the administrator, who uses it to see the database schema and the configuration. Only accounts holding <span class="role">admin</span> can sign in, through the <strong>MedCEA sign-in</strong> button; the access policy decides this. Anyone else is sent back to pgAdmin's login page with a message that they are not authorized. pgAdmin checks the role only at sign-in. The portal has no card for it, so open <code>https://pgadmin.&lt;domain&gt;</code> directly.</p>
 <p>pgAdmin uses one of two database logins:</p>
 <ul>
 <li>While the services use their own database roles (<code>IAM_DB_SERVICE_ROLES=true</code>), it connects as <code>rr_admin_login</code>. That login owns nothing and reads only what the <span class="role">admin</span> role may read. It cannot change regulated data or the histories.</li>

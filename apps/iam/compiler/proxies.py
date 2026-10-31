@@ -11,13 +11,14 @@ ANY = None  # admit any level but N
 
 # Hosts whose gate is compiled from the policy today, and when the others follow
 # (codeplan/MedCEA_IAM_Implementation_Plan.md). `cli.py hosts` prints the status,
-# so the policy's intent is never read as what is running.
+# so the policy's intent is never read as what is running. "compiled" is an
+# oauth2-proxy's allowed_groups; "tool (…)" the tool's own setting (compiler/tools.py).
 ENFORCEMENT = {
     "PORTAL_DOMAIN": "compiled", "CONFIG_DOMAIN": "compiled", "SCHEDULER_DOMAIN": "compiled",
     "MONITOR_DOMAIN": "compiled", "DBMGMT_DOMAIN": "compiled", "MQTTX_DOMAIN": "compiled",
     "NODE_RED_DOMAIN": "compiled", "ACCESS_DOMAIN": "compiled",
     "GRAFANA_DOMAIN": "tool (Grafana role_attribute_path)", "WORKBENCH_DOMAIN": "tool (JupyterHub allowed_groups)",
-    "ONBOARD_DOMAIN": "not yet (Phase 3.4; EDGE_WIZARD_ROLE)", "PGADMIN_DOMAIN": "admin (pgAdmin's own OAuth2)",
+    "ONBOARD_DOMAIN": "tool (edge wizard --required-role)", "PGADMIN_DOMAIN": "tool (pgAdmin OAUTH2_ADDITIONAL_CLAIMS)",
     "POLICY_DOMAIN": "not deployed (Phase 4)",
 }
 

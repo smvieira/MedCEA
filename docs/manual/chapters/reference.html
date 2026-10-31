@@ -17,15 +17,15 @@
 <tr><td><code>NODE_RED_DOMAIN</code></td><td><code>node-red.$DOMAIN</code></td><td>Node-RED</td><td><span class="role">engineer</span></td><td>Compiled from the policy; the editor's own rights too</td></tr>
 <tr><td><code>GRAFANA_DOMAIN</code></td><td><code>grafana.$DOMAIN</code></td><td>Grafana</td><td><span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td><td>Compiled into Grafana's own role setting (IAM Phase 3.1): <span class="role">engineer</span> is Editor, the others Viewer; any other role cannot sign in. Nobody gets Grafana Admin through the sign-in.</td></tr>
 <tr><td><code>WORKBENCH_DOMAIN</code></td><td><code>ai-workbench.$DOMAIN</code></td><td>AI Workbench (JupyterHub)</td><td><span class="role">engineer</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">admin</span></td><td>Compiled into JupyterHub's own sign-in setting (IAM Phase 3.2): the roles listed may sign in; <span class="role">admin</span> is hub administrator and cannot open anyone's workspace.</td></tr>
-<tr><td><code>ONBOARD_DOMAIN</code></td><td><code>onboard-device.$DOMAIN</code></td><td>Device onboarding (edge wizard)</td><td><span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not compiled yet (IAM Phase 3.4). Any signed-in account, unless <code>EDGE_WIZARD_ROLE</code> names a required role.</td></tr>
-<tr><td><code>PGADMIN_DOMAIN</code></td><td><code>pgadmin.$DOMAIN</code></td><td>pgAdmin</td><td><span class="role">admin</span></td><td>pgAdmin's own Keycloak sign-in, administrators only</td></tr>
+<tr><td><code>ONBOARD_DOMAIN</code></td><td><code>onboard-device.$DOMAIN</code></td><td>Device onboarding (edge wizard)</td><td><span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Compiled into the wizard's own role setting; checked at sign-in and at every renewal during a run</td></tr>
+<tr><td><code>PGADMIN_DOMAIN</code></td><td><code>pgadmin.$DOMAIN</code></td><td>pgAdmin</td><td><span class="role">admin</span></td><td>Compiled into pgAdmin's own sign-in setting; checked at sign-in only</td></tr>
 <tr><td><code>KEYCLOAK_DOMAIN</code></td><td><code>keycloak.$DOMAIN</code></td><td>Keycloak sign-in pages</td><td>everyone, to sign in</td><td>The Keycloak console of realm <code>master</code> is for the break-glass account only</td></tr>
 </tbody>
 </table></div>
 <div class="note"><p>The access policy also names an Access Policy host (<code>POLICY_DOMAIN</code>, for <span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span>). It is not deployed yet (IAM Phase 4) and has no setting in <code>config.env.example</code>. With <code>IAM_GATES="false"</code> the compiled hosts fall back to the pre-policy list <span class="role">operator</span>, <span class="role">qa</span>, <span class="role">auditor</span>, <span class="role">admin</span>. Sensor and control boards do not use a web address: they reach the MQTT broker on port <code>31883</code> of the platform host.</p></div>
 
 <h3 id="reference-roles-apps">Roles and applications</h3>
-<p>The same data as the table above, one row per role: "yes" means the access policy admits the role to that application. Device onboarding follows the policy only once its gate is compiled; see the last column above. In Grafana, <span class="role">engineer</span> is Editor and the other roles marked "yes" are Viewer. Roles <span class="role">qc</span> and <span class="role">qp</span> are defined for later use.</p>
+<p>The same data as the table above, one row per role: "yes" means the access policy admits the role to that application. For device onboarding, <span class="role">maintenance</span> may only re-onboard into a slot that already exists. In Grafana, <span class="role">engineer</span> is Editor and the other roles marked "yes" are Viewer. Roles <span class="role">qc</span> and <span class="role">qp</span> are defined for later use.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Role</th><th>Portal</th><th>Config UI</th><th>Scheduler</th><th>Monitor</th><th>DB Mgmt</th><th>User Manager</th><th>MQTT Explorer</th><th>Node-RED</th><th>Grafana</th><th>AI Workbench</th><th>Onboarding</th><th>pgAdmin</th></tr></thead>
 <tbody>
@@ -127,7 +127,7 @@
 <tbody>
 <tr><td><code>ADMIN_USER</code>, <code>ADMIN_EMAIL</code></td><td><code>admin</code>, empty</td><td>The platform administrator. The e-mail address receives Keycloak password resets and is the pgAdmin login.</td></tr>
 <tr><td><code>QA_USER</code>, <code>QA_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">qa</span>, who confirms account grants and approves policy changes. Must be someone other than the administrator.</td></tr>
-<tr><td><code>ENGINEER_USER</code>, <code>ENGINEER_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">engineer</span>, the only role admitted to Node-RED, MQTT Explorer and device onboarding. May be a second account of the administrator, with its own username and e-mail address.</td></tr>
+<tr><td><code>ENGINEER_USER</code>, <code>ENGINEER_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">engineer</span>, the only role admitted to Node-RED and MQTT Explorer; device onboarding admits it and, into existing slots only, <span class="role">maintenance</span>. May be a second account of the administrator, with its own username and e-mail address.</td></tr>
 <tr><td><code>KC_BREAKGLASS_USER</code></td><td><code>kc-breakglass</code></td><td>Keycloak's own console account (realm <code>master</code>), used only for recovery. Every use is recorded in Keycloak's admin events.</td></tr>
 <tr><td><code>GRAFANA_ADMIN_USER</code>, <code>GRAFANA_DEVELOPER_USER</code>, <code>GRAFANA_VIEWER_USER</code></td><td><code>admin</code>, <code>developer</code>, <code>viewer</code></td><td>The demo accounts from before IAM Phase 3.1. Used only while <code>IAM_GATES</code> is <code>false</code> (the rollback), which creates them with the old Grafana roles. Otherwise nothing creates them, and accounts that already exist are left as they are.</td></tr>
 </tbody>
@@ -159,7 +159,7 @@
 <tr><td><code>WORKBENCH_IMAGE</code></td><td><code>quay.io/jupyter/scipy-notebook:latest</code></td><td>Notebook image for each workbench user.</td></tr>
 <tr><td><code>WORKBENCH_STORAGE</code></td><td><code>10Gi</code></td><td>Persistent home size per workbench user.</td></tr>
 <tr><td><code>EDGE_WIZARD_PORT</code></td><td><code>8088</code></td><td>Port of the onboarding wizard on the host. Must match the redirect addresses registered in Keycloak.</td></tr>
-<tr><td><code>EDGE_WIZARD_ROLE</code></td><td>empty</td><td>Role a person must hold to provision boards. Empty means any signed-in account.</td></tr>
+<tr><td><code>EDGE_WIZARD_ROLE</code></td><td>empty</td><td>Used only with <code>IAM_GATES=false</code>: the role a person must hold to provision boards; empty means any signed-in account. With <code>IAM_GATES=true</code> the access policy decides and this value is ignored with a warning.</td></tr>
 <tr><td><code>DOCKERHUB_USER</code></td><td>empty</td><td>Docker Hub account, for chart pulls and to avoid pull limits.</td></tr>
 </tbody>
 </table></div>
@@ -211,6 +211,8 @@
 <tr><td>Node-RED editor rights</td><td>The editor's own sign-in is on, with the rights compiled from the access policy, and its admin interface refuses a call without a sign-in. FAIL on any difference (run <code>./deploy-infra.sh</code>).</td></tr>
 <tr><td>Mosquitto MQTT (TCP)</td><td>The broker port for boards (<code>31883</code>) is open.</td></tr>
 <tr><td>Onboarding wizard</td><td>The wizard service on the host (<code>$PLATFORM_IP:$EDGE_WIZARD_PORT</code>) answers.</td></tr>
+<tr><td>Onboarding roles</td><td>The running wizard admits exactly the roles compiled from the access policy (<span class="role">engineer</span>, <span class="role">maintenance</span>). FAIL on any difference, or when it admits any signed-in account (run <code>./apps/edge-wizard/deploy.sh</code> when no run is active). WARN while <code>IAM_GATES</code> is false. SKIP when the wizard is not running.</td></tr>
+<tr><td>pgAdmin roles</td><td>pgAdmin's sign-in admits exactly the roles compiled from the access policy (<span class="role">admin</span>). FAIL on any difference (run <code>./deploy-infra.sh</code>). WARN while <code>IAM_GATES</code> is false.</td></tr>
 <tr><td>Access policy history</td><td>The hash chain of the access policy history is intact (FAIL names the first broken event).</td></tr>
 <tr><td>Database roles mode</td><td>The <code>IAM_DB_ROLES</code> mode recorded in the database matches <code>config.env</code>. WARN while it is <code>false</code>.</td></tr>
 <tr><td>Database grants</td><td>The database's rights equal those compiled from the access policy. FAIL on any difference.</td></tr>

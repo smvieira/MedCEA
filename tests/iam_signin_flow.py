@@ -42,6 +42,17 @@ in is a hub user afterwards; the throwaway admin account removes them through th
 (DELETE /hub/api/users/<name>, its own session and _xsrf cookie). It cannot remove itself,
 so test-admin-<hex> stays as a hub user without a home (delete_pvc false, nothing spawned).
 
+The onboarding wizard (IAM 3.4, [tool …]) signs in like a proxied host (/ → Keycloak → its
+own /oauth2/callback); a role outside the policy's onboarding list gets the wizard's 403
+("… required to provision hardware", naming the roles), which counts as refused. Nothing is
+started. pgAdmin (IAM 3.4) shows its login page: the flow reads the CSRF token from it, posts
+/authenticate/login with oauth2_button=keycloak, then Keycloak's form; ending on /browser/
+is in, pgAdmin's "not authorized … claims" message is refused. pgAdmin creates a user for
+each account it admits (OAUTH2_AUTO_CREATE_USER): only the throwaway admin, and it is gone
+when the pod restarts (no volume). The pgAdmin form fields follow pgAdmin 9 and may need
+updating after an image update (`dpage/pgadmin4:9`). IAM_GATES=false: the wizard expects
+EDGE_WIZARD_ROLE (empty: every account, the role-less one included), pgAdmin admin.
+
 Where it got in, the account then calls one API of each service behind the host (PROBES)
 with its session, so the access token goes through the proxy to the service's
 medcea_iam.check(). The calls go to "probes_out" with whether the route table lets that
@@ -115,8 +126,11 @@ def gated_hosts(p):
             # apps/access/deploy.sh: admin only, never the portal's pre-policy list;
             # Grafana's pre-3.1 setting: any enabled account, with or without a role
             # Node-RED and the MQTT Explorer keep their compiled list (IAM 3.3 decision)
-            want = (["admin"] if var == "ACCESS_DOMAIN" else
+            # the wizard: EDGE_WIZARD_ROLE (empty: any signed-in account); pgAdmin: admin
+            legacy = [r.strip() for r in os.environ.get("EDGE_WIZARD_ROLE", "").split(",") if r.strip()]
+            want = (["admin"] if var in ("ACCESS_DOMAIN", "PGADMIN_DOMAIN") else
                     proxies.admitted(p, var) if var in ("NODE_RED_DOMAIN", "MQTTX_DOMAIN") else
+                    (legacy or list(p.roles) + ["none"]) if var == "ONBOARD_DOMAIN" else
                     list(p.roles) + ["none"] if status.startswith("tool") else PRE_POLICY)
         else:
             want = proxies.admitted(p, var)
@@ -164,10 +178,45 @@ def classify(domain, label, status, url, body):
         return "in", ""
     if status == 403 and ("No access yet" in body or f"No access to {html.escape(label)}" in body):
         return "refused", ""
+    if status == 403 and host == domain and "required to provision hardware" in body:
+        return "refused", ""   # the onboarding wizard's own refusal (IAM 3.4)
     if FORM.search(body):
         return "error", "Keycloak showed the login form again (wrong password or account disabled?)"
     title = re.search(r"<title>(.*?)</title>", body, re.S)
     return "error", f"HTTP {status} at {url[:90]}" + (f" — {title.group(1).strip()[:60]}" if title else "")
+
+
+PGADMIN_CSRF = re.compile(r'"csrfToken":\s*"([^"]+)"')
+
+
+def pgadmin_sign_in(op, domain, user):
+    """pgAdmin 9's own OAuth2 sign-in: its login page, the MedCEA button, Keycloak."""
+    status, url, body = fetch(op, f"https://{domain}/login")
+    m = PGADMIN_CSRF.search(body)
+    if not m:
+        return status, url, body
+    form = urllib.parse.urlencode({"csrf_token": m.group(1), "oauth2_button": "keycloak"}).encode()
+    status, url, body = fetch(op, f"https://{domain}/authenticate/login", form,
+                              headers={"Referer": f"https://{domain}/login"})
+    m = FORM.search(body)
+    if m:  # Keycloak's form: no session yet in this jar
+        form = urllib.parse.urlencode({"username": user["username"], "password": user["password"],
+                                       "credentialId": ""}).encode()
+        status, url, body = fetch(op, html.unescape(m.group(1)), form)
+    return status, url, body
+
+
+def classify_pgadmin(domain, status, url, body):
+    parts = urllib.parse.urlsplit(url)
+    if 200 <= status < 300 and parts.hostname == domain and parts.path.startswith("/browser"):
+        return "in", ""
+    if parts.hostname == domain and "not authorized" in body:
+        return "refused", ""
+    if FORM.search(body):
+        return "error", "Keycloak showed the login form again (wrong password or account disabled?)"
+    if parts.hostname == domain and parts.path.startswith("/login"):
+        return "error", "back on pgAdmin's login page without its claims message (CSRF or form fields changed?)"
+    return "error", f"HTTP {status} at {url[:90]}"
 
 
 def grafana_role(p, role):
@@ -348,6 +397,8 @@ def main():
                 got, why = classify(domain, label, *sign_in(op, domain, u, HUB_START))
             elif var == "GRAFANA_DOMAIN":
                 got, why, gf_role = classify_grafana(op, domain, *sign_in(op, domain, u))
+            elif var == "PGADMIN_DOMAIN":
+                got, why = classify_pgadmin(domain, *pgadmin_sign_in(op, domain, u))
             else:
                 got, why = classify(domain, label, *sign_in(op, domain, u))
             expect = "in" if u["role"] in want else "refused"

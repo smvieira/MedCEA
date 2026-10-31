@@ -238,7 +238,7 @@ class BrowserWaiter(edge_auth.Waiter):
         emit(edge_auth.fmt_wait("browser", "waiting for a sign-in%s at the address printed "
                                 "above — that exact link: a sign-in from the bare address "
                                 "does not act for this run"
-                                % (" with the '%s' role" % need if need else "")))
+                                % (" with %s" % edge_auth.roles_text(need) if need else "")))
         if not holder.wait_until(lambda: holder.ts is not None, edge_auth.REAUTH_WAIT):
             raise edge_auth.AuthError("timeout", "nobody signed in within %d min — re-run"
                                       % (edge_auth.REAUTH_WAIT // 60))
@@ -880,10 +880,10 @@ class Handler(BaseHTTPRequestHandler):
         if need and not edge_auth.has_role(access, need):
             who = claims.get("preferred_username", "?")
             return self._send(403, "text/plain",
-                              ("%s is signed in but does not have the '%s' role, which is "
+                              ("%s is signed in but does not have %s, which is "
                                "required to provision hardware. Ask an administrator to "
                                "change your role in the User Manager, then reload.\n"
-                               % (who, need)).encode())
+                               % (who, edge_auth.roles_text(need))).encode())
 
         tokset = edge_auth.TokenSet.from_response(tok, time.time())
         sid = new_session(claims, tok.get("id_token", ""), tokset)
@@ -1070,7 +1070,8 @@ def main():
     ap.add_argument("--client-secret", default="",
                     help="deprecated: visible in ps; pass EDGE_WIZARD_SECRET in the environment")
     ap.add_argument("--required-role", default="",
-                    help="realm role a user must hold to provision hardware")
+                    help="roles that may provision hardware, comma-separated; any one "
+                         "admits (edge/wizard-daemon.sh passes the access policy's list)")
     ap.add_argument("--allowed-host", action="append", default=[],
                     help="host:port the browser may reach this on directly, or "
                          "https://host when it comes through a TLS proxy; repeatable")
@@ -1109,7 +1110,7 @@ def main():
     STATE["auth"] = a.auth
     STATE["client_id"] = a.client_id
     STATE["client_secret"] = secret
-    STATE["required_role"] = a.required_role or None
+    STATE["required_role"] = edge_auth.roles_of(a.required_role)
     # "host:port" is reached directly over http; "https://host" through the
     # TLS ingress (apps/edge-wizard), which keeps the Host header.
     STATE["hosts"] = {}

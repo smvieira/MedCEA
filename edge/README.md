@@ -126,7 +126,7 @@ refuses to start:
 |---|---|
 | `EDGE_WIZARD_SECRET` | Client secret, filled in by `deploy-infra.sh` |
 | `EDGE_WIZARD_PORT` | Must match the registered redirect URIs (default 8088) |
-| `EDGE_WIZARD_ROLE` | Realm role required to provision. Empty = any realm user |
+| `EDGE_WIZARD_ROLE` | Used only with `IAM_GATES=false` (the pre-policy rollback): the realm role required to provision; empty = any realm user. With `IAM_GATES=true` the access policy decides (`apps/iam/policy/defaults.yaml`, group `onboarding`, C or U: engineer and maintenance) and this value is ignored with a warning |
 
 `deploy-infra.sh` also creates a `config` client and puts `config.$DOMAIN` behind
 its own oauth2-proxy. That page previously had **no authentication at all** —
