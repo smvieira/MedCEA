@@ -2772,6 +2772,12 @@ END $$;
 -- caller holds R. may_approve and why_not_code/why_not are advisory, computed in the
 -- approve functions' order without their locks; the database still decides at
 -- approval. A draft qa returned reads state 'returned' until it changes again.
+-- Last, the completed runs nobody released (kind 'run'), only for roles holding A
+-- on runs and reading every unit's runs (qp): detail is the run's summary (unit,
+-- recipe and parameter set with their approvals, creator, every executor,
+-- attempts, cycles; no run log), authors its creator, changers and executors,
+-- may_approve whether release_run() would release it (its checks, in its order;
+-- a run from before 008b reads no_attribution and stays unreleased).
 -- Only a person's own token (source 'token'): the services that inherit EXECUTE
 -- through audit_histories R get a refusal.
 CREATE OR REPLACE FUNCTION medcea.approval_queue(p_changes boolean DEFAULT true)
@@ -2798,6 +2804,9 @@ DECLARE
     cur   jsonb;
     v     integer;
     holds boolean;
+    rn    record;
+    ex    record;
+    cy    jsonb;
 BEGIN
     SELECT * INTO a FROM medcea_auth.request_actor();
     IF a.source IS DISTINCT FROM 'token' THEN
@@ -2929,6 +2938,103 @@ BEGIN
             WHEN 'run_in_progress' THEN format('run %s is in %s on this unit', b_run, b_st) END;
         may_approve := why_not_code IS NULL;
         may_return := holds AND state = 'waiting' AND p.proposed_by_person IS DISTINCT FROM a.person;
+        RETURN NEXT;
+    END LOOP;
+    -- a definer reads past the run tables' row security: an own_unit reader (or a
+    -- role without A) gets no run row
+    IF medcea_auth.policy_holds(a.role, 'runs', 'A') IS NULL
+       OR medcea_auth.policy_holds(a.role, 'runs', 'R') IS DISTINCT FROM 'free' THEN
+        RETURN;
+    END IF;
+    FOR rn IN
+        SELECT x.*, cu.unit_code::text AS r_unit, rc.recipe_name::text AS r_recipe, rc.status AS r_recipe_status,
+               uap.name::text AS r_params, uap.status AS r_params_status
+          FROM medcea.recipe_run x
+          JOIN medcea.cea_unit cu ON cu.unit_id = x.unit_id
+          JOIN medcea.recipe rc ON rc.recipe_id = x.recipe_id
+          LEFT JOIN medcea.unit_algorithm_params uap ON uap.params_id = x.params_id
+         WHERE x.recipe_run_status = 'C'
+           AND NOT EXISTS (SELECT 1 FROM medcea.run_release rl WHERE rl.recipe_run_id = x.recipe_run_id)
+         ORDER BY x.recipe_run_id
+    LOOP
+        rk := jsonb_build_array(rn.recipe_run_id);
+        kind := 'run'; target := 'medcea.recipe_run'; id := rn.recipe_run_id; group_name := 'runs';
+        label := format('%s on %s', rn.r_recipe, rn.r_unit); state := 'waiting';
+        -- _authors()'s rule, as for a draft (a run has no approval: every change counts)
+        SELECT coalesce(array_agg(DISTINCT c.actor_person) FILTER (WHERE c.authors AND c.actor_person IS NOT NULL), '{}') AS persons,
+               coalesce(array_agg(DISTINCT c.actor_name) FILTER (WHERE c.authors AND c.actor_person IS NOT NULL), '{}') AS names,
+               (count(*) FILTER (WHERE c.authors AND c.actor_person IS NULL AND coalesce(c.actor_source, '') <> 'migration'))::integer AS unattr,
+               count(*)::integer AS total
+          INTO cs FROM medcea_auth._changes_since('medcea.recipe_run', rk) c;
+        -- every attempt's executor: each start (status to R) in the run's changes
+        SELECT coalesce(jsonb_agg(jsonb_build_object('by_name', c.actor_name, 'by_person', c.actor_person,
+                                                     'by_role', c.actor_role, 'at', c.at) ORDER BY c.change_id), '[]'::jsonb) AS list,
+               count(*)::integer AS n, coalesce(max(c.at), rn.recipe_run_start) AS last_start
+          INTO ex FROM medcea.row_change c
+         WHERE c.target = 'medcea.recipe_run' AND c.row_key = rk AND c.op = 'U'
+           AND c.new_values ->> 'recipe_run_status' = 'R';
+        SELECT jsonb_build_object('total', coalesce(sum(z.n), 0), 'by_status', coalesce(jsonb_object_agg(z.st, z.n), '{}'::jsonb))
+          INTO cy
+          FROM (SELECT cr.recipe_line_cycle_run_status::text AS st, count(*) AS n FROM medcea.recipe_line_cycle_run cr
+                 WHERE cr.recipe_run_id = rn.recipe_run_id GROUP BY 1) z;
+        -- the approvals in effect at its last start (start_run checked them then), and now
+        detail := jsonb_build_object(
+            'run_id', rn.recipe_run_id, 'status', rn.recipe_run_status, 'unit_id', rn.unit_id, 'unit_code', rn.r_unit,
+            'start', rn.recipe_run_start, 'end', rn.recipe_run_end, 'schedule_id', rn.schedule_id,
+            'recipe_id', rn.recipe_id, 'recipe_name', rn.r_recipe, 'recipe_status', rn.r_recipe_status,
+            'recipe_approved_now', medcea_auth._is_approved('medcea.recipe', jsonb_build_array(rn.recipe_id)),
+            'recipe_approval_id', (SELECT max(ap.approval_id) FROM medcea.approval ap
+                                    WHERE ap.target = 'medcea.recipe' AND ap.row_key = jsonb_build_array(rn.recipe_id)
+                                      AND ap.action IN ('approve', 'review', 'grandfather')
+                                      AND ap.approved_at <= ex.last_start),
+            'params_id', rn.params_id, 'params_name', rn.r_params, 'params_status', rn.r_params_status,
+            'params_approved_now', CASE WHEN rn.params_id IS NOT NULL
+                                        THEN medcea_auth._is_approved('medcea.unit_algorithm_params', jsonb_build_array(rn.params_id)) END,
+            'params_approval_id', (SELECT max(ap.approval_id) FROM medcea.approval ap
+                                    WHERE ap.target = 'medcea.unit_algorithm_params' AND ap.row_key = jsonb_build_array(rn.params_id)
+                                      AND ap.action IN ('approve', 'review', 'grandfather')
+                                      AND ap.approved_at <= ex.last_start),
+            'created_by', rn.created_by_name, 'created_by_person', rn.created_by_person,
+            'created_by_role', rn.created_by_role, 'created_at', rn.timestamp_cre,
+            'executed_by', rn.executed_by_name, 'executed_by_person', rn.executed_by_person,
+            'executed_by_role', rn.executed_by_role, 'executors', ex.list, 'attempts', ex.n, 'cycles', cy);
+        authors := CASE WHEN rn.executed_by_person IS NULL OR rn.executed_by_person = ANY (cs.persons) THEN cs.persons
+                        ELSE cs.persons || rn.executed_by_person::text END;
+        author_names := CASE WHEN rn.executed_by_person IS NULL OR rn.executed_by_person = ANY (cs.persons) THEN cs.names
+                             ELSE cs.names || rn.executed_by_name::text END;
+        unattributed := cs.unattr; changes_total := cs.total;
+        last_approval_id := NULL; last_approved_at := NULL; last_approved_by := NULL;
+        changes := NULL;
+        IF p_changes THEN
+            SELECT coalesce(jsonb_agg(jsonb_build_object(
+                       'change_id', c.change_id, 'target', c.target, 'row_key', c.row_key, 'op', c.op,
+                       'old', c.old_values, 'new', c.new_values, 'by_name', c.actor_name, 'by_person', c.actor_person,
+                       'by_role', c.actor_role, 'by_source', c.actor_source, 'at', c.at, 'authors', c.authors)
+                       ORDER BY c.change_id DESC), '[]'::jsonb)
+              INTO changes
+              FROM (SELECT c0.* FROM medcea_auth._changes_since('medcea.recipe_run', rk) c0 ORDER BY c0.change_id DESC LIMIT 200) c;
+        END IF;
+        reason := NULL; proposed_by := NULL; proposed_at := NULL;
+        returned_at := NULL; returned_by := NULL; return_reason := NULL;
+        -- release_run()'s order: _approver (person), then own author or executor, then
+        -- unattributed, then a run nobody recorded created or started (one from before
+        -- 008b: B4 stamped it migration:008, with no row_change), whose authors are unknown
+        why_not_code := CASE
+            WHEN a.person IS NULL THEN 'no_person'
+            WHEN a.person = ANY (cs.persons) OR a.person = rn.executed_by_person THEN 'own_author'
+            WHEN cs.unattr > 0 THEN 'unattributed'
+            WHEN rn.created_by_person IS NULL
+                 OR NOT EXISTS (SELECT 1 FROM medcea.row_change c
+                                 WHERE c.target = 'medcea.recipe_run' AND c.row_key = rk AND c.op IN ('I', 'U')
+                                   AND c.new_values ->> 'recipe_run_status' = 'R' AND c.actor_person IS NOT NULL)
+                 THEN 'no_attribution' END;
+        why_not := CASE why_not_code
+            WHEN 'no_person' THEN 'your token carries no person_id'
+            WHEN 'own_author' THEN 'you created, changed or executed this run'
+            WHEN 'unattributed' THEN format('%s change(s) to this run have no person', cs.unattr)
+            WHEN 'no_attribution' THEN 'no recorded person created or started this run (it predates attribution)' END;
+        may_approve := why_not_code IS NULL;
+        may_return := false;
         RETURN NEXT;
     END LOOP;
 END $$;
@@ -3393,8 +3499,10 @@ BEGIN
 END $$;
 
 -- release_run(run, note): qp releases a completed run nobody it authored or
--- executed (any attempt). Level A.
-CREATE OR REPLACE FUNCTION medcea.release_run(p_run_id integer) RETURNS bigint
+-- executed (any attempt), whose creator and a start are recorded persons, with an optional note (run_release.note and
+-- approval.note). Level A. No DEFAULT on the note, as approve_recipe(id, note):
+-- the 1-argument version calls this one. approval_queue() mirrors these checks.
+CREATE OR REPLACE FUNCTION medcea.release_run(p_run_id integer, p_note text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 DECLARE
     ap   record;
@@ -3402,12 +3510,17 @@ DECLARE
     st   text;
     k    jsonb := jsonb_build_array(p_run_id);
     h    text;
+    nt   text := nullif(btrim(p_note), '');
     v_id bigint;
 BEGIN
     SELECT * INTO ap FROM medcea_auth._approver('runs');
     SELECT recipe_run_status INTO st FROM medcea.recipe_run WHERE recipe_run_id = p_run_id FOR UPDATE;
     IF st IS DISTINCT FROM 'C' THEN
         RAISE EXCEPTION 'release_run: run % is %, not completed', p_run_id, coalesce(st, 'missing') USING ERRCODE = '22023';
+    END IF;
+    -- after the run's lock: a release committed meanwhile is seen here
+    IF EXISTS (SELECT 1 FROM medcea.run_release rl WHERE rl.recipe_run_id = p_run_id) THEN
+        RAISE EXCEPTION 'release_run: run % is already released', p_run_id USING ERRCODE = '22023';
     END IF;
     PERFORM medcea_auth._lock_row('medcea.recipe_run', k);
     SELECT * INTO au FROM medcea_auth._authors('medcea.recipe_run', k);
@@ -3419,17 +3532,32 @@ BEGIN
         RAISE EXCEPTION 'unattributed changes: % change(s) to run % have no person', au.unattributed, p_run_id
             USING ERRCODE = '42501';
     END IF;
+    -- a run from before 008b (created migration:008, no row_change) has no known creator
+    -- or executor, so not_own_author proves nothing: it is never released
+    IF EXISTS (SELECT 1 FROM medcea.recipe_run r WHERE r.recipe_run_id = p_run_id AND r.created_by_person IS NULL)
+       OR NOT EXISTS (SELECT 1 FROM medcea.row_change c
+                       WHERE c.target = 'medcea.recipe_run' AND c.row_key = k AND c.op IN ('I', 'U')
+                         AND c.new_values ->> 'recipe_run_status' = 'R' AND c.actor_person IS NOT NULL) THEN
+        RAISE EXCEPTION 'no attributed history: no recorded person created or started run %', p_run_id
+            USING ERRCODE = '42501';
+    END IF;
     h := medcea_auth.row_digest('medcea.recipe_run', k);
-    INSERT INTO medcea.run_release (recipe_run_id, row_hash, released_by_sub, released_by_person, released_by_name,
+    INSERT INTO medcea.run_release (recipe_run_id, row_hash, note, released_by_sub, released_by_person, released_by_name,
                                     released_by_role, released_by_source)
-    VALUES (p_run_id, h, ap.sub, ap.person, ap.name, ap.role, ap.source);
-    INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, author_persons,
+    VALUES (p_run_id, h, nt, ap.sub, ap.person, ap.name, ap.role, ap.source);
+    INSERT INTO medcea.approval (target, row_key, row_hash, group_name, action, note, author_persons,
                                  approved_by_sub, approved_by_person, approved_by_name, approved_by_role, approved_by_source,
                                  last_change_id)
-    VALUES ('medcea.recipe_run', k, h, 'runs', 'release', au.persons, ap.sub, ap.person, ap.name, ap.role, ap.source,
+    VALUES ('medcea.recipe_run', k, h, 'runs', 'release', nt, au.persons, ap.sub, ap.person, ap.name, ap.role, ap.source,
             au.last_change)
     RETURNING approval_id INTO v_id;
     RETURN v_id;
+END $$;
+
+CREATE OR REPLACE FUNCTION medcea.release_run(p_run_id integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    RETURN medcea.release_run(p_run_id, NULL::text);
 END $$;
 
 -- retire_algorithm_state(unit, algorithm, reason): the next run starts cold.

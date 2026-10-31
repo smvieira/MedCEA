@@ -55,6 +55,7 @@
     .st-S { background: #78350f33; color: #fbbf24; border: 1px solid #78350f; }
     .st-on  { background: #14532d33; color: #4ade80; border: 1px solid #14532d; }
     .st-off { background: #1e293b; color: #64748b; border: 1px solid #334155; }
+    .st-rel { background: #312e8133; color: #a5b4fc; border: 1px solid #3730a3; margin-left: 6px; }
 
     .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; padding: 16px; overflow-y: auto; }
     .modal-bg.open { display: flex; }
@@ -533,6 +534,19 @@ function statusBadge(s) {
 
 function fmtTime(iso) {
   return iso ? iso.replace('T',' ').slice(0,19) : '—';
+}
+
+function escHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// A run qp released in the Config UI's Approvals tab (medcea.run_release): who and when.
+// An unreleased completed run shows nothing; release is never done from this page.
+function releasedBadge(r) {
+  if (!r || !r.released_at) return '';
+  const who = (r.released_by_name || '?') + (r.released_by_role ? ' (' + r.released_by_role + ')' : '');
+  return `<span class="st st-rel" title="Released by ${escHtml(who)}, ${escHtml(fmtTime(r.released_at))} UTC">Released</span>`
+       + `<div style="font-size:.72rem;color:#94a3b8;margin-top:3px">by ${escHtml(who)}, ${escHtml(fmtTime(r.released_at))}</div>`;
 }
 
 // ---- Current Runs ---------------------------------------------------------
@@ -1051,7 +1065,7 @@ async function loadRuns() {
       <td><code style="color:#a5b4fc">#${r.recipe_run_id}</code></td>
       <td>${r.unit_code}</td>
       <td>${r.recipe_name}</td>
-      <td>${statusBadge(r.recipe_run_status)}</td>
+      <td>${statusBadge(r.recipe_run_status)}${releasedBadge(r)}</td>
       <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_start)}</td>
       <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_end)}</td>
       <td><button class="btn btn-sm" onclick="openLog(${r.recipe_run_id}, false)">View Log</button></td>
@@ -1165,7 +1179,7 @@ async function _loadLogContent(runId, fullLog) {
     const r = await res.json();
     document.getElementById('log-unit').textContent = r.unit_code;
     document.getElementById('log-recipe').textContent = r.recipe_name;
-    document.getElementById('log-status-badge').innerHTML = statusBadge(r.recipe_run_status);
+    document.getElementById('log-status-badge').innerHTML = statusBadge(r.recipe_run_status) + releasedBadge(r);
     pre.textContent = r.log_withheld ? NO_LOG_READ : (r.log || '(no output yet)');
     _logPollOffset = new TextEncoder().encode(r.log || '').length;
     pre.scrollTop = pre.scrollHeight;

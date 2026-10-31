@@ -260,9 +260,9 @@ DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), me
     medcea._check_run_params(integer, integer, integer), medcea._check_run_params(integer, integer, integer, integer),
     medcea._check_assigned_run(medcea.recipe_run, text, text, text), medcea._refuse_hidden_run(integer),
     medcea.start_run(integer), medcea.set_run_status(integer, text), medcea.finish_run(integer, text),
-    medcea.record_cycle(integer, jsonb), medcea.release_run(integer), medcea.retire_schedule(integer),
-    medcea.retire_algorithm_state(integer, text, text), medcea.register_mqtt_credential(integer, text, text),
-    medcea.revoke_person_mqtt(uuid, text),
+    medcea.record_cycle(integer, jsonb), medcea.release_run(integer), medcea.release_run(integer, text),
+    medcea.retire_schedule(integer), medcea.retire_algorithm_state(integer, text, text),
+    medcea.register_mqtt_credential(integer, text, text), medcea.revoke_person_mqtt(uuid, text),
     iam_policy.log_user_zone(), iam_policy.log_user_unit(), iam_policy.log_export(text[], text[]);
 CREATE OR REPLACE FUNCTION medcea.register_mqtt_credential(
     p_username text, p_password_hash text, p_device_id integer, p_role text, p_topic_base text)

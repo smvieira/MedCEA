@@ -1634,5 +1634,67 @@ class ApproveCommissionTest(unittest.TestCase):
         self.assertIn("last_approved_by := CASE WHEN hist THEN", uc)
 
 
+class RunReleaseTest(unittest.TestCase):
+    """Release in the Approvals tab (2026-10-31): release_run(run, note) and the completed
+    runs in approval_queue() for qp, with release_run's rule as its may_approve."""
+
+    NEW = ("medcea.release_run(integer,text)", "medcea.release_run(integer)")
+    setUpClass = classmethod(ApproveCommissionTest.setUpClass.__func__)
+    holders = ApproveCommissionTest.holders
+    body = ApproveCommissionTest.body
+
+    def test_who_holds_what(self):
+        for fn in self.NEW:
+            self.assertEqual(self.holders(fn), {"rr_qp"}, fn)
+        self.assertIn("medcea.release_run(int, text)", self.policy.groups["runs"]["approval"]["functions"])
+
+    def test_created_and_dropped_by_the_full_down(self):
+        created = _created_functions(self.mig)
+        drops = " ".join(re.findall(r"DROP FUNCTION IF EXISTS (.*?);", self.down, re.S))
+        dropped = {grants.norm_sig(x.strip()) for x in re.split(r",\s*(?=[a-z_]+\.[a-z_]+\()", drops)}
+        for fn in self.NEW:
+            self.assertIn(fn, created, fn)
+            self.assertIn(fn, dropped, f"{fn} is not in the down file's -v full=1 DROP list")
+            self.assertIn(fn, grants.declared_functions(self.policy), fn)
+
+    def test_noted_overload_has_no_default(self):
+        self.assertIn("FUNCTION medcea.release_run(p_run_id integer, p_note text) RETURNS bigint", self.mig)
+        self.assertIn("RETURN medcea.release_run(p_run_id, NULL::text);", self.body("FUNCTION medcea.release_run(p_run_id integer) RETURNS"))
+        rel = self.body("FUNCTION medcea.release_run(p_run_id integer, p_note text)")
+        self.assertIn("nt   text := nullif(btrim(p_note), '');", rel)
+        self.assertIn("VALUES (p_run_id, h, nt, ap.sub", rel)                     # run_release.note
+        self.assertIn("'runs', 'release', nt, au.persons", rel)                    # approval.note
+        # the order the queue mirrors: approver, completed, not yet released, own author,
+        # unattributed, no recorded creator or start (a run from before 008b)
+        order = ["medcea_auth._approver('runs')", "not completed", "is already released", "not_own_author", "unattributed changes",
+                 "no attributed history"]
+        self.assertEqual([rel.index(x) for x in order], sorted(rel.index(x) for x in order))
+
+    def test_queue_mirrors_release_run(self):
+        q = self.body("FUNCTION medcea.approval_queue(")
+        runs = q[q.index("FOR rn IN"):]
+        # only A on runs and every unit's runs (an own_unit reader sees no run row)
+        gate = q[:q.index("FOR rn IN")]
+        self.assertIn("medcea_auth.policy_holds(a.role, 'runs', 'A') IS NULL", gate)
+        self.assertIn("medcea_auth.policy_holds(a.role, 'runs', 'R') IS DISTINCT FROM 'free'", gate)
+        self.assertIn("WHERE x.recipe_run_status = 'C'", runs)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM medcea.run_release rl WHERE rl.recipe_run_id = x.recipe_run_id)", runs)
+        self.assertIn("medcea_auth._changes_since('medcea.recipe_run', rk)", runs)
+        self.assertIn("WHEN a.person = ANY (cs.persons) OR a.person = rn.executed_by_person THEN 'own_author'", runs)
+        self.assertLess(runs.index("THEN 'no_person'"), runs.index("THEN 'own_author'"))
+        self.assertLess(runs.index("THEN 'own_author'"), runs.index("THEN 'unattributed'"))
+        self.assertLess(runs.index("THEN 'unattributed'"), runs.index("THEN 'no_attribution'"))
+        # one rule: the queue's no_attribution is release_run's refusal, predicate for predicate
+        rel = self.body("FUNCTION medcea.release_run(p_run_id integer, p_note text)")
+        pred = ("WHERE c.target = 'medcea.recipe_run' AND c.row_key = {} AND c.op IN ('I', 'U')",
+                "AND c.new_values ->> 'recipe_run_status' = 'R' AND c.actor_person IS NOT NULL")
+        for text, key in ((runs, "rk"), (rel, "k")):
+            self.assertIn(pred[0].format(key), text)
+            self.assertIn(pred[1], text)
+        self.assertIn("WHEN rn.created_by_person IS NULL", runs)
+        self.assertIn("r.created_by_person IS NULL", rel)
+        self.assertIn("may_return := false;", runs)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

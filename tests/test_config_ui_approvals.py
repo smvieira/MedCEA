@@ -8,14 +8,17 @@
   against the RAISE in apps/database/medcea_db_migrations.sql (a reworded RAISE breaks
   this test); every why_not_code approval_queue() returns has its own text;
   describeChange (I/U/D, recipe and step, JSON params), jsonKeyDiff, statusBadge, the
-  history filters and the parameter-set form.
+  history filters and the parameter-set form; a completed run (kind 'run', qp) maps to
+  release_run(run, note), its refusals to their own texts, and its summary (runSummary)
+  shows recipe, parameter set, creator, executors, attempts and cycles, never a log.
 - Static: every /rpc/<fn> the page calls exists in the migration, is a function member of
   defaults.yaml and is held by a person role (the golden), with the expected holders for
   the approval functions; each RPC body's argument names match one overload exactly
   (PostgREST picks it by name); friendlyDbError no longer maps the shared approval
   refusals to the Q-table text; the page never PATCHes a status but to 'retired' and
   never DELETEs a recipe, step or parameter set; frozen definitions are guarded; the
-  Scheduler's retention reminder links to the Approvals tab.
+  Scheduler's retention reminder links to the Approvals tab and its run list shows the
+  Released badge from run_release.
 
 Run: python3 tests/test_config_ui_approvals.py
 """
@@ -101,6 +104,21 @@ REFUSALS = [
      "commissioning: unit UNIT01 has run 7 in R"),
     ("approval_queue: read it in the Configuration UI with your own sign-in",
      "'approval_queue: read it in the Configuration UI with your own sign-in'", "your own sign-in only"),
+    ("not_own_author: p-qp created, changed or executed run 9",
+     "'not_own_author: % created, changed or executed run %'", "You created, changed or executed this run"),
+    ("unattributed changes: 1 change(s) to run 9 have no person",
+     "'unattributed changes: % change(s) to run % have no person'", "it cannot be released and stays unreleased"),
+    ("no attributed history: no recorded person created or started run 9",
+     "'no attributed history: no recorded person created or started run %'", "predates attribution"),
+    ("release_run: run 9 is F, not completed",
+     "'release_run: run % is %, not completed'", "not completed (status F)"),
+    ("release_run: run 9 is missing, not completed",
+     "'release_run: run % is %, not completed'", "no longer exists"),
+    ("release_run: run 9 is already released",
+     "'release_run: run % is already released'", "Already released meanwhile"),
+    ("role qa holds no approval on runs",
+     "'role % holds no approval on %'", "Your role cannot release runs; qp releases."),
+    ("permission denied for function release_run", None, "Your role cannot release runs; qp releases."),
     ("permission denied for function approve_recipe", None, "Your role cannot approve or return this."),
     ("permission denied for function return_change", None, "Your role cannot approve or return this."),
 ]
@@ -111,7 +129,23 @@ RPC_ROWS = [
     {"kind": "params", "target": "medcea.unit_algorithm_params", "id": 3},
     {"kind": "setting", "target": "medcea.pending_change", "id": 12},
     {"kind": "commissioning", "target": "medcea.pending_change", "id": 13},
+    {"kind": "run", "target": "medcea.recipe_run", "id": 9},
 ]
+
+# A completed run as approval_queue() lists it for qp (kind 'run').
+RUN_ROW = {
+    "kind": "run", "target": "medcea.recipe_run", "id": 9, "label": "Lettuce on UNIT01", "state": "waiting",
+    "may_approve": False, "why_not_code": "own_author", "may_return": False,
+    "detail": {"run_id": 9, "status": "C", "unit_code": "UNIT01", "recipe_name": "Lettuce", "recipe_status": "approved",
+               "recipe_approved_now": True, "recipe_approval_id": 41, "params_id": 3, "params_name": "PID gentle",
+               "params_status": "retired", "params_approved_now": False, "params_approval_id": 44,
+               "created_by": "pm", "created_by_role": "production_manager", "created_at": "2026-10-30T08:00:00Z",
+               "executed_by": "op2", "executed_by_role": "operator",
+               "executors": [{"by_name": "op1", "by_role": "operator", "at": "2026-10-30T09:00:00Z"},
+                             {"by_name": "op2", "by_role": "operator", "at": "2026-10-30T12:00:00Z"}],
+               "attempts": 2, "cycles": {"total": 5, "by_status": {"C": 4, "F": 1}},
+               "start": "2026-10-30T12:00:00Z", "end": "2026-10-31T06:00:00Z"},
+}
 
 CHANGES = [
     {"change_id": 1, "target": "medcea.recipe", "row_key": [5], "op": "I",
@@ -179,6 +213,14 @@ out.pending = [pendingSummary({ kind: 'commissioning', state: 'waiting', detail:
 out.retire = [retireError('role engineer holds no approval on controllers_state'), retireError('other')];
 out.friendlyDb = input.dbMessages.map(m => friendlyDbError(m));
 out.myState = ['waiting', 'returned', 'applied_review_pending', 'withdrawn', 'superseded'].map(myStateText);
+out.run = runSummary(input.run);
+out.runOk = runSummary(Object.assign({}, input.run, { may_approve: true, why_not_code: null,
+  detail: Object.assign({}, input.run.detail, { params_id: null, executors: [], attempts: 0 }) }));
+out.runLabel = approvalLabel(input.run);
+out.runWhy = ['own_author', 'unattributed', 'no_person', 'no_attribution'].map(c => approvalWhyNot(c, input.run));
+out.runCount = approvalCount([Object.assign({}, input.run, { may_approve: true }), input.run], []);
+out.runChange = describeChange({ target: 'medcea.recipe_run', row_key: [9], op: 'U', old: { recipe_run_status: 'R' },
+                                 new: { recipe_run_status: 'C' }, by_name: 'op2', at: '2026-10-31T06:00:00Z', authors: true });
 console.log(JSON.stringify(out));
 """
 
@@ -201,7 +243,7 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
             f.write(logic_block(html) + "\n" + friendly_db_error(html) + "\n" + HARNESS)
         data = os.path.join(tmp, "input.json")
         with open(data, "w", encoding="utf-8") as f:
-            json.dump({"sets": [{"params_id": 3, "name": "PID gentle"}], "rows": RPC_ROWS, "refusals": [r[0] for r in REFUSALS], "codes": cls.codes, "changes": CHANGES,
+            json.dump({"run": RUN_ROW, "sets": [{"params_id": 3, "name": "PID gentle"}], "rows": RPC_ROWS, "refusals": [r[0] for r in REFUSALS], "codes": cls.codes, "changes": CHANGES,
                        "dbMessages": ["approvals are made by a person signed in through the API, not by db",
                                       "role engineer holds no approval on controllers_state",
                                       "permission denied for function retire_algorithm_state"]}, f)
@@ -213,7 +255,7 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
 
     def test_codes_found(self):
         self.assertEqual(set(self.codes), {"algorithm_not_approved", "no_person", "no_role", "own_author", "unattributed",
-                                           "retention_minimum", "no_change", "run_in_progress"})
+                                           "retention_minimum", "no_change", "run_in_progress", "no_attribution"})
 
     def test_rpc_mapping(self):
         rpc = self.out["rpc"]
@@ -223,6 +265,8 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
         for i, cid in ((3, 12), (4, 13)):
             self.assertEqual(rpc[i], {"path": "/rpc/approve_change",
                                       "body": {"p_target": "medcea.pending_change", "p_id": cid, "p_note": "checked"}})
+        # a run: the 2-argument release_run, its note in run_release.note and approval.note
+        self.assertEqual(rpc[5], {"path": "/rpc/release_run", "body": {"p_run_id": 9, "p_note": "checked"}})
         # an empty note is sent as null, so the 2-argument overload is still the one called
         self.assertEqual(self.out["rpcEmpty"]["body"], {"p_recipe_id": 5, "p_note": None})
         for row, ret in zip(RPC_ROWS, self.out["ret"]):
@@ -262,6 +306,34 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
         self.assertEqual([f["label"] for f in js["fields"]], ["Params.kd", "Params.ki", "Params.kp"])
         self.assertFalse(status["authors"])
         self.assertEqual(self.out["steps"], [3, 4])
+
+    def test_run_summary(self):
+        s = dict(self.out["run"])
+        self.assertEqual(s["Run"], "#9 — completed")
+        self.assertEqual(s["Unit"], "UNIT01")
+        self.assertEqual(s["Recipe"], "Lettuce — approved; approval #41 in effect at its start")
+        self.assertEqual(s["Parameter set"], "PID gentle — retired (not approved now); approval #44 in effect at its start")
+        self.assertIn("pm (production_manager)", s["Created by"])
+        self.assertIn("op1 (operator), 2026-10-30 09:00 UTC; op2 (operator), 2026-10-30 12:00 UTC", s["Executed by"])
+        self.assertEqual(s["Attempts"], "2")
+        self.assertEqual(s["Cycles"], "5 (4 completed, 1 failed)")
+        self.assertEqual((s["Started"], s["Ended"]), ("2026-10-30 12:00 UTC", "2026-10-31 06:00 UTC"))
+        self.assertIn("You cannot release it: You created, changed or executed this run", s["Release"])
+        self.assertNotIn("log", " ".join(k.lower() for k in s))      # qp holds R on runs only: no run log
+        ok = dict(self.out["runOk"])
+        self.assertIn("You may release it: a recorded person created and started it", ok["Release"])
+        self.assertEqual(ok["Parameter set"], "none recorded for this run")
+        self.assertEqual(ok["Executed by"], "op2 (operator)")         # no recorded start: the run's column
+        self.assertEqual(self.out["runLabel"], "Run #9 (Lettuce on UNIT01)")
+        own, unattr, noperson, legacy = self.out["runWhy"]
+        self.assertIn("predates attribution", legacy)
+        self.assertIn("cannot be released", legacy)
+        self.assertIn("Another qp person must release it", own)
+        self.assertIn("cannot be released", unattr)
+        self.assertIn("person_id", noperson)
+        self.assertEqual(self.out["runCount"], 1)
+        self.assertEqual(self.out["runChange"]["subject"], "run")
+        self.assertEqual(self.out["runChange"]["fields"], [{"label": "recipe_run_status", "old": "R", "new": "C"}])
 
     def test_json_key_diff(self):
         self.assertEqual(self.out["diff"], [{"key": "a", "old": 1}, {"key": "b", "old": 2, "new": 3}, {"key": "d", "new": None}])
@@ -370,6 +442,8 @@ class ApprovalsStatic(unittest.TestCase):
         for fn in ("approve_recipe", "approve_algorithm", "approve_params", "approve_change", "return_change",
                    "retire_algorithm_state"):
             self.assertEqual({r for r in self.holders(fn) if r.startswith("rr_")}, {"rr_qa"}, fn)
+        self.assertIn("release_run", fns)
+        self.assertEqual(self.holders("release_run"), {"rr_qp"})
         self.assertEqual({r for r in self.holders("approval_queue") if r.startswith("rr_")}, {"rr_qa", "rr_qp", "rr_auditor"})
         self.assertIn("rr_engineer", self.holders("my_approvals"))
         self.assertIn("rr_admin", self.holders("withdraw_change"))
@@ -381,6 +455,7 @@ class ApprovalsStatic(unittest.TestCase):
             "approve_recipe": {"p_recipe_id", "p_note"}, "approve_algorithm": {"p_algorithm_id", "p_note"},
             "approve_params": {"p_params_id", "p_note"}, "approve_change": {"p_target", "p_id", "p_note"},
             "return_change": {"p_target", "p_id", "p_reason"}, "withdraw_change": {"p_id", "p_reason"},
+            "release_run": {"p_run_id", "p_note"},
         }
         for fn, keys in bodies.items():
             match = [s for s in self.signatures(fn) if s[1] <= keys <= s[0]]
@@ -460,6 +535,30 @@ class ApprovalsStatic(unittest.TestCase):
         self.assertNotIn("localStorage.setItem(RETENTION_KEY,", sched)
         deploy = read(os.path.join(ROOT, "apps", "scheduler", "deploy.sh"))
         self.assertIn("html.replace('\\$CONFIG_DOMAIN', sys.argv[4])", deploy)
+
+    def test_scheduler_released_badge(self):
+        # the Released badge (who, when) on the completed runs and the run detail, from
+        # run_release through the scheduler's own run reads; the page releases nothing
+        sched = read(os.path.join(ROOT, "apps", "scheduler", "html", "scheduler.html"))
+        self.assertIn("${statusBadge(r.recipe_run_status)}${releasedBadge(r)}", sched)
+        self.assertIn("statusBadge(r.recipe_run_status) + releasedBadge(r)", sched)
+        badge = sched[sched.index("function releasedBadge("):]
+        badge = badge[:badge.index("\n}\n")]
+        self.assertIn("escHtml(who)", badge)
+        for col in ("released_at", "released_by_name", "released_by_role"):
+            self.assertIn(col, badge)
+        self.assertNotIn("release_run", sched)
+        api = read(os.path.join(ROOT, "apps", "scheduler", "scheduler-api.py"))
+        self.assertIn('LEFT JOIN medcea.run_release rl ON rl.recipe_run_id = rr.recipe_run_id', api)
+        self.assertEqual(api.count("{_RELEASE_JOIN}"), 2)                # GET /api/runs and /api/runs/<id>
+
+    def test_run_release_in_the_tab(self):
+        self.assertIn("ab.textContent = r.kind === 'run' ? 'Release'", self.html)
+        self.assertIn("A release is final", self.html)
+        self.assertIn("'Release note (optional, recorded with the release).'", self.html)
+        # the run's summary is approval_queue's detail: the page reads no run log
+        self.assertNotIn("run_logs", self.html.split("/* approvals-logic:begin */")[1].split("/* approvals-logic:end */")[0])
+        self.assertIn("'/recipe_run?select=recipe_run_id,unit_id'", self.html)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,9 @@
 #                W7 unit assignments (apps/iam/units.sql, IAM 2.8: assign waits for
 #                qa, --bootstrap acts at once, remove withdraws a waiting one); the own_unit RLS
 #                probes run in W4, and so do the Approve action's (noted approvals,
-#                approval_queue() against the approve functions, return, my_approvals());
+#                approval_queue() against the approve functions, return, my_approvals())
+#                and the Release's (release_run with a note, the queue's run rows
+#                against release_run, who sees them, a run from before 008b);
 #                W8 commissioning (propose, approve, return, withdraw, off at once with
 #                qa's review, runs in R/S, unit_commissioning() per role, the chain events)
 #   access       (not in the default set; write probes) IAM 2.7's account decisions,
@@ -52,7 +54,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -784,12 +786,14 @@ $run_setup
 $(as_postgres)
 UPDATE medcea.recipe_run SET recipe_run_status = 'C' WHERE recipe_run_id = :run;
 SQL
-        rerun="
+        # rerun_by TOKEN: the run of run_setup started by p-op, failed, rescheduled (F -> S)
+        # by TOKEN, started again by p-op2 and completed by the scheduler
+        rerun_by() { cat <<RERUN
 $run_setup
 $(as_token "$T_OP")
 SELECT medcea.start_run(:run);
 SELECT medcea.set_run_status(:run, 'F');
-$(as_token "$T_PM")
+$(as_token "$1")
 SELECT medcea.set_run_status(:run, 'S');
 $(as_postgres)
 INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP2'::uuid, unit_id FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP';
@@ -802,7 +806,10 @@ SELECT medcea.finish_run(:run, 'C');
 $(as_postgres)
 -- the stored system actor lasts the transaction (the probe is one); a release is
 -- PostgREST's own transaction in real life, so clear it before the token
-DELETE FROM pg_temp.medcea_actor WHERE kind = 'actor';"
+DELETE FROM pg_temp.medcea_actor WHERE kind = 'actor';
+RERUN
+        }
+        rerun="$(rerun_by "$T_PM")"
         probe W4 "control: re-executed run (F -> S -> R -> C) released by an independent qp" ok <<SQL
 $rerun
 $(as_token "$T_QP")
@@ -814,6 +821,182 @@ SQL
 $rerun
 $(as_token "$T_QPOP")
 SELECT medcea.release_run(:run);
+SQL
+        # Release in the Approvals tab (2026-10-31): release_run(run, note), the queue's run
+        # rows for qp (approval_queue kind 'run') and their may_approve against release_run
+        T_QPPM="$(claims qp "$UUID_QP" p-pm)"; T_QPOP2="$(claims qp "$UUID_QP" p-op2)"
+        T_QPPM2="$(claims qp "$UUID_QP" p-pm2)"; T_PM2="$(claims production_manager "$UUID_PM" p-pm2)"
+        T_QP2="$(claims qp "$UUID_QA2" p-qp2)"; T_AU="$(claims auditor "$UUID_QA2" p-au)"
+        run_row="SELECT may_approve AS ma, coalesce(why_not_code, 'none') AS wn FROM medcea.approval_queue() WHERE kind = 'run' AND id = :run \gset"
+        probe W4 "control: approval_queue lists the completed run for qp, with its summary and may_approve" ok <<SQL
+$rerun
+$(as_token "$T_QP")
+SELECT may_approve AS ma, may_return AS mr, state AS st, group_name AS g, target AS tg,
+       (SELECT array_agg(x ORDER BY x) FROM unnest(authors) x)::text AS au,
+       (detail ->> 'attempts')::integer AS att, detail ->> 'status' AS rs, detail ->> 'created_by_person' AS cp,
+       detail ->> 'executed_by_person' AS ep,
+       (SELECT array_agg(e ->> 'by_person' ORDER BY i) FROM jsonb_array_elements(detail -> 'executors') WITH ORDINALITY x(e, i))::text AS exs,
+       (detail -> 'cycles' ->> 'total')::integer AS cyc, detail ? 'recipe_approval_id' AND detail ? 'params_approval_id' AS apr,
+       detail ? 'log' AS lg
+  FROM medcea.approval_queue() WHERE kind = 'run' AND id = :run \gset
+--CHECKS
+SELECT 'CHECK|waiting, may release, never return', :'st' = 'waiting' AND :'ma'::boolean AND NOT :'mr'::boolean;
+SELECT 'CHECK|group runs, target recipe_run', :'g' = 'runs' AND :'tg' = 'medcea.recipe_run';
+SELECT 'CHECK|authors: creator and both executors (' || :'au' || ')', :'au' = '{p-op,p-op2,p-pm}';
+SELECT 'CHECK|two attempts, executors p-op then p-op2 (' || :'exs' || ')', :att = 2 AND :'exs' = '{p-op,p-op2}';
+SELECT 'CHECK|completed, created by p-pm, executed by p-op2', :'rs' = 'C' AND :'cp' = 'p-pm' AND :'ep' = 'p-op2';
+SELECT 'CHECK|cycles counted, approvals named', :cyc >= 0 AND :'apr'::boolean;
+SELECT 'CHECK|no run log in the summary', NOT :'lg'::boolean;
+SQL
+        probe W4 "control: qp releases with a note (2-argument overload); the run leaves the queue" ok <<SQL
+$rerun
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run, ' iam-db release note ') AS rel \gset
+SELECT count(*) AS left_in_queue FROM medcea.approval_queue() WHERE kind = 'run' AND id = :run \gset
+--CHECKS
+SELECT 'CHECK|run_release.note trimmed', note = 'iam-db release note' AND released_by_person = 'p-qp'
+  FROM medcea.run_release WHERE recipe_run_id = :run;
+SELECT 'CHECK|approval release row with the note', action = 'release' AND note = 'iam-db release note' AND group_name = 'runs'
+  FROM medcea.approval WHERE approval_id = :rel;
+SELECT 'CHECK|no longer in the queue', :left_in_queue = 0;
+SQL
+        probe W4 "control: the 1-argument release_run still releases, without a note" ok <<SQL
+$rerun
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run);
+--CHECKS
+SELECT 'CHECK|released, note NULL', note IS NULL FROM medcea.run_release WHERE recipe_run_id = :run;
+SQL
+        probe W4 "a run released twice" "22023:is already released" <<SQL
+$rerun
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run, 'first');
+$(as_token "$T_QP2")
+SELECT medcea.release_run(:run, 'second');
+SQL
+        probe W4 "release of a run that is not completed" "22023:not completed" <<SQL
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.start_run(:run);
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run, NULL);
+SQL
+        probe W4 "approval_queue: a run that is not completed is not listed" ok <<SQL
+$run_setup
+$(as_token "$T_OP")
+SELECT medcea.start_run(:run);
+$(as_token "$T_QP")
+SELECT count(*) AS n FROM medcea.approval_queue() WHERE kind = 'run' AND id = :run \gset
+--CHECKS
+SELECT 'CHECK|not listed', :n = 0;
+SQL
+        # own_author for each way of authoring a run; each queue row, then release_run itself
+        for who in "creator:T_QPPM" "first executor:T_QPOP" "last executor:T_QPOP2" "rescheduler (changer only):T_QPPM2"; do
+            tok="${who#*:}"
+            probe W4 "approval_queue: the run's $(cut -d: -f1 <<<"$who") reads own_author" ok <<SQL
+$(rerun_by "$T_PM2")
+$(as_token "${!tok}")
+$run_row
+--CHECKS
+SELECT 'CHECK|own_author, not may_approve', :'wn' = 'own_author' AND NOT :'ma'::boolean;
+SQL
+            probe W4 "parity: the run's $(cut -d: -f1 <<<"$who") releases" "42501:not_own_author" <<SQL
+$(rerun_by "$T_PM2")
+$(as_token "${!tok}")
+SELECT medcea.release_run(:run, 'parity');
+SQL
+        done
+        probe W4 "control: with a rescheduler p-pm2, an independent qp may still release" ok <<SQL
+$(rerun_by "$T_PM2")
+$(as_token "$T_QP")
+$run_row
+SELECT medcea.release_run(:run, 'parity');
+--CHECKS
+SELECT 'CHECK|may_approve agreed with the release', :'ma'::boolean AND :'wn' = 'none';
+SQL
+        # an unattributed change to the run (as a pre-IAM writer left them): a row_change
+        # with no person, appended as postgres
+        unattributed_run="
+$(as_postgres)
+INSERT INTO medcea.row_change (target, row_key, op, old_values, new_values, actor_sub, actor_name, actor_source)
+VALUES ('medcea.recipe_run', jsonb_build_array(:run), 'U', '{\"is_active\": \"N\"}', '{\"is_active\": \"Y\"}', 'db:postgres', 'postgres', 'db');"
+        probe W4 "approval_queue: an unattributed change to the run reads unattributed" ok <<SQL
+$rerun
+$unattributed_run
+$(as_token "$T_QP")
+$run_row
+--CHECKS
+SELECT 'CHECK|unattributed, not may_approve', :'wn' = 'unattributed' AND NOT :'ma'::boolean;
+SQL
+        probe W4 "parity: release of a run with an unattributed change" "42501:unattributed changes" <<SQL
+$rerun
+$unattributed_run
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run, 'parity');
+SQL
+        # a completed run from before 008b, as B4 left it: created migration:008, no person,
+        # no row_change (replica skips stamp_actor and row_change_trg), executed_by_person NULL
+        legacy_run="
+$(as_postgres)
+SET LOCAL session_replication_role = replica;
+INSERT INTO medcea.recipe_run (recipe_id, unit_id, recipe_run_start, recipe_run_end, recipe_run_status, is_active,
+                               created_by_sub, created_by_name, created_by_source)
+SELECT r.recipe_id, u.unit_id, now() - interval '2 days', now() - interval '1 day', 'C', 'Y',
+       'migration:008', 'migration:008', 'migration'
+  FROM medcea.recipe r, medcea.cea_unit u
+ WHERE r.recipe_name = 'IAMTEST-R1' AND u.unit_code = 'IAMT01' RETURNING recipe_run_id AS run \\gset
+SET LOCAL session_replication_role = origin;"
+        probe W4 "approval_queue: a run from before 008b (migration:008, no history) reads no_attribution" ok <<SQL
+$legacy_run
+SELECT count(*) AS hist FROM medcea.row_change WHERE target = 'medcea.recipe_run' AND row_key = jsonb_build_array(:run) \gset
+$(as_token "$T_QP")
+$run_row
+--CHECKS
+SELECT 'CHECK|no row_change for the legacy run (' || :hist || ')', :hist = 0;
+SELECT 'CHECK|no_attribution, not may_approve', :'wn' = 'no_attribution' AND NOT :'ma'::boolean;
+SQL
+        probe W4 "parity: release of a run from before 008b" "42501:no attributed history" <<SQL
+$legacy_run
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run, 'parity');
+SQL
+        probe W4 "approval_queue: a qp token without person_id reads no_person" ok <<SQL
+$rerun
+$(as_token "$(claims qp "$UUID_QP" p-qp | sed 's/"person_id":"p-qp",//')")
+$run_row
+--CHECKS
+SELECT 'CHECK|no_person', :'wn' = 'no_person' AND NOT :'ma'::boolean;
+SQL
+        probe W4 "approval_queue: qa and auditor (R on runs, no A) get no run rows" ok <<SQL
+$rerun
+$(as_token "$T_QA")
+SELECT count(*) AS qa FROM medcea.approval_queue() WHERE kind = 'run' \gset
+$(as_token "$T_AU")
+SELECT count(*) AS au FROM medcea.approval_queue() WHERE kind = 'run' \gset
+--CHECKS
+SELECT 'CHECK|qa none (' || :qa || '), auditor none (' || :au || ')', :qa = 0 AND :au = 0;
+SQL
+        probe W4 "an operator of another unit reads no approval_queue" "42501:permission denied for function approval_queue" <<SQL
+$rerun
+$(as_token "$T_OP2")
+SELECT count(*) FROM medcea.approval_queue();
+SQL
+        probe W4 "an operator of another unit reads none of the run's release (RLS)" ok <<SQL
+$rerun
+$(as_token "$T_QP")
+SELECT medcea.release_run(:run, 'rls');
+$(as_postgres)
+DELETE FROM iam_policy.user_unit WHERE person_sub = '$UUID_OP2'::uuid;
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP2'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+$(as_token "$T_OP2")
+SELECT count(*) AS n FROM medcea.run_release WHERE recipe_run_id = :run \gset
+--CHECKS
+SELECT 'CHECK|nothing (' || :n || ')', :n = 0;
+SQL
+        probe W4 "a production manager cannot release" "42501:permission denied for function release_run" <<SQL
+$rerun
+$(as_token "$T_PM2")
+SELECT medcea.release_run(:run, 'not mine to release');
 SQL
         recipe_setup="
 $(as_token "$T_EN")
@@ -1241,20 +1424,32 @@ SQL
         rows_digest() {  # VAR FROM-AND-WHERE: \gset VAR to the sha256 of the sorted rows / their count (md5() is unsupported in production's image)
             echo "SELECT encode(sha256(convert_to(coalesce(string_agg(x, ',' ORDER BY x), ''), 'UTF8')), 'hex') || '/' || count(*) AS $1 FROM (SELECT encode(sha256(convert_to(t::text, 'UTF8')), 'hex') AS x FROM $2) s \\gset"
         }
+        # the scheduler's run reads LEFT JOIN run_release for the Released badge (2026-10-31):
+        # with a released run, the joined rows equal what rr_operator reads of both tables
+        rel_cols="(SELECT r.recipe_run_id, rl.released_by_name, rl.released_at FROM medcea.recipe_run r LEFT JOIN medcea.run_release rl ON rl.recipe_run_id = r.recipe_run_id"
         probe RLS "the services' own_unit SQL returns what rr_operator's RLS returns" ok <<SQL
 $run_full
 INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+INSERT INTO medcea.run_release (recipe_run_id, row_hash, released_by_sub, released_by_person, released_by_name, released_by_role)
+SELECT x.recipe_run_id, 'iam-db', '$UUID_QP', 'p-qp', 'iam-db qp', 'qp' FROM medcea.recipe_run x
+  JOIN medcea.cea_unit u ON u.unit_id = x.unit_id AND u.unit_code = 'IAMT02'
+ WHERE NOT EXISTS (SELECT 1 FROM medcea.run_release y WHERE y.recipe_run_id = x.recipe_run_id) ORDER BY x.recipe_run_id LIMIT 1;
 SET SESSION AUTHORIZATION svc_monitor;
 $(rows_digest s_run "medcea.recipe_run t WHERE t.unit_id IN $own_runs")
 $(rows_digest s_meas "medcea.measurement t WHERE t.zone_id IN $own_zones")
 $(as_postgres)
 SET SESSION AUTHORIZATION svc_scheduler;
 $(rows_digest s_cyc "medcea.recipe_line_cycle_run t WHERE t.recipe_run_id IN (SELECT x.recipe_run_id FROM medcea.recipe_run x WHERE x.unit_id IN $own_runs)")
+$(rows_digest s_rel "$rel_cols WHERE r.unit_id IN $own_runs) t")
 $(as_token "$T_OP")
 $(rows_digest o_run "medcea.recipe_run t")
 $(rows_digest o_meas "medcea.measurement t")
 $(rows_digest o_cyc "medcea.recipe_line_cycle_run t")
+$(rows_digest o_rel "$rel_cols) t")
+SELECT count(*) AS o_reln FROM medcea.run_release \gset
 --CHECKS
+SELECT 'CHECK|the operator reads the release of their unit''s run', :o_reln >= 1;
+SELECT 'CHECK|runs with their release (' || :'s_rel' || ')', :'s_rel' = :'o_rel' AND :'s_rel' NOT LIKE '%/0';
 SELECT 'CHECK|runs (' || :'s_run' || ')', :'s_run' = :'o_run' AND :'s_run' NOT LIKE '%/0';
 SELECT 'CHECK|measurements (' || :'s_meas' || ')', :'s_meas' = :'o_meas' AND :'s_meas' NOT LIKE '%/0';
 SELECT 'CHECK|cycles (' || :'s_cyc' || ')', :'s_cyc' = :'o_cyc' AND :'s_cyc' NOT LIKE '%/0';

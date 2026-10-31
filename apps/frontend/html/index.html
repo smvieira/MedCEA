@@ -745,7 +745,7 @@
         <span class="panel-title">Waiting for approval</span>
         <button class="btn btn-ghost btn-sm" onclick="loadApprovals()">↻ Refresh</button>
       </div>
-      <p class="muted" style="margin-bottom:6px">Drafts and proposed changes waiting for qa. You approve another person's work: the database refuses an approval when you changed the item since its last approval. A draft or a proposal can be returned with a reason; a returned draft stays an editable draft.</p>
+      <p class="muted" style="margin-bottom:6px">Drafts and proposed changes waiting for qa, and for qp the completed runs nobody released yet. You approve another person's work: the database refuses an approval when you changed the item since its last approval, and a release when you created, changed or executed the run. A draft or a proposal can be returned with a reason; a returned draft stays an editable draft. A run is released or left unreleased: there is no hold or refusal.</p>
       <p class="appr-label" style="margin:0 0 14px">Approval — an attributable record, not an electronic signature (21 CFR 11.50/11.70/11.200 arrive with Section 7).</p>
       <div id="appr-queue-wrap" style="overflow-x:auto"><div class="empty">Loading…</div></div>
     </div>
@@ -1150,7 +1150,7 @@
       default_params: 'Default params', params: 'Params', name: 'Name', unit_id: 'Unit', algorithm_id: 'Algorithm'
     };
     const KIND_LABELS = { recipe: 'Recipe', algorithm: 'Control algorithm', params: 'Parameter set',
-                          setting: 'Log setting', commissioning: 'Commissioning' };
+                          setting: 'Log setting', commissioning: 'Commissioning', run: 'Completed run' };
     const PENDING_KINDS = ['setting', 'commissioning'];
 
     // The one mapping from a queue row's kind to its approval RPC and argument names.
@@ -1165,6 +1165,8 @@
         case 'setting':
         case 'commissioning':
           return { path: '/rpc/approve_change', body: { p_target: 'medcea.pending_change', p_id: row.id, p_note: n } };
+        // qp releases a completed run (release_run(run, note): run_release.note and approval.note)
+        case 'run':       return { path: '/rpc/release_run',       body: { p_run_id: row.id, p_note: n } };
       }
       throw new Error('unknown approval kind ' + row.kind);
     }
@@ -1197,6 +1199,7 @@
                                  + (d.unit_code || 'any unit') + ')';
         case 'setting':   return 'Log setting ' + row.label;
         case 'commissioning': return 'Commissioning of ' + (row.label || 'unit ' + ((d.row_key || [])[0] ?? '?'));
+        case 'run':       return 'Run #' + row.id + ' (' + (row.label || '?') + ')';
       }
       return row.label || row.kind;
     }
@@ -1230,6 +1233,11 @@
     function approvalWhyNot(code, row) {
       const pending = PENDING_KINDS.includes(row && row.kind);
       const d = (row && row.detail) || {};
+      if (row && row.kind === 'run') {
+        if (code === 'own_author') return RUN_OWN_AUTHOR;
+        if (code === 'unattributed') return RUN_UNATTRIBUTED;
+        if (code === 'no_attribution') return RUN_NO_ATTRIBUTION;
+      }
       switch (code) {
         case null: case undefined: case '': return '';
         case 'algorithm_not_approved': return 'Approve its control algorithm first.';
@@ -1239,6 +1247,7 @@
                                            : 'You changed this item (or one of its steps) since its last approval. Another qa person must approve it.';
         case 'unattributed': return pending ? 'This proposal has no person behind it; it cannot be approved. Return it.'
                                             : 'Some changes to this item were made without a signed-in person (for example directly in the database). It cannot be approved: copy it into a new draft and approve the copy.';
+        case 'no_attribution': return RUN_NO_ATTRIBUTION;
         case 'retention_minimum': return 'Not a whole number of days, or below the minimum (compress ≥ 1 day, retention ≥ 30 days); it cannot be applied. Return it.';
         case 'no_change':   return 'It would change nothing: the unit is already in that state. Return it.';
         case 'run_in_progress': return 'Run ' + (d.blocking_run_id ?? '?') + ' is ' + (d.blocking_run_status === 'S' ? 'scheduled' : 'running')
@@ -1252,6 +1261,15 @@
     function friendlyApprovalError(msg) {
       const m = String(msg || '');
       let g;
+      // release_run (qp): before the shared texts, which speak of drafts and qa
+      if (/not_own_author: .* created, changed or executed run \d+/.test(m)) return RUN_OWN_AUTHOR;
+      if (/unattributed changes: \d+ change\(s\) to run \d+ have no person/.test(m)) return RUN_UNATTRIBUTED;
+      if (/no attributed history: no recorded person created or started run \d+/.test(m)) return RUN_NO_ATTRIBUTION;
+      if (/release_run: run \d+ is already released|run_release_recipe_run_id_key/.test(m)) return 'Already released meanwhile; the list was refreshed.';
+      if ((g = /release_run: run \d+ is (\w+), not completed/.exec(m)))
+        return g[1] === 'missing' ? 'This run no longer exists; the list was refreshed.'
+                                  : 'This run is not completed (status ' + g[1] + '); only a completed run is released. The list was refreshed.';
+      if (/holds no approval on runs\b|permission denied for function release_run/.test(m)) return 'Your role cannot release runs; qp releases.';
       if (/not_own_author: .* proposed change \d+; withdraw it instead/.test(m)) return 'You proposed this change; withdraw it under My proposals instead.';
       if (/not_own_author: .* changed/.test(m)) return 'You changed this item (or one of its steps) since its last approval. Another qa person must approve it.';
       if (/not_own_author: .* proposed/.test(m)) return 'You proposed this change. Another qa person must approve it.';
@@ -1313,7 +1331,7 @@
       let subject;
       if (isLine) subject = 'step ' + ((c.row_key || [])[1] ?? vals.recipe_item_seq_id ?? '?');
       else subject = { 'medcea.recipe': 'recipe', 'medcea.control_algorithm': 'algorithm',
-                       'medcea.unit_algorithm_params': 'parameter set' }[c.target] || c.target;
+                       'medcea.unit_algorithm_params': 'parameter set', 'medcea.recipe_run': 'run' }[c.target] || c.target;
       const fields = [];
       const src = c.op === 'D' ? (c.old || {}) : (c.new || {});
       Object.keys(src).sort().forEach(k => {
@@ -1379,6 +1397,40 @@
                      'medcea.unit_algorithm_params': 'Parameter set', 'medcea.pending_change': 'Change',
                      'medcea.recipe_run': 'Run', 'medcea.algorithm_state': 'Learned state' }[a.target];
       return (kind || a.target) + ' #' + (a.row_key || []).join('/');
+    }
+
+    // A completed run in the queue (kind 'run', qp): its summary from approval_queue's
+    // detail, never the run log (qp holds R on runs only). Each line is [label, text].
+    const RUN_OWN_AUTHOR = 'You created, changed or executed this run (one of its attempts). Another qp person must release it.';
+    const RUN_UNATTRIBUTED = 'Some changes to this run were made without a signed-in person (for example directly in the database); it cannot be released and stays unreleased (deviations are not recorded on the platform yet).';
+    const RUN_NO_ATTRIBUTION = 'No recorded person created or started this run: it predates attribution (or was written without a signed-in person), so who made it is unknown. It cannot be released and stays unreleased (deviations are not recorded on the platform yet).';
+    const RUN_STATUS_TEXT = { S: 'scheduled', R: 'running', C: 'completed', F: 'failed' };
+    function runApprovalText(name, status, approvedNow, idAtStart) {
+      if (!name) return '—';
+      return name + ' — ' + (status || '?') + (approvedNow ? '' : ' (not approved now)')
+           + (idAtStart ? '; approval #' + idAtStart + ' in effect at its start' : '; no approval found at its start');
+    }
+    function runSummary(row) {
+      const d = (row && row.detail) || {};
+      const who = (n, r) => (n || 'no person') + (r ? ' (' + r + ')' : '');
+      const ex = (d.executors || []).map(e => who(e.by_name, e.by_role) + ', ' + fmtWhen(e.at));
+      const cy = d.cycles || {};
+      const by = Object.keys(cy.by_status || {}).sort().map(k => (cy.by_status[k]) + ' ' + (RUN_STATUS_TEXT[k] || k));
+      return [
+        ['Run', '#' + (d.run_id ?? row.id) + ' — ' + (RUN_STATUS_TEXT[d.status] || d.status || '?')],
+        ['Unit', d.unit_code || '—'],
+        ['Recipe', runApprovalText(d.recipe_name, d.recipe_status, d.recipe_approved_now, d.recipe_approval_id)],
+        ['Parameter set', d.params_id ? runApprovalText(d.params_name || ('#' + d.params_id), d.params_status, d.params_approved_now, d.params_approval_id)
+                                      : 'none recorded for this run'],
+        ['Created by', who(d.created_by, d.created_by_role) + ', ' + fmtWhen(d.created_at)],
+        ['Executed by', ex.length ? ex.join('; ') : who(d.executed_by, d.executed_by_role)],
+        ['Attempts', String(d.attempts ?? (ex.length || '—'))],
+        ['Cycles', String(cy.total ?? 0) + (by.length ? ' (' + by.join(', ') + ')' : '')],
+        ['Started', fmtWhen(d.start)],
+        ['Ended', fmtWhen(d.end)],
+        ['Release', row.may_approve ? 'You may release it: a recorded person created and started it, you neither created, changed nor executed it, and every change has a person.'
+                                    : 'You cannot release it: ' + approvalWhyNot(row.why_not_code, row)],
+      ];
     }
 
     // The Approvals tab's count: what the viewer can act on. In the queue, what they may
@@ -3955,11 +4007,14 @@
           }
           if (r.state === 'returned')
             authors += '<div class="appr-why">Returned by ' + esc(r.returned_by || '?') + ', ' + esc(fmtWhen(r.returned_at)) + ': “' + esc(r.return_reason || '') + '” — waits for its author</div>';
-          const last = r.last_approved_at ? esc(fmtWhen(r.last_approved_at)) + '<div class="muted">by ' + esc(r.last_approved_by || '?') + '</div>' : 'never';
-          const changes = pending ? esc(pendingSummary(r)) : String(r.changes_total ?? 0);
+          const run = r.kind === 'run';
+          const last = r.last_approved_at ? esc(fmtWhen(r.last_approved_at)) + '<div class="muted">by ' + esc(r.last_approved_by || '?') + '</div>'
+                                          : (run ? 'not released' : 'never');
+          const changes = pending ? esc(pendingSummary(r))
+                        : String(r.changes_total ?? 0) + (run ? '<div class="muted">' + esc(String(((r.detail || {}).cycles || {}).total ?? 0)) + ' cycle(s), ended ' + esc(fmtWhen((r.detail || {}).end)) + '</div>' : '');
           return '<tr>'
             + '<td>' + esc(KIND_LABELS[r.kind] || r.kind) + (r.state === 'review' ? '<div class="muted">review after the fact</div>' : '') + '</td>'
-            + '<td><strong>' + esc(r.label || '') + '</strong></td>'
+            + '<td><strong>' + esc(run ? approvalLabel(r) : (r.label || '')) + '</strong></td>'
             + '<td>' + authors + '</td>'
             + '<td>' + last + '</td>'
             + '<td>' + changes + '</td>'
@@ -3979,6 +4034,7 @@
         case 'params': return 'Approve parameter set “' + r.label + '” (' + (d.algorithm_code || '?') + ', ' + (d.unit_code || 'any unit') + ')';
         case 'setting': return 'Approve log setting';
         case 'commissioning': return (r.state === 'review' ? 'Review the end of commissioning of ' : 'Approve commissioning of ') + r.label;
+        case 'run': return 'Release ' + approvalLabel(r);
       }
       return approvalLabel(r);
     }
@@ -4007,6 +4063,9 @@
           + (d.description ? '<p class="muted">' + esc(d.description) + '</p>' : '') + '<p class="muted" style="margin-top:6px">Default params</p>' + pre(d.default_params);
       if (r.kind === 'params')
         return '<p><span class="algo-badge">' + esc(d.algorithm_code) + '</span> for <strong>' + esc(d.unit_code || 'any unit') + '</strong></p>' + pre(d.params);
+      if (r.kind === 'run')
+        return '<table class="tbl"><tbody>' + runSummary(r).map(([k, v]) => '<tr><th style="white-space:nowrap">' + esc(k) + '</th><td>' + esc(v) + '</td></tr>').join('')
+          + '</tbody></table><p class="muted" style="margin-top:6px">The run log is not shown here: qp reads runs, not run logs. A release is final; a run you do not release simply stays in this queue.</p>';
       const who = '<p class="muted" style="margin-top:6px">Proposed by ' + esc(r.proposed_by || 'no person') + ', ' + esc(fmtWhen(r.proposed_at))
                 + (r.reason ? ': “' + esc(r.reason) + '”' : '') + '</p>';
       if (r.kind === 'setting')
@@ -4023,7 +4082,9 @@
     function approvalChangesHtml(r) {
       if (PENDING_KINDS.includes(r.kind)) return '';
       const changes = r.changes || [];
-      const head = r.last_approved_at
+      const head = r.kind === 'run'
+        ? 'Changes to this run since its creation (' + (r.changes_total ?? changes.length) + ')'
+        : r.last_approved_at
         ? 'Changes since the last approval (' + fmtWhen(r.last_approved_at) + ' by ' + (r.last_approved_by || '?') + ')'
         : 'Never approved: ' + (r.changes_total ?? changes.length) + ' change(s) since creation';
       if (!changes.length) return '<div class="appr-box"><h5>' + esc(head) + '</h5><p class="muted">None recorded.</p></div>';
@@ -4045,16 +4106,19 @@
       apprCurrent = r;
       document.getElementById('appr-modal-title').textContent = approvalModalTitle(r);
       document.getElementById('appr-modal-body').innerHTML =
-        '<div class="appr-box"><h5>What you approve</h5>' + approvalWhatHtml(r) + '</div>' + approvalChangesHtml(r)
+        '<div class="appr-box"><h5>' + (r.kind === 'run' ? 'What you release' : 'What you approve') + '</h5>' + approvalWhatHtml(r) + '</div>' + approvalChangesHtml(r)
         + (r.state === 'returned' ? '<div class="warn-banner">Returned by ' + esc(r.returned_by || '?') + ', ' + esc(fmtWhen(r.returned_at))
                                      + ': “' + esc(r.return_reason || '') + '”. It waits for its author to change it.</div>' : '');
-      document.getElementById('appr-note').value = '';
+      const note = document.getElementById('appr-note');
+      note.value = '';
+      note.placeholder = r.kind === 'run' ? 'Release note (optional, recorded with the release).'
+        : 'Note (optional, recorded with the approval). To return it: the reason (required), shown to its author.';
       const why = document.getElementById('appr-modal-why');
       why.classList.toggle('hidden', !!r.may_approve);
-      why.textContent = r.may_approve ? '' : 'You cannot approve this: ' + approvalWhyNot(r.why_not_code, r);
+      why.textContent = r.may_approve ? '' : (r.kind === 'run' ? 'You cannot release this: ' : 'You cannot approve this: ') + approvalWhyNot(r.why_not_code, r);
       const ab = document.getElementById('appr-approve-btn');
       ab.disabled = !r.may_approve;
-      ab.textContent = r.state === 'review' ? 'Mark reviewed' : (PENDING_KINDS.includes(r.kind) ? 'Approve and apply' : 'Approve');
+      ab.textContent = r.kind === 'run' ? 'Release' : r.state === 'review' ? 'Mark reviewed' : (PENDING_KINDS.includes(r.kind) ? 'Approve and apply' : 'Approve');
       document.getElementById('appr-return-btn').classList.toggle('hidden', !r.may_return);
       document.getElementById('appr-modal-bg').classList.add('open');
     }
@@ -4077,15 +4141,16 @@
       const r = apprCurrent;
       if (!r) return;
       const { path, body } = approvalRpc(r, document.getElementById('appr-note').value);
+      if (r.kind === 'run' && !confirm('Release ' + approvalLabel(r) + '?\n\nA release is final: it records your name, role and a digest of the run, and cannot be withdrawn.')) return;
       const btn = document.getElementById('appr-approve-btn');
       btn.disabled = true;
       try {
         const id = await api('POST', path, body);
-        const verb = r.state === 'review' ? 'Reviewed' : (PENDING_KINDS.includes(r.kind) ? 'Applied' : 'Approved');
+        const verb = r.kind === 'run' ? 'Released' : r.state === 'review' ? 'Reviewed' : (PENDING_KINDS.includes(r.kind) ? 'Applied' : 'Approved');
         toast(verb + ': ' + approvalLabel(r) + ' (approval #' + id + ')');
         closeApprovalModal();
       } catch(e) {
-        toast('Not approved: ' + approvalRefusal(r, e), false);
+        toast((r.kind === 'run' ? 'Not released: ' : 'Not approved: ') + approvalRefusal(r, e), false);
         closeApprovalModal();
       }
       await refreshAfterApproval();
@@ -4183,6 +4248,9 @@
               ? 'Commissioning of ' + unitCode((x.row_key || [])[0]) + ' → ' + (x.new_value === true ? 'on' : 'off') + ' (#' + x.change_id + ')'
               : (SETTING_LABELS[(x.row_key || [])[0]] || (x.row_key || [])[0]) + ' = ' + x.new_value + ' (#' + x.change_id + ')'),
       ]);
+      // a run's unit (the history's reader holds R on runs: qa, qp, auditor; best effort)
+      await get('medcea.recipe_run', '/recipe_run?select=recipe_run_id,unit_id', 'recipe_run_id',
+                x => 'Run #' + x.recipe_run_id + ' on ' + unitCode(x.unit_id));
       names['medcea.cea_unit'] = {};
       units.forEach(u => { names['medcea.cea_unit'][u.unit_id] = 'Unit ' + u.unit_code; });
       return names;

@@ -2681,6 +2681,12 @@
   [
    "rr_qp",
    "function",
+   "medcea.release_run(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qp",
+   "function",
    "medcea.unit_commissioning()",
    "EXECUTE"
   ],

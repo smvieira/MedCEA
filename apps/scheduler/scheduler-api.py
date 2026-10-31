@@ -15,10 +15,12 @@ Endpoints:
   PUT  /api/schedules/<id>             — update schedule (a retired one: 409)
   DEL  /api/schedules/<id>             — RETIRE schedule (medcea.retire_schedule; kept, never deleted)
   POST /api/schedules/<id>/trigger     — run immediately (background thread)
-  GET  /api/runs?limit=N               — recent completed recipe_run rows
+  GET  /api/runs?limit=N               — recent completed recipe_run rows (+ released_at,
+                                         released_by_name/_role from run_release, or null)
   GET  /api/runs/active                — runs with status != C
-  GET  /api/runs/<id>                  — single run + full log content (log null and
-                                         log_withheld for a role without R on run_logs)
+  GET  /api/runs/<id>                  — single run (+ its release, as above) + full log
+                                         content (log null and log_withheld for a role
+                                         without R on run_logs)
   GET  /api/runs/<id>/log?offset=N     — incremental log tail (live polling)
   POST /api/runs/<id>/execute          — start execution of a queued run (medcea.start_run)
   POST /api/runs/<id>/stop             — stop a run (medcea.set_run_status F, then SIGTERM)
@@ -1004,12 +1006,19 @@ _RUN_COLS = """rr.recipe_run_id, rr.recipe_run_status,
                rr.recipe_run_start, rr.recipe_run_end,
                rr.params_id, rr.schedule_id,
                rr.created_by_name, rr.executed_by_name"""
+# The release of a completed run (qp, Config UI Approvals tab): who and when, for the
+# "Released" badge. A LEFT JOIN on the run's own id (one release per run), so it adds
+# columns and never a row; the own_unit clause still limits the runs themselves.
+_RELEASE_COLS = """rl.released_at, rl.released_by_name, rl.released_by_role"""
+_RELEASE_JOIN = "LEFT JOIN medcea.run_release rl ON rl.recipe_run_id = rr.recipe_run_id"
 
 
 def _fmt_runs(rows):
     for r in rows:
         r['recipe_run_start'] = r['recipe_run_start'].isoformat() if r['recipe_run_start'] else None
         r['recipe_run_end']   = r['recipe_run_end'].isoformat()   if r['recipe_run_end']   else None
+        if r.get('released_at'):
+            r['released_at'] = r['released_at'].isoformat()
     return rows
 
 @app.route('/api/runs/active')
@@ -1037,11 +1046,12 @@ def list_runs():
     limit = request.args.get('limit', 50, type=int)
     sub = _unit_scope()
     rows = query(f"""
-        SELECT {_RUN_COLS},
+        SELECT {_RUN_COLS}, {_RELEASE_COLS},
                u.unit_code, r.recipe_name
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
+        {_RELEASE_JOIN}
         WHERE rr.recipe_run_status = 'C'
         """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n        " if sub else "") + """ORDER BY rr.recipe_run_id DESC
         LIMIT %s
@@ -1202,17 +1212,19 @@ def stop_run(run_id):
 def get_run(run_id):
     sub = _unit_scope()
     row = query(f"""
-        SELECT {_RUN_COLS},
+        SELECT {_RUN_COLS}, {_RELEASE_COLS},
                u.unit_code, r.recipe_name
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
+        {_RELEASE_JOIN}
         WHERE rr.recipe_run_id = %s
     """ + ("    AND rr.unit_id IN " + _MY_UNITS + "\n" if sub else ""), (run_id, sub) if sub else (run_id,), fetchall=False)
     if not row:
         return jsonify({'error': 'not found'}), 404
     row['recipe_run_start'] = row['recipe_run_start'].isoformat() if row['recipe_run_start'] else None
     row['recipe_run_end']   = row['recipe_run_end'].isoformat()   if row['recipe_run_end']   else None
+    row['released_at']      = row['released_at'].isoformat()      if row.get('released_at') else None
     if _withhold_log(run_id):
         row['log'], row['log_withheld'] = None, 'run_logs'
         return jsonify(row)

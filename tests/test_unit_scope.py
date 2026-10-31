@@ -4,7 +4,7 @@ an operator's run, cycle, log and telemetry reads carry the iam_policy.user_unit
 subquery with their sub as a parameter while IAM_ENFORCE or IAM_DB_ROLES is true;
 everyone else, and an operator in report-only mode, runs the unscoped SQL unchanged.
 GET /api/runs/<id> leaves out the log for a role without R on run_logs while
-IAM_ENFORCE is true.
+IAM_ENFORCE is true. The run_release join (the Released badge) adds columns only.
 
 No cluster, no database, no Flask: flask, psycopg2 and apscheduler are stubs, every
 statement goes to a fake connection that records it, and the real medcea_iam library
@@ -246,6 +246,18 @@ class UnitScopeTest(unittest.TestCase):
             r = run(['qc'])
         self.assertIsNotNone(r['log'])
         self.assertTrue(any('run_logs: would withhold' in m for m in cm.output), cm.output)
+
+    def test_release_columns_never_widen_the_scope(self):
+        # the Released badge (run_release, qp's release in the Config UI): a LEFT JOIN on
+        # the run's own id, so the operator's runs are still limited by rr.unit_id
+        ENFORCE['v'] = True
+        got = self.stmts(['operator'])
+        for path in ('/api/runs', '/api/runs/7'):
+            sql = got[path][0]
+            self.assertIn('LEFT JOIN medcea.run_release rl ON rl.recipe_run_id = rr.recipe_run_id', sql, path)
+            self.assertIn('rl.released_at, rl.released_by_name, rl.released_by_role', sql, path)
+            self.assertIn('AND rr.unit_id IN ' + SCH._MY_UNITS, sql, path)
+        self.assertIsNone(call('scheduler', '/api/runs/7', lambda: SCH.get_run(7), ['qp'])[1]['released_at'])
 
 
 if __name__ == '__main__':

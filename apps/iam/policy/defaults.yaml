@@ -824,9 +824,9 @@ resource_groups:
     risk: A forged or edited run breaks the batch record.
     approval:
       record: medcea.run_release
-      functions: ["medcea.release_run(int)"]
+      functions: ["medcea.release_run(int)", "medcea.release_run(int, text)"]
       effect: blocking
-      help: Release of a completed run by a person who neither created nor executed it.
+      help: Release of a completed run, with an optional note, by a person who neither created, changed nor executed it (Configuration UI, Approvals tab). There is no hold or refuse; a run qp does not release stays unreleased.
     members:
       - {type: data, object: medcea.recipe_run}
       - {type: data, object: medcea.recipe_line_cycle_run, written_by: functions}
@@ -838,6 +838,7 @@ resource_groups:
       - {type: data, function: "medcea.finish_run(int, text)", level: C, service_only: [svc_scheduler]}
       - {type: data, function: "medcea.record_cycle(int, jsonb)", level: C, service_only: [svc_scheduler], writes: [medcea.recipe_line_cycle_run]}
       - {type: data, function: "medcea.release_run(int)", level: A, writes: [medcea.run_release]}
+      - {type: data, function: "medcea.release_run(int, text)", level: A, writes: [medcea.run_release], note: "the same release with a note, recorded in run_release.note and approval.note (Configuration UI, Approvals tab)"}
       - type: api
         service: scheduler
         routes:
@@ -1142,7 +1143,7 @@ resource_groups:
       - {type: data, object: medcea.approval, written_by: functions}
       - {type: data, object: medcea.pending_change, written_by: functions, note: "blocking changes waiting for approve_change() (retention, commissioning)"}
       - {type: data, object: medcea.row_change, written_by: functions, note: "every change to the 14 attributed tables; not_own_author reads it"}
-      - {type: data, function: "medcea.approval_queue(boolean)", level: R, note: "drafts and open pending changes of the groups where the caller holds R, with the changes since the last approval and an advisory may_approve; refuses any actor but a person's own token, so the services' EXECUTE through their ceiling is inert"}
+      - {type: data, function: "medcea.approval_queue(boolean)", level: R, note: "drafts and open pending changes of the groups where the caller holds R, with the changes since the last approval and an advisory may_approve; completed unreleased runs with their summary (no run log) only for roles holding A on runs and reading every unit's runs; refuses any actor but a person's own token, so the services' EXECUTE through their ceiling is inert"}
       - {type: data, function: "iam_policy.log_export(text[], text[])", level: C, service_only: [svc_dbexport], writes: [iam_policy.export_log]}
       - {type: data, function: "iam.create_review(jsonb)", level: C, service_only: [svc_access], writes: [iam.access_review], note: "the quarter's snapshot; the database adds units, decisions, the switches it holds and the chain verdict itself"}
       - {type: data, function: "iam.sign_off_review(int, text)", level: C, service_only: [svc_access], writes: [iam.access_review], note: "the creator may sign off (one qa person: a known single-person control)"}

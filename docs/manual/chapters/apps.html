@@ -189,7 +189,7 @@
 <p><strong>What the author sees.</strong> The Recipes table has an <strong>Approval</strong> column (Draft — waits for qa approval, Approved, Retired; its tooltip names who last edited the recipe and when) next to <strong>Active</strong>. An approved or retired recipe opens with <strong>View</strong> instead of <strong>Edit</strong>, under a banner that says it is frozen; its form, <strong>+ Add Step</strong> and the steps' <strong>Edit</strong> are not offered. Algorithms and parameter sets show the same status. Where your own work stands (waiting, returned with qa's reason, approved) is under <strong>My proposals and drafts</strong> on the Approvals tab.</p>
 
 <h4>Approving drafts and proposed changes</h4>
-<p>The <strong>Waiting for approval</strong> panel of the <strong>Approvals</strong> tab lists the draft recipes, control algorithms and parameter sets, and the proposed changes: log settings proposed in the Scheduler and unit commissioning proposed on the Units tab. Each row says what it is, who changed it since its last approval (or who proposed it, with the reason), when it was last approved and by whom, and how many changes there are. <span class="role">qa</span> approves. <span class="role">auditor</span> reads the whole queue. <span class="role">qp</span> sees only the commissioning proposals (the queue lists only the groups a role reads, and <span class="role">qp</span> reads master data but not recipes, controllers or scheduler settings), so an empty queue for <span class="role">qp</span> does not mean nothing waits for <span class="role">qa</span>. Neither approves or returns. The count on the tab is what you can act on: what you may approve (not the drafts you returned, which wait for their author) and your own returned drafts.</p>
+<p>The <strong>Waiting for approval</strong> panel of the <strong>Approvals</strong> tab lists the draft recipes, control algorithms and parameter sets, and the proposed changes: log settings proposed in the Scheduler and unit commissioning proposed on the Units tab. Each row says what it is, who changed it since its last approval (or who proposed it, with the reason), when it was last approved and by whom, and how many changes there are. <span class="role">qa</span> approves. <span class="role">auditor</span> reads the whole queue except the completed runs. <span class="role">qp</span> sees the commissioning proposals and the completed runs waiting for release (see <a href="#apps-config-release">releasing a completed run</a>), not the drafts or settings (the queue lists only the groups a role reads, and <span class="role">qp</span> reads master data but not recipes, controllers or scheduler settings), so an empty queue for <span class="role">qp</span> does not mean nothing waits for <span class="role">qa</span>. Neither <span class="role">auditor</span> nor <span class="role">qp</span> approves or returns these. The count on the tab is what you can act on: what you may approve (not the drafts you returned, which wait for their author) and your own returned drafts.</p>
 <ol class="steps">
 <li>Open the <strong>Approvals</strong> tab.</li>
 <li>Click <strong>Review…</strong> on a row.</li>
@@ -209,11 +209,31 @@
 </ul>
 <p>An approval here is an attributable record, not an electronic signature; signatures in the sense of 21 CFR 11.50, 11.70 and 11.200 arrive with Section 7 of the plan.</p>
 
+<h4 id="apps-config-release">Releasing a completed run</h4>
+<p>A completed run is released by a <span class="role">qp</span> person who neither created it, changed it nor executed it (any attempt of it). The <strong>Waiting for approval</strong> panel lists, for <span class="role">qp</span> only, every run with status Completed that nobody has released yet, as <strong>Completed run</strong> rows named "Run #&lt;id&gt; (&lt;recipe&gt; on &lt;unit&gt;)". Only a role that may release runs and reads every unit's runs gets these rows; an <span class="role">operator</span>, who reads only their own units' runs, never does.</p>
+<ol class="steps">
+<li>Open the <strong>Approvals</strong> tab and click <strong>Review…</strong> on a <strong>Completed run</strong> row.</li>
+<li>Read <strong>What you release</strong>: the run's status and unit; the recipe and the parameter set, each with its approval status today and the approval in effect when the run last started; who created the run; who executed each attempt, and when; the number of attempts; the cycles by status; the start and end; and whether you may release it, and why not. Below it, the changes recorded on the run, with person, role and time.</li>
+<li>Optionally type a <strong>Release note</strong>. It is recorded with the release.</li>
+<li>Click <strong>Release</strong> and confirm. The message names the approval record.</li>
+</ol>
+<p>The run log is not shown: <span class="role">qp</span> reads runs, not run logs. A release is final. There is no hold or refusal: a run you do not release simply stays in the queue, unreleased, and nothing records why (see the known gaps). A released run can no longer be set back to Queued for a retry.</p>
+<p>When you may not release a run, the row says why and <strong>Release</strong> is off. The database checks again when you click; its refusals are:</p>
+<ul>
+<li>you created, changed or executed this run (one of its attempts): another <span class="role">qp</span> person must release it;</li>
+<li>a change to the run was made without a signed-in person: it cannot be released, and stays unreleased;</li>
+<li>no recorded person created or started the run (a run completed before attribution was built, or written without a signed-in person): who made it is unknown, so it cannot be released and stays unreleased in the queue (see the known gaps);</li>
+<li>the run is not completed, or was released meanwhile: the list is refreshed;</li>
+<li>your role cannot release runs: <span class="role">qp</span> releases.</li>
+</ul>
+<p>The release shows in the Scheduler as a <strong>Released</strong> badge, with who released the run and when (see <a href="#apps-scheduler">Scheduler</a>), and in <strong>Approval history</strong> under <strong>Run releases</strong>, with the person and the note.</p>
+<div class="record"><p>A release writes a row to <code>medcea.run_release</code> (the run, a digest of its row, the note, the person's account, person, name, role and source, and the time; one per run, never changed) and a row to <code>medcea.approval</code> with action <code>release</code>, the same note, and the persons who created, changed or executed the run.</p></div>
+
 <h4>My proposals and drafts</h4>
 <p>Every signed-in person sees, on the Approvals tab, their own proposals and the drafts they changed since the last approval, with where each stands: waiting for qa, returned (with qa's reason), applied, applied at once and waiting for review, withdrawn, or replaced. <strong>Withdraw…</strong> takes back your own proposal while it waits; the reason is optional and recorded. Approvers' names and notes are not shown here.</p>
 
 <h4>Approval history</h4>
-<p><span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span> also see <strong>Approval history</strong>: the newest 100 approval records, filtered by All, Recipes, Control algorithms, Parameter sets, Settings and commissioning, Master data and device reviews, Run releases or Q-table retirements, each with the time, the item, the action (approve, apply, review, return, withdraw, release, retire, grandfather), the person with role and source, the number of authors and the note. <strong>History of this item</strong> in the review shows the records of that one item.</p>
+<p><span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span> also see <strong>Approval history</strong>: the newest 100 approval records, filtered by All, Recipes, Control algorithms, Parameter sets, Settings and commissioning, Master data and device reviews, Run releases or Q-table retirements, each with the time, the item (a run as "Run #&lt;id&gt; on &lt;unit&gt;"), the action (approve, apply, review, return, withdraw, release, retire, grandfather), the person with role and source (for a release, who released it), the number of authors and the note. <strong>History of this item</strong> in the review shows the records of that one item.</p>
 <p>While <code>IAM_DB_ROLES</code> is <code>false</code> the Approvals tab is not shown and nobody approves from the apps.</p>
 <div class="record"><p>Every change to these definitions records who made it, with which role, and when; it is also kept in the append-only row-change log. Each approval, return and withdrawal is a row naming the person, their role and source (their own sign-in), the authors since the last approval, a digest of the content, the note or reason, and the newest change it covers. The status change an approval makes is also in the row-change log.</p></div>
 
@@ -250,6 +270,7 @@
 <li><strong>Completed</strong></li>
 <li><strong>Failed</strong>: the run failed or was stopped.</li>
 </ul>
+<p>A completed run that a <span class="role">qp</span> person has released shows a <strong>Released</strong> badge next to its status in <strong>Completed Runs</strong>, with who released it and when (UTC); so does the run's window with <strong>Full log</strong> ticked. The Scheduler only shows it; runs are released in the Configuration UI (see <a href="#apps-config-release">releasing a completed run</a>). An <span class="role">operator</span> still sees only their own units' runs.</p>
 
 <h4>Starting a run now</h4>
 <ol class="steps">
