@@ -1000,6 +1000,44 @@ SQL
 $(as_token "$T_PM")
 UPDATE medcea.recipe SET recipe_description = 'x' WHERE recipe_name = 'IAMTEST-R1';
 SQL
+        # The Config UI's Retire (it replaced Delete: nobody holds DELETE on recipes) and
+        # its parameter-set editor, as the page sends them through PostgREST
+        probe W4 "control: an engineer retires an approved recipe (status alone, Config UI Retire…)" ok <<SQL
+$recipe_setup
+$(as_token "$T_QA")
+SELECT medcea.approve_recipe(:ra);
+$(as_token "$T_EN")
+UPDATE medcea.recipe SET status = 'retired' WHERE recipe_id = :ra;
+--CHECKS
+SELECT 'CHECK|retired', status = 'retired' FROM medcea.recipe WHERE recipe_id = :ra;
+SELECT 'CHECK|retiring makes nobody an author', (medcea_auth._authors('medcea.recipe', jsonb_build_array(:ra))).persons = '{}';
+SQL
+        probe W4 "a retired recipe stays retired" "42501:a retired row stays retired" <<SQL
+$recipe_setup
+$(as_token "$T_EN")
+UPDATE medcea.recipe SET status = 'retired' WHERE recipe_id = :ra;
+UPDATE medcea.recipe SET status = 'draft' WHERE recipe_id = :ra;
+SQL
+        probe W4 "control: an engineer creates and edits a draft parameter set (Config UI editor)" ok <<SQL
+$(as_token "$T_EN")
+INSERT INTO medcea.unit_algorithm_params (name, algorithm_id, unit_id, params)
+SELECT 'IAMT ui params', algorithm_id, NULL, '{"kp": 1}' FROM medcea.control_algorithm WHERE status = 'approved'
+ ORDER BY algorithm_id LIMIT 1 RETURNING params_id AS pu \\gset
+UPDATE medcea.unit_algorithm_params SET params = '{"kp": 2}' WHERE params_id = :pu;
+--CHECKS
+SELECT 'CHECK|a draft', status = 'draft' FROM medcea.unit_algorithm_params WHERE params_id = :pu;
+SELECT 'CHECK|the edit is the engineer''s', (medcea_auth._authors('medcea.unit_algorithm_params', jsonb_build_array(:pu))).persons = '{p-en}';
+SQL
+        probe W4 "an engineer edits an approved parameter set" "42501:draft_only" <<SQL
+$(as_token "$T_EN")
+INSERT INTO medcea.unit_algorithm_params (name, algorithm_id, unit_id, params)
+SELECT 'IAMT ui params', algorithm_id, NULL, '{"kp": 1}' FROM medcea.control_algorithm WHERE status = 'approved'
+ ORDER BY algorithm_id LIMIT 1 RETURNING params_id AS pu \\gset
+$(as_token "$T_QA")
+SELECT medcea.approve_params(:pu, 'iam-db');
+$(as_token "$T_EN")
+UPDATE medcea.unit_algorithm_params SET params = '{"kp": 3}' WHERE params_id = :pu;
+SQL
         probe W4 "control: svc_scheduler writes a new Q-table state" ok <<SQL
 INSERT INTO medcea.algorithm_state (unit_id, algorithm, channel, state)
 SELECT unit_id, 'Q_LEARNING', 'iamt', '{"q": 1}' FROM medcea.cea_unit WHERE unit_code = 'IAMT01';

@@ -71,7 +71,7 @@ $KUBECTL create configmap scheduler-nginx -n "$NAMESPACE" --dry-run=client -o ya
   --from-file=default.conf="$SCRIPT_DIR/k8s/nginx.conf" | $KUBECTL apply -f -
 
 # =============================================================================
-# 3. HTML ConfigMap  (substitute $PORTAL_DOMAIN and embed background image)
+# 3. HTML ConfigMap  (substitute $PORTAL_DOMAIN, $CONFIG_DOMAIN and embed background image)
 # =============================================================================
 log "Creating HTML ConfigMap..."
 _BG_STYLE=""
@@ -90,9 +90,10 @@ import sys
 html  = open(sys.argv[1]).read()
 style = open(sys.argv[2]).read()
 html  = html.replace('\$PORTAL_DOMAIN', sys.argv[3])
+html  = html.replace('\$CONFIG_DOMAIN', sys.argv[4])   # the Approvals link (Log Management)
 html  = html.replace('__BG_STYLE__', style)
 sys.stdout.write(html)
-" "$SCRIPT_DIR/html/scheduler.html" "$_BG_TMP" "${PORTAL_DOMAIN}" \
+" "$SCRIPT_DIR/html/scheduler.html" "$_BG_TMP" "${PORTAL_DOMAIN}" "${CONFIG_DOMAIN:-config.$DOMAIN}" \
   | $KUBECTL create configmap scheduler-html -n "$NAMESPACE" \
     --from-file=index.html=/dev/stdin \
     --dry-run=client -o yaml > /tmp/scheduler-html-cm.yaml

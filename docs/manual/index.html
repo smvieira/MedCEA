@@ -516,8 +516,9 @@ footer { color: var(--muted); font-size: .82rem; }
 <p>The Configuration UI, titled <strong>System Configuration</strong>, holds the definitions the platform runs on:</p>
 <ul>
 <li>the physical plant: locations, units, zones and devices</li>
-<li>the control algorithms and the learned state of learning controllers</li>
+<li>the control algorithms, their parameter sets and the learned state of learning controllers</li>
 <li>the recipes, which recipe may run on which unit, and the steps of each recipe</li>
+<li>the approval of drafts and proposed changes</li>
 </ul>
 <p>Every role can open it. What you may change depends on your role:</p>
 <div class="table-wrap"><table>
@@ -528,10 +529,12 @@ footer { color: var(--muted); font-size: .82rem; }
 <tr><td>Recipes and steps</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
 <tr><td>Recipe ↔ Unit Permissions (assignments)</td><td><span class="role">production_manager</span>, approved recipes only</td><td>The roles that read recipes</td></tr>
 <tr><td>Control algorithm defaults</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Parameter sets</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Approvals (drafts and proposed changes)</td><td><span class="role">qa</span> approves or returns; the proposer withdraws their own proposal</td><td><span class="role">qp</span> and <span class="role">auditor</span> read the queue and the history; every person sees their own proposals and drafts</td></tr>
 <tr><td>Learned state (Q-tables)</td><td><span class="role">qa</span> may retire it</td><td><span class="role">production_manager</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
 </tbody>
 </table></div>
-<p>The page has five tabs: <strong>Locations</strong>, <strong>Units</strong>, <strong>Devices</strong>, <strong>Control Models</strong> and <strong>Recipes</strong>. The <strong>Portal</strong> link at the top left returns to the portal.</p>
+<p>The page has six tabs: <strong>Locations</strong>, <strong>Units</strong>, <strong>Devices</strong>, <strong>Control Models</strong>, <strong>Recipes</strong> and <strong>Approvals</strong>. The Approvals tab is shown only while the database enforces roles (<code>IAM_DB_ROLES=true</code>), like Q-table retirement; its count is what you can act on. The <strong>Portal</strong> link at the top left returns to the portal.</p>
 
 <h4>Locations</h4>
 <p>A location is a site, for example a building. Each one has a name, an address, a contact, coordinates, a description and a status (Active or Inactive).</p>
@@ -565,19 +568,21 @@ footer { color: var(--muted); font-size: .82rem; }
 <li>substrate temperature</li>
 </ul>
 <ol class="steps">
-<li>Open the <strong>Recipes</strong> tab and click <strong>+ New Recipe</strong>. Enter a <strong>Name</strong> and click <strong>Save</strong>.</li>
+<li>Open the <strong>Recipes</strong> tab and click <strong>+ New Recipe</strong>. Enter a <strong>Name</strong> and click <strong>Save</strong>. A new recipe is a draft.</li>
 <li>Click <strong>Steps →</strong> on the recipe's row.</li>
 <li>Click <strong>+ Add Step</strong>. Fill in <strong>Step #</strong>, <strong>Step Name</strong>, <strong>Cycles</strong>, the light settings and the limits, then click <strong>Save Step</strong>.</li>
 <li>Repeat for every step, then click <strong>← Back</strong>.</li>
 </ol>
 <p>Other actions on a recipe:</p>
 <ul>
-<li><strong>⎘ Copy</strong> makes a new recipe with the same steps.</li>
+<li><strong>⎘ Copy</strong> makes a new draft with the same steps. On an approved or retired recipe it reads <strong>⎘ Copy to a new draft</strong>: that is how an approved recipe is changed.</li>
+<li><strong>Retire…</strong> (in the recipe's detail) takes a recipe out of use. Nothing is deleted: a retired recipe keeps its steps for the record, cannot be changed, assigned or run again, and cannot be brought back. <strong>Show retired</strong> lists retired recipes too.</li>
+<li><strong>Remove step…</strong> (in a draft's step) does not delete the step either: it copies the recipe to a new draft without that step and retires the old draft.</li>
 <li><strong>↓ Export</strong> downloads the recipe as a file.</li>
 <li><strong>↑ Import</strong> reads a recipe from your computer or from the <strong>Platform Recipe Library</strong>.</li>
 </ul>
 <p>Saving a recipe to the Platform Recipe Library is refused for every role once the services enforce, because the library cannot check the rules that limit who may change a recipe (drafts only for engineers, assignments only for production managers). Downloading a recipe, and the recipes in the database, are not affected.</p>
-<div class="note"><p>No role may delete configuration records once the database enforces roles (<code>IAM_DB_ROLES=true</code>), so the <strong>Delete</strong> buttons are refused. To take a recipe, unit, location or device out of use, set its <strong>Status</strong> to Inactive.</p></div>
+<div class="note"><p>No role may delete configuration records once the database enforces roles (<code>IAM_DB_ROLES=true</code>), so the <strong>Delete</strong> buttons of locations, units and devices are refused. To take a unit, location or device out of use, set its <strong>Status</strong> to Inactive. Recipes, steps and parameter sets have no Delete button any more, in either mode: they are retired.</p></div>
 
 <h4>Assigning recipes to units</h4>
 <p>The <strong>Recipe ↔ Unit Permissions</strong> panel on the Units tab is a grid of recipes against units. A tick means the recipe may run on that unit, and a circle means it may not. Under the tick is the algorithm chosen for that pairing. Inactive recipes are faded and inactive units struck through; their cells show a dash and cannot be clicked. This is the <span class="role">production_manager</span>'s planning task.</p>
@@ -587,12 +592,13 @@ footer { color: var(--muted); font-size: .82rem; }
 <li>Pick a <strong>Default Algorithm</strong> (left empty, the system default IF_THEN_ELSE is used), optionally enter <strong>Parameter Overrides (JSON)</strong>, and click <strong>Save</strong>. To change these later, click the tick.</li>
 <li>To withdraw the assignment, click the tick and then <strong>Revoke Permission</strong>.</li>
 </ol>
-<p>Once the database enforces roles, the recipe must be approved before it can be assigned. A run then takes its algorithm and parameters from an approved parameter set: the schedule's, or else the assignment's. The parameter overrides typed here are not used. This release has no screen that creates a parameter set or attaches one to an assignment; the Scheduler lists the sets that exist.</p>
+<p>Once the database enforces roles, the recipe must be approved before it can be assigned. A run then takes its algorithm and parameters from an approved parameter set: the schedule's, or else the assignment's. The parameter overrides typed here are not used. Parameter sets are created on the Control Models tab; this screen does not yet attach one to an assignment, and the Scheduler lists the sets that exist.</p>
 
 <h4>Control Models and learned state</h4>
-<p>The <strong>Control Models</strong> tab has two panels.</p>
+<p>The <strong>Control Models</strong> tab has three panels.</p>
 <ul>
-<li><strong>Control Algorithms</strong> lists each algorithm with its code, name, description and <strong>Default Params (JSON)</strong>. An algorithm that is not approved shows its status (for example <code>draft</code>) under its code. An <span class="role">engineer</span> may edit the defaults of a draft and click <strong>Save</strong>.</li>
+<li><strong>Control Algorithms</strong> lists each algorithm with its code, name, description and <strong>Default Params (JSON)</strong>, and its approval status under the code. An <span class="role">engineer</span> may edit the defaults of a draft and click <strong>Save</strong>. An approved algorithm is frozen: its defaults are read-only and <strong>Save</strong> is off; a unit is tuned with a parameter set instead. This screen does not create a new algorithm.</li>
+<li><strong>Parameter Sets</strong> lists the parameter sets of each algorithm (filter by algorithm; <strong>Show retired</strong> adds the retired ones) with the unit they are for (or any unit), their parameters, their approval status and who last edited them. An <span class="role">engineer</span> clicks <strong>+ New Parameter Set</strong> (or <strong>Edit</strong> on a draft), enters a <strong>Name</strong>, the <strong>Algorithm</strong>, the <strong>Unit</strong> and the <strong>Params (JSON object)</strong>, which start from the algorithm's defaults, and clicks <strong>Save draft</strong>. An approved set opens read-only, with <strong>⎘ Copy to a new draft</strong>; <strong>Retire…</strong> takes a set out of use, without deleting it.</li>
 <li><strong>Production Units</strong> lists, for each unit, how many recipes are allowed on it and the learned state each learning controller keeps for it. Click the record count to see the state per channel and when it was last updated.</li>
 </ul>
 
@@ -601,12 +607,40 @@ footer { color: var(--muted); font-size: .82rem; }
 <ul>
 <li>A new definition starts as a draft.</li>
 <li>A <span class="role">qa</span> person approves it. The approval is refused when the approver changed the definition since its last approval. It is also refused when any change since then has no recorded person; such a definition has to be re-created before it can be approved.</li>
-<li>An approved definition is frozen. While <code>IAM_DB_ROLES</code> is <code>false</code>, editing an approved definition is allowed but turns it back into a draft, and the app shows that as an advisory. While it is <code>true</code>, the edit is refused. Make a copy with <strong>⎘ Copy</strong> and have the copy approved instead.</li>
+<li>An approved definition is frozen. The Configuration UI offers no edit of an approved or retired definition, in either mode. Through other clients (the API, the Scheduler's algorithm defaults) the database refuses the edit while <code>IAM_DB_ROLES</code> is <code>true</code>; while it is <code>false</code> it allows it but turns the definition back into a draft, with an advisory. Make a copy with <strong>⎘ Copy to a new draft</strong> and have the copy approved instead.</li>
 <li>A parameter set can only be approved once its algorithm is approved.</li>
 </ul>
 <p>While the database enforces roles, only approved recipes may be assigned to units, and a run uses only approved algorithms and parameter sets.</p>
-<div class="note"><p>The apps have no approval screen yet. The approval itself is a database function (<code>approve_recipe</code>, <code>approve_algorithm</code>, <code>approve_params</code>) that only a signed-in person holding <span class="role">qa</span> can call. See the <a href="#compliance">compliance chapter</a> for how approvals are checked.</p></div>
-<div class="record"><p>Every change to these definitions records who made it, with which role, and when; it is also kept in the append-only row-change log. Each approval is a row naming the approver, the authors since the last approval and a digest of the approved row.</p></div>
+<p><strong>What the author sees.</strong> The Recipes table has an <strong>Approval</strong> column (Draft — waits for qa approval, Approved, Retired; its tooltip names who last edited the recipe and when) next to <strong>Active</strong>. An approved or retired recipe opens with <strong>View</strong> instead of <strong>Edit</strong>, under a banner that says it is frozen; its form, <strong>+ Add Step</strong> and the steps' <strong>Edit</strong> are not offered. Algorithms and parameter sets show the same status. Where your own work stands (waiting, returned with qa's reason, approved) is under <strong>My proposals and drafts</strong> on the Approvals tab.</p>
+
+<h4>Approving drafts and proposed changes</h4>
+<p>The <strong>Waiting for approval</strong> panel of the <strong>Approvals</strong> tab lists the draft recipes, control algorithms and parameter sets, and the proposed changes: log settings proposed in the Scheduler and unit commissioning proposed on the Units tab. Each row says what it is, who changed it since its last approval (or who proposed it, with the reason), when it was last approved and by whom, and how many changes there are. <span class="role">qa</span> approves; <span class="role">qp</span> and <span class="role">auditor</span> read the queue only.</p>
+<ol class="steps">
+<li>Open the <strong>Approvals</strong> tab.</li>
+<li>Click <strong>Review…</strong> on a row.</li>
+<li>Read <strong>What you approve</strong> (the recipe with its steps, the steps changed since the last approval highlighted; the parameters; or the proposed value) and <strong>Changes since the last approval</strong>: each change with its time, the person, role and source, and the fields with their old and new values.</li>
+<li>Optionally type a <strong>Note</strong>. It is recorded with the approval.</li>
+<li>Click <strong>Approve</strong> (<strong>Approve and apply</strong> for a proposed change, which then takes effect). The message names the approval record.</li>
+</ol>
+<p>To send work back instead, type the reason in the same field and click <strong>Return…</strong>. A returned draft stays an editable draft, is marked returned in the queue until its author changes it, and shows the reason to its author. A returned proposal is closed and never applies; its proposer may propose again. Ending a unit's commissioning applies at once; it is listed for review afterwards, and <strong>Mark reviewed</strong> records that you checked it.</p>
+<p>When you may not approve a row, it says why under the button, and the Approve button is off. The database checks again when you click, and its refusal is shown in plain words:</p>
+<ul>
+<li>you changed the item (or one of its steps) since its last approval, or you proposed the change: another <span class="role">qa</span> person must approve it;</li>
+<li>a change was made without a signed-in person: copy the item into a new draft and approve the copy (a proposal without a person is returned);</li>
+<li>your role cannot approve it;</li>
+<li>a parameter set's algorithm is not approved yet: approve the algorithm first;</li>
+<li>it was approved, returned, withdrawn or replaced meanwhile: the list is refreshed;</li>
+<li>a log setting below the minimum, or commissioning a unit that has a run running or scheduled, cannot be applied.</li>
+</ul>
+<p>An approval here is an attributable record, not an electronic signature; signatures in the sense of 21 CFR 11.50, 11.70 and 11.200 arrive with Section 7 of the plan.</p>
+
+<h4>My proposals and drafts</h4>
+<p>Every signed-in person sees, on the Approvals tab, their own proposals and the drafts they changed since the last approval, with where each stands: waiting for qa, returned (with qa's reason), applied, applied at once and waiting for review, withdrawn, or replaced. <strong>Withdraw…</strong> takes back your own proposal while it waits; the reason is optional and recorded. Approvers' names and notes are not shown here.</p>
+
+<h4>Approval history</h4>
+<p><span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span> also see <strong>Approval history</strong>: the newest 100 approval records, filtered by All, Recipes, Control algorithms, Parameter sets, Settings and commissioning, Master data and device reviews, Run releases or Q-table retirements, each with the time, the item, the action (approve, apply, review, return, withdraw, release, retire, grandfather), the person with role and source, the number of authors and the note. <strong>History of this item</strong> in the review shows the records of that one item.</p>
+<p>While <code>IAM_DB_ROLES</code> is <code>false</code> the Approvals tab is not shown and nobody approves from the apps.</p>
+<div class="record"><p>Every change to these definitions records who made it, with which role, and when; it is also kept in the append-only row-change log. Each approval, return and withdrawal is a row naming the person, their role and source (their own sign-in), the authors since the last approval, a digest of the content, the note or reason, and the newest change it covers. The status change an approval makes is also in the row-change log.</p></div>
 
 <h4>Retiring a Q-table</h4>
 <p>A learning controller, such as Q-learning, keeps what it learnt in a Q-table between runs. Starting a unit afresh means retiring that table. Only <span class="role">qa</span> may do it, and nothing is deleted: the next run on that unit starts cold.</p>
@@ -699,7 +733,8 @@ footer { color: var(--muted); font-size: .82rem; }
 <p><strong>Retention setting (not applied)</strong> is kept as a value but nothing reads it, because run logs are never deleted.</p>
 <ol class="steps">
 <li>As <span class="role">admin</span>, change <strong>Compress run logs after</strong> (in days) and click <strong>Propose retention</strong>.</li>
-<li>While the database enforces roles, the message says the value is proposed and "pending qa approval". The new value applies only after a <span class="role">qa</span> person other than you approves it. There is no approval screen for this in the Scheduler yet. While the database does not enforce roles, the value is saved at once and the message reads "Defaults saved".</li>
+<li>While the database enforces roles, the message says the value is proposed and "pending qa approval". The new value applies only after a <span class="role">qa</span> person other than you approves it in the Configuration UI's Approvals tab; until then the old value stays in force. While the database does not enforce roles, the value is saved at once and the message reads "Defaults saved".</li>
+<li>Under the settings, a line reads <strong>Pending</strong> with the proposal's number and a link, <strong>See it in the Approvals queue</strong>, until the proposed value is in force. The line is a reminder kept in your browser only: where the proposal stands (approved, returned, withdrawn) is under <strong>My proposals and drafts</strong> on the Approvals tab, where you may also withdraw it. <strong>Dismiss</strong> hides the line.</li>
 </ol>
 <div class="record"><p>A proposed setting is stored as a pending change with its author. The approval records the <span class="role">qa</span> person who confirmed it.</p></div>
 

@@ -33,6 +33,21 @@
     .badge { padding: 2px 9px; border-radius: 4px; font-size: .72rem; font-weight: 700; letter-spacing: .04em; }
     .badge-y { background: #14532d; color: #86efac; }
     .badge-n { background: #450a0a; color: #fca5a5; }
+    .badge-draft { background: #451a03; color: #fcd34d; }
+    .badge-retired { background: #1e293b; color: #94a3b8; }
+    /* Approvals */
+    .appr-why { font-size: .75rem; color: #fbbf24; margin-top: 5px; max-width: 280px; white-space: normal; }
+    .appr-box { background: #1a2130; border: 1px solid #2a364e; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; font-size: .84rem; }
+    .appr-box h5 { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: #64748b; margin-bottom: 8px; }
+    .appr-changes { list-style: none; font-size: .8rem; max-height: 260px; overflow-y: auto; }
+    .appr-changes li { padding: 6px 0; border-bottom: 1px solid #222c3d; }
+    .appr-changes li:last-child { border-bottom: none; }
+    .appr-changes .meta { color: #64748b; }
+    .appr-changes .fld { color: #cbd5e1; padding-left: 12px; }
+    .appr-pre { margin: 0; background: #0d1321; border: 1px solid #1e293b; border-radius: 6px; padding: 8px 10px; font-size: .75rem; color: #a5b4fc; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow-y: auto; }
+    .tr-changed td { background: #2a2410; }
+    .appr-label { font-size: .75rem; color: #64748b; margin-top: 10px; }
+    .muted { color: #64748b; font-size: .8rem; }
     .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; font: 500 .875rem 'Segoe UI',system-ui; transition: .15s; text-decoration: none; white-space: nowrap; }
     .btn-primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
     .btn-primary:hover { background: #2563eb; }
@@ -117,6 +132,8 @@
     <button class="tab" onclick="showTab('devices')" id="tb-devices">Devices</button>
     <button class="tab" onclick="showTab('sysconfig')" id="tb-sysconfig">Control Models</button>
     <button class="tab" onclick="showTab('recipes')" id="tb-recipes">Recipes</button>
+    <!-- shown by probeApprovals() when the database answers (IAM_DB_ROLES=true) -->
+    <button class="tab hidden" onclick="showTab('approvals')" id="tb-approvals">Approvals <span id="appr-count"></span></button>
   </div>
 
   <!-- ══ LOCATIONS TAB ══════════════════════════════════════ -->
@@ -545,7 +562,26 @@
           <tbody id="algo-tbody"><tr><td colspan="5" class="empty" style="padding:28px">Loading…</td></tr></tbody>
         </table>
       </div>
-      <p style="font-size:.8rem;color:#475569;margin-top:8px">Edit default params to tune global algorithm defaults. Per-schedule and per-permission overrides take precedence.</p>
+      <p style="font-size:.8rem;color:#475569;margin-top:8px">An engineer edits the defaults of a draft algorithm; qa approves it in the Approvals tab. Approved algorithms are frozen: tune a unit with a parameter set below. Runs use approved algorithms and parameter sets only.</p>
+    </div>
+
+    <!-- Parameter Sets (medcea.unit_algorithm_params): engineers create and edit drafts,
+         qa approves them in the Approvals tab; an approved set is frozen. -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title" style="display:flex;align-items:center;gap:8px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="18" r="2"/></svg>
+          Parameter Sets
+        </span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select id="ps-filter-algo" style="width:auto" onchange="renderParamSets()"><option value="">All algorithms</option></select>
+          <label class="muted" style="display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" id="ps-show-retired" style="width:auto" onchange="renderParamSets()"> Show retired</label>
+          <button class="btn btn-ghost btn-sm" onclick="loadParamSets()">↻ Refresh</button>
+          <button class="btn btn-primary btn-sm" onclick="openParamSetModal(null)">+ New Parameter Set</button>
+        </div>
+      </div>
+      <div id="ps-wrap" style="overflow-x:auto"><div class="empty">Loading…</div></div>
+      <p style="font-size:.8rem;color:#475569;margin-top:8px">A run takes its algorithm's parameters from an approved parameter set (the schedule's, or else the assignment's). An engineer creates and edits drafts; qa approves them in the Approvals tab, once their algorithm is approved. To change an approved set, copy it to a new draft.</p>
     </div>
 
     <!-- Production Units -->
@@ -574,6 +610,7 @@
       <div class="panel-hdr">
         <span class="panel-title">Recipes</span>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <label class="muted" style="display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" id="recipe-show-retired" style="width:auto" onchange="renderRecipeTable()"> Show retired</label>
           <button class="btn btn-ghost btn-sm" onclick="openImportChoice()">↑ Import</button>
           <button class="btn btn-ghost btn-sm" onclick="openExportAllChoice()">↓ Export All</button>
           <button class="btn btn-primary btn-sm" onclick="openRecipeForm(null)">+ New Recipe</button>
@@ -668,11 +705,14 @@
         <span id="recipe-detail-title" class="panel-title">Recipe</span>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-ghost btn-sm" onclick="openExportChoice()">↓ Export</button>
-          <button class="btn btn-ghost btn-sm" onclick="copyRecipe()">⎘ Copy</button>
-          <button class="btn btn-danger btn-sm" id="recipe-del-btn" onclick="deleteRecipe()">Delete</button>
+          <button class="btn btn-ghost btn-sm" id="recipe-copy-btn" onclick="copyRecipe()">⎘ Copy</button>
+          <button class="btn btn-danger btn-sm" id="recipe-del-btn" onclick="retireRecipe()" title="Nothing is deleted: a retired recipe is kept for the record">Retire…</button>
           <button class="btn btn-ghost btn-sm" onclick="closeRecipeDetail()">← Back</button>
         </div>
       </div>
+      <!-- Approval status: an approved or retired recipe is frozen (renderRecipeFreeze) -->
+      <div id="recipe-status-line" style="margin-bottom:12px"></div>
+      <div id="recipe-frozen-banner" class="warn-banner hidden"></div>
       <!-- Inline edit form for recipe header -->
       <form id="recipe-header-form" onsubmit="submitRecipeHeader(event)" style="margin-bottom:20px">
         <div class="form-grid">
@@ -681,15 +721,115 @@
           <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
         </div>
         <div style="margin-top:14px;display:flex;gap:8px">
-          <button type="submit" class="btn btn-primary btn-sm">Save</button>
+          <button type="submit" class="btn btn-primary btn-sm" id="recipe-save-btn">Save</button>
         </div>
       </form>
       <!-- Recipe lines -->
       <div class="panel-hdr" style="margin-top:8px;margin-bottom:14px;border-top:1px solid #2a364e;padding-top:18px">
         <span class="panel-title" style="font-size:.9rem">Steps</span>
-        <button class="btn btn-primary btn-sm" onclick="openRecipeLineModal(null)">+ Add Step</button>
+        <button class="btn btn-primary btn-sm" id="recipe-addstep-btn" onclick="openRecipeLineModal(null)">+ Add Step</button>
       </div>
       <div id="recipe-lines-wrap"><div class="empty">No steps yet.</div></div>
+      <p id="recipe-draft-hint" class="muted hidden" style="margin-top:10px">Every change is recorded with your name; the person who approves this recipe must be someone who did not change it. qa approves drafts in the Approvals tab.</p>
+    </div>
+  </div>
+
+  <!-- ══ APPROVALS TAB ══════════════════════════════════════ -->
+  <!-- The queue (medcea.approval_queue: qa approves; qp and auditor read), the
+       caller's own proposals and drafts (medcea.my_approvals: every person) and the
+       approval history (medcea.approval: qa, qp, auditor). Each panel shows only when
+       the database answers it; the database alone decides every approval. -->
+  <div id="tab-approvals" class="content hidden">
+    <div id="appr-queue-panel" class="panel hidden">
+      <div class="panel-hdr">
+        <span class="panel-title">Waiting for approval</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadApprovals()">↻ Refresh</button>
+      </div>
+      <p class="muted" style="margin-bottom:6px">Drafts and proposed changes waiting for qa. You approve another person's work: the database refuses an approval when you changed the item since its last approval. A draft or a proposal can be returned with a reason; a returned draft stays an editable draft.</p>
+      <p class="appr-label" style="margin:0 0 14px">Approval — an attributable record, not an electronic signature (21 CFR 11.50/11.70/11.200 arrive with Section 7).</p>
+      <div id="appr-queue-wrap" style="overflow-x:auto"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div id="appr-mine-panel" class="panel hidden">
+      <div class="panel-hdr">
+        <span class="panel-title">My proposals and drafts</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadMyApprovals()">↻ Refresh</button>
+      </div>
+      <p class="muted" style="margin-bottom:14px">Your own proposals (log settings, unit commissioning) and the drafts you changed since their last approval, with where each stands. You may withdraw a proposal while it waits. A returned draft shows qa's reason; your next change sends it back to the queue.</p>
+      <div id="appr-mine-wrap" style="overflow-x:auto"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div id="appr-hist-panel" class="panel hidden">
+      <div class="panel-hdr">
+        <span class="panel-title">Approval history</span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select id="appr-hist-filter" style="width:auto" onchange="apprHistItem=null;loadApprovalHistory()">
+            <option value="all">All</option>
+            <option value="recipes">Recipes</option>
+            <option value="algorithms">Control algorithms</option>
+            <option value="params">Parameter sets</option>
+            <option value="pending">Settings and commissioning</option>
+            <option value="reviews">Master data and device reviews</option>
+            <option value="releases">Run releases</option>
+            <option value="qtables">Q-table retirements</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" onclick="loadApprovalHistory()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="appr-hist-item" class="warn-banner hidden"></div>
+      <div id="appr-hist-wrap" style="overflow-x:auto"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ══ APPROVAL REVIEW MODAL ══════════════════════════════ -->
+  <div class="modal-bg" id="appr-modal-bg" onclick="if(event.target===this)closeApprovalModal()">
+    <div class="modal" style="max-width:800px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="appr-modal-title">Approve</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeApprovalModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <div id="appr-modal-body"></div>
+      <div id="appr-modal-why" class="warn-banner hidden"></div>
+      <div class="fg full">
+        <label>Note or reason</label>
+        <textarea id="appr-note" maxlength="500" rows="2" placeholder="Note (optional, recorded with the approval). To return it: the reason (required), shown to its author."></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="showItemHistory()">History of this item</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="closeApprovalModal()">Cancel</button>
+        <button type="button" class="btn btn-danger btn-sm hidden" id="appr-return-btn" onclick="returnCurrent()">Return…</button>
+        <button type="button" class="btn btn-primary btn-sm" id="appr-approve-btn" onclick="approveCurrent()">Approve</button>
+      </div>
+      <p class="appr-label">Approving records your name, role and a digest of the content. Approval — an attributable record, not an electronic signature (21 CFR 11.50/11.70/11.200 arrive with Section 7).</p>
+    </div>
+  </div>
+
+  <!-- ══ PARAMETER SET MODAL ══════════════════════════════════ -->
+  <div class="modal-bg" id="ps-modal-bg" onclick="if(event.target===this)closeParamSetModal()">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="ps-modal-title">New Parameter Set</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeParamSetModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <div id="ps-status-line" style="margin-bottom:12px"></div>
+      <div id="ps-frozen-banner" class="warn-banner hidden"></div>
+      <form id="ps-form" onsubmit="submitParamSet(event)">
+        <div class="form-grid">
+          <div class="fg"><label>Name <span class="req">*</span></label><input name="name" required maxlength="120" placeholder="e.g. UNIT01 PID gentle"></div>
+          <div class="fg"><label>Algorithm <span class="req">*</span></label><select name="algorithm_id" required onchange="onParamSetAlgoChange()"></select></div>
+          <div class="fg"><label>Unit</label><select name="unit_id"></select></div>
+          <div class="fg full"><label>Params (JSON object) <span class="req">*</span></label><textarea name="params" rows="7" style="font:.8rem/1.5 monospace" placeholder='{"kp": 2.0}'></textarea></div>
+        </div>
+        <p class="muted" style="margin-top:10px">A new set starts as a draft. Every change is recorded with your name; qa approves it in the Approvals tab, once its algorithm is approved.</p>
+        <div class="form-actions">
+          <button type="button" class="btn btn-danger btn-sm hidden" id="ps-retire-btn" onclick="retireParamSet()">Retire…</button>
+          <span class="spacer"></span>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="closeParamSetModal()">Cancel</button>
+          <button type="button" class="btn btn-teal btn-sm hidden" id="ps-copy-btn" onclick="copyParamSet()">⎘ Copy to a new draft</button>
+          <button type="submit" class="btn btn-primary btn-sm" id="ps-save-btn">Save draft</button>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -727,7 +867,7 @@
           <div class="fg full"><label>Notes</label><textarea name="notes" rows="2" placeholder="Optional notes for this step"></textarea></div>
         </div>
         <div class="form-actions">
-          <button type="button" class="btn btn-danger btn-sm hidden" id="rline-del-btn" onclick="deleteRecipeLine()">Delete Step</button>
+          <button type="button" class="btn btn-danger btn-sm hidden" id="rline-del-btn" onclick="retireRecipeLine()" title="Steps are never deleted: this copies the recipe to a new draft without the step">Remove step…</button>
           <span class="spacer"></span>
           <button type="button" class="btn btn-ghost btn-sm" onclick="closeRecipeLineModal()">Cancel</button>
           <button type="submit" class="btn btn-primary btn-sm">Save Step</button>
@@ -871,14 +1011,15 @@
 
     // ── Tabs ──────────────────────────────────────────────────
     function showTab(name) {
-      ['locations','units','devices','sysconfig','recipes'].forEach(n => {
+      ['locations','units','devices','sysconfig','recipes','approvals'].forEach(n => {
         document.getElementById('tab-' + n).classList.toggle('hidden', n !== name);
         document.getElementById('tb-' + n).classList.toggle('active', n === name);
       });
       if (name === 'locations') loadLocations();
       if (name === 'units')     { loadLocations(); loadUnits(); loadPermissionMatrix(); }
       if (name === 'devices')   loadAllDevices();
-      if (name === 'sysconfig') { loadAlgorithms(); loadUnitMemory(); }
+      if (name === 'sysconfig') { loadAlgorithms(); loadParamSets(); loadUnitMemory(); }
+      if (name === 'approvals') { loadApprovals(); loadMyApprovals(); loadApprovalHistory(); }
       if (name === 'recipes')   loadRecipes();
     }
 
@@ -918,7 +1059,7 @@
         try { e = await r.clone().json(); } catch(_) {}
         if (e && e.code === '42501') {
           sessionStorage.removeItem('cfgReauth');
-          throw new Error(friendlyDbError(e.message || 'refused by the database'));
+          throw dbError(r.status, e, e.message || 'refused by the database');
         }
       }
       if (r.status === 401 || r.status === 403) {
@@ -934,12 +1075,23 @@
       }
       sessionStorage.removeItem('cfgReauth');
       if (!r.ok) {
-        let msg = 'Request failed';
-        try { const e = await r.json(); msg = e.message || e.detail || msg; } catch(_) {}
-        throw new Error(friendlyDbError(msg));
+        let msg = 'Request failed', e = null;
+        try { e = await r.json(); msg = e.message || e.detail || msg; } catch(_) {}
+        throw dbError(r.status, e, msg);
       }
       const text = await r.text();
       return text ? JSON.parse(text) : null;
+    }
+
+    // The thrown Error keeps the HTTP status, PostgREST's code (SQLSTATE or PGRSTnnn)
+    // and the database's own message (raw), so a caller maps a refusal in its own
+    // context (friendlyApprovalError, retireError) and a probe tells 42501 from 404.
+    function dbError(status, e, msg) {
+      const err = new Error(friendlyDbError(msg));
+      err.status = status;
+      err.code = (e && e.code) || null;
+      err.raw = msg;
+      return err;
     }
 
     // A device's name is lower(unit)-s|c-lower(zone), so codes must be unique
@@ -948,10 +1100,281 @@
       if (/cea_zone_unit_code_ci_uk/.test(msg)) return 'A zone with that code already exists in this unit (codes are compared ignoring case).';
       if (/cea_unit_code_ci_uk|unit_code_uk/.test(msg)) return 'A unit with that code already exists (codes are compared ignoring case).';
       if (/dns_name_uk/.test(msg)) return 'Another device already has that hostname.';
-      if (/permission denied for function retire_algorithm_state|holds no approval on controllers_state|approvals are made by a person signed in through the API/.test(msg))
+      // Only the function's own name: the _approver() texts ("approvals are made by a
+      // person signed in…", "holds no approval on …") are shared by every approval, so
+      // retireAlgorithmState() maps them itself (retireError) and the Approvals tab
+      // with friendlyApprovalError().
+      if (/permission denied for function retire_algorithm_state/.test(msg))
         return 'Retiring learned state needs a qa person signed in (approval on controllers_state).';
       return msg;
     }
+
+    /* approvals-logic:begin */
+    // Pure functions (no DOM, no fetch) for the Approvals tab, the approval status of
+    // recipes, algorithms and parameter sets, and the parameter-set editor;
+    // tests/test_config_ui_approvals.py runs this block under node. The database alone
+    // decides: may_approve/why_not come from medcea.approval_queue(), advisory, and a
+    // refusal at approval is always shown as the database gave it.
+    const RECIPE_FIELD_LABELS = {
+      recipe_name: 'Name', recipe_description: 'Description', is_active: 'Active', status: 'Status',
+      recipe_item_seq_id: 'Step #', recipe_item_seq_name: 'Step name', cycle_number: 'Cycles',
+      light_type: 'Light type', light_on_minutes: 'Light ON (min)', light_off_minutes: 'Light OFF (min)',
+      air_temperature_lower_limit: 'Air temp min °C', air_temperature_upper_limit: 'Air temp max °C',
+      co2_lower_limit: 'CO₂ min (ppm)', co2_upper_limit: 'CO₂ max (ppm)',
+      hr_lower_limit: 'Humidity min %', hr_upper_limit: 'Humidity max %',
+      substrate_temperature_lower_limit: 'Substrate temp min °C', substrate_temperature_upper_limit: 'Substrate temp max °C',
+      notes: 'Notes', algorithm_code: 'Code', algorithm_name: 'Name', description: 'Description',
+      default_params: 'Default params', params: 'Params', name: 'Name', unit_id: 'Unit', algorithm_id: 'Algorithm'
+    };
+    const KIND_LABELS = { recipe: 'Recipe', algorithm: 'Control algorithm', params: 'Parameter set',
+                          setting: 'Log setting', commissioning: 'Commissioning' };
+    const PENDING_KINDS = ['setting', 'commissioning'];
+
+    // The one mapping from a queue row's kind to its approval RPC and argument names.
+    // The 2-argument overloads always get p_note (null when empty): PostgREST picks the
+    // overload by the names it is sent.
+    function approvalRpc(row, note) {
+      const n = (note || '').trim() || null;
+      switch (row.kind) {
+        case 'recipe':    return { path: '/rpc/approve_recipe',    body: { p_recipe_id: row.id, p_note: n } };
+        case 'algorithm': return { path: '/rpc/approve_algorithm', body: { p_algorithm_id: row.id, p_note: n } };
+        case 'params':    return { path: '/rpc/approve_params',    body: { p_params_id: row.id, p_note: n } };
+        case 'setting':
+        case 'commissioning':
+          return { path: '/rpc/approve_change', body: { p_target: 'medcea.pending_change', p_id: row.id, p_note: n } };
+      }
+      throw new Error('unknown approval kind ' + row.kind);
+    }
+    // qa sends a draft or a waiting proposal back (a reason is required by the database too).
+    function returnRpc(row, reason) {
+      return { path: '/rpc/return_change', body: { p_target: row.target, p_id: row.id, p_reason: (reason || '').trim() } };
+    }
+    // The proposer takes their own waiting proposal back (the reason is optional).
+    function withdrawRpc(id, reason) {
+      return { path: '/rpc/withdraw_change', body: { p_id: id, p_reason: (reason || '').trim() || null } };
+    }
+
+    function statusBadge(status) {
+      if (status === 'draft')    return { text: 'Draft — waits for qa approval', cls: 'badge-draft' };
+      if (status === 'approved') return { text: 'Approved', cls: 'badge-y' };
+      if (status === 'retired')  return { text: 'Retired', cls: 'badge-retired' };
+      return { text: status || '—', cls: 'badge-retired' };
+    }
+
+    // An approved or retired definition is never edited from this page (in both modes:
+    // under IAM_DB_ROLES=false the database would demote it instead of refusing).
+    function isFrozen(status) { return status === 'approved' || status === 'retired'; }
+
+    function approvalLabel(row) {
+      const d = row.detail || {};
+      switch (row.kind) {
+        case 'recipe':    return 'Recipe “' + row.label + '”';
+        case 'algorithm': return 'Control algorithm ' + row.label;
+        case 'params':    return 'Parameter set “' + row.label + '” (' + (d.algorithm_code || '?') + ', '
+                                 + (d.unit_code || 'any unit') + ')';
+        case 'setting':   return 'Log setting ' + row.label;
+        case 'commissioning': return 'Commissioning of ' + (row.label || 'unit ' + ((d.row_key || [])[0] ?? '?'));
+      }
+      return row.label || row.kind;
+    }
+
+    // "off → on" for a commissioning proposal, "7 → 14 days" for a log setting; a
+    // proposal that would change nothing says so.
+    function pendingSummary(row) {
+      const d = row.detail || {};
+      const cur = d.current, prop = d.proposed;
+      if (row.kind === 'commissioning') {
+        const word = v => (v === true || v === 'true') ? 'on' : 'off';
+        if (row.state === 'review') return 'commissioning ended (applied at once on ' + fmtWhen(d.applied_at) + '); qa reviews it';
+        if (word(cur) === word(prop)) return 'no change (already ' + word(cur) + ')';
+        return 'commissioning ' + word(cur) + ' → ' + word(prop);
+      }
+      if (row.kind === 'setting') {
+        const val = v => (v === null || v === undefined) ? 'not set' : String(v).replace(/^"|"$/g, '');
+        return val(cur) + ' → ' + val(prop) + ' days';
+      }
+      return '';
+    }
+
+    function fmtWhen(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return String(ts);
+      return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    }
+
+    // why_not_code (medcea.approval_queue) → what the viewer reads.
+    function approvalWhyNot(code, row) {
+      const pending = PENDING_KINDS.includes(row && row.kind);
+      const d = (row && row.detail) || {};
+      switch (code) {
+        case null: case undefined: case '': return '';
+        case 'algorithm_not_approved': return 'Approve its control algorithm first.';
+        case 'no_person':   return 'Your account has no person_id; ask an administrator (a person_id change waits for qa).';
+        case 'no_role':     return 'Your role reads this queue; a qa person approves.';
+        case 'own_author':  return pending ? 'You proposed this change. Another qa person must approve it.'
+                                           : 'You changed this item (or one of its steps) since its last approval. Another qa person must approve it.';
+        case 'unattributed': return pending ? 'This proposal has no person behind it; it cannot be approved. Return it.'
+                                            : 'Some changes to this item were made without a signed-in person (for example directly in the database). It cannot be approved: copy it into a new draft and approve the copy.';
+        case 'retention_minimum': return 'Not a whole number of days, or below the minimum (compress ≥ 1 day, retention ≥ 30 days); it cannot be applied. Return it.';
+        case 'no_change':   return 'It would change nothing: the unit is already in that state. Return it.';
+        case 'run_in_progress': return 'Run ' + (d.blocking_run_id ?? '?') + ' is ' + (d.blocking_run_status === 'S' ? 'scheduled' : 'running')
+                                       + ' on this unit; commissioning waits until no run is running or scheduled.';
+      }
+      return (row && row.why_not) || code;
+    }
+
+    // A refusal from approve_* / approve_change / return_change / withdraw_change → plain
+    // words. msg is the database's own message (err.raw from api()).
+    function friendlyApprovalError(msg) {
+      const m = String(msg || '');
+      let g;
+      if (/not_own_author: .* proposed change \d+; withdraw it instead/.test(m)) return 'You proposed this change; withdraw it under My proposals instead.';
+      if (/not_own_author: .* changed/.test(m)) return 'You changed this item (or one of its steps) since its last approval. Another qa person must approve it.';
+      if (/not_own_author: .* proposed/.test(m)) return 'You proposed this change. Another qa person must approve it.';
+      if (/unattributed changes/.test(m)) return 'Some changes to this item were made without a signed-in person (for example directly in the database). It cannot be approved: copy it into a new draft and approve the copy.';
+      if ((g = /holds no approval on (\w+)/.exec(m))) return 'Your role cannot approve ' + g[1] + '; qa approves.';
+      if (/approvals are made by a person signed in through the API/.test(m)) return 'Approvals need your own sign-in at the database (IAM_POSTGREST_JWT and IAM_DB_ROLES true).';
+      if (/token carries no person_id/.test(m)) return 'Your account has no person_id; ask an administrator (a person_id change waits for qa).';
+      if (/its algorithm \d+ is not approved/.test(m)) return 'Approve its control algorithm first.';
+      if (/is (approved|retired), not a draft/.test(m)) return 'Already approved or retired meanwhile; the list was refreshed.';
+      if (/was returned and has not changed since/.test(m)) return 'Already returned; it has not changed since.';
+      if (/no longer pending/.test(m)) return 'This proposal was already applied, returned, withdrawn or replaced by a newer one; the list was refreshed.';
+      if (/applied at once; review it/.test(m)) return 'This change already applied (a narrowing): mark it reviewed instead of returning it.';
+      if (/applied at once; propose the opposite/.test(m)) return 'This change already applied; propose the opposite to undo it.';
+      if (/is not a proposal of yours/.test(m)) return 'Only the person who proposed it can withdraw it.';
+      if (/a reason is required/.test(m)) return 'Give a reason.';
+      if (/^retention:/.test(m)) return 'Below the minimum retention or not a whole number of days (compress ≥ 1 day, retention ≥ 30 days); it cannot be applied. Return it.';
+      if (/changes nothing: unit \S+ is already/.test(m)) return 'It would change nothing: the unit is already in that state. Return it.';
+      if (/^commissioning: unit \S+ has run/.test(m)) return m;
+      if (/permission denied for function (approve_|return_change)/.test(m)) return 'Your role cannot approve or return this.';
+      if (/permission denied for function (withdraw_change|my_approvals)/.test(m)) return 'Not available while the database does not enforce roles (IAM_DB_ROLES=false).';
+      if (/approval_queue: read it/.test(m)) return 'The queue is read with your own sign-in only.';
+      return m;
+    }
+
+    // Retiring a Q-table (retire_algorithm_state) refused by _approver().
+    function retireError(msg) {
+      const m = String(msg || '');
+      if (/permission denied for function retire_algorithm_state|holds no approval on controllers_state|approvals are made by a person signed in through the API/.test(m))
+        return 'Retiring learned state needs a qa person signed in (approval on controllers_state).';
+      return m;
+    }
+
+    function isStampKey(k) { return /_by_/.test(k) || /^timestamp_/.test(k); }
+
+    // Added, removed and changed keys of two JSON objects, by key.
+    function jsonKeyDiff(a, b) {
+      const o = (a && typeof a === 'object') ? a : {}, n = (b && typeof b === 'object') ? b : {};
+      const keys = [...new Set([...Object.keys(o), ...Object.keys(n)])].sort();
+      const out = [];
+      keys.forEach(k => {
+        const ov = k in o ? o[k] : undefined, nv = k in n ? n[k] : undefined;
+        if (JSON.stringify(ov) !== JSON.stringify(nv)) out.push({ key: k, old: ov, new: nv });
+      });
+      return out;
+    }
+
+    function showValue(v) {
+      if (v === undefined) return '—';
+      if (v === null) return 'empty';
+      return typeof v === 'object' ? JSON.stringify(v) : String(v);
+    }
+
+    // One medcea.row_change entry (as approval_queue lists it) → a line of the review.
+    function describeChange(c) {
+      const isLine = c.target === 'medcea.recipe_line';
+      const vals = c.new || c.old || {};
+      const verb = { I: 'Created', U: 'Changed', D: 'Removed' }[c.op] || c.op;
+      let subject;
+      if (isLine) subject = 'step ' + ((c.row_key || [])[1] ?? vals.recipe_item_seq_id ?? '?');
+      else subject = { 'medcea.recipe': 'recipe', 'medcea.control_algorithm': 'algorithm',
+                       'medcea.unit_algorithm_params': 'parameter set' }[c.target] || c.target;
+      const fields = [];
+      const src = c.op === 'D' ? (c.old || {}) : (c.new || {});
+      Object.keys(src).sort().forEach(k => {
+        if (isStampKey(k)) return;
+        const ov = c.op === 'I' ? undefined : (c.old || {})[k];
+        const nv = c.op === 'D' ? undefined : (c.new || {})[k];
+        const label = RECIPE_FIELD_LABELS[k] || k;
+        const isObj = x => x && typeof x === 'object' && !Array.isArray(x);
+        if (c.op === 'U' && (isObj(ov) || isObj(nv))) {
+          jsonKeyDiff(ov, nv).forEach(d => fields.push({ label: label + '.' + d.key, old: d.old, new: d.new }));
+        } else if (c.op !== 'U' || JSON.stringify(ov) !== JSON.stringify(nv)) {
+          fields.push({ label, old: ov, new: nv });
+        }
+      });
+      const who = (c.by_name || 'no person') + (c.by_role ? ' · ' + c.by_role : '') + (c.by_source ? ' · ' + c.by_source : '');
+      return { when: fmtWhen(c.at), who, verb, subject, fields, authors: c.authors !== false };
+    }
+
+    // The steps (recipe_item_seq_id) of a recipe touched by the listed changes.
+    function changedSteps(changes) {
+      const s = new Set();
+      (changes || []).forEach(c => {
+        if (c.target !== 'medcea.recipe_line') return;
+        const seq = (c.row_key || [])[1] ?? (c.new || {}).recipe_item_seq_id ?? (c.old || {}).recipe_item_seq_id;
+        if (seq !== undefined && seq !== null) s.add(Number(seq));
+      });
+      return s;
+    }
+
+    // my_approvals() state → text for the person who proposed or authored.
+    function myStateText(state) {
+      return { waiting: 'Waiting for qa', returned: 'Returned by qa', applied: 'Approved and applied',
+               applied_review_pending: 'Applied at once; waits for qa review', reviewed: 'Applied and reviewed by qa',
+               withdrawn: 'Withdrawn by you', superseded: 'Replaced by a newer proposal' }[state] || state;
+    }
+
+    // History filter → the approval targets it reads (null: no filter).
+    const HISTORY_FILTERS = {
+      all: null,
+      recipes: ['medcea.recipe'],
+      algorithms: ['medcea.control_algorithm'],
+      params: ['medcea.unit_algorithm_params'],
+      pending: ['medcea.pending_change'],
+      reviews: ['medcea.cea_location', 'medcea.cea_unit', 'medcea.cea_zone', 'medcea.component', 'medcea.device'],
+      releases: ['medcea.recipe_run'],
+      qtables: ['medcea.algorithm_state']
+    };
+    function historyQuery(filter, item) {
+      let q = '/approval?select=approval_id,target,row_key,action,note,author_persons,approved_by_name,approved_by_role,'
+            + 'approved_by_source,approved_at&order=approval_id.desc&limit=100';
+      if (item) return q + '&target=eq.' + encodeURIComponent(item.target)
+                         + '&row_key=eq.' + encodeURIComponent(JSON.stringify([item.id]));
+      const t = HISTORY_FILTERS[filter];
+      if (t) q += '&target=in.(' + t.map(encodeURIComponent).join(',') + ')';
+      return q;
+    }
+    // An approval row's subject, from the names the page has loaded (maps by target).
+    function historyLabel(a, names) {
+      const id = (a.row_key || [])[0];
+      const m = (names || {})[a.target] || {};
+      if (m[id] !== undefined) return m[id];
+      const kind = { 'medcea.recipe': 'Recipe', 'medcea.control_algorithm': 'Control algorithm',
+                     'medcea.unit_algorithm_params': 'Parameter set', 'medcea.pending_change': 'Change',
+                     'medcea.recipe_run': 'Run', 'medcea.algorithm_state': 'Learned state' }[a.target];
+      return (kind || a.target) + ' #' + (a.row_key || []).join('/');
+    }
+
+    // The parameter-set form → a row for POST/PATCH /unit_algorithm_params, or the error.
+    function paramSetPayload(f) {
+      const name = String(f.name || '').trim();
+      if (!name) return { error: 'Give the parameter set a name.' };
+      const alg = parseInt(f.algorithm_id, 10);
+      if (!Number.isInteger(alg)) return { error: 'Choose its algorithm.' };
+      let unit = null;
+      if (f.unit_id !== '' && f.unit_id !== null && f.unit_id !== undefined) {
+        unit = parseInt(f.unit_id, 10);
+        if (!Number.isInteger(unit)) return { error: 'Choose a unit, or any unit.' };
+      }
+      let params;
+      try { params = JSON.parse(String(f.params || '').trim() || '{}'); }
+      catch (_) { return { error: 'Params are not valid JSON.' }; }
+      if (!params || typeof params !== 'object' || Array.isArray(params)) return { error: 'Params must be a JSON object, e.g. {"kp": 2.0}.' };
+      return { body: { name, algorithm_id: alg, unit_id: unit, params } };
+    }
+    /* approvals-logic:end */
 
     // ── Locations ─────────────────────────────────────────────
     async function loadLocations() {
@@ -1575,23 +1998,33 @@
       } catch(e) { toast('Load recipes failed: ' + e.message, false); }
     }
 
+    // The approval status (medcea.recipe.status) of each recipe, with who last edited
+    // it. An approved or retired recipe opens read-only: a change starts a new draft
+    // (⎘ Copy), which qa approves in the Approvals tab.
     function renderRecipeTable() {
       const w = document.getElementById('recipe-table-wrap');
-      if (!recipes.length) { w.innerHTML = '<div class="empty">No recipes yet. Create one to get started.</div>'; return; }
+      const showRetired = document.getElementById('recipe-show-retired').checked;
+      const list = recipes.filter(r => showRetired || r.status !== 'retired');
+      if (!list.length) { w.innerHTML = '<div class="empty">No recipes yet. Create one to get started.</div>'; return; }
       w.innerHTML = '<table class="tbl"><thead><tr>'
-        + '<th>Name</th><th>Description</th><th>Status</th><th>Created</th><th></th>'
+        + '<th>Name</th><th>Description</th><th>Approval</th><th>Active</th><th>Created</th><th></th>'
         + '</tr></thead><tbody>'
-        + recipes.map(r => '<tr>'
+        + list.map(r => {
+          const b = statusBadge(r.status);
+          const edited = 'Last edited by ' + (r.updated_by_name || r.created_by_name || 'unknown') + ' on '
+                       + fmtWhen(r.timestamp_upd || r.timestamp_cre);
+          return '<tr>'
           + '<td><strong>' + esc(r.recipe_name) + '</strong></td>'
           + '<td>' + esc(r.recipe_description || '—') + '</td>'
+          + '<td><span class="badge ' + b.cls + '" title="' + esc(edited) + '">' + esc(b.text) + '</span></td>'
           + '<td><span class="badge badge-' + (r.is_active === 'Y' ? 'y' : 'n') + '">' + (r.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
           + '<td>' + (r.timestamp_cre ? r.timestamp_cre.slice(0,10) : '—') + '</td>'
           + '<td style="white-space:nowrap">'
-          + '<button class="btn btn-ghost btn-sm" onclick="openRecipeForm(' + r.recipe_id + ')">Edit</button>'
+          + '<button class="btn btn-ghost btn-sm" onclick="openRecipeForm(' + r.recipe_id + ')">' + (isFrozen(r.status) ? 'View' : 'Edit') + '</button>'
           + ' <button class="btn btn-teal btn-sm" onclick="openRecipeDetail(' + r.recipe_id + ')">Steps →</button>'
-          + ' <button class="btn btn-ghost btn-sm" onclick="copyRecipeById(' + r.recipe_id + ')" title="Duplicate this recipe">⎘ Copy</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="copyRecipeById(' + r.recipe_id + ')" title="' + (r.status === 'draft' ? 'Duplicate this recipe' : 'Copy to a new draft') + '">⎘ Copy</button>'
           + ' <button class="btn btn-ghost btn-sm" onclick="openExportChoiceFor(' + r.recipe_id + ')" title="Export this recipe">↓ Export</button>'
-          + '</td></tr>').join('')
+          + '</td></tr>'; }).join('')
         + '</tbody></table>';
     }
 
@@ -1616,6 +2049,7 @@
         document.getElementById('recipe-list-panel').classList.add('hidden');
         document.getElementById('recipe-detail-panel').classList.remove('hidden');
         document.getElementById('recipe-lines-wrap').innerHTML = '<div class="empty">Save the recipe first, then add steps.</div>';
+        renderRecipeFreeze(null);
       }
     }
 
@@ -1633,7 +2067,38 @@
       }
       document.getElementById('recipe-list-panel').classList.add('hidden');
       document.getElementById('recipe-detail-panel').classList.remove('hidden');
+      renderRecipeFreeze(r);
       await loadRecipeLines(id);
+    }
+
+    // Approved or retired: frozen here in both modes (the database refuses the edit
+    // under IAM_DB_ROLES=true and would demote the recipe under false). A draft is
+    // edited as before. r null: a new recipe.
+    function renderRecipeFreeze(r) {
+      const status = r ? r.status : 'draft';
+      const frozen = isFrozen(status);
+      const b = statusBadge(status);
+      document.getElementById('recipe-status-line').innerHTML = r
+        ? '<span class="badge ' + b.cls + '">' + esc(b.text) + '</span> <span class="muted">Last edited by '
+          + esc(r.updated_by_name || r.created_by_name || 'unknown') + ', ' + esc(fmtWhen(r.timestamp_upd || r.timestamp_cre)) + '</span>'
+        : '';
+      const banner = document.getElementById('recipe-frozen-banner');
+      banner.classList.toggle('hidden', !frozen);
+      banner.textContent = status === 'retired'
+        ? 'Retired: this recipe is kept for the record and cannot be changed. ⎘ Copy makes a new draft from it.'
+        : 'Approved: this recipe is frozen. To change it, use ⎘ Copy. The copy is a new draft that qa approves.';
+      const form = document.getElementById('recipe-header-form');
+      Array.from(form.elements).forEach(el => { el.disabled = frozen; });
+      document.getElementById('recipe-save-btn').classList.toggle('hidden', frozen);
+      document.getElementById('recipe-addstep-btn').classList.toggle('hidden', frozen);
+      document.getElementById('recipe-del-btn').classList.toggle('hidden', !r || status === 'retired');
+      document.getElementById('recipe-copy-btn').textContent = frozen ? '⎘ Copy to a new draft' : '⎘ Copy';
+      document.getElementById('recipe-draft-hint').classList.toggle('hidden', frozen || !r);
+    }
+
+    function currentRecipeFrozen() {
+      const r = recipes.find(x => x.recipe_id === currentRecipeId);
+      return !!(r && isFrozen(r.status));
     }
 
     function closeRecipeDetail() {
@@ -1663,15 +2128,20 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteRecipe() {
-      if (!confirm('Delete this recipe and all its steps?')) return;
+    // Nothing is deleted (no role holds DELETE on recipes, I1): a recipe is retired,
+    // status alone (draft or approved → retired, which the guards allow an engineer),
+    // and stays retired; ⎘ Copy makes a new draft from it.
+    async function retireRecipe() {
+      const r = recipes.find(x => x.recipe_id === currentRecipeId);
+      if (!r) return;
+      if (!confirm('Retire recipe "' + r.recipe_name + '"?\n\nNothing is deleted: a retired recipe is kept for the record with its steps, '
+                   + 'cannot be changed, assigned or run again, and cannot be brought back (⎘ Copy makes a new draft from it).')) return;
       try {
-        await api('DELETE', '/recipe_line?recipe_id=eq.' + currentRecipeId);
-        await api('DELETE', '/recipe?recipe_id=eq.' + currentRecipeId);
-        toast('Recipe deleted');
+        await api('PATCH', '/recipe?recipe_id=eq.' + currentRecipeId, { status: 'retired' });
+        toast('Recipe retired');
         closeRecipeDetail();
         await loadRecipes();
-      } catch(err) { toast(err.message, false); }
+      } catch(err) { toast('Not retired: ' + err.message, false); }
     }
 
     async function loadRecipeLines(recipeId) {
@@ -1705,12 +2175,13 @@
           + '<td>' + l.air_temperature_lower_limit + '–' + l.air_temperature_upper_limit + '</td>'
           + '<td>' + l.co2_lower_limit + '–' + l.co2_upper_limit + '</td>'
           + '<td>' + l.hr_lower_limit + '–' + l.hr_upper_limit + '</td>'
-          + '<td><button class="btn btn-ghost btn-sm" onclick="openRecipeLineModal(' + l.recipe_item_seq_id + ')">Edit</button></td>'
+          + '<td>' + (currentRecipeFrozen() ? '' : '<button class="btn btn-ghost btn-sm" onclick="openRecipeLineModal(' + l.recipe_item_seq_id + ')">Edit</button>') + '</td>'
           + '</tr>').join('')
         + '</tbody></table>';
     }
 
     function openRecipeLineModal(seqId) {
+      if (currentRecipeFrozen()) { toast('This recipe is frozen; ⎘ Copy makes a new draft to change', false); return; }
       recipeLineModal = { recipeId: currentRecipeId, seqId };
       const form = document.getElementById('rline-form');
       form.reset();
@@ -1762,15 +2233,14 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteRecipeLine() {
-      if (!confirm('Delete this step?')) return;
-      try {
-        await api('DELETE',
-          '/recipe_line?recipe_id=eq.' + recipeLineModal.recipeId + '&recipe_item_seq_id=eq.' + recipeLineModal.seqId);
-        toast('Step deleted');
-        closeRecipeLineModal();
-        await loadRecipeLines(recipeLineModal.recipeId);
-      } catch(err) { toast(err.message, false); }
+    // A step is never deleted (no DELETE on recipe_line; it has no status of its own):
+    // the recipe is copied to a new draft without it, and this draft is retired.
+    async function retireRecipeLine() {
+      const seq = recipeLineModal.seqId, rid = recipeLineModal.recipeId;
+      if (!confirm('Steps are never deleted. Remove step ' + seq + ' by copying this recipe to a new draft without it?\n\n'
+                   + 'This draft is then retired (kept for the record); the new draft waits for qa approval.')) return;
+      closeRecipeLineModal();
+      await copyRecipeById(rid, { skipSeq: seq, retireSource: true });
     }
 
     // ── Recipe Import / Export ────────────────────────────────
@@ -1866,13 +2336,17 @@
     // ── Copy Recipe ───────────────────────────────────────────
     async function copyRecipe() { await copyRecipeById(currentRecipeId); }
 
-    async function copyRecipeById(recipeId) {
+    // A copy is a new draft. opts.skipSeq leaves one step out; opts.retireSource then
+    // retires the source draft (Remove step…).
+    async function copyRecipeById(recipeId, opts = {}) {
       const src = recipes.find(r => r.recipe_id === recipeId);
       if (!src) return;
-      const newName = prompt('Copy recipe as:', src.recipe_name + ' (copy)');
+      const newName = prompt(opts.skipSeq ? 'New draft without step ' + opts.skipSeq + ', named:' : 'Copy recipe as:',
+                             src.recipe_name + (opts.skipSeq ? ' (rev)' : ' (copy)'));
       if (!newName || !newName.trim()) return;
       try {
-        const lines = await api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id');
+        const lines = (await api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id'))
+          .filter(l => !opts.skipSeq || l.recipe_item_seq_id !== opts.skipSeq);
         const rows = await api('POST', '/recipe', {
           recipe_name: newName.trim(),
           recipe_description: src.recipe_description || null
@@ -1890,7 +2364,12 @@
             return s;
           }));
         }
-        toast('Copied as "' + newName.trim() + '"');
+        let msg = 'Copied as "' + newName.trim() + '" (a new draft)';
+        if (opts.retireSource) {
+          try { await api('PATCH', '/recipe?recipe_id=eq.' + recipeId, { status: 'retired' }); msg += '; "' + src.recipe_name + '" retired'; }
+          catch(e) { msg += '; "' + src.recipe_name + '" was not retired: ' + e.message; }
+        }
+        toast(msg);
         await loadRecipes();
         await openRecipeDetail(newId);
       } catch(e) { toast('Copy failed: ' + e.message, false); }
@@ -2826,14 +3305,20 @@
         tb.innerHTML = '<tr><td colspan="5" class="empty" style="padding:28px">No algorithms found.</td></tr>';
         return;
       }
+      // Every status is shown; an approved (or retired) algorithm is frozen here in both
+      // modes: its defaults are read-only and Save is off (a unit is tuned with a
+      // parameter set instead).
       tb.innerHTML = algorithms.map(a => {
         const params = JSON.stringify(a.default_params || {}, null, 2);
+        const b = statusBadge(a.status);
+        const frozen = isFrozen(a.status);
+        const why = 'Approved algorithms are frozen; tune a unit with a parameter set instead';
         return `<tr>
-          <td><span class="algo-badge">${a.algorithm_code}</span>${a.status && a.status !== 'approved' ? `<div style="font-size:.72rem;color:#fbbf24;margin-top:3px" title="Runs use approved definitions only once the database enforces approvals">${a.status}</div>` : ''}</td>
-          <td style="font-weight:600;color:#e2e8f0">${a.algorithm_name}</td>
-          <td style="font-size:.82rem;color:#94a3b8">${a.description || ''}</td>
-          <td><textarea id="algo-params-${a.algorithm_id}">${params}</textarea></td>
-          <td><button class="btn btn-sm btn-purple" onclick="saveAlgorithm(${a.algorithm_id})">Save</button></td>
+          <td><span class="algo-badge">${esc(a.algorithm_code)}</span>${a.status ? `<div style="margin-top:5px"><span class="badge ${b.cls}" title="Runs use approved definitions only once the database enforces approvals">${esc(b.text)}</span></div>` : ''}</td>
+          <td style="font-weight:600;color:#e2e8f0">${esc(a.algorithm_name)}</td>
+          <td style="font-size:.82rem;color:#94a3b8">${esc(a.description || '')}</td>
+          <td><textarea id="algo-params-${a.algorithm_id}"${frozen ? ' readonly title="' + why + '"' : ''}>${esc(params)}</textarea></td>
+          <td><button class="btn btn-sm btn-purple" onclick="saveAlgorithm(${a.algorithm_id})"${frozen ? ' disabled title="' + why + '"' : ''}>Save</button></td>
         </tr>`;
       }).join('');
     }
@@ -2896,7 +3381,7 @@
         const n = await api('POST', '/rpc/retire_algorithm_state', {p_unit_id: uid, p_algorithm: algo, p_reason: reason.trim()});
         toast(`${algo} state retired for ${ucode} (${n} channel${n!==1?'s':''}); the next run starts cold`);
         loadUnitMemory();
-      } catch(e) { toast('Not retired: ' + e.message, false); }
+      } catch(e) { toast('Not retired: ' + retireError(e.raw || e.message), false); }
     }
 
     // ── Algorithm State Modal ─────────────────────────────────
@@ -2926,8 +3411,486 @@
       document.getElementById('algo-state-modal-bg').classList.remove('open');
     }
 
+    // ── Parameter Sets (Control Models) ───────────────────────
+    // medcea.unit_algorithm_params through PostgREST as the person's role: an
+    // engineer creates and edits drafts (draft_only), qa approves them in the
+    // Approvals tab; approved and retired sets are frozen here (⎘ Copy to a new draft).
+    let paramSets = [], psAlgorithms = [], psUnits = [], psModal = { id: null, touched: false };
+
+    async function loadParamSets() {
+      const w = document.getElementById('ps-wrap');
+      try {
+        const [sets, algs, us] = await Promise.all([
+          api('GET', '/unit_algorithm_params?select=params_id,name,algorithm_id,unit_id,params,status,created_by_name,updated_by_name,timestamp_cre,timestamp_upd&order=name'),
+          api('GET', '/control_algorithm?select=algorithm_id,algorithm_code,algorithm_name,default_params,status&order=algorithm_code'),
+          api('GET', '/cea_unit?select=unit_id,unit_code&order=unit_code')]);
+        paramSets = sets; psAlgorithms = algs; psUnits = us;
+        const sel = document.getElementById('ps-filter-algo'), keep = sel.value;
+        sel.innerHTML = '<option value="">All algorithms</option>'
+          + algs.map(a => '<option value="' + a.algorithm_id + '">' + esc(a.algorithm_code) + '</option>').join('');
+        sel.value = keep;
+        renderParamSets();
+      } catch(e) {
+        paramSets = [];
+        w.innerHTML = e.code === '42501'
+          ? '<div class="empty">Your role does not read parameter sets (nobody reads them here while the database does not enforce roles).</div>'
+          : '<div class="empty" style="color:#fca5a5">Failed to load parameter sets: ' + esc(e.message) + '</div>';
+      }
+    }
+
+    function psAlgoCode(id) { const a = psAlgorithms.find(x => x.algorithm_id === id); return a ? a.algorithm_code : '#' + id; }
+    function psUnitCode(id) {
+      if (id === null || id === undefined) return 'any unit';
+      const u = psUnits.find(x => x.unit_id === id); return u ? u.unit_code : '#' + id;
+    }
+
+    function renderParamSets() {
+      const w = document.getElementById('ps-wrap');
+      const alg = document.getElementById('ps-filter-algo').value;
+      const showRetired = document.getElementById('ps-show-retired').checked;
+      const list = paramSets.filter(p => (!alg || String(p.algorithm_id) === alg) && (showRetired || p.status !== 'retired'));
+      if (!list.length) { w.innerHTML = '<div class="empty">No parameter sets' + (alg ? ' for this algorithm' : '') + '.</div>'; return; }
+      w.innerHTML = '<table class="tbl"><thead><tr><th>Name</th><th>Algorithm</th><th>Unit</th><th>Params</th><th>Approval</th><th>Last edited by</th><th></th></tr></thead><tbody>'
+        + list.map(p => {
+          const b = statusBadge(p.status);
+          return '<tr>'
+            + '<td><strong>' + esc(p.name) + '</strong></td>'
+            + '<td><span class="algo-badge">' + esc(psAlgoCode(p.algorithm_id)) + '</span></td>'
+            + '<td>' + esc(psUnitCode(p.unit_id)) + '</td>'
+            + '<td><code style="font-size:.75rem;color:#a5b4fc;word-break:break-all">' + esc(JSON.stringify(p.params || {})) + '</code></td>'
+            + '<td><span class="badge ' + b.cls + '">' + esc(b.text) + '</span></td>'
+            + '<td class="muted">' + esc(p.updated_by_name || p.created_by_name || '—') + '<br>' + esc(fmtWhen(p.timestamp_upd || p.timestamp_cre)) + '</td>'
+            + '<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="openParamSetModal(' + p.params_id + ')">'
+            + (isFrozen(p.status) ? 'View' : 'Edit') + '</button></td>'
+            + '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    function openParamSetModal(id, copyFrom) {
+      const p = id ? paramSets.find(x => x.params_id === id) : null;
+      const src = p || copyFrom || null;
+      psModal = { id: p ? id : null, touched: !!src };
+      const form = document.getElementById('ps-form');
+      form.reset();
+      form.elements['algorithm_id'].innerHTML = '<option value="">— Select —</option>'
+        + psAlgorithms.filter(a => a.status !== 'retired' || (src && a.algorithm_id === src.algorithm_id))
+            .map(a => '<option value="' + a.algorithm_id + '">' + esc(a.algorithm_code + ' — ' + a.algorithm_name)
+                      + (a.status !== 'approved' ? ' (' + a.status + ')' : '') + '</option>').join('');
+      form.elements['unit_id'].innerHTML = '<option value="">Any unit</option>'
+        + psUnits.map(u => '<option value="' + u.unit_id + '">' + esc(u.unit_code) + '</option>').join('');
+      const filt = document.getElementById('ps-filter-algo').value;
+      if (src) {
+        form.elements['name'].value = copyFrom ? src.name + ' (copy)' : src.name;
+        form.elements['algorithm_id'].value = src.algorithm_id;
+        form.elements['unit_id'].value = src.unit_id ?? '';
+        form.elements['params'].value = JSON.stringify(src.params || {}, null, 2);
+      } else if (filt) {
+        form.elements['algorithm_id'].value = filt;
+        onParamSetAlgoChange();
+      }
+      const status = p ? p.status : 'draft';
+      const frozen = isFrozen(status);
+      Array.from(form.elements).forEach(el => { if (el.tagName !== 'BUTTON') el.disabled = frozen; });
+      document.getElementById('ps-modal-title').textContent = p ? (frozen ? 'Parameter Set' : 'Edit Parameter Set')
+                                                                 : (copyFrom ? 'New Draft from “' + copyFrom.name + '”' : 'New Parameter Set');
+      const b = statusBadge(status);
+      document.getElementById('ps-status-line').innerHTML = p
+        ? '<span class="badge ' + b.cls + '">' + esc(b.text) + '</span> <span class="muted">Last edited by '
+          + esc(p.updated_by_name || p.created_by_name || 'unknown') + ', ' + esc(fmtWhen(p.timestamp_upd || p.timestamp_cre)) + '</span>'
+        : '';
+      const banner = document.getElementById('ps-frozen-banner');
+      banner.classList.toggle('hidden', !frozen);
+      banner.textContent = status === 'retired'
+        ? 'Retired: this parameter set is kept for the record and cannot be changed.'
+        : 'Approved: this parameter set is frozen. To change it, copy it to a new draft, which qa approves.';
+      document.getElementById('ps-save-btn').classList.toggle('hidden', frozen);
+      document.getElementById('ps-copy-btn').classList.toggle('hidden', !p);
+      document.getElementById('ps-retire-btn').classList.toggle('hidden', !p || status === 'retired');
+      document.getElementById('ps-modal-bg').classList.add('open');
+      form.elements['params'].oninput = () => { psModal.touched = true; };
+    }
+
+    function closeParamSetModal() { document.getElementById('ps-modal-bg').classList.remove('open'); }
+
+    // A new set starts from its algorithm's defaults until the params are edited.
+    function onParamSetAlgoChange() {
+      const form = document.getElementById('ps-form');
+      if (psModal.id || psModal.touched) return;
+      const a = psAlgorithms.find(x => String(x.algorithm_id) === form.elements['algorithm_id'].value);
+      form.elements['params'].value = a ? JSON.stringify(a.default_params || {}, null, 2) : '';
+    }
+
+    async function submitParamSet(e) {
+      e.preventDefault();
+      const f = e.target.elements;
+      const r = paramSetPayload({ name: f['name'].value, algorithm_id: f['algorithm_id'].value,
+                                  unit_id: f['unit_id'].value, params: f['params'].value });
+      if (r.error) { toast(r.error, false); return; }
+      try {
+        if (psModal.id) {
+          await api('PATCH', '/unit_algorithm_params?params_id=eq.' + psModal.id, r.body);
+          toast('Parameter set saved (a draft; qa approves it in the Approvals tab)');
+        } else {
+          await api('POST', '/unit_algorithm_params', r.body);
+          toast('Parameter set created as a draft; qa approves it in the Approvals tab');
+        }
+        closeParamSetModal();
+        await loadParamSets();
+      } catch(err) { toast('Not saved: ' + err.message, false); }
+    }
+
+    function copyParamSet() {
+      const p = paramSets.find(x => x.params_id === psModal.id);
+      if (!p) return;
+      openParamSetModal(null, p);
+    }
+
+    // Status alone (draft or approved → retired); a retired set stays retired.
+    async function retireParamSet() {
+      const p = paramSets.find(x => x.params_id === psModal.id);
+      if (!p) return;
+      if (!confirm('Retire parameter set "' + p.name + '"?\n\nNothing is deleted: it is kept for the record, cannot be changed or used by a new run, and cannot be brought back (copy it to a new draft instead).')) return;
+      try {
+        await api('PATCH', '/unit_algorithm_params?params_id=eq.' + p.params_id, { status: 'retired' });
+        toast('Parameter set retired');
+        closeParamSetModal();
+        await loadParamSets();
+      } catch(err) { toast('Not retired: ' + err.message, false); }
+    }
+
+    // ── Approvals ─────────────────────────────────────────────
+    let apprAccess = { queue: false, mine: false };
+    let apprQueue = [], apprMine = [], apprCurrent = null, apprHistItem = null;
+
+    // One read for a probe: a raw fetch, so a refusal never sends the browser through
+    // the sign-in again. 42501 (the role, or every role while IAM_DB_ROLES=false) and
+    // 404 PGRST202 (the page deployed before the database) mean "not here", silently.
+    async function apprProbe(path) {
+      try {
+        const r = await fetch(API + path, { headers: { 'Accept': 'application/json' } });
+        if (r.ok) return { ok: true, rows: await r.json() };
+        let e = null;
+        try { e = await r.json(); } catch(_) {}
+        const quiet = (e && (e.code === '42501' || e.code === 'PGRST202')) || r.status === 404 || r.status === 401 || r.status === 403;
+        if (!quiet) console.warn('approvals: ' + path + ' answered ' + r.status, e);
+        return { ok: false };
+      } catch(err) { console.warn('approvals: ' + path, err); return { ok: false }; }
+    }
+
+    // The tab shows when the database answers the queue (qa, qp, auditor) or the
+    // caller's own work (every person); the count is what the viewer can act on.
+    async function probeApprovals() {
+      const [q, m] = await Promise.all([apprProbe('/rpc/approval_queue?p_changes=false'), apprProbe('/rpc/my_approvals')]);
+      apprAccess = { queue: q.ok, mine: m.ok };
+      document.getElementById('tb-approvals').classList.toggle('hidden', !(q.ok || m.ok));
+      setApprovalCount(q.ok ? q.rows : [], m.ok ? m.rows : []);
+      if ((q.ok || m.ok) && location.hash === '#approvals') showTab('approvals');
+    }
+
+    function setApprovalCount(queue, mine) {
+      const n = (queue || []).filter(r => r.may_approve).length + (mine || []).filter(r => r.state === 'returned').length;
+      document.getElementById('appr-count').textContent = n ? '(' + n + ')' : '';
+    }
+
+    async function loadApprovals() {
+      const panel = document.getElementById('appr-queue-panel');
+      panel.classList.toggle('hidden', !apprAccess.queue);
+      if (!apprAccess.queue) return;
+      const w = document.getElementById('appr-queue-wrap');
+      try {
+        apprQueue = await api('GET', '/rpc/approval_queue');
+        renderApprovalQueue();
+        setApprovalCount(apprQueue, apprMine);
+      } catch(e) {
+        w.innerHTML = '<div class="empty" style="color:#fca5a5">Failed to load the queue: ' + esc(friendlyApprovalError(e.raw || e.message)) + '</div>';
+      }
+    }
+
+    function renderApprovalQueue() {
+      const w = document.getElementById('appr-queue-wrap');
+      if (!apprQueue.length) { w.innerHTML = '<div class="empty">Nothing waits for approval.</div>'; return; }
+      w.innerHTML = '<table class="tbl"><thead><tr><th>What</th><th>Item</th><th>Authors since last approval</th><th>Last approved</th><th>Changes</th><th></th></tr></thead><tbody>'
+        + apprQueue.map((r, i) => {
+          const pending = PENDING_KINDS.includes(r.kind);
+          let authors;
+          if (pending) {
+            authors = 'proposed by ' + esc(r.proposed_by || 'no person') + ', ' + esc(fmtWhen(r.proposed_at))
+                    + (r.reason ? '<div class="muted">“' + esc(r.reason) + '”</div>' : '');
+          } else {
+            authors = esc((r.author_names || []).join(', ') || '—')
+                    + (r.unattributed ? '<div class="muted">+ ' + r.unattributed + ' change(s) without a person</div>' : '');
+          }
+          if (r.state === 'returned')
+            authors += '<div class="appr-why">Returned by ' + esc(r.returned_by || '?') + ', ' + esc(fmtWhen(r.returned_at)) + ': “' + esc(r.return_reason || '') + '” — waits for its author</div>';
+          const last = r.last_approved_at ? esc(fmtWhen(r.last_approved_at)) + '<div class="muted">by ' + esc(r.last_approved_by || '?') + '</div>' : 'never';
+          const changes = pending ? esc(pendingSummary(r)) : String(r.changes_total ?? 0);
+          return '<tr>'
+            + '<td>' + esc(KIND_LABELS[r.kind] || r.kind) + (r.state === 'review' ? '<div class="muted">review after the fact</div>' : '') + '</td>'
+            + '<td><strong>' + esc(r.label || '') + '</strong></td>'
+            + '<td>' + authors + '</td>'
+            + '<td>' + last + '</td>'
+            + '<td>' + changes + '</td>'
+            + '<td style="white-space:nowrap"><button class="btn btn-teal btn-sm" onclick="openApprovalModal(' + i + ')">Review…</button>'
+            + (r.may_approve ? '' : '<div class="appr-why">' + esc(approvalWhyNot(r.why_not_code, r)) + '</div>') + '</td>'
+            + '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    const SETTING_LABELS = { log_compress_days: 'Compress run logs after', log_delete_days: 'Retention setting (not applied)' };
+
+    function approvalModalTitle(r) {
+      const d = r.detail || {};
+      switch (r.kind) {
+        case 'recipe': return 'Approve recipe “' + r.label + '”';
+        case 'algorithm': return 'Approve control algorithm ' + r.label;
+        case 'params': return 'Approve parameter set “' + r.label + '” (' + (d.algorithm_code || '?') + ', ' + (d.unit_code || 'any unit') + ')';
+        case 'setting': return 'Approve log setting';
+        case 'commissioning': return (r.state === 'review' ? 'Review the end of commissioning of ' : 'Approve commissioning of ') + r.label;
+      }
+      return approvalLabel(r);
+    }
+
+    function approvalWhatHtml(r) {
+      const d = r.detail || {};
+      const pre = v => '<pre class="appr-pre">' + esc(JSON.stringify(v ?? {}, null, 2)) + '</pre>';
+      if (r.kind === 'recipe') {
+        const hot = changedSteps(r.changes);
+        const lines = d.lines || [];
+        return '<p><strong>' + esc(d.recipe_name) + '</strong> · ' + (d.is_active === 'Y' ? 'Active' : 'Inactive')
+          + (d.recipe_description ? '<div class="muted">' + esc(d.recipe_description) + '</div>' : '') + '</p>'
+          + (lines.length ? '<div style="overflow-x:auto;margin-top:8px"><table class="tbl"><thead><tr><th>#</th><th>Name</th><th>Cycles</th><th>Light</th><th>ON/OFF</th><th>Air °C</th><th>CO₂</th><th>RH %</th><th>Substrate °C</th></tr></thead><tbody>'
+            + lines.map(l => '<tr' + (hot.has(Number(l.recipe_item_seq_id)) ? ' class="tr-changed" title="changed since the last approval"' : '') + '>'
+              + '<td>' + l.recipe_item_seq_id + '</td><td>' + esc(l.recipe_item_seq_name) + '</td><td>' + l.cycle_number + '</td>'
+              + '<td>' + esc(l.light_type) + '</td><td>' + l.light_on_minutes + ' / ' + l.light_off_minutes + '</td>'
+              + '<td>' + l.air_temperature_lower_limit + '–' + l.air_temperature_upper_limit + '</td>'
+              + '<td>' + l.co2_lower_limit + '–' + l.co2_upper_limit + '</td>'
+              + '<td>' + l.hr_lower_limit + '–' + l.hr_upper_limit + '</td>'
+              + '<td>' + (l.substrate_temperature_lower_limit ?? '—') + '–' + (l.substrate_temperature_upper_limit ?? '—') + '</td></tr>').join('')
+            + '</tbody></table></div>' + (hot.size ? '<p class="muted" style="margin-top:6px">Highlighted steps changed since the last approval.</p>' : '')
+            : '<p class="muted">No steps.</p>');
+      }
+      if (r.kind === 'algorithm')
+        return '<p><span class="algo-badge">' + esc(d.algorithm_code) + '</span> <strong>' + esc(d.algorithm_name) + '</strong></p>'
+          + (d.description ? '<p class="muted">' + esc(d.description) + '</p>' : '') + '<p class="muted" style="margin-top:6px">Default params</p>' + pre(d.default_params);
+      if (r.kind === 'params')
+        return '<p><span class="algo-badge">' + esc(d.algorithm_code) + '</span> for <strong>' + esc(d.unit_code || 'any unit') + '</strong></p>' + pre(d.params);
+      const who = '<p class="muted" style="margin-top:6px">Proposed by ' + esc(r.proposed_by || 'no person') + ', ' + esc(fmtWhen(r.proposed_at))
+                + (r.reason ? ': “' + esc(r.reason) + '”' : '') + '</p>';
+      if (r.kind === 'setting')
+        return '<p>' + esc(SETTING_LABELS[r.label] || r.label) + ': <strong>' + esc(pendingSummary(r)) + '</strong></p>' + who
+          + '<p class="muted">The new value applies when you approve it.</p>';
+      if (r.kind === 'commissioning')
+        return '<p>' + esc(r.label) + ': <strong>' + esc(pendingSummary(r)) + '</strong></p>' + who
+          + (r.state === 'review'
+             ? '<p class="muted">Ending commissioning is a narrowing: it applied at once. Marking it reviewed records that you checked it.</p>'
+             : '<p class="muted">While a unit is flagged, engineers can command it from the MQTT Explorer (within about 15 seconds) and no run can start on it.</p>');
+      return pre(d);
+    }
+
+    function approvalChangesHtml(r) {
+      if (PENDING_KINDS.includes(r.kind)) return '';
+      const changes = r.changes || [];
+      const head = r.last_approved_at
+        ? 'Changes since the last approval (' + fmtWhen(r.last_approved_at) + ' by ' + (r.last_approved_by || '?') + ')'
+        : 'Never approved: ' + (r.changes_total ?? changes.length) + ' change(s) since creation';
+      if (!changes.length) return '<div class="appr-box"><h5>' + esc(head) + '</h5><p class="muted">None recorded.</p></div>';
+      return '<div class="appr-box"><h5>' + esc(head) + '</h5><ul class="appr-changes">'
+        + changes.map(c => {
+          const x = describeChange(c);
+          return '<li><span class="meta">' + esc(x.when) + ' · ' + esc(x.who) + '</span> · ' + esc(x.verb) + ' ' + esc(x.subject)
+            + (x.authors ? '' : ' <span class="meta">(status only; makes nobody an author)</span>')
+            + x.fields.map(f => '<div class="fld">' + esc(f.label) + ': ' + esc(showValue(f.old)) + ' → ' + esc(showValue(f.new)) + '</div>').join('')
+            + '</li>';
+        }).join('') + '</ul>'
+        + ((r.changes_total || 0) > changes.length ? '<p class="muted">Showing the newest ' + changes.length + ' of ' + r.changes_total + '.</p>' : '')
+        + '</div>';
+    }
+
+    function openApprovalModal(i) {
+      const r = apprQueue[i];
+      if (!r) return;
+      apprCurrent = r;
+      document.getElementById('appr-modal-title').textContent = approvalModalTitle(r);
+      document.getElementById('appr-modal-body').innerHTML =
+        '<div class="appr-box"><h5>What you approve</h5>' + approvalWhatHtml(r) + '</div>' + approvalChangesHtml(r)
+        + (r.state === 'returned' ? '<div class="warn-banner">Returned by ' + esc(r.returned_by || '?') + ', ' + esc(fmtWhen(r.returned_at))
+                                     + ': “' + esc(r.return_reason || '') + '”. It waits for its author to change it.</div>' : '');
+      document.getElementById('appr-note').value = '';
+      const why = document.getElementById('appr-modal-why');
+      why.classList.toggle('hidden', !!r.may_approve);
+      why.textContent = r.may_approve ? '' : 'You cannot approve this: ' + approvalWhyNot(r.why_not_code, r);
+      const ab = document.getElementById('appr-approve-btn');
+      ab.disabled = !r.may_approve;
+      ab.textContent = r.state === 'review' ? 'Mark reviewed' : (PENDING_KINDS.includes(r.kind) ? 'Approve and apply' : 'Approve');
+      document.getElementById('appr-return-btn').classList.toggle('hidden', !r.may_return);
+      document.getElementById('appr-modal-bg').classList.add('open');
+    }
+
+    function closeApprovalModal() { document.getElementById('appr-modal-bg').classList.remove('open'); }
+
+    async function refreshAfterApproval() {
+      await Promise.all([loadApprovals(), loadMyApprovals(), loadApprovalHistory()]);
+      loadRecipes(); loadParamSets(); loadAlgorithms().catch(() => {});
+    }
+
+    async function approveCurrent() {
+      const r = apprCurrent;
+      if (!r) return;
+      const { path, body } = approvalRpc(r, document.getElementById('appr-note').value);
+      const btn = document.getElementById('appr-approve-btn');
+      btn.disabled = true;
+      try {
+        const id = await api('POST', path, body);
+        const verb = r.state === 'review' ? 'Reviewed' : (PENDING_KINDS.includes(r.kind) ? 'Applied' : 'Approved');
+        toast(verb + ': ' + approvalLabel(r) + ' (approval #' + id + ')');
+        closeApprovalModal();
+      } catch(e) {
+        toast('Not approved: ' + friendlyApprovalError(e.raw || e.message), false);
+        closeApprovalModal();
+      }
+      await refreshAfterApproval();
+    }
+
+    async function returnCurrent() {
+      const r = apprCurrent;
+      if (!r) return;
+      const reason = document.getElementById('appr-note').value.trim();
+      if (!reason) { toast('Give the reason for returning it in the note field', false); document.getElementById('appr-note').focus(); return; }
+      const what = PENDING_KINDS.includes(r.kind) ? 'The proposal is closed and never applies; its proposer may propose again.'
+                                                  : 'The draft stays an editable draft and leaves the queue until its author changes it.';
+      if (!confirm('Return ' + approvalLabel(r) + '?\n\n' + what + '\nThe reason is recorded and shown to the author.')) return;
+      const { path, body } = returnRpc(r, reason);
+      try {
+        const id = await api('POST', path, body);
+        toast('Returned: ' + approvalLabel(r) + ' (record #' + id + ')');
+        closeApprovalModal();
+      } catch(e) {
+        toast('Not returned: ' + friendlyApprovalError(e.raw || e.message), false);
+        closeApprovalModal();
+      }
+      await refreshAfterApproval();
+    }
+
+    async function loadMyApprovals() {
+      const panel = document.getElementById('appr-mine-panel');
+      panel.classList.toggle('hidden', !apprAccess.mine);
+      if (!apprAccess.mine) return;
+      const w = document.getElementById('appr-mine-wrap');
+      try {
+        apprMine = await api('GET', '/rpc/my_approvals');
+        setApprovalCount(apprQueue, apprMine);
+        if (!apprMine.length) { w.innerHTML = '<div class="empty">You have no proposals and no drafts waiting.</div>'; return; }
+        w.innerHTML = '<table class="tbl"><thead><tr><th>What</th><th>Item</th><th>Where it stands</th><th>Since</th><th>Reason</th><th></th></tr></thead><tbody>'
+          + apprMine.map((r, i) => {
+            const d = r.detail || {};
+            const proposed = PENDING_KINDS.includes(r.kind) && d.proposed !== undefined
+              ? ' <span class="muted">→ ' + esc(r.kind === 'commissioning' ? ((d.proposed === true || d.proposed === 'true') ? 'on' : 'off')
+                                                                           : String(d.proposed).replace(/^"|"$/g, '')) + '</span>' : '';
+            const reason = (r.reason ? esc(r.reason) : '') + (r.return_reason ? '<div class="appr-why">qa: “' + esc(r.return_reason) + '”</div>' : '');
+            let action = '';
+            if (r.may_withdraw) action = '<button class="btn btn-ghost btn-sm" onclick="withdrawMine(' + i + ')">Withdraw…</button>';
+            else if (r.state === 'returned' && !PENDING_KINDS.includes(r.kind)) action = '<span class="muted">Change the draft to send it back</span>';
+            return '<tr>'
+              + '<td>' + esc(KIND_LABELS[r.kind] || r.kind) + '</td>'
+              + '<td><strong>' + esc(r.label || '') + '</strong>' + proposed + '</td>'
+              + '<td>' + esc(myStateText(r.state)) + '</td>'
+              + '<td>' + esc(fmtWhen(r.closed_at || r.changed_at)) + '</td>'
+              + '<td>' + (reason || '—') + '</td>'
+              + '<td style="white-space:nowrap">' + action + '</td>'
+              + '</tr>';
+          }).join('') + '</tbody></table>';
+      } catch(e) {
+        w.innerHTML = '<div class="empty" style="color:#fca5a5">Failed to load: ' + esc(friendlyApprovalError(e.raw || e.message)) + '</div>';
+      }
+    }
+
+    async function withdrawMine(i) {
+      const r = apprMine[i];
+      if (!r) return;
+      const reason = prompt('Withdraw your proposal (' + (KIND_LABELS[r.kind] || r.kind) + ' ' + (r.label || '') + ')?\nIt never applies. Reason (optional, recorded):');
+      if (reason === null) return;
+      const { path, body } = withdrawRpc(r.id, reason);
+      try {
+        await api('POST', path, body);
+        toast('Proposal withdrawn');
+      } catch(e) { toast('Not withdrawn: ' + friendlyApprovalError(e.raw || e.message), false); }
+      await Promise.all([loadMyApprovals(), loadApprovals()]);
+    }
+
+    // The names the history shows, by approval target (best effort: a read the role
+    // lacks leaves the "medcea.recipe #5" form).
+    async function historyNames(rows) {
+      const names = {};
+      const ids = t => [...new Set(rows.filter(a => a.target === t).map(a => (a.row_key || [])[0]))].filter(x => x !== undefined);
+      const get = async (t, path, key, label) => {
+        const want = ids(t);
+        if (!want.length) return;
+        try {
+          const got = await api('GET', path + '&' + key + '=in.(' + want.join(',') + ')');
+          names[t] = {};
+          got.forEach(x => { names[t][x[key]] = label(x); });
+        } catch(_) {}
+      };
+      let units = [];
+      try { units = await api('GET', '/cea_unit?select=unit_id,unit_code'); } catch(_) {}
+      const unitCode = id => { const u = units.find(x => x.unit_id === Number(id)); return u ? u.unit_code : 'unit #' + id; };
+      await Promise.all([
+        get('medcea.recipe', '/recipe?select=recipe_id,recipe_name', 'recipe_id', x => 'Recipe “' + x.recipe_name + '”'),
+        get('medcea.control_algorithm', '/control_algorithm?select=algorithm_id,algorithm_code', 'algorithm_id', x => 'Control algorithm ' + x.algorithm_code),
+        get('medcea.unit_algorithm_params', '/unit_algorithm_params?select=params_id,name', 'params_id', x => 'Parameter set “' + x.name + '”'),
+        get('medcea.pending_change', '/pending_change?select=change_id,target,row_key,column_name,new_value', 'change_id',
+            x => x.target === 'medcea.cea_unit'
+              ? 'Commissioning of ' + unitCode((x.row_key || [])[0]) + ' → ' + (x.new_value === true ? 'on' : 'off') + ' (#' + x.change_id + ')'
+              : (SETTING_LABELS[(x.row_key || [])[0]] || (x.row_key || [])[0]) + ' = ' + x.new_value + ' (#' + x.change_id + ')'),
+      ]);
+      names['medcea.cea_unit'] = {};
+      units.forEach(u => { names['medcea.cea_unit'][u.unit_id] = 'Unit ' + u.unit_code; });
+      return names;
+    }
+
+    async function loadApprovalHistory() {
+      const panel = document.getElementById('appr-hist-panel');
+      const w = document.getElementById('appr-hist-wrap');
+      const filter = document.getElementById('appr-hist-filter').value;
+      const itemBar = document.getElementById('appr-hist-item');
+      itemBar.classList.toggle('hidden', !apprHistItem);
+      if (apprHistItem) itemBar.innerHTML = 'History of ' + esc(apprHistItem.label)
+        + ' <button class="btn btn-ghost btn-sm" onclick="apprHistItem=null;loadApprovalHistory()">Show all</button>';
+      let rows;
+      try {
+        rows = await api('GET', historyQuery(filter, apprHistItem));
+      } catch(e) {
+        // qa, qp and auditor read medcea.approval; for everyone else the panel stays hidden
+        if (e.code === '42501' || e.status === 404) { panel.classList.add('hidden'); return; }
+        panel.classList.remove('hidden');
+        w.innerHTML = '<div class="empty" style="color:#fca5a5">Failed to load the history: ' + esc(e.message) + '</div>';
+        return;
+      }
+      panel.classList.remove('hidden');
+      if (!rows.length) { w.innerHTML = '<div class="empty">No approvals recorded' + (filter !== 'all' || apprHistItem ? ' for this selection' : '') + '.</div>'; return; }
+      const names = await historyNames(rows);
+      w.innerHTML = '<table class="tbl"><thead><tr><th>When</th><th>What</th><th>Action</th><th>By</th><th>Authors</th><th>Note</th></tr></thead><tbody>'
+        + rows.map(a => '<tr>'
+          + '<td style="white-space:nowrap">' + esc(fmtWhen(a.approved_at)) + '</td>'
+          + '<td>' + esc(historyLabel(a, names)) + '</td>'
+          + '<td>' + esc(a.action) + '</td>'
+          + '<td>' + esc(a.approved_by_name || '?') + '<div class="muted">' + esc((a.approved_by_role || '') + (a.approved_by_source ? ' · ' + a.approved_by_source : '')) + '</div></td>'
+          + '<td class="muted">' + esc((a.author_persons || []).length) + ' person(s)</td>'
+          + '<td>' + esc(a.note || '—') + '</td>'
+          + '</tr>').join('') + '</tbody></table>';
+    }
+
+    function showItemHistory() {
+      const r = apprCurrent;
+      if (!r) return;
+      apprHistItem = { target: r.target, id: r.id, label: approvalLabel(r) };
+      closeApprovalModal();
+      loadApprovalHistory().then(() => document.getElementById('appr-hist-panel').scrollIntoView({ behavior: 'smooth' }));
+    }
+
     // ── Init ──────────────────────────────────────────────────
     loadLocations();
+    probeApprovals();
   </script>
   <!-- Algorithm State Records Modal -->
   <div class="modal-bg" id="algo-state-modal-bg" onclick="if(event.target===this)closeAlgoStateModal()">

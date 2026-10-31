@@ -265,6 +265,9 @@
       </div>
 
       <div class="logmgmt-note" id="logmgmt-job"></div>
+      <!-- A retention proposal sent from this browser, until its value is in force:
+           where it stands is in the Configuration UI's Approvals tab (My proposals). -->
+      <div class="logmgmt-note" id="logmgmt-pending" style="display:none;color:#fbbf24"></div>
 
       <div class="logmgmt-actions">
         <button class="btn btn-sm btn-primary" onclick="saveLogDefaults()">
@@ -1205,6 +1208,7 @@ async function loadLogConfig() {
   const d = await res.json();
   document.getElementById('lm-compress-days').value = d.compress_days;
   document.getElementById('lm-delete-days').value   = d.delete_days ?? '';
+  showRetentionProposal(d);
   const j = d.job || {}, r = j.last_result;
   document.getElementById('logmgmt-job').textContent =
     `Compressed by the scheduler ${j.schedule || ''}, never deleted; last run ${j.last_run || 'not yet'}`
@@ -1238,8 +1242,43 @@ async function saveLogDefaults() {
     const d = await apiOk(res);
     toast(d.pending ? 'Proposed — pending qa approval (a retention change applies once a different qa person approves it)'
                     : 'Nothing changed');
+    if (d.pending) {
+      rememberRetentionProposal({ ids: d.change_ids || [], compress_days, delete_days, at: new Date().toISOString() });
+      loadLogConfig();
+    }
   } else if (res.ok) { await apiOk(res); toast('Defaults saved'); }
   else await apiFail(res, 'Defaults not saved');
+}
+
+// The proposal the 202 named (change ids), kept in this browser only as a reminder:
+// the scheduler cannot read pending changes, the Configuration UI's Approvals tab
+// shows where each stands (applied, returned, withdrawn, waiting). Cleared once the
+// proposed values are in force or the person dismisses it.
+const RETENTION_KEY = 'medcea.retentionProposal';
+function rememberRetentionProposal(p) {
+  try { localStorage.setItem(RETENTION_KEY, JSON.stringify(p)); } catch (_) {}
+}
+function forgetRetentionProposal() {
+  try { localStorage.removeItem(RETENTION_KEY); } catch (_) {}
+  showRetentionProposal(null);
+}
+function showRetentionProposal(cfg) {
+  const el = document.getElementById('logmgmt-pending');
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(RETENTION_KEY) || 'null'); } catch (_) {}
+  if (p && cfg && cfg.compress_days === p.compress_days && (p.delete_days === null || cfg.delete_days === p.delete_days)) {
+    try { localStorage.removeItem(RETENTION_KEY); } catch (_) {}
+    p = null;   // approved: the proposed values are in force
+  }
+  if (!p) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const esc = v => String(v).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const ids = (p.ids || []).map(i => '#' + i).join(', ');
+  el.innerHTML = `Pending: your proposal ${esc(ids)} (compress after ${esc(String(p.compress_days))} days`
+    + (p.delete_days !== null && p.delete_days !== undefined ? `, retention ${esc(String(p.delete_days))} days` : '')
+    + `, sent ${esc(new Date(p.at).toLocaleString())}) waits for a qa person other than you; the values above stay in force until then. `
+    + `<a href="https://$CONFIG_DOMAIN/#approvals" target="_blank" rel="noopener" style="color:#fbbf24">See it in the Approvals queue</a>`
+    + ` · <a href="#" style="color:#94a3b8" onclick="event.preventDefault();forgetRetentionProposal()">Dismiss</a>`;
+  el.style.display = '';
 }
 
 // ---- Control Algorithms panel ---------------------------------------------
