@@ -187,7 +187,7 @@ resource_types:
     label: Broker topic class
     enforced_by: Mosquitto ACL rows written by the auth sidecar from medcea.mqtt_credential and medcea.mqtt_service_acl
     levels: [N, R, C, U]
-    help: People reach topics only through per-person, short-lived MQTT Explorer credentials that mirror their cells.
+    help: People reach topics only through per-person, short-lived MQTT Explorer credentials that mirror their cells, accepted only on the broker's WebSocket listener (IAM 3.5, IAM_MQTT_PERSON). compiler/mqtt.py compiles them into mqtt.json.
   idp:
     label: Keycloak account operation
     enforced_by: the access service's Keycloak service account, acting only after the route check and qa_dual_control
@@ -327,6 +327,11 @@ network:
                               "proxy:DBMGMT_DOMAIN", "proxy:ACCESS_DOMAIN", "proxy:MQTTX_DOMAIN"],
            why: "/_account/ (user menu and profile) on every host that mounts it; not Node-RED's"}
         - {port: 8080, from: [ingress, node], why: the public access request form; kubelet readiness probe}
+    iam:
+      selector: {app: iam-api}
+      carries: {iam-mqttx: 8085}
+      ingress:
+        - {port: 8085, from: ["proxy:MQTTX_DOMAIN", node], why: "MQTT Explorer credentials (/_mqtt-credential) through the Explorer's proxy only; kubelet probes"}
     node-red:
       selector: {app.kubernetes.io/name: node-red}
       carries: {}
@@ -583,7 +588,10 @@ service_identities:
 #   {type: data, object: medcea.v, view: true}                     a view: SELECT only, security_invoker
 #   {type: api,  service: <name>, routes: {"METHOD /path": LEVEL}}
 #   {type: ui,   host: <hosts key>, admit: [levels]?}             admit defaults to every level but N
-#   {type: mqtt, topic: <pattern>}
+#   {type: mqtt, topic: <pattern>, person_write: false?}          <pattern> is medcea/<unit|+>/<zone|+>/<class>/#;
+#                                                                the first segment stands for PROJECT_NAME.
+#                                                                person_write: false keeps C/U from compiling to
+#                                                                a person's write row (compiler/mqtt.py)
 #   {type: idp | infra | code, object: <text>}
 # `reaches` lists what a tool lets its user touch beyond its own members (with the tool's
 # own credential); `mirrors` marks a tool that acts with the person's own cells only.
@@ -934,15 +942,24 @@ resource_groups:
     risk: Publishing switches relays in a live chamber.
     members:
       - {type: mqtt, topic: "medcea/+/+/control/#"}
-      - {type: mqtt, topic: "medcea/+/+/control_setpoint/#"}
+      # Boards report their state here: a person may read it, never forge it (IAM 3.5 decision).
+      - {type: mqtt, topic: "medcea/+/+/control_setpoint/#", person_write: false}
 
   mqtt_explorer:
     label: MQTT Explorer
     class: config
     description: The browser MQTT tool and the per-person credentials it connects with.
     why_this_class: A tool; the data it shows belongs to the topic groups.
-    risk: None beyond the person's own topic rights. The credential mirrors the person's mqtt_sense and mqtt_control cells, is rebuilt on every broker sync, and dies at once when the account is deactivated, the role changes or the unit leaves commissioning.
+    risk: None beyond the person's own topic rights. The credential mirrors the person's mqtt_sense and mqtt_control cells; its write rows are re-derived on every broker sync (about 15 s), so they end when the unit leaves commissioning or a run starts, and the whole credential ends within one sync of a deactivation or a role change. Keycloak sign-out does not end it (at most ttl_hours).
     mirrors: [mqtt_sense, mqtt_control]
+    # The person credential iam-api issues (IAM 3.5, compiler/mqtt.py -> mqtt.json):
+    # hours it lives, how many may be active per person (one per browser tab), and the
+    # only listener that accepts it.
+    credential:
+      ttl_hours: 8
+      max_active: 3
+      listener: websocket
+      help: Issued by iam-api after sign-in; kept in the page's memory only; refused on the 1883 NodePort.
     members:
       - {type: ui, host: MQTTX_DOMAIN}
       - {type: api, service: iam-mqttx, routes: {"POST /_mqtt-credential": R}}

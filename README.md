@@ -176,7 +176,8 @@ Currently available components:
 | **frontend** | System Configuration UI and Database Management portal |
 | **node-red** | `node-red-contrib-postgresql` package + MQTT→PostgreSQL flow |
 | **monitor** | Run Monitor dashboard (live recipe runs) |
-| **mqtt-explorer** | Browser MQTT tool, behind sign-in; talks to the broker as its own service account |
+| **mqtt-explorer** | Browser MQTT tool, behind sign-in; with `IAM_MQTT_PERSON=true` each person connects with their own short-lived credential (from **iam**), otherwise as the shared service account |
+| **iam** | Checks the access policy; deploys iam-api, which issues the MQTT Explorer's personal credentials |
 | **report** | Grafana dashboard definitions |
 | **scheduler** | Recipe Schedule Manager Flask API and browser UI |
 
@@ -526,7 +527,8 @@ or delete (the Compliance Plane rule):
 | A board | its name, e.g. `unit01-s-zone01` | minted at onboarding, written to the board and to `edge/provisioned/<name>.json` | SENSE: publish `<root>/<UNIT>/<ZONE>/sense/#`; CONTROL: receive `…/control/#`, publish `…/control_setpoint/#` |
 | Node-RED | `node-red` | `MQTT_NODE_RED_PASS` (config.env) | read `<root>/#` |
 | Scheduler | `scheduler` | `MQTT_SCHEDULER_PASS` | read `…/sense/#`, publish `…/control/#` |
-| MQTT Explorer | `mqtt-explorer` | `MQTT_EXPLORER_PASS` | read and publish `<root>/#` |
+| MQTT Explorer, `IAM_MQTT_PERSON=true` | `explorer-<user>-<6 hex>`, one per sign-in | issued by iam-api, kept in the page only, 8 h | the person's role: an engineer reads `…/sense/#`, `…/control/#`, `…/control_setpoint/#` and publishes `…/control/#` only to a unit flagged for commissioning without a running run; WebSocket listener only |
+| MQTT Explorer, `IAM_MQTT_PERSON=false` | `mqtt-explorer` | `MQTT_EXPLORER_PASS` | read and publish `<root>/#`, on both listeners |
 
 The root is `PROJECT_NAME` (`medcea`). Board credentials come only from the
 onboarding wizard, which registers the password's hash in the database;
@@ -583,7 +585,9 @@ client.on_message = on_message
 client.loop_forever()
 ```
 
-**Command line**
+**Command line** — only while `IAM_MQTT_PERSON=false` (the shared account); with
+`true` it is refused on both listeners and the MQTT Explorer page is the way to watch
+the topics:
 
 ```bash
 mosquitto_sub -h <server-LAN-IP> -p 31883 -u mqtt-explorer -P "$MQTT_EXPLORER_PASS" -t 'medcea/#' -v
@@ -595,9 +599,11 @@ user `node-red`). A new flow can reuse that broker node.
 
 ### Browser-based MQTT Explorer
 
-Open **https://mqtt-explorer.\<domain\>** (sign-in required). It connects to the
-broker over `wss://mqtt-explorer.<domain>/mqtt` as the `mqtt-explorer` account
-and shows everything under the topic root. Click any topic to see its message
+Open **https://mqtt-explorer.\<domain\>** (sign-in required; engineers). It connects
+to the broker over `wss://mqtt-explorer.<domain>/mqtt`. With `IAM_MQTT_PERSON=true` it
+first asks iam-api for the person's own credential (8 h, renewed in the background) and
+shows the topics that person's role may read, with a "Your rights" note; otherwise it
+uses the shared `mqtt-explorer` account and shows everything under the topic root. Click any topic to see its message
 history; use the Publish panel at the bottom to send messages.
 
 ### Recommended topic structure

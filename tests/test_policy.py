@@ -19,7 +19,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
-from compiler import grants, invariants, model, netpol, proxies, routes, routes_diff, tools  # noqa: E402
+from compiler import grants, invariants, model, mqtt, netpol, proxies, routes, routes_diff, tools  # noqa: E402
 
 GOLDEN = os.path.join(REPO, "tests", "iam-grants.golden.json")
 UPDATE_GOLDEN = "--update-golden" in sys.argv
@@ -179,6 +179,20 @@ MUTATIONS = {
                              "cannot give pgadmin's sign_in"),
     "role admitted to pgAdmin without the claim": (_set(["matrix", "platform_admin", "qa"], ["R"]),
                                                    "PGADMIN_DOMAIN admits"),
+    # IAM 3.5: the MQTT Explorer's personal credentials (compiler/mqtt.py) and iam-api's network entry
+    "unconstrained person write on mqtt_control": (_set(["matrix", "mqtt_control", "engineer"], ["R", "C"]),
+                                                   "the broker honours person write rows only"),
+    "mqtt topic of a fifth class": (_with_member("mqtt_sense", "topic", "medcea/+/+/sense/#",
+                                                 lambda m: m.update(topic="medcea/+/+/telemetry/#")),
+                                    "is not medcea/<unit|+>"),
+    "auditor admitted to the Explorer with no topic": (_set(["matrix", "mqtt_explorer", "auditor"], ["R"]),
+                                                       "the credential would carry no topic"),
+    "service mqtt_user in the person namespace": (_set(["service_identities", "svc_ingest", "mqtt_user"], "explorer-x"),
+                                                  "namespace of person credentials"),
+    "Explorer credential without a lifetime": (_pop(["resource_groups", "mqtt_explorer", "credential", "ttl_hours"]),
+                                               "ttl_hours"),
+    "iam-mqttx not reachable from the Explorer proxy": (_set(["network", "pods", "iam", "ingress", 0, "from"], ["node"]),
+                                                        "MQTTX_DOMAIN serves iam-mqttx"),
 }
 
 
@@ -615,6 +629,63 @@ class NetpolTest(unittest.TestCase):
     def test_node_addresses_required(self):
         with self.assertRaisesRegex(ValueError, "no node address"):
             netpol.compile(self.policy, "medcea", [])
+
+
+class MqttTest(unittest.TestCase):
+    """compiler/mqtt.py: the MQTT Explorer's personal credential rows (IAM 3.5)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+
+    def test_engineer_rows(self):
+        doc = mqtt.compile(self.policy)
+        self.assertEqual(list(doc["roles"]), ["engineer"])     # only the roles holding R on mqtt_explorer
+        rows = {(r["access"], r["topic"], r["constraint"]) for r in doc["roles"]["engineer"]}
+        self.assertEqual(rows, {("read", "+/+/sense/#", None), ("read", "+/+/control/#", None),
+                                ("read", "+/+/control_setpoint/#", None),
+                                # control_setpoint is person_write: false (boards report there; IAM 3.5 decision)
+                                ("write", "+/+/control/#", "commissioning_unit")})
+        self.assertEqual((doc["ttl_hours"], doc["max_active"], doc["listener"]), (8, 3, "websocket"))
+        self.assertEqual(doc["roles"]["engineer"] and proxies.admitted(self.policy, "MQTTX_DOMAIN"), ["engineer"])
+
+    def test_deterministic_and_digest(self):
+        a, b = mqtt.dumps(mqtt.compile(self.policy)), mqtt.dumps(mqtt.compile(model.load()))
+        self.assertEqual(a, b)
+        doc = json.loads(a)
+        body = {k: v for k, v in doc.items() if k != "digest"}
+        self.assertEqual(hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                         doc["digest"])
+
+    def test_route_digest_does_not_move(self):
+        # mqtt.json is its own ConfigMap key: the route table (and role_widening's stamp) ignore it
+        d = copy.deepcopy(self.policy.data)
+        d["resource_groups"]["mqtt_explorer"]["credential"]["ttl_hours"] = 4
+        self.assertEqual(routes.compile(model.Policy(d))["digest"], routes.compile(self.policy)["digest"])
+
+    def test_iam_pod_and_proxy_upstream(self):
+        doc = netpol.compile(self.policy, "medcea", ["192.168.1.7"])
+        iam = next(i for i in doc["items"] if i["metadata"]["name"] == "iam-iam")
+        self.assertEqual(iam["spec"]["podSelector"], {"matchLabels": {"app": "iam-api"}})
+        self.assertEqual(iam["spec"]["ingress"][0]["ports"], [{"protocol": "TCP", "port": 8085}])
+        self.assertIn({"podSelector": {"matchLabels": {"app.kubernetes.io/instance": "mqttx-oauth2-proxy"}}},
+                      iam["spec"]["ingress"][0]["from"])
+        with open(os.path.join(REPO, "apps", "mqtt-explorer", "k8s", "oauth2-proxy-values.yaml")) as fh:
+            self.assertIn('"http://iam-mqttx.${NAMESPACE}.svc.cluster.local:8085/_mqtt-credential"', fh.read())
+        with open(os.path.join(REPO, "apps", "iam", "k8s", "iam.yaml")) as fh:
+            m = fh.read()
+        self.assertIn("name: iam-mqttx", m)
+        self.assertIn("containerPort: 8085", m)
+
+    def test_infra_ships_mqtt_json(self):
+        with open(os.path.join(REPO, "deploy-infra.sh")) as fh:
+            infra = fh.read()
+        self.assertIn('--from-file=mqtt.json="$_IAM_DIR/mqtt.json"', infra)
+        self.assertIn('"medcea/mqtt-digest=$IAM_MQTT_DIGEST"', infra)
+        self.assertIn('"IAM_MQTT_PERSON": e["SW_MQTT"] == "true"', infra)
+        self.assertRegex(infra, r'dba_record_switch "\$NAMESPACE" [^\n]*IAM_MQTT_PERSON')
+        with open(os.path.join(REPO, "health-check.sh")) as fh:
+            self.assertIn("iammqtt)      check_iammqtt", fh.read())
 
 
 class GrantsTest(unittest.TestCase):

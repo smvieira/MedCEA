@@ -250,7 +250,8 @@ def _check(service, method, path, headers):
     platform = set(table.get("roles", []))
     roles = sorted(set(claims.get("groups") or []) & platform)
     who = {"sub": claims.get("sub"), "person_id": claims.get("person_id"),
-           "username": claims.get("preferred_username"), "roles": roles, "azp": claims.get("azp")}
+           "username": claims.get("preferred_username"), "roles": roles, "azp": claims.get("azp"),
+           "iat": claims.get("iat")}   # when the token was issued: iam-api's re-issue guard (IAM 3.5)
 
     key = match(svc["routes"], method, path)
     if key is None:

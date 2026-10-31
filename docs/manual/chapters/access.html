@@ -140,10 +140,10 @@
 <div class="table-wrap"><table>
 <thead><tr><th>Change</th><th>When it takes effect</th></tr></thead>
 <tbody>
-<tr><td>Role change that gives more access</td><td>Waits under <strong>Decisions</strong> until a <span class="role">qa</span> person confirms it.</td></tr>
-<tr><td>Role change that only removes access</td><td>Applied at once. Any MQTT Explorer credentials you hold are revoked.</td></tr>
+<tr><td>Role change that gives more access</td><td>Waits under <strong>Decisions</strong> until a <span class="role">qa</span> person confirms it. When it is confirmed, any MQTT Explorer credentials you hold are revoked; the Explorer then asks for a new one with your new role.</td></tr>
+<tr><td>Role change that only removes access</td><td>Applied at once. Any MQTT Explorer credentials you hold are revoked: the broker refuses them within about 15 seconds.</td></tr>
 <tr><td>Activation of a disabled account</td><td>Always waits for a <span class="role">qa</span> confirmation.</td></tr>
-<tr><td>Deactivation</td><td>Applied at once. Every sign-in session is ended, MQTT Explorer credentials are revoked, and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
+<tr><td>Deactivation</td><td>Applied at once. Every sign-in session is ended, MQTT Explorer credentials are revoked (the broker refuses them within about 15 seconds, and no new one is issued on the old sign-in), and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
 </tbody>
 </table></div>
 <p>You do not need to sign out for a role change to reach you. The sign-in gate in front of each app checks your session with Keycloak every 4 minutes, and the proof of sign-in passed to the services is valid for 5 minutes. So, for the apps behind such a gate (all except Grafana, the AI Workbench and pgAdmin, which keep their own sessions; the AI Workbench is described below the list):</p>

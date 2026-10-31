@@ -13,7 +13,7 @@
 # names on disk); the --by username is remembered for the session.
 #
 # IAM switches (IAM_GATES, IAM_NETPOL, IAM_ENFORCE, IAM_POSTGREST_JWT,
-# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES) and WORKBENCH_ENABLED: shows the current value (the
+# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES, IAM_MQTT_PERSON) and WORKBENCH_ENABLED: shows the current value (the
 # one active line in config.env; zero or several active lines are refused), the ordered
 # recipe for enabling or rolling back with its preconditions, then sets the value (that
 # one line, a backup config.env.guide-<timestamp>.bak next to it, the diff shown) and runs
@@ -239,7 +239,7 @@ component_purpose() {
         database)      echo "medcea_db: schema, migrations, roles, grants, the IAM_DB_ROLES bundle" ;;
         edge-wizard)   echo "Device onboarding wizard (host service) at the onboard address" ;;
         frontend)      echo "System Configuration UI, config-api (PostgREST) and Database Management" ;;
-        iam)           echo "Policy check only (Phase 0): deploys nothing" ;;
+        iam)           echo "Policy check, and iam-api: the MQTT Explorer's personal credentials (:8085)" ;;
         monitor)       echo "Run Monitor dashboard" ;;
         mqtt-explorer) echo "Browser MQTT Explorer" ;;
         node-red)      echo "Node-RED palette packages and platform flows" ;;
@@ -606,7 +606,7 @@ a_apps_one() {
         database)  NOTES=("Behaviour comes from config.env (IAM_DB_ROLES, IAM_DB_SERVICE_ROLES); restarts config-api when IAM_DB_ROLES changed.") ;;
         frontend)  NOTES=("IAM_POSTGREST_JWT in config.env decides config-api's mode; a switch costs config-api up to ~15 s, by design.") ;;
         scheduler) NOTES=("Refuses until the database deploy has created retire_schedule and start_run.") ;;
-        iam)       LEVEL=read; EFFECT="nothing (checks the policy and lists the hosts)" ;;
+        iam)       NOTES=("Checks the policy, then deploys iam-api on iam_svc (IAM_DB_SERVICE_ROLES=true; after ./apps/database/deploy.sh and ./apps/access/deploy.sh). Skipped with a warning until then while IAM_MQTT_PERSON=false.") ;;
         edge-wizard) SUDO="no (a systemd user service); mk8s for the Ingress" ;;
     esac
     plan_run
@@ -646,7 +646,8 @@ a_apps_uninstall_one() {
                 purge_word
                 NOTES+=("Unit assignments in iam_policy.user_unit stay in effect without their decisions; waiting ones are lost. The next access deploy records survivors again as pending_qa.")
             fi ;;
-        iam) LEVEL=change; EFFECT="nothing (Phase 0 deploys nothing)" ;;
+        iam) EFFECT="removes iam-api (Service iam-mqttx); never the policy, its history or the credential tables"
+             NOTES+=("While IAM_MQTT_PERSON=true the MQTT Explorer then gets no credential: roll the switch back first.") ;;
     esac
     plan_run
 }
@@ -725,6 +726,7 @@ a_sw_enforce() { switch_flow IAM_ENFORCE; }
 a_sw_jwt()     { switch_flow IAM_POSTGREST_JWT; }
 a_sw_svc()     { switch_flow IAM_DB_SERVICE_ROLES; }
 a_sw_dbroles() { switch_flow IAM_DB_ROLES; }
+a_sw_mqtt()    { switch_flow IAM_MQTT_PERSON; }
 a_rollback_27() {
     # Shown, never run: it needs a 2.7 commit, a git revert and psql in the PostgreSQL pod.
     local ns db
@@ -851,6 +853,20 @@ recipe() {
                    "While IAM_ENFORCE is true, nothing checks an operator's assigned_run any more (health-check iamenforce FAILs): roll IAM_ENFORCE back too unless this is brief."
                    "While false, nobody can retire a Q-table from the Config UI (config-api runs every token as anon, which may execute no function). If one must start cold meanwhile: medcea.retire_algorithm_state in psql in the PostgreSQL pod, which records no person."
                    "Before a git revert of the Phase 2 code, also run medcea_db_migrations_down_008b.sql with -v full=1 as postgres (by hand; see CLAUDE.md).") ;;
+        IAM_MQTT_PERSON:enable)
+            PRE=("./apps/iam/deploy.sh has run since the IAM 3.5 pull: iam-api answers (needs IAM_DB_SERVICE_ROLES=true; it never runs as postgres), and so has ./apps/access/deploy.sh (a confirmed role change ends a credential)."
+                 "IAM_DB_ROLES is true: the broker reads the person credentials as mqtt_auth through its compiled grants."
+                 "No run is active: ./deploy-infra.sh restarts the broker (the boards reconnect within seconds)."
+                 "Nobody uses MQTT_EXPLORER_PASS outside the Explorer page (an MQTT client on 31883 or wss): it stops working on both listeners.")
+            STEPS=("set IAM_MQTT_PERSON true" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
+            AFTER=("iam-api reads the switch from ConfigMap medcea-iam-lib within about a minute; the Explorer deploy waits for it."
+                   "Engineers reload the Explorer: it signs them in to the broker with their own 8 h credential. They read every unit's sense, control and control_setpoint topics; sending works only to a unit flagged for commissioning with no run in progress — today no screen flags one, so in practice the Explorer only reads."
+                   "Between the two deploys an open Explorer page is refused for under a minute."
+                   "Verify: ./health-check.sh (MQTT person credentials, iammqtt) and tests/iam-mqtt.sh (takes the deploy lock).") ;;
+        IAM_MQTT_PERSON:rollback)
+            STEPS=("set IAM_MQTT_PERSON false" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
+            AFTER=("The shared mqtt-explorer account (MQTT_EXPLORER_PASS) is back on both listeners, with read and send on the whole topic root; iam-api answers 409 within about a minute."
+                   "Person credentials stay in the database, inert; nothing is deleted.") ;;
         WORKBENCH_ENABLED:enable)
             STEPS=("set WORKBENCH_ENABLED true" "run ./deploy-infra.sh")
             AFTER=("About 2 GB of images. To redeploy only the workbench later: ./infra/deploy-workbench.sh") ;;
@@ -869,6 +885,7 @@ switch_purpose() {
         IAM_POSTGREST_JWT)    echo "config-api (PostgREST) verifies the person's token (Phase 2b)." ;;
         IAM_DB_SERVICE_ROLES) echo "Each database client logs in as its own role instead of postgres (Phase 2.5)." ;;
         IAM_DB_ROLES)         echo "The database enforces per-role grants, RLS and guard triggers (Phase 2a)." ;;
+        IAM_MQTT_PERSON)      echo "The MQTT Explorer connects with a short-lived personal credential, on the broker's WebSocket listener only (false: one shared account)." ;;
         WORKBENCH_ENABLED)    echo "deploy-infra.sh also deploys the AI workbench (JupyterHub)." ;;
     esac
 }
@@ -1115,6 +1132,13 @@ a_iam_access() {
     NOTES=("Run after ./apps/access/deploy.sh. It leaves permanent append-only records.")
     plan_run
 }
+a_iam_mqtt() {
+    CMD=(tests/iam-mqtt.sh)
+    EFFECT="Keycloak: 3 throwaway accounts, deleted on exit; database: one applied deactivation decision stays (append-only); cluster: short-lived probe pods"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Needs IAM_MQTT_PERSON=true. Run after ./apps/iam/deploy.sh and ./apps/mqtt-explorer/deploy.sh.")
+    plan_run
+}
 a_fixture_run() {
     CMD=(tests/iam-db-fixture.sh run)
     EFFECT="cluster: creates namespace medcea-iamtest, runs the whole IAM Phase 2 sequence there and deletes it on exit; production is only read"
@@ -1325,6 +1349,7 @@ AREA_SWITCHES=(
     "a_sw_svc|IAM_DB_SERVICE_ROLES — own database roles|Phase 2.5: each client logs in as its own role, not postgres."
     "a_sw_dbroles|IAM_DB_ROLES — the database enforces|Phase 2a: per-role grants, RLS, guard triggers."
     "a_rollback_27|IAM 2.7 rollback (shows the steps)|Account decisions back out; shown, not run."
+    "a_sw_mqtt|IAM_MQTT_PERSON — personal MQTT Explorer credentials|IAM 3.5: each person's own topics; the shared account retired."
 )
 AREA_HEALTH=(
     "a_health|Health check|Every service and IAM control: OK / WARN / FAIL."
@@ -1342,6 +1367,7 @@ AREA_HEALTH=(
     "a_fixture_keep|Build the throwaway database and keep it|tests/iam-db-fixture.sh up, load, apply: for the write probes."
     "a_fixture_down|Delete the throwaway database|tests/iam-db-fixture.sh down."
     "a_iam_workbench|Workbench: admin cannot open others' servers|tests/iam-workbench.sh: throwaway accounts, takes the deploy lock."
+    "a_iam_mqtt|MQTT Explorer personal credentials test|tests/iam-mqtt.sh: throwaway accounts, takes the deploy lock."
 )
 AREA_EDGE=(
     "a_flash|Flash and register a board|./edge/flash-device.sh: an ESP32 over USB into a unit/zone slot."

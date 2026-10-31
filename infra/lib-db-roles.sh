@@ -15,6 +15,7 @@
 #   node-red (ingest flow)                svc_ingest      apps/node-red/deploy.sh
 #   grafana (datasource)                  svc_grafana     deploy-infra.sh
 #   pgadmin (server entry)                rr_admin_login  deploy-infra.sh
+#   iam-api (MQTT Explorer credentials)   iam_svc         apps/iam/deploy.sh (never postgres: it refuses)
 #
 # A client moves to its own role only when IAM_DB_SERVICE_ROLES=true AND the role
 # can already log in; otherwise it stays on postgres and says why. The database
@@ -49,6 +50,7 @@ db_client_role() {
         node-red)  echo svc_ingest ;;
         grafana)   echo svc_grafana ;;
         pgadmin)   echo rr_admin_login ;;
+        iam-api)   echo iam_svc ;;
         *)         return 1 ;;
     esac
 }
@@ -104,7 +106,7 @@ db_client() {
 # be read prints "<client> ?", which the database deploy treats as in use.
 db_clients_live() {
     local ns="$1" d u
-    for d in scheduler monitor dbmgmt; do
+    for d in scheduler monitor dbmgmt iam-api; do
         $KUBECTL get deployment "$d" -n "$ns" >/dev/null 2>&1 || continue
         u="$($KUBECTL get deployment "$d" -n "$ns" \
             -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="PG_USER")]}{.value}{"\n"}{end}' 2>/dev/null | head -1)" || u=""

@@ -43,13 +43,13 @@ SOURCES = {
     # do_PUT refuses a path without a file name (`if not fname`), so lists are GET only.
     "platform-api":   {"kind": "http", "file": "apps/frontend/k8s/recipe-fileserver.yaml", "key": "server.py",
                        "cls": "H", "resolver": "_resolve", "resolves": {"GET": ("list", "file"), "PUT": ("file",)}},
+    "iam-mqttx":      {"kind": "http", "file": "apps/iam/iam-api.py", "cls": "MqttCredential"},
 }
 
 REMOVED = {}
 
 NOT_BUILT = {
     ("iam", None): "4.1",
-    ("iam-mqttx", None): "3.5",
 }
 
 _PH = re.compile(r"<(?:[^<>:]+:)?([^<>]+)>")

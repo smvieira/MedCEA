@@ -1,0 +1,29 @@
+# ConfigMap mosquitto-config while IAM_MQTT_PERSON=true (IAM 3.5): per-listener auth.
+# 1883 (the LAN NodePort and in-cluster services) reads passwd/acl — services and
+# boards only; 9001 (WebSocket, reached only through the MQTT Explorer's sign-in)
+# reads passwd-ws/acl-ws — the person credentials iam-api issues, nothing else. The
+# mqtt-auth-sync sidecar writes all four files. With per_listener_settings true,
+# allow_anonymous, password_file and acl_file belong to each listener; the rest
+# stays global. websockets_headers_size: as in mosquitto-conf.yaml (the explorer's
+# upgrade carries the session cookie).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosquitto-config
+  namespace: ${NAMESPACE}
+data:
+  mosquitto.conf: |
+    per_listener_settings true
+    websockets_headers_size 16384
+    persistence true
+    persistence_location /mosquitto/data/
+    log_dest stdout
+    listener 1883
+    allow_anonymous false
+    password_file /mosquitto/auth/passwd
+    acl_file /mosquitto/auth/acl
+    listener 9001
+    protocol websockets
+    allow_anonymous false
+    password_file /mosquitto/auth/passwd-ws
+    acl_file /mosquitto/auth/acl-ws

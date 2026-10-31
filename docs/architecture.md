@@ -32,7 +32,7 @@ substrate moisture/pH) and actuators (heating, cooling, humidification, ventilat
 |---|---|
 | MicroPython SENSE / CONTROL application (same image on every board) | `edge/src/app/` |
 | Device onboarding (flash, slot from DB, channel map) | `edge/flash-device.sh`, `edge/wizard-daemon.sh` |
-| MQTT transport (`medcea/<UNIT>/<ZONE>/...`) | Mosquitto, deployed by `deploy-infra.sh`; per-board and per-service credentials with topic ACLs (`medcea.mqtt_credential`, sidecar `k8s/mosquitto/mqtt-auth-sync.py`) |
+| MQTT transport (`medcea/<UNIT>/<ZONE>/...`) | Mosquitto, deployed by `deploy-infra.sh`; per-board and per-service credentials with topic ACLs (`medcea.mqtt_credential`, sidecar `k8s/mosquitto/mqtt-auth-sync.py`); per-person MQTT Explorer credentials from iam-api on the WebSocket listener only (`medcea.mqtt_service_credential`, IAM 3.5, `IAM_MQTT_PERSON`) |
 
 **TODO:** edge-side validation and outlier detection. Lightweight on-device disturbance-rejection inference.
 

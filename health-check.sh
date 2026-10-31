@@ -99,6 +99,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         and on IAM_ENFORCE=true with IAM_DB_ROLES=false (assigned_run unchecked) or a pod copy"
     echo -e "         still false (fails open without /iam/); WARN on a pod copy still true, or while false"
     echo ""
+    echo -e "  ${CYAN}iammqtt${NC} the MQTT Explorer's personal credentials (IAM_MQTT_PERSON, IAM 3.5): NAMESPACE"
+    echo -e "         FAIL when config.env, the broker (pod annotation, sidecar, conf), the Explorer page"
+    echo -e "         and iam-api disagree on the mode; under true also when the shared mqtt-explorer"
+    echo -e "         account or a person credential is in the 1883 file, another name is in the"
+    echo -e "         WebSocket file, or IAM_DB_ROLES is false; WARN while false, or when the broker's"
+    echo -e "         sidecar last read the database over 5 minutes ago. Usernames only, never a hash"
+    echo ""
     echo -e "  ${CYAN}grafanarole${NC} Grafana's role setting is the access policy's (IAM 3.1): NAMESPACE"
     echo -e "         FAIL when the live role path differs from the compiled one (./deploy-infra.sh),"
     echo -e "         strict is not true or Grafana may grant Grafana Admin; WARN while IAM_GATES=false"
@@ -545,6 +552,72 @@ check_iamenforce() {
 }
 
 # =============================================================================
+# Check: the MQTT Explorer's personal credentials (IAM_MQTT_PERSON, IAM 3.5) — read-only
+# target: NAMESPACE. Every part must follow config.env: the broker pod's annotation
+# medcea/mqtt-mode, the sidecar's MQTT_PERSON_CREDENTIALS, the conf (per_listener_settings),
+# the page's data-mqtt-mode (ConfigMap mqtt-explorer-html) and iam-api's /healthz mode
+# (through kubectl exec: its NetworkPolicy admits no host traffic but the kubelet's).
+# Reads the broker's files' usernames (cut -d: -f1) and status.json, never a hash.
+# =============================================================================
+check_iammqtt() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" want ann env conf page api users ws st problems=() warns=()
+    want=false; [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && want=true
+    ann="$(timeout "$TIMEOUT" $KUBECTL get deployment mosquitto -n "$ns" \
+        -o jsonpath='{.spec.template.metadata.annotations.medcea/mqtt-mode}' 2>/dev/null)" \
+        || { _record FAIL "$name" "no Mosquitto deployment in $ns"; return; }
+    env="$($KUBECTL get deployment mosquitto -n "$ns" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="mqtt-auth-sync")].env[?(@.name=="MQTT_PERSON_CREDENTIALS")].value}' 2>/dev/null)"
+    conf=false
+    $KUBECTL get configmap mosquitto-config -n "$ns" -o jsonpath='{.data.mosquitto\.conf}' 2>/dev/null \
+        | grep -qx 'per_listener_settings true' && conf=true
+    [[ "${ann:-false}" == "$want" ]] || problems+=("broker pod annotation says ${ann:-false} (./deploy-infra.sh)")
+    [[ "${env:-false}" == "$want" ]] || problems+=("broker sidecar runs ${env:-false} (./deploy-infra.sh)")
+    [[ "$conf" == "$want" ]] || problems+=("broker conf per_listener_settings is $conf (./deploy-infra.sh)")
+    page="$($KUBECTL get configmap mqtt-explorer-html -n "$ns" -o jsonpath='{.data.index\.html}' 2>/dev/null \
+        | sed -n 's/.*data-mqtt-mode="\([a-z_]*\)".*/\1/p' | head -1)"
+    if [[ -n "$page" || "$want" == true ]]; then
+        [[ "$page" == "$([[ "$want" == true ]] && echo person || echo legacy)" ]] \
+            || problems+=("the Explorer page is in mode '${page:-pre-3.5}' (./apps/mqtt-explorer/deploy.sh)")
+    fi
+    if [[ "$want" == true ]]; then
+        api="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/iam-api -- python3 -c \
+            'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8085/healthz", timeout=5).read().decode())' 2>/dev/null)"
+        case "$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print(str(d.get("mode") is True).lower() + ("" if d.get("mqtt_digest") else "-nodoc"))' "$api" 2>/dev/null)" in
+            true) ;;
+            true-nodoc) problems+=("iam-api has no valid mqtt.json (./deploy-infra.sh)") ;;
+            false) problems+=("iam-api still reads IAM_MQTT_PERSON=false (./deploy-infra.sh; it follows within a minute)") ;;
+            *) problems+=("iam-mqttx does not answer (./apps/iam/deploy.sh)") ;;
+        esac
+        [[ "${IAM_DB_ROLES:-false}" == "true" ]] || problems+=("IAM_DB_ROLES=false: the broker cannot read person credentials (mqtt_auth's grants)")
+        users="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd 2>/dev/null)"
+        ws="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd-ws 2>/dev/null)"
+        grep -qx 'mqtt-explorer' <<<"$users"$'\n'"$ws" && problems+=("the shared mqtt-explorer account is still in a password file")
+        grep -q '^explorer-' <<<"$users" && problems+=("a person credential is in the 1883 file")
+        [[ -n "$ws" ]] || problems+=("no WebSocket password file (passwd-ws)")
+        [[ -n "$ws" ]] && grep -qv '^explorer-' <<<"$ws" && problems+=("a name outside explorer- is in the WebSocket file")
+    fi
+    st="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cat /mosquitto/auth/status.json 2>/dev/null)"
+    if [[ -n "$st" ]]; then
+        python3 -c 'import datetime, json, sys
+d = json.loads(sys.argv[1]).get("last_db_ok")
+t = datetime.datetime.strptime(d, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) if d else None
+sys.exit(0 if t and (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() < 300 else 1)' "$st" 2>/dev/null \
+            || warns+=("the broker's sidecar has not read the database for over 5 minutes (it keeps the last set; person writes are dropped)")
+    fi
+    if [[ ${#problems[@]} -gt 0 ]]; then
+        local IFS=';'; _record FAIL "$name" "${problems[*]}"
+    elif [[ "$want" == false ]]; then
+        $KUBECTL get deployment iam-api -n "$ns" >/dev/null 2>&1 \
+            || warns+=("iam-api is not deployed (./apps/iam/deploy.sh, needed before the switch)")
+        _record WARN "$name" "IAM_MQTT_PERSON=false: the Explorer uses the shared mqtt-explorer account (read and send on the whole topic root, also on the LAN port 31883)${warns:+; ${warns[*]}}"
+    elif [[ ${#warns[@]} -gt 0 ]]; then
+        local IFS=';'; _record WARN "$name" "${warns[*]}"
+    else
+        _record OK "$name" "personal credentials on the WebSocket listener only; broker, page and iam-api agree"
+    fi
+}
+
+# =============================================================================
 # Check: Grafana's role setting is the policy's (IAM 3.1) — read-only
 # target: NAMESPACE (default $NAMESPACE). Compares the deployment's env with
 # policy_grafana (infra/lib-oauth2-proxy.sh), the function deploy-infra renders.
@@ -951,6 +1024,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
         iamenforce)   check_iamenforce "$name" "$target" ;;
+        iammqtt)      check_iammqtt "$name" "$target" ;;
         grafanarole)  check_grafanarole "$name" "$target" ;;
         iamworkbench) check_iamworkbench "$name" "$target" ;;
         noderedflows) check_noderedflows "$name" "$target" ;;

@@ -66,9 +66,21 @@ elif [[ "$have" != "$want" || "$annot" != "$want" ]]; then
 else
     pass routes "ConfigMap medcea-iam-lib matches the policy (${want:0:12})"
 fi
+# IAM 3.5: mqtt.json (the MQTT Explorer's credential rows, read by iam-api) is a fresh compile
+want_mq="$(python3 apps/iam/compiler/cli.py compile mqtt | digest_of)"
+have_mq="$($KUBECTL get configmap medcea-iam-lib -n "$NAMESPACE" -o jsonpath='{.data.mqtt\.json}' 2>/dev/null | digest_of)"
+annot_mq="$($KUBECTL get configmap medcea-iam-lib -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.medcea/mqtt-digest}' 2>/dev/null)"
+if [[ -z "$want_mq" ]]; then
+    fail mqtt "cli.py compile mqtt failed"
+elif [[ "$have_mq" != "$want_mq" || "$annot_mq" != "$want_mq" ]]; then
+    fail mqtt "ConfigMap mqtt.json ${have_mq:0:12} (annotation ${annot_mq:0:12}) is not the policy's ${want_mq:0:12} (run ./deploy-infra.sh)"
+else
+    pass mqtt "ConfigMap medcea-iam-lib mqtt.json matches the policy (${want_mq:0:12})"
+fi
 # deployment:container of every service that will call medcea_iam.check()
-for dc in scheduler:api monitor:api dbmgmt:api config-ui:recipe-fileserver access:api; do
+for dc in scheduler:api monitor:api dbmgmt:api config-ui:recipe-fileserver access:api iam-api:iam-api; do
     dep="${dc%%:*}" ctr="${dc#*:}"
+    [[ "$dep" == iam-api ]] && ! $KUBECTL get deployment iam-api -n "$NAMESPACE" >/dev/null 2>&1 && continue   # IAM 3.5, optional
     got="$($KUBECTL exec -n "$NAMESPACE" "deployment/$dep" -c "$ctr" -- cat /iam/routes.json 2>/dev/null | digest_of)"
     if [[ -z "$got" ]]; then
         fail routes "$dep/$ctr cannot read /iam/routes.json (redeploy the component)"

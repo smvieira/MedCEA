@@ -5,7 +5,8 @@
 #   blocked   a throwaway pod (busybox, no platform labels) cannot reach any application
 #             pod: not through its Services, and not on the pods' internal ports
 #             (Flask on :8082, the file server on :8081), nor Node-RED's editor and admin
-#             API on :1880 (IAM 3.3) — every attempt times out
+#             API on :1880 (IAM 3.3), nor iam-api's MQTT credential port :8085 (IAM 3.5,
+#             when deployed) — every attempt times out
 #   control   the same pod does reach Keycloak (no policy of ours), so "blocked" is the
 #             policy and not a pod without a network
 #   allowed   the Config UI's nginx reaches config-api and the scheduler; the host reaches
@@ -87,7 +88,9 @@ for url in http://scheduler.$NS/ http://monitor.$NS/ http://dbmgmt.$NS/ http://c
            "http://$(podip scheduler):8082/api/runs" "http://$(podip monitor):8082/api/runs" \
            "http://$(podip dbmgmt):8081/objects" "http://$(podip config-ui):8081/devices/" \
            "http://$(podip access):8080/register" "http://$(podip access):8081/healthz" "http://$(podip access):8082/_account/" \
-           "http://node-red.$NS:1880/flows" "http://$(nr_podip):1880/flows"; do
+           "http://node-red.$NS:1880/flows" "http://$(nr_podip):1880/flows" \
+           $($KUBECTL get deployment iam-api -n "$NS" >/dev/null 2>&1 \
+               && echo "http://iam-mqttx.$NS:8085/healthz http://$(podip iam-api):8085/healthz"); do
     r="$(reach "pod/$PROBE" "$PROBE" "$url")"
     case "$r" in
         blocked) pass blocked "$url" ;;

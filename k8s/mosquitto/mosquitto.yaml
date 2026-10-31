@@ -1,31 +1,6 @@
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mosquitto-config
-  namespace: ${NAMESPACE}
-data:
-  # Every client authenticates: boards with the per-device credential minted at
-  # onboarding (medcea.mqtt_credential), platform services with the accounts in
-  # the Secret mosquitto-service-auth. Both files are assembled by the
-  # mqtt-auth-sync sidecar below and re-read on SIGHUP.
-  # websockets_headers_size: the explorer's socket arrives through its
-  # oauth2-proxy with the browser's session cookie (several KB of tokens);
-  # libwebsockets' default (~1 KB) silently drops that upgrade, which the
-  # proxy reports as a 502 "proxy error: EOF".
-  mosquitto.conf: |
-    per_listener_settings false
-    websockets_headers_size 16384
-    allow_anonymous false
-    password_file /mosquitto/auth/passwd
-    acl_file /mosquitto/auth/acl
-    persistence true
-    persistence_location /mosquitto/data/
-    log_dest stdout
-    listener 1883
-    listener 9001
-    protocol websockets
----
+# The broker's conf (ConfigMap mosquitto-config) is mosquitto-conf.yaml or, under
+# IAM_MQTT_PERSON=true, mosquitto-conf-person.yaml; deploy-infra.sh applies one.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -55,6 +30,8 @@ spec:
     metadata:
       labels:
         app: mosquitto
+      annotations:
+        medcea/mqtt-mode: "${IAM_MQTT_PERSON}"   # health-check iammqtt compares it with config.env
     spec:
       # The sidecar signals the broker (SIGHUP) to reload the auth files.
       shareProcessNamespace: true
@@ -63,7 +40,10 @@ spec:
         image: eclipse-mosquitto:2.0
         # Mosquitto refuses to start without its password file; the sidecar
         # writes it within seconds of starting.
-        command: ["sh", "-c", "until [ -s /mosquitto/auth/passwd ]; do sleep 1; done; exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf"]
+        # Under IAM_MQTT_PERSON=true the WebSocket listener's file too.
+        command: ["sh", "-c", "until [ -s /mosquitto/auth/passwd ] && { [ \"$MQTT_PERSON\" != true ] || [ -s /mosquitto/auth/passwd-ws ]; }; do sleep 1; done; exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf"]
+        env:
+        - {name: MQTT_PERSON, value: "${IAM_MQTT_PERSON}"}
         ports:
         - containerPort: 1883
         - containerPort: 9001
@@ -82,6 +62,8 @@ spec:
         - {name: PG_HOST, value: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local"}
         - {name: PG_DATABASE, value: "${POSTGRES_DB}"}
         - {name: PG_USER, value: mqtt_auth}
+        - {name: PROJECT_NAME, value: "${PROJECT_NAME}"}                     # the topic root person rows are parsed under
+        - {name: MQTT_PERSON_CREDENTIALS, value: "${IAM_MQTT_PERSON}"}       # IAM 3.5: four files, per listener
         - name: PG_PASSWORD
           valueFrom:
             secretKeyRef: {name: mosquitto-service-auth, key: db-password}

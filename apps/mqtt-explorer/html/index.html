@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-mqtt-mode="__MQTT_MODE__">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -39,6 +39,10 @@ button { background: #0ea5e9; color: #fff; border: none; border-radius: 6px; pad
 button:hover { background: #38bdf8; }
 button:disabled { background: #334155; color: #64748b; cursor: default; }
 .empty { color: #475569; font-size: 0.82rem; font-style: italic; }
+.rights { font-size: 0.72rem; color: #94a3b8; line-height: 1.5; }
+.rights b { color: #cbd5e1; font-weight: 600; }
+.rights code { color: #38bdf8; }
+.rights[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -66,16 +70,22 @@ button:disabled { background: #334155; color: #64748b; cursor: default; }
           <button id="pb" onclick="pub()" disabled>Send</button>
         </div>
         <textarea id="pp" placeholder="payload (text or JSON)"></textarea>
+        <div class="rights" id="rights" hidden></div>
       </div>
     </div>
   </div>
 <script>
 // Through this page's own host: the oauth2-proxy in front of it routes /mqtt to
 // the broker's WebSocket listener, so the socket is wss:// (no mixed content)
-// and only reachable signed in. The broker still checks its own credential —
-// the "mqtt-explorer" service account, readwrite on the topic root only.
+// and only reachable signed in. The broker still checks its own credential:
+//   person (IAM_MQTT_PERSON=true)  a personal one from POST /_mqtt-credential
+//          (iam-api behind the same proxy), kept in this closure only — never in
+//          localStorage or sessionStorage — and asked for again 5 min before it
+//          expires and after a refused reconnect, at most once a minute;
+//   legacy (false)  the shared "mqtt-explorer" service account baked in at deploy.
 var WS = 'wss://' + location.host + '/mqtt';
 var ROOT = '__TOPIC_ROOT__';
+var MODE = document.documentElement.getAttribute('data-mqtt-mode');
 document.getElementById('broker').textContent = WS;
 var MAX = 100;
 var topics = {};
@@ -87,16 +97,74 @@ var tc = document.getElementById('tc');
 var ml = document.getElementById('ml');
 var pb = document.getElementById('pb');
 
+var cred = null;        // person mode: {username, password, expires_at, read, write}; memory only
+var lastIssue = 0, renewTimer = null, firstTry = 0;
+var canWrite = MODE !== 'person';
+
+function status(text, cls) { st.textContent = text; st.className = cls || ''; }
+
+function showRights(c) {
+  var r = document.getElementById('rights');
+  var list = function(a) { return a.length ? a.map(function(t) { return '<code>' + esc(t) + '</code>'; }).join(' ') : 'none'; };
+  r.innerHTML = '<b>Your rights</b> (from your role; ends ' + esc(new Date(c.expires_at).toLocaleString()) + ')<br>'
+    + 'Read: ' + list(c.read) + '<br>Send: ' + list(c.write)
+    + (c.write.length ? '<br>Sending works only to a unit flagged for commissioning with no run in progress (' + esc(c.write_rule) + ').' : '')
+    + '<br>A message the broker does not allow is dropped silently: no error appears here.';
+  r.hidden = false;
+}
+
+// Person mode: one credential from iam-api. 401 = signed out (the reload signs in again),
+// 403 = no MQTT rights or access changed since sign-in: stop, never retry by itself.
+function issue(then) {
+  lastIssue = Date.now();
+  fetch('/_mqtt-credential', { method: 'POST', credentials: 'same-origin',
+                               headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .then(function(res) {
+      if (res.status === 401) { location.reload(); return null; }
+      return res.json().then(function(b) { return { status: res.status, body: b }; });
+    })
+    .then(function(r) {
+      if (!r) return;
+      if (r.status === 403) { status(r.body.error === 'your role has no MQTT rights' ? 'Your role has no MQTT rights' : (r.body.error || 'Refused'), 'err'); return; }
+      if (r.status !== 200) { status('No credential: ' + (r.body.error || ('HTTP ' + r.status)), 'err'); return; }
+      cred = r.body;
+      canWrite = cred.write.length > 0;
+      showRights(cred);
+      clearTimeout(renewTimer);
+      // 5 minutes before it ends, a fresh one (the broker lets the old one go at its next sync)
+      renewTimer = setTimeout(function() { reissue(); }, Math.max(new Date(cred.expires_at).getTime() - Date.now() - 300000, 60000));
+      then();
+    })
+    .catch(function(e) { status('No credential: ' + e.message, 'err'); });
+}
+
+function reissue() {
+  if (Date.now() - lastIssue < 60000) return;
+  issue(function() { if (cli) { cli.end(true); } firstTry = Date.now(); connect(); });
+}
+
 function connect() {
+  if (MODE === 'person' && !cred) { firstTry = Date.now(); return issue(connect); }
+  var user = MODE === 'person' ? cred.username : '__MQTT_USER__';
+  var pass = MODE === 'person' ? cred.password : '__MQTT_PASS__';
   cli = mqtt.connect(WS, { clientId: 'explorer-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000,
-                           username: '__MQTT_USER__', password: '__MQTT_PASS__',
+                           username: user, password: pass,
                            // under ingress-nginx's idle timeout even when nothing is published
                            keepalive: 30 });
   // ROOT/#: everything this account may read. A bare '#' would be accepted but
   // deliver the same (the broker filters per message against the ACL).
-  cli.on('connect', function() { st.textContent = 'Connected'; st.className = 'ok'; pb.disabled = false; cli.subscribe(ROOT + '/#'); });
-  cli.on('offline', function() { st.textContent = 'Reconnecting\u2026'; st.className = ''; pb.disabled = true; });
-  cli.on('error', function(e) { st.textContent = 'Error' + (e && e.message ? ': ' + e.message : ''); st.className = 'err'; });
+  cli.on('connect', function() { status('Connected', 'ok'); pb.disabled = !canWrite; cli.subscribe(ROOT + '/#'); });
+  cli.on('offline', function() { status('Reconnecting\u2026'); pb.disabled = true; });
+  cli.on('error', function(e) {
+    var refused = e && /Not authorized|Bad username/i.test(e.message || '');
+    if (MODE === 'person' && refused) {
+      // a new credential reaches the broker at its next sync (up to ~15 s): retry for 30 s,
+      // then ask iam-api for a fresh one (a revoked or expired credential)
+      if (Date.now() - firstTry < 30000) { status('Waiting for the broker to accept your credential\u2026'); return; }
+      return reissue();
+    }
+    status('Error' + (e && e.message ? ': ' + e.message : ''), 'err');
+  });
   cli.on('message', function(topic, payload) {
     var v = payload.toString();
     var t = new Date().toLocaleTimeString();
@@ -139,7 +207,7 @@ function renderMsgs(topic) {
 function pub() {
   var topic = document.getElementById('pt').value.trim();
   var payload = document.getElementById('pp').value;
-  if (topic && cli) cli.publish(topic, payload);
+  if (topic && cli && canWrite) cli.publish(topic, payload);
 }
 
 function esc(s) {

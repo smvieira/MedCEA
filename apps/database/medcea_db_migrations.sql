@@ -2185,9 +2185,9 @@ END $$;
 -- revoke_person_mqtt(sub, reason): every MQTT person credential of an account
 -- inactive (IAM 2.7, qa_dual_control): called by access-api in the transaction
 -- of a deactivation or a pure narrowing, after iam.record_decision. The broker's
--- auth sidecar drops them at its next sync (~15 s). Explorer person credentials
--- arrive in IAM 3.5, so today this changes 0 rows. An owner definer: access_svc
--- holds EXECUTE only and reads no credential.
+-- auth sidecar drops them at its next sync (~15 s). The credentials are the MQTT
+-- Explorer's (iam-api, IAM 3.5); iam.confirm_decision ends them for a confirmed
+-- role change. An owner definer: access_svc holds EXECUTE only and reads no credential.
 CREATE OR REPLACE FUNCTION medcea.revoke_person_mqtt(p_sub uuid, p_reason text) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 DECLARE n integer;

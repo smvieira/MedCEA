@@ -44,8 +44,8 @@ fake_kubectl() {
         "get deployment node-red -n "*) [[ -n "${FAKE_FLOWS+x}" ]] ;;
         "exec -n "*"deployment/node-red -- cat /data/flows.json") printf '%s' "${FAKE_FLOWS:-}" ;;
         "get deployment "*"-o jsonpath"*)
-            v="FAKE_DEPLOY_$3"; [[ -n "${!v+x}" ]] || return 1; printf '%s\n' "${!v}" ;;
-        "get deployment "*) v="FAKE_DEPLOY_$3"; [[ -n "${!v+x}" ]] ;;
+            v="FAKE_DEPLOY_${3//-/_}"; [[ -n "${!v+x}" ]] || return 1; printf '%s\n' "${!v}" ;;
+        "get deployment "*) v="FAKE_DEPLOY_${3//-/_}"; [[ -n "${!v+x}" ]] ;;
         *) echo "fake_kubectl: unexpected: $a" >&2; return 1 ;;
     esac
 }
@@ -119,10 +119,11 @@ class ClientsLive(unittest.TestCase):
 
     def test_reads_every_client(self):
         rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler",
-                         FAKE_DEPLOY_monitor="postgres", FAKE_FLOWS=self.FLOWS, FAKE_GRAFANA_B64=self.GRAFANA,
-                         FAKE_SERVERS=self.SERVERS)
+                         FAKE_DEPLOY_monitor="postgres", FAKE_DEPLOY_iam_api="iam_svc", FAKE_FLOWS=self.FLOWS,
+                         FAKE_GRAFANA_B64=self.GRAFANA, FAKE_SERVERS=self.SERVERS)
         self.assertEqual(rc, 0)
-        self.assertEqual(out.splitlines(), ["scheduler svc_scheduler", "monitor postgres", "node-red svc_ingest",
+        self.assertEqual(out.splitlines(), ["scheduler svc_scheduler", "monitor postgres", "iam-api iam_svc",
+                                            "node-red svc_ingest",
                                             "grafana svc_grafana", "pgadmin postgres"])
 
     def test_not_deployed_is_skipped_unreadable_is_question_mark(self):
@@ -136,9 +137,9 @@ class ClientsLive(unittest.TestCase):
         self.assertEqual((rc, out), (0, "end"))
 
     def test_roles(self):
-        rc, out, _ = lib("for c in scheduler monitor dbmgmt node-red grafana pgadmin; do db_client_role $c; done")
+        rc, out, _ = lib("for c in scheduler monitor dbmgmt node-red grafana pgadmin iam-api; do db_client_role $c; done")
         self.assertEqual(out.split(), ["svc_scheduler", "svc_monitor", "svc_dbexport", "svc_ingest",
-                                       "svc_grafana", "rr_admin_login"])
+                                       "svc_grafana", "rr_admin_login", "iam_svc"])
 
 
 # ── the wiring ────────────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ CLIENTS = [  # deploy script, template, the role db_client is asked for
     ("apps/frontend/deploy.sh", "apps/frontend/k8s/dbmgmt.yaml", "svc_dbexport"),
     ("deploy-infra.sh", "k8s/grafana/datasource-secret.yaml", "svc_grafana"),
     ("deploy-infra.sh", "k8s/pgadmin/pgadmin.yaml", "rr_admin_login"),
+    ("apps/iam/deploy.sh", "apps/iam/k8s/iam.yaml", "iam_svc"),   # IAM 3.5: refuses a postgres fallback
 ]
 
 
@@ -201,6 +203,12 @@ class Wiring(unittest.TestCase):
         lib_apply = read("apps/database/lib-db-apply.sh")
         self.assertIn('--service-logins "$DBA_SERVICE_LOGINS"', lib_apply)
         self.assertIn('[[ "$grants_mode" == additive', lib_apply)
+
+    def test_iam_api_never_on_postgres(self):
+        # IAM 3.5: the one service that mints MQTT credentials refuses the postgres fallback
+        sh = read("apps/iam/deploy.sh")
+        self.assertIn('[[ "$DBC_USER" == "iam_svc" ]]', sh)
+        self.assertIn("SERVICE_ROLE = 'iam_svc'", read("apps/iam/iam-api.py"))
 
     def test_flag_documented(self):
         self.assertIn('IAM_DB_SERVICE_ROLES="false"', read("config.env.example"))

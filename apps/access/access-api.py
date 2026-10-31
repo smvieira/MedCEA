@@ -1819,7 +1819,7 @@ def review_snapshot():
     s = iam.settings() if iam is not None and hasattr(iam, 'settings') else {}
     sw = s.get('switches') or {}
     switches = {'IAM_ENFORCE': {'value': s.get('enforce'), 'source': '/iam/settings.json (live)'}}
-    for k in ('IAM_GATES', 'IAM_NETPOL', 'IAM_POSTGREST_JWT'):
+    for k in ('IAM_GATES', 'IAM_NETPOL', 'IAM_POSTGREST_JWT', 'IAM_MQTT_PERSON'):   # IAM_MQTT_PERSON: IAM 3.5
         switches[k] = {'value': sw.get(k), 'source': 'as of deploy-infra %s' % (sw.get('written_at') or '(time unknown)')}
     # The drift at this moment, so the qa person signing off sees what they accept:
     # a signed-off review explains the roles it lists here, and nothing it does not.

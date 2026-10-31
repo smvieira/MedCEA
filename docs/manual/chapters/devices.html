@@ -198,6 +198,7 @@ Move this board from unit01-s-zone01 to UNIT01 / ZONE02?</code></pre>
 </ul>
 <p>A board that is not registered (the run was refused, the board had no IP, or <code>--no-register</code>) has a password that the broker does not know, so it cannot publish. Onboard it again once the cause is fixed.</p>
 <p>Boards flashed before broker authentication existed have no credential. Re-onboard them.</p>
+<p>Boards and the platform's services connect on the broker's LAN port (31883 on the server; 1883 inside the cluster). With <code>IAM_MQTT_PERSON=true</code> that port accepts no person's credential: the MQTT Explorer's personal credentials work only on the broker's WebSocket listener, behind the Explorer's sign-in (see <a href="#apps-mqtt">MQTT Explorer</a>). The shared <code>mqtt-explorer</code> account, which the onboarding summary suggests for watching a board from the command line, is refused there too; watch the board in the MQTT Explorer instead.</p>
 <div class="warn"><p>The WiFi passphrase and the MQTT password sit in plain text on the board's flash. Anyone holding the board can read them. WebREPL also stays on after onboarding: anyone who reaches port 8266 with the board's WebREPL password gets a full Python prompt and the board's files. Treat a lost board as a lost credential and mark it Inactive.</p></div>
 
 <h3 id="devices-history">Slot history and what gets recorded</h3>

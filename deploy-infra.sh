@@ -404,31 +404,39 @@ $MK8S kubectl create namespace "$NAMESPACE" \
 # leaves the ConfigMap as it is. Services re-read the mount when the kubelet
 # updates it (about a minute), so a change here needs no restart.
 echo -e "\n${GREEN}[IAM] Access check (ConfigMap medcea-iam-lib)...${NC}"
-if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)"; then
+# mqtt.json (IAM 3.5, compiler/mqtt.py): the MQTT Explorer's per-person rows, read by
+# iam-api; its own key and annotation, so routes.json's digest does not move with it.
+if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)" \
+   && IAM_MQTT_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile mqtt)"; then
     IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
+    IAM_MQTT_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_MQTT_JSON")"
     _IAM_DIR="$(mktemp -d)"
     printf '%s\n' "$IAM_ROUTES_JSON" > "$_IAM_DIR/routes.json"
+    printf '%s\n' "$IAM_MQTT_JSON" > "$_IAM_DIR/mqtt.json"
     # switches: the other IAM flags as this run set them, with the time, for the
     # quarterly access review's record (IAM 2.7) — labelled there "as of
-    # deploy-infra <written_at>", since only enforce is read live from this file.
+    # deploy-infra <written_at>". enforce is read live from this file by every
+    # service, and IAM_MQTT_PERSON by iam-api (IAM 3.5: no app redeploy for it).
     ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" \
-    SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" python3 -c '
+    SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" \
+    SW_MQTT="${IAM_MQTT_PERSON:-false}" python3 -c '
 import datetime, json, os
 e = os.environ
 print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
                   "enforce": e["ENFORCE"] == "true",
                   "switches": {"IAM_GATES": e["SW_GATES"] != "false", "IAM_NETPOL": e["SW_NETPOL"] != "false",
-                               "IAM_POSTGREST_JWT": e["SW_JWT"] == "true",
+                               "IAM_POSTGREST_JWT": e["SW_JWT"] == "true", "IAM_MQTT_PERSON": e["SW_MQTT"] == "true",
                                "written_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}},
                  sort_keys=True))' > "$_IAM_DIR/settings.json"
     chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
     $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
         --from-file=routes.json="$_IAM_DIR/routes.json" \
         --from-file=settings.json="$_IAM_DIR/settings.json" \
+        --from-file=mqtt.json="$_IAM_DIR/mqtt.json" \
         --from-file=medcea_iam.py="$SCRIPT_DIR/apps/iam/lib/medcea_iam.py" \
         --dry-run=client -o yaml \
       | $MK8S kubectl label --local -f - medcea/iam-lib=true -o yaml \
-      | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" -o yaml \
+      | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" "medcea/mqtt-digest=$IAM_MQTT_DIGEST" -o yaml \
       | $MK8S kubectl apply -f -
     rm -rf "$_IAM_DIR"
     [[ "${IAM_ENFORCE:-false}" == "true" ]] \
@@ -613,6 +621,11 @@ if [[ "$("${_PG_EXEC[@]}" "SELECT 1 FROM pg_database WHERE datname='$POSTGRES_DB
         echo -e "${YELLOW}WARNING: could not record IAM_ENFORCE in iam_policy.history; the switch itself is in force: ${_OUT:0:200}${NC}" >&2
     elif [[ "$_OUT" == *skip* ]]; then
         echo -e "${YELLOW}  IAM_ENFORCE not recorded in the access history: migration 008b is not applied yet (./apps/database/deploy.sh).${NC}"
+    fi
+    # IAM 3.5: IAM_MQTT_PERSON the same way (the broker below and iam-api follow it)
+    _MQP=false; [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && _MQP=true
+    if ! _OUT="$(dba_record_switch "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" IAM_MQTT_PERSON "$_MQP" 2>&1)"; then
+        echo -e "${YELLOW}WARNING: could not record IAM_MQTT_PERSON in iam_policy.history; the switch itself is in force: ${_OUT:0:200}${NC}" >&2
     fi
 fi
 
@@ -1465,32 +1478,53 @@ source config.env
 #    (new salt) on every run, which costs one harmless reload.
 # =============================================================================
 echo -e "\n${GREEN}[4/10] Deploying Mosquitto MQTT broker...${NC}"
+# IAM_MQTT_PERSON (IAM 3.5): true gives each listener its own auth — 1883 services and
+# boards, 9001 (the Explorer's WebSocket) only the person credentials iam-api issues —
+# and leaves the shared mqtt-explorer account out (MQTT_EXPLORER_PASS stays in
+# config.env for the rollback). false renders the broker as before 3.5.
+case "${IAM_MQTT_PERSON:-false}" in
+    true)  IAM_MQTT_PERSON=true;  _MQ_CONF=mosquitto-conf-person.yaml ;;
+    false) IAM_MQTT_PERSON=false; _MQ_CONF=mosquitto-conf.yaml ;;
+    *) echo -e "${RED}ERROR: IAM_MQTT_PERSON='$IAM_MQTT_PERSON' must be \"true\" or \"false\".${NC}" >&2; exit 1 ;;
+esac
+if [[ "$IAM_MQTT_PERSON" == "true" ]] && ! $MK8S kubectl get service iam-mqttx -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo -e "${YELLOW}WARNING: IAM_MQTT_PERSON=true but Service iam-mqttx is missing: the MQTT Explorer gets no credential until ./apps/iam/deploy.sh runs.${NC}" >&2
+fi
 _H_NR=$(printf '%s' "$MQTT_NODE_RED_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
 _H_SC=$(printf '%s' "$MQTT_SCHEDULER_PASS" | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
-_H_EX=$(printf '%s' "$MQTT_EXPLORER_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
 # node-red only subscribes (its flows have no mqtt out node); the scheduler
-# reads telemetry and writes setpoints; the explorer is the operator's tool.
-# A subscription wider than these lines is accepted, but only messages the
-# ACL allows are delivered — the filter is applied per message (tested on 2.0.22).
-$MK8S kubectl create secret generic mosquitto-service-auth -n "$NAMESPACE" --dry-run=client -o yaml \
-  --from-literal=service-passwd="node-red:${_H_NR}
-scheduler:${_H_SC}
-mqtt-explorer:${_H_EX}" \
-  --from-literal=service-acl="user node-red
+# reads telemetry and writes setpoints; the explorer (IAM_MQTT_PERSON=false only)
+# is the engineers' tool. A subscription wider than these lines is accepted, but
+# only messages the ACL allows are delivered — the filter is applied per message
+# (tested on 2.0.22).
+_MQ_PASSWD="node-red:${_H_NR}
+scheduler:${_H_SC}"
+_MQ_ACL="user node-red
 topic read ${PROJECT_NAME}/#
 
 user scheduler
 topic read ${PROJECT_NAME}/+/+/sense/#
-topic write ${PROJECT_NAME}/+/+/control/#
+topic write ${PROJECT_NAME}/+/+/control/#"
+if [[ "$IAM_MQTT_PERSON" == "false" ]]; then
+    _H_EX=$(printf '%s' "$MQTT_EXPLORER_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
+    _MQ_PASSWD+="
+mqtt-explorer:${_H_EX}"
+    _MQ_ACL+="
 
 user mqtt-explorer
-topic readwrite ${PROJECT_NAME}/#" \
+topic readwrite ${PROJECT_NAME}/#"
+fi
+$MK8S kubectl create secret generic mosquitto-service-auth -n "$NAMESPACE" --dry-run=client -o yaml \
+  --from-literal=service-passwd="$_MQ_PASSWD" \
+  --from-literal=service-acl="$_MQ_ACL" \
   --from-literal=db-password="$MQTT_AUTH_DB_PASS" | $MK8S kubectl apply -f -
 $MK8S kubectl create configmap mqtt-auth-sync -n "$NAMESPACE" \
   --from-file=mqtt-auth-sync.py="$SCRIPT_DIR/k8s/mosquitto/mqtt-auth-sync.py" \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
-render "$SCRIPT_DIR/k8s/mosquitto/mosquitto.yaml" NAMESPACE POSTGRES_DB | $MK8S kubectl apply -f -
-# The sidecar reads its script once at start: restart so a changed script runs.
+render "$SCRIPT_DIR/k8s/mosquitto/$_MQ_CONF" NAMESPACE | $MK8S kubectl apply -f -
+render "$SCRIPT_DIR/k8s/mosquitto/mosquitto.yaml" NAMESPACE POSTGRES_DB PROJECT_NAME IAM_MQTT_PERSON | $MK8S kubectl apply -f -
+# The sidecar reads its script once at start, and the broker its conf: restart so a
+# changed script or a switched IAM_MQTT_PERSON runs (the boards reconnect within seconds).
 $MK8S kubectl rollout restart deployment/mosquitto -n "$NAMESPACE"
 $MK8S kubectl rollout status deployment/mosquitto -n "$NAMESPACE" --timeout=5m
 
@@ -2016,7 +2050,12 @@ echo -e "  MQTT Explorer:   https://$MQTTX_DOMAIN  (Keycloak SSO; ./deploy-apps.
 echo -e "  Mosquitto MQTT:  mqtt://$_LAN_IP:31883  (LAN NodePort — boards, per-device credentials from onboarding)"
 echo -e "                   mqtt://mosquitto.$NAMESPACE.svc.cluster.local:1883  (in-cluster, service accounts)"
 echo -e "                   wss://$MQTTX_DOMAIN/mqtt  (browsers, through the explorer's sign-in)"
-echo -e "    Auth:          required for every client — service passwords MQTT_*_PASS in config.env"
+if [[ "${IAM_MQTT_PERSON:-false}" == "true" ]]; then
+    echo -e "    Auth:          required for every client — service passwords MQTT_*_PASS in config.env;"
+    echo -e "                   the explorer: a personal 8 h credential per sign-in, WebSocket only (IAM_MQTT_PERSON)"
+else
+    echo -e "    Auth:          required for every client — service passwords MQTT_*_PASS in config.env"
+fi
 echo -e "  MQTT topic root: ${PROJECT_NAME}/<UNIT>/<ZONE>/{sense,control,control_setpoint}/...  (PROJECT_NAME)"
 echo -e "  ${YELLOW}Note:${NC} If LAN IP changes (router DHCP), re-run deploy or set a DHCP reservation."
 echo -e "        IoT devices can also use $(hostname).local:31883 (mDNS via Avahi)."
@@ -2128,7 +2167,8 @@ PGADMIN (Keycloak SSO — platform role admin only)
   URL                 https://$PGADMIN_DOMAIN
 
 MQTT BROKER (every client authenticates)
-  Service accounts    node-red / scheduler / mqtt-explorer — passwords MQTT_*_PASS in config.env
+  Service accounts    node-red / scheduler$( [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] || echo ' / mqtt-explorer') — passwords MQTT_*_PASS in config.env
+  MQTT Explorer       $( [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && echo 'a personal credential per sign-in (IAM_MQTT_PERSON=true); MQTT_EXPLORER_PASS is unused' || echo 'the shared mqtt-explorer account (IAM_MQTT_PERSON=false)')
   Boards              one credential each, minted at onboarding (edge/provisioned/<name>.json)
 
 POSTGRESQL SUPERUSER (cluster-internal)

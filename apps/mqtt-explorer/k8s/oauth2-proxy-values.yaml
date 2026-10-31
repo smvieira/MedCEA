@@ -1,7 +1,9 @@
 # MQTT Explorer's sign-in gate. Same rules as k8s/oauth2-proxy/values-app.yaml
-# (any platform role), plus a third upstream: /mqtt goes to the broker's
-# WebSocket listener, so the browser's socket is wss://<MQTTX_DOMAIN>/mqtt —
-# same origin, only after sign-in. oauth2-proxy passes the WebSocket upgrade
+# (the roles the policy compiles for MQTTX_DOMAIN), plus two upstreams: /mqtt goes
+# to the broker's WebSocket listener, so the browser's socket is
+# wss://<MQTTX_DOMAIN>/mqtt — same origin, only after sign-in — and
+# /_mqtt-credential to iam-api (Service iam-mqttx, IAM 3.5), which issues the
+# person's own credential from the token this proxy forwards. oauth2-proxy passes the WebSocket upgrade
 # through; the Ingress timeouts below keep an idle socket open past
 # ingress-nginx's 60 s default.
 configuration:
@@ -31,7 +33,7 @@ configuration:
     redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
     oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
     profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
-    upstreams = ["http://mqtt-explorer.${NAMESPACE}.svc.cluster.local:80", "http://mosquitto-ws.${NAMESPACE}.svc.cluster.local:9001/mqtt", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/"]
+    upstreams = ["http://mqtt-explorer.${NAMESPACE}.svc.cluster.local:80", "http://mosquitto-ws.${NAMESPACE}.svc.cluster.local:9001/mqtt", "http://access-profile.${NAMESPACE}.svc.cluster.local:80/_account/", "http://iam-mqttx.${NAMESPACE}.svc.cluster.local:8085/_mqtt-credential"]
 ingress:
   annotations:
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"

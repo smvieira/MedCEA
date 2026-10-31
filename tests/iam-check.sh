@@ -50,8 +50,12 @@ for spec in scheduler:api:8082:scheduler:/api/runs \
             monitor:api:8082:monitor:/api/runs \
             dbmgmt:api:8081:dbmgmt:/objects \
             config-ui:recipe-fileserver:8081:platform-api:/devices/ \
-            access:api:8081:access:/api/users; do
+            access:api:8081:access:/api/users \
+            iam-api:iam-api:8085:iam-mqttx:/_mqtt-credential; do
     IFS=: read -r dep ctr port svc path <<<"$spec"
+    if [[ "$dep" == iam-api ]] && ! $KUBECTL get deployment iam-api -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo ""; note "$svc" "iam-api is not deployed (IAM 3.5: ./apps/iam/deploy.sh)"; continue
+    fi
     echo ""
     echo -e "${BOLD}$svc${NC}  ($dep/$ctr :$port)"
     ex() { $KUBECTL exec -i -n "$NAMESPACE" "deployment/$dep" -c "$ctr" -- "$@"; }
@@ -79,7 +83,7 @@ PY
     case "$out" in
         ok\ *)    read -r _ mode nkeys envcopy <<<"$out"
                   pass files "library, table, settings and $nkeys RS256 key(s) mounted; PyJWT present; $mode"
-                  [[ "$svc" == dbmgmt || "$envcopy" == "$ENFORCE" ]] \
+                  [[ "$svc" == dbmgmt || "$svc" == iam-mqttx || "$envcopy" == "$ENFORCE" ]] \
                       || note files "pod env IAM_ENFORCE=$envcopy, config.env $ENFORCE: used only without /iam/ (redeploy the component to align it)" ;;
         mode*)    fail files "settings.json says enforce=${out#mode }, config.env IAM_ENFORCE=$ENFORCE (./deploy-infra.sh; the mount updates within about a minute)" ;;
         missing*) fail files "not mounted: ${out#missing } (./deploy-infra.sh, then redeploy the component)" ;;
@@ -107,15 +111,15 @@ PY
             | grep -m1 "medcea_iam: \(would refuse\|refused\) GET $path on $svc")"
     if [[ -z "$line" ]]; then
         fail forged "GET $path with forged headers (answered $code) left no refusal in the log"
-    elif [[ ( "$svc" == access || "$svc" == dbmgmt ) && ( "$line" == *"would refuse"* || ( "$code" != 401 && "$code" != 403 ) ) ]]; then
-        # IAM 2.7: the User Manager's Admin port, and IAM 2.6: Database Management (an
-        # export leaves the platform), enforce whatever IAM_ENFORCE says
+    elif [[ ( "$svc" == access || "$svc" == dbmgmt || "$svc" == iam-mqttx ) && ( "$line" == *"would refuse"* || ( "$code" != 401 && "$code" != 403 ) ) ]]; then
+        # IAM 2.7: the User Manager's Admin port, IAM 2.6: Database Management (an
+        # export leaves the platform), and IAM 3.5: iam-api enforce whatever IAM_ENFORCE says
         fail forged "$svc must refuse for real (\"refused\" and 401/403), got $code: ${line:0:120}"
     elif [[ "$line" == *"would refuse"* && "$ENFORCE" == true ]]; then
         fail forged "the service only reports, but IAM_ENFORCE=true: ${line:0:120}"
     elif [[ "$line" == *"would refuse"* ]]; then
         pass forged "GET $path with forged headers: ${line#*: would refuse GET $path on $svc for }"
-    elif [[ "$code" == 401 || ( ( "$svc" == access || "$svc" == dbmgmt ) && "$code" == 403 ) ]]; then
+    elif [[ "$code" == 401 || ( ( "$svc" == access || "$svc" == dbmgmt || "$svc" == iam-mqttx ) && "$code" == 403 ) ]]; then
         pass forged "GET $path with forged headers refused with $code"
     else
         fail forged "logged a refusal but answered $code: $line"

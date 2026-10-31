@@ -912,6 +912,8 @@ $$;
 -- effect before the check (bootstrap, backfill, or made before assignments waited
 -- for qa), for which the insert is a no-op. A unit deleted meanwhile is 22023:
 -- refuse the decision. Either way the chain gets account_decision_confirmed.
+-- A confirmed role_change also sets the person's MQTT Explorer credentials
+-- inactive (IAM 3.5), in this transaction.
 CREATE OR REPLACE FUNCTION iam.confirm_decision(p_decision integer, p_note text)
 RETURNS TABLE (decision_id bigint, kind text, keycloak_user_id text, username text, from_role text,
                to_role text, new_person_id text, unit_id integer)
@@ -952,6 +954,13 @@ BEGIN
                                              actor, actor_sub, actor_person, decision_id)
         VALUES (d.keycloak_user_id, d.username, CASE d.kind WHEN 'role_change' THEN 'role_changed' ELSE 'activated' END,
                 d.reason, d.from_role, d.to_role, c.name, c.sub, c.person, d.decision_id);
+        -- IAM 3.5: a confirmed role change ends the person's MQTT Explorer credentials,
+        -- as an applied narrowing does (revoke_person_mqtt); the broker drops them at its
+        -- next sync and the Explorer asks iam-api again with the new role's token.
+        IF d.kind = 'role_change' AND d.keycloak_user_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+            UPDATE medcea.mqtt_service_credential m SET active = false
+             WHERE m.person_sub = d.keycloak_user_id::uuid AND m.active;
+        END IF;
     ELSIF d.kind = 'mail_settings' THEN
         UPDATE iam.mail_settings m
            SET smtp_host = p.smtp_host, smtp_port = p.smtp_port, smtp_user = p.smtp_user, smtp_pass = p.smtp_pass,

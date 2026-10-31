@@ -247,12 +247,13 @@ def _matrix_invariants(p, err, note):
 
 def check(p):
     """(errors, notes) for a loaded Policy."""
-    from compiler import grants, netpol, tools  # the database, network and tool sections' own checkers
+    from compiler import grants, mqtt, netpol, tools  # the database, network, MQTT and tool sections' own checkers
     errors, notes = [], []
     _structure(p, errors.append)
     if errors:
         return errors, notes  # the rest assumes a well-formed file
     errors.extend(netpol.check(p))
+    errors.extend(mqtt.check(p))
     errors.extend(grants.check(p))
     errors.extend(tools.check(p))
     _help(p, errors.append)

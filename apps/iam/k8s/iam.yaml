@@ -1,0 +1,76 @@
+# iam-api (apps/iam/iam-api.py): the access policy's own service. IAM 3.5 serves
+#   iam-mqttx  :8085  POST /_mqtt-credential — only the MQTT Explorer's oauth2-proxy
+#                     upstream (NetworkPolicy iam-iam, compiled from network: by
+#                     deploy-infra.sh, admits that proxy and the node)
+# Phase 4.1 adds the Policy UI's port (Service iam-admin :8083) to the same pod.
+# It logs in as iam_svc only (apps/iam/deploy.sh refuses a postgres fallback), and
+# reads IAM_MQTT_PERSON live from /iam/settings.json, so no switch needs a redeploy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iam-api
+  namespace: ${NAMESPACE}
+  labels: {app: iam-api}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: iam-api}
+  template:
+    metadata:
+      labels: {app: iam-api}
+    spec:
+      containers:
+      - name: iam-api
+        image: python:3.12-alpine
+        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 'pyjwt[crypto]' && exec python -u /app/iam-api.py"]
+        ports:
+        - {name: mqttx, containerPort: 8085}
+        env:
+        - {name: PG_HOST, value: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local"}
+        - {name: PG_DATABASE, value: "${POSTGRES_DB}"}
+        - name: PG_USER            # iam_svc (IAM 2.5, infra/lib-db-roles.sh)
+          value: "${PG_USER}"
+        - name: PG_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ${PG_SECRET}
+              key: ${PG_SECRET_KEY}
+        - {name: PROJECT_NAME, value: "${PROJECT_NAME}"}   # the MQTT topic root
+        - {name: MQTTX_DOMAIN, value: "${MQTTX_DOMAIN}"}   # the only Origin a POST may come from
+        - {name: IAM_ENFORCE, value: "${IAM_ENFORCE}"}     # informational: this port always enforces
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8085}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8085}
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        resources:
+          requests: {cpu: 10m, memory: 48Mi}
+          limits: {memory: 160Mi}
+        volumeMounts:
+        - {name: code, mountPath: /app/iam-api.py, subPath: iam-api.py}
+        - {name: code, mountPath: /app/mqtt_passwd.py, subPath: mqtt_passwd.py}   # infra/mqtt-passwd.py
+        - {name: iam-lib, mountPath: /iam, readOnly: true}   # access check, route table, mqtt.json, settings
+        - {name: jwks, mountPath: /jwks, readOnly: true}     # the realm's signing keys (Secret medcea-jwks)
+      volumes:
+      - name: code
+        configMap: {name: iam-api-code}
+      - name: iam-lib
+        configMap: {name: medcea-iam-lib, optional: true}
+      - name: jwks
+        secret: {secretName: medcea-jwks, optional: true}
+---
+# The MQTT Explorer's credential endpoint, reached only as an upstream of
+# mqttx-oauth2-proxy (apps/mqtt-explorer/k8s/oauth2-proxy-values.yaml) — never
+# from an Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: iam-mqttx
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: iam-api}
+  ports:
+  - {name: mqttx, port: 8085, targetPort: mqttx}

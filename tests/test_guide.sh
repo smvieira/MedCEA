@@ -31,6 +31,8 @@
 #  18  the IAM 2.7 rollback prints the psql command that reads the password in the pod
 #  19  IAM_ENFORCE enable (routes-diff --strict first) and rollback (one infra deploy, no
 #      app deploys), dry
+#  20  IAM_MQTT_PERSON enable and rollback: set, the infra deploy, then the Explorer's
+#      deploy, in that order (iam-api reads the switch live; no app deploy for it), dry
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -330,6 +332,30 @@ has   "step 1 sets the switch back" '1. config.env: IAM_ENFORCE="false"'
 has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
 hasnt "no step 3" '3. '
 hasnt "no app deploy" 'would run: ./deploy-apps.sh'
+no_stub
+
+echo "20 IAM_MQTT_PERSON enable and rollback"
+mkcfg true true
+SUM_BEFORE="$(sha256sum "$T/config.env" | cut -d' ' -f1)"
+guide $'5\n8\n1\ny\ny\nq\n'
+rc_is "quits with 0" 0
+has   "shows the current value" 'Now: IAM_MQTT_PERSON="false"'
+has   "iam-api is on the checklist" "[ ] ./apps/iam/deploy.sh has run since the IAM 3.5 pull"
+has   "the shared password's users are warned" "Nobody uses MQTT_EXPLORER_PASS outside the Explorer page"
+has   "step 1 sets the switch" '1. config.env: IAM_MQTT_PERSON="true"'
+has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
+has   "step 3 is the Explorer's deploy" '3. ./apps/mqtt-explorer/deploy.sh'
+hasnt "no step 4" '4. '
+has   "the lock is held for the recipe" "Every step takes the deploy lock"
+no_stub
+[[ "$(sha256sum "$T/config.env" | cut -d' ' -f1)" == "$SUM_BEFORE" ]] && pass "config.env untouched" || fail "config.env changed"
+sed -i 's/^IAM_MQTT_PERSON=.*/IAM_MQTT_PERSON="true"/' "$T/config.env"
+guide $'5\n8\n2\ny\nq\n'
+rc_is "quits with 0" 0
+has   "step 1 sets the switch back" '1. config.env: IAM_MQTT_PERSON="false"'
+has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
+has   "step 3 is the Explorer's deploy" '3. ./apps/mqtt-explorer/deploy.sh'
+has   "the shared account comes back" "The shared mqtt-explorer account (MQTT_EXPLORER_PASS) is back"
 no_stub
 
 echo "10 the real config.env"

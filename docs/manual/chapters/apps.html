@@ -372,17 +372,28 @@ The snapshot never changes afterwards.</li>
 <h3 id="apps-mqtt">MQTT Explorer</h3>
 <p>MQTT Explorer is a browser tool that shows the messages the boards and the platform exchange on the message broker. Only <span class="role">engineer</span> can open it. It is meant for commissioning and fault finding.</p>
 <ul>
-<li>The left column lists every topic under the platform's topic root (<code>medcea/</code> by default) seen since the page opened, with its last value.</li>
+<li>The left column lists every topic under the platform's topic root (<code>medcea/</code> by default) that you may read, seen since the page opened, with its last value.</li>
 <li>Click a topic to see its latest messages; the page keeps the last 100 for each topic.</li>
-<li>The status at the top reads Connected, Reconnecting or Error.</li>
+<li>The status at the top reads Connected, Reconnecting, Waiting for the broker to accept your credential, or an error.</li>
 </ul>
+<p>How the page connects depends on the switch <code>IAM_MQTT_PERSON</code> (see <a href="#admin-switches">IAM switches</a>).</p>
+<p><strong>With your own credential</strong> (<code>IAM_MQTT_PERSON=true</code>). When the page opens it asks the platform for a broker credential that is yours alone, made from your role, and connects with it. You see nothing of this: no password is shown or stored in the browser.</p>
+<ul>
+<li>The first connection can take up to 15 seconds: the broker picks up a new credential at its next check.</li>
+<li>The credential lasts 8 hours and is renewed in the background before it ends. Signing out of the platform does not end it at once; deactivating your account or changing your role ends it within about 15 seconds.</li>
+<li>The <strong>Your rights</strong> note under the Publish box lists what you may read and where you may send. An <span class="role">engineer</span> reads every unit's <code>sense</code>, <code>control</code> and <code>control_setpoint</code> topics, and may send only to a unit's <code>control</code> topics while that unit is flagged for commissioning and has no run in progress. The broker checks this every 15 seconds: when the flag is cleared or a run starts, sending to that unit stops.</li>
+<li>No screen can flag a unit for commissioning yet, so in practice the page only reads. <strong>Send</strong> stays disabled while you have nowhere to send.</li>
+<li>A message the broker does not allow is dropped silently: the page shows no error, and nobody receives it.</li>
+<li>If the page says your role has no MQTT rights, or that your access changed since you signed in, reload it after your administrator has sorted out your role.</li>
+</ul>
+<p><strong>With the shared account</strong> (<code>IAM_MQTT_PERSON=false</code>). The page connects with one shared service account that may read and write every topic under the platform root.</p>
 <p>To send a message:</p>
 <ol class="steps">
 <li>Click a topic, or type one in the <strong>Publish</strong> box.</li>
 <li>Enter the payload, as text or JSON.</li>
 <li>Click <strong>Send</strong>.</li>
 </ol>
-<div class="warn"><p>At this release the page connects to the broker with one shared service account that may read and write every topic under the platform root. A message published to a <code>control</code> topic switches equipment in a live chamber, whatever the unit's state. The policy's per-person credential, which allows writing only to a unit flagged for commissioning, is not yet what this page uses. Publish to control topics only on a unit with no active run.</p></div>
+<div class="warn"><p>With the shared account, a message published to a <code>control</code> topic switches equipment in a live chamber, whatever the unit's state. Publish to control topics only on a unit with no active run. With your own credential the broker refuses it, but a unit flagged for commissioning is still real equipment.</p></div>
 
 <h3 id="apps-nodered">Node-RED</h3>
 <p>Node-RED runs the flow that receives telemetry from the broker and writes it to the database. Its editor is where that flow, and any other integration flow, is changed. Only <span class="role">engineer</span> can open it.</p>

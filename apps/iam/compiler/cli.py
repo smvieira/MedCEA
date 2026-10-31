@@ -15,6 +15,8 @@
                                         IAM 3.3) from the flows group's `tool:` block
   cli.py compile edge-wizard [--file F] the onboarding wizard's --required-role, comma-separated (IAM 3.4)
   cli.py compile pgadmin [--file F]     pgAdmin's OAUTH2_ADDITIONAL_CLAIMS, a Python literal (IAM 3.4)
+  cli.py compile mqtt [--file F]        the MQTT Explorer's per-person credential rows (mqtt.json of ConfigMap
+                                        medcea-iam-lib, read by iam-api; IAM 3.5), canonical, one line
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
                          [--service-logins ROLE,...]  (additive: login roles allowed to log in, IAM Phase 2.5)
                          [--without-iam]  (schema iam and access_svc absent: leave both out, IAM 2.7)
@@ -41,7 +43,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler import grants, invariants, model, netpol, proxies, routes, tools  # noqa: E402
+from compiler import grants, invariants, model, mqtt, netpol, proxies, routes, tools  # noqa: E402
 
 
 def main(argv=None):
@@ -55,7 +57,7 @@ def main(argv=None):
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
     comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants", "grafana", "jupyterhub", "node-red",
-                                         "edge-wizard", "pgadmin"])
+                                         "edge-wizard", "pgadmin", "mqtt"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
     comp.add_argument("--setting", choices=["allowed_groups", "admin_groups"], help="compile jupyterhub: which list")
@@ -174,6 +176,9 @@ def main(argv=None):
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+        return 0
+    if args.cmd == "compile" and args.target == "mqtt":
+        print(mqtt.dumps(mqtt.compile(p)))
         return 0
     if args.cmd == "compile" and args.target == "routes":
         try:

@@ -1208,5 +1208,27 @@ class ReviewFixes(Base):
         self.assertEqual(self.drift([(S, 'operator', 1), (S, 'operator', 9)], (snap, 5)), [('sam', 'engineer')])
 
 
+
+class ReviewSwitches(unittest.TestCase):
+    """The access review records every IAM switch deploy-infra writes (IAM 3.5: IAM_MQTT_PERSON)."""
+
+    def test_switches_in_snapshot(self):
+        from unittest import mock
+
+        class Con:
+            def cursor(self):
+                return None
+
+            def close(self):
+                pass
+        with mock.patch.object(API, 'kc', return_value=(200, [], None)), \
+                mock.patch.object(API, 'role_members', return_value={}), \
+                mock.patch.object(API, 'db', return_value=Con()), \
+                mock.patch.object(API, 'compute_drift', return_value=[]):
+            snap = API.review_snapshot()
+        self.assertEqual(set(snap['switches']),
+                         {'IAM_ENFORCE', 'IAM_GATES', 'IAM_NETPOL', 'IAM_POSTGREST_JWT', 'IAM_MQTT_PERSON'})
+        self.assertIn('as of deploy-infra', snap['switches']['IAM_MQTT_PERSON']['source'])
+
 if __name__ == '__main__':
     unittest.main()

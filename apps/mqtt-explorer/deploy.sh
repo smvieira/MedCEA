@@ -2,16 +2,20 @@
 # apps/mqtt-explorer/deploy.sh — MQTT Explorer (browser MQTT tool)
 #
 # Deploys:
-#   1. HTML ConfigMap (index.html, with the topic root and the broker's
-#      "mqtt-explorer" service account filled in)
+#   1. HTML ConfigMap (index.html, with the topic root and the mode: under
+#      IAM_MQTT_PERSON=true the page asks iam-api for a personal credential;
+#      under false the broker's shared "mqtt-explorer" account is filled in)
 #   2. Deployment + Service (nginx serving the page)
-#   3. mqttx-oauth2-proxy on $MQTTX_DOMAIN (Keycloak SSO, any platform role),
-#      which also routes /mqtt to the broker's WebSocket listener
+#   3. mqttx-oauth2-proxy on $MQTTX_DOMAIN (Keycloak SSO, the roles the policy
+#      compiles: engineer), which also routes /mqtt to the broker's WebSocket
+#      listener and /_mqtt-credential to iam-api (Service iam-mqttx)
 #   4. Portal card
 #
-# The page connects to wss://$MQTTX_DOMAIN/mqtt — through its own sign-in —
-# and the broker checks the service account on top. That account's password is
-# in the page, which is why the page is only served after sign-in.
+# The page connects to wss://$MQTTX_DOMAIN/mqtt — through its own sign-in — and
+# the broker checks a credential on top: the person's own, short-lived one
+# (IAM_MQTT_PERSON=true; this deploy refuses until iam-mqttx answers in person mode
+# and the broker runs it), or the shared account, whose password is then in the
+# page, which is why the page is only served after sign-in.
 #
 # Idempotent: safe to re-run.
 
@@ -37,18 +41,49 @@ MQTTX_DOMAIN="${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}"
 GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[mqtt-explorer]${NC} $*"; }
 
-if [[ -z "${MQTT_EXPLORER_PASS:-}" ]]; then
-    echo "ERROR: MQTT_EXPLORER_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
-    exit 1
-fi
+case "${IAM_MQTT_PERSON:-false}" in
+    true)
+        _MODE=person
+        # The page would get no credential: iam-api must answer in person mode, and the
+        # broker must have been restarted with per-listener auth (./deploy-infra.sh).
+        # iam-api reads the switch from its /iam mount, which the kubelet refreshes about
+        # a minute after deploy-infra: wait up to 150 s.
+        _OK=false
+        for _ in $(seq 1 30); do
+            _H="$($KUBECTL exec -n "$NAMESPACE" deployment/iam-api -- python3 -c \
+                'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8085/healthz", timeout=5).read().decode())' 2>/dev/null)" || _H=""
+            if python3 -c 'import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get("mode") is True and d.get("mqtt_digest") else 1)' "$_H" 2>/dev/null; then
+                _OK=true; break
+            fi
+            [[ -n "$_H" ]] || break          # no iam-api at all: no point waiting
+            sleep 5
+        done
+        if [[ "$_OK" != true ]]; then
+            echo "ERROR: IAM_MQTT_PERSON=true, but iam-api (Service iam-mqttx) does not answer in person mode — run ./apps/iam/deploy.sh and ./deploy-infra.sh first." >&2
+            exit 1
+        fi
+        if [[ "$($KUBECTL get deployment mosquitto -n "$NAMESPACE" -o jsonpath='{.spec.template.metadata.annotations.medcea/mqtt-mode}' 2>/dev/null)" != "true" ]]; then
+            echo "ERROR: IAM_MQTT_PERSON=true, but the broker still runs the shared account — run ./deploy-infra.sh first." >&2
+            exit 1
+        fi ;;
+    false)
+        _MODE=legacy
+        if [[ -z "${MQTT_EXPLORER_PASS:-}" ]]; then
+            echo "ERROR: MQTT_EXPLORER_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
+            exit 1
+        fi ;;
+    *)  echo "ERROR: IAM_MQTT_PERSON='${IAM_MQTT_PERSON}' must be \"true\" or \"false\"." >&2; exit 1 ;;
+esac
 
 # =============================================================================
 # 1. Page
 # =============================================================================
-log "Creating HTML ConfigMap..."
+log "Creating HTML ConfigMap (mode: $_MODE)..."
+if [[ "$_MODE" == person ]]; then _MQ_USER=""; _MQ_PASS=""; else _MQ_USER=mqtt-explorer; _MQ_PASS="$MQTT_EXPLORER_PASS"; fi
 sed -e "s|__TOPIC_ROOT__|${PROJECT_NAME:-medcea}|g" \
-    -e "s|__MQTT_USER__|mqtt-explorer|g" \
-    -e "s|__MQTT_PASS__|${MQTT_EXPLORER_PASS}|g" \
+    -e "s|__MQTT_MODE__|${_MODE}|g" \
+    -e "s|__MQTT_USER__|${_MQ_USER}|g" \
+    -e "s|__MQTT_PASS__|${_MQ_PASS}|g" \
     "$SCRIPT_DIR/html/index.html" \
   | $KUBECTL create configmap mqtt-explorer-html -n "$NAMESPACE" \
       --from-file=index.html=/dev/stdin --dry-run=client -o yaml \
@@ -89,4 +124,8 @@ portal_card enable "https://$MQTTX_DOMAIN"
 
 log ""
 log "MQTT Explorer deployed!"
-log "  UI: https://$MQTTX_DOMAIN   (broker: wss://$MQTTX_DOMAIN/mqtt as mqtt-explorer)"
+if [[ "$_MODE" == person ]]; then
+    log "  UI: https://$MQTTX_DOMAIN   (broker: wss://$MQTTX_DOMAIN/mqtt with each person's own credential)"
+else
+    log "  UI: https://$MQTTX_DOMAIN   (broker: wss://$MQTTX_DOMAIN/mqtt as mqtt-explorer)"
+fi

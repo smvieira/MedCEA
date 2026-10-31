@@ -25,7 +25,7 @@
 #                qa, --bootstrap acts at once, remove withdraws a waiting one); the own_unit RLS
 #                probes run in W4
 #   access       (not in the default set; write probes) IAM 2.7's account decisions,
-#                D1-D18: record, withdraw, confirm, refuse, review as access_svc with
+#                D1-D19: record, withdraw, confirm, refuse, review as access_svc with
 #                set_actor; the who-may rules, units.sql refusals, the attestation,
 #                append-only histories, role_widening's stub, the review, template
 #                reset, MQTT revocation, rr_qa without EXECUTE
@@ -600,6 +600,17 @@ SET ROLE mqtt_auth;
 SELECT c.username, c.password_hash, c.role, c.topic_base FROM medcea.mqtt_credential c
   JOIN medcea.device d ON d.device_id = c.device_id WHERE c.active AND d.is_active = 'Y' ORDER BY c.username;
 SQL
+        if [[ "$MODE" == true ]]; then   # IAM 3.5: the person credentials, read through the compiled grants
+            probe W1 "broker sidecar (mqtt_auth): its person and unit queries" ok <<'SQL'
+SET ROLE mqtt_auth;
+SELECT c.username, c.password_hash, c.expires_at, a.access, a.topic FROM medcea.mqtt_service_credential c
+  LEFT JOIN medcea.mqtt_service_acl a USING (username)
+ WHERE c.active AND c.expires_at > now() AND c.person_sub IS NOT NULL AND c.username LIKE 'explorer-%';
+SELECT u.unit_code, u.commissioning,
+       EXISTS (SELECT 1 FROM medcea.recipe_run r WHERE r.unit_id = u.unit_id AND r.recipe_run_status = 'R')
+  FROM medcea.cea_unit u;
+SQL
+        fi
         if [[ "$MODE" != legacy ]]; then
             probe W1 "config UI: deleting a unit whose assignment has a parameter set" ok <<SQL
 INSERT INTO medcea.cea_unit (unit_type, location_id, is_active, unit_code)
@@ -1860,6 +1871,23 @@ SET SESSION AUTHORIZATION rr_qa;
 SELECT * FROM iam.confirm_decision(1, 'x');
 SQL
     fi
+    # D19 — IAM 3.5: a confirmed role change ends the subject's MQTT Explorer credentials
+    probe D19 "qa confirms a role change: the subject's MQTT credentials go inactive" ok <<SQL
+$cred
+$(pending_d1)
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:d1, 'iam-db D19') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|inactive', NOT active FROM medcea.mqtt_service_credential WHERE username = 'iamt-person-$_h';
+SQL
+    probe D19 "qa refuses a role change: the credentials stay" ok <<SQL
+$cred
+$(pending_d1)
+$(um_qa)
+SELECT * FROM iam.refuse_decision(:d1, 'iam-db D19') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|still active', active FROM medcea.mqtt_service_credential WHERE username = 'iamt-person-$_h';
+SQL
 elif want access; then
     note access "skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
 fi
