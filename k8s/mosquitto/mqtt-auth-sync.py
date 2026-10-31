@@ -31,14 +31,17 @@ the right shape: no password derives it.
 The database lives in the apps stage and this pod in the infra stage, so a table may
 not exist yet, or the DB may be down for a moment: the last successfully read device
 set is kept (only a successful query can shrink the fleet). The person set is read in
-its own transaction; when it fails, the last person set is kept minus credentials
-expired by the local clock, and every person write row is dropped until a read
-succeeds (fail closed). Files are written atomically (tmp + rename) — acl-ws,
-passwd-ws, acl, passwd — then every process named `mosquitto` gets SIGHUP
-(shareProcessNamespace), which makes Mosquitto 2 re-read them. A user that disappears
-is refused on its next CONNECT, and its publishes are denied at once. status.json
-(mode, counts per listener, write rows honoured and dropped by reason, last_db_ok)
-holds no hash and no password. Nothing here hashes a password, and no hash is logged.
+its own transaction; when it fails, every person write row is dropped at once and
+the last person set is kept, minus credentials expired by the local clock, for at most
+PERSON_GRACE_SECONDS (default 2 x POLL) after the last successful read; after that
+passwd-ws holds only the placeholder until a read succeeds (fail closed: a credential
+revoked in the database must not keep its reads while the read keeps failing).
+Files are written atomically (tmp + rename) — acl-ws, passwd-ws, acl, passwd — then
+every process named `mosquitto` gets SIGHUP (shareProcessNamespace), which makes
+Mosquitto 2 re-read them. A user that disappears is refused on its next CONNECT, and
+its publishes are denied at once. status.json (mode, counts per listener, write rows
+honoured and dropped by reason, last_db_ok, persons_last_ok) holds no hash and no
+password. Nothing here hashes a password, and no hash is logged.
 """
 import base64
 import datetime
@@ -53,6 +56,7 @@ E = os.environ
 AUTH_DIR = E.get('AUTH_DIR', '/mosquitto/auth')
 SECRET_DIR = E.get('SECRET_DIR', '/secrets')
 POLL = int(E.get('POLL_SECONDS', '15'))
+PERSON_GRACE = int(E.get('PERSON_GRACE_SECONDS', str(2 * POLL)))
 MOSQ_UID = int(E.get('MOSQUITTO_UID', '1883'))
 PERSON_MODE = E.get('MQTT_PERSON_CREDENTIALS', 'false') == 'true'
 ROOT = E.get('PROJECT_NAME', 'medcea')
@@ -237,6 +241,15 @@ def render_persons(persons, units, root=ROOT, writes_ok=True, now=None, placehol
     return '\n'.join(passwd) + '\n', '\n'.join(acl) + '\n', stats
 
 
+def kept_persons(last_persons, last_ok, now, grace=None):
+    """The person rows to serve after a failed read: the last set while the last
+    successful read is at most grace seconds old, none after that (or without one)."""
+    grace = PERSON_GRACE if grace is None else grace
+    if last_ok is None or (now - last_ok).total_seconds() > grace:
+        return []
+    return last_persons
+
+
 def write_atomic(path, content, mode=0o600):
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
@@ -270,6 +283,7 @@ def main():
     os.makedirs(AUTH_DIR, exist_ok=True)
     last_rows, db_state, written = [], None, None
     last_persons, last_units, persons_ok, person_state, last_db_ok = [], [], False, None, None
+    persons_last_ok = None
     placeholder = placeholder_hash()             # one per start, never logged
     while True:
         service_passwd, service_acl = read_secret('service-passwd'), read_secret('service-acl')
@@ -286,18 +300,24 @@ def main():
         files = {}
         stats = None
         if PERSON_MODE:
+            now = datetime.datetime.now(datetime.timezone.utc)
             try:
                 last_persons, last_units = fetch_persons()
-                persons_ok, pstate = True, 'ok'
+                persons_ok, pstate, persons_last_ok = True, 'ok', now
             except Exception as e:               # noqa: BLE001 — fail closed: no write row
                 persons_ok, pstate = False, 'unavailable: %s' % str(e).splitlines()[0][:160]
+            serving = last_persons if persons_ok else kept_persons(last_persons, persons_last_ok, now)
+            if not persons_ok and not serving and last_persons:
+                pstate += ' (grace over)'
             if pstate != person_state:
                 log('person credentials:', 'from the database' if pstate == 'ok'
-                    else 'database %s — last known set, reads only, until a read succeeds' % pstate)
+                    else 'database %s — %s until a read succeeds' % (
+                        pstate, 'last known set, reads only, for %d s,' % PERSON_GRACE if serving
+                        else 'none (placeholder only)'))
                 person_state = pstate
             files['passwd'], files['acl'], n = render(service_passwd, service_acl, last_rows, PERSON_PREFIX)
             files['passwd-ws'], files['acl-ws'], stats = render_persons(
-                last_persons, last_units, ROOT, persons_ok, placeholder=placeholder)
+                serving, last_units, ROOT, persons_ok, now=now, placeholder=placeholder)
         else:
             files['passwd'], files['acl'], n = render(service_passwd, service_acl, last_rows)
         if files != written:
@@ -314,7 +334,7 @@ def main():
                   'last_db_ok': _iso(last_db_ok), 'devices': n,
                   'services': service_passwd.count('\n') + 1 if service_passwd else 0}
         if stats:
-            status.update(persons=stats, persons_from_database=persons_ok)
+            status.update(persons=stats, persons_from_database=persons_ok, persons_last_ok=_iso(persons_last_ok))
         try:
             write_atomic(os.path.join(AUTH_DIR, 'status.json'), json.dumps(status, sort_keys=True) + '\n', 0o644)
         except OSError as e:

@@ -143,7 +143,7 @@
 <tr><td>Role change that gives more access</td><td>Waits under <strong>Decisions</strong> until a <span class="role">qa</span> person confirms it. When it is confirmed, any MQTT Explorer credentials you hold are revoked; the Explorer then asks for a new one with your new role.</td></tr>
 <tr><td>Role change that only removes access</td><td>Applied at once. Any MQTT Explorer credentials you hold are revoked: the broker refuses them within about 15 seconds.</td></tr>
 <tr><td>Activation of a disabled account</td><td>Always waits for a <span class="role">qa</span> confirmation.</td></tr>
-<tr><td>Deactivation</td><td>Applied at once. Every sign-in session is ended, MQTT Explorer credentials are revoked (the broker refuses them within about 15 seconds, and no new one is issued on the old sign-in), and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
+<tr><td>Deactivation</td><td>Applied at once. Every platform sign-in session is ended (Grafana, pgAdmin and AI Workbench sessions as described below the table), MQTT Explorer credentials are revoked (the broker refuses them within about 15 seconds, and no new one is issued on the old sign-in), and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
 </tbody>
 </table></div>
 <p>You do not need to sign out for a role change to reach you. The sign-in gate in front of each app checks your session with Keycloak every 4 minutes, and the proof of sign-in passed to the services is valid for 5 minutes. So, for the apps behind such a gate (all except Grafana, the AI Workbench and pgAdmin, which keep their own sessions; the AI Workbench is described below the list):</p>
@@ -153,6 +153,7 @@
 </ul>
 <p>The AI Workbench checks your role each time you sign in to it, and a workbench session lasts at most an hour before the sign-in runs again (without a password while your platform session is open). So a role that no longer includes the workbench, or a deactivation, reaches it within an hour; a notebook tab left open stops working by then too. Your files are kept, and come back if access is restored.</p>
 <p>The device onboarding wizard checks your role when you sign in and again each time it renews your sign-in during a run (at least every five minutes). If you lose <span class="role">engineer</span> or <span class="role">maintenance</span> during a run, it stops before the board is erased. pgAdmin checks your role only when you sign in: a pgAdmin session you already have open stays open after a role change until it ends.</p>
+<p>Grafana also checks your role only when you sign in. A Grafana tab you already have open keeps the Grafana role it was given, and keeps showing every unit's telemetry, after a role change or a deactivation, until that Grafana session ends or Grafana restarts (it restarts when the policy changes who gets which Grafana role). This is a known gap.</p>
 <div class="record"><p>Every role change, activation and deactivation is kept as an account decision, with the reason, who made it, who confirmed it when confirmation is needed, and the times. Each one that takes effect is also added to the account's status history, with the old and new role for a role change. These histories can only be added to, never edited.</p></div>
 
 <h3 id="access-noaccess">Why can't I open an app</h3>

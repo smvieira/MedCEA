@@ -416,7 +416,7 @@ The snapshot never changes afterwards.</li>
 <li>no sign-in for every other role (<span class="role">operator</span>, <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>) and for an account without a platform role.</li>
 </ul>
 <p>A person Grafana refuses sees Grafana's own sign-in page with a message that the login was denied, not the platform's "No access" page. Nobody gets Grafana Admin through the platform sign-in: only Grafana's local break-glass account holds it (see <a href="#admin-credentials">Credentials</a>).</p>
-<p>The dashboards change only through the repository (<code>apps/report/dashboards/</code>) and the report deploy. An Editor who changes a dashboard in the browser cannot save it.</p>
+<p>The platform's dashboards change only through the repository (<code>apps/report/dashboards/</code>) and the report deploy. An Editor who changes one of them in the browser cannot save it. An Editor can still create a new dashboard, or copy one with "Save as"; such a dashboard is visible to other Grafana users until Grafana restarts, then it is gone. It is not part of the record: put a dashboard that should stay in the repository.</p>
 <div class="warn"><p>Dashboards read through Grafana's own database account, so a viewer sees telemetry of every unit; that is why an <span class="role">operator</span>, who sees only their own units in the Run Monitor, has no Grafana. A viewer can also send Grafana any query that account may run, even though the Explore screen is hidden from Viewers: what limits a viewer is the database account's read access (master data, measurements and runs), not the dashboards.</p></div>
 
 <h3 id="apps-workbench">AI Workbench (JupyterHub)</h3>

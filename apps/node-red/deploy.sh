@@ -70,13 +70,18 @@ fi
 
 echo "    Pod: $NR_POD"
 
+# Working files in a private directory (mode 700), removed on exit: the rendered and
+# merged flows hold the ingest database and broker passwords.
+NR_TMP="$(mktemp -d)"
+trap 'rm -rf "$NR_TMP"' EXIT
+
 # Start port-forward in background; kill it on exit
 $KUBECTL port-forward \
     -n "$NAMESPACE" \
     "pod/$NR_POD" \
-    "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log 9>&- &
+    "${NR_LOCAL_PORT}:1880" &>"$NR_TMP/portforward.log" 9>&- &
 PF_PID=$!
-trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+trap 'kill "$PF_PID" 2>/dev/null || true; rm -rf "$NR_TMP"' EXIT
 
 # Wait for Node-RED to be reachable
 echo -n "    Waiting for Node-RED"
@@ -114,13 +119,13 @@ while IFS= read -r pkg || [[ -n "$pkg" ]]; do
     HTTP=$(nr_curl "$NAMESPACE" -sf -X POST "$NR_BASE/nodes" \
         -H "Content-Type: application/json" \
         -d "{\"module\":\"$pkg\"}" \
-        -o /tmp/nr-pkg.log \
+        -o "$NR_TMP/pkg.log" \
         -w "%{http_code}" 2>/dev/null || echo "000")
 
     if [[ "$HTTP" == "200" ]]; then
         echo "installed"
     else
-        echo "FAILED (HTTP $HTTP) — $(cat /tmp/nr-pkg.log 2>/dev/null)"
+        echo "FAILED (HTTP $HTTP) — $(cat "$NR_TMP/pkg.log" 2>/dev/null)"
         echo "ERROR: Install $pkg manually via the Node-RED palette manager, then re-run." >&2
         exit 1
     fi
@@ -149,40 +154,41 @@ for flow_file in "$SCRIPT_DIR/flows/"*.json; do
     # flows_diff.py's environment, never on a command line.
     NR_MQTT_PASS="$MQTT_NODE_RED_PASS" NR_PG_USER="$PG_USER" NR_PG_PASS="$PG_PASS" \
         python3 "$SCRIPT_DIR/flows_diff.py" render "$flow_file" \
-        < <(nr_flow_values "$NAMESPACE") > /tmp/nr-new-flow.json
+        < <(nr_flow_values "$NAMESPACE") > "$NR_TMP/new-flow.json"
 
     # Get current flows from Node-RED
-    nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" > /tmp/nr-current-flows.json 2>/dev/null
+    nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" > "$NR_TMP/current-flows.json" 2>/dev/null
 
     # Merge: drop any nodes whose IDs appear in the new flow, then append new nodes
-    python3 << 'PYEOF'
-import json
+    NR_TMP="$NR_TMP" python3 << 'PYEOF'
+import json, os
 
-with open('/tmp/nr-new-flow.json') as f:
+d = os.environ['NR_TMP']
+with open(os.path.join(d, 'new-flow.json')) as f:
     new_nodes = json.load(f)
 
-with open('/tmp/nr-current-flows.json') as f:
+with open(os.path.join(d, 'current-flows.json')) as f:
     current = json.load(f)
 
 new_id_set = {n['id'] for n in new_nodes}
 kept = [n for n in current if n.get('id') not in new_id_set]
 merged = kept + new_nodes
 
-with open('/tmp/nr-merged-flows.json', 'w') as f:
+with open(os.path.join(d, 'merged-flows.json'), 'w') as f:
     json.dump(merged, f)
 PYEOF
 
     HTTP=$(nr_curl "$NAMESPACE" -sf -X POST "$NR_BASE/flows" \
         -H "Content-Type: application/json" \
-        -d @/tmp/nr-merged-flows.json \
-        -o /tmp/nr-deploy.log \
+        -d @"$NR_TMP/merged-flows.json" \
+        -o "$NR_TMP/deploy.log" \
         -w "%{http_code}" 2>/dev/null || echo "000")
 
     if [[ "$HTTP" == "200" || "$HTTP" == "204" ]]; then
         echo "    Flow '$flow_name' deployed"
     else
         echo "ERROR: Flow deploy failed (HTTP $HTTP)" >&2
-        echo "       $(cat /tmp/nr-deploy.log 2>/dev/null)" >&2
+        echo "       $(cat "$NR_TMP/deploy.log" 2>/dev/null)" >&2
         exit 1
     fi
 done

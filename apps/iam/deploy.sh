@@ -14,7 +14,9 @@
 #    deployed — a warning while IAM_MQTT_PERSON=false (a default install), an error
 #    while it is true (the Explorer would have no credential endpoint).
 #    IAM_MQTT_PERSON is read live from /iam/settings.json (./deploy-infra.sh), so the
-#    switch needs no redeploy here; while it is false POST answers 409.
+#    switch needs no redeploy here; while it is false POST answers 409. The guide's
+#    enable recipe still runs this deploy right after setting the switch, before
+#    ./deploy-infra.sh, so a missing iam-api stops it before the broker changes.
 #
 # Phase 4 adds the Policy UI, apply.sh and the bootstrap of version 1 here.
 # Idempotent: safe to re-run.

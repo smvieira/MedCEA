@@ -854,19 +854,20 @@ recipe() {
                    "While false, nobody can retire a Q-table from the Config UI (config-api runs every token as anon, which may execute no function). If one must start cold meanwhile: medcea.retire_algorithm_state in psql in the PostgreSQL pod, which records no person."
                    "Before a git revert of the Phase 2 code, also run medcea_db_migrations_down_008b.sql with -v full=1 as postgres (by hand; see CLAUDE.md).") ;;
         IAM_MQTT_PERSON:enable)
-            PRE=("./apps/iam/deploy.sh has run since the IAM 3.5 pull: iam-api answers (needs IAM_DB_SERVICE_ROLES=true; it never runs as postgres), and so has ./apps/access/deploy.sh (a confirmed role change ends a credential)."
+            PRE=("IAM_DB_SERVICE_ROLES is true and ./apps/database/deploy.sh has let iam_svc log in: iam-api never runs as postgres (the recipe's iam deploy refuses otherwise). ./apps/access/deploy.sh has run since the IAM 3.5 pull (a confirmed role change ends a credential)."
                  "IAM_DB_ROLES is true: the broker reads the person credentials as mqtt_auth through its compiled grants."
                  "No run is active: ./deploy-infra.sh restarts the broker (the boards reconnect within seconds)."
                  "Nobody uses MQTT_EXPLORER_PASS outside the Explorer page (an MQTT client on 31883 or wss): it stops working on both listeners.")
-            STEPS=("set IAM_MQTT_PERSON true" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
-            AFTER=("iam-api reads the switch from ConfigMap medcea-iam-lib within about a minute; the Explorer deploy waits for it."
+            STEPS=("set IAM_MQTT_PERSON true" "run ./apps/iam/deploy.sh" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
+            AFTER=("The iam deploy refuses while iam-api cannot be deployed, so the recipe stops before the broker changes: restore config.env as shown."
+                   "iam-api reads the switch from ConfigMap medcea-iam-lib within about a minute; the Explorer deploy waits for it."
                    "Engineers reload the Explorer: it signs them in to the broker with their own 8 h credential. They read every unit's sense, control and control_setpoint topics; sending works only to a unit flagged for commissioning with no run in progress — today no screen flags one, so in practice the Explorer only reads."
                    "Between the two deploys an open Explorer page is refused for under a minute."
                    "Verify: ./health-check.sh (MQTT person credentials, iammqtt) and tests/iam-mqtt.sh (takes the deploy lock).") ;;
         IAM_MQTT_PERSON:rollback)
             STEPS=("set IAM_MQTT_PERSON false" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
             AFTER=("The shared mqtt-explorer account (MQTT_EXPLORER_PASS) is back on both listeners, with read and send on the whole topic root; iam-api answers 409 within about a minute."
-                   "Person credentials stay in the database, inert; nothing is deleted.") ;;
+                   "The infra deploy ends every person credential (inactive, recorded in the policy history); nothing is deleted, and a later enable issues new ones.") ;;
         WORKBENCH_ENABLED:enable)
             STEPS=("set WORKBENCH_ENABLED true" "run ./deploy-infra.sh")
             AFTER=("About 2 GB of images. To redeploy only the workbench later: ./infra/deploy-workbench.sh") ;;

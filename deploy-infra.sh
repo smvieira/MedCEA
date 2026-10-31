@@ -429,6 +429,8 @@ print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
                                "written_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}},
                  sort_keys=True))' > "$_IAM_DIR/settings.json"
     chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
+    _OLD_MQTT_DIGEST="$($MK8S kubectl get configmap medcea-iam-lib -n "$NAMESPACE" \
+        -o jsonpath='{.metadata.annotations.medcea/mqtt-digest}' 2>/dev/null || true)"
     $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
         --from-file=routes.json="$_IAM_DIR/routes.json" \
         --from-file=settings.json="$_IAM_DIR/settings.json" \
@@ -439,6 +441,16 @@ print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
       | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" "medcea/mqtt-digest=$IAM_MQTT_DIGEST" -o yaml \
       | $MK8S kubectl apply -f -
     rm -rf "$_IAM_DIR"
+    # A changed MQTT policy: restart iam-api so it issues from the new mqtt.json at once
+    # (the mount follows in about a minute); the database step below then ends every
+    # person credential issued under another digest (dba_retire_person_mqtt).
+    if [[ -n "$_OLD_MQTT_DIGEST" && "$_OLD_MQTT_DIGEST" != "$IAM_MQTT_DIGEST" ]] \
+       && $MK8S kubectl get deployment iam-api -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo -e "${GREEN}  MQTT policy changed: restarting iam-api...${NC}"
+        $MK8S kubectl rollout restart deployment/iam-api -n "$NAMESPACE" >/dev/null
+        $MK8S kubectl rollout status deployment/iam-api -n "$NAMESPACE" --timeout=3m \
+            || echo -e "${YELLOW}WARNING: iam-api did not restart; it may issue from the old mqtt.json for about a minute.${NC}" >&2
+    fi
     [[ "${IAM_ENFORCE:-false}" == "true" ]] \
         && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow (live within about a minute).${NC}" \
         || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./guide.sh).${NC}"
@@ -622,8 +634,17 @@ if [[ "$("${_PG_EXEC[@]}" "SELECT 1 FROM pg_database WHERE datname='$POSTGRES_DB
     elif [[ "$_OUT" == *skip* ]]; then
         echo -e "${YELLOW}  IAM_ENFORCE not recorded in the access history: migration 008b is not applied yet (./apps/database/deploy.sh).${NC}"
     fi
-    # IAM 3.5: IAM_MQTT_PERSON the same way (the broker below and iam-api follow it)
+    # IAM 3.5: IAM_MQTT_PERSON the same way (the broker below and iam-api follow it).
+    # First end the person credentials the policy no longer backs: issued under another
+    # mqtt.json digest, or all of them on a switch transition (read before it is recorded).
     _MQP=false; [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && _MQP=true
+    if [[ -n "${IAM_MQTT_DIGEST:-}" ]]; then
+        if ! _OUT="$(dba_retire_person_mqtt "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" "$IAM_MQTT_DIGEST" "$_MQP" 2>&1)"; then
+            echo -e "${YELLOW}WARNING: could not end the MQTT person credentials of an older policy or switch state; they lapse within 8 h: ${_OUT:0:200}${NC}" >&2
+        elif [[ "$_OUT" =~ ^[1-9][0-9]*$ ]]; then
+            echo -e "${GREEN}  Ended $_OUT MQTT person credential(s) issued under an older MQTT policy or switch state (the Explorer asks for a new one).${NC}"
+        fi
+    fi
     if ! _OUT="$(dba_record_switch "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" IAM_MQTT_PERSON "$_MQP" 2>&1)"; then
         echo -e "${YELLOW}WARNING: could not record IAM_MQTT_PERSON in iam_policy.history; the switch itself is in force: ${_OUT:0:200}${NC}" >&2
     fi
@@ -1577,6 +1598,23 @@ fi
 $KUBECTL create configmap node-red-settings -n "$NAMESPACE" --from-file=settings.js="$SCRIPT_DIR/k8s/node-red/settings.js" \
   --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
 NR_SETTINGS_CHECKSUM="$(nr_settings_checksum)"
+# Break-glass NR_ADMIN_AUTH=off (kubectl set env) leaves no record of its own: the helm
+# upgrade below turns the sign-in on again, so record what it ends in the policy history
+# first (break_glass in defaults.yaml), with the time the pod started that way.
+_NR_AUTH="$($KUBECTL get deployment node-red -n "$NAMESPACE" \
+    -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="NR_ADMIN_AUTH")]}{.value}{end}' 2>/dev/null || true)"
+if [[ "$_NR_AUTH" == "off" ]]; then
+    _NR_SINCE="$($KUBECTL get pods -l app.kubernetes.io/name=node-red -n "$NAMESPACE" \
+        -o jsonpath='{.items[0].metadata.creationTimestamp}' 2>/dev/null || true)"
+    echo -e "${YELLOW}  Node-RED runs without its own sign-in (NR_ADMIN_AUTH=off, break-glass, pod since ${_NR_SINCE:-?}): turning it on again.${NC}"
+    source "$SCRIPT_DIR/apps/database/lib-db-apply.sh"
+    _NR_PAYLOAD="$(SINCE="$_NR_SINCE" python3 -c 'import json, os
+print(json.dumps({"identity": "node-red NR_ADMIN_AUTH=off", "pod_since": os.environ["SINCE"] or None, "ended_by": "deploy-infra"}))')"
+    if ! _OUT="$(dba_record_event "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" break_glass_seen "$_NR_PAYLOAD" \
+                  "Node-RED ran without its own sign-in; deploy-infra turns it on again" 2>&1)" || [[ "$_OUT" == *skip* ]]; then
+        echo -e "${YELLOW}WARNING: could not record Node-RED's break-glass in iam_policy.history: ${_OUT:0:200}${NC}" >&2
+    fi
+fi
 _NR_VALUES=$(mktemp /tmp/node-red-values-XXXXXX.yaml)
 render "$SCRIPT_DIR/k8s/node-red/values.yaml" NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM NODE_RED_DOMAIN \
   NODE_RED_TZ NR_SETTINGS_CHECKSUM > "$_NR_VALUES"

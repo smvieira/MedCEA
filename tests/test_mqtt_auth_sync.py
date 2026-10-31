@@ -8,7 +8,8 @@ and the broker's two confs, offline (IAM 3.5). Stdlib only; no database, no brok
     row expands to flagged units without a running run only; a concrete unit that is not
     flagged, or has a run in R, or is unknown, is dropped; expired credentials are dropped;
     a unit code with a space, '/', '+' or '#' is never expanded; an unparseable topic is
-    skipped; a failed read keeps reads and drops every write; no credential gives the
+    skipped; a failed read keeps reads and drops every write, and serves no person once
+    PERSON_GRACE has passed since the last good read; no credential gives the
     explorer-none placeholder; a credential without rows still connects
   - the broker waits for passwd-ws only in person mode; the person conf has per-listener auth
   - status.json's content carries no hash
@@ -134,6 +135,16 @@ class PersonMode(unittest.TestCase):
         self.assertFalse([l for l in lines if "write" in l])
         self.assertEqual(len(lines), 2)
         self.assertEqual(st["dropped"]["db_unavailable"], 1)
+
+    def test_failed_reads_end_reads_after_the_grace(self):
+        ok = NOW - datetime.timedelta(seconds=20)
+        self.assertEqual(S.kept_persons(ENG, ok, NOW, grace=30), ENG)
+        self.assertEqual(S.kept_persons(ENG, ok, NOW, grace=10), [])
+        self.assertEqual(S.kept_persons(ENG, None, NOW, grace=30), [])
+        self.assertEqual(S.PERSON_GRACE, 2 * S.POLL)
+        p, a, st = S.render_persons(S.kept_persons(ENG, ok, NOW, grace=10), UNITS, "medcea", False, NOW,
+                                    placeholder="$7$101$AAAA$BBBB")
+        self.assertEqual(users(p), ["explorer-none"])  # a revoked credential cannot keep reading
 
     def test_placeholder_without_persons(self):
         p, a, st = S.render_persons([], UNITS, "medcea", True, NOW, placeholder="$7$101$AAAA$BBBB")

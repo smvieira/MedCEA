@@ -791,8 +791,9 @@ BEGIN
     IF v_w IS NULL OR pg_catalog.jsonb_typeof(v_w) <> 'array' THEN
         RAISE EXCEPTION 'role_widening(%, %) answered %, not a list', v_from, v_to, v_w;
     END IF;
-    -- Every activation waits: an enabled account reaches the hosts not gated by role
-    -- yet (Grafana, until IAM 3.1) even with no platform role.
+    -- Every activation waits: an enabled account gets back everything its role gives,
+    -- and while IAM_GATES=false Grafana and the AI workbench admit it even with no
+    -- platform role (role_widening cannot see either).
     v_widens := v_w <> '[]'::jsonb OR p_kind IN ('grant', 'activate', 'person_id', 'mail_settings');
     v_status := CASE WHEN v_widens THEN 'pending_qa' ELSE 'applied' END;
 

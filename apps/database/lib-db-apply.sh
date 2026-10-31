@@ -9,6 +9,13 @@
 #                             appends enforcement_enabled/_disabled {switch: SWITCH} to
 #                             the hash chain when MODE differs from SWITCH's last event
 #                             (deploy-infra.sh, IAM_ENFORCE; IAM 2.6); "skip" before 008a/b
+#   dba_retire_person_mqtt NS POD DB DIGEST MODE
+#                             ends MQTT person credentials the policy no longer backs
+#                             (deploy-infra.sh, before dba_record_switch IAM_MQTT_PERSON;
+#                             IAM 3.5); prints the count, "skip" before 008b
+#   dba_record_event NS POD DB EVENT PAYLOAD_JSON REASON
+#                             appends one event as system:deploy (deploy-infra.sh:
+#                             break_glass_seen; IAM 3.3); "skip" before 008a/b
 #
 # Needs: KUBECTL, REPO_ROOT, PROJECT_NAME, CEA_DB. Optional: DBPW_<role> (plaintext
 # passwords: DBPW_authenticator, DBPW_mqtt_auth, DBPW_svc_ingest, … — each sent only as
@@ -303,6 +310,70 @@ BEGIN
         PERFORM iam_policy.append_history(ev, pg_catalog.jsonb_build_object('switch', sw), 'deploy');
     END IF;
 END $$;
+\else
+\echo skip
+\endif
+SQL
+}
+
+# dba_retire_person_mqtt NS POD DB DIGEST MODE — MQTT person credentials (iam-api, IAM 3.5)
+# are bound to the mqtt.json they were issued under: every active one whose
+# mqtt_credential_issued event names another digest than DIGEST is set inactive, and
+# every active one when MODE (IAM_MQTT_PERSON) differs from that switch's last event in
+# the chain, so a narrowed policy or a true -> false -> true round trip never brings an
+# old credential back. Call it before dba_record_switch records MODE. Appends
+# mqtt_credentials_retired {count, reason, mqtt_digest} when it ended any. Prints the
+# count, or "skip" while the tables or append_history are missing.
+dba_retire_person_mqtt() {
+    _DBA_NS="$1"; _DBA_POD="$2"
+    [[ "$5" == "false" || "$5" == "true" ]] || { echo "dba_retire_person_mqtt: MODE must be false or true" >&2; return 2; }
+    [[ "$4" =~ ^[0-9a-f]{16,128}$ ]] || { echo "dba_retire_person_mqtt: DIGEST must be the mqtt.json digest" >&2; return 2; }
+    _dba_psql "$3" -q -tA -1 -v ON_ERROR_STOP=1 -v dg="$4" \
+        -v ev="$([[ "$5" == true ]] && echo enforcement_enabled || echo enforcement_disabled)" <<'SQL'
+SELECT pg_catalog.to_regclass('medcea.mqtt_service_credential') IS NOT NULL
+   AND pg_catalog.to_regprocedure('iam_policy.append_history(text,jsonb,text)') IS NOT NULL
+   AND pg_catalog.to_regprocedure('medcea_auth._set_internal_actor(text)') IS NOT NULL AS ready \gset
+\if :ready
+SELECT medcea_auth._set_internal_actor('system:deploy') \g /dev/null
+SELECT (SELECT h.event FROM iam_policy.history h WHERE h.payload ->> 'switch' = 'IAM_MQTT_PERSON'
+         ORDER BY h.event_id DESC LIMIT 1) IS DISTINCT FROM :'ev' AS switched \gset
+WITH r AS (
+    UPDATE medcea.mqtt_service_credential c SET active = false
+     WHERE c.active
+       AND (:'switched'::boolean
+            OR NOT EXISTS (SELECT 1 FROM iam_policy.history h
+                            WHERE h.event = 'mqtt_credential_issued'
+                              AND h.payload ->> 'username' = c.username
+                              AND h.payload ->> 'mqtt_digest' = :'dg'))
+    RETURNING 1)
+SELECT pg_catalog.count(*) AS n FROM r \gset
+SELECT :n > 0 AS any \gset
+\if :any
+SELECT iam_policy.append_history('mqtt_credentials_retired',
+         pg_catalog.jsonb_build_object('count', :n, 'mqtt_digest', :'dg',
+             'reason', CASE WHEN :'switched'::boolean THEN 'IAM_MQTT_PERSON switched'
+                            ELSE 'the MQTT policy changed (mqtt.json digest)' END),
+         'deploy') \g /dev/null
+\endif
+\echo :n
+\else
+\echo skip
+\endif
+SQL
+}
+
+# dba_record_event NS POD DB EVENT PAYLOAD_JSON REASON — one event in the hash chain as
+# system:deploy, for what only a deploy can see (a break-glass setting it finds on a
+# running pod). Prints "skip" while append_history or _set_internal_actor is missing.
+dba_record_event() {
+    _DBA_NS="$1"; _DBA_POD="$2"
+    [[ "$4" =~ ^[a-z][a-z0-9_]{2,62}$ ]] || { echo "dba_record_event: EVENT must be a snake_case name" >&2; return 2; }
+    _dba_psql "$3" -q -tA -1 -v ON_ERROR_STOP=1 -v ev="$4" -v payload="$5" -v why="$6" <<'SQL'
+SELECT pg_catalog.to_regprocedure('iam_policy.append_history(text,jsonb,text)') IS NOT NULL
+   AND pg_catalog.to_regprocedure('medcea_auth._set_internal_actor(text)') IS NOT NULL AS ready \gset
+\if :ready
+SELECT medcea_auth._set_internal_actor('system:deploy') \g /dev/null
+SELECT iam_policy.append_history(:'ev', :'payload'::jsonb, :'why') \g /dev/null
 \else
 \echo skip
 \endif

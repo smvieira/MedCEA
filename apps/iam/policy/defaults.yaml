@@ -1171,6 +1171,7 @@ break_glass:
   - {identity: "Grafana local admin (Grafana Admin, the only one; password GRAFANA_BREAKGLASS_PASS)", used_by: "recovery; apps/report's dashboard push", logged_by: "Grafana server log"}
   - {identity: "pgAdmin internal admin (PGADMIN_DEFAULT_EMAIL)", used_by: "recovery when Keycloak is down (internal authentication switched on by hand)", logged_by: "pgAdmin log"}
   - {identity: "host sudo / kubeconfig", used_by: "deploy scripts", logged_by: "logs/ of every locked script"}
+  - {identity: "Node-RED without its own sign-in (kubectl set env deployment/node-red NR_ADMIN_AUTH=off: the editor and its admin API open to every caller NetworkPolicy iam-node-red admits, the host included)", used_by: "recovery of a broken editor sign-in", logged_by: "deploy-infra.sh, which finds it on the running Node-RED, appends break_glass_seen to iam_policy.history before it turns the sign-in on again; health-check noderedauth FAILs meanwhile; Node-RED's log"}
 
 # ── Default matrix ───────────────────────────────────────────────────────────────────
 # Cells are written closed under `implies` (I16), so a reader sees every level held.

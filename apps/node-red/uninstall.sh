@@ -34,25 +34,27 @@ fi
 # wants the deploy token (nr_curl). The Secrets, ConfigMaps and the /data volume
 # belong to deploy-infra.sh and stay.
 nr_token "$NAMESPACE"
-$KUBECTL port-forward -n "$NAMESPACE" "pod/$NR_POD" "${NR_LOCAL_PORT}:1880" &>/tmp/nr-portforward.log 9>&- &
+NR_TMP="$(mktemp -d)"                     # private (700): the flows hold passwords
+trap 'rm -rf "$NR_TMP"' EXIT
+$KUBECTL port-forward -n "$NAMESPACE" "pod/$NR_POD" "${NR_LOCAL_PORT}:1880" &>"$NR_TMP/portforward.log" 9>&- &
 PF_PID=$!
-trap 'kill "$PF_PID" 2>/dev/null || true; rm -f /tmp/nr-current-flows.json /tmp/nr-pruned-flows.json' EXIT
+trap 'kill "$PF_PID" 2>/dev/null || true; rm -rf "$NR_TMP"' EXIT
 
 echo -n "==> Waiting for Node-RED"
 for i in $(seq 1 30); do
-    nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" -o /tmp/nr-current-flows.json 2>/dev/null && { echo " ready"; break; }
+    nr_curl "$NAMESPACE" -sf "$NR_BASE/flows" -o "$NR_TMP/current-flows.json" 2>/dev/null && { echo " ready"; break; }
     [[ "$i" -eq 30 ]] && { echo " TIMEOUT"; echo "ERROR: Node-RED did not answer within 30 seconds" >&2; exit 1; }
     sleep 1; echo -n "."
 done
 
-REMOVED=$(python3 - "$SCRIPT_DIR/flows" <<'PYEOF'
+REMOVED=$(python3 - "$SCRIPT_DIR/flows" "$NR_TMP" <<'PYEOF'
 import glob, json, os, sys
 shipped = set()
 for f in glob.glob(os.path.join(sys.argv[1], "*.json")):
     shipped |= {n["id"] for n in json.load(open(f)) if "id" in n}
-current = json.load(open("/tmp/nr-current-flows.json"))
+current = json.load(open(os.path.join(sys.argv[2], "current-flows.json")))
 kept = [n for n in current if n.get("id") not in shipped]
-json.dump(kept, open("/tmp/nr-pruned-flows.json", "w"))
+json.dump(kept, open(os.path.join(sys.argv[2], "pruned-flows.json"), "w"))
 print(len(current) - len(kept))
 PYEOF
 )
@@ -63,7 +65,7 @@ if [[ "$REMOVED" -eq 0 ]]; then
 fi
 
 HTTP=$(nr_curl "$NAMESPACE" -s -X POST "$NR_BASE/flows" -H "Content-Type: application/json" \
-    -d @/tmp/nr-pruned-flows.json -o /dev/null -w "%{http_code}" || echo "000")
+    -d @"$NR_TMP/pruned-flows.json" -o /dev/null -w "%{http_code}" || echo "000")
 if [[ "$HTTP" == "200" || "$HTTP" == "204" ]]; then
     echo "==> Removed $REMOVED Node-RED nodes shipped by apps/node-red/flows"
 else
