@@ -122,12 +122,19 @@ inner = 'https://%s/realms/%s/protocol/openid-connect/logout?client_id=config&po
 print(urllib.parse.quote(inner, safe=''))
 " "$KEYCLOAK_DOMAIN" "$KEYCLOAK_REALM" "$CONFIG_DOMAIN")
 
-sed -e "s|\$PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
+# replace/create, never apply: apply copies the page into its last-applied annotation,
+# which holds 256 KiB, and index.html is past that (the scheduler page does the same)
+_CONFIG_UI_CM="$(sed -e "s|\$PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
     -e "s|\$EDGE_WIZARD_URL|$_EDGE_WIZARD_URL|g" \
     -e "s|\$KEYCLOAK_LOGOUT_URL|$_KEYCLOAK_LOGOUT_URL|g" "$SCRIPT_DIR/html/index.html" \
   | $KUBECTL create configmap config-ui-html -n "$NAMESPACE" \
     --from-file=index.html=/dev/stdin \
-    --dry-run=client -o yaml | $KUBECTL apply -f -
+    --dry-run=client -o yaml)"
+if $KUBECTL get configmap config-ui-html -n "$NAMESPACE" >/dev/null 2>&1; then
+    $KUBECTL replace -f - <<<"$_CONFIG_UI_CM"
+else
+    $KUBECTL create -f - <<<"$_CONFIG_UI_CM"
+fi
 
 
 # =============================================================================

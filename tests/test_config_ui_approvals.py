@@ -427,6 +427,17 @@ class ApprovalsStatic(unittest.TestCase):
         self.assertIn("location.hash === '#approvals'", self.html)
         self.assertIn("'approvals'].forEach", self.html)
 
+    def test_page_configmap_is_not_applied(self):
+        # kubectl apply copies the page into last-applied (256 KiB max): the 31 Oct 2026
+        # deploy failed with "metadata.annotations: Too long"; replace/create has no limit
+        # but ConfigMap's 1 MiB
+        deploy = read(os.path.join(ROOT, "apps", "frontend", "deploy.sh"))
+        step = deploy[deploy.index("create configmap config-ui-html"):]
+        step = step[:step.index("\nfi\n")]
+        self.assertNotIn("apply", step.split("--dry-run=client -o yaml)")[1])
+        self.assertIn("replace -f -", step)
+        self.assertLess(len(self.html.encode()), 900 * 1024)
+
     def test_return_confirm_and_badge(self):
         self.assertNotIn("leaves the queue until its author changes it", self.html)
         self.assertIn("stays in the queue, marked returned, until its author changes it", self.html)
