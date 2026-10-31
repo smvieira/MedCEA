@@ -296,6 +296,9 @@ probes() {  # MODE
 # Production may run IAM_DB_SERVICE_ROLES=true (2.5): its service roles and
 # rr_admin_login then log in, and rr_admin_login inherits rr_admin, in B0 only —
 # the fixture's apply false runs without the service logins.
+# mqtt_auth reads master_data, so it executes that group's read function
+# medcea.unit_commissioning() (approvals and test mode); the sidecar never calls it,
+# and a caller without a person gets no names, reasons or rights from it.
 # Production may run IAM_DB_ROLES=true: B0 is then compared with the first apply
 # true (T1) instead, and the seed has reset the database setting the flag lives in.
 DELTA='^[<>] owner\|
@@ -306,6 +309,7 @@ DELTA='^[<>] owner\|
 ^< acl\|authenticator\|(table|sequence)\|medcea\.schedule
 ^> acl\|anon\|schema\|medcea_auth\|USAGE
 ^> acl\|anon\|function\|medcea_auth\.pre_request\(\)\|EXECUTE
+^> acl\|mqtt_auth\|function\|medcea\.unit_commissioning\(\)\|EXECUTE
 ^< acl\|PUBLIC\|function\|
 ^> reloption\|.*security_invoker=true
 ^> dbsetting\|\*\|medcea\.iam_db_roles=(false|true)

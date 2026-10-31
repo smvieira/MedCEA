@@ -1066,7 +1066,8 @@ UPDATE medcea.recipe SET status = 'retired' WHERE recipe_id = :ra;
 SELECT 'CHECK|retired', status = 'retired' FROM medcea.recipe WHERE recipe_id = :ra;
 SELECT 'CHECK|retiring makes nobody an author', (medcea_auth._authors('medcea.recipe', jsonb_build_array(:ra))).persons = '{}';
 SQL
-        probe W4 "a retired recipe stays retired" "42501:a retired row stays retired" <<SQL
+        # under true the draft_only guard (iam_*, it fires before status_guard_trg) refuses first
+        probe W4 "a retired recipe stays retired" "42501:is retired, not a draft" <<SQL
 $recipe_setup
 $(as_token "$T_EN")
 UPDATE medcea.recipe SET status = 'retired' WHERE recipe_id = :ra;
@@ -1237,8 +1238,8 @@ SQL
         # unit's zones by their current unit (the seed's board moved IAMT01/Z01 -> IAMT02/Z01)
         own_runs="(SELECT uu.unit_id FROM iam_policy.user_unit uu WHERE uu.person_sub = '$UUID_OP'::uuid)"
         own_zones="(SELECT cz.zone_id FROM medcea.cea_zone cz JOIN iam_policy.user_unit uu ON uu.unit_id = cz.unit_id WHERE uu.person_sub = '$UUID_OP'::uuid)"
-        rows_digest() {  # VAR FROM-AND-WHERE: \gset VAR to the md5 of the sorted rows / their count
-            echo "SELECT md5(coalesce(string_agg(x, ',' ORDER BY x), '')) || '/' || count(*) AS $1 FROM (SELECT md5(t::text) AS x FROM $2) s \\gset"
+        rows_digest() {  # VAR FROM-AND-WHERE: \gset VAR to the sha256 of the sorted rows / their count (md5() is unsupported in production's image)
+            echo "SELECT encode(sha256(convert_to(coalesce(string_agg(x, ',' ORDER BY x), ''), 'UTF8')), 'hex') || '/' || count(*) AS $1 FROM (SELECT encode(sha256(convert_to(t::text, 'UTF8')), 'hex') AS x FROM $2) s \\gset"
         }
         probe RLS "the services' own_unit SQL returns what rr_operator's RLS returns" ok <<SQL
 $run_full
@@ -1915,7 +1916,7 @@ SQL
         # one is not open
         probe W8 "control: the health check's iampending predicate" ok <<SQL
 $propose_on
-RESET ROLE;
+$(as_postgres)
 SELECT count(*) FILTER (WHERE x.change_id = :chg) AS open_new,
        count(*) FILTER (WHERE x.change_id = :chg AND coalesce(x.applied_at, x.proposed_at) < now() - interval '7 days') AS stale_new
   FROM medcea.pending_change x WHERE medcea._pending_open(x) \\gset
