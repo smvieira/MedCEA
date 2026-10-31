@@ -7,6 +7,8 @@
   cli.py compile routes [--file F]      the route table (routes.json of ConfigMap medcea-iam-lib)
   cli.py compile netpol --namespace NS --node-ip IP [--node-ip IP ...]
                                         the NetworkPolicies of `network:` as a JSON List
+  cli.py compile grafana [--file F]     Grafana's role_attribute_path (Editor, Viewer or '' = refused,
+                                        role_attribute_strict) from the dashboards group's `tool:` block
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
                          [--service-logins ROLE,...]  (additive: login roles allowed to log in, IAM Phase 2.5)
                          [--without-iam]  (schema iam and access_svc absent: leave both out, IAM 2.7)
@@ -33,7 +35,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler import grants, invariants, model, netpol, proxies, routes  # noqa: E402
+from compiler import grants, invariants, model, netpol, proxies, routes, tools  # noqa: E402
 
 
 def main(argv=None):
@@ -46,7 +48,7 @@ def main(argv=None):
     desc.add_argument("host")
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
-    comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants"])
+    comp.add_argument("target", choices=["proxy", "routes", "netpol", "grants", "grafana"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
     comp.add_argument("--node-ip", action="append", default=[])
@@ -131,6 +133,13 @@ def main(argv=None):
                                  [r for r in args.service_logins.split(",") if r], args.without_iam,
                                  os.path.basename(args.file) if args.file else "defaults.yaml"), end="")
         except grants.GrantsError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "compile" and args.target == "grafana":
+        try:
+            print(tools.grafana_role_path(p))
+        except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         return 0

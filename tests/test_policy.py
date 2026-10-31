@@ -19,7 +19,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
-from compiler import grants, invariants, model, netpol, proxies, routes, routes_diff  # noqa: E402
+from compiler import grants, invariants, model, netpol, proxies, routes, routes_diff, tools  # noqa: E402
 
 GOLDEN = os.path.join(REPO, "tests", "iam-grants.golden.json")
 UPDATE_GOLDEN = "--update-golden" in sys.argv
@@ -137,6 +137,15 @@ MUTATIONS = {
     "K function member without service_only": (
         _with_member("iam_users", "function", "iam.withdraw_decision(int, text)", lambda m: m.pop("service_only")),
         "at level K needs service_only"),
+    # compiler/tools.py: a tool's own role setting (IAM 3.1)
+    "Grafana Admin from a cell": (_append(["resource_groups", "dashboards", "tool", "settings"],
+                                          {"setting": "Admin", "levels": ["U"]}), "tool dashboards"),
+    "constrained dashboards cell": (_set(["matrix", "dashboards", "maintenance"], {"levels": ["R"], "constraint": "own_unit"}),
+                                    "cannot evaluate"),
+    "admitted role without a Grafana role": (_pop(["resource_groups", "dashboards", "tool", "settings", 1]), "tool dashboards"),
+    "tool reaches less than its datasource": (_set(["resource_groups", "dashboards", "reaches"], {"measurements": ["R"], "runs": ["R"]}),
+                                              "svc_grafana"),
+    "schema older than its tool blocks": (_set(["schema_version"], 2), "schema_version"),
 }
 
 
@@ -176,6 +185,42 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(proxies.admitted(p, "ACCESS_DOMAIN"), ["admin", "auditor", "qa", "qp"])
         for host in p.hosts:
             self.assertTrue(proxies.admitted(p, host), f"{host} admits nobody")
+
+
+class ToolsTest(unittest.TestCase):
+    """compiler/tools.py: Grafana's role setting from the dashboards group (IAM 3.1)."""
+
+    EXPECTED_PATH = ("(contains(groups[*], 'engineer')) && 'Editor' || (contains(groups[*], 'auditor') || "
+                     "contains(groups[*], 'maintenance') || contains(groups[*], 'production_manager') || "
+                     "contains(groups[*], 'qa') || contains(groups[*], 'qc') || contains(groups[*], 'qp')) && 'Viewer' || ''")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load()
+
+    def test_grafana_settings(self):
+        self.assertEqual(tools.groups(self.policy), ["dashboards"])
+        self.assertEqual(dict(tools.settings(self.policy, "dashboards")), {
+            "Editor": ["engineer"], "Viewer": ["auditor", "maintenance", "production_manager", "qa", "qc", "qp"]})
+
+    def test_grafana_path_text(self):
+        self.assertEqual(tools.grafana_role_path(self.policy), self.EXPECTED_PATH)
+
+    def test_tool_roles_equal_gate(self):
+        given = sorted(r for _, roles in tools.settings(self.policy, "dashboards") for r in roles)
+        self.assertEqual(given, proxies.admitted(self.policy, "GRAFANA_DOMAIN"))
+        for refused in ("operator", "admin", "bio_scientist", "control_scientist"):
+            self.assertNotIn(refused, given)
+
+    def test_no_admin_setting(self):
+        self.assertEqual(tools.KINDS["grafana"], {"Editor", "Viewer"})
+        self.assertNotIn("Admin", tools.grafana_role_path(self.policy))
+
+    def test_reaches_cover_ceiling(self):
+        p = self.policy
+        reaches = p.groups["dashboards"]["reaches"]
+        for g, lv in p.services["svc_grafana"]["ceiling"].items():
+            self.assertLessEqual(set(lv), p.closure(reaches.get(g, [])), g)
 
 
 class RoutesTest(unittest.TestCase):
@@ -1024,6 +1069,43 @@ class WiringTest(unittest.TestCase):
         self.assertTrue(any("SECRET_NAME DB_ROLE DB_PASS" in l for l in render))
         self.assertIn("db-roles --names", self.read("apps/database/uninstall.sh"))
         self.assertIn("purge.sql", self.read("apps/database/uninstall.sh"))
+
+    def test_grafana_wiring(self):
+        """IAM 3.1: Grafana's role setting is rendered from the policy, its admin never in argv."""
+        values = self.read("k8s/grafana/values.yaml")
+        self.assertIn('GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "${GRAFANA_ROLE_PATH}"', values)
+        self.assertIn('GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT: "${GRAFANA_ROLE_STRICT}"', values)
+        self.assertIn('GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN: "false"', values)
+        self.assertIn('GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email groups"', values)
+        self.assertIn("existingSecret: grafana-admin", values)
+        # no persistence: a changed role path rolls a pod with an empty database, which is
+        # what ends the old sessions (there is no revocation step)
+        self.assertNotRegex(values, r"(?m)^persistence:")
+        infra = self.read("deploy-infra.sh")
+        # envsubst leaves an unlisted ${VAR} as literal text (lib-render.sh)
+        call = re.search(r'render "\$SCRIPT_DIR/k8s/grafana/values.yaml"(.*?)>', infra, re.S).group(1)
+        used = set(re.findall(r"\$\{([A-Z_]+)\}", values))
+        self.assertEqual(used - set(call.replace("\\", " ").split()), set())
+        # compiled before the realm loses the grafana_* roles and their mapper
+        self.assertLess(infra.index("policy_grafana ||"), infra.index("roles/${_r}"))
+        self.assertLess(infra.index("policy_grafana ||"), infra.index("grafana-realm-roles"))
+        self.assertLess(infra.index("policy_grafana ||"), infra.index("helm3 upgrade --install grafana"))
+        self.assertNotIn("adminPassword=", infra)
+        self.assertNotIn("adminUser=", infra)
+        for script in ("apps/report/deploy.sh", "apps/report/uninstall.sh"):
+            src = self.read(script)
+            self.assertNotIn('-u "admin:', src, script)
+            self.assertNotIn("ADMIN_PASS", src, script)
+            self.assertIn("-K <(grafana_admin_cfg)", src, script)
+        lib = self.read("infra/lib-oauth2-proxy.sh")
+        pre_31 = ("contains(roles[*], 'grafana_admin') && 'Admin' || "
+                  "contains(roles[*], 'grafana_developer') && 'Editor' || 'Viewer'")
+        self.assertIn(f'GRAFANA_PRE_31_PATH="{pre_31}"', lib)
+        self.assertIn("compile grafana", lib)
+        self.assertIn("allowUiUpdates: false", self.read("apps/report/k8s/dashboard-provider.yaml"))
+        # generated before configure.sh's early exit, or an existing install never gets it
+        conf = self.read("infra/configure.sh")
+        self.assertLess(conf.index("cfg_set GRAFANA_BREAKGLASS_PASS"), conf.index("[[ ${#MISSING[@]} -eq 0"))
 
     def test_2_6_scheduler_routes_removed(self):
         """No person compresses or deletes a run log, nothing deletes a Q-table (IAM 2.6)."""

@@ -15,6 +15,14 @@
 #            the proxy asks for (a missing `groups` client scope is invalid_scope)
 #   reach    at least one enabled account holds a role the gate admits (composites
 #            expanded), so no host is left that nobody can open
+# A host whose gate is the tool's own role setting [tool …] (GRAFANA_DOMAIN, IAM 3.1):
+#   gate     the live Grafana env's role path equals `policy_grafana`, strict true and
+#            allow_assign_grafana_admin false (IAM_GATES=false: the pre-3.1 path, strict
+#            false — any enabled account is at least Viewer)
+#   live     the Grafana pod started after its Deployment last changed
+#   sign-in  Grafana's sign-in reaches Keycloak's login page with scope `groups`
+#            (invalid_scope would refuse everyone: strict fails closed)
+#   reach    some enabled account holds a role the policy gives a Grafana role
 # Hosts whose gate is not compiled yet are listed as SKIP with the phase that adds it.
 # Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
 # account, and the realm's discovery document lists device_authorization_endpoint.
@@ -26,7 +34,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -76,6 +84,69 @@ echo -e "${BOLD}IAM host gates${NC} (namespace $NAMESPACE, realm $KEYCLOAK_REALM
     echo -e "${YELLOW}IAM_GATES=false: expecting the pre-policy list on every compiled host.${NC}"
 $HOLDERS_OK || echo -e "${YELLOW}Keycloak's database is not readable; the reach check is skipped.${NC}"
 
+# Grafana signs people in itself (IAM 3.1): its gate is its own role setting.
+check_grafana() {
+    local host="$1" roles="$2" envs path strict assign GRAFANA_ROLE_PATH GRAFANA_ROLE_STRICT
+    envs="$($KUBECTL get deployment grafana -n "$NAMESPACE" \
+        -o jsonpath='{range .spec.template.spec.containers[?(@.name=="grafana")].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null)" \
+        || { fail gate "no Grafana deployment in $NAMESPACE"; return; }
+    path="$(sed -n 's/^GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=//p' <<<"$envs")"
+    strict="$(sed -n 's/^GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT=//p' <<<"$envs")"
+    assign="$(sed -n 's/^GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN=//p' <<<"$envs")"
+    policy_grafana 2>/dev/null || { fail gate "policy_grafana failed (cli.py check)"; return; }
+    if [[ "$path" != "$GRAFANA_ROLE_PATH" ]]; then
+        fail gate "Grafana's live role path is not the compiled one: ${path:0:100}"
+    elif [[ "$strict" != "$GRAFANA_ROLE_STRICT" ]]; then
+        fail gate "role_attribute_strict is '$strict', want $GRAFANA_ROLE_STRICT"
+    elif [[ "$assign" != "false" ]]; then
+        fail gate "allow_assign_grafana_admin is '$assign', want false"
+    elif [[ "$GRAFANA_ROLE_STRICT" == "true" ]]; then
+        pass gate "role path compiled from the policy, strict, no Grafana Admin from SSO"
+    else
+        pass gate "IAM_GATES=false: the pre-3.1 role path, strict off"
+    fi
+
+    local dep_time pod_time
+    # the spec's last write, not the controller's status updates
+    dep_time="$($KUBECTL get deployment grafana -n "$NAMESPACE" -o json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    mf = json.load(sys.stdin)["metadata"].get("managedFields", [])
+except Exception:
+    sys.exit()
+print(max((m.get("time", "") for m in mf if m.get("subresource") != "status"), default=""))')"
+    pod_time="$($KUBECTL get pods -n "$NAMESPACE" -l app.kubernetes.io/name=grafana \
+        --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.status.startTime}{"\n"}{end}' | sort | head -1)"
+    if [[ -z "$pod_time" ]]; then
+        fail live "no running Grafana pod"
+    elif [[ "$pod_time" < "$dep_time" ]]; then
+        fail live "Grafana pod started $pod_time, before its Deployment changed at $dep_time"
+    else
+        pass live "pod started $pod_time"
+    fi
+
+    local out code url
+    out="$(curl -sk -L --max-redirs 6 -o /dev/null -m 15 -w '%{http_code} %{url_effective}' "https://$host/login/generic_oauth")"
+    code="${out%% *}" url="${out#* }"
+    if [[ "$code" == 200 && "$url" == "https://$KEYCLOAK_DOMAIN/"* && "$url" == *scope=*groups* ]]; then
+        pass sign-in "Keycloak shows the login page for scopes $(grep -o 'scope=[^&]*' <<<"$url" | cut -d= -f2)"
+    else
+        fail sign-in "Grafana's sign-in ended at $code ${url:0:100} (want Keycloak's login page, scope with groups)"
+    fi
+
+    if [[ "$GRAFANA_ROLE_STRICT" != "true" ]]; then
+        skip reach "IAM_GATES=false: any enabled account gets in"
+    elif $HOLDERS_OK; then
+        local who="" r
+        for r in $roles; do [[ -n "${HOLDERS[$r]:-}" ]] && who+="$r:${HOLDERS[$r]} "; done
+        if [[ -n "$who" ]]; then
+            pass reach "enabled accounts by role: ${who% }"
+        else
+            fail reach "no enabled account holds any of [$roles]: nobody can open $host"
+        fi
+    fi
+}
+
 HOSTS="$(python3 apps/iam/compiler/cli.py hosts)" || { echo "cli.py hosts failed" >&2; exit 2; }
 INGRESSES="$($KUBECTL get ingress -n "$NAMESPACE" -o \
     jsonpath='{range .items[*]}{.spec.rules[0].host}{" "}{.metadata.labels.app\.kubernetes\.io/instance}{"\n"}{end}')"
@@ -87,6 +158,10 @@ while IFS= read -r line; do
     echo ""
     echo -e "${BOLD}${var}${NC}  ${host:-<unset>}"
     case "$status" in
+        tool*)
+            if [[ -z "$host" ]]; then fail gate "$var is not set in config.env"; continue; fi
+            check_grafana "$host" "${line##*]}"
+            continue ;;
         compiled)
             if [[ "$var" == ACCESS_DOMAIN && "${IAM_GATES:-true}" == false ]]; then
                 expected='["admin"]'

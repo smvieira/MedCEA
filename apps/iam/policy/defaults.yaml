@@ -1,4 +1,4 @@
-# MedCEA IAM default policy — schema_version 2
+# MedCEA IAM default policy — schema_version 3
 #
 # The one source of access rights on the platform. apps/iam/compiler/ turns it into
 # PostgreSQL grants, oauth2-proxy allowed_groups, the Grafana / JupyterHub / Node-RED /
@@ -27,7 +27,7 @@
 # which opens it ([R, K]), or {levels: U, unconstrained_only: true} — only the roles that
 # hold the level without a constraint, for a service that cannot evaluate the constraint.
 
-schema_version: 2
+schema_version: 3
 policy_version: 1
 title: MedCEA default access policy
 
@@ -582,6 +582,12 @@ service_identities:
 #   {type: idp | infra | code, object: <text>}
 # `reaches` lists what a tool lets its user touch beyond its own members (with the tool's
 # own credential); `mirrors` marks a tool that acts with the person's own cells only.
+# `tool:` (schema_version 3) maps the group's levels to a tool's own role setting, which
+# compiler/tools.py compiles (`cli.py compile <kind>`):
+#   {kind: grafana, host: <hosts key of a ui member>, service_identity: <its datasource>,
+#    settings: [{setting: S, levels: [L]}, ...], otherwise: refuse, help: <text>}
+# A role gets the first setting whose levels it holds unconstrained; every role the host
+# admits must get one, and nobody else. `reaches` must cover the service identity's ceiling.
 resource_groups:
   portal:
     label: Service portal and profile
@@ -828,8 +834,26 @@ resource_groups:
     class: config
     description: Production dashboards over telemetry and runs.
     why_this_class: Presentation configuration.
-    risk: Dashboards read regulated data through Grafana's own database account, so a dashboard viewer reads telemetry of every unit.
-    reaches: {measurements: [R], runs: [R]}
+    risk: >
+      Dashboards read regulated data through Grafana's own database account, so a dashboard
+      viewer reads telemetry of every unit. A viewer can also send any query that account may
+      run (Grafana's query API is open to Viewer; hiding Explore is not a boundary): the bound
+      is svc_grafana's grants, not the dashboards.
+    reaches: {master_data: [R], measurements: [R], runs: [R]}
+    tool:
+      kind: grafana
+      host: GRAFANA_DOMAIN
+      service_identity: svc_grafana   # its ceiling must be covered by reaches
+      settings:                       # first match wins: a role gets the first setting
+        - {setting: Editor, levels: [U]}   # whose levels it holds unconstrained on this group
+        - {setting: Viewer, levels: [R]}
+      otherwise: refuse               # role_attribute_strict: no setting, no sign-in
+      help: >
+        Grafana's own role comes from this group: U gives Editor (edit dashboards, Explore),
+        R gives Viewer (view dashboards). Any other role cannot sign in to Grafana. Grafana
+        Admin is never given from the policy; only the local break-glass account holds it.
+        Dashboards change through git and the report deploy; an edit in the browser is
+        refused.
     members:
       - {type: ui, host: GRAFANA_DOMAIN}
       - {type: code, object: apps/report/dashboards/*.json}
@@ -902,7 +926,7 @@ resource_groups:
       help: >
         A grant, a role change that adds any (group, level) pair the old role did not
         have, any activation (an enabled account reaches the hosts not yet gated by
-        role, Grafana until IAM 3.1, even without a platform role), a new unit assignment, a
+        role, the AI workbench until IAM 3.2, even without a platform role), a new unit assignment, a
         person_id change or a change of the mail settings takes effect only when a qa
         person confirms it who is neither the administrator who made it nor its subject.
         Deactivation, a pure narrowing and the removal of a unit act at once and are
@@ -1052,7 +1076,7 @@ resource_groups:
 break_glass:
   - {identity: "postgres (superuser)", used_by: "deploy scripts and apply.sh on the host", logged_by: "ALTER ROLE postgres IN DATABASE medcea_db SET log_statement = 'all' (Keycloak's own database is not affected); logs/ of every locked script"}
   - {identity: "Keycloak master-realm admin", used_by: "deploy-infra.sh and recovery", logged_by: "Keycloak admin events, enabled by deploy-infra.sh; role mappings not made through the User Manager are flagged by health-check.sh"}
-  - {identity: "Grafana local admin", used_by: "recovery only", logged_by: "Grafana server log"}
+  - {identity: "Grafana local admin (Grafana Admin, the only one; password GRAFANA_BREAKGLASS_PASS)", used_by: "recovery; apps/report's dashboard push", logged_by: "Grafana server log"}
   - {identity: "pgAdmin internal admin (PGADMIN_DEFAULT_EMAIL)", used_by: "recovery when Keycloak is down (internal authentication switched on by hand)", logged_by: "pgAdmin log"}
   - {identity: "host sudo / kubeconfig", used_by: "deploy scripts", logged_by: "logs/ of every locked script"}
 

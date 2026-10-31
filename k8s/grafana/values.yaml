@@ -1,3 +1,11 @@
+# Grafana Admin is the local break-glass account only (Secret grafana-admin, user
+# ADMIN_USER, password GRAFANA_BREAKGLASS_PASS), reached at /login?disableAutoLogin.
+# No persistence: every pod starts with an empty database, so a role change takes
+# effect at each person's next sign-in and the admin password from the Secret.
+admin:
+  existingSecret: grafana-admin
+  userKey: admin-user
+  passwordKey: admin-password
 env:
   GF_SERVER_ROOT_URL: "https://${GRAFANA_DOMAIN}"
   GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
@@ -7,13 +15,21 @@ env:
   GF_AUTH_GENERIC_OAUTH_NAME: "Keycloak"
   GF_AUTH_GENERIC_OAUTH_CLIENT_ID: "grafana"
   GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: "${GRAFANA_OAUTH_SECRET}"
-  GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email roles"
+  # `groups`: the realm roles (composites expanded), the claim the role path reads.
+  GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email groups"
   GF_AUTH_GENERIC_OAUTH_AUTH_URL: "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
   GF_AUTH_GENERIC_OAUTH_TOKEN_URL: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
   GF_AUTH_GENERIC_OAUTH_API_URL: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
   GF_AUTH_GENERIC_OAUTH_TLS_SKIP_VERIFY_INSECURE: "false"
   GF_AUTH_GENERIC_OAUTH_SKIP_ORG_ROLE_SYNC: "false"
-  GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(roles[*], 'grafana_admin') && 'Admin' || contains(roles[*], 'grafana_developer') && 'Editor' || 'Viewer'"
+  # Compiled from the access policy (policy_grafana, infra/lib-oauth2-proxy.sh):
+  # dashboards U → Editor, R → Viewer, anything else '' → refused (strict).
+  GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "${GRAFANA_ROLE_PATH}"
+  GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT: "${GRAFANA_ROLE_STRICT}"
+  GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN: "false"
+  # Explore stays Editor-only; a Viewer never edits and an Editor never administers.
+  GF_USERS_VIEWERS_CAN_EDIT: "false"
+  GF_USERS_EDITORS_CAN_ADMIN: "false"
 extraSecretMounts:
 - name: datasource-secret
   secretName: grafana-datasource

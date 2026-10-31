@@ -16,6 +16,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
 [[ -f "$REPO_ROOT/config.env" ]] || { echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2; exit 1; }
 source "$REPO_ROOT/config.env"
+source "$SCRIPT_DIR/lib-grafana-admin.sh"   # grafana_admin_cfg: the break-glass login, off argv
 
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 NAMESPACE="${NAMESPACE:-medcea}"
@@ -54,7 +55,7 @@ fi
 for f in "$DASHBOARDS_DIR"/*.json; do
     uid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("uid",""))' "$f" 2>/dev/null || true)"
     [[ -n "$uid" ]] || continue
-    curl -s -o /dev/null "${CA_ARGS[@]}" -u "admin:${ADMIN_PASS}" \
+    curl -s -o /dev/null "${CA_ARGS[@]}" -K <(grafana_admin_cfg) \
         -X DELETE "${GRAFANA_URL}/api/dashboards/uid/${uid}" || true
 done
 

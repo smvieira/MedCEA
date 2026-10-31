@@ -90,7 +90,7 @@
 <div class="table-wrap"><table>
 <thead><tr><th>Switch</th><th>When true</th><th>Value on this install</th></tr></thead>
 <tbody>
-<tr><td><code>IAM_GATES</code></td><td>Each sign-in gate admits only the roles the access policy compiles for its host. False puts every gate back on the list used before the access policy (operator, qa, auditor, admin) and the User Manager on admin only.</td><td>true</td></tr>
+<tr><td><code>IAM_GATES</code></td><td>Each sign-in gate, and Grafana's own role setting, admit only the roles the access policy compiles for their host. False puts every gate back on the list used before the access policy (operator, qa, auditor, admin), the User Manager on admin only, and Grafana on any enabled account (at least Viewer).</td><td>true</td></tr>
 <tr><td><code>IAM_NETPOL</code></td><td>One network policy per application pod: only its listed callers can connect; anything else times out.</td><td>true</td></tr>
 <tr><td><code>IAM_POSTGREST_JWT</code></td><td>config-api (PostgREST, behind the System Configuration UI and the onboarding wizard) verifies the person's sign-in token.</td><td>true</td></tr>
 <tr><td><code>IAM_DB_SERVICE_ROLES</code></td><td>Each database client (scheduler, monitor, Database Management, Node-RED, Grafana, pgAdmin) logs in as its own database role instead of the superuser.</td><td>true</td></tr>
@@ -113,7 +113,7 @@
 <div class="table-wrap"><table>
 <thead><tr><th>Switch</th><th>Enable</th><th>Roll back</th></tr></thead>
 <tbody>
-<tr><td><code>IAM_GATES</code></td><td>set true; <code>./deploy-infra.sh</code>; <code>./deploy-apps.sh --all</code>. Check with <code>tests/iam-hosts.sh</code>.</td><td><code>IAM_GATES=false ./apps/access/deploy.sh</code> (narrows the User Manager first); set false; <code>./deploy-infra.sh</code>; <code>./deploy-apps.sh --all</code>. Accounts with production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until it is true again.</td></tr>
+<tr><td><code>IAM_GATES</code></td><td>set true; <code>./deploy-infra.sh</code>; <code>./deploy-apps.sh --all</code>. Check with <code>tests/iam-hosts.sh</code>.</td><td><code>IAM_GATES=false ./apps/access/deploy.sh</code> (narrows the User Manager first); set false; <code>./deploy-infra.sh</code>; <code>./deploy-apps.sh --all</code>. Accounts with production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until it is true again. Grafana admits any enabled account again; its old <code>grafana_*</code> roles are re-created, so Editor and Admin go only to the old built-in accounts that still exist.</td></tr>
 <tr><td><code>IAM_NETPOL</code></td><td>set true; <code>./deploy-infra.sh</code>. Check with <code>tests/iam-network.sh</code>.</td><td>set false; <code>./deploy-infra.sh</code>. At once, without a deploy: <code>microk8s kubectl -n &lt;namespace&gt; delete netpol -l medcea/iam-netpol=true</code> (until the next <code>deploy-infra.sh</code> while it is still true).</td></tr>
 <tr><td><code>IAM_POSTGREST_JWT</code></td><td><code>./deploy-infra.sh</code>; set true; <code>./apps/frontend/deploy.sh</code>.</td><td>If <code>IAM_DB_ROLES</code> is true, first set it false and run <code>./apps/database/deploy.sh</code>; then set false and run <code>./apps/frontend/deploy.sh</code>.</td></tr>
 <tr><td><code>IAM_DB_SERVICE_ROLES</code></td><td>set true; <code>./deploy-apps.sh --all</code>; <code>./deploy-infra.sh</code>. Check <code>dbclients</code> OK.</td><td>Refused while <code>IAM_DB_ROLES</code> is true. Set false; <code>./deploy-apps.sh --all</code>; <code>./deploy-infra.sh</code>; <code>./apps/database/deploy.sh</code> (the last makes the service roles unable to log in again).</td></tr>
@@ -138,7 +138,7 @@
 <tr><td>SKIP</td><td>The check does not apply yet (for example the component it reads is not installed).</td></tr>
 </tbody></table></div>
 <p>The summary is <code>All N checks passed.</code>, or a count of OK, warnings and failures. The script exits 1 if any check failed. Services that are still starting usually pass a minute later.</p>
-<div class="note"><p>The checks <code>iamdbroles</code>, <code>postgrest</code> and <code>iamenforce</code> WARN on purpose while their switch is false, so a platform that is not fully enforcing never prints "All checks passed". <code>IAM_GATES</code> and <code>IAM_NETPOL</code> have no health check; test them with <code>tests/iam-hosts.sh</code> and <code>tests/iam-network.sh</code>. On this install every switch is now true, so after the apps have been redeployed these checks should all be OK.</p></div>
+<div class="note"><p>The checks <code>iamdbroles</code>, <code>postgrest</code> and <code>iamenforce</code> WARN on purpose while their switch is false, so a platform that is not fully enforcing never prints "All checks passed". <code>grafanarole</code> WARNs while <code>IAM_GATES</code> is false; the proxies' gates and <code>IAM_NETPOL</code> have no health check; test them with <code>tests/iam-hosts.sh</code> and <code>tests/iam-network.sh</code>. On this install every switch is now true, so after the apps have been redeployed these checks should all be OK.</p></div>
 <h4>The IAM checks</h4>
 <div class="table-wrap"><table>
 <thead><tr><th>Check (type, and the name the output shows)</th><th>OK when</th><th>WARN or FAIL</th></tr></thead>
@@ -149,6 +149,7 @@
 <tr><td><code>iamdecisions</code> (Account decisions)</td><td>No account decision has waited for qa for over 7 days.</td><td>WARN on an older waiting decision or a pending mail settings change (User Manager, Decisions tab). FAIL when the access or database deploy is missing a step, naming which to run. SKIP without the access component.</td></tr>
 <tr><td><code>dbclients</code> (Database clients)</td><td>Every deployed database client logs in as the role the switch says.</td><td>WARN while a client disagrees; deploy it again (Grafana and pgAdmin with <code>./deploy-infra.sh</code>).</td></tr>
 <tr><td><code>postgrest</code> (PostgREST tokens)</td><td>config-api runs the token-verifying setup, its keys match what the realm publishes, and a forged token gets 401.</td><td>WARN while <code>IAM_POSTGREST_JWT</code> is false. FAIL on a stale or removed realm key (run <code>./deploy-infra.sh</code>) or a changed password Secret (run <code>./apps/frontend/deploy.sh</code>).</td></tr>
+<tr><td><code>grafanarole</code> (Grafana roles)</td><td>Grafana runs the role setting compiled from the access policy, refuses a role without a setting, and cannot give Grafana Admin through the sign-in.</td><td>WARN while <code>IAM_GATES</code> is false (any enabled account gets in). FAIL when the running setting differs from the policy (run <code>./deploy-infra.sh</code>). SKIP without Grafana.</td></tr>
 <tr><td><code>iamenforce</code> (Service enforcement)</td><td>The shared access settings and every service pod agree with <code>IAM_ENFORCE=true</code>, and <code>IAM_DB_ROLES</code> is true.</td><td>WARN while false, or when a pod's copy is still true. FAIL when the shared access settings disagree with <code>config.env</code> (run <code>./deploy-infra.sh</code>), when <code>IAM_ENFORCE</code> is true but <code>IAM_DB_ROLES</code> is false, or when a pod's copy is still false under true (redeploy the apps when no run is active).</td></tr>
 </tbody></table></div>
 
@@ -217,7 +218,8 @@
 <ul>
 <li>the platform admin, the first qa person and the first engineer, with the portal address;</li>
 <li>the Keycloak admin console break-glass account (realm <code>master</code>), for recovery only; every use is recorded in Keycloak's admin events;</li>
-<li>the Grafana admin, editor and viewer accounts, and the pgAdmin address (platform admin role only);</li>
+<li>the Grafana address, and Grafana's local admin account (the only Grafana Admin, for recovery only, at <code>/login?disableAutoLogin</code>; its password <code>GRAFANA_BREAKGLASS_PASS</code> is not the platform admin's); the demo accounts <code>developer</code> and <code>viewer</code> only while they still exist from an older install;</li>
+<li>the pgAdmin address (platform admin role only);</li>
 <li>where the MQTT service account passwords are (<code>MQTT_*_PASS</code> in <code>config.env</code>) and that each board has its own credential;</li>
 <li>the PostgreSQL superuser.</li>
 </ul>
@@ -227,6 +229,8 @@
 <h3 id="admin-troubleshooting">Troubleshooting</h3>
 <h4>A person gets a 403 page from the portal</h4>
 <p>Symptom: the person signs in and sees "No access yet", or another 403 page. Cause: "No access yet" means Keycloak signed them in but their account has no platform role, so the portal's gate refuses them. A 403 with a different message is a failed sign-in (a provider error or an expired sign-in form), not a missing role. A host other than the portal shows "No access to &lt;service&gt;" with the roles that may open it. Fix: for "No access yet", give the account a role in the User Manager (a grant waits for qa to confirm); a password reset does not help. The role takes effect within about four minutes, without a new sign-in. For a failed sign-in, have the person open the portal again.</p>
+<h4>Grafana says the login was denied</h4>
+<p>Symptom: after signing in, a person lands on Grafana's own sign-in page with a message that the login was denied. Cause: their role holds nothing on the Grafana dashboards row of the access policy (for example <span class="role">operator</span>, <span class="role">admin</span> or a scientist), or the account has no platform role. Fix: none, if the role is right; Grafana is not for that role. Otherwise change the role in the User Manager. If everyone is refused, run <code>./health-check.sh</code>: a <code>grafanarole</code> FAIL or a Keycloak scope problem (<code>tests/iam-hosts.sh</code>, sign-in line for Grafana) is the cause.</p>
 <h4>The System Configuration UI fails after a realm key rotation</h4>
 <p>Symptom: after a signing key was rotated or removed in Keycloak, the System Configuration UI's data calls are refused and the health check shows <code>postgrest</code> FAIL naming key ids the realm no longer publishes. Cause: config-api and the Python services verify tokens against the keys published at the last <code>./deploy-infra.sh</code>; config-api reads them only when it starts. Fix: run <code>./deploy-infra.sh</code>. It republishes the keys and restarts config-api when they changed.</p>
 <h4>The Config UI stops answering for a few seconds during a switch</h4>

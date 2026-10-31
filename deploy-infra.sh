@@ -298,7 +298,7 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 MISSING_VARS=()
 for var in PROJECT_NAME NAMESPACE DOMAIN ADMIN_USER ADMIN_EMAIL ADMIN_PASS QA_USER QA_EMAIL QA_INITIAL_PASS \
            ENGINEER_USER ENGINEER_EMAIL ENGINEER_INITIAL_PASS \
-           KC_BREAKGLASS_USER KC_BREAKGLASS_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
+           KC_BREAKGLASS_USER KC_BREAKGLASS_PASS GRAFANA_BREAKGLASS_PASS POSTGRES_USER POSTGRES_PASS POSTGRES_DB DOCKERHUB_USER DOCKERHUB_PAT \
            STORAGE_SIZE KEYCLOAK_DOMAIN KEYCLOAK_REALM GRAFANA_DOMAIN NODE_RED_DOMAIN \
            WORKBENCH_DOMAIN PGADMIN_DOMAIN PORTAL_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN DBMGMT_DOMAIN \
            SCHEDULER_DOMAIN MONITOR_DOMAIN PLATFORM_IP; do
@@ -656,6 +656,13 @@ $MK8S kubectl rollout status deployment/keycloak -n "$NAMESPACE" --timeout=10m
 # =============================================================================
 echo -e "\n${GREEN}[3/10] Configuring Keycloak realm '${KEYCLOAK_REALM}' and OAuth clients...${NC}"
 
+# Grafana's role setting is compiled before the realm changes (IAM 3.1): the
+# grafana_* roles and their claim are retired below, so a broken policy must stop
+# the deploy here, not after the old role path has lost its claim.
+REPO_ROOT="$SCRIPT_DIR"
+source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"
+policy_grafana || { echo -e "${RED}ERROR: cannot compile Grafana's role setting from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }
+
 # Kill any stale port-forward on 18080 from a previous run
 fuser -k 18080/tcp &>/dev/null || true
 sleep 1
@@ -1009,13 +1016,12 @@ _assign_realm_role() {
       -d "[${ROLE_JSON}]" || true
 }
 
-# --- Grafana realm roles ---
-echo -e "${YELLOW}  Creating Grafana roles...${NC}"
-_create_realm_role "grafana_admin"
-_create_realm_role "grafana_developer"
-_create_realm_role "grafana_viewer"
-
-# --- Grafana users — usernames/passwords from config.env, fall back to ADMIN_PASS ---
+# --- Built-in users — usernames/passwords from config.env, fall back to ADMIN_PASS ---
+# IAM 3.1: Grafana's role comes from the access policy (policy_grafana), so the
+# grafana_* realm roles and the demo accounts developer/viewer are retired under
+# IAM_GATES=true. Accounts are never created or deleted for that here: existing
+# ones stay (deactivating them is a User Manager decision); a new install gets
+# none. IAM_GATES=false keeps the pre-3.1 block, so the rollback restores it.
 _GF_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 _GF_ADMIN_PASS="${GRAFANA_ADMIN_PASS:-$ADMIN_PASS}"
 _GF_DEV_USER="${GRAFANA_DEVELOPER_USER:-developer}"
@@ -1031,40 +1037,58 @@ _demo_email() { echo "${1}@${PROJECT_NAME}.invalid"; }
 _GF_ADMIN_EMAIL=$(_demo_email "$_GF_ADMIN_USER")
 [[ "$_GF_ADMIN_USER" == "$ADMIN_USER" ]] && _GF_ADMIN_EMAIL="$ADMIN_EMAIL"
 
-echo -e "${YELLOW}  Creating Grafana users...${NC}"
 # _*_NEW: whether this run created the account; only a new account gets its
 # platform role below (IAM 2.7: a role change is an account decision).
-_create_kc_user "$_GF_ADMIN_USER" "Platform" "Admin"     "$_GF_ADMIN_EMAIL"                 "$_GF_ADMIN_PASS"
-_GF_ADMIN_NEW=$_KC_CREATED
-_create_kc_user "$_GF_DEV_USER"   "Platform" "Developer" "$(_demo_email "$_GF_DEV_USER")"   "$_GF_DEV_PASS"
-_GF_DEV_NEW=$_KC_CREATED
-_create_kc_user "$_GF_VIEW_USER"  "Platform" "Viewer"    "$(_demo_email "$_GF_VIEW_USER")"  "$_GF_VIEW_PASS"
-_GF_VIEW_NEW=$_KC_CREATED
-
-echo -e "${YELLOW}  Assigning roles to Grafana users...${NC}"
-_assign_realm_role "$_GF_ADMIN_USER" "grafana_admin"
-_assign_realm_role "$_GF_DEV_USER"   "grafana_developer"
-_assign_realm_role "$_GF_VIEW_USER"  "grafana_viewer"
+_GF_ADMIN_NEW=0; _GF_DEV_NEW=0; _GF_VIEW_NEW=0
+if [[ "${IAM_GATES:-true}" == "false" ]]; then
+    echo -e "${YELLOW}  IAM_GATES=false: creating the pre-3.1 Grafana roles and users...${NC}"
+    _create_realm_role "grafana_admin"
+    _create_realm_role "grafana_developer"
+    _create_realm_role "grafana_viewer"
+    _create_kc_user "$_GF_ADMIN_USER" "Platform" "Admin"     "$_GF_ADMIN_EMAIL"                 "$_GF_ADMIN_PASS"
+    _GF_ADMIN_NEW=$_KC_CREATED
+    _create_kc_user "$_GF_DEV_USER"   "Platform" "Developer" "$(_demo_email "$_GF_DEV_USER")"   "$_GF_DEV_PASS"
+    _GF_DEV_NEW=$_KC_CREATED
+    _create_kc_user "$_GF_VIEW_USER"  "Platform" "Viewer"    "$(_demo_email "$_GF_VIEW_USER")"  "$_GF_VIEW_PASS"
+    _GF_VIEW_NEW=$_KC_CREATED
+    _assign_realm_role "$_GF_ADMIN_USER" "grafana_admin"
+    _assign_realm_role "$_GF_DEV_USER"   "grafana_developer"
+    _assign_realm_role "$_GF_VIEW_USER"  "grafana_viewer"
+else
+    # The roles go; the accounts that held them stay, with their platform role.
+    for _r in grafana_admin grafana_developer grafana_viewer; do
+        _CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+          "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/roles/${_r}" \
+          -H "Authorization: Bearer $(_kc_token)" || true)
+        case "$_CODE" in
+            204) echo -e "${YELLOW}  Retired realm role ${_r} (IAM 3.1: Grafana's role comes from the access policy).${NC}" ;;
+            404) ;;
+            *)   echo -e "${RED}  Could not retire realm role ${_r} (HTTP ${_CODE}); it gives no Grafana role either way.${NC}" >&2 ;;
+        esac
+    done
+fi
 
 # The platform admin (portal, Node-RED, workbench admin, credentials file) is
-# ADMIN_USER. It only existed in the realm because ADMIN_USER defaults to
-# "admin" = GRAFANA_ADMIN_USER; with any other name the documented login did
-# not exist. Create it explicitly unless it is the same user.
-_ADMIN_NEW=$_GF_ADMIN_NEW
-if [[ "$ADMIN_USER" != "$_GF_ADMIN_USER" ]]; then
+# ADMIN_USER. Before IAM 3.1 it existed only because ADMIN_USER defaults to
+# "admin" = GRAFANA_ADMIN_USER; it is now created on its own.
+if [[ "${IAM_GATES:-true}" == "false" && "$ADMIN_USER" == "$_GF_ADMIN_USER" ]]; then
+    _ADMIN_NEW=$_GF_ADMIN_NEW
+else
     echo -e "${YELLOW}  Creating platform admin user '$ADMIN_USER'...${NC}"
     _create_kc_user "$ADMIN_USER" "Platform" "Administrator" "$ADMIN_EMAIL" "$ADMIN_PASS"
     _ADMIN_NEW=$_KC_CREATED
-    _assign_realm_role "$ADMIN_USER" "grafana_admin"
+    if [[ "${IAM_GATES:-true}" == "false" ]]; then _assign_realm_role "$ADMIN_USER" "grafana_admin"; fi
 fi
 
 # _create_kc_user never touches an existing user. The admin's address follows
 # ADMIN_EMAIL, because pgAdmin's default account must match it; a demo user's
 # is replaced only while it is still the old @cea.com placeholder.
 _set_kc_email "$ADMIN_USER" "$ADMIN_EMAIL"
-[[ "$_GF_ADMIN_USER" != "$ADMIN_USER" ]] && _set_kc_email "$_GF_ADMIN_USER" "$_GF_ADMIN_EMAIL" "@cea.com"
-_set_kc_email "$_GF_DEV_USER"  "$(_demo_email "$_GF_DEV_USER")"  "@cea.com"
-_set_kc_email "$_GF_VIEW_USER" "$(_demo_email "$_GF_VIEW_USER")" "@cea.com"
+if [[ "${IAM_GATES:-true}" == "false" ]]; then
+    if [[ "$_GF_ADMIN_USER" != "$ADMIN_USER" ]]; then _set_kc_email "$_GF_ADMIN_USER" "$_GF_ADMIN_EMAIL" "@cea.com"; fi
+    _set_kc_email "$_GF_DEV_USER"  "$(_demo_email "$_GF_DEV_USER")"  "@cea.com"
+    _set_kc_email "$_GF_VIEW_USER" "$(_demo_email "$_GF_VIEW_USER")" "@cea.com"
+fi
 
 # --- Platform realm roles (apps/iam/policy/defaults.yaml) ---
 # The eleven roles of the access policy; the host gates are compiled from it
@@ -1304,13 +1328,16 @@ fi
 rm -rf "$_JWKS_TMP"
 trap - EXIT
 
-# --- Add realm-role mapper to grafana client so roles[] appears in userinfo ---
-echo -e "${YELLOW}  Adding realm-role mapper to Grafana client...${NC}"
+# --- Grafana's claim: `groups` (IAM 3.1), or `roles` under IAM_GATES=false ---
+# The compiled role path reads the `groups` client scope (a default scope of
+# grafana, above). The pre-3.1 path reads `roles`, from a mapper on the client
+# itself, which only the rollback puts back: one claim source at a time.
 _GF_UUID=$(curl -sf \
   "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=grafana" \
   -H "Authorization: Bearer $(_kc_token)" \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null || echo "")
-if [[ -n "$_GF_UUID" ]]; then
+if [[ -n "$_GF_UUID" && "${IAM_GATES:-true}" == "false" ]]; then
+    echo -e "${YELLOW}  IAM_GATES=false: adding the realm-role mapper to the Grafana client...${NC}"
     curl -s -o /dev/null -X POST \
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_GF_UUID}/protocol-mappers/models" \
       -H "Authorization: Bearer $(_kc_token)" \
@@ -1328,7 +1355,15 @@ if [[ -n "$_GF_UUID" ]]; then
           "multivalued": "true"
         }
       }' || true
-    echo -e "${GREEN}  Grafana role mapper added.${NC}"
+elif [[ -n "$_GF_UUID" ]]; then
+    _OLD_MAPPER=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_GF_UUID}/protocol-mappers/models" \
+      -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(next((m['id'] for m in json.load(sys.stdin) if m['name']=='grafana-realm-roles'),''))" 2>/dev/null || echo "")
+    if [[ -n "$_OLD_MAPPER" ]]; then
+        echo -e "${YELLOW}  Removing the Grafana client's realm-role mapper (IAM 3.1: the role path reads groups)...${NC}"
+        curl -s -o /dev/null -X DELETE \
+          "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_GF_UUID}/protocol-mappers/models/${_OLD_MAPPER}" \
+          -H "Authorization: Bearer $(_kc_token)" || true
+    fi
 fi
 
 # What the credentials file may show for each Keycloak password config.env holds.
@@ -1350,9 +1385,15 @@ _CRED_ADMIN_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$ADMIN_USER" "$ADMIN_PASS")"
 _CRED_MASTER_PASS="$(_shown_pass master "$KC_BREAKGLASS_USER" "$KC_BREAKGLASS_PASS")"
 _CRED_QA_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$QA_USER" "$QA_INITIAL_PASS")"
 _CRED_ENG_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$ENGINEER_USER" "$ENGINEER_INITIAL_PASS")"
-_CRED_GF_ADMIN_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$_GF_ADMIN_USER" "$_GF_ADMIN_PASS")"
-_CRED_GF_DEV_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$_GF_DEV_USER" "$_GF_DEV_PASS")"
-_CRED_GF_VIEW_PASS="$(_shown_pass "$KEYCLOAK_REALM" "$_GF_VIEW_USER" "$_GF_VIEW_PASS")"
+# The demo accounts from before IAM 3.1, listed only while they exist (none on a
+# new install under IAM_GATES=true); their Grafana role now follows their
+# platform role like everyone's.
+_CRED_GF_DEMO=""
+for _u in "$_GF_ADMIN_USER:$_GF_ADMIN_PASS" "$_GF_DEV_USER:$_GF_DEV_PASS" "$_GF_VIEW_USER:$_GF_VIEW_PASS"; do
+    [[ "${_u%%:*}" == "$ADMIN_USER" ]] && continue
+    [[ "$(kc_password_status "$KEYCLOAK_REALM" "${_u%%:*}")" == missing ]] && continue
+    _CRED_GF_DEMO+="$(printf '  %-19s %s' "${_u%%:*}" "$(_shown_pass "$KEYCLOAK_REALM" "${_u%%:*}" "${_u#*:}")")"$'\n'
+done
 
 kc_admin_done
 kill $_KC_PF_PID 2>/dev/null || true
@@ -1506,15 +1547,26 @@ echo -e "\n${GREEN}[6/10] Deploying Grafana...${NC}"
 # template when passed via --set or values files. Use GF_* env vars instead — fully
 # equivalent and supported by the chart's env: map.
 # The datasource secret is mounted via extraSecretMounts into the provisioning directory.
+# Grafana's own role (IAM 3.1): GRAFANA_ROLE_PATH/_STRICT from policy_grafana,
+# compiled before the Keycloak section. Grafana keeps no state (no persistence),
+# so the changed env rolls a pod with an empty database: every session ends and
+# each person's org role is computed again at their next sign-in.
+# The local admin — the only Grafana Admin, break-glass — reads its login from
+# Secret grafana-admin, written from the environment, never from argv.
+ADMIN_USER="$ADMIN_USER" GF_PASS="$GRAFANA_BREAKGLASS_PASS" NS="$NAMESPACE" python3 -c '
+import json, os
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                  "metadata": {"name": "grafana-admin", "namespace": os.environ["NS"]},
+                  "stringData": {"admin-user": os.environ["ADMIN_USER"], "admin-password": os.environ["GF_PASS"]}}))' \
+  | $MK8S kubectl apply -f - >/dev/null
 _GF_VALUES=$(mktemp /tmp/grafana-values-XXXXXX.yaml)
-render "$SCRIPT_DIR/k8s/grafana/values.yaml" GRAFANA_DOMAIN GRAFANA_OAUTH_SECRET KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE > "$_GF_VALUES"
+render "$SCRIPT_DIR/k8s/grafana/values.yaml" GRAFANA_DOMAIN GRAFANA_OAUTH_SECRET KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
+  GRAFANA_ROLE_PATH GRAFANA_ROLE_STRICT > "$_GF_VALUES"
 $MK8S helm3 upgrade --install grafana \
   grafana/grafana \
   --version 7.3.12 \
   --namespace "$NAMESPACE" \
   --values "$_GF_VALUES" \
-  --set adminUser="$ADMIN_USER" \
-  --set adminPassword="$ADMIN_PASS" \
   --set ingress.enabled=true \
   --set "ingress.hosts[0]=$GRAFANA_DOMAIN" \
   --set "ingress.tls[0].hosts[0]=$GRAFANA_DOMAIN" \
@@ -1529,6 +1581,13 @@ if [[ -n "$_GF_PREV_USER" && "$_GF_PREV_USER" != "$DS_USER" ]]; then
     $MK8S kubectl rollout status deployment/grafana -n "$NAMESPACE" --timeout=5m
 fi
 DS_PASS=""
+# The Secret is read at pod start; a pod that did not restart (nothing else
+# changed) still has the previous password. Set it on the running Grafana too,
+# on stdin. Best effort: the next restart reads the Secret anyway.
+if ! printf '%s\n' "$GRAFANA_BREAKGLASS_PASS" | $MK8S kubectl exec -i -n "$NAMESPACE" deployment/grafana -c grafana -- \
+        grafana cli --homepath /usr/share/grafana admin reset-admin-password --password-from-stdin >/dev/null 2>&1; then
+    echo -e "${RED}  Could not set Grafana's break-glass password on the running pod; it applies at its next restart.${NC}" >&2
+fi
 
 # =============================================================================
 # 7. OAUTH2 PROXY
@@ -1539,8 +1598,7 @@ echo -e "\n${GREEN}[7/10] Deploying OAuth2 Proxy (Node-RED SSO gateway)...${NC}"
 _OP2_VALUES=$(mktemp /tmp/oauth2proxy-values-XXXXXX.yaml)
 # allowed_groups compiled from the access policy for this host (policy_groups,
 # infra/lib-oauth2-proxy.sh); IAM_GATES=false renders the pre-policy list.
-REPO_ROOT="$SCRIPT_DIR"
-source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"
+# (lib-oauth2-proxy.sh was sourced before the Keycloak section, for policy_grafana.)
 ALLOWED_GROUPS="$(policy_groups NODE_RED_DOMAIN)"
 render "$SCRIPT_DIR/k8s/oauth2-proxy/values-node-red.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_OP2_VALUES"
 gate_error_page oauth2-proxy NODE_RED_DOMAIN "$ALLOWED_GROUPS"
@@ -1874,9 +1932,12 @@ echo ""
 echo -e "${GREEN}  DIRECT SERVICE ACCESS${NC}"
 echo -e "${GREEN}  ---------------------${NC}"
 echo -e "  Grafana:         https://$GRAFANA_DOMAIN"
-echo -e "    SSO:           $_GF_ADMIN_USER  (Admin)"
-echo -e "                   $_GF_DEV_USER  (Editor)"
-echo -e "                   $_GF_VIEW_USER  (Viewer)"
+if [[ "${IAM_GATES:-true}" == "false" ]]; then
+echo -e "    SSO:           any enabled account (IAM_GATES=false: Admin/Editor from the grafana_* roles)"
+else
+echo -e "    SSO:           Editor: engineer; Viewer: roles holding R on dashboards; others refused"
+fi
+echo -e "    Break-glass:   local admin $ADMIN_USER at https://$GRAFANA_DOMAIN/login?disableAutoLogin (recovery only)"
 echo ""
 echo -e "  Node-RED:        https://$NODE_RED_DOMAIN"
 echo -e "    SSO:           $ADMIN_USER"
@@ -2002,12 +2063,17 @@ KEYCLOAK ADMIN CONSOLE — BREAK-GLASS ONLY (realm master)
   Username            $KC_BREAKGLASS_USER
   Password            $_CRED_MASTER_PASS
 
-GRAFANA (Keycloak SSO)
+GRAFANA (Keycloak SSO; the role follows the access policy: Editor for engineer,
+Viewer for the roles holding R on dashboards, no sign-in for the others)
   URL                 https://$GRAFANA_DOMAIN
-  Admin               $_GF_ADMIN_USER / $_CRED_GF_ADMIN_PASS
-  Editor              $_GF_DEV_USER / $_CRED_GF_DEV_PASS
-  Viewer              $_GF_VIEW_USER / $_CRED_GF_VIEW_PASS
 
+GRAFANA LOCAL ADMIN — BREAK-GLASS ONLY (Grafana Admin; logged by Grafana)
+  URL                 https://$GRAFANA_DOMAIN/login?disableAutoLogin
+  Username            $ADMIN_USER
+  Password            $GRAFANA_BREAKGLASS_PASS
+${_CRED_GF_DEMO:+
+DEMO ACCOUNTS FROM BEFORE IAM 3.1 (kept; deactivate in the User Manager if unused)
+${_CRED_GF_DEMO}}
 PGADMIN (Keycloak SSO — platform role admin only)
   URL                 https://$PGADMIN_DOMAIN
 

@@ -4,6 +4,8 @@ providers:
   type: file
   disableDeletion: false
   updateIntervalSeconds: 30
-  allowUiUpdates: true
+  # Dashboards change only through git and ./apps/report/deploy.sh (IAM 3.1);
+  # an edit in the browser is refused (and would be lost at the next restart).
+  allowUiUpdates: false
   options:
     path: /var/lib/grafana/dashboards

@@ -86,7 +86,7 @@
 <tr><td>MQTT Explorer</td><td><code>mqtt-explorer.</code></td><td><span class="role">engineer</span></td><td>Checked</td></tr>
 <tr><td>Node-RED</td><td><code>node-red.</code></td><td><span class="role">engineer</span></td><td>Checked</td></tr>
 <tr><td>pgAdmin</td><td><code>pgadmin.</code></td><td><span class="role">admin</span></td><td>Checked by pgAdmin's own sign-in setting</td></tr>
-<tr><td>Grafana</td><td><code>grafana.</code></td><td>Policy: <span class="role">auditor</span>, <span class="role">engineer</span>, <span class="role">maintenance</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span></td><td>Not yet checked (planned for IAM Phase 3.1). Today any active account can sign in.</td></tr>
+<tr><td>Grafana</td><td><code>grafana.</code></td><td><span class="role">auditor</span>, <span class="role">engineer</span>, <span class="role">maintenance</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span></td><td>Checked by Grafana's own sign-in setting: <span class="role">engineer</span> is Editor, the others Viewer; any other role cannot sign in</td></tr>
 <tr><td>AI Workbench</td><td><code>ai-workbench.</code></td><td>Policy: <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span></td><td>Not yet checked (planned for IAM Phase 3.2). Today any active account can sign in.</td></tr>
 <tr><td>Device onboarding</td><td><code>onboard-device.</code></td><td>Policy: <span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not yet checked (planned for IAM Phase 3.4, through the <code>EDGE_WIZARD_ROLE</code> setting)</td></tr>
 <tr><td>Access Policy</td><td>not deployed</td><td>Policy: <span class="role">admin</span>, <span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Not deployed yet (IAM Phase 4)</td></tr>
@@ -161,6 +161,7 @@
 <li>that you should ask an administrator to change your role if you need it for your work.</li>
 </ul>
 <p>It offers <strong>Back to the portal</strong> and <strong>Sign out</strong>.</p>
+<p>Grafana checks your role in its own sign-in, so it shows no such page: you land on Grafana's sign-in page with a message that the login was denied.</p>
 <p>The service portal has its own page, <strong>No access yet</strong>. It means your account has no platform role at all, which usually means your access request has not been confirmed yet.</p>
 <p>A sign-in failure also shows an error page, but with its own message (starting "Login Failed") and a <strong>Try again</strong> button. That is a problem with the sign-in itself, not with your role.</p>
 <div class="note"><p>Being able to open an app does not mean every button works for you. If an action inside an app is refused, the service checked your role for that action. Ask an administrator which role the action needs, or see the role descriptions in <a href="#access-roles">The eleven roles</a>.</p></div>

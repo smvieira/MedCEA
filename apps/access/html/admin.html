@@ -550,7 +550,7 @@ function selectUser(u) {
     d.append(el('div', 'help', deact
       ? (u.enabled ? 'The person is signed out everywhere at once and cannot sign in again until the account is activated. Their MQTT person credentials are revoked. Their data, role and history are kept.'
                    : 'The account is already disabled; deactivating records that and withdraws the decision waiting for qa.')
-      : 'Activating an account waits for a qa person to confirm — also one with no role, which would still reach Grafana.'));
+      : 'Activating an account waits for a qa person to confirm — also one with no role, which would still reach the AI workbench.'));
     const f = actionForm(d, 'ureason', 'Reason', deact, deact ? 'Deactivate account' : 'Activate (waits for qa)', 'go' + (deact ? ' r' : ''));
     f.go.onclick = async () => {
       if (deact && !f.ta.value.trim()) { f.res.className = 'res bad'; f.res.textContent = 'Give a reason for the deactivation.'; f.ta.focus(); return; }

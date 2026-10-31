@@ -99,6 +99,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         and on IAM_ENFORCE=true with IAM_DB_ROLES=false (assigned_run unchecked) or a pod copy"
     echo -e "         still false (fails open without /iam/); WARN on a pod copy still true, or while false"
     echo ""
+    echo -e "  ${CYAN}grafanarole${NC} Grafana's role setting is the access policy's (IAM 3.1): NAMESPACE"
+    echo -e "         FAIL when the live role path differs from the compiled one (./deploy-infra.sh),"
+    echo -e "         strict is not true or Grafana may grant Grafana Admin; WARN while IAM_GATES=false"
+    echo -e "         (any enabled account is at least Viewer); SKIP without the deployment"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -524,6 +529,38 @@ check_iamenforce() {
 }
 
 # =============================================================================
+# Check: Grafana's role setting is the policy's (IAM 3.1) — read-only
+# target: NAMESPACE (default $NAMESPACE). Compares the deployment's env with
+# policy_grafana (infra/lib-oauth2-proxy.sh), the function deploy-infra renders.
+# =============================================================================
+check_grafanarole() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" envs path strict assign problems=()
+    envs="$(timeout "$TIMEOUT" $KUBECTL get deployment grafana -n "$ns" \
+        -o jsonpath='{range .spec.template.spec.containers[?(@.name=="grafana")].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null)" \
+        || { _record SKIP "$name" "no Grafana deployment in $ns"; return; }
+    path="$(sed -n 's/^GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=//p' <<<"$envs")"
+    strict="$(sed -n 's/^GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT=//p' <<<"$envs")"
+    assign="$(sed -n 's/^GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN=//p' <<<"$envs")"
+    if [[ "${IAM_GATES:-true}" == "false" ]]; then
+        _record WARN "$name" "IAM_GATES=false: Grafana admits any enabled account, at least as Viewer (pre-3.1 setting)"
+        return
+    fi
+    local GRAFANA_ROLE_PATH="" GRAFANA_ROLE_STRICT=""
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh" || ! REPO_ROOT="$SCRIPT_DIR" policy_grafana 2>/dev/null; then
+        _record FAIL "$name" "cannot compile Grafana's role setting (python3 apps/iam/compiler/cli.py check)"
+        return
+    fi
+    [[ "$path" == "$GRAFANA_ROLE_PATH" ]] || problems+=("the live role path is not the compiled one (./deploy-infra.sh)")
+    [[ "$strict" == "true" ]] || problems+=("role_attribute_strict is '${strict}', not true: a role without a setting still signs in")
+    [[ "$assign" == "false" ]] || problems+=("allow_assign_grafana_admin is '${assign}', not false")
+    if [[ ${#problems[@]} -eq 0 ]]; then
+        _record OK "$name" "Editor/Viewer from the access policy; others refused; Grafana Admin only break-glass"
+    else
+        local IFS=';'; _record FAIL "$name" "${problems[*]}"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -687,6 +724,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
         iamenforce)   check_iamenforce "$name" "$target" ;;
+        grafanarole)  check_grafanarole "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

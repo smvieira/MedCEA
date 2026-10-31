@@ -32,6 +32,25 @@ policy_groups() {
     python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile proxy "$1"
 }
 
+#   policy_grafana || exit 1
+#
+# Grafana signs people in itself, so its gate is its own role setting (IAM 3.1):
+# sets GRAFANA_ROLE_PATH (GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH over the
+# `groups` claim: Editor, Viewer or '' — compiled from the dashboards group's
+# `tool:` block) and GRAFANA_ROLE_STRICT (true: '' is no sign-in). IAM_GATES=false
+# renders the pre-3.1 expression byte for byte with strict off, so any enabled
+# account is at least Viewer again. A broken policy returns 1 and changes nothing.
+GRAFANA_PRE_31_PATH="contains(roles[*], 'grafana_admin') && 'Admin' || contains(roles[*], 'grafana_developer') && 'Editor' || 'Viewer'"
+policy_grafana() {
+    if [[ "${IAM_GATES:-true}" == "false" ]]; then
+        echo -e "\033[0;33mWARNING: IAM_GATES=false — Grafana gets the pre-3.1 role setting: any enabled account is at least Viewer.\033[0m" >&2
+        GRAFANA_ROLE_PATH="$GRAFANA_PRE_31_PATH" GRAFANA_ROLE_STRICT=false
+        return 0
+    fi
+    GRAFANA_ROLE_PATH="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grafana)" || return 1
+    GRAFANA_ROLE_STRICT=true
+}
+
 #   gate_error_page RELEASE HOST_VAR ALLOWED_GROUPS
 #
 # The proxy's 403 page: "No access to <service>", the roles that may open it and

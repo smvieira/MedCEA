@@ -33,8 +33,13 @@ def _route_levels(lv):
     return lv if isinstance(lv, list) else [lv]
 
 
+SCHEMA_VERSION = 3   # 3: a group may carry a `tool:` block (compiler/tools.py, IAM 3.1)
+
+
 def _structure(p, err):
     d = p.data
+    if d.get("schema_version") != SCHEMA_VERSION:
+        err(f"schema_version is {d.get('schema_version')}, this compiler reads {SCHEMA_VERSION}")
     for k in ("levels", "roles", "resource_groups", "matrix", "invariants", "constraints", "classes", "hosts"):
         if k not in d:
             err(f"missing top-level key {k}")
@@ -60,6 +65,8 @@ def _structure(p, err):
                     for x in _route_levels(lv):
                         if x not in p.levels:
                             err(f"group {g}: route {route} level {x} unknown")
+        if gd.get("tool") and not any(m["type"] == "ui" for m in gd["members"]):
+            err(f"group {g}: a tool block on a group without a ui member")
         for tg in (gd.get("reaches") or {}):
             if tg not in p.groups:
                 err(f"group {g}: reaches unknown group {tg}")
@@ -240,13 +247,14 @@ def _matrix_invariants(p, err, note):
 
 def check(p):
     """(errors, notes) for a loaded Policy."""
-    from compiler import grants, netpol  # the database and network sections' own checkers
+    from compiler import grants, netpol, tools  # the database, network and tool sections' own checkers
     errors, notes = [], []
     _structure(p, errors.append)
     if errors:
         return errors, notes  # the rest assumes a well-formed file
     errors.extend(netpol.check(p))
     errors.extend(grants.check(p))
+    errors.extend(tools.check(p))
     _help(p, errors.append)
     _members(p, errors.append)
     _cells(p, errors.append)

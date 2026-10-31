@@ -1,6 +1,6 @@
 """apps/iam/compiler/model.py — load the access policy and answer questions about it.
 
-The policy is apps/iam/policy/defaults.yaml (schema_version 2) or, once Phase 1 has
+The policy is apps/iam/policy/defaults.yaml (schema_version 3) or, once Phase 1 has
 created iam_policy, the applied version read from the database. Everything else in the
 compiler (invariants, host gates, grants, routes, explain) asks this module, so there is
 one reading of `implies`, composites, constraints and tool reach.

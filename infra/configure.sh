@@ -349,11 +349,13 @@ check_tailscale
 # Generated, never asked — so filled before the early exit below, on every run:
 # the qa person's initial password (shown once in the credentials box, replaced
 # at first sign-in) and Keycloak's break-glass console account (its own name and
-# password, never the platform admin's; infra/lib-keycloak-admin.sh).
+# password, never the platform admin's; infra/lib-keycloak-admin.sh) and Grafana's
+# local admin, the only Grafana Admin (IAM 3.1; Secret grafana-admin).
 [[ -n "$(cfg_get QA_INITIAL_PASS)" ]] || cfg_set QA_INITIAL_PASS "$(gen_password)"
 [[ -n "$(cfg_get ENGINEER_INITIAL_PASS)" ]] || cfg_set ENGINEER_INITIAL_PASS "$(gen_password)"
 [[ -n "$(cfg_get KC_BREAKGLASS_USER)" ]] || cfg_set KC_BREAKGLASS_USER "kc-breakglass"
 [[ -n "$(cfg_get KC_BREAKGLASS_PASS)" ]] || cfg_set KC_BREAKGLASS_PASS "$(gen_password)"
+[[ -n "$(cfg_get GRAFANA_BREAKGLASS_PASS)" ]] || cfg_set GRAFANA_BREAKGLASS_PASS "$(gen_password)"
 # The database roles' passwords (IAM plan 3.6; apps/database/deploy.sh writes them
 # into Secrets db-<role>). Generated, never asked, never shown.
 for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
@@ -448,8 +450,8 @@ fi
 # --- 3. Administrator ---------------------------------------------------------
 if wanted ADMIN_USER || wanted ADMIN_EMAIL || wanted ADMIN_PASS; then
     section "Administrator"
-    info "The platform admin: Keycloak console, Grafana, Node-RED and the portal."
-    info "Grafana's demo users (developer, viewer) get the same password unless you set GRAFANA_*_PASS."
+    info "The platform admin: the portal and the User Manager. Grafana is reached only through its"
+    info "break-glass local admin (its own generated password, GRAFANA_BREAKGLASS_PASS)."
     info "Its e-mail is a real one you read: Keycloak password resets go there, and it is the pgAdmin login."
 fi
 if wanted ADMIN_USER; then

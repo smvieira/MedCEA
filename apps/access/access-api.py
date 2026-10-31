@@ -1634,7 +1634,7 @@ def set_user_status(user_id, body, who, role):
             return 409, {'error': v}
     reason = reason or 'activated'
     # Every activation waits for qa (record_decision): an enabled account reaches the
-    # hosts not gated by role yet (Grafana, until IAM 3.1) even with no platform role.
+    # hosts not gated by role yet (the AI workbench, until IAM 3.2) even with no platform role.
     with tx(who, role) as (con, cur):
         dec = record_decision(cur, 'activate', user_id, u['username'], person_of(u), from_role, None, None, reason)
         # The account lock is held from here: what was classified must still be so.

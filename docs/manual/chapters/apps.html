@@ -15,7 +15,7 @@
 <tr><td>User Manager</td><td><code>access.&lt;domain&gt;</code></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
 <tr><td>MQTT Explorer</td><td><code>mqtt-explorer.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
 <tr><td>Node-RED</td><td><code>node-red.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
-<tr><td>Grafana</td><td><code>grafana.&lt;domain&gt;</code></td><td>Any enabled account, even one without a platform role; a role gate is planned (IAM Phase 3.1)</td></tr>
+<tr><td>Grafana</td><td><code>grafana.&lt;domain&gt;</code></td><td><span class="role">engineer</span> (Editor); <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span> (Viewer). Checked by Grafana's own sign-in setting</td></tr>
 <tr><td>AI Workbench (JupyterHub)</td><td><code>ai-workbench.&lt;domain&gt;</code></td><td>Any enabled account, even one without a platform role; a role gate is planned (IAM Phase 3.2)</td></tr>
 <tr><td>pgAdmin</td><td><code>pgadmin.&lt;domain&gt;</code></td><td><span class="role">admin</span> only, checked by pgAdmin's own sign-in</td></tr>
 </tbody>
@@ -395,13 +395,15 @@ The snapshot never changes afterwards.</li>
 <li>historical trends of the same readings</li>
 <li>a summary of the latest readings by zone and device</li>
 </ul>
-<p>Grafana gives each person one of its own roles:</p>
+<p>Grafana gives each person one of its own roles, from the access policy's <strong>Grafana dashboards</strong> row:</p>
 <ul>
-<li>Admin, for accounts holding <code>grafana_admin</code></li>
-<li>Editor, for accounts holding <code>grafana_developer</code></li>
-<li>Viewer, for everyone else</li>
+<li>Editor, for <span class="role">engineer</span>: edits dashboards and opens Explore;</li>
+<li>Viewer, for <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span>: views dashboards;</li>
+<li>no sign-in for every other role (<span class="role">operator</span>, <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>) and for an account without a platform role.</li>
 </ul>
-<p>At this release, any enabled platform account can sign in. Dashboards read through Grafana's own database account, so a viewer sees telemetry of every unit, including an <span class="role">operator</span> who sees only their own units in the Run Monitor. Per-role access in Grafana is planned (IAM Phase 3.1).</p>
+<p>A person Grafana refuses sees Grafana's own sign-in page with a message that the login was denied, not the platform's "No access" page. Nobody gets Grafana Admin through the platform sign-in: only Grafana's local break-glass account holds it (see <a href="#admin-credentials">Credentials</a>).</p>
+<p>The dashboards change only through the repository (<code>apps/report/dashboards/</code>) and the report deploy. An Editor who changes a dashboard in the browser cannot save it.</p>
+<div class="warn"><p>Dashboards read through Grafana's own database account, so a viewer sees telemetry of every unit; that is why an <span class="role">operator</span>, who sees only their own units in the Run Monitor, has no Grafana. A viewer can also send Grafana any query that account may run, even though the Explore screen is hidden from Viewers: what limits a viewer is the database account's read access (master data, measurements and runs), not the dashboards.</p></div>
 
 <h3 id="apps-workbench">AI Workbench (JupyterHub)</h3>
 <p>The AI Workbench is JupyterHub: notebooks for data analysis and for developing control algorithms. It is meant for <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> work.</p>

@@ -5,7 +5,7 @@
 #   - grafana-dashboard-provider  ConfigMap  → /etc/grafana/provisioning/dashboards/
 #   - grafana-dashboards          ConfigMap  → /var/lib/grafana/dashboards/
 #   - Mounts both into the Grafana deployment (idempotent)
-#   - Pushes dashboard JSON via Grafana API for immediate effect
+#   - Checks, as Grafana's break-glass admin, that each dashboard is provisioned
 #
 # Idempotent: safe to re-run.
 
@@ -22,6 +22,11 @@ fi
 source "$REPO_ROOT/config.env"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/infra/lib-wait.sh"
+source "$SCRIPT_DIR/lib-grafana-admin.sh"   # grafana_admin_cfg: the break-glass login, off argv
+if [[ -z "${GRAFANA_BREAKGLASS_PASS:-}" ]]; then
+    echo "ERROR: GRAFANA_BREAKGLASS_PASS is empty in config.env — run ./deploy-infra.sh first (IAM 3.1)." >&2
+    exit 1
+fi
 
 source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback)
 NAMESPACE="${NAMESPACE:-medcea}"
@@ -72,41 +77,45 @@ else
     $KUBECTL rollout status deployment/grafana -n "$NAMESPACE" --timeout=90s
 fi
 
-# ── 4. Push each dashboard via Grafana API (immediate effect) ─────────────────
+# ── 4. Check each dashboard is provisioned (as the break-glass admin) ─────────
+# The provider has allowUiUpdates: false (IAM 3.1: dashboards change only through
+# git and this deploy), and Grafana then refuses an API save of a provisioned
+# dashboard too, so nothing is pushed: the restarted pod loads the files at start.
 # `rollout status` returns when the Deployment reports available, which is not the
-# same as Grafana serving HTTP through the ingress — the endpoint needs to pick up
-# the new pod, and Grafana still has to finish starting. Pushing immediately after
-# the rollout raced that and got a 502 from nginx, failing a deploy whose work had
-# actually succeeded. Wait for Grafana to answer before pushing anything.
+# same as Grafana serving HTTP through the ingress, so wait for it to answer first.
 log "Waiting for Grafana to answer..."
 wait_for_http "${GRAFANA_URL}/api/health" 120 "Grafana" || exit 1
 
-log "Pushing dashboards to Grafana API..."
+log "Checking the provisioned dashboards..."
 for DASHBOARD_FILE in "$DASHBOARDS_DIR"/*.json; do
     DASHBOARD_NAME="$(basename "$DASHBOARD_FILE" .json)"
-    DASHBOARD_JSON="$(cat "$DASHBOARD_FILE")"
-
-    # Retry on 5xx: a healthy Grafana can still briefly 502 through the ingress
-    # while endpoints settle. 4xx is a real rejection and is not retried.
-    for _try in 1 2 3 4 5; do
-        HTTP_CODE=$(curl -s -o /tmp/grafana_push_response.json -w "%{http_code}" "${CA_ARGS[@]}" \
-            -u "admin:${ADMIN_PASS}" \
-            -H "Content-Type: application/json" \
-            -X POST "${GRAFANA_URL}/api/dashboards/db" \
-            -d "{\"dashboard\": ${DASHBOARD_JSON}, \"overwrite\": true, \"message\": \"Deployed via deploy-apps.sh\"}")
-        [[ "$HTTP_CODE" =~ ^5 ]] || break
+    UID_="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("uid",""))' "$DASHBOARD_FILE")"
+    if [[ -z "$UID_" ]]; then
+        echo "  ✗ ${DASHBOARD_NAME} has no uid; a provisioned dashboard needs one" >&2
+        exit 1
+    fi
+    # Retry: provisioning runs shortly after start, and the ingress may still 502.
+    for _try in 1 2 3 4 5 6; do
+        HTTP_CODE=$(curl -s -o /tmp/grafana_dashboard_check.json -w "%{http_code}" "${CA_ARGS[@]}" \
+            -K <(grafana_admin_cfg) "${GRAFANA_URL}/api/dashboards/uid/${UID_}")
+        [[ "$HTTP_CODE" == 401 || "$HTTP_CODE" =~ ^2 ]] && break
         sleep $(( _try * 2 ))
     done
 
-    if [[ "$HTTP_CODE" =~ ^2 ]]; then
-        URL=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('url',''))" < /tmp/grafana_push_response.json 2>/dev/null || true)
+    if [[ "$HTTP_CODE" =~ ^2 ]] && python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["meta"].get("provisioned") else 1)' \
+            < /tmp/grafana_dashboard_check.json 2>/dev/null; then
+        URL=$(python3 -c "import json,sys; print(json.load(sys.stdin)['meta'].get('url',''))" < /tmp/grafana_dashboard_check.json 2>/dev/null || true)
         log "  ✓ ${DASHBOARD_NAME} → ${GRAFANA_URL}${URL}"
+    elif [[ "$HTTP_CODE" == 401 ]]; then
+        echo "  ✗ Grafana refused the break-glass login (HTTP 401): run ./deploy-infra.sh, which sets GRAFANA_BREAKGLASS_PASS on Grafana" >&2
+        exit 1
     else
-        echo "  ✗ Failed to push ${DASHBOARD_NAME} (HTTP ${HTTP_CODE})" >&2
-        cat /tmp/grafana_push_response.json >&2
+        echo "  ✗ ${DASHBOARD_NAME} is not provisioned (HTTP ${HTTP_CODE})" >&2
+        cat /tmp/grafana_dashboard_check.json >&2
         exit 1
     fi
 done
+rm -f /tmp/grafana_dashboard_check.json
 
 echo ""
 echo -e "  ${BOLD}Reports deployed${NC}"

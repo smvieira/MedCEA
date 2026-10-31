@@ -780,13 +780,15 @@ recipe() {
         IAM_GATES:enable)
             STEPS=("set IAM_GATES true" "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("The User Manager widens beyond admin only once every access pod proves it enforces (the access deploy checks)."
-                   "Verify: tests/iam-hosts.sh") ;;
+                   "Grafana's role setting comes from the policy again (Editor: engineer; Viewer: roles holding R on dashboards; others cannot sign in); the grafana_* roles are retired."
+                   "Verify: tests/iam-hosts.sh (Grafana's role setting included) and ./health-check.sh (Grafana roles)") ;;
         IAM_GATES:rollback)
             STEPS=("run env IAM_GATES=false ./apps/access/deploy.sh" "set IAM_GATES false"
                    "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("Every gate goes back to operator, qa, auditor, admin; the User Manager to admin only. Each deploy warns while false."
                    "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until IAM_GATES is true again."
-                   "Node-RED is not exact: before Phase 0 it admitted any signed-in user.") ;;
+                   "Node-RED is not exact: before Phase 0 it admitted any signed-in user."
+                   "Grafana goes back to any enabled account (at least Viewer); the grafana_* roles are re-created, so Editor/Admin only for the built-in accounts that still exist.") ;;
         IAM_NETPOL:enable)
             PRE=("Every caller of an application pod is listed under network: in apps/iam/policy/defaults.yaml (an unlisted caller times out).")
             STEPS=("set IAM_NETPOL true" "run ./deploy-infra.sh")
@@ -856,7 +858,7 @@ recipe() {
 
 switch_purpose() {
     case "$1" in
-        IAM_GATES)            echo "Each sign-in gate admits the roles the policy compiles for its host (false: the pre-policy lists)." ;;
+        IAM_GATES)            echo "Each sign-in gate, and Grafana's role setting, admit the roles the policy compiles for its host (false: the pre-policy lists)." ;;
         IAM_NETPOL)           echo "One NetworkPolicy per application pod: only its listed callers can connect." ;;
         IAM_ENFORCE)          echo "Python services refuse what the route table does not allow (false: they only log 'would refuse')." ;;
         IAM_POSTGREST_JWT)    echo "config-api (PostgREST) verifies the person's token (Phase 2b)." ;;
@@ -1304,7 +1306,7 @@ AREA_UNITS=(
     "a_units_remove_sub|Remove units of a deleted account|By its Keycloak id (units.sh list prints it)."
 )
 AREA_SWITCHES=(
-    "a_sw_gates|IAM_GATES — sign-in gates from the policy|Each oauth2-proxy admits the roles the policy compiles for its host."
+    "a_sw_gates|IAM_GATES — sign-in gates from the policy|Each oauth2-proxy, and Grafana's role setting, admit the roles the policy compiles for its host."
     "a_sw_netpol|IAM_NETPOL — NetworkPolicies per pod|Only each application pod's listed callers can connect."
     "a_sw_enforce|IAM_ENFORCE — services refuse|Python services refuse instead of logging 'would refuse'."
     "a_sw_jwt|IAM_POSTGREST_JWT — config-api verifies tokens|Phase 2b: PostgREST checks the person's token."

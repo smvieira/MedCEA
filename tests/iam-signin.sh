@@ -12,7 +12,10 @@
 # gets in, it also calls one read-only API per service behind the host, and the services'
 # logs must hold a "would refuse" (enforcing: "refused") line for exactly the calls the
 # route table refuses, and every service must refuse one path in no table (a hook that
-# never loaded fails) (medcea_iam.check(), IAM plan 1.2).
+# never loaded fails) (medcea_iam.check(), IAM plan 1.2). One more account,
+# test-none-<random>, holds no platform role and must be refused everywhere, Grafana
+# included (IAM 3.1: an enabled account without a role no longer reaches it); Grafana's
+# role and Explore are checked against the policy (iam_signin_flow.py).
 #
 # Takes the deploy lock (it creates accounts). Calls the Keycloak admin API as the deploy
 # scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a Keycloak login event in the
@@ -22,7 +25,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -79,7 +82,7 @@ from compiler import model
 print(" ".join(model.load().roles))')"
 
 USERS_JSON="["
-for role in $ROLES; do
+for role in $ROLES none; do
     user="test-${role//_/-}-$SUFFIX"
     pass="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
     body="$(U="$user" P="$pass" E="$user@${PROJECT_NAME}.invalid" ROLE="$role" python3 -c '
@@ -95,8 +98,11 @@ print(json.dumps({"username": os.environ["U"], "enabled": True, "emailVerified":
         echo -e "${RED}Could not create $user (HTTP $code).${NC}" >&2
         exit 1
     fi
-    rolerep="$(_kc_get "realms/$R/roles/$role")"
-    code="$(_kc_send POST "realms/$R/users/$id/role-mappings/realm" "[$rolerep]")"
+    code=204
+    if [[ "$role" != none ]]; then   # none: an enabled account without a platform role
+        rolerep="$(_kc_get "realms/$R/roles/$role")"
+        code="$(_kc_send POST "realms/$R/users/$id/role-mappings/realm" "[$rolerep]")"
+    fi
     if [[ "$code" != 204 ]]; then
         echo -e "${RED}Could not give $user the role $role (HTTP $code) — is it a realm role?${NC}" >&2
         exit 1
