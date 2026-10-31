@@ -30,8 +30,11 @@ account without a platform role) is refused everywhere, Grafana included.
 
 Node-RED (IAM 3.3) keeps its proxy gate; past it, each admitted account completes the
 editor's own sign-in (/auth/strategy, silent through the Keycloak session), and GET
-/settings with the editor token must show the rights cli.py compile node-red gives its role,
-and POST /nodes (a palette install) must be 401. The token is revoked, never printed.
+/settings with the editor token must answer 200 with the rights cli.py compile node-red gives
+its role (any other answer is "editor token not accepted", and nothing else is judged), and
+POST /nodes (a palette install) must be 401. The token is read from the redirect as the
+editor reads it (raw base64: '+' stays '+'), never printed, and revoked: the revoke must
+answer 200 and the token then be refused (401).
 IAM_GATES=false keeps Node-RED's and the MQTT Explorer's compiled lists.
 
 The AI workbench (IAM 3.2, JupyterHub, also [tool …]) starts at
@@ -47,8 +50,12 @@ own /oauth2/callback); a role outside the policy's onboarding list gets the wiza
 ("… required to provision hardware", naming the roles), which counts as refused. Nothing is
 started. pgAdmin (IAM 3.4) shows its login page: the flow reads the CSRF token from it, posts
 /authenticate/login with oauth2_button=keycloak, then Keycloak's form; ending on /browser/
-is in, pgAdmin's "not authorized … claims" message is refused. pgAdmin creates a user for
-each account it admits (OAUTH2_AUTO_CREATE_USER): only the throwaway admin, and it is gone
+is in, pgAdmin's flashed "not authorized to login based on your identity profile" (the
+claims refusal) is refused, and any other flashed message is reported as an error in
+pgAdmin's own words. pgAdmin creates a user for each account it admits
+(OAUTH2_AUTO_CREATE_USER) and validates its e-mail then: email_validator refuses
+special-use domains such as .invalid, so iam-signin.sh gives the test accounts the RFC 2606
+example domain <project>.example.org. Only the throwaway admin is created, and it is gone
 when the pod restarts (no volume). The pgAdmin form fields follow pgAdmin 9 and may need
 updating after an image update (`dpage/pgadmin4:9`). IAM_GATES=false: the wizard expects
 EDGE_WIZARD_ROLE (empty: every account, the role-less one included), pgAdmin admin.
@@ -187,6 +194,27 @@ def classify(domain, label, status, url, body):
 
 
 PGADMIN_CSRF = re.compile(r'"csrfToken":\s*"([^"]+)"')
+# pgAdmin's flashed messages: render_page.html passes get_flashed_messages(with_categories=true)
+# through tojson as other_props "messages", a list of [category, message] pairs. The category
+# is not always a string: pgAdmin's MessageType.ERROR is ('Error',) (a trailing comma in
+# pgadmin/utils/constants.py), so its claims refusal (oauth2.py) reaches the page as
+# [["Error"], "The user is not authorized ..."]. The list is decoded as JSON, not matched.
+PGADMIN_MESSAGES = re.compile(r'"messages":\s*(?=\[)')
+PGADMIN_CLAIMS_REFUSAL = "not authorized to login based on your identity"
+
+
+def pgadmin_flashes(body):
+    """Every flashed message on a pgAdmin page, as text, whatever form its category has."""
+    found = []
+    for m in PGADMIN_MESSAGES.finditer(body):
+        try:
+            pairs, _ = json.JSONDecoder().raw_decode(body, m.end())
+        except ValueError:
+            continue
+        for pair in pairs if isinstance(pairs, list) else []:
+            if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[1], str):
+                found.append(pair[1])
+    return found
 
 
 def pgadmin_sign_in(op, domain, user):
@@ -210,12 +238,15 @@ def classify_pgadmin(domain, status, url, body):
     parts = urllib.parse.urlsplit(url)
     if 200 <= status < 300 and parts.hostname == domain and parts.path.startswith("/browser"):
         return "in", ""
-    if parts.hostname == domain and "not authorized" in body:
+    flashes = pgadmin_flashes(body) if parts.hostname == domain else []
+    if any(PGADMIN_CLAIMS_REFUSAL in f for f in flashes):
         return "refused", ""
+    if flashes:
+        return "error", f"pgAdmin refused the sign-in: {' / '.join(flashes)[:160]}"
     if FORM.search(body):
         return "error", "Keycloak showed the login form again (wrong password or account disabled?)"
     if parts.hostname == domain and parts.path.startswith("/login"):
-        return "error", "back on pgAdmin's login page without its claims message (CSRF or form fields changed?)"
+        return "error", "back on pgAdmin's login page without a flashed message (CSRF or form fields changed?)"
     return "error", f"HTTP {status} at {url[:90]}"
 
 
@@ -268,25 +299,48 @@ def node_red_checks(op, domain, p, user_role):
     editor token is never printed, and is revoked afterwards."""
     status, url, _ = fetch(op, f"https://{domain}/auth/strategy")
     parts = urllib.parse.urlsplit(url)
-    token = (urllib.parse.parse_qs(parts.query).get("access_token") or [None])[0]
+    # Node-RED (editor-api lib/auth/index.js) puts the raw base64 token in the query, not
+    # form-encoded: a '+' is part of the token. parse_qs would turn it into a space, and
+    # passport-http-bearer then answers 400 before any right is looked at. Read it the way
+    # the editor does (red.js: a regex, no '+' decoding); unquote leaves '+' alone.
+    m = re.search(r"(?:^|&)access_token=([^&]*)", parts.query)
+    token = urllib.parse.unquote(m.group(1)) if m else None
     if not token:
         return [f"{user_role:18} {domain:24} Node-RED's own sign-in gave no editor token (HTTP {status} at {parts.path})"]
     bearer = {"Authorization": f"Bearer {token}"}
     out = []
     code, _, body = fetch(op, f"https://{domain}/settings", headers=bearer)
     try:
-        got = (json.loads(body).get("user") or {}).get("permissions")
-    except ValueError:
-        got = f"HTTP {code}"
+        got = (json.loads(body).get("user") or {}).get("permissions") if code == 200 else None
+    except (ValueError, AttributeError):
+        got = None
+    if code != 200 or got is None:
+        # Without a token Node-RED takes, a later 401 proves nothing about the rights.
+        out.append(f"{user_role:18} {domain:24} editor token not accepted: HTTP {code} from /settings")
+        out.extend(node_red_revoke(op, domain, user_role, token, bearer, check_gone=False))
+        return out
     want = tools.node_red_permissions(p)["permissions"].get(user_role)
-    if sorted(got or []) != sorted(want or []):
-        out.append(f"{user_role:18} {domain:24} Node-RED editor rights {got}, the policy gives {want}")
+    if sorted(got) != sorted(want or []):
+        out.append(f"{user_role:18} {domain:24} Node-RED editor rights {sorted(got)}, the policy gives {want}")
     code, _, _ = fetch(op, f"https://{domain}/nodes", data=b'{"module":"__iam_probe__"}',
                        headers={**bearer, "Content-Type": "application/json"})
     if code != 401:
         out.append(f"{user_role:18} {domain:24} installing a palette module answered {code}, not 401 (packages.txt only)")
-    fetch(op, f"https://{domain}/auth/revoke", data=urllib.parse.urlencode({"token": token}).encode(), headers=bearer)
+    out.extend(node_red_revoke(op, domain, user_role, token, bearer, check_gone=True))
     return out
+
+
+def node_red_revoke(op, domain, user_role, token, bearer, check_gone):
+    """Revoke the editor token; a token left behind is a failure (it lasts the 8 h session)."""
+    code, _, _ = fetch(op, f"https://{domain}/auth/revoke", data=urllib.parse.urlencode({"token": token}).encode(),
+                       headers=bearer)
+    if code != 200:
+        return [f"{user_role:18} {domain:24} editor token not revoked (HTTP {code})"]
+    if check_gone:
+        code, _, _ = fetch(op, f"https://{domain}/settings", headers=bearer)
+        if code != 401:
+            return [f"{user_role:18} {domain:24} the revoked editor token still answers /settings with {code}, not 401"]
+    return []
 
 
 HUB_START = "/hub/login?next=%2Fhub%2Fhome"   # never /hub/ (redirect_to_server spawns)

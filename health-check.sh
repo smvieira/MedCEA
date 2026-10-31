@@ -112,11 +112,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         (any enabled account is at least Viewer); SKIP without the deployment"
     echo ""
     echo -e "  ${CYAN}iamworkbench${NC} the AI workbench's gate is the access policy's (IAM 3.2): NAMESPACE"
-    echo -e "         FAIL when the hub's deployed allowed_groups/admin_groups differ from the compiled"
-    echo -e "         ones, allow_all or admin_users is set, admin_access, delete_pvc or auth_state is on,"
-    echo -e "         the notebooks' NetworkPolicy allows private addresses, or the hub pod runs older"
-    echo -e "         values (./infra/deploy-workbench.sh); WARN while IAM_GATES=false; SKIP while"
-    echo -e "         WORKBENCH_ENABLED is not true or there is no hub"
+    echo -e "         FAIL when the hub's deployed allowed_groups differ from the compiled ones, hub"
+    echo -e "         role workbench-admin's scopes are not exactly the decided ones or its members not"
+    echo -e "         the compiled ones, anyone can hold the built-in admin role (admin_groups,"
+    echo -e "         admin_users, admin role members), allow_all is set, delete_pvc or auth_state is"
+    echo -e "         on, the notebooks' NetworkPolicy allows private addresses, or the hub pod runs"
+    echo -e "         older values (./infra/deploy-workbench.sh); WARN while IAM_GATES=false; SKIP"
+    echo -e "         while WORKBENCH_ENABLED is not true or there is no hub"
     echo ""
     echo -e "  ${CYAN}onboardroles${NC} the onboarding wizard admits the access policy's roles (IAM 3.4): -"
     echo -e "         FAIL when the running daemon's --required-role differs from policy_tool edge-wizard"
@@ -672,12 +674,17 @@ if not isinstance(v, dict):
     sys.exit(1)
 c = (v.get("hub") or {}).get("config") or {}
 a, g = c.get("Authenticator") or {}, c.get("GenericOAuthenticator") or {}
+lr = (v.get("hub") or {}).get("loadRoles") or {}
+wa, ad = lr.get("workbench-admin") or {}, lr.get("admin") or {}
 np = ((v.get("singleuser") or {}).get("networkPolicy") or {})
 eg = np.get("egressAllowRules") or {}
 out = {"allow_all": a.get("allow_all"), "admin_users": sorted(a.get("admin_users") or []),
        "existing": a.get("allow_existing_users"), "auth_state": a.get("enable_auth_state"),
-       "allowed": sorted(g.get("allowed_groups") or []), "admins": sorted(g.get("admin_groups") or []),
-       "key": g.get("auth_state_groups_key"), "admin_access": (c.get("JupyterHub") or {}).get("admin_access"),
+       "allowed": sorted(g.get("allowed_groups") or []), "admin_groups": sorted(g.get("admin_groups") or []),
+       "key": g.get("auth_state_groups_key"),
+       "role_scopes": sorted(wa.get("scopes") or []), "role_groups": sorted(wa.get("groups") or []),
+       "role_users": sorted(wa.get("users") or []),
+       "builtin_admins": ad.get("users") if isinstance(ad.get("users"), list) else "unpinned",
        "delete_pvc": (c.get("KubeSpawner") or {}).get("delete_pvc"),
        "netpol": np.get("enabled"), "private": eg.get("privateIPs"), "metadata": eg.get("cloudMetadataServer"),
        "egress": json.dumps(np.get("egress") or [], sort_keys=True, separators=(",", ":"))}
@@ -686,7 +693,24 @@ for k, x in out.items():
     declare -A L=()
     local k x
     while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
-    [[ "${L[admin_access]}" == false ]] || problems+=("admin_access is ${L[admin_access]}: a hub admin can open others' servers")
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"; then
+        _record FAIL "$name" "cannot read infra/lib-oauth2-proxy.sh"; return
+    fi
+    # Hub administration is the custom role workbench-admin (values.yaml hub.loadRoles);
+    # JupyterHub's built-in admin role carries tokens and access:servers (a token minted
+    # for a person opens their server) and nobody may hold it. admin_access is deprecated
+    # since JupyterHub 2.0 and does nothing, so it is not checked.
+    [[ "${L[admin_users]}" == "[]" ]] || problems+=("admin_users is set: they are admitted whatever the policy says and get the built-in admin role")
+    [[ "${L[admin_groups]}" == "[]" ]] || problems+=("admin_groups is set: its members get the built-in admin role (tokens, access:servers)")
+    [[ "${L[builtin_admins]}" == "[]" ]] || problems+=("the built-in admin role's members are ${L[builtin_admins]}, not pinned to [] (stored admin flags survive)")
+    local want_scopes forbidden
+    want_scopes="$(python3 -c 'import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))' "$WORKBENCH_ADMIN_ROLE_SCOPES")"
+    forbidden="$(python3 -c '
+import json, sys
+bad = set(json.loads(sys.argv[2]))
+print(" ".join(s for s in json.loads(sys.argv[1]) if s.split("!")[0] in bad))' "${L[role_scopes]}" "$WORKBENCH_ADMIN_ROLE_FORBIDDEN")"
+    [[ -z "$forbidden" ]] || problems+=("workbench-admin holds $forbidden: a hub admin can open others' servers")
+    [[ "${L[role_scopes]}" == "$want_scopes" ]] || problems+=("workbench-admin's scopes ${L[role_scopes]} are not the decided $want_scopes")
     [[ "${L[delete_pvc]}" == false ]] || problems+=("delete_pvc is ${L[delete_pvc]}: removing a hub user deletes the home")
     [[ "${L[auth_state]}" != true ]] || problems+=("enable_auth_state is true: a hub admin can read people's Keycloak tokens")
     [[ "${L[existing]}" != true ]] || problems+=("allow_existing_users is true: every user in the hub database gets in")
@@ -695,7 +719,7 @@ for k, x in out.items():
     # The notebooks' platform hops (IAM 3.2b): exactly the compiled ones, and none
     # unless IAM_POSTGREST_JWT and IAM_DB_ROLES are true (policy_workbench_egress).
     local WORKBENCH_EGRESS="" want_egress
-    if REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh" && REPO_ROOT="$SCRIPT_DIR" policy_workbench_egress 2>/dev/null; then
+    if REPO_ROOT="$SCRIPT_DIR" policy_workbench_egress 2>/dev/null; then
         want_egress="$(python3 -c 'import json, sys; print(json.dumps(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":"))))' "$WORKBENCH_EGRESS")"
         [[ "${L[egress]}" == "$want_egress" ]] \
             || problems+=("the notebooks' egress hops are not the compiled ones for this IAM_POSTGREST_JWT/IAM_DB_ROLES (./infra/deploy-workbench.sh)")
@@ -707,29 +731,34 @@ for k, x in out.items():
     pod="$($KUBECTL get pods -n "$ns" -l component=hub --field-selector=status.phase=Running \
         -o jsonpath='{range .items[*]}{.metadata.annotations.checksum/secret}{"\n"}{end}' 2>/dev/null | sort -u)"
     [[ -n "$tmpl" && "$pod" == "$tmpl" ]] || problems+=("the running hub pod does not carry the deployed values (rollout pending?)")
+    # workbench-admin's members are policy_workbench's in either mode: the compiled admin
+    # groups (IAM_GATES=true) or ADMIN_USER by name (IAM_GATES=false).
+    local WORKBENCH_ALLOWED_GROUPS="" WORKBENCH_ADMIN_GROUPS="" WORKBENCH_ALLOW_ALL="" WORKBENCH_HUBADMIN_USERS="" WORKBENCH_403_MESSAGE=""
+    if ! REPO_ROOT="$SCRIPT_DIR" policy_workbench 2>/dev/null; then
+        _record FAIL "$name" "cannot compile the workbench's gate (python3 apps/iam/compiler/cli.py check)"
+        return
+    fi
+    local sorted_json='import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))'
+    local want_admins want_hubadmins
+    want_admins="$(python3 -c "$sorted_json" "$WORKBENCH_ADMIN_GROUPS")"
+    want_hubadmins="$(python3 -c "$sorted_json" "$WORKBENCH_HUBADMIN_USERS")"
+    [[ "${L[role_groups]}" == "$want_admins" ]] || problems+=("workbench-admin's groups ${L[role_groups]} are not the compiled $want_admins")
+    [[ "${L[role_users]}" == "$want_hubadmins" ]] || problems+=("workbench-admin's users ${L[role_users]} are not $want_hubadmins")
     if [[ "${IAM_GATES:-true}" == "false" ]]; then
         if [[ ${#problems[@]} -eq 0 ]]; then
-            _record WARN "$name" "IAM_GATES=false: the workbench admits any realm account (pre-3.2 sign-in)"
+            _record WARN "$name" "IAM_GATES=false: the workbench admits any realm account (pre-3.2 sign-in); hub administrator $want_hubadmins (workbench-admin)"
         else
             local IFS=';'; _record FAIL "$name" "${problems[*]}"
         fi
         return
     fi
-    local WORKBENCH_ALLOWED_GROUPS="" WORKBENCH_ADMIN_GROUPS="" WORKBENCH_ALLOW_ALL="" WORKBENCH_ADMIN_USERS="" WORKBENCH_403_MESSAGE=""
-    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh" || ! REPO_ROOT="$SCRIPT_DIR" policy_workbench 2>/dev/null; then
-        _record FAIL "$name" "cannot compile the workbench's gate (python3 apps/iam/compiler/cli.py check)"
-        return
-    fi
-    local want_allowed want_admins
-    want_allowed="$(python3 -c 'import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))' "$WORKBENCH_ALLOWED_GROUPS")"
-    want_admins="$(python3 -c 'import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))' "$WORKBENCH_ADMIN_GROUPS")"
+    local want_allowed
+    want_allowed="$(python3 -c "$sorted_json" "$WORKBENCH_ALLOWED_GROUPS")"
     [[ "${L[allow_all]}" == false ]] || problems+=("allow_all is ${L[allow_all]}")
-    [[ "${L[admin_users]}" == "[]" ]] || problems+=("admin_users is set: OAuthenticator admits them whatever the policy says")
     [[ "${L[allowed]}" == "$want_allowed" ]] || problems+=("allowed_groups ${L[allowed]} is not the compiled $want_allowed (./infra/deploy-workbench.sh)")
-    [[ "${L[admins]}" == "$want_admins" ]] || problems+=("admin_groups ${L[admins]} is not the compiled $want_admins")
     [[ "${L[key]}" == '"oauth_user.groups"' ]] || problems+=("auth_state_groups_key is ${L[key]}")
     if [[ ${#problems[@]} -eq 0 ]]; then
-        _record OK "$name" "admits $want_allowed from the access policy; hub admins $want_admins without admin_access"
+        _record OK "$name" "admits $want_allowed from the access policy; hub administrators $want_admins hold workbench-admin (no tokens, no access:servers), nobody the built-in admin role"
     else
         local IFS=';'; _record FAIL "$name" "${problems[*]}"
     fi

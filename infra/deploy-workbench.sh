@@ -22,10 +22,13 @@
 #   - per-user notebook pods, spawned on demand and culled when idle
 #   - Keycloak directly via GenericOAuthenticator — no Dex in the middle
 #   - its gate compiled from the access policy (IAM 3.2, policy_workbench in
-#     infra/lib-oauth2-proxy.sh): allowed_groups and admin_groups from the
-#     research_workbench group's `tool:` block, admin_access false (a hub admin
-#     never opens another person's server), delete_pvc false (removing a hub user
-#     keeps the home). A policy that does not compile stops the deploy before helm;
+#     infra/lib-oauth2-proxy.sh): allowed_groups from the research_workbench
+#     group's `tool:` block; hub administration is the custom role workbench-admin
+#     (hub.loadRoles: admin page, list users, start/stop servers, remove hub users;
+#     never tokens or access:servers, so a hub admin never opens another person's
+#     server), held by the policy's admin groups; nobody holds JupyterHub's built-in
+#     admin role (admin_access is deprecated and does nothing); delete_pvc false
+#     (removing a hub user keeps the home). A policy that does not compile stops the deploy before helm;
 #     IAM_GATES=false renders the pre-policy sign-in (any realm account).
 #   - the existing nginx ingress, on the same hostname Kubeflow used
 #   - VS Code and real-time collaboration inside the user's own pod
@@ -118,9 +121,9 @@ fi
 # Fail closed: a policy that does not compile leaves the running hub as it is.
 policy_workbench || die "the access policy does not compile to the workbench's gate (python3 apps/iam/compiler/cli.py check)"
 if [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then
-    log "Gate: any realm account (IAM_GATES=false); hub admin: $ADMIN_USER"
+    log "Gate: any realm account (IAM_GATES=false); hub administrator (workbench-admin): $ADMIN_USER"
 else
-    log "Gate: $WORKBENCH_ALLOWED_GROUPS; hub admins: $WORKBENCH_ADMIN_GROUPS (from the access policy)"
+    log "Gate: $WORKBENCH_ALLOWED_GROUPS; hub administrators (workbench-admin): $WORKBENCH_ADMIN_GROUPS (from the access policy)"
 fi
 policy_workbench_egress || die "the access policy does not compile to the notebooks' network hops (python3 apps/iam/compiler/cli.py check)"
 # config.env is not enough: the documented order runs this (through ./deploy-infra.sh)
@@ -159,7 +162,7 @@ log "Example notebooks: ~/medcea-examples (read-only) in every server"
 
 render "$REPO_ROOT/k8s/workbench/values.yaml" WORKBENCH_SECRET WORKBENCH_DOMAIN KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
     WORKBENCH_IMAGE_NAME WORKBENCH_IMAGE_TAG WORKBENCH_STORAGE WORKBENCH_NOTEBOOK_REPO WORKBENCH_EGRESS \
-    WORKBENCH_ALLOW_ALL WORKBENCH_ADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE > "$VALUES"
+    WORKBENCH_ALLOW_ALL WORKBENCH_HUBADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE > "$VALUES"
 
 $HELM upgrade --install workbench jupyterhub/jupyterhub \
   --version "$CHART_VERSION" \

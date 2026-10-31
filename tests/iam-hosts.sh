@@ -25,9 +25,11 @@
 #   reach    some enabled account holds a role the policy gives a Grafana role
 # The AI workbench [tool (JupyterHub …)] (WORKBENCH_DOMAIN, IAM 3.2):
 #   gate     the hub's deployed values (Secret hub, read on stdin) carry allow_all false,
-#            admin_users [], allowed_groups/admin_groups equal to `policy_workbench`,
-#            admin_access false, delete_pvc false, no auth_state (IAM_GATES=false:
-#            allow_all true); SKIP while WORKBENCH_ENABLED is not true
+#            allowed_groups equal to `policy_workbench`, hub role workbench-admin with
+#            exactly WORKBENCH_ADMIN_ROLE_SCOPES and the compiled admin groups (IAM_GATES
+#            =false: allow_all true, ADMIN_USER as its one user), nobody in the built-in
+#            admin role (admin_users [], no admin_groups, its members pinned to []),
+#            delete_pvc false, no auth_state; SKIP while WORKBENCH_ENABLED is not true
 #   live     the running hub pod carries the Deployment's checksum/secret
 #   notebooks (IAM 3.2b) the singleuser egress equals `policy_workbench_egress` (Keycloak
 #            and config-api only while IAM_POSTGREST_JWT and IAM_DB_ROLES are true, else
@@ -172,7 +174,7 @@ print(max((m.get("time", "") for m in mf if m.get("subresource") != "status"), d
 # JupyterHub signs people in itself (IAM 3.2): its gate is the hub's own settings.
 check_workbench() {
     local host="$1" roles="$2" live k x
-    local WORKBENCH_ALLOW_ALL WORKBENCH_ADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE WORKBENCH_EGRESS
+    local WORKBENCH_ALLOW_ALL WORKBENCH_HUBADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE WORKBENCH_EGRESS
     if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then skip gate "WORKBENCH_ENABLED is not true"; return; fi
     policy_workbench 2>/dev/null || { fail gate "policy_workbench failed (cli.py check)"; return; }
     # the values hold the client secret: parsed on stdin, only the gate's fields printed
@@ -184,10 +186,15 @@ if not isinstance(v, dict):
     sys.exit(1)
 c = v["hub"]["config"]
 a, g = c.get("Authenticator") or {}, c.get("GenericOAuthenticator") or {}
-for k, x in (("allow_all", a.get("allow_all")), ("admin_users", sorted(a.get("admin_users") or [])),
-             ("allowed", sorted(g.get("allowed_groups") or [])), ("admins", sorted(g.get("admin_groups") or [])),
-             ("safe", (c.get("JupyterHub") or {}).get("admin_access") is False
-                      and (c.get("KubeSpawner") or {}).get("delete_pvc") is False
+lr = v["hub"].get("loadRoles") or {}
+wa, ad = lr.get("workbench-admin") or {}, lr.get("admin") or {}
+# nobody holds the built-in admin role: no admin_users, no admin_groups, its members pinned to []
+nobody = not a.get("admin_users") and not g.get("admin_groups") and ad.get("users") == []
+for k, x in (("allow_all", a.get("allow_all")), ("nobody_admin", nobody),
+             ("allowed", sorted(g.get("allowed_groups") or [])),
+             ("role_scopes", sorted(wa.get("scopes") or [])), ("role_groups", sorted(wa.get("groups") or [])),
+             ("role_users", sorted(wa.get("users") or [])),
+             ("safe", (c.get("KubeSpawner") or {}).get("delete_pvc") is False
                       and a.get("enable_auth_state") is not True)):
     print(f"{k}\t{json.dumps(x)}")
 s = v.get("singleuser") or {}
@@ -203,19 +210,23 @@ print("envsecret\t" + json.dumps(sorted(n for n in names if any(w in n.upper() f
     while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
     local sorted_list='import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))'
     if [[ "${L[safe]}" != true ]]; then
-        fail gate "admin_access, delete_pvc or enable_auth_state is not as deployed by IAM 3.2"
+        fail gate "delete_pvc or enable_auth_state is not as deployed by IAM 3.2"
+    elif [[ "${L[nobody_admin]}" != true ]]; then
+        fail gate "someone can hold JupyterHub's built-in admin role (admin_users, admin_groups or its members not pinned to []): it mints tokens that open others' servers"
+    elif [[ "${L[role_scopes]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ADMIN_ROLE_SCOPES")" ]]; then
+        fail gate "workbench-admin's scopes are ${L[role_scopes]}, decided $WORKBENCH_ADMIN_ROLE_SCOPES"
     elif [[ "${L[allow_all]}" != "$WORKBENCH_ALLOW_ALL" ]]; then
         fail gate "allow_all is ${L[allow_all]}, want $WORKBENCH_ALLOW_ALL"
-    elif [[ "${L[admin_users]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ADMIN_USERS")" ]]; then
-        fail gate "admin_users is ${L[admin_users]}, want $WORKBENCH_ADMIN_USERS"
     elif [[ "${L[allowed]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ALLOWED_GROUPS")" ]]; then
         fail gate "allowed_groups is ${L[allowed]}, the policy compiles $WORKBENCH_ALLOWED_GROUPS"
-    elif [[ "${L[admins]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ADMIN_GROUPS")" ]]; then
-        fail gate "admin_groups is ${L[admins]}, the policy compiles $WORKBENCH_ADMIN_GROUPS"
+    elif [[ "${L[role_groups]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ADMIN_GROUPS")" ]]; then
+        fail gate "workbench-admin's groups are ${L[role_groups]}, the policy compiles $WORKBENCH_ADMIN_GROUPS"
+    elif [[ "${L[role_users]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_HUBADMIN_USERS")" ]]; then
+        fail gate "workbench-admin's users are ${L[role_users]}, want $WORKBENCH_HUBADMIN_USERS"
     elif [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then
-        pass gate "IAM_GATES=false: any realm account, $ADMIN_USER hub admin"
+        pass gate "IAM_GATES=false: any realm account, $ADMIN_USER hub administrator (workbench-admin)"
     else
-        pass gate "admits $(roles_of "${L[allowed]}"); hub admins $(roles_of "${L[admins]}")"
+        pass gate "admits $(roles_of "${L[allowed]}"); hub administrators (workbench-admin) $(roles_of "${L[role_groups]}")"
     fi
 
     local tmpl pod

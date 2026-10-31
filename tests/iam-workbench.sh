@@ -6,9 +6,15 @@
 # test-bio-<random> (bio_scientist), each with a random password, verified e-mail and
 # person_id — and deletes them on exit, also on Ctrl-C or failure. tests/iam_workbench_flow.py
 # signs them in the way a browser does and checks, through the hub's own API:
-#   W1 bio starts its own server; W2 admin is a hub admin (admin page, user list), bio not;
-#   W3 admin's requests to bio's server never answer 200 there; W4 a token the admin mints
-#   for bio does not open bio's server; W9 bio's user model shows the admin no stored token;
+#   W1 bio starts its own server; W2 admin holds the hub role workbench-admin, read from
+#   its effective scopes (admin-ui, list:users, read:users, servers, delete:users; the role
+#   comes through the hub group, which /hub/api/user's "roles" does not list), and no
+#   token, server-access or sharing scope over others, nobody is a
+#   built-in hub admin, bio is refused /hub/admin; W3 admin's GET of bio's lab ends 403 at
+#   the hub's authorize step (its consent page would be access, so a 200 there FAILS);
+#   W4 the hub refuses (403) to mint a token for bio and to change bio's record, and
+#   refuses (403 or 404: the hub's 404 when the admin holds the scope only for itself)
+#   to show bio's tokens and shares; W9 bio's user model shows the admin no stored token;
 #   W5 admin stops bio's server; W6 admin removes hub user bio, and its home volume is kept.
 # Then W7: bio's realm role is removed and a fresh sign-in gets the hub's 403 naming the
 # roles; W8: bio's account is disabled and a fresh sign-in does not get in. (A session
@@ -22,7 +28,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 

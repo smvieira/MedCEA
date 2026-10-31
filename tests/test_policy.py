@@ -284,7 +284,7 @@ class ToolsTest(unittest.TestCase):
             self.assertLessEqual(set(lv), p.closure(reaches.get(g, [])), g)
 
     def test_jupyterhub_groups(self):
-        """IAM 3.2: allowed_groups is the host's gate, admin_groups the holders of K."""
+        """IAM 3.2: allowed_groups is the host's gate, admin_groups the holders of K (hub role workbench-admin)."""
         p = self.policy
         self.assertEqual(tools.groups(p, "jupyterhub"), ["research_workbench"])
         allowed = tools.jupyterhub_groups(p, "allowed_groups")
@@ -1309,13 +1309,18 @@ class WiringTest(unittest.TestCase):
     def test_workbench_wiring(self):
         """IAM 3.2: JupyterHub's gate is rendered from the policy and fails closed."""
         values = self.read("k8s/workbench/values.yaml")
-        for line in ("allow_all: ${WORKBENCH_ALLOW_ALL}", "admin_users: ${WORKBENCH_ADMIN_USERS}",
-                     "allowed_groups: ${WORKBENCH_ALLOWED_GROUPS}", "admin_groups: ${WORKBENCH_ADMIN_GROUPS}",
-                     "custom_403_message: ${WORKBENCH_403_MESSAGE}", "admin_access: false",
+        for line in ("allow_all: ${WORKBENCH_ALLOW_ALL}", "admin_users: []",
+                     "allowed_groups: ${WORKBENCH_ALLOWED_GROUPS}", "groups: ${WORKBENCH_ADMIN_GROUPS}",
+                     "users: ${WORKBENCH_HUBADMIN_USERS}", "loadRoles:", "workbench-admin:",
+                     "scopes: [admin-ui, list:users, read:users, servers, delete:users]",
+                     "custom_403_message: ${WORKBENCH_403_MESSAGE}",
                      'auth_state_groups_key: "oauth_user.groups"', "delete_pvc: false",
                      "allow_existing_users: false", "enable_auth_state: false", "oauth_token_expires_in: 3600"):
             self.assertIn(line, values)
-        self.assertNotIn("${ADMIN_USER}", values)   # admin_users is the gate's, never a fixed account
+        self.assertNotIn("${ADMIN_USER}", values)   # the hub administrator comes from policy_workbench
+        code = "\n".join(l.split("#")[0] for l in values.splitlines())   # comments may name them
+        self.assertNotIn("admin_groups:", code)      # it would give the built-in admin role (tokens)
+        self.assertNotIn("load_roles", code)         # hub.loadRoles keeps the chart's idle-culler role
         src = self.read("infra/deploy-workbench.sh")
         self.assertIn("policy_workbench || die", src)
         self.assertLess(src.index("policy_workbench || die"), src.index("upgrade --install workbench"))

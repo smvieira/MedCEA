@@ -1,9 +1,32 @@
 hub:
+  # Hub administration (IAM 3.2: K is administration, not content) is the custom role
+  # workbench-admin, never JupyterHub's built-in `admin` role: that one carries tokens
+  # (mint a token for any user, which opens their server), access:servers and shares,
+  # and its scopes cannot be changed. hub.loadRoles, not hub.config.JupyterHub.load_roles:
+  # the chart appends these to its own list, which holds the idle culler's role.
+  loadRoles:
+    workbench-admin:
+      description: "Hub administration (IAM 3.2, K): admin page, list users, start and stop servers, remove hub users; never open a server"
+      # Exactly these (health-check iamworkbench, tests/iam-hosts.sh and
+      # tests/test_workbench_render.py compare them with WORKBENCH_ADMIN_ROLE_SCOPES in
+      # infra/lib-oauth2-proxy.sh). Never tokens, access:servers, shares, admin:users
+      # (it could PATCH itself admin), groups or admin:auth_state. `servers` starts and
+      # stops; a start's user_options are ignored (KubeSpawner has no profile_list here).
+      scopes: [admin-ui, list:users, read:users, servers, delete:users]
+      # The policy's compiled admin groups (IAM_GATES=true; hub groups follow the
+      # Keycloak groups claim at every sign-in, manage_groups) or, IAM_GATES=false,
+      # [ADMIN_USER] (policy_workbench in infra/lib-oauth2-proxy.sh).
+      groups: ${WORKBENCH_ADMIN_GROUPS}
+      users: ${WORKBENCH_HUBADMIN_USERS}
+    admin:
+      # The built-in role, its scopes unchanged: nobody holds it. An exact (empty) member
+      # list makes the hub strip a stored admin=True from every user at start.
+      users: []
   config:
     JupyterHub:
       authenticator_class: generic-oauth
-      # A hub admin lists, starts and stops servers and removes hub users; it never opens
-      # another person's server or notebook (IAM 3.2: K is administration, not content).
+      # DEPRECATED since JupyterHub 2.0 and without effect: the scopes of a user's roles
+      # decide (workbench-admin above). Kept false only so no reader takes it for on.
       admin_access: false
       # A session lasts an hour, then the sign-in runs again through Keycloak (silent while
       # the Keycloak session lives) and the groups are checked again: a role removal or a
@@ -13,14 +36,17 @@ hub:
       oauth_token_expires_in: 3600
     Authenticator:
       # The gate (infra/lib-oauth2-proxy.sh policy_workbench): IAM_GATES=true renders
-      # allow_all false, admin_users [] and the groups compiled from the access policy;
-      # IAM_GATES=false the pre-policy sign-in (any realm account, ADMIN_USER hub admin).
+      # allow_all false and the groups compiled from the access policy; IAM_GATES=false
+      # the pre-policy sign-in (any realm account, ADMIN_USER holds workbench-admin).
       allow_all: ${WORKBENCH_ALLOW_ALL}
-      admin_users: ${WORKBENCH_ADMIN_USERS}
+      # Always empty in both modes: admin_users would be admitted whatever the groups say
+      # and would get the built-in admin role.
+      admin_users: []
       # Never true: it would admit every user already in the hub's database.
       allow_existing_users: false
-      # No auth_state is stored: with it, a hub admin (admin:users) could read every
-      # person's Keycloak tokens. The groups are checked at each sign-in instead.
+      # No auth_state is stored: with it, anyone holding admin:auth_state could read every
+      # person's Keycloak tokens (workbench-admin does not). The groups are checked at
+      # each sign-in instead.
       enable_auth_state: false
       # No "Sign in with Keycloak" page: straight to the platform login.
       auto_login: true
@@ -36,13 +62,13 @@ hub:
       # `groups` is a default client scope of client workbench, so the claim arrives
       # in the userinfo response without being requested.
       scope: ["openid", "profile", "email"]
-      # OAuthenticator 17 (hub image k8s-hub 4.4.1): allowed_groups, admin_groups and
+      # OAuthenticator 17 (hub image k8s-hub 4.4.1): allowed_groups and
       # auth_state_groups_key need manage_groups. The groups come from this sign-in's
-      # auth_model (in memory), so enable_auth_state stays false.
+      # auth_model (in memory), so enable_auth_state stays false. No admin_groups: it
+      # would give the built-in admin role (workbench-admin above is held by group).
       manage_groups: true
       auth_state_groups_key: "oauth_user.groups"
       allowed_groups: ${WORKBENCH_ALLOWED_GROUPS}
-      admin_groups: ${WORKBENCH_ADMIN_GROUPS}
       custom_403_message: ${WORKBENCH_403_MESSAGE}
     KubeSpawner:
       # Removing a hub user (admin page) keeps the person's home volume claim-<name>

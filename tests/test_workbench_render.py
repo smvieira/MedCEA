@@ -4,9 +4,15 @@
 
 policy_workbench (infra/lib-oauth2-proxy.sh) is run in bash, then k8s/workbench/values.yaml
 is filled with lib-render.sh's `render` exactly as the deploy does, and the result parsed:
-  IAM_GATES=true   allow_all false, admin_users [], the two lists `cli.py compile
-                   jupyterhub` prints, admin_access false, delete_pvc false, the 403 text
-  IAM_GATES=false  allow_all true, admin_users [ADMIN_USER], still admin_access false
+  IAM_GATES=true   allow_all false, allowed_groups and the hub role workbench-admin's
+                   groups the two lists `cli.py compile jupyterhub` prints, its users [],
+                   delete_pvc false, the 403 text
+  IAM_GATES=false  allow_all true, workbench-admin held by ADMIN_USER alone
+Either way nobody holds JupyterHub's built-in admin role (Authenticator.admin_users [],
+no admin_groups, hub.loadRoles.admin.users []) and workbench-admin's scopes are exactly
+the decided ones (WORKBENCH_ADMIN_ROLE_SCOPES): no tokens, access:servers, shares,
+admin:users, groups or admin:auth_state. The roles are in hub.loadRoles, never in
+hub.config.JupyterHub.load_roles (which would drop the chart's idle-culler role).
 Either way no ${VAR} is left but the postStart command's $HOME, $ATTRS and $HOOKS, which
 must reach the pod.
 A cli.py that fails, or prints [], makes policy_workbench return 1 (the deploy dies
@@ -36,8 +42,12 @@ import yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY = os.path.join(REPO, "infra", "deploy-workbench.sh")
-VARS = ["WORKBENCH_ALLOW_ALL", "WORKBENCH_ADMIN_USERS", "WORKBENCH_ALLOWED_GROUPS",
+VARS = ["WORKBENCH_ALLOW_ALL", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_ALLOWED_GROUPS",
         "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_403_MESSAGE"]
+# The decided abilities of the hub administrator (decision record, compliance chapter).
+ADMIN_SCOPES = ["admin-ui", "delete:users", "list:users", "read:users", "servers"]
+NEVER = {"tokens", "read:tokens", "access:servers", "shares", "users:shares", "admin:users",
+         "groups", "admin:groups", "admin:auth_state", "admin:servers", "admin:server_state"}
 
 
 def render_list():
@@ -62,6 +72,13 @@ def run(gates, repo_root=REPO, jwt="false", db_roles="false"):
     return r.returncode, r.stdout if r.returncode == 0 else r.stderr
 
 
+def lib_constant(name):
+    """A JSON constant of infra/lib-oauth2-proxy.sh, as bash sees it."""
+    r = subprocess.run(["bash", "-c", f'REPO_ROOT="{REPO}"; source "{REPO}/infra/lib-oauth2-proxy.sh"; printf %s "${name}"'],
+                       capture_output=True, text=True, check=True)
+    return json.loads(r.stdout)
+
+
 def compiled(setting):
     out = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"),
                           "compile", "jupyterhub", "--setting", setting], capture_output=True, text=True, check=True)
@@ -78,7 +95,21 @@ class RenderTest(unittest.TestCase):
     def check_common(self, text):
         v = yaml.safe_load(text)
         hub = v["hub"]["config"]
-        self.assertIs(hub["JupyterHub"]["admin_access"], False)
+        # admin_access is deprecated since JupyterHub 2.0 and does nothing; if present it
+        # stays false so no reader takes it for on. The roles below are what decides.
+        self.assertIs(hub["JupyterHub"].get("admin_access", False), False)
+        self.assertNotIn("load_roles", hub["JupyterHub"], "load_roles would replace the chart's idle-culler role")
+        self.assertEqual(hub["Authenticator"]["admin_users"], [])
+        self.assertNotIn("admin_groups", hub["GenericOAuthenticator"], "admin_groups gives the built-in admin role")
+        roles = v["hub"]["loadRoles"]
+        self.assertEqual(set(roles), {"workbench-admin", "admin"})
+        self.assertEqual(roles["admin"], {"users": []}, "the built-in admin role: scopes untouched, nobody holds it")
+        wa = roles["workbench-admin"]
+        self.assertEqual(sorted(wa["scopes"]), ADMIN_SCOPES)
+        self.assertEqual(sorted(wa["scopes"]), lib_constant("WORKBENCH_ADMIN_ROLE_SCOPES"))
+        self.assertFalse({x.split("!")[0] for x in wa["scopes"]} & NEVER)
+        self.assertLessEqual(set(lib_constant("WORKBENCH_ADMIN_ROLE_FORBIDDEN")), NEVER)
+        self.assertEqual(set(wa) - {"description", "scopes", "groups", "users"}, set())
         self.assertEqual(hub["JupyterHub"]["oauth_token_expires_in"], 3600)
         self.assertIs(hub["KubeSpawner"]["delete_pvc"], False)
         self.assertIs(hub["Authenticator"]["allow_existing_users"], False)
@@ -97,11 +128,12 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         hub = self.check_common(out)
         self.assertIs(hub["Authenticator"]["allow_all"], False)
-        self.assertEqual(hub["Authenticator"]["admin_users"], [])
         g = hub["GenericOAuthenticator"]
         self.assertEqual(g["allowed_groups"], compiled("allowed_groups"))
-        self.assertEqual(g["admin_groups"], compiled("admin_groups"))
-        self.assertEqual(g["admin_groups"], ["admin"])
+        wa = yaml.safe_load(out)["hub"]["loadRoles"]["workbench-admin"]
+        self.assertEqual(wa["groups"], compiled("admin_groups"))
+        self.assertEqual(wa["groups"], ["admin"])
+        self.assertEqual(wa["users"], [])
         msg = g["custom_403_message"]
         self.assertTrue(msg.startswith("No access to AI Workbench. It is open to: "), msg)
         self.assertIn("System Administrator", msg)
@@ -113,9 +145,10 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         hub = self.check_common(out)
         self.assertIs(hub["Authenticator"]["allow_all"], True)
-        self.assertEqual(hub["Authenticator"]["admin_users"], ["boss"])
         self.assertEqual(hub["GenericOAuthenticator"]["allowed_groups"], [])
-        self.assertEqual(hub["GenericOAuthenticator"]["admin_groups"], [])
+        wa = yaml.safe_load(out)["hub"]["loadRoles"]["workbench-admin"]
+        self.assertEqual(wa["groups"], [])
+        self.assertEqual(wa["users"], ["boss"], "IAM_GATES=false: ADMIN_USER holds workbench-admin, not the built-in admin")
 
     def singleuser(self, **kw):
         rc, out = run("true", **kw)

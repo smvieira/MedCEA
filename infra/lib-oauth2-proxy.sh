@@ -64,19 +64,21 @@ policy_grafana() {
 #
 # JupyterHub signs people in itself, so the AI workbench's gate is its own setting
 # (IAM 3.2), compiled from the research_workbench group's `tool:` block. Sets, for
-# k8s/workbench/values.yaml: WORKBENCH_ALLOW_ALL (false), WORKBENCH_ADMIN_USERS ([]:
-# OAuthenticator admits admin_users whatever the groups say), WORKBENCH_ALLOWED_GROUPS
-# and WORKBENCH_ADMIN_GROUPS (["a", "b"]) and WORKBENCH_403_MESSAGE (the refusal text,
-# a JSON string: "No access to <service>", the roles, the portal). IAM_GATES=false
-# renders the pre-3.2 authentication: any realm account, ADMIN_USER the hub admin.
+# k8s/workbench/values.yaml: WORKBENCH_ALLOW_ALL (false), WORKBENCH_ALLOWED_GROUPS and
+# WORKBENCH_ADMIN_GROUPS (["a", "b"]: the members of the hub role workbench-admin),
+# WORKBENCH_HUBADMIN_USERS ([]: the role's members by name) and WORKBENCH_403_MESSAGE
+# (the refusal text, a JSON string: "No access to <service>", the roles, the portal).
+# IAM_GATES=false renders the pre-3.2 authentication: any realm account, ADMIN_USER the
+# only holder of workbench-admin. Nobody gets JupyterHub's built-in admin role in either
+# mode (Authenticator.admin_users and the admin role's members are [] in values.yaml).
 # A broken policy or an empty list returns 1 and changes nothing: the caller never
 # falls back to allow_all.
 policy_workbench() {
     local cli="$REPO_ROOT/apps/iam/compiler/cli.py" desc
     if [[ "${IAM_GATES:-true}" == "false" ]]; then
-        echo -e "\033[0;33mWARNING: IAM_GATES=false — the AI workbench admits any realm account; ${ADMIN_USER} is hub admin.\033[0m" >&2
+        echo -e "\033[0;33mWARNING: IAM_GATES=false — the AI workbench admits any realm account; ${ADMIN_USER} is hub administrator (workbench-admin).\033[0m" >&2
         WORKBENCH_ALLOW_ALL=true WORKBENCH_ALLOWED_GROUPS='[]' WORKBENCH_ADMIN_GROUPS='[]'
-        WORKBENCH_ADMIN_USERS="$(python3 -c 'import json, sys; print(json.dumps([sys.argv[1]]))' "${ADMIN_USER:?}")"
+        WORKBENCH_HUBADMIN_USERS="$(python3 -c 'import json, sys; print(json.dumps([sys.argv[1]]))' "${ADMIN_USER:?}")"
         WORKBENCH_403_MESSAGE='"No access to AI Workbench. Ask an administrator."'
         return 0
     fi
@@ -89,8 +91,15 @@ import html, json, sys
 service, roles = html.unescape(sys.argv[1]).split("\t", 1)
 print(json.dumps(f"No access to {service}. It is open to: {roles}. Ask an administrator for one of "
                  f"these roles. The platform portal: https://{sys.argv[2]}/"))' "$desc" "${PORTAL_DOMAIN:-}")" || return 1
-    WORKBENCH_ALLOW_ALL=false WORKBENCH_ADMIN_USERS='[]'
+    WORKBENCH_ALLOW_ALL=false WORKBENCH_HUBADMIN_USERS='[]'
 }
+
+# The scopes of the hub role workbench-admin, exactly as k8s/workbench/values.yaml
+# writes them (sorted JSON): what health-check iamworkbench, tests/iam-hosts.sh and
+# tests/test_workbench_render.py compare the deployed role with. Decided in the
+# manual's decision record; WORKBENCH_ADMIN_ROLE_FORBIDDEN never appears in them.
+WORKBENCH_ADMIN_ROLE_SCOPES='["admin-ui", "delete:users", "list:users", "read:users", "servers"]'
+WORKBENCH_ADMIN_ROLE_FORBIDDEN='["access:servers", "admin:auth_state", "admin:users", "groups", "shares", "tokens"]'
 
 #   policy_workbench_egress || exit 1
 #

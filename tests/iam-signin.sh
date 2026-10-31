@@ -4,7 +4,9 @@
 # moved here from Phase 0).
 #
 # Creates one throwaway account per role in realm $KEYCLOAK_REALM — test-<role>-<random>,
-# with a first and last name, test-…@$PROJECT_NAME.invalid (verified), its own person_id
+# with a first and last name, test-…@$PROJECT_NAME.example.org (verified; an RFC 2606
+# example domain, never delivered: pgAdmin's e-mail validator refuses the special-use
+# .invalid when it creates the admin's OAuth2 user), its own person_id
 # and a random password, so Keycloak asks for nothing before signing in — and deletes them
 # all on exit, also on Ctrl-C or failure. tests/iam_signin_flow.py then signs each one in
 # the way a browser does (host → Keycloak's form → the proxy's callback), so this tests the
@@ -30,7 +32,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -90,7 +92,7 @@ USERS_JSON="["
 for role in $ROLES none; do
     user="test-${role//_/-}-$SUFFIX"
     pass="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
-    body="$(U="$user" P="$pass" E="$user@${PROJECT_NAME}.invalid" ROLE="$role" python3 -c '
+    body="$(U="$user" P="$pass" E="$user@${PROJECT_NAME}.example.org" ROLE="$role" python3 -c '
 import json, os
 print(json.dumps({"username": os.environ["U"], "enabled": True, "emailVerified": True,
     "email": os.environ["E"], "firstName": "Test", "lastName": os.environ["ROLE"],

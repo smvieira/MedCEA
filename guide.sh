@@ -798,7 +798,7 @@ recipe() {
             STEPS=("set IAM_GATES true" "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("The User Manager widens beyond admin only once every access pod proves it enforces (the access deploy checks)."
                    "Grafana's role setting comes from the policy again (Editor: engineer; Viewer: roles holding R on dashboards; others cannot sign in); the grafana_* roles are retired."
-                   "The AI workbench admits the roles the policy compiles; the hub admin cannot open others' servers. It is redeployed by ./deploy-infra.sh (WORKBENCH_ENABLED=true)."
+                   "The AI workbench admits the roles the policy compiles; the hub administrator (role workbench-admin) cannot open others' servers or mint their tokens. It is redeployed by ./deploy-infra.sh (WORKBENCH_ENABLED=true)."
                    "Device onboarding admits the policy's roles (engineer, maintenance) and pgAdmin admin; ./deploy-apps.sh --all restarts the onboarding wizard and refuses while a flash run is active."
                    "Verify: tests/iam-hosts.sh (Grafana's role setting, the AI workbench, the wizard and pgAdmin included), tests/iam-workbench.sh and ./health-check.sh (Grafana roles, AI Workbench gate, Onboarding roles, pgAdmin roles)") ;;
         IAM_GATES:rollback)
@@ -808,7 +808,7 @@ recipe() {
                    "Node-RED and the MQTT Explorer keep their compiled list (engineer): they reach telemetry and device control. Node-RED's editor keeps its rights from the policy (adminAuth)."
                    "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every other gated host until IAM_GATES is true again."
                    "Grafana goes back to any enabled account (at least Viewer); the grafana_* roles are re-created, so Editor/Admin only for the built-in accounts that still exist."
-                   "The AI workbench goes back to any realm account, with ADMIN_USER as hub admin (it still cannot open others' servers, and removing a hub user still keeps the home)."
+                   "The AI workbench goes back to any realm account, with ADMIN_USER as hub administrator through the workbench-admin role (it still cannot open others' servers, and removing a hub user still keeps the home)."
                    "Device onboarding goes back to EDGE_WIZARD_ROLE (empty: any signed-in account may erase and flash a board); pgAdmin stays admin only.") ;;
         IAM_NETPOL:enable)
             PRE=("Every caller of an application pod is listed under network: in apps/iam/policy/defaults.yaml (an unlisted caller times out).")

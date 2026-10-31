@@ -144,12 +144,12 @@ levels:
       Administrative settings without the content the tool holds, with one exception
       that is stated rather than hidden: on accounts (idp) administering means reading and
       changing account records, which are personal data. On the AI workbench K is hub
-      administration with admin_access disabled, so an administrator cannot enter other
-      people's notebook servers. Held only by admin (invariant I13); on regulated or
+      administration through the hub role workbench-admin, which holds no token or server
+      access scope, so an administrator cannot enter other people's notebook servers. Held only by admin (invariant I13); on regulated or
       history data K never compiles to a privilege (invariant I2).
     meaning:
       api: admin routes of the group
-      ui: admitted to the host; tool administration (JupyterHub admin without admin_access)
+      ui: admitted to the host; tool administration (JupyterHub role workbench-admin, never the built-in admin)
       idp: read, create, change and deactivate accounts and their roles (every grant confirmed by qa)
       infra: run the locked host scripts (break-glass, see break_glass)
   D:
@@ -1164,14 +1164,15 @@ resource_groups:
       kind: jupyterhub
       host: WORKBENCH_DOMAIN
       settings:                       # first match wins
-        - {setting: admin, levels: [K]}    # JupyterHub admin_groups (admin_access false)
+        - {setting: admin, levels: [K]}    # the groups of hub role workbench-admin
         - {setting: user, levels: [R]}     # allowed_groups: every role given a setting
       otherwise: refuse               # allow_all false: no setting, no sign-in
       help: >
         The AI workbench admits the roles holding a level here, and nobody else. K makes
-        the role a hub administrator: it lists, starts and stops servers and removes hub
-        users, but cannot open a server or notebook (admin_access false), and removing a hub
-        user keeps the home volume (delete_pvc false). JupyterHub has no read-only mode, so
+        the role a hub administrator (hub role workbench-admin): it opens the admin page,
+        lists users, starts and stops servers and removes hub users, but cannot open a
+        server or notebook, mint a token or share a server (no tokens, access:servers or
+        shares scope), and removing a hub user keeps the home volume (delete_pvc false). JupyterHub has no read-only mode, so
         R admits to a full notebook server.
 
   platform_admin:

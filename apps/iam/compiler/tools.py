@@ -86,7 +86,8 @@ def grafana_role_path(p):
 
 def jupyterhub_groups(p, which):
     """JupyterHub's allowed_groups (every role given a setting: the host's gate) or
-    admin_groups (the roles given `admin`), sorted. allowed_groups is never empty:
+    admin_groups (the roles given `admin`: the members of the hub role workbench-admin,
+    k8s/workbench/values.yaml hub.loadRoles; never OAuthenticator's admin_groups), sorted. allowed_groups is never empty:
     allow_all false would then lock everyone out."""
     given = settings(p, _one(p, "jupyterhub"))
     if which == "allowed_groups":
