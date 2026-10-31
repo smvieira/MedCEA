@@ -805,6 +805,27 @@
     </div>
   </div>
 
+  <!-- ══ COMMISSIONING MODAL (propose on / end / withdraw) ══════ -->
+  <div class="modal-bg" id="comm-modal-bg" onclick="if(event.target===this)closeCommModal()">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-hdr">
+        <span class="modal-title" id="comm-modal-title">Commissioning</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeCommModal()" style="padding:4px 10px">✕</button>
+      </div>
+      <p id="comm-modal-text" style="margin-bottom:12px;font-size:.85rem"></p>
+      <div class="fg full">
+        <label id="comm-reason-label">Reason</label>
+        <textarea id="comm-reason" maxlength="500" rows="3"></textarea>
+      </div>
+      <div class="form-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="closeCommModal()">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" id="comm-submit-btn" onclick="submitCommModal()">Propose</button>
+      </div>
+      <p class="appr-label">Recorded with your name, role and the reason (medcea.pending_change; the tamper-evident policy history when the flag changes).</p>
+    </div>
+  </div>
+
   <!-- ══ PARAMETER SET MODAL ══════════════════════════════════ -->
   <div class="modal-bg" id="ps-modal-bg" onclick="if(event.target===this)closeParamSetModal()">
     <div class="modal" style="max-width:640px">
@@ -1004,6 +1025,7 @@
   <script>
     const API = '/api';
     let locations = [], units = [], unitZoneCounts = {};
+    let unitComm = null;   // unit_id → medcea.unit_commissioning() row; null: read-only fallback
     let editLocId = null, editUnitId = null;
     let zoneModal    = { unitId: null, zoneId: null };
     let deviceModal  = { deviceId: null };
@@ -1376,6 +1398,148 @@
     }
     /* approvals-logic:end */
 
+    /* commissioning-logic:begin */
+    // Pure functions (no DOM, no fetch) for the Units tab's commissioning (test mode)
+    // column; tests/test_config_ui_commissioning.py runs this block under node, with
+    // the approvals-logic block. Every right comes from medcea.unit_commissioning()
+    // (can_propose, can_approve, can_read_history, pending_mine), advisory: the
+    // database decides at proposal, approval, return and withdrawal.
+    const COMM_FALLBACK_NOTE = 'Commissioning changes need the database\'s enforcement (IAM_DB_ROLES=true); shown read-only.';
+
+    function commRunText(id, st) {
+      return 'Run #' + id + ' is ' + (st === 'S' ? 'scheduled' : 'running');
+    }
+
+    // One unit_commissioning() row (or, with fallback, a /cea_unit row) → what its cell
+    // shows: {badge: {text, cls, title}, lines: [{text, title, cls}], actions: [{id,
+    // label, enabled, title}]}. Actions: propose_on (Flag for commissioning…, refused
+    // while a run is running or scheduled), propose_off (End commissioning…, applies at
+    // once), withdraw (the proposer's own waiting "on"), review (qa: the waiting "on",
+    // or the "off" that applied and waits for review), history (audit_histories readers).
+    function commissioningCell(row, fallback) {
+      const r = row || {};
+      const on = r.commissioning === true;
+      const badge = on
+        ? { text: 'Commissioning', cls: 'badge-draft',
+            title: 'Engineers can send commands to this unit from the MQTT Explorer (the broker applies it within about 15 seconds); no run can start on it.' }
+        : { text: 'Off', cls: 'badge-retired', title: 'Normal operation: only the run in progress commands this unit.' };
+      const lines = [], actions = [];
+      if (fallback) {
+        lines.push({ text: COMM_FALLBACK_NOTE, cls: 'muted' });
+        return { badge, lines, actions };
+      }
+      if (r.blocking_run_id !== null && r.blocking_run_id !== undefined)
+        lines.push({ text: commRunText(r.blocking_run_id, r.blocking_run_status), cls: 'muted' });
+      const pending = r.pending_change_id !== null && r.pending_change_id !== undefined;
+      if (pending) {
+        let t = 'Waiting for qa: ' + (r.pending_value === false ? 'end commissioning' : 'flag on');
+        if (r.pending_by) t += ' — proposed by ' + r.pending_by + ', ' + fmtWhen(r.pending_at);
+        if (r.pending_mine) t += ' (your proposal)';
+        lines.push({ text: t, title: r.pending_reason ? 'Reason: ' + r.pending_reason : '', cls: 'appr-why' });
+      }
+      const review = r.review_change_id !== null && r.review_change_id !== undefined;
+      if (review) lines.push({ text: 'Ended at once (change #' + r.review_change_id + '); waits for qa\'s review', cls: 'muted' });
+      if (r.last_changed_at) {
+        let t = 'Last change ' + fmtWhen(r.last_changed_at) + ': ' + (r.last_value ? 'on' : 'off');
+        if (r.last_proposed_by) t += ', proposed by ' + r.last_proposed_by;
+        if (r.last_approved_by) t += ', approved by ' + r.last_approved_by;
+        lines.push({ text: t, cls: 'muted' });
+      }
+      if (r.can_propose && !on && !pending) {
+        const busy = r.blocking_run_id !== null && r.blocking_run_id !== undefined;
+        actions.push({ id: 'propose_on', label: 'Flag for commissioning…', enabled: !busy,
+                       title: busy ? commRunText(r.blocking_run_id, r.blocking_run_status) + '; flag the unit when no run is running or scheduled.'
+                                   : 'Propose it with a reason; a qa person other than you approves it.' });
+      }
+      if (r.can_propose && on)
+        actions.push({ id: 'propose_off', label: 'End commissioning…', enabled: true,
+                       title: 'Applies at once (a narrowing); qa reviews it afterwards.' });
+      if (pending && r.pending_mine)
+        actions.push({ id: 'withdraw', label: 'Withdraw…', enabled: true, title: 'Take your proposal back; it never applies.' });
+      if (r.can_approve && pending)
+        actions.push({ id: 'review', label: 'Review…', enabled: !r.pending_mine,
+                       title: r.pending_mine ? 'You proposed this; another qa person must approve it.'
+                                             : 'Approve and apply it, or return it with a reason.' });
+      else if (r.can_approve && review)
+        actions.push({ id: 'review', label: 'Review…', enabled: true, title: 'Mark the end of commissioning reviewed.' });
+      if (r.can_read_history)
+        actions.push({ id: 'history', label: 'History', enabled: true, title: 'Every proposal for this unit and how it ended.' });
+      return { badge, lines, actions };
+    }
+
+    // The change unit_commissioning() points the Review… button at: the waiting "on",
+    // else the "off" waiting for review.
+    function commissioningReviewId(row) {
+      const r = row || {};
+      return r.pending_change_id ?? r.review_change_id ?? null;
+    }
+
+    function commissioningProposeRpc(unitId, value, reason) {
+      return { path: '/rpc/propose_commissioning',
+               body: { p_unit_id: unitId, p_value: value === true, p_reason: String(reason || '').trim() } };
+    }
+
+    // The history reads (audit_histories: qa, qp, auditor): the unit's proposals, then
+    // the approval rows closing them. row_key is jsonb: eq takes the array itself, in.
+    // takes each array double-quoted; both percent-encoded.
+    function commissioningHistoryPaths(unitId, changeIds) {
+      const changes = '/pending_change?select=change_id,new_value,reason,proposed_by_name,proposed_by_role,proposed_at,applied_at'
+        + '&target=eq.medcea.cea_unit&column_name=eq.commissioning&row_key=eq.' + encodeURIComponent(JSON.stringify([unitId]))
+        + '&order=change_id.desc&limit=50';
+      const ids = (changeIds || []).filter(x => Number.isInteger(x));
+      const approvals = ids.length
+        ? '/approval?select=row_key,action,note,approved_by_name,approved_by_role,approved_at&target=eq.medcea.pending_change'
+          + '&row_key=in.(' + ids.map(id => encodeURIComponent('"' + JSON.stringify([id]) + '"')).join(',') + ')&order=approval_id'
+        : null;
+      return { changes, approvals };
+    }
+
+    // Each proposal (newest first) with how it ended, from its approval rows: applied
+    // by qa, applied at once (off) and then reviewed or still waiting for review,
+    // returned by qa, withdrawn by its proposer, replaced (an older open row), waiting.
+    function commissioningHistory(changes, approvals) {
+      const by = {};
+      (approvals || []).forEach(a => { const id = (a.row_key || [])[0]; (by[id] = by[id] || []).push(a); });
+      const list = (changes || []).slice().sort((a, b) => b.change_id - a.change_id);
+      return list.map((c, i) => {
+        const acts = by[c.change_id] || [];
+        const last = acts[acts.length - 1];
+        const who = a => (a.approved_by_name || '?') + (a.note ? ': “' + a.note + '”' : '');
+        const value = (c.new_value === true || c.new_value === 'true') ? 'on' : 'off';
+        let outcome, state;
+        if (last && last.action === 'apply') { state = 'applied'; outcome = 'Applied ' + fmtWhen(last.approved_at) + ' by ' + who(last); }
+        else if (last && last.action === 'review') { state = 'reviewed'; outcome = 'Applied at once ' + fmtWhen(c.applied_at) + '; reviewed ' + fmtWhen(last.approved_at) + ' by ' + who(last); }
+        else if (last && last.action === 'return') { state = 'returned'; outcome = 'Returned ' + fmtWhen(last.approved_at) + ' by ' + who(last); }
+        else if (last && last.action === 'withdraw') { state = 'withdrawn'; outcome = 'Withdrawn ' + fmtWhen(last.approved_at) + ' by its proposer' + (last.note ? ': “' + last.note + '”' : ''); }
+        else if (c.applied_at) { state = 'review_pending'; outcome = 'Applied at once ' + fmtWhen(c.applied_at) + '; waits for qa\'s review'; }
+        else if (i > 0) { state = 'superseded'; outcome = 'Replaced by #' + list[i - 1].change_id; }
+        else { state = 'waiting'; outcome = 'Waiting for qa'; }
+        return { change_id: c.change_id, value, proposed: fmtWhen(c.proposed_at),
+                 by: (c.proposed_by_name || 'no person') + (c.proposed_by_role ? ' · ' + c.proposed_by_role : ''),
+                 reason: c.reason || '', state, outcome };
+      });
+    }
+
+    // A refusal from propose_commissioning / withdraw_change / approve_change /
+    // return_change / unit_commissioning → plain words (msg: the database's own, err.raw).
+    // Never the Q-table text: that is retireError()'s alone.
+    function commissioningError(msg) {
+      const m = String(msg || '');
+      let g;
+      if ((g = /propose_commissioning: unit (\S+) is already (on|off)/.exec(m)))
+        return 'Nothing to change: ' + g[1] + ' is already ' + (g[2] === 'on' ? 'flagged for commissioning.' : 'out of commissioning.');
+      if ((g = /propose_commissioning: change (\d+) for unit (\S+) already waits for qa/.exec(m)))
+        return 'Proposal #' + g[1] + ' for ' + g[2] + ' already waits for qa: it is approved, returned or withdrawn first.';
+      if (/propose_commissioning: a reason is required/.test(m)) return 'Give a reason.';
+      if (/propose_commissioning: no unit/.test(m)) return 'This unit no longer exists; the list was refreshed.';
+      if (/propose_commissioning: your token carries no person_id/.test(m)) return 'Your account has no person_id; ask an administrator.';
+      if (/permission denied for function propose_commissioning/.test(m)) return 'Only an engineer proposes commissioning changes.';
+      if (/permission denied for function unit_commissioning/.test(m)) return COMM_FALLBACK_NOTE;
+      if (/approve_change: unit \S+ no longer exists/.test(m)) return 'This unit no longer exists; the list was refreshed.';
+      return typeof friendlyApprovalError === 'function' ? friendlyApprovalError(m) : m;
+    }
+    /* commissioning-logic:end */
+
     // ── Locations ─────────────────────────────────────────────
     async function loadLocations() {
       try {
@@ -1446,15 +1610,34 @@
     // ── Units ─────────────────────────────────────────────────
     async function loadUnits() {
       try {
-        const [unitData, zoneData] = await Promise.all([
+        // unit_commissioning() alone may fail (anon under IAM_DB_ROLES=false, or before
+        // the database deploy): the column then falls back to cea_unit.commissioning,
+        // read-only, and the rest of the tab loads as before.
+        const [unitData, zoneData, commData] = await Promise.all([
           api('GET', '/cea_unit?order=unit_code'),
-          api('GET', '/cea_zone?select=unit_id')
+          api('GET', '/cea_zone?select=unit_id'),
+          api('GET', '/rpc/unit_commissioning').catch(e => { console.warn('unit_commissioning:', e.raw || e.message); return null; })
         ]);
         units = unitData;
         unitZoneCounts = {};
         zoneData.forEach(z => { unitZoneCounts[z.unit_id] = (unitZoneCounts[z.unit_id] || 0) + 1; });
+        unitComm = null;
+        if (Array.isArray(commData)) { unitComm = {}; commData.forEach(c => { unitComm[c.unit_id] = c; }); }
         renderUnitTable();
       } catch(e) { toast('Load units failed: ' + e.message, false); }
+    }
+
+    // The Commissioning cell of a unit row (commissioningCell() decides; this renders).
+    function commissioningCellHtml(u) {
+      const row = unitComm ? unitComm[u.unit_id] : null;
+      const c = commissioningCell(row || { commissioning: u.commissioning === true }, !row);
+      return '<span class="badge ' + c.badge.cls + '" title="' + esc(c.badge.title) + '">' + esc(c.badge.text) + '</span>'
+        + c.lines.map(l => '<div class="' + (l.cls || 'muted') + '"' + (l.title ? ' title="' + esc(l.title) + '"' : '') + '>' + esc(l.text) + '</div>').join('')
+        + (c.actions.length ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">'
+          + c.actions.map(a => '<button class="btn ' + (a.id === 'review' ? 'btn-teal' : 'btn-ghost') + ' btn-sm"'
+              + (a.enabled ? '' : ' disabled') + ' title="' + esc(a.title || '') + '"'
+              + ' onclick="commissioningAction(' + u.unit_id + ', \'' + a.id + '\')">' + esc(a.label) + '</button>').join('')
+          + '</div>' : '');
     }
 
     function locName(id) { const l = locations.find(l => l.location_id === id); return l ? l.name : '—'; }
@@ -1463,7 +1646,7 @@
       const w = document.getElementById('unit-table-wrap');
       if (!units.length) { w.innerHTML = '<div class="empty">No units yet. Create one to get started.</div>'; return; }
       let html = '<table class="tbl"><thead><tr>'
-        + '<th>Code</th><th>Type</th><th>Location</th><th>Area</th><th>Height</th><th>Status</th><th></th>'
+        + '<th>Code</th><th>Type</th><th>Location</th><th>Area</th><th>Height</th><th>Status</th><th>Commissioning</th><th></th>'
         + '</tr></thead>';
       units.forEach(u => {
         const hasNoZones = !(unitZoneCounts[u.unit_id] > 0);
@@ -1477,6 +1660,7 @@
           + '<td>' + (u.area   != null ? u.area   + ' m²' : '—') + '</td>'
           + '<td>' + (u.height != null ? u.height + ' m'  : '—') + '</td>'
           + '<td><span class="badge badge-' + (u.is_active === 'Y' ? 'y' : 'n') + '">' + (u.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
+          + '<td style="min-width:190px;max-width:300px">' + commissioningCellHtml(u) + '</td>'
           + '<td style="white-space:nowrap">'
           + '<button class="btn btn-ghost btn-sm" onclick="openUnitForm(' + u.unit_id + ')">Edit</button>'
           + ' <button class="btn btn-ghost btn-sm" onclick="openUnitExportChoiceFor(' + u.unit_id + ')">↓ Export</button>'
@@ -1485,11 +1669,120 @@
           + ' Zones' + warnIcon + '</button>'
           + '</td></tr>'
           + '<tr class="zones-row hidden" id="zr-' + u.unit_id + '">'
-          + '<td colspan="7"><div class="zones-content" id="zc-' + u.unit_id + '"><div style="padding:8px;color:#475569;font-size:.82rem">Loading…</div></div></td>'
+          + '<td colspan="8"><div class="zones-content" id="zc-' + u.unit_id + '"><div style="padding:8px;color:#475569;font-size:.82rem">Loading…</div></div></td>'
+          + '</tr>'
+          + '<tr class="zones-row hidden" id="ch-' + u.unit_id + '">'
+          + '<td colspan="8"><div class="zones-content" id="chc-' + u.unit_id + '"></div></td>'
           + '</tr>'
           + '</tbody>';
       });
-      w.innerHTML = html + '</table>';
+      w.innerHTML = html + '</table>'
+        + (unitComm ? '' : '<p class="muted" style="margin-top:10px">' + esc(COMM_FALLBACK_NOTE) + '</p>');
+    }
+
+    // ── Commissioning (test mode) ─────────────────────────────
+    // An engineer proposes "on" with a reason (a qa person other than the proposer
+    // approves it; refused while a run is running or scheduled) or ends it (applies at
+    // once; qa reviews it afterwards). qa approves or returns here or in the Approvals
+    // tab (the same modal); the proposer withdraws. The database decides each step.
+    let commModal = { unitId: null, mode: null };
+
+    function commissioningAction(unitId, id) {
+      if (id === 'propose_on' || id === 'propose_off' || id === 'withdraw') return openCommModal(unitId, id);
+      if (id === 'review') return reviewCommissioning(unitId);
+      if (id === 'history') return toggleCommHistory(unitId);
+    }
+
+    function openCommModal(unitId, mode) {
+      const u = units.find(x => x.unit_id === unitId) || {};
+      const code = u.unit_code || ('unit #' + unitId);
+      const row = (unitComm || {})[unitId] || {};
+      commModal = { unitId, mode, changeId: row.pending_change_id ?? null };
+      const t = {
+        propose_on: ['Flag ' + code + ' for commissioning',
+          'A qa person other than you must approve this before it takes effect. While ' + code + ' is flagged, engineers can send commands to its control topics from the MQTT Explorer (within about 15 seconds of the approval), and no run can start on it. It is refused while a run is running or scheduled on the unit.',
+          'Reason (required, shown to qa)', 'Propose'],
+        propose_off: ['End commissioning of ' + code,
+          'Ending commissioning applies at once: the broker stops engineers\' commands to ' + code + ' within about 15 seconds, and runs can start on it again. A qa person reviews it afterwards.',
+          'Reason (required, recorded)', 'End commissioning'],
+        withdraw: ['Withdraw your proposal for ' + code,
+          'Your proposal (change #' + (row.pending_change_id ?? '?') + ') is closed and never applies. You may propose again later.',
+          'Reason (optional, recorded)', 'Withdraw']
+      }[mode];
+      document.getElementById('comm-modal-title').textContent = t[0];
+      document.getElementById('comm-modal-text').textContent = t[1];
+      document.getElementById('comm-reason-label').textContent = t[2];
+      document.getElementById('comm-submit-btn').textContent = t[3];
+      document.getElementById('comm-reason').value = '';
+      document.getElementById('comm-modal-bg').classList.add('open');
+      document.getElementById('comm-reason').focus();
+    }
+
+    function closeCommModal() { document.getElementById('comm-modal-bg').classList.remove('open'); }
+
+    async function submitCommModal() {
+      const { unitId, mode, changeId } = commModal;
+      const reason = document.getElementById('comm-reason').value.trim();
+      if (mode !== 'withdraw' && !reason) { toast('Give a reason', false); document.getElementById('comm-reason').focus(); return; }
+      const btn = document.getElementById('comm-submit-btn');
+      btn.disabled = true;
+      try {
+        if (mode === 'withdraw') {
+          const { path, body } = withdrawRpc(changeId, reason);
+          await api('POST', path, body);
+          toast('Proposal withdrawn.');
+        } else {
+          const { path, body } = commissioningProposeRpc(unitId, mode === 'propose_on', reason);
+          const id = await api('POST', path, body);
+          toast(mode === 'propose_on'
+            ? 'Proposed (change #' + id + ') — waiting for a qa person other than you to approve it.'
+            : 'Commissioning ended (change #' + id + '). The broker stops its commands within about 15 seconds; qa reviews it.');
+        }
+        closeCommModal();
+      } catch(e) {
+        toast((mode === 'withdraw' ? 'Not withdrawn: ' : 'Not proposed: ') + commissioningError(e.raw || e.message), false);
+        closeCommModal();
+      } finally { btn.disabled = false; }
+      await loadUnits();
+      if (apprAccess.mine || apprAccess.queue) probeApprovals();
+    }
+
+    // qa: the shared approval modal (Approvals tab), opened on this unit's change from
+    // approval_queue(), so the advisory may_approve/why_not and Approve and apply /
+    // Return… / Mark reviewed are the tab's own.
+    async function reviewCommissioning(unitId) {
+      const id = commissioningReviewId((unitComm || {})[unitId]);
+      try {
+        const rows = await api('GET', '/rpc/approval_queue?p_changes=false');
+        const i = rows.findIndex(r => r.target === 'medcea.pending_change' && r.id === id);
+        if (i < 0) { toast('This proposal no longer waits for qa; the list was refreshed.', false); await loadUnits(); return; }
+        apprQueue = rows;
+        openApprovalModal(i);
+      } catch(e) { toast('Cannot open the review: ' + commissioningError(e.raw || e.message), false); }
+    }
+
+    // qa, qp, auditor (audit_histories): every proposal for the unit and how it ended.
+    async function toggleCommHistory(unitId) {
+      const row = document.getElementById('ch-' + unitId);
+      const panel = document.getElementById('chc-' + unitId);
+      if (!row.classList.contains('hidden')) { row.classList.add('hidden'); return; }
+      row.classList.remove('hidden');
+      panel.innerHTML = '<div style="padding:8px;color:#475569;font-size:.82rem">Loading…</div>';
+      try {
+        const p = commissioningHistoryPaths(unitId, []);
+        const changes = await api('GET', p.changes);
+        const q = commissioningHistoryPaths(unitId, changes.map(c => c.change_id));
+        const approvals = q.approvals ? await api('GET', q.approvals) : [];
+        const hist = commissioningHistory(changes, approvals);
+        panel.innerHTML = '<div class="zones-hdr"><span class="zones-label">Commissioning history (newest 50)</span></div>'
+          + (hist.length
+            ? '<table class="ztbl"><thead><tr><th>#</th><th>Proposed</th><th>By</th><th>Value</th><th>Reason</th><th>Outcome</th></tr></thead><tbody>'
+              + hist.map(h => '<tr><td>' + h.change_id + '</td><td>' + esc(h.proposed) + '</td><td>' + esc(h.by) + '</td><td>' + esc(h.value)
+                + '</td><td>' + esc(h.reason) + '</td><td>' + esc(h.outcome) + '</td></tr>').join('') + '</tbody></table>'
+            : '<div class="zone-empty">No commissioning proposal for this unit yet.</div>');
+      } catch(e) {
+        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">Failed to load: ' + esc(commissioningError(e.raw || e.message)) + '</div>';
+      }
     }
 
     async function toggleZones(unitId, btn) {
@@ -3730,7 +4023,7 @@
 
     async function refreshAfterApproval() {
       await Promise.all([loadApprovals(), loadMyApprovals(), loadApprovalHistory()]);
-      loadRecipes(); loadParamSets(); loadAlgorithms().catch(() => {});
+      loadRecipes(); loadParamSets(); loadAlgorithms().catch(() => {}); loadUnits();
     }
 
     async function approveCurrent() {

@@ -1805,6 +1805,18 @@ SELECT medcea.approve_change('medcea.cea_unit', :cu, 'iam-db: master data review
 SELECT 'CHECK|review authored by p-en only', author_persons = '{p-en}' FROM medcea.approval
  WHERE target = 'medcea.cea_unit' AND row_key = jsonb_build_array(:cu) AND action = 'review';
 SQL
+        # health-check.sh iampending reads the open changes as postgres with this predicate
+        # (keep the two in step): a fresh proposal is open and not yet stale, an applied
+        # one is not open
+        probe W8 "control: the health check's iampending predicate" ok <<SQL
+$propose_on
+RESET ROLE;
+SELECT count(*) FILTER (WHERE x.change_id = :chg) AS open_new,
+       count(*) FILTER (WHERE x.change_id = :chg AND coalesce(x.applied_at, x.proposed_at) < now() - interval '7 days') AS stale_new
+  FROM medcea.pending_change x WHERE medcea._pending_open(x) \\gset
+--CHECKS
+SELECT 'CHECK|the waiting proposal is open, not stale', :open_new = 1 AND :stale_new = 0;
+SQL
     fi
     if [[ "$MODE" == false ]]; then
         for fn in "medcea.unit_commissioning()" "medcea.approval_queue()" "medcea.my_approvals()"; do

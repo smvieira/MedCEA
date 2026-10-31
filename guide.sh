@@ -1448,6 +1448,13 @@ a_iam_mqtt() {
     CMD=(tests/iam-mqtt.sh)
     EFFECT="Keycloak: 3 throwaway accounts, deleted on exit; database: one applied deactivation decision stays (append-only); cluster: short-lived probe pods"
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    echo "  --commissioning UNIT (M11) flags an existing unit for commissioning for up to a minute"
+    echo "  (no run may be running or scheduled on it) and leaves append-only proposal records."
+    if ask_yn "Also test commissioning on one unit (--commissioning UNIT)?" n; then
+        ask_match "Unit code (no run running or scheduled on it)" "$UNIT_RE" "$UNIT_HINT"
+        CMD+=(--commissioning "$ANSWER")
+        EFFECT="Keycloak: 4 throwaway accounts (one qa), deleted on exit; database: one applied deactivation decision, the unit's commissioning proposals, approvals and policy-history events stay (append-only); the unit is flagged for up to a minute; cluster: short-lived probe pods"
+    fi
     NOTES=("Needs IAM_MQTT_PERSON=true. Run after ./apps/iam/deploy.sh and ./apps/mqtt-explorer/deploy.sh.")
     plan_run
 }

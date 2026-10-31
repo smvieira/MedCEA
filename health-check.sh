@@ -89,6 +89,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         (./apps/database/deploy.sh); WARN on a decision pending for over 7 days"
     echo -e "         or a pending mail settings change"
     echo ""
+    echo -e "  ${CYAN}iampending${NC} configuration changes waiting for qa: DATABASE"
+    echo -e "         SKIP before the approval functions exist (./apps/database/deploy.sh);"
+    echo -e "         WARN on a pending change (commissioning proposal, log setting, review of"
+    echo -e "         a commissioning end) waiting for over 7 days: Config UI → Approvals"
+    echo ""
     echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
     echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
     echo -e "         Secret medcea-jwks, every key id there is still published by the realm"
@@ -445,6 +450,50 @@ SQL
         _record WARN "$name" "a mail settings change waits for qa (decision #${mail_id}): the realm still sends with the old account"
     else
         _record OK "$name" "${pending} decision(s) waiting for qa, none older than 7 days"
+    fi
+}
+
+# =============================================================================
+# Check: configuration changes waiting for qa (Approvals tab) — read-only
+# target: DATABASE. An open medcea.pending_change is one medcea._pending_open()
+# says no approval, return or withdrawal closed (the queue's own rule): a waiting
+# commissioning "on" or log setting, or the review of an "off" that applied at once.
+# =============================================================================
+check_iampending() {
+    local name="$1" db="$2" out exit_code=0
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' "$db" 2>&1 <<'SQL'
+-- the argument type first: to_regprocedure() may raise on a type that does not exist
+SELECT pg_catalog.to_regclass('medcea.pending_change') IS NOT NULL AS has_table \gset
+\if :has_table
+SELECT pg_catalog.to_regprocedure('medcea._pending_open(medcea.pending_change)') IS NOT NULL AS built \gset
+\else
+SELECT false AS built \gset
+\endif
+\if :built
+SELECT 'stale|' || count(*) || '|' || coalesce(min(x.change_id)::text, '-') || '|'
+       || count(*) FILTER (WHERE x.target = 'medcea.cea_unit')
+  FROM medcea.pending_change x
+ WHERE medcea._pending_open(x) AND coalesce(x.applied_at, x.proposed_at) < now() - interval '7 days';
+SELECT 'pending|' || count(*) FROM medcea.pending_change x WHERE medcea._pending_open(x);
+\else
+SELECT 'state|unbuilt';
+\endif
+SQL
+) || exit_code=$?
+    local state stale stale_id stale_comm pending
+    state="$(grep -m1 '^state|' <<<"$out" | cut -d'|' -f2)"
+    IFS='|' read -r _ stale stale_id stale_comm <<<"$(grep -m1 '^stale|' <<<"$out")"
+    pending="$(grep -m1 '^pending|' <<<"$out" | cut -d'|' -f2)"
+    if [[ "$state" == unbuilt ]]; then
+        _record SKIP "$name" "no approval functions yet (./apps/database/deploy.sh)"
+    elif [[ $exit_code -ne 0 || -z "$pending" || -z "$stale" ]]; then
+        _record FAIL "$name" "could not read the pending changes: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"
+    elif [[ "$stale" -gt 0 ]]; then
+        _record WARN "$name" "${stale} change(s) waiting for qa for over 7 days (oldest #${stale_id}; ${stale_comm} commissioning): Config UI → Approvals"
+    else
+        _record OK "$name" "${pending} change(s) waiting for qa, none older than 7 days"
     fi
 }
 
@@ -1062,6 +1111,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
         iamdecisions) check_iamdecisions "$name" "$target" ;;
+        iampending)   check_iampending "$name" "$target" ;;
         dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
         iamenforce)   check_iamenforce "$name" "$target" ;;

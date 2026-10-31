@@ -161,6 +161,17 @@ and enter the code   XXXX-XXXX</code></pre>
 <pre><code>./edge/tools/build-editor.sh        # writes edge/tools/actuator-config-editor.html
 python3 edge/src/host/device_template.py pins CONTROL esp32c3   # the pin table in a terminal</code></pre>
 
+<h3 id="devices-commissioning">Testing a CONTROL board: commissioning</h3>
+<p>After a CONTROL board is onboarded, an <span class="role">engineer</span> can check its wiring by sending commands to it by hand from the <a href="#apps-mqtt">MQTT Explorer</a>. The broker allows that only while the board's unit is flagged for commissioning (test mode) and has no run in progress:</p>
+<ol class="steps">
+<li>Make sure no run is running or scheduled on the unit; flagging is refused while one is.</li>
+<li>In the Configuration UI's <strong>Units</strong> tab, click <strong>Flag for commissioning…</strong> on the unit, give the reason (for example "relay test of the new CONTROL board in zone 2") and click <strong>Propose</strong>.</li>
+<li>Ask a <span class="role">qa</span> person to approve it. Within about 15 seconds of the approval, the MQTT Explorer's <strong>Your rights</strong> note lists the unit's <code>control</code> topics and <strong>Send</strong> works for them.</li>
+<li>Send the test commands and watch the board's <code>control_setpoint</code> reports.</li>
+<li>Click <strong>End commissioning…</strong> on the unit when you are done. It applies at once; runs can start on the unit again, and <span class="role">qa</span> reviews it afterwards.</li>
+</ol>
+<p>The full procedure, the refusals and who sees what are in <a href="#apps-config-commissioning">commissioning a unit</a>.</p>
+
 <h3 id="devices-replace">Replacing a board</h3>
 <p>Use this when a board fails and a new board takes its place in the same slot. <span class="role">maintenance</span> and <span class="role">engineer</span> may do it.</p>
 <ol class="steps">

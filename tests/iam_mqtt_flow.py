@@ -16,6 +16,16 @@ them on stdin as JSON:
                                               User Manager (an applied decision: permanent,
                                               as tests/iam-access.sh's); then M7: the
                                               engineer's old session gets no new credential
+  python3 tests/iam_mqtt_flow.py commission_on   M11a-c (iam-mqtt.sh --commissioning UNIT;
+                                              stdin also carries "unit", "work" and a "qa"
+                                              account): through the Configuration UI's
+                                              /api/rpc the engineer proposes test mode for
+                                              UNIT, may not approve it (401/403, 42501), a
+                                              qa person approves it; WORK/comm-on marks the
+                                              unit flagged
+  python3 tests/iam_mqtt_flow.py commission_off  M11e, M11g: the engineer ends it (applies at
+                                              once), qa reviews the end
+  python3 tests/iam_mqtt_flow.py commission_end  the exit trap's end of a unit left flagged
 
 Every sign-in goes through the host's oauth2-proxy and Keycloak's form, as a browser does
 (iam_signin_flow.sign_in). Exit 1 on any failure.
@@ -34,6 +44,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOMAIN = os.environ.get("MQTTX_DOMAIN", "")
 ACCESS = os.environ.get("ACCESS_DOMAIN", "")
 ROOT = os.environ.get("PROJECT_NAME", "medcea")
+CONFIG = os.environ.get("CONFIG_DOMAIN", "")
 FAILS = []
 NAME = re.compile(r"^explorer-[A-Za-z0-9._-]+-[0-9a-f]{6}$")
 
@@ -109,9 +120,67 @@ def deactivate(data):
           f"the engineer's old session gets no new credential ({s} {r.get('error') if isinstance(r, dict) else ''})")
 
 
+def unit_row(op, code):
+    """UNIT's row of medcea.unit_commissioning(), through the Config UI's API."""
+    s, rows = post(op, CONFIG, "/api/rpc/unit_commissioning")
+    if s != 200 or not isinstance(rows, list):
+        return s, None
+    return s, next((r for r in rows if (r.get("unit_code") or "").lower() == code.lower()), None)
+
+
+def commission_on(data):
+    code = data["unit"]
+    eng, status, _ = session(data, "engineer", CONFIG)
+    qa, qstatus, _ = session(data, "qa", CONFIG)
+    s, row = unit_row(eng, code)
+    if row is None:
+        check("M11a", False, f"unit {code}: unit_commissioning answered {s} without it")
+        return
+    if row.get("commissioning") or row.get("pending_change_id") or row.get("blocking_run_id"):
+        check("M11a", False, f"unit {code} is flagged, has a waiting proposal or a run running or scheduled: pick another")
+        return
+    s, chg = post(eng, CONFIG, "/api/rpc/propose_commissioning",
+                  json.dumps({"p_unit_id": row["unit_id"], "p_value": True, "p_reason": "tests/iam-mqtt.sh M11"}))
+    check("M11a", s == 200 and isinstance(chg, int), f"the engineer proposed test mode for {code} ({s}, change {chg})")
+    if not (s == 200 and isinstance(chg, int)):
+        return
+    body = json.dumps({"p_target": "medcea.pending_change", "p_id": chg, "p_note": "tests/iam-mqtt.sh M11"})
+    s, r = post(eng, CONFIG, "/api/rpc/approve_change", body)
+    check("M11b", s in (401, 403) and isinstance(r, dict) and r.get("code") == "42501",
+          f"the engineer may not approve it ({s} {r.get('code') if isinstance(r, dict) else ''})")
+    s, r = post(qa, CONFIG, "/api/rpc/approve_change", body)
+    check("M11c", s == 200, f"a qa person approved it ({s}{'' if s == 200 else ' ' + str(r)[:120]})")
+    if s == 200:
+        open(os.path.join(data["work"], "comm-on"), "w").close()
+
+
+def end_commissioning(data, code_end, code_review):
+    code = data["unit"]
+    eng, _, _ = session(data, "engineer", CONFIG)
+    s, row = unit_row(eng, code)
+    if not row or not row.get("commissioning"):
+        check(code_end, row is not None, f"{code} is not flagged any more ({s})")
+        return
+    s, chg = post(eng, CONFIG, "/api/rpc/propose_commissioning",
+                  json.dumps({"p_unit_id": row["unit_id"], "p_value": False, "p_reason": "tests/iam-mqtt.sh M11 end"}))
+    check(code_end, s == 200 and isinstance(chg, int), f"the engineer ended test mode for {code}, at once ({s})")
+    if s != 200:
+        return
+    try:
+        os.remove(os.path.join(data["work"], "comm-on"))
+    except OSError:
+        pass
+    qa, _, _ = session(data, "qa", CONFIG)
+    s, _ = post(qa, CONFIG, "/api/rpc/approve_change",
+                json.dumps({"p_target": "medcea.pending_change", "p_id": chg, "p_note": "tests/iam-mqtt.sh M11 review"}))
+    check(code_review, s == 200, f"a qa person reviewed the end ({s})")
+
+
 def main():
     data = json.load(sys.stdin)
-    {"issue": issue, "checks": checks, "deactivate": deactivate}[sys.argv[1]](data)
+    {"issue": issue, "checks": checks, "deactivate": deactivate, "commission_on": commission_on,
+     "commission_off": lambda d: end_commissioning(d, "M11e", "M11g"),
+     "commission_end": lambda d: end_commissioning(d, "M11x", "M11y")}[sys.argv[1]](data)
     sys.exit(1 if FAILS else 0)
 
 

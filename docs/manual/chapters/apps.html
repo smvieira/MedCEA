@@ -81,6 +81,7 @@
 <tr><td>Control algorithm defaults</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
 <tr><td>Parameter sets</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
 <tr><td>Approvals (drafts and proposed changes)</td><td><span class="role">qa</span> approves or returns; the proposer withdraws their own proposal</td><td><span class="role">qp</span> and <span class="role">auditor</span> read the queue and the history; every person sees their own proposals and drafts</td></tr>
+<tr><td>Unit commissioning flag (test mode)</td><td><span class="role">engineer</span> proposes it, with a reason; <span class="role">qa</span> approves it (never the proposer). Ending it: <span class="role">engineer</span>, at once</td><td>Every role sees the flag; who sees names and reasons is described under <a href="#apps-config-commissioning">commissioning a unit</a></td></tr>
 <tr><td>Learned state (Q-tables)</td><td><span class="role">qa</span> may retire it</td><td><span class="role">production_manager</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
 </tbody>
 </table></div>
@@ -104,6 +105,30 @@
 <li>To add a zone, open the unit with <strong>Edit</strong>, click <strong>+ Add Zone</strong>, enter the <strong>Zone Code</strong> and click <strong>Save Zone</strong>.</li>
 </ol>
 <p>Unit codes and zone codes are unique regardless of case. A duplicate is reported as "already exists". A code becomes part of each board's network name, so choose codes of letters, digits, <code>_</code> and <code>-</code> only; the <a href="#devices">devices chapter</a> explains why.</p>
+
+<h4 id="apps-config-commissioning">Commissioning a unit (test mode)</h4>
+<p>A unit flagged for commissioning is in test mode: engineers may send commands to its <code>control</code> topics from the <a href="#apps-mqtt">MQTT Explorer</a>, and no run can start on it. The broker applies a change of the flag at its next check, within about 15 seconds. The <strong>Commissioning</strong> column of the Units tab shows each unit's state: <strong>Off</strong> or <strong>Commissioning</strong>, a run that is running or scheduled on it, a proposal waiting for <span class="role">qa</span>, an end waiting for <span class="role">qa</span>'s review, and the last change.</p>
+<p>To flag a unit (<span class="role">engineer</span>):</p>
+<ol class="steps">
+<li>Open the <strong>Units</strong> tab and click <strong>Flag for commissioning…</strong> in the unit's Commissioning cell.</li>
+<li>Type the <strong>Reason</strong> (required; <span class="role">qa</span> reads it) and click <strong>Propose</strong>.</li>
+<li>The cell reads "Waiting for qa: flag on … (your proposal)". Nothing changes until a <span class="role">qa</span> person other than you approves it.</li>
+</ol>
+<p><strong>Withdraw…</strong> takes your waiting proposal back (the reason is optional); it never applies. A proposal another engineer made shows without buttons: only its proposer withdraws it, and only <span class="role">qa</span> returns it.</p>
+<p>To end commissioning (<span class="role">engineer</span>), click <strong>End commissioning…</strong>, type the reason and click <strong>End commissioning</strong>. Ending applies at once: the broker stops engineers' commands within about 15 seconds and runs can start again. It then waits for <span class="role">qa</span>'s review.</p>
+<p>To approve (<span class="role">qa</span>), click <strong>Review…</strong> in the unit's cell, or on the row in the <strong>Approvals</strong> tab: the same review opens, with the proposer, the time and the reason. Type an optional note and click <strong>Approve and apply</strong>, or type a reason and click <strong>Return…</strong>. For an end that already applied, the button is <strong>Mark reviewed</strong>. <strong>Review…</strong> is off on a proposal you made yourself.</p>
+<p>The refusals, as the page words them:</p>
+<ul>
+<li>"Run #N is running" or "Run #N is scheduled": <strong>Flag for commissioning…</strong> is off while the unit has a run running or scheduled, and the database refuses the proposal, and the approval, while it has one;</li>
+<li>you proposed this change: another <span class="role">qa</span> person must approve it;</li>
+<li>"Nothing to change": the unit is already in that state;</li>
+<li>a proposal for this unit already waits for qa: it is approved, returned or withdrawn first;</li>
+<li>the proposal was already applied, returned, withdrawn or replaced: the list is refreshed;</li>
+<li>only an engineer proposes commissioning changes.</li>
+</ul>
+<p>Who sees what: the proposer's name and reason are shown to <span class="role">engineer</span>, <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span>; the approver's name to <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span>; every other role sees the flag and "Waiting for qa". The run that blocks a unit is shown only to roles that read every unit's runs (not to <span class="role">operator</span>). <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span> also get <strong>History</strong>: every proposal for the unit with its proposer, value, reason and outcome (applied, applied at once and reviewed, returned, withdrawn, replaced, waiting).</p>
+<p>While <code>IAM_DB_ROLES</code> is <code>false</code> the column only shows the flag, with a note that commissioning changes need the database's enforcement; nobody can change it.</p>
+<div class="record"><p>Each proposal is a row in <code>medcea.pending_change</code> with the proposer's account, person, name, role and reason. Each approval, review, return and withdrawal is a row in <code>medcea.approval</code>. The flag change is in the row-change log and in the tamper-evident policy history (<code>commissioning_enabled</code>, <code>commissioning_disabled</code>), with the unit, the person who made it take effect and the reason.</p></div>
 
 <h4>Devices</h4>
 <p>The <strong>Devices</strong> tab lists every board with its hostname, type, unit and zone, model, serial number and status. The <strong>Online</strong> column checks whether the board answers on the network: click the icon in a row to check that board, or the icon in the column header to check all of them. <strong>Edit</strong> opens a device, and its components can be added with <strong>+ Add Component</strong>.</p>
@@ -416,7 +441,7 @@ The snapshot never changes afterwards.</li>
 <li>The first connection can take up to 15 seconds: the broker picks up a new credential at its next check.</li>
 <li>The credential lasts 8 hours and is renewed in the background before it ends. Signing out of the platform does not end it at once; deactivating your account or changing your role ends it within about 15 seconds.</li>
 <li>The <strong>Your rights</strong> note under the Publish box lists what you may read and where you may send. An <span class="role">engineer</span> reads every unit's <code>sense</code>, <code>control</code> and <code>control_setpoint</code> topics, and may send only to a unit's <code>control</code> topics while that unit is flagged for commissioning and has no run in progress. The broker checks this every 15 seconds: when the flag is cleared or a run starts, sending to that unit stops.</li>
-<li>No screen can flag a unit for commissioning yet, so in practice the page only reads. <strong>Send</strong> stays disabled while you have nowhere to send.</li>
+<li>A unit is flagged for commissioning in the Configuration UI's Units tab (see <a href="#apps-config-commissioning">commissioning a unit</a>): an engineer proposes it and a <span class="role">qa</span> person approves it. Your rights follow the flag within about 15 seconds without a reload. <strong>Send</strong> stays disabled while you have nowhere to send.</li>
 <li>A message the broker does not allow is dropped silently: the page shows no error, and nobody receives it.</li>
 <li>If the page says your role has no MQTT rights, or that your access changed since you signed in, reload it after your administrator has sorted out your role.</li>
 </ul>

@@ -16,6 +16,15 @@
 #   M6  the admin deactivates the engineer in the User Manager; within 20 s the credential
 #       leaves passwd-ws and is refused on 9001
 #   M7  the engineer's old session gets no new credential (re-issue guard)
+#   M11 (only with --commissioning UNIT: an existing unit with no run running or scheduled,
+#       not flagged; a throwaway test-qa-<random> account too) through the Configuration
+#       UI's /api/rpc as a browser: the engineer proposes test mode, may not approve it
+#       (401/403 + 42501), a qa person approves it, acl-ws gives the engineer's credential
+#       write rows for UNIT within 20 s; the engineer ends it (applies at once), the rows
+#       leave within 20 s, qa reviews the end. The flag is ended on exit whatever happens.
+#       The proposals, approvals, row_change rows and the policy history's
+#       commissioning_enabled/_disabled events stay (append-only), and UNIT is flagged for
+#       up to a minute: no run can start on it meanwhile.
 # MQTT clients run in a throwaway pod (python:3.12-alpine, raw MQTT 3.1.1 over TCP and
 # WebSocket); the credential reaches it on stdin, never in argv, and is kept in a mode-600
 # temporary file deleted on exit. Usernames only are printed. Takes the deploy lock.
@@ -24,9 +33,16 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
+COMM_UNIT=""
+if [[ "${1:-}" == "--commissioning" ]]; then
+    COMM_UNIT="${2:-}"
+    [[ "$COMM_UNIT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { echo "--commissioning needs a unit code ([A-Za-z0-9_-])." >&2; exit 2; }
+    shift 2
+fi
+[[ $# -eq 0 ]] || { echo "Usage: tests/iam-mqtt.sh [--commissioning UNIT]" >&2; exit 2; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -50,6 +66,12 @@ PF_PID=""
 WORK="$(mktemp -d)"; chmod 700 "$WORK"
 cleanup() {
     local id code n=0
+    # M11 left the unit flagged (a failure between approve and end): end it while the
+    # engineer still exists; ending applies at once
+    if [[ -f "$WORK/comm-on" ]]; then
+        python3 tests/iam_mqtt_flow.py commission_end <<<"$ACCOUNTS" \
+            || echo -e "${RED}  $COMM_UNIT may still be flagged for commissioning: end it in the Configuration UI's Units tab${NC}" >&2
+    fi
     for id in "${CREATED[@]}"; do
         code="$(_kc_send DELETE "realms/$R/users/$id")"
         [[ "$code" == 204 || "$code" == 404 ]] && n=$((n + 1)) \
@@ -78,7 +100,8 @@ done
 echo -e "${BOLD}MQTT Explorer personal credentials${NC} (https://$MQTTX_DOMAIN, realm $R)"
 SUFFIX="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
 ACCOUNTS="{"
-for role in engineer operator admin; do
+ROLES=(engineer operator admin); [[ -n "$COMM_UNIT" ]] && ROLES+=(qa)
+for role in "${ROLES[@]}"; do
     user="test-$role-$SUFFIX"
     pass="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
     body="$(U="$user" P="$pass" E="$user@${PROJECT_NAME}.invalid" ROLE="$role" python3 -c '
@@ -97,8 +120,8 @@ print(json.dumps({"username": os.environ["U"], "enabled": True, "emailVerified":
 import json, os; print(json.dumps(os.environ["K"]) + ": " + json.dumps({"username": os.environ["U"], "password": os.environ["P"], "id": os.environ["I"]}))'),"
 done
 CACERT=null; [[ -f .ca/ca.crt ]] && CACERT="\"$REPO_ROOT/.ca/ca.crt\""
-ACCOUNTS+="\"cacert\": $CACERT, \"out\": \"$WORK/cred.json\"}"
-echo "Created test-engineer-, test-operator- and test-admin-$SUFFIX"
+ACCOUNTS+="\"cacert\": $CACERT, \"out\": \"$WORK/cred.json\", \"work\": \"$WORK\", \"unit\": \"$COMM_UNIT\"}"
+echo "Created test-{${ROLES[*]// /,}}-$SUFFIX"
 echo ""
 
 python3 tests/iam_mqtt_flow.py issue <<<"$ACCOUNTS" || FAILS=$((FAILS + 1))
@@ -188,6 +211,28 @@ WROTE="$($KUBECTL exec -n "$NAMESPACE" deployment/mosquitto -c mqtt-auth-sync --
     || fail "M8 write rows for '${WROTE//$'\n'/ }', flagged and idle: '${ELIGIBLE//$'\n'/ }'"
 
 python3 tests/iam_mqtt_flow.py checks <<<"$ACCOUNTS" || FAILS=$((FAILS + 1))
+
+# M11 — commissioning through the Configuration UI (opt-in); before M6 deactivates the engineer
+unit_writes() {   # the units the engineer's credential may write to, from acl-ws
+    $KUBECTL exec -n "$NAMESPACE" deployment/mosquitto -c mqtt-auth-sync -- \
+        awk -v u="user $CRED_USER" '$0 == u {on = 1; next} /^user / {on = 0} on && $2 == "write" {split($3, t, "/"); print t[2]}' \
+        /mosquitto/auth/acl-ws 2>/dev/null | sort -u
+}
+if [[ -n "$COMM_UNIT" ]]; then
+    if python3 tests/iam_mqtt_flow.py commission_on <<<"$ACCOUNTS"; then
+        ok=false
+        for _ in $(seq 1 10); do unit_writes | grep -qx -- "$COMM_UNIT" && { ok=true; break; }; sleep 2; done
+        $ok && pass "M11d $CRED_USER may write to $COMM_UNIT within 20 s of the approval" \
+            || fail "M11d no write row for $COMM_UNIT in acl-ws 20 s after the approval"
+        python3 tests/iam_mqtt_flow.py commission_off <<<"$ACCOUNTS" || FAILS=$((FAILS + 1))
+        ok=false
+        for _ in $(seq 1 10); do unit_writes | grep -qx -- "$COMM_UNIT" || { ok=true; break; }; sleep 2; done
+        $ok && pass "M11f the write rows for $COMM_UNIT left acl-ws within 20 s of the end" \
+            || fail "M11f $CRED_USER still writes to $COMM_UNIT 20 s after the end"
+    else
+        FAILS=$((FAILS + 1))
+    fi
+fi
 python3 tests/iam_mqtt_flow.py deactivate <<<"$ACCOUNTS" || FAILS=$((FAILS + 1))
 ok=false
 for _ in $(seq 1 10); do in_file passwd-ws "$CRED_USER" || { ok=true; break; }; sleep 2; done
