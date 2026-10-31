@@ -189,6 +189,18 @@ set -e
 # broker it publishes to and the topic root the rest of the platform listens on.
 # shellcheck source=/dev/null
 [ -f "$REPO_ROOT/config.env" ] && source "$REPO_ROOT/config.env"
+# How to watch a board's topics after onboarding (IAM 3.5): with IAM_MQTT_PERSON=true the
+# shared mqtt-explorer account is gone from the broker, so the hint is the MQTT Explorer,
+# where each engineer signs in with their own credential.
+_watch_hint() {
+  if [ "${IAM_MQTT_PERSON:-false}" = true ]; then
+    echo "      open https://${MQTTX_DOMAIN:-mqtt-explorer.<domain>} and watch $TOPIC_BASE/#"
+    echo "                                    ${DIM}(your own MQTT Explorer sign-in; the shared account is retired)${N}"
+  else
+    echo "      mosquitto_sub -h $MQTT_HOST -p $MQTT_PORT -u mqtt-explorer -P \"\$MQTT_EXPLORER_PASS\" -t '$TOPIC_BASE/#' -v"
+    echo "                                    ${DIM}(MQTT_EXPLORER_PASS is in config.env; or open https://${MQTTX_DOMAIN:-mqtt-explorer.<domain>})${N}"
+  fi
+}
 PROJECT_NAME="${PROJECT_NAME:-medcea}"
 
 # Inferred, in this order: what was passed on the command line, what config.env
@@ -2158,8 +2170,7 @@ ${B} Next${N}
   The board is running its own program. Watch it work:
 
       $MPREMOTE connect $PORT repl          ${DIM}(Ctrl-] exits, Ctrl-D reboots)${N}
-      mosquitto_sub -h $MQTT_HOST -p $MQTT_PORT -u mqtt-explorer -P "\$MQTT_EXPLORER_PASS" -t '$TOPIC_BASE/#' -v
-                                    ${DIM}(MQTT_EXPLORER_PASS is in config.env; or open https://mqtt-explorer.<domain>)${N}
+$(_watch_hint)
 
   It appears in the Devices tab under $UNIT_CODE / $ZONE_CODE. Re-running
   this wizard for the same slot updates that row in place; it never
