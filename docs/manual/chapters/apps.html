@@ -441,8 +441,8 @@ The snapshot never changes afterwards.</li>
 <ul>
 <li>The first connection can take up to 15 seconds: the broker picks up a new credential at its next check.</li>
 <li>The credential lasts 8 hours and is renewed in the background before it ends. Signing out of the platform does not end it at once; deactivating your account or changing your role ends it within about 15 seconds.</li>
-<li>The <strong>Your rights</strong> note under the Publish box lists what you may read and where you may send. An <span class="role">engineer</span> reads every unit's <code>sense</code>, <code>control</code> and <code>control_setpoint</code> topics, and may send only to a unit's <code>control</code> topics while that unit is flagged for commissioning and has no run in progress. The broker checks this every 15 seconds: when the flag is cleared or a run starts, sending to that unit stops.</li>
-<li>A unit is flagged for commissioning in the Configuration UI's Units tab (see <a href="#apps-config-commissioning">commissioning a unit</a>): an engineer proposes it and a <span class="role">qa</span> person approves it. Your rights follow the flag within about 15 seconds without a reload. <strong>Send</strong> stays disabled while you have nowhere to send.</li>
+<li>The <strong>Your rights</strong> note under the Publish box lists the topic patterns your role may read and send to, for every unit (for <span class="role">engineer</span>, send: <code>medcea/+/+/control/#</code>). An <span class="role">engineer</span> reads every unit's <code>sense</code>, <code>control</code> and <code>control_setpoint</code> topics, and may send only to a unit's <code>control</code> topics while that unit is flagged for commissioning and has no run in progress. The broker checks this every 15 seconds: when the flag is cleared or a run starts, sending to that unit stops.</li>
+<li>A unit is flagged for commissioning in the Configuration UI's Units tab (see <a href="#apps-config-commissioning">commissioning a unit</a>): an engineer proposes it and a <span class="role">qa</span> person approves it. The broker follows the flag within about 15 seconds, without a reload. The <strong>Your rights</strong> note does not change with the flag: it shows your role's patterns, not which units are flagged. <strong>Send</strong> is enabled whenever your role has a send pattern, and stays disabled for a role without one.</li>
 <li>A message the broker does not allow is dropped silently: the page shows no error, and nobody receives it.</li>
 <li>The topics in <strong>Your rights</strong> are patterns (<code>+</code> is one level, <code>#</code> the rest). Send to one topic they match, for example <code>medcea/UNIT01/ZONE01/control/&lt;tag&gt;</code>. A topic with <code>+</code> or <code>#</code> is refused by the page before it is sent: the broker would close the connection instead.</li>
 <li>If the page says your role has no MQTT rights, or that your access changed since you signed in, reload it after your administrator has sorted out your role.</li>
@@ -450,7 +450,7 @@ The snapshot never changes afterwards.</li>
 <p><strong>With the shared account</strong> (<code>IAM_MQTT_PERSON=false</code>). The page connects with one shared service account that may read and write every topic under the platform root.</p>
 <p>To send a message:</p>
 <ol class="steps">
-<li>Click a topic, or type one in the <strong>Publish</strong> box.</li>
+<li>Click a topic, or type one in the <strong>Publish</strong> box. In either mode the page refuses a topic with <code>+</code> or <code>#</code> ("Not sent: + and # only match topics") instead of sending it.</li>
 <li>Enter the payload, as text or JSON.</li>
 <li>Click <strong>Send</strong>.</li>
 </ol>

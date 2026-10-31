@@ -166,8 +166,8 @@ python3 edge/src/host/device_template.py pins CONTROL esp32c3   # the pin table 
 <ol class="steps">
 <li>Make sure no run is running or scheduled on the unit; flagging is refused while one is.</li>
 <li>In the Configuration UI's <strong>Units</strong> tab, click <strong>Flag for commissioning…</strong> on the unit, give the reason (for example "relay test of the new CONTROL board in zone 2") and click <strong>Propose</strong>.</li>
-<li>Ask a <span class="role">qa</span> person to approve it. Within about 15 seconds of the approval, the MQTT Explorer's <strong>Your rights</strong> note lists the unit's <code>control</code> topics and <strong>Send</strong> works for them.</li>
-<li>Send the test commands and watch the board's <code>control_setpoint</code> reports.</li>
+<li>Ask a <span class="role">qa</span> person to approve it. Within about 15 seconds of the approval, the broker accepts your messages to the unit's <code>control</code> topics. The MQTT Explorer's <strong>Your rights</strong> note does not change: it lists your role's pattern, <code>medcea/+/+/control/#</code>, for every unit.</li>
+<li>Send the test commands to one concrete topic, for example <code>medcea/UNIT01/ZONE01/control/&lt;tag&gt;</code> (never the pattern itself: the page refuses <code>+</code> and <code>#</code>), and watch the board's <code>control_setpoint</code> reports. Clicking the topic in the left-hand list shows your message as the broker delivered it.</li>
 <li>Click <strong>End commissioning…</strong> on the unit when you are done. It applies at once; runs can start on the unit again, and <span class="role">qa</span> reviews it afterwards.</li>
 </ol>
 <p>The full procedure, the refusals and who sees what are in <a href="#apps-config-commissioning">commissioning a unit</a>.</p>
