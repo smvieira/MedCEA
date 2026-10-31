@@ -1195,6 +1195,8 @@ class WiringTest(unittest.TestCase):
             self.assertIn("pass_access_token = true", self.read(values), values)
             self.assertIn("pass_authorization_header = false", self.read(values), values)
         self.assertIn("pass_access_token = false", self.read("k8s/oauth2-proxy/values-node-red.yaml"))
+        # the editor token arrives as /?access_token=…; the proxy must not log "/"
+        self.assertIn('exclude_logging_paths = "/"', self.read("k8s/oauth2-proxy/values-node-red.yaml"))
         # IAM 2.6: each pod carries IAM_ENFORCE (rendered by its deploy) and, when /iam/ is
         # missing, fails closed on it alone (dbmgmt always); health-check iamenforce
         # compares the copies

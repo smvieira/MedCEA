@@ -36,6 +36,10 @@ configuration:
     # this host has no /_account/ upstream, and the editor runs code the
     # engineers write, which could read and replay each person's token.
     pass_access_token = false
+    # Node-RED's sign-in redirects to /?access_token=<editor token>, and the
+    # request log would keep that token in clear (found 2026-10-31). Requests to
+    # "/" are not logged; every other path still is.
+    exclude_logging_paths = "/"
     # The Node-RED editor runs code with the ingest account, so it is open only
     # to the roles the access policy admits here (group flows; ALLOWED_GROUPS is
     # compiled by policy_groups). Needs the "groups" client scope on node-red.
