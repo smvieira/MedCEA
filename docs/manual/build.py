@@ -21,10 +21,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHAPTERS = ['overview', 'access', 'apps', 'devices', 'compliance', 'admin', 'reference', 'revisions']
 EDITION = {
-    'EDITION': '2',
-    'COVERS': 'IAM phases 0 to 2 (complete)',
+    'EDITION': '3',
+    'COVERS': 'IAM phases 0 to 3 (complete)',
     'DATE': '31 Oct 2026',
-    'COMMIT': 'b7cba75 (iam/phase-2)',
+    'COMMIT': 'cb84d72 (iam/phase-3)',
 }
 
 SECTION = re.compile(r'<section\s+id="([a-z0-9-]+)"\s+data-title="([^"]+)"\s*>')

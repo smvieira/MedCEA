@@ -92,9 +92,9 @@ def issue(data):
 def checks(data):
     op, _, _ = session(data, "engineer", DOMAIN)
     s, _ = post(op, DOMAIN, "/_mqtt-credential", body="x=1", ctype="application/x-www-form-urlencoded")
-    check("M10a", s == 415, f"a form POST answers {s}, not 415")
+    check("M10a", s == 415, f"a form POST answers {s} (want 415)")
     s, _ = post(op, DOMAIN, "/_mqtt-credential", origin="https://evil.invalid")
-    check("M10b", s == 403, f"a POST from another Origin answers {s}, not 403")
+    check("M10b", s == 403, f"a POST from another Origin answers {s} (want 403)")
 
 
 def deactivate(data):
