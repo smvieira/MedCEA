@@ -1,0 +1,246 @@
+<section id="devices" data-title="Edge devices">
+<h2>Edge devices</h2>
+<p class="lede">The boards in the growing chambers are ESP32 microcontrollers. A SENSE board reads the chamber and publishes measurements. A CONTROL board receives the scheduler's commands and switches equipment through relays. Each board fills one slot: one unit, one zone, one role. A board joins the fleet through onboarding. Someone plugs it into the platform host over USB, signs in, picks a free slot and says what is wired to it. The onboarding run then erases and flashes the board, joins it to WiFi, gives it its own broker credential and registers it in that slot. This chapter covers who may do that, the steps of a run in the browser and in a terminal, how to replace or move a board, how board credentials work, and what the platform records.</p>
+
+<h3 id="devices-boards">SENSE and CONTROL boards</h3>
+<p>Every board runs the same application. What makes it a SENSE or a CONTROL board is a small configuration file that onboarding writes onto it. That file holds the role, the slot, the broker credential and, for a SENSE board, its sensors and their pins. A CONTROL board also gets a pin map file with the relay channels chosen during the run.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th>What it does</th><th>MQTT topics</th></tr></thead>
+<tbody>
+<tr><td>SENSE</td><td>Reads its sensors at a fixed interval (30 seconds by default) and publishes one message per measurement tag. A SENSE board may carry several sensors.</td><td>Publishes to <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;</code></td></tr>
+<tr><td>CONTROL</td><td>Drives a relay board. It receives the scheduler's commands for its zone, switches the relay channels and reports what it actually did.</td><td>Receives <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control/#</code>; reports on <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control_setpoint/...</code></td></tr>
+</tbody>
+</table></div>
+<p>The topic root is the platform's project name, <code>medcea</code>. The unit and zone segments are the codes as the Units tab shows them.</p>
+<p>The sensors the SENSE template offers today:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Sensor</th><th>Tags it publishes</th></tr></thead>
+<tbody>
+<tr><td>Sensirion SCD40 / SCD41</td><td><code>co2</code>, <code>air_temperature</code>, <code>air_humidity</code></td></tr>
+<tr><td>Sensirion SCD30</td><td><code>co2</code>, <code>air_temperature</code>, <code>air_humidity</code></td></tr>
+<tr><td>DS18B20 substrate probe</td><td><code>ground_temperature</code></td></tr>
+<tr><td>Analogue water level probe</td><td><code>water_level</code></td></tr>
+</tbody>
+</table></div>
+<p>The CONTROL template describes an 8 or 16 channel relay board. Its equipment is the red, blue and UV grow lights, the air heater pad, the air cooler, the humidifier, the air flow fan, the CO2 fan, the CO2 flow steriliser and the substrate heater.</p>
+
+<h3 id="devices-slots">Slots</h3>
+<p>A unit is a physical chamber and a zone is one area inside it. Both are created in the Units tab of the Configuration UI before any board is onboarded. The onboarding wizard reads units and zones from the database and never creates them.</p>
+<p>Each active zone has exactly two slots, one per role:</p>
+<pre><code>UNIT01 / ZONE01  -&gt;  unit01-s-zone01   SENSE: reads the chamber
+                     unit01-c-zone01   CONTROL: drives the chamber</code></pre>
+<ul>
+<li>A slot is <strong>free</strong> when no active device of that role is in the zone. Only free slots are offered.</li>
+<li>A slot is <strong>taken</strong> when an active device of that role is in it. The wizard lists taken slots with their board, but you cannot pick them.</li>
+<li>A slot is <strong>not offered</strong> when its unit and zone codes cannot make a legal board name. The wizard says why. See <a href="#devices-names">Device names</a>.</li>
+<li>Slots in an inactive unit or an inactive zone are left out.</li>
+</ul>
+<p>This rule is read from the live device table on every run. To free a slot, mark its device Inactive in the Devices tab. Onboarding a board into a slot that already has a device record updates that record in place. It never creates a second one.</p>
+<p>The one-SENSE, one-CONTROL rule also limits harm. A board can publish only under its own slot's topics, and a second board cannot quietly start driving a chamber that already has a controller.</p>
+
+<h3 id="devices-names">Device names</h3>
+<p>A board has one name, built from its slot:</p>
+<pre><code>lower(unit code) - s|c - lower(zone code)
+
+UNIT02 + CONTROL + ZONE02  -&gt;  unit02-c-zone02</code></pre>
+<p>The same name is the board's DHCP hostname, its Hostname (DHCP) in the Devices tab, the <code>device_dns</code> field in every MQTT message, its broker user name, and the file name of its provisioning record. Lowercasing is the only change made to the codes, so the name stays readable and is the same every time the slot is onboarded. Unit codes are unique ignoring case, and zone codes are unique within their unit ignoring case, so two slots can never get the same name.</p>
+<p>The codes must produce a legal hostname:</p>
+<ul>
+<li>letters, digits and hyphens only, with no hyphen at the start or the end;</li>
+<li>at most 32 characters, the longest hostname a MicroPython board accepts.</li>
+</ul>
+<p>A slot whose codes break either rule is listed as not offered, with the reason, for example a code containing an underscore or a space. There is no fallback name. To use the slot, rename the unit or zone code in the Units tab. After the board boots, the run reads the hostname back from the board and warns if the board kept a different one.</p>
+<p>A board onboarded with <code>--unregistered</code> is named <code>cea-un-&lt;mac6&gt;</code>, where <code>&lt;mac6&gt;</code> is the last six hex digits of its MAC address. The <code>un</code> shows at a glance that it has no slot.</p>
+<div class="note"><p>The board does not answer <code>.local</code> names: it runs no mDNS responder. Use the IP address printed at the end of the run and kept in the provisioning record. A DHCP reservation on the router keeps that address stable.</p></div>
+
+<h3 id="devices-who">Who may onboard</h3>
+<p>The access policy (<code>apps/iam/policy/defaults.yaml</code>) gives these rights on boards:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th>Boards and onboarding</th><th>Slot history</th></tr></thead>
+<tbody>
+<tr><td><span class="role">engineer</span></td><td>Onboards boards into any free slot, replaces and moves boards, edits device records.</td><td>Read</td></tr>
+<tr><td><span class="role">maintenance</span></td><td>Re-onboards a board into a slot that already exists: a replacement for an inactive board, or a re-flash in place. Can change a device record that stays in its slot, for example to mark it Inactive. Creating a new slot is refused, with the message that a new slot is an engineer's change.</td><td>Read</td></tr>
+<tr><td><span class="role">qa</span></td><td>Reads and exports devices, and reviews (approves) a device change made by someone else. qa may not review their own change.</td><td>Read and export (qa holds everything the auditor holds)</td></tr>
+<tr><td><span class="role">auditor</span></td><td>Reads and exports devices.</td><td>Read and export</td></tr>
+<tr><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">admin</span></td><td>Read devices only.</td><td>None</td></tr>
+<tr><td><span class="role">qc</span>, <span class="role">qp</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span></td><td>No access to device records.</td><td>None</td></tr>
+</tbody>
+</table></div>
+<p>The platform database enforces these rights (with <code>IAM_DB_ROLES=true</code>, as on this platform). The wizard reads and writes the platform database as the person who signed in. A person without onboarding rights can open the wizard and sign in, but the database refuses the registration. The wizard then reports that this role may not onboard boards. An administrator can also set <code>EDGE_WIZARD_ROLE</code> in <code>config.env</code> to require one realm role before anyone may use the wizard at all. It is empty by default.</p>
+
+<h3 id="devices-before">Before the first onboarding</h3>
+<p>These are one-time tasks for the administrator of the platform host.</p>
+<ol class="steps">
+<li><strong>Serial port access.</strong> The account that runs the wizard must be in the <code>dialout</code> group. <code>./deploy-infra.sh</code> adds it. To do it by hand:
+<pre><code>sudo usermod -aG dialout "$USER"
+sudo systemctl restart "user@$(id -u)"</code></pre>
+The second command matters: the wizard service keeps its old group list until its user service manager restarts. Confirm with <code>id -nG</code>.</li>
+<li><strong>The wizard service.</strong> <code>./install.sh</code> and <code>./deploy-apps.sh --all</code> run <code>./apps/edge-wizard/deploy.sh</code>. It installs the <code>cea-edge-wizard</code> service on the host and publishes it at <code>https://onboard-device.&lt;domain&gt;</code>. If the service is not running, the Onboard Device button gives a connection error. <code>./health-check.sh</code> checks that it answers.</li>
+<li><strong>Sign-in.</strong> <code>./deploy-infra.sh</code> creates the Keycloak client <code>edge-wizard</code> and writes <code>EDGE_WIZARD_SECRET</code> into <code>config.env</code>. Without it the wizard cannot sign anyone in.</li>
+<li><strong>Units and zones.</strong> Create them in the Units tab, with codes that make legal names.</li>
+<li><strong>Firmware.</strong> Nothing to do. <code>edge/firmware/</code> may start empty: the run offers MicroPython images for the detected chip and downloads one on request.</li>
+</ol>
+<p>The same tasks are in <code>./guide.sh</code> under Edge devices: flash and register a board, show <code>flash-device.sh</code>'s options, and install or update the browser wizard service.</p>
+<div class="warn"><p>The provisioning records in <code>edge/provisioned/</code> hold each board's WiFi passphrase, WebREPL password and MQTT password in plain text. The files are readable by their owner only and are not in git. Keep them that way, and include the folder in host backups only if the backup is protected.</p></div>
+
+<h3 id="devices-browser">Onboarding from the browser</h3>
+<p>This is the normal way. Onboarding always happens over USB on the platform host: the cable proves the board is in your hands, and the sign-in says who you are.</p>
+<ol class="steps">
+<li>Plug the board into a USB port of the machine that runs the platform.</li>
+<li>Open the Configuration UI at <code>https://config.&lt;domain&gt;</code>, go to the Devices tab and press <strong>Onboard Device</strong>. It opens <code>https://onboard-device.&lt;domain&gt;</code> in a new tab.</li>
+<li>Sign in with your platform account.</li>
+<li>The page "Onboard a device" shows one tile per device type. Pick <strong>ESP32 / ESP32-S3</strong>. Tiles marked planned or unavailable cannot be started.</li>
+<li>Answer each question as the page shows it. The page also shows the live log and the current step. The questions are described in <a href="#devices-run">The steps of a run</a>.</li>
+<li>At the end, read the summary card: IP address, hostname, unit and zone, role, broker, topics, and whether the device record was written. Copy the WebREPL password if you need it.</li>
+<li>Return to the Devices tab. The new board appears under its unit and zone.</li>
+</ol>
+<p>The service runs one onboarding at a time. A second start while a run is in progress is refused with "a device is already being provisioned".</p>
+<div class="note"><p>Do not use the Add Record button to add a board. It creates an inventory entry only, with no flash, no slot check and no broker credential.</p></div>
+
+<h3 id="devices-terminal">Onboarding from a terminal</h3>
+<p>The same run works in a terminal on the platform host, for example over SSH:</p>
+<pre><code>./edge/flash-device.sh</code></pre>
+<p>Before it reads the free slots, the script shows a sign-in box:</p>
+<pre><code>This run reads and writes the platform database as you.
+On any device with a browser open:  https://keycloak.&lt;domain&gt;/realms/medcea/device
+and enter the code   XXXX-XXXX</code></pre>
+<p>Open that address on any phone or computer, sign in, and enter the code. The code expires after about ten minutes. Once you are signed in, the script prints "signed in as &lt;name&gt; (&lt;user&gt;, &lt;role&gt;)" and every database call in the run acts as you. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> while it waits to stop without writing anything. The device code appears only in the terminal and is never shown on a web page.</p>
+<p>Useful options (<code>./edge/flash-device.sh --help</code> lists all of them):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Option</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>--role SENSE</code> or <code>--role CONTROL</code></td><td>Skip the role question.</td></tr>
+<tr><td><code>--unit CODE</code>, <code>--zone CODE</code></td><td>Limit the slot menu to one unit or zone. Type the code exactly as the Units tab shows it; case matters. Only free slots are still offered.</td></tr>
+<tr><td><code>--advanced</code></td><td>Also ask the parameters the template marks as advanced, such as I2C frequency and UART pins.</td></tr>
+<tr><td><code>--port PATH</code></td><td>Use this serial port instead of autodetecting.</td></tr>
+<tr><td><code>--offline</code></td><td>Use only firmware already in <code>edge/firmware/</code>.</td></tr>
+<tr><td><code>--no-erase</code></td><td>Skip the full erase. Only for a board you have already erased once.</td></tr>
+<tr><td><code>--ui</code></td><td>Also serve this run as a web page and print its address. Use the printed link, which carries the run's token. It needs port 8088 free, so it cannot run while the wizard service is up; use the wizard service instead.</td></tr>
+<tr><td><code>--no-register</code></td><td>Flash and configure the board for the slot, but do not write the device record. The slot stays free.</td></tr>
+<tr><td><code>--unregistered</code></td><td>Bench mode. See <a href="#devices-bench">Bench mode</a>.</td></tr>
+</tbody>
+</table></div>
+<p>With <code>-y</code> the script does not ask before erasing. It also refuses to move a board that is registered in another slot.</p>
+
+<h3 id="devices-run">The steps of a run</h3>
+<p>The questions that only the person at the chamber can answer (role, slot, wiring) come first, before the board is touched, so a board is not left half onboarded because someone walked away. Two questions come later: the go-ahead to erase, and the WiFi network, which the board can only scan once it runs MicroPython. The browser page and the terminal ask the same questions in the same order.</p>
+<ol class="steps">
+<li><strong>Sign in.</strong> In the browser you are already signed in. In a terminal, enter the device code. A run that is not registering a board (<code>--unregistered</code>) skips this.</li>
+<li><strong>Role.</strong> "What is this board for?" Pick SENSE or CONTROL.</li>
+<li><strong>Slot.</strong> "Which unit and zone is this board going into?" Only free slots of that role are listed, each with the name it will give the board. If there is exactly one, it is chosen for you. If none is free, the run stops and says to mark the existing device Inactive or add a zone.</li>
+<li><strong>What is wired.</strong> For a SENSE board, "Which sensor is wired to this board?", one sensor at a time, then each sensor's pins, for example the 1-Wire data pin of a DS18B20. Pick Done when every sensor is listed. For a CONTROL board, the run shows the reference wiring, equipment against GPIO pin, and asks "Use this reference wiring?". Answer no to set the pins yourself or to remove equipment the chamber does not have. See <a href="#devices-channelmap">The channel-map editor</a>.</li>
+<li><strong>Interval.</strong> For a SENSE board, the publish interval in seconds (30 by default). A CONTROL board's command poll interval (100 ms) is asked only with <code>--advanced</code>. The run then prints what it inferred without asking: broker address and port, topics and the board's name.</li>
+<li><strong>Serial port.</strong> Detected automatically. If the account cannot open the port, the run says so and points at the <code>dialout</code> fix.</li>
+<li><strong>Board check.</strong> The run reads the chip type and MAC address from the board. Two checks happen here, before anything is erased:
+<ul>
+<li>If this board is already registered in another slot, the run asks the move question. See <a href="#devices-move">Moving a board</a>.</li>
+<li>If the pin map was checked against a different chip than the one plugged in, the run checks it again against the real chip. If the map cannot drive that chip, the run stops and tells you which board type to pick.</li>
+</ul></li>
+<li><strong>Firmware.</strong> The newest local image for this chip is the default. Images from micropython.org are offered for download. Only images that match the detected chip are listed.</li>
+<li><strong>Erase and flash.</strong> "Erase and flash this board?" Yes wipes the whole chip, then writes MicroPython.</li>
+<li><strong>WiFi.</strong> The board scans the air with its own radio. Pick a network, or enter a hidden one by name, then type the passphrase. A network missing from the list is usually 5 GHz only: these boards hear only 2.4 GHz.</li>
+<li><strong>Files.</strong> The run generates a WebREPL password for this board only, writes the board's configuration file, its pin map (CONTROL) and the application, then restarts the board and waits for it to report an IP address.</li>
+<li><strong>Registration.</strong> If the board came online, the run writes its device record, one component record per sensor (or one for the relay board), and the hash of its broker password. If the board never reported an IP address, it is not registered and the slot stays free.</li>
+<li><strong>Record and summary.</strong> The run writes <code>edge/provisioned/&lt;name&gt;.json</code> and prints the summary.</li>
+</ol>
+<p>If a registration is refused, the board is still flashed and running. Fix the cause and onboard the same slot again. The slot's record is updated in place.</p>
+<p>The board in download mode: most boards reset themselves for flashing. If the run cannot talk to the board, hold <kbd>BOOT</kbd>, tap <kbd>RESET</kbd>, release <kbd>BOOT</kbd>, and try again.</p>
+
+<h3 id="devices-channelmap">The channel-map editor and the board check</h3>
+<p>When you answer no to the reference wiring in the browser, the page shows the channel map itself: a table of relay channels, every command the scheduler can send, and the pin map file being built as you type.</p>
+<ul>
+<li><strong>Board selector.</strong> It defaults to <code>esp32s3</code>, what this fleet runs. ESP32, S2, S3, C3, C6, H2 and P4 are offered. Changing it checks the map you have against that chip, without rewriting it.</li>
+<li><strong>Pin reference.</strong> Opens the table of every GPIO on the selected chip and what else already uses it.</li>
+<li><strong>Each row</strong> shows its pin's type as you type the number. Pins that cannot work (input-only pins, pins used by the SPI flash) are errors. Strapping, PSRAM, USB-JTAG and console pins are warnings.</li>
+<li><strong>Missing equipment.</strong> Clear the equipment the chamber does not have. Every command that needed it is then left out of the board's table, rather than shipped as a command that does nothing and still reports success.</li>
+<li><strong>Reset to reference wiring</strong> puts the reference layout back.</li>
+</ul>
+<p>The page refuses to submit a map with errors. The run checks the map again when it gets it, and a third time against the real chip after probing, before the erase. In a terminal the same step asks for one GPIO per piece of equipment. Answer blank or <code>-</code> for equipment the chamber does not have.</p>
+<p>The same editor exists as a standalone page for inspecting or correcting a map away from the platform:</p>
+<pre><code>./edge/tools/build-editor.sh        # writes edge/tools/actuator-config-editor.html
+python3 edge/src/host/device_template.py pins CONTROL esp32c3   # the pin table in a terminal</code></pre>
+
+<h3 id="devices-replace">Replacing a board</h3>
+<p>Use this when a board fails and a new board takes its place in the same slot. <span class="role">maintenance</span> and <span class="role">engineer</span> may do it.</p>
+<ol class="steps">
+<li>In the Devices tab, press <strong>Edit</strong> on the old board, set Status to <strong>Inactive</strong> and save. The slot becomes free, and within about 15 seconds the broker refuses the old board.</li>
+<li>Plug the new board into the platform host and start onboarding.</li>
+<li>Pick the same role and the now free slot. Wire it, flash it and let it register as usual.</li>
+</ol>
+<p>The registration updates the slot's existing record in place. The record keeps its id, gets the new board's serial number, becomes Active again, and its components are replaced with the ones just chosen. The board gets the same name as before and a new broker password.</p>
+<p>To re-flash the same board in its own slot (a firmware update, new pins), onboard it again without deactivating it. The run sees that the board is already in this slot and updates its record in place. The broker password changes.</p>
+<div class="record"><p>Replacement is recorded in the slot history as <code>replaced</code>, with the old and the new serial number and the person who did it. Changing the serial number also deactivates the old board's broker credential.</p></div>
+
+<h3 id="devices-move">Moving a board</h3>
+<p>A board's record follows the board, because its serial number (the MAC address) is unique. To move a board to another slot, start onboarding with the board plugged in and pick the new slot. When the run reads the board's MAC address, it finds the existing record and asks:</p>
+<pre><code>this board is already registered as unit01-s-zone01 - UNIT01 / ZONE01 (SENSE).
+Move this board from unit01-s-zone01 to UNIT01 / ZONE02?</code></pre>
+<ul>
+<li><strong>Yes</strong> moves the record to the new slot. The board takes the new slot's name, its components are replaced, and the old slot becomes free. If the new slot holds an older inactive record with the same name, that record is renamed <code>&lt;name&gt;-&lt;id&gt;</code> and kept inactive.</li>
+<li><strong>No</strong> stops the run before anything is erased or written.</li>
+</ul>
+<p>The question comes after the board is probed and before the erase, because that is the first moment both the board and the target slot are known. A run started with <code>-y</code> never moves a board: it stops and asks you to onboard interactively.</p>
+<p><span class="role">maintenance</span> may move a board only into a slot that already has an inactive record. Moving a board into a slot that never had one is an engineer's change.</p>
+<div class="record"><p>A move is recorded in the slot history as <code>moved</code>, with the old and new zone, role and name.</p></div>
+
+<h3 id="devices-mqtt">MQTT credentials per board</h3>
+<p>The broker admits nobody anonymously. Each registered board has its own credential:</p>
+<ul>
+<li><strong>User name:</strong> the board's name, for example <code>unit02-c-zone02</code>.</li>
+<li><strong>Password:</strong> a fresh random password minted at every onboarding, so re-flashing a board changes it. The password goes onto the board and into its provisioning record. The platform database stores only its hash.</li>
+<li><strong>Access by role.</strong> The broker lets a SENSE board publish only under its own slot's <code>sense/</code> topics. It lets a CONTROL board receive only its own slot's <code>control/</code> topics and publish only its own <code>control_setpoint/</code> topics.</li>
+</ul>
+<p>A sidecar next to the broker rebuilds the broker's password and access files from the database every 15 seconds. Two things follow from that:</p>
+<ul>
+<li><strong>Deactivation revokes within about 15 seconds.</strong> When a device is marked Inactive, or its record is deleted, its credential drops out at the next rebuild. The broker then refuses its next connection and denies its publishes.</li>
+<li><strong>The first connections of a new board may be refused.</strong> The board boots before it is registered. Until the registration lands and the next rebuild picks it up, which takes up to about 15 seconds, the broker refuses the board. The board restarts after 10 seconds and tries again, so this clears by itself.</li>
+</ul>
+<p>A board that is not registered (the run was refused, the board had no IP, or <code>--no-register</code>) has a password that the broker does not know, so it cannot publish. Onboard it again once the cause is fixed.</p>
+<p>Boards flashed before broker authentication existed have no credential. Re-onboard them.</p>
+<div class="warn"><p>The WiFi passphrase and the MQTT password sit in plain text on the board's flash. Anyone holding the board can read them. WebREPL also stays on after onboarding: anyone who reaches port 8266 with the board's WebREPL password gets a full Python prompt and the board's files. Treat a lost board as a lost credential and mark it Inactive.</p></div>
+
+<h3 id="devices-history">Slot history and what gets recorded</h3>
+<p>The database keeps an append-only history of where every board has been. A database trigger writes it on every change to a device record, whoever makes the change: onboarding, the Devices tab or a direct database change. Nobody can edit or delete the history, and it outlives a deleted device record.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Event</th><th>When</th></tr></thead>
+<tbody>
+<tr><td><code>placed</code></td><td>A device record was created.</td></tr>
+<tr><td><code>moved</code></td><td>Its zone or role changed.</td></tr>
+<tr><td><code>renamed</code></td><td>Only its name changed, for example after a unit or zone code was renamed and the slot re-onboarded.</td></tr>
+<tr><td><code>replaced</code></td><td>A different board (serial number) took over the record.</td></tr>
+<tr><td><code>removed</code></td><td>The record was deleted.</td></tr>
+</tbody>
+</table></div>
+<p>Each event holds the board's serial number, the zone, role and name before and after, the time, and who made the change: their account, person id, name, platform role and source. A re-flash in place with no change of slot, name or board adds no event.</p>
+<div class="record"><p>For each onboarding the platform records: the device record and its components, stamped with the person whose sign-in the run used; the slot history event; the board's credential hash; and on the host, <code>edge/provisioned/&lt;name&gt;.json</code> with the MAC address, chip, firmware file and its SHA-256, MicroPython version, tool versions, the IP at onboarding, the host login that flashed it and the Keycloak account that registered it. Every stored measurement is stamped with the zone its board was in when the reading arrived.</p></div>
+<p><span class="role">maintenance</span> and <span class="role">engineer</span> may read the slot history. <span class="role">auditor</span> and <span class="role">qa</span> may read it and export it from Database Management.</p>
+
+<h3 id="devices-sensor">Adding a sensor type</h3>
+<p>The wizard's questions are data, not code. The SENSE questions come from <code>edge/templates/esp32-sense.json</code> and the CONTROL questions from <code>edge/templates/esp32-control.json</code>. Each sensor entry gives its name, the tags it publishes, and the parameters to ask, with the reference build's wiring as defaults. Neither <code>flash-device.sh</code> nor the wizard page changes when an entry is added.</p>
+<p>A sensor also needs code on the board to read it: a reading function in the board application (<code>edge/src/app/cea_sensors.py</code>). If that function already exists, the template entry is all that is needed. A new kind of sensor needs a new reading function, which is a developer's change made through the normal review.</p>
+<p>New device types in the onboarding page work the same way. Each tile is an entry in <code>edge/catalog.json</code>. An entry whose script is missing or not executable is shown as unavailable.</p>
+
+<h3 id="devices-bench">Bench mode</h3>
+<pre><code>./edge/flash-device.sh --unregistered</code></pre>
+<p>This brings a board up on WiFi with no platform identity, for a bench with no platform deployed. It asks no slot, ships no application, writes nothing to the database and needs no sign-in. The board is named <code>cea-un-&lt;mac6&gt;</code> and has no MQTT credential, so it cannot connect to the broker. It joins WiFi and keeps WebREPL open, so the warning in <a href="#devices-mqtt">MQTT credentials per board</a> applies to it too. To give it a slot later, onboard it normally. Nothing has to be undone.</p>
+<p>A registered run also offers to continue unregistered when the platform database does not answer or no sign-in is possible. If you accept, the board ends up the same as with <code>--unregistered</code>.</p>
+<div class="note"><p><code>--no-register</code> is different: it flashes the board for a slot with its application and pins, but does not write the device record. The slot still reads as free, and the broker refuses the board until it is onboarded again with registration.</p></div>
+
+<h3 id="devices-trouble">When onboarding is refused</h3>
+<p>The wizard explains a refusal from the platform database in plain words:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>The wizard says</th><th>What to do</th></tr></thead>
+<tbody>
+<tr><td>this role may not onboard boards (permission denied)</td><td>Ask an administrator for the <span class="role">engineer</span> or <span class="role">maintenance</span> role.</td></tr>
+<tr><td>no platform role, or two own roles</td><td>Ask an administrator to fix the account in the User Manager.</td></tr>
+<tr><td>anonymous request refused, or the sign-in token was refused</td><td>Sign in again and re-run.</td></tr>
+<tr><td>the token expired during the request</td><td>Re-run. The slot's record is updated in place.</td></tr>
+<tr><td>config-api has no JWT key</td><td>Administrator: run <code>./deploy-infra.sh</code>, then <code>./apps/frontend/deploy.sh</code>.</td></tr>
+<tr><td>the code expired before the sign-in was finished</td><td>Re-run for a new code. If Keycloak said the account is disabled, the access request is still pending or the account was deactivated.</td></tr>
+<tr><td>no free SENSE (or CONTROL) slot</td><td>Mark the existing device Inactive, or add a zone in the Units tab.</td></tr>
+<tr><td>not offered: ... is not a legal hostname</td><td>Rename the unit or zone code in the Units tab.</td></tr>
+</tbody>
+</table></div>
+<p>The run checks your sign-in again when it checks the board, just before the erase and just before the registration. If your session has ended (you signed out, or your account was deactivated), the run pauses and asks the same person to sign in again: the browser page sends you to the sign-in page, and a terminal run shows a new code. The run waits up to 15 minutes. If nobody signs in by then, a run that has not yet erased the board stops with "Nothing was erased".</p>
+<p>If an administrator has set <code>EDGE_WIZARD_ROLE</code> and you no longer hold that role, the run stops before the erase. After the erase it skips the registration instead, and the board stays unregistered.</p>
+</section>

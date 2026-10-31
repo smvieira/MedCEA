@@ -1,0 +1,154 @@
+<section id="overview" data-title="Platform overview">
+<h2>Platform overview</h2>
+<p class="lede">MedCEA is an open, self-hosted platform for growing medicinal mushrooms and plants in controlled chambers so that the same recipe gives the same result, and so that every step can be shown to an inspector afterwards. This chapter explains what the platform is for, the parts it is built from, how a sensor reading reaches a dashboard and how a recipe ends up switching a relay, the web addresses you use, and the words the rest of this manual relies on.</p>
+
+<h3 id="overview-what">What MedCEA is</h3>
+<p>MedCEA stands for Medicinal Controlled Environment Agriculture. It is the prototype built in a Design Science Research PhD project at ISCTE-IUL and Instituto de Telecomunicações, with ESACB (2025 to 2028). The main organism is Hericium erinaceus (lion's mane). The goal of the production is not the largest harvest. It is a reproducible amount of the target bioactive compounds, made in a way a regulator can accept. All custom code is released under the MIT licence.</p>
+<p>The project sets the platform four goals, called pillars:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Pillar</th><th>What the platform must do</th></tr></thead>
+<tbody>
+<tr><td>I. Compound-centred control</td><td>Run a recipe as a programme of steps, each with its own target ranges for temperature, humidity, CO2 and light, and keep the chamber inside those ranges with a control algorithm, which can be a simple on/off rule or an AI method.</td></tr>
+<tr><td>II. Reproducible outcomes</td><td>Follow the recipe and know the genetic origin of each lot, so that differences between batches can be traced to the environment rather than to chance.</td></tr>
+<tr><td>III. Compliance by design</td><td>Build the rules of GACP, EU GMP Annex 11, the Novel Food regulation and THMPD into the data model, the access control and the event records, rather than produce them afterwards as reports.</td></tr>
+<tr><td>IV. Traceability and audit</td><td>Record every event in a lot's life in an audit trail that can be added to but not edited, with access split by role (operator, quality, administrator, auditor).</td></tr>
+</tbody>
+</table></div>
+<div class="note"><p>This is a prototype. Recipe execution, control algorithms, sign-in with eleven roles, changes stamped with the person who made them, approvals recorded in the database and a hash-chained history of access policy changes are built. Batch and lot records, laboratory results, the Electronic Batch Record, GS1 EPCIS event export and a regulator interface are not built yet. Where a later chapter describes a duty that has no screen yet, it says so.</p></div>
+
+<h3 id="overview-blocks">Building blocks</h3>
+<p>Everything runs on one Ubuntu computer (the host) with MicroK8s, a small Kubernetes. Two scripts install it: <code>./deploy-infra.sh</code> for the infrastructure and <code>./deploy-apps.sh</code> for the applications. The administrator runs them on the host; everyone else works in a web browser. See <a href="#admin">Administration</a>.</p>
+<h4>Infrastructure services</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Service</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td>Keycloak</td><td>The one sign-in page for every web application (realm <code>medcea</code>). It holds the accounts and the role of each person.</td></tr>
+<tr><td>PostgreSQL</td><td>The shared database <code>medcea_db</code>: units, devices, recipes, runs, measurements, approvals and the audit records. It is reachable only inside the cluster.</td></tr>
+<tr><td>Mosquitto</td><td>The MQTT message broker. Boards and services exchange readings and commands through it. Every client signs in with its own credential; there is no anonymous access. Boards on the local network connect on port <code>31883</code>.</td></tr>
+<tr><td>Node-RED</td><td>Subscribes to every MQTT message under <code>medcea/</code> and writes it into the database as a measurement. Engineers also use its editor to build flows.</td></tr>
+<tr><td>Grafana</td><td>Dashboards that read the measurements from PostgreSQL.</td></tr>
+</tbody>
+</table></div>
+<h4>Web applications</h4>
+<p>The Portal is the start page. It shows three cards: Grafana, JupyterHub (AI Workbench) and Administration. The Administration card opens the Platform Management page, which holds the cards for Node-RED, Database Management, MQTT Explorer, System Configuration, Recipe Schedule Manager, Run Monitor and User Manager. pgAdmin and the device onboarding wizard have no Portal card; the table says where to find them.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Application</th><th>What you do there</th></tr></thead>
+<tbody>
+<tr><td>System Configuration (Config UI)</td><td>Manage locations, production units, zones, devices, recipes and their steps, control models, and which recipes each unit may run. Its tabs are Locations, Units, Devices, Control Models and Recipes. The Onboard Device button on the Devices tab opens the device onboarding wizard.</td></tr>
+<tr><td>Recipe Schedule Manager (Scheduler)</td><td>Start a run now (Run Now), schedule runs (once, hourly, daily, weekly, monthly), stop or retry runs, read run logs.</td></tr>
+<tr><td>Run Monitor</td><td>Live view of active runs, cycle progress, and sensor readings against the step's limits.</td></tr>
+<tr><td>Database Management</td><td>Export the definition and data of the database objects in the groups your role may export; every export is logged. It also links to pgAdmin.</td></tr>
+<tr><td>pgAdmin</td><td>A PostgreSQL web console, for the <span class="role">admin</span> role only. Reached from Database Management.</td></tr>
+<tr><td>User Manager</td><td>Tabs Requests, Users, Decisions, E-mail settings, Templates, Access review and Change log. Each person sees only the tabs their role may use.</td></tr>
+<tr><td>MQTT Explorer</td><td>Browse, publish and subscribe to MQTT topics in the browser.</td></tr>
+<tr><td>Node-RED editor</td><td>Build and change data flows.</td></tr>
+<tr><td>AI Workbench</td><td>JupyterHub: notebooks and VS Code with a personal workspace, for research on the platform's data.</td></tr>
+<tr><td>Device onboarding wizard</td><td>Runs on the host, because it flashes boards over USB. It registers a board in a slot and writes its configuration. Open it with the Onboard Device button in the Config UI.</td></tr>
+</tbody>
+</table></div>
+<p>Every card is shown to everyone, but which applications a person can open depends on their role. See <a href="#access">Access and roles</a> and <a href="#apps">Using the applications</a>.</p>
+<h4>Edge boards</h4>
+<p>The chambers are equipped with ESP32 boards running MicroPython. Each board is onboarded with one of two roles and runs the application for that role:</p>
+<ul>
+<li>SENSE reads the sensors fitted to it and publishes the readings. The supported sensors are a Sensirion SCD40/SCD41 or SCD30 (CO2, air temperature and air humidity), a DS18B20 substrate temperature probe and an analogue water level probe.</li>
+<li>CONTROL drives a relay board: grow lights (red, blue, UV), air heater pad, air cooler, humidifier, air flow fan, CO2 fan, CO2 flow steriliser, substrate heater. Which relay drives which equipment is set in the board's channel map during onboarding. It reports back what it actually switched.</li>
+</ul>
+<p>Onboarding, replacing and calibrating boards is covered in <a href="#devices">Devices</a>.</p>
+
+<h3 id="overview-structure">Units, zones and slots</h3>
+<p>The physical layout is stored as three levels:</p>
+<ol>
+<li>A location is a site or room.</li>
+<li>A production unit is a chamber in a location, identified by a unit code such as <code>UNIT01</code>.</li>
+<li>A zone is a controlled area inside a unit, identified by a zone code such as <code>ZONE01</code>.</li>
+</ol>
+<p>Each zone has exactly two slots: one for a SENSE board and one for a CONTROL board. A board's name comes from its slot: the unit code, <code>s</code> or <code>c</code>, and the zone code, in lower case, for example <code>unit01-s-zone01</code>. That name is its network hostname, its MQTT user name and the hostname shown in the Config UI. A board that is not registered yet is called <code>cea-un-</code> followed by the last six characters of its MAC address.</p>
+<p>All MQTT traffic for a zone sits under one topic base, <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;</code>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Topic</th><th>Who publishes</th><th>Who listens</th><th>Content</th></tr></thead>
+<tbody>
+<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;</code></td><td>SENSE board</td><td>Node-RED, the run in progress</td><td>A reading, for example tag <code>co2</code>, <code>air_temperature</code> or <code>air_humidity</code></td></tr>
+<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control/&lt;tag&gt;</code></td><td>The run in progress (Scheduler); an engineer during commissioning</td><td>CONTROL board</td><td>A command for the equipment that affects that reading, or <code>light</code> for the grow lights</td></tr>
+<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control_setpoint/&lt;tag&gt;</code></td><td>CONTROL board</td><td>Node-RED</td><td>What the board actually switched</td></tr>
+</tbody>
+</table></div>
+<p>The broker enforces this: a SENSE board may only publish to its own <code>sense</code> topics, and a CONTROL board may only read its own <code>control</code> topics and publish to its own <code>control_setpoint</code> topics. Setting a device's Status to Inactive in the Config UI locks it out of the broker within about 15 seconds.</p>
+
+<h3 id="overview-flow">How data flows</h3>
+<h4>From a sensor to a dashboard</h4>
+<ol class="steps">
+<li>The SENSE board in a zone reads its sensors and publishes each value on <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;</code>, with a timestamp and the board's name.</li>
+<li>Mosquitto checks the board's credential and topic, then passes the message on.</li>
+<li>Node-RED receives every message under <code>medcea/</code> and stores it in the database table of measurements.</li>
+<li>Grafana dashboards and the Run Monitor read the measurements from the database and show them.</li>
+</ol>
+<h4>From a recipe to a relay</h4>
+<ol class="steps">
+<li>An engineer writes a recipe in the Config UI: a sequence of steps, each with a number of cycles, light ON and light OFF minutes, a light type (UV, BLUE, RED or DARK), and lower and upper limits for air temperature, humidity, CO2 and (optionally) substrate temperature.</li>
+<li>The recipe is allowed on a unit in the Recipe ↔ Unit Permissions panel of the Config UI's Units tab, with a control algorithm and its parameters.</li>
+<li>In the Scheduler someone starts a run (Run Now) or creates a schedule that starts it later. The run is recorded with the person who started it, or, for a schedule, the person who created the schedule.</li>
+<li>The run goes through the steps in order and repeats each step for its number of cycles. During a cycle it listens to the <code>sense</code> topics of the unit. At present a run follows one zone per unit.</li>
+<li>For each reading the control algorithm compares the value with the step's limits and decides UP, DOWN or OFF, and the run publishes that on the matching <code>control</code> topic. Once per pass it also publishes ON or OFF for the grow lights on <code>control/light</code>: ON during the light ON minutes of the cycle, OFF after.</li>
+<li>The CONTROL board looks the command up in its channel map and switches the relay of the right equipment, for example the heater for UP on air temperature.</li>
+<li>The board publishes what it did on <code>control_setpoint</code>. Node-RED stores that too, so the record shows not only the command but that it reached the hardware.</li>
+<li>When the last cycle ends, the run is marked Completed. A stopped or crashed run is marked Failed.</li>
+</ol>
+<div class="table-wrap"><table>
+<thead><tr><th>Stage</th><th>Sensor path</th><th>Control path</th></tr></thead>
+<tbody>
+<tr><td>Chamber</td><td>Sensor on a SENSE board</td><td>Relay on a CONTROL board</td></tr>
+<tr><td>Transport</td><td>MQTT <code>sense</code> topic via Mosquitto</td><td>MQTT <code>control</code> topic via Mosquitto, answered on <code>control_setpoint</code></td></tr>
+<tr><td>Platform</td><td>Node-RED stores the measurement in PostgreSQL</td><td>The Scheduler's run applies the recipe step and the control algorithm</td></tr>
+<tr><td>People</td><td>Grafana, Run Monitor</td><td>Config UI (recipe), Scheduler (run), Run Monitor (progress)</td></tr>
+</tbody>
+</table></div>
+<div class="record"><p>Changes to locations, units, zones, devices, recipes and their steps, recipe-unit permissions, algorithms, parameter sets, schedules, scheduler settings, runs and cycles are stamped with who made them (the signed-in person; <code>system:scheduler</code> acting for the person behind a schedule; or <code>db:</code> followed by the database login for a change made directly in the database, such as by a deploy script) and copied to an append-only change log. Every placement or move of a board in a slot is kept in a slot history. See <a href="#compliance">Compliance and records</a>.</p></div>
+
+<h3 id="overview-addresses">Web addresses</h3>
+<p>Every application has its own host name under one base domain, and every one is served over HTTPS with a certificate signed by the platform's own certificate authority. Each computer or phone that opens the platform must trust that authority once, or the browser shows "Not secure".</p>
+<p>The administrator chooses the base domain at install time:</p>
+<ul>
+<li>Name-based (<code>medcea</code>): addresses such as <code>https://portal.medcea</code>. The host answers name lookups for the <code>medcea</code> names, and Tailscale split DNS sends every device on the tailnet to it. This needs one setting in the Tailscale admin console, once per tailnet.</li>
+<li>IP-based (the default): addresses such as <code>https://portal.100.94.119.12.nip.io</code>, which need no DNS setup.</li>
+<li>A domain in your own DNS.</li>
+</ul>
+<p>When the platform moves from the IP-based to the name-based domain, the old addresses (the alias) stay as permanent redirects, so bookmarks keep working. The first time you open a name-based address, type the <code>https://</code>: browsers treat a one-word ending as a search until they have visited it.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Address (name-based domain)</th><th>Application</th></tr></thead>
+<tbody>
+<tr><td><code>portal.medcea</code></td><td>Portal: start here</td></tr>
+<tr><td><code>access.medcea</code></td><td>User Manager; <code>access.medcea/register</code> opens the Request access tab of the sign-in page</td></tr>
+<tr><td><code>config.medcea</code></td><td>System Configuration</td></tr>
+<tr><td><code>scheduler.medcea</code></td><td>Recipe Schedule Manager</td></tr>
+<tr><td><code>monitor.medcea</code></td><td>Run Monitor</td></tr>
+<tr><td><code>dbmgmt.medcea</code></td><td>Database Management</td></tr>
+<tr><td><code>pgadmin.medcea</code></td><td>pgAdmin</td></tr>
+<tr><td><code>grafana.medcea</code></td><td>Grafana</td></tr>
+<tr><td><code>node-red.medcea</code></td><td>Node-RED editor</td></tr>
+<tr><td><code>mqtt-explorer.medcea</code></td><td>MQTT Explorer</td></tr>
+<tr><td><code>ai-workbench.medcea</code></td><td>AI Workbench (JupyterHub)</td></tr>
+<tr><td><code>onboard-device.medcea</code></td><td>Device onboarding wizard</td></tr>
+<tr><td><code>keycloak.medcea</code></td><td>Keycloak (sign-in page; its admin console is for recovery only)</td></tr>
+</tbody>
+</table></div>
+<p>With the IP-based domain, replace <code>medcea</code> with the IP-based domain, for example <code>grafana.100.94.119.12.nip.io</code>. Boards do not use these names: they reach the broker on the host's local network address, port <code>31883</code>.</p>
+
+<h3 id="overview-terms">Key terms</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>Unit (production unit)</td><td>One cultivation chamber, identified by its unit code (for example <code>UNIT01</code>). Operators are assigned to units and see only the runs, run logs and telemetry of the units assigned to them.</td></tr>
+<tr><td>Zone</td><td>A controlled area inside a unit, identified by its zone code. Each zone has one SENSE and one CONTROL slot and its own MQTT topic base.</td></tr>
+<tr><td>Slot</td><td>The place for one board in a zone: unit, zone and role (SENSE or CONTROL). A board is registered into a slot; replacing a board means marking the old one inactive and onboarding the new one into the same slot.</td></tr>
+<tr><td>Recipe</td><td>A cultivation programme: an ordered list of steps, each with its cycle count, light type, light ON and OFF minutes, and lower and upper limits per environmental parameter. A recipe is a draft until a <span class="role">qa</span> person who did not write it approves it. An approved recipe cannot be edited; a change starts a new draft. The approval is recorded in the database; the Config UI has no Approve button yet.</td></tr>
+<tr><td>Run</td><td>One execution of a recipe on one unit, with its status (Queued, Running, Completed, Failed), its log and the person it is attributed to.</td></tr>
+<tr><td>Cycle</td><td>One repetition of a recipe step. It lasts the step's light ON plus light OFF minutes; a step runs as many cycles as its cycle count says.</td></tr>
+<tr><td>Algorithm (control model)</td><td>The rule that turns a reading and the step's limits into UP, DOWN or OFF. Built in, as named on the Control Models tab: If-Then-Else (a simple on/off rule, and the default), PID Controller, Fuzzy Logic Control, Model Predictive Control and Q-Learning.</td></tr>
+<tr><td>Parameter set</td><td>A named set of settings for one algorithm (for example PID gains), for one unit or for any unit. It starts as a draft and is used once a <span class="role">qa</span> person approves it. Schedules, recipe-unit permissions and runs refer to a parameter set, so a run uses settings that were reviewed.</td></tr>
+<tr><td>Learned State (Q-table)</td><td>What a learning algorithm has saved for a unit, kept between cycles and runs so it does not start from zero; for Q-Learning this is its Q-table. The Config UI shows it in the Learned State column. It is never deleted; only a <span class="role">qa</span> person can retire it, and the next run then starts from zero.</td></tr>
+<tr><td>Release</td><td>The record that a <span class="role">qp</span> person who neither created nor executed the run released the output of a completed run. The database supports it; there is no screen for it yet. Once a run is released, it can no longer be reset for a retry.</td></tr>
+<tr><td>Decision (account decision)</td><td>A recorded change to an account made by an administrator: a grant, a role change, a unit assignment, a deactivation or activation. A decision that widens access waits until a <span class="role">qa</span> person who is neither its maker nor the person it concerns confirms it in the User Manager's Decisions tab. Deactivation and narrowing take effect at once.</td></tr>
+<tr><td>Access review</td><td>The quarterly review of who holds which role and unit. A <span class="role">qa</span> person creates it in the User Manager's Access review tab and signs it off; the sign-off cannot be undone. Auditors can read it.</td></tr>
+</tbody>
+</table></div>
+</section>

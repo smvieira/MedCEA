@@ -1,0 +1,236 @@
+<section id="compliance" data-title="Access control and records">
+<h2>Access control and records</h2>
+<p class="lede">This chapter is for quality staff (<span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span>), auditors and thesis examiners. It describes the one access policy that says who may do what, the layers that enforce it, the decisions that need a second person, and the records the platform keeps of every change. It ends with the known gaps and the decisions taken for IAM 2.6. It describes IAM 2.6 (commit <code>a9639b7</code> on branch <code>iam/phase-2</code>). The current value of each switch is shown by <code>./health-check.sh</code> and in each access review.</p>
+
+<h3 id="compliance-policy">The access policy: one source</h3>
+<p>Every access right on the platform comes from one file, <code>apps/iam/policy/defaults.yaml</code>. A compiler reads it and produces the database grants, the sign-in gate of each web host, the route table every service checks and the network policies. Grafana, the AI workbench and device onboarding are not yet gated from it (see <a href="#compliance-gaps">Known gaps</a>). The compiler refuses to compile a policy that breaks one of its invariants.</p>
+<p>The policy is a matrix. Rows are <strong>resource groups</strong>: a set of tables, API routes, web pages and MQTT topics that belong together, such as "Recipes and recipe-to-unit assignment" or "Telemetry". Columns are the eleven <strong>platform roles</strong>. A cell lists the <strong>access levels</strong> a role holds on a group. A role not listed in a row holds nothing there. Every account has exactly one platform role.</p>
+
+<h4>Roles</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th>Name in the UI</th><th>What the role is for</th></tr></thead>
+<tbody>
+<tr><td><span class="role">operator</span></td><td>Cultivation Operator</td><td>Runs the cultivation day to day in the units assigned to them.</td></tr>
+<tr><td><span class="role">production_manager</span></td><td>Production Manager (Process Owner)</td><td>Prepares and starts runs, assigns approved recipes and parameter sets to units. Holds everything an operator holds, in every unit.</td></tr>
+<tr><td><span class="role">maintenance</span></td><td>Maintenance and Calibration</td><td>Replaces and calibrates boards and sensors in existing slots.</td></tr>
+<tr><td><span class="role">qc</span></td><td>Quality Control Analyst</td><td>Tests product and records lab results. Offered, but tagged "not yet in use".</td></tr>
+<tr><td><span class="role">qa</span></td><td>Quality Assurance</td><td>Independent approver of configuration, access decisions and policy changes. Also holds everything <span class="role">auditor</span> holds.</td></tr>
+<tr><td><span class="role">qp</span></td><td>Qualified / Responsible Person</td><td>Releases the output of a completed run; creates and changes nothing. Offered, but tagged "not yet in use".</td></tr>
+<tr><td><span class="role">engineer</span></td><td>Automation Engineer</td><td>Builds master data, devices, recipes, controllers, flows and dashboards as drafts that <span class="role">qa</span> approves.</td></tr>
+<tr><td><span class="role">bio_scientist</span></td><td>Bio-process Scientist</td><td>Reads recipes and controllers; works in the AI workbench.</td></tr>
+<tr><td><span class="role">control_scientist</span></td><td>Control and AI Scientist</td><td>Reads controllers and parameter sets; develops algorithms in the AI workbench.</td></tr>
+<tr><td><span class="role">admin</span></td><td>System Administrator</td><td>Keeps the platform running and administers accounts and the policy, without access to regulated or history content.</td></tr>
+<tr><td><span class="role">auditor</span></td><td>Auditor / Inspector</td><td>Reads and exports records, configuration and audit trails; changes nothing.</td></tr>
+</tbody></table></div>
+
+<h4>Access levels</h4>
+<p>One scale of letters is used for every kind of resource. Some levels include others ("implies"), and a cell always lists every level it holds, so a reader sees exactly what is granted.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Level</th><th>Name</th><th>Includes</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>N</td><td>None</td><td></td><td>No access. The default for every cell.</td></tr>
+<tr><td>R</td><td>Read</td><td></td><td>See the resource, change nothing.</td></tr>
+<tr><td>X</td><td>Read and export</td><td>R</td><td>Read, and take a copy out of the platform through Database Management. Every export is logged.</td></tr>
+<tr><td>C</td><td>Create</td><td>R</td><td>Add new records; never change existing ones. The level used for appending to regulated data and audit trails.</td></tr>
+<tr><td>U</td><td>Update</td><td>C, R</td><td>Create and change records within the group's constraint. Removing a configuration record is an update to "retired", never a delete. Never held by a person on regulated or history data.</td></tr>
+<tr><td>A</td><td>Approve</td><td>R</td><td>Approve or release another person's work. In this version an approval is an attributable, time-stamped record, not a 21 CFR Part 11 electronic signature.</td></tr>
+<tr><td>O</td><td>Operate</td><td>R</td><td>Start, stop or trigger a run; no change to its definition.</td></tr>
+<tr><td>K</td><td>Configure</td><td></td><td>Administer a tool or accounts. Held only by <span class="role">admin</span>. On accounts it means reading and changing account records, which are personal data.</td></tr>
+<tr><td>D</td><td>Delete</td><td></td><td>Remove platform components on the host. Never data. Held only by <span class="role">admin</span>, on platform administration.</td></tr>
+</tbody></table></div>
+
+<h4>Data classes</h4>
+<p>Each resource group has one class, and the invariants are written against the classes.</p>
+<ul>
+<li><strong>Regulated data</strong>: records produced while making product, such as runs, telemetry, persisted controller state and run logs. Created once and never changed or deleted by anyone; corrections are new records.</li>
+<li><strong>Audit history</strong>: append-only trails of who did what, including approvals and export logs. Written only by database functions and triggers.</li>
+<li><strong>Personal data</strong>: accounts, names, e-mail addresses, unit assignments and access decisions.</li>
+<li><strong>Configuration</strong>: master data, recipes, controllers, schedules, settings, dashboards and tools, changed under the group's approval rule.</li>
+</ul>
+
+<h4>Constraints</h4>
+<p>A constraint narrows a level in a cell. A person passes when any of their roles holds the level without a constraint, or with a constraint that holds.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Constraint</th><th>Where it applies</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td><code>own_unit</code></td><td><span class="role">operator</span> reading telemetry, runs and run logs</td><td>Only the units assigned to the person, including every zone of those units and zones added later.</td></tr>
+<tr><td><code>assigned_run</code></td><td><span class="role">operator</span> executing or stopping runs</td><td>Only a run another person created while holding <span class="role">production_manager</span> (or a schedule such a person created), in one of the operator's units.</td></tr>
+<tr><td><code>assign_only</code></td><td><span class="role">production_manager</span> on recipes</td><td>Assign approved recipes and approved parameter sets to units; never edit them.</td></tr>
+<tr><td><code>draft_only</code></td><td><span class="role">engineer</span> on recipes and controllers</td><td>Edit drafts only. Once approved, a definition is frozen and a change starts a new draft.</td></tr>
+<tr><td><code>existing_slot</code></td><td><span class="role">maintenance</span> on devices and onboarding</td><td>Re-onboard a board into a slot that already exists; creating a new slot is refused.</td></tr>
+<tr><td><code>commissioning_unit</code></td><td><span class="role">engineer</span> publishing on command topics</td><td>Command only a unit flagged for commissioning and with no active run.</td></tr>
+<tr><td><code>not_own_author</code></td><td>every Approve (A) cell</td><td>Approve only another person's work. Compares persons, not accounts.</td></tr>
+<tr><td><code>qa_dual_control</code></td><td><span class="role">admin</span> on accounts and unit assignments</td><td>Grants wait for a <span class="role">qa</span> person; removing access acts at once.</td></tr>
+</tbody></table></div>
+
+<h4>Invariants</h4>
+<p>Invariants are rules the policy itself must satisfy. The matrix rules are checked on every compile and by <code>python3 apps/iam/compiler/cli.py check</code>. The workflow rules are checked when a change is approved: I17 by the User Manager, I8 by the planned Policy UI. The database rules (I9, I10, I15) are checked by the database deploy, which rolls back if the live grants differ from the policy.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td>I1</td><td>No role holds U or D on regulated or history data.</td></tr>
+<tr><td>I2</td><td><span class="role">admin</span> holds nothing but K on regulated, history or personal data, including through tools.</td></tr>
+<tr><td>I3</td><td><span class="role">auditor</span> holds only R or X.</td></tr>
+<tr><td>I4</td><td>On a group with an approval rule, no role holds both (C, U or O) and A.</td></tr>
+<tr><td>I5</td><td>The two scientist roles hold nothing on runs, schedules, telemetry, MQTT topics and controller state.</td></tr>
+<tr><td>I6</td><td>Production roles hold nothing on the AI workbench; <span class="role">engineer</span> at most R.</td></tr>
+<tr><td>I7</td><td><span class="role">qp</span> holds no C, U or O anywhere, and holds A on runs.</td></tr>
+<tr><td>I8</td><td>A policy version is applied only after approval by someone other than the submitter, whose own role it does not widen.</td></tr>
+<tr><td>I9</td><td>Nothing in the platform's schemas is reachable without a verified identity.</td></tr>
+<tr><td>I10</td><td>Each service's grants stay within its ceiling; no service approves on its own or rewrites regulated or history tables unless a waiver covers it.</td></tr>
+<tr><td>I11</td><td>A tool cannot widen a role's access to the data it reaches, unless a waiver covers it.</td></tr>
+<tr><td>I12</td><td>At least one role other than <span class="role">admin</span> holds A on the policy and on accounts; <span class="role">admin</span> never does.</td></tr>
+<tr><td>I13</td><td>Only <span class="role">admin</span> holds K or D; D only on platform administration.</td></tr>
+<tr><td>I14, I16</td><td>Every cell compiles to something real, and cells list every level they imply.</td></tr>
+<tr><td>I15</td><td>The privileges in the database equal what the policy compiles to, and every table belongs to a group.</td></tr>
+<tr><td>I17</td><td>No person holds an <span class="role">admin</span> account and a <span class="role">qa</span> account at the same time.</td></tr>
+</tbody></table></div>
+<p>Two waivers are accepted and stated in the policy with their compensating controls and a review date of 2027-10-27. W1: the Node-RED editor runs with the ingest account, which must insert telemetry. W2: a learning controller updates its Q-table during a run; every update is also appended as an event with the run id.</p>
+<div class="note"><p>The Policy UI, where an administrator drafts a change and a <span class="role">qa</span> person approves it before it is applied, is planned (Phase 4) and not built. Today the policy changes only through a change to <code>defaults.yaml</code> in git followed by a deploy, and <code>python3 apps/iam/compiler/cli.py check</code> runs the invariants.</p></div>
+
+<h3 id="compliance-layers">How the policy is enforced, in layers</h3>
+<p>No single check is trusted alone. A request passes five layers, each compiled from the same policy.</p>
+<ol>
+<li><strong>Sign-in gate per host.</strong> Every web UI signs in through Keycloak. Each gated host admits only the roles that hold some level on a group served there. A signed-in person without such a role sees a "No access" page naming the roles that may open it. For example the policy admits <span class="role">auditor</span>, <span class="role">qa</span> and <span class="role">qp</span> to Database Management, and <span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span> to the User Manager. <code>python3 apps/iam/compiler/cli.py hosts</code> lists who each host admits.</li>
+<li><strong>Verified token in every service.</strong> The five Python services (scheduler, Monitor, Database Management, the Config UI's platform API and the User Manager) check every request against the compiled route table. They trust only a signed access token verified against Keycloak's public keys, never identity headers that anything inside the cluster could send. Each route belongs to one group and needs one level; a route missing from the table is refused.</li>
+<li><strong>Network policies.</strong> Each of the six application services (scheduler, Monitor, Database Management, the Config UI, its database API and the User Manager) accepts connections only from its listed callers, so another program in the cluster, a notebook or a forged request cannot reach it at all. The portal, MQTT Explorer, Node-RED, Grafana and the workbench are not covered.</li>
+<li><strong>Database roles and row-level security.</strong> While <code>IAM_DB_ROLES</code> is true, a person's requests through the Config UI's database API run as that person's own database role. Each service logs in as its own role. Row-level security (a filter the database applies to every query) limits an <span class="role">operator</span> to the telemetry and runs of their units. Triggers refuse edits to approved definitions and to append-only records. This layer holds even if an application has a bug.</li>
+<li><strong>Approvals in the database.</strong> Approval functions check the approver's role and that the approver is not an author, using the person from the verified token. A service cannot approve on its own.</li>
+</ol>
+<p>Some constraints are checked only in one layer. <code>assigned_run</code> is checked only by the database's run functions, and <code>own_unit</code> by row-level security and by the Monitor and scheduler reads themselves.</p>
+
+<h3 id="compliance-modes">Report-only and enforce</h3>
+<p>The services can run in two modes, set by <code>IAM_ENFORCE</code> in <code>config.env</code>.</p>
+<ul>
+<li><strong>Report-only</strong> (<code>IAM_ENFORCE=false</code>, the state in which IAM 2.6 was deployed): a request the route table refuses is let through, and the service writes <code>medcea_iam: would refuse …</code> to its log. In the same way the scheduler logs <code>run_logs: would withhold</code> when it shows a run's log to a role that will not see it under enforcement.</li>
+<li><strong>Enforce</strong> (<code>IAM_ENFORCE=true</code>): the service answers 401 (no token or a bad one), 403 (route or role not allowed) or 503 (the service cannot check, for example the route table or keys are missing).</li>
+</ul>
+<p>Two places always enforce, whatever <code>IAM_ENFORCE</code> says: Database Management (exports) and the User Manager's administration port. The database layer has its own switch, <code>IAM_DB_ROLES</code>, which has been <code>true</code> since 30 October 2026, and the operator unit filter in the Monitor and scheduler applies whenever either switch is true. Only while both are false do those two services log <code>own_unit: would limit …</code> instead of filtering.</p>
+<p>The administrator turns enforcement on with <code>./guide.sh</code>: area "IAM switches (enable / roll back)", the <code>IAM_ENFORCE</code> action, then enable. The guide first lists its preconditions as a checklist the administrator confirms: <code>IAM_DB_ROLES</code> is true, the report-only trial is over, and every operator has a unit in effect. It then takes the deploy lock, runs <code>python3 tests/iam-routes-diff.py --strict</code>, sets the switch in <code>config.env</code> and runs <code>./deploy-infra.sh</code>, stopping at the first failure. Services read the new value within about a minute without a restart. Rollback sets it back to <code>false</code> and runs <code>./deploy-infra.sh</code> again.</p>
+<div class="record"><p>Every transition of <code>IAM_ENFORCE</code> or <code>IAM_DB_ROLES</code> appends an <code>enforcement_enabled</code> or <code>enforcement_disabled</code> event, naming the switch, to the tamper-evident policy history. <code>./health-check.sh</code> (check <code>iamenforce</code>) fails when the value the services read differs from <code>config.env</code>, when <code>IAM_ENFORCE</code> is true while <code>IAM_DB_ROLES</code> is false, or when a service's own fallback copy is still false under true. It warns while <code>IAM_ENFORCE</code> is false.</p></div>
+
+<h3 id="compliance-dual">Dual control: the maker is never the checker</h3>
+<p>Every approval needs two different <em>persons</em>. The platform compares the <code>person_id</code> carried in each verified token, not account names, so one person with two accounts is still one person. <code>person_id</code> is set to the account's own id when it is first enabled; changing it is itself a decision that waits for <span class="role">qa</span>.</p>
+<p>An approval function refuses when the approver is the author, submitter, creator or executor of the record, or, for an account decision, its subject; and when the change would widen the approver's own role. For account decisions the accounts are compared as well.</p>
+<p>Rule I17 keeps the administrator and the independent approver apart: no person may hold an <span class="role">admin</span> and a <span class="role">qa</span> account at the same time. The User Manager checks this against Keycloak when a role or <code>person_id</code> change is proposed and again when it is confirmed.</p>
+
+<h3 id="compliance-accounts">Account decisions</h3>
+<p>Every change an administrator makes to an account in the User Manager is recorded as an account decision. What happens next depends on whether the change gives access or takes it away.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Change</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td>Grant (an approved access request)</td><td>Waits for <span class="role">qa</span>. The request reads "approved", but the account stays disabled with no role until confirmed.</td></tr>
+<tr><td>Activation of an account</td><td>Waits for <span class="role">qa</span>, because an enabled account reaches Grafana, which is not yet gated by role.</td></tr>
+<tr><td>Role change that adds any (group, level) the old role did not have</td><td>Waits for <span class="role">qa</span>.</td></tr>
+<tr><td>New unit assignment</td><td>Waits for <span class="role">qa</span> (see <a href="#compliance-units">Unit assignments</a>).</td></tr>
+<tr><td><code>person_id</code> change</td><td>Always waits for <span class="role">qa</span>.</td></tr>
+<tr><td>E-mail settings change</td><td>Waits for <span class="role">qa</span>.</td></tr>
+<tr><td>Deactivation</td><td>Acts at once, signs the person out and revokes their MQTT credentials; reviewed by <span class="role">qa</span> afterwards.</td></tr>
+<tr><td>Role change that only narrows</td><td>Acts at once, revokes MQTT credentials; reviewed afterwards.</td></tr>
+<tr><td>Removal of a unit</td><td>Acts at once; reviewed afterwards.</td></tr>
+</tbody></table></div>
+<p>An account has at most one open decision at a time. A deactivation is the exception: it withdraws the account's waiting decisions. An administrator may withdraw a waiting decision in the User Manager, except a unit assignment, which is withdrawn with <code>units.sh remove</code>. The last enabled <span class="role">admin</span> and the last enabled <span class="role">qa</span> cannot be removed.</p>
+<h4>Confirming, refusing and reviewing</h4>
+<ol class="steps">
+<li>Sign in to the User Manager as a <span class="role">qa</span> person and open the <strong>Decisions</strong> tab.</li>
+<li>"Waiting for qa" lists the decisions to confirm or refuse; "To review" lists the changes that already acted; "All" lists every decision.</li>
+<li>Open a decision and read what it will do. For a waiting decision choose <strong>Confirm</strong> or <strong>Refuse</strong>; a note is optional to confirm and required to refuse. For an applied one choose <strong>Mark reviewed</strong>. Confirming applies the change in Keycloak in the same step. Refusing a grant deletes the requested account, so the person can apply again. If you cannot check a decision, for example because you made it or it concerns your own account, the page says why.</li>
+</ol>
+<p>A red banner at the top of the Decisions tab ("Keycloak differs from the decisions") lists any account whose live role or state is not explained by a recorded decision, for example a role granted directly in the Keycloak console.</p>
+<div class="record"><p>Each decision row keeps the maker, the subject, the change, the reason, and the checker with time and note. Once checked the row is final: a database trigger lets only the check columns be filled, once. Confirmations, refusals, reviews and withdrawals are also appended to the hash-chained policy history. Status and role changes are kept in the append-only account status history.</p></div>
+<p><code>./health-check.sh</code> (check <code>iamdecisions</code>) warns when a decision has waited more than 7 days, or when an e-mail settings change is pending.</p>
+
+<h3 id="compliance-units">Unit assignments</h3>
+<p>Operators are assigned units, not zones. An <span class="role">operator</span> with no unit in effect sees no telemetry and no runs and can start none. Until the planned Policy UI (Phase 4) brings this into the web interface, units are assigned on the platform host with <code>apps/iam/units.sh</code>, which takes the deploy lock.</p>
+<pre><code>./apps/iam/units.sh list
+./apps/iam/units.sh assign &lt;username&gt; UNIT01 --by &lt;your username&gt;
+./apps/iam/units.sh remove &lt;username&gt; UNIT01 --by &lt;your username&gt;</code></pre>
+<p><code>--by</code> names the person running the command, who is recorded as the maker. An assignment is only proposed: nothing takes effect until a <span class="role">qa</span> person who is neither the maker nor the subject confirms it in the Decisions tab. A refusal applies nothing. A removal acts at once. <code>list</code> shows the units in effect and those still waiting for <span class="role">qa</span>.</p>
+<p>The script cannot prove who ran it, since whoever runs it controls the host. So every assignment made by <code>units.sh</code> can be confirmed only after the <span class="role">qa</span> person ticks the box "I did not run units.sh for this assignment." The attestation is stored with the confirmation note.</p>
+<p><code>--bootstrap</code> applies an assignment at once, before any check, and is allowed only while no other enabled <span class="role">qa</span> account could confirm it. The decision still waits for <span class="role">qa</span>; the Decisions tab marks it "in effect before the check", and a refusal removes the unit.</p>
+<div class="record"><p>Every unit that takes effect or is removed appends <code>unit_assigned</code> or <code>unit_removed</code> to the hash-chained policy history, with the <span class="role">qa</span> person as actor for a confirmed assignment.</p></div>
+
+<h3 id="compliance-review">The quarterly access review</h3>
+<p>The <strong>Access review</strong> tab of the User Manager holds one review per quarter. A <span class="role">qa</span> person creates it and signs it off; <span class="role">auditor</span> and <span class="role">qp</span> can read it.</p>
+<ol class="steps">
+<li>Open <strong>Access review</strong> and choose "Create this quarter's review". The snapshot is taken at that moment and never changes.</li>
+<li>Read the snapshot: every account with its role, state, <code>person_id</code> and last login; the units; anything unexplained at the time of the review; decisions waiting for <span class="role">qa</span>; decisions since the last review; the waivers; the IAM switches; and the policy version and hash-chain verdict.</li>
+<li>Add an optional note and choose "Sign off" followed by the quarter. Signing off cannot be undone.</li>
+</ol>
+<div class="warn"><p>Signing off a review that lists unexplained roles accepts them: the drift banner in the Decisions tab stops showing them until a later change to that account.</p></div>
+
+<h3 id="compliance-approvals">Approvals of configuration</h3>
+<p>Groups with an approval rule are either <em>blocking</em> (nothing is used until approved) or <em>review</em> (<span class="role">qa</span> confirms after the fact).</p>
+<div class="table-wrap"><table>
+<thead><tr><th>What</th><th>Rule</th><th>Who approves</th></tr></thead>
+<tbody>
+<tr><td>Recipes</td><td>Blocking. Status draft, approved, in use, retired. The scheduler refuses to assign or run a recipe that is not approved, and an approved recipe cannot be edited.</td><td><span class="role">qa</span></td></tr>
+<tr><td>Control algorithms and parameter sets</td><td>Blocking. A run uses only approved algorithms and approved parameter sets.</td><td><span class="role">qa</span></td></tr>
+<tr><td>Scheduler settings (log retention)</td><td>Blocking. A new value waits as a pending change and applies only after a <span class="role">qa</span> person other than its author confirms it. The database also enforces minimums (compress after at least 1 day).</td><td><span class="role">qa</span></td></tr>
+<tr><td>Unit commissioning flag</td><td>Blocking. Takes effect only after <span class="role">qa</span> confirms, because it opens MQTT command rights to the unit.</td><td><span class="role">qa</span></td></tr>
+<tr><td>Master data and devices</td><td>Review. Each change is confirmed after the fact; an unconfirmed one blocks nothing.</td><td><span class="role">qa</span></td></tr>
+<tr><td>Persisted controller state (Q-tables)</td><td>Blocking. Retiring is an approved, recorded event; the next run starts cold.</td><td><span class="role">qa</span></td></tr>
+<tr><td>Run release</td><td>Release of a completed run by a person who neither created nor executed it.</td><td><span class="role">qp</span></td></tr>
+</tbody></table></div>
+<p>Editing an approved recipe, algorithm or parameter set is refused while <code>IAM_DB_ROLES</code> is true; a change starts a new draft. An approval is also refused while the record carries a change with no attributed person since its last approval.</p>
+<p>To retire a Q-table, a <span class="role">qa</span> person opens the <strong>Control Models</strong> tab of the Config UI, finds the unit in the <strong>Production Units</strong> table, chooses <strong>Retire…</strong> next to the algorithm under <strong>Learned State</strong> and gives a reason, which is recorded. Nothing is deleted.</p>
+<div class="record"><p>Each approval writes a row to <code>medcea.approval</code> with the record, a hash of its content, the persons who authored it, and the approver's account, person, name, role and source. A retired Q-table keeps its full state, and each of its channels gains an approval row with action <code>retire</code> and the reason.</p></div>
+
+<h3 id="compliance-attribution">Attribution: who did what</h3>
+<p>The 14 attributed tables (master data, devices, recipes, controllers, runs, schedules and others) carry <code>created_by</code> and <code>updated_by</code> fields: account, person, name, role and source. A database trigger fills them from the verified actor of the transaction and overwrites whatever a client sends. A service acting for a person records that person, with source <code>person via</code> followed by the service's database login; a schedule firing acts as <code>system:scheduler</code> on behalf of the person who created the schedule.</p>
+<p>Every change to those tables is also appended to <code>medcea.row_change</code>. The approval functions read it to decide who counts as an author.</p>
+
+<h3 id="compliance-chain">The tamper-evident policy history</h3>
+<p><code>iam_policy.history</code> is a hash chain: each event stores the hash of the previous one, so a changed or removed event breaks every hash after it. Triggers refuse UPDATE, DELETE and TRUNCATE on it for every role, the owner included. It records:</p>
+<ul>
+<li><code>enforcement_enabled</code> and <code>enforcement_disabled</code>, with the switch (<code>IAM_DB_ROLES</code> or <code>IAM_ENFORCE</code>);</li>
+<li><code>unit_assigned</code> and <code>unit_removed</code>;</li>
+<li><code>account_decision_confirmed</code>, <code>_refused</code>, <code>_reviewed</code> and <code>_withdrawn</code>;</li>
+<li>older <code>zone_assigned</code> and <code>zone_removed</code> events from before units replaced zones.</li>
+</ul>
+<p><code>./health-check.sh</code> runs <code>iam_policy.verify_chain()</code> (check <code>iamchain</code>) and reports "hash chain intact, N event(s)" or the first broken event.</p>
+<div class="warn"><p>Known limit: the chain catches any edit that does not rebuild it. It does not catch a database superuser who disables the triggers, drops the newest events or re-hashes the chain from an edited event onward. That needs the head of the chain anchored outside the database, which is not built.</p></div>
+
+<h3 id="compliance-exports">Exports and the export log</h3>
+<p>Database Management lets a person holding X take a copy of tables and views of schema <code>medcea</code>, covering exactly the groups where their role holds X. An object outside those groups refuses the whole export and nothing is logged. A file saved on the platform goes to <code>apps/database/exports/</code> and never overwrites an existing file.</p>
+<div class="record"><p>Each export writes one row to <code>iam_policy.export_log</code> naming who exported which groups and objects (with row counts) and when, before the file is produced. The file header carries the export number; the page shows the export number and the start of the file's SHA-256, and the service log records the full hash. The export log is append-only for every role.</p></div>
+
+<h3 id="compliance-retention">What is never deleted</h3>
+<ul>
+<li><strong>Audit histories</strong>: the policy history, export log, approvals, row changes, account status history, access request history and the User Manager's change log are append-only: database triggers refuse changing or deleting their rows for every role, the owner included.</li>
+<li><strong>Device placement history</strong>: every placement, move and removal of a board.</li>
+<li><strong>Run logs</strong>: kept for good. The scheduler's own job <code>sys_log_retention</code> (daily at 03:15 UTC) compresses the log of a finished run after <code>log_compress_days</code>. It never deletes one, and no person can delete or compress logs. <code>log_delete_days</code> remains a setting but nothing reads it.</li>
+<li><strong>Q-tables</strong>: retired, never deleted.</li>
+<li><strong>Configuration</strong>: recipes, schedules and similar records are retired, not deleted. No person holds a DELETE grant on data.</li>
+</ul>
+<p>While <code>IAM_ENFORCE</code> is true, a run's log is shown only to roles that hold Read on run logs; <span class="role">maintenance</span>, <span class="role">qc</span> and <span class="role">qp</span> see the run without its log.</p>
+
+<h3 id="compliance-gaps">Known gaps and single-person controls</h3>
+<ul>
+<li><strong>Zone moves.</strong> Telemetry is filtered by the zone's current unit. Moving a zone to another unit, which <span class="role">engineer</span> may do, gives that unit's operators the zone's whole history without an account decision. It is recorded only in <code>medcea.row_change</code>. Deferred.</li>
+<li><strong>Tools not yet gated by role.</strong> Grafana and the AI workbench are not yet gated by the policy's roles (Phase 3.1 and 3.2): any enabled account reaches Grafana. Node-RED's sign-in admits only <span class="role">engineer</span>, but rights inside the editor are not yet from the policy (Phase 3.3). Grafana dashboards read telemetry of every unit. Device onboarding still checks its own role setting (<code>EDGE_WIZARD_ROLE</code>), not the policy (Phase 3.4).</li>
+<li><strong>Per-person MQTT credentials not built.</strong> MQTT Explorer still connects with one shared account; the per-person credentials that would carry the <code>commissioning_unit</code> rule come with Phase 3.5.</li>
+<li><strong>Chain head not anchored</strong> outside the database (see <a href="#compliance-chain">the policy history</a>).</li>
+<li><strong>Approvals are records, not electronic signatures.</strong> Re-authentication and signature manifestation are not built.</li>
+<li><strong>Host operator.</strong> In the prototype the administrator also operates the host, which is break-glass access to the superuser and the Keycloak console. Statements by the database superuser are logged in full.</li>
+<li><strong>One <span class="role">qa</span> person may create and sign off the same access review.</strong> This is a known single-person control.</li>
+<li><strong>Recorded self-check.</strong> The test account <code>sergio_qa</code> belonged to the same person as the account <code>svieira</code>. It was granted <span class="role">qa</span>, confirmed account decision #3 (unit UNIT02) and was then deactivated. That confirmation is recorded as independent although it was not. It is noted here and was not undone.</li>
+</ul>
+
+<h3 id="compliance-decisions">Decision record</h3>
+<p>Decisions taken for IAM 2.6, with the reason for each.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Decision</th><th>Choice</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Run log retention</td><td>Compress only, never delete.</td><td>Run logs are part of the regulated run record. Deletion may return later, with a durable record of what was deleted.</td></tr>
+<tr><td>File save routes in the Config UI that carry a constraint (devices, recipes)</td><td>Narrowed to roles holding the level without a constraint: <span class="role">engineer</span> for device files, no role for recipe files.</td><td>The platform API cannot yet evaluate <code>existing_slot</code>, <code>draft_only</code> or <code>assign_only</code>. Under enforcement the Config UI's "Save to Platform Library" is refused for recipe files, and for device files to every role but <span class="role">engineer</span>; recipes in the database are not affected.</td></tr>
+<tr><td>Export scope</td><td>Database Management exports schema <code>medcea</code> only, for now.</td><td>The account and policy tables (schemas <code>iam</code> and <code>iam_policy</code>) stay out of exports until decided otherwise, although some belong to groups where <span class="role">auditor</span> holds X.</td></tr>
+<tr><td>Roles offered on the request form and in the User Manager</td><td>All eleven; <span class="role">qc</span> and <span class="role">qp</span> tagged "not yet in use".</td><td>A person can request the role the policy defines for their work; roles not yet used are marked as such rather than hidden.</td></tr>
+<tr><td>Role descriptions on the public request form</td><td>Shown as the policy words them.</td><td>One wording for every reader.</td></tr>
+<tr><td>Order of the switches</td><td><code>IAM_ENFORCE</code> requires <code>IAM_DB_ROLES=true</code>.</td><td><code>assigned_run</code> is checked only in the database; without it an operator could execute or stop another unit's run.</td></tr>
+<tr><td>Q-table counts per unit (<code>GET /api/units</code>)</td><td>Left visible to every role that reads master data.</td><td>The counts show how many channels hold learned state, not the state itself; left as is by decision.</td></tr>
+<tr><td>Report-only trial</td><td>A report-only trial before the <code>IAM_ENFORCE</code> flip.</td><td>To see what real use would refuse before it is refused.</td></tr>
+<tr><td>Export files</td><td>Files in <code>apps/database/exports/</code> are ignored by git.</td><td>Exports hold data and must not enter the repository.</td></tr>
+<tr><td>Q-table retirement during a rollback</td><td>While <code>IAM_DB_ROLES=false</code> a Q-table cannot be retired from the UI.</td><td>Retiring needs a <span class="role">qa</span> person's verified sign-in at the database, which exists only while <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> are both true. During such a rollback nobody can retire a Q-table.</td></tr>
+</tbody></table></div>
+</section>

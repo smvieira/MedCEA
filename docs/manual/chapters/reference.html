@@ -1,0 +1,254 @@
+<section id="reference" data-title="Reference">
+<h2>Reference</h2>
+<p class="lede">Lookup tables for everyday use: the web addresses and who may open them, the roles each application admits, the access levels and resource groups of the access policy, the settings an administrator may change, the scripts on the platform host, the health checks, and the abbreviations used in this manual. The tables describe the platform as of IAM 2.6, deployed report-only on 31 October 2026, with the access policy at its default version.</p>
+
+<h3 id="reference-addresses">Web addresses</h3>
+<p>Every web application has its own address, <code>&lt;name&gt;.$DOMAIN</code>, set by a <code>*_DOMAIN</code> setting in <code>config.env</code>. Every address except the access request form signs you in through Keycloak first. "Who can open it" is the list <code>python3 apps/iam/compiler/cli.py hosts</code> prints from the access policy. Where the gate is not compiled from the policy yet, the last column says what applies today.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Setting</th><th>Default address</th><th>Application</th><th>Who can open it (policy)</th><th>Gate today</th></tr></thead>
+<tbody>
+<tr><td><code>PORTAL_DOMAIN</code></td><td><code>portal.$DOMAIN</code></td><td>Service portal</td><td>every role</td><td>Compiled from the policy</td></tr>
+<tr><td><code>CONFIG_DOMAIN</code></td><td><code>config.$DOMAIN</code></td><td>Configuration UI (devices, recipes, units)</td><td>every role</td><td>Compiled from the policy</td></tr>
+<tr><td><code>SCHEDULER_DOMAIN</code></td><td><code>scheduler.$DOMAIN</code></td><td>Scheduler (Recipe Schedule Manager)</td><td>every role</td><td>Compiled from the policy</td></tr>
+<tr><td><code>MONITOR_DOMAIN</code></td><td><code>monitor.$DOMAIN</code></td><td>Monitor (Run Monitor)</td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td><td>Compiled from the policy</td></tr>
+<tr><td><code>DBMGMT_DOMAIN</code></td><td><code>dbmgmt.$DOMAIN</code></td><td>Database Management (export)</td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td><td>Compiled from the policy</td></tr>
+<tr><td><code>ACCESS_DOMAIN</code></td><td><code>access.$DOMAIN</code></td><td>User Manager; <code>/register</code> is the public "Request access" form</td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span>; the form needs no account</td><td>Compiled from the policy</td></tr>
+<tr><td><code>MQTTX_DOMAIN</code></td><td><code>mqtt-explorer.$DOMAIN</code></td><td>MQTT Explorer</td><td><span class="role">engineer</span></td><td>Compiled from the policy</td></tr>
+<tr><td><code>NODE_RED_DOMAIN</code></td><td><code>node-red.$DOMAIN</code></td><td>Node-RED</td><td><span class="role">engineer</span></td><td>Compiled from the policy</td></tr>
+<tr><td><code>GRAFANA_DOMAIN</code></td><td><code>grafana.$DOMAIN</code></td><td>Grafana</td><td><span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td><td>Not compiled yet (IAM Phase 3.1). Any signed-in account gets in; Grafana makes it Admin with the <code>grafana_admin</code> role, Editor with <code>grafana_developer</code>, otherwise Viewer.</td></tr>
+<tr><td><code>WORKBENCH_DOMAIN</code></td><td><code>ai-workbench.$DOMAIN</code></td><td>AI Workbench (JupyterHub)</td><td><span class="role">engineer</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">admin</span></td><td>Not compiled yet (IAM Phase 3.2). Any signed-in account gets in; the account named by <code>ADMIN_USER</code> is hub administrator.</td></tr>
+<tr><td><code>ONBOARD_DOMAIN</code></td><td><code>onboard-device.$DOMAIN</code></td><td>Device onboarding (edge wizard)</td><td><span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not compiled yet (IAM Phase 3.4). Any signed-in account, unless <code>EDGE_WIZARD_ROLE</code> names a required role.</td></tr>
+<tr><td><code>PGADMIN_DOMAIN</code></td><td><code>pgadmin.$DOMAIN</code></td><td>pgAdmin</td><td><span class="role">admin</span></td><td>pgAdmin's own Keycloak sign-in, administrators only</td></tr>
+<tr><td><code>KEYCLOAK_DOMAIN</code></td><td><code>keycloak.$DOMAIN</code></td><td>Keycloak sign-in pages</td><td>everyone, to sign in</td><td>The Keycloak console of realm <code>master</code> is for the break-glass account only</td></tr>
+</tbody>
+</table></div>
+<div class="note"><p>The access policy also names an Access Policy host (<code>POLICY_DOMAIN</code>, for <span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span>). It is not deployed yet (IAM Phase 4) and has no setting in <code>config.env.example</code>. With <code>IAM_GATES="false"</code> the compiled hosts fall back to the pre-policy list <span class="role">operator</span>, <span class="role">qa</span>, <span class="role">auditor</span>, <span class="role">admin</span>. Sensor and control boards do not use a web address: they reach the MQTT broker on port <code>31883</code> of the platform host.</p></div>
+
+<h3 id="reference-roles-apps">Roles and applications</h3>
+<p>The same data as the table above, one row per role: "yes" means the access policy admits the role to that application. Grafana, AI Workbench and Device onboarding follow the policy only once their gates are compiled; see the last column above. Roles <span class="role">qc</span> and <span class="role">qp</span> are defined for later use.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th>Portal</th><th>Config UI</th><th>Scheduler</th><th>Monitor</th><th>DB Mgmt</th><th>User Manager</th><th>MQTT Explorer</th><th>Node-RED</th><th>Grafana</th><th>AI Workbench</th><th>Onboarding</th><th>pgAdmin</th></tr></thead>
+<tbody>
+<tr><td><span class="role">operator</span> Cultivation Operator</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td><span class="role">production_manager</span> Production Manager</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td></td><td></td><td>yes</td><td></td><td></td><td></td></tr>
+<tr><td><span class="role">maintenance</span> Maintenance and Calibration</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td></td><td></td><td>yes</td><td></td><td>yes</td><td></td></tr>
+<tr><td><span class="role">qc</span> Quality Control Analyst</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td></td><td></td><td>yes</td><td></td><td></td><td></td></tr>
+<tr><td><span class="role">qa</span> Quality Assurance</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td>yes</td><td>yes</td><td></td><td></td></tr>
+<tr><td><span class="role">qp</span> Qualified / Responsible Person</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td>yes</td><td></td><td></td><td></td></tr>
+<tr><td><span class="role">engineer</span> Automation Engineer</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td></tr>
+<tr><td><span class="role">bio_scientist</span> Bio-process Scientist</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td></td><td></td><td></td><td></td><td>yes</td><td></td><td></td></tr>
+<tr><td><span class="role">control_scientist</span> Control and AI Scientist</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td></td><td></td><td></td><td></td><td>yes</td><td></td><td></td></tr>
+<tr><td><span class="role">admin</span> System Administrator</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td>yes</td><td></td><td></td><td></td><td>yes</td><td></td><td>yes</td></tr>
+<tr><td><span class="role">auditor</span> Auditor / Inspector</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td></td><td></td><td>yes</td><td></td><td></td><td></td></tr>
+</tbody>
+</table></div>
+<p>Opening an application is only the first gate. What you may do on the page is decided by your access levels on each resource group, checked by the service and by the database.</p>
+
+<h3 id="reference-levels">Access levels</h3>
+<p>Every cell of the access policy holds zero or more of these levels. A level that "includes" others gives them too.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Letter</th><th>Name</th><th>Includes</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>N</code></td><td>None</td><td></td><td>No access. The role does not see the resource at all. The default for every cell.</td></tr>
+<tr><td><code>R</code></td><td>Read</td><td></td><td>See the resource, change nothing.</td></tr>
+<tr><td><code>X</code></td><td>Read and export</td><td>R</td><td>Read, and take a copy out of the platform through the Database Management export. Each export is recorded with who exported which objects and when.</td></tr>
+<tr><td><code>C</code></td><td>Create</td><td>R</td><td>Add new records; never change existing ones. Used for appending to regulated data and audit trails.</td></tr>
+<tr><td><code>U</code></td><td>Update</td><td>C, R</td><td>Create and change records, within the group's constraint. On recipes and controllers only while the record is a draft. Removing a configuration record means setting it to "retired", never deleting it. Never given to a person on regulated or history data.</td></tr>
+<tr><td><code>A</code></td><td>Approve</td><td>R</td><td>Approve or release another person's work. The approver must be a different person from the author. In this version an approval is an attributable, time-stamped record, not a 21 CFR Part 11 electronic signature.</td></tr>
+<tr><td><code>O</code></td><td>Operate</td><td>R</td><td>Start, stop or trigger a process (execute a run, stop it, trigger a schedule) without changing its definition.</td></tr>
+<tr><td><code>K</code></td><td>Configure</td><td></td><td>Administer the tool without the content it holds. On accounts it means reading and changing account records, which are personal data. Held only by <span class="role">admin</span>.</td></tr>
+<tr><td><code>D</code></td><td>Delete</td><td></td><td>Remove platform components and releases on the host. Never data. Held only by <span class="role">admin</span>.</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="reference-groups">Resource groups</h3>
+<p>Each row of the access policy is a resource group: tables, service routes, web pages and MQTT topics that belong together. The class decides the rules that always apply to the group.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Class</th><th>Label</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td><code>regulated</code></td><td>Regulated data</td><td>Records produced while making product. Created once, never changed or deleted by anyone; corrections are new records.</td></tr>
+<tr><td><code>history</code></td><td>Audit history</td><td>Append-only trails of who did what, including approval records and export logs. Written by the system only; readable by reviewers.</td></tr>
+<tr><td><code>personal</code></td><td>Personal data</td><td>Accounts, names, e-mail addresses, unit assignments and access decisions. Administered by <span class="role">admin</span>, confirmed by <span class="role">qa</span>, readable by reviewers.</td></tr>
+<tr><td><code>config</code></td><td>Configuration</td><td>Master data, recipes, controllers, schedules, settings, dashboards and tools. Changed under the group's approval rule.</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Group key</th><th>Label</th><th>Class</th></tr></thead>
+<tbody>
+<tr><td><code>portal</code></td><td>Service portal and profile</td><td>config</td></tr>
+<tr><td><code>user_manager</code></td><td>User Manager page</td><td>config</td></tr>
+<tr><td><code>master_data</code></td><td>Master data (locations, units, zones, components)</td><td>config</td></tr>
+<tr><td><code>devices</code></td><td>Devices and provisioning</td><td>config</td></tr>
+<tr><td><code>onboarding</code></td><td>Device onboarding (edge wizard)</td><td>config</td></tr>
+<tr><td><code>device_history</code></td><td>Device placement history</td><td>history</td></tr>
+<tr><td><code>recipes</code></td><td>Recipes and recipe-to-unit assignment</td><td>config</td></tr>
+<tr><td><code>controllers</code></td><td>Controllers and parameter sets</td><td>config</td></tr>
+<tr><td><code>controllers_state</code></td><td>Persisted controller state (Q-tables)</td><td>regulated</td></tr>
+<tr><td><code>runs</code></td><td>Recipe runs and cycle runs</td><td>regulated</td></tr>
+<tr><td><code>schedules</code></td><td>Schedules</td><td>config</td></tr>
+<tr><td><code>scheduler_settings</code></td><td>Scheduler settings (log retention)</td><td>config</td></tr>
+<tr><td><code>measurements</code></td><td>Telemetry</td><td>regulated</td></tr>
+<tr><td><code>run_logs</code></td><td>Run logs</td><td>regulated</td></tr>
+<tr><td><code>dashboards</code></td><td>Grafana dashboards</td><td>config</td></tr>
+<tr><td><code>flows</code></td><td>Node-RED flows</td><td>config</td></tr>
+<tr><td><code>mqtt_sense</code></td><td>Telemetry topics</td><td>regulated</td></tr>
+<tr><td><code>mqtt_control</code></td><td>Command and setpoint topics</td><td>regulated</td></tr>
+<tr><td><code>mqtt_explorer</code></td><td>MQTT Explorer</td><td>config</td></tr>
+<tr><td><code>db_export</code></td><td>Database Management export</td><td>config</td></tr>
+<tr><td><code>iam_users</code></td><td>Accounts, roles and access requests</td><td>personal</td></tr>
+<tr><td><code>zones</code></td><td>Unit assignments</td><td>personal</td></tr>
+<tr><td><code>iam_policy</code></td><td>Access policy</td><td>config</td></tr>
+<tr><td><code>audit_histories</code></td><td>Audit histories and approval records</td><td>history</td></tr>
+<tr><td><code>research_workbench</code></td><td>AI Workbench (JupyterHub)</td><td>config</td></tr>
+<tr><td><code>platform_admin</code></td><td>Platform administration</td><td>config</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="reference-settings">Settings</h3>
+<p>The settings an administrator may change in <code>config.env</code>, with the default from <code>config.env.example</code>. Change them with <code>./infra/configure.sh</code> or, for the IAM switches, with <code>./guide.sh</code>, which runs the deploys each switch needs in the right order. A changed setting takes effect at the next deploy of the parts that read it.</p>
+<h4>Identity and network</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>PROJECT_NAME</code></td><td><code>medcea</code></td><td>The MQTT topic root, the Kubernetes namespace and the Keycloak realm. Lowercase letters, digits and hyphens, starting with a letter. Changing it after boards are flashed means reflashing them.</td></tr>
+<tr><td><code>NAMESPACE</code></td><td><code>$PROJECT_NAME</code></td><td>The Kubernetes namespace.</td></tr>
+<tr><td><code>K8S_CHANNEL</code></td><td><code>1.29/stable</code></td><td>MicroK8s Kubernetes version.</td></tr>
+<tr><td><code>PLATFORM_IP</code></td><td>this machine's Tailscale IPv4 address, else its first LAN address</td><td>The address every service name points to.</td></tr>
+<tr><td><code>DOMAIN</code></td><td><code>${PLATFORM_IP}.nip.io</code></td><td>Base domain: every service is <code>&lt;name&gt;.$DOMAIN</code>. Can be IP-based (no DNS setup), a short name the platform answers DNS for, or your own DNS domain.</td></tr>
+<tr><td><code>LOCAL_DNS</code></td><td><code>false</code></td><td><code>true</code>: the platform runs a DNS server for <code>$DOMAIN</code> on port 53 and maps the names in this machine's <code>/etc/hosts</code>.</td></tr>
+<tr><td><code>ALIAS_DOMAIN</code></td><td><code>${PLATFORM_IP}.nip.io</code></td><td>A previous domain kept as permanent redirects to <code>$DOMAIN</code>, so old links still work. Inactive when equal to <code>DOMAIN</code> or empty.</td></tr>
+<tr><td><code>USE_TAILSCALE</code></td><td>empty</td><td><code>true</code>: a deploy stops if Tailscale is not up. <code>false</code>: LAN only. Empty: not decided yet.</td></tr>
+<tr><td><code>*_DOMAIN</code></td><td>see <a href="#reference-addresses">Web addresses</a></td><td>The address of each application.</td></tr>
+</tbody>
+</table></div>
+<h4>First accounts</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>ADMIN_USER</code>, <code>ADMIN_EMAIL</code></td><td><code>admin</code>, empty</td><td>The platform administrator. The e-mail address receives Keycloak password resets and is the pgAdmin login.</td></tr>
+<tr><td><code>QA_USER</code>, <code>QA_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">qa</span>, who confirms account grants and approves policy changes. Must be someone other than the administrator.</td></tr>
+<tr><td><code>ENGINEER_USER</code>, <code>ENGINEER_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">engineer</span>, the only role admitted to Node-RED, MQTT Explorer and device onboarding. May be a second account of the administrator, with its own username and e-mail address.</td></tr>
+<tr><td><code>KC_BREAKGLASS_USER</code></td><td><code>kc-breakglass</code></td><td>Keycloak's own console account (realm <code>master</code>), used only for recovery. Every use is recorded in Keycloak's admin events.</td></tr>
+<tr><td><code>GRAFANA_ADMIN_USER</code>, <code>GRAFANA_DEVELOPER_USER</code>, <code>GRAFANA_VIEWER_USER</code></td><td><code>admin</code>, <code>developer</code>, <code>viewer</code></td><td>Grafana sign-in accounts created in Keycloak during deployment, as Grafana Admin, Editor and Viewer.</td></tr>
+</tbody>
+</table></div>
+<h4>IAM switches</h4>
+<p>Change these with <code>./guide.sh</code> (IAM switches), which checks each switch's preconditions and runs its enable or rollback steps.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>IAM_GATES</code></td><td><code>true</code></td><td>Each signed-in host admits the roles compiled from the access policy. <code>false</code> falls back to the pre-policy list (<span class="role">operator</span>, <span class="role">qa</span>, <span class="role">auditor</span>, <span class="role">admin</span>), and every deploy prints a warning.</td></tr>
+<tr><td><code>IAM_NETPOL</code></td><td><code>true</code></td><td>One network policy per application pod, so only its sign-in proxy and the listed services can connect to it. <code>false</code> removes them.</td></tr>
+<tr><td><code>IAM_ENFORCE</code></td><td><code>false</code></td><td><code>false</code> (report-only): every service checks each request against the route table but only logs "would refuse". <code>true</code>: the services answer 401, 403 or 503 to what the route table refuses. The administration side of the User Manager and Database Management refuse in both modes. Takes effect about a minute after <code>./deploy-infra.sh</code>, without a restart.</td></tr>
+<tr><td><code>IAM_POSTGREST_JWT</code></td><td><code>false</code></td><td><code>true</code>: the configuration API verifies each person's sign-in token, so writes are attributed to the person and an expired or forged token is refused.</td></tr>
+<tr><td><code>IAM_DB_SERVICE_ROLES</code></td><td><code>false</code></td><td><code>true</code>: each service connects to the database under its own role instead of the database superuser. pgAdmin then has limited rights: it can no longer change table structure or write data.</td></tr>
+<tr><td><code>IAM_DB_ROLES</code></td><td><code>false</code></td><td><code>true</code>: the database itself enforces each role's rights, limits operators to their own units and refuses changes to locked records. Refused until <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_SERVICE_ROLES</code> are on. Operators need units assigned first (<code>apps/iam/units.sh</code>).</td></tr>
+</tbody>
+</table></div>
+<div class="record"><p>Changes of <code>IAM_DB_ROLES</code> are recorded in the access policy history. When <code>./deploy-infra.sh</code> applies a changed <code>IAM_ENFORCE</code>, it records an <code>enforcement_enabled</code> or <code>enforcement_disabled</code> event there.</p></div>
+<h4>Services and storage</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>POSTGRES_USER</code></td><td><code>postgres</code></td><td>Database superuser name.</td></tr>
+<tr><td><code>POSTGRES_DB</code></td><td><code>medcea_db</code></td><td>Database name.</td></tr>
+<tr><td><code>STORAGE_SIZE</code></td><td><code>10Gi</code></td><td>Database volume size.</td></tr>
+<tr><td><code>NODE_RED_TZ</code></td><td><code>Europe/London</code></td><td>Node-RED time zone.</td></tr>
+<tr><td><code>KEYCLOAK_REALM</code></td><td><code>$PROJECT_NAME</code></td><td>The Keycloak realm that holds every platform account.</td></tr>
+<tr><td><code>WORKBENCH_ENABLED</code></td><td><code>true</code></td><td><code>false</code> skips the AI workbench in <code>./deploy-infra.sh</code> (about 2 GB of images).</td></tr>
+<tr><td><code>WORKBENCH_IMAGE</code></td><td><code>quay.io/jupyter/scipy-notebook:latest</code></td><td>Notebook image for each workbench user.</td></tr>
+<tr><td><code>WORKBENCH_STORAGE</code></td><td><code>10Gi</code></td><td>Persistent home size per workbench user.</td></tr>
+<tr><td><code>EDGE_WIZARD_PORT</code></td><td><code>8088</code></td><td>Port of the onboarding wizard on the host. Must match the redirect addresses registered in Keycloak.</td></tr>
+<tr><td><code>EDGE_WIZARD_ROLE</code></td><td>empty</td><td>Role a person must hold to provision boards. Empty means any signed-in account.</td></tr>
+<tr><td><code>DOCKERHUB_USER</code></td><td>empty</td><td>Docker Hub account, for chart pulls and to avoid pull limits.</td></tr>
+</tbody>
+</table></div>
+<h4>Secrets</h4>
+<p><code>config.env</code> also holds passwords, client secrets and cookie secrets. <code>./infra/configure.sh</code> asks you for three of them: <code>ADMIN_PASS</code>, <code>POSTGRES_PASS</code> and the Docker Hub access token <code>DOCKERHUB_PAT</code>. The others are generated by <code>./infra/configure.sh</code> or <code>./deploy-infra.sh</code> and must not be edited by hand: the initial passwords <code>QA_INITIAL_PASS</code> and <code>ENGINEER_INITIAL_PASS</code> (replaced at first sign-in), <code>KC_BREAKGLASS_PASS</code>, <code>KC_DEPLOYER_SECRET</code>, the Grafana passwords, one Keycloak client secret and one cookie secret per signed-in host, the database role passwords (<code>SVC_*_DB_PASS</code>, <code>IAM_SVC_DB_PASS</code>, <code>RR_ADMIN_LOGIN_DB_PASS</code>, <code>AUTHENTICATOR_DB_PASS</code>) and the MQTT service passwords (<code>MQTT_*_PASS</code>).</p>
+<div class="warn"><p><code>config.env</code> and its backups (<code>config.env.guide-&lt;timestamp&gt;.bak</code>) hold every password. Keep them on the host only. E-mail settings are not in <code>config.env</code>: set them in the User Manager under E-mail settings.</p></div>
+
+<h3 id="reference-scripts">Scripts and commands</h3>
+<p>Run every script from the repository root on the platform host. Scripts that change the cluster or <code>config.env</code> take the deploy lock, so only one runs at a time; a second one stops and names the run that holds the lock.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>What it does</th><th>Takes the lock</th></tr></thead>
+<tbody>
+<tr><td><code>./install.sh</code></td><td>Installs or updates everything: infrastructure, then applications, then a health check. <code>--uninstall-apps</code>, <code>--uninstall-infra</code> and <code>--uninstall-all</code> remove parts of the platform.</td><td>yes</td></tr>
+<tr><td><code>./guide.sh</code></td><td>Question-and-answer guide to every command below: shows the exact command and runs it on confirmation. Also the way to turn the IAM switches on and off. <code>--dry-run</code> runs nothing.</td><td>for a switch recipe, once for all its steps; other commands take their own</td></tr>
+<tr><td><code>./deploy-infra.sh</code></td><td>Deploys the infrastructure: MicroK8s, PostgreSQL, Keycloak and its clients, Node-RED, Grafana, pgAdmin, the portal, the AI workbench. Publishes the IAM settings to the services. <code>--configure</code> reviews settings; <code>--reset</code> wipes the namespace; <code>--uninstall</code> removes MicroK8s.</td><td>yes</td></tr>
+<tr><td><code>./infra/configure.sh</code></td><td>Fills <code>config.env</code> by question and answer. <code>--missing</code> asks only for required values that are empty.</td><td>yes</td></tr>
+<tr><td><code>./infra/bootstrap-infra.sh</code></td><td>Sets up MicroK8s. Called by <code>./deploy-infra.sh</code>.</td><td>yes</td></tr>
+<tr><td><code>./infra/deploy-workbench.sh</code></td><td>Deploys or redeploys only the AI workbench (JupyterHub).</td><td>yes</td></tr>
+<tr><td><code>./deploy-apps.sh</code></td><td>Deploys application components: a menu, or <code>--all</code>. <code>--uninstall [--purge-data] [component ...]</code> removes them.</td><td>yes</td></tr>
+<tr><td><code>./apps/&lt;component&gt;/deploy.sh</code></td><td>Deploys one component: <code>access</code>, <code>database</code>, <code>edge-wizard</code>, <code>frontend</code>, <code>iam</code>, <code>monitor</code>, <code>mqtt-explorer</code>, <code>node-red</code>, <code>report</code> (Grafana dashboards), <code>scheduler</code>. Each has an <code>uninstall.sh</code>.</td><td>yes</td></tr>
+<tr><td><code>./apps/iam/deploy.sh</code></td><td>Checks the access policy against its invariants and reports which roles each host admits.</td><td>yes</td></tr>
+<tr><td><code>apps/iam/units.sh assign | remove | list</code></td><td>Assigns units to an operator or removes them. An assignment waits for a <span class="role">qa</span> person to confirm it in the User Manager; a removal applies at once. <code>--by</code> names you.</td><td>yes</td></tr>
+<tr><td><code>./health-check.sh</code></td><td>Runs every check in <code>health-checks.conf</code> and prints OK, WARN, FAIL or SKIP for each. <code>-v</code> shows detail.</td><td>no</td></tr>
+<tr><td><code>python3 apps/iam/compiler/cli.py hosts</code></td><td>Lists every host, whether its gate is compiled, and the roles it admits. <code>cli.py check</code> checks the policy invariants.</td><td>no</td></tr>
+<tr><td><code>./edge/flash-device.sh</code></td><td>Flashes one ESP32 board over USB, gives it a slot from the database and registers it. <code>--ui</code> serves the same steps as a web page.</td><td>no</td></tr>
+<tr><td><code>tests/iam-check.sh</code></td><td>Checks that every service runs the access check with the <code>IAM_ENFORCE</code> setting of <code>config.env</code>, and that each service marks a forged request as refused (in report-only mode it is logged as "would refuse" and let through).</td><td>no</td></tr>
+<tr><td><code>tests/iam-hosts.sh</code></td><td>Checks that each host's live gate admits exactly the roles the policy compiles.</td><td>no</td></tr>
+<tr><td><code>tests/iam-signin.sh</code></td><td>Signs in one throwaway account per role to every host and checks it gets in exactly where the policy says. Deletes the accounts on exit.</td><td>yes</td></tr>
+<tr><td><code>tests/iam-access.sh</code></td><td>Tests account decisions in the User Manager with throwaway accounts.</td><td>yes</td></tr>
+<tr><td><code>tests/iam-network.sh</code></td><td>Checks that the network policies block what they should and nothing the platform needs.</td><td>yes</td></tr>
+</tbody>
+</table></div>
+<div class="warn"><p><code>./deploy-infra.sh --reset</code> and <code>--uninstall</code>, <code>./install.sh --uninstall-infra</code>, <code>--uninstall-all</code> and <code>--uninstall-apps --purge-data</code>, and <code>./deploy-apps.sh --uninstall --purge-data</code> delete platform data. Each asks you to confirm before it removes anything.</p></div>
+
+<h3 id="reference-health">Health checks</h3>
+<p><code>./health-check.sh</code> runs the checks listed in <code>health-checks.conf</code>. Most check that a workload is ready, a web address answers or a port is open; the IAM checks read the database and the cluster without changing anything.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Check</th><th>What it checks</th></tr></thead>
+<tbody>
+<tr><td>PostgreSQL, Keycloak, Mosquitto, Node-RED, Grafana, pgAdmin, MQTT Explorer, DB Mgmt, Run Monitor, Scheduler, User Manager, Portal</td><td>The workload is rolled out and ready.</td></tr>
+<tr><td>OAuth2 Proxy (Node-RED), MQTT Explorer proxy, Config UI proxy, DB Mgmt proxy, Run Monitor proxy, Scheduler proxy, User Manager proxy, Portal OAuth2 Proxy</td><td>The sign-in proxy in front of the application is ready.</td></tr>
+<tr><td>Node-RED UI, MQTT Explorer UI, Config UI, DB Mgmt UI, Run Monitor UI, Scheduler UI, User Manager UI, Portal UI, AI Workbench, Onboarding wizard UI</td><td>The address answers with a redirect (to the sign-in), which is the healthy answer for a signed-out request.</td></tr>
+<tr><td>Keycloak HTTPS</td><td>Keycloak answers over HTTPS.</td></tr>
+<tr><td>Grafana UI, pgAdmin UI</td><td>The application's own health page answers.</td></tr>
+<tr><td>Mosquitto MQTT (TCP)</td><td>The broker port for boards (<code>31883</code>) is open.</td></tr>
+<tr><td>Onboarding wizard</td><td>The wizard service on the host (<code>$PLATFORM_IP:$EDGE_WIZARD_PORT</code>) answers.</td></tr>
+<tr><td>Access policy history</td><td>The hash chain of the access policy history is intact (FAIL names the first broken event).</td></tr>
+<tr><td>Database roles mode</td><td>The <code>IAM_DB_ROLES</code> mode recorded in the database matches <code>config.env</code>. WARN while it is <code>false</code>.</td></tr>
+<tr><td>Database grants</td><td>The database's rights equal those compiled from the access policy. FAIL on any difference.</td></tr>
+<tr><td>Account decisions</td><td>Account decisions waiting for <span class="role">qa</span>. WARN when one has waited over 7 days or a mail settings change is waiting.</td></tr>
+<tr><td>Database clients</td><td>Which database role each service connects as, against <code>IAM_DB_SERVICE_ROLES</code>.</td></tr>
+<tr><td>PostgREST tokens</td><td>The configuration API verifies tokens as <code>IAM_POSTGREST_JWT</code> says, its signing keys are current, and a forged token is refused with 401. WARN while the switch is <code>false</code>.</td></tr>
+<tr><td>Service enforcement</td><td>The services' <code>IAM_ENFORCE</code> setting matches <code>config.env</code>, and every pod's own copy agrees. WARN while it is <code>false</code>; FAIL if it is <code>true</code> while <code>IAM_DB_ROLES</code> is <code>false</code>, or while a pod's own copy still says <code>false</code>.</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="reference-glossary">Glossary</h3>
+<p>Abbreviations and terms used in this manual.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>ACL</td><td>Access control list. The broker's list of which topics each MQTT account may read or write.</td></tr>
+<tr><td>ALCOA+</td><td>Data integrity principles: attributable, legible, contemporaneous, original, accurate, plus complete, consistent, enduring and available.</td></tr>
+<tr><td>Annex 11</td><td>EU GMP Annex 11, the rules for computerised systems.</td></tr>
+<tr><td>Break-glass</td><td>Emergency access outside the normal rules, recorded when used: the Keycloak console account and the administrator's access to the host.</td></tr>
+<tr><td>CA</td><td>Certificate authority. The platform's own CA ("CEA Platform CA") signs the HTTPS certificates of its addresses.</td></tr>
+<tr><td>CEA</td><td>Controlled environment agriculture. MedCEA is medicinal CEA.</td></tr>
+<tr><td>EBR</td><td>Electronic batch record. Planned, not implemented yet.</td></tr>
+<tr><td>EPCIS</td><td>GS1 Electronic Product Code Information Services, a standard for traceability events. Planned, not implemented yet.</td></tr>
+<tr><td>ESP32</td><td>The microcontroller boards used as sensor and control devices.</td></tr>
+<tr><td>GACP</td><td>Good agricultural and collection practice, for medicinal plants.</td></tr>
+<tr><td>GMP</td><td>Good manufacturing practice.</td></tr>
+<tr><td>GxP</td><td>The family of good practice rules (GMP, GACP and others).</td></tr>
+<tr><td>IAM</td><td>Identity and access management: accounts, roles and the access policy.</td></tr>
+<tr><td>JWT</td><td>JSON Web Token. The signed sign-in token Keycloak issues and the services verify.</td></tr>
+<tr><td>MHRA</td><td>Medicines and Healthcare products Regulatory Agency (UK).</td></tr>
+<tr><td>MQTT</td><td>The messaging protocol boards use to send telemetry and receive commands, through the Mosquitto broker.</td></tr>
+<tr><td>OIDC</td><td>OpenID Connect. The sign-in protocol between Keycloak and the applications.</td></tr>
+<tr><td>PostgREST</td><td>The service that exposes the database as a web API to the Configuration UI (the configuration API).</td></tr>
+<tr><td>Q-table</td><td>The learned state of a reinforcement-learning controller, kept as regulated data.</td></tr>
+<tr><td>qa</td><td>Quality Assurance role: approves configuration, account decisions and policy changes made by someone else.</td></tr>
+<tr><td>qc</td><td>Quality Control Analyst role: tests product. Defined for later use.</td></tr>
+<tr><td>qp</td><td>Qualified or Responsible Person role: releases the output of a completed run. Defined for later use.</td></tr>
+<tr><td>RBAC</td><td>Role-based access control.</td></tr>
+<tr><td>Report-only</td><td>The mode of <code>IAM_ENFORCE="false"</code>: the services log what they would refuse but let the request through.</td></tr>
+<tr><td>RLS</td><td>Row-level security. A database rule that limits which rows a role sees, for example an operator's own units.</td></tr>
+<tr><td>SSO</td><td>Single sign-on. One Keycloak sign-in opens every application your role admits.</td></tr>
+<tr><td>TLS</td><td>Transport Layer Security, the encryption behind HTTPS.</td></tr>
+<tr><td>Unit, zone</td><td>A unit is a cultivation chamber; a zone is part of a unit. Each zone has one place for a sense board and one for a control board.</td></tr>
+</tbody>
+</table></div>
+</section>

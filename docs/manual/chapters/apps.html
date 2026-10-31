@@ -1,0 +1,427 @@
+<section id="apps" data-title="Using the web apps">
+<h2>Using the web apps</h2>
+<p class="lede">The platform is a set of web apps, each on its own address under the platform domain, all signed in through the same platform account. This chapter takes them one at a time: what each app is for, which roles can open it, and the main tasks as step lists. It also says what each action records. The access policy decides who may do what. An app that your role may not open answers with an error page that names the roles that may open it. In most apps a button your role may not use stays on the screen; once the policy is enforced, the action is refused with a message that names the reason.</p>
+
+<h3 id="apps-who">Which roles can open which app</h3>
+<p>Every app sits behind a sign-in gate that admits only the roles the access policy compiles for that address. The table shows the gates at this release. Inside an app, the policy then limits each action further, as the sections below explain.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>App</th><th>Default address</th><th>Roles admitted</th></tr></thead>
+<tbody>
+<tr><td>Portal</td><td><code>portal.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
+<tr><td>Configuration UI (System Configuration)</td><td><code>config.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
+<tr><td>Scheduler (Recipe Schedule Manager)</td><td><code>scheduler.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
+<tr><td>Run Monitor</td><td><code>monitor.&lt;domain&gt;</code></td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Database Management</td><td><code>dbmgmt.&lt;domain&gt;</code></td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
+<tr><td>User Manager</td><td><code>access.&lt;domain&gt;</code></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
+<tr><td>MQTT Explorer</td><td><code>mqtt-explorer.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
+<tr><td>Node-RED</td><td><code>node-red.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
+<tr><td>Grafana</td><td><code>grafana.&lt;domain&gt;</code></td><td>Any enabled account, even one without a platform role; a role gate is planned (IAM Phase 3.1)</td></tr>
+<tr><td>AI Workbench (JupyterHub)</td><td><code>ai-workbench.&lt;domain&gt;</code></td><td>Any enabled account, even one without a platform role; a role gate is planned (IAM Phase 3.2)</td></tr>
+<tr><td>pgAdmin</td><td><code>pgadmin.&lt;domain&gt;</code></td><td><span class="role">admin</span> only, checked by pgAdmin's own sign-in</td></tr>
+</tbody>
+</table></div>
+<p>The addresses are the defaults from <code>config.env.example</code>. An installation can change them in <code>config.env</code>. How to obtain a role is described in the <a href="#access">access chapter</a>.</p>
+
+<h4>Report-only and enforcing</h4>
+<p>The Scheduler, the Run Monitor and the Configuration UI's file libraries check every request against the access policy. The switch <code>IAM_ENFORCE</code> in <code>config.env</code> decides what a failed check does:</p>
+<ul>
+<li>While it is <code>false</code> (report-only), the request goes through and the service writes a "would refuse", "would limit" or "would withhold" line to its log.</li>
+<li>While it is <code>true</code>, the request is refused: 401 when the app cannot tell who you are, 403 when your role does not hold the right, and 503 when the service cannot load the policy.</li>
+</ul>
+<p>Database Management and the User Manager always enforce, whatever the switch says. The changes you save in the Configuration UI go straight to the database, which adds its own checks once <code>IAM_DB_ROLES</code> is <code>true</code>. Each app section notes where the two modes differ. The switches themselves are explained in the <a href="#admin">administration chapter</a>.</p>
+
+<h4>The user menu</h4>
+<p>Every signed-in app except Grafana, the AI Workbench, Node-RED and pgAdmin shows your name at the top right. It opens a menu with two entries:</p>
+<ul>
+<li><strong>Profile</strong>: your personal details and your password.</li>
+<li><strong>Sign out</strong>: ends your session on the platform, not only in that app.</li>
+</ul>
+
+<h3 id="apps-portal">Portal</h3>
+<p>The portal is the start page. It lists the apps as cards; clicking a card opens that app in a new browser tab. Every platform role can open the portal. An account without a platform role gets the page <strong>No access yet</strong>, which explains that an administrator still has to approve the access request.</p>
+<p>The main page, <strong>MedCEA Platform</strong>, shows three cards:</p>
+<ul>
+<li><strong>Grafana</strong>: the MedCEA Dashboard.</li>
+<li><strong>JupyterHub</strong>: the AI Workbench.</li>
+<li><strong>Administration</strong>: opens the <strong>Platform Management</strong> page.</li>
+</ul>
+<p>Platform Management holds the cards for these apps:</p>
+<ul>
+<li>Node-RED</li>
+<li>Database Management</li>
+<li>MQTT Explorer</li>
+<li>Configuration</li>
+<li>Scheduling (Recipe Schedule Manager)</li>
+<li>Operations (Run Monitor)</li>
+<li>User Manager</li>
+</ul>
+<p>The portal shows every card to every role. A card for an app your role may not open still opens it, and the app's gate answers with an error page. When an administrator uninstalls an app, its card stays on the page, greyed out and not clickable, and it comes back when the app is deployed again.</p>
+<ol class="steps">
+<li>Open <code>https://portal.&lt;domain&gt;</code> and sign in with your platform account.</li>
+<li>Click a card. For the apps under Platform Management, click <strong>Administration</strong> first.</li>
+<li>Use <strong>Back</strong> to return to the main page, or the user menu to sign out.</li>
+</ol>
+
+<h3 id="apps-config">Configuration UI</h3>
+<p>The Configuration UI, titled <strong>System Configuration</strong>, holds the definitions the platform runs on:</p>
+<ul>
+<li>the physical plant: locations, units, zones and devices</li>
+<li>the control algorithms and the learned state of learning controllers</li>
+<li>the recipes, which recipe may run on which unit, and the steps of each recipe</li>
+</ul>
+<p>Every role can open it. What you may change depends on your role:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Area</th><th>Who may change it</th><th>Who may only read it</th></tr></thead>
+<tbody>
+<tr><td>Locations, units, zones, components</td><td><span class="role">engineer</span></td><td>Every other role</td></tr>
+<tr><td>Devices</td><td><span class="role">engineer</span>; <span class="role">maintenance</span> only into a slot that already exists</td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">admin</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Recipes and steps</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Recipe ↔ Unit Permissions (assignments)</td><td><span class="role">production_manager</span>, approved recipes only</td><td>The roles that read recipes</td></tr>
+<tr><td>Control algorithm defaults</td><td><span class="role">engineer</span>, drafts only</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Learned state (Q-tables)</td><td><span class="role">qa</span> may retire it</td><td><span class="role">production_manager</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
+</tbody>
+</table></div>
+<p>The page has five tabs: <strong>Locations</strong>, <strong>Units</strong>, <strong>Devices</strong>, <strong>Control Models</strong> and <strong>Recipes</strong>. The <strong>Portal</strong> link at the top left returns to the portal.</p>
+
+<h4>Locations</h4>
+<p>A location is a site, for example a building. Each one has a name, an address, a contact, coordinates, a description and a status (Active or Inactive).</p>
+<ol class="steps">
+<li>Open the <strong>Locations</strong> tab.</li>
+<li>Click <strong>+ New Location</strong>, or <strong>Edit</strong> on an existing row.</li>
+<li>Fill in at least <strong>Name</strong>, then click <strong>Save Location</strong>.</li>
+</ol>
+<p><strong>↑ Import</strong> loads locations from a file on your computer or from the <strong>Platform Location Library</strong>. <strong>↓ Export All</strong> and the row's <strong>↓ Export</strong> save them to your computer or to the library. Once the services enforce, only an <span class="role">engineer</span> may save to the library.</p>
+
+<h4>Units and zones</h4>
+<p>A unit is one cultivation chamber at a location; a zone is a part of a unit. Telemetry, runs and device names all carry the unit and zone codes.</p>
+<ol class="steps">
+<li>Open the <strong>Units</strong> tab and click <strong>+ New Unit</strong>, or <strong>Edit</strong> on a row.</li>
+<li>Enter the <strong>Unit Code</strong>, choose the <strong>Unit Type</strong> (Greens, Mushrooms or Other) and the <strong>Location</strong>. <strong>+ New</strong> beside the location creates one without leaving the form.</li>
+<li>Click <strong>Save Unit</strong>.</li>
+<li>To add a zone, open the unit with <strong>Edit</strong>, click <strong>+ Add Zone</strong>, enter the <strong>Zone Code</strong> and click <strong>Save Zone</strong>.</li>
+</ol>
+<p>Unit codes and zone codes are unique regardless of case. A duplicate is reported as "already exists". A code becomes part of each board's network name, so choose codes of letters, digits, <code>_</code> and <code>-</code> only; the <a href="#devices">devices chapter</a> explains why.</p>
+
+<h4>Devices</h4>
+<p>The <strong>Devices</strong> tab lists every board with its hostname, type, unit and zone, model, serial number and status. The <strong>Online</strong> column checks whether the board answers on the network: click the icon in a row to check that board, or the icon in the column header to check all of them. <strong>Edit</strong> opens a device, and its components can be added with <strong>+ Add Component</strong>.</p>
+<p>Boards are normally added with the onboarding wizard, not typed in here. That procedure, and the rule that <span class="role">maintenance</span> may only re-onboard into an existing slot, are in the <a href="#devices">devices chapter</a>.</p>
+
+<h4>Recipes and steps</h4>
+<p>A recipe is the growth programme for a crop: a sequence of steps, each with a number of cycles, a light type, the minutes the light is on and off, and lower and upper limits for:</p>
+<ul>
+<li>air temperature</li>
+<li>CO<sub>2</sub></li>
+<li>humidity</li>
+<li>substrate temperature</li>
+</ul>
+<ol class="steps">
+<li>Open the <strong>Recipes</strong> tab and click <strong>+ New Recipe</strong>. Enter a <strong>Name</strong> and click <strong>Save</strong>.</li>
+<li>Click <strong>Steps →</strong> on the recipe's row.</li>
+<li>Click <strong>+ Add Step</strong>. Fill in <strong>Step #</strong>, <strong>Step Name</strong>, <strong>Cycles</strong>, the light settings and the limits, then click <strong>Save Step</strong>.</li>
+<li>Repeat for every step, then click <strong>← Back</strong>.</li>
+</ol>
+<p>Other actions on a recipe:</p>
+<ul>
+<li><strong>⎘ Copy</strong> makes a new recipe with the same steps.</li>
+<li><strong>↓ Export</strong> downloads the recipe as a file.</li>
+<li><strong>↑ Import</strong> reads a recipe from your computer or from the <strong>Platform Recipe Library</strong>.</li>
+</ul>
+<p>Saving a recipe to the Platform Recipe Library is refused for every role once the services enforce, because the library cannot check the rules that limit who may change a recipe (drafts only for engineers, assignments only for production managers). Downloading a recipe, and the recipes in the database, are not affected.</p>
+<div class="note"><p>No role may delete configuration records once the database enforces roles (<code>IAM_DB_ROLES=true</code>), so the <strong>Delete</strong> buttons are refused. To take a recipe, unit, location or device out of use, set its <strong>Status</strong> to Inactive.</p></div>
+
+<h4>Assigning recipes to units</h4>
+<p>The <strong>Recipe ↔ Unit Permissions</strong> panel on the Units tab is a grid of recipes against units. A tick means the recipe may run on that unit, and a circle means it may not. Under the tick is the algorithm chosen for that pairing. Inactive recipes are faded and inactive units struck through; their cells show a dash and cannot be clicked. This is the <span class="role">production_manager</span>'s planning task.</p>
+<ol class="steps">
+<li>Open the <strong>Units</strong> tab and scroll to <strong>Recipe ↔ Unit Permissions</strong>.</li>
+<li>Click the circle where the recipe's row meets the unit's column. The cell turns into a tick and <strong>Permission Settings</strong> opens.</li>
+<li>Pick a <strong>Default Algorithm</strong> (left empty, the system default IF_THEN_ELSE is used), optionally enter <strong>Parameter Overrides (JSON)</strong>, and click <strong>Save</strong>. To change these later, click the tick.</li>
+<li>To withdraw the assignment, click the tick and then <strong>Revoke Permission</strong>.</li>
+</ol>
+<p>Once the database enforces roles, the recipe must be approved before it can be assigned. A run then takes its algorithm and parameters from an approved parameter set: the schedule's, or else the assignment's. The parameter overrides typed here are not used. This release has no screen that creates a parameter set or attaches one to an assignment; the Scheduler lists the sets that exist.</p>
+
+<h4>Control Models and learned state</h4>
+<p>The <strong>Control Models</strong> tab has two panels.</p>
+<ul>
+<li><strong>Control Algorithms</strong> lists each algorithm with its code, name, description and <strong>Default Params (JSON)</strong>. An algorithm that is not approved shows its status (for example <code>draft</code>) under its code. An <span class="role">engineer</span> may edit the defaults of a draft and click <strong>Save</strong>.</li>
+<li><strong>Production Units</strong> lists, for each unit, how many recipes are allowed on it and the learned state each learning controller keeps for it. Click the record count to see the state per channel and when it was last updated.</li>
+</ul>
+
+<h4>Drafts, approval and the author rule</h4>
+<p>Recipes (with their steps), control algorithms and parameter sets have a status: <code>draft</code>, <code>approved</code> or <code>retired</code>.</p>
+<ul>
+<li>A new definition starts as a draft.</li>
+<li>A <span class="role">qa</span> person approves it. The approval is refused when the approver changed the definition since its last approval. It is also refused when any change since then has no recorded person; such a definition has to be re-created before it can be approved.</li>
+<li>An approved definition is frozen. While <code>IAM_DB_ROLES</code> is <code>false</code>, editing an approved definition is allowed but turns it back into a draft, and the app shows that as an advisory. While it is <code>true</code>, the edit is refused. Make a copy with <strong>⎘ Copy</strong> and have the copy approved instead.</li>
+<li>A parameter set can only be approved once its algorithm is approved.</li>
+</ul>
+<p>While the database enforces roles, only approved recipes may be assigned to units, and a run uses only approved algorithms and parameter sets.</p>
+<div class="note"><p>The apps have no approval screen yet. The approval itself is a database function (<code>approve_recipe</code>, <code>approve_algorithm</code>, <code>approve_params</code>) that only a signed-in person holding <span class="role">qa</span> can call. See the <a href="#compliance">compliance chapter</a> for how approvals are checked.</p></div>
+<div class="record"><p>Every change to these definitions records who made it, with which role, and when; it is also kept in the append-only row-change log. Each approval is a row naming the approver, the authors since the last approval and a digest of the approved row.</p></div>
+
+<h4>Retiring a Q-table</h4>
+<p>A learning controller, such as Q-learning, keeps what it learnt in a Q-table between runs. Starting a unit afresh means retiring that table. Only <span class="role">qa</span> may do it, and nothing is deleted: the next run on that unit starts cold.</p>
+<ol class="steps">
+<li>Open the <strong>Control Models</strong> tab and find the unit in <strong>Production Units</strong>.</li>
+<li>On the row of the algorithm whose state you want to retire, click <strong>Retire…</strong>.</li>
+<li>Enter the reason. A reason is required and is recorded.</li>
+<li>Confirm. The message names the unit and the number of channels retired.</li>
+</ol>
+<p>Retiring needs the database to verify your sign-in, which it does only while <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> are both <code>true</code>. Without them, nobody can retire a Q-table. Any other role gets the message that retiring learned state needs a <span class="role">qa</span> person signed in.</p>
+<div class="record"><p>For each channel retired, the controller-state event log gets a <code>retired</code> event with the unit, the algorithm, the retired state, the reason and the <span class="role">qa</span> person, and the approval record gets a row naming that person. Neither record can be changed afterwards.</p></div>
+
+<h3 id="apps-scheduler">Scheduler</h3>
+<p>The Scheduler, titled <strong>Recipe Schedule Manager</strong>, is where runs are started, stopped and followed, and where recurring schedules are kept. A run is one execution of a recipe on a unit. Every role can open the page and sees all four sections. Once the services enforce, the Scheduler refuses the data and actions your role does not hold, as the table shows.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Task</th><th>Roles</th></tr></thead>
+<tbody>
+<tr><td>See current and completed runs</td><td><span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">operator</span> for their own units only</td></tr>
+<tr><td>Read a run's log</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">operator</span> for their own units only. Not <span class="role">maintenance</span>, <span class="role">qc</span> or <span class="role">qp</span>.</td></tr>
+<tr><td>Create a run (<strong>Run Now</strong> in the header)</td><td><span class="role">production_manager</span></td></tr>
+<tr><td>Execute, stop or retry a run, or start a schedule with <strong>▶ Run Now</strong></td><td><span class="role">production_manager</span>; <span class="role">operator</span> for a run a production manager prepared in one of their units</td></tr>
+<tr><td>See schedules</td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Create, edit or retire a schedule</td><td><span class="role">production_manager</span></td></tr>
+<tr><td>See log settings</td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Propose log settings</td><td><span class="role">admin</span>; a different <span class="role">qa</span> person approves</td></tr>
+</tbody>
+</table></div>
+<p>The page has four sections: <strong>Current Runs</strong>, <strong>Scheduled Jobs</strong>, <strong>Completed Runs</strong> and <strong>Log Management</strong>. A run's status is one of:</p>
+<ul>
+<li><strong>Queued</strong>: created, not yet started.</li>
+<li><strong>Running</strong></li>
+<li><strong>Completed</strong></li>
+<li><strong>Failed</strong>: the run failed or was stopped.</li>
+</ul>
+
+<h4>Starting a run now</h4>
+<ol class="steps">
+<li>Click <strong>Run Now</strong> at the top right.</li>
+<li>Choose the <strong>Production Unit</strong>, then a <strong>Recipe</strong>. The list offers only the recipes allowed on that unit. If the unit already has an active run, a warning asks you to finish or cancel it first, and a new run is refused.</li>
+<li>Optionally choose an <strong>Algorithm</strong> and enter <strong>Param Overrides (JSON)</strong>. Once the database enforces roles, leave these empty: the run uses the approved parameter set of the recipe's assignment, and typed parameters are refused.</li>
+<li>Click <strong>Start Run</strong>. The run is created and executed in one go and appears under <strong>Current Runs</strong>.</li>
+</ol>
+<p>If the run is created but cannot start, the message begins "Run created but not started", and the run waits as Queued.</p>
+
+<h4>Executing, stopping and retrying</h4>
+<p>Each row in <strong>Current Runs</strong> shows the buttons that fit its status:</p>
+<ul>
+<li><strong>▶ Execute</strong> on a Queued run.</li>
+<li><strong>■ Stop</strong> on a Running run. Stopping marks the run Failed, then ends the process.</li>
+<li><strong>↺ Retry</strong> on a Failed run. Retrying sets the run back to Queued and executes it again, optionally with another algorithm.</li>
+<li><strong>📋 Log</strong> on every run.</li>
+</ul>
+<p>The arrow at the left of a row expands the cycles of the run, with each cycle's step, start and end times, status and parameters.</p>
+<p>An <span class="role">operator</span> may execute, stop or retry a run only when both of these hold:</p>
+<ul>
+<li>a different person holding <span class="role">production_manager</span> created it, or a schedule such a person created started it;</li>
+<li>its unit is one of the operator's units.</li>
+</ul>
+<p>This keeps preparing a run separate from starting it.</p>
+<div class="record"><p>A run records who created it and who executed it, with their roles. Each cycle is recorded as the runner completes it. A run started by a schedule is recorded with the actor <code>system:scheduler</code>, on behalf of the person who created the schedule.</p></div>
+
+<h4>Schedules</h4>
+<ol class="steps">
+<li>Click <strong>New Schedule</strong>.</li>
+<li>Choose the <strong>Production Unit</strong> and the <strong>Recipe</strong>.</li>
+<li>Pick a <strong>Frequency</strong>: Daily, Weekly, Monthly, Hourly or Run Once. Set the days, the date and the time. All times are UTC. <strong>Generated Schedule</strong> shows the result.</li>
+<li>Choose the <strong>Parameter set</strong>. While the database enforces roles, you must choose an approved set, and the schedule runs that set's algorithm and parameters. Otherwise the list is for information only, and the schedule runs the <strong>Algorithm</strong> and <strong>Param Overrides (JSON)</strong> fields below it.</li>
+<li>Optionally add a <strong>Description</strong>, leave <strong>Enabled</strong> on, and click <strong>Save</strong>.</li>
+</ol>
+<p>In <strong>Scheduled Jobs</strong>, each schedule has three buttons:</p>
+<ul>
+<li><strong>▶ Run Now</strong> starts the schedule's recipe at once.</li>
+<li><strong>Edit</strong> changes the schedule.</li>
+<li><strong>Retire</strong> stops the schedule from firing.</li>
+</ul>
+<p>A schedule is retired, never deleted. A retired schedule stays in the record and cannot be edited or enabled again. Create a new schedule instead.</p>
+
+<h4>Run logs</h4>
+<p>Click <strong>📋 Log</strong> on a current run, or <strong>View Log</strong> on a completed one, to open the run's log. For a running run, the log follows new lines as they are written.</p>
+<p>A role that does not hold read access on run logs sees the run but not its log: the window shows "(your role does not hold R on run logs)", where R means read. This applies to <span class="role">maintenance</span>, <span class="role">qc</span> and <span class="role">qp</span> while <code>IAM_ENFORCE</code> is <code>true</code>. While it is <code>false</code>, the log is shown and the service records a "would withhold" line.</p>
+
+<h4>Log Management: compression, never deletion</h4>
+<p>No person compresses or deletes a run log. The scheduler's own nightly job runs every day at 03:15 UTC. It compresses (gzips) the log of each run that has finished, Completed or Failed, once the log is older than the <strong>Compress run logs after</strong> setting. It never touches the log of a run that is queued or running, and it never deletes a log. A compressed log still opens from <strong>View Log</strong>.</p>
+<p>The <strong>Log Management</strong> section shows:</p>
+<ul>
+<li>the number of run log files, their total size and the oldest one;</li>
+<li>when the job last ran and how many files it compressed or kept;</li>
+<li>the smallest values allowed: 1 day for compression and 30 days for the retention value.</li>
+</ul>
+<p><strong>Retention setting (not applied)</strong> is kept as a value but nothing reads it, because run logs are never deleted.</p>
+<ol class="steps">
+<li>As <span class="role">admin</span>, change <strong>Compress run logs after</strong> (in days) and click <strong>Propose retention</strong>.</li>
+<li>While the database enforces roles, the message says the value is proposed and "pending qa approval". The new value applies only after a <span class="role">qa</span> person other than you approves it. There is no approval screen for this in the Scheduler yet. While the database does not enforce roles, the value is saved at once and the message reads "Defaults saved".</li>
+</ol>
+<div class="record"><p>A proposed setting is stored as a pending change with its author. The approval records the <span class="role">qa</span> person who confirmed it.</p></div>
+
+<h4>Operators see only their own units</h4>
+<p>An <span class="role">operator</span> sees only the runs, cycles and logs of the units assigned to them. A run in another unit looks the same as a run that does not exist. The filter applies while <code>IAM_ENFORCE</code> or <code>IAM_DB_ROLES</code> is <code>true</code>. An operator with no unit assigned sees no runs and can start none. Units are assigned with <code>apps/iam/units.sh</code> and confirmed by <span class="role">qa</span> in the User Manager's <strong>Decisions</strong> tab, as described in the <a href="#admin">administration chapter</a>.</p>
+
+<h3 id="apps-monitor">Run Monitor</h3>
+<p>The Run Monitor is a live view of every run that has not completed: running, queued (shown as Scheduled) and failed runs. Each run gets its own card. The Monitor is for watching. It has no buttons that change anything.</p>
+<p>The roles admitted are <span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span> and <span class="role">auditor</span>. An <span class="role">operator</span> sees only the units assigned to them, under the same rule as in the Scheduler: runs, readings and actions of other units are not shown, and a reading that carries no zone is never shown to an operator.</p>
+<p>Each card shows the unit code and type, the run number, the recipe, the status and the start time, with three panels:</p>
+<ul>
+<li><strong>Steps</strong>: each step of the recipe, its status and the cycles completed out of the total. The current step is highlighted.</li>
+<li><strong>Live Measurements</strong>: the latest value of each sensor reading for the unit. Air Temp, CO<sub>2</sub>, Humidity and Substrate Temp are drawn as bars against the current step's limits, which are shown in brackets. A bar marks whether the value is inside or outside the limits, and "no limits set" means the step has none for that reading.</li>
+<li><strong>Actions</strong>: the latest command sent to each actuator, for example a light or a fan, with its time.</li>
+</ul>
+<p>The page refreshes itself every 30 seconds. Click <strong>↻ Refresh</strong> to refresh at once. "No active runs at this time." means that no run you may see is open.</p>
+
+<h3 id="apps-dbmgmt">Database Management</h3>
+<p>Database Management exports database objects as an SQL file, for evidence, for an inspection or for a copy kept outside the platform. Only <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span> can open it. It always enforces the policy, whatever <code>IAM_ENFORCE</code> says, because an export takes data out of the platform.</p>
+<p>The page lists only the objects in the export groups your role holds, and states them in a line that begins "You may export:".</p>
+<ul>
+<li><span class="role">qa</span> and <span class="role">auditor</span> may export master data, devices, device history, recipes, controllers, controller state, runs, schedules, scheduler settings, telemetry and the audit histories.</li>
+<li><span class="role">qp</span> may export runs, telemetry and the audit histories.</li>
+</ul>
+<p>The page offers only the platform's own data tables and views. The account records, unit assignments and access policy that belong to the same groups are not offered here, and the audit histories offered are the platform's approvals, pending changes and row-change log. Sequences and types hold no rows and are offered as definitions to everyone who can open the page.</p>
+<p>The card <strong>pgAdmin</strong> at the top links to pgAdmin, which only <span class="role">admin</span> can use (see <a href="#apps-pgadmin">pgAdmin</a>).</p>
+<ol class="steps">
+<li>In <strong>DDL &amp; Data Export</strong>, tick <strong>DDL</strong> (the table definition) and/or <strong>Data</strong> (the rows) for each object you need. <strong>All DDL</strong>, <strong>All Data</strong> and <strong>Clear</strong> set or clear every box. For views, sequences and types the Data box is disabled; only their definition is exported.</li>
+<li>Keep or change the <strong>File Name</strong>.</li>
+<li>Under <strong>Save To</strong>, choose one destination:
+<ul>
+<li><strong>Download locally</strong> puts the file on your computer.</li>
+<li><strong>Save to platform (apps/database/exports/)</strong> writes it on the platform host. It refuses a name that already exists there.</li>
+</ul></li>
+<li>Click <strong>↓ Export SQL</strong>. The result line shows the file name, its size, the export number and the start of its sha256 checksum.</li>
+</ol>
+<p>The file begins with a header naming:</p>
+<ul>
+<li>the export number</li>
+<li>when it was generated, in UTC</li>
+<li>who exported it, and with which role</li>
+<li>the groups it covers</li>
+</ul>
+<p>If one selected object is outside your groups, the whole export is refused and nothing is logged.</p>
+<div class="record"><p>Every export writes one row to the export log (<code>iam_policy.export_log</code>). The row holds the time, the person, the groups, and each object with whether its DDL or how many rows were exported. The row is written before the file is handed over, and nobody can change or delete it afterwards. The full sha256 of the file is written to the Database Management service log; keep the checksum with the file, so you can show later that the file is the one exported.</p></div>
+
+<h3 id="apps-usermanager">User Manager</h3>
+<p>The User Manager is where access to the platform is decided and checked:</p>
+<ul>
+<li>access requests</li>
+<li>accounts and their roles</li>
+<li>the decisions <span class="role">qa</span> must confirm</li>
+<li>the e-mail the platform sends</li>
+<li>the quarterly access review</li>
+</ul>
+<p>The roles admitted are <span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span>. Each person sees only the tabs their role may use:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Tab</th><th>What it is for</th><th>Who sees it</th></tr></thead>
+<tbody>
+<tr><td><strong>Requests</strong></td><td>Approve or reject access requests (Pending, Approved, Rejected, All)</td><td><span class="role">admin</span></td></tr>
+<tr><td><strong>Users</strong></td><td>Accounts (Active, Inactive, Awaiting approval, All): deactivate, activate, change role, set the person</td><td><span class="role">admin</span></td></tr>
+<tr><td><strong>Decisions</strong></td><td>Account decisions (Waiting for qa, To review, All)</td><td><span class="role">admin</span> and <span class="role">auditor</span> read them; <span class="role">qa</span> confirms, refuses and reviews them</td></tr>
+<tr><td><strong>E-mail settings</strong></td><td>The sending mail account</td><td><span class="role">admin</span></td></tr>
+<tr><td><strong>Templates</strong></td><td>The texts of the e-mails sent to applicants</td><td><span class="role">admin</span></td></tr>
+<tr><td><strong>Access review</strong></td><td>The quarterly review of who holds what</td><td><span class="role">qa</span> creates and signs it off; <span class="role">qp</span> and <span class="role">auditor</span> read it</td></tr>
+<tr><td><strong>Change log</strong></td><td>Changes to the mail settings and templates</td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
+</tbody>
+</table></div>
+<p>The full access process, including what the applicant sees, is in the <a href="#access">access chapter</a>; dual control and the review are explained in the <a href="#compliance">compliance chapter</a>. The main tasks are below.</p>
+
+<h4>Deciding an access request (admin)</h4>
+<ol class="steps">
+<li>Open <strong>Requests</strong>, tab <strong>Pending</strong>, and select a request.</li>
+<li>Under <strong>Decision</strong>, choose <strong>Approve</strong> or <strong>Reject</strong>. For an approval, check <strong>Role to grant</strong>. It starts as the requested role, and you may reassign it.</li>
+<li>Write a note. A rejection needs one. Check the e-mail to the applicant, which is pre-filled from the template; untick <strong>Send e-mail to</strong> the applicant's address to send nothing.</li>
+<li>Confirm. An approved request waits for <span class="role">qa</span>: the account stays disabled, with no role, until a <span class="role">qa</span> person confirms the decision, and the approval e-mail goes out only then. A rejection takes effect at once: the e-mail goes out, and the pending account is deleted so the person may apply again. The request record keeps who asked, for what, and why it was refused.</li>
+</ol>
+
+<h4>Changing an account (admin)</h4>
+<p>In <strong>Users</strong>, select an account. Deactivating, changing the role, proposing a person and withdrawing a decision each need a reason; for an activation the reason is optional. The reason is recorded with the decision. You cannot change your own account.</p>
+<ul>
+<li><strong>Deactivate account</strong> acts at once. The person is signed out everywhere and their MQTT credentials are revoked. Their data, role and history are kept.</li>
+<li><strong>Activate (waits for qa)</strong> waits for confirmation, also for an account with no role.</li>
+<li><strong>Change role</strong> acts at once when the new role holds less, a narrowing; it takes effect within a few minutes, without signing the person out. When the new role adds any right, the button reads <strong>Change (waits for qa)</strong> and the page lists the rights it adds.</li>
+<li><strong>Person</strong>: enter the <strong>New person_id</strong> the account belongs to and click <strong>Propose (waits for qa)</strong>. This always waits for <span class="role">qa</span>.</li>
+<li>While a decision about the account waits for <span class="role">qa</span>, the role and the person cannot be changed until it is decided or withdrawn with <strong>Withdraw decision</strong>. Deactivating the account is always possible and withdraws the waiting decision.</li>
+</ul>
+
+<h4>Confirming decisions (qa)</h4>
+<ol class="steps">
+<li>Open <strong>Decisions</strong>, tab <strong>Waiting for qa</strong>, and select a decision. The detail lists the effect and the access it adds. For a new applicant it also lists the existing <span class="role">admin</span> and <span class="role">qa</span> accounts, flagging any that may be the same person.</li>
+<li>Write a note (required to refuse) and click <strong>Confirm</strong> or <strong>Refuse</strong>.</li>
+<li>Decisions that acted at once (deactivations, narrowings) appear under <strong>To review</strong>. Click <strong>Mark reviewed</strong> after checking them.</li>
+</ol>
+<p>You cannot check a decision that you made, or one about your own account. The page says why when that is the case.</p>
+
+<h4>E-mail settings and templates (admin)</h4>
+<p>Until e-mail is set up, a banner at the top says that nothing is sent and messages go to the service log.</p>
+<ol class="steps">
+<li>In <strong>E-mail settings</strong>, enter the <strong>Gmail address</strong>, the <strong>App password</strong> and the <strong>Sender name</strong>. The panel beside the form explains how to get an app password. Use <strong>Another mail server</strong> for a different SMTP host.</li>
+<li>Click <strong>Verify and propose (waits for qa)</strong>. The login is checked first. The change is used only after a <span class="role">qa</span> person confirms it, because the same account sends the password-reset e-mails.</li>
+<li><strong>Send test e-mail to me</strong> checks the current account.</li>
+</ol>
+<p>In <strong>Templates</strong>, select a template, edit it and click <strong>Save template</strong>, or <strong>Reset to default</strong>. A template change applies at once.</p>
+<div class="record"><p>Every request, decision, confirmation, refusal and review is kept in append-only histories with who and when. Mail settings and template changes are listed in the <strong>Change log</strong> (when, what, change, by).</p></div>
+
+<h4>The quarterly access review (qa)</h4>
+<ol class="steps">
+<li>Open <strong>Access review</strong> and click <strong>Create this quarter's review</strong>. The page takes a snapshot of:
+<ul>
+<li>accounts, roles and units</li>
+<li>decisions waiting and decisions made since the last review</li>
+<li>waivers and switches</li>
+</ul>
+The snapshot never changes afterwards.</li>
+<li>Read the review, including <strong>Unexplained at the time of the review</strong>.</li>
+<li>Optionally write a note and click <strong>Sign off</strong>. Signing off cannot be undone, and it accepts any unexplained roles listed.</li>
+</ol>
+
+<h3 id="apps-mqtt">MQTT Explorer</h3>
+<p>MQTT Explorer is a browser tool that shows the messages the boards and the platform exchange on the message broker. Only <span class="role">engineer</span> can open it. It is meant for commissioning and fault finding.</p>
+<ul>
+<li>The left column lists every topic under the platform's topic root (<code>medcea/</code> by default) seen since the page opened, with its last value.</li>
+<li>Click a topic to see its latest messages; the page keeps the last 100 for each topic.</li>
+<li>The status at the top reads Connected, Reconnecting or Error.</li>
+</ul>
+<p>To send a message:</p>
+<ol class="steps">
+<li>Click a topic, or type one in the <strong>Publish</strong> box.</li>
+<li>Enter the payload, as text or JSON.</li>
+<li>Click <strong>Send</strong>.</li>
+</ol>
+<div class="warn"><p>At this release the page connects to the broker with one shared service account that may read and write every topic under the platform root. A message published to a <code>control</code> topic switches equipment in a live chamber, whatever the unit's state. The policy's per-person credential, which allows writing only to a unit flagged for commissioning, is not yet what this page uses. Publish to control topics only on a unit with no active run.</p></div>
+
+<h3 id="apps-nodered">Node-RED</h3>
+<p>Node-RED runs the flow that receives telemetry from the broker and writes it to the database. Its editor is where that flow, and any other integration flow, is changed. Only <span class="role">engineer</span> can open it.</p>
+<div class="warn"><p>The flows connect to the message broker as the <code>node-red</code> service account, which reads every topic under the platform root, and to the database with the ingest login (the database superuser while <code>IAM_DB_SERVICE_ROLES</code> is <code>false</code>). A broken or deleted ingest flow stops telemetry from being stored. Export a copy of the flow before you change it. The flow kept in the repository is <code>apps/node-red/flows/message-processing.json</code>.</p></div>
+
+<h3 id="apps-grafana">Grafana</h3>
+<p>Grafana shows telemetry as dashboards. The portal's Grafana card opens it, and you are signed in with your platform account without a further prompt. The provided dashboard, <strong>IoT Environmental Monitoring</strong>, has these panels:</p>
+<ul>
+<li>live readings of air temperature, relative humidity and CO<sub>2</sub></li>
+<li>historical trends of the same readings</li>
+<li>a summary of the latest readings by zone and device</li>
+</ul>
+<p>Grafana gives each person one of its own roles:</p>
+<ul>
+<li>Admin, for accounts holding <code>grafana_admin</code></li>
+<li>Editor, for accounts holding <code>grafana_developer</code></li>
+<li>Viewer, for everyone else</li>
+</ul>
+<p>At this release, any enabled platform account can sign in. Dashboards read through Grafana's own database account, so a viewer sees telemetry of every unit, including an <span class="role">operator</span> who sees only their own units in the Run Monitor. Per-role access in Grafana is planned (IAM Phase 3.1).</p>
+
+<h3 id="apps-workbench">AI Workbench (JupyterHub)</h3>
+<p>The AI Workbench is JupyterHub: notebooks for data analysis and for developing control algorithms. It is meant for <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> work.</p>
+<ul>
+<li>Each person gets their own workspace with persistent storage. It starts when you sign in and is stopped after an hour without activity; your files are kept.</li>
+<li>The workspace opens in JupyterLab, and VS Code is available inside it.</li>
+<li>The first start of a workspace takes longer, because it installs VS Code into your home folder.</li>
+</ul>
+<ol class="steps">
+<li>Click the <strong>JupyterHub</strong> card on the portal. You go straight to the platform sign-in.</li>
+<li>Wait while your workspace starts, then work in JupyterLab.</li>
+</ol>
+<p>At this release any enabled platform account may sign in, and the administrator account is the hub's administrator. Limiting the workbench to the roles the policy names (<span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span>, and <span class="role">admin</span> for the hub) is planned (IAM Phase 3.2).</p>
+
+<h3 id="apps-pgadmin">pgAdmin</h3>
+<p>pgAdmin is a database browser for the administrator, who uses it to see the database schema and the configuration. Only accounts holding <span class="role">admin</span> can sign in, through the <strong>MedCEA sign-in</strong> button. The portal has no card for it, so open <code>https://pgadmin.&lt;domain&gt;</code> directly.</p>
+<p>pgAdmin uses one of two database logins:</p>
+<ul>
+<li>While the services use their own database roles (<code>IAM_DB_SERVICE_ROLES=true</code>), it connects as <code>rr_admin_login</code>. That login owns nothing and reads only what the <span class="role">admin</span> role may read. It cannot change regulated data or the histories.</li>
+<li>While that switch is <code>false</code>, it connects as the database superuser.</li>
+</ul>
+<p>Do not change the database schema here. Schema changes are applied by the database deploy, as described in the <a href="#admin">administration chapter</a>.</p>
+</section>

@@ -1,0 +1,167 @@
+<section id="access" data-title="Getting access and roles">
+<h2>Getting access and roles</h2>
+<p class="lede">Every person signs in to MedCEA with one personal account, and every account holds exactly one platform role. You ask for an account on the sign-in page. An administrator reviews the request, and a different person holding <span class="role">qa</span> confirms it before the account can be used. Your role decides which web apps you can open and what you may do in them. This chapter covers how to request access, what each of the eleven roles is for, how to sign in and out, how to manage your profile and password, what happens when your role changes or your account is deactivated, and what to do when a page says you have no access.</p>
+
+<h3 id="access-request">Requesting access</h3>
+<p>The platform has one sign-in page, served by Keycloak in the MedCEA look. It has two tabs: <strong>Sign in</strong> and <strong>Request access</strong>. Below the sign-in form there is also a link, "No account yet? Request access". Opening <code>https://access.&lt;domain&gt;/register</code> brings you to the same tab.</p>
+
+<h4>What the form asks</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Field</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td>First name, Last name</td><td>Required, up to 100 characters each.</td></tr>
+<tr><td>E-mail</td><td>Required, a valid address. The decision is sent here.</td></tr>
+<tr><td>Organisation</td><td>Optional, up to 200 characters.</td></tr>
+<tr><td>Username</td><td>3 to 32 characters: lowercase letters, digits, dot, dash or underscore, starting with a letter or digit.</td></tr>
+<tr><td>Password, Repeat password</td><td>At least 10 characters; both must match. This is the password you will sign in with.</td></tr>
+<tr><td>Role you need</td><td>Choose one role from the list. Each role shows its label and a short description. Roles not yet available carry the tag "not yet in use".</td></tr>
+<tr><td>Business justification</td><td>What you will use the platform for, 20 to 2000 characters.</td></tr>
+</tbody>
+</table></div>
+
+<ol class="steps">
+<li>Open the sign-in page and choose the <strong>Request access</strong> tab.</li>
+<li>Fill in every field and choose the role you need.</li>
+<li>Choose <strong>Submit request</strong>. The page answers "Request received. You will get an e-mail once an administrator has reviewed it."</li>
+<li>Wait for the e-mail. Until then, signing in shows "This account is not active".</li>
+</ol>
+
+<p>The form refuses a request when another request for the same e-mail address is already waiting, or when the username or e-mail address already has an account. One network address can send at most 10 valid requests per hour.</p>
+
+<h4>What happens to your request</h4>
+<p>Submitting creates your account at once, but disabled. It stays disabled until two different people have acted on it:</p>
+<ol>
+<li>An administrator opens the request in the <strong>User Manager</strong> under <strong>Requests</strong>, and either approves it with a role (the one you asked for or a different one) or rejects it with a note explaining why. The administrator also writes the e-mail you will receive, starting from a prepared text, or unticks <strong>Send e-mail to</strong> (followed by your address) so that none is sent.</li>
+<li>An approval does not enable the account. It becomes an account decision that waits under <strong>Decisions</strong> until a person holding <span class="role">qa</span> confirms or refuses it. That person must not be the administrator who approved it, and must not be you.</li>
+<li>When <span class="role">qa</span> confirms, the account is enabled with the granted role and the e-mail the administrator wrote is sent. If the granted role differs from the one you asked for, the prepared text the administrator starts from says the role was reassigned.</li>
+</ol>
+<p>A rejection, or a <span class="role">qa</span> refusal of the approval, deletes the disabled account. You may apply again.</p>
+<div class="note"><p>E-mails depend on the platform's mail account, which an administrator sets up in the User Manager under <strong>E-mail settings</strong>. Without it, the decision is still recorded but no e-mail goes out, so ask an administrator directly.</p></div>
+<div class="record"><p>Your request is stored with every field except the password, which only Keycloak keeps. Each step (submitted, approved, reassigned, rejected) is added to the request's history, with who decided and when. The approval and the <span class="role">qa</span> confirmation are kept as one account decision that names the maker, the checker, both times and any notes, and the e-mail text the administrator wrote is stored with the request.</p></div>
+
+<h3 id="access-roles">The eleven roles</h3>
+<p>The roles come from the access policy (<code>apps/iam/policy/defaults.yaml</code>, section <code>roles</code>). The role key is the name the platform uses in the User Manager and in records. Two roles include another: a <span class="role">production_manager</span> may do everything an <span class="role">operator</span> may do, in every unit, and <span class="role">qa</span> may do everything an <span class="role">auditor</span> may do.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th>Label</th><th>What the person does</th><th>Availability</th></tr></thead>
+<tbody>
+<tr><td><span class="role">operator</span></td><td>Cultivation Operator</td><td>Runs the cultivation day to day in the units assigned to them. Executes and stops runs a production manager prepared for their unit; watches telemetry, runs and run logs of their own units in the Monitor; reads recipes and schedules.</td><td>In use</td></tr>
+<tr><td><span class="role">production_manager</span></td><td>Production Manager (Process Owner)</td><td>Owns production planning. Creates runs and schedules, starts and stops runs, and assigns approved recipes and approved parameter sets to units without editing them. Includes everything an operator may do, in every unit.</td><td>In use</td></tr>
+<tr><td><span class="role">maintenance</span></td><td>Maintenance and Calibration</td><td>Replaces and calibrates boards and sensors in slots that already exist (never creates a new slot). Reads telemetry, runs and device history to diagnose faults.</td><td>In use</td></tr>
+<tr><td><span class="role">qc</span></td><td>Quality Control Analyst</td><td>Tests product and records lab results. Reads runs and telemetry of the batches under test. Lab results are not yet part of the platform.</td><td>Not yet in use</td></tr>
+<tr><td><span class="role">qa</span></td><td>Quality Assurance</td><td>Independent approver. Approves recipes, controllers, settings, master data and device changes made by someone else; confirms every account grant, role widening and unit assignment an administrator makes; approves every change to the access policy; signs off the quarterly access review; reviews audit trails and export evidence. Includes everything an auditor may do.</td><td>In use</td></tr>
+<tr><td><span class="role">qp</span></td><td>Qualified / Responsible Person</td><td>Releases the output of a completed run they neither created nor executed; reads and exports the run record and its histories. Creates and changes nothing.</td><td>Not yet in use</td></tr>
+<tr><td><span class="role">engineer</span></td><td>Automation Engineer</td><td>Builds and maintains the automation: drafts recipes, controllers, parameter sets and master data for <span class="role">qa</span> to approve; onboards devices; maintains Node-RED flows and Grafana dashboards; commissions units over MQTT while a unit is flagged for commissioning.</td><td>In use</td></tr>
+<tr><td><span class="role">bio_scientist</span></td><td>Bio-process Scientist</td><td>Studies the biology. Reads recipes and controllers and analyses data in the AI Workbench.</td><td>In use</td></tr>
+<tr><td><span class="role">control_scientist</span></td><td>Control and AI Scientist</td><td>Designs control algorithms. Reads controller definitions and parameter sets and develops and evaluates algorithms in the AI Workbench.</td><td>In use</td></tr>
+<tr><td><span class="role">admin</span></td><td>System Administrator</td><td>Keeps the platform running. Administers accounts and unit assignments (every grant confirmed by <span class="role">qa</span>), drafts policy and settings changes for <span class="role">qa</span> to approve, administers the workbench hub, and views the schema and configuration in pgAdmin. Has no access to regulated or history content. In the prototype the same person operates the host, which counts as break-glass access.</td><td>In use</td></tr>
+<tr><td><span class="role">auditor</span></td><td>Auditor / Inspector</td><td>Reads and exports records, configuration and audit trails. Changes nothing.</td><td>In use</td></tr>
+</tbody>
+</table></div>
+<p>"Not yet in use" means the role exists and can be requested, but the work it is meant for is not yet in the platform. The request form shows these roles with the tag "not yet in use".</p>
+
+<h4>One platform role per account</h4>
+<p>An account holds exactly one platform role. To do work that needs another role, ask an administrator to change your role; you do not get a second one. When a role changes, the new role is added before the old one is removed, so a failure in between leaves the account with two roles for a moment, never with none.</p>
+<p>Two rules protect the separation between administration and approval:</p>
+<ul>
+<li>No person may hold an <span class="role">admin</span> account and a <span class="role">qa</span> account at the same time. The User Manager checks this against all of a person's accounts, enabled or not, when a role is changed and again when the change is confirmed.</li>
+<li>The User Manager refuses to take away the last enabled <span class="role">admin</span> or the last enabled <span class="role">qa</span>.</li>
+</ul>
+
+<h4>Operators and their units</h4>
+<p>An <span class="role">operator</span> works only in the units assigned to them: they see the telemetry, runs and run logs of those units and start or stop runs only there. With no unit assigned they see none of this. The administrator assigns units on the platform host with <code>apps/iam/units.sh</code>, not in the User Manager. Each assignment waits until a <span class="role">qa</span> person other than the administrator confirms it in the User Manager under <strong>Decisions</strong>; a removal takes effect at once. A <span class="role">production_manager</span> is not limited to assigned units. The <a href="#admin">Administration</a> chapter describes how assignments are made.</p>
+
+<h3 id="access-apps">Which web apps each role can open</h3>
+<p>Each web app sits behind a sign-in gate that admits only the roles the access policy names for it. The administrator can print the current list from the policy with:</p>
+<pre><code>python3 apps/iam/compiler/cli.py hosts</code></pre>
+<p>The table below is that list for the default policy. Hostnames are shown with the default prefixes from <code>config.env.example</code>; your installation's domain follows the dot.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Web app</th><th>Host</th><th>Roles admitted</th><th>Gate status</th></tr></thead>
+<tbody>
+<tr><td>Service portal</td><td><code>portal.</code></td><td>All eleven roles</td><td>Checked</td></tr>
+<tr><td>Configuration UI</td><td><code>config.</code></td><td>All eleven roles</td><td>Checked</td></tr>
+<tr><td>Scheduler</td><td><code>scheduler.</code></td><td>All eleven roles</td><td>Checked</td></tr>
+<tr><td>Monitor</td><td><code>monitor.</code></td><td><span class="role">auditor</span>, <span class="role">engineer</span>, <span class="role">maintenance</span>, <span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span></td><td>Checked</td></tr>
+<tr><td>Database Management</td><td><code>dbmgmt.</code></td><td><span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Checked</td></tr>
+<tr><td>User Manager</td><td><code>access.</code></td><td><span class="role">admin</span>, <span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Checked</td></tr>
+<tr><td>MQTT Explorer</td><td><code>mqtt-explorer.</code></td><td><span class="role">engineer</span></td><td>Checked</td></tr>
+<tr><td>Node-RED</td><td><code>node-red.</code></td><td><span class="role">engineer</span></td><td>Checked</td></tr>
+<tr><td>pgAdmin</td><td><code>pgadmin.</code></td><td><span class="role">admin</span></td><td>Checked by pgAdmin's own sign-in setting</td></tr>
+<tr><td>Grafana</td><td><code>grafana.</code></td><td>Policy: <span class="role">auditor</span>, <span class="role">engineer</span>, <span class="role">maintenance</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span></td><td>Not yet checked (planned for IAM Phase 3.1). Today any active account can sign in.</td></tr>
+<tr><td>AI Workbench</td><td><code>ai-workbench.</code></td><td>Policy: <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span></td><td>Not yet checked (planned for IAM Phase 3.2). Today any active account can sign in.</td></tr>
+<tr><td>Device onboarding</td><td><code>onboard-device.</code></td><td>Policy: <span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not yet checked (planned for IAM Phase 3.4, through the <code>EDGE_WIZARD_ROLE</code> setting)</td></tr>
+<tr><td>Access Policy</td><td>not deployed</td><td>Policy: <span class="role">admin</span>, <span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Not deployed yet (IAM Phase 4)</td></tr>
+</tbody>
+</table></div>
+<p>Opening a web app is only the first gate. What you may do inside it (create a recipe, start a run, approve a change, export data) is decided again for each action by the service and by the database, from the same policy. For example, every role can open the Configuration UI, but only some roles can save a draft there and only <span class="role">qa</span> can approve one.</p>
+<div class="note"><p>The service portal shows every card to everyone. A card for an app your role cannot open leads to the "No access" page described in <a href="#access-noaccess">Why can't I open an app</a>.</p></div>
+
+<h3 id="access-signin">Signing in and out</h3>
+<ol class="steps">
+<li>Open any platform address, for example the service portal. If you are not signed in, you are sent to the sign-in page.</li>
+<li>On the <strong>Sign in</strong> tab, enter your <strong>Username or e-mail</strong> and your <strong>Password</strong>. <strong>Show</strong> displays the password as you type it.</li>
+<li>Tick <strong>Remember me</strong> if you want Keycloak to keep your sign-in on this browser after you close it.</li>
+<li>Choose <strong>Sign in</strong>. You return to the page you asked for.</li>
+</ol>
+<p>One sign-in covers every web app on the platform: once signed in, opening another app does not ask for your password again. pgAdmin shows a <strong>MedCEA sign-in</strong> button first; choosing it uses the same sign-in.</p>
+<p>Messages you may see on the sign-in page:</p>
+<ul>
+<li>"Invalid username or password." Check both and try again.</li>
+<li>"This account is not active." Your request has not been confirmed yet, or your account was deactivated. Contact an administrator.</li>
+</ul>
+<p>To sign out, open the user menu and choose <strong>Sign out</strong>. This ends your sign-in session, not only the page you are on, and returns you to the app you signed out from, which asks you to sign in again.</p>
+
+<h3 id="access-menu">The user menu and your profile</h3>
+<p>Signed-in pages (the service portal, the Configuration UI, the Scheduler, the Monitor, Database Management, MQTT Explorer and the User Manager) show your name with your initials at the top right. Choosing it opens the user menu:</p>
+<ul>
+<li><strong>Profile</strong> opens your profile page.</li>
+<li><strong>Sign out</strong> signs you out.</li>
+</ul>
+<p>If the profile service cannot be reached, the menu shows "Account" instead of your name and still offers <strong>Sign out</strong>. In that case <strong>Sign out</strong> ends your sign-in for that app only, so close the browser if you need to be sure you are signed out everywhere.</p>
+<h4>Profile</h4>
+<p>The profile page, "Your MedCEA account", has two parts:</p>
+<ul>
+<li><strong>Personal details</strong>: you can change your first name, last name and organisation and choose <strong>Save changes</strong>. Your username and e-mail are shown but cannot be changed here; ask an administrator.</li>
+<li><strong>Password</strong>: <strong>Change password</strong> takes you to the platform's password page. You may be asked to sign in again first. When the change is done you return to your profile, which says "Your password was changed." The password goes only to Keycloak, never through the platform's own services.</li>
+</ul>
+<p>The <strong>Back to</strong> link at the top left (for example "Back to portal") returns you to the page you opened the menu from, or to that app's home page.</p>
+
+<h3 id="access-forgot">Forgotten password</h3>
+<p>The sign-in page shows a <strong>Forgot password?</strong> link only when the platform's mail account is configured and confirmed. Then:</p>
+<ol class="steps">
+<li>Choose <strong>Forgot password?</strong> on the sign-in page.</li>
+<li>Enter your username or e-mail address on the "Reset your password" page.</li>
+<li>Follow the link in the e-mail you receive and set a new password.</li>
+</ol>
+<p>When the link is missing, mail is not configured: ask an administrator for help.</p>
+<div class="note"><p>An administrator sets the mail account in the User Manager under <strong>E-mail settings</strong>. The change takes effect, and the <strong>Forgot password?</strong> link appears, only after a <span class="role">qa</span> person confirms it under <strong>Decisions</strong>. This stops an administrator from sending password-reset mail through a mailbox they read.</p></div>
+
+<h3 id="access-changes">When your role changes or your account is deactivated</h3>
+<p>Only an administrator changes a role, activates or deactivates an account, in the User Manager under <strong>Users</strong>. A role change and a deactivation need a reason; for an activation the reason is optional. An administrator cannot change their own account.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Change</th><th>When it takes effect</th></tr></thead>
+<tbody>
+<tr><td>Role change that gives more access</td><td>Waits under <strong>Decisions</strong> until a <span class="role">qa</span> person confirms it.</td></tr>
+<tr><td>Role change that only removes access</td><td>Applied at once. Any MQTT Explorer credentials you hold are revoked.</td></tr>
+<tr><td>Activation of a disabled account</td><td>Always waits for a <span class="role">qa</span> confirmation.</td></tr>
+<tr><td>Deactivation</td><td>Applied at once. Every sign-in session is ended, MQTT Explorer credentials are revoked, and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
+</tbody>
+</table></div>
+<p>You do not need to sign out for a role change to reach you. The sign-in gate in front of each app checks your session with Keycloak every 4 minutes, and the proof of sign-in passed to the services is valid for 5 minutes. So, for the apps behind such a gate (all except Grafana, the AI Workbench and pgAdmin, which keep their own sessions):</p>
+<ul>
+<li>after a role change, the apps you can open and the actions you may take follow the new role within about 4 minutes;</li>
+<li>after a deactivation, your sessions end at once, and a page you still have open stops working within about 4 minutes, at the next check.</li>
+</ul>
+<div class="record"><p>Every role change, activation and deactivation is kept as an account decision, with the reason, who made it, who confirmed it when confirmation is needed, and the times. Each one that takes effect is also added to the account's status history, with the old and new role for a role change. These histories can only be added to, never edited.</p></div>
+
+<h3 id="access-noaccess">Why can't I open an app</h3>
+<p>When your role does not admit you to an app, its gate shows a page titled <strong>No access to</strong> followed by the app's name, for example "No access to Node-RED". The page says:</p>
+<ul>
+<li>that you are signed in, but your role does not include the app;</li>
+<li>which roles may open it, by label, as listed in <a href="#access-apps">Which web apps each role can open</a>;</li>
+<li>that you should ask an administrator to change your role if you need it for your work.</li>
+</ul>
+<p>It offers <strong>Back to the portal</strong> and <strong>Sign out</strong>.</p>
+<p>The service portal has its own page, <strong>No access yet</strong>. It means your account has no platform role at all, which usually means your access request has not been confirmed yet.</p>
+<p>A sign-in failure also shows an error page, but with its own message (starting "Login Failed") and a <strong>Try again</strong> button. That is a problem with the sign-in itself, not with your role.</p>
+<div class="note"><p>Being able to open an app does not mean every button works for you. If an action inside an app is refused, the service checked your role for that action. Ask an administrator which role the action needs, or see the role descriptions in <a href="#access-roles">The eleven roles</a>.</p></div>
+</section>

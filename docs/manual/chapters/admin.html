@@ -1,0 +1,248 @@
+<section id="admin" data-title="Running the platform">
+<h2>Running the platform</h2>
+<p class="lede">This chapter is for the administrator who runs the MedCEA host. It covers installing the platform with <code>./install.sh</code>, the deploy scripts and the order they run in, the rule that only one deploy runs at a time, and <code>./guide.sh</code>, the question-and-answer front end to all of these commands. It then explains the six IAM switches in <code>config.env</code> that turn the access controls on step by step (and <code>WORKBENCH_ENABLED</code>, which the guide switches the same way), what the health check reports, which IAM test scripts to run and what a good result looks like, how operators are given units, how to uninstall, how the domain names reach other devices through Tailscale, and the credentials file. It ends with troubleshooting for problems an administrator can meet. Run every command from the repository root on the host.</p>
+
+<h3 id="admin-install">Installing and updating</h3>
+<p><code>./install.sh</code> is the one entry point. It runs three stages in order: the infrastructure (<code>./deploy-infra.sh</code>), every application (<code>./deploy-apps.sh --all</code>), and the health check (<code>./health-check.sh</code>). The same command updates an existing install: finished steps are skipped or updated in place, so it is safe to run again after a pull or after a failure. If a stage fails, the script stops, names the stage and its log file in <code>logs/</code>, and tells you to fix the cause and run it again.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>./install.sh</code></td><td>Install or update everything: infrastructure, applications, health check. Asks for any missing settings first.</td></tr>
+<tr><td><code>./install.sh --configure</code></td><td>Review every setting (current values offered as defaults), then install.</td></tr>
+<tr><td><code>./install.sh --infra-only</code></td><td>Only the infrastructure: MicroK8s, PostgreSQL, Keycloak, Grafana, Node-RED, the portal and the AI workbench.</td></tr>
+<tr><td><code>./install.sh --apps-only</code></td><td>Only the applications. Needs the infrastructure and <code>config.env</code>.</td></tr>
+<tr><td><code>./install.sh --help</code></td><td>The options, including the uninstall levels (see <a href="#admin-uninstall">Uninstalling</a>).</td></tr>
+</tbody></table></div>
+<p>At the end of an install the script prints the steps for trusting the platform's certificate authority on your devices and then the credentials box (see <a href="#admin-credentials">The credentials file</a>), so the passwords are the last thing on screen.</p>
+
+<h4>config.env and the setup questions</h4>
+<p>All settings live in <code>config.env</code> in the repository root. It is not in git and is readable only by its owner (mode 600), because it holds every platform password. You do not write it by hand: the first run of <code>./deploy-infra.sh</code> (or <code>./install.sh</code>) creates it from <code>config.env.example</code> by asking questions. Press <kbd>Enter</kbd> to accept the value shown in brackets. Later runs ask only for required values that are still empty. To review every setting, run <code>./deploy-infra.sh --configure</code>, or <code>./infra/configure.sh</code> to edit the settings without deploying.</p>
+<p>The questions cover:</p>
+<ul>
+<li>Project name (<code>PROJECT_NAME</code>, default <code>medcea</code>): the MQTT topic root, the Kubernetes namespace and the Keycloak realm. Lowercase, starting with a letter, 2 to 31 characters from <code>a-z 0-9 -</code>. Changing it after boards are flashed means reflashing them.</li>
+<li>Domain (<code>DOMAIN</code>): every web page is served at <code>&lt;service&gt;.&lt;DOMAIN&gt;</code>. The menu offers a name (for example <code>medcea</code>, so the portal is <code>portal.medcea</code>) when Tailscale is up, the Tailscale or LAN IP with <code>nip.io</code>, or a custom domain you provide DNS for. Changing the domain later means running <code>./deploy-infra.sh</code> again.</li>
+<li>The platform administrator: username, a real e-mail address you read (Keycloak password resets go there, and it is the pgAdmin login) and password.</li>
+<li>The first qa person and the first engineer: username and e-mail for each. The qa person must be someone other than the administrator. Their initial passwords are generated and replaced at their first sign-in.</li>
+<li>The PostgreSQL superuser password, the database volume size, and your Docker Hub username and access token (needed to pull the Bitnami Helm charts).</li>
+<li>On a full review only (<code>--configure</code>): the time zone for Node-RED flows and schedules, and whether to deploy the AI workbench.</li>
+</ul>
+<p>Some values are generated and never asked: the qa and engineer initial passwords, the Keycloak break-glass console account (<code>kc-breakglass</code>) and its password, and the passwords of the database service roles. Configuration also checks for Tailscale on every run. <code>USE_TAILSCALE</code> records whether the domain depends on it: when it is <code>true</code>, a deploy stops if Tailscale is down, rather than quietly falling back to the LAN address.</p>
+<h4>Password rules</h4>
+<p>A password you type must be 8 to 64 characters from <code>A-Z a-z 0-9 . _ ~ -</code> only. Other punctuation breaks the URLs and YAML files the password is written into, so the question asks again. Password input is hidden and typed twice. Pressing <kbd>Enter</kbd> generates a 20-character password (or keeps the current one if there is one), shows it once, and lists it in the credentials file.</p>
+<div class="note"><p>Configuration runs before the deploy log starts, so your answers and generated passwords never reach <code>logs/</code>. When configuration rebuilds <code>config.env</code> on a newer <code>config.env.example</code> (keeping your values), it saves the previous file as <code>config.env.bak</code>.</p></div>
+
+<h3 id="admin-deploy">The deploy scripts and their order</h3>
+<p><code>install.sh</code> is a thin wrapper. Each stage also works on its own, and after the first install you will usually run the stages directly.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Script</th><th>What it deploys</th></tr></thead>
+<tbody>
+<tr><td><code>./deploy-infra.sh</code></td><td>MicroK8s (bootstrapped only on the first run), PostgreSQL, Keycloak with the realm, clients and roles, the MQTT broker, Node-RED, Grafana, pgAdmin, the sign-in proxies, the portal, the AI workbench (unless <code>WORKBENCH_ENABLED=false</code>), the access policy's route table and the realm's public keys. It writes a log to <code>logs/deploy-infra-&lt;timestamp&gt;.log</code>.</td></tr>
+<tr><td><code>./deploy-apps.sh</code></td><td>A checkbox menu of the application components under <code>apps/</code>. <code>./deploy-apps.sh --all</code> deploys every component without asking.</td></tr>
+<tr><td><code>./apps/&lt;component&gt;/deploy.sh</code></td><td>One component on its own. The components are <code>access</code>, <code>database</code>, <code>edge-wizard</code>, <code>frontend</code>, <code>iam</code>, <code>monitor</code>, <code>mqtt-explorer</code>, <code>node-red</code>, <code>report</code> and <code>scheduler</code> (<code>./deploy-apps.sh --help</code> lists them).</td></tr>
+<tr><td><code>./infra/deploy-workbench.sh</code></td><td>Redeploys only the AI workbench (JupyterHub).</td></tr>
+</tbody></table></div>
+<p>The order rules are:</p>
+<ul>
+<li>Infrastructure first. The applications need the cluster, Keycloak and PostgreSQL that <code>deploy-infra.sh</code> creates. <code>./install.sh --apps-only</code> refuses without <code>config.env</code>.</li>
+<li>Database before scheduler. <code>deploy-apps.sh</code> runs components in alphabetical order, so <code>database</code> comes before <code>scheduler</code>. When you deploy them one by one, run <code>./apps/database/deploy.sh</code> first: the scheduler deploy refuses until the database functions it needs exist.</li>
+<li>Access after infrastructure. Run <code>./deploy-infra.sh</code>, then <code>./apps/access/deploy.sh</code>. The access deploy runs the database deploy itself when it needs to.</li>
+<li>After a pull of new IAM code: <code>./deploy-infra.sh</code> (the route table), then <code>./apps/database/deploy.sh</code>, then <code>./deploy-apps.sh --all</code> while no recipe run is active. Until all three have run, the health check's <code>iamgrants</code> and <code>tests/iam-schema.sh</code> stay red.</li>
+<li>After rotating or removing a realm key in Keycloak, run <code>./deploy-infra.sh</code>. It republishes the keys and restarts config-api when they changed.</li>
+</ul>
+<div class="warn"><p>The scheduler runs recipe code straight from the repository (<code>schd/</code>), and the onboarding wizard runs <code>edge/</code> from it. Do not pull or edit the repository while a recipe run is active: check first that <code>pgrep -af '[r]un_recipe.py'</code> prints nothing.</p></div>
+<p>When your login session is not yet in the <code>microk8s</code> group (for example right after the first install added you to it), the scripts run their <code>microk8s</code> calls through <code>sudo</code> and say why they ask for your password. Log out and back in to stop that.</p>
+
+<h3 id="admin-lock">One deploy at a time</h3>
+<p>Every script that changes the cluster or <code>config.env</code> takes the deploy lock first: <code>install.sh</code>, <code>deploy-infra.sh</code>, <code>infra/configure.sh</code>, <code>deploy-apps.sh</code>, each <code>apps/&lt;component&gt;/deploy.sh</code> and <code>uninstall.sh</code>, <code>infra/deploy-workbench.sh</code>, <code>apps/iam/units.sh</code>, <code>tests/iam-signin.sh</code> and the other test scripts that create things, and <code>guide.sh</code> for the length of a switch recipe. <code>health-check.sh</code>, the read-only tests and every <code>--help</code> do not take it. Two deploys side by side would interleave Helm releases, Keycloak clients and rewrites of <code>config.env</code>.</p>
+<p>The lock is held by the kernel on the file <code>.medcea.lock</code> in the repository root. It is released the moment the holding process ends, even after <code>kill -9</code> or a closed terminal, so there is never a stale lock to delete. A script started by another script that holds the lock (for example <code>install.sh</code> running <code>deploy-infra.sh</code>) uses its parent's lock.</p>
+<h4>Reading a refusal</h4>
+<p>A refused script prints <code>Another MedCEA deploy is already running:</code> and exits with code 1. What follows tells you who holds it:</p>
+<ul>
+<li>A running deploy: its PID, start time, terminal and command, then <code>Wait for it to finish, or stop it with:  kill -- -&lt;pgid&gt;</code>. Use that group kill, not a plain <code>kill &lt;pid&gt;</code>: a <code>helm --wait</code> or <code>rollout status</code> the run is waiting on would survive and keep the lock.</li>
+<li>Leftover processes: <code>The run that started it has ended; these leftover processes still hold the lock</code>, with each process and the <code>kill</code> command to stop them.</li>
+<li>A run as another user, usually under <code>sudo</code>: the holder could not be inspected, and the message suggests <code>sudo fuser -v</code> on the lock file.</li>
+</ul>
+<p><code>guide.sh</code> reports a held lock without exiting: it says another deploy is running and returns you to the menu with nothing changed.</p>
+
+<h3 id="admin-guide">guide.sh, the guided front end</h3>
+<p><code>./guide.sh</code> walks you through the platform's commands by question and answer. It is the recommended way to run anything you do not run every day, and the only supported way to change an IAM switch.</p>
+<ol class="steps">
+<li>Run <code>./guide.sh</code>, or <code>./guide.sh --dry-run</code> to see what it would do without running or changing anything. Every question and confirmation is still asked in a dry run.</li>
+<li>Pick an area: Install and uninstall; Infrastructure; Applications; Operators and units; IAM switches (enable / roll back); Health and tests; Edge devices; Policy (read-only).</li>
+<li>Pick an action and answer its questions. Answers are checked the way the target script checks them (unit codes, usernames, component names that exist on disk), and nothing you type may start with <code>-</code>, so an answer cannot turn into an option.</li>
+<li>Read the plan: the exact command, whether it is read-only, changes the platform or is destructive, what it changes, whether it takes the deploy lock, and whether it needs <code>sudo</code>.</li>
+<li>Confirm. A read-only command asks <code>[Y/n]</code>; a change asks <code>[y/N]</code>; a destructive one (an uninstall, <code>--purge-data</code>, <code>--reset</code>, <code>--bootstrap</code>, erasing a board) wants the word <code>yes</code> typed in full, and <code>--purge-data</code> also the project name.</li>
+<li>The command runs in your terminal, so its own prompts work, and the guide reports its exit code.</li>
+</ol>
+<p>The guide never asks for a password or secret: the commands it runs ask for their own. <kbd>Ctrl</kbd>+<kbd>D</kbd> (end of input) leaves the guide. For units commands it asks for <code>--by</code>, your own Keycloak username, and offers your last answer as the default for the rest of the session.</p>
+<h4>Switch recipes</h4>
+<p>For an IAM switch or <code>WORKBENCH_ENABLED</code>, the guide shows the switch's current value, then the recipe for enabling it or rolling it back:</p>
+<ul>
+<li>Before you start: a checklist of preconditions, which you confirm once. The guide does not test the checklist items for you. Some preconditions it does check itself and refuses the recipe with the reason (for example, enabling <code>IAM_DB_ROLES</code> while <code>IAM_POSTGREST_JWT</code> is not true).</li>
+<li>Steps, in order: each is either a change to one line of <code>config.env</code> or a command. The recipe takes the deploy lock once for all its steps and stops at the first step that fails, or at <kbd>Ctrl</kbd>+<kbd>C</kbd>.</li>
+<li>Notes: what happens afterwards and how to check it.</li>
+</ul>
+<p>The switch must be on exactly one active line in <code>config.env</code>; with none or several, the guide refuses and says which lines to fix. A switch that another recipe's order depends on (<code>IAM_DB_ROLES</code>, <code>IAM_POSTGREST_JWT</code>, <code>IAM_DB_SERVICE_ROLES</code>) must be written literally as <code>"true"</code> or <code>"false"</code>.</p>
+<p>Before the first change, the guide copies <code>config.env</code> to <code>config.env.guide-&lt;timestamp&gt;.bak</code> (mode 600, not in git). It shows only the changed line, never the lines around it, which may be passwords. If a step fails, it tells you whether <code>config.env</code> was already changed and prints the <code>cp -p</code> command that puts the backup back. Restoring the file does not undo the steps that already ran; each step is safe to repeat, so the usual fix is to correct the cause and run the recipe again. After a recipe completes, the guide offers to delete the backup, because it is a full copy with every password. <code>./install.sh --uninstall-all</code> deletes any backups that are left.</p>
+
+<h3 id="admin-switches">The IAM switches</h3>
+<p>The access controls (IAM) were built in phases. Each phase has a switch in <code>config.env</code> that is off on a fresh install and is turned on, in order, with a recipe in <code>./guide.sh</code> (IAM switches). Each one can be rolled back the same way.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Switch</th><th>When true</th><th>Value on this install</th></tr></thead>
+<tbody>
+<tr><td><code>IAM_GATES</code></td><td>Each sign-in gate admits only the roles the access policy compiles for its host. False puts every gate back on the list used before the access policy (operator, qa, auditor, admin) and the User Manager on admin only.</td><td>true</td></tr>
+<tr><td><code>IAM_NETPOL</code></td><td>One network policy per application pod: only its listed callers can connect; anything else times out.</td><td>true</td></tr>
+<tr><td><code>IAM_POSTGREST_JWT</code></td><td>config-api (PostgREST, behind the System Configuration UI and the onboarding wizard) verifies the person's sign-in token.</td><td>true</td></tr>
+<tr><td><code>IAM_DB_SERVICE_ROLES</code></td><td>Each database client (scheduler, monitor, Database Management, Node-RED, Grafana, pgAdmin) logs in as its own database role instead of the superuser.</td><td>true</td></tr>
+<tr><td><code>IAM_DB_ROLES</code></td><td>The database enforces per-role grants, row-level security and guard triggers, including the operator's unit and assigned-run checks.</td><td>true</td></tr>
+<tr><td><code>IAM_ENFORCE</code></td><td>The five Python services (scheduler, monitor, Database Management, the Config UI's platform API, the User Manager) refuse what the route table does not allow. False: they only log <code>medcea_iam: would refuse …</code> and let the request through.</td><td>true (since 31 October 2026)</td></tr>
+<tr><td><code>WORKBENCH_ENABLED</code></td><td><code>deploy-infra.sh</code> also deploys the AI workbench (JupyterHub, about 2 GB of images).</td><td>true</td></tr>
+</tbody></table></div>
+<div class="note"><p>The values above are those in <code>config.env</code> on 31 October 2026. IAM 2.6 first ran in report-only mode; <code>IAM_ENFORCE</code>, the last switch, was turned on that day, followed by <code>./deploy-infra.sh</code> and <code>./deploy-apps.sh --all</code>. Always read the current value in <code>./guide.sh</code>, which shows it from <code>config.env</code> before offering a recipe.</p></div>
+<div class="note"><p>Two parts enforce whatever <code>IAM_ENFORCE</code> says: the User Manager's admin port and Database Management. They have no off switch.</p></div>
+<h4>Order and prerequisites</h4>
+<ol>
+<li><code>IAM_GATES</code> and <code>IAM_NETPOL</code> stand on their own. For <code>IAM_NETPOL</code>, every caller of an application pod must be listed under <code>network:</code> in <code>apps/iam/policy/defaults.yaml</code>.</li>
+<li><code>IAM_POSTGREST_JWT</code> needs <code>AUTHENTICATOR_DB_PASS</code> set and different from <code>POSTGRES_PASS</code> (configuration generates it).</li>
+<li><code>IAM_DB_SERVICE_ROLES</code>, then check that the health check shows <code>dbclients</code> OK.</li>
+<li><code>IAM_DB_ROLES</code>: the guide refuses it until <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_SERVICE_ROLES</code> are both true, and the database deploy refuses it, changing nothing, until every database client has moved to its own role. Before it, every operator needs a unit in effect, confirmed by qa (see <a href="#admin-units">Operators and units</a>); an operator without one sees no telemetry or runs and starts none.</li>
+<li><code>IAM_ENFORCE</code> needs <code>IAM_DB_ROLES</code> true: only the database checks that an operator's run belongs to their unit. The guide lists this in its checklist but does not refuse; the health check reports <code>iamenforce</code> FAIL while <code>IAM_ENFORCE</code> is true and <code>IAM_DB_ROLES</code> false. It should follow a report-only trial in which every "would refuse" line from a real person is intended policy, because each becomes a refusal.</li>
+</ol>
+<h4>Recipes</h4>
+<p><code>./guide.sh</code> runs these steps for you. They are listed here so you know what each recipe does.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Switch</th><th>Enable</th><th>Roll back</th></tr></thead>
+<tbody>
+<tr><td><code>IAM_GATES</code></td><td>set true; <code>./deploy-infra.sh</code>; <code>./deploy-apps.sh --all</code>. Check with <code>tests/iam-hosts.sh</code>.</td><td><code>IAM_GATES=false ./apps/access/deploy.sh</code> (narrows the User Manager first); set false; <code>./deploy-infra.sh</code>; <code>./deploy-apps.sh --all</code>. Accounts with production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until it is true again.</td></tr>
+<tr><td><code>IAM_NETPOL</code></td><td>set true; <code>./deploy-infra.sh</code>. Check with <code>tests/iam-network.sh</code>.</td><td>set false; <code>./deploy-infra.sh</code>. At once, without a deploy: <code>microk8s kubectl -n &lt;namespace&gt; delete netpol -l medcea/iam-netpol=true</code> (until the next <code>deploy-infra.sh</code> while it is still true).</td></tr>
+<tr><td><code>IAM_POSTGREST_JWT</code></td><td><code>./deploy-infra.sh</code>; set true; <code>./apps/frontend/deploy.sh</code>.</td><td>If <code>IAM_DB_ROLES</code> is true, first set it false and run <code>./apps/database/deploy.sh</code>; then set false and run <code>./apps/frontend/deploy.sh</code>.</td></tr>
+<tr><td><code>IAM_DB_SERVICE_ROLES</code></td><td>set true; <code>./deploy-apps.sh --all</code>; <code>./deploy-infra.sh</code>. Check <code>dbclients</code> OK.</td><td>Refused while <code>IAM_DB_ROLES</code> is true. Set false; <code>./deploy-apps.sh --all</code>; <code>./deploy-infra.sh</code>; <code>./apps/database/deploy.sh</code> (the last makes the service roles unable to log in again).</td></tr>
+<tr><td><code>IAM_DB_ROLES</code></td><td>set true; <code>./apps/database/deploy.sh</code> (it restarts config-api itself).</td><td>set false; <code>./apps/database/deploy.sh</code>. While <code>IAM_ENFORCE</code> is true, roll that back too unless the rollback is brief.</td></tr>
+<tr><td><code>IAM_ENFORCE</code></td><td><code>python3 tests/iam-routes-diff.py --strict</code>; set true; <code>./deploy-infra.sh</code>.</td><td>set false; <code>./deploy-infra.sh</code>.</td></tr>
+<tr><td><code>WORKBENCH_ENABLED</code></td><td>set true; <code>./deploy-infra.sh</code>.</td><td>set false; <code>./deploy-infra.sh</code>. This does not remove a workbench already running; later deploys only skip it.</td></tr>
+</tbody></table></div>
+<h4>After switching IAM_ENFORCE</h4>
+<p>The services read the switch on each request from the shared access settings that <code>./deploy-infra.sh</code> publishes (the <code>medcea-iam-lib</code> ConfigMap), so the change is live within about a minute with no restart. From then on a refused request is answered 401 (no token or a bad one), 403 (the route or role is not allowed) or 503 (the service cannot verify tokens). Each application pod also keeps a copy of the switch from its last deploy, used only if the route-table mount is missing; it stays at the old value until the app is deployed again, and the health check reports <code>iamenforce</code> as FAIL until then. Redeploy the apps with <code>./deploy-apps.sh --all</code> when no recipe run is active. Then check with <code>tests/iam-check.sh</code>, <code>./health-check.sh</code> and <code>tests/iam-signin.sh</code>.</p>
+<p>A rollback of <code>IAM_ENFORCE</code> returns the services to logging "would refuse" within about a minute.</p>
+<div class="record"><p>When <code>IAM_ENFORCE</code> or <code>IAM_DB_ROLES</code> changes, the deploy appends an <code>enforcement_enabled</code> or <code>enforcement_disabled</code> event to the access policy history, a hash chain in the database that the health check verifies. For <code>IAM_ENFORCE</code> the event carries <code>{switch: IAM_ENFORCE}</code>. Each <code>./deploy-infra.sh</code> also writes the current values of <code>IAM_GATES</code>, <code>IAM_NETPOL</code> and <code>IAM_POSTGREST_JWT</code> into the route-table settings with the time, which the quarterly access review records.</p></div>
+<div class="warn"><p>A <code>git revert</code> of IAM code comes only after the switch is rolled back. A reverted deploy breaks a config-api that is still in token mode, and reverting the database phase also needs a manual database step, which the guide's <code>IAM_DB_ROLES</code> rollback notes name.</p></div>
+
+<h3 id="admin-health">The health check</h3>
+<p><code>./health-check.sh</code> checks every service and IAM control listed in <code>health-checks.conf</code> and prints one line per check. It is read-only and does not take the deploy lock. Options: <code>--verbose</code> shows detail for passing checks too, <code>--timeout SECS</code> sets the per-check timeout (default 8), <code>--config FILE</code> reads another check list.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Result</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>OK</td><td>The check passed.</td></tr>
+<tr><td>WARN</td><td>Not broken, but not in its final state: for example a switch still false, a pod's copy of a setting that is out of date, or a decision waiting a long time.</td></tr>
+<tr><td>FAIL</td><td>Something is wrong or disagrees with <code>config.env</code>. The message names the cause and usually the command that fixes it.</td></tr>
+<tr><td>SKIP</td><td>The check does not apply yet (for example the component it reads is not installed).</td></tr>
+</tbody></table></div>
+<p>The summary is <code>All N checks passed.</code>, or a count of OK, warnings and failures. The script exits 1 if any check failed. Services that are still starting usually pass a minute later.</p>
+<div class="note"><p>The checks <code>iamdbroles</code>, <code>postgrest</code> and <code>iamenforce</code> WARN on purpose while their switch is false, so a platform that is not fully enforcing never prints "All checks passed". <code>IAM_GATES</code> and <code>IAM_NETPOL</code> have no health check; test them with <code>tests/iam-hosts.sh</code> and <code>tests/iam-network.sh</code>. On this install every switch is now true, so after the apps have been redeployed these checks should all be OK.</p></div>
+<h4>The IAM checks</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Check (type, and the name the output shows)</th><th>OK when</th><th>WARN or FAIL</th></tr></thead>
+<tbody>
+<tr><td><code>iamchain</code> (Access policy history)</td><td>The hash chain of the access policy history verifies.</td><td>FAIL names the event where the chain is broken.</td></tr>
+<tr><td><code>iamdbroles</code> (Database roles mode)</td><td>The database records <code>IAM_DB_ROLES=true</code>, as <code>config.env</code> says.</td><td>WARN while false. FAIL when the database and <code>config.env</code> disagree (run <code>./apps/database/deploy.sh</code>).</td></tr>
+<tr><td><code>iamgrants</code> (Database grants)</td><td>The database's grants equal the compiled policy (checked in a read-only transaction).</td><td>FAIL on any drift. Expected right after a pull until <code>./apps/database/deploy.sh</code> has run.</td></tr>
+<tr><td><code>iamdecisions</code> (Account decisions)</td><td>No account decision has waited for qa for over 7 days.</td><td>WARN on an older waiting decision or a pending mail settings change (User Manager, Decisions tab). FAIL when the access or database deploy is missing a step, naming which to run. SKIP without the access component.</td></tr>
+<tr><td><code>dbclients</code> (Database clients)</td><td>Every deployed database client logs in as the role the switch says.</td><td>WARN while a client disagrees; deploy it again (Grafana and pgAdmin with <code>./deploy-infra.sh</code>).</td></tr>
+<tr><td><code>postgrest</code> (PostgREST tokens)</td><td>config-api runs the token-verifying setup, its keys match what the realm publishes, and a forged token gets 401.</td><td>WARN while <code>IAM_POSTGREST_JWT</code> is false. FAIL on a stale or removed realm key (run <code>./deploy-infra.sh</code>) or a changed password Secret (run <code>./apps/frontend/deploy.sh</code>).</td></tr>
+<tr><td><code>iamenforce</code> (Service enforcement)</td><td>The shared access settings and every service pod agree with <code>IAM_ENFORCE=true</code>, and <code>IAM_DB_ROLES</code> is true.</td><td>WARN while false, or when a pod's copy is still true. FAIL when the shared access settings disagree with <code>config.env</code> (run <code>./deploy-infra.sh</code>), when <code>IAM_ENFORCE</code> is true but <code>IAM_DB_ROLES</code> is false, or when a pod's copy is still false under true (redeploy the apps when no run is active).</td></tr>
+</tbody></table></div>
+
+<h3 id="admin-tests">IAM test scripts</h3>
+<p>These scripts check the running platform. Run them from the repository root, or from <code>./guide.sh</code> under Health and tests. Each exits 1 on any failure and prints a PASS or FAIL line per item.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Script</th><th>What it checks</th><th>Lock</th><th>Green looks like</th></tr></thead>
+<tbody>
+<tr><td><code>tests/iam-check.sh</code></td><td>Each of the five Python service pods has the route table, settings and keys mounted, its settings say the same <code>IAM_ENFORCE</code> as <code>config.env</code>, and a forged request sent straight to the pod is caught.</td><td>No (read-only)</td><td>Every pod PASS. With <code>IAM_ENFORCE=false</code> the forged request leaves a "would refuse" line; with true, a "refused" line and a 401. The User Manager's admin port and Database Management always refuse.</td></tr>
+<tr><td><code>tests/iam-schema.sh</code></td><td>The route table in the ConfigMap and in every pod equals a fresh compile; the IAM schemas and their grants are in place; the hash chain verifies, and an edit to it is refused (in a transaction that is rolled back).</td><td>No (read-only)</td><td>Every item PASS. Red right after a pull until <code>./deploy-infra.sh</code> and <code>./apps/database/deploy.sh</code> have run.</td></tr>
+<tr><td><code>tests/iam-hosts.sh</code></td><td>Each signed-in host's live gate admits exactly the roles the policy compiles, its 403 page names them, its proxy pod is newer than its configuration, Keycloak accepts its sign-in scopes, and at least one enabled account can open it.</td><td>No (read-only)</td><td>Every compiled host PASS; hosts not compiled yet are SKIP with the phase that adds them.</td></tr>
+<tr><td><code>tests/iam-signin.sh</code></td><td>Creates one throwaway account per role (<code>test-&lt;role&gt;-&lt;random&gt;</code>), signs each in to every gated host as a browser does, and compares who gets in with the policy. Where an account gets in, it calls one read-only API per service and checks the services refused exactly the calls the route table refuses.</td><td>Yes</td><td>No mismatch. A refused call answers 401 or 403; an allowed call never answers 401 or 503. The accounts are deleted on exit, also on <kbd>Ctrl</kbd>+<kbd>C</kbd>.</td></tr>
+</tbody></table></div>
+<div class="record"><p><code>tests/iam-signin.sh</code> leaves a Keycloak login event in each test account's name, which stays after the accounts are deleted.</p></div>
+<p>Two offline checks need no cluster: <code>python3 tests/iam-routes-diff.py</code> compares the route table with the routes each service serves (the <code>IAM_ENFORCE</code> recipe runs it with <code>--strict</code>), and <code>python3 tests/test_policy.py</code> runs the policy unit tests.</p>
+
+<h3 id="admin-units">Operators and units</h3>
+<p>An operator works in the units they are assigned to. Once <code>IAM_DB_ROLES</code> is true (or <code>IAM_ENFORCE</code>), an operator sees the telemetry, runs and run logs of every zone of their units, including zones added later, and starts or stops runs only there. An operator with no unit in effect sees an empty Monitor and can start nothing. Assign units with <code>apps/iam/units.sh</code>, or through <code>./guide.sh</code> under Operators and units.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>apps/iam/units.sh list [&lt;username&gt;]</code></td><td>Columns USERNAME, ROLE, ENABLED, UNITS, WAITING_QA. UNITS are in effect (a <code>*</code> marks one in effect before qa checked it, its decision still waiting); WAITING_QA are not in effect yet. Warns about an enabled operator with no unit in effect.</td></tr>
+<tr><td><code>apps/iam/units.sh assign &lt;username&gt; &lt;UNIT&gt;… --by &lt;your username&gt;</code></td><td>Proposes the assignment. It waits for a qa person other than you to confirm it in the User Manager's Decisions tab, and is not in effect until then.</td></tr>
+<tr><td><code>apps/iam/units.sh remove &lt;username&gt; &lt;UNIT&gt;… --by &lt;your username&gt;</code></td><td>Removes an assigned unit at once, or withdraws an assignment still waiting for qa.</td></tr>
+<tr><td><code>apps/iam/units.sh remove --sub &lt;uuid&gt; &lt;UNIT&gt;… --by &lt;your username&gt;</code></td><td>The same for an account Keycloak no longer has; <code>list</code> prints the command.</td></tr>
+</tbody></table></div>
+<p><code>--by</code> is your own Keycloak username in the platform realm. It is recorded as the person who made the change, so you cannot confirm it yourself. <code>--reason TEXT</code> adds a reason. Unit codes are case-insensitive. The script takes the deploy lock and is not run by <code>deploy-apps.sh</code>. It warns, without refusing, about an account that is not an operator, is disabled or has no person id. Exit code 1 means an unknown user or unit, an SQL failure or a held lock; 2 means a usage error (a missing <code>--by</code> included), a database or access deploy that has not run yet, or Keycloak unreachable.</p>
+<p>When the qa person confirms such a decision in the Decisions tab, they must also tick the statement "I did not run units.sh for this assignment.", because <code>--by</code> is a claim the script cannot prove: whoever runs it has the host.</p>
+<h4>--bootstrap</h4>
+<p><code>assign … --bootstrap</code> puts the unit in effect at once, before any check, with its decision still waiting for qa. It is allowed only while Keycloak has no enabled qa account other than yours and the operator's, so nobody else could confirm. Otherwise it is refused with exit code 2, naming who could confirm. A qa person who later refuses that decision removes the unit. <code>./guide.sh</code> asks for <code>yes</code> before running it.</p>
+<div class="record"><p>Each assignment or removal writes one account decision per unit (maker shown as <code>system:deploy (by &lt;username&gt;)</code>). When qa confirms an assignment, a <code>unit_assigned</code> event is added to the access policy history with the qa person as actor; a removal adds <code>unit_removed</code>; a withdrawal adds <code>account_decision_withdrawn</code>.</p></div>
+<div class="note"><p>A unit that is still assigned to someone cannot be deleted in the System Configuration UI. Remove the assignment with <code>units.sh remove</code> first.</p></div>
+
+<h3 id="admin-uninstall">Uninstalling</h3>
+<p>There are three levels, all through <code>install.sh</code>. Each lists what it removes and asks you to type a word to confirm, and refuses without a terminal.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>Removes</th><th>Keeps</th></tr></thead>
+<tbody>
+<tr><td><code>./install.sh --uninstall-apps [component …]</code> (type <code>apps</code>)</td><td>All application components, or the ones named, each through its own <code>apps/&lt;component&gt;/uninstall.sh</code>.</td><td>The infrastructure and the database contents.</td></tr>
+<tr><td><code>./install.sh --uninstall-infra</code> (type <code>reset</code>)</td><td>Every platform service, every application and all data in the namespace: the database, Keycloak users, Grafana settings, workbench home folders.</td><td>MicroK8s (so a reinstall is fast), <code>config.env</code>, the platform CA.</td></tr>
+<tr><td><code>./install.sh --uninstall-all</code> (type <code>uninstall</code>)</td><td>All of the above plus MicroK8s, the onboarding wizard service, <code>edge/.venv</code>, the MedCEA block in <code>/etc/hosts</code>, <code>logs/</code> and the credentials files. Asks separately about <code>config.env</code> (with the guide's backups) and the platform CA <code>.ca/</code>; the default is to keep them.</td><td><code>edge/provisioned/</code> (the board provisioning records) and <code>edge/firmware/</code>. Tailscale and installed packages are not touched.</td></tr>
+</tbody></table></div>
+<p>The infrastructure levels map to <code>./deploy-infra.sh --reset</code> and <code>./deploy-infra.sh --uninstall</code>. <code>./deploy-infra.sh --reset --secrets</code> also blanks the generated credentials in <code>config.env</code>.</p>
+<h4>--purge-data</h4>
+<p><code>./install.sh --uninstall-apps --purge-data</code> (or <code>./deploy-apps.sh --uninstall --purge-data</code>) also drops the platform database <code>medcea_db</code> with all its data and its database roles. It applies only when <code>database</code> is among the components removed, and asks for the project name to confirm.</p>
+<div class="warn"><p><code>--purge-data</code> cannot be undone. It drops every run, recipe, measurement, device record and audit record in <code>medcea_db</code>, including the access policy history. If config-api still verifies tokens, it cannot connect after the purge until <code>./apps/database/deploy.sh</code> and then <code>./apps/frontend/deploy.sh</code> have run.</p></div>
+<div class="warn"><p><code>./apps/access/uninstall.sh --purge-data</code> drops the User Manager's data: access requests, account decisions and their histories. Unit assignments in effect survive (the script warns while there are any), and the next <code>./apps/access/deploy.sh</code> records each one again as a decision waiting for qa. Assignments that were still waiting for qa are lost and must be assigned again.</p></div>
+<div class="note"><p>Keycloak has its own database, so purging <code>medcea_db</code> does not remove realms, users or clients. Those go only with <code>--uninstall-infra</code> or <code>--uninstall-all</code>.</p></div>
+
+<h3 id="admin-dns">DNS and Tailscale</h3>
+<p>With a name-based domain (<code>DOMAIN="medcea"</code>, <code>LOCAL_DNS="true"</code>, as on this install), the platform answers DNS for <code>*.medcea</code> itself, on its Tailscale address, port 53. The host resolves the names from a managed block in <code>/etc/hosts</code>. Other devices on your tailnet need one setting in the Tailscale admin console, which no command can make for you:</p>
+<ol class="steps">
+<li>Open <code>https://login.tailscale.com/admin/dns</code>.</li>
+<li>Nameservers, Add nameserver, Custom.</li>
+<li>Enter the server's Tailscale IP (<code>PLATFORM_IP</code>), turn on "Restrict to domain" (Split DNS), domain <code>medcea</code>, and save.</li>
+<li>Each device needs "Use Tailscale DNS settings" on (the default). On Linux: <code>sudo tailscale set --accept-dns=true</code>.</li>
+<li>Test from any device: <code>nslookup portal.medcea</code> must answer the server's IP. Then open <code>https://portal.medcea</code>, typing the <code>https://</code> the first time, because browsers treat a one-word ending as a search until they have visited it.</li>
+</ol>
+<p>Each <code>./deploy-infra.sh</code> checks this setting at the end and reports when split DNS is active.</p>
+<h4>A rebuilt or replaced server</h4>
+<p>A new machine gets a new Tailscale IP, but the admin console keeps sending the domain to the old one. The server itself still resolves everything through <code>/etc/hosts</code>, so only other devices fail. <code>./deploy-infra.sh</code> warns about this in its DNS step and, at the end, prints the old and new addresses and the edit to make: in the admin console, edit the nameserver restricted to the domain and change the old IP to the new one. If the old server is gone for good, remove it under Machines too.</p>
+<p>With an IP-based domain (<code>&lt;ip&gt;.nip.io</code>) no DNS setup is needed. When you move from one domain to another, the old <code>nip.io</code> addresses keep working as permanent redirects (<code>ALIAS_DOMAIN</code>).</p>
+
+<h3 id="admin-credentials">The credentials file</h3>
+<p>Each <code>./deploy-infra.sh</code> writes the passwords a person needs to <code>credentials-&lt;timestamp&gt;.txt</code> in the repository root, readable only by you, and shows it in a box on the terminal. The box is written straight to the terminal, never to the deploy log. It lists:</p>
+<ul>
+<li>the platform admin, the first qa person and the first engineer, with the portal address;</li>
+<li>the Keycloak admin console break-glass account (realm <code>master</code>), for recovery only; every use is recorded in Keycloak's admin events;</li>
+<li>the Grafana admin, editor and viewer accounts, and the pgAdmin address (platform admin role only);</li>
+<li>where the MQTT service account passwords are (<code>MQTT_*_PASS</code> in <code>config.env</code>) and that each board has its own credential;</li>
+<li>the PostgreSQL superuser.</li>
+</ul>
+<p>Save these in a password manager, then delete the file. <code>config.env</code> keeps its own copy, which re-deploys need. A person may change their own password from the user menu; the box then shows "(changed since the account was created; config.env's copy no longer works)" instead of a value nobody uses any more. A first password that must be replaced at first sign-in is marked "temporary".</p>
+<div class="warn"><p>The platform admin (the username you gave at setup, in the realm named after the project, <code>medcea</code> on this install) and the break-glass console account <code>kc-breakglass</code> in realm <code>master</code> are different accounts. Use the break-glass account only when the platform's own tools cannot do the job.</p></div>
+
+<h3 id="admin-troubleshooting">Troubleshooting</h3>
+<h4>A person gets a 403 page from the portal</h4>
+<p>Symptom: the person signs in and sees "No access yet", or another 403 page. Cause: "No access yet" means Keycloak signed them in but their account has no platform role, so the portal's gate refuses them. A 403 with a different message is a failed sign-in (a provider error or an expired sign-in form), not a missing role. A host other than the portal shows "No access to &lt;service&gt;" with the roles that may open it. Fix: for "No access yet", give the account a role in the User Manager (a grant waits for qa to confirm); a password reset does not help. The role takes effect within about four minutes, without a new sign-in. For a failed sign-in, have the person open the portal again.</p>
+<h4>The System Configuration UI fails after a realm key rotation</h4>
+<p>Symptom: after a signing key was rotated or removed in Keycloak, the System Configuration UI's data calls are refused and the health check shows <code>postgrest</code> FAIL naming key ids the realm no longer publishes. Cause: config-api and the Python services verify tokens against the keys published at the last <code>./deploy-infra.sh</code>; config-api reads them only when it starts. Fix: run <code>./deploy-infra.sh</code>. It republishes the keys and restarts config-api when they changed.</p>
+<h4>The Config UI stops answering for a few seconds during a switch</h4>
+<p>Symptom: while <code>IAM_POSTGREST_JWT</code> is switched in either direction, the System Configuration UI's requests fail for up to about 15 seconds. Cause: by design. config-api's database password changes in the same step as its mode, and nothing serves until the new pod is ready. Fix: none needed; do the switch when nobody is editing configuration, and reload the page afterwards.</p>
+<h4>A newly onboarded board's first MQTT connections are refused</h4>
+<p>Symptom: right after onboarding, a board restarts once or twice before it publishes. Cause: its credential is registered after it boots and reaches the broker at the next sync, up to about 15 seconds later. Fix: none; the retry succeeds. A board flashed before the broker required credentials has none, never connects and must be onboarded again.</p>
+<h4>A change to the sign-in page does not show</h4>
+<p>Symptom: the login page still looks the same after you changed the theme files. Cause: Keycloak caches themes and never re-reads them while running. Fix: run <code>./deploy-infra.sh</code>; it restarts Keycloak when the theme changed.</p>
+<h4>A deploy is refused although nothing is running</h4>
+<p>Symptom: "Another MedCEA deploy is already running", but the deploy you started earlier has ended. Cause: a background process started by that run, or a <code>helm --wait</code> or <code>rollout status</code> left after a plain <code>kill</code>, still holds the lock. Fix: the refusal lists the leftover processes and the <code>kill</code> command for them. Next time stop a run with the group kill it prints (<code>kill -- -&lt;pgid&gt;</code>). See <a href="#admin-lock">One deploy at a time</a>.</p>
+<h4>MicroK8s steps fail on Ubuntu 25.10 or later</h4>
+<p>Symptom: a MicroK8s start or addon enable fails with <code>snapctl … from outside of a snap</code>, or <code>enable rbac</code> dies after "No callback tokens file." Cause: Ubuntu's default <code>sudo</code> is now sudo-rs, which ignores <code>sudo -E</code>, and MicroK8s needs it for every privileged step. <code>bootstrap-infra.sh</code> switches to classic sudo for its own duration and restores the setting afterwards, so deploys work; a MicroK8s command you run by hand does not get that. Fix: by hand, run <code>sudo update-alternatives --set sudo /usr/bin/sudo.ws</code>, then the <code>microk8s</code> command, then <code>sudo update-alternatives --auto sudo</code>.</p>
+<h4>Other devices cannot open *.medcea after a server rebuild</h4>
+<p>Symptom: the host opens every page, laptops and phones on the tailnet do not. Cause: Tailscale split DNS still points at the old server's IP. Fix: change it in the admin console as <code>./deploy-infra.sh</code> prints (see <a href="#admin-dns">DNS and Tailscale</a>).</p>
+<h4>An operator sees an empty Monitor</h4>
+<p>Symptom: an operator signs in but sees no telemetry or runs and cannot start a run. Cause: no unit is in effect for them, either none assigned or an assignment still waiting for qa. Fix: <code>apps/iam/units.sh list &lt;username&gt;</code>; assign a unit with <code>--by</code> and have a qa person confirm it in the User Manager's Decisions tab.</p>
+<h4>A qa decision cannot be confirmed</h4>
+<p>Symptom: a decision about the only qa person's own account, or one they made, waits forever. Cause: the person who checks a decision is never its maker or its subject. Fix: another qa person confirms it. With no enabled qa person at all, set a new <code>QA_USER</code> in <code>config.env</code> and run <code>./deploy-infra.sh</code> (break-glass, outside the decisions).</p>
+</section>

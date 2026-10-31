@@ -1,0 +1,149 @@
+<title>MedCEA Platform Manual</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@87,600;87,700&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a controlled-document header, then a sticky chapter index beside one reading column; chapters and sections are numbered because the manual cross-references them. */
+:root {
+  --bg: #f3f6f5; --paper: #ffffff; --ink: #14211c; --muted: #56655f; --line: #d3ddd8;
+  --accent: #12715b; --accent-soft: #e0f0ea;
+  --note: #2a5aa0; --note-bg: #e6eef9;
+  --warn: #93590a; --warn-bg: #fbf0dc;
+  --record: #6a3f8f; --record-bg: #f1e9f7;
+  --code-bg: #edf2f0;
+  --display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --body: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1513; --paper: #151f1b; --ink: #e2ebe7; --muted: #95a59e; --line: #2a3833;
+  --accent: #4fc4a0; --accent-soft: #173229;
+  --note: #8fb3ef; --note-bg: #1a2438; --warn: #e9b55a; --warn-bg: #352812;
+  --record: #c9a2ec; --record-bg: #2a1f36; --code-bg: #1c2824; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0e1513; --paper: #151f1b; --ink: #e2ebe7; --muted: #95a59e; --line: #2a3833;
+  --accent: #4fc4a0; --accent-soft: #173229;
+  --note: #8fb3ef; --note-bg: #1a2438; --warn: #e9b55a; --warn-bg: #352812;
+  --record: #c9a2ec; --record-bg: #2a1f36; --code-bg: #1c2824; color-scheme: dark }
+
+html { scroll-padding-top: calc(env(safe-area-inset-top, 0px) + 16px); }
+body { background: var(--bg); color: var(--ink); font: 16px/1.6 var(--body); }
+.page { max-width: 1180px; margin: 0 auto; padding-block: 28px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+
+/* controlled-document header */
+.doc { display: grid; grid-template-columns: 1fr auto; gap: 12px 32px; align-items: end;
+  border-bottom: 2px solid var(--ink); padding-bottom: 16px; margin-bottom: 28px; }
+.doc h1 { font: 700 clamp(1.9rem, 4vw, 2.6rem)/1.05 var(--display); font-stretch: 87%; margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+.doc .sub { color: var(--muted); margin: 8px 0 0; max-width: 62ch; }
+.doc dl { display: grid; grid-template-columns: auto auto; gap: 2px 14px; margin: 0; font: .78rem/1.5 var(--mono); }
+.doc dt { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.doc dd { margin: 0; font-weight: 600; }
+@media (max-width: 720px) { .doc { grid-template-columns: 1fr; } }
+
+/* index + column */
+.layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 40px; align-items: start; }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); max-height: calc(100vh - 32px); overflow: auto;
+  font-size: .88rem; padding-right: 4px; }
+nav.toc > p { font: 600 .72rem var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; }
+nav.toc > ol > li { margin: 0 0 10px; }
+nav.toc a { color: inherit; text-decoration: none; display: block; padding: 2px 8px; border-left: 2px solid transparent; border-radius: 0 4px 4px 0; }
+nav.toc a:hover { background: var(--accent-soft); }
+nav.toc a.on { border-left-color: var(--accent); color: var(--accent); font-weight: 700; }
+nav.toc > ol > li > a { font-weight: 700; }
+nav.toc ol ol { margin: 2px 0 0 10px; color: var(--muted); font-size: .84rem; }
+nav.toc .n { font: .75rem var(--mono); color: var(--muted); margin-right: 6px; }
+details.toc-m { display: none; }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  nav.toc { display: none; }
+  details.toc-m { display: block; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 24px; }
+  details.toc-m summary { font-weight: 700; cursor: pointer; }
+  details.toc-m nav.toc { display: block; position: static; max-height: none; margin-top: 10px; }
+}
+
+/* reading column */
+main { min-width: 0; counter-reset: ch; }
+main section { counter-increment: ch; counter-reset: sec; padding-bottom: 40px; margin-bottom: 40px; border-bottom: 1px solid var(--line); }
+main h2 { font: 700 1.75rem/1.15 var(--display); font-stretch: 87%; margin: 0 0 10px; text-wrap: balance; scroll-margin-top: 16px; }
+main h2::before { content: counter(ch); display: inline-block; min-width: 1.6em; color: var(--accent); }
+main h3 { counter-increment: sec; font: 700 1.2rem/1.3 var(--display); font-stretch: 87%; margin: 34px 0 8px; text-wrap: balance; }
+main h3::before { content: counter(ch) "." counter(sec); font: 600 .85rem var(--mono); color: var(--muted); margin-right: 10px; }
+main h4 { font: 700 1rem/1.4 var(--body); margin: 22px 0 6px; }
+main p, main li { max-width: 72ch; }
+main p { margin: 0 0 12px; }
+main ul, main ol { margin: 0 0 14px; padding-left: 1.4em; display: grid; gap: 4px; }
+.lede { font-size: 1.06rem; color: var(--muted); max-width: 68ch; }
+ol.steps { list-style: none; padding: 0; counter-reset: st; gap: 8px; }
+ol.steps > li { counter-increment: st; position: relative; padding-left: 2.4em; }
+ol.steps > li::before { content: counter(st); position: absolute; left: 0; top: .05em; width: 1.6em; height: 1.6em; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent); font: 700 .8rem/1.6em var(--mono); text-align: center; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code { font: .86em var(--mono); background: var(--code-bg); padding: .08em .35em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; margin: 0 0 14px; max-width: 100%; }
+pre code { background: none; padding: 0; font-size: .84rem; overflow-wrap: normal; white-space: pre; }
+kbd { font: .82em var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 .35em; background: var(--paper); }
+.role { font: 600 .8em var(--mono); color: var(--accent); background: var(--accent-soft); padding: .05em .45em; border-radius: 999px; white-space: nowrap; }
+.table-wrap { overflow-x: auto; margin: 0 0 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; vertical-align: top; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+thead th { font: 600 .74rem var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: var(--bg); position: sticky; top: 0; }
+tbody tr:last-child td { border-bottom: 0; }
+.note, .warn, .record { border-radius: 6px; padding: 10px 14px 2px 14px; margin: 0 0 16px; max-width: 76ch; border: 1px solid; }
+.note { background: var(--note-bg); border-color: color-mix(in srgb, var(--note) 35%, transparent); }
+.warn { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.record { background: var(--record-bg); border-color: color-mix(in srgb, var(--record) 35%, transparent); }
+.note::before, .warn::before, .record::before { display: block; font: 600 .7rem var(--mono); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
+.note::before { content: "Note"; color: var(--note); }
+.warn::before { content: "Caution"; color: var(--warn); }
+.record::before { content: "What is recorded"; color: var(--record); }
+footer { color: var(--muted); font-size: .82rem; }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+
+<div class="page">
+  <header class="doc">
+    <div>
+      <h1>MedCEA Platform Manual</h1>
+      <p class="sub">How to get access to, use and run the MedCEA platform for regulated controlled-environment cultivation: the web apps, the edge devices, the access controls and the records they keep.</p>
+    </div>
+    <dl>
+      <dt>Edition</dt><dd>{{EDITION}}</dd>
+      <dt>Covers</dt><dd>{{COVERS}}</dd>
+      <dt>Updated</dt><dd>{{DATE}}</dd>
+      <dt>Code</dt><dd>{{COMMIT}}</dd>
+    </dl>
+  </header>
+  <div class="layout">
+    <div>
+      <details class="toc-m"><summary>Contents</summary>{{TOC}}</details>
+      {{TOC_SIDE}}
+    </div>
+    <main>
+{{CHAPTERS}}
+      <footer>Source: <code>docs/manual/</code> in the MedCEA repository; built by <code>docs/manual/build.py</code> from one file per chapter. Updated at the end of every phase of the IAM plan.</footer>
+    </main>
+  </div>
+</div>
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+  var byId = {};
+  links.forEach(function (a) { var id = a.getAttribute('href').slice(1); (byId[id] = byId[id] || []).push(a); });
+  var heads = Array.prototype.slice.call(document.querySelectorAll('main h2[id], main h3[id], main section[id]'));
+  if (!('IntersectionObserver' in window) || !heads.length) return;
+  var current = null;
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      var id = e.target.id;
+      if (!byId[id] || id === current) return;
+      links.forEach(function (a) { a.classList.remove('on'); });
+      byId[id].forEach(function (a) { a.classList.add('on'); });
+      current = id;
+    });
+  }, { rootMargin: '0px 0px -75% 0px' });
+  heads.forEach(function (h) { io.observe(h); });
+})();
+</script>
