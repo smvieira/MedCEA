@@ -16,7 +16,7 @@ ENFORCEMENT = {
     "PORTAL_DOMAIN": "compiled", "CONFIG_DOMAIN": "compiled", "SCHEDULER_DOMAIN": "compiled",
     "MONITOR_DOMAIN": "compiled", "DBMGMT_DOMAIN": "compiled", "MQTTX_DOMAIN": "compiled",
     "NODE_RED_DOMAIN": "compiled", "ACCESS_DOMAIN": "compiled",
-    "GRAFANA_DOMAIN": "tool (Grafana role_attribute_path)", "WORKBENCH_DOMAIN": "not yet (Phase 3.2)",
+    "GRAFANA_DOMAIN": "tool (Grafana role_attribute_path)", "WORKBENCH_DOMAIN": "tool (JupyterHub allowed_groups)",
     "ONBOARD_DOMAIN": "not yet (Phase 3.4; EDGE_WIZARD_ROLE)", "PGADMIN_DOMAIN": "admin (pgAdmin's own OAuth2)",
     "POLICY_DOMAIN": "not deployed (Phase 4)",
 }

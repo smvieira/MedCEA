@@ -586,6 +586,8 @@ service_identities:
 # compiler/tools.py compiles (`cli.py compile <kind>`):
 #   {kind: grafana, host: <hosts key of a ui member>, service_identity: <its datasource>,
 #    settings: [{setting: S, levels: [L]}, ...], otherwise: refuse, help: <text>}
+#   {kind: jupyterhub, host: ..., settings: [{setting: admin, levels: [K]}, {setting: user, ...}],
+#    otherwise: refuse, help: <text>}   (no service_identity: a notebook holds no platform credential)
 # A role gets the first setting whose levels it holds unconstrained; every role the host
 # admits must get one, and nobody else. `reaches` must cover the service identity's ceiling.
 resource_groups:
@@ -925,8 +927,8 @@ resource_groups:
       effect: blocking
       help: >
         A grant, a role change that adds any (group, level) pair the old role did not
-        have, any activation (an enabled account reaches the hosts not yet gated by
-        role, the AI workbench until IAM 3.2, even without a platform role), a new unit assignment, a
+        have, any activation (an enabled account gets back everything its role gives;
+        under IAM_GATES=false the AI workbench even without a platform role), a new unit assignment, a
         person_id change or a change of the mail settings takes effect only when a qa
         person confirms it who is neither the administrator who made it nor its subject.
         Deactivation, a pure narrowing and the removal of a unit act at once and are
@@ -1054,9 +1056,26 @@ resource_groups:
     class: config
     description: Notebooks for analysis and algorithm development.
     why_this_class: Research environment, outside the production record.
-    risk: Notebooks run code; their pods are isolated by NetworkPolicy, so the workbench reaches no platform service or database.
+    risk: >
+      Notebooks run code. Their pods are isolated by the chart's NetworkPolicy (no egress to
+      private addresses), so the workbench reaches no platform service or database. A hub
+      administrator can stop another person's server or remove their hub user, never open
+      the server, and removing a hub user keeps the person's home volume.
     members:
       - {type: ui, host: WORKBENCH_DOMAIN}
+    tool:
+      kind: jupyterhub
+      host: WORKBENCH_DOMAIN
+      settings:                       # first match wins
+        - {setting: admin, levels: [K]}    # JupyterHub admin_groups (admin_access false)
+        - {setting: user, levels: [R]}     # allowed_groups: every role given a setting
+      otherwise: refuse               # allow_all false: no setting, no sign-in
+      help: >
+        The AI workbench admits the roles holding a level here, and nobody else. K makes
+        the role a hub administrator: it lists, starts and stops servers and removes hub
+        users, but cannot open a server or notebook (admin_access false), and removing a hub
+        user keeps the home volume (delete_pvc false). JupyterHub has no read-only mode, so
+        R admits to a full notebook server.
 
   platform_admin:
     label: Platform administration

@@ -1,7 +1,7 @@
 """apps/iam/compiler/tools.py — a tool's own role setting, compiled from a group's `tool:` block.
 
-A tool that signs people in itself (Grafana in IAM 3.1; JupyterHub, Node-RED, the edge
-wizard and pgAdmin extend KINDS in 3.2-3.4) cannot read the route table, so its role
+A tool that signs people in itself (Grafana in IAM 3.1, JupyterHub in 3.2; Node-RED, the
+edge wizard and pgAdmin extend KINDS in 3.3-3.4) cannot read the route table, so its role
 setting is compiled here. The level-to-setting mapping is policy data under the group
 (schema_version 3), not a constant in this file:
 
@@ -14,7 +14,8 @@ and inherited cells, implies expanded); a role with none is refused. check() kee
 equal to the host's gate (proxies.admitted): every role the host admits gets a setting,
 nobody else does. A tool cannot evaluate a constraint, so a constrained level on the group
 is an error, and `reaches` must cover the datasource account's ceiling, so I11 sees
-everything the tool's own credential reads.
+everything the tool's own credential reads (JupyterHub has none: a notebook holds no
+platform credential).
 """
 import re
 
@@ -22,7 +23,11 @@ from compiler import proxies
 
 # kind -> the settings the policy may name. Grafana's Admin and GrafanaAdmin are left out on
 # purpose: only the local break-glass account holds them (allow_assign_grafana_admin false).
-KINDS = {"grafana": {"Editor", "Viewer"}}
+KINDS = {"grafana": {"Editor", "Viewer"}, "jupyterhub": {"admin", "user"}}
+# (kind, setting) -> the only levels that may give it. JupyterHub's admin is administration
+# (K, which I13 keeps with admin): a hub admin given by R would be every notebook user.
+SETTING_LEVELS = {("jupyterhub", "admin"): {"K"}}
+SERVICE_IDENTITY = {"grafana"}   # kinds that read the platform with their own credential
 KEYS = {"kind", "host", "service_identity", "settings", "otherwise", "help"}
 ROLE_NAME = re.compile(r"^[a-z_]+$")   # spliced into JMESPath (Grafana) and config files
 
@@ -62,6 +67,21 @@ def grafana_role_path(p):
     return " || ".join(clauses + ["''"])
 
 
+def jupyterhub_groups(p, which):
+    """JupyterHub's allowed_groups (every role given a setting: the host's gate) or
+    admin_groups (the roles given `admin`), sorted. allowed_groups is never empty:
+    allow_all false would then lock everyone out."""
+    given = settings(p, _one(p, "jupyterhub"))
+    if which == "allowed_groups":
+        roles = sorted(r for _, rs in given for r in rs)
+        if not roles:
+            raise ValueError("no role is given a JupyterHub setting: the hub would admit nobody")
+        return roles
+    if which == "admin_groups":
+        return sorted(r for s, rs in given if s == "admin" for r in rs)
+    raise ValueError(f"unknown JupyterHub setting {which}; known: allowed_groups, admin_groups")
+
+
 def check(p):
     """Errors in the `tool:` blocks, each starting with `tool <group>:`."""
     errors = []
@@ -96,6 +116,11 @@ def check(p):
                 if lv == "N" or lv not in p.types["ui"]["levels"]:
                     err(f"setting {s.get('setting')}: level {lv} is not a ui level")
                     bad = True
+                only = SETTING_LEVELS.get((kind, s.get("setting")))
+                if only and lv not in only:
+                    err(f"setting {s.get('setting')}: level {lv} cannot give {kind}'s {s.get('setting')} "
+                        f"(only {', '.join(sorted(only))})")
+                    bad = True
         if bad:
             continue
         for r in p.roles:
@@ -110,6 +135,10 @@ def check(p):
             err(f"{host} admits {sorted(admitted)} but {kind} gives a role to {sorted(given)} "
                 f"(missing: {sorted(admitted - given) or 'none'}; extra: {sorted(given - admitted) or 'none'})")
         sid = t.get("service_identity")
+        if kind not in SERVICE_IDENTITY:
+            if sid is not None:
+                err(f"{kind} reads nothing with its own credential: no service_identity")
+            continue
         if sid not in p.services:
             err(f"service_identity {sid} is not a service identity")
             continue

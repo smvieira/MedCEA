@@ -23,6 +23,14 @@
 #   sign-in  Grafana's sign-in reaches Keycloak's login page with scope `groups`
 #            (invalid_scope would refuse everyone: strict fails closed)
 #   reach    some enabled account holds a role the policy gives a Grafana role
+# The AI workbench [tool (JupyterHub …)] (WORKBENCH_DOMAIN, IAM 3.2):
+#   gate     the hub's deployed values (Secret hub, read on stdin) carry allow_all false,
+#            admin_users [], allowed_groups/admin_groups equal to `policy_workbench`,
+#            admin_access false, delete_pvc false, no auth_state (IAM_GATES=false:
+#            allow_all true); SKIP while WORKBENCH_ENABLED is not true
+#   live     the running hub pod carries the Deployment's checksum/secret
+#   sign-in  /hub/login (auto_login → /hub/oauth_login) reaches Keycloak's login page
+#   reach    some enabled account holds a role the hub admits
 # Hosts whose gate is not compiled yet are listed as SKIP with the phase that adds it.
 # Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
 # account, and the realm's discovery document lists device_authorization_endpoint.
@@ -34,7 +42,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -147,6 +155,79 @@ print(max((m.get("time", "") for m in mf if m.get("subresource") != "status"), d
     fi
 }
 
+# JupyterHub signs people in itself (IAM 3.2): its gate is the hub's own settings.
+check_workbench() {
+    local host="$1" roles="$2" live k x
+    local WORKBENCH_ALLOW_ALL WORKBENCH_ADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE
+    if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then skip gate "WORKBENCH_ENABLED is not true"; return; fi
+    policy_workbench 2>/dev/null || { fail gate "policy_workbench failed (cli.py check)"; return; }
+    # the values hold the client secret: parsed on stdin, only the gate's fields printed
+    live="$($KUBECTL get secret hub -n "$NAMESPACE" -o jsonpath='{.data.values\.yaml}' 2>/dev/null | base64 -d 2>/dev/null \
+        | python3 -c '
+import json, sys, yaml
+v = yaml.safe_load(sys.stdin)
+if not isinstance(v, dict):
+    sys.exit(1)
+c = v["hub"]["config"]
+a, g = c.get("Authenticator") or {}, c.get("GenericOAuthenticator") or {}
+for k, x in (("allow_all", a.get("allow_all")), ("admin_users", sorted(a.get("admin_users") or [])),
+             ("allowed", sorted(g.get("allowed_groups") or [])), ("admins", sorted(g.get("admin_groups") or [])),
+             ("safe", (c.get("JupyterHub") or {}).get("admin_access") is False
+                      and (c.get("KubeSpawner") or {}).get("delete_pvc") is False
+                      and a.get("enable_auth_state") is not True)):
+    print(f"{k}\t{json.dumps(x)}")')" || { fail gate "no hub Secret in $NAMESPACE"; return; }
+    declare -A L=()
+    while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
+    local sorted_list='import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))'
+    if [[ "${L[safe]}" != true ]]; then
+        fail gate "admin_access, delete_pvc or enable_auth_state is not as deployed by IAM 3.2"
+    elif [[ "${L[allow_all]}" != "$WORKBENCH_ALLOW_ALL" ]]; then
+        fail gate "allow_all is ${L[allow_all]}, want $WORKBENCH_ALLOW_ALL"
+    elif [[ "${L[admin_users]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ADMIN_USERS")" ]]; then
+        fail gate "admin_users is ${L[admin_users]}, want $WORKBENCH_ADMIN_USERS"
+    elif [[ "${L[allowed]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ALLOWED_GROUPS")" ]]; then
+        fail gate "allowed_groups is ${L[allowed]}, the policy compiles $WORKBENCH_ALLOWED_GROUPS"
+    elif [[ "${L[admins]}" != "$(python3 -c "$sorted_list" "$WORKBENCH_ADMIN_GROUPS")" ]]; then
+        fail gate "admin_groups is ${L[admins]}, the policy compiles $WORKBENCH_ADMIN_GROUPS"
+    elif [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then
+        pass gate "IAM_GATES=false: any realm account, $ADMIN_USER hub admin"
+    else
+        pass gate "admits $(roles_of "${L[allowed]}"); hub admins $(roles_of "${L[admins]}")"
+    fi
+
+    local tmpl pod
+    tmpl="$($KUBECTL get deployment hub -n "$NAMESPACE" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
+    pod="$($KUBECTL get pods -n "$NAMESPACE" -l component=hub --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.metadata.annotations.checksum/secret}{"\n"}{end}' 2>/dev/null | sort -u)"
+    if [[ -n "$tmpl" && "$pod" == "$tmpl" ]]; then
+        pass live "the hub pod runs the deployed values"
+    else
+        fail live "the running hub pod does not carry the Deployment's checksum/secret (rollout pending?)"
+    fi
+
+    local out code url
+    # auto_login: /hub/login → /hub/oauth_login → Keycloak
+    out="$(curl -sk -L --max-redirs 6 -o /dev/null -m 15 -w '%{http_code} %{url_effective}' "https://$host/hub/login")"
+    code="${out%% *}" url="${out#* }"
+    if [[ "$code" == 200 && "$url" == "https://$KEYCLOAK_DOMAIN/"* ]]; then
+        pass sign-in "Keycloak shows the login page for client workbench"
+    else
+        fail sign-in "the hub's sign-in ended at $code ${url:0:100} (want Keycloak's login page)"
+    fi
+
+    if [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then
+        skip reach "IAM_GATES=false: any enabled account gets in"
+    elif $HOLDERS_OK; then
+        local who="" r
+        for r in $roles; do [[ -n "${HOLDERS[$r]:-}" ]] && who+="$r:${HOLDERS[$r]} "; done
+        if [[ -n "$who" ]]; then
+            pass reach "enabled accounts by role: ${who% }"
+        else
+            fail reach "no enabled account holds any of [$roles]: nobody can open $host"
+        fi
+    fi
+}
+
 HOSTS="$(python3 apps/iam/compiler/cli.py hosts)" || { echo "cli.py hosts failed" >&2; exit 2; }
 INGRESSES="$($KUBECTL get ingress -n "$NAMESPACE" -o \
     jsonpath='{range .items[*]}{.spec.rules[0].host}{" "}{.metadata.labels.app\.kubernetes\.io/instance}{"\n"}{end}')"
@@ -160,7 +241,11 @@ while IFS= read -r line; do
     case "$status" in
         tool*)
             if [[ -z "$host" ]]; then fail gate "$var is not set in config.env"; continue; fi
-            check_grafana "$host" "${line##*]}"
+            if [[ "$var" == WORKBENCH_DOMAIN ]]; then
+                check_workbench "$host" "${line##*]}"
+            else
+                check_grafana "$host" "${line##*]}"
+            fi
             continue ;;
         compiled)
             if [[ "$var" == ACCESS_DOMAIN && "${IAM_GATES:-true}" == false ]]; then

@@ -51,6 +51,38 @@ policy_grafana() {
     GRAFANA_ROLE_STRICT=true
 }
 
+#   policy_workbench || exit 1
+#
+# JupyterHub signs people in itself, so the AI workbench's gate is its own setting
+# (IAM 3.2), compiled from the research_workbench group's `tool:` block. Sets, for
+# k8s/workbench/values.yaml: WORKBENCH_ALLOW_ALL (false), WORKBENCH_ADMIN_USERS ([]:
+# OAuthenticator admits admin_users whatever the groups say), WORKBENCH_ALLOWED_GROUPS
+# and WORKBENCH_ADMIN_GROUPS (["a", "b"]) and WORKBENCH_403_MESSAGE (the refusal text,
+# a JSON string: "No access to <service>", the roles, the portal). IAM_GATES=false
+# renders the pre-3.2 authentication: any realm account, ADMIN_USER the hub admin.
+# A broken policy or an empty list returns 1 and changes nothing: the caller never
+# falls back to allow_all.
+policy_workbench() {
+    local cli="$REPO_ROOT/apps/iam/compiler/cli.py" desc
+    if [[ "${IAM_GATES:-true}" == "false" ]]; then
+        echo -e "\033[0;33mWARNING: IAM_GATES=false — the AI workbench admits any realm account; ${ADMIN_USER} is hub admin.\033[0m" >&2
+        WORKBENCH_ALLOW_ALL=true WORKBENCH_ALLOWED_GROUPS='[]' WORKBENCH_ADMIN_GROUPS='[]'
+        WORKBENCH_ADMIN_USERS="$(python3 -c 'import json, sys; print(json.dumps([sys.argv[1]]))' "${ADMIN_USER:?}")"
+        WORKBENCH_403_MESSAGE='"No access to AI Workbench. Ask an administrator."'
+        return 0
+    fi
+    WORKBENCH_ALLOWED_GROUPS="$(python3 "$cli" compile jupyterhub --setting allowed_groups)" || return 1
+    WORKBENCH_ADMIN_GROUPS="$(python3 "$cli" compile jupyterhub --setting admin_groups)" || return 1
+    [[ -n "$WORKBENCH_ALLOWED_GROUPS" && "$WORKBENCH_ALLOWED_GROUPS" != '[]' ]] || return 1
+    desc="$(python3 "$cli" describe-gate WORKBENCH_DOMAIN "$WORKBENCH_ALLOWED_GROUPS")" || return 1
+    WORKBENCH_403_MESSAGE="$(python3 -c '
+import html, json, sys
+service, roles = html.unescape(sys.argv[1]).split("\t", 1)
+print(json.dumps(f"No access to {service}. It is open to: {roles}. Ask an administrator for one of "
+                 f"these roles. The platform portal: https://{sys.argv[2]}/"))' "$desc" "${PORTAL_DOMAIN:-}")" || return 1
+    WORKBENCH_ALLOW_ALL=false WORKBENCH_ADMIN_USERS='[]'
+}
+
 #   gate_error_page RELEASE HOST_VAR ALLOWED_GROUPS
 #
 # The proxy's 403 page: "No access to <service>", the roles that may open it and

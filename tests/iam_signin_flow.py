@@ -28,6 +28,14 @@ for Editor only (a viewer cannot open Explore). IAM_GATES=false: every enabled a
 in, as Viewer (the test accounts hold no grafana_* role). The role "none" (iam-signin.sh's
 account without a platform role) is refused everywhere, Grafana included.
 
+The AI workbench (IAM 3.2, JupyterHub, also [tool …]) starts at
+/hub/login?next=/hub/home, so the flow never follows a redirect into /hub/spawn or /user/
+and starts no server: "in" is 200 on /hub/home, "refused" JupyterHub's 403 page with the
+policy's text ("No access to AI Workbench", custom_403_message). Every account that got
+in is a hub user afterwards; the throwaway admin account removes them through the hub API
+(DELETE /hub/api/users/<name>, its own session and _xsrf cookie). It cannot remove itself,
+so test-admin-<hex> stays as a hub user without a home (delete_pvc false, nothing spawned).
+
 Where it got in, the account then calls one API of each service behind the host (PROBES)
 with its session, so the access token goes through the proxy to the service's
 medcea_iam.check(). The calls go to "probes_out" with whether the route table lets that
@@ -132,8 +140,8 @@ def fetch(op, url, data=None, headers=None):
         return 0, url, str(e)
 
 
-def sign_in(op, domain, user):
-    status, url, body = fetch(op, f"https://{domain}/")
+def sign_in(op, domain, user, path="/"):
+    status, url, body = fetch(op, f"https://{domain}{path}")
     m = FORM.search(body)
     if m:  # Keycloak's form: no session yet in this jar
         form = urllib.parse.urlencode({"username": user["username"], "password": user["password"],
@@ -194,6 +202,31 @@ def grafana_checks(op, domain, p, user_role, got_role):
         return out
     if explore != (got_role == "Editor"):
         out.append(f"{user_role:18} {domain:24} {got_role} {'may' if explore else 'may not'} open Explore")
+    return out
+
+
+HUB_START = "/hub/login?next=%2Fhub%2Fhome"   # never /hub/ (redirect_to_server spawns)
+
+
+def hub_cleanup(op, domain, names):
+    """Remove the hub users the sign-ins created, as the throwaway admin (its session)."""
+    jar = next(h.cookiejar for h in op.handlers if isinstance(h, urllib.request.HTTPCookieProcessor))
+    xsrf = next((c.value for c in jar if c.name == "_xsrf" and c.domain.lstrip(".") == domain), None)
+    if not xsrf:
+        return [f"{domain}: no _xsrf cookie in the admin's session; remove the hub users {', '.join(names)} by hand"]
+    out = []
+    for n in names:
+        req = urllib.request.Request(f"https://{domain}/hub/api/users/{urllib.parse.quote(n)}", method="DELETE",
+                                     headers={"X-XSRFToken": xsrf, "Referer": f"https://{domain}/hub/admin"})
+        try:
+            with op.open(req, timeout=20) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            code = str(e)
+        if code not in (204, 404):
+            out.append(f"{domain}: could not remove hub user {n} ({code}); remove it on the hub's admin page")
     return out
 
 
@@ -272,10 +305,13 @@ def main():
     fails = []
     results = {}
     probes = []
+    hub_users, hub_admin = [], None
     for u in users:
         op = opener(data.get("cacert"))
         for var, domain, label, want in hosts:
-            if var == "GRAFANA_DOMAIN":
+            if var == "WORKBENCH_DOMAIN":
+                got, why = classify(domain, label, *sign_in(op, domain, u, HUB_START))
+            elif var == "GRAFANA_DOMAIN":
                 got, why, gf_role = classify_grafana(op, domain, *sign_in(op, domain, u))
             else:
                 got, why = classify(domain, label, *sign_in(op, domain, u))
@@ -284,6 +320,12 @@ def main():
             if got != expect:
                 fails.append(f"{u['role']:18} {domain:24} expected {expect}, got {got}" + (f": {why}" if why else ""))
             if got != "in":
+                continue
+            if var == "WORKBENCH_DOMAIN":
+                if u["role"] == "admin" and os.environ.get("IAM_GATES", "true") != "false":
+                    hub_admin = (op, domain)
+                else:
+                    hub_users.append(u["username"])
                 continue
             if var == "GRAFANA_DOMAIN":
                 fails.extend(grafana_checks(op, domain, p, u["role"], gf_role))
@@ -297,6 +339,12 @@ def main():
                 probes.append({"user": u["username"], "role": u["role"], "host": domain, "path": path,
                                "service": service, "seen": seen, "status": status,
                                "allowed": bool(key) and u["role"] in svc["routes"][key]["roles"]})
+    if hub_users and hub_admin:
+        print(f"Removing {len(hub_users)} hub user(s) the sign-ins created on the AI workbench")
+        for msg in hub_cleanup(*hub_admin, hub_users):
+            print("  NOTE", msg)
+    elif hub_users:
+        print(f"  NOTE the throwaway admin is no hub admin here: remove hub users {', '.join(hub_users)} by hand")
     if data.get("probes_out"):
         with open(data["probes_out"], "w") as f:
             json.dump(probes, f)

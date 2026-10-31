@@ -146,6 +146,17 @@ MUTATIONS = {
     "tool reaches less than its datasource": (_set(["resource_groups", "dashboards", "reaches"], {"measurements": ["R"], "runs": ["R"]}),
                                               "svc_grafana"),
     "schema older than its tool blocks": (_set(["schema_version"], 2), "schema_version"),
+    # IAM 3.2: the AI workbench's JupyterHub setting
+    "hub admin by R": (_set(["resource_groups", "research_workbench", "tool", "settings", 0, "levels"], ["R"]),
+                       "cannot give jupyterhub's admin"),
+    "constrained hub cell": (_set(["matrix", "research_workbench", "bio_scientist"],
+                                  {"levels": ["R", "C", "U"], "constraint": "draft_only", "applies_to": ["R", "C", "U"]}),
+                             "cannot evaluate"),
+    "constrained hub admin": (_set(["matrix", "research_workbench", "admin"], {"levels": ["K"], "constraint": "draft_only"}),
+                              "cannot evaluate"),
+    "unknown tool kind": (_set(["resource_groups", "research_workbench", "tool", "kind"], "zeppelin"), "unknown kind zeppelin"),
+    "notebook with a platform credential": (_set(["resource_groups", "research_workbench", "tool", "service_identity"],
+                                                 "svc_grafana"), "no service_identity"),
 }
 
 
@@ -199,7 +210,7 @@ class ToolsTest(unittest.TestCase):
         cls.policy = model.load()
 
     def test_grafana_settings(self):
-        self.assertEqual(tools.groups(self.policy), ["dashboards"])
+        self.assertEqual(tools.groups(self.policy, "grafana"), ["dashboards"])
         self.assertEqual(dict(tools.settings(self.policy, "dashboards")), {
             "Editor": ["engineer"], "Viewer": ["auditor", "maintenance", "production_manager", "qa", "qc", "qp"]})
 
@@ -221,6 +232,25 @@ class ToolsTest(unittest.TestCase):
         reaches = p.groups["dashboards"]["reaches"]
         for g, lv in p.services["svc_grafana"]["ceiling"].items():
             self.assertLessEqual(set(lv), p.closure(reaches.get(g, [])), g)
+
+    def test_jupyterhub_groups(self):
+        """IAM 3.2: allowed_groups is the host's gate, admin_groups the holders of K."""
+        p = self.policy
+        self.assertEqual(tools.groups(p, "jupyterhub"), ["research_workbench"])
+        allowed = tools.jupyterhub_groups(p, "allowed_groups")
+        self.assertEqual(allowed, ["admin", "bio_scientist", "control_scientist", "engineer", "qa"])
+        self.assertEqual(allowed, proxies.admitted(p, "WORKBENCH_DOMAIN"))
+        self.assertEqual(tools.jupyterhub_groups(p, "admin_groups"), ["admin"])
+        for refused in ("operator", "auditor", "production_manager", "maintenance", "qc", "qp"):
+            self.assertNotIn(refused, allowed)
+        with self.assertRaises(ValueError):
+            tools.jupyterhub_groups(p, "admin_users")
+
+    def test_tool_block_does_not_change_route_digest(self):
+        # a tool block is not in the route table: no database deploy, role_widening() unchanged
+        d = copy.deepcopy(self.policy.data)
+        del d["resource_groups"]["research_workbench"]["tool"]
+        self.assertEqual(routes.compile(model.Policy(d))["digest"], routes.compile(self.policy)["digest"])
 
 
 class RoutesTest(unittest.TestCase):
@@ -1106,6 +1136,26 @@ class WiringTest(unittest.TestCase):
         # generated before configure.sh's early exit, or an existing install never gets it
         conf = self.read("infra/configure.sh")
         self.assertLess(conf.index("cfg_set GRAFANA_BREAKGLASS_PASS"), conf.index("[[ ${#MISSING[@]} -eq 0"))
+
+    def test_workbench_wiring(self):
+        """IAM 3.2: JupyterHub's gate is rendered from the policy and fails closed."""
+        values = self.read("k8s/workbench/values.yaml")
+        for line in ("allow_all: ${WORKBENCH_ALLOW_ALL}", "admin_users: ${WORKBENCH_ADMIN_USERS}",
+                     "allowed_groups: ${WORKBENCH_ALLOWED_GROUPS}", "admin_groups: ${WORKBENCH_ADMIN_GROUPS}",
+                     "custom_403_message: ${WORKBENCH_403_MESSAGE}", "admin_access: false",
+                     'auth_state_groups_key: "oauth_user.groups"', "delete_pvc: false",
+                     "allow_existing_users: false", "enable_auth_state: false", "oauth_token_expires_in: 3600"):
+            self.assertIn(line, values)
+        self.assertNotIn("${ADMIN_USER}", values)   # admin_users is the gate's, never a fixed account
+        src = self.read("infra/deploy-workbench.sh")
+        self.assertIn("policy_workbench || die", src)
+        self.assertLess(src.index("policy_workbench || die"), src.index("upgrade --install workbench"))
+        call = re.search(r'render "\$REPO_ROOT/k8s/workbench/values.yaml"(.*?)>', src, re.S).group(1)
+        used = set(re.findall(r"\$\{([A-Z_]+)\}", values))
+        self.assertEqual(used - set(call.replace("\\", " ").split()), set())
+        lib = self.read("infra/lib-oauth2-proxy.sh")
+        self.assertIn("compile jupyterhub --setting allowed_groups", lib)
+        self.assertIn("compile jupyterhub --setting admin_groups", lib)
 
     def test_2_6_scheduler_routes_removed(self):
         """No person compresses or deletes a run log, nothing deletes a Q-table (IAM 2.6)."""

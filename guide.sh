@@ -553,7 +553,8 @@ a_workbench() {
     CMD=(./infra/deploy-workbench.sh)
     EFFECT="cluster (the JupyterHub Helm release)"
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
-    NOTES=("Needs WORKBENCH_SECRET in config.env (written by ./deploy-infra.sh).")
+    NOTES=("Needs WORKBENCH_SECRET in config.env (written by ./deploy-infra.sh)."
+           "Who may sign in, and who is hub administrator, come from the access policy (IAM_GATES=false: any realm account); a policy that does not compile stops the deploy and leaves the running hub as it is.")
     plan_run
 }
 a_workbench_switch() { switch_flow WORKBENCH_ENABLED; }
@@ -781,14 +782,16 @@ recipe() {
             STEPS=("set IAM_GATES true" "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("The User Manager widens beyond admin only once every access pod proves it enforces (the access deploy checks)."
                    "Grafana's role setting comes from the policy again (Editor: engineer; Viewer: roles holding R on dashboards; others cannot sign in); the grafana_* roles are retired."
-                   "Verify: tests/iam-hosts.sh (Grafana's role setting included) and ./health-check.sh (Grafana roles)") ;;
+                   "The AI workbench admits the roles the policy compiles; the hub admin cannot open others' servers. It is redeployed by ./deploy-infra.sh (WORKBENCH_ENABLED=true)."
+                   "Verify: tests/iam-hosts.sh (Grafana's role setting and the AI workbench included), tests/iam-workbench.sh and ./health-check.sh (Grafana roles, AI Workbench gate)") ;;
         IAM_GATES:rollback)
             STEPS=("run env IAM_GATES=false ./apps/access/deploy.sh" "set IAM_GATES false"
                    "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("Every gate goes back to operator, qa, auditor, admin; the User Manager to admin only. Each deploy warns while false."
                    "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until IAM_GATES is true again."
                    "Node-RED is not exact: before Phase 0 it admitted any signed-in user."
-                   "Grafana goes back to any enabled account (at least Viewer); the grafana_* roles are re-created, so Editor/Admin only for the built-in accounts that still exist.") ;;
+                   "Grafana goes back to any enabled account (at least Viewer); the grafana_* roles are re-created, so Editor/Admin only for the built-in accounts that still exist."
+                   "The AI workbench goes back to any realm account, with ADMIN_USER as hub admin (it still cannot open others' servers, and removing a hub user still keeps the home).") ;;
         IAM_NETPOL:enable)
             PRE=("Every caller of an application pod is listed under network: in apps/iam/policy/defaults.yaml (an unlisted caller times out).")
             STEPS=("set IAM_NETPOL true" "run ./deploy-infra.sh")
@@ -858,7 +861,7 @@ recipe() {
 
 switch_purpose() {
     case "$1" in
-        IAM_GATES)            echo "Each sign-in gate, and Grafana's role setting, admit the roles the policy compiles for its host (false: the pre-policy lists)." ;;
+        IAM_GATES)            echo "Each sign-in gate, Grafana's role setting and the AI workbench's hub admit the roles the policy compiles for their host (false: the pre-policy lists)." ;;
         IAM_NETPOL)           echo "One NetworkPolicy per application pod: only its listed callers can connect." ;;
         IAM_ENFORCE)          echo "Python services refuse what the route table does not allow (false: they only log 'would refuse')." ;;
         IAM_POSTGREST_JWT)    echo "config-api (PostgREST) verifies the person's token (Phase 2b)." ;;
@@ -1084,6 +1087,13 @@ a_iam_signin() {
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     plan_run
 }
+a_iam_workbench() {
+    CMD=(tests/iam-workbench.sh)
+    EFFECT="Keycloak: two throwaway accounts (test-admin-/test-bio-<hex>), deleted on exit; cluster: one notebook server and its home volume, deleted on exit; the throwaway admin stays a hub user"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Needs WORKBENCH_ENABLED=true and IAM_GATES=true. Starts one notebook server (the first start pulls the image).")
+    plan_run
+}
 a_iam_network() {
     CMD=(tests/iam-network.sh)
     EFFECT="cluster: a busybox probe pod, deleted on exit"
@@ -1306,7 +1316,7 @@ AREA_UNITS=(
     "a_units_remove_sub|Remove units of a deleted account|By its Keycloak id (units.sh list prints it)."
 )
 AREA_SWITCHES=(
-    "a_sw_gates|IAM_GATES — sign-in gates from the policy|Each oauth2-proxy, and Grafana's role setting, admit the roles the policy compiles for its host."
+    "a_sw_gates|IAM_GATES — sign-in gates from the policy|Each oauth2-proxy, Grafana's role setting and the AI workbench admit the roles the policy compiles for their host."
     "a_sw_netpol|IAM_NETPOL — NetworkPolicies per pod|Only each application pod's listed callers can connect."
     "a_sw_enforce|IAM_ENFORCE — services refuse|Python services refuse instead of logging 'would refuse'."
     "a_sw_jwt|IAM_POSTGREST_JWT — config-api verifies tokens|Phase 2b: PostgREST checks the person's token."
@@ -1329,6 +1339,7 @@ AREA_HEALTH=(
     "a_fixture_run|Build and test the throwaway database|tests/iam-db-fixture.sh run: the whole sequence, then deletes namespace medcea-iamtest."
     "a_fixture_keep|Build the throwaway database and keep it|tests/iam-db-fixture.sh up, load, apply: for the write probes."
     "a_fixture_down|Delete the throwaway database|tests/iam-db-fixture.sh down."
+    "a_iam_workbench|Workbench: admin cannot open others' servers|tests/iam-workbench.sh: throwaway accounts, takes the deploy lock."
 )
 AREA_EDGE=(
     "a_flash|Flash and register a board|./edge/flash-device.sh: an ESP32 over USB into a unit/zone slot."

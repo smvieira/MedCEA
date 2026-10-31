@@ -104,6 +104,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         strict is not true or Grafana may grant Grafana Admin; WARN while IAM_GATES=false"
     echo -e "         (any enabled account is at least Viewer); SKIP without the deployment"
     echo ""
+    echo -e "  ${CYAN}iamworkbench${NC} the AI workbench's gate is the access policy's (IAM 3.2): NAMESPACE"
+    echo -e "         FAIL when the hub's deployed allowed_groups/admin_groups differ from the compiled"
+    echo -e "         ones, allow_all or admin_users is set, admin_access, delete_pvc or auth_state is on,"
+    echo -e "         the notebooks' NetworkPolicy allows private addresses, or the hub pod runs older"
+    echo -e "         values (./infra/deploy-workbench.sh); WARN while IAM_GATES=false; SKIP while"
+    echo -e "         WORKBENCH_ENABLED is not true or there is no hub"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -561,6 +568,80 @@ check_grafanarole() {
 }
 
 # =============================================================================
+# Check: the AI workbench's gate is the policy's (IAM 3.2) — read-only
+# target: NAMESPACE. Reads the values helm deployed (Secret hub, values.yaml) on
+# stdin — they hold the client secret, so only the verdict fields are printed —
+# and compares them with policy_workbench (infra/lib-oauth2-proxy.sh).
+# =============================================================================
+check_iamworkbench() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" live problems=()
+    if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then
+        _record SKIP "$name" "WORKBENCH_ENABLED is not true"; return
+    fi
+    live="$(timeout "$TIMEOUT" $KUBECTL get secret hub -n "$ns" -o jsonpath='{.data.values\.yaml}' 2>/dev/null \
+        | base64 -d 2>/dev/null | python3 -c '
+import json, sys, yaml
+try:
+    v = yaml.safe_load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(v, dict):
+    sys.exit(1)
+c = (v.get("hub") or {}).get("config") or {}
+a, g = c.get("Authenticator") or {}, c.get("GenericOAuthenticator") or {}
+np = ((v.get("singleuser") or {}).get("networkPolicy") or {})
+eg = np.get("egressAllowRules") or {}
+out = {"allow_all": a.get("allow_all"), "admin_users": sorted(a.get("admin_users") or []),
+       "existing": a.get("allow_existing_users"), "auth_state": a.get("enable_auth_state"),
+       "allowed": sorted(g.get("allowed_groups") or []), "admins": sorted(g.get("admin_groups") or []),
+       "key": g.get("auth_state_groups_key"), "admin_access": (c.get("JupyterHub") or {}).get("admin_access"),
+       "delete_pvc": (c.get("KubeSpawner") or {}).get("delete_pvc"),
+       "netpol": np.get("enabled"), "private": eg.get("privateIPs"), "metadata": eg.get("cloudMetadataServer")}
+for k, x in out.items():
+    print(f"{k}\t{json.dumps(x)}")')" || { _record SKIP "$name" "no hub Secret in $ns (workbench not deployed)"; return; }
+    declare -A L=()
+    local k x
+    while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
+    [[ "${L[admin_access]}" == false ]] || problems+=("admin_access is ${L[admin_access]}: a hub admin can open others' servers")
+    [[ "${L[delete_pvc]}" == false ]] || problems+=("delete_pvc is ${L[delete_pvc]}: removing a hub user deletes the home")
+    [[ "${L[auth_state]}" != true ]] || problems+=("enable_auth_state is true: a hub admin can read people's Keycloak tokens")
+    [[ "${L[existing]}" != true ]] || problems+=("allow_existing_users is true: every user in the hub database gets in")
+    [[ "${L[netpol]}" == true && "${L[private]}" == false && "${L[metadata]}" == false ]] \
+        || problems+=("the notebooks' NetworkPolicy is off or allows private addresses")
+    local tmpl pod
+    tmpl="$($KUBECTL get deployment hub -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
+    pod="$($KUBECTL get pods -n "$ns" -l component=hub --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.metadata.annotations.checksum/secret}{"\n"}{end}' 2>/dev/null | sort -u)"
+    [[ -n "$tmpl" && "$pod" == "$tmpl" ]] || problems+=("the running hub pod does not carry the deployed values (rollout pending?)")
+    if [[ "${IAM_GATES:-true}" == "false" ]]; then
+        if [[ ${#problems[@]} -eq 0 ]]; then
+            _record WARN "$name" "IAM_GATES=false: the workbench admits any realm account (pre-3.2 sign-in)"
+        else
+            local IFS=';'; _record FAIL "$name" "${problems[*]}"
+        fi
+        return
+    fi
+    local WORKBENCH_ALLOWED_GROUPS="" WORKBENCH_ADMIN_GROUPS="" WORKBENCH_ALLOW_ALL="" WORKBENCH_ADMIN_USERS="" WORKBENCH_403_MESSAGE=""
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh" || ! REPO_ROOT="$SCRIPT_DIR" policy_workbench 2>/dev/null; then
+        _record FAIL "$name" "cannot compile the workbench's gate (python3 apps/iam/compiler/cli.py check)"
+        return
+    fi
+    local want_allowed want_admins
+    want_allowed="$(python3 -c 'import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))' "$WORKBENCH_ALLOWED_GROUPS")"
+    want_admins="$(python3 -c 'import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))' "$WORKBENCH_ADMIN_GROUPS")"
+    [[ "${L[allow_all]}" == false ]] || problems+=("allow_all is ${L[allow_all]}")
+    [[ "${L[admin_users]}" == "[]" ]] || problems+=("admin_users is set: OAuthenticator admits them whatever the policy says")
+    [[ "${L[allowed]}" == "$want_allowed" ]] || problems+=("allowed_groups ${L[allowed]} is not the compiled $want_allowed (./infra/deploy-workbench.sh)")
+    [[ "${L[admins]}" == "$want_admins" ]] || problems+=("admin_groups ${L[admins]} is not the compiled $want_admins")
+    [[ "${L[key]}" == '"oauth_user.groups"' ]] || problems+=("auth_state_groups_key is ${L[key]}")
+    if [[ ${#problems[@]} -eq 0 ]]; then
+        _record OK "$name" "admits $want_allowed from the access policy; hub admins $want_admins without admin_access"
+    else
+        local IFS=';'; _record FAIL "$name" "${problems[*]}"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -725,6 +806,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         postgrest)  check_postgrest "$name" "$target" ;;
         iamenforce)   check_iamenforce "$name" "$target" ;;
         grafanarole)  check_grafanarole "$name" "$target" ;;
+        iamworkbench) check_iamworkbench "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

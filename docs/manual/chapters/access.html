@@ -87,7 +87,7 @@
 <tr><td>Node-RED</td><td><code>node-red.</code></td><td><span class="role">engineer</span></td><td>Checked</td></tr>
 <tr><td>pgAdmin</td><td><code>pgadmin.</code></td><td><span class="role">admin</span></td><td>Checked by pgAdmin's own sign-in setting</td></tr>
 <tr><td>Grafana</td><td><code>grafana.</code></td><td><span class="role">auditor</span>, <span class="role">engineer</span>, <span class="role">maintenance</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">qc</span>, <span class="role">qp</span></td><td>Checked by Grafana's own sign-in setting: <span class="role">engineer</span> is Editor, the others Viewer; any other role cannot sign in</td></tr>
-<tr><td>AI Workbench</td><td><code>ai-workbench.</code></td><td>Policy: <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span></td><td>Not yet checked (planned for IAM Phase 3.2). Today any active account can sign in.</td></tr>
+<tr><td>AI Workbench</td><td><code>ai-workbench.</code></td><td><span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span></td><td>Checked by JupyterHub's own sign-in setting; <span class="role">admin</span> is hub administrator, but cannot open anyone's workspace</td></tr>
 <tr><td>Device onboarding</td><td><code>onboard-device.</code></td><td>Policy: <span class="role">engineer</span>, <span class="role">maintenance</span></td><td>Not yet checked (planned for IAM Phase 3.4, through the <code>EDGE_WIZARD_ROLE</code> setting)</td></tr>
 <tr><td>Access Policy</td><td>not deployed</td><td>Policy: <span class="role">admin</span>, <span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span></td><td>Not deployed yet (IAM Phase 4)</td></tr>
 </tbody>
@@ -146,11 +146,12 @@
 <tr><td>Deactivation</td><td>Applied at once. Every sign-in session is ended, MQTT Explorer credentials are revoked, and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
 </tbody>
 </table></div>
-<p>You do not need to sign out for a role change to reach you. The sign-in gate in front of each app checks your session with Keycloak every 4 minutes, and the proof of sign-in passed to the services is valid for 5 minutes. So, for the apps behind such a gate (all except Grafana, the AI Workbench and pgAdmin, which keep their own sessions):</p>
+<p>You do not need to sign out for a role change to reach you. The sign-in gate in front of each app checks your session with Keycloak every 4 minutes, and the proof of sign-in passed to the services is valid for 5 minutes. So, for the apps behind such a gate (all except Grafana, the AI Workbench and pgAdmin, which keep their own sessions; the AI Workbench is described below the list):</p>
 <ul>
 <li>after a role change, the apps you can open and the actions you may take follow the new role within about 4 minutes;</li>
 <li>after a deactivation, your sessions end at once, and a page you still have open stops working within about 4 minutes, at the next check.</li>
 </ul>
+<p>The AI Workbench checks your role each time you sign in to it, and a workbench session lasts at most an hour before the sign-in runs again (without a password while your platform session is open). So a role that no longer includes the workbench, or a deactivation, reaches it within an hour; a notebook tab left open stops working by then too. Your files are kept, and come back if access is restored.</p>
 <div class="record"><p>Every role change, activation and deactivation is kept as an account decision, with the reason, who made it, who confirmed it when confirmation is needed, and the times. Each one that takes effect is also added to the account's status history, with the old and new role for a role change. These histories can only be added to, never edited.</p></div>
 
 <h3 id="access-noaccess">Why can't I open an app</h3>
@@ -162,6 +163,7 @@
 </ul>
 <p>It offers <strong>Back to the portal</strong> and <strong>Sign out</strong>.</p>
 <p>Grafana checks your role in its own sign-in, so it shows no such page: you land on Grafana's sign-in page with a message that the login was denied.</p>
+<p>The AI Workbench also checks your role in its own sign-in. Its refusal is the workbench's own error page (403) with the text "No access to AI Workbench", the roles that may open it and the address of the portal. It has no sign-out button; sign out from the portal.</p>
 <p>The service portal has its own page, <strong>No access yet</strong>. It means your account has no platform role at all, which usually means your access request has not been confirmed yet.</p>
 <p>A sign-in failure also shows an error page, but with its own message (starting "Login Failed") and a <strong>Try again</strong> button. That is a problem with the sign-in itself, not with your role.</p>
 <div class="note"><p>Being able to open an app does not mean every button works for you. If an action inside an app is refused, the service checked your role for that action. Ask an administrator which role the action needs, or see the role descriptions in <a href="#access-roles">The eleven roles</a>.</p></div>

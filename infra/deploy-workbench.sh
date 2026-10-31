@@ -21,6 +21,12 @@
 #   - one Helm release (Zero-to-JupyterHub)
 #   - per-user notebook pods, spawned on demand and culled when idle
 #   - Keycloak directly via GenericOAuthenticator — no Dex in the middle
+#   - its gate compiled from the access policy (IAM 3.2, policy_workbench in
+#     infra/lib-oauth2-proxy.sh): allowed_groups and admin_groups from the
+#     research_workbench group's `tool:` block, admin_access false (a hub admin
+#     never opens another person's server), delete_pvc false (removing a hub user
+#     keeps the home). A policy that does not compile stops the deploy before helm;
+#     IAM_GATES=false renders the pre-policy sign-in (any realm account).
 #   - the existing nginx ingress, on the same hostname Kubeflow used
 #   - VS Code and real-time collaboration inside the user's own pod
 #
@@ -44,6 +50,7 @@ source config.env
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib-wait.sh"
 source "$SCRIPT_DIR/lib-render.sh"
+source "$SCRIPT_DIR/lib-oauth2-proxy.sh"   # policy_workbench
 
 # When deploy-infra.sh calls this, $MK8S is already set; standalone it is not.
 if [[ -z "${MK8S:-}" ]]; then
@@ -60,6 +67,7 @@ die() { echo -e "\033[0;31m[workbench] ERROR:\033[0m $*" >&2; exit 1; }
 : "${NAMESPACE:?}" ; : "${KEYCLOAK_DOMAIN:?}" ; : "${DOMAIN:?}"
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-medcea}"
 WORKBENCH_DOMAIN="${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}"
+PORTAL_DOMAIN="${PORTAL_DOMAIN:-portal.$DOMAIN}"   # named on the 403 page
 WORKBENCH_IMAGE="${WORKBENCH_IMAGE:-quay.io/jupyter/scipy-notebook:latest}"
 # Split here: the values template (k8s/workbench/values.yaml) is filled by
 # envsubst, which cannot do ${VAR%:*} itself.
@@ -80,6 +88,14 @@ if $KUBECTL get ingress kubeflow-domain -n kubeflow >/dev/null 2>&1; then
     $KUBECTL delete ingress kubeflow-domain -n kubeflow --ignore-not-found
 fi
 
+# Fail closed: a policy that does not compile leaves the running hub as it is.
+policy_workbench || die "the access policy does not compile to the workbench's gate (python3 apps/iam/compiler/cli.py check)"
+if [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then
+    log "Gate: any realm account (IAM_GATES=false); hub admin: $ADMIN_USER"
+else
+    log "Gate: $WORKBENCH_ALLOWED_GROUPS; hub admins: $WORKBENCH_ADMIN_GROUPS (from the access policy)"
+fi
+
 log "Deploying JupyterHub $CHART_VERSION to https://$WORKBENCH_DOMAIN"
 
 $HELM repo add jupyterhub https://hub.jupyter.org/helm-chart/ >/dev/null 2>&1 || true
@@ -88,7 +104,9 @@ $HELM repo update jupyterhub >/dev/null 2>&1 || true
 VALUES=$(mktemp /tmp/workbench-values-XXXXXX.yaml)
 trap 'rm -f "$VALUES"' EXIT
 
-render "$REPO_ROOT/k8s/workbench/values.yaml" ADMIN_USER WORKBENCH_SECRET WORKBENCH_DOMAIN KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE WORKBENCH_IMAGE_NAME WORKBENCH_IMAGE_TAG WORKBENCH_STORAGE > "$VALUES"
+render "$REPO_ROOT/k8s/workbench/values.yaml" WORKBENCH_SECRET WORKBENCH_DOMAIN KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
+    WORKBENCH_IMAGE_NAME WORKBENCH_IMAGE_TAG WORKBENCH_STORAGE \
+    WORKBENCH_ALLOW_ALL WORKBENCH_ADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE > "$VALUES"
 
 $HELM upgrade --install workbench jupyterhub/jupyterhub \
   --version "$CHART_VERSION" \
@@ -108,6 +126,6 @@ wait_for_http "https://$WORKBENCH_DOMAIN/hub/login" 180 "JupyterHub" || {
     exit 1
 }
 log "AI Workbench is live: https://$WORKBENCH_DOMAIN"
-log "Sign in with a Keycloak account in realm '$KEYCLOAK_REALM'."
+log "Sign in with a Keycloak account in realm '$KEYCLOAK_REALM' holding a role the policy admits."
 log "The first launch pulls the notebook image and installs VS Code into the"
 log "user's home volume, so it is slow once and fast afterwards."

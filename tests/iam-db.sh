@@ -1467,7 +1467,7 @@ SELECT 'CHECK|role_changed by A as a person', count(*) = 1 FROM iam.user_status_
  WHERE decision_id = :d2 AND action = 'role_changed' AND actor_sub = '$A' AND actor_person = '$PA'
    AND from_role = 'production_manager' AND to_role = 'operator';
 SQL
-    # an enabled account reaches the AI workbench (not gated by role until IAM 3.2) with no platform role
+    # an activation waits for qa even with no platform role (under IAM_GATES=false the AI workbench admits any enabled account)
     probe D2 "activate an account with no platform role: pending_qa, no pairs" ok <<SQL
 $(um_admin)
 $(rec d2 activate '' '')

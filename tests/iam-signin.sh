@@ -15,7 +15,9 @@
 # never loaded fails) (medcea_iam.check(), IAM plan 1.2). One more account,
 # test-none-<random>, holds no platform role and must be refused everywhere, Grafana
 # included (IAM 3.1: an enabled account without a role no longer reaches it); Grafana's
-# role and Explore are checked against the policy (iam_signin_flow.py).
+# role and Explore are checked against the policy (iam_signin_flow.py). The AI workbench
+# (IAM 3.2) is signed in at /hub/login?next=/hub/home, so no server is spawned; the
+# throwaway admin then removes the hub users the sign-ins created (not itself).
 #
 # Takes the deploy lock (it creates accounts). Calls the Keycloak admin API as the deploy
 # scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a Keycloak login event in the
@@ -25,7 +27,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
