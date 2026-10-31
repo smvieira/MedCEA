@@ -101,7 +101,9 @@ if [[ "$IAM_DB_ROLES" == "true" ]]; then
     for _cu in "${_live[@]}"; do
         read -r _c _u <<<"$_cu"
         _seen+="$_c "
-        [[ "$_u" == "$(db_client_role "$_c")" ]] \
+        # "-": deployed with no connection (Node-RED before its flows); its own
+        # deploy runs this one first, then loads flows with its role
+        [[ "$_u" == "-" || "$_u" == "$(db_client_role "$_c")" ]] \
             || refuse+=("$_c logs in as ${_u/#\?/an unreadable user}, not $(db_client_role "$_c") (2.5: IAM_DB_SERVICE_ROLES=true, then deploy it again)")
     done
     for _c in scheduler node-red; do   # the two that write regulated data must exist

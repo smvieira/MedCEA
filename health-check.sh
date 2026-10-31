@@ -345,6 +345,7 @@ check_dbclients() {
         read -r c u <<<"$cu"
         want="$(db_client_role "$c")"
         if [[ "$u" == "?" ]]; then unreadable+=("$c")
+        elif [[ "$u" == "-" ]]; then :   # no connection (Node-RED without flows: noderedflows reports it)
         elif [[ "$u" == "$want" ]]; then on_role+=("$c")
         else off+=("$c")
         fi

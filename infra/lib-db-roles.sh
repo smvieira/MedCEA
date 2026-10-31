@@ -6,6 +6,7 @@
 #   db_role_can_login NS ROLE  0 = ROLE exists and may log in, 1 = not, 2 = cannot tell
 #   db_client NS ROLE          sets DBC_USER, DBC_PASS, DBC_SECRET, DBC_SECRET_KEY
 #   db_clients_live NS         "<client> <user>" for every client that is deployed
+#                              ("?" unreadable, "-" deployed but no connection: Node-RED without flows)
 #   db_client_role CLIENT      the role a client of db_clients_live moves to
 #
 # The clients and their roles:
@@ -115,9 +116,9 @@ db_clients_live() {
     if $KUBECTL get deployment node-red -n "$ns" >/dev/null 2>&1; then
         # A Node-RED with no flows deployed yet (a fresh persistent /data after
         # ./deploy-infra.sh, before ./apps/node-red/deploy.sh) opens no database
-        # connection: not a live client. "?" stays for a pod that cannot be asked.
+        # connection: "node-red -". "?" stays for a pod that cannot be asked.
         f="$($KUBECTL exec -n "$ns" deployment/node-red -- sh -c 'test -f /data/flows.json && echo yes || echo no' 2>/dev/null)" || f=""
-        if [[ "$f" == no ]]; then :; else
+        if [[ "$f" == no ]]; then echo "node-red -"; else
         u="$($KUBECTL exec -n "$ns" deployment/node-red -- cat /data/flows.json 2>/dev/null \
             | python3 -c 'import json,sys
 try:

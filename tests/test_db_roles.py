@@ -133,14 +133,14 @@ class ClientsLive(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.splitlines(), ["dbmgmt ?", "node-red ?", "pgadmin ?"])
 
-    def test_node_red_without_flows_is_not_a_client(self):
+    def test_node_red_without_flows_has_no_connection(self):
         # ./deploy-infra.sh gives Node-RED a fresh persistent /data (IAM 3.3); until
         # ./apps/node-red/deploy.sh loads the flows it opens no database connection,
         # and the database deploy (which node-red's deploy runs first) must not refuse.
         rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_FLOWS="", FAKE_NOFLOWS="1",
                          FAKE_DEPLOY_scheduler="svc_scheduler")
         self.assertEqual(rc, 0)
-        self.assertEqual(out.splitlines(), ["scheduler svc_scheduler"])
+        self.assertEqual(out.splitlines(), ["scheduler svc_scheduler", "node-red -"])
 
     def test_kubectl_down_prints_nothing(self):
         rc, out, _ = lib("db_clients_live medcea-x; echo end", strict=True, FAKE_FAIL="1")
@@ -203,6 +203,11 @@ class Wiring(unittest.TestCase):
         guard = db[db.index('if [[ "$IAM_DB_ROLES" == "true" ]]; then'):db.index("# ── Passwords")]
         self.assertIn('"${IAM_DB_SERVICE_ROLES:-false}" == "true" ]] || refuse+=', guard)
         self.assertIn("db_clients_live", guard)
+        # a Node-RED without flows ("node-red -") is present but has no connection: the
+        # guard must accept it, or node-red's own deploy (which runs this one first)
+        # can never load its flows (deadlock seen on 2026-10-31)
+        self.assertIn('[[ "$_u" == "-" || "$_u" == "$(db_client_role "$_c")" ]]', guard)
+        self.assertIn("for _c in scheduler node-red; do", guard)
         # never `while read … < <(db_clients_live …)`: kubectl exec -i in the body eats the list
         self.assertNotRegex(db, r"done < <\(db_clients_live")
         logins = db[db.index("# ── Service logins"):db.index("# ── Apply")]
