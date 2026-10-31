@@ -25,6 +25,8 @@ medcea_iam.check(). The calls go to "probes_out" with whether the route table le
 role call the route; `iam_signin_flow.py --compare PROBES LOGS` then checks the services'
 logs: a "would refuse" (or, enforcing, "refused") line naming the account for exactly the
 calls the table refuses, and none saying the token could not be verified (IAM plan 1.2).
+The status must agree too (IAM 2.6): a "refused" call answered 401/403, and an allowed
+one never 401 or 503 (a 403 may be the database's own refusal under IAM_DB_ROLES).
 
 With IAM_POSTGREST_JWT=true (Phase 2b) every account the Config UI admits also reads
 /api/cea_unit?limit=1 through it, so its access token reaches PostgREST as Bearer: 200 is
@@ -64,6 +66,7 @@ PROBES = {
     "SCHEDULER_DOMAIN": [("/api/runs", "scheduler", "/api/runs")],
     "MONITOR_DOMAIN": [("/api/runs", "monitor", "/api/runs"),
                        (f"/api/{SENTINEL}", "monitor", f"/api/{SENTINEL}")],
+    # IAM 2.6: dbmgmt enforces always (enforce=True), so its log says "refused" too
     "DBMGMT_DOMAIN": [("/api/objects", "dbmgmt", "/objects"),
                       (f"/api/{SENTINEL}", "dbmgmt", f"/{SENTINEL}")],
     # IAM 2.7: every admitted role (admin, qa, qp, auditor) opens the page; the Decisions
@@ -151,7 +154,8 @@ def _library():
 
 def compare(probes_file, logs_file):
     """Each probe the table refuses has a "would refuse" line in its service's log, and no
-    probe it allows has one. Exit 1 otherwise."""
+    probe it allows has one; a "refused" probe answered 401/403, an allowed one neither
+    401 nor 503. Exit 1 otherwise."""
     with open(probes_file) as f:
         probes = json.load(f)
     with open(logs_file) as f:
@@ -169,6 +173,10 @@ def compare(probes_file, logs_file):
             bad.append(f"{pr['role']:18} {pr['host']}{pr['path']}: the table allows it, but{hit[0].split(':', 2)[-1]}")
         elif not pr["allowed"] and not hit:
             bad.append(f"{pr['role']:18} {pr['host']}{pr['path']}: the table refuses it, but nothing was logged")
+        elif hit and "medcea_iam: refused" in hit[0] and pr.get("status") not in (401, 403):
+            bad.append(f"{pr['role']:18} {pr['host']}{pr['path']}: refused in the log but answered {pr.get('status')}")
+        elif pr["allowed"] and pr.get("status") in (401, 503):
+            bad.append(f"{pr['role']:18} {pr['host']}{pr['path']}: the table allows it, but it answered {pr['status']}")
     n_ref = sum(not p["allowed"] for p in probes)
     print(f"{len(probes)} API calls through the proxies ({len(probes) - n_ref} allowed by the route table, "
           f"{n_ref} refused); the services' checks agree on {len(probes) - len(bad)}")

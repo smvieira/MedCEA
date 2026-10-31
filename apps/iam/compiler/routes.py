@@ -8,6 +8,8 @@ as routes.json and medcea_iam.check() reads (plan Section 3.2). Per service:
             the levels any of which opens it ([R, K]). `roles` maps every role that may
             call the route to null (unconstrained) or the constraints that must hold,
             composites and implies expanded, so check() needs no matrix logic of its own.
+            A route written {levels, unconstrained_only: true} keeps only the null ones
+            (its service cannot evaluate the constraints; possibly no role at all)
   public    routes that need no platform role (`public_routes`); "*" applies to every
             service
   roles     the platform roles: check() keeps only these from a token's groups claim
@@ -20,6 +22,10 @@ as routes.json and medcea_iam.check() reads (plan Section 3.2). Per service:
             decides with medcea_auth.role_widening(), compiled from the same rule (grants.py)
             and stamped with this document's digest; the User Manager shows "waits for qa"
   waivers   [{id, invariant, subject, target, levels, review}] for the access review snapshot
+  exports   {tool, groups: {group: [schema.object]}, roles: {role: [groups held with X freely]}}:
+            what Database Management may export for a person (2.6); the objects are the
+            non-service_only data members of the tool's mirrors, and a constrained X counts
+            for nothing (dbmgmt cannot evaluate a constraint, so it fails closed)
 A route missing from the table is refused. The body is canonical JSON, and `digest` is
 its SHA-256, so two compiles of one policy are byte-identical.
 """
@@ -37,6 +43,8 @@ class RouteError(ValueError):
 
 
 def _levels(lv):
+    if isinstance(lv, dict):
+        lv = lv["levels"]
     return lv if isinstance(lv, list) else [lv]
 
 
@@ -92,6 +100,25 @@ def widening_table(p):
     return out
 
 
+EXPORT_TOOL = "db_export"
+
+
+def export_table(p):
+    """{tool, groups, roles} for medcea_iam.exportable(): per mirrored group of EXPORT_TOOL
+    its person-exportable data members (an `object`, no service_only), and per platform role
+    (always present, possibly []) the mirrored groups where it holds X unconstrained."""
+    gd = p.groups.get(EXPORT_TOOL)
+    if not gd or not gd.get("mirrors"):
+        raise RouteError(f"group {EXPORT_TOOL} is missing or mirrors nothing: dbmgmt could export nothing")
+    mirrors = sorted(gd["mirrors"])
+    groups = {g: sorted(m["object"] for m in p.groups[g]["members"]
+                        if m["type"] == "data" and "object" in m and not m.get("service_only"))
+              for g in mirrors}
+    who = {g: _who(p, g, ["X"]) for g in mirrors}
+    roles = {r: [g for g in mirrors if r in who[g] and who[g][r] is None] for r in sorted(p.roles)}
+    return {"tool": EXPORT_TOOL, "groups": groups, "roles": roles}
+
+
 def compile(p, source="defaults.yaml"):
     """The route table document for a loaded Policy. Raises RouteError on a malformed
     route or a route that is both public and in a group."""
@@ -107,7 +134,10 @@ def compile(p, source="defaults.yaml"):
                 if route in table:
                     raise RouteError(f"route {m['service']} {route} is in {table[route]['group']} and {g}")
                 levels = _levels(lv)
-                table[route] = {"group": g, "levels": levels, "roles": _who(p, g, levels)}
+                who = _who(p, g, levels)
+                if isinstance(lv, dict) and lv.get("unconstrained_only"):
+                    who = {r: c for r, c in who.items() if c is None}
+                table[route] = {"group": g, "levels": levels, "roles": who}
 
     public = {}
     for pr in p.data.get("public_routes", []):
@@ -130,6 +160,7 @@ def compile(p, source="defaults.yaml"):
         "widening": widening_table(p),
         "waivers": [{"id": w["id"], "invariant": w["invariant"], "subject": w["subject"], "target": w["target"],
                      "levels": list(w["levels"]), "review": w.get("review_by")} for w in p.waivers],
+        "exports": export_table(p),
     }
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
     body["digest"] = hashlib.sha256(canon.encode()).hexdigest()

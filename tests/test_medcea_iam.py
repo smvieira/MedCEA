@@ -39,6 +39,20 @@ def _load_lib(tmp):
     return mod
 
 
+def _handler(method, path, headers=None):
+    """A stand-in BaseHTTPRequestHandler for http_check(): records the statuses sent."""
+    import io
+
+    class H:
+        pass
+    h = H()
+    h.command, h.path, h.headers, h.wfile, h.sent = method, path, headers or {}, io.BytesIO(), []
+    h.send_response = lambda code: h.sent.append(code)
+    h.send_header = lambda k, v: None
+    h.end_headers = lambda: None
+    return h
+
+
 @unittest.skipUnless(HAVE_JWT, "PyJWT/cryptography not installed on this host")
 class CheckTest(unittest.TestCase):
     @classmethod
@@ -82,6 +96,23 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(d.constraints, ["own_unit"])
         self.assertTrue(self.check("monitor", "GET", "/api/runs", self.token(["qa"], azp="monitor")).allow)
         self.assertFalse(self.check("monitor", "GET", "/api/runs", self.token(["admin"], azp="monitor")).allow)
+
+    def test_own_unit_sub(self):
+        # IAM 2.6: the uuid whose units bound an own_unit read, or None when not limited
+        sub = self.iam.own_unit_sub
+        uid = "11111111-1111-4111-8111-111111111111"
+        tok = self.token(["operator"], azp="monitor", sub=uid)
+        self.assertEqual(sub(self.check("monitor", "GET", "/api/measurements/UNIT01", tok)), uid)
+        self.assertEqual(sub(self.check("monitor", "GET", "/api/runs", self.token(["operator"], azp="monitor"))),
+                         self.iam.NIL_SUB)                              # sub 'u-1' is no account uuid
+        pm = self.token(["production_manager", "operator"], azp="monitor", sub=uid)
+        self.assertIsNone(sub(self.check("monitor", "GET", "/api/runs", pm)))        # an unconstrained grant wins
+        self.assertIsNone(sub(self.check("monitor", "GET", "/api/runs", self.token(["qa"], azp="monitor"))))
+        self.assertIsNone(sub(self.check("monitor", "GET", "/api/runs", self.token(["admin"], azp="monitor"))))  # refused
+        op = self.token(["operator"], sub=uid)
+        self.assertIsNone(sub(self.check("scheduler", "POST", "/api/runs/1/execute", op)))   # assigned_run only
+        self.assertEqual(sub(self.check("scheduler", "GET", "/api/runs/7/log", op)), uid)
+        self.assertIsNone(sub(None))
 
     def test_literal_route_wins_and_unknown_routes_refused(self):
         d = self.check("scheduler", "GET", "/api/runs/active", self.token(["operator"]))
@@ -150,10 +181,57 @@ class CheckTest(unittest.TestCase):
             self.assertIs(lib.enforcing(), want)
         os.environ.pop("IAM_ENFORCE")
         self.assertFalse(self.iam.enforcing())       # settings.json says false: it wins
+        # IAM 2.6: a service that cannot verify any token answers 503, not 401 (its fault,
+        # not the person's): no keys, or no issuer
+        for name, settings in (("jwks.json", {"issuer": ISSUER}), ("settings.json", {"audience": "medcea-api"})):
+            tmp = tempfile.mkdtemp()
+            for f in ("routes.json", "jwks.json"):
+                if f != name:
+                    with open(os.path.join(self.tmp, f)) as src, open(os.path.join(tmp, f), "w") as dst:
+                        dst.write(src.read())
+            with open(os.path.join(tmp, "settings.json"), "w") as f:
+                json.dump(settings, f)
+            d = _load_lib(tmp).check("scheduler", "GET", "/api/runs", {"X-Forwarded-Access-Token": self.token(["qa"])})
+            self.assertEqual(d.status, 503, d)
+            self.assertIn("keys" if name == "jwks.json" else "issuer", d.reason)
+        self.assertEqual(self.check("scheduler", "GET", "/api/runs", self.token(["qa"], kid="k9")).status, 401)
+        _load_lib(self.tmp)
+
+    def test_settings_enforce_true(self):
+        # IAM 2.6: settings.json's enforce beats the pod's copy; a refusal is sent, with one
+        # 'refused' line; a constraint is reported, not evaluated, under true too
+        import contextlib
+        import io
+        tmp = tempfile.mkdtemp()
+        for f in ("routes.json", "jwks.json"):
+            with open(os.path.join(self.tmp, f)) as src, open(os.path.join(tmp, f), "w") as dst:
+                dst.write(src.read())
+        with open(os.path.join(tmp, "settings.json"), "w") as f:
+            json.dump({"issuer": ISSUER, "audience": "medcea-api", "enforce": True}, f)
+        try:
+            lib = _load_lib(tmp)
+            os.environ["IAM_ENFORCE"] = "false"
+            self.assertIs(lib.enforcing(), True)
+            h, err = _handler("GET", "/_account/api/me"), io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIs(lib.http_check(h, "access-profile"), False)
+            self.assertEqual(h.sent, [401])
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("medcea_iam: refused", lines[0])
+            op = {"X-Forwarded-Access-Token": self.token(["operator"], azp="monitor")}
+            d = lib.check("monitor", "GET", "/api/runs", op)
+            self.assertTrue(d.allow, d)
+            self.assertEqual(d.constraints, ["own_unit"])
+            d = lib.check("monitor", "GET", "/api/nonesuch", op)
+            self.assertEqual((d.allow, d.status), (False, 403))
+        finally:
+            os.environ.pop("IAM_ENFORCE", None)
+            _load_lib(self.tmp)
 
 
 class TableQueriesTest(unittest.TestCase):
-    """widening(), roles_including(), allows() and http_check(enforce=) (IAM 2.7): read the
+    """widening(), roles_including(), allows(), exportable() (2.6) and http_check(enforce=) (IAM 2.7): read the
     route table only, so no PyJWT is needed."""
 
     @classmethod
@@ -190,6 +268,30 @@ class TableQueriesTest(unittest.TestCase):
         self.assertEqual(self.iam.roles_including("admin"), [])
         self.assertEqual(self.iam.roles_including("nonesuch"), [])
 
+    def test_exportable(self):
+        # IAM 2.6: what Database Management may export, scoped by actor_role() (the role
+        # log_export records)
+        from types import SimpleNamespace as D
+        ex = self.iam.exportable
+        qp = ex(D(who={"roles": ["qp"]}))
+        self.assertEqual(sorted(qp), ["audit_histories", "measurements", "runs"])
+        self.assertIn("medcea.measurement", qp["measurements"])
+        every = sorted(self.policy.groups["db_export"]["mirrors"])
+        self.assertEqual(sorted(ex(D(who={"roles": ["qa"]}))), every)
+        self.assertEqual(sorted(ex(D(who={"roles": ["qa", "auditor"]}))), every)   # the composite collapses to qa
+        self.assertEqual(ex(D(who={"roles": ["operator"]})), {})
+        self.assertEqual(ex(D(who={"roles": ["qa", "qp"]})), {})                    # two own roles: no scope
+        self.assertEqual(ex(D(who=None)), {})
+        self.assertEqual(ex(None), {})
+        # a table compiled before 2.6 has no exports: None, so dbmgmt fails closed
+        tmp = tempfile.mkdtemp()
+        doc = routes.compile(self.policy)
+        doc.pop("exports")
+        with open(os.path.join(tmp, "routes.json"), "w") as f:
+            json.dump(doc, f)
+        self.assertIsNone(_load_lib(tmp).exportable(D(who={"roles": ["qp"]})))
+        _load_lib(self.tmp)
+
     def test_allows(self):
         a = self.iam.allows
         for role in ("admin", "qa", "qp", "auditor"):
@@ -210,16 +312,7 @@ class TableQueriesTest(unittest.TestCase):
         _load_lib(self.tmp)
 
     def _handler(self, method, path):
-        import io
-
-        class H:
-            pass
-        h = H()
-        h.command, h.path, h.headers, h.wfile, h.sent = method, path, {}, io.BytesIO(), []
-        h.send_response = lambda code: h.sent.append(code)
-        h.send_header = lambda k, v: None
-        h.end_headers = lambda: None
-        return h
+        return _handler(method, path)
 
     def test_http_check_enforce(self):
         import contextlib

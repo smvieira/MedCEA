@@ -25,8 +25,12 @@ import urllib.parse
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp(prefix='test-access-api-')
 ORIGIN = 'https://access.test'
+sys.path.insert(0, os.path.join(REPO, 'apps', 'iam'))
+from compiler import model as POLICY_MODEL                          # noqa: E402
 
 # ── fixture route table (what deploy-infra writes to ConfigMap medcea-iam-lib) ──
+# Deliberately not the policy's role list (superqa is a made-up composite, maintenance,
+# qc and the scientists are left out); RoleCatalogue checks the offered list against it.
 ROLES = ['admin', 'auditor', 'engineer', 'operator', 'production_manager', 'qa', 'qp', 'superqa']
 INCLUDES = {'admin': [], 'auditor': [], 'engineer': [], 'operator': [], 'production_manager': ['operator'],
             'qa': ['auditor'], 'qp': [], 'superqa': ['auditor', 'qa']}
@@ -655,6 +659,92 @@ class Roles(Base):
         self.assertEqual(status, 409)
         self.assertIn('one role first', body['error'])
         self.assertFalse(any('record_decision' in s for s in self.w.sql()))
+
+
+# ── IAM 2.6: every policy role is offered ─────────────────────────────────────
+class RoleCatalogue(Base):
+    FORM = {'username': 'newbie', 'email': 'n@x.org', 'first_name': 'N', 'last_name': 'B',
+            'justification': 'j' * 30, 'password': 'p' * 12}
+
+    def test_roles_match_policy(self):
+        p = POLICY_MODEL.load()
+        self.assertEqual(list(API.ROLES), list(p.roles))
+        for r, v in API.ROLES.items():
+            for k in ('label', 'description', 'availability'):
+                self.assertEqual(v[k], p.roles[r][k], '%s.%s differs from defaults.yaml' % (r, k))
+            self.assertIn(v['availability'], ('prototype', 'later'))
+
+    def test_db_check_accepts_every_role(self):
+        with open(os.path.join(REPO, 'apps', 'access', 'access_db.sql')) as fh:
+            sql = fh.read()
+        for c in ('access_request_requested_role_check', 'access_request_granted_role_check'):
+            m = re.search(r'ADD CONSTRAINT %s\s+CHECK \(\w+ IN \(([^)]*)\)' % c, sql)
+            self.assertIsNotNone(m, c)
+            self.assertEqual(set(re.findall(r"'(\w+)'", m.group(1))), set(API.ROLES), c)
+
+    def test_register_roles_public(self):
+        self.decision = LIB.Decision(True, 200, 'public route')
+        status, body = self.call('GET', '/api/register/roles', cls=API.Public)
+        self.assertEqual(status, 200)
+        self.assertEqual([x['id'] for x in body], list(API.ROLES))
+        for x in body:
+            self.assertEqual(set(x), {'id', 'label', 'description', 'availability'})
+            self.assertEqual(x['availability'], 'later' if x['id'] in ('qc', 'qp') else 'prototype')
+
+    def test_me_roles(self):
+        self.as_(ADMIN)
+        status, body = self.call('GET', '/api/me')
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['roles'], API.role_list())
+        self.assertLessEqual({'maintenance', 'bio_scientist', 'control_scientist', 'qc'}, {x['id'] for x in body['roles']})
+
+    def test_validate_every_role(self):
+        for r in API.ROLES:
+            clean, err = API.validate(dict(self.FORM, requested_role=r))
+            self.assertIsNone(err, r)
+            self.assertEqual(clean['requested_role'], r)
+        for r in ('superqa', ''):
+            self.assertEqual(API.validate(dict(self.FORM, requested_role=r)), (None, 'Choose a role.'))
+
+    def test_approve_new_role(self):
+        self.staff()
+        self.w.user(S, 'newbie', enabled=False)
+        self.w.on('FOR UPDATE', [self.request_row()])
+        self.w.on('iam.record_decision', [(7, 'pending_qa', WIDENING['-']['production_manager'], [])])
+        self.w.on('UPDATE iam.access_request', [self.request_row('approved', granted='production_manager')])
+        status, body = self.call('POST', '/api/requests/5/decision', {'decision': 'approve', 'role': 'production_manager', 'email_subject': 'Hi', 'email_body': 'Welcome'})
+        self.assertEqual(status, 202, body)
+        rec = next(e for e in self.w.events if e[0] == 'sql' and 'record_decision' in e[1])
+        self.assertEqual(rec[2][5], 'production_manager')
+        self.assertEqual(self.w.kc_writes(), [])
+
+    def test_approve_unknown_role(self):
+        self.staff()
+        self.w.user(S, 'newbie', enabled=False)
+        self.w.on('FOR UPDATE', [self.request_row()])
+        status, body = self.call('POST', '/api/requests/5/decision', {'decision': 'approve', 'role': 'superqa', 'email_subject': 'Hi', 'email_body': 'Welcome'})
+        self.assertEqual(status, 400, body)
+        self.assertIn('choose the role to grant', body['error'])
+        self.assertFalse(any('record_decision' in s for s in self.w.sql()))
+
+    def test_role_change_to_maintenance(self):
+        # The fixture table has no maintenance (above): both widening sides are [].
+        self.staff()
+        self.w.user(S, 'sam', roles=['operator'], person='pS')
+        self.w.on('iam.record_decision', [(33, 'pending_qa', [], [])])
+        status, body = self.call('POST', '/api/users/%s/role' % S, {'role': 'maintenance', 'reason': 'r'})
+        self.assertEqual(status, 202, body)
+        rec = next(e for e in self.w.events if e[0] == 'sql' and 'record_decision' in e[1])
+        self.assertEqual(rec[2][4:6], ('operator', 'maintenance'))
+        status, body = self.call('POST', '/api/users/%s/role' % S, {'role': 'superqa', 'reason': 'r'})
+        self.assertEqual(status, 400, body)
+        self.assertIn('choose one of', body['error'])
+
+    def test_template_labels(self):
+        row = dict(zip(API.REQ_COLS, self.request_row(granted='qp')), requested_role='qc')
+        v = API.template_values(row)
+        self.assertEqual((v['requested_role_label'], v['granted_role_label']),
+                         ('Quality Control Analyst', 'Qualified / Responsible Person'))
 
 
 # ── 13. public and profile ports unchanged ────────────────────────────────────

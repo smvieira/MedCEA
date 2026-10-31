@@ -22,7 +22,7 @@ An IoT platform deployer for Ubuntu. Two commands install and wire together a co
 | **Recipe Schedule Manager** | Schedule grow recipes, manage unit permissions, run/stop cycles | `https://scheduler.<domain>` |
 | **Run Monitor** | Live view of active recipe runs, cycle progress, and sensor readings vs limits | `https://monitor.<domain>` |
 | **System Configuration** | Manage locations, units, devices, recipes | `https://config.<domain>` |
-| **Database Management** | Browse/export the PostgreSQL `medcea` schema | `https://dbmgmt.<domain>` |
+| **Database Management** | Export the `medcea` objects of the groups your role may export (X); every export is logged | `https://dbmgmt.<domain>` |
 | **pgAdmin** | PostgreSQL web UI | `https://pgadmin.<domain>` |
 | **PostgreSQL** | Shared database | internal only |
 
@@ -326,7 +326,7 @@ Node-RED:      https://node-red.<domain>        (login via Keycloak)
 AI Workbench:  https://ai-workbench.<domain>   (JupyterHub — login via Keycloak)
 Run Monitor:   https://monitor.<domain>         (live run progress + sensor readings)
 Config UI:     https://config.<domain>          (locations, units, devices, recipes)
-DB Mgmt:       https://dbmgmt.<domain>          (browse/export medcea schema)
+DB Mgmt:       https://dbmgmt.<domain>          (logged export of your X groups' medcea objects)
 Scheduler:     https://scheduler.<domain>       (recipe schedules)
 Onboarding:    https://onboard-device.<domain>  (device wizard, runs on the host — login via Keycloak)
 pgAdmin:       https://pgadmin.<domain>         (Keycloak sign-in, role admin)
@@ -370,17 +370,24 @@ Node-RED, Grafana and JupyterHub keep their own built-in user menus.
 ### Roles
 
 Each account holds **one** platform role. The access policy
-([apps/iam/policy/defaults.yaml](apps/iam/policy/defaults.yaml)) defines eleven;
-the request form and the User Manager offer these five for now, the rest once
-the services enforce the policy themselves:
+([apps/iam/policy/defaults.yaml](apps/iam/policy/defaults.yaml)) defines eleven,
+and the request form and the User Manager offer all of them, in this order. The
+two marked *not yet in use* can be granted, but most of their duties are not
+built in this prototype yet:
 
-| Role | Meant for |
-|---|---|
-| `operator` | running recipes and day-to-day cultivation in your units |
-| `engineer` | devices, recipes, controllers, flows and dashboards (drafts that qa approves) |
-| `qa` | approving others' work, confirming account grants and policy changes |
-| `auditor` | read-only access to records and audit trails |
-| `admin` | managing the platform and its users — without access to production data |
+| Role | Name | Meant for |
+|---|---|---|
+| `operator` | Cultivation Operator | running the cultivation day to day in your units |
+| `production_manager` | Production Manager (Process Owner) | planning production; preparing and starting runs, assigning approved recipes and parameter sets (includes `operator`) |
+| `maintenance` | Maintenance and Calibration | replacing and calibrating boards and sensors in existing slots |
+| `qc` | Quality Control Analyst — *not yet in use* | testing product and recording lab results |
+| `qa` | Quality Assurance | approving others' work, confirming account grants and policy changes (includes `auditor`) |
+| `qp` | Qualified / Responsible Person — *not yet in use* | releasing the output of a completed run |
+| `engineer` | Automation Engineer | devices, recipes, controllers, flows and dashboards (drafts that qa approves) |
+| `bio_scientist` | Bio-process Scientist | reading recipes and controllers; research in the AI Workbench |
+| `control_scientist` | Control and AI Scientist | control algorithms; research in the AI Workbench |
+| `admin` | System Administrator | managing the platform and its users — without access to production data |
+| `auditor` | Auditor / Inspector | reading and exporting records and audit trails |
 
 Which role reaches which service is **compiled from the policy** into the sign-in
 gates of the portal, Config UI, scheduler, Monitor, Database Management, MQTT
@@ -401,10 +408,18 @@ nothing else is enforced yet. Turn it on, then run `./deploy-apps.sh --all` and
 `./deploy-infra.sh`; pgAdmin can then only read, so schema changes go through
 psql in the PostgreSQL pod.
 
-Under `IAM_DB_ROLES=true` an operator sees the telemetry, runs and run logs of
-the units assigned to them only (every zone of the unit, zones added later
-included), and starts or stops runs only there. **Assign units, and have a qa
-person confirm them, before turning it on**, or operators see nothing:
+`IAM_ENFORCE=true` (IAM 2.6, off by default) makes the scheduler, monitor and
+Config UI services refuse every call the route table does not allow, instead of
+only logging it. Database Management and the User Manager's admin side always
+refuse. Switch it with `./guide.sh IAM_ENFORCE` after a report-only soak, once
+`IAM_DB_ROLES` is true (only the database checks which runs an operator may
+start or stop).
+
+Under `IAM_DB_ROLES=true` or `IAM_ENFORCE=true` an operator sees the telemetry,
+runs and run logs of the units assigned to them only (every zone of the unit,
+zones added later included); under `IAM_DB_ROLES=true` they also start or stop
+runs only there. **Assign units, and have a qa person confirm them, before
+turning either on**, or operators see nothing:
 
 ```bash
 apps/iam/units.sh assign <username> UNIT01 UNIT02 --by <you>   # waits for qa; not in effect until confirmed

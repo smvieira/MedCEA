@@ -40,6 +40,13 @@ database as postgres. Exit 1 on any FAIL.
   R17  a verified person the route table refuses (an auditor's POST /api/runs, an
        operator's DELETE /api/schedules/<id>): 403 and nothing written under true,
        even with IAM_ENFORCE=false; written and attributed under false (report-only)
+  R18  IAM 2.6: the log and Q-table delete routes are gone; sys_log_retention compresses
+       only a finished run's log (not a run in S, not a deploy log) and deletes nothing;
+       GET /api/runs/<id>[/log] read the .log.gz; a retention below 30 days is 400
+  R19  IAM 2.6 own_unit on the run reads: under IAM_DB_ROLES=true or IAM_ENFORCE=true an
+       operator lists only their unit's runs, another unit's run, log and cycles are
+       404/404/[]; report-only otherwise; the composite production manager sees every
+       run; a role with runs R but no run_logs R gets log null under IAM_ENFORCE=true
 """
 import argparse
 import importlib.util
@@ -712,6 +719,112 @@ def main():
     finally:
         if saved is not None:
             lib.actor_role = saved
+    end_open_runs()
+
+    # R18 ──────────────────────────────────────────────────────────────────────────
+    rules = {(str(r), m) for r in api.app.url_map.iter_rules() for m in r.methods}
+    gone = [("/api/logs/compress", "POST"), ("/api/logs/delete", "POST"),
+            ("/api/units/<int:uid>/algorithm-state", "DELETE"),
+            ("/api/units/<int:uid>/algorithm-state/<algorithm>", "DELETE")]
+    ok("R18", "the four removed routes are not served", not [g for g in gone if g in rules], rules)
+    codes = [c.post("/api/logs/compress", headers=H(T_PM)).status_code, c.post("/api/logs/delete", headers=H(T_PM)).status_code,
+             c.delete(f"/api/units/{i['u1']}/algorithm-state", headers=H(T_PM)).status_code,
+             c.delete(f"/api/units/{i['u1']}/algorithm-state/Q_LEARNING", headers=H(T_PM)).status_code]
+    ok("R18", "they answer 404, 404, 404, 405 (route check report-only here)", codes == [404, 404, 404, 405], codes)
+    if rid3:
+        tmp, old_dir = f"/tmp/iam-runner-logs-{uuid.uuid4().hex[:6]}", api.LOG_DIR
+        os.makedirs(tmp)
+        text = log_of(api, rid3) or "iam-runner R18\n"
+        r = c.post("/api/runs", json={"unit_id": i["u1"], "recipe_id": i["r0"]}, headers=H(T_PM))
+        rid_s = (r.get_json() or {}).get("recipe_run_id")
+        try:
+            api.LOG_DIR = tmp
+            r3 = q("SELECT u.unit_code, r.recipe_name FROM medcea.recipe_run rr JOIN medcea.cea_unit u USING (unit_id) "
+                   "JOIN medcea.recipe r USING (recipe_id) WHERE rr.recipe_run_id = %s", (rid3,), one=True)
+            p3 = api._log_path(r3["unit_code"], r3["recipe_name"], rid3)
+            ps = api._log_path(r3["unit_code"], r3["recipe_name"], rid_s) if rid_s else None
+            old = time.time() - 40 * 86400
+            for path, body in ((p3, text), (ps, "queued\n"), (os.path.join(tmp, "deploy-infra-x.log"), "deploy\n")):
+                if path:
+                    with open(path, "w") as f:
+                        f.write(body)
+                    os.utime(path, (old, old))
+            api._log_retention_job()
+            left = sorted(os.listdir(tmp))
+            want = sorted([os.path.basename(p3) + ".gz", "deploy-infra-x.log"] + ([os.path.basename(ps)] if ps else []))
+            ok("R18", "sys_log_retention compressed only the C run's log", left == want, (left, api._RETENTION))
+            r = c.get(f"/api/runs/{rid3}/log?tail=5", headers=H(T_PM))
+            tail = "".join(text.splitlines(keepends=True)[-5:])
+            ok("R18", "GET /api/runs/<id>/log reads the .log.gz", r.status_code == 200 and (r.get_json() or {}).get("content") == tail, r.get_json())
+            r = c.get(f"/api/runs/{rid3}", headers=H(T_PM))
+            ok("R18", "GET /api/runs/<id> reads the .log.gz", r.status_code == 200 and (r.get_json() or {}).get("log") == text)
+            r = c.get("/api/config/logs", headers=H(T_PM))
+            job = (r.get_json() or {}).get("job") or {}
+            ok("R18", "GET /api/config/logs shows the job's last result",
+               r.status_code == 200 and (job.get("last_result") or {}).get("compressed") == 1, r.get_json())
+        finally:
+            api.LOG_DIR = old_dir
+            shutil.rmtree(tmp, ignore_errors=True)
+        end_open_runs()
+    r = c.put("/api/config/logs", json={"delete_days": 5}, headers=H(T_LOG))
+    ok("R18", f"{mode}: log_delete_days 5 is 400 (minimum 30)", r.status_code == 400, r.get_json())
+
+    # R19 ──────────────────────────────────────────────────────────────────────────
+    # own_unit on the run reads: T_OP holds IAMT01 only. Runs inserted as the owner
+    # (the seed has no allowed IAMT02 assignment for POST /api/runs), one S and one C
+    # per unit, so /api/runs/active and /api/runs (completed) both have one of each.
+    runs19 = {}
+    for u in ("u1", "u2"):
+        for st in ("S", "C"):
+            runs19[(u, st)] = owner("""INSERT INTO medcea.recipe_run (unit_id, recipe_id, recipe_run_start, recipe_run_status, is_active)
+                                       VALUES (%s, %s, now(), %s, 'Y') RETURNING recipe_run_id""",
+                                    (i[u], i["r0"], st))[0]["recipe_run_id"]
+    lib = api._medcea_iam()
+    saved_enf = lib.enforcing
+    try:
+        def ids19(token, path):
+            return {r["recipe_run_id"] for r in (c.get(path, headers=H(token)).get_json() or [])} & set(runs19.values())
+
+        def sees(token):
+            return (ids19(token, "/api/runs/active") | ids19(token, "/api/runs?limit=500"),
+                    [c.get(f"/api/runs/{runs19[('u2', 'C')]}{p}", headers=H(token)) for p in ("", "/log", "/cycles")],
+                    c.get(f"/api/runs/{runs19[('u1', 'C')]}", headers=H(token)).status_code)
+        every = set(runs19.values())
+        own = {runs19[("u1", "S")], runs19[("u1", "C")]}
+        for gate, flag in (("IAM_DB_ROLES", enforce), ("IAM_ENFORCE", True)):
+            if gate == "IAM_ENFORCE":
+                lib.enforcing = lambda: True
+            elif not flag:
+                seen, _, _ = sees(T_OP)
+                ok("R19", f"{mode}: the operator sees every unit's runs (report-only)", seen == every, (seen, runs19))
+                continue
+            seen, other, mine = sees(T_OP)
+            ok("R19", f"{gate}=true: the operator lists only IAMT01's runs (active and completed)", seen == own, (seen, runs19))
+            ok("R19", f"{gate}=true: IAMT02's run is 404, its log 404, its cycles []",
+               [r.status_code for r in other] == [404, 404, 200] and other[2].get_json() == [],
+               [(r.status_code, r.get_json()) for r in other])
+            ok("R19", f"{gate}=true: IAMT01's run is 200", mine == 200, mine)
+            seen, other, _ = sees(T_PM)
+            ok("R19", f"{gate}=true: the production manager (composite) sees every run",
+               seen == every and other[0].status_code == 200, (seen, other[0].status_code))
+        lib.enforcing = saved_enf
+        rl = routes["services"]["scheduler"]["routes"]
+        no_log = sorted(set(rl["GET /api/runs/<id>"]["roles"]) - set(rl["GET /api/runs/<id>/log"]["roles"]))
+        if ok("R19", "the policy has a role with R on runs but not on run_logs", bool(no_log), no_log):
+            T_NL = tok([no_log[0]], "99999999-9999-4999-8999-999999999999", "p-nl", "test-nl")
+            d = c.get(f"/api/runs/{runs19[('u1', 'C')]}", headers=H(T_NL)).get_json() or {}
+            ok("R19", f"IAM_ENFORCE=false: {no_log[0]} still gets the log (report-only)",
+               d.get("log") is not None and "log_withheld" not in d, d)
+            lib.enforcing = lambda: True
+            d = c.get(f"/api/runs/{runs19[('u1', 'C')]}", headers=H(T_NL)).get_json() or {}
+            ok("R19", f"IAM_ENFORCE=true: {no_log[0]} gets log null, log_withheld run_logs",
+               d.get("log") is None and d.get("log_withheld") == "run_logs", d)
+    finally:
+        lib.enforcing = saved_enf
+        try:
+            owner("DELETE FROM medcea.recipe_run WHERE recipe_run_id = ANY(%s)", (list(runs19.values()),))
+        except psycopg2.Error as e:   # end_open_runs() still closes the S runs
+            note("R19", f"cleanup: {type(e).__name__}")
     end_open_runs()
 
     # the new runner's command-line path with 008b: works while false, refused while true

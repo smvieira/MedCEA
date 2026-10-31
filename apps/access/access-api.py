@@ -61,18 +61,47 @@ HOST_CLIENTS = dict(p.split('=', 1) for p in E.get('HOST_CLIENTS', '').split(','
 # after every Ready pod answers with it (invariant W, never fail open).
 ACCESS_VERSION = '2.7'
 
-# The platform roles this service offers as a *target*, in the form's order. The
-# access policy (apps/iam/policy/defaults.yaml) has eleven, and every one of them is
-# read from Keycloak (routes.json roles); offering the rest is task 2.6. engineer is
-# offered from Phase 0 because the policy admits only engineers to Node-RED, MQTT
-# Explorer and device onboarding.
+# The platform roles this service offers (the request form, the User Manager), in the
+# policy's order (R1..R11): a copy of apps/iam/policy/defaults.yaml roles: (label,
+# availability, description). Deliberately not read from routes.json, whose digest
+# medcea_auth.role_widening() carries (a wording change must not need a database deploy),
+# and served even without the /iam mount. tests/test_access_api.py fails when it differs
+# from the policy or from access_db.sql's CHECKs. availability 'later' (qc, qp) is offered,
+# marked as not yet in use.
 ROLES = {
-    'operator': 'Operator — runs recipes and day-to-day cultivation in the units assigned to them',
-    'engineer': 'Automation Engineer — devices, recipes, controllers, flows and dashboards (drafts that QA approves)',
-    'qa':       'Quality Assurance — independently approves recipes, settings, account changes and policy made by someone else',
-    'auditor':  'Auditor — read-only access to records and audit trails',
-    'admin':    'Administrator — manages the platform and its accounts (QA confirms every grant); no access to production data',
+    'operator': {'label': 'Cultivation Operator', 'availability': 'prototype',
+        'description': 'Runs the cultivation day to day in the units assigned to them.'},
+    'production_manager': {'label': 'Production Manager (Process Owner)', 'availability': 'prototype',
+        'description': 'Owns production planning; prepares and starts runs, assigns approved recipes and parameter sets to units.'},
+    'maintenance': {'label': 'Maintenance and Calibration', 'availability': 'prototype',
+        'description': 'Replaces and calibrates boards and sensors in existing slots.'},
+    'qc': {'label': 'Quality Control Analyst', 'availability': 'later',
+        'description': 'Tests product and records lab results (lab results arrive with the L4 entities).'},
+    'qa': {'label': 'Quality Assurance', 'availability': 'prototype',
+        'description': 'Independent approver of configuration, access decisions and policy changes.'},
+    'qp': {'label': 'Qualified / Responsible Person', 'availability': 'later',
+        'description': 'Releases the output of a completed run; creates and changes nothing.'},
+    'engineer': {'label': 'Automation Engineer', 'availability': 'prototype',
+        'description': 'Builds and maintains the automation — master data, devices, recipes, controllers, flows and dashboards — as drafts that qa approves.'},
+    'bio_scientist': {'label': 'Bio-process Scientist', 'availability': 'prototype',
+        'description': 'Studies the biology; reads recipes and controllers and works in the research workbench.'},
+    'control_scientist': {'label': 'Control and AI Scientist', 'availability': 'prototype',
+        'description': 'Designs control algorithms; reads recipes and controllers and works in the research workbench.'},
+    'admin': {'label': 'System Administrator', 'availability': 'prototype',
+        'description': 'Keeps the platform running and administers accounts and this policy, without access to regulated or history content (MHRA GxP data integrity 6.16). In the prototype the same person operates the host, which is break-glass access (see break_glass).'},
+    'auditor': {'label': 'Auditor / Inspector', 'availability': 'prototype',
+        'description': 'Reads and exports everything an inspection needs; changes nothing.'},
 }
+
+
+def role_list():
+    """ROLES as the request form and the User Manager read it."""
+    return [dict(id=k, **v) for k, v in ROLES.items()]
+
+
+def role_label(r):
+    return (ROLES.get(r or '') or {}).get('label', '')
+
 
 USERNAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{2,31}$')
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
@@ -707,8 +736,8 @@ def template_values(r):
         'platform': PLATFORM, 'request_id': r['request_id'],
         'first_name': r['first_name'], 'last_name': r['last_name'], 'username': r['username'],
         'email': r['email'], 'organisation': r.get('organisation') or '—',
-        'requested_role': r['requested_role'], 'requested_role_label': ROLES.get(r['requested_role'], ''),
-        'granted_role': r.get('granted_role') or '', 'granted_role_label': ROLES.get(r.get('granted_role') or '', ''),
+        'requested_role': r['requested_role'], 'requested_role_label': role_label(r['requested_role']),
+        'granted_role': r.get('granted_role') or '', 'granted_role_label': role_label(r.get('granted_role')),
         'justification': r['justification'], 'decided_by': r.get('decided_by') or '',
         'notes': notes or '—',
         'notes_block': ('Notes from the administrator:\n%s\n' % notes) if notes else '',
@@ -1999,7 +2028,7 @@ class Public(Base):
         if p == '/healthz':
             return self.send(200, {'ok': True})
         if p == '/api/register/roles':
-            return self.send(200, [{'id': k, 'label': v} for k, v in ROLES.items()])
+            return self.send(200, role_list())
         self.send(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -2039,7 +2068,7 @@ class Admin(Base):
             'review_read': ('GET', '/api/review'), 'review_write': ('POST', '/api/review'),
             'histories': ('GET', '/api/config-history')}.items()}
         out = {'user': w.get('username'), 'sub': w.get('sub'), 'has_person': bool(w.get('person_id')), 'role': role,
-               'roles': [{'id': k, 'label': v} for k, v in ROLES.items()], 'smtp': smtp_ready(mail_settings()),
+               'roles': role_list(), 'smtp': smtp_ready(mail_settings()),
                'platform': PLATFORM, 'portal_url': PORTAL_URL, 'admin_url': ACCESS_URL + '/', 'can': can}
         if can['users']:
             out['widening'] = _table().get('widening') or {}

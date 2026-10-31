@@ -29,6 +29,8 @@
 #  17  the fixture kept for the write probes: up && load && apply, each only after the last
 #      succeeded (dry and real against stubs)
 #  18  the IAM 2.7 rollback prints the psql command that reads the password in the pod
+#  19  IAM_ENFORCE enable (routes-diff --strict first) and rollback (one infra deploy, no
+#      app deploys), dry
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -305,6 +307,30 @@ mkcfg false false
 guide $'5\n7\nq\n'
 has   "namespace from config.env" "microk8s kubectl exec -i -n medcea rdbms-postgresql-0 -- \\"
 has   "reads the password in the pod" "sh -c 'PGPASSWORD=\"\$(cat \"\$POSTGRES_PASSWORD_FILE\")\" psql -X -1 -v ON_ERROR_STOP=1 -U postgres -d medcea_db -f -'"
+
+echo "19 IAM_ENFORCE enable and rollback"
+mkcfg true true
+SUM_BEFORE="$(sha256sum "$T/config.env" | cut -d' ' -f1)"
+guide $'5\n3\n1\ny\ny\nq\n'
+rc_is "quits with 0" 0
+has   "shows the current value" 'Now: IAM_ENFORCE="false"'
+has   "the soak is on the checklist" "[ ] A report-only soak is over"
+has   "step 1 is the strict route diff" '1. python3 tests/iam-routes-diff.py --strict'
+has   "step 2 sets the switch" '2. config.env: IAM_ENFORCE="true"'
+has   "step 3 is the infra deploy" '3. ./deploy-infra.sh'
+hasnt "no step 4" '4. '
+hasnt "no app deploy" 'would run: ./deploy-apps.sh'
+has   "prints the deploy it would run" '[dry run] would run: ./deploy-infra.sh'
+no_stub
+[[ "$(sha256sum "$T/config.env" | cut -d' ' -f1)" == "$SUM_BEFORE" ]] && pass "config.env untouched" || fail "config.env changed"
+sed -i 's/^IAM_ENFORCE=.*/IAM_ENFORCE="true"/' "$T/config.env"
+guide $'5\n3\n2\ny\nq\n'
+rc_is "quits with 0" 0
+has   "step 1 sets the switch back" '1. config.env: IAM_ENFORCE="false"'
+has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
+hasnt "no step 3" '3. '
+hasnt "no app deploy" 'would run: ./deploy-apps.sh'
+no_stub
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

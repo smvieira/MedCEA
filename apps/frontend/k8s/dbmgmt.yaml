@@ -67,10 +67,10 @@ spec:
         hostPath:
           path: ${APP_DIR}/images
           type: Directory
-      - name: db-exports
+      - name: db-exports         # its own directory: never the SQL the database deploy runs
         hostPath:
-          path: ${REPO_ROOT}/apps/database
-          type: Directory
+          path: ${REPO_ROOT}/apps/database/exports
+          type: DirectoryOrCreate
       - name: iam-lib
         configMap:
           name: medcea-iam-lib

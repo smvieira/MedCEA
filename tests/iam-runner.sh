@@ -80,7 +80,7 @@ trap cleanup EXIT
 # the code under test, as tarballs (no pid files, no bytecode)
 tar czf "$WORK/src.tgz" --exclude=__pycache__ --exclude='*.pid' --exclude='*.pyc' \
     -C "$SCHD/.." "$(basename "$SCHD")" --transform "s,^$(basename "$SCHD"),schd," \
-    -C "$REPO_ROOT" apps/scheduler/scheduler-api.py apps/iam/lib/medcea_iam.py tests/runner \
+    -C "$REPO_ROOT" apps/scheduler/scheduler-api.py apps/scheduler/log_retention.py apps/iam/lib/medcea_iam.py tests/runner \
     || { echo "cannot pack the code under test" >&2; exit 1; }
 if [[ -n "$PREV" ]]; then
     tar czf "$WORK/prev.tgz" --exclude=__pycache__ --exclude='*.pid' --exclude='*.pyc' \

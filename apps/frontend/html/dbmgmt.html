@@ -93,7 +93,7 @@
     <div class="card" onclick="document.getElementById('export-panel').scrollIntoView({behavior:'smooth'})">
       <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
       <div class="cl">DDL &amp; Data Export</div><div class="ct">Schema &amp; Data</div>
-      <div class="cd">Export DDL (CREATE statements) and data (INSERT INTO) for selected medcea schema objects.</div>
+      <div class="cd">Export DDL (CREATE statements) and data (INSERT INTO) of the objects in the groups you may export (X). Every export is recorded in the export log.</div>
       <div class="ck">↓ Export tool below</div>
     </div>
   </div>
@@ -104,6 +104,7 @@
       <div>
         <div class="panel-title">DDL &amp; Data Export</div>
         <div class="panel-sub">Select objects and choose what to export. Downloads as a .sql file.</div>
+        <div class="panel-sub" id="groups-line"></div>
       </div>
       <div class="toolbar">
         <button class="btn btn-ghost" onclick="selectAll('ddl')">All DDL</button>
@@ -121,18 +122,18 @@
         <span class="opt-lbl">Save To</span>
         <div class="radio-row">
           <label class="radio-opt"><input type="radio" name="target" value="local" checked> Download locally</label>
-          <label class="radio-opt"><input type="radio" name="target" value="platform"> Save to platform (apps/database/)</label>
+          <label class="radio-opt"><input type="radio" name="target" value="platform"> Save to platform (apps/database/exports/)</label>
         </div>
       </div>
     </div>
     <div class="tbl-wrap">
       <table id="obj-table">
         <thead><tr>
-          <th>Object</th><th>Type</th>
+          <th>Object</th><th>Type</th><th>Group</th>
           <th style="width:70px;text-align:center">DDL</th>
           <th style="width:70px;text-align:center">Data</th>
         </tr></thead>
-        <tbody id="obj-tbody"><tr><td colspan="4" class="empty"><span class="spin">⟳</span> Loading objects…</td></tr></tbody>
+        <tbody id="obj-tbody"><tr><td colspan="5" class="empty"><span class="spin">⟳</span> Loading objects…</td></tr></tbody>
       </table>
     </div>
     <div class="status" id="status"></div>
@@ -141,29 +142,37 @@
 
 <script>
 let objects = [];
+let groups = [];
 
 async function loadObjects() {
   try {
     const r = await fetch('/api/objects');
-    objects = await r.json();
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    objects = j.objects;
+    groups = j.groups;
+    document.getElementById('groups-line').textContent = groups.length
+      ? 'You may export: ' + groups.join(', ')
+      : 'Your role holds X on no group: nothing to export.';
     renderTable();
   } catch(e) {
     document.getElementById('obj-tbody').innerHTML =
-      '<tr><td colspan="5" class="empty st-err">Failed to load objects: ' + e.message + '</td></tr>';
+      '<tr><td colspan="5" class="empty st-err">Failed to load objects: ' + esc(e.message) + '</td></tr>';
   }
 }
 
 function renderTable() {
   const tbody = document.getElementById('obj-tbody');
   if (!objects.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">No objects found in medcea schema.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No objects in your export groups.</td></tr>';
     return;
   }
   const noData = new Set(['view','sequence','enum','domain','type']);
   tbody.innerHTML = objects.map((o, i) =>
     '<tr>' +
-    '<td><strong>' + esc(o.name) + '</strong></td>' +
-    '<td><span class="badge badge-' + o.type + '">' + o.type + '</span></td>' +
+    '<td><strong>' + esc(o.schema + '.' + o.name) + '</strong></td>' +
+    '<td><span class="badge badge-' + esc(o.type) + '">' + esc(o.type) + '</span></td>' +
+    '<td>' + esc(o.group || '\u2014') + '</td>' +
     '<td style="text-align:center"><input type="checkbox" class="cb ddl-chk" data-i="' + i + '" onchange="updateExportBtn()"></td>' +
     '<td style="text-align:center"><input type="checkbox" class="cb data-chk" data-i="' + i + '"' +
       (noData.has(o.type) ? ' disabled title="No row data for this object type"' : '') + ' onchange="updateExportBtn()"></td>' +
@@ -172,7 +181,7 @@ function renderTable() {
   updateExportBtn();
 }
 
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 function selectAll(kind) {
   document.querySelectorAll('.' + kind + '-chk:not(:disabled)').forEach(cb => cb.checked = true);
@@ -205,6 +214,7 @@ async function runExport() {
   status.innerHTML = '<span class="st-info">Generating SQL…</span>';
 
   const selections = objects.map((o, i) => ({
+    schema: o.schema,
     name: o.name,
     type: o.type,
     ddl:  document.querySelector('.ddl-chk[data-i="' + i + '"]')?.checked  || false,
@@ -217,20 +227,27 @@ async function runExport() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({selections, filename, target})
     });
-    if (!r.ok) { const t = await r.text(); throw new Error(t); }
+    if (!r.ok) {
+      const t = await r.text();
+      let msg = t;
+      try { msg = JSON.parse(t).error || t; } catch(_) {}
+      throw new Error(msg);
+    }
     if (target === 'local') {
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = filename; a.click();
       URL.revokeObjectURL(url);
-      status.innerHTML = '<span class="st-ok">✓ Downloaded: ' + esc(filename) + ' (' + (blob.size/1024).toFixed(1) + ' KB)</span>';
+      status.innerHTML = '<span class="st-ok">✓ Downloaded: ' + esc(filename) + ' (' + (blob.size/1024).toFixed(1) + ' KB) \u2014 export #' +
+        esc(r.headers.get('X-Medcea-Export-Id')) + ', sha256 ' + esc((r.headers.get('X-Medcea-Export-Sha256') || '').slice(0, 12)) + '\u2026</span>';
     } else {
       const j = await r.json();
-      status.innerHTML = '<span class="st-ok">✓ Saved to platform: <code>' + esc(j.path) + '</code> (' + (j.size/1024).toFixed(1) + ' KB)</span>';
+      status.innerHTML = '<span class="st-ok">✓ Saved to platform: <code>' + esc(j.path) + '</code> (' + (j.size/1024).toFixed(1) + ' KB) \u2014 export #' +
+        esc(j.export_id) + ', sha256 ' + esc(String(j.sha256 || '').slice(0, 12)) + '\u2026</span>';
     }
   } catch(e) {
-    status.innerHTML = '<span class="st-err">✗ Export failed: ' + e.message + '</span>';
+    status.innerHTML = '<span class="st-err">✗ Export failed: ' + esc(e.message) + '</span>';
   }
 
   btn.disabled = false;

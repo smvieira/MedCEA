@@ -94,6 +94,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         Secret medcea-jwks, every key id there is still published by the realm"
     echo -e "         (else FAIL: run ./deploy-infra.sh), and a forged token gets 401; false: WARN"
     echo ""
+    echo -e "  ${CYAN}iamenforce${NC} the Python services enforce the route table (IAM_ENFORCE, IAM 2.6): NAMESPACE"
+    echo -e "         FAIL when ConfigMap medcea-iam-lib disagrees with config.env (./deploy-infra.sh),"
+    echo -e "         and on IAM_ENFORCE=true with IAM_DB_ROLES=false (assigned_run unchecked) or a pod copy"
+    echo -e "         still false (fails open without /iam/); WARN on a pod copy still true, or while false"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -477,6 +482,48 @@ print("".join(" %s:%s" % (sys.argv[1], g) for g in gone) or ("" if ours else " e
 }
 
 # =============================================================================
+# Check: the Python services enforce the route table (IAM_ENFORCE, IAM 2.6) — read-only
+# target: NAMESPACE (default $NAMESPACE). Reads the ConfigMap and the deployments only:
+# the NetworkPolicies admit no host traffic to scheduler, monitor or dbmgmt.
+# =============================================================================
+check_iamenforce() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" json mode want dc v stale=()
+    want=false; [[ "${IAM_ENFORCE:-false}" == "true" ]] && want=true
+    json="$(timeout "$TIMEOUT" $KUBECTL get configmap medcea-iam-lib -n "$ns" -o jsonpath='{.data.settings\.json}' 2>/dev/null)"
+    mode="$(python3 -c 'import json, sys; print(str(json.load(sys.stdin).get("enforce") is True).lower())' <<<"$json" 2>/dev/null)"
+    if [[ -z "$mode" ]]; then
+        _record FAIL "$name" "ConfigMap medcea-iam-lib missing or unreadable (./deploy-infra.sh)"
+        return
+    fi
+    if [[ "$mode" != "$want" ]]; then
+        _record FAIL "$name" "ConfigMap says enforce=$mode, config.env IAM_ENFORCE=${IAM_ENFORCE:-false} (./deploy-infra.sh)"
+        return
+    fi
+    # the pods' copy, used only when /iam/ is missing (dbmgmt fails closed without it anyway);
+    # an empty copy is false, as the services read it
+    for dc in scheduler:api monitor:api config-ui:recipe-fileserver access:api; do
+        v="$(timeout "$TIMEOUT" $KUBECTL get deployment "${dc%%:*}" -n "$ns" \
+            -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${dc#*:}\")].env[?(@.name==\"IAM_ENFORCE\")].value}" 2>/dev/null)" \
+            || continue                                     # not deployed
+        [[ "$v" == "true" ]] || v=false
+        [[ "$v" == "$want" ]] || stale+=("${dc%%:*}")
+    done
+    # assigned_run (an operator's execute/stop/status/trigger) is checked only by the
+    # database functions under IAM_DB_ROLES=true: no route-level check by decision
+    if [[ "$want" == "true" && "${IAM_DB_ROLES:-false}" != "true" ]]; then
+        _record FAIL "$name" "IAM_ENFORCE=true with IAM_DB_ROLES=false: operators can start and stop other units' runs (./guide.sh IAM_DB_ROLES, or IAM_ENFORCE back to false)"
+    elif [[ ${#stale[@]} -gt 0 && "$want" == "true" ]]; then
+        _record FAIL "$name" "pod IAM_ENFORCE copy still false: ${stale[*]} (without /iam/ they let every request through: redeploy them, no run active)"
+    elif [[ ${#stale[@]} -gt 0 ]]; then
+        _record WARN "$name" "pod IAM_ENFORCE copy differs: ${stale[*]} (redeploy them; the copy is used only when /iam/ is missing)"
+    elif [[ "$want" == "false" ]]; then
+        _record WARN "$name" "IAM_ENFORCE=false: services only log what they would refuse (IAM 2.6)"
+    else
+        _record OK "$name" "services refuse what the route table does not allow; every pod agrees"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -639,6 +686,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamdecisions) check_iamdecisions "$name" "$target" ;;
         dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
+        iamenforce)   check_iamenforce "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

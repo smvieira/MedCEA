@@ -114,11 +114,16 @@
                 }).then(function (roles) {
                     rolesLoaded = true;
                     var box = $('r_roles'); box.textContent = '';
-                    roles.forEach(function (role, n) {
+                    // None is preselected: the submit handler asks for one. An access-api
+                    // older than IAM 2.6 sends 'Label — description' and no description.
+                    roles.forEach(function (role) {
                         var l = document.createElement('label'); l.className = 'role';
-                        var i = document.createElement('input'); i.type = 'radio'; i.name = 'requested_role'; i.value = role.id; if (n === 0) i.checked = true;
-                        var parts = role.label.split(' — ');
+                        var i = document.createElement('input'); i.type = 'radio'; i.name = 'requested_role'; i.value = role.id;
+                        var parts = role.description === undefined ? role.label.split(' — ') : [role.label, role.description];
                         var t = document.createElement('span'); t.className = 'role-t'; t.textContent = parts[0];
+                        if (role.availability === 'later') {
+                            var g = document.createElement('span'); g.className = 'role-tag'; g.textContent = 'not yet in use'; t.append(g);
+                        }
                         var d = document.createElement('span'); d.className = 'role-d'; d.textContent = parts[1] || '';
                         var s = document.createElement('span'); s.append(t, d);
                         l.append(i, s); box.append(l);

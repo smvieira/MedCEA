@@ -17,15 +17,18 @@ Endpoints:
   POST /api/schedules/<id>/trigger     — run immediately (background thread)
   GET  /api/runs?limit=N               — recent completed recipe_run rows
   GET  /api/runs/active                — runs with status != C
-  GET  /api/runs/<id>                  — single run + full log content
+  GET  /api/runs/<id>                  — single run + full log content (log null and
+                                         log_withheld for a role without R on run_logs)
   GET  /api/runs/<id>/log?offset=N     — incremental log tail (live polling)
   POST /api/runs/<id>/execute          — start execution of a queued run (medcea.start_run)
   POST /api/runs/<id>/stop             — stop a run (medcea.set_run_status F, then SIGTERM)
   PATCH /api/runs/<id>/status          — reset run to S (retry)
   GET  /api/config/logs                — log management thresholds + stats
   PUT  /api/config/logs                — save thresholds (IAM_DB_ROLES=true: a proposal for qa, 202)
-  POST /api/logs/compress?days=N       — gzip .log files older than N days
-  POST /api/logs/delete?days=N         — delete .log/.log.gz files older than N days
+Run logs are compressed by the scheduler's own job sys_log_retention (daily 03:15 UTC,
+log_retention.py; only run_recipe_*.log of finished runs) and never deleted; no person
+compresses or deletes a log (IAM 2.6). Q-tables are retired through PostgREST
+/rpc/retire_algorithm_state by qa (Config UI); the scheduler never deletes or retires one.
 
 Who is recorded (IAM plan 2.4). Every regulated write runs in one transaction with
 its actor (the actor lasts one transaction):
@@ -42,6 +45,12 @@ its actor (the actor lasts one transaction):
             such fallback is logged with method, path and reason. Under true a request
             without a person is refused (401) and a system actor without a person
             creator is refused.
+own_unit (IAM 2.6): for an operator, the run reads (GET /api/runs, /runs/active,
+/runs/<id>, /runs/<id>/cycles, /runs/<id>/log) are limited to their units in
+iam_policy.user_unit, the rule of my_units(); another unit's run is 404 (cycles: [])
+like a missing one. Applied while IAM_ENFORCE or IAM_DB_ROLES is true, otherwise
+logged as "own_unit: would limit". GET /api/runs/<id> leaves the log out for a role
+without R on run_logs (maintenance, qc, qp) while IAM_ENFORCE is true.
 IAM_DB_ROLES is read from the database setting medcea.iam_db_roles; it only picks the
 code path, the database stays authoritative (medcea.platform_setting, the triggers).
 While false, runs carry no params_id and the algorithm is chosen exactly as before
@@ -51,14 +60,17 @@ Database WARNINGs (e.g. "IAM_DB_ROLES=false, would refuse: …", a demoted appro
 returned in the response as `warnings` — advisory, not errors.
 """
 
-import os, sys, re, signal, logging, subprocess, threading, gzip, shutil, json, importlib.util, contextlib
-from datetime import timezone, timedelta
+import os, sys, re, signal, logging, subprocess, threading, gzip, json, time, importlib.util, contextlib
 import psycopg2, psycopg2.extras
 from flask import Flask, jsonify, request, g, has_request_context
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from datetime import datetime, timezone
+
+# next to this file: /scripts in the pod (same ConfigMap), the checkout for iam_runner_flow
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import log_retention
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
@@ -282,9 +294,9 @@ def _superuser(cur):
 
 def _functions_only(cur):
     """True when a write must take the IAM_DB_ROLES=true path even while the database
-    is false: on its own role (svc_scheduler, IAM 2.5) the scheduler holds no DELETE on
-    algorithm_state, no UPDATE on recipe_run and only SELECT on scheduler_config, so
-    the direct DML of the false path would be "permission denied"."""
+    is false: on its own role (svc_scheduler, IAM 2.5) the scheduler holds no UPDATE on
+    recipe_run and only SELECT on scheduler_config, so the direct DML of the false
+    path would be "permission denied"."""
     return _enforcing(cur) or not _superuser(cur)
 
 
@@ -325,6 +337,78 @@ def _why_no_person():
     if not who.get('sub') or not _UUID.match(str(who.get('sub'))):
         return 'the token has no account uuid'
     return 'no single own platform role in %s' % (who.get('roles') or '[]')
+
+
+# ── own_unit (IAM 2.6) ──────────────────────────────────────────────────────
+# svc_scheduler's RLS policies are permissive, so an operator's run reads are
+# limited here, by the rule of medcea_auth.my_units() (medcea_db_migrations.sql):
+# the person's units in iam_policy.user_unit. A subquery with the sub as a
+# parameter, because svc_scheduler may not execute my_units(). Another unit's
+# run answers as a missing one. Applied while IAM_ENFORCE or IAM_DB_ROLES is
+# true, otherwise logged ("own_unit: would limit", once an hour per person and
+# route: the page polls).
+_NIL_SUB = '00000000-0000-0000-0000-000000000000'
+_MY_UNITS = "(SELECT uu.unit_id FROM iam_policy.user_unit uu WHERE uu.person_sub = %s::uuid)"
+_DB_ROLES = {'at': 0.0, 'v': False}
+_REPORTED = {}  # (what, username, route) -> time of the last report-only line
+
+
+def _db_roles():
+    """_enforcing() for the read routes, which have no cursor: cached for 30 s, so a
+    polling page in report-only mode costs one connection per 30 s, not per request."""
+    now = time.time()
+    if now - _DB_ROLES['at'] > 30:
+        conn = get_db()
+        try:
+            _DB_ROLES.update(v=_enforcing(conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)), at=now)
+        finally:
+            conn.close()
+    return _DB_ROLES['v']
+
+
+def _report(what, fmt, *args):
+    d = _decision()
+    key = (what, (getattr(d, 'who', None) or {}).get('username'), getattr(d, 'route', None) or request.path)
+    now = time.time()
+    if now - _REPORTED.get(key, 0) > 3600:
+        _REPORTED[key] = now
+        log.info(fmt, *args)
+
+
+def _unit_scope():
+    """None (not limited) or the uuid whose units bound this run read."""
+    iam, d = _medcea_iam(), _decision()
+    if iam is None or d is None:
+        return None
+    if hasattr(iam, 'own_unit_sub'):
+        sub = iam.own_unit_sub(d)
+    else:   # a library from before own_unit_sub: fail closed
+        sub = _NIL_SUB if getattr(d, 'allow', False) and 'own_unit' in (getattr(d, 'constraints', None) or []) else None
+    if sub is None:
+        return None
+    if iam.enforcing() or _db_roles():
+        return sub
+    user = (getattr(d, 'who', None) or {}).get('username') or '-'
+    _report('own_unit', 'own_unit: would limit %s %s to the units of %s (IAM_ENFORCE and IAM_DB_ROLES are false)',
+            request.method, request.path, user)
+    return None
+
+
+def _withhold_log(run_id):
+    """True when GET /api/runs/<id> must leave out the log: the verified person holds R
+    on runs but not on run_logs (maintenance, qc, qp). A route-level check, so it
+    follows IAM_ENFORCE alone; while false it is only logged."""
+    d, iam = _decision(), _medcea_iam()
+    who = getattr(d, 'who', None) or {}
+    if not who or iam is None or not hasattr(iam, 'allows'):
+        return False
+    if iam.allows(who.get('roles'), 'scheduler', 'GET', f'/api/runs/{run_id}/log'):
+        return False
+    if iam.enforcing():
+        return True
+    _report('run_logs', 'run_logs: would withhold the log of run %s from %s (no R on run_logs; IAM_ENFORCE is false)',
+            run_id, who.get('username') or '-')
+    return False
 
 
 def _act_person(cur, need_fn=False):
@@ -432,15 +516,25 @@ def _log_path(unit_code, recipe_name, run_id=None):
     suffix = f'_{run_id}' if run_id is not None else ''
     return os.path.join(LOG_DIR, f'run_recipe_{su}_{sr}{suffix}.log')
 
-def _find_log_path(unit_code, recipe_name, run_id):
-    """Return the log file path: new run_id-based name first, then legacy fallback."""
-    path = _log_path(unit_code, recipe_name, run_id)
-    if os.path.exists(path):
-        return path
-    legacy = _log_path(unit_code, recipe_name)
-    if os.path.exists(legacy):
-        return legacy
-    return path  # return new-style path even if missing (for error messages)
+def _find_log_parts(unit_code, recipe_name, run_id):
+    """The run's log as existing files in reading order: the new run_id-based name,
+    else the legacy one; its .log.gz (compressed by sys_log_retention) before its .log
+    (a retried run appends to a fresh .log). Empty when there is none."""
+    for path in (_log_path(unit_code, recipe_name, run_id), _log_path(unit_code, recipe_name)):
+        parts = [p for p in (path + '.gz', path) if os.path.exists(p)]
+        if parts:
+            return parts
+    return []
+
+
+def _read_log_bytes(parts):
+    """The decompressed content of _find_log_parts, concatenated (offsets for live
+    polling count in it)."""
+    out = b''
+    for p in parts:
+        with (gzip.open(p, 'rb') if p.endswith('.gz') else open(p, 'rb')) as f:
+            out += f.read()
+    return out
 
 
 def _spawn(run_id, unit_code, recipe_name, legacy=None, once_sid=None, label=None):
@@ -581,8 +675,8 @@ def _reload_schedules():
     """)
     # Remove jobs that are no longer in DB (or were retired)
     db_ids = {f"sched_{r['schedule_id']}" for r in rows}
-    for job in scheduler.get_jobs():
-        if job.id not in db_ids:
+    for job in scheduler.get_jobs():   # sched_ only: sys_log_retention stays
+        if job.id.startswith('sched_') and job.id not in db_ids:
             scheduler.remove_job(job.id)
     # Add/replace
     for r in rows:
@@ -640,24 +734,6 @@ def get_units():
     return jsonify(rows)
 
 
-def _delete_algorithm_state(where, args):
-    """Removed by IAM plan 2.6 (retire_algorithm_state replaces it). Under
-    IAM_DB_ROLES=true a Q-table is never deleted: 403."""
-    with tx() as cur:
-        _act_person(cur)
-        if _functions_only(cur):
-            raise Refused(403, 'a Q-table is retired, never deleted (IAM_DB_ROLES=true, or the scheduler on its own '
-                               'database role): medcea.retire_algorithm_state, by a person holding A on controllers_state')
-        cur.execute("DELETE FROM medcea.algorithm_state WHERE " + where, args)
-        return cur.rowcount
-
-
-@app.route('/api/units/<int:uid>/algorithm-state', methods=['DELETE'])
-def delete_unit_algorithm_state(uid):
-    purged = _delete_algorithm_state("unit_id=%s", (uid,))
-    return jsonify({'purged': purged, 'unit_id': uid})
-
-
 @app.route('/api/units/<int:uid>/algorithm-state/<algorithm>', methods=['GET'])
 def get_unit_algorithm_state(uid, algorithm):
     rows = query("""
@@ -668,11 +744,6 @@ def get_unit_algorithm_state(uid, algorithm):
     """, (uid, algorithm.upper()))
     return jsonify(rows)
 
-
-@app.route('/api/units/<int:uid>/algorithm-state/<algorithm>', methods=['DELETE'])
-def delete_unit_algorithm_state_by_algo(uid, algorithm):
-    purged = _delete_algorithm_state("unit_id=%s AND algorithm=%s", (uid, algorithm.upper()))
-    return jsonify({'purged': purged, 'unit_id': uid, 'algorithm': algorithm.upper()})
 
 @app.route('/api/algorithms')
 def get_algorithms():
@@ -943,6 +1014,7 @@ def _fmt_runs(rows):
 
 @app.route('/api/runs/active')
 def list_active_runs():
+    sub = _unit_scope()
     rows = query(f"""
         SELECT {_RUN_COLS},
                u.unit_id, u.unit_code, r.recipe_id, r.recipe_name
@@ -950,8 +1022,8 @@ def list_active_runs():
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
         WHERE rr.recipe_run_status != 'C'
-        ORDER BY rr.recipe_run_id DESC
-    """)
+        """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n        " if sub else "") + """ORDER BY rr.recipe_run_id DESC
+    """, (sub,) if sub else None)
     _fmt_runs(rows)
     with _active_pids_lock:
         for r in rows:
@@ -963,6 +1035,7 @@ def list_active_runs():
 @app.route('/api/runs')
 def list_runs():
     limit = request.args.get('limit', 50, type=int)
+    sub = _unit_scope()
     rows = query(f"""
         SELECT {_RUN_COLS},
                u.unit_code, r.recipe_name
@@ -970,9 +1043,9 @@ def list_runs():
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
         WHERE rr.recipe_run_status = 'C'
-        ORDER BY rr.recipe_run_id DESC
+        """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n        " if sub else "") + """ORDER BY rr.recipe_run_id DESC
         LIMIT %s
-    """, (limit,))
+    """, (sub, limit) if sub else (limit,))
     return jsonify(_fmt_runs(rows))
 
 @app.route('/api/runs', methods=['POST'])
@@ -1127,6 +1200,7 @@ def stop_run(run_id):
 
 @app.route('/api/runs/<int:run_id>')
 def get_run(run_id):
+    sub = _unit_scope()
     row = query(f"""
         SELECT {_RUN_COLS},
                u.unit_code, r.recipe_name
@@ -1134,21 +1208,24 @@ def get_run(run_id):
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
         WHERE rr.recipe_run_id = %s
-    """, (run_id,), fetchall=False)
+    """ + ("    AND rr.unit_id IN " + _MY_UNITS + "\n" if sub else ""), (run_id, sub) if sub else (run_id,), fetchall=False)
     if not row:
         return jsonify({'error': 'not found'}), 404
     row['recipe_run_start'] = row['recipe_run_start'].isoformat() if row['recipe_run_start'] else None
     row['recipe_run_end']   = row['recipe_run_end'].isoformat()   if row['recipe_run_end']   else None
-    log_path = _find_log_path(row['unit_code'], row['recipe_name'], run_id)
-    if os.path.exists(log_path):
-        with open(log_path) as f:
-            row['log'] = f.read()
+    if _withhold_log(run_id):
+        row['log'], row['log_withheld'] = None, 'run_logs'
+        return jsonify(row)
+    parts = _find_log_parts(row['unit_code'], row['recipe_name'], run_id)
+    if parts:
+        row['log'] = _read_log_bytes(parts).decode('utf-8', errors='replace')
     else:
-        row['log'] = f'(no log file at {log_path})'
+        row['log'] = f"(no log file at {_log_path(row['unit_code'], row['recipe_name'], run_id)})"
     return jsonify(row)
 
 @app.route('/api/runs/<int:run_id>/cycles')
 def get_run_cycles(run_id):
+    sub = _unit_scope()   # another unit's run: [] as for a missing one (rr_operator's RLS)
     rows = query("""
         SELECT rlcr.recipe_item_seq_cycle_num,
                rl.recipe_item_seq_name,
@@ -1161,8 +1238,9 @@ def get_run_cycles(run_id):
           ON rlcr.recipe_id = rl.recipe_id
          AND rlcr.recipe_item_seq_id = rl.recipe_item_seq_id
         WHERE rlcr.recipe_run_id = %s
-        ORDER BY rlcr.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num
-    """, (run_id,))
+        """ + ("AND rlcr.recipe_run_id IN (SELECT x.recipe_run_id FROM medcea.recipe_run x WHERE x.unit_id IN "
+               + _MY_UNITS + ")\n        " if sub else "") + """ORDER BY rlcr.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num
+    """, (run_id, sub) if sub else (run_id,))
     for r in rows:
         r['recipe_line_seq_cycle_run_start'] = r['recipe_line_seq_cycle_run_start'].isoformat() if r['recipe_line_seq_cycle_run_start'] else None
         r['recipe_line_seq_cycle_run_end']   = r['recipe_line_seq_cycle_run_end'].isoformat()   if r['recipe_line_seq_cycle_run_end']   else None
@@ -1178,32 +1256,30 @@ def get_run_log(run_id):
     """
     offset = request.args.get('offset', 0, type=int)
     tail   = request.args.get('tail',   0, type=int)
+    sub    = _unit_scope()   # another unit's run: 404 before any log path is built
     row = query("""
         SELECT rr.recipe_run_status, u.unit_code, r.recipe_name
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
         WHERE rr.recipe_run_id = %s
-    """, (run_id,), fetchall=False)
+    """ + ("    AND rr.unit_id IN " + _MY_UNITS + "\n" if sub else ""), (run_id, sub) if sub else (run_id,), fetchall=False)
     if not row:
         return jsonify({'error': 'not found'}), 404
-    log_path = _find_log_path(row['unit_code'], row['recipe_name'], run_id)
+    parts = _find_log_parts(row['unit_code'], row['recipe_name'], run_id)
     content = ''
     next_offset = offset
-    if os.path.exists(log_path):
+    if parts:
+        raw = _read_log_bytes(parts)
         if tail > 0:
-            with open(log_path, 'rb') as f:
-                raw = f.read()
             next_offset = len(raw)
             text  = raw.decode('utf-8', errors='replace')
             lines = text.splitlines(keepends=True)
             content = ''.join(lines[-tail:]) if len(lines) > tail else text
         else:
-            with open(log_path, 'rb') as f:
-                f.seek(offset)
-                chunk = f.read()
-                next_offset = offset + len(chunk)
-                content = chunk.decode('utf-8', errors='replace')
+            chunk = raw[offset:]
+            next_offset = offset + len(chunk)
+            content = chunk.decode('utf-8', errors='replace')
     return jsonify({
         'content':     content,
         'next_offset': next_offset,
@@ -1222,8 +1298,8 @@ def _get_config(key, default):
 def _log_stats():
     files = []
     if os.path.isdir(LOG_DIR):
-        for fname in os.listdir(LOG_DIR):
-            if fname.endswith('.log') or fname.endswith('.log.gz'):
+        for fname in os.listdir(LOG_DIR):   # run logs only: /logs also holds the deploy logs
+            if log_retention.RUN_LOG.match(fname):
                 fpath = os.path.join(LOG_DIR, fname)
                 try:
                     st = os.stat(fpath)
@@ -1240,9 +1316,14 @@ def _log_stats():
 
 @app.route('/api/config/logs', methods=['GET'])
 def get_log_config():
+    dd = _get_config('log_delete_days', None)
     result = {
         'compress_days': int(_get_config('log_compress_days', '7')),
-        'delete_days':   int(_get_config('log_delete_days',   '30')),
+        'delete_days':   int(dd) if dd is not None else None,   # kept, unused: nothing deletes a run log
+        'minimums': {'compress_days': log_retention.MIN_COMPRESS_DAYS,
+                     'delete_days':   log_retention.MIN_DELETE_DAYS},
+        'job': {'schedule': RETENTION_SCHEDULE, 'last_run': _RETENTION['at'],
+                'last_result': _RETENTION['result'], 'last_error': _RETENTION['error']},
     }
     result.update(_log_stats())
     return jsonify(result)
@@ -1261,19 +1342,29 @@ def put_log_config():
             except (TypeError, ValueError):
                 return jsonify({'error': f'{key} must be a whole number of days'}), 400
     with tx() as cur:
+        # a key sent back unchanged is skipped, so a legacy value below the minimum
+        # (the page sends both fields; 008b's CHECK is NOT VALID) never blocks the other
+        changed = []
+        for key, val in wanted:
+            cur.execute("SELECT value FROM medcea.scheduler_config WHERE key=%s", (key,))
+            now = cur.fetchone()
+            if not (now and str(now['value']) == str(val)):
+                changed.append((key, val))
+        # the database's minimums (approve_change, scheduler_config_retention_chk), in both
+        # modes: under IAM_DB_ROLES=false there is no CHECK
+        for key, val in changed:
+            low = log_retention.MIN_COMPRESS_DAYS if key == 'log_compress_days' else log_retention.MIN_DELETE_DAYS
+            if val < low:
+                return jsonify({'error': f'{key} must be at least {low}'}), 400
         if _functions_only(cur):   # a proposal, applied once approved (A on scheduler_settings)
             _act_person(cur, need_fn=True)
             ids = []
-            for key, val in wanted:
-                cur.execute("SELECT value FROM medcea.scheduler_config WHERE key=%s", (key,))
-                now = cur.fetchone()
-                if now and str(now['value']) == str(val):
-                    continue
+            for key, val in changed:
                 cur.execute("SELECT medcea.propose_setting(%s, %s::jsonb) AS id", (key, json.dumps(val)))
                 ids.append(cur.fetchone()['id'])
             return jsonify({'pending': bool(ids), 'change_ids': ids}), 202
         _act_person(cur)
-        for key, val in wanted:
+        for key, val in changed:
             cur.execute("""
                 INSERT INTO medcea.scheduler_config (key, value)
                 VALUES (%s, %s)
@@ -1281,56 +1372,56 @@ def put_log_config():
             """, (key, str(val)))
     return jsonify({'saved': True})
 
-@app.route('/api/logs/compress', methods=['POST'])
-def compress_logs():
-    days = request.args.get('days', type=int) or int(_get_config('log_compress_days', '7'))
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    compressed = 0
-    skipped = 0
-    if os.path.isdir(LOG_DIR):
-        for fname in os.listdir(LOG_DIR):
-            if not fname.endswith('.log'):
-                continue
-            fpath = os.path.join(LOG_DIR, fname)
-            try:
-                mtime = datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc)
-                if mtime >= cutoff:
-                    skipped += 1
-                    continue
-                gz_path = fpath + '.gz'
-                with open(fpath, 'rb') as f_in, gzip.open(gz_path, 'wb') as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-                os.remove(fpath)
-                compressed += 1
-                log.info(f'Compressed {fname}')
-            except Exception as e:
-                log.error(f'Failed to compress {fname}: {e}')
-                skipped += 1
-    return jsonify({'compressed': compressed, 'skipped': skipped})
+# ---------------------------------------------------------------------------
+# System job — run-log compression (IAM 2.6)
+# ---------------------------------------------------------------------------
+_RETENTION = {'at': None, 'result': None, 'error': None}
+RETENTION_SCHEDULE = 'daily 03:15 UTC'
 
-@app.route('/api/logs/delete', methods=['POST'])
-def delete_logs():
-    days = request.args.get('days', type=int) or int(_get_config('log_delete_days', '30'))
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    deleted = 0
-    skipped = 0
-    if os.path.isdir(LOG_DIR):
-        for fname in os.listdir(LOG_DIR):
-            if not (fname.endswith('.log') or fname.endswith('.log.gz')):
-                continue
-            fpath = os.path.join(LOG_DIR, fname)
-            try:
-                mtime = datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc)
-                if mtime >= cutoff:
-                    skipped += 1
-                    continue
-                os.remove(fpath)
-                deleted += 1
-                log.info(f'Deleted {fname}')
-            except Exception as e:
-                log.error(f'Failed to delete {fname}: {e}')
-                skipped += 1
-    return jsonify({'deleted': deleted, 'skipped': skipped})
+
+def _still_idle(run_id):
+    with _active_pids_lock:
+        return run_id not in _active_pids
+
+
+def _log_retention_job():
+    """System job sys_log_retention: no person compresses or deletes a run log, and
+    this job only compresses (log_retention.plan). Writes no database row, so it needs
+    no actor. A database it cannot read means no run this time, never the defaults."""
+    try:
+        cd = _get_config('log_compress_days', '7')
+        entries, stats = [], {}
+        if os.path.isdir(LOG_DIR):
+            for fname in os.listdir(LOG_DIR):
+                if log_retention.RUN_LOG.match(fname):
+                    try:
+                        st = os.stat(os.path.join(LOG_DIR, fname))
+                    except OSError:
+                        continue
+                    entries.append((fname, st.st_mtime))
+                    stats[fname] = (st.st_mtime, st.st_size)
+        ids = sorted({i for i in (log_retention.run_id_of(f) for f, _ in entries) if i is not None})
+        runs = {}
+        if ids:
+            for r in query("""
+                SELECT rr.recipe_run_id, rr.recipe_run_status, u.unit_code, r.recipe_name
+                FROM medcea.recipe_run rr
+                JOIN medcea.cea_unit u ON u.unit_id   = rr.unit_id
+                JOIN medcea.recipe   r ON r.recipe_id = rr.recipe_id
+                WHERE rr.recipe_run_id = ANY(%s)
+            """, (ids,)):
+                runs[r['recipe_run_id']] = {
+                    'status': r['recipe_run_status'],
+                    'basename': os.path.basename(_log_path(r['unit_code'], r['recipe_name'], r['recipe_run_id']))}
+        with _active_pids_lock:
+            active = set(_active_pids)
+        actions = log_retention.plan(entries, time.time(), cd, runs, active)
+        res = log_retention.apply(LOG_DIR, actions, log, still_idle=_still_idle, stats=stats)
+        _RETENTION.update(at=datetime.now(timezone.utc).isoformat(), result=res, error=None)
+        log.info(f"log retention: compressed {res['compressed']}, kept {res['kept']}, errors {res['errors']}")
+    except Exception as e:  # noqa: BLE001
+        _RETENTION.update(at=datetime.now(timezone.utc).isoformat(), error=f'{type(e).__name__}: {e}')
+        log.error(f'log retention: not run: {type(e).__name__}: {e}')
 
 # ---------------------------------------------------------------------------
 # Startup recovery — re-register or reap orphaned run_recipe.py processes
@@ -1402,6 +1493,9 @@ if __name__ == '__main__':
     _check_schema()
     _startup_recovery()
     scheduler.start()
+    scheduler.add_job(_log_retention_job, CronTrigger(hour=3, minute=15, timezone='UTC'),
+                      id='sys_log_retention', replace_existing=True, max_instances=1,
+                      coalesce=True, misfire_grace_time=3600)
     _reload_schedules()
     log.info('Scheduler API ready on :8082')
     app.run(host='0.0.0.0', port=8082, threaded=True)

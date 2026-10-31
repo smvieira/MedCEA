@@ -785,6 +785,7 @@ recipe() {
             STEPS=("run env IAM_GATES=false ./apps/access/deploy.sh" "set IAM_GATES false"
                    "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
             AFTER=("Every gate goes back to operator, qa, auditor, admin; the User Manager to admin only. Each deploy warns while false."
+                   "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every gated host until IAM_GATES is true again."
                    "Node-RED is not exact: before Phase 0 it admitted any signed-in user.") ;;
         IAM_NETPOL:enable)
             PRE=("Every caller of an application pod is listed under network: in apps/iam/policy/defaults.yaml (an unlisted caller times out).")
@@ -794,12 +795,19 @@ recipe() {
             STEPS=("set IAM_NETPOL false" "run ./deploy-infra.sh")
             AFTER=("At once, without a deploy: microk8s kubectl -n <namespace> delete netpol -l medcea/iam-netpol=true (lasts until the next ./deploy-infra.sh while IAM_NETPOL=true).") ;;
         IAM_ENFORCE:enable)
-            PRE=("config.env.example keeps this false until Phase 2.6: you mean to refuse every request the route table does not allow.")
-            STEPS=("run python3 tests/iam-routes-diff.py" "set IAM_ENFORCE true" "run ./deploy-infra.sh")
-            AFTER=("Services read it per request: no restart. Refusals are 401/403/503 from now on.") ;;
+            PRE=("The IAM 2.6 code is deployed with IAM_ENFORCE still false (./deploy-infra.sh, ./apps/database/deploy.sh, then ./deploy-apps.sh --all since the last pull)."
+                 "IAM_DB_ROLES is true (./guide.sh IAM_DB_ROLES): only the database functions check an operator's assigned_run (execute, stop, status, trigger); without it an operator can stop another unit's run (health-check iamenforce FAILs)."
+                 "A report-only soak is over: the services' 'medcea_iam: would refuse' lines from real people are all intended policy (each becomes a 401/403)."
+                 "Enabled accounts hold the roles the work needs (production_manager: runs and schedules; engineer: recipes, devices, algorithms); admin keeps no access to recipes, runs or exports."
+                 "Every operator has a unit in effect (./apps/iam/units.sh list, run before this guide: it takes the deploy lock), or the Monitor and the scheduler show them no runs or telemetry.")
+            STEPS=("run python3 tests/iam-routes-diff.py --strict" "set IAM_ENFORCE true" "run ./deploy-infra.sh")
+            AFTER=("Services read it from ConfigMap medcea-iam-lib per request: live within about a minute (kubelet sync), no restart. Refusals are 401/403/503 from then on."
+                   "The pods' IAM_ENFORCE copy (used only when /iam/ is missing, and then it lets everything through) stays false until each app's next deploy: ./health-check.sh FAILs (iamenforce) until then, so redeploy them when no run is active (./deploy-apps.sh --all)."
+                   "Verify: tests/iam-check.sh (every pod 'enforce', a forged request 'refused' 401), ./health-check.sh, tests/iam-signin.sh (takes the deploy lock).") ;;
         IAM_ENFORCE:rollback)
             STEPS=("set IAM_ENFORCE false" "run ./deploy-infra.sh")
-            AFTER=("Services log 'would refuse' and let the request through. The access Admin port enforces whatever this says.") ;;
+            AFTER=("Services log 'would refuse' and let the request through again within about a minute. The access Admin port and dbmgmt enforce whatever this says."
+                   "The pods' copy stays true until each app's next deploy; it only fails closed when /iam/ is missing.") ;;
         IAM_POSTGREST_JWT:enable)
             PRE=("AUTHENTICATOR_DB_PASS in config.env is set and differs from POSTGRES_PASS (the frontend deploy refuses otherwise).")
             STEPS=("run ./deploy-infra.sh" "set IAM_POSTGREST_JWT true" "run ./apps/frontend/deploy.sh")
@@ -833,6 +841,8 @@ recipe() {
         IAM_DB_ROLES:rollback)
             STEPS=("set IAM_DB_ROLES false" "run ./apps/database/deploy.sh")
             AFTER=("The deploy restarts config-api. health-check iamdbroles WARNs while false, by design."
+                   "While IAM_ENFORCE is true, nothing checks an operator's assigned_run any more (health-check iamenforce FAILs): roll IAM_ENFORCE back too unless this is brief."
+                   "While false, nobody can retire a Q-table from the Config UI (config-api runs every token as anon, which may execute no function). If one must start cold meanwhile: medcea.retire_algorithm_state in psql in the PostgreSQL pod, which records no person."
                    "Before a git revert of the Phase 2 code, also run medcea_db_migrations_down_008b.sql with -v full=1 as postgres (by hand; see CLAUDE.md).") ;;
         WORKBENCH_ENABLED:enable)
             STEPS=("set WORKBENCH_ENABLED true" "run ./deploy-infra.sh")

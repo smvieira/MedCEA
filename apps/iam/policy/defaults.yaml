@@ -22,6 +22,10 @@
 #   {levels: [R, O], constraint: {R: own_unit, O: assigned_run}}
 #                                             one constraint per level (no applies_to)
 # A role not listed in a group's row holds N there.
+#
+# Route syntax (an api member's routes.<"METHOD /path">): a level (U), the levels any of
+# which opens it ([R, K]), or {levels: U, unconstrained_only: true} — only the roles that
+# hold the level without a constraint, for a service that cannot evaluate the constraint.
 
 schema_version: 2
 policy_version: 1
@@ -512,6 +516,7 @@ service_identities:
       Splitting the runner into its own pod is listed in plan Section 7. devices R:
       the runner finds a unit's actuators through medcea.device and medcea.component
       (get_feedback_control_loop_params); never the credential table (service_only).
+      Run, cycle and log reads are limited to the person's units for operators (own_unit).
     db_role: svc_scheduler
     db_password: SVC_SCHEDULER_DB_PASS
     mqtt_user: scheduler
@@ -638,7 +643,10 @@ resource_groups:
       - {type: data, function: "medcea.register_mqtt_credential(int, text, text)", level: C, note: "takes the device id, the board's serial and the hash; refuses unless the serial equals the device row's, and derives user, role and topic from the row"}
       - type: api
         service: platform-api
-        routes: {"GET /devices": R, "GET /devices/<file>": R, "PUT /devices/<file>": U, "GET /check/<host>": R, "GET /check/<host>/<port>": R}
+        # platform-api writes any seed file and cannot evaluate existing_slot: maintenance
+        # gets no PUT until it does (IAM 2.6)
+        routes: {"GET /devices": R, "GET /devices/<file>": R, "PUT /devices/<file>": {levels: U, unconstrained_only: true},
+                 "GET /check/<host>": R, "GET /check/<host>/<port>": R}
       - {type: code, object: "apps/frontend/devices/*.json (seed files served by platform-api)"}
 
   onboarding:
@@ -676,7 +684,10 @@ resource_groups:
       - {type: data, object: medcea.recipe_unit_permission}
       - {type: data, function: "medcea.approve_recipe(int)", level: A}
       - {type: api, service: scheduler, routes: {"GET /api/recipes": R}}
-      - {type: api, service: platform-api, routes: {"GET /": R, "GET /<file>": R, "PUT /<file>": U}}
+      # platform-api writes any recipe file and cannot evaluate draft_only/assign_only, so
+      # no role may PUT one until it does (IAM 2.6): the Config UI's "save to the platform
+      # library" is refused under IAM_ENFORCE (download, and the recipes in the database, stay)
+      - {type: api, service: platform-api, routes: {"GET /": R, "GET /<file>": R, "PUT /<file>": {levels: U, unconstrained_only: true}}}
       - {type: code, object: apps/frontend/recipes/*.json}
 
   controllers:
@@ -772,7 +783,7 @@ resource_groups:
   scheduler_settings:
     label: Scheduler settings (log retention)
     class: config
-    description: How long run logs are kept and when they are compressed.
+    description: When run logs are compressed (log_compress_days); log_delete_days is kept but unused, since no run log is deleted (IAM 2.6).
     why_this_class: Configuration of how regulated logs are retained.
     risk: A shorter retention destroys run logs. The minimum retention is a database CHECK, and every change waits for qa.
     approval:
@@ -806,9 +817,9 @@ resource_groups:
   run_logs:
     label: Run logs
     class: regulated
-    description: The runner's log file per run, kept and compressed by the scheduler according to scheduler_settings.
+    description: The runner's log file per run, kept for good; a finished run's log is compressed after log_compress_days by the scheduler's system job sys_log_retention.
     why_this_class: Part of the run record.
-    risk: A deleted log loses evidence of what the controller did. No person can delete or compress logs; the scheduler does it as a system job.
+    risk: A deleted log loses evidence of what the controller did. No person can delete or compress logs; the scheduler compresses them as a system job and deletes none.
     members:
       - {type: api, service: scheduler, routes: {"GET /api/runs/<id>/log": R}}
 
@@ -1202,8 +1213,9 @@ constraints:
       current unit, so moving a zone to another unit moves its history with it. Such a move
       (an UPDATE of medcea.cea_zone.unit_id, which engineers hold) widens the new unit's
       operators without an account decision; it is recorded only in medcea.row_change — a
-      qa_dual_control gap still open after IAM 2.7 (plan risk R9).
-    enforced_by: ["RLS policies TO rr_operator on medcea.measurement (zone_id ∈ my_zones()), medcea.recipe_run (unit_id ∈ my_units()), medcea.recipe_line_cycle_run and medcea.run_release (through their run); other roles have explicit permissive policies", "monitor and scheduler routes filter by unit (2.6)"]
+      qa_dual_control gap still open after IAM 2.6 (deferred; the Monitor and scheduler
+      filters follow the same current-unit rule).
+    enforced_by: ["RLS policies TO rr_operator on medcea.measurement (zone_id ∈ my_zones()), medcea.recipe_run (unit_id ∈ my_units()), medcea.recipe_line_cycle_run and medcea.run_release (through their run); other roles have explicit permissive policies", "monitor-api.py (all four routes) and scheduler-api.py (GET /api/runs, /api/runs/active, /api/runs/<id>, /api/runs/<id>/cycles, /api/runs/<id>/log) limit an operator to iam_policy.user_unit through medcea_iam.own_unit_sub while IAM_ENFORCE or IAM_DB_ROLES is true (IAM 2.6): their database roles read through permissive policies"]
     rls:
       objects: [medcea.measurement, medcea.recipe_run, medcea.recipe_line_cycle_run, medcea.run_release]
       using:

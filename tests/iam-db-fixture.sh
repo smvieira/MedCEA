@@ -619,15 +619,19 @@ cmd_postgrest() {  # MODE
     tests/iam-postgrest.sh --namespace "$FX_NS" --mode "$1" --dir "$IAMTEST_DIR" || FAILS=$((FAILS + 1))
 }
 
-# svcprobe ROLE LABEL WANT — SQL on stdin, as ROLE (SET SESSION AUTHORIZATION, so
-# rr_admin_login inherits rr_admin as when it logs in), in BEGIN … ROLLBACK.
-# WANT: ok, or "denied" (a permission error expected).
+# svcprobe ROLE LABEL WANT [ISOLATION] — SQL on stdin, as ROLE (SET SESSION AUTHORIZATION,
+# so rr_admin_login inherits rr_admin as when it logs in), in BEGIN [ISOLATION LEVEL …]
+# … ROLLBACK; the SQL must not end the transaction itself.
+# WANT: ok, "denied" (a permission error expected) or err:TEXT (an error containing TEXT).
 svcprobe() {
-    local role="$1" label="$2" want="$3" out
-    out="$( { echo "BEGIN;"; echo "SET SESSION AUTHORIZATION $role;"; cat; echo "SELECT 'probe-done';"; echo "ROLLBACK;"; } \
+    local role="$1" label="$2" want="$3" iso="${4:+ ISOLATION LEVEL $4}" out
+    out="$( { echo "BEGIN$iso;"; echo "SET SESSION AUTHORIZATION $role;"; cat; echo "SELECT 'probe-done';"; echo "ROLLBACK;"; } \
             | fx medcea_db -q -tA -v ON_ERROR_STOP=1 -f - 2>&1)"
     if [[ "$want" == ok ]]; then
         grep -q 'probe-done' <<<"$out" && pass svc "$role: $label" || fail svc "$role: $label: $(grep -m1 ERROR <<<"$out")"
+    elif [[ "$want" == err:* ]]; then
+        grep 'ERROR' <<<"$out" | grep -qF "${want#err:}" && pass svc "$role: $label (refused)" \
+            || fail svc "$role: $label: expected an error with '${want#err:}', got: $(grep -m1 -E 'ERROR|probe-done' <<<"$out")"
     else
         grep -q 'permission denied' <<<"$out" && pass svc "$role: $label (refused)" \
             || fail svc "$role: $label: expected permission denied, got: $(grep -m1 -E 'ERROR|probe-done' <<<"$out")"
@@ -636,7 +640,7 @@ svcprobe() {
 
 # Each service's own statements (the 2.5 inventory: monitor-api.py, dbmgmt-api.py,
 # Node-RED's INSERT, the Grafana dashboard, pgAdmin's rr_admin), as its role. The
-# scheduler's are tests/iam-runner.sh --mode false-svc.
+# scheduler's are tests/iam-runner.sh --mode false-svc, but for its own_unit reads (2.6).
 cmd_svcprobes() {
     step "the services' statements as their own roles (IAM 2.5)"
     svcprobe svc_monitor "runs, cycles, telemetry views" ok <<'SQL'
@@ -644,6 +648,17 @@ SELECT count(*) FROM medcea.recipe_run r JOIN medcea.cea_unit u ON u.unit_id = r
 SELECT count(*) FROM medcea.recipe_line l, medcea.recipe_line_cycle_run x WHERE x.recipe_run_id IS NOT NULL LIMIT 1;
 SELECT count(*) FROM medcea.v_ap_measurements;
 SELECT count(*) FROM medcea.v_ct_measurements;
+SQL
+    # IAM 2.6 own_unit: the scoped reads with a literal sub (monitor-api.py, scheduler-api.py)
+    svcprobe svc_monitor "own_unit scoped reads" ok <<'SQL'
+SELECT count(*) FROM medcea.recipe_run rr WHERE rr.unit_id IN (SELECT uu.unit_id FROM iam_policy.user_unit uu WHERE uu.person_sub = '11111111-1111-4111-8111-111111111111'::uuid);
+SELECT count(*) FROM medcea.measurement m WHERE m.msg_type::text IN ('AP', 'CT') AND m.msg ->> 'unit_code' = 'IAMT01'
+   AND m.zone_id IN (SELECT cz.zone_id FROM medcea.cea_zone cz JOIN iam_policy.user_unit uu ON uu.unit_id = cz.unit_id WHERE uu.person_sub = '11111111-1111-4111-8111-111111111111'::uuid);
+SQL
+    svcprobe svc_scheduler "own_unit scoped reads" ok <<'SQL'
+SELECT count(*) FROM medcea.recipe_run rr WHERE rr.unit_id IN (SELECT uu.unit_id FROM iam_policy.user_unit uu WHERE uu.person_sub = '11111111-1111-4111-8111-111111111111'::uuid);
+SELECT count(*) FROM medcea.recipe_line_cycle_run rlcr WHERE rlcr.recipe_run_id IN (SELECT x.recipe_run_id FROM medcea.recipe_run x
+ WHERE x.unit_id IN (SELECT uu.unit_id FROM iam_policy.user_unit uu WHERE uu.person_sub = '11111111-1111-4111-8111-111111111111'::uuid));
 SQL
     svcprobe svc_dbexport "every listed table and view, every sequence's definition" ok <<'SQL'
 DO $$
@@ -663,6 +678,18 @@ END $$;
 SQL
     svcprobe svc_dbexport "a credential table" denied <<'SQL'
 SELECT 1 FROM medcea.mqtt_credential LIMIT 1;
+SQL
+    # IAM 2.6: every export is one REPEATABLE READ transaction, set_actor → reads → log_export
+    svcprobe svc_dbexport "set_actor then log_export" ok "REPEATABLE READ" <<'SQL'
+SELECT medcea_auth.set_actor('00000000-0000-4000-8000-0000000000e1', '00000000-0000-4000-8000-0000000000e1', 'iamt-auditor', 'auditor');
+SELECT count(*) FROM medcea.measurement;
+SELECT iam_policy.log_export(ARRAY['measurements'], ARRAY['medcea.measurement:table:ddl']);
+SQL
+    svcprobe svc_dbexport "log_export without an actor" "err:no actor" <<'SQL'
+SELECT iam_policy.log_export(ARRAY[]::text[], ARRAY[]::text[]);
+SQL
+    svcprobe svc_dbexport "writing export_log directly" denied <<'SQL'
+INSERT INTO iam_policy.export_log (groups, objects) VALUES ('{}', '{}');
 SQL
     svcprobe svc_ingest "Node-RED's INSERT of a reading" ok <<'SQL'
 INSERT INTO medcea.measurement (measure_timestamp, device_id, device_dns, msg_type, msg)

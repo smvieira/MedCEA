@@ -42,13 +42,14 @@ select.input { appearance: auto; }
 .muted { font-size: .85rem; color: #64748b; }
 .hp { position: absolute; left: -9999px; width: 1px; height: 1px; }
 
-.roles { display: grid; gap: 8px; }
+.roles { display: grid; gap: 8px; max-height: 22rem; overflow-y: auto; }
 .role { display: flex; gap: 10px; align-items: flex-start; background: #0f172a; border: 1px solid #2a364e; border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
 .role:hover { border-color: #3b82f6; }
 .role:has(input:checked) { border-color: #3b82f6; background: #13203a; }
 .role input { margin-top: 3px; accent-color: #3b82f6; }
 .role-t { display: block; font-size: .88rem; font-weight: 600; color: #fff; }
 .role-d { display: block; font-size: .8rem; color: #94a3b8; margin-top: 1px; }
+.role-tag { display: inline-block; margin-left: 6px; font-size: .7rem; font-weight: 500; color: #fbbf24; border: 1px solid #92400e; border-radius: 4px; padding: 0 5px; vertical-align: 1px; }
 
 .options { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: .84rem; color: #94a3b8; }
 .check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }

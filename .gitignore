@@ -22,3 +22,7 @@ __pycache__/
 
 # Local planning notes
 codeplan/
+
+# Database Management platform exports (dbmgmt-api.py EXPORT_DIR)
+apps/database/exports/
+apps/database/medcea_export_*.sql

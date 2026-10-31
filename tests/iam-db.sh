@@ -853,6 +853,30 @@ RESET ROLE;
 SET SESSION AUTHORIZATION svc_scheduler;
 UPDATE medcea.algorithm_state SET retired_at = NULL WHERE channel = 'iamt';
 SQL
+        # IAM 2.6: a Q-table is retired only through PostgREST by qa (the scheduler's
+        # DELETE routes are gone)
+        qstate="
+INSERT INTO medcea.algorithm_state (unit_id, algorithm, channel, state)
+SELECT unit_id, 'Q_LEARNING', 'iamt', '{\"q\": 1}' FROM medcea.cea_unit WHERE unit_code = 'IAMT01';"
+        probe W4 "control: qa retires a Q-table through PostgREST" ok <<SQL
+$qstate
+$(as_token "$T_QA")
+SELECT medcea.retire_algorithm_state(unit_id, 'Q_LEARNING', 'iam-db probe') FROM medcea.cea_unit WHERE unit_code = 'IAMT01';
+--CHECKS
+SELECT 'CHECK|retired, not deleted', retired_at IS NOT NULL FROM medcea.algorithm_state WHERE channel = 'iamt';
+SELECT 'CHECK|retired event with the reason', EXISTS (SELECT 1 FROM medcea.algorithm_state_event WHERE channel = 'iamt' AND event = 'retired' AND reason = 'iam-db probe');
+SELECT 'CHECK|approval by a token', EXISTS (SELECT 1 FROM medcea.approval WHERE target = 'medcea.algorithm_state' AND action = 'retire' AND row_key ->> 2 = 'iamt' AND approved_by_source = 'token');
+SQL
+        probe W4 "an engineer token cannot retire a Q-table" "42501:permission denied" <<SQL
+$qstate
+$(as_token "$T_EN")
+SELECT medcea.retire_algorithm_state(unit_id, 'Q_LEARNING', 'iam-db probe') FROM medcea.cea_unit WHERE unit_code = 'IAMT01';
+SQL
+        probe W4 "svc_scheduler cannot retire a Q-table (no EXECUTE; set_actor is no token)" "42501:permission denied" <<SQL
+$qstate
+SET SESSION AUTHORIZATION svc_scheduler;
+SELECT medcea.retire_algorithm_state(unit_id, 'Q_LEARNING', 'iam-db probe') FROM medcea.cea_unit WHERE unit_code = 'IAMT01';
+SQL
         retention() {  # VALUE EXPECT
             probe W4 "approve_change: log_delete_days = $1" "$2" <<SQL
 $(as_token "$T_AD")
@@ -945,6 +969,33 @@ SELECT 'CHECK|the second operator holds a unit', :'o_has_unit'::boolean;
 SELECT 'CHECK|the operator of IAMT02 sees none of them (' || :o_run || '/' || :o_cyc || '/' || :o_rel || '/' || :o_hist || ')',
        :o_run = 0 AND :o_cyc = 0 AND :o_rel = 0 AND :o_hist = 0;
 SELECT 'CHECK|the production manager sees it', :pm = 1;
+SQL
+        # IAM 2.6: the Monitor's and the scheduler's own_unit SQL (svc_* read through
+        # permissive policies, so the services filter with a subquery on user_unit) returns
+        # exactly what rr_operator's RLS returns: runs, cycles, and the measurements of the
+        # unit's zones by their current unit (the seed's board moved IAMT01/Z01 -> IAMT02/Z01)
+        own_runs="(SELECT uu.unit_id FROM iam_policy.user_unit uu WHERE uu.person_sub = '$UUID_OP'::uuid)"
+        own_zones="(SELECT cz.zone_id FROM medcea.cea_zone cz JOIN iam_policy.user_unit uu ON uu.unit_id = cz.unit_id WHERE uu.person_sub = '$UUID_OP'::uuid)"
+        rows_digest() {  # VAR FROM-AND-WHERE: \gset VAR to the md5 of the sorted rows / their count
+            echo "SELECT md5(coalesce(string_agg(x, ',' ORDER BY x), '')) || '/' || count(*) AS $1 FROM (SELECT md5(t::text) AS x FROM $2) s \\gset"
+        }
+        probe RLS "the services' own_unit SQL returns what rr_operator's RLS returns" ok <<SQL
+$run_full
+INSERT INTO iam_policy.user_unit (person_sub, unit_id) SELECT '$UUID_OP'::uuid, unit_id FROM medcea.cea_unit WHERE unit_code = 'IAMT02';
+SET SESSION AUTHORIZATION svc_monitor;
+$(rows_digest s_run "medcea.recipe_run t WHERE t.unit_id IN $own_runs")
+$(rows_digest s_meas "medcea.measurement t WHERE t.zone_id IN $own_zones")
+$(as_postgres)
+SET SESSION AUTHORIZATION svc_scheduler;
+$(rows_digest s_cyc "medcea.recipe_line_cycle_run t WHERE t.recipe_run_id IN (SELECT x.recipe_run_id FROM medcea.recipe_run x WHERE x.unit_id IN $own_runs)")
+$(as_token "$T_OP")
+$(rows_digest o_run "medcea.recipe_run t")
+$(rows_digest o_meas "medcea.measurement t")
+$(rows_digest o_cyc "medcea.recipe_line_cycle_run t")
+--CHECKS
+SELECT 'CHECK|runs (' || :'s_run' || ')', :'s_run' = :'o_run' AND :'s_run' NOT LIKE '%/0';
+SELECT 'CHECK|measurements (' || :'s_meas' || ')', :'s_meas' = :'o_meas' AND :'s_meas' NOT LIKE '%/0';
+SELECT 'CHECK|cycles (' || :'s_cyc' || ')', :'s_cyc' = :'o_cyc' AND :'s_cyc' NOT LIKE '%/0';
 SQL
         # start_run/set_run_status are SECURITY DEFINER (past the RLS): a run of another
         # unit and a run that does not exist get the same refusal, before any status check

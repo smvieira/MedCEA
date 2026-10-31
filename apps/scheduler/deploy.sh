@@ -106,6 +106,7 @@ rm -f /tmp/scheduler-html-cm.yaml
 log "Creating API script ConfigMap..."
 $KUBECTL create configmap scheduler-api -n "$NAMESPACE" \
   --from-file=scheduler-api.py="$SCRIPT_DIR/scheduler-api.py" \
+  --from-file=log_retention.py="$SCRIPT_DIR/log_retention.py" \
   --dry-run=client -o yaml | $KUBECTL apply -f -
 
 # =============================================================================

@@ -115,6 +115,7 @@
     .logmgmt-stats strong { color: #94a3b8; }
     .logmgmt-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
     .logmgmt-row label { margin-bottom: 0; white-space: nowrap; }
+    .logmgmt-note { font-size: .8rem; color: #64748b; margin: 4px 0 8px; }
     .logmgmt-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
 
     #toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; border: 1px solid #2a364e; color: #e2e8f0; padding: 12px 20px; border-radius: 10px; font-size: .875rem; display: none; z-index: 200; box-shadow: 0 4px 24px rgba(0,0,0,.5); }
@@ -252,29 +253,23 @@
       <div class="logmgmt-stats" id="logmgmt-stats">Loading stats…</div>
 
       <div class="logmgmt-row">
-        <label style="min-width:200px">Compress logs older than</label>
-        <input type="number" class="inline" id="lm-compress-days" min="0" value="7">
+        <label style="min-width:200px">Compress run logs after</label>
+        <input type="number" class="inline" id="lm-compress-days" min="1" value="7">
         <span style="font-size:.85rem;color:#64748b">days</span>
-        <button class="btn btn-sm" onclick="compressLogs()">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Compress Now
-        </button>
       </div>
 
       <div class="logmgmt-row">
-        <label style="min-width:200px">Delete logs older than</label>
-        <input type="number" class="inline" id="lm-delete-days" min="0" value="30">
-        <span style="font-size:.85rem;color:#64748b">days</span>
-        <button class="btn btn-sm btn-danger" onclick="deleteLogs()">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-          Delete Now
-        </button>
+        <label style="min-width:200px">Retention setting (not applied)</label>
+        <input type="number" class="inline" id="lm-delete-days" min="30" placeholder="not set">
+        <span style="font-size:.85rem;color:#64748b">days — run logs are never deleted</span>
       </div>
+
+      <div class="logmgmt-note" id="logmgmt-job"></div>
 
       <div class="logmgmt-actions">
         <button class="btn btn-sm btn-primary" onclick="saveLogDefaults()">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-          Save as Defaults
+          Propose retention
         </button>
       </div>
     </div>
@@ -1132,9 +1127,9 @@ async function openLog(runId, isLive) {
   document.getElementById('log-modal').classList.add('open');
 
   const fullLog = document.getElementById('log-full-checkbox').checked;
-  await _loadLogContent(runId, fullLog);
+  const readable = await _loadLogContent(runId, fullLog);
 
-  if (isLive) {
+  if (isLive && readable) {
     _logPollRunId = runId;
     document.getElementById('live-badge').style.display = '';
     _logPollInterval = setInterval(async () => {
@@ -1156,23 +1151,27 @@ async function openLog(runId, isLive) {
   }
 }
 
+// false when the person may not read run logs (no R on run_logs, IAM 2.6): no live poll
+const NO_LOG_READ = '(your role does not hold R on run logs)';
 async function _loadLogContent(runId, fullLog) {
   const pre = document.getElementById('log-content');
   if (fullLog) {
     // Full mode: fetch entire log via /api/runs/<id>
     const res = await fetch(`${API}/runs/${runId}`);
-    if (!res.ok) { pre.textContent = 'Failed to load.'; return; }
+    if (!res.ok) { pre.textContent = 'Failed to load.'; return true; }
     const r = await res.json();
     document.getElementById('log-unit').textContent = r.unit_code;
     document.getElementById('log-recipe').textContent = r.recipe_name;
     document.getElementById('log-status-badge').innerHTML = statusBadge(r.recipe_run_status);
-    pre.textContent = r.log || '(no output yet)';
+    pre.textContent = r.log_withheld ? NO_LOG_READ : (r.log || '(no output yet)');
     _logPollOffset = new TextEncoder().encode(r.log || '').length;
     pre.scrollTop = pre.scrollHeight;
+    return !r.log_withheld;
   } else {
     // Tail mode: fetch last 50 lines via ?tail=50
     const res = await fetch(`${API}/runs/${runId}/log?tail=50`);
-    if (!res.ok) { pre.textContent = 'Failed to load.'; return; }
+    if (res.status === 403) { pre.textContent = NO_LOG_READ; return false; }
+    if (!res.ok) { pre.textContent = 'Failed to load.'; return true; }
     const data = await res.json();
     document.getElementById('log-unit').textContent = data.unit_code;
     document.getElementById('log-recipe').textContent = data.recipe_name;
@@ -1181,6 +1180,7 @@ async function _loadLogContent(runId, fullLog) {
     _logPollOffset = data.next_offset;
     pre.scrollTop = pre.scrollHeight;
   }
+  return true;
 }
 
 async function toggleLogFull() {
@@ -1204,7 +1204,13 @@ async function loadLogConfig() {
   if (!res.ok) return;
   const d = await res.json();
   document.getElementById('lm-compress-days').value = d.compress_days;
-  document.getElementById('lm-delete-days').value   = d.delete_days;
+  document.getElementById('lm-delete-days').value   = d.delete_days ?? '';
+  const j = d.job || {}, r = j.last_result;
+  document.getElementById('logmgmt-job').textContent =
+    `Compressed by the scheduler ${j.schedule || ''}, never deleted; last run ${j.last_run || 'not yet'}`
+    + (r ? ` — compressed ${r.compressed}, kept ${r.kept}, errors ${r.errors}` : '')
+    + (j.last_error ? ` — error: ${j.last_error}` : '')
+    + `. Minimums: ${d.minimums?.compress_days} / ${d.minimums?.delete_days} days; a change waits for qa.`;
 
   const sizeStr = d.log_size_bytes > 1048576
     ? (d.log_size_bytes / 1048576).toFixed(1) + ' MB'
@@ -1221,8 +1227,9 @@ async function loadLogConfig() {
 
 async function saveLogDefaults() {
   const compress_days = parseInt(document.getElementById('lm-compress-days').value);
-  const delete_days   = parseInt(document.getElementById('lm-delete-days').value);
-  if (isNaN(compress_days) || isNaN(delete_days)) { toast('Enter valid day counts', true); return; }
+  const dd = document.getElementById('lm-delete-days').value.trim();
+  const delete_days   = dd === '' ? null : parseInt(dd);   // empty: left unset
+  if (isNaN(compress_days) || Number.isNaN(delete_days)) { toast('Enter valid day counts', true); return; }
   const res = await fetch(`${API}/config/logs`, {
     method: 'PUT', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({compress_days, delete_days}),
@@ -1233,33 +1240,6 @@ async function saveLogDefaults() {
                     : 'Nothing changed');
   } else if (res.ok) { await apiOk(res); toast('Defaults saved'); }
   else await apiFail(res, 'Defaults not saved');
-}
-
-async function compressLogs() {
-  const days = parseInt(document.getElementById('lm-compress-days').value);
-  if (isNaN(days)) { toast('Enter a valid number of days', true); return; }
-  const res = await fetch(`${API}/logs/compress?days=${days}`, {method:'POST'});
-  if (res.ok) {
-    const d = await res.json();
-    toast(`Compressed ${d.compressed} file${d.compressed !== 1 ? 's' : ''} (${d.skipped} skipped)`);
-    loadLogConfig();
-  } else {
-    toast('Compression failed', true);
-  }
-}
-
-async function deleteLogs() {
-  const days = parseInt(document.getElementById('lm-delete-days').value);
-  if (isNaN(days)) { toast('Enter a valid number of days', true); return; }
-  if (!confirm(`Delete all log files older than ${days} day${days !== 1 ? 's' : ''}?`)) return;
-  const res = await fetch(`${API}/logs/delete?days=${days}`, {method:'POST'});
-  if (res.ok) {
-    const d = await res.json();
-    toast(`Deleted ${d.deleted} file${d.deleted !== 1 ? 's' : ''} (${d.skipped} skipped)`);
-    loadLogConfig();
-  } else {
-    toast('Delete failed', true);
-  }
 }
 
 // ---- Control Algorithms panel ---------------------------------------------
@@ -1301,37 +1281,6 @@ function _populateAlgoSelect(selId, selectedId) {
   sel.innerHTML = '<option value="">— use recipe/unit default —</option>'
     + _algorithms.map(a => `<option value="${a.algorithm_id}">${a.algorithm_name} (${a.algorithm_code})</option>`).join('');
   if (prev) sel.value = prev;
-}
-
-// ---- Units & Control Memory -----------------------------------------------
-async function loadUnitMemory() {
-  const res = await fetch(`${API}/units`);
-  const units = await res.json();
-  const tb = document.getElementById('units-memory-tbody');
-  if (!units.length) { tb.innerHTML = '<tr class="empty-row"><td colspan="4">No units found.</td></tr>'; return; }
-  tb.innerHTML = units.map(u => {
-    const hasState = u.algorithm_state_count > 0;
-    return `<tr>
-      <td><strong>${u.unit_code}</strong></td>
-      <td>${u.recipe_count}</td>
-      <td>${hasState ? `<span style="color:#a5b4fc">${u.algorithm_state_count} record${u.algorithm_state_count!==1?'s':''}</span>` : '<span style="color:#475569">none</span>'}</td>
-      <td><button class="btn btn-sm btn-danger" ${hasState?'':'disabled style="opacity:.4;cursor:not-allowed"'} onclick="clearAlgorithmState(${u.unit_id},'${u.unit_code}')">
-        Clear Control Memory
-      </button></td>
-    </tr>`;
-  }).join('');
-}
-
-async function clearAlgorithmState(uid, ucode) {
-  if (!confirm(`Reset learned control memory for ${ucode}?\nThis will clear Q-Learning history — the algorithm will cold-start next run.`)) return;
-  const res = await fetch(`${API}/units/${uid}/algorithm-state`, {method:'DELETE'});
-  if (res.ok) {
-    const d = await apiOk(res);
-    toast(`Control memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)`);
-    loadUnitMemory();
-  } else {
-    await apiFail(res, 'Memory not cleared');   // 403 once Q-tables are retired, not deleted
-  }
 }
 
 // ---- Algorithm helpers for modals -----------------------------------------
@@ -1386,7 +1335,6 @@ loadSchedules();
 loadRuns();
 loadLogConfig();
 loadAlgorithms();
-loadUnitMemory();
 setInterval(loadActive, 10000);
 setInterval(loadRuns, 30000);
 setInterval(loadSchedules, 30000);

@@ -11,6 +11,8 @@ Every account signs in the way a browser does (tests/iam_signin_flow.py's sign_i
 Keycloak's form → the proxy's callback) and then calls the API with its session cookie, as
 the page does: JSON bodies, Content-Type application/json and Origin https://ACCESS_DOMAIN.
 The steps (spec 8.3):
+  0  (IAM 2.6) admin's GET /api/me and an anonymous GET /api/register/roles offer every
+     policy role, in the policy's order, each with a label and availability prototype/later
   1  admin proposes operator → engineer for the operator account: a widening (the pairs are
      routes.json's widening.operator.engineer, read from apps/iam), so 202 and pending_qa
   2  qa confirms it: 200, and GET /api/users shows the account with role engineer
@@ -112,6 +114,28 @@ def steps(data, ops):
         ok("sign", "%s opened the User Manager" % k)
     adm, qa, qa2 = ops["admin"], ops["qa"], ops["qa2"]
     op_id, qa_id, qa2_id = us["operator"]["id"], us["qa"]["id"], us["qa2"]["id"]
+
+    # 0 — every policy role is offered, to the User Manager and on the public form
+    policy = list(model.load().roles)
+    if sorted(policy) != sorted(routes.compile(model.load())["roles"]):
+        bad("0", "defaults.yaml roles: and routes.json roles differ")
+    status, me = call(adm, "GET", "/api/me")
+    got = me.get("roles", []) if isinstance(me, dict) else []
+    if status == 200 and [x.get("id") for x in got] == policy and all(
+            x.get("label") and x.get("availability") in ("prototype", "later") for x in got):
+        ok("0", "/api/me offers the %d policy roles in order" % len(policy))
+    else:
+        bad("0", "/api/me roles: HTTP %s, %s" % (status, [x.get("id") for x in got if isinstance(x, dict)]))
+    status, _, text = fetch(opener(data.get("cacert")), "https://%s/api/register/roles" % DOMAIN,
+                            None, {"Accept": "application/json"})
+    try:
+        pub = [x.get("id") for x in json.loads(text)]
+    except (ValueError, AttributeError, TypeError):
+        pub = None
+    if status == 200 and pub == policy:
+        ok("0", "the public request form offers the %d policy roles in order (no sign-in)" % len(policy))
+    else:
+        bad("0", "GET /api/register/roles without sign-in: HTTP %s, %s" % (status, pub or text[:80]))
 
     # 1 — a widening waits
     pairs = routes.compile(model.load()).get("widening", {}).get("operator", {}).get("engineer", [])

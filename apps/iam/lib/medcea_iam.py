@@ -16,11 +16,15 @@ route table, mounted at /iam/; standard library plus PyJWT (pyjwt[crypto]).
      in the service's table (literal segments beat <placeholders>); a route missing from
      the table is refused;
   5. allowed if one of the person's roles may call the route. A route whose only grant
-     to them carries a constraint (own_unit, assigned_run …) passes here: the constraint
-     is enforced where the data is (Phase 2), and Decision.constraints names it.
+     to them carries a constraint (own_unit, assigned_run …) passes here, under either
+     value of enforce: check() never evaluates a constraint. Decision.constraints names
+     it, and the database or the service must act on it — own_unit on a read by the
+     reading service through own_unit_sub() (IAM 2.6).
 
-Decision.allow is the verdict. While enforce is false (IAM_ENFORCE, Phase 1) the wrappers
-let every request through and log "would refuse …"; when true they answer 401/403/503.
+Decision.allow is the verdict. While enforce is false (IAM_ENFORCE) the wrappers let
+every request through and log "would refuse …"; when true (IAM 2.6) they answer 401 (no
+or a bad token), 403 (route or role refused) or 503 (no table, an unknown service, or a
+service that cannot verify any token: PyJWT, the realm's keys or the issuer missing).
 Nothing logged contains a token.
 
 actor_role(decision) is the person's own platform role for the database actor
@@ -36,6 +40,13 @@ Read-only questions about the table, for the User Manager (IAM 2.7), none of the
     allows(roles, service, method, path)
                                 whether these roles may call the route: check()'s route match
                                 and role test without a token (the page's capabilities)
+    exportable(decision)        {group: [schema.object]} Database Management may export for the
+                                verified person (routes.json `exports`, IAM 2.6), scoped by
+                                actor_role(), the role the export is logged under; None when
+                                the table has no exports (compiled before 2.6)
+    own_unit_sub(decision)      None when an own_unit read is not limited, else the uuid whose
+                                units (iam_policy.user_unit) bound it (IAM 2.6); NIL_SUB, which
+                                matches no row, for a constrained token without an account uuid
 
 Wrappers, called by each service on every request (the service loads this file itself
 from /iam/ and reloads it when the mount changes, so a missing ConfigMap heals and a new
@@ -49,6 +60,7 @@ version needs no restart):
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -57,6 +69,8 @@ ROUTES_FILE = os.environ.get("MEDCEA_IAM_ROUTES", "/iam/routes.json")
 SETTINGS_FILE = os.environ.get("MEDCEA_IAM_SETTINGS", "/iam/settings.json")
 JWKS_FILE = os.environ.get("MEDCEA_IAM_JWKS", "/jwks/jwks.json")
 LEEWAY = 30  # seconds of clock skew allowed on exp/iat/nbf
+NIL_SUB = "00000000-0000-0000-0000-000000000000"  # own_unit_sub(): a uuid no person has
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 _lock = threading.Lock()
 _cache = {}  # path -> (mtime, parsed)
@@ -158,11 +172,16 @@ def _token(headers):
     return None
 
 
+class _Unavailable(str):
+    """A verify() reason that is the service's fault, not the token's: check() answers
+    503, so a person is not told to sign in again for a server fault."""
+
+
 def _key(jwt, kid):
     for attempt in (0, 1):
         jwks = _load(JWKS_FILE)
         if jwks is None:
-            return None, "the realm's keys (/jwks/jwks.json) are missing"
+            return None, _Unavailable("the realm's keys (/jwks/jwks.json) are missing")
         for k in jwks.get("keys", []):
             if k.get("kid") == kid and k.get("alg", "RS256") == "RS256" and k.get("use", "sig") == "sig":
                 return jwt.PyJWK(k, algorithm="RS256").key, None
@@ -177,10 +196,10 @@ def verify(token, clients):
     try:
         import jwt  # PyJWT
     except ImportError:
-        return None, "PyJWT is not installed in this service"
+        return None, _Unavailable("PyJWT is not installed in this service")
     s = settings()
     if not s.get("issuer"):
-        return None, "no issuer in /iam/settings.json"
+        return None, _Unavailable("no issuer in /iam/settings.json")
     try:
         kid = jwt.get_unverified_header(token).get("kid")
     except jwt.PyJWTError:
@@ -227,7 +246,7 @@ def _check(service, method, path, headers):
         return Decision(False, 401, "no access token")
     claims, why = verify(token, set(svc.get("clients", [])))
     if claims is None:
-        return Decision(False, 401, why)
+        return Decision(False, 503 if isinstance(why, _Unavailable) else 401, str(why))
     platform = set(table.get("roles", []))
     roles = sorted(set(claims.get("groups") or []) & platform)
     who = {"sub": claims.get("sub"), "person_id": claims.get("person_id"),
@@ -262,6 +281,19 @@ def actor_role(decision):
     return own[0] if len(own) == 1 else None
 
 
+def own_unit_sub(decision):
+    """own_unit for a read (IAM 2.6): None when it is not limited, else the uuid whose units
+    (iam_policy.user_unit) bound it. None for no decision, a refused request (report-only
+    lets it through as before) and a person one of whose roles holds the level freely
+    (constraints empty: production_manager + operator). A constrained token whose sub is
+    not an account uuid gets NIL_SUB, which matches no row (fail closed, like my_units())."""
+    if decision is None or not getattr(decision, "allow", False) \
+            or "own_unit" not in (getattr(decision, "constraints", None) or []):
+        return None
+    sub = str((getattr(decision, "who", None) or {}).get("sub") or "")
+    return sub if _UUID.match(sub) else NIL_SUB
+
+
 def widening(old, new):
     """[[group, level], ...] that changing from role `old` (None: no role) to `new` adds, from
     routes.json `widening`; [] when it adds nothing; None when the table has no widening, so
@@ -280,6 +312,20 @@ def roles_including(role):
     if not isinstance(includes, dict):
         return []
     return sorted(r for r, inc in includes.items() if role in (inc or []))
+
+
+def exportable(decision):
+    """{group: [schema.object, ...]} the verified person behind `decision` may export: the
+    groups routes.json exports.roles gives their actor_role() (the role log_export records),
+    each with exports.groups[group]. {} for no verified person, no single own role or no X;
+    None when the table has no `exports` (compiled before 2.6), so a caller fails closed."""
+    ex = (_load(ROUTES_FILE) or {}).get("exports")
+    if not isinstance(ex, dict) or not isinstance(ex.get("roles"), dict) or not isinstance(ex.get("groups"), dict):
+        return None
+    role = actor_role(decision)
+    if role is None:
+        return {}
+    return {g: list(ex["groups"].get(g) or []) for g in sorted(ex["roles"].get(role) or [])}
 
 
 def allows(roles, service, method, path):

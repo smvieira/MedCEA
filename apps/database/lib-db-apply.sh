@@ -5,6 +5,10 @@
 #   db_apply NS POD MODE      MODE: false | true (IAM_DB_ROLES)
 #                             DBA_SERVICE_LOGINS (env, optional): comma-separated login
 #                             roles that may log in while MODE is false (IAM Phase 2.5)
+#   dba_record_switch NS POD DB SWITCH MODE
+#                             appends enforcement_enabled/_disabled {switch: SWITCH} to
+#                             the hash chain when MODE differs from SWITCH's last event
+#                             (deploy-infra.sh, IAM_ENFORCE; IAM 2.6); "skip" before 008a/b
 #
 # Needs: KUBECTL, REPO_ROOT, PROJECT_NAME, CEA_DB. Optional: DBPW_<role> (plaintext
 # passwords: DBPW_authenticator, DBPW_mqtt_auth, DBPW_svc_ingest, … — each sent only as
@@ -271,5 +275,36 @@ BEGIN
                                           '{"switch": "IAM_DB_ROLES"}'::jsonb, 'deploy');
     END IF;
 END $$;
+SQL
+}
+
+# dba_record_switch NS POD DB SWITCH MODE — an enforcement switch that is not the
+# database's own (IAM_ENFORCE) into the hash chain, on a transition only, with the same
+# events and reason as IAM_DB_ROLES' block above. Prints "skip" while
+# iam_policy.append_history or _set_internal_actor is missing; returns psql's status.
+dba_record_switch() {
+    _DBA_NS="$1"; _DBA_POD="$2"
+    [[ "$5" == "false" || "$5" == "true" ]] || { echo "dba_record_switch: MODE must be false or true" >&2; return 2; }
+    _dba_psql "$3" -q -tA -1 -v ON_ERROR_STOP=1 -v sw="$4" -v mode="$5" <<'SQL'
+SELECT pg_catalog.to_regprocedure('iam_policy.append_history(text,jsonb,text)') IS NOT NULL
+   AND pg_catalog.to_regprocedure('medcea_auth._set_internal_actor(text)') IS NOT NULL AS ready \gset
+\if :ready
+SELECT medcea_auth._set_internal_actor('system:deploy') \g /dev/null
+SELECT pg_catalog.set_config('medcea.sw', :'sw', true), pg_catalog.set_config('medcea.sw_mode', :'mode', true) \g /dev/null
+DO $$
+DECLARE
+    sw    text := current_setting('medcea.sw');
+    ev    text := CASE current_setting('medcea.sw_mode') WHEN 'true' THEN 'enforcement_enabled' ELSE 'enforcement_disabled' END;
+    last  text;
+BEGIN
+    SELECT h.event INTO last FROM iam_policy.history h
+     WHERE h.payload ->> 'switch' = sw ORDER BY h.event_id DESC LIMIT 1;
+    IF last IS DISTINCT FROM ev THEN
+        PERFORM iam_policy.append_history(ev, pg_catalog.jsonb_build_object('switch', sw), 'deploy');
+    END IF;
+END $$;
+\else
+\echo skip
+\endif
 SQL
 }

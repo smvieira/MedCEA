@@ -210,8 +210,8 @@ class Wiring(unittest.TestCase):
     def test_scheduler_takes_the_function_path_off_superuser(self):
         api = read("apps/scheduler/scheduler-api.py")
         self.assertIn("return _enforcing(cur) or not _superuser(cur)", api)
-        for anchor in ("a Q-table is retired, never deleted", "a completed run is not reopened",
-                       "SELECT medcea.propose_setting"):
+        self.assertNotIn("DELETE FROM medcea.algorithm_state", api)   # IAM 2.6: retired, never deleted
+        for anchor in ("a completed run is not reopened", "SELECT medcea.propose_setting"):
             i = api.index(anchor)
             self.assertIn("_functions_only(cur)", api[api.rindex("\n    with tx()", 0, i) if "propose" in anchor else i - 400:i],
                           anchor)
@@ -221,9 +221,13 @@ class Wiring(unittest.TestCase):
         self.assertNotIn("information_schema.sequences", api)
         self.assertIn("pg_catalog.pg_sequence", api)
         self.assertIn("c.relkind = 'S'", api)
-        exp = api[api.index("def build_export"):api.index("# ── Access policy check")]
-        self.assertLess(exp.index("listed = {"), exp.index("get_data_inserts"))
-        self.assertIn("not in listed", exp)
+        # IAM 2.6: the person's X groups narrow the listing, and the export is logged
+        # (set_actor -> reads -> log_export) before it commits
+        exp = api[api.index("def run_export"):api.index("# ── Access policy check")]
+        self.assertLess(exp.index("exportable_objects("), exp.index("get_data_inserts("))
+        self.assertIn("not in allowed", exp)
+        self.assertLess(exp.index("SELECT medcea_auth.set_actor"), exp.index("SELECT iam_policy.log_export"))
+        self.assertLess(exp.index("SELECT iam_policy.log_export"), exp.index("con.commit()"))
 
 
 if __name__ == "__main__":

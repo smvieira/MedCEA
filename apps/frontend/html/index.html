@@ -911,6 +911,16 @@
       // this is not a browser navigation. The page therefore cannot tell that
       // the session has gone, and every tab shows "Request failed" until
       // somebody reloads by hand. Send them through the login flow instead.
+      // A database refusal (SQLSTATE 42501: 403, or 401 as anon) is not a session
+      // problem; token failures carry PGRST30x, pre_request's 28000.
+      if (r.status === 401 || r.status === 403) {
+        let e = null;
+        try { e = await r.clone().json(); } catch(_) {}
+        if (e && e.code === '42501') {
+          sessionStorage.removeItem('cfgReauth');
+          throw new Error(friendlyDbError(e.message || 'refused by the database'));
+        }
+      }
       if (r.status === 401 || r.status === 403) {
         if (!sessionStorage.getItem('cfgReauth')) {
           sessionStorage.setItem('cfgReauth', '1');
@@ -938,6 +948,8 @@
       if (/cea_zone_unit_code_ci_uk/.test(msg)) return 'A zone with that code already exists in this unit (codes are compared ignoring case).';
       if (/cea_unit_code_ci_uk|unit_code_uk/.test(msg)) return 'A unit with that code already exists (codes are compared ignoring case).';
       if (/dns_name_uk/.test(msg)) return 'Another device already has that hostname.';
+      if (/permission denied for function retire_algorithm_state|holds no approval on controllers_state|approvals are made by a person signed in through the API/.test(msg))
+        return 'Retiring learned state needs a qa person signed in (approval on controllers_state).';
       return msg;
     }
 
@@ -2864,8 +2876,8 @@
               <td>${i === 0 ? `<strong>${u.unit_code}</strong>` : ''}</td>
               <td>${i === 0 ? u.recipe_count : ''}</td>
               <td><span class="algo-badge">${algo}</span> <a href="#" style="color:#a5b4fc;text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" onclick="event.preventDefault();openAlgoStateModal(${u.unit_id},'${u.unit_code}','${algo}')">${cnt} record${cnt!==1?'s':''}</a></td>
-              <td><button class="btn btn-sm btn-danger" onclick="clearAlgorithmState(${u.unit_id},'${u.unit_code}','${algo}')">
-                Clear
+              <td><button class="btn btn-sm btn-danger" onclick="retireAlgorithmState(${u.unit_id},'${u.unit_code}','${algo}')">
+                Retire…
               </button></td>
             </tr>`);
           });
@@ -2874,17 +2886,17 @@
       tb.innerHTML = rows.join('');
     }
 
-    async function clearAlgorithmState(uid, ucode, algo) {
-      if (!confirm(`Reset ${algo} memory for ${ucode}?\nThe algorithm will cold-start on the next run.`)) return;
-      const res = await fetch(`${SCHED_API}/units/${uid}/algorithm-state/${algo}`, {method:'DELETE'});
-      if (res.ok) {
-        const d = await res.json();
-        toast(`${algo} memory cleared (${d.purged} record${d.purged!==1?'s':''} purged)` + schedAdvisory(d));
+    // A Q-table is retired, never deleted (IAM 2.6): medcea.retire_algorithm_state
+    // through PostgREST, by a qa person (A on controllers_state); recorded with the reason.
+    async function retireAlgorithmState(uid, ucode, algo) {
+      const reason = prompt(`Retire ${algo} learned state for ${ucode}?\nNothing is deleted; the next run starts cold. Reason (recorded):`);
+      if (reason === null) return;
+      if (!reason.trim()) { toast('A reason is required', false); return; }
+      try {
+        const n = await api('POST', '/rpc/retire_algorithm_state', {p_unit_id: uid, p_algorithm: algo, p_reason: reason.trim()});
+        toast(`${algo} state retired for ${ucode} (${n} channel${n!==1?'s':''}); the next run starts cold`);
         loadUnitMemory();
-      } else {
-        // IAM_DB_ROLES=true: a Q-table is retired by an approver, never deleted (403)
-        await schedRefusal(res, 'Memory not cleared');
-      }
+      } catch(e) { toast('Not retired: ' + e.message, false); }
     }
 
     // ── Algorithm State Modal ─────────────────────────────────

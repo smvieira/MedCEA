@@ -28,6 +28,8 @@ def _member_keys(m):
 
 
 def _route_levels(lv):
+    if isinstance(lv, dict):
+        lv = lv.get("levels")
     return lv if isinstance(lv, list) else [lv]
 
 
@@ -53,6 +55,8 @@ def _structure(p, err):
                 err(f"group {g}: ui host {m['host']} not in hosts")
             if m["type"] == "api":
                 for route, lv in m["routes"].items():
+                    if isinstance(lv, dict) and set(lv) - {"levels", "unconstrained_only"}:
+                        err(f"group {g}: route {route} has keys other than levels, unconstrained_only")
                     for x in _route_levels(lv):
                         if x not in p.levels:
                             err(f"group {g}: route {route} level {x} unknown")

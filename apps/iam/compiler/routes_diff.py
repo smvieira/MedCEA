@@ -17,8 +17,9 @@ pg8000 and a cluster):
   resolver  platform-api dispatches on a function of the path (_resolve), which is run
             alone on probe paths built from its own constants.
 
-Two lists say which differences are planned. REMOVED: served now, removed by plan task
-2.6. NOT_BUILT: in the table before their code exists. An entry that no longer applies
+Two lists say which differences are planned. REMOVED: served now, removed by a later
+plan task (empty since 2.6, kept for the next planned removal). NOT_BUILT: in the table
+before their code exists. An entry that no longer applies
 fails the diff, so neither list outlives its reason.
 """
 import ast
@@ -44,12 +45,7 @@ SOURCES = {
                        "cls": "H", "resolver": "_resolve", "resolves": {"GET": ("list", "file"), "PUT": ("file",)}},
 }
 
-REMOVED = {
-    ("scheduler", "POST /api/logs/delete"): "2.6",
-    ("scheduler", "POST /api/logs/compress"): "2.6",
-    ("scheduler", "DELETE /api/units/<uid>/algorithm-state"): "2.6",
-    ("scheduler", "DELETE /api/units/<uid>/algorithm-state/<algorithm>"): "2.6",
-}
+REMOVED = {}
 
 NOT_BUILT = {
     ("iam", None): "4.1",

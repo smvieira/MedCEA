@@ -432,8 +432,8 @@ print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
       | $MK8S kubectl apply -f -
     rm -rf "$_IAM_DIR"
     [[ "${IAM_ENFORCE:-false}" == "true" ]] \
-        && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow.${NC}" \
-        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (Phase 1).${NC}"
+        && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow (live within about a minute).${NC}" \
+        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./guide.sh).${NC}"
 elif [[ "${IAM_GATES:-true}" == "false" ]]; then
     echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
 else
@@ -599,6 +599,21 @@ _PG_EXEC=($MK8S kubectl exec -n "$NAMESPACE" rdbms-postgresql-0 -- env PGPASSWOR
 if [[ "$("${_PG_EXEC[@]}" "SELECT 1 FROM pg_database WHERE datname='keycloak'" | tr -d '[:space:]')" != "1" ]]; then
     echo -e "${YELLOW}  Creating database 'keycloak'...${NC}"
     "${_PG_EXEC[@]}" "CREATE DATABASE keycloak ENCODING 'UTF8' TEMPLATE template0"
+fi
+
+# IAM_ENFORCE in the access history (IAM 2.6): enforcement_enabled/_disabled
+# {switch: IAM_ENFORCE} on a transition, as the database deploy records IAM_DB_ROLES.
+# Best effort: the switch is in force through ConfigMap medcea-iam-lib either way.
+# dba_record_switch reads the password inside the pod (not _PG_EXEC, which puts it in argv).
+if [[ "$("${_PG_EXEC[@]}" "SELECT 1 FROM pg_database WHERE datname='$POSTGRES_DB'" | tr -d '[:space:]')" == "1" ]]; then
+    KUBECTL="$MK8S kubectl" REPO_ROOT="$SCRIPT_DIR"
+    source "$SCRIPT_DIR/apps/database/lib-db-apply.sh"
+    _ENF=false; [[ "${IAM_ENFORCE:-false}" == "true" ]] && _ENF=true
+    if ! _OUT="$(dba_record_switch "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" IAM_ENFORCE "$_ENF" 2>&1)"; then
+        echo -e "${YELLOW}WARNING: could not record IAM_ENFORCE in iam_policy.history; the switch itself is in force: ${_OUT:0:200}${NC}" >&2
+    elif [[ "$_OUT" == *skip* ]]; then
+        echo -e "${YELLOW}  IAM_ENFORCE not recorded in the access history: migration 008b is not applied yet (./apps/database/deploy.sh).${NC}"
+    fi
 fi
 
 # Keycloak
@@ -1882,7 +1897,7 @@ echo -e "    Realm:         $KEYCLOAK_REALM  (all SSO users managed here)"
 echo -e "    User portal:   https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/account"
 echo -e "  User Manager:    https://$ACCESS_DOMAIN   (requests and users: admin; decisions and review: qa; ./deploy-apps.sh installs it)"
 echo -e "    Register:      https://$ACCESS_DOMAIN/register   (the portal sign-in page links here)"
-echo -e "    Portal gate:   realm roles operator / qa / auditor / admin"
+echo -e "    Portal gate:   the roles compiled for PORTAL_DOMAIN (python3 apps/iam/compiler/cli.py hosts)"
 echo ""
 echo -e "${GREEN}  INTERNAL (cluster-only)${NC}"
 echo -e "${GREEN}  -----------------------${NC}"

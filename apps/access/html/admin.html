@@ -237,6 +237,10 @@ const $ = id => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const fmt = s => s ? new Date(s).toLocaleString() : '—';
 const roleName = id => (ROLES.find(r => r.id === id) || { label: id || '—' }).label;
+// A role's description for the selects' note; availability 'later' (qc, qp) is offered, not yet built.
+const roleDesc = id => { const r = ROLES.find(x => x.id === id); if (!r) return '';
+  return (r.description || '') + (r.availability === 'later' ? ' Planned role: most of its duties are not built in this prototype yet.' : ''); };
+const roleOption = (x, selected) => { const o = el('option', null, x.label + (x.availability === 'later' ? ' (not yet in use)' : '')); o.value = x.id; o.selected = selected; return o; };
 const TPL_TITLES = { 'new-request': 'New request (to admins)', approved: 'Approved', reassigned: 'Approved, role reassigned', rejected: 'Rejected' };
 const VARS = ['first_name', 'last_name', 'username', 'email', 'organisation', 'requested_role', 'requested_role_label',
               'granted_role', 'granted_role_label', 'justification', 'notes', 'notes_block', 'decided_by', 'portal_url', 'admin_url', 'platform', 'request_id'];
@@ -322,7 +326,7 @@ async function load(keepId) {
   rows.forEach(r => {
     const it = el('div', 'item'); it.dataset.id = r.request_id;
     it.append(el('div', 'nm', r.first_name + ' ' + r.last_name + ' · ' + r.username), el('span', 'pill p-' + r.status, r.status));
-    it.append(el('div', 'meta', r.email + ' — ' + (r.status === 'approved' ? 'granted ' + r.granted_role + grantState(r) : 'requested ' + r.requested_role) + ' — ' + fmt(r.created_at)));
+    it.append(el('div', 'meta', r.email + ' — ' + (r.status === 'approved' ? 'granted ' + roleName(r.granted_role) + grantState(r) : 'requested ' + roleName(r.requested_role)) + ' — ' + fmt(r.created_at)));
     it.onclick = () => select(r);
     list.append(it);
   });
@@ -362,8 +366,8 @@ function select(r) {
   d.append(el('h3', null, 'History'), ul);
   api('/api/requests/' + r.request_id + '/history').then(rows => rows.forEach(h => {
     const li = el('li');
-    const what = { submitted: 'Submitted, requesting ' + h.requested_role, approved: 'Approved as ' + h.granted_role,
-                   reassigned: 'Approved with role reassigned: ' + h.requested_role + ' → ' + h.granted_role, rejected: 'Rejected' }[h.event] || h.event;
+    const what = { submitted: 'Submitted, requesting ' + roleName(h.requested_role), approved: 'Approved as ' + roleName(h.granted_role),
+                   reassigned: 'Approved with role reassigned: ' + roleName(h.requested_role) + ' → ' + roleName(h.granted_role), rejected: 'Rejected' }[h.event] || h.event;
     li.append(el('div', null, what + ' — by ' + h.actor), el('div', 'when', fmt(h.occurred_at)));
     if (h.notes && h.event !== 'submitted') li.append(el('div', 'n', h.notes));
     ul.append(li);
@@ -380,9 +384,9 @@ function composer(d, r) {
   const roleWrap = el('div');
   const l1 = el('label', null, 'Role to grant'); l1.htmlFor = 'role';
   const sel = el('select'); sel.id = 'role';
-  ROLES.forEach(x => { const o = el('option', null, x.label); o.value = x.id; if (x.id === r.requested_role) o.selected = true; sel.append(o); });
-  const hint = el('div', 'note');
-  roleWrap.append(l1, sel, hint);
+  ROLES.forEach(x => sel.append(roleOption(x, x.id === r.requested_role)));
+  const desc = el('div', 'note'), hint = el('div', 'note');
+  roleWrap.append(l1, sel, desc, hint);
 
   const l2 = el('label'); l2.htmlFor = 'notes';
   const ta = el('textarea'); ta.id = 'notes'; ta.maxLength = 4000;
@@ -429,13 +433,14 @@ function composer(d, r) {
     status.textContent = edited ? 'Edited by you — changes to the decision no longer update it.' : 'Follows the template; edit freely before sending.';
     reload.hidden = !edited;
     const re = decision === 'approve' && sel.value !== r.requested_role;
+    desc.textContent = roleDesc(sel.value);
     hint.className = 'note' + (re ? ' re' : '');
-    hint.textContent = (re ? 'Role reassigned: they asked for ' + r.requested_role + '. Explain why in the notes — the e-mail includes them. ' : '') +
+    hint.textContent = (re ? 'Role reassigned: they asked for ' + roleName(r.requested_role) + '. Explain why in the notes — the e-mail includes them. ' : '') +
                        (decision === 'approve' ? 'The account is enabled, and the e-mail sent, when a qa person confirms.' : '');
     roleWrap.hidden = decision === 'reject';
     l2.replaceChildren(document.createTextNode('Notes '), el('span', 'opt', decision === 'reject' ? 'required — recorded and put in the e-mail as $notes_block' : 'optional — recorded and put in the e-mail as $notes_block'));
     go.className = 'go' + (decision === 'reject' ? ' r' : '');
-    go.textContent = decision === 'reject' ? 'Reject request' + (send.checked ? ' and send e-mail' : '') : 'Approve as ' + sel.value + ' (waits for qa)';
+    go.textContent = decision === 'reject' ? 'Reject request' + (send.checked ? ' and send e-mail' : '') : 'Approve as ' + roleName(sel.value) + ' (waits for qa)';
     [ls, subj, lb, body, foot].forEach(x => x.style.opacity = send.checked ? 1 : .45);
   }
   bA.onclick = () => { decision = 'approve'; bA.className = 'on a'; bR.className = 'r'; refresh(); };
@@ -576,8 +581,8 @@ function selectUser(u) {
   api('/api/users/' + u.id + '/history').then(rows => {
     if (!rows.length) ul.append(el('li', 'when', 'No activations or deactivations recorded.'));
     rows.forEach(h => {
-      const what = h.action === 'role_changed' ? 'Role changed: ' + (h.from_role || 'none') + ' → ' + h.to_role
-                 : (h.action === 'deactivated' ? 'Deactivated' : 'Activated' + (h.to_role ? ' as ' + h.to_role : ''));
+      const what = h.action === 'role_changed' ? 'Role changed: ' + (h.from_role ? roleName(h.from_role) : 'none') + ' → ' + roleName(h.to_role)
+                 : (h.action === 'deactivated' ? 'Deactivated' : 'Activated' + (h.to_role ? ' as ' + roleName(h.to_role) : ''));
       const li = el('li'); li.append(el('div', null, what + ' — by ' + h.actor + (h.decision_id ? ' (decision #' + h.decision_id + ')' : '')), el('div', 'when', fmt(h.occurred_at)));
       if (h.reason) li.append(el('div', 'n', h.reason));
       ul.append(li);
@@ -598,13 +603,13 @@ function withdrawSection(d, id, after) {
 }
 function roleSection(d, u) {
   d.append(el('h3', null, 'Platform role'));
-  const cur = u.roles.length ? u.roles.join(', ') : 'none';
+  const cur = u.roles.length ? u.roles.map(roleName).join(', ') : 'none';
   const from = u.roles.length === 1 ? u.roles[0] : null;    // none or several: a change from none
   const sel = el('select'); sel.id = 'urole';
-  ROLES.forEach(x => { const o = el('option', null, x.label); o.value = x.id; if (u.roles[0] === x.id) o.selected = true; sel.append(o); });
-  const hint = el('div', 'note');
+  ROLES.forEach(x => sel.append(roleOption(x, u.roles[0] === x.id)));
+  const hint = el('div', 'note'), desc = el('div', 'note');
   const lr = el('label', null, 'Role'); lr.htmlFor = 'urole';
-  d.append(lr, sel, hint);
+  d.append(lr, sel, hint, desc);
   const f = actionForm(d, 'urreason', 'Reason', true, 'Change role', 'btn pri');
   function refresh() {
     const same = u.roles.length === 1 && sel.value === u.roles[0];
@@ -612,20 +617,21 @@ function roleSection(d, u) {
     f.go.disabled = same || !!u.pending_decision;
     f.go.textContent = w.length ? 'Change (waits for qa)' : 'Change role';
     hint.className = 'note' + (same ? '' : ' re');
+    desc.textContent = roleDesc(sel.value);
     hint.textContent = u.pending_decision ? 'Decision #' + u.pending_decision.id + ' is waiting for qa — withdraw it first.'
       : same ? 'Current role.'
-      : w.length ? 'Changes ' + cur + ' → ' + sel.value + '. It adds ' + w.map(p => p[0] + ' · ' + p[1]).join(', ') + ', so it waits for a qa person.'
-      : 'Changes ' + cur + ' → ' + sel.value + '. A narrowing: applied at once (MQTT person credentials revoked), takes effect within a few minutes, without signing out.';
+      : w.length ? 'Changes ' + cur + ' → ' + roleName(sel.value) + '. It adds ' + w.map(p => p[0] + ' · ' + p[1]).join(', ') + ', so it waits for a qa person.'
+      : 'Changes ' + cur + ' → ' + roleName(sel.value) + '. A narrowing: applied at once (MQTT person credentials revoked), takes effect within a few minutes, without signing out.';
   }
   sel.onchange = refresh; refresh();
   f.go.onclick = async () => {
     if (!f.ta.value.trim()) { f.res.className = 'res bad'; f.res.textContent = 'Give a reason for the role change.'; f.ta.focus(); return; }
-    if (!confirm('Change the role of ' + u.display_name + ' from ' + cur + ' to ' + sel.value + '?')) return;
+    if (!confirm('Change the role of ' + u.display_name + ' from ' + cur + ' to ' + roleName(sel.value) + '?')) return;
     f.go.disabled = true;
     try {
       const out = await post('/api/users/' + u.id + '/role', { role: sel.value, reason: f.ta.value });
       f.res.className = 'res good';
-      f.res.textContent = out.__status === 202 ? WAIT(out.decision.decision_id) : 'Role changed: ' + (out.from || 'none') + ' → ' + out.role + '.';
+      f.res.textContent = out.__status === 202 ? WAIT(out.decision.decision_id) : 'Role changed: ' + (out.from ? roleName(out.from) : 'none') + ' → ' + roleName(out.role) + '.';
       setTimeout(() => loadUsers(u.id), 900);
     } catch (e) { f.res.className = 'res bad'; f.res.textContent = 'Not changed: ' + e.message; f.go.disabled = false; }
   };
@@ -658,8 +664,8 @@ $('usearch').addEventListener('input', paintUsers);
 let DECISIONS = [], dfilter = 'pending_qa', dcurrent = null, ATTEST = '';
 function unitName(x) { return x.unit_code || ('unit #' + x.unit_id); }
 function kindLabel(x) {
-  return ({ grant: 'Grant: ' + x.to_role, role_change: 'Role: ' + (x.from_role || 'none') + ' → ' + x.to_role,
-            activate: 'Activate' + (x.from_role ? ' (' + x.from_role + ')' : ''), deactivate: 'Deactivated',
+  return ({ grant: 'Grant: ' + roleName(x.to_role), role_change: 'Role: ' + (x.from_role ? roleName(x.from_role) : 'none') + ' → ' + roleName(x.to_role),
+            activate: 'Activate' + (x.from_role ? ' (' + roleName(x.from_role) + ')' : ''), deactivate: 'Deactivated',
             person_id: 'person_id → ' + x.new_person_id, mail_settings: 'Mail settings',
             unit_assign: 'Unit: ' + unitName(x) + ' assigned', unit_remove: 'Unit: ' + unitName(x) + ' removed',
             zone_assign: 'Zone #' + x.zone_id + ' assigned', zone_remove: 'Zone #' + x.zone_id + ' removed' })[x.kind] || x.kind;
@@ -696,9 +702,9 @@ async function loadDecisions(keepId) {
   if (again) selectDecision(again);
 }
 function effectText(x) {
-  return ({ grant: x.username + ' gets ' + x.to_role + ' access and the account is enabled',
-            role_change: x.username + "'s role becomes " + x.to_role,
-            activate: x.username + "'s account is enabled with its role " + (x.from_role || ''),
+  return ({ grant: x.username + ' gets ' + roleName(x.to_role) + ' access and the account is enabled',
+            role_change: x.username + "'s role becomes " + roleName(x.to_role),
+            activate: x.username + "'s account is enabled with its role " + (x.from_role ? roleName(x.from_role) : ''),
             person_id: x.username + ' is recorded as person ' + x.new_person_id,
             mail_settings: 'the new sending account is used, also for Forgot password? e-mails',
             unit_assign: x.in_effect ? x.username + ' keeps ' + unitName(x) : x.username + ' gets ' + unitName(x) })[x.kind] || 'the decision is closed';

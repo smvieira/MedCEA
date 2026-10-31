@@ -19,7 +19,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
-from compiler import grants, invariants, model, netpol, proxies, routes  # noqa: E402
+from compiler import grants, invariants, model, netpol, proxies, routes, routes_diff  # noqa: E402
 
 GOLDEN = os.path.join(REPO, "tests", "iam-grants.golden.json")
 UPDATE_GOLDEN = "--update-golden" in sys.argv
@@ -203,14 +203,32 @@ class RoutesTest(unittest.TestCase):
                     n += 1
                     entry = self.doc["services"][m["service"]]["routes"][route]
                     self.assertEqual(entry["group"], g, route)
+                    lv = lv["levels"] if isinstance(lv, dict) else lv
                     self.assertEqual(entry["levels"], lv if isinstance(lv, list) else [lv], route)
         self.assertEqual(n, sum(len(s["routes"]) for s in self.doc["services"].values()))
 
     def test_every_route_is_open_to_some_role(self):
+        # but for platform-api's recipe PUT, closed on purpose (IAM 2.6, below)
         for svc, sd in self.doc["services"].items():
             for route, e in sd["routes"].items():
-                self.assertTrue(e["roles"], f"{svc} {route}: no role may call it")
+                if (svc, route) != ("platform-api", "PUT /<file>"):
+                    self.assertTrue(e["roles"], f"{svc} {route}: no role may call it")
                 self.assertTrue(set(e["roles"]) <= set(self.policy.roles), route)
+
+    def test_unconstrained_only_routes(self):
+        # IAM 2.6: platform-api cannot evaluate draft_only/assign_only/existing_slot, so its
+        # file PUTs admit only the roles that hold U there without a constraint
+        api = self.doc["services"]["platform-api"]["routes"]
+        self.assertEqual(api["PUT /devices/<file>"]["roles"], {"engineer": None})
+        self.assertEqual(api["PUT /<file>"]["roles"], {})
+        for svc, sd in self.doc["services"].items():
+            for route, e in sd["routes"].items():
+                if svc == "platform-api":
+                    self.assertTrue(all(c is None for c in e["roles"].values()), f"{svc} {route}: constrained")
+        bad = copy.deepcopy(self.policy.data)
+        _member("recipes", "service", "platform-api")(bad)["routes"]["PUT /<file>"]["only"] = True
+        errors, _ = invariants.check(model.Policy(bad))
+        self.assertTrue(any("PUT /<file> has keys other than" in e for e in errors), errors)
 
     def test_roles_and_constraints(self):
         sched = self.doc["services"]["scheduler"]["routes"]
@@ -272,6 +290,45 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(sched["GET /api/param-sets"]["group"], "controllers")
         # DELETE on a schedule retires it (medcea.retire_schedule): still level U
         self.assertEqual(sched["DELETE /api/schedules/<id>"]["levels"], ["U"])
+
+    def test_exports_table_2_6(self):
+        # Database Management's only source for what a person may export (IAM 2.6)
+        ex = self.doc["exports"]
+        self.assertEqual(ex["tool"], "db_export")
+        mirrors = sorted(self.policy.groups["db_export"]["mirrors"])
+        self.assertEqual(sorted(ex["groups"]), mirrors)
+        self.assertEqual(sorted(ex["roles"]), sorted(self.policy.roles))
+        for r in ("auditor", "qa"):
+            self.assertEqual(ex["roles"][r], mirrors, r)
+        self.assertEqual(ex["roles"]["qp"], ["audit_histories", "measurements", "runs"])
+        for r in set(self.policy.roles) - {"auditor", "qa", "qp"}:
+            self.assertEqual(ex["roles"][r], [], r)
+        # the export and the service ceiling cannot drift apart
+        objs = {o for g in ex["groups"].values() for o in g}
+        selects = {o for g, k, o, pv in grants.privileges(self.policy)
+                   if g == "svc_dbexport" and k == "table" and pv == "SELECT"}
+        self.assertEqual(objs, selects)
+        for o in ("medcea.mqtt_credential", "iam.mail_settings", "medcea.backup_remote_to_insert_measurement"):
+            self.assertNotIn(o, objs)
+        bad = copy.deepcopy(self.policy.data)
+        del bad["resource_groups"]["db_export"]["mirrors"]
+        with self.assertRaisesRegex(routes.RouteError, "db_export"):
+            routes.compile(model.Policy(bad))
+
+    def test_every_x_group_with_data_is_exported(self):
+        # an X cell on a group with data the export does not mirror would export nothing, silently
+        mirrors = set(self.policy.groups["db_export"]["mirrors"])
+        for g, gd in self.policy.groups.items():
+            has_data = any(m["type"] == "data" and "object" in m and not m.get("service_only") for m in gd["members"])
+            if has_data and routes._who(self.policy, g, ["X"]):
+                self.assertIn(g, mirrors, g)
+
+    def test_no_constrained_x(self):
+        # dbmgmt cannot evaluate a constraint: a constrained X would quietly export nothing.
+        # If one appears, decide how dbmgmt evaluates it before relaxing this.
+        for g in self.policy.groups:
+            for r, c in routes._who(self.policy, g, ["X"]).items():
+                self.assertIsNone(c, (g, r))
 
     def test_clients_and_public(self):
         every = sorted({h["client"] for h in self.policy.hosts.values()})
@@ -746,6 +803,38 @@ class WiringTest(unittest.TestCase):
         with open(os.path.join(REPO, rel)) as f:
             return f.read()
 
+    def test_own_unit_reads_are_scoped(self):
+        # IAM 2.6: every monitor/scheduler handler of a route that grants own_unit calls
+        # _unit_scope, and the services' SQL is still my_units()/my_zones()'s rule
+        doc, iam = routes.compile(self.policy), routes_diff._medcea_iam()
+        found = {}
+        for svc in ("monitor", "scheduler"):
+            table = doc["services"][svc]["routes"]
+            tree = ast.parse(self.read(routes_diff.SOURCES[svc]["file"]))
+            for fn in ast.walk(tree):
+                if not isinstance(fn, ast.FunctionDef):
+                    continue
+                served, _, _ = routes_diff._flask(ast.Module(body=[fn], type_ignores=[]))
+                for method, path in served:
+                    key = iam.match(table, method, path)
+                    if key and any("own_unit" in (c or []) for c in table[key]["roles"].values()):
+                        calls = {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+                        self.assertIn("_unit_scope", calls, f"{svc} {method} {path} ({fn.name})")
+                        found[svc] = found.get(svc, 0) + 1
+        self.assertEqual(found, {"monitor": 4, "scheduler": 5})
+        units = "FROM iam_policy.user_unit uu WHERE uu.person_sub = %s::uuid"
+        zones = "JOIN iam_policy.user_unit uu ON uu.unit_id = cz.unit_id"
+        mon, sch = self.read("apps/monitor/monitor-api.py"), self.read("apps/scheduler/scheduler-api.py")
+        self.assertIn(units, mon)
+        self.assertIn(units, sch)
+        self.assertIn(zones, mon)
+        mig = self.read("apps/database/medcea_db_migrations.sql")
+        body = mig[mig.index("FUNCTION medcea_auth.my_zones()"):]
+        self.assertIn(zones, body[:body.index("END $$")])
+        for src in (mon, sch):   # iam_signin_flow counts 'would refuse' lines
+            self.assertNotIn("own_unit: would refuse", src)
+            self.assertNotIn("run_logs: would refuse", src)
+
     def test_every_host_has_an_enforcement_status(self):
         self.assertEqual(set(proxies.ENFORCEMENT), set(self.policy.hosts))
 
@@ -832,7 +921,8 @@ class WiringTest(unittest.TestCase):
         services = {  # manifest -> (source, how it calls the check)
             "apps/scheduler/k8s/scheduler.yaml": ("apps/scheduler/scheduler-api.py", ["flask_check('scheduler')"]),
             "apps/monitor/k8s/monitor.yaml": ("apps/monitor/monitor-api.py", ["flask_check('monitor')"]),
-            "apps/frontend/k8s/dbmgmt.yaml": ("apps/frontend/html/dbmgmt-api.py", ["http_check(self, 'dbmgmt')"]),
+            # IAM 2.6: an export leaves the platform, so dbmgmt enforces whatever IAM_ENFORCE says
+            "apps/frontend/k8s/dbmgmt.yaml": ("apps/frontend/html/dbmgmt-api.py", ["http_check(self, 'dbmgmt', enforce=True)"]),
             "apps/frontend/k8s/config-ui.yaml": ("apps/frontend/k8s/recipe-fileserver.yaml", ["http_check(self, 'platform-api')"]),
             "apps/access/k8s/access.yaml": ("apps/access/access-api.py", [
                 # IAM 2.7: the admin port enforces whatever IAM_ENFORCE says (spec §5.1),
@@ -861,6 +951,26 @@ class WiringTest(unittest.TestCase):
             self.assertIn("pass_access_token = true", self.read(values), values)
             self.assertIn("pass_authorization_header = false", self.read(values), values)
         self.assertIn("pass_access_token = false", self.read("k8s/oauth2-proxy/values-node-red.yaml"))
+        # IAM 2.6: each pod carries IAM_ENFORCE (rendered by its deploy) and, when /iam/ is
+        # missing, fails closed on it alone (dbmgmt always); health-check iamenforce
+        # compares the copies
+        for manifest, (source, _) in services.items():
+            self.assertRegex(self.read(manifest), r'name: IAM_ENFORCE,?\s+(# .*\n\s+)?value: "\$\{IAM_ENFORCE\}"', manifest)
+            fallback = ("send_error(503, 'access policy not loaded')" if "dbmgmt" in source
+                        else "os.environ.get('IAM_ENFORCE') == 'true'")
+            self.assertTrue(fallback in self.read(source), f"{source}: no fail-closed fallback {fallback}")
+        for deploy, manifests in (("apps/scheduler/deploy.sh", ["scheduler.yaml"]), ("apps/monitor/deploy.sh", ["monitor.yaml"]),
+                                  ("apps/frontend/deploy.sh", ["config-ui.yaml", "dbmgmt.yaml"]),
+                                  ("apps/access/deploy.sh", ["access.yaml"])):
+            lines = self.read(deploy).splitlines()
+            for mf in manifests:
+                render = [l for l in lines if "render " in l and f"k8s/{mf}" in l]
+                self.assertTrue(render and all("IAM_ENFORCE" in l for l in render), f"{deploy}: {mf}")
+        self.assertRegex(self.read("health-checks.conf"), r"\| iamenforce +\|")
+        self.assertIn('iamenforce)   check_iamenforce', self.read("health-check.sh"))
+        # ... and every IAM_ENFORCE transition is in the hash chain
+        self.assertRegex(infra, r'dba_record_switch "\$NAMESPACE" [^\n]*IAM_ENFORCE')
+        self.assertIn("dba_record_switch()", self.read("apps/database/lib-db-apply.sh"))
 
     def test_offered_roles_are_platform_roles_the_database_accepts(self):
         src = self.read("apps/access/access-api.py")
@@ -914,6 +1024,26 @@ class WiringTest(unittest.TestCase):
         self.assertTrue(any("SECRET_NAME DB_ROLE DB_PASS" in l for l in render))
         self.assertIn("db-roles --names", self.read("apps/database/uninstall.sh"))
         self.assertIn("purge.sql", self.read("apps/database/uninstall.sh"))
+
+    def test_2_6_scheduler_routes_removed(self):
+        """No person compresses or deletes a run log, nothing deletes a Q-table (IAM 2.6)."""
+        api = self.read("apps/scheduler/scheduler-api.py")
+        for gone in ("/api/logs/compress", "/api/logs/delete", "algorithm-state', methods=['DELETE']",
+                     "DELETE FROM medcea.algorithm_state"):
+            self.assertNotIn(gone, api)
+        self.assertIn("id='sys_log_retention'", api)
+        self.assertIn("job.id.startswith('sched_')", api)
+        self.assertIn('log_retention.py="$SCRIPT_DIR/log_retention.py"', self.read("apps/scheduler/deploy.sh"))
+        self.assertIn("apps/scheduler/log_retention.py", self.read("tests/iam-runner.sh"))
+        for ui in ("apps/scheduler/html/scheduler.html", "apps/frontend/html/index.html"):
+            html = self.read(ui)
+            self.assertNotIn("logs/compress", html, ui)
+            self.assertNotIn("logs/delete", html, ui)
+            self.assertNotRegex(html, r"algorithm-state[^\n]*method:\s*'DELETE'", ui)
+        index = self.read("apps/frontend/html/index.html")
+        self.assertIn("'/rpc/retire_algorithm_state'", index)
+        self.assertIn("e.code === '42501'", index)
+        self.assertEqual(routes_diff.REMOVED, {})
 
 
 if __name__ == "__main__":
