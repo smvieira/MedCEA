@@ -133,7 +133,7 @@
 </tbody>
 </table></div>
 <h4>IAM switches</h4>
-<p>Change these with <code>./guide.sh</code> (IAM switches), which checks each switch's preconditions and runs its enable or rollback steps.</p>
+<p>Change these with <code>./guide.sh</code> (IAM switches), which checks each switch's preconditions and runs its enable or rollback steps. After a fresh install, IAM switches → Bring IAM to full enforcement turns on every switch still false, in order (see <a href="#admin-fresh">After a fresh install</a>).</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
@@ -175,7 +175,7 @@
 <thead><tr><th>Command</th><th>What it does</th><th>Takes the lock</th></tr></thead>
 <tbody>
 <tr><td><code>./install.sh</code></td><td>Installs or updates everything: infrastructure, then applications, then a health check. <code>--uninstall-apps</code>, <code>--uninstall-infra</code> and <code>--uninstall-all</code> remove parts of the platform.</td><td>yes</td></tr>
-<tr><td><code>./guide.sh</code></td><td>Question-and-answer guide to every command below: shows the exact command and runs it on confirmation. Also the way to turn the IAM switches on and off. <code>--dry-run</code> runs nothing.</td><td>for a switch recipe, once for all its steps; other commands take their own</td></tr>
+<tr><td><code>./guide.sh</code></td><td>Question-and-answer guide to every command below: shows the exact command and runs it on confirmation. Also the way to turn the IAM switches on and off, one at a time or, with Bring IAM to full enforcement, every switch still false in order. <code>--dry-run</code> runs nothing.</td><td>for a switch recipe, once for all its steps (for Bring IAM to full enforcement, once for the whole chain); other commands take their own</td></tr>
 <tr><td><code>./deploy-infra.sh</code></td><td>Deploys the infrastructure: MicroK8s, PostgreSQL, Keycloak and its clients, Node-RED, Grafana, pgAdmin, the portal, the AI workbench. Publishes the IAM settings to the services. <code>--configure</code> reviews settings; <code>--reset</code> wipes the namespace; <code>--uninstall</code> removes MicroK8s.</td><td>yes</td></tr>
 <tr><td><code>./infra/configure.sh</code></td><td>Fills <code>config.env</code> by question and answer. <code>--missing</code> asks only for required values that are empty.</td><td>yes</td></tr>
 <tr><td><code>./infra/bootstrap-infra.sh</code></td><td>Sets up MicroK8s. Called by <code>./deploy-infra.sh</code>.</td><td>yes</td></tr>

@@ -21,6 +21,13 @@
 # offers to delete the backup (it holds every password); ./install.sh --uninstall-all
 # deletes any that are left together with config.env.
 #
+# "Bring IAM to full enforcement" (IAM switches area) runs the enable recipe of every
+# IAM switch still false, in order (IAM_GATES, IAM_NETPOL, IAM_POSTGREST_JWT,
+# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES, IAM_ENFORCE, IAM_MQTT_PERSON): the whole plan, one
+# [y/N], one deploy lock for the chain, each switch's checklist at its turn, a look at the
+# operators' units before IAM_DB_ROLES. It stops at the first refusal or failure; run it
+# again to resume (switches already true are skipped).
+#
 # --dry-run  run nothing and change nothing: print each command, and each config.env
 #            change, that would have been made. Every question and confirmation is
 #            still asked.
@@ -278,7 +285,12 @@ cfg_check_one() {   # cfg_check_one KEY [quiet] → CFG_LINE, CFG_VAL; status 1 
     raw="${raw%"${raw##*[![:space:]]}"}"
     raw="${raw#\"}"; raw="${raw%\"}"; raw="${raw#\'}"; raw="${raw%\'}"
     CFG_VAL="$raw"
+    # The full-enforcement chain plans (and dry-runs) each recipe as if the switches
+    # before it were already set; config.env itself is never touched for that.
+    [[ -n "${CHAIN_SIM[$key]+x}" ]] && CFG_VAL="${CHAIN_SIM[$key]}"
+    return 0
 }
+declare -A CHAIN_SIM=()
 
 cfg_literal() {   # cfg_literal KEY DEFAULT → ANSWER: KEY's value, one $VAR resolved, else DEFAULT
     local key="$1" def="$2" ref
@@ -302,7 +314,11 @@ cfg_set() {   # cfg_set KEY VALUE: replace that one line; first call backs confi
     prefix="${line%%"${key}"=*}"                      # keeps leading space or "export "
     newline="${prefix}${key}=\"${val}\""
     if [[ -z "$CFG_BACKUP" ]]; then
-        CFG_BACKUP="${CFG}.guide-$(date +%Y%m%d-%H%M%S).bak"
+        local ts n=1
+        ts="$(date +%Y%m%d-%H%M%S)"
+        CFG_BACKUP="${CFG}.guide-${ts}.bak"
+        # A chain of recipes makes one backup per switch, possibly within one second.
+        while [[ -e "$CFG_BACKUP" ]]; do CFG_BACKUP="${CFG}.guide-${ts}-$(( n++ )).bak"; done
         cp -p "$CFG" "$CFG_BACKUP" || { warn "could not back up $CFG"; CFG_BACKUP=""; return 1; }
         chmod 600 "$CFG_BACKUP"
         echo "  Backup: $CFG_BACKUP"
@@ -919,64 +935,58 @@ step_text() {   # step_text STEP → how it reads in the recipe
     esac
 }
 
-switch_flow() {   # switch_flow KEY: current value → enable|roll back → recipe → run
-    local key="$1" cur dir target i s n_set=0
+# The recipe machinery, shared by switch_flow (one switch) and a_sw_full (the chain).
+# recipe() fills PRE/STEPS/AFTER/REFUSE; these show, lock and run them.
+
+recipe_sets_ok() {   # every key STEPS sets is one clean line (the reason printed otherwise)
+    local s
     local -a w
-    echo
-    echo -e "${BOLD}${key}${NC}: $(switch_purpose "$key")"
-    cfg_check_one "$key" || { echo "Nothing was changed."; return 0; }
-    cur="$CFG_VAL"
-    echo "  Now: ${key}=\"${cur}\"   ($CFG line $CFG_LINE)"
-    menu "$key: what do you want to do?" \
-        "Enable (set ${key}=true)|$( [[ "$cur" == true ]] && echo 'already true: re-runs the deploys' || echo 'the enable recipe')" \
-        "Roll back (set ${key}=false)|$( [[ "$cur" == false ]] && echo 'already false: re-runs the deploys' || echo 'the rollback recipe')"
-    [[ "$PICK" == b ]] && return 10
-    if (( PICK == 1 )); then dir=enable; target=true; else dir=rollback; target=false; fi
-    recipe "$key" "$dir"
-    if [[ -n "$REFUSE" ]]; then
-        warn "$REFUSE"
-        echo "Nothing was changed."
-        return 0
-    fi
-    # Every key the recipe sets must be one clean line before anything is touched.
     for s in "${STEPS[@]}"; do
         read -ra w <<<"$s"
-        if [[ "${w[0]}" == set ]]; then
-            cfg_check_one "${w[1]}" || { echo "Nothing was changed."; return 0; }
-            n_set=$(( n_set + 1 ))
-        fi
+        if [[ "${w[0]}" == set ]]; then cfg_check_one "${w[1]}" || return 1; fi
     done
-    echo
-    echo -e "${BOLD}Recipe: $key → $target${NC}"
+    return 0
+}
+
+recipe_show() {   # recipe_show INDENT: PRE as a checklist, STEPS numbered, AFTER as notes
+    local ind="$1" i s
     if (( ${#PRE[@]} )); then
-        echo "  Before you start, check:"
-        for s in "${PRE[@]}"; do echo "    [ ] $s"; done
+        echo "${ind}Before you start, check:"
+        for s in "${PRE[@]}"; do echo "${ind}  [ ] $s"; done
     fi
-    echo "  Steps, in order (stops at the first that fails):"
+    echo "${ind}Steps, in order (stops at the first that fails):"
     for (( i = 0; i < ${#STEPS[@]}; i++ )); do
-        printf '    %d. %s\n' $(( i + 1 )) "$(step_text "${STEPS[i]}")"
+        printf '%s  %d. %s\n' "$ind" $(( i + 1 )) "$(step_text "${STEPS[i]}")"
     done
     if (( ${#AFTER[@]} )); then
-        echo "  Notes:"
-        for s in "${AFTER[@]}"; do echo "    - $s"; done
+        echo "${ind}Notes:"
+        for s in "${AFTER[@]}"; do echo "${ind}  - $s"; done
     fi
-    echo "  Every step takes the deploy lock; deploys use sudo only without the microk8s group (deploy-infra may ask for it)."
-    if (( ${#PRE[@]} )); then
-        ask_yn "Is every item in 'Before you start' true?" n || { echo "Do those first. Nothing was changed."; return 0; }
-    fi
-    ask_yn "Run these ${#STEPS[@]} steps?" n || { echo "Cancelled. Nothing was changed."; return 0; }
+}
 
-    if ! $DRY_RUN; then
-        guide_lock || { echo "Nothing was changed."; return 0; }
-        # Ctrl-C reaches the step's command too, which stops; the guide then reports
-        # instead of dying with config.env changed and nothing said (switch_failed).
-        RECIPE_SIG=""
-        trap 'RECIPE_SIG="Ctrl-C (SIGINT)"' INT
-        trap 'RECIPE_SIG=SIGTERM' TERM
-        trap 'RECIPE_SIG=SIGHUP' HUP
-    fi
-    CFG_BACKUP=""
+recipe_begin() {   # the deploy lock and the signal traps, once for everything that follows
+    $DRY_RUN && return 0
+    guide_lock || return 1
+    # Ctrl-C reaches the step's command too, which stops; the guide then reports
+    # instead of dying with config.env changed and nothing said (switch_failed).
+    RECIPE_SIG=""
+    recipe_traps
+}
+
+recipe_traps() {   # a signal is recorded, and acted on once the running step has ended
+    trap 'RECIPE_SIG="Ctrl-C (SIGINT)"' INT
+    trap 'RECIPE_SIG=SIGTERM' TERM
+    trap 'RECIPE_SIG=SIGHUP' HUP
+}
+
+FAILED_STEP=0
+recipe_steps() {   # runs STEPS in order → 0 all done; 1 a step failed, 130 a signal (FAILED_STEP, LAST_RC, RECIPE_SIG)
+    local i
+    local -a w
+    RECIPE_SIG="${RECIPE_SIG-}"
     for (( i = 0; i < ${#STEPS[@]}; i++ )); do
+        # A signal that came before this step (e.g. at a question) stops before it runs.
+        [[ -n "$RECIPE_SIG" ]] && { FAILED_STEP=$i; LAST_RC=130; return 130; }
         read -ra w <<<"${STEPS[i]}"
         echo
         echo -e "${BOLD}Step $(( i + 1 ))/${#STEPS[@]}${NC}: $(step_text "${STEPS[i]}")"
@@ -995,29 +1005,79 @@ switch_flow() {   # switch_flow KEY: current value → enable|roll back → reci
             reset_plan; CMD=("${w[@]:1}")
             run_array
         fi
-        if [[ -n "$RECIPE_SIG" ]]; then
-            switch_failed "$i" "$LAST_RC" "$RECIPE_SIG"
-            recipe_end
-            exit 130
-        fi
-        (( LAST_RC == 0 )) || { switch_failed "$i" "$LAST_RC"; recipe_end; return 0; }
+        FAILED_STEP=$i
+        [[ -n "$RECIPE_SIG" ]] && return 130
+        (( LAST_RC == 0 )) || return 1
     done
+    return 0
+}
+
+switch_flow() {   # switch_flow KEY: current value → enable|roll back → recipe → run
+    local key="$1" cur dir target rc
+    echo
+    echo -e "${BOLD}${key}${NC}: $(switch_purpose "$key")"
+    cfg_check_one "$key" || { echo "Nothing was changed."; return 0; }
+    cur="$CFG_VAL"
+    echo "  Now: ${key}=\"${cur}\"   ($CFG line $CFG_LINE)"
+    menu "$key: what do you want to do?" \
+        "Enable (set ${key}=true)|$( [[ "$cur" == true ]] && echo 'already true: re-runs the deploys' || echo 'the enable recipe')" \
+        "Roll back (set ${key}=false)|$( [[ "$cur" == false ]] && echo 'already false: re-runs the deploys' || echo 'the rollback recipe')"
+    [[ "$PICK" == b ]] && return 10
+    if (( PICK == 1 )); then dir=enable; target=true; else dir=rollback; target=false; fi
+    recipe "$key" "$dir"
+    if [[ -n "$REFUSE" ]]; then
+        warn "$REFUSE"
+        echo "Nothing was changed."
+        return 0
+    fi
+    # Every key the recipe sets must be one clean line before anything is touched.
+    recipe_sets_ok || { echo "Nothing was changed."; return 0; }
+    echo
+    echo -e "${BOLD}Recipe: $key → $target${NC}"
+    recipe_show "  "
+    echo "  Every step takes the deploy lock; deploys use sudo only without the microk8s group (deploy-infra may ask for it)."
+    if (( ${#PRE[@]} )); then
+        ask_yn "Is every item in 'Before you start' true?" n || { echo "Do those first. Nothing was changed."; return 0; }
+    fi
+    ask_yn "Run these ${#STEPS[@]} steps?" n || { echo "Cancelled. Nothing was changed."; return 0; }
+
+    recipe_begin || { echo "Nothing was changed."; return 0; }
+    CFG_BACKUP=""
+    recipe_steps; rc=$?
+    if (( rc )); then
+        switch_failed "$FAILED_STEP" "$LAST_RC" "$( (( rc == 130 )) && echo "$RECIPE_SIG")"
+        recipe_end
+        (( rc == 130 )) && exit 130
+        return 0
+    fi
     echo
     if $DRY_RUN; then echo -e "${GREEN}[dry run] recipe shown; nothing was run or changed.${NC}"; return 0; fi
     recipe_end
     echo -e "${GREEN}All ${#STEPS[@]} steps done: ${key}=\"${target}\".${NC}"
-    if [[ -n "$CFG_BACKUP" && -f "$CFG_BACKUP" ]]; then
-        echo "  $CFG_BACKUP is a full copy of the old config.env, passwords included; the only change is shown above."
-        if ask_yn "Delete that backup now?" y; then
-            rm -f -- "$CFG_BACKUP" && echo "  Deleted $CFG_BACKUP."
-        else
-            echo "  Kept. ./install.sh --uninstall-all deletes it together with config.env."
-        fi
-    fi
+    offer_backup_delete "$CFG_BACKUP"
     return 0
 }
 
+offer_backup_delete() {   # offer_backup_delete FILE…: after a completed recipe (or chain)
+    local f
+    local -a files=()
+    for f in "$@"; do [[ -n "$f" && -f "$f" ]] && files+=("$f"); done
+    (( ${#files[@]} )) || return 0
+    if (( ${#files[@]} == 1 )); then
+        echo "  ${files[0]} is a full copy of the old config.env, passwords included; the only change is shown above."
+    else
+        echo "  These are full copies of config.env as it was before each switch, passwords included; the changes are shown above:"
+        for f in "${files[@]}"; do echo "    $f"; done
+    fi
+    if ask_yn "Delete $( (( ${#files[@]} == 1 )) && echo 'that backup' || echo "these ${#files[@]} backups") now?" y; then
+        rm -f -- "${files[@]}" && echo "  Deleted."
+    else
+        echo "  Kept. ./install.sh --uninstall-all deletes them together with config.env."
+    fi
+}
+
 recipe_end() {   # after a real recipe: the lock and the signal traps go
+    $DRY_RUN && return 0
     trap - INT TERM HUP
     guide_unlock
 }
@@ -1040,6 +1100,240 @@ switch_failed() {   # switch_failed INDEX RC [WHY]
     else
         echo "  config.env was not changed."
     fi
+}
+
+# ── Bring IAM to full enforcement: every enable recipe still due, in order ──
+# Each switch's own enable recipe from recipe(), run by the same machinery (recipe_show,
+# recipe_sets_ok, its checklist, cfg_set's backup, recipe_steps), under one deploy lock
+# for the whole chain. A switch already true is skipped, so after a stop the action run
+# again resumes from the switch that stopped. Planning reads each recipe as if the
+# switches before it were already true (CHAIN_SIM), since e.g. IAM_DB_ROLES's enable is
+# refused until IAM_POSTGREST_JWT and IAM_DB_SERVICE_ROLES are; when its turn comes the
+# recipe is read again from config.env as it then is.
+CHAIN_ORDER=(IAM_GATES IAM_NETPOL IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON)
+
+a_sw_full() {
+    local rc
+    chain_flow; rc=$?
+    CHAIN_SIM=()
+    return "$rc"
+}
+
+chain_sim_steps() {   # what STEPS would set, as CHAIN_SIM (planning and dry runs only)
+    local s
+    local -a w
+    for s in "${STEPS[@]}"; do
+        read -ra w <<<"$s"
+        [[ "${w[0]}" == set ]] && CHAIN_SIM[${w[1]}]="${w[2]}"
+    done
+    return 0
+}
+
+chain_flow() {
+    local key i s n_steps=0 rc
+    local -a todo=() done_keys=() backups=()
+    echo
+    echo -e "${BOLD}Bring IAM to full enforcement${NC}: each IAM switch that is still false, by its own enable recipe, in order."
+    for key in "${CHAIN_ORDER[@]}"; do
+        cfg_check_one "$key" || { echo "Nothing was changed."; return 1; }
+        case "$CFG_VAL" in
+            true)  ;;
+            false) todo+=("$key") ;;
+            *) warn "$key is '$CFG_VAL' on line $CFG_LINE of $CFG: write it as \"true\" or \"false\", then come back."
+               echo "Nothing was changed."; return 1 ;;
+        esac
+        printf '  %-22s %s\n' "$key" "$CFG_VAL"
+    done
+    if (( ${#todo[@]} == 0 )); then
+        echo -e "${GREEN}Every IAM switch is already true: nothing to do.${NC}"
+        return 0
+    fi
+
+    echo
+    echo -e "${BOLD}Plan: ${#todo[@]} switch(es) → true, in this order${NC}"
+    CHAIN_SIM=()
+    for (( i = 0; i < ${#todo[@]}; i++ )); do
+        key="${todo[i]}"
+        echo
+        echo -e "  ${BOLD}$(( i + 1 )). ${key} → true${NC}: $(switch_purpose "$key")"
+        recipe "$key" enable
+        if [[ -n "$REFUSE" ]]; then
+            warn "$key: $REFUSE"
+            echo "Nothing was changed."; return 1
+        fi
+        recipe_sets_ok || { echo "Nothing was changed."; return 1; }
+        recipe_show "     "
+        [[ "$key" == IAM_DB_ROLES ]] && echo "     Before its checklist: ./apps/iam/units.sh list (read-only, under the chain's lock); if an enabled operator has no unit in effect, you are asked whether to go on."
+        n_steps=$(( n_steps + ${#STEPS[@]} ))
+        chain_sim_steps
+    done
+    CHAIN_SIM=()
+    echo
+    echo "  The chain takes the deploy lock once for all its steps (refused while another deploy runs);"
+    echo "  deploys use sudo only without the microk8s group. Each switch's checklist is asked when its"
+    echo "  turn comes. It stops at the first refused precondition, failed step or Ctrl-C; switches"
+    echo "  already true are skipped, so running this again resumes from the one that stopped."
+    ask_yn "Run these ${#todo[@]} recipes (${n_steps} steps)?" n || { echo "Cancelled. Nothing was changed."; return 0; }
+
+    recipe_begin || { echo "Nothing was changed."; return 1; }
+    for (( i = 0; i < ${#todo[@]}; i++ )); do
+        key="${todo[i]}"
+        echo
+        echo -e "${BOLD}━━ Switch $(( i + 1 ))/${#todo[@]}: ${key} → true ━━${NC}"
+        CFG_BACKUP=""                                   # this switch's own backup, made by its first set
+        CHAIN_KEY="$key"; CHAIN_DONE="${done_keys[*]}"; CHAIN_REST="${todo[*]:i+1}"; CHAIN_BACKUPS=("${backups[@]}")
+        recipe "$key" enable
+        if [[ -n "$REFUSE" ]]; then
+            warn "$REFUSE"
+            chain_stopped "$key" "its recipe was refused" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+            recipe_end; return 1
+        fi
+        if ! recipe_sets_ok; then
+            chain_stopped "$key" "config.env cannot be changed as the recipe needs" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+            recipe_end; return 1
+        fi
+        if [[ "$key" == IAM_DB_ROLES ]]; then
+            chain_units_check; rc=$?
+            if (( rc == 130 )); then
+                echo -e "${RED}Stopped by $RECIPE_SIG while reading the operators' units.${NC}"
+                chain_stopped "$key" "Ctrl-C before its steps" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+                recipe_end; exit 130
+            fi
+            if (( rc )); then
+                chain_stopped "$key" "you chose not to go on while operators have no unit in effect" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+                recipe_end; return 1
+            fi
+        fi
+        if (( ${#PRE[@]} )); then
+            echo "  Before you start, check:"
+            for s in "${PRE[@]}"; do echo "    [ ] $s"; done
+            if ! chain_ask_yn "Is every item in 'Before you start' true for ${key}?" n; then
+                chain_stopped "$key" "its checklist was answered no (do those first)" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+                recipe_end; return 1
+            fi
+        fi
+        recipe_steps; rc=$?
+        [[ -n "$CFG_BACKUP" ]] && backups+=("$CFG_BACKUP")
+        if (( rc )); then
+            switch_failed "$FAILED_STEP" "$LAST_RC" "$( (( rc == 130 )) && echo "$RECIPE_SIG")"
+            chain_stopped "$key" "step $(( FAILED_STEP + 1 )) $( (( rc == 130 )) && echo 'was interrupted' || echo 'failed')" \
+                "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+            recipe_end
+            (( rc == 130 )) && exit 130
+            return 1
+        fi
+        $DRY_RUN && chain_sim_steps
+        done_keys+=("$key")
+        if $DRY_RUN; then echo "[dry run] ${key}'s recipe shown."
+        else echo -e "${GREEN}${key}=\"true\": all ${#STEPS[@]} steps done.${NC}"; fi
+    done
+    echo
+    if $DRY_RUN; then
+        echo -e "${GREEN}[dry run] the whole chain shown; nothing was run or changed, and no lock was taken.${NC}"
+        return 0
+    fi
+    recipe_end
+    echo -e "${GREEN}IAM is at full enforcement: ${done_keys[*]} turned on; every IAM switch is true.${NC}"
+    echo "  Each recipe's notes are in the plan above (verify with ./health-check.sh; IAM_ENFORCE's notes say to redeploy the apps)."
+    offer_backup_delete "${backups[@]}"
+    return 0
+}
+
+chain_stopped() {   # chain_stopped KEY WHAT "DONE…" "NOT_STARTED…" BACKUP…
+    local key="$1" what="$2" done_list="$3" rest="$4" b
+    shift 4
+    echo
+    echo -e "${RED}Bring IAM to full enforcement stopped at ${key}: ${what}.${NC}"
+    if [[ -n "$done_list" ]]; then
+        echo "  Already done, now true in config.env and deployed: ${done_list}."
+    else
+        echo "  No switch was finished by this run."
+    fi
+    [[ -n "$rest" ]] && echo "  Not started: ${rest}."
+    if (( $# )); then
+        echo "  Backups of config.env, one before each switch this run changed (each a full copy, passwords included):"
+        for b in "$@"; do echo "    $b"; done
+        echo "  Putting back an earlier one also turns off the switches after it, whose deploys already ran: don't, unless you roll those back too."
+    fi
+    if [[ -n "$CFG_BACKUP" ]]; then
+        # Its set step ran: config.env says true although its deploys did not all run, and
+        # a plain re-run would skip it as done.
+        echo -e "  ${YELLOW}${key} is already \"true\" in config.env, but its recipe did not finish${NC}, so running this"
+        echo "  action again as it is would skip it. Fix the cause, then either put its backup back (only ${key} changes):"
+        echo "      cp -p $(printf '%q' "$CFG_BACKUP") $(printf '%q' "$CFG")"
+        echo "  and run this action again (IAM switches → Bring IAM to full enforcement): switches already"
+        echo "  true are skipped, so it resumes from ${key}; or finish ${key} with its own entry (IAM switches →"
+        echo "  ${key} → Enable, which runs every step again), then run this action for the rest."
+    else
+        echo "  config.env was not changed for ${key}."
+        echo "  Fix the cause, then run this action again (IAM switches → Bring IAM to full enforcement):"
+        echo "  switches already true are skipped, so it resumes from ${key}."
+    fi
+}
+
+chain_units_check() {   # → 0 go on, 1 stop (answered no), 130 a signal
+    local out rc name role en units rest line readable=true
+    local -a missing=()
+    echo
+    echo -e "${BOLD}Before IAM_DB_ROLES: operators and their units${NC}"
+    echo "  Under IAM_DB_ROLES=true an operator with no unit in effect sees no telemetry or runs and starts none."
+    if $DRY_RUN; then
+        echo "[dry run] would run: ./apps/iam/units.sh list   (read-only, under the chain's lock), and ask whether to go on if an enabled operator has no unit in effect"
+        return 0
+    fi
+    echo -e "${CYAN}\$ ./apps/iam/units.sh list${NC}"
+    out="$(./apps/iam/units.sh list)"; rc=$?
+    [[ -n "$RECIPE_SIG" ]] && return 130
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    if (( rc != 0 )) || [[ "${out%%$'\n'*}" != USERNAME$'\t'* ]]; then
+        readable=false
+    else
+        while IFS= read -r line; do
+            IFS=$'\t' read -r name role en units rest <<<"$line"
+            [[ "$name" == USERNAME || "$name" == "(no such account)" ]] && continue
+            [[ "$role" == operator && "$en" == true && ( -z "$units" || "$units" == - ) ]] && missing+=("$name")
+        done <<<"$out"
+    fi
+    if $readable && (( ${#missing[@]} == 0 )); then
+        echo "  Every enabled operator has a unit in effect."
+        return 0
+    fi
+    if $readable; then
+        warn "enabled operator(s) with no unit in effect: ${missing[*]}"
+    else
+        warn "could not read the operators' units (./apps/iam/units.sh list exited $rc): whether every operator has one is unknown."
+    fi
+    echo "  Once IAM_DB_ROLES is true they see no telemetry or runs (an empty Monitor) and start none."
+    echo "  To give one a unit: ./apps/iam/units.sh assign <operator> <UNIT>… --by <your username>"
+    echo "  (or this guide: Operators and units → Assign units), then a qa person other than you confirms it"
+    echo "  in the User Manager (Decisions); an assignment waiting for qa is not in effect."
+    chain_ask_yn "Go on with IAM_DB_ROLES anyway?" n
+}
+
+# A question asked while the chain holds the lock. recipe_traps only records a signal,
+# and bash's read does not return on a trapped Ctrl-C: the answer typed afterwards would
+# be taken and the next step run before the stop. So around the question a signal stops
+# the chain at once, at that switch, before any of its steps (nothing of it changed).
+CHAIN_KEY=""; CHAIN_DONE=""; CHAIN_REST=""; CHAIN_BACKUPS=()
+chain_prompt_stop() {   # chain_prompt_stop SIGNAME → exit 130
+    trap - INT TERM HUP
+    echo
+    echo -e "${RED}Stopped by $1 at a question for ${CHAIN_KEY}; none of its steps ran.${NC}"
+    chain_stopped "$CHAIN_KEY" "stopped by $1 before its steps" "$CHAIN_DONE" "$CHAIN_REST" "${CHAIN_BACKUPS[@]}"
+    recipe_end
+    exit 130
+}
+
+chain_ask_yn() {   # ask_yn under the chain's lock: a signal while it waits stops the chain
+    local rc
+    $DRY_RUN && { ask_yn "$@"; return; }
+    [[ -n "$RECIPE_SIG" ]] && chain_prompt_stop "$RECIPE_SIG"
+    trap 'chain_prompt_stop "Ctrl-C (SIGINT)"' INT
+    trap 'chain_prompt_stop SIGTERM' TERM
+    trap 'chain_prompt_stop SIGHUP' HUP
+    ask_yn "$@"; rc=$?
+    recipe_traps
+    return "$rc"
 }
 
 # ── Health and tests ──
@@ -1368,6 +1662,7 @@ AREA_SWITCHES=(
     "a_sw_dbroles|IAM_DB_ROLES — the database enforces|Phase 2a: per-role grants, RLS, guard triggers."
     "a_rollback_27|IAM 2.7 rollback (shows the steps)|Account decisions back out; shown, not run."
     "a_sw_mqtt|IAM_MQTT_PERSON — personal MQTT Explorer credentials|IAM 3.5: each person's own topics; the shared account retired."
+    "a_sw_full|Bring IAM to full enforcement|Every switch still false, by its own enable recipe, in order, under one lock; run again to resume."
 )
 AREA_HEALTH=(
     "a_health|Health check|Every service and IAM control: OK / WARN / FAIL."
@@ -1407,7 +1702,7 @@ AREAS=(
     "AREA_INFRA|Infrastructure|deploy-infra.sh and its settings: cluster services, workbench, reset."
     "AREA_APPS|Applications|deploy-apps.sh and the components under apps/."
     "AREA_UNITS|Operators and units|Which units an operator works in (apps/iam/units.sh)."
-    "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, in the documented order."
+    "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
     "AREA_POLICY|Policy (read-only)|What apps/iam/policy/defaults.yaml compiles to."

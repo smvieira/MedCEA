@@ -146,6 +146,24 @@ finish_with_credentials() {
     [[ -n "$f" ]] && show_credentials "$f"
 }
 
+# One line after a fresh install: a new config.env has the sign-in gates and network
+# policies on, but token checks, database roles and enforcement off (each has its own
+# rollback). config.env is read the way guide.sh reads it — never sourced: each switch
+# must be one active line, literally "true" or "false"; anything else is not counted.
+# Never fails the install.
+iam_switches_hint() {
+    local k hits v off=0
+    [[ -f config.env ]] || return 0
+    for k in IAM_GATES IAM_NETPOL IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON; do
+        hits="$(grep -cE "^[[:space:]]*(export[[:space:]]+)?${k}=" config.env 2>/dev/null)" || true
+        [[ "$hits" == 1 ]] || continue
+        v="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" config.env | sed -E "s/^[^=]*=//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//; s/^[\"']//; s/[\"']$//")"
+        [[ "$v" == false ]] && off=$(( off + 1 ))
+    done
+    (( off )) && echo -e "${YELLOW}$off IAM switch(es) still false. To turn on the rest in order: ./guide.sh → IAM switches → \"Bring IAM to full enforcement\".${NC}"
+    return 0
+}
+
 case "$MODE" in
 # -----------------------------------------------------------------------------
 install)
@@ -155,6 +173,7 @@ install)
     with_mk8s_group ./health-check.sh || echo -e "${YELLOW}Some checks failed — see above. Services that are still starting usually pass a minute later: ./health-check.sh${NC}"
     echo ""
     echo -e "${GREEN}${BOLD}MedCEA is installed.${NC} Start at the service portal: https://$( (source ./config.env; echo "$PORTAL_DOMAIN") 2>/dev/null)"
+    iam_switches_hint || true      # before the box, which stays the last thing on screen
     finish_with_credentials
     ;;
 infra)
