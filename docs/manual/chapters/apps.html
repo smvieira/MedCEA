@@ -508,7 +508,7 @@ The snapshot never changes afterwards.</li>
 <ul>
 <li>Each person gets their own workspace with persistent storage (a home folder of its own). It starts when you sign in and is stopped after an hour without activity; your files are kept, and copied every night into the platform's backup. Keep your work in git all the same: see <a href="#apps-workbench-git">Saving your notebooks to git</a>.</li>
 <li>The workspace opens in JupyterLab, and VS Code is available inside it.</li>
-<li>The first start of a new workspace takes a few minutes: real-time collaboration and VS Code are installed into your home folder before the workspace opens. Later starts are fast. Wait on the start page; the hub waits up to 15 minutes.</li>
+<li>The first start of a new workspace takes a few minutes: real-time collaboration and VS Code are installed into your home folder before the workspace opens. The very first workspace on a newly installed host also downloads the notebook image (about 2 GB) first; the install does not wait for that download. Later starts are fast. Wait on the start page; the hub waits up to 15 minutes.</li>
 <li>The workspace runs as the container's own account, <code>jovyan</code>, so file paths start with <code>/home/jovyan</code>. You are still shown as yourself: a terminal's prompt reads <code>&lt;your username&gt;@workbench</code>, and your commits carry your username as the author name (see <a href="#apps-workbench-git">Saving your notebooks to git</a>).</li>
 </ul>
 <ol class="steps">

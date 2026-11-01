@@ -843,7 +843,7 @@ recipe() {
                  "Every operator has a unit in effect (./apps/iam/units.sh list, run before this guide: it takes the deploy lock), or the Monitor and the scheduler show them no runs or telemetry.")
             STEPS=("run python3 tests/iam-routes-diff.py --strict" "set IAM_ENFORCE true" "run ./deploy-infra.sh")
             AFTER=("Services read it from ConfigMap medcea-iam-lib per request: live within about a minute (kubelet sync), no restart. Refusals are 401/403/503 from then on."
-                   "The pods' IAM_ENFORCE copy (used only when /iam/ is missing, and then it lets everything through) stays false until each app's next deploy: ./health-check.sh FAILs (iamenforce) until then, so redeploy them when no run is active (./deploy-apps.sh --all)."
+                   "The pods' IAM_ENFORCE copy (used only when /iam/ is missing, and then it lets everything through) stays false until each app's next deploy: ./health-check.sh FAILs (iamenforce) until then, so redeploy them when no run is active (./deploy-apps.sh --all; Bring IAM to full enforcement asks for it at its end)."
                    "Verify: tests/iam-check.sh (every pod 'enforce', a forged request 'refused' 401), ./health-check.sh, tests/iam-signin.sh (takes the deploy lock).") ;;
         IAM_ENFORCE:rollback)
             STEPS=("set IAM_ENFORCE false" "run ./deploy-infra.sh")
@@ -895,7 +895,7 @@ recipe() {
             STEPS=("set IAM_MQTT_PERSON true" "run ./apps/iam/deploy.sh" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
             AFTER=("The iam deploy refuses while iam-api cannot be deployed, so the recipe stops before the broker changes: restore config.env as shown."
                    "iam-api reads the switch from ConfigMap medcea-iam-lib within about a minute; the Explorer deploy waits for it."
-                   "Engineers reload the Explorer: it signs them in to the broker with their own 8 h credential. They read every unit's sense, control and control_setpoint topics; sending works only to a unit flagged for commissioning with no run in progress — today no screen flags one, so in practice the Explorer only reads."
+                   "Engineers reload the Explorer: it signs them in to the broker with their own 8 h credential. They read every unit's sense, control and control_setpoint topics; sending works only to a unit flagged for commissioning (test mode) with no run in progress: an engineer flags it in the Configuration UI's Units tab (Commissioning) and a qa person approves it."
                    "Between the two deploys an open Explorer page is refused for under a minute."
                    "Verify: ./health-check.sh (MQTT person credentials, iammqtt) and tests/iam-mqtt.sh (takes the deploy lock).") ;;
         IAM_MQTT_PERSON:rollback)
@@ -1169,6 +1169,11 @@ chain_flow() {
         chain_sim_steps
     done
     CHAIN_SIM=()
+    if [[ " ${todo[*]} " == *" IAM_ENFORCE "* ]]; then
+        echo
+        echo -e "  ${BOLD}Last: ./deploy-apps.sh --all${NC} (asked when the switches are done; no run may be active): every app pod"
+        echo "     then carries IAM_ENFORCE=\"true\" (until then ./health-check.sh FAILs iamenforce)."
+    fi
     echo
     echo "  The chain takes the deploy lock once for all its steps (refused while another deploy runs);"
     echo "  deploys use sudo only without the microk8s group. Each switch's checklist is asked when its"
@@ -1228,16 +1233,70 @@ chain_flow() {
         if $DRY_RUN; then echo "[dry run] ${key}'s recipe shown."
         else echo -e "${GREEN}${key}=\"true\": all ${#STEPS[@]} steps done.${NC}"; fi
     done
+    local apps_pending=false
+    if [[ " ${done_keys[*]} " == *" IAM_ENFORCE "* ]]; then
+        CHAIN_DONE="${done_keys[*]}"
+        chain_redeploy_apps || apps_pending=true
+    fi
     echo
     if $DRY_RUN; then
         echo -e "${GREEN}[dry run] the whole chain shown; nothing was run or changed, and no lock was taken.${NC}"
         return 0
     fi
     recipe_end
-    echo -e "${GREEN}IAM is at full enforcement: ${done_keys[*]} turned on; every IAM switch is true.${NC}"
-    echo "  Each recipe's notes are in the plan above (verify with ./health-check.sh; IAM_ENFORCE's notes say to redeploy the apps)."
+    if $apps_pending; then
+        echo -e "${YELLOW}Every IAM switch is true (${done_keys[*]} turned on), but the apps were not redeployed.${NC}"
+        echo "  Still to do, with no run active: ./deploy-apps.sh --all (guide: Applications). Until then the app pods"
+        echo "  carry IAM_ENFORCE=\"false\" and ./health-check.sh FAILs (iamenforce). Each recipe's notes are in the plan above."
+    else
+        echo -e "${GREEN}IAM is at full enforcement: ${done_keys[*]} turned on; every IAM switch is true.${NC}"
+        echo "  Each recipe's notes are in the plan above. Verify with ./health-check.sh."
+    fi
     offer_backup_delete "${backups[@]}"
     return 0
+}
+
+# After IAM_ENFORCE: every app pod keeps the IAM_ENFORCE copy its last deploy rendered
+# (false, on a fresh install), and health-check iamenforce FAILs on it. The switch's own
+# recipe leaves the redeploy out because it restarts the scheduler while runs may be
+# active, so the chain asks for it once, under its lock. → 0 done, 1 skipped or failed.
+chain_redeploy_apps() {
+    local rc
+    echo
+    echo -e "${BOLD}━━ Last: redeploy the apps ━━${NC}"
+    echo "  The app pods (scheduler, monitor, config UI, User Manager, database management) still carry the"
+    echo "  IAM_ENFORCE copy of their last deploy; ./health-check.sh FAILs (iamenforce) until they are redeployed."
+    echo "  ./deploy-apps.sh --all restarts the scheduler, so no run may be active."
+    STEPS=("run ./deploy-apps.sh --all")
+    if ! $DRY_RUN; then
+        [[ -n "$RECIPE_SIG" ]] && chain_apps_stop "$RECIPE_SIG"
+        trap 'chain_apps_stop "Ctrl-C (SIGINT)"' INT
+        trap 'chain_apps_stop SIGTERM' TERM
+        trap 'chain_apps_stop SIGHUP' HUP
+        ask_yn "No run is active: redeploy the apps now?" n; rc=$?
+        recipe_traps
+        (( rc )) && return 1
+    fi
+    recipe_steps; rc=$?
+    if (( rc == 130 )); then
+        echo -e "${RED}Stopped by $RECIPE_SIG during ./deploy-apps.sh --all.${NC}"
+        chain_apps_stop "$RECIPE_SIG"
+    fi
+    if (( rc )); then
+        warn "./deploy-apps.sh --all failed (exit code $LAST_RC): fix the cause and run it again (config.env is not changed by it)."
+        return 1
+    fi
+    return 0
+}
+
+chain_apps_stop() {   # chain_apps_stop SIGNAME → exit 130
+    trap - INT TERM HUP
+    echo
+    echo -e "${RED}Stopped by $1 before the apps were redeployed.${NC}"
+    echo "  Every IAM switch is true (this run turned on: ${CHAIN_DONE})."
+    echo "  Still to do, with no run active: ./deploy-apps.sh --all; until then ./health-check.sh FAILs (iamenforce)."
+    recipe_end
+    exit 130
 }
 
 chain_stopped() {   # chain_stopped KEY WHAT "DONE…" "NOT_STARTED…" BACKUP…
@@ -1283,9 +1342,13 @@ chain_units_check() {   # → 0 go on, 1 stop (answered no), 130 a signal
         return 0
     fi
     echo -e "${CYAN}\$ ./apps/iam/units.sh list${NC}"
-    out="$(./apps/iam/units.sh list)"; rc=$?
+    # MEDCEA_NO_LOG: units.sh would otherwise tee itself to logs/ and print "Log: …" as its
+    # first line. The table is still taken from its USERNAME header on, so any line
+    # before it (a log line, a warning on stdout) cannot make the list unreadable.
+    out="$(MEDCEA_NO_LOG=1 ./apps/iam/units.sh list)"; rc=$?
     [[ -n "$RECIPE_SIG" ]] && return 130
     [[ -n "$out" ]] && printf '%s\n' "$out"
+    [[ "$out" == *$'\n'USERNAME$'\t'* ]] && out="USERNAME"$'\t'"${out#*$'\n'USERNAME$'\t'}"
     if (( rc != 0 )) || [[ "${out%%$'\n'*}" != USERNAME$'\t'* ]]; then
         readable=false
     else

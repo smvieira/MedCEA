@@ -423,8 +423,10 @@ sw_is() {   # sw_is FILE KEY VAL
 printf '%s\n' '#!/bin/sh' \
     'echo "STUB apps/iam/units.sh $*" >&2' \
     'echo "LOCK_HELD=${MEDCEA_LOCK_HELD:-}" >&2' \
+    '[ -n "${MEDCEA_NO_LOG:-}" ] || echo "Log: logs/app-iam-units-stub.log"' \
+    '[ "${UNITS_MODE:-ok}" = logline ] && echo "Log: logs/app-iam-units-stub.log"' \
     'case "${UNITS_MODE:-ok}" in' \
-    '  ok)   printf "USERNAME\tROLE\tENABLED\tUNITS\tWAITING_QA\nop1\toperator\ttrue\tUNIT01\t-\nqa1\tqa\ttrue\t-\t-\n" ;;' \
+    '  ok|logline) printf "USERNAME\tROLE\tENABLED\tUNITS\tWAITING_QA\nop1\toperator\ttrue\tUNIT01\t-\nqa1\tqa\ttrue\t-\t-\n" ;;' \
     '  none) printf "USERNAME\tROLE\tENABLED\tUNITS\tWAITING_QA\nop1\toperator\ttrue\tUNIT01\t-\nop2\toperator\ttrue\t-\tUNIT02\n" ;;' \
     '  fail) exit 2 ;;' \
     'esac' >"$S/apps/iam/units.sh"
@@ -493,8 +495,8 @@ compgen -G "$T/config.env.guide*" >/dev/null && fail "a backup or temp file was 
 echo "25 full enforcement: a real chain against stubs"
 swcfg "$S/config.env"
 rm -f "$S"/config.env.guide-*.bak
-# run; JWT checklist; IAM_DB_ROLES checklist; IAM_ENFORCE's; IAM_MQTT_PERSON's; delete backups (Enter)
-chain $'5\n9\ny\ny\ny\ny\ny\n\n\nq\n'
+# run; JWT checklist; IAM_DB_ROLES checklist; IAM_ENFORCE's; IAM_MQTT_PERSON's; redeploy the apps; delete backups (Enter)
+chain $'5\n9\ny\ny\ny\ny\ny\ny\n\n\nq\n'
 rc_is "quits with 0" 0
 for k in "${SW_ALL[@]}"; do sw_is "$S/config.env" "$k" true; done
 WANT='STUB deploy-infra.sh
@@ -508,7 +510,8 @@ STUB tests/iam-routes-diff.py --strict
 STUB deploy-infra.sh
 STUB apps/iam/deploy.sh
 STUB deploy-infra.sh
-STUB apps/mqtt-explorer/deploy.sh'
+STUB apps/mqtt-explorer/deploy.sh
+STUB deploy-apps.sh --all'
 GOT="$(grep '^STUB ' <<<"$OUT" | sed 's/ *$//')"
 [[ "$GOT" == "$WANT" ]] && pass "every recipe's steps ran, in order" || fail "steps out of order:"$'\n'"$GOT"
 LH="$(grep '^LOCK_HELD=' <<<"$OUT" | sort -u)"
@@ -521,6 +524,8 @@ LS="$(grep '^LOCK_STAMP=' <<<"$OUT" | sort -u)"
 [[ "$(grep -c '^LOCK_STAMP=' <<<"$OUT")" -ge 10 && "$(wc -l <<<"$LS")" == 1 && "$LS" != "LOCK_STAMP=" ]] \
     && pass "the lock was taken once for the whole chain" || fail "the lock was taken more than once: $LS"
 has   "the units check found every operator placed" "Every enabled operator has a unit in effect."
+has   "the plan names the last redeploy" "Last: ./deploy-apps.sh --all"
+has   "the redeploy is asked, [y/N]" "No run is active: redeploy the apps now? [y/N]"
 has   "done" "IAM is at full enforcement: IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON turned on"
 has   "the backups are offered for deletion" "Delete these 5 backups now?"
 compgen -G "$S/config.env.guide-*.bak" >/dev/null && fail "Enter did not delete the backups" || pass "Enter deletes the backups"
@@ -546,7 +551,7 @@ sw_is "$S/config.env" IAM_DB_ROLES false
 sw_is "$S/config.env" IAM_ENFORCE false
 sw_is "$S/config.env" IAM_MQTT_PERSON false
 lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
-chain $'5\n9\ny\ny\ny\ny\nn\n\nq\n'
+chain $'5\n9\ny\ny\ny\ny\ny\nn\n\nq\n'
 rc_is "again: quits with 0" 0
 has   "again: the plan starts at IAM_DB_ROLES" "1. IAM_DB_ROLES → true"
 hasnt "again: JWT skipped" "IAM_POSTGREST_JWT → true"
@@ -600,9 +605,20 @@ chain $'5\n9\ny\nn\n\nq\n' UNITS_MODE=fail
 has   "an unreadable list is said" "could not read the operators' units (./apps/iam/units.sh list exited 2)"
 has   "and asked about" "Go on with IAM_DB_ROLES anyway? [y/N]"
 # yes goes on to the checklist and the recipe
-chain $'5\n9\ny\ny\ny\ny\ny\n\n\nq\n' UNITS_MODE=none
+# ... and the redeploy answered no: the switches are true, the end says what is left
+chain $'5\n9\ny\ny\ny\ny\ny\nn\n\n\nq\n' UNITS_MODE=none
 has   "yes goes on" "STUB apps/database/deploy.sh"
 sw_is "$S/config.env" IAM_MQTT_PERSON true
+hasnt "no redeploy when answered no" "STUB deploy-apps.sh --all"
+hasnt "no claim of full enforcement" "IAM is at full enforcement"
+has   "says the apps are left" "Still to do, with no run active: ./deploy-apps.sh --all"
+rm -f "$S"/config.env.guide-*.bak
+# a "Log: …" line before the table (units.sh logging) still reads as a list
+swcfg "$S/config.env" IAM_POSTGREST_JWT=true IAM_DB_SERVICE_ROLES=true
+chain $'5\n9\ny\nn\n\nq\n' UNITS_MODE=logline
+has   "a log line before the header is skipped" "Every enabled operator has a unit in effect."
+hasnt "not called unreadable" "could not read the operators' units"
+grep -q '^Log: logs/app-iam-units-stub.log' <<<"$OUT" && pass "the stub printed its log line" || fail "the stub printed no log line"
 rm -f "$S"/config.env.guide-*.bak
 
 echo "29 full enforcement: Ctrl-C"

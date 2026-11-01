@@ -468,11 +468,26 @@ fi
 # A real address: Keycloak sends password resets to it once e-mail is set up in
 # the User Manager. The character set is narrow because the value is spliced
 # into JSON, YAML and a pgAdmin Python literal.
+# Special-use domains (.local, .test, .invalid, …) are refused: pgAdmin's e-mail
+# check rejects them (ADMIN_EMAIL is its default login, and a refused one stops
+# its container and the deploy), and no mail reaches them. The same list as
+# kc_claim_emails (infra/lib-keycloak-admin.sh).
+_email_special() {
+    local tld="${1##*.}"
+    case "${tld,,}" in arpa|example|invalid|local|localhost|onion|test) return 0 ;; esac
+    return 1
+}
+_EMAIL_SPECIAL_MSG="A real mail domain, please: pgAdmin and Keycloak's mail refuse .local, .test, .invalid, .example, .localhost, .arpa and .onion."
 if wanted ADMIN_EMAIL; then
     while true; do
         ask _v "Admin e-mail" "$(cfg_get ADMIN_EMAIL)"
-        [[ "$_v" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && break
-        info "${RED}An e-mail address, e.g. you@example.org.${NC}"
+        if [[ ! "$_v" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            info "${RED}An e-mail address, e.g. you@example.org.${NC}"
+        elif _email_special "$_v"; then
+            info "${RED}$_EMAIL_SPECIAL_MSG${NC}"
+        else
+            break
+        fi
     done
     cfg_update ADMIN_EMAIL "$_v"
 fi
@@ -506,6 +521,8 @@ ask_person_email() {
         ask _pv "$q" "$(cfg_get "$var")"
         if [[ ! "$_pv" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
             info "${RED}An e-mail address, e.g. name@example.org.${NC}"
+        elif _email_special "$_pv"; then
+            info "${RED}$_EMAIL_SPECIAL_MSG${NC}"
         elif _taken_emails "$@" | grep -qxF "${_pv,,}"; then
             info "${RED}Another seeded account already uses that address (Gmail: name+role@gmail.com is a separate address).${NC}"
         else
@@ -617,6 +634,7 @@ if [[ "$MODE" == "all" ]]; then
     echo ""
     info "Nightly backups (apps/backup): an absolute folder on this host, created mode 700."
     info "It holds secrets; another disk than the data's is better (it survives that disk)."
+    info "When you cannot write its parent (e.g. /var/backups), the apps stage asks for sudo once to create it."
     while true; do
         ask _v "Backup folder" "$(cfg_get BACKUP_DIR)"
         [[ "$_v" =~ ^/[A-Za-z0-9._/-]+$ && "$_v" != */.* ]] && break

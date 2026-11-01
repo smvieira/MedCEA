@@ -331,6 +331,7 @@ render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM
 # The 403 page names exactly the roles this gate admits.
 gate_error_page access-oauth2-proxy ACCESS_DOMAIN "$ALLOWED_GROUPS"
 mapfile -t _AOP_GATE_ARGS < <(gate_helm_args access-oauth2-proxy)
+helm_dockerhub_login   # the chart pull runs as this process's identity (infra/lib-oauth2-proxy.sh)
 $MK8S helm3 upgrade --install access-oauth2-proxy \
   oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
   --version 8.0.2 \

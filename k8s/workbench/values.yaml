@@ -297,6 +297,17 @@ singleuser:
         log "done"
         exit 0
 
+# No pre-pull hook: with it (the chart's default) helm waits, inside its --timeout,
+# until every node has pulled the ~2 GB notebook image, so a fresh host on a slow link
+# failed the whole workbench deploy at 10 minutes and the platform came up without a
+# hub. Without it the first server start pays the pull (startTimeout 600 s above,
+# http_timeout 900 s), and a person waits a few minutes once.
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false
+
 cull:
   enabled: true
   timeout: 3600            # reclaim a user pod after an hour idle

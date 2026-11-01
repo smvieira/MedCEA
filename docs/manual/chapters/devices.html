@@ -71,10 +71,10 @@ UNIT02 + CONTROL + ZONE02  -&gt;  unit02-c-zone02</code></pre>
 <h3 id="devices-before">Before the first onboarding</h3>
 <p>These are one-time tasks for the administrator of the platform host.</p>
 <ol class="steps">
-<li><strong>Serial port access.</strong> The account that runs the wizard must be in the <code>dialout</code> group. <code>./deploy-infra.sh</code> adds it. To do it by hand:
+<li><strong>Serial port access.</strong> The account that runs the wizard must be in the <code>dialout</code> group. <code>./deploy-infra.sh</code> adds it, as its last step. The wizard service keeps its old group list until its user service manager restarts, and that restart closes every desktop program of the account, so <code>./deploy-infra.sh</code> restarts it only when it runs over SSH or on a text console with no desktop session of the account open. On a desktop it says so instead, and <code>./install.sh</code> repeats it at the end: reboot the host once after the install. To do it all by hand, signed out of the desktop (from SSH or a text console):
 <pre><code>sudo usermod -aG dialout "$USER"
 sudo systemctl restart "user@$(id -u)"</code></pre>
-The second command matters: the wizard service keeps its old group list until its user service manager restarts. Confirm with <code>id -nG</code>.</li>
+Logging out of the desktop is not enough: the wizard service keeps the user service manager running (linger). Confirm with <code>id -nG</code> in a new login.</li>
 <li><strong>The wizard service.</strong> <code>./install.sh</code> and <code>./deploy-apps.sh --all</code> run <code>./apps/edge-wizard/deploy.sh</code>. It installs the <code>cea-edge-wizard</code> service on the host and publishes it at <code>https://onboard-device.&lt;domain&gt;</code>. If the service is not running, the Onboard Device button gives a connection error. <code>./health-check.sh</code> checks that it answers. It restarts the service, so it refuses while an onboarding run started from the wizard is in progress; run it again when the run has finished. It prints the roles the wizard admits.</li>
 <li><strong>Sign-in.</strong> <code>./deploy-infra.sh</code> creates the Keycloak client <code>edge-wizard</code> and writes <code>EDGE_WIZARD_SECRET</code> into <code>config.env</code>. Without it the wizard cannot sign anyone in.</li>
 <li><strong>Units and zones.</strong> Create them in the Units tab, with codes that make legal names.</li>

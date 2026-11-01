@@ -86,10 +86,14 @@ Not sure which command you need? `./guide.sh` asks what you want to do (install,
 | Tailscale | checked on every run. If it is missing, stopped or not logged in, the installer prints the steps (with links), then lets you re-check, run them for you, or continue LAN-only |
 | Project name | `medcea` |
 | Domain | with Tailscale: the name `medcea` (`https://ai-workbench.medcea`); otherwise your LAN IP + `.nip.io` |
-| Admin username / password | `admin` / generated if you press Enter (shown once — note it down) |
+| Admin username / e-mail / password | `admin` / none (required: a real address you read, not `.local`, `.test` or another special-use domain) / generated if you press Enter (shown once — note it down) |
+| First qa person: username, e-mail | none (required; someone other than the admin, with their own address) |
+| First engineer: username, e-mail | none (required; its own address) |
 | PostgreSQL password, volume size | generated / `10Gi` |
 | Docker Hub username + access token | none: the installer links to sign-up and token creation and checks the pair |
-| Timezone, AI workbench on/off | system timezone / on |
+| Timezone | system timezone |
+| Backup folder, days to keep | `/var/backups/medcea` / `14` (when you cannot write the folder's parent, the applications stage asks for sudo once to create it) |
+| AI workbench on/off | on |
 
 Passwords may use only letters, digits and `. _ ~ -`, because they are written unescaped into URLs and YAML. Service secrets (OAuth clients, cookies) are generated later in the run, with no questions.
 
@@ -147,6 +151,8 @@ Then the applications stage (`deploy-apps.sh --all`, next section) and `health-c
 
 **At the very end it shows your credentials.** Every password a person needs (platform admin, Keycloak, Grafana users, pgAdmin, PostgreSQL) is written to `credentials-<timestamp>.txt` in the repository root, readable only by you. Its content is shown on the terminal, never in the log. **Save it in a password manager, then delete the file**; the installer prints the exact `rm` command and lists any files left over from earlier runs. `config.env` keeps its own copy, because re-deploys need it.
 
+**Then turn on the rest of the access controls.** A fresh install has only the sign-in gates and the network policies on (`IAM_GATES`, `IAM_NETPOL`); token checks, database roles, service enforcement and the MQTT Explorer's personal credentials (`IAM_POSTGREST_JWT`, `IAM_DB_SERVICE_ROLES`, `IAM_DB_ROLES`, `IAM_ENFORCE`, `IAM_MQTT_PERSON`) are off, so the health check never says "All checks passed" and the MQTT Explorer has no credential. Run `./guide.sh` → **IAM switches** → **Bring IAM to full enforcement**: it turns them on in order and, at its end, offers `./deploy-apps.sh --all` (answer yes when no run is active) so every app pod carries the new `IAM_ENFORCE`. The manual's "After a fresh install" section explains its checklists (operators' units confirmed by qa, a report-only trial before `IAM_ENFORCE`).
+
 > **Note:** Charmed Kubeflow was retired — it cost 37 Juju charm units and nothing in the codebase used it. JupyterHub replaced it and authenticates against Keycloak directly, which also removed Dex, oidc-gatekeeper, Istio, MetalLB and the static LAN IP.
 
 ### 3. Application components
@@ -171,6 +177,7 @@ Currently available components:
 | Component | What it installs |
 |---|---|
 | **access** | Access requests, the **User Manager**, the user menu and Profile — see [Users and access](#users-and-access) |
+| **backup** | Nightly backups (CronJob `medcea-backup`, 02:30 UTC) of the databases, the workbench homes, Node-RED and Grafana into `BACKUP_DIR` (default `/var/backups/medcea`); its deploy creates that folder, with sudo once when its parent is not writable. `./apps/backup/backups.sh now\|list\|verify\|restore-help` |
 | **database** | `medcea` schema, measurement table, and DB migrations (control algorithms, permissions, algorithm state) |
 | **edge-wizard** | The device onboarding wizard as a host service (`https://onboard-device.<domain>`), for flashing boards over USB |
 | **frontend** | System Configuration UI and Database Management portal |
@@ -1017,6 +1024,12 @@ container image, which on this platform is roughly 10 GB.
 ```bash
 ./health-check.sh          # every service, with expected status codes
 ```
+
+A rebuilt platform starts from `config.env`'s IAM switches. After an
+`--uninstall-all` that also deleted `config.env`, they are back to a fresh
+install's (only `IAM_GATES` and `IAM_NETPOL` on): run `./guide.sh` → IAM
+switches → **Bring IAM to full enforcement**, then let it redeploy the apps
+(`./deploy-apps.sh --all`) at its end.
 
 Then confirm the two things a fresh Keycloak realm affects: sign in at
 `portal.$DOMAIN`, and sign in at `ai-workbench.$DOMAIN` — both go through

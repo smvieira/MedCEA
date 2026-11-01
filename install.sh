@@ -12,7 +12,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 
 usage() {
-    cat <<'EOF'
+    local comps
+    comps="$(find "$SCRIPT_DIR/apps" -mindepth 2 -maxdepth 2 -name uninstall.sh -printf '%h\n' 2>/dev/null | xargs -n1 basename 2>/dev/null | sort | tr '\n' ' ')"
+    comps="${comps% }"
+    cat <<EOF
 Usage: ./install.sh [option]
 
 Install / update
@@ -23,14 +26,16 @@ Install / update
   --configure            Review every setting (current values as defaults), then install.
   --infra-only           Only the infrastructure (MicroK8s, Postgres, Keycloak, Grafana,
                          Node-RED, portal, AI workbench).
-  --apps-only            Only the applications (database schema, onboarding wizard,
-                         config UI, scheduler, monitor, reports, Node-RED flows).
-                         Needs the infrastructure.
+  --apps-only            Only the applications (database schema, User Manager, iam-api,
+                         onboarding wizard, config UI, scheduler, monitor, reports,
+                         Node-RED flows, MQTT Explorer, nightly backup). Needs the
+                         infrastructure. The backup step asks for sudo once when
+                         BACKUP_DIR's parent is not writable (it creates the folder).
 
 Uninstall
   --uninstall-apps [component ...]
                          Remove application components — all, or the ones named
-                         (database edge-wizard frontend monitor node-red report scheduler).
+                         ($comps).
                          The infrastructure keeps running; database contents are kept.
       --purge-data       ...and drop the database medcea_db with all its data.
   --uninstall-infra      Remove every platform service, every application and ALL data
@@ -167,6 +172,21 @@ iam_switches_hint() {
     return 0
 }
 
+# One line when deploy-infra added this account to dialout but could not restart
+# its user service manager (a desktop run): the onboarding wizard's process still
+# lacks the group, so it cannot open the USB port until a reboot. Never fails.
+usb_group_hint() {
+    local gid pid
+    gid="$(getent group dialout 2>/dev/null | cut -d: -f3)"
+    [[ -n "$gid" ]] || return 0
+    id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -qx dialout || return 0
+    pid="$(systemctl --user show -p MainPID --value cea-edge-wizard 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+    awk '/^Groups:/ { for (i = 2; i <= NF; i++) print $i }' "/proc/$pid/status" 2>/dev/null | grep -qx "$gid" && return 0
+    echo -e "${YELLOW}The onboarding wizard does not have group dialout yet, so it cannot open a board's USB port. Reboot the host once (or, signed out of the desktop, from SSH: sudo systemctl restart user@$(id -u)).${NC}"
+    return 0
+}
+
 case "$MODE" in
 # -----------------------------------------------------------------------------
 install)
@@ -177,6 +197,7 @@ install)
     echo ""
     echo -e "${GREEN}${BOLD}MedCEA is installed.${NC} Start at the service portal: https://$( (source ./config.env; echo "$PORTAL_DOMAIN") 2>/dev/null)"
     iam_switches_hint || true      # before the box, which stays the last thing on screen
+    usb_group_hint || true
     finish_with_credentials
     ;;
 infra)

@@ -213,6 +213,29 @@ gate_helm_args() {
       --set "extraVolumeMounts[0].readOnly=true"
 }
 
+# helm_dockerhub_login — log helm into Docker Hub as the identity that pulls.
+#
+# deploy-infra.sh logs in once, but on a fresh host it runs everything through
+# `sudo microk8s` (the session has no microk8s group yet), so that login lands in
+# root's helm config; install.sh then runs the apps stage as the user (sg
+# microk8s), whose helm has none, and the bitnamicharts pulls went anonymous
+# (rate-limited per IP). So every chart pull outside deploy-infra logs in first,
+# once per process. Best effort: a failed login warns and the pull still runs.
+# The token goes on stdin only.
+helm_dockerhub_login() {
+    [[ "${_MEDCEA_HELM_LOGIN_DONE:-}" == 1 ]] && return 0
+    _MEDCEA_HELM_LOGIN_DONE=1
+    if [[ -z "${DOCKERHUB_USER:-}" || -z "${DOCKERHUB_PAT:-}" ]]; then
+        echo "WARNING: DOCKERHUB_USER/DOCKERHUB_PAT not set in config.env: pulling bitnamicharts anonymously." >&2
+        return 0
+    fi
+    if ! printf '%s\n' "$DOCKERHUB_PAT" | $MK8S helm3 registry login registry-1.docker.io \
+            -u "$DOCKERHUB_USER" --password-stdin >/dev/null 2>&1; then
+        echo "WARNING: helm could not log in to Docker Hub as $DOCKERHUB_USER: pulling bitnamicharts anonymously." >&2
+    fi
+    return 0
+}
+
 deploy_oauth2_proxy() {
     local release="$1" client_id="$2" client_secret="$3" cookie_secret="$4" host="$5" values="$6"
     shift 6
@@ -223,6 +246,7 @@ deploy_oauth2_proxy() {
         echo "       Run ./deploy-infra.sh first — it creates the client and writes both." >&2
         return 1
     fi
+    helm_dockerhub_login
     $MK8S helm3 upgrade --install "$release" \
       oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
       --version 8.0.2 \
