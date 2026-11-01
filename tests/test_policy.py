@@ -1999,9 +1999,9 @@ class ShortSessionsTest(unittest.TestCase):
         env = {e["name"]: e.get("value") for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
         # The image's entrypoint writes NAME = value into config_distro.py: Python literals.
         self.assertIs(ast.literal_eval(env["PGADMIN_CONFIG_OAUTH2_AUTO_LOGIN"]), True)
-        days = ast.literal_eval(env["PGADMIN_CONFIG_SESSION_EXPIRATION_TIME"])
-        self.assertIsInstance(days, float)
-        self.assertAlmostEqual(days * 24 * 60, 60, delta=0.1)          # one hour
+        # SESSION_EXPIRATION_TIME * 86400 is gunicorn's --timeout (an integer): a fraction of
+        # a day stops pgAdmin from starting (1 Nov 2026), so it keeps its default of one day
+        self.assertNotIn("PGADMIN_CONFIG_SESSION_EXPIRATION_TIME", env)
         # auto-login applies only with OAuth2 the only source and one provider
         self.assertEqual(ast.literal_eval(env["PGADMIN_CONFIG_AUTHENTICATION_SOURCES"]), ["oauth2"])
         self.assertEqual(len(ast.literal_eval(sec["stringData"]["oauth2-config"])), 1)

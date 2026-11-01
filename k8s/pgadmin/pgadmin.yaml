@@ -255,18 +255,14 @@ spec:
         # the login page with its "MedCEA sign-in" button still shows.
         - name: PGADMIN_CONFIG_OAUTH2_AUTO_LOGIN
           value: "True"
-        # pgAdmin's session lifetime, in days (a Python float; default 1): 1/24 = one
-        # hour, not five minutes. pgAdmin checks no session age itself: this is only the
-        # browser cookie's expiry, renewed whenever pgAdmin writes the session (running a
-        # query does; reading results does not), and a new session gets new database
-        # connections, so a shorter value would drop an open Query Tool transaction from
-        # under someone still reading its results. An hour matches MAX_SESSION_IDLE_TIME
-        # (60 minutes, unchanged), after which pgAdmin already releases idle connections.
-        # pgAdmin does not follow Keycloak by itself: the next person in the same browser
-        # gets the earlier person's pgAdmin until an hour after its last session write
-        # (and their own use renews it) or pgAdmin's Logout (manual: known gaps).
-        - name: PGADMIN_CONFIG_SESSION_EXPIRATION_TIME
-          value: "0.0417"
+        # pgAdmin's own session is NOT shortened. SESSION_EXPIRATION_TIME (days) must stay a
+        # whole number: the image's entrypoint passes SESSION_EXPIRATION_TIME * 86400 to
+        # gunicorn --timeout, which takes only an integer ("0.0417" made 3602.88 and pgAdmin
+        # never started, 1 Nov 2026). So pgAdmin keeps its defaults: the browser is signed
+        # out after 60 minutes idle (MAX_SESSION_IDLE_TIME), and a session lasts at most one
+        # day. pgAdmin does not follow Keycloak by itself: the next person in the same
+        # browser gets the earlier person's pgAdmin until then, or until pgAdmin's own
+        # Logout (manual: known gaps).
         - name: PGADMIN_CONFIG_OAUTH2_CONFIG
           valueFrom:
             secretKeyRef:

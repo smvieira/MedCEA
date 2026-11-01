@@ -324,7 +324,7 @@
 <p>Known gaps you may see (see <a href="#access-switch">switching accounts in one browser</a>):</p>
 <ul>
 <li>Reloading the Node-RED tab less than 4 minutes after step 6 may still open the editor as <code>eng</code>: its gate checks the platform sign-in every 4 minutes. If B were another engineer, whom the gate admits, the editor would keep acting as <code>eng</code> for up to an hour after step 4.</li>
-<li>pgAdmin opened by A, if A could open it, would stay A's for up to an hour.</li>
+<li>pgAdmin opened by A, if A could open it, would stay A's for up to 60 minutes without use, and at most a day.</li>
 <li>A Grafana tab that stays in use, for example a dashboard with auto-refresh, keeps <code>eng</code>'s Grafana session for up to an hour after step 3, so in step 11 it may still show <code>eng</code>. The hour is the bound; 5 minutes would drop unsaved panel edits.</li>
 <li>If the AI Workbench does not answer, step 6 stops on its error page. The platform sign-in has already ended; only the workbench's own session is left, for up to 5 minutes.</li>
 </ul>

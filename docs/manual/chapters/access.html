@@ -125,7 +125,7 @@
 <tr><td>AI Workbench</td><td>5 minutes</td><td>The next workbench page signs you in again without a prompt. A JupyterLab tab that stays open stops saving and opening files about 5 to 10 minutes after it was loaded ("Forbidden"). Reload the tab, or open the workbench in another tab, and it works again. Unsaved changes stay in the tab, and your kernels keep running.</td></tr>
 <tr><td>Grafana</td><td>5 minutes without use, and at most 1 hour from when you signed in to it</td><td>The page reloads once and comes back to the same dashboard. Dashboard changes you have not saved are lost at that reload, so save as you go. A tab you keep using (a dashboard that refreshes itself counts) is not interrupted before the hour, so you do not lose a panel you are building every 5 minutes.</td></tr>
 <tr><td>Node-RED editor</td><td>1 hour from when you opened it</td><td>The editor signs you in again. If you have changes you have not deployed, the browser first asks whether to leave the page: choose to stay, export your flows (menu → Export), then reload and import them, or deploy before the hour is up. Five minutes would interrupt editing too often, so the editor keeps one hour.</td></tr>
-<tr><td>pgAdmin</td><td>1 hour after pgAdmin last saved your session (running a query renews it)</td><td>pgAdmin signs you in again without a prompt, with new database connections: a Query Tool transaction you did not commit is gone. pgAdmin cannot check the platform sign-in sooner without dropping that work.</td></tr>
+<tr><td>pgAdmin</td><td>60 minutes without use, and at most one day</td><td>pgAdmin signs you in again without a prompt, as whoever is signed in to the platform then. pgAdmin offers no shorter session: its start-up accepts only whole days.</td></tr>
 </tbody>
 </table></div>
 <h4 id="access-switch">Switching accounts in one browser</h4>
@@ -134,7 +134,7 @@
 <li>The AI Workbench may show the previous person for up to 5 minutes (an open JupyterLab tab for up to 10 minutes). The new person is never shown the previous person's workbench server: the workbench refuses it.</li>
 <li>Grafana may show the previous person for up to 5 minutes after its tab was last used, and for up to an hour after they opened it while a tab keeps it in use (for example a dashboard that refreshes itself). Close Grafana's tabs before you hand over the computer.</li>
 <li>The Node-RED editor may show the previous person for up to an hour after they opened it, and acts as that person, when the new person may also open Node-RED. Editor sessions started before 1 November 2026 were set to last a week; the deploy of that day ended them.</li>
-<li>pgAdmin may show the previous person for up to an hour after its session was last saved. If the new person keeps using it, the hour starts again. Use pgAdmin's own <strong>Logout</strong> before you hand over the computer.</li>
+<li>pgAdmin may show the previous person until it has gone 60 minutes without use, and for at most a day. Use pgAdmin's own <strong>Logout</strong> before you hand over the computer.</li>
 <li>The app you chose <strong>Sign out</strong> in is signed out at once. Another app you had open in another tab can keep working in that tab for up to 4 minutes.</li>
 <li>Open live connections stay connected until you close their tab. These are JupyterLab kernels, MQTT Explorer's broker connection and Grafana's live updates.</li>
 </ul>
