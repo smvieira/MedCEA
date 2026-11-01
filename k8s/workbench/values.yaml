@@ -62,7 +62,7 @@ hub:
       # `groups` is a default client scope of client workbench, so the claim arrives
       # in the userinfo response without being requested.
       scope: ["openid", "profile", "email"]
-      # OAuthenticator 17 (hub image k8s-hub 4.4.1): allowed_groups and
+      # OAuthenticator 17 (hub image k8s-hub 4.4.4): allowed_groups and
       # auth_state_groups_key need manage_groups. The groups come from this sign-in's
       # auth_model (in memory), so enable_auth_state stays false. No admin_groups: it
       # would give the built-in admin role (workbench-admin above is held by group).
@@ -74,6 +74,12 @@ hub:
       # Removing a hub user (admin page) keeps the person's home volume claim-<name>
       # (KubeSpawner's default would delete it: K is not D).
       delete_pvc: false
+      # How long the hub waits for a started server to answer (default 30 s). The home
+      # setup (singleuser.extraFiles) runs inside the container's command, before the
+      # server: on a new home its installs are bounded at 780 s in all (pip 300,
+      # code-server 60 + 300, nbstripout 120), so 900 leaves room for the server start.
+      # A server that never answers is given up after 15 minutes.
+      http_timeout: 900
 
 proxy:
   service:
@@ -124,10 +130,21 @@ singleuser:
   memory: { guarantee: 512M, limit: 4G }
   cpu: { guarantee: 0.1, limit: 2 }
   defaultUrl: "/lab"
-  # Installed into the user's persistent home, so only the first start pays for
-  # it. Baking these into an image is the better answer at scale — see the
-  # infra/workbench.Dockerfile — but this keeps the deployment to one Helm
-  # release with no registry to run.
+  # A first start pulls the notebook image (about 2 GB) before the container runs:
+  # KubeSpawner's start_timeout (default 300 s) bounds that wait.
+  startTimeout: 600
+  # The home setup, run BEFORE the notebook server starts (docker-stacks' start.sh runs
+  # every executable in /usr/local/bin/before-notebook.d, then execs the server). Until
+  # 1 Nov 2026 this was a postStart hook, which Kubernetes runs at the same time as the
+  # container's command: on a new home the server loaded its extensions before pip had
+  # installed jupyter-collaboration, the browser still loaded the collaboration lab
+  # extension and asked /api/collaboration/* for every document (404), so nothing
+  # opened, not even medcea-examples, until a restart.
+  # Installed into the person's home, so only the first start pays for it (the hub
+  # waits up to hub.config.KubeSpawner.http_timeout for the server meanwhile). Baking
+  # these into an image is the better answer at scale (infra/workbench.Dockerfile; a
+  # baked code-server is found on PATH and skipped), but this keeps the deployment to
+  # one Helm release with no registry to run.
   # Every start (idempotent) also makes nbstripout the global git filter for *.ipynb,
   # so a commit never stores cell outputs (telemetry values), and sets git's credential
   # store (the person's GitHub token stays in their home) unless they chose another
@@ -136,40 +153,122 @@ singleuser:
   # stage a notebook rather than store it whole; and the global core.hooksPath (unless
   # the person set one) runs medcea-examples/nb_output_guard.py as pre-commit, which
   # refuses a staged notebook still holding outputs — a repository's own .gitattributes
-  # can turn the filter off, not that hook. A failure never stops the server.
-  lifecycleHooks:
-    postStart:
-      exec:
-        command:
-          - "sh"
-          - "-c"
-          - >
-            (test -x "$HOME/.local/bin/code-server" ||
-             (pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy &&
-              curl -fsSL https://code-server.dev/install.sh |
-                sh -s -- --method=standalone --prefix="$HOME/.local" )) ;
-            (python3 -c "import nbstripout" 2>/dev/null || pip install --quiet --user nbstripout) ;
-            (python3 -m nbstripout --is-installed --global ||
-             python3 -m nbstripout --install --global) ;
-            (git config --global --get filter.nbstripout.clean >/dev/null ||
-             git config --global filter.nbstripout.clean "python3 -m nbstripout") ;
-            git config --global filter.nbstripout.required true ;
-            ATTRS="$(git config --global --path --get core.attributesFile)" ;
-            [ -n "$ATTRS" ] || { ATTRS="$HOME/.config/git/attributes" ;
-              git config --global core.attributesFile "$ATTRS" ; } ;
-            mkdir -p "$(dirname "$ATTRS")" ;
-            (grep -qx '*.ipynb filter=nbstripout' "$ATTRS" 2>/dev/null ||
-             echo '*.ipynb filter=nbstripout' >> "$ATTRS") ;
-            HOOKS="$HOME/.config/git/hooks" ;
-            (git config --global --get core.hooksPath >/dev/null ||
-             git config --global core.hooksPath "$HOOKS") ;
-            if [ "$(git config --global --path --get core.hooksPath)" = "$HOOKS" ]; then
-              mkdir -p "$HOOKS" &&
-              printf '#!/bin/sh\nexec python3 /home/jovyan/medcea-examples/nb_output_guard.py\n' > "$HOOKS/pre-commit" &&
-              chmod +x "$HOOKS/pre-commit" ; fi ;
-            (git config --global --get credential.helper >/dev/null ||
-             git config --global credential.helper store) ;
-            true
+  # can turn the filter off, not that hook. The container runs as jovyan (uid 1000, the
+  # image's account); the git author name and the terminal prompt show the person
+  # ($JUPYTERHUB_USER) instead. A failure never stops the server (always exit 0).
+  # The chart puts the file in Secret `singleuser` and mounts it by subPath, so the
+  # image's own hooks in that folder stay; a running server sees a change only after a
+  # restart. Plain POSIX sh, and no dollar-brace anywhere: this file goes through render.
+  extraFiles:
+    medcea-home-setup:
+      mountPath: /usr/local/bin/before-notebook.d/50-medcea-home-setup
+      mode: 493                # 0755: no .sh, so run-hooks.sh runs it as its own process
+      stringData: |
+        #!/bin/sh
+        # medcea-home-setup (k8s/workbench/values.yaml): the person's home, before the
+        # notebook server starts. Output goes to the pod log.
+        log() { echo "medcea-home-setup: $*"; }
+        # limited SECONDS CMD...: bounded, so the hub's http_timeout is never outrun.
+        limited() {
+            secs="$1"; shift
+            if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+        }
+        log "start ($JUPYTERHUB_USER)"
+
+        # (a) Real-time collaboration and the VS Code launcher, into ~/.local.
+        if ! python3 -c 'import jupyter_collaboration, jupyter_vscode_proxy' 2>/dev/null; then
+            if limited 300 pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy; then
+                log "installed jupyter-collaboration and jupyter-vscode-proxy"
+            else
+                log "WARNING: pip could not install jupyter-collaboration and jupyter-vscode-proxy; the next start tries again"
+            fi
+        fi
+
+        # (b) code-server (VS Code), unless the image or an earlier start has it. Downloaded
+        # to a file and checked first: curl | sh would run an empty script and succeed.
+        if ! command -v code-server >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/code-server" ]; then
+            inst="$(mktemp 2>/dev/null)"; ilog="$(mktemp 2>/dev/null)"
+            if [ -n "$inst" ] && [ -n "$ilog" ] &&
+               limited 60 curl -fsSL https://code-server.dev/install.sh -o "$inst" && [ -s "$inst" ] &&
+               limited 300 sh "$inst" --method=standalone --prefix="$HOME/.local" >"$ilog" 2>&1 &&
+               [ -x "$HOME/.local/bin/code-server" ]; then
+                log "installed code-server into ~/.local"
+            else
+                log "WARNING: code-server could not be installed (no VS Code until a later start installs it)"
+                [ -n "$ilog" ] && tail -n 5 "$ilog" 2>/dev/null | sed 's/^/medcea-home-setup:   /'
+            fi
+            rm -f "$inst" "$ilog"
+        fi
+
+        # (c) nbstripout, into ~/.local.
+        python3 -c 'import nbstripout' 2>/dev/null ||
+            limited 120 pip install --quiet --user nbstripout ||
+            log "WARNING: pip could not install nbstripout; git refuses to commit notebooks until it is installed"
+        # (d) nbstripout as the global git filter.
+        python3 -m nbstripout --is-installed --global ||
+            python3 -m nbstripout --install --global
+        # (e) Fail closed: the clean command and `required`, even when pip failed.
+        git config --global --get filter.nbstripout.clean >/dev/null ||
+            git config --global filter.nbstripout.clean "python3 -m nbstripout"
+        git config --global filter.nbstripout.required true
+        # (f) The attribute that applies the filter to every notebook.
+        ATTRS="$(git config --global --path --get core.attributesFile)"
+        if [ -z "$ATTRS" ]; then
+            ATTRS="$HOME/.config/git/attributes"
+            git config --global core.attributesFile "$ATTRS"
+        fi
+        mkdir -p "$(dirname "$ATTRS")"
+        grep -qx '*.ipynb filter=nbstripout' "$ATTRS" 2>/dev/null ||
+            echo '*.ipynb filter=nbstripout' >> "$ATTRS"
+        # (g) The pre-commit output guard, unless the person chose their own hooks folder.
+        HOOKS="$HOME/.config/git/hooks"
+        git config --global --get core.hooksPath >/dev/null ||
+            git config --global core.hooksPath "$HOOKS"
+        if [ "$(git config --global --path --get core.hooksPath)" = "$HOOKS" ]; then
+            mkdir -p "$HOOKS" &&
+            printf '#!/bin/sh\nexec python3 /home/jovyan/medcea-examples/nb_output_guard.py\n' > "$HOOKS/pre-commit" &&
+            chmod +x "$HOOKS/pre-commit"
+        fi
+        # (h) The GitHub token stays in the home, unless the person chose another helper.
+        git config --global --get credential.helper >/dev/null ||
+            git config --global credential.helper store
+
+        # (i) Show the person, not jovyan: the git author name (never overwritten) and,
+        # in an appended block, the prompt and the terminal title. The e-mail is the
+        # person's to set (SAVE_TO_GIT.md).
+        if [ -n "$JUPYTERHUB_USER" ]; then
+            git config --global --get user.name >/dev/null ||
+                { git config --global user.name "$JUPYTERHUB_USER" && log "git author name set to $JUPYTERHUB_USER"; }
+        fi
+        git config --global --get user.email >/dev/null ||
+            log "git has no user.email: set it once with git config --global user.email (medcea-examples/SAVE_TO_GIT.md)"
+        # A new home has no shell start files (the volume hides the image's home). A
+        # Jupyter terminal is a login shell, which reads ~/.profile, which reads ~/.bashrc.
+        if [ ! -e "$HOME/.bashrc" ] && [ -f /etc/skel/.bashrc ]; then
+            cp /etc/skel/.bashrc "$HOME/.bashrc" && log "created ~/.bashrc from /etc/skel"
+        fi
+        if [ ! -e "$HOME/.profile" ] && [ ! -e "$HOME/.bash_profile" ] && [ ! -e "$HOME/.bash_login" ] &&
+           [ -f /etc/skel/.profile ]; then
+            cp /etc/skel/.profile "$HOME/.profile" && log "created ~/.profile from /etc/skel"
+        fi
+        # Appended once; a .bashrc is never rewritten.
+        if ! grep -qxF '# >>> medcea workbench prompt >>>' "$HOME/.bashrc" 2>/dev/null; then
+            cat >> "$HOME/.bashrc" <<'EOF'
+
+        # >>> medcea workbench prompt >>>
+        # Added by the workbench (medcea-home-setup): the prompt and the terminal title
+        # show your workbench name instead of the container's account, jovyan. To use
+        # your own prompt, set PS1 below this block (a deleted block comes back).
+        if [ -n "$JUPYTERHUB_USER" ]; then
+            PS1='\[\e]0;$JUPYTERHUB_USER@workbench: \w\a\]$JUPYTERHUB_USER@workbench:\w\$ '
+        fi
+        # <<< medcea workbench prompt <<<
+        EOF
+            log "added the workbench prompt to ~/.bashrc"
+        fi
+
+        log "done"
+        exit 0
 
 cull:
   enabled: true

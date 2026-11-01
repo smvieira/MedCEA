@@ -13,19 +13,26 @@ no admin_groups, hub.loadRoles.admin.users []) and workbench-admin's scopes are 
 the decided ones (WORKBENCH_ADMIN_ROLE_SCOPES): no tokens, access:servers, shares,
 admin:users, groups or admin:auth_state. The roles are in hub.loadRoles, never in
 hub.config.JupyterHub.load_roles (which would drop the chart's idle-culler role).
-Either way no ${VAR} is left but the postStart command's $HOME, $ATTRS and $HOOKS, which
-must reach the pod.
+Either way no ${VAR} is left but the home setup script's own shell variables, which must
+reach the pod.
 A cli.py that fails, or prints [], makes policy_workbench return 1 (the deploy dies
 before helm and the running hub stays as it is).
 IAM 3.2b: policy_workbench_egress renders singleuser.networkPolicy.egress — exactly
 `cli.py compile egress notebooks` (Keycloak and config-api) while IAM_POSTGREST_JWT and
 IAM_DB_ROLES are both true, [] otherwise — with private addresses still closed; the pod
-gets endpoints only (no secret), the examples read-only in the home, and a postStart that
-makes nbstripout the global git filter idempotently, fails closed when nbstripout cannot be
-installed (attribute, clean command and `required` still written), installs the
-pre-commit output guard (nb_output_guard.py, tried against a real git repository) and
-never fails the start. workbench_egress_close (the database and frontend deploys, on a
-switch to false) removes exactly the compiled hops from the live NetworkPolicy.
+gets endpoints only (no secret) and the examples read-only in the home.
+The home setup (1 Nov 2026) is singleuser.extraFiles medcea-home-setup, an executable in
+docker-stacks' before-notebook.d, so it runs BEFORE the server starts (a postStart ran
+concurrently, and a new home's server started without the collaboration extension); the
+hub's http_timeout covers its bounded installs. Run under sh with stub python3/pip/git/curl
+it installs jupyter-collaboration, jupyter-vscode-proxy and code-server once (a second run
+calls neither pip nor curl), makes nbstripout the global git filter idempotently, fails
+closed when pip and curl fail (attribute, clean command, `required` and the pre-commit
+output guard still written; nb_output_guard.py is tried against a real git repository),
+always exits 0, sets git's user.name to the person only while unset and shows the person in
+the prompt (~/.bashrc from /etc/skel when missing, the block appended once, a person's own
+lines kept). workbench_egress_close (the database and frontend deploys, on a switch to
+false) removes exactly the compiled hops from the live NetworkPolicy.
 
   python3 tests/test_workbench_render.py
 """
@@ -46,6 +53,9 @@ VARS = ["WORKBENCH_ALLOW_ALL", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_ALLOWED_GR
         "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_403_MESSAGE"]
 # The decided abilities of the hub administrator (decision record, compliance chapter).
 ADMIN_SCOPES = ["admin-ui", "delete:users", "list:users", "read:users", "servers"]
+# The home setup script's own shell variables: none is on the render list, so render keeps them.
+SCRIPT_VARS = {"$HOME", "$ATTRS", "$HOOKS", "$JUPYTERHUB_USER", "$inst", "$ilog", "$secs"}
+SETUP_DIR = "/usr/local/bin/before-notebook.d/"
 NEVER = {"tokens", "read:tokens", "access:servers", "shares", "users:shares", "admin:users",
          "groups", "admin:groups", "admin:auth_state", "admin:servers", "admin:server_state"}
 
@@ -120,7 +130,7 @@ class RenderTest(unittest.TestCase):
         self.assertIs(hub["GenericOAuthenticator"]["manage_groups"], True)
         self.assertEqual(hub["GenericOAuthenticator"]["client_secret"], "s3cret")
         left = set(re.findall(r"\$\{?[A-Za-z_]+", text))
-        self.assertEqual(left, {"$HOME", "$ATTRS", "$HOOKS"}, "an unrendered variable, or the postStart's shell variables were eaten")
+        self.assertEqual(left, SCRIPT_VARS, "an unrendered variable, or the home setup's shell variables were eaten")
         return hub
 
     def test_gated(self):
@@ -198,91 +208,239 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(st["extraVolumes"], [{"name": "medcea-examples", "configMap": {"name": "workbench-examples"}}])
         self.assertEqual(st["extraVolumeMounts"], [{"name": "medcea-examples", "mountPath": "/home/jovyan/medcea-examples",
                                                     "readOnly": True}])
-        hook = su["lifecycleHooks"]["postStart"]["exec"]["command"]
-        self.assertEqual(hook[:2], ["sh", "-c"])
-        cmd = hook[2]
+        self.assertNotIn("lifecycleHooks", su, "a postStart runs at the same time as the server: the setup is a before-notebook script")
+        cmd = self.setup_script(su)
         self.assertIn("python3 -m nbstripout --is-installed --global ||", cmd)
         self.assertIn("python3 -m nbstripout --install --global", cmd)
         self.assertIn("git config --global filter.nbstripout.required true", cmd)
         self.assertNotIn("nbstripout) &&", cmd, "a failed pip install must not skip the filter's setup")
         self.assertIn("/home/jovyan/medcea-examples/nb_output_guard.py", cmd)
-        self.assertTrue(cmd.rstrip().endswith("true"), "a failed setup must never stop the server")
-        self.assertEqual(subprocess.run(["sh", "-n", "-c", cmd]).returncode, 0)
 
-    def hook_home(self, pip_works=True):
-        """A scratch home with stub pip/python3/git/curl that record what the postStart does."""
+    @staticmethod
+    def setup_script(su=None):
+        """The before-notebook script medcea-home-setup, as rendered."""
+        if su is None:
+            su = yaml.safe_load(run("true")[1])["singleuser"]
+        return su["extraFiles"]["medcea-home-setup"]["stringData"]
+
+    def test_setup_runs_before_the_server(self):
+        """The setup is an executable in before-notebook.d (start.sh runs it, then execs the
+        server), not a postStart; the hub waits long enough for its bounded installs."""
+        rc, out = run("true")
+        self.assertEqual(rc, 0, out)
+        v = yaml.safe_load(out)
+        su = v["singleuser"]
+        self.assertNotIn("lifecycleHooks", su)
+        self.assertEqual(set(su["extraFiles"]), {"medcea-home-setup"})
+        f = su["extraFiles"]["medcea-home-setup"]
+        self.assertTrue(f["mountPath"].startswith(SETUP_DIR), f["mountPath"])
+        self.assertNotIn("/", f["mountPath"][len(SETUP_DIR):])
+        self.assertFalse(f["mountPath"].endswith(".sh"), "a .sh hook is sourced into start.sh, whose `set -e` and `exit` it would share")
+        self.assertEqual(f["mode"], 0o755)
+        self.assertEqual(set(f) - {"mountPath", "mode", "stringData"}, set())
+        script = f["stringData"]
+        self.assertTrue(script.startswith("#!/bin/sh\n"))
+        self.assertNotIn("${", script, "the script goes through render")
+        self.assertEqual(subprocess.run(["sh", "-n", "-c", script]).returncode, 0)
+        if shutil.which("busybox"):
+            self.assertEqual(subprocess.run(["busybox", "sh", "-n", "-c", script]).returncode, 0)
+        lines = [l.strip() for l in script.splitlines() if l.strip() and not l.strip().startswith("#")]
+        self.assertEqual(lines[-1], "exit 0", "a failed setup must never stop the server")
+        self.assertNotIn("set -e", script)
+        # Every install is bounded, and the hub's wait for the server covers them all.
+        code = "\n".join(l for l in script.splitlines() if not l.strip().startswith("#"))
+        installs = re.findall(r"\b(pip install|curl|sh \"\$inst\")", code)
+        self.assertEqual(len(installs), 4)
+        self.assertEqual(len(re.findall(r"limited \d+ (?:pip install|curl|sh \"\$inst\")", code)), len(installs),
+                         "an unbounded install could outrun the hub's http_timeout")
+        total = sum(int(n) for n in re.findall(r"limited (\d+) ", script))
+        self.assertGreaterEqual(v["hub"]["config"]["KubeSpawner"]["http_timeout"], total + 60)
+        self.assertGreaterEqual(v["hub"]["config"]["KubeSpawner"]["http_timeout"], 660)
+        self.assertGreaterEqual(su["startTimeout"], 600, "a first image pull of about 2 GB")
+
+    def test_chart_pin(self):
+        with open(DEPLOY) as f:
+            src = f.read()
+        self.assertEqual(re.findall(r'^CHART_VERSION="([^"]*)"', src, re.M), ["4.4.4"])
+
+    def hook_home(self, pip_works=True, curl_works=True, code_server=False):
+        """A scratch home with stub pip/python3/git/curl that record what the setup does."""
         home = tempfile.mkdtemp()
         bin_ = os.path.join(home, "bin")
         os.makedirs(os.path.join(home, ".local", "bin"))
         os.makedirs(bin_)
-        open(os.path.join(home, ".local", "bin", "code-server"), "w").close()
-        os.chmod(os.path.join(home, ".local", "bin", "code-server"), 0o755)
+        if code_server:
+            open(os.path.join(home, ".local", "bin", "code-server"), "w").close()
+            os.chmod(os.path.join(home, ".local", "bin", "code-server"), 0o755)
+        # A module is importable once pip "installed" it: $HOME/mod-<module>.
         # git config --global as files under $HOME/cfg/<key>: --get prints and fails when unset
+        pip_body = ('for a in "$@"; do case "$a" in -*|install) ;; *) touch "$HOME/mod-$(echo "$a" | tr - _)" ;; esac; done'
+                    if pip_works else "exit 1")
+        # The installer curl "downloads" creates code-server under its --prefix.
+        installer = ('for a; do case "$a" in --prefix=*) p="$(echo "$a" | cut -d= -f2)" ;; esac; done\n'
+                     'mkdir -p "$p/bin" && printf "#!/bin/sh\\n" > "$p/bin/code-server" && chmod +x "$p/bin/code-server"\n')
+        with open(os.path.join(home, "installer"), "w") as f:
+            f.write(installer)
+        curl_body = ('while [ "$1" != "-o" ]; do shift; done; cp "$HOME/installer" "$2"' if curl_works else "exit 22")
         stubs = {
-            "pip": ('echo "pip $*" >> "$LOG"; ' + ('touch "$HOME/nbstripout-installed"' if pip_works else "exit 1")),
+            "pip": 'echo "pip $*" >> "$LOG"\n' + pip_body,
             "python3": ('mkdir -p "$HOME/cfg"\ncase "$*" in\n'
-                        '  "-c import nbstripout") test -e "$HOME/nbstripout-installed" ;;\n'
+                        '  "-c import "*) for m in $(echo "$2" | sed "s/^import //; s/,/ /g"); do\n'
+                        '        test -e "$HOME/mod-$m" || exit 1; done ;;\n'
                         '  *--is-installed*) test -e "$HOME/cfg/filter.nbstripout.clean" ;;\n'
-                        '  *"--install --global"*) test -e "$HOME/nbstripout-installed" || exit 1\n'
+                        '  *"--install --global"*) test -e "$HOME/mod-nbstripout" || exit 1\n'
                         '      echo "install $*" >> "$LOG"; echo "py -m nbstripout" > "$HOME/cfg/filter.nbstripout.clean" ;;\n'
+                        '  *) exit 1 ;;\n'
                         'esac'),
             "git": ('mkdir -p "$HOME/cfg"\n'
                     '[ "$1 $2" = "config --global" ] || exit 0\n'
                     'shift 2; [ "$1" = "--path" ] && shift\n'
                     'if [ "$1" = "--get" ]; then test -e "$HOME/cfg/$2" && cat "$HOME/cfg/$2"; exit; fi\n'
                     'echo "set $1 $2" >> "$LOG"; printf %s "$2" > "$HOME/cfg/$1"'),
-            "curl": "exit 1",
+            "curl": 'echo "curl $*" >> "$LOG"\n' + curl_body,
         }
         for name, body in stubs.items():
             p = os.path.join(bin_, name)
             with open(p, "w") as f:
                 f.write("#!/bin/sh\n" + body + "\n")
             os.chmod(p, 0o755)
-        return home, {"HOME": home, "PATH": bin_ + ":/usr/bin:/bin", "LOG": os.path.join(home, "calls")}
+        return home, {"HOME": home, "PATH": bin_ + ":/usr/bin:/bin", "LOG": os.path.join(home, "calls"),
+                      "JUPYTERHUB_USER": "ana"}
 
-    def hook_cmd(self):
-        return yaml.safe_load(run("true")[1])["singleuser"]["lifecycleHooks"]["postStart"]["exec"]["command"][2]
+    def run_setup(self, env):
+        """The rendered script, run as start.sh runs it: an executable file of its own."""
+        script = os.path.join(env["HOME"], "50-medcea-home-setup")
+        with open(script, "w") as f:
+            f.write(self.setup_script())
+        os.chmod(script, 0o755)
+        r = subprocess.run([script], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
 
-    def test_hook_is_idempotent(self):
-        """The postStart command run twice: nbstripout installed once, the filter, attribute,
-        hook and credential helper set once, `required` kept true."""
-        home, env = self.hook_home()
-        for _ in range(2):
-            self.assertEqual(subprocess.run(["sh", "-c", self.hook_cmd()], env=env).returncode, 0)
+    def calls(self, env):
+        if not os.path.exists(env["LOG"]):
+            return []
         with open(env["LOG"]) as f:
-            calls = f.read().splitlines()
+            return f.read().splitlines()
+
+    def test_setup_is_idempotent(self):
+        """Run twice on an empty home: the extensions, code-server and nbstripout are installed
+        once, the filter, attribute, hook, credential helper and author name set once,
+        `required` kept true; the second run calls neither pip nor curl."""
+        home, env = self.hook_home()
+        out = self.run_setup(env)
+        first = self.calls(env)
+        self.assertIn("medcea-home-setup: installed jupyter-collaboration and jupyter-vscode-proxy", out)
+        self.assertIn("medcea-home-setup: installed code-server into ~/.local", out)
+        self.assertTrue(os.access(os.path.join(home, ".local", "bin", "code-server"), os.X_OK))
+        self.assertTrue(all(l.startswith("medcea-home-setup: ") for l in out.splitlines()), out)
+        out2 = self.run_setup(env)
+        second = self.calls(env)[len(first):]
         attrs = os.path.join(home, ".config", "git", "attributes")
         hooks = os.path.join(home, ".config", "git", "hooks")
-        self.assertEqual(calls, ["pip install --quiet --user nbstripout",
-                                 "install -m nbstripout --install --global",
-                                 "set filter.nbstripout.required true",
-                                 "set core.attributesFile " + attrs,
-                                 "set core.hooksPath " + hooks,
-                                 "set credential.helper store",
-                                 "set filter.nbstripout.required true"])
+        self.assertEqual(first[0], "pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy")
+        self.assertTrue(first[1].startswith("curl -fsSL https://code-server.dev/install.sh -o "), first[1])
+        self.assertEqual(first[2:], ["pip install --quiet --user nbstripout",
+                                     "install -m nbstripout --install --global",
+                                     "set filter.nbstripout.required true",
+                                     "set core.attributesFile " + attrs,
+                                     "set core.hooksPath " + hooks,
+                                     "set credential.helper store",
+                                     "set user.name ana"])
+        self.assertEqual(second, ["set filter.nbstripout.required true"], "a second start installs nothing")
+        self.assertNotIn("installed", out2)
         with open(attrs) as f:
             self.assertEqual(f.read(), "*.ipynb filter=nbstripout\n")
         with open(os.path.join(hooks, "pre-commit")) as f:
             self.assertIn("nb_output_guard.py", f.read())
         self.assertTrue(os.access(os.path.join(hooks, "pre-commit"), os.X_OK))
 
-    def test_hook_fails_closed_without_nbstripout(self):
-        """pip fails: the filter is still required, with a clean command that then fails, the
-        attribute and the pre-commit guard are written, and the start still succeeds."""
-        home, env = self.hook_home(pip_works=False)
-        self.assertEqual(subprocess.run(["sh", "-c", self.hook_cmd()], env=env).returncode, 0)
+    def test_setup_skips_a_code_server_it_has(self):
+        home, env = self.hook_home(code_server=True)
+        self.run_setup(env)
+        self.assertFalse([c for c in self.calls(env) if c.startswith("curl")])
+
+    def test_setup_fails_closed(self):
+        """pip and curl fail: the start still succeeds (exit 0), the filter is still required,
+        with a clean command that then fails, the attribute and the pre-commit guard are
+        written, and the failures are in the pod log."""
+        home, env = self.hook_home(pip_works=False, curl_works=False)
+        out = self.run_setup(env)
         cfg = lambda k: open(os.path.join(home, "cfg", k)).read()
         self.assertEqual(cfg("filter.nbstripout.required"), "true")
         self.assertEqual(cfg("filter.nbstripout.clean"), "python3 -m nbstripout")
+        with open(os.path.join(home, ".config", "git", "attributes")) as f:
+            self.assertEqual(f.read(), "*.ipynb filter=nbstripout\n")
         self.assertTrue(os.path.exists(os.path.join(home, ".config", "git", "hooks", "pre-commit")))
+        self.assertFalse(os.path.exists(os.path.join(home, ".local", "bin", "code-server")))
+        self.assertEqual(len([l for l in out.splitlines() if "WARNING" in l]), 3, out)
+        self.assertIn("medcea-home-setup: done", out)
 
     def test_hook_keeps_a_chosen_hooks_path(self):
-        home, env = self.hook_home()
+        home, env = self.hook_home(code_server=True)
         os.makedirs(os.path.join(home, "cfg"))
         with open(os.path.join(home, "cfg", "core.hooksPath"), "w") as f:
             f.write(os.path.join(home, "mine"))
-        self.assertEqual(subprocess.run(["sh", "-c", self.hook_cmd()], env=env).returncode, 0)
+        self.run_setup(env)
         self.assertFalse(os.path.exists(os.path.join(home, "mine")), "a person's own hooks folder is left alone")
+
+    def test_setup_shows_the_person(self):
+        """git's author name is the person's workbench name only while unset; the e-mail is
+        left to the person (a hint in the log)."""
+        home, env = self.hook_home(code_server=True)
+        out = self.run_setup(env)
+        with open(os.path.join(home, "cfg", "user.name")) as f:
+            self.assertEqual(f.read(), "ana")
+        self.assertFalse(os.path.exists(os.path.join(home, "cfg", "user.email")))
+        self.assertIn("git has no user.email", out)
+        home, env = self.hook_home(code_server=True)
+        os.makedirs(os.path.join(home, "cfg"))
+        for k, v in (("user.name", "Ana Silva"), ("user.email", "ana@example.org")):
+            with open(os.path.join(home, "cfg", k), "w") as f:
+                f.write(v)
+        out = self.run_setup(env)
+        self.assertNotIn("set user.name", "\n".join(self.calls(env)), "a name the person set is kept")
+        self.assertNotIn("user.email", out)
+        home, env = self.hook_home(code_server=True)
+        env["JUPYTERHUB_USER"] = ""
+        self.run_setup(env)
+        self.assertNotIn("set user.name", "\n".join(self.calls(env)))
+
+    @unittest.skipUnless(os.path.isfile("/etc/skel/.bashrc") and os.path.isfile("/etc/skel/.profile")
+                         and shutil.which("bash"), "no /etc/skel start files or bash here")
+    def test_setup_prompt(self):
+        """A new home gets ~/.bashrc and ~/.profile from /etc/skel and the prompt block once;
+        an existing ~/.bashrc keeps its own lines; bash then shows the person, not jovyan."""
+        home, env = self.hook_home(code_server=True)
+        self.run_setup(env)
+        self.run_setup(env)
+        with open("/etc/skel/.bashrc") as f:
+            skel = f.read()
+        with open(os.path.join(home, ".bashrc")) as f:
+            rc = f.read()
+        self.assertTrue(rc.startswith(skel))
+        self.assertEqual(rc.count("# >>> medcea workbench prompt >>>"), 1)
+        self.assertEqual(rc.count("# <<< medcea workbench prompt <<<"), 1)
+        self.assertTrue(os.path.isfile(os.path.join(home, ".profile")))
+        # An interactive bash reads ~/.bashrc itself (skel's returns at once otherwise).
+        r = subprocess.run(["bash", "-i", "-c", 'printf %s "${PS1@P}"'], stdin=subprocess.DEVNULL, cwd=home,
+                           env=dict(env, PATH="/usr/bin:/bin", TERM="xterm-256color", PS1="x"),
+                           capture_output=True, text=True)
+        self.assertTrue(r.stdout.endswith("ana@workbench:~$ "), r.stdout)
+        self.assertIn("\x1b]0;ana@workbench: ~\x07", r.stdout, "the terminal title")
+        self.assertNotIn("jovyan", r.stdout)
+        # A person's own .bashrc (and login file) is kept; the block is appended after it.
+        home, env = self.hook_home(code_server=True)
+        with open(os.path.join(home, ".bashrc"), "w") as f:
+            f.write("alias ll='ls -l'\nPS1='mine$ '\n")
+        with open(os.path.join(home, ".bash_profile"), "w") as f:
+            f.write(". ~/.bashrc\n")
+        self.run_setup(env)
+        with open(os.path.join(home, ".bashrc")) as f:
+            rc = f.read()
+        self.assertTrue(rc.startswith("alias ll='ls -l'\nPS1='mine$ '\n"))
+        self.assertEqual(rc.count("# >>> medcea workbench prompt >>>"), 1)
+        self.assertFalse(os.path.exists(os.path.join(home, ".profile")), "a home with its own login file gets no .profile")
 
     @unittest.skipUnless(shutil.which("git"), "git is not installed")
     def test_output_guard(self):

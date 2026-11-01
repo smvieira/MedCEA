@@ -507,7 +507,8 @@ The snapshot never changes afterwards.</li>
 <ul>
 <li>Each person gets their own workspace with persistent storage (a home folder of its own). It starts when you sign in and is stopped after an hour without activity; your files are kept. Nothing backs them up: see <a href="#apps-workbench-git">Saving your notebooks to git</a>.</li>
 <li>The workspace opens in JupyterLab, and VS Code is available inside it.</li>
-<li>The first start of a workspace takes longer, because it installs VS Code into your home folder.</li>
+<li>The first start of a new workspace takes a few minutes: real-time collaboration and VS Code are installed into your home folder before the workspace opens. Later starts are fast. Wait on the start page; the hub waits up to 15 minutes.</li>
+<li>The workspace runs as the container's own account, <code>jovyan</code>, so file paths start with <code>/home/jovyan</code>. You are still shown as yourself: a terminal's prompt reads <code>&lt;your username&gt;@workbench</code>, and your commits carry your username as the author name (see <a href="#apps-workbench-git">Saving your notebooks to git</a>).</li>
 </ul>
 <ol class="steps">
 <li>Click the <strong>JupyterHub</strong> card on the portal. You go straight to the platform sign-in.</li>
@@ -539,7 +540,7 @@ The snapshot never changes afterwards.</li>
 <h4 id="apps-workbench-git">Saving your notebooks to git</h4>
 <p>Your home folder is kept when your workspace stops, when the administrator removes you from the hub and when your role loses the workbench, but <strong>nothing backs it up</strong>, and uninstalling the platform deletes it. Keep work that matters in the research repository on GitHub that the administrator set up (<code>WORKBENCH_NOTEBOOK_REPO</code>; a terminal in your workspace prints it with <code>echo "$MEDCEA_NOTEBOOK_REPO"</code>). <code>SAVE_TO_GIT.md</code> has the details.</p>
 <ol class="steps">
-<li>Once: set your name and e-mail for commits (<code>git config --global user.name</code> and <code>user.email</code>), create a fine-grained personal access token on GitHub for that repository only (<em>Contents: Read and write</em>, with an expiry date), and clone the repository into your home folder from a terminal. Git asks for your GitHub username and the token, and keeps the token in your home folder only (<code>~/.git-credentials</code>).</li>
+<li>Once: set your e-mail for commits (<code>git config --global user.email "you@example.org"</code>, preferably your GitHub account's). The author name is already your username; set <code>user.name</code> yourself to use your full name, and the workspace keeps it. Then create a fine-grained personal access token on GitHub for that repository only (<em>Contents: Read and write</em>, with an expiry date), and clone the repository into your home folder from a terminal. Git asks for your GitHub username and the token, and keeps the token in your home folder only (<code>~/.git-credentials</code>).</li>
 <li>Save your notebooks inside the cloned folder.</li>
 <li>In the <strong>Git</strong> panel on the left: stage the changed files (<strong>+</strong>), write a message, <strong>Commit</strong>, then <strong>Push</strong>. <strong>Pull</strong> brings in your colleagues' work.</li>
 </ol>

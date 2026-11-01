@@ -1,9 +1,12 @@
 # Optional: bake VS Code and the collaboration extension into the notebook image
 # instead of installing them into each user's home on first start.
 #
-# The deploy script works without this — it installs into the persistent home
-# volume via a postStart hook, so only the first launch is slow. Build this when
-# you would rather pay the cost once, at build time, for every user.
+# The deploy script works without this — a before-notebook script
+# (singleuser.extraFiles in k8s/workbench/values.yaml) installs them into the
+# persistent home before the server starts, so only the first start is slow. It
+# skips what this image already has (code-server on PATH, the Python modules
+# importable). Build this when you would rather pay the cost once, at build time,
+# for every user.
 #
 #   microk8s enable registry
 #   docker build -t localhost:32000/cea-workbench:1 -f infra/workbench.Dockerfile infra/

@@ -31,7 +31,10 @@
 #     (removing a hub user keeps the home). A policy that does not compile stops the deploy before helm;
 #     IAM_GATES=false renders the pre-policy sign-in (any realm account).
 #   - the existing nginx ingress, on the same hostname Kubeflow used
-#   - VS Code and real-time collaboration inside the user's own pod
+#   - VS Code and real-time collaboration inside the user's own pod, installed into
+#     the home by a before-notebook script (singleuser.extraFiles), before the server
+#     starts; the same script sets nbstripout and git up, and shows the person (git
+#     author name, terminal prompt) instead of the container account jovyan
 #   - (IAM 3.2b) the example notebooks, read-only in every server (ConfigMap
 #     workbench-examples from k8s/workbench/examples/), whose medcea_data.py signs the
 #     person in with a device code and reads config-api with their own token; the
@@ -76,7 +79,9 @@ fi
 
 KUBECTL="$MK8S kubectl"
 HELM="$MK8S helm3"
-CHART_VERSION="4.4.1"
+# Zero-to-JupyterHub 4.4.4 (JupyterHub 5.5.4, 1 Nov 2026). It differs from 4.4.1 only in
+# image tags and versions: templates and values.schema.json are byte-identical.
+CHART_VERSION="4.4.4"
 
 log() { echo -e "\033[0;32m[workbench]\033[0m $*"; }
 die() { echo -e "\033[0;31m[workbench] ERROR:\033[0m $*" >&2; exit 1; }
@@ -184,8 +189,11 @@ wait_for_http "https://$WORKBENCH_DOMAIN/hub/login" 180 "JupyterHub" || {
 }
 log "AI Workbench is live: https://$WORKBENCH_DOMAIN"
 log "Sign in with a Keycloak account in realm '$KEYCLOAK_REALM' holding a role the policy admits."
-log "The first launch pulls the notebook image and installs VS Code into the"
-log "user's home volume, so it is slow once and fast afterwards."
+log "The first start of a new home pulls the notebook image and installs real-time"
+log "collaboration and VS Code into it before the server answers: a few minutes once,"
+log "fast afterwards (the hub waits up to 15 minutes)."
+log "A server started before this deploy keeps its old setup (a postStart hook before"
+log "1 Nov 2026) until it is stopped and started again."
 log "A running server keeps its old environment (the MEDCEA_* endpoints) and its old"
 log "mounts until it is stopped and started again (File > Hub Control Panel, or culled"
 log "after an hour idle): a server started before ~/medcea-examples existed shows it only"

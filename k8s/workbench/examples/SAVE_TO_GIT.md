@@ -13,10 +13,15 @@ If that prints nothing, ask an administrator which repository to use (for exampl
 
 ## Once: your name, your token, the clone
 
-1. Tell git who you are (the name and e-mail your commits carry):
+1. Give git your e-mail (your commits carry it). The author name is already set to your
+   workbench name, the one your terminal prompt shows (`git config --global user.name`
+   prints it):
 
-       git config --global user.name  "Your Name"
        git config --global user.email "you@example.org"
+
+   Use the e-mail of your GitHub account so GitHub links the commits to you. To sign
+   commits with your full name instead: `git config --global user.name "Your Name"`
+   (the workbench never overwrites a name you set).
 
 2. Create a **personal access token** on GitHub: Settings → Developer settings → Personal
    access tokens → Fine-grained tokens → Generate new token. Give it access to the research

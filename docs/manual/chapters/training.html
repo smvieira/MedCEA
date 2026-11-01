@@ -14,6 +14,7 @@
 <tr><td><a href="#training-e6">E6 Release a completed run</a></td><td><span class="role">production_manager</span>, <span class="role">operator</span>, <span class="role">qp</span></td><td>Only a person who neither created, changed nor executed a run can release it.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e7">E7 Deactivate and reactivate an account</a></td><td><span class="role">admin</span>, <span class="role">qa</span></td><td>Taking access away acts at once; giving it back waits for a second person.</td><td>31 Oct 2026, deactivation only (decision 12)</td></tr>
 <tr><td><a href="#training-e8">E8 Quarterly access review</a></td><td><span class="role">qa</span>, <span class="role">auditor</span></td><td>Who holds what is reviewed, signed off and readable by an auditor.</td><td>Not recorded here</td></tr>
+<tr><td><a href="#training-e9">E9 Open an example notebook in a new workbench home</a></td><td><span class="role">bio_scientist</span> (or any role the AI Workbench admits), <span class="role">admin</span></td><td>A new workspace opens documents on its first start and shows the person, not <code>jovyan</code>.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -255,6 +256,28 @@
 <div class="warn"><p>Signing off a review that lists unexplained roles accepts them: the drift banner in the Decisions tab stops showing them until a later change to that account. Explain or correct them first.</p></div>
 <p><strong>Afterwards.</strong> Nothing to undo.</p>
 <p><strong>Last done.</strong> Not recorded here.</p>
+
+<h3 id="training-e9">E9 Open an example notebook in a new workbench home</h3>
+<p><strong>Goal.</strong> Start an AI Workbench workspace for the first time and open an example notebook at once, without a restart. The exercise proves that the workspace's installs finish before it starts (before 1 November 2026 a new home folder opened no document until its workspace was restarted) and that the workspace shows the person: the terminal prompt and the git author name are the person's username, not the container's account <code>jovyan</code>.</p>
+<p><strong>Accounts and roles.</strong> A test account that has never started a workspace, holding a role the workbench admits, for example a new <code>bio_test</code> (<span class="role">bio_scientist</span>) made with <a href="#training-e1">E1</a> and added to the <a href="#compliance-test-accounts">test accounts</a> table. <code>admin</code> (<span class="role">admin</span>, hub administrator) watches from the hub's admin page and can stop the workspace afterwards; the administrator cannot open it.</p>
+<p><strong>Before you start.</strong> <code>./infra/deploy-workbench.sh</code> (or <code>./deploy-infra.sh</code>) has run since 1 November 2026, and <code>./health-check.sh</code> shows <code>iamworkbench</code> OK. The account must be new to the workbench: a home folder already set up by an earlier start proves nothing about a first start. Use a browser session of its own (see <a href="#training-safely">running an exercise safely</a>).</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Test account: on the portal, click the <strong>JupyterHub</strong> card and sign in.</li>
+<li>Wait on the start page until JupyterLab opens. The first start takes a few minutes.</li>
+<li>In the file browser, open <code>medcea-examples</code>, then <code>01-connect.ipynb</code>.</li>
+<li>Open a terminal (<strong>File → New → Terminal</strong>), read the prompt, then run <code>git config --global user.name</code>.</li>
+<li><span class="role">admin</span>: on the hub's admin page, find the test account's workspace and its start time.</li>
+</ol>
+<p><strong>What you should see.</strong> In step 3 the notebook opens with its cells; it never stays on "The document is taking some time to load". In step 4 the prompt reads <code>bio_test@workbench:~$</code>, the terminal tab's title names <code>bio_test</code>, and <code>git config --global user.name</code> prints <code>bio_test</code>. The workspace's log lists its set-up steps before the notebook server starts.</p>
+<div class="record"><p>Nothing is recorded in the platform's database: the exercise changes no right and no record. Evidence is the workspace's log on the host, which the host operator reads: <code>kubectl -n medcea get pods -l component=singleuser-server</code> names the workspace's pod (<code>jupyter-…</code>, the username with special characters escaped), then <code>kubectl -n medcea logs &lt;pod&gt; | grep -E "medcea-home-setup|is running at"</code>. Every <code>medcea-home-setup:</code> line, ending with <code>medcea-home-setup: done</code>, comes before the line saying the Jupyter Server is running, and no line holds WARNING. The hub's admin page shows when the workspace started.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li><span class="role">admin</span>: follow the link to the test account's workspace from the admin page. The hub answers "403 Forbidden"; the administrator cannot open the workspace or its notebooks.</li>
+<li>Test account: in the terminal, run <code>touch ~/medcea-examples/x</code>. It answers <code>touch: cannot touch '/home/jovyan/medcea-examples/x': Read-only file system</code>, because the folder is mounted read-only. Then change a cell of <code>01-connect.ipynb</code> and save it (<strong>Ctrl+S</strong>). The save is refused: JupyterLab may show a "File Save Error for 01-connect.ipynb" dialog naming the read-only file system or "Permission denied", or, with real-time collaboration on, show nothing at all. Either way, close the notebook and open it again: your change is gone. Copy the notebook into your home folder to change it.</li>
+</ul>
+<p><strong>Afterwards.</strong> Stop the workspace (<strong>File → Hub Control Panel</strong>, <strong>Stop My Server</strong>, or <span class="role">admin</span> from the admin page). The home folder is kept. Deactivate the test account if it is not needed again (<a href="#training-e7">E7</a>).</p>
+<p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
