@@ -1317,7 +1317,8 @@ class WiringTest(unittest.TestCase):
                      "scopes: [admin-ui, list:users, read:users, servers, delete:users]",
                      "custom_403_message: ${WORKBENCH_403_MESSAGE}",
                      'auth_state_groups_key: "oauth_user.groups"', "delete_pvc: false",
-                     "allow_existing_users: false", "enable_auth_state: false", "oauth_token_expires_in: 3600"):
+                     "allow_existing_users: false", "enable_auth_state: false", "oauth_token_expires_in: 300",
+                     "cookie_max_age_days: 0.003472", 'logout_redirect_url: "${WORKBENCH_LOGOUT_URL}"'):
             self.assertIn(line, values)
         self.assertNotIn("${ADMIN_USER}", values)   # the hub administrator comes from policy_workbench
         code = "\n".join(l.split("#")[0] for l in values.splitlines())   # comments may name them
@@ -1954,6 +1955,84 @@ def _created_functions(sql):
             args.append(" ".join(words[1:]) if len(words) > 1 and not words[0].startswith("medcea") else a)
         out.add(grants.norm_sig(f"{m.group(1)}({', '.join(args)})"))
     return out
+
+
+class ShortSessionsTest(unittest.TestCase):
+    """Decision of 1 Nov 2026, "short sessions + one-hop sign-out": each tool's own session
+    is short and follows the Keycloak person when it ends (workbench in
+    tests/test_workbench_render.py, Node-RED in tests/test_node_red_flows.py, the user
+    menu's Sign out in tests/test_access_api.py and tests/test_access_deploy.sh)."""
+
+    def read(self, rel):
+        with open(os.path.join(REPO, rel)) as f:
+            return f.read()
+
+    def test_grafana(self):
+        import yaml
+        env = yaml.safe_load(self.read("k8s/grafana/values.yaml"))["env"]
+        # 5 minutes without use, at most an hour in use (review of 1 Nov 2026: a hard 5-minute
+        # end reloads the page and drops unsaved panel edits every 5 minutes)
+        self.assertEqual(env["GF_AUTH_LOGIN_MAXIMUM_LIFETIME_DURATION"], "1h")
+        self.assertEqual(env["GF_AUTH_LOGIN_MAXIMUM_INACTIVE_LIFETIME_DURATION"], "5m")
+        # rotation (minimum 2) inside the inactivity limit, so a session in use is never cut at 5 minutes
+        self.assertEqual(env["GF_AUTH_TOKEN_ROTATION_INTERVAL_MINUTES"], "2")
+        self.assertEqual(env["GF_AUTH_OAUTH_AUTO_LOGIN"], "true")      # silent re-sign-in at expiry
+        # A Grafana sign-out URL with post_logout_redirect_uri would get the ID token appended
+        # (id_token_hint): none is set.
+        self.assertFalse([k for k in env if "SIGNOUT_REDIRECT" in k])
+
+    def test_pgadmin(self):
+        import subprocess
+        import yaml
+        names = ("NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN "
+                 "PGADMIN_OAUTH2_CLAIMS KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP "
+                 "PGADMIN_OAUTH2_SERVER_USERS PGADMIN_CONFIG_CHECKSUM").split()
+        vals = {n: f"dummy-{n.lower()}" for n in names}
+        vals.update(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin']}", PLATFORM_IP="10.0.0.1",
+                    PGADMIN_CONFIG_CHECKSUM="0" * 64)
+        out = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-render.sh"; render "$0" "$@"',
+                              os.path.join(REPO, "k8s/pgadmin/pgadmin.yaml")] + names,
+                             capture_output=True, text=True, env=dict(os.environ, **vals), check=True).stdout
+        docs = [d for d in yaml.safe_load_all(out) if d]
+        dep = [d for d in docs if d["kind"] == "Deployment"][0]
+        sec = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"] == "pgadmin-config"][0]
+        env = {e["name"]: e.get("value") for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+        # The image's entrypoint writes NAME = value into config_distro.py: Python literals.
+        self.assertIs(ast.literal_eval(env["PGADMIN_CONFIG_OAUTH2_AUTO_LOGIN"]), True)
+        days = ast.literal_eval(env["PGADMIN_CONFIG_SESSION_EXPIRATION_TIME"])
+        self.assertIsInstance(days, float)
+        self.assertAlmostEqual(days * 24 * 60, 60, delta=0.1)          # one hour
+        # auto-login applies only with OAuth2 the only source and one provider
+        self.assertEqual(ast.literal_eval(env["PGADMIN_CONFIG_AUTHENTICATION_SOURCES"]), ["oauth2"])
+        self.assertEqual(len(ast.literal_eval(sec["stringData"]["oauth2-config"])), 1)
+        self.assertNotIn("PGADMIN_CONFIG_MAX_SESSION_IDLE_TIME", env)   # stays 60 minutes
+        self.assertNotIn("{id_token}", out)                             # no token in a logout URL
+
+    def test_workbench_client_returns_to_the_portal(self):
+        src = self.read("deploy-infra.sh")
+        self.assertIn('local POST_LOGOUT="${ORIGIN}/*${5:+##$5}"', src)
+        self.assertEqual(src.count('\\"post.logout.redirect.uris\\":\\"${POST_LOGOUT}\\"'), 2)
+        self.assertIn('_create_client "workbench" "https://${WORKBENCH_DOMAIN}/hub/oauth_callback" false "" '
+                      '"https://${PORTAL_DOMAIN}/*"', src)
+
+    def test_user_menu_clients_return_to_the_workbench(self):
+        """Sign out (review of 1 Nov 2026): every HOST_CLIENTS client's end-session returns to
+        the workbench's /hub/logout, so that URI is registered on each, whatever
+        WORKBENCH_ENABLED says (otherwise Keycloak answers "Invalid redirect uri" and the
+        session is not ended)."""
+        src = self.read("deploy-infra.sh")
+        self.assertIn('_HUB_LOGOUT_URI="https://${WORKBENCH_DOMAIN}/hub/logout"', src)
+        dep = self.read("apps/access/deploy.sh")
+        clients = re.findall(r'=([a-z-]+)', "".join(l for l in dep.splitlines() if l.startswith("HOST_CLIENTS")))
+        self.assertEqual(sorted(clients), sorted(["portal", "config", "access", "monitor", "scheduler", "dbmgmt",
+                                                  "mqtt-explorer"]))
+        for c in clients:
+            calls = re.findall(r'_create_client "%s" "[^"]+"( [^)]*)?\)' % re.escape(c), src)
+            self.assertEqual(len(calls), 1, c)
+            self.assertTrue(calls[0].endswith(' "" "$_HUB_LOGOUT_URI"'), (c, calls[0]))
+        self.assertLess(src.index('_HUB_LOGOUT_URI="'), src.index('_create_client "portal"'))
+        # the access deploy renders the same address
+        self.assertIn('SIGNOUT_HUB="https://${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}/hub/logout"', dep)
 
 
 class ApproveCommissionTest(unittest.TestCase):

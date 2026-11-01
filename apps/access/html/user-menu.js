@@ -38,6 +38,14 @@
     return ((p[0] || '?')[0] + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
   }
 
+  // Sign out comes from /_account/api/me (apps/access/access-api.py account_links): this
+  // host's proxy sign-out, on to Keycloak's end-session and, when the AI workbench is
+  // deployed, its logout and the portal. It is always a same-host path; anything else
+  // (another origin, a scheme, "//host") falls back to the plain proxy sign-out.
+  function signOutHref(u) {
+    return (typeof u === 'string' && /^\/(?![\/\\])/.test(u)) ? u : '/oauth2/sign_out';
+  }
+
   function mount(host, me) {
     var root = document.createElement('div');
     root.className = 'um' + (host ? '' : ' um-fixed');
@@ -53,7 +61,7 @@
     var prof = document.createElement('a'); prof.href = '/_account/'; prof.setAttribute('role', 'menuitem');
     prof.innerHTML = ICON_USER; prof.append(document.createTextNode('Profile'));
     var sep = document.createElement('div'); sep.className = 'um-sep';
-    var out = document.createElement('a'); out.href = me.sign_out || '/oauth2/sign_out'; out.setAttribute('role', 'menuitem');
+    var out = document.createElement('a'); out.href = signOutHref(me.sign_out); out.setAttribute('role', 'menuitem');
     out.innerHTML = ICON_OUT; out.append(document.createTextNode('Sign out'));
     dd.append(prof, sep, out);
     root.append(btn, dd);

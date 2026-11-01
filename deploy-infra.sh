@@ -793,12 +793,16 @@ _create_client() {
     # A fourth argument adds one more redirect URI (Node-RED's own editor sign-in).
     local EXTRA_URI="${4:+,\"$4\"}"
     local TOK
-    # Keycloak 18+ will not end a session from a plain GET to the logout
-    # endpoint — it shows a "Do you want to log out?" confirmation instead, so
-    # the SSO session survives and the next visit silently re-authenticates.
-    # RP-initiated logout needs client_id + post_logout_redirect_uri, and that
-    # URI must be registered here or Keycloak answers 400.
+    # RP-initiated logout sends client_id + post_logout_redirect_uri, and that URI
+    # must be registered here or Keycloak answers 400. Without an id_token_hint
+    # (never sent: no token in a URL) Keycloak 26 still shows its "Do you want to
+    # log out?" page while the browser has a Keycloak session; with none it
+    # redirects at once.
     local ORIGIN="${REDIRECT_URI%%/oauth2/*}"; ORIGIN="${ORIGIN%%/login/*}"; ORIGIN="${ORIGIN%%/hub/*}"
+    # A fifth argument adds one more post-logout URI (Keycloak's "##" list): the
+    # workbench's /hub/logout returns to the portal, and each user-menu host's
+    # end-session returns to /hub/logout (one-hop sign-out, 1 Nov 2026).
+    local POST_LOGOUT="${ORIGIN}/*${5:+##$5}"
     TOK=$(_kc_token)
 
     # Create client — 409 means already exists, both are fine
@@ -806,7 +810,7 @@ _create_client() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"${EXTRA_URI}],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
+      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"${EXTRA_URI}],\"attributes\":{\"post.logout.redirect.uris\":\"${POST_LOGOUT}\"}}" || true
 
     # Look up internal UUID
     local UUID
@@ -830,7 +834,7 @@ _create_client() {
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${UUID}" \
       -H "Authorization: Bearer ${TOK}" \
       -H "Content-Type: application/json" \
-      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"${EXTRA_URI}],\"attributes\":{\"post.logout.redirect.uris\":\"${ORIGIN}/*\"}}" || true
+      -d "{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"serviceAccountsEnabled\":${SA_ENABLED},\"redirectUris\":[\"${REDIRECT_URI}\",\"${ORIGIN}/_account/*\"${EXTRA_URI}],\"attributes\":{\"post.logout.redirect.uris\":\"${POST_LOGOUT}\"}}" || true
 
     # Retrieve the generated secret
     curl -sf \
@@ -917,24 +921,32 @@ _GRAFANA_SECRET=$(_create_client "grafana" "https://${GRAFANA_DOMAIN}/login/gene
 echo -e "${YELLOW}  Creating client 'workbench'...${NC}"
 # JupyterHub's GenericOAuthenticator talks to Keycloak directly — there is no Dex
 # in between any more, so the callback is the hub's own, not /dex/callback.
-_WORKBENCH_SECRET=$(_create_client "workbench" "https://${WORKBENCH_DOMAIN}/hub/oauth_callback")
+# The portal is a post-logout URI too: the hub's logout_redirect_url (Sign out, File >
+# Log Out) ends the Keycloak session for client workbench and lands on the portal.
+_WORKBENCH_SECRET=$(_create_client "workbench" "https://${WORKBENCH_DOMAIN}/hub/oauth_callback" false "" "https://${PORTAL_DOMAIN}/*")
 echo -e "${YELLOW}  Creating public client 'workbench-notebook' (device sign-in from a notebook)...${NC}"
 _create_public_device_client "workbench-notebook" \
     || echo -e "${RED}  Notebooks cannot sign in to read platform data until this client exists.${NC}" >&2
+# Sign out (1 Nov 2026, apps/access/access-api.py account_links): each user-menu host's
+# client ends the Keycloak session and Keycloak returns to the workbench's /hub/logout,
+# so that is a post-logout URI of every such client. Registered whatever WORKBENCH_ENABLED
+# says (a fixed address of this platform), so a Sign out never meets Keycloak's "Invalid
+# redirect uri" when the access deploy and this run disagree about the workbench.
+_HUB_LOGOUT_URI="https://${WORKBENCH_DOMAIN}/hub/logout"
 echo -e "${YELLOW}  Creating client 'portal'...${NC}"
-_PORTAL_SECRET=$(_create_client "portal" "https://${PORTAL_DOMAIN}/oauth2/callback")
+_PORTAL_SECRET=$(_create_client "portal" "https://${PORTAL_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
 echo -e "${YELLOW}  Creating client 'config'...${NC}"
-_CONFIG_SECRET=$(_create_client "config" "https://${CONFIG_DOMAIN}/oauth2/callback")
+_CONFIG_SECRET=$(_create_client "config" "https://${CONFIG_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
 # Cookie secrets are kept once generated: a new one on every run made every
 # deploy log everybody out (existing cookies no longer decrypt).
 _CONFIG_COOKIE_SECRET="${CONFIG_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 # Every remaining web UI gets its own oauth2-proxy (apps/*/deploy.sh) and so
 # its own client; the proxies share k8s/oauth2-proxy/values-app.yaml.
 echo -e "${YELLOW}  Creating clients 'monitor', 'scheduler', 'dbmgmt', 'mqtt-explorer'...${NC}"
-_MONITOR_SECRET=$(_create_client "monitor" "https://${MONITOR_DOMAIN}/oauth2/callback")
-_SCHEDULER_SECRET=$(_create_client "scheduler" "https://${SCHEDULER_DOMAIN}/oauth2/callback")
-_DBMGMT_SECRET=$(_create_client "dbmgmt" "https://${DBMGMT_DOMAIN}/oauth2/callback")
-_MQTTX_SECRET=$(_create_client "mqtt-explorer" "https://${MQTTX_DOMAIN}/oauth2/callback")
+_MONITOR_SECRET=$(_create_client "monitor" "https://${MONITOR_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
+_SCHEDULER_SECRET=$(_create_client "scheduler" "https://${SCHEDULER_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
+_DBMGMT_SECRET=$(_create_client "dbmgmt" "https://${DBMGMT_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
+_MQTTX_SECRET=$(_create_client "mqtt-explorer" "https://${MQTTX_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
 _MONITOR_COOKIE_SECRET="${MONITOR_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 _SCHEDULER_COOKIE_SECRET="${SCHEDULER_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 _DBMGMT_COOKIE_SECRET="${DBMGMT_COOKIE_SECRET:-$(openssl rand -base64 24)}"
@@ -970,7 +982,7 @@ echo -e "${YELLOW}  Creating client 'access'...${NC}"
 # and the service account apps/access uses to create, enable, role-map and
 # delete users. The PUT in _create_client leaves serviceAccountsEnabled alone,
 # so setting it once here survives later runs.
-_ACCESS_SECRET=$(_create_client "access" "https://${ACCESS_DOMAIN}/oauth2/callback" true)
+_ACCESS_SECRET=$(_create_client "access" "https://${ACCESS_DOMAIN}/oauth2/callback" true "" "$_HUB_LOGOUT_URI")
 _ACCESS_COOKIE_SECRET="${ACCESS_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 _ACCESS_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=access" \
   -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")

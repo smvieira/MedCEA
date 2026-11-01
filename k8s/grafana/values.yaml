@@ -30,11 +30,27 @@ env:
   # Explore stays Editor-only; a Viewer never edits and an Editor never administers.
   GF_USERS_VIEWERS_CAN_EDIT: "false"
   GF_USERS_EDITORS_CAN_ADMIN: "false"
-  # A Grafana session ends after one hour, used or not; the next visit signs in
-  # through Keycloak again, so a removed role or a deactivation reaches Grafana
-  # within the hour (Grafana does not see Keycloak session ends by itself).
+  # Short sessions (decision of 1 Nov 2026, "short sessions + one-hop sign-out"; it
+  # narrows the earlier "bounded to 1 hour"): a Grafana session ends after 5 minutes
+  # without use (inactivity counts from the last token rotation), and at the latest one
+  # hour after its sign-in, used or not (the maximum lifetime counts from creation;
+  # rotation does not extend it). Not 5 minutes outright: at the end the page's next API
+  # call answers 401 and Grafana 10.4 reloads it, dropping unsaved dashboard and panel
+  # edits without asking, so a hard 5-minute end would cost an Editor their work every
+  # 5 minutes (the same "unless that drops work" exception as the Node-RED editor and
+  # pgAdmin; review of 1 Nov 2026). The reload goes to /login and, with
+  # GF_AUTH_OAUTH_AUTO_LOGIN, through Keycloak silently (while the Keycloak session lives)
+  # as whoever is signed in to Keycloak in that browser now, back to the same page. So
+  # after a Sign out, an account switch or an SSO expiry Grafana follows the Keycloak
+  # person within 5 minutes once its tab is idle, and within the hour while the tab keeps
+  # making requests (a dashboard with auto-refresh counts as use); a removed role or a
+  # deactivation reaches it as fast (Grafana does not see Keycloak session ends by
+  # itself).
   GF_AUTH_LOGIN_MAXIMUM_LIFETIME_DURATION: "1h"
-  GF_AUTH_LOGIN_MAXIMUM_INACTIVE_LIFETIME_DURATION: "1h"
+  GF_AUTH_LOGIN_MAXIMUM_INACTIVE_LIFETIME_DURATION: "5m"
+  # Rotate the session token every 2 minutes (Grafana's minimum; default 10), so the
+  # inactivity limit above never ends a session that is in use.
+  GF_AUTH_TOKEN_ROTATION_INTERVAL_MINUTES: "2"
 extraSecretMounts:
 - name: datasource-secret
   secretName: grafana-datasource

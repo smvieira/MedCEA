@@ -38,6 +38,9 @@ spec:
         - {name: LOGIN_ORIGIN, value: "https://${KEYCLOAK_DOMAIN}"}
         - {name: KC_PUBLIC_URL, value: "https://${KEYCLOAK_DOMAIN}"}
         - {name: HOST_CLIENTS, value: "${HOST_CLIENTS}"}
+        # Where Keycloak's end-session returns on Sign out: the workbench's /hub/logout, or
+        # empty (back to the host; apps/access/deploy.sh)
+        - {name: SIGNOUT_HUB, value: "${SIGNOUT_HUB}"}
         - {name: IAM_ENFORCE, value: "${IAM_ENFORCE}"}   # also in /iam/settings.json; covers a missing mount
         envFrom:
         - secretRef: {name: access-secrets}

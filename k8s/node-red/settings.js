@@ -65,6 +65,68 @@ function user(username) {
     }
 }
 
+// The editor's own session, in seconds (adminAuth.sessionExpiryTime: Node-RED 3.1 reads it
+// only inside adminAuth; the top-level `sessionExpiryTime: 28800` this file had until
+// 1 Nov 2026 was ignored, so editor sessions lasted Node-RED's default of a week).
+// Decision of 1 Nov 2026 ("short sessions"): about 5 minutes for every tool, unless that
+// drops work. For the editor it would: the session counts from sign-in and nothing extends
+// it; at its end Node-RED tells the open editor "auth fail" on its websocket and the editor
+// goes to its sign-in (silent through Keycloak while the SSO session lives, as whoever is
+// signed in to Keycloak now). With undeployed changes the browser first asks to leave the
+// page: leaving drops them; staying keeps an editor that can no longer deploy (401) until
+// the flows are exported and the page reloaded. So one hour, not five minutes: an editing
+// stretch without that interruption, and the same bound the platform already accepted
+// for the other tools' sessions. Within it the editor keeps the identity of whoever signed
+// in to it (its token is in the browser's storage): the next person in the same browser
+// gets the earlier one's editor for at most this long (manual: known gaps).
+const SESSION_EXPIRY_SECONDS = 3600;
+
+// Sessions already stored keep the expiry they were issued with: Node-RED 3.1 writes each
+// as {<token>: {user, client, scope, accessToken, expires}} (expires = issue time +
+// sessionExpiryTime, in ms) to <userDir>/.sessions.json on the /data volume, and checks
+// only that stored value. So when this bound is lowered (the week-long sessions before
+// 1 Nov 2026), the ones issued under the longer value would outlive the deploy by days.
+// This file runs at every start, before the runtime loads that file: drop each stored
+// session whose expiry lies beyond now + this bound (one issued under it never does; a
+// minute's slack for clock steps). Its holder's editor signs in again (silent through
+// Keycloak, as whoever is signed in there now). Best effort: an unreadable or malformed
+// file is left to Node-RED. Logs counts only, never a token or a username.
+const SESSIONS_FILE = env.NR_SESSIONS_FILE || '/data/.sessions.json';
+
+function capStoredSessions(file, boundSeconds, now) {
+    let sessions;
+    try {
+        sessions = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+        return 0;                                   // none yet, or Node-RED's to handle
+    }
+    if (!sessions || typeof sessions !== 'object' || Array.isArray(sessions)) {
+        return 0;
+    }
+    const limit = now + (boundSeconds + 60) * 1000;
+    let dropped = 0;
+    for (const t of Object.keys(sessions)) {
+        const exp = sessions[t] && sessions[t].expires;
+        if (typeof exp !== 'number' || exp > limit) {
+            delete sessions[t];
+            dropped++;
+        }
+    }
+    if (dropped) {
+        try {
+            const tmp = file + '.medcea-tmp';
+            fs.writeFileSync(tmp, JSON.stringify(sessions), { mode: 0o600 });
+            fs.renameSync(tmp, file);
+            console.warn('[medcea] ended ' + dropped + ' stored editor session(s) longer than ' + boundSeconds + ' s');
+        } catch (e) {
+            console.error('[medcea] cannot shorten the stored editor sessions: ' + e.message.split('\n')[0]);
+            return 0;
+        }
+    }
+    return dropped;
+}
+capStoredSessions(SESSIONS_FILE, SESSION_EXPIRY_SECONDS, Date.now());
+
 function adminAuth() {
     if (env.NR_ADMIN_AUTH === 'off') {
         console.warn('[medcea] NR_ADMIN_AUTH=off: the editor and its admin API have no authentication (break-glass)');
@@ -76,7 +138,7 @@ function adminAuth() {
         JSON.parse(fs.readFileSync(POLICY, 'utf8'));
     } catch (e) {
         console.error('[medcea] adminAuth: ' + e.message.split('\n')[0] + ' — the editor refuses everyone; only the deploy token works');
-        return { type: 'credentials', users: [], tokens: deployToken };
+        return { type: 'credentials', users: [], tokens: deployToken, sessionExpiryTime: SESSION_EXPIRY_SECONDS };
     }
     return {
         type: 'strategy',
@@ -112,7 +174,8 @@ function adminAuth() {
             }
         },
         users: user,
-        tokens: deployToken
+        tokens: deployToken,
+        sessionExpiryTime: SESSION_EXPIRY_SECONDS
     };
 }
 
@@ -121,10 +184,7 @@ module.exports = {
     flowFilePretty: true,
     uiPort: env.PORT || 1880,
 
-    adminAuth: adminAuth(),
-    // One working day, as the proxy's cookie_expire (8h): a shorter session would send the
-    // editor through its sign-in in the middle of unsaved edits.
-    sessionExpiryTime: 28800,
+    adminAuth: adminAuth(),   // its sessionExpiryTime: SESSION_EXPIRY_SECONDS above
 
     diagnostics: { enabled: true, ui: true },
     runtimeState: { enabled: false, ui: false },

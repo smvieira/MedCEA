@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 import yaml
 
@@ -68,6 +69,18 @@ def render_list():
     return call.replace("\\", " ").split()
 
 
+def logout_assignment():
+    """deploy-workbench.sh's own WORKBENCH_LOGOUT_URL line, run as it is by run() below, so
+    removing or renaming it there fails the render tests (review of 1 Nov 2026: an unset
+    variable renders logout_redirect_url: "" and Sign out stops at the hub)."""
+    with open(DEPLOY) as f:
+        lines = f.read().splitlines()
+    found = [i for i, l in enumerate(lines) if re.match(r'WORKBENCH_LOGOUT_URL=', l)]
+    render_at = [i for i, l in enumerate(lines) if l.startswith('render "$REPO_ROOT/k8s/workbench/values.yaml"')]
+    assert len(found) == 1 and len(render_at) == 1 and found[0] < render_at[0], (found, render_at)
+    return lines[found[0]]
+
+
 def run(gates, repo_root=REPO, jwt="false", db_roles="false"):
     """(exit code, rendered values or stderr) of policy_workbench(_egress) + render."""
     env = dict(os.environ, IAM_GATES=gates, ADMIN_USER="boss", PORTAL_DOMAIN="portal.test",
@@ -77,6 +90,7 @@ def run(gates, repo_root=REPO, jwt="false", db_roles="false"):
                IAM_POSTGREST_JWT=jwt, IAM_DB_ROLES=db_roles, RR=repo_root, LIBS=REPO)
     script = ('source "$LIBS/infra/lib-render.sh"; REPO_ROOT="$RR" source "$LIBS/infra/lib-oauth2-proxy.sh"; '
               'REPO_ROOT="$RR" policy_workbench || exit 1; REPO_ROOT="$RR" policy_workbench_egress || exit 1; '
+              'die() { echo "$*" >&2; exit 1; }; ' + logout_assignment() + '; '
               f'render "$LIBS/k8s/workbench/values.yaml" {" ".join(render_list())}')
     r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     return r.returncode, r.stdout if r.returncode == 0 else r.stderr
@@ -120,7 +134,25 @@ class RenderTest(unittest.TestCase):
         self.assertFalse({x.split("!")[0] for x in wa["scopes"]} & NEVER)
         self.assertLessEqual(set(lib_constant("WORKBENCH_ADMIN_ROLE_FORBIDDEN")), NEVER)
         self.assertEqual(set(wa) - {"description", "scopes", "groups", "users"}, set())
-        self.assertEqual(hub["JupyterHub"]["oauth_token_expires_in"], 3600)
+        # Short sessions (decision of 1 Nov 2026): the hub's sign-in and an open lab tab's
+        # token last 5 minutes, then follow whoever is signed in to Keycloak now.
+        self.assertEqual(hub["JupyterHub"]["oauth_token_expires_in"], 300)
+        self.assertAlmostEqual(hub["JupyterHub"]["cookie_max_age_days"] * 86400, 300, delta=1)
+        self.assertNotIn("shutdown_on_logout", hub["JupyterHub"])   # default false: logout never stops servers
+        self.assertIs(hub["Authenticator"]["auto_login"], True)
+        # One-hop sign-out: /hub/logout goes to Keycloak's end-session for client workbench
+        # and back to the portal's proxy sign-out. Fixed, no token, nothing from a request.
+        out = hub["GenericOAuthenticator"]["logout_redirect_url"]
+        u = urllib.parse.urlsplit(out)
+        self.assertEqual((u.scheme, u.netloc, u.path),
+                         ("https", "kc.test", "/realms/medcea/protocol/openid-connect/logout"))
+        q = urllib.parse.parse_qs(u.query, strict_parsing=True)
+        self.assertEqual(q, {"client_id": ["workbench"],
+                             "post_logout_redirect_uri": ["https://portal.test/oauth2/sign_out?rd=%2F"]})
+        self.assertNotRegex(out.lower(), r"id_token|access_token|token=|\{")
+        self.assertEqual(logout_assignment(),
+                         'WORKBENCH_LOGOUT_URL="$(workbench_logout_url)" || die "could not build the workbench\'s '
+                         'logout URL (python3 missing?)"')
         self.assertIs(hub["KubeSpawner"]["delete_pvc"], False)
         self.assertIs(hub["Authenticator"]["allow_existing_users"], False)
         self.assertIs(hub["Authenticator"]["enable_auth_state"], False)

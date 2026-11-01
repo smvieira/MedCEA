@@ -14,6 +14,8 @@
 #   4  IAM_GATES=false                    → ["admin"], exit 0
 #   5  the database deploy fails          → exit 1, no rollout, no helm
 #   6  access_svc already holds its grants → no database deploy
+#   7  Sign out (1 Nov 2026): SIGNOUT_HUB, where Keycloak returns, is the workbench's /hub/logout,
+#      empty with WORKBENCH_ENABLED=false; HOST_CLIENTS (Change password) unchanged
 #
 #   tests/test_access_deploy.sh      exit 1 on any FAIL
 
@@ -118,7 +120,7 @@ case "$a" in
     *"rollout "*) echo "ROLLOUT ${a#rollout }" | cut -d' ' -f1-3 >> "$L" ;;
     *"--from-file=error.html=/dev/stdin"*) cat > /dev/null; echo "kind: ConfigMap" ;;
     *"--dry-run=client"*) echo "kind: Something" ;;
-    *"apply -f -"*) cat > /dev/null ;;
+    *"apply -f -"*) cat >> "$D/applied" ;;
     *) echo "OTHER $a" | cut -c1-120 >> "$L" ;;
 esac
 SH
@@ -127,7 +129,7 @@ chmod +x "$T/bin/microk8s"
 # run CASE [env...] — one deploy; sets OUT, RC, LOG
 run() {
     local name="$1"; shift
-    rm -f "$T/fake/log" "$T/fake/granted"
+    rm -f "$T/fake/log" "$T/fake/granted" "$T/fake/applied"
     : > "$T/fake/log"
     OUT="$(cd "$R" && env -i HOME="$HOME" PATH="$T/bin:$PATH" TMPDIR="$T" FAKE_LOG="$T/fake/log" FAKE_DIR="$T/fake" \
              "$@" bash "$R/apps/access/deploy.sh" 2>&1)"
@@ -195,6 +197,25 @@ OUT="$(cd "$R" && touch "$T/fake/granted" && env -i HOME="$HOME" PATH="$T/bin:$P
          bash "$R/apps/access/deploy.sh" 2>&1)"; RC=$?; LOG="$(cat "$T/fake/log")"
 echo -e "\n${BOLD}6 access_svc already holds its grants${NC} (exit $RC)"
 [[ $RC -eq 0 ]] && ! grep -q '^DBDEPLOY' <<<"$LOG" && pass "no database deploy" || fail "exit $RC, log $(tr '\n' ';' <<<"$LOG")"
+
+# 7 — Sign out: Keycloak returns to the workbench's own logout, or to the host without the workbench
+signout_of() { grep 'name: SIGNOUT_HUB' "$T/fake/applied" 2>/dev/null | sed -n 's/.*value: "\(.*\)"}.*/\1/p'; }
+hosts_of() { grep 'name: HOST_CLIENTS' "$T/fake/applied" 2>/dev/null | sed -n 's/.*value: "\(.*\)"}.*/\1/p'; }
+WANT_HOSTS="portal.medcea=portal,config.medcea=config,access.medcea=access,monitor.medcea=monitor,scheduler.medcea=scheduler,dbmgmt.medcea=dbmgmt,mqtt-explorer.medcea=mqtt-explorer"
+setup 27 27 'access-new True\n' 'access-new\n'
+run "7a Sign out with the workbench (default)"
+[[ "$(signout_of)" == "https://ai-workbench.medcea/hub/logout" ]] && pass "SIGNOUT_HUB is the workbench's /hub/logout" \
+    || fail "SIGNOUT_HUB: '$(signout_of)'"
+[[ "$(hosts_of)" == "$WANT_HOSTS" ]] && pass "HOST_CLIENTS unchanged (Change password)" || fail "HOST_CLIENTS: $(hosts_of)"
+setup 27 27 'access-new True\n' 'access-new\n'
+run "7b Sign out with WORKBENCH_DOMAIN set" WORKBENCH_DOMAIN=lab.medcea
+[[ "$(signout_of)" == "https://lab.medcea/hub/logout" ]] && pass "follows WORKBENCH_DOMAIN" || fail "SIGNOUT_HUB: '$(signout_of)'"
+setup 27 27 'access-new True\n' 'access-new\n'
+run "7c Sign out with WORKBENCH_ENABLED=false" WORKBENCH_ENABLED=false
+[[ $RC -eq 0 ]] && grep -q 'name: SIGNOUT_HUB, value: ""' "$T/fake/applied" \
+    && pass "SIGNOUT_HUB empty: Keycloak returns to the host as before" || fail "exit $RC, SIGNOUT_HUB '$(signout_of)'"
+[[ "$(hosts_of)" == "$WANT_HOSTS" ]] && pass "HOST_CLIENTS unchanged" || fail "HOST_CLIENTS: $(hosts_of)"
+grep -q 'Sign out: this host, then Keycloak (WORKBENCH_ENABLED is not true)' <<<"$OUT" && pass "says so" || fail "no message"
 
 echo ""
 if [[ $FAILS -eq 0 ]]; then

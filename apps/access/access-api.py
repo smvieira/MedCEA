@@ -57,6 +57,30 @@ KC_PUBLIC = E.get('KC_PUBLIC_URL', '').rstrip('/')       # https://keycloak.<dom
 # host=client pairs: which Keycloak client a signed-in host belongs to, for its
 # sign-out and change-password links (portal.medcea=portal,config.medcea=config).
 HOST_CLIENTS = dict(p.split('=', 1) for p in E.get('HOST_CLIENTS', '').split(',') if '=' in p)
+# Sign out (decision of 1 Nov 2026, "short sessions + one-hop sign-out"; order changed in
+# its review): when the AI workbench is deployed, apps/access/deploy.sh renders its logout
+# here, https://<WORKBENCH_DOMAIN>/hub/logout. Sign out then clears this host's own proxy
+# cookie, ends the Keycloak session (end-session for this host's client) and only then
+# goes to the hub's logout as Keycloak's post_logout_redirect_uri; the hub ends its own
+# session and goes on, by its fixed logout_redirect_url (k8s/workbench/values.yaml), to
+# Keycloak once more (no session left: no page) and the portal's sign-out. So a hub that
+# is down costs only its own cookie (<= 5 min), never the Keycloak sign-out. Empty
+# (WORKBENCH_ENABLED=false) or anything but that exact shape: Keycloak returns to this
+# host, as before. Never taken from a request, so it cannot become an open redirect; it
+# carries no token. deploy-infra.sh registers it as a post-logout URI on every host client.
+_SIGNOUT_HUB_RE = re.compile(r'https://[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?/hub/logout')
+
+
+def signout_hub(value):
+    """The workbench logout Keycloak returns to, or '' when it is not exactly https://<host>/hub/logout."""
+    value = (value or '').strip()
+    if value and not _SIGNOUT_HUB_RE.fullmatch(value):
+        sys.stderr.write('access: SIGNOUT_HUB is not https://<host>/hub/logout; Sign out returns to the host\n')
+        return ''
+    return value
+
+
+SIGNOUT_HUB = signout_hub(E.get('SIGNOUT_HUB', ''))
 # What /healthz on the admin port reports; apps/access/deploy.sh widens the proxy only
 # after every Ready pod answers with it (invariant W, never fail open).
 ACCESS_VERSION = '2.7'
@@ -1868,13 +1892,18 @@ def profile_of(u):
 
 
 def account_links(host):
-    """Sign-out and change-password URLs for the client this host signs in with."""
+    """Sign-out and change-password URLs for the client this host signs in with.
+
+    Sign out is always this host's proxy sign-out (its own cookie, at once) on to
+    Keycloak's end-session for this host's client; Keycloak then returns to the
+    workbench's logout (SIGNOUT_HUB) when one is configured, else to this host.
+    Change password always belongs to this host's client."""
     client = HOST_CLIENTS.get(host, '')
     if not (client and KC_PUBLIC):
         return {'sign_out': '/oauth2/sign_out', 'change_password': ''}
     q = urllib.parse.quote
     logout = '%s/realms/%s/protocol/openid-connect/logout?client_id=%s&post_logout_redirect_uri=%s' % (
-        KC_PUBLIC, KC_REALM, client, q('https://%s/' % host, safe=''))
+        KC_PUBLIC, KC_REALM, client, q(SIGNOUT_HUB or 'https://%s/' % host, safe=''))
     # Application-initiated action: Keycloak shows its (medcea-themed) update
     # password page, asking to sign in again if the login is old, then returns
     # here. The password never passes through this service.

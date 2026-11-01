@@ -101,6 +101,23 @@ print(json.dumps(f"No access to {service}. It is open to: {roles}. Ask an admini
 WORKBENCH_ADMIN_ROLE_SCOPES='["admin-ui", "delete:users", "list:users", "read:users", "servers"]'
 WORKBENCH_ADMIN_ROLE_FORBIDDEN='["access:servers", "admin:auth_state", "admin:users", "groups", "shares", "tokens"]'
 
+# workbench_logout_url — prints where the hub's /hub/logout goes
+# (GenericOAuthenticator.logout_redirect_url, decision of 1 Nov 2026, "short sessions +
+# one-hop sign-out"): Keycloak's end-session for client workbench, returning to the
+# portal's proxy sign-out (it clears the portal's own cookie, then the portal sends the
+# browser to the Keycloak sign-in page). client_id and post_logout_redirect_uri only,
+# never id_token_hint, so no token is in any URL (Keycloak then shows its "Do you want to
+# log out?" page while a session exists). Uses KEYCLOAK_DOMAIN, KEYCLOAK_REALM and
+# PORTAL_DOMAIN; the post-logout URI is registered on client workbench by deploy-infra.sh
+# (_create_client, https://<PORTAL_DOMAIN>/*).
+workbench_logout_url() {
+    local rd
+    rd="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+          "https://${PORTAL_DOMAIN:?}/oauth2/sign_out?rd=%2F")" || return 1
+    printf 'https://%s/realms/%s/protocol/openid-connect/logout?client_id=workbench&post_logout_redirect_uri=%s\n' \
+        "${KEYCLOAK_DOMAIN:?}" "${KEYCLOAK_REALM:?}" "$rd"
+}
+
 #   policy_workbench_egress || exit 1
 #
 # The notebooks' platform hops (IAM 3.2b): WORKBENCH_EGRESS, the workbench chart's

@@ -773,6 +773,103 @@ class OtherPorts(Base):
         self.assertEqual(self.call('GET', '/_account/healthz', cls=API.Profile)[0], 200)
 
 
+# ── 13b. Sign out (decision of 1 Nov 2026, "short sessions + one-hop sign-out") ──
+class SignOutLinks(Base):
+    WB = 'https://ai-workbench.medcea/hub/logout'
+    HOSTS = {'portal.medcea': 'portal', 'config.medcea': 'config', 'access.medcea': 'access'}
+    KC = 'https://keycloak.medcea/realms/medcea/protocol/openid-connect/logout'
+
+    def setUp(self):
+        super().setUp()
+        saved = (API.SIGNOUT_HUB, API.HOST_CLIENTS, API.KC_PUBLIC, API.KC_REALM)
+        self.addCleanup(lambda: setattr(API, 'SIGNOUT_HUB', saved[0]) or setattr(API, 'HOST_CLIENTS', saved[1])
+                        or setattr(API, 'KC_PUBLIC', saved[2]) or setattr(API, 'KC_REALM', saved[3]))
+        API.HOST_CLIENTS, API.KC_PUBLIC, API.KC_REALM = dict(self.HOSTS), 'https://keycloak.medcea', 'medcea'
+
+    def change_password(self, host, client):
+        return ('https://keycloak.medcea/realms/medcea/protocol/openid-connect/auth?client_id=%s&response_type=code'
+                '&scope=openid&kc_action=UPDATE_PASSWORD&redirect_uri=%s' % (
+                    client, urllib.parse.quote('https://%s/_account/?password=updated' % host, safe='')))
+
+    def hops(self, sign_out):
+        """(this host's proxy path, the Keycloak end-session URL, its query) of a Sign out link."""
+        u = urllib.parse.urlsplit(sign_out)
+        self.assertEqual((u.scheme, u.netloc), ('', ''))                  # same host
+        rd = urllib.parse.parse_qs(u.query, strict_parsing=True)
+        self.assertEqual(list(rd), ['rd'])
+        kc = urllib.parse.urlsplit(rd['rd'][0])
+        return u.path, '%s://%s%s' % (kc.scheme, kc.netloc, kc.path), urllib.parse.parse_qs(kc.query, strict_parsing=True)
+
+    def test_host_then_keycloak_then_workbench(self):
+        """Review of 1 Nov 2026: the host's own proxy cookie and the Keycloak session end
+        first, on every host; the workbench's logout is Keycloak's way back, so a hub that
+        does not answer cannot keep the Keycloak session alive."""
+        API.SIGNOUT_HUB = self.WB
+        for host, client in self.HOSTS.items():
+            links = API.account_links(host)
+            path, kc, q = self.hops(links['sign_out'])
+            self.assertEqual(path, '/oauth2/sign_out')                    # this host's cookie, at once
+            self.assertEqual(kc, self.KC)
+            self.assertEqual(q, {'client_id': [client], 'post_logout_redirect_uri': [self.WB]})
+            self.assertEqual(links['change_password'], self.change_password(host, client))   # unchanged
+        # an unknown host (no client): only its own proxy sign-out, no change-password link
+        self.assertEqual(API.account_links('evil.example'), {'sign_out': '/oauth2/sign_out', 'change_password': ''})
+
+    def test_without_workbench_as_before(self):
+        API.SIGNOUT_HUB = ''      # WORKBENCH_ENABLED=false: deploy.sh renders it empty
+        links = API.account_links('config.medcea')
+        rd = urllib.parse.parse_qs(urllib.parse.urlsplit(links['sign_out']).query)['rd'][0]
+        self.assertTrue(links['sign_out'].startswith('/oauth2/sign_out?rd='))
+        self.assertEqual(rd, self.KC + '?client_id=config&post_logout_redirect_uri=https%3A%2F%2Fconfig.medcea%2F')
+        self.assertEqual(links['change_password'], self.change_password('config.medcea', 'config'))
+        self.assertEqual(API.account_links('evil.example'), {'sign_out': '/oauth2/sign_out', 'change_password': ''})
+
+    def test_only_the_exact_shape_is_taken(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for bad in ('http://ai-workbench.medcea/hub/logout', 'https://ai-workbench.medcea/hub/logout?next=//evil',
+                        'https://ai-workbench.medcea/hub/logout/', 'https://evil@ai-workbench.medcea/hub/logout',
+                        'https://ai-workbench.medcea/hub/login', '//ai-workbench.medcea/hub/logout',
+                        'https://ai-workbench.medcea/hub/logout\nX: y', 'javascript:alert(1)', 'https:///hub/logout',
+                        'https://AI-workbench.medcea/hub/logout'):
+                self.assertEqual(API.signout_hub(bad), '', bad)
+        self.assertIn('returns to the host', err.getvalue())
+        self.assertNotIn('evil', err.getvalue())                       # the value is never logged
+        for good in (self.WB, ' %s ' % self.WB, 'https://ai-workbench.medcea:8443/hub/logout'):
+            self.assertEqual(API.signout_hub(good), good.strip())
+        self.assertEqual(API.signout_hub(''), '')
+        self.assertEqual(API.signout_hub(None), '')
+
+    def test_no_token_and_host_header_ignored(self):
+        API.SIGNOUT_HUB = self.WB
+        self.w.user(S, 'sam')
+        status, body = self.call('GET', '/_account/api/me', cls=API.Profile,
+                                 headers={'X-Forwarded-Preferred-Username': 'sam', 'Host': 'evil.example'})
+        self.assertEqual((status, body['sign_out'], body['change_password']), (200, '/oauth2/sign_out', ''))
+        for v in API.account_links('portal.medcea').values():
+            self.assertNotRegex(v.lower(), r'id_token|access_token|[?&]token=')
+
+    def test_user_menu_takes_only_same_host_paths(self):
+        """user-menu.js: the Sign out link is /api/me's sign_out when it is a same-host
+        path, otherwise (and when /api/me fails) the proxy sign-out."""
+        import shutil
+        import subprocess
+        with open(os.path.join(REPO, 'apps', 'access', 'html', 'user-menu.js')) as fh:
+            js = fh.read()
+        self.assertIn("mount(host, { display_name: 'Account', sign_out: '/oauth2/sign_out' })", js)
+        fn = re.search(r'function signOutHref\(u\) \{.*?\n  \}', js, re.S)
+        self.assertIsNotNone(fn)
+        if not shutil.which('node'):
+            self.skipTest('node is not installed')
+        API.SIGNOUT_HUB = self.WB
+        real = API.account_links('portal.medcea')['sign_out']
+        cases = [real, '/oauth2/sign_out?rd=https%3A%2F%2Fk', self.WB, '//evil.example/x', '/\\evil.example',
+                 'javascript:alert(1)', 'http://ai-workbench.medcea/hub/logout', 'https:///x', '', None, 7]
+        script = fn.group(0) + '\nconsole.log(JSON.stringify(%s.map(signOutHref)));' % json.dumps(cases)
+        r = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [real, '/oauth2/sign_out?rd=https%3A%2F%2Fk'] + ['/oauth2/sign_out'] * 9)
+
+
 # ── 14. CSRF ──────────────────────────────────────────────────────────────────
 class Csrf(Base):
     def test_form_post(self):

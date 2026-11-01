@@ -247,7 +247,22 @@ log "Deploying access service..."
 HOST_CLIENTS="${PORTAL_DOMAIN}=portal,${CONFIG_DOMAIN:-config.$DOMAIN}=config,${ACCESS_DOMAIN}=access"
 HOST_CLIENTS+=",${MONITOR_DOMAIN:-monitor.$DOMAIN}=monitor,${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}=scheduler"
 HOST_CLIENTS+=",${DBMGMT_DOMAIN:-dbmgmt.$DOMAIN}=dbmgmt,${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}=mqtt-explorer"
-render "$SCRIPT_DIR/k8s/access.yaml" NAMESPACE POSTGRES_DB KEYCLOAK_REALM KEYCLOAK_DOMAIN ACCESS_DOMAIN PORTAL_DOMAIN HOST_CLIENTS IAM_ENFORCE \
+# Sign out (1 Nov 2026, order from its review): the user menu's Sign out clears the host's
+# own proxy cookie and ends the Keycloak session first; with the AI workbench deployed,
+# Keycloak then returns to the workbench's own logout, which ends the hub session and goes
+# on to the portal (k8s/workbench/values.yaml logout_redirect_url). A hub that does not
+# answer stops only that last part. deploy-infra.sh registers the URI on every host
+# client, so run it before this script. WORKBENCH_ENABLED not "true" (deploy-infra then
+# deploys no workbench): empty, and Keycloak returns to the host signed out from, as
+# before. access-api also ignores a value that is not exactly https://<host>/hub/logout.
+if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then
+    SIGNOUT_HUB=""
+    log "Sign out: this host, then Keycloak (WORKBENCH_ENABLED is not true)"
+else
+    SIGNOUT_HUB="https://${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}/hub/logout"
+    log "Sign out: this host, then Keycloak, then the AI workbench's logout ($SIGNOUT_HUB), then the portal"
+fi
+render "$SCRIPT_DIR/k8s/access.yaml" NAMESPACE POSTGRES_DB KEYCLOAK_REALM KEYCLOAK_DOMAIN ACCESS_DOMAIN PORTAL_DOMAIN HOST_CLIENTS SIGNOUT_HUB IAM_ENFORCE \
   | $KUBECTL apply -f -
 $KUBECTL rollout restart deployment/access -n "$NAMESPACE"
 log "Waiting for the access rollout..."

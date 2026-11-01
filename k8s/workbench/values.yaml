@@ -28,12 +28,28 @@ hub:
       # DEPRECATED since JupyterHub 2.0 and without effect: the scopes of a user's roles
       # decide (workbench-admin above). Kept false only so no reader takes it for on.
       admin_access: false
-      # A session lasts an hour, then the sign-in runs again through Keycloak (silent while
-      # the Keycloak session lives) and the groups are checked again: a role removal or a
-      # deactivation reaches the hub within the hour. An open notebook's own token
-      # (oauth_token_expires_in) lasts as long; a tab open longer reloads through sign-in.
-      cookie_max_age_days: 0.0417
-      oauth_token_expires_in: 3600
+      # Short sessions (decision of 1 Nov 2026, "short sessions + one-hop sign-out"): the
+      # hub's own sign-in lasts 5 minutes (0.003472 days = 300 s, counted from sign-in, not
+      # extended by use). Then the next hub page runs the sign-in again through Keycloak
+      # (auto_login: silent while the Keycloak session lives) as whoever is signed in to
+      # Keycloak in that browser now, and the groups are checked again. So after a Sign out,
+      # an account switch or an SSO expiry the hub follows the Keycloak person within
+      # 5 minutes, and a role removal or a deactivation reaches it as fast. Until then it was
+      # an hour, and the next person in the same browser got the previous one's hub.
+      cookie_max_age_days: 0.003472
+      # The token an open JupyterLab tab carries (cookie jupyterhub-user-<name>, path
+      # /user/<name>/): 5 minutes too; the server caches the hub's answer for up to 5 more
+      # (HubAuth cache_max_age 300 s). Then the tab's API calls (save, open, start a kernel)
+      # answer 403 "Forbidden" until any workbench page is loaded again: JupyterLab does not
+      # re-authenticate by itself. Reloading the tab, or opening the workbench in another
+      # tab, fetches a new token silently through the hub and Keycloak; unsaved edits stay
+      # in the open tab and save once the token is back. Kernels keep running, an open
+      # kernel connection stays up, and the idle culler and the server's activity reports
+      # (its own JUPYTERHUB_API_TOKEN) are not affected. If Keycloak now has another person,
+      # that person is refused /user/<name>/ (403 at the hub's authorize and at the server:
+      # access:servers!server=<name>/ is only the owner's), so the earlier person's server
+      # is never shown to the new one.
+      oauth_token_expires_in: 300
     Authenticator:
       # The gate (infra/lib-oauth2-proxy.sh policy_workbench): IAM_GATES=true renders
       # allow_all false and the groups compiled from the access policy; IAM_GATES=false
@@ -70,6 +86,17 @@ hub:
       auth_state_groups_key: "oauth_user.groups"
       allowed_groups: ${WORKBENCH_ALLOWED_GROUPS}
       custom_403_message: ${WORKBENCH_403_MESSAGE}
+      # One-hop sign-out (1 Nov 2026): /hub/logout (the user menu's Sign out when the
+      # workbench is deployed, JupyterLab's File > Log Out, the hub's Logout button) ends
+      # the hub session (with a live hub cookie it also deletes this browser session's
+      # server tokens) and then always goes here, with or without a hub session:
+      # Keycloak's end-session for client workbench (it shows its "Do you want to log
+      # out?" page while a Keycloak session exists: no id_token_hint, so no token in any
+      # URL), which returns to the portal's proxy sign-out and the portal. A fixed URL
+      # rendered by infra/deploy-workbench.sh (WORKBENCH_LOGOUT_URL); the hub reads no
+      # parameter for it, so it is no open redirect. The portal's origin is registered as
+      # a post-logout URI of client workbench (deploy-infra.sh _create_client).
+      logout_redirect_url: "${WORKBENCH_LOGOUT_URL}"
     KubeSpawner:
       # Removing a hub user (admin page) keeps the person's home volume claim-<name>
       # (KubeSpawner's default would delete it: K is not D).

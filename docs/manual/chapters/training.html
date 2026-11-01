@@ -15,6 +15,7 @@
 <tr><td><a href="#training-e7">E7 Deactivate and reactivate an account</a></td><td><span class="role">admin</span>, <span class="role">qa</span></td><td>Taking access away acts at once; giving it back waits for a second person.</td><td>31 Oct 2026, deactivation only (decision 12)</td></tr>
 <tr><td><a href="#training-e8">E8 Quarterly access review</a></td><td><span class="role">qa</span>, <span class="role">auditor</span></td><td>Who holds what is reviewed, signed off and readable by an auditor.</td><td>Not recorded here</td></tr>
 <tr><td><a href="#training-e9">E9 Open an example notebook in a new workbench home</a></td><td><span class="role">bio_scientist</span> (or any role the AI Workbench admits), <span class="role">admin</span></td><td>A new workspace opens documents on its first start and shows the person, not <code>jovyan</code>.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e10">E10 Sign out and switch accounts</a></td><td><span class="role">engineer</span>, <span class="role">admin</span></td><td>After <strong>Sign out</strong>, the next person in the same browser never gets the previous person's AI Workbench, Grafana or pgAdmin, and an app left open follows the new person within minutes.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -277,6 +278,57 @@
 <li>Test account: in the terminal, run <code>touch ~/medcea-examples/x</code>. It answers <code>touch: cannot touch '/home/jovyan/medcea-examples/x': Read-only file system</code>, because the folder is mounted read-only. Then change a cell of <code>01-connect.ipynb</code> and save it (<strong>Ctrl+S</strong>). The save is refused: JupyterLab may show a "File Save Error for 01-connect.ipynb" dialog naming the read-only file system or "Permission denied", or, with real-time collaboration on, show nothing at all. Either way, close the notebook and open it again: your change is gone. Copy the notebook into your home folder to change it.</li>
 </ul>
 <p><strong>Afterwards.</strong> Stop the workspace (<strong>File → Hub Control Panel</strong>, <strong>Stop My Server</strong>, or <span class="role">admin</span> from the admin page). The home folder is kept. Deactivate the test account if it is not needed again (<a href="#training-e7">E7</a>).</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
+<h3 id="training-e10">E10 Sign out and switch accounts</h3>
+<p><strong>Goal.</strong> Sign out as one account and sign in as another in the same browser window, and see each app follow the new person. The exercise proves the decision of 1 November 2026 ("short sessions and one-hop sign-out"). <strong>Sign out</strong> ends the app it is chosen in, the platform sign-in and the AI Workbench's own session. The AI Workbench follows the person signed in now within 5 minutes, and so does a Grafana tab that is not in use. Nobody is shown another person's workspace. Before that day the workbench still served the previous person after a sign-out.</p>
+<p><strong>Accounts and roles.</strong> Two test accounts used one after the other in one browser window. Account A is <code>eng</code> (<span class="role">engineer</span>), which may open the AI Workbench, Grafana (Editor) and the Node-RED editor. Account B is <code>admin</code> (<span class="role">admin</span>), which may open the AI Workbench and pgAdmin, but not Grafana or the Node-RED editor. The exercise shows that two people never share an identity through one browser.</p>
+<p><strong>Before you start.</strong> <code>./deploy-infra.sh</code>, then <code>./apps/access/deploy.sh</code>, then <code>./health-check.sh</code> have run, in that order, since the review of 1 November 2026, and the AI Workbench is installed (<code>WORKBENCH_ENABLED=true</code>). Contrary to the usual advice (see <a href="#training-safely">running an exercise safely</a>), use one private window for both accounts. Sharing one window is the point of this exercise. Do not tick <strong>Remember me</strong>. Have a watch at hand.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>A: in a new private window, open the portal and sign in as <code>eng</code>.</li>
+<li>A: open the AI Workbench from the portal and wait until JupyterLab shows. Note the address, <code>…/user/eng/lab</code>. Leave the tab open.</li>
+<li>A: open Grafana from the portal and open the <strong>IoT Environmental Monitoring</strong> dashboard. Grafana's profile menu (top right) names <code>eng</code>. Set auto-refresh to <strong>Off</strong> next to the time range, so the tab is not in use. Leave the tab open and do not touch it.</li>
+<li>A: open the Node-RED editor from the portal. Leave the tab open.</li>
+<li>A: on the portal tab, open the user menu (your name, top right) and choose <strong>Sign out</strong>. Note the time.</li>
+<li>A: on the page "Do you want to log out?", choose <strong>Logout</strong>.</li>
+<li>B: on the sign-in page you land on, sign in as <code>admin</code>.</li>
+<li>B: open the AI Workbench from the portal.</li>
+<li>B: open pgAdmin from the Platform Management page.</li>
+<li>B: in the tab of step 2, try to save the notebook or open a file, then reload the tab.</li>
+<li>B: when at least 5 minutes have passed since step 3, reload the Grafana tab of step 3.</li>
+<li>B: then, at least 5 minutes after step 6, reload the Node-RED tab of step 4.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 5 shows "Do you want to log out?" (the portal has signed you out of itself first).</li>
+<li>Step 6 passes through the AI Workbench's address and lands on the portal's sign-in page.</li>
+<li>Step 8 opens <code>…/user/admin/lab</code>. <strong>File → Hub Control Panel</strong> names <code>admin</code>, and nothing shows <code>eng</code>.</li>
+<li>Step 9 goes to pgAdmin's browser tree without a <strong>MedCEA sign-in</strong> button.</li>
+<li>In step 10, before the reload, the save may still work: the old tab keeps <code>eng</code>'s token for about 5 to 10 minutes. After the reload the workbench answers "403 Forbidden" for <code>eng</code>'s workspace.</li>
+<li>In step 11 the Grafana tab goes through the sign-in and shows Grafana's sign-in page saying the login was denied, because <span class="role">admin</span> has no Grafana role. It does not show <code>eng</code>'s dashboards as <code>eng</code>.</li>
+<li>Step 12 shows the page "No access to Node-RED".</li>
+</ul>
+<div class="record"><p>Nothing is recorded in the platform's database: the exercise changes no right and no record. The host operator can read the evidence:</p>
+<ul>
+<li>The hub's log has a line <code>User logged out: eng</code> at the time of step 6, if step 6 came within 5 minutes of step 2. Read it with <code>kubectl -n medcea logs deploy/hub | grep "logged out"</code>.</li>
+<li>In the Keycloak admin console, <strong>Users → eng → Sessions</strong> lists no session after step 6.</li>
+<li>Grafana's log has a refused sign-in for <code>admin</code> after step 11.</li>
+</ul>
+<p>Write the times of steps 5, 6 and 11 under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>B: type the address of A's workspace (<code>https://ai-workbench.&lt;domain&gt;/user/eng/lab</code>). The workbench answers "403 Forbidden".</li>
+<li>A, in a second run: on the "Do you want to log out?" page, close the tab instead of confirming. The portal signed A out of itself, but the platform sign-in stays: opening the portal signs A in again without a password, and the AI Workbench still shows A. This is why the page must be confirmed.</li>
+</ul>
+<p>Known gaps you may see (see <a href="#access-switch">switching accounts in one browser</a>):</p>
+<ul>
+<li>Reloading the Node-RED tab less than 4 minutes after step 6 may still open the editor as <code>eng</code>: its gate checks the platform sign-in every 4 minutes. If B were another engineer, whom the gate admits, the editor would keep acting as <code>eng</code> for up to an hour after step 4.</li>
+<li>pgAdmin opened by A, if A could open it, would stay A's for up to an hour.</li>
+<li>A Grafana tab that stays in use, for example a dashboard with auto-refresh, keeps <code>eng</code>'s Grafana session for up to an hour after step 3, so in step 11 it may still show <code>eng</code>. The hour is the bound; 5 minutes would drop unsaved panel edits.</li>
+<li>If the AI Workbench does not answer, step 6 stops on its error page. The platform sign-in has already ended; only the workbench's own session is left, for up to 5 minutes.</li>
+</ul>
+<p><strong>Afterwards.</strong> B: <strong>Sign out</strong>, then close the private window. Stop both workspaces if they are not needed (<span class="role">admin</span>, from the hub's admin page).</p>
 <p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>

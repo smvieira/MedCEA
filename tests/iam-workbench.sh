@@ -18,7 +18,7 @@
 #   W5 admin stops bio's server; W6 admin removes hub user bio, and its home volume is kept.
 # Then W7: bio's realm role is removed and a fresh sign-in gets the hub's 403 naming the
 # roles; W8: bio's account is disabled and a fresh sign-in does not get in. (A session
-# already open lasts until the hub cookie's hour runs out: cookie_max_age_days.)
+# already open lasts until the hub cookie's 5 minutes run out: cookie_max_age_days.)
 #
 # Cleanup also deletes bio's home volume (the one PVC W1 created, found by the hub's
 # username annotation). The throwaway admin stays a hub user without a home: a hub admin

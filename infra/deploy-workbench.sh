@@ -89,7 +89,7 @@ die() { echo -e "\033[0;31m[workbench] ERROR:\033[0m $*" >&2; exit 1; }
 : "${NAMESPACE:?}" ; : "${KEYCLOAK_DOMAIN:?}" ; : "${DOMAIN:?}"
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-medcea}"
 WORKBENCH_DOMAIN="${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}"
-PORTAL_DOMAIN="${PORTAL_DOMAIN:-portal.$DOMAIN}"   # named on the 403 page
+PORTAL_DOMAIN="${PORTAL_DOMAIN:-portal.$DOMAIN}"   # named on the 403 page; where sign-out lands
 # Pinned: the tag that ships JupyterLab 4.6.4 with the git panel (@jupyterlab/git
 # 0.55.0) and nbdime 4.0.4, as verified on the running server on 2026-10-31. A date
 # tag or a digest (name:tag@sha256:…) pins harder; `latest` is accepted with a warning.
@@ -132,6 +132,9 @@ else
     log "Gate: $WORKBENCH_ALLOWED_GROUPS; hub administrators (workbench-admin): $WORKBENCH_ADMIN_GROUPS (from the access policy)"
 fi
 policy_workbench_egress || die "the access policy does not compile to the notebooks' network hops (python3 apps/iam/compiler/cli.py check)"
+# Where /hub/logout goes: Keycloak's end-session, then the portal (one-hop sign-out,
+# 1 Nov 2026; infra/lib-oauth2-proxy.sh workbench_logout_url).
+WORKBENCH_LOGOUT_URL="$(workbench_logout_url)" || die "could not build the workbench's logout URL (python3 missing?)"
 # config.env is not enough: the documented order runs this (through ./deploy-infra.sh)
 # before the frontend and database deploys switch, so the hops open only when config-api
 # runs JWT and the database enforces now. Otherwise none, until this runs again.
@@ -168,7 +171,8 @@ log "Example notebooks: ~/medcea-examples (read-only) in every server"
 
 render "$REPO_ROOT/k8s/workbench/values.yaml" WORKBENCH_SECRET WORKBENCH_DOMAIN KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
     WORKBENCH_IMAGE_NAME WORKBENCH_IMAGE_TAG WORKBENCH_STORAGE WORKBENCH_NOTEBOOK_REPO WORKBENCH_EGRESS \
-    WORKBENCH_ALLOW_ALL WORKBENCH_HUBADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE > "$VALUES"
+    WORKBENCH_ALLOW_ALL WORKBENCH_HUBADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE \
+    WORKBENCH_LOGOUT_URL > "$VALUES"
 
 $HELM upgrade --install workbench jupyterhub/jupyterhub \
   --version "$CHART_VERSION" \

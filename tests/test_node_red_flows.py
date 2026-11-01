@@ -220,7 +220,8 @@ class SettingsJsTest(unittest.TestCase):
 const s = require(process.argv[2]);
 const a = s.adminAuth;
 const out = {type: a.type, autoLogin: a.strategy && a.strategy.autoLogin,
-             arity: a.strategy && a.strategy.options.verify.length};
+             arity: a.strategy && a.strategy.options.verify.length,
+             expiry: a.sessionExpiryTime, top_expiry: s.sessionExpiryTime === undefined ? null : s.sessionExpiryTime};
 const done = (k) => (err, user) => { out[k] = user; };
 (async () => {
   if (a.type === 'strategy') {
@@ -238,7 +239,7 @@ const done = (k) => (err, user) => { out[k] = user; };
 })();
 """
 
-    def run_js(self, module=True, policy=True):
+    def run_js(self, module=True, policy=True, sessions=None):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp)
         mod = os.path.join(tmp, "passport-openidconnect")
@@ -254,7 +255,12 @@ const done = (k) => (err, user) => { out[k] = user; };
         script = os.path.join(tmp, "t.js")
         with open(script, "w") as f:
             f.write(self.JS)
-        env = dict(os.environ, NR_ADMIN_AUTH="on", NR_DEPLOY_TOKEN="d" * 64,
+        sess = os.path.join(tmp, ".sessions.json")
+        if sessions is not None:
+            with open(sess, "w") as f:
+                f.write(sessions if isinstance(sessions, str) else json.dumps(sessions))
+        self.sessions_file = sess
+        env = dict(os.environ, NR_ADMIN_AUTH="on", NR_DEPLOY_TOKEN="d" * 64, NR_SESSIONS_FILE=sess,
                    NR_AUTH_OIDC_MODULE=mod, NR_AUTH_POLICY_FILE=pol, NR_OIDC_CLIENT_SECRET="cs")
         r = subprocess.run(["node", script, os.path.join(ROOT, "k8s", "node-red", "settings.js")],
                            capture_output=True, text=True, env=env)
@@ -269,6 +275,12 @@ const done = (k) => (err, user) => { out[k] = user; };
         self.assertEqual(out["type"], "strategy")
         self.assertTrue(out["autoLogin"])
         self.assertEqual(out["arity"], 9)
+        # The editor session (decision of 1 Nov 2026): inside adminAuth, where Node-RED 3.1
+        # reads it (a top-level value is ignored: sessions then last a week); one hour,
+        # not five minutes, because a session end sends an editor with undeployed
+        # changes to its sign-in.
+        self.assertEqual(out["expiry"], 3600)
+        self.assertIsNone(out["top_expiry"])
         self.assertEqual(out["login_eng"], {"username": "eng"})
         self.assertEqual(out["eng"], {"username": "eng", "permissions": sorted(want)})
         self.assertIsNone(out["adm"])        # admin: no editor
@@ -281,8 +293,40 @@ const done = (k) => (err, user) => { out[k] = user; };
         for module, policy in ((False, True), (True, False)):
             out, err = self.run_js(module, policy)
             self.assertEqual(out["type"], "credentials")
+            self.assertEqual(out["expiry"], 3600)
             self.assertEqual(out["tok_ok"], {"username": "system:deploy", "permissions": "*"})
             self.assertIn("refuses everyone", err)
+
+    def test_stored_sessions_capped(self):
+        """Sessions issued under a longer setting (the week before 1 Nov 2026) are dropped
+        at start; one issued under the hour stays; nothing names a token or a user."""
+        import time
+        now = int(time.time() * 1000)
+        old_tok, new_tok, bad_tok = "T" * 40, "N" * 40, "B" * 40
+        stored = {old_tok: {"user": "eng", "client": "node-red-editor", "scope": ["*"], "accessToken": old_tok,
+                            "expires": now + 6 * 86400 * 1000},
+                  new_tok: {"user": "eng2", "client": "node-red-editor", "scope": ["*"], "accessToken": new_tok,
+                            "expires": now + 3000 * 1000},
+                  bad_tok: {"user": "x"}}
+        out, err = self.run_js(sessions=stored)
+        self.assertEqual(out["expiry"], 3600)
+        with open(self.sessions_file) as f:
+            kept = json.load(f)
+        self.assertEqual(list(kept), [new_tok])
+        self.assertEqual(kept[new_tok], stored[new_tok])
+        self.assertIn("ended 2 stored editor session(s)", err)
+        for secret in (old_tok, new_tok, "eng"):
+            self.assertNotIn(secret, err)
+        self.assertEqual(oct(os.stat(self.sessions_file).st_mode & 0o777), "0o600")
+        # nothing to drop: the file is left as it is; a malformed or missing one too
+        for content in (json.dumps({new_tok: stored[new_tok]}), "{not json", None):
+            out, err = self.run_js(sessions=content)
+            self.assertNotIn("stored editor session", err)
+            if content is None:
+                self.assertFalse(os.path.exists(self.sessions_file))
+            else:
+                with open(self.sessions_file) as f:
+                    self.assertEqual(f.read(), content)
 
 
 if __name__ == "__main__":

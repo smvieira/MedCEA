@@ -247,6 +247,26 @@ spec:
           value: "['oauth2']"
         - name: PGADMIN_CONFIG_OAUTH2_AUTO_CREATE_USER
           value: "True"
+        # Short sessions (decision of 1 Nov 2026): when pgAdmin's own session is gone,
+        # its login page sends the browser straight to Keycloak (OAUTH2_AUTO_LOGIN,
+        # pgAdmin 9.19: OAuth2 is the only source and there is one provider), so the
+        # next sign-in is silent while the Keycloak session lives, as whoever is signed
+        # in to Keycloak now. After pgAdmin's own Logout, and at /login?no_auto_login,
+        # the login page with its "MedCEA sign-in" button still shows.
+        - name: PGADMIN_CONFIG_OAUTH2_AUTO_LOGIN
+          value: "True"
+        # pgAdmin's session lifetime, in days (a Python float; default 1): 1/24 = one
+        # hour, not five minutes. pgAdmin checks no session age itself: this is only the
+        # browser cookie's expiry, renewed whenever pgAdmin writes the session (running a
+        # query does; reading results does not), and a new session gets new database
+        # connections, so a shorter value would drop an open Query Tool transaction from
+        # under someone still reading its results. An hour matches MAX_SESSION_IDLE_TIME
+        # (60 minutes, unchanged), after which pgAdmin already releases idle connections.
+        # pgAdmin does not follow Keycloak by itself: the next person in the same browser
+        # gets the earlier person's pgAdmin until an hour after its last session write
+        # (and their own use renews it) or pgAdmin's Logout (manual: known gaps).
+        - name: PGADMIN_CONFIG_SESSION_EXPIRATION_TIME
+          value: "0.0417"
         - name: PGADMIN_CONFIG_OAUTH2_CONFIG
           valueFrom:
             secretKeyRef:
