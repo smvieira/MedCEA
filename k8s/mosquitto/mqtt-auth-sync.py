@@ -2,7 +2,7 @@
 
 Sources, merged every POLL seconds:
   /secrets/service-passwd, /secrets/service-acl   the platform's own clients
-        (node-red, scheduler, and mqtt-explorer while IAM_MQTT_PERSON=false), hashed
+        (node-red, scheduler; the shared mqtt-explorer account was removed), hashed
         by deploy-infra.sh into the Secret mosquitto-service-auth; Secret updates
         reach the mount.
   medcea.mqtt_credential (+ medcea.device.is_active)   one row per board,

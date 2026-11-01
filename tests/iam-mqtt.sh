@@ -9,7 +9,7 @@
 #   M2  the engineer gets a credential: explorer-<user>-<6 hex>, the compiled rows
 #   M3  within 20 s it is in passwd-ws and not in passwd (the broker's 1883 file)
 #   M4  it connects on the WebSocket listener (9001) and is refused on 1883 (CONNACK 4/5)
-#   M5  the shared mqtt-explorer account is refused on both listeners
+#   M5  the removed shared mqtt-explorer account is refused on both listeners
 #   M8  acl-ws holds a write row only for a unit flagged for commissioning without a run
 #       in R (compared with the database, read-only)
 #   M10 415 without JSON, 403 from another Origin
@@ -183,11 +183,12 @@ PY
         < <(python3 -c 'import sys; print(repr(open(sys.argv[1]).read()))' "$WORK/probe.py"; printf '%s\n' "$cases") 2>/dev/null
 }
 
-CASES="$(M="mosquitto.$NAMESPACE.svc.cluster.local" W="mosquitto-ws.$NAMESPACE.svc.cluster.local" \
-    EX="${MQTT_EXPLORER_PASS:-x}" python3 -c '
-import json, os, sys
+# M5: the removed shared account (1 Nov 2026) must be refused on both listeners; it has no
+# password any more, so the probe sends a throwaway one.
+CASES="$(M="mosquitto.$NAMESPACE.svc.cluster.local" W="mosquitto-ws.$NAMESPACE.svc.cluster.local" python3 -c '
+import json, os, secrets, sys
 c = json.load(open(sys.argv[1]))
-u, p, ex = c["username"], c["password"], os.environ["EX"]
+u, p, ex = c["username"], c["password"], secrets.token_hex(20)
 print(json.dumps({"cases": [["M4a", "ws", os.environ["W"], u, p], ["M4b", "tcp", os.environ["M"], u, p],
                             ["M5a", "tcp", os.environ["M"], "mqtt-explorer", ex], ["M5b", "ws", os.environ["W"], "mqtt-explorer", ex]]}))' \
     "$WORK/cred.json")"

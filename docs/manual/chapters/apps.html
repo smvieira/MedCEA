@@ -468,14 +468,14 @@ The snapshot never changes afterwards.</li>
 <li>The topics in <strong>Your rights</strong> are patterns (<code>+</code> is one level, <code>#</code> the rest). Send to one topic they match, for example <code>medcea/UNIT01/ZONE01/control/&lt;tag&gt;</code>. A topic with <code>+</code> or <code>#</code> is refused by the page before it is sent: the broker would close the connection instead.</li>
 <li>If the page says your role has no MQTT rights, or that your access changed since you signed in, reload it after your administrator has sorted out your role.</li>
 </ul>
-<p><strong>With the shared account</strong> (<code>IAM_MQTT_PERSON=false</code>). The page connects with one shared service account that may read and write every topic under the platform root.</p>
+<p><strong>With <code>IAM_MQTT_PERSON=false</code></strong> the page connects to nothing. It says "The MQTT Explorer needs IAM_MQTT_PERSON=true" and shows no topics. The shared account it used to connect with was removed on 1 November 2026, after the personal credentials had run for a trial period. Ask an administrator to turn the switch back on.</p>
 <p>To send a message:</p>
 <ol class="steps">
-<li>Click a topic, or type one in the <strong>Publish</strong> box. In either mode the page refuses a topic with <code>+</code> or <code>#</code> ("Not sent: + and # only match topics") instead of sending it.</li>
+<li>Click a topic, or type one in the <strong>Publish</strong> box. The page refuses a topic with <code>+</code> or <code>#</code> ("Not sent: + and # only match topics") instead of sending it.</li>
 <li>Enter the payload, as text or JSON.</li>
 <li>Click <strong>Send</strong>.</li>
 </ol>
-<div class="warn"><p>With the shared account, a message published to a <code>control</code> topic switches equipment in a live chamber, whatever the unit's state. Publish to control topics only on a unit with no active run. With your own credential the broker refuses it, but a unit flagged for commissioning is still real equipment.</p></div>
+<div class="warn"><p>A message sent to a <code>control</code> topic switches real equipment. The broker accepts it only for a unit flagged for commissioning with no run in progress, but that unit is still a live chamber.</p></div>
 
 <h3 id="apps-nodered">Node-RED</h3>
 <p>Node-RED runs the flow that receives telemetry from the broker and writes it to the database. Its editor is where that flow, and any other integration flow, is changed. Only <span class="role">engineer</span> can open it.</p>

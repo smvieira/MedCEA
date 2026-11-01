@@ -1,5 +1,5 @@
 # ConfigMap mosquitto-config while IAM_MQTT_PERSON=false: one password and ACL file for
-# both listeners (the shared mqtt-explorer account works on 1883 and 9001). Applied by
+# both listeners (services and boards; no Explorer account since 1 Nov 2026). Applied by
 # deploy-infra.sh instead of mosquitto-conf-person.yaml; byte for byte the conf of
 # before IAM 3.5 (tests/golden/mosquitto-conf.yaml).
 ---

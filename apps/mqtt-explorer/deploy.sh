@@ -4,7 +4,7 @@
 # Deploys:
 #   1. HTML ConfigMap (index.html, with the topic root and the mode: under
 #      IAM_MQTT_PERSON=true the page asks iam-api for a personal credential;
-#      under false the broker's shared "mqtt-explorer" account is filled in)
+#      under false it connects to nothing and says it needs true)
 #   2. Deployment + Service (nginx serving the page)
 #   3. mqttx-oauth2-proxy on $MQTTX_DOMAIN (Keycloak SSO, the roles the policy
 #      compiles: engineer), which also routes /mqtt to the broker's WebSocket
@@ -14,8 +14,9 @@
 # The page connects to wss://$MQTTX_DOMAIN/mqtt — through its own sign-in — and
 # the broker checks a credential on top: the person's own, short-lived one
 # (IAM_MQTT_PERSON=true; this deploy refuses until iam-mqttx answers in person mode
-# and the broker runs it), or the shared account, whose password is then in the
-# page, which is why the page is only served after sign-in.
+# and the broker runs it). The shared "mqtt-explorer" account was removed after the
+# trial (1 Nov 2026): under false the page has no credential (mode "off") and the
+# deploy warns; a leftover MQTT_EXPLORER_PASS in config.env is ignored.
 #
 # Idempotent: safe to re-run.
 
@@ -68,11 +69,8 @@ case "${IAM_MQTT_PERSON:-false}" in
             exit 1
         fi ;;
     false)
-        _MODE=legacy
-        if [[ -z "${MQTT_EXPLORER_PASS:-}" ]]; then
-            echo "ERROR: MQTT_EXPLORER_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
-            exit 1
-        fi ;;
+        _MODE=off
+        echo "WARNING: IAM_MQTT_PERSON=false: the MQTT Explorer has no broker credential (the shared account was removed); its page says it needs IAM_MQTT_PERSON=true (./guide.sh, IAM switches)." >&2 ;;
     *)  echo "ERROR: IAM_MQTT_PERSON='${IAM_MQTT_PERSON}' must be \"true\" or \"false\"." >&2; exit 1 ;;
 esac
 
@@ -80,11 +78,8 @@ esac
 # 1. Page
 # =============================================================================
 log "Creating HTML ConfigMap (mode: $_MODE)..."
-if [[ "$_MODE" == person ]]; then _MQ_USER=""; _MQ_PASS=""; else _MQ_USER=mqtt-explorer; _MQ_PASS="$MQTT_EXPLORER_PASS"; fi
 sed -e "s|__TOPIC_ROOT__|${PROJECT_NAME:-medcea}|g" \
     -e "s|__MQTT_MODE__|${_MODE}|g" \
-    -e "s|__MQTT_USER__|${_MQ_USER}|g" \
-    -e "s|__MQTT_PASS__|${_MQ_PASS}|g" \
     "$SCRIPT_DIR/html/index.html" \
   | $KUBECTL create configmap mqtt-explorer-html -n "$NAMESPACE" \
       --from-file=index.html=/dev/stdin --dry-run=client -o yaml \
@@ -128,5 +123,5 @@ log "MQTT Explorer deployed!"
 if [[ "$_MODE" == person ]]; then
     log "  UI: https://$MQTTX_DOMAIN   (broker: wss://$MQTTX_DOMAIN/mqtt with each person's own credential)"
 else
-    log "  UI: https://$MQTTX_DOMAIN   (broker: wss://$MQTTX_DOMAIN/mqtt as mqtt-explorer)"
+    log "  UI: https://$MQTTX_DOMAIN   (no broker credential while IAM_MQTT_PERSON=false: the page says so)"
 fi

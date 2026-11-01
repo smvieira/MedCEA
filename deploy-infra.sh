@@ -236,7 +236,7 @@ if [[ "${1:-}" == "--reset" ]]; then
                   ACCESS_CLIENT_SECRET ACCESS_COOKIE_SECRET \
                   MONITOR_CLIENT_SECRET MONITOR_COOKIE_SECRET SCHEDULER_CLIENT_SECRET SCHEDULER_COOKIE_SECRET \
                   DBMGMT_CLIENT_SECRET DBMGMT_COOKIE_SECRET MQTTX_CLIENT_SECRET MQTTX_COOKIE_SECRET \
-                  PGADMIN_OAUTH_SECRET MQTT_NODE_RED_PASS MQTT_SCHEDULER_PASS MQTT_EXPLORER_PASS MQTT_AUTH_DB_PASS \
+                  PGADMIN_OAUTH_SECRET MQTT_NODE_RED_PASS MQTT_SCHEDULER_PASS MQTT_AUTH_DB_PASS \
                   WORKBENCH_SECRET EDGE_WIZARD_SECRET; do
             sed -i "s|^${_v}=.*|${_v}=\"\"|" config.env
         done
@@ -962,7 +962,6 @@ _PGADMIN_SECRET=$(_create_client "pgadmin" "https://${PGADMIN_DOMAIN}/oauth2/aut
 # so they are safe in sed, YAML and a .env file.
 _MQTT_NODE_RED_PASS="${MQTT_NODE_RED_PASS:-$(openssl rand -hex 20)}"
 _MQTT_SCHEDULER_PASS="${MQTT_SCHEDULER_PASS:-$(openssl rand -hex 20)}"
-_MQTT_EXPLORER_PASS="${MQTT_EXPLORER_PASS:-$(openssl rand -hex 20)}"
 _MQTT_AUTH_DB_PASS="${MQTT_AUTH_DB_PASS:-$(openssl rand -hex 20)}"
 echo -e "${YELLOW}  Creating client 'edge-wizard'...${NC}"
 # The edge provisioning wizard (edge/flash-device.sh --ui) runs on this host and
@@ -1513,7 +1512,7 @@ for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=
            "MQTTX_CLIENT_SECRET=${_MQTTX_SECRET}" "MQTTX_COOKIE_SECRET=${_MQTTX_COOKIE_SECRET}" \
            "PGADMIN_OAUTH_SECRET=${_PGADMIN_SECRET}" \
            "MQTT_NODE_RED_PASS=${_MQTT_NODE_RED_PASS}" "MQTT_SCHEDULER_PASS=${_MQTT_SCHEDULER_PASS}" \
-           "MQTT_EXPLORER_PASS=${_MQTT_EXPLORER_PASS}" "MQTT_AUTH_DB_PASS=${_MQTT_AUTH_DB_PASS}" \
+           "MQTT_AUTH_DB_PASS=${_MQTT_AUTH_DB_PASS}" \
            "KC_DEPLOYER_SECRET=${KC_DEPLOYER_SECRET:-}"; do
     _k="${_kv%%=*}"
     if grep -q "^${_k}=" config.env; then
@@ -1549,9 +1548,10 @@ source config.env
 # =============================================================================
 echo -e "\n${GREEN}[4/10] Deploying Mosquitto MQTT broker...${NC}"
 # IAM_MQTT_PERSON (IAM 3.5): true gives each listener its own auth — 1883 services and
-# boards, 9001 (the Explorer's WebSocket) only the person credentials iam-api issues —
-# and leaves the shared mqtt-explorer account out (MQTT_EXPLORER_PASS stays in
-# config.env for the rollback). false renders the broker as before 3.5.
+# boards, 9001 (the Explorer's WebSocket) only the person credentials iam-api issues.
+# false renders the conf as before 3.5 (one auth for both listeners: services and
+# boards). The shared mqtt-explorer account is gone in both modes (removed after the
+# trial, 1 Nov 2026): under false the Explorer has no credential and says so.
 case "${IAM_MQTT_PERSON:-false}" in
     true)  IAM_MQTT_PERSON=true;  _MQ_CONF=mosquitto-conf-person.yaml ;;
     false) IAM_MQTT_PERSON=false; _MQ_CONF=mosquitto-conf.yaml ;;
@@ -1563,8 +1563,7 @@ fi
 _H_NR=$(printf '%s' "$MQTT_NODE_RED_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
 _H_SC=$(printf '%s' "$MQTT_SCHEDULER_PASS" | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
 # node-red only subscribes (its flows have no mqtt out node); the scheduler
-# reads telemetry and writes setpoints; the explorer (IAM_MQTT_PERSON=false only)
-# is the engineers' tool. A subscription wider than these lines is accepted, but
+# reads telemetry and writes setpoints. A subscription wider than these lines is accepted, but
 # only messages the ACL allows are delivered — the filter is applied per message
 # (tested on 2.0.22).
 _MQ_PASSWD="node-red:${_H_NR}
@@ -1575,15 +1574,6 @@ topic read ${PROJECT_NAME}/#
 user scheduler
 topic read ${PROJECT_NAME}/+/+/sense/#
 topic write ${PROJECT_NAME}/+/+/control/#"
-if [[ "$IAM_MQTT_PERSON" == "false" ]]; then
-    _H_EX=$(printf '%s' "$MQTT_EXPLORER_PASS"  | python3 "$SCRIPT_DIR/infra/mqtt-passwd.py")
-    _MQ_PASSWD+="
-mqtt-explorer:${_H_EX}"
-    _MQ_ACL+="
-
-user mqtt-explorer
-topic readwrite ${PROJECT_NAME}/#"
-fi
 $MK8S kubectl create secret generic mosquitto-service-auth -n "$NAMESPACE" --dry-run=client -o yaml \
   --from-literal=service-passwd="$_MQ_PASSWD" \
   --from-literal=service-acl="$_MQ_ACL" \
@@ -2317,8 +2307,8 @@ PGADMIN (Keycloak SSO — platform role admin only)
   URL                 https://$PGADMIN_DOMAIN
 
 MQTT BROKER (every client authenticates)
-  Service accounts    node-red / scheduler$( [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] || echo ' / mqtt-explorer') — passwords MQTT_*_PASS in config.env
-  MQTT Explorer       $( [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && echo 'a personal credential per sign-in (IAM_MQTT_PERSON=true); MQTT_EXPLORER_PASS is unused' || echo 'the shared mqtt-explorer account (IAM_MQTT_PERSON=false)')
+  Service accounts    node-red / scheduler — passwords MQTT_*_PASS in config.env
+  MQTT Explorer       $( [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && echo 'a personal credential per sign-in (IAM_MQTT_PERSON=true)' || echo 'no credential while IAM_MQTT_PERSON=false (the page says it needs true)')
   Boards              one credential each, minted at onboarding (edge/provisioned/<name>.json)
 
 POSTGRESQL SUPERUSER (cluster-internal)

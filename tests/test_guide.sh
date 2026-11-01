@@ -366,7 +366,7 @@ guide $'5\n8\n1\ny\ny\nq\n'
 rc_is "quits with 0" 0
 has   "shows the current value" 'Now: IAM_MQTT_PERSON="false"'
 has   "iam_svc is on the checklist" "[ ] IAM_DB_SERVICE_ROLES is true and ./apps/database/deploy.sh has let iam_svc log in"
-has   "the shared password's users are warned" "Nobody uses MQTT_EXPLORER_PASS outside the Explorer page"
+hasnt "no shared password on the checklist" "MQTT_EXPLORER_PASS"
 has   "step 1 sets the switch" '1. config.env: IAM_MQTT_PERSON="true"'
 has   "step 2 deploys iam-api, before the broker changes" '2. ./apps/iam/deploy.sh'
 has   "step 3 is the infra deploy" '3. ./deploy-infra.sh'
@@ -381,7 +381,8 @@ rc_is "quits with 0" 0
 has   "step 1 sets the switch back" '1. config.env: IAM_MQTT_PERSON="false"'
 has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
 has   "step 3 is the Explorer's deploy" '3. ./apps/mqtt-explorer/deploy.sh'
-has   "the shared account comes back" "The shared mqtt-explorer account (MQTT_EXPLORER_PASS) is back"
+has   "the Explorer is left without a credential" "The MQTT Explorer then has no broker credential"
+hasnt "the shared account does not come back" "MQTT_EXPLORER_PASS"
 no_stub
 
 echo "21 IAM_DB_ROLES and the notebooks' hop"

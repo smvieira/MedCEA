@@ -3,7 +3,8 @@
 and the broker's two confs, offline (IAM 3.5). Stdlib only; no database, no broker.
 
   - IAM_MQTT_PERSON=false: passwd/acl exactly as before 3.5 for services and boards (golden
-    text below), and the conf ConfigMap is tests/golden/mosquitto-conf.yaml byte for byte
+    text below), and the conf ConfigMap is tests/golden/mosquitto-conf.yaml byte for byte;
+    the shared mqtt-explorer account is gone from deploy-infra's service Secret in both modes
   - true: no explorer- name in passwd (1883), only explorer- names in passwd-ws; a '+' write
     row expands to flagged units without a running run only; a concrete unit that is not
     flagged, or has a run in R, or is unknown, is dropped; expired credentials are dropped;
@@ -37,9 +38,12 @@ S = load()
 NOW = datetime.datetime(2026, 10, 31, 12, 0, tzinfo=datetime.timezone.utc)
 LATER = NOW + datetime.timedelta(hours=8)
 H = "$7$101$c2FsdHNhbHRzYWx0$aGFzaA=="
-SERVICES_P = "node-red:%s\nscheduler:%s\nmqtt-explorer:%s" % (H, H, H)
+# The service Secret as deploy-infra writes it since the shared mqtt-explorer account was
+# removed (1 Nov 2026). The sidecar copies it verbatim, so dropping that account from the
+# input moves the golden text below with it; render() itself is unchanged.
+SERVICES_P = "node-red:%s\nscheduler:%s" % (H, H)
 SERVICES_A = ("user node-red\ntopic read medcea/#\n\nuser scheduler\ntopic read medcea/+/+/sense/#\n"
-              "topic write medcea/+/+/control/#\n\nuser mqtt-explorer\ntopic readwrite medcea/#")
+              "topic write medcea/+/+/control/#")
 BOARDS = [("unit01-s-zone01", H, "SENSE", "medcea/UNIT01/ZONE01"),
           ("unit01-c-zone01", H, "CONTROL", "medcea/UNIT01/ZONE01"),
           ("bad name", H, "SENSE", "medcea/X/Y")]
@@ -184,10 +188,20 @@ class Manifests(unittest.TestCase):
         self.assertIn("acl_file /mosquitto/auth/acl-ws", l9001)
         self.assertEqual(conf.count("allow_anonymous false"), 2)
 
-    def test_shared_account_only_while_false(self):
+    def test_no_shared_account(self):
+        # removed after the IAM_MQTT_PERSON trial: no mode hashes it, writes it or keeps it
         infra = self.read("deploy-infra.sh")
-        block = infra[infra.index('if [[ "$IAM_MQTT_PERSON" == "false" ]]; then\n    _H_EX='):]
-        self.assertLess(block.index("mqtt-explorer:${_H_EX}"), block.index("fi\n"))
+        block = infra[infra.index("_MQ_PASSWD="):infra.index("kubectl create secret generic mosquitto-service-auth")]
+        self.assertNotIn("mqtt-explorer", block)
+        for f in (("deploy-infra.sh",), ("config.env.example",), ("apps", "mqtt-explorer", "deploy.sh"),
+                  ("apps", "mqtt-explorer", "html", "index.html"), ("guide.sh",)):
+            text = self.read(*f)
+            for line in text.splitlines():
+                if "MQTT_EXPLORER_PASS" in line:
+                    self.assertTrue(line.lstrip().startswith(("#", "echo", "//")) or "ignored" in line, (f, line))
+        page = self.read("apps", "mqtt-explorer", "html", "index.html")
+        self.assertNotIn("__MQTT_USER__", page)
+        self.assertNotIn("__MQTT_PASS__", page)
 
     def test_status_has_no_hash(self):
         p, a, st = S.render_persons(ENG, UNITS, "medcea", True, NOW)

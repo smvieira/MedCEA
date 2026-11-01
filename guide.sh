@@ -889,8 +889,7 @@ recipe() {
         IAM_MQTT_PERSON:enable)
             PRE=("IAM_DB_SERVICE_ROLES is true and ./apps/database/deploy.sh has let iam_svc log in: iam-api never runs as postgres (the recipe's iam deploy refuses otherwise). ./apps/access/deploy.sh has run since the IAM 3.5 pull (a confirmed role change ends a credential)."
                  "IAM_DB_ROLES is true: the broker reads the person credentials as mqtt_auth through its compiled grants."
-                 "No run is active: ./deploy-infra.sh restarts the broker (the boards reconnect within seconds)."
-                 "Nobody uses MQTT_EXPLORER_PASS outside the Explorer page (an MQTT client on 31883 or wss): it stops working on both listeners.")
+                 "No run is active: ./deploy-infra.sh restarts the broker (the boards reconnect within seconds).")
             STEPS=("set IAM_MQTT_PERSON true" "run ./apps/iam/deploy.sh" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
             AFTER=("The iam deploy refuses while iam-api cannot be deployed, so the recipe stops before the broker changes: restore config.env as shown."
                    "iam-api reads the switch from ConfigMap medcea-iam-lib within about a minute; the Explorer deploy waits for it."
@@ -899,7 +898,7 @@ recipe() {
                    "Verify: ./health-check.sh (MQTT person credentials, iammqtt) and tests/iam-mqtt.sh (takes the deploy lock).") ;;
         IAM_MQTT_PERSON:rollback)
             STEPS=("set IAM_MQTT_PERSON false" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
-            AFTER=("The shared mqtt-explorer account (MQTT_EXPLORER_PASS) is back on both listeners, with read and send on the whole topic root; iam-api answers 409 within about a minute."
+            AFTER=("The MQTT Explorer then has no broker credential: its page says it needs IAM_MQTT_PERSON=true (the shared mqtt-explorer account was removed and does not come back). iam-api answers 409 within about a minute."
                    "The infra deploy ends every person credential (inactive, recorded in the policy history); nothing is deleted, and a later enable issues new ones.") ;;
         WORKBENCH_ENABLED:enable)
             STEPS=("set WORKBENCH_ENABLED true" "run ./deploy-infra.sh")
@@ -919,7 +918,7 @@ switch_purpose() {
         IAM_POSTGREST_JWT)    echo "config-api (PostgREST) verifies the person's token (Phase 2b)." ;;
         IAM_DB_SERVICE_ROLES) echo "Each database client logs in as its own role instead of postgres (Phase 2.5)." ;;
         IAM_DB_ROLES)         echo "The database enforces per-role grants, RLS and guard triggers (Phase 2a)." ;;
-        IAM_MQTT_PERSON)      echo "The MQTT Explorer connects with a short-lived personal credential, on the broker's WebSocket listener only (false: one shared account)." ;;
+        IAM_MQTT_PERSON)      echo "The MQTT Explorer connects with a short-lived personal credential, on the broker's WebSocket listener only (false: the Explorer has no credential and says so)." ;;
         WORKBENCH_ENABLED)    echo "deploy-infra.sh also deploys the AI workbench (JupyterHub)." ;;
     esac
 }

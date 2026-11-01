@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # apps/mqtt-explorer/uninstall.sh — remove what apps/mqtt-explorer/deploy.sh
 # installed: the sign-in proxy, the page's Deployment, Service and ConfigMap.
-# The broker and its "mqtt-explorer" service account (IAM_MQTT_PERSON=false) are
-# infrastructure and stay; so do iam-api (apps/iam) and the person credentials.
+# The broker is infrastructure and stays; so do iam-api (apps/iam) and the person
+# credentials.
 #
 # Idempotent: safe to re-run.
 

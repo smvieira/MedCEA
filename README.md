@@ -176,7 +176,7 @@ Currently available components:
 | **frontend** | System Configuration UI and Database Management portal |
 | **node-red** | `node-red-contrib-postgresql` package + MQTT→PostgreSQL flow |
 | **monitor** | Run Monitor dashboard (live recipe runs) |
-| **mqtt-explorer** | Browser MQTT tool, behind sign-in; with `IAM_MQTT_PERSON=true` each person connects with their own short-lived credential (from **iam**), otherwise as the shared service account |
+| **mqtt-explorer** | Browser MQTT tool, behind sign-in; with `IAM_MQTT_PERSON=true` each person connects with their own short-lived credential (from **iam**), otherwise it has no credential (the shared account was removed) |
 | **iam** | Checks the access policy; deploys iam-api, which issues the MQTT Explorer's personal credentials |
 | **report** | Grafana dashboard definitions |
 | **scheduler** | Recipe Schedule Manager Flask API and browser UI |
@@ -528,7 +528,11 @@ or delete (the Compliance Plane rule):
 | Node-RED | `node-red` | `MQTT_NODE_RED_PASS` (config.env) | read `<root>/#` |
 | Scheduler | `scheduler` | `MQTT_SCHEDULER_PASS` | read `…/sense/#`, publish `…/control/#` |
 | MQTT Explorer, `IAM_MQTT_PERSON=true` | `explorer-<user>-<6 hex>`, one per sign-in | issued by iam-api, kept in the page only, 8 h | the person's role: an engineer reads `…/sense/#`, `…/control/#`, `…/control_setpoint/#` and publishes `…/control/#` only to a unit flagged for commissioning without a running run; WebSocket listener only |
-| MQTT Explorer, `IAM_MQTT_PERSON=false` | `mqtt-explorer` | `MQTT_EXPLORER_PASS` | read and publish `<root>/#`, on both listeners |
+
+There is no shared Explorer account any more: the `mqtt-explorer` account and
+`MQTT_EXPLORER_PASS` were removed after the `IAM_MQTT_PERSON` trial (1 Nov 2026). With
+`IAM_MQTT_PERSON=false` the Explorer has no credential and its page says it needs `true`;
+a leftover `MQTT_EXPLORER_PASS` in an older `config.env` is ignored.
 
 The root is `PROJECT_NAME` (`medcea`). Board credentials come only from the
 onboarding wizard, which registers the password's hash in the database;
@@ -585,13 +589,8 @@ client.on_message = on_message
 client.loop_forever()
 ```
 
-**Command line** — only while `IAM_MQTT_PERSON=false` (the shared account); with
-`true` it is refused on both listeners and the MQTT Explorer page is the way to watch
-the topics:
-
-```bash
-mosquitto_sub -h <server-LAN-IP> -p 31883 -u mqtt-explorer -P "$MQTT_EXPLORER_PASS" -t 'medcea/#' -v
-```
+**Command line** — there is no shared account for people any more; the MQTT Explorer
+page is the way to watch the topics.
 
 **Node-RED** — the platform flow's broker node is configured by
 `apps/node-red/deploy.sh` (server `mosquitto.medcea.svc.cluster.local:1883`,
@@ -602,8 +601,8 @@ user `node-red`). A new flow can reuse that broker node.
 Open **https://mqtt-explorer.\<domain\>** (sign-in required; engineers). It connects
 to the broker over `wss://mqtt-explorer.<domain>/mqtt`. With `IAM_MQTT_PERSON=true` it
 first asks iam-api for the person's own credential (8 h, renewed in the background) and
-shows the topics that person's role may read, with a "Your rights" note; otherwise it
-uses the shared `mqtt-explorer` account and shows everything under the topic root. Click any topic to see its message
+shows the topics that person's role may read, with a "Your rights" note; with `false` it
+has no credential and says it needs `IAM_MQTT_PERSON=true`. Click any topic to see its message
 history; use the Publish panel at the bottom to send messages.
 
 ### Recommended topic structure

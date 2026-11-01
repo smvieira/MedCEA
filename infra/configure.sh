@@ -342,6 +342,9 @@ else
 fi
 # It is about to hold every platform password.
 chmod 600 "$CONFIG_FILE"
+# Retired keys an older config.env may still carry: ignored, never an error, never printed.
+grep -q '^MQTT_EXPLORER_PASS=' "$CONFIG_FILE" \
+    && echo -e "${YELLOW}Note: MQTT_EXPLORER_PASS in $CONFIG_FILE is no longer used (the shared mqtt-explorer account was removed, IAM 3.5); it is ignored and can be deleted.${NC}"
 
 check_prereqs
 check_tailscale

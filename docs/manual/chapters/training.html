@@ -157,7 +157,7 @@
 <h3 id="training-e5">E5 Test mode and the MQTT Explorer</h3>
 <p><strong>Goal.</strong> Put a unit in test mode (commissioning), send a command from the MQTT Explorer, and end test mode, seeing the broker follow each change.</p>
 <p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) proposes, sends and ends; <code>svieira</code> (<span class="role">qa</span>) approves and reviews. Turning test mode on opens command rights, so it waits for <span class="role">qa</span>; ending it narrows them, so it acts at once and is reviewed afterwards.</p>
-<p><strong>Before you start.</strong> The unit (here UNIT01) has no run running or scheduled; its <strong>Commissioning</strong> cell reads <strong>Off</strong>; <code>IAM_MQTT_PERSON=true</code>.</p>
+<p><strong>Before you start.</strong> The unit (here UNIT01) has no run running or scheduled; its <strong>Commissioning</strong> cell reads <strong>Off</strong>; <code>IAM_MQTT_PERSON=true</code>. If the MQTT Explorer says "The MQTT Explorer needs IAM_MQTT_PERSON=true", the switch is off (a fresh install starts with it off): since 1 November 2026 there is no shared account to fall back on, so the host operator turns it on first with <code>./guide.sh</code> (IAM switches).</p>
 <div class="warn"><p>A message on a <code>control</code> topic reaches the unit's CONTROL board. Use a tag that no channel in the board's channel map uses, such as <code>test</code>, unless you mean to switch equipment.</p></div>
 <p><strong>Steps.</strong></p>
 <ol class="steps">

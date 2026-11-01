@@ -613,7 +613,10 @@ check_iamenforce() {
 # medcea/mqtt-mode, the sidecar's MQTT_PERSON_CREDENTIALS, the conf (per_listener_settings),
 # the page's data-mqtt-mode (ConfigMap mqtt-explorer-html) and iam-api's /healthz mode
 # (through kubectl exec: its NetworkPolicy admits no host traffic but the kubelet's).
-# Reads the broker's files' usernames (cut -d: -f1) and status.json, never a hash.
+# Reads the broker's files' usernames (cut -d: -f1) and status.json, never a hash. The
+# shared mqtt-explorer account was removed (1 Nov 2026): it FAILs in either mode if a
+# password file still names it (a broker not redeployed since), and under false the page
+# must be in mode "off" (no credential).
 # =============================================================================
 check_iammqtt() {
     local name="$1" ns="${2:-${NAMESPACE:-medcea}}" want ann env conf page api users ws st problems=() warns=()
@@ -632,9 +635,11 @@ check_iammqtt() {
     page="$($KUBECTL get configmap mqtt-explorer-html -n "$ns" -o jsonpath='{.data.index\.html}' 2>/dev/null \
         | sed -n 's/.*data-mqtt-mode="\([a-z_]*\)".*/\1/p' | head -1)"
     if [[ -n "$page" || "$want" == true ]]; then
-        [[ "$page" == "$([[ "$want" == true ]] && echo person || echo legacy)" ]] \
+        [[ "$page" == "$([[ "$want" == true ]] && echo person || echo off)" ]] \
             || problems+=("the Explorer page is in mode '${page:-pre-3.5}' (./apps/mqtt-explorer/deploy.sh)")
     fi
+    users="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd 2>/dev/null)"
+    grep -qx 'mqtt-explorer' <<<"$users" && problems+=("the removed shared mqtt-explorer account is still in the broker's password file (./deploy-infra.sh)")
     if [[ "$want" == true ]]; then
         api="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/iam-api -- python3 -c \
             'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8085/healthz", timeout=5).read().decode())' 2>/dev/null)"
@@ -645,9 +650,7 @@ check_iammqtt() {
             *) problems+=("iam-mqttx does not answer (./apps/iam/deploy.sh)") ;;
         esac
         [[ "${IAM_DB_ROLES:-false}" == "true" ]] || problems+=("IAM_DB_ROLES=false: the broker cannot read person credentials (mqtt_auth's grants)")
-        users="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd 2>/dev/null)"
         ws="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd-ws 2>/dev/null)"
-        grep -qx 'mqtt-explorer' <<<"$users"$'\n'"$ws" && problems+=("the shared mqtt-explorer account is still in a password file")
         grep -q '^explorer-' <<<"$users" && problems+=("a person credential is in the 1883 file")
         [[ -n "$ws" ]] || problems+=("no WebSocket password file (passwd-ws)")
         [[ -n "$ws" ]] && grep -qv '^explorer-' <<<"$ws" && problems+=("a name outside explorer- is in the WebSocket file")
@@ -665,7 +668,7 @@ sys.exit(0 if t and (datetime.datetime.now(datetime.timezone.utc) - t).total_sec
     elif [[ "$want" == false ]]; then
         $KUBECTL get deployment iam-api -n "$ns" >/dev/null 2>&1 \
             || warns+=("iam-api is not deployed (./apps/iam/deploy.sh, needed before the switch)")
-        _record WARN "$name" "IAM_MQTT_PERSON=false: the Explorer uses the shared mqtt-explorer account (read and send on the whole topic root, also on the LAN port 31883)${warns:+; ${warns[*]}}"
+        _record WARN "$name" "IAM_MQTT_PERSON=false: the MQTT Explorer has no broker credential (no shared account any more); set it true with ./guide.sh${warns:+; ${warns[*]}}"
     elif [[ ${#warns[@]} -gt 0 ]]; then
         local IFS=';'; _record WARN "$name" "${warns[*]}"
     else
