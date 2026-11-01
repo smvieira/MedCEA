@@ -1850,8 +1850,11 @@ _pgadmin_server_users() {
 PGADMIN_OAUTH2_SERVER_USERS="$(_pgadmin_server_users)"
 echo -e "${GREEN}  pgAdmin server entry for: ${PGADMIN_OAUTH2_SERVER_USERS:-nobody}${NC}"
 # Secret pgadmin-config holds the OAuth2 config (client secret, claims) and the
-# default password; pgAdmin reads them as secretKeyRef env, at start only, so
-# their sha256 is the pod annotation medcea/config-checksum. The rendered
+# default password; pgAdmin reads them as secretKeyRef env, at start only, and the
+# postStart hook and servers.json (ConfigMap pgadmin-servers) act only at start too,
+# as does the init container's copy of Secret pgadmin-pgpassfile (and the hook's copies
+# of it in each user's storage folder), so the sha256 of all three is the pod
+# annotation medcea/config-checksum: a rotated rr_admin_login password restarts pgAdmin. The rendered
 # manifest reaches python on stdin and only the hash is printed.
 PGADMIN_CONFIG_CHECKSUM="$(set -o pipefail
     render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
@@ -1859,9 +1862,11 @@ PGADMIN_CONFIG_CHECKSUM="$(set -o pipefail
     | python3 -c '
 import hashlib, json, sys, yaml
 try:  # a YAML error quotes the input, which holds the secrets: say nothing of it
-    doc = [d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "Secret"
-           and d["metadata"]["name"] == "pgadmin-config"][0]
-    print(hashlib.sha256(json.dumps(doc["stringData"], sort_keys=True).encode()).hexdigest())
+    docs = {(d.get("kind"), d["metadata"]["name"]): d for d in yaml.safe_load_all(sys.stdin) if d}
+    both = {"secret": docs[("Secret", "pgadmin-config")]["stringData"],
+            "pgpassfile": docs[("Secret", "pgadmin-pgpassfile")]["stringData"],
+            "configmap": docs[("ConfigMap", "pgadmin-servers")]["data"]}
+    print(hashlib.sha256(json.dumps(both, sort_keys=True).encode()).hexdigest())
 except Exception:
     sys.exit(1)')" \
     || { echo -e "${RED}ERROR: cannot render pgAdmin's Secret pgadmin-config (k8s/pgadmin/pgadmin.yaml).${NC}" >&2; exit 1; }

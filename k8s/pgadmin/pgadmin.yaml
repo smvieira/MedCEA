@@ -40,6 +40,8 @@ data:
     [ -n "$HOOK_LOG" ] || HOOK_LOG=/proc/1/fd/1
     [ -n "$HOOK_WAIT" ] || HOOK_WAIT=900
     [ -n "$HOOK_STEP" ] || HOOK_STEP=5
+    [ -n "$HOOK_STORAGE" ] || HOOK_STORAGE=/var/lib/pgadmin/storage
+    [ -n "$HOOK_PASSFILE" ] || HOOK_PASSFILE=/pgpassfile
     [ -n "$HOOK_PING" ] || HOOK_PING="http://127.0.0.1:$(printenv PGADMIN_LISTEN_PORT || echo 80)/misc/ping"
     set -f
     log() { { printf 'medcea oauth2-servers: %s\n' "$*" >>"$HOOK_LOG"; } 2>/dev/null || true; }
@@ -57,6 +59,20 @@ data:
         *.arpa|*.example|*.invalid|*.local|*.localhost|*.onion|*.test) return 1 ;;
       esac
     }
+    # In server mode pgAdmin reads a passfile only from the user's own storage folder
+    # ("PassFile": "/pgpassfile" is <storage>/<user>/pgpassfile; an absolute path
+    # elsewhere is refused, and PGPASSFILE is ignored: client_files_isolated, 9.19).
+    # The folder is pgAdmin's preprocess_username: a leading digit gets pga_user_,
+    # '@' becomes '_'. Mode 600, written atomically; the person can see the file in
+    # pgAdmin's storage manager (it holds rr_admin_login's password, by decision).
+    store() {
+      d="$(printf %s "$1" | tr '@' '_')"
+      case "$d" in [0-9]*) d="pga_user_$d" ;; esac
+      mkdir -p "$HOOK_STORAGE/$d" && chmod 700 "$HOOK_STORAGE/$d" &&
+        cp "$HOOK_PASSFILE" "$HOOK_STORAGE/$d/.pgpassfile.tmp" &&
+        chmod 600 "$HOOK_STORAGE/$d/.pgpassfile.tmp" &&
+        mv -f "$HOOK_STORAGE/$d/.pgpassfile.tmp" "$HOOK_STORAGE/$d/pgpassfile"
+    } 2>/dev/null
     users="$(printenv PGADMIN_OAUTH2_SERVER_USERS)"
     if [ -z "$users" ]; then
       log "PGADMIN_OAUTH2_SERVER_USERS is empty: no OAuth2 user gets a server entry"
@@ -92,7 +108,11 @@ data:
         n=$((n + 1))
         sleep "$HOOK_STEP"
       done
-      log "$e: server entry loaded"
+      if store "$e"; then
+        log "$e: server entry loaded, password file in place"
+      else
+        log "$e: server entry loaded, but the password file could not be copied: pgAdmin will ask for a password"
+      fi
     done
     exit 0
 ---

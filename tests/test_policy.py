@@ -1534,7 +1534,8 @@ class WiringTest(unittest.TestCase):
         self.assertNotIn("${", out)
 
     def test_pgadmin_config_checksum(self):
-        """deploy-infra's hash follows the Secret's values: a new claim or secret restarts pgAdmin."""
+        """deploy-infra's hash follows the Secret's values and ConfigMap pgadmin-servers (the
+        postStart hook, servers.json): a new claim, secret or hook restarts pgAdmin."""
         import subprocess
         infra = self.read("deploy-infra.sh")
         block = re.search(r'PGADMIN_CONFIG_CHECKSUM="\$\(set -o pipefail\n(.*?)\)" \\\n', infra, re.S).group(1)
@@ -1550,10 +1551,14 @@ class WiringTest(unittest.TestCase):
             self.assertEqual((r.returncode, r.stderr), (0, ""))
             self.assertRegex(r.stdout, r"^[0-9a-f]{64}\n$")
             self.assertNotIn(vals["PGADMIN_OAUTH_SECRET"], r.stdout)
+            self.assertNotIn(vals["PGA_DB_PASS"], r.stdout)
             return r.stdout
         base = checksum()
         self.assertEqual(checksum(), base)
-        self.assertEqual(checksum(PGA_DB_USER="rr_admin_login"), base)
+        # servers.json names the database user: a new one restarts pgAdmin (as medcea/db-user does)
+        self.assertNotEqual(checksum(PGA_DB_USER="rr_admin_login"), base)
+        # a rotated rr_admin_login password restarts pgAdmin (the passfile copies are made at start)
+        self.assertNotEqual(checksum(PGA_DB_PASS="other"), base)
         self.assertNotEqual(checksum(PGADMIN_OAUTH_SECRET="other"), base)
         self.assertNotEqual(checksum(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin', 'qa']}"), base)
         self.assertNotEqual(checksum(ADMIN_PASS="other"), base)
@@ -1640,7 +1645,11 @@ class WiringTest(unittest.TestCase):
                     '*) exit 3 ;;\nesac\n')
         os.chmod(py, 0o755)
         dbf, calls, log = (os.path.join(tmp, n) for n in ("pgadmin4.db", "calls", "log"))
+        passfile = os.path.join(tmp, "pgpassfile")
+        with open(passfile, "w") as f:
+            f.write("rdbms:5432:*:rr_admin_login:PW-secret\n")
         env = dict(os.environ, HOOK_PY=py, HOOK_DIR=tmp, HOOK_DB=dbf, HOOK_SERVERS="/srv/servers.json",
+                   HOOK_STORAGE=os.path.join(tmp, "storage"), HOOK_PASSFILE=passfile,
                    HOOK_LOG=log, HOOK_WAIT=str(wait), HOOK_STEP="1", CALLS=calls,
                    PGADMIN_OAUTH2_SERVER_USERS=users, FAIL_LOAD="1" if fail_load else "")
         p = subprocess.Popen([*shell, script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1669,9 +1678,19 @@ class WiringTest(unittest.TestCase):
             "setup.py load-servers /srv/servers.json --user ann@example.org --auth-source oauth2 --replace"])
         self.assertTrue(any(c.startswith("-c ") and c.endswith("http://127.0.0.1:80/misc/ping") for c in calls), calls)
         self.assertEqual(log.count("medcea oauth2-servers: skipped an entry that is not a plain lower-case e-mail address"), 2)
-        self.assertIn("medcea oauth2-servers: admin@cea.com: server entry loaded", log)
-        self.assertIn("medcea oauth2-servers: ann@example.org: server entry loaded", log)
+        self.assertIn("medcea oauth2-servers: admin@cea.com: server entry loaded, password file in place", log)
+        self.assertIn("medcea oauth2-servers: ann@example.org: server entry loaded, password file in place", log)
         self.assertFalse(any("rm -rf" in c for c in calls + log))
+        # the passfile in each user's storage folder (pgAdmin's preprocess_username), 600 in 700
+        import stat
+        for d in ("admin_cea.com", "ann_example.org"):
+            f = os.path.join(tmp, "storage", d, "pgpassfile")
+            self.assertEqual(stat.S_IMODE(os.stat(f).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(f)).st_mode), 0o700)
+            with open(f) as fh:
+                self.assertIn("rr_admin_login", fh.read())
+        self.assertEqual(sorted(os.listdir(os.path.join(tmp, "storage"))), ["admin_cea.com", "ann_example.org"])
+        self.assertFalse(any("PW-secret" in l for l in log))
 
     def test_pgadmin_hook_script(self):
         """The postStart hook waits, loads servers.json per valid e-mail, skips bad ones, exits 0."""
@@ -1700,6 +1719,10 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual([c for c in calls if c.startswith("setup.py")], ["setup.py get-users"])
         self.assertEqual(log.count("medcea oauth2-servers: skipped an entry that is not a plain lower-case e-mail address"), 2)
+        # a local part starting with a digit: pgAdmin's folder is pga_user_<name>
+        rc, calls, log, _, tmp = self._hook("7ann@example.org")
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isfile(os.path.join(tmp, "storage", "pga_user_7ann_example.org", "pgpassfile")))
         # an empty list: nothing to do
         rc, calls, log, _, _ = self._hook("")
         self.assertEqual((rc, calls), (0, []))
@@ -1800,6 +1823,9 @@ class WiringTest(unittest.TestCase):
         ''')
         con.commit()
         con.close()
+        # the password file next to pgAdmin's database: <data>/storage/<user folder>/pgpassfile
+        os.makedirs(os.path.join(os.path.dirname(db), "storage", "admin_cea.com"))
+        open(os.path.join(os.path.dirname(db), "storage", "admin_cea.com", "pgpassfile"), "w").close()
 
         def run(users):
             return subprocess.run(["python3", "-", db], input=q, capture_output=True, text=True,
@@ -1808,6 +1834,8 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(run("admin@cea.com,ann@example.org,bob@example.org"),
                          "missing bob@example.org (no OAuth2 user); ann@example.org (no IoT Postgres entry)")
         self.assertEqual(run(""), "empty")
+        os.remove(os.path.join(os.path.dirname(db), "storage", "admin_cea.com", "pgpassfile"))
+        self.assertEqual(run("admin@cea.com"), "missing admin@cea.com (no password file)")
         before = os.path.getmtime(db)
         self.assertEqual(subprocess.run(["python3", "-", db + ".absent"], input=q, capture_output=True,
                                         text=True).stdout.strip(), "?")

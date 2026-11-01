@@ -937,6 +937,10 @@ try:
     else:
         bad = ["%s (no OAuth2 user)" % e for e in want if e not in have]
         bad += ["%s (no IoT Postgres entry)" % e for e in want if have.get(e) == 0]
+        # its password file, where pgAdmin resolves "PassFile" (preprocess_username)
+        folder = lambda e: (("pga_user_" + e) if e[:1].isdigit() else e).replace("@", "_")
+        bad += ["%s (no password file)" % e for e in want if have.get(e) and not os.access(
+            os.path.join(os.path.dirname(sys.argv[1]), "storage", folder(e), "pgpassfile"), os.R_OK)]
         print(("missing " + "; ".join(bad)) if bad else "ok %d" % len(want))
 except Exception:
     print("?")
