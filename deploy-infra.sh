@@ -130,13 +130,14 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  - All deployed services (Postgres, Keycloak, Node-RED, Grafana, JupyterHub)"
     echo "  - MicroK8s and all cluster data (PersistentVolumes, namespaces, pods)"
     echo "  - kubeconfig (~/.kube)"
-    echo "  - every AI workbench home (each person's notebooks; not backed up)"
+    echo "  - every AI workbench home (each person's notebooks) and Grafana's volume (the"
+    echo "    dashboards Editors made in the browser); neither is backed up"
     echo ""
     # install.sh --uninstall-all has already listed everything and asked.
     if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
         [[ -f config.env ]] && source config.env
-        source "$SCRIPT_DIR/infra/lib-workbench-homes.sh"
-        KUBECTL="$MK8S kubectl" workbench_homes_warn "${NAMESPACE:-medcea}"
+        source "$SCRIPT_DIR/infra/lib-data-volumes.sh"
+        KUBECTL="$MK8S kubectl" data_volumes_warn "${NAMESPACE:-medcea}"
         read -p "Type 'yes' to confirm uninstall: " _CONFIRM
         if [[ "$_CONFIRM" != "yes" ]]; then
             echo "Aborted."
@@ -196,14 +197,15 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo "    Node-RED, the oauth2-proxies, JupyterHub)"
     echo "  - the namespace itself: all pods, services, ingresses, ConfigMaps,"
     echo "    Secrets, and every PersistentVolumeClaim (so: all data, the AI workbench"
-    echo "    homes with each person's notebooks included; they are not backed up)"
+    echo "    homes with each person's notebooks and Grafana's volume with the dashboards"
+    echo "    Editors made in the browser included; they are not backed up)"
     echo "  - MicroK8s itself is KEPT, so images stay cached and the rebuild is fast"
     [[ "${2:-}" == "--secrets" ]] && echo "  - the generated secrets in config.env (--secrets)"
     echo ""
     # install.sh --uninstall-infra has already listed everything and asked.
     if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
-        source "$SCRIPT_DIR/infra/lib-workbench-homes.sh"
-        KUBECTL="$MK8S kubectl" workbench_homes_warn "$NAMESPACE"
+        source "$SCRIPT_DIR/infra/lib-data-volumes.sh"
+        KUBECTL="$MK8S kubectl" data_volumes_warn "$NAMESPACE"
         read -p "Type 'reset' to confirm: " _CONFIRM
         [[ "$_CONFIRM" == "reset" ]] || { echo "Aborted."; exit 0; }
     fi
@@ -1704,9 +1706,10 @@ echo -e "\n${GREEN}[6/10] Deploying Grafana...${NC}"
 # equivalent and supported by the chart's env: map.
 # The datasource secret is mounted via extraSecretMounts into the provisioning directory.
 # Grafana's own role (IAM 3.1): GRAFANA_ROLE_PATH/_STRICT from policy_grafana,
-# compiled before the Keycloak section. Grafana keeps no state (no persistence),
-# so the changed env rolls a pod with an empty database: every session ends and
-# each person's org role is computed again at their next sign-in.
+# compiled before the Keycloak section. Grafana's database is persistent (PVC
+# grafana, decision of 1 Nov 2026), so a changed env restarts the pod without
+# ending sessions: each person's org role is computed again at their next sign-in,
+# within 5 minutes of no use or the hour a session lasts at most (values.yaml).
 # The local admin — the only Grafana Admin, break-glass — reads its login from
 # Secret grafana-admin, written from the environment, never from argv.
 ADMIN_USER="$ADMIN_USER" GF_PASS="$GRAFANA_BREAKGLASS_PASS" NS="$NAMESPACE" python3 -c '
@@ -1715,9 +1718,21 @@ print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                   "metadata": {"name": "grafana-admin", "namespace": os.environ["NS"]},
                   "stringData": {"admin-user": os.environ["ADMIN_USER"], "admin-password": os.environ["GF_PASS"]}}))' \
   | $MK8S kubectl apply -f - >/dev/null
+# The volume's size: GRAFANA_STORAGE (default 2Gi). A bound claim cannot shrink, and
+# microk8s-hostpath cannot grow one, so an existing PVC keeps its own size.
+GRAFANA_STORAGE="${GRAFANA_STORAGE:-2Gi}"
+if [[ ! "$GRAFANA_STORAGE" =~ ^[1-9][0-9]*(Mi|Gi|Ti)$ ]]; then
+    echo -e "${RED}ERROR: GRAFANA_STORAGE='$GRAFANA_STORAGE' must be a size such as 2Gi (Mi, Gi or Ti).${NC}" >&2
+    exit 1
+fi
+_GF_LIVE_SIZE="$($MK8S kubectl get pvc grafana -n "$NAMESPACE" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || true)"
+if [[ -n "$_GF_LIVE_SIZE" && "$_GF_LIVE_SIZE" != "$GRAFANA_STORAGE" ]]; then
+    echo -e "${YELLOW}  Grafana's volume stays $_GF_LIVE_SIZE (GRAFANA_STORAGE=$GRAFANA_STORAGE applies to a new volume only).${NC}"
+    GRAFANA_STORAGE="$_GF_LIVE_SIZE"
+fi
 _GF_VALUES=$(mktemp /tmp/grafana-values-XXXXXX.yaml)
 render "$SCRIPT_DIR/k8s/grafana/values.yaml" GRAFANA_DOMAIN GRAFANA_OAUTH_SECRET KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
-  GRAFANA_ROLE_PATH GRAFANA_ROLE_STRICT > "$_GF_VALUES"
+  GRAFANA_ROLE_PATH GRAFANA_ROLE_STRICT GRAFANA_STORAGE > "$_GF_VALUES"
 $MK8S helm3 upgrade --install grafana \
   grafana/grafana \
   --version 7.3.12 \
@@ -1737,12 +1752,13 @@ if [[ -n "$_GF_PREV_USER" && "$_GF_PREV_USER" != "$DS_USER" ]]; then
     $MK8S kubectl rollout status deployment/grafana -n "$NAMESPACE" --timeout=5m
 fi
 DS_PASS=""
-# The Secret is read at pod start; a pod that did not restart (nothing else
-# changed) still has the previous password. Set it on the running Grafana too,
-# on stdin. Best effort: the next restart reads the Secret anyway.
+# The Secret seeds the admin password only when Grafana creates its database; the
+# database is persistent, so a rotated GRAFANA_BREAKGLASS_PASS reaches Grafana only
+# here, on stdin, in its database. (A changed ADMIN_USER does not rename the
+# existing admin login: that stays the name the database was created with.)
 if ! printf '%s\n' "$GRAFANA_BREAKGLASS_PASS" | $MK8S kubectl exec -i -n "$NAMESPACE" deployment/grafana -c grafana -- \
         grafana cli --homepath /usr/share/grafana admin reset-admin-password --password-from-stdin >/dev/null 2>&1; then
-    echo -e "${RED}  Could not set Grafana's break-glass password on the running pod; it applies at its next restart.${NC}" >&2
+    echo -e "${RED}  Could not set Grafana's break-glass password; Grafana keeps the previous one until ./deploy-infra.sh sets it.${NC}" >&2
 fi
 
 # =============================================================================

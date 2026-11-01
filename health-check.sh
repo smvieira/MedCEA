@@ -68,6 +68,10 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "  ${CYAN}tcp${NC}    TCP port: HOST:PORT"
     echo -e "         e.g. localhost:31883"
     echo ""
+    echo -e "  ${CYAN}pvc${NC}    a PersistentVolumeClaim is Bound: NAMESPACE/NAME"
+    echo -e "         e.g. medcea/grafana; WARN when it is missing or not Bound (the service"
+    echo -e "         then keeps nothing across a restart, or does not start)"
+    echo ""
     echo -e "  ${CYAN}iamchain${NC} the access policy history's hash chain: DATABASE"
     echo -e "         e.g. \$POSTGRES_DB   (iam_policy.verify_chain(); SKIP before migration 008a)"
     echo ""
@@ -235,6 +239,31 @@ check_k8s() {
         _record OK "$name" "${label}: ${ready}/${total} ready"
     else
         _record FAIL "$name" "${label}: ${ready}/${total} ready — ${out}"
+    fi
+}
+
+# =============================================================================
+# Check: a PersistentVolumeClaim is Bound — read-only
+# target: NAMESPACE/NAME. WARN, not FAIL: the workload's own check says whether it
+# runs; this says whether what people saved in it survives (Grafana since 1 Nov 2026).
+# =============================================================================
+check_pvc() {
+    local name="$1" target="$2" ns claim out phase size
+    ns="${target%%/*}"; claim="${target#*/}"
+    if [[ -z "$ns" || -z "$claim" || "$claim" == "$target" ]]; then
+        _record FAIL "$name" "Invalid pvc target '${target}' — expected NAMESPACE/NAME"
+        return
+    fi
+    if ! out="$(timeout "$TIMEOUT" $KUBECTL get pvc "$claim" -n "$ns" \
+            -o jsonpath='{.status.phase} {.status.capacity.storage}' 2>&1)"; then
+        _record WARN "$name" "no PVC ${claim} in ${ns}: nothing it should hold survives a restart (./deploy-infra.sh)"
+        return
+    fi
+    read -r phase size <<<"$out"
+    if [[ "$phase" == Bound ]]; then
+        _record OK "$name" "pvc/${claim} (${ns}): Bound, ${size:-?}"
+    else
+        _record WARN "$name" "pvc/${claim} (${ns}) is ${phase:-in no phase}, not Bound"
     fi
 }
 
@@ -1186,6 +1215,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         k8s)  check_k8s  "$name" "$target" ;;
         http) check_http "$name" "$target" "$options" ;;
         tcp)  check_tcp  "$name" "$target" ;;
+        pvc)  check_pvc  "$name" "$target" ;;
         juju) check_juju "$name" "$target" ;;
         iamchain) check_iamchain "$name" "$target" ;;
         iamdbroles) check_iamdbroles "$name" "$target" ;;

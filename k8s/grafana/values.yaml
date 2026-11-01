@@ -1,7 +1,37 @@
 # Grafana Admin is the local break-glass account only (Secret grafana-admin, user
 # ADMIN_USER, password GRAFANA_BREAKGLASS_PASS), reached at /login?disableAutoLogin.
-# No persistence: every pod starts with an empty database, so a role change takes
-# effect at each person's next sign-in and the admin password from the Secret.
+# The Secret seeds only a new database; deploy-infra sets the password on the running
+# pod each run (grafana cli admin reset-admin-password, on stdin).
+#
+# Persistent (decision of 1 Nov 2026): Grafana's SQLite database lives in PVC grafana
+# (microk8s-hostpath, GRAFANA_STORAGE), so the dashboards Editors create or "Save as"
+# in the browser, their folders, annotations, alert rules and the signed-in sessions
+# survive a restart. The provisioned dashboards stay read-only (apps/report provider,
+# allowUiUpdates false): they change only through git. A role is computed again at each
+# sign-in, so a changed role path or a removed role reaches a person when their session
+# ends: 5 minutes without use or 1 hour after sign-in (below), not at the restart.
+# Not backed up: --reset, --uninstall and a MicroK8s wipe delete it, and warn first
+# (infra/lib-data-volumes.sh).
+persistence:
+  enabled: true
+  type: pvc
+  storageClassName: microk8s-hostpath
+  accessModes:
+  - ReadWriteOnce
+  size: ${GRAFANA_STORAGE}
+# One pod at a time on the volume: a rolling update would start the new Grafana on
+# the same SQLite file while the old one still writes to it.
+deploymentStrategy:
+  type: Recreate
+# The chart's init container chowns /var/lib/grafana to 472:472 (securityContext
+# runAsUser/runAsGroup/fsGroup 472, the chart's defaults): hostpath volumes ignore
+# fsGroup. busybox 1.36, the tag pgAdmin's init container already pulls.
+initChownData:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: library/busybox
+    tag: "1.36"
 admin:
   existingSecret: grafana-admin
   userKey: admin-user

@@ -154,6 +154,7 @@
 <tr><td><code>POSTGRES_USER</code></td><td><code>postgres</code></td><td>Database superuser name.</td></tr>
 <tr><td><code>POSTGRES_DB</code></td><td><code>medcea_db</code></td><td>Database name.</td></tr>
 <tr><td><code>STORAGE_SIZE</code></td><td><code>10Gi</code></td><td>Database volume size.</td></tr>
+<tr><td><code>GRAFANA_STORAGE</code></td><td><code>2Gi</code></td><td>Size of Grafana's volume (<code>grafana</code>: the dashboards Editors make in the browser, annotations, sessions; kept, not backed up). Read when the volume is created; an existing volume keeps its size.</td></tr>
 <tr><td><code>NODE_RED_TZ</code></td><td><code>Europe/London</code></td><td>Node-RED time zone (its log, debug output and local times in flows). Applied by <code>./deploy-infra.sh</code>.</td></tr>
 <tr><td><code>KEYCLOAK_REALM</code></td><td><code>$PROJECT_NAME</code></td><td>The Keycloak realm that holds every platform account.</td></tr>
 <tr><td><code>WORKBENCH_ENABLED</code></td><td><code>true</code></td><td><code>false</code> skips the AI workbench in <code>./deploy-infra.sh</code> (about 2 GB of images).</td></tr>

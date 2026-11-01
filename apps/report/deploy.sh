@@ -55,6 +55,8 @@ $KUBECTL create configmap grafana-dashboards \
     --dry-run=client -o yaml | $KUBECTL apply -f -
 
 # ── 3. Patch Grafana deployment to mount ConfigMaps (skip if already mounted) ─
+# Grafana restarts with strategy Recreate (one pod on its volume at a time): the old
+# pod stops before the new one starts, so the rollouts below allow 3 minutes.
 if ! $KUBECTL get deployment grafana -n "$NAMESPACE" \
         -o jsonpath='{.spec.template.spec.volumes[*].name}' 2>/dev/null \
         | grep -q "dashboard-provider"; then
@@ -70,12 +72,12 @@ if ! $KUBECTL get deployment grafana -n "$NAMESPACE" \
        "value":{"name":"dashboards","mountPath":"/var/lib/grafana/dashboards","readOnly":true}}
     ]'
     log "Waiting for Grafana rollout..."
-    $KUBECTL rollout status deployment/grafana -n "$NAMESPACE" --timeout=90s
+    $KUBECTL rollout status deployment/grafana -n "$NAMESPACE" --timeout=3m
 else
     log "Grafana deployment already has dashboard mounts — updating ConfigMap only."
     # Trigger a rolling restart so Grafana re-reads the updated ConfigMap
     $KUBECTL rollout restart deployment/grafana -n "$NAMESPACE"
-    $KUBECTL rollout status deployment/grafana -n "$NAMESPACE" --timeout=90s
+    $KUBECTL rollout status deployment/grafana -n "$NAMESPACE" --timeout=3m
 fi
 
 # ── 4. Check each dashboard is provisioned (as the break-glass admin) ─────────

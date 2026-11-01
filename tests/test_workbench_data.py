@@ -14,8 +14,9 @@
     the ConfigMap into an annotation, and an object's annotations hold 256 KiB).
   - the policy: scientists hold R (not X) on measurements; config-api accepts the
     workbench-notebook client (pre_request's azp list) and admits the notebook pods.
-  - infra/lib-workbench-homes.sh against a fake kubectl: lists each claim-<name> with its
-    directory and how to keep it, says nothing without claims, warns when it cannot ask.
+  - infra/lib-data-volumes.sh against a fake kubectl: lists each claim-<name> and Grafana's
+    volume with its directory and how to keep it, says nothing without them, warns when it
+    cannot ask.
 
   python3 tests/test_workbench_data.py
 """
@@ -397,7 +398,7 @@ class HomesTest(unittest.TestCase):
         with open(k, "w") as f:
             f.write("#!/bin/sh\n" + kubectl_body + "\n")
         os.chmod(k, 0o755)
-        r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-workbench-homes.sh"; workbench_homes_warn medcea; echo "rc=$?"'],
+        r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-data-volumes.sh"; data_volumes_warn medcea; echo "rc=$?"'],
                            env=dict(os.environ, KUBECTL=k), capture_output=True, text=True)
         return r.stdout
 
@@ -414,6 +415,23 @@ esac""")
         self.assertNotIn("rdbms", out)
         self.assertIn("sudo cp -a", out)
         self.assertIn("SAVE_TO_GIT.md", out)
+        self.assertNotIn("Grafana", out)
+        self.assertTrue(out.rstrip().endswith("rc=0"))
+
+    def test_lists_grafana(self):
+        pvcs = json.dumps({"items": [
+            {"metadata": {"name": "grafana"}, "spec": {"volumeName": "pvc-g"}, "status": {"capacity": {"storage": "2Gi"}}},
+            {"metadata": {"name": "grafana-other"}, "spec": {"volumeName": "pvc-x"}}]})
+        out = self.run_warn(f"""case "$*" in
+  "get pvc -n medcea -o json") echo '{pvcs}' ;;
+  "get pv pvc-g -o jsonpath={{.spec.hostPath.path}}") printf /var/snap/microk8s/common/default-storage/medcea-grafana-pvc-g ;;
+  *) exit 1 ;;
+esac""")
+        self.assertIn("Grafana's volume", out)
+        self.assertIn("grafana (2Gi), on this host in /var/snap/microk8s/common/default-storage/medcea-grafana-pvc-g", out)
+        self.assertIn("Export", out)
+        self.assertNotIn("grafana-other", out)
+        self.assertNotIn("AI workbench homes", out)
         self.assertTrue(out.rstrip().endswith("rc=0"))
 
     def test_no_homes_no_words(self):
@@ -422,6 +440,7 @@ esac""")
     def test_cannot_ask(self):
         out = self.run_warn("exit 1")
         self.assertIn("Could not list the AI workbench homes", out)
+        self.assertIn("Grafana's volume", out)
         self.assertTrue(out.rstrip().endswith("rc=0"))
 
     def test_every_uninstall_path_warns_before_it_asks(self):
@@ -429,16 +448,16 @@ esac""")
             infra = f.read()
         for branch, ask in (('"--uninstall" ]]', "Type 'yes' to confirm uninstall"), ('"--reset" ]]', "Type 'reset' to confirm")):
             part = infra[infra.index(branch):]
-            self.assertLess(part.index("workbench_homes_warn"), part.index(ask), branch)
+            self.assertLess(part.index("data_volumes_warn"), part.index(ask), branch)
         with open(os.path.join(REPO, "install.sh")) as f:
             inst = f.read()
         for branch, ask in (("uninstall-infra)\n", "confirm reset"), ("uninstall-all)\n", "confirm uninstall")):
             part = inst[inst.rindex(branch):]
-            self.assertLess(part.index("workbench_homes "), part.index(ask), branch)
+            self.assertLess(part.index("data_volumes "), part.index(ask), branch)
         with open(os.path.join(REPO, "infra", "bootstrap-infra.sh")) as f:
             boot = f.read()
         part = boot[boot.index("MICROK8S RESET LOGIC"):]
-        self.assertLess(part.index("workbench_homes_warn"), part.index("Fully wipe MicroK8s"), "bootstrap wipe")
+        self.assertLess(part.index("data_volumes_warn"), part.index("Fully wipe MicroK8s"), "bootstrap wipe")
 
 
 if __name__ == "__main__":

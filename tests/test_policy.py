@@ -1279,9 +1279,23 @@ class WiringTest(unittest.TestCase):
         self.assertIn('GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN: "false"', values)
         self.assertIn('GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email groups"', values)
         self.assertIn("existingSecret: grafana-admin", values)
-        # no persistence: a changed role path rolls a pod with an empty database, which is
-        # what ends the old sessions (there is no revocation step)
-        self.assertNotRegex(values, r"(?m)^persistence:")
+        # persistent (decision of 1 Nov 2026): Editors' own dashboards survive a restart; a
+        # changed role path reaches a session at its 5 min idle / 1 h bound, not at the restart
+        import yaml
+        doc = yaml.safe_load(values)
+        self.assertEqual(doc["persistence"]["enabled"], True)
+        self.assertEqual(doc["persistence"]["type"], "pvc")
+        self.assertEqual(doc["persistence"]["storageClassName"], "microk8s-hostpath")
+        self.assertEqual(doc["persistence"]["size"], "${GRAFANA_STORAGE}")
+        self.assertNotIn("existingClaim", doc["persistence"])
+        # one Grafana on the SQLite file at a time; the chart chowns the hostpath to 472
+        self.assertEqual(doc["deploymentStrategy"], {"type": "Recreate"})
+        self.assertTrue(doc["initChownData"]["enabled"])
+        self.assertNotIn("securityContext", doc)          # the chart's runAsUser/fsGroup 472
+        self.assertIn('GRAFANA_STORAGE="2Gi"', self.read("config.env.example"))
+        self.assertIn('GRAFANA_STORAGE="${GRAFANA_STORAGE:-2Gi}"', self.read("deploy-infra.sh"))
+        self.assertIn("Grafana volume           | pvc   | $NAMESPACE/grafana",
+                      self.read("health-checks.conf"))
         infra = self.read("deploy-infra.sh")
         # envsubst leaves an unlisted ${VAR} as literal text (lib-render.sh)
         call = re.search(r'render "\$SCRIPT_DIR/k8s/grafana/values.yaml"(.*?)>', infra, re.S).group(1)
