@@ -15,6 +15,7 @@
 </tbody>
 </table></div>
 <div class="note"><p>This is a prototype. Recipe execution, control algorithms, sign-in with eleven roles, changes stamped with the person who made them, approvals recorded in the database and a hash-chained history of access policy changes are built. Batch and lot records, laboratory results, the Electronic Batch Record, GS1 EPCIS event export and a regulator interface are not built yet. Where a later chapter describes a duty that has no screen yet, it says so.</p></div>
+<p>To learn the main tasks by doing them on the platform, and to check after a change that they still work, follow the exercises in <a href="#training">Training</a>.</p>
 
 <h3 id="overview-blocks">Building blocks</h3>
 <p>Everything runs on one Ubuntu computer (the host) with MicroK8s, a small Kubernetes. Two scripts install it: <code>./deploy-infra.sh</code> for the infrastructure and <code>./deploy-apps.sh</code> for the applications. The administrator runs them on the host; everyone else works in a web browser. See <a href="#admin">Administration</a>.</p>

@@ -19,7 +19,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CHAPTERS = ['overview', 'access', 'apps', 'devices', 'compliance', 'admin', 'reference', 'revisions']
+CHAPTERS = ['overview', 'access', 'apps', 'devices', 'compliance', 'admin', 'training', 'reference', 'revisions']
 EDITION = {
     'EDITION': '3',
     'COVERS': 'IAM phases 0 to 3 (complete)',

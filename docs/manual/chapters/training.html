@@ -1,0 +1,268 @@
+<section id="training" data-title="Training">
+<h2>Training: hands-on exercises</h2>
+<p class="lede">An exercise is a task you carry out on the platform from start to end, with the accounts and screens a real person would use. It has two purposes. A new person learns a task by doing it once under guidance. After a change to the platform, running the exercise shows that the screens, the database rules and the records still work together. This chapter says how to run an exercise safely, where to read what it recorded, the fixed form every exercise follows, the exercises themselves, and how to add a new one.</p>
+
+<h3 id="training-summary">Exercises at a glance</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Exercise</th><th>Roles</th><th>What it proves</th><th>Last done</th></tr></thead>
+<tbody>
+<tr><td><a href="#training-e1">E1 Request access and grant a role</a></td><td>applicant, <span class="role">admin</span>, <span class="role">qa</span></td><td>An approved request gives no access until a second person confirms it.</td><td>Not recorded here</td></tr>
+<tr><td><a href="#training-e2">E2 Assign a unit to an operator</a></td><td>host operator, <span class="role">qa</span>, <span class="role">operator</span></td><td>An operator sees a unit only after <span class="role">qa</span> confirms the assignment, with the attestation.</td><td>Partly (confirmation only): 31 Oct 2026, UNIT01 (decision 14)</td></tr>
+<tr><td><a href="#training-e3">E3 Draft and approve a parameter set</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>A draft is used only after another person approves it, and is frozen afterwards.</td><td>31 Oct 2026, <code>q_test</code> (approval #6)</td></tr>
+<tr><td><a href="#training-e4">E4 Return and withdraw</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>Work can be sent back with a reason or taken back by its proposer, and both are recorded.</td><td>Not yet on production</td></tr>
+<tr><td><a href="#training-e5">E5 Test mode and the MQTT Explorer</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>Commands reach a unit only while <span class="role">qa</span> has approved test mode, and stop when it ends.</td><td>31 Oct 2026, two cycles on UNIT01</td></tr>
+<tr><td><a href="#training-e6">E6 Release a completed run</a></td><td><span class="role">production_manager</span>, <span class="role">operator</span>, <span class="role">qp</span></td><td>Only a person who neither created, changed nor executed a run can release it.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e7">E7 Deactivate and reactivate an account</a></td><td><span class="role">admin</span>, <span class="role">qa</span></td><td>Taking access away acts at once; giving it back waits for a second person.</td><td>31 Oct 2026, deactivation only (decision 12)</td></tr>
+<tr><td><a href="#training-e8">E8 Quarterly access review</a></td><td><span class="role">qa</span>, <span class="role">auditor</span></td><td>Who holds what is reviewed, signed off and readable by an auditor.</td><td>Not recorded here</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="training-safely">Running an exercise safely</h3>
+<ul>
+<li><strong>Use test accounts.</strong> Every account on this install is a test account of one person (see <a href="#compliance-test-accounts">test accounts</a>). Several exercises need roles no account holds yet (<span class="role">production_manager</span>, <span class="role">operator</span>, <span class="role">qp</span>): make them with <a href="#training-e1">E1</a> first, with a username that says it is a test account, for example <code>qp_test</code>, and add each one to the test accounts table.</li>
+<li><strong>Give each account its own browser session.</strong> All the web apps share one sign-in. If you sign in as a second account in another tab of the same window, the first account is replaced everywhere, and the screens then act for whoever signed in last. Use a normal window for one account, a private window for a second, and another browser or browser profile for a third. Private windows of the same browser share one session with each other, so two private windows are still one account.</li>
+<li><strong>Every exercise leaves permanent records.</strong> Approvals, returns, decisions, releases and the policy history can be added to but never changed or deleted; the policy history is hash-chained, so a removed or edited event would show. That is what the exercises are meant to prove. Never try to clean up a record afterwards. An approved test item can be retired, a test account deactivated, a unit removed; each of those is a new record too.</li>
+<li><strong>Real equipment is real.</strong> A unit in test mode drives its chamber. Do not send commands to a unit with plants in it unless that is the point of the exercise.</li>
+</ul>
+
+<h3 id="training-evidence">Where to read the evidence</h3>
+<p>By decision, nobody has an SQL console on production data (see <a href="#compliance-production-data">who reaches production data</a>). Everything an exercise records is read on these screens and in these files:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Where</th><th>Who can read it</th><th>What it shows</th></tr></thead>
+<tbody>
+<tr><td>Configuration UI, <strong>Approvals</strong> tab, <strong>Approval history</strong></td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td><td>The newest 100 approval records, filtered by All, Recipes, Control algorithms, Parameter sets, Settings and commissioning, Master data and device reviews, Run releases or Q-table retirements: time, item, action, person with role and source, authors, note. <strong>History of this item</strong> in a review shows one item's records.</td></tr>
+<tr><td>Configuration UI, <strong>Approvals</strong> tab, <strong>My proposals and drafts</strong></td><td>Every signed-in person, for their own work</td><td>Where each of your proposals and drafts stands, with a return's reason.</td></tr>
+<tr><td>Configuration UI, <strong>Units</strong> tab, <strong>History</strong> in the Commissioning cell</td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td><td>Every commissioning proposal for the unit, with proposer, value, reason and outcome.</td></tr>
+<tr><td>User Manager, <strong>Decisions</strong> tab (Waiting for qa, To review, All)</td><td><span class="role">admin</span> and <span class="role">auditor</span> read; <span class="role">qa</span> checks</td><td>Every account decision: maker, subject, change, reason, checker, times and note.</td></tr>
+<tr><td>User Manager, <strong>Requests</strong>, <strong>Access review</strong>, <strong>Change log</strong></td><td>As in <a href="#apps-usermanager">User Manager</a></td><td>Access requests and their history, the quarterly reviews, mail settings and template changes.</td></tr>
+<tr><td>Scheduler and Run Monitor</td><td>The roles that read runs</td><td>Runs, their status and cycles. The <strong>Released</strong> badge, with who and when, is shown in the Scheduler only (<strong>Completed Runs</strong>).</td></tr>
+<tr><td><code>./health-check.sh</code> on the host</td><td>The host operator</td><td><code>iampending</code> (a configuration change waiting for <span class="role">qa</span> over 7 days), <code>iamdecisions</code> (an account decision waiting over 7 days), <code>iamchain</code> (the policy history's hash chain verifies). See <a href="#admin-health">the health check</a>.</td></tr>
+<tr><td><code>logs/</code> on the host</td><td>The platform user on the host</td><td>Every command writes <code>logs/&lt;name&gt;-&lt;timestamp&gt;.log</code>, for example <code>health-check-…</code> and <code>app-iam-units-…</code>. The first line of a command's output names its log.</td></tr>
+<tr><td>Database Management export</td><td><span class="role">qp</span> and <span class="role">auditor</span>, for the groups their role may export (<span class="role">qa</span> holds X on no group and cannot export)</td><td>The rows themselves, as a file, when a screen is not enough. Every export is in the export log.</td></tr>
+</tbody>
+</table></div>
+<p>The policy history has no screen of its own: <code>iamchain</code> checks that it verifies, and the access review shows its verdict.</p>
+
+<h3 id="training-template">How every exercise is written</h3>
+<p>Each exercise has the same parts, in this order:</p>
+<ol class="steps">
+<li><strong>Goal</strong>: what you learn and what the exercise proves.</li>
+<li><strong>Accounts and roles</strong>: which accounts take part, and which separation of duties the exercise shows.</li>
+<li><strong>Before you start</strong>: what must be true first.</li>
+<li><strong>Steps</strong>: numbered; who does what, with the screen, tab, button and field names as the page shows them.</li>
+<li><strong>What you should see</strong>: the result on the screen.</li>
+<li><strong>What is recorded and where to check it</strong>: the records, and the screen or file that shows them.</li>
+<li><strong>Refusals worth trying</strong>: what the platform must refuse, and the message it shows.</li>
+<li><strong>Afterwards</strong>: how to leave the platform as you found it.</li>
+<li><strong>Last done</strong>: the date and result, or "not yet".</li>
+</ol>
+
+<h3 id="training-e1">E1 Request access and grant a role</h3>
+<p><strong>Goal.</strong> Make a new account the way every person gets one, and see that an approved request gives no access until a second person confirms it.</p>
+<p><strong>Accounts and roles.</strong> A new applicant (no account yet), <code>admin</code> (<span class="role">admin</span>) and <code>svieira</code> (<span class="role">qa</span>). The administrator approves; a <span class="role">qa</span> person who is neither the administrator nor the applicant confirms. Rule I17: no person may hold an <span class="role">admin</span> and a <span class="role">qa</span> account at once (see <a href="#compliance-dual">dual control</a>).</p>
+<p><strong>Before you start.</strong> A username and an e-mail address that have no account yet. If e-mail is not set up in the User Manager, no e-mail goes out; the decision is still recorded.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Applicant, in a window of its own: open <code>https://access.&lt;domain&gt;/register</code>. The sign-in page opens on the <strong>Request access</strong> tab. Fill in every field, choose the <strong>Role you need</strong> and a <strong>Business justification</strong> (20 characters or more), and choose <strong>Submit request</strong>.</li>
+<li>Applicant: try to sign in with the new username and password.</li>
+<li><span class="role">admin</span>: User Manager, <strong>Requests</strong>, tab <strong>Pending</strong>. Select the request. Under <strong>Decision</strong> choose <strong>Approve</strong>, check <strong>Role to grant</strong>, write <strong>Notes</strong>, untick <strong>Send e-mail to</strong> if the address is not real, click <strong>Approve as &lt;role&gt; (waits for qa)</strong> and confirm the dialog.</li>
+<li><span class="role">admin</span>: open <strong>Decisions</strong> and select the new decision.</li>
+<li><span class="role">qa</span>: User Manager, <strong>Decisions</strong>, tab <strong>Waiting for qa</strong>. Select the decision. Read the effect, the access it adds and the list of existing <span class="role">admin</span> and <span class="role">qa</span> accounts. Write an optional note and click <strong>Confirm</strong>.</li>
+<li>Applicant: sign in again.</li>
+</ol>
+<p><strong>What you should see.</strong> After step 1: "Request received. You will get an e-mail once an administrator has reviewed it." In step 2: "This account is not active". After step 3 the request reads approved, but the account stays disabled with no role. In step 4 the administrator reads the decision but cannot check it. After step 6 the applicant signs in with the granted role.</p>
+<div class="record"><p>The request and its history (submitted, approved, reassigned if the role changed) are under <strong>Requests</strong>, tab <strong>All</strong>. The grant is one account decision naming the maker, the checker, both times and the notes: <strong>Decisions</strong>, tab <strong>All</strong>. The confirmation is also appended to the hash-chained policy history (<code>iamchain</code>). <code>iamdecisions</code> warns if a grant waits more than 7 days.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li><span class="role">admin</span> opens the waiting decision (step 4): it shows no <strong>Confirm</strong>, <strong>Refuse</strong> or <strong>Mark reviewed</strong>, because only <span class="role">qa</span> holds A on account decisions. The administrator never confirms.</li>
+<li>A <span class="role">qa</span> person opens a decision they made, or one about their own account: "You cannot check this decision:" followed by the reason, for example "not_own_author: you are its subject". The rule compares persons, not account names.</li>
+<li>Submitting a second request with the same e-mail address while the first waits, or with a username that already has an account: the form refuses it.</li>
+<li><span class="role">qa</span> clicks <strong>Refuse</strong> with an empty note: "A refusal needs a note."</li>
+<li>I17: giving a <span class="role">qa</span> account the <code>person_id</code> of an <span class="role">admin</span> account, or the reverse, is refused before anything is recorded, with "person … would hold both an admin account (…) and a qa account (…) (I17)".</li>
+</ul>
+<p><strong>Afterwards.</strong> The account stays. Add it to the <a href="#compliance-test-accounts">test accounts</a> table. When it is no longer needed, deactivate it (<a href="#training-e7">E7</a>); it is never deleted. A refused grant deletes the pending account, so the applicant may apply again.</p>
+<p><strong>Last done.</strong> Not recorded here.</p>
+
+<h3 id="training-e2">E2 Assign a unit to an operator</h3>
+<p><strong>Goal.</strong> Give an operator a unit and see that the operator sees nothing of it until <span class="role">qa</span> confirms.</p>
+<p><strong>Accounts and roles.</strong> The person who runs <code>units.sh</code> on the host (recorded as maker with <code>--by</code>), a <span class="role">qa</span> person who did not run it (<code>svieira</code>), and an <span class="role">operator</span> account (from <a href="#training-e1">E1</a>). The script cannot prove who ran it, so <span class="role">qa</span> attests that they did not.</p>
+<p><strong>Before you start.</strong> An enabled <span class="role">operator</span> account; the unit exists in the Units tab; a shell on the platform host in the repository folder. <code>units.sh</code> takes the deploy lock, so no deploy may be running.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Operator: open the Scheduler and the Run Monitor. Note what you see.</li>
+<li>Host: run <code>./apps/iam/units.sh assign &lt;operator username&gt; UNIT01 --by &lt;your username&gt;</code>. For <code>--by</code>, name an account that is not the <span class="role">qa</span> person who will confirm.</li>
+<li>Host: run <code>./apps/iam/units.sh list</code>. The unit is listed under <code>WAITING_QA</code>.</li>
+<li>Operator: reload the Scheduler. Still nothing.</li>
+<li><span class="role">qa</span>: User Manager, <strong>Decisions</strong>, <strong>Waiting for qa</strong>. Select the unit assignment. Read the note that <code>units.sh</code> recorded its maker but cannot verify it. Tick "I did not run units.sh for this assignment.", write an optional note and click <strong>Confirm</strong>.</li>
+<li>Host: <code>./apps/iam/units.sh list</code> again. Operator: reload the Scheduler and the Run Monitor.</li>
+</ol>
+<p><strong>What you should see.</strong> Before the confirmation the operator sees no runs and no telemetry and can start nothing. After it, the operator sees UNIT01's runs, cycles and logs in the Scheduler and its telemetry in the Run Monitor, and <code>list</code> shows the unit under <code>UNITS</code>.</p>
+<div class="record"><p>One account decision per unit, with the maker as "system:deploy (by &lt;username&gt;)", the checker, the note with the attestation, and the times: <strong>Decisions</strong>, tab <strong>All</strong>. The unit taking effect appends <code>unit_assigned</code> to the policy history, with the <span class="role">qa</span> person as actor (<code>iamchain</code>). The command's output is in <code>logs/app-iam-units-&lt;timestamp&gt;.log</code>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li><strong>Confirm</strong> stays off until the attestation box is ticked.</li>
+<li>Run the assignment with <code>--by</code> naming the <span class="role">qa</span> account, then open it as that account: "You cannot check this decision:" with the reason that you made it. Refuse it from another <span class="role">qa</span> account or remove it with <code>units.sh remove</code>.</li>
+<li><code>units.sh assign</code> without <code>--by</code> is a usage error (exit 2) and records nothing.</li>
+</ul>
+<p><strong>Afterwards.</strong> Keep the assignment if the operator is needed for <a href="#training-e6">E6</a>. Otherwise run <code>./apps/iam/units.sh remove &lt;operator username&gt; UNIT01 --by &lt;your username&gt;</code>: a removal acts at once and <span class="role">qa</span> marks it reviewed under <strong>To review</strong>. See <a href="#compliance-units">unit assignments</a>.</p>
+<p><strong>Last done.</strong> 31 October 2026: an assignment of UNIT01 confirmed by <code>svieira</code> at 22:13 (decision 14). The operator's view (steps 1, 4 and 6) was not checked: no operator account was enabled.</p>
+
+<h3 id="training-e3">E3 Draft and approve a parameter set</h3>
+<p><strong>Goal.</strong> Make a parameter set the way every configuration item is made: an engineer drafts, a different person approves, and the approved set is frozen.</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) writes the draft; <code>svieira</code> (<span class="role">qa</span>) approves. The approval is refused when the approver is the same person as anyone who changed the item since its last approval.</p>
+<p><strong>Before you start.</strong> The algorithm the set is for is approved (its status shows under its code in <strong>Control Algorithms</strong>). The database enforces roles (<code>IAM_DB_ROLES=true</code>), so the <strong>Approvals</strong> tab is shown.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">engineer</span>: Configuration UI, <strong>Control Models</strong>, panel <strong>Parameter Sets</strong>, <strong>+ New Parameter Set</strong>. Enter the <strong>Name</strong>, choose the <strong>Algorithm</strong> and the <strong>Unit</strong>, adjust <strong>Params (JSON object)</strong> and click <strong>Save draft</strong>.</li>
+<li><span class="role">engineer</span>: open the <strong>Approvals</strong> tab. The draft is under <strong>My proposals and drafts</strong>, waiting for qa.</li>
+<li><span class="role">qa</span>: <strong>Approvals</strong>, panel <strong>Waiting for approval</strong>, <strong>Review…</strong> on the parameter set. Read <strong>What you approve</strong> and the list of changes (for a new set: <strong>Never approved: N change(s) since creation</strong>). Type a <strong>Note</strong> and click <strong>Approve</strong>.</li>
+<li><span class="role">engineer</span>: open the set again in <strong>Parameter Sets</strong>.</li>
+</ol>
+<p><strong>What you should see.</strong> After step 3 the message names the approval record ("Approved: … (approval #N)"). The set's status reads approved; it opens read-only with <strong>⎘ Copy to a new draft</strong> and <strong>Retire…</strong>. A schedule can now choose it.</p>
+<div class="record"><p>Every save is stamped with who made it and kept in the row-change log. The approval is a row naming the approver, role and source, the authors, a digest of the content and the note: <strong>Approval history</strong>, filter <strong>Parameter sets</strong>, or <strong>History of this item</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>The author cannot approve. With separate roles, <code>eng</code> has no <strong>Approve</strong> at all and sees the draft only under <strong>My proposals and drafts</strong>. The person rule shows when the approver's account and an author's carry the same <code>person_id</code>: "You changed this item (or one of its steps) since its last approval. Another qa person must approve it." (database code <code>not_own_author</code>).</li>
+<li>An approved set cannot be edited: the screen offers no <strong>Edit</strong>, and the database refuses an edit from any other client with <code>draft_only: … is approved, not a draft; a change starts a new draft</code>. Use <strong>⎘ Copy to a new draft</strong>.</li>
+<li>A set whose algorithm is still a draft cannot be approved: the row says "Approve its control algorithm first." and <strong>Approve</strong> is off. This can be tried only while some algorithm is a draft.</li>
+</ul>
+<p><strong>Afterwards.</strong> The approved set stays. If it should not be used, <strong>Retire…</strong> it (it asks you to confirm; nothing is deleted).</p>
+<p><strong>Last done.</strong> 31 October 2026: <code>q_test</code> (#1), created and edited by <code>eng</code>, approved by <code>svieira</code> at 21:59:54 UTC (approval #6).</p>
+
+<h3 id="training-e4">E4 Return and withdraw</h3>
+<p><strong>Goal.</strong> Send work back with a reason, change it and send it again; and take back a proposal of your own.</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) as author and proposer; <code>svieira</code> (<span class="role">qa</span>) returns. Only <span class="role">qa</span> returns; only the proposer withdraws.</p>
+<p><strong>Before you start.</strong> A draft parameter set by <code>eng</code> (as in <a href="#training-e3">E3</a>, up to step 2). For the withdrawal, a unit with no run running or scheduled.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">qa</span>: <strong>Approvals</strong>, <strong>Review…</strong> on the draft. Type the reason in the note field and click <strong>Return…</strong>, then confirm.</li>
+<li><span class="role">engineer</span>: <strong>Approvals</strong>, <strong>My proposals and drafts</strong>. The draft reads Returned by qa, with qa's reason, and "Change the draft to send it back".</li>
+<li><span class="role">engineer</span>: <strong>Control Models</strong>, <strong>Parameter Sets</strong>, <strong>Edit</strong> on the draft, change it, <strong>Save draft</strong>.</li>
+<li><span class="role">qa</span>: the draft is back in <strong>Waiting for approval</strong> and may be approved.</li>
+<li><span class="role">engineer</span>: <strong>Units</strong> tab, <strong>Flag for commissioning…</strong> on the unit, a reason, <strong>Propose</strong>. Then <strong>Withdraw…</strong> (in the unit's cell or under <strong>My proposals and drafts</strong>), with an optional reason.</li>
+</ol>
+<p><strong>What you should see.</strong> After step 1: "Returned: … (record #N)"; the draft stays an editable draft, marked returned in the queue until its author changes it. After step 5 the proposal reads withdrawn and never applies.</p>
+<div class="record"><p>A return and a withdrawal are rows in the approval record (actions <code>return</code> and <code>withdraw</code>) with the reason; no approval rule counts them as approvals. Read them in <strong>Approval history</strong> (filter <strong>Parameter sets</strong> for the return, <strong>Settings and commissioning</strong> for the withdrawal) and the unit's <strong>History</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>A draft returned and not changed since cannot be returned again: <strong>Return…</strong> is not offered, and the database refuses it with "Already returned; it has not changed since."</li>
+<li>Someone else's proposal cannot be withdrawn: another engineer's proposal shows without buttons, and the database refuses with "Only the person who proposed it can withdraw it." This needs a second <span class="role">engineer</span> account.</li>
+<li><span class="role">qa</span> clicks <strong>Return…</strong> with an empty note: "Give the reason for returning it in the note field".</li>
+</ul>
+<p><strong>Afterwards.</strong> Approve or retire the test draft. A withdrawn proposal is closed; nothing to undo.</p>
+<p><strong>Last done.</strong> Not yet on production; only probed on the throwaway test database.</p>
+
+<h3 id="training-e5">E5 Test mode and the MQTT Explorer</h3>
+<p><strong>Goal.</strong> Put a unit in test mode (commissioning), send a command from the MQTT Explorer, and end test mode, seeing the broker follow each change.</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) proposes, sends and ends; <code>svieira</code> (<span class="role">qa</span>) approves and reviews. Turning test mode on opens command rights, so it waits for <span class="role">qa</span>; ending it narrows them, so it acts at once and is reviewed afterwards.</p>
+<p><strong>Before you start.</strong> The unit (here UNIT01) has no run running or scheduled; its <strong>Commissioning</strong> cell reads <strong>Off</strong>; <code>IAM_MQTT_PERSON=true</code>.</p>
+<div class="warn"><p>A message on a <code>control</code> topic reaches the unit's CONTROL board. Use a tag that no channel in the board's channel map uses, such as <code>test</code>, unless you mean to switch equipment.</p></div>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">engineer</span>: Configuration UI, <strong>Units</strong>, in UNIT01's Commissioning cell <strong>Flag for commissioning…</strong>. Type the <strong>Reason</strong> and click <strong>Propose</strong>.</li>
+<li><span class="role">qa</span>: <strong>Approvals</strong>, <strong>Review…</strong> on the proposal. Read the proposer, time and reason, type an optional note and click <strong>Approve and apply</strong>.</li>
+<li><span class="role">engineer</span>: open the MQTT Explorer. Wait until the status reads Connected (up to 15 seconds for a new credential). Read <strong>Your rights</strong>: its topics are patterns.</li>
+<li><span class="role">engineer</span>: in the <strong>Publish</strong> box type one concrete topic, <code>medcea/UNIT01/ZONE01/control/test</code>, a payload, and click <strong>Send</strong>.</li>
+<li><span class="role">engineer</span>: send the same to a unit that is not in test mode, for example <code>medcea/UNIT02/ZONE01/control/test</code>.</li>
+<li><span class="role">engineer</span>: <strong>Units</strong>, <strong>End commissioning…</strong>, a reason, <strong>End commissioning</strong>. After about 15 seconds send step 4 again.</li>
+<li><span class="role">qa</span>: <strong>Approvals</strong>, <strong>Review…</strong> on the ended commissioning, <strong>Mark reviewed</strong>.</li>
+</ol>
+<p><strong>What you should see.</strong> After step 1 the cell reads "Waiting for qa: flag on … (your proposal)". After step 2 it reads <strong>Commissioning</strong> and the message names the approval record. In step 4 the message arrives on that topic. In step 5 nothing happens and no error is shown: the broker drops a message you may not send. Step 6 applies at once; the cell reads <strong>Off</strong> with an end waiting for review, and the resend in step 6 is dropped in the same silent way.</p>
+<div class="record"><p>Each proposal is a pending change with the proposer and reason; each approval, review and withdrawal a row in the approval record: <strong>Approval history</strong>, filter <strong>Settings and commissioning</strong>, and the unit's <strong>History</strong>. The policy history gets <code>commissioning_enabled</code> and <code>commissioning_disabled</code> with the unit, actor and reason, and <code>mqtt_credential_issued</code> for the engineer's credential (<code>iamchain</code>). <code>iampending</code> warns if a proposal or an end waits for <span class="role">qa</span> more than 7 days.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>A topic with <code>+</code> or <code>#</code>, such as the pattern <code>medcea/+/+/control/#</code> copied from <strong>Your rights</strong>: "Not sent: + and # only match topics; send to one, e.g. medcea/UNIT01/ZONE01/control/&lt;tag&gt;".</li>
+<li>While the unit has a run running or scheduled, <strong>Flag for commissioning…</strong> is off, with "Run #N is running" (or "is scheduled"); the database refuses the proposal and the approval too. The other way round, no run can be scheduled on a flagged unit.</li>
+<li>A second proposal for a unit whose proposal already waits: refused until it is approved, returned or withdrawn.</li>
+<li><span class="role">qa</span> cannot propose test mode: there is no <strong>Flag for commissioning…</strong> for them; only an engineer proposes. In the <strong>Units</strong> cell, <strong>Review…</strong> is off for the proposer's own change.</li>
+</ul>
+<p><strong>Afterwards.</strong> Every unit's cell reads <strong>Off</strong>, nothing waits in <strong>Waiting for approval</strong>, and <code>./health-check.sh</code> passes <code>iampending</code> and <code>iamchain</code>. See <a href="#apps-config-commissioning">commissioning a unit</a> and <a href="#apps-mqtt">MQTT Explorer</a>.</p>
+<p><strong>Last done.</strong> 31 October 2026: two full cycles on UNIT01 (pending changes #1 to #4, approvals #7 and #8 for the first cycle, the second approved at 22:40:18 and reviewed at 22:43:18, policy history events <code>commissioning_enabled</code> and <code>commissioning_disabled</code>); sending from the Explorer verified. The same evening found that a wildcard topic made the broker close the Explorer's connection; fixed that day (see <a href="#compliance-gaps">known gaps</a>).</p>
+
+<h3 id="training-e6">E6 Release a completed run</h3>
+<p><strong>Goal.</strong> Take a run from preparation to release, and see that the release can only come from a person who had no hand in the run.</p>
+<p><strong>Accounts and roles.</strong> A <span class="role">production_manager</span> prepares the run; the same production manager, or an <span class="role">operator</span> assigned to the unit, starts it; a <span class="role">qp</span> person who neither created, changed nor executed it releases it. None of these roles is held by an account on this install yet: make them with <a href="#training-e1">E1</a>, and assign the operator with <a href="#training-e2">E2</a>.</p>
+<p><strong>Before you start.</strong></p>
+<ul>
+<li>An approved recipe allowed on UNIT01 in <strong>Recipe ↔ Unit Permissions</strong>. A short one (one step, one cycle of a few minutes) keeps the exercise short; <code>eng</code> drafts it and <code>svieira</code> approves it as in <a href="#training-e3">E3</a>.</li>
+<li>An approved parameter set for the unit, for example <code>q_test</code>.</li>
+<li>UNIT01 is not in test mode and has no active run.</li>
+</ul>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">production_manager</span>: Configuration UI, <strong>Units</strong>, <strong>Recipe ↔ Unit Permissions</strong>. If the recipe has no tick for UNIT01, click the circle, choose the <strong>Default Algorithm</strong> and click <strong>Save</strong>.</li>
+<li><span class="role">production_manager</span>: Scheduler, <strong>New Schedule</strong>. Choose UNIT01 and the recipe, <strong>Frequency</strong> Run Once with a time (UTC), the approved <strong>Parameter set</strong>, and click <strong>Save</strong>.</li>
+<li>Let the schedule start the run, or the production manager clicks <strong>▶ Run Now</strong> on it in <strong>Scheduled Jobs</strong>. An operator of UNIT01 may click <strong>▶ Execute</strong> on a Queued run the production manager prepared.</li>
+<li>Follow it in <strong>Current Runs</strong> or the Run Monitor until it is Completed.</li>
+<li><span class="role">qp</span>: Configuration UI, <strong>Approvals</strong>, <strong>Review…</strong> on the <strong>Completed run</strong> row "Run #&lt;id&gt; (&lt;recipe&gt; on UNIT01)". Read <strong>What you release</strong>: recipe and parameter set with their approvals, creator, executors, attempts, cycles, start and end, and whether you may release it.</li>
+<li><span class="role">qp</span>: type an optional <strong>Release note</strong>, click <strong>Release</strong> and confirm.</li>
+<li>Any role that reads runs: Scheduler, <strong>Completed Runs</strong>.</li>
+</ol>
+<p><strong>What you should see.</strong> The confirmation says a release is final. The message reads "Released: … (approval #N)" and the row leaves the queue. In the Scheduler the run shows a <strong>Released</strong> badge; hovering over it shows who released it and when (UTC).</p>
+<div class="record"><p>The run records who created and who executed it, with their roles. The release is a run-release row (one per run, never changed) and an approval row with action <code>release</code>, the note, and the persons who created, changed or executed the run: <strong>Approval history</strong>, filter <strong>Run releases</strong>. See <a href="#apps-config-release">releasing a completed run</a>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>A person who created, changed (for example rescheduled) or executed the run cannot release it: "You created, changed or executed this run (one of its attempts). Another qp person must release it." With separate accounts per role this shows only when the <span class="role">qp</span> account carries the same <code>person_id</code> as one of them.</li>
+<li>A run with no recorded person behind its creation or start is listed with "No recorded person created or started this run: …" and is never released.</li>
+<li>A run already released is not offered again; if it was released meanwhile: "Already released meanwhile; the list was refreshed."</li>
+<li><span class="role">qp</span> clicks <strong>View Log</strong> on the run in the Scheduler: "(your role does not hold R on run logs)". The release is decided on the summary, not the log.</li>
+<li>Setting a released run back for a retry is refused.</li>
+</ul>
+<p><strong>Afterwards.</strong> Nothing to undo: a release is final. Retire the Run Once schedule if it is still listed.</p>
+<p><strong>Last done.</strong> Not yet. It needs a completed run and a <span class="role">qp</span> account.</p>
+
+<h3 id="training-e7">E7 Deactivate and reactivate an account</h3>
+<p><strong>Goal.</strong> Take an account out of use and bring it back, and see that removing access acts at once while giving it back waits for a second person.</p>
+<p><strong>Accounts and roles.</strong> <code>admin</code> (<span class="role">admin</span>) deactivates and proposes the activation; <code>svieira</code> (<span class="role">qa</span>) reviews the deactivation and confirms the activation. The subject is a test account that is not needed for anything else.</p>
+<p><strong>Before you start.</strong> The account is enabled and is not the last enabled <span class="role">admin</span> or <span class="role">qa</span>. For an <span class="role">operator</span>, remove its units first with <code>units.sh remove</code> if they should not come back with it.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">admin</span>: User Manager, <strong>Users</strong>, tab <strong>Active</strong>. Select the account, write the <strong>Reason</strong> and click <strong>Deactivate account</strong>.</li>
+<li>Subject: try to keep working, then sign in again.</li>
+<li><span class="role">qa</span>: <strong>Decisions</strong>, tab <strong>To review</strong>. Select the deactivation and click <strong>Mark reviewed</strong>.</li>
+<li><span class="role">admin</span>: <strong>Users</strong>, tab <strong>Inactive</strong>. Select the account and click <strong>Activate (waits for qa)</strong>.</li>
+<li><span class="role">qa</span>: <strong>Decisions</strong>, <strong>Waiting for qa</strong>, select the activation, <strong>Confirm</strong>.</li>
+</ol>
+<p><strong>What you should see.</strong> Step 1 applies at once: the person is signed out everywhere and their MQTT credentials are revoked; data, role and history are kept. In step 2 sign-in shows "This account is not active". After step 4 the account is still disabled; after step 5 it signs in again with its role.</p>
+<div class="record"><p>Both changes are account decisions with maker, subject, reason, checker and note: <strong>Decisions</strong>, tab <strong>All</strong>. Status changes are kept in the append-only account status history; the review and the confirmation are appended to the policy history (<code>iamchain</code>).</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>The administrator selects their own account: "This is your own account — another administrator would have to change it."</li>
+<li>The administrator deactivates <code>svieira</code>, today the only enabled <span class="role">qa</span> account: refused with "this is the last enabled qa person", before anything is recorded. The same holds for the last enabled administrator.</li>
+<li>While an activation waits for <span class="role">qa</span>, the account's role and person cannot be changed until it is decided or withdrawn with <strong>Withdraw decision</strong>.</li>
+</ul>
+<p><strong>Afterwards.</strong> Leave the account as it should be: reactivated if still needed, otherwise deactivated. See <a href="#access-changes">when your account is deactivated</a>.</p>
+<p><strong>Last done.</strong> 31 October 2026: <code>developer</code> deactivated as a test of the retire path, after its units were removed with <code>units.sh</code> (decision 12). Reactivation: not yet.</p>
+
+<h3 id="training-e8">E8 Quarterly access review</h3>
+<p><strong>Goal.</strong> Review who holds which role and unit, sign it off, and read it as an auditor.</p>
+<p><strong>Accounts and roles.</strong> <code>svieira</code> (<span class="role">qa</span>) creates and signs off; <code>viewer</code> (<span class="role">auditor</span>) reads. One <span class="role">qa</span> person may create and sign off the same review: a known single-person control.</p>
+<p><strong>Before you start.</strong> The tab holds one review per quarter, and its snapshot never changes. Creating it is this quarter's review, not practice: run this exercise when the review is due.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">qa</span>: User Manager, <strong>Access review</strong>, <strong>Create this quarter's review</strong>.</li>
+<li><span class="role">qa</span>: read the snapshot: accounts with role, state, <code>person_id</code> and last login; units; <strong>Unexplained at the time of the review</strong>; decisions waiting and made since the last review; waivers; the IAM switches; the policy version and hash-chain verdict. Compare the accounts with the <a href="#compliance-test-accounts">test accounts</a> table.</li>
+<li><span class="role">qa</span>: write an optional note and click <strong>Sign off</strong>.</li>
+<li><span class="role">auditor</span>: User Manager, <strong>Access review</strong>.</li>
+</ol>
+<p><strong>What you should see.</strong> The signed-off review with its snapshot, note and signer. The auditor reads it but has no create or sign-off button.</p>
+<div class="record"><p>The review, its snapshot and its sign-off are kept in the User Manager's <strong>Access review</strong> tab, readable by <span class="role">qa</span>, <span class="role">qp</span> and <span class="role">auditor</span>. See <a href="#compliance-review">the quarterly access review</a>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li><span class="role">auditor</span> and <span class="role">qp</span> cannot create or sign off a review.</li>
+<li>A signed-off review cannot be undone or changed.</li>
+</ul>
+<div class="warn"><p>Signing off a review that lists unexplained roles accepts them: the drift banner in the Decisions tab stops showing them until a later change to that account. Explain or correct them first.</p></div>
+<p><strong>Afterwards.</strong> Nothing to undo.</p>
+<p><strong>Last done.</strong> Not recorded here.</p>
+
+<h3 id="training-adding">Adding an exercise</h3>
+<p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
+<ol class="steps">
+<li>Write it in the form of <a href="#training-template">How every exercise is written</a>, all nine parts. Take the screen, tab, button and field names and the refusal texts from the code, not from memory.</li>
+<li>Add its row to <a href="#training-summary">Exercises at a glance</a>: exercise, roles, what it proves, last done ("Not yet").</li>
+<li>After the change is deployed, run the exercise on the platform.</li>
+<li>Write the date and the result under <strong>Last done</strong> and in the summary row, with the record numbers the screens showed (approval, decision, pending change). Never write a number you did not see.</li>
+<li>When the exercise is evidence that a control works, record it in the <a href="#compliance-decisions">decision record</a> as well, and list anything it found in <a href="#compliance-gaps">known gaps</a>.</li>
+</ol>
+</section>
