@@ -615,6 +615,22 @@ if [[ "$MODE" == "all" ]]; then
     cfg_update NODE_RED_TZ "$_v"
 
     echo ""
+    info "Nightly backups (apps/backup): an absolute folder on this host, created mode 700."
+    info "It holds secrets; another disk than the data's is better (it survives that disk)."
+    while true; do
+        ask _v "Backup folder" "$(cfg_get BACKUP_DIR)"
+        [[ "$_v" =~ ^/[A-Za-z0-9._/-]+$ && "$_v" != */.* ]] && break
+        info "${RED}An absolute path such as /var/backups/medcea or /mnt/backup/medcea.${NC}"
+    done
+    cfg_update BACKUP_DIR "$_v"
+    while true; do
+        ask _v "Days to keep backups" "$(cfg_get BACKUP_KEEP_DAYS)"
+        [[ "$_v" =~ ^[1-9][0-9]{0,3}$ ]] && break
+        info "${RED}A whole number of days, 1 or more.${NC}"
+    done
+    cfg_update BACKUP_KEEP_DAYS "$_v"
+
+    echo ""
     info "AI workbench (JupyterHub): per-user notebooks behind Keycloak, about 2 GB of images."
     _def="y"; [[ "$(cfg_get WORKBENCH_ENABLED)" == "false" ]] && _def="n"
     if ask_yn "Deploy the AI workbench" "$_def"; then
@@ -626,7 +642,7 @@ fi
 
 # --- Summary ------------------------------------------------------------------
 section "Saved to $CONFIG_FILE"
-for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER ADMIN_EMAIL QA_USER QA_EMAIL ENGINEER_USER ENGINEER_EMAIL POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ WORKBENCH_ENABLED; do
+for v in PROJECT_NAME DOMAIN LOCAL_DNS USE_TAILSCALE ADMIN_USER ADMIN_EMAIL QA_USER QA_EMAIL ENGINEER_USER ENGINEER_EMAIL POSTGRES_DB STORAGE_SIZE DOCKERHUB_USER NODE_RED_TZ BACKUP_DIR BACKUP_KEEP_DAYS WORKBENCH_ENABLED; do
     printf '  %-18s %s\n' "$v" "$(cfg_get "$v")"
 done
 for v in ADMIN_PASS POSTGRES_PASS DOCKERHUB_PAT; do

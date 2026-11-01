@@ -139,6 +139,10 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         pgadmin, or the deployment still holds the OAuth2 config or default password as plain"
     echo -e "         env (./deploy-infra.sh); WARN while IAM_GATES=false; SKIP without the deployment"
     echo ""
+    echo -e "  ${CYAN}backupage${NC} the nightly backup (apps/backup): NAMESPACE"
+    echo -e "         OK while the newest OK marker in BACKUP_DIR is at most 26 h old, WARN beyond,"
+    echo -e "         FAIL beyond 72 h; SKIP without CronJob medcea-backup, and on its first day"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -169,6 +173,9 @@ if [[ -f "${SCRIPT_DIR}/config.env" ]]; then
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/config.env" 2>/dev/null || true
 fi
+
+# backup_dir, backup_newest_ok, backup_age_status (check backupage); read-only
+source "${SCRIPT_DIR}/apps/backup/lib-backup.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${RED}ERROR: Config file not found: $CONFIG_FILE${NC}" >&2
@@ -265,6 +272,31 @@ check_pvc() {
     else
         _record WARN "$name" "pvc/${claim} (${ns}) is ${phase:-in no phase}, not Bound"
     fi
+}
+
+# =============================================================================
+# Check: the nightly backup is recent — read-only
+# target: NAMESPACE. SKIP before apps/backup is deployed (no CronJob medcea-backup);
+# otherwise the age of the newest OK marker in BACKUP_DIR on this host (the job hands
+# each folder to the account that deployed it): WARN over 26 h, FAIL over 72 h. With
+# no complete backup yet, the CronJob's own age stands in (SKIP on its first day).
+# =============================================================================
+check_backupage() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" created created_epoch dir newest res
+    if ! created="$(timeout "$TIMEOUT" $KUBECTL get cronjob medcea-backup -n "$ns" \
+            -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)" || [[ -z "$created" ]]; then
+        _record SKIP "$name" "no CronJob medcea-backup in ${ns} (./apps/backup/deploy.sh)"
+        return
+    fi
+    dir="$(backup_dir)"
+    if [[ ! -d "$dir" || ! -r "$dir" || ! -x "$dir" ]]; then
+        _record FAIL "$name" "cannot read ${dir} (BACKUP_DIR): run this as the account that ran ./apps/backup/deploy.sh, which creates it"
+        return
+    fi
+    created_epoch="$(date -u -d "$created" +%s 2>/dev/null || echo 0)"
+    newest="$(backup_newest_ok "$dir")"
+    res="$(backup_age_status "$(date -u +%s)" "${newest#* }" "$created_epoch" "${newest%% *}")"
+    _record "${res%%|*}" "$name" "${res#*|}"
 }
 
 # =============================================================================
@@ -1232,6 +1264,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         noderedauth)  check_noderedauth "$name" "$target" ;;
         onboardroles) check_onboardroles "$name" ;;
         pgadminroles) check_pgadminroles "$name" "$target" ;;
+        backupage)    check_backupage "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

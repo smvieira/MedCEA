@@ -10,8 +10,8 @@
 # allowUiUpdates false): they change only through git. A role is computed again at each
 # sign-in, so a changed role path or a removed role reaches a person when their session
 # ends: 5 minutes without use or 1 hour after sign-in (below), not at the restart.
-# Not backed up: --reset, --uninstall and a MicroK8s wipe delete it, and warn first
-# (infra/lib-data-volumes.sh).
+# Copied nightly by apps/backup into BACKUP_DIR; --reset, --uninstall and a MicroK8s
+# wipe delete the volume, and warn first (infra/lib-data-volumes.sh).
 persistence:
   enabled: true
   type: pvc

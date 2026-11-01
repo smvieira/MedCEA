@@ -17,6 +17,7 @@
 <tr><td><a href="#training-e9">E9 Open an example notebook in a new workbench home</a></td><td><span class="role">bio_scientist</span> (or any role the AI Workbench admits), <span class="role">admin</span></td><td>A new workspace opens documents on its first start and shows the person, not <code>jovyan</code>.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e10">E10 Sign out and switch accounts</a></td><td><span class="role">engineer</span>, <span class="role">admin</span></td><td>After <strong>Sign out</strong>, the next person in the same browser never gets the previous person's AI Workbench, Grafana or pgAdmin, and an app left open follows the new person within minutes.</td><td>1 Nov 2026 (workbench part)</td></tr>
 <tr><td><a href="#training-e11">E11 Keep an Editor's dashboard across a restart</a></td><td><span class="role">engineer</span>, <span class="role">qa</span>, host operator</td><td>An Editor's own dashboard and an open Grafana session survive a restart of Grafana, while the platform's dashboards stay read-only and a Viewer cannot save.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e12">E12 Make and check a backup</a></td><td>host operator (<span class="role">admin</span>), <span class="role">bio_scientist</span> (or any role the AI Workbench admits)</td><td>A backup can be made on demand, checked against its checksums, is readable only by the host account, and gives back a person's deleted file.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -359,6 +360,39 @@
 <li><code>eng</code>: in the copy from step 2, open <strong>Dashboard settings → JSON Model</strong>, change the title and save. It works: an Editor's own dashboard is the Editor's to change. Only the platform's dashboards are refused.</li>
 </ul>
 <p><strong>Afterwards.</strong> <code>eng</code>: delete both <code>E11</code> dashboards (<strong>Dashboard settings → Delete dashboard</strong>). A dashboard that should stay in the platform goes into the repository instead (<a href="#apps-grafana">Grafana</a>).</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
+<h3 id="training-e12">E12 Make and check a backup</h3>
+<p><strong>Goal.</strong> Make a backup on demand, check it, and bring back a file a person deleted from their AI workbench home. The exercise proves the decision of 1 November 2026 ("Nightly backups to a local folder"): the backup holds the person's home, its checksums show it is unchanged, only the host account can read it, and the documented restore gives the file back. (E11 is the Grafana exercise of the same day, so this one is E12.)</p>
+<p><strong>Accounts and roles.</strong> The host operator (the account that ran <code>./apps/backup/deploy.sh</code>; on this install <code>svieira</code>, also the platform <span class="role">admin</span>) makes, checks and restores the backup. A <span class="role">bio_scientist</span> test account (any role the AI Workbench admits will do) creates and deletes the file. On this one-person install both are the same human (see <a href="#compliance-test-accounts">test accounts</a>).</p>
+<p><strong>Before you start.</strong> <code>./apps/backup/deploy.sh</code> has run (<code>./health-check.sh</code> shows <strong>Backups</strong> as OK or, on its first day, SKIP), and the test account has started its AI workbench at least once, so its home <code>claim-&lt;name&gt;</code> exists. Use one browser session for the test account (see <a href="#training-safely">running an exercise safely</a>).</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Test account: open the AI Workbench from the portal, then <strong>File → New → Text File</strong>, type one line, and save it as <code>e12-&lt;date&gt;.txt</code> in the home folder.</li>
+<li>Host operator: <code>./guide.sh</code> → Backups → Make a backup now (or <code>./apps/backup/backups.sh now</code>), answer <code>y</code>. Note the folder name the log prints after <code>backup: folder</code>, and the time.</li>
+<li>Host operator: Backups → List the backups, then Backups → Check a backup's checksums with that folder name.</li>
+<li>Host operator: <code>./health-check.sh</code>.</li>
+<li>Test account: delete <code>e12-&lt;date&gt;.txt</code> (right-click → <strong>Delete</strong>), then stop the workspace: <strong>File → Hub Control Panel → Stop My Server</strong>.</li>
+<li>Host operator: Backups → How to restore with the folder name, and follow part C for one file: find <code>D</code>, then <code>tar -tzf F/volumes/claim-&lt;name&gt;.tar.gz | grep e12</code>, then <code>sudo tar -C "$D" -xzpf F/volumes/claim-&lt;name&gt;.tar.gz --numeric-owner ./e12-&lt;date&gt;.txt</code>.</li>
+<li>Test account: sign in, open the AI Workbench, and open <code>e12-&lt;date&gt;.txt</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 2 prints the Job's log: <code>pg_dump</code> of <code>medcea_db</code> and <code>keycloak</code>, one <code>tar</code> line per workbench home, <code>node-red</code> and <code>grafana</code>, then <code>OK: … complete</code>, <code>Job … succeeded</code> and the list of folders. No password appears.</li>
+<li>Step 3 lists the folder as <code>complete</code> with its size, and the check ends <code>OK: &lt;folder&gt;, N files match the checksums written at backup time.</code></li>
+<li>Step 4 shows <strong>Backups</strong> OK (with <code>-v</code>: <code>newest complete backup &lt;folder&gt;, 0 h old</code>).</li>
+<li>Step 6 lists exactly one <code>./e12-&lt;date&gt;.txt</code> in the archive and restores it without an error.</li>
+<li>In step 7 the file is back with the line typed in step 1.</li>
+</ul>
+<div class="record"><p>Nothing is recorded in the platform's database: a backup and a restore are host operations. The evidence is the folder itself (<code>MANIFEST</code> with every file's size and SHA-256, <code>OK</code> with the finish time), the Job (<code>microk8s kubectl -n medcea get jobs -l app=medcea-backup</code>, named <code>medcea-backup-now-&lt;time&gt;</code>), and the logs <code>logs/backups-now-&lt;time&gt;.log</code> and <code>logs/backups-verify-&lt;time&gt;.log</code>. Write the folder name and the times of steps 2 and 7 under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>Host operator: <code>sudo -u nobody ls /var/backups/medcea</code> is refused with "Permission denied": only the deploying account (and root) can read the backups.</li>
+<li>Host operator: <code>./apps/backup/backups.sh verify ../etc</code> is refused: "'../etc' is not a backup folder name (like 20261102-023000Z)." The guide does not accept such a name at all.</li>
+<li>Host operator, only if <code>list</code> shows a folder as <code>incomplete</code> (a run that failed): <code>verify</code> on it is refused: "has no OK marker: that run did not finish; choose a complete one." Never change a real backup to provoke a checksum failure; <code>tests/test_backup.py</code> covers that offline.</li>
+<li>Host operator: <code>./apps/backup/backups.sh delete</code> is refused ("Unknown command"): nothing in the platform deletes a backup on request; only the nightly run deletes folders older than <code>BACKUP_KEEP_DAYS</code>.</li>
+</ul>
+<p><strong>Afterwards.</strong> Test account: delete <code>e12-&lt;date&gt;.txt</code> again. The backup folder from step 2 stays; it is deleted with the others once it is older than <code>BACKUP_KEEP_DAYS</code>.</p>
 <p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>

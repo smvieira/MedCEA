@@ -211,7 +211,7 @@ uninstall-all)
     echo -e "${RED}${BOLD}TOTAL UNINSTALL — this permanently removes:${NC}"
     echo "  - every platform service, application and ALL data (the AI workbench homes, each"
     echo "    person's notebooks, and Grafana's volume, Editors' own dashboards, included;"
-    echo "    not backed up)"
+    echo "    copied only by the nightly backup, if deployed: BACKUP_DIR is kept)"
     echo "  - MicroK8s (and Juju, if an old install left it), all cluster data and ~/.kube"
     echo "  - the onboarding wizard user service (cea-edge-wizard), edge/.venv"
     echo "  - the MedCEA block in /etc/hosts (name-based domain)"

@@ -121,7 +121,7 @@ singleuser:
   storage:
     # claim-<name> keeps the person's home across server restarts and hub-user removals
     # (delete_pvc false). Deleting the namespace deletes it: every uninstall path warns
-    # first (infra/lib-data-volumes.sh). Not backed up.
+    # first (infra/lib-data-volumes.sh). Copied nightly by apps/backup into BACKUP_DIR.
     capacity: ${WORKBENCH_STORAGE}
     # The example notebooks, read-only inside the home (ConfigMap workbench-examples,
     # from k8s/workbench/examples/): a person copies one to change it.

@@ -4,7 +4,7 @@
 #   ./guide.sh [--dry-run] [--help]
 #
 # Walks a tree of menus — area (install, infrastructure, applications, operators and
-# units, IAM switches, health and tests, edge devices, policy) → action → the questions
+# units, IAM switches, health and tests, edge devices, policy, backups) → action → the questions
 # that action needs — then shows the exact command, what it changes, whether it takes
 # the deploy lock or needs sudo, and runs it once you confirm: [Y/n] for a read-only
 # command, [y/N] for one that changes something, and the word yes typed in full for a
@@ -100,6 +100,7 @@ POD_RE='^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
 DB_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 INT_RE='^[1-9][0-9]{0,4}$'
 IPV4_RE='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+STAMP_RE='^[0-9]{8}-[0-9]{6}Z$'                    # a backup folder (apps/backup), no leading -
 BY_USER=""                                          # --by, remembered for the session
 
 ask() {   # ask PROMPT [DEFAULT] → ANSWER (trimmed; DEFAULT when empty)
@@ -243,6 +244,7 @@ pick_one_component() {   # pick_one_component deploy|uninstall → ANSWER (name)
 component_purpose() {
     case "$1" in
         access)        echo "Access requests and the User Manager" ;;
+        backup)        echo "Nightly backups of the databases and volumes into BACKUP_DIR" ;;
         database)      echo "medcea_db: schema, migrations, roles, grants, the IAM_DB_ROLES bundle" ;;
         edge-wizard)   echo "Device onboarding wizard (host service) at the onboard address" ;;
         frontend)      echo "System Configuration UI, config-api (PostgREST) and Database Management" ;;
@@ -531,14 +533,14 @@ a_uninstall_infra() {
     CMD=(./install.sh --uninstall-infra)
     EFFECT="removes every platform service, every application and ALL data (the whole namespace, PVCs included); keeps MicroK8s, config.env and .ca/"
     LOCK=yes; LEVEL=destroy; SUDO=mk8s
-    NOTES=("install.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Reinstall: ./install.sh")
+    NOTES=("install.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Reinstall: ./install.sh")
     plan_run
 }
 a_uninstall_all() {
     CMD=(./install.sh --uninstall-all)
     EFFECT="removes MicroK8s and all cluster data, ~/.kube, the /etc/hosts block, the wizard service, edge/.venv, logs/ and credentials files; asks about .ca/ and config.env (with guide.sh's backups of it)"
     LOCK=yes; LEVEL=destroy; SUDO="yes (snap remove, /etc/hosts)"
-    NOTES=("install.sh then asks you to type 'uninstall'. edge/provisioned/ and edge/firmware/ are kept." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
+    NOTES=("install.sh then asks you to type 'uninstall'. edge/provisioned/ and edge/firmware/ are kept." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
     plan_run
 }
 
@@ -582,14 +584,14 @@ a_infra_reset() {
         CMD+=(--secrets); EFFECT+="; blanks generated secrets in config.env"
     fi
     LOCK=yes; LEVEL=destroy; SUDO=mk8s
-    NOTES=("deploy-infra.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Afterwards both: ./deploy-infra.sh && ./deploy-apps.sh --all")
+    NOTES=("deploy-infra.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Afterwards both: ./deploy-infra.sh && ./deploy-apps.sh --all")
     plan_run
 }
 a_infra_uninstall() {
     CMD=(./deploy-infra.sh --uninstall)
     EFFECT="removes MicroK8s (and Juju), all cluster data, ~/.kube and the /etc/hosts block; keeps config.env, .ca/, edge/.venv, logs"
     LOCK=yes; LEVEL=destroy; SUDO="yes (snap remove, /etc/hosts)"
-    NOTES=("deploy-infra.sh then asks you to type 'yes'. Reinstalling is slow (images are pulled again)." "It deletes every AI workbench home (each person's notebooks; not backed up): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
+    NOTES=("deploy-infra.sh then asks you to type 'yes'. Reinstalling is slow (images are pulled again)." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
     plan_run
 }
 a_infra_help() {
@@ -1626,11 +1628,48 @@ a_pol_netpol() {
     plan_run
 }
 
+# ── Backups (apps/backup) ──
+backup_folder() {   # → ANSWER: a dated backup folder, or "" for the newest complete one
+    ask_match "Backup folder, e.g. 20261102-023000Z (Enter = the newest complete one)" "$STAMP_RE" \
+        "a folder name like 20261102-023000Z (Backups → List the backups shows them)" "" optional
+}
+a_backup_now() {
+    CMD=(./apps/backup/backups.sh now)
+    EFFECT="one run of the nightly backup now (a Job): a new dated folder in BACKUP_DIR; folders older than BACKUP_KEEP_DAYS are deleted after it"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Waits for the Job (up to an hour) and prints its log, which names files and sizes, never a secret."
+           "Needs ./apps/backup/deploy.sh first (Applications → Deploy one component → backup).")
+    plan_run
+}
+a_backup_list() {
+    CMD=(./apps/backup/backups.sh list)
+    EFFECT="nothing (the dated folders in BACKUP_DIR: complete or not, size, files)"
+    CFG_NEEDED=yes
+    plan_run
+}
+a_backup_verify() {
+    backup_folder
+    CMD=(./apps/backup/backups.sh verify)
+    [[ -n "$ANSWER" ]] && CMD+=("$ANSWER")
+    EFFECT="nothing (every file against the folder's SHA256SUMS, written at backup time)"
+    CFG_NEEDED=yes
+    plan_run
+}
+a_backup_restore() {
+    backup_folder
+    CMD=(./apps/backup/backups.sh restore-help)
+    [[ -n "$ANSWER" ]] && CMD+=("$ANSWER")
+    EFFECT="nothing: prints the restore steps (database, Keycloak, a workbench home, Node-RED, Grafana) with that folder's paths"
+    CFG_NEEDED=yes
+    NOTES=("Shown, not run: a restore stops services and drops databases; you run the steps you need.")
+    plan_run
+}
+
 # Areas: "function|label|purpose". The order is the menu's.
 AREA_INSTALL=(
     "a_install|Install or update everything|Infrastructure, then every application, then a health check."
     "a_install_infra|Infrastructure only|MicroK8s, Postgres, Keycloak, Grafana, Node-RED, portal, AI workbench."
-    "a_install_apps|Applications only|Database schema, wizard, config UI, scheduler, monitor, reports, flows, access."
+    "a_install_apps|Applications only|Database schema, wizard, config UI, scheduler, monitor, reports, flows, access, backups."
     "a_uninstall_apps|Uninstall applications|All, or the ones you name; infrastructure keeps running; data kept unless purged."
     "a_uninstall_infra|Uninstall the infrastructure|Every service, every application and ALL data; keeps MicroK8s."
     "a_uninstall_all|Uninstall everything|All of the above plus MicroK8s, the wizard service, logs and credentials files."
@@ -1703,6 +1742,12 @@ AREA_POLICY=(
     "a_pol_grants|The grants SQL|cli.py compile grants (printed, never run)."
     "a_pol_netpol|The NetworkPolicies|cli.py compile netpol (printed, never applied)."
 )
+AREA_BACKUP=(
+    "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
+    "a_backup_list|List the backups|./apps/backup/backups.sh list."
+    "a_backup_verify|Check a backup's checksums|./apps/backup/backups.sh verify [folder]."
+    "a_backup_restore|How to restore (shows the steps)|./apps/backup/backups.sh restore-help [folder]: printed, not run."
+)
 AREAS=(
     "AREA_INSTALL|Install and uninstall|Install, update or remove the whole platform."
     "AREA_INFRA|Infrastructure|deploy-infra.sh and its settings: cluster services, workbench, reset."
@@ -1712,6 +1757,7 @@ AREAS=(
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
     "AREA_POLICY|Policy (read-only)|What apps/iam/policy/defaults.yaml compiles to."
+    "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 
 after_action() {

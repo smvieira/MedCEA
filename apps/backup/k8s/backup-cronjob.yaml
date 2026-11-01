@@ -1,0 +1,127 @@
+# apps/backup/k8s/backup-cronjob.yaml — the nightly backup (apps/backup/deploy.sh).
+# Render list: NAMESPACE BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_IMAGE BACKUP_UID BACKUP_GID
+#              STORAGE_DIR POSTGRES_DB
+#
+# One pod per run, from the image rdbms-postgresql runs (pg_dump of the server's own
+# version, already on the node), running apps/backup/backup-job.sh from ConfigMap
+# medcea-backup-script. It writes one dated folder into the host's BACKUP_DIR
+# (hostPath, read-write) and reads the volumes from microk8s-hostpath's PV directory
+# (hostPath, read-only): the parent directory and not each volume, because a workbench
+# home appears at a person's first start and the job must find it without a redeploy.
+# The postgres password reaches the pod only as PGPASSWORD from the Secret.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: medcea-backup
+  namespace: ${NAMESPACE}
+  labels:
+    app: medcea-backup
+spec:
+  # 02:30 UTC: outside working hours, and 45 minutes before the scheduler's own
+  # nightly job sys_log_retention (03:15 UTC).
+  schedule: "30 2 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  # A host that was off at 02:30 runs the night's backup when it is back within 6 h.
+  startingDeadlineSeconds: 21600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: medcea-backup
+    spec:
+      # No retry: a failed run leaves its folder without OK, the health check says
+      # so, and the next night runs again.
+      backoffLimit: 0
+      activeDeadlineSeconds: 10800
+      template:
+        metadata:
+          labels:
+            app: medcea-backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          containers:
+          - name: backup
+            image: ${BACKUP_IMAGE}
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "/scripts/backup-job.sh", "run"]
+            env:
+            - name: BACKUP_OUT
+              value: /backup
+            - name: STORAGE
+              value: /storage
+            - name: NAMESPACE
+              value: "${NAMESPACE}"
+            - name: DATABASES
+              value: "${POSTGRES_DB} keycloak"
+            # The AI workbench homes, Node-RED's /data and Grafana's database. Not
+            # PostgreSQL's own volume (dumped above), the broker's or the hub's.
+            - name: VOLUMES
+              value: "claim-* node-red grafana"
+            - name: KEEP_DAYS
+              value: "${BACKUP_KEEP_DAYS}"
+            - name: OWNER_UID
+              value: "${BACKUP_UID}"
+            - name: OWNER_GID
+              value: "${BACKUP_GID}"
+            - name: PGHOST
+              value: rdbms-postgresql
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: postgres
+            - name: PGCONNECT_TIMEOUT
+              value: "30"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rdbms-postgresql
+                  key: postgres-password
+            - name: HOME
+              value: /tmp
+            # root, to read every file of every person's home and to write into the
+            # owner's mode-700 folder; it hands each folder back to that account.
+            # No other capability, no privilege escalation, a read-only image.
+            securityContext:
+              runAsUser: 0
+              runAsGroup: 0
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+                add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                memory: 1Gi
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: out
+              mountPath: /backup
+            - name: storage
+              mountPath: /storage
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: script
+            configMap:
+              name: medcea-backup-script
+              defaultMode: 0444
+          - name: out
+            hostPath:
+              path: ${BACKUP_DIR}
+              type: Directory
+          - name: storage
+            hostPath:
+              path: ${STORAGE_DIR}
+              type: Directory
+          - name: tmp
+            emptyDir: {}

@@ -625,6 +625,12 @@ Application content (flows, schemas, etc.) lives in `apps/` and follows a **sepa
 
 ```
 apps/
+├── backup/
+│   ├── deploy.sh           # BACKUP_DIR (mode 700) + CronJob medcea-backup, daily 02:30 UTC
+│   ├── backup-job.sh       # In the pod: pg_dump medcea_db + keycloak, tar of the homes,
+│   │                       #   Node-RED and Grafana volumes, MANIFEST/SHA256SUMS/OK, retention
+│   ├── backups.sh          # Host: now | list | verify | restore-help (the restore is shown, not run)
+│   └── uninstall.sh        # Removes the CronJob; BACKUP_DIR and the backups stay
 ├── database/
 │   ├── medcea_db_ddl.sql          # Schema DDL (plain SQL, schema `medcea`)
 │   ├── medcea_db_migrations.sql   # Idempotent migrations (algorithms, permissions, state)

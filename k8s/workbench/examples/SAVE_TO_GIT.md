@@ -1,7 +1,9 @@
 # Save your notebooks to git
 
-Your home folder is kept when your server stops, but it is **not backed up**. Keep the work
-that matters in the research repository on GitHub, committed under your own name.
+Your home folder is kept when your server stops, and the platform copies it every night
+into a backup on the same machine, kept for two weeks by default. That copy is for
+disasters, restored by an administrator, not a history of your work: keep the work that
+matters in the research repository on GitHub, committed under your own name.
 
 The repository is the one your administrator set for this platform. Open a **Terminal**
 (File → New → Terminal) and print it:

@@ -4,7 +4,8 @@
 #   data_volumes_warn NS
 #
 # Two kinds of volume in the platform namespace hold what people made in the
-# browser, and nothing backs either up:
+# browser; only the nightly backup (apps/backup, when deployed) copies them, into
+# BACKUP_DIR on this host, which no uninstall deletes:
 #   - each person's AI workbench home, PersistentVolumeClaim claim-<name>
 #     (KubeSpawner; delete_pvc false keeps it when a server stops or a hub user is
 #     removed): their notebooks;
@@ -21,9 +22,16 @@
 # and never fails the caller (no such claims: it says nothing; no cluster answer:
 # a short warning).
 #
-# Needs $KUBECTL (e.g. "microk8s kubectl"). Read-only.
+# Needs $KUBECTL (e.g. "microk8s kubectl"). Read-only. BACKUP_DIR comes from the
+# caller's config.env; the newest complete backup in it is named when there is one.
 data_volumes_warn() {
-    local ns="${1:-medcea}" json rows
+    local ns="${1:-medcea}" json rows backed="nothing backs them up" backed1="nothing backs it up" nb
+    # shellcheck source=../apps/backup/lib-backup.sh
+    if source "$(dirname "${BASH_SOURCE[0]}")/../apps/backup/lib-backup.sh" 2>/dev/null \
+            && nb="$(backup_newest_ok "$(backup_dir)" 2>/dev/null)" && [[ -n "$nb" ]]; then
+        backed="newest nightly backup: ${nb%% *} in $(backup_dir), which this keeps"
+        backed1="$backed"
+    fi
     if ! json="$(timeout 20 ${KUBECTL:-microk8s kubectl} get pvc -n "$ns" -o json 2>/dev/null </dev/null)"; then
         echo -e "\033[0;31mCould not list the AI workbench homes (claim-<name>) or Grafana's volume in '$ns'.\033[0m"
         echo -e "\033[0;31mIf people keep notebooks or their own dashboards there, this deletes them: answer no,\033[0m"
@@ -55,9 +63,10 @@ for i in items:
         fi
     done <<<"$rows"
     if (( ${#homes[@]} )); then
-        echo -e "\033[0;31m\033[1mAI workbench homes that this deletes (nothing backs them up):\033[0m"
+        echo -e "\033[0;31m\033[1mAI workbench homes that this deletes ($backed):\033[0m"
         for line in "${homes[@]}"; do echo "  - $line"; done
-        echo "  To keep them, answer no now and first either:"
+        echo "  To keep them, answer no now and first either (or restore them from the nightly backup"
+        echo "  afterwards: ./apps/backup/backups.sh restore-help):"
         echo "    - have each person commit and push their notebooks to the research repository"
         echo "      (Git panel; ~/medcea-examples/SAVE_TO_GIT.md), or"
         echo "    - copy each directory above off the volume, e.g."
@@ -67,7 +76,7 @@ for i in items:
         echo ""
     fi
     if [[ -n "$grafana" ]]; then
-        echo -e "\033[0;31m\033[1mGrafana's volume, which this deletes (nothing backs it up):\033[0m"
+        echo -e "\033[0;31m\033[1mGrafana's volume, which this deletes ($backed1):\033[0m"
         echo "  - $grafana"
         echo "  It holds the dashboards Editors made in the browser (new ones and \"Save as\" copies),"
         echo "  their folders, annotations and alert rules. The platform's own dashboards come from"

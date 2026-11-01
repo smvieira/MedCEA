@@ -55,6 +55,8 @@
 #  29  Ctrl-C during the chain exits 130 with the resume text
 #  30  Ctrl-C while the chain waits at a question (IAM_DB_ROLES's checklist, the units
 #      question), then y typed: exit 130 at once, IAM_DB_ROLES still false, no new backup
+#  31  Backups: now (changes, the lock), list, verify with a folder (a bad name re-asked) and
+#      restore-help for the newest, dry; the restore entry runs restore-help, nothing else
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -152,9 +154,9 @@ has   "yes runs (dry)" "[dry run] not executed: ./install.sh --uninstall-apps da
 no_stub
 
 echo "3  invalid menu input"
-guide $'9\nx\nq\n'
+guide $'10\nx\nq\n'
 rc_is "quits with 0" 0
-has   "9 is re-asked" "not a choice: '9'"
+has   "10 is re-asked" "not a choice: '10'"
 has   "x is re-asked" "not a choice: 'x'"
 
 echo "4  end of input"
@@ -669,6 +671,20 @@ hasnt "at the units question: no step" "STUB apps/database/deploy.sh"
 sw_is "$S/config.env" IAM_DB_ROLES false
 compgen -G "$S/config.env.guide-*.bak" >/dev/null && fail "a backup was made" || pass "config.env not touched"
 lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
+
+echo "31 backups"
+mkcfg false false
+guide $'9\n1\ny\nb\n2\n\nb\n3\n../etc\n20261102-023000Z\n\nb\n4\n\n\nq\n'
+rc_is "quits with 0" 0
+has   "now (dry)" "[dry run] not executed: ./apps/backup/backups.sh now"
+has   "now takes the lock" "Deploy lock: takes it"
+has   "list (dry)" "[dry run] not executed: ./apps/backup/backups.sh list"
+has   "a bad folder name is re-asked" "a folder name like 20261102-023000Z"
+has   "verify with the folder (dry)" "[dry run] not executed: ./apps/backup/backups.sh verify 20261102-023000Z"
+has   "restore-help for the newest (dry)" "[dry run] not executed: ./apps/backup/backups.sh restore-help"
+has   "the restore is shown, not run" "Shown, not run"
+hasnt "no folder smuggled in" "backups.sh verify ../etc"
+no_stub
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"
