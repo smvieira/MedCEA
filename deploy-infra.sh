@@ -1809,8 +1809,24 @@ PGA_DB_USER="$DBC_USER"; PGA_DB_PASS="$DBC_PASS"
 source "$SCRIPT_DIR/infra/lib-policy-tools.sh"
 PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin)" \
     || { echo -e "${RED}ERROR: cannot compile pgAdmin's sign-in roles from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }
+# Secret pgadmin-config holds the OAuth2 config (client secret, claims) and the
+# default password; pgAdmin reads them as secretKeyRef env, at start only, so
+# their sha256 is the pod annotation medcea/config-checksum. The rendered
+# manifest reaches python on stdin and only the hash is printed.
+PGADMIN_CONFIG_CHECKSUM="$(set -o pipefail
+    render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
+           KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP \
+    | python3 -c '
+import hashlib, json, sys, yaml
+try:  # a YAML error quotes the input, which holds the secrets: say nothing of it
+    doc = [d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "Secret"
+           and d["metadata"]["name"] == "pgadmin-config"][0]
+    print(hashlib.sha256(json.dumps(doc["stringData"], sort_keys=True).encode()).hexdigest())
+except Exception:
+    sys.exit(1)')" \
+    || { echo -e "${RED}ERROR: cannot render pgAdmin's Secret pgadmin-config (k8s/pgadmin/pgadmin.yaml).${NC}" >&2; exit 1; }
 render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
-       KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP | $MK8S kubectl apply -n "$NAMESPACE" -f -
+       KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 # 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config
 # database before gunicorn starts, which took ~5.5 min on a clean install (pod

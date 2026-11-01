@@ -178,9 +178,10 @@ class Wiring(unittest.TestCase):
                 body = "\n".join(l for l in read(tpl).splitlines() if not l.lstrip().startswith("#"))
                 used = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", body))
                 rel = tpl.split("/", 2)[2] if script.startswith("apps/") else tpl   # $SCRIPT_DIR is the app's dir
-                call = re.search(r'render "\$(?:SCRIPT_DIR|REPO_ROOT)/%s"(.*?)[|>]' % re.escape(rel), read(script), re.S)
-                self.assertIsNotNone(call, f"no render call for {tpl} in {script}")
-                listed = set(call.group(1).replace("\\", " ").split())
+                # the last call is the one applied (pgAdmin's first only hashes its Secret)
+                calls = re.findall(r'render "\$(?:SCRIPT_DIR|REPO_ROOT)/%s"(.*?)[|>]' % re.escape(rel), read(script), re.S)
+                self.assertTrue(calls, f"no render call for {tpl} in {script}")
+                listed = set(calls[-1].replace("\\", " ").split())
                 self.assertEqual(used - listed, set(), f"{tpl}: not in the render call")
                 self.assertNotIn("POSTGRES_PASS", used)
                 self.assertNotIn("POSTGRES_USER", used)

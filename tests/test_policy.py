@@ -1342,30 +1342,45 @@ class WiringTest(unittest.TestCase):
         self.assertNotIn("{'groups': [", tmpl)
         infra = self.read("deploy-infra.sh")
         self.assertIn('PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin)"', infra)
-        # envsubst leaves an unlisted ${VAR} as literal text; the call spans two lines
-        call = re.search(r'render "\$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml"(.*?)\|', infra, re.S).group(1)
+        # envsubst leaves an unlisted ${VAR} as literal text; each call spans lines.
+        # The first render only hashes Secret pgadmin-config, the second is applied.
+        calls = [c.replace("\\", " ").split() for c in
+                 re.findall(r'render "\$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml"(.*?)\|', infra, re.S)]
+        self.assertEqual(len(calls), 2)
         used = set(re.findall(r"\$\{([A-Z_]+)\}", tmpl))
-        self.assertEqual(used - set(call.replace("\\", " ").split()), set())
+        self.assertEqual(used - set(calls[1]), set())
+        self.assertEqual(used - set(calls[0]), {"PGADMIN_CONFIG_CHECKSUM"})
         self.assertLess(infra.index("policy_tool pgadmin"), infra.index('render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml"'))
+        self.assertLess(infra.index('PGADMIN_CONFIG_CHECKSUM="$('),
+                        infra.index("PLATFORM_IP PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply"))
         self.assertIn("compile \"$1\"", self.read("infra/lib-policy-tools.sh"))
         deploy = self.read("apps/edge-wizard/deploy.sh")
         self.assertIn("policy_tool edge-wizard", deploy)
         self.assertLess(deploy.index("unit_flash_runs | xargs"), deploy.index('systemctl --user restart "$UNIT"'))
         self.assertLess(deploy.index("policy_tool edge-wizard"), deploy.index('systemctl --user restart "$UNIT"'))
-        # the deployment's env holds the client secret: on stdin only, never an argument
+        # Secret pgadmin-config holds the client secret: on stdin only, never an
+        # argument; the deployment is read whole on stdin for literal env values
         for script in ("health-check.sh", "tests/iam-hosts.sh"):
             src = self.read(script)
-            self.assertIn('PGADMIN_CONFIG_OAUTH2_CONFIG")].value}', src, script)
-            self.assertNotRegex(src, r'python3 -c [^\n]*"\$(cfg|have_env|oauth)"', script)
+            self.assertIn("get secret pgadmin-config", src, script)
+            self.assertIn("-o jsonpath='{.data.oauth2-config}' 2>/dev/null \\\n        | base64 -d 2>/dev/null | python3 -c '",
+                          src, script)
+            self.assertIn('get deployment,replicaset -n', src, script)
+            self.assertIn("-l app=pgadmin -o json 2>/dev/null \\\n        | python3 -c '", src, script)
+            self.assertIn("get secret pgadmin-config -n", src, script)
+            self.assertIn("Secret pgadmin-config is missing in", src, script)
+            self.assertNotIn('PGADMIN_CONFIG_OAUTH2_CONFIG")].value}', src, script)
+            self.assertNotRegex(src, r'python3 -c [^\n]*"\$(cfg|have_env|oauth|literal)"', script)
         self.assertIn("pgadminroles", self.read("health-checks.conf"))
         self.assertIn("onboardroles", self.read("health-checks.conf"))
 
-    def _health_fn(self, fn, setup, kubectl_out, env=None):
+    def _health_fn(self, fn, setup, kubectl_out, env=None, kubectl=None, extra_env=None):
         """Run one health-check function with a fake kubectl/pgrep; its _record line."""
         import subprocess
         import tempfile
         tmp = tempfile.mkdtemp()
-        for name, body in (("kubectl", f"#!/bin/sh\ncat <<'EOF'\n{kubectl_out}\nEOF\n"),
+        env = dict(env or {}, **(extra_env or {}))
+        for name, body in (("kubectl", kubectl or f"#!/bin/sh\ncat <<'EOF'\n{kubectl_out}\nEOF\n"),
                            ("pgrep", "#!/bin/sh\nprintf '%s\\n' \"$FAKE_PGREP\"\n")):
             path = os.path.join(tmp, name)
             with open(path, "w") as f:
@@ -1379,19 +1394,138 @@ class WiringTest(unittest.TestCase):
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e).stdout.strip()
 
     def test_health_pgadminroles(self):
-        secret = "S3CRET-pgadmin-client"
+        """The claims come from Secret pgadmin-config; a plain env value FAILs; no secret printed."""
+        import base64
+        secret, password = "S3CRET-pgadmin-client", "ADM1N-pass"
         live = ("[{'OAUTH2_NAME': 'keycloak', 'OAUTH2_CLIENT_SECRET': '%s', "
                 "'OAUTH2_ADDITIONAL_CLAIMS': {'groups': ['admin']}}]" % secret)
-        out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea', live)
+
+        def ref(key):
+            return {"secretKeyRef": {"name": "pgadmin-config", "key": key}}
+
+        def obj(kind, name, oauth_env, pass_env):
+            env = [{"name": "PGADMIN_DEFAULT_EMAIL", "value": "admin@example.org"},
+                   dict(name="PGADMIN_DEFAULT_PASSWORD", **pass_env),
+                   dict(name="PGADMIN_CONFIG_OAUTH2_CONFIG", **oauth_env)]
+            return {"kind": kind, "metadata": {"name": name},
+                    "spec": {"template": {"spec": {"containers": [{"name": "pgadmin", "env": env}]}}}}
+
+        def listing(*objs):
+            return json.dumps({"kind": "List", "items": list(objs)})
+
+        def deployment(oauth_env, pass_env, *rs):
+            return listing(obj("Deployment", "pgadmin", oauth_env, pass_env), *rs)
+
+        new_env = ({"valueFrom": ref("oauth2-config")}, {"valueFrom": ref("default-password")})
+        moved = deployment(*new_env, obj("ReplicaSet", "pgadmin-new", *new_env))
+
+        def run(dep, cfg, env=None):
+            # answers the existence check (nothing), the deployment's JSON and the Secret's key
+            out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea', "", env,
+                                  kubectl=("#!/bin/sh\ncase \"$*\" in\n"
+                                           "*'get secret pgadmin-config'*\"{.data.oauth2-config}\"*) "
+                                           "printf %s \"$FAKE_SECRET\" ;;\n"
+                                           "*'get secret pgadmin-config'*) [ -n \"$FAKE_SECRET\" ] ;;\n"
+                                           "*'-o json'*) printf %s \"$FAKE_DEPLOYMENT\" ;;\n"
+                                           "esac\n"),
+                                  extra_env={"FAKE_SECRET": base64.b64encode(cfg.encode()).decode(),
+                                             "FAKE_DEPLOYMENT": dep})
+            self.assertNotIn(secret, out)
+            self.assertNotIn(password, out)
+            return out
+        out = run(moved, live)
         self.assertTrue(out.startswith("OK|"), out)
-        self.assertNotIn(secret, out)
-        out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea',
-                              live.replace("['admin']", "['admin', 'qa']"))
+        out = run(moved, live.replace("['admin']", "['admin', 'qa']"))
         self.assertTrue(out.startswith("FAIL|"), out)
-        self.assertNotIn(secret, out)
-        out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea', live,
-                              {"IAM_GATES": "false"})
-        self.assertTrue(out.startswith("WARN|"), out)
+        self.assertIn("./deploy-infra.sh", out)
+        self.assertTrue(run(moved, live, {"IAM_GATES": "false"}).startswith("WARN|"))
+        # a pre-change pgAdmin: either secret still a literal env value
+        old_env = ({"value": live}, {"value": password})
+        for dep, names in ((deployment(*old_env),
+                            "deployment/pgadmin (PGADMIN_DEFAULT_PASSWORD, PGADMIN_CONFIG_OAUTH2_CONFIG)"),
+                           (deployment({"valueFrom": ref("oauth2-config")}, {"value": password}),
+                            "deployment/pgadmin (PGADMIN_DEFAULT_PASSWORD)"),
+                           # moved, but a kept pre-change ReplicaSet still holds both
+                           (deployment(*new_env, obj("ReplicaSet", "pgadmin-new", *new_env),
+                                       obj("ReplicaSet", "pgadmin-old", *old_env)),
+                            "replicaset/pgadmin-old (PGADMIN_DEFAULT_PASSWORD, PGADMIN_CONFIG_OAUTH2_CONFIG)")):
+            out = run(dep, live)
+            self.assertTrue(out.startswith("FAIL|"), out)
+            self.assertIn(names, out)
+            self.assertIn("./deploy-infra.sh", out)
+            self.assertNotIn("pgadmin-new", out)
+        # no Secret: named as missing, not as unreadable claims
+        out = run(moved, "")
+        self.assertTrue(out.startswith("FAIL|"), out)
+        self.assertIn("Secret pgadmin-config is missing in medcea", out)
+        # an unreadable listing, or one without the Deployment: never reported as a leak
+        for dep in ("not json", listing(obj("ReplicaSet", "pgadmin-new", *new_env))):
+            out = run(dep, live)
+            self.assertTrue(out.startswith("FAIL|"), out)
+            self.assertIn("cannot read pgAdmin's deployment", out)
+            self.assertNotIn("plain env", out)
+
+    def test_pgadmin_secrets_not_in_env(self):
+        """Rendered offline: the two secrets live in Secret pgadmin-config, never in Deployment env."""
+        import subprocess
+        import yaml
+        tmpl = self.read("k8s/pgadmin/pgadmin.yaml")
+        dep_text = tmpl[tmpl.index("kind: Deployment"):]
+        self.assertNotIn("${PGADMIN_OAUTH_SECRET}", dep_text)
+        self.assertNotIn("${ADMIN_PASS}", dep_text)
+        names = ("NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN "
+                 "PGADMIN_OAUTH2_CLAIMS KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP "
+                 "PGADMIN_CONFIG_CHECKSUM").split()
+        vals = {n: f"dummy-{n.lower()}" for n in names}
+        vals.update(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin']}", PLATFORM_IP="10.0.0.1",
+                    PGADMIN_CONFIG_CHECKSUM="0" * 64)
+        out = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-render.sh"; render "$0" "$@"',
+                              os.path.join(REPO, "k8s/pgadmin/pgadmin.yaml")] + names,
+                             capture_output=True, text=True, env=dict(os.environ, **vals), check=True).stdout
+        docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(out) if d}
+        sec = docs[("Secret", "pgadmin-config")]["stringData"]
+        self.assertEqual(sec["default-password"], vals["ADMIN_PASS"])
+        cfg = ast.literal_eval(sec["oauth2-config"])[0]
+        self.assertEqual(cfg["OAUTH2_CLIENT_SECRET"], vals["PGADMIN_OAUTH_SECRET"])
+        self.assertEqual(cfg["OAUTH2_ADDITIONAL_CLAIMS"], {"groups": ["admin"]})
+        dep = docs[("Deployment", "pgadmin")]
+        dep_dump = json.dumps(dep)
+        self.assertNotIn(vals["ADMIN_PASS"], dep_dump)
+        self.assertNotIn(vals["PGADMIN_OAUTH_SECRET"], dep_dump)
+        self.assertEqual(dep["spec"]["template"]["metadata"]["annotations"]["medcea/config-checksum"], "0" * 64)
+        # no old ReplicaSet keeps a pre-Secret pod template with the plain values
+        self.assertEqual(dep["spec"]["revisionHistoryLimit"], 0)
+        env = {e["name"]: e for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+        for name, key in (("PGADMIN_CONFIG_OAUTH2_CONFIG", "oauth2-config"),
+                          ("PGADMIN_DEFAULT_PASSWORD", "default-password")):
+            self.assertNotIn("value", env[name])
+            self.assertEqual(env[name]["valueFrom"], {"secretKeyRef": {"name": "pgadmin-config", "key": key}})
+        self.assertNotIn("${", out)
+
+    def test_pgadmin_config_checksum(self):
+        """deploy-infra's hash follows the Secret's values: a new claim or secret restarts pgAdmin."""
+        import subprocess
+        infra = self.read("deploy-infra.sh")
+        block = re.search(r'PGADMIN_CONFIG_CHECKSUM="\$\(set -o pipefail\n(.*?)\)" \\\n', infra, re.S).group(1)
+        names = ("NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN "
+                 "PGADMIN_OAUTH2_CLAIMS KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP").split()
+
+        def checksum(**over):
+            vals = {n: f"dummy-{n.lower()}" for n in names}
+            vals["PGADMIN_OAUTH2_CLAIMS"] = "{'groups': ['admin']}"
+            vals.update(over)
+            r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-render.sh"; SCRIPT_DIR="{REPO}"\n{block}'],
+                               capture_output=True, text=True, env=dict(os.environ, **vals))
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
+            self.assertRegex(r.stdout, r"^[0-9a-f]{64}\n$")
+            self.assertNotIn(vals["PGADMIN_OAUTH_SECRET"], r.stdout)
+            return r.stdout
+        base = checksum()
+        self.assertEqual(checksum(), base)
+        self.assertEqual(checksum(PGA_DB_USER="rr_admin_login"), base)
+        self.assertNotEqual(checksum(PGADMIN_OAUTH_SECRET="other"), base)
+        self.assertNotEqual(checksum(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin', 'qa']}"), base)
+        self.assertNotEqual(checksum(ADMIN_PASS="other"), base)
 
     def test_health_onboardroles(self):
         daemon = "42 python3 edge/src/host/wizard_server.py --dir /tmp/x --daemon --auth keycloak"

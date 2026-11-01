@@ -38,9 +38,12 @@
 #   reach    some enabled account holds a role the hub admits
 # The onboarding wizard and pgAdmin [tool (…)] (ONBOARD_DOMAIN, PGADMIN_DOMAIN, IAM 3.4):
 #   gate     the running wizard's --required-role equals `policy_tool edge-wizard`, and
-#            pgAdmin's live OAUTH2_ADDITIONAL_CLAIMS (read on stdin: the same value holds
-#            the client secret, and only the claims are printed) equals `policy_tool
-#            pgadmin` (IAM_GATES=false: EDGE_WIZARD_ROLE, and {'groups': ['admin']})
+#            pgAdmin's live OAUTH2_ADDITIONAL_CLAIMS (Secret pgadmin-config, read on
+#            stdin: the same value holds the client secret, and only the claims are
+#            printed) equals `policy_tool pgadmin` (IAM_GATES=false: EDGE_WIZARD_ROLE,
+#            and {'groups': ['admin']})
+#   secret   pgAdmin's deployment holds neither the OAuth2 config nor the default
+#            password as plain env (only from Secret pgadmin-config)
 #   sign-in  signed out, the host redirects to Keycloak (the wizard) or shows pgAdmin's
 #            MedCEA sign-in button (pgAdmin)
 #   reach    some enabled account holds a role the tool admits
@@ -318,24 +321,57 @@ check_onboard() {
     if [[ -z "$want" ]]; then skip reach "any signed-in account gets in"; else reach_of "$host" "${want//,/ }"; fi
 }
 
-# pgAdmin (IAM 3.4): its gate is OAUTH2_ADDITIONAL_CLAIMS. The env value also holds
-# the client secret: python reads it on stdin and prints only the claims.
+# pgAdmin (IAM 3.4): its gate is OAUTH2_ADDITIONAL_CLAIMS, in Secret pgadmin-config
+# with the client secret: python reads it on stdin and prints only the claims. A
+# deployment still holding either secret as plain env fails (names only printed).
 check_pgadmin() {
-    local host="$1" want have same page
+    local host="$1" want have same page literal missing
     want="$(policy_tool pgadmin 2>/dev/null)" || { fail gate "policy_tool pgadmin failed (cli.py check)"; return; }
-    have="$($KUBECTL get deployment pgadmin -n "$NAMESPACE" \
-        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PGADMIN_CONFIG_OAUTH2_CONFIG")].value}' 2>/dev/null \
+    # The Deployment and every ReplicaSet it kept ("?" = unreadable)
+    literal="$($KUBECTL get deployment,replicaset -n "$NAMESPACE" -l app=pgadmin -o json 2>/dev/null \
         | python3 -c '
+import json, sys
+try:
+    items, held = json.load(sys.stdin)["items"], []
+    if not any(o["kind"] == "Deployment" for o in items):
+        raise ValueError("no deployment")
+    for o in items:
+        env = o["spec"]["template"]["spec"]["containers"][0].get("env", [])
+        names = [e["name"] for e in env if "value" in e
+                 and e["name"] in ("PGADMIN_CONFIG_OAUTH2_CONFIG", "PGADMIN_DEFAULT_PASSWORD")]
+        if names:
+            held.append("%s/%s (%s)" % (o["kind"].lower(), o["metadata"]["name"], ", ".join(names)))
+    print("; ".join(held))
+except Exception:
+    print("?")')"
+    missing=""
+    $KUBECTL get secret pgadmin-config -n "$NAMESPACE" >/dev/null 2>&1 \
+        || missing="Secret pgadmin-config is missing in $NAMESPACE (./deploy-infra.sh)"
+    if [[ "$literal" == "?" ]]; then
+        fail secret "cannot read pgAdmin's deployment and ReplicaSets in $NAMESPACE"
+    elif [[ -n "$literal" ]]; then
+        fail secret "pgAdmin's secrets are plain env values in $literal (./deploy-infra.sh)"
+    elif [[ -n "$missing" ]]; then
+        fail secret "$missing"
+    else
+        pass secret "the OAuth2 config and default password come from Secret pgadmin-config"
+    fi
+    if [[ -n "$missing" ]]; then
+        fail gate "$missing"
+    else
+        have="$($KUBECTL get secret pgadmin-config -n "$NAMESPACE" -o jsonpath='{.data.oauth2-config}' 2>/dev/null \
+        | base64 -d 2>/dev/null | python3 -c '
 import ast, sys
 try:
     print(repr(ast.literal_eval(sys.stdin.read())[0].get("OAUTH2_ADDITIONAL_CLAIMS")))
 except Exception:
     print("unreadable")')"
-    same="$(python3 -c 'import ast, sys; print(ast.literal_eval(sys.argv[1]) == ast.literal_eval(sys.argv[2]))' "$have" "$want" 2>/dev/null)"
-    if [[ "$same" == True ]]; then
-        pass gate "OAUTH2_ADDITIONAL_CLAIMS $want"
-    else
-        fail gate "OAUTH2_ADDITIONAL_CLAIMS is $have, want $want (./deploy-infra.sh)"
+        same="$(python3 -c 'import ast, sys; print(ast.literal_eval(sys.argv[1]) == ast.literal_eval(sys.argv[2]))' "$have" "$want" 2>/dev/null)"
+        if [[ "$same" == True ]]; then
+            pass gate "OAUTH2_ADDITIONAL_CLAIMS $want"
+        else
+            fail gate "OAUTH2_ADDITIONAL_CLAIMS is $have, want $want (./deploy-infra.sh)"
+        fi
     fi
     page="$(curl -sk -L -m 15 "https://$host/login")"
     if grep -q '"OAUTH2_NAME": "keycloak"' <<<"$page"; then

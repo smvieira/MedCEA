@@ -131,8 +131,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         IAM_GATES=false; SKIP when no daemon runs (the http check reports it)"
     echo ""
     echo -e "  ${CYAN}pgadminroles${NC} pgAdmin admits the access policy's roles (IAM 3.4): NAMESPACE"
-    echo -e "         FAIL when the deployment's OAUTH2_ADDITIONAL_CLAIMS differs from policy_tool pgadmin"
-    echo -e "         (./deploy-infra.sh); WARN while IAM_GATES=false; SKIP without the deployment"
+    echo -e "         FAIL when OAUTH2_ADDITIONAL_CLAIMS in Secret pgadmin-config differs from policy_tool"
+    echo -e "         pgadmin, or the deployment still holds the OAuth2 config or default password as plain"
+    echo -e "         env (./deploy-infra.sh); WARN while IAM_GATES=false; SKIP without the deployment"
     echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
@@ -853,16 +854,47 @@ check_onboardroles() {
 
 # =============================================================================
 # Check: pgAdmin's sign-in roles are the policy's (IAM 3.4) — read-only
-# target: NAMESPACE. PGADMIN_CONFIG_OAUTH2_CONFIG also holds the client secret:
-# it reaches python on stdin, which prints only OAUTH2_ADDITIONAL_CLAIMS.
+# target: NAMESPACE. The OAuth2 config is in Secret pgadmin-config with the client
+# secret: it reaches python on stdin, which prints only OAUTH2_ADDITIONAL_CLAIMS.
+# A Deployment that still carries PGADMIN_CONFIG_OAUTH2_CONFIG or
+# PGADMIN_DEFAULT_PASSWORD as a literal value (from before the Secret) FAILs;
+# only the variables' names are printed.
 # =============================================================================
 check_pgadminroles() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" have want same
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" have want same literal
     timeout "$TIMEOUT" $KUBECTL get deployment pgadmin -n "$ns" >/dev/null 2>&1 \
         || { _record SKIP "$name" "no pgAdmin deployment in $ns"; return; }
-    have="$($KUBECTL get deployment pgadmin -n "$ns" \
-        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PGADMIN_CONFIG_OAUTH2_CONFIG")].value}' 2>/dev/null \
+    # The Deployment and every ReplicaSet it kept: an old one still holds its pod
+    # template, plain env values included. "?" = unreadable, never a variable name.
+    literal="$(timeout "$TIMEOUT" $KUBECTL get deployment,replicaset -n "$ns" -l app=pgadmin -o json 2>/dev/null \
         | python3 -c '
+import json, sys
+try:
+    items, held = json.load(sys.stdin)["items"], []
+    if not any(o["kind"] == "Deployment" for o in items):
+        raise ValueError("no deployment")
+    for o in items:
+        env = o["spec"]["template"]["spec"]["containers"][0].get("env", [])
+        names = [e["name"] for e in env if "value" in e
+                 and e["name"] in ("PGADMIN_CONFIG_OAUTH2_CONFIG", "PGADMIN_DEFAULT_PASSWORD")]
+        if names:
+            held.append("%s/%s (%s)" % (o["kind"].lower(), o["metadata"]["name"], ", ".join(names)))
+    print("; ".join(held))
+except Exception:
+    print("?")')"
+    if [[ "$literal" == "?" ]]; then
+        _record FAIL "$name" "cannot read pgAdmin's deployment and ReplicaSets in $ns"
+        return
+    elif [[ -n "$literal" ]]; then
+        _record FAIL "$name" "pgAdmin's secrets are plain env values in $literal, not from Secret pgadmin-config (./deploy-infra.sh)"
+        return
+    fi
+    if ! timeout "$TIMEOUT" $KUBECTL get secret pgadmin-config -n "$ns" >/dev/null 2>&1; then
+        _record FAIL "$name" "Secret pgadmin-config is missing in $ns (./deploy-infra.sh)"
+        return
+    fi
+    have="$($KUBECTL get secret pgadmin-config -n "$ns" -o jsonpath='{.data.oauth2-config}' 2>/dev/null \
+        | base64 -d 2>/dev/null | python3 -c '
 import ast, sys
 try:
     print(repr(ast.literal_eval(sys.stdin.read())[0].get("OAUTH2_ADDITIONAL_CLAIMS")))
