@@ -60,6 +60,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source infra/lib-log.sh; medcea_log iam-db   # logs/iam-db-<ts>.log, unless a parent logs
 source infra/lib-mk8s.sh
 CLI="$REPO_ROOT/apps/iam/compiler/cli.py"
 

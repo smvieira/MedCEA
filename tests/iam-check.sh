@@ -28,6 +28,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source infra/lib-log.sh; medcea_log iam-check   # logs/iam-check-<ts>.log, unless a parent logs
 if [[ ! -f config.env ]]; then
     echo "config.env not found — run ./deploy-infra.sh first." >&2
     exit 2

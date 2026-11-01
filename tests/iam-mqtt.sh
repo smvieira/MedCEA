@@ -46,6 +46,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source infra/lib-log.sh; medcea_log iam-mqtt   # logs/iam-mqtt-<ts>.log, unless a parent logs
 [[ -f config.env ]] || { echo "config.env not found — run ./deploy-infra.sh first." >&2; exit 2; }
 set -a   # the flow reads MQTTX_DOMAIN, ACCESS_DOMAIN and PROJECT_NAME from the environment
 # shellcheck disable=SC1091

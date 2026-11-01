@@ -264,6 +264,7 @@ fi
 
 mkdir -p logs
 LOG_FILE="logs/deploy-infra-$(date +%Y%m%d-%H%M%S).log"
+export MEDCEA_LOG_FILE="$LOG_FILE"   # the component scripts log here, not in a log of their own (infra/lib-log.sh)
 exec > >(tee "$LOG_FILE") 2>&1
 echo "Deploy started: $(date)"
 _print_banner

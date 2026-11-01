@@ -36,6 +36,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source infra/lib-log.sh; medcea_log iam-runner   # logs/iam-runner-<ts>.log, unless a parent logs
 source infra/lib-mk8s.sh
 source infra/lib-render.sh
 source infra/lib-lock.sh; medcea_lock

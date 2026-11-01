@@ -114,6 +114,7 @@ fi
 # shellcheck disable=SC1091
 source config.env
 set -euo pipefail
+source infra/lib-log.sh; medcea_log app-iam-units   # logs/app-iam-units-<ts>.log
 source infra/lib-lock.sh; medcea_lock
 source infra/lib-mk8s.sh
 source apps/database/lib-db-apply.sh   # _dba_psql: psql in the pod, password read there

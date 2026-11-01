@@ -154,6 +154,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# logs/health-check-<ts>.log (read-only, no lock; infra/lib-log.sh)
+REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-log.sh"; REPO_ROOT="$SCRIPT_DIR" medcea_log health-check
+
 # =============================================================================
 # Load config.env for variable expansion in targets
 # =============================================================================

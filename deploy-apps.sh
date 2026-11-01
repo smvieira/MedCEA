@@ -119,6 +119,7 @@ if $UNINSTALL; then
 
     LOG_DIR="$REPO_ROOT/logs"; mkdir -p "$LOG_DIR"
     LOG_FILE="$LOG_DIR/uninstall-apps-$(date +%Y%m%d-%H%M%S).log"
+    export MEDCEA_LOG_FILE="$LOG_FILE"
     exec > >(tee -a "$LOG_FILE") 2>&1
     echo "Log: $LOG_FILE"
 
@@ -147,6 +148,7 @@ fi
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/deploy-apps-$(date +%Y%m%d-%H%M%S).log"
+export MEDCEA_LOG_FILE="$LOG_FILE"   # the component scripts log here, not in a log of their own (infra/lib-log.sh)
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "Log: $LOG_FILE"
 

@@ -83,6 +83,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source infra/lib-log.sh; medcea_log "iam-db-fixture-$1"   # logs/iam-db-fixture-<command>-<ts>.log
 [[ -f config.env ]] || { echo "config.env not found" >&2; exit 2; }
 # shellcheck disable=SC1091
 source config.env
