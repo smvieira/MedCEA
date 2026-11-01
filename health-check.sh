@@ -861,7 +861,7 @@ check_onboardroles() {
 # only the variables' names are printed.
 # =============================================================================
 check_pgadminroles() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" have want same literal
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" have want same literal oauth passfile
     timeout "$TIMEOUT" $KUBECTL get deployment pgadmin -n "$ns" >/dev/null 2>&1 \
         || { _record SKIP "$name" "no pgAdmin deployment in $ns"; return; }
     # The Deployment and every ReplicaSet it kept: an old one still holds its pod
@@ -909,10 +909,48 @@ except Exception:
     same="$(python3 -c 'import ast, sys; print(ast.literal_eval(sys.argv[1]) == ast.literal_eval(sys.argv[2]))' "$have" "$want" 2>/dev/null)"
     if [[ "$same" != True ]]; then
         _record FAIL "$name" "OAUTH2_ADDITIONAL_CLAIMS is $have, the policy compiles $want (./deploy-infra.sh)"
+    # libpq skips a passfile its user cannot read: the server entry then fails with
+    # "no password supplied" (the file was root's until 1 Nov 2026). The pod says
+    # which; no answer means kubectl could not reach the container at all.
+    elif passfile="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/pgadmin -c pgadmin -- \
+            sh -c 'test -r /pgpassfile && echo readable || echo unreadable' 2>/dev/null)"; [[ "$passfile" != readable ]]; then
+        if [[ "$passfile" == unreadable ]]; then
+            _record FAIL "$name" "pgAdmin's user cannot read /pgpassfile: its database server entry cannot connect (./deploy-infra.sh)"
+        else
+            _record FAIL "$name" "cannot reach pgAdmin's container (still starting? kubectl -n $ns get pods -l app=pgadmin)"
+        fi
+    # Each e-mail in the pod's PGADMIN_OAUTH2_SERVER_USERS must be an OAuth2 user
+    # owning "IoT Postgres" (the postStart hook loads them). Read-only: python's
+    # sqlite3 in the pod on pgAdmin's own database, opened mode=ro; prints e-mails
+    # and counts, nothing else. "?" = unreadable.
+    elif oauth="$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$ns" deployment/pgadmin -c pgadmin -- \
+            /venv/bin/python3 - /var/lib/pgadmin/pgadmin4.db 2>/dev/null <<'PY'
+import os, sqlite3, sys
+try:
+    want = sorted({u for u in os.environ.get("PGADMIN_OAUTH2_SERVER_USERS", "").split(",") if u})
+    db = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+    have = {u.lower(): n for u, n in db.execute(
+        "SELECT u.username, (SELECT count(*) FROM server s WHERE s.user_id = u.id"
+        " AND s.name = 'IoT Postgres') FROM \"user\" u WHERE u.auth_source = 'oauth2'")}
+    if not want:
+        print("empty")
+    else:
+        bad = ["%s (no OAuth2 user)" % e for e in want if e not in have]
+        bad += ["%s (no IoT Postgres entry)" % e for e in want if have.get(e) == 0]
+        print(("missing " + "; ".join(bad)) if bad else "ok %d" % len(want))
+except Exception:
+    print("?")
+PY
+)"; [[ "$oauth" == "?" || -z "$oauth" ]]; then
+        _record FAIL "$name" "cannot read pgAdmin's users and servers in its pod (still starting? kubectl -n $ns logs deployment/pgadmin)"
+    elif [[ "$oauth" == missing* ]]; then
+        _record FAIL "$name" "pgAdmin's postStart hook did not give ${oauth#missing } its server (kubectl -n $ns logs deployment/pgadmin | grep oauth2-servers; ./deploy-infra.sh)"
     elif [[ "${IAM_GATES:-true}" == "false" ]]; then
         _record WARN "$name" "IAM_GATES=false: pgAdmin keeps the pre-policy $want"
+    elif [[ "$oauth" == empty ]]; then
+        _record WARN "$name" "admits $want, but PGADMIN_OAUTH2_SERVER_USERS is empty: no OAuth2 user has the IoT Postgres entry (./deploy-infra.sh)"
     else
-        _record OK "$name" "admits $want from the access policy (checked at sign-in only)"
+        _record OK "$name" "admits $want from the access policy (checked at sign-in only); ${oauth#ok } OAuth2 user(s) have the IoT Postgres entry"
     fi
 }
 

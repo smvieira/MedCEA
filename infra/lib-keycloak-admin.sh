@@ -10,6 +10,9 @@
 #   kc_enable_events REALM
 #   kc_password_status REALM USER   ok | changed | temporary | missing — from the
 #                         admin API, without signing in as the person
+#   kc_claim_emails REALM CLAIMS FALLBACK
+#                         the e-mails of the enabled accounts a tool's claims admit
+#                         (FALLBACK and exit 1 when Keycloak cannot be read)
 #
 # Three master-realm identities, tried in this order:
 #   1. client medcea-deployer (client credentials, KC_DEPLOYER_SECRET) — what the
@@ -267,4 +270,85 @@ elif creds[0].get("createdDate", 0) - u.get("createdTimestamp", 0) > 60000:
     print("changed")   # set more than a minute after the account was made
 else:
     print("ok")' 2>/dev/null || echo missing
+}
+
+# kc_claim_emails REALM CLAIMS FALLBACK — the e-mail addresses of the enabled
+# accounts of REALM holding any realm role in CLAIMS (a Python literal such as
+# {'groups': ['admin']}, as policy_tool prints it), directly or through a
+# composite role (production_manager contains operator: the groups claim carries
+# both): lower-cased, sorted, comma-separated. Used for pgAdmin's
+# PGADMIN_OAUTH2_SERVER_USERS (deploy-infra.sh). An account without an e-mail, or
+# with one that is not a plain address, is skipped with a warning naming the
+# username; so is one on a special-use domain (.invalid, .test, .example,
+# .local, .localhost, .arpa, .onion), which pgAdmin's e-mail check refuses
+# (the demo accounts' .invalid addresses). When Keycloak cannot be read it warns,
+# prints FALLBACK (lower-cased) and returns 1, so a caller can tell a failed
+# read from a one-address list. Needs kc_admin_select first.
+kc_claim_emails() {
+    local realm="$1" claims="$2" fallback="${3,,}" tmp r rc=0 out list
+    tmp="$(mktemp -d)" || { echo "  WARNING: no temporary directory to read the role holders in." >&2; printf '%s\n' "$fallback"; return 1; }
+    if _kc_get "realms/$realm/roles?briefRepresentation=false&first=0&max=1000" > "$tmp/roles.json" \
+       && list="$(python3 -c '
+import json, re, sys
+for x in json.load(open(sys.argv[1])):
+    if x.get("composite") and re.fullmatch(r"[A-Za-z0-9_-]+", x.get("name", "")):
+        print(x["name"])' "$tmp/roles.json" 2>/dev/null)"; then
+        for r in $list; do
+            _kc_get "realms/$realm/roles/$r/composites/realm" > "$tmp/c-$r.json" || { rc=1; break; }
+        done
+    else
+        rc=1
+    fi
+    if (( rc == 0 )); then
+        # every role whose effective set meets the claims
+        list="$(python3 -c '
+import ast, glob, json, os, re, sys
+want = set(ast.literal_eval(sys.argv[2]).get("groups") or [])
+names = {x["name"] for x in json.load(open(os.path.join(sys.argv[1], "roles.json")))}
+kids = {os.path.basename(f)[2:-5]: {c["name"] for c in json.load(open(f))}
+        for f in glob.glob(os.path.join(sys.argv[1], "c-*.json"))}
+reach = set(want & names)
+grew = True
+while grew:
+    more = {p for p, k in kids.items() if k & reach} - reach
+    grew = bool(more)
+    reach |= more
+for n in sorted(reach):
+    if re.fullmatch(r"[A-Za-z0-9_-]+", n):
+        print(n)' "$tmp" "$claims" 2>/dev/null)" || rc=1
+    fi
+    if (( rc == 0 )); then
+        for r in $list; do
+            _kc_get "realms/$realm/roles/$r/users?briefRepresentation=false&first=0&max=5000" > "$tmp/u-$r.json" \
+                || { rc=1; break; }
+        done
+    fi
+    if (( rc == 0 )) && out="$(python3 -c '
+import glob, json, os, re, sys
+ok = re.compile(r"[a-z0-9][a-z0-9._%+-]*@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,63}")
+special = {"arpa", "example", "invalid", "local", "localhost", "onion", "test"}
+mails, seen = set(), set()
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "u-*.json"))):
+    for u in json.load(open(f)):
+        if not u.get("enabled") or u.get("id") in seen:
+            continue
+        seen.add(u.get("id"))
+        e = (u.get("email") or "").strip().lower()
+        if not e:
+            print("  WARNING: account %r has no e-mail: it gets no pgAdmin server entry." % u.get("username"), file=sys.stderr)
+        elif len(e) > 254 or not ok.fullmatch(e):
+            print("  WARNING: account %r has an e-mail pgAdmin is not given: it gets no server entry." % u.get("username"), file=sys.stderr)
+        elif e.rsplit(".", 1)[-1] in special:
+            print("  WARNING: account %r has an e-mail on a special-use domain, which pgAdmin refuses: it gets no server entry." % u.get("username"), file=sys.stderr)
+        else:
+            mails.add(e)
+print(",".join(sorted(mails)))' "$tmp")"; then
+        rm -rf "$tmp"
+        printf '%s\n' "$out"
+        return 0
+    fi
+    rm -rf "$tmp"
+    echo "  WARNING: cannot read the role holders in realm '$realm'." >&2
+    printf '%s\n' "$fallback"
+    return 1
 }

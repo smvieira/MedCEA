@@ -1352,7 +1352,7 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(used - set(calls[0]), {"PGADMIN_CONFIG_CHECKSUM"})
         self.assertLess(infra.index("policy_tool pgadmin"), infra.index('render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml"'))
         self.assertLess(infra.index('PGADMIN_CONFIG_CHECKSUM="$('),
-                        infra.index("PLATFORM_IP PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply"))
+                        infra.index("PLATFORM_IP PGADMIN_OAUTH2_SERVER_USERS PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply"))
         self.assertIn("compile \"$1\"", self.read("infra/lib-policy-tools.sh"))
         deploy = self.read("apps/edge-wizard/deploy.sh")
         self.assertIn("policy_tool edge-wizard", deploy)
@@ -1419,22 +1419,53 @@ class WiringTest(unittest.TestCase):
         new_env = ({"valueFrom": ref("oauth2-config")}, {"valueFrom": ref("default-password")})
         moved = deployment(*new_env, obj("ReplicaSet", "pgadmin-new", *new_env))
 
-        def run(dep, cfg, env=None):
-            # answers the existence check (nothing), the deployment's JSON and the Secret's key
+        def run(dep, cfg, env=None, oauth="ok 1", passfile="readable"):
+            # answers the existence check (nothing), the deployment's JSON, the Secret's
+            # key, the passfile test and the in-pod users/servers query (stdin read)
             out = self._health_fn("check_pgadminroles", 'check_pgadminroles "pgAdmin roles" medcea', "", env,
                                   kubectl=("#!/bin/sh\ncase \"$*\" in\n"
+                                           "*'exec -n medcea deployment/pgadmin -c pgadmin -- sh -c "
+                                           "test -r /pgpassfile && echo readable || echo unreadable') "
+                                           "[ -n \"$FAKE_PASSFILE\" ] && printf '%s\\n' \"$FAKE_PASSFILE\" ;;\n"
+                                           "*'exec -i -n medcea deployment/pgadmin -c pgadmin -- "
+                                           "/venv/bin/python3 - /var/lib/pgadmin/pgadmin4.db') "
+                                           "cat >/dev/null; printf '%s\\n' \"$FAKE_OAUTH\" ;;\n"
+                                           "*exec*) exit 1 ;;\n"
                                            "*'get secret pgadmin-config'*\"{.data.oauth2-config}\"*) "
                                            "printf %s \"$FAKE_SECRET\" ;;\n"
                                            "*'get secret pgadmin-config'*) [ -n \"$FAKE_SECRET\" ] ;;\n"
                                            "*'-o json'*) printf %s \"$FAKE_DEPLOYMENT\" ;;\n"
                                            "esac\n"),
                                   extra_env={"FAKE_SECRET": base64.b64encode(cfg.encode()).decode(),
-                                             "FAKE_DEPLOYMENT": dep})
+                                             "FAKE_DEPLOYMENT": dep, "FAKE_OAUTH": oauth,
+                                             "FAKE_PASSFILE": passfile})
             self.assertNotIn(secret, out)
             self.assertNotIn(password, out)
             return out
         out = run(moved, live)
         self.assertTrue(out.startswith("OK|"), out)
+        self.assertIn("1 OAuth2 user(s) have the IoT Postgres entry", out)
+        # the passfile pgAdmin's user cannot read (it was root's until 1 Nov 2026)
+        out = run(moved, live, passfile="unreadable")
+        self.assertTrue(out.startswith("FAIL|"), out)
+        self.assertIn("cannot read /pgpassfile", out)
+        # an exec that cannot reach the container is not a passfile verdict
+        out = run(moved, live, passfile="")
+        self.assertTrue(out.startswith("FAIL|"), out)
+        self.assertIn("cannot reach pgAdmin's container (still starting?", out)
+        self.assertNotIn("/pgpassfile", out)
+        # the postStart hook's work: a listed e-mail without its user or its server
+        out = run(moved, live, oauth="missing bob@example.org (no OAuth2 user); "
+                                     "ann@example.org (no IoT Postgres entry)")
+        self.assertTrue(out.startswith("FAIL|"), out)
+        self.assertIn("bob@example.org (no OAuth2 user); ann@example.org (no IoT Postgres entry)", out)
+        for unreadable in ("?", ""):
+            out = run(moved, live, oauth=unreadable)
+            self.assertTrue(out.startswith("FAIL|"), out)
+            self.assertIn("cannot read pgAdmin's users and servers", out)
+        out = run(moved, live, oauth="empty")
+        self.assertTrue(out.startswith("WARN|"), out)
+        self.assertIn("PGADMIN_OAUTH2_SERVER_USERS is empty", out)
         out = run(moved, live.replace("['admin']", "['admin', 'qa']"))
         self.assertTrue(out.startswith("FAIL|"), out)
         self.assertIn("./deploy-infra.sh", out)
@@ -1475,7 +1506,7 @@ class WiringTest(unittest.TestCase):
         self.assertNotIn("${ADMIN_PASS}", dep_text)
         names = ("NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN "
                  "PGADMIN_OAUTH2_CLAIMS KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP "
-                 "PGADMIN_CONFIG_CHECKSUM").split()
+                 "PGADMIN_OAUTH2_SERVER_USERS PGADMIN_CONFIG_CHECKSUM").split()
         vals = {n: f"dummy-{n.lower()}" for n in names}
         vals.update(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin']}", PLATFORM_IP="10.0.0.1",
                     PGADMIN_CONFIG_CHECKSUM="0" * 64)
@@ -1526,6 +1557,262 @@ class WiringTest(unittest.TestCase):
         self.assertNotEqual(checksum(PGADMIN_OAUTH_SECRET="other"), base)
         self.assertNotEqual(checksum(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin', 'qa']}"), base)
         self.assertNotEqual(checksum(ADMIN_PASS="other"), base)
+
+    PGADMIN_NAMES = ("NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN "
+                     "PGADMIN_OAUTH2_CLAIMS KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP "
+                     "PGADMIN_OAUTH2_SERVER_USERS PGADMIN_CONFIG_CHECKSUM").split()
+
+    def _pgadmin_render(self, **over):
+        import subprocess
+        import yaml
+        vals = {n: f"dummy-{n.lower()}" for n in self.PGADMIN_NAMES}
+        vals.update(PGADMIN_OAUTH2_CLAIMS="{'groups': ['admin']}", PLATFORM_IP="10.0.0.1",
+                    PGADMIN_CONFIG_CHECKSUM="0" * 64,
+                    PGADMIN_OAUTH2_SERVER_USERS="admin@cea.com,ann@example.org", **over)
+        out = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-render.sh"; render "$0" "$@"',
+                              os.path.join(REPO, "k8s/pgadmin/pgadmin.yaml")] + self.PGADMIN_NAMES,
+                             capture_output=True, text=True, env=dict(os.environ, **vals), check=True).stdout
+        return {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(out) if d}
+
+    def test_pgadmin_manifest_image_and_hook(self):
+        """1 Nov 2026: pinned image, unshared server, the postStart hook and its user list."""
+        infra = self.read("deploy-infra.sh")
+        docs = self._pgadmin_render()
+        cm = docs[("ConfigMap", "pgadmin-servers")]["data"]
+        servers = json.loads(cm["servers.json"])["Servers"]["1"]
+        self.assertEqual((servers["Name"], servers["Shared"], servers["PassFile"]), ("IoT Postgres", False, "/pgpassfile"))
+        self.assertIn("load-servers", cm["oauth2-servers.sh"])
+        pod = docs[("Deployment", "pgadmin")]["spec"]["template"]["spec"]
+        c = pod["containers"][0]
+        self.assertRegex(c["image"], r"^dpage/pgadmin4:9\.19\.0@sha256:[0-9a-f]{64}$")
+        self.assertIn("3591b3d02910dcd817dec6fcaa681c278ba6966945283dd0ea0042731c330c83", c["image"])
+        self.assertEqual(c["lifecycle"]["postStart"]["exec"]["command"], ["sh", "/medcea/oauth2-servers.sh"])
+        mounts = {m["mountPath"]: m for m in c["volumeMounts"]}
+        self.assertEqual((mounts["/medcea/oauth2-servers.sh"]["name"], mounts["/medcea/oauth2-servers.sh"]["subPath"]),
+                         ("servers-config", "oauth2-servers.sh"))
+        env = {e["name"]: e for e in c["env"]}
+        self.assertEqual(env["PGADMIN_OAUTH2_SERVER_USERS"], {"name": "PGADMIN_OAUTH2_SERVER_USERS",
+                                                               "value": "admin@cea.com,ann@example.org"})
+        # still no data volume: the reason the hook runs at every start
+        self.assertEqual({v["name"] for v in pod["volumes"]}, {"servers-config", "pgpassfile-src", "pgpassfile-rw"})
+        # the init container leaves the passfile to pgAdmin's user, 0600
+        init = pod["initContainers"][0]["command"][-1]
+        self.assertIn("chown 5050:0 /pgpassfile-rw/pgpassfile", init)
+        self.assertIn("chmod 0600 /pgpassfile-rw/pgpassfile", init)
+        # deploy-infra: the list comes from the claims, through the admin-API library,
+        # before both renders, and it is on both render lists (checked above too)
+        self.assertIn('kc_claim_emails "$KEYCLOAK_REALM" "$PGADMIN_OAUTH2_CLAIMS" "$ADMIN_EMAIL"', infra)
+        self.assertLess(infra.index('PGADMIN_OAUTH2_SERVER_USERS="$(_pgadmin_server_users)"'),
+                        infra.index('PGADMIN_CONFIG_CHECKSUM="$('))
+        self.assertLess(infra.index('PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT'),
+                        infra.index('PGADMIN_OAUTH2_SERVER_USERS="$(_pgadmin_server_users)"'))
+        self.assertIn("--timeout=16m", infra[infra.index("rollout status deployment/pgadmin"):][:120])
+        # the Deployment's progress deadline outlasts that wait, or rollout status
+        # fails at the default 600 s whatever its --timeout
+        timeout = re.search(r"rollout status deployment/pgadmin\s*\\\s*-n \"\$NAMESPACE\" --timeout=(\d+)m", infra)
+        self.assertIsNotNone(timeout)
+        self.assertGreaterEqual(docs[("Deployment", "pgadmin")]["spec"]["progressDeadlineSeconds"],
+                                int(timeout.group(1)) * 60)
+        # a failed Keycloak read keeps the live list (a shorter one restarts pgAdmin
+        # with a fresh database); ADMIN_EMAIL only without one
+        fn = infra[infra.index("_pgadmin_server_users() {"):infra.index('PGADMIN_OAUTH2_SERVER_USERS="$(_pgadmin_server_users)"')]
+        self.assertIn('out="$(kc_claim_emails ', fn)
+        self.assertIn('env[?(@.name=="PGADMIN_OAUTH2_SERVER_USERS")].value', fn)
+        self.assertLess(fn.index('printf \'%s\\n\' "$live"'), fn.index('printf \'%s\\n\' "${ADMIN_EMAIL,,}"'))
+
+    def _hook(self, users, *, ready_after=0.0, wait=30, fail_load=False, db=True, shell=("sh",)):
+        """Run the rendered postStart hook under sh with a fake python/setup.py."""
+        import subprocess
+        import tempfile
+        import time
+        tmp = tempfile.mkdtemp()
+        script = os.path.join(tmp, "hook.sh")
+        with open(script, "w") as f:
+            f.write(self._pgadmin_render()[("ConfigMap", "pgadmin-servers")]["data"]["oauth2-servers.sh"])
+        py = os.path.join(tmp, "python3")
+        with open(py, "w") as f:
+            f.write('#!/bin/sh\necho "$(pwd)|$*" >> "$CALLS"\n'
+                    'case "$1 $2" in\n'
+                    '"-c "*) exit 0 ;;\n'
+                    '"setup.py get-users") exit 0 ;;\n'
+                    '"setup.py add-external-user") exit 1 ;;\n'  # "already exists" is fine
+                    '"setup.py load-servers") [ -z "$FAIL_LOAD" ] ;;\n'
+                    '*) exit 3 ;;\nesac\n')
+        os.chmod(py, 0o755)
+        dbf, calls, log = (os.path.join(tmp, n) for n in ("pgadmin4.db", "calls", "log"))
+        env = dict(os.environ, HOOK_PY=py, HOOK_DIR=tmp, HOOK_DB=dbf, HOOK_SERVERS="/srv/servers.json",
+                   HOOK_LOG=log, HOOK_WAIT=str(wait), HOOK_STEP="1", CALLS=calls,
+                   PGADMIN_OAUTH2_SERVER_USERS=users, FAIL_LOAD="1" if fail_load else "")
+        p = subprocess.Popen([*shell, script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if db:
+            time.sleep(ready_after)
+            open(dbf, "w").close()
+        out, err = p.communicate(timeout=60)
+        def read(path):
+            if not os.path.exists(path):
+                return []
+            with open(path) as f:
+                return f.read().splitlines()
+        return (p.returncode, [c.split("|", 1)[1] for c in read(calls)], read(log),
+                {c.split("|")[0] for c in read(calls) if "|setup.py" in c}, tmp)
+
+    def _hook_main_checks(self, rc, calls, log, cwds, tmp):
+        self.assertEqual(rc, 0)
+        # setup.py runs from pgAdmin's directory
+        self.assertEqual(cwds, {tmp})
+        setup = [c for c in calls if c.startswith("setup.py")]
+        self.assertEqual(setup[0], "setup.py get-users")
+        self.assertEqual([c for c in setup if not c.endswith("get-users")], [
+            "setup.py add-external-user admin@cea.com --auth-source oauth2 --email admin@cea.com",
+            "setup.py load-servers /srv/servers.json --user admin@cea.com --auth-source oauth2 --replace",
+            "setup.py add-external-user ann@example.org --auth-source oauth2 --email ann@example.org",
+            "setup.py load-servers /srv/servers.json --user ann@example.org --auth-source oauth2 --replace"])
+        self.assertTrue(any(c.startswith("-c ") and c.endswith("http://127.0.0.1:80/misc/ping") for c in calls), calls)
+        self.assertEqual(log.count("medcea oauth2-servers: skipped an entry that is not a plain lower-case e-mail address"), 2)
+        self.assertIn("medcea oauth2-servers: admin@cea.com: server entry loaded", log)
+        self.assertIn("medcea oauth2-servers: ann@example.org: server entry loaded", log)
+        self.assertFalse(any("rm -rf" in c for c in calls + log))
+
+    def test_pgadmin_hook_script(self):
+        """The postStart hook waits, loads servers.json per valid e-mail, skips bad ones, exits 0."""
+        import subprocess
+        text = self._pgadmin_render()[("ConfigMap", "pgadmin-servers")]["data"]["oauth2-servers.sh"]
+        self.assertNotIn("${", self.read("k8s/pgadmin/pgadmin.yaml").split("oauth2-servers.sh: |")[1].split("---")[0])
+        self.assertEqual(subprocess.run(["sh", "-n"], input=text, text=True).returncode, 0)
+        # the image's sh is busybox ash: the same run there when the host has busybox
+        import shutil
+        for shell in [("sh",)] + ([(shutil.which("busybox"), "sh")] if shutil.which("busybox") else []):
+            rc, calls, log, cwds, tmp = self._hook("admin@cea.com,Bad@Example.org,x;rm -rf @a.com,ann@example.org",
+                                                   ready_after=1.5, shell=shell)
+            self._hook_main_checks(rc, calls, log, cwds, tmp)
+        # setup.py failing: three tries, a log line, still exit 0
+        rc, calls, log, _, _ = self._hook("ann@example.org", fail_load=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(c.startswith("setup.py load-servers") for c in calls), 3)
+        self.assertIn("medcea oauth2-servers: ann@example.org: load-servers failed 3 times: no server entry", log)
+        # never ready: gives up after HOOK_WAIT, exit 0, no setup.py write
+        rc, calls, log, _, _ = self._hook("ann@example.org", wait=2, db=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("not ready after 2 s", log[0])
+        # a special-use domain pgAdmin refuses: skipped like a bad address
+        rc, calls, log, _, _ = self._hook("demo@medcea.invalid,qa@x.test")
+        self.assertEqual(rc, 0)
+        self.assertEqual([c for c in calls if c.startswith("setup.py")], ["setup.py get-users"])
+        self.assertEqual(log.count("medcea oauth2-servers: skipped an entry that is not a plain lower-case e-mail address"), 2)
+        # an empty list: nothing to do
+        rc, calls, log, _, _ = self._hook("")
+        self.assertEqual((rc, calls), (0, []))
+        self.assertIn("PGADMIN_OAUTH2_SERVER_USERS is empty", log[0])
+
+    def test_kc_claim_emails(self):
+        """The e-mails of the enabled accounts the claims admit, from a fake admin API; fallback on failure."""
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        R = "/admin/realms/medcea/roles"
+        u = lambda i, name, email, enabled=True: {"id": i, "username": name, "email": email, "enabled": enabled}  # noqa: E731
+        routes = {
+            R: [{"name": "admin", "composite": False}, {"name": "operator", "composite": False},
+                {"name": "production_manager", "composite": True}, {"name": "qa", "composite": True},
+                {"name": "auditor", "composite": False}, {"name": "default-roles-medcea", "composite": True}],
+            R + "/production_manager/composites/realm": [{"name": "operator"}],
+            R + "/qa/composites/realm": [{"name": "auditor"}],
+            R + "/default-roles-medcea/composites/realm": [{"name": "offline_access"}],
+            R + "/admin/users": [u("1", "admin", "Admin@CEA.com"), u("2", "old", "old@cea.com", False),
+                                 u("3", "noemail", ""), u("4", "odd", "odd@localhost"),
+                                 u("5", "bob", "bob@example.org"), u("9", "demo", "demo@medcea.invalid")],
+            R + "/operator/users": [u("6", "op", "op@example.org")],
+            R + "/production_manager/users": [u("7", "pm", "pm@example.org"), u("5", "bob", "bob@example.org")],
+            R + "/qa/users": [u("8", "qa", "qa@example.org")],
+            R + "/auditor/users": [],
+        }
+        state = {"fail": False, "auth": set()}
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                state["auth"].add(self.headers.get("Authorization"))
+                path = self.path.split("?")[0]
+                if state["fail"] or path not in routes:
+                    self.send_response(500 if state["fail"] else 404)
+                    self.end_headers()
+                    return
+                body = json.dumps(routes[path]).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def run(claims):
+                r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-keycloak-admin.sh"\n'
+                                    'kc_admin_token() { printf tok; }\n'
+                                    'kc_claim_emails medcea "$1" "$2"', "x", claims, "Admin@CEA.com"],
+                                   capture_output=True, text=True,
+                                   env=dict(os.environ, KC_URL="http://127.0.0.1:%d" % srv.server_port))
+                # 1 = a failed read (FALLBACK printed), so the caller can keep the live list
+                self.assertEqual(r.returncode, 1 if state["fail"] or claims == "not a literal" else 0, r.stderr)
+                return r.stdout.strip(), r.stderr
+            out, err = run("{'groups': ['admin']}")
+            self.assertEqual(out, "admin@cea.com,bob@example.org")
+            self.assertIn("'noemail' has no e-mail", err)
+            self.assertIn("'odd' has an e-mail pgAdmin is not given", err)
+            # a special-use domain pgAdmin's e-mail check refuses (the demo accounts')
+            self.assertIn("'demo' has an e-mail on a special-use domain", err)
+            self.assertNotIn("old", err)
+            self.assertEqual(state["auth"], {"Bearer tok"})
+            # through a composite: production_manager's holders carry operator too
+            out, _ = run("{'groups': ['operator']}")
+            self.assertEqual(out, "bob@example.org,op@example.org,pm@example.org")
+            out, _ = run("{'groups': ['auditor', 'admin']}")
+            self.assertEqual(out, "admin@cea.com,bob@example.org,qa@example.org")
+            state["fail"] = True
+            out, err = run("{'groups': ['admin']}")
+            self.assertEqual(out, "admin@cea.com")
+            self.assertIn("cannot read the role holders", err)
+            state["fail"] = False
+            out, err = run("not a literal")
+            self.assertEqual(out, "admin@cea.com")
+        finally:
+            srv.shutdown()
+
+    def test_pgadmin_users_query(self):
+        """health-check pgadminroles' in-pod query (shared with iam-hosts.sh) on a pgAdmin-shaped database."""
+        import sqlite3
+        import subprocess
+        import tempfile
+        grab = lambda src: re.search(r"<<'PY'\n(import os, sqlite3.*?)\nPY\n", src, re.S).group(1)  # noqa: E731
+        q = grab(self.read("health-check.sh"))
+        self.assertEqual(q, grab(self.read("tests/iam-hosts.sh")))
+        self.assertIn("mode=ro", q)
+        db = os.path.join(tempfile.mkdtemp(), "pgadmin4.db")
+        con = sqlite3.connect(db)
+        con.executescript('''
+            CREATE TABLE "user" (id INTEGER PRIMARY KEY, username TEXT, email TEXT, auth_source TEXT);
+            CREATE TABLE server (id INTEGER PRIMARY KEY, user_id INTEGER, name TEXT);
+            INSERT INTO "user" VALUES (1, 'admin@cea.com', 'admin@cea.com', 'internal'),
+                                      (2, 'admin@cea.com', 'admin@cea.com', 'oauth2'),
+                                      (3, 'ann@example.org', 'ann@example.org', 'oauth2');
+            INSERT INTO server VALUES (1, 1, 'IoT Postgres'), (2, 2, 'IoT Postgres'), (3, 3, 'Other');
+        ''')
+        con.commit()
+        con.close()
+
+        def run(users):
+            return subprocess.run(["python3", "-", db], input=q, capture_output=True, text=True,
+                                  env=dict(os.environ, PGADMIN_OAUTH2_SERVER_USERS=users)).stdout.strip()
+        self.assertEqual(run("admin@cea.com"), "ok 1")
+        self.assertEqual(run("admin@cea.com,ann@example.org,bob@example.org"),
+                         "missing bob@example.org (no OAuth2 user); ann@example.org (no IoT Postgres entry)")
+        self.assertEqual(run(""), "empty")
+        before = os.path.getmtime(db)
+        self.assertEqual(subprocess.run(["python3", "-", db + ".absent"], input=q, capture_output=True,
+                                        text=True).stdout.strip(), "?")
+        self.assertFalse(os.path.exists(db + ".absent"))
+        self.assertEqual(os.path.getmtime(db), before)
 
     def test_health_onboardroles(self):
         daemon = "42 python3 edge/src/host/wizard_server.py --dir /tmp/x --daemon --auth keycloak"

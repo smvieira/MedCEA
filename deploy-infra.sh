@@ -1796,7 +1796,8 @@ $MK8S kubectl rollout status deployment/oauth2-proxy \
 
 # =============================================================================
 # 8. pgAdmin
-#    Image: docker.io/dpage/pgadmin4:9 (Docker Hub — auth configured)
+#    Image: docker.io/dpage/pgadmin4:9.19.0, pinned by digest in
+#    k8s/pgadmin/pgadmin.yaml (Docker Hub — auth configured)
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
 echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
@@ -1809,13 +1810,52 @@ PGA_DB_USER="$DBC_USER"; PGA_DB_PASS="$DBC_PASS"
 source "$SCRIPT_DIR/infra/lib-policy-tools.sh"
 PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin)" \
     || { echo -e "${RED}ERROR: cannot compile pgAdmin's sign-in roles from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }
+# Who gets the IoT Postgres entry (1 Nov 2026): pgAdmin does not share a server's
+# username or passfile, so each OAuth2 user needs its own copy of servers.json,
+# loaded by the pod's postStart hook (k8s/pgadmin/pgadmin.yaml) for the e-mails
+# listed here — the enabled accounts holding a role in the claims compiled above.
+# A plain env value (no secret); a changed list restarts pgAdmin, which also ends
+# its sessions. The realm's port-forward closed with section 3, so it is opened
+# again on the same port for this one read. Never stops the deploy: a failed read
+# keeps the running pgAdmin's list (a shorter one would restart pgAdmin with a
+# fresh database and drop the other admins' entries), and only without one
+# goes on with ADMIN_EMAIL alone.
+_pgadmin_server_users() {
+    local pf ok=0 out live
+    fuser -k 18080/tcp &>/dev/null || true
+    $MK8S kubectl port-forward svc/keycloak 18080:80 -n "$NAMESPACE" &>/dev/null 9>&- &
+    pf=$!
+    for _ in $(seq 1 12); do
+        kc_admin_select && { ok=1; break; }
+        sleep 2
+    done
+    if (( ok )) && out="$(kc_claim_emails "$KEYCLOAK_REALM" "$PGADMIN_OAUTH2_CLAIMS" "$ADMIN_EMAIL")"; then
+        printf '%s\n' "$out"
+    else
+        # the live list; only plain address characters, since it is rendered again
+        live="$($MK8S kubectl get deployment pgadmin -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="pgadmin")].env[?(@.name=="PGADMIN_OAUTH2_SERVER_USERS")].value}' \
+            2>/dev/null || true)"
+        if [[ -n "$live" && "$live" =~ ^[a-z0-9._%+@,-]+$ ]]; then
+            echo -e "${YELLOW}  WARNING: cannot read Keycloak's role holders; pgAdmin keeps its current list (${live}).${NC}" >&2
+            printf '%s\n' "$live"
+        else
+            echo -e "${YELLOW}  WARNING: cannot read Keycloak's role holders and pgAdmin has no list yet; its server entry goes to ${ADMIN_EMAIL,,} alone.${NC}" >&2
+            printf '%s\n' "${ADMIN_EMAIL,,}"
+        fi
+    fi
+    kc_admin_done
+    kill "$pf" 2>/dev/null || true
+}
+PGADMIN_OAUTH2_SERVER_USERS="$(_pgadmin_server_users)"
+echo -e "${GREEN}  pgAdmin server entry for: ${PGADMIN_OAUTH2_SERVER_USERS:-nobody}${NC}"
 # Secret pgadmin-config holds the OAuth2 config (client secret, claims) and the
 # default password; pgAdmin reads them as secretKeyRef env, at start only, so
 # their sha256 is the pod annotation medcea/config-checksum. The rendered
 # manifest reaches python on stdin and only the hash is printed.
 PGADMIN_CONFIG_CHECKSUM="$(set -o pipefail
     render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
-           KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP \
+           KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP PGADMIN_OAUTH2_SERVER_USERS \
     | python3 -c '
 import hashlib, json, sys, yaml
 try:  # a YAML error quotes the input, which holds the secrets: say nothing of it
@@ -1826,13 +1866,15 @@ except Exception:
     sys.exit(1)')" \
     || { echo -e "${RED}ERROR: cannot render pgAdmin's Secret pgadmin-config (k8s/pgadmin/pgadmin.yaml).${NC}" >&2; exit 1; }
 render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
-       KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
+       KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP PGADMIN_OAUTH2_SERVER_USERS PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 # 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config
 # database before gunicorn starts, which took ~5.5 min on a clean install (pod
 # created 10:36, Ready 10:42) and failed a 5m wait on a pod that was healthy.
+# 16m since the postStart hook (up to 15 min of waiting, then setup.py per user):
+# the pod is Ready only after it.
 $MK8S kubectl rollout status deployment/pgadmin \
-  -n "$NAMESPACE" --timeout=10m
+  -n "$NAMESPACE" --timeout=16m
 
 # =============================================================================
 # 9. SERVICE PORTAL

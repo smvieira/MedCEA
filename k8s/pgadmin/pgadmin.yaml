@@ -17,10 +17,84 @@ data:
           "Username": "${PGA_DB_USER}",
           "PassFile": "/pgpassfile",
           "SSLMode": "disable",
-          "Shared": true
+          "Shared": false
         }
       }
     }
+  # postStart hook of the pgadmin container (below). "Shared": false above
+  # because pgAdmin does not share a server's Username or PassFile: an OAuth2
+  # user saw the default user's shared entry without them, and its connection
+  # failed ("no password supplied"). Each user listed in
+  # PGADMIN_OAUTH2_SERVER_USERS (deploy-infra.sh: the enabled Keycloak accounts
+  # holding a role in pgAdmin's claims) gets its own copy of servers.json instead.
+  # Read at container start only, like servers.json. This text goes through
+  # render: no dollar-brace here, and no name from the render list after a dollar.
+  oauth2-servers.sh: |
+    # sh; uid 5050, the container's environment. Always exits 0: a failing
+    # postStart hook kills the container. Logs one line per user to the
+    # container's stdout, never a password (there is none here).
+    [ -n "$HOOK_PY" ] || HOOK_PY=/venv/bin/python3
+    [ -n "$HOOK_DIR" ] || HOOK_DIR=/pgadmin4
+    [ -n "$HOOK_DB" ] || HOOK_DB=/var/lib/pgadmin/pgadmin4.db
+    [ -n "$HOOK_SERVERS" ] || HOOK_SERVERS=/pgadmin4/servers.json
+    [ -n "$HOOK_LOG" ] || HOOK_LOG=/proc/1/fd/1
+    [ -n "$HOOK_WAIT" ] || HOOK_WAIT=900
+    [ -n "$HOOK_STEP" ] || HOOK_STEP=5
+    [ -n "$HOOK_PING" ] || HOOK_PING="http://127.0.0.1:$(printenv PGADMIN_LISTEN_PORT || echo 80)/misc/ping"
+    set -f
+    log() { { printf 'medcea oauth2-servers: %s\n' "$*" >>"$HOOK_LOG"; } 2>/dev/null || true; }
+    setup() { (cd "$HOOK_DIR" && "$HOOK_PY" setup.py "$@") >/dev/null 2>&1; }
+    ping() { "$HOOK_PY" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5)' "$HOOK_PING" >/dev/null 2>&1; }
+    # an e-mail from Keycloak, before it reaches setup.py: one line, lower case,
+    # at most 254 characters, a plain local part and a dotted domain
+    valid() {
+      case "$1" in *'
+    '*) return 1 ;; esac
+      [ "$(printf %s "$1" | wc -c)" -le 254 ] || return 1
+      printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9._%+-]*@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,63}$' || return 1
+      # special-use domains, which pgAdmin's e-mail check refuses (as kc_claim_emails)
+      case "$1" in
+        *.arpa|*.example|*.invalid|*.local|*.localhost|*.onion|*.test) return 1 ;;
+      esac
+    }
+    users="$(printenv PGADMIN_OAUTH2_SERVER_USERS)"
+    if [ -z "$users" ]; then
+      log "PGADMIN_OAUTH2_SERVER_USERS is empty: no OAuth2 user gets a server entry"
+      exit 0
+    fi
+    # The entrypoint creates the database (about 5 min on a first boot) and loads
+    # the default user's servers before it starts gunicorn: wait for all of it,
+    # so nothing here races its writes.
+    waited=0
+    until [ -f "$HOOK_DB" ] && ping && setup get-users; do
+      if [ "$waited" -ge "$HOOK_WAIT" ]; then
+        log "pgAdmin not ready after $waited s: no OAuth2 server entry loaded"
+        exit 0
+      fi
+      sleep "$HOOK_STEP"
+      waited=$((waited + HOOK_STEP))
+    done
+    IFS=','
+    for e in $users; do
+      IFS=' '
+      if ! valid "$e"; then
+        log "skipped an entry that is not a plain lower-case e-mail address"
+        continue
+      fi
+      # an existing user makes this fail, which is fine: load-servers decides
+      setup add-external-user "$e" --auth-source oauth2 --email "$e"
+      n=1
+      until setup load-servers "$HOOK_SERVERS" --user "$e" --auth-source oauth2 --replace; do
+        if [ "$n" -ge 3 ]; then
+          log "$e: load-servers failed 3 times: no server entry"
+          continue 2
+        fi
+        n=$((n + 1))
+        sleep "$HOOK_STEP"
+      done
+      log "$e: server entry loaded"
+    done
+    exit 0
 ---
 apiVersion: v1
 kind: Secret
@@ -73,6 +147,11 @@ spec:
   # Secret pgadmin-config hold both secrets as plain env (health-check
   # pgadminroles FAILs while one is left). Roll back with git, not rollout undo.
   revisionHistoryLimit: 0
+  # 17 min, not the default 10: the pod is Ready only after the postStart hook,
+  # which may wait 15 min for a first boot and then run setup.py per user. Past
+  # this deadline kubectl rollout status fails whatever its --timeout (16m in
+  # deploy-infra.sh), and the deploy stops.
+  progressDeadlineSeconds: 1020
   selector:
     matchLabels:
       app: pgadmin
@@ -98,7 +177,10 @@ spec:
       initContainers:
       - name: fix-pgpassfile-perms
         image: busybox:1.36
-        command: ["sh", "-c", "cp /pgpassfile-src/pgpassfile /pgpassfile-rw/pgpassfile && chmod 0600 /pgpassfile-rw/pgpassfile"]
+        # libpq ignores a passfile it cannot read, or one others can read: 0600 and
+        # owned by pgAdmin's user (uid 5050 in dpage/pgadmin4), or every connection
+        # through it fails with "no password supplied" (it was root's until 1 Nov 2026)
+        command: ["sh", "-c", "cp /pgpassfile-src/pgpassfile /pgpassfile-rw/pgpassfile && chown 5050:0 /pgpassfile-rw/pgpassfile && chmod 0600 /pgpassfile-rw/pgpassfile"]
         volumeMounts:
         - name: pgpassfile-src
           mountPath: /pgpassfile-src
@@ -106,7 +188,11 @@ spec:
           mountPath: /pgpassfile-rw
       containers:
       - name: pgadmin
-        image: dpage/pgadmin4:9
+        # Pinned (9.19.0, Docker Hub digest of 29 Oct 2026). To move it: read the
+        # new tag's digest (docker buildx imagetools inspect dpage/pgadmin4:<tag>,
+        # or Docker Hub's tag page), replace both parts, ./deploy-infra.sh, then
+        # ./health-check.sh (pgadminroles checks what the hook's setup.py calls made).
+        image: dpage/pgadmin4:9.19.0@sha256:3591b3d02910dcd817dec6fcaa681c278ba6966945283dd0ea0042731c330c83
         env:
         - name: PGADMIN_DEFAULT_EMAIL
           value: "${ADMIN_EMAIL}"
@@ -119,6 +205,11 @@ spec:
           value: "/pgadmin4/servers.json"
         - name: PGPASSFILE
           value: "/pgpassfile"
+        # the e-mails (= pgAdmin usernames of OAuth2 users) that get their own
+        # IoT Postgres entry from the postStart hook; not a secret. A changed list
+        # changes the pod template, so pgAdmin restarts and the hook runs again.
+        - name: PGADMIN_OAUTH2_SERVER_USERS
+          value: "${PGADMIN_OAUTH2_SERVER_USERS}"
         # Sign-in through Keycloak only. The roles it admits come from the
         # access policy (platform_admin's tool block: `cli.py compile pgadmin`,
         # policy_tool in infra/lib-policy-tools.sh, rendered as PGADMIN_OAUTH2_CLAIMS);
@@ -126,9 +217,10 @@ spec:
         # are written verbatim into config_distro.py, so they are Python
         # literals: strings quoted, True/False capitalised (the OAuth2 dict is
         # in Secret pgadmin-config above, with the client secret). The default e-mail
-        # above is the admin's Keycloak e-mail too, so their SSO login lands on
-        # the account that owns the preconfigured server; other admins are
-        # created on first login and see it because it is "Shared".
+        # above makes pgAdmin's internal default user (used only by break-glass);
+        # a Keycloak sign-in is a separate OAuth2 user, named after the token's
+        # e-mail and created at first sign-in (role User) or by the postStart hook
+        # below, which gives each listed OAuth2 user its own server entry.
         # Break-glass if Keycloak is down:
         #   kubectl set env deployment/pgadmin PGADMIN_CONFIG_AUTHENTICATION_SOURCES="['internal']"
         - name: PGADMIN_CONFIG_AUTHENTICATION_SOURCES
@@ -140,6 +232,19 @@ spec:
             secretKeyRef:
               name: pgadmin-config
               key: oauth2-config
+        # Every OAuth2 user listed above gets its own copy of servers.json
+        # (oauth2-servers.sh in ConfigMap pgadmin-servers). A postStart hook, not a
+        # change to the entrypoint: the pod has no data volume, so every start is a
+        # fresh database and the users and servers must be loaded at every start,
+        # and the image's /entrypoint.sh (which creates the database and execs
+        # gunicorn) stays the image's own across upgrades. The hook waits for the
+        # entrypoint's work, then runs setup.py add-external-user and load-servers
+        # --replace per user. Kubernetes marks the container started (and probes
+        # it) only after the hook, so the pod is Ready once the entries are loaded.
+        lifecycle:
+          postStart:
+            exec:
+              command: ["sh", "/medcea/oauth2-servers.sh"]
         ports:
         - containerPort: 80
           name: http
@@ -161,6 +266,9 @@ spec:
         - name: servers-config
           mountPath: /pgadmin4/servers.json
           subPath: servers.json
+        - name: servers-config
+          mountPath: /medcea/oauth2-servers.sh
+          subPath: oauth2-servers.sh
         - name: pgpassfile-rw
           mountPath: /pgpassfile
           subPath: pgpassfile

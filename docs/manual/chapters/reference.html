@@ -125,7 +125,7 @@
 <div class="table-wrap"><table>
 <thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
-<tr><td><code>ADMIN_USER</code>, <code>ADMIN_EMAIL</code></td><td><code>admin</code>, empty</td><td>The platform administrator. The e-mail address receives Keycloak password resets and is the pgAdmin login.</td></tr>
+<tr><td><code>ADMIN_USER</code>, <code>ADMIN_EMAIL</code></td><td><code>admin</code>, empty</td><td>The platform administrator. The e-mail address receives Keycloak password resets and is the login of pgAdmin's built-in user (used only with pgAdmin's break-glass sign-in); when Keycloak cannot be read during <code>./deploy-infra.sh</code> and pgAdmin has no list of its own yet, it is the one address that gets pgAdmin's IoT Postgres entry (otherwise pgAdmin keeps its current list).</td></tr>
 <tr><td><code>QA_USER</code>, <code>QA_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">qa</span>, who confirms account grants and approves policy changes. Must be someone other than the administrator.</td></tr>
 <tr><td><code>ENGINEER_USER</code>, <code>ENGINEER_EMAIL</code></td><td>empty</td><td>The first person with role <span class="role">engineer</span>, the only role admitted to Node-RED and MQTT Explorer; device onboarding admits it and, into existing slots only, <span class="role">maintenance</span>. May be a second account of the administrator, with its own username and e-mail address.</td></tr>
 <tr><td><code>KC_BREAKGLASS_USER</code></td><td><code>kc-breakglass</code></td><td>Keycloak's own console account (realm <code>master</code>), used only for recovery. Every use is recorded in Keycloak's admin events.</td></tr>
@@ -216,7 +216,7 @@
 <tr><td>Mosquitto MQTT (TCP)</td><td>The broker port for boards (<code>31883</code>) is open.</td></tr>
 <tr><td>Onboarding wizard</td><td>The wizard service on the host (<code>$PLATFORM_IP:$EDGE_WIZARD_PORT</code>) answers.</td></tr>
 <tr><td>Onboarding roles</td><td>The running wizard admits exactly the roles compiled from the access policy (<span class="role">engineer</span>, <span class="role">maintenance</span>). FAIL on any difference, or when it admits any signed-in account (run <code>./apps/edge-wizard/deploy.sh</code> when no run is active). WARN while <code>IAM_GATES</code> is false. SKIP when the wizard is not running.</td></tr>
-<tr><td>pgAdmin roles</td><td>pgAdmin's sign-in admits exactly the roles compiled from the access policy (<span class="role">admin</span>). FAIL on any difference (run <code>./deploy-infra.sh</code>). WARN while <code>IAM_GATES</code> is false.</td></tr>
+<tr><td>pgAdmin roles</td><td>pgAdmin's sign-in admits exactly the roles compiled from the access policy (<span class="role">admin</span>), pgAdmin can read its database password file, and every address in its server list owns the IoT Postgres entry. FAIL on any difference (run <code>./deploy-infra.sh</code>). WARN while <code>IAM_GATES</code> is false, or while the server list is empty.</td></tr>
 <tr><td>Access policy history</td><td>The hash chain of the access policy history is intact (FAIL names the first broken event).</td></tr>
 <tr><td>Database roles mode</td><td>The <code>IAM_DB_ROLES</code> mode recorded in the database matches <code>config.env</code>. WARN while it is <code>false</code>.</td></tr>
 <tr><td>Database grants</td><td>The database's rights equal those compiled from the access policy. FAIL on any difference.</td></tr>

@@ -44,6 +44,8 @@
 #            and {'groups': ['admin']})
 #   secret   pgAdmin's deployment holds neither the OAuth2 config nor the default
 #            password as plain env (only from Secret pgadmin-config)
+#   servers  pgAdmin: every e-mail in the pod's PGADMIN_OAUTH2_SERVER_USERS is an OAuth2
+#            user owning "IoT Postgres" (read-only sqlite3 in the pod; the postStart hook)
 #   sign-in  signed out, the host redirects to Keycloak (the wizard) or shows pgAdmin's
 #            MedCEA sign-in button (pgAdmin)
 #   reach    some enabled account holds a role the tool admits
@@ -325,7 +327,7 @@ check_onboard() {
 # with the client secret: python reads it on stdin and prints only the claims. A
 # deployment still holding either secret as plain env fails (names only printed).
 check_pgadmin() {
-    local host="$1" want have same page literal missing
+    local host="$1" want have same page literal missing servers passfile
     want="$(policy_tool pgadmin 2>/dev/null)" || { fail gate "policy_tool pgadmin failed (cli.py check)"; return; }
     # The Deployment and every ReplicaSet it kept ("?" = unreadable)
     literal="$($KUBECTL get deployment,replicaset -n "$NAMESPACE" -l app=pgadmin -o json 2>/dev/null \
@@ -356,6 +358,41 @@ except Exception:
     else
         pass secret "the OAuth2 config and default password come from Secret pgadmin-config"
     fi
+    # the same read-only query as health-check pgadminroles
+    servers="$($KUBECTL exec -i -n "$NAMESPACE" deployment/pgadmin -c pgadmin -- \
+            /venv/bin/python3 - /var/lib/pgadmin/pgadmin4.db 2>/dev/null <<'PY'
+import os, sqlite3, sys
+try:
+    want = sorted({u for u in os.environ.get("PGADMIN_OAUTH2_SERVER_USERS", "").split(",") if u})
+    db = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+    have = {u.lower(): n for u, n in db.execute(
+        "SELECT u.username, (SELECT count(*) FROM server s WHERE s.user_id = u.id"
+        " AND s.name = 'IoT Postgres') FROM \"user\" u WHERE u.auth_source = 'oauth2'")}
+    if not want:
+        print("empty")
+    else:
+        bad = ["%s (no OAuth2 user)" % e for e in want if e not in have]
+        bad += ["%s (no IoT Postgres entry)" % e for e in want if have.get(e) == 0]
+        print(("missing " + "; ".join(bad)) if bad else "ok %d" % len(want))
+except Exception:
+    print("?")
+PY
+)"
+    # libpq skips a passfile its user cannot read ("no password supplied"); the
+    # pod says which, and no answer means the container could not be reached
+    passfile="$($KUBECTL exec -n "$NAMESPACE" deployment/pgadmin -c pgadmin -- \
+        sh -c 'test -r /pgpassfile && echo readable || echo unreadable' 2>/dev/null)"
+    case "$passfile" in
+        readable)   pass passfile "pgAdmin's user can read /pgpassfile" ;;
+        unreadable) fail passfile "pgAdmin's user cannot read /pgpassfile: the server entry cannot connect (./deploy-infra.sh)" ;;
+        *)          fail passfile "cannot reach pgAdmin's container" ;;
+    esac
+    case "$servers" in
+        ok\ *)    pass servers "${servers#ok } OAuth2 user(s) own the IoT Postgres entry" ;;
+        empty)    skip servers "PGADMIN_OAUTH2_SERVER_USERS is empty (./deploy-infra.sh)" ;;
+        missing*) fail servers "the postStart hook did not give ${servers#missing } its server (./deploy-infra.sh)" ;;
+        *)        fail servers "cannot read pgAdmin's users and servers in its pod" ;;
+    esac
     if [[ -n "$missing" ]]; then
         fail gate "$missing"
     else
