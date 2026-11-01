@@ -32,6 +32,28 @@ initChownData:
     registry: docker.io
     repository: library/busybox
     tag: "1.36"
+# microk8s-hostpath creates each volume directory 0777 with no sticky bit, under a
+# parent any local account can enter, so anyone on the host could swap grafana.db for
+# a file of their own. This runs after init-chown-data (the chart puts
+# extraInitContainers last) and closes the volume root to Grafana's uid at every start,
+# also after a restore (tar -p brings back the 0777 of '.'). Root only for FOWNER.
+extraInitContainers:
+- name: medcea-close-data
+  image: docker.io/library/busybox:1.36
+  imagePullPolicy: IfNotPresent
+  command: ["chmod", "0700", "/var/lib/grafana"]
+  securityContext:
+    runAsNonRoot: false
+    runAsUser: 0
+    allowPrivilegeEscalation: false
+    seccompProfile:
+      type: RuntimeDefault
+    capabilities:
+      drop: ["ALL"]
+      add: ["FOWNER"]
+  volumeMounts:
+  - name: storage
+    mountPath: /var/lib/grafana
 admin:
   existingSecret: grafana-admin
   userKey: admin-user

@@ -186,7 +186,8 @@ D. Node-RED (/data: flows, flows_cred.json and its key, palette modules)
 E. Grafana (grafana.db: Editors' dashboards, folders, annotations, alert rules)
   1. $k scale deployment grafana --replicas=0
   2. D as in C.2 with pvc grafana, then replace its content:
-       test -n "\$D" && sudo find "\$D" -mindepth 1 -delete && sudo tar -C "\$D" -xzpf $f/volumes/grafana.tar.gz --numeric-owner
+       test -n "\$D" && sudo find "\$D" -mindepth 1 -delete && sudo tar -C "\$D" -xzpf $f/volumes/grafana.tar.gz --numeric-owner && sudo chmod 0700 "\$D"
+     (tar -p brings back the 0777 of '.'; Grafana's init container closes it again at each start)
   3. $k scale deployment grafana --replicas=1, then ./deploy-infra.sh (Grafana's break-glass password)
      and ./apps/report/deploy.sh (the platform's dashboards from the repository).
 

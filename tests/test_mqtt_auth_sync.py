@@ -21,6 +21,9 @@ import datetime
 import importlib.util
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -206,6 +209,107 @@ class Manifests(unittest.TestCase):
     def test_status_has_no_hash(self):
         p, a, st = S.render_persons(ENG, UNITS, "medcea", True, NOW)
         self.assertNotIn("$7$", repr(st))
+
+
+def _health_fn(name):
+    """One check function of health-check.sh, as text (run under bash with fakes)."""
+    with open(os.path.join(REPO, "health-check.sh")) as fh:
+        src = fh.read()
+    return re.search(r"(?ms)^%s\(\) \{.*?^\}" % name, src).group(0)
+
+
+class HealthChecks(unittest.TestCase):
+    """check_iammqtt and check_pvc against a fake kubectl (offline)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def run_check(self, fn, call, kubectl, env=None):
+        k = os.path.join(self.tmp, "kubectl")
+        with open(k, "w") as fh:
+            fh.write("#!/bin/sh\n" + kubectl + "\n")
+        os.chmod(k, 0o755)
+        script = (f'_record() {{ echo "$1|$2|$3"; }}\nTIMEOUT=5\nKUBECTL="{k}"\nNAMESPACE=medcea\n'
+                  f"{_health_fn(fn)}\n{call}\n")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                           env=dict(os.environ, **(env or {})))
+        return r.stdout.strip()
+
+    @staticmethod
+    def deploy_mode(switch):
+        """The page mode apps/mqtt-explorer/deploy.sh renders for IAM_MQTT_PERSON=switch."""
+        with open(os.path.join(REPO, "apps", "mqtt-explorer", "deploy.sh")) as fh:
+            src = fh.read()
+        block = src[src.index('case "${IAM_MQTT_PERSON:-false}" in'):]
+        return re.search(r"(?m)^\s*%s\)\s*\n\s*_MODE=(\w+)" % switch, block).group(1)
+
+    def broker(self, mode, users, page):
+        conf = "per_listener_settings true" if mode == "true" else "listener 1883"
+        return f"""case "$*" in
+  *"annotations.medcea/mqtt-mode"*) printf %s {mode} ;;
+  *MQTT_PERSON_CREDENTIALS*) printf %s {mode} ;;
+  *"configmap mosquitto-config"*) printf '%s\\n' '{conf}' ;;
+  *"configmap mqtt-explorer-html"*) printf '%s\\n' '<html data-mqtt-mode="{page}">' ;;
+  *"/mosquitto/auth/passwd-ws"*) printf 'explorer-eng-abc123\\n' ;;
+  *"/mosquitto/auth/passwd"*) printf '{users}' ;;
+  *status.json*) exit 1 ;;
+  *"get deployment iam-api"*) exit 0 ;;
+  *"deployment/iam-api"*) printf '%s' '{{"mode": true, "mqtt_digest": "x"}}' ;;
+  *) exit 1 ;;
+esac"""
+
+    def test_deploy_and_check_agree_on_page_modes(self):
+        self.assertEqual(self.deploy_mode("false"), "off")
+        self.assertEqual(self.deploy_mode("true"), "person")
+
+    def test_iammqtt_false_off_page(self):
+        page = self.deploy_mode("false")
+        r = self.run_check("check_iammqtt", "check_iammqtt MQTT medcea",
+                           self.broker("false", "node-red\\nscheduler\\n", page), {"IAM_MQTT_PERSON": "false"})
+        self.assertTrue(r.startswith("WARN|MQTT|IAM_MQTT_PERSON=false"), r)
+        self.assertNotIn("Explorer page", r)
+
+    def test_iammqtt_shared_account_fails_in_both_modes(self):
+        for mode, extra in (("false", {}), ("true", {"IAM_DB_ROLES": "true"})):
+            r = self.run_check("check_iammqtt", "check_iammqtt MQTT medcea",
+                               self.broker(mode, "node-red\\nmqtt-explorer\\nscheduler\\n", self.deploy_mode(mode)),
+                               dict({"IAM_MQTT_PERSON": mode}, **extra))
+            self.assertTrue(r.startswith("FAIL|MQTT|"), (mode, r))
+            self.assertIn("mqtt-explorer account is still in the broker's password file", r)
+
+    def test_iammqtt_true_ok(self):
+        r = self.run_check("check_iammqtt", "check_iammqtt MQTT medcea",
+                           self.broker("true", "node-red\\nscheduler\\n", self.deploy_mode("true")),
+                           {"IAM_MQTT_PERSON": "true", "IAM_DB_ROLES": "true"})
+        self.assertTrue(r.startswith("OK|MQTT|"), r)
+
+    def pvc(self, phase, mode=None):
+        d = os.path.join(self.tmp, "medcea-grafana-pvc-g")
+        os.makedirs(d, exist_ok=True)
+        if mode is not None:
+            os.chmod(d, mode)
+        return f"""case "$*" in
+  "get pvc grafana -n medcea -o jsonpath={{.status.phase}} {{.status.capacity.storage}}") printf '%s' '{phase} 2Gi' ;;
+  "get pvc grafana -n medcea -o jsonpath={{.spec.volumeName}}") printf pvc-g ;;
+  "get pv pvc-g -o jsonpath={{.spec.hostPath.path}}") printf '%s' '{d}' ;;
+  *) exit 1 ;;
+esac"""
+
+    def test_pvc(self):
+        r = self.run_check("check_pvc", "check_pvc Vol medcea/grafana", self.pvc("Bound", 0o700))
+        self.assertTrue(r.startswith("OK|Vol|pvc/grafana (medcea): Bound, 2Gi, root mode 700"), r)
+        r = self.run_check("check_pvc", "check_pvc Vol medcea/grafana", self.pvc("Bound", 0o777))
+        self.assertTrue(r.startswith("WARN|Vol|") and "mode 777, not 700" in r, r)
+        r = self.run_check("check_pvc", "check_pvc Vol medcea/grafana", self.pvc("Pending"))
+        self.assertTrue(r.startswith("WARN|Vol|pvc/grafana (medcea) is Pending"), r)
+        r = self.run_check("check_pvc", "check_pvc Vol medcea/grafana", "exit 1")
+        self.assertTrue(r.startswith("WARN|Vol|no PVC grafana in medcea"), r)
+        for bad in ("grafana", "/grafana", "medcea/"):
+            r = self.run_check("check_pvc", f"check_pvc Vol {bad}", "exit 1")
+            self.assertTrue(r.startswith("FAIL|Vol|Invalid pvc target"), (bad, r))
 
 
 if __name__ == "__main__":

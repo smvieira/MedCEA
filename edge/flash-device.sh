@@ -189,16 +189,16 @@ set -e
 # broker it publishes to and the topic root the rest of the platform listens on.
 # shellcheck source=/dev/null
 [ -f "$REPO_ROOT/config.env" ] && source "$REPO_ROOT/config.env"
-# How to watch a board's topics after onboarding (IAM 3.5): with IAM_MQTT_PERSON=true the
-# shared mqtt-explorer account is gone from the broker, so the hint is the MQTT Explorer,
-# where each engineer signs in with their own credential.
+# How to watch a board's topics after onboarding: the MQTT Explorer, where each engineer
+# signs in with their own credential (IAM 3.5). The shared mqtt-explorer account and
+# MQTT_EXPLORER_PASS are gone (1 Nov 2026), so under IAM_MQTT_PERSON=false there is no
+# way to watch from here: say so rather than print a command the broker refuses.
 _watch_hint() {
+  echo "      open https://${MQTTX_DOMAIN:-mqtt-explorer.<domain>} and watch $TOPIC_BASE/#"
   if [ "${IAM_MQTT_PERSON:-false}" = true ]; then
-    echo "      open https://${MQTTX_DOMAIN:-mqtt-explorer.<domain>} and watch $TOPIC_BASE/#"
-    echo "                                    ${DIM}(your own MQTT Explorer sign-in; the shared account is retired)${N}"
+    echo "                                    ${DIM}(your own MQTT Explorer sign-in)${N}"
   else
-    echo "      mosquitto_sub -h $MQTT_HOST -p $MQTT_PORT -u mqtt-explorer -P \"\$MQTT_EXPLORER_PASS\" -t '$TOPIC_BASE/#' -v"
-    echo "                                    ${DIM}(MQTT_EXPLORER_PASS is in config.env; or open https://${MQTTX_DOMAIN:-mqtt-explorer.<domain>})${N}"
+    echo "                                    ${DIM}(needs IAM_MQTT_PERSON=true: ./guide.sh → IAM switches)${N}"
   fi
 }
 PROJECT_NAME="${PROJECT_NAME:-medcea}"

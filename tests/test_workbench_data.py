@@ -392,15 +392,64 @@ class PolicyTest(unittest.TestCase):
 
 
 class HomesTest(unittest.TestCase):
-    def run_warn(self, kubectl_body):
+    def run_warn(self, kubectl_body, backup_dir=None):
         d = tempfile.mkdtemp()
         k = os.path.join(d, "kubectl")
         with open(k, "w") as f:
             f.write("#!/bin/sh\n" + kubectl_body + "\n")
         os.chmod(k, 0o755)
+        # An empty BACKUP_DIR of its own unless given: never the host's /var/backups.
+        if backup_dir is None:
+            backup_dir = os.path.join(d, "no-backups")
+            os.makedirs(backup_dir)
         r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-data-volumes.sh"; data_volumes_warn medcea; echo "rc=$?"'],
-                           env=dict(os.environ, KUBECTL=k), capture_output=True, text=True)
+                           env=dict(os.environ, KUBECTL=k, BACKUP_DIR=backup_dir), capture_output=True, text=True)
         return r.stdout
+
+    BOTH = json.dumps({"items": [
+        {"metadata": {"name": "claim-bio1"}, "spec": {"volumeName": "pvc-1"}, "status": {"capacity": {"storage": "10Gi"}}},
+        {"metadata": {"name": "grafana"}, "spec": {"volumeName": "pvc-g"}, "status": {"capacity": {"storage": "2Gi"}}}]})
+
+    def backup_fixture(self, ok):
+        b = tempfile.mkdtemp()
+        os.makedirs(os.path.join(b, "20261102-023000Z"))
+        if ok:
+            with open(os.path.join(b, "20261102-023000Z", "OK"), "w") as f:
+                f.write("1793586600 2026-11-02T02:30:00Z started 20261102-023000Z\n")
+        return b
+
+    def test_names_newest_backup(self):
+        """The sourcing of ../apps/backup/lib-backup.sh works: a moved file or a renamed
+        backup_newest_ok would silently fall back to 'nothing backs'."""
+        b = self.backup_fixture(ok=True)
+        out = self.run_warn(f"""case "$*" in "get pvc -n medcea -o json") echo '{self.BOTH}' ;; *) exit 1 ;; esac""", b)
+        want = f"newest nightly backup: 20261102-023000Z in {b}, which this keeps"
+        self.assertIn(f"AI workbench homes that this deletes ({want})", out)
+        self.assertIn(f"Grafana's volume, which this deletes ({want})", out)
+        self.assertNotIn("nothing backs", out)
+
+    def test_incomplete_backup_is_none(self):
+        b = self.backup_fixture(ok=False)
+        out = self.run_warn(f"""case "$*" in "get pvc -n medcea -o json") echo '{self.BOTH}' ;; *) exit 1 ;; esac""", b)
+        self.assertIn("AI workbench homes that this deletes (nothing backs them up)", out)
+        self.assertIn("Grafana's volume, which this deletes (nothing backs it up)", out)
+        self.assertNotIn("newest nightly backup", out)
+
+    def test_confirmations_do_not_deny_the_backup(self):
+        """The fixed text before data_volumes_warn must not say 'not backed up' while
+        the warning under it may name a backup this keeps."""
+        for path in ("install.sh", "deploy-infra.sh"):
+            with open(os.path.join(REPO, path)) as f:
+                src = f.read()
+            self.assertNotIn("neither backed up", src, path)
+            self.assertNotIn("neither is backed up", src, path)
+            self.assertNotIn("nothing backs", src, path)
+        with open(os.path.join(REPO, "install.sh")) as f:
+            inst = f.read()
+        fn = inst[inst.index("data_volumes() {"):]
+        fn = fn[:fn.index("\n}\n")]
+        # BACKUP_DIR comes from config.env, sourced in a subshell around the warning.
+        self.assertRegex(fn, r"\(\s*\[\[ -f config\.env \]\] && source \./config\.env\s+KUBECTL=\"\$k\" data_volumes_warn")
 
     def test_lists_homes(self):
         pvcs = json.dumps({"items": [

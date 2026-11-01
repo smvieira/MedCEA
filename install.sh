@@ -127,7 +127,9 @@ data_volumes() {
     command -v microk8s >/dev/null 2>&1 || return 0
     local k="sudo -n microk8s kubectl"
     microk8s status --timeout 5 >/dev/null 2>&1 && k="microk8s kubectl"
-    KUBECTL="$k" data_volumes_warn "${1:-medcea}"
+    # In a subshell with config.env, so backup_dir() sees the BACKUP_DIR configure.sh asked for.
+    ( [[ -f config.env ]] && source ./config.env
+      KUBECTL="$k" data_volumes_warn "${1:-medcea}" )
 }
 
 ask_delete() {   # ask_delete "question" → 0 = delete, 1 = keep (the default)
@@ -199,7 +201,8 @@ uninstall-infra)
     echo "    pgAdmin, portal, MQTT broker and explorer, AI workbench"
     echo "  - every application (config UI, scheduler, monitor, reports, flows)"
     echo "  - ALL data: the database, Keycloak users, Grafana's volume (the dashboards Editors"
-    echo "    made in the browser), workbench homes (each person's notebooks); neither backed up"
+    echo "    made in the browser), workbench homes (each person's notebooks); copied only by"
+    echo "    the nightly backup, if deployed: BACKUP_DIR is kept"
     echo "  Kept: MicroK8s (cached images make reinstalling fast), config.env, the platform CA."
     echo ""
     data_volumes "$NS"

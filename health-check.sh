@@ -253,6 +253,8 @@ check_k8s() {
 # Check: a PersistentVolumeClaim is Bound — read-only
 # target: NAMESPACE/NAME. WARN, not FAIL: the workload's own check says whether it
 # runs; this says whether what people saved in it survives (Grafana since 1 Nov 2026).
+# Also WARNs when the volume's hostPath root on this host is not 0700:
+# microk8s-hostpath makes it 0777, and Grafana's init container closes it at each start.
 # =============================================================================
 check_pvc() {
     local name="$1" target="$2" ns claim out phase size
@@ -268,7 +270,17 @@ check_pvc() {
     fi
     read -r phase size <<<"$out"
     if [[ "$phase" == Bound ]]; then
-        _record OK "$name" "pvc/${claim} (${ns}): Bound, ${size:-?}"
+        local pv path mode
+        pv="$(timeout "$TIMEOUT" $KUBECTL get pvc "$claim" -n "$ns" -o jsonpath='{.spec.volumeName}' 2>/dev/null)" || pv=""
+        path=""
+        [[ -n "$pv" ]] && { path="$(timeout "$TIMEOUT" $KUBECTL get pv "$pv" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null)" || path=""; }
+        mode=""
+        [[ -n "$path" ]] && mode="$(stat -c %a "$path" 2>/dev/null)" || true
+        if [[ -n "$mode" && "$mode" != 700 ]]; then
+            _record WARN "$name" "pvc/${claim} (${ns}): Bound, but ${path} is mode ${mode}, not 700: any local account may replace its files (restart the workload: ./deploy-infra.sh)"
+        else
+            _record OK "$name" "pvc/${claim} (${ns}): Bound, ${size:-?}${mode:+, root mode $mode}"
+        fi
     else
         _record WARN "$name" "pvc/${claim} (${ns}) is ${phase:-in no phase}, not Bound"
     fi

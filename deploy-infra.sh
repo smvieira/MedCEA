@@ -131,7 +131,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  - MicroK8s and all cluster data (PersistentVolumes, namespaces, pods)"
     echo "  - kubeconfig (~/.kube)"
     echo "  - every AI workbench home (each person's notebooks) and Grafana's volume (the"
-    echo "    dashboards Editors made in the browser); neither is backed up"
+    echo "    dashboards Editors made in the browser); only the nightly backup in BACKUP_DIR,"
+    echo "    if deployed, keeps a copy, and this does not delete it"
     echo ""
     # install.sh --uninstall-all has already listed everything and asked.
     if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then

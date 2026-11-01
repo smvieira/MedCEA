@@ -1292,6 +1292,13 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(doc["deploymentStrategy"], {"type": "Recreate"})
         self.assertTrue(doc["initChownData"]["enabled"])
         self.assertNotIn("securityContext", doc)          # the chart's runAsUser/fsGroup 472
+        # microk8s-hostpath makes the volume root 0777 with no sticky bit: closed at each start
+        (close,) = doc["extraInitContainers"]
+        self.assertEqual(close["command"], ["chmod", "0700", "/var/lib/grafana"])
+        self.assertEqual(close["volumeMounts"], [{"name": "storage", "mountPath": "/var/lib/grafana"}])
+        self.assertEqual(close["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["FOWNER"]})
+        self.assertEqual(close["image"], "docker.io/library/busybox:1.36")
+        self.assertNotIn("{{", yaml.safe_dump(close))     # the chart runs tpl on it
         self.assertIn('GRAFANA_STORAGE="2Gi"', self.read("config.env.example"))
         self.assertIn('GRAFANA_STORAGE="${GRAFANA_STORAGE:-2Gi}"', self.read("deploy-infra.sh"))
         self.assertIn("Grafana volume           | pvc   | $NAMESPACE/grafana",
