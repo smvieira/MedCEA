@@ -389,6 +389,15 @@ pa_bundle() {
 }
 
 cmd_policy_apply() {  # IAM 4.2a, after policy (a fresh database: medcea_pa, medcea_pa2)
+    policy_apply_steps
+    # whatever the steps did: their applies ran IAM_DB_ROLES=false, and role LOGIN and
+    # membership are cluster-wide, so medcea_db's mode goes back to the roles (as fresh
+    # does); and the two databases go, or access_svc cannot be dropped by purge-access
+    fx postgres -q -c "DROP DATABASE IF EXISTS medcea_pa WITH (FORCE);" -c "DROP DATABASE IF EXISTS medcea_pa2 WITH (FORCE);" >/dev/null
+    cmd_apply true
+}
+
+policy_apply_steps() {
     step "IAM 4.2a: the bootstrap bundle, _record's actors, the filter (fresh databases)"
     local db=medcea_pa dir out rc snap1 snap2 ev
     dir="$(mktemp -d "$IAMTEST_DIR/pa-XXXXXX")"
@@ -455,7 +464,6 @@ SQL
     ev="$(fx medcea_pa2 -q -tA -c "SELECT count(*) FROM iam_policy.version")"
     [[ $rc -ne 0 && "$out" == *"needs READ COMMITTED"* && "$ev" == 0 ]] \
         && pass P22 "READ COMMITTED asserted inside the bundle (F-24)" || fail P22 "repeatable read: exit $rc, versions $ev, ${out:0:200}"
-    fx postgres -q -c "DROP DATABASE IF EXISTS medcea_pa WITH (FORCE);" -c "DROP DATABASE IF EXISTS medcea_pa2 WITH (FORCE);" >/dev/null
     rm -rf "$dir"
 }
 

@@ -991,6 +991,29 @@ class CanApprove(unittest.TestCase):
                 apply_check.by_user(bad, "admin")
 
 
+# NULLIF, COALESCE, GREATEST and LEAST are SQL syntax, not functions: qualified they
+# parse, and fail only when they run ("function pg_catalog.nullif(text, unknown) does
+# not exist", the 4.2a fixture's bootstrap bundle)
+SQL_KEYWORD_QUALIFIED = re.compile(r"(?i)\bpg_catalog\s*\.\s*(nullif|coalesce|greatest|least)\s*\(")
+
+
+class SqlKeywordsNotQualified(unittest.TestCase):
+    def test_no_file_qualifies_a_sql_keyword(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        hits = []
+        for top in ("apps", "infra", "tests"):
+            for d, _, names in os.walk(os.path.join(root, top)):
+                for name in names:
+                    if not name.endswith((".sql", ".sh", ".py")) or name == "test_apply.py":
+                        continue
+                    f = os.path.join(d, name)
+                    with open(f, errors="replace") as fh:
+                        for n, line in enumerate(fh, 1):
+                            if SQL_KEYWORD_QUALIFIED.search(line):
+                                hits.append(f"{os.path.relpath(f, root)}:{n}")
+        self.assertEqual(hits, [])
+
+
 class BundleSql(unittest.TestCase):
     def test_values_travel_base64(self):
         st = apply_check.simulate_state()
@@ -1006,6 +1029,7 @@ class BundleSql(unittest.TestCase):
                 self.assertRegex(line, r"^\\set [a-z0-9_]+ '[A-Za-z0-9+/=\-]*'$")
         self.assertNotIn("_record(", pre + post)            # the fixture writes bootstrap_applied itself
         self.assertIn(":v,", post)
+        self.assertNotRegex(pre + post, SQL_KEYWORD_QUALIFIED)
         try:
             import pglast  # noqa: F401
         except ImportError:

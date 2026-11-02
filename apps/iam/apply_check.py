@@ -404,7 +404,7 @@ def bundle_sql(state, by_sub, by_person, log, commit=None, digests=None, data=No
         _set("v1_by_person", by_person),
         _set("v1_log", log or ""),
         f"SELECT iam_policy._mark_applied(:v, {J('v1_digests')}, {T('v1_os_user')}, :'v1_by_sub'::uuid, "
-        f"{T('v1_by_person')}, pg_catalog.nullif({T('v1_log')}, '')) \\g /dev/null",
+        f"{T('v1_by_person')}, NULLIF({T('v1_log')}, '')) \\g /dev/null",
         ""])
     return pre, post
 

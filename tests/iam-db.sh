@@ -2995,8 +2995,10 @@ SET ROLE medcea_owner;
 SELECT set_config('iam_policy.transition', 'new_draft::' || txid_current(), true) \\g /dev/null
 INSERT INTO iam_policy.version (version, status, kind, reason, based_on) VALUES (:d + 1, 'draft', 'change', 'forged', :v1);
 SQL
-    # P13 — pgAdmin's login cannot move a status
-    probe P13 "rr_admin_login: UPDATE iam_policy.version SET status = 'approved'" "42501:permission denied for table version" <<SQL
+    # P13 — pgAdmin's login cannot move a status (under false it has no USAGE on the schema at all)
+    p13="42501:permission denied for table version"
+    [[ "$MODE" == true ]] || p13="42501:permission denied for schema iam_policy"
+    probe P13 "rr_admin_login: UPDATE iam_policy.version SET status = 'approved'" "$p13" <<SQL
 $(build_v1)
 SET SESSION AUTHORIZATION rr_admin_login;
 UPDATE iam_policy.version SET status = 'approved';
