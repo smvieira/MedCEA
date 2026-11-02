@@ -419,7 +419,7 @@ infrastructure_functions:
   - {function: "medcea_auth._lock_row(text, jsonb)", execute: [], why: "The approval functions' row locks (the row, a recipe's lines, a run's cycles), taken before _authors() so authorship is read in commit order."}
   - {function: "medcea.stamp_actor()", execute: [], why: "Trigger function; runs as the table owner and overwrites created_by_*/updated_by_* with the verified actor."}
   - {function: "medcea.register_mqtt_credential(text, text, integer, text, text)", execute: [], why: "Version 1, called by the edge wizard as anon before Phase 2b. The legacy grant to anon lives in medcea_db_migrations_down_008b.sql only (IAM_DB_ROLES=false); enforce revokes it."}
-  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [iam_svc], why: "Appends to the hash chain (iam-api's mqtt_credential_issued). access_svc never calls it: the iam definer functions do. From 008c it refuses the policy version events (42501): only the policy functions write those, through _append_history."}
+  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [iam_svc], why: "Appends to the hash chain (iam-api's mqtt_credential_issued). access_svc never calls it: the iam definer functions do. From 008c it refuses the policy version events (42501): only the policy functions write those, through _append_history. From 4.2a it compares names case-insensitively with the apply_, bootstrap_, break_glass_ and policy_ prefixes too, lets iam_svc append only mqtt_credential_issued, and drops a payload version (only the policy functions file an event under a version)."}
   - {function: "iam_policy.verify_chain()", execute: [iam_svc], why: "Run by health-check.sh as postgres on the host; the Policy UI's History tab shows the chain status (iam_svc; read-only, READ COMMITTED)."}
   - {function: "medcea_auth._account_actor(text, text)", execute: [], why: "The one who-may rule for account decisions (a person via the User Manager holding a level on a group); called by the iam definer functions and revoke_person_mqtt."}
   - {function: "medcea_auth.role_widening(text, text)", execute: [], why: "Compiled from the matrix (model.Policy.widening, the same table as routes.json widening, stamped with its digest); called by iam.record_decision."}
@@ -443,6 +443,7 @@ infrastructure_functions:
   - {function: "iam_policy.confirm_applied(int, text, text)", execute: [], why: "Internal of medcea.confirm_policy: qa confirms a bootstrap or rollback version, never the person apply.sh recorded."}
   - {function: "iam_policy.dispute_applied(int, text)", execute: [], why: "Internal of medcea.dispute_policy: qa disputes an unconfirmed bootstrap or rollback version."}
   - {function: "iam_policy._system()", execute: [], why: "The actor of apply.sh's bundle: system:apply."}
+  - {function: "iam_policy._system_as(text[])", execute: [], why: "The policy's system actors: apply.sh, and a deploy's skeleton gate and records (system:apply, system:deploy); SECURITY INVOKER, called by the owner functions only."}
   - {function: "iam_policy._sync_skeleton(jsonb, text)", execute: [], why: "iam_policy.role and resource_group follow the skeleton's keys (upserted; a key that left it is marked retired); the entries' foreign keys need them."}
   - {function: "iam_policy._accept_skeleton(text, jsonb, text, text, jsonb)", execute: [], why: "The skeleton gate (4.2a) or apply.sh accepts a platform skeleton (skeleton_accepted)."}
   - {function: "iam_policy._propose_skeleton(text, jsonb, text, jsonb, text, uuid, text, text)", execute: [], why: "apply.sh --propose-skeleton (4.4): a widening git skeleton as a submitted skeleton version with the host-computed diff."}
@@ -450,7 +451,7 @@ infrastructure_functions:
   - {function: "iam_policy._mark_applied(int, jsonb, text, uuid, text, text)", execute: [], why: "apply.sh: approved (or a bootstrap/rollback draft) -> applied, the previous -> superseded; re-reads status and entries digest FOR UPDATE."}
   - {function: "iam_policy._mark_reverted(int, int, text)", execute: [], why: "apply.sh: a full revert puts the previous version back."}
   - {function: "iam_policy._withdraw_open(text)", execute: [], why: "apply.sh: withdraws the open change or skeleton version as system:apply (a rollback)."}
-  - {function: "iam_policy._record(text, jsonb)", execute: [], why: "apply.sh's own events (applied, partial_apply, bootstrap_applied, break_glass_seen, apply_deferred, account_seeded)."}
+  - {function: "iam_policy._record(text, jsonb)", execute: [], why: "apply.sh's own events (applied, partial_apply, bootstrap_applied, apply_deferred: system:apply) and the deploys' (break_glass_seen, break_glass_ended, account_seeded: system:apply or system:deploy; account_seeded idempotent per content hash)."}
 
 # Database roles that are not a platform role or a service identity. grants.py creates
 # rr_admin_login and compiles every role's privileges; medcea_owner, anon and

@@ -30,7 +30,7 @@ source "$REPO_ROOT/infra/lib-wait.sh"
 source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client: postgres or the service's own role (IAM 2.5)
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 SCHEDULER_DOMAIN="${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}"
 if [[ -z "${MQTT_SCHEDULER_PASS:-}" ]]; then
     echo "ERROR: MQTT_SCHEDULER_PASS is not set in config.env — run ./deploy-infra.sh first." >&2
@@ -158,3 +158,6 @@ portal_card enable "https://$SCHEDULER_DOMAIN"
 log ""
 log "Scheduler deployed!"
 log "  UI: https://$SCHEDULER_DOMAIN"
+
+# The last command of the success path: ends an open policy break-glass for scheduler (IAM 4.2a)
+policy_source_finish "$NAMESPACE" scheduler

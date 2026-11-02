@@ -29,7 +29,7 @@ source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # deploy_oauth2_proxy — one SSO
 APP_DIR="$SCRIPT_DIR"   # the app directory, as the k8s/ templates call it (hostPath mounts)
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 CONFIG_DOMAIN="config.$DOMAIN"
 DBMGMT_DOMAIN="${DBMGMT_DOMAIN:-dbmgmt.$DOMAIN}"
 PORTAL_URL="https://${PORTAL_DOMAIN}"
@@ -323,3 +323,6 @@ wait_for_http "https://$DBMGMT_DOMAIN/" 120 "DB Mgmt"   || exit 1
 echo -e "  Config UI:  https://$CONFIG_DOMAIN"
 echo -e "  DB Mgmt:    https://${DBMGMT_DOMAIN}"
 echo ""
+
+# The last command of the success path: ends an open policy break-glass for frontend (IAM 4.2a)
+policy_source_finish "$NAMESPACE" frontend

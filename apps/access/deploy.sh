@@ -57,7 +57,7 @@ source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are 
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # policy_groups / gate_error_page / gate_helm_args
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"   # older config.env files lack it
 POSTGRES_DB="${POSTGRES_DB:-medcea_db}"
 # How long step 5 waits for every Ready pod to prove it enforces (tests shorten it).
@@ -371,3 +371,6 @@ log "  Register:     the Request access tab of the platform login page (https://
 log "  User Manager: https://$ACCESS_DOMAIN/            (admits $ALLOWED_GROUPS; each role sees the tabs its routes allow)"
 log "  Decisions:    a grant, a widening role change, an activation and a person_id change wait for a qa person"
 log "  E-mail:       User Manager → E-mail settings (Gmail app password, templates; a settings change waits for qa)"
+
+# The last command of the success path: ends an open policy break-glass for access (IAM 4.2a)
+policy_source_finish "$NAMESPACE" access

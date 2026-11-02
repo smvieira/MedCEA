@@ -154,6 +154,10 @@ A. The platform database ($db)
   2. Drop it and restore it from the dump:
        $k exec -i rdbms-postgresql-0 -- sh -c '$pw exec psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS $db WITH (FORCE)"'
        $k exec -i rdbms-postgresql-0 -- sh -c '$pw exec pg_restore -U postgres -d postgres --create --exit-on-error' < $f/db/$db.dump
+  2a. (IAM 4.2a) Move the host's policy file aside, so the next deploy writes it again from the
+     restored database (it moves state/policy-applied.yaml, the queued account facts and any
+     break-glass copies into state/retired-<time>-restore/; nothing is deleted):
+       bash -c 'source infra/lib-lock.sh && medcea_lock && source infra/lib-policy-source.sh && policy_state_retire restore'
   3. ./apps/database/deploy.sh   (migrations, grants and the role passwords of this config.env)
   4. $k scale deployment node-red scheduler monitor config-api dbmgmt access iam-api --replicas=1
      then ./health-check.sh (Access policy history must be OK: the restored hash chain verifies).

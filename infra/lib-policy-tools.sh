@@ -18,11 +18,13 @@
 # apps/edge-wizard/deploy.sh, health-check.sh and tests/iam-hosts.sh.
 #
 # The source (IAM Phase 4): this library never chooses one (it does not source
-# lib-policy-source.sh), but it refuses an inherited MEDCEA_POLICY_FILE unless this
-# shell's entry script has run the source init (MEDCEA_POLICY_SOURCE_DONE set). The
-# edge scripts never run it, so a break-glass draft exported in an operator's shell
-# cannot silently set who may onboard; the deploys refuse the override the same way
-# and health-check drops it.
+# lib-policy-source.sh), but it refuses MEDCEA_POLICY_FILE unless this run's entry script
+# recorded it (IAM 4.2a): MEDCEA_POLICY_SOURCE_DONE, MEDCEA_POLICY_BREAK_GLASS_EVENT
+# (the break_glass_seen event) and MEDCEA_POLICY_BREAK_GLASS_SHA256 set, and the file's
+# sha256 equal to the last (policy_source_init points MEDCEA_POLICY_FILE at its snapshot
+# in state/break-glass/). The edge scripts never run the init, so a break-glass draft
+# exported in an operator's shell cannot silently set who may onboard; health-check
+# drops the override.
 policy_tool() {
     local out
     case "$1" in
@@ -38,9 +40,17 @@ policy_tool() {
         fi
         return 0
     fi
-    if [[ -n "${MEDCEA_POLICY_FILE:-}" && -z "${MEDCEA_POLICY_SOURCE_DONE:-}" ]]; then
-        echo -e "\033[0;31mERROR: MEDCEA_POLICY_FILE is set: $1 compiles the applied policy only. Break-glass needs its hash-chain record, which arrives with IAM Phase 4 slice 4.2a. Unset MEDCEA_POLICY_FILE (and MEDCEA_POLICY_BREAK_GLASS) and re-run.\033[0m" >&2
-        return 1
+    if [[ -n "${MEDCEA_POLICY_FILE:-}" ]]; then
+        if [[ -z "${MEDCEA_POLICY_SOURCE_DONE:-}" || -z "${MEDCEA_POLICY_BREAK_GLASS_EVENT:-}" \
+              || -z "${MEDCEA_POLICY_BREAK_GLASS_SHA256:-}" ]]; then
+            echo -e "\033[0;31mERROR: MEDCEA_POLICY_FILE is set: $1 compiles the applied policy only, unless this run's deploy recorded the break-glass first. Unset MEDCEA_POLICY_FILE (and MEDCEA_POLICY_BREAK_GLASS) and re-run.\033[0m" >&2
+            return 1
+        fi
+        if [[ ! -r "$MEDCEA_POLICY_FILE" \
+              || "$(sha256sum <"$MEDCEA_POLICY_FILE" | cut -d' ' -f1)" != "$MEDCEA_POLICY_BREAK_GLASS_SHA256" ]]; then
+            echo -e "\033[0;31mERROR: MEDCEA_POLICY_FILE ($MEDCEA_POLICY_FILE) is not the break-glass file this run recorded (event ${MEDCEA_POLICY_BREAK_GLASS_EVENT}): its sha256 differs.\033[0m" >&2
+            return 1
+        fi
     fi
     out="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile "$1")" || return 1
     [[ -n "$out" ]] || return 1

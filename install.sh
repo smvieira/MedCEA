@@ -26,6 +26,12 @@ Install / update
   --configure            Review every setting (current values as defaults), then install.
   --infra-only           Only the infrastructure (MicroK8s, Postgres, Keycloak, Grafana,
                          Node-RED, portal, AI workbench).
+  --break-glass "<reason>"
+                         With an install: policy break-glass for this run (IAM 4.2a). Needs
+                         an exported MEDCEA_POLICY_FILE; compiles its matrix and waivers
+                         (never the skeleton). Asks for the typed word break-glass once;
+                         deploy-infra and deploy-apps each record it (two events). Without
+                         this option an exported MEDCEA_POLICY_FILE is ignored.
   --apps-only            Only the applications (database schema, User Manager, iam-api,
                          onboarding wizard, config UI, scheduler, monitor, reports,
                          Node-RED flows, MQTT Explorer, nightly backup). Needs the
@@ -54,10 +60,12 @@ case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
 cd "$SCRIPT_DIR" || exit 1
 
-MODE="install"; CONFIGURE=""; PURGE=""; declare -a COMPONENTS=()
+MODE="install"; CONFIGURE=""; PURGE=""; BREAK_GLASS=""; declare -a COMPONENTS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configure)        CONFIGURE="--configure" ;;
+        --break-glass)      [[ -n "${2:-}" && "${2:-}" != -* ]] || { echo -e "${RED}--break-glass needs a reason: --break-glass \"<reason>\"${NC}" >&2; exit 1; }
+                            BREAK_GLASS="$2"; shift ;;
         --infra-only)       MODE="infra" ;;
         --apps-only)        MODE="apps" ;;
         --uninstall-apps)   MODE="uninstall-apps" ;;
@@ -72,6 +80,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$PURGE" && "$MODE" != "uninstall-apps" ]] && { echo -e "${RED}--purge-data goes with --uninstall-apps.${NC}" >&2; exit 1; }
 [[ -n "$CONFIGURE" && "$MODE" != "install" && "$MODE" != "infra" ]] && { echo -e "${RED}--configure goes with an install.${NC}" >&2; exit 1; }
+[[ -n "$BREAK_GLASS" && "$MODE" != "install" && "$MODE" != "infra" && "$MODE" != "apps" ]] && { echo -e "${RED}--break-glass goes with an install.${NC}" >&2; exit 1; }
+if [[ -n "$BREAK_GLASS" ]]; then
+    [[ -n "${MEDCEA_POLICY_FILE:-}" ]] || { echo -e "${RED}--break-glass needs MEDCEA_POLICY_FILE (export MEDCEA_POLICY_FILE=<your policy file>)${NC}" >&2; exit 1; }
+    [[ -r "$MEDCEA_POLICY_FILE" ]] || { echo -e "${RED}MEDCEA_POLICY_FILE=$MEDCEA_POLICY_FILE cannot be read${NC}" >&2; exit 1; }
+fi
 
 # One deploy at a time; the stages below inherit the lock (infra/lib-lock.sh).
 source "$SCRIPT_DIR/infra/lib-lock.sh"
@@ -79,6 +92,30 @@ medcea_lock
 
 # deploy-infra.sh leaves the credentials box to us (see infra/lib-credentials.sh).
 export MEDCEA_INSTALLER=1
+
+# Policy break-glass (IAM 4.2a, design §14.4.6): asked once here, for both stages; each
+# stage records its own break_glass_seen. Without --break-glass an exported override is
+# dropped, so it never reaches a deploy by accident.
+declare -a APPS_BG=()
+if [[ -n "$BREAK_GLASS" ]]; then
+    ( : <>/dev/tty ) 2>/dev/null || { echo -e "${RED}break-glass needs a person at the terminal to type the word break-glass: nothing was changed${NC}" >&2; exit 1; }
+    {
+        echo -e "${RED}BREAK-GLASS requested${NC}: compile $MEDCEA_POLICY_FILE in every stage of this install"
+        echo "  reason: $BREAK_GLASS"
+        echo "  this changes the matrix and waivers every compile of this run reads; it is recorded"
+        echo "  (it never changes the skeleton: a widening git skeleton is refused under break-glass too)"
+        echo -n "Type break-glass to go on: "
+    } >/dev/tty
+    _bg_word=""; read -r _bg_word </dev/tty || _bg_word=""
+    [[ "$_bg_word" == break-glass ]] || { echo -e "${RED}break-glass not confirmed: nothing was changed${NC}" >&2; exit 1; }
+    export MEDCEA_POLICY_BREAK_GLASS="$BREAK_GLASS" MEDCEA_POLICY_BREAK_GLASS_ASKED="$MEDCEA_LOCK_HELD"
+    APPS_BG=(--break-glass "$BREAK_GLASS")
+else
+    if [[ -n "${MEDCEA_POLICY_FILE:-}${MEDCEA_POLICY_BREAK_GLASS:-}" ]]; then
+        echo -e "${YELLOW}MEDCEA_POLICY_FILE / MEDCEA_POLICY_BREAK_GLASS are ignored without --break-glass \"<reason>\"${NC}" >&2
+    fi
+    unset MEDCEA_POLICY_FILE MEDCEA_POLICY_BREAK_GLASS MEDCEA_POLICY_BREAK_GLASS_ASKED
+fi
 
 stage() { echo ""; echo -e "${GREEN}${BOLD}━━━━ $* ━━━━${NC}"; }
 
@@ -191,7 +228,7 @@ case "$MODE" in
 # -----------------------------------------------------------------------------
 install)
     run_stage "1/3  Infrastructure" deploy-infra ./deploy-infra.sh $CONFIGURE
-    run_stage "2/3  Applications"   deploy-apps  with_mk8s_group ./deploy-apps.sh --all
+    run_stage "2/3  Applications"   deploy-apps  with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
     stage "3/3  Health check"
     with_mk8s_group ./health-check.sh || echo -e "${YELLOW}Some checks failed — see above. Services that are still starting usually pass a minute later: ./health-check.sh${NC}"
     echo ""
@@ -207,7 +244,7 @@ infra)
     ;;
 apps)
     [[ -f config.env ]] || { echo -e "${RED}No config.env — install the infrastructure first: ./install.sh${NC}" >&2; exit 1; }
-    run_stage "Applications" deploy-apps with_mk8s_group ./deploy-apps.sh --all
+    run_stage "Applications" deploy-apps with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
     ;;
 # -----------------------------------------------------------------------------
 uninstall-apps)

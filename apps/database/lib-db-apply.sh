@@ -15,7 +15,33 @@
 #                             IAM 3.5); prints the count, "skip" before 008b
 #   dba_record_event NS POD DB EVENT PAYLOAD_JSON REASON
 #                             appends one event as system:deploy (deploy-infra.sh:
-#                             break_glass_seen; IAM 3.3); "skip" before 008a/b
+#                             break_glass_seen, IAM 3.3; account_seeded and the policy
+#                             break-glass, IAM 4.2a). break_glass_seen, break_glass_ended
+#                             and account_seeded go through iam_policy._record once
+#                             _system_as exists (the 4.2a bodies); "skip-4.1" while only
+#                             the 4.1 _record exists (the caller warns or queues);
+#                             before 008c append_history (account_seeded: "skip", the
+#                             caller queues); "skip" before 008a/b
+#
+#   IAM Phase 4, slice 4.2a — the pieces of db_apply that apps/iam/apply.sh reuses:
+#   dba_compiled_functions NS POD [--without-iam]
+#                             step 4a: the policy's compiled functions, one transaction
+#                             (the factory policy on medcea-iamtest only, as db_apply)
+#   dba_mode_live NS POD DB   prints true|false from medcea.platform_setting.iam_db_roles;
+#                             3 while it is unset (no 008b), 1 when it cannot ask
+#   dba_service_logins NS     the comma list of login roles that may log in while
+#                             IAM_DB_ROLES=false (IAM 2.5; moved from apps/database/
+#                             deploy.sh); reads only the presence of each password
+#                             variable, never its value
+#   dba_policy_bundle NS POD MODE PRE_SQL POST_SQL [--with-functions]
+#                             step 6: one transaction (MODE false|true|auto; auto reads
+#                             dba_mode_live and refuses, 3, when config.env differs):
+#                             actor (DBA_ACTOR, default system:deploy), READ COMMITTED
+#                             asserted, PRE_SQL, [the compiled functions], the down or
+#                             enforce file, the grants body, the settings, POST_SQL,
+#                             the asserts last. db_apply passes /dev/null twice.
+#                             DBA_IAM_FLAG / DBA_SERVICE_LOGINS (env), when set, are used
+#                             instead of asking dba_iam_flag / dba_service_logins.
 #
 # Needs: KUBECTL, REPO_ROOT, PROJECT_NAME, CEA_DB. Optional: DBPW_<role> (plaintext
 # passwords: DBPW_authenticator, DBPW_mqtt_auth, DBPW_svc_ingest, … — each sent only as
@@ -42,7 +68,7 @@
 #   4b medcea_db_008b_data.sql                      (-1, ON_ERROR_STOP; skipped while enforcing)
 #   4c medcea_db_008b_index.sql                     (autocommit; CONCURRENTLY, batched backfill)
 #   5  passwords of authenticator and mqtt_auth
-#   6  the mode bundle, one transaction (-1, ON_ERROR_STOP):
+#   6  the mode bundle, one transaction (-1, ON_ERROR_STOP; dba_policy_bundle):
 #        false: medcea_db_migrations_down_008b.sql + grants --mode additive
 #        true:  medcea_db_migrations_008b_enforce.sql + grants --mode enforce
 #      then the settings (mqtt_topic_root, iam_db_roles, the database setting, the
@@ -120,10 +146,7 @@ dba_iam_flag() {
 db_apply() {
     local ns="$1" pod="$2" mode="$3" out nonce got grants_mode down_or_enforce verifier r flag
     local iam_flag=() src=()
-    # where the grants are compiled from (IAM Phase 4): the throwaway fixture namespace
-    # always compiles the factory policy, which its probes expect; every other namespace
-    # the source rule's (compiler/source.py: the applied version, else defaults.yaml)
-    [[ "$ns" == medcea-iamtest ]] && src=(--defaults)
+    _dba_src "$ns"
     _DBA_NS="$ns"; _DBA_POD="$pod"
     [[ "$mode" == "false" || "$mode" == "true" ]] || { echo "db_apply: MODE must be false or true" >&2; return 2; }
     [[ "$PROJECT_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || { echo "db_apply: PROJECT_NAME is not ^[a-z][a-z0-9-]{1,30}$" >&2; return 2; }
@@ -207,9 +230,7 @@ SQL
     # ── 4a. the compiled functions (policy_holds, object_group, pre_request, …) ─
     # before the data steps, which digest rows through object_group(); the bundle
     # re-creates them in step 6 from the same policy
-    _dba_log "Compiled policy functions..."
-    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode additive --part functions "${iam_flag[@]}" \
-        | _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - >/dev/null || return 1
+    dba_compiled_functions "$ns" "$pod" "${iam_flag[@]}" || return 1
 
     # ── 4b/4c. 008b data steps ────────────────────────────────────────────────
     _dba_log "Migration 008b data (grandfathering, parameter sets)..."
@@ -237,18 +258,155 @@ SQL
         done
     } | _dba_psql "$CEA_DB" -q -v ON_ERROR_STOP=1 -f - >/dev/null || return 1
 
-    # ── 6. the mode bundle ────────────────────────────────────────────────────
+    # ── 6. the mode bundle (dba_policy_bundle, also apps/iam/apply.sh's) ───────
+    DBA_IAM_FLAG="$flag" DBA_SERVICE_LOGINS="${DBA_SERVICE_LOGINS:-}" \
+        dba_policy_bundle "$ns" "$pod" "$mode" /dev/null /dev/null || return 1
+}
+
+# _dba_src NS — sets the caller's `src` array: where the grants are compiled from (IAM
+# Phase 4). The throwaway fixture namespace always compiles the factory policy, which its
+# probes expect; every other namespace the source rule's (compiler/source.py: the
+# applied version, else defaults.yaml).
+_dba_src() {
+    local ns="$1"
+    src=()
+    [[ "$ns" == medcea-iamtest ]] && src=(--defaults)
+    return 0
+}
+
+# dba_compiled_functions NS POD [--without-iam] — step 4a: the policy's compiled
+# functions (policy_holds, object_group, pre_request, role_widening, …) in one
+# transaction, from the namespace's source (_dba_src). Before the data steps, which
+# digest rows through object_group().
+# Design §14.4.8 wrote this as `NS POD [--defaults]`. Built differently on purpose: the
+# source is not a caller's option but follows from NS (_dba_src, the one rule db_apply and
+# dba_policy_bundle share), so no caller can compile a production namespace from the
+# factory file past the source rule (--defaults only for medcea-iamtest, CLAUDE.md); the
+# one argument a caller does choose is §14.4.8's `<iam flag>`, i.e. --without-iam.
+dba_compiled_functions() {
+    local ns="$1" pod="$2" a src=() iam_flag=()
+    shift 2
+    for a in "$@"; do
+        case "$a" in
+            --without-iam) iam_flag=(--without-iam) ;;
+            *) echo "dba_compiled_functions: unknown argument $a" >&2; return 2 ;;
+        esac
+    done
+    _dba_src "$ns"
+    _DBA_NS="$ns"; _DBA_POD="$pod"
+    _dba_log "Compiled policy functions..."
+    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode additive --part functions "${iam_flag[@]}" \
+        | _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - >/dev/null || return 1
+}
+
+# dba_mode_live NS POD DB — the database's own IAM_DB_ROLES (medcea.platform_setting
+# iam_db_roles): prints true or false. 3 while it is unset (migration 008b not applied),
+# 1 when the database cannot be asked. Reads only.
+dba_mode_live() {
+    local v
+    _DBA_NS="$1"; _DBA_POD="$2"
+    v="$(_dba_psql "$3" -tAq -v ON_ERROR_STOP=1 -c "SELECT CASE WHEN pg_catalog.to_regclass('medcea.platform_setting') IS NULL THEN 'unset'
+               ELSE coalesce((SELECT s.value FROM medcea.platform_setting s WHERE s.key = 'iam_db_roles'), 'unset') END" </dev/null)" \
+        || { echo "dba_mode_live: cannot read medcea.platform_setting in '$3'" >&2; return 1; }
+    v="$(tr -d '[:space:]' <<<"$v")"
+    case "$v" in
+        true|false) echo "$v" ;;
+        unset) echo "dba_mode_live: the database records no IAM_DB_ROLES (migration 008b not applied): ./apps/database/deploy.sh" >&2; return 3 ;;
+        *) echo "dba_mode_live: unexpected iam_db_roles '$v' in '$3'" >&2; return 1 ;;
+    esac
+}
+
+# dba_service_logins NS — who may log in while IAM_DB_ROLES=false (IAM Phase 2.5), as a
+# comma list on stdout (nothing under IAM_DB_ROLES=true: every login role logs in).
+# IAM_DB_SERVICE_ROLES=true: every login role whose password variable config.env sets
+# (its presence only: `cli.py db-roles --passwords`, so the caller, apply.sh too, never
+# needs the value; the services move to them as they are deployed next,
+# infra/lib-db-roles.sh). false: only the roles a live client still uses, so turning the
+# flag off never locks out a service that has not been deployed back onto postgres yet;
+# the next deploy after it has been makes the role NOLOGIN. Needs infra/lib-db-roles.sh
+# (db_clients_live, db_client_role, db_role_can_login) for the false case.
+dba_service_logins() {
+    local ns="$1" cli="$REPO_ROOT/apps/iam/compiler/cli.py" _sl=() _live=() _cu _c _u _role _var
+    local -A _pwvar=()
+    [[ "${IAM_DB_ROLES:-false}" == "true" ]] && return 0
+    if [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" ]]; then
+        while read -r _role _var; do _pwvar[$_role]="$_var"; done < <(python3 "$cli" db-roles --passwords)
+        while read -r _role; do
+            _var="${_pwvar[$_role]:-}"
+            [[ -n "$_var" && -n "${!_var:+x}" ]] && _sl+=("$_role")
+        done < <(python3 "$cli" db-roles --logins)
+    else
+        # an array, not `while read < <(…)`: db_role_can_login's kubectl exec -i
+        # would read the rest of the list as its stdin
+        mapfile -t _live < <(db_clients_live "$ns")
+        for _cu in "${_live[@]}"; do
+            read -r _c _u <<<"$_cu"
+            _role="$(db_client_role "$_c")"
+            if [[ "$_u" == "$_role" ]] || { [[ "$_u" == "?" ]] && db_role_can_login "$ns" "$_role"; }; then
+                _sl+=("$_role")
+                _dba_warn "IAM_DB_SERVICE_ROLES=false, but $_c still logs in as $_role: the role keeps its login until $_c is deployed back onto postgres; run this deploy again after that"
+            fi
+        done
+    fi
+    (IFS=,; echo "${_sl[*]}")
+}
+
+# dba_policy_bundle NS POD MODE PRE_SQL POST_SQL [--with-functions] — step 6 of db_apply
+# and apps/iam/apply.sh's bundle (IAM 4.2a): one `psql -1` transaction, in order:
+#   SET log_statement = 'none'; the \set lines (root, mode, pw_<role> for each DBPW_<role>
+#   set by the caller — apply.sh sets none; the body guards its password lines); the
+#   actor (DBA_ACTOR, default system:deploy); READ COMMITTED asserted (F-24); PRE_SQL;
+#   [--with-functions: the compiled functions]; the down (false) or enforce (true) file;
+#   the grants body (--service-logins under additive); the settings; POST_SQL; the
+#   grants asserts, last. PRE_SQL and POST_SQL are host files concatenated onto stdin,
+#   never paths inside the pod. MODE false|true, or auto: the database's own mode, refused
+#   (3) when config.env's IAM_DB_ROLES says otherwise. Returns 1 when the bundle rolled
+#   back (nothing in it applied), 2 on a usage error.
+dba_policy_bundle() {
+    local ns="$1" pod="$2" mode="$3" pre="${4:-}" post="${5:-}" withfn=false
+    local src=() iam_flag=() flag live cfg grants_mode down_or_enforce body asserts fns="" out r verifier sl
+    local actor="${DBA_ACTOR:-system:deploy}" logins=()
+    if [[ $# -eq 6 && "$6" == --with-functions ]]; then withfn=true
+    elif [[ $# -ne 5 ]]; then echo "dba_policy_bundle: NS POD MODE PRE_SQL POST_SQL [--with-functions]" >&2; return 2; fi
+    [[ -r "$pre" && -r "$post" ]] || { echo "dba_policy_bundle: cannot read $pre or $post" >&2; return 2; }
+    [[ "$actor" =~ ^system:[a-z0-9:_-]+$ ]] || { echo "dba_policy_bundle: DBA_ACTOR must be system:<name>, not '$actor'" >&2; return 2; }
+    _DBA_NS="$ns"; _DBA_POD="$pod"
+    _dba_src "$ns"
+    case "$mode" in
+        true|false) ;;
+        auto)
+            live="$(dba_mode_live "$ns" "$pod" "$CEA_DB")" || return $?
+            cfg="${IAM_DB_ROLES:-false}"
+            if [[ "$live" != "$cfg" ]]; then
+                echo "config.env says IAM_DB_ROLES=$cfg, the database records $live: run ./apps/database/deploy.sh first" >&2
+                return 3
+            fi
+            mode="$live" ;;
+        *) echo "dba_policy_bundle: MODE must be false, true or auto" >&2; return 2 ;;
+    esac
+    if [[ -n "${DBA_IAM_FLAG+x}" ]]; then
+        flag="$DBA_IAM_FLAG"
+    else
+        flag="$(dba_iam_flag "$ns" "$pod" "$CEA_DB")" || return $?
+    fi
+    [[ -n "$flag" ]] && iam_flag=("$flag")
+    local dir="$REPO_ROOT/apps/database"
     if [[ "$mode" == "true" ]]; then
         grants_mode=enforce; down_or_enforce="$dir/medcea_db_migrations_008b_enforce.sql"
     else
         grants_mode=additive; down_or_enforce="$dir/medcea_db_migrations_down_008b.sql"
     fi
     _dba_log "IAM_DB_ROLES=$mode: $(basename "$down_or_enforce") + grants --mode $grants_mode, one transaction..."
-    local body asserts
-    local logins=()
-    [[ "$grants_mode" == additive && -n "${DBA_SERVICE_LOGINS:-}" ]] && logins=(--service-logins "$DBA_SERVICE_LOGINS")
+    if [[ "$grants_mode" == additive ]]; then
+        if [[ -n "${DBA_SERVICE_LOGINS+x}" ]]; then sl="$DBA_SERVICE_LOGINS"; else sl="$(dba_service_logins "$ns")" || return 1; fi
+        [[ -n "$sl" ]] && logins=(--service-logins "$sl")
+    fi
     body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode "$grants_mode" --part body "${logins[@]}" "${iam_flag[@]}")" || return 1
     asserts="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode "$grants_mode" --part assert "${iam_flag[@]}")" || return 1
+    if [[ "$withfn" == true ]]; then
+        # step 4a's SQL (dba_compiled_functions), inside the transaction
+        fns="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode additive --part functions "${iam_flag[@]}")" || return 1
+    fi
     out="$({
         echo "SET log_statement = 'none';"
         printf "\\\\set root '%s'\n" "$PROJECT_NAME"
@@ -257,18 +415,35 @@ SQL
             verifier="$(_dba_scram "$r")"
             [[ -n "$verifier" ]] && printf "\\\\set pw_%s '%s'\n" "$r" "$verifier"
         done < <(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" db-roles --passwords)
-        echo "SELECT medcea_auth._set_internal_actor('system:deploy');"
+        echo "SELECT medcea_auth._set_internal_actor('$actor');"
+        _dba_isolation_sql
+        cat "$pre"
+        [[ "$withfn" == true ]] && echo "$fns"
         cat "$down_or_enforce"
         echo "$body"
         _dba_settings_sql
+        cat "$post"
         echo "$asserts"
     } | _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" || {
         grep -v 'NOTICE' <<<"$out" | sed 's/^psql:[^ ]* //' >&2
-        echo "ERROR: the IAM_DB_ROLES=$mode bundle was rolled back (nothing in it was applied)" >&2
+        echo "ERROR: the IAM_DB_ROLES=$mode policy bundle was rolled back (nothing in it was applied)" >&2
         return 1
     }
     _dba_report "$out"
     _dba_log "IAM_DB_ROLES=$mode applied; grants match the policy."
+}
+
+# The bundle's isolation assert (F-24): the hash chain's writer needs READ COMMITTED, and
+# a database or role default of another level would otherwise fail deep inside.
+_dba_isolation_sql() {
+    cat <<'SQL'
+DO $iso$
+BEGIN
+    IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'the policy bundle needs READ COMMITTED (is %)', pg_catalog.current_setting('transaction_isolation');
+    END IF;
+END $iso$;
+SQL
 }
 
 # The settings block of the bundle. psql variables are interpolated in plain
@@ -382,14 +557,44 @@ SQL
 
 # dba_record_event NS POD DB EVENT PAYLOAD_JSON REASON — one event in the hash chain as
 # system:deploy, for what only a deploy can see (a break-glass setting it finds on a
-# running pod). Prints "skip" while append_history or _set_internal_actor is missing.
+# running pod, a policy break-glass, an account it seeded). The three events _record
+# owns (break_glass_seen, break_glass_ended, account_seeded) go through
+# iam_policy._record once iam_policy._system_as exists (the IAM 4.2a bodies: _record
+# fills the version and, for account_seeded, checks the content hash and records each
+# fact once); REASON becomes the payload's reason unless it names one. With only the
+# 4.1 _record (it refuses system:deploy) it prints "skip-4.1" and returns 0: the caller
+# warns or queues. Before 008c, break_glass_seen/_ended use append_history as before and
+# account_seeded prints "skip" (the caller queues it). Every other event goes through
+# append_history. Prints "skip" while append_history or _set_internal_actor is missing.
 dba_record_event() {
     _DBA_NS="$1"; _DBA_POD="$2"
     [[ "$4" =~ ^[a-z][a-z0-9_]{2,62}$ ]] || { echo "dba_record_event: EVENT must be a snake_case name" >&2; return 2; }
-    _dba_psql "$3" -q -tA -1 -v ON_ERROR_STOP=1 -v ev="$4" -v payload="$5" -v why="$6" <<'SQL'
-SELECT pg_catalog.to_regprocedure('iam_policy.append_history(text,jsonb,text)') IS NOT NULL
-   AND pg_catalog.to_regprocedure('medcea_auth._set_internal_actor(text)') IS NOT NULL AS ready \gset
-\if :ready
+    _dba_record_event_sql | _dba_psql "$3" -q -tA -1 -v ON_ERROR_STOP=1 -v ev="$4" -v payload="$5" -v why="$6"
+}
+
+# _dba_record_event_sql — dba_record_event's SQL (psql variables ev, payload, why); also
+# run inside a rolled-back probe by tests/iam-db.sh (P24)
+_dba_record_event_sql() {
+    cat <<'SQL'
+SELECT pg_catalog.to_regprocedure('medcea_auth._set_internal_actor(text)') IS NOT NULL AS actor_ok,
+       :'ev' IN ('break_glass_seen', 'break_glass_ended', 'account_seeded') AS policy_event,
+       :'ev' = 'account_seeded' AS seed_event,
+       pg_catalog.to_regprocedure('iam_policy._system_as(text[])') IS NOT NULL AS system_as,
+       pg_catalog.to_regprocedure('iam_policy._record(text,jsonb)') IS NOT NULL AS record_41,
+       pg_catalog.to_regprocedure('iam_policy.append_history(text,jsonb,text)') IS NOT NULL AS writer \gset
+SELECT :'policy_event'::boolean AND :'system_as'::boolean AND :'actor_ok'::boolean AS via_record,
+       :'policy_event'::boolean AND :'record_41'::boolean AND NOT :'system_as'::boolean AS only_41,
+       :'writer'::boolean AND :'actor_ok'::boolean AS ready \gset
+\if :via_record
+SELECT medcea_auth._set_internal_actor('system:deploy') \g /dev/null
+SELECT iam_policy._record(:'ev', CASE WHEN p ? 'reason' OR coalesce(pg_catalog.btrim(:'why'), '') = '' THEN p
+                                      ELSE p || pg_catalog.jsonb_build_object('reason', :'why') END)
+  FROM (SELECT :'payload'::jsonb AS p) x \g /dev/null
+\elif :only_41
+\echo skip-4.1
+\elif :seed_event
+\echo skip
+\elif :ready
 SELECT medcea_auth._set_internal_actor('system:deploy') \g /dev/null
 SELECT iam_policy.append_history(:'ev', :'payload'::jsonb, :'why') \g /dev/null
 \else

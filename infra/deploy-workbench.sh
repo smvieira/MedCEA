@@ -88,7 +88,7 @@ die() { echo -e "\033[0;31m[workbench] ERROR:\033[0m $*" >&2; exit 1; }
 
 : "${NAMESPACE:?}" ; : "${KEYCLOAK_DOMAIN:?}" ; : "${DOMAIN:?}"
 source "$SCRIPT_DIR/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-medcea}"
 WORKBENCH_DOMAIN="${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}"
 PORTAL_DOMAIN="${PORTAL_DOMAIN:-portal.$DOMAIN}"   # named on the 403 page; where sign-out lands
@@ -205,3 +205,6 @@ log "mounts until it is stopped and started again (File > Hub Control Panel, or 
 log "after an hour idle): a server started before ~/medcea-examples existed shows it only"
 log "after that restart. Network hops change at once, and the example files refresh"
 log "within about a minute in servers that already have the folder."
+
+# The last command of the success path: ends an open policy break-glass for workbench (IAM 4.2a)
+policy_source_finish "$NAMESPACE" workbench

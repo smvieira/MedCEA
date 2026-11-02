@@ -456,6 +456,13 @@ class HostCommand(unittest.TestCase):
                      'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"'):
             self.assertIn(part, out)
         self.assertIn("This command runs none of them.", out)
+        # IAM 4.2a (ops-2): step 2a moves the host's policy file aside, between the restore
+        # and the database deploy (the refusals of policy_source_init and apply.sh name it)
+        a2, a3 = out.index("  2a. (IAM 4.2a)"), out.index("  3. ./apps/database/deploy.sh")
+        self.assertLess(out.index("  2. Drop it and restore it"), a2)
+        self.assertLess(a2, a3)
+        self.assertIn("bash -c 'source infra/lib-lock.sh && medcea_lock && source infra/lib-policy-source.sh"
+                      " && policy_state_retire restore'", out[a2:a3])
 
     def test_now(self):
         p = self.run_cmd("now", "--timeout", "10")

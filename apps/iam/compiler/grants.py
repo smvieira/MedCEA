@@ -496,8 +496,10 @@ def _only_rpc_sql(orpc):
                       for c, names in sorted(orpc.items()))
     return f"""
     -- An only_rpc client (network.clients.<c>.only_rpc: the policy host's tokens, IAM 4.1)
-    -- may only POST its own few RPCs; nothing else through PostgREST, no read either.
-    IF (c ->> 'azp') = ANY ({_array(sorted(orpc))}) THEN
+    -- may only POST its own few RPCs; nothing else through PostgREST, no read either. In
+    -- both database modes (IAM 4.2a, L6): under IAM_DB_ROLES=false such a token would
+    -- otherwise act as anon with the legacy grants, stamped as the person.
+    IF c IS NOT NULL AND (c ->> 'azp') = ANY ({_array(sorted(orpc))}) THEN
         IF pg_catalog.current_setting('request.method', true) IS DISTINCT FROM 'POST'
            OR NOT coalesce(pg_catalog.current_setting('request.path', true) = ANY (CASE c ->> 'azp'
 {cases} END), false) THEN
@@ -537,7 +539,8 @@ def compiled_functions(p, smoke=False, without_iam=False, source="defaults.yaml"
     return f"""
 -- pre_request(): PostgREST's db-pre-request. SECURITY INVOKER and without a SET clause:
 -- a function's SET clause would undo the SET LOCAL ROLE at its exit. A no-op unless the
--- database setting medcea.iam_db_roles is 'true' (IAM_DB_ROLES), so a rolled-back database
+-- database setting medcea.iam_db_roles is 'true' (IAM_DB_ROLES), but for the only_rpc
+-- refusal, which runs in both modes (IAM 4.2a), so a rolled-back database
 -- does not refuse PostgREST's new sessions (pooled ones keep the old setting: deploy.sh
 -- restarts config-api on a flip); in enforce mode anon holds nothing, so even a no-op
 -- fails closed.
@@ -547,10 +550,10 @@ DECLARE
     grp  jsonb;
     own  text[];
 BEGIN
+    c := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;{_only_rpc_sql(orpc)}
     IF pg_catalog.current_setting('medcea.iam_db_roles', true) IS DISTINCT FROM 'true' THEN
         RETURN;
     END IF;
-    c := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;
     -- without a token PostgREST 12 still sets the claims, to role = the anon role only
     IF c IS NULL OR c - 'role' = '{{}}'::jsonb THEN
         -- PostgREST runs the pre-request for its OpenAPI root too, and config-api's
@@ -568,7 +571,7 @@ BEGIN
     END IF;
     IF NOT coalesce((c ->> 'azp') = ANY ({_array(clients)}), false) THEN
         RAISE EXCEPTION 'client % may not use the API', c ->> 'azp' USING ERRCODE = '28000';
-    END IF;{_only_rpc_sql(orpc)}
+    END IF;
     -- A read-only client (network.clients.<c>.read_only: notebook code, which nobody
     -- validates) only reads, whatever its person's role may change elsewhere: no write,
     -- no RPC by POST, and a read-only transaction under whatever GET reaches.

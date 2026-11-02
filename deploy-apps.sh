@@ -7,6 +7,9 @@
 # Usage:
 #   ./deploy-apps.sh           # interactive checkbox menu
 #   ./deploy-apps.sh --all     # install all without prompting
+#   ./deploy-apps.sh [--all] --break-glass "<reason>"
+#                              # policy break-glass for this run (IAM 4.2a): needs an
+#                              # exported MEDCEA_POLICY_FILE; asked and recorded once
 #   ./deploy-apps.sh --uninstall [--purge-data] [component ...]
 #   ./deploy-apps.sh --help
 
@@ -30,10 +33,16 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<EOF
-Usage: ./deploy-apps.sh [--all | --uninstall [--purge-data] [component ...] | --help]
+Usage: ./deploy-apps.sh [--all] [--break-glass "<reason>"] | --uninstall [--purge-data] [component ...] | --help
 
   (no args)   Interactive checkbox menu — toggle components, then confirm
   --all       Install all components without prompting
+  --break-glass "<reason>"
+              Policy break-glass for this run: compile the exported MEDCEA_POLICY_FILE
+              (matrix and waivers only; never the skeleton). Asks for the typed word
+              break-glass once and records one break_glass_seen for every selected
+              component that compiles the policy. Without this option an exported
+              MEDCEA_POLICY_FILE / MEDCEA_POLICY_BREAK_GLASS is ignored (unset).
   --uninstall Remove app components (all, or the ones named) by running each
               apps/<component>/uninstall.sh. Infrastructure keeps running and
               database contents are kept.
@@ -44,6 +53,31 @@ Usage: ./deploy-apps.sh [--all | --uninstall [--purge-data] [component ...] | --
 Components: $(find "$APPS_DIR" -mindepth 2 -maxdepth 2 -name deploy.sh -printf '%h\n' | xargs -n1 basename | sort | tr '\n' ' ')
 EOF
     exit 0
+fi
+
+# --break-glass "<reason>" (IAM 4.2a, design §14.4.6), anywhere before --uninstall's own args
+BREAK_GLASS_REASON=""
+if [[ "${1:-}" != "--uninstall" ]]; then
+    declare -a _rest=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --break-glass)
+                [[ -n "${2:-}" && "${2:-}" != -* ]] || { echo "--break-glass needs a reason: --break-glass \"<reason>\"" >&2; exit 1; }
+                BREAK_GLASS_REASON="$2"; shift 2 ;;
+            *) _rest+=("$1"); shift ;;
+        esac
+    done
+    set -- "${_rest[@]+"${_rest[@]}"}"
+fi
+if [[ -n "$BREAK_GLASS_REASON" ]]; then
+    [[ -n "${MEDCEA_POLICY_FILE:-}" ]] || { echo "--break-glass needs MEDCEA_POLICY_FILE (export MEDCEA_POLICY_FILE=<your policy file>)" >&2; exit 1; }
+    export MEDCEA_POLICY_BREAK_GLASS="$BREAK_GLASS_REASON"
+else
+    # an exported break-glass never reaches a component by accident
+    if [[ -n "${MEDCEA_POLICY_FILE:-}${MEDCEA_POLICY_BREAK_GLASS:-}" ]]; then
+        echo "MEDCEA_POLICY_FILE / MEDCEA_POLICY_BREAK_GLASS are ignored without --break-glass \"<reason>\"" >&2
+    fi
+    unset MEDCEA_POLICY_FILE MEDCEA_POLICY_BREAK_GLASS
 fi
 
 INSTALL_ALL=false
@@ -278,6 +312,42 @@ if ! $INSTALL_ALL; then
         echo "Aborted."
         exit 0
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# The access policy, once for the run (IAM 4.2a, design §14.4.4 "deploy-apps", §14.4.6)
+# ---------------------------------------------------------------------------
+# The components that compile the policy each read it at their start. Before the first
+# one: with --break-glass, the one read that asks, snapshots and records the break-glass
+# (the components then take its marker); otherwise one look at PostgreSQL, so a database
+# that is not Ready stops the run once instead of failing every component after a wait.
+POLICY_COMPILING=(access database edge-wizard frontend iam monitor mqtt-explorer scheduler)
+declare -a _POLICY_SEL=()
+for c in "${SELECTED[@]}"; do
+    printf '%s\n' "${POLICY_COMPILING[@]}" | grep -qx "$c" && _POLICY_SEL+=("$c")
+done
+if [[ ${#_POLICY_SEL[@]} -gt 0 && -f "$REPO_ROOT/config.env" ]]; then
+    source "$REPO_ROOT/config.env"
+    source "$REPO_ROOT/infra/lib-mk8s.sh"
+    source "$REPO_ROOT/infra/lib-policy-source.sh"
+    NAMESPACE="${NAMESPACE:-medcea}"
+    if [[ -n "$BREAK_GLASS_REASON" ]]; then
+        printf '%s\n' "${_POLICY_SEL[@]}" | grep -qx access && _POLICY_SEL+=(database)
+        MEDCEA_POLICY_COMPONENTS="$(printf '%s\n' "${_POLICY_SEL[@]}" | sort -u | paste -sd, -)"
+        export MEDCEA_POLICY_COMPONENTS
+        policy_source_init "$NAMESPACE" || exit $?
+    else
+        _PS_PROBE="$(mktemp -d)"
+        _PS_ST="$(policy_db_state "$NAMESPACE" "$_PS_PROBE/state.json")" || _PS_ST=error
+        if [[ "$_PS_ST" == unreachable ]]; then
+            echo -e "${RED}PostgreSQL is not Ready ($(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("detail",""))' "$_PS_PROBE/state.json")): no component that compiles the policy can deploy; wait for ${PG_RELEASE:-rdbms}-postgresql-0 (or repair it with ./deploy-infra.sh), then re-run.${NC}" >&2
+            rm -rf "$_PS_PROBE"; exit 1
+        fi
+        rm -rf "$_PS_PROBE"
+    fi
+elif [[ -n "$BREAK_GLASS_REASON" ]]; then
+    echo -e "${YELLOW}--break-glass: no selected component compiles the access policy; the override is not used.${NC}"
+    unset MEDCEA_POLICY_FILE MEDCEA_POLICY_BREAK_GLASS
 fi
 
 # ---------------------------------------------------------------------------

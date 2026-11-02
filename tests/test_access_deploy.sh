@@ -33,7 +33,11 @@ trap 'rm -rf "$T"' EXIT
 R="$T/repo"
 mkdir -p "$R/apps/access" "$R/apps/iam/compiler" "$R/apps/database" "$R/infra" "$R/k8s/oauth2-proxy" "$T/bin" "$T/fake"
 cp -r "$REPO/apps/access/." "$R/apps/access/"
-for f in lib-log.sh lib-lock.sh lib-mk8s.sh lib-render.sh lib-oauth2-proxy.sh lib-portal.sh lib-policy-source.sh; do cp "$REPO/infra/$f" "$R/infra/"; done
+for f in lib-log.sh lib-lock.sh lib-mk8s.sh lib-render.sh lib-oauth2-proxy.sh lib-portal.sh lib-policy-source.sh lib-db-roles.sh; do cp "$REPO/infra/$f" "$R/infra/"; done
+# lib-policy-source.sh (IAM 4.2a) sources lib-db-apply.sh and asks compiler/source.py whether
+# state/policy-applied.yaml exists; the fake cluster has no PostgreSQL StatefulSet (state none)
+cp "$REPO/apps/database/lib-db-apply.sh" "$R/apps/database/"
+cp "$REPO/apps/iam/compiler/source.py" "$R/apps/iam/compiler/"
 cp "$REPO/k8s/oauth2-proxy/error.html" "$REPO/k8s/oauth2-proxy/values-common.yaml" "$R/k8s/oauth2-proxy/"
 cat > "$R/config.env" <<'ENV'
 PROJECT_NAME=medcea
@@ -99,6 +103,7 @@ a="$*"
 case "$a" in
     *"get configmap medcea-iam-lib"*routes*) cat "$D/routes.json" ;;
     *"get configmap medcea-iam-lib"*medcea_iam*) cat "$D/lib.py" ;;
+    *"get statefulset "*) echo "Error from server (NotFound): statefulsets.apps \"${3:-}\" not found" >&2; exit 1 ;;
     *"get pod "*"app.kubernetes.io/name=postgresql"*) printf 'rdbms-postgresql-0' ;;
     *"get secret access-secrets"*) exit 1 ;;
     *"get cm portal-html"*) exit 1 ;;

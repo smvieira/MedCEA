@@ -142,9 +142,17 @@ def dual_control(p):
     return out
 
 
-def compile(p, source="defaults.yaml"):
+# Fields of routes.json the digest does not cover (IAM 4.2a): the source's label and
+# the applied version say where the content came from, not what it is, so the digest
+# follows the content alone (design §3.3, §14.4.7): version 1 composed from the
+# factory file compiles to the same digest as defaults.yaml.
+UNHASHED = ("source", "applied_version")
+
+
+def compile(p, source="defaults.yaml", applied_version=None):
     """The route table document for a loaded Policy. Raises RouteError on a malformed
-    route or a route that is both public and in a group."""
+    route or a route that is both public and in a group. `source` and
+    `applied_version` are recorded but not hashed (UNHASHED)."""
     services = {}
     for g, gd in p.groups.items():
         for m in gd["members"]:
@@ -176,6 +184,7 @@ def compile(p, source="defaults.yaml"):
         "schema": SCHEMA,
         "policy_version": p.data.get("policy_version"),
         "source": source,
+        "applied_version": applied_version,
         "roles": sorted(p.roles),
         "role_includes": {r: sorted(p.effective_roles(r) - {r}) for r in sorted(p.roles)},
         "services": {s: {"clients": sorted(clients.get(s, ())), "routes": t} for s, t in services.items()},
@@ -186,7 +195,7 @@ def compile(p, source="defaults.yaml"):
         "exports": export_table(p),
         "dual_control": dual_control(p),
     }
-    canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    canon = json.dumps({k: v for k, v in body.items() if k not in UNHASHED}, sort_keys=True, separators=(",", ":"))
     body["digest"] = hashlib.sha256(canon.encode()).hexdigest()
     return body
 

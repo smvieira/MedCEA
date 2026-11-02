@@ -21,6 +21,25 @@ sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 
 from compiler import grants, invariants, model, mqtt, netpol, proxies, routes, routes_diff, tools  # noqa: E402
 
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from _scratch import clean_env, scratch_repo  # noqa: E402
+
+_SCRATCH = []
+
+
+def scratch_root():
+    """One scratch copy for the tests that run cli.py or the shell libraries in a subprocess
+    (design v4 §14.4.15): the repository's state/ never decides their outcome."""
+    if not _SCRATCH:
+        _SCRATCH.append(scratch_repo("medcea-test-policy-"))
+    return _SCRATCH[0]
+
+
+def tearDownModule():
+    import shutil
+    for d in _SCRATCH:
+        shutil.rmtree(d, ignore_errors=True)
+
 GOLDEN = os.path.join(REPO, "tests", "iam-grants.golden.json")
 UPDATE_GOLDEN = "--update-golden" in sys.argv
 if UPDATE_GOLDEN:
@@ -374,7 +393,8 @@ class RoutesTest(unittest.TestCase):
     def test_deterministic_and_digest_covers_body(self):
         again = routes.compile(model.load_defaults())
         self.assertEqual(routes.dumps(self.doc), routes.dumps(again))
-        body = {k: v for k, v in self.doc.items() if k != "digest"}
+        # IAM 4.2a: the digest covers the body but its unhashed labels (routes.UNHASHED)
+        body = {k: v for k, v in self.doc.items() if k != "digest" and k not in routes.UNHASHED}
         self.assertEqual(self.doc["digest"], hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
 
@@ -597,8 +617,10 @@ class WideningTest(unittest.TestCase):
         self.assertIn(f"COMMENT ON FUNCTION medcea_auth.role_widening(text, text) IS 'policy {doc['digest']}';", fn)
         # verify (health-check iamgrants, tests/iam-schema.sh) compares the comment
         self.assertIn(f"'policy {doc['digest']}'", grants.sql(self.policy, "verify"))
-        # a policy file given by name changes the route table's source, so both follow it
+        # IAM 4.2a: the source's label is not hashed, so a policy file given by name keeps
+        # the digest of the same content (design §14.4.7)
         other = routes.compile(self.policy, "v7.yaml")["digest"]
+        self.assertEqual(other, doc["digest"])
         self.assertIn(f"'policy {other}'", grants.sql(self.policy, "verify", source="v7.yaml"))
 
     def test_role_widening_stub_raises(self):
@@ -1431,9 +1453,10 @@ class WiringTest(unittest.TestCase):
             os.chmod(path, 0o755)
         src = self.read("health-check.sh")
         body = re.search(rf"(?ms)^{fn}\(\) \{{.*?^\}}", src).group(0)
-        script = (f'_record() {{ echo "$1|$2|$3"; }}\nSCRIPT_DIR={REPO}\nTIMEOUT=5\nKUBECTL=kubectl\n'
+        # SCRIPT_DIR is a scratch copy: the health functions compile through policy_tool
+        script = (f'_record() {{ echo "$1|$2|$3"; }}\nSCRIPT_DIR={scratch_root()}\nTIMEOUT=5\nKUBECTL=kubectl\n'
                   f"{body}\n{setup}\n")
-        e = dict(os.environ, PATH=tmp + ":" + os.environ["PATH"], **(env or {}))
+        e = clean_env(PATH=tmp + ":" + os.environ["PATH"], **(env or {}))
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e).stdout.strip()
 
     def test_health_pgadminroles(self):
@@ -1899,9 +1922,10 @@ class WiringTest(unittest.TestCase):
         """infra/lib-policy-tools.sh: compiled under IAM_GATES=true, pre-policy under false."""
         import subprocess
 
-        def run(tool, env, repo=REPO):
-            e = dict(os.environ, REPO_ROOT=repo, **env)
-            return subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-policy-tools.sh"; policy_tool {tool}'],
+        def run(tool, env, repo=None):
+            root = scratch_root()
+            e = clean_env(REPO_ROOT=repo or root, **env)
+            return subprocess.run(["bash", "-c", f'source "{root}/infra/lib-policy-tools.sh"; policy_tool {tool}'],
                                   capture_output=True, text=True, env=e)
         r = run("edge-wizard", {"IAM_GATES": "true", "EDGE_WIZARD_ROLE": ""})
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "engineer,maintenance\n", ""))
@@ -2373,7 +2397,7 @@ class Phase41Test(unittest.TestCase):
         self.assertIn("LIKE 'skeleton\\_%'", flt)
         self.assertIn("LIKE 'waiver\\_%'", flt)
         self.assertIn("ERRCODE = '42501'", flt)
-        self.assertIn("RETURN iam_policy._append_history(p_event, p_payload, p_reason);", flt)
+        self.assertIn("RETURN iam_policy._append_history(p_event, p_payload - 'version', p_reason);", flt)
         # no 008c function body calls the public one any more
         self.assertEqual(re.findall(r"(?<![_\w])iam_policy\.append_history\('", self.c), [])
         rec = self.c[self.c.index("FUNCTION iam_policy._record("):]
@@ -2422,7 +2446,9 @@ class Phase41Test(unittest.TestCase):
         for w in ("approve_policy", "return_policy", "confirm_policy", "dispute_policy"):
             self.assertIn(f"'/rpc/{w}'", pre)
         self.assertIn("IS DISTINCT FROM 'POST'", pre)
-        self.assertLess(pre.index("may not use the API"), pre.index("may only call"))
+        # IAM 4.2a (L6): the only_rpc refusal runs in both modes, so before the mode check
+        # and therefore before the azp check of enforce mode
+        self.assertLess(pre.index("may only call"), pre.index("may not use the API"))
         self.assertLess(pre.index("may only call"), pre.index("may only read"))
         self.assertIn("'policy'", pre[:pre.index("may not use the API")])
         self.assertEqual(grants.only_rpc_clients(self.policy),
@@ -2532,6 +2558,131 @@ class Phase41Test(unittest.TestCase):
         for k in ("'kind', v.kind", "'groups'", "'roles'", "'entries'", "'waivers'", "COLLATE \"C\"",
                   "pg_catalog.to_jsonb(w) - 'version'", "ORDER BY w.id COLLATE \"C\""):
             self.assertIn(k, ed)
+
+
+class Phase42aTest(unittest.TestCase):
+    """IAM Phase 4, slice 4.2a (design §14.4.2, §14.4.7): the 008c edits (_system_as, the
+    actors of _record/_accept_skeleton/_sync_skeleton, the filter), pre_request's only_rpc
+    block in both modes, and the route table's unhashed labels."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load_defaults()
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
+            mig = f.read()
+        cls.c = mig[mig.index("Migration 008c"):]
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008c.sql")) as f:
+            cls.down_c = f.read()
+
+    def body(self, sig):
+        i = self.c.index(f"CREATE OR REPLACE FUNCTION iam_policy.{sig}")
+        return self.c[i:self.c.index("END $$;", i)]
+
+    def test_pre_request_only_rpc_in_both_modes(self):
+        fn = grants.compiled_functions(self.policy)
+        pre = fn[fn.index("FUNCTION medcea_auth.pre_request()"):fn.index("$pre$;")]
+        claims = pre.index("c := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;")
+        block = pre.index("may only call")
+        mode = pre.index("IF pg_catalog.current_setting('medcea.iam_db_roles', true) IS DISTINCT FROM 'true' THEN")
+        self.assertLess(claims, block)
+        self.assertLess(block, mode)
+        self.assertEqual(pre.count("request.jwt.claims"), 1)
+        self.assertIn("IF c IS NOT NULL AND (c ->> 'azp') = ANY (ARRAY['policy']", pre)
+        # without an only_rpc client the mode check comes straight after reading the claims
+        d = copy.deepcopy(self.policy.data)
+        del d["network"]["clients"]["iam-approvals"]
+        d["network"]["pods"]["config-api"]["ingress"][0]["from"].remove("client:iam-approvals")
+        fn2 = grants.compiled_functions(model.Policy(d))
+        self.assertIn("::jsonb;\n    IF pg_catalog.current_setting('medcea.iam_db_roles', true)", fn2)
+
+    def test_system_as(self):
+        sa = self.body("_system_as(p_allowed text[])")
+        self.assertNotIn("SECURITY DEFINER", sa[:sa.index("AS $$")])
+        self.assertIn("PERFORM medcea_auth._set_internal_actor(p_allowed[1]);", sa)
+        self.assertIn("a.sub = ANY (p_allowed)", sa)
+        self.assertIn("ERRCODE = '42501'", sa)
+        self.assertIn("PERFORM iam_policy._system_as(ARRAY['system:apply']);", self.body("_system()"))
+        # in the YAML (owner only) and in the down file
+        fns = {f["function"]: f for f in self.policy.data["infrastructure_functions"]}
+        self.assertEqual(fns["iam_policy._system_as(text[])"]["execute"], [])
+        self.assertIn("iam_policy._system_as(text[])", self.down_c)
+        self.assertNotIn("iam_policy._system_as", grants.NOT_BUILT)
+
+    def test_who_may_act(self):
+        both = "ARRAY['system:apply', 'system:deploy']"
+        for sig in ("_accept_skeleton(p_digest text", "_sync_skeleton(p_body jsonb"):
+            b = self.body(sig)
+            self.assertIn(f"PERFORM iam_policy._system_as({both});", b)
+            self.assertNotIn("iam_policy._system();", b)
+        for sig in ("_build_version(", "_mark_applied(", "_mark_reverted(", "_withdraw_open(", "_propose_skeleton("):
+            b = self.body(sig)
+            self.assertIn("PERFORM iam_policy._system();", b, sig)
+            self.assertNotIn("system:deploy", b, sig)
+        # _record: system:deploy only for the three deploy events
+        rec = self.body("_record(p_event text")
+        apply_only = rec.index("IF p_event IN ('applied', 'partial_apply', 'bootstrap_applied', 'apply_deferred') THEN")
+        deploy = rec.index("ELSIF p_event IN ('break_glass_seen', 'break_glass_ended', 'account_seeded') THEN")
+        self.assertLess(apply_only, deploy)
+        self.assertEqual(rec[apply_only:deploy].count("_system_as(ARRAY['system:apply'])"), 1)
+        self.assertIn(f"_system_as({both})", rec[deploy:rec.index("ELSE", deploy)])
+        self.assertEqual(rec.count("system:deploy"), 1)
+        self.assertIn("'source' = 'file'", rec)
+        self.assertIn("WHERE x.status = 'applied'", rec)          # the version filled in
+        self.assertIn("RETURN v_id;", rec)                       # idempotent per content
+
+    def test_accept_records_what_it_replaced(self):
+        b = self.body("_accept_skeleton(p_digest text")
+        self.assertIn("'from', v_from", b)
+        self.assertLess(b.index("SELECT s.digest INTO v_from"), b.index("INSERT INTO iam_policy.skeleton"))
+        self.assertLess(b.index("SELECT s.digest INTO v_from"), b.index("UPDATE iam_policy.skeleton"))
+
+    def test_account_seeded_fact_id_twin(self):
+        # the SQL hashes jsonb_build_object(fact, username, sub, role, person_id)::text; Python
+        # builds the same text with source.pg_jsonb_text (design §14.4.2 item 3)
+        from compiler import source
+        rec = self.body("_record(p_event text")
+        self.assertIn("'fact', p_payload -> 'fact', 'username', p_payload -> 'username', 'sub', p_payload -> 'sub',\n"
+                      "                     'role', p_payload -> 'role', 'person_id', p_payload -> 'person_id')::text", rec)
+        fact = {"fact": "observed", "username": "qa1", "sub": "33333333-3333-4333-8333-333333333333",
+                "role": "qa", "person_id": "p-1"}
+        text = source.pg_jsonb_text(fact)
+        self.assertEqual(text, '{"sub": "33333333-3333-4333-8333-333333333333", "fact": "observed", "role": "qa", '
+                               '"username": "qa1", "person_id": "p-1"}')
+        self.assertRegex(hashlib.sha256(text.encode()).hexdigest(), r"^[0-9a-f]{64}$")
+
+    def test_filter(self):
+        flt = self.body("append_history(p_event text, p_payload jsonb, p_reason text)\nRETURNS bigint LANGUAGE plpgsql "
+                        "SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$\nDECLARE\n    e text")
+        self.assertIn("e text := pg_catalog.lower(p_event);", flt)
+        self.assertIn("'break_glass_ended'", flt)
+        for pre in ("waiver", "skeleton", "break\\_glass", "apply", "bootstrap", "policy"):
+            self.assertIn(f"e LIKE '{pre}\\_%'", flt)
+        self.assertNotIn("p_event LIKE", flt)
+        self.assertIn("session_user = 'iam_svc' AND p_event IS DISTINCT FROM 'mqtt_credential_issued'", flt)
+        self.assertLess(flt.index("is a policy version event"), flt.index("iam_svc writes only"))
+        self.assertIn("p_payload - 'version'", flt)
+        # every event apply.sh or a deploy records is refused through the public function
+        for ev in ("applied", "partial_apply", "bootstrap_applied", "apply_deferred", "break_glass_seen",
+                   "break_glass_ended", "account_seeded", "apply_started", "apply_reverted"):
+            self.assertIn(f"'{ev}'", flt)
+        # account_decision_withdrawn (units.sql) is no prefix match
+        self.assertFalse(re.match(r"^(waiver|skeleton|break_glass|apply|bootstrap|policy)_", "account_decision_withdrawn"))
+
+    def test_routes_unhashed(self):
+        self.assertEqual(routes.UNHASHED, ("source", "applied_version"))
+        a = routes.compile(self.policy)
+        b = routes.compile(self.policy, "version-1", 1)
+        self.assertEqual(a["digest"], b["digest"])
+        self.assertEqual((a["source"], a["applied_version"]), ("defaults.yaml", None))
+        self.assertEqual((b["source"], b["applied_version"]), ("version-1", 1))
+        self.assertEqual({k: v for k, v in a.items() if k not in routes.UNHASHED},
+                         {k: v for k, v in b.items() if k not in routes.UNHASHED})
+        # content still moves it
+        d = copy.deepcopy(self.policy.data)
+        d["policy_version"] = "other"
+        self.assertNotEqual(routes.compile(model.Policy(d))["digest"], a["digest"])
+        # role_widening()'s comment carries the same digest whatever the label
+        self.assertEqual(grants.policy_digest(self.policy, "break-glass:x"), a["digest"])
 
 
 if __name__ == "__main__":

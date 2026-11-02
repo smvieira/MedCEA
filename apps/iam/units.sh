@@ -204,10 +204,12 @@ kc_ok() {   # PATH → the body on stdout; any status but 200 ends the run (exit
     [[ "$code" == 200 ]] || die 2 "Keycloak admin API: GET $1 answered HTTP $code."
     cat "$TMP/body"
 }
+# The platform roles are skeleton (no policy version changes them), so the factory file
+# names them: units.sh never needs the host applied file (design v4 §14.4.15).
 PLATFORM_ROLES="$(python3 -c '
 import sys; sys.path.insert(0, "apps/iam")
 from compiler import model
-print(" ".join(model.load().roles))')"
+print(" ".join(model.load_defaults().roles))')"
 # platform_role ID → the account's platform role(s), comma-separated, or -
 platform_role() {
     kc_ok "realms/$R/users/$1/role-mappings/realm" | ROLES="$PLATFORM_ROLES" python3 -c '

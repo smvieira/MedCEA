@@ -34,6 +34,32 @@
   cli.py describe-gate HOST ROLES       for a gate's 403 page: the host's label, a tab, and the
                                         labels of ROLES (the deployed list, ["a", "b"]),
                                         HTML-escaped
+  cli.py skeleton-gate (--state F | --against-git REV) [--check]
+                                        the skeleton gate (IAM 4.2a, design §14.4.5): the git
+                                        skeleton against the accepted one of policy_db_state's
+                                        document F (or REV's defaults.yaml, offline: --check
+                                        implied); one JSON line on stdout (verdict equal |
+                                        narrowing | widening, the added reach per role, _system
+                                        and _sections; the git body only for a narrowing
+                                        without --check), the message on stderr; exit 0 equal
+                                        or narrowing, 3 widening, 2 a bad state or compile error,
+                                        or a narrowing (--state) whose skeleton composed with the
+                                        applied rows fails the checker (verdict "refused": never
+                                        accepted)
+  cli.py write-applied --state F [--if-different]
+                                        compose the applied version of F with the git skeleton
+                                        (which the gate made the accepted one) and write
+                                        state/policy-applied.yaml under the verified deploy lock
+                                        (--if-different: only when absent or different); one line
+  cli.py export-applied                 defaults.yaml's text with only its top-level matrix: and
+                                        waivers: blocks replaced by the applied ones (from the host
+                                        file); writes nothing; exit 2 without a host file
+  cli.py bootstrap-targets --out DIR [--source host] [--state F]
+                                        apply.sh --bootstrap's proof (apps/iam/apply_check.py): every
+                                        target compiled from --defaults, from the composed version 1
+                                        and from a simulated host file, byte-identical (routes minus
+                                        source/applied_version), else exit 1; --source host compiles
+                                        the written state/policy-applied.yaml against DIR's --defaults
 
 Where the policy comes from (compiler/source.py, IAM Phase 4; one rule for every command):
   --file F       an offline draft or a test (never a deploy script; its label is the file
@@ -48,21 +74,155 @@ Where the policy comes from (compiler/source.py, IAM Phase 4; one rule for every
                  version-N, break-glass:<reason>, the --file name, or defaults.yaml)
 db-roles and describe-gate read only the skeleton (role names, passwords' variables, labels):
 they take the git tree's defaults.yaml unless --file is given, so they work with no source at
-all (apps/database/uninstall.sh --purge-data). Exit 2 for a source error.
+all (apps/database/uninstall.sh --purge-data); so does skeleton-gate (the git skeleton and the
+state document only). write-applied reads the state document and the git skeleton, never the
+host file it replaces; export-applied reads the host file only; bootstrap-targets names its
+sources itself (MEDCEA_POLICY_* stripped). Exit 2 for a source error.
 """
 import argparse
+import datetime
 import html
 import json
 import os
+import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler import grants, invariants, model, mqtt, netpol, proxies, routes, source, tools  # noqa: E402
+from compiler import explain, grants, invariants, model, mqtt, netpol, proxies, routes, source, tools  # noqa: E402
 
 
 # Commands that read only the skeleton: no source, no database (F-15).
-SKELETON_ONLY = ("db-roles", "describe-gate")
+SKELETON_ONLY = ("db-roles", "describe-gate", "skeleton-gate")
+# Commands that never resolve a source: they build or read the host file themselves.
+OWN_SOURCE = ("skeleton-gate", "write-applied", "export-applied", "bootstrap-targets")
+
+
+def _load_state(path):
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError) as e:
+        raise source.SourceError(f"cannot read the state document {path}: {e}") from None
+    if not isinstance(state, dict):
+        raise source.SourceError(f"the state document {path} is not an object")
+    return state
+
+
+def cmd_skeleton_gate(args):
+    git = source.factory()
+    if args.against_git:
+        if not re.fullmatch(r"[A-Za-z0-9._/~^-]+", args.against_git):
+            raise source.SourceError(f"bad revision {args.against_git!r}")
+        r = subprocess.run(["git", "-C", source.REPO_ROOT, "show", f"{args.against_git}:apps/iam/policy/defaults.yaml"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise source.SourceError(f"git show {args.against_git}: {r.stderr.strip()}")
+        import yaml
+        accepted = yaml.safe_load(r.stdout)
+        if not isinstance(accepted, dict):
+            raise source.SourceError(f"{args.against_git}:apps/iam/policy/defaults.yaml is not a policy")
+        acc_digest, ew, check = source.skeleton_digest(accepted), source.entries_and_waivers(accepted), True
+    else:
+        state = _load_state(args.state)
+        acc = source._need_version(state)
+        accepted, acc_digest, ew, check = acc["body"], acc["digest"], source.state_rows(state), args.check
+    git_digest = source.skeleton_digest(git)
+    if git_digest == acc_digest:
+        g = {"verdict": "equal", "git_digest": git_digest, "accepted_digest": acc_digest, "added": {},
+             "narrowed": [], "unchanged": []}
+    else:
+        g = explain.gate(accepted, git, ew)
+        g["accepted_digest"] = acc_digest
+        if g["verdict"] == "equal":   # the stored body does not hash to its digest: compare as different
+            g["verdict"] = "narrowing"
+    g["commit"] = source.git_commit()
+    g["compiler_digest"] = source.compiler_digest()
+    if g["verdict"] == "narrowing" and not args.against_git:
+        # a narrowing is accepted with no review: it must pass the checker first, composed
+        # with the applied rows as the deploys will compile it (review 4.2a)
+        errors = explain.checker_errors(git, ew)
+        if errors:
+            g["verdict"], g["checker"] = "refused", errors
+            print(json.dumps(g, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+            print(f"ERROR: the git skeleton {git_digest[:12]} with the applied matrix fails the checker "
+                  f"({len(errors)} violation(s)); it is not accepted and nothing was changed:", file=sys.stderr)
+            for e in errors:
+                print(f"  FAIL: {e}", file=sys.stderr)
+            print("Fix the change in git (python3 apps/iam/compiler/cli.py --file <draft> check).", file=sys.stderr)
+            return 2
+    if g["verdict"] == "narrowing" and not check:
+        g["body"] = source.skeleton(git)
+    print(json.dumps(g, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    if g["verdict"] == "widening":
+        print(explain.gate_message(g), file=sys.stderr)
+        return 3
+    if g["verdict"] == "narrowing":
+        print(f"[policy] skeleton {git_digest[:12]} narrows or changes no access over the accepted {acc_digest[:12]}"
+              f" (narrowed: {', '.join(g['narrowed']) or 'none: help text or unused keys'})", file=sys.stderr)
+    return 0
+
+
+def cmd_write_applied(args):
+    state = _load_state(args.state)
+    what = source.host_file_differs(state)
+    v, kind = int(state["version"]), state["kind"]
+    if what is None and args.if_different:
+        print(f"[policy] state/policy-applied.yaml: version {v} ({kind}) unchanged")
+        return 0
+    text = source.host_file_text(state, source.git_commit(),
+                                 datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    source.write_host_file(source.HOST_FILE, text)
+    print(f"[policy] state/policy-applied.yaml: version {v} ({kind}) "
+          + ("rewritten: it differed from the database" if what == "different" else "written"))
+    return 0
+
+
+def _top_blocks(lines):
+    """{key: (start, end)} of the top-level YAML blocks of defaults.yaml's lines: from the
+    key's line to the next top-level key, without the comment and blank lines before it."""
+    starts = [(i, l.split(":", 1)[0]) for i, l in enumerate(lines) if re.match(r"[A-Za-z_][A-Za-z0-9_]*:", l)]
+    out = {}
+    for n, (i, key) in enumerate(starts):
+        end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
+        while end > i + 1 and (not lines[end - 1].strip() or lines[end - 1].startswith("#")):
+            end -= 1
+        out[key] = (i, end)
+    return out
+
+
+def export_applied_text(host_data, defaults_text):
+    """defaults.yaml's text with only its top-level matrix: and waivers: blocks replaced by
+    host_data's (yaml.safe_dump of each block, at the same place)."""
+    import yaml
+    lines = defaults_text.splitlines(keepends=True)
+    blocks = _top_blocks(lines)
+    for key in ("matrix", "waivers"):
+        if key not in blocks:
+            raise source.SourceError(f"defaults.yaml has no top-level {key}: block")
+    for key in sorted(("matrix", "waivers"), key=lambda k: -blocks[k][0]):
+        a, b = blocks[key]
+        dumped = yaml.safe_dump({key: host_data.get(key) or ({} if key == "matrix" else [])},
+                                sort_keys=False, allow_unicode=True, width=1000)
+        lines[a:b] = dumped.splitlines(keepends=True)
+    return "".join(lines)
+
+
+def cmd_export_applied(args):
+    host = source.read_host_file()
+    if host is None:
+        print("ERROR: no applied version on this host (no state/policy-applied.yaml)", file=sys.stderr)
+        return 2
+    with open(source.DEFAULTS) as f:
+        print(export_applied_text(host.data, f.read()), end="")
+    return 0
+
+
+def cmd_bootstrap_targets(args):
+    """A thin wrapper over apps/iam/apply_check.py bootstrap-targets (design §14.4.13)."""
+    import apply_check
+    return apply_check.bootstrap_targets(args.out, args.source == "host", state_path=args.state)
 
 
 def source_label(src, given=None):
@@ -96,6 +256,19 @@ def main(argv=None):
                       help="grants --mode additive: comma-separated login roles that may log in (IAM_DB_SERVICE_ROLES)")
     comp.add_argument("--without-iam", action="store_true",
                       help="grants: leave schema iam and access_svc out (the access component is not installed)")
+    sg = sub.add_parser("skeleton-gate")
+    sgs = sg.add_mutually_exclusive_group(required=True)
+    sgs.add_argument("--state", help="policy_db_state's JSON document")
+    sgs.add_argument("--against-git", help="a git revision whose defaults.yaml is the accepted side (offline)")
+    sg.add_argument("--check", action="store_true", help="never print the body (read-only callers)")
+    wa = sub.add_parser("write-applied")
+    wa.add_argument("--state", required=True, help="policy_db_state's JSON document")
+    wa.add_argument("--if-different", action="store_true", help="write only when absent or different")
+    sub.add_parser("export-applied")
+    bt = sub.add_parser("bootstrap-targets")
+    bt.add_argument("--out", required=True, help="the staging directory (apply.sh's, mode 700)")
+    bt.add_argument("--source", choices=["host"], help="compile the written host file against DIR's reference (or --defaults)")
+    bt.add_argument("--state", help="--resume: the committed version's state document is the reference")
     dbr = sub.add_parser("db-roles")
     g = dbr.add_mutually_exclusive_group(required=True)
     g.add_argument("--names", action="store_true")
@@ -103,6 +276,19 @@ def main(argv=None):
     g.add_argument("--logins", action="store_true")
     args = ap.parse_args(argv)
 
+    if args.cmd in OWN_SOURCE:
+        if args.file or args.defaults or args.label:
+            print(f"ERROR: {args.cmd} takes no --file, --defaults or --label", file=sys.stderr)
+            return 2
+        try:
+            return {"skeleton-gate": cmd_skeleton_gate, "write-applied": cmd_write_applied,
+                    "export-applied": cmd_export_applied, "bootstrap-targets": cmd_bootstrap_targets}[args.cmd](args)
+        except source.SourceError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        except (KeyError, TypeError, ValueError, grants.GrantsError, routes.RouteError) as e:
+            print(f"ERROR: {args.cmd}: {type(e).__name__}: {e}", file=sys.stderr)
+            return 2
     try:
         if args.cmd in SKELETON_ONLY and not args.file:
             src = source.Source("defaults", source.DEFAULTS, source.factory())
@@ -224,7 +410,8 @@ def main(argv=None):
         return 0
     if args.cmd == "compile" and args.target == "routes":
         try:
-            print(routes.dumps(routes.compile(p, source_label(src, args.label))))
+            print(routes.dumps(routes.compile(p, source_label(src, args.label),
+                                              src.version if src.kind == "host" else None)))
         except routes.RouteError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

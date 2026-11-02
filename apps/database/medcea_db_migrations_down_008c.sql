@@ -113,7 +113,7 @@ DROP FUNCTION IF EXISTS
     iam_policy.submit(integer, text, double precision), iam_policy.withdraw(integer, text, double precision),
     iam_policy._qa(text), iam_policy.approve(integer, text, text, text, text), iam_policy.return_version(integer, text),
     iam_policy.confirm_applied(integer, text, text), iam_policy.dispute_applied(integer, text),
-    iam_policy.why_not(integer), iam_policy.audit_versions(), iam_policy._system(),
+    iam_policy.why_not(integer), iam_policy.audit_versions(), iam_policy._system(), iam_policy._system_as(text[]),
     iam_policy._sync_skeleton(jsonb, text), iam_policy._accept_skeleton(text, jsonb, text, text, jsonb),
     iam_policy._propose_skeleton(text, jsonb, text, jsonb, text, uuid, text, text),
     iam_policy._build_version(text, jsonb, jsonb, integer, integer, text),

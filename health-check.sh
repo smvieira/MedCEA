@@ -87,6 +87,20 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         --without-iam while schema iam is absent, from dba_iam_flag; a stale"
     echo -e "         medcea_auth.role_widening digest is drift too)"
     echo ""
+    echo -e "  ${CYAN}iampolicy${NC} the applied access policy version (IAM 4.2a): DATABASE"
+    echo -e "         SKIP before migration 008c or without kubectl; FAIL when PostgreSQL cannot be read,"
+    echo -e "         no version is applied yet (./apps/iam/deploy.sh bootstraps it), state/policy-applied.yaml"
+    echo -e "         is absent or differs from the database (header or body), the git skeleton widens over"
+    echo -e "         the accepted one, an earlier accept widened, an apply did not record its end, a policy"
+    echo -e "         break-glass is still open, audit_versions() finds anything, the chain is broken, or a"
+    echo -e "         waiver's review date has passed; WARN on queued account facts, an apply in progress,"
+    echo -e "         a narrowing git skeleton, git lagging the applied matrix, a waiver due within 30 days"
+    echo ""
+    echo -e "  ${CYAN}iamartefacts${NC} the live route table, MQTT rows and sign-in gates are the applied"
+    echo -e "         version's compile (IAM 4.2a): NAMESPACE. SKIP without ConfigMap medcea-iam-lib;"
+    echo -e "         FAIL on a digest or gate that differs (the message names the deploy); WARN while the"
+    echo -e "         User Manager's gate is admin-only; hosts whose proxy is not deployed are counted"
+    echo ""
     echo -e "  ${CYAN}iamdecisions${NC} account decisions waiting for qa (IAM 2.7): DATABASE"
     echo -e "         SKIP without schema iam or role access_svc; FAIL without iam.confirm_decision"
     echo -e "         (./apps/access/deploy.sh) or when access_svc may not execute it"
@@ -182,6 +196,8 @@ source "${SCRIPT_DIR}/apps/backup/lib-backup.sh"
 # first, so a check never trusts a source it was handed; read-only, writes nothing.
 source "${SCRIPT_DIR}/infra/lib-policy-source.sh"
 policy_source_init "${NAMESPACE:-medcea}" --read-only
+# its state document (check iampolicy) lives in a mktemp -d directory that is ours to remove
+[[ -n "${POLICY_SOURCE_STATE_FILE:-}" ]] && trap 'rm -rf "$(dirname "$POLICY_SOURCE_STATE_FILE")"' EXIT
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${RED}ERROR: Config file not found: $CONFIG_FILE${NC}" >&2
@@ -480,6 +496,168 @@ check_iamgrants() {
         _record OK "$name" "database grants equal the compiled policy${flag:+ ($flag: no access component)}"
     else
         _record FAIL "$name" "grant drift: $(grep -m1 -E 'ERROR|DETAIL' <<<"$out" | cut -c1-200)"
+    fi
+}
+
+# =============================================================================
+# Check: the applied access policy version (IAM 4.2a, design §14.4.14) — read-only
+# target: DATABASE (informational: the state document is the one policy_source_init
+# --read-only read at the top for $POSTGRES_DB, POLICY_SOURCE_STATE_FILE, bounded by
+# TIMEOUT). apps/iam/apply_check.py health judges it: the host file (line 1, line 2 and the
+# whole body against the database's rows), the skeleton gate against git, every unreviewed
+# accept recomputed, the apply events, break-glass, audit_versions(), the chain, waivers,
+# the seed queue. "An apply is running" = a holder of .medcea.lock (_lock_holders) whose
+# command line is apps/iam/apply.sh: health never runs flock. The worst line wins; the
+# detail lists every WARN and FAIL, 160 characters each. --policy-port absent until iam-api
+# reports a policy port (IAM 4.3): a bootstrap version is then OK while unconfirmed.
+# =============================================================================
+check_iampolicy() {
+    local name="$1" out rc=0 lvl msg worst="" ok="" skip="" details=() holders tmo
+    if [[ -z "${POLICY_SOURCE_STATE_FILE:-}" || ! -s "${POLICY_SOURCE_STATE_FILE:-}" ]]; then
+        if [[ "${POLICY_SOURCE_VERDICT:-skip}" == fail ]]; then
+            _record FAIL "$name" "cannot read the applied policy: ${POLICY_SOURCE_DETAIL:0:160}"
+        else
+            _record SKIP "$name" "${POLICY_SOURCE_DETAIL:-no usable kubectl}"
+        fi
+        return
+    fi
+    # The lock's holders only when they matter: scanning every /proc/<pid>/fd takes seconds
+    # on a busy host, and only an unfinished apply_started asks whether an apply is running.
+    holders=""
+    if grep -q '"apply_started"' "$POLICY_SOURCE_STATE_FILE" 2>/dev/null; then
+        holders="$(_lock_holders 2>/dev/null | paste -sd ' ')"
+    fi
+    tmo=$(( TIMEOUT > 30 ? TIMEOUT : 30 ))
+    out="$(timeout "$tmo" python3 "$SCRIPT_DIR/apps/iam/apply_check.py" health --state "$POLICY_SOURCE_STATE_FILE" \
+        --host-file "$SCRIPT_DIR/state/policy-applied.yaml" --holders "$holders" --policy-port absent 2>&1)" || rc=$?
+    while IFS='|' read -r lvl msg; do
+        case "$lvl" in
+            FAIL) worst=FAIL; details+=("${msg:0:160}") ;;
+            WARN) [[ "$worst" == FAIL ]] || worst=WARN; details+=("${msg:0:160}") ;;
+            OK)   ok="${msg:0:160}" ;;
+            SKIP) skip="${msg:0:160}" ;;
+        esac
+    done <<<"$out"
+    if [[ $rc -ne 0 || -z "$worst$ok$skip" ]]; then
+        _record FAIL "$name" "apply_check.py health failed (exit $rc): $(tail -n1 <<<"$out" | cut -c1-160)"
+    elif [[ -n "$worst" ]]; then
+        local IFS=';'; _record "$worst" "$name" "${details[*]}"
+    elif [[ -n "$ok" ]]; then
+        _record OK "$name" "$ok"
+    elif [[ "${POLICY_SOURCE_VERDICT:-}" == fail ]]; then
+        # state none, yet the read-only init failed it: a host file without any policy version
+        _record FAIL "$name" "${POLICY_SOURCE_DETAIL:0:160}"
+    else
+        _record SKIP "$name" "$skip"
+    fi
+}
+
+# =============================================================================
+# Check: the live policy artefacts are the applied version's compile (IAM 4.2a) — read-only
+# target: NAMESPACE. (a) ConfigMap medcea-iam-lib: annotation medcea/routes-digest and
+# routes.json's digest = cli.py compile routes; (b) medcea/mqtt-digest and mqtt.json's digest
+# = cli.py compile mqtt; (c) every HOST → release of network.proxies (the compiled policy):
+# ConfigMap <release> absent → "not deployed" (counted); else its oauth2_proxy.cfg
+# allowed_groups (no secret in it) = policy_groups HOST (lib-oauth2-proxy.sh, which renders
+# the IAM_GATES=false lists too). The User Manager's admin-only fallback (["admin"] while
+# the compile differs: not every access pod proved it enforces) is a WARN. The tool hosts
+# (Grafana, workbench, Node-RED, wizard, pgAdmin) keep their own checks.
+# =============================================================================
+check_iamartefacts() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" cm rc=0 cli="$SCRIPT_DIR/apps/iam/compiler/cli.py"
+    local want_r want_m probs=() warns=() gates=0 absent=0 host rel live want owner line
+    local -A LIVE=() OWNER=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    cm="$(timeout "$TIMEOUT" $KUBECTL get configmap medcea-iam-lib -n "$ns" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -qiE 'NotFound|not found' <<<"$cm"; then
+            _record SKIP "$name" "no ConfigMap medcea-iam-lib in $ns yet (./deploy-infra.sh)"
+        else
+            _record FAIL "$name" "cannot read ConfigMap medcea-iam-lib: $(tail -n1 <<<"$cm" | cut -c1-160)"
+        fi
+        return
+    fi
+    _digest() { python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' 2>/dev/null; }
+    want_r="$(python3 "$cli" compile routes 2>/dev/null | _digest)"
+    want_m="$(python3 "$cli" compile mqtt 2>/dev/null | _digest)"
+    if [[ -z "$want_r" || -z "$want_m" ]]; then
+        unset -f _digest
+        _record FAIL "$name" "the applied policy does not compile (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    unset -f _digest
+    # (a), (b): one line per mismatch, never a value but the digests
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && probs+=("$line")
+    done < <(python3 -c '
+import json, sys
+cm, wr, wm = json.load(sys.stdin), sys.argv[1], sys.argv[2]
+ann, data = cm["metadata"].get("annotations") or {}, cm.get("data") or {}
+def dig(key):
+    try:
+        return json.loads(data.get(key) or "")["digest"]
+    except Exception:
+        return ""
+for what, a, k, want in (("routes", "medcea/routes-digest", "routes.json", wr), ("mqtt", "medcea/mqtt-digest", "mqtt.json", wm)):
+    have_a, have_d = ann.get(a, ""), dig(k)
+    if have_a != want or have_d != want:
+        print("%s: annotation %s, %s %s, the applied version compiles %s (./deploy-infra.sh)"
+              % (what, have_a[:12] or "-", k, have_d[:12] or "-", want[:12]))
+' "$want_r" "$want_m" <<<"$cm" 2>&1)
+    # (c) the gates: HOST release, from the compiled policy
+    local proxies
+    proxies="$(python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+from compiler import model
+for h, r in (model.load().data.get("network", {}).get("proxies") or {}).items():
+    print(h, r)' "$SCRIPT_DIR/apps/iam" 2>/dev/null)" || { _record FAIL "$name" "cannot read network.proxies from the applied policy"; return; }
+    while IFS=$'\t' read -r host owner; do OWNER[$host]="${owner%% --*}"; done \
+        < <(python3 "$SCRIPT_DIR/apps/iam/apply_check.py" owners 2>/dev/null)
+    rc=0
+    # shellcheck disable=SC2046  # one release name per word
+    cm="$(timeout "$TIMEOUT" $KUBECTL get configmap $(awk '{print $2}' <<<"$proxies") -n "$ns" --ignore-not-found -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record FAIL "$name" "cannot read the sign-in proxies' ConfigMaps: $(tail -n1 <<<"$cm" | cut -c1-160)"; return
+    fi
+    while IFS=$'\t' read -r rel live; do [[ -n "$rel" ]] && LIVE[$rel]="$live"; done < <(python3 -c '
+import json, re, sys
+raw = sys.stdin.read().strip()
+d = json.loads(raw) if raw else {"items": []}
+for it in d.get("items") or ([d] if d.get("kind") == "ConfigMap" else []):
+    cfg = (it.get("data") or {}).get("oauth2_proxy.cfg") or ""
+    m = re.search(r"(?m)^\s*allowed_groups\s*=\s*(.*)$", cfg)
+    roles = " ".join(sorted(set(re.findall(r"\"([^\"]*)\"", m.group(1))))) if m else "-"
+    print(it["metadata"]["name"] + "\t" + (roles or "-"))' <<<"$cm" 2>/dev/null)
+    REPO_ROOT="$SCRIPT_DIR"
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"
+    while read -r host rel; do
+        [[ -n "$host" ]] || continue
+        if [[ -z "${LIVE[$rel]+x}" ]]; then absent=$((absent + 1)); continue; fi
+        gates=$((gates + 1))
+        if [[ "$host" == ACCESS_DOMAIN && "${IAM_GATES:-true}" == false ]]; then
+            want="admin"
+        else
+            want="$(policy_groups "$host" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' | sort -u | paste -sd ' ')"
+        fi
+        live="${LIVE[$rel]}"
+        if [[ -z "$want" ]]; then
+            probs+=("gate $host: policy_groups compiles nothing (python3 apps/iam/compiler/cli.py check)")
+        elif [[ "$live" == "$want" ]]; then
+            :
+        elif [[ "$host" == ACCESS_DOMAIN && "$live" == admin ]]; then
+            warns+=("the User Manager's gate is admin-only: not every access pod proved it enforces (./apps/access/deploy.sh)")
+        elif [[ "$live" == "-" ]]; then
+            probs+=("gate $host ($rel) has no allowed_groups: anyone signed in gets in (${OWNER[$host]:-./deploy-infra.sh})")
+        else
+            probs+=("gate $host ($rel) admits [$live], the applied version compiles [$want] (${OWNER[$host]:-./deploy-infra.sh})")
+        fi
+    done <<<"$proxies"
+    if ((${#probs[@]})); then
+        local IFS=';'; _record FAIL "$name" "${probs[*]}${warns:+;${warns[*]}}"
+    elif ((${#warns[@]})); then
+        local IFS=';'; _record WARN "$name" "${warns[*]}"
+    else
+        _record OK "$name" "routes, mqtt and $gates gates equal the applied version's compile; $absent hosts not deployed"
     fi
 }
 
@@ -1270,6 +1448,8 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamchain) check_iamchain "$name" "$target" ;;
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
+        iampolicy)    check_iampolicy "$name" "$target" ;;
+        iamartefacts) check_iamartefacts "$name" "$target" ;;
         iamdecisions) check_iamdecisions "$name" "$target" ;;
         iampending)   check_iampending "$name" "$target" ;;
         dbclients)  check_dbclients "$name" ;;

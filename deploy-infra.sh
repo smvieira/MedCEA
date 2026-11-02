@@ -167,6 +167,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     source "$SCRIPT_DIR/infra/lib-dns.sh"
     hosts_block && echo "  Removed the MedCEA block from /etc/hosts (if there was one)."
 
+    # The host's applied-policy files belong to the database just removed: moved aside
+    # into state/retired-<time>-uninstall/ (nothing deleted), so a reinstall starts clean
+    # (IAM 4.2a, design §14.4.4).
+    source "$SCRIPT_DIR/infra/lib-policy-source.sh"
+    policy_state_retire uninstall || echo -e "${YELLOW}WARNING: the host policy files were not moved aside (above): move state/policy-applied.yaml away before reinstalling.${NC}" >&2
+
     echo -e "${GREEN}Uninstall complete.${NC}"
     exit 0
 fi
@@ -232,6 +238,12 @@ if [[ "${1:-}" == "--reset" ]]; then
         exit 1
     fi
 
+    # The host's applied-policy files belonged to the database just deleted: moved aside
+    # into state/retired-<time>-reset/ (nothing deleted), so the rebuild starts clean
+    # (IAM 4.2a, design §14.4.4).
+    source "$SCRIPT_DIR/infra/lib-policy-source.sh"
+    policy_state_retire reset || { echo -e "${RED}ERROR: the host policy files were not moved aside (above); the rebuild would refuse them.${NC}" >&2; exit 1; }
+
     if [[ "${2:-}" == "--secrets" ]]; then
         echo -e "${YELLOW}Blanking generated secrets in config.env...${NC}"
         for _v in OAUTH2_PROXY_SECRET GRAFANA_OAUTH_SECRET OAUTH2_COOKIE_SECRET \
@@ -276,10 +288,13 @@ _print_banner
 source config.env
 set -e
 
-# Where every compile of the access policy below reads it (IAM Phase 4, design §3.4):
-# the applied version, from slice 4.2a; until then defaults.yaml, exactly as before.
+# Where every compile of the access policy below reads it (IAM Phase 4, design §3.4,
+# §14.4.4): the applied version from the database. Read in two steps: a read-only
+# precheck of the skeleton gate right after the API wait (a widening git change stops
+# the deploy before anything changes), and the full read after the PostgreSQL step,
+# so a cold or broken PostgreSQL can always be repaired by this script; nothing that
+# compiles the policy runs before that full read.
 source "$SCRIPT_DIR/infra/lib-policy-source.sh"
-policy_source_init "${NAMESPACE:-medcea}" || exit 1
 
 # Docker Hub credentials were asked for by infra/configure.sh if they were empty.
 DOCKERHUB_PASS="$DOCKERHUB_PAT"
@@ -363,6 +378,8 @@ until $MK8S kubectl cluster-info &>/dev/null; do
     sleep 5
 done
 echo -e "${GREEN}API ready.${NC}"
+KUBECTL="$MK8S kubectl"
+policy_source_init "$NAMESPACE" --precheck || exit $?
 
 # =============================================================================
 # DOCKER HUB AUTH
@@ -420,101 +437,6 @@ echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \
 # with 'namespaces "medcea" not found'.
 $MK8S kubectl create namespace "$NAMESPACE" \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
-
-# The access policy's check (codeplan IAM plan 1.1/1.2): ConfigMap medcea-iam-lib,
-# mounted by every service at /iam/ — the route table, the check library
-# (apps/iam/lib/medcea_iam.py) and its settings (issuer, audience, IAM_ENFORCE).
-# Here, because this script runs before every app component. The table is
-# compiled by the source rule (infra/lib-policy-source.sh, compiler/source.py): the
-# applied version once IAM Phase 4 slice 4.2a writes one, defaults.yaml until then. A policy that fails its invariants stops the deploy
-# rather than shipping a table — unless IAM_GATES=false (the rollback), which
-# leaves the ConfigMap as it is. Services re-read the mount when the kubelet
-# updates it (about a minute), so a change here needs no restart.
-echo -e "\n${GREEN}[IAM] Access check (ConfigMap medcea-iam-lib)...${NC}"
-# mqtt.json (IAM 3.5, compiler/mqtt.py): the MQTT Explorer's per-person rows, read by
-# iam-api; its own key and annotation, so routes.json's digest does not move with it.
-if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)" \
-   && IAM_MQTT_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile mqtt)"; then
-    IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
-    IAM_MQTT_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_MQTT_JSON")"
-    _IAM_DIR="$(mktemp -d)"
-    printf '%s\n' "$IAM_ROUTES_JSON" > "$_IAM_DIR/routes.json"
-    printf '%s\n' "$IAM_MQTT_JSON" > "$_IAM_DIR/mqtt.json"
-    # switches: the other IAM flags as this run set them, with the time, for the
-    # quarterly access review's record (IAM 2.7) — labelled there "as of
-    # deploy-infra <written_at>". enforce is read live from this file by every
-    # service, and IAM_MQTT_PERSON by iam-api (IAM 3.5: no app redeploy for it).
-    ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" \
-    SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" \
-    SW_MQTT="${IAM_MQTT_PERSON:-false}" python3 -c '
-import datetime, json, os
-e = os.environ
-print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
-                  "enforce": e["ENFORCE"] == "true",
-                  "switches": {"IAM_GATES": e["SW_GATES"] != "false", "IAM_NETPOL": e["SW_NETPOL"] != "false",
-                               "IAM_POSTGREST_JWT": e["SW_JWT"] == "true", "IAM_MQTT_PERSON": e["SW_MQTT"] == "true",
-                               "written_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}},
-                 sort_keys=True))' > "$_IAM_DIR/settings.json"
-    chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
-    _OLD_MQTT_DIGEST="$($MK8S kubectl get configmap medcea-iam-lib -n "$NAMESPACE" \
-        -o jsonpath='{.metadata.annotations.medcea/mqtt-digest}' 2>/dev/null || true)"
-    $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
-        --from-file=routes.json="$_IAM_DIR/routes.json" \
-        --from-file=settings.json="$_IAM_DIR/settings.json" \
-        --from-file=mqtt.json="$_IAM_DIR/mqtt.json" \
-        --from-file=medcea_iam.py="$SCRIPT_DIR/apps/iam/lib/medcea_iam.py" \
-        --dry-run=client -o yaml \
-      | $MK8S kubectl label --local -f - medcea/iam-lib=true -o yaml \
-      | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" "medcea/mqtt-digest=$IAM_MQTT_DIGEST" -o yaml \
-      | $MK8S kubectl apply -f -
-    rm -rf "$_IAM_DIR"
-    # A changed MQTT policy: restart iam-api so it issues from the new mqtt.json at once
-    # (the mount follows in about a minute); the database step below then ends every
-    # person credential issued under another digest (dba_retire_person_mqtt).
-    if [[ -n "$_OLD_MQTT_DIGEST" && "$_OLD_MQTT_DIGEST" != "$IAM_MQTT_DIGEST" ]] \
-       && $MK8S kubectl get deployment iam-api -n "$NAMESPACE" >/dev/null 2>&1; then
-        echo -e "${GREEN}  MQTT policy changed: restarting iam-api...${NC}"
-        $MK8S kubectl rollout restart deployment/iam-api -n "$NAMESPACE" >/dev/null
-        $MK8S kubectl rollout status deployment/iam-api -n "$NAMESPACE" --timeout=3m \
-            || echo -e "${YELLOW}WARNING: iam-api did not restart; it may issue from the old mqtt.json for about a minute.${NC}" >&2
-    fi
-    [[ "${IAM_ENFORCE:-false}" == "true" ]] \
-        && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow (live within about a minute).${NC}" \
-        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./guide.sh).${NC}"
-elif [[ "${IAM_GATES:-true}" == "false" ]]; then
-    echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
-else
-    echo -e "${RED}ERROR: the access policy did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
-    exit 1
-fi
-
-# NetworkPolicies of the application pods (IAM plan 1.4), compiled from `network:`
-# in the access policy: each pod admits only its proxy, the listed in-cluster hops
-# and the node itself (kubelet probes, the edge wizard). The node's addresses are
-# read now, because host traffic arrives from them. IAM_NETPOL=false removes them.
-echo -e "\n${GREEN}[IAM] Network policies of the application pods...${NC}"
-if [[ "${IAM_NETPOL:-true}" == "false" ]]; then
-    $MK8S kubectl delete netpol -n "$NAMESPACE" -l medcea/iam-netpol=true --ignore-not-found
-    echo -e "${YELLOW}  IAM_NETPOL=false: application pods accept connections from anywhere in the cluster.${NC}"
-else
-    _NODE_IPS=()
-    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
-        _NODE_IPS+=(--node-ip "${_ip%/*}")
-    done
-    if _NETPOL="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --namespace "$NAMESPACE" "${_NODE_IPS[@]}")"; then
-        $MK8S kubectl apply -f - <<<"$_NETPOL"
-        # A pod dropped from `network:` keeps no stale policy.
-        _WANT="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_NETPOL")"
-        for _np in $($MK8S kubectl get netpol -n "$NAMESPACE" -l medcea/iam-netpol=true -o jsonpath='{.items[*].metadata.name}'); do
-            [[ " $_WANT " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$NAMESPACE" "$_np"
-        done
-    elif [[ "${IAM_GATES:-true}" == "false" ]]; then
-        echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — network policies left as they are.${NC}" >&2
-    else
-        echo -e "${RED}ERROR: the network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
-        exit 1
-    fi
-fi
 
 echo -e "\n${GREEN}[TLS] Platform CA and wildcard certificate...${NC}"
 CA_DIR="$SCRIPT_DIR/.ca"; mkdir -p "$CA_DIR"; chmod 700 "$CA_DIR"
@@ -635,6 +557,108 @@ $MK8S helm3 upgrade --install rdbms \
 # PC a limit only throttles; the request guarantees the share), a memory limit so
 # a runaway query cannot starve the host. readReplicas is not deployed
 # (standalone); it is set only so nothing is left on a preset.
+
+# The full read of the applied policy (design §14.4.4), now that PostgreSQL is up: the
+# skeleton gate (a narrowing is accepted and recorded), break-glass, the host file
+# state/policy-applied.yaml. Every compile below (the access check, the NetworkPolicies,
+# Grafana, Keycloak's gates, the proxies, ...) reads what it settled.
+policy_source_init "$NAMESPACE" || exit $?
+
+# The access policy's check (codeplan IAM plan 1.1/1.2): ConfigMap medcea-iam-lib,
+# mounted by every service at /iam/ — the route table, the check library
+# (apps/iam/lib/medcea_iam.py) and its settings (issuer, audience, IAM_ENFORCE).
+# Here, because this script runs before every app component. The table is
+# compiled by the source rule (infra/lib-policy-source.sh, compiler/source.py): the
+# applied version once IAM Phase 4 slice 4.2a writes one, defaults.yaml until then. A policy that fails its invariants stops the deploy
+# rather than shipping a table — unless IAM_GATES=false (the rollback), which
+# leaves the ConfigMap as it is. Services re-read the mount when the kubelet
+# updates it (about a minute), so a change here needs no restart.
+echo -e "\n${GREEN}[IAM] Access check (ConfigMap medcea-iam-lib)...${NC}"
+# mqtt.json (IAM 3.5, compiler/mqtt.py): the MQTT Explorer's per-person rows, read by
+# iam-api; its own key and annotation, so routes.json's digest does not move with it.
+if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)" \
+   && IAM_MQTT_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile mqtt)"; then
+    IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
+    IAM_MQTT_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_MQTT_JSON")"
+    _IAM_DIR="$(mktemp -d)"
+    printf '%s\n' "$IAM_ROUTES_JSON" > "$_IAM_DIR/routes.json"
+    printf '%s\n' "$IAM_MQTT_JSON" > "$_IAM_DIR/mqtt.json"
+    # switches: the other IAM flags as this run set them, with the time, for the
+    # quarterly access review's record (IAM 2.7) — labelled there "as of
+    # deploy-infra <written_at>". enforce is read live from this file by every
+    # service, and IAM_MQTT_PERSON by iam-api (IAM 3.5: no app redeploy for it).
+    ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" \
+    SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" \
+    SW_MQTT="${IAM_MQTT_PERSON:-false}" python3 -c '
+import datetime, json, os
+e = os.environ
+print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
+                  "enforce": e["ENFORCE"] == "true",
+                  "switches": {"IAM_GATES": e["SW_GATES"] != "false", "IAM_NETPOL": e["SW_NETPOL"] != "false",
+                               "IAM_POSTGREST_JWT": e["SW_JWT"] == "true", "IAM_MQTT_PERSON": e["SW_MQTT"] == "true",
+                               "written_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}},
+                 sort_keys=True))' > "$_IAM_DIR/settings.json"
+    chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
+    _OLD_MQTT_DIGEST="$($MK8S kubectl get configmap medcea-iam-lib -n "$NAMESPACE" \
+        -o jsonpath='{.metadata.annotations.medcea/mqtt-digest}' 2>/dev/null || true)"
+    $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
+        --from-file=routes.json="$_IAM_DIR/routes.json" \
+        --from-file=settings.json="$_IAM_DIR/settings.json" \
+        --from-file=mqtt.json="$_IAM_DIR/mqtt.json" \
+        --from-file=medcea_iam.py="$SCRIPT_DIR/apps/iam/lib/medcea_iam.py" \
+        --dry-run=client -o yaml \
+      | $MK8S kubectl label --local -f - medcea/iam-lib=true -o yaml \
+      | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" "medcea/mqtt-digest=$IAM_MQTT_DIGEST" -o yaml \
+      | $MK8S kubectl apply -f -
+    rm -rf "$_IAM_DIR"
+    # A changed MQTT policy: restart iam-api so it issues from the new mqtt.json at once
+    # (the mount follows in about a minute); the database step below then ends every
+    # person credential issued under another digest (dba_retire_person_mqtt).
+    if [[ -n "$_OLD_MQTT_DIGEST" && "$_OLD_MQTT_DIGEST" != "$IAM_MQTT_DIGEST" ]] \
+       && $MK8S kubectl get deployment iam-api -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo -e "${GREEN}  MQTT policy changed: restarting iam-api...${NC}"
+        $MK8S kubectl rollout restart deployment/iam-api -n "$NAMESPACE" >/dev/null
+        $MK8S kubectl rollout status deployment/iam-api -n "$NAMESPACE" --timeout=3m \
+            || echo -e "${YELLOW}WARNING: iam-api did not restart; it may issue from the old mqtt.json for about a minute.${NC}" >&2
+    fi
+    [[ "${IAM_ENFORCE:-false}" == "true" ]] \
+        && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow (live within about a minute).${NC}" \
+        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./guide.sh).${NC}"
+elif [[ "${IAM_GATES:-true}" == "false" ]]; then
+    echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
+else
+    echo -e "${RED}ERROR: the access policy did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
+    exit 1
+fi
+
+# NetworkPolicies of the application pods (IAM plan 1.4), compiled from `network:`
+# in the access policy: each pod admits only its proxy, the listed in-cluster hops
+# and the node itself (kubelet probes, the edge wizard). The node's addresses are
+# read now, because host traffic arrives from them. IAM_NETPOL=false removes them.
+echo -e "\n${GREEN}[IAM] Network policies of the application pods...${NC}"
+if [[ "${IAM_NETPOL:-true}" == "false" ]]; then
+    $MK8S kubectl delete netpol -n "$NAMESPACE" -l medcea/iam-netpol=true --ignore-not-found
+    echo -e "${YELLOW}  IAM_NETPOL=false: application pods accept connections from anywhere in the cluster.${NC}"
+else
+    _NODE_IPS=()
+    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
+        _NODE_IPS+=(--node-ip "${_ip%/*}")
+    done
+    if _NETPOL="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --namespace "$NAMESPACE" "${_NODE_IPS[@]}")"; then
+        $MK8S kubectl apply -f - <<<"$_NETPOL"
+        # A pod dropped from `network:` keeps no stale policy.
+        _WANT="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_NETPOL")"
+        for _np in $($MK8S kubectl get netpol -n "$NAMESPACE" -l medcea/iam-netpol=true -o jsonpath='{.items[*].metadata.name}'); do
+            [[ " $_WANT " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$NAMESPACE" "$_np"
+        done
+    elif [[ "${IAM_GATES:-true}" == "false" ]]; then
+        echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — network policies left as they are.${NC}" >&2
+    else
+        echo -e "${RED}ERROR: the network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
+        exit 1
+    fi
+fi
+
 
 # Keycloak's own database. It used to share medcea_db (tables in public), so
 # apps/database/uninstall.sh --purge-data — DROP DATABASE medcea_db — would have
@@ -1256,12 +1280,38 @@ fi
 # No first or last name: these are real people, and Keycloak asks them for their
 # own name at first sign-in along with the new password, so every record they
 # make carries their name, not a placeholder.
+# IAM 4.2a: what this run seeds is recorded on the policy history as account_seeded facts
+# (design §14.4.12, OA-b), gathered here and recorded (or queued) after the person_id loop.
+_SEED_RUN="$(mktemp)"; chmod 600 "$_SEED_RUN"
+_SEED_CREATED=" "
+_seed_fact() {   # FACT USERNAME SUB [ROLE] [PERSON_ID] — one account_seeded fact of this run
+    [[ -n "$2" && -n "$3" ]] || return 0
+    python3 "$SCRIPT_DIR/apps/iam/apply_check.py" seed-build --fact "$1" --username "$2" --sub "$3" \
+        --role "${4:-}" --person-id "${5:-}" >> "$_SEED_RUN" \
+        || echo -e "${YELLOW}WARNING: [policy] the $1 fact of '$2' could not be built: it is not recorded${NC}" >&2
+}
+_seed_user_json() {   # USERNAME → the exact account's full representation (or nothing)
+    local enc
+    enc="$(U="$1" python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["U"], safe=""))')"
+    curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users?username=${enc}&exact=true&briefRepresentation=false" \
+        -H @<(_kc_bearer "$(_kc_token)") 2>/dev/null \
+      | python3 -c 'import json, sys
+d = json.load(sys.stdin)
+if d:
+    print(json.dumps(d[0]))' 2>/dev/null || true
+}
 _seed_person() {   # USER EMAIL PASSWORD ROLE LABEL
     [[ -n "$1" ]] || return 0
     _create_kc_user "$1" "" "" "$2" "$3" true
     if [[ "$_KC_CREATED" == 1 ]]; then
         _assign_realm_role "$1" "$4"
         echo -e "${GREEN}  Created '$1' with role $4 (temporary password in the credentials file).${NC}"
+        _SEED_CREATED+="$1 "
+        _seed_fact created "$1" "$(_seed_user_json "$1" | python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin)["id"])
+except Exception:
+    pass' 2>/dev/null || true)" "$4" ""
     fi
 }
 echo -e "${YELLOW}  Ensuring the first qa person and the first engineer...${NC}"
@@ -1331,12 +1381,82 @@ attrs["person_id"] = [u["id"]]
 u["attributes"] = attrs
 print(json.dumps(u))' 2>/dev/null || true)
     if [[ -n "$_U_JSON" ]]; then
-        curl -s -o /dev/null -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_uid}" \
-          -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_U_JSON" || true
+        _PID_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_uid}" \
+          -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$_U_JSON" || true)"
         _PID_N=$((_PID_N + 1))
+        if [[ "$_PID_CODE" == 2* ]]; then
+            _seed_fact person_id_set "$(python3 -c 'import json, sys; print(json.load(sys.stdin)["username"])' <<<"$_U_JSON" 2>/dev/null || true)" \
+                "$_uid" "" "$_uid"
+        fi
     fi
 done
 [[ $_PID_N -gt 0 ]] && echo -e "${GREEN}  person_id set on ${_PID_N} account(s).${NC}"
+
+# IAM 4.2a: the seeded accounts on the policy record (account_seeded; design §14.4.12, OA-b).
+# The facts of this run (created, person_id_set) and, once the 4.2a database functions exist,
+# the one-time backfill of QA_USER and ENGINEER_USER as they are now (observed; recorded again
+# only when their role or person_id changes: the fact_id is the content hash). Each goes
+# through iam_policy._record as system:deploy (dba_record_event); without _system_as (no
+# database yet, no 008c, or the 4.1 bodies) they are queued in state/seed-facts.jsonl (under
+# the lock, 600 in a 700 state/) for the next flush. A failure only warns: the accounts exist
+# either way, and approver eligibility reads Keycloak live, never this record.
+KUBECTL="$MK8S kubectl"; REPO_ROOT="$SCRIPT_DIR"
+declare -F _dbr_pg_pod >/dev/null || source "$SCRIPT_DIR/infra/lib-db-roles.sh"
+_SEED_POD="$(_dbr_pg_pod "$NAMESPACE" 2>/dev/null)" || _SEED_POD=""
+_SEED_SYSAS=false
+if [[ -n "$_SEED_POD" ]] \
+   && [[ "$(_DBA_NS="$NAMESPACE" _DBA_POD="$_SEED_POD" _dba_psql postgres -tAq -v db="$POSTGRES_DB" \
+             <<<"SELECT 1 FROM pg_catalog.pg_database WHERE datname = :'db';" 2>/dev/null | tr -d '[:space:]')" == 1 ]] \
+   && [[ "$(_DBA_NS="$NAMESPACE" _DBA_POD="$_SEED_POD" _dba_psql "$POSTGRES_DB" -tAq \
+             -c "SELECT pg_catalog.to_regprocedure('iam_policy._system_as(text[])') IS NOT NULL" </dev/null 2>/dev/null \
+             | tr -d '[:space:]')" == t ]]; then
+    _SEED_SYSAS=true
+fi
+if $_SEED_SYSAS; then
+    _SEED_ROLES="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1])
+from compiler import model
+print(" ".join(model.load_defaults().roles))' "$SCRIPT_DIR/apps/iam" 2>/dev/null || true)"
+    for _su in "${QA_USER:-}" "${ENGINEER_USER:-}"; do
+        [[ -n "$_su" && "$_SEED_CREATED" != *" $_su "* ]] || continue
+        _SU_JSON="$(_seed_user_json "$_su")"
+        [[ -n "$_SU_JSON" ]] || continue
+        _SU_ID="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])' <<<"$_SU_JSON" 2>/dev/null || true)"
+        _SU_PID="$(python3 -c 'import json, sys; print(((json.load(sys.stdin).get("attributes") or {}).get("person_id") or [""])[0])' <<<"$_SU_JSON" 2>/dev/null || true)"
+        _SU_ROLE="$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/users/${_SU_ID}/role-mappings/realm" \
+            -H @<(_kc_bearer "$(_kc_token)") 2>/dev/null | ROLES="$_SEED_ROLES" python3 -c 'import json, os, sys
+mine = {r["name"] for r in json.load(sys.stdin)} & set(os.environ["ROLES"].split())
+print(",".join(sorted(mine)))' 2>/dev/null || true)"
+        if [[ -n "$_SU_ID" ]]; then _seed_fact observed "$_su" "$_SU_ID" "$_SU_ROLE" "$_SU_PID"; fi
+    done
+fi
+mapfile -t _SEED_LINES < <(grep -v '^[[:space:]]*$' "$_SEED_RUN" || true)
+rm -f "$_SEED_RUN"
+if ((${#_SEED_LINES[@]})); then
+    _SEED_LEFT=()
+    if $_SEED_SYSAS; then
+        _ps_flush_seed_facts "$NAMESPACE" "$_SEED_POD" true || true   # the queue first (infra/lib-policy-source.sh)
+        _SEED_OK=0
+        for _line in "${_SEED_LINES[@]}"; do
+            if _OUT="$(dba_record_event "$NAMESPACE" "$_SEED_POD" "$POSTGRES_DB" account_seeded "$_line" \
+                         "seeded by deploy-infra.sh" 2>&1)" && [[ "$_OUT" != *skip* ]]; then
+                _SEED_OK=$((_SEED_OK + 1))
+            else
+                _SEED_LEFT+=("$_line")
+                echo -e "${YELLOW}WARNING: [policy] an account fact could not be recorded (${_OUT:0:200}): it is queued${NC}" >&2
+            fi
+        done
+        if ((_SEED_OK)); then echo -e "${GREEN}  [policy] ${_SEED_OK} account fact(s) recorded (account_seeded).${NC}"; fi
+    else
+        _SEED_LEFT=("${_SEED_LINES[@]}")
+    fi
+    if ((${#_SEED_LEFT[@]})); then
+        if _SEED_Q="$(printf '%s\n' "${_SEED_LEFT[@]}" | python3 "$SCRIPT_DIR/apps/iam/apply_check.py" seed-queue --in /dev/stdin)"; then
+            echo -e "${YELLOW}  [policy] ${_SEED_Q} account fact(s) queued until ./apps/database/deploy.sh (IAM 4.2a) has run (state/seed-facts.jsonl).${NC}"
+        else
+            echo -e "${YELLOW}WARNING: [policy] ${#_SEED_LEFT[@]} account fact(s) could be neither recorded nor queued (above): they are not on the record${NC}" >&2
+        fi
+    fi
+fi
 
 # Realm roles as a "groups" claim, which is what oauth2-proxy's allowed_groups
 # reads. It has to be a client SCOPE named "groups", not just a mapper: with
@@ -1669,7 +1789,12 @@ if [[ "$_NR_AUTH" == "off" ]]; then
     _NR_PAYLOAD="$(SINCE="$_NR_SINCE" python3 -c 'import json, os
 print(json.dumps({"identity": "node-red NR_ADMIN_AUTH=off", "pod_since": os.environ["SINCE"] or None, "ended_by": "deploy-infra"}))')"
     if ! _OUT="$(dba_record_event "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" break_glass_seen "$_NR_PAYLOAD" \
-                  "Node-RED ran without its own sign-in; deploy-infra turns it on again" 2>&1)" || [[ "$_OUT" == *skip* ]]; then
+                  "Node-RED ran without its own sign-in; deploy-infra turns it on again" 2>&1)"; then
+        echo -e "${YELLOW}WARNING: could not record Node-RED's break-glass in iam_policy.history: ${_OUT:0:200}${NC}" >&2
+    elif [[ "$_OUT" == *skip-4.1* ]]; then
+        # IAM 4.2a, critique ops-3: the 4.1 _record refuses a deploy's records
+        echo -e "${YELLOW}WARNING: Node-RED's break-glass is not recorded in iam_policy.history: iam_policy._record still has its IAM 4.1 body; it records a deploy's events once ./apps/database/deploy.sh has run (note this one in the operations log)${NC}" >&2
+    elif [[ "$_OUT" == *skip* ]]; then
         echo -e "${YELLOW}WARNING: could not record Node-RED's break-glass in iam_policy.history: ${_OUT:0:200}${NC}" >&2
     fi
 fi
@@ -2136,6 +2261,10 @@ if $_ALIAS_ON; then
     _alias_ingress "alias-root" "${ALIAS_DOMAIN}" "https://${PORTAL_DOMAIN}/"
     echo -e "${GREEN}  ${#_SVC_DOMAINS[@]} hosts + the bare domain redirect.${NC}"
 fi
+
+# A policy break-glass open for `infra` ends with this successful run without one
+# (break_glass_ended; the workbench's own deploy ends `workbench`). Never fails.
+policy_source_finish "$NAMESPACE" infra
 
 # =============================================================================
 # SUMMARY

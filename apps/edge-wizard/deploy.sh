@@ -39,7 +39,7 @@ source "$REPO_ROOT/infra/lib-render.sh" # render FILE VAR...
 source "$REPO_ROOT/infra/lib-policy-tools.sh" # policy_tool edge-wizard
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 EDGE_WIZARD_PORT="${EDGE_WIZARD_PORT:-8088}"
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"
 
@@ -129,3 +129,6 @@ echo -e "  ${BOLD}Onboarding wizard deployed${NC}"
 echo -e "  Wizard:   $URL   (the Devices tab's Onboard Device button)
   Direct:   http://${PLATFORM_IP}:$PORT/   (the daemon itself, without the ingress)"
 echo -e "  Service:  systemctl --user status $UNIT"
+
+# The last command of the success path: ends an open policy break-glass for edge-wizard (IAM 4.2a)
+policy_source_finish "$NAMESPACE" edge-wizard

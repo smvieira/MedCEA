@@ -51,7 +51,7 @@ source "$REPO_ROOT/infra/lib-db-roles.sh"    # db_clients_live, db_role_secret (
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # workbench_egress_close (IAM 3.2b)
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 PG_RELEASE="${PG_RELEASE:-rdbms}"
 CEA_DB="${POSTGRES_DB:-medcea_db}"
 IAM_DB_ROLES="${IAM_DB_ROLES:-false}"
@@ -159,34 +159,11 @@ if [[ ${#_missing[@]} -gt 0 ]]; then
 fi
 
 # ── Service logins (IAM Phase 2.5): who may log in while IAM_DB_ROLES=false ──
-# IAM_DB_SERVICE_ROLES=true: every login role with a password (the services move
-# to them as they are deployed next, infra/lib-db-roles.sh). false: only the roles
-# a live client still uses, so turning the flag off never locks out a service that
-# has not been deployed back onto postgres yet; the next deploy after it has been
-# makes the role NOLOGIN. Under IAM_DB_ROLES=true every login role logs in anyway.
-DBA_SERVICE_LOGINS=""
-if [[ "$IAM_DB_ROLES" != "true" ]]; then
-    _sl=()
-    if [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" ]]; then
-        while read -r _role; do
-            _v="DBPW_$_role"; [[ -n "${!_v:-}" ]] && _sl+=("$_role")
-        done < <(python3 "$CLI" db-roles --logins)
-    else
-        # an array, not `while read < <(…)`: db_role_can_login's kubectl exec -i
-        # would read the rest of the list as its stdin
-        mapfile -t _live < <(db_clients_live "$NAMESPACE")
-        for _cu in "${_live[@]}"; do
-            read -r _c _u <<<"$_cu"
-            _role="$(db_client_role "$_c")"
-            if [[ "$_u" == "$_role" ]] || { [[ "$_u" == "?" ]] && db_role_can_login "$NAMESPACE" "$_role"; }; then
-                _sl+=("$_role")
-                warn "IAM_DB_SERVICE_ROLES=false, but $_c still logs in as $_role: the role keeps its login until $_c is deployed back onto postgres; run this deploy again after that"
-            fi
-        done
-    fi
-    DBA_SERVICE_LOGINS="$(IFS=,; echo "${_sl[*]}")"
-    [[ -z "$DBA_SERVICE_LOGINS" ]] || log "Roles that may log in (IAM_DB_SERVICE_ROLES=${IAM_DB_SERVICE_ROLES:-false}): ${DBA_SERVICE_LOGINS//,/, }"
-fi
+# dba_service_logins (lib-db-apply.sh, shared with apps/iam/apply.sh since IAM 4.2a):
+# IAM_DB_SERVICE_ROLES=true every login role whose password config.env sets, false only
+# the roles a live client still uses; nothing under IAM_DB_ROLES=true.
+DBA_SERVICE_LOGINS="$(dba_service_logins "$NAMESPACE")"
+[[ -z "$DBA_SERVICE_LOGINS" ]] || log "Roles that may log in (IAM_DB_SERVICE_ROLES=${IAM_DB_SERVICE_ROLES:-false}): ${DBA_SERVICE_LOGINS//,/, }"
 
 # ── The notebooks' platform hops close before the database relaxes (IAM 3.2b) ──
 # Under IAM_DB_ROLES=false config-api runs every request as anon, which the bundle
@@ -257,3 +234,6 @@ echo ""
 echo -e "  ${BOLD}Database deployed${NC}"
 echo -e "  DB:  ${CEA_DB}  (pod: ${PG_POD})   IAM_DB_ROLES=${IAM_DB_ROLES}"
 echo ""
+
+# The last command of the success path: ends an open policy break-glass for database (IAM 4.2a)
+policy_source_finish "$NAMESPACE" database

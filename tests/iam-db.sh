@@ -42,7 +42,12 @@
 #                rr_admin_login, apply_started, the audit and a tampered chain, READ
 #                COMMITTED, the access guard; with --mode true the token path: approve
 #                and return (evidence, events), every approve refusal (P7a-i), pre_request's
-#                only_rpc block, the blank person_id (G9), confirm and dispute
+#                only_rpc block, the blank person_id (G9), confirm and dispute.
+#                IAM 4.2a, P19-P26: _withdraw_open, _mark_reverted (its applies need
+#                --mode true), _propose_skeleton, _record's actors and account_seeded,
+#                the filter (iam_svc writes only mqtt_credential_issued), dba_record_event
+#                through _record, a deploy's _accept_skeleton, and (--mode false)
+#                pre_request's only_rpc block under IAM_DB_ROLES=false
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
 #
@@ -63,7 +68,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -2653,10 +2658,11 @@ elif want access; then
 fi
 
 # ── policy (IAM Phase 4, slice 4.1: migration 008c) ─────────────────────────────
-# P1 reads the catalog (any namespace); P2-P18 are write probes on medcea-iamtest, each
+# P1 reads the catalog (any namespace); P2-P26 (4.2a: P19-P26) are write probes on medcea-iamtest, each
 # in BEGIN … ROLLBACK, building version 1 inside the probe through the owner functions
 # (a reduced skeleton: the factory's role and group keys). The token probes (P7-P10,
-# P12) need IAM_DB_ROLES=true (authenticator's memberships, pre_request's role).
+# P12, P20's applies) need IAM_DB_ROLES=true (authenticator's memberships, pre_request's
+# role); P26 needs IAM_DB_ROLES=false.
 if want policy && [[ "$MODE" != legacy ]]; then
     echo ""
     out="$(db <<'SQL'
@@ -2757,6 +2763,13 @@ SQL
     as_iam() {
         printf 'RESET ROLE;\nRESET SESSION AUTHORIZATION;\nSET SESSION AUTHORIZATION iam_svc;\n'
         echo "SELECT medcea_auth.set_actor('$1', $(sqlq "$2"), '$3', '$4') \\g /dev/null"
+    }
+    # as_system NAME — postgres acting as an internal actor (apply.sh's system:apply, a
+    # deploy's system:deploy), with no person actor left over from an earlier step
+    as_system() {
+        as_postgres
+        clear_actor
+        echo "SELECT medcea_auth._set_internal_actor('$1') \\g /dev/null"
     }
     # draft_chain [EDITOR_SUB EDITOR_PERSON] — admin A drafts from the applied version, an
     # editor (default A) saves one cell, A submits: :d submitted, :ed its entries digest
@@ -2912,18 +2925,18 @@ $(build_v1)
 $(as_iam "$A" "$PA" test-pa admin)
 SELECT iam_policy.withdraw(:v1, 'iam-db probe', $IAT);
 SQL
-    # (_withdraw_open, _mark_reverted and _propose_skeleton, apply.sh's, get their probes
-    # with apply.sh in 4.2a/4.4: deferred, not forgotten)
-    # P18 — iam_svc may append its own events, never a policy version event
-    probe P18 "iam_svc appends a service event, as iam-api does (the control)" ok <<SQL
+    # (_withdraw_open, _mark_reverted and _propose_skeleton, apply.sh's: P19-P21, IAM 4.2a)
+    # P18 — iam_svc may append its own event (iam-api's, the only one since 4.2a), never a
+    # policy version event
+    probe P18 "iam_svc appends mqtt_credential_issued, as iam-api does (the control)" ok <<SQL
 $(build_v1)
 $(as_iam "$A" "$PA" test-pa admin)
-SELECT iam_policy.append_history('test_probe', '{}'::jsonb, 'iam-db') \\g /dev/null
+SELECT iam_policy.append_history('mqtt_credential_issued', '{"username": "explorer-iam-db"}'::jsonb, 'iam-db') \\g /dev/null
 --CHECKS
-SELECT 'CHECK|appended for A', EXISTS (SELECT 1 FROM iam_policy.history WHERE event = 'test_probe' AND actor_sub = '$A'
+SELECT 'CHECK|appended for A', EXISTS (SELECT 1 FROM iam_policy.history WHERE event = 'mqtt_credential_issued' AND actor_sub = '$A'
                                        AND event_id = (SELECT max(event_id) FROM iam_policy.history));
 SQL
-    for ev in applied status_changed entry_saved skeleton_accepted; do
+    for ev in applied status_changed entry_saved skeleton_accepted break_glass_seen break_glass_ended account_seeded; do
         probe P18 "iam_svc forges '$ev' for the half-applied version" "42501:is a policy version event" <<SQL
 $(build_v1 no-record)
 RESET ROLE;
@@ -3020,6 +3033,215 @@ $(build_v1)
 ALTER FUNCTION iam._changed_since(text, text, double precision) RENAME TO _changed_since_gone;
 $(as_iam "$A" "$PA" test-pa admin)
 SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+
+    # ── IAM 4.2a: apply.sh's owner functions, _record's actors, the filter, the deploy's accept ──
+    # a second skeleton (another digest, the same keys) for P21 and P25
+    P_SKEL2="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); d["probe"]=True; print(json.dumps(d, sort_keys=True))' "$P_SKEL")"
+    P_DG2="$(printf 'iam-db skeleton 2 %s' "$_h" | sha256sum | cut -d' ' -f1)"
+    # an account_seeded fact and its content hash (design §14.4.2 item 3: source.pg_jsonb_text)
+    seed_fact() {  # USERNAME SUB ROLE PERSON [FACT_ID]
+        python3 - "$REPO_ROOT" "$@" <<'PY'
+import hashlib, json, sys
+sys.path.insert(0, sys.argv[1] + "/apps/iam")
+from compiler import source
+u, sub, role, person = sys.argv[2:6]
+core = {"fact": "observed", "username": u, "sub": sub, "role": role, "person_id": person}
+fid = sys.argv[6] if len(sys.argv) > 6 else hashlib.sha256(source.pg_jsonb_text(core).encode()).hexdigest()
+print(json.dumps({**core, "created": False, "observed": True, "by": "iam-db", "os_user": "iam-db", "fact_id": fid}))
+PY
+    }
+    SEED="$(seed_fact test-pq "$Q" qa "$PQ")"
+    # P19 — _withdraw_open (apply.sh, a rollback withdraws the open change)
+    probe P19 "_withdraw_open as system:apply withdraws the open draft" ok <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+$(as_system system:apply)
+SELECT iam_policy._withdraw_open('iam-db probe') AS w \\gset
+$(clear_marker)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d2 \\gset
+--CHECKS
+SELECT 'CHECK|returns the draft', :w = :d;
+SELECT 'CHECK|withdrawn by system:apply', status = 'withdrawn' AND withdrawn_by = 'system:apply' AND withdrawn_at IS NOT NULL
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|withdrawn event', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d AND event = 'withdrawn'
+          AND payload ->> 'by' = 'system:apply' AND actor_name = 'system:apply');
+SELECT 'CHECK|status_changed draft>withdrawn:_withdraw_open', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d
+          AND event = 'status_changed' AND payload ->> 'from' = 'draft' AND payload ->> 'to' = 'withdrawn'
+          AND payload ->> 'by_function' = '_withdraw_open');
+SELECT 'CHECK|one_open freed: a second draft', status = 'draft' FROM iam_policy.version WHERE version = :d2;
+SQL
+    probe P19 "_withdraw_open with nothing open: NULL, nothing appended" ok <<SQL
+$(build_v1)
+$(as_system system:apply)
+SELECT max(event_id) AS h0 FROM iam_policy.history \\gset
+SELECT iam_policy._withdraw_open('iam-db probe') IS NULL AS none \\gset
+--CHECKS
+SELECT 'CHECK|NULL', :'none'::boolean;
+SELECT 'CHECK|nothing appended', (SELECT max(event_id) FROM iam_policy.history) = :h0;
+SQL
+    probe P19 "_withdraw_open as system:deploy" "42501:not by system:deploy" <<SQL
+$(build_v1)
+$(as_system system:deploy)
+SELECT iam_policy._withdraw_open('iam-db probe');
+SQL
+    probe P19 "_withdraw_open as iam_svc" "42501:permission denied for function _withdraw_open" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy._withdraw_open('iam-db probe');
+SQL
+    # P20 — _mark_reverted's refusals (the positive paths need an approved version: --mode true)
+    probe P20 "_mark_reverted with a blank reason" "22023:a reason is required" <<SQL
+$(build_v1)
+$(as_system system:apply)
+SELECT iam_policy._mark_reverted(:v1, NULL, ' ');
+SQL
+    probe P20 "_mark_reverted of a version that is not applied" "22023:is not the applied one" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_system system:apply)
+SELECT iam_policy._mark_reverted(:d, :v1, 'iam-db probe');
+SQL
+    # P21 — _propose_skeleton (apply.sh --propose-skeleton, 4.4)
+    probe P21 "_propose_skeleton of the accepted skeleton" "22023:nothing to approve" <<SQL
+$(build_v1)
+$(as_system system:apply)
+SELECT iam_policy._propose_skeleton('$P_DG', \$j\$$P_SKEL\$j\$::jsonb, 'iam-db', '{"added": {}}'::jsonb, '$DD',
+                                    '$A', '$PA', 'iam-db probe');
+SQL
+    probe P21 "_propose_skeleton of another skeleton: a submitted skeleton version" ok <<SQL
+$(build_v1)
+$(as_system system:apply)
+SELECT iam_policy._propose_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', '{"added": {"qa": []}}'::jsonb, '$DD',
+                                    '$A', '$PA', 'iam-db probe') AS s \\gset
+--CHECKS
+SELECT 'CHECK|submitted skeleton version on v1', status = 'submitted' AND kind = 'skeleton' AND based_on = :v1
+          AND skeleton_digest = '$P_DG2' AND submitted_by_sub = '$A' AND submitted_by_person = '$PA'
+  FROM iam_policy.version WHERE version = :s;
+SELECT 'CHECK|entries = v1''s', (SELECT count(*) FROM iam_policy.entry WHERE version = :s)
+          = (SELECT count(*) FROM iam_policy.entry WHERE version = :v1);
+SELECT 'CHECK|entries_digest set', entries_digest IS NOT NULL AND entries_digest = iam_policy.entries_digest(:s)
+  FROM iam_policy.version WHERE version = :s;
+SELECT 'CHECK|version_diff computed on the host', EXISTS (SELECT 1 FROM iam_policy.version_diff
+          WHERE version = :s AND computed_on = 'host' AND diff_digest = '$DD');
+SELECT 'CHECK|submitted event', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :s AND event = 'submitted'
+          AND payload ->> 'kind' = 'skeleton' AND payload ->> 'skeleton_digest' = '$P_DG2'
+          AND payload ->> 'diff_digest' = '$DD');
+SELECT 'CHECK|not accepted by proposing', iam_policy._accepted() = '$P_DG';
+SQL
+    probe P21 "a second skeleton proposal while one is open" "23505:still open" <<SQL
+$(build_v1)
+$(as_system system:apply)
+SELECT iam_policy._propose_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', '{}'::jsonb, '$DD', '$A', '$PA', 'iam-db probe') \\g /dev/null
+SELECT iam_policy._propose_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', '{}'::jsonb, '$DD', '$A', '$PA', 'iam-db probe');
+SQL
+    probe P21 "_propose_skeleton with a blank proposer person" "22023:the proposer (--by)" <<SQL
+$(build_v1)
+$(as_system system:apply)
+SELECT iam_policy._propose_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', '{}'::jsonb, '$DD', '$A', ' ', 'iam-db probe');
+SQL
+    # P23 — _record's actors, account_seeded, and the filter (critique sec-10, sec-11)
+    probe P23 "system:deploy records account_seeded once per content, under the applied version" ok <<SQL
+$(build_v1)
+$(as_system system:deploy)
+SELECT iam_policy._record('account_seeded', \$j\$$SEED\$j\$::jsonb) AS e1 \\gset
+SELECT iam_policy._record('account_seeded', \$j\$$SEED\$j\$::jsonb) AS e2 \\gset
+--CHECKS
+SELECT 'CHECK|the same event id', :e1 = :e2;
+SELECT 'CHECK|appended once', count(*) = 1 FROM iam_policy.history
+ WHERE event = 'account_seeded' AND payload ->> 'fact_id' = (\$j\$$SEED\$j\$::jsonb ->> 'fact_id');
+SELECT 'CHECK|filed under v1 by system:deploy', version = :v1 AND (payload ->> 'version')::int = :v1 AND actor_name = 'system:deploy'
+  FROM iam_policy.history WHERE event_id = :e1;
+SQL
+    probe P23 "account_seeded whose fact_id is not the content hash" "22023:not the content hash" <<SQL
+$(build_v1)
+$(as_system system:deploy)
+SELECT iam_policy._record('account_seeded', \$j\$$(seed_fact test-pq "$Q" qa "$PQ" "$DD")\$j\$::jsonb);
+SQL
+    for ev in Applied break_glass_end apply_note; do
+        probe P23 "iam_svc appends '$ev'" "42501:is a policy version event" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.append_history('$ev', '{}'::jsonb, 'forged');
+SQL
+    done
+    probe P23 "iam_svc appends another service event" "42501:iam_svc writes only mqtt_credential_issued" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.append_history('test_probe', '{}'::jsonb, 'iam-db');
+SQL
+    probe P23 "iam_svc's mqtt_credential_issued naming a version is filed under none" ok <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.append_history('mqtt_credential_issued', jsonb_build_object('version', :v1, 'username', 'explorer-iam-db'), 'iam-db') AS e \\gset
+--CHECKS
+SELECT 'CHECK|no version', version IS NULL AND NOT payload ? 'version' FROM iam_policy.history WHERE event_id = :e;
+SQL
+    probe P23 "break_glass_seen (source file) without an applied version" "22023:needs an applied version" <<SQL
+$(as_system system:deploy)
+SELECT iam_policy._record('break_glass_seen', '{"source": "file", "reason": "iam-db", "version": null}'::jsonb);
+SQL
+    probe P23 "system:deploy records 'applied'" "42501:not by system:deploy" <<SQL
+$(build_v1)
+$(as_system system:deploy)
+SELECT iam_policy._record('applied', jsonb_build_object('version', :v1));
+SQL
+    probe P23 "system:scheduler records account_seeded" "42501:not by system:scheduler" <<SQL
+$(build_v1)
+$(as_system system:scheduler)
+SELECT iam_policy._record('account_seeded', \$j\$$SEED\$j\$::jsonb);
+SQL
+    # P24 — the 4.1 defect (ops-3): dba_record_event's own SQL reaches _record as system:deploy
+    probe P24 "dba_record_event break_glass_seen (Node-RED): through _record, under v1" ok <<SQL
+$(build_v1)
+\\set ev break_glass_seen
+\\set payload '{"identity": "node-red NR_ADMIN_AUTH=off", "ended_by": "iam-db"}'
+\\set why 'iam-db probe'
+$(_dba_record_event_sql)
+--CHECKS
+SELECT 'CHECK|filed under v1 by system:deploy with its reason', event = 'break_glass_seen' AND version = :v1
+          AND (payload ->> 'version')::int = :v1 AND actor_name = 'system:deploy' AND reason = 'iam-db probe'
+  FROM iam_policy.history WHERE event_id = (SELECT max(event_id) FROM iam_policy.history);
+SQL
+    probe P24 "dba_record_event break_glass_seen with no applied version: filed under none" ok <<SQL
+\\set ev break_glass_seen
+\\set payload '{"identity": "node-red NR_ADMIN_AUTH=off"}'
+\\set why 'iam-db probe'
+$(_dba_record_event_sql)
+--CHECKS
+SELECT 'CHECK|the applied version (none here), system:deploy', event = 'break_glass_seen'
+          AND version IS NOT DISTINCT FROM (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied')
+          AND payload ? 'version' AND actor_name = 'system:deploy'
+  FROM iam_policy.history WHERE event_id = (SELECT max(event_id) FROM iam_policy.history);
+SQL
+    # P25 — a deploy's skeleton gate accepts a non-widening skeleton (system:deploy)
+    probe P25 "_accept_skeleton and _sync_skeleton as system:deploy; the event names what it replaced" ok <<SQL
+$(build_v1)
+$(as_system system:deploy)
+SELECT iam_policy._accept_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', NULL,
+                                   '{"narrowed": [], "unchanged": [], "reviewed_by_version": null}'::jsonb) \\g /dev/null
+SELECT iam_policy._sync_skeleton(\$j\$$P_SKEL2\$j\$::jsonb, 'iam-db') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|accepted', iam_policy._accepted() = '$P_DG2';
+SELECT 'CHECK|skeleton_accepted from the earlier digest, by system:deploy', payload ->> 'from' = '$P_DG'
+          AND payload ->> 'digest' = '$P_DG2' AND actor_name = 'system:deploy'
+  FROM iam_policy.history WHERE event = 'skeleton_accepted' ORDER BY event_id DESC LIMIT 1;
+SELECT 'CHECK|the first accept has from null', payload -> 'from' = 'null'::jsonb
+  FROM iam_policy.history WHERE event = 'skeleton_accepted' AND payload ->> 'digest' = '$P_DG' ORDER BY event_id DESC LIMIT 1;
+SELECT 'CHECK|skeleton_synced by system:deploy', actor_name = 'system:deploy'
+  FROM iam_policy.history WHERE event = 'skeleton_synced' ORDER BY event_id DESC LIMIT 1;
+SQL
+    probe P25 "_accept_skeleton as iam_svc" "42501:permission denied for function _accept_skeleton" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy._accept_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', NULL, '{}'::jsonb);
+SQL
+    probe P25 "_accept_skeleton as system:scheduler" "42501:not by system:scheduler" <<SQL
+$(build_v1)
+$(as_system system:scheduler)
+SELECT iam_policy._accept_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', NULL, '{}'::jsonb);
 SQL
 
     if [[ "$MODE" == true ]]; then
@@ -3194,12 +3416,60 @@ SELECT medcea.dispute_policy(:v1, 'iam-db: not what was agreed');
 $(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
 SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.');
 SQL
+        # P20 — _mark_reverted: an approved change applied, then reverted (a full revert)
+        probe P20 "apply an approved change, then _mark_reverted puts v1 back" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+$(as_system system:apply)
+SELECT iam_policy._mark_applied(:d, '{"git_commit": "iam-db"}'::jsonb, 'iam-db', NULL, NULL, NULL) \\g /dev/null
+SELECT status = 'superseded' AS sup FROM iam_policy.version WHERE version = :v1 \\gset
+SELECT iam_policy._mark_reverted(:d, :v1, 'iam-db probe') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|v1 was superseded by the apply', :'sup'::boolean;
+SELECT 'CHECK|the change back to approved', status = 'approved' AND applied_at IS NULL FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|v1 applied again', status = 'applied' AND superseded_at IS NULL FROM iam_policy.version WHERE version = :v1;
+SELECT 'CHECK|apply_reverted with decisions_in_window', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d
+          AND event = 'apply_reverted' AND payload ? 'decisions_in_window' AND (payload ->> 'prev')::int = :v1);
+SELECT 'CHECK|status_changed on both', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d AND event = 'status_changed'
+          AND payload ->> 'to' = 'approved' AND payload ->> 'by_function' = '_mark_reverted')
+          AND EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :v1 AND event = 'status_changed'
+          AND payload ->> 'to' = 'applied' AND payload ->> 'by_function' = '_mark_reverted');
+SQL
+        probe P20 "a rollback version applied, then reverted: withdrawn, never approved (F-16)" ok <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.') \\g /dev/null
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+$(as_system system:apply)
+SELECT iam_policy._mark_applied(:d, '{"git_commit": "iam-db"}'::jsonb, 'iam-db', NULL, NULL, NULL) \\g /dev/null
+SELECT iam_policy._withdraw_open('iam-db probe') IS NULL AS none_open \\gset
+SELECT iam_policy._build_version('rollback', \$j\$$P_ENTRIES\$j\$::jsonb, \$j\$$P_WAIVERS\$j\$::jsonb, :d, :v1, 'iam-db rollback') AS r \\gset
+SELECT iam_policy._mark_applied(:r, '{"git_commit": "iam-db"}'::jsonb, 'iam-db', NULL, NULL, NULL) \\g /dev/null
+SELECT iam_policy._mark_reverted(:r, :d, 'iam-db probe') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|nothing was open', :'none_open'::boolean;
+SELECT 'CHECK|the rollback withdrawn by system:apply', status = 'withdrawn' AND withdrawn_by = 'system:apply' AND kind = 'rollback'
+          AND rollback_of = :v1 FROM iam_policy.version WHERE version = :r;
+SELECT 'CHECK|the change applied again', status = 'applied' FROM iam_policy.version WHERE version = :d;
+SQL
     else
-        note policy "P7-P10, P12 (the token path) need --mode true"
+        note policy "P7-P10, P12, P20's applies (the token path) need --mode true"
+        # P26 — pre_request's only_rpc block under IAM_DB_ROLES=false (L6)
+        probe P26 "IAM_DB_ROLES=false, policy token: GET /recipe" "28000:may only call" <<SQL
+$(qa_token "$QA_CLAIMS" GET /recipe)
+SQL
+        probe P26 "IAM_DB_ROLES=false, policy token: POST /rpc/approve_policy passes pre_request, anon may not execute it" "42501:permission denied for function approve_policy" <<SQL
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT medcea.approve_policy(1, 'iam-db', '$DD', '$DD', '$P_DG');
+SQL
     fi
     fi
 elif want policy; then
-    note policy "P2-P18 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
+    note policy "P2-P26 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
 fi
 
 # ── drift ────────────────────────────────────────────────────────────────────────

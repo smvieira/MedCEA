@@ -39,7 +39,7 @@ source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
 source "$REPO_ROOT/infra/lib-wait.sh"
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 MQTTX_DOMAIN="${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}"
 
 GREEN='\033[0;32m'; NC='\033[0m'
@@ -127,3 +127,6 @@ if [[ "$_MODE" == person ]]; then
 else
     log "  UI: https://$MQTTX_DOMAIN   (no broker credential while IAM_MQTT_PERSON=false: the page says so)"
 fi
+
+# The last command of the success path: ends an open policy break-glass for mqtt-explorer (IAM 4.2a)
+policy_source_finish "$NAMESPACE" mqtt-explorer

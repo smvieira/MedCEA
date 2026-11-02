@@ -8,7 +8,9 @@
 #                                                rr_*, rr_admin_login, svc_*, iam_svc,
 #                                                mqtt_auth — plus medcea_owner,
 #                                                authenticator and anon) and the
-#                                                Secrets db-<role> (label medcea/db-role)
+#                                                Secrets db-<role> (label medcea/db-role),
+#                                                then moves the host's policy files
+#                                                aside (policy_state_retire purge-data)
 #
 # Roles are instance-wide: they are dropped only after the database that holds
 # their grants is gone. The keycloak database is never touched; access_svc is
@@ -71,5 +73,11 @@ $KUBECTL exec -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
     | $KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- env PGPASSWORD="$PG_PASS" \
         psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -f -
 $KUBECTL delete secret -n "$NAMESPACE" -l medcea/db-role=true --ignore-not-found >/dev/null
+
+# The host's applied-policy files (IAM 4.2a) belonged to the database just dropped: moved
+# aside into state/retired-<time>-purge-data/ (nothing deleted), under the lock held above,
+# so the next database deploy starts from "no version" instead of refusing them.
+source "$REPO_ROOT/infra/lib-policy-source.sh"
+policy_state_retire purge-data
 
 log "Database '$CEA_DB', its roles and the db-<role> Secrets dropped."

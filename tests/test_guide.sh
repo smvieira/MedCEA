@@ -61,6 +61,15 @@
 #      before the [y/N]; dry: nothing run, no lock; real against stubs: all three under the
 #      guide's one lock (each finds it held), a failure stops the chain, the lock is free
 #      afterwards; refused, nothing run, while another process holds the lock
+#  33  Deploy IAM 4.2a: database, infra, iam in that order; --by asked (a leading - re-asked)
+#      and passed to the iam deploy as MEDCEA_POLICY_BOOTSTRAP_BY; one lock for all three; the
+#      notes (order, no 503 window, the bootstrap, the two new checks) before the [y/N]
+#  34  Bootstrap version 1 by hand: the typed word yes (y cancels), --by remembered, a --by
+#      starting with - re-asked; apply.sh gets MEDCEA_CONFIRMED=1 and takes its own lock
+#  35  Policy versions: status and Print the applied policy are read-only ([Y/n], no lock);
+#      Would version 1 bootstrap? passes --check-only; Finish an interrupted apply is [y/N]
+#  36  How to use policy break-glass is shown, never run: no command, no confirmation, and it
+#      says break-glass does not bypass the skeleton gate
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -95,6 +104,7 @@ mkstub() {   # mkstub RELPATH: prints "STUB RELPATH args", the lock it inherited
             'echo "LOCK_HELD=${MEDCEA_LOCK_HELD:-}"' \
             "echo \"LOCK_STAMP=\$(stat -c %y $(printf %q "$S/.medcea.lock") 2>/dev/null)\"" \
             "flock -n $(printf %q "$S/.medcea.lock") true 9>&- && echo LOCK_PROBE=free || echo LOCK_PROBE=held" \
+            'echo "ENV_BY=${MEDCEA_POLICY_BOOTSTRAP_BY:-} ENV_CONFIRMED=${MEDCEA_CONFIRMED:-}"' \
             '[ -n "${STUB_INT:-}" ] && kill -INT 0' \
             'exit "${STUB_RC:-0}"' >"$f"
     fi
@@ -745,6 +755,90 @@ else
     hasnt "nothing ran" "STUB "
 fi
 kill "$LOCKER" 2>/dev/null; wait "$LOCKER" 2>/dev/null; LOCKER=""
+
+echo "33 deploy IAM 4.2a (version 1 and the skeleton gate)"
+mkcfg true true
+guide $'8\n9\n-x\nsvieira\ny\nq\n'
+rc_is "quits with 0" 0
+has   "a --by starting with - is re-asked" "'-x': letters, digits and . _ @ -"
+has   "the chain, in order, --by to the iam deploy" "[dry run] not executed: ./apps/database/deploy.sh && ./deploy-infra.sh && env MEDCEA_POLICY_BOOTSTRAP_BY=svieira ./apps/iam/deploy.sh"
+has   "one lock for all three" "held by the guide for all three"
+has   "a change ([y/N])" "Kind:        changes the platform"
+has   "the order is explained" "Order: the database deploy first"
+has   "no 503 window" "No 503 window"
+has   "the bootstrap is explained" "bootstraps version 1 from apps/iam/policy/defaults.yaml, claimed by svieira"
+has   "the two new checks" "Access policy version and Policy artefacts (54 checks)"
+has   "the clean tree" "git status -- apps/iam must be clean"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'8\n9\nsvieira\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: database, infra, iam in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/database/deploy.sh", "STUB deploy-infra.sh", "STUB apps/iam/deploy.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+grep -q '^ENV_BY=svieira ENV_CONFIRMED=$' <<<"$OUT" && pass "real: the iam deploy gets MEDCEA_POLICY_BOOTSTRAP_BY" \
+    || fail "real: MEDCEA_POLICY_BOOTSTRAP_BY not passed"
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 3 ]] \
+    && pass "real: each step runs under the guide's lock" || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+OUT="$(printf '8\n9\nsvieira\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/database/deploy.sh"
+hasnt "deploy-infra did not run" "STUB deploy-infra.sh"
+hasnt "the iam deploy did not run" "STUB apps/iam/deploy.sh"
+
+echo "34 bootstrap version 1 by hand needs the typed yes"
+mkcfg true true
+guide $'8\n12\n--bootstrap\nsvieira\ny\nb\n12\n\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "--bootstrap as --by is re-asked" "'--bootstrap': letters, digits and . _ @ -"
+has   "destructive" "This is destructive."
+has   "y is not yes" "Cancelled; nothing was run."
+has   "--by remembered" "Your Keycloak username (--by) [svieira]:"
+has   "yes runs (dry), confirmed for apply.sh" "[dry run] not executed: env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --bootstrap --by svieira"
+has   "a permanent record" "a PERMANENT record claimed by svieira"
+[[ "$(grep -c 'not executed: env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --bootstrap' <<<"$OUT")" == 1 ]] \
+    && pass "the cancelled one never ran" || fail "the cancelled one ran"
+no_stub
+real $'8\n12\nsvieira\nyes\nq\n'
+has   "real: apply.sh ran" "STUB apps/iam/apply.sh --bootstrap --by svieira"
+grep -q '^ENV_BY= ENV_CONFIRMED=1$' <<<"$OUT" && pass "real: MEDCEA_CONFIRMED=1 reaches apply.sh" || fail "real: MEDCEA_CONFIRMED not passed"
+grep -q '^LOCK_HELD=$' <<<"$OUT" && pass "real: apply.sh takes its own lock (none inherited)" || fail "real: the guide held the lock"
+
+echo "35 status and export are read-only; check-only and resume"
+mkcfg true true
+guide $'8\n10\n\nb\n14\n\nb\n11\nsvieira\n\nb\n13\n\ny\nq\n'
+rc_is "quits with 0" 0
+has   "status (dry)" "[dry run] not executed: ./apps/iam/apply.sh --status"
+has   "export (dry)" "[dry run] not executed: python3 apps/iam/compiler/cli.py export-applied"
+has   "check-only (dry)" "[dry run] not executed: ./apps/iam/apply.sh --bootstrap --check-only --by svieira"
+has   "resume (dry)" "[dry run] not executed: env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --resume --by svieira"
+[[ "$(grep -c 'Kind:        read-only' <<<"$OUT")" == 3 ]] && pass "status, export, check-only: read-only" || fail "not read-only"
+[[ "$(grep -c 'Run it? \[Y/n\]' <<<"$OUT")" == 3 ]] && pass "three [Y/n]" || fail "not [Y/n]"
+has   "resume asks [y/N]" "Run it? [y/N]"
+has   "export never writes" "the guide never writes the file"
+no_stub
+real $'8\n10\n\nq\n'
+has   "real: status ran" "STUB apps/iam/apply.sh --status"
+grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: status runs without the lock" || fail "real: status ran under a lock"
+
+echo "36 policy break-glass is shown, never run"
+mkcfg true true
+guide $'8\n15\nq\n'
+rc_is "quits with 0" 0
+has   "the variables" "MEDCEA_POLICY_FILE=<file.yaml> MEDCEA_POLICY_BREAK_GLASS="
+has   "typed at the terminal" "type the word break-glass at the terminal"
+has   "never bypasses the gate" "It does NOT bypass the skeleton gate"
+has   "only the matrix and the waivers" "It changes only the matrix and the waivers"
+has   "how it ends" "./deploy-infra.sh and ./deploy-apps.sh --all end it everywhere"
+hasnt "no command to run" "Run it?"
+hasnt "nothing planned" "not executed"
+no_stub
+real $'8\n15\nq\n'
+hasnt "real: nothing ran" "STUB "
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

@@ -18,7 +18,12 @@
 #    enable recipe still runs this deploy right after setting the switch, before
 #    ./deploy-infra.sh, so a missing iam-api stops it before the broker changes.
 #
-# Phase 4 adds the Policy UI, apply.sh and the bootstrap of version 1 here.
+# 3. IAM Phase 4, slice 4.2a: version 1 of the access policy, once (design §10, §14.4.11):
+#    while iam_policy.version is empty it runs ./apps/iam/apply.sh --bootstrap --by
+#    ${MEDCEA_POLICY_BOOTSTRAP_BY:-$ADMIN_USER} (the factory file, applied at once, nothing
+#    re-rendered); an apply that was committed but did not record its end is finished with
+#    apply.sh --resume. Reached on every iam deploy, also when iam-api is skipped below.
+#    The Policy UI arrives with IAM 4.3.
 # Idempotent: safe to re-run.
 
 set -euo pipefail
@@ -31,9 +36,11 @@ source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inh
 GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 log() { echo -e "${GREEN}[iam]${NC} $*"; }
 die() { echo -e "${RED}[iam] $*${NC}" >&2; exit 1; }
+warn() { echo -e "\033[0;33mWARNING: [iam] $*${NC}" >&2; }
 skip_api() {   # iam-api cannot be deployed yet: fatal only while the Explorer depends on it
     [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && die "$*"
     echo -e "\033[0;33m[iam] iam-api not deployed: $* (needed before IAM_MQTT_PERSON=true).\033[0m" >&2
+    policy_source_finish "$NAMESPACE" iam
     exit 0
 }
 
@@ -44,7 +51,7 @@ source "$REPO_ROOT/infra/lib-render.sh"    # render FILE VAR... — manifests ar
 source "$REPO_ROOT/infra/lib-db-roles.sh"  # db_client; _dba_psql
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 
 log "Checking the access policy..."
 if ! python3 "$SCRIPT_DIR/compiler/cli.py" check; then
@@ -53,6 +60,35 @@ fi
 
 log "Roles each signed-in host admits (policy; [status] = enforced today?):"
 python3 "$SCRIPT_DIR/compiler/cli.py" hosts | sed 's/^/  /'
+
+# =============================================================================
+# IAM Phase 4 slice 4.2a: version 1 of the access policy, once (design §10, §14.4.11)
+# =============================================================================
+log "Policy versions..."
+_PS_DIR="$(mktemp -d)"; trap 'rm -rf "$_PS_DIR"' EXIT
+_ST="$(policy_db_state "$NAMESPACE" "$_PS_DIR/state.json")" || die "cannot read the policy versions"
+case "$_ST" in
+  none)        warn "policy bootstrap waits for ./apps/database/deploy.sh (no migration 008c yet)" ;;
+  unreachable) die "PostgreSQL is not Ready (the init above would have refused)" ;;
+  version-*)
+    if [[ "$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("last_apply_event") or {}).get("event",""))' "$_PS_DIR/state.json")" == apply_started ]]; then
+      warn "version ${_ST#version-} was committed but its apply did not record its end: finishing it (apply.sh --resume)"
+      MEDCEA_CONFIRMED=1 "$SCRIPT_DIR/apply.sh" --resume --by "${MEDCEA_POLICY_BOOTSTRAP_BY:-$ADMIN_USER}" \
+        || die "the apply of version ${_ST#version-} is still not finished: ./apps/iam/apply.sh --resume --by <you>"
+    fi
+    log "  applied: ${_ST#version-} (./apps/iam/apply.sh --status)" ;;
+  partial)     die "policy versions exist but none is applied: ./apps/iam/apply.sh --status" ;;
+  empty)
+    rc=0
+    MEDCEA_CONFIRMED=1 "$SCRIPT_DIR/apply.sh" --bootstrap --by "${MEDCEA_POLICY_BOOTSTRAP_BY:-$ADMIN_USER}" || rc=$?
+    case $rc in
+      0) unset MEDCEA_POLICY_SOURCE_DONE; policy_source_init "$NAMESPACE" || exit $? ;;   # re-read: version 1, host file verified
+      2) warn "policy bootstrap waits (see above); health shows 'no applied version' until a later ./apps/iam/deploy.sh" ;;
+      3) die "version 1 is committed but not finished: ./apps/iam/apply.sh --resume --by <you>" ;;
+      130) die "the policy bootstrap was interrupted before its commit: nothing was changed" ;;
+      *) die "the policy bootstrap refused or failed (see above; it says whether anything was changed)" ;;
+    esac ;;
+esac
 
 MQTTX_DOMAIN="${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}"
 
@@ -96,5 +132,6 @@ log "  /healthz: $_HEALTH"
 python3 -c 'import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get("mqtt_digest") else 1)' "$_HEALTH" \
     || echo -e "\033[0;33m[iam] no valid /iam/mqtt.json yet: run ./deploy-infra.sh (the Explorer's POST answers 503 until then).\033[0m" >&2
 
+policy_source_finish "$NAMESPACE" iam   # ends an open policy break-glass for iam (IAM 4.2a)
 log ""
 log "iam-api deployed: the MQTT Explorer's credential endpoint (IAM_MQTT_PERSON=${IAM_MQTT_PERSON:-false}, read live)."

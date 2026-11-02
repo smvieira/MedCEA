@@ -31,7 +31,7 @@ source "$REPO_ROOT/infra/lib-wait.sh"
 source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client: postgres or the service's own role (IAM 2.5)
 NAMESPACE="${NAMESPACE:-medcea}"
 source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
-policy_source_init "$NAMESPACE" || exit 1
+policy_source_init "$NAMESPACE" || exit $?   # 2: a widening git skeleton (the gate's message above)
 MONITOR_DOMAIN="${MONITOR_DOMAIN:-monitor.$DOMAIN}"
 
 GREEN='\033[0;32m'; NC='\033[0m'
@@ -118,3 +118,6 @@ portal_card enable "https://$MONITOR_DOMAIN"
 log ""
 log "Monitor deployed!"
 log "  UI: https://$MONITOR_DOMAIN"
+
+# The last command of the success path: ends an open policy break-glass for monitor (IAM 4.2a)
+policy_source_finish "$NAMESPACE" monitor

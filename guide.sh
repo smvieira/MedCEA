@@ -248,7 +248,7 @@ component_purpose() {
         database)      echo "medcea_db: schema, migrations, roles, grants, the IAM_DB_ROLES bundle" ;;
         edge-wizard)   echo "Device onboarding wizard (host service) at the onboard address" ;;
         frontend)      echo "System Configuration UI, config-api (PostgREST) and Database Management" ;;
-        iam)           echo "Policy check, and iam-api: the MQTT Explorer's personal credentials (:8085)" ;;
+        iam)           echo "Policy check, version 1 of the policy (once), and iam-api: the MQTT Explorer's personal credentials (:8085)" ;;
         monitor)       echo "Run Monitor dashboard" ;;
         mqtt-explorer) echo "Browser MQTT Explorer" ;;
         node-red)      echo "Node-RED palette packages and platform flows" ;;
@@ -634,7 +634,8 @@ a_apps_one() {
         database)  NOTES=("Behaviour comes from config.env (IAM_DB_ROLES, IAM_DB_SERVICE_ROLES); restarts config-api when IAM_DB_ROLES changed.") ;;
         frontend)  NOTES=("IAM_POSTGREST_JWT in config.env decides config-api's mode; a switch costs config-api up to ~15 s, by design.") ;;
         scheduler) NOTES=("Refuses until the database deploy has created retire_schedule and start_run.") ;;
-        iam)       NOTES=("Checks the policy, then deploys iam-api on iam_svc (IAM_DB_SERVICE_ROLES=true; after ./apps/database/deploy.sh and ./apps/access/deploy.sh). Skipped with a warning until then while IAM_MQTT_PERSON=false.") ;;
+        iam)       NOTES=("Checks the policy; while no policy version exists it bootstraps version 1 (apply.sh --bootstrap --by \$ADMIN_USER, or MEDCEA_POLICY_BOOTSTRAP_BY; Policy → Deploy IAM 4.2a asks it), and finishes an interrupted apply."
+                          "Then deploys iam-api on iam_svc (IAM_DB_SERVICE_ROLES=true; after ./apps/database/deploy.sh and ./apps/access/deploy.sh). Skipped with a warning until then while IAM_MQTT_PERSON=false.") ;;
         edge-wizard) SUDO="no (a systemd user service); mk8s for the Ingress" ;;
     esac
     plan_run
@@ -674,7 +675,7 @@ a_apps_uninstall_one() {
                 purge_word
                 NOTES+=("Unit assignments in iam_policy.user_unit stay in effect without their decisions; waiting ones are lost. The next access deploy records survivors again as pending_qa.")
             fi ;;
-        iam) EFFECT="removes iam-api (Service iam-mqttx); never the policy, its history or the credential tables"
+        iam) EFFECT="removes iam-api (Service iam-mqttx); never the policy, its versions, its history, state/policy-applied.yaml or the credential tables"
              NOTES+=("While IAM_MQTT_PERSON=true the MQTT Explorer then gets no credential: roll the switch back first.") ;;
     esac
     plan_run
@@ -1444,6 +1445,92 @@ a_policy_41_deploy() {
            "Nothing calls the new policy functions yet (no Policy UI, no apply.sh): IAM 4.2a on.")
     plan_run
 }
+# IAM 4.2a (design §14.4.16): version 1 of the access policy and the skeleton gate.
+POLICY_BY_RE='^[A-Za-z0-9][A-Za-z0-9._@-]*$'   # apps/iam/apply.sh's --by rule (no +, no leading -)
+ask_policy_by() {   # --by for apply.sh: the applier's claim on the record, remembered for the session
+    echo "  --by is YOUR Keycloak username: recorded as the person who applied the version (a claim);"
+    echo "  a qa person other than you confirms it in the Policy UI (IAM 4.3)."
+    ask_match "Your Keycloak username (--by)" "$POLICY_BY_RE" "letters, digits and . _ @ -, starting with a letter or digit" "$BY_USER"
+    BY_USER="$ANSWER"
+}
+a_policy_42a_deploy() {
+    ask_policy_by
+    CMD=(./apps/database/deploy.sh "&&" ./deploy-infra.sh "&&" env "MEDCEA_POLICY_BOOTSTRAP_BY=$BY_USER" ./apps/iam/deploy.sh)
+    EFFECT="migration 008c's 4.2a functions and the grants bundle; the route table's digest (it no longer hashes the source label) and the rest of deploy-infra; then version 1 of the access policy (a permanent record) and state/policy-applied.yaml"
+    LOCK="yes, held by the guide for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the database deploy first (the 4.2a functions the other two record through), then deploy-infra at once, then the iam deploy, which bootstraps version 1 because no version exists yet."
+           "Before: git status -- apps/iam must be clean: the bootstrap refuses uncommitted changes there (version 1 is the committed factory policy)."
+           "No 503 window: nobody's access changes. Between the first two deploys the health check's iamenforce and tests/iam-schema.sh are red for a few minutes (the route table's digest moves once)."
+           "The iam deploy bootstraps version 1 from apps/iam/policy/defaults.yaml, claimed by $BY_USER; it changes no artefact (it proves every compile is identical first) and restarts iam-api as every iam deploy does."
+           "Afterwards ./health-check.sh shows two new checks, Access policy version and Policy artefacts (54 checks)."
+           "From now on every deploy refuses a git change that widens access (the skeleton gate), break-glass included, until policy approvals exist (IAM 4.5).")
+    plan_run
+}
+a_policy_status() {
+    CMD=(./apps/iam/apply.sh --status)
+    EFFECT="nothing (the applied version, the accepted and git skeletons, the host file, the last policy events)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_policy_bootstrap_check() {
+    ask_policy_by
+    CMD=(./apps/iam/apply.sh --bootstrap --check-only --by "$BY_USER")
+    EFFECT="nothing (--check-only: no lock, no file, no database write; Keycloak read through a port-forward)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Says whether version 1 would bootstrap: no version yet, a clean apps/iam, your account found in Keycloak, every compile identical to defaults.yaml's, and the live route table and grants already at that compile.")
+    plan_run
+}
+a_policy_bootstrap() {
+    ask_policy_by
+    CMD=(env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --bootstrap --by "$BY_USER")
+    EFFECT="version 1 of the access policy, a PERMANENT record claimed by $BY_USER (only while no version exists); state/policy-applied.yaml; no artefact changes"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Normally the iam deploy does this itself (Deploy IAM 4.2a); use this entry only when it waited (Keycloak down, an unknown --by)."
+           "Your typed yes here is apply.sh's confirmation (MEDCEA_CONFIRMED=1), so it does not ask again."
+           "Exit 3 means version 1 is committed but not finished: run 'Finish an interrupted apply'.")
+    plan_run
+}
+a_policy_resume() {
+    ask_policy_by
+    CMD=(env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --resume --by "$BY_USER")
+    EFFECT="finishes an apply that was committed but did not record its end: rewrites state/policy-applied.yaml, checks the grants, records the end (no database change to the version itself)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Says 'nothing to resume' and exits 0 when the last apply recorded its end."
+           "Your [y/N] here is apply.sh's confirmation (MEDCEA_CONFIRMED=1).")
+    plan_run
+}
+a_policy_export() {
+    CMD=("${POLICY_CLI[@]}" export-applied)
+    EFFECT="nothing (prints defaults.yaml with its matrix: and waivers: replaced by the applied version's; the guide never writes the file)"
+    NOTES=("To commit it: python3 apps/iam/compiler/cli.py export-applied > apps/iam/policy/defaults.yaml, review the diff, commit. Git may lag the applied version; that is allowed (health WARNs 'git may lag')."
+           "Exit 2 when no version is applied on this host (no state/policy-applied.yaml).")
+    plan_run
+}
+a_policy_break_glass() {
+    # Shown, never run: break-glass is typed at the terminal by a person, and recorded.
+    echo
+    echo -e "${BOLD}Policy break-glass — how it works (this guide runs none of it)${NC}"
+    echo "  Break-glass compiles one deploy from a policy file of your own instead of the applied version:"
+    echo "    MEDCEA_POLICY_FILE=<file.yaml> MEDCEA_POLICY_BREAK_GLASS=\"<reason>\" ./apps/<component>/deploy.sh"
+    echo "  (or ./deploy-infra.sh). The deploy then asks you to type the word break-glass at the terminal;"
+    echo "  without a terminal it refuses. With MEDCEA_POLICY_FILE exported, ./deploy-apps.sh --break-glass \"<reason>\""
+    echo "  asks once and records one event for every component it runs; ./install.sh --break-glass \"<reason>\""
+    echo "  asks once and records two (infrastructure, applications). Without --break-glass both ignore an"
+    echo "  exported MEDCEA_POLICY_FILE."
+    echo "  - It changes only the matrix and the waivers. The file's skeleton must equal the accepted one,"
+    echo "    and its iam_policy and iam_users rows must equal the applied version's: break-glass can never"
+    echo "    change who approves policy or account changes."
+    echo "  - It does NOT bypass the skeleton gate: a git change that widens access is refused under"
+    echo "    break-glass too, before anything is recorded."
+    echo "  - The file is copied to state/break-glass/<time>-<pid>.yaml (that copy is what is compiled) and"
+    echo "    recorded as break_glass_seen (file sha256, reason, your OS user, the components) before any compile."
+    echo "  - Health (Access policy version) FAILs while it is open. It ends per component: the next normal"
+    echo "    deploy of that component (without MEDCEA_POLICY_FILE) records break_glass_ended."
+    echo "    ./deploy-infra.sh and ./deploy-apps.sh --all end it everywhere."
+    echo "  - Write the decision in your operations log. See docs/manual: admin, Policy break-glass."
+    return 0
+}
 a_policy_tests() {
     CMD=(python3 tests/test_policy.py)
     EFFECT="nothing (offline policy unit tests)"
@@ -1827,6 +1914,13 @@ AREA_POLICY=(
     "a_pol_grants|The grants SQL|cli.py compile grants (printed, never run)."
     "a_pol_netpol|The NetworkPolicies|cli.py compile netpol (printed, never applied)."
     "a_policy_41_deploy|Deploy IAM 4.1 (policy versions schema)|The access, database and infra deploys in order, under one lock; explains the short 503 window first."
+    "a_policy_42a_deploy|Deploy IAM 4.2a (version 1 and the skeleton gate)|The database, infra and iam deploys in order, under one lock; the iam deploy bootstraps version 1."
+    "a_policy_status|Policy versions: status|./apps/iam/apply.sh --status (read-only)."
+    "a_policy_bootstrap_check|Would version 1 bootstrap?|./apps/iam/apply.sh --bootstrap --check-only (read-only)."
+    "a_policy_bootstrap|Bootstrap version 1 by hand|./apps/iam/apply.sh --bootstrap: a permanent record; only when the iam deploy waited."
+    "a_policy_resume|Finish an interrupted apply|./apps/iam/apply.sh --resume: the host file, the checks and the record of a committed apply."
+    "a_policy_export|Print the applied policy as defaults.yaml|cli.py export-applied (printed; never written)."
+    "a_policy_break_glass|How to use policy break-glass (shows the steps)|Shown, never run: what it changes, what it never bypasses, how it ends."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -1842,7 +1936,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy|What apps/iam/policy/defaults.yaml compiles to (read-only), and the IAM 4.1 deploy."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions and break-glass, and the IAM 4.1 and 4.2a deploys."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

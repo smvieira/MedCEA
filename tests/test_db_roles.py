@@ -212,12 +212,20 @@ class Wiring(unittest.TestCase):
         # never `while read … < <(db_clients_live …)`: kubectl exec -i in the body eats the list
         self.assertNotRegex(db, r"done < <\(db_clients_live")
         logins = db[db.index("# ── Service logins"):db.index("# ── Apply")]
-        self.assertIn("db-roles --logins", logins)
-        self.assertIn("db_role_can_login", logins)
+        self.assertIn('DBA_SERVICE_LOGINS="$(dba_service_logins "$NAMESPACE")"', logins)
         self.assertIn('db_role_secret "$_role"', db)
         self.assertNotIn("_secret_for", db)
+        # the block itself moved to lib-db-apply.sh (IAM 4.2a: apply.sh's bundle uses it too)
         lib_apply = read("apps/database/lib-db-apply.sh")
-        self.assertIn('--service-logins "$DBA_SERVICE_LOGINS"', lib_apply)
+        fn = lib_apply[lib_apply.index("dba_service_logins() {"):]
+        fn = fn[:fn.index("\n}\n")]
+        self.assertIn("db-roles --logins", fn)
+        self.assertIn("db-roles --passwords", fn)
+        self.assertIn('${!_var:+x}', fn)          # presence only, never the value
+        self.assertIn("db_role_can_login", fn)
+        self.assertNotRegex(fn, r"done < <\(db_clients_live")
+        self.assertIn('logins=(--service-logins "$sl")', lib_apply)
+        self.assertIn('DBA_SERVICE_LOGINS="${DBA_SERVICE_LOGINS:-}"', lib_apply)
         self.assertIn('[[ "$grants_mode" == additive', lib_apply)
 
     def test_iam_api_never_on_postgres(self):

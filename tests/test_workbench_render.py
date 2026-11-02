@@ -48,7 +48,29 @@ import urllib.parse
 
 import yaml
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _scratch import clean_env, scratch_repo  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Every compile runs in a scratch copy (design v4 §14.4.15): on the live host the
+# repository's state/policy-applied.yaml exists once a version is applied, and the
+# repository's cli.py would read it. The scratch tree has no state/, so it compiles the
+# factory defaults.yaml; MEDCEA_POLICY_* is stripped from every child's environment.
+SCRATCH = None
+
+
+def setUpModule():
+    global SCRATCH
+    SCRATCH = scratch_repo("medcea-wb-render-")
+
+
+def tearDownModule():
+    if SCRATCH:
+        shutil.rmtree(SCRATCH, ignore_errors=True)
+
+
+def scratch_cli():
+    return os.path.join(SCRATCH, "apps", "iam", "compiler", "cli.py")
 DEPLOY = os.path.join(REPO, "infra", "deploy-workbench.sh")
 VARS = ["WORKBENCH_ALLOW_ALL", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_ALLOWED_GROUPS",
         "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_403_MESSAGE"]
@@ -81,13 +103,14 @@ def logout_assignment():
     return lines[found[0]]
 
 
-def run(gates, repo_root=REPO, jwt="false", db_roles="false"):
-    """(exit code, rendered values or stderr) of policy_workbench(_egress) + render."""
-    env = dict(os.environ, IAM_GATES=gates, ADMIN_USER="boss", PORTAL_DOMAIN="portal.test",
+def run(gates, repo_root=None, jwt="false", db_roles="false"):
+    """(exit code, rendered values or stderr) of policy_workbench(_egress) + render; the
+    compiler is the scratch tree's unless repo_root names a stub tree."""
+    env = clean_env(IAM_GATES=gates, ADMIN_USER="boss", PORTAL_DOMAIN="portal.test",
                WORKBENCH_SECRET="s3cret", WORKBENCH_DOMAIN="ai-workbench.test", KEYCLOAK_DOMAIN="kc.test",
                KEYCLOAK_REALM="medcea", NAMESPACE="medcea", WORKBENCH_IMAGE_NAME="img",
                WORKBENCH_IMAGE_TAG="1", WORKBENCH_STORAGE="10Gi", WORKBENCH_NOTEBOOK_REPO="smvieira/medcea-notebooks",
-               IAM_POSTGREST_JWT=jwt, IAM_DB_ROLES=db_roles, RR=repo_root, LIBS=REPO)
+               IAM_POSTGREST_JWT=jwt, IAM_DB_ROLES=db_roles, RR=repo_root or SCRATCH, LIBS=REPO)
     script = ('source "$LIBS/infra/lib-render.sh"; REPO_ROOT="$RR" source "$LIBS/infra/lib-oauth2-proxy.sh"; '
               'REPO_ROOT="$RR" policy_workbench || exit 1; REPO_ROOT="$RR" policy_workbench_egress || exit 1; '
               'die() { echo "$*" >&2; exit 1; }; ' + logout_assignment() + '; '
@@ -104,14 +127,15 @@ def lib_constant(name):
 
 
 def compiled(setting):
-    out = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"),
-                          "compile", "jupyterhub", "--setting", setting], capture_output=True, text=True, check=True)
+    out = subprocess.run([sys.executable, scratch_cli(), "--defaults",
+                          "compile", "jupyterhub", "--setting", setting],
+                         env=clean_env(), capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
 
 
 def compiled_egress():
-    out = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"),
-                          "compile", "egress", "notebooks"], capture_output=True, text=True, check=True)
+    out = subprocess.run([sys.executable, scratch_cli(), "--defaults", "compile", "egress", "notebooks"],
+                         env=clean_env(), capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
 
 
@@ -220,7 +244,7 @@ class RenderTest(unittest.TestCase):
         """A cli.py that compiles jupyterhub like the real one but answers `egress` with egress_body."""
         return self.stub(
             "import subprocess, sys\n"
-            f"real = {os.path.join(REPO, 'apps', 'iam', 'compiler', 'cli.py')!r}\n"
+            f"real = {scratch_cli()!r}\n"
             "if sys.argv[1:3] == ['compile', 'egress']:\n"
             + "".join("    " + line + "\n" for line in egress_body.splitlines()) +
             "    sys.exit(0)\n"
@@ -517,9 +541,9 @@ class RenderTest(unittest.TestCase):
                     '  patch) shift; while [ "$1" != "-p" ]; do shift; done; printf %s "$2" > "$(dirname "$0")/patch" ;;\n'
                     '  *) exit 1 ;;\nesac\n')
         os.chmod(k, 0o755)
-        r = subprocess.run(["bash", "-c", f'REPO_ROOT="{REPO}"; source "{REPO}/infra/lib-oauth2-proxy.sh"; '
+        r = subprocess.run(["bash", "-c", f'REPO_ROOT="{SCRATCH}"; source "{REPO}/infra/lib-oauth2-proxy.sh"; '
                                           'n="$(workbench_egress_close medcea)" || exit 1; echo "n=$n"'],
-                           env=dict(os.environ, KUBECTL=k), capture_output=True, text=True)
+                           env=clean_env(KUBECTL=k), capture_output=True, text=True)
         patch = os.path.join(d, "patch")
         return r.returncode, r.stdout.strip(), (json.load(open(patch)) if os.path.exists(patch) else None)
 

@@ -4210,15 +4210,26 @@ BEGIN
 END $$;
 CREATE OR REPLACE FUNCTION iam_policy.append_history(p_event text, p_payload jsonb, p_reason text)
 RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    e text := pg_catalog.lower(p_event);
 BEGIN
-    IF p_event IN ('draft_created', 'entry_saved', 'submitted', 'approved', 'returned', 'withdrawn',
-                   'confirmed', 'disputed', 'status_changed', 'apply_started', 'applied', 'partial_apply',
-                   'bootstrap_applied', 'apply_reverted', 'break_glass_seen', 'apply_deferred', 'account_seeded')
-       OR p_event LIKE 'waiver\_%' OR p_event LIKE 'skeleton\_%' THEN
+    -- IAM 4.2a (critique sec-11): compared case-insensitively, with the prefixes of
+    -- every apply.sh and deploy event, so no near-copy of a policy event name passes
+    IF e IN ('draft_created', 'entry_saved', 'submitted', 'approved', 'returned', 'withdrawn',
+             'confirmed', 'disputed', 'status_changed', 'apply_started', 'applied', 'partial_apply',
+             'bootstrap_applied', 'apply_reverted', 'break_glass_seen', 'break_glass_ended', 'apply_deferred',
+             'account_seeded')
+       OR e LIKE 'waiver\_%' OR e LIKE 'skeleton\_%' OR e LIKE 'break\_glass\_%' OR e LIKE 'apply\_%'
+       OR e LIKE 'bootstrap\_%' OR e LIKE 'policy\_%' THEN
         RAISE EXCEPTION 'append_history: % is a policy version event, written only by the policy functions', p_event
             USING ERRCODE = '42501';
     END IF;
-    RETURN iam_policy._append_history(p_event, p_payload, p_reason);
+    -- iam-api's one event (iam-api.py): iam_svc appends nothing else
+    IF session_user = 'iam_svc' AND p_event IS DISTINCT FROM 'mqtt_credential_issued' THEN
+        RAISE EXCEPTION 'append_history: iam_svc writes only mqtt_credential_issued' USING ERRCODE = '42501';
+    END IF;
+    -- only the policy functions file an event under a version
+    RETURN iam_policy._append_history(p_event, p_payload - 'version', p_reason);
 END $$;
 
 -- The compiled medcea_auth._rpc_client(text) (grants.py, database deploy step 4a)
@@ -5010,17 +5021,32 @@ END $$;
 
 -- ── owner-only functions (apply.sh as postgres, actor system:apply; 4.2a on) ──
 
--- _system(): the actor of apply.sh's bundle, system:apply, unless one is set.
-CREATE OR REPLACE FUNCTION iam_policy._system() RETURNS void
+-- _system_as(allowed): the policy's system actors (IAM 4.2a). With no actor set it
+-- sets allowed[1]; an actor in the list is accepted; anything else is 42501. Returns
+-- the actor. SECURITY INVOKER: called from the owner functions only.
+CREATE OR REPLACE FUNCTION iam_policy._system_as(p_allowed text[]) RETURNS text
     LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE a record;
 BEGIN
+    IF p_allowed IS NULL OR pg_catalog.cardinality(p_allowed) = 0 THEN
+        RAISE EXCEPTION '_system_as needs the allowed actors' USING ERRCODE = '22023';
+    END IF;
     SELECT * INTO a FROM medcea_auth.request_actor();
     IF a.sub IS NULL THEN
-        PERFORM medcea_auth._set_internal_actor('system:apply');
-    ELSIF a.sub <> 'system:apply' THEN
-        RAISE EXCEPTION 'the policy is built and applied by apply.sh (system:apply), not by %', a.sub USING ERRCODE = '42501';
+        PERFORM medcea_auth._set_internal_actor(p_allowed[1]);
+        RETURN p_allowed[1];
+    ELSIF a.sub = ANY (p_allowed) THEN
+        RETURN a.sub;
     END IF;
+    RAISE EXCEPTION 'the policy is built and applied by % (apply.sh, or a deploy''s skeleton gate and records), not by %',
+        pg_catalog.array_to_string(p_allowed, ' or '), a.sub USING ERRCODE = '42501';
+END $$;
+
+-- _system(): the actor of apply.sh's bundle, system:apply, unless one is set.
+CREATE OR REPLACE FUNCTION iam_policy._system() RETURNS void
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    PERFORM iam_policy._system_as(ARRAY['system:apply']);
 END $$;
 
 -- _sync_skeleton(body, commit): role and resource_group follow the skeleton's
@@ -5034,7 +5060,7 @@ DECLARE
     v_retired  jsonb;
 BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
-    PERFORM iam_policy._system();
+    PERFORM iam_policy._system_as(ARRAY['system:apply', 'system:deploy']);
     IF pg_catalog.jsonb_typeof(p_body -> 'roles') IS DISTINCT FROM 'object'
        OR pg_catalog.jsonb_typeof(p_body -> 'resource_groups') IS DISTINCT FROM 'object' THEN
         RAISE EXCEPTION 'a skeleton names roles and resource_groups' USING ERRCODE = '22023';
@@ -5060,29 +5086,34 @@ BEGIN
 END $$;
 
 -- _accept_skeleton(digest, body, commit, compiler_digest, summary): the host's
--- skeleton gate (or apply.sh) accepts a skeleton: inserted if new, made the
--- accepted one. summary {narrowed, unchanged, reviewed_by_version}.
+-- skeleton gate (system:deploy, IAM 4.2a) or apply.sh (system:apply) accepts a
+-- skeleton: inserted if new, made the accepted one; the event names the digest it
+-- replaced ('from', null for the first). summary {narrowed, unchanged, reviewed_by_version}.
 CREATE OR REPLACE FUNCTION iam_policy._accept_skeleton(p_digest text, p_body jsonb, p_commit text,
     p_compiler_digest text, p_summary jsonb) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
     hid  bigint;
     rv   integer := (p_summary ->> 'reviewed_by_version')::integer;
+    v_from text;
 BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
     PERFORM iam_policy._begin('_accept_skeleton', rv);
-    PERFORM iam_policy._system();
+    PERFORM iam_policy._system_as(ARRAY['system:apply', 'system:deploy']);
     IF coalesce(p_digest, '') !~ '^[0-9a-f]{64}$' OR p_body IS NULL THEN
         RAISE EXCEPTION 'a skeleton needs its sha256 digest and its body' USING ERRCODE = '22023';
     END IF;
     IF EXISTS (SELECT 1 FROM iam_policy.skeleton s WHERE s.digest = p_digest AND s.body <> p_body) THEN
         RAISE EXCEPTION 'skeleton % is stored with another body' , p_digest USING ERRCODE = '22023';
     END IF;
+    -- what it replaces (critique sec-12): health recomputes every accept from its two bodies
+    SELECT s.digest INTO v_from FROM iam_policy.skeleton s WHERE s.accepted_at IS NOT NULL
+     ORDER BY s.accepted_at DESC, s.digest LIMIT 1;
     INSERT INTO iam_policy.skeleton (digest, body, git_commit, compiler_digest)
     VALUES (p_digest, p_body, p_commit, p_compiler_digest) ON CONFLICT (digest) DO NOTHING;
     hid := iam_policy._append_history('skeleton_accepted', pg_catalog.jsonb_build_object(
         'version', (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied'),
-        'digest', p_digest, 'commit', p_commit, 'narrowed', p_summary -> 'narrowed', 'unchanged', p_summary -> 'unchanged',
+        'digest', p_digest, 'from', v_from, 'commit', p_commit, 'narrowed', p_summary -> 'narrowed', 'unchanged', p_summary -> 'unchanged',
         'reviewed_by_version', rv), NULL);
     UPDATE iam_policy.skeleton s SET accepted_at = pg_catalog.clock_timestamp(), accepted_event = hid,
            reviewed_by_version = coalesce(rv, s.reviewed_by_version)
@@ -5312,19 +5343,69 @@ BEGIN
     RETURN v;
 END $$;
 
--- _record(event, payload): apply.sh's own events. Every payload names its
--- version (_append_history files it there), except account_seeded.
+-- _record(event, payload): apply.sh's and the deploys' own events (IAM 4.2a).
+--   applied, partial_apply, bootstrap_applied, apply_deferred: system:apply only,
+--     and the payload names its version (a number);
+--   break_glass_seen, break_glass_ended, account_seeded: system:apply or
+--     system:deploy; a payload without a version key is filed under the applied
+--     version (JSON null when none). break_glass_seen with source 'file' (a policy
+--     override) needs a number version and a reason. account_seeded needs
+--     username, sub, fact and fact_id = the sha256 of its canonical content
+--     (jsonb text of fact, username, sub, role, person_id; source.pg_jsonb_text in
+--     Python) and is idempotent per content: the same fact_id returns the event
+--     already recorded and appends nothing.
 CREATE OR REPLACE FUNCTION iam_policy._record(p_event text, p_payload jsonb) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    v_fid  text;
+    v_id   bigint;
 BEGIN
-    PERFORM iam_policy._system();
-    IF p_event IS NULL OR p_event NOT IN ('applied', 'partial_apply', 'bootstrap_applied', 'break_glass_seen',
-                                          'apply_deferred', 'account_seeded') THEN
-        RAISE EXCEPTION '_record: % is not an apply.sh event', p_event USING ERRCODE = '22023';
+    IF p_event IN ('applied', 'partial_apply', 'bootstrap_applied', 'apply_deferred') THEN
+        PERFORM iam_policy._system_as(ARRAY['system:apply']);
+    ELSIF p_event IN ('break_glass_seen', 'break_glass_ended', 'account_seeded') THEN
+        PERFORM iam_policy._system_as(ARRAY['system:apply', 'system:deploy']);
+    ELSE
+        RAISE EXCEPTION '_record: % is not an apply.sh or deploy event', p_event USING ERRCODE = '22023';
     END IF;
-    IF pg_catalog.jsonb_typeof(p_payload) IS DISTINCT FROM 'object'
-       OR (p_event <> 'account_seeded' AND pg_catalog.jsonb_typeof(p_payload -> 'version') IS DISTINCT FROM 'number') THEN
-        RAISE EXCEPTION '_record: the % payload must name its version', p_event USING ERRCODE = '22023';
+    IF pg_catalog.jsonb_typeof(p_payload) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION '_record: the % payload must be an object', p_event USING ERRCODE = '22023';
+    END IF;
+    IF p_event IN ('applied', 'partial_apply', 'bootstrap_applied', 'apply_deferred') THEN
+        IF pg_catalog.jsonb_typeof(p_payload -> 'version') IS DISTINCT FROM 'number' THEN
+            RAISE EXCEPTION '_record: the % payload must name its version', p_event USING ERRCODE = '22023';
+        END IF;
+    ELSIF NOT p_payload ? 'version' THEN
+        p_payload := p_payload || pg_catalog.jsonb_build_object('version',
+            (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied'));
+    ELSIF pg_catalog.jsonb_typeof(p_payload -> 'version') NOT IN ('number', 'null') THEN
+        RAISE EXCEPTION '_record: the % payload''s version must be a number or null', p_event USING ERRCODE = '22023';
+    END IF;
+    IF p_event = 'break_glass_seen' AND p_payload ->> 'source' = 'file' THEN
+        IF pg_catalog.jsonb_typeof(p_payload -> 'version') IS DISTINCT FROM 'number' THEN
+            RAISE EXCEPTION '_record: a policy break-glass (source file) needs an applied version' USING ERRCODE = '22023';
+        END IF;
+        IF coalesce(pg_catalog.btrim(p_payload ->> 'reason'), '') = '' THEN
+            RAISE EXCEPTION '_record: a policy break-glass (source file) needs its reason' USING ERRCODE = '22023';
+        END IF;
+    END IF;
+    IF p_event = 'account_seeded' THEN
+        IF coalesce(pg_catalog.btrim(p_payload ->> 'username'), '') = '' OR coalesce(pg_catalog.btrim(p_payload ->> 'sub'), '') = ''
+           OR coalesce(p_payload ->> 'fact', '') NOT IN ('created', 'person_id_set', 'observed') THEN
+            RAISE EXCEPTION '_record: an account_seeded fact names its username, sub and fact (created, person_id_set, observed)'
+                USING ERRCODE = '22023';
+        END IF;
+        v_fid := pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object(
+                     'fact', p_payload -> 'fact', 'username', p_payload -> 'username', 'sub', p_payload -> 'sub',
+                     'role', p_payload -> 'role', 'person_id', p_payload -> 'person_id')::text, 'UTF8')), 'hex');
+        IF coalesce(p_payload ->> 'fact_id', '') !~ '^[0-9a-f]{64}$' OR p_payload ->> 'fact_id' <> v_fid THEN
+            RAISE EXCEPTION '_record: fact_id is not the content hash of this account_seeded fact' USING ERRCODE = '22023';
+        END IF;
+        PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.account_seeded'));
+        SELECT h.event_id INTO v_id FROM iam_policy.history h
+         WHERE h.event = 'account_seeded' AND h.payload ->> 'fact_id' = v_fid ORDER BY h.event_id LIMIT 1;
+        IF v_id IS NOT NULL THEN
+            RETURN v_id;
+        END IF;
     END IF;
     RETURN iam_policy._append_history(p_event, p_payload, p_payload ->> 'reason');
 END $$;

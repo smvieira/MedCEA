@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # infra/lib-lock.sh — one deploy at a time.
 #
-#   medcea_lock     take the platform lock, or exit naming the run that has it
+#   medcea_lock         take the platform lock, or exit naming the run that has it
+#   medcea_lock_verify  return 0 only when this run really holds it (IAM 4.2a: every write
+#                       of the access policy's state checks it; medcea_lock itself trusts
+#                       an inherited MEDCEA_LOCK_HELD, which its callers and tests rely on)
 #
 # Every script that changes the cluster or config.env calls it once, after its
 # --help branch: two runs side by side interleave helm releases, Keycloak
@@ -66,4 +69,23 @@ medcea_lock() {
     printf '%s\tstarted %s, terminal %s: %s\n' "$$" "$(date '+%F %T')" \
         "${term#/dev/}" "$(ps -o args= -p $$)" > "$MEDCEA_LOCK_FILE"
     export MEDCEA_LOCK_HELD=$$
+}
+
+# medcea_lock_verify — 0 only when MEDCEA_LOCK_HELD names a live process that is this
+# shell or an ancestor of it (/proc/<pid>/stat's 4th field, walked up from $$), whose fd 9
+# is $MEDCEA_LOCK_FILE, and a fresh flock -n on a new descriptor of that file fails (the
+# lock is really held). Prints nothing; 1 otherwise. Takes no lock (the probe's own
+# descriptor is closed with its subshell; on success it held nothing worth keeping).
+medcea_lock_verify() {
+    local held="${MEDCEA_LOCK_HELD:-}" p="$$" stat rest
+    [[ "$held" =~ ^[1-9][0-9]*$ ]] || return 1
+    while [[ "$p" != "$held" ]]; do
+        [[ "$p" =~ ^[0-9]+$ && "$p" -gt 1 ]] || return 1
+        stat="$(cat "/proc/$p/stat" 2>/dev/null)" || return 1
+        rest="${stat##*) }"            # after the command name, which may hold spaces
+        read -r _ p _ <<<"$rest"       # state, ppid
+    done
+    [[ "$(readlink "/proc/$held/fd/9" 2>/dev/null)" == "$MEDCEA_LOCK_FILE" ]] || return 1
+    # a new open file description of the lock file must not get the lock
+    ! ( exec 8>>"$MEDCEA_LOCK_FILE" && flock -n 8 ) 2>/dev/null
 }

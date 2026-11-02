@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/iam-db-fixture.sh — IAM Phase 2a on a throwaway PostgreSQL, end to end.
 #
-#   tests/iam-db-fixture.sh up | load | fresh | apply MODE | access MODE | policy | cycle | logins MODE
+#   tests/iam-db-fixture.sh up | load | fresh | apply MODE | access MODE | policy | policy-apply
+#                           | cycle | logins MODE
 #                           | preflight | postgrest MODE | pgrst-flip | services | runner MODE
 #                           | fulldown | purge-access | rollback-27 | serverlog | purge | down
 #                           | run [--keep]
@@ -33,6 +34,16 @@
 #             the 008c catalog (constraints, triggers, sha256 of every function, owners), the
 #             version rows and entries_digest(1) unchanged, no policy event written; apply
 #             false then true (a mode flip with v1); down_008c refused while v1 exists
+#   policy-apply  IAM 4.2a, on a fresh database (medcea_pa, with this tree's access
+#             component): tests/iam-db.sh --section policy --write-probes --mode false
+#             (P2-P26 but the token path; P26 pre_request's only_rpc under false); P22:
+#             apps/iam/apply_check.py simulate-state + bundle-sql, then dba_policy_bundle
+#             auto --with-functions as system:apply COMMITTED (the bootstrap's bundle):
+#             version 1 applied, entries_digest(1) = Python's, bootstrap_applied recorded,
+#             audit_versions() empty; apply true twice (008c re-run with v1 and the 4.2a
+#             bodies: the snapshot equal, no event under a version); down_008c refused. On
+#             a second fresh database (medcea_pa2) a failing statement in the bundle and a
+#             REPEATABLE READ default each roll the whole bundle back (no version row)
 #   cycle     false -> A; B0 vs A differs only by the declared delta; false = A;
 #             true twice equal; false = A; true = the earlier true
 #   logins M  every svc_* role and rr_admin_login logs in over TCP with its password
@@ -73,8 +84,8 @@
 #   run       up, load, runner legacy, preflight;
 #             apply false, probes, access false, logins false, preflight, postgrest false,
 #             runner false, pgrst-flip, services;
-#             apply true, probes, access true, policy, logins true, preflight, postgrest true,
-#             runner true;
+#             apply true, probes, access true, policy, policy-apply, logins true, preflight,
+#             postgrest true, runner true;
 #             apply false, probes (W1 again), cycle, fulldown, fresh, purge-access,
 #             rollback-27, serverlog, purge, down (on exit, unless --keep)
 #
@@ -85,7 +96,7 @@
 set -uo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
-    sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,94p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -358,6 +369,94 @@ cmd_policy() {  # after apply true (IAM 4.1)
         || fail policy "the mode flip changed the versions: $(grep '^ver|' <<<"$snap2")"
     out="$(fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008c.sql 2>&1)"
     grep -q 'policy versions exist' <<<"$out" && pass policy "down_008c refused while version 1 exists" || fail policy "down_008c with v1: ${out:-it ran}"
+}
+
+# policy_bundle_sql DIR — apply.sh --bootstrap's PRE and POST (apps/iam/apply_check.py,
+# IAM 4.2a §14.4.10) for a state document simulated from defaults.yaml, into DIR
+policy_bundle_sql() {
+    local dir="$1"
+    python3 apps/iam/apply_check.py simulate-state --out "$dir/state.json" \
+        && python3 apps/iam/apply_check.py bundle-sql --kind bootstrap --state "$dir/state.json" \
+               --by-sub 77777777-7777-4777-8777-777777777777 --by-person p-iam-db-fixture \
+               --log iam-db-fixture --out "$dir"
+}
+
+# pa_bundle DB DIR POST — the bootstrap bundle as apply.sh runs it (IAM_DB_ROLES=false here)
+pa_bundle() {
+    load_passwords
+    IAM_DB_ROLES=false CEA_DB="$1" DBA_ACTOR=system:apply DBA_SERVICE_LOGINS="" \
+        dba_policy_bundle "$FX_NS" "$FX_POD" auto "$2/pre.sql" "$3" --with-functions 2>&1
+}
+
+cmd_policy_apply() {  # IAM 4.2a, after policy (a fresh database: medcea_pa, medcea_pa2)
+    step "IAM 4.2a: the bootstrap bundle, _record's actors, the filter (fresh databases)"
+    local db=medcea_pa dir out rc snap1 snap2 ev
+    dir="$(mktemp -d "$IAMTEST_DIR/pa-XXXXXX")"
+    fx postgres -q -c "DROP DATABASE IF EXISTS medcea_pa WITH (FORCE);" -c "DROP DATABASE IF EXISTS medcea_pa2 WITH (FORCE);" >/dev/null
+    cmd_apply false "$db"
+    out="$(access_sql | fx "$db" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" \
+        && pass policy-apply "access_db.sql on $db" || { echo "$out" | head; fail policy-apply "access_db.sql on $db"; return; }
+    cmd_apply false "$db"
+    # every policy probe that needs no token, and P26 (pre_request's only_rpc under false)
+    tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --db "$db" --mode false --write-probes --section policy \
+        || FAILS=$((FAILS + 1))
+    # P22 — the bootstrap's bundle, committed
+    if ! out="$(policy_bundle_sql "$dir" 2>&1)"; then
+        fail P22 "apply_check.py simulate-state/bundle-sql: ${out:0:300}"; rm -rf "$dir"; return
+    fi
+    out="$(pa_bundle "$db" "$dir" "$dir/post.sql")"; rc=$?
+    [[ $rc -eq 0 ]] && pass P22 "dba_policy_bundle auto --with-functions as system:apply: committed" \
+        || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P22 "the bootstrap bundle (exit $rc)"; rm -rf "$dir"; return; }
+    out="$(python3 - "$REPO_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/apps/iam")
+from compiler import source
+print(source.policy_entries_digest(source.factory(), "bootstrap"))
+PY
+)"
+    out="$(fx "$db" -q -tA -c "SELECT v.status || '|' || v.kind || '|' || (iam_policy.entries_digest(1) = '$out')::text
+                                      || '|' || (v.skeleton_digest = iam_policy._accepted())::text
+                                 FROM iam_policy.version v WHERE v.version = 1")"
+    [[ "$out" == "applied|bootstrap|true|true" ]] && pass P22 "version 1 applied, kind bootstrap, entries_digest(1) = Python's, the accepted skeleton" \
+        || fail P22 "version 1 (status|kind|digest|skeleton): ${out:-missing}"
+    out="$(fx "$db" -q -tA -v ON_ERROR_STOP=1 2>&1 <<'SQL'
+SELECT medcea_auth._set_internal_actor('system:apply') \g /dev/null
+SELECT iam_policy._record('bootstrap_applied', '{"version": 1, "kind": "bootstrap", "os_user": "iam-db-fixture", "changed": [], "deferred": []}'::jsonb) \g /dev/null
+SELECT (SELECT count(*) FROM iam_policy.audit_versions()) || '|' || (SELECT ok FROM iam_policy.verify_chain())::text
+       || '|' || (SELECT string_agg(event, ',' ORDER BY event_id) FROM iam_policy.history WHERE version = 1 AND event <> 'status_changed');
+SQL
+)"
+    [[ "$out" == "0|true|draft_created,apply_started,bootstrap_applied" ]] \
+        && pass P22 "bootstrap_applied recorded: audit_versions() empty, the chain verifies" \
+        || fail P22 "after bootstrap_applied (findings|chain|events): $out"
+    # the 008c re-run with version 1 and the 4.2a bodies
+    cmd_apply true "$db"
+    snap1="$(CEA_DB="$db" policy_snapshot)" && snapshot_whole "$snap1" || { fail policy-apply "policy_snapshot failed"; rm -rf "$dir"; return; }
+    ev="$(fx "$db" -q -tA -c "SELECT max(event_id) FROM iam_policy.history")"
+    cmd_apply true "$db"
+    snap2="$(CEA_DB="$db" policy_snapshot)" && snapshot_whole "$snap2" || { fail policy-apply "policy_snapshot failed after the re-run"; rm -rf "$dir"; return; }
+    [[ "$snap1" == "$snap2" ]] && pass policy-apply "008c re-run with v1 and the 4.2a bodies: catalog and versions unchanged" \
+        || { fail policy-apply "008c re-run changed the catalog or the versions:"; diff <(echo "$snap1") <(echo "$snap2") | head -20; }
+    out="$(fx "$db" -q -tA -c "SELECT coalesce(string_agg(event, ','), '') FROM iam_policy.history WHERE event_id > $ev AND version IS NOT NULL")"
+    [[ -z "$out" ]] && pass policy-apply "the re-run wrote no event under a version" || fail policy-apply "the re-run wrote: $out"
+    out="$(fx "$db" -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008c.sql 2>&1)"
+    grep -q 'policy versions exist' <<<"$out" && pass policy-apply "down_008c refused while version 1 exists" || fail policy-apply "down_008c with v1: ${out:-it ran}"
+    # P22 — a failing statement and a REPEATABLE READ default each roll the bundle back
+    cmd_apply false medcea_pa2
+    { cat "$dir/post.sql"; echo "DO \$\$ BEGIN RAISE EXCEPTION 'iam-db-fixture: a broken assert'; END \$\$;"; } > "$dir/post-broken.sql"
+    out="$(pa_bundle medcea_pa2 "$dir" "$dir/post-broken.sql")"; rc=$?
+    ev="$(fx medcea_pa2 -q -tA -c "SELECT (SELECT count(*) FROM iam_policy.version) || '|' || (SELECT count(*) FROM iam_policy.skeleton)")"
+    [[ $rc -ne 0 && "$out" == *"a broken assert"* && "$ev" == "0|0" ]] \
+        && pass P22 "a broken assert rolls the whole bundle back (no version, no skeleton)" \
+        || fail P22 "broken assert: exit $rc, versions|skeletons $ev"
+    fx postgres -q -c "ALTER DATABASE medcea_pa2 SET default_transaction_isolation = 'repeatable read';" >/dev/null
+    out="$(pa_bundle medcea_pa2 "$dir" "$dir/post.sql")"; rc=$?
+    fx postgres -q -c "ALTER DATABASE medcea_pa2 RESET default_transaction_isolation;" >/dev/null
+    ev="$(fx medcea_pa2 -q -tA -c "SELECT count(*) FROM iam_policy.version")"
+    [[ $rc -ne 0 && "$out" == *"needs READ COMMITTED"* && "$ev" == 0 ]] \
+        && pass P22 "READ COMMITTED asserted inside the bundle (F-24)" || fail P22 "repeatable read: exit $rc, versions $ev, ${out:0:200}"
+    fx postgres -q -c "DROP DATABASE IF EXISTS medcea_pa WITH (FORCE);" -c "DROP DATABASE IF EXISTS medcea_pa2 WITH (FORCE);" >/dev/null
+    rm -rf "$dir"
 }
 
 cmd_access() {  # MODE (after apply MODE)
@@ -683,7 +782,8 @@ cmd_purge() {
     step "purge"
     local roles out
     fx postgres -q -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS medcea_db WITH (FORCE);' -c 'DROP DATABASE IF EXISTS medcea_fresh WITH (FORCE);' \
-        -c 'DROP DATABASE IF EXISTS medcea_old27 WITH (FORCE);' >/dev/null
+        -c 'DROP DATABASE IF EXISTS medcea_old27 WITH (FORCE);' -c 'DROP DATABASE IF EXISTS medcea_pa WITH (FORCE);' \
+        -c 'DROP DATABASE IF EXISTS medcea_pa2 WITH (FORCE);' >/dev/null
     fx postgres -q -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'access_svc') THEN DROP ROLE access_svc; END IF; END \$\$;" >/dev/null
     roles="$(python3 "$CLI" db-roles --names | paste -sd, -),medcea_owner,authenticator,anon"
     out="$({ printf "\\\\set roles '%s'\n" "$roles"; cat apps/database/purge.sql; } | fx postgres -q -v ON_ERROR_STOP=1 2>&1)" \
@@ -882,6 +982,7 @@ case "$1" in
     apply) cmd_apply "${2:?apply false|true}" "${3:-medcea_db}" ;;
     access) cmd_access "${2:?access false|true}" ;;
     policy) cmd_policy ;;
+    policy-apply) cmd_policy_apply ;;
     purge-access) cmd_purge_access ;;
     rollback-27) cmd_rollback27 ;;
     logins) cmd_logins "${2:?logins false|true}" ;;
@@ -904,7 +1005,7 @@ case "$1" in
         cmd_apply false; probes false; cmd_access false; cmd_logins false; cmd_preflight
         cmd_postgrest false; cmd_runner false; cmd_pgrst_flip
         cmd_services
-        cmd_apply true; probes true; cmd_access true; cmd_policy; cmd_logins true; cmd_preflight
+        cmd_apply true; probes true; cmd_access true; cmd_policy; cmd_policy_apply; cmd_logins true; cmd_preflight
         cmd_postgrest true; cmd_runner true
         cmd_apply false; probes false
         cmd_cycle
