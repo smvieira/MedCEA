@@ -30,7 +30,7 @@
 #             without versions (wrappers gone, three tables parked), then apply true (008c
 #             moves them back, P1 again); version 1 built COMMITTED from defaults.yaml through
 #             the owner functions (the bootstrap's bundle without apply.sh); apply true again:
-#             the 008c catalog (constraints, triggers, md5 of every function, owners), the
+#             the 008c catalog (constraints, triggers, sha256 of every function, owners), the
 #             version rows and entries_digest(1) unchanged, no policy event written; apply
 #             false then true (a mode flip with v1); down_008c refused while v1 exists
 #   cycle     false -> A; B0 vs A differs only by the declared delta; false = A;
@@ -267,15 +267,15 @@ cmd_apply() {  # MODE [DB] — DBA_SERVICE_LOGINS (env): login roles allowed to 
 }
 
 # policy_snapshot — what a re-run of 008c must leave alone (IAM 4.1): version's
-# constraints, the freeze triggers' modes, md5 of every 008c function, the table owners,
+# constraints, the freeze triggers' modes, sha256 of every 008c function, the table owners,
 # the version rows and entries_digest of each
 policy_snapshot() {
     fx "$CEA_DB" -q -tA -v ON_ERROR_STOP=1 <<'SQL'
 SELECT 'con|' || conname || '|' || pg_get_constraintdef(oid) FROM pg_constraint
  WHERE conrelid = 'iam_policy.version'::regclass ORDER BY conname;
-SELECT 'trg|' || c.relname || '|' || t.tgname || '|' || t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+SELECT 'trg|' || c.relname || '|' || t.tgname || '|' || t.tgenabled::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
  WHERE c.relnamespace = 'iam_policy'::regnamespace AND NOT t.tgisinternal ORDER BY 1;
-SELECT 'fn|' || p.oid::regprocedure::text || '|' || md5(p.prosrc) || '|' || pg_get_userbyid(p.proowner) || '|' || coalesce(p.proacl::text, '')
+SELECT 'fn|' || p.oid::regprocedure::text || '|' || encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') || '|' || pg_get_userbyid(p.proowner) || '|' || coalesce(p.proacl::text, '')
   FROM pg_proc p WHERE p.pronamespace = 'iam_policy'::regnamespace
      OR p.oid IN (to_regprocedure('medcea.approve_policy(integer,text,text,text,text)'), to_regprocedure('medcea.return_policy(integer,text)'),
                   to_regprocedure('medcea.confirm_policy(integer,text,text)'), to_regprocedure('medcea.dispute_policy(integer,text)'))
@@ -285,6 +285,13 @@ SELECT 'own|' || c.relname || '|' || pg_get_userbyid(c.relowner) FROM pg_class c
 SELECT 'ver|' || v.version || '|' || v.status || '|' || v.kind || '|' || v.entries_digest || '|' || iam_policy.entries_digest(v.version)
   FROM iam_policy.version v ORDER BY v.version;
 SQL
+}
+
+# snapshot_whole SNAP — every section is there (a query that fails half way, as the
+# "char" || text one did, must not leave two equal partial snapshots that pass)
+snapshot_whole() {
+    local k
+    for k in con trg fn own ver; do grep -q "^$k|" <<<"$1" || return 1; done
 }
 
 # v1_sql — version 1 from defaults.yaml, as apply.sh --bootstrap's bundle builds it
@@ -322,7 +329,7 @@ cmd_policy() {  # after apply true (IAM 4.1)
     out="$(fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008c.sql 2>&1)" \
         && pass policy "medcea_db_migrations_down_008c.sql without versions" || { echo "$out" | grep ERROR; fail policy "down_008c failed"; return; }
     out="$(fx "$CEA_DB" -q -tA -c "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('approve_policy', 'return_policy', 'confirm_policy', 'dispute_policy'))
-                                     || '|' || (SELECT count(*) FROM pg_class WHERE relnamespace = to_regnamespace('iam_policy_retired_008c'))
+                                     || '|' || (SELECT count(*) FROM pg_class WHERE relnamespace = to_regnamespace('iam_policy_retired_008c') AND relkind = 'r')
                                      || '|' || (SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'freeze_policy%')")"
     [[ "$out" == "0|3|0" ]] && pass policy "down_008c: no wrapper, three tables parked, no freeze trigger" || fail policy "after down_008c (wrappers|parked|triggers): $out"
     cmd_apply true
@@ -336,16 +343,17 @@ cmd_policy() {  # after apply true (IAM 4.1)
     fi
     grep -q '^digest|true$' <<<"$out" && pass policy "version 1 committed; entries_digest(1) = source.policy_entries_digest(defaults.yaml)" \
         || fail policy "entries_digest(1) differs from compiler/source.py: $(grep '^digest|' <<<"$out")"
-    snap1="$(policy_snapshot)"; ev="$(fx "$CEA_DB" -q -tA -c "SELECT max(event_id) FROM iam_policy.history")"
+    snap1="$(policy_snapshot)" && snapshot_whole "$snap1" || { fail policy "policy_snapshot failed: the re-run checks would compare nothing"; return; }
+    ev="$(fx "$CEA_DB" -q -tA -c "SELECT max(event_id) FROM iam_policy.history")"
     cmd_apply true
-    snap2="$(policy_snapshot)"
-    [[ -n "$snap1" && "$snap1" == "$snap2" ]] && pass policy "008c re-run with v1: constraints, triggers, functions, owners, versions and digests unchanged" \
+    snap2="$(policy_snapshot)" && snapshot_whole "$snap2" || { fail policy "policy_snapshot failed after the re-run"; return; }
+    [[ "$snap1" == "$snap2" ]] && pass policy "008c re-run with v1: constraints, triggers, functions, owners, versions and digests unchanged" \
         || { fail policy "008c re-run with v1 changed the catalog or the versions:"; diff <(echo "$snap1") <(echo "$snap2") | head -20; }
     out="$(fx "$CEA_DB" -q -tA -c "SELECT coalesce(string_agg(event, ','), '') FROM iam_policy.history WHERE event_id > $ev AND version IS NOT NULL")"
     [[ -z "$out" ]] && pass policy "the re-run wrote no policy event" || fail policy "the re-run wrote policy events: $out"
     cmd_apply false
     cmd_apply true
-    snap2="$(policy_snapshot)"
+    snap2="$(policy_snapshot)" && snapshot_whole "$snap2" || { fail policy "policy_snapshot failed after the mode flip"; return; }
     [[ "$(grep '^ver|' <<<"$snap1")" == "$(grep '^ver|' <<<"$snap2")" ]] && pass policy "a mode flip with v1 leaves the versions and digests alone" \
         || fail policy "the mode flip changed the versions: $(grep '^ver|' <<<"$snap2")"
     out="$(fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008c.sql 2>&1)"
