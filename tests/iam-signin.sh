@@ -49,6 +49,7 @@ source config.env
 set +a
 source infra/lib-lock.sh; medcea_lock
 source infra/lib-mk8s.sh
+source infra/lib-policy-source.sh; policy_source_init "${NAMESPACE:-medcea}" --read-only   # compile what the deploys compiled
 
 KC_PORT=18089
 KC_URL="http://localhost:$KC_PORT"

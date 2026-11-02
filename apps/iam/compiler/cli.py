@@ -35,9 +35,20 @@
                                         labels of ROLES (the deployed list, ["a", "b"]),
                                         HTML-escaped
 
-Reads apps/iam/policy/defaults.yaml unless --file is given. From Phase 1 on it reads the
-applied version from the database when one exists (plan Section 3.3); until then the
-defaults are the policy in force.
+Where the policy comes from (compiler/source.py, IAM Phase 4; one rule for every command):
+  --file F       an offline draft or a test (never a deploy script; its label is the file
+                 name, with a warning, unless --label is given)
+  --defaults     apps/iam/policy/defaults.yaml, whatever this host has applied (the offline
+                 tests and the iam-db fixture)
+  otherwise      MEDCEA_POLICY_FILE, only with MEDCEA_POLICY_BREAK_GLASS=<reason> (exit 2
+                 without it); else the host applied file state/policy-applied.yaml (written
+                 from the database's applied version, from slice 4.2a; a header that does not
+                 match its body is exit 2); else apps/iam/policy/defaults.yaml
+  --label L      the source name routes.json and role_widening() record (default: by source:
+                 version-N, break-glass:<reason>, the --file name, or defaults.yaml)
+db-roles and describe-gate read only the skeleton (role names, passwords' variables, labels):
+they take the git tree's defaults.yaml unless --file is given, so they work with no source at
+all (apps/database/uninstall.sh --purge-data). Exit 2 for a source error.
 """
 import argparse
 import html
@@ -47,12 +58,23 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compiler import grants, invariants, model, mqtt, netpol, proxies, routes, tools  # noqa: E402
+from compiler import grants, invariants, model, mqtt, netpol, proxies, routes, source, tools  # noqa: E402
+
+
+# Commands that read only the skeleton: no source, no database (F-15).
+SKELETON_ONLY = ("db-roles", "describe-gate")
+
+
+def source_label(src, given=None):
+    """The one source label (routes.json `source`, role_widening()'s digest comment)."""
+    return source.label(src, given, warn=lambda m: print(m, file=sys.stderr))
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cli.py", description=__doc__.splitlines()[0])
-    ap.add_argument("--file", help="policy file (default: apps/iam/policy/defaults.yaml)")
+    ap.add_argument("--file", help="an offline policy file (never in a deploy script)")
+    ap.add_argument("--defaults", action="store_true", help="read apps/iam/policy/defaults.yaml, whatever is applied")
+    ap.add_argument("--label", help="the source name routes.json and role_widening() record")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
     sub.add_parser("hosts")
@@ -81,11 +103,20 @@ def main(argv=None):
     g.add_argument("--logins", action="store_true")
     args = ap.parse_args(argv)
 
-    p = model.load(args.file)
+    try:
+        if args.cmd in SKELETON_ONLY and not args.file:
+            src = source.Source("defaults", source.DEFAULTS, source.factory())
+        else:
+            src = source.resolve(args.file, args.defaults)
+    except source.SourceError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    p = model.Policy(src.data)
 
     if args.cmd == "check":
         errors, notes = invariants.check(p)
         cells = sum(len(v) for v in p.matrix.values())
+        print(source.describe(src))
         print(f"{len(p.roles)} roles, {len(p.groups)} groups, {cells} cells, "
               f"{len(p.data['invariants'])} invariants, {len(p.waivers)} waivers")
         for n in notes:
@@ -152,7 +183,7 @@ def main(argv=None):
                 # the same source name as `compile routes`, so role_widening() carries routes.json's digest
                 print(grants.sql(p, args.mode, args.smoke, args.part,
                                  [r for r in args.service_logins.split(",") if r], args.without_iam,
-                                 os.path.basename(args.file) if args.file else "defaults.yaml"), end="")
+                                 source_label(src, args.label)), end="")
         except grants.GrantsError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -193,7 +224,7 @@ def main(argv=None):
         return 0
     if args.cmd == "compile" and args.target == "routes":
         try:
-            print(routes.dumps(routes.compile(p, os.path.basename(args.file) if args.file else "defaults.yaml")))
+            print(routes.dumps(routes.compile(p, source_label(src, args.label))))
         except routes.RouteError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

@@ -30,6 +30,8 @@ source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
 source "$REPO_ROOT/infra/lib-wait.sh"
 source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client: postgres or the service's own role (IAM 2.5)
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 MONITOR_DOMAIN="${MONITOR_DOMAIN:-monitor.$DOMAIN}"
 
 GREEN='\033[0;32m'; NC='\033[0m'

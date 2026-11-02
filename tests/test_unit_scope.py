@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(REPO, 'apps', 'iam'))
 from compiler import model, routes                                  # noqa: E402
 
 with open(os.path.join(TMP, 'routes.json'), 'w') as fh:
-    fh.write(routes.dumps(routes.compile(model.load())))
+    fh.write(routes.dumps(routes.compile(model.load_defaults())))
 with open(os.path.join(TMP, 'settings.json'), 'w') as fh:
     json.dump({'issuer': 'https://kc.test/realms/medcea', 'audience': 'medcea-api', 'enforce': False}, fh)
 os.environ.update(MEDCEA_IAM_ROUTES=os.path.join(TMP, 'routes.json'), MEDCEA_IAM_SETTINGS=os.path.join(TMP, 'settings.json'),

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """tests/iam-routes-diff.py — the route table matches the routes the services serve.
 
-Compiles the route table from apps/iam/policy/defaults.yaml and compares it, per service,
-with the routes read from each service's source (apps/iam/compiler/routes_diff.py): a
-route served but not in the table would be refused under IAM_ENFORCE, a table route no
-code serves is policy for nothing. The planned differences (planned removals, routes
-and services whose code comes later) are listed, not failed. Then proves the diff
-catches each kind of difference.
+Compiles the route table from apps/iam/policy/defaults.yaml (model.load_defaults(), never
+MEDCEA_POLICY_FILE or the host applied file: routes are skeleton, which lives in git, and
+are compared with the code on disk) and compares it, per service, with the routes read
+from each service's source (apps/iam/compiler/routes_diff.py): a route served but not in
+the table would be refused under IAM_ENFORCE, a table route no code serves is policy for
+nothing. The planned differences (planned removals, routes and services whose code comes
+later) are listed, not failed. Then proves the diff catches each kind of difference.
 
 Run from the repository root:  python3 tests/iam-routes-diff.py [--strict]
 --strict also fails while a planned removal is still served (it would be refused under
@@ -26,7 +27,7 @@ from compiler import model, routes, routes_diff  # noqa: E402
 
 def main(argv):
     strict = "--strict" in argv[1:]
-    doc = routes.compile(model.load(None))
+    doc = routes.compile(model.load_defaults())   # never MEDCEA_POLICY_FILE or the host file
     out, failures = routes_diff.diff(doc)
 
     print("Route table against the services' code")

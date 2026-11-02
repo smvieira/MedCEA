@@ -100,7 +100,7 @@ class FakeDB:
 class IamApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        p = model.load()
+        p = model.load_defaults()
         with open(os.path.join(TMP, "routes.json"), "w") as f:
             f.write(routes.dumps(routes.compile(p)))
         cls.doc = mqtt.compile(p)

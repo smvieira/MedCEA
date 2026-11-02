@@ -177,6 +177,12 @@ fi
 # backup_dir, backup_newest_ok, backup_age_status (check backupage); read-only
 source "${SCRIPT_DIR}/apps/backup/lib-backup.sh"
 
+# Every policy compile below reads what the deploys compiled (IAM Phase 4): an inherited
+# MEDCEA_POLICY_FILE (break-glass) or a parent's "already verified" marker is dropped
+# first, so a check never trusts a source it was handed; read-only, writes nothing.
+source "${SCRIPT_DIR}/infra/lib-policy-source.sh"
+policy_source_init "${NAMESPACE:-medcea}" --read-only
+
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${RED}ERROR: Config file not found: $CONFIG_FILE${NC}" >&2
     exit 1

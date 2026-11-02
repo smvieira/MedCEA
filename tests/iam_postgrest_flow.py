@@ -143,7 +143,7 @@ def message(body):
 
 # ── roles from the policy (no role name hard-coded beyond the obvious ones) ──────
 def roles_for_unit():
-    p = model.load()
+    p = model.load_defaults()   # the fixture is built from the factory policy
     group = grants.member_objects(p)["medcea.cea_unit"]
     readers = sorted(r for r in p.roles if "R" in p.direct(group, r)[1])
     writers = sorted(r for r in p.roles if {"R", "U"} <= p.direct(group, r)[1])

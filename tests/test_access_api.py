@@ -667,7 +667,7 @@ class RoleCatalogue(Base):
             'justification': 'j' * 30, 'password': 'p' * 12}
 
     def test_roles_match_policy(self):
-        p = POLICY_MODEL.load()
+        p = POLICY_MODEL.load_defaults()
         self.assertEqual(list(API.ROLES), list(p.roles))
         for r, v in API.ROLES.items():
             for k in ('label', 'description', 'availability'):

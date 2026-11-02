@@ -38,6 +38,8 @@ source "$REPO_ROOT/infra/lib-mk8s.sh"   # $KUBECTL (sudo fallback)
 source "$REPO_ROOT/infra/lib-render.sh" # render FILE VAR...
 source "$REPO_ROOT/infra/lib-policy-tools.sh" # policy_tool edge-wizard
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 EDGE_WIZARD_PORT="${EDGE_WIZARD_PORT:-8088}"
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"
 

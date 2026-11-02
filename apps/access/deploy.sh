@@ -56,6 +56,8 @@ source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback
 source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are in k8s/
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # policy_groups / gate_error_page / gate_helm_args
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"   # older config.env files lack it
 POSTGRES_DB="${POSTGRES_DB:-medcea_db}"
 # How long step 5 waits for every Ready pod to prove it enforces (tests shorten it).

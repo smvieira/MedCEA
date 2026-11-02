@@ -50,6 +50,8 @@ source "$REPO_ROOT/infra/lib-postgrest.sh"   # pgrst_live_mode: which password a
 source "$REPO_ROOT/infra/lib-db-roles.sh"    # db_clients_live, db_role_secret (IAM Phase 2.5)
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # workbench_egress_close (IAM 3.2b)
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 PG_RELEASE="${PG_RELEASE:-rdbms}"
 CEA_DB="${POSTGRES_DB:-medcea_db}"
 IAM_DB_ROLES="${IAM_DB_ROLES:-false}"

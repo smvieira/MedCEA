@@ -29,6 +29,8 @@ source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
 source "$REPO_ROOT/infra/lib-wait.sh"
 source "$REPO_ROOT/infra/lib-db-roles.sh"   # db_client: postgres or the service's own role (IAM 2.5)
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 SCHEDULER_DOMAIN="${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}"
 if [[ -z "${MQTT_SCHEDULER_PASS:-}" ]]; then
     echo "ERROR: MQTT_SCHEDULER_PASS is not set in config.env — run ./deploy-infra.sh first." >&2

@@ -59,7 +59,7 @@ class CheckTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
         with open(os.path.join(cls.tmp, "routes.json"), "w") as f:
-            f.write(routes.dumps(routes.compile(model.load())))
+            f.write(routes.dumps(routes.compile(model.load_defaults())))
         with open(os.path.join(cls.tmp, "settings.json"), "w") as f:
             json.dump({"issuer": ISSUER, "audience": "medcea-api", "enforce": False}, f)
         cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -159,7 +159,7 @@ class CheckTest(unittest.TestCase):
         self.assertIsNone(self.iam.actor_role(None))
         # a route table compiled before role_includes: None, never a guess
         tmp = tempfile.mkdtemp()
-        doc = routes.compile(model.load())
+        doc = routes.compile(model.load_defaults())
         doc.pop("role_includes")
         with open(os.path.join(tmp, "routes.json"), "w") as f:
             json.dump(doc, f)
@@ -236,7 +236,7 @@ class TableQueriesTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
         cls.tmp = tempfile.mkdtemp()
         with open(os.path.join(cls.tmp, "routes.json"), "w") as f:
             f.write(routes.dumps(routes.compile(cls.policy)))

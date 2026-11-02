@@ -28,6 +28,8 @@ source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are 
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"  # deploy_oauth2_proxy — one SSO gate per host
 APP_DIR="$SCRIPT_DIR"   # the app directory, as the k8s/ templates call it (hostPath mounts)
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 CONFIG_DOMAIN="config.$DOMAIN"
 DBMGMT_DOMAIN="${DBMGMT_DOMAIN:-dbmgmt.$DOMAIN}"
 PORTAL_URL="https://${PORTAL_DOMAIN}"

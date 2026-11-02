@@ -368,7 +368,7 @@ class ExamplesTest(unittest.TestCase):
 class PolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.p = model.load(None)
+        cls.p = model.load_defaults()
 
     def test_scientists_read_telemetry(self):
         for r in ("bio_scientist", "control_scientist"):

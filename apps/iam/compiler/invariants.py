@@ -226,6 +226,7 @@ def _matrix_invariants(p, err, note):
 
     for g in ("iam_policy", "iam_users"):
         if g not in p.groups:
+            err(f"I12 group {g} is missing: nobody could approve a change to it")
             continue
         approvers = [r for r in p.roles if "A" in p.direct(g, r)[0]]
         if not [r for r in approvers if r != "admin"]:

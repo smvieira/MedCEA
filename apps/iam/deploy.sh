@@ -37,6 +37,15 @@ skip_api() {   # iam-api cannot be deployed yet: fatal only while the Explorer d
     exit 0
 }
 
+[[ -f "$REPO_ROOT/config.env" ]] || die "config.env not found at $REPO_ROOT/config.env"
+source "$REPO_ROOT/config.env"
+source "$REPO_ROOT/infra/lib-mk8s.sh"      # mk8s / $MK8S / $KUBECTL (sudo fallback)
+source "$REPO_ROOT/infra/lib-render.sh"    # render FILE VAR... — manifests are in k8s/
+source "$REPO_ROOT/infra/lib-db-roles.sh"  # db_client; _dba_psql
+NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
+
 log "Checking the access policy..."
 if ! python3 "$SCRIPT_DIR/compiler/cli.py" check; then
     die "The access policy violates its invariants — fix apps/iam/policy/defaults.yaml."
@@ -45,12 +54,6 @@ fi
 log "Roles each signed-in host admits (policy; [status] = enforced today?):"
 python3 "$SCRIPT_DIR/compiler/cli.py" hosts | sed 's/^/  /'
 
-[[ -f "$REPO_ROOT/config.env" ]] || die "config.env not found at $REPO_ROOT/config.env"
-source "$REPO_ROOT/config.env"
-source "$REPO_ROOT/infra/lib-mk8s.sh"      # mk8s / $MK8S / $KUBECTL (sudo fallback)
-source "$REPO_ROOT/infra/lib-render.sh"    # render FILE VAR... — manifests are in k8s/
-source "$REPO_ROOT/infra/lib-db-roles.sh"  # db_client; _dba_psql
-NAMESPACE="${NAMESPACE:-medcea}"
 MQTTX_DOMAIN="${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}"
 
 # =============================================================================

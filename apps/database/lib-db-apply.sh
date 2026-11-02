@@ -111,7 +111,11 @@ dba_iam_flag() {
 
 db_apply() {
     local ns="$1" pod="$2" mode="$3" out nonce got grants_mode down_or_enforce verifier r flag
-    local iam_flag=()
+    local iam_flag=() src=()
+    # where the grants are compiled from (IAM Phase 4): the throwaway fixture namespace
+    # always compiles the factory policy, which its probes expect; every other namespace
+    # the source rule's (compiler/source.py: the applied version, else defaults.yaml)
+    [[ "$ns" == medcea-iamtest ]] && src=(--defaults)
     _DBA_NS="$ns"; _DBA_POD="$pod"
     [[ "$mode" == "false" || "$mode" == "true" ]] || { echo "db_apply: MODE must be false or true" >&2; return 2; }
     [[ "$PROJECT_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || { echo "db_apply: PROJECT_NAME is not ^[a-z][a-z0-9-]{1,30}$" >&2; return 2; }
@@ -190,7 +194,7 @@ SQL
     # before the data steps, which digest rows through object_group(); the bundle
     # re-creates them in step 6 from the same policy
     _dba_log "Compiled policy functions..."
-    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode additive --part functions "${iam_flag[@]}" \
+    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode additive --part functions "${iam_flag[@]}" \
         | _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - >/dev/null || return 1
 
     # ── 4b/4c. 008b data steps ────────────────────────────────────────────────
@@ -229,8 +233,8 @@ SQL
     local body asserts
     local logins=()
     [[ "$grants_mode" == additive && -n "${DBA_SERVICE_LOGINS:-}" ]] && logins=(--service-logins "$DBA_SERVICE_LOGINS")
-    body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part body "${logins[@]}" "${iam_flag[@]}")" || return 1
-    asserts="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile grants --mode "$grants_mode" --part assert "${iam_flag[@]}")" || return 1
+    body="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode "$grants_mode" --part body "${logins[@]}" "${iam_flag[@]}")" || return 1
+    asserts="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode "$grants_mode" --part assert "${iam_flag[@]}")" || return 1
     out="$({
         echo "SET log_statement = 'none';"
         printf "\\\\set root '%s'\n" "$PROJECT_NAME"

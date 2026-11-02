@@ -38,6 +38,7 @@ fi
 # shellcheck disable=SC1091
 source config.env
 source infra/lib-mk8s.sh
+source infra/lib-policy-source.sh; policy_source_init "${NAMESPACE:-medcea}" --read-only   # compile what the deploys compiled
 
 FAILS=0
 pass() { printf "  ${GREEN}PASS${NC}  %-8s %s\n" "$1" "$2"; }

@@ -55,6 +55,7 @@ set +a
 [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] || { echo "IAM_MQTT_PERSON is not true: nothing to test (./guide.sh)." >&2; exit 2; }
 source infra/lib-lock.sh; medcea_lock
 source infra/lib-mk8s.sh
+source infra/lib-policy-source.sh; policy_source_init "${NAMESPACE:-medcea}" --read-only   # compile what the deploys compiled
 NAMESPACE="${NAMESPACE:-medcea}"
 
 KC_PORT=18093

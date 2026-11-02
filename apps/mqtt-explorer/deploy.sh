@@ -38,6 +38,8 @@ source "$REPO_ROOT/infra/lib-render.sh"  # render FILE VAR... — manifests are 
 source "$REPO_ROOT/infra/lib-oauth2-proxy.sh"
 source "$REPO_ROOT/infra/lib-wait.sh"
 NAMESPACE="${NAMESPACE:-medcea}"
+source "$REPO_ROOT/infra/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 MQTTX_DOMAIN="${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}"
 
 GREEN='\033[0;32m'; NC='\033[0m'

@@ -212,7 +212,7 @@ MUTATIONS = {
 class PolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
 
     def test_defaults_pass(self):
         errors, _ = invariants.check(self.policy)
@@ -257,7 +257,7 @@ class ToolsTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
 
     def test_grafana_settings(self):
         self.assertEqual(tools.groups(self.policy, "grafana"), ["dashboards"])
@@ -336,7 +336,7 @@ class ToolsTest(unittest.TestCase):
 
     def test_compile_tool_cli(self):
         import subprocess
-        cli = [sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"), "compile"]
+        cli = [sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"), "--defaults", "compile"]
         out = subprocess.run(cli + ["edge-wizard"], capture_output=True, text=True)
         self.assertEqual((out.returncode, out.stdout), (0, "engineer,maintenance\n"))
         out = subprocess.run(cli + ["pgadmin"], capture_output=True, text=True)
@@ -355,11 +355,11 @@ class RoutesTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
         cls.doc = routes.compile(cls.policy)
 
     def test_deterministic_and_digest_covers_body(self):
-        again = routes.compile(model.load())
+        again = routes.compile(model.load_defaults())
         self.assertEqual(routes.dumps(self.doc), routes.dumps(again))
         body = {k: v for k, v in self.doc.items() if k != "digest"}
         self.assertEqual(self.doc["digest"], hashlib.sha256(
@@ -525,7 +525,7 @@ class WideningTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
 
     def test_widening_values(self):
         p = self.policy
@@ -613,7 +613,7 @@ class NetpolTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
         cls.doc = netpol.compile(cls.policy, "medcea", ["192.168.1.7", "10.1.0.1", "192.168.1.7"])
         cls.by = {i["metadata"]["name"]: i for i in cls.doc["items"]}
 
@@ -649,7 +649,7 @@ class MqttTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
 
     def test_engineer_rows(self):
         doc = mqtt.compile(self.policy)
@@ -663,7 +663,7 @@ class MqttTest(unittest.TestCase):
         self.assertEqual(doc["roles"]["engineer"] and proxies.admitted(self.policy, "MQTTX_DOMAIN"), ["engineer"])
 
     def test_deterministic_and_digest(self):
-        a, b = mqtt.dumps(mqtt.compile(self.policy)), mqtt.dumps(mqtt.compile(model.load()))
+        a, b = mqtt.dumps(mqtt.compile(self.policy)), mqtt.dumps(mqtt.compile(model.load_defaults()))
         self.assertEqual(a, b)
         doc = json.loads(a)
         body = {k: v for k, v in doc.items() if k != "digest"}
@@ -706,7 +706,7 @@ class GrantsTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
         cls.privs = grants.privileges(cls.policy)
         cls.doc = grants.document(cls.policy)
 
@@ -750,10 +750,10 @@ class GrantsTest(unittest.TestCase):
                              "the compiled grants changed: review, then python3 tests/test_policy.py --update-golden")
 
     def test_deterministic(self):
-        again = grants.document(model.load())
+        again = grants.document(model.load_defaults())
         self.assertEqual(again["digest"], self.doc["digest"])
         for mode in ("additive", "enforce", "verify"):
-            self.assertEqual(grants.sql(self.policy, mode), grants.sql(model.load(), mode))
+            self.assertEqual(grants.sql(self.policy, mode), grants.sql(model.load_defaults(), mode))
 
     def test_anon_holds_only_its_two_items(self):
         anon = {(k, o, p) for g, k, o, p in self.privs if g == "anon"}
@@ -1027,7 +1027,7 @@ class GrantsTest(unittest.TestCase):
         self.assertIn("rolcanlogin", sec1)
         self.assertIn("REVOKE ALL ON ALL TABLES    IN SCHEMA medcea, medcea_auth, iam_policy FROM %I", down[full:])
         pat = re.compile(r"rolname LIKE 'rr\\_%' OR rolname LIKE 'svc\\_%' OR rolname = 'iam_svc'")
-        for r in grants.managed(model.load()):
+        for r in grants.managed(model.load_defaults()):
             self.assertTrue(r.startswith(("rr_", "svc_")) or r == "iam_svc", r)
         self.assertGreaterEqual(len(pat.findall(down)), 2)
 
@@ -1041,7 +1041,7 @@ class WiringTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
 
     def read(self, rel):
         with open(os.path.join(REPO, rel)) as f:
@@ -2069,7 +2069,7 @@ class ApproveCommissionTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.policy = model.load()
+        cls.policy = model.load_defaults()
         cls.privs = grants.privileges(cls.policy)
         with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
             cls.mig = f.read()

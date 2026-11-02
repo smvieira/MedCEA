@@ -80,6 +80,15 @@ if [[ "$WRITES" == true && "$NS" != "medcea-iamtest" ]]; then
     echo "REFUSED: --write-probes runs only against the throwaway instance (namespace medcea-iamtest), never $NS." >&2
     exit 2
 fi
+# Which policy the expected grants come from (IAM Phase 4): the throwaway fixture was
+# built from the factory policy (db_apply compiles --defaults there); any other namespace
+# from the source rule, i.e. what its deploys compiled (infra/lib-policy-source.sh).
+SRC=()
+if [[ "$NS" == "medcea-iamtest" ]]; then
+    SRC=(--defaults)
+else
+    source infra/lib-policy-source.sh; policy_source_init "$NS" --read-only
+fi
 [[ ${#SECTIONS[@]} -gt 0 ]] || SECTIONS=(catalog matrix prerequest actor writes drift)
 want() { local s; for s in "${SECTIONS[@]}"; do [[ "$s" == "$1" ]] && return 0; done; return 1; }
 
@@ -300,10 +309,10 @@ fi
 # ── matrix ───────────────────────────────────────────────────────────────────────
 if want matrix && [[ "$MODE" != legacy ]]; then
     echo ""
-    sql="$(python3 - "$CLI" "$MODE" "${IAM_FLAG[@]}" <<'PY'
+    sql="$(python3 - "$CLI" "$MODE" "${SRC[*]}" "${IAM_FLAG[@]}" <<'PY'
 import json, subprocess, sys
-cli, mode, flag = sys.argv[1], sys.argv[2], sys.argv[3:]
-doc = json.loads(subprocess.check_output([sys.executable, cli, "compile", "grants", "--format", "json"] + flag))
+cli, mode, src, flag = sys.argv[1], sys.argv[2], sys.argv[3].split(), sys.argv[4:]
+doc = json.loads(subprocess.check_output([sys.executable, cli] + src + ["compile", "grants", "--format", "json"] + flag))
 mgd = set(subprocess.check_output([sys.executable, cli, "db-roles", "--names"], text=True).split())
 q = lambda s: "'" + s.replace("'", "''") + "'"
 lines = []
@@ -348,7 +357,7 @@ PY
         [[ "$n_mem" == 0 ]] && pass matrix "authenticator: SET without INHERIT on every rr_ role and anon; rr_admin_login inherits rr_admin" \
             || fail matrix "memberships: $(grep '^member|' <<<"$out" | cut -d'|' -f2 | tr '\n' ' ')"
     fi
-    vout="$(python3 "$CLI" compile grants --mode verify "${IAM_FLAG[@]}" | db)"
+    vout="$(python3 "$CLI" "${SRC[@]}" compile grants --mode verify "${IAM_FLAG[@]}" | db)"
     grep -q 'grants verified' <<<"$vout" && ! grep -q ERROR <<<"$vout" && pass matrix "grants --mode verify passes" \
         || fail matrix "verify: $(grep -m2 -E 'ERROR|DETAIL' <<<"$vout" | tr '\n' ' ' | cut -c1-300)"
 fi
@@ -1354,7 +1363,7 @@ $(as_token "$T_QP")
 SELECT medcea.release_run(:run);
 $(as_postgres)"
         for obj in medcea.measurement medcea.recipe_run medcea.recipe_line_cycle_run medcea.run_release; do
-            for r in $(python3 "$CLI" compile grants --format json "${IAM_FLAG[@]}" | OBJ="$obj" python3 -c '
+            for r in $(python3 "$CLI" "${SRC[@]}" compile grants --format json "${IAM_FLAG[@]}" | OBJ="$obj" python3 -c '
 import json, os, sys
 d = json.load(sys.stdin)
 print(" ".join(sorted({g for g, k, o, p in d["privileges"] if o == os.environ["OBJ"] and p == "SELECT"})))'); do
@@ -2637,7 +2646,7 @@ fi
 # ── drift ────────────────────────────────────────────────────────────────────────
 if want drift && [[ "$WRITES" == true && "$MODE" != legacy ]]; then
     echo ""
-    VERIFY="$(python3 "$CLI" compile grants --mode verify "${IAM_FLAG[@]}")"
+    VERIFY="$(python3 "$CLI" "${SRC[@]}" compile grants --mode verify "${IAM_FLAG[@]}")"
     drift() {  # NAME SQL
         probe drift "$1" "P0001:differ" <<SQL
 $2

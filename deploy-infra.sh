@@ -276,6 +276,11 @@ _print_banner
 source config.env
 set -e
 
+# Where every compile of the access policy below reads it (IAM Phase 4, design §3.4):
+# the applied version, from slice 4.2a; until then defaults.yaml, exactly as before.
+source "$SCRIPT_DIR/infra/lib-policy-source.sh"
+policy_source_init "${NAMESPACE:-medcea}" || exit 1
+
 # Docker Hub credentials were asked for by infra/configure.sh if they were empty.
 DOCKERHUB_PASS="$DOCKERHUB_PAT"
 export DOCKERHUB_USER DOCKERHUB_PASS
@@ -420,8 +425,8 @@ $MK8S kubectl create namespace "$NAMESPACE" \
 # mounted by every service at /iam/ — the route table, the check library
 # (apps/iam/lib/medcea_iam.py) and its settings (issuer, audience, IAM_ENFORCE).
 # Here, because this script runs before every app component. The table is
-# compiled from defaults.yaml: the applied version in iam_policy is read instead
-# once Phase 4 creates one. A policy that fails its invariants stops the deploy
+# compiled by the source rule (infra/lib-policy-source.sh, compiler/source.py): the
+# applied version once IAM Phase 4 slice 4.2a writes one, defaults.yaml until then. A policy that fails its invariants stops the deploy
 # rather than shipping a table — unless IAM_GATES=false (the rollback), which
 # leaves the ConfigMap as it is. Services re-read the mount when the kubelet
 # updates it (about a minute), so a change here needs no restart.

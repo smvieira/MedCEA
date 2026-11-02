@@ -16,6 +16,13 @@
 # and prints nothing, so a caller stops rather than open the tool.
 # Used by deploy-infra.sh (pgAdmin), edge/wizard-daemon.sh, edge/flash-device.sh,
 # apps/edge-wizard/deploy.sh, health-check.sh and tests/iam-hosts.sh.
+#
+# The source (IAM Phase 4): this library never chooses one (it does not source
+# lib-policy-source.sh), but it refuses an inherited MEDCEA_POLICY_FILE unless this
+# shell's entry script has run the source init (MEDCEA_POLICY_SOURCE_DONE set). The
+# edge scripts never run it, so a break-glass draft exported in an operator's shell
+# cannot silently set who may onboard; the deploys refuse the override the same way
+# and health-check drops it.
 policy_tool() {
     local out
     case "$1" in
@@ -30,6 +37,10 @@ policy_tool() {
             echo "${EDGE_WIZARD_ROLE:-}"
         fi
         return 0
+    fi
+    if [[ -n "${MEDCEA_POLICY_FILE:-}" && -z "${MEDCEA_POLICY_SOURCE_DONE:-}" ]]; then
+        echo -e "\033[0;31mERROR: MEDCEA_POLICY_FILE is set: $1 compiles the applied policy only. Break-glass needs its hash-chain record, which arrives with IAM Phase 4 slice 4.2a. Unset MEDCEA_POLICY_FILE (and MEDCEA_POLICY_BREAK_GLASS) and re-run.\033[0m" >&2
+        return 1
     fi
     out="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile "$1")" || return 1
     [[ -n "$out" ]] || return 1

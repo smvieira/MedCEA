@@ -251,7 +251,7 @@ const done = (k) => (err, user) => { out[k] = user; };
         if policy:
             from compiler import model, tools
             with open(pol, "w") as f:
-                json.dump(tools.node_red_permissions(model.load()), f)
+                json.dump(tools.node_red_permissions(model.load_defaults()), f)
         script = os.path.join(tmp, "t.js")
         with open(script, "w") as f:
             f.write(self.JS)
@@ -271,7 +271,7 @@ const done = (k) => (err, user) => { out[k] = user; };
     def test_rights_from_the_policy(self):
         out, _ = self.run_js()
         from compiler import model, tools
-        want = tools.node_red_permissions(model.load())["permissions"]["engineer"]
+        want = tools.node_red_permissions(model.load_defaults())["permissions"]["engineer"]
         self.assertEqual(out["type"], "strategy")
         self.assertTrue(out["autoLogin"])
         self.assertEqual(out["arity"], 9)

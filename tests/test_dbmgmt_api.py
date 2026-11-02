@@ -29,7 +29,7 @@ TMP = tempfile.mkdtemp(prefix='test-dbmgmt-api-')
 sys.path.insert(0, os.path.join(REPO, 'apps', 'iam'))
 from compiler import model, routes                                  # noqa: E402
 
-DOC = routes.compile(model.load())
+DOC = routes.compile(model.load_defaults())
 with open(os.path.join(TMP, 'routes.json'), 'w') as fh:
     fh.write(routes.dumps(DOC))
 OLD = dict(DOC)

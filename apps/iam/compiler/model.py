@@ -1,15 +1,15 @@
 """apps/iam/compiler/model.py — load the access policy and answer questions about it.
 
-The policy is apps/iam/policy/defaults.yaml (schema_version 3) or, once Phase 1 has
-created iam_policy, the applied version read from the database. Everything else in the
-compiler (invariants, host gates, grants, routes, explain) asks this module, so there is
-one reading of `implies`, composites, constraints and tool reach.
+load() reads the policy through compiler/source.py's source rule: --file, the host applied
+file (state/policy-applied.yaml, the applied version, from IAM Phase 4 slice 4.2a) or, with
+neither, apps/iam/policy/defaults.yaml (schema_version 3). load_defaults() always reads the
+factory file (the offline tests). Everything else in the compiler (invariants, host gates,
+grants, routes, explain) asks this module, so there is one reading of `implies`,
+composites, constraints and tool reach.
 """
-import os
+from compiler import source
 
-import yaml
-
-DEFAULTS = os.path.join(os.path.dirname(__file__), "..", "policy", "defaults.yaml")
+DEFAULTS = source.DEFAULTS
 
 
 class Policy:
@@ -137,7 +137,20 @@ class Policy:
         return sorted(out)
 
 
+def widening_between(p_old, p_new, role):
+    """What `role` reaches under p_new and not under p_old (explain.reach, composites and
+    tool reach included): the skeleton gate's and rollback's test. Not Policy.widening,
+    which compares two roles under one policy (qa_dual_control)."""
+    from compiler import explain
+    return explain.reach(p_new, role) - explain.reach(p_old, role)
+
+
 def load(path=None):
-    """Load the policy file (the defaults unless a path is given)."""
-    with open(path or DEFAULTS) as f:
-        return Policy(yaml.safe_load(f))
+    """The policy by the source rule (source.resolve): `path` when given, else the host
+    applied file when there is one, else defaults.yaml. Raises source.SourceError."""
+    return Policy(source.resolve(path).data)
+
+
+def load_defaults():
+    """The factory policy, policy/defaults.yaml, whatever this host has applied."""
+    return Policy(source.factory())

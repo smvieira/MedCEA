@@ -33,7 +33,7 @@ trap 'rm -rf "$T"' EXIT
 R="$T/repo"
 mkdir -p "$R/apps/access" "$R/apps/iam/compiler" "$R/apps/database" "$R/infra" "$R/k8s/oauth2-proxy" "$T/bin" "$T/fake"
 cp -r "$REPO/apps/access/." "$R/apps/access/"
-for f in lib-log.sh lib-lock.sh lib-mk8s.sh lib-render.sh lib-oauth2-proxy.sh lib-portal.sh; do cp "$REPO/infra/$f" "$R/infra/"; done
+for f in lib-log.sh lib-lock.sh lib-mk8s.sh lib-render.sh lib-oauth2-proxy.sh lib-portal.sh lib-policy-source.sh; do cp "$REPO/infra/$f" "$R/infra/"; done
 cp "$REPO/k8s/oauth2-proxy/error.html" "$REPO/k8s/oauth2-proxy/values-common.yaml" "$R/k8s/oauth2-proxy/"
 cat > "$R/config.env" <<'ENV'
 PROJECT_NAME=medcea

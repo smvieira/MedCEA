@@ -87,6 +87,8 @@ log() { echo -e "\033[0;32m[workbench]\033[0m $*"; }
 die() { echo -e "\033[0;31m[workbench] ERROR:\033[0m $*" >&2; exit 1; }
 
 : "${NAMESPACE:?}" ; : "${KEYCLOAK_DOMAIN:?}" ; : "${DOMAIN:?}"
+source "$SCRIPT_DIR/lib-policy-source.sh"   # where every compile reads the policy (IAM Phase 4)
+policy_source_init "$NAMESPACE" || exit 1
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-medcea}"
 WORKBENCH_DOMAIN="${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}"
 PORTAL_DOMAIN="${PORTAL_DOMAIN:-portal.$DOMAIN}"   # named on the 403 page; where sign-out lands

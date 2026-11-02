@@ -90,7 +90,8 @@ if [[ -n "$PREV" ]]; then
 else
     : > "$WORK/prev.tgz"
 fi
-python3 apps/iam/compiler/cli.py compile routes > "$WORK/routes.json" || { echo "cannot compile the route table" >&2; exit 1; }
+# the fixture's database was built from the factory policy (db_apply --defaults there)
+python3 apps/iam/compiler/cli.py --defaults compile routes > "$WORK/routes.json" || { echo "cannot compile the route table" >&2; exit 1; }
 $KUBECTL create configmap iam-runner-src -n "$NS" --from-file=src.tgz="$WORK/src.tgz" \
     --from-file=prev.tgz="$WORK/prev.tgz" --from-file=routes.json="$WORK/routes.json" \
     --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null || exit 1

@@ -218,7 +218,7 @@ class Database(unittest.TestCase):
         for mode in ("additive", "enforce"):
             for part in ("functions", "body"):
                 out = subprocess.run([sys.executable, os.path.join(ROOT, "apps", "iam", "compiler", "cli.py"),
-                                      "compile", "grants", "--mode", mode, "--part", part],
+                                      "--defaults", "compile", "grants", "--mode", mode, "--part", part],
                                      capture_output=True, text=True, check=True).stdout
                 yield "grants %s %s" % (mode, part), out
 
@@ -238,7 +238,7 @@ class Database(unittest.TestCase):
 
     def test_pre_request_exempts_only_the_anonymous_root(self):
         fn = subprocess.run([sys.executable, os.path.join(ROOT, "apps", "iam", "compiler", "cli.py"),
-                             "compile", "grants", "--mode", "enforce", "--part", "functions"],
+                             "--defaults", "compile", "grants", "--mode", "enforce", "--part", "functions"],
                             capture_output=True, text=True, check=True).stdout
         pre = fn[fn.index("FUNCTION medcea_auth.pre_request()"):]
         pre = pre[:pre.index("$pre$;")]

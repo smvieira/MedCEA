@@ -11,6 +11,9 @@ credentials-*.txt
 logs/
 # infra/lib-lock.sh — one deploy at a time
 .medcea.lock
+# The host applied file (IAM Phase 4: state/policy-applied.yaml, mode 700 directory),
+# written under the lock from the database's applied policy version
+state/
 
 # Python bytecode
 __pycache__/
