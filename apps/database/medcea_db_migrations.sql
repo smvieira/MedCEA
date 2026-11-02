@@ -1413,6 +1413,11 @@ END $$;
 -- The hash and history_record() are unchanged. actor_sub is a uuid column: it
 -- holds the sub only when the actor is a person's account; system:, migration:
 -- and db:<login> actors are named in actor_name (008a's mapping for db:).
+-- From 008c on this body is iam_policy._append_history and append_history is
+-- 008c's filter in front of it: re-created here only while 008c is absent, so a
+-- re-run never opens the policy events to iam_svc between the two transactions.
+SELECT pg_catalog.to_regprocedure('iam_policy._append_history(text,jsonb,text)') IS NULL AS b16_writer \gset
+\if :b16_writer
 CREATE OR REPLACE FUNCTION iam_policy.append_history(p_event text, p_payload jsonb, p_reason text)
 RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam_policy, pg_temp AS $$
 DECLARE
@@ -1455,6 +1460,7 @@ BEGIN
                 v_id, v_at, v_sub, v_person, v_name, p_event, v_version, p_reason, p_payload, v_prev), 'UTF8')), 'hex'));
     RETURN v_id;
 END $$;
+\endif
 
 -- log_export(groups, objects): one row per Database Management export (2.6).
 CREATE OR REPLACE FUNCTION iam_policy.log_export(p_groups text[], p_objects text[]) RETURNS bigint
@@ -2191,7 +2197,8 @@ BEGIN
         RAISE EXCEPTION 'approvals are made by a person signed in through the API, not by %', coalesce(a.source, 'an unknown actor')
             USING ERRCODE = '42501';
     END IF;
-    IF a.person IS NULL THEN
+    -- IAM 4.1 (G9): a blank person_id is no person, as _person_actor already says.
+    IF a.person IS NULL OR btrim(a.person) = '' THEN
         RAISE EXCEPTION 'the approver''s token carries no person_id' USING ERRCODE = '42501';
     END IF;
     IF medcea_auth.policy_holds(a.role, p_group, 'A') IS NULL THEN
@@ -2200,21 +2207,25 @@ BEGIN
     sub := a.sub; person := a.person; name := a.name; role := a.role; source := a.source;
 END $$;
 
--- _account_actor(group, level): the actor of an account decision (IAM 2.7): a
--- person signed in to the User Manager (set_actor by access_svc, so the source
--- is 'person via access_svc'), whose token carries a person_id and whose role
--- holds the level on the group. Never a system, migration, db:<login> or
--- PostgREST actor. The one copy of this rule: the iam.* decision functions
--- (apps/access/access_db.sql) and medcea.revoke_person_mqtt() call it.
--- SECURITY INVOKER: its callers are definer functions owned by medcea_owner.
-CREATE OR REPLACE FUNCTION medcea_auth._account_actor(p_group text, p_level text,
+-- _person_actor(service, group, level): a person signed in to a UI whose
+-- service called set_actor (source 'person via <service>'), whose token
+-- carries a non-blank person_id and whose role holds the level on the group.
+-- Never a system, migration, db:<login> or PostgREST actor. The one copy of
+-- this rule: _account_actor (access_svc, IAM 2.7) and the policy author
+-- functions (iam_svc, IAM 4.1) call it. SECURITY INVOKER: its callers are
+-- definer functions owned by medcea_owner.
+CREATE OR REPLACE FUNCTION medcea_auth._person_actor(p_service text, p_group text, p_level text,
     OUT sub text, OUT person text, OUT name text, OUT role text)
     LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE a record;
 BEGIN
     SELECT * INTO a FROM medcea_auth.request_actor();
-    IF a.source IS DISTINCT FROM 'person via access_svc' THEN
-        RAISE EXCEPTION 'account decisions are made in the User Manager by a signed-in person, not by %',
+    IF a.source IS DISTINCT FROM 'person via ' || p_service THEN
+        IF p_service = 'access_svc' THEN
+            RAISE EXCEPTION 'account decisions are made in the User Manager by a signed-in person, not by %',
+                coalesce(a.source, 'an unknown actor') USING ERRCODE = '42501';
+        END IF;
+        RAISE EXCEPTION 'policy changes are made in the Policy UI by a signed-in person, not by %',
             coalesce(a.source, 'an unknown actor') USING ERRCODE = '42501';
     END IF;
     IF a.person IS NULL OR btrim(a.person) = '' THEN
@@ -2224,6 +2235,19 @@ BEGIN
         RAISE EXCEPTION 'role % holds no % on %', a.role, p_level, p_group USING ERRCODE = '42501';
     END IF;
     sub := a.sub; person := a.person; name := a.name; role := a.role;
+END $$;
+
+-- _account_actor(group, level): the actor of an account decision (IAM 2.7): a
+-- person signed in to the User Manager (set_actor by access_svc, so the source
+-- is 'person via access_svc'). The iam.* decision functions
+-- (apps/access/access_db.sql) and medcea.revoke_person_mqtt() call it; the rule
+-- itself is _person_actor's (IAM 4.1).
+CREATE OR REPLACE FUNCTION medcea_auth._account_actor(p_group text, p_level text,
+    OUT sub text, OUT person text, OUT name text, OUT role text)
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    SELECT p.sub, p.person, p.name, p.role INTO sub, person, name, role
+      FROM medcea_auth._person_actor('access_svc', p_group, p_level) p;
 END $$;
 
 -- revoke_person_mqtt(sub, reason): every MQTT person credential of an account
@@ -2866,11 +2890,11 @@ BEGIN
             state := 'waiting'; returned_at := NULL; returned_by := NULL; return_reason := NULL;
         END IF;
         reason := NULL; proposed_by := NULL; proposed_at := NULL;
-        holds := a.person IS NOT NULL AND medcea_auth.policy_holds(a.role, d.d_group, 'A') IS NOT NULL;
+        holds := btrim(coalesce(a.person, '')) <> '' AND medcea_auth.policy_holds(a.role, d.d_group, 'A') IS NOT NULL;
         why_not_code := CASE
             WHEN d.d_alg IS NOT NULL AND NOT medcea_auth._is_approved('medcea.control_algorithm', jsonb_build_array(d.d_alg))
                 THEN 'algorithm_not_approved'
-            WHEN a.person IS NULL THEN 'no_person'
+            WHEN btrim(coalesce(a.person, '')) = '' THEN 'no_person'
             WHEN NOT holds THEN 'no_role'
             WHEN a.person = ANY (cs.persons) THEN 'own_author'
             WHEN cs.unattr > 0 THEN 'unattributed' END;
@@ -2917,9 +2941,9 @@ BEGIN
         changes := NULL; changes_total := 0;
         reason := p.reason; proposed_by := p.proposed_by_name; proposed_at := p.proposed_at;
         returned_at := NULL; returned_by := NULL; return_reason := NULL;
-        holds := a.person IS NOT NULL AND medcea_auth.policy_holds(a.role, g, 'A') IS NOT NULL;
+        holds := btrim(coalesce(a.person, '')) <> '' AND medcea_auth.policy_holds(a.role, g, 'A') IS NOT NULL;
         why_not_code := CASE
-            WHEN a.person IS NULL THEN 'no_person'
+            WHEN btrim(coalesce(a.person, '')) = '' THEN 'no_person'
             WHEN NOT holds THEN 'no_role'
             WHEN p.proposed_by_person IS NULL THEN 'unattributed'
             WHEN p.proposed_by_person = a.person THEN 'own_author'
@@ -3020,7 +3044,7 @@ BEGIN
         -- unattributed, then a run nobody recorded created or started (one from before
         -- 008b: B4 stamped it migration:008, with no row_change), whose authors are unknown
         why_not_code := CASE
-            WHEN a.person IS NULL THEN 'no_person'
+            WHEN btrim(coalesce(a.person, '')) = '' THEN 'no_person'
             WHEN a.person = ANY (cs.persons) OR a.person = rn.executed_by_person THEN 'own_author'
             WHEN cs.unattr > 0 THEN 'unattributed'
             WHEN rn.created_by_person IS NULL
@@ -3918,6 +3942,1480 @@ COMMENT ON TABLE medcea.algorithm_state_event IS 'Append-only events of the cont
 NOTIFY pgrst, 'reload schema';
 
 INSERT INTO medcea.platform_setting (key, value) VALUES ('008b:last_nonce', :'deploy_nonce')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+COMMIT;
+
+-- ── Migration 008c: the access policy's versions (IAM Phase 4, slice 4.1) ───
+-- (Design phase4-design-v3 §2 and §14.2.) Every database object Phase 4 needs:
+-- the version table's new columns, the per-level entry table, the accepted
+-- skeletons, the host-computed diffs, the approvals' signed tokens, the freeze
+-- trigger and the functions of the policy's state machine. NOTHING CALLS THEM
+-- in 4.1: iam-api, apply.sh and the Policy UI arrive in 4.2a–4.5, and no row is
+-- written here.
+--
+-- Its own transaction, after 008b's, with the same deploy nonce, which
+-- lib-db-apply.sh reads back as 008c:last_nonce. Re-run on every database
+-- deploy, so it writes no row (once version 1 exists the freeze trigger would
+-- refuse one) and every ALTER TABLE is guarded by a catalog check: a steady-state
+-- re-run takes no ACCESS EXCLUSIVE or SHARE lock on any table.
+--
+-- Who writes what:
+--   * iam_policy.version, entry, waiver, skeleton, version_diff and
+--     approval_evidence are written only by the definer functions below, which
+--     run as medcea_owner and open with iam_policy._begin(), which sets the
+--     transaction-local marker iam_policy.transition = '<function>:<v>:<txid>'.
+--     The freeze trigger (SECURITY INVOKER, ENABLE ALWAYS) refuses any write
+--     without that marker or by another role, any DELETE (but a draft's
+--     entries, replaced by save_entry) and TRUNCATE, keeps a version on the
+--     edges of its state machine and records every status change itself
+--     (status_changed in the hash chain).
+--   * Authors (draft, edit, submit, withdraw) act through iam-api as iam_svc,
+--     with set_actor (medcea_auth._person_actor('iam_svc', ...)).
+--   * qa approves, returns, confirms and disputes with their own token through
+--     PostgREST, on the wrappers medcea.*_policy (schema medcea is the one
+--     PostgREST exposes), which only a token of the policy host's client may
+--     call (pre_request's only_rpc block and medcea_auth._rpc_client, both
+--     compiled by grants.py). The signed token is kept as evidence.
+--   * apply.sh (4.2a on) builds, applies, reverts and records as postgres
+--     through the owner-only functions, actor system:apply.
+-- Refusals: 42501 who may not, 22023 a wrong state, 23505 a race, 55000 a
+-- missing component (the access deploy's iam._changed_since).
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+-- 1. A down file (medcea_db_migrations_down_008c.sql) may have parked three
+--    tables in schema iam_policy_retired_008c: bring them back, with their rows.
+DO $$
+DECLARE t text;
+BEGIN
+    IF pg_catalog.to_regnamespace('iam_policy_retired_008c') IS NULL THEN
+        RETURN;
+    END IF;
+    FOREACH t IN ARRAY ARRAY['skeleton', 'version_diff', 'approval_evidence'] LOOP
+        IF pg_catalog.to_regclass('iam_policy_retired_008c.' || t) IS NOT NULL
+           AND pg_catalog.to_regclass('iam_policy.' || t) IS NULL THEN
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy_retired_008c.%I SET SCHEMA iam_policy', t);
+        END IF;
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class
+                    WHERE relnamespace = 'iam_policy_retired_008c'::regnamespace) THEN
+        DROP SCHEMA iam_policy_retired_008c;
+    END IF;
+END $$;
+
+-- 2. iam_policy.entry, one row per level. 008a's shape (levels char(1)[],
+--    applies_to) cannot hold {R: own_unit, O: assigned_run}; nothing ever wrote
+--    it, so the old shape is dropped while empty, and refused otherwise. The
+--    guard tests the column, never the rows, once the new shape exists.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                WHERE attrelid = pg_catalog.to_regclass('iam_policy.entry') AND attname = 'levels' AND NOT attisdropped) THEN
+        IF EXISTS (SELECT 1 FROM iam_policy.entry) THEN
+            RAISE EXCEPTION 'iam_policy.entry has rows in the pre-008c shape: nothing writes them before 008c; restore from backup or move them away'
+                USING ERRCODE = '55000';
+        END IF;
+        DROP TABLE iam_policy.entry;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS iam_policy.entry (
+    version          int NOT NULL REFERENCES iam_policy.version,
+    role             text NOT NULL REFERENCES iam_policy.role,
+    group_code       text NOT NULL REFERENCES iam_policy.resource_group,
+    level            char(1) NOT NULL CHECK (level IN ('R', 'X', 'C', 'U', 'A', 'O', 'K', 'D')),
+    constraint_name  text,             -- NULL = unconstrained at this level
+    PRIMARY KEY (version, role, group_code, level)
+);
+
+-- 3. Added columns, each only when pg_attribute lacks it (no lock otherwise).
+--    resource_group.retired: _sync_skeleton marks a group that left the skeleton,
+--    as role.retired (008a) does for a role.
+DO $$
+DECLARE c text[];
+BEGIN
+    FOREACH c SLICE 1 IN ARRAY ARRAY[
+        ['waiver', 'objects', $t$text[] NOT NULL DEFAULT '{}'$t$],
+        ['resource_group', 'retired', 'boolean NOT NULL DEFAULT false'],
+        ['version', 'kind', $t$text NOT NULL DEFAULT 'change'$t$],
+        ['version', 'based_on', 'integer'],
+        ['version', 'rollback_of', 'integer'],
+        ['version', 'groups', 'text[]'],
+        ['version', 'roles', 'text[]'],
+        ['version', 'created_by_person', 'text'],
+        ['version', 'created_by_name', 'text'],
+        ['version', 'created_at', 'timestamptz NOT NULL DEFAULT now()'],
+        ['version', 'submitted_by_sub', 'uuid'],
+        ['version', 'submitted_by_name', 'text'],
+        ['version', 'submitted_at', 'timestamptz'],
+        ['version', 'approved_by_name', 'text'],
+        ['version', 'approval_note', 'text'],
+        ['version', 'approved_iat', 'double precision'],
+        ['version', 'returned_at', 'timestamptz'],
+        ['version', 'return_note', 'text'],
+        ['version', 'withdrawn_at', 'timestamptz'],
+        ['version', 'withdrawn_by_sub', 'uuid'],
+        ['version', 'withdrawn_by', 'text'],
+        ['version', 'superseded_at', 'timestamptz'],
+        ['version', 'confirmed_by_sub', 'uuid'],
+        ['version', 'confirm_note', 'text'],
+        ['version', 'disputed_at', 'timestamptz'],
+        ['version', 'disputed_by_person', 'text'],
+        ['version', 'dispute_note', 'text'],
+        ['version', 'entries_digest', 'text'],
+        ['version', 'skeleton_digest', 'text'],
+        ['version', 'approved_skeleton_digest', 'text'],
+        ['version', 'diff_digest', 'text'],
+        ['version', 'artefact_digests', 'jsonb'],
+        ['version', 'claimed_by_os', 'text'],
+        ['version', 'claimed_by_person', 'text'],
+        ['version', 'claimed_by_sub', 'uuid'],
+        ['version', 'apply_log', 'text'],
+        ['version', 'apply_log_sha256', 'text']] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                        WHERE attrelid = pg_catalog.to_regclass('iam_policy.' || c[1]) AND attname = c[2] AND NOT attisdropped) THEN
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.%I ADD COLUMN %I %s', c[1], c[2], c[3]);
+        END IF;
+    END LOOP;
+END $$;
+
+-- 4. New tables. Owner-written through the functions below only.
+CREATE TABLE IF NOT EXISTS iam_policy.skeleton (
+    digest               text PRIMARY KEY,      -- sha256 of the canonical skeleton (compiler/source.py)
+    body                 jsonb NOT NULL,
+    git_commit           text,
+    compiler_digest      text,
+    accepted_at          timestamptz,           -- NULL: proposed (a skeleton version), never accepted
+    accepted_event       bigint,                -- iam_policy.history event_id of skeleton_accepted
+    reviewed_by_version  int                    -- the skeleton version qa approved, if any
+);
+CREATE TABLE IF NOT EXISTS iam_policy.version_diff (
+    version      int PRIMARY KEY REFERENCES iam_policy.version,
+    diff         jsonb NOT NULL,
+    diff_digest  text NOT NULL,
+    computed_on  text NOT NULL CHECK (computed_on = 'host')
+);
+CREATE TABLE IF NOT EXISTS iam_policy.approval_evidence (
+    version      int REFERENCES iam_policy.version,
+    history_id   bigint,
+    event        text NOT NULL,
+    jws          text NOT NULL,
+    claims       jsonb NOT NULL,
+    recorded_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (version, history_id)
+);
+REVOKE ALL ON iam_policy.entry, iam_policy.skeleton, iam_policy.version_diff, iam_policy.approval_evidence
+    FROM PUBLIC, anon, authenticator;
+
+-- 5. iam_policy.version: named CHECKs, replaced only when pg_get_constraintdef()
+--    differs from the wanted text (deparsed from a temporary copy of the table,
+--    so the comparison never depends on how PostgreSQL prints an expression);
+--    foreign keys and the one-open index added only when their name is missing.
+DO $$
+DECLARE r record; want text; have text;
+BEGIN
+    CREATE TEMPORARY TABLE iam_008c_shape (LIKE iam_policy.version) ON COMMIT DROP;
+    FOR r IN SELECT * FROM (VALUES
+        ('version_status_check', $c$status IN ('draft', 'submitted', 'approved', 'applied', 'superseded', 'withdrawn')$c$),
+        ('version_kind_check', $c$kind IN ('bootstrap', 'change', 'skeleton', 'rollback')$c$),
+        ('version_rollback_check', $c$(kind = 'rollback') = (rollback_of IS NOT NULL)$c$),
+        ('version_built_check', $c$kind NOT IN ('bootstrap', 'rollback') OR status IN ('draft', 'applied', 'superseded', 'withdrawn')$c$)
+    ) v(name, expr) LOOP
+        EXECUTE pg_catalog.format('ALTER TABLE pg_temp.iam_008c_shape ADD CONSTRAINT %I CHECK (%s)', r.name, r.expr);
+        SELECT pg_catalog.pg_get_constraintdef(c.oid) INTO want FROM pg_catalog.pg_constraint c
+         WHERE c.conrelid = 'pg_temp.iam_008c_shape'::regclass AND c.conname = r.name;
+        have := NULL;
+        SELECT pg_catalog.pg_get_constraintdef(c.oid) INTO have FROM pg_catalog.pg_constraint c
+         WHERE c.conrelid = 'iam_policy.version'::regclass AND c.conname = r.name;
+        IF have IS DISTINCT FROM want THEN
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.version DROP CONSTRAINT IF EXISTS %I', r.name);
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.version ADD CONSTRAINT %I CHECK (%s)', r.name, r.expr);
+        END IF;
+    END LOOP;
+    DROP TABLE pg_temp.iam_008c_shape;
+    FOR r IN SELECT * FROM (VALUES
+        ('version_based_on_fkey', 'FOREIGN KEY (based_on) REFERENCES iam_policy.version (version)'),
+        ('version_rollback_of_fkey', 'FOREIGN KEY (rollback_of) REFERENCES iam_policy.version (version)'),
+        ('version_skeleton_digest_fkey', 'FOREIGN KEY (skeleton_digest) REFERENCES iam_policy.skeleton (digest)'),
+        ('version_approved_skeleton_fkey', 'FOREIGN KEY (approved_skeleton_digest) REFERENCES iam_policy.skeleton (digest)')
+    ) v(name, def) LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c
+                        WHERE c.conrelid = 'iam_policy.version'::regclass AND c.conname = r.name) THEN
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.version ADD CONSTRAINT %I %s', r.name, r.def);
+        END IF;
+    END LOOP;
+    -- one change or skeleton version in flight; bootstrap and rollback versions are
+    -- built and applied in one transaction and never count
+    IF pg_catalog.to_regclass('iam_policy.one_open') IS NULL THEN
+        CREATE UNIQUE INDEX one_open ON iam_policy.version ((true))
+            WHERE status IN ('draft', 'submitted', 'approved') AND kind IN ('change', 'skeleton');
+    END IF;
+END $$;
+
+-- 6. Functions. Every one SET search_path = pg_catalog, pg_temp, with qualified
+--    names. Owner-only unless the policy grants EXECUTE (defaults.yaml: the
+--    iam_policy group's members and infrastructure_functions).
+
+-- The hash chain's writer (008b B16's body, unchanged) is owner-only from 008c on:
+-- iam_policy._append_history. iam_policy.append_history, which iam_svc may
+-- execute (iam-api's mqtt_credential_issued; defaults.yaml), is a filter in
+-- front of it that refuses every event the policy's versions are read from
+-- (new_draft's guard, _authors, audit_versions, the health rules): those are
+-- written only by the functions below, through _append_history. A definer
+-- function cannot tell its caller (current_user is medcea_owner either way), so
+-- the line is the function, not the caller.
+CREATE OR REPLACE FUNCTION iam_policy._append_history(p_event text, p_payload jsonb, p_reason text)
+RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam_policy, pg_temp AS $$
+DECLARE
+    v_id      bigint;
+    v_at      timestamptz := now();
+    a         record;
+    v_sub     uuid;
+    v_person  text;
+    v_name    text;
+    v_version int;
+    v_prev    text;
+BEGIN
+    IF coalesce(btrim(p_event), '') = '' THEN
+        RAISE EXCEPTION '_append_history: event is required';
+    END IF;
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION '_append_history needs READ COMMITTED (is %): a transaction snapshot could miss the head',
+            current_setting('transaction_isolation');
+    END IF;
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.sub IS NULL THEN
+        v_name := 'db:' || session_user;
+    ELSIF a.sub ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+        v_sub := a.sub::uuid; v_person := a.person; v_name := a.name;
+    ELSE
+        v_person := a.person; v_name := a.sub;
+    END IF;
+    p_payload := coalesce(p_payload, '{}'::jsonb);
+    IF jsonb_typeof(p_payload -> 'version') = 'number' THEN
+        v_version := (p_payload ->> 'version')::int;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtext('iam_policy.history'));
+    SELECT h.hash INTO v_prev FROM iam_policy.history h ORDER BY h.event_id DESC LIMIT 1;
+    v_prev := coalesce(v_prev, repeat('0', 64));
+    v_id := nextval(pg_get_serial_sequence('iam_policy.history', 'event_id'));
+    INSERT INTO iam_policy.history
+        (event_id, at, actor_sub, actor_person, actor_name, event, version, reason, payload, prev_hash, hash)
+    VALUES (v_id, v_at, v_sub, v_person, v_name, p_event, v_version, p_reason, p_payload, v_prev,
+            encode(sha256(convert_to(iam_policy.history_record(
+                v_id, v_at, v_sub, v_person, v_name, p_event, v_version, p_reason, p_payload, v_prev), 'UTF8')), 'hex'));
+    RETURN v_id;
+END $$;
+CREATE OR REPLACE FUNCTION iam_policy.append_history(p_event text, p_payload jsonb, p_reason text)
+RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF p_event IN ('draft_created', 'entry_saved', 'submitted', 'approved', 'returned', 'withdrawn',
+                   'confirmed', 'disputed', 'status_changed', 'apply_started', 'applied', 'partial_apply',
+                   'bootstrap_applied', 'apply_reverted', 'break_glass_seen', 'apply_deferred', 'account_seeded')
+       OR p_event LIKE 'waiver\_%' OR p_event LIKE 'skeleton\_%' THEN
+        RAISE EXCEPTION 'append_history: % is a policy version event, written only by the policy functions', p_event
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN iam_policy._append_history(p_event, p_payload, p_reason);
+END $$;
+
+-- The compiled medcea_auth._rpc_client(text) (grants.py, database deploy step 4a)
+-- replaces this stub, created only when missing: before the first compile no
+-- wrapper accepts any client.
+DO $$
+BEGIN
+    IF pg_catalog.to_regprocedure('medcea_auth._rpc_client(text)') IS NULL THEN
+        CREATE FUNCTION medcea_auth._rpc_client(p_function text) RETURNS text
+            LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $f$ SELECT NULL::text $f$;
+    END IF;
+END $$;
+
+-- _begin(function, version): marks this transaction's writes as the named
+-- policy function's. SECURITY INVOKER on purpose: called from a definer
+-- function it sees medcea_owner, called by anyone else it refuses.
+CREATE OR REPLACE FUNCTION iam_policy._begin(p_function text, p_version integer) RETURNS void
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF current_user <> 'medcea_owner' THEN
+        RAISE EXCEPTION 'iam_policy._begin: only the policy functions (medcea_owner) write the policy, not %', current_user
+            USING ERRCODE = '42501';
+    END IF;
+    PERFORM pg_catalog.set_config('iam_policy.transition',
+        p_function || ':' || coalesce(p_version::text, '') || ':' || pg_catalog.txid_current()::text, true);
+END $$;
+
+-- _edge_ok(from, to, kind, function): the version state machine (design §2.3).
+-- from NULL is the INSERT; function NULL asks only whether the edge exists
+-- (audit_versions, for events recorded without one).
+CREATE OR REPLACE FUNCTION iam_policy._edge_ok(p_from text, p_to text, p_kind text, p_function text) RETURNS boolean
+    LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
+    SELECT EXISTS (SELECT 1 FROM (VALUES
+        (NULL::text,   'draft',      '{change}'::text[],                          '{new_draft}'::text[]),
+        (NULL,         'draft',      '{bootstrap,rollback}',                      '{_build_version}'),
+        (NULL,         'submitted',  '{skeleton}',                                '{_propose_skeleton}'),
+        ('draft',      'submitted',  '{change}',                                  '{submit}'),
+        ('draft',      'withdrawn',  '{change}',                                  '{withdraw,_withdraw_open}'),
+        ('submitted',  'draft',      '{change}',                                  '{return_version}'),
+        ('submitted',  'withdrawn',  '{skeleton}',                                '{return_version}'),
+        ('submitted',  'approved',   '{change,skeleton}',                         '{approve}'),
+        ('submitted',  'withdrawn',  '{change,skeleton}',                         '{withdraw,_withdraw_open}'),
+        ('approved',   'withdrawn',  '{change,skeleton}',                         '{withdraw,_withdraw_open}'),
+        ('approved',   'applied',    '{change,skeleton}',                         '{_mark_applied}'),
+        ('draft',      'applied',    '{bootstrap,rollback}',                      '{_mark_applied}'),
+        ('applied',    'superseded', '{change,skeleton,bootstrap,rollback}',      '{_mark_applied}'),
+        ('applied',    'approved',   '{change,skeleton}',                         '{_mark_reverted}'),
+        ('superseded', 'applied',    '{change,skeleton,bootstrap,rollback}',      '{_mark_reverted}'),
+        ('applied',    'withdrawn',  '{bootstrap,rollback}',                      '{_mark_reverted}')
+    ) e(f, t, kinds, fns)
+     WHERE e.f IS NOT DISTINCT FROM p_from AND e.t = p_to AND p_kind = ANY (e.kinds)
+       AND (p_function IS NULL OR p_function = ANY (e.fns)))
+$$;
+
+-- _accepted(): the digest of the skeleton this host accepted last, or NULL.
+CREATE OR REPLACE FUNCTION iam_policy._accepted() RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT s.digest FROM iam_policy.skeleton s WHERE s.accepted_at IS NOT NULL
+     ORDER BY s.accepted_at DESC, s.accepted_event DESC NULLS LAST LIMIT 1
+$$;
+
+-- freeze_policy(): see the header. SECURITY INVOKER, so current_user is the
+-- writer: medcea_owner inside a definer function, anyone else otherwise.
+CREATE OR REPLACE FUNCTION iam_policy.freeze_policy() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    m        text := pg_catalog.current_setting('iam_policy.transition', true);
+    fn       text;
+    st       text;
+    changed  text[];
+    allowed  text[];
+BEGIN
+    IF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'iam_policy.% cannot be truncated', TG_TABLE_NAME USING ERRCODE = '42501';
+    END IF;
+    fn := pg_catalog.split_part(coalesce(m, ''), ':', 1);
+    IF current_user <> 'medcea_owner' OR coalesce(m, '') = ''
+       OR pg_catalog.split_part(m, ':', 3) IS DISTINCT FROM pg_catalog.txid_current()::text THEN
+        RAISE EXCEPTION 'iam_policy.% is written only by the policy functions (% refused)', TG_TABLE_NAME, TG_OP
+            USING ERRCODE = '42501';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        -- a draft's cell is replaced (save_entry), nothing else is ever deleted
+        IF TG_TABLE_NAME IN ('entry', 'waiver') AND fn IN ('save_entry', 'save_waiver', 'drop_waiver')
+           AND (SELECT v.status FROM iam_policy.version v WHERE v.version = OLD.version) = 'draft' THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'iam_policy.% rows are never deleted', TG_TABLE_NAME USING ERRCODE = '42501';
+    END IF;
+    IF TG_TABLE_NAME IN ('entry', 'waiver') THEN
+        IF TG_OP = 'UPDATE' AND NEW.version IS DISTINCT FROM OLD.version THEN
+            RAISE EXCEPTION 'iam_policy.% rows never move to another version', TG_TABLE_NAME USING ERRCODE = '22023';
+        END IF;
+        SELECT v.status INTO st FROM iam_policy.version v WHERE v.version = NEW.version;
+        IF st = 'draft' OR (TG_OP = 'INSERT' AND fn = '_propose_skeleton' AND st = 'submitted') THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'version % is %: its entries and waivers are frozen', NEW.version, coalesce(st, 'missing')
+            USING ERRCODE = '22023';
+    ELSIF TG_TABLE_NAME = 'skeleton' THEN
+        IF TG_OP = 'INSERT' AND fn IN ('_accept_skeleton', '_propose_skeleton') THEN
+            RETURN NEW;
+        END IF;
+        IF TG_OP = 'UPDATE' AND fn = '_accept_skeleton' AND NEW.digest = OLD.digest AND NEW.body = OLD.body
+           AND NEW.git_commit IS NOT DISTINCT FROM OLD.git_commit
+           AND NEW.compiler_digest IS NOT DISTINCT FROM OLD.compiler_digest THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'iam_policy.skeleton: a skeleton never changes (% by %)', TG_OP, fn USING ERRCODE = '42501';
+    ELSIF TG_TABLE_NAME = 'version_diff' THEN
+        IF TG_OP = 'INSERT' AND fn = '_propose_skeleton' THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'iam_policy.version_diff: a stored diff never changes' USING ERRCODE = '42501';
+    ELSIF TG_TABLE_NAME = 'approval_evidence' THEN
+        IF TG_OP = 'INSERT' AND fn IN ('approve', 'return_version', 'confirm_applied', 'dispute_applied') THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'iam_policy.approval_evidence is append-only' USING ERRCODE = '42501';
+    END IF;
+    -- iam_policy.version: one edge per statement, only that edge's columns
+    IF TG_OP = 'INSERT' THEN
+        IF NOT iam_policy._edge_ok(NULL, NEW.status, NEW.kind, fn) THEN
+            RAISE EXCEPTION 'a % version cannot start as % (by %)', NEW.kind, NEW.status, fn USING ERRCODE = '22023';
+        END IF;
+        PERFORM iam_policy._append_history('status_changed',
+            pg_catalog.jsonb_build_object('version', NEW.version, 'from', NULL, 'to', NEW.status, 'kind', NEW.kind,
+                                          'by_function', fn), NULL);
+        RETURN NEW;
+    END IF;
+    SELECT coalesce(pg_catalog.array_agg(n.key ORDER BY n.key), '{}') INTO changed
+      FROM pg_catalog.jsonb_each(pg_catalog.to_jsonb(NEW)) n
+     WHERE n.value IS DISTINCT FROM pg_catalog.to_jsonb(OLD) -> n.key;
+    allowed := CASE fn
+        WHEN 'save_entry'       THEN '{checker_verdict,checker_digest}'
+        WHEN 'submit'           THEN '{status,submitted_by_sub,submitted_by_person,submitted_by_name,submitted_at,skeleton_digest,entries_digest}'
+        WHEN 'withdraw'         THEN '{status,withdrawn_at,withdrawn_by_sub,withdrawn_by}'
+        WHEN '_withdraw_open'   THEN '{status,withdrawn_at,withdrawn_by_sub,withdrawn_by}'
+        WHEN 'return_version'   THEN '{status,returned_at,return_note,withdrawn_at,withdrawn_by_sub,withdrawn_by}'
+        WHEN 'approve'          THEN '{status,approved_by_person,approved_by_sub,approved_by_name,approved_at,approval_note,approved_iat,diff_digest,approved_skeleton_digest}'
+        WHEN 'confirm_applied'  THEN '{confirmed_by_person,confirmed_by_sub,confirmed_at,confirm_note}'
+        WHEN 'dispute_applied'  THEN '{disputed_at,disputed_by_person,dispute_note}'
+        WHEN '_build_version'   THEN '{entries_digest}'
+        WHEN '_propose_skeleton' THEN '{entries_digest}'
+        WHEN '_mark_applied'    THEN '{status,applied_at,superseded_at,artefact_digests,claimed_by_os,claimed_by_person,claimed_by_sub,apply_log,apply_log_sha256}'
+        WHEN '_mark_reverted'   THEN '{status,applied_at,superseded_at,withdrawn_at,withdrawn_by}'
+        ELSE '{}' END::text[];
+    IF NOT changed <@ allowed THEN
+        RAISE EXCEPTION 'version %: % may not change %', NEW.version, fn, pg_catalog.array_to_string(changed, ', ')
+            USING ERRCODE = '42501';
+    END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        IF NOT iam_policy._edge_ok(OLD.status, NEW.status, NEW.kind, fn) THEN
+            RAISE EXCEPTION 'version % (%): % -> % is not a transition % makes', NEW.version, NEW.kind, OLD.status, NEW.status, fn
+                USING ERRCODE = '22023';
+        END IF;
+        PERFORM iam_policy._append_history('status_changed',
+            pg_catalog.jsonb_build_object('version', NEW.version, 'from', OLD.status, 'to', NEW.status, 'kind', NEW.kind,
+                                          'by_function', fn), NULL);
+    END IF;
+    RETURN NEW;
+END $$;
+
+-- _changed_since(sub, person, iat): iam._changed_since (apps/access/access_db.sql)
+-- when the access component is installed; 55000 otherwise, so 008c applies
+-- without schema iam and a policy change without it fails closed.
+CREATE OR REPLACE FUNCTION iam_policy._changed_since(p_sub text, p_person text, p_iat double precision) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE r boolean;
+BEGIN
+    IF pg_catalog.to_regprocedure('iam._changed_since(text,text,double precision)') IS NULL THEN
+        RAISE EXCEPTION 'policy changes need the access component: run ./apps/access/deploy.sh' USING ERRCODE = '55000';
+    END IF;
+    EXECUTE 'SELECT iam._changed_since($1, $2, $3)' INTO r USING p_sub, p_person, p_iat;
+    RETURN coalesce(r, true);
+END $$;
+
+-- _authors(v): the actors of the version's draft_created, entry_saved,
+-- waiver_saved, waiver_dropped and submitted events; for a skeleton version
+-- also the claimed --by person (design §1.2).
+CREATE OR REPLACE FUNCTION iam_policy._authors(p_version integer) RETURNS TABLE (sub text, person text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT DISTINCT h.actor_sub::text, h.actor_person FROM iam_policy.history h
+     WHERE h.version = p_version
+       AND h.event IN ('draft_created', 'entry_saved', 'waiver_saved', 'waiver_dropped', 'submitted')
+       AND (h.actor_sub IS NOT NULL OR h.actor_person IS NOT NULL)
+    UNION
+    SELECT v.created_by_sub::text, v.created_by_person FROM iam_policy.version v
+     WHERE v.version = p_version AND v.kind = 'skeleton'
+       AND (v.created_by_sub IS NOT NULL OR v.created_by_person IS NOT NULL)
+$$;
+
+-- entries_digest(v): sha256 of the canonical jsonb text of {kind, groups, roles,
+-- entries, waivers}: entries [role, group, level, constraint] ordered by role,
+-- group, level (bytewise), waivers every column but version, ordered by id.
+-- compiler/source.py entries_digest() reproduces it (fixture probe P2).
+CREATE OR REPLACE FUNCTION iam_policy.entries_digest(p_version integer) RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object(
+        'kind', v.kind, 'groups', pg_catalog.to_jsonb(v.groups), 'roles', pg_catalog.to_jsonb(v.roles),
+        'entries', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(e.role, e.group_code, e.level::text, e.constraint_name)
+                                                  ORDER BY e.role COLLATE "C", e.group_code COLLATE "C", e.level::text COLLATE "C")
+                               FROM iam_policy.entry e WHERE e.version = v.version), '[]'::jsonb),
+        'waivers', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version' ORDER BY w.id COLLATE "C")
+                               FROM iam_policy.waiver w WHERE w.version = v.version), '[]'::jsonb)
+    )::text, 'UTF8')), 'hex')
+      FROM iam_policy.version v WHERE v.version = p_version
+$$;
+
+-- _put_rows(v, entries, waivers): a new version's rows from jsonb
+-- ([{role, group_code, level, constraint_name}], [{id, invariant, subject,
+-- group_code (or group), target, levels, review_by, rationale, controls, objects}]),
+-- the shapes of compiler/source.py entries_and_waivers(). Its callers hold the marker.
+CREATE OR REPLACE FUNCTION iam_policy._put_rows(p_version integer, p_entries jsonb, p_waivers jsonb) RETURNS void
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF pg_catalog.jsonb_typeof(coalesce(p_entries, '[]')) <> 'array' OR pg_catalog.jsonb_typeof(coalesce(p_waivers, '[]')) <> 'array' THEN
+        RAISE EXCEPTION 'entries and waivers must be JSON arrays' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO iam_policy.entry (version, role, group_code, level, constraint_name)
+    SELECT p_version, e ->> 'role', e ->> 'group_code', e ->> 'level', nullif(e ->> 'constraint_name', '')
+      FROM pg_catalog.jsonb_array_elements(coalesce(p_entries, '[]')) e;
+    INSERT INTO iam_policy.waiver (version, id, invariant, subject, group_code, target, levels, review_by,
+                                   rationale, controls, objects)
+    SELECT p_version, w ->> 'id', w ->> 'invariant', w ->> 'subject', coalesce(w ->> 'group_code', w ->> 'group'),
+           w ->> 'target',
+           ARRAY(SELECT pg_catalog.jsonb_array_elements_text(coalesce(w -> 'levels', '[]')))::char(1)[],
+           (w ->> 'review_by')::date, w ->> 'rationale', w ->> 'controls',
+           ARRAY(SELECT pg_catalog.jsonb_array_elements_text(coalesce(w -> 'objects', '[]')))
+      FROM pg_catalog.jsonb_array_elements(coalesce(p_waivers, '[]')) w;
+END $$;
+
+-- _evidence(v, event): the signed token behind this request (PostgREST's
+-- request headers, Authorization: the raw JWS) after checking that its payload
+-- is the verified claims' (sub, iat, jti, azp). Returns {source, sub, iat, jti,
+-- azp, jws_sha256, jws}; the caller appends its event without `jws` and stores
+-- the row in iam_policy.approval_evidence with that event's id. The signature
+-- is checked by apply.sh against the realm keys, not here.
+CREATE OR REPLACE FUNCTION iam_policy._evidence(p_version integer, p_event text) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    c    jsonb;
+    h    text;
+    jws  text;
+    b    text;
+    pl   jsonb;
+BEGIN
+    c := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;
+    BEGIN
+        h := nullif(pg_catalog.current_setting('request.headers', true), '')::json ->> 'authorization';
+    EXCEPTION WHEN others THEN
+        h := NULL;
+    END;
+    IF c IS NULL OR h IS NULL OR h !~* '^bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$' THEN
+        RAISE EXCEPTION 'version %: % needs the signed token as evidence: use the Policy UI', p_version, p_event
+            USING ERRCODE = '42501';
+    END IF;
+    jws := pg_catalog.substr(h, 8);
+    b := pg_catalog.translate(pg_catalog.split_part(jws, '.', 2), '-_', '+/');
+    b := b || pg_catalog.repeat('=', (4 - pg_catalog.length(b) % 4) % 4);
+    BEGIN
+        pl := pg_catalog.convert_from(pg_catalog.decode(b, 'base64'), 'UTF8')::jsonb;
+    EXCEPTION WHEN others THEN
+        pl := NULL;
+    END;
+    IF pl IS NULL OR pg_catalog.jsonb_typeof(pl) <> 'object'
+       OR (pl ->> 'sub') IS DISTINCT FROM (c ->> 'sub') OR (pl ->> 'iat') IS DISTINCT FROM (c ->> 'iat')
+       OR (pl ->> 'jti') IS DISTINCT FROM (c ->> 'jti') OR (pl ->> 'azp') IS DISTINCT FROM (c ->> 'azp')
+       OR (c ->> 'sub') IS NULL OR (c ->> 'iat') IS NULL THEN
+        RAISE EXCEPTION 'version %: the token sent is not the one verified for this request', p_version
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('source', 'token', 'sub', c ->> 'sub', 'iat', c -> 'iat', 'jti', c ->> 'jti',
+        'azp', c ->> 'azp', 'jws_sha256', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(jws, 'UTF8')), 'hex'),
+        'jws', jws);
+END $$;
+
+-- ── author functions (iam-api as iam_svc, set_actor from the verified token) ──
+
+-- new_draft(from, reason, iat, cells, waivers): a change version as a draft,
+-- from the applied version, the factory defaults iam-api passes, or version N.
+-- Keys of the accepted skeleton the base does not cover get the proposed cells.
+CREATE OR REPLACE FUNCTION iam_policy.new_draft(p_from text, p_reason text, p_iat double precision,
+    p_cells jsonb, p_waivers jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a        record;
+    applied  integer;
+    base     integer;
+    open_v   integer;
+    last_ev  text;
+    v        integer;
+    skel     text;
+    sgroups  text[];
+    sroles   text[];
+    bgroups  text[];
+    broles   text[];
+    ents     jsonb;
+    wvs      jsonb;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('new_draft', NULL);
+    SELECT * INTO a FROM medcea_auth._person_actor('iam_svc', 'iam_policy', 'C');
+    IF iam_policy._changed_since(a.sub, a.person, p_iat) THEN
+        RAISE EXCEPTION 'your access changed since you signed in: reload the page' USING ERRCODE = '42501';
+    END IF;
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT x.version INTO applied FROM iam_policy.version x WHERE x.status = 'applied';
+    IF applied IS NULL THEN
+        RAISE EXCEPTION 'no policy version is applied yet: the host operator runs ./apps/iam/apply.sh --bootstrap first'
+            USING ERRCODE = '22023';
+    END IF;
+    SELECT h.event INTO last_ev FROM iam_policy.history h WHERE h.version = applied
+       AND h.event <> 'status_changed' ORDER BY h.event_id DESC LIMIT 1;
+    IF last_ev IN ('apply_started', 'partial_apply') THEN
+        RAISE EXCEPTION 'version % is being applied (%): wait for apply.sh, or have the host operator run ./apps/iam/apply.sh --resume',
+            applied, last_ev USING ERRCODE = '22023';
+    END IF;
+    SELECT x.version INTO open_v FROM iam_policy.version x
+     WHERE x.status IN ('draft', 'submitted', 'approved') AND x.kind IN ('change', 'skeleton');
+    IF open_v IS NOT NULL THEN
+        RAISE EXCEPTION 'version % is still open: take it through or withdraw it first', open_v USING ERRCODE = '23505';
+    END IF;
+    skel := iam_policy._accepted();
+    SELECT ARRAY(SELECT k FROM pg_catalog.jsonb_object_keys(s.body -> 'resource_groups') k ORDER BY k COLLATE "C"),
+           ARRAY(SELECT k FROM pg_catalog.jsonb_object_keys(s.body -> 'roles') k ORDER BY k COLLATE "C")
+      INTO sgroups, sroles FROM iam_policy.skeleton s WHERE s.digest = skel;
+    IF p_from = 'applied' OR p_from ~ '^[0-9]+$' THEN
+        base := CASE WHEN p_from = 'applied' THEN applied ELSE p_from::integer END;
+        IF NOT EXISTS (SELECT 1 FROM iam_policy.version x WHERE x.version = base) THEN
+            RAISE EXCEPTION 'no policy version %', base USING ERRCODE = '22023';
+        END IF;
+        SELECT x.groups, x.roles INTO bgroups, broles FROM iam_policy.version x WHERE x.version = base;
+        SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('role', e.role, 'group_code', e.group_code,
+                   'level', e.level::text, 'constraint_name', e.constraint_name)), '[]')
+          INTO ents FROM iam_policy.entry e WHERE e.version = base;
+        SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version'), '[]')
+          INTO wvs FROM iam_policy.waiver w WHERE w.version = base;
+        -- keys the base does not cover (a group or role git added since) get the proposed cells
+        SELECT ents || coalesce(pg_catalog.jsonb_agg(c), '[]') INTO ents
+          FROM pg_catalog.jsonb_array_elements(coalesce(p_cells, '[]')) c
+         WHERE NOT ((c ->> 'group_code') = ANY (coalesce(bgroups, '{}')) AND (c ->> 'role') = ANY (coalesce(broles, '{}')))
+           AND (c ->> 'group_code') = ANY (coalesce(sgroups, '{}')) AND (c ->> 'role') = ANY (coalesce(sroles, '{}'));
+    ELSIF p_from = 'defaults' THEN
+        ents := coalesce(p_cells, '[]');
+        wvs := coalesce(p_waivers, '[]');
+    ELSE
+        RAISE EXCEPTION 'a draft starts from applied, defaults or a version number, not %', p_from USING ERRCODE = '22023';
+    END IF;
+    SELECT coalesce(max(x.version), 0) + 1 INTO v FROM iam_policy.version x;
+    INSERT INTO iam_policy.version (version, status, kind, reason, based_on, groups, roles,
+                                    created_by_sub, created_by_person, created_by_name)
+    VALUES (v, 'draft', 'change', p_reason, applied, sgroups, sroles, a.sub::uuid, a.person, a.name);
+    PERFORM iam_policy._put_rows(v, ents, wvs);
+    PERFORM iam_policy._append_history('draft_created',
+        pg_catalog.jsonb_build_object('version', v, 'base', base, 'from', p_from), p_reason);
+    RETURN v;
+END $$;
+
+-- save_entry(v, role, group, levels, reason, verdict, iat): replaces one cell of a
+-- draft; p_levels {"R": null, "O": "assigned_run"} ({} = N); p_verdict {ok,
+-- errors[], checker_digest} is iam-api's checker run, advisory here and
+-- required ok by submit().
+CREATE OR REPLACE FUNCTION iam_policy.save_entry(p_version integer, p_role text, p_group text, p_levels jsonb,
+    p_reason text, p_verdict jsonb, p_iat double precision) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a       record;
+    v       iam_policy.version;
+    v_before  jsonb;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('save_entry', p_version);
+    SELECT * INTO a FROM medcea_auth._person_actor('iam_svc', 'iam_policy', 'U');
+    IF iam_policy._changed_since(a.sub, a.person, p_iat) THEN
+        RAISE EXCEPTION 'your access changed since you signed in: reload the page' USING ERRCODE = '42501';
+    END IF;
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.status <> 'draft' OR v.kind <> 'change' THEN
+        RAISE EXCEPTION 'version % is not a draft', p_version USING ERRCODE = '22023';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM iam_policy.role r WHERE r.code = p_role AND NOT r.retired)
+       OR NOT EXISTS (SELECT 1 FROM iam_policy.resource_group g WHERE g.code = p_group AND NOT g.retired) THEN
+        RAISE EXCEPTION 'no role % or group % in the accepted skeleton', p_role, p_group USING ERRCODE = '22023';
+    END IF;
+    IF pg_catalog.jsonb_typeof(p_levels) IS DISTINCT FROM 'object'
+       OR EXISTS (SELECT 1 FROM pg_catalog.jsonb_each(p_levels) l
+                   WHERE l.key NOT IN ('R', 'X', 'C', 'U', 'A', 'O', 'K', 'D')
+                      OR pg_catalog.jsonb_typeof(l.value) NOT IN ('null', 'string')) THEN
+        RAISE EXCEPTION 'levels must be an object {level: constraint or null}' USING ERRCODE = '22023';
+    END IF;
+    SELECT coalesce(pg_catalog.jsonb_object_agg(e.level::text, e.constraint_name), '{}') INTO v_before
+      FROM iam_policy.entry e WHERE e.version = p_version AND e.role = p_role AND e.group_code = p_group;
+    DELETE FROM iam_policy.entry e WHERE e.version = p_version AND e.role = p_role AND e.group_code = p_group;
+    INSERT INTO iam_policy.entry (version, role, group_code, level, constraint_name)
+    SELECT p_version, p_role, p_group, l.key, nullif(l.value #>> '{}', '') FROM pg_catalog.jsonb_each(p_levels) l;
+    UPDATE iam_policy.version x SET checker_verdict = coalesce((p_verdict ->> 'ok')::boolean, false),
+                                    checker_digest = p_verdict ->> 'checker_digest'
+     WHERE x.version = p_version;
+    PERFORM iam_policy._append_history('entry_saved',
+        pg_catalog.jsonb_build_object('version', p_version, 'role', p_role, 'group', p_group, 'before', v_before,
+                                      'after', p_levels, 'verdict_ok', coalesce((p_verdict ->> 'ok')::boolean, false)),
+        p_reason);
+END $$;
+
+-- submit(v, reason, iat): draft -> submitted; stores the accepted skeleton and
+-- the entries digest qa will approve; returns the digest.
+CREATE OR REPLACE FUNCTION iam_policy.submit(p_version integer, p_reason text, p_iat double precision) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a     record;
+    v     iam_policy.version;
+    d     text;
+    skel  text;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('submit', p_version);
+    SELECT * INTO a FROM medcea_auth._person_actor('iam_svc', 'iam_policy', 'U');
+    IF iam_policy._changed_since(a.sub, a.person, p_iat) THEN
+        RAISE EXCEPTION 'your access changed since you signed in: reload the page' USING ERRCODE = '42501';
+    END IF;
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.status <> 'draft' OR v.kind <> 'change' THEN
+        RAISE EXCEPTION 'version % is not a draft', p_version USING ERRCODE = '22023';
+    END IF;
+    IF v.checker_verdict IS NOT TRUE THEN
+        RAISE EXCEPTION 'version % does not pass the checker: fix the errors it lists first', p_version USING ERRCODE = '22023';
+    END IF;
+    skel := iam_policy._accepted();
+    IF skel IS NULL THEN
+        RAISE EXCEPTION 'this host has accepted no platform skeleton yet' USING ERRCODE = '22023';
+    END IF;
+    d := iam_policy.entries_digest(p_version);
+    UPDATE iam_policy.version x SET status = 'submitted', submitted_by_sub = a.sub::uuid, submitted_by_person = a.person,
+           submitted_by_name = a.name, submitted_at = pg_catalog.now(), skeleton_digest = skel, entries_digest = d
+     WHERE x.version = p_version;
+    PERFORM iam_policy._append_history('submitted',
+        pg_catalog.jsonb_build_object('version', p_version, 'entries_digest', d), p_reason);
+    RETURN d;
+END $$;
+
+-- withdraw(v, reason, iat): an author takes an open change or skeleton version back.
+CREATE OR REPLACE FUNCTION iam_policy.withdraw(p_version integer, p_reason text, p_iat double precision) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a  record;
+    v  iam_policy.version;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('withdraw', p_version);
+    SELECT * INTO a FROM medcea_auth._person_actor('iam_svc', 'iam_policy', 'U');
+    IF iam_policy._changed_since(a.sub, a.person, p_iat) THEN
+        RAISE EXCEPTION 'your access changed since you signed in: reload the page' USING ERRCODE = '42501';
+    END IF;
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.kind NOT IN ('change', 'skeleton') OR v.status NOT IN ('draft', 'submitted', 'approved')
+       OR (v.kind = 'skeleton' AND v.status = 'draft') THEN
+        RAISE EXCEPTION 'version % is not open', p_version USING ERRCODE = '22023';
+    END IF;
+    UPDATE iam_policy.version x SET status = 'withdrawn', withdrawn_at = pg_catalog.now(),
+           withdrawn_by_sub = a.sub::uuid, withdrawn_by = a.person
+     WHERE x.version = p_version;
+    PERFORM iam_policy._append_history('withdrawn', pg_catalog.jsonb_build_object('version', p_version), p_reason);
+END $$;
+
+-- ── qa functions (the person's own token through PostgREST; owner only, called
+--    by the medcea.*_policy wrappers) ─────────────────────────────────────────
+
+-- _qa(rpc): the approver and the verified claims; the token must be the policy
+-- host's (the client whose only_rpc names the wrapper).
+CREATE OR REPLACE FUNCTION iam_policy._qa(p_rpc text, OUT sub text, OUT person text, OUT name text, OUT role text,
+    OUT source text, OUT claims jsonb)
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+DECLARE a record; want text;
+BEGIN
+    SELECT * INTO a FROM medcea_auth._approver('iam_policy');
+    claims := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;
+    want := medcea_auth._rpc_client(p_rpc);
+    IF want IS NULL OR (claims ->> 'azp') IS DISTINCT FROM want THEN
+        RAISE EXCEPTION 'approve access-policy versions in the Policy UI' USING ERRCODE = '42501';
+    END IF;
+    IF iam_policy._changed_since(a.sub, a.person, (claims ->> 'iat')::double precision) THEN
+        RAISE EXCEPTION 'your access changed since you signed in: reload the page' USING ERRCODE = '42501';
+    END IF;
+    sub := a.sub; person := a.person; name := a.name; role := a.role; source := a.source;
+END $$;
+
+-- approve(v, note, entries_digest, diff_digest, skeleton_digest): submitted ->
+-- approved; binds the entries, the diff qa saw and the skeleton it was computed on.
+CREATE OR REPLACE FUNCTION iam_policy.approve(p_version integer, p_note text, p_entries_digest text,
+    p_diff_digest text, p_skeleton_digest text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a        record;
+    v        iam_policy.version;
+    applied  integer;
+    d        text;
+    want     text;
+    ev       jsonb;
+    hid      bigint;
+BEGIN
+    SELECT * INTO a FROM iam_policy._qa('approve_policy');
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('approve', p_version);
+    IF coalesce(pg_catalog.btrim(p_note), '') = '' THEN
+        RAISE EXCEPTION 'a note is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.status <> 'submitted' THEN
+        RAISE EXCEPTION 'version % is not submitted', p_version USING ERRCODE = '22023';
+    END IF;
+    SELECT x.version INTO applied FROM iam_policy.version x WHERE x.status = 'applied';
+    IF applied IS NULL THEN
+        RAISE EXCEPTION 'no policy version is applied' USING ERRCODE = '22023';
+    END IF;
+    IF v.based_on IS DISTINCT FROM applied THEN
+        RAISE EXCEPTION 'version % was drafted on version %, but version % is applied now: return it', p_version, v.based_on, applied
+            USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (SELECT 1 FROM iam_policy._authors(p_version) au WHERE au.sub = a.sub OR au.person = a.person) THEN
+        RAISE EXCEPTION 'you are an author of version %: another qa person approves it', p_version USING ERRCODE = '42501';
+    END IF;
+    d := iam_policy.entries_digest(p_version);
+    IF d IS DISTINCT FROM v.entries_digest OR d IS DISTINCT FROM p_entries_digest THEN
+        RAISE EXCEPTION 'version % changed since you opened it: reload the page', p_version USING ERRCODE = '22023';
+    END IF;
+    want := CASE WHEN v.kind = 'skeleton' THEN v.skeleton_digest ELSE iam_policy._accepted() END;
+    IF want IS NULL OR p_skeleton_digest IS DISTINCT FROM want THEN
+        RAISE EXCEPTION 'the Policy service shows another platform skeleton than this host accepted: run ./apps/iam/deploy.sh, then reload'
+            USING ERRCODE = '22023';
+    END IF;
+    IF coalesce(p_diff_digest, '') !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'the approval names no diff digest' USING ERRCODE = '22023';
+    END IF;
+    IF v.kind = 'skeleton' AND p_diff_digest IS DISTINCT FROM (SELECT x.diff_digest FROM iam_policy.version_diff x WHERE x.version = p_version) THEN
+        RAISE EXCEPTION 'the diff you saw is not the one the host stored for version %: reload the page', p_version
+            USING ERRCODE = '22023';
+    END IF;
+    ev := iam_policy._evidence(p_version, 'approved');
+    UPDATE iam_policy.version x SET status = 'approved', approved_by_person = a.person, approved_by_sub = a.sub::uuid,
+           approved_by_name = a.name, approved_at = pg_catalog.now(), approval_note = p_note,
+           approved_iat = (a.claims ->> 'iat')::double precision, diff_digest = p_diff_digest,
+           approved_skeleton_digest = p_skeleton_digest
+     WHERE x.version = p_version;
+    hid := iam_policy._append_history('approved', pg_catalog.jsonb_build_object(
+        'version', p_version, 'source', a.source, 'role', a.role, 'person', a.person, 'sub', a.sub,
+        'iat', ev -> 'iat', 'jti', ev ->> 'jti', 'azp', ev ->> 'azp', 'entries_digest', d,
+        'diff_digest', p_diff_digest, 'skeleton_digest', p_skeleton_digest, 'jws_sha256', ev ->> 'jws_sha256'), p_note);
+    INSERT INTO iam_policy.approval_evidence (version, history_id, event, jws, claims)
+    VALUES (p_version, hid, 'approved', ev ->> 'jws', a.claims);
+END $$;
+
+-- return_version(v, note): qa sends a submitted version back (a change to its
+-- draft, a skeleton version to withdrawn: git changes and a new proposal follow).
+CREATE OR REPLACE FUNCTION iam_policy.return_version(p_version integer, p_note text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a    record;
+    v    iam_policy.version;
+    ev   jsonb;
+    hid  bigint;
+BEGIN
+    SELECT * INTO a FROM iam_policy._qa('return_policy');
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('return_version', p_version);
+    IF coalesce(pg_catalog.btrim(p_note), '') = '' THEN
+        RAISE EXCEPTION 'a note is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.status <> 'submitted' THEN
+        RAISE EXCEPTION 'version % is not submitted', p_version USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (SELECT 1 FROM iam_policy._authors(p_version) au WHERE au.sub = a.sub OR au.person = a.person) THEN
+        RAISE EXCEPTION 'you are an author of version %: another qa person returns it', p_version USING ERRCODE = '42501';
+    END IF;
+    ev := iam_policy._evidence(p_version, 'returned');
+    IF v.kind = 'skeleton' THEN
+        UPDATE iam_policy.version x SET status = 'withdrawn', returned_at = pg_catalog.now(), return_note = p_note,
+               withdrawn_at = pg_catalog.now(), withdrawn_by_sub = a.sub::uuid, withdrawn_by = a.person
+         WHERE x.version = p_version;
+    ELSE
+        UPDATE iam_policy.version x SET status = 'draft', returned_at = pg_catalog.now(), return_note = p_note
+         WHERE x.version = p_version;
+    END IF;
+    hid := iam_policy._append_history('returned', pg_catalog.jsonb_build_object(
+        'version', p_version, 'source', a.source, 'role', a.role, 'person', a.person, 'sub', a.sub,
+        'iat', ev -> 'iat', 'jti', ev ->> 'jti', 'azp', ev ->> 'azp', 'jws_sha256', ev ->> 'jws_sha256'), p_note);
+    INSERT INTO iam_policy.approval_evidence (version, history_id, event, jws, claims)
+    VALUES (p_version, hid, 'returned', ev ->> 'jws', a.claims);
+END $$;
+
+-- confirm_applied(v, note, attest): qa confirms a bootstrap or rollback version
+-- (applied at once by apply.sh); not by the person who claimed to run apply.sh.
+CREATE OR REPLACE FUNCTION iam_policy.confirm_applied(p_version integer, p_note text, p_attest text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a    record;
+    v    iam_policy.version;
+    ev   jsonb;
+    hid  bigint;
+BEGIN
+    SELECT * INTO a FROM iam_policy._qa('confirm_policy');
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('confirm_applied', p_version);
+    IF coalesce(pg_catalog.btrim(p_note), '') = '' THEN
+        RAISE EXCEPTION 'a note is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.kind NOT IN ('bootstrap', 'rollback') OR v.status NOT IN ('applied', 'superseded') THEN
+        RAISE EXCEPTION 'version % is no applied bootstrap or rollback version', p_version USING ERRCODE = '22023';
+    END IF;
+    IF v.confirmed_at IS NOT NULL OR v.disputed_at IS NOT NULL THEN
+        RAISE EXCEPTION 'version % is already % ', p_version, CASE WHEN v.confirmed_at IS NOT NULL THEN 'confirmed' ELSE 'disputed' END
+            USING ERRCODE = '22023';
+    END IF;
+    IF v.claimed_by_person IS NOT NULL AND v.claimed_by_person = a.person THEN
+        RAISE EXCEPTION 'apply.sh recorded you as running version %: another qa person confirms it', p_version
+            USING ERRCODE = '42501';
+    END IF;
+    IF p_attest IS DISTINCT FROM 'I did not run apply.sh for this version.' THEN
+        RAISE EXCEPTION 'confirming needs the attestation "I did not run apply.sh for this version."' USING ERRCODE = '22023';
+    END IF;
+    ev := iam_policy._evidence(p_version, 'confirmed');
+    UPDATE iam_policy.version x SET confirmed_by_person = a.person, confirmed_by_sub = a.sub::uuid,
+           confirmed_at = pg_catalog.now(), confirm_note = p_note
+     WHERE x.version = p_version;
+    hid := iam_policy._append_history('confirmed', pg_catalog.jsonb_build_object(
+        'version', p_version, 'source', a.source, 'role', a.role, 'person', a.person, 'sub', a.sub, 'attest', p_attest,
+        'iat', ev -> 'iat', 'jti', ev ->> 'jti', 'azp', ev ->> 'azp', 'jws_sha256', ev ->> 'jws_sha256'), p_note);
+    INSERT INTO iam_policy.approval_evidence (version, history_id, event, jws, claims)
+    VALUES (p_version, hid, 'confirmed', ev ->> 'jws', a.claims);
+END $$;
+
+-- dispute_applied(v, note): qa disputes a bootstrap or rollback version not yet
+-- confirmed (health FAILs until a later version replaces it).
+CREATE OR REPLACE FUNCTION iam_policy.dispute_applied(p_version integer, p_note text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    a    record;
+    v    iam_policy.version;
+    ev   jsonb;
+    hid  bigint;
+BEGIN
+    SELECT * INTO a FROM iam_policy._qa('dispute_policy');
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('dispute_applied', p_version);
+    IF coalesce(pg_catalog.btrim(p_note), '') = '' THEN
+        RAISE EXCEPTION 'a note is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.kind NOT IN ('bootstrap', 'rollback') OR v.status NOT IN ('applied', 'superseded', 'withdrawn') THEN
+        RAISE EXCEPTION 'version % is no applied bootstrap or rollback version', p_version USING ERRCODE = '22023';
+    END IF;
+    IF v.confirmed_at IS NOT NULL OR v.disputed_at IS NOT NULL THEN
+        RAISE EXCEPTION 'version % is already %', p_version, CASE WHEN v.confirmed_at IS NOT NULL THEN 'confirmed' ELSE 'disputed' END
+            USING ERRCODE = '22023';
+    END IF;
+    ev := iam_policy._evidence(p_version, 'disputed');
+    UPDATE iam_policy.version x SET disputed_at = pg_catalog.now(), disputed_by_person = a.person, dispute_note = p_note
+     WHERE x.version = p_version;
+    hid := iam_policy._append_history('disputed', pg_catalog.jsonb_build_object(
+        'version', p_version, 'source', a.source, 'role', a.role, 'person', a.person, 'sub', a.sub,
+        'iat', ev -> 'iat', 'jti', ev ->> 'jti', 'azp', ev ->> 'azp', 'jws_sha256', ev ->> 'jws_sha256'), p_note);
+    INSERT INTO iam_policy.approval_evidence (version, history_id, event, jws, claims)
+    VALUES (p_version, hid, 'disputed', ev ->> 'jws', a.claims);
+END $$;
+
+-- ── read functions (R on iam_policy) ─────────────────────────────────────────
+
+-- why_not(v): approve()'s checks for the actor of this transaction, read-only.
+-- The token and client checks are reported as needs_token_path (iam-api asks
+-- as iam_svc with set_actor; the approval itself goes through PostgREST).
+CREATE OR REPLACE FUNCTION iam_policy.why_not(p_version integer)
+    RETURNS TABLE (may_approve boolean, why_not_code text, needs_token_path boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+#variable_conflict use_column
+DECLARE
+    a        record;
+    c        jsonb;
+    v        iam_policy.version;
+    applied  integer;
+    code     text;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    c := CASE WHEN a.source = 'token' THEN nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb END;
+    needs_token_path := a.source IS DISTINCT FROM 'token'
+        OR (c ->> 'azp') IS DISTINCT FROM medcea_auth._rpc_client('approve_policy')
+        OR medcea_auth._rpc_client('approve_policy') IS NULL;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version;
+    SELECT x.version INTO applied FROM iam_policy.version x WHERE x.status = 'applied';
+    code := CASE
+        WHEN a.sub IS NULL THEN 'no_token'
+        WHEN coalesce(pg_catalog.btrim(a.person), '') = '' THEN 'no_person'
+        WHEN medcea_auth.policy_holds(a.role, 'iam_policy', 'A') IS NULL THEN 'not_approver'
+        WHEN c IS NOT NULL AND iam_policy._changed_since(a.sub, a.person, (c ->> 'iat')::double precision) THEN 'changed_since'
+        WHEN v.version IS NULL THEN 'no_version'
+        WHEN v.status <> 'submitted' THEN 'not_submitted'
+        WHEN applied IS NULL THEN 'no_applied'
+        WHEN v.based_on IS DISTINCT FROM applied THEN 'stale_base'
+        WHEN EXISTS (SELECT 1 FROM iam_policy._authors(p_version) au WHERE au.sub = a.sub OR au.person = a.person) THEN 'own_author'
+        WHEN iam_policy.entries_digest(p_version) IS DISTINCT FROM v.entries_digest THEN 'entries_changed'
+        END;
+    may_approve := code IS NULL;
+    why_not_code := code;
+    RETURN NEXT;
+END $$;
+
+-- audit_versions(): read-only; one row per finding (health iampolicy and the
+-- History tab, from 4.2a/4.3). No row: every version's history is consistent.
+CREATE OR REPLACE FUNCTION iam_policy.audit_versions() RETURNS TABLE (version integer, finding text, detail jsonb)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+#variable_conflict use_column
+DECLARE
+    v    record;
+    ch   record;
+    ap   jsonb;
+    evs  text[];
+    ok   boolean;
+BEGIN
+    SELECT vc.ok INTO ok FROM iam_policy.verify_chain() vc;
+    IF NOT ok THEN
+        version := NULL; finding := 'chain';
+        detail := (SELECT pg_catalog.to_jsonb(vc) FROM iam_policy.verify_chain() vc);
+        RETURN NEXT;
+    END IF;
+    FOR ch IN SELECT DISTINCT h.version FROM iam_policy.history h
+               WHERE h.version IS NOT NULL AND NOT EXISTS (SELECT 1 FROM iam_policy.version x WHERE x.version = h.version)
+                 AND h.event IN ('draft_created', 'entry_saved', 'waiver_saved', 'waiver_dropped', 'submitted', 'approved',
+                                 'returned', 'withdrawn', 'apply_started', 'applied', 'partial_apply', 'bootstrap_applied',
+                                 'apply_reverted', 'confirmed', 'disputed', 'status_changed') LOOP
+        version := ch.version; finding := 'unknown_version'; detail := NULL; RETURN NEXT;
+    END LOOP;
+    FOR ch IN SELECT h.version, h.payload, h.event_id FROM iam_policy.history h
+               WHERE h.event = 'status_changed' AND h.version IS NOT NULL
+                 AND NOT iam_policy._edge_ok(h.payload ->> 'from', h.payload ->> 'to',
+                                             coalesce(h.payload ->> 'kind', (SELECT x.kind FROM iam_policy.version x WHERE x.version = h.version)),
+                                             h.payload ->> 'by_function') LOOP
+        version := ch.version; finding := 'bad_transition';
+        detail := ch.payload || pg_catalog.jsonb_build_object('event_id', ch.event_id); RETURN NEXT;
+    END LOOP;
+    FOR v IN SELECT * FROM iam_policy.version x ORDER BY x.version LOOP
+        SELECT pg_catalog.array_agg(h.event ORDER BY h.event_id) INTO evs FROM iam_policy.history h
+         WHERE h.version = v.version AND h.event <> 'status_changed';
+        evs := coalesce(evs, '{}');
+        IF v.status IN ('applied', 'superseded') AND v.kind IN ('change', 'skeleton') THEN
+            IF NOT coalesce(pg_catalog.array_position(evs, 'approved') IS NOT NULL
+                    AND pg_catalog.array_position(evs, 'submitted') < pg_catalog.array_position(evs, 'approved')
+                    AND pg_catalog.array_position(evs, 'apply_started', pg_catalog.array_position(evs, 'approved')) IS NOT NULL
+                    AND pg_catalog.array_position(evs, 'applied', pg_catalog.array_position(evs, 'approved')) IS NOT NULL
+                    AND (v.kind = 'skeleton' OR evs[1] = 'draft_created'), false) THEN
+                version := v.version; finding := 'sequence'; detail := pg_catalog.to_jsonb(evs); RETURN NEXT;
+            END IF;
+        ELSIF v.status IN ('applied', 'superseded') AND v.kind IN ('bootstrap', 'rollback') THEN
+            IF NOT coalesce(pg_catalog.array_position(evs, 'apply_started') IS NOT NULL
+                    AND (pg_catalog.array_position(evs, 'applied', pg_catalog.array_position(evs, 'apply_started')) IS NOT NULL
+                         OR pg_catalog.array_position(evs, 'bootstrap_applied', pg_catalog.array_position(evs, 'apply_started')) IS NOT NULL), false) THEN
+                version := v.version; finding := 'sequence'; detail := pg_catalog.to_jsonb(evs); RETURN NEXT;
+            END IF;
+        END IF;
+        IF v.approved_at IS NOT NULL THEN
+            IF EXISTS (SELECT 1 FROM iam_policy._authors(v.version) au
+                        WHERE au.sub = v.approved_by_sub::text OR au.person = v.approved_by_person) THEN
+                version := v.version; finding := 'approver_is_author'; detail := NULL; RETURN NEXT;
+            END IF;
+            SELECT h.payload INTO ap FROM iam_policy.history h
+             WHERE h.version = v.version AND h.event = 'approved' ORDER BY h.event_id DESC LIMIT 1;
+            IF ap IS NULL OR (ap ->> 'diff_digest') IS DISTINCT FROM v.diff_digest
+               OR (ap ->> 'skeleton_digest') IS DISTINCT FROM v.approved_skeleton_digest
+               OR (ap ->> 'entries_digest') IS DISTINCT FROM iam_policy.entries_digest(v.version) THEN
+                version := v.version; finding := 'approval_mismatch';
+                detail := pg_catalog.jsonb_build_object('approved', ap, 'diff_digest', v.diff_digest,
+                    'skeleton_digest', v.approved_skeleton_digest, 'entries_digest', iam_policy.entries_digest(v.version));
+                RETURN NEXT;
+            END IF;
+        END IF;
+    END LOOP;
+END $$;
+
+-- ── owner-only functions (apply.sh as postgres, actor system:apply; 4.2a on) ──
+
+-- _system(): the actor of apply.sh's bundle, system:apply, unless one is set.
+CREATE OR REPLACE FUNCTION iam_policy._system() RETURNS void
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+DECLARE a record;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.sub IS NULL THEN
+        PERFORM medcea_auth._set_internal_actor('system:apply');
+    ELSIF a.sub <> 'system:apply' THEN
+        RAISE EXCEPTION 'the policy is built and applied by apply.sh (system:apply), not by %', a.sub USING ERRCODE = '42501';
+    END IF;
+END $$;
+
+-- _sync_skeleton(body, commit): role and resource_group follow the skeleton's
+-- keys (the entries' foreign keys need them): upserted, and a key that left it
+-- marked retired. member and effective_route are not synced in Phase 4.
+CREATE OR REPLACE FUNCTION iam_policy._sync_skeleton(p_body jsonb, p_commit text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    nr       integer;
+    ng       integer;
+    v_retired  jsonb;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._system();
+    IF pg_catalog.jsonb_typeof(p_body -> 'roles') IS DISTINCT FROM 'object'
+       OR pg_catalog.jsonb_typeof(p_body -> 'resource_groups') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'a skeleton names roles and resource_groups' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO iam_policy.role AS r (code, db_role, includes, retired)
+    SELECT k, coalesce(d ->> 'db_role', 'rr_' || k),
+           ARRAY(SELECT pg_catalog.jsonb_array_elements_text(coalesce(d -> 'includes', '[]'))), false
+      FROM pg_catalog.jsonb_each(p_body -> 'roles') x(k, d)
+    ON CONFLICT (code) DO UPDATE SET db_role = EXCLUDED.db_role, includes = EXCLUDED.includes, retired = false;
+    GET DIAGNOSTICS nr = ROW_COUNT;
+    INSERT INTO iam_policy.resource_group AS g (code, data_class, retired)
+    SELECT k, d ->> 'class', false FROM pg_catalog.jsonb_each(p_body -> 'resource_groups') x(k, d)
+    ON CONFLICT (code) DO UPDATE SET data_class = EXCLUDED.data_class, retired = false;
+    GET DIAGNOSTICS ng = ROW_COUNT;
+    WITH r AS (UPDATE iam_policy.role x SET retired = true
+                WHERE NOT x.retired AND NOT (p_body -> 'roles') ? x.code RETURNING 'role:' || x.code AS k),
+         g AS (UPDATE iam_policy.resource_group x SET retired = true
+                WHERE NOT x.retired AND NOT (p_body -> 'resource_groups') ? x.code RETURNING 'group:' || x.code AS k)
+    SELECT coalesce(pg_catalog.jsonb_agg(k ORDER BY k), '[]') INTO v_retired FROM (SELECT k FROM r UNION ALL SELECT k FROM g) z;
+    PERFORM iam_policy._append_history('skeleton_synced', pg_catalog.jsonb_build_object(
+        'version', (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied'),
+        'roles', nr, 'groups', ng, 'retired', v_retired, 'commit', p_commit), NULL);
+END $$;
+
+-- _accept_skeleton(digest, body, commit, compiler_digest, summary): the host's
+-- skeleton gate (or apply.sh) accepts a skeleton: inserted if new, made the
+-- accepted one. summary {narrowed, unchanged, reviewed_by_version}.
+CREATE OR REPLACE FUNCTION iam_policy._accept_skeleton(p_digest text, p_body jsonb, p_commit text,
+    p_compiler_digest text, p_summary jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    hid  bigint;
+    rv   integer := (p_summary ->> 'reviewed_by_version')::integer;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('_accept_skeleton', rv);
+    PERFORM iam_policy._system();
+    IF coalesce(p_digest, '') !~ '^[0-9a-f]{64}$' OR p_body IS NULL THEN
+        RAISE EXCEPTION 'a skeleton needs its sha256 digest and its body' USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (SELECT 1 FROM iam_policy.skeleton s WHERE s.digest = p_digest AND s.body <> p_body) THEN
+        RAISE EXCEPTION 'skeleton % is stored with another body' , p_digest USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO iam_policy.skeleton (digest, body, git_commit, compiler_digest)
+    VALUES (p_digest, p_body, p_commit, p_compiler_digest) ON CONFLICT (digest) DO NOTHING;
+    hid := iam_policy._append_history('skeleton_accepted', pg_catalog.jsonb_build_object(
+        'version', (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied'),
+        'digest', p_digest, 'commit', p_commit, 'narrowed', p_summary -> 'narrowed', 'unchanged', p_summary -> 'unchanged',
+        'reviewed_by_version', rv), NULL);
+    UPDATE iam_policy.skeleton s SET accepted_at = pg_catalog.clock_timestamp(), accepted_event = hid,
+           reviewed_by_version = coalesce(rv, s.reviewed_by_version)
+     WHERE s.digest = p_digest;
+END $$;
+
+-- _propose_skeleton(...): apply.sh --propose-skeleton (4.4): a git skeleton that
+-- adds reach becomes a submitted skeleton version with the applied entries and
+-- the host-computed diff qa will see byte for byte.
+CREATE OR REPLACE FUNCTION iam_policy._propose_skeleton(p_digest text, p_body jsonb, p_commit text, p_diff jsonb,
+    p_diff_digest text, p_by_sub uuid, p_by_person text, p_reason text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    applied  integer;
+    open_v   integer;
+    v        integer;
+    ents     jsonb;
+    wvs      jsonb;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    SELECT coalesce(max(x.version), 0) + 1 INTO v FROM iam_policy.version x;
+    PERFORM iam_policy._begin('_propose_skeleton', v);
+    PERFORM iam_policy._system();
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' OR coalesce(pg_catalog.btrim(p_by_person), '') = '' OR p_by_sub IS NULL THEN
+        RAISE EXCEPTION 'a skeleton proposal needs a reason and the proposer (--by)' USING ERRCODE = '22023';
+    END IF;
+    IF coalesce(p_digest, '') !~ '^[0-9a-f]{64}$' OR coalesce(p_diff_digest, '') !~ '^[0-9a-f]{64}$' OR p_diff IS NULL THEN
+        RAISE EXCEPTION 'a skeleton proposal needs the skeleton digest, the diff and its digest' USING ERRCODE = '22023';
+    END IF;
+    SELECT x.version INTO applied FROM iam_policy.version x WHERE x.status = 'applied';
+    IF applied IS NULL THEN
+        RAISE EXCEPTION 'no policy version is applied' USING ERRCODE = '22023';
+    END IF;
+    SELECT x.version INTO open_v FROM iam_policy.version x
+     WHERE x.status IN ('draft', 'submitted', 'approved') AND x.kind IN ('change', 'skeleton');
+    IF open_v IS NOT NULL THEN
+        RAISE EXCEPTION 'version % is still open: take it through or withdraw it first', open_v USING ERRCODE = '23505';
+    END IF;
+    IF p_digest IS NOT DISTINCT FROM iam_policy._accepted() THEN
+        RAISE EXCEPTION 'nothing to approve: this skeleton is the accepted one' USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (SELECT 1 FROM iam_policy.skeleton s WHERE s.digest = p_digest AND s.body <> p_body) THEN
+        RAISE EXCEPTION 'skeleton % is stored with another body', p_digest USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO iam_policy.skeleton (digest, body, git_commit) VALUES (p_digest, p_body, p_commit)
+    ON CONFLICT (digest) DO NOTHING;
+    INSERT INTO iam_policy.version (version, status, kind, reason, based_on, groups, roles, skeleton_digest,
+                                    created_by_sub, created_by_person, created_by_name,
+                                    submitted_by_sub, submitted_by_person, submitted_by_name, submitted_at)
+    VALUES (v, 'submitted', 'skeleton', p_reason, applied,
+            ARRAY(SELECT k FROM pg_catalog.jsonb_object_keys(p_body -> 'resource_groups') k ORDER BY k COLLATE "C"),
+            ARRAY(SELECT k FROM pg_catalog.jsonb_object_keys(p_body -> 'roles') k ORDER BY k COLLATE "C"),
+            p_digest, p_by_sub, p_by_person, 'apply.sh --by (claimed)', p_by_sub, p_by_person, 'apply.sh --by (claimed)',
+            pg_catalog.now());
+    SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('role', e.role, 'group_code', e.group_code,
+               'level', e.level::text, 'constraint_name', e.constraint_name)), '[]')
+      INTO ents FROM iam_policy.entry e WHERE e.version = applied;
+    SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version'), '[]')
+      INTO wvs FROM iam_policy.waiver w WHERE w.version = applied;
+    PERFORM iam_policy._put_rows(v, ents, wvs);
+    UPDATE iam_policy.version x SET entries_digest = iam_policy.entries_digest(v) WHERE x.version = v;
+    INSERT INTO iam_policy.version_diff (version, diff, diff_digest, computed_on) VALUES (v, p_diff, p_diff_digest, 'host');
+    PERFORM iam_policy._append_history('submitted', pg_catalog.jsonb_build_object(
+        'version', v, 'kind', 'skeleton', 'skeleton_digest', p_digest, 'diff_digest', p_diff_digest, 'commit', p_commit,
+        'claimed_by', pg_catalog.jsonb_build_object('sub', p_by_sub, 'person', p_by_person),
+        'entries_digest', (SELECT x.entries_digest FROM iam_policy.version x WHERE x.version = v)), p_reason);
+    RETURN v;
+END $$;
+
+-- _build_version(kind, entries, waivers, based_on, rollback_of, reason): a
+-- bootstrap or rollback version as a draft with its rows, inside apply.sh's
+-- bundle, which applies it (_mark_applied) in the same transaction. Bootstrap
+-- only on an empty table; a rollback only to a version once approved and
+-- applied (now superseded) or a confirmed bootstrap or rollback (OA-c).
+CREATE OR REPLACE FUNCTION iam_policy._build_version(p_kind text, p_entries jsonb, p_waivers jsonb,
+    p_based_on integer, p_rollback_of integer, p_reason text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    v     integer;
+    t     iam_policy.version;
+    skel  text;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    SELECT coalesce(max(x.version), 0) + 1 INTO v FROM iam_policy.version x;
+    PERFORM iam_policy._begin('_build_version', v);
+    PERFORM iam_policy._system();
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    IF p_kind = 'bootstrap' THEN
+        IF EXISTS (SELECT 1 FROM iam_policy.version) THEN
+            RAISE EXCEPTION 'policy versions exist: --bootstrap is only for an empty table' USING ERRCODE = '22023';
+        END IF;
+        IF p_based_on IS NOT NULL OR p_rollback_of IS NOT NULL THEN
+            RAISE EXCEPTION 'a bootstrap version has no base' USING ERRCODE = '22023';
+        END IF;
+    ELSIF p_kind = 'rollback' THEN
+        SELECT * INTO t FROM iam_policy.version x WHERE x.version = p_rollback_of;
+        IF NOT FOUND OR t.status <> 'superseded'
+           OR (t.kind IN ('bootstrap', 'rollback') AND (t.confirmed_at IS NULL OR t.disputed_at IS NOT NULL)) THEN
+            RAISE EXCEPTION 'version % cannot be rolled back to: only an approved version once applied, or a confirmed bootstrap or rollback',
+                p_rollback_of USING ERRCODE = '22023';
+        END IF;
+        IF p_based_on IS DISTINCT FROM (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied') THEN
+            RAISE EXCEPTION 'a rollback is based on the applied version' USING ERRCODE = '22023';
+        END IF;
+    ELSE
+        RAISE EXCEPTION '_build_version builds bootstrap or rollback versions, not %', p_kind USING ERRCODE = '22023';
+    END IF;
+    skel := iam_policy._accepted();
+    IF skel IS NULL THEN
+        RAISE EXCEPTION 'accept the platform skeleton first (_accept_skeleton)' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO iam_policy.version (version, status, kind, reason, based_on, rollback_of, groups, roles, skeleton_digest,
+                                    created_by_name)
+    SELECT v, 'draft', p_kind, p_reason, p_based_on, p_rollback_of,
+           ARRAY(SELECT k FROM pg_catalog.jsonb_object_keys(s.body -> 'resource_groups') k ORDER BY k COLLATE "C"),
+           ARRAY(SELECT k FROM pg_catalog.jsonb_object_keys(s.body -> 'roles') k ORDER BY k COLLATE "C"),
+           skel, 'system:apply'
+      FROM iam_policy.skeleton s WHERE s.digest = skel;
+    PERFORM iam_policy._put_rows(v, p_entries, p_waivers);
+    UPDATE iam_policy.version x SET entries_digest = iam_policy.entries_digest(v) WHERE x.version = v;
+    PERFORM iam_policy._append_history('draft_created', pg_catalog.jsonb_build_object(
+        'version', v, 'kind', p_kind, 'rollback_of', p_rollback_of,
+        'entries_digest', (SELECT x.entries_digest FROM iam_policy.version x WHERE x.version = v)), p_reason);
+    RETURN v;
+END $$;
+
+-- _mark_applied(v, digests, os_user, by_sub, by_person, log): approved (or a
+-- bootstrap/rollback draft) -> applied, the previous applied -> superseded.
+-- Re-reads the status and the entries digest FOR UPDATE (F-16).
+CREATE OR REPLACE FUNCTION iam_policy._mark_applied(p_version integer, p_digests jsonb, p_os_user text,
+    p_by_sub uuid, p_by_person text, p_log_path text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    v     iam_policy.version;
+    prev  integer;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('_mark_applied', p_version);
+    PERFORM iam_policy._system();
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no policy version %', p_version USING ERRCODE = '22023';
+    END IF;
+    IF NOT ((v.kind IN ('change', 'skeleton') AND v.status = 'approved')
+            OR (v.kind IN ('bootstrap', 'rollback') AND v.status = 'draft')) THEN
+        RAISE EXCEPTION 'version % (%) is %: nothing to apply', p_version, v.kind, v.status USING ERRCODE = '22023';
+    END IF;
+    IF iam_policy.entries_digest(p_version) IS DISTINCT FROM v.entries_digest THEN
+        RAISE EXCEPTION 'version %: its entries are not the ones approved', p_version USING ERRCODE = '22023';
+    END IF;
+    SELECT x.version INTO prev FROM iam_policy.version x WHERE x.status = 'applied' FOR UPDATE;
+    IF v.kind IN ('change', 'skeleton') AND v.based_on IS DISTINCT FROM prev THEN
+        RAISE EXCEPTION 'version % was approved on version %, but version % is applied', p_version, v.based_on, prev
+            USING ERRCODE = '22023';
+    END IF;
+    IF prev IS NOT NULL THEN
+        UPDATE iam_policy.version x SET status = 'superseded', superseded_at = pg_catalog.now() WHERE x.version = prev;
+    END IF;
+    UPDATE iam_policy.version x SET status = 'applied', applied_at = pg_catalog.now(), artefact_digests = p_digests,
+           claimed_by_os = p_os_user, claimed_by_sub = p_by_sub, claimed_by_person = p_by_person, apply_log = p_log_path
+     WHERE x.version = p_version;
+    PERFORM iam_policy._append_history('apply_started', pg_catalog.jsonb_build_object(
+        'version', p_version, 'kind', v.kind, 'previous', prev, 'db_digests', p_digests, 'commit', p_digests ->> 'git_commit',
+        'skeleton_digest', iam_policy._accepted(), 'compiler_digest', p_digests ->> 'compiler_digest'), NULL);
+END $$;
+
+-- _mark_reverted(v, prev, why): a failed apply puts the previous version back
+-- (a full revert only): a change or skeleton version returns to approved, a
+-- bootstrap or rollback version is withdrawn (never an "approved" phantom).
+CREATE OR REPLACE FUNCTION iam_policy._mark_reverted(p_version integer, p_prev integer, p_why text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    v  iam_policy.version;
+    n  bigint;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    PERFORM iam_policy._begin('_mark_reverted', p_version);
+    PERFORM iam_policy._system();
+    IF coalesce(pg_catalog.btrim(p_why), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version FOR UPDATE;
+    IF NOT FOUND OR v.status <> 'applied' THEN
+        RAISE EXCEPTION 'version % is not the applied one', p_version USING ERRCODE = '22023';
+    END IF;
+    IF p_prev IS NOT NULL AND NOT EXISTS (SELECT 1 FROM iam_policy.version x WHERE x.version = p_prev AND x.status = 'superseded') THEN
+        RAISE EXCEPTION 'version % is not superseded: nothing to put back', p_prev USING ERRCODE = '22023';
+    END IF;
+    IF v.kind IN ('change', 'skeleton') THEN
+        UPDATE iam_policy.version x SET status = 'approved', applied_at = NULL WHERE x.version = p_version;
+    ELSE
+        UPDATE iam_policy.version x SET status = 'withdrawn', withdrawn_at = pg_catalog.now(), withdrawn_by = 'system:apply'
+         WHERE x.version = p_version;
+    END IF;
+    IF p_prev IS NOT NULL THEN
+        UPDATE iam_policy.version x SET status = 'applied', superseded_at = NULL WHERE x.version = p_prev;
+    END IF;
+    IF pg_catalog.to_regclass('iam.account_decision') IS NOT NULL AND v.applied_at IS NOT NULL THEN
+        EXECUTE 'SELECT count(*) FROM iam.account_decision d WHERE d.made_at >= $1' INTO n USING v.applied_at;
+    END IF;
+    PERFORM iam_policy._append_history('apply_reverted', pg_catalog.jsonb_build_object(
+        'version', p_version, 'prev', p_prev, 'decisions_in_window', n), p_why);
+END $$;
+
+-- _withdraw_open(reason): apply.sh withdraws an open change or skeleton version
+-- (a rollback, §6.6), as system:apply. Returns its number, or NULL.
+CREATE OR REPLACE FUNCTION iam_policy._withdraw_open(p_reason text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE v integer;
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
+    SELECT x.version INTO v FROM iam_policy.version x
+     WHERE x.status IN ('draft', 'submitted', 'approved') AND x.kind IN ('change', 'skeleton') FOR UPDATE;
+    PERFORM iam_policy._begin('_withdraw_open', v);
+    PERFORM iam_policy._system();
+    IF coalesce(pg_catalog.btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    IF v IS NULL THEN
+        RETURN NULL;
+    END IF;
+    UPDATE iam_policy.version x SET status = 'withdrawn', withdrawn_at = pg_catalog.now(), withdrawn_by = 'system:apply'
+     WHERE x.version = v;
+    PERFORM iam_policy._append_history('withdrawn', pg_catalog.jsonb_build_object('version', v, 'by', 'system:apply'), p_reason);
+    RETURN v;
+END $$;
+
+-- _record(event, payload): apply.sh's own events. Every payload names its
+-- version (_append_history files it there), except account_seeded.
+CREATE OR REPLACE FUNCTION iam_policy._record(p_event text, p_payload jsonb) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    PERFORM iam_policy._system();
+    IF p_event IS NULL OR p_event NOT IN ('applied', 'partial_apply', 'bootstrap_applied', 'break_glass_seen',
+                                          'apply_deferred', 'account_seeded') THEN
+        RAISE EXCEPTION '_record: % is not an apply.sh event', p_event USING ERRCODE = '22023';
+    END IF;
+    IF pg_catalog.jsonb_typeof(p_payload) IS DISTINCT FROM 'object'
+       OR (p_event <> 'account_seeded' AND pg_catalog.jsonb_typeof(p_payload -> 'version') IS DISTINCT FROM 'number') THEN
+        RAISE EXCEPTION '_record: the % payload must name its version', p_event USING ERRCODE = '22023';
+    END IF;
+    RETURN iam_policy._append_history(p_event, p_payload, p_payload ->> 'reason');
+END $$;
+
+-- ── the PostgREST wrappers (schema medcea; level A of iam_policy) ───────────
+-- PL/pgSQL on purpose: medcea_auth._rpc_client is compiled after the migrations
+-- (lib-db-apply.sh step 4a), and a plpgsql body is resolved only when it runs.
+CREATE OR REPLACE FUNCTION medcea.approve_policy(p_version integer, p_note text, p_entries_digest text,
+    p_diff_digest text, p_skeleton_digest text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    PERFORM iam_policy.approve(p_version, p_note, p_entries_digest, p_diff_digest, p_skeleton_digest);
+END $$;
+CREATE OR REPLACE FUNCTION medcea.return_policy(p_version integer, p_note text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    PERFORM iam_policy.return_version(p_version, p_note);
+END $$;
+CREATE OR REPLACE FUNCTION medcea.confirm_policy(p_version integer, p_note text, p_attest text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    PERFORM iam_policy.confirm_applied(p_version, p_note, p_attest);
+END $$;
+CREATE OR REPLACE FUNCTION medcea.dispute_policy(p_version integer, p_note text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    PERFORM iam_policy.dispute_applied(p_version, p_note);
+END $$;
+
+-- 7. The freeze trigger on the six tables: created only when missing (never
+--    CREATE OR REPLACE TRIGGER, which would reset it to ORIGIN mode), and
+--    ENABLE ALWAYS only where it is not already (session_replication_role =
+--    replica does not bypass it).
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['version', 'entry', 'waiver', 'skeleton', 'version_diff', 'approval_evidence'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = pg_catalog.to_regclass('iam_policy.' || t)
+                                                             AND tgname = 'freeze_policy_trg') THEN
+            EXECUTE pg_catalog.format('CREATE TRIGGER freeze_policy_trg BEFORE INSERT OR UPDATE OR DELETE ON iam_policy.%I '
+                                      'FOR EACH ROW EXECUTE FUNCTION iam_policy.freeze_policy()', t);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = pg_catalog.to_regclass('iam_policy.' || t)
+                                                             AND tgname = 'freeze_policy_truncate_trg') THEN
+            EXECUTE pg_catalog.format('CREATE TRIGGER freeze_policy_truncate_trg BEFORE TRUNCATE ON iam_policy.%I '
+                                      'FOR EACH STATEMENT EXECUTE FUNCTION iam_policy.freeze_policy()', t);
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = pg_catalog.to_regclass('iam_policy.' || t)
+                    AND tgname IN ('freeze_policy_trg', 'freeze_policy_truncate_trg') AND tgenabled <> 'A') THEN
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.%I ENABLE ALWAYS TRIGGER freeze_policy_trg', t);
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.%I ENABLE ALWAYS TRIGGER freeze_policy_truncate_trg', t);
+        END IF;
+    END LOOP;
+END $$;
+
+-- 8. Ownership: 008b's loop (B21) ran before 008c in this file, so 008c owns its
+--    own: every function in iam_policy, the four wrappers and the _rpc_client stub
+--    to medcea_owner, nothing executable by PUBLIC; the new tables to medcea_owner.
+DO $$
+DECLARE f regprocedure; t text;
+BEGIN
+    FOR f IN SELECT p.oid::regprocedure FROM pg_catalog.pg_proc p
+              WHERE p.pronamespace = 'iam_policy'::regnamespace
+                 OR p.oid IN (pg_catalog.to_regprocedure('medcea.approve_policy(integer,text,text,text,text)'),
+                              pg_catalog.to_regprocedure('medcea.return_policy(integer,text)'),
+                              pg_catalog.to_regprocedure('medcea.confirm_policy(integer,text,text)'),
+                              pg_catalog.to_regprocedure('medcea.dispute_policy(integer,text)'),
+                              pg_catalog.to_regprocedure('medcea_auth._rpc_client(text)')) LOOP
+        IF (SELECT proowner FROM pg_catalog.pg_proc WHERE oid = f) <> 'medcea_owner'::regrole THEN
+            EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO medcea_owner', f);
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p, pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+                    WHERE p.oid = f AND a.grantee = 0) THEN
+            EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
+        END IF;
+    END LOOP;
+    FOREACH t IN ARRAY ARRAY['entry', 'skeleton', 'version_diff', 'approval_evidence'] LOOP
+        IF (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('iam_policy.' || t)) <> 'medcea_owner'::regrole THEN
+            EXECUTE pg_catalog.format('ALTER TABLE iam_policy.%I OWNER TO medcea_owner', t);
+        END IF;
+    END LOOP;
+END $$;
+
+COMMENT ON TABLE iam_policy.skeleton IS 'Accepted (accepted_at set) and proposed platform skeletons by digest: everything of the policy but matrix, waivers and policy_version. Written by the host only (apply.sh, the deploys'' skeleton gate; IAM Phase 4).';
+COMMENT ON TABLE iam_policy.version_diff IS 'The host-computed diff of a skeleton version, served to qa byte for byte; its digest is what qa approves (IAM Phase 4).';
+COMMENT ON TABLE iam_policy.approval_evidence IS 'The signed tokens (JWS) behind each approve, return, confirm and dispute of a policy version, with their claims; owner only; apply.sh verifies the signature (IAM Phase 4).';
+COMMENT ON TABLE iam_policy.entry IS 'One row per (version, role, group, level): the matrix of a policy version; constraint_name NULL = unconstrained (IAM Phase 4).';
+
+NOTIFY pgrst, 'reload schema';
+
+INSERT INTO medcea.platform_setting (key, value) VALUES ('008c:last_nonce', :'deploy_nonce')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 COMMIT;

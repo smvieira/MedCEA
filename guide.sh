@@ -393,8 +393,11 @@ guide_unlock() {
 #                for --purge-data, as deploy-apps.sh asks it)
 #   NOTES=(…)    extra lines shown before the confirmation
 #   CFG_NEEDED   yes when the command refuses without config.env
+#   HOLD_LOCK    yes: the guide takes the deploy lock itself and holds it for every
+#                command of the && chain (MEDCEA_LOCK_HELD exported, so each skips its
+#                own), as a switch recipe does: nothing else deploys between them
 
-reset_plan() { CMD=(); PIPE=(); EFFECT=""; LOCK=no; SUDO=no; LEVEL=read; CONFIRM_WORD=""; NOTES=(); CFG_NEEDED=no; }
+reset_plan() { CMD=(); PIPE=(); EFFECT=""; LOCK=no; SUDO=no; LEVEL=read; CONFIRM_WORD=""; NOTES=(); CFG_NEEDED=no; HOLD_LOCK=no; }
 
 qwords() {   # qwords WORD… → the words as they would be typed (printf %q), space-separated
     local out
@@ -479,6 +482,12 @@ plan_run() {
     [[ "$CFG_NEEDED" == yes && ! -f "$CFG" ]] && warn "this command needs config.env, which does not exist yet: run ./install.sh first"
     if ! confirm_level; then echo "Cancelled; nothing was run."; return 0; fi
     if $DRY_RUN; then echo "[dry run] not executed: $(cmd_text)"; return 0; fi
+    if [[ "$HOLD_LOCK" == yes ]]; then
+        guide_lock || { echo "Nothing was run."; return 0; }
+        run_array
+        guide_unlock
+        return 0
+    fi
     run_array
 }
 
@@ -1422,6 +1431,19 @@ a_routes_diff() {
     EFFECT="nothing (offline: compiled route table vs the routes each service serves)"
     plan_run
 }
+# IAM 4.1 (slice 4.1, design §14.2.7): the three deploys that ship migration 008c and the
+# Phase 4 policy, in the order that keeps access-api's 503 window shortest, under one lock.
+a_policy_41_deploy() {
+    CMD=(./apps/access/deploy.sh "&&" ./apps/database/deploy.sh "&&" ./deploy-infra.sh)
+    EFFECT="access_db.sql (iam._changed_since); migration 008c, the compiled functions and grants; the route table, NetworkPolicies and the rest of deploy-infra"
+    LOCK="yes, held by the guide for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the access deploy first (the database deploy refuses without iam._changed_since), then the database, then deploy-infra at once."
+           "From the database deploy's commit until deploy-infra has written the route table (about 1-2 minutes), the User Manager answers 503 to a grant, an activation or a role change into qa, qp, admin or auditor: do not grant or change roles until all three have finished. A refused decision can simply be repeated."
+           "Each command runs only if the one before it succeeded. Health is green after the third (iamgrants is red in between)."
+           "Nothing calls the new policy functions yet (no Policy UI, no apply.sh): IAM 4.2a on.")
+    plan_run
+}
 a_policy_tests() {
     CMD=(python3 tests/test_policy.py)
     EFFECT="nothing (offline policy unit tests)"
@@ -1804,6 +1826,7 @@ AREA_POLICY=(
     "a_pol_dbroles|Database roles the policy manages|cli.py db-roles."
     "a_pol_grants|The grants SQL|cli.py compile grants (printed, never run)."
     "a_pol_netpol|The NetworkPolicies|cli.py compile netpol (printed, never applied)."
+    "a_policy_41_deploy|Deploy IAM 4.1 (policy versions schema)|The access, database and infra deploys in order, under one lock; explains the short 503 window first."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -1819,7 +1842,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy (read-only)|What apps/iam/policy/defaults.yaml compiles to."
+    "AREA_POLICY|Policy|What apps/iam/policy/defaults.yaml compiles to (read-only), and the IAM 4.1 deploy."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

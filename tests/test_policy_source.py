@@ -9,6 +9,12 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    PRE_40:apps/iam; skipped without git or that commit), check included but
                    for its new source line; and compose(skeleton, entries_and_waivers) of the
                    factory policy compiles to the same bytes for every target
+                   (slice 4.1 moves routes, grants, netpol, check and the new client's
+                   egress on purpose: those are compared in Phase41Delta instead)
+  Phase41Delta     against PRE_41 (slice 4.0, bdc7d48): every other output byte-identical;
+                   routes.json differs only by the declared iam routes, the policy_page
+                   widening pairs, dual_control and the two exportable tables; only the
+                   NetworkPolicies iam-iam, iam-config-api and iam-access change
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -46,6 +52,28 @@ CLI = os.path.join(REPO, "apps", "iam", "compiler", "cli.py")
 DEFAULTS = os.path.join(REPO, "apps", "iam", "policy", "defaults.yaml")
 # The last commit before slice 4.0: SourceIdentity runs its cli.py as the reference.
 PRE_40 = "6b73e72"
+# The last commit before slice 4.1 (slice 4.0 built): Phase41Delta's reference.
+PRE_41 = "bdc7d48"
+# What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
+# policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
+# members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
+# pins how; every other output stays byte-identical to PRE_40 and PRE_41.
+MOVED_IN_41 = ("routes", "netpol", "check", "egress-iam-approvals")
+
+
+def moved_in_41(key):
+    return key in MOVED_IN_41 or key.startswith("grants-")
+
+
+def archive_cli(commit, prefix):
+    """cli.py of `commit` (git archive of apps/iam), or None without git or that commit."""
+    old = tempfile.mkdtemp(prefix=prefix)
+    r = subprocess.run(f'git -C "{REPO}" archive {commit} apps/iam/compiler apps/iam/policy | tar -x -C "{old}"',
+                       shell=True, capture_output=True, text=True)
+    if r.returncode != 0:
+        shutil.rmtree(old, ignore_errors=True)
+        return None, r.stderr.strip()
+    return old, os.path.join(old, "apps", "iam", "compiler", "cli.py")
 
 
 def clean_env(**extra):
@@ -176,6 +204,8 @@ class SourceIdentity(unittest.TestCase):
                 self.skipTest(f"no git archive of {PRE_40}: {r.stderr.strip()}")
             old_cli = os.path.join(old, "apps", "iam", "compiler", "cli.py")
             for key in list(self.want) + ["check"]:
+                if moved_in_41(key):
+                    continue   # Phase41Delta
                 argv = cli_argv(key)
                 rc_old, want, err_old = run_cli(argv, cli=old_cli)
                 rc, got, err = run_cli(argv, cli=self.cli)
@@ -649,6 +679,92 @@ class Wiring(unittest.TestCase):
             self.assertNotRegex(t, r"model\.load\((None)?\)", f)
             self.assertNotRegex(t, r"POLICY_MODEL\.load\(\)", f)
         self.assertIn("model.load_defaults()", read("tests/iam-routes-diff.py"))
+
+
+class Phase41Delta(unittest.TestCase):
+    """Slice 4.1 moves exactly what design §14.2.7 lists, against PRE_41 (slice 4.0)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_41, "medcea-pre41-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_41}: {self.old_cli}")
+
+    def old_out(self, key):
+        rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+        self.assertEqual(rc, 0, f"{key} ({PRE_41}): {err}")
+        return out
+
+    def test_unmoved_outputs_byte_identical(self):
+        for key, want in self.want.items():
+            if moved_in_41(key):
+                continue
+            self.assertEqual(self.old_out(key), want, key)
+
+    def test_routes_delta(self):
+        old, new = json.loads(self.old_out("routes")), json.loads(self.want["routes"])
+        self.assertNotIn("dual_control", old)
+        self.assertEqual(new["dual_control"], {"iam_policy": {"approver_roles": ["qa"], "maker_roles": ["admin"]},
+                                               "iam_users": {"approver_roles": ["qa"], "maker_roles": ["admin"]}})
+        # services: only iam's routes, by exactly the declared ones; its clients unchanged
+        self.assertEqual(set(old["services"]), set(new["services"]))
+        for svc in new["services"]:
+            if svc != "iam":
+                self.assertEqual(old["services"][svc], new["services"][svc], svc)
+        self.assertEqual(old["services"]["iam"]["clients"], new["services"]["iam"]["clients"])
+        o, n = old["services"]["iam"]["routes"], new["services"]["iam"]["routes"]
+        self.assertEqual(set(o) - set(n), {"GET /api/zones", "PUT /api/zones"})
+        declared = {r for g in ("policy_page", "iam_policy", "audit_histories")
+                    for m in self.p.groups[g]["members"] if m["type"] == "api" and m["service"] == "iam"
+                    for r in m["routes"]}
+        self.assertEqual(set(n), declared)
+        for r in set(o) & set(n):
+            self.assertEqual(o[r], n[r], r)
+        # widening: only (policy_page, R) added, nothing removed
+        for old_role in set(old["widening"]) | set(new["widening"]):
+            ow, nw = old["widening"].get(old_role, {}), new["widening"].get(old_role, {})
+            for new_role in set(ow) | set(nw):
+                a = {tuple(x) for x in nw.get(new_role, [])}
+                b = {tuple(x) for x in ow.get(new_role, [])}
+                self.assertLessEqual(a - b, {("policy_page", "R")}, (old_role, new_role))
+                self.assertEqual(b - a, set(), (old_role, new_role))
+        self.assertTrue(any(["policy_page", "R"] in v for row in new["widening"].values() for v in row.values()))
+        # exports: iam_policy gains skeleton and version_diff (approval_evidence is owner-only)
+        og, ng = old["exports"]["groups"], new["exports"]["groups"]
+        self.assertEqual(set(ng["iam_policy"]) - set(og["iam_policy"]), {"iam_policy.skeleton", "iam_policy.version_diff"})
+        self.assertEqual(set(og["iam_policy"]) - set(ng["iam_policy"]), set())
+        self.assertEqual({g: v for g, v in og.items() if g != "iam_policy"}, {g: v for g, v in ng.items() if g != "iam_policy"})
+        self.assertEqual(old["exports"]["roles"], new["exports"]["roles"])
+        # the rest of the body is unchanged
+        for k in set(old) | set(new):
+            if k not in ("services", "widening", "dual_control", "exports", "digest"):
+                self.assertEqual(old.get(k), new.get(k), k)
+        self.assertNotEqual(old["digest"], new["digest"])
+
+    def test_netpol_delta(self):
+        old = {i["metadata"]["name"]: i for i in json.loads(self.old_out("netpol"))["items"]}
+        new = {i["metadata"]["name"]: i for i in json.loads(self.want["netpol"])["items"]}
+        self.assertEqual(set(old), set(new))
+        changed = {k for k in new if old[k] != new[k]}
+        self.assertEqual(changed, {"iam-iam", "iam-config-api", "iam-access"})
+        ports = [r["ports"][0]["port"] for r in new["iam-iam"]["spec"]["ingress"]]
+        self.assertEqual(ports, [8085, 8083])
+
+    def test_no_route_moves_mqtt_or_a_gate(self):
+        """mqtt.json, the tool settings and every proxy gate: no restart, no credential retired."""
+        for key in ["mqtt", "grafana", "node-red", "edge-wizard", "pgadmin", "hosts"] + \
+                   [k for k in self.want if k.startswith(("proxy-", "describe-gate-", "jupyterhub-", "egress-notebooks"))]:
+            self.assertEqual(self.old_out(key), self.want[key], key)
 
 
 if __name__ == "__main__":

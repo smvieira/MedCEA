@@ -32,8 +32,10 @@
 #
 #   0  role shells: medcea_owner, anon (NOLOGIN), authenticator, mqtt_auth (LOGIN NOINHERIT)
 #   1  CREATE DATABASE if missing; then dba_iam_flag: is schema iam (apps/access) compiled?
+#      (1a: schema iam must also have iam._changed_since, IAM 4.1: the compiled grants name it)
 #   2  medcea_db_ddl.sql (no ON_ERROR_STOP; "already exists" filtered, as before)
-#   3  medcea_db_migrations.sql with -v deploy_nonce; 008b must have committed it
+#   3  medcea_db_migrations.sql with -v deploy_nonce; 008b and 008c (IAM 4.1, the
+#      access policy's versions) must both have committed it
 #   3a recipe_recipe_id_seq fix (was deploy.sh step 4)
 #   4  medcea_db_owner.sql (iam too, IAM 2.7)       (-1, ON_ERROR_STOP)
 #   4a the policy's compiled functions              (-1, ON_ERROR_STOP)
@@ -82,18 +84,21 @@ _dba_report() {
 #                           role access_svc is left alone and holds nothing compiled
 #   exit 3, message         a half-present access component: schema iam without role
 #                           access_svc, or without iam.confirm_decision (the IAM 2.7
-#                           access deploy has not run): run ./apps/access/deploy.sh first
+#                           access deploy has not run), or without iam._changed_since
+#                           (the IAM 4.1 access deploy has not run): run
+#                           ./apps/access/deploy.sh first
 #   exit 1                  the query failed: callers abort or FAIL, never default
 # Used by db_apply, health-check.sh (iamgrants) and tests/iam-db.sh. Reads only.
 dba_iam_flag() {
-    local row s r f
+    local row s r f c
     _DBA_NS="$1"; _DBA_POD="$2"
     row="$(_dba_psql "$3" -tAq -v ON_ERROR_STOP=1 -F'|' -c "SELECT pg_catalog.to_regnamespace('iam') IS NOT NULL,
                EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'access_svc'),
-               pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL" </dev/null)" \
+               pg_catalog.to_regprocedure('iam.confirm_decision(integer,text)') IS NOT NULL,
+               pg_catalog.to_regprocedure('iam._changed_since(text,text,double precision)') IS NOT NULL" </dev/null)" \
         || { echo "dba_iam_flag: cannot read schema iam and role access_svc in '$3'" >&2; return 1; }
-    IFS='|' read -r s r f <<<"$(tr -d '[:space:]' <<<"$row")"
-    if [[ ! "$s|$r|$f" =~ ^[tf]\|[tf]\|[tf]$ ]]; then
+    IFS='|' read -r s r f c <<<"$(tr -d '[:space:]' <<<"$row")"
+    if [[ ! "$s|$r|$f|$c" =~ ^[tf]\|[tf]\|[tf]\|[tf]$ ]]; then
         echo "dba_iam_flag: unexpected answer from '$3': $row" >&2
         return 1
     fi
@@ -104,6 +109,9 @@ dba_iam_flag() {
         return 3
     elif [[ "$f" == f ]]; then
         echo "schema iam has no iam.confirm_decision: run ./apps/access/deploy.sh first (IAM 2.7)" >&2
+        return 3
+    elif [[ "$c" == f ]]; then
+        echo "schema iam has no iam._changed_since: run ./apps/access/deploy.sh first (IAM 4.1)" >&2
         return 3
     fi
     return 0
@@ -168,6 +176,12 @@ SQL
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '008b:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
         echo "ERROR: migration 008b did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 008c (IAM 4.1) is a second transaction after 008b's, with the same nonce
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '008c:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 008c did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
         return 1
     fi
 

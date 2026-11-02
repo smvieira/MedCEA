@@ -16,7 +16,11 @@ I5_GROUPS = ("runs", "schedules", "measurements", "mqtt_sense", "mqtt_control", 
 # so nothing is exported through Database Management.
 I5_ALLOWED = {"measurements": {"R"}}
 # The only services that record an approval for a person whose token they verified (I10).
-SERVICE_APPROVERS = {("svc_access", "iam_users"), ("svc_access", "zones"), ("svc_iam", "iam_policy")}
+# svc_iam left in IAM 4.1: a policy version is approved with the qa person's own token,
+# through PostgREST (medcea.approve_policy), never by iam-api.
+SERVICE_APPROVERS = {("svc_access", "iam_users"), ("svc_access", "zones")}
+# I12 (IAM 4.1): the levels that make a role a maker of each approval-guarded group.
+I12_MAKER_LEVELS = {"iam_policy": {"C", "U"}, "iam_users": {"K"}}
 
 
 def _member_keys(m):
@@ -233,6 +237,12 @@ def _matrix_invariants(p, err, note):
             err(f"I12 no non-admin role holds A on {g}")
         if "admin" in approvers:
             err(f"I12 admin holds A on {g}")
+        # someone who could actually approve: an approver that is no maker there, and whose
+        # role is in use (availability other than `later`)
+        makers = {r for r in p.roles if p.direct(g, r)[0] & I12_MAKER_LEVELS[g]}
+        if approvers and not [r for r in approvers if r not in makers
+                              and p.roles[r].get("availability") != "later"]:
+            err(f"I12 every role holding A on {g} is a maker there or availability: later")
 
     for s, sd in p.services.items():
         for g, lv in (sd.get("ceiling") or {}).items():

@@ -77,6 +77,7 @@
 <tbody>
 <tr><td><code>portal</code></td><td>Service portal and profile</td><td>config</td></tr>
 <tr><td><code>user_manager</code></td><td>User Manager page</td><td>config</td></tr>
+<tr><td><code>policy_page</code></td><td>Access Policy page (IAM 4.1: the Policy UI's page and the person's own capabilities; <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">admin</span>, <span class="role">auditor</span> read it)</td><td>config</td></tr>
 <tr><td><code>master_data</code></td><td>Master data (locations, units, zones, components)</td><td>config</td></tr>
 <tr><td><code>devices</code></td><td>Devices and provisioning</td><td>config</td></tr>
 <tr><td><code>onboarding</code></td><td>Device onboarding (edge wizard)</td><td>config</td></tr>
@@ -103,6 +104,31 @@
 <tr><td><code>platform_admin</code></td><td>Platform administration</td><td>config</td></tr>
 </tbody>
 </table></div>
+
+<h3 id="reference-policy-versions">Access policy versions (IAM 4.1)</h3>
+<p>Since slice 4.1 the database holds everything Phase 4 needs to keep the access policy as numbered versions (migration 008c). <strong>Nothing calls it yet</strong>: there is no Policy UI, no <code>apply.sh</code> and no Keycloak client <code>policy</code> before slices 4.2a to 4.5, so no version exists and the policy is still <code>apps/iam/policy/defaults.yaml</code>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Object</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>iam_policy.version</code></td><td>One row per version: kind (<code>bootstrap</code>, <code>change</code>, <code>skeleton</code>, <code>rollback</code>), status (<code>draft</code>, <code>submitted</code>, <code>approved</code>, <code>applied</code>, <code>superseded</code>, <code>withdrawn</code>), who drafted, submitted, approved, applied, confirmed or disputed it, and its digests. At most one change or skeleton version is open at a time (<code>one_open</code>).</td></tr>
+<tr><td><code>iam_policy.entry</code></td><td>The matrix of a version, one row per role, group and level, with the constraint that narrows that level.</td></tr>
+<tr><td><code>iam_policy.waiver</code></td><td>The version's waivers, with the objects each one covers.</td></tr>
+<tr><td><code>iam_policy.skeleton</code></td><td>Platform skeletons (everything of the policy but the matrix and waivers) by digest; the one this host accepted last is in force.</td></tr>
+<tr><td><code>iam_policy.version_diff</code></td><td>For a skeleton version, the diff the host computed, shown to <span class="role">qa</span> byte for byte.</td></tr>
+<tr><td><code>iam_policy.approval_evidence</code></td><td>The signed token behind every approve, return, confirm and dispute. Readable by the database owner only.</td></tr>
+</tbody></table></div>
+<p>The six tables are written only by the policy's own database functions. A trigger refuses anything else, for every role, the database owner included: no update without the function's mark, no delete (except replacing a cell of a draft), no truncate, one step of the state machine per update, and every status change written to the policy history (<code>status_changed</code>).</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Function</th><th>Who may call it</th><th>Refusals</th></tr></thead>
+<tbody>
+<tr><td><code>iam_policy.new_draft</code>, <code>save_entry</code>, <code>submit</code>, <code>withdraw</code></td><td>iam-api (<code>iam_svc</code>) for a signed-in <span class="role">admin</span> (C or U on <code>iam_policy</code>)</td><td>Not the Policy UI's own person, or a blank <code>person_id</code>: refused. Access changed since the person signed in: "your access changed since you signed in: reload the page". No applied version, or one being applied: refused. Another version open: refused.</td></tr>
+<tr><td><code>medcea.approve_policy</code>, <code>return_policy</code>, <code>confirm_policy</code>, <code>dispute_policy</code></td><td>A <span class="role">qa</span> person through the configuration API (PostgREST), with their own token of the policy host</td><td>Any other sign-in: "approve access-policy versions in the Policy UI". An author of the version (by account or person): refused. A stale base, changed entries, or another platform skeleton than this host accepted: refused, reload. The person <code>apply.sh</code> recorded may not confirm.</td></tr>
+<tr><td><code>iam_policy.why_not</code>, <code>entries_digest</code>, <code>audit_versions</code></td><td>Roles that read <code>iam_policy</code> (and iam-api, and Database Management's account)</td><td>Read only.</td></tr>
+<tr><td><code>iam._changed_since</code></td><td>iam-api</td><td>Read only: whether a person's access changed since their token was issued. Installed by <code>./apps/access/deploy.sh</code>.</td></tr>
+<tr><td><code>iam_policy.append_history</code></td><td>iam-api (its own events, such as <code>mqtt_credential_issued</code>)</td><td>Any event a policy version is read from (<code>draft_created</code>, <code>submitted</code>, <code>approved</code>, <code>applied</code>, <code>apply_started</code>, <code>status_changed</code>, <code>skeleton_…</code> and the rest): "is a policy version event, written only by the policy functions". Those are written only by the functions above, so whoever holds iam-api's database password cannot record a version as applied, approved or authored.</td></tr>
+</tbody></table></div>
+<p>The configuration API accepts tokens of the policy host's client (<code>policy</code>) for exactly these four calls, by POST, and nothing else: no read and no other write. The network entry is <code>network.clients.iam-approvals</code> with <code>only_rpc</code> in the policy. A <span class="role">qa</span> token of the Configuration UI cannot approve a policy version either.</p>
+<p>The route table (<code>routes.json</code>) gains <code>dual_control</code>: the roles that may approve and the roles that make changes on <code>iam_policy</code> and on <code>iam_users</code> (today <span class="role">qa</span> and <span class="role">admin</span> for both). The User Manager and <code>apply.sh</code> read it from IAM 4.5.</p>
 
 <h3 id="reference-settings">Settings</h3>
 <p>The settings an administrator may change in <code>config.env</code>, with the default from <code>config.env.example</code>. Change them with <code>./infra/configure.sh</code> or, for the IAM switches, with <code>./guide.sh</code>, which runs the deploys each switch needs in the right order. A changed setting takes effect at the next deploy of the parts that read it.</p>

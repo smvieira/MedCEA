@@ -57,6 +57,10 @@
 #      question), then y typed: exit 130 at once, IAM_DB_ROLES still false, no new backup
 #  31  Backups: now (changes, the lock), list, verify with a folder (a bad name re-asked) and
 #      restore-help for the newest, dry; the restore entry runs restore-help, nothing else
+#  32  Deploy IAM 4.1: access, database, infra in that order, the 503 window explained
+#      before the [y/N]; dry: nothing run, no lock; real against stubs: all three under the
+#      guide's one lock (each finds it held), a failure stops the chain, the lock is free
+#      afterwards; refused, nothing run, while another process holds the lock
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -701,6 +705,46 @@ has   "restore-help for the newest (dry)" "[dry run] not executed: ./apps/backup
 has   "the restore is shown, not run" "Shown, not run"
 hasnt "no folder smuggled in" "backups.sh verify ../etc"
 no_stub
+
+echo "32 deploy IAM 4.1 (policy versions schema)"
+mkcfg false false
+guide $'8\n8\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain, in order" "[dry run] not executed: ./apps/access/deploy.sh && ./apps/database/deploy.sh && ./deploy-infra.sh"
+has   "the 503 window is explained" "the User Manager answers 503"
+has   "one lock for all three" "held by the guide for all three"
+has   "a change ([y/N])" "Kind:        changes the platform"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'8\n8\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: access first" "STUB apps/access/deploy.sh"
+has   "real: then the database" "STUB apps/database/deploy.sh"
+has   "real: then deploy-infra" "STUB deploy-infra.sh"
+python3 - "$OUT" <<'PY' && pass "real: access, database, infra in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/access/deploy.sh", "STUB apps/database/deploy.sh", "STUB deploy-infra.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 3 ]] \
+    && pass "real: each step runs under the guide's lock" || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+OUT="$(printf '8\n8\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/access/deploy.sh"
+hasnt "the database deploy did not run" "STUB apps/database/deploy.sh"
+lock_free && pass "the lock is free after a failure" || fail "the lock is still held after a failure"
+( exec 8>>"$S/.medcea.lock"; flock 8 && exec sleep 60 ) &
+LOCKER=$!
+for _ in $(seq 50); do lock_free || break; sleep 0.1; done
+if lock_free; then
+    fail "could not take the lock for the test"
+else
+    real $'8\n8\ny\nq\n'
+    has   "refused while another deploy holds the lock" "another MedCEA deploy is running"
+    hasnt "nothing ran" "STUB "
+fi
+kill "$LOCKER" 2>/dev/null; wait "$LOCKER" 2>/dev/null; LOCKER=""
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

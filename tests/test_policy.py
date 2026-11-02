@@ -119,6 +119,19 @@ MUTATIONS = {
                                                  "is a host's client"),
     "notebook token client without read_only": (_pop(["network", "clients", "notebooks", "read_only"]),
                                                 "needs read_only: true or false"),
+    # IAM 4.1: the one exception to "never a host's client" (only_rpc), and I12's availability rule
+    "host client as token_client without only_rpc": (_pop(["network", "clients", "iam-approvals", "only_rpc"]),
+                                                     "is a host's client"),
+    "only_rpc without a token_client": (_pop(["network", "clients", "iam-approvals", "token_client"]),
+                                        "only_rpc needs a token_client"),
+    "only_rpc with read_only true": (_set(["network", "clients", "iam-approvals", "read_only"], True),
+                                     "only_rpc with read_only: true"),
+    "only_rpc client of a host that serves config-api": (_set(["network", "clients", "iam-approvals", "token_client"], "config"),
+                                                          "which serves config-api"),
+    "only_rpc name that is no medcea function": (_append(["network", "clients", "iam-approvals", "only_rpc"], "approve_nothing"),
+                                                 "is no medcea function member"),
+    "I12 approver only at availability later": (_set(["roles", "qa", "availability"], "later"),
+                                                "I12 every role holding A on iam_policy"),
     "notebook hop with pod and selector": (
         lambda d: d["network"]["clients"]["notebooks"]["egress"][1].__setitem__("pod", "config-api"),
         "names either pod or selector"),
@@ -221,7 +234,7 @@ class PolicyTest(unittest.TestCase):
     def test_counts(self):
         p = self.policy
         self.assertEqual(len(p.roles), 11)
-        self.assertEqual(len(p.groups), 26)
+        self.assertEqual(len(p.groups), 27)        # policy_page (IAM 4.1)
 
     def test_mutations_are_caught(self):
         for name, (mutate, expected) in MUTATIONS.items():
@@ -636,7 +649,7 @@ class NetpolTest(unittest.TestCase):
         self.assertIn({"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress"}}},
                       self.peers("iam-access", 8080))
         profile = self.peers("iam-access", 8082)
-        self.assertEqual(len(profile), 7)                 # every proxy with /_account/ …
+        self.assertEqual(len(profile), 8)                 # every proxy with /_account/ (POLICY_DOMAIN's: IAM 4.1) …
         self.assertNotIn({"podSelector": {"matchLabels": {"app.kubernetes.io/instance": "oauth2-proxy"}}}, profile)  # … not Node-RED's
 
     def test_node_addresses_required(self):
@@ -774,8 +787,9 @@ class GrantsTest(unittest.TestCase):
         self.assertEqual(self.holders("medcea.algorithm_state", "UPDATE"), {"svc_scheduler"})  # W2's objects
         self.assertEqual(self.holders("medcea_auth.my_zones()"), {"rr_operator"})
         self.assertEqual(self.holders("medcea_auth.my_units()"), {"rr_operator"})
+        # iam_svc lost zones in IAM 4.1 (propose_unit is not built: units stay in the User Manager)
         self.assertEqual(self.holders("iam_policy.user_unit"),
-                         {"access_svc", "iam_svc", "rr_auditor", "rr_qa", "svc_dbexport", "svc_monitor", "svc_scheduler"})
+                         {"access_svc", "rr_auditor", "rr_qa", "svc_dbexport", "svc_monitor", "svc_scheduler"})
         self.assertEqual(self.holders("medcea.release_run(integer)"), {"rr_qp"})
         self.assertEqual(self.holders("medcea.approve_change(text,bigint,text)"), {"rr_qa"})
         self.assertEqual(self.holders("iam_policy.append_history(text,jsonb,text)"), {"iam_svc"})
@@ -811,8 +825,10 @@ class GrantsTest(unittest.TestCase):
         self.assertEqual({p for g, k, o, p in self.privs if g == "access_svc" and o == "iam.mail_settings_pending"},
                          {"SELECT", "INSERT", "UPDATE"})
         self.assertIn("access_svc", self.holders("medcea.cea_unit", "SELECT"))            # Q7: unit codes
+        # propose_unit left the policy in IAM 4.1 (owner decision 4); NOT_BUILT holds the waiver editing only
         self.assertNotIn("iam_policy.propose_unit(uuid,integer,text)", {o for g, k, o, p in self.privs})
-        self.assertEqual(grants.NOT_BUILT["iam_policy.propose_unit(uuid,integer,text)"], "4.3")
+        self.assertNotIn("iam_policy.propose_unit(uuid,integer,text)", grants.NOT_BUILT)
+        self.assertEqual(set(grants.NOT_BUILT.values()), {"4.7"})
         for sig in ("iam.confirm_decision(integer,text)", "iam.sign_off_review(integer,text)"):
             self.assertNotIn(sig, grants.NOT_BUILT)
 
@@ -1255,9 +1271,14 @@ class WiringTest(unittest.TestCase):
         self.assertIn("SET log_statement = 'none'", self.read("apps/access/deploy.sh"))
         self.assertIn("SET log_statement = 'none'", self.read("apps/database/lib-db-apply.sh"))
         # 008b is one transaction that writes the nonce deploy.sh reads back
-        tail = migrations[migrations.index("Migration 008b"):]
+        tail = migrations[migrations.index("Migration 008b"):migrations.index("Migration 008c")]
         self.assertEqual((tail.count("BEGIN;"), tail.count("COMMIT;")), (1, 1))
         self.assertIn("'008b:last_nonce', :'deploy_nonce'", tail)
+        # 008c (IAM 4.1) is a second transaction after it, with the same nonce, read back too
+        tail_c = migrations[migrations.index("Migration 008c"):]
+        self.assertEqual((tail_c.count("BEGIN;"), tail_c.count("COMMIT;")), (1, 1))
+        self.assertIn("'008c:last_nonce', :'deploy_nonce'", tail_c)
+        self.assertIn("key = '008c:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own
         for f in ("medcea_db_migrations_down_008b.sql", "medcea_db_migrations_008b_enforce.sql"):
             self.assertNotRegex(self.read("apps/database/" + f), r"(?m)^(BEGIN|COMMIT);", f)
@@ -2243,6 +2264,274 @@ class RunReleaseTest(unittest.TestCase):
         self.assertIn("WHEN rn.created_by_person IS NULL", runs)
         self.assertIn("r.created_by_person IS NULL", rel)
         self.assertIn("may_return := false;", runs)
+
+
+class Phase41Test(unittest.TestCase):
+    """IAM Phase 4, slice 4.1 (design §14.2): migration 008c and its down file, the
+    only_rpc exception and pre_request's block, _rpc_client, dual_control, the exports,
+    the entries digest's Python twin, and the members' agreement with the SQL."""
+
+    WRAPPERS = ("medcea.approve_policy(integer,text,text,text,text)", "medcea.return_policy(integer,text)",
+                "medcea.confirm_policy(integer,text,text)", "medcea.dispute_policy(integer,text)")
+    TABLES = ("version", "entry", "waiver", "skeleton", "version_diff", "approval_evidence")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = model.load_defaults()
+        cls.privs = grants.privileges(cls.policy)
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
+            cls.mig = f.read()
+        cls.c = cls.mig[cls.mig.index("Migration 008c"):]
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008c.sql")) as f:
+            cls.down_c = f.read()
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008b.sql")) as f:
+            cls.down_b = f.read()
+        cls.full = cls.down_b[cls.down_b.index("\\if :{?full}"):]
+
+    def holders(self, obj, priv="EXECUTE"):
+        return {g for g, k, o, p in self.privs if o == obj and p == priv}
+
+    @staticmethod
+    def outside_bodies(sql):
+        """The SQL text with every dollar-quoted body blanked: what runs at the top level."""
+        return re.sub(r"\$(\w*)\$.*?\$\1\$", "$$", sql, flags=re.S)
+
+    @staticmethod
+    def dropped(sql):
+        drops = ", ".join(re.findall(r"DROP FUNCTION IF EXISTS\s+(.*?);", sql, re.S))
+        return {grants.norm_sig(x.strip()) for x in re.split(r",\s*(?=[a-z_]+\.[a-z_]+\()", drops) if x.strip()}
+
+    def test_members_match_the_sql(self):
+        created = _created_functions(self.c)
+        declared = set(grants.declared_functions(self.policy)) | set(grants.NOT_BUILT)
+        for fn in created:
+            self.assertIn(fn, declared, f"{fn}: created by 008c but no member or infrastructure function")
+        named = {f for f in declared if f.startswith("iam_policy.") or f in self.WRAPPERS}
+        existing = _created_functions(self.mig[:self.mig.index("Migration 008c")])
+        for fn in named - existing:
+            self.assertTrue(fn in created or fn in grants.NOT_BUILT, f"{fn}: named by the policy, created nowhere")
+        self.assertEqual(set(grants.NOT_BUILT), {"iam_policy.save_waiver(integer,jsonb,text,double precision)",
+                                                 "iam_policy.drop_waiver(integer,text,text,double precision)"})
+        for fn in grants.NOT_BUILT:
+            self.assertNotIn(fn, created)
+        self.assertIn("iam._changed_since(text,text,double precision)", _created_functions(self.read_access()))
+        self.assertIn("medcea_auth._person_actor(text,text,text)", _created_functions(self.mig))
+
+    def read_access(self):
+        with open(os.path.join(REPO, "apps/access/access_db.sql")) as f:
+            return f.read()
+
+    def test_down_files_name_everything(self):
+        created = {f for f in _created_functions(self.c) if not f.startswith("medcea_auth.")}
+        # dropped, or (append_history, whose filter 008c puts in front) given back its 008b body
+        self.assertEqual(created - self.dropped(self.down_c) - _created_functions(self.down_c), set(),
+                         "down_008c misses a 008c function")
+        self.assertEqual(_created_functions(self.down_c), {"iam_policy.append_history(text,jsonb,text)"})
+        for t in self.TABLES:
+            self.assertIn(f"'{t}'", self.down_c[self.down_c.index("DROP TRIGGER IF EXISTS") - 300:])
+        for trg in ("freeze_policy_trg", "freeze_policy_truncate_trg"):
+            self.assertIn(trg, self.down_c)
+            self.assertIn(trg, self.full)
+        full_drops = self.dropped(self.full)
+        for fn in self.WRAPPERS + ("medcea_auth._person_actor(text,text,text)", "medcea_auth._rpc_client(text)"):
+            self.assertIn(fn, full_drops, f"{fn} is not in the down file's -v full=1 DROP list")
+        # the wrappers go before schema medcea is given back to postgres
+        self.assertLess(self.full.index("medcea.approve_policy("), self.full.index("ALTER SCHEMA medcea OWNER TO postgres"))
+        self.assertIn("policy versions exist", self.down_c)
+        self.assertNotRegex(self.down_c, r"(?m)^(BEGIN|COMMIT);")
+
+    def test_008c_is_rerun_safe(self):
+        top = self.outside_bodies(self.c)
+        # no row is written but the nonce, and no table altered outside a guarded DO block
+        self.assertEqual(re.findall(r"INSERT INTO ([a-z_.]+)", top), ["medcea.platform_setting"])
+        self.assertNotRegex(top, r"\bUPDATE iam_policy\.")
+        self.assertNotRegex(top, r"(?m)^\s*ALTER TABLE")
+        self.assertNotRegex(self.c, r"(?m)^[^-\n]*CREATE OR REPLACE TRIGGER")   # (comments may name it)
+        self.assertNotRegex(top, r"CREATE (UNIQUE )?INDEX")
+        # ENABLE ALWAYS, only where the trigger is not in that mode yet
+        self.assertIn("tgenabled <> 'A'", self.c)
+        self.assertIn("ENABLE ALWAYS TRIGGER freeze_policy_trg", self.c)
+        # new tables lose PUBLIC/anon/authenticator right after their CREATE
+        self.assertIn("REVOKE ALL ON iam_policy.entry, iam_policy.skeleton, iam_policy.version_diff, "
+                      "iam_policy.approval_evidence\n    FROM PUBLIC, anon, authenticator;", self.c)
+        # the gap the coverage check found (§2.2): _sync_skeleton writes resource_group.retired
+        self.assertIn("['resource_group', 'retired', 'boolean NOT NULL DEFAULT false']", self.c)
+        # its own ownership loop: 008b's (B21) ran before it
+        self.assertLess(self.mig.index("B21. Ownership"), self.mig.index("Migration 008c"))
+        self.assertIn("ALTER FUNCTION %s OWNER TO medcea_owner", self.c)
+
+    def test_policy_events_only_through_the_writer(self):
+        # iam_svc executes append_history (iam-api), so it must not reach the events the
+        # policy's versions are read from: 008c's filter refuses them, the functions use
+        # the owner-only _append_history (review of slice 4.1)
+        i = self.c.index("CREATE OR REPLACE FUNCTION iam_policy.append_history(")
+        flt = self.c[i:self.c.index("END $$;", i)]
+        events = set(re.findall(r"_append_history\('([a-z_]+)'", self.c))
+        events |= {"applied", "partial_apply", "bootstrap_applied", "break_glass_seen", "apply_deferred", "account_seeded"}
+        for ev in events:
+            self.assertTrue(f"'{ev}'" in flt or ev.startswith(("skeleton_", "waiver_")), ev)
+        self.assertIn("LIKE 'skeleton\\_%'", flt)
+        self.assertIn("LIKE 'waiver\\_%'", flt)
+        self.assertIn("ERRCODE = '42501'", flt)
+        self.assertIn("RETURN iam_policy._append_history(p_event, p_payload, p_reason);", flt)
+        # no 008c function body calls the public one any more
+        self.assertEqual(re.findall(r"(?<![_\w])iam_policy\.append_history\('", self.c), [])
+        rec = self.c[self.c.index("FUNCTION iam_policy._record("):]
+        self.assertIn("iam_policy._append_history(p_event", rec[:rec.index("END $$;")])
+        # B16's body is re-created only while 008c's writer is absent, so a re-run opens no window
+        b16 = self.mig[self.mig.index("B16. append_history"):self.mig.index("Migration 008c")]
+        self.assertLess(b16.index("\\if :b16_writer"), b16.index("FUNCTION iam_policy.append_history("))
+        self.assertIn("\\endif", b16[b16.index("FUNCTION iam_policy.append_history("):b16.index("log_export(groups")])
+        # the down file restores the writer before dropping _append_history
+        self.assertIn("iam_policy._append_history(text, jsonb, text)", self.down_c)
+        self.assertLess(self.down_c.index("FUNCTION iam_policy.append_history("),
+                        self.down_c.index("iam_policy._append_history(text, jsonb, text)"))
+
+    def test_wrappers_are_plpgsql_definers(self):
+        for w in ("approve_policy", "return_policy", "confirm_policy", "dispute_policy"):
+            i = self.c.index(f"FUNCTION medcea.{w}(")
+            head = self.c[i:self.c.index("AS $$", i)]
+            self.assertIn("LANGUAGE plpgsql SECURITY DEFINER", head, w)   # _rpc_client is compiled after the migrations
+        # the internals check the client the wrapper is named for
+        for internal, rpc in (("approve", "approve_policy"), ("return_version", "return_policy"),
+                              ("confirm_applied", "confirm_policy"), ("dispute_applied", "dispute_policy")):
+            i = self.c.index(f"FUNCTION iam_policy.{internal}(")
+            self.assertIn(f"iam_policy._qa('{rpc}')", self.c[i:self.c.index("END $$;", i)], internal)
+        qa = self.c[self.c.index("FUNCTION iam_policy._qa("):]
+        qa = qa[:qa.index("END $$;")]
+        order = ["medcea_auth._approver('iam_policy')", "medcea_auth._rpc_client(p_rpc)", "iam_policy._changed_since("]
+        self.assertEqual([qa.index(x) for x in order], sorted(qa.index(x) for x in order))
+        self.assertIn("'approve access-policy versions in the Policy UI'", qa)
+
+    def test_approver_blank_person(self):
+        ap = self.mig[self.mig.index("FUNCTION medcea_auth._approver("):]
+        ap = ap[:ap.index("END $$;")]
+        self.assertIn("IF a.person IS NULL OR btrim(a.person) = '' THEN", ap)
+        # the queue's advisory codes follow the same rule (coverage check, G9)
+        q = self.mig[self.mig.index("FUNCTION medcea.approval_queue("):]
+        q = q[:q.index("END $$;")]
+        self.assertNotIn("WHEN a.person IS NULL THEN 'no_person'", q)
+        self.assertEqual(q.count("WHEN btrim(coalesce(a.person, '')) = '' THEN 'no_person'"), 3)
+        acc = self.mig[self.mig.index("FUNCTION medcea_auth._account_actor("):]
+        self.assertIn("medcea_auth._person_actor('access_svc', p_group, p_level)", acc[:acc.index("END $$;")])
+
+    def test_pre_request_only_rpc(self):
+        fn = grants.compiled_functions(self.policy)
+        pre = fn[fn.index("FUNCTION medcea_auth.pre_request()"):fn.index("$pre$;")]
+        self.assertEqual(pre.count("may only call"), 1)
+        for w in ("approve_policy", "return_policy", "confirm_policy", "dispute_policy"):
+            self.assertIn(f"'/rpc/{w}'", pre)
+        self.assertIn("IS DISTINCT FROM 'POST'", pre)
+        self.assertLess(pre.index("may not use the API"), pre.index("may only call"))
+        self.assertLess(pre.index("may only call"), pre.index("may only read"))
+        self.assertIn("'policy'", pre[:pre.index("may not use the API")])
+        self.assertEqual(grants.only_rpc_clients(self.policy),
+                         {"policy": ["approve_policy", "confirm_policy", "dispute_policy", "return_policy"]})
+        self.assertIn("policy", grants.token_clients(self.policy))
+        self.assertNotIn("policy", grants.read_only_clients(self.policy))
+        rc = fn[fn.index("FUNCTION medcea_auth._rpc_client("):fn.index("$rc$;")]
+        self.assertEqual(re.findall(r"WHEN '([a-z_]+)' THEN '([a-z-]+)'", rc),
+                         [("approve_policy", "policy"), ("confirm_policy", "policy"),
+                          ("dispute_policy", "policy"), ("return_policy", "policy")])
+        self.assertEqual(grants.document(self.policy)["only_rpc"], grants.only_rpc_clients(self.policy))
+        # without an only_rpc client: no block, and _rpc_client answers NULL for everything
+        d = copy.deepcopy(self.policy.data)
+        del d["network"]["clients"]["iam-approvals"]
+        d["network"]["pods"]["config-api"]["ingress"][0]["from"].remove("client:iam-approvals")
+        fn2 = grants.compiled_functions(model.Policy(d))
+        self.assertNotIn("may only call", fn2)
+        self.assertIn("SELECT NULL::text", fn2)
+
+    def test_who_holds_the_008c_functions(self):
+        for w in self.WRAPPERS:
+            self.assertEqual(self.holders(w), {"rr_qa"}, w)
+        for fn in ("iam_policy.new_draft(text,text,double precision,jsonb,jsonb)",
+                   "iam_policy.save_entry(integer,text,text,jsonb,text,jsonb,double precision)",
+                   "iam_policy.submit(integer,text,double precision)", "iam_policy.withdraw(integer,text,double precision)",
+                   "iam._changed_since(text,text,double precision)"):
+            self.assertEqual(self.holders(fn), {"iam_svc"}, fn)
+        for fn in ("iam_policy.why_not(integer)", "iam_policy.entries_digest(integer)", "iam_policy.audit_versions()"):
+            self.assertEqual(self.holders(fn), {"iam_svc", "rr_qa", "rr_admin", "rr_auditor", "svc_dbexport"}, fn)
+        self.assertEqual(self.holders("iam_policy.verify_chain()"), {"iam_svc"})
+        for internal in ("iam_policy.approve(integer,text,text,text,text)", "iam_policy._mark_applied(integer,jsonb,text,uuid,text,text)",
+                         "iam_policy._build_version(text,jsonb,jsonb,integer,integer,text)", "medcea_auth._rpc_client(text)",
+                         "medcea_auth._person_actor(text,text,text)", "iam_policy.freeze_policy()",
+                         "iam_policy._append_history(text,jsonb,text)"):
+            self.assertEqual(self.holders(internal), set(), internal)
+        self.assertEqual({g for g, k, o, p in self.privs if o == "iam_policy.approval_evidence"}, set())
+        for t in ("iam_policy.role", "iam_policy.resource_group", "iam_policy.member", "iam_policy.effective_route",
+                  "iam_policy.skeleton", "iam_policy.version_diff"):
+            self.assertEqual({p for g, k, o, p in self.privs if o == t}, {"SELECT"}, t)
+        # svc_iam approves nothing (I10): no A in its ceiling, no zones
+        self.assertEqual(self.policy.services["svc_iam"]["ceiling"],
+                         {"iam_policy": ["R", "C", "U"], "iam_users": ["R"], "mqtt_explorer": ["R", "C", "U"],
+                          "audit_histories": ["R", "C"]})
+        self.assertNotIn(("svc_iam", "iam_policy"), invariants.SERVICE_APPROVERS)
+
+    def test_dual_control(self):
+        self.assertEqual(routes.dual_control(self.policy),
+                         {"iam_policy": {"approver_roles": ["qa"], "maker_roles": ["admin"]},
+                          "iam_users": {"approver_roles": ["qa"], "maker_roles": ["admin"]}})
+        d = copy.deepcopy(self.policy.data)
+        d["roles"]["qp"]["includes"] = list(d["roles"]["qp"].get("includes") or []) + ["qa"]
+        dc = routes.dual_control(model.Policy(d))
+        self.assertIn("qp", dc["iam_policy"]["approver_roles"])        # a composite holding A counts
+        self.assertIn("dual_control", routes.compile(self.policy))
+
+    def test_exports(self):
+        ex = routes.export_table(self.policy)
+        self.assertIn("iam_policy.skeleton", ex["groups"]["iam_policy"])
+        self.assertIn("iam_policy.version_diff", ex["groups"]["iam_policy"])
+        self.assertNotIn("iam_policy.approval_evidence", ex["groups"]["iam_policy"])
+        self.assertNotIn("iam_policy.role", ex["groups"]["iam_policy"])
+
+    def test_policy_page(self):
+        self.assertEqual({r: c for r, c in self.policy.matrix["policy_page"].items()},
+                         {"qa": ["R"], "qp": ["R"], "admin": ["R"], "auditor": ["R"]})
+        self.assertEqual(self.policy.hosts["POLICY_DOMAIN"]["serves"], ["iam"])
+        self.assertEqual(sorted(proxies.admitted(self.policy, "POLICY_DOMAIN")), ["admin", "auditor", "qa", "qp"])
+
+    def test_access_changed_since(self):
+        sql = self.read_access()
+        i = sql.index("FUNCTION iam._changed_since(")
+        body = sql[i:sql.index("$$;", i)]
+        self.assertIn("LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog", body)
+        for k in ("'deactivate'", "'activate'", "'role_change'", "'person_id'", "'grant'",
+                  "d.subject_person = p_person", "d.new_person_id = p_person", "d.checked_at >="):
+            self.assertIn(k, body)
+        self.assertIn("REVOKE ALL ON FUNCTION iam._changed_since(text, text, double precision) FROM PUBLIC;", sql)
+        self.assertLess(sql.index("CREATE TABLE IF NOT EXISTS iam.account_decision"), i)
+        lib = open(os.path.join(REPO, "apps/database/lib-db-apply.sh")).read()
+        flag = lib[lib.index("dba_iam_flag() {"):]
+        self.assertLess(flag.index("no iam.confirm_decision"), flag.index("no iam._changed_since"))  # PREV27's text first
+
+    def test_entries_digest_jsonb_text(self):
+        from compiler import source
+        self.assertEqual(source.pg_jsonb_text({"bb": 1, "a": None, "ab": [True, "x"], "é": "ü"}),
+                         '{"a": null, "ab": [true, "x"], "bb": 1, "é": "ü"}')
+        self.assertEqual(source.pg_jsonb_text("q\"b\\n\n\t\x01"), '"q\\"b\\\\n\\n\\t\\u0001"')
+        rows = [{"role": "qa", "group_code": "portal", "level": "R", "constraint_name": None},
+                {"role": "admin", "group_code": "portal", "level": "R", "constraint_name": None}]
+        w = [{"id": "W1", "invariant": "I11", "subject": "engineer", "group": "flows", "target": "measurements",
+              "levels": ["C"], "objects": ["medcea.measurement"], "review_by": "2027-10-27",
+              "rationale": "é", "controls": "c"}]
+        doc = ('{"kind": "bootstrap", "roles": ["admin", "qa"], "groups": ["portal"], "entries": '
+               '[["admin", "portal", "R", null], ["qa", "portal", "R", null]], "waivers": [{"id": "W1", '
+               '"levels": ["C"], "target": "measurements", "objects": ["medcea.measurement"], "subject": "engineer", '
+               '"controls": "c", "invariant": "I11", "rationale": "é", "review_by": "2027-10-27", '
+               '"group_code": "flows"}]}')
+        self.assertEqual(source.entries_digest("bootstrap", ["portal"], ["qa", "admin"], rows, w),
+                         hashlib.sha256(doc.encode()).hexdigest())
+        # one row per level, byte order (upper case before lower case)
+        self.assertEqual(source.entries_digest("change", None, None, list(reversed(rows)), []),
+                         source.entries_digest("change", None, None, rows, []))
+        self.assertRegex(source.policy_entries_digest(self.policy.data), r"^[0-9a-f]{64}$")
+        # the SQL side orders and keys the same way
+        ed = self.c[self.c.index("FUNCTION iam_policy.entries_digest("):]
+        ed = ed[:ed.index("$$;")]
+        for k in ("'kind', v.kind", "'groups'", "'roles'", "'entries'", "'waivers'", "COLLATE \"C\"",
+                  "pg_catalog.to_jsonb(w) - 'version'", "ORDER BY w.id COLLATE \"C\""):
+            self.assertIn(k, ed)
 
 
 if __name__ == "__main__":

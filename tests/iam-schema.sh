@@ -11,8 +11,10 @@
 #   grants   the API role (anon) reaches nothing in iam_policy and holds, in both
 #            IAM_DB_ROLES modes, USAGE on medcea_auth and EXECUTE on pre_request()
 #            only there; the iam_policy functions are executable exactly by the roles
-#            infrastructure_functions and the policy members name (append_history:
-#            iam_svc, log_export: svc_dbexport; superusers bypass ACLs)
+#            the compiled grants name (infrastructure_functions and the policy members:
+#            append_history to iam_svc, log_export to svc_dbexport, and since IAM 4.1
+#            the author functions to iam_svc and the read functions to R holders;
+#            superusers bypass ACLs); 14 iam_policy tables since migration 008c (IAM 4.1)
 #   chain    iam_policy.verify_chain() passes on the live history, and inside a
 #            transaction that is rolled back: two appends chain, verify, and an
 #            UPDATE, DELETE and TRUNCATE are each refused
@@ -24,7 +26,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -95,6 +97,14 @@ done
 
 # ── schema + grants ─────────────────────────────────────────────────────────────
 echo ""
+# who may execute each iam_policy function, from the compiled grants ("proname to role")
+exec_want="$(python3 apps/iam/compiler/cli.py compile grants --format json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+w = sorted({o.split("(")[0].split(".", 1)[1] + " to " + g for g, k, o, p in d["privileges"]
+            if k == "function" and o.startswith("iam_policy.") and p == "EXECUTE"})
+print(", ".join("\x27" + x + "\x27" for x in w))')"
+[[ -n "$exec_want" ]] || { fail grants "cli.py compile grants --format json failed"; exec_want="'-'"; }
 out="$(db <<SQL
 SELECT 'schema', n.nspname, pg_get_userbyid(n.nspowner) FROM pg_namespace n
  WHERE n.nspname IN ('medcea_auth', 'iam_policy') ORDER BY 2;
@@ -122,9 +132,9 @@ SELECT 'exec', count(*), string_agg(x, ', ') FROM (
     (SELECT p.proname || ' to ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS x
        FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
       WHERE p.pronamespace = 'iam_policy'::regnamespace AND a.privilege_type = 'EXECUTE' AND a.grantee <> p.proowner
-     EXCEPT SELECT unnest(ARRAY['append_history to iam_svc', 'log_export to svc_dbexport']))
+     EXCEPT SELECT unnest(ARRAY[$exec_want]))
     UNION ALL
-    (SELECT unnest(ARRAY['append_history to iam_svc', 'log_export to svc_dbexport'])
+    (SELECT unnest(ARRAY[$exec_want])
      EXCEPT SELECT p.proname || ' to ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
        FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
       WHERE p.pronamespace = 'iam_policy'::regnamespace AND a.privilege_type = 'EXECUTE' AND a.grantee <> p.proowner)
@@ -137,8 +147,8 @@ else
     while IFS='|' read -r what a b; do
         case "$what" in
             schema)  [[ "$b" == medcea_owner ]] && pass schema "schema $a owned by medcea_owner" || fail schema "schema $a owned by $b" ;;
-            tables)  [[ "$b" == 11 && "$a" == 11 ]] && pass schema "11 iam_policy tables, all owned by medcea_owner" \
-                         || fail schema "iam_policy has $b table(s), $a owned by medcea_owner (want 11)" ;;
+            tables)  [[ "$b" == 14 && "$a" == 14 ]] && pass schema "14 iam_policy tables, all owned by medcea_owner" \
+                         || fail schema "iam_policy has $b table(s), $a owned by medcea_owner (want 14: ./apps/database/deploy.sh for 008c)" ;;
             setting) [[ "$a" == "$PROJECT_NAME" ]] && pass schema "platform_setting mqtt_topic_root = $a" \
                          || fail schema "platform_setting mqtt_topic_root is $a, PROJECT_NAME is $PROJECT_NAME" ;;
             access)  [[ "$a" == 2 ]] && pass schema "iam.account_decision and iam.access_review exist" \
@@ -147,7 +157,7 @@ else
                          || fail schema "iam.account_decision has no unit_id or unit_* kinds (./apps/access/deploy.sh)" ;;
             anon)    [[ "$a" == 0 ]] && pass grants "anon: nothing in iam_policy, only USAGE on medcea_auth and EXECUTE on pre_request()" \
                          || fail grants "anon: $b" ;;
-            exec)    [[ "$a" == 0 ]] && pass grants "iam_policy functions: append_history to iam_svc, log_export to svc_dbexport, nothing else" \
+            exec)    [[ "$a" == 0 ]] && pass grants "iam_policy functions: executable exactly by the compiled roles (append_history to iam_svc, log_export to svc_dbexport, the 4.1 author and read functions)" \
                          || fail grants "iam_policy EXECUTE differs (missing or extra): $b" ;;
         esac
     done <<<"$out"

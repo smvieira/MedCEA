@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/iam-db-fixture.sh — IAM Phase 2a on a throwaway PostgreSQL, end to end.
 #
-#   tests/iam-db-fixture.sh up | load | fresh | apply MODE | access MODE | cycle | logins MODE
+#   tests/iam-db-fixture.sh up | load | fresh | apply MODE | access MODE | policy | cycle | logins MODE
 #                           | preflight | postgrest MODE | pgrst-flip | services | runner MODE
 #                           | fulldown | purge-access | rollback-27 | serverlog | purge | down
 #                           | run [--keep]
@@ -25,6 +25,14 @@
 #             as access_svc with set_actor), then access_db.sql applied a second time
 #             as apps/access/deploy.sh does, and the catalog (triggers still ALWAYS) and
 #             matrix sections again
+#   policy    IAM 4.1 (migration 008c), after access true: tests/iam-db.sh --section policy
+#             --write-probes (P1-P18); medcea_db_migrations_down_008c.sql on the database
+#             without versions (wrappers gone, three tables parked), then apply true (008c
+#             moves them back, P1 again); version 1 built COMMITTED from defaults.yaml through
+#             the owner functions (the bootstrap's bundle without apply.sh); apply true again:
+#             the 008c catalog (constraints, triggers, md5 of every function, owners), the
+#             version rows and entries_digest(1) unchanged, no policy event written; apply
+#             false then true (a mode flip with v1); down_008c refused while v1 exists
 #   cycle     false -> A; B0 vs A differs only by the declared delta; false = A;
 #             true twice equal; false = A; true = the earlier true
 #   logins M  every svc_* role and rr_admin_login logs in over TCP with its password
@@ -65,7 +73,7 @@
 #   run       up, load, runner legacy, preflight;
 #             apply false, probes, access false, logins false, preflight, postgrest false,
 #             runner false, pgrst-flip, services;
-#             apply true, probes, access true, logins true, preflight, postgrest true,
+#             apply true, probes, access true, policy, logins true, preflight, postgrest true,
 #             runner true;
 #             apply false, probes (W1 again), cycle, fulldown, fresh, purge-access,
 #             rollback-27, serverlog, purge, down (on exit, unless --keep)
@@ -77,7 +85,7 @@
 set -uo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
-    sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -258,6 +266,92 @@ cmd_apply() {  # MODE [DB] — DBA_SERVICE_LOGINS (env): login roles allowed to 
     fi
 }
 
+# policy_snapshot — what a re-run of 008c must leave alone (IAM 4.1): version's
+# constraints, the freeze triggers' modes, md5 of every 008c function, the table owners,
+# the version rows and entries_digest of each
+policy_snapshot() {
+    fx "$CEA_DB" -q -tA -v ON_ERROR_STOP=1 <<'SQL'
+SELECT 'con|' || conname || '|' || pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'iam_policy.version'::regclass ORDER BY conname;
+SELECT 'trg|' || c.relname || '|' || t.tgname || '|' || t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE c.relnamespace = 'iam_policy'::regnamespace AND NOT t.tgisinternal ORDER BY 1;
+SELECT 'fn|' || p.oid::regprocedure::text || '|' || md5(p.prosrc) || '|' || pg_get_userbyid(p.proowner) || '|' || coalesce(p.proacl::text, '')
+  FROM pg_proc p WHERE p.pronamespace = 'iam_policy'::regnamespace
+     OR p.oid IN (to_regprocedure('medcea.approve_policy(integer,text,text,text,text)'), to_regprocedure('medcea.return_policy(integer,text)'),
+                  to_regprocedure('medcea.confirm_policy(integer,text,text)'), to_regprocedure('medcea.dispute_policy(integer,text)'))
+ ORDER BY 1;
+SELECT 'own|' || c.relname || '|' || pg_get_userbyid(c.relowner) FROM pg_class c
+ WHERE c.relnamespace = 'iam_policy'::regnamespace AND c.relkind = 'r' ORDER BY 1;
+SELECT 'ver|' || v.version || '|' || v.status || '|' || v.kind || '|' || v.entries_digest || '|' || iam_policy.entries_digest(v.version)
+  FROM iam_policy.version v ORDER BY v.version;
+SQL
+}
+
+# v1_sql — version 1 from defaults.yaml, as apply.sh --bootstrap's bundle builds it
+# (4.2a): accept the git skeleton, sync role/resource_group, build, apply, record
+v1_sql() {
+    python3 - "$REPO_ROOT" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/apps/iam")
+from compiler import source
+d = source.factory()
+sk, ew = json.dumps(source.skeleton(d)), source.entries_and_waivers(d)
+def dq(text, tag):
+    assert f"${tag}$" not in text
+    return f"${tag}${text}${tag}$"
+print(f"SELECT iam_policy._accept_skeleton('{source.skeleton_digest(d)}', {dq(sk, 'sk')}::jsonb, 'iam-db-fixture', NULL, '{{}}'::jsonb);")
+print(f"SELECT iam_policy._sync_skeleton({dq(sk, 'sk')}::jsonb, 'iam-db-fixture');")
+print(f"SELECT iam_policy._build_version('bootstrap', {dq(json.dumps(ew['entries']), 'e')}::jsonb, "
+      f"{dq(json.dumps(ew['waivers']), 'w')}::jsonb, NULL, NULL, 'iam-db-fixture: version 1 from defaults.yaml') AS v1 \\gset")
+print("SELECT iam_policy._mark_applied(:v1, '{\"git_commit\": \"iam-db-fixture\"}'::jsonb, 'iam-db-fixture', NULL, NULL, NULL);")
+print("SELECT iam_policy._record('bootstrap_applied', jsonb_build_object('version', :v1));")
+print(f"SELECT 'digest|' || (iam_policy.entries_digest(:v1) = '{source.policy_entries_digest(d)}');")
+PY
+}
+
+cmd_policy() {  # after apply true (IAM 4.1)
+    step "IAM 4.1: migration 008c, the policy's versions"
+    local out snap1 snap2 ev
+    [[ "$(fx "$CEA_DB" -q -tA -c "SELECT value FROM medcea.platform_setting WHERE key = 'iam_db_roles'")" == true ]] || cmd_apply true
+    if [[ "$(fx "$CEA_DB" -q -tA -c "SELECT count(*) FROM iam_policy.version")" != 0 ]]; then
+        fail policy "versions exist already: the policy step needs a fixture without versions (run it once, after access true)"
+        return
+    fi
+    tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --mode true --write-probes --section policy || FAILS=$((FAILS + 1))
+    # the down file on a database without versions, then 008c brings everything back
+    out="$(fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008c.sql 2>&1)" \
+        && pass policy "medcea_db_migrations_down_008c.sql without versions" || { echo "$out" | grep ERROR; fail policy "down_008c failed"; return; }
+    out="$(fx "$CEA_DB" -q -tA -c "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('approve_policy', 'return_policy', 'confirm_policy', 'dispute_policy'))
+                                     || '|' || (SELECT count(*) FROM pg_class WHERE relnamespace = to_regnamespace('iam_policy_retired_008c'))
+                                     || '|' || (SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'freeze_policy%')")"
+    [[ "$out" == "0|3|0" ]] && pass policy "down_008c: no wrapper, three tables parked, no freeze trigger" || fail policy "after down_008c (wrappers|parked|triggers): $out"
+    cmd_apply true
+    out="$(fx "$CEA_DB" -q -tA -c "SELECT to_regnamespace('iam_policy_retired_008c') IS NULL AND to_regclass('iam_policy.approval_evidence') IS NOT NULL")"
+    [[ "$out" == t ]] && pass policy "008c moved the parked tables back and dropped the schema" || fail policy "parked tables not back: $out"
+    tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --mode true --section policy || FAILS=$((FAILS + 1))
+    # version 1, committed
+    out="$(v1_sql | fx "$CEA_DB" -q -tA -1 -v ON_ERROR_STOP=1 2>&1)"
+    if grep -q 'ERROR' <<<"$out"; then
+        grep ERROR <<<"$out" | head; fail policy "version 1 through the owner functions"; return
+    fi
+    grep -q '^digest|true$' <<<"$out" && pass policy "version 1 committed; entries_digest(1) = source.policy_entries_digest(defaults.yaml)" \
+        || fail policy "entries_digest(1) differs from compiler/source.py: $(grep '^digest|' <<<"$out")"
+    snap1="$(policy_snapshot)"; ev="$(fx "$CEA_DB" -q -tA -c "SELECT max(event_id) FROM iam_policy.history")"
+    cmd_apply true
+    snap2="$(policy_snapshot)"
+    [[ -n "$snap1" && "$snap1" == "$snap2" ]] && pass policy "008c re-run with v1: constraints, triggers, functions, owners, versions and digests unchanged" \
+        || { fail policy "008c re-run with v1 changed the catalog or the versions:"; diff <(echo "$snap1") <(echo "$snap2") | head -20; }
+    out="$(fx "$CEA_DB" -q -tA -c "SELECT coalesce(string_agg(event, ','), '') FROM iam_policy.history WHERE event_id > $ev AND version IS NOT NULL")"
+    [[ -z "$out" ]] && pass policy "the re-run wrote no policy event" || fail policy "the re-run wrote policy events: $out"
+    cmd_apply false
+    cmd_apply true
+    snap2="$(policy_snapshot)"
+    [[ "$(grep '^ver|' <<<"$snap1")" == "$(grep '^ver|' <<<"$snap2")" ]] && pass policy "a mode flip with v1 leaves the versions and digests alone" \
+        || fail policy "the mode flip changed the versions: $(grep '^ver|' <<<"$snap2")"
+    out="$(fx "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008c.sql 2>&1)"
+    grep -q 'policy versions exist' <<<"$out" && pass policy "down_008c refused while version 1 exists" || fail policy "down_008c with v1: ${out:-it ran}"
+}
+
 cmd_access() {  # MODE (after apply MODE)
     step "IAM 2.7 account decisions (mode $1)"
     tests/iam-db.sh --namespace "$FX_NS" --pod "$FX_POD" --mode "$1" --write-probes --section access || FAILS=$((FAILS + 1))
@@ -385,6 +479,17 @@ cmd_fulldown() {
     out="$(fx medcea_db -q -1 -v ON_ERROR_STOP=1 -v full=1 < apps/database/medcea_db_migrations_down_008b.sql 2>&1)" \
         && pass fulldown "medcea_db_migrations_down_008b.sql -v full=1" || { echo "$out" | grep ERROR; fail fulldown "the full down file failed"; return; }
     cmd_logins false
+    # IAM 4.1: no policy wrapper left in medcea, and no postgres-owned definer function there
+    left="$(fx medcea_db -q -tA -c "SELECT string_agg(p.oid::regprocedure::text, ', ') FROM pg_proc p
+             WHERE p.pronamespace = 'medcea'::regnamespace
+               AND (p.proname IN ('approve_policy', 'return_policy', 'confirm_policy', 'dispute_policy')
+                    OR (p.prosecdef AND p.proowner = 'postgres'::regrole AND p.proname IN ('approve_policy', 'return_policy', 'confirm_policy', 'dispute_policy')))")"
+    [[ -z "$left" ]] && pass fulldown "no medcea.*_policy wrapper after the full down" || fail fulldown "policy wrappers left: $left"
+    left="$(fx medcea_db -q -tA -c "SELECT string_agg(p.oid::regprocedure::text, ', ') FROM pg_proc p
+             WHERE p.pronamespace = 'medcea'::regnamespace AND p.prosecdef AND p.proowner = 'postgres'::regrole
+               AND p.oid NOT IN (to_regprocedure('medcea.register_mqtt_credential(text,text,integer,text,text)'),
+                                 to_regprocedure('medcea.log_device_slot()'))")"
+    [[ -z "$left" ]] && pass fulldown "no other postgres-owned SECURITY DEFINER function in medcea" || fail fulldown "postgres-owned definers: $left"
     left="$(managed_grants)"
     [[ -z "$left" ]] && pass fulldown "the managed roles hold nothing after the full down" \
         || { fail fulldown "managed roles still hold $(wc -l <<<"$left") privilege(s):"; sed 's/^/        /' <<<"$left" | head -20; }
@@ -768,6 +873,7 @@ case "$1" in
     load) cmd_load ;;
     apply) cmd_apply "${2:?apply false|true}" "${3:-medcea_db}" ;;
     access) cmd_access "${2:?access false|true}" ;;
+    policy) cmd_policy ;;
     purge-access) cmd_purge_access ;;
     rollback-27) cmd_rollback27 ;;
     logins) cmd_logins "${2:?logins false|true}" ;;
@@ -790,7 +896,7 @@ case "$1" in
         cmd_apply false; probes false; cmd_access false; cmd_logins false; cmd_preflight
         cmd_postgrest false; cmd_runner false; cmd_pgrst_flip
         cmd_services
-        cmd_apply true; probes true; cmd_access true; cmd_logins true; cmd_preflight
+        cmd_apply true; probes true; cmd_access true; cmd_policy; cmd_logins true; cmd_preflight
         cmd_postgrest true; cmd_runner true
         cmd_apply false; probes false
         cmd_cycle

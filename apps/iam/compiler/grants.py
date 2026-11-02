@@ -8,8 +8,11 @@ compile-time model
   rls(p)               [{object, name, cmd, role, using, check}] row-level security policies
   compiled_functions(p, smoke)
                        CREATE OR REPLACE text of pre_request(), _own_role(), platform_roles(),
-                       policy_holds(), object_group(), _token_clients() and role_widening()
-                       (the last stamped with the route table's digest, which `verify` compares)
+                       policy_holds(), object_group(), _token_clients(), _rpc_client() and
+                       role_widening() (the last stamped with the route table's digest, which
+                       `verify` compares)
+  only_rpc_clients(p)  {token client: [function names]}: the clients whose tokens pre_request
+                       lets call only POST /rpc/<name> (network.clients.<c>.only_rpc, IAM 4.1)
   sql(p, mode, smoke, part, without_iam=False)
                        the psql script apps/database/lib-db-apply.sh runs inside the mode
                        bundle's transaction; mode additive (IAM_DB_ROLES=false), enforce (true)
@@ -54,11 +57,8 @@ MEMBER_SCHEMAS = ("medcea", "iam_policy", "iam")
 IAM_SCHEMA = "iam"
 IAM_ROLES = ("access_svc",)
 NOT_BUILT = {
-    "iam_policy.new_draft(integer,text)": "4.3",
-    "iam_policy.save_entry(integer,text,text,text[],text,text[],text)": "4.3",
-    "iam_policy.submit(integer,text)": "4.3",
-    "iam_policy.approve(integer,text)": "4.3",
-    "iam_policy.propose_unit(uuid,integer,text)": "4.3",
+    "iam_policy.save_waiver(integer,jsonb,text,double precision)": "4.7",
+    "iam_policy.drop_waiver(integer,text,text,double precision)": "4.7",
 }
 # The legacy grants of IAM_DB_ROLES=false (medcea_db_migrations_down_008b.sql): tables the
 # blanket anon grant is taken back from. tests/test_policy.py checks the down file names
@@ -400,6 +400,13 @@ def token_clients(p, smoke=False):
     return out + (["iam-test"] if smoke else [])
 
 
+def only_rpc_clients(p):
+    """{token client: [function names]}: tokens of these clients may only POST /rpc/<name>
+    (network.clients.<c>.only_rpc: the policy host's approvals, IAM 4.1). pre_request refuses
+    anything else; medcea_auth._rpc_client(name) names the client a wrapper requires."""
+    return _netpol.only_rpc(p, "config-api")
+
+
 def read_only_clients(p):
     """The token clients whose tokens only read (network.clients.<c>.read_only: the
     workbench's notebooks, IAM 3.2b): pre_request serves them GET/HEAD only, read-only."""
@@ -410,7 +417,7 @@ def document(p, smoke=False, without_iam=False):
     body = {"privileges": [list(x) for x in privileges(p, without_iam)],
             "memberships": [list(x) for x in memberships(p)],
             "rls": rls(p), "not_built": NOT_BUILT, "without_iam": without_iam,
-            "token_clients": token_clients(p, smoke)}
+            "token_clients": token_clients(p, smoke), "only_rpc": only_rpc_clients(p)}
     body["digest"] = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return body
 
@@ -479,9 +486,49 @@ COMMENT ON FUNCTION medcea_auth.role_widening(text, text) IS {_lit("policy " + p
 """
 
 
+def _only_rpc_sql(orpc):
+    """pre_request's only_rpc block (IAM 4.1): a token of such a client may only POST to
+    /rpc/<one of its functions>, so a stolen policy-host token neither reads nor writes
+    platform data through PostgREST. Empty when no client declares only_rpc."""
+    if not orpc:
+        return ""
+    cases = "\n".join(f"                WHEN {_lit(c)} THEN {_array(['/rpc/' + n for n in names])}"
+                      for c, names in sorted(orpc.items()))
+    return f"""
+    -- An only_rpc client (network.clients.<c>.only_rpc: the policy host's tokens, IAM 4.1)
+    -- may only POST its own few RPCs; nothing else through PostgREST, no read either.
+    IF (c ->> 'azp') = ANY ({_array(sorted(orpc))}) THEN
+        IF pg_catalog.current_setting('request.method', true) IS DISTINCT FROM 'POST'
+           OR NOT coalesce(pg_catalog.current_setting('request.path', true) = ANY (CASE c ->> 'azp'
+{cases} END), false) THEN
+            RAISE EXCEPTION 'client % may only call %', c ->> 'azp', pg_catalog.array_to_string(CASE c ->> 'azp'
+{cases} END, ', ') USING ERRCODE = '28000';
+        END IF;
+    END IF;"""
+
+
+def _rpc_client_sql(orpc):
+    """medcea_auth._rpc_client(function name): the only_rpc client whose tokens alone may call
+    that function, else NULL. The medcea.*_policy wrappers refuse any other azp (IAM 4.1)."""
+    pairs = sorted((n, c) for c, names in orpc.items() for n in names)
+    body = ("CASE p_function\n" + "\n".join(f"        WHEN {_lit(n)} THEN {_lit(c)}" for n, c in pairs)
+            + "\n    END") if pairs else "NULL::text"
+    return f"""
+-- _rpc_client(function): the token client whose only_rpc names the function, else NULL
+-- (network.clients.<c>.only_rpc). The policy approval wrappers require it as azp.
+CREATE OR REPLACE FUNCTION medcea_auth._rpc_client(p_function text) RETURNS text
+    LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $rc$
+    SELECT {body}
+$rc$;
+ALTER FUNCTION medcea_auth._rpc_client(text) OWNER TO medcea_owner;
+REVOKE ALL ON FUNCTION medcea_auth._rpc_client(text) FROM PUBLIC;
+"""
+
+
 def compiled_functions(p, smoke=False, without_iam=False, source="defaults.yaml"):
     clients = token_clients(p, smoke)
     readers = read_only_clients(p)
+    orpc = only_rpc_clients(p)
     holds = ",\n        ".join(f"({_lit(r)}, {_lit(g)}, {_lit(l)}, {_lit(v)})" for r, g, l, v in policy_holds_table(p))
     groups = ",\n        ".join(f"({_lit(o)}, {_lit(g)})" for o, g in sorted(member_objects(p).items())
                                if not (without_iam and _iam(o)))
@@ -521,7 +568,7 @@ BEGIN
     END IF;
     IF NOT coalesce((c ->> 'azp') = ANY ({_array(clients)}), false) THEN
         RAISE EXCEPTION 'client % may not use the API', c ->> 'azp' USING ERRCODE = '28000';
-    END IF;
+    END IF;{_only_rpc_sql(orpc)}
     -- A read-only client (network.clients.<c>.read_only: notebook code, which nobody
     -- validates) only reads, whatever its person's role may change elsewhere: no write,
     -- no RPC by POST, and a read-only transaction under whatever GET reaches.
@@ -573,7 +620,7 @@ CREATE OR REPLACE FUNCTION medcea_auth._token_clients() RETURNS text[]
     LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $r$ SELECT {_array(clients)} $r$;
 ALTER FUNCTION medcea_auth._token_clients() OWNER TO medcea_owner;
 REVOKE ALL ON FUNCTION medcea_auth._token_clients() FROM PUBLIC;
-
+{_rpc_client_sql(orpc)}
 -- policy_holds(role, group, level): NULL (not held), 'free', or the constraint it is held under.
 CREATE OR REPLACE FUNCTION medcea_auth.policy_holds(p_role text, p_group text, p_level text) RETURNS text
     LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $h$
@@ -1178,6 +1225,11 @@ def check(p):
             err(f"infrastructure_functions: {f['function']} rule {f['rule']} is not a constraint")
         if "execute" not in f and "rule" not in f:
             err(f"infrastructure_functions: {f['function']} needs execute or rule")
+    for c, names in only_rpc_clients(p).items():
+        for n in names:
+            if not any(f.startswith(f"medcea.{n}(") for f in funcs):
+                err(f"network client of {c}: only_rpc names {n}, which is no medcea function member "
+                    f"(PostgREST exposes schema medcea only)")
     for s, sd in p.services.items():
         if not sd.get("managed_by") and not sd.get("db_password"):
             err(f"service {s}: db_password (a config.env variable) missing")

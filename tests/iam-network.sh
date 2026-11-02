@@ -6,12 +6,16 @@
 #             pod: not through its Services, and not on the pods' internal ports
 #             (Flask on :8082, the file server on :8081), nor Node-RED's editor and admin
 #             API on :1880 (IAM 3.3), nor iam-api's MQTT credential port :8085 (IAM 3.5,
-#             when deployed) — every attempt times out
+#             when deployed) nor its Policy port :8083 (IAM 4.1: nothing listens there
+#             before 4.3, so only the policy's drop gives a timeout; a refusal would mean
+#             the packet got through) — every attempt times out
 #   control   the same pod does reach Keycloak (no policy of ours), so "blocked" is the
 #             policy and not a pod without a network
 #   allowed   the Config UI's nginx reaches config-api and the scheduler; the host reaches
 #             config-api (edge wizard, platform_db.py); ingress-nginx serves the public
-#             access request form; the host gets 401 from Node-RED's admin API (adminAuth)
+#             access request form; the host gets 401 from Node-RED's admin API (adminAuth);
+#             iam-api reaches config-api :3000 (IAM 4.1, network.clients.iam-approvals:
+#             the approval forwarder of 4.4; python urllib, the image has no wget)
 # Real sessions through every proxy are tests/iam-signin.sh.
 #
 # Takes the deploy lock (it starts a pod, deleted on exit). Run from the repository root:
@@ -20,7 +24,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -91,7 +95,7 @@ for url in http://scheduler.$NS/ http://monitor.$NS/ http://dbmgmt.$NS/ http://c
            "http://$(podip access):8080/register" "http://$(podip access):8081/healthz" "http://$(podip access):8082/_account/" \
            "http://node-red.$NS:1880/flows" "http://$(nr_podip):1880/flows" \
            $($KUBECTL get deployment iam-api -n "$NS" >/dev/null 2>&1 \
-               && echo "http://iam-mqttx.$NS:8085/healthz http://$(podip iam-api):8085/healthz"); do
+               && echo "http://iam-mqttx.$NS:8085/healthz http://$(podip iam-api):8085/healthz http://$(podip iam-api):8083/"); do
     r="$(reach "pod/$PROBE" "$PROBE" "$url")"
     case "$r" in
         blocked) pass blocked "$url" ;;
@@ -114,6 +118,24 @@ api_ip="$($KUBECTL get svc -n "$NS" config-api -o jsonpath='{.spec.clusterIP}')"
 code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$api_ip:3000/")"
 [[ "$code" =~ ^[2-4] ]] && pass allowed "host → config-api ($code; the edge wizard's path)" \
     || fail allowed "host cannot reach config-api ($code): onboarding cannot register boards"
+# IAM 4.1: iam-api's pods may open config-api :3000 (client iam-approvals). Its image has
+# python, not wget: an HTTP answer (any status) is open, a timeout is blocked.
+if $KUBECTL get deployment iam-api -n "$NS" >/dev/null 2>&1; then
+    r="$($KUBECTL exec -n "$NS" deployment/iam-api -c iam-api -- python3 -c '
+import socket, sys, urllib.error, urllib.request
+try:
+    urllib.request.urlopen(sys.argv[1], timeout=4)
+    print("open")
+except urllib.error.HTTPError:
+    print("open")
+except (socket.timeout, TimeoutError):
+    print("blocked")
+except urllib.error.URLError as e:
+    print("blocked" if isinstance(e.reason, (socket.timeout, TimeoutError)) else "error: %s" % e.reason)
+' "http://config-api.$NS.svc.cluster.local:3000/" 2>&1 | tail -1)"
+    [[ "$r" == open ]] && pass allowed "iam-api → config-api:3000 (client iam-approvals)" \
+        || fail allowed "iam-api → config-api:3000: $r (the Policy UI's approvals cannot reach PostgREST from 4.4)"
+fi
 nr_ip="$($KUBECTL get svc -n "$NS" node-red -o jsonpath='{.spec.clusterIP}')"
 code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$nr_ip:1880/flows")"
 [[ "$code" == 401 ]] && pass allowed "host → node-red:1880 (401 without a token: health-check, kubelet)" \

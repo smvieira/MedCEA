@@ -11,7 +11,9 @@
   is in the render call's list;
 - the token lifespan outlives cookie_refresh with margin, and nothing overrides it
   per client;
-- no SQL reads request.headers or request.cookies, the down file grants anon no
+- no SQL reads request.headers or request.cookies (but iam_policy._evidence, which keeps
+  the signed token of a policy approval after matching it to the verified claims), the
+  down file grants anon no
   EXECUTE but register_mqtt_credential and pre_request, nothing under apps/ points
   a service at another /iam/ or sends X-Test-Who;
 - no changed script echoes a password; infra/jwks-sig.py on a Keycloak-shaped set;
@@ -223,7 +225,18 @@ class Database(unittest.TestCase):
                 yield "grants %s %s" % (mode, part), out
 
     def test_no_sql_reads_request_headers_or_cookies(self):
+        # The one exception (IAM 4.1, design S-F3): iam_policy._evidence reads the raw
+        # Authorization header only to keep the signed token as evidence of an approval,
+        # and refuses unless its payload is the verified claims' (sub, iat, jti, azp); it
+        # never takes an identity from it. Everything else reads only request.jwt.claims.
         for name, txt in self.sql_sources():
+            if name.endswith("medcea_db_migrations.sql"):
+                i = txt.index("FUNCTION iam_policy._evidence(")
+                body = txt[i:txt.index("END $$;", i)]
+                self.assertEqual(len(re.findall(r"request\.(headers|cookies)", body)), 1, "_evidence reads the header once")
+                for k in ("sub", "iat", "jti", "azp"):
+                    self.assertIn(f"(pl ->> '{k}') IS DISTINCT FROM (c ->> '{k}')", body)
+                txt = txt[:i] + txt[txt.index("END $$;", i):]
             self.assertNotRegex(txt, r"request\.(headers|cookies)", name)
 
     def test_down_file_grants_anon_no_other_execute(self):

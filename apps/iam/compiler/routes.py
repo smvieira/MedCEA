@@ -25,7 +25,13 @@ as routes.json and medcea_iam.check() reads (plan Section 3.2). Per service:
   exports   {tool, groups: {group: [schema.object]}, roles: {role: [groups held with X freely]}}:
             what Database Management may export for a person (2.6); the objects are the
             non-service_only data members of the tool's mirrors, and a constrained X counts
-            for nothing (dbmgmt cannot evaluate a constraint, so it fails closed)
+            for nothing (dbmgmt cannot evaluate a constraint, so it fails closed);
+            `service_only: []` (the owner only) counts as service-only
+  dual_control
+            {group: {approver_roles, maker_roles}} for iam_policy and iam_users (IAM 4.1):
+            the roles holding A there, and those holding C or U on iam_policy, K on
+            iam_users (Policy.holds: composites and implies expanded). access-api's
+            last-approver and I17 guards and apply.sh read these sets from IAM 4.5
 A route missing from the table is refused. The body is canonical JSON, and `digest` is
 its SHA-256, so two compiles of one policy are byte-identical.
 """
@@ -112,11 +118,28 @@ def export_table(p):
         raise RouteError(f"group {EXPORT_TOOL} is missing or mirrors nothing: dbmgmt could export nothing")
     mirrors = sorted(gd["mirrors"])
     groups = {g: sorted(m["object"] for m in p.groups[g]["members"]
-                        if m["type"] == "data" and "object" in m and not m.get("service_only"))
+                        if m["type"] == "data" and "object" in m and m.get("service_only") is None)
               for g in mirrors}
     who = {g: _who(p, g, ["X"]) for g in mirrors}
     roles = {r: [g for g in mirrors if r in who[g] and who[g][r] is None] for r in sorted(p.roles)}
     return {"tool": EXPORT_TOOL, "groups": groups, "roles": roles}
+
+
+MAKER_LEVELS = {"iam_policy": ("C", "U"), "iam_users": ("K",)}
+
+
+def dual_control(p):
+    """{group: {"approver_roles": [...], "maker_roles": [...]}} for the two groups whose
+    approval guards the platform's access (iam_policy, iam_users): approvers hold A there,
+    makers hold a level of MAKER_LEVELS; held through composites and implies (Policy.holds)."""
+    out = {}
+    for g, makers in sorted(MAKER_LEVELS.items()):
+        if g not in p.groups:
+            continue
+        held = {r: {lv for (gg, lv) in p.holds(r) if gg == g} for r in sorted(p.roles)}
+        out[g] = {"approver_roles": [r for r in sorted(p.roles) if "A" in held[r]],
+                  "maker_roles": [r for r in sorted(p.roles) if held[r] & set(makers)]}
+    return out
 
 
 def compile(p, source="defaults.yaml"):
@@ -161,6 +184,7 @@ def compile(p, source="defaults.yaml"):
         "waivers": [{"id": w["id"], "invariant": w["invariant"], "subject": w["subject"], "target": w["target"],
                      "levels": list(w["levels"]), "review": w.get("review_by")} for w in p.waivers],
         "exports": export_table(p),
+        "dual_control": dual_control(p),
     }
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
     body["digest"] = hashlib.sha256(canon.encode()).hexdigest()

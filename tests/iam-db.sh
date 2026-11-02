@@ -34,6 +34,15 @@
 #                set_actor; the who-may rules, units.sql refusals, the attestation,
 #                append-only histories, role_widening's stub, the review, template
 #                reset, MQTT revocation, rr_qa without EXECUTE
+#   policy       (not in the default set) IAM 4.1, migration 008c: P1 the catalog
+#                (read-only: 14 tables, the freeze trigger ALWAYS, ownership, the
+#                wrappers, the constraints, the nonce); with --write-probes P2-P18: the
+#                entries digest against compiler/source.py, the freeze trigger and the
+#                state machine, the author path as iam_svc and its refusals, one_open,
+#                rr_admin_login, apply_started, the audit and a tampered chain, READ
+#                COMMITTED, the access guard; with --mode true the token path: approve
+#                and return (evidence, events), every approve refusal (P7a-i), pre_request's
+#                only_rpc block, the blank person_id (G9), confirm and dispute
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
 #
@@ -54,7 +63,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -2641,6 +2650,556 @@ SELECT 'CHECK|still active', active FROM medcea.mqtt_service_credential WHERE us
 SQL
 elif want access; then
     note access "skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
+fi
+
+# ── policy (IAM Phase 4, slice 4.1: migration 008c) ─────────────────────────────
+# P1 reads the catalog (any namespace); P2-P18 are write probes on medcea-iamtest, each
+# in BEGIN … ROLLBACK, building version 1 inside the probe through the owner functions
+# (a reduced skeleton: the factory's role and group keys). The token probes (P7-P10,
+# P12) need IAM_DB_ROLES=true (authenticator's memberships, pre_request's role).
+if want policy && [[ "$MODE" != legacy ]]; then
+    echo ""
+    out="$(db <<'SQL'
+SELECT 'tables', count(*), count(*) FILTER (WHERE c.relowner = 'medcea_owner'::regrole)
+  FROM pg_class c WHERE c.relnamespace = 'iam_policy'::regnamespace AND c.relkind = 'r';
+SELECT 'freeze', count(*) FILTER (WHERE t.tgenabled = 'A'), count(*)
+  FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE c.relnamespace = 'iam_policy'::regnamespace AND t.tgname IN ('freeze_policy_trg', 'freeze_policy_truncate_trg')
+   AND c.relname IN ('version', 'entry', 'waiver', 'skeleton', 'version_diff', 'approval_evidence');
+SELECT 'fnowner', count(*) FROM pg_proc p WHERE p.pronamespace = 'iam_policy'::regnamespace AND p.proowner <> 'medcea_owner'::regrole;
+SELECT 'fnpublic', count(*) FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+ WHERE (p.pronamespace = 'iam_policy'::regnamespace OR p.proname IN ('approve_policy', 'return_policy', 'confirm_policy', 'dispute_policy'))
+   AND a.grantee = 0;
+SELECT 'wrappers', count(*) FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+ WHERE p.pronamespace = 'medcea'::regnamespace AND p.proname IN ('approve_policy', 'return_policy', 'confirm_policy', 'dispute_policy')
+   AND p.prosecdef AND l.lanname = 'plpgsql' AND p.proowner = 'medcea_owner'::regrole;
+SELECT 'checks', count(*) FROM pg_constraint WHERE conrelid = 'iam_policy.version'::regclass
+   AND conname IN ('version_status_check', 'version_kind_check', 'version_rollback_check', 'version_built_check',
+                   'version_based_on_fkey', 'version_rollback_of_fkey', 'version_skeleton_digest_fkey', 'version_approved_skeleton_fkey');
+SELECT 'oneopen', count(*) FROM pg_indexes WHERE schemaname = 'iam_policy' AND indexname = 'one_open'
+   AND indexdef LIKE '%kind = ANY%';
+SELECT 'retired', count(*) FROM pg_attribute WHERE attrelid = 'iam_policy.resource_group'::regclass AND attname = 'retired';
+SELECT 'nonce', (SELECT value FROM medcea.platform_setting WHERE key = '008c:last_nonce')
+              = (SELECT value FROM medcea.platform_setting WHERE key = '008b:last_nonce');
+SELECT 'rpcclient', medcea_auth._rpc_client('approve_policy') = 'policy' AND medcea_auth._rpc_client('approve_change') IS NULL;
+SELECT 'changedsince', to_regprocedure('iam._changed_since(text,text,double precision)') IS NOT NULL
+                       OR to_regnamespace('iam') IS NULL;
+SQL
+)"
+    get() { grep -m1 "^$1|" <<<"$out" | cut -d'|' -f2-; }
+    [[ "$(get tables)" == "14|14" ]] && pass P1 "14 iam_policy tables, all owned by medcea_owner" || fail P1 "iam_policy tables (count|owned): $(get tables)"
+    [[ "$(get freeze)" == "12|12" ]] && pass P1 "freeze_policy_trg and _truncate_trg on the six tables, ENABLE ALWAYS" || fail P1 "freeze triggers (always|all): $(get freeze)"
+    [[ "$(get fnowner)" == 0 ]] && pass P1 "every iam_policy function owned by medcea_owner" || fail P1 "$(get fnowner) iam_policy function(s) not owned by medcea_owner"
+    [[ "$(get fnpublic)" == 0 ]] && pass P1 "no PUBLIC EXECUTE on the 008c functions" || fail P1 "PUBLIC executes $(get fnpublic) 008c function(s)"
+    [[ "$(get wrappers)" == 4 ]] && pass P1 "the four medcea.*_policy wrappers: plpgsql, SECURITY DEFINER, medcea_owner" || fail P1 "wrappers: $(get wrappers) of 4"
+    [[ "$(get checks)" == 8 ]] && pass P1 "version's four named CHECKs and four foreign keys" || fail P1 "version constraints: $(get checks) of 8"
+    [[ "$(get oneopen)" == 1 ]] && pass P1 "one_open counts change and skeleton versions only" || fail P1 "one_open index missing or without its kind predicate"
+    [[ "$(get retired)" == 1 ]] && pass P1 "iam_policy.resource_group.retired exists (_sync_skeleton writes it)" || fail P1 "resource_group.retired missing"
+    [[ "$(get nonce)" == t ]] && pass P1 "008c committed with this deploy's nonce" || fail P1 "008c nonce differs from 008b's: $(get nonce)"
+    [[ "$(get rpcclient)" == t ]] && pass P1 "_rpc_client compiled: approve_policy -> policy, nothing else" || fail P1 "_rpc_client: $(get rpcclient)"
+    [[ "$(get changedsince)" == t ]] && pass P1 "iam._changed_since present (or no access component)" || fail P1 "schema iam without iam._changed_since"
+fi
+
+if want policy && [[ "$WRITES" == true && "$MODE" != legacy ]]; then
+    _u() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+    A="$(_u)"; A2="$(_u)"; Q="$(_u)"; Q2="$(_u)"; X="$(_u)"
+    _h="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
+    PA="p-pa-$_h"; PQ="p-pq-$_h"; PQ2="p-pq2-$_h"
+    IAT=$(( $(date +%s) - 120 ))   # a token issued two minutes ago: rows written now are newer
+    DD="$(printf 'iam-db diff %s' "$_h" | sha256sum | cut -d' ' -f1)"
+    sqlq() { if [[ -n "${1:-}" ]]; then printf "'%s'" "${1//\'/\'\'}"; else printf "''"; fi; }
+    # the factory policy's rows and a reduced skeleton (its role and group keys), from Python
+    P_SKEL=""; P_DG=""; P_ENTRIES=""; P_WAIVERS=""; P_ED=""
+    eval "$(python3 - "$REPO_ROOT" <<'PY'
+import hashlib, json, shlex, sys
+sys.path.insert(0, sys.argv[1] + "/apps/iam")
+from compiler import source
+d = source.factory()
+body = {"roles": {r: {"db_role": rd.get("db_role", "rr_" + r), "includes": list(rd.get("includes") or [])}
+                  for r, rd in d["roles"].items()},
+        "resource_groups": {g: {"class": gd["class"]} for g, gd in d["resource_groups"].items()}}
+ew = source.entries_and_waivers(d)
+ws = [source.waiver_row(w) for w in ew["waivers"]]
+out = {"P_SKEL": json.dumps(body, sort_keys=True), "P_DG": hashlib.sha256(source.canonical(body)).hexdigest(),
+       "P_ENTRIES": json.dumps(ew["entries"]), "P_WAIVERS": json.dumps(ws),
+       "P_ED": source.entries_digest("bootstrap", list(body["resource_groups"]), list(body["roles"]), ew["entries"], ws)}
+for k, v in out.items():
+    assert "$j$" not in v
+    print(f"{k}={shlex.quote(v)}")
+PY
+)" || { fail policy "cannot compute the factory rows (python3, compiler/source.py)"; P_SKEL=""; }
+
+    clear_actor() {
+        echo 'DO $c$ BEGIN IF pg_catalog.to_regclass($q$pg_temp.medcea_actor$q$) IS NOT NULL THEN DELETE FROM pg_temp.medcea_actor; END IF; END $c$;'
+    }
+    # clear_marker — _begin()'s iam_policy.transition is transaction-local and outlives the
+    # function that set it, so a probe's own write after build_v1/draft_chain would carry the
+    # last function's marker; the "without a marker" probes need none, the forged ones set theirs
+    clear_marker() {
+        echo "SELECT pg_catalog.set_config('iam_policy.transition', '', true) \\g /dev/null"
+    }
+    # build_v1 [record|no-record] [CLAIMED_SUB CLAIMED_PERSON] — version 1 (bootstrap) applied: :v1
+    build_v1() {
+        as_postgres
+        local by_sub=NULL by_person=NULL
+        [[ -n "${2:-}" ]] && by_sub="'$2'::uuid" && by_person="$(sqlq "$3")"
+        cat <<SQL
+SELECT iam_policy._accept_skeleton('$P_DG', \$j\$$P_SKEL\$j\$::jsonb, 'iam-db', NULL, '{}'::jsonb) \\g /dev/null
+SELECT iam_policy._sync_skeleton(\$j\$$P_SKEL\$j\$::jsonb, 'iam-db') \\g /dev/null
+SELECT iam_policy._build_version('bootstrap', \$j\$$P_ENTRIES\$j\$::jsonb, \$j\$$P_WAIVERS\$j\$::jsonb, NULL, NULL, 'iam-db probe') AS v1 \\gset
+SELECT iam_policy._mark_applied(:v1, '{"git_commit": "iam-db"}'::jsonb, 'iam-db', $by_sub, $by_person, NULL) \\g /dev/null
+SQL
+        [[ "${1:-record}" == record ]] && echo "SELECT iam_policy._record('bootstrap_applied', jsonb_build_object('version', :v1)) \\g /dev/null"
+        clear_actor
+        clear_marker
+    }
+    # as_iam SUB PERSON NAME ROLE — iam-api (iam_svc) acting for that person
+    as_iam() {
+        printf 'RESET ROLE;\nRESET SESSION AUTHORIZATION;\nSET SESSION AUTHORIZATION iam_svc;\n'
+        echo "SELECT medcea_auth.set_actor('$1', $(sqlq "$2"), '$3', '$4') \\g /dev/null"
+    }
+    # draft_chain [EDITOR_SUB EDITOR_PERSON] — admin A drafts from the applied version, an
+    # editor (default A) saves one cell, A submits: :d submitted, :ed its entries digest
+    draft_chain() {
+        as_iam "$A" "$PA" test-pa admin
+        echo "SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset"
+        [[ -n "${1:-}" ]] && as_iam "$1" "$2" test-editor admin
+        cat <<SQL
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"R": null, "X": null}'::jsonb, 'iam-db probe',
+                             '{"ok": true, "errors": [], "checker_digest": "iam-db"}'::jsonb, $IAT) \\g /dev/null
+SQL
+        as_iam "$A" "$PA" test-pa admin
+        echo "SELECT iam_policy.submit(:d, 'iam-db probe', $IAT) AS ed \\gset"
+        clear_marker
+    }
+    # pclaims SUB PERSON [AZP] [ROLE] — a policy-host token's claims, iat two minutes ago
+    pclaims() {
+        printf '{"typ":"Bearer","azp":"%s","aud":"medcea-api","sub":"%s","person_id":"%s","preferred_username":"test-%s","groups":["%s"],"iat":%s,"exp":%s,"jti":"%s"}' \
+            "${3:-policy}" "$1" "$2" "${2:-none}" "${4:-qa}" "$IAT" "$((IAT + 300))" "$(_u)"
+    }
+    # an unsigned JWS whose payload is the claims (the database compares, apply.sh verifies)
+    jws_of() { python3 -c 'import base64,sys; b=lambda s: base64.urlsafe_b64encode(s.encode()).decode().rstrip("="); print(b("{\"alg\":\"RS256\",\"kid\":\"iam-db\"}") + "." + b(sys.argv[1]) + ".c2ln")' "$1"; }
+    # qa_token CLAIMS METHOD PATH [header|no-header] — PostgREST's session for that token
+    qa_token() {
+        as_postgres
+        clear_actor
+        cat <<SQL
+SET SESSION AUTHORIZATION authenticator;
+SET ROLE anon;
+SELECT set_config('request.jwt.claims', '$1', true), set_config('request.method', '$2', true),
+       set_config('request.path', '$3', true) \\g /dev/null
+SQL
+        [[ "${4:-header}" == header ]] && echo "SELECT set_config('request.headers', '{\"authorization\": \"Bearer $(jws_of "$1")\"}', true) \\g /dev/null"
+        echo "SELECT medcea_auth.pre_request() \\g /dev/null"
+    }
+    approve_sql() { echo "SELECT medcea.approve_policy(:d, 'iam-db note', ${1:-:'ed'}, '$DD', '${2:-$P_DG}');"; }
+    QA_CLAIMS="$(pclaims "$Q" "$PQ")"
+
+    if [[ -z "$P_SKEL" ]]; then
+        :
+    else
+    # P2 — the entries digest: SQL equals compiler/source.py for the same rows
+    probe P2 "version 1 built and applied through the owner functions; entries_digest = source.entries_digest" ok <<SQL
+$(build_v1)
+--CHECKS
+SELECT 'CHECK|SQL digest = Python digest', iam_policy.entries_digest(:v1) = '$P_ED';
+SELECT 'CHECK|stored at build', entries_digest = '$P_ED' FROM iam_policy.version WHERE version = :v1;
+SELECT 'CHECK|bootstrap, applied, the accepted skeleton', kind = 'bootstrap' AND status = 'applied' AND skeleton_digest = '$P_DG'
+  FROM iam_policy.version WHERE version = :v1;
+SELECT 'CHECK|accepted', iam_policy._accepted() = '$P_DG';
+SELECT 'CHECK|actor system:apply', bool_and(actor_name = 'system:apply') FROM iam_policy.history
+ WHERE version = :v1 AND event IN ('draft_created', 'apply_started');
+SELECT 'CHECK|roles and groups synced', (SELECT count(*) FROM iam_policy.role WHERE NOT retired) = 11
+       AND (SELECT count(*) FROM iam_policy.resource_group WHERE NOT retired) = $(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])['resource_groups']))" "$P_SKEL");
+SQL
+    # P3 — the freeze trigger
+    probe P3 "medcea_owner without a marker: UPDATE version" "42501:written only by the policy functions" <<SQL
+$(build_v1)
+SET ROLE medcea_owner;
+UPDATE iam_policy.version SET reason = 'forged' WHERE version = :v1;
+SQL
+    probe P3 "postgres (superuser) without a marker: DELETE version" "42501:written only by the policy functions" <<SQL
+$(build_v1)
+DELETE FROM iam_policy.version WHERE version = :v1;
+SQL
+    probe P3 "medcea_owner with a forged marker: DELETE version" "42501:never deleted" <<SQL
+$(build_v1)
+SET ROLE medcea_owner;
+SELECT set_config('iam_policy.transition', '_mark_applied:' || :v1 || ':' || txid_current(), true) \\g /dev/null
+DELETE FROM iam_policy.version WHERE version = :v1;
+SQL
+    probe P3 "TRUNCATE approval_evidence" "42501:cannot be truncated" <<SQL
+$(build_v1)
+TRUNCATE iam_policy.approval_evidence;
+SQL
+    probe P3 "an entry for an applied version, even with a marker" "22023:are frozen" <<SQL
+$(build_v1)
+SET ROLE medcea_owner;
+SELECT set_config('iam_policy.transition', 'save_entry:' || :v1 || ':' || txid_current(), true) \\g /dev/null
+INSERT INTO iam_policy.entry (version, role, group_code, level) VALUES (:v1, 'operator', 'portal', 'X');
+SQL
+    probe P3 "a transition no function makes (applied -> draft)" "22023:is not a transition" <<SQL
+$(build_v1)
+SET ROLE medcea_owner;
+SELECT set_config('iam_policy.transition', 'submit:' || :v1 || ':' || txid_current(), true) \\g /dev/null
+UPDATE iam_policy.version SET status = 'draft' WHERE version = :v1;
+SQL
+    probe P3 "a column outside the function's edge" "42501:may not change" <<SQL
+$(build_v1)
+SET ROLE medcea_owner;
+SELECT set_config('iam_policy.transition', 'save_entry:' || :v1 || ':' || txid_current(), true) \\g /dev/null
+UPDATE iam_policy.version SET reason = 'forged' WHERE version = :v1;
+SQL
+    probe P3 "a stored skeleton's body" "42501:never changes" <<SQL
+$(build_v1)
+SET ROLE medcea_owner;
+SELECT set_config('iam_policy.transition', '_accept_skeleton::' || txid_current(), true) \\g /dev/null
+UPDATE iam_policy.skeleton SET body = '{}'::jsonb WHERE digest = '$P_DG';
+SQL
+    # P5/P4 — the author path, its columns and events
+    probe P5 "admin through iam_svc: new_draft, save_entry, submit" ok <<SQL
+$(build_v1)
+$(draft_chain)
+--CHECKS
+SELECT 'CHECK|submitted change on v1', status = 'submitted' AND kind = 'change' AND based_on = :v1 FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|created and submitted by A', created_by_sub = '$A' AND created_by_person = '$PA' AND submitted_by_person = '$PA'
+          AND submitted_by_sub = '$A' FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|digests', entries_digest = :'ed' AND entries_digest = iam_policy.entries_digest(:d) AND skeleton_digest = '$P_DG'
+          AND checker_verdict FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|the cell, one row per level', array_agg(level::text ORDER BY level) = '{R,X}'
+  FROM iam_policy.entry WHERE version = :d AND role = 'qa' AND group_code = 'portal';
+SELECT 'CHECK|the rest copied from v1', (SELECT count(*) FROM iam_policy.entry WHERE version = :d AND NOT (role = 'qa' AND group_code = 'portal'))
+          = (SELECT count(*) FROM iam_policy.entry WHERE version = :v1 AND NOT (role = 'qa' AND group_code = 'portal'));
+SELECT 'CHECK|draft_created, entry_saved, submitted by A', array_agg(event ORDER BY event_id) = '{draft_created,entry_saved,submitted}'
+          AND bool_and(actor_sub = '$A' AND actor_person = '$PA')
+  FROM iam_policy.history WHERE version = :d AND event <> 'status_changed';
+SELECT 'CHECK|_authors is A', (SELECT array_agg(sub || '/' || person) FROM iam_policy._authors(:d)) = ARRAY['$A/$PA'];
+SQL
+    probe P4 "every status change is a status_changed event, every policy event names its version" ok <<SQL
+$(build_v1)
+$(draft_chain)
+--CHECKS
+SELECT 'CHECK|status_changed for d', array_agg(coalesce(payload ->> 'from', '-') || '>' || (payload ->> 'to') || ':' || (payload ->> 'by_function') ORDER BY event_id)
+          = '{->draft:new_draft,draft>submitted:submit}' FROM iam_policy.history WHERE version = :d AND event = 'status_changed';
+SELECT 'CHECK|status_changed for v1', array_agg(coalesce(payload ->> 'from', '-') || '>' || (payload ->> 'to') ORDER BY event_id)
+          = '{->draft,draft>applied}' FROM iam_policy.history WHERE version = :v1 AND event = 'status_changed';
+SELECT 'CHECK|version in every payload', bool_and(payload ? 'version') FROM iam_policy.history
+ WHERE version IN (:v1, :d);
+SELECT 'CHECK|chain ok', ok FROM iam_policy.verify_chain();
+SQL
+    probe P5 "new_draft before any version is applied" "22023:no policy version is applied" <<SQL
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    probe P5 "admin through iam_svc: withdraw the submitted change, then a new draft" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT) \\g /dev/null
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d2 \\gset
+--CHECKS
+SELECT 'CHECK|withdrawn by A', status = 'withdrawn' AND withdrawn_by = '$PA' AND withdrawn_by_sub = '$A' AND withdrawn_at IS NOT NULL
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|a withdrawn event', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d AND event = 'withdrawn'
+                                           AND actor_sub = '$A' AND actor_person = '$PA');
+SELECT 'CHECK|status_changed submitted>withdrawn:withdraw', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d
+          AND event = 'status_changed' AND payload ->> 'from' = 'submitted' AND payload ->> 'to' = 'withdrawn'
+          AND payload ->> 'by_function' = 'withdraw');
+SELECT 'CHECK|the new draft is open (one_open freed)', status = 'draft' FROM iam_policy.version WHERE version = :d2;
+SQL
+    probe P5 "withdraw the applied bootstrap version" "22023:is not open" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.withdraw(:v1, 'iam-db probe', $IAT);
+SQL
+    # (_withdraw_open, _mark_reverted and _propose_skeleton, apply.sh's, get their probes
+    # with apply.sh in 4.2a/4.4: deferred, not forgotten)
+    # P18 — iam_svc may append its own events, never a policy version event
+    probe P18 "iam_svc appends a service event, as iam-api does (the control)" ok <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.append_history('test_probe', '{}'::jsonb, 'iam-db') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|appended for A', EXISTS (SELECT 1 FROM iam_policy.history WHERE event = 'test_probe' AND actor_sub = '$A'
+                                       AND event_id = (SELECT max(event_id) FROM iam_policy.history));
+SQL
+    for ev in applied status_changed entry_saved skeleton_accepted; do
+        probe P18 "iam_svc forges '$ev' for the half-applied version" "42501:is a policy version event" <<SQL
+$(build_v1 no-record)
+RESET ROLE;
+RESET SESSION AUTHORIZATION;
+SET SESSION AUTHORIZATION iam_svc;
+SELECT iam_policy.append_history('$ev', jsonb_build_object('version', :v1), 'forged');
+SQL
+    done
+    probe P18 "iam_svc calls the writer itself" "42501:permission denied for function _append_history" <<SQL
+$(build_v1 no-record)
+RESET ROLE;
+RESET SESSION AUTHORIZATION;
+SET SESSION AUTHORIZATION iam_svc;
+SELECT iam_policy._append_history('applied', jsonb_build_object('version', :v1), 'forged');
+SQL
+    # P6 — who may author
+    probe P6 "a blank person_id" "42501:carries no person_id" <<SQL
+$(build_v1)
+$(as_iam "$A" "" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    probe P6 "a role without C on iam_policy (qa)" "42501:holds no C on iam_policy" <<SQL
+$(build_v1)
+$(as_iam "$Q" "$PQ" test-pq qa)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    if [[ "$(q1 "SELECT to_regprocedure('medcea_auth.set_actor(text,text,text,text)') IS NOT NULL AND EXISTS (SELECT FROM pg_roles WHERE rolname = 'access_svc')")" == t ]]; then
+        probe P6 "set_actor through access_svc (source person via access_svc)" "42501:made in the Policy UI" <<SQL
+$(build_v1)
+RESET SESSION AUTHORIZATION;
+SET SESSION AUTHORIZATION access_svc;
+SELECT medcea_auth.set_actor('$A', '$PA', 'test-pa', 'admin') \\g /dev/null
+RESET SESSION AUTHORIZATION;
+SET SESSION AUTHORIZATION iam_svc;
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    fi
+    probe P6 "access changed since the token's iat (a status history row)" "42501:your access changed since you signed in" <<SQL
+$(build_v1)
+INSERT INTO iam.user_status_history (keycloak_user_id, username, action, reason, actor) VALUES ('$A', 'test-pa', 'deactivated', 'iam-db probe', 'iam-db');
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    # P11 — one version in flight; a bootstrap does not count (P5 drafted after one)
+    probe P11 "a second change draft" "23505:still open" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    probe P11 "the unique index backs it (a second open row inserted under a marker)" "23505:one_open" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_postgres)
+SET ROLE medcea_owner;
+SELECT set_config('iam_policy.transition', 'new_draft::' || txid_current(), true) \\g /dev/null
+INSERT INTO iam_policy.version (version, status, kind, reason, based_on) VALUES (:d + 1, 'draft', 'change', 'forged', :v1);
+SQL
+    # P13 — pgAdmin's login cannot move a status
+    probe P13 "rr_admin_login: UPDATE iam_policy.version SET status = 'approved'" "42501:permission denied for table version" <<SQL
+$(build_v1)
+SET SESSION AUTHORIZATION rr_admin_login;
+UPDATE iam_policy.version SET status = 'approved';
+SQL
+    # P14 — no draft while the applied version's apply is open
+    probe P14 "new_draft while the applied version's latest event is apply_started" "22023:is being applied" <<SQL
+$(build_v1 no-record)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+    # P15 — the audit and the chain
+    probe P15 "audit_versions() on the built versions: no finding" ok <<SQL
+$(build_v1)
+$(draft_chain)
+--CHECKS
+SELECT 'CHECK|no finding', NOT EXISTS (SELECT 1 FROM iam_policy.audit_versions());
+SQL
+    probe P15 "a history row tampered with (triggers off, as postgres)" ok <<SQL
+$(build_v1)
+ALTER TABLE iam_policy.history DISABLE TRIGGER USER;
+UPDATE iam_policy.history SET reason = 'tampered' WHERE event_id = (SELECT max(event_id) FROM iam_policy.history);
+--CHECKS
+SELECT 'CHECK|verify_chain false', NOT ok FROM iam_policy.verify_chain();
+SELECT 'CHECK|audit finding chain', EXISTS (SELECT 1 FROM iam_policy.audit_versions() WHERE finding = 'chain');
+SQL
+    # P16 — the chain needs READ COMMITTED (append_history), so every owner function does
+    probe P16 "an owner function under REPEATABLE READ" "P0001:READ COMMITTED" <<SQL
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+$(build_v1)
+SQL
+    # P17 — the access guard: without iam._changed_since a policy change fails closed
+    probe P17 "iam._changed_since missing: an author function" "55000:need the access component" <<SQL
+$(build_v1)
+ALTER FUNCTION iam._changed_since(text, text, double precision) RENAME TO _changed_since_gone;
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+
+    if [[ "$MODE" == true ]]; then
+        # P8 — approve, positive, through the token path (the control for P7)
+        probe P8 "qa approves through PostgREST with the policy host's token" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+--CHECKS
+SELECT 'CHECK|approved by Q', status = 'approved' AND approved_by_person = '$PQ' AND approved_by_sub = '$Q'
+          AND approved_skeleton_digest = '$P_DG' AND diff_digest = '$DD' AND approved_iat = $IAT
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|one evidence row with the JWS', count(*) = 1 AND bool_and(jws = '$(jws_of "$QA_CLAIMS")' AND event = 'approved')
+  FROM iam_policy.approval_evidence WHERE version = :d;
+SELECT 'CHECK|approved event', payload ?& ARRAY['version', 'source', 'role', 'person', 'sub', 'iat', 'jti', 'azp', 'entries_digest',
+                                                'diff_digest', 'skeleton_digest', 'jws_sha256']
+          AND payload ->> 'source' = 'token' AND payload ->> 'azp' = 'policy' AND actor_person = '$PQ'
+          AND payload ->> 'jws_sha256' = encode(sha256(convert_to('$(jws_of "$QA_CLAIMS")', 'UTF8')), 'hex')
+          AND history.version = :d
+  FROM iam_policy.history WHERE version = :d AND event = 'approved';
+SELECT 'CHECK|evidence keyed by the event', EXISTS (SELECT 1 FROM iam_policy.approval_evidence e JOIN iam_policy.history h
+          ON h.event_id = e.history_id AND h.event = 'approved' WHERE e.version = :d);
+SELECT 'CHECK|audit: no finding', NOT EXISTS (SELECT 1 FROM iam_policy.audit_versions());
+SQL
+        probe P8 "qa returns a submitted change to its draft" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/return_policy)
+SELECT medcea.return_policy(:d, 'iam-db: please fix');
+--CHECKS
+SELECT 'CHECK|back to draft with the note', status = 'draft' AND return_note = 'iam-db: please fix' FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|returned event and evidence', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d AND event = 'returned')
+          AND EXISTS (SELECT 1 FROM iam_policy.approval_evidence WHERE version = :d AND event = 'returned');
+SQL
+        probe P8 "why_not for the qa token: may approve" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc, needs_token_path AS wn FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|may approve, no code, on the token path', :'wm'::boolean AND :'wc' = '-' AND NOT :'wn'::boolean;
+SQL
+        # P7 — the approve refusals, each after the control above
+        probe P7a "iam_svc with set_actor as a qa person" "42501:permission denied for function approve_policy" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$Q" "$PQ" test-pq qa)
+$(approve_sql)
+SQL
+        probe P7a "the internal as postgres with a set_actor qa: not token-sourced" "42501:approvals are made by a person signed in through the API" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_postgres)
+SELECT medcea_auth.set_actor('$Q', '$PQ', 'test-pq', 'qa') \\g /dev/null
+SELECT iam_policy.approve(:d, 'iam-db note', :'ed', '$DD', '$P_DG');
+SQL
+        probe P7b "hand-set claims and no Authorization header" "42501:needs the signed token as evidence" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy no-header)
+$(approve_sql)
+SQL
+        probe P7b "a header whose token is not the verified one" "42501:not the one verified" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy no-header)
+SELECT set_config('request.headers', '{"authorization": "Bearer $(jws_of "$(pclaims "$Q2" "$PQ2")")"}', true) \\g /dev/null
+$(approve_sql)
+SQL
+        probe P7c "a Config UI token (azp config)" "42501:approve access-policy versions in the Policy UI" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$(pclaims "$Q" "$PQ" config)" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P7d "a blank person_id" "42501:carries no person_id" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$(pclaims "$Q" "")" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P7e "an author by entry_saved only (another account of the approver's person)" "42501:you are an author" <<SQL
+$(build_v1)
+$(draft_chain "$A2" "$PQ")
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P7f "a stale based_on" "22023:was drafted on version" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_postgres)
+ALTER TABLE iam_policy.version DISABLE TRIGGER freeze_policy_trg;
+UPDATE iam_policy.version SET based_on = NULL WHERE version = :d;
+ALTER TABLE iam_policy.version ENABLE ALWAYS TRIGGER freeze_policy_trg;
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P7g "an entries_digest mismatch" "22023:changed since you opened it" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql "'$(printf '0%.0s' {1..64})'")
+SQL
+        probe P7h "a skeleton digest other than the accepted one" "22023:another platform skeleton" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql ":'ed'" "$(printf 'f%.0s' {1..64})")
+SQL
+        probe P7i "a confirmed person_id decision about another account of the approver's person, after the iat" "42501:your access changed since you signed in" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_postgres)
+INSERT INTO iam.account_decision (kind, keycloak_user_id, username, subject_person, new_person_id, widens, status, reason,
+                                  made_by_name, checked_by_name, checked_by_person, checked_at)
+VALUES ('person_id', '$X', 'test-other', '$PQ', 'p-new-$_h', true, 'confirmed', 'iam-db probe', 'iam-db', 'iam-db', 'p-checker-$_h', now());
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P7 "an author returns their own version" "42501:you are an author" <<SQL
+$(build_v1)
+$(draft_chain "$A2" "$PQ")
+$(qa_token "$QA_CLAIMS" POST /rpc/return_policy)
+SELECT medcea.return_policy(:d, 'iam-db');
+SQL
+        # P9 — pre_request's only_rpc block for the policy host's tokens
+        probe P9 "policy token: GET /recipe" "28000:may only call" <<SQL
+$(qa_token "$QA_CLAIMS" GET /recipe)
+SQL
+        probe P9 "policy token: POST /rpc/approve_change" "28000:may only call" <<SQL
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_change)
+SQL
+        probe P9 "policy token: POST /rpc/approve_policy -> rr_qa" ok <<SQL
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT current_user AS cu \\gset
+--CHECKS
+SELECT 'CHECK|SET LOCAL ROLE rr_qa', :'cu' = 'rr_qa';
+SQL
+        # P10 — G9: a blank person_id is no approver anywhere (approve_change too)
+        probe P10 "approve_recipe with a person_id: past the approver (control)" "22023:does not exist" <<SQL
+$(qa_token "$(pclaims "$Q" "$PQ" config)" POST /rpc/approve_recipe)
+SELECT medcea.approve_recipe(-1, 'iam-db');
+SQL
+        probe P10 "approve_recipe with a blank person_id (passed before 4.1)" "42501:carries no person_id" <<SQL
+$(qa_token "$(pclaims "$Q" "" config)" POST /rpc/approve_recipe)
+SELECT medcea.approve_recipe(-1, 'iam-db');
+SQL
+        # P12 — confirm and dispute a bootstrap version
+        probe P12 "confirm by another qa person" ok <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.');
+--CHECKS
+SELECT 'CHECK|confirmed by Q', confirmed_by_person = '$PQ' AND confirmed_at IS NOT NULL FROM iam_policy.version WHERE version = :v1;
+SELECT 'CHECK|confirmed event', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :v1 AND event = 'confirmed');
+SQL
+        probe P12 "confirm by the person apply.sh recorded" "42501:recorded you as running" <<SQL
+$(build_v1 record "$Q" "$PQ")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.');
+SQL
+        probe P12 "confirm without the attestation" "22023:needs the attestation" <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'yes');
+SQL
+        probe P12 "dispute, then confirm" "22023:already disputed" <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/dispute_policy)
+SELECT medcea.dispute_policy(:v1, 'iam-db: not what was agreed');
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.');
+SQL
+    else
+        note policy "P7-P10, P12 (the token path) need --mode true"
+    fi
+    fi
+elif want policy; then
+    note policy "P2-P18 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
 fi
 
 # ── drift ────────────────────────────────────────────────────────────────────────

@@ -423,6 +423,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS account_decision_one_open_uq ON iam.account_de
 CREATE INDEX IF NOT EXISTS account_decision_unit_idx ON iam.account_decision (keycloak_user_id, unit_id, decision_id)
     WHERE unit_id IS NOT NULL;
 
+-- iam._changed_since(sub, person, iat) (IAM 4.1): true when the access of the
+-- account p_sub, or of any account of the person p_person, may have changed
+-- since the token's iat (seconds since the epoch): a status history row of the
+-- account, or a deactivate/activate/role_change/person_id/grant decision about
+-- the account or about any account whose subject_person or new_person_id is the
+-- person, applied or reviewed (made_at) or confirmed (checked_at) since then.
+-- The access policy's author and qa functions refuse then (iam_policy._changed_since,
+-- migration 008c); iam-api's CHANGED_SINCE moves to it in IAM 4.3. It lives here,
+-- not in the migrations, because the tables it reads are this file's and the
+-- database deploy runs without the access component. Executed by iam_svc
+-- (compiled grant) and by the 008c definer functions as medcea_owner.
+CREATE OR REPLACE FUNCTION iam._changed_since(p_sub text, p_person text, p_iat double precision)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT p_iat IS NULL
+        OR EXISTS (SELECT 1 FROM iam.user_status_history h
+                    WHERE h.keycloak_user_id = p_sub AND h.occurred_at >= pg_catalog.to_timestamp(p_iat))
+        OR EXISTS (SELECT 1 FROM iam.account_decision d
+                    WHERE d.kind IN ('deactivate', 'activate', 'role_change', 'person_id', 'grant')
+                      AND (d.keycloak_user_id = p_sub
+                           OR (pg_catalog.btrim(coalesce(p_person, '')) <> ''
+                               AND (d.subject_person = p_person OR d.new_person_id = p_person)))
+                      AND ((d.status IN ('applied', 'reviewed') AND d.made_at >= pg_catalog.to_timestamp(p_iat))
+                           OR (d.status = 'confirmed' AND d.checked_at >= pg_catalog.to_timestamp(p_iat))))
+$$;
+REVOKE ALL ON FUNCTION iam._changed_since(text, text, double precision) FROM PUBLIC;
+
 -- access_review: the quarterly snapshot of accounts, roles, persons, units,
 -- last logins, pending decisions, waivers and enforcement switches, signed off
 -- by a qa person. The snapshot is frozen at creation; sign-off is added once.

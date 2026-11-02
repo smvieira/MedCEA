@@ -12,8 +12,13 @@ it on every check):
   - a host serving a carried service is in `proxies` or `unproxied`
   - every `clients` entry has a selector and egress hops; a `pod:` hop names a pod of the
     section that admits client:<name> on that port; a pod admitting client:<name> is a
-    hop of that client (both sides agree); a `token_client` is not a host's client, and
-    a client with one says `read_only` (true or false)
+    hop of that client (both sides agree); a client with a `token_client` says
+    `read_only` (true or false); a `token_client` is not a host's client, with one
+    exception (IAM 4.1): a client may name a host's client when it declares a non-empty
+    `only_rpc` list of function names, says `read_only: false`, and no host with that
+    client serves config-api (pre_request then lets those tokens call only
+    POST /rpc/<name>); `only_rpc` without a `token_client`, or with `read_only: true`,
+    is an error
 
 compile(policy, namespace, node_ips) returns a Kubernetes List of NetworkPolicies, named
 iam-<pod> and labelled medcea/iam-netpol=true, so `kubectl delete netpol -l
@@ -25,9 +30,14 @@ chart that owns those pods (the workbench's singleuser.networkPolicy.egress, IAM
 token_clients(policy, service) returns the `token_client`s of the clients that reach the
 pod carrying `service` (grants.token_clients: config-api's azp list); read_only=True only
 those whose client says `read_only: true` (pre_request serves them reads only).
+only_rpc(policy, service) returns {token_client: sorted function names} of the clients with
+`only_rpc` that reach the pod carrying `service` (pre_request's only_rpc block, IAM 4.1).
 """
 
+import re
+
 LABEL = "medcea/iam-netpol"
+_RPC = re.compile(r"^[a-z_][a-z0-9_]*$")
 KINDS = ("proxy:", "pod:", "client:")
 
 
@@ -115,8 +125,23 @@ def check(p):
             errors.append(f"network: client {c} has no selector")
         if not cd.get("egress"):
             errors.append(f"network: client {c} opens nothing (no egress hops)")
+        orpc = cd.get("only_rpc")
+        if orpc is not None:
+            if not cd.get("token_client"):
+                errors.append(f"network: client {c}: only_rpc needs a token_client")
+            if not isinstance(orpc, list) or not orpc or not all(isinstance(n, str) and _RPC.match(n) for n in orpc):
+                errors.append(f"network: client {c}: only_rpc must be a non-empty list of function names")
+            if cd.get("read_only") is True:
+                errors.append(f"network: client {c}: only_rpc with read_only: true (an RPC is a POST)")
         if cd.get("token_client") in host_clients:
-            errors.append(f"network: client {c}: token_client {cd['token_client']} is a host's client")
+            serving = sorted(h for h, hd in p.hosts.items()
+                             if hd["client"] == cd["token_client"] and "config-api" in hd["serves"])
+            if not orpc or not isinstance(orpc, list) or cd.get("read_only") is not False:
+                errors.append(f"network: client {c}: token_client {cd['token_client']} is a host's client "
+                              f"(allowed only with a non-empty only_rpc and read_only: false)")
+            if serving:
+                errors.append(f"network: client {c}: token_client {cd['token_client']} is the client of "
+                              f"{', '.join(serving)}, which serves config-api (only_rpc would cut its own use)")
         if cd.get("token_client") and not isinstance(cd.get("read_only"), bool):
             errors.append(f"network: client {c}: a token_client needs read_only: true or false")
         hops = set()
@@ -205,3 +230,16 @@ def token_clients(p, service, read_only=False):
     return sorted({cd["token_client"] for cd in (net.get("clients") or {}).values()
                    if cd.get("token_client") and any(h.get("pod") in carriers for h in cd.get("egress") or [])
                    and (cd.get("read_only") is True or not read_only)})
+
+
+def only_rpc(p, service):
+    """{token_client: sorted function names} of the clients declaring `only_rpc` that have a
+    hop to the pod carrying `service` (pre_request: those tokens may only POST /rpc/<name>)."""
+    net = p.data.get("network") or {}
+    carriers = {name for name, pd in (net.get("pods") or {}).items() if service in (pd.get("carries") or {})}
+    out = {}
+    for cd in (net.get("clients") or {}).values():
+        if cd.get("token_client") and isinstance(cd.get("only_rpc"), list) and cd["only_rpc"] \
+           and any(h.get("pod") in carriers for h in cd.get("egress") or []):
+            out.setdefault(cd["token_client"], set()).update(cd["only_rpc"])
+    return {k: sorted(v) for k, v in sorted(out.items())}

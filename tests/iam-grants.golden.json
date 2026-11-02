@@ -341,7 +341,61 @@
   [
    "iam_svc",
    "function",
+   "iam._changed_since(text,text,double precision)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
    "iam_policy.append_history(text,jsonb,text)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.audit_versions()",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.entries_digest(integer)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.new_draft(text,text,double precision,jsonb,jsonb)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.save_entry(integer,text,text,jsonb,text,jsonb,double precision)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.submit(integer,text,double precision)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.verify_chain()",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.why_not(integer)",
+   "EXECUTE"
+  ],
+  [
+   "iam_svc",
+   "function",
+   "iam_policy.withdraw(integer,text,double precision)",
    "EXECUTE"
   ],
   [
@@ -426,19 +480,7 @@
    "iam_svc",
    "table",
    "iam_policy.effective_route",
-   "INSERT"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.effective_route",
    "SELECT"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.effective_route",
-   "UPDATE"
   ],
   [
    "iam_svc",
@@ -462,43 +504,13 @@
    "iam_svc",
    "table",
    "iam_policy.member",
-   "INSERT"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.member",
-   "SELECT"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.member",
-   "UPDATE"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.resource_group",
-   "INSERT"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.resource_group",
    "SELECT"
   ],
   [
    "iam_svc",
    "table",
    "iam_policy.resource_group",
-   "UPDATE"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.role",
-   "INSERT"
+   "SELECT"
   ],
   [
    "iam_svc",
@@ -509,25 +521,19 @@
   [
    "iam_svc",
    "table",
-   "iam_policy.role",
-   "UPDATE"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.user_unit",
-   "SELECT"
-  ],
-  [
-   "iam_svc",
-   "table",
-   "iam_policy.user_zone",
+   "iam_policy.skeleton",
    "SELECT"
   ],
   [
    "iam_svc",
    "table",
    "iam_policy.version",
+   "SELECT"
+  ],
+  [
+   "iam_svc",
+   "table",
+   "iam_policy.version_diff",
    "SELECT"
   ],
   [
@@ -683,6 +689,24 @@
   [
    "rr_admin",
    "function",
+   "iam_policy.audit_versions()",
+   "EXECUTE"
+  ],
+  [
+   "rr_admin",
+   "function",
+   "iam_policy.entries_digest(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_admin",
+   "function",
+   "iam_policy.why_not(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_admin",
+   "function",
    "medcea.my_approvals()",
    "EXECUTE"
   ],
@@ -725,7 +749,19 @@
   [
    "rr_admin",
    "table",
+   "iam_policy.skeleton",
+   "SELECT"
+  ],
+  [
+   "rr_admin",
+   "table",
    "iam_policy.version",
+   "SELECT"
+  ],
+  [
+   "rr_admin",
+   "table",
+   "iam_policy.version_diff",
    "SELECT"
   ],
   [
@@ -769,6 +805,24 @@
    "table",
    "medcea.scheduler_config",
    "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "iam_policy.audit_versions()",
+   "EXECUTE"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "iam_policy.entries_digest(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_auditor",
+   "function",
+   "iam_policy.why_not(integer)",
+   "EXECUTE"
   ],
   [
    "rr_auditor",
@@ -875,6 +929,12 @@
   [
    "rr_auditor",
    "table",
+   "iam_policy.skeleton",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
    "iam_policy.user_unit",
    "SELECT"
   ],
@@ -888,6 +948,12 @@
    "rr_auditor",
    "table",
    "iam_policy.version",
+   "SELECT"
+  ],
+  [
+   "rr_auditor",
+   "table",
+   "iam_policy.version_diff",
    "SELECT"
   ],
   [
@@ -2183,6 +2249,24 @@
   [
    "rr_qa",
    "function",
+   "iam_policy.audit_versions()",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "iam_policy.entries_digest(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "iam_policy.why_not(integer)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
    "medcea.approval_queue(boolean)",
    "EXECUTE"
   ],
@@ -2219,6 +2303,12 @@
   [
    "rr_qa",
    "function",
+   "medcea.approve_policy(integer,text,text,text,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
    "medcea.approve_recipe(integer)",
    "EXECUTE"
   ],
@@ -2226,6 +2316,18 @@
    "rr_qa",
    "function",
    "medcea.approve_recipe(integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.confirm_policy(integer,text,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.dispute_policy(integer,text)",
    "EXECUTE"
   ],
   [
@@ -2244,6 +2346,12 @@
    "rr_qa",
    "function",
    "medcea.return_change(text,bigint,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_qa",
+   "function",
+   "medcea.return_policy(integer,text)",
    "EXECUTE"
   ],
   [
@@ -2339,6 +2447,12 @@
   [
    "rr_qa",
    "table",
+   "iam_policy.skeleton",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
    "iam_policy.user_unit",
    "SELECT"
   ],
@@ -2352,6 +2466,12 @@
    "rr_qa",
    "table",
    "iam_policy.version",
+   "SELECT"
+  ],
+  [
+   "rr_qa",
+   "table",
+   "iam_policy.version_diff",
    "SELECT"
   ],
   [
@@ -2867,7 +2987,25 @@
   [
    "svc_dbexport",
    "function",
+   "iam_policy.audit_versions()",
+   "EXECUTE"
+  ],
+  [
+   "svc_dbexport",
+   "function",
+   "iam_policy.entries_digest(integer)",
+   "EXECUTE"
+  ],
+  [
+   "svc_dbexport",
+   "function",
    "iam_policy.log_export(text[],text[])",
+   "EXECUTE"
+  ],
+  [
+   "svc_dbexport",
+   "function",
+   "iam_policy.why_not(integer)",
    "EXECUTE"
   ],
   [
@@ -2975,6 +3113,12 @@
   [
    "svc_dbexport",
    "table",
+   "iam_policy.skeleton",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
    "iam_policy.user_unit",
    "SELECT"
   ],
@@ -2988,6 +3132,12 @@
    "svc_dbexport",
    "table",
    "iam_policy.version",
+   "SELECT"
+  ],
+  [
+   "svc_dbexport",
+   "table",
+   "iam_policy.version_diff",
    "SELECT"
   ],
   [

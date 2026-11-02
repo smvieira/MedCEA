@@ -220,7 +220,10 @@ BEGIN
                         ('approval', 'pending_change', 'run_release', 'algorithm_state_event', 'row_change',
                          'device_slot_history') AND t.tgname LIKE '%\_append\_only')
                  OR (c.oid = 'iam_policy.user_zone'::regclass AND t.tgname = 'user_zone_audit_trg')
-                 OR (c.oid = pg_catalog.to_regclass('iam_policy.user_unit') AND t.tgname = 'user_unit_audit_trg')) LOOP
+                 OR (c.oid = pg_catalog.to_regclass('iam_policy.user_unit') AND t.tgname = 'user_unit_audit_trg')
+                 -- 008c's freeze trigger (IAM 4.1) on the policy's version tables
+                 OR (c.relnamespace = 'iam_policy'::regnamespace
+                     AND t.tgname IN ('freeze_policy_trg', 'freeze_policy_truncate_trg'))) LOOP
         EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', r.tgname, r.rel);
     END LOOP;
     -- 008a's append-only triggers go back to plain ENABLE
@@ -244,7 +247,14 @@ BEGIN
 END $$;
 
 -- 008b's functions (the 008a ones and the two register_mqtt_credential
--- versions' v1 stay; v1's body is migration 007's again).
+-- versions' v1 stay; v1's body is migration 007's again), and 008c's four
+-- policy wrappers (IAM 4.1), before section 4 gives schema medcea back to
+-- postgres: a postgres-owned SECURITY DEFINER wrapper, under default privileges
+-- that grant EXECUTE to PUBLIC, must not outlive the rest. 008c's iam_policy
+-- functions stay with medcea_owner, like 008a's; with every privilege revoked
+-- above nobody can call them.
+DROP FUNCTION IF EXISTS medcea.approve_policy(integer, text, text, text, text), medcea.return_policy(integer, text),
+    medcea.confirm_policy(integer, text, text), medcea.dispute_policy(integer, text);
 DROP FUNCTION IF EXISTS medcea.stamp_actor(), medcea.guard_control_columns(), medcea.schedule_retired_guard(), medcea.log_row_change(),
     medcea.stamp_measurement_zone(), medcea.device_serial_change(), medcea.mqtt_service_acl_root(),
     medcea.log_algorithm_state(), medcea.algorithm_state_before(), medcea.refuse_change(),
@@ -350,7 +360,8 @@ BEGIN
 END $$;
 -- the actor store and the medcea_auth functions 008b added (pre_request stays:
 -- anon may still execute it, and it is a no-op while the setting is false)
-DROP FUNCTION IF EXISTS medcea_auth._account_actor(text, text), medcea_auth.role_widening(text, text),
+DROP FUNCTION IF EXISTS medcea_auth._account_actor(text, text), medcea_auth._person_actor(text, text, text),
+    medcea_auth._rpc_client(text), medcea_auth.role_widening(text, text),
     medcea_auth.set_actor(text, text, text, text), medcea_auth.set_system_actor(text, text, bigint),
     medcea_auth.my_zones(), medcea_auth.my_units(), medcea_auth._authors(text, jsonb), medcea_auth._changes_since(text, jsonb), medcea_auth._lock_row(text, jsonb), medcea_auth._approver(text),
     medcea_auth._is_approved(text, jsonb), medcea_auth.row_digest(text, jsonb), medcea_auth._content(jsonb, boolean),

@@ -37,6 +37,16 @@ Pure functions on the YAML's dict form (no database reader yet):
   compose(skel, ew, version)  skeleton + entries + waivers -> the policy's dict; policy_version
                               stays the factory file's literal (the routes and MQTT digests do
                               not move for a version that changes nothing they contain)
+  pg_jsonb_text(obj)          PostgreSQL's jsonb text output of a JSON value (keys ordered by
+                              byte length, then bytes; separators ", " and ": "; non-ASCII kept)
+  waiver_row(w)               a YAML waiver in iam_policy.waiver's shape (group -> group_code)
+  entries_digest(kind, groups, roles, rows, waivers)
+                              iam_policy.entries_digest(v) in Python (migration 008c): sha256 of
+                              the jsonb text of {kind, groups, roles, entries, waivers}, entries
+                              [role, group, level, constraint] in byte order, waivers by id
+  policy_entries_digest(data, kind)
+                              the same for a whole policy dict (its skeleton's group and role
+                              keys, its matrix and waivers): what a bootstrap of it stores
 """
 import copy
 import hashlib
@@ -268,3 +278,96 @@ def compose(skel, ew, policy_version=None):
     out["matrix"] = matrix
     out["waivers"] = copy.deepcopy(ew["waivers"])
     return out
+
+
+# ── the entries digest (migration 008c, iam_policy.entries_digest) ────────────────────
+def _pg_str(x):
+    r"""A JSON string as PostgreSQL's escape_json() writes it: \" \\ \b \f \n \r \t, other
+    control characters as \u00xx (lower-case hex), everything else (non-ASCII too) as is."""
+    out = ['"']
+    for ch in x:
+        o = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif o < 0x20:
+            out.append("\\u%04x" % o)
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def pg_jsonb_text(obj):
+    """The text of `obj` as a PostgreSQL jsonb value prints (jsonb::text): object keys
+    sorted by UTF-8 length, then bytes (jsonb's own key order), ", " and ": " separators.
+    Integers only (no floats: the digest's documents hold none)."""
+    if obj is None:
+        return "null"
+    if obj is True:
+        return "true"
+    if obj is False:
+        return "false"
+    if isinstance(obj, int):
+        return str(obj)
+    if isinstance(obj, str):
+        return _pg_str(obj)
+    if isinstance(obj, (list, tuple)):
+        return "[" + ", ".join(pg_jsonb_text(x) for x in obj) + "]"
+    if isinstance(obj, dict):
+        keys = sorted(obj, key=lambda k: (len(k.encode("utf-8")), k.encode("utf-8")))
+        return "{" + ", ".join(f"{_pg_str(k)}: {pg_jsonb_text(obj[k])}" for k in keys) + "}"
+    raise TypeError(f"pg_jsonb_text: unsupported {type(obj).__name__}")
+
+
+def _iso(d):
+    if d is None:
+        return None
+    return d.isoformat() if hasattr(d, "isoformat") else str(d)
+
+
+def waiver_row(w):
+    """A waiver as iam_policy.waiver stores it (every column but version): the YAML's
+    `group` is the column group_code, levels and objects lists, review_by an ISO date."""
+    return {"id": w.get("id"), "invariant": w.get("invariant"), "subject": w.get("subject"),
+            "group_code": w.get("group_code", w.get("group")), "target": w.get("target"),
+            "levels": list(w.get("levels") or []), "review_by": _iso(w.get("review_by")),
+            "rationale": w.get("rationale"), "controls": w.get("controls"),
+            "objects": list(w.get("objects") or [])}
+
+
+def _bytes(x):
+    return (x or "").encode("utf-8")
+
+
+def entries_digest(kind, groups, roles, rows, waivers):
+    """iam_policy.entries_digest(v) for a version of `kind` whose skeleton has the group and
+    role keys `groups`, `roles` (None: unknown), entry rows [{role, group_code, level,
+    constraint_name}] and waivers (YAML or table shape)."""
+    ents = sorted(([r["role"], r["group_code"], r["level"], r.get("constraint_name")] for r in rows),
+                  key=lambda e: (_bytes(e[0]), _bytes(e[1]), _bytes(e[2])))
+    wvs = sorted((waiver_row(w) for w in waivers), key=lambda w: _bytes(w["id"]))
+    doc = {"kind": kind,
+           "groups": None if groups is None else sorted(groups, key=_bytes),
+           "roles": None if roles is None else sorted(roles, key=_bytes),
+           "entries": ents, "waivers": wvs}
+    return hashlib.sha256(pg_jsonb_text(doc).encode("utf-8")).hexdigest()
+
+
+def policy_entries_digest(data, kind="bootstrap"):
+    """entries_digest() of a whole policy dict: what _build_version stores for it as a
+    version of `kind` under its own skeleton."""
+    ew = entries_and_waivers(data)
+    return entries_digest(kind, list(data.get("resource_groups") or {}), list(data.get("roles") or {}),
+                          ew["entries"], ew["waivers"])

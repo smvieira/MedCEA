@@ -7,10 +7,15 @@
 # concrete objects the compiler derives from a cell — so what is explained is what is
 # enforced.
 #
-# Bootstrap (plan Section 3.4): on first install apps/iam/deploy.sh applies this file as
-# version 1 under the deploy lock and records a 'bootstrap_applied' event; the first qa
-# person then confirms version 1 like any later version. Afterwards the file is only the
-# "Reset to defaults" template.
+# The matrix and waivers below are the factory defaults: version 1 on a fresh install and
+# the target of Reset to defaults. The live policy is the applied version in the database
+# (`./apps/iam/apply.sh --status`). This file may lag it; `cli.py export-applied` writes
+# the live one for an occasional commit. Everything else here (levels, roles, groups,
+# members, routes, network, tool blocks, constraints, invariants, help) is the platform
+# skeleton, kept in git (IAM Phase 4; apply.sh, export-applied and the skeleton gate
+# arrive in slice 4.2a, and until then every compile reads this file).
+# Bootstrap: `apply.sh --bootstrap` seeds version 1 from this file and records it; the
+# first qa person then confirms version 1 in the Policy UI.
 # Keys (roles, levels, groups, members, constraints, invariants) are stable identifiers;
 # the UI edits cells, never keys. A key added here later reaches an existing install as a
 # schema migration that adds N cells and a history event (plan Section 3.4, item 4).
@@ -287,6 +292,12 @@ public_routes:
 # tokens are accepted by config-api (medcea_auth.pre_request's azp list) when a hop
 # reaches the pod that carries it; such a client says `read_only: true` (pre_request then
 # serves its tokens GET/HEAD only, in a read-only transaction) or `false`.
+# A `token_client` is never a host's client, with one exception (IAM 4.1): a client that
+# declares `only_rpc` — a non-empty list of medcea function names — and `read_only: false`
+# may name the client of a host that does not serve config-api. pre_request then lets
+# those tokens call only POST /rpc/<name> (nothing else, no read), and each such function
+# refuses any other client (medcea_auth._rpc_client). The one use: iam-approvals, which
+# forwards a qa person's own Policy UI token for the four approval calls.
 network:
   ingress_namespace: ingress
   unproxied:
@@ -301,6 +312,7 @@ network:
     ACCESS_DOMAIN:    access-oauth2-proxy
     MQTTX_DOMAIN:     mqttx-oauth2-proxy
     NODE_RED_DOMAIN:  oauth2-proxy
+    POLICY_DOMAIN:    iam-oauth2-proxy
   pods:
     scheduler:
       selector: {app: scheduler}
@@ -327,21 +339,22 @@ network:
       selector: {app: config-api}
       carries: {config-api: 3000}
       ingress:
-        - {port: 3000, from: ["pod:config-ui", node, "client:notebooks"], why: "PostgREST behind the Config UI's /api/; the edge wizard and platform_db.py on the host; kubelet probe; workbench notebooks with the person's own token (IAM 3.2b)"}
+        - {port: 3000, from: ["pod:config-ui", node, "client:notebooks", "client:iam-approvals"], why: "PostgREST behind the Config UI's /api/; the edge wizard and platform_db.py on the host; kubelet probe; workbench notebooks with the person's own token (IAM 3.2b); iam-api forwarding a qa person's own token for the four policy approval calls (IAM 4.4; nothing calls before)"}
     access:
       selector: {app: access}
       carries: {access: 8081, access-profile: 8082, access-public: 8080}
       ingress:
         - {port: 8081, from: ["proxy:ACCESS_DOMAIN", node], why: the User Manager; kubelet liveness probe}
         - {port: 8082, from: ["proxy:PORTAL_DOMAIN", "proxy:CONFIG_DOMAIN", "proxy:SCHEDULER_DOMAIN", "proxy:MONITOR_DOMAIN",
-                              "proxy:DBMGMT_DOMAIN", "proxy:ACCESS_DOMAIN", "proxy:MQTTX_DOMAIN"],
+                              "proxy:DBMGMT_DOMAIN", "proxy:ACCESS_DOMAIN", "proxy:MQTTX_DOMAIN", "proxy:POLICY_DOMAIN"],
            why: "/_account/ (user menu and profile) on every host that mounts it; not Node-RED's"}
         - {port: 8080, from: [ingress, node], why: the public access request form; kubelet readiness probe}
     iam:
       selector: {app: iam-api}
-      carries: {iam-mqttx: 8085}
+      carries: {iam-mqttx: 8085, iam: 8083}
       ingress:
         - {port: 8085, from: ["proxy:MQTTX_DOMAIN", node], why: "MQTT Explorer credentials (/_mqtt-credential) through the Explorer's proxy only; kubelet probes"}
+        - {port: 8083, from: ["proxy:POLICY_DOMAIN", node], why: "the Policy UI and its API (IAM 4.3; nothing listens on 8083 before); kubelet probes"}
     node-red:
       selector: {app.kubernetes.io/name: node-red}
       carries: {}
@@ -364,6 +377,18 @@ network:
         - {pod: config-api, port: 3000, why: "PostgREST with the person's own token: the database applies their rr_ role and row security"}
         - {selector: {app: keycloak}, port: 8080, why: "the device-code sign-in and token refresh (Service keycloak, client workbench-notebook)"}
       why: "Reading platform data from a notebook, per person (IAM 3.2b; manual: AI workbench)"
+    iam-approvals:
+      # iam-api's pods forward a qa person's own policy-host token to config-api for exactly
+      # the four approval calls (design §1.1). Their NetworkPolicy is ingress-only, so
+      # nothing renders these hops into a chart; the entry exists for config-api's ingress
+      # and for pre_request's azp list.
+      selector: {app: iam-api}
+      token_client: policy
+      read_only: false
+      only_rpc: [approve_policy, return_policy, confirm_policy, dispute_policy]
+      egress:
+        - {pod: config-api, port: 3000, why: "PostgREST with the qa person's own token: the database applies rr_qa and medcea_auth._approver"}
+      why: "Approving, returning, confirming and disputing access-policy versions (IAM Phase 4)"
 
 # Functions every authenticated path needs. Granted by rule, not by the matrix (plan
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants. `execute`
@@ -394,10 +419,38 @@ infrastructure_functions:
   - {function: "medcea_auth._lock_row(text, jsonb)", execute: [], why: "The approval functions' row locks (the row, a recipe's lines, a run's cycles), taken before _authors() so authorship is read in commit order."}
   - {function: "medcea.stamp_actor()", execute: [], why: "Trigger function; runs as the table owner and overwrites created_by_*/updated_by_* with the verified actor."}
   - {function: "medcea.register_mqtt_credential(text, text, integer, text, text)", execute: [], why: "Version 1, called by the edge wizard as anon before Phase 2b. The legacy grant to anon lives in medcea_db_migrations_down_008b.sql only (IAM_DB_ROLES=false); enforce revokes it."}
-  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [iam_svc], why: "The only writer of the hash chain. access_svc never calls it: the iam definer functions do."}
-  - {function: "iam_policy.verify_chain()", execute: [], why: "Run by health-check.sh as postgres on the host."}
+  - {function: "iam_policy.append_history(text, jsonb, text)", execute: [iam_svc], why: "Appends to the hash chain (iam-api's mqtt_credential_issued). access_svc never calls it: the iam definer functions do. From 008c it refuses the policy version events (42501): only the policy functions write those, through _append_history."}
+  - {function: "iam_policy.verify_chain()", execute: [iam_svc], why: "Run by health-check.sh as postgres on the host; the Policy UI's History tab shows the chain status (iam_svc; read-only, READ COMMITTED)."}
   - {function: "medcea_auth._account_actor(text, text)", execute: [], why: "The one who-may rule for account decisions (a person via the User Manager holding a level on a group); called by the iam definer functions and revoke_person_mqtt."}
   - {function: "medcea_auth.role_widening(text, text)", execute: [], why: "Compiled from the matrix (model.Policy.widening, the same table as routes.json widening, stamped with its digest); called by iam.record_decision."}
+  # IAM Phase 4 (migration 008c, slice 4.1): the owner-only half of the policy's versions.
+  # apply.sh (4.2a on) calls the _build/_mark/_accept/_propose/_withdraw/_record ones as
+  # postgres; the rest are called by the definer functions of the iam_policy group.
+  - {function: "medcea_auth._person_actor(text, text, text)", execute: [], why: "The one who-may rule for a person acting through a service's UI (source 'person via <service>', a non-blank person_id, the level on the group): _account_actor (access_svc) and the policy author functions (iam_svc) call it."}
+  - {function: "medcea_auth._rpc_client(text)", execute: [], why: "Compiled from network.clients only_rpc: the token client whose tokens alone may call a function (the policy host's, for the four approval wrappers), else NULL."}
+  - {function: "iam_policy._append_history(text, jsonb, text)", execute: [], why: "The hash chain's one writer (008b's body); append_history is a filter in front of it. The policy functions write their version events (draft_created ... status_changed, apply_*, skeleton_*) through it, so iam_svc cannot forge one."}
+  - {function: "iam_policy._begin(text, int)", execute: [], why: "Marks the transaction's policy writes as one function's (iam_policy.transition); SECURITY INVOKER, refuses any caller but medcea_owner."}
+  - {function: "iam_policy._edge_ok(text, text, text, text)", execute: [], why: "The version state machine's edges, read by the freeze trigger and audit_versions()."}
+  - {function: "iam_policy._accepted()", execute: [], why: "The digest of the skeleton this host accepted last."}
+  - {function: "iam_policy.freeze_policy()", execute: [], why: "Trigger function (INVOKER, ENABLE ALWAYS) on version, entry, waiver, skeleton, version_diff and approval_evidence: no write without a policy function's marker, no DELETE but a draft's cell, no TRUNCATE, one state-machine edge per update, every status change recorded (status_changed)."}
+  - {function: "iam_policy._changed_since(text, text, double precision)", execute: [], why: "iam._changed_since when the access component is installed, else 55000: the policy functions never call schema iam directly."}
+  - {function: "iam_policy._authors(int)", execute: [], why: "The accounts and persons who drafted, edited or submitted a version (and a skeleton version's claimed proposer): none of them approves or returns it."}
+  - {function: "iam_policy._put_rows(int, jsonb, jsonb)", execute: [], why: "A new version's entry and waiver rows from JSON (the shapes of compiler/source.py)."}
+  - {function: "iam_policy._evidence(int, text)", execute: [], why: "The signed token behind a qa call (request.headers authorization), checked against the verified claims; stored in approval_evidence, verified by apply.sh."}
+  - {function: "iam_policy._qa(text)", execute: [], why: "The qa actor of an approval call: medcea_auth._approver, the policy host's client (azp = _rpc_client), access unchanged since the token's iat."}
+  - {function: "iam_policy.approve(int, text, text, text, text)", execute: [], why: "Internal of medcea.approve_policy: submitted -> approved, binding the entries, the diff qa saw and the skeleton."}
+  - {function: "iam_policy.return_version(int, text)", execute: [], why: "Internal of medcea.return_policy: a change back to its draft, a skeleton version withdrawn."}
+  - {function: "iam_policy.confirm_applied(int, text, text)", execute: [], why: "Internal of medcea.confirm_policy: qa confirms a bootstrap or rollback version, never the person apply.sh recorded."}
+  - {function: "iam_policy.dispute_applied(int, text)", execute: [], why: "Internal of medcea.dispute_policy: qa disputes an unconfirmed bootstrap or rollback version."}
+  - {function: "iam_policy._system()", execute: [], why: "The actor of apply.sh's bundle: system:apply."}
+  - {function: "iam_policy._sync_skeleton(jsonb, text)", execute: [], why: "iam_policy.role and resource_group follow the skeleton's keys (upserted; a key that left it is marked retired); the entries' foreign keys need them."}
+  - {function: "iam_policy._accept_skeleton(text, jsonb, text, text, jsonb)", execute: [], why: "The skeleton gate (4.2a) or apply.sh accepts a platform skeleton (skeleton_accepted)."}
+  - {function: "iam_policy._propose_skeleton(text, jsonb, text, jsonb, text, uuid, text, text)", execute: [], why: "apply.sh --propose-skeleton (4.4): a widening git skeleton as a submitted skeleton version with the host-computed diff."}
+  - {function: "iam_policy._build_version(text, jsonb, jsonb, int, int, text)", execute: [], why: "apply.sh: a bootstrap or rollback version, built and applied in one transaction."}
+  - {function: "iam_policy._mark_applied(int, jsonb, text, uuid, text, text)", execute: [], why: "apply.sh: approved (or a bootstrap/rollback draft) -> applied, the previous -> superseded; re-reads status and entries digest FOR UPDATE."}
+  - {function: "iam_policy._mark_reverted(int, int, text)", execute: [], why: "apply.sh: a full revert puts the previous version back."}
+  - {function: "iam_policy._withdraw_open(text)", execute: [], why: "apply.sh: withdraws the open change or skeleton version as system:apply (a rollback)."}
+  - {function: "iam_policy._record(text, jsonb)", execute: [], why: "apply.sh's own events (applied, partial_apply, bootstrap_applied, break_glass_seen, apply_deferred, account_seeded)."}
 
 # Database roles that are not a platform role or a service identity. grants.py creates
 # rr_admin_login and compiles every role's privileges; medcea_owner, anon and
@@ -591,10 +644,10 @@ service_identities:
     ceiling: {master_data: [R], iam_users: [R, C, U, A, K], zones: [R, A], mqtt_explorer: [R, U], audit_histories: [R, C]}
   svc_iam:
     label: iam-api.py (Policy UI and MQTT Explorer credentials)
-    description: Policy drafts, submissions and approvals; per-person MQTT Explorer credentials.
+    description: "Policy drafts and submissions (never approvals: qa approves with their own token through PostgREST); per-person MQTT Explorer credentials."
     db_role: iam_svc
     db_password: IAM_SVC_DB_PASS
-    ceiling: {iam_policy: [R, C, U, A], zones: [R, C], iam_users: [R], mqtt_explorer: [R, C, U], audit_histories: [R, C]}
+    ceiling: {iam_policy: [R, C, U], iam_users: [R], mqtt_explorer: [R, C, U], audit_histories: [R, C]}
 
 # ── Resource groups ──────────────────────────────────────────────────────────────────
 # Every table in medcea, iam and iam_policy is a member of exactly one group (I14, I15).
@@ -660,6 +713,15 @@ resource_groups:
     risk: None; it shows which tabs exist.
     members:
       - {type: api, service: access, routes: {"GET /": R, "GET /api/me": R}}
+
+  policy_page:
+    label: Access Policy page
+    class: config
+    description: The Policy UI's page and the signed-in person's own capabilities. Every list and action is a route of iam_policy or audit_histories.
+    why_this_class: Navigation; holds no records.
+    risk: None; it shows which tabs exist.
+    members:
+      - {type: api, service: iam, routes: {"GET /": R, "GET /api/me": R}}
 
   master_data:
     label: Master data (locations, units, zones, components)
@@ -1052,6 +1114,7 @@ resource_groups:
       - {type: data, function: "iam.confirm_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam.user_status_history, iam.mail_settings, iam_policy.user_unit], note: "confirming a unit_assign inserts the user_unit row (a no-op for one already in effect: bootstrap, backfill)"}
       - {type: data, function: "iam.refuse_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision, iam_policy.user_unit], note: "refusing a unit_assign deletes the user_unit row, only while it is the latest unit decision"}
       - {type: data, function: "iam.review_decision(int, text)", level: A, service_only: [svc_access], writes: [iam.account_decision]}
+      - {type: data, function: "iam._changed_since(text, text, double precision)", level: R, service_only: [svc_iam], note: "true when the person's access changed since their token's iat (status history, applied/reviewed/confirmed deactivations, activations, role, person_id and grant decisions of any of the person's accounts); iam-api refuses then (4.3)"}
       - type: api
         service: access
         routes:
@@ -1088,8 +1151,7 @@ resource_groups:
     members:
       - {type: data, object: iam_policy.user_unit, written_by: functions}
       - {type: data, object: iam_policy.user_zone, written_by: functions, note: "unused since unit assignments; kept for the history that names it"}
-      - {type: data, function: "iam_policy.propose_unit(uuid, int, text)", level: C, service_only: [svc_iam], note: "IAM 4.3: called by iam-api for an admin holding K; records a pending decision; removal is immediate. Until then apps/iam/units.sh is the only assigner"}
-      - {type: api, service: iam, routes: {"GET /api/zones": [R, K], "PUT /api/zones": K}}
+      - {type: infra, object: "apps/iam/units.sh assign/remove --by <admin> (the host operator, under medcea_lock; an assignment waits for qa as an iam.account_decision). iam-api's planned propose_unit and its /api/zones routes were dropped in IAM 4.1: units stay in the User Manager and units.sh (owner decision 4)"}
 
   iam_policy:
     label: Access policy
@@ -1098,33 +1160,52 @@ resource_groups:
     why_this_class: Configuration of access; every change needs qa approval.
     risk: A policy change can open any group to any role.
     approval:
-      record: iam_policy.version.status (draft → submitted → approved → applied)
-      functions: ["iam_policy.approve(int, text)"]
+      record: iam_policy.version.status (draft → submitted → approved → applied; bootstrap and rollback versions are applied at once and then confirmed or disputed by qa)
+      functions: ["medcea.approve_policy(int, text, text, text, text)", "medcea.return_policy(int, text)", "medcea.confirm_policy(int, text, text)", "medcea.dispute_policy(int, text)"]
       effect: blocking
-      help: apply.sh applies only an approved version; the approver is a different person from the submitter, and the version must not widen the approver's own role.
+      help: apply.sh applies only an approved version (or, as a rollback, an earlier approved or confirmed one). The approver signs in to the Policy UI with their own account, is none of the version's authors by account or person, and approves exactly the diff they were shown; apply.sh checks the signed token and that the approver is an enabled qa account whose person is no author's and no enabled admin's, and that the version widens none of that person's roles.
     members:
       - {type: data, object: iam_policy.version, written_by: functions}
       - {type: data, object: iam_policy.entry, written_by: functions}
       - {type: data, object: iam_policy.waiver, written_by: functions}
-      - {type: data, function: "iam_policy.new_draft(int, text)", level: C}
-      - {type: data, function: "iam_policy.save_entry(int, text, text, text[], text, text[], text)", level: U}
-      - {type: data, function: "iam_policy.submit(int, text)", level: U}
-      - {type: data, function: "iam_policy.approve(int, text)", level: A}
-      - {type: data, object: iam_policy.role, service_only: [svc_iam]}
-      - {type: data, object: iam_policy.resource_group, service_only: [svc_iam]}
-      - {type: data, object: iam_policy.member, service_only: [svc_iam]}
-      - {type: data, object: iam_policy.effective_route, service_only: [svc_iam]}
+      - {type: data, object: iam_policy.skeleton, written_by: functions, note: "accepted platform skeletons by digest; only the host writes them (apply.sh, the deploys' skeleton gate)"}
+      - {type: data, object: iam_policy.version_diff, written_by: functions, note: "the host-computed diff of a skeleton version, served to qa byte for byte"}
+      - {type: data, object: iam_policy.approval_evidence, written_by: functions, service_only: [], note: "the approvals' signed tokens: the owner only; apply.sh and cli.py audit-version read it as postgres"}
+      - {type: data, object: iam_policy.role, written_by: functions, service_only: [svc_iam]}
+      - {type: data, object: iam_policy.resource_group, written_by: functions, service_only: [svc_iam]}
+      - {type: data, object: iam_policy.member, written_by: functions, service_only: [svc_iam]}
+      - {type: data, object: iam_policy.effective_route, written_by: functions, service_only: [svc_iam]}
+      - {type: data, function: "iam_policy.new_draft(text, text, double precision, jsonb, jsonb)", level: C, service_only: [svc_iam], writes: [iam_policy.version, iam_policy.entry, iam_policy.waiver]}
+      - {type: data, function: "iam_policy.save_entry(int, text, text, jsonb, text, jsonb, double precision)", level: U, service_only: [svc_iam], writes: [iam_policy.version, iam_policy.entry]}
+      - {type: data, function: "iam_policy.save_waiver(int, jsonb, text, double precision)", level: U, service_only: [svc_iam], writes: [iam_policy.waiver], note: "IAM 4.7"}
+      - {type: data, function: "iam_policy.drop_waiver(int, text, text, double precision)", level: U, service_only: [svc_iam], writes: [iam_policy.waiver], note: "IAM 4.7"}
+      - {type: data, function: "iam_policy.submit(int, text, double precision)", level: U, service_only: [svc_iam], writes: [iam_policy.version]}
+      - {type: data, function: "iam_policy.withdraw(int, text, double precision)", level: U, service_only: [svc_iam], writes: [iam_policy.version]}
+      - {type: data, function: "medcea.approve_policy(int, text, text, text, text)", level: A, writes: [iam_policy.version, iam_policy.approval_evidence], note: "only with the policy host's token (pre_request only_rpc, medcea_auth._rpc_client)"}
+      - {type: data, function: "medcea.return_policy(int, text)", level: A, writes: [iam_policy.version, iam_policy.approval_evidence]}
+      - {type: data, function: "medcea.confirm_policy(int, text, text)", level: A, writes: [iam_policy.version, iam_policy.approval_evidence]}
+      - {type: data, function: "medcea.dispute_policy(int, text)", level: A, writes: [iam_policy.version, iam_policy.approval_evidence]}
+      - {type: data, function: "iam_policy.why_not(int)", level: R}
+      - {type: data, function: "iam_policy.entries_digest(int)", level: R}
+      - {type: data, function: "iam_policy.audit_versions()", level: R}
       - type: api
         service: iam
         routes:
+          "GET /api/policy": R
           "GET /api/policy/<v>": R
           "GET /api/policy/<v>/explain": R
           "GET /api/policy/<v>/diff": R
           "GET /api/policy/who-can": R
+          "GET /api/policy/service-identities": R
+          "GET /api/policy/break-glass": R
           "POST /api/policy/draft": C
           "PUT /api/policy/<v>/entry": U
           "POST /api/policy/<v>/submit": U
+          "POST /api/policy/<v>/withdraw": U
           "POST /api/policy/<v>/approve": A
+          "POST /api/policy/<v>/return": A
+          "POST /api/policy/<v>/confirm": A
+          "POST /api/policy/<v>/dispute": A
       - {type: ui, host: POLICY_DOMAIN}
 
   audit_histories:
@@ -1157,7 +1238,7 @@ resource_groups:
           "GET /api/review/<id>": R
           "POST /api/review": C
           "POST /api/review/<id>/sign-off": C
-      - {type: api, service: iam, routes: {"GET /api/policy/history": R}}
+      - {type: api, service: iam, routes: {"GET /api/policy/history": R, "GET /api/policy/chain": R}}
 
   research_workbench:
     label: AI Workbench (JupyterHub)
@@ -1243,6 +1324,11 @@ matrix:
     admin: [R]
     auditor: [R]
   user_manager:
+    qp: [R]
+    admin: [R]
+    auditor: [R]
+  policy_page:
+    qa: [R]
     qp: [R]
     admin: [R]
     auditor: [R]
@@ -1475,12 +1561,12 @@ invariants:
   - {code: I6, kind: matrix, rule: "operator and production_manager hold N on research_workbench; engineer holds at most R there.", rationale: "Production roles do not run unvalidated code.", cites: "Annex 11 §4"}
   - {code: I7, kind: matrix, rule: "qp holds no C, U or O anywhere, and holds A on runs.", rationale: "The QP releases and does nothing else.", cites: "EU GMP Annex 16"}
   - {code: I11, kind: matrix, rule: "A tool cannot widen a role's access: for each group a tool reaches, the role must hold the reached levels on that group directly and without a constraint, unless waiver covers it. A mirroring tool acts with the person's own cells and cannot widen by construction.", rationale: "Access through Grafana, Node-RED or an export is still access to the data.", cites: "Annex 11 §12"}
-  - {code: I12, kind: matrix, rule: "At least one role other than admin holds A on iam_policy and on iam_users; admin never holds A on either.", rationale: "The policy cannot be changed so that nobody independent can approve it.", cites: "Annex 11 §12"}
+  - {code: I12, kind: matrix, rule: "At least one role other than admin holds A on iam_policy and on iam_users, and at least one role holding A on each that holds no C, U or K there is not `availability: later`; admin never holds A on either.", rationale: "The policy cannot be changed so that nobody independent can approve it.", cites: "Annex 11 §12"}
   - {code: I13, kind: matrix, rule: "Only admin holds K or D; D only on platform_admin.", rationale: "Administration and removal stay with one accountable role.", cites: "MHRA §6.16"}
   - {code: I14, kind: matrix, rule: "Every level in a cell applies to at least one member of its group; every A sits on a group with an approval rule; every constraint names levels the cell holds; every member and route belongs to one group only; waivers name only waivable invariants.", rationale: "A cell that compiles to nothing, or an escape hatch on a core rule, misleads the reader.", cites: "—"}
   - {code: I16, kind: matrix, rule: "Cells are closed under implies (U lists C and R).", rationale: "What the reader sees is what the compiler grants.", cites: "—"}
   - {code: I8, kind: workflow, rule: "A policy version is applied only after approval by a person holding A on iam_policy in the applied version who is not the submitter and whose own role the version does not widen.", rationale: "Every access change has two people behind it.", cites: "Annex 11 §12; PIC/S PI 041-1 §9.3"}
   - {code: I17, kind: workflow, rule: "No person holds an admin account and a qa account at the same time; checked by access-api against Keycloak on every role change and person_id change, at proposal and at confirmation.", rationale: "The administrator and the independent approver are different people.", cites: "PIC/S PI 041-1 §9.3"}
   - {code: I9, kind: catalog, rule: "anon and PUBLIC hold no privilege on any object in schemas medcea, iam and iam_policy, and anon holds only USAGE on schema medcea_auth and EXECUTE on medcea_auth.pre_request().", rationale: "Nothing is reachable without a verified identity.", cites: "21 CFR 11.10(d)"}
-  - {code: I10, kind: catalog, rule: "Every service role's grants are within its ceiling; no service holds A except svc_access on iam_users and zones and svc_iam on iam_policy (whose approval functions refuse system actors); no service holds U or D on a regulated or history table unless a waiver covers it.", rationale: "A compromised service cannot rewrite the record or approve on its own.", cites: "21 CFR 11.10(e)"}
+  - {code: I10, kind: catalog, rule: "Every service role's grants are within its ceiling; no service holds A except svc_access on iam_users and zones (whose approval functions refuse system actors); no service holds U or D on a regulated or history table unless a waiver covers it.", rationale: "A compromised service cannot rewrite the record or approve on its own.", cites: "21 CFR 11.10(e)"}
   - {code: I15, kind: catalog, rule: "The privileges in pg_catalog equal what the version compiles to (matrix, ceilings, infrastructure_functions), and every table in medcea, iam and iam_policy is a member of a group.", rationale: "Detects grants made outside the policy and tables nobody classified.", cites: "Annex 11 §12"}
