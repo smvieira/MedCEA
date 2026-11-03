@@ -24,8 +24,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/edge-wizard/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-edge-wizard-deploy   # logs/app-edge-wizard-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
 
 if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2
@@ -76,6 +85,38 @@ unit_flash_runs() {
     done < "/sys/fs/cgroup$cg/cgroup.procs"
     return 0
 }
+# --gate-only: the daemon's --required-role against the compile. The daemon compiles
+# its roles when it starts, so a drift is a restart of the unit — deferred (exit 4,
+# apply.sh records apply_deferred) while an onboarding run is in the unit.
+if [[ "$_MODE" == scoped ]]; then
+    ONBOARD_ROLES="$(policy_tool edge-wizard)" || {
+        echo "ERROR: cannot compile the onboarding roles from the access policy (python3 apps/iam/compiler/cli.py check); the running wizard is left as it is." >&2
+        exit 1
+    }
+    _argv="$(pgrep -af '[w]izard_server.py .*--daemon' | head -1)"
+    _gate_equal() {
+        if [[ -n "$ONBOARD_ROLES" ]]; then [[ " $_argv " == *" --required-role $ONBOARD_ROLES "* ]]
+        else [[ -n "$_argv" && " $_argv " != *" --required-role "* ]]; fi
+    }
+    if [[ -z "$_argv" && ! -f "$UNIT_FILE" ]]; then
+        log "ONBOARD_DOMAIN (edge-wizard): not deployed (./apps/edge-wizard/deploy.sh installs it)"
+    elif _gate_equal; then
+        log "ONBOARD_DOMAIN (edge-wizard): unchanged"
+    else
+        _runs="$(unit_flash_runs | xargs)"
+        if [[ -n "$_runs" ]]; then
+            warn "ONBOARD_DOMAIN (edge-wizard): deferred — an onboarding run is in progress (PID $_runs); the wizard keeps its old roles until a restart."
+            exit 4
+        fi
+        systemctl --user restart "$UNIT"
+        wait_for_http "http://127.0.0.1:$PORT/" 60 "Onboarding wizard" || { journalctl --user -u "$UNIT" -n 20 --no-pager >&2 || true; exit 1; }
+        _argv="$(pgrep -af '[w]izard_server.py .*--daemon' | head -1)"
+        _gate_equal || { echo "ERROR: the restarted wizard does not pass --required-role $ONBOARD_ROLES (edge/ older than IAM 3.4?)." >&2; exit 1; }
+        log "ONBOARD_DOMAIN (edge-wizard): re-rendered (the wizard restarted with --required-role ${ONBOARD_ROLES:-none})"
+    fi
+    policy_source_finish "$NAMESPACE" edge-wizard
+    exit 0
+fi
 _runs="$(unit_flash_runs | xargs)"
 if [[ -n "$_runs" ]]; then
     echo "ERROR: an onboarding run is in progress (PID $_runs); restarting the wizard would kill it mid-flash. Re-run when it has finished." >&2

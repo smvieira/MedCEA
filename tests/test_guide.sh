@@ -72,6 +72,9 @@
 #      says break-glass does not bypass the skeleton gate
 #  37  Infrastructure → Publish the manual to the portal: ./infra/publish-manual.sh alone, a
 #      change ([y/N]) that takes the lock itself (the guide holds none), dry and real
+#  38  Policy → Re-render the policy artefacts (IAM 4.2b): deploy-infra --policy-only, the
+#      workbench's --policy-only, then every app's --gate-only, under the guide's one lock;
+#      a failure (or the wizard's deferral) stops the chain
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -858,6 +861,26 @@ has   "real: the script ran" "STUB infra/publish-manual.sh"
 hasnt "real: nothing else ran" "STUB deploy-infra.sh"
 grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
     && pass "real: the guide holds no lock (the script takes its own)" || fail "real: ran under the guide's lock"
+
+echo "38 re-render the policy artefacts (scoped)"
+mkcfg true true
+guide $'8\n16\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh --policy-only && ./infra/deploy-workbench.sh --policy-only && ./apps/access/deploy.sh --gate-only && ./apps/edge-wizard/deploy.sh --gate-only && ./apps/frontend/deploy.sh --gate-only && ./apps/iam/deploy.sh --gate-only && ./apps/monitor/deploy.sh --gate-only && ./apps/mqtt-explorer/deploy.sh --gate-only && ./apps/scheduler/deploy.sh --gate-only"
+has   "a change ([y/N])" "Kind:        changes the platform"
+has   "one lock" "held by the guide for all of them"
+has   "the deferral is explained" "never during an onboarding run"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'8\n16\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: deploy-infra --policy-only ran" "STUB deploy-infra.sh --policy-only"
+has   "real: the last gate ran" "STUB apps/scheduler/deploy.sh --gate-only"
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 9 ]] && pass "real: all nine under the guide's lock" \
+    || fail "real: a step ran without the guide's lock"
+OUT="$(printf '8\n16\ny\nq\n' | NO_COLOR=1 STUB_RC=4 "$S/guide.sh" 2>&1)"
+has   "a deferral (exit 4) stops the chain" "STUB deploy-infra.sh --policy-only"
+hasnt "nothing after it" "STUB infra/deploy-workbench.sh"
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

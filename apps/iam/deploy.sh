@@ -30,8 +30,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/iam/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-iam-deploy   # logs/app-iam-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
+if [[ "$_MODE" == scoped ]]; then
+    # POLICY_DOMAIN's proxy (the Policy UI) arrives with IAM 4.3, which fills this in.
+    echo "  POLICY_DOMAIN: no gate before slice 4.3"
+    exit 0
+fi
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 log() { echo -e "${GREEN}[iam]${NC} $*"; }

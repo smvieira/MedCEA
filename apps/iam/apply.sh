@@ -451,6 +451,7 @@ KIND="$(jget "$STATE" 'd.get("kind")')"
 LAST="$(jget "$STATE" '(d.get("last_apply_event") or {}).get("event", "")')"
 case "$LAST" in
     apply_started) ;;
+    apply_deferred) log "version $VERSION has a deferred target (apply_deferred): re-rendering it now" ;;
     partial_apply) die 2 "version $VERSION ended in partial_apply: resuming it arrives with IAM 4.5" ;;
     *)
         py "$CHECK" health --state "$STATE" --host-file "$REPO_ROOT/state/policy-applied.yaml" 2>/dev/null \
@@ -488,14 +489,38 @@ if [[ "$KIND" == bootstrap ]]; then
         || fail3 "version $VERSION cannot be compiled from the database's rows (above)"
     py "$CLI" bootstrap-targets --out "$STAGE/targets" --source host || fail3 "the written host file does not compile to version $VERSION (above)"
 fi
-# 9. the grants, and the artefacts reported (8: none re-rendered in 4.2a)
+# 8. the artefacts (IAM 4.2b): every scoped mode under this lock, each re-rendering only
+# what drifted from version $VERSION's compile; the wizard's exit 4 (a flash running) is
+# recorded as apply_deferred and closed by the next --resume. grants: step 9.
+DEFERRED=()
+while IFS= read -r cmd; do
+    [[ -n "$cmd" ]] || continue
+    log "step 8: $cmd"
+    rc=0
+    # shellcheck disable=SC2086  # "./path --mode": the command and its one option
+    MEDCEA_CONFIRMED=1 "$REPO_ROOT/"${cmd#./} </dev/null || rc=$?
+    case $rc in
+        0) ;;
+        4) DEFERRED+=("$cmd") ;;
+        *) fail3 "$cmd failed (exit $rc): version $VERSION is committed; fix the cause above and run --resume again" ;;
+    esac
+done < <(py "$CHECK" owners --scoped)
+# 9. the grants, and the artefacts reported
 verify_grants
 printf '%s\n' 'Policy artefacts | iamartefacts | $NAMESPACE |' > "$STAGE/artefacts.conf"
 if ! "$REPO_ROOT/health-check.sh" -c "$STAGE/artefacts.conf"; then
-    warn "the live artefacts are not version $VERSION's compile; re-render them with (in this order):"
+    warn "the live artefacts are still not version $VERSION's compile after the scoped modes; a full deploy re-renders them (in this order):"
     py "$CHECK" owners --deploys | sed 's/^/  /' >&2
 fi
-# 10. the record
+# 10. the record, then each deferral after it (open until the next applied record)
 record "$EVENT" --resumed
+for cmd in "${DEFERRED[@]}"; do
+    py "$CHECK" deferred-record --state "$STATE" --target "$(basename "$(dirname "${cmd%% *}")")" \
+        --reason "an onboarding run is in progress" --command "$cmd" --out "$STAGE/deferred.sql" \
+        || fail3 "cannot build the apply_deferred record (above)"
+    id="$(q -1 < "$STAGE/deferred.sql" | tr -d '[:space:]')" || id=""
+    [[ "$id" =~ ^[0-9]+$ ]] || fail3 "could not record apply_deferred in iam_policy.history (above)"
+    warn "deferred: $cmd (apply_deferred, event $id): run ./apps/iam/apply.sh --resume --by <you> once the onboarding run has finished"
+done
 report
 log "version $VERSION ($KIND): the apply is finished."

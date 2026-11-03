@@ -61,8 +61,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
+# --policy-only (IAM 4.2b): re-render only the gate and the notebooks' hops, and only
+# when they drifted from the compile; nothing else is applied.
+_MODE=full
+case "$*" in
+    "") ;;
+    --policy-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./infra/deploy-workbench.sh [--policy-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log deploy-workbench   # logs/deploy-workbench-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-infra.sh
+[[ "$_MODE" == scoped ]] && echo "mode: policy-only"
 # shellcheck source=/dev/null
 source config.env
 # shellcheck source=/dev/null
@@ -126,6 +135,9 @@ if $KUBECTL get ingress kubeflow-domain -n kubeflow >/dev/null 2>&1; then
     $KUBECTL delete ingress kubeflow-domain -n kubeflow --ignore-not-found
 fi
 
+# The policy part (IAM 4.2b: a function, shared with --policy-only): the gate and the
+# notebooks' hops compiled from the access policy, the hops checked against what runs.
+_policy() {
 # Fail closed: a policy that does not compile leaves the running hub as it is.
 policy_workbench || die "the access policy does not compile to the workbench's gate (python3 apps/iam/compiler/cli.py check)"
 if [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then
@@ -154,6 +166,8 @@ if [[ "$WORKBENCH_EGRESS" == "[]" ]]; then
 else
     log "Notebooks may reach Keycloak and config-api, with each person's own sign-in (network.clients.notebooks)"
 fi
+}
+_policy
 [[ "$WORKBENCH_IMAGE_TAG" == latest ]] \
     && log "WARNING: WORKBENCH_IMAGE uses 'latest' without a digest: JupyterLab and its git panel can change under people at any pull"
 
@@ -165,16 +179,53 @@ $HELM repo update jupyterhub >/dev/null 2>&1 || true
 VALUES=$(mktemp /tmp/workbench-values-XXXXXX.yaml)
 trap 'rm -f "$VALUES"' EXIT
 
+# --policy-only: the values this run would deploy against the hub's (Secret hub,
+# values.yaml, read on stdin as health iamworkbench reads it: it holds the client
+# secret), on the policy keys only. Equal: nothing is applied.
+_policy_keys() {
+    python3 -c '
+import json, sys, yaml
+def keys(v):
+    v = v or {}
+    c = (v.get("hub") or {}).get("config") or {}
+    g = c.get("GenericOAuthenticator") or {}
+    wa = ((v.get("hub") or {}).get("loadRoles") or {}).get("workbench-admin") or {}
+    return {"allow_all": (c.get("Authenticator") or {}).get("allow_all"),
+            "allowed": sorted(g.get("allowed_groups") or []), "message": g.get("custom_403_message"),
+            "role_groups": sorted(wa.get("groups") or []), "role_users": sorted(wa.get("users") or []),
+            "egress": ((v.get("singleuser") or {}).get("networkPolicy") or {}).get("egress") or []}
+live, want = (yaml.safe_load(open(f)) for f in sys.argv[1:3])
+sys.exit(0 if json.dumps(keys(live), sort_keys=True) == json.dumps(keys(want), sort_keys=True) else 1)' "$@"
+}
+
 # The example notebooks and their helper, mounted read-only into every server (a
 # running server sees a change within a minute; nothing restarts).
+if [[ "$_MODE" == full ]]; then
 $KUBECTL create configmap workbench-examples -n "$NAMESPACE" --from-file="$REPO_ROOT/k8s/workbench/examples/" \
     --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
 log "Example notebooks: ~/medcea-examples (read-only) in every server"
+fi
 
 render "$REPO_ROOT/k8s/workbench/values.yaml" WORKBENCH_SECRET WORKBENCH_DOMAIN KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
     WORKBENCH_IMAGE_NAME WORKBENCH_IMAGE_TAG WORKBENCH_STORAGE WORKBENCH_NOTEBOOK_REPO WORKBENCH_EGRESS \
     WORKBENCH_ALLOW_ALL WORKBENCH_HUBADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE \
     WORKBENCH_LOGOUT_URL > "$VALUES"
+
+if [[ "$_MODE" == scoped ]]; then
+    _LIVE=$(mktemp /tmp/workbench-live-XXXXXX.yaml)
+    trap 'rm -f "$VALUES" "$_LIVE"' EXIT
+    if ! $KUBECTL get secret hub -n "$NAMESPACE" -o jsonpath='{.data.values\.yaml}' 2>/dev/null | base64 -d > "$_LIVE" 2>/dev/null \
+       || [[ ! -s "$_LIVE" ]]; then
+        log "WORKBENCH_DOMAIN (workbench): not deployed (./infra/deploy-workbench.sh installs it)"
+        policy_source_finish "$NAMESPACE" workbench
+        exit 0
+    fi
+    if _policy_keys "$_LIVE" "$VALUES"; then
+        log "WORKBENCH_DOMAIN (workbench): unchanged"
+        policy_source_finish "$NAMESPACE" workbench
+        exit 0
+    fi
+fi
 
 $HELM upgrade --install workbench jupyterhub/jupyterhub \
   --version "$CHART_VERSION" \
@@ -193,6 +244,11 @@ wait_for_http "https://$WORKBENCH_DOMAIN/hub/login" 180 "JupyterHub" || {
     log "The hub rolled out but is not serving through the ingress yet."
     exit 1
 }
+if [[ "$_MODE" == scoped ]]; then
+    log "WORKBENCH_DOMAIN (workbench): re-rendered (gate or notebook hops)"
+    policy_source_finish "$NAMESPACE" workbench
+    exit 0
+fi
 log "AI Workbench is live: https://$WORKBENCH_DOMAIN"
 log "Sign in with a Keycloak account in realm '$KEYCLOAK_REALM' holding a role the policy admits."
 log "The first start of a new home pulls the notebook image and installs real-time"

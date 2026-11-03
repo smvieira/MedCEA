@@ -24,8 +24,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/mqtt-explorer/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-mqtt-explorer-deploy   # logs/app-mqtt-explorer-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
 
 if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2
@@ -44,6 +53,18 @@ MQTTX_DOMAIN="${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}"
 
 GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[mqtt-explorer]${NC} $*"; }
+
+# The sign-in gate (IAM 4.2b: shared by the full deploy and --gate-only). --gate-only
+# skips the person-mode checks below: they guard the page, not the gate.
+_gate() {
+    app_gate "$_MODE" mqttx-oauth2-proxy mqtt-explorer "${MQTTX_CLIENT_SECRET:-}" "${MQTTX_COOKIE_SECRET:-}" \
+        MQTTX_DOMAIN "$MQTTX_DOMAIN" "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml"
+}
+if [[ "$_MODE" == scoped ]]; then
+    _gate
+    policy_source_finish "$NAMESPACE" mqtt-explorer
+    exit 0
+fi
 
 case "${IAM_MQTT_PERSON:-false}" in
     true)
@@ -105,12 +126,7 @@ $KUBECTL rollout status deployment/mqtt-explorer -n "$NAMESPACE" --timeout=3m
 # 3. Sign-in (and the broker WebSocket at /mqtt)
 # =============================================================================
 log "Deploying mqttx-oauth2-proxy (Keycloak SSO)..."
-_VALUES=$(mktemp /tmp/mqttx-oauth2proxy-values-XXXXXX.yaml)
-ALLOWED_GROUPS="$(policy_groups MQTTX_DOMAIN)"
-gate_error_page mqttx-oauth2-proxy MQTTX_DOMAIN "$ALLOWED_GROUPS"
-render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_VALUES"
-deploy_oauth2_proxy mqttx-oauth2-proxy mqtt-explorer "${MQTTX_CLIENT_SECRET:-}" "${MQTTX_COOKIE_SECRET:-}" "$MQTTX_DOMAIN" "$_VALUES"
-rm -f "$_VALUES"
+_gate
 $KUBECTL rollout status deployment/mqttx-oauth2-proxy -n "$NAMESPACE" --timeout=4m
 wait_for_http "https://$MQTTX_DOMAIN/" 120 "MQTT Explorer" || exit 1
 

@@ -15,8 +15,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/monitor/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-monitor-deploy   # logs/app-monitor-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
 
 if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2
@@ -36,6 +45,17 @@ MONITOR_DOMAIN="${MONITOR_DOMAIN:-monitor.$DOMAIN}"
 
 GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[monitor]${NC} $*"; }
+
+# The sign-in gate (IAM 4.2b: shared by the full deploy and --gate-only).
+_gate() {
+    app_gate "$_MODE" monitor-oauth2-proxy monitor "${MONITOR_CLIENT_SECRET:-}" "${MONITOR_COOKIE_SECRET:-}" \
+        MONITOR_DOMAIN "$MONITOR_DOMAIN" "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" monitor
+}
+if [[ "$_MODE" == scoped ]]; then
+    _gate
+    policy_source_finish "$NAMESPACE" monitor
+    exit 0
+fi
 
 # =============================================================================
 # 1. nginx ConfigMap
@@ -96,12 +116,7 @@ log "Waiting for monitor rollout..."
 $KUBECTL rollout status deployment/monitor -n "$NAMESPACE" --timeout=3m
 
 log "Deploying monitor-oauth2-proxy (Keycloak SSO)..."
-_VALUES=$(mktemp /tmp/monitor-oauth2proxy-values-XXXXXX.yaml)
-ALLOWED_GROUPS="$(policy_groups MONITOR_DOMAIN)"
-gate_error_page monitor-oauth2-proxy MONITOR_DOMAIN "$ALLOWED_GROUPS"
-APP_SERVICE=monitor render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_VALUES"
-deploy_oauth2_proxy monitor-oauth2-proxy monitor "${MONITOR_CLIENT_SECRET:-}" "${MONITOR_COOKIE_SECRET:-}" "$MONITOR_DOMAIN" "$_VALUES"
-rm -f "$_VALUES"
+_gate
 $KUBECTL rollout status deployment/monitor-oauth2-proxy -n "$NAMESPACE" --timeout=4m
 wait_for_http "https://$MONITOR_DOMAIN/" 120 "Run Monitor" || exit 1
 

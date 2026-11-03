@@ -178,11 +178,13 @@ print(json.dumps(ops))' "$hops" <<<"$live")" || return 1
 # the list the gate is deployed with (from policy_groups, or a fixed one), so the
 # page names exactly the roles that gate admits. Written to ConfigMap
 # RELEASE-templates, which gate_helm_args mounts at the values files'
-# custom_templates_dir; the caller restarts the pod (deploy_oauth2_proxy does).
+# custom_templates_dir; gate_helm_args also stamps its sha256 on the pod template,
+# so a changed page rolls the proxy through helm (IAM 4.2b).
 # The portal keeps its own page (k8s/portal/error.html): there a 403 means no
-# platform role at all.
-gate_error_page() {
-    local release="$1" host_var="$2" allowed="$3" desc
+# platform role at all. gate_error_html prints the page without applying it
+# (the scoped modes compare it with the live one first).
+gate_error_html() {
+    local host_var="$1" allowed="$2" desc
     desc="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" describe-gate "$host_var" "$allowed")" || return 1
     local GATE_SERVICE="${desc%%$'\t'*}" GATE_ROLES="${desc#*$'\t'}"
     local GATE_PORTAL_URL="https://$PORTAL_DOMAIN/" GATE_LOGOUT_RD
@@ -194,15 +196,33 @@ inner = 'https://%s/realms/%s/protocol/openid-connect/logout?client_id=portal&po
     sys.argv[1], sys.argv[2], urllib.parse.quote('https://%s/' % sys.argv[3], safe=''))
 print(urllib.parse.quote(inner, safe=''))
 " "$KEYCLOAK_DOMAIN" "$KEYCLOAK_REALM" "$PORTAL_DOMAIN")"
-    render "$REPO_ROOT/k8s/oauth2-proxy/error.html" GATE_SERVICE GATE_ROLES GATE_PORTAL_URL GATE_LOGOUT_RD \
+    render "$REPO_ROOT/k8s/oauth2-proxy/error.html" GATE_SERVICE GATE_ROLES GATE_PORTAL_URL GATE_LOGOUT_RD
+}
+gate_error_page() {
+    local release="$1" page
+    page="$(gate_error_html "$2" "$3")" || return 1
+    printf '%s\n' "$page" \
       | $MK8S kubectl create configmap "$release-templates" -n "$NAMESPACE" --from-file=error.html=/dev/stdin \
           --dry-run=client -o yaml | $MK8S kubectl apply -f - >/dev/null
+}
+
+#   gate_page_sha RELEASE
+#
+# sha256 of the 403 page in ConfigMap RELEASE-templates as the cluster has it, or
+# "none" without the ConfigMap.
+gate_page_sha() {
+    local page
+    page="$($MK8S kubectl get configmap "$1-templates" -n "$NAMESPACE" -o jsonpath='{.data.error\.html}' 2>/dev/null)" \
+        || { echo none; return 0; }
+    printf '%s\n' "$page" | sha256sum | cut -d' ' -f1   # $(…) dropped the page's last newline
 }
 
 #   mapfile -t ARR < <(gate_helm_args RELEASE)
 #
 # The helm --set arguments that mount RELEASE-templates at /templates. Optional,
 # so a proxy deployed before its page still starts (with oauth2-proxy's page).
+# The page's sha256 as a pod annotation: oauth2-proxy reads its templates at start
+# only, so a changed page must change the pod template (IAM 4.2b).
 gate_helm_args() {
     printf '%s\n' \
       --set "extraVolumes[0].name=gate-templates" \
@@ -210,7 +230,8 @@ gate_helm_args() {
       --set "extraVolumes[0].configMap.optional=true" \
       --set "extraVolumeMounts[0].name=gate-templates" \
       --set "extraVolumeMounts[0].mountPath=/templates" \
-      --set "extraVolumeMounts[0].readOnly=true"
+      --set "extraVolumeMounts[0].readOnly=true" \
+      --set "podAnnotations.medcea/gate-page-sha256=$(gate_page_sha "$1")"
 }
 
 # helm_dockerhub_login — log helm into Docker Hub as the identity that pulls.
@@ -263,7 +284,94 @@ deploy_oauth2_proxy() {
       --set "ingress.extraTls[0].secretName=cea-tls" \
       "${gate_args[@]}" \
       --timeout 5m "$@"
-    # A changed values file alone does not roll the pod (the config lives in a
-    # Secret the chart mounts); restart so the new configuration is live.
-    $KUBECTL rollout restart "deployment/$release" -n "$NAMESPACE"
+    # A changed configuration.content rolls the pod by itself (the chart's
+    # checksum/config annotation), and a changed 403 page through gate_helm_args'
+    # annotation; the client and cookie secrets carry no checksum, so a full deploy
+    # restarts to pick up a rotated one. The scoped modes (OAUTH2_PROXY_NO_RESTART=1,
+    # IAM 4.2b) change only the gate and leave the restart to helm.
+    [[ "${OAUTH2_PROXY_NO_RESTART:-}" == 1 ]] || $KUBECTL rollout restart "deployment/$release" -n "$NAMESPACE"
+}
+
+#   pa_gate_state RELEASE HOST_VAR ALLOWED_GROUPS
+#
+# Whether a proxy's gate is what this run would deploy (IAM 4.2b): the live
+# allowed_groups in the release's ConfigMap (read as health-check iamartefacts reads
+# it), the live 403 page and the pod template's gate-page-sha256 against the page
+# ALLOWED_GROUPS renders. 0 equal, 1 drift (PA_DRIFT says what), 3 the release is
+# not deployed, 4 a read failed.
+pa_gate_state() {
+    local release="$1" host_var="$2" allowed="$3" cm live want page want_sha live_sha ann
+    PA_DRIFT=""
+    $KUBECTL get deployment "$release" -n "$NAMESPACE" >/dev/null 2>&1 || return 3
+    cm="$($KUBECTL get configmap "$release" -n "$NAMESPACE" -o json 2>/dev/null)" || return 4
+    live="$(pa_live_groups <<<"$cm" | cut -f2)"
+    want="$(grep -o '"[^"]*"' <<<"$allowed" | tr -d '"' | sort -u | paste -sd ' ')"
+    [[ "$live" == "$want" ]] || PA_DRIFT="allowed_groups [$live] → [$want]"
+    if [[ "$host_var" != PORTAL_DOMAIN ]]; then
+        page="$(gate_error_html "$host_var" "$allowed")" || return 4
+        want_sha="$(printf '%s\n' "$page" | sha256sum | cut -d' ' -f1)"
+        live_sha="$(gate_page_sha "$release")"
+        ann="$($KUBECTL get deployment "$release" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.metadata.annotations.medcea/gate-page-sha256}' 2>/dev/null)" || return 4
+        [[ "$live_sha" == "$want_sha" && "$ann" == "$want_sha" ]] \
+            || PA_DRIFT="${PA_DRIFT:+$PA_DRIFT; }403 page"
+    fi
+    [[ -z "$PA_DRIFT" ]]
+}
+
+#   pa_live_groups < CONFIGMAP_JSON
+#
+# RELEASE<TAB>roles (sorted, space-separated; "-" without allowed_groups) for each
+# oauth2-proxy ConfigMap (a single one or a List) on stdin. The one reader of a
+# proxy's live gate: health-check iamartefacts and the scoped modes both use it.
+pa_live_groups() {
+    python3 -c '
+import json, re, sys
+raw = sys.stdin.read().strip()
+d = json.loads(raw) if raw else {"items": []}
+for it in d.get("items") or ([d] if d.get("kind") == "ConfigMap" else []):
+    cfg = (it.get("data") or {}).get("oauth2_proxy.cfg") or ""
+    m = re.search(r"(?m)^\s*allowed_groups\s*=\s*(.*)$", cfg)
+    roles = " ".join(sorted(set(re.findall(r"\"([^\"]*)\"", m.group(1))))) if m else "-"
+    print(it["metadata"]["name"] + "\t" + (roles or "-"))'
+}
+
+#   app_gate MODE RELEASE CLIENT_ID CLIENT_SECRET COOKIE_SECRET HOST_VAR HOST VALUES_TEMPLATE [APP_SERVICE]
+#
+# An app's sign-in gate (the apps' _gate, IAM 4.2b). MODE full: what the app deploys
+# did before 4.2b, command for command — policy_groups, the 403 page, the values
+# file, deploy_oauth2_proxy (which restarts). MODE scoped (--gate-only): nothing when
+# pa_gate_state says equal or the release is not deployed; else the same, without
+# the restart, then rollout status. Prints one line per gate in scoped mode.
+# Leaves ALLOWED_GROUPS set, as the inline blocks did.
+app_gate() {
+    local mode="$1" release="$2" client="$3" secret="$4" cookie="$5" host_var="$6" host="$7" tpl="$8" svc="${9:-}"
+    local values rc=0
+    ALLOWED_GROUPS="$(policy_groups "$host_var")"
+    if [[ "$mode" == scoped ]]; then
+        pa_gate_state "$release" "$host_var" "$ALLOWED_GROUPS" || rc=$?
+        case $rc in
+            0) echo "  $host_var ($release): unchanged"; return 0 ;;
+            3) echo "  $host_var ($release): not deployed (the app's full deploy installs it)"; return 0 ;;
+            4) echo "ERROR: cannot read $release's live gate." >&2; return 1 ;;
+        esac
+    fi
+    # Bare calls, never `|| return`: the deploy scripts run under set -e, and a
+    # function called in a || list runs without it (a failed helm would go on).
+    values=$(mktemp "/tmp/$release-values-XXXXXX.yaml")
+    gate_error_page "$release" "$host_var" "$ALLOWED_GROUPS"
+    if [[ -n "$svc" ]]; then
+        APP_SERVICE="$svc" render "$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$values"
+    else
+        render "$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$values"
+    fi
+    if [[ "$mode" == scoped ]]; then
+        OAUTH2_PROXY_NO_RESTART=1 deploy_oauth2_proxy "$release" "$client" "$secret" "$cookie" "$host" "$values"
+        rm -f "$values"
+        $KUBECTL rollout status "deployment/$release" -n "$NAMESPACE" --timeout=4m
+        echo "  $host_var ($release): re-rendered ($PA_DRIFT)"
+    else
+        deploy_oauth2_proxy "$release" "$client" "$secret" "$cookie" "$host" "$values"
+        rm -f "$values"
+    fi
 }

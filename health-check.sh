@@ -624,18 +624,11 @@ for h, r in (model.load().data.get("network", {}).get("proxies") or {}).items():
     if [[ $rc -ne 0 ]]; then
         _record FAIL "$name" "cannot read the sign-in proxies' ConfigMaps: $(tail -n1 <<<"$cm" | cut -c1-160)"; return
     fi
-    while IFS=$'\t' read -r rel live; do [[ -n "$rel" ]] && LIVE[$rel]="$live"; done < <(python3 -c '
-import json, re, sys
-raw = sys.stdin.read().strip()
-d = json.loads(raw) if raw else {"items": []}
-for it in d.get("items") or ([d] if d.get("kind") == "ConfigMap" else []):
-    cfg = (it.get("data") or {}).get("oauth2_proxy.cfg") or ""
-    m = re.search(r"(?m)^\s*allowed_groups\s*=\s*(.*)$", cfg)
-    roles = " ".join(sorted(set(re.findall(r"\"([^\"]*)\"", m.group(1))))) if m else "-"
-    print(it["metadata"]["name"] + "\t" + (roles or "-"))' <<<"$cm" 2>/dev/null)
     REPO_ROOT="$SCRIPT_DIR"
     # shellcheck source=/dev/null
     source "$SCRIPT_DIR/infra/lib-oauth2-proxy.sh"
+    # pa_live_groups: the one reader of a proxy's live gate, shared with the scoped modes (IAM 4.2b)
+    while IFS=$'\t' read -r rel live; do [[ -n "$rel" ]] && LIVE[$rel]="$live"; done < <(pa_live_groups <<<"$cm" 2>/dev/null)
     while read -r host rel; do
         [[ -n "$host" ]] || continue
         if [[ -z "${LIVE[$rel]+x}" ]]; then absent=$((absent + 1)); continue; fi

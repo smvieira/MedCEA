@@ -241,6 +241,29 @@ MUTATIONS = {
 }
 
 
+# IAM 4.2b: deploy-infra's policy blocks live in infra/lib-policy-artefacts.sh (called at the
+# same place), and the apps' gates are app_gate calls (infra/lib-oauth2-proxy.sh). The source
+# checks read what runs: deploy-infra.sh with the library, and each app_gate call expanded into
+# the lines app_gate runs for it (AppGateTest pins that app_gate runs exactly those).
+APP_GATE = re.compile(r'app_gate "\$_MODE" (\S+) \S+ "[^"]*" "[^"]*" \\?\s*(\w+) "[^"]*" "([^"]+)"(?: (\S+))?')
+
+
+def read_wired(rel):
+    with open(os.path.join(REPO, rel)) as f:
+        src = f.read()
+    if rel == "deploy-infra.sh":
+        with open(os.path.join(REPO, "infra/lib-policy-artefacts.sh")) as f:
+            src += "\n" + f.read()
+
+    def expand(m):
+        release, host, tpl, svc = m.groups()
+        app = f"APP_SERVICE={svc} " if svc else ""
+        return (f'\nALLOWED_GROUPS="$(policy_groups {host})"\n'
+                f'gate_error_page {release} {host} "$ALLOWED_GROUPS"\n'
+                f'{app}render "{tpl}" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$values"')
+    return APP_GATE.sub(expand, src)
+
+
 class PolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -726,8 +749,7 @@ class MqttTest(unittest.TestCase):
         self.assertIn("containerPort: 8085", m)
 
     def test_infra_ships_mqtt_json(self):
-        with open(os.path.join(REPO, "deploy-infra.sh")) as fh:
-            infra = fh.read()
+        infra = read_wired("deploy-infra.sh")
         self.assertIn('--from-file=mqtt.json="$_IAM_DIR/mqtt.json"', infra)
         self.assertIn('"medcea/mqtt-digest=$IAM_MQTT_DIGEST"', infra)
         self.assertIn('"IAM_MQTT_PERSON": e["SW_MQTT"] == "true"', infra)
@@ -1070,8 +1092,7 @@ class GrantsTest(unittest.TestCase):
         self.assertGreaterEqual(len(pat.findall(down)), 2)
 
     def read(self, rel):
-        with open(os.path.join(REPO, rel)) as f:
-            return f.read()
+        return read_wired(rel)
 
 
 class WiringTest(unittest.TestCase):
@@ -1082,8 +1103,7 @@ class WiringTest(unittest.TestCase):
         cls.policy = model.load_defaults()
 
     def read(self, rel):
-        with open(os.path.join(REPO, rel)) as f:
-            return f.read()
+        return read_wired(rel)
 
     def test_own_unit_reads_are_scoped(self):
         # IAM 2.6: every monitor/scheduler handler of a route that grants own_unit calls
@@ -2030,8 +2050,7 @@ class ShortSessionsTest(unittest.TestCase):
     menu's Sign out in tests/test_access_api.py and tests/test_access_deploy.sh)."""
 
     def read(self, rel):
-        with open(os.path.join(REPO, rel)) as f:
-            return f.read()
+        return read_wired(rel)
 
     def test_grafana(self):
         import yaml
@@ -2683,6 +2702,26 @@ class Phase42aTest(unittest.TestCase):
         self.assertNotEqual(routes.compile(model.Policy(d))["digest"], a["digest"])
         # role_widening()'s comment carries the same digest whatever the label
         self.assertEqual(grants.policy_digest(self.policy, "break-glass:x"), a["digest"])
+
+
+class AppGateTest(unittest.TestCase):
+    """app_gate (IAM 4.2b) runs, for each call, the lines read_wired() expands it into"""
+
+    def test_app_gate_body(self):
+        with open(os.path.join(REPO, "infra/lib-oauth2-proxy.sh")) as f:
+            lib = f.read()
+        body = lib[lib.index("app_gate() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn('ALLOWED_GROUPS="$(policy_groups "$host_var")"', body)
+        self.assertIn('gate_error_page "$release" "$host_var" "$ALLOWED_GROUPS"', body)
+        self.assertEqual(len(re.findall(r'render "\$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE (APP_SERVICE )?ALLOWED_GROUPS > "\$values"', body)), 2)
+
+    def test_every_app_gate_call_is_expanded(self):
+        for script in ("apps/frontend/deploy.sh", "apps/monitor/deploy.sh", "apps/scheduler/deploy.sh",
+                       "apps/mqtt-explorer/deploy.sh"):
+            with open(os.path.join(REPO, script)) as f:
+                raw = f.read()
+            self.assertEqual(raw.count("app_gate "), len(APP_GATE.findall(raw)), script)
 
 
 if __name__ == "__main__":

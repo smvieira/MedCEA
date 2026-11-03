@@ -184,7 +184,9 @@ SELECT '[]' AS reverted_unreviewed \\gset
   'audit_findings', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(a)) FROM iam_policy.audit_versions() a), '[]'),
   'chain_ok', (SELECT vc.ok FROM iam_policy.verify_chain() vc),
   'apply_deferred_open', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('event_id', h.event_id, 'at', h.at)
-        ORDER BY h.event_id) FROM iam_policy.history h WHERE h.event = 'apply_deferred' AND h.version = ap.version), '[]'),
+        ORDER BY h.event_id) FROM iam_policy.history h WHERE h.event = 'apply_deferred' AND h.version = ap.version
+          AND h.event_id > coalesce((SELECT max(c.event_id) FROM iam_policy.history c
+                                      WHERE c.event IN ('applied', 'bootstrap_applied') AND c.version = ap.version), 0)), '[]'),
   'waivers_review', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('id', w.id, 'review_by', w.review_by)
         ORDER BY w.id COLLATE \"C\") FROM iam_policy.waiver w WHERE w.version = ap.version), '[]'),
   'last_events', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(x) ORDER BY x.event_id DESC)
@@ -230,7 +232,7 @@ SELECT (pg_catalog.jsonb_build_object(
                  FROM iam_policy.waiver w WHERE w.version = ap.version), '[]'),
   'last_apply_event', (SELECT pg_catalog.jsonb_build_object('event', h.event, 'event_id', h.event_id, 'at', h.at)
                  FROM iam_policy.history h WHERE h.version = ap.version
-                  AND h.event IN ('apply_started', 'applied', 'bootstrap_applied', 'apply_reverted', 'partial_apply')
+                  AND h.event IN ('apply_started', 'applied', 'bootstrap_applied', 'apply_reverted', 'partial_apply', 'apply_deferred')
                  ORDER BY h.event_id DESC LIMIT 1),
   'break_glass_open', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('event_id', b.event_id, 'at', b.at,
                  'reason', b.payload ->> 'reason', 'components', b.payload -> 'components', 'open', b.open) ORDER BY b.event_id)

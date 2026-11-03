@@ -1504,10 +1504,26 @@ a_policy_bootstrap() {
 a_policy_resume() {
     ask_policy_by
     CMD=(env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --resume --by "$BY_USER")
-    EFFECT="finishes an apply that was committed but did not record its end: rewrites state/policy-applied.yaml, checks the grants, records the end (no database change to the version itself)"
+    EFFECT="finishes an apply that was committed but did not record its end, or one with a deferred target: rewrites state/policy-applied.yaml, re-renders what drifted (every scoped mode), checks the grants, records the end (no database change to the version itself)"
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Says 'nothing to resume' and exits 0 when the last apply recorded its end."
            "Your [y/N] here is apply.sh's confirmation (MEDCEA_CONFIRMED=1).")
+    plan_run
+}
+# IAM 4.2b (design §14.5): every scoped mode, each re-rendering only what drifted.
+a_policy_scoped() {
+    CMD=(./deploy-infra.sh --policy-only "&&" ./infra/deploy-workbench.sh --policy-only)
+    local c
+    for c in access edge-wizard frontend iam monitor mqtt-explorer scheduler; do
+        CMD+=("&&" "./apps/$c/deploy.sh" --gate-only)
+    done
+    EFFECT="only the policy artefacts that differ from the applied policy's compile (route table, NetworkPolicies, Node-RED's rights, Grafana's roles, pgAdmin's claims, every sign-in gate, the workbench's gate and hops, the wizard's roles); unchanged ones are left alone"
+    LOCK="yes, held by the guide for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Each prints one line per target: unchanged, re-rendered or not deployed. On a platform that matches the policy nothing changes and nothing restarts."
+           "A drifted sign-in gate rolls only its proxy. Grafana and pgAdmin, when their roles drifted, redeploy their whole section (they restart; pgAdmin's sessions end)."
+           "The onboarding wizard restarts only when its roles changed, and never during an onboarding run: then it says deferred and the chain stops (exit 4); run this again when the run has finished."
+           "Use it when ./health-check.sh's Policy artefacts names a stale target. ./apps/iam/apply.sh --resume runs the same modes itself.")
     plan_run
 }
 a_policy_export() {
@@ -1932,6 +1948,7 @@ AREA_POLICY=(
     "a_policy_resume|Finish an interrupted apply|./apps/iam/apply.sh --resume: the host file, the checks and the record of a committed apply."
     "a_policy_export|Print the applied policy as defaults.yaml|cli.py export-applied (printed; never written)."
     "a_policy_break_glass|How to use policy break-glass (shows the steps)|Shown, never run: what it changes, what it never bypasses, how it ends."
+    "a_policy_scoped|Re-render the policy artefacts (scoped)|Every --policy-only/--gate-only, under one lock: only what drifted from the applied policy."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -1947,7 +1964,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions and break-glass, and the IAM 4.1 and 4.2a deploys."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, and the IAM 4.1 and 4.2a deploys."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

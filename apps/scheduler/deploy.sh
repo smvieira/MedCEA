@@ -14,8 +14,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/scheduler/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-scheduler-deploy   # logs/app-scheduler-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
 
 if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2
@@ -39,6 +48,17 @@ fi
 
 GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 log() { echo -e "${GREEN}[scheduler]${NC} $*"; }
+
+# The sign-in gate (IAM 4.2b: shared by the full deploy and --gate-only).
+_gate() {
+    app_gate "$_MODE" scheduler-oauth2-proxy scheduler "${SCHEDULER_CLIENT_SECRET:-}" "${SCHEDULER_COOKIE_SECRET:-}" \
+        SCHEDULER_DOMAIN "$SCHEDULER_DOMAIN" "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" scheduler
+}
+if [[ "$_MODE" == scoped ]]; then
+    _gate
+    policy_source_finish "$NAMESPACE" scheduler
+    exit 0
+fi
 
 # =============================================================================
 # 1. Database schema — owned by apps/database/deploy.sh (migration 008b)
@@ -136,12 +156,7 @@ $KUBECTL rollout status deployment/scheduler -n "$NAMESPACE" --timeout=3m
 # 5b. Sign-in: oauth2-proxy owns $SCHEDULER_DOMAIN (any platform role)
 # =============================================================================
 log "Deploying scheduler-oauth2-proxy (Keycloak SSO)..."
-_VALUES=$(mktemp /tmp/scheduler-oauth2proxy-values-XXXXXX.yaml)
-ALLOWED_GROUPS="$(policy_groups SCHEDULER_DOMAIN)"
-gate_error_page scheduler-oauth2-proxy SCHEDULER_DOMAIN "$ALLOWED_GROUPS"
-APP_SERVICE=scheduler render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_VALUES"
-deploy_oauth2_proxy scheduler-oauth2-proxy scheduler "${SCHEDULER_CLIENT_SECRET:-}" "${SCHEDULER_COOKIE_SECRET:-}" "$SCHEDULER_DOMAIN" "$_VALUES"
-rm -f "$_VALUES"
+_gate
 $KUBECTL rollout status deployment/scheduler-oauth2-proxy -n "$NAMESPACE" --timeout=4m
 wait_for_http "https://$SCHEDULER_DOMAIN/" 120 "Scheduler" || exit 1
 

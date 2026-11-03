@@ -52,9 +52,12 @@ tested without a cluster (tests/test_apply.py), as units_bootstrap.py is for uni
         STATUS|detail lines of health's iampolicy (design §14.4.14)
   status --state F [--gate G --gate-rc N] [--live-routes D] [--live-mqtt D]
         apply.sh --status's report (read-only)
-  owners [--deploys]
+  owners [--deploys | --scoped]
         HOST_OWNER and the other targets' owning commands (§6.7); --deploys: the full deploys
-        that re-render them, in order (4.2a has no scoped modes yet: --resume's advice)
+        that re-render them, in order; --scoped: every scoped mode once, in the order
+        apply.sh --resume runs them (IAM 4.2b)
+  deferred-record --state F --target T --reason R --command C --out SQL
+        the apply_deferred record (system:apply) of a target --resume could not re-render (4.2b)
 
 Not in 4.2a: the JWS verification, the eligibility rule and the version-widening check of an
 approver's person (design §6.1 step 4 items 1-4: IAM 4.5).
@@ -78,7 +81,8 @@ sys.path.insert(0, HERE)
 from compiler import explain, model, source  # noqa: E402
 
 # Host → the command that owns its gate (design §6.7). The scoped modes (--policy-only,
-# --gate-only) arrive with 4.2b; in 4.2a apply.sh --resume prints the full deploys.
+# --gate-only, IAM 4.2b) re-render only what drifted; apply.sh --resume runs them all
+# (owners --scoped), each a no-op where nothing drifted.
 HOST_OWNER = {
     "PORTAL_DOMAIN": "./deploy-infra.sh --policy-only",
     "NODE_RED_DOMAIN": "./deploy-infra.sh --policy-only",
@@ -410,8 +414,8 @@ def bundle_sql(state, by_sub, by_person, log, commit=None, digests=None, data=No
 
 
 def record_sql(event, payload, actor="system:apply"):
-    if event not in ("bootstrap_applied", "applied"):
-        die(f"apply-record records bootstrap_applied or applied, not {event!r}")
+    if event not in ("bootstrap_applied", "applied", "apply_deferred"):
+        die(f"apply-record records bootstrap_applied, applied or apply_deferred, not {event!r}")
     if actor not in ACTORS:
         die(f"bad actor {actor!r}")
     return "\n".join([
@@ -432,6 +436,26 @@ def apply_payload(state, by_sub, by_person, log, commit, chain_head, digests, re
             "reason": (f"version {state['version']} ({state['kind']}): its apply finished by --resume" if resumed
                        else f"version {state['version']}: the factory policy, bootstrapped"),
             **({"resumed": True} if resumed else {})}
+
+
+def deferred_payload(state, target, reason, command):
+    """apply_deferred (IAM 4.2b): a target apply.sh --resume could not re-render now; open
+    until the version's next applied/bootstrap_applied (a later --resume)."""
+    return {"version": int(state["version"]), "target": target, "reason": reason, "command": command,
+            "os_user": os_user()}
+
+
+def scoped_commands():
+    """Every scoped mode, once, in the order apply.sh --resume runs them: deploy-infra's,
+    the workbench's, then the apps' (alphabetical). grants has none (the bundle applies it)."""
+    seen, out = set(), []
+    cmds = list(TARGET_OWNER.values()) + list(HOST_OWNER.values())
+    rank = lambda c: (0 if c.startswith("./deploy-infra") else 1 if c.startswith("./infra/") else 2, c)
+    for c in sorted(cmds, key=rank):
+        if (c.endswith("--policy-only") or c.endswith("--gate-only")) and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 # ── the targets (design §14.4.10) ──────────────────────────────────────────────────────
@@ -769,7 +793,8 @@ def health(state, host_file, holders="", policy_port="absent", today=None):
         if (o.get("age_days") or 0) > 7:
             out.append(("WARN", f"version {o.get('version')} is {o.get('status')} for {o.get('age_days')} days"))
     if state.get("apply_deferred_open"):
-        out.append(("WARN", f"{len(state['apply_deferred_open'])} deferred apply target(s) open"))
+        out.append(("WARN", f"{len(state['apply_deferred_open'])} deferred apply target(s) open "
+                            "(./apps/iam/apply.sh --resume --by <you> re-renders them)"))
     for r in state.get("reverted_unreviewed") or []:
         # §14.4.14: a pure narrowing access-api applied while the reverted version was live
         # stays applied after the revert; qa reviews it in the User Manager's Decisions tab
@@ -936,6 +961,13 @@ def main(argv=None):
     c.add_argument("--live-mqtt")
     c = sub.add_parser("owners")
     c.add_argument("--deploys", action="store_true")
+    c.add_argument("--scoped", action="store_true")
+    c = sub.add_parser("deferred-record")
+    c.add_argument("--state", required=True)
+    c.add_argument("--target", required=True)
+    c.add_argument("--reason", required=True)
+    c.add_argument("--command", required=True)
+    c.add_argument("--out", required=True)
     a = ap.parse_args(argv)
 
     try:
@@ -985,6 +1017,11 @@ def main(argv=None):
             with open(a.out, "w", encoding="utf-8") as f:
                 f.write(record_sql(a.event, payload))
             return 0
+        if a.cmd == "deferred-record":
+            with open(a.out, "w", encoding="utf-8") as f:
+                f.write(record_sql("apply_deferred", deferred_payload(load_json(a.state), a.target, a.reason,
+                                                                      a.command)))
+            return 0
         if a.cmd == "bootstrap-targets":
             return bootstrap_targets(a.out, a.source == "host", a.commit, a.state)
         if a.cmd == "health":
@@ -998,6 +1035,10 @@ def main(argv=None):
         if a.cmd == "owners":
             if a.deploys:
                 for cmd in full_deploys():
+                    print(cmd)
+                return 0
+            if a.scoped:
+                for cmd in scoped_commands():
                     print(cmd)
                 return 0
             for k, v in sorted(HOST_OWNER.items()):

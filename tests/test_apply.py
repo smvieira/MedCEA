@@ -308,6 +308,16 @@ class Tree:
         with open(os.path.join(self.root, "config.env"), "w") as f:
             f.write(CONFIG)
         self.fd = os.path.join(self.root, ".fake")
+        # the scoped modes --resume runs (IAM 4.2b): stubs that log their argv to .fake/scoped.log
+        # (the iam deploy is the real one: its --gate-only says "no gate before slice 4.3")
+        for rel in ("deploy-infra.sh", "infra/deploy-workbench.sh") + tuple(
+                f"apps/{c}/deploy.sh" for c in ("access", "edge-wizard", "frontend", "monitor", "mqtt-explorer",
+                                                 "scheduler")):
+            dst = os.path.join(self.root, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "w") as f:
+                f.write(f'#!/bin/sh\necho "{rel} $*" >> "$(dirname "$0")/{"../" * rel.count("/")}.fake/scoped.log"\nexit 0\n')
+            os.chmod(dst, 0o755)
         self.bin = os.path.join(self.fd, "bin")
         os.makedirs(self.bin)
         fake = os.path.join(self.fd, "fake.py")
@@ -735,6 +745,12 @@ class AfterCommit(unittest.TestCase):
             payload = json.loads(b64var(f.read(), "payload"))
         self.assertEqual(payload["artefacts"]["routes"], V1)
         self.assertEqual(self.t.read_state()["last_apply_event"]["event"], "bootstrap_applied")
+        # step 8 (IAM 4.2b): every scoped mode, deploy-infra's first, the workbench's next
+        with open(os.path.join(self.t.fd, "scoped.log")) as f:
+            ran = f.read().splitlines()
+        self.assertEqual(ran[:2], ["deploy-infra.sh --policy-only", "infra/deploy-workbench.sh --policy-only"])
+        self.assertEqual(len(ran), 8)
+        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[2:]), ran)
 
     def test_a_signal_after_the_commit_is_exit_3(self):
         # the trap knows the phase: after the COMMIT an interrupt is 3 and names --resume

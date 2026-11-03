@@ -39,8 +39,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/access/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-access-deploy   # logs/app-access-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
 
 if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2
@@ -138,6 +147,115 @@ _psql() {
     $KUBECTL exec -i -n "$NAMESPACE" "$PG_POD" -- \
         env PGPASSWORD="$POSTGRES_PASS" psql -X -q -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" -d "$POSTGRES_DB" "$@"
 }
+
+# Steps 5 and 6, the proof and the User Manager's gate (IAM 4.2b: a function, shared by
+# the full deploy and --gate-only, which runs the proof against the pods already Ready
+# and, as the full deploy, fails closed: no proof → the admin-only gate and exit 1).
+_gate() {
+# =============================================================================
+# 5. Proof: every Ready pod enforces
+# =============================================================================
+# /healthz on the Admin port is answered before check() and reports the code's
+# version and that it enforces always. A Ready pod answering anything else (an old
+# pod still terminating) is waited for; the Ready pods are listed again each round.
+_PROVE='
+import json, sys, urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=5) as r:
+        d = json.load(r)
+except Exception as e:
+    print("unreachable: %s" % e); sys.exit(1)
+ok = d.get("ok") is True and d.get("access_version") == "2.7" and d.get("enforce_always") is True
+print("enforce_always" if ok else "answered %s" % json.dumps(d)[:200]); sys.exit(0 if ok else 1)'
+_PROOF_DETAIL=""
+_prove_all() {   # → 0 when at least one pod is Ready and every Ready pod proves it
+    local listing line p ready out n=0 bad=() pods=()
+    listing="$($KUBECTL get pods -n "$NAMESPACE" -l app=access \
+        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>&1)" \
+        || { _PROOF_DETAIL="cannot list the access pods: ${listing:0:120}"; return 1; }
+    mapfile -t pods <<<"$listing"
+    for line in "${pods[@]}"; do
+        read -r p ready <<<"$line"
+        [[ -n "$p" && "$ready" == True ]] || continue
+        n=$((n + 1))
+        out="$($KUBECTL exec -n "$NAMESPACE" "$p" -c api -- python3 -c "$_PROVE" 2>&1)" || bad+=("$p: ${out:0:160}")
+    done
+    if [[ $n -eq 0 ]]; then _PROOF_DETAIL="no Ready access pod"; return 1; fi
+    _PROOF_DETAIL="${bad[*]:-}"
+    [[ ${#bad[@]} -eq 0 ]]
+}
+log "Proving every Ready access pod enforces its route table (up to ${ACCESS_PROOF_TIMEOUT} s)..."
+_ENFORCING_PROVEN=0
+_DEADLINE=$((SECONDS + ACCESS_PROOF_TIMEOUT))
+while :; do
+    if _prove_all; then _ENFORCING_PROVEN=1; break; fi
+    (( SECONDS < _DEADLINE )) || break
+    sleep 3
+done
+if [[ $_ENFORCING_PROVEN == 1 ]]; then
+    log "Every Ready access pod answers /healthz with enforce_always."
+else
+    warn "Not every Ready access pod proved it enforces: ${_PROOF_DETAIL}"
+fi
+
+# =============================================================================
+# 6. oauth2-proxy for the User Manager
+# =============================================================================
+# Widened to the compiled roles (admin, qa, qp, auditor) only after step 5. Under
+# IAM_GATES=false, or without the proof, realm role admin alone: this host's
+# pre-policy list, never the portal's (policy_groups' IAM_GATES=false list).
+if [[ "${IAM_GATES:-true}" == false || "$_ENFORCING_PROVEN" != 1 ]]; then
+    ALLOWED_GROUPS='["admin"]'
+else
+    ALLOWED_GROUPS="$_COMPILED_GROUPS"
+fi
+log "Deploying access-oauth2-proxy (admits $ALLOWED_GROUPS)..."
+_AOP_VALUES=$(mktemp /tmp/access-oauth2proxy-values-XXXXXX.yaml)
+render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_AOP_VALUES"
+# The 403 page names exactly the roles this gate admits.
+gate_error_page access-oauth2-proxy ACCESS_DOMAIN "$ALLOWED_GROUPS"
+mapfile -t _AOP_GATE_ARGS < <(gate_helm_args access-oauth2-proxy)
+helm_dockerhub_login   # the chart pull runs as this process's identity (infra/lib-oauth2-proxy.sh)
+$MK8S helm3 upgrade --install access-oauth2-proxy \
+  oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
+  --version 8.0.2 \
+  --namespace "$NAMESPACE" \
+  --values "$REPO_ROOT/k8s/oauth2-proxy/values-common.yaml" \
+  --values "$_AOP_VALUES" \
+  --set configuration.clientID="access" \
+  --set configuration.clientSecret="$ACCESS_CLIENT_SECRET" \
+  --set configuration.cookieSecret="$ACCESS_COOKIE_SECRET" \
+  --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
+  --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
+  --set ingress.hostname="$ACCESS_DOMAIN" \
+  --set "ingress.extraTls[0].hosts[0]=$ACCESS_DOMAIN" \
+  --set "ingress.extraTls[0].secretName=cea-tls" \
+  "${_AOP_GATE_ARGS[@]}" \
+  --timeout 5m
+rm -f "$_AOP_VALUES"
+[[ "$_MODE" == scoped ]] || $KUBECTL rollout restart deployment/access-oauth2-proxy -n "$NAMESPACE"
+$KUBECTL rollout status deployment/access-oauth2-proxy -n "$NAMESPACE" --timeout=4m
+
+if [[ $_ENFORCING_PROVEN != 1 ]]; then
+    die "the User Manager's gate stays admin-only: not every access pod proved it enforces (${_PROOF_DETAIL}).
+       Check the pod (kubectl logs deployment/access -n $NAMESPACE) and run this script again."
+fi
+
+}
+if [[ "$_MODE" == scoped ]]; then
+    _WANT="$_COMPILED_GROUPS"   # ["admin"] under IAM_GATES=false (above)
+    _rc=0
+    pa_gate_state access-oauth2-proxy ACCESS_DOMAIN "$_WANT" || _rc=$?
+    case $_rc in
+        0) log "ACCESS_DOMAIN (access-oauth2-proxy): unchanged" ;;
+        3) log "ACCESS_DOMAIN (access-oauth2-proxy): not deployed (./apps/access/deploy.sh installs it)" ;;
+        4) die "cannot read access-oauth2-proxy's live gate" ;;
+        *) _gate
+           log "ACCESS_DOMAIN (access-oauth2-proxy): re-rendered ($PA_DRIFT)" ;;
+    esac
+    policy_source_finish "$NAMESPACE" access
+    exit 0
+fi
 
 # =============================================================================
 # 1. Database: schema iam and role access_svc
@@ -270,94 +388,7 @@ $KUBECTL rollout restart deployment/access -n "$NAMESPACE"
 log "Waiting for the access rollout..."
 $KUBECTL rollout status deployment/access -n "$NAMESPACE" --timeout=4m
 
-# =============================================================================
-# 5. Proof: every Ready pod enforces
-# =============================================================================
-# /healthz on the Admin port is answered before check() and reports the code's
-# version and that it enforces always. A Ready pod answering anything else (an old
-# pod still terminating) is waited for; the Ready pods are listed again each round.
-_PROVE='
-import json, sys, urllib.request
-try:
-    with urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=5) as r:
-        d = json.load(r)
-except Exception as e:
-    print("unreachable: %s" % e); sys.exit(1)
-ok = d.get("ok") is True and d.get("access_version") == "2.7" and d.get("enforce_always") is True
-print("enforce_always" if ok else "answered %s" % json.dumps(d)[:200]); sys.exit(0 if ok else 1)'
-_PROOF_DETAIL=""
-_prove_all() {   # → 0 when at least one pod is Ready and every Ready pod proves it
-    local listing line p ready out n=0 bad=() pods=()
-    listing="$($KUBECTL get pods -n "$NAMESPACE" -l app=access \
-        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>&1)" \
-        || { _PROOF_DETAIL="cannot list the access pods: ${listing:0:120}"; return 1; }
-    mapfile -t pods <<<"$listing"
-    for line in "${pods[@]}"; do
-        read -r p ready <<<"$line"
-        [[ -n "$p" && "$ready" == True ]] || continue
-        n=$((n + 1))
-        out="$($KUBECTL exec -n "$NAMESPACE" "$p" -c api -- python3 -c "$_PROVE" 2>&1)" || bad+=("$p: ${out:0:160}")
-    done
-    if [[ $n -eq 0 ]]; then _PROOF_DETAIL="no Ready access pod"; return 1; fi
-    _PROOF_DETAIL="${bad[*]:-}"
-    [[ ${#bad[@]} -eq 0 ]]
-}
-log "Proving every Ready access pod enforces its route table (up to ${ACCESS_PROOF_TIMEOUT} s)..."
-_ENFORCING_PROVEN=0
-_DEADLINE=$((SECONDS + ACCESS_PROOF_TIMEOUT))
-while :; do
-    if _prove_all; then _ENFORCING_PROVEN=1; break; fi
-    (( SECONDS < _DEADLINE )) || break
-    sleep 3
-done
-if [[ $_ENFORCING_PROVEN == 1 ]]; then
-    log "Every Ready access pod answers /healthz with enforce_always."
-else
-    warn "Not every Ready access pod proved it enforces: ${_PROOF_DETAIL}"
-fi
-
-# =============================================================================
-# 6. oauth2-proxy for the User Manager
-# =============================================================================
-# Widened to the compiled roles (admin, qa, qp, auditor) only after step 5. Under
-# IAM_GATES=false, or without the proof, realm role admin alone: this host's
-# pre-policy list, never the portal's (policy_groups' IAM_GATES=false list).
-if [[ "${IAM_GATES:-true}" == false || "$_ENFORCING_PROVEN" != 1 ]]; then
-    ALLOWED_GROUPS='["admin"]'
-else
-    ALLOWED_GROUPS="$_COMPILED_GROUPS"
-fi
-log "Deploying access-oauth2-proxy (admits $ALLOWED_GROUPS)..."
-_AOP_VALUES=$(mktemp /tmp/access-oauth2proxy-values-XXXXXX.yaml)
-render "$SCRIPT_DIR/k8s/oauth2-proxy-values.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_AOP_VALUES"
-# The 403 page names exactly the roles this gate admits.
-gate_error_page access-oauth2-proxy ACCESS_DOMAIN "$ALLOWED_GROUPS"
-mapfile -t _AOP_GATE_ARGS < <(gate_helm_args access-oauth2-proxy)
-helm_dockerhub_login   # the chart pull runs as this process's identity (infra/lib-oauth2-proxy.sh)
-$MK8S helm3 upgrade --install access-oauth2-proxy \
-  oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
-  --version 8.0.2 \
-  --namespace "$NAMESPACE" \
-  --values "$REPO_ROOT/k8s/oauth2-proxy/values-common.yaml" \
-  --values "$_AOP_VALUES" \
-  --set configuration.clientID="access" \
-  --set configuration.clientSecret="$ACCESS_CLIENT_SECRET" \
-  --set configuration.cookieSecret="$ACCESS_COOKIE_SECRET" \
-  --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
-  --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
-  --set ingress.hostname="$ACCESS_DOMAIN" \
-  --set "ingress.extraTls[0].hosts[0]=$ACCESS_DOMAIN" \
-  --set "ingress.extraTls[0].secretName=cea-tls" \
-  "${_AOP_GATE_ARGS[@]}" \
-  --timeout 5m
-rm -f "$_AOP_VALUES"
-$KUBECTL rollout restart deployment/access-oauth2-proxy -n "$NAMESPACE"
-$KUBECTL rollout status deployment/access-oauth2-proxy -n "$NAMESPACE" --timeout=4m
-
-if [[ $_ENFORCING_PROVEN != 1 ]]; then
-    die "the User Manager's gate stays admin-only: not every access pod proved it enforces (${_PROOF_DETAIL}).
-       Check the pod (kubectl logs deployment/access -n $NAMESPACE) and run this script again."
-fi
+_gate
 
 # =============================================================================
 # 7. Portal card

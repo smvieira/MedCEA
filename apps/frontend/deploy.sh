@@ -12,8 +12,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --gate-only (IAM 4.2b): only the sign-in gate, and only when it drifted from the
+# applied policy; no restart, no other apply. Anything else is refused.
+_MODE=full
+case "$*" in
+    "") ;;
+    --gate-only) _MODE=scoped ;;
+    *) echo "ERROR: unknown arguments: $* (usage: ./apps/frontend/deploy.sh [--gate-only])" >&2; exit 2 ;;
+esac
 source "$REPO_ROOT/infra/lib-log.sh"; medcea_log app-frontend-deploy   # logs/app-frontend-deploy-<ts>.log, unless a parent logs
 source "$REPO_ROOT/infra/lib-lock.sh"; medcea_lock   # one deploy at a time; inherited from deploy-apps.sh
+[[ "$_MODE" == scoped ]] && echo "mode: gate-only"
 
 if [[ ! -f "$REPO_ROOT/config.env" ]]; then
     echo "ERROR: config.env not found at $REPO_ROOT/config.env" >&2
@@ -36,6 +45,22 @@ PORTAL_URL="https://${PORTAL_DOMAIN}"
 
 GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
 log() { echo -e "${GREEN}[frontend]${NC} $*"; }
+
+# The two sign-in gates (IAM 4.2b: shared by the full deploy and --gate-only).
+_gate() {   # config | dbmgmt
+    case "$1" in
+        config) app_gate "$_MODE" config-oauth2-proxy config "${CONFIG_OAUTH2_PROXY_SECRET:-}" "${CONFIG_COOKIE_SECRET:-}" \
+                    CONFIG_DOMAIN "$CONFIG_DOMAIN" "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" config-ui ;;
+        dbmgmt) app_gate "$_MODE" dbmgmt-oauth2-proxy dbmgmt "${DBMGMT_CLIENT_SECRET:-}" "${DBMGMT_COOKIE_SECRET:-}" \
+                    DBMGMT_DOMAIN "$DBMGMT_DOMAIN" "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" dbmgmt ;;
+    esac
+}
+if [[ "$_MODE" == scoped ]]; then
+    _gate config
+    _gate dbmgmt
+    policy_source_finish "$NAMESPACE" frontend
+    exit 0
+fi
 
 
 # =============================================================================
@@ -177,12 +202,7 @@ $KUBECTL delete ingress config-ui -n "$NAMESPACE" --ignore-not-found
 # four platform roles, the same rule as the portal. Before, any Keycloak
 # account got in, role or not. upstreams live inside configuration.content
 # there: the content block overrides the configuration.upstreams helm value.
-_CFG_VALUES=$(mktemp /tmp/config-oauth2proxy-values-XXXXXX.yaml)
-ALLOWED_GROUPS="$(policy_groups CONFIG_DOMAIN)"
-gate_error_page config-oauth2-proxy CONFIG_DOMAIN "$ALLOWED_GROUPS"
-APP_SERVICE=config-ui render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_CFG_VALUES"
-deploy_oauth2_proxy config-oauth2-proxy config "$CONFIG_OAUTH2_PROXY_SECRET" "$CONFIG_COOKIE_SECRET" "$CONFIG_DOMAIN" "$_CFG_VALUES"
-rm -f "$_CFG_VALUES"
+_gate config
 
 # =============================================================================
 # 7. Wait for rollouts
@@ -241,12 +261,7 @@ $KUBECTL rollout restart deployment/dbmgmt -n "$NAMESPACE"
 $KUBECTL rollout status deployment/dbmgmt -n "$NAMESPACE" --timeout=120s
 
 log "Deploying dbmgmt-oauth2-proxy (Keycloak SSO)..."
-_DB_VALUES=$(mktemp /tmp/dbmgmt-oauth2proxy-values-XXXXXX.yaml)
-ALLOWED_GROUPS="$(policy_groups DBMGMT_DOMAIN)"
-gate_error_page dbmgmt-oauth2-proxy DBMGMT_DOMAIN "$ALLOWED_GROUPS"
-APP_SERVICE=dbmgmt render "$REPO_ROOT/k8s/oauth2-proxy/values-app.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$_DB_VALUES"
-deploy_oauth2_proxy dbmgmt-oauth2-proxy dbmgmt "${DBMGMT_CLIENT_SECRET:-}" "${DBMGMT_COOKIE_SECRET:-}" "$DBMGMT_DOMAIN" "$_DB_VALUES"
-rm -f "$_DB_VALUES"
+_gate dbmgmt
 $KUBECTL rollout status deployment/dbmgmt-oauth2-proxy -n "$NAMESPACE" --timeout=4m
 
 # =============================================================================

@@ -84,7 +84,7 @@ _print_banner() {
 # =============================================================================
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "${GREEN}Usage:${NC}"
-    echo "  ./deploy-infra.sh [--help|--configure|--reset [--secrets]|--uninstall]"
+    echo "  ./deploy-infra.sh [--help|--configure|--reset [--secrets]|--uninstall|--policy-only]"
     echo ""
     echo -e "${GREEN}Description:${NC}"
     echo "  Deploys the full MedCEA IoT stack onto MicroK8s:"
@@ -113,8 +113,29 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "  ./deploy-infra.sh --reset --secrets  # ...and blank generated credentials"
     echo "  ./deploy-infra.sh --uninstall        # remove MicroK8s entirely (slow)"
     echo "  Removes Juju, MicroK8s, and all associated data. Prompts for confirmation."
+    echo ""
+    echo -e "${GREEN}Policy artefacts only (IAM 4.2b):${NC}"
+    echo "  ./deploy-infra.sh --policy-only      # re-render only what drifted from the applied policy"
+    echo "  The route table, NetworkPolicies, Node-RED's rights, Grafana's roles, pgAdmin's"
+    echo "  claims and the Node-RED and portal gates: each is compared with its compile and"
+    echo "  left alone when equal. No restart, no Keycloak or database change (Grafana and"
+    echo "  pgAdmin re-render their whole section on a drift). Logs to logs/deploy-infra-policy-*."
     exit 0
 fi
+
+# Only the options above: an unknown one (a typo such as --polcy-only) used to run a
+# full deploy (IAM 4.2b).
+case "${1:-}" in
+    ""|--configure|--uninstall|--policy-only) [[ $# -le 1 ]] ;;
+    --reset) [[ $# -eq 1 || ( $# -eq 2 && "$2" == --secrets ) ]] ;;
+    *) false ;;
+esac || {
+    echo -e "${RED}ERROR: unknown arguments: $*${NC}" >&2
+    echo "  Usage: ./deploy-infra.sh [--help|--configure|--reset [--secrets]|--uninstall|--policy-only]" >&2
+    exit 2
+}
+# The scoped mode is its own entry script (its own log, lock and short flow).
+[[ "${1:-}" == --policy-only ]] && exec "$SCRIPT_DIR/infra/deploy-policy.sh"
 
 # One deploy at a time — before --uninstall/--reset and before configure.sh
 # (infra/lib-lock.sh).
@@ -295,6 +316,8 @@ set -e
 # so a cold or broken PostgreSQL can always be repaired by this script; nothing that
 # compiles the policy runs before that full read.
 source "$SCRIPT_DIR/infra/lib-policy-source.sh"
+# The compiled artefacts' blocks (IAM 4.2b): moved there unchanged, shared with --policy-only.
+source "$SCRIPT_DIR/infra/lib-policy-artefacts.sh"
 
 # Docker Hub credentials were asked for by infra/configure.sh if they were empty.
 DOCKERHUB_PASS="$DOCKERHUB_PAT"
@@ -564,100 +587,10 @@ $MK8S helm3 upgrade --install rdbms \
 # Grafana, Keycloak's gates, the proxies, ...) reads what it settled.
 policy_source_init "$NAMESPACE" || exit $?
 
-# The access policy's check (codeplan IAM plan 1.1/1.2): ConfigMap medcea-iam-lib,
-# mounted by every service at /iam/ — the route table, the check library
-# (apps/iam/lib/medcea_iam.py) and its settings (issuer, audience, IAM_ENFORCE).
-# Here, because this script runs before every app component. The table is
-# compiled by the source rule (infra/lib-policy-source.sh, compiler/source.py): the
-# applied version once IAM Phase 4 slice 4.2a writes one, defaults.yaml until then. A policy that fails its invariants stops the deploy
-# rather than shipping a table — unless IAM_GATES=false (the rollback), which
-# leaves the ConfigMap as it is. Services re-read the mount when the kubelet
-# updates it (about a minute), so a change here needs no restart.
-echo -e "\n${GREEN}[IAM] Access check (ConfigMap medcea-iam-lib)...${NC}"
-# mqtt.json (IAM 3.5, compiler/mqtt.py): the MQTT Explorer's per-person rows, read by
-# iam-api; its own key and annotation, so routes.json's digest does not move with it.
-if IAM_ROUTES_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile routes)" \
-   && IAM_MQTT_JSON="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile mqtt)"; then
-    IAM_ROUTES_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_ROUTES_JSON")"
-    IAM_MQTT_DIGEST="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' <<<"$IAM_MQTT_JSON")"
-    _IAM_DIR="$(mktemp -d)"
-    printf '%s\n' "$IAM_ROUTES_JSON" > "$_IAM_DIR/routes.json"
-    printf '%s\n' "$IAM_MQTT_JSON" > "$_IAM_DIR/mqtt.json"
-    # switches: the other IAM flags as this run set them, with the time, for the
-    # quarterly access review's record (IAM 2.7) — labelled there "as of
-    # deploy-infra <written_at>". enforce is read live from this file by every
-    # service, and IAM_MQTT_PERSON by iam-api (IAM 3.5: no app redeploy for it).
-    ISSUER="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" ENFORCE="${IAM_ENFORCE:-false}" \
-    SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" \
-    SW_MQTT="${IAM_MQTT_PERSON:-false}" python3 -c '
-import datetime, json, os
-e = os.environ
-print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
-                  "enforce": e["ENFORCE"] == "true",
-                  "switches": {"IAM_GATES": e["SW_GATES"] != "false", "IAM_NETPOL": e["SW_NETPOL"] != "false",
-                               "IAM_POSTGREST_JWT": e["SW_JWT"] == "true", "IAM_MQTT_PERSON": e["SW_MQTT"] == "true",
-                               "written_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}},
-                 sort_keys=True))' > "$_IAM_DIR/settings.json"
-    chmod 755 "$_IAM_DIR"; chmod 644 "$_IAM_DIR"/*   # readable by a sudo kubectl
-    _OLD_MQTT_DIGEST="$($MK8S kubectl get configmap medcea-iam-lib -n "$NAMESPACE" \
-        -o jsonpath='{.metadata.annotations.medcea/mqtt-digest}' 2>/dev/null || true)"
-    $MK8S kubectl create configmap medcea-iam-lib -n "$NAMESPACE" \
-        --from-file=routes.json="$_IAM_DIR/routes.json" \
-        --from-file=settings.json="$_IAM_DIR/settings.json" \
-        --from-file=mqtt.json="$_IAM_DIR/mqtt.json" \
-        --from-file=medcea_iam.py="$SCRIPT_DIR/apps/iam/lib/medcea_iam.py" \
-        --dry-run=client -o yaml \
-      | $MK8S kubectl label --local -f - medcea/iam-lib=true -o yaml \
-      | $MK8S kubectl annotate --local -f - "medcea/routes-digest=$IAM_ROUTES_DIGEST" "medcea/mqtt-digest=$IAM_MQTT_DIGEST" -o yaml \
-      | $MK8S kubectl apply -f -
-    rm -rf "$_IAM_DIR"
-    # A changed MQTT policy: restart iam-api so it issues from the new mqtt.json at once
-    # (the mount follows in about a minute); the database step below then ends every
-    # person credential issued under another digest (dba_retire_person_mqtt).
-    if [[ -n "$_OLD_MQTT_DIGEST" && "$_OLD_MQTT_DIGEST" != "$IAM_MQTT_DIGEST" ]] \
-       && $MK8S kubectl get deployment iam-api -n "$NAMESPACE" >/dev/null 2>&1; then
-        echo -e "${GREEN}  MQTT policy changed: restarting iam-api...${NC}"
-        $MK8S kubectl rollout restart deployment/iam-api -n "$NAMESPACE" >/dev/null
-        $MK8S kubectl rollout status deployment/iam-api -n "$NAMESPACE" --timeout=3m \
-            || echo -e "${YELLOW}WARNING: iam-api did not restart; it may issue from the old mqtt.json for about a minute.${NC}" >&2
-    fi
-    [[ "${IAM_ENFORCE:-false}" == "true" ]] \
-        && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow (live within about a minute).${NC}" \
-        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./guide.sh).${NC}"
-elif [[ "${IAM_GATES:-true}" == "false" ]]; then
-    echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
-else
-    echo -e "${RED}ERROR: the access policy did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
-    exit 1
-fi
-
-# NetworkPolicies of the application pods (IAM plan 1.4), compiled from `network:`
-# in the access policy: each pod admits only its proxy, the listed in-cluster hops
-# and the node itself (kubelet probes, the edge wizard). The node's addresses are
-# read now, because host traffic arrives from them. IAM_NETPOL=false removes them.
-echo -e "\n${GREEN}[IAM] Network policies of the application pods...${NC}"
-if [[ "${IAM_NETPOL:-true}" == "false" ]]; then
-    $MK8S kubectl delete netpol -n "$NAMESPACE" -l medcea/iam-netpol=true --ignore-not-found
-    echo -e "${YELLOW}  IAM_NETPOL=false: application pods accept connections from anywhere in the cluster.${NC}"
-else
-    _NODE_IPS=()
-    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
-        _NODE_IPS+=(--node-ip "${_ip%/*}")
-    done
-    if _NETPOL="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --namespace "$NAMESPACE" "${_NODE_IPS[@]}")"; then
-        $MK8S kubectl apply -f - <<<"$_NETPOL"
-        # A pod dropped from `network:` keeps no stale policy.
-        _WANT="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_NETPOL")"
-        for _np in $($MK8S kubectl get netpol -n "$NAMESPACE" -l medcea/iam-netpol=true -o jsonpath='{.items[*].metadata.name}'); do
-            [[ " $_WANT " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$NAMESPACE" "$_np"
-        done
-    elif [[ "${IAM_GATES:-true}" == "false" ]]; then
-        echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — network policies left as they are.${NC}" >&2
-    else
-        echo -e "${RED}ERROR: the network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC}" >&2
-        exit 1
-    fi
-fi
+# The access policy's check (ConfigMap medcea-iam-lib: route table, MQTT rows, library,
+# settings) and the application pods' NetworkPolicies, infra/lib-policy-artefacts.sh.
+pa_iam_lib full
+pa_netpol full
 
 
 # Keycloak's own database. It used to share medcea_db (tables in public), so
@@ -689,13 +622,7 @@ if [[ "$("${_PG_EXEC[@]}" "SELECT 1 FROM pg_database WHERE datname='$POSTGRES_DB
     # First end the person credentials the policy no longer backs: issued under another
     # mqtt.json digest, or all of them on a switch transition (read before it is recorded).
     _MQP=false; [[ "${IAM_MQTT_PERSON:-false}" == "true" ]] && _MQP=true
-    if [[ -n "${IAM_MQTT_DIGEST:-}" ]]; then
-        if ! _OUT="$(dba_retire_person_mqtt "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" "$IAM_MQTT_DIGEST" "$_MQP" 2>&1)"; then
-            echo -e "${YELLOW}WARNING: could not end the MQTT person credentials of an older policy or switch state; they lapse within 8 h: ${_OUT:0:200}${NC}" >&2
-        elif [[ "$_OUT" =~ ^[1-9][0-9]*$ ]]; then
-            echo -e "${GREEN}  Ended $_OUT MQTT person credential(s) issued under an older MQTT policy or switch state (the Explorer asks for a new one).${NC}"
-        fi
-    fi
+    pa_mqtt_retire
     if ! _OUT="$(dba_record_switch "$NAMESPACE" rdbms-postgresql-0 "$POSTGRES_DB" IAM_MQTT_PERSON "$_MQP" 2>&1)"; then
         echo -e "${YELLOW}WARNING: could not record IAM_MQTT_PERSON in iam_policy.history; the switch itself is in force: ${_OUT:0:200}${NC}" >&2
     fi
@@ -1764,15 +1691,7 @@ print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                   "metadata": {"name": "node-red-admin-tokens", "namespace": os.environ["NS"]},
                   "stringData": {"deploy": secrets.token_hex(32)}}))' | $KUBECTL apply -f - >/dev/null
 fi
-if _NR_PERMS="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile node-red)"; then
-    $KUBECTL create configmap node-red-auth -n "$NAMESPACE" --from-literal=permissions.json="$_NR_PERMS" \
-      --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
-elif [[ "${IAM_GATES:-true}" == "false" ]]; then
-    echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap node-red-auth left as it is.${NC}" >&2
-else
-    echo -e "${RED}ERROR: cannot compile Node-RED's editor rights (python3 apps/iam/compiler/cli.py check).${NC}" >&2
-    exit 1
-fi
+pa_node_red_auth full   # ConfigMap node-red-auth: the editor's rights (infra/lib-policy-artefacts.sh)
 $KUBECTL create configmap node-red-settings -n "$NAMESPACE" --from-file=settings.js="$SCRIPT_DIR/k8s/node-red/settings.js" \
   --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
 NR_SETTINGS_CHECKSUM="$(nr_settings_checksum)"
@@ -1832,127 +1751,14 @@ fi
 #    Chart:  grafana/grafana 7.3.12 (official Grafana Helm repo — no auth)
 #    Image:  docker.io/grafana/grafana (Docker Hub Official — NO auth needed)
 # =============================================================================
-echo -e "\n${GREEN}Pre-wiring Grafana Postgres datasource...${NC}"
-# postgres, or svc_grafana once IAM_DB_SERVICE_ROLES=true and the role may log in
-# (IAM 2.5). Grafana reads the datasource at start only: a changed user restarts it.
-KUBECTL="$MK8S kubectl"; REPO_ROOT="$SCRIPT_DIR"
-source "$SCRIPT_DIR/infra/lib-db-roles.sh"
-_GF_PREV_USER="$(db_clients_live "$NAMESPACE" | awk '$1 == "grafana" {print $2}')"
-db_client "$NAMESPACE" svc_grafana
-DS_USER="$DBC_USER"; DS_PASS="$DBC_PASS"
-render "$SCRIPT_DIR/k8s/grafana/datasource-secret.yaml" NAMESPACE POSTGRES_DB DS_USER DS_PASS | $MK8S kubectl apply -f -
-
-echo -e "\n${GREEN}[6/10] Deploying Grafana...${NC}"
-# grafana.ini with dotted section names (auth.generic_oauth) is unparseable by the chart
-# template when passed via --set or values files. Use GF_* env vars instead — fully
-# equivalent and supported by the chart's env: map.
-# The datasource secret is mounted via extraSecretMounts into the provisioning directory.
-# Grafana's own role (IAM 3.1): GRAFANA_ROLE_PATH/_STRICT from policy_grafana,
-# compiled before the Keycloak section. Grafana's database is persistent (PVC
-# grafana, decision of 1 Nov 2026), so a changed env restarts the pod without
-# ending sessions: each person's org role is computed again at their next sign-in,
-# within 5 minutes of no use or the hour a session lasts at most (values.yaml).
-# The local admin — the only Grafana Admin, break-glass — reads its login from
-# Secret grafana-admin, written from the environment, never from argv.
-ADMIN_USER="$ADMIN_USER" GF_PASS="$GRAFANA_BREAKGLASS_PASS" NS="$NAMESPACE" python3 -c '
-import json, os
-print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-                  "metadata": {"name": "grafana-admin", "namespace": os.environ["NS"]},
-                  "stringData": {"admin-user": os.environ["ADMIN_USER"], "admin-password": os.environ["GF_PASS"]}}))' \
-  | $MK8S kubectl apply -f - >/dev/null
-# The volume's size: GRAFANA_STORAGE (default 2Gi). A bound claim cannot shrink, and
-# microk8s-hostpath cannot grow one, so an existing PVC keeps its own size.
-GRAFANA_STORAGE="${GRAFANA_STORAGE:-2Gi}"
-if [[ ! "$GRAFANA_STORAGE" =~ ^[1-9][0-9]*(Mi|Gi|Ti)$ ]]; then
-    echo -e "${RED}ERROR: GRAFANA_STORAGE='$GRAFANA_STORAGE' must be a size such as 2Gi (Mi, Gi or Ti).${NC}" >&2
-    exit 1
-fi
-_GF_LIVE_SIZE="$($MK8S kubectl get pvc grafana -n "$NAMESPACE" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || true)"
-if [[ -n "$_GF_LIVE_SIZE" && "$_GF_LIVE_SIZE" != "$GRAFANA_STORAGE" ]]; then
-    echo -e "${YELLOW}  Grafana's volume stays $_GF_LIVE_SIZE (GRAFANA_STORAGE=$GRAFANA_STORAGE applies to a new volume only).${NC}"
-    GRAFANA_STORAGE="$_GF_LIVE_SIZE"
-fi
-_GF_VALUES=$(mktemp /tmp/grafana-values-XXXXXX.yaml)
-render "$SCRIPT_DIR/k8s/grafana/values.yaml" GRAFANA_DOMAIN GRAFANA_OAUTH_SECRET KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE \
-  GRAFANA_ROLE_PATH GRAFANA_ROLE_STRICT GRAFANA_STORAGE > "$_GF_VALUES"
-$MK8S helm3 upgrade --install grafana \
-  grafana/grafana \
-  --version 7.3.12 \
-  --namespace "$NAMESPACE" \
-  --values "$_GF_VALUES" \
-  --set ingress.enabled=true \
-  --set "ingress.hosts[0]=$GRAFANA_DOMAIN" \
-  --set "ingress.tls[0].hosts[0]=$GRAFANA_DOMAIN" \
-  --set "ingress.tls[0].secretName=cea-tls" \
-  --set assertNoLeakedSecrets=false \
-  --timeout 10m \
-  --wait
-rm -f "$_GF_VALUES"
-if [[ -n "$_GF_PREV_USER" && "$_GF_PREV_USER" != "$DS_USER" ]]; then
-    echo "  Grafana's datasource now logs in as $DS_USER (was $_GF_PREV_USER): restarting Grafana..."
-    $MK8S kubectl rollout restart deployment/grafana -n "$NAMESPACE"
-    $MK8S kubectl rollout status deployment/grafana -n "$NAMESPACE" --timeout=5m
-fi
-DS_PASS=""
-# The Secret seeds the admin password only when Grafana creates its database; the
-# database is persistent, so a rotated GRAFANA_BREAKGLASS_PASS reaches Grafana only
-# here, on stdin, in its database. (A changed ADMIN_USER does not rename the
-# existing admin login: that stays the name the database was created with.)
-if ! printf '%s\n' "$GRAFANA_BREAKGLASS_PASS" | $MK8S kubectl exec -i -n "$NAMESPACE" deployment/grafana -c grafana -- \
-        grafana cli --homepath /usr/share/grafana admin reset-admin-password --password-from-stdin >/dev/null 2>&1; then
-    echo -e "${RED}  Could not set Grafana's break-glass password; Grafana keeps the previous one until ./deploy-infra.sh sets it.${NC}" >&2
-fi
+pa_grafana full
 
 # =============================================================================
 # 7. OAUTH2 PROXY
 #    Chart:  bitnami/oauth2-proxy 8.0.2 (OCI)
 #    Image:  quay.io/oauth2-proxy/oauth2-proxy (Quay — NO auth needed)
 # =============================================================================
-echo -e "\n${GREEN}[7/10] Deploying OAuth2 Proxy (Node-RED SSO gateway)...${NC}"
-_OP2_VALUES=$(mktemp /tmp/oauth2proxy-values-XXXXXX.yaml)
-# allowed_groups compiled from the access policy for this host (policy_groups,
-# infra/lib-oauth2-proxy.sh); IAM_GATES=false renders the pre-policy list.
-# (lib-oauth2-proxy.sh was sourced before the Keycloak section, for policy_grafana.)
-ALLOWED_GROUPS="$(policy_groups NODE_RED_DOMAIN)"
-render "$SCRIPT_DIR/k8s/oauth2-proxy/values-node-red.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_OP2_VALUES"
-gate_error_page oauth2-proxy NODE_RED_DOMAIN "$ALLOWED_GROUPS"
-mapfile -t _OP2_GATE_ARGS < <(gate_helm_args oauth2-proxy)
-$MK8S helm3 upgrade --install oauth2-proxy \
-  oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
-  --version 8.0.2 \
-  --namespace "$NAMESPACE" \
-  --values "$SCRIPT_DIR/k8s/oauth2-proxy/values-common.yaml" \
-  --values "$_OP2_VALUES" \
-  --set configuration.clientID="node-red" \
-  --set configuration.clientSecret="$OAUTH2_PROXY_SECRET" \
-  --set configuration.cookieSecret="$OAUTH2_COOKIE_SECRET" \
-  --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
-  --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
-  --set ingress.hostname="$NODE_RED_DOMAIN" \
-  --set "ingress.extraTls[0].hosts[0]=$NODE_RED_DOMAIN" \
-  --set "ingress.extraTls[0].secretName=cea-tls" \
-  "${_OP2_GATE_ARGS[@]}" \
-  --timeout 5m
-rm -f "$_OP2_VALUES"
-
-# Force pod restart so it picks up the updated ConfigMap (cookie_secret).
-# The chart stores the secret in a ConfigMap volume, not in the pod template spec,
-# so helm upgrade alone does not trigger a rollout.
-$MK8S kubectl rollout restart deployment/oauth2-proxy -n "$NAMESPACE"
-
-echo -e "${YELLOW}Waiting for OAuth2 Proxy to be ready (up to 10 min)...${NC}"
-$MK8S kubectl rollout status deployment/oauth2-proxy \
-  -n "$NAMESPACE" --timeout=10m || {
-    echo -e "${RED}--- OAuth2 Proxy pod status ---${NC}"
-    $MK8S kubectl get pods -l app.kubernetes.io/name=oauth2-proxy -n "$NAMESPACE"
-    echo -e "${RED}--- OAuth2 Proxy pod logs ---${NC}"
-    $MK8S kubectl logs -l app.kubernetes.io/name=oauth2-proxy \
-      -n "$NAMESPACE" --tail=30 2>/dev/null || true
-    echo -e "${RED}--- OAuth2 Proxy pod events ---${NC}"
-    $MK8S kubectl describe pod -l app.kubernetes.io/name=oauth2-proxy \
-      -n "$NAMESPACE" | tail -20
-    exit 1
-}
+pa_node_red_proxy full
 
 # =============================================================================
 # 8. pgAdmin
@@ -1960,86 +1766,7 @@ $MK8S kubectl rollout status deployment/oauth2-proxy \
 #    k8s/pgadmin/pgadmin.yaml (Docker Hub — auth configured)
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
-echo -e "\n${GREEN}[8/10] Deploying pgAdmin...${NC}"
-# its server entry: postgres, or rr_admin_login (IAM 2.5); the pod annotation
-# medcea/db-user restarts it when that changes
-db_client "$NAMESPACE" rr_admin_login
-PGA_DB_USER="$DBC_USER"; PGA_DB_PASS="$DBC_PASS"
-# its sign-in roles (IAM 3.4): OAUTH2_ADDITIONAL_CLAIMS compiled from the policy;
-# a policy that does not compile stops here and the running pgAdmin stays
-source "$SCRIPT_DIR/infra/lib-policy-tools.sh"
-PGADMIN_OAUTH2_CLAIMS="$(REPO_ROOT="$SCRIPT_DIR" policy_tool pgadmin)" \
-    || { echo -e "${RED}ERROR: cannot compile pgAdmin's sign-in roles from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }
-# Who gets the IoT Postgres entry (1 Nov 2026): pgAdmin does not share a server's
-# username or passfile, so each OAuth2 user needs its own copy of servers.json,
-# loaded by the pod's postStart hook (k8s/pgadmin/pgadmin.yaml) for the e-mails
-# listed here — the enabled accounts holding a role in the claims compiled above.
-# A plain env value (no secret); a changed list restarts pgAdmin, which also ends
-# its sessions. The realm's port-forward closed with section 3, so it is opened
-# again on the same port for this one read. Never stops the deploy: a failed read
-# keeps the running pgAdmin's list (a shorter one would restart pgAdmin with a
-# fresh database and drop the other admins' entries), and only without one
-# goes on with ADMIN_EMAIL alone.
-_pgadmin_server_users() {
-    local pf ok=0 out live
-    fuser -k 18080/tcp &>/dev/null || true
-    $MK8S kubectl port-forward svc/keycloak 18080:80 -n "$NAMESPACE" &>/dev/null 9>&- &
-    pf=$!
-    for _ in $(seq 1 12); do
-        kc_admin_select && { ok=1; break; }
-        sleep 2
-    done
-    if (( ok )) && out="$(kc_claim_emails "$KEYCLOAK_REALM" "$PGADMIN_OAUTH2_CLAIMS" "$ADMIN_EMAIL")"; then
-        printf '%s\n' "$out"
-    else
-        # the live list; only plain address characters, since it is rendered again
-        live="$($MK8S kubectl get deployment pgadmin -n "$NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.containers[?(@.name=="pgadmin")].env[?(@.name=="PGADMIN_OAUTH2_SERVER_USERS")].value}' \
-            2>/dev/null || true)"
-        if [[ -n "$live" && "$live" =~ ^[a-z0-9._%+@,-]+$ ]]; then
-            echo -e "${YELLOW}  WARNING: cannot read Keycloak's role holders; pgAdmin keeps its current list (${live}).${NC}" >&2
-            printf '%s\n' "$live"
-        else
-            echo -e "${YELLOW}  WARNING: cannot read Keycloak's role holders and pgAdmin has no list yet; its server entry goes to ${ADMIN_EMAIL,,} alone.${NC}" >&2
-            printf '%s\n' "${ADMIN_EMAIL,,}"
-        fi
-    fi
-    kc_admin_done
-    kill "$pf" 2>/dev/null || true
-}
-PGADMIN_OAUTH2_SERVER_USERS="$(_pgadmin_server_users)"
-echo -e "${GREEN}  pgAdmin server entry for: ${PGADMIN_OAUTH2_SERVER_USERS:-nobody}${NC}"
-# Secret pgadmin-config holds the OAuth2 config (client secret, claims) and the
-# default password; pgAdmin reads them as secretKeyRef env, at start only, and the
-# postStart hook and servers.json (ConfigMap pgadmin-servers) act only at start too,
-# as does the init container's copy of Secret pgadmin-pgpassfile (and the hook's copies
-# of it in each user's storage folder), so the sha256 of all three is the pod
-# annotation medcea/config-checksum: a rotated rr_admin_login password restarts pgAdmin. The rendered
-# manifest reaches python on stdin and only the hash is printed.
-PGADMIN_CONFIG_CHECKSUM="$(set -o pipefail
-    render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
-           KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP PGADMIN_OAUTH2_SERVER_USERS \
-    | python3 -c '
-import hashlib, json, sys, yaml
-try:  # a YAML error quotes the input, which holds the secrets: say nothing of it
-    docs = {(d.get("kind"), d["metadata"]["name"]): d for d in yaml.safe_load_all(sys.stdin) if d}
-    both = {"secret": docs[("Secret", "pgadmin-config")]["stringData"],
-            "pgpassfile": docs[("Secret", "pgadmin-pgpassfile")]["stringData"],
-            "configmap": docs[("ConfigMap", "pgadmin-servers")]["data"]}
-    print(hashlib.sha256(json.dumps(both, sort_keys=True).encode()).hexdigest())
-except Exception:
-    sys.exit(1)')" \
-    || { echo -e "${RED}ERROR: cannot render pgAdmin's Secret pgadmin-config (k8s/pgadmin/pgadmin.yaml).${NC}" >&2; exit 1; }
-render "$SCRIPT_DIR/k8s/pgadmin/pgadmin.yaml" NAMESPACE POSTGRES_DB PGA_DB_USER PGA_DB_PASS ADMIN_EMAIL ADMIN_PASS PGADMIN_DOMAIN PGADMIN_OAUTH2_CLAIMS \
-       KEYCLOAK_DOMAIN KEYCLOAK_REALM PGADMIN_OAUTH_SECRET PLATFORM_IP PGADMIN_OAUTH2_SERVER_USERS PGADMIN_CONFIG_CHECKSUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
-
-# 10m, not 5m: pgAdmin's first boot creates and migrates its own SQLite config
-# database before gunicorn starts, which took ~5.5 min on a clean install (pod
-# created 10:36, Ready 10:42) and failed a 5m wait on a pod that was healthy.
-# 16m since the postStart hook (up to 15 min of waiting, then setup.py per user):
-# the pod is Ready only after it.
-$MK8S kubectl rollout status deployment/pgadmin \
-  -n "$NAMESPACE" --timeout=16m
+pa_pgadmin full
 
 # =============================================================================
 # 9. SERVICE PORTAL
@@ -2109,28 +1836,7 @@ render "$SCRIPT_DIR/k8s/portal/error.html" _PORTAL_LOGOUT_RD \
   | $MK8S kubectl create configmap portal-templates -n "$NAMESPACE" --from-file=error.html=/dev/stdin \
       --dry-run=client -o yaml | $MK8S kubectl apply -f -
 
-# Portal OAuth2 Proxy (Keycloak client: portal)
-_POP2_VALUES=$(mktemp /tmp/portal-oauth2proxy-values-XXXXXX.yaml)
-ALLOWED_GROUPS="$(policy_groups PORTAL_DOMAIN)"
-render "$SCRIPT_DIR/k8s/oauth2-proxy/values-portal.yaml" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$_POP2_VALUES"
-$MK8S helm3 upgrade --install portal-oauth2-proxy \
-  oci://registry-1.docker.io/bitnamicharts/oauth2-proxy \
-  --version 8.0.2 \
-  --namespace "$NAMESPACE" \
-  --values "$SCRIPT_DIR/k8s/oauth2-proxy/values-common.yaml" \
-  --values "$_POP2_VALUES" \
-  --set configuration.clientID="portal" \
-  --set configuration.clientSecret="$PORTAL_OAUTH2_PROXY_SECRET" \
-  --set configuration.cookieSecret="$PORTAL_COOKIE_SECRET" \
-  --set configuration.oidcIssuerUrl="https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM" \
-  --set "extraArgs[0]=--whitelist-domain=$KEYCLOAK_DOMAIN" \
-  --set ingress.hostname="$PORTAL_DOMAIN" \
-  --set "ingress.extraTls[0].hosts[0]=$PORTAL_DOMAIN" \
-  --set "ingress.extraTls[0].secretName=cea-tls" \
-  --timeout 5m
-rm -f "$_POP2_VALUES"
-
-$MK8S kubectl rollout restart deployment/portal-oauth2-proxy -n "$NAMESPACE"
+pa_portal_proxy full
 
 # Redirect bare domain ($DOMAIN with no subdomain) to the portal so visitors
 # don't see a raw nginx 404. Requires its own ingress because nginx-ingress

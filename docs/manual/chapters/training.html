@@ -466,6 +466,37 @@
 <p><strong>Afterwards.</strong> In the User Manager, deactivate <code>e14-norole</code> with the reason "E14 test account" (or delete it in the Keycloak console), and note it in the test accounts table. Nothing else changed.</p>
 <p><strong>Last done.</strong> Not yet.</p>
 
+<h3 id="training-e15">E15 Re-render only what drifted</h3>
+<p><strong>Goal.</strong> See the scoped modes leave a platform that matches the applied policy untouched, and repair one artefact that drifted without restarting anything else. The exercise proves the decision of 3 November 2026 "Scoped re-render of the policy artefacts" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> The host operator (the platform <span class="role">admin</span>, who runs the deploys). An <span class="role">engineer</span> account for step 5 (<code>engineer</code> of the install, see the <a href="#compliance-test-accounts">test accounts</a>).</p>
+<p><strong>Before you start.</strong> Slice 4.2b is deployed (<code>./deploy-infra.sh</code>, then <code>./deploy-apps.sh --all</code>); <code>./health-check.sh</code> shows <strong>Policy artefacts</strong> OK; no other deploy runs; nobody is onboarding a board.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>./guide.sh</code> → Policy → <strong>Re-render the policy artefacts</strong>, and answer <code>y</code>.</li>
+<li>Make Node-RED's editor rights drift by hand: <code>microk8s kubectl -n medcea create configmap node-red-auth --from-literal=permissions.json='{}' --dry-run=client -o yaml | microk8s kubectl apply -f -</code>.</li>
+<li><code>./health-check.sh</code>.</li>
+<li><code>./deploy-infra.sh --policy-only</code>.</li>
+<li><span class="role">engineer</span>: sign in to Node-RED's editor (<code>https://node-red.&lt;domain&gt;</code>) and open a flow.</li>
+<li><code>./deploy-infra.sh --polcy-only</code> (mistyped on purpose).</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: <code>./deploy-infra.sh --policy-only</code>, <code>./infra/deploy-workbench.sh --policy-only</code> and each application's <code>--gate-only</code> in turn, every target <code>unchanged</code> (the Policy UI's: "no gate before slice 4.3"), "Finished: exit code 0". No pod restarts (<code>microk8s kubectl -n medcea get pods</code> shows the same ages as before).</li>
+<li>Step 3: <strong>Node-RED editor rights</strong> FAILs (its rights file is not the compile).</li>
+<li>Step 4: <code>node-red-auth: re-rendered</code>, every other target <code>unchanged</code>. Node-RED is not restarted (its rights are a directory mount, read at every login).</li>
+<li>Step 5: the editor opens with the engineer's rights, as before step 2.</li>
+<li>Step 6: "ERROR: unknown arguments: --polcy-only" and the usage, exit 2; nothing runs.</li>
+</ul>
+<div class="record"><p>The scoped runs are in <code>logs/deploy-infra-policy-&lt;time&gt;.log</code> and the application logs (<code>logs/app-&lt;component&gt;-deploy-&lt;time&gt;.log</code>, starting <code>mode: gate-only</code>), or in the guide's log. Nothing is written to the policy history: no version was applied. Write the times of steps 1 and 4 under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>While another deploy runs: any scoped mode is refused ("Another MedCEA deploy is already running:").</li>
+<li><code>./apps/monitor/deploy.sh --policy-only</code>: refused, exit 2 (the applications take <code>--gate-only</code>).</li>
+<li>Do not start an onboarding run to see the wizard defer: <code>tests/test_scoped_deploy.py</code> proves offline that a drift during a run exits 4 and restarts nothing.</li>
+</ul>
+<p><strong>Afterwards.</strong> <code>./health-check.sh</code>: all checks as before step 2.</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
 <ol class="steps">

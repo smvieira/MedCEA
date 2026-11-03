@@ -1610,7 +1610,7 @@ def read(rel):
 
 # Entry scripts that compile the policy (directly or through lib-oauth2-proxy.sh,
 # lib-policy-tools.sh or lib-db-apply.sh's db_apply), and how they call the init.
-WRITERS = ["deploy-infra.sh", "infra/deploy-workbench.sh"] + [
+WRITERS = ["deploy-infra.sh", "infra/deploy-workbench.sh", "infra/deploy-policy.sh"] + [
     f"apps/{c}/deploy.sh" for c in ("access", "database", "edge-wizard", "frontend", "iam", "monitor",
                                     "mqtt-explorer", "scheduler")]
 READERS = ["health-check.sh", "tests/iam-hosts.sh", "tests/iam-schema.sh", "tests/iam-signin.sh",
@@ -1664,7 +1664,7 @@ class Wiring(unittest.TestCase):
 
     def test_every_writer_ends_with_finish(self):
         # review 4.2a: break_glass_ended needs policy_source_finish at the end of each success path
-        comps = {"deploy-infra.sh": "infra", "infra/deploy-workbench.sh": "workbench"}
+        comps = {"deploy-infra.sh": "infra", "infra/deploy-workbench.sh": "workbench", "infra/deploy-policy.sh": "infra"}
         for p in WRITERS:
             comp = comps.get(p) or p.split("/")[1]
             t = code(read(p))
@@ -1687,8 +1687,13 @@ class Wiring(unittest.TestCase):
         full = t.index('policy_source_init "$NAMESPACE" || exit $?')
         self.assertLess(rdbms, full)
         self.assertIn("--wait", t[rdbms:full])
-        self.assertLess(full, t.index("create configmap medcea-iam-lib"))
-        self.assertLess(full, t.index("compile netpol"))
+        # IAM 4.2b: the blocks are infra/lib-policy-artefacts.sh's, called at the same place
+        self.assertLess(full, t.index("pa_iam_lib full"))
+        self.assertLess(full, t.index("pa_netpol full"))
+        lib = code(read("infra/lib-policy-artefacts.sh"))
+        self.assertIn("create configmap medcea-iam-lib", lib)
+        self.assertIn("compile netpol", lib)
+        self.assertNotRegex(lib, r"policy_source_init ")
         for pat in (r"cli\.py\"? (compile|check|hosts)", r"\bpolicy_(groups|grafana|workbench|workbench_egress|tool)\b "):
             m = re.search(pat, t)
             self.assertTrue(m is None or m.start() > full, pat)
