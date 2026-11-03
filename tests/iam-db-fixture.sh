@@ -43,7 +43,9 @@
 #             audit_versions() empty; apply true twice (008c re-run with v1 and the 4.2a
 #             bodies: the snapshot equal, no event under a version); down_008c refused. On
 #             a second fresh database (medcea_pa2) a failing statement in the bundle and a
-#             REPEATABLE READ default each roll the whole bundle back (no version row)
+#             REPEATABLE READ default each roll the whole bundle back (no version row);
+#             then, with the access component and apply true, the bundle under
+#             IAM_DB_ROLES=true commits version 1 (POST runs as system:apply again)
 #   cycle     false -> A; B0 vs A differs only by the declared delta; false = A;
 #             true twice equal; false = A; true = the earlier true
 #   logins M  every svc_* role and rr_admin_login logs in over TCP with its password
@@ -381,10 +383,11 @@ policy_bundle_sql() {
                --log iam-db-fixture --out "$dir"
 }
 
-# pa_bundle DB DIR POST — the bootstrap bundle as apply.sh runs it (IAM_DB_ROLES=false here)
+# pa_bundle DB DIR POST [MODE] — the bootstrap bundle as apply.sh runs it (IAM_DB_ROLES=MODE,
+# default false)
 pa_bundle() {
     load_passwords
-    IAM_DB_ROLES=false CEA_DB="$1" DBA_ACTOR=system:apply DBA_SERVICE_LOGINS="" \
+    IAM_DB_ROLES="${4:-false}" CEA_DB="$1" DBA_ACTOR=system:apply DBA_SERVICE_LOGINS="" \
         dba_policy_bundle "$FX_NS" "$FX_POD" auto "$2/pre.sql" "$3" --with-functions 2>&1
 }
 
@@ -474,6 +477,15 @@ SQL
         done
         echo "        the bundle's output:"; sed 's/^/          /' <<<"$out" | head -60
     fi
+    # P22 — the bootstrap under IAM_DB_ROLES=true, as production runs it: the enforce file
+    # sets system:deploy for its demotion, and _mark_applied in POST needs system:apply
+    out="$(access_sql | fx medcea_pa2 -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" || { echo "$out" | head; fail P22 "access_db.sql on medcea_pa2"; }
+    cmd_apply true medcea_pa2
+    out="$(pa_bundle medcea_pa2 "$dir" "$dir/post.sql" true)"; rc=$?
+    ev="$(fx medcea_pa2 -q -tA -c "SELECT coalesce(string_agg(version || ':' || kind || ':' || status, ' '), 'none') FROM iam_policy.version")"
+    [[ $rc -eq 0 && "$ev" == "1:bootstrap:applied" ]] \
+        && pass P22 "the bootstrap bundle under IAM_DB_ROLES=true: committed, version 1 applied" \
+        || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P22 "the bootstrap under true: exit $rc, versions $ev"; }
     rm -rf "$dir"
 }
 

@@ -422,6 +422,9 @@ dba_policy_bundle() {
         cat "$down_or_enforce"
         echo "$body"
         _dba_settings_sql
+        # the enforce file sets system:deploy for its demotion step: POST (apply.sh's
+        # _mark_applied) runs as this bundle's actor again
+        [[ -s "$post" ]] && echo "SELECT medcea_auth._set_internal_actor('$actor');"
         cat "$post"
         echo "$asserts"
     } | _dba_psql "$CEA_DB" -q -1 -v ON_ERROR_STOP=1 -f - 2>&1)" || {

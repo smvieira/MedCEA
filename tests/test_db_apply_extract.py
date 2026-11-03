@@ -195,6 +195,21 @@ class PolicyBundle(unittest.TestCase):
         self.assertGreater(sql.rindex("ASSERT") if "ASSERT" in sql else sql.rindex("RAISE"), sql.index("POST-MARK"))
         self.assertNotIn("system:deploy", sql[:sql.index("PRE-MARK")])
 
+    def test_true_post_runs_as_the_bundle_actor(self):
+        # the enforce file sets system:deploy for its demotion; _mark_applied in POST needs
+        # system:apply (the 3 Nov bootstrap was refused: "not by system:deploy")
+        p, calls = run(LIB, "dba_policy_bundle", "medcea-iamtest", "pod", "auto", self.pre, self.post,
+                       "--with-functions",
+                       env={"FAKE_LIVE": "true", "IAM_DB_ROLES": "true", "DBA_ACTOR": "system:apply",
+                            "FAKE_IAM": "t|t|t|t"})
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        sql = bundle(calls)[1]
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations_008b_enforce.sql")) as f:
+            self.assertIn("_set_internal_actor('system:deploy')", f.read())
+        before_post = sql[:sql.index("POST-MARK")]
+        last = re.findall(r"_set_internal_actor\('([^']+)'\)", before_post)[-1]
+        self.assertEqual(last, "system:apply")
+
     def test_rollback_message(self):
         p, _ = run(LIB, "dba_policy_bundle", "medcea-iamtest", "pod", "false", self.pre, self.post,
                    env={"FAKE_FAIL": "PRE-MARK", "DBA_SERVICE_LOGINS": ""})
