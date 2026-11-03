@@ -3,9 +3,10 @@
 # the System Configuration UI (config-ui + config-api/PostgREST + its
 # oauth2-proxy) and the Database Management portal (dbmgmt).
 #
-# Kept on purpose: the portal-nginx ConfigMap and the images mount deploy.sh
-# adds to the portal Deployment. The portal (infra) mounts them, so removing
-# them would stop the portal from starting; they only add the background image.
+# Kept on purpose: the images mount deploy.sh adds to the portal Deployment
+# (removing a mount the running portal uses would restart it for nothing; it only
+# adds the background image). The portal-nginx ConfigMap is the portal's own
+# (deploy-infra.sh, k8s/portal/nginx.conf) and is never touched here.
 # Database contents are untouched (see apps/database/uninstall.sh).
 #
 # Idempotent: safe to re-run.

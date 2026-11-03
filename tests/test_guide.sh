@@ -70,6 +70,8 @@
 #      Would version 1 bootstrap? passes --check-only; Finish an interrupted apply is [y/N]
 #  36  How to use policy break-glass is shown, never run: no command, no confirmation, and it
 #      says break-glass does not bypass the skeleton gate
+#  37  Infrastructure → Publish the manual to the portal: ./infra/publish-manual.sh alone, a
+#      change ([y/N]) that takes the lock itself (the guide holds none), dry and real
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -767,7 +769,7 @@ has   "a change ([y/N])" "Kind:        changes the platform"
 has   "the order is explained" "Order: the database deploy first"
 has   "no 503 window" "No 503 window"
 has   "the bootstrap is explained" "bootstraps version 1 from apps/iam/policy/defaults.yaml, claimed by svieira"
-has   "the two new checks" "Access policy version and Policy artefacts (54 checks)"
+has   "the two new checks" "Access policy version and Policy artefacts (55 checks with the Platform manual)"
 has   "the clean tree" "git status -- apps/iam must be clean"
 no_stub
 lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
@@ -839,6 +841,23 @@ hasnt "nothing planned" "not executed"
 no_stub
 real $'8\n15\nq\n'
 hasnt "real: nothing ran" "STUB "
+
+echo "37 publish the manual to the portal"
+mkcfg true true
+guide $'2\n9\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the command (dry)" "[dry run] not executed: ./infra/publish-manual.sh"
+has   "a change ([y/N])" "Kind:        changes the platform"
+has   "takes the lock itself" "Deploy lock: takes it"
+has   "only the manual" "ConfigMap portal-manual"
+has   "says it builds from the chapters" "the working tree is not touched"
+no_stub
+real $'2\n9\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the script ran" "STUB infra/publish-manual.sh"
+hasnt "real: nothing else ran" "STUB deploy-infra.sh"
+grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: the guide holds no lock (the script takes its own)" || fail "real: ran under the guide's lock"
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

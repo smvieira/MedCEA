@@ -459,7 +459,7 @@ class Wiring(unittest.TestCase):
         i = names.index("Database grants")
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
-        self.assertEqual(len(lines), 54)
+        self.assertEqual(len(lines), 55)
         with open(os.path.join(REPO, "health-check.sh")) as f:
             src = f.read()
         self.assertIn('iampolicy)    check_iampolicy "$name" "$target" ;;', src)

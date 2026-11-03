@@ -8,6 +8,7 @@
 <thead><tr><th>App</th><th>Default address</th><th>Roles admitted</th></tr></thead>
 <tbody>
 <tr><td>Portal</td><td><code>portal.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
+<tr><td>Platform manual (this manual)</td><td><code>portal.&lt;domain&gt;/manual/</code></td><td>All eleven platform roles (the portal's gate)</td></tr>
 <tr><td>Configuration UI (System Configuration)</td><td><code>config.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
 <tr><td>Scheduler (Recipe Schedule Manager)</td><td><code>scheduler.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
 <tr><td>Run Monitor</td><td><code>monitor.&lt;domain&gt;</code></td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> for telemetry only (no runs)</td></tr>
@@ -39,10 +40,11 @@
 
 <h3 id="apps-portal">Portal</h3>
 <p>The portal is the start page. It lists the apps as cards; clicking a card opens that app in a new browser tab. Every platform role can open the portal. An account without a platform role gets the page <strong>No access yet</strong>, which explains that an administrator still has to approve the access request.</p>
-<p>The main page, <strong>MedCEA Platform</strong>, shows three cards:</p>
+<p>The main page, <strong>MedCEA Platform</strong>, shows four cards:</p>
 <ul>
 <li><strong>Grafana</strong>: the MedCEA Dashboard.</li>
 <li><strong>JupyterHub</strong>: the AI Workbench.</li>
+<li><strong>Documentation</strong>: the <strong>Platform manual</strong>, this manual (see <a href="#apps-manual">below</a>).</li>
 <li><strong>Administration</strong>: opens the <strong>Platform Management</strong> page.</li>
 </ul>
 <p>Platform Management holds the cards for these apps:</p>
@@ -61,6 +63,9 @@
 <li>Click a card. For the apps under Platform Management, click <strong>Administration</strong> first.</li>
 <li>Use <strong>Back</strong> to return to the main page, or the user menu to sign out.</li>
 </ol>
+<h4 id="apps-manual">The platform manual in the portal</h4>
+<p>Since 3 November 2026 this manual is part of the platform. The <strong>Platform manual</strong> card on the portal's main page opens it in a new tab at <code>https://portal.&lt;domain&gt;/manual/</code>; <code>/manual</code> without the slash leads there too. It sits behind the portal's own sign-in, so everyone the portal admits can read it (every platform role) and nobody else: signed out, the address leads to the platform sign-in page, and an account without a platform role gets the portal's <strong>No access yet</strong> page. It is not in the user menu.</p>
+<p>The copy you read there is built from the manual's chapters in the repository each time it is published, by every <code>./deploy-infra.sh</code> and by <code>./guide.sh</code> → Infrastructure → <strong>Publish the manual to the portal</strong> (see <a href="#admin-manual">the manual in the portal</a>). Your browser checks for a newer copy at every load, so a republished manual shows at once on reload. Reading it leaves no event in the platform's records; a read appears only in the access logs of the sign-in proxy and of the portal's web server. The <strong>Updated</strong> and <strong>Code</strong> lines at the top say which edition you read.</p>
 
 <h3 id="apps-config">Configuration UI</h3>
 <p>The Configuration UI, titled <strong>System Configuration</strong>, holds the definitions the platform runs on:</p>

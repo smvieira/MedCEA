@@ -603,6 +603,16 @@ a_infra_uninstall() {
     NOTES=("deploy-infra.sh then asks you to type 'yes'. Reinstalling is slow (images are pulled again)." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
     plan_run
 }
+a_manual_publish() {
+    CMD=(./infra/publish-manual.sh)
+    EFFECT="ConfigMap portal-manual (the manual built from docs/manual/chapters now), then a restart of the portal; nothing else"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("After a change to the manual: it builds into a temporary file (the working tree is not touched) and refuses when docs/manual/build.py refuses."
+           "Everyone the portal admits reads it at https://<PORTAL_DOMAIN>/manual/ (the Platform manual card). ./deploy-infra.sh publishes it too."
+           "On an install whose portal predates the manual it only stores it (no restart) and says so: run ./deploy-infra.sh once to add the /manual/ route and the card."
+           "The health check's Platform manual WARNs while the portal serves an older build than the repository's.")
+    plan_run
+}
 a_infra_help() {
     CMD=(./deploy-infra.sh --help)
     EFFECT="nothing (prints the usage)"
@@ -1463,7 +1473,7 @@ a_policy_42a_deploy() {
            "Before: git status -- apps/iam must be clean: the bootstrap refuses uncommitted changes there (version 1 is the committed factory policy)."
            "No 503 window: nobody's access changes. Between the first two deploys the health check's iamenforce and tests/iam-schema.sh are red for a few minutes (the route table's digest moves once)."
            "The iam deploy bootstraps version 1 from apps/iam/policy/defaults.yaml, claimed by $BY_USER; it changes no artefact (it proves every compile is identical first) and restarts iam-api as every iam deploy does."
-           "Afterwards ./health-check.sh shows two new checks, Access policy version and Policy artefacts (54 checks)."
+           "Afterwards ./health-check.sh shows two new checks, Access policy version and Policy artefacts (55 checks with the Platform manual)."
            "From now on every deploy refuses a git change that widens access (the skeleton gate), break-glass included, until policy approvals exist (IAM 4.5).")
     plan_run
 }
@@ -1855,6 +1865,7 @@ AREA_INFRA=(
     "a_infra_reset|Reset: wipe the namespace, keep MicroK8s|./deploy-infra.sh --reset: every service and ALL data."
     "a_infra_uninstall|Remove MicroK8s entirely|./deploy-infra.sh --uninstall: all cluster data."
     "a_infra_help|Show deploy-infra.sh's help|Read-only."
+    "a_manual_publish|Publish the manual to the portal|./infra/publish-manual.sh: build docs/manual and serve it at /manual/; nothing else."
 )
 AREA_APPS=(
     "a_apps_menu|Pick components from a menu|./deploy-apps.sh (its own checkbox menu)."

@@ -250,22 +250,18 @@ rm -f "$_DB_VALUES"
 $KUBECTL rollout status deployment/dbmgmt-oauth2-proxy -n "$NAMESPACE" --timeout=4m
 
 # =============================================================================
-# 5. Portal: nginx config, images mount and background (card is in the infra page)
+# 5. Portal: images mount and background (card is in the infra page)
 # =============================================================================
-log "Configuring portal nginx (images location)..."
-$KUBECTL create configmap portal-nginx -n "$NAMESPACE" --dry-run=client -o yaml \
-  --from-file=default.conf="$SCRIPT_DIR/k8s/portal-nginx.conf" | $KUBECTL apply -f -
-
+# The portal's nginx config (ConfigMap portal-nginx: /, /images/ and the manual at
+# /manual/) belongs to the portal itself since 3 Nov 2026: deploy-infra.sh writes it from
+# k8s/portal/nginx.conf and k8s/portal/portal.yaml mounts it. This deploy adds only the
+# images volume (a hostPath in this component's tree).
 log "Patching portal deployment (images volume)..."
 if ! $KUBECTL get deployment portal -n "$NAMESPACE" \
-        -o jsonpath='{.spec.template.spec.volumes[*].name}' | grep -q "images"; then
+        -o jsonpath='{.spec.template.spec.volumes[*].name}' | grep -qw "images"; then
     $KUBECTL patch deployment portal -n "$NAMESPACE" --type=json -p='[
       {"op":"add","path":"/spec/template/spec/volumes/-",
-       "value":{"name":"portal-nginx","configMap":{"name":"portal-nginx"}}},
-      {"op":"add","path":"/spec/template/spec/volumes/-",
        "value":{"name":"images","hostPath":{"path":"'"$SCRIPT_DIR"'/images","type":"Directory"}}},
-      {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
-       "value":{"name":"portal-nginx","mountPath":"/etc/nginx/conf.d/default.conf","subPath":"default.conf","readOnly":true}},
       {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
        "value":{"name":"images","mountPath":"/usr/share/nginx/html/images","readOnly":true}}
     ]'

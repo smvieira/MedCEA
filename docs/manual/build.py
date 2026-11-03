@@ -9,6 +9,15 @@ that does not exist, so the published page never has a dead cross-reference.
 
     python3 docs/manual/build.py            # writes docs/manual/index.html
     python3 docs/manual/build.py --check    # validates only
+    python3 docs/manual/build.py --out PATH # writes the page to PATH instead (index.html untouched)
+    python3 docs/manual/build.py --out PATH --standalone
+                                            # the same page as a complete document for a
+                                            # plain web server: doctype, html, charset, viewport
+
+--out is how the portal gets its copy (infra/lib-manual.sh): built from the chapters at
+deploy time into a temporary file, never the committed index.html, which may be stale.
+shell.html has no doctype or <html> because the artifact host wraps it; served as it is
+by the portal's nginx it would render in quirks mode, hence --standalone.
 
 Edition details live in EDITION below: bump them when a phase updates the manual,
 and add a row to chapters/revisions.html.
@@ -26,6 +35,11 @@ EDITION = {
     'DATE': '1 Nov 2026',
     'COMMIT': '73ffd31 (main, release v0.4.0)',
 }
+
+# What --standalone puts before shell.html's own <title>, <link> and <style> (which the
+# HTML parser then places in the head, as it does inside the artifact host's skeleton).
+STANDALONE_HEAD = ('<!DOCTYPE html>\n<html lang="en">\n<meta charset="utf-8">\n'
+                   '<meta name="viewport" content="width=device-width, initial-scale=1">\n')
 
 SECTION = re.compile(r'<section\s+id="([a-z0-9-]+)"\s+data-title="([^"]+)"\s*>')
 H3 = re.compile(r'<h3\s+id="([a-z0-9-]+)"\s*>(.*?)</h3>', re.S)
@@ -78,7 +92,22 @@ def toc(chapters):
     return '<nav class="toc" aria-label="Contents"><p>Contents</p><ol>' + ''.join(items) + '</ol></nav>'
 
 
+def out_path(argv):
+    """The --out PATH (or --out=PATH) argument, else docs/manual/index.html; None if malformed."""
+    for i, a in enumerate(argv):
+        if a.startswith('--out='):
+            return a[len('--out='):] or None
+        if a == '--out':
+            nxt = argv[i + 1] if i + 1 < len(argv) else ''
+            return nxt if nxt and not nxt.startswith('--') else None
+    return os.path.join(HERE, 'index.html')
+
+
 def main():
+    out = out_path(sys.argv[1:])
+    if out is None:
+        print('build: --out needs a file path', file=sys.stderr)
+        return 2
     chapters, errors = load()
     if errors:
         print('\n'.join('build: ' + e for e in errors), file=sys.stderr)
@@ -92,13 +121,16 @@ def main():
     page = page.replace('{{CHAPTERS}}', '\n'.join(c['src'] for c in chapters))
     for k, v in EDITION.items():
         page = page.replace('{{' + k + '}}', html.escape(v))
+    if '--standalone' in sys.argv:
+        page = STANDALONE_HEAD + page.rstrip('\n') + '\n</html>\n'
     left = re.findall(r'\{\{[A-Z_]+\}\}', page)
     if left:
         print('build: unfilled placeholders ' + ', '.join(left), file=sys.stderr)
         return 1
-    with open(os.path.join(HERE, 'index.html'), 'w', encoding='utf-8') as f:
+    with open(out, 'w', encoding='utf-8') as f:
         f.write(page)
-    print(f'build: wrote docs/manual/index.html ({len(chapters)} chapters, {len(page) // 1024} KiB)')
+    shown = 'docs/manual/index.html' if os.path.abspath(out) == os.path.join(HERE, 'index.html') else out
+    print(f'build: wrote {shown} ({len(chapters)} chapters, {len(page) // 1024} KiB)')
     return 0
 
 

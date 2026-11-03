@@ -2046,6 +2046,7 @@ $MK8S kubectl rollout status deployment/pgadmin \
 #    nginx serving a static HTML service catalog, protected by OAuth2 Proxy.
 #    Keycloak client: portal
 #    Background image: place apps/portal/bg.jpg (or bg.png) to auto-embed it.
+#    The platform manual at /manual/ (infra/lib-manual.sh), behind the same proxy.
 # =============================================================================
 
 # Encode background image as data URI if provided (embedded inline in the HTML).
@@ -2074,16 +2075,26 @@ print(urllib.parse.quote(inner, safe=''))
 
 
 echo -e "\n${GREEN}[9/9] Deploying Service Portal...${NC}"
+# The server config (/, /images/, /manual/), a plain file. The portal owns it; before
+# 3 Nov 2026 apps/frontend/deploy.sh wrote it, and now only mounts the images.
+$MK8S kubectl create configmap portal-nginx -n "$NAMESPACE" --dry-run=client -o yaml \
+  --from-file=default.conf="$SCRIPT_DIR/k8s/portal/nginx.conf" | $MK8S kubectl apply -f -
+# The manual, built from the chapters now (never the committed index.html) into ConfigMap
+# portal-manual; the restart below picks it up. A manual that does not build, or would not
+# fit, stops the deploy here, before the portal changes.
+source "$SCRIPT_DIR/infra/lib-manual.sh"
+KUBECTL="$MK8S kubectl" manual_publish "$NAMESPACE" --no-roll \
+  || { echo -e "${RED}ERROR: the platform manual was not published (above). Fix it and run ./deploy-infra.sh again.${NC}" >&2; exit 1; }
 # The background is a ~200 KB data URI — over the 128 KiB limit for one
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
 _PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
-render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN \
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
   | $MK8S kubectl apply -n "$NAMESPACE" -f -
 rm -f "$_PORTAL_BG_TMP"
 
-# The HTML is mounted with subPath, and a subPath ConfigMap mount does NOT
+# The HTML (and the nginx config) is mounted with subPath, and a subPath ConfigMap mount does NOT
 # update in a running pod — kubelet only refreshes whole-directory mounts. So an
 # unchanged Deployment spec means a changed ConfigMap is simply never picked up,
 # and the pod keeps serving the previous page indefinitely. Force the roll.

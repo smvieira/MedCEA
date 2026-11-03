@@ -157,6 +157,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         OK while the newest OK marker in BACKUP_DIR is at most 26 h old, WARN beyond,"
     echo -e "         FAIL beyond 72 h; SKIP without CronJob medcea-backup, and on its first day"
     echo ""
+    echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
+    echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
+    echo -e "         docs/manual/build.py --out --standalone (a temp file); WARN when it lags or is missing (./guide.sh"
+    echo -e "         → Infrastructure → Publish the manual to the portal), or the portal does not mount it;"
+    echo -e "         FAIL when build.py refuses or the content differs from its annotation; SKIP without the portal"
+    echo ""
     echo -e "  ${CYAN}juju${NC}   [unused] Juju model/app status — kept for older configs; Juju was"
     echo -e "         removed with Kubeflow, so these checks report SKIP."
     echo -e "         e.g. kubeflow            (all apps in model 'kubeflow')"
@@ -659,6 +665,78 @@ for it in d.get("items") or ([d] if d.get("kind") == "ConfigMap" else []):
     else
         _record OK "$name" "routes, mqtt and $gates gates equal the applied version's compile; $absent hosts not deployed"
     fi
+}
+
+# =============================================================================
+# Check: the platform manual the portal serves is the one the repository builds (3 Nov 2026)
+# — read-only. target: NAMESPACE. ConfigMap portal-manual (infra/lib-manual.sh) carries the
+# page gzipped and medcea/manual-sha256; the check rebuilds the page into a mktemp file
+# (docs/manual/build.py --out --standalone, as infra/lib-manual.sh builds it; the working
+# tree is not touched) and compares three digests:
+# the annotation, the ConfigMap's own content (gunzipped) and the fresh build. A lag is a
+# WARN with the fix; a ConfigMap whose content is not what its annotation says, or a manual
+# that no longer builds, is a FAIL. The portal Deployment must mount the ConfigMap (WARN).
+# =============================================================================
+check_manual() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" rc=0 tmp out
+    local fix="./guide.sh → Infrastructure → Publish the manual to the portal"
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    # Files, not variables: the ConfigMap is ~210 KiB of JSON, over the 128 KiB a single
+    # command-line argument may hold.
+    tmp="$(mktemp -d)"
+    timeout "$TIMEOUT" $KUBECTL get deployment portal -n "$ns" -o json >"$tmp/dep.json" 2>"$tmp/err" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -qiE 'NotFound|not found' "$tmp/err"; then
+            _record SKIP "$name" "no portal deployment in $ns yet (./deploy-infra.sh)"
+        else
+            _record FAIL "$name" "cannot read deployment portal: $(tail -n1 "$tmp/err" | cut -c1-160)"
+        fi
+        rm -rf "$tmp"; return
+    fi
+    timeout "$TIMEOUT" $KUBECTL get configmap portal-manual -n "$ns" -o json >"$tmp/cm.json" 2>"$tmp/err" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -qiE 'NotFound|not found' "$tmp/err"; then
+            _record WARN "$name" "the manual is not published: /manual/ answers 404 ($fix)"
+        else
+            _record FAIL "$name" "cannot read ConfigMap portal-manual: $(tail -n1 "$tmp/err" | cut -c1-160)"
+        fi
+        rm -rf "$tmp"; return
+    fi
+    if ! out="$(timeout $(( TIMEOUT > 30 ? TIMEOUT : 30 )) python3 "$SCRIPT_DIR/docs/manual/build.py" --out "$tmp/index.html" --standalone 2>&1)"; then
+        rm -rf "$tmp"
+        _record FAIL "$name" "docs/manual/build.py refuses to build the manual: $(grep -m1 'build:' <<<"$out" | cut -c1-160)"
+        return
+    fi
+    out="$(python3 -c '
+import base64, gzip, hashlib, json, sys
+d = sys.argv[1]
+cm, dep = json.load(open(d + "/cm.json")), json.load(open(d + "/dep.json"))
+want = hashlib.sha256(open(d + "/index.html", "rb").read()).hexdigest()
+meta = cm.get("metadata") or {}
+ann = (meta.get("annotations") or {})
+have_a, commit = ann.get("medcea/manual-sha256", ""), ann.get("medcea/manual-commit", "?")
+try:
+    have_c = hashlib.sha256(gzip.decompress(base64.b64decode((cm.get("binaryData") or {})["index.html.gz"]))).hexdigest()
+except Exception:
+    have_c = ""
+mounted = any((v.get("configMap") or {}).get("name") == "portal-manual"
+              for v in ((dep.get("spec") or {}).get("template") or {}).get("spec", {}).get("volumes") or [])
+if not have_c or have_c != have_a:
+    print("FAIL|ConfigMap portal-manual holds %s, its annotation says %s: republish it" % (have_c[:12] or "no readable page", have_a[:12] or "-"))
+elif have_a != want:
+    print("WARN|the portal serves the manual of %s (%s), the repository builds %s" % (commit, have_a[:12], want[:12]))
+elif not mounted:
+    print("WARN|the manual is published (%s) but the portal does not mount it yet: ./deploy-infra.sh" % want[:12])
+else:
+    print("OK|the portal serves the manual the repository builds (%s, commit %s)" % (want[:12], commit))
+' "$tmp" 2>&1)" || out="FAIL|cannot compare the manual's digests: $(tail -n1 <<<"$out" | cut -c1-120)"
+    rm -rf "$tmp"
+    case "${out%%|*}" in
+        OK)   _record OK "$name" "${out#*|}" ;;
+        WARN) if [[ "$out" == *"repository builds"* ]]; then _record WARN "$name" "${out#*|} ($fix)"
+              else _record WARN "$name" "${out#*|}"; fi ;;
+        *)    _record FAIL "$name" "${out#*|}" ;;
+    esac
 }
 
 # =============================================================================
@@ -1463,6 +1541,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         onboardroles) check_onboardroles "$name" ;;
         pgadminroles) check_pgadminroles "$name" "$target" ;;
         backupage)    check_backupage "$name" "$target" ;;
+        manual)       check_manual "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

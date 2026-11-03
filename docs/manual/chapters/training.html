@@ -21,6 +21,7 @@
 <tr><td><a href="#training-e11">E11 Keep an Editor's dashboard across a restart</a></td><td><span class="role">engineer</span>, <span class="role">qa</span>, host operator</td><td>An Editor's own dashboard and an open Grafana session survive a restart of Grafana, while the platform's dashboards stay read-only and a Viewer cannot save.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e12">E12 Make and check a backup</a></td><td>host operator (<span class="role">admin</span>), <span class="role">bio_scientist</span> (or any role the AI Workbench admits)</td><td>A backup can be made on demand, checked against its checksums, is readable only by the host account, and gives back a person's deleted file.</td><td>2 Nov 2026 (backup and verify)</td></tr>
 <tr><td><a href="#training-e13">E13 Version 1 and the skeleton gate</a></td><td>host operator (<span class="role">admin</span>)</td><td>Version 1 is recorded once and changes nothing a person can reach, and a git change that would give a role more access is refused before any deploy changes anything, break-glass included.</td><td>3 Nov 2026 (steps 1 and 3)</td></tr>
+<tr><td><a href="#training-e14">E14 Open the manual from the portal</a></td><td><span class="role">operator</span>, host operator (<span class="role">admin</span>), an account with no platform role</td><td>Everyone the portal admits reads, from a card on the portal, the manual the repository builds now; nobody else reads it; a republished manual shows at once.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -414,7 +415,7 @@
 <ul>
 <li>Step 1: the database deploy, <code>./deploy-infra.sh</code>, then the iam deploy printing <code>Policy versions...</code>, the bootstrap ("version 1 compiles to exactly what defaults.yaml compiles to (… targets): nothing is re-rendered"), <code>[policy] state/policy-applied.yaml: version 1 (bootstrap) written</code>, the grants check OK, the report lines, and "version 1 (bootstrap) applied: nothing was re-rendered".</li>
 <li>Step 2: <code>applied: version 1 (bootstrap), claimed by person &lt;your person_id&gt;, waiting for qa (4.3)</code>; <code>skeleton: accepted … , git …: equal</code>; <code>host file: … matches the database</code>; <code>bootstrap_applied</code> among the last policy events.</li>
-<li>Step 3: 54 checks; <strong>Access policy version</strong> OK ("version 1 (bootstrap), qa confirms it in the Policy UI once it exists (IAM 4.3)"); <strong>Policy artefacts</strong> OK.</li>
+<li>Step 3: 54 checks (55 since the <strong>Platform manual</strong> check of 3 Nov 2026); <strong>Access policy version</strong> OK ("version 1 (bootstrap), qa confirms it in the Policy UI once it exists (IAM 4.3)"); <strong>Policy artefacts</strong> OK.</li>
 <li>Step 4: the deploy stops before compiling anything: "ERROR: this git change gives access that has not been approved …", one line per role that gains the route (<span class="role">auditor</span>, <span class="role">qa</span>, <span class="role">qp</span>: "1 new: route iam GET /api/e13-probe"), "It cannot deploy until policy approvals can be applied (IAM 4.5) …", "Break-glass (MEDCEA_POLICY_FILE) does not bypass this check …", "Nothing was changed."</li>
 <li>Step 5: a normal deploy.</li>
 </ul>
@@ -430,6 +431,40 @@
 </ul>
 <p><strong>Afterwards.</strong> <code>git status</code> shows <code>apps/iam/policy/defaults.yaml</code> unchanged. Version 1 and its events stay: they are the platform's permanent record.</p>
 <p><strong>Last done.</strong> Steps 1 and 3 on 3 Nov 2026, by the live deploy: version 1 (bootstrap) applied at 09:59 UTC, claimed by <code>svieira</code>; events 42–46 (<code>skeleton_accepted</code> to <code>status_changed</code>) and 48 (<code>bootstrap_applied</code>), <code>account_seeded</code> 36 and 37 from <code>./deploy-infra.sh</code> at 09:36; host file matches the database; health 54/54 at 10:13. The first attempt at 09:38 was refused inside the bundle and rolled back (nothing changed; fixed in 2dc8422). Steps 2, 4 and 5 and the refusals: not yet.</p>
+
+<h3 id="training-e14">E14 Open the manual from the portal</h3>
+<p><strong>Goal.</strong> Find this manual on the portal, see that it is the copy the repository builds now, and see that only people the portal admits can read it. The exercise proves the decision of 3 November 2026 "The manual in the platform" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> An <span class="role">operator</span> account (any role other than <span class="role">admin</span> does; make one with <a href="#training-e1">E1</a> if none exists, for example <code>operator_test</code>), the host operator (the platform <span class="role">admin</span>, who publishes), and, for the refusal, an account with no platform role. The reader needs no right of its own: the portal's sign-in is the only gate.</p>
+<p><strong>Before you start.</strong> <code>./deploy-infra.sh</code> of 3 November 2026 or later has run, so the portal has the manual and the card; <code>./health-check.sh</code> shows <strong>Platform manual</strong> OK. For the refusal, an account with no platform role: in the Keycloak console (break-glass account, realm <code>medcea</code>) create <code>e14-norole</code> with a password and no role, and add it to the <a href="#compliance-test-accounts">test accounts</a> table. Give each account its own browser session.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">operator</span>: open <code>https://portal.&lt;domain&gt;</code> and sign in. On the main page click the <strong>Platform manual</strong> card (label <strong>Documentation</strong>).</li>
+<li><span class="role">operator</span>: in the new tab, read the box at the top (<strong>Edition</strong>, <strong>Updated</strong>, <strong>Code</strong>) and open <strong>Contents</strong> → Training → <strong>E14 Open the manual from the portal</strong>.</li>
+<li><span class="role">operator</span>: open <code>https://portal.&lt;domain&gt;/manual</code> (no slash at the end).</li>
+<li>Host operator: <code>./guide.sh</code> → Infrastructure → <strong>Publish the manual to the portal</strong>, and answer <code>y</code>. Then <code>./health-check.sh</code>.</li>
+<li><span class="role">operator</span>: reload the manual's tab.</li>
+<li><code>e14-norole</code>, in its own browser session: open <code>https://portal.&lt;domain&gt;/manual/</code> and sign in.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: a new tab at <code>https://portal.&lt;domain&gt;/manual/</code> with the manual, without a second sign-in. The user menu has no manual entry.</li>
+<li>Step 2: the edition box matches the repository (<code>docs/manual/build.py</code>'s edition); this exercise is there, which a copy older than 3 November 2026 would not have.</li>
+<li>Step 3: the address becomes <code>…/manual/</code> and shows the manual.</li>
+<li>Step 4: <code>manual: … KiB, … KiB gzipped in ConfigMap portal-manual (sha256 …, commit …)</code>, the portal's restart, <code>manual: the portal serves it at /manual/ (sha256 …)</code>, "Finished: exit code 0". The health check's <strong>Platform manual</strong> is OK: "the portal serves the manual the repository builds (&lt;sha256&gt;, commit &lt;commit&gt;)", 55 checks.</li>
+<li>Step 5: the manual again, at once (the browser asks for a fresh copy at every load).</li>
+<li>Step 6: the portal's <strong>No access yet</strong> page, not the manual.</li>
+</ul>
+<div class="record"><p>Reading the manual is not recorded: no event in the policy history, no decision. The publish of step 4 is in <code>logs/publish-manual-&lt;time&gt;.log</code>, and the health check's result in <code>logs/health-check-&lt;time&gt;.log</code>. The ConfigMap <code>portal-manual</code> carries the published page's sha256 and commit (<code>medcea/manual-sha256</code>, <code>medcea/manual-commit</code>). Write the commit and the first 12 characters of the sha256 from step 4 under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>Signed out (a fresh private window): <code>https://portal.&lt;domain&gt;/manual/</code> leads to the platform sign-in page, never to the manual.</li>
+<li>An account with no platform role (step 6): <strong>No access yet</strong>, on <code>/manual/</code> as on the portal.</li>
+<li>Signed in, <code>https://portal.&lt;domain&gt;/manual/index.html.gz</code> or any other address under <code>/manual/</code>: 404 Not Found. Only the page itself is served.</li>
+<li>Host operator, while another deploy runs: <strong>Publish the manual to the portal</strong> is refused ("Another MedCEA deploy is already running:", followed by the holder's PID and how to stop it), and nothing changes.</li>
+<li>Do not break a chapter on the host to see a publish refused: <code>tests/test_portal_manual.py</code> proves offline that a chapter <code>build.py</code> refuses publishes nothing and that a manual too large for a ConfigMap is refused.</li>
+</ul>
+<p><strong>Afterwards.</strong> In the User Manager, deactivate <code>e14-norole</code> with the reason "E14 test account" (or delete it in the Keycloak console), and note it in the test accounts table. Nothing else changed.</p>
+<p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>

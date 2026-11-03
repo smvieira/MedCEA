@@ -23,7 +23,7 @@ def read(rel):
 
 
 ENTRY = (sorted(glob.glob("apps/*/deploy.sh", root_dir=ROOT)) + sorted(glob.glob("apps/*/uninstall.sh", root_dir=ROOT))
-         + ["apps/iam/units.sh", "apps/iam/apply.sh", "apps/backup/backups.sh", "infra/deploy-workbench.sh", "health-check.sh",
+         + ["apps/iam/units.sh", "apps/iam/apply.sh", "apps/backup/backups.sh", "infra/deploy-workbench.sh", "infra/publish-manual.sh", "health-check.sh",
             "tests/iam-db-fixture.sh"]
          + [f"tests/iam-{n}.sh" for n in ("signin", "workbench", "mqtt", "access", "network", "hosts", "check",
                                           "schema", "runner", "postgrest", "db")])
