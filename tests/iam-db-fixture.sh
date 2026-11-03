@@ -138,10 +138,15 @@ step() { echo -e "\n${BOLD}── $* ──${NC}"; }
 mkdir -p "$IAMTEST_DIR" && chmod 700 "$IAMTEST_DIR"
 
 # fx DB [psql args] — psql in the fixture pod as postgres; SQL on stdin
-fx() {
+fx() {  # with -f -, the whole script is read before psql starts (as _dba_psql)
     local db="$1"; shift
+    local run='PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -U postgres -d "$0" "$@"'
+    case " $* " in
+        *" -f - "*) run='sql="$(cat; echo .)"; PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; export PGPASSWORD
+printf %s "${sql%.}" | psql -X -U postgres -d "$0" "$@"' ;;
+    esac
     $KUBECTL exec -i -n "$FX_NS" "$FX_POD" -- env PGOPTIONS="-c client_min_messages=warning" \
-        sh -c 'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -U postgres -d "$0" "$@"' "$db" "$@"
+        sh -c "$run" "$db" "$@"
 }
 # prod CMD... — a read-only client program in the production pod (pg_dump, pg_dumpall)
 prod() {

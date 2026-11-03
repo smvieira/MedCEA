@@ -82,11 +82,20 @@ _dba_log()  { echo -e "${_DBA_GREEN}[database]${_DBA_NC} $*"; }
 _dba_warn() { echo -e "${_DBA_YELLOW}[database] $*${_DBA_NC}" >&2; }
 
 # _dba_psql DB [psql args...] — SQL on stdin
+# With -f - the pod reads the whole script before psql starts (in memory, never a file):
+# a psql that stops early (ON_ERROR_STOP on the first statement) with input still unsent
+# left `kubectl exec -i` hanging, or exiting 0 without the error (IAM 4.2a fixture P22).
+# Without -f - stdin may be a terminal, so it is passed through untouched.
 _dba_psql() {
     local db="$1"; shift
+    local run='PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -U postgres -d "$0" "$@"'
+    case " $* " in
+        *" -f - "*) run='sql="$(cat; echo .)"; PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; export PGPASSWORD
+printf %s "${sql%.}" | psql -X -U postgres -d "$0" "$@"' ;;
+    esac
     $KUBECTL exec -i -n "$_DBA_NS" "$_DBA_POD" -- \
         env PGOPTIONS="-c client_min_messages=warning -c lock_timeout=5s" \
-        sh -c 'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -U postgres -d "$0" "$@"' "$db" "$@"
+        sh -c "$run" "$db" "$@"
 }
 
 # _dba_scram ROLE — the verifier of DBPW_<ROLE>, or nothing
