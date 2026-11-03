@@ -459,11 +459,21 @@ SQL
         && pass P22 "a broken assert rolls the whole bundle back (no version, no skeleton)" \
         || fail P22 "broken assert: exit $rc, versions|skeletons $ev"
     fx postgres -q -c "ALTER DATABASE medcea_pa2 SET default_transaction_isolation = 'repeatable read';" >/dev/null
+    local iso; iso="$(fx medcea_pa2 -q -tA -c "SELECT current_setting('transaction_isolation')" 2>&1)"
+    [[ "$iso" == "repeatable read" ]] || fail P22 "the database default did not take: a new session on medcea_pa2 runs '$iso'"
     out="$(pa_bundle medcea_pa2 "$dir" "$dir/post.sql")"; rc=$?
     fx postgres -q -c "ALTER DATABASE medcea_pa2 RESET default_transaction_isolation;" >/dev/null
     ev="$(fx medcea_pa2 -q -tA -c "SELECT count(*) FROM iam_policy.version")"
-    [[ $rc -ne 0 && "$out" == *"needs READ COMMITTED"* && "$ev" == 0 ]] \
-        && pass P22 "READ COMMITTED asserted inside the bundle (F-24)" || fail P22 "repeatable read: exit $rc, versions $ev, ${out:0:200}"
+    if [[ $rc -ne 0 && "$out" == *"needs READ COMMITTED"* && "$ev" == 0 ]]; then
+        pass P22 "READ COMMITTED asserted inside the bundle (F-24)"
+    else
+        fail P22 "repeatable read: exit $rc, versions on medcea_pa2 $ev"
+        local d
+        for d in medcea_pa medcea_pa2; do
+            echo "        $d versions: $(fx "$d" -q -tA -c "SELECT coalesce(string_agg(version || ':' || kind || ':' || status, ' ' ORDER BY version), 'none') FROM iam_policy.version" 2>&1)"
+        done
+        echo "        the bundle's output:"; sed 's/^/          /' <<<"$out" | head -60
+    fi
     rm -rf "$dir"
 }
 
