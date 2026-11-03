@@ -20,7 +20,7 @@
 <tr><td><a href="#training-e10">E10 Sign out and switch accounts</a></td><td><span class="role">engineer</span>, <span class="role">admin</span></td><td>After <strong>Sign out</strong>, the next person in the same browser never gets the previous person's AI Workbench, Grafana or pgAdmin, and an app left open follows the new person within minutes.</td><td>1 Nov 2026 (workbench part)</td></tr>
 <tr><td><a href="#training-e11">E11 Keep an Editor's dashboard across a restart</a></td><td><span class="role">engineer</span>, <span class="role">qa</span>, host operator</td><td>An Editor's own dashboard and an open Grafana session survive a restart of Grafana, while the platform's dashboards stay read-only and a Viewer cannot save.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e12">E12 Make and check a backup</a></td><td>host operator (<span class="role">admin</span>), <span class="role">bio_scientist</span> (or any role the AI Workbench admits)</td><td>A backup can be made on demand, checked against its checksums, is readable only by the host account, and gives back a person's deleted file.</td><td>2 Nov 2026 (backup and verify)</td></tr>
-<tr><td><a href="#training-e13">E13 Version 1 and the skeleton gate</a></td><td>host operator (<span class="role">admin</span>)</td><td>Version 1 is recorded once and changes nothing a person can reach, and a git change that would give a role more access is refused before any deploy changes anything, break-glass included.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e13">E13 Version 1 and the skeleton gate</a></td><td>host operator (<span class="role">admin</span>)</td><td>Version 1 is recorded once and changes nothing a person can reach, and a git change that would give a role more access is refused before any deploy changes anything, break-glass included.</td><td>3 Nov 2026 (steps 1 and 3)</td></tr>
 </tbody>
 </table></div>
 
@@ -429,7 +429,7 @@
 <li>Do not edit <code>state/policy-applied.yaml</code>: <code>tests/test_policy_source.py</code> proves offline that every compile refuses an edited one.</li>
 </ul>
 <p><strong>Afterwards.</strong> <code>git status</code> shows <code>apps/iam/policy/defaults.yaml</code> unchanged. Version 1 and its events stay: they are the platform's permanent record.</p>
-<p><strong>Last done.</strong> Not yet.</p>
+<p><strong>Last done.</strong> Steps 1 and 3 on 3 Nov 2026, by the live deploy: version 1 (bootstrap) applied at 09:59 UTC, claimed by <code>svieira</code>; events 42–46 (<code>skeleton_accepted</code> to <code>status_changed</code>) and 48 (<code>bootstrap_applied</code>), <code>account_seeded</code> 36 and 37 from <code>./deploy-infra.sh</code> at 09:36; host file matches the database; health 54/54 at 10:13. The first attempt at 09:38 was refused inside the bundle and rolled back (nothing changed; fixed in 2dc8422). Steps 2, 4 and 5 and the refusals: not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
