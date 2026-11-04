@@ -87,6 +87,11 @@ details pre { white-space: pre-wrap; font: 12px var(--mono); margin: 4px 0; }
 </header>
 <nav class="tabs" role="tablist">
   <button role="tab" data-view="matrix" hidden>Matrix</button>
+  <button role="tab" data-view="changes" hidden>Changes</button>
+  <button role="tab" data-view="approval" hidden>Approval</button>
+  <button role="tab" data-view="whocan" hidden>Who can…</button>
+  <button role="tab" data-view="identities" hidden>Service identities</button>
+  <button role="tab" data-view="breakglass" hidden>Break-glass</button>
   <button role="tab" data-view="history" hidden>History</button>
   <button role="tab" data-view="confirm" hidden>Confirm</button>
   <a id="lnk-decisions" href="#">Account decisions</a>
@@ -101,10 +106,46 @@ details pre { white-space: pre-wrap; font: 12px var(--mono); margin: 4px 0; }
       <span id="ver-info"></span>
     </div>
     <div class="note">Who may do what on the platform: one row per resource group, one column per role. A letter is a level the role holds (a dashed one is limited by a constraint). Click a cell to see what it gives. Red: the policy's checker refuses the cell; amber: a recorded waiver allows it.</div>
+    <div id="ver-banner"></div>
     <div id="checker"></div>
     <div class="wrap"><table class="matrix" id="matrix"></table></div>
     <h2 style="margin-top:16px">Levels</h2>
     <table class="list" id="levels"></table>
+  </section>
+
+  <section class="view" id="view-changes" hidden>
+    <div class="note">Every version of the access policy. A change is drafted by an administrator, edited cell by cell in the Matrix, submitted, and approved by a quality assurance person who is none of its authors. Nothing approved is applied until the host operator runs <code>apply.sh</code> (IAM 4.5).</div>
+    <div id="draft-form"></div>
+    <div id="open-card"></div>
+    <table class="list" id="changes"></table>
+  </section>
+
+  <section class="view" id="view-approval" hidden>
+    <div id="approval-list"></div>
+    <div id="approval"></div>
+  </section>
+
+  <section class="view" id="view-whocan" hidden>
+    <div class="note">Pick a database object, API route, host, MQTT topic or tool (or a resource group) to see which roles reach it, at which level, and which services do.</div>
+    <div class="bar">
+      <label>Version <select id="wc-ver"></select></label>
+      <label>Object <input type="text" id="wc-obj" list="wc-objects" size="48" autocomplete="off"></label>
+      <datalist id="wc-objects"></datalist>
+      <label>Level <select id="wc-level"><option value="">any</option></select></label>
+      <button class="btn" id="wc-go">Show</button>
+    </div>
+    <div id="whocan"></div>
+  </section>
+
+  <section class="view" id="view-identities" hidden>
+    <div class="note">The services' own identities: the database role and MQTT user each one logs in as, and the most its role may ever hold (its ceiling). They are part of the platform skeleton and change only through git.</div>
+    <div id="identities"></div>
+  </section>
+
+  <section class="view" id="view-breakglass" hidden>
+    <div id="overrides"></div>
+    <div class="note">The identities that can act outside the access policy, who uses them and what records their use. Using one is break-glass: the record of it is in the History tab.</div>
+    <table class="list" id="breakglass"></table>
   </section>
 
   <section class="view" id="view-history" hidden>
@@ -163,6 +204,46 @@ const REFUSALS = [
   [/^your access changed since you signed in/, () => 'Your access changed since you signed in. Reload the page.'],
   [/^approve access-policy versions in the Policy UI/, () => 'This request did not come through the Policy UI\'s sign-in. Reload the page and try again.'],
   [/^confirmation needs IAM_POSTGREST_JWT and IAM_DB_ROLES/, () => 'Confirming is not possible on this platform yet (IAM_POSTGREST_JWT and IAM_DB_ROLES must be true). Ask the administrator.'],
+  // IAM 4.4: the author functions (new_draft, save_entry, submit, withdraw)
+  [/^a reason is required/, () => 'Write a reason.'],
+  [/^no policy version is applied yet/, () => 'No policy version is applied on this host yet: the host operator runs ./apps/iam/apply.sh --bootstrap first.'],
+  [/^version (\d+) is being applied \(([^)]*)\)/, m => `Version ${m[1]} is being applied (${m[2]}). Wait for apply.sh to finish, or ask the host operator to run ./apps/iam/apply.sh --resume.`],
+  [/^version (\d+) is still open/, m => `Version ${m[1]} is still open: take it through, or withdraw it, before you start another draft.`],
+  [/^no policy version (\d+)/, m => `There is no policy version ${m[1]}.`],
+  [/^a draft starts from applied, defaults or a version number/, () => 'A draft starts from the applied version, the factory defaults or an earlier version number.'],
+  [/^version (\d+) is not a draft/, m => `Version ${m[1]} is no longer a draft: it cannot be edited or submitted. Reload the page.`],
+  [/^no role (\S+) or group (\S+) in the accepted skeleton/, m => `The host's accepted platform skeleton has no role ${m[1]} or group ${m[2]}: the Policy service runs another skeleton. The host operator runs ./apps/iam/deploy.sh.`],
+  [/^levels must be an object/, () => 'The cell was not sent as a set of levels. Reload the page and try again.'],
+  [/^version (\d+) does not pass the checker/, m => `Version ${m[1]} does not pass the policy's checker: fix the errors it lists (red cells in the Matrix) first.`],
+  [/^this host has accepted no platform skeleton yet/, () => 'This host has accepted no platform skeleton yet: the host operator runs ./apps/iam/deploy.sh.'],
+  [/^version (\d+) is not open/, m => `Version ${m[1]} is no longer open; nothing was changed. Reload the page.`],
+  // medcea_auth._person_actor and _approver
+  [/^policy changes are made in the Policy UI by a signed-in person/, () => 'Policy changes are made here by a signed-in person; this request did not carry one. Reload the page.'],
+  [/^your token carries no person_id/, () => 'Your account has no person_id, so nothing can be attributed to you. Ask an administrator.'],
+  [/^approvals are made by a person signed in through the API/, () => 'This approval did not arrive with your own sign-in. Reload the page and try again.'],
+  [/^the approver's token carries no person_id/, () => 'Your account has no person_id, so an approval cannot be attributed to you. Ask an administrator.'],
+  [/^role (\S+) holds no approval on (\S+)/, m => `Your role (${m[1]}) may not approve on ${m[2]}.`],
+  [/^role (\S+) holds no (\S+) on (\S+)/, m => `Your role (${m[1]}) holds no ${m[2]} on ${m[3]}.`],
+  // iam_policy.approve and return_version
+  [/^version (\d+) is not submitted/, m => `Version ${m[1]} is not waiting for approval (any more). Reload the page.`],
+  [/^no policy version is applied/, () => 'No policy version is applied on this host.'],
+  [/^version (\d+) was drafted on version (\d+), but version (\d+) is applied now/, m => `Version ${m[1]} was drafted on version ${m[2]}, but version ${m[3]} is applied now: return it to its authors.`],
+  [/^a policy break-glass is open \(event (\d+)\)(?:: approvals wait until a normal deploy of (.*) ends it)?/, m => `A policy break-glass is open (event ${m[1]}): approvals wait until a normal deploy${m[2] ? ' of ' + m[2] : ''} ends it. See the Break-glass tab.`],
+  [/^you are an author of version (\d+): another qa person approves it/, m => `You are an author of version ${m[1]}: another quality assurance person approves it.`],
+  [/^you are an author of version (\d+): another qa person returns it/, m => `You are an author of version ${m[1]}: another quality assurance person returns it.`],
+  [/^version (\d+) changed since you opened it/, m => `Version ${m[1]} changed since you opened it. Reload the page.`],
+  [/^the Policy service shows another platform skeleton than this host accepted/, () => 'The Policy service runs another platform skeleton than this host accepted: the host operator runs ./apps/iam/deploy.sh, then reload.'],
+  [/^the approval names no diff digest/, () => 'The approval did not carry the diff you saw. Reload the page.'],
+  [/^the diff you saw is not the one the host stored for version (\d+)/, m => `The diff you saw is not the one the host stored for version ${m[1]}. Reload the page.`],
+  [/^version (\d+) was proposed against skeleton (\w+)(?:, the accepted one is now (\w+))?/, m => `Version ${m[1]} was proposed against skeleton ${m[2]}${m[3] ? ', but the host now accepts ' + m[3] : ''}: return it, and the host operator proposes again.`],
+  [/^approving a skeleton version needs the attestation/, () => 'Tick the statement that you did not run apply.sh --propose-skeleton for this version.'],
+  [/^version (\d+) widens role (\S+?),? which you hold/, m => `Version ${m[1]} widens role ${m[2]}, which you hold: you may not approve it.`],
+  [/^version (\d+): (\S+) needs the signed token as evidence/, m => `The ${m[2]} of version ${m[1]} needs your signed token as evidence: use the Policy UI, and reload the page.`],
+  // iam-api's own (policy_api.py)
+  [/^the diff you approved is not the one the Policy service computes now/, () => 'The diff you approved is not the one the Policy service computes now. Reload the page and review it again.'],
+  [/^version (\d+) fails the checker now/, m => `Version ${m[1]} fails the policy's checker now: fix the errors it lists first.`],
+  [/^version (\d+) changed while it was checked/, m => `Version ${m[1]} changed while it was checked. Reload the page.`],
+  [/^only a change or skeleton version has an approval diff/, () => 'Only a change or skeleton version has an approval diff.'],
 ];
 function friendlyRefusal(msg) {
   const s = String(msg || '');
@@ -188,49 +269,243 @@ function describeReach(t) {
   if (kind === 'level') return `level ${b} on ${a}` + (c ? ` (if ${[].concat(c).join(', ')})` : '');
   return t.join(' ');
 }
+
+// ── IAM 4.4: the cell editor ─────────────────────────────────────────────────────────
+// levelsDoc is the document's `levels` ([{key, implies}]); a cell is written closed under
+// implies (I16), and N is never written.
+function closeImplied(levels, levelsDoc) {
+  const imp = {};
+  (levelsDoc || []).forEach(l => { imp[l.key] = l.implies || []; });
+  const out = new Set((levels || []).filter(l => l !== 'N'));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const l of [...out]) for (const i of imp[l] || []) if (i !== 'N' && !out.has(i)) { out.add(i); grew = true; }
+  }
+  return [...out].sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
+}
+
+// I14: a constraint on a level the cell does not hold.
+function constraintOnUnheld(levels, constraints) {
+  return Object.keys(constraints || {}).filter(l => constraints[l] && !(levels || []).includes(l));
+}
+
+// The whole cell, as PUT …/entry sends it (save_entry replaces the cell): {level: constraint | null}.
+function levelsPayload(levels, constraints) {
+  const out = {};
+  [...(levels || [])].sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b))
+    .forEach(l => { out[l] = (constraints || {})[l] || null; });
+  return out;
+}
+
+// Submit: the selected document is this draft change's, and its checker lists no error.
+function submitEnabled(doc, version) {
+  return !!(doc && version && version.kind === 'change' && version.status === 'draft' && doc.version === version.version
+    && doc.checker && Array.isArray(doc.checker.errors) && doc.checker.errors.length === 0);
+}
+
+// ── IAM 4.4: the approval ────────────────────────────────────────────────────────────
+const SKELETON_ATTEST = 'I did not run apply.sh --propose-skeleton for this version.';   // iam_policy.approve's
+
+function hex(u8) { return [...u8].map(b => b.toString(16).padStart(2, '0')).join(''); }
+// The digest of the exact response bytes, and the document parsed from the same buffer.
+async function digestOf(buf) { return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', buf))); }
+function parseDiff(buf) { return JSON.parse(new TextDecoder().decode(buf)); }
+
+// The roles of the viewer (own role and every role it includes) the diff adds to, in byte order.
+function ownWidening(diff, role, includes) {
+  const mine = [...new Set([role, ...(includes || [])].filter(Boolean))];
+  const roles = (diff && diff.roles) || {};
+  return mine.filter(r => roles[r] && (roles[r].added || []).length).sort();
+}
+
+const WHY_NOT = {
+  no_token: 'You are not signed in as a person the database can see. Reload the page.',
+  no_person: 'Your account has no person_id: ask an administrator.',
+  not_approver: 'Your role may not approve access-policy versions.',
+  changed_since: 'Your access changed since you signed in. Reload the page.',
+  no_version: 'This version does not exist.',
+  not_submitted: 'This version is not waiting for approval.',
+  no_applied: 'No policy version is applied on this host.',
+  stale_base: 'This version was drafted on another version than the one applied now: return it to its authors.',
+  own_author: 'You are an author of this version: another quality assurance person approves it.',
+  entries_changed: 'The version\'s entries changed since it was submitted: return it.',
+  break_glass_open: 'A policy break-glass is open: approvals wait until a normal deploy ends it (see the Break-glass tab).',
+  stale_skeleton: 'This skeleton version was proposed against a skeleton the host no longer accepts: return it, and the host operator proposes again.',
+  own_widening: 'This version widens a role you hold: you may not approve it.',
+};
+function whyNotText(code) { return WHY_NOT[code] || (code ? `The database refuses this approval (${code}).` : 'The database gave no verdict for this version. Reload the page.'); }
+
+// ds: {doc, digest (the browser's), headerDigest, skeletonDigest, accepted}. {ok, why}.
+function approveEnabled(v, ds, note, attest, me) {
+  const no = why => ({ ok: false, why });
+  if (!v || v.status !== 'submitted') return no('Only a submitted version can be approved.');
+  if (!ds || !ds.doc || !ds.headerDigest || !ds.skeletonDigest) return no('The diff has not loaded with its headers: reload the page.');
+  if (ds.digest !== ds.headerDigest) return no('The diff did not load intact: reload the page.');
+  if (ds.doc.version !== v.version || ds.doc.kind !== v.kind || !/^[0-9a-f]{64}$/.test(String(ds.doc.entries_digest || '')))
+    return no('The diff shown is not the one of this version: reload the page.');
+  const own = ownWidening(ds.doc, me && me.role, me && me.includes);
+  if (own.length) return no(`You may not approve a version that widens a role you hold (${own.join(', ')}).`);
+  if (v.kind === 'change' && ds.skeletonDigest !== ds.accepted)
+    return no('The Policy service runs another skeleton than this host accepted: the host operator runs ./apps/iam/deploy.sh.');
+  if (!v.why_not || v.why_not.may_approve !== true) return no(whyNotText(v.why_not && v.why_not.why_not_code));
+  if (!String(note || '').trim()) return no('Write a note.');
+  if (v.kind === 'skeleton' && attest !== true) return no('Tick the statement that you did not run apply.sh --propose-skeleton for this version.');
+  return { ok: true, why: '' };
+}
+
+// The reach tuples of every kind (explain.reach and explain.system_reach), in words.
+function describeTuple(t) {
+  const [kind, a, b, c, d] = t;
+  const s = x => [].concat(x == null ? [] : x).join(', ');
+  if (['db', 'route', 'host', 'tool', 'mqtt', 'level'].includes(kind)) return describeReach(t);
+  if (kind === 'public') return `API without sign-in: ${a} ${b}`;
+  if (kind === 'shared') return `shared upstream: ${a} ${b}`;
+  if (kind === 'serves') return `host ${a} serves ${b}`;
+  if (kind === 'azp') return `host ${a} signs in with client ${b}`;
+  if (kind === 'ingress') return `pod ${a} admits ${s(c)} on port ${b}`;
+  if (kind === 'unproxied') return `host ${a} reached without a proxy from ${b}`;
+  if (kind === 'client' && b === 'egress') return `client ${a} may connect to ${s(c)} on port ${d}`;
+  if (kind === 'client' && b === 'token_client') return `client ${a} sends tokens of ${c}`;
+  if (kind === 'client' && b === 'writes') return `client ${a} may write`;
+  if (kind === 'only_rpc') return `client ${a} may call only ${b}`;
+  if (kind === 'token_client') return `tokens of client ${a} are accepted`;
+  if (kind === 'svc') return `service ${a}: ${d} on ${c}`;
+  if (kind === 'svc-member') return `${b} is a member of ${a}`;
+  if (kind === 'rls') return `row policy on ${a} for ${b} (${c})`;
+  if (kind === 'section') return `skeleton section ${a} changed`;
+  return t.filter(x => x != null).map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(' ');
+}
+
+const TUPLE_KINDS = [['db', 'Database privileges'], ['route', 'API routes'], ['host', 'Sign-in'], ['mqtt', 'MQTT topics'],
+  ['tool', 'Tool settings'], ['level', 'Levels held']];
+// [[label, [tuples]]] in TUPLE_KINDS' order, any other kind last as "Other".
+function groupTuples(ts) {
+  const out = TUPLE_KINDS.map(([k, label]) => [label, (ts || []).filter(t => t[0] === k)]);
+  out.push(['Other', (ts || []).filter(t => !TUPLE_KINDS.some(([k]) => k === t[0]))]);
+  return out.filter(([, list]) => list.length);
+}
+
+// {L: constraint | [constraints] | null} as words: "R, O (if assigned_run)", or "nothing".
+function cellWords(levels) {
+  const ks = Object.keys(levels || {}).sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
+  return ks.length ? ks.map(l => l + (levels[l] ? ` (if ${[].concat(levels[l]).join(' or ')})` : '')).join(', ') : 'nothing';
+}
+
+// The makers of a version, as the Changes and Approval tabs show them. A skeleton version's
+// created_by_name is the fixed text "apply.sh --by (claimed)": its maker is the claimed person.
+function makersOf(v) {
+  const out = [];
+  for (const a of (v && v.authors) || []) {
+    if (a.claimed) out.push(`person ${a.person} (claimed by apply.sh --by)`);
+    else if (a.name && !out.includes(a.name)) out.push(a.name);
+  }
+  if (v && v.kind !== 'skeleton' && v.submitted_by_name && !out.includes(v.submitted_by_name)) out.push(v.submitted_by_name);
+  if (v && v.kind === 'skeleton' && v.created_by_person && !out.some(x => x.includes(v.created_by_person)))
+    out.push(`person ${v.created_by_person} (claimed by apply.sh --by)`);
+  return out;
+}
+
+// The "from" choices of a new draft: applied, defaults, and every earlier version number.
+function draftSources(versions) {
+  return ['applied', 'defaults'].concat((versions || []).filter(v => v.status !== 'draft').map(v => String(v.version)));
+}
 /* policy-logic:end */
 
 const $ = id => document.getElementById(id);
-let ME = null, DOC = null, VERSIONS = [];
+let ME = null, DOC = null, VERSIONS = [], LIST = {}, DIFF = null, WHO_INDEX = null;
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+function reauth(status) {
+  if (status === 401 && !sessionStorage.getItem('policy-reauth')) {
+    try { sessionStorage.setItem('policy-reauth', '1'); } catch (e) { /* storage off */ }
+    location.href = '/oauth2/start?rd=' + encodeURIComponent(location.pathname + location.hash);
+    throw new Error('signing in again');
+  }
+}
 
 async function api(path, opts) {
   const r = await fetch(path, Object.assign({ credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, opts || {}));
   let body = {};
   try { body = await r.json(); } catch (e) { /* not JSON */ }
-  if (r.status === 401 && !sessionStorage.getItem('policy-reauth')) {
-    try { sessionStorage.setItem('policy-reauth', '1'); } catch (e) { /* storage off */ }
-    location.href = '/oauth2/start?rd=' + encodeURIComponent(location.pathname);
-    throw new Error('signing in again');
-  }
-  if (!r.ok) { const e = new Error(body.error || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+  reauth(r.status);
+  if (!r.ok) { const e = new Error(body.error || ('HTTP ' + r.status)); e.status = r.status; e.body = body; throw e; }
   try { sessionStorage.removeItem('policy-reauth'); } catch (e) { /* storage off */ }
   return body;
 }
 
-function show(kind, text) { $('msg').innerHTML = text ? `<div class="${kind}">${esc(text)}</div>` : ''; }
+// A JSON write (POST or PUT): the Origin the browser sends is the one iam-api requires.
+function send(method, path, body) {
+  return api(path, { method, headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
+}
 
-function select(view) {
+// The approval diff: the exact response bytes are hashed, and the document shown is parsed
+// from the same buffer (design §14.7.3), so what qa sees is what is hashed.
+async function fetchDiff(v) {
+  const r = await fetch(`/api/policy/${v}/diff?against=applied`, { credentials: 'same-origin', cache: 'no-store', headers: { 'Accept': 'application/json' } });
+  reauth(r.status);
+  const buf = await r.arrayBuffer();
+  if (!r.ok) {
+    let body = {};
+    try { body = parseDiff(buf); } catch (e) { /* not JSON */ }
+    const e = new Error(body.error || ('HTTP ' + r.status)); e.status = r.status; throw e;
+  }
+  return { doc: parseDiff(buf), digest: await digestOf(buf), headerDigest: r.headers.get('X-Medcea-Diff-Digest'),
+           skeletonDigest: r.headers.get('X-Medcea-Skeleton-Digest'), accepted: LIST.accepted_skeleton_digest || null };
+}
+
+function show(kind, text) { $('msg').innerHTML = text ? `<div class="${kind}">${esc(text)}</div>` : ''; }
+function refused(e) {
+  const errs = (e && e.body && Array.isArray(e.body.errors)) ? e.body.errors : [];
+  $('msg').innerHTML = `<div class="error">${esc(friendlyRefusal(e.message))}` +
+    (errs.length ? `<ul>${errs.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '') + '</div>';
+}
+function when(t) { return t ? esc(String(t).slice(0, 19).replace('T', ' ')) + ' UTC' : ''; }
+
+function select(view, arg) {
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === view)));
   document.querySelectorAll('.view').forEach(v => { v.hidden = v.id !== 'view-' + view; });
+  $('panel').hidden = true;
   show('', '');
   try { localStorage.setItem('policy-tab', view); } catch (e) { /* storage off */ }
-  if (view === 'matrix') loadMatrix($('ver').value || 'applied');
+  if (view === 'matrix') loadMatrix(arg || $('ver').value || 'applied');
+  if (view === 'changes') loadChanges();
+  if (view === 'approval') loadApproval(arg);
+  if (view === 'whocan') loadWhoCan();
+  if (view === 'identities') loadIdentities();
+  if (view === 'breakglass') loadBreakGlass();
   if (view === 'history') loadHistory();
   if (view === 'confirm') loadPending();
 }
 
 function helpOf(list, key) { const x = (list || []).find(e => e.key === key); return x ? (x.help || x.summary || x.label || '') : ''; }
+function metaOf(n) { return VERSIONS.find(x => x.version === n) || {}; }
+function editing() { const m = metaOf(DOC && DOC.version); return !!(ME.acts && ME.acts.edit && m.kind === 'change' && m.status === 'draft'); }
+
+async function refreshVersions() {
+  LIST = await api('/api/policy');
+  VERSIONS = LIST.versions || [];
+  const cur = $('ver').value;
+  $('ver').innerHTML = VERSIONS.map(v =>
+    `<option value="${v.version}"${(cur ? String(v.version) === cur : v.status === 'applied') ? ' selected' : ''}>${v.version} (${esc(v.kind)}, ${esc(v.status)})</option>`).join('');
+  $('wc-ver').innerHTML = '<option value="applied">applied</option>' + VERSIONS.map(v => `<option value="${v.version}">${v.version} (${esc(v.kind)}, ${esc(v.status)})</option>`).join('');
+  const hv = $('hist-ver').value;
+  $('hist-ver').innerHTML = '<option value="">all</option>' + VERSIONS.map(v => `<option value="${v.version}"${String(v.version) === hv ? ' selected' : ''}>${v.version}</option>`).join('');
+}
 
 async function loadMatrix(v) {
   try {
     DOC = await api('/api/policy/' + encodeURIComponent(v));
-  } catch (e) { return show('error', friendlyRefusal(e.message)); }
+  } catch (e) { return refused(e); }
   const roles = DOC.roles, groups = DOC.groups;
-  const meta = VERSIONS.find(x => x.version === DOC.version) || {};
+  const meta = metaOf(DOC.version);
   $('ver-info').textContent = `version ${DOC.version} (${meta.kind || '?'}, ${meta.status || '?'})` +
     (meta.confirmed_at ? ', confirmed' : meta.disputed_at ? ', DISPUTED' : meta.needs_confirmation ? ', waiting for confirmation' : '');
+  let banner = '';
+  if (meta.kind === 'skeleton') banner += '<div class="note">Kind skeleton: its entries are the applied ones; what changes is the platform skeleton (Approval → diff).</div>';
+  if (editing()) banner += `<div class="note">Edit mode: version ${DOC.version} is a draft. Click a cell to change it; each save records the checker's verdict. Submit stays disabled while the checker lists errors.</div>`;
+  $('ver-banner').innerHTML = banner;
   const ck = DOC.checker || {};
   $('checker').innerHTML = (ck.errors || []).length
     ? `<div class="error">The checker refuses ${ck.errors.length} rule(s): ${esc(ck.errors.join('; '))}</div>`
@@ -254,6 +529,59 @@ async function loadMatrix(v) {
     `<tr><td><span class="chip">${esc(l.key)}</span> ${esc(l.name)}</td><td>${esc(l.summary)} ${esc(l.help)}</td></tr>`).join('');
 }
 
+// The cell editor (edit mode): one checkbox per level, a constraint per held level, a reason.
+function editorHtml(role, group) {
+  const c = ((DOC.cells || {})[group] || {})[role] || { levels: [], constraints: {} };
+  const cons = Object.keys(DOC.constraints || {});
+  const rows = DOC.levels.filter(l => l.key !== 'N').map(l => {
+    const held = c.levels.includes(l.key), con = (c.constraints || {})[l.key] || '';
+    return `<tr><td><label><input type="checkbox" class="ed-level" value="${esc(l.key)}"${held ? ' checked' : ''}> <span class="chip">${esc(l.key)}</span> <span class="name" title="${esc(l.help)}">${esc(l.name)}</span></label></td>` +
+      `<td><select class="ed-con" data-level="${esc(l.key)}"${held ? '' : ' disabled'}><option value="">no constraint</option>` +
+      cons.map(k => `<option value="${esc(k)}" title="${esc(DOC.constraints[k])}"${k === con ? ' selected' : ''}>${esc(k)}</option>`).join('') + '</select></td></tr>';
+  }).join('');
+  return `<div class="card" id="editor"><h3 style="margin-top:0">Change this cell (version ${DOC.version})</h3>
+    <table class="list">${rows}</table>
+    <p class="mono" id="ed-implied"></p>
+    <label>Reason (required)<textarea id="ed-reason" maxlength="2000"></textarea></label>
+    <div class="row"><button class="btn" id="ed-save" disabled>Save the cell</button></div>
+    <div id="ed-verdict"></div></div>`;
+}
+
+function wireEditor(role, group) {
+  const read = () => {
+    const picked = [...document.querySelectorAll('#editor .ed-level')].filter(x => x.checked).map(x => x.value);
+    const levels = closeImplied(picked, DOC.levels);
+    const cons = {};
+    document.querySelectorAll('#editor .ed-con').forEach(s => { if (s.value) cons[s.dataset.level] = s.value; });
+    return { picked, levels, cons };
+  };
+  const upd = () => {
+    const { picked, levels } = read();
+    document.querySelectorAll('#editor .ed-con').forEach(s => { s.disabled = !levels.includes(s.dataset.level); if (s.disabled) s.value = ''; });
+    const added = levels.filter(l => !picked.includes(l));
+    $('ed-implied').textContent = added.length ? `Also held, because the levels you ticked imply them: ${added.join(' ')}` : '';
+    $('ed-save').disabled = !String($('ed-reason').value).trim();
+  };
+  document.querySelectorAll('#editor .ed-level, #editor .ed-con').forEach(x => x.addEventListener('change', upd));
+  $('ed-reason').addEventListener('input', upd);
+  upd();
+  $('ed-save').addEventListener('click', async () => {
+    const { levels, cons } = read();
+    const bad = constraintOnUnheld(levels, cons);
+    if (bad.length) { $('ed-verdict').innerHTML = `<div class="error">A constraint on a level the cell does not hold: ${esc(bad.join(', '))}</div>`; return; }
+    const v = DOC.version;
+    try {
+      const r = await send('PUT', `/api/policy/${v}/entry`, { role, group, levels: levelsPayload(levels, cons), reason: $('ed-reason').value });
+      await loadMatrix(String(v));
+      await openCell(role, group);
+      const vd = r.verdict || {};
+      $('ed-verdict').innerHTML = (vd.errors || []).length
+        ? `<div class="error">Saved. The checker now refuses ${vd.errors.length} rule(s); Submit stays disabled until they are fixed:<ul>${vd.errors.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`
+        : '<div class="ok">Saved. The checker accepts the version.</div>';
+    } catch (e) { $('ed-verdict').innerHTML = `<div class="error">${esc(friendlyRefusal(e.message))}</div>`; }
+  });
+}
+
 async function openCell(role, group) {
   $('panel').hidden = false;
   $('p-title').textContent = 'Loading…';
@@ -264,7 +592,8 @@ async function openCell(role, group) {
   } catch (e) { $('p-title').textContent = 'Cell'; $('p-body').innerHTML = `<div class="error">${esc(friendlyRefusal(e.message))}</div>`; return; }
   $('p-title').textContent = `${d.role_label || d.role} on ${d.group_label || d.group}`;
   const lv = d.levels.length ? d.levels.map(l => `<span class="chip">${esc(l)}</span>` + (d.constraints[l] ? ` only if <b>${esc(d.constraints[l].name)}</b>: ${esc(d.constraints[l].help)}` : '')).join('<br>') : 'No level: this role holds nothing here.';
-  let h = `<p>${esc(d.group_help)}</p><h3>Levels</h3><p>${lv}</p>`;
+  let h = editing() ? editorHtml(role, group) : '';
+  h += `<p>${esc(d.group_help)}</p><h3>Levels</h3><p>${lv}</p>`;
   if (d.implied.length) h += `<p>Implied: ${d.implied.map(l => `<span class="chip">${esc(l)}</span>`).join('')}</p>`;
   h += `<h3>What only this cell gives</h3>` + (d.gives.length ? '<ul>' + d.gives.map(t => `<li>${esc(describeReach(t))}</li>`).join('') + '</ul>' : '<p>Nothing beyond the role\'s other cells.</p>');
   const added = d.hosts.with.filter(x => !d.hosts.without.includes(x));
@@ -274,8 +603,227 @@ async function openCell(role, group) {
   if (d.checker.length) h += `<h3>Checker</h3><ul>${d.checker.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`;
   if (d.changed && !d.changed.same) h += `<h3>Against the applied version</h3><p>Applied: ${d.changed.applied_levels.join(' ') || 'nothing'}</p>`;
   $('p-body').innerHTML = h;
+  if (editing()) wireEditor(role, group);
 }
 
+// ── Changes ──────────────────────────────────────────────────────────────────────────
+function checkersOf(v) {
+  const out = [];
+  if (v.approved_by_name) out.push(`approved by ${v.approved_by_name} ${when(v.approved_at)}` + (v.approval_note ? `: ${v.approval_note}` : ''));
+  if (v.confirmed_at) out.push(`confirmed ${when(v.confirmed_at)}` + (v.confirm_note ? `: ${v.confirm_note}` : ''));
+  if (v.disputed_at) out.push(`DISPUTED ${when(v.disputed_at)}` + (v.dispute_note ? `: ${v.dispute_note}` : ''));
+  return out;
+}
+
+async function loadChanges() {
+  try { await refreshVersions(); } catch (e) { return refused(e); }
+  const open = LIST.open == null ? null : metaOf(LIST.open);
+  if (ME.acts && ME.acts.draft) {
+    $('draft-form').innerHTML = `<div class="card"><h3 style="margin-top:0">New draft</h3>` +
+      (open ? `<div class="note">Version ${open.version} (${esc(open.kind)}, ${esc(open.status)}) is still open: take it through or withdraw it before you start another draft.</div>` : '') +
+      `<div class="bar"><label>Start from <select id="dr-from">${draftSources(VERSIONS).map(x => `<option value="${esc(x)}">${esc(x === 'applied' ? 'the applied version' : x === 'defaults' ? 'the factory defaults' : 'version ' + x)}</option>`).join('')}</select></label></div>
+      <label>Reason (required)<textarea id="dr-reason" maxlength="2000"></textarea></label>
+      <div class="row"><button class="btn" id="dr-go" disabled>Create the draft</button></div></div>`;
+    const upd = () => { $('dr-go').disabled = !!open || !String($('dr-reason').value).trim(); };
+    $('dr-reason').addEventListener('input', upd);
+    $('dr-go').addEventListener('click', async () => {
+      try {
+        const r = await send('POST', '/api/policy/draft', { from: $('dr-from').value, reason: $('dr-reason').value });
+        await refreshVersions();
+        $('ver').value = String(r.version);
+        select('matrix', String(r.version));
+        show((r.verdict || {}).ok ? 'ok' : 'error', `Draft ${r.version} created.` + ((r.verdict || {}).ok ? ' The checker accepts it.' : ' The checker lists errors: fix them before you submit.'));
+      } catch (e) { refused(e); }
+    });
+  } else $('draft-form').innerHTML = '';
+  $('open-card').innerHTML = '';
+  if (open && ME.acts && (ME.acts.submit || ME.acts.withdraw)) await openCard(open);
+  $('changes').innerHTML = '<tr><th>#</th><th>Kind, status</th><th>Made by</th><th>Checked by</th><th>Reason</th></tr>' + VERSIONS.map(v =>
+    `<tr><td><a href="#" data-matrix="${v.version}">${v.version}</a></td><td>${esc(v.kind)}, <b>${esc(v.status)}</b>` +
+      (v.kind === 'skeleton' && v.skeleton_commit ? `<br>git commit <code>${esc(v.skeleton_commit)}</code>` : '') +
+      (v.based_on != null ? `<br>based on ${v.based_on}` : '') + `</td>` +
+    `<td>${esc(makersOf(v).join('; ') || v.created_by_name || '')}<br><span class="mono">${when(v.created_at)}</span></td>` +
+    `<td>${esc(checkersOf(v).join('; '))}${v.return_note ? `<br>returned by qa ${when(v.returned_at)}: ${esc(v.return_note)}` : ''}` +
+      (v.withdrawn_at ? `<br>withdrawn ${when(v.withdrawn_at)}${v.withdrawn_by ? ' by ' + esc(v.withdrawn_by) : ''}` : '') + `</td>` +
+    `<td>${esc(v.reason)}</td></tr>`).join('');
+  document.querySelectorAll('#changes [data-matrix]').forEach(a => a.addEventListener('click', ev => {
+    ev.preventDefault(); $('ver').value = a.dataset.matrix; select('matrix', a.dataset.matrix);
+  }));
+}
+
+// The open version: Submit (a draft change the checker accepts) and Withdraw, each with a reason.
+async function openCard(v) {
+  let doc = null;
+  if (v.kind === 'change' && v.status === 'draft') {
+    try { doc = await api('/api/policy/' + v.version); } catch (e) { /* shown as not submittable */ }
+  }
+  const canSubmit = ME.acts.submit && v.kind === 'change' && v.status === 'draft';
+  const ok = submitEnabled(doc, v);
+  $('open-card').innerHTML = `<div class="card"><h3 style="margin-top:0">Open: version ${v.version} (${esc(v.kind)}, ${esc(v.status)})</h3>
+    <dl><dt>Made by</dt><dd>${esc(makersOf(v).join('; '))}</dd><dt>Reason</dt><dd>${esc(v.reason)}</dd>
+    ${v.return_note ? `<dt>Returned by qa</dt><dd>${esc(v.return_note)}</dd>` : ''}</dl>
+    ${canSubmit && !ok ? `<div class="note">Submit stays disabled while the checker lists errors${doc ? ` (${(doc.checker.errors || []).length})` : ''}: fix the red cells in the <a href="#" data-matrix="${v.version}">Matrix</a>.</div>` : ''}
+    <label>Reason (required)<textarea id="oc-reason" maxlength="2000"></textarea></label>
+    <div class="row">${canSubmit ? '<button class="btn" id="oc-submit" disabled>Submit for approval</button>' : ''}${ME.acts.withdraw ? '<button class="btn secondary" id="oc-withdraw" disabled>Withdraw…</button>' : ''}</div></div>`;
+  const upd = () => {
+    const r = !!String($('oc-reason').value).trim();
+    if ($('oc-submit')) $('oc-submit').disabled = !(r && ok);
+    if ($('oc-withdraw')) $('oc-withdraw').disabled = !r;
+  };
+  $('oc-reason').addEventListener('input', upd);
+  document.querySelectorAll('#open-card [data-matrix]').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); $('ver').value = a.dataset.matrix; select('matrix', a.dataset.matrix); }));
+  if ($('oc-submit')) $('oc-submit').addEventListener('click', async () => {
+    if (!confirm(`Submit version ${v.version}? A quality assurance person who is none of its authors then approves or returns it.`)) return;
+    try { await send('POST', `/api/policy/${v.version}/submit`, { reason: $('oc-reason').value }); await loadChanges(); show('ok', `Version ${v.version} submitted. It waits for approval.`); }
+    catch (e) { refused(e); }
+  });
+  if ($('oc-withdraw')) $('oc-withdraw').addEventListener('click', async () => {
+    if (!confirm(`Withdraw version ${v.version}? A withdrawn version stays in the history and is never applied.`)) return;
+    try { await send('POST', `/api/policy/${v.version}/withdraw`, { reason: $('oc-reason').value }); await loadChanges(); show('ok', `Version ${v.version} withdrawn. It is in the history.`); }
+    catch (e) { refused(e); }
+  });
+}
+
+// ── Approval ─────────────────────────────────────────────────────────────────────────
+async function loadApproval(n) {
+  try { await refreshVersions(); } catch (e) { return refused(e); }
+  const subs = VERSIONS.filter(v => v.status === 'submitted');
+  $('approval').innerHTML = '';
+  if (!subs.length) { $('approval-list').innerHTML = '<p>Nothing waits for approval.</p>'; return; }
+  $('approval-list').innerHTML = '<h2>Versions waiting for approval</h2><ul>' + subs.map(v =>
+    `<li><a href="#approval/${v.version}" data-approve="${v.version}">Version ${v.version}</a> (${esc(v.kind)}): ${esc(v.reason)}</li>`).join('') + '</ul>';
+  document.querySelectorAll('#approval-list [data-approve]').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); openApproval(Number(a.dataset.approve)); }));
+  const pick = subs.find(v => v.version === Number(n)) || (subs.length === 1 ? subs[0] : null);
+  if (pick) await openApproval(pick.version);
+}
+
+function tupleList(ts) {
+  return groupTuples(ts).map(([label, list]) => `<p><b>${esc(label)}</b></p><ul>${list.map(t => `<li>${esc(describeTuple(t))}</li>`).join('')}</ul>`).join('');
+}
+
+function waiverWords(w) { return `${w.id} (${w.invariant}${w.subject ? ', ' + w.subject : ''}${w.group ? ' on ' + w.group : ''})` + (w.rationale ? ': ' + w.rationale : ''); }
+
+async function openApproval(n) {
+  const v = metaOf(n);
+  try { history.replaceState(null, '', '#approval/' + n); } catch (e) { /* no history */ }
+  $('approval').innerHTML = '<p>Loading the diff…</p>';
+  DIFF = null;
+  try { DIFF = await fetchDiff(n); } catch (e) { $('approval').innerHTML = `<div class="error">${esc(friendlyRefusal(e.message))}</div>`; return; }
+  const d = DIFF.doc, sk = v.kind === 'skeleton';
+  const own = ownWidening(d, ME.role, ME.includes);
+  let h = `<div class="card"><h2>Version ${v.version}: ${esc(v.kind)}</h2><dl>
+    <dt>Reason</dt><dd>${esc(v.reason)}</dd>
+    <dt>Made by</dt><dd>${esc(makersOf(v).join('; '))}</dd>
+    <dt>Based on</dt><dd>version ${esc(v.based_on)}; applied now: ${esc(LIST.applied)}</dd>
+    <dt>Submitted</dt><dd>${when(v.submitted_at)}</dd></dl>`;
+  if (sk) h += `<div class="note">A git change: commit <code>${esc(v.skeleton_commit || '?')}</code>, proposed by the host operator for person <code>${esc(v.created_by_person)}</code> (a claim of apply.sh --by; the reason names the username).</div>`;
+  h += '</div>';
+  if (own.length) h += `<div class="error"><b>This version widens a role you hold.</b> You may not approve a version that widens a role you hold.` +
+    own.map(r => `<p>${esc(r)}:</p>${tupleList(d.roles[r].added)}`).join('') +
+    '<p>This check covers only the role you signed in with; your other accounts are checked when the version is applied (IAM 4.5).</p></div>';
+  h += '<h3>What changes, per role</h3>';
+  const roles = Object.keys(d.roles || {}).sort();
+  h += roles.length ? roles.map(r => `<div class="card"><b>${esc(r)}</b>` +
+    ((d.roles[r].added || []).length ? `<p>Gains:</p>${tupleList(d.roles[r].added)}` : '') +
+    ((d.roles[r].removed || []).length ? `<p>Loses:</p>${tupleList(d.roles[r].removed)}` : '') + '</div>').join('') : '<p>No role gains or loses anything.</p>';
+  h += '<h3>Changed cells</h3>' + ((d.cells || []).length ? '<table class="list"><tr><th>Group</th><th>Role</th><th>Before</th><th>After</th></tr>' +
+    d.cells.map(c => `<tr><td>${esc(c.group)}</td><td>${esc(c.role)}</td><td>${esc(cellWords(c.before))}</td><td>${esc(cellWords(c.after))}</td></tr>`).join('') + '</table>' : '<p>No cell changes.</p>');
+  const wa = (d.waivers || {}).added || [], wr = (d.waivers || {}).removed || [];
+  if (wa.length || wr.length) h += '<h3>Waivers</h3><ul>' + wa.map(w => `<li>added: ${esc(waiverWords(w))}</li>`).join('') + wr.map(w => `<li>removed: ${esc(waiverWords(w))}</li>`).join('') + '</ul>';
+  const sa = (d.system || {}).added || [], sr = (d.system || {}).removed || [];
+  if (sa.length || sr.length) h += '<h3>Services and the network</h3><ul>' + sa.map(t => `<li>added: ${esc(describeTuple(t))}</li>`).join('') + sr.map(t => `<li>removed: ${esc(describeTuple(t))}</li>`).join('') + '</ul>';
+  if (sk && d.skeleton) h += `<h3>Platform skeleton</h3><p class="mono">from ${esc(String(d.skeleton.from || '').slice(0, 12))} to ${esc(String(d.skeleton.to || '').slice(0, 12))}</p>` +
+    ((d.skeleton.sections || []).length ? '<ul>' + d.skeleton.sections.map(t => `<li>${esc(describeTuple(t))}</li>`).join('') + '</ul>' : '');
+  h += `<p class="mono">diff ${esc(DIFF.digest.slice(0, 16))}…, entries ${esc(String(d.entries_digest || '').slice(0, 16))}…, skeleton ${esc(String(DIFF.skeletonDigest || '').slice(0, 16))}…</p>`;
+  h += `<div class="card"><p><b>Approval — an attributable record, not an electronic signature.</b></p>
+    ${sk ? `<label class="attest"><input type="checkbox" id="ap-attest"> <span>${esc(SKELETON_ATTEST)}</span></label>` : ''}
+    <label>Note (required)<textarea id="ap-note" maxlength="2000"></textarea></label>
+    <div id="ap-why" class="note"></div>
+    <div class="row">${ME.acts.approve ? '<button class="btn" id="ap-approve" disabled>Approve</button>' : ''}${ME.acts.return ? '<button class="btn secondary" id="ap-return" disabled>Return…</button>' : ''}</div></div>`;
+  $('approval').innerHTML = h;
+  const upd = () => {
+    const note = $('ap-note').value, att = sk ? $('ap-attest').checked : false;
+    const st = approveEnabled(v, DIFF, note, att, ME);
+    if ($('ap-approve')) $('ap-approve').disabled = !st.ok;
+    $('ap-why').textContent = st.ok ? 'Ready to approve.' : st.why;
+    if ($('ap-return')) $('ap-return').disabled = !disputeEnabled(note);
+  };
+  $('ap-note').addEventListener('input', upd);
+  if (sk) $('ap-attest').addEventListener('change', upd);
+  upd();
+  if ($('ap-approve')) $('ap-approve').addEventListener('click', async () => {
+    const body = { note: $('ap-note').value, entries_digest: d.entries_digest, diff_digest: DIFF.digest, skeleton_digest: DIFF.skeletonDigest };
+    if (sk) body.attest = $('ap-attest').checked ? SKELETON_ATTEST : '';
+    try { await send('POST', `/api/policy/${n}/approve`, body); await loadApproval(); show('ok', `Version ${n} approved. It is applied when the host operator runs apply.sh (IAM 4.5).`); }
+    catch (e) { refused(e); }
+  });
+  if ($('ap-return')) $('ap-return').addEventListener('click', async () => {
+    const q = sk ? `Return version ${n}? Returning a skeleton version withdraws it: the host operator proposes again after the git change.`
+                 : `Return version ${n} to its authors? It becomes a draft again.`;
+    if (!confirm(q)) return;
+    try { await send('POST', `/api/policy/${n}/return`, { note: $('ap-note').value }); await loadApproval(); show('ok', `Version ${n} returned. It is in the history.`); }
+    catch (e) { refused(e); }
+  });
+}
+
+// ── Who can…, Service identities, Break-glass ────────────────────────────────────────
+async function loadWhoCan() {
+  if (!$('wc-level').options.length || $('wc-level').options.length === 1) {
+    $('wc-level').innerHTML = '<option value="">any</option>' + LEVEL_ORDER.map(l => `<option value="${l}">${l}</option>`).join('');
+  }
+  if (WHO_INDEX) return;
+  try {
+    WHO_INDEX = await api('/api/policy/who-can?version=' + encodeURIComponent($('wc-ver').value || 'applied'));
+    $('wc-objects').innerHTML = (WHO_INDEX.objects || []).map(o => `<option value="${esc(o.name)}">${esc(o.type)}${(o.groups || []).length ? ' in ' + esc(o.groups.join(', ')) : ''}</option>`).join('');
+  } catch (e) { refused(e); }
+}
+
+async function showWhoCan() {
+  const obj = $('wc-obj').value.trim();
+  if (!obj) return;
+  const q = `version=${encodeURIComponent($('wc-ver').value || 'applied')}&object=${encodeURIComponent(obj)}` + ($('wc-level').value ? '&level=' + encodeURIComponent($('wc-level').value) : '');
+  let r;
+  try { r = await api('/api/policy/who-can?' + q); } catch (e) { $('whocan').innerHTML = `<div class="error">${esc(friendlyRefusal(e.message))}</div>`; return; }
+  let h = `<h2>${esc(r.object)}</h2><p>In ${(r.groups || []).length ? 'the groups ' + esc(r.groups.join(', ')) : 'no resource group'}.</p>`;
+  h += (r.roles || []).length ? '<table class="list"><tr><th>Role</th><th>Levels</th><th>What it reaches</th></tr>' + r.roles.map(x =>
+    `<tr><td>${esc(x.role)}</td><td>${esc(cellWords(x.levels))}</td><td><ul>${(x.tuples || []).map(t => `<li>${esc(describeTuple(t))}</li>`).join('')}</ul></td></tr>`).join('') + '</table>'
+    : '<p>No role reaches it.</p>';
+  if ((r.services || []).length) h += '<h3>Services</h3><ul>' + r.services.map(t => `<li>${esc(describeTuple(t))}</li>`).join('') + '</ul>';
+  $('whocan').innerHTML = h;
+}
+
+function groupLabel(groups, key) {
+  const g = Array.isArray(groups) ? groups.find(x => x.key === key) : (groups || {})[key];
+  return g ? { label: g.label || key, help: g.help || '' } : { label: key, help: '' };
+}
+
+async function loadIdentities() {
+  let r;
+  try { r = await api('/api/policy/service-identities'); } catch (e) { return refused(e); }
+  $('identities').innerHTML = (r.identities || []).map(i => `<div class="card"><b>${esc(i.label || i.key)}</b> <code>${esc(i.key)}</code>
+    <p>${esc(i.description)}</p><dl>
+    <dt>Database role</dt><dd><code>${esc(i.db_role || '—')}</code></dd>
+    <dt>MQTT user</dt><dd><code>${esc(i.mqtt_user || '—')}</code></dd>
+    ${i.managed_by ? `<dt>Managed by</dt><dd>${esc(i.managed_by)}</dd>` : ''}
+    ${i.password_key ? `<dt>Password</dt><dd>its password is config.env's <code>${esc(i.password_key)}</code></dd>` : ''}
+    <dt>Ceiling</dt><dd>${Object.keys(i.ceiling || {}).map(g => { const gl = groupLabel(i.groups, g);
+      return `<span class="name" title="${esc(gl.help)}">${esc(gl.label)}</span> ${(i.ceiling[g] || []).map(l => `<span class="chip">${esc(l)}</span>`).join('')}`; }).join('<br>')}</dd></dl></div>`).join('')
+    || '<p>No service identity.</p>';
+}
+
+async function loadBreakGlass() {
+  let r;
+  try { r = await api('/api/policy/break-glass'); } catch (e) { return refused(e); }
+  const open = r.open_overrides || [];
+  $('overrides').innerHTML = open.length
+    ? `<div class="error"><b>A policy override is open.</b> Approvals wait until a normal deploy of the components ends it.<ul>` +
+      open.map(o => `<li>event ${esc(o.event_id)} at ${when(o.at)}: ${esc([].concat(o.components || []).join(', '))}</li>`).join('') + '</ul>The reason is in the History tab.</div>'
+    : '<div class="ok">No policy override (break-glass) is open.</div>';
+  $('breakglass').innerHTML = '<tr><th>Identity</th><th>Used by</th><th>What records its use</th></tr>' +
+    (r.identities || []).map(b => `<tr><td>${esc(b.identity)}</td><td>${esc(b.used_by)}</td><td>${esc(b.logged_by)}</td></tr>`).join('');
+}
+
+// ── History and Confirm (4.3) ────────────────────────────────────────────────────────
 async function loadHistory() {
   try {
     const c = await api('/api/policy/chain');
@@ -324,8 +872,8 @@ async function loadPending() {
 
 async function act(v, verb, body) {
   try {
-    await api(`/api/policy/${v}/${verb}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
-    VERSIONS = (await api('/api/policy')).versions;
+    await send('POST', `/api/policy/${v}/${verb}`, body);
+    await refreshVersions();
     await loadPending();
     show('ok', `Version ${v} ${verb === 'confirm' ? 'confirmed' : 'disputed'}. It is in the history.`);
   } catch (e) { show('error', friendlyRefusal(e.message)); }
@@ -333,6 +881,7 @@ async function act(v, verb, body) {
 
 async function init() {
   try { ME = await api('/api/me'); } catch (e) { return show('error', friendlyRefusal(e.message)); }
+  ME.acts = ME.acts || {};
   $('who').textContent = `${ME.user} (${ME.role})`;
   $('lnk-decisions').href = ME.access_url || '#';
   $('lnk-review').href = ME.access_url || '#';
@@ -341,22 +890,21 @@ async function init() {
     if (ME.can[b.dataset.view]) { b.hidden = false; views.push(b.dataset.view); b.addEventListener('click', () => select(b.dataset.view)); }
   });
   if (!views.length) return show('error', 'Your role sees nothing in the Policy UI.');
-  try {
-    const list = await api('/api/policy');
-    VERSIONS = list.versions;
-    $('ver').innerHTML = VERSIONS.filter(v => ['applied', 'superseded'].includes(v.status)).map(v =>
-      `<option value="${v.version}"${v.status === 'applied' ? ' selected' : ''}>${v.version} (${esc(v.kind)}, ${esc(v.status)})</option>`).join('');
-    $('hist-ver').innerHTML += VERSIONS.map(v => `<option value="${v.version}">${v.version}</option>`).join('');
-  } catch (e) { show('error', friendlyRefusal(e.message)); }
+  try { await refreshVersions(); } catch (e) { show('error', friendlyRefusal(e.message)); }
   $('ver').addEventListener('change', () => loadMatrix($('ver').value));
   $('hist-ver').addEventListener('change', loadHistory);
+  $('wc-ver').addEventListener('change', () => { WHO_INDEX = null; loadWhoCan(); });
+  $('wc-go').addEventListener('click', showWhoCan);
+  $('wc-obj').addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); showWhoCan(); } });
   $('matrix').addEventListener('click', ev => { const td = ev.target.closest('td.cell'); if (td) openCell(td.dataset.role, td.dataset.group); });
   $('matrix').addEventListener('keydown', ev => { const td = ev.target.closest('td.cell'); if (td && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); openCell(td.dataset.role, td.dataset.group); } });
   $('p-close').addEventListener('click', () => { $('panel').hidden = true; });
-  let first = views[0];
+  let first = views[0], arg;
   try { const t = localStorage.getItem('policy-tab'); if (views.includes(t)) first = t; } catch (e) { /* storage off */ }
   if (ME.can.confirm && pendingVersions(VERSIONS).length) first = 'confirm';
-  select(first);
+  const hm = location.hash.match(/^#approval\/([1-9][0-9]{0,8})$/);
+  if (hm && views.includes('approval')) { first = 'approval'; arg = hm[1]; }
+  select(first, arg);
 }
 init();
 </script>

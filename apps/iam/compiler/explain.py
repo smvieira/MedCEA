@@ -39,8 +39,16 @@ applied rows (unknown keys dropped), person reach per role, system reach, and th
 it cannot reduce to reach (sections()). verdict: widening when anything is added, narrowing
 when nothing is but the digests differ, equal when they are equal. Called by
 `cli.py skeleton-gate` (every deploy's policy_source_init, apply.sh, health).
+
+diff(p_from, p_to) and diff_document(...) (IAM 4.4, design §14.7.3) are what a change or
+skeleton version changes, the document qa approves: cells, waivers, reach per role and
+system reach both ways. diff_bytes() is source.canonical() of it and diff_digest() its
+sha256, the one serialisation iam-api serves, the browser hashes and apply.sh stores.
+who_can(p, obj) (§14.7.5) is one object's holders, from the same tuples.
 """
 import copy
+import hashlib
+import re
 
 from compiler import grants, model, mqtt, proxies, routes, source, tools
 
@@ -337,7 +345,8 @@ def _describe(t):
 
 
 def gate_message(g, first=10):
-    """The refusal text (exit 3) of a widening gate, before IAM 4.5 (design §14.4.5)."""
+    """The refusal text (exit 3) of a widening gate, before IAM 4.5 (design §14.4.5; the proposal
+    line since 4.4, §14.7.6)."""
     lines = [f"ERROR: this git change gives access that has not been approved "
              f"(skeleton {g['git_digest'][:12]} over the accepted {g['accepted_digest'][:12]}):"]
     for role, ts in g["added"].items():
@@ -352,7 +361,10 @@ def gate_message(g, first=10):
         lines.append(f"  anonymous and services: {'; '.join(_describe(t) for t in ts[:first])}{more}")
     if g["added"].get("_sections"):
         lines.append("  checker: " + "; ".join(_describe(t) for t in g["added"]["_sections"]))
-    lines += ["It cannot deploy until policy approvals can be applied (IAM 4.5). Revert the change, or keep it on a branch.",
+    lines += ["This change needs a qa-approved skeleton version: put HEAD back at the accepted skeleton, keep the "
+              "change as a commit on a branch, and run ./apps/iam/apply.sh --propose-skeleton --by <you> "
+              "--reason \"<why>\" --from-git <commit>; qa approves it in the Policy UI. Applying an approved "
+              "skeleton version arrives with IAM 4.5.",
               "Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the matrix, never the skeleton.",
               "Nothing was changed."]
     return "\n".join(lines)
@@ -412,3 +424,212 @@ def cell(p, p_applied, role, group):
                           "adds": [_jsonable(t) for t in sorted(with_ - ra, key=repr)],
                           "removes": [_jsonable(t) for t in sorted(ra - with_, key=repr)]}
     return out
+
+
+# ── diff: what a version changes, as the bytes qa approves (IAM 4.4, design §14.7.3) ───
+DIFF_SCHEMA = 1
+DIFF_KINDS = ("change", "skeleton")
+
+
+def _json(x):
+    """Tuples as lists, all the way down: the diff equals its own JSON round trip."""
+    if isinstance(x, (list, tuple)):
+        return [_json(v) for v in x]
+    if isinstance(x, dict):
+        return {k: _json(v) for k, v in x.items()}
+    return x
+
+
+def _cell_map(p, group, role):
+    """{level: constraint or None} of the direct cell (group, role), {} for N."""
+    c = p.cell(group, role) if group in p.groups and role in p.roles else None
+    if not c:
+        return {}
+    levels, cons, _ = c
+    return {l: cons.get(l) for l in sorted(levels)}
+
+
+def _bytes(x):
+    return (x or "").encode("utf-8")
+
+
+def diff(p_from, p_to):
+    """What p_to changes against p_from, as one JSON-ready dict (pure, deterministic, and
+    mode-independent: built on reach()/system_reach(), which read grants.document()):
+      cells    the cells that differ, {group, role, before, after} ({level: constraint or
+               None}; {} for N), sorted by the bytes of (group, role)
+      waivers  {added, removed}: source.waiver_row forms compared by id (a changed waiver
+               is removed and added), sorted by id bytes
+      roles    {role: {added, removed}} for each role of either policy whose reach moved
+      system   {added, removed}: system_reach() both ways
+    Tuples are lists in _listed() order (the gate's)."""
+    cells = []
+    for g in sorted(set(p_from.groups) | set(p_to.groups), key=_bytes):
+        for r in sorted(set(p_from.roles) | set(p_to.roles), key=_bytes):
+            before, after = _cell_map(p_from, g, r), _cell_map(p_to, g, r)
+            if before != after:
+                cells.append({"group": g, "role": r, "before": before, "after": after})
+    wf = {w["id"]: w for w in (source.waiver_row(x) for x in p_from.waivers)}
+    wt = {w["id"]: w for w in (source.waiver_row(x) for x in p_to.waivers)}
+    waivers = {"added": [wt[i] for i in sorted(wt, key=_bytes) if wf.get(i) != wt[i]],
+               "removed": [wf[i] for i in sorted(wf, key=_bytes) if wt.get(i) != wf[i]]}
+    roles = {}
+    for r in sorted(set(p_from.roles) | set(p_to.roles), key=_bytes):
+        before, after = reach(p_from, r), reach(p_to, r)
+        if before != after:
+            roles[r] = {"added": _listed(after - before), "removed": _listed(before - after)}
+    sb, sa = system_reach(p_from), system_reach(p_to)
+    return _json({"cells": cells, "waivers": waivers, "roles": roles,
+                  "system": {"added": _listed(sa - sb), "removed": _listed(sb - sa)}})
+
+
+def diff_document(kind, version, against, entries_digest, p_from, p_to, skeleton=None):
+    """The approval diff of a version of kind change or skeleton: {schema, kind, version,
+    against, entries_digest, skeleton, cells, waivers, roles, system}. `skeleton` is None
+    for a change; for a skeleton version {from: accepted digest, to: proposed digest,
+    sections: [...]} (sections listed by _listed when given as tuples). No compiler
+    digest, commit, time or label: a commit that changes no compiled tuple leaves the
+    bytes as they were (OPEN CHOICE 1, G8)."""
+    if kind not in DIFF_KINDS:
+        raise ValueError(f"only a change or skeleton version has an approval diff, not {kind!r}")
+    if (kind == "skeleton") != (skeleton is not None):
+        raise ValueError("a skeleton version's diff names its skeletons; a change's names none")
+    sk = None
+    if skeleton is not None:
+        secs = skeleton.get("sections") or []
+        sk = {"from": skeleton["from"], "to": skeleton["to"],
+              "sections": _listed(secs) if any(isinstance(t, tuple) for t in secs) else _json(secs)}
+    doc = {"schema": DIFF_SCHEMA, "kind": kind, "version": version, "against": against,
+           "entries_digest": entries_digest, "skeleton": sk}
+    doc.update(diff(p_from, p_to))
+    return doc
+
+
+def diff_bytes(doc):
+    """The canonical bytes of a diff document, as served and hashed (source.canonical:
+    sorted keys, no spaces, UTF-8 unescaped). One function on every side: iam-api, the
+    host (apply_check.py) and, after jsonb, the re-serialised stored diff."""
+    return source.canonical(doc)
+
+
+def diff_digest(doc):
+    """sha256 of diff_bytes(doc), 64 lower-case hex characters."""
+    return hashlib.sha256(diff_bytes(doc)).hexdigest()
+
+
+# ── who can: one object's holders (IAM 4.4, design §14.7.5) ──────────────────────────
+_ROUTE_OBJ = re.compile(r"^(\S+) ([A-Z]+ /\S*)$")
+NO_TUPLE_TYPES = ("code", "idp", "infra")      # members that compile to no reach tuple
+
+
+def _member_names(m):
+    """The who-can names of one member, as the skeleton writes it (functions normalised as
+    grants.document() names them, an api member one name per route)."""
+    t = m.get("type")
+    if t == "api":
+        return [f"{m['service']} {r}" for r in m.get("routes") or {}]
+    if t == "ui":
+        return [m["host"]]
+    if t == "mqtt":
+        return [m["topic"]]
+    if m.get("function"):
+        return [grants.norm_sig(m["function"])]
+    return [m["object"]] if m.get("object") else []
+
+
+def who_can_index(p):
+    """{objects: [{name, type, groups}]}: every member name and tool of the skeleton,
+    sorted by name bytes (the Who can… picker)."""
+    idx = {}
+    for g, gd in p.groups.items():
+        for m in gd.get("members") or []:
+            for n in _member_names(m):
+                e = idx.setdefault(n, {"name": n, "type": m.get("type"), "groups": []})
+                if g not in e["groups"]:
+                    e["groups"].append(g)
+        tool = gd.get("tool")
+        if tool and tool.get("kind"):
+            e = idx.setdefault(tool["kind"], {"name": tool["kind"], "type": "tool", "groups": []})
+            e["groups"].append(g)
+    for e in idx.values():
+        e["groups"].sort(key=_bytes)
+    return {"objects": [idx[n] for n in sorted(idx, key=_bytes)]}
+
+
+def _who_levels(p, role, groups):
+    """{level: None | constraint | [constraints]} the role holds on any of `groups`
+    (holds(): composites, implies and tool reach expanded); free wins, alternatives
+    from several cells are a sorted list."""
+    out = {}
+    for (g, l), how in p.holds(role).items():
+        if g not in groups:
+            continue
+        if how == "free" or out.get(l, "") is None:
+            out[l] = None
+        else:
+            out[l] = sorted(set(out.get(l) or []) | set(how))
+    order = list(p.levels)
+    return {l: (v if v is None or len(v) > 1 else v[0])
+            for l, v in sorted(out.items(), key=lambda x: order.index(x[0]) if x[0] in order else len(order))}
+
+
+def who_can(p, obj, level=None, cache=None):
+    """Who holds `obj` (a member name as the skeleton writes it: a db object schema.name, a
+    function signature, "service METHOD /path", a *_DOMAIN host, an MQTT topic, a tool
+    kind; or group:<code>), as {object, groups, roles: [{role, levels, tuples}], services}.
+    groups: the codes holding obj as a member; roles: each role with a reach() tuple naming
+    obj (tuples, by _listed), and its levels on those groups (_who_levels); a role holding
+    nothing relevant is left out (for code, idp and infra members, which compile to no
+    tuple, holding a level on the group is relevant); `level` keeps the roles holding it.
+    services: the system_reach() tuples naming obj. Pure; ExplainParity checks it against
+    the route table, grants.document(), proxies.admitted() and mqtt.rows(). `cache`, a dict
+    the caller keeps per Policy, holds the reach sets across calls (each costs a compile)."""
+    cache = {} if cache is None else cache
+    if "reach" not in cache:
+        cache["reach"] = {r: reach(p, r) for r in p.roles}
+        cache["system"] = system_reach(p)
+    groups, kind = [], None
+    if obj.startswith("group:"):
+        code = obj[len("group:"):]
+        if code not in p.groups:
+            raise KeyError(f"no resource group {code!r}")
+        groups, kind = [code], "group"
+    else:
+        if "(" in obj and not _ROUTE_OBJ.match(obj):
+            try:
+                obj = grants.norm_sig(obj)
+            except grants.GrantsError:
+                pass
+        for g, gd in p.groups.items():
+            for m in gd.get("members") or []:
+                if obj in _member_names(m):
+                    groups.append(g)
+                    kind = kind or m.get("type")
+            if (gd.get("tool") or {}).get("kind") == obj:
+                groups.append(g)
+                kind = kind or "tool"
+        groups = sorted(set(groups), key=_bytes)
+    rm = _ROUTE_OBJ.match(obj) if kind not in ("group", "tool") else None
+
+    def names(t):
+        if kind == "group":
+            return t[0] in ("level", "tool") and t[1] == obj[len("group:"):]
+        if kind == "tool":
+            return t[0] == "tool" and t[1] in groups
+        if rm:
+            return t[0] in ("route", "public") and t[1] == rm.group(1) and t[2] == rm.group(2)
+        if kind == "mqtt":
+            return t[0] == "mqtt" and t[2] == obj.split("/", 1)[-1]
+        return obj in t[1:]
+
+    roles = []
+    for r in sorted(p.roles, key=_bytes):
+        ts = [t for t in cache["reach"][r] if names(t)]
+        levels = _who_levels(p, r, set(groups))
+        if not ts and not (kind in NO_TUPLE_TYPES and levels):
+            continue
+        if level is not None and level not in levels:
+            continue
+        roles.append({"role": r, "levels": levels, "tuples": _listed(ts)})
+    services = [] if kind in ("group", "tool") else _listed(t for t in cache["system"] if names(t))
+    return _json({"object": obj, "groups": groups, "roles": roles, "services": services})

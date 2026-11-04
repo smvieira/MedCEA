@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tests/test_apply.py — apps/iam/apply.sh and apps/iam/apply_check.py (IAM Phase 4, slice
-4.2a; design §14.4.9, §14.4.10, §14.4.11, §14.4.17).
+4.2a; design §14.4.9, §14.4.10, §14.4.11, §14.4.17; --propose-skeleton and --withdraw-open of
+slice 4.4, §14.7.6).
 
 Offline. apply.sh runs in a scratch tree (tests/_scratch.py: state/ and .medcea.lock resolve
 inside the copy) against a fake cluster: `microk8s` (kubectl, and psql through `kubectl exec`)
@@ -13,6 +14,7 @@ the bundle, the host file, the grants check, the record, the report), that it ne
 applies or deletes anything, and that --check-only and --status write nothing.
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -111,6 +113,27 @@ def psql(db, args, sql):
         if sc.get("seed_fail"):
             print("ERROR:  _record: fact_id is not the content hash", file=sys.stderr)
             return 3
+        return 0
+    if "_propose_skeleton(" in sql:   # IAM 4.4: apply.sh --propose-skeleton's one transaction
+        with open(os.path.join(FD, "propose.sql"), "w") as f:
+            f.write(sql)
+        if sc.get("propose_fail"):
+            print("ERROR:  another version was created meanwhile (the diff names version 2): run apply.sh again",
+                  file=sys.stderr)
+            return 3
+        print(sc.get("next_version", 2))
+        return 0
+    if "_withdraw_open(" in sql:      # IAM 4.4: apply.sh --withdraw-open
+        with open(os.path.join(FD, "withdraw.sql"), "w") as f:
+            f.write(sql)
+        if sc.get("withdraw_fail"):
+            print("ERROR:  another version was opened meanwhile (withdrawn: 3, shown: 2): nothing was withdrawn",
+                  file=sys.stderr)
+            return 3
+        print(re.search(r"\\set want_version '(\d+)'", sql).group(1))
+        return 0
+    if "max(x.version)" in sql:
+        print(sc.get("next_version", 2))
         return 0
     if "verify_chain()" in sql and "h.hash" in sql:
         print(("t" if sc.get("chain_ok", True) else "f") + "|41|" + "ab" * 32)
@@ -211,6 +234,10 @@ def curl(a):
         role = path.split("/")[4]
         code, body = 200, [{"id": x["id"], "username": x["username"], "enabled": x["enabled"]}
                            for x in users if role in x.get("roles", [])]
+    elif re.fullmatch(r"admin/realms/medcea/users/[0-9a-f-]{36}/role-mappings/realm/composite", path):
+        hit = [x for x in users if x["id"] == path.split("/")[4]]
+        if hit:
+            code, body = 200, [{"name": r} for r in hit[0].get("roles", [])]
     elif re.fullmatch(r"admin/realms/medcea/users/[0-9a-f-]{36}", path):
         hit = [x for x in users if x["id"] == path.rsplit("/", 1)[1]]
         if hit:
@@ -369,7 +396,8 @@ class Tree:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
-WRITE_SQL = ("_build_version", "_accept_skeleton(", "_mark_applied", "_record(", "_sync_skeleton(")
+WRITE_SQL = ("_build_version", "_accept_skeleton(", "_mark_applied", "_record(", "_sync_skeleton(",
+             "_propose_skeleton(", "_withdraw_open(")
 
 
 def writes(calls):
@@ -646,8 +674,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(self.t.calls(), [])
 
     def test_later_modes(self):
-        for args, slice_ in ((["1", "--by", "admin"], "4.5"), (["--rollback-to", "1", "--by", "admin"], "4.5"),
-                             (["--propose-skeleton", "--by", "admin"], "4.4")):
+        for args, slice_ in ((["1", "--by", "admin"], "4.5"), (["--rollback-to", "1", "--by", "admin"], "4.5")):
             with self.subTest(args):
                 p = self.t.run(*args)
                 self.assertEqual(p.returncode, 2)
@@ -655,7 +682,10 @@ class Refusals(unittest.TestCase):
         self.assertEqual(self.t.calls(), [])
 
     def test_usage(self):
-        for args in ([], ["--bootstrap"], ["--bootstrap", "--by", "-x"], ["--status", "--by", "admin"], ["--nope"]):
+        for args in ([], ["--bootstrap"], ["--bootstrap", "--by", "-x"], ["--status", "--by", "admin"], ["--nope"],
+                     ["--bootstrap", "--by", "admin", "--reason", "r"], ["--resume", "--by", "admin", "--from-git", "HEAD"],
+                     ["--withdraw-open", "--by", "admin", "--reason", "r", "--from-git", "HEAD"],
+                     ["--propose-skeleton", "--withdraw-open", "--by", "admin", "--reason", "r"]):
             with self.subTest(args):
                 self.assertEqual(self.t.run(*args).returncode, 2)
 
@@ -958,6 +988,332 @@ class FreshInstallOrder(unittest.TestCase):
             self.assertEqual(len([c for c in t.calls() if c["kind"] == "kubectl" and c["argv"][:1] == ["wait"]]), 1)
         finally:
             t.close()
+
+
+def applied_state(**kw):
+    """version 1 applied (bootstrap_applied), the --full fields apply.sh's 4.4 modes read."""
+    d = apply_check.simulate_state()
+    d.update(last_apply_event={"event": "bootstrap_applied", "event_id": 42, "at": "2026-11-02T10:01:00+00:00"},
+             chain_ok=True, open_versions=[])
+    d.update(kw)
+    return d
+
+
+GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@example.test"}
+POLICY = "apps/iam/policy/defaults.yaml"
+# git edits of defaults.yaml, each committed on its own branch of the scratch tree
+WIDE = ('routes: {"GET /api/recipes": R}}', 'routes: {"GET /api/recipes": R, "GET /api/recipes/extra": R}}')
+PROSE = ("Independent approver of configuration, access decisions and policy changes.",
+         "Independent approver of configuration, access decisions and changes to the policy.")
+RED = ("    includes: [auditor]\n", "    includes: [auditor, admin]\n")
+
+
+def id_un():
+    return subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+
+
+class ProposeSkeleton(unittest.TestCase):
+    """apply.sh --propose-skeleton (IAM 4.4, design §14.7.6), against the fake cluster and a
+    scratch tree with a git history: the deploying tree (HEAD) stays at the accepted skeleton,
+    the proposals are commits on branches."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.t = Tree()
+        env = dict(os.environ, HOME=cls.t.root, **GIT_ENV)
+
+        def git(*a):
+            return subprocess.run(["git", "-C", cls.t.root, *a], check=True, env=env, capture_output=True,
+                                  text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        with open(cls.t.path(".git", "info", "exclude"), "a") as f:
+            f.write(".fake/\n.medcea.lock\nstate/\n")
+        git("add", "-A")
+        git("commit", "-qm", "scratch")
+        cls.base = git("rev-parse", "HEAD")
+        cls.rev = {}
+        for name, (a, b) in (("wide", WIDE), ("prose", PROSE), ("red", RED)):
+            git("checkout", "-q", "-b", name, "main")
+            with open(cls.t.path(POLICY)) as f:
+                text = f.read()
+            assert text.count(a) == 1, name
+            with open(cls.t.path(POLICY), "w") as f:
+                f.write(text.replace(a, b))
+            git("commit", "-qam", name)
+            cls.rev[name] = git("rev-parse", "HEAD")
+        git("checkout", "-q", "main")
+        cls.wide_data = yaml.safe_load(git("show", f"{cls.rev['wide']}:{POLICY}"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.t.close()
+
+    def setUp(self):
+        self.t.state(applied_state())
+        self.t.scenario({"users": users(), "configmap": {"routes": V1, "mqtt": "m" * 64}, "comment": f"policy {V1}"})
+        for f in ("calls.log", "propose.sql"):
+            try:
+                os.remove(os.path.join(self.t.fd, f))
+            except FileNotFoundError:
+                pass
+
+    def run_(self, *args, **env):
+        return self.t.run("--propose-skeleton", "--by", "admin", *args, **env)
+
+    def sql(self):
+        with open(os.path.join(self.t.fd, "propose.sql")) as f:
+            return f.read()
+
+    def assertNothingProposed(self):
+        self.assertFalse([c for c in self.t.calls() if c["kind"] == "psql" and "_propose_skeleton(" in c["sql"]])
+        self.assertEqual(writes(self.t.calls()), [])
+
+    def test_a_widening_is_submitted(self):
+        p = self.run_("--reason", "test: a new recipes route", "--from-git", "wide")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("version 2 (skeleton) submitted: a qa person other than admin", p.stdout)
+        self.assertIn("arrives with IAM 4.5 (./apps/iam/apply.sh 2)", p.stdout)
+        self.assertIn("route scheduler GET /api/recipes/extra", p.stdout)
+        self.assertNotIn("WARNING", p.stderr)          # HEAD is at the accepted skeleton
+        sql = self.sql()
+        # --from-git reads the revision: its skeleton and its commit
+        self.assertIn(f"\\set digest '{source.skeleton_digest(self.wide_data)}'", sql)
+        self.assertEqual(b64var(sql, "commit"), self.rev["wide"])
+        body = json.loads(b64var(sql, "body"))
+        self.assertEqual(source.skeleton_digest(body), source.skeleton_digest(self.wide_data))
+        # the claimed --by, resolved in Keycloak; the reason carries the username and the OS user
+        self.assertIn(f"\\set by_sub '{ADMIN}'", sql)
+        self.assertEqual(b64var(sql, "by_person"), "p-admin")
+        self.assertEqual(b64var(sql, "reason"), "test: a new recipes route [apply.sh --propose-skeleton, --by admin "
+                                                f"(claimed), OS user {id_un()}]")
+        # the diff document: canonical bytes, its digest, against the accepted skeleton
+        doc = json.loads(b64var(sql, "diff"))
+        want = re.search(r"\\set diff_digest '([0-9a-f]{64})'", sql).group(1)
+        self.assertEqual(hashlib.sha256(source.canonical(doc)).hexdigest(), want)
+        self.assertEqual(b64var(sql, "diff").encode("utf-8"), source.canonical(doc))
+        st = applied_state()
+        self.assertEqual((doc["kind"], doc["version"], doc["against"]), ("skeleton", 2, 1))
+        self.assertEqual(doc["skeleton"]["from"], st["accepted"]["digest"])
+        self.assertEqual(doc["skeleton"]["to"], source.skeleton_digest(self.wide_data))
+        self.assertIn("qa", doc["roles"])
+        # the entries digest _propose_skeleton will store (asserted in the transaction)
+        rows = source.state_rows(st)
+        skel = source.skeleton(self.wide_data)
+        ed = source.entries_digest("skeleton", list(skel["resource_groups"]), list(skel["roles"]), rows["entries"],
+                                   rows["waivers"])
+        self.assertEqual(doc["entries_digest"], ed)
+        self.assertIn(f"\\set want_entries '{ed}'", sql)
+        self.assertIn("\\set want_version '2'", sql)
+        self.assertIn("_set_internal_actor('system:apply')", sql)
+        self.assertIn("transaction_isolation", sql)
+        self.assertLess(sql.index("pg_advisory_xact_lock"), sql.index("_propose_skeleton("))
+        self.assertLess(sql.index("_propose_skeleton("), sql.index("iam_policy.entries_digest("))
+        # every value base64 (or hex/uuid/number) in \set, nothing on argv
+        for line in sql.splitlines():
+            if line.startswith("\\set"):
+                self.assertRegex(line, r"^\\set [a-z0-9_]+ '[A-Za-z0-9+/=\-]*'$")
+        self.assertNotRegex(sql, SQL_KEYWORD_QUALIFIED)
+        for c in self.t.calls():
+            if c["kind"] == "kubectl":
+                self.assertNotIn("a new recipes route", json.dumps(c["argv"]))
+        # one transaction (psql -1), and nothing but the proposal written
+        exe = [c["argv"] for c in self.t.calls() if c["kind"] == "kubectl" and c["argv"][:1] == ["exec"]]
+        self.assertTrue(any("-1" in a for a in exe))
+        self.assertEqual(len(writes(self.t.calls())), 1)
+        self.assertFalse(os.path.exists(self.t.path("state", "policy-applied.yaml")))
+
+    def test_order_resolve_by_before_propose(self):
+        p = self.run_("--reason", "test: order", "--from-git", "wide")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        calls = self.t.calls()
+
+        def first(pred):
+            return next(i for i, c in enumerate(calls) if pred(c))
+        state = first(lambda c: c["kind"] == "psql" and "BEGIN TRANSACTION READ ONLY" in c["sql"])
+        chain = first(lambda c: c["kind"] == "psql" and "verify_chain()" in c["sql"] and "h.hash" in c["sql"])
+        by = first(lambda c: c["kind"] == "curl" and "username=admin" in c["url"])
+        nxt = first(lambda c: c["kind"] == "psql" and "max(x.version)" in c["sql"] and "_propose_skeleton" not in c["sql"])
+        prop = first(lambda c: c["kind"] == "psql" and "_propose_skeleton(" in c["sql"])
+        self.assertLess(state, chain)
+        self.assertLess(chain, by)
+        self.assertLess(by, nxt)
+        self.assertLess(nxt, prop)
+        # in the script too: resolve_by before apply_check.py propose
+        s = read_repo("apps/iam/apply.sh")
+        blk = s[s.index('if [[ "$MODE" == propose-skeleton ]]; then'):s.index('if [[ "$MODE" == withdraw-open ]]; then')]
+        self.assertLess(blk.index("    resolve_by\n"), blk.index('py "$CHECK" propose'))
+
+    def test_equal_narrowing_and_red_refuse(self):
+        for rev, rc, text in (("main", 1, "nothing to approve: this skeleton is the accepted one"),
+                              ("prose", 1, "nothing to approve: it adds no access; deploy as usual"),
+                              ("red", 1, "the proposed skeleton fails the checker with the applied matrix")):
+            with self.subTest(rev):
+                p = self.run_("--reason", "test: refused", "--from-git", rev)
+                self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+                self.assertIn(text, p.stderr)
+                self.assertNothingProposed()
+
+    def test_an_open_version_refuses(self):
+        self.t.state(applied_state(open_versions=[{"version": 2, "kind": "change", "status": "submitted",
+                                                   "age_days": 0, "authors": ["alice"], "reason": "r"}]))
+        p = self.run_("--reason", "test: refused", "--from-git", "wide")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("version 2 (change, submitted) is still open", p.stderr)
+        self.assertNothingProposed()
+
+    def test_usage_and_preconditions(self):
+        for args, env, text in (
+                (["--reason", "test: r"], {}, "propose a skeleton change from a commit: --from-git <rev>"),
+                (["--from-git", "wide"], {}, "needs --reason"),
+                (["--reason", "-x", "--from-git", "wide"], {}, "needs --reason"),
+                (["--reason", "test: r", "--from-git", "-x"], {}, "is not a revision"),
+                (["--reason", "test: r", "--from-git", "wide"],
+                 {"MEDCEA_POLICY_FILE": "x.yaml", "MEDCEA_POLICY_BREAK_GLASS": "t"}, "no skeleton proposal under break-glass"),
+                (["--reason", "test: r", "--from-git", "nosuchbranch"], {}, "no such commit")):
+            with self.subTest(args):
+                p = self.run_(*args, **env)
+                self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+                self.assertIn(text, p.stderr)
+                self.assertNothingProposed()
+
+    def test_state_preconditions(self):
+        for st, rc, text in ((empty_state(), 2, "no applied version: ./apps/iam/deploy.sh bootstraps it"),
+                             (applied_state(last_apply_event={"event": "apply_started", "event_id": 40, "at": "x"}), 1,
+                              "is being applied (apply_started)")):
+            with self.subTest(text):
+                self.t.state(st)
+                p = self.run_("--reason", "test: r", "--from-git", "wide")
+                self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+                self.assertIn(text, p.stderr)
+                self.assertNothingProposed()
+
+    def test_a_tree_off_the_accepted_skeleton_warns_only(self):
+        path = self.t.path(POLICY)
+        with open(path) as f:
+            text = f.read()
+        try:
+            with open(path, "w") as f:
+                f.write(text.replace(*PROSE))
+            p = self.run_("--reason", "test: r", "--from-git", "wide", "--check-only")
+        finally:
+            with open(path, "w") as f:
+                f.write(text)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("this tree's skeleton is not the accepted one: deploys refuse a widening", p.stderr)
+
+    def test_check_only_takes_no_lock_and_writes_nothing(self):
+        lock = self.t.path(".medcea.lock")
+        if os.path.exists(lock):
+            os.remove(lock)
+        p = self.run_("--reason", "test: r", "--from-git", "wide", "--check-only")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("would submit skeleton version 2", p.stdout)
+        self.assertIn("diff digest ", p.stdout)
+        self.assertNothingProposed()
+        self.assertFalse(os.path.exists(lock))
+
+    def test_no_terminal_without_confirmation(self):
+        p = self.run_("--reason", "test: r", "--from-git", "wide", MEDCEA_CONFIRMED="")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("refusing without a terminal", p.stderr)
+        self.assertNothingProposed()
+
+    def test_a_rolled_back_proposal(self):
+        self.t.scenario({"users": users(), "propose_fail": True})
+        p = self.run_("--reason", "test: r", "--from-git", "wide")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("another version was created meanwhile", p.stderr)
+        self.assertIn("the proposal was rolled back", p.stderr)
+
+    def test_a_by_without_a_maker_role_warns(self):
+        p = self.t.run("--propose-skeleton", "--by", "quinn", "--reason", "test: r", "--from-git", "wide", "--check-only")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("--by quinn holds no maker role of iam_policy (admin)", p.stderr)
+        p = self.run_("--reason", "test: r", "--from-git", "wide", "--check-only")
+        self.assertNotIn("holds no maker role", p.stderr)
+
+
+class WithdrawOpen(unittest.TestCase):
+    """apply.sh --withdraw-open (IAM 4.4, design §14.7.6): the host path, no Keycloak."""
+
+    OPEN = {"version": 2, "kind": "change", "status": "approved", "age_days": 1, "reason": "test: a draft",
+            "authors": ["alice", "bob"], "skeleton_digest": None, "diff_from": None, "approved_at": "x"}
+
+    def setUp(self):
+        self.t = Tree()
+        self.t.state(applied_state(open_versions=[self.OPEN]))
+
+    def tearDown(self):
+        self.t.close()
+
+    def run_(self, *args, **env):
+        return self.t.run("--withdraw-open", "--by", "admin", "--reason", "test: rollback", *args, **env)
+
+    def assertNoKeycloak(self):
+        self.assertEqual([c for c in self.t.calls() if c["kind"] == "curl"], [])
+
+    def test_nothing_open(self):
+        self.t.state(applied_state())
+        p = self.run_()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("nothing is open", p.stdout)
+        self.assertEqual(writes(self.t.calls()), [])
+        self.assertNoKeycloak()
+
+    def test_the_open_version_is_withdrawn(self):
+        p = self.run_()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("open: version 2 (change, approved), reason: test: a draft", p.stdout)
+        self.assertIn("authors: alice, bob", p.stdout)
+        self.assertIn("version 2 withdrawn (system:apply)", p.stdout)
+        with open(os.path.join(self.t.fd, "withdraw.sql")) as f:
+            sql = f.read()
+        self.assertEqual(b64var(sql, "reason"), "test: rollback [apply.sh --withdraw-open, --by admin (claimed), "
+                                                f"OS user {id_un()}]")
+        self.assertIn("\\set want_version '2'", sql)
+        self.assertIn("_set_internal_actor('system:apply')", sql)
+        self.assertLess(sql.index("_withdraw_open("), sql.index("another version was opened meanwhile"))
+        self.assertNotRegex(sql, SQL_KEYWORD_QUALIFIED)
+        self.assertNoKeycloak()
+        self.assertTrue(os.path.exists(self.t.path(".medcea.lock")))
+
+    def test_another_version_meanwhile_rolls_back(self):
+        self.t.scenario({"users": users(), "withdraw_fail": True})
+        p = self.run_()
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("another version was opened meanwhile", p.stderr)
+        self.assertIn("the withdraw was rolled back", p.stderr)
+
+    def test_check_only_writes_nothing(self):
+        p = self.run_("--check-only")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("would withdraw version 2", p.stdout)
+        self.assertEqual(writes(self.t.calls()), [])
+        self.assertFalse(os.path.exists(self.t.path(".medcea.lock")))
+        self.assertNoKeycloak()
+
+    def test_no_terminal_without_confirmation(self):
+        p = self.run_(MEDCEA_CONFIRMED="")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("refusing without a terminal", p.stderr)
+        self.assertEqual(writes(self.t.calls()), [])
+
+    def test_unreachable_and_usage(self):
+        self.t.state({"state": "unreachable", "detail": "rdbms-postgresql-0 is not Ready", "break_glass_open": []})
+        self.assertEqual(self.run_().returncode, 1)
+        p = self.t.run("--withdraw-open", "--by", "admin")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("needs --reason", p.stderr)
+
+    def test_asks_y_n(self):
+        s = read_repo("apps/iam/apply.sh")
+        blk = s[s.index('if [[ "$MODE" == withdraw-open ]]; then'):s.index("# --resume (design")]
+        self.assertIn('confirm "Withdraw version $OV ($OKIND, $OSTATUS)? [y/N] " y', blk)
+        self.assertNotIn("kc_start", blk)
+        self.assertNotIn("resolve_by", blk)
+        self.assertLess(blk.index("confirm "), blk.index("withdraw-sql"))
+
 
 
 class CanApprove(unittest.TestCase):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""apps/iam/apply_check.py — the offline half of apps/iam/apply.sh (IAM Phase 4, slice 4.2a;
-design §14.4.10). stdlib + PyYAML; fed JSON files (never a secret), so every decision here is
+"""apps/iam/apply_check.py — the offline half of apps/iam/apply.sh (IAM Phase 4, slices 4.2a
+and 4.4; design §14.4.10, §14.7.6). stdlib + PyYAML; fed JSON files (never a secret), so every decision here is
 tested without a cluster (tests/test_apply.py), as units_bootstrap.py is for units.sh.
 
   can-approve --dual-control D --accounts A
@@ -58,8 +58,23 @@ tested without a cluster (tests/test_apply.py), as units_bootstrap.py is for uni
         apply.sh --resume runs them (IAM 4.2b)
   deferred-record --state F --target T --reason R --command C --out SQL
         the apply_deferred record (system:apply) of a target --resume could not re-render (4.2b)
+  propose --state F --rev REV --commit C --by-sub U --by-person P --reason-file R --version N
+          [--out SQL]
+        apply.sh --propose-skeleton's step 4 (IAM 4.4, design §14.7.6): the skeleton gate of
+        REV's defaults.yaml over the accepted one (equal, narrowing, a checker failure or an
+        open change or skeleton version: exit 1), then skeleton version N's diff document
+        (explain.diff_document), its canonical digest, the summary, and in SQL the one
+        transaction that submits it (_propose_skeleton, version and entries digest asserted)
+  open-version --state F
+        the open change or skeleton version of a --full state document, tab-separated
+        (version, kind, status, reason, authors), or nothing
+  withdraw-sql --version N --reason-file R --out SQL
+        apply.sh --withdraw-open's transaction: _withdraw_open, asserted to withdraw N
+  maker-warn --dual-control D --roles F --username U
+        a warning line when U's realm roles (Keycloak's role-mappings/realm/composite answer
+        F) hold no maker role of iam_policy (dual_control); nothing otherwise
 
-Not in 4.2a: the JWS verification, the eligibility rule and the version-widening check of an
+Not in 4.4: the JWS verification, the eligibility rule and the version-widening check of an
 approver's person (design §6.1 step 4 items 1-4: IAM 4.5).
 """
 import argparse
@@ -73,6 +88,7 @@ import json
 import os
 import pwd
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -458,6 +474,187 @@ def scoped_commands():
     return out
 
 
+# ── a skeleton proposal and the host withdraw (IAM 4.4, design §14.7.6) ───────────────
+ATTEST_ROLES_GROUP = "iam_policy"
+OPEN_KINDS = ("change", "skeleton")
+_ISOLATION_SQL = "\n".join([
+    "DO $iso$",
+    "BEGIN",
+    "    IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN",
+    "        RAISE EXCEPTION 'apply.sh needs READ COMMITTED (is %)', pg_catalog.current_setting('transaction_isolation');",
+    "    END IF;",
+    "END $iso$;"])
+
+
+def open_version(state):
+    """The open change or skeleton version of a --full state document, or None (one in flight)."""
+    opens = [o for o in state.get("open_versions") or [] if o.get("kind") in OPEN_KINDS]
+    return opens[0] if opens else None
+
+
+def git_policy(rev):
+    """apps/iam/policy/defaults.yaml at a git revision (validated as cli.py skeleton-gate
+    --against-git does); SourceError when it cannot be read."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/~^-]*", rev or ""):
+        raise source.SourceError(f"bad revision {rev!r}")
+    r = subprocess.run(["git", "-C", source.REPO_ROOT, "show", f"{rev}:apps/iam/policy/defaults.yaml"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise source.SourceError(f"git show {rev}: {r.stderr.strip()}")
+    data = source.yaml.safe_load(r.stdout)
+    if not isinstance(data, dict):
+        raise source.SourceError(f"{rev}:apps/iam/policy/defaults.yaml is not a policy")
+    return data
+
+
+def _composed(acc_body, git, ew):
+    """(p_old, p_new, acc_skel, git_skel) composed exactly as explain.gate composes them: the
+    accepted body (jsonb, keys sorted) takes the git level order, rows naming a key a
+    skeleton lacks dropped."""
+    acc_skel, git_skel = copy.deepcopy(source.skeleton(acc_body)), source.skeleton(git)
+    if isinstance(acc_skel.get("levels"), dict) and isinstance(git_skel.get("levels"), dict):
+        order = [l for l in git_skel["levels"] if l in acc_skel["levels"]]
+        order += sorted(l for l in acc_skel["levels"] if l not in order)
+        acc_skel["levels"] = {l: acc_skel["levels"][l] for l in order}
+    return (model.Policy(source.compose(acc_skel, ew, drop_unknown=True)),
+            model.Policy(source.compose(git_skel, ew, drop_unknown=True)), acc_skel, git_skel)
+
+
+def closure(roles, role):
+    """role and every role it includes (Keycloak composites), from a skeleton's roles."""
+    out, todo = {role}, [role]
+    while todo:
+        for inc in (roles.get(todo.pop()) or {}).get("includes") or []:
+            if inc not in out:
+                out.add(inc)
+                todo.append(inc)
+    return out
+
+
+def propose(state, git, by_sub, by_person, reason, commit, version):
+    """apply.sh --propose-skeleton's step 4 (design §14.7.6): (rc, lines, sql). rc 1 refuses
+    (lines say why), 0 builds the diff document of skeleton version `version` and the one
+    psql transaction that submits it (sql)."""
+    acc = source._need_version(state)
+    rows = source.state_rows(state)
+    git_digest = source.skeleton_digest(git)
+    if git_digest == acc["digest"]:
+        return 1, ["nothing to approve: this skeleton is the accepted one"], None
+    try:
+        g = explain.gate(acc["body"], git, rows)
+    except Exception as e:   # a compile error
+        return 1, [f"the skeleton gate could not be computed: {type(e).__name__}: {e}"], None
+    if g["verdict"] != "widening":
+        return 1, ["nothing to approve: it adds no access; deploy as usual, the deploy accepts it"], None
+    errors = explain.checker_errors(git, rows)
+    if errors:
+        return 1, ["the proposed skeleton fails the checker with the applied matrix:"] + [f"  FAIL: {e}" for e in errors], None
+    o = open_version(state)
+    if o:
+        return 1, [f"version {o.get('version')} ({o.get('kind')}, {o.get('status')}) is still open: take it through or "
+                   "withdraw it first (the Policy UI, or ./apps/iam/apply.sh --withdraw-open)"], None
+    if not UUID.fullmatch(by_sub or ""):
+        die(f"--by-sub {by_sub!r} is not a uuid")
+    if not (by_person or "").strip() or not (reason or "").strip():
+        die("a skeleton proposal needs the proposer's person and a reason")
+    body = source.skeleton(git)
+    p_old, p_new, acc_skel, git_skel = _composed(acc["body"], git, rows)
+    groups, roles = sorted(body.get("resource_groups") or {}, key=source._bytes), sorted(body.get("roles") or {}, key=source._bytes)
+    entries_digest = source.entries_digest("skeleton", groups, roles, rows["entries"], rows["waivers"])
+    skel = {"from": acc["digest"], "to": git_digest, "sections": explain.sections(acc_skel, git_skel)}
+    doc = explain.diff_document("skeleton", int(version), int(state["version"]), entries_digest, p_old, p_new, skeleton=skel)
+    diff_bytes, diff_digest = explain.diff_bytes(doc), explain.diff_digest(doc)   # source.canonical (§14.7.3)
+    widened = {r for r in g["added"] if not r.startswith("_")}
+    barred = sorted((r for r in (body.get("roles") or {}) if closure(body["roles"], r) & widened), key=source._bytes)
+    lines = [f"skeleton version {version}: skeleton {git_digest[:12]} (commit {commit}) over the accepted "
+             f"{acc['digest'][:12]}, with the entries of applied version {state['version']}; it adds:"]
+    lines += [l for l in explain.gate_message(g).splitlines() if l.startswith("  ")]
+    lines += [f"diff digest {diff_digest}", f"entries digest {entries_digest}",
+              "no one holding these roles may approve it (they, or a role they include, gain access): "
+              + (", ".join(barred) or "none")]
+    T, J = source._text, source._jsonb
+    sql = "\n".join([
+        "-- apps/iam/apply.sh --propose-skeleton (apply_check.py propose; design §14.7.6)",
+        f"\\set digest '{git_digest}'",
+        _set("body", source.canonical(body).decode("utf-8")),
+        _set("commit", commit),
+        _set("diff", diff_bytes.decode("utf-8")),
+        f"\\set diff_digest '{diff_digest}'",
+        f"\\set by_sub '{by_sub.lower()}'",
+        _set("by_person", by_person),
+        _set("reason", reason),
+        f"\\set want_version '{int(version)}'",
+        f"\\set want_entries '{entries_digest}'",
+        "SELECT medcea_auth._set_internal_actor('system:apply') \\g /dev/null",
+        _ISOLATION_SQL,
+        "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version')) \\g /dev/null",
+        "SELECT pg_catalog.set_config('medcea.propose_want', :'want_version', true),",
+        "       pg_catalog.set_config('medcea.propose_entries', :'want_entries', true) \\g /dev/null",
+        "DO $next$",
+        "BEGIN",
+        "    IF (SELECT coalesce(max(x.version), 0) + 1 FROM iam_policy.version x)",
+        "       <> pg_catalog.current_setting('medcea.propose_want')::integer THEN",
+        "        RAISE EXCEPTION 'another version was created meanwhile (the diff names version %): run apply.sh again',",
+        "            pg_catalog.current_setting('medcea.propose_want');",
+        "    END IF;",
+        "END $next$;",
+        f"SELECT iam_policy._propose_skeleton(:'digest', {J('body')}, {T('commit')}, {J('diff')}, :'diff_digest', "
+        f":'by_sub'::uuid, {T('by_person')}, {T('reason')}) AS v \\gset",
+        "SELECT pg_catalog.set_config('medcea.propose_version', :'v', true) \\g /dev/null",
+        "DO $chk$",
+        "BEGIN",
+        "    IF pg_catalog.current_setting('medcea.propose_version') <> pg_catalog.current_setting('medcea.propose_want') THEN",
+        "        RAISE EXCEPTION 'another version was created meanwhile (got %, the diff names %): run apply.sh again',",
+        "            pg_catalog.current_setting('medcea.propose_version'), pg_catalog.current_setting('medcea.propose_want');",
+        "    END IF;",
+        "    IF iam_policy.entries_digest(pg_catalog.current_setting('medcea.propose_version')::integer)",
+        "       IS DISTINCT FROM pg_catalog.current_setting('medcea.propose_entries') THEN",
+        "        RAISE EXCEPTION 'version % does not store the entries the diff names (entries digest %, want %)',",
+        "            pg_catalog.current_setting('medcea.propose_version'),",
+        "            iam_policy.entries_digest(pg_catalog.current_setting('medcea.propose_version')::integer),",
+        "            pg_catalog.current_setting('medcea.propose_entries');",
+        "    END IF;",
+        "END $chk$;",
+        "SELECT :v;",
+        ""])
+    return 0, lines, sql
+
+
+def withdraw_sql(version, reason):
+    """apply.sh --withdraw-open's one transaction: _withdraw_open as system:apply, then the
+    number it withdrew asserted against the one shown (else rolled back); prints it."""
+    if not (reason or "").strip():
+        die("a reason is required")
+    return "\n".join([
+        "-- apps/iam/apply.sh --withdraw-open (apply_check.py withdraw-sql; design §14.7.6)",
+        _set("reason", reason),
+        f"\\set want_version '{int(version)}'",
+        "SELECT medcea_auth._set_internal_actor('system:apply') \\g /dev/null",
+        _ISOLATION_SQL,
+        "SELECT pg_catalog.set_config('medcea.withdraw_want', :'want_version', true) \\g /dev/null",
+        f"SELECT pg_catalog.set_config('medcea.withdraw_got', coalesce(iam_policy._withdraw_open({source._text('reason')})::text, ''), true) \\g /dev/null",
+        "DO $chk$",
+        "BEGIN",
+        "    IF pg_catalog.current_setting('medcea.withdraw_got') <> pg_catalog.current_setting('medcea.withdraw_want') THEN",
+        "        RAISE EXCEPTION 'another version was opened meanwhile (withdrawn: %, shown: %): nothing was withdrawn',",
+        "            nullif(pg_catalog.current_setting('medcea.withdraw_got'), ''), pg_catalog.current_setting('medcea.withdraw_want');",
+        "    END IF;",
+        "END $chk$;",
+        "SELECT pg_catalog.current_setting('medcea.withdraw_got');",
+        ""])
+
+
+def maker_warning(dual, role_names, username, group=ATTEST_ROLES_GROUP):
+    """A warning (or None) when --by holds no maker role of `group` (dual_control, §1.3)."""
+    if "dual_control" in dual:
+        dual = dual["dual_control"]
+    makers = (dual.get(group) or {}).get("maker_roles") or []
+    if set(role_names) & set(makers):
+        return None
+    return (f"--by {username} holds no maker role of {group} ({', '.join(makers) or 'none'}): the proposal is "
+            "recorded with that claim all the same")
+
+
 # ── the targets (design §14.4.10) ──────────────────────────────────────────────────────
 def targets(p):
     """[(name, cli argv)] of every target, describe-gate excluded (it needs the proxy list)."""
@@ -726,11 +923,18 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
     git = source.factory()
     acc = state.get("accepted") or {}
     rows = source.state_rows(state)
+    opens = [o for o in state.get("open_versions") or [] if o.get("kind") in OPEN_KINDS]
     if source.skeleton_digest(git) != acc.get("digest"):
         g = _gate_against(acc.get("body") or {}, git, rows)
         if g["verdict"] == "widening":
-            out.append(("FAIL", "the git skeleton widens over the accepted one: a deploy would refuse it "
-                                "(cli.py skeleton-gate)"))
+            # IAM 4.4: still a FAIL (a deploy refuses it), even when a version proposes it
+            prop = [o for o in opens if o.get("kind") == "skeleton" and o.get("skeleton_digest") == source.skeleton_digest(git)]
+            # health-check.sh cuts a detail at 160 characters: with a proposal the base is shorter,
+            # so the whole instruction fits up to version 99999 (tests/test_health_policy.py)
+            out.append(("FAIL", (
+                f"the git skeleton widens: a deploy refuses it (proposed as version {prop[0].get('version')}, "
+                f"{prop[0].get('status')}: put HEAD back at the accepted skeleton; the proposal waits on its branch)"
+                if prop else "the git skeleton widens over the accepted one: a deploy would refuse it (cli.py skeleton-gate)")))
         elif g["verdict"] == "error":
             out.append(("FAIL", f"the skeleton gate could not be computed: {g['error']}"))
         else:
@@ -801,6 +1005,14 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
     for o in state.get("open_versions") or []:
         if (o.get("age_days") or 0) > 7:
             out.append(("WARN", f"version {o.get('version')} is {o.get('status')} for {o.get('age_days')} days"))
+    for o in opens:   # IAM 4.4 (design §14.7.6): nothing approved is applied before 4.5
+        if o.get("status") == "approved":
+            out.append(("WARN", f"version {o.get('version')} ({o.get('kind')}) is approved; applying it arrives with "
+                                f"IAM 4.5 (./apps/iam/apply.sh {o.get('version')})"))
+        if o.get("kind") == "skeleton" and o.get("diff_from") and o.get("diff_from") != acc.get("digest"):
+            out.append(("WARN", f"skeleton version {o.get('version')} was proposed against skeleton "
+                                f"{str(o.get('diff_from'))[:12]}, the accepted one is now {str(acc.get('digest'))[:12]}: "
+                                "return it and propose again"))
     if state.get("apply_deferred_open"):
         out.append(("WARN", f"{len(state['apply_deferred_open'])} deferred apply target(s) open "
                             "(./apps/iam/apply.sh --resume --by <you> re-renders them)"))
@@ -862,8 +1074,15 @@ def status_text(state, gate=None, gate_rc=None, live_routes=None, live_mqtt=None
             verdict = "widening"
         else:
             verdict = "equal" if git_digest == acc.get("digest") else "unknown"
+        prop = [o for o in state.get("open_versions") or [] if o.get("kind") == "skeleton"]
+        widening = "WIDENING: refused until an approved skeleton can be applied (4.5)"
+        if prop:
+            widening += (f"; skeleton version {prop[0].get('version')} ({prop[0].get('status')}) proposes "
+                         f"{str(prop[0].get('skeleton_digest'))[:12]}")
+        else:
+            widening += "; propose it from a commit: ./apps/iam/apply.sh --propose-skeleton --from-git <rev>"
         word = {"equal": "equal", "narrowing": "narrowing: accepted at the next deploy",
-                "widening": "WIDENING: refused until an approved skeleton can be applied (4.5)",
+                "widening": widening,
                 "refused": "REFUSED: it narrows, but fails the checker with the applied matrix (fix it in git)"}.get(verdict, verdict)
         L.append(f"skeleton: accepted {acc['digest'][:12]}, git {git_digest[:12]}: {word}")
     else:
@@ -972,6 +1191,25 @@ def main(argv=None):
     c = sub.add_parser("owners")
     c.add_argument("--deploys", action="store_true")
     c.add_argument("--scoped", action="store_true")
+    c = sub.add_parser("propose")
+    c.add_argument("--state", required=True)
+    c.add_argument("--rev", required=True)
+    c.add_argument("--commit", required=True)
+    c.add_argument("--by-sub", required=True)
+    c.add_argument("--by-person", required=True)
+    c.add_argument("--reason-file", required=True)
+    c.add_argument("--version", type=int, required=True)
+    c.add_argument("--out")
+    c = sub.add_parser("open-version")
+    c.add_argument("--state", required=True)
+    c = sub.add_parser("withdraw-sql")
+    c.add_argument("--version", type=int, required=True)
+    c.add_argument("--reason-file", required=True)
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("maker-warn")
+    c.add_argument("--dual-control", required=True)
+    c.add_argument("--roles", required=True)
+    c.add_argument("--username", required=True)
     c = sub.add_parser("deferred-record")
     c.add_argument("--state", required=True)
     c.add_argument("--target", required=True)
@@ -1031,6 +1269,45 @@ def main(argv=None):
             with open(a.out, "w", encoding="utf-8") as f:
                 f.write(record_sql("apply_deferred", deferred_payload(load_json(a.state), a.target, a.reason,
                                                                       a.command)))
+            return 0
+        if a.cmd == "propose":
+            state = load_json(a.state)
+            with open(a.reason_file, encoding="utf-8") as f:
+                reason = f.read()
+            git = git_policy(a.rev)
+            if source.skeleton_digest(source.factory()) != (state.get("accepted") or {}).get("digest"):
+                print("WARNING: this tree's skeleton is not the accepted one: deploys refuse a widening until HEAD "
+                      "is back at the accepted skeleton", file=sys.stderr)
+            rc, lines, sql = propose(state, git, a.by_sub, a.by_person, reason, a.commit, a.version)
+            if rc:
+                print("ERROR: " + "\n".join(lines) + "\nNothing was changed.", file=sys.stderr)
+                return rc
+            print("\n".join(lines))
+            if a.out:
+                fd = os.open(a.out, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(sql)
+            return 0
+        if a.cmd == "open-version":
+            o = open_version(load_json(a.state))
+            if o:
+                print("\t".join(str(x) if x not in (None, "") else "-" for x in (
+                    o.get("version"), o.get("kind"), o.get("status"), " ".join(str(o.get("reason") or "").split()),
+                    ", ".join(o.get("authors") or []) + (f" (claimed --by person {o['claimed_by_person']})"
+                                                         if o.get("claimed_by_person") else ""))))
+            return 0
+        if a.cmd == "withdraw-sql":
+            with open(a.reason_file, encoding="utf-8") as f:
+                text = withdraw_sql(a.version, f.read())
+            fd = os.open(a.out, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            return 0
+        if a.cmd == "maker-warn":
+            names = [r.get("name") for r in load_json(a.roles) if isinstance(r, dict)]
+            w = maker_warning(load_json(a.dual_control), names, a.username)
+            if w:
+                print(w)
             return 0
         if a.cmd == "bootstrap-targets":
             return bootstrap_targets(a.out, a.source == "host", a.commit, a.state)

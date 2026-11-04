@@ -23,6 +23,8 @@
 <tr><td><a href="#training-e13">E13 Version 1 and the skeleton gate</a></td><td>host operator (<span class="role">admin</span>)</td><td>Version 1 is recorded once and changes nothing a person can reach, and a git change that would give a role more access is refused before any deploy changes anything, break-glass included.</td><td>3 Nov 2026 (steps 1 and 3)</td></tr>
 <tr><td><a href="#training-e14">E14 Open the manual from the portal</a></td><td><span class="role">operator</span>, host operator (<span class="role">admin</span>), an account with no platform role</td><td>Everyone the portal admits reads, from a card on the portal, the manual the repository builds now; nobody else reads it; a republished manual shows at once.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e16">E16 Confirm version 1 in the Access Policy</a></td><td><span class="role">qa</span> (two accounts), <span class="role">operator</span>, host operator</td><td>A bootstrap version is confirmed through the Policy UI by a <span class="role">qa</span> person other than the one <code>apply.sh</code> recorded, and the applier cannot confirm it.</td><td>4 November 2026: confirmed by <code>sergio_qa</code>, event 51; <code>svieira</code> refused</td></tr>
+<tr><td><a href="#training-e17">E17 Change the access policy (to approved, then withdrawn)</a></td><td><span class="role">admin</span>, <span class="role">qa</span> (two accounts)</td><td>A change to the policy is drafted by one person, checked by the checker, and approved only by a <span class="role">qa</span> person who is none of its authors, on exactly the diff shown; nothing approved is applied in 4.4.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e18">E18 Propose a git skeleton change and approve it</a></td><td>host operator (<span class="role">admin</span>), <span class="role">qa</span></td><td>A git change that gives access reaches no deploy: it is proposed from a commit as a skeleton version and approved with the attestation by a <span class="role">qa</span> person who did not propose it.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -528,6 +530,67 @@
 </ul>
 <p><strong>Afterwards.</strong> Nothing to undo: the confirmation is the record.</p>
 <p><strong>Last done.</strong> 4 November 2026. Refusal: six confirmations as <code>svieira</code>, the account <code>apply.sh --bootstrap --by</code> named (10:35–10:59 UTC), all refused 403 "You applied version 1 yourself"; nothing written, the history stayed at event 48. Confirmation: <code>sergio_qa</code> (activated through the User Manager, confirmed by <code>svieira</code>) confirmed version 1 at 11:10:59 UTC, history event 51 <code>confirmed</code>, version 1, actor <code>sergio_qa</code>, person <code>96b98720…</code>; <code>iam_policy.version</code> carries <code>confirmed_at</code> and the person; one <code>approval_evidence</code> row; <code>verify_chain()</code> ok. <code>./health-check.sh</code> 11:15 UTC: <strong>Access policy version</strong> OK; <code>./apps/iam/apply.sh --status</code>: "confirmed 2026-11-04T11:10:59". The note was a placeholder rather than the step's text. Not tried: the operator refusal and the unticked-statement state.</p>
+
+<h3 id="training-e17">E17 Change the access policy (to approved, then withdrawn)</h3>
+<p><strong>Goal.</strong> Draft a small change to the access policy as an <span class="role">admin</span>, submit it, and have a <span class="role">qa</span> person who is none of its authors approve it on the diff the page shows; then withdraw it, since applying arrives with slice 4.5. The exercise proves the decisions of 4 November 2026 "The approval diff" and "A version that widens the approver's own role" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> Maker: <code>admin</code> (<span class="role">admin</span>, the install's <code>ADMIN_USER</code>). Approver: <code>sergio_qa</code> (<span class="role">qa</span>). For the refusals: <code>svieira</code> (<span class="role">qa</span>). Before you start, check in the User Manager that <code>sergio_qa</code>'s and <code>svieira</code>'s <code>person_id</code>s differ from <code>admin</code>'s. See the <a href="#compliance-test-accounts">test accounts</a>: on this install they belong to one human.</p>
+<p><strong>Before you start.</strong> Slice 4.4 is deployed (<a href="#admin-iam44">IAM 4.4</a>); <code>./apps/iam/apply.sh --status</code> shows no open version; <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> are <code>true</code>; no policy break-glass is open. Give each account its own browser session.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">admin</span>: Access Policy → <strong>Changes</strong> → <strong>New draft</strong> from the applied version, reason "E17: remove a level nobody needs", <strong>Create the draft</strong>.</li>
+<li><span class="role">admin</span>: in <strong>Matrix</strong>, click a cell that holds a level a role does not need for its work (a narrowing, so no <span class="role">qa</span> role is widened), untick that level, write a reason, <strong>Save the cell</strong>.</li>
+<li><span class="role">admin</span>: in <strong>Changes</strong>, <strong>Submit for approval</strong>, with a reason.</li>
+<li><span class="role">qa</span> (<code>sergio_qa</code>): <strong>Approval</strong>, open the version, read the diff, write a note, <strong>Approve</strong>.</li>
+<li><span class="role">admin</span>: <strong>Changes</strong> → <strong>Withdraw…</strong> on the approved version, reason "E17 done: applying arrives with 4.5".</li>
+<li>Host operator: <code>./apps/iam/apply.sh --status</code> and <code>./health-check.sh</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: a new version, kind change, status draft, with you as maker; the checker's verdict is green.</li>
+<li>Step 2: the cell shows the new levels; the checker stays green (or names the rule the change breaks: then choose another cell).</li>
+<li>Step 3: status submitted; the version is no longer editable.</li>
+<li>Step 4: the diff lists the changed cell (before → after) and what the role loses; no "This version widens a role you hold"; then "Version N approved. It is applied when the host operator runs apply.sh (IAM 4.5)."</li>
+<li>Step 5: status withdrawn.</li>
+<li>Step 6: no open version; between steps 4 and 5 the health check WARNs "version N (change) is approved; applying it arrives with IAM 4.5", after step 5 it is green again.</li>
+</ul>
+<div class="record"><p>The policy history holds <code>draft_created</code>, two <code>entry_saved</code> (one at creation, recording the checker's verdict), <code>submitted</code>, <code>approved</code> (with the three digests and the token's hash), <code>withdrawn</code> and a <code>status_changed</code> per step; <code>iam_policy.approval_evidence</code> holds the approval's signed token. Read them in <strong>History</strong> (as <span class="role">qa</span>). All permanent. Write the version and event numbers under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>As <code>admin</code>, approving: the Approval tab is not offered, and the route answers 403.</li>
+<li>Submitting a draft the checker refuses (save a cell that breaks a rule): <strong>Submit for approval</strong> stays disabled; sent anyway, 409, and the page says "Version N fails the policy's checker now: fix the errors it lists first."</li>
+<li>Approving from a page opened before a later save (<span class="role">qa</span> returns it, <span class="role">admin</span> saves a cell and submits again, then approve from the old page): refused, "Version N changed since you opened it. Reload the page."</li>
+<li>As <code>svieira</code> (<span class="role">qa</span>), approving once it is approved: refused, "Version N is not waiting for approval (any more). Reload the page." (the database's "version N is not submitted").</li>
+</ul>
+<p><strong>Afterwards.</strong> Nothing to undo: the version is withdrawn and stays in the record. Never leave an approved version open.</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
+<h3 id="training-e18">E18 Propose a git skeleton change and approve it</h3>
+<p><strong>Goal.</strong> Take a git change that gives access (which every deploy refuses) through the only path it has: a skeleton version proposed from its commit, approved by a <span class="role">qa</span> person with the attestation. The exercise proves the decision of 4 November 2026 "Who made a skeleton version" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> The host operator (on this install the OS account <code>svieira</code>, which the version's reason records), naming <code>admin</code> with <code>--by</code>; approver <code>sergio_qa</code> (<span class="role">qa</span>), whose <code>person_id</code> differs from <code>admin</code>'s. On this install they belong to one human.</p>
+<p><strong>Before you start.</strong> As E17; no open version. Choose a harmless widening that no <span class="role">qa</span> or <span class="role">auditor</span> role gains, for example one more read route for <span class="role">engineer</span> in a group it already reads.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Host operator: on a branch, change <code>apps/iam/policy/defaults.yaml</code> and commit; then go back to the deploying branch (HEAD at the accepted skeleton).</li>
+<li>Host operator: <code>./apps/iam/apply.sh --propose-skeleton --by admin --reason "E18: one read route" --from-git &lt;commit&gt; --check-only</code>, then the same without <code>--check-only</code>, answering <code>y</code> (or <code>./guide.sh</code> → Policy → <strong>Propose a git skeleton change for approval</strong>).</li>
+<li><span class="role">qa</span>: Access Policy → <strong>Approval</strong>, open the skeleton version, read the header and the diff, tick "I did not run apply.sh --propose-skeleton for this version.", write a note, <strong>Approve</strong>.</li>
+<li>Host operator: <code>./apps/iam/apply.sh --withdraw-open --by admin --reason "E18 done: applying arrives with 4.5"</code> (or <strong>Withdraw…</strong> in the Access Policy as <span class="role">admin</span>).</li>
+<li>Host operator: <code>./apps/iam/apply.sh --status</code>, <code>./health-check.sh</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 2: what <span class="role">engineer</span> gains, the digests, and "version N (skeleton) submitted: a qa person other than admin, who did not run this proposal, approves it in the Policy UI (Approval) …".</li>
+<li>Step 3: the note reads "A git change: commit …, proposed by the host operator for person … (a claim of apply.sh --by; the reason names the username)"; the diff lists the route under <span class="role">engineer</span> and the skeleton sections that change; Approve is enabled only with the box ticked and a note.</li>
+<li>Steps 4 and 5: "version N withdrawn (system:apply)"; no open version; the health check is green.</li>
+</ul>
+<div class="record"><p><code>submitted</code> (kind skeleton, with the commit, the claimed <code>--by</code> person and the reason naming the username and OS account), <code>approved</code> (the note begins with the attestation), <code>withdrawn</code> (<code>by</code> <code>system:apply</code>); the stored diff in <code>iam_policy.version_diff</code>; the proposed skeleton stays unaccepted. All permanent.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>Approving without ticking the attestation: <strong>Approve</strong> stays disabled; sent anyway, refused: "Tick the statement that you did not run apply.sh --propose-skeleton for this version."</li>
+<li>Approving as the <code>--by</code> person (propose with <code>--by svieira</code>, a <span class="role">qa</span> account, and approve as <code>svieira</code>): refused, "You are an author of version N: another quality assurance person approves it."</li>
+<li><code>./deploy-infra.sh</code> with the branch checked out: refused by the skeleton gate before anything changes, approved version or not.</li>
+</ul>
+<p><strong>Afterwards.</strong> Keep the branch or delete it; the version is withdrawn and stays in the record.</p>
+<p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>

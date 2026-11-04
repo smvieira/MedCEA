@@ -545,10 +545,13 @@ ALTER FUNCTION iam_policy.append_history(text, jsonb, text) OWNER TO medcea_owne
 REVOKE ALL ON FUNCTION iam_policy.append_history(text, jsonb, text) FROM PUBLIC;
 
 -- verify_chain() → one row: ok, events, the first event that breaks the chain
--- (NULL when ok), why, and the head hash. Run by health-check.sh as postgres.
+-- (NULL when ok), why, and the head hash. Run by health-check.sh as postgres and by
+-- the Policy UI's History tab as iam_svc (defaults.yaml). SECURITY DEFINER (IAM 4.4)
+-- because history_record() is owner only and granting it would widen the skeleton; it
+-- reads only the history, which iam_svc already reads, and returns the verdict.
 CREATE OR REPLACE FUNCTION iam_policy.verify_chain(
     OUT ok boolean, OUT events bigint, OUT first_bad_event bigint, OUT detail text, OUT head text)
-LANGUAGE plpgsql STABLE SET search_path = iam_policy, pg_temp AS $$
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = iam_policy, pg_temp AS $$
 DECLARE
     r     record;
     prev  text := repeat('0', 64);
@@ -4679,7 +4682,8 @@ BEGIN
     RETURN d;
 END $$;
 
--- withdraw(v, reason, iat): an author takes an open change or skeleton version back.
+-- withdraw(v, reason, iat): an admin (U on iam_policy) takes an open version back;
+-- withdrawing grants nothing, so it is not limited to the authors.
 CREATE OR REPLACE FUNCTION iam_policy.withdraw(p_version integer, p_reason text, p_iat double precision) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -4730,6 +4734,9 @@ END $$;
 
 -- approve(v, note, entries_digest, diff_digest, skeleton_digest): submitted ->
 -- approved; binds the entries, the diff qa saw and the skeleton it was computed on.
+-- Refused while a policy break-glass is open (4.4); a skeleton version also needs
+-- its proposal not stale, the attestation in the note and no role the approver
+-- holds (with what it includes) gaining reach in the stored diff (4.4, §14.7.1).
 CREATE OR REPLACE FUNCTION iam_policy.approve(p_version integer, p_note text, p_entries_digest text,
     p_diff_digest text, p_skeleton_digest text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -4741,6 +4748,12 @@ DECLARE
     want     text;
     ev       jsonb;
     hid      bigint;
+    bg_ev    bigint;
+    bg_open  text;
+    acc      text;
+    s_from   text;
+    wide     text;
+    attest   constant text := 'I did not run apply.sh --propose-skeleton for this version.';
 BEGIN
     SELECT * INTO a FROM iam_policy._qa('approve_policy');
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'));
@@ -4758,6 +4771,26 @@ BEGIN
     END IF;
     IF v.based_on IS DISTINCT FROM applied THEN
         RAISE EXCEPTION 'version % was drafted on version %, but version % is applied now: return it', p_version, v.based_on, applied
+            USING ERRCODE = '22023';
+    END IF;
+    -- a policy break-glass still open (4.4, §3.5): a break_glass_seen of source file
+    -- with a component no break_glass_ended has closed; the predicate of
+    -- policy_db_state's break_glass_open (infra/lib-policy-source.sh), inline because a
+    -- helper would be a new skeleton member
+    SELECT min(b.event_id), pg_catalog.string_agg(b.component, ', ' ORDER BY b.component COLLATE "C")
+      INTO bg_ev, bg_open
+      FROM (SELECT min(h.event_id) AS event_id, bc.value AS component
+              FROM iam_policy.history h
+             CROSS JOIN LATERAL pg_catalog.jsonb_array_elements_text(CASE WHEN pg_catalog.jsonb_typeof(h.payload -> 'components') = 'array'
+                                                                          THEN h.payload -> 'components' ELSE '[]' END) AS bc(value)
+             WHERE h.event = 'break_glass_seen' AND h.payload ->> 'source' = 'file'
+               AND NOT EXISTS (SELECT 1 FROM iam_policy.history e
+                                WHERE e.event = 'break_glass_ended'
+                                  AND e.payload ->> 'since_event' = h.event_id::text
+                                  AND e.payload ->> 'component' = bc.value)
+             GROUP BY bc.value) b;
+    IF bg_ev IS NOT NULL THEN
+        RAISE EXCEPTION 'a policy break-glass is open (event %): approvals wait until a normal deploy of % ends it', bg_ev, bg_open
             USING ERRCODE = '22023';
     END IF;
     IF EXISTS (SELECT 1 FROM iam_policy._authors(p_version) au WHERE au.sub = a.sub OR au.person = a.person) THEN
@@ -4778,6 +4811,36 @@ BEGIN
     IF v.kind = 'skeleton' AND p_diff_digest IS DISTINCT FROM (SELECT x.diff_digest FROM iam_policy.version_diff x WHERE x.version = p_version) THEN
         RAISE EXCEPTION 'the diff you saw is not the one the host stored for version %: reload the page', p_version
             USING ERRCODE = '22023';
+    END IF;
+    IF v.kind = 'skeleton' THEN
+        -- stale: a deploy accepted another (narrowing) skeleton since the proposal
+        acc := iam_policy._accepted();
+        SELECT x.diff -> 'skeleton' ->> 'from' INTO s_from FROM iam_policy.version_diff x WHERE x.version = p_version;
+        IF s_from IS DISTINCT FROM acc THEN
+            RAISE EXCEPTION 'version % was proposed against skeleton %, the accepted one is now %: return it and propose again',
+                p_version, pg_catalog.left(s_from, 12), pg_catalog.left(acc, 12) USING ERRCODE = '22023';
+        END IF;
+        -- the maker is only the claimed --by (_propose_skeleton): qa attests, as confirm_applied
+        IF pg_catalog.left(coalesce(p_note, ''), pg_catalog.length(attest)) IS DISTINCT FROM attest
+           OR pg_catalog.btrim(pg_catalog.substr(p_note, pg_catalog.length(attest) + 1)) = '' THEN
+            RAISE EXCEPTION 'approving a skeleton version needs the attestation "I did not run apply.sh --propose-skeleton for this version."'
+                USING ERRCODE = '22023';
+        END IF;
+        -- the approver's own role, or one it includes, gains reach: not theirs to approve
+        WITH RECURSIVE held(role_code) AS (
+            SELECT a.role
+            UNION
+            SELECT i.role_code FROM held hr JOIN iam_policy.role r ON r.code = hr.role_code
+             CROSS JOIN LATERAL pg_catalog.unnest(r.includes) AS i(role_code))
+        SELECT hr.role_code INTO wide FROM held hr, iam_policy.version_diff x
+         WHERE x.version = p_version
+           AND pg_catalog.jsonb_typeof(x.diff -> 'roles' -> hr.role_code -> 'added') = 'array'
+           AND pg_catalog.jsonb_array_length(x.diff -> 'roles' -> hr.role_code -> 'added') > 0
+         ORDER BY hr.role_code COLLATE "C" LIMIT 1;
+        IF wide IS NOT NULL THEN
+            RAISE EXCEPTION 'version % widens role %, which you hold: you may not approve it', p_version, wide
+                USING ERRCODE = '42501';
+        END IF;
     END IF;
     ev := iam_policy._evidence(p_version, 'approved');
     UPDATE iam_policy.version x SET status = 'approved', approved_by_person = a.person, approved_by_sub = a.sub::uuid,
@@ -4923,6 +4986,9 @@ DECLARE
     v        iam_policy.version;
     applied  integer;
     code     text;
+    bg       boolean;
+    stale    boolean := false;
+    wide     boolean := false;
 BEGIN
     SELECT * INTO a FROM medcea_auth.request_actor();
     c := CASE WHEN a.source = 'token' THEN nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb END;
@@ -4931,6 +4997,28 @@ BEGIN
         OR medcea_auth._rpc_client('approve_policy') IS NULL;
     SELECT * INTO v FROM iam_policy.version x WHERE x.version = p_version;
     SELECT x.version INTO applied FROM iam_policy.version x WHERE x.status = 'applied';
+    -- approve()'s 4.4 checks, the same predicates (break-glass: lib-policy-source.sh's)
+    bg := EXISTS (SELECT 1 FROM iam_policy.history h
+                  CROSS JOIN LATERAL pg_catalog.jsonb_array_elements_text(CASE WHEN pg_catalog.jsonb_typeof(h.payload -> 'components') = 'array'
+                                                                               THEN h.payload -> 'components' ELSE '[]' END) AS bc(value)
+                  WHERE h.event = 'break_glass_seen' AND h.payload ->> 'source' = 'file'
+                    AND NOT EXISTS (SELECT 1 FROM iam_policy.history e
+                                     WHERE e.event = 'break_glass_ended'
+                                       AND e.payload ->> 'since_event' = h.event_id::text
+                                       AND e.payload ->> 'component' = bc.value));
+    IF v.kind = 'skeleton' THEN
+        stale := (SELECT x.diff -> 'skeleton' ->> 'from' FROM iam_policy.version_diff x WHERE x.version = p_version)
+                 IS DISTINCT FROM iam_policy._accepted();
+        WITH RECURSIVE held(role_code) AS (
+            SELECT a.role
+            UNION
+            SELECT i.role_code FROM held hr JOIN iam_policy.role r ON r.code = hr.role_code
+             CROSS JOIN LATERAL pg_catalog.unnest(r.includes) AS i(role_code))
+        SELECT EXISTS (SELECT 1 FROM held hr, iam_policy.version_diff x
+                        WHERE x.version = p_version
+                          AND pg_catalog.jsonb_typeof(x.diff -> 'roles' -> hr.role_code -> 'added') = 'array'
+                          AND pg_catalog.jsonb_array_length(x.diff -> 'roles' -> hr.role_code -> 'added') > 0) INTO wide;
+    END IF;
     code := CASE
         WHEN a.sub IS NULL THEN 'no_token'
         WHEN coalesce(pg_catalog.btrim(a.person), '') = '' THEN 'no_person'
@@ -4940,6 +5028,9 @@ BEGIN
         WHEN v.status <> 'submitted' THEN 'not_submitted'
         WHEN applied IS NULL THEN 'no_applied'
         WHEN v.based_on IS DISTINCT FROM applied THEN 'stale_base'
+        WHEN bg THEN 'break_glass_open'
+        WHEN stale THEN 'stale_skeleton'
+        WHEN wide THEN 'own_widening'
         WHEN EXISTS (SELECT 1 FROM iam_policy._authors(p_version) au WHERE au.sub = a.sub OR au.person = a.person) THEN 'own_author'
         WHEN iam_policy.entries_digest(p_version) IS DISTINCT FROM v.entries_digest THEN 'entries_changed'
         END;
@@ -5122,7 +5213,10 @@ END $$;
 
 -- _propose_skeleton(...): apply.sh --propose-skeleton (4.4): a git skeleton that
 -- adds reach becomes a submitted skeleton version with the applied entries and
--- the host-computed diff qa will see byte for byte.
+-- the host-computed diff qa will see byte for byte. It does not hash p_diff
+-- itself: apply.sh computed p_diff_digest over source.canonical(p_diff), and
+-- iam-api re-checks it before serving the diff. created_by_name is the fixed text
+-- 'apply.sh --by (claimed)'; the --by username and the OS user are in the reason.
 CREATE OR REPLACE FUNCTION iam_policy._propose_skeleton(p_digest text, p_body jsonb, p_commit text, p_diff jsonb,
     p_diff_digest text, p_by_sub uuid, p_by_person text, p_reason text) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$

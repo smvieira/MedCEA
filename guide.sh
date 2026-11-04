@@ -1530,6 +1530,57 @@ a_policy_open_ui() {
     NOTES=("Sign in as admin, auditor, qa or qp. qa confirms a bootstrap or rollback version there (Confirm tab).")
     plan_run
 }
+# IAM 4.4 (design §14.7): drafting and approval — two function bodies in 008c, then iam-api's
+# write side, the diff and the new tabs; apply.sh's skeleton proposal and host withdraw.
+a_policy_44_deploy() {
+    CMD=(./apps/database/deploy.sh "&&" ./apps/iam/deploy.sh)
+    EFFECT="migration 008c's approve and why_not bodies (break-glass and skeleton-version refusals); iam-api :8083's drafting and approval routes, the Policy UI's new tabs and ConfigMap iam-compiler (iam-api restarts)"
+    LOCK="yes, held by the guide for both (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the database deploy first (the two function bodies), then the iam deploy. deploy-infra and the access deploy are not needed."
+           "Nobody's access changes: no route table, gate, grant or skeleton moves, and there is no 503 window. In the minute between the two the old page serves and cannot write."
+           "Approvals need both IAM switches, IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true: qa approves with their own token through config-api."
+           "Nothing approved is applied before IAM 4.5. Health stays green until a version is approved (then it WARNs that applying it waits for 4.5).")
+    plan_run
+}
+POLICY_USER_RE='^[A-Za-z0-9][A-Za-z0-9_-]*$'   # --by of the IAM 4.4 modes (§14.7.7), no leading -
+POLICY_REASON_RE='^[^-]'                        # apply.sh's --reason rule: non-empty, not starting with -
+POLICY_REV_RE='^[A-Za-z0-9][A-Za-z0-9._/~^-]*$' # a git revision, no leading -
+policy_by_reason() {   # --by (a Keycloak username, remembered) and --reason → CMD += both
+    ask_match "Your Keycloak username (--by)" "$POLICY_USER_RE" "letters, digits, _ and -, starting with a letter or digit" "$BY_USER"
+    BY_USER="$ANSWER"
+    while :; do
+        ask_match "Reason to record (--reason)" "$POLICY_REASON_RE" "a reason is required, and it may not start with -"
+        [[ "$ANSWER" != *[[:cntrl:]]* ]] && break
+        warn "no control characters, please"
+    done
+    CMD+=(--by "$BY_USER" --reason "$ANSWER")
+}
+a_policy_propose_skeleton() {
+    echo "  --by is YOUR Keycloak username: recorded as the proposer (a claim), with your OS user;"
+    echo "  a qa person who did not run the proposal approves it in the Policy UI (Approval)."
+    CMD=(./apps/iam/apply.sh --propose-skeleton)
+    policy_by_reason
+    echo "  The change must be a commit (on a branch): this tree stays at the accepted skeleton."
+    ask_match "Git revision holding the skeleton change (--from-git)" "$POLICY_REV_RE" "a commit, branch or tag: letters, digits and . _ / ~ ^ -, starting with a letter or digit"
+    CMD+=(--from-git "$ANSWER")
+    EFFECT="database: a version of kind skeleton, submitted with its diff (a permanent record); no file, no artefact, no deploy"
+    LOCK="apply.sh's own (refused while another deploy runs)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("apply.sh prints what the change adds per role and both digests, then asks its own [y/N] here."
+           "Refused (nothing changed) when the commit's skeleton equals the accepted one or only narrows (deploy it as usual), fails the checker, or another change or skeleton version is open."
+           "Keycloak is read through a port-forward to resolve --by. Applying an approved skeleton version arrives with IAM 4.5.")
+    plan_run
+}
+a_policy_withdraw_open() {
+    CMD=(./apps/iam/apply.sh --withdraw-open)
+    echo "  --by is YOUR Keycloak username, recorded in the reason (it is not looked up in Keycloak)."
+    policy_by_reason
+    EFFECT="database: the one open change or skeleton version (draft, submitted or approved) becomes withdrawn, by system:apply (a permanent record); nothing when none is open"
+    LOCK="apply.sh's own (refused while another deploy runs)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("The normal path is the Policy UI's Withdraw (an admin). This is for when the page cannot: a rollback of IAM 4.4, an aborted live test."
+           "apply.sh shows the open version and asks its own [y/N] here. An approved IAM 4.4 version must not survive a revert of 4.4: withdraw it first.")
+    plan_run
+}
 # IAM 4.2b (design §14.5): every scoped mode, each re-rendering only what drifted.
 a_policy_scoped() {
     CMD=(./deploy-infra.sh --policy-only "&&" ./infra/deploy-workbench.sh --policy-only)
@@ -1675,6 +1726,14 @@ a_iam_mqtt() {
         EFFECT="Keycloak: 4 throwaway accounts (one qa), deleted on exit; database: one applied deactivation decision, the unit's commissioning proposals, approvals and policy-history events stay (append-only); the unit is flagged for up to a minute; cluster: short-lived probe pods"
     fi
     NOTES=("Needs IAM_MQTT_PERSON=true. Run after ./apps/iam/deploy.sh and ./apps/mqtt-explorer/deploy.sh.")
+    plan_run
+}
+a_iam_policy() {
+    CMD=(tests/iam-policy.sh)
+    EFFECT="Keycloak: 4 throwaway accounts, deleted on exit; database: one change version drafted, approved and withdrawn, its events and approval evidence stay (append-only)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Needs IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true, run after Deploy IAM 4.4. Refused while a change or skeleton version is open."
+           "If it stops half-way it withdraws its version (in the Policy UI, else apply.sh --withdraw-open) before deleting the accounts.")
     plan_run
 }
 a_fixture_run() {
@@ -1945,6 +2004,7 @@ AREA_HEALTH=(
     "a_fixture_down|Delete the throwaway database|tests/iam-db-fixture.sh down."
     "a_iam_workbench|Workbench: admin cannot open others' servers|tests/iam-workbench.sh: throwaway accounts, takes the deploy lock."
     "a_iam_mqtt|MQTT Explorer personal credentials test|tests/iam-mqtt.sh: throwaway accounts, takes the deploy lock."
+    "a_iam_policy|Policy drafting and approval test (IAM 4.4)|tests/iam-policy.sh: throwaway accounts, a version drafted, approved and withdrawn."
 )
 AREA_EDGE=(
     "a_flash|Flash and register a board|./edge/flash-device.sh: an ESP32 over USB into a unit/zone slot."
@@ -1971,6 +2031,9 @@ AREA_POLICY=(
     "a_policy_scoped|Re-render the policy artefacts (scoped)|Every --policy-only/--gate-only, under one lock: only what drifted from the applied policy."
     "a_policy_43_deploy|Deploy IAM 4.3 (the Policy UI)|deploy-infra, access and iam deploys in order, under one lock; nobody's access changes."
     "a_policy_open_ui|Open the Policy UI|Prints its address (https://policy.<domain>/)."
+    "a_policy_44_deploy|Deploy IAM 4.4 (drafting and approval)|The database and iam deploys in order, under one lock; nobody's access changes."
+    "a_policy_propose_skeleton|Propose a git skeleton change for approval (IAM 4.4)|./apps/iam/apply.sh --propose-skeleton --from-git <rev>: a qa person approves it in the Policy UI."
+    "a_policy_withdraw_open|Withdraw the open policy version from the host (IAM 4.4)|./apps/iam/apply.sh --withdraw-open: when the Policy UI cannot."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -1986,7 +2049,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, and the IAM 4.1, 4.2a and 4.3 deploys."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, the IAM 4.1, 4.2a and 4.3 deploys, and the IAM 4.4 deploy, skeleton proposals and the host withdraw."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

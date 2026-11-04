@@ -2749,6 +2749,297 @@ class ExplainCellTest(unittest.TestCase):
         self.assertEqual(cm["metadata"]["annotations"]["medcea/compiler-sha256"], sha)
 
 
+class ExplainDiffTest(unittest.TestCase):
+    """explain.diff / diff_document (IAM 4.4, design §14.7.3): the bytes qa approves are
+    deterministic, carry no compiler digest, commit or time, and survive jsonb."""
+
+    @classmethod
+    def setUpClass(cls):
+        from compiler import explain
+        cls.explain = explain
+        cls.p = model.load_defaults()
+        cls.empty = explain.diff(cls.p, cls.p)
+        # a new cell: the first (group, role) in byte order with no cell, given R
+        cls.cell_key = next((g, r) for g in sorted(cls.p.groups) for r in sorted(cls.p.roles)
+                            if not cls.p.cell(g, r) and "R" in cls.p.levels)
+        d = copy.deepcopy(cls.p.data)
+        d["matrix"].setdefault(cls.cell_key[0], {})[cls.cell_key[1]] = ["R"]
+        cls.p_cell = model.Policy(d)
+        cls.d_cell = explain.diff(cls.p, cls.p_cell)
+        # operator's own_unit on runs dropped: the lost constraint is an added tuple
+        d = copy.deepcopy(cls.p.data)
+        c = d["matrix"]["runs"]["operator"]
+        d["matrix"]["runs"]["operator"] = list(c["levels"])
+        cls.p_free = model.Policy(d)
+        cls.d_free = explain.diff(cls.p, cls.p_free)
+
+    def test_equal_policies_give_an_empty_diff(self):
+        self.assertEqual(self.empty, {"cells": [], "waivers": {"added": [], "removed": []}, "roles": {},
+                                      "system": {"added": [], "removed": []}})
+
+    def test_a_cell_change_shows_in_cells_and_roles(self):
+        g, r = self.cell_key
+        self.assertEqual(self.d_cell["cells"], [{"group": g, "role": r, "before": {}, "after": {"R": None}}])
+        self.assertIn(["level", g, "R", None], self.d_cell["roles"][r]["added"])
+        self.assertEqual(self.d_cell["roles"][r]["removed"], [])
+        # every role whose reach moved, and only those
+        for role in self.p.roles:
+            moved = self.explain.reach(self.p, role) != self.explain.reach(self.p_cell, role)
+            self.assertEqual(role in self.d_cell["roles"], moved, role)
+        # the reverse diff swaps added and removed
+        back = self.explain.diff(self.p_cell, self.p)
+        self.assertEqual(back["roles"][r], {"added": [], "removed": self.d_cell["roles"][r]["added"]})
+        self.assertEqual(back["cells"][0]["before"], {"R": None})
+
+    def test_a_lost_constraint_shows_as_added(self):
+        cell = self.d_free["cells"]
+        self.assertEqual([(c["group"], c["role"]) for c in cell], [("runs", "operator")])
+        self.assertEqual(cell[0]["before"]["R"], "own_unit")
+        self.assertIsNone(cell[0]["after"]["R"])
+        self.assertIn(["level", "runs", "R", None], self.d_free["roles"]["operator"]["added"])
+        self.assertIn(["level", "runs", "R", ["own_unit"]], self.d_free["roles"]["operator"]["removed"])
+
+    def test_waivers_by_id(self):
+        d = copy.deepcopy(self.p.data)
+        w = dict(copy.deepcopy(d["waivers"][0]), id="W-test", rationale="x")
+        d["waivers"] = list(d.get("waivers") or []) + [w]
+        p2 = model.Policy(d)
+        got = self.explain.diff(self.p, p2)["waivers"]
+        from compiler import source
+        self.assertEqual(got, {"added": [source.waiver_row(w)], "removed": []})
+        d3 = copy.deepcopy(d)
+        d3["waivers"][-1]["rationale"] = "changed"
+        got = self.explain.diff(p2, model.Policy(d3))["waivers"]
+        self.assertEqual([x["id"] for x in got["added"]], ["W-test"])
+        self.assertEqual([x["id"] for x in got["removed"]], ["W-test"])
+
+    def test_determinism(self):
+        p_again = model.load_defaults()
+        d = copy.deepcopy(p_again.data)
+        d["matrix"].setdefault(self.cell_key[0], {})[self.cell_key[1]] = ["R"]
+        a = self.explain.diff_document("change", 2, 1, "0" * 64, self.p, self.p_cell)
+        b = self.explain.diff_document("change", 2, 1, "0" * 64, p_again, model.Policy(d))
+        self.assertEqual(self.explain.diff_bytes(a), self.explain.diff_bytes(b))
+        self.assertEqual(self.explain.diff_digest(a), hashlib.sha256(self.explain.diff_bytes(a)).hexdigest())
+        self.assertRegex(self.explain.diff_digest(a), r"^[0-9a-f]{64}$")
+        # the document is its own JSON round trip (tuples are lists)
+        self.assertEqual(json.loads(self.explain.diff_bytes(a)), a)
+
+    def test_document_fields(self):
+        from compiler import source
+        doc = self.explain.diff_document("change", 2, 1, "a" * 64, self.p, self.p_cell)
+        self.assertEqual(set(doc), {"schema", "kind", "version", "against", "entries_digest", "skeleton",
+                                    "cells", "waivers", "roles", "system"})
+        self.assertEqual((doc["schema"], doc["kind"], doc["version"], doc["against"], doc["skeleton"]),
+                         (1, "change", 2, 1, None))
+        self.assertEqual(self.explain.diff_bytes(doc), source.canonical(doc))
+        text = self.explain.diff_bytes(doc).decode()
+        for word in ("compiler", "commit", "written_at", "label", "source"):
+            self.assertNotIn(f'"{word}', text, word)
+        sk = self.explain.diff_document("skeleton", 3, 1, "a" * 64, self.p, self.p,
+                                        skeleton={"from": "b" * 64, "to": "c" * 64,
+                                                  "sections": [("section", "network.ingress_namespace")]})
+        self.assertEqual(sk["skeleton"], {"from": "b" * 64, "to": "c" * 64,
+                                          "sections": [["section", "network.ingress_namespace"]]})
+        with self.assertRaises(ValueError):
+            self.explain.diff_document("bootstrap", 1, None, "a" * 64, self.p, self.p)
+        with self.assertRaises(ValueError):
+            self.explain.diff_document("skeleton", 3, 1, "a" * 64, self.p, self.p)
+        with self.assertRaises(ValueError):
+            self.explain.diff_document("change", 3, 1, "a" * 64, self.p, self.p, skeleton={"from": "", "to": ""})
+
+    def test_the_keys_the_database_reads(self):
+        """approve()/why_not() and health read diff -> 'skeleton' ->> 'from' and
+        diff -> 'roles' -> <role> -> 'added' (§14.7.1)."""
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
+            sql = f.read()
+        self.assertIn("x.diff -> 'skeleton' ->> 'from'", sql)
+        self.assertIn("x.diff -> 'roles' -> hr.role_code -> 'added'", sql)
+        doc = self.explain.diff_document("skeleton", 3, 1, "a" * 64, self.p, self.p_free,
+                                         skeleton={"from": "b" * 64, "to": "c" * 64, "sections": []})
+        self.assertEqual(doc["skeleton"]["from"], "b" * 64)
+        self.assertIsInstance(doc["roles"]["operator"]["added"], list)
+
+    def test_jsonb_round_trip(self):
+        """Python canonical -> jsonb text -> json.loads -> canonical: the same sha256 (the
+        stored diff of a skeleton version is re-serialised before it is served)."""
+        from compiler import source
+        d = copy.deepcopy(self.p_cell.data)
+        d["waivers"] = list(d.get("waivers") or []) + [
+            dict(copy.deepcopy(d["waivers"][0]), id="W-é", rationale="a → b — café", controls="\"quoted\" \\ tab\t")]
+        doc = self.explain.diff_document("skeleton", 4, 1, "a" * 64, self.p, model.Policy(d),
+                                         skeleton={"from": "b" * 64, "to": "c" * 64, "sections": []})
+        raw = self.explain.diff_bytes(doc)
+        self.assertIn("→ b — café".encode(), raw)
+        stored = source.pg_jsonb_text(json.loads(raw))
+        self.assertNotEqual(stored.encode(), raw)          # jsonb reorders and spaces
+        again = source.canonical(json.loads(stored))
+        self.assertEqual(hashlib.sha256(again).hexdigest(), self.explain.diff_digest(doc))
+
+
+class ExplainParity(unittest.TestCase):
+    """explain.who_can (IAM 4.4, design §14.7.5) names exactly the roles the compiled
+    artefacts admit: the route table, grants.document(), proxies.admitted(), mqtt.rows(),
+    and every tuple it shows is in reach() / system_reach(). explain.cell keeps its own
+    check (ExplainCellTest.test_parity_with_reach)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from compiler import explain
+        cls.explain = explain
+        cls.p = model.load_defaults()
+        cls.cache = {}
+        cls.seen = []
+
+    def who(self, obj, level=None):
+        out = self.explain.who_can(self.p, obj, level, cache=self.cache)
+        self.seen.append(out)
+        return out
+
+    def test_routes(self):
+        doc = routes.compile(self.p)
+        for svc, sd in doc["services"].items():
+            for route, rd in sd["routes"].items():
+                got = {x["role"] for x in self.who(f"{svc} {route}")["roles"]}
+                self.assertEqual(got, set(rd["roles"]), (svc, route))
+        for svc, rs in doc["public"].items():
+            for route in rs:
+                self.assertIn(["public", svc, route], self.who(f"{svc} {route}")["services"], (svc, route))
+
+    def test_db_objects(self):
+        people = {v: k for k, v in grants.people(self.p).items()}
+        want = {}
+        for grantee, _kind, obj, priv in grants.document(self.p)["privileges"]:
+            if grantee in people:
+                want.setdefault(obj, {}).setdefault(priv, set()).add(people[grantee])
+        self.assertTrue(want)
+        for obj, privs in want.items():
+            w = self.who(obj)
+            for priv, roles in privs.items():
+                got = {x["role"] for x in w["roles"] if any(t[0] == "db" and t[2] == priv for t in x["tuples"])}
+                self.assertEqual(got, roles, (obj, priv))
+
+    def test_function_signatures_as_written(self):
+        # a member's signature as the YAML writes it finds the normalised grant
+        w = self.who("medcea.propose_commissioning(int, boolean, text)")
+        self.assertEqual(w["object"], "medcea.propose_commissioning(integer,boolean,text)")
+        self.assertIn("master_data", w["groups"])
+        self.assertTrue(w["roles"])
+
+    def test_hosts(self):
+        for host in self.p.hosts:
+            got = {x["role"] for x in self.who(host)["roles"]}
+            self.assertEqual(got, set(proxies.admitted(self.p, host)), host)
+
+    def test_mqtt_topics(self):
+        topics = sorted({m["topic"] for gd in self.p.groups.values() for m in gd.get("members") or []
+                         if m.get("type") == "mqtt"})
+        self.assertTrue(topics)
+        for topic in topics:
+            stripped = topic.split("/", 1)[1]
+            want = {r for r in mqtt.admitted(self.p) if any(x["topic"] == stripped for x in mqtt.rows(self.p, r))}
+            got = {x["role"] for x in self.who(topic)["roles"]}
+            self.assertEqual(got, want, topic)
+
+    def test_groups_tools_and_level(self):
+        w = self.who("group:iam_policy")
+        self.assertEqual(w["groups"], ["iam_policy"])
+        holders = {r for r in self.p.roles if any(g == "iam_policy" for g, _ in self.p.holds(r))}
+        self.assertEqual({x["role"] for x in w["roles"]}, holders)
+        qa = next(x for x in w["roles"] if x["role"] == "qa")
+        self.assertEqual(qa["levels"]["A"], "not_own_author")
+        self.assertEqual({x["role"] for x in self.who("group:iam_policy", "A")["roles"]},
+                         {r for r in holders if ("iam_policy", "A") in self.p.holds(r)})
+        g = self.who("grafana")
+        self.assertEqual(g["groups"], ["dashboards"])
+        self.assertTrue(all(t[0] == "tool" for x in g["roles"] for t in x["tuples"]))
+        with self.assertRaises(KeyError):
+            self.explain.who_can(self.p, "group:nope", cache=self.cache)
+
+    def test_index(self):
+        idx = self.explain.who_can_index(self.p)["objects"]
+        names = [o["name"] for o in idx]
+        self.assertEqual(names, sorted(names, key=lambda n: n.encode()))
+        self.assertEqual(len(names), len(set(names)))
+        by = {o["name"]: o for o in idx}
+        self.assertEqual(by["grafana"]["type"], "tool")
+        self.assertIn("PORTAL_DOMAIN", by)
+        # every index name is answered with the same groups
+        for o in idx[:40]:
+            self.assertEqual(self.who(o["name"])["groups"], o["groups"], o["name"])
+
+    def test_zz_every_tuple_is_reach(self):
+        if not self.seen:
+            self.who("medcea.cea_unit")
+        reach = self.cache["reach"]
+        system = {self.explain.source.canonical(list(t)) for t in self.cache["system"]}
+        for w in self.seen:
+            for x in w["roles"]:
+                mine = {self.explain.source.canonical(list(t)) for t in reach[x["role"]]}
+                for t in x["tuples"]:
+                    self.assertIn(self.explain.source.canonical(t), mine, (w["object"], x["role"], t))
+            for t in w["services"]:
+                self.assertIn(self.explain.source.canonical(t), system, (w["object"], t))
+
+
+class BreakGlassPredicateParity(unittest.TestCase):
+    """approve()'s and why_not()'s break-glass refusal (IAM 4.4, §14.7.1) use
+    policy_db_state's break_glass_open predicate (infra/lib-policy-source.sh), inline; and
+    the own-widening closure is the same CTE in both functions."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
+            sql = f.read()
+        with open(os.path.join(REPO, "infra/lib-policy-source.sh")) as f:
+            lib = f.read()
+
+        def body(name):
+            start = sql.index(f"CREATE OR REPLACE FUNCTION iam_policy.{name}(")
+            return sql[start:sql.index("$$;", start)]
+        cls.approve, cls.why_not = body("approve"), body("why_not")
+        start = lib.index("'break_glass_open'")
+        cls.lib = lib[start:lib.index("'system_functions'", start)]
+
+    @staticmethod
+    def facts(text):
+        """The events, payload keys and source literal a predicate names."""
+        return (frozenset(re.findall(r"\b[a-z]\.event = '([a-z_]+)'", text)),
+                frozenset(re.findall(r"payload ->>? '([a-z_]+)'", text)) - {"reason"},
+                frozenset(re.findall(r"->> 'source' = '([a-z]+)'", text)))
+
+    @staticmethod
+    def between(text, start, end):
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
+    def test_same_events_and_keys(self):
+        want = self.facts(self.lib)
+        self.assertEqual(want, (frozenset({"break_glass_seen", "break_glass_ended"}),
+                                frozenset({"components", "source", "since_event", "component"}),
+                                frozenset({"file"})))
+        for name, text in (("approve", self.between(self.approve, "-- a policy break-glass", "RAISE EXCEPTION")),
+                           ("why_not", self.between(self.why_not, "bg := EXISTS", "IF v.kind"))):
+            self.assertEqual(self.facts(text), want, name)
+        self.assertIn("a policy break-glass is open (event %)", self.approve)
+        self.assertIn("'break_glass_open'", self.why_not)
+
+    def test_own_widening_closure_is_one_cte(self):
+        def cte(text):
+            start = text.index("WITH RECURSIVE held(role_code) AS (")
+            end = text.index("'added') > 0", start) + len("'added') > 0")
+            block = text[start:end]
+            head = block[:block.index("SELECT", block.index("unnest(r.includes)"))]
+            conds = re.findall(r"pg_catalog\.jsonb_\w+\(x\.diff -> 'roles' -> hr\.role_code -> 'added'\)[^\n]*", block)
+            return " ".join(head.split()), conds
+        a, w = cte(self.approve), cte(self.why_not)
+        self.assertEqual(a, w)
+        self.assertIn("iam_policy.role r ON r.code = hr.role_code", a[0])
+        self.assertEqual(len(a[1]), 2)
+        self.assertIn("'own_widening'", self.why_not)
+        self.assertIn("widens role %, which you hold", self.approve)
+
+
 class AppGateTest(unittest.TestCase):
     """app_gate (IAM 4.2b) runs, for each call, the lines read_wired() expands it into"""
 

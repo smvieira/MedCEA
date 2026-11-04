@@ -78,6 +78,13 @@
 #  39  Policy → Deploy IAM 4.3: deploy-infra, access, iam in that order under one lock; the
 #      notes (order, nobody's access changes, the proof-gated proxy, the expected WARN);
 #      Open the Policy UI prints the address and runs nothing else
+#  40  Policy → Deploy IAM 4.4: database then iam under one lock; the notes (order, nobody's
+#      access changes, both switches); a failure stops the chain
+#  41  Policy → Propose a git skeleton change: a --by starting with -, an empty or -leading
+#      reason and an empty revision are re-asked; the command printed with printf %q; the
+#      [y/N]; apply.sh asks its own [y/N] (no MEDCEA_CONFIRMED) and takes its own lock
+#  42  Policy → Withdraw the open policy version from the host: the command, the [y/N],
+#      apply.sh's own lock; Health → the policy drafting and approval test (tests/iam-policy.sh)
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -908,6 +915,74 @@ PY2
 guide $'8\n18\n\nq\n'
 has   "the address" "https://policy."
 hasnt "nothing ran" "STUB "
+
+echo "40 deploy IAM 4.4 (drafting and approval)"
+mkcfg true true
+guide $'8\n19\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./apps/database/deploy.sh && ./apps/iam/deploy.sh"
+has   "one lock" "held by the guide for both"
+has   "a change ([y/N])" "Kind:        changes the platform"
+has   "the order" "Order: the database deploy first"
+has   "nobody's access changes" "Nobody's access changes"
+has   "both switches" "IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'8\n19\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: database, then iam" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/database/deploy.sh", "STUB apps/iam/deploy.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 2 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 2 ]] \
+    && pass "real: both under the guide's lock" || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+OUT="$(printf '8\n19\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/database/deploy.sh"
+hasnt "the iam deploy did not run" "STUB apps/iam/deploy.sh"
+
+echo "41 propose a git skeleton change"
+mkcfg true true
+guide $'8\n20\n-x\nsvieira\n\n-why\ntest: a reason\n\nfeature/x\ny\nq\n'
+rc_is "quits with 0" 0
+has   "a --by starting with - is re-asked" "'-x': letters, digits, _ and -"
+has   "an empty reason is re-asked" "'': a reason is required, and it may not start with -"
+has   "a reason starting with - is re-asked" "'-why': a reason is required"
+has   "an empty revision is re-asked" "'': a commit, branch or tag"
+has   "the command (printf %q, dry)" "[dry run] not executed: ./apps/iam/apply.sh --propose-skeleton --by svieira --reason test:\ a\ reason --from-git feature/x"
+has   "a change, [y/N]" "Run it? [y/N]"
+has   "apply.sh asks its own" "asks its own [y/N] here"
+has   "a permanent record" "a version of kind skeleton, submitted with its diff"
+no_stub
+guide $'8\n20\nsvieira\nwhy\n--bootstrap\nmain\nn\nq\n'
+has   "a revision starting with - is re-asked" "'--bootstrap': a commit, branch or tag"
+has   "n cancels" "Cancelled; nothing was run."
+real $'8\n20\nsvieira\ntest: a reason\nfeature/x\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: apply.sh ran" "STUB apps/iam/apply.sh --propose-skeleton --by svieira --reason test: a reason --from-git feature/x"
+grep -q '^ENV_BY= ENV_CONFIRMED=$' <<<"$OUT" && pass "real: no MEDCEA_CONFIRMED (apply.sh asks)" || fail "real: MEDCEA_CONFIRMED passed"
+grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: apply.sh takes its own lock (none inherited)" || fail "real: the guide held the lock"
+
+echo "42 withdraw the open version from the host; the live test"
+mkcfg true true
+guide $'8\n21\nsvieira\ntest: why\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the command (dry)" "[dry run] not executed: ./apps/iam/apply.sh --withdraw-open --by svieira --reason test:\ why"
+has   "a change, [y/N]" "Run it? [y/N]"
+has   "the Policy UI is the normal path" "The normal path is the Policy UI's Withdraw"
+has   "--by not looked up" "not looked up in Keycloak"
+no_stub
+real $'8\n21\nsvieira\ntest: why\ny\nq\n'
+has   "real: apply.sh ran" "STUB apps/iam/apply.sh --withdraw-open --by svieira --reason test: why"
+grep -q '^ENV_BY= ENV_CONFIRMED=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: apply.sh asks and locks itself" || fail "real: confirmed or locked by the guide"
+guide $'6\n17\ny\nq\n'
+has   "the live test (dry)" "[dry run] not executed: tests/iam-policy.sh"
+has   "throwaway accounts" "4 throwaway accounts"
+no_stub
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

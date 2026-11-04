@@ -6,8 +6,25 @@
 #                                                         is empty (apps/iam/deploy.sh runs it)
 #   apply.sh --resume --by <username> [--check-only]      finish an apply that did not record its end
 #   apply.sh --status                                     read-only
-#   apply.sh <version> | --rollback-to <v> | --propose-skeleton
-#                                                         refused: they arrive with IAM 4.5 (4.4)
+#   apply.sh <version> | --rollback-to <v>               refused: they arrive with IAM 4.5
+#
+# As of slice 4.4 (design §14.7.6):
+#   apply.sh --propose-skeleton --by <username> --reason "<text>" --from-git <rev> [--check-only]
+#                                                         a git skeleton that widens access becomes
+#                                                         a submitted version of kind skeleton, for
+#                                                         qa's approval in the Policy UI
+#   apply.sh --withdraw-open --by <username> --reason "<text>" [--check-only]
+#                                                         withdraw the open change or skeleton
+#                                                         version from the host (no Keycloak)
+#
+# --propose-skeleton reads the proposed skeleton from a commit (--from-git, mandatory): the
+# deploying tree stays at the accepted skeleton, so no deploy refuses and health does not FAIL
+# while the version waits. Nothing is applied: applying an approved version arrives with 4.5.
+# The proposer is the claimed --by (resolved in Keycloak, before the diff is built); the
+# --by username and the OS user are appended to the reason, the only place they are recorded.
+# --withdraw-open needs no Keycloak (withdrawing grants nothing; a rollback must not depend on
+# it). Both: exit 0 done, would do (--check-only) or nothing to withdraw; 1 refused, nothing
+# changed; 2 usage or a precondition. Nothing follows their commit, so there is no exit 3.
 #
 # --bootstrap seeds version 1 from the factory file (apps/iam/policy/defaults.yaml) and applies
 # it at once. It changes no artefact: before its one database transaction it proves that every
@@ -49,30 +66,39 @@ Usage:
         finish an apply that was committed but did not record its end
   apps/iam/apply.sh --status
         the applied version, the skeleton, the host file, the last policy events (read-only)
-  apps/iam/apply.sh <version> | --rollback-to <version> | --propose-skeleton
-        arrive with IAM 4.5 (4.4 for --propose-skeleton)
+  apps/iam/apply.sh --propose-skeleton --by <username> --reason "<text>" --from-git <rev> [--check-only]
+        propose the skeleton of commit <rev> (it widens access) as a version for qa's approval
+  apps/iam/apply.sh --withdraw-open --by <username> --reason "<text>" [--check-only]
+        withdraw the open change or skeleton version (when the Policy UI cannot)
+  apps/iam/apply.sh <version> | --rollback-to <version>
+        arrive with IAM 4.5
 
 --by is the username (realm $KEYCLOAK_REALM) of the person who applies: a claim on the record.
 Exit: 0 done, 1 refused or failed (nothing changed), 2 usage or a precondition (the bootstrap
-waits), 3 committed but not finished (run --resume).
+waits), 3 committed but not finished (run --resume; never for --propose-skeleton or --withdraw-open).
 EOF
 }
 
-MODE="" BY="" CHECK_ONLY=false REFUSE="" ERR=""
+MODE="" BY="" CHECK_ONLY=false REFUSE="" ERR="" REASON="" REASON_SET=false REV="" REV_SET=false
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --bootstrap|--resume|--status)
-            [[ -z "$MODE" ]] || ERR="give one of --bootstrap, --resume, --status"
+        --bootstrap|--resume|--status|--propose-skeleton|--withdraw-open)
+            [[ -z "$MODE" ]] || ERR="give one of --bootstrap, --resume, --status, --propose-skeleton, --withdraw-open"
             MODE="${1#--}" ;;
         --check-only) CHECK_ONLY=true ;;
         --by)
             if (($# < 2)); then ERR="--by needs a username"; else BY="$2"; shift; fi ;;
         --by=*) BY="${1#--by=}" ;;
+        --reason)
+            if (($# < 2)); then ERR="--reason needs a text"; else REASON="$2"; REASON_SET=true; shift; fi ;;
+        --reason=*) REASON="${1#--reason=}"; REASON_SET=true ;;
+        --from-git)
+            if (($# < 2)); then ERR="--from-git needs a revision"; else REV="$2"; REV_SET=true; shift; fi ;;
+        --from-git=*) REV="${1#--from-git=}"; REV_SET=true ;;
         --rollback-to|--rollback-to=*)
             REFUSE="--rollback-to arrives with IAM 4.5 (rollback to an approved or confirmed version)"
             [[ "$1" == --rollback-to && $# -ge 2 ]] && shift ;;
-        --propose-skeleton) REFUSE="--propose-skeleton arrives with IAM 4.4" ;;
         [0-9]*) REFUSE="apply.sh <version> arrives with IAM 4.5 (applying an approved version)" ;;
         *) ERR="unknown argument '$1'" ;;
     esac
@@ -91,13 +117,29 @@ die()  { local rc="$1"; shift; err "$*"; exit "$rc"; }
 [[ -z "$REFUSE" ]] || die 2 "$REFUSE"
 if [[ -n "$ERR" || -z "$MODE" ]]; then
     usage >&2
-    die 2 "${ERR:-give --bootstrap, --resume or --status}"
+    die 2 "${ERR:-give --bootstrap, --resume, --status, --propose-skeleton or --withdraw-open}"
 fi
 if [[ "$MODE" == status ]]; then
     [[ -z "$BY" && "$CHECK_ONLY" == false ]] || die 2 "--status takes no --by and no --check-only"
 elif [[ ! "$BY" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]; then
     die 2 "--$MODE needs --by <username> (letters, digits, . _ @ -; not starting with -)"
 fi
+case "$MODE" in
+    propose-skeleton|withdraw-open)
+        # the reason reaches psql only base64 in a \set variable (apply_check.py), never on argv
+        [[ -n "${REASON//[[:space:]]/}" && "$REASON" != -* ]] \
+            || die 2 "--$MODE needs --reason \"<text>\" (not empty, not starting with -)"
+        if [[ "$MODE" == propose-skeleton ]]; then
+            # break-glass changes the matrix, never the skeleton (design §3.5)
+            [[ -z "${MEDCEA_POLICY_FILE:-}" ]] || die 2 "no skeleton proposal under break-glass: it changes the matrix, never the skeleton (unset MEDCEA_POLICY_FILE)"
+            $REV_SET || die 2 "propose a skeleton change from a commit: --from-git <rev>; the deploying tree stays at the accepted skeleton until IAM 4.5 applies it"
+            [[ "$REV" =~ ^[A-Za-z0-9][A-Za-z0-9._/~^-]*$ ]] || die 2 "--from-git '$REV' is not a revision (letters, digits, . _ / ~ ^ -; not starting with -)"
+        else
+            $REV_SET && die 2 "--withdraw-open takes no --from-git"
+        fi ;;
+    *)
+        { $REASON_SET || $REV_SET; } && die 2 "--reason and --from-git belong to --propose-skeleton and --withdraw-open" ;;
+esac
 WRITES=false
 [[ "$MODE" != status && "$CHECK_ONLY" == false ]] && WRITES=true
 
@@ -432,6 +474,104 @@ print(source.git_commit())' "$SCRIPT_DIR")"
     # 11. the report
     report
     log "version 1 (bootstrap) applied: nothing was re-rendered. qa confirms it in the Policy UI once it exists (IAM 4.3)."
+    exit 0
+fi
+
+# The reason as recorded (design §14.7.6): the --by username and the OS user appended, the only
+# place they are kept (the database functions take neither); into a file, never on argv.
+reason_file() {   # MODE-FLAG — $STAGE/reason
+    printf '%s [apply.sh --%s, --by %s (claimed), OS user %s]' "$REASON" "$1" "$BY" "$(id -un)" > "$STAGE/reason"
+}
+
+# =============================================================================
+# --propose-skeleton (IAM 4.4, design §14.7.6): a git skeleton that widens access becomes a
+# submitted version of kind skeleton; qa approves it in the Policy UI, 4.5 applies it
+# =============================================================================
+if [[ "$MODE" == propose-skeleton ]]; then
+    log "Skeleton proposal from $REV$($CHECK_ONLY && echo ' (--check-only: nothing is written)')"
+    # 1. the revision (the compiler stays this tree's)
+    COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REV^{commit}" 2>/dev/null)" \
+        || die 2 "--from-git $REV: no such commit in this repository"
+    # 2. the state (the full document: the open versions), then the chain
+    read_state --full
+    case "$ST" in
+        version-*) VERSION="" ;;
+        none|empty) die 2 "no applied version: ./apps/iam/deploy.sh bootstraps it" ;;
+        partial) die 2 "policy versions exist but none is applied: ./apps/iam/apply.sh --status" ;;
+        unreachable) die 1 "PostgreSQL is not Ready ($(jget "$STATE" 'd.get("detail")')): nothing was changed" ;;
+        *) die 1 "cannot read the policy versions ($ST): nothing was changed" ;;
+    esac
+    LAST="$(jget "$STATE" '(d.get("last_apply_event") or {}).get("event", "")')"
+    case "$LAST" in
+        apply_started|partial_apply)
+            die 1 "version ${ST#version-} is being applied ($LAST): wait for apply.sh, or run ./apps/iam/apply.sh --resume first; nothing was changed" ;;
+    esac
+    check_chain
+    # 3. --by, before anything uses the proposer
+    kc_start 12 || die 2 "Keycloak's admin API cannot be reached (port-forward on $KC_PORT): nothing was changed"
+    resolve_by
+    py "$CLI" --defaults compile routes > "$STAGE/routes-now.json"
+    if [[ "$(kc_get "realms/$KEYCLOAK_REALM/users/$BY_SUB/role-mappings/realm/composite" "$STAGE/kc-by-roles.json")" == 200 ]]; then
+        w="$(py "$CHECK" maker-warn --dual-control "$STAGE/routes-now.json" --roles "$STAGE/kc-by-roles.json" --username "$BY")"
+        [[ -z "$w" ]] || warn "$w"
+    else
+        warn "cannot read --by $BY's realm roles in Keycloak: whether it holds a maker role of iam_policy is not checked"
+    fi
+    # 4. the gate, the checker, the open version, the diff and its transaction (apply_check.py)
+    NEXT="$(q -c "SELECT coalesce(max(x.version), 0) + 1 FROM iam_policy.version x" </dev/null | tr -d '[:space:]')" \
+        || die 1 "cannot read the policy versions: nothing was changed"
+    [[ "$NEXT" =~ ^[1-9][0-9]*$ ]] || die 1 "cannot read the next version number ('$NEXT'): nothing was changed"
+    reason_file propose-skeleton
+    out=()
+    $CHECK_ONLY || out=(--out "$STAGE/propose.sql")
+    rc=0
+    py "$CHECK" propose --state "$STATE" --rev "$REV" --commit "$COMMIT" --by-sub "$BY_SUB" --by-person "$BY_PERSON" \
+        --reason-file "$STAGE/reason" --version "$NEXT" "${out[@]}" || rc=$?
+    ((rc == 0)) || exit "$rc"
+    if $CHECK_ONLY; then
+        log "would submit skeleton version $NEXT for qa's approval (claimed by $BY)"
+        exit 0
+    fi
+    # 5. a [y/N]: withdrawing or returning closes the version
+    confirm "Submit skeleton version $NEXT (commit ${COMMIT:0:12}) for qa's approval, claimed by $BY? [y/N] " y
+    # 6. one transaction as postgres, actor system:apply; the proposer is the claimed --by
+    v="$(q -1 -f - < "$STAGE/propose.sql" | tr -d '[:space:]')" \
+        || die 1 "the proposal was rolled back (above): nothing was changed (./apps/iam/apply.sh --status)"
+    [[ "$v" == "$NEXT" ]] || die 1 "the proposal answered '$v', not version $NEXT (above): ./apps/iam/apply.sh --status"
+    # 7. the report
+    log "version $NEXT (skeleton) submitted: a qa person other than $BY, who did not run this proposal, approves it in the Policy UI (Approval); applying it arrives with IAM 4.5 (./apps/iam/apply.sh $NEXT); until then the change stays on $REV's branch."
+    exit 0
+fi
+
+# =============================================================================
+# --withdraw-open (IAM 4.4, design §14.7.6): the host path when the Policy UI cannot
+# withdraw (a rollback of 4.4, an aborted live test). No Keycloak: withdrawing grants nothing.
+# =============================================================================
+if [[ "$MODE" == withdraw-open ]]; then
+    log "Withdraw the open policy version$($CHECK_ONLY && echo ' (--check-only: nothing is written)')"
+    read_state --full
+    [[ "$ST" == unreachable ]] && die 1 "PostgreSQL is not Ready ($(jget "$STATE" 'd.get("detail")')): nothing was changed"
+    OPEN="$(py "$CHECK" open-version --state "$STATE")" || die 1 "cannot read the open versions (above): nothing was changed"
+    if [[ -z "$OPEN" ]]; then
+        log "nothing is open: no change or skeleton version to withdraw"
+        exit 0
+    fi
+    IFS=$'\t' read -r OV OKIND OSTATUS OREASON OAUTHORS <<<"$OPEN"
+    [[ "$OV" =~ ^[1-9][0-9]*$ ]] || die 1 "cannot read the open version ('$OV'): nothing was changed"
+    log "open: version $OV ($OKIND, $OSTATUS), reason: $OREASON"
+    log "      authors: $OAUTHORS"
+    if $CHECK_ONLY; then
+        log "would withdraw version $OV (system:apply)"
+        exit 0
+    fi
+    confirm "Withdraw version $OV ($OKIND, $OSTATUS)? [y/N] " y
+    reason_file withdraw-open
+    py "$CHECK" withdraw-sql --version "$OV" --reason-file "$STAGE/reason" --out "$STAGE/withdraw.sql" \
+        || die 1 "cannot build the withdraw (above): nothing was changed"
+    w="$(q -1 -f - < "$STAGE/withdraw.sql" | tr -d '[:space:]')" \
+        || die 1 "the withdraw was rolled back (above): nothing was changed"
+    [[ "$w" == "$OV" ]] || die 1 "the withdraw answered '$w', not version $OV (above): ./apps/iam/apply.sh --status"
+    log "version $OV withdrawn (system:apply)"
     exit 0
 fi
 

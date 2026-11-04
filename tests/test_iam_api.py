@@ -252,9 +252,17 @@ class IamApiTest(unittest.TestCase):
 
 
 
-# ── the Policy UI's port (IAM 4.3) ──────────────────────────────────────────────────────
+# ── the Policy UI's port (IAM 4.3, 4.4) ─────────────────────────────────────────────────
+class DbError(Exception):
+    """pg8000's DatabaseError shape: args[0] is {C: SQLSTATE, M: message}."""
+
+    def __init__(self, code, msg):
+        super().__init__({"C": code, "M": msg})
+
+
 class PolicyCursor:
-    """Answers the Policy UI's reads from version 1 = defaults.yaml's rows."""
+    """Answers the Policy UI's reads and the author functions from a small model of
+    iam_policy: version 1 = defaults.yaml's rows (bootstrap, applied), more as drafted."""
 
     def __init__(self, db):
         self.db, self.result, self.description = db, [], []
@@ -263,27 +271,77 @@ class PolicyCursor:
         q = " ".join(sql.split())
         self.db.log.append((q, params))
         d = self.db
+        if q in d.fail:
+            raise DbError(*d.fail[q])
+        for fn, err in d.fail_fn.items():
+            if ".%s(" % fn in q:
+                raise DbError(*err)
         if "_changed_since" in q:
             cols, rows = ["c"], [(d.changed,)]
+        elif "pg_advisory_xact_lock" in q or "medcea_auth.set_actor" in q:
+            cols, rows = ["x"], [("",)]
         elif "WHERE status = 'applied'" in q:
             cols, rows = ["version"], [(1,)]
-        elif "SELECT entries_digest FROM iam_policy.version" in q:
-            cols, rows = ["entries_digest"], ([("d1",)] if params[0] == 1 else [])
+        elif q.startswith("SELECT entries_digest, status FROM iam_policy.version"):
+            v = d.versions.get(params[0])
+            cols, rows = ["entries_digest", "status"], ([(v["entries_digest"], v["status"])] if v else [])
+        elif q.startswith("SELECT version, kind, status, groups, roles, entries_digest, skeleton_digest"):
+            v = d.versions.get(params[0])
+            cols = ["version", "kind", "status", "groups", "roles", "entries_digest", "skeleton_digest"]
+            rows = [tuple(v.get(c) for c in cols)] if v else []
         elif "FROM iam_policy.entry" in q:
             cols, rows = ["role", "group_code", "level", "constraint_name"], \
-                [(e["role"], e["group_code"], e["level"], e["constraint_name"]) for e in d.ew["entries"]]
+                [(e["role"], e["group_code"], e["level"], e["constraint_name"]) for e in d.entries[params[0]]]
         elif "FROM iam_policy.waiver" in q:
             cols = ["id", "invariant", "subject", "group_code", "target", "levels", "review_by", "rationale", "controls", "objects"]
             rows = [(w["id"], w["invariant"], w["subject"], w["group"], w["target"], w["levels"],
                      datetime.date.fromisoformat(w["review_by"]), w["rationale"], w["controls"], w.get("objects") or [])
                     for w in d.ew["waivers"]]
-        elif "FROM iam_policy.version ORDER BY" in q:
-            cols = [c.strip() for c in q.split("SELECT ", 1)[1].split(" FROM", 1)[0].split(",")]
-            v = dict.fromkeys(cols)
-            v.update(version=1, kind="bootstrap", status="applied", reason="the factory policy",
-                     applied_at=datetime.datetime(2026, 11, 3, 9, 59, tzinfo=datetime.timezone.utc),
-                     claimed_by_person=d.claimant, confirmed_at=d.confirmed_at)
-            rows = [tuple(v[c] for c in cols)]
+        elif "FROM iam_policy.version v LEFT JOIN iam_policy.skeleton s" in q:
+            sel = q.split("SELECT ", 1)[1].split(" FROM", 1)[0].split(", ")
+            cols = [c.split(" AS ")[-1].split(".")[-1] for c in sel]
+            rows = []
+            for n in sorted(d.versions, reverse=True):
+                v = dict.fromkeys(cols)
+                v.update({k: x for k, x in d.versions[n].items() if k in cols})
+                rows.append(tuple(v[c] for c in cols))
+        elif "iam_policy.entries_digest(" in q:
+            cols, rows = ["d"], [(d.digest(params[0]),)]
+        elif "iam_policy.new_draft(" in q:
+            n = max(d.versions) + 1
+            d.versions[n] = dict(version=n, kind="change", status="draft", reason=params[1], based_on=1,
+                                 groups=d.versions[1]["groups"], roles=d.versions[1]["roles"])
+            d.entries[n] = [dict(e) for e in d.entries[1]]
+            cols, rows = ["v"], [(n,)]
+        elif "iam_policy.save_entry(" in q:
+            v, role, group, levels = params[0], params[1], params[2], json.loads(params[3])
+            if d.versions[v]["status"] != "draft":
+                raise DbError("22023", "version %d is not a draft" % v)
+            if group not in d.versions[v]["groups"] or role not in d.versions[v]["roles"]:
+                raise DbError("22023", "no role %s or group %s in the accepted skeleton" % (role, group))
+            d.entries[v] = [e for e in d.entries[v] if (e["role"], e["group_code"]) != (role, group)] + \
+                [{"role": role, "group_code": group, "level": l, "constraint_name": c} for l, c in levels.items()]
+            if d.corrupt_save:
+                d.entries[v].append({"role": "qa", "group_code": "zones", "level": "D", "constraint_name": None})
+            d.versions[v]["checker_verdict"] = json.loads(params[5]).get("ok")
+            cols, rows = ["x"], [("",)]
+        elif "iam_policy.submit(" in q:
+            v = d.versions[params[0]]
+            v.update(status="submitted", entries_digest=d.digest(params[0]), skeleton_digest=d.skel_digest)
+            cols, rows = ["d"], [(d.submit_digest or v["entries_digest"],)]
+        elif "iam_policy.withdraw(" in q:
+            d.versions[params[0]]["status"] = "withdrawn"
+            cols, rows = ["x"], [("",)]
+        elif "iam_policy.why_not(" in q:
+            cols, rows = ["may_approve", "why_not_code", "needs_token_path"], [(True, None, True)]
+        elif "FROM iam_policy.history h WHERE h.version = %s AND h.event IN" in q:
+            cols, rows = ["name", "person"], [("admin", "p-admin")]
+        elif "FROM iam_policy.skeleton s WHERE s.accepted_at" in q:
+            cols, rows = ["digest"], [(d.skel_digest,)]
+        elif "FROM iam_policy.version_diff" in q:
+            cols, rows = ["diff", "diff_digest"], ([d.vdiff[params[0]]] if params[0] in d.vdiff else [])
+        elif "break_glass_seen" in q:
+            cols, rows = ["event_id", "at", "components"], d.bg_open
         elif "current_setting('medcea.iam_db_roles'" in q:
             cols, rows = ["s"], [(d.db_roles,)]
         elif "verify_chain" in q:
@@ -309,9 +367,27 @@ class PolicyCursor:
 class PolicyDB(FakeDB):
     def __init__(self, ew):
         super().__init__()
+        from compiler import source
+        self.source = source
+        skel = source.skeleton(source.factory())
+        self.skel_digest = source.skeleton_digest(skel)
         self.ew, self.db_roles, self.claimant, self.confirmed_at = ew, "true", "p-someone-else", None
+        self.versions = {1: dict(version=1, kind="bootstrap", status="applied", reason="the factory policy",
+                                 applied_at=datetime.datetime(2026, 11, 3, 9, 59, tzinfo=datetime.timezone.utc),
+                                 claimed_by_person=self.claimant, confirmed_at=None, entries_digest="d1",
+                                 groups=sorted(skel["resource_groups"]), roles=sorted(skel["roles"]),
+                                 skeleton_digest=self.skel_digest)}
+        self.entries = {1: [dict(e) for e in ew["entries"]]}
+        self.fail, self.fail_fn, self.vdiff, self.bg_open = {}, {}, {}, []
+        self.corrupt_save, self.submit_digest = False, None
+
+    def digest(self, n):
+        v = self.versions[n]
+        return self.source.entries_digest(v["kind"], v["groups"], v["roles"], self.entries[n], self.ew["waivers"])
 
     def cursor(self):
+        self.versions[1]["confirmed_at"] = self.confirmed_at
+        self.versions[1]["claimed_by_person"] = self.claimant
         return PolicyCursor(self)
 
 
@@ -380,7 +456,7 @@ class PolicyAdminTest(IamApiTest):
             claims["person_id"] = person
         return jwt.encode(claims, self.key, algorithm="RS256", headers={"kid": "k1"})
 
-    def req(self, path, token=None, body=None, origin="https://" + POLICY_DOMAIN, ctype="application/json"):
+    def req(self, path, token=None, body=None, origin="https://" + POLICY_DOMAIN, ctype="application/json", method=None):
         h = {"Accept": "application/json"}
         if token:
             h["X-Forwarded-Access-Token"] = token
@@ -388,7 +464,7 @@ class PolicyAdminTest(IamApiTest):
         if body is not None:
             data = json.dumps(body).encode()
             h.update({"Content-Type": ctype, "Origin": origin})
-        r = urllib.request.Request(self.purl + path, data=data, headers=h, method="POST" if body is not None else "GET")
+        r = urllib.request.Request(self.purl + path, data=data, headers=h, method=method or ("POST" if body is not None else "GET"))
         try:
             with urllib.request.urlopen(r, timeout=20) as resp:
                 raw = resp.read()
@@ -412,19 +488,31 @@ class PolicyAdminTest(IamApiTest):
         status, body, _ = self.req("/api/me", self.ptoken(["qa"], person=None))
         self.assertEqual(status, 403)
         self.assertIn("person_id", body["error"])
-        self.assertEqual(self.req("/api/policy/1/diff", self.ptoken(["qa"]))[0], 404)       # 4.4
+        status, body, _ = self.req("/api/policy/1/diff", self.ptoken(["qa"]))               # 4.4: bootstrap
+        self.assertEqual(status, 409)
+        self.assertIn("only a change or skeleton version has an approval diff", body["error"])
 
     def test_me_per_role(self):
-        for role, want in (("qa", {"matrix": True, "history": True, "confirm": True}),
-                           ("admin", {"matrix": True, "history": False, "confirm": False}),
-                           ("auditor", {"matrix": True, "history": True, "confirm": False}),
-                           ("qp", {"matrix": False, "history": True, "confirm": False})):
+        tabs = ("matrix", "changes", "approval", "whocan", "identities", "breakglass", "history", "confirm")
+        acts = ("draft", "edit", "submit", "withdraw", "approve", "return")
+        self.assertEqual(self.req("/api/me", self.ptoken(["production_manager"]))[0], 403)   # no route on iam
+        for role, can, act, inc in (
+                ("qa", {"matrix", "changes", "approval", "whocan", "identities", "breakglass", "history", "confirm"},
+                 {"approve", "return"}, ["auditor"]),
+                ("admin", {"matrix", "changes", "whocan", "identities", "breakglass"},
+                 {"draft", "edit", "submit", "withdraw"}, []),
+                ("auditor", {"matrix", "changes", "whocan", "identities", "breakglass", "history"}, set(), []),
+                ("qp", {"history"}, set(), [])):
             status, body, h = self.req("/api/me", self.ptoken([role]))
             self.assertEqual(status, 200, (role, body))
-            self.assertEqual(body["can"], want, role)
+            self.assertEqual(body["can"], {t: t in can for t in tabs}, role)
+            self.assertEqual(body["acts"], {a: a in act for a in acts}, role)
+            self.assertEqual(body["includes"], inc, role)
             self.assertEqual(body["role"], role)
             self.assertEqual(h.get("Cache-Control"), "no-store")
         self.assertEqual(body["attest"], "I did not run apply.sh for this version.")
+        self.assertEqual(body["skeleton_attest"], "I did not run apply.sh --propose-skeleton for this version.")
+        self.assertEqual(set(self.pa.ACTS), set(acts))
 
     def test_matrix_of_version_1(self):
         status, body, _ = self.req("/api/policy/applied", self.ptoken(["qa"]))
@@ -506,6 +594,373 @@ class PolicyAdminTest(IamApiTest):
         self.assertIn(b"policy-logic:begin", body)
         self.assertTrue(h["Content-Type"].startswith("text/html"))
 
+
+    # ── IAM 4.4: the write side, the diff, the forwarded approval ────────────────────────
+    def put(self, path, token, body, **kw):
+        return self.req(path, token, body, method="PUT", **kw)
+
+    def sql(self, needle):
+        """[(index, params)] of the logged statements containing needle."""
+        return [(i, p) for i, (s, p) in enumerate(self.pdb.log) if needle in s]
+
+    def first(self, needle):
+        hits = self.sql(needle)
+        self.assertTrue(hits, needle)
+        return hits[0][0]
+
+    def open_version(self, status="submitted", change=None, kind="change"):
+        """Version 2 in the fake: version 1's rows with change(entries) applied."""
+        d = self.pdb
+        ents = [dict(e) for e in d.entries[1]]
+        if change:
+            ents = change(ents)
+        d.entries[2] = ents
+        d.versions[2] = dict(version=2, kind=kind, status=status, reason="test", based_on=1,
+                             groups=d.versions[1]["groups"], roles=d.versions[1]["roles"],
+                             skeleton_digest=d.skel_digest, created_by_person="p-host")
+        d.versions[2]["entries_digest"] = d.digest(2) if status != "draft" else None
+        return d.versions[2]
+
+    @staticmethod
+    def without_engineer_on(group):
+        return lambda ents: [e for e in ents if not (e["role"] == "engineer" and e["group_code"] == group)]
+
+    def engineer_group(self):
+        return next(e["group_code"] for e in self.pdb.entries[1] if e["role"] == "engineer")
+
+    def test_version_columns_and_author_events(self):
+        with open(os.path.join(REPO, "apps", "database", "medcea_db_migrations.sql")) as f:
+            mig = f.read()
+        table = mig[mig.index("CREATE TABLE IF NOT EXISTS iam_policy.version ("):]
+        table = table[:table.index(");")]
+        cols = set(re.findall(r"^\s+([a-z_]+)\s", table, re.M)) | set(re.findall(r"\['version', '([a-z_]+)'", mig))
+        self.assertEqual([c for c in self.pa.VERSION_COLS if c not in cols], [])
+        body = mig[mig.index("FUNCTION iam_policy._authors("):]
+        events = re.search(r"h\.event IN \(([^)]*)\)", body).group(1)
+        self.assertEqual(tuple(re.findall(r"'([a-z_]+)'", events)), self.pa.AUTHOR_EVENTS)
+
+    def test_draft(self):
+        tok = self.ptoken(["admin"], person="p-admin")
+        status, body, _ = self.req("/api/policy/draft", tok, {"from": "applied", "reason": "test: a draft"})
+        self.assertEqual(status, 201, body)
+        self.assertEqual(body["version"], 2)
+        self.assertIs(body["verdict"]["ok"], True)
+        self.assertTrue(self.pdb.committed)
+        # the lock first, then set_actor with the person_id (never the sub), then any row read
+        lock, actor = self.first("pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version'))"), \
+            self.first("medcea_auth.set_actor")
+        self.assertLess(lock, actor)
+        self.assertLess(actor, self.first("FROM iam_policy"))
+        self.assertEqual(self.pdb.log[actor][1], (SUB, "p-admin", "quinn.q", "admin"))
+        # new_draft gets the factory cells and waivers (table shape)
+        nd = self.sql("iam_policy.new_draft(")[0][1]
+        self.assertEqual(nd[:2], ("applied", "test: a draft"))
+        self.assertEqual(json.loads(nd[3]), self.ew["entries"])
+        self.assertEqual([w["group_code"] for w in json.loads(nd[4])], [w["group"] for w in self.ew["waivers"]])
+        # the verdict at creation: one save_entry of the first (group, role) in byte order, the whole cell
+        saves = self.sql("iam_policy.save_entry(")
+        self.assertEqual(len(saves), 1)
+        g, r = min({(e["group_code"], e["role"]) for e in self.ew["entries"]}, key=lambda k: (k[0].encode(), k[1].encode()))
+        args = saves[0][1]
+        self.assertEqual(args[:3], (2, r, g))
+        self.assertEqual(json.loads(args[3]), {e["level"]: e["constraint_name"] for e in self.ew["entries"]
+                                               if (e["group_code"], e["role"]) == (g, r)})
+        self.assertTrue(args[4].endswith("(checker run when the draft was created)"))
+        verdict = json.loads(args[5])
+        self.assertEqual((verdict["ok"], verdict["errors"]), (True, []))
+        from compiler import source
+        self.assertEqual(verdict["checker_digest"], source.compiler_digest())
+        self.assertEqual(len(self.sql("iam_policy.entries_digest(")), 2, "the digest before and after the save")
+        self.assertEqual(self.pdb.digest(2), self.pdb.source.entries_digest(
+            "change", self.pdb.versions[2]["groups"], self.pdb.versions[2]["roles"], self.ew["entries"], self.ew["waivers"]))
+
+    def test_draft_from_a_base_with_a_retired_group(self):
+        # a narrowing skeleton retired a group the applied version still has rows for, and its
+        # code sorts first: the verdict goes on the first cell the accepted skeleton still has
+        self.pdb.entries[1].append({"role": "admin", "group_code": "aaa_retired", "level": "R", "constraint_name": None})
+        tok = self.ptoken(["admin"], person="p-admin")
+        status, body, _ = self.req("/api/policy/draft", tok, {"from": "applied", "reason": "test: a draft"})
+        self.assertEqual(status, 201, body)
+        self.assertTrue(self.pdb.committed)
+        saves = self.sql("iam_policy.save_entry(")
+        self.assertEqual(len(saves), 1)
+        g, r = min({(e["group_code"], e["role"]) for e in self.ew["entries"]}, key=lambda k: (k[0].encode(), k[1].encode()))
+        self.assertEqual(saves[0][1][:3], (2, r, g))
+
+    def test_draft_with_no_live_cell_leaves_the_verdict_unset(self):
+        d = self.pdb
+        d.entries[1] = [{"role": "admin", "group_code": "aaa_retired", "level": "R", "constraint_name": None}]
+        tok = self.ptoken(["admin"], person="p-admin")
+        status, body, _ = self.req("/api/policy/draft", tok, {"from": "applied", "reason": "test: a draft"})
+        self.assertEqual(status, 201, body)
+        self.assertFalse(self.sql("iam_policy.save_entry("))
+        self.assertTrue(d.committed)
+
+    def test_draft_refusals(self):
+        tok = self.ptoken(["admin"], person="p-admin")
+        self.assertEqual(self.req("/api/policy/draft", tok, {"from": "latest", "reason": "x"})[0], 400)
+        self.assertEqual(self.req("/api/policy/draft", tok, {"from": "applied", "reason": " "})[0], 400)
+        self.assertEqual(self.req("/api/policy/draft", self.ptoken(["qa"]), {"from": "applied", "reason": "x"})[0], 403)
+        self.pdb.fail_fn["new_draft"] = ("23505", "version 2 is still open: take it through or withdraw it first")
+        status, body, _ = self.req("/api/policy/draft", tok, {"from": "applied", "reason": "x"})
+        self.assertEqual((status, body["error"]), (409, "version 2 is still open: take it through or withdraw it first"))
+        self.assertFalse(self.pdb.committed)
+        del self.pdb.fail_fn["new_draft"]
+        self.pdb.fail_fn["_changed_since"] = ("55000", "policy changes need the access component: run ./apps/access/deploy.sh")
+        self.assertEqual(self.req("/api/policy/draft", tok, {"from": "applied", "reason": "x"})[0], 503)
+        del self.pdb.fail_fn["_changed_since"]
+        self.pdb.corrupt_save = True                 # the verdict save must leave the digest as it was
+        status, body, _ = self.req("/api/policy/draft", tok, {"from": "defaults", "reason": "x"})
+        self.assertEqual(status, 500, body)
+        self.assertFalse(self.pdb.committed)
+
+    def test_entry(self):
+        tok = self.ptoken(["admin"], person="p-admin")
+        self.open_version("draft")
+        for bad in ({"role": "operator", "group": "master_data", "levels": {"Z": None}, "reason": "x"},
+                    {"role": "operator", "group": "master_data", "levels": {"R": "nope"}, "reason": "x"},
+                    {"role": "nobody", "group": "master_data", "levels": {"R": None}, "reason": "x"},
+                    {"role": "operator", "group": "master_data", "levels": ["R"], "reason": "x"},
+                    {"role": "operator", "group": "master_data", "levels": {"R": None}, "reason": ""}):
+            status, body, _ = self.put("/api/policy/2/entry", tok, bad)
+            self.assertEqual(status, 400, (bad, body))
+        self.assertFalse(self.sql("iam_policy.save_entry("))
+        # a red cell (I16: U without C and R) still saves, with ok false and the compiler digest
+        status, body, _ = self.put("/api/policy/2/entry", tok,
+                                   {"role": "operator", "group": "master_data", "levels": {"U": None}, "reason": "test: red"})
+        self.assertEqual(status, 200, body)
+        self.assertIs(body["verdict"]["ok"], False)
+        self.assertTrue(any(e.startswith("I16 master_data.operator") for e in body["verdict"]["errors"]))
+        self.assertEqual(body["cell"], {"levels": ["U"], "constraints": {}})
+        save = self.sql("iam_policy.save_entry(")[0]
+        verdict = json.loads(save[1][5])
+        self.assertIs(verdict["ok"], False)
+        from compiler import source
+        self.assertEqual(verdict["checker_digest"], source.compiler_digest())
+        self.assertEqual(json.loads(save[1][3]), {"U": None})
+        self.assertLess(self.first("pg_advisory_xact_lock"), self.first("FROM iam_policy.entry"))
+        self.assertTrue(self.pdb.committed)
+        # not a draft: 409 before any save
+        self.pdb.versions[2]["status"] = "submitted"
+        n = len(self.sql("iam_policy.save_entry("))
+        status, body, _ = self.put("/api/policy/2/entry", tok,
+                                   {"role": "operator", "group": "master_data", "levels": {"R": None}, "reason": "x"})
+        self.assertEqual((status, body["error"]), (409, "version 2 is not a draft"))
+        self.assertEqual(len(self.sql("iam_policy.save_entry(")), n)
+        # PUT is JSON from the page's own Origin, and U on iam_policy (admin)
+        self.assertEqual(self.put("/api/policy/2/entry", tok, {}, ctype="text/plain")[0], 415)
+        self.assertEqual(self.put("/api/policy/2/entry", tok, {}, origin="https://evil.test")[0], 403)
+        self.assertEqual(self.put("/api/policy/2/entry", self.ptoken(["qa"]), {})[0], 403)
+        self.assertEqual(self.put("/api/policy/2/other", tok, {})[0], 403)      # not in the route table
+
+    def test_submit(self):
+        tok = self.ptoken(["admin"], person="p-admin")
+        self.open_version("draft", change=lambda ents: [e for e in ents if not (e["role"] == "operator"
+                                                                                and e["group_code"] == "master_data")]
+                          + [{"role": "operator", "group_code": "master_data", "level": "U", "constraint_name": None}])
+        status, body, _ = self.req("/api/policy/2/submit", tok, {"reason": "test: submit"})
+        self.assertEqual(status, 409, body)
+        self.assertIn("version 2 fails the checker now", body["error"])
+        self.assertTrue(body["errors"])
+        self.assertFalse(self.sql("iam_policy.submit("), "the database is not asked")
+        self.open_version("draft", change=self.without_engineer_on(self.engineer_group()))
+        self.pdb.submit_digest = "0" * 64              # submit stored other rows than those checked
+        status, body, _ = self.req("/api/policy/2/submit", tok, {"reason": "test: submit"})
+        self.assertEqual((status, body["error"]), (409, "version 2 changed while it was checked: reload the page"))
+        self.assertFalse(self.pdb.committed)
+        self.pdb.submit_digest = None
+        self.pdb.versions[2]["status"] = "draft"
+        status, body, _ = self.req("/api/policy/2/submit", tok, {"reason": "test: submit"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["entries_digest"], self.pdb.digest(2))
+        self.assertTrue(self.pdb.committed)
+        self.assertLess(self.first("pg_advisory_xact_lock"), self.first("FROM iam_policy.entry"))
+
+    def test_withdraw(self):
+        tok = self.ptoken(["admin"], person="p-admin")
+        self.open_version("approved")
+        self.assertEqual(self.req("/api/policy/2/withdraw", tok, {"reason": ""})[0], 400)
+        status, body, _ = self.req("/api/policy/2/withdraw", tok, {"reason": "test: withdraw"})
+        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertEqual(self.sql("iam_policy.withdraw(")[0][1][:2], (2, "test: withdraw"))
+        self.assertEqual(self.pdb.versions[2]["status"], "withdrawn")
+        self.assertTrue(self.pdb.committed)
+        self.pdb.fail_fn["withdraw"] = ("22023", "version 2 is not open")
+        self.assertEqual(self.req("/api/policy/2/withdraw", tok, {"reason": "again"})[0], 409)
+
+    def change_diff_expected(self):
+        from compiler import explain, source
+        p1 = self.pa.composed(PolicyCursor(self.pdb), 1)[0]
+        p2 = self.pa.composed(PolicyCursor(self.pdb), 2)[0]
+        doc = explain.diff_document("change", 2, 1, self.pdb.versions[2]["entries_digest"], p1, p2)
+        return source.canonical(doc), doc
+
+    def test_diff_of_a_change(self):
+        self.open_version("submitted", change=self.without_engineer_on(self.engineer_group()))
+        status, body, h = self.req("/api/policy/2/diff?against=applied", self.ptoken(["qa"]))
+        self.assertEqual(status, 200)
+        want, doc = self.change_diff_expected()
+        self.assertEqual(body, json.loads(want))
+        raw = urllib.request.urlopen(urllib.request.Request(
+            self.purl + "/api/policy/2/diff?against=applied",
+            headers={"X-Forwarded-Access-Token": self.ptoken(["qa"])}), timeout=60).read()
+        self.assertEqual(raw, want)
+        self.assertEqual(h["X-Medcea-Skeleton-Digest"], self.pdb.skel_digest)
+        self.assertEqual(h["X-Medcea-Diff-Digest"], hashlib.sha256(want).hexdigest())
+        self.assertEqual(h.get("Cache-Control"), "no-store")
+        self.assertTrue(doc["cells"])
+        self.assertEqual(set(doc["roles"]), {"engineer"})
+        self.assertEqual(self.req("/api/policy/2/diff?against=1", self.ptoken(["qa"]))[0], 400)
+
+    def skeleton_version(self, roles=None):
+        """Version 2 of kind skeleton with a host-stored diff (jsonb text, as psql returns it)."""
+        from compiler import source
+        v = self.open_version("submitted", kind="skeleton")
+        doc = {"schema": 1, "kind": "skeleton", "version": 2, "against": 1, "entries_digest": v["entries_digest"],
+               "skeleton": {"from": self.pdb.skel_digest, "to": "f" * 64, "sections": ["hosts"]},
+               "cells": [], "waivers": {"added": [], "removed": []}, "roles": roles or {},
+               "system": {"added": [["host", "NEW_DOMAIN → svc é"]], "removed": []}}
+        b = source.canonical(doc)
+        self.pdb.vdiff[2] = (source.pg_jsonb_text(doc), hashlib.sha256(b).hexdigest())
+        return b
+
+    def test_diff_of_a_skeleton_version(self):
+        b = self.skeleton_version()
+        status, body, h = self.req("/api/policy/2/diff", self.ptoken(["auditor"]))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), b)
+        self.assertEqual(h["X-Medcea-Diff-Digest"], hashlib.sha256(b).hexdigest())
+        self.assertEqual(h["X-Medcea-Skeleton-Digest"], self.pdb.skel_digest)
+        self.pdb.vdiff[2] = (self.pdb.vdiff[2][0], "0" * 64)
+        status, body, _ = self.req("/api/policy/2/diff", self.ptoken(["auditor"]))
+        self.assertEqual((status, body["error"]), (500, "the stored diff of version 2 does not hash to its digest"))
+
+    def approve(self, body, token=None):
+        return self.req("/api/policy/2/approve", token or self.ptoken(["qa"]), body)
+
+    def test_approve_a_change(self):
+        self.open_version("submitted", change=self.without_engineer_on(self.engineer_group()))
+        want, doc = self.change_diff_expected()
+        good = {"note": "test: read it", "entries_digest": doc["entries_digest"],
+                "diff_digest": hashlib.sha256(want).hexdigest(), "skeleton_digest": self.pdb.skel_digest}
+        for k in ("entries_digest", "diff_digest", "skeleton_digest"):
+            status, body, _ = self.approve(dict(good, **{k: "ABC"}))
+            self.assertEqual(status, 400, k)
+        for k in ("diff_digest", "skeleton_digest"):
+            status, body, _ = self.approve(dict(good, **{k: "e" * 64}))
+            self.assertEqual(status, 409, k)
+            self.assertIn("the diff you approved is not the one the Policy service computes now", body["error"])
+        self.assertEqual(self.cfg.calls, [], "nothing forwarded")
+        tok = self.ptoken(["qa"])
+        status, body, _ = self.approve(good, tok)
+        self.assertEqual(status, 200, body)
+        path, auth, args = self.cfg.calls[-1]
+        self.assertEqual((path, auth), ("/rpc/approve_policy", "Bearer " + tok))
+        self.assertEqual(args, {"p_version": 2, "p_note": "test: read it", "p_entries_digest": good["entries_digest"],
+                                "p_diff_digest": good["diff_digest"], "p_skeleton_digest": good["skeleton_digest"]})
+        self.assertNotIn(tok, self.logs.getvalue())
+        self.assertEqual(self.req("/api/policy/2/approve", self.ptoken(["admin"]), good)[0], 403)   # A: qa
+        for answer, want_status in (((403, b'{"code":"28000","message":"this client may only call medcea.approve_policy"}'), 403),
+                                    ((404, b'{"code":"PGRST202","message":"Could not find the function"}'), 503),
+                                    ((404, b'{"code":"42883","message":"function does not exist"}'), 503),
+                                    ((403, b'{"code":"42501","message":"you are an author of version 2: another qa person approves it"}'), 403),
+                                    ((400, b'{"code":"22023","message":"a policy break-glass is open (event 7)"}'), 409)):
+            self.cfg.answer = answer
+            status, body, _ = self.approve(good)
+            self.assertEqual(status, want_status, (answer, body))
+        n = len(self.cfg.calls)
+        self.pdb.db_roles = "false"
+        self.assertEqual(self.approve(good)[0], 503)
+        self.pdb.db_roles = "true"
+        write_settings(True, jwt_mode=False)
+        self.assertEqual(self.approve(good)[0], 503)
+        write_settings(True)
+        self.assertEqual(len(self.cfg.calls), n, "nothing forwarded with a switch false")
+
+    def test_approve_refuses_a_widening_of_the_approvers_role(self):
+        g = next(g for g in sorted(self.pdb.versions[1]["groups"])
+                 if not any(e["role"] == "auditor" and e["group_code"] == g for e in self.pdb.entries[1]))
+        self.open_version("submitted", change=lambda ents: ents + [
+            {"role": "auditor", "group_code": g, "level": "R", "constraint_name": None}])
+        want, doc = self.change_diff_expected()
+        self.assertTrue(doc["roles"]["auditor"]["added"])
+        good = {"note": "test", "entries_digest": doc["entries_digest"],
+                "diff_digest": hashlib.sha256(want).hexdigest(), "skeleton_digest": self.pdb.skel_digest}
+        status, body, _ = self.approve(good)                     # qa includes auditor
+        self.assertEqual((status, body["error"]), (403, "version 2 widens role auditor, which you hold: you may not approve it"))
+        self.assertEqual(self.cfg.calls, [])
+
+    def test_approve_a_skeleton_version(self):
+        b = self.skeleton_version()
+        good = {"note": "test: read the diff", "entries_digest": self.pdb.versions[2]["entries_digest"],
+                "diff_digest": hashlib.sha256(b).hexdigest(), "skeleton_digest": self.pdb.skel_digest,
+                "attest": self.pa.SKELETON_ATTEST}
+        for attest in (None, "I did not run apply.sh for this version.", self.pa.SKELETON_ATTEST + " "):
+            status, body, _ = self.approve(dict(good, attest=attest))
+            self.assertEqual(status, 400, attest)
+            self.assertIn("needs the attestation", body["error"])
+        status, body, _ = self.approve(dict(good, diff_digest="e" * 64))
+        self.assertEqual(status, 409)
+        self.assertEqual(self.cfg.calls, [])
+        status, body, _ = self.approve(good)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.cfg.calls[-1][2]["p_note"],
+                         "I did not run apply.sh --propose-skeleton for this version. test: read the diff")
+        self.skeleton_version(roles={"qa": {"added": [["host", "X_DOMAIN", None]], "removed": []}})
+        status, body, _ = self.approve(dict(good, diff_digest=self.pdb.vdiff[2][1]))
+        self.assertEqual((status, body["error"]), (403, "version 2 widens role qa, which you hold: you may not approve it"))
+
+    def test_return_forwarded(self):
+        self.open_version("submitted")
+        self.assertEqual(self.req("/api/policy/2/return", self.ptoken(["qa"]), {"note": ""})[0], 400)
+        tok = self.ptoken(["qa"])
+        status, body, _ = self.req("/api/policy/2/return", tok, {"note": "test: not yet"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.cfg.calls[-1], ("/rpc/return_policy", "Bearer " + tok, {"p_version": 2, "p_note": "test: not yet"}))
+
+    def test_versions_with_an_open_one(self):
+        self.open_version("submitted", kind="skeleton")
+        status, body, _ = self.req("/api/policy", self.ptoken(["qa"]))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["open"], 2)
+        self.assertEqual(body["accepted_skeleton_digest"], self.pdb.skel_digest)
+        v2 = body["versions"][0]
+        self.assertEqual(v2["why_not"], {"may_approve": True, "why_not_code": None, "needs_token_path": True})
+        self.assertEqual(v2["authors"], [{"name": "admin", "person": "p-admin"},
+                                         {"name": None, "person": "p-host", "claimed": True}])
+        actor = self.first("medcea_auth.set_actor")
+        self.assertLess(actor, self.first("iam_policy.why_not("))
+        self.assertEqual(self.pdb.log[actor][1], (SUB, "p-qa", "quinn.q", "qa"))
+        self.assertIn("LEFT JOIN iam_policy.skeleton s", self.pdb.log[self.first("FROM iam_policy.version v")][0])
+        self.assertFalse(self.pdb.committed)
+
+    def test_who_can_identities_break_glass(self):
+        tok = self.ptoken(["admin"], person="p-admin")
+        status, body, _ = self.req("/api/policy/who-can", tok)
+        self.assertEqual(status, 200, body)
+        names = {o["name"] for o in body["objects"]}
+        self.assertIn("POLICY_DOMAIN", names)
+        status, body, _ = self.req("/api/policy/who-can?object=POLICY_DOMAIN", tok)
+        self.assertEqual(status, 200, body)
+        self.assertEqual({r["role"] for r in body["roles"]}, {"admin", "auditor", "qa", "qp"})
+        status, body, _ = self.req("/api/policy/who-can?object=POLICY_DOMAIN&level=A", tok)
+        self.assertEqual({r["role"] for r in body["roles"]}, {"qa"})
+        self.assertEqual(self.req("/api/policy/who-can?object=POLICY_DOMAIN&level=Z", tok)[0], 400)
+        self.assertEqual(self.req("/api/policy/who-can?object=group:nothing", tok)[0], 404)
+        status, body, _ = self.req("/api/policy/service-identities", tok)
+        self.assertEqual(status, 200, body)
+        svc = {i["key"]: i for i in body["identities"]}
+        self.assertEqual(svc["svc_iam"]["password_key"], "IAM_SVC_DB_PASS")
+        self.assertEqual(svc["svc_iam"]["ceiling"]["iam_policy"], ["R", "C", "U"])
+        self.assertTrue(svc["svc_iam"]["groups"]["iam_policy"]["help"])
+        self.pdb.bg_open = [(7, datetime.datetime(2026, 11, 4, 9, 0, tzinfo=datetime.timezone.utc), '["infra"]')]
+        status, body, _ = self.req("/api/policy/break-glass", tok)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["identities"][0]["identity"])
+        self.assertEqual(body["open_overrides"], [{"event_id": 7, "at": "2026-11-04T09:00:00+00:00", "components": ["infra"]}])
+        q = self.pdb.log[self.first("break_glass_seen")][0]
+        for k in ("'break_glass_ended'", "'since_event'", "'component'", "'source' = 'file'", "'components'"):
+            self.assertIn(k, q)
 
 if __name__ == "__main__":
     unittest.main()

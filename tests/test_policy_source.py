@@ -21,6 +21,9 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    COMMENT and the verify assert's digest literal, pre_request's only_rpc
                    block before the mode check, the fns assert array gaining
                    iam_policy._system_as(text[])); the grants document is unchanged
+  Phase44Delta     against PRE_44 (slice 4.3, 31df34b): every output byte-identical, the
+                   hosts listing included; skeleton, matrix and waivers equal; cli.py
+                   skeleton-gate --check --against-git 31df34b prints equal
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -30,7 +33,8 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    and a consistent forgery refused, an unreadable state/ an error, dropped rows,
                    the git key order, waiver rows, export-applied
   Gate             (4.2a) the skeleton gate: equal, narrowing, person and system widening, the
-                   sections, the prose keys, cli.py's exit codes, --check, --against-git
+                   sections, the prose keys, cli.py's exit codes, --check, --against-git;
+                   (4.4) the refusal's --propose-skeleton line
   LibSource        (4.2a) policy_source_init and friends against a fake kubectl/psql in a
                    scratch tree: every state, the gate (narrowing accepted as system:deploy,
                    widening 2 with nothing written), --precheck, --read-only, the lock,
@@ -86,6 +90,7 @@ PRE_41 = "bdc7d48"
 # The last commit before slice 4.2a (slice 4.1 built and deployed): Phase42aDelta's reference.
 PRE_42A = "08fab15"
 PRE_43 = "e18b4ee"   # slice 4.2b deployed: 4.3 changes no compiled artefact and no skeleton
+PRE_44 = "31df34b"   # slice 4.3 built: 4.4 changes no compiled artefact, no listing and no skeleton
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -800,6 +805,21 @@ class Gate(unittest.TestCase):
         self.widening(lambda d: d["resource_groups"]["dashboards"]["tool"]["settings"].insert(
             0, {"setting": "Admin", "levels": ["R"]}) if "settings" in d["resource_groups"]["dashboards"].get("tool", {})
             else d["resource_groups"]["dashboards"]["tool"].__setitem__("x", 1))
+
+    def test_message_names_the_proposal(self):
+        """4.4 (design §14.7.6): the refusal names apply.sh --propose-skeleton --from-git as the
+        way on; applying an approved skeleton version is 4.5's."""
+        g = self.widening(lambda d: d["public_routes"].append({"service": "monitor", "route": "GET /api/e13-public",
+                                                               "why": "E13"}), "_system")
+        lines = explain.gate_message(g).splitlines()
+        self.assertEqual(lines[-3], "This change needs a qa-approved skeleton version: put HEAD back at the accepted "
+                         "skeleton, keep the change as a commit on a branch, and run ./apps/iam/apply.sh "
+                         "--propose-skeleton --by <you> --reason \"<why>\" --from-git <commit>; qa approves it in "
+                         "the Policy UI. Applying an approved skeleton version arrives with IAM 4.5.")
+        self.assertEqual(lines[-2], "Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the "
+                         "matrix, never the skeleton.")
+        self.assertEqual(lines[-1], "Nothing was changed.")
+        self.assertNotIn("It cannot deploy until", "\n".join(lines))
 
     def test_system_widening(self):
         g = self.widening(lambda d: d["public_routes"].append({"service": "monitor", "route": "GET /api/e13-public",
@@ -2037,6 +2057,58 @@ class Phase43Delta(unittest.TestCase):
         self.assertEqual(len(changed), 1, changed)
         self.assertIn("POLICY_DOMAIN", changed[0][1])
         self.assertIn("[compiled]", changed[0][1])
+
+
+class Phase44Delta(unittest.TestCase):
+    """Slice 4.4 (drafting and approval) compiles every artefact byte for byte as PRE_44,
+    the hosts listing included (no proxies.ENFORCEMENT change), and leaves the skeleton,
+    the matrix and the waivers as they were (design §14.7.0: the skeleton freeze)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_44, "medcea-pre44-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_44}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        for key, want in self.want.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_44}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_skeleton_and_matrix_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_data = yaml.safe_load(f)
+        self.assertEqual(source.skeleton_digest(old_data), source.skeleton_digest(self.p.data))
+        self.assertEqual(old_data["matrix"], self.p.data["matrix"])
+        self.assertEqual(old_data["waivers"], self.p.data["waivers"])
+
+    def test_skeleton_gate_against_pre44_is_equal(self):
+        """`cli.py skeleton-gate --check --against-git 31df34b` prints equal (run in-process:
+        the command reads only the git revision and defaults.yaml, never a host file)."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_44, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_44}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+        self.assertEqual(g["git_digest"], g["accepted_digest"])
 
 
 class Phase42aDelta(unittest.TestCase):

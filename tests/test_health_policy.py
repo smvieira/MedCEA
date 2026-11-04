@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """tests/test_health_policy.py — health-check.sh's iampolicy and iamartefacts (IAM Phase 4,
-slice 4.2a; design §14.4.14).
+slice 4.2a; design §14.4.14; the open versions of 4.4, §14.7.6).
 
 Offline. Each check runs in a scratch tree (tests/_scratch.py: state/ and .medcea.lock resolve
 inside the copy, so the live host's state/policy-applied.yaml never changes an outcome) against
@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import sys
 import unittest
+
+import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -227,6 +229,71 @@ class IamPolicy(unittest.TestCase):
         self.t.write_host()
         self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk}})
         self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|Access policy version|version 1 (bootstrap), skeleton"))
+
+    def test_an_approved_version_waits_for_4_5(self):
+        # IAM 4.4 (design §14.7.6): nothing approved is applied before 4.5
+        self.t.write_host()
+        self.t.st["open_versions"] = [{"version": 2, "kind": "change", "status": "approved", "age_days": 0,
+                                       "skeleton_digest": self.t.st["accepted"]["digest"], "diff_from": None}]
+        self.assertEqual(self.run_check(self.t.write_state()),
+                         "WARN|Access policy version|version 2 (change) is approved; applying it arrives with IAM 4.5 "
+                         "(./apps/iam/apply.sh 2)")
+        self.t.st["open_versions"][0]["status"] = "submitted"
+        self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|"))
+
+    def test_a_stale_skeleton_proposal_warns(self):
+        # a narrowing deploy accepted another skeleton under the open skeleton version
+        self.t.write_host()
+        acc = self.t.st["accepted"]["digest"]
+        self.t.st["open_versions"] = [{"version": 2, "kind": "skeleton", "status": "submitted", "age_days": 0,
+                                       "skeleton_digest": "a" * 64, "diff_from": "b" * 64}]
+        self.assertEqual(self.run_check(self.t.write_state()),
+                         f"WARN|Access policy version|skeleton version 2 was proposed against skeleton {'b' * 12}, the "
+                         f"accepted one is now {acc[:12]}: return it and propose again")
+        self.t.st["open_versions"][0]["diff_from"] = acc
+        self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|"))
+
+    def test_a_proposed_widening_in_the_tree_still_fails(self):
+        # the deploying tree carries the proposed skeleton: a deploy refuses it, so it stays a
+        # FAIL, and the detail says to put HEAD back (the proposal waits on its branch)
+        self.t.write_host()
+        pol = self.t.path("apps", "iam", "policy", "defaults.yaml")
+        with open(pol) as f:
+            text = f.read()
+        a = 'routes: {"GET /api/recipes": R}}'
+        self.assertEqual(text.count(a), 1)
+        with open(pol, "w") as f:
+            f.write(text.replace(a, 'routes: {"GET /api/recipes": R, "GET /api/recipes/extra": R}}'))
+        with open(pol) as f:
+            wide = source.skeleton_digest(yaml.safe_load(f))
+        out = self.run_check(self.t.write_state())
+        self.assertTrue(out.startswith("FAIL|Access policy version|"), out)
+        self.assertIn("a deploy would refuse it (cli.py skeleton-gate)", out)
+        self.t.st["open_versions"] = [{"version": 2, "kind": "skeleton", "status": "approved", "age_days": 0,
+                                       "skeleton_digest": wide, "diff_from": self.t.st["accepted"]["digest"]}]
+        out = self.run_check(self.t.write_state())
+        self.assertTrue(out.startswith("FAIL|Access policy version|"), out)
+        # through health-check.sh, which cuts each detail at 160 characters: the whole instruction
+        self.assertIn("the git skeleton widens: a deploy refuses it (proposed as version 2, approved: put HEAD back "
+                      "at the accepted skeleton; the proposal waits on its branch)", out)
+        self.assertIn("version 2 (skeleton) is approved; applying it arrives with IAM 4.5", out)
+        # the whole detail (health-check.sh cuts each at 160 characters), from the scratch tree's judge
+        p = subprocess.run([sys.executable, self.t.path("apps", "iam", "apply_check.py"), "health", "--state",
+                            self.t.write_state(), "--host-file", self.t.path("state", "policy-applied.yaml")],
+                           capture_output=True, text=True, env=self.t.env(), timeout=300)
+        self.assertIn("FAIL|the git skeleton widens: a deploy refuses it (proposed as version 2, approved: put "
+                      "HEAD back at the accepted skeleton; the proposal waits on its branch)", p.stdout.splitlines())
+        for line in p.stdout.splitlines():
+            self.assertLessEqual(len(line.split("|", 1)[1]), 160, line)
+        # the longest status and a five-digit version still fit
+        self.t.st["open_versions"][0].update(version=12345, status="submitted")
+        p = subprocess.run([sys.executable, self.t.path("apps", "iam", "apply_check.py"), "health", "--state",
+                            self.t.write_state(), "--host-file", self.t.path("state", "policy-applied.yaml")],
+                           capture_output=True, text=True, env=self.t.env(), timeout=300)
+        wide = [l for l in p.stdout.splitlines() if "git skeleton widens" in l]
+        self.assertEqual(len(wide), 1, p.stdout)
+        self.assertTrue(wide[0].endswith("the proposal waits on its branch)"), wide[0])
+        self.assertLessEqual(len(wide[0].split("|", 1)[1]), 160, wide[0])
 
     def test_skip_without_kubectl_or_008c(self):
         self.assertEqual(self.run_check(None, "skip", "no usable kubectl"),

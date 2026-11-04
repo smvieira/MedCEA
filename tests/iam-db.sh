@@ -47,7 +47,14 @@
 #                --mode true), _propose_skeleton, _record's actors and account_seeded,
 #                the filter (iam_svc writes only mqtt_credential_issued), dba_record_event
 #                through _record, a deploy's _accept_skeleton, and (--mode false)
-#                pre_request's only_rpc block under IAM_DB_ROLES=false
+#                pre_request's only_rpc block under IAM_DB_ROLES=false.
+#                IAM 4.4, P27-P37: approve refused while a policy break-glass is open,
+#                a skeleton version's approval (digests, the attestation, the --by
+#                author), the approval's inputs, return, withdraw by any admin and by
+#                _withdraw_open, submit's and save_entry's refusals and the whole-cell
+#                rule, new_draft's bases and merge, why_not as iam_svc, a stale
+#                skeleton proposal, a proposal widening the approver's own role, and
+#                iam_svc taking the version lock before save_entry
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
 #
@@ -268,6 +275,7 @@ SELECT 'rls', count(*) FROM pg_class WHERE relnamespace = 'medcea'::regnamespace
 SELECT 'unitalways', tgenabled FROM pg_trigger WHERE tgname = 'user_unit_audit_trg';
 SELECT 'commalways', tgenabled FROM pg_trigger WHERE tgname = 'commissioning_history_trg';
 SELECT 'chain', ok FROM iam_policy.verify_chain();
+SELECT 'chaindef', p.prosecdef FROM pg_proc p WHERE p.oid = 'iam_policy.verify_chain()'::regprocedure;
 SQL
 )"
     get() { grep -m1 "^$1|" <<<"$out" | cut -d'|' -f2; }
@@ -318,6 +326,8 @@ print("\n".join(sorted("%s %s" % (g, o.replace(" ", "")) for g, k, o, p in d["pr
     [[ "$(get commalways)" == A ]] && pass catalog "commissioning_history_trg is ENABLE ALWAYS" \
         || fail catalog "commissioning_history_trg: tgenabled '$(get commalways)' (want A)"
     [[ "$(get chain)" == t ]] && pass catalog "iam_policy.verify_chain() ok" || fail catalog "verify_chain: $(get chain)"
+    [[ "$(get chaindef)" == t ]] && pass catalog "verify_chain() is SECURITY DEFINER (iam_svc runs it without history_record)" \
+        || fail catalog "verify_chain() prosecdef '$(get chaindef)': the Policy UI cannot verify the chain as iam_svc"
 fi
 
 # ── matrix ───────────────────────────────────────────────────────────────────────
@@ -2658,11 +2668,11 @@ elif want access; then
 fi
 
 # ── policy (IAM Phase 4, slice 4.1: migration 008c) ─────────────────────────────
-# P1 reads the catalog (any namespace); P2-P26 (4.2a: P19-P26) are write probes on medcea-iamtest, each
+# P1 reads the catalog (any namespace); P2-P37 (4.2a: P19-P26; 4.4: P27-P37) are write probes on medcea-iamtest, each
 # in BEGIN … ROLLBACK, building version 1 inside the probe through the owner functions
 # (a reduced skeleton: the factory's role and group keys). The token probes (P7-P10,
-# P12, P20's applies) need IAM_DB_ROLES=true (authenticator's memberships, pre_request's
-# role); P26 needs IAM_DB_ROLES=false.
+# P12, P20's applies, P27-P30, P31's approved versions, P35-P37) need IAM_DB_ROLES=true
+# (authenticator's memberships, pre_request's role); P26 needs IAM_DB_ROLES=false.
 if want policy && [[ "$MODE" != legacy ]]; then
     echo ""
     out="$(db <<'SQL'
@@ -3246,6 +3256,230 @@ $(as_system system:scheduler)
 SELECT iam_policy._accept_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', NULL, '{}'::jsonb);
 SQL
 
+    # ── IAM 4.4: drafting and approval (design §14.7.1, §14.7.8) ──────────────────────
+    # a third skeleton: the factory keys plus one group (P33's merge, P35's later accept)
+    P_SKEL3="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); g=sorted(d["resource_groups"])[0]; d["resource_groups"]["iam_db_probe"]=dict(d["resource_groups"][g]); print(json.dumps(d, sort_keys=True))' "$P_SKEL")"
+    P_DG3="$(printf 'iam-db skeleton 3 %s' "$_h" | sha256sum | cut -d' ' -f1)"
+    DD2="$(printf 'iam-db diff 2 %s' "$_h" | sha256sum | cut -d' ' -f1)"
+    # a cell of the factory matrix with two levels or more: role, group and its whole level map
+    P_CELL2="$(python3 -c '
+import json, sys
+cells = {}
+for e in json.loads(sys.argv[1]):
+    cells.setdefault((e["role"], e["group_code"]), {})[e["level"]] = e["constraint_name"]
+r, g = sorted(k for k, v in cells.items() if len(v) >= 2)[0]
+print("\t".join([r, g, json.dumps(cells[(r, g)], sort_keys=True), sorted(cells[(r, g)])[0]]))' "$P_ENTRIES")"
+    IFS=$'\t' read -r C2_ROLE C2_GROUP C2_LEVELS C2_FIRST <<<"$P_CELL2"
+    C2_ONE="$(python3 -c 'import json,sys; m=json.loads(sys.argv[1]); print(json.dumps({sys.argv[2]: m[sys.argv[2]]}))' "$C2_LEVELS" "$C2_FIRST")"
+    ATTEST='I did not run apply.sh --propose-skeleton for this version.'
+    # skel_diff ROLE… — a host diff document from the accepted skeleton (P_DG, or SKEL_FROM) to
+    # P_DG2, adding one reach tuple to each ROLE
+    skel_diff() {
+        python3 - "${SKEL_FROM:-$P_DG}" "$P_DG2" "$@" <<'PY'
+import json, sys
+roles = {r: {"added": [["route", "iam-db", "GET /probe"]], "removed": []} for r in sys.argv[3:]}
+print(json.dumps({"schema": 1, "kind": "skeleton", "skeleton": {"from": sys.argv[1], "to": sys.argv[2], "sections": []},
+                  "cells": [], "waivers": {"added": [], "removed": []}, "roles": roles,
+                  "system": {"added": [], "removed": []}}, sort_keys=True))
+PY
+    }
+    # propose_skel [ROLE…] — apply.sh --propose-skeleton (system:apply) with --by SKEL_BY /
+    # SKEL_BY_PERSON (default the admin A), a diff adding to each ROLE (default engineer):
+    # :d the submitted skeleton version (P_DG2, diff digest DD), :ed its entries digest
+    propose_skel() {
+        local roles=("$@")
+        [[ ${#roles[@]} -gt 0 ]] || roles=(engineer)
+        as_system system:apply
+        cat <<SQL
+SELECT iam_policy._propose_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', \$j\$$(skel_diff "${roles[@]}")\$j\$::jsonb, '$DD',
+                                    '${SKEL_BY:-$A}', $(sqlq "${SKEL_BY_PERSON:-$PA}"), 'iam-db probe') AS d \\gset
+SELECT entries_digest AS ed FROM iam_policy.version WHERE version = :d \\gset
+SQL
+        clear_actor
+        clear_marker
+    }
+    # skel_approve_sql NOTE [DIFF_DIGEST] [SKELETON_DIGEST] — approve the skeleton version :d
+    skel_approve_sql() { echo "SELECT medcea.approve_policy(:d, $(sqlq "$1"), :'ed', '${2:-$DD}', '${3:-$P_DG2}');"; }
+    # break_glass COMPONENT… — a policy break-glass (source file) recorded as a deploy does: :bg
+    break_glass() {
+        local comps
+        comps="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")"
+        as_system system:deploy
+        echo "SELECT iam_policy._record('break_glass_seen', jsonb_build_object('source', 'file', 'reason', 'iam-db probe', 'components', '$comps'::jsonb, 'file_sha256', '$DD')) AS bg \\gset"
+        clear_actor
+    }
+    # break_glass_end COMPONENT — the next normal deploy of COMPONENT ends :bg for it
+    break_glass_end() {
+        as_system system:deploy
+        echo "SELECT iam_policy._record('break_glass_ended', jsonb_build_object('since_event', :bg, 'component', '$1')) \\g /dev/null"
+        clear_actor
+    }
+
+    # P31 — withdraw (any admin, owner decision 3): a submitted skeleton version, then again
+    probe P31 "an admin withdraws a submitted skeleton version" ok <<SQL
+$(build_v1)
+$(propose_skel)
+$(as_iam "$A2" "p-pa2-$_h" test-pa2 admin)
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT) \\g /dev/null
+--CHECKS
+SELECT 'CHECK|withdrawn by an admin who is no author', status = 'withdrawn' AND withdrawn_by = 'p-pa2-$_h' AND withdrawn_by_sub = '$A2'
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|withdrawn event', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d AND event = 'withdrawn');
+SQL
+    probe P31 "a second withdraw" "22023:is not open" <<SQL
+$(build_v1)
+$(propose_skel)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT) \\g /dev/null
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT);
+SQL
+    # P32 — submit and save_entry's refusals; save_entry replaces the whole cell
+    probe P32 "submit a draft whose checker verdict is false" "22023:does not pass the checker" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"R": null}'::jsonb, 'iam-db probe',
+                             '{"ok": false, "errors": ["iam-db"], "checker_digest": "iam-db"}'::jsonb, $IAT) \\g /dev/null
+SELECT iam_policy.submit(:d, 'iam-db probe', $IAT);
+SQL
+    probe P32 "save_entry on the applied version" "22023:is not a draft" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.save_entry(:v1, 'qa', 'portal', '{"R": null}'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry on a submitted skeleton version" "22023:is not a draft" <<SQL
+$(build_v1)
+$(propose_skel)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"R": null}'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry for an unknown role" "22023:no role iam_db_nobody or group portal" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, 'iam_db_nobody', 'portal', '{"R": null}'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry for an unknown group" "22023:no role qa or group iam_db_nothing" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, 'qa', 'iam_db_nothing', '{"R": null}'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry for a retired group" "22023:no role qa or group portal" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+$(as_postgres)
+UPDATE iam_policy.resource_group SET retired = true WHERE code = 'portal';
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"R": null}'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry with levels that are not an object" "22023:levels must be an object" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '["R"]'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry with an unknown level letter" "22023:levels must be an object" <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"Z": null}'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT);
+SQL
+    probe P32 "save_entry replaces the whole cell ($C2_ROLE/$C2_GROUP): the full map keeps the digest, one level drops the rest" ok <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+$(as_postgres)
+SELECT iam_policy.entries_digest(:d) AS e0 \\gset
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.save_entry(:d, '$C2_ROLE', '$C2_GROUP', '$C2_LEVELS'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT) \\g /dev/null
+$(as_postgres)
+SELECT iam_policy.entries_digest(:d) AS e1 \\gset
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.save_entry(:d, '$C2_ROLE', '$C2_GROUP', '$C2_ONE'::jsonb, 'iam-db probe', '{"ok": true}'::jsonb, $IAT) \\g /dev/null
+--CHECKS
+SELECT 'CHECK|the whole cell saved unchanged: entries digest unchanged', :'e0' = :'e1';
+SELECT 'CHECK|one level saved: only that row is left', array_agg(level::text) = ARRAY['$C2_FIRST']
+  FROM iam_policy.entry WHERE version = :d AND role = '$C2_ROLE' AND group_code = '$C2_GROUP';
+SELECT 'CHECK|the digest moved', iam_policy.entries_digest(:d) <> :'e0';
+SQL
+    # P33 — new_draft from defaults, from a version number, and the merge of a key the base lacks
+    probe P33 "new_draft from defaults: the cells and waivers passed" ok <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('defaults', 'iam-db probe', $IAT, \$j\$$P_ENTRIES\$j\$::jsonb, \$j\$$P_WAIVERS\$j\$::jsonb) AS d \\gset
+--CHECKS
+SELECT 'CHECK|the entries are the factory''s', NOT EXISTS (
+          (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :d)
+          EXCEPT (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :v1))
+       AND NOT EXISTS (
+          (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :v1)
+          EXCEPT (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :d));
+SELECT 'CHECK|the waivers too', (SELECT count(*) FROM iam_policy.waiver WHERE version = :d)
+          = (SELECT count(*) FROM iam_policy.waiver WHERE version = :v1);
+SELECT 'CHECK|draft_created from defaults', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d
+          AND event = 'draft_created' AND payload ->> 'from' = 'defaults');
+SQL
+    probe P33 "new_draft from a withdrawn version's number" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT) \\g /dev/null
+SELECT iam_policy.new_draft(:'d', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d2 \\gset
+--CHECKS
+SELECT 'CHECK|the rows of the withdrawn version', NOT EXISTS (
+          (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :d)
+          EXCEPT (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :d2))
+       AND (SELECT count(*) FROM iam_policy.entry WHERE version = :d) = (SELECT count(*) FROM iam_policy.entry WHERE version = :d2);
+SELECT 'CHECK|its qa/portal cell, not v1''s', array_agg(level::text ORDER BY level) = '{R,X}'
+  FROM iam_policy.entry WHERE version = :d2 AND role = 'qa' AND group_code = 'portal';
+SELECT 'CHECK|based on the applied version', based_on = :v1 FROM iam_policy.version WHERE version = :d2;
+SQL
+    probe P33 "new_draft after a deploy added a group: its proposed cell merged, the base's cells kept, no duplicate" ok <<SQL
+$(build_v1)
+$(as_system system:deploy)
+SELECT iam_policy._accept_skeleton('$P_DG3', \$j\$$P_SKEL3\$j\$::jsonb, 'iam-db', NULL, '{"narrowed": [], "unchanged": []}'::jsonb) \\g /dev/null
+SELECT iam_policy._sync_skeleton(\$j\$$P_SKEL3\$j\$::jsonb, 'iam-db') \\g /dev/null
+$(clear_marker)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT,
+    '[{"role": "qa", "group_code": "iam_db_probe", "level": "R", "constraint_name": null},
+      {"role": "qa", "group_code": "portal", "level": "K", "constraint_name": null}]'::jsonb, '[]'::jsonb) AS d \\gset
+--CHECKS
+SELECT 'CHECK|the new key''s cell, once', count(*) = 1 FROM iam_policy.entry
+ WHERE version = :d AND role = 'qa' AND group_code = 'iam_db_probe' AND level = 'R';
+SELECT 'CHECK|a key the base covers keeps the base''s cell', NOT EXISTS (SELECT 1 FROM iam_policy.entry
+          WHERE version = :d AND role = 'qa' AND group_code = 'portal' AND level = 'K');
+SELECT 'CHECK|no duplicate rows', count(*) = count(DISTINCT (role, group_code, level)) FROM iam_policy.entry WHERE version = :d;
+SELECT 'CHECK|the version''s groups are the accepted skeleton''s', 'iam_db_probe' = ANY (groups) FROM iam_policy.version WHERE version = :d;
+SQL
+    # P34 — why_not as iam-api asks it (iam_svc, set_actor): never on the token path
+    probe P34 "why_not as iam_svc for a qa person: may approve, needs the token path" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$Q" "$PQ" test-pq qa)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc, needs_token_path AS wn FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|may approve, no code, needs the token path', :'wm'::boolean AND :'wc' = '-' AND :'wn'::boolean;
+SQL
+    probe P34 "why_not as iam_svc for an admin: not_approver" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$A2" "p-pa2-$_h" test-pa2 admin)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|not_approver', NOT :'wm'::boolean AND :'wc' = 'not_approver';
+SQL
+    probe P34 "why_not as iam_svc for a qa person who saved a cell: own_author" ok <<SQL
+$(build_v1)
+$(draft_chain "$A2" "$PQ")
+$(as_iam "$Q" "$PQ" test-pq qa)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|own_author', NOT :'wm'::boolean AND :'wc' = 'own_author';
+SQL
+
     if [[ "$MODE" == true ]]; then
         # P8 — approve, positive, through the token path (the control for P7)
         probe P8 "qa approves through PostgREST with the policy host's token" ok <<SQL
@@ -3458,8 +3692,241 @@ SELECT 'CHECK|the rollback withdrawn by system:apply', status = 'withdrawn' AND 
           AND rollback_of = :v1 FROM iam_policy.version WHERE version = :r;
 SELECT 'CHECK|the change applied again', status = 'applied' FROM iam_policy.version WHERE version = :d;
 SQL
+        # ── IAM 4.4 on the token path (design §14.7.1, §14.7.8) ──
+        # P27 — no approval while a policy break-glass (source file) is open
+        probe P27 "approve while a policy break-glass is open for frontend and iam" "22023:a policy break-glass is open" <<SQL
+$(build_v1)
+$(draft_chain)
+$(break_glass frontend iam)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P27 "the frontend's deploy ended it: still open, naming iam only" "22023:approvals wait until a normal deploy of iam ends it" <<SQL
+$(build_v1)
+$(draft_chain)
+$(break_glass frontend iam)
+$(break_glass_end frontend)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+SQL
+        probe P27 "why_not while it is open: break_glass_open" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(break_glass frontend iam)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|break_glass_open', NOT :'wm'::boolean AND :'wc' = 'break_glass_open';
+SQL
+        probe P27 "both components ended: approved (a break-glass of another source never blocks)" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(break_glass frontend iam)
+$(break_glass_end frontend)
+$(break_glass_end iam)
+$(as_system system:deploy)
+SELECT iam_policy._record('break_glass_seen', '{"source": "node-red", "reason": "iam-db probe", "components": ["node-red"]}'::jsonb) \\g /dev/null
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+--CHECKS
+SELECT 'CHECK|approved', status = 'approved' FROM iam_policy.version WHERE version = :d;
+SQL
+        # P28 — approving a skeleton version (apply.sh --propose-skeleton's, P21)
+        probe P28 "a diff digest other than the stored one" "22023:the diff you saw is not the one the host stored" <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db" "$DD2")
+SQL
+        probe P28 "the accepted skeleton's digest instead of the proposed one" "22023:another platform skeleton" <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db" "$DD" "$P_DG")
+SQL
+        probe P28 "a note without the attestation" "22023:needs the attestation" <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "iam-db: reviewed the diff")
+SQL
+        probe P28 "the attestation with nothing after it" "22023:needs the attestation" <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST   ")
+SQL
+        probe P28 "the attestation not at the start of the note" "22023:needs the attestation" <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "iam-db: $ATTEST")
+SQL
+        probe P28 "qa approves a skeleton version with both digests and the attestation" ok <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db: reviewed the diff")
+--CHECKS
+SELECT 'CHECK|approved by Q, both digests stored', status = 'approved' AND approved_by_person = '$PQ' AND diff_digest = '$DD'
+          AND approved_skeleton_digest = '$P_DG2' FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|the attested note stored whole', approval_note = $(sqlq "$ATTEST iam-db: reviewed the diff")
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|on the chain as the approved event''s reason', reason = $(sqlq "$ATTEST iam-db: reviewed the diff")
+          AND payload ->> 'skeleton_digest' = '$P_DG2' AND payload ->> 'diff_digest' = '$DD'
+  FROM iam_policy.history WHERE version = :d AND event = 'approved';
+SQL
+        probe P28 "the --by person approves the skeleton version" "42501:you are an author" <<SQL
+$(build_v1)
+$(SKEL_BY="$Q" SKEL_BY_PERSON="$PQ" propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db")
+SQL
+        # P29 — the approval's own inputs (a change version)
+        probe P29 "no diff digest" "22023:the approval names no diff digest" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT medcea.approve_policy(:d, 'iam-db note', :'ed', NULL, '$P_DG');
+SQL
+        probe P29 "a diff digest that is not hex" "22023:the approval names no diff digest" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT medcea.approve_policy(:d, 'iam-db note', :'ed', '$(printf 'Z%.0s' {1..64})', '$P_DG');
+SQL
+        probe P29 "a blank note" "22023:a note is required" <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT medcea.approve_policy(:d, '  ', :'ed', '$DD', '$P_DG');
+SQL
+        # P30 — return: a skeleton version ends withdrawn; a change goes back to its draft
+        probe P30 "qa returns a skeleton version: withdrawn, with the note" ok <<SQL
+$(build_v1)
+$(propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/return_policy)
+SELECT medcea.return_policy(:d, 'iam-db: propose it again') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|withdrawn, returned_at and return_note', status = 'withdrawn' AND returned_at IS NOT NULL
+          AND return_note = 'iam-db: propose it again' AND withdrawn_by = '$PQ' FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|returned event and evidence', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d AND event = 'returned')
+          AND EXISTS (SELECT 1 FROM iam_policy.approval_evidence WHERE version = :d AND event = 'returned');
+SQL
+        probe P30 "a returned change: saved again, submitted again, approved" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/return_policy)
+SELECT medcea.return_policy(:d, 'iam-db: please fix') \\g /dev/null
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"R": null}'::jsonb, 'iam-db probe',
+                             '{"ok": true, "errors": [], "checker_digest": "iam-db"}'::jsonb, $IAT) \\g /dev/null
+SELECT iam_policy.submit(:d, 'iam-db probe', $IAT) AS ed \\gset
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+--CHECKS
+SELECT 'CHECK|approved with the new digest', status = 'approved' AND entries_digest = :'ed' AND returned_at IS NOT NULL
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|returned, then submitted and approved', (SELECT array_agg(event ORDER BY event_id) FROM iam_policy.history
+          WHERE version = :d AND event IN ('returned', 'submitted', 'approved')) = '{submitted,returned,submitted,approved}';
+SQL
+        # P31 — withdrawing an approved version: by an admin, or by apply.sh --withdraw-open
+        probe P31 "an admin withdraws an approved change" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+$(as_iam "$A2" "p-pa2-$_h" test-pa2 admin)
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT) \\g /dev/null
+--CHECKS
+SELECT 'CHECK|withdrawn after approval', status = 'withdrawn' AND approved_at IS NOT NULL AND withdrawn_by = 'p-pa2-$_h'
+  FROM iam_policy.version WHERE version = :d;
+SELECT 'CHECK|status_changed approved>withdrawn', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :d
+          AND event = 'status_changed' AND payload ->> 'from' = 'approved' AND payload ->> 'to' = 'withdrawn');
+SQL
+        probe P31 "_withdraw_open withdraws an approved version (apply.sh --withdraw-open)" ok <<SQL
+$(build_v1)
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+$(as_system system:apply)
+SELECT iam_policy._withdraw_open('iam-db probe') AS w \\gset
+--CHECKS
+SELECT 'CHECK|returns it', :w = :d;
+SELECT 'CHECK|withdrawn by system:apply', status = 'withdrawn' AND withdrawn_by = 'system:apply' FROM iam_policy.version WHERE version = :d;
+SQL
+        # P35 — a skeleton version whose proposal a later accept made stale
+        probe P35 "approve after a deploy accepted another skeleton" "22023:was proposed against skeleton" <<SQL
+$(build_v1)
+$(propose_skel)
+$(as_system system:deploy)
+SELECT iam_policy._accept_skeleton('$P_DG3', \$j\$$P_SKEL3\$j\$::jsonb, 'iam-db', NULL, '{"narrowed": [], "unchanged": []}'::jsonb) \\g /dev/null
+$(clear_marker)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db")
+SQL
+        probe P35 "why_not for it: stale_skeleton" ok <<SQL
+$(build_v1)
+$(propose_skel)
+$(as_system system:deploy)
+SELECT iam_policy._accept_skeleton('$P_DG3', \$j\$$P_SKEL3\$j\$::jsonb, 'iam-db', NULL, '{"narrowed": [], "unchanged": []}'::jsonb) \\g /dev/null
+$(clear_marker)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|stale_skeleton', NOT :'wm'::boolean AND :'wc' = 'stale_skeleton';
+SQL
+        probe P35 "a proposal whose stored diff names another 'from'" "22023:was proposed against skeleton" <<SQL
+$(build_v1)
+$(SKEL_FROM="$P_DG3" propose_skel)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db")
+SQL
+        # P36 — a skeleton version that widens a role the approver holds (qa includes auditor)
+        probe P36 "a diff adding to auditor, approved by qa" "42501:widens role auditor, which you hold" <<SQL
+$(build_v1)
+$(propose_skel engineer auditor)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db")
+SQL
+        probe P36 "a diff adding to qa and auditor: the first in byte order" "42501:widens role auditor, which you hold" <<SQL
+$(build_v1)
+$(propose_skel qa auditor)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(skel_approve_sql "$ATTEST iam-db")
+SQL
+        probe P36 "why_not for it: own_widening" ok <<SQL
+$(build_v1)
+$(propose_skel qa)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|own_widening', NOT :'wm'::boolean AND :'wc' = 'own_widening';
+SQL
+        probe P36 "a diff adding only to engineer passes (P28's positive case); why_not: may approve" ok <<SQL
+$(build_v1)
+$(propose_skel engineer)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+SELECT may_approve AS wm, coalesce(why_not_code, '-') AS wc FROM iam_policy.why_not(:d) \\gset
+--CHECKS
+SELECT 'CHECK|may approve', :'wm'::boolean AND :'wc' = '-';
+SQL
+        # P37 — iam-api's lock: iam_svc takes the version lock, then save_entry re-enters it
+        probe P37 "iam_svc takes pg_advisory_xact_lock(hashtext('iam_policy.version')), then save_entry in the same transaction" ok <<SQL
+$(build_v1)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('iam_policy.version')) \\g /dev/null
+SELECT iam_policy.save_entry(:d, 'qa', 'portal', '{"R": null, "X": null}'::jsonb, 'iam-db probe',
+                             '{"ok": true, "errors": [], "checker_digest": "iam-db"}'::jsonb, $IAT) \\g /dev/null
+SELECT count(*) > 0 AS held FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid() \\gset
+--CHECKS
+SELECT 'CHECK|the lock held by this session', :'held'::boolean;
+SELECT 'CHECK|the cell saved', array_agg(level::text ORDER BY level) = '{R,X}'
+  FROM iam_policy.entry WHERE version = :d AND role = 'qa' AND group_code = 'portal';
+SQL
     else
-        note policy "P7-P10, P12, P20's applies (the token path) need --mode true"
+        note policy "P7-P10, P12, P20's applies, P27-P31's and P35-P37 (the token path) need --mode true"
         # P26 — pre_request's only_rpc block under IAM_DB_ROLES=false (L6)
         probe P26 "IAM_DB_ROLES=false, policy token: GET /recipe" "28000:may only call" <<SQL
 $(qa_token "$QA_CLAIMS" GET /recipe)
@@ -3471,7 +3938,7 @@ SQL
     fi
     fi
 elif want policy; then
-    note policy "P2-P26 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
+    note policy "P2-P37 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
 fi
 
 # ── drift ────────────────────────────────────────────────────────────────────────

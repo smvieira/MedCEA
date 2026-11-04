@@ -19,7 +19,7 @@ pg8000 and a cluster):
 
 Two lists say which differences are planned. REMOVED: served now, removed by a later
 plan task (empty since 2.6, kept for the next planned removal). NOT_BUILT: in the table
-before their code exists. An entry that no longer applies
+before their code exists (empty since 4.4, kept for the next planned route). An entry that no longer applies
 fails the diff, so neither list outlives its reason.
 """
 import ast
@@ -49,18 +49,7 @@ SOURCES = {
 
 REMOVED = {}
 
-# The Policy UI's write side and its Approval tab's diff (IAM 4.4). GET who-can,
-# service-identities and break-glass are not listed: their paths fit the served
-# GET /api/policy/<v>, which answers them 404 (not a version) until 4.4 serves them.
-NOT_BUILT = {
-    ("iam", "POST /api/policy/draft"): "4.4",
-    ("iam", "PUT /api/policy/<v>/entry"): "4.4",
-    ("iam", "POST /api/policy/<v>/submit"): "4.4",
-    ("iam", "POST /api/policy/<v>/withdraw"): "4.4",
-    ("iam", "POST /api/policy/<v>/approve"): "4.4",
-    ("iam", "POST /api/policy/<v>/return"): "4.4",
-    ("iam", "GET /api/policy/<v>/diff"): "4.4",
-}
+NOT_BUILT = {}
 
 _PH = re.compile(r"<(?:[^<>:]+:)?([^<>]+)>")
 

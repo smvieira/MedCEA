@@ -170,10 +170,19 @@ SELECT coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('even
 \\else
 SELECT '[]' AS reverted_unreviewed \\gset
 \\endif"
+        # open_versions (IAM 4.4, design §14.7.6): a skeleton version's proposed digest and the
+        # accepted digest its diff was computed on (diff_from: health's stale WARN), approved_at
+        # (the "waits for 4.5" WARN), and the reason and authors apply.sh --withdraw-open shows
         extra="|| pg_catalog.jsonb_build_object(
   'reverted_unreviewed', :'reverted_unreviewed'::jsonb,
   'open_versions', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('version', v.version, 'status', v.status,
-        'kind', v.kind, 'age_days', pg_catalog.floor(EXTRACT(EPOCH FROM pg_catalog.now() - v.created_at) / 86400)::int)
+        'kind', v.kind, 'age_days', pg_catalog.floor(EXTRACT(EPOCH FROM pg_catalog.now() - v.created_at) / 86400)::int,
+        'skeleton_digest', v.skeleton_digest, 'approved_at', v.approved_at, 'reason', v.reason,
+        'diff_from', (SELECT x.diff -> 'skeleton' ->> 'from' FROM iam_policy.version_diff x WHERE x.version = v.version),
+        'authors', coalesce((SELECT pg_catalog.jsonb_agg(DISTINCT h.actor_name) FROM iam_policy.history h
+                              WHERE h.version = v.version AND h.actor_name IS NOT NULL
+                                AND h.event IN ('draft_created', 'entry_saved', 'waiver_saved', 'waiver_dropped', 'submitted')), '[]'),
+        'claimed_by_person', CASE WHEN v.kind = 'skeleton' THEN v.created_by_person END)
         ORDER BY v.version) FROM iam_policy.version v WHERE v.status IN ('draft', 'submitted', 'approved')), '[]'),
   'unconfirmed', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('version', v.version, 'kind', v.kind,
         'status', v.status) ORDER BY v.version) FROM iam_policy.version v
