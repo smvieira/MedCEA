@@ -481,6 +481,7 @@ _SVC_DOMAINS=()
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"   # older config.env files lack it
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"             # likewise
 POLICY_DOMAIN="${POLICY_DOMAIN:-policy.$DOMAIN}"             # likewise (the Policy UI, IAM 4.3)
+SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"       # likewise (the portal's dashboard chooser)
 for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
           SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN \
           ONBOARD_DOMAIN ACCESS_DOMAIN POLICY_DOMAIN; do
@@ -1825,10 +1826,16 @@ KUBECTL="$MK8S kubectl" manual_publish "$NAMESPACE" --no-roll \
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
 _PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
-render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN POLICY_DOMAIN \
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN POLICY_DOMAIN SUPERSET_DOMAIN \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
   | $MK8S kubectl apply -n "$NAMESPACE" -f -
 rm -f "$_PORTAL_BG_TMP"
+# The page renders Superset's card greyed out (apps/superset/deploy.sh enables it); a
+# re-render must not grey out a Superset that is installed.
+if $MK8S kubectl get deployment superset -n "$NAMESPACE" >/dev/null 2>&1; then
+  source "$SCRIPT_DIR/infra/lib-portal.sh"
+  KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"
+fi
 
 # The HTML (and the nginx config) is mounted with subPath, and a subPath ConfigMap mount does NOT
 # update in a running pod — kubelet only refreshes whole-directory mounts. So an

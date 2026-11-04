@@ -30,6 +30,7 @@ data:
         .card { background: #1e2532; border: 1px solid #2a364e; border-radius: 12px; padding: 26px; text-decoration: none; color: inherit; display: flex; flex-direction: column; cursor: pointer; transition: border-color .25s, background .25s, box-shadow .25s, transform .2s; box-shadow: 0 4px 24px rgba(0,0,0,.4); }
         .card:hover { border-color: rgba(59,130,246,.5); background: #232d3d; box-shadow: 0 8px 32px rgba(30,60,120,.2); transform: translateY(-2px); }
         .card-dis { cursor: default; opacity: .5; pointer-events: none; }
+        .card-dis .cd::after { content: " Not installed yet."; color: #cbd5e1; }
         .ci { margin-bottom: 14px; }
         .ci svg { width: 38px; height: 38px; }
         .cl { font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #475569; margin-bottom: 7px; }
@@ -68,12 +69,12 @@ data:
               <p class="ph-sub">Connected Environments &amp; Analytics &mdash; Service Catalog</p>
             </div>
             <div class="grid">
-              <a class="card" href="https://${GRAFANA_DOMAIN}" target="_blank" rel="noopener">
+              <div class="card" onclick="show('dashboards')">
                 <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
-                <div class="cl">Grafana</div><div class="ct">MedCEA Dashboard</div>
-                <div class="cd">Visualize IoT sensor data, telemetry metrics, and analytics in real time.</div>
-                <div class="ck">https://${GRAFANA_DOMAIN} <span class="ck-a">&rarr;</span></div>
-              </a>
+                <div class="cl">Dashboards</div><div class="ct">MedCEA Dashboard</div>
+                <div class="cd">Live telemetry and run dashboards in Grafana, and data analysis in Superset. Choose a tool.</div>
+                <div class="ck">Open <span class="ck-a">&rarr;</span></div>
+              </div>
               <a class="card" href="https://${WORKBENCH_DOMAIN}" target="_blank" rel="noopener">
                 <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5a2.5 2.5 0 0 0-4.96-.46 2.5 2.5 0 0 0-1.98 3 2.5 2.5 0 0 0-1.32 4.24 3 3 0 0 0 .34 5.58 2.5 2.5 0 0 0 2.96 3.08 2.5 2.5 0 0 0 4.91.05L12 20V4.5Z"/><path d="M16 8V5c0-1.1.9-2 2-2"/><path d="M12 13h4"/><path d="M12 18h6a2 2 0 0 1 2 2v1"/><path d="M12 8h8"/><circle cx="20.5" cy="8" r=".5" fill="#c084fc"/><circle cx="16.5" cy="13" r=".5" fill="#c084fc"/><circle cx="20.5" cy="21" r=".5" fill="#c084fc"/><circle cx="18.5" cy="3" r=".5" fill="#c084fc"/></svg></div>
                 <div class="cl">JupyterHub</div><div class="ct">AI Workbench</div>
@@ -101,6 +102,42 @@ data:
                   <img src="https://gci.iscte-iul.pt/2022/identidade/files/brand_v2/escolas/rgb/ista/en/small/horizontal/main/rgb_ista_en_small_horizontal_main.svg" alt="ISCTE-IUL" onerror="this.outerHTML='<span style=color:#1e293b;font-weight:700;padding:0 8px>ISCTE-IUL</span>'">
                 </a>
               </div>
+            </div>
+          </div>
+        </div>
+        <!-- DASHBOARDS SUB-PORTAL: one card per dashboard tool. Superset's card is greyed out
+             (infra/lib-portal.sh's disabled form) until apps/superset/deploy.sh enables it. -->
+        <div id="v-dashboards" class="view">
+          <div class="page">
+            <div class="hdr-btns">
+              <button class="btn" onclick="show('portal')">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+                Back
+              </button>
+            </div>
+            <div class="ph">
+              <h1 class="ph-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:46px;height:46px"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                MedCEA Dashboard
+              </h1>
+              <p class="ph-sub">Dashboards and data analysis</p>
+            </div>
+            <div class="grid">
+              <a class="card" href="https://${GRAFANA_DOMAIN}" target="_blank" rel="noopener">
+                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg></div>
+                <div class="cl">Grafana</div><div class="ct">Live dashboards</div>
+                <div class="cd">IoT sensor data, telemetry and runs in real time, on the platform's prepared dashboards.</div>
+                <div class="ck">https://${GRAFANA_DOMAIN} <span class="ck-a">&rarr;</span></div>
+              </a>
+              <div class="card card-dis" data-href="https://${SUPERSET_DOMAIN}">
+                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg></div>
+                <div class="cl">Superset</div><div class="ct">Data analysis</div>
+                <div class="cd">Build your own charts and dashboards, and query telemetry, runs and master data.</div>
+                <div class="ck">https://${SUPERSET_DOMAIN} <span class="ck-a">&rarr;</span></div>
+              </div><!--/card-->
+            </div>
+            <div class="pfooter">
+              <p>MedCEA &mdash; Powered by Keycloak, JupyterHub &amp; MicroK8s</p>
             </div>
           </div>
         </div>

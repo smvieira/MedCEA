@@ -43,10 +43,15 @@
 <p>The portal is the start page. It lists the apps as cards; clicking a card opens that app in a new browser tab. Every platform role can open the portal. An account without a platform role gets the page <strong>No access yet</strong>, which explains that an administrator still has to approve the access request.</p>
 <p>The main page, <strong>MedCEA Platform</strong>, shows four cards:</p>
 <ul>
-<li><strong>Grafana</strong>: the MedCEA Dashboard.</li>
+<li><strong>Dashboards</strong>: the <strong>MedCEA Dashboard</strong> page, where you choose the dashboard tool (below).</li>
 <li><strong>JupyterHub</strong>: the AI Workbench.</li>
 <li><strong>Documentation</strong>: the <strong>Platform manual</strong>, this manual (see <a href="#apps-manual">below</a>).</li>
 <li><strong>Administration</strong>: opens the <strong>Platform Management</strong> page.</li>
+</ul>
+<p>The <strong>MedCEA Dashboard</strong> page (<strong>Back</strong> returns to the main page) holds one card per dashboard tool:</p>
+<ul>
+<li><strong>Grafana</strong> (Live dashboards): the platform's prepared dashboards of telemetry and runs.</li>
+<li><strong>Superset</strong> (Data analysis): your own charts and dashboards, and queries over telemetry, runs and master data. Until Superset is installed its card is greyed out with "Not installed yet". Superset's access is decided (decision record, 4 November 2026) but arrives only with IAM slice 4.5, through an approved skeleton version.</li>
 </ul>
 <p>Platform Management holds the cards for these apps:</p>
 <ul>
@@ -58,7 +63,7 @@
 <li>Operations (Run Monitor)</li>
 <li>User Manager</li>
 </ul>
-<p>The portal shows every card to every role. A card for an app your role may not open still opens it, and the app's gate answers with an error page. When an administrator uninstalls an app, its card stays on the page, greyed out and not clickable, and it comes back when the app is deployed again.</p>
+<p>The portal shows every card to every role. A card for an app your role may not open still opens it, and the app's gate answers with an error page. When an administrator uninstalls an app, its card stays on the page, greyed out, not clickable and marked "Not installed yet", and it comes back when the app is deployed again.</p>
 <ol class="steps">
 <li>Open <code>https://portal.&lt;domain&gt;</code> and sign in with your platform account.</li>
 <li>Click a card. For the apps under Platform Management, click <strong>Administration</strong> first.</li>

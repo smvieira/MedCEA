@@ -7,7 +7,10 @@ infra/lib-manual.sh builds from docs/manual/chapters at deploy time and stores g
 
   Render     k8s/portal/portal.yaml rendered with deploy-infra.sh's own render list: it
              parses, / still serves portal-html with its readiness probe, the landing page
-             has the "Platform manual" card, the nginx config and the manual are mounted
+             has the "Platform manual" card, the nginx config and the manual are mounted;
+             the MedCEA Dashboard card opens the dashboard chooser (Grafana, and Superset
+             greyed out until installed), which lib-portal's portal_card enables and
+             deploy-infra keeps enabled for an installed Superset
   Nginx      k8s/portal/nginx.conf routes /, /images/ and /manual/ (gzip_static always,
              gunzip, charset, no-cache) onto the mount's path; deploy-infra writes it and
              publishes the manual before the portal's manifest; apps/frontend no longer does
@@ -143,6 +146,52 @@ class Render(unittest.TestCase):
         self.assertNotIn("manual", read("apps/access/html/user-menu.js").lower())
         # lib-portal's card switch never matches it (its URLs are https://<host>)
         self.assertEqual(html.count('href="/manual/"'), 1)
+
+    def test_dashboard_chooser(self):
+        html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
+        main = html[html.index('id="v-portal"'):html.index('id="v-dashboards"')]
+        # the landing card opens the chooser instead of linking Grafana
+        self.assertIn("""<div class="card" onclick="show('dashboards')">""", main)
+        self.assertIn('<div class="ct">MedCEA Dashboard</div>', main)
+        self.assertNotIn("grafana_domain.example", main)
+        view = html[html.index('id="v-dashboards"'):html.index('id="v-management"')]
+        self.assertIn("onclick=\"show('portal')\"", view)
+        self.assertIn('<a class="card" href="https://grafana_domain.example" target="_blank" rel="noopener">', view)
+        # Superset: exactly the disabled form lib-portal's portal_card enable matches
+        self.assertRegex(view, r'(?s)<div class="card card-dis" data-href="https://superset_domain\.example">.*?</div><!--/card-->')
+        self.assertIn(".card-dis .cd::after", html)
+        self.assertNotIn("${", html)
+
+    def test_portal_card_enables_superset(self):
+        html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
+        with tempfile.TemporaryDirectory() as d:
+            src, out = os.path.join(d, "in.html"), os.path.join(d, "out.html")
+            open(src, "w").write(html)
+            fake = os.path.join(d, "kubectl")
+            open(fake, "w").write(f"""#!/bin/sh
+case "$*" in
+  "get cm portal-html"*) cat {src} ;;
+  "create configmap portal-html"*) cat > {out}.yaml ;;
+  "apply -f -") cat > /dev/null ;;
+  "rollout restart"*) : ;;
+  *) echo "fake kubectl: $*" >&2; exit 98 ;;
+esac
+""")
+            os.chmod(fake, 0o755)
+            subprocess.run(["bash", "-c", 'source infra/lib-portal.sh; portal_card enable "https://superset_domain.example"'],
+                           cwd=REPO, env=dict(os.environ, KUBECTL=fake, NAMESPACE="medcea"), check=True)
+            # the fake records what create configmap read from stdin (--from-file=index.html=/dev/stdin)
+            enabled = open(out + ".yaml").read()
+        self.assertIn('<a class="card" href="https://superset_domain.example" target="_blank" rel="noopener">', enabled)
+        self.assertNotIn('data-href="https://superset_domain.example"', enabled)
+
+    def test_deploy_infra_keeps_an_installed_superset_enabled(self):
+        src = read("deploy-infra.sh")
+        sec = src[src.index('render "$SCRIPT_DIR/k8s/portal/portal.yaml"'):src.index("rollout restart deployment/portal")]
+        self.assertIn('kubectl get deployment superset -n "$NAMESPACE"', sec)
+        self.assertIn('portal_card enable "https://${SUPERSET_DOMAIN}"', sec)
+        self.assertIn('SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"', src)
+        self.assertIn('SUPERSET_DOMAIN="superset.$DOMAIN"', read("config.env.example"))
 
     def test_mounts(self):
         spec = self.docs[("Deployment", "portal")]["spec"]["template"]["spec"]
