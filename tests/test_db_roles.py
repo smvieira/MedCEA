@@ -157,8 +157,10 @@ CLIENTS = [  # deploy script, template, the role db_client is asked for
     ("apps/scheduler/deploy.sh", "apps/scheduler/k8s/scheduler.yaml", "svc_scheduler"),
     ("apps/monitor/deploy.sh", "apps/monitor/k8s/monitor.yaml", "svc_monitor"),
     ("apps/frontend/deploy.sh", "apps/frontend/k8s/dbmgmt.yaml", "svc_dbexport"),
-    ("deploy-infra.sh", "k8s/grafana/datasource-secret.yaml", "svc_grafana"),
-    ("deploy-infra.sh", "k8s/pgadmin/pgadmin.yaml", "rr_admin_login"),
+    # deploy-infra's Grafana and pgAdmin sections, moved word for word into
+    # lib-policy-artefacts.sh by IAM 4.2b (pa_grafana, pa_pgadmin; Wiring checks deploy-infra calls them)
+    ("infra/lib-policy-artefacts.sh", "k8s/grafana/datasource-secret.yaml", "svc_grafana"),
+    ("infra/lib-policy-artefacts.sh", "k8s/pgadmin/pgadmin.yaml", "rr_admin_login"),
     ("apps/iam/deploy.sh", "apps/iam/k8s/iam.yaml", "iam_svc"),   # IAM 3.5: refuses a postgres fallback
 ]
 
@@ -170,6 +172,13 @@ class Wiring(unittest.TestCase):
                 sh = read(script)
                 self.assertRegex(sh, r'db_client "\$NAMESPACE" %s\b' % role)
                 self.assertIn("infra/lib-db-roles.sh", sh)
+
+    def test_deploy_infra_runs_the_moved_sections(self):
+        infra = read("deploy-infra.sh")
+        self.assertIn('source "$SCRIPT_DIR/infra/lib-policy-artefacts.sh"', infra)
+        for fn in ("pa_grafana", "pa_pgadmin"):
+            with self.subTest(fn=fn):
+                self.assertRegex(infra, r"(?m)^%s full$" % fn)
 
     def test_templates_rendered_with_every_variable(self):
         # an unlisted ${VAR} is left as literal text by render (CLAUDE.md, lib-render.sh)
@@ -195,7 +204,7 @@ class Wiring(unittest.TestCase):
 
     def test_restarts_on_a_new_login(self):
         self.assertIn('medcea/db-user: "${PGA_DB_USER}"', read("k8s/pgadmin/pgadmin.yaml"))
-        infra = read("deploy-infra.sh")
+        infra = read("infra/lib-policy-artefacts.sh")
         self.assertIn('"$_GF_PREV_USER" != "$DS_USER"', infra)
         self.assertLess(infra.index("_GF_PREV_USER=\"$(db_clients_live"), infra.index("db_client \"$NAMESPACE\" svc_grafana"))
 
