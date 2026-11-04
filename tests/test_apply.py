@@ -1286,7 +1286,8 @@ class Wiring(unittest.TestCase):
         self.assertLess(s.index('"$SCRIPT_DIR/apply.sh" --bootstrap'), s.index("# iam-api (IAM 3.5)"))
         self.assertLess(s.index("policy_source_init \"$NAMESPACE\" || exit $?"), s.index("Policy versions..."))
         self.assertIn('MEDCEA_POLICY_BOOTSTRAP_BY:-$ADMIN_USER', s)
-        self.assertEqual(s.count("policy_source_finish \"$NAMESPACE\" iam"), 2)
+        # skip_api, --gate-only (IAM 4.3) and the success path
+        self.assertEqual(s.count("policy_source_finish \"$NAMESPACE\" iam"), 3)
 
     def test_deploy_infra_records_or_queues_seed_facts(self):
         s = self.read("deploy-infra.sh")

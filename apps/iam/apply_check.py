@@ -697,8 +697,10 @@ def _gate_against(acc_body, git, rows):
         return {"verdict": "error", "error": f"{type(e).__name__}: {e}"}
 
 
-def health(state, host_file, holders="", policy_port="absent", today=None):
-    """[(STATUS, detail)] for iampolicy."""
+def health(state, host_file, holders="", policy_port="absent", today=None, live=None):
+    """[(STATUS, detail)] for iampolicy. live: iam-api's /healthz on :8083 (IAM 4.3) when
+    policy_port is "true": its applied_version must be the database's (FAIL), its
+    skeleton_digest the accepted one (WARN: the pod ships another skeleton)."""
     today = today or datetime.date.today()
     st = state.get("state") if isinstance(state, dict) else None
     if st == "none" or st is None:
@@ -787,6 +789,13 @@ def health(state, host_file, holders="", policy_port="absent", today=None):
                                     f"{e.get('version')}, the applied one is {v}"))
             break
     unconfirmed = [u for u in state.get("unconfirmed") or [] if u.get("version") == v]
+    if policy_port == "true" and isinstance(live, dict):
+        if live.get("applied_version") != v:
+            out.append(("FAIL", f"the Policy UI (iam-api :8083) reports applied version {live.get('applied_version')}, "
+                                f"the database {v} (kubectl -n medcea logs deployment/iam-api)"))
+        if live.get("skeleton_digest") != acc.get("digest"):
+            out.append(("WARN", f"the Policy UI ships skeleton {str(live.get('skeleton_digest'))[:12]}, the accepted one "
+                                f"is {str(acc.get('digest'))[:12]} (./apps/iam/deploy.sh)"))
     if unconfirmed and policy_port == "true":
         out.append(("WARN", f"version {v} ({state.get('kind')}) is not confirmed by qa yet (the Policy UI)"))
     for o in state.get("open_versions") or []:
@@ -953,6 +962,7 @@ def main(argv=None):
     c.add_argument("--host-file", default=None)
     c.add_argument("--holders", default="")
     c.add_argument("--policy-port", choices=["true", "false", "absent"], default="absent")
+    c.add_argument("--live", help="iam-api's /healthz JSON on :8083 (IAM 4.3)")
     c = sub.add_parser("status")
     c.add_argument("--state", required=True)
     c.add_argument("--gate")
@@ -1025,7 +1035,14 @@ def main(argv=None):
         if a.cmd == "bootstrap-targets":
             return bootstrap_targets(a.out, a.source == "host", a.commit, a.state)
         if a.cmd == "health":
-            for level, detail in health(load_json(a.state), a.host_file or source.HOST_FILE, a.holders, a.policy_port):
+            live = None
+            if a.live:
+                try:
+                    live = json.loads(a.live)
+                except ValueError:
+                    live = None
+            for level, detail in health(load_json(a.state), a.host_file or source.HOST_FILE, a.holders, a.policy_port,
+                                        live=live):
                 print(f"{level}|{detail}")
             return 0
         if a.cmd == "status":

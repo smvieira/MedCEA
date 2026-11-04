@@ -49,6 +49,9 @@ NODE_RED_DOMAIN="node-red.medcea"
 GRAFANA_DOMAIN="grafana.medcea"
 PGADMIN_DOMAIN="pgadmin.medcea"
 ACCESS_DOMAIN="access.medcea"
+POLICY_DOMAIN="policy.medcea"
+POLICY_CLIENT_SECRET="polsecret"
+POLICY_COOKIE_SECRET="polcookie0123456789abcdef0123456"
 SCHEDULER_DOMAIN="scheduler.medcea"
 MONITOR_DOMAIN="monitor.medcea"
 MQTTX_DOMAIN="mqtt-explorer.medcea"
@@ -344,6 +347,7 @@ app_gate full scheduler-oauth2-proxy scheduler "$SCHEDULER_CLIENT_SECRET" "$SCHE
 app_gate full monitor-oauth2-proxy monitor "$MONITOR_CLIENT_SECRET" "$MONITOR_COOKIE_SECRET" MONITOR_DOMAIN "$MONITOR_DOMAIN" k8s/oauth2-proxy/values-app.yaml monitor
 app_gate full mqttx-oauth2-proxy mqtt-explorer "$MQTTX_CLIENT_SECRET" "$MQTTX_COOKIE_SECRET" MQTTX_DOMAIN "$MQTTX_DOMAIN" apps/mqtt-explorer/k8s/oauth2-proxy-values.yaml
 app_gate full access-oauth2-proxy access "$ACCESS_CLIENT_SECRET" "$ACCESS_COOKIE_SECRET" ACCESS_DOMAIN "$ACCESS_DOMAIN" apps/access/k8s/oauth2-proxy-values.yaml
+app_gate full iam-oauth2-proxy policy "$POLICY_CLIENT_SECRET" "$POLICY_COOKIE_SECRET" POLICY_DOMAIN "$POLICY_DOMAIN" k8s/oauth2-proxy/values-app.yaml iam-admin
 """
 SCOPED = [
     ("./deploy-infra.sh --policy-only", "deploy-infra"),
@@ -384,7 +388,7 @@ class Scoped(unittest.TestCase):
                 r, calls = self.run_scoped(cmd)
                 self.assertEqual(writes(calls), [], r.stdout[-2000:])
                 self.assertNotIn("re-rendered", r.stdout)
-                self.assertTrue("unchanged" in r.stdout or "no gate before slice 4.3" in r.stdout, r.stdout[-1500:])
+                self.assertIn("unchanged", r.stdout, r.stdout[-1500:])
                 self.assertFalse(any(c["cmd"] == "kubectl" and c["argv"][:1] == ["port-forward"] for c in calls),
                                  "a scoped mode asked Keycloak with nothing drifted")
 

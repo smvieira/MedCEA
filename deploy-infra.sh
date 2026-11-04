@@ -270,7 +270,7 @@ if [[ "${1:-}" == "--reset" ]]; then
         for _v in OAUTH2_PROXY_SECRET GRAFANA_OAUTH_SECRET OAUTH2_COOKIE_SECRET \
                   PORTAL_OAUTH2_PROXY_SECRET PORTAL_COOKIE_SECRET \
                   CONFIG_OAUTH2_PROXY_SECRET CONFIG_COOKIE_SECRET \
-                  ACCESS_CLIENT_SECRET ACCESS_COOKIE_SECRET \
+                  ACCESS_CLIENT_SECRET ACCESS_COOKIE_SECRET POLICY_CLIENT_SECRET POLICY_COOKIE_SECRET \
                   MONITOR_CLIENT_SECRET MONITOR_COOKIE_SECRET SCHEDULER_CLIENT_SECRET SCHEDULER_COOKIE_SECRET \
                   DBMGMT_CLIENT_SECRET DBMGMT_COOKIE_SECRET MQTTX_CLIENT_SECRET MQTTX_COOKIE_SECRET \
                   PGADMIN_OAUTH_SECRET MQTT_NODE_RED_PASS MQTT_SCHEDULER_PASS MQTT_AUTH_DB_PASS \
@@ -480,9 +480,10 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$CA_DIR/server.key"
 _SVC_DOMAINS=()
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"   # older config.env files lack it
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"             # likewise
+POLICY_DOMAIN="${POLICY_DOMAIN:-policy.$DOMAIN}"             # likewise (the Policy UI, IAM 4.3)
 for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
           SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN \
-          ONBOARD_DOMAIN ACCESS_DOMAIN; do
+          ONBOARD_DOMAIN ACCESS_DOMAIN POLICY_DOMAIN; do
     [[ -n "${!_v:-}" ]] && _SVC_DOMAINS+=("${!_v}")
 done
 _ALIAS_ON=false
@@ -953,6 +954,13 @@ echo -e "${YELLOW}  Creating client 'access'...${NC}"
 # so setting it once here survives later runs.
 _ACCESS_SECRET=$(_create_client "access" "https://${ACCESS_DOMAIN}/oauth2/callback" true "" "$_HUB_LOGOUT_URI")
 _ACCESS_COOKIE_SECRET="${ACCESS_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+# The Policy UI (IAM 4.3): its sign-in proxy iam-oauth2-proxy (apps/iam/deploy.sh). Its
+# tokens are also what config-api checks for a qa person's confirmation (token_client
+# policy of network.clients.iam-approvals), so it carries groups, person_id and the
+# medcea-api audience (the scope loop below).
+echo -e "${YELLOW}  Creating client 'policy'...${NC}"
+_POLICY_SECRET=$(_create_client "policy" "https://${POLICY_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
+_POLICY_COOKIE_SECRET="${POLICY_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 _ACCESS_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=access" \
   -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
 if [[ -n "$_ACCESS_UUID" ]]; then
@@ -1429,7 +1437,7 @@ if [[ -n "$_GS_ID" ]]; then
     # Every client of the access policy's hosts (apps/iam/policy/defaults.yaml);
     # a client asking for "groups" without having the scope gets invalid_scope.
     # workbench-notebook has no host: it is network.clients.notebooks' token_client.
-    for _c in portal access config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana workbench-notebook; do
+    for _c in portal access policy config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana workbench-notebook; do
         _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
           -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
         [[ -n "$_C_UUID" ]] || continue
@@ -1572,6 +1580,7 @@ sed -i "s|^PORTAL_OAUTH2_PROXY_SECRET=.*|PORTAL_OAUTH2_PROXY_SECRET=\"${_PORTAL_
 sed -i "s|^PORTAL_COOKIE_SECRET=.*|PORTAL_COOKIE_SECRET=\"${_PORTAL_COOKIE_SECRET}\"|" config.env
 for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=${_CONFIG_COOKIE_SECRET}" \
            "ACCESS_CLIENT_SECRET=${_ACCESS_SECRET}" "ACCESS_COOKIE_SECRET=${_ACCESS_COOKIE_SECRET}" \
+           "POLICY_CLIENT_SECRET=${_POLICY_SECRET}" "POLICY_COOKIE_SECRET=${_POLICY_COOKIE_SECRET}" "POLICY_DOMAIN=${POLICY_DOMAIN}" \
            "MONITOR_CLIENT_SECRET=${_MONITOR_SECRET}" "MONITOR_COOKIE_SECRET=${_MONITOR_COOKIE_SECRET}" \
            "SCHEDULER_CLIENT_SECRET=${_SCHEDULER_SECRET}" "SCHEDULER_COOKIE_SECRET=${_SCHEDULER_COOKIE_SECRET}" \
            "DBMGMT_CLIENT_SECRET=${_DBMGMT_SECRET}" "DBMGMT_COOKIE_SECRET=${_DBMGMT_COOKIE_SECRET}" \
@@ -1816,7 +1825,7 @@ KUBECTL="$MK8S kubectl" manual_publish "$NAMESPACE" --no-roll \
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
 _PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
-render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN \
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN POLICY_DOMAIN \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
   | $MK8S kubectl apply -n "$NAMESPACE" -f -
 rm -f "$_PORTAL_BG_TMP"

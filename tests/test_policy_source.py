@@ -85,6 +85,7 @@ PRE_40 = "6b73e72"
 PRE_41 = "bdc7d48"
 # The last commit before slice 4.2a (slice 4.1 built and deployed): Phase42aDelta's reference.
 PRE_42A = "08fab15"
+PRE_43 = "e18b4ee"   # slice 4.2b deployed: 4.3 changes no compiled artefact and no skeleton
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -105,6 +106,13 @@ def archive_cli(commit, prefix):
         shutil.rmtree(old, ignore_errors=True)
         return None, r.stderr.strip()
     return old, os.path.join(old, "apps", "iam", "compiler", "cli.py")
+
+
+def as_of_43(key, out):
+    """An older commit's output with IAM 4.3's one listing change applied: `cli.py hosts`
+    marks POLICY_DOMAIN [compiled] since its proxy exists (proxies.ENFORCEMENT is code, not
+    skeleton; Phase43Delta pins that it is the only line that moved)."""
+    return out.replace("[not deployed (Phase 4)]", "[compiled]") if key == "hosts" else out
 
 
 def run_cli(args, cli=CLI, **env):
@@ -269,7 +277,7 @@ class SourceIdentity(unittest.TestCase):
                 if key == "check":
                     first, got = got.split("\n", 1)
                     self.assertEqual(first, "source: defaults.yaml (no applied version on this host)")
-                self.assertEqual(got, want, key)
+                self.assertEqual(got, as_of_43(key, want), key)
                 self.assertEqual(err, err_old, key)
         finally:
             shutil.rmtree(old, ignore_errors=True)
@@ -1926,7 +1934,7 @@ class Phase41Delta(unittest.TestCase):
         for key, want in self.want.items():
             if moved_in_41(key):
                 continue
-            self.assertEqual(self.old_out(key), want, key)
+            self.assertEqual(as_of_43(key, self.old_out(key)), want, key)
 
     def test_routes_delta(self):
         old, new = json.loads(self.old_out("routes")), json.loads(self.want["routes"])
@@ -1981,7 +1989,54 @@ class Phase41Delta(unittest.TestCase):
         """mqtt.json, the tool settings and every proxy gate: no restart, no credential retired."""
         for key in ["mqtt", "grafana", "node-red", "edge-wizard", "pgadmin", "hosts"] + \
                    [k for k in self.want if k.startswith(("proxy-", "describe-gate-", "jupyterhub-", "egress-notebooks"))]:
-            self.assertEqual(self.old_out(key), self.want[key], key)
+            self.assertEqual(as_of_43(key, self.old_out(key)), self.want[key], key)
+
+
+class Phase43Delta(unittest.TestCase):
+    """Slice 4.3 (the Policy UI) compiles every artefact byte for byte as PRE_43 and leaves
+    the skeleton as it was (design §14.6.0: no slice before 4.5 may widen it). Only the
+    hosts listing moves: POLICY_DOMAIN's status (proxies.ENFORCEMENT, code, not skeleton)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_43, "medcea-pre43-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_43}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        for key, want in self.want.items():
+            if key == "hosts":
+                continue          # its POLICY_DOMAIN line: test_only_the_policy_hosts_status_moves
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_43}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_skeleton_and_matrix_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_data = yaml.safe_load(f)
+        self.assertEqual(source.skeleton_digest(old_data), source.skeleton_digest(self.p.data))
+        self.assertEqual(old_data["matrix"], self.p.data["matrix"])
+        self.assertEqual(old_data["waivers"], self.p.data["waivers"])
+
+    def test_only_the_policy_hosts_status_moves(self):
+        rc, old, err = run_cli(["--defaults", "hosts"], cli=self.old_cli)
+        self.assertEqual(rc, 0, err)
+        rc, new, err = run_cli(["--defaults", "hosts"])
+        self.assertEqual(rc, 0, err)
+        changed = [(a, b) for a, b in zip(old.splitlines(), new.splitlines()) if a != b]
+        self.assertEqual(len(changed), 1, changed)
+        self.assertIn("POLICY_DOMAIN", changed[0][1])
+        self.assertIn("[compiled]", changed[0][1])
 
 
 class Phase42aDelta(unittest.TestCase):
@@ -2016,7 +2071,7 @@ class Phase42aDelta(unittest.TestCase):
         for key, want in self.want.items():
             if key == "routes" or (key.startswith("grants-") and not key.startswith("grants-json")):
                 continue
-            self.assertEqual(self.old_out(key), want, key)
+            self.assertEqual(as_of_43(key, self.old_out(key)), want, key)
         # check: the same text; the skeleton digest moves (defaults.yaml's one 4.2a edit,
         # iam_policy._system_as(text[]) in infrastructure_functions), which check does not print
         rc, out, err = run_cli(["--defaults", "check"])

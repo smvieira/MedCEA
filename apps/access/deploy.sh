@@ -367,6 +367,7 @@ log "Deploying access service..."
 HOST_CLIENTS="${PORTAL_DOMAIN}=portal,${CONFIG_DOMAIN:-config.$DOMAIN}=config,${ACCESS_DOMAIN}=access"
 HOST_CLIENTS+=",${MONITOR_DOMAIN:-monitor.$DOMAIN}=monitor,${SCHEDULER_DOMAIN:-scheduler.$DOMAIN}=scheduler"
 HOST_CLIENTS+=",${DBMGMT_DOMAIN:-dbmgmt.$DOMAIN}=dbmgmt,${MQTTX_DOMAIN:-mqtt-explorer.$DOMAIN}=mqtt-explorer"
+HOST_CLIENTS+=",${POLICY_DOMAIN:-policy.$DOMAIN}=policy"   # the Policy UI (IAM 4.3)
 # Sign out (1 Nov 2026, order from its review): the user menu's Sign out clears the host's
 # own proxy cookie and ends the Keycloak session first; with the AI workbench deployed,
 # Keycloak then returns to the workbench's own logout, which ends the hub session and goes
@@ -382,7 +383,8 @@ else
     SIGNOUT_HUB="https://${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}/hub/logout"
     log "Sign out: this host, then Keycloak, then the AI workbench's logout ($SIGNOUT_HUB), then the portal"
 fi
-render "$SCRIPT_DIR/k8s/access.yaml" NAMESPACE POSTGRES_DB KEYCLOAK_REALM KEYCLOAK_DOMAIN ACCESS_DOMAIN PORTAL_DOMAIN HOST_CLIENTS SIGNOUT_HUB IAM_ENFORCE \
+POLICY_DOMAIN="${POLICY_DOMAIN:-policy.$DOMAIN}"
+render "$SCRIPT_DIR/k8s/access.yaml" NAMESPACE POSTGRES_DB KEYCLOAK_REALM KEYCLOAK_DOMAIN ACCESS_DOMAIN PORTAL_DOMAIN POLICY_DOMAIN HOST_CLIENTS SIGNOUT_HUB IAM_ENFORCE \
   | $KUBECTL apply -f -
 $KUBECTL rollout restart deployment/access -n "$NAMESPACE"
 log "Waiting for the access rollout..."

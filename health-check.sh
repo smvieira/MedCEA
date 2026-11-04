@@ -514,8 +514,10 @@ check_iamgrants() {
 # accept recomputed, the apply events, break-glass, audit_versions(), the chain, waivers,
 # the seed queue. "An apply is running" = a holder of .medcea.lock (_lock_holders) whose
 # command line is apps/iam/apply.sh: health never runs flock. The worst line wins; the
-# detail lists every WARN and FAIL, 160 characters each. --policy-port absent until iam-api
-# reports a policy port (IAM 4.3): a bootstrap version is then OK while unconfirmed.
+# detail lists every WARN and FAIL, 160 characters each. --policy-port: what iam-api's
+# /healthz on :8083 answers (IAM 4.3; read in the pod, no secret in it): absent without the
+# port (a bootstrap version is then OK while unconfirmed), true once the Policy UI runs —
+# then an unconfirmed bootstrap WARNs, another applied version FAILs, another skeleton WARNs.
 # =============================================================================
 check_iampolicy() {
     local name="$1" out rc=0 lvl msg worst="" ok="" skip="" details=() holders tmo
@@ -534,8 +536,16 @@ check_iampolicy() {
         holders="$(_lock_holders 2>/dev/null | paste -sd ' ')"
     fi
     tmo=$(( TIMEOUT > 30 ? TIMEOUT : 30 ))
+    local live="" port=absent
+    live="$(timeout "$TIMEOUT" $KUBECTL exec -n "${NAMESPACE:-medcea}" deployment/iam-api -c iam-api -- python3 -c \
+        'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8083/healthz", timeout=5).read().decode())' 2>/dev/null)" || live=""
+    if python3 -c 'import json, sys; sys.exit(0 if json.loads(sys.argv[1]).get("policy_port") is True else 1)' "$live" 2>/dev/null; then
+        port=true
+    else
+        live=""
+    fi
     out="$(timeout "$tmo" python3 "$SCRIPT_DIR/apps/iam/apply_check.py" health --state "$POLICY_SOURCE_STATE_FILE" \
-        --host-file "$SCRIPT_DIR/state/policy-applied.yaml" --holders "$holders" --policy-port absent 2>&1)" || rc=$?
+        --host-file "$SCRIPT_DIR/state/policy-applied.yaml" --holders "$holders" --policy-port "$port" --live "$live" 2>&1)" || rc=$?
     while IFS='|' read -r lvl msg; do
         case "$lvl" in
             FAIL) worst=FAIL; details+=("${msg:0:160}") ;;
@@ -633,7 +643,7 @@ for h, r in (model.load().data.get("network", {}).get("proxies") or {}).items():
         [[ -n "$host" ]] || continue
         if [[ -z "${LIVE[$rel]+x}" ]]; then absent=$((absent + 1)); continue; fi
         gates=$((gates + 1))
-        if [[ "$host" == ACCESS_DOMAIN && "${IAM_GATES:-true}" == false ]]; then
+        if [[ ( "$host" == ACCESS_DOMAIN || "$host" == POLICY_DOMAIN ) && "${IAM_GATES:-true}" == false ]]; then
             want="admin"
         else
             want="$(policy_groups "$host" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' | sort -u | paste -sd ' ')"
@@ -645,6 +655,8 @@ for h, r in (model.load().data.get("network", {}).get("proxies") or {}).items():
             :
         elif [[ "$host" == ACCESS_DOMAIN && "$live" == admin ]]; then
             warns+=("the User Manager's gate is admin-only: not every access pod proved it enforces (./apps/access/deploy.sh)")
+        elif [[ "$host" == POLICY_DOMAIN && "$live" == admin ]]; then
+            warns+=("the Policy UI's gate is admin-only: not every iam-api pod proved it enforces (./apps/iam/deploy.sh)")
         elif [[ "$live" == "-" ]]; then
             probs+=("gate $host ($rel) has no allowed_groups: anyone signed in gets in (${OWNER[$host]:-./deploy-infra.sh})")
         else

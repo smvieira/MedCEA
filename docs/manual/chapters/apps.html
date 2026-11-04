@@ -14,6 +14,7 @@
 <tr><td>Run Monitor</td><td><code>monitor.&lt;domain&gt;</code></td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> for telemetry only (no runs)</td></tr>
 <tr><td>Database Management</td><td><code>dbmgmt.&lt;domain&gt;</code></td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
 <tr><td>User Manager</td><td><code>access.&lt;domain&gt;</code></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
+<tr><td>Access Policy (the Policy UI)</td><td><code>policy.&lt;domain&gt;</code></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td></tr>
 <tr><td>MQTT Explorer</td><td><code>mqtt-explorer.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
 <tr><td>Node-RED</td><td><code>node-red.&lt;domain&gt;</code></td><td><span class="role">engineer</span></td></tr>
 <tr><td>Grafana</td><td><code>grafana.&lt;domain&gt;</code></td><td><span class="role">engineer</span> (Editor); <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span> (Viewer). Checked by Grafana's own sign-in setting</td></tr>
@@ -29,7 +30,7 @@
 <li>While it is <code>false</code> (report-only), the request goes through and the service writes a "would refuse", "would limit" or "would withhold" line to its log.</li>
 <li>While it is <code>true</code>, the request is refused: 401 when the app cannot tell who you are, 403 when your role does not hold the right, and 503 when the service cannot load the policy.</li>
 </ul>
-<p>Database Management and the User Manager always enforce, whatever the switch says. The changes you save in the Configuration UI go straight to the database, which adds its own checks once <code>IAM_DB_ROLES</code> is <code>true</code>. Each app section notes where the two modes differ. The switches themselves are explained in the <a href="#admin">administration chapter</a>.</p>
+<p>Database Management, the User Manager and the Access Policy always enforce, whatever the switch says. The changes you save in the Configuration UI go straight to the database, which adds its own checks once <code>IAM_DB_ROLES</code> is <code>true</code>. Each app section notes where the two modes differ. The switches themselves are explained in the <a href="#admin">administration chapter</a>.</p>
 
 <h4>The user menu</h4>
 <p>Every signed-in app except Grafana, the AI Workbench, Node-RED and pgAdmin shows your name at the top right. It opens a menu with two entries:</p>
@@ -454,6 +455,24 @@ The snapshot never changes afterwards.</li>
 <li>Read the review, including <strong>Unexplained at the time of the review</strong>.</li>
 <li>Optionally write a note and click <strong>Sign off</strong>. Signing off cannot be undone, and it accepts any unexplained roles listed.</li>
 </ol>
+
+<h3 id="apps-policy">Access Policy</h3>
+<p>The Access Policy shows who may do what on the platform: the access policy that is applied now, its earlier versions, and its history. Open it from the portal's <strong>Access Policy</strong> card or from the User Manager's <strong>Access Policy</strong> link. Since slice 4.3 (November 2026) it is read-only, except for one action: a <span class="role">qa</span> person confirms (or disputes) a version that was applied without approval beforehand. Changing the policy in the browser comes with slice 4.4.</p>
+<p>It always enforces its own rules: your account needs a <code>person_id</code> and exactly one platform role, and if your account changed since you signed in (a role, a deactivation, a decision), every request answers "your access changed since you signed in: reload the page".</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Tab</th><th>Who sees it</th><th>What it shows</th></tr></thead>
+<tbody>
+<tr><td>Matrix</td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">auditor</span></td><td>One row per resource group, one column per role; a cell lists the levels the role holds (a dashed letter is limited by a constraint). Every role, group and level name shows its explanation when you point at it. Red: the policy's checker refuses the cell; amber: a recorded waiver allows it; "not granted": no role holds anything on the group in this version. Click a cell for what it gives: the database objects, the routes, the sign-ins, the MQTT topics that only this cell gives the role, the group's members, the constraint's meaning and any waiver. A version selector shows earlier versions.</td></tr>
+<tr><td>History</td><td><span class="role">qa</span>, <span class="role">qp</span>, <span class="role">auditor</span></td><td>Every event of the policy's record, newest first (at most 500; choose a version to narrow it): who, when, the reason and the details. Above it, whether the record is intact (the hash chain: green "Record intact", red with the first broken event, grey "cannot verify"), and what the version audit finds.</td></tr>
+<tr><td>Confirm</td><td><span class="role">qa</span></td><td>The bootstrap and rollback versions waiting for confirmation, with when they were applied and the person who ran <code>apply.sh</code>.</td></tr>
+</tbody></table></div>
+<h4>Confirming a version</h4>
+<p>A bootstrap or rollback version is applied at once by the person who runs <code>apply.sh</code>. A <span class="role">qa</span> person then confirms that it is what was intended, or disputes it:</p>
+<ol class="steps">
+<li>Read the version in the <strong>Matrix</strong> tab and its events in the <strong>History</strong> tab.</li>
+<li>In the <strong>Confirm</strong> tab, tick "I did not run apply.sh for this version.", write a note, and press <strong>Confirm</strong>. To dispute it instead, write a note and press <strong>Dispute…</strong>: a dispute is permanent, the version stays disputed until a later version supersedes it, and the health check reports it as a failure.</li>
+</ol>
+<p>The confirmation goes to the database with your own sign-in token, and the database checks it: it refuses a person who ran <code>apply.sh</code> for that version ("You applied version N yourself"), a missing note or statement, a version already confirmed or disputed, and a request that did not come through the Policy UI's sign-in. A confirmation is an attributable record (your account, your person, the time, your note), not an electronic signature. It needs <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> to be <code>true</code>; otherwise the page says confirming is not possible yet.</p>
 
 <h3 id="apps-mqtt">MQTT Explorer</h3>
 <p>MQTT Explorer is a browser tool that shows the messages the boards and the platform exchange on the message broker. Only <span class="role">engineer</span> can open it. It is meant for commissioning and fault finding.</p>

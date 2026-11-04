@@ -1510,6 +1510,26 @@ a_policy_resume() {
            "Your [y/N] here is apply.sh's confirmation (MEDCEA_CONFIRMED=1).")
     plan_run
 }
+# IAM 4.3 (design §14.6): the Policy UI — its Keycloak client and certificate, the User
+# Manager's link and Sign out, then iam-api's :8083 and its proof-gated proxy.
+a_policy_43_deploy() {
+    CMD=(./deploy-infra.sh "&&" ./apps/access/deploy.sh "&&" ./apps/iam/deploy.sh)
+    EFFECT="Keycloak client policy, POLICY_DOMAIN in the certificate and DNS, the portal card; the User Manager's Policy link and Sign out; iam-api's second port :8083 (the Policy UI), ConfigMap iam-compiler and the sign-in proxy iam-oauth2-proxy"
+    LOCK="yes, held by the guide for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: deploy-infra first (the client and the certificate), then the access deploy (the Policy link, Sign out on the new host), then the iam deploy."
+           "Nobody's access changes and nothing is written to the policy: the Policy UI reads; only a qa person's confirmation of version 1 writes, later (exercise E16)."
+           "The proxy admits admin only until every iam-api pod proves it enforces on :8083, then admin, auditor, qa and qp."
+           "Afterwards ./health-check.sh warns once: version 1 waits for a qa person's confirmation in the Policy UI.")
+    plan_run
+}
+a_policy_open_ui() {
+    cfg_literal POLICY_DOMAIN "policy.<DOMAIN>"
+    CMD=(echo "https://$ANSWER/")
+    EFFECT="nothing (prints the Policy UI's address)"
+    NOTES=("Sign in as admin, auditor, qa or qp. qa confirms a bootstrap or rollback version there (Confirm tab).")
+    plan_run
+}
 # IAM 4.2b (design §14.5): every scoped mode, each re-rendering only what drifted.
 a_policy_scoped() {
     CMD=(./deploy-infra.sh --policy-only "&&" ./infra/deploy-workbench.sh --policy-only)
@@ -1949,6 +1969,8 @@ AREA_POLICY=(
     "a_policy_export|Print the applied policy as defaults.yaml|cli.py export-applied (printed; never written)."
     "a_policy_break_glass|How to use policy break-glass (shows the steps)|Shown, never run: what it changes, what it never bypasses, how it ends."
     "a_policy_scoped|Re-render the policy artefacts (scoped)|Every --policy-only/--gate-only, under one lock: only what drifted from the applied policy."
+    "a_policy_43_deploy|Deploy IAM 4.3 (the Policy UI)|deploy-infra, access and iam deploys in order, under one lock; nobody's access changes."
+    "a_policy_open_ui|Open the Policy UI|Prints its address (https://policy.<domain>/)."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -1964,7 +1986,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, and the IAM 4.1 and 4.2a deploys."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, and the IAM 4.1, 4.2a and 4.3 deploys."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

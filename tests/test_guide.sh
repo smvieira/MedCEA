@@ -75,6 +75,9 @@
 #  38  Policy → Re-render the policy artefacts (IAM 4.2b): deploy-infra --policy-only, the
 #      workbench's --policy-only, then every app's --gate-only, under the guide's one lock;
 #      a failure (or the wizard's deferral) stops the chain
+#  39  Policy → Deploy IAM 4.3: deploy-infra, access, iam in that order under one lock; the
+#      notes (order, nobody's access changes, the proof-gated proxy, the expected WARN);
+#      Open the Policy UI prints the address and runs nothing else
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -881,6 +884,30 @@ has   "real: the last gate ran" "STUB apps/scheduler/deploy.sh --gate-only"
 OUT="$(printf '8\n16\ny\nq\n' | NO_COLOR=1 STUB_RC=4 "$S/guide.sh" 2>&1)"
 has   "a deferral (exit 4) stops the chain" "STUB deploy-infra.sh --policy-only"
 hasnt "nothing after it" "STUB infra/deploy-workbench.sh"
+
+echo "39 deploy IAM 4.3 (the Policy UI)"
+mkcfg true true
+guide $'8\n17\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh && ./apps/access/deploy.sh && ./apps/iam/deploy.sh"
+has   "one lock" "held by the guide for all three"
+has   "the order" "Order: deploy-infra first"
+has   "the proof" "admits admin only until every iam-api pod proves it enforces"
+has   "the expected WARN" "version 1 waits for a qa person's confirmation"
+no_stub
+real $'8\n17\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: infra, access, iam in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB deploy-infra.sh", "STUB apps/access/deploy.sh", "STUB apps/iam/deploy.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 ]] && pass "real: all three under the guide's lock" \
+    || fail "real: a step ran without the guide's lock"
+guide $'8\n18\n\nq\n'
+has   "the address" "https://policy."
+hasnt "nothing ran" "STUB "
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

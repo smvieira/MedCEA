@@ -44,12 +44,22 @@ SOURCES = {
     "platform-api":   {"kind": "http", "file": "apps/frontend/k8s/recipe-fileserver.yaml", "key": "server.py",
                        "cls": "H", "resolver": "_resolve", "resolves": {"GET": ("list", "file"), "PUT": ("file",)}},
     "iam-mqttx":      {"kind": "http", "file": "apps/iam/iam-api.py", "cls": "MqttCredential"},
+    "iam":            {"kind": "http", "file": "apps/iam/policy_api.py", "cls": "PolicyAdmin"},
 }
 
 REMOVED = {}
 
+# The Policy UI's write side and its Approval tab's diff (IAM 4.4). GET who-can,
+# service-identities and break-glass are not listed: their paths fit the served
+# GET /api/policy/<v>, which answers them 404 (not a version) until 4.4 serves them.
 NOT_BUILT = {
-    ("iam", None): "4.3",
+    ("iam", "POST /api/policy/draft"): "4.4",
+    ("iam", "PUT /api/policy/<v>/entry"): "4.4",
+    ("iam", "POST /api/policy/<v>/submit"): "4.4",
+    ("iam", "POST /api/policy/<v>/withdraw"): "4.4",
+    ("iam", "POST /api/policy/<v>/approve"): "4.4",
+    ("iam", "POST /api/policy/<v>/return"): "4.4",
+    ("iam", "GET /api/policy/<v>/diff"): "4.4",
 }
 
 _PH = re.compile(r"<(?:[^<>:]+:)?([^<>]+)>")

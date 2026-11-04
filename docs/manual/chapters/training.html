@@ -497,6 +497,37 @@
 <p><strong>Afterwards.</strong> <code>./health-check.sh</code>: all checks as before step 2.</p>
 <p><strong>Last done.</strong> Not yet: deferred by the owner on 3 November 2026 until the IAM plan is complete (after slice 4.6). Until then the offline test <code>tests/test_scoped_deploy.py</code> is the evidence for this decision.</p>
 
+<h3 id="training-e16">E16 Confirm version 1 in the Access Policy</h3>
+<p><strong>Goal.</strong> Read the applied access policy and its history in the browser, and confirm version 1 as a <span class="role">qa</span> person who did not apply it, through that person's own sign-in. The exercise proves the decision of 3 November 2026 "Confirming version 1" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> The install's <span class="role">qa</span> account (<code>QA_USER</code>), which did not run <code>apply.sh</code>; the account that did (<code>svieira</code>, <span class="role">admin</span>) for the refusals; an <span class="role">operator</span> account (for example <code>operator_test</code>, see <a href="#training-e1">E1</a>). See the <a href="#compliance-test-accounts">test accounts</a>: on this install they belong to one human.</p>
+<p><strong>Before you start.</strong> Slice 4.3 is deployed (<a href="#admin-iam43">IAM 4.3</a>); <code>./health-check.sh</code> shows <strong>Access policy version</strong> WARN "version 1 (bootstrap) is not confirmed by qa yet"; <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> are <code>true</code>. Give each account its own browser session.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><span class="role">qa</span>: open the portal and click <strong>Access Policy</strong>. The page opens on the <strong>Confirm</strong> tab.</li>
+<li><span class="role">qa</span>: open <strong>Matrix</strong>; point at a role and a group name; click the cell <span class="role">qa</span> × Access policy.</li>
+<li><span class="role">qa</span>: open <strong>History</strong>.</li>
+<li><span class="role">qa</span>: back in <strong>Confirm</strong>, tick "I did not run apply.sh for this version.", write the note "E16: read the matrix and the history; this is the factory policy", press <strong>Confirm</strong>.</li>
+<li>Host operator: <code>./health-check.sh</code> and <code>./apps/iam/apply.sh --status</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: version 1 (bootstrap, applied), its time, its reason and the claimed person.</li>
+<li>Step 2: the checker accepts the version, with its two waiver notes. The names show their explanations. The cell panel shows levels R and A, A only if <strong>not_own_author</strong> with its meaning, and what only this cell gives: among others "database: EXECUTE on medcea.confirm_policy(integer,text,text)".</li>
+<li>Step 3: "Record intact", "The version audit finds nothing", and the events of version 1 down to <code>skeleton_accepted</code>.</li>
+<li>Step 4: "Version 1 confirmed. It is in the history." The Confirm tab then says "Nothing waits for confirmation", and History shows a new <code>confirmed</code> event by the <span class="role">qa</span> account.</li>
+<li>Step 5: <strong>Access policy version</strong> OK "version 1 (bootstrap), skeleton …, host file matches"; <code>--status</code> shows <code>confirmed</code> with the time.</li>
+</ul>
+<div class="record"><p>The policy history holds <code>confirmed</code> for version 1 with the <span class="role">qa</span> person as actor and the note; <code>iam_policy.version</code> carries <code>confirmed_at</code>, <code>confirmed_by_person</code> and the note, and <code>iam_policy.approval_evidence</code> the token's evidence. The confirmation is permanent. Write the event number and the time under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying</strong> (before step 4, or with a later bootstrap or rollback version):</p>
+<ul>
+<li>As <code>svieira</code> (<span class="role">admin</span>, the person who applied version 1): the Confirm tab is not shown, and a confirmation request is refused 403 by the route table. The database's own refusal of the applier, "You applied version 1 yourself", cannot be reached here, because no person holds both <span class="role">admin</span> and <span class="role">qa</span> (invariant I17); <code>tests/test_iam_api.py</code> checks that the page shows it.</li>
+<li>Confirm without ticking the statement, or without a note: the buttons stay disabled.</li>
+<li>An <span class="role">operator</span> opening <code>https://policy.&lt;domain&gt;</code>: the sign-in proxy's page "No access to Access Policy".</li>
+<li>Do not try <strong>Dispute…</strong> on version 1: a dispute is permanent and the health check fails until a later version supersedes it. <code>tests/test_iam_api.py</code> proves the dispute path offline.</li>
+</ul>
+<p><strong>Afterwards.</strong> Nothing to undo: the confirmation is the record.</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
 <ol class="steps">

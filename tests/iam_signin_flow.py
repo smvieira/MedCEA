@@ -135,7 +135,7 @@ def gated_hosts(p):
             # Node-RED and the MQTT Explorer keep their compiled list (IAM 3.3 decision)
             # the wizard: EDGE_WIZARD_ROLE (empty: any signed-in account); pgAdmin: admin
             legacy = [r.strip() for r in os.environ.get("EDGE_WIZARD_ROLE", "").split(",") if r.strip()]
-            want = (["admin"] if var in ("ACCESS_DOMAIN", "PGADMIN_DOMAIN") else
+            want = (["admin"] if var in ("ACCESS_DOMAIN", "POLICY_DOMAIN", "PGADMIN_DOMAIN") else
                     proxies.admitted(p, var) if var in ("NODE_RED_DOMAIN", "MQTTX_DOMAIN") else
                     (legacy or list(p.roles) + ["none"]) if var == "ONBOARD_DOMAIN" else
                     list(p.roles) + ["none"] if status.startswith("tool") else PRE_POLICY)

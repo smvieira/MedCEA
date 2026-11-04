@@ -2,7 +2,12 @@
 #   iam-mqttx  :8085  POST /_mqtt-credential — only the MQTT Explorer's oauth2-proxy
 #                     upstream (NetworkPolicy iam-iam, compiled from network: by
 #                     deploy-infra.sh, admits that proxy and the node)
-# Phase 4.1 adds the Policy UI's port (Service iam-admin :8083) to the same pod.
+#   iam        :8083  the Policy UI and its API (policy_api.py, IAM 4.3) — only the
+#                     upstream of iam-oauth2-proxy (POLICY_DOMAIN) and the node; Service
+#                     iam-admin :80 → 8083 (values-app.yaml sends to <service>:80)
+# The compiler and the factory policy (ConfigMap iam-compiler, server-side applied: about
+# 340 KiB) are mounted at /opt/iam, so the Policy UI shows a version with the skeleton this
+# platform accepted; medcea/compiler-sha256 restarts the pod when they change.
 # It logs in as iam_svc only (apps/iam/deploy.sh refuses a postgres fallback), and
 # reads IAM_MQTT_PERSON live from /iam/settings.json, so no switch needs a redeploy.
 apiVersion: apps/v1
@@ -18,13 +23,16 @@ spec:
   template:
     metadata:
       labels: {app: iam-api}
+      annotations:
+        medcea/compiler-sha256: "${IAM_COMPILER_SHA256}"
     spec:
       containers:
       - name: iam-api
         image: python:3.12-alpine
-        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 'pyjwt[crypto]' && exec python -u /app/iam-api.py"]
+        command: ["sh", "-c", "pip install --quiet --no-cache-dir pg8000 'pyjwt[crypto]' pyyaml && exec python -u /app/iam-api.py"]
         ports:
         - {name: mqttx, containerPort: 8085}
+        - {name: iam, containerPort: 8083}
         env:
         - {name: PG_HOST, value: "rdbms-postgresql.${NAMESPACE}.svc.cluster.local"}
         - {name: PG_DATABASE, value: "${POSTGRES_DB}"}
@@ -37,9 +45,13 @@ spec:
               key: ${PG_SECRET_KEY}
         - {name: PROJECT_NAME, value: "${PROJECT_NAME}"}   # the MQTT topic root
         - {name: MQTTX_DOMAIN, value: "${MQTTX_DOMAIN}"}   # the only Origin a POST may come from
-        - {name: IAM_ENFORCE, value: "${IAM_ENFORCE}"}     # informational: this port always enforces
-        readinessProbe:
-          httpGet: {path: /healthz, port: 8085}
+        - {name: IAM_ENFORCE, value: "${IAM_ENFORCE}"}     # informational: both ports always enforce
+        - {name: POLICY_DOMAIN, value: "${POLICY_DOMAIN}"} # the only Origin a Policy UI POST may come from
+        - {name: ACCESS_DOMAIN, value: "${ACCESS_DOMAIN}"} # the User Manager, linked from the Policy UI
+        - {name: CONFIG_API_URL, value: "http://config-api.${NAMESPACE}.svc.cluster.local:3000"}   # confirm/dispute
+        - {name: MEDCEA_COMPILER_DIR, value: /opt/iam}
+        readinessProbe:             # Ready only once the Policy UI's port answers too
+          httpGet: {path: /healthz, port: 8083}
           initialDelaySeconds: 5
           periodSeconds: 10
         livenessProbe:
@@ -52,6 +64,9 @@ spec:
         volumeMounts:
         - {name: code, mountPath: /app/iam-api.py, subPath: iam-api.py}
         - {name: code, mountPath: /app/mqtt_passwd.py, subPath: mqtt_passwd.py}   # infra/mqtt-passwd.py
+        - {name: code, mountPath: /app/policy_api.py, subPath: policy_api.py}
+        - {name: code, mountPath: /app/policy.html, subPath: policy.html}
+        - {name: compiler, mountPath: /opt/iam, readOnly: true}
         - {name: iam-lib, mountPath: /iam, readOnly: true}   # access check, route table, mqtt.json, settings
         - {name: jwks, mountPath: /jwks, readOnly: true}     # the realm's signing keys (Secret medcea-jwks)
       volumes:
@@ -59,6 +74,10 @@ spec:
         configMap: {name: iam-api-code}
       - name: iam-lib
         configMap: {name: medcea-iam-lib, optional: true}
+      - name: compiler             # keys compiler__<f>.py and policy__defaults.yaml, laid out as files
+        configMap:
+          name: iam-compiler
+          items: ${IAM_COMPILER_ITEMS}
       - name: jwks
         secret: {secretName: medcea-jwks, optional: true}
 ---
@@ -74,3 +93,15 @@ spec:
   selector: {app: iam-api}
   ports:
   - {name: mqttx, port: 8085, targetPort: mqttx}
+---
+# The Policy UI (IAM 4.3), reached only as the upstream of iam-oauth2-proxy
+# (k8s/oauth2-proxy/values-app.yaml with APP_SERVICE=iam-admin) — never from an Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: iam-admin
+  namespace: ${NAMESPACE}
+spec:
+  selector: {app: iam-api}
+  ports:
+  - {name: iam, port: 80, targetPort: iam}

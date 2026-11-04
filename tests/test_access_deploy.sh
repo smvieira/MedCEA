@@ -206,7 +206,7 @@ echo -e "\n${BOLD}6 access_svc already holds its grants${NC} (exit $RC)"
 # 7 — Sign out: Keycloak returns to the workbench's own logout, or to the host without the workbench
 signout_of() { grep 'name: SIGNOUT_HUB' "$T/fake/applied" 2>/dev/null | sed -n 's/.*value: "\(.*\)"}.*/\1/p'; }
 hosts_of() { grep 'name: HOST_CLIENTS' "$T/fake/applied" 2>/dev/null | sed -n 's/.*value: "\(.*\)"}.*/\1/p'; }
-WANT_HOSTS="portal.medcea=portal,config.medcea=config,access.medcea=access,monitor.medcea=monitor,scheduler.medcea=scheduler,dbmgmt.medcea=dbmgmt,mqtt-explorer.medcea=mqtt-explorer"
+WANT_HOSTS="portal.medcea=portal,config.medcea=config,access.medcea=access,monitor.medcea=monitor,scheduler.medcea=scheduler,dbmgmt.medcea=dbmgmt,mqtt-explorer.medcea=mqtt-explorer,policy.medcea=policy"
 setup 27 27 'access-new True\n' 'access-new\n'
 run "7a Sign out with the workbench (default)"
 [[ "$(signout_of)" == "https://ai-workbench.medcea/hub/logout" ]] && pass "SIGNOUT_HUB is the workbench's /hub/logout" \

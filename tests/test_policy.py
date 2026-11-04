@@ -1152,6 +1152,7 @@ class WiringTest(unittest.TestCase):
                                                  ("apps/scheduler/deploy.sh", "SCHEDULER_DOMAIN")],
             "apps/access/k8s/oauth2-proxy-values.yaml": [("apps/access/deploy.sh", "ACCESS_DOMAIN")],
         }
+        wiring["k8s/oauth2-proxy/values-app.yaml"].append(("apps/iam/deploy.sh", "POLICY_DOMAIN"))   # IAM 4.3
         compiled = {h for h, st in proxies.ENFORCEMENT.items() if st == "compiled"}
         self.assertEqual(compiled, {h for v in wiring.values() for _, h in v})
         for template, users in wiring.items():
@@ -2110,7 +2111,7 @@ class ShortSessionsTest(unittest.TestCase):
         dep = self.read("apps/access/deploy.sh")
         clients = re.findall(r'=([a-z-]+)', "".join(l for l in dep.splitlines() if l.startswith("HOST_CLIENTS")))
         self.assertEqual(sorted(clients), sorted(["portal", "config", "access", "monitor", "scheduler", "dbmgmt",
-                                                  "mqtt-explorer"]))
+                                                  "mqtt-explorer", "policy"]))   # policy: the Policy UI, IAM 4.3
         for c in clients:
             calls = re.findall(r'_create_client "%s" "[^"]+"( [^)]*)?\)' % re.escape(c), src)
             self.assertEqual(len(calls), 1, c)
@@ -2702,6 +2703,50 @@ class Phase42aTest(unittest.TestCase):
         self.assertNotEqual(routes.compile(model.Policy(d))["digest"], a["digest"])
         # role_widening()'s comment carries the same digest whatever the label
         self.assertEqual(grants.policy_digest(self.policy, "break-glass:x"), a["digest"])
+
+
+class ExplainCellTest(unittest.TestCase):
+    """explain.cell (IAM 4.3, the Policy UI's "See more"): what a cell gives is exactly the
+    reach it adds (ExplainParity), and the Policy UI's compiler fits its ConfigMap."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = model.load_defaults()
+
+    def test_parity_with_reach(self):
+        from compiler import explain
+        for g in self.p.groups:
+            for r in self.p.roles:
+                d = explain.cell(self.p, self.p, r, g)
+                full = {tuple(tuple(x) if isinstance(x, list) else x for x in t) for t in
+                        [list(t) for t in explain.reach(self.p, r)]}
+                gives = {tuple(tuple(x) if isinstance(x, list) else x for x in t) for t in d["gives"]}
+                self.assertLessEqual(gives, full, (r, g))
+                if not self.p.cell(g, r):
+                    self.assertEqual(gives, set(), (r, g))
+                self.assertTrue(d["changed"]["same"], (r, g))
+                self.assertEqual(d["changed"]["adds"] + d["changed"]["removes"], [], (r, g))
+
+    def test_known_cells(self):
+        from compiler import explain
+        d = explain.cell(self.p, None, "qa", "iam_policy")
+        self.assertEqual(d["levels"], ["A", "R"])
+        self.assertEqual(d["constraints"]["A"]["name"], "not_own_author")
+        self.assertIn(["db", "medcea.confirm_policy(integer,text,text)", "EXECUTE", None], d["gives"])
+        self.assertIsNone(d["changed"])
+        d = explain.cell(self.p, None, "operator", "runs")
+        self.assertEqual(d["constraints"]["R"]["name"], "own_unit")
+        with self.assertRaises(KeyError):
+            explain.cell(self.p, None, "nobody", "runs")
+
+    def test_compiler_configmap_size(self):
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        import compiler_cm
+        cm, sha, items = compiler_cm.build(os.path.join(REPO, "apps", "iam"), "medcea")
+        self.assertLess(len(json.dumps(cm).encode()), compiler_cm.LIMIT)
+        self.assertIn({"key": "policy__defaults.yaml", "path": "policy/defaults.yaml"}, items)
+        self.assertIn({"key": "compiler____init__.py", "path": "compiler/__init__.py"}, items)
+        self.assertEqual(cm["metadata"]["annotations"]["medcea/compiler-sha256"], sha)
 
 
 class AppGateTest(unittest.TestCase):

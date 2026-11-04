@@ -118,6 +118,7 @@
     <button data-v="templates" hidden>Templates</button>
     <button data-v="review" hidden>Access review</button>
     <button data-v="log" hidden>Change log</button>
+    <a id="policy-link" href="#" hidden style="margin-left:auto;align-self:center">Access Policy &rarr;</a>
   </div>
 
   <!-- REQUESTS -->
@@ -290,6 +291,7 @@ async function init() {
   ROLES = ME.roles;
   const can = ME.can || {};
   document.querySelectorAll('#nav button').forEach(b => { b.hidden = !can[VIEWS[b.dataset.v]]; });
+  if (ME.policy_url) { $('policy-link').href = ME.policy_url; $('policy-link').hidden = false; }   // the Policy UI (IAM 4.3)
   $('warn').style.display = (!can.settings || ME.smtp) ? 'none' : 'block';
   if (!ME.has_person) $('subtitle').textContent = 'Your sign-in carries no person_id: you cannot make or check account decisions. Ask an administrator.';
   if (can.templates) TEMPLATES = await api('/api/templates');

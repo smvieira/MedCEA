@@ -171,6 +171,12 @@ data:
                 <div class="cd">Review access requests, grant or reassign roles, and keep the decision record. Administrators only.</div>
                 <div class="ck">https://${ACCESS_DOMAIN} <span class="ck-a">&rarr;</span></div>
               </a>
+              <a class="card" href="https://${POLICY_DOMAIN}" target="_blank" rel="noopener">
+                <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#e879f9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></div>
+                <div class="cl">Administration</div><div class="ct">Access Policy</div>
+                <div class="cd">Who may do what: the applied policy, its history, and confirming a version. Administrators, quality assurance, qualified persons and auditors.</div>
+                <div class="ck">https://${POLICY_DOMAIN} <span class="ck-a">&rarr;</span></div>
+              </a>
               <a class="card" href="https://${PGADMIN_DOMAIN}" target="_blank" rel="noopener">
                 <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg></div>
                 <div class="cl">Administration</div><div class="ct">pgAdmin</div>

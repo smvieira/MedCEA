@@ -19,7 +19,7 @@ ENFORCEMENT = {
     "NODE_RED_DOMAIN": "compiled", "ACCESS_DOMAIN": "compiled",
     "GRAFANA_DOMAIN": "tool (Grafana role_attribute_path)", "WORKBENCH_DOMAIN": "tool (JupyterHub allowed_groups)",
     "ONBOARD_DOMAIN": "tool (edge wizard --required-role)", "PGADMIN_DOMAIN": "tool (pgAdmin OAUTH2_ADDITIONAL_CLAIMS)",
-    "POLICY_DOMAIN": "not deployed (Phase 4)",
+    "POLICY_DOMAIN": "compiled",   # proof-gated like ACCESS_DOMAIN (apps/iam/deploy.sh, IAM 4.3)
 }
 
 

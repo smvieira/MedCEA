@@ -48,6 +48,7 @@ KC_CLIENT_ID = E.get('KC_CLIENT_ID', 'access')
 KC_CLIENT_SECRET = E.get('KC_CLIENT_SECRET', '')
 ACCESS_URL = E.get('ACCESS_URL', '').rstrip('/')
 PORTAL_URL = E.get('PORTAL_URL', '').rstrip('/')
+POLICY_URL = E.get('POLICY_URL', '').rstrip('/')   # the Policy UI (IAM 4.3), linked from the tab bar
 # The Keycloak login page (theme medcea) posts its Request access tab here.
 LOGIN_ORIGIN = E.get('LOGIN_ORIGIN', '').rstrip('/')
 HTML_DIR = E.get('HTML_DIR', '/app/html')
@@ -2098,7 +2099,8 @@ class Admin(Base):
             'histories': ('GET', '/api/config-history')}.items()}
         out = {'user': w.get('username'), 'sub': w.get('sub'), 'has_person': bool(w.get('person_id')), 'role': role,
                'roles': role_list(), 'smtp': smtp_ready(mail_settings()),
-               'platform': PLATFORM, 'portal_url': PORTAL_URL, 'admin_url': ACCESS_URL + '/', 'can': can}
+               'platform': PLATFORM, 'portal_url': PORTAL_URL, 'admin_url': ACCESS_URL + '/', 'can': can,
+               'policy_url': POLICY_URL + '/' if POLICY_URL else ''}
         if can['users']:
             out['widening'] = _table().get('widening') or {}
         return 200, out

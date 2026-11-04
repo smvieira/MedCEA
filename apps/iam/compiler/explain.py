@@ -356,3 +356,59 @@ def gate_message(g, first=10):
               "Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the matrix, never the skeleton.",
               "Nothing was changed."]
     return "\n".join(lines)
+
+
+# ── cell: one matrix cell explained (IAM 4.3, the Policy UI's "See more") ─────────────
+def _without_cell(p, role, group):
+    data = copy.deepcopy(p.data)
+    (data.get("matrix") or {}).get(group, {}).pop(role, None)
+    return model.Policy(data)
+
+
+def _jsonable(t):
+    return [list(x) if isinstance(x, tuple) else x for x in t]
+
+
+def cell(p, p_applied, role, group):
+    """What the cell (group, role) of policy p gives, as one JSON-ready dict: its levels and
+    their constraints, the implied levels, what the role reaches only through this cell
+    (reach with the cell minus reach without it: db objects, routes, hosts, tool settings,
+    MQTT rows, held levels), the group's members with their type, the waivers and checker
+    messages that name it, and its difference from the same cell in p_applied (None: no
+    comparison). Pure: the same objects the compiled artefacts carry (ExplainParity)."""
+    if role not in p.roles:
+        raise KeyError(f"no role {role!r}")
+    if group not in p.groups:
+        raise KeyError(f"no resource group {group!r}")
+    c = p.cell(group, role)
+    levels, cons = (sorted(c[0]), c[1]) if c else ([], {})
+    implied = sorted(p.closure(levels) - set(levels))
+    with_ = reach(p, role)
+    without = reach(_without_cell(p, role, group), role)
+    gives = sorted(with_ - without, key=repr)
+    hosts_with = sorted(h for k, h, *_ in with_ if k == "host")
+    hosts_without = sorted(h for k, h, *_ in without if k == "host")
+    g = p.groups[group]
+    members = [{"type": m.get("type"), "name": m.get("object") or m.get("function") or m.get("service")
+                or m.get("host") or m.get("topic") or m.get("tool"), "note": m.get("note") or m.get("why")}
+               for m in g.get("members") or []]
+    waivers = [w for w in p.waivers if w.get("subject") == role and w.get("group") == group]
+    from compiler import invariants
+    errors, notes = invariants.check(p)
+    named = [m for m in errors + notes if f" {role} " in f" {m} " and group in m]
+    out = {"role": role, "group": group, "levels": levels,
+           "constraints": {l: {"name": n, "help": (p.constraints.get(n) or {}).get("help")
+                                or (p.constraints.get(n) or {}).get("description")} for l, n in sorted(cons.items())},
+           "implied": implied, "gives": [_jsonable(t) for t in gives],
+           "hosts": {"with": hosts_with, "without": hosts_without},
+           "members": members, "group_label": g.get("label"), "group_help": g.get("description"),
+           "role_label": p.roles[role].get("label"), "waivers": waivers, "checker": named, "changed": None}
+    if p_applied is not None:
+        a = p_applied.cell(group, role) if group in p_applied.groups and role in p_applied.roles else None
+        a_levels, a_cons = (sorted(a[0]), a[1]) if a else ([], {})
+        ra = reach(p_applied, role) if role in p_applied.roles else frozenset()
+        out["changed"] = {"applied_levels": a_levels, "applied_constraints": dict(sorted(a_cons.items())),
+                          "same": (a_levels, dict(a_cons)) == (levels, dict(cons)),
+                          "adds": [_jsonable(t) for t in sorted(with_ - ra, key=repr)],
+                          "removes": [_jsonable(t) for t in sorted(ra - with_, key=repr)]}
+    return out

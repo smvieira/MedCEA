@@ -1,9 +1,11 @@
-"""iam-api: the access policy's own service (IAM plan Phase 3.5; 4.1 adds the Policy UI's port).
+"""iam-api: the access policy's own service (IAM plan Phase 3.5; 4.3 adds the Policy UI's port).
 
 One listener per route-table service, so the trust boundary is a port:
   :8085  iam-mqttx  POST /_mqtt-credential, reached only as an upstream of the MQTT
                     Explorer's oauth2-proxy (mqttx-oauth2-proxy; network: admits that proxy
                     and the node). GET /healthz answers before any check.
+  :8083  iam        the Policy UI and its API (policy_api.py, IAM 4.3), reached only as the
+                    upstream of iam-oauth2-proxy (POLICY_DOMAIN) and from the node.
 
 POST /_mqtt-credential issues the signed-in person a short-lived MQTT credential for the
 broker's WebSocket listener (IAM_MQTT_PERSON=true; 1883 refuses it). Its rows come from
@@ -21,8 +23,11 @@ iam_policy.append_history('mqtt_credential_issued') -> commit. The password is m
 (secrets), hashed with infra/mqtt-passwd.py (mounted as mqtt_passwd.py), returned once
 with Cache-Control no-store and never logged; log lines carry the username only.
 """
-import datetime, hashlib, importlib.util, json, os, re, secrets, sys, time
+import datetime, hashlib, importlib.util, json, os, re, secrets, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import policy_api  # noqa: E402 — the Policy UI's port (IAM 4.3), beside this file
 
 E = os.environ
 PG = dict(host=E.get('PG_HOST', 'rdbms-postgresql'), port=int(E.get('PG_PORT', '5432')),
@@ -117,15 +122,11 @@ def username_for(who):
     return '%s%s-%s' % (PERSON_PREFIX, u, secrets.token_hex(3))
 
 
-# The re-issue guard: a deactivation, an applied narrowing or a confirmed role change after
-# the token was issued means the token's role is no longer the account's.
-CHANGED_SINCE = """
-    SELECT EXISTS (SELECT 1 FROM iam.user_status_history h
-                    WHERE h.keycloak_user_id = %s AND h.occurred_at >= to_timestamp(%s))
-        OR EXISTS (SELECT 1 FROM iam.account_decision d
-                    WHERE d.keycloak_user_id = %s AND d.kind IN ('deactivate', 'role_change')
-                      AND ((d.status IN ('applied', 'reviewed') AND d.made_at >= to_timestamp(%s))
-                           OR (d.status = 'confirmed' AND d.checked_at >= to_timestamp(%s))))"""
+# The re-issue guard: iam._changed_since (apps/access/access_db.sql, IAM 4.1) — any change
+# to any account of the person since the token was issued (a deactivation, an activation, a
+# role or person_id change, a grant) means the token's role may no longer be the account's.
+# It replaced an inline copy that looked at the one account and two decision kinds (4.3).
+CHANGED_SINCE = "SELECT iam._changed_since(%s, %s, %s)"
 RETIRE = """
     UPDATE medcea.mqtt_service_credential c SET active = false
      WHERE c.person_sub = %s::uuid AND c.active
@@ -152,7 +153,7 @@ def issue(who, role, doc):
         cur = con.cursor()
         cur.execute('SELECT medcea_auth.set_actor(%s, %s, %s, %s)',
                     (sub, who.get('person_id') or sub, who.get('username'), role))
-        cur.execute(CHANGED_SINCE, (sub, iat, sub, iat, iat))
+        cur.execute(CHANGED_SINCE, (sub, who.get('person_id'), iat))
         if cur.fetchone()[0]:
             raise Refused(403, 'your access changed since you signed in: reload the page')
         cur.execute(RETIRE, (sub, sub, max(int(doc.get('max_active') or 1) - 1, 0)))
@@ -284,5 +285,7 @@ def serve(handler, port):
 if __name__ == '__main__':
     if PG['user'] != SERVICE_ROLE:
         log('warning: PG_USER is %s, not %s — POST /_mqtt-credential answers 503' % (PG['user'], SERVICE_ROLE))
-    log('listening: iam-mqttx :8085')
+    policy_api.db, policy_api.medcea_iam, policy_api.log = db, _medcea_iam, log
+    threading.Thread(target=serve, args=(policy_api.PolicyAdmin, 8083), daemon=True).start()
+    log('listening: iam-mqttx :8085, iam (the Policy UI) :8083')
     serve(MqttCredential, 8085)

@@ -60,6 +60,11 @@ def kubectl(a):
         return 0
     if verb == "exec":
         rest = a[a.index("--") + 1:]
+        if rest[0] == "python3":      # iam-api's /healthz on :8083 (IAM 4.3)
+            if "iam_healthz" not in sc:
+                return 1
+            print(json.dumps(sc["iam_healthz"]))
+            return 0
         i = rest.index("-c")
         return psql(rest[i + 2], sys.stdin.read())
     if verb != "get":
@@ -204,6 +209,25 @@ class IamPolicy(unittest.TestCase):
         self.assertEqual(out, "OK|Access policy version|version 1 (bootstrap), qa confirms it in the Policy UI "
                               "once it exists (IAM 4.3)")
 
+    def test_the_policy_ui_running(self):
+        # IAM 4.3: iam-api answers policy_port on :8083 — v1 unconfirmed WARNs, another
+        # applied version FAILs, another skeleton WARNs
+        self.t.write_host()
+        sk = self.t.st["accepted"]["digest"]
+        self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk}})
+        self.assertEqual(self.run_check(self.t.write_state()),
+                         "WARN|Access policy version|version 1 (bootstrap) is not confirmed by qa yet (the Policy UI)")
+        self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 2, "skeleton_digest": "0" * 64}})
+        out = self.run_check(self.t.write_state())
+        self.assertTrue(out.startswith("FAIL|Access policy version|"), out)
+        self.assertIn("reports applied version 2", out)
+        self.assertIn("ships skeleton 000000000000", out)
+        st = dict(self.t.st, unconfirmed=[], confirmed_at="2026-11-04T10:00:00Z")
+        self.t.st = st
+        self.t.write_host()
+        self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk}})
+        self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|Access policy version|version 1 (bootstrap), skeleton"))
+
     def test_skip_without_kubectl_or_008c(self):
         self.assertEqual(self.run_check(None, "skip", "no usable kubectl"),
                          "SKIP|Access policy version|no usable kubectl")
@@ -299,7 +323,12 @@ class IamPolicy(unittest.TestCase):
         self.run_check(self.t.write_state())
         self.assertEqual(sorted(os.listdir(self.t.path("state"))), before)
         self.assertNotIn("flock", body("check_iampolicy"))
-        self.assertEqual(self.t.calls(), [])   # no kubectl of its own: the init read the state
+        # one kubectl of its own (IAM 4.3): iam-api's /healthz on :8083, read in the pod; the
+        # init read the state
+        calls = self.t.calls()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(calls[0][:4], ["exec", "-n", "medcea", "deployment/iam-api"])
+        self.assertIn("http://127.0.0.1:8083/healthz", calls[0][-1])
 
 
 class IamArtefacts(unittest.TestCase):

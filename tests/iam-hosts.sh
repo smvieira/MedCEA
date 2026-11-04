@@ -448,7 +448,7 @@ while IFS= read -r line; do
             fi
             continue ;;
         compiled)
-            if [[ "$var" == ACCESS_DOMAIN && "${IAM_GATES:-true}" == false ]]; then
+            if [[ ( "$var" == ACCESS_DOMAIN || "$var" == POLICY_DOMAIN ) && "${IAM_GATES:-true}" == false ]]; then
                 expected='["admin"]'
             else
                 expected="$(policy_groups "$var" 2>/dev/null)" || { fail gate "policy_groups $var failed"; continue; }

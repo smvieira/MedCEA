@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Access Policy</title>
+<style>
+:root {
+  --bg: #ffffff; --panel: #f4f6f9; --ink: #1d2733; --muted: #44546a; --line: #d5dbe3;
+  --accent: #1f4d78; --accent-2: #2e74b5; --link: #0563c1;
+  --red-bg: #fde8e8; --red: #a4161a; --amber-bg: #fff4d6; --amber: #8a5a00; --ok: #1e6b3a; --ok-bg: #e6f4ea;
+  --none: #9aa5b1;
+  --display: "Century Gothic", "URW Gothic", "Avenir Next", sans-serif;
+  --body: Calibri, Carlito, "Segoe UI", sans-serif;
+  --mono: Consolas, "DejaVu Sans Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12171d; --panel: #1b222b; --ink: #e3e8ee; --muted: #a7b3c1; --line: #2f3a46;
+    --accent: #8db8e3; --accent-2: #6fa3d6; --link: #8fc3ff;
+    --red-bg: #3a1618; --red: #ff9a9a; --amber-bg: #382a0c; --amber: #f0c66a; --ok: #8fd6a4; --ok-bg: #16301f; --none: #5b6672;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 var(--body); }
+header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 3px solid var(--accent); }
+header h1 { font: 600 20px var(--display); margin: 0; color: var(--accent); }
+header .who { margin-left: auto; color: var(--muted); font-size: 13px; }
+nav.tabs { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+nav.tabs button { background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 12px; font: inherit;
+  color: var(--muted); cursor: pointer; }
+nav.tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+nav.tabs a { margin-left: auto; padding: 10px 4px; color: var(--link); font-size: 13px; }
+nav.tabs a + a { margin-left: 12px; }
+main { padding: 16px; }
+.view[hidden] { display: none; }
+.bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+select, textarea, input[type=text] { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+.note { background: var(--panel); border-left: 4px solid var(--accent-2); padding: 8px 12px; margin: 8px 0 12px; }
+.error { background: var(--red-bg); color: var(--red); border-left: 4px solid var(--red); padding: 8px 12px; margin: 8px 0; }
+.ok { background: var(--ok-bg); color: var(--ok); border-left: 4px solid var(--ok); padding: 8px 12px; margin: 8px 0; }
+.wrap { overflow-x: auto; border: 1px solid var(--line); }
+table.matrix { border-collapse: collapse; font-size: 13px; }
+table.matrix th, table.matrix td { border: 1px solid var(--line); padding: 4px 6px; white-space: nowrap; }
+table.matrix thead th { position: sticky; top: 0; background: var(--panel); writing-mode: vertical-rl; transform: rotate(180deg); text-align: left; }
+table.matrix tbody th { text-align: left; background: var(--panel); position: sticky; left: 0; }
+td.cell { cursor: pointer; min-width: 44px; text-align: center; }
+td.cell.none { color: var(--none); }
+td.cell.red { background: var(--red-bg); color: var(--red); }
+td.cell.amber { background: var(--amber-bg); color: var(--amber); }
+td.cell:focus, td.cell:hover { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.chip { display: inline-block; font: 600 11px var(--mono); padding: 1px 4px; border-radius: 3px; background: var(--panel);
+  border: 1px solid var(--line); margin: 0 1px; }
+.chip.c { border-style: dashed; }
+.name { border-bottom: 1px dotted var(--muted); cursor: help; }
+.ng { color: var(--muted); font-style: italic; }
+aside.panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 100%); background: var(--bg); border-left: 1px solid var(--line);
+  box-shadow: -4px 0 16px rgba(0,0,0,.15); padding: 16px; overflow-y: auto; }
+aside.panel[hidden] { display: none; }
+aside.panel h2, .view h2 { font: 600 17px var(--display); color: var(--accent); margin: 0 0 8px; }
+aside.panel h3 { font: 600 14px var(--display); margin: 14px 0 4px; }
+aside.panel ul { padding-left: 18px; margin: 4px 0; }
+aside.panel code, td code, .mono { font: 12px var(--mono); }
+button.btn { font: inherit; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 4px; padding: 6px 14px; cursor: pointer; }
+button.btn.secondary { background: none; color: var(--accent); }
+button.btn:disabled { opacity: .45; cursor: not-allowed; }
+table.list { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.list th, table.list td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+table.list th { color: var(--muted); font-weight: 600; }
+.status { font-weight: 600; }
+.status.green { color: var(--ok); } .status.red { color: var(--red); } .status.grey { color: var(--muted); }
+.card { border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; margin: 0 0 14px; }
+.card dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 12px; font-size: 13px; }
+.card dt { color: var(--muted); }
+label.attest { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+textarea { width: 100%; min-height: 60px; }
+.row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+details pre { white-space: pre-wrap; font: 12px var(--mono); margin: 4px 0; }
+@media (max-width: 640px) { header { flex-wrap: wrap; } nav.tabs a { margin-left: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Access Policy</h1>
+  <span class="who" id="who"></span>
+  <div id="user-menu"></div>
+</header>
+<nav class="tabs" role="tablist">
+  <button role="tab" data-view="matrix" hidden>Matrix</button>
+  <button role="tab" data-view="history" hidden>History</button>
+  <button role="tab" data-view="confirm" hidden>Confirm</button>
+  <a id="lnk-decisions" href="#">Account decisions</a>
+  <a id="lnk-review" href="#">Access review</a>
+</nav>
+<main>
+  <div id="msg"></div>
+
+  <section class="view" id="view-matrix" hidden>
+    <div class="bar">
+      <label>Version <select id="ver"></select></label>
+      <span id="ver-info"></span>
+    </div>
+    <div class="note">Who may do what on the platform: one row per resource group, one column per role. A letter is a level the role holds (a dashed one is limited by a constraint). Click a cell to see what it gives. Red: the policy's checker refuses the cell; amber: a recorded waiver allows it.</div>
+    <div id="checker"></div>
+    <div class="wrap"><table class="matrix" id="matrix"></table></div>
+    <h2 style="margin-top:16px">Levels</h2>
+    <table class="list" id="levels"></table>
+  </section>
+
+  <section class="view" id="view-history" hidden>
+    <div class="bar">
+      <span id="chain" class="status grey">Checking the record…</span>
+      <label>Version <select id="hist-ver"><option value="">all</option></select></label>
+    </div>
+    <div id="findings"></div>
+    <table class="list" id="events"></table>
+  </section>
+
+  <section class="view" id="view-confirm" hidden>
+    <h2>Versions waiting for confirmation</h2>
+    <div class="note">A bootstrap or rollback version is applied at once, by the person who ran <code>apply.sh</code>. Another quality assurance person confirms afterwards that it is what was intended, or disputes it. A confirmation is an attributable record, not an electronic signature.</div>
+    <div id="pending"></div>
+  </section>
+</main>
+
+<aside class="panel" id="panel" hidden aria-live="polite">
+  <div class="row" style="justify-content:space-between;margin:0 0 8px"><h2 id="p-title">Cell</h2><button class="btn secondary" id="p-close">Close</button></div>
+  <div id="p-body"></div>
+</aside>
+
+<script>
+/* policy-logic:begin */
+// Pure functions (tests/test_policy_ui.py runs them under node).
+const LEVEL_ORDER = ['R', 'X', 'C', 'U', 'A', 'O', 'K', 'D'];
+
+function cellClass(cell, role, group, waivers, errors) {
+  if (!cell) return 'none';
+  const named = (errors || []).some(e => (' ' + e + ' ').includes(' ' + role + ' ') && e.includes(group));
+  if (named) return 'red';
+  if ((waivers || []).some(w => w.subject === role && w.group === group)) return 'amber';
+  return '';
+}
+
+function chips(cell) {
+  if (!cell) return [];
+  const cons = cell.constraints || {};
+  return [...cell.levels].sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b))
+    .map(l => ({ level: l, constraint: cons[l] || null }));
+}
+
+function confirmEnabled(attested, note) { return attested === true && String(note || '').trim().length > 0; }
+function disputeEnabled(note) { return String(note || '').trim().length > 0; }
+
+// The database's refusals (iam_policy._qa, confirm_applied, dispute_applied), in plain words.
+const REFUSALS = [
+  [/^apply\.sh recorded you as running version (\d+)/, m => `You applied version ${m[1]} yourself (apply.sh recorded your person). Another quality assurance person confirms it.`],
+  [/^version (\d+) is already (confirmed|disputed)/, m => `Version ${m[1]} is already ${m[2]}; nothing was changed.`],
+  [/^version (\d+) is no applied bootstrap or rollback version/, m => `Version ${m[1]} is not a bootstrap or rollback version waiting for confirmation.`],
+  [/^confirming needs the attestation/, () => 'Tick the statement that you did not run apply.sh for this version.'],
+  [/^a note is required/, () => 'Write a note.'],
+  [/^your access changed since you signed in/, () => 'Your access changed since you signed in. Reload the page.'],
+  [/^approve access-policy versions in the Policy UI/, () => 'This request did not come through the Policy UI\'s sign-in. Reload the page and try again.'],
+  [/^confirmation needs IAM_POSTGREST_JWT and IAM_DB_ROLES/, () => 'Confirming is not possible on this platform yet (IAM_POSTGREST_JWT and IAM_DB_ROLES must be true). Ask the administrator.'],
+];
+function friendlyRefusal(msg) {
+  const s = String(msg || '');
+  for (const [re, f] of REFUSALS) { const m = s.match(re); if (m) return f(m); }
+  return s || 'The request was refused.';
+}
+
+function chainStatus(c) {
+  if (!c || c.ok === null || c.ok === undefined) return { cls: 'grey', text: 'Cannot verify the record' + (c && c.detail ? ': ' + c.detail : '') };
+  if (c.ok) return { cls: 'green', text: `Record intact: ${c.events} events, the newest ${String(c.head || '').slice(0, 12)}` };
+  return { cls: 'red', text: `Record broken at event ${c.first_bad_event}: ${c.detail || ''}` };
+}
+
+function pendingVersions(versions) { return (versions || []).filter(v => v.needs_confirmation); }
+
+function describeReach(t) {
+  const [kind, a, b, c] = t;
+  if (kind === 'db') return b === 'MEMBER' ? `database: member of ${a}` : `database: ${b} on ${a}` + (c ? ' (rows limited)' : '');
+  if (kind === 'route') return `API: ${a} ${b}` + (c ? ` (if ${[].concat(c).join(', ')})` : '');
+  if (kind === 'host') return `sign-in to ${a}`;
+  if (kind === 'tool') return `${a}: ${b}`;
+  if (kind === 'mqtt') return `MQTT ${a}: ${b}` + (c ? ` (if ${c})` : '');
+  if (kind === 'level') return `level ${b} on ${a}` + (c ? ` (if ${[].concat(c).join(', ')})` : '');
+  return t.join(' ');
+}
+/* policy-logic:end */
+
+const $ = id => document.getElementById(id);
+let ME = null, DOC = null, VERSIONS = [];
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({ credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, opts || {}));
+  let body = {};
+  try { body = await r.json(); } catch (e) { /* not JSON */ }
+  if (r.status === 401 && !sessionStorage.getItem('policy-reauth')) {
+    try { sessionStorage.setItem('policy-reauth', '1'); } catch (e) { /* storage off */ }
+    location.href = '/oauth2/start?rd=' + encodeURIComponent(location.pathname);
+    throw new Error('signing in again');
+  }
+  if (!r.ok) { const e = new Error(body.error || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+  try { sessionStorage.removeItem('policy-reauth'); } catch (e) { /* storage off */ }
+  return body;
+}
+
+function show(kind, text) { $('msg').innerHTML = text ? `<div class="${kind}">${esc(text)}</div>` : ''; }
+
+function select(view) {
+  document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === view)));
+  document.querySelectorAll('.view').forEach(v => { v.hidden = v.id !== 'view-' + view; });
+  show('', '');
+  try { localStorage.setItem('policy-tab', view); } catch (e) { /* storage off */ }
+  if (view === 'matrix') loadMatrix($('ver').value || 'applied');
+  if (view === 'history') loadHistory();
+  if (view === 'confirm') loadPending();
+}
+
+function helpOf(list, key) { const x = (list || []).find(e => e.key === key); return x ? (x.help || x.summary || x.label || '') : ''; }
+
+async function loadMatrix(v) {
+  try {
+    DOC = await api('/api/policy/' + encodeURIComponent(v));
+  } catch (e) { return show('error', friendlyRefusal(e.message)); }
+  const roles = DOC.roles, groups = DOC.groups;
+  const meta = VERSIONS.find(x => x.version === DOC.version) || {};
+  $('ver-info').textContent = `version ${DOC.version} (${meta.kind || '?'}, ${meta.status || '?'})` +
+    (meta.confirmed_at ? ', confirmed' : meta.disputed_at ? ', DISPUTED' : meta.needs_confirmation ? ', waiting for confirmation' : '');
+  const ck = DOC.checker || {};
+  $('checker').innerHTML = (ck.errors || []).length
+    ? `<div class="error">The checker refuses ${ck.errors.length} rule(s): ${esc(ck.errors.join('; '))}</div>`
+    : `<div class="ok">The policy's checker accepts this version${(ck.notes || []).length ? ' (' + esc(ck.notes.join('; ')) + ')' : ''}.</div>`;
+  let h = '<thead><tr><th style="writing-mode:horizontal-tb;transform:none">Group \\ role</th>' +
+    roles.map(r => `<th><span class="name" title="${esc(r.help)}">${esc(r.label || r.key)}</span></th>`).join('') + '</tr></thead><tbody>';
+  for (const g of groups) {
+    const row = (DOC.cells || {})[g.key] || {};
+    h += `<tr><th><span class="name" title="${esc(g.help)}">${esc(g.label || g.key)}</span>` +
+      (DOC.not_granted.includes(g.key) ? ' <span class="ng" title="No role holds any level on this group in this version.">not granted</span>' : '') + '</th>';
+    for (const r of roles) {
+      const c = row[r.key];
+      const cls = cellClass(c, r.key, g.key, DOC.waivers, ck.errors);
+      const txt = c ? chips(c).map(x => `<span class="chip${x.constraint ? ' c' : ''}" title="${esc(helpOf(DOC.levels, x.level))}${x.constraint ? ' — only if ' + esc(x.constraint) : ''}">${x.level}</span>`).join('') : '·';
+      h += `<td class="cell ${cls}" tabindex="0" data-role="${esc(r.key)}" data-group="${esc(g.key)}">${txt}</td>`;
+    }
+    h += '</tr>';
+  }
+  $('matrix').innerHTML = h + '</tbody>';
+  $('levels').innerHTML = '<tr><th>Level</th><th>Meaning</th></tr>' + DOC.levels.map(l =>
+    `<tr><td><span class="chip">${esc(l.key)}</span> ${esc(l.name)}</td><td>${esc(l.summary)} ${esc(l.help)}</td></tr>`).join('');
+}
+
+async function openCell(role, group) {
+  $('panel').hidden = false;
+  $('p-title').textContent = 'Loading…';
+  $('p-body').innerHTML = '';
+  let d;
+  try {
+    d = await api(`/api/policy/${DOC.version}/explain?role=${encodeURIComponent(role)}&group=${encodeURIComponent(group)}`);
+  } catch (e) { $('p-title').textContent = 'Cell'; $('p-body').innerHTML = `<div class="error">${esc(friendlyRefusal(e.message))}</div>`; return; }
+  $('p-title').textContent = `${d.role_label || d.role} on ${d.group_label || d.group}`;
+  const lv = d.levels.length ? d.levels.map(l => `<span class="chip">${esc(l)}</span>` + (d.constraints[l] ? ` only if <b>${esc(d.constraints[l].name)}</b>: ${esc(d.constraints[l].help)}` : '')).join('<br>') : 'No level: this role holds nothing here.';
+  let h = `<p>${esc(d.group_help)}</p><h3>Levels</h3><p>${lv}</p>`;
+  if (d.implied.length) h += `<p>Implied: ${d.implied.map(l => `<span class="chip">${esc(l)}</span>`).join('')}</p>`;
+  h += `<h3>What only this cell gives</h3>` + (d.gives.length ? '<ul>' + d.gives.map(t => `<li>${esc(describeReach(t))}</li>`).join('') + '</ul>' : '<p>Nothing beyond the role\'s other cells.</p>');
+  const added = d.hosts.with.filter(x => !d.hosts.without.includes(x));
+  h += `<h3>Sign-in</h3><p>${added.length ? 'This cell admits the role to ' + esc(added.join(', ')) + '.' : 'No host depends on this cell.'}</p>`;
+  h += `<h3>Members of the group</h3><ul>${d.members.map(m => `<li><code>${esc(m.type)}</code> ${esc(m.name)}${m.note ? ' — ' + esc(m.note) : ''}</li>`).join('')}</ul>`;
+  if (d.waivers.length) h += `<h3>Waivers</h3><ul>${d.waivers.map(w => `<li><b>${esc(w.id)}</b> (${esc(w.invariant)}, review by ${esc(w.review_by)}): ${esc(w.rationale)}</li>`).join('')}</ul>`;
+  if (d.checker.length) h += `<h3>Checker</h3><ul>${d.checker.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`;
+  if (d.changed && !d.changed.same) h += `<h3>Against the applied version</h3><p>Applied: ${d.changed.applied_levels.join(' ') || 'nothing'}</p>`;
+  $('p-body').innerHTML = h;
+}
+
+async function loadHistory() {
+  try {
+    const c = await api('/api/policy/chain');
+    const s = chainStatus(c);
+    $('chain').className = 'status ' + s.cls; $('chain').textContent = s.text;
+  } catch (e) { $('chain').className = 'status grey'; $('chain').textContent = 'Cannot verify the record: ' + e.message; }
+  try {
+    const h = await api('/api/policy/history' + ($('hist-ver').value ? '?version=' + encodeURIComponent($('hist-ver').value) : ''));
+    $('findings').innerHTML = h.findings.length
+      ? `<div class="error">The version audit found ${h.findings.length} problem(s): ${esc(h.findings.map(f => `version ${f.version}: ${f.finding}`).join('; '))}</div>`
+      : '<div class="ok">The version audit finds nothing.</div>';
+    $('events').innerHTML = '<tr><th>#</th><th>When (UTC)</th><th>Event</th><th>Version</th><th>By</th><th>Reason / details</th></tr>' +
+      h.events.map(e => `<tr><td>${e.event_id}</td><td>${esc(String(e.at).slice(0, 19).replace('T', ' '))}</td><td><code>${esc(e.event)}</code></td>` +
+        `<td>${e.version == null ? '' : e.version}</td><td>${esc(e.actor_name)}</td><td>${esc(e.reason)}<details><summary>details</summary><pre>${esc(JSON.stringify(e.payload, null, 1))}</pre></details></td></tr>`).join('');
+  } catch (e) { show('error', friendlyRefusal(e.message)); }
+}
+
+async function loadPending() {
+  const list = pendingVersions(VERSIONS);
+  if (!list.length) { $('pending').innerHTML = '<p>Nothing waits for confirmation.</p>'; return; }
+  $('pending').innerHTML = list.map(v => `<div class="card" data-v="${v.version}">
+    <b>Version ${v.version}</b> (${esc(v.kind)}, ${esc(v.status)})
+    <dl><dt>Applied</dt><dd>${esc(String(v.applied_at || '').slice(0, 19).replace('T', ' '))} UTC</dd>
+    <dt>Reason</dt><dd>${esc(v.reason)}</dd><dt>Claimed by person</dt><dd><code>${esc(v.claimed_by_person)}</code>${v.claimed_by_person === ME.person ? ' (you: another quality assurance person confirms it)' : ''}</dd></dl>
+    <p>Before confirming, read the <a href="#" data-goto="matrix">matrix</a> and the <a href="#" data-goto="history">history</a> of this version.</p>
+    <label class="attest"><input type="checkbox" class="att"> <span>${esc(ME.attest)}</span></label>
+    <label>Note (required)<textarea class="note-in" maxlength="2000"></textarea></label>
+    <div class="row"><button class="btn do-confirm" disabled>Confirm</button><button class="btn secondary do-dispute" disabled>Dispute…</button></div>
+  </div>`).join('');
+  document.querySelectorAll('#pending .card').forEach(card => {
+    const att = card.querySelector('.att'), note = card.querySelector('.note-in');
+    const upd = () => {
+      card.querySelector('.do-confirm').disabled = !confirmEnabled(att.checked, note.value);
+      card.querySelector('.do-dispute').disabled = !disputeEnabled(note.value);
+    };
+    att.addEventListener('change', upd); note.addEventListener('input', upd);
+    card.querySelector('.do-confirm').addEventListener('click', () => act(card.dataset.v, 'confirm', { note: note.value, attest: att.checked ? ME.attest : '' }));
+    card.querySelector('.do-dispute').addEventListener('click', () => {
+      if (confirm(`Dispute version ${card.dataset.v}? A dispute is permanent: the version stays disputed until a later version supersedes it.`)) act(card.dataset.v, 'dispute', { note: note.value });
+    });
+  });
+  document.querySelectorAll('#pending [data-goto]').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); select(a.dataset.goto); }));
+}
+
+async function act(v, verb, body) {
+  try {
+    await api(`/api/policy/${v}/${verb}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
+    VERSIONS = (await api('/api/policy')).versions;
+    await loadPending();
+    show('ok', `Version ${v} ${verb === 'confirm' ? 'confirmed' : 'disputed'}. It is in the history.`);
+  } catch (e) { show('error', friendlyRefusal(e.message)); }
+}
+
+async function init() {
+  try { ME = await api('/api/me'); } catch (e) { return show('error', friendlyRefusal(e.message)); }
+  $('who').textContent = `${ME.user} (${ME.role})`;
+  $('lnk-decisions').href = ME.access_url || '#';
+  $('lnk-review').href = ME.access_url || '#';
+  const views = [];
+  document.querySelectorAll('nav.tabs button').forEach(b => {
+    if (ME.can[b.dataset.view]) { b.hidden = false; views.push(b.dataset.view); b.addEventListener('click', () => select(b.dataset.view)); }
+  });
+  if (!views.length) return show('error', 'Your role sees nothing in the Policy UI.');
+  try {
+    const list = await api('/api/policy');
+    VERSIONS = list.versions;
+    $('ver').innerHTML = VERSIONS.filter(v => ['applied', 'superseded'].includes(v.status)).map(v =>
+      `<option value="${v.version}"${v.status === 'applied' ? ' selected' : ''}>${v.version} (${esc(v.kind)}, ${esc(v.status)})</option>`).join('');
+    $('hist-ver').innerHTML += VERSIONS.map(v => `<option value="${v.version}">${v.version}</option>`).join('');
+  } catch (e) { show('error', friendlyRefusal(e.message)); }
+  $('ver').addEventListener('change', () => loadMatrix($('ver').value));
+  $('hist-ver').addEventListener('change', loadHistory);
+  $('matrix').addEventListener('click', ev => { const td = ev.target.closest('td.cell'); if (td) openCell(td.dataset.role, td.dataset.group); });
+  $('matrix').addEventListener('keydown', ev => { const td = ev.target.closest('td.cell'); if (td && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); openCell(td.dataset.role, td.dataset.group); } });
+  $('p-close').addEventListener('click', () => { $('panel').hidden = true; });
+  let first = views[0];
+  try { const t = localStorage.getItem('policy-tab'); if (views.includes(t)) first = t; } catch (e) { /* storage off */ }
+  if (ME.can.confirm && pendingVersions(VERSIONS).length) first = 'confirm';
+  select(first);
+}
+init();
+</script>
+<script src="/_account/user-menu.js" defer></script>
+</body>
+</html>

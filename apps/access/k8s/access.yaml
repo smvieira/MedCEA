@@ -35,6 +35,7 @@ spec:
         - {name: KC_CLIENT_ID, value: access}
         - {name: ACCESS_URL, value: "https://${ACCESS_DOMAIN}"}
         - {name: PORTAL_URL, value: "https://${PORTAL_DOMAIN}"}
+        - {name: POLICY_URL, value: "https://${POLICY_DOMAIN}"}   # the Policy UI, linked from the tab bar (IAM 4.3)
         - {name: LOGIN_ORIGIN, value: "https://${KEYCLOAK_DOMAIN}"}
         - {name: KC_PUBLIC_URL, value: "https://${KEYCLOAK_DOMAIN}"}
         - {name: HOST_CLIENTS, value: "${HOST_CLIENTS}"}
