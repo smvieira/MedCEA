@@ -148,7 +148,9 @@ function chips(cell) {
     .map(l => ({ level: l, constraint: cons[l] || null }));
 }
 
-function confirmEnabled(attested, note) { return attested === true && String(note || '').trim().length > 0; }
+// The person apply.sh recorded never confirms their own version (confirm_applied refuses it).
+function ownClaim(v, me) { return !!(v && me && v.claimed_by_person && v.claimed_by_person === me.person); }
+function confirmEnabled(attested, note, own) { return own !== true && attested === true && String(note || '').trim().length > 0; }
 function disputeEnabled(note) { return String(note || '').trim().length > 0; }
 
 // The database's refusals (iam_policy._qa, confirm_applied, dispute_applied), in plain words.
@@ -294,23 +296,25 @@ async function loadHistory() {
 async function loadPending() {
   const list = pendingVersions(VERSIONS);
   if (!list.length) { $('pending').innerHTML = '<p>Nothing waits for confirmation.</p>'; return; }
-  $('pending').innerHTML = list.map(v => `<div class="card" data-v="${v.version}">
+  $('pending').innerHTML = list.map(v => { const own = ownClaim(v, ME); return `<div class="card" data-v="${v.version}"${own ? ' data-own="1"' : ''}>
     <b>Version ${v.version}</b> (${esc(v.kind)}, ${esc(v.status)})
     <dl><dt>Applied</dt><dd>${esc(String(v.applied_at || '').slice(0, 19).replace('T', ' '))} UTC</dd>
-    <dt>Reason</dt><dd>${esc(v.reason)}</dd><dt>Claimed by person</dt><dd><code>${esc(v.claimed_by_person)}</code>${v.claimed_by_person === ME.person ? ' (you: another quality assurance person confirms it)' : ''}</dd></dl>
-    <p>Before confirming, read the <a href="#" data-goto="matrix">matrix</a> and the <a href="#" data-goto="history">history</a> of this version.</p>
-    <label class="attest"><input type="checkbox" class="att"> <span>${esc(ME.attest)}</span></label>
+    <dt>Reason</dt><dd>${esc(v.reason)}</dd><dt>Claimed by person</dt><dd><code>${esc(v.claimed_by_person)}</code>${own ? ' (you)' : ''}</dd></dl>
+    ${own ? '<div class="note">You applied this version (apply.sh recorded your person), so you cannot confirm it: another quality assurance person signs in and confirms it. You can still dispute it.</div>'
+          : '<p>Before confirming, read the <a href="#" data-goto="matrix">matrix</a> and the <a href="#" data-goto="history">history</a> of this version.</p>'}
+    ${own ? '' : `<label class="attest"><input type="checkbox" class="att"> <span>${esc(ME.attest)}</span></label>`}
     <label>Note (required)<textarea class="note-in" maxlength="2000"></textarea></label>
-    <div class="row"><button class="btn do-confirm" disabled>Confirm</button><button class="btn secondary do-dispute" disabled>Dispute…</button></div>
-  </div>`).join('');
+    <div class="row">${own ? '' : '<button class="btn do-confirm" disabled>Confirm</button>'}<button class="btn secondary do-dispute" disabled>Dispute…</button></div>
+  </div>`; }).join('');
   document.querySelectorAll('#pending .card').forEach(card => {
-    const att = card.querySelector('.att'), note = card.querySelector('.note-in');
+    const att = card.querySelector('.att'), note = card.querySelector('.note-in'), conf = card.querySelector('.do-confirm');
     const upd = () => {
-      card.querySelector('.do-confirm').disabled = !confirmEnabled(att.checked, note.value);
+      if (conf) conf.disabled = !confirmEnabled(att.checked, note.value, card.dataset.own === '1');
       card.querySelector('.do-dispute').disabled = !disputeEnabled(note.value);
     };
-    att.addEventListener('change', upd); note.addEventListener('input', upd);
-    card.querySelector('.do-confirm').addEventListener('click', () => act(card.dataset.v, 'confirm', { note: note.value, attest: att.checked ? ME.attest : '' }));
+    if (att) att.addEventListener('change', upd);
+    note.addEventListener('input', upd);
+    if (conf) conf.addEventListener('click', () => act(card.dataset.v, 'confirm', { note: note.value, attest: att.checked ? ME.attest : '' }));
     card.querySelector('.do-dispute').addEventListener('click', () => {
       if (confirm(`Dispute version ${card.dataset.v}? A dispute is permanent: the version stays disputed until a later version supersedes it.`)) act(card.dataset.v, 'dispute', { note: note.value });
     });

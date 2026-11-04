@@ -75,6 +75,11 @@ class Logic(unittest.TestCase):
                        "confirmEnabled('true', 'ok'), disputeEnabled('why'), disputeEnabled('')]")
         self.assertEqual(got, [True, False, False, False, True, False])
 
+    def test_own_claim_cannot_confirm(self):
+        got = run_node("[ownClaim({claimed_by_person: 'p1'}, {person: 'p1'}), ownClaim({claimed_by_person: 'p1'}, {person: 'p2'}), "
+                       "ownClaim({claimed_by_person: null}, {person: null}), confirmEnabled(true, 'ok', true), confirmEnabled(true, 'ok', false)]")
+        self.assertEqual(got, [True, False, False, False, True])
+
     def test_chain_status(self):
         got = run_node("[chainStatus({ok: true, events: 50, head: '0123456789abcdef'}).cls, "
                        "chainStatus({ok: false, first_bad_event: 7, detail: 'hash'}).text, "
