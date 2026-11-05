@@ -884,10 +884,16 @@ _create_public_device_client() {
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" -d "$BODY" || true
 }
 
+# Sign out (1 Nov 2026, apps/access/access-api.py account_links): each user-menu host's
+# client, and Node-RED's editor Logout (5 Nov 2026, node_red_logout_url), ends the Keycloak session and Keycloak returns to the workbench's /hub/logout,
+# so that is a post-logout URI of every such client. Registered whatever WORKBENCH_ENABLED
+# says (a fixed address of this platform), so a Sign out never meets Keycloak's "Invalid
+# redirect uri" when the access deploy and this run disagree about the workbench.
+_HUB_LOGOUT_URI="https://${WORKBENCH_DOMAIN}/hub/logout"
 echo -e "${YELLOW}  Creating client 'node-red'...${NC}"
 # Two callbacks: the proxy's, and Node-RED's own editor sign-in (adminAuth, IAM 3.3).
 _NODE_RED_SECRET=$(_create_client "node-red" "https://${NODE_RED_DOMAIN}/oauth2/callback" false \
-  "https://${NODE_RED_DOMAIN}/auth/strategy/callback")
+  "https://${NODE_RED_DOMAIN}/auth/strategy/callback" "$_HUB_LOGOUT_URI")
 echo -e "${YELLOW}  Creating client 'grafana'...${NC}"
 _GRAFANA_SECRET=$(_create_client "grafana" "https://${GRAFANA_DOMAIN}/login/generic_oauth")
 echo -e "${YELLOW}  Creating client 'workbench'...${NC}"
@@ -899,12 +905,6 @@ _WORKBENCH_SECRET=$(_create_client "workbench" "https://${WORKBENCH_DOMAIN}/hub/
 echo -e "${YELLOW}  Creating public client 'workbench-notebook' (device sign-in from a notebook)...${NC}"
 _create_public_device_client "workbench-notebook" \
     || echo -e "${RED}  Notebooks cannot sign in to read platform data until this client exists.${NC}" >&2
-# Sign out (1 Nov 2026, apps/access/access-api.py account_links): each user-menu host's
-# client ends the Keycloak session and Keycloak returns to the workbench's /hub/logout,
-# so that is a post-logout URI of every such client. Registered whatever WORKBENCH_ENABLED
-# says (a fixed address of this platform), so a Sign out never meets Keycloak's "Invalid
-# redirect uri" when the access deploy and this run disagree about the workbench.
-_HUB_LOGOUT_URI="https://${WORKBENCH_DOMAIN}/hub/logout"
 echo -e "${YELLOW}  Creating client 'portal'...${NC}"
 _PORTAL_SECRET=$(_create_client "portal" "https://${PORTAL_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
 echo -e "${YELLOW}  Creating client 'config'...${NC}"
@@ -1727,9 +1727,12 @@ print(json.dumps({"identity": "node-red NR_ADMIN_AUTH=off", "pod_since": os.envi
         echo -e "${YELLOW}WARNING: could not record Node-RED's break-glass in iam_policy.history: ${_OUT:0:200}${NC}" >&2
     fi
 fi
+# The editor's Logout signs out of the platform (5 Nov 2026): node_red_logout_url.
+NR_LOGOUT_URL="$(node_red_logout_url)" || {
+    echo -e "${RED}ERROR: could not build Node-RED's logout address (python3 missing?)${NC}" >&2; exit 1; }
 _NR_VALUES=$(mktemp /tmp/node-red-values-XXXXXX.yaml)
 render "$SCRIPT_DIR/k8s/node-red/values.yaml" NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM NODE_RED_DOMAIN \
-  NODE_RED_TZ NR_SETTINGS_CHECKSUM > "$_NR_VALUES"
+  NODE_RED_TZ NR_SETTINGS_CHECKSUM NR_LOGOUT_URL > "$_NR_VALUES"
 $MK8S helm3 upgrade --install node-red \
   node-red/node-red \
   --version 0.40.0 \

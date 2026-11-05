@@ -1979,6 +1979,8 @@ class WiringTest(unittest.TestCase):
         used = set(re.findall(r"\$\{([A-Z_]+)\}", values))
         self.assertEqual(used - set(call.replace("\\", " ").split()), set())
         self.assertIn("NR_SETTINGS_CHECKSUM", used)
+        self.assertIn("NR_LOGOUT_URL", used)
+        self.assertIn('NR_LOGOUT_URL="$(node_red_logout_url)" ||', infra)
         for line in ("configMapName: node-red-settings", "name: node-red-auth, optional: true",
                      "mountPath: /auth-policy", "passport-openidconnect@0.1.2", "storageClass: microk8s-hostpath",
                      "name: node-red-oidc, key: client-secret", "name: node-red-admin-tokens, key: deploy"):
@@ -2121,6 +2123,11 @@ class ShortSessionsTest(unittest.TestCase):
             self.assertEqual(len(calls), 1, c)
             self.assertTrue(calls[0].endswith(' "" "$_HUB_LOGOUT_URI"'), (c, calls[0]))
         self.assertLess(src.index('_HUB_LOGOUT_URI="'), src.index('_create_client "portal"'))
+        # Node-RED's editor Logout (5 Nov 2026, node_red_logout_url) returns there too, so the
+        # node-red client registers it, and the address is defined before that client
+        nr = re.search(r'_create_client "node-red" (.*?)\)\n', src, re.S).group(1)
+        self.assertTrue(nr.rstrip().endswith('"$_HUB_LOGOUT_URI"'), nr)
+        self.assertLess(src.index('_HUB_LOGOUT_URI="'), src.index('_create_client "node-red"'))
         # the access deploy renders the same address
         self.assertIn('SIGNOUT_HUB="https://${WORKBENCH_DOMAIN:-ai-workbench.$DOMAIN}/hub/logout"', dep)
 

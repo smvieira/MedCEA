@@ -214,6 +214,33 @@ class NrCurlTest(unittest.TestCase):
         self.assertEqual(r.stderr.count("no Secret node-red-admin-tokens"), 1)
 
 
+def node_red_logout_url(workbench="true"):
+    r = subprocess.run(["bash", "-c", 'source infra/lib-oauth2-proxy.sh; node_red_logout_url'], cwd=ROOT,
+                       capture_output=True, text=True, check=True,
+                       env=dict(os.environ, NODE_RED_DOMAIN="node-red.test", KEYCLOAK_DOMAIN="kc.test",
+                                KEYCLOAK_REALM="medcea", WORKBENCH_DOMAIN="wb.test", WORKBENCH_ENABLED=workbench))
+    return r.stdout.strip()
+
+
+class LogoutUrlTest(unittest.TestCase):
+    """node_red_logout_url (5 Nov 2026): the user menu's Sign out chain for the editor's Logout."""
+
+    def test_chain(self):
+        from urllib.parse import parse_qs, urlsplit
+        for workbench, back in (("true", "https://wb.test/hub/logout"), ("false", "https://node-red.test/")):
+            url = node_red_logout_url(workbench)
+            u = urlsplit(url)
+            self.assertEqual((u.scheme, u.netloc, u.path), ("https", "node-red.test", "/oauth2/sign_out"))
+            rd = parse_qs(u.query, strict_parsing=True)
+            self.assertEqual(list(rd), ["rd"])
+            k = urlsplit(rd["rd"][0])
+            self.assertEqual((k.scheme, k.netloc, k.path),
+                             ("https", "kc.test", "/realms/medcea/protocol/openid-connect/logout"))
+            self.assertEqual(parse_qs(k.query, strict_parsing=True),
+                             {"client_id": ["node-red"], "post_logout_redirect_uri": [back]})
+            self.assertNotRegex(url.lower(), r"id_token|access_token|token=")
+
+
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
 class SettingsJsTest(unittest.TestCase):
     JS = r"""
@@ -221,7 +248,8 @@ const s = require(process.argv[2]);
 const a = s.adminAuth;
 const out = {type: a.type, autoLogin: a.strategy && a.strategy.autoLogin,
              arity: a.strategy && a.strategy.options.verify.length,
-             expiry: a.sessionExpiryTime, top_expiry: s.sessionExpiryTime === undefined ? null : s.sessionExpiryTime};
+             expiry: a.sessionExpiryTime, top_expiry: s.sessionExpiryTime === undefined ? null : s.sessionExpiryTime,
+             logout: s.editorTheme.logout === undefined ? null : s.editorTheme.logout};
 const done = (k) => (err, user) => { out[k] = user; };
 (async () => {
   if (a.type === 'strategy') {
@@ -239,7 +267,7 @@ const done = (k) => (err, user) => { out[k] = user; };
 })();
 """
 
-    def run_js(self, module=True, policy=True, sessions=None):
+    def run_js(self, module=True, policy=True, sessions=None, **extra):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp)
         mod = os.path.join(tmp, "passport-openidconnect")
@@ -262,6 +290,8 @@ const done = (k) => (err, user) => { out[k] = user; };
         self.sessions_file = sess
         env = dict(os.environ, NR_ADMIN_AUTH="on", NR_DEPLOY_TOKEN="d" * 64, NR_SESSIONS_FILE=sess,
                    NR_AUTH_OIDC_MODULE=mod, NR_AUTH_POLICY_FILE=pol, NR_OIDC_CLIENT_SECRET="cs")
+        env.pop("NR_LOGOUT_URL", None)
+        env.update(extra)
         r = subprocess.run(["node", script, os.path.join(ROOT, "k8s", "node-red", "settings.js")],
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -288,6 +318,18 @@ const done = (k) => (err, user) => { out[k] = user; };
         self.assertEqual(out["tok_ok"], {"username": "system:deploy", "permissions": "*"})
         self.assertIsNone(out["tok_bad"])
         self.assertIsNone(out["tok_empty"])
+
+    def test_logout_signs_out_of_the_platform(self):
+        """5 Nov 2026: the editor's Logout goes through the platform's sign-out (NR_LOGOUT_URL),
+        an https address only; without one Logout ends the editor session alone, said at start."""
+        url = node_red_logout_url()
+        out, err = self.run_js(NR_LOGOUT_URL=url)
+        self.assertEqual(out["logout"], {"redirect": url})
+        self.assertNotIn("NR_LOGOUT_URL", err)
+        for bad in ("", "javascript:alert(1)", "http://node-red.test/", "https://a b"):
+            out, err = self.run_js(NR_LOGOUT_URL=bad)
+            self.assertIsNone(out["logout"], bad)
+            self.assertIn("NR_LOGOUT_URL is not an https address", err)
 
     def test_fails_closed(self):
         for module, policy in ((False, True), (True, False)):

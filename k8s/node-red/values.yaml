@@ -1,6 +1,6 @@
 # Node-RED (chart schwarzit/node-red 0.40.0), rendered by deploy-infra.sh with
 #   render k8s/node-red/values.yaml NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM NODE_RED_DOMAIN
-#          NODE_RED_TZ NR_SETTINGS_CHECKSUM
+#          NODE_RED_TZ NR_SETTINGS_CHECKSUM NR_LOGOUT_URL
 # into a mktemp file (lib-render.sh). It holds no secret: the client secret and the deploy
 # token come from Secrets node-red-oidc and node-red-admin-tokens.
 image:
@@ -44,6 +44,10 @@ env:
     value: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
   - name: NR_OIDC_CALLBACK
     value: "https://${NODE_RED_DOMAIN}/auth/strategy/callback"
+  # Where the editor's Logout goes (settings.js editorTheme.logout): the platform's sign-out
+  # chain, built by node_red_logout_url (infra/lib-oauth2-proxy.sh). No secret, no token.
+  - name: NR_LOGOUT_URL
+    value: "${NR_LOGOUT_URL}"
   - name: NR_OIDC_CLIENT_SECRET
     valueFrom:
       secretKeyRef: {name: node-red-oidc, key: client-secret}

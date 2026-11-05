@@ -20,6 +20,12 @@
  * ingest flow keeps running and health-check.sh noderedauth FAILs. NR_ADMIN_AUTH=off
  * (kubectl set env, the break-glass) turns adminAuth off; ./deploy-infra.sh turns it on.
  *
+ * Logout (5 Nov 2026): editorTheme.logout.redirect sends the browser, after the editor has
+ * revoked its own session, through the platform's sign-out (NR_LOGOUT_URL, built by
+ * node_red_logout_url in infra/lib-oauth2-proxy.sh: the proxy's cookie, the Keycloak
+ * session, the workbench's logout). Without it Logout ended only the editor's session and
+ * autoLogin signed the same person straight back in. Only an https address is taken.
+ *
  * No httpNodeAuth (basic auth would be one shared password): the flows' http-in endpoints
  * are reachable only through the proxy, which admits the same roles, and NetworkPolicy
  * iam-node-red. Never log a token or a profile here.
@@ -28,6 +34,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const env = process.env;
+const LOGOUT_URL = /^https:\/\/[^\s"'<>]+$/.test(env.NR_LOGOUT_URL || '') ? env.NR_LOGOUT_URL : '';
+if (!LOGOUT_URL) {
+    console.error('[medcea] NR_LOGOUT_URL is not an https address: the editor\'s Logout ends only the editor session');
+}
 // Fixed in the pod (k8s/node-red/values.yaml); the overrides are for tests/test_node_red_flows.py.
 const POLICY = env.NR_AUTH_POLICY_FILE || '/auth-policy/permissions.json';
 const OIDC_MODULE = env.NR_AUTH_OIDC_MODULE || '/opt/nr-auth/node_modules/passport-openidconnect';
@@ -205,6 +215,8 @@ module.exports = {
     editorTheme: {
         palette: {},
         projects: { enabled: false, workflow: { mode: 'manual' } },
-        codeEditor: { lib: 'monaco', options: {} }
+        codeEditor: { lib: 'monaco', options: {} },
+        // Logout: through the platform's sign-out (header comment); none without an address
+        ...(LOGOUT_URL ? { logout: { redirect: LOGOUT_URL } } : {})
     }
 };

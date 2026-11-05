@@ -27,6 +27,7 @@
 <tr><td><a href="#training-e18">E18 Propose a git skeleton change and approve it</a></td><td>host operator (<span class="role">admin</span>), <span class="role">qa</span></td><td>A git change that gives access reaches no deploy: it is proposed from a commit as a skeleton version and approved with the attestation by a <span class="role">qa</span> person who did not propose it.</td><td>4 Nov 2026: version 6, approved by <code>sergio_qa</code> with the attestation, withdrawn</td></tr>
 <tr><td><a href="#training-e19">E19 Apply a policy change, roll it back and confirm it</a></td><td>host operator (<span class="role">admin</span>), <span class="role">qa</span> (two accounts)</td><td>An approved change takes effect only through <code>apply.sh</code>, which checks the approval on the host first; a rollback restores the earlier version and is confirmed afterwards by a <span class="role">qa</span> person who did not run it.</td><td>5 Nov 2026</td></tr>
 <tr><td><a href="#training-e20">E20 Open a dashboard tool from the portal</a></td><td><span class="role">engineer</span>, <span class="role">operator</span>; later <span class="role">bio_scientist</span></td><td>The MedCEA Dashboard card offers the dashboard tools; each tool admits only the roles the access policy gives it.</td><td>Grafana part 4 Nov 2026; Superset part after IAM 4.5</td></tr>
+<tr><td><a href="#training-e21">E21 Log out of the Node-RED editor</a></td><td><span class="role">engineer</span></td><td>The editor's Logout ends the platform sign-in too, so the next person on the browser must sign in.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -660,6 +661,33 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 </ul>
 <p><strong>Afterwards.</strong> Nothing to undo. Charts made in step 4 stay in Superset; delete them if they were only for the exercise.</p>
 <p><strong>Last done.</strong> Grafana part, 4 November 2026, on production after <code>./deploy-infra.sh</code> at 22:53 (commit 44443e9; health 55/55): the MedCEA Dashboard page showed Grafana and Superset, Superset greyed out with "Not installed yet" and not clickable; the <span class="role">engineer</span> opened Grafana as Editor; the <span class="role">operator</span> was refused at Grafana's sign-in. Superset part: not yet (after IAM 4.5).</p>
+
+<h3 id="training-e21">E21 Log out of the Node-RED editor</h3>
+<p><strong>Goal.</strong> See that the Node-RED editor's <strong>Logout</strong> signs you out of the whole platform, not only out of the editor, so whoever opens Node-RED next on that browser must sign in. The exercise proves the decision of 5 November 2026 "The Node-RED editor's Logout signs out of the platform" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> <code>engineer</code> (<span class="role">engineer</span>), see the <a href="#compliance-test-accounts">test accounts</a>.</p>
+<p><strong>Before you start.</strong> <code>./deploy-infra.sh</code> has run since 5 November 2026 (it gives Node-RED its logout address and registers the return addresses with the platform sign-in); <code>./health-check.sh</code> shows <strong>Node-RED editor rights</strong> OK. Use a browser window with no other platform session.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>engineer</code>: open <code>https://node-red.&lt;domain&gt;</code>, sign in, and wait for the editor.</li>
+<li>Click the person icon at the top right of the editor, then <strong>Logout</strong>.</li>
+<li>On the platform sign-in page that asks "Do you want to log out?", click <strong>Logout</strong>.</li>
+<li>Open <code>https://node-red.&lt;domain&gt;</code> again in the same browser.</li>
+<li>Open <code>https://portal.&lt;domain&gt;</code> in the same browser.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 2: the address bar passes through <code>node-red.&lt;domain&gt;/oauth2/sign_out</code> to the platform sign-in's logout question.</li>
+<li>Step 3: you land on the platform sign-in page (through the AI Workbench's logout when the workbench is installed).</li>
+<li>Step 4: the platform sign-in page, not the editor: Node-RED does not open until someone signs in.</li>
+<li>Step 5: the platform sign-in page as well: the logout ended the platform session, not only Node-RED's.</li>
+</ul>
+<div class="record"><p>Nothing is written to the policy history. Node-RED's log has <code>auth.login.revoke</code> for the editor session (its audit logging); the platform sign-in records the logout (<code>LOGOUT</code> among realm <code>medcea</code>'s login events). Write the date and what steps 4 and 5 showed under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>At step 3, choose not to confirm and go back instead: Node-RED's sign-in gate has already ended, so opening Node-RED leads to the platform sign-in, which still knows you and lets you straight back in. The platform session ends only when you confirm.</li>
+</ul>
+<p><strong>Afterwards.</strong> Nothing to undo; sign in again to go on working.</p>
+<p><strong>Last done.</strong> Not yet: run after the <code>./deploy-infra.sh</code> that brings the change.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>

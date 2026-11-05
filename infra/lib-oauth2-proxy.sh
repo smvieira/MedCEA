@@ -118,6 +118,32 @@ workbench_logout_url() {
         "${KEYCLOAK_DOMAIN:?}" "${KEYCLOAK_REALM:?}" "$rd"
 }
 
+# node_red_logout_url — prints where the Node-RED editor's Logout goes
+# (settings.js editorTheme.logout.redirect, from NR_LOGOUT_URL; 5 Nov 2026). The same
+# chain as the user menu's Sign out (apps/access account_links): Node-RED's proxy
+# sign-out (its cookie; the proxy whitelists KEYCLOAK_DOMAIN), Keycloak's end-session for
+# client node-red, then the workbench's /hub/logout when the workbench is deployed
+# (WORKBENCH_ENABLED=true, as the access deploy's SIGNOUT_HUB), else Node-RED's own
+# address, which then asks the platform sign-in. Without it the editor's Logout ended only
+# the editor's session and autoLogin signed the same person straight back in. client_id
+# and post_logout_redirect_uri only, never id_token_hint; both return addresses are
+# registered on client node-red by deploy-infra.sh (its origin, and _HUB_LOGOUT_URI).
+node_red_logout_url() {
+    local back
+    if [[ "${WORKBENCH_ENABLED:-true}" == "true" ]]; then
+        back="https://${WORKBENCH_DOMAIN:?}/hub/logout"
+    else
+        back="https://${NODE_RED_DOMAIN:?}/"
+    fi
+    python3 - "${NODE_RED_DOMAIN:?}" "${KEYCLOAK_DOMAIN:?}" "${KEYCLOAK_REALM:?}" "$back" <<'PY' || return 1
+import sys, urllib.parse
+nr, kc, realm, back = sys.argv[1:]
+q = lambda s: urllib.parse.quote(s, safe="")
+end = "https://%s/realms/%s/protocol/openid-connect/logout?client_id=node-red&post_logout_redirect_uri=%s" % (kc, realm, q(back))
+print("https://%s/oauth2/sign_out?rd=%s" % (nr, q(end)))
+PY
+}
+
 #   policy_workbench_egress || exit 1
 #
 # The notebooks' platform hops (IAM 3.2b): WORKBENCH_EGRESS, the workbench chart's
