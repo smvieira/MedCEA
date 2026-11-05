@@ -897,6 +897,18 @@ def _claims_of(x):
     return json.loads(x) if isinstance(x, str) else x
 
 
+def claims_recorded(token_claims, stored):
+    """True when the stored request.jwt.claims are the token's: PostgREST adds the role it
+    took (contract C1: always anon, the role claim key is one nobody issues), and only that,
+    only when the token carries no role of its own."""
+    stored = _claims_of(stored)
+    if not isinstance(stored, dict) or not isinstance(token_claims, dict):
+        return False
+    if "role" not in token_claims and stored.get("role") == "anon":
+        stored = {k: v for k, v in stored.items() if k != "role"}
+    return token_claims == stored
+
+
 # ── step 2.4: the skeleton gate and its exception for an approved skeleton version ──────
 def gate_decision(state, doc, gate, gate_rc, mode, version, head_has=None):
     """(rc, lines): the gate of design §14.8.4 step 2.4 (`<N>`) or §14.8.7 step 2
@@ -1312,7 +1324,7 @@ def evidence_problems(doc, jwks, prev_routes, prev_grants, issuer, version):
                       f"{version} and draft again"], None
     except JwsError as e:
         return out + [str(e)], None
-    if claims != _claims_of(evid.get("claims")):
+    if not claims_recorded(claims, evid.get("claims")):
         return out + ["the approval token's claims are not the ones recorded with it"], jwk
     if str(claims.get("sub") or "").lower() != sub:
         out.append("the approval token's sub is not approved_by_sub")
@@ -1503,7 +1515,7 @@ def rollback_problems(doc, state, jwks, k):
         else:
             try:
                 _, claims, _ = verify_rs256(jws, jwks)
-                if claims != _claims_of((ap.get("evidence") or {}).get("claims")):
+                if not claims_recorded(claims, (ap.get("evidence") or {}).get("claims")):
                     out.append("its approval token's claims are not the ones recorded")
             except UnknownKid:
                 warn.append(f"version {k}'s realm key is no longer published: the approval stands on its record")

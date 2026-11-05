@@ -2072,6 +2072,15 @@ class CheckApproval(unittest.TestCase):
         self.assertRefused("is not the one its approved event hashed", self.variant(ev={"jws_sha256": "0" * 64}))
         self.assertRefused("claims are not the ones recorded",
                            self.variant(evidence={"claims": dict(qa_claims(), extra=1)}))
+        # PostgREST's request.jwt.claims carries the role it took (C1: anon) and nothing else
+        self.assertEqual(self.refusals(doc=self.variant(evidence={"claims": dict(qa_claims(), role="anon")})), [])
+        self.assertRefused("claims are not the ones recorded",
+                           self.variant(evidence={"claims": dict(qa_claims(), role="rr_qa")}))
+        cr = apply_check.claims_recorded
+        self.assertTrue(cr({"a": 1}, '{"a": 1, "role": "anon"}'))
+        self.assertFalse(cr({"a": 1, "role": "x"}, {"a": 1, "role": "anon"}))   # the token's own role is compared
+        self.assertFalse(cr({"a": 1}, {"a": 1, "role": "anon", "b": 2}))
+        self.assertFalse(cr({"a": 1}, None))
         self.assertRefused("no longer published: withdraw version 2 and draft again",
                            jwks={"keys": [dict(JWKS["keys"][0], kid="rotated")]})
 
