@@ -665,6 +665,97 @@ class WizardTests(unittest.TestCase):
         with open(os.path.join(self.spool, "answer")) as f:
             self.assertEqual(f.read(), "1")
 
+    def post(self, sid, path, body, prompt=None):
+        if prompt is not None:
+            with open(os.path.join(self.spool, "prompt.json"), "w") as f:
+                json.dump(prompt, f)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), self.ws.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d%s" % (srv.server_address[1], path),
+                data=json.dumps(body).encode(),
+                headers={"Cookie": "%s=%s" % (self.ws.COOKIE, sid), "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, e.read()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_cancel_is_the_run_owners(self):
+        """5 Nov 2026: Cancel writes spool/cancel for the script; only the run's owner may."""
+        alice, _ = self.session(tokenset())
+        self.ws.STATE["run_id"] = "r1"
+        self.assertEqual(self.post(alice, "/api/cancel", {"run": "r1"})[0], 409)   # nothing runs
+        self.ws.STATE["run"] = subprocess.Popen(["sleep", "30"])
+        self.ws.STATE["run_owner"] = {"sub": "u-alice", "user": "alice"}
+        bob, _ = self.session(tokenset(sub="u-bob", user="bob"), sub="u-bob")
+        status, body = self.post(bob, "/api/cancel", {"run": "r1"})
+        self.assertEqual(status, 403)
+        self.assertIn(b"belongs to alice", body)
+        self.assertFalse(os.path.exists(os.path.join(self.spool, "cancel")))
+        # a stale tab naming an earlier run, or no run, cancels nothing
+        self.assertEqual(self.post(alice, "/api/cancel", {"run": "r0"})[0], 409)
+        self.assertEqual(self.post(alice, "/api/cancel", {})[0], 409)
+        self.assertFalse(os.path.exists(os.path.join(self.spool, "cancel")))
+        self.assertEqual(self.post(alice, "/api/cancel", {"run": "r1"})[0], 200)
+        with open(os.path.join(self.spool, "cancel")) as f:
+            self.assertEqual(f.read(), "alice")
+
+    def test_cancel_closes_once_the_board_is_written(self):
+        alice, _ = self.session(tokenset())
+        self.ws.STATE.update({"run": subprocess.Popen(["sleep", "30"]), "run_id": "r1",
+                              "run_owner": {"sub": "u-alice", "user": "alice"}})
+        open(os.path.join(self.spool, "nocancel"), "w").close()
+        status, body = self.post(alice, "/api/cancel", {"run": "r1"})
+        self.assertEqual(status, 409)
+        self.assertIn(b"too late to cancel", body)
+        self.assertFalse(os.path.exists(os.path.join(self.spool, "cancel")))
+        self.assertFalse(self.ws.cancellable())
+
+    def test_a_ui_run_is_cancellable_until_it_finishes(self):
+        """flash-device.sh --ui: the script is the server's parent, so 'running' is the spool's."""
+        self.ws.STATE.update({"daemon": False, "run": None, "run_id": "u1"})
+        self.assertTrue(self.ws.cancellable())
+        open(os.path.join(self.spool, "finished"), "w").close()
+        self.assertFalse(self.ws.cancellable())
+
+    def test_back_only_where_the_script_offers_it(self):
+        self.ws.STATE["run_owner"] = {"sub": "u-alice", "user": "alice"}
+        alice, _ = self.session(tokenset())
+        answer = os.path.join(self.spool, "answer")
+        status, _ = self.post(alice, "/api/answer", {"id": "p1", "back": True}, {"id": "p1", "label": "Slot?"})
+        self.assertEqual(status, 409)
+        self.assertFalse(os.path.exists(answer))
+        status, _ = self.post(alice, "/api/answer", {"id": "p2", "back": True},
+                              {"id": "p2", "label": "Slot?", "back": True})
+        self.assertEqual(status, 200)
+        with open(answer) as f:
+            self.assertEqual(f.read(), self.ws.BACK_TOKEN)
+        os.unlink(answer)
+        # a typed value can never pose as Back
+        status, _ = self.post(alice, "/api/answer", {"id": "p3", "value": "x" + self.ws.BACK_TOKEN},
+                              {"id": "p3", "label": "SSID", "back": True})
+        self.assertEqual(status, 400)
+        self.assertFalse(os.path.exists(answer))
+
+    def test_a_new_run_clears_a_stale_cancel(self):
+        with open(os.path.join(self.spool, "cancel"), "w") as f:
+            f.write("alice")
+        self.kc.token = lambda form: (200, token_response())
+        _sid, sess = self.session(tokenset(exp_in=200))
+        open(os.path.join(self.spool, "nocancel"), "w").close()
+        old = self.ws.STATE.get("run_id")
+        self.assertEqual(self.ws.start_run(sess, "dev")[0], 200)
+        self.assertFalse(os.path.exists(os.path.join(self.spool, "cancel")))
+        self.assertFalse(os.path.exists(os.path.join(self.spool, "nocancel")))
+        self.assertTrue(self.ws.STATE["run_id"])
+        self.assertNotEqual(self.ws.STATE["run_id"], old)
+
     def test_ui_run_is_bound_only_by_the_terminal_link(self):
         self.ws.STATE["daemon"] = False
         self.ws.STATE["token"] = "RUN-URL-TOKEN"

@@ -418,6 +418,29 @@ def register(base, spec):
     # API role has to that table, and a failure here is a registration failure:
     # a board the broker refuses is not onboarded.
     if spec.get("mqtt_password_hash"):
+        _register_credential(base, device_id, spec)
+    return device_id, action
+
+
+def _register_credential(base, device_id, spec):
+    """The board's broker credential: register_mqtt_credential v2 (device id, the board's
+    serial, the hash), which checks the serial against the device row and derives the
+    user, role and topic itself, so a person cannot register a credential for another
+    slot. Since IAM_DB_ROLES=true only v2 is granted (to the holders of C on devices),
+    and the wizard calling v1 was refused "permission denied" (found 5 Nov 2026). v1
+    (user, hash, device, role, topic from the client) is called only when v2 cannot be
+    called at all: IAM_DB_ROLES=false, where the legacy anon holds v1 alone."""
+    try:
+        name = _request(base, "/rpc/register_mqtt_credential", "POST", {
+            "p_device_id": device_id,
+            "p_serial": (spec.get("serial_number") or "").lower(),
+            "p_hash": spec["mqtt_password_hash"],
+        })
+    except PlatformError as e:
+        said = str(e)
+        if ("permission denied for function register_mqtt_credential" not in said
+                and "PGRST202" not in said):
+            raise
         _request(base, "/rpc/register_mqtt_credential", "POST", {
             "p_username": spec["mqtt_username"],
             "p_password_hash": spec["mqtt_password_hash"],
@@ -425,7 +448,12 @@ def register(base, spec):
             "p_role": spec["device_type"],
             "p_topic_base": spec["topic_base"],
         })
-    return device_id, action
+        return
+    # v2 names the credential after the device row; the board was given its user name
+    # by the wizard. They must agree, or the broker refuses the board for good.
+    if name != spec["mqtt_username"]:
+        raise PlatformError("the platform registered the broker credential as %r, but the board was "
+                            "given %r; onboard it again" % (name, spec["mqtt_username"]))
 
 
 def board(base, serial):

@@ -252,10 +252,35 @@ ui_tee() {
   else cat; fi
 }
 
-step()  { printf '\n%s==> %s%s\n' "$B" "$*" "$N"; ui_append ""; ui_append "==> $*"; ui_phase "$*"; }
+step()  { cancel_check; printf '\n%s==> %s%s\n' "$B" "$*" "$N"; ui_append ""; ui_append "==> $*"; ui_phase "$*"; }
 info()  { printf '    %s\n' "$*"; ui_append "    $*"; }
 warn()  { printf '%s !  %s%s\n' "$YEL" "$*" "$N" >&2; ui_append " !  $*"; }
 die()   { printf '%s !! %s%s\n' "$RED" "$*" "$N" >&2; ui_append " !! $*"; exit 1; }
+# Cancel (5 Nov 2026): the wizard page writes $UI_DIR/cancel (the run's owner only). It is
+# acted on at the next question or step, never inside a flash write (esptool stopped
+# mid-write leaves a board that must be re-flashed). The database is written only at
+# the end, so a cancelled run has registered nothing unless it got that far. Exit 130.
+BOARD_TOUCHED=0
+CANCEL_CLOSED=0
+cancel_check() {
+  [ "$CANCEL_CLOSED" = 1 ] && return 0
+  [ -n "${UI_DIR:-}" ] && [ -f "$UI_DIR/cancel" ] && cancelled
+  return 0
+}
+cancelled() {
+  local who where
+  who="$(head -c 80 "$UI_DIR/cancel" 2>/dev/null | tr -cd '[:alnum:]._@ -' || true)"
+  rm -f "$UI_DIR/prompt.json" "$UI_DIR/cancel"
+  if [ "$BOARD_TOUCHED" = 1 ]; then
+    where="the board was erased or partly written: onboard it again before it is used"
+  else
+    where="nothing was changed on the board"
+  fi
+  where="$where; nothing was registered"   # Cancel closes before the registration
+  printf '%s !! cancelled%s: %s%s\n' "$RED" "${who:+ by $who}" "$where" "$N" >&2
+  ui_append " !! cancelled${who:+ by $who} in the browser: $where"
+  exit 130
+}
 # EOF is not an answer. Without this, running the script with stdin closed —
 # `< /dev/null`, a cron entry, a `timeout` that detached the terminal — makes
 # any re-asking prompt spin forever on an empty reply nobody typed.
@@ -273,6 +298,13 @@ ask()   {
 # blocks on a file the server writes, so the script remains the single engine —
 # there is no second copy of the flow to drift out of sync.
 CHOICES=(); ANSWER=""
+# Back (5 Nov 2026): a question asked with BACK_OK=1 offers Back (the page's button, or
+# "<" in a terminal); the answer is then BACK_TOKEN, which nothing can type into the
+# page, and the caller goes to the previous stage. Only the questions before the board
+# is touched (role, slot, wiring) and the WiFi network/passphrase offer it.
+BACK_TOKEN=$'\x1b''back'; BACK_OK=0
+is_back() { [ "$ANSWER" = "$BACK_TOKEN" ]; }
+term_back() { [ "$BACK_OK" = 1 ] && [ "$ANSWER" = "<" ] && ANSWER="$BACK_TOKEN"; return 0; }
 # These set $ANSWER rather than echoing it, and that is load-bearing: a
 # $(command substitution) runs in a subshell, and bash defers a signal trap
 # until the current foreground command finishes. Blocking for a browser answer
@@ -284,6 +316,7 @@ ui_wait_answer() {
   printf '%s' "$json" > "$UI_DIR/prompt.json.tmp"
   mv "$UI_DIR/prompt.json.tmp" "$UI_DIR/prompt.json"
   while [ ! -f "$f" ]; do
+    cancel_check
     if [ -n "$UI_PID" ] && ! kill -0 "$UI_PID" 2>/dev/null; then
       rm -f "$UI_DIR/prompt.json"
       die "the browser UI stopped; re-run without --ui to answer in the terminal"
@@ -296,31 +329,31 @@ ui_wait_answer() {
 # backslashes or non-ASCII cannot break the payload.
 ui_prompt_json() {
   local kind="$1" label="$2" default="$3" hint="$4"
-  KIND="$kind" LABEL="$label" DEF="$default" HINT="$hint" ID="$RANDOM$$$(date +%s%N)" \
+  KIND="$kind" LABEL="$label" DEF="$default" HINT="$hint" ID="$RANDOM$$$(date +%s%N)" BACK="$BACK_OK" \
   python3 -c '
 import json, os, sys
 e = os.environ
 print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
                   "default": e["DEF"], "hint": e["HINT"],
-                  "submit_on_click": e["KIND"] == "choice",
+                  "submit_on_click": e["KIND"] == "choice", "back": e["BACK"] == "1",
                   "options": [l.rstrip("\n") for l in sys.stdin.read().split("\x00") if l]}))' \
   < <(printf '%s\0' "${CHOICES[@]:-}")
 }
 prompt_text()    { # label default [hint]   -> $ANSWER
   if ui_on; then CHOICES=(); ui_wait_answer "$(ui_prompt_json text "$1" "${2:-}" "${3:-}")"
-  else ANSWER="$(ask "$1" "${2:-}")"; fi
+  else ANSWER="$(ask "$1" "${2:-}")"; term_back; fi
 }
 prompt_secret()  { # label [hint]          -> $ANSWER
   if ui_on; then CHOICES=(); ui_wait_answer "$(ui_prompt_json secret "$1" "" "${2:-}")"
-  else read -r -s -p "    $1" ANSWER; echo; fi
+  else read -r -s -p "    $1" ANSWER; echo; term_back; fi
 }
 prompt_confirm() { # label [hint]          -> $ANSWER = y|n
   if ui_on; then CHOICES=(); ui_wait_answer "$(ui_prompt_json confirm "$1" n "${2:-}")"
-  else ANSWER="$(ask "$1 [y/N]: " n)"; fi
+  else ANSWER="$(ask "$1 [y/N]: " n)"; term_back; fi
 }
 prompt_choice()  { # label default [hint]  -> $ANSWER, options in CHOICES
   if ui_on; then ui_wait_answer "$(ui_prompt_json choice "$1" "${2:-}" "${3:-}")"
-  else ANSWER="$(ask "$1" "${2:-}")"; fi
+  else ANSWER="$(ask "$1" "${2:-}")"; term_back; fi
 }
 # The channel map is the one question a terminal cannot ask well: it is a table
 # with a live verdict on it, not a value. In the browser it is one prompt whose
@@ -331,7 +364,7 @@ prompt_channelmap() { # label spec-file [hint]  -> $ANSWER = the edited config J
   ui_on || { ANSWER=""; return 0; }
   CHOICES=()
   ui_wait_answer "$(
-    KIND=channelmap LABEL="$1" SPECF="$2" HINT="${3:-}" \
+    KIND=channelmap LABEL="$1" SPECF="$2" HINT="${3:-}" BACK="$BACK_OK" \
     ID="$RANDOM$$$(date +%s%N)" python3 -c '
 import json, os
 e = os.environ
@@ -339,7 +372,7 @@ with open(e["SPECF"], encoding="utf-8") as f:
     spec = json.load(f)
 print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
                   "default": "", "hint": e["HINT"], "submit_on_click": False,
-                  "options": [], "spec": spec}))')"
+                  "back": e["BACK"] == "1", "options": [], "spec": spec}))')"
 }
 ui_waiting() { ui_on && info "${DIM}→ answer in the browser${N}" || true; }
 
@@ -566,6 +599,7 @@ menu_ask() {
     else
       prompt_choice "$label [1-$n]: " "" "$hint"
     fi
+    is_back && return 0
     if [[ "$ANSWER" =~ ^[0-9]+$ ]] && [ "$ANSWER" -ge 1 ] && [ "$ANSWER" -le "$n" ]; then
       return 0
     fi
@@ -608,6 +642,7 @@ ask_param() {
       else
         menu_ask "$label?" "$hint" 2
       fi
+      is_back && return 0
       [ "$ANSWER" = "1" ] && ANSWER="true" || ANSWER="false"
       ;;
     choice)
@@ -620,6 +655,7 @@ ask_param() {
       if [ "$n" -eq 0 ]; then ANSWER="$def"; return 0; fi
       ui_waiting
       menu_ask "$label" "$hint" "$sel"
+      is_back && return 0
       ANSWER="$(printf '%s\n' "${PARAMS[@]}" \
                 | awk -F'\t' -v p="$name" -v i="$ANSWER" \
                       '$1=="OPTION" && $2==p { n++; if (n==i) { print $3; exit } }')"
@@ -628,6 +664,7 @@ ask_param() {
     *)
       ui_waiting
       prompt_text "$label [$def]: " "$def" "$hint"
+      is_back && return 0
       [ -n "$ANSWER" ] || ANSWER="$def"
       ;;
   esac
@@ -916,9 +953,15 @@ if [ "$UNREGISTERED" != 1 ]; then
   fi
 fi
 
-if [ "$UNREGISTERED" != 1 ]; then
+# --- the planning questions: role, slot, wiring (Back, 5 Nov 2026) -----------
+# Each stage is a function. Back at any of its questions sets PLAN_BACK and returns,
+# and the loop below goes to the previous stage that asked something. Nothing has
+# touched the board or the database yet, so going back undoes nothing; a stage
+# asked again starts from scratch (its answers are re-collected).
+plan_role() {
   # --- role ---
   if [ -z "$ROLE" ]; then
+    ROLE_ASKED=1; BACK_OK=0
     menu_reset
     menu_add "SENSE"   "reads the chamber and publishes"
     menu_add "CONTROL" "drives the chamber's relays"
@@ -929,6 +972,10 @@ if [ "$UNREGISTERED" != 1 ]; then
   fi
   info "role: ${B}$ROLE${N}"
 
+}
+
+plan_slot() {
+  SLOT_ASKED=0
   # --- slot ---
   # Free slots are offered; taken ones are listed separately rather than shown
   # greyed out in the same numbering, because a menu you can typo into a
@@ -979,9 +1026,11 @@ if [ "$UNREGISTERED" != 1 ]; then
       IFS=$'\t' read -r _ fu fz _ _ _ fdns _ _ ftype fdesc <<<"$f"
       menu_add "$fu / $fz" "$fdns${ftype:+ · $ftype}${fdesc:+ · $fdesc}"
     done
+    SLOT_ASKED=1; BACK_OK="$ROLE_ASKED"
     ui_waiting
     menu_ask "Which unit and zone is this board going into?" \
       "Only free $ROLE slots are listed. Each is one physical zone of one chamber."
+    if is_back; then PLAN_BACK=1; return 0; fi
     SLOT_LINE="${FREE[$((ANSWER-1))]}"
     IFS=$'\t' read -r _ UNIT_CODE ZONE_CODE ZONE_ID _ _ SLOT_DNS _ _ _ _ <<<"$SLOT_LINE"
   fi
@@ -989,7 +1038,7 @@ if [ "$UNREGISTERED" != 1 ]; then
   [ -n "$SLOT_DNS" ] || die "internal: the platform returned a free slot with no hostname"
   # One name: the DHCP hostname, which is also dns_name and the payload's device_dns.
   info "hostname   : ${B}$SLOT_DNS${N}   ${DIM}(DHCP name, dns_name and MQTT device_dns)${N}"
-fi
+}
 
 # ------------------------------------------------- 0.6 what is wired up -------
 # The questions come from edge/templates/<role>.json, not from here — adding a
@@ -997,8 +1046,14 @@ fi
 # the fields the template marks as asked are asked; everything derivable is
 # derived. Defaults are the reference build's wiring, so pressing Enter through
 # the whole thing produces the board the fleet already runs.
-if [ "$UNREGISTERED" != 1 ]; then
+plan_wiring() {
   step "What is wired to this board"
+  # Every pass starts as a straight run does: Back to another slot or role must not
+  # leave an earlier pass's sensors or channel map behind.
+  SENSORS_TSV=""; CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
+  MESSAGE_INTERVAL=""; POLL_MS=""
+  BACK_OK=0
+  if [ "$ROLE_ASKED" = 1 ] || [ "$SLOT_ASKED" = 1 ]; then BACK_OK=1; fi
 
   mapfile -t TPL < <(python3 "$TEMPLATE_TOOL" drivers "$ROLE") \
     || die "cannot read the $ROLE template"
@@ -1038,6 +1093,7 @@ if [ "$UNREGISTERED" != 1 ]; then
       ui_waiting
       menu_ask "Which sensor is wired to this board?" \
         "Pick one at a time. A SENSE board may carry several; each publishes its own tags."
+      if is_back; then PLAN_BACK=1; return 0; fi
       _pick="$ANSWER"
       # The Done entry, when present, is always the last one.
       if [ "$_added" -gt 0 ] && [ "$_pick" -gt "$_avail" ]; then break; fi
@@ -1068,6 +1124,7 @@ if [ "$UNREGISTERED" != 1 ]; then
           continue
         fi
         ask_param "$pname" "$pkind" "$pdef" "$plabel" "$phint"
+        if is_back; then PLAN_BACK=1; return 0; fi
         SENSORS_TSV+="$DRIVER_ID"$'\t'"$pname"$'\t'"$ANSWER"$'\n'
       done
     done
@@ -1091,6 +1148,7 @@ if [ "$UNREGISTERED" != 1 ]; then
     ui_waiting
     prompt_confirm 'Use this reference wiring?' \
       "The relay layout of the reference build. Answer no to set each GPIO yourself, or to mark equipment this chamber does not have."
+    if is_back; then PLAN_BACK=1; return 0; fi
     CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
     if [ "$ANSWER" = "y" ]; then
       while IFS=$'\t' read -r kind fid flabel fpin; do
@@ -1109,6 +1167,7 @@ if [ "$UNREGISTERED" != 1 ]; then
       prompt_channelmap "Which channel drives what?" "$_CMSPEC" \
         "Every command the scheduler can send, and what it does to the relay channels. Remove the equipment this chamber does not have; the commands that needed it disappear with it."
       rm -f "$_CMSPEC"
+      if is_back; then PLAN_BACK=1; return 0; fi
       [ -n "$ANSWER" ] || die "the browser returned an empty channel map"
       # {"config": {...}, "variant": "esp32s3"} — the map plus the silicon it
       # was checked against.
@@ -1147,6 +1206,7 @@ print("channel map accepted (%d warning(s))" % d["warnings"])')"
         ui_waiting
         prompt_text "$flabel GPIO [${fpin:--}]: " "${fpin:--}" \
           "Blank or '-' if the chamber has no $flabel. Every command that needs it is then left out of the board's table entirely, rather than shipped as a no-op that reports success."
+        if is_back; then PLAN_BACK=1; return 0; fi
         case "${ANSWER:--}" in
           -) info "  ${DIM}$flabel: not fitted${N}" ;;
           *) CONTROL_PINS_TSV+="$fid"$'\t'"$ANSWER"$'\n' ;;
@@ -1176,12 +1236,32 @@ print("%d channel(s), %d actuator(s) from the editor"
       info "${DIM}$pname = $pdef   (advanced; --advanced to be asked)${N}"
     else
       ask_param "$pname" "$pkind" "$pdef" "$plabel" "$phint"
+      if is_back; then PLAN_BACK=1; return 0; fi
     fi
     case "$pname" in
       message_interval) MESSAGE_INTERVAL="$ANSWER" ;;
       poll_ms)          POLL_MS="$ANSWER" ;;
     esac
   done
+
+}
+
+if [ "$UNREGISTERED" != 1 ]; then
+  ROLE_ASKED=0; SLOT_ASKED=0; PLAN_STAGE=role
+  ui_on || info "${DIM}type < at a question to go back${N}"
+  while :; do
+    PLAN_BACK=0
+    case "$PLAN_STAGE" in
+      role)   plan_role; PLAN_STAGE=slot ;;
+      slot)   plan_slot
+              if [ "$PLAN_BACK" = 1 ]; then ROLE=""; PLAN_STAGE=role; else PLAN_STAGE=wiring; fi ;;
+      wiring) plan_wiring
+              if [ "$PLAN_BACK" != 1 ]; then break
+              elif [ "$SLOT_ASKED" = 1 ]; then PLAN_STAGE=slot
+              else ROLE=""; PLAN_STAGE=role; fi ;;
+    esac
+  done
+  BACK_OK=0
 
   # --- what was inferred, said out loud -------------------------------------
   TOPIC_BASE="$TOPIC_ROOT/$UNIT_CODE/$ZONE_CODE"
@@ -1360,7 +1440,7 @@ fi
 # NAMED, and the silicon has now said what it actually is. A C3 has no GPIO26,
 # an original ESP32 cannot drive GPIO34 at all, and either mistake produces a
 # board that flashes cleanly and then quietly fails to switch a relay.
-if [ -n "$CONTROL_ACTUATOR_JSON" ] && [ -n "$CONTROL_VARIANT" ] \
+if [ "$ROLE" = CONTROL ] && [ -n "$CONTROL_ACTUATOR_JSON" ] && [ -n "$CONTROL_VARIANT" ] \
    && [ "$CONTROL_VARIANT" != "$CHIP" ]; then
   warn "the channel map was checked against $CONTROL_VARIANT, but this board is $CHIP."
   if ! _RECHECK="$(printf '%s' "$CONTROL_ACTUATOR_JSON" \
@@ -1575,6 +1655,7 @@ fi
 
 flash_at() {
   local baud="$1"
+  BOARD_TOUCHED=1   # from here a cancel leaves a board that needs onboarding again
   # ui_tee passes output through to the terminal unchanged and copies a cleaned
   # copy into the browser log; PIPESTATUS keeps esptool's status, not tee's.
   if [ "$DO_ERASE" = 1 ]; then
@@ -1609,9 +1690,12 @@ info "${GRN}REPL up${N} — MicroPython $MPY_VER"
 # ---------------------------------------------------- 7. choose network -------
 step "WiFi"
 # One pass per network and passphrase, until the board itself has joined (wifi_try)
-# or the operator chooses to go on without that.
+# or the operator chooses to go on without that. SSID_PICKED: the network came from
+# the list here (not --ssid), so Back from the passphrase returns to the list.
+SSID_PICKED=0
 while :; do
 if [ -z "$SSID" ]; then
+  SSID_PICKED=1
   while :; do
     info "scanning from the board's own radio…"
     SCAN="$(mpy run "$SRC_DIR/scan_networks.py" 2>/dev/null || true)"
@@ -1663,7 +1747,11 @@ if [ -z "$SSID" ]; then
       esac
     fi
     case "$sel" in
-      m|M) prompt_text 'SSID' '' 'Exactly as configured on the access point.'; SSID="$ANSWER"
+      m|M) BACK_OK=1
+           prompt_text 'SSID' '' 'Exactly as configured on the access point.'
+           BACK_OK=0
+           is_back && continue      # back to the network list
+           SSID="$ANSWER"
            [ -n "$SSID" ] && break ;;
       r|R) continue ;;
       *) if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$_n" ]; then
@@ -1677,7 +1765,10 @@ info "ssid: $SSID"
 
 if [ -z "$PSK" ]; then
   ui_waiting
+  BACK_OK="$SSID_PICKED"
   prompt_secret "passphrase for '$SSID' (not echoed): " "Stored on the board in plaintext until flash encryption is on."
+  BACK_OK=0
+  if is_back; then SSID=""; continue; fi    # back to the network list
   PSK="$ANSWER"
 fi
 [ -n "$PSK" ] || warn "empty passphrase — only valid for an open network"
@@ -1898,6 +1989,11 @@ info "copied $(ls -1 "$APP_DIR"/*.py | wc -l) application module(s), boot.py las
 # ---------------------------------------------------- 10. verify --------------
 # The acceptance test is the real boot path, not a simulation of it: hard-reset
 # the board, let boot.py run, then ask the board what happened.
+# From here Cancel is closed: the board holds its files and its new passwords, so the
+# run goes on to the check, the registration and the record, which keeps them. The
+# page is told (spool nocancel) and /api/cancel then refuses.
+CANCEL_CLOSED=1
+[ -n "${UI_DIR:-}" ] && : > "$UI_DIR/nocancel" 2>/dev/null || true
 step "Verifying"
 mpy reset >/dev/null 2>&1 || true
 sleep 2

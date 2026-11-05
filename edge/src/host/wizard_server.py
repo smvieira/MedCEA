@@ -92,6 +92,17 @@ def run_active():
     return r is not None and r.poll() is None
 
 
+def cancellable():
+    """A run the page may cancel: the daemon's child while it runs; a --ui run (the
+    script is our parent) until it writes 'finished'; never once the script has said
+    its board is written (spool nocancel, from the Verifying step on)."""
+    if os.path.exists(spool("nocancel")):
+        return False
+    if STATE["daemon"]:
+        return run_active()
+    return not os.path.exists(spool("finished"))
+
+
 def load_catalog(path, repo_root):
     """Read the device-type catalogue and keep only entries that can actually run.
 
@@ -180,7 +191,8 @@ def start_run(sess, device_id):
         ts = tok.copy()
 
     d = STATE["dir"]
-    for name in ("log", "prompt.json", "answer", "done.json", "finished", "phase"):
+    STATE["run_id"] = secrets.token_hex(8)   # /api/cancel must name it: a stale tab cannot stop a later run
+    for name in ("log", "prompt.json", "answer", "done.json", "finished", "phase", "cancel", "nocancel"):
         try:
             os.unlink(os.path.join(d, name))
         except OSError:
@@ -486,7 +498,7 @@ __CHANNELMAP_CSS__
     <div class="opts" id="popts"></div>
     <div id="pmap" hidden></div>
     <div id="pfree" hidden><input type="text" id="pinput" autocomplete="off"><button class="alt" type="button" id="pshow" hidden aria-pressed="false">Show</button></div>
-    <div class="row" id="prow"><button class="go" id="psend">Continue</button>
+    <div class="row" id="prow"><button class="alt" type="button" id="pback" hidden>Back</button><button class="go" id="psend">Continue</button>
       <button class="alt" id="preset" hidden>Reset to reference wiring</button>
       <span class="hint" id="pmapwarn" hidden></span></div>
   </div>
@@ -499,6 +511,9 @@ __CHANNELMAP_CSS__
       this machine — onboarding runs on the host the platform runs on.</p>
     <div class="grid" id="store"></div>
   </div>
+  <div class="card" id="runcard" hidden><div class="row" style="margin-top:0">
+    <button class="alt" type="button" id="pcancel">Cancel onboarding</button>
+    <span class="hint" id="runhint">Stops the run at its next step. A flash write in progress finishes first.</span></div></div>
   <div class="card" id="idlecard" hidden><div class="idle"><span class="dot"></span><span id="idletext">Waiting for the script&hellip;</span></div></div>
   <div class="card" id="donecard" hidden></div>
   <div class="card"><pre class="log" id="log"></pre></div>
@@ -600,7 +615,36 @@ function renderPrompt(p) {
   }
   $("psend").hidden = (p.kind === "confirm");
   $("psend").disabled = false;
+  // Back (5 Nov 2026): only where the script offers it (questions before the board is
+  // touched, and the WiFi network and passphrase).
+  $("pback").hidden = !p.back;
 }
+
+function post(path, body) {
+  return api(path, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  }).then(async r => {
+    if (r.status === 403 || r.status === 409) {
+      const j = await r.json().catch(() => ({}));
+      if (j.error) alert(j.error);
+    }
+    return r;
+  });
+}
+function goBack() {
+  if (curId === null) return;
+  const id = curId; curId = null; mapCtl = null;
+  $("promptcard").hidden = true;
+  post("/api/answer", { id, back: true });
+}
+$("pback").onclick = goBack;
+let runId = null;
+$("pcancel").onclick = () => {
+  if (!confirm("Cancel this onboarding?\n\nBefore the erase nothing on the board or in the platform changes. " +
+               "After it, the board is left erased or partly written and must be onboarded again. " +
+               "Nothing is registered unless the run already got that far.")) return;
+  post("/api/cancel", { run: runId });
+};
 
 function send() {
   if (curId === null) return;
@@ -759,11 +803,18 @@ async function tick() {
     const idle = s.daemon && !s.running && !s.prompt;
     $("startcard").hidden = !idle;
     if (idle) renderStore(s.catalog || [], !!(s.done || s.finished));
-    $("idlecard").hidden = !!(s.prompt || s.done || idle);
+    // A run that ended without a summary (cancelled, or an error) keeps its outcome on
+    // the page above the device chooser, in the daemon too.
+    const ended = s.finished && !s.done && s.exit && s.exit !== "0";
+    $("idlecard").hidden = !!(s.prompt || s.done || (idle && !ended));
     // Set on every tick: a run's outcome must not stay on the page into the next run
     // (until 5 Nov 2026 "stopped with exit code 1" stayed up while the next run worked).
+    runId = s.run_id;
+    $("runcard").hidden = !s.cancellable;
     $("idletext").textContent = s.finished && !s.done
-      ? (s.exit && s.exit !== "0"
+      ? (s.exit === "130"
+          ? "The run was cancelled \u2014 the log says what state the board was left in."
+          : s.exit && s.exit !== "0"
           ? "The run stopped with exit code " + s.exit + " \u2014 see the log."
           : "The run has finished.")
       : "Waiting for the script\u2026";
@@ -1006,6 +1057,8 @@ class Handler(BaseHTTPRequestHandler):
                 "daemon": STATE["daemon"],
                 "catalog": catalog_public() if STATE["daemon"] else [],
                 "running": run_active(),
+                "cancellable": cancellable(),
+                "run_id": STATE.get("run_id"),
                 "exit": read("finished").strip() or None,
             }).encode()
             return self._send(200, "application/json", body)
@@ -1028,6 +1081,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(status, "application/json",
                                   json.dumps({"error": err}).encode())
             return self._send(200, "application/json", b'{"ok":true}')
+        if path == "/api/cancel":
+            return self._cancel()
         if path != "/api/answer":
             return self._send(404, "text/plain", b"not found\n")
         try:
@@ -1059,7 +1114,20 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "this run belongs to %s — only they can answer its questions"
                          % owner["user"]}).encode())
 
-        value = str(payload.get("value", ""))
+        if payload.get("back") is True:
+            # Back (5 Nov 2026): only on a question the script offered it on; the token
+            # is one nothing can type into the page (flash-device.sh BACK_TOKEN).
+            try:
+                offered = bool(json.loads(cur).get("back"))
+            except ValueError:
+                offered = False
+            if not offered:
+                return self._send(409, "text/plain", b"this question has no Back\n")
+            value = BACK_TOKEN
+        else:
+            value = str(payload.get("value", ""))
+            if BACK_TOKEN in value:
+                return self._send(400, "text/plain", b"bad value\n")
         tmp = spool("answer.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(value)
@@ -1069,6 +1137,40 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
         self._send(200, "application/json", b'{"ok":true}')
+
+
+BACK_TOKEN = "\x1bback"    # = flash-device.sh's BACK_TOKEN
+
+
+def _cancel(self):
+    """POST /api/cancel (5 Nov 2026): ask the running onboarding to stop. Only the run's
+    owner may; the script acts on it at its next question or step (never inside a flash
+    write) and exits 130, saying what state the board was left in."""
+    try:
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n).decode()) if 0 < n <= 4096 else {}
+    except (ValueError, OSError):
+        body = {}
+    if os.path.exists(spool("nocancel")):
+        return self._send(409, "application/json", json.dumps({
+            "error": "too late to cancel: the board's files are written, and the run now checks "
+                     "and registers it so that its new passwords are kept"}).encode())
+    if not cancellable() or not STATE.get("run_id") or body.get("run") != STATE["run_id"]:
+        return self._send(409, "application/json", b'{"error":"that onboarding run is no longer running"}')
+    owner = STATE["run_owner"]
+    me = getattr(self, "session", None) or {}
+    if STATE["auth"] == "keycloak" and owner and me.get("sub") != owner["sub"]:
+        return self._send(403, "application/json", json.dumps({
+            "error": "this run belongs to %s — only they can cancel it" % owner["user"]}).encode())
+    who = (owner or {}).get("user") or me.get("user") or ""
+    tmp = spool("cancel.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(who)
+    os.replace(tmp, spool("cancel"))
+    return self._send(200, "application/json", b'{"ok":true}')
+
+
+Handler._cancel = _cancel
 
 
 def main():
@@ -1127,6 +1229,7 @@ def main():
     STATE["auth"] = a.auth
     STATE["client_id"] = a.client_id
     STATE["client_secret"] = secret
+    STATE["run_id"] = secrets.token_hex(8)       # a --ui run's id; the daemon sets one per start
     STATE["required_role"] = edge_auth.roles_of(a.required_role)
     # "host:port" is reached directly over http; "https://host" through the
     # TLS ingress (apps/edge-wizard), which keeps the Host header.

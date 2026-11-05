@@ -29,6 +29,7 @@
 <tr><td><a href="#training-e20">E20 Open a dashboard tool from the portal</a></td><td><span class="role">engineer</span>, <span class="role">operator</span>; later <span class="role">bio_scientist</span></td><td>The MedCEA Dashboard card offers the dashboard tools; each tool admits only the roles the access policy gives it.</td><td>Grafana part 4 Nov 2026; Superset part after IAM 4.5</td></tr>
 <tr><td><a href="#training-e21">E21 Log out of the Node-RED editor</a></td><td><span class="role">engineer</span></td><td>The editor's Logout ends the platform sign-in too, so the next person on the browser must sign in.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e22">E22 Onboard a board over TLS</a></td><td><span class="role">engineer</span>, host operator</td><td>A wrong WiFi passphrase is caught at its question; a registered board reaches the broker over TLS only, and the plain port is closed.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e23">E23 Go back and cancel during onboarding</a></td><td><span class="role">engineer</span> (two accounts)</td><td>A wrong planning answer can be corrected with Back; a run can be cancelled only by the person who started it, and says what state it left.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -717,6 +718,31 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 </ul>
 <p><strong>Afterwards.</strong> Keep the board, or mark it Inactive in the Devices tab (its credential then stops within about 15 seconds).</p>
 <p><strong>Last done.</strong> Not yet: run after the <code>./deploy-infra.sh</code> that brings the TLS port.</p>
+
+<h3 id="training-e23">E23 Go back and cancel during onboarding</h3>
+<p><strong>Goal.</strong> Correct a planning answer with <strong>Back</strong>, and cancel a run, in the onboarding wizard. The exercise proves the decision of 5 November 2026 "Back and Cancel in onboarding" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) starts the run; a second account that onboarding admits (another <span class="role">engineer</span> or <span class="role">maintenance</span>) tries to cancel it.</p>
+<p><strong>Before you start.</strong> The wizard restarted since 5 November 2026 (<code>./apps/edge-wizard/deploy.sh</code>), an ESP32 on the server's USB port, at least two free slots of one role.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>eng</code>: start onboarding; answer <strong>What is this board for?</strong>, then on <strong>Which unit and zone…</strong> click <strong>Back</strong>.</li>
+<li>Answer the role again, choose a slot, and on the first wiring question click <strong>Back</strong>; choose another slot.</li>
+<li>The second account, signed in to the wizard in another browser: click <strong>Cancel onboarding</strong> and confirm.</li>
+<li><code>eng</code>: click <strong>Cancel onboarding</strong> and confirm, before <strong>Erase and flash this board?</strong>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Steps 1 and 2: the previous question again; the slot chosen last is the one the log shows ("hostname : …").</li>
+<li>Step 3: "this run belongs to eng — only they can cancel it"; the run goes on.</li>
+<li>Step 4: the log ends "cancelled by eng in the browser: nothing was changed on the board; nothing was registered"; the page says "The run was cancelled"; the slot is still free in the Devices tab.</li>
+</ul>
+<div class="record"><p>Nothing is recorded in the platform: the database is written only at the end of a run. The run's log (in the wizard) shows each question asked again and the cancellation. Write the date and what step 4 showed under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>After <strong>Erase and flash this board?</strong>: no Back on the questions; Cancel then says the board must be onboarded again.</li>
+</ul>
+<p><strong>Afterwards.</strong> Onboard the board for real (exercise E22).</p>
+<p><strong>Last done.</strong> Not yet: run after the wizard restart that brings it.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
