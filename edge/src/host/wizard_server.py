@@ -640,7 +640,7 @@ function goBack() {
 $("pback").onclick = goBack;
 let runId = null;
 $("pcancel").onclick = () => {
-  if (!confirm("Cancel this onboarding?\n\nBefore the erase nothing on the board or in the platform changes. " +
+  if (!confirm("Cancel this onboarding?\\n\\nBefore the erase nothing on the board or in the platform changes. " +
                "After it, the board is left erased or partly written and must be onboarded again. " +
                "Nothing is registered unless the run already got that far.")) return;
   post("/api/cancel", { run: runId });

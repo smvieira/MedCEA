@@ -14,6 +14,8 @@ import http.client
 import importlib.util
 import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -685,6 +687,22 @@ class WizardTests(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_served_page_scripts_parse(self):
+        """The page as served: PAGE is an ordinary Python string, so an escape in its JS
+        (\\n inside a JS string) arrives as a real line break, a syntax error that stops the
+        whole script and leaves the page at "connecting..." (5 Nov 2026). Check what the
+        browser gets, not the source text."""
+        page = self.ws.PAGE.replace("__CHANNELMAP_JS__", self.ws.ui_asset("channelmap.js"))
+        scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+        self.assertEqual(len(scripts), 2)
+        for i, js in enumerate(scripts):
+            path = os.path.join(self.tmp, "page%d.js" % i)
+            with open(path, "w") as f:
+                f.write(js)
+            r = subprocess.run(["node", "--check", path], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr[-600:])
 
     def test_cancel_is_the_run_owners(self):
         """5 Nov 2026: Cancel writes spool/cancel for the script; only the run's owner may."""
