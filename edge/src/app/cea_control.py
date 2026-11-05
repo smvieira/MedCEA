@@ -165,9 +165,18 @@ def run():
     print("\nCONTROL loop: subscribed to %s, reporting to %s"
           % (cfg.topic_sub, cfg.topic_pub))
 
+    # A CONTROL board publishes only when a command arrives, so while no run sends
+    # any it would send nothing, and the broker drops a client silent for 1.5 x
+    # keepalive: every relay off and a reboot every ~135 s. A PINGREQ at half the
+    # keepalive keeps the connection (the PINGRESP is read by check_msg).
+    ping_every = max(10, (client.keepalive or 60) // 2) * 1000
+    last_ping = time.ticks_ms()
     while True:
         try:
             client.check_msg()
+            if time.ticks_diff(time.ticks_ms(), last_ping) >= ping_every:
+                client.ping()
+                last_ping = time.ticks_ms()
             time.sleep_ms(cfg.poll_ms)
         except OSError as e:
             # Losing the broker leaves the relays where they are, which is the

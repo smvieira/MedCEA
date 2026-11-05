@@ -7,7 +7,7 @@ import network
 # Import the CEA configurations.
 import config as cfg
 # Import the MQTT module
-from umqtt.simple import MQTTClient
+from umqtt.simple import MQTTClient, MQTTException
 
 import machine
  
@@ -153,14 +153,50 @@ def connect_mqtt():
     """
     global client_id, mqtt_server
     # user/password: this board's own broker credential (device_cfg.py). A
-    # refused CONNACK raises OSError, the caller restarts the board, and the
-    # retry lands once the credential row has reached the broker (seconds).
+    # refused CONNACK is turned into OSError below, the caller restarts the board,
+    # and the retry lands once the credential row has reached the broker (seconds).
+    # TLS (5 Nov 2026): the broker's LAN port takes TLS only, so the password never
+    # crosses the LAN in clear. A board flashed before then has no MQTT_TLS_NAME and
+    # cannot connect until it is onboarded again.
+    tls = {}
+    if cfg.mqtt_tls_name:
+        tls = {"ssl": _tls_context(), "ssl_params": {"server_hostname": cfg.mqtt_tls_name}}
     client = MQTTClient(cfg.client_id, cfg.mqtt_server, cfg.mqtt_port,
                         user=cfg.mqtt_user, password=cfg.mqtt_pass,
-                        keepalive=max(60, 3 * cfg.message_interval))
-    client.connect()
-    print('Connected to %s MQTT broker' % (cfg.mqtt_server))
+                        keepalive=max(60, 3 * cfg.message_interval), **tls)
+    try:
+        client.connect()
+    except (MQTTException, AssertionError) as e:
+        # A refused login (CONNACK rc 4/5: the credential has not reached the broker
+        # yet, the device is inactive, or a newer onboarding replaced the password) is
+        # MQTTException, not OSError: the callers restart the board only on OSError,
+        # so it used to leave the board at the REPL until someone power-cycled it.
+        raise OSError("broker refused the connection: %r" % (e.args[0] if e.args else e,))
+    print('Connected to %s MQTT broker%s' % (cfg.mqtt_server, " (TLS, %s)" % cfg.mqtt_tls_name if tls else ""))
     return client
+
+
+MQTT_CA_FILE = "mqtt_ca.der"   # the platform CA, copied by edge/flash-device.sh
+
+
+def _tls_context():
+    """A TLS context that accepts only the broker's certificate: signed by the platform CA
+    (MQTT_CA_FILE) and named cfg.mqtt_tls_name (checked by wrap_socket's server_hostname).
+
+    The certificate's dates are checked too, so a clock still at 2000 (NTP not answered
+    at boot) refuses even the right certificate: try NTP once more, and raise OSError
+    when the clock is still unset, so the caller restarts the board and tries again."""
+    import ssl
+    if utime.localtime()[0] < 2025:
+        set_device_time()
+        if utime.localtime()[0] < 2025:
+            raise OSError("clock not set (NTP did not answer): the broker's certificate cannot be checked")
+    with open(MQTT_CA_FILE, "rb") as f:
+        ca = f.read()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(cadata=ca)
+    return ctx
 
 def restart_and_reconnect():
     

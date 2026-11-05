@@ -239,7 +239,7 @@
     {
       "name": "mqtt_port",
       "from": "config.env",
-      "note": "31883, the Mosquitto NodePort"
+      "note": "31884, the broker's TLS NodePort (certificate mqtt.<domain>)"
     },
     {
       "name": "topic_pub",

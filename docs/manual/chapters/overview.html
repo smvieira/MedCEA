@@ -25,7 +25,7 @@
 <tbody>
 <tr><td>Keycloak</td><td>The one sign-in page for every web application (realm <code>medcea</code>). It holds the accounts and the role of each person.</td></tr>
 <tr><td>PostgreSQL</td><td>The shared database <code>medcea_db</code>: units, devices, recipes, runs, measurements, approvals and the audit records. It is reachable only inside the cluster.</td></tr>
-<tr><td>Mosquitto</td><td>The MQTT message broker. Boards and services exchange readings and commands through it. Every client signs in with its own credential; there is no anonymous access. Boards on the local network connect on port <code>31883</code>.</td></tr>
+<tr><td>Mosquitto</td><td>The MQTT message broker. Boards and services exchange readings and commands through it. Every client signs in with its own credential; there is no anonymous access. Boards on the local network connect over TLS on port <code>31884</code> and check the broker's certificate first.</td></tr>
 <tr><td>Node-RED</td><td>Subscribes to every MQTT message under <code>medcea/</code> and writes it into the database as a measurement. Engineers also use its editor to build flows.</td></tr>
 <tr><td>Grafana</td><td>Dashboards that read the measurements from PostgreSQL.</td></tr>
 </tbody>
@@ -132,7 +132,7 @@
 <tr><td><code>keycloak.medcea</code></td><td>Keycloak (sign-in page; its admin console is for recovery only)</td></tr>
 </tbody>
 </table></div>
-<p>With the IP-based domain, replace <code>medcea</code> with the IP-based domain, for example <code>grafana.100.94.119.12.nip.io</code>. Boards do not use these names: they reach the broker on the host's local network address, port <code>31883</code>.</p>
+<p>With the IP-based domain, replace <code>medcea</code> with the IP-based domain, for example <code>grafana.100.94.119.12.nip.io</code>. Boards do not use these names: they reach the broker on the host's local network address, port <code>31884</code> (TLS; the certificate is named <code>mqtt.&lt;domain&gt;</code>).</p>
 
 <h3 id="overview-terms">Key terms</h3>
 <div class="table-wrap"><table>

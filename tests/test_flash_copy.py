@@ -239,5 +239,27 @@ class WifiTryShellTest(unittest.TestCase):
         self.assertLess(src.index('step "WiFi"'), src.index('step "Writing the board\'s files"'))
 
 
+
+class PipefailTest(unittest.TestCase):
+    """flash-device.sh runs under set -e and pipefail: a pipeline whose reader stops early
+    (head, awk ... exit, grep -q) ends with the writer's SIGPIPE, status 141, and ended the
+    first run whose board got an address, before its summary (5 Nov 2026)."""
+
+    def test_no_early_exit_pipeline_without_a_fallback(self):
+        bad = []
+        for n, line in enumerate(read(SCRIPT).splitlines(), 1):
+            if re.search(r"\|\s*(head\b|grep -q|grep -m|awk [^|]*\bexit\b)", line) \
+                    and not re.search(r"\|\|\s*(true|echo|die)", line) \
+                    and not line.lstrip().startswith("#"):
+                bad.append("%d: %s" % (n, line.strip()))
+        self.assertEqual(bad, [])
+
+    def test_the_line_that_ended_the_run(self):
+        r = subprocess.run(["bash", "-c", "set -eo pipefail; seq 1 100000 | awk '{print; exit}' >/dev/null; echo survived"],
+                           capture_output=True, text=True)
+        self.assertNotIn("survived", r.stdout)      # the hazard is real
+        self.assertIn("ip route | awk '/^default/{print $3; exit}' || true", read(SCRIPT))
+
+
 if __name__ == "__main__":
     unittest.main()

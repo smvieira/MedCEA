@@ -49,6 +49,10 @@ mqtt_port   = _d.MQTT_PORT
 # before credentials existed has neither and cannot connect until re-onboarded.
 mqtt_user   = getattr(_d, "MQTT_USER", "") or None
 mqtt_pass   = getattr(_d, "MQTT_PASS", "") or None
+# TLS (5 Nov 2026): the name in the broker's certificate (mqtt.<domain>), checked
+# against the platform CA in mqtt_ca.der. The board connects by address, so the
+# name need not resolve. None on a board flashed before TLS: it cannot connect.
+mqtt_tls_name = getattr(_d, "MQTT_TLS_NAME", "") or None
 
 # ---- topics -----------------------------------------------------------------
 # <root>/<unit>/<zone>/<sense|control>. Derived rather than stored so a board

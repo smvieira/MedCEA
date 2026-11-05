@@ -1,7 +1,7 @@
 # ConfigMap mosquitto-config while IAM_MQTT_PERSON=false: one password and ACL file for
 # both listeners (services and boards; no Explorer account since 1 Nov 2026). Applied by
-# deploy-infra.sh instead of mosquitto-conf-person.yaml; byte for byte the conf of
-# before IAM 3.5 (tests/golden/mosquitto-conf.yaml).
+# deploy-infra.sh instead of mosquitto-conf-person.yaml; the conf of before IAM 3.5 plus
+# the boards' TLS listener 8883 (5 Nov 2026; tests/golden/mosquitto-conf.yaml).
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -29,3 +29,8 @@ data:
     listener 1883
     listener 9001
     protocol websockets
+    # The boards' only way in from the LAN (NodePort 31884): TLS, the broker's own
+    # certificate (Secret mosquitto-tls, by deploy-infra.sh from the platform CA).
+    listener 8883
+    certfile /mosquitto/certs/tls.crt
+    keyfile /mosquitto/certs/tls.key

@@ -505,6 +505,23 @@ $MK8S kubectl create secret tls cea-tls -n "$NAMESPACE" \
 $MK8S kubectl create configmap cea-ca -n "$NAMESPACE" \
   --from-file=ca.crt="$CA_DIR/ca.crt" \
   --dry-run=client -o yaml | $MK8S kubectl apply -f -
+# The broker's own certificate (5 Nov 2026): boards connect over TLS only (Mosquitto
+# listener 8883, NodePort 31884) and verify it by the name mqtt.<DOMAIN> against the CA
+# that onboarding copies to each board (edge/flash-device.sh). The board connects by
+# address, so the name need not resolve; the LAN address is in the SANs for other
+# clients. Reissued every run like the web certificate; the broker restarts below.
+MQTT_TLS_NAME="mqtt.${DOMAIN}"
+_MQ_SANS="DNS:${MQTT_TLS_NAME}"
+[[ -n "${_LAN_IP:-}" ]] && _MQ_SANS+=",IP:${_LAN_IP}"
+openssl ecparam -name prime256v1 -genkey -noout -out "$CA_DIR/mqtt.key"
+openssl req -new -key "$CA_DIR/mqtt.key" -subj "/CN=${MQTT_TLS_NAME}" -out "$CA_DIR/mqtt.csr"
+openssl x509 -req -in "$CA_DIR/mqtt.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
+  -CAcreateserial -days 825 -sha256 -out "$CA_DIR/mqtt.crt" \
+  -extfile <(printf "subjectAltName=%s\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n" "$_MQ_SANS")
+chmod 600 "$CA_DIR"/*.key
+$MK8S kubectl create secret tls mosquitto-tls -n "$NAMESPACE" \
+  --cert="$CA_DIR/mqtt.crt" --key="$CA_DIR/mqtt.key" \
+  --dry-run=client -o yaml | $MK8S kubectl apply -f -
 
 # =============================================================================
 # NAME-BASED DOMAIN (LOCAL_DNS=true): DNS server + this machine's /etc/hosts
@@ -1615,7 +1632,9 @@ source config.env
 # =============================================================================
 # 4. MOSQUITTO
 #    Image:  eclipse-mosquitto:2.0 (Docker Hub Official — no registry auth needed)
-#    NodePort 31883 → boards on the LAN (per-device credentials from onboarding)
+#    NodePort 31884 → listener 8883, TLS only: boards on the LAN (per-device credentials
+#    from onboarding; the certificate is mosquitto-tls above). The plain NodePort 31883
+#    was closed on 5 Nov 2026: a password must never cross the LAN in clear.
 #    ClusterIP 1883 → in-cluster services; 9001 (WebSocket) → the MQTT Explorer's
 #    oauth2-proxy only. Nobody connects anonymously: the mqtt-auth-sync sidecar
 #    merges the service accounts below with medcea.mqtt_credential (apps stage)
@@ -2048,7 +2067,7 @@ echo ""
 echo -e "${GREEN}  INTERNAL (cluster-only)${NC}"
 echo -e "${GREEN}  -----------------------${NC}"
 echo -e "  MQTT Explorer:   https://$MQTTX_DOMAIN  (Keycloak SSO; ./deploy-apps.sh installs it)"
-echo -e "  Mosquitto MQTT:  mqtt://$_LAN_IP:31883  (LAN NodePort — boards, per-device credentials from onboarding)"
+echo -e "  Mosquitto MQTT:  mqtts://$_LAN_IP:31884  (LAN NodePort, TLS only — boards, per-device credentials; certificate name ${MQTT_TLS_NAME})"
 echo -e "                   mqtt://mosquitto.$NAMESPACE.svc.cluster.local:1883  (in-cluster, service accounts)"
 echo -e "                   wss://$MQTTX_DOMAIN/mqtt  (browsers, through the explorer's sign-in)"
 if [[ "${IAM_MQTT_PERSON:-false}" == "true" ]]; then
@@ -2059,7 +2078,7 @@ else
 fi
 echo -e "  MQTT topic root: ${PROJECT_NAME}/<UNIT>/<ZONE>/{sense,control,control_setpoint}/...  (PROJECT_NAME)"
 echo -e "  ${YELLOW}Note:${NC} If LAN IP changes (router DHCP), re-run deploy or set a DHCP reservation."
-echo -e "        IoT devices can also use $(hostname).local:31883 (mDNS via Avahi)."
+echo -e "        IoT devices can also use $(hostname).local:31884 (mDNS via Avahi; TLS, certificate name ${MQTT_TLS_NAME})."
 echo -e "  Postgres:        rdbms-postgresql.$NAMESPACE.svc.cluster.local:5432"
 echo -e "    DB / User:     $POSTGRES_DB / $POSTGRES_USER"
 echo ""

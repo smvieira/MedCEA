@@ -57,8 +57,14 @@ class MQTTClient:
         addr = socket.getaddrinfo(self.server, self.port)[0][-1]
         self.sock.connect(addr)
         if self.ssl:
-            import ussl
-            self.sock = ussl.wrap_socket(self.sock, **self.ssl_params)
+            # ssl is either True (the old ussl.wrap_socket with ssl_params) or an
+            # ssl.SSLContext, which the boards pass since 5 Nov 2026: a context with
+            # CERT_REQUIRED and the platform CA, server_hostname from ssl_params.
+            if hasattr(self.ssl, "wrap_socket"):
+                self.sock = self.ssl.wrap_socket(self.sock, **self.ssl_params)
+            else:
+                import ussl
+                self.sock = ussl.wrap_socket(self.sock, **self.ssl_params)
         premsg = bytearray(b"\x10\0\0\0\0\0")
         msg = bytearray(b"\x04MQTT\x04\x02\0\0")
 

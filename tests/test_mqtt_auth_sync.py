@@ -3,7 +3,8 @@
 and the broker's two confs, offline (IAM 3.5). Stdlib only; no database, no broker.
 
   - IAM_MQTT_PERSON=false: passwd/acl exactly as before 3.5 for services and boards (golden
-    text below), and the conf ConfigMap is tests/golden/mosquitto-conf.yaml byte for byte;
+    text below), and the conf ConfigMap is tests/golden/mosquitto-conf.yaml byte for byte
+    (the pre-3.5 conf plus the boards' TLS listener 8883, 5 Nov 2026);
     the shared mqtt-explorer account is gone from deploy-infra's service Secret in both modes
   - true: no explorer- name in passwd (1883), only explorer- names in passwd-ws; a '+' write
     row expands to flagged units without a running run only; a concrete unit that is not
@@ -88,7 +89,8 @@ class SharedMode(unittest.TestCase):
         p, a, n = S.render(SERVICES_P, SERVICES_A, BOARDS)
         self.assertEqual((p, a, n), (GOLDEN_PASSWD, GOLDEN_ACL, 2))
 
-    def test_conf_is_the_old_one(self):
+    def test_conf_is_the_golden_one(self):
+        """The pre-3.5 conf plus, since 5 Nov 2026, the boards' TLS listener 8883 (and only that)."""
         with open(os.path.join(REPO, "k8s", "mosquitto", "mosquitto-conf.yaml")) as fh:
             body = "".join(l for l in fh if not l.startswith("#"))
         with open(os.path.join(REPO, "tests", "golden", "mosquitto-conf.yaml")) as fh:
@@ -185,11 +187,41 @@ class Manifests(unittest.TestCase):
         c = self.read("k8s", "mosquitto", "mosquitto-conf-person.yaml")
         conf = c.split("mosquitto.conf: |", 1)[1]
         self.assertIn("per_listener_settings true", conf)
-        l1883, l9001 = conf.split("listener 9001")
+        l1883, rest = conf.split("listener 9001")
+        l9001, l8883 = rest.split("listener 8883")
         self.assertIn("password_file /mosquitto/auth/passwd\n", l1883)
         self.assertIn("password_file /mosquitto/auth/passwd-ws", l9001)
         self.assertIn("acl_file /mosquitto/auth/acl-ws", l9001)
-        self.assertEqual(conf.count("allow_anonymous false"), 2)
+        # the boards' TLS listener: services and boards, never a person credential
+        self.assertIn("password_file /mosquitto/auth/passwd\n", l8883)
+        self.assertIn("acl_file /mosquitto/auth/acl\n", l8883)
+        self.assertNotIn("-ws", l8883)
+        self.assertEqual(conf.count("allow_anonymous false"), 3)
+
+    def test_boards_reach_the_broker_over_tls_only(self):
+        """5 Nov 2026: the LAN NodePort is 31884 on listener 8883 (TLS); 1883 is in-cluster
+        only (no NodePort 31883); the certificate is Secret mosquitto-tls from the CA."""
+        m = self.read("k8s", "mosquitto", "mosquitto.yaml")
+        docs = m.split("\n---\n")
+        svc = {d.split("name: ", 1)[1].split("\n", 1)[0]: d for d in docs if "kind: Service\n" in d}
+        self.assertIn("type: ClusterIP", svc["mosquitto"])
+        self.assertNotIn("nodePort", svc["mosquitto"])
+        self.assertIn("type: NodePort", svc["mosquitto-tls"])
+        self.assertIn("targetPort: 8883", svc["mosquitto-tls"])
+        self.assertIn("nodePort: 31884", svc["mosquitto-tls"])
+        self.assertNotIn("nodePort: 31883", m)
+        self.assertIn("secretName: mosquitto-tls", m)
+        self.assertIn("mountPath: /mosquitto/certs", m)
+        for f in ("mosquitto-conf.yaml", "mosquitto-conf-person.yaml"):
+            c = self.read("k8s", "mosquitto", f)
+            tls = c.split("listener 8883", 1)[1]
+            self.assertIn("certfile /mosquitto/certs/tls.crt", tls)
+            self.assertIn("keyfile /mosquitto/certs/tls.key", tls)
+        infra = self.read("deploy-infra.sh")
+        self.assertIn('MQTT_TLS_NAME="mqtt.${DOMAIN}"', infra)
+        self.assertIn("kubectl create secret tls mosquitto-tls", infra)
+        # issued before the broker is deployed
+        self.assertLess(infra.index("create secret tls mosquitto-tls"), infra.index('k8s/mosquitto/mosquitto.yaml"'))
 
     def test_no_shared_account(self):
         # removed after the IAM_MQTT_PERSON trial: no mode hashes it, writes it or keeps it

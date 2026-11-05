@@ -28,6 +28,7 @@
 <tr><td><a href="#training-e19">E19 Apply a policy change, roll it back and confirm it</a></td><td>host operator (<span class="role">admin</span>), <span class="role">qa</span> (two accounts)</td><td>An approved change takes effect only through <code>apply.sh</code>, which checks the approval on the host first; a rollback restores the earlier version and is confirmed afterwards by a <span class="role">qa</span> person who did not run it.</td><td>5 Nov 2026</td></tr>
 <tr><td><a href="#training-e20">E20 Open a dashboard tool from the portal</a></td><td><span class="role">engineer</span>, <span class="role">operator</span>; later <span class="role">bio_scientist</span></td><td>The MedCEA Dashboard card offers the dashboard tools; each tool admits only the roles the access policy gives it.</td><td>Grafana part 4 Nov 2026; Superset part after IAM 4.5</td></tr>
 <tr><td><a href="#training-e21">E21 Log out of the Node-RED editor</a></td><td><span class="role">engineer</span></td><td>The editor's Logout ends the platform sign-in too, so the next person on the browser must sign in.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e22">E22 Onboard a board over TLS</a></td><td><span class="role">engineer</span>, host operator</td><td>A wrong WiFi passphrase is caught at its question; a registered board reaches the broker over TLS only, and the plain port is closed.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -688,6 +689,34 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 </ul>
 <p><strong>Afterwards.</strong> Nothing to undo; sign in again to go on working.</p>
 <p><strong>Last done.</strong> Not yet: run after the <code>./deploy-infra.sh</code> that brings the change.</p>
+
+<h3 id="training-e22">E22 Onboard a board over TLS</h3>
+<p><strong>Goal.</strong> Onboard a SENSE board and see that the onboarding catches a wrong WiFi passphrase at its question, and that the board then reaches the broker over TLS only. The exercise proves the decisions of 5 November 2026 "Boards reach the broker over TLS only" and "Onboarding checks the WiFi passphrase at once" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) in the onboarding wizard; the host operator for the checks on the server.</p>
+<p><strong>Before you start.</strong> <code>./deploy-infra.sh</code> has run since 5 November 2026 (the broker's certificate and its TLS port). A free SENSE slot, an ESP32 on the server's USB port, and the WiFi passphrase. <code>./health-check.sh</code> shows <strong>Mosquitto MQTT (TLS)</strong> OK.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>eng</code>: open the onboarding wizard (<code>https://onboard-device.&lt;domain&gt;</code>), choose the board type and the slot, and go on until <strong>Which network should the board join?</strong>; choose your network.</li>
+<li>Type a wrong passphrase on purpose, click <strong>Show</strong> to see it, then <strong>Continue</strong>.</li>
+<li>Choose <strong>Type the passphrase again</strong>, type the right one, <strong>Continue</strong>, and let the run finish.</li>
+<li>Host operator: <code>timeout 3 bash -c '&gt;/dev/tcp/&lt;server LAN address&gt;/31883' &amp;&amp; echo open || echo closed</code>.</li>
+<li>Host operator: <code>openssl s_client -connect &lt;server LAN address&gt;:31884 -verify_hostname mqtt.&lt;domain&gt; -CAfile .ca/ca.crt &lt;/dev/null 2&gt;/dev/null | grep "Verify return code"</code>.</li>
+<li><code>eng</code>: open the MQTT Explorer and watch the slot's <code>sense</code> topic.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 2: the passphrase in clear while <strong>Show</strong> is on; then "checking: the board joins '&lt;network&gt;'…", "'&lt;network&gt;' refused the board: a wrong passphrase, or the access point gave up on the handshake.", and the question with three answers.</li>
+<li>Step 3: "joined '&lt;network&gt;': the board got &lt;address&gt;"; at the end the summary with the board's address and "broker &lt;address&gt;:31884 (TLS, mqtt.&lt;domain&gt;)"; the board is registered.</li>
+<li>Step 4: <code>closed</code>. Step 5: <code>Verify return code: 0 (ok)</code>.</li>
+<li>Step 6: the board's readings within a minute of the end of the run.</li>
+</ul>
+<div class="record"><p>The device record and its MQTT credential in the platform database (Devices tab); the slot's change in <code>medcea.device_slot_history</code>; the provisioning record <code>edge/provisioned/&lt;name&gt;.json</code> (with <code>"tls_name"</code>). The broker's log shows the board's connection. Write the date, the board's name and what steps 2, 4 and 5 showed under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>Step 5 with <code>-verify_hostname mqtt.example</code>: a verify error naming the host: the board would refuse such a broker too.</li>
+</ul>
+<p><strong>Afterwards.</strong> Keep the board, or mark it Inactive in the Devices tab (its credential then stops within about 15 seconds).</p>
+<p><strong>Last done.</strong> Not yet: run after the <code>./deploy-infra.sh</code> that brings the TLS port.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>

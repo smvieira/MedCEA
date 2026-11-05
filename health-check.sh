@@ -66,7 +66,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "                  expect=CODE    e.g. expect=302, expect=30x, expect=2xx"
     echo ""
     echo -e "  ${CYAN}tcp${NC}    TCP port: HOST:PORT"
-    echo -e "         e.g. localhost:31883"
+    echo -e "         e.g. localhost:5432"
+    echo ""
+    echo -e "  ${CYAN}mqtttls${NC} the boards' broker port: HOST:PORT answers TLS with a certificate that"
+    echo -e "         verifies against the platform CA (.ca/ca.crt) for mqtt.\$DOMAIN, and the"
+    echo -e "         plain port 31883 is closed; e.g. localhost:31884"
     echo ""
     echo -e "  ${CYAN}pvc${NC}    a PersistentVolumeClaim is Bound: NAMESPACE/NAME"
     echo -e "         e.g. medcea/grafana; WARN when it is missing or not Bound (the service"
@@ -1392,6 +1396,35 @@ check_tcp() {
 }
 
 # =============================================================================
+# Check: the boards' MQTT port is TLS only (5 Nov 2026)
+# target: HOST:PORT of the TLS NodePort (31884). FAIL when it does not answer TLS with a
+# certificate the platform CA signed for mqtt.$DOMAIN (what each board checks), or when
+# the plain NodePort 31883, closed that day, answers again.
+# =============================================================================
+check_mqtttls() {
+    local name="$1" target="$2" host port ca out
+    host="${target%:*}"; port="${target##*:}"
+    ca="$SCRIPT_DIR/.ca/ca.crt"
+    if [[ ! -r "$ca" ]]; then
+        _record FAIL "$name" "the platform CA $ca is unreadable (run as the account that deploys)"
+        return
+    fi
+    if timeout "$TIMEOUT" bash -c ">/dev/tcp/${host}/31883" 2>/dev/null; then
+        _record FAIL "$name" "the plain MQTT port ${host}:31883 answers: boards must come in over TLS only (./deploy-infra.sh)"
+        return
+    fi
+    out="$(timeout "$TIMEOUT" openssl s_client -connect "${host}:${port}" -servername "mqtt.${DOMAIN}" \
+            -verify_hostname "mqtt.${DOMAIN}" -CAfile "$ca" -verify_return_error </dev/null 2>&1 || true)"
+    if grep -q "Verify return code: 0 (ok)" <<<"$out"; then
+        _record OK "$name" "TLS on ${host}:${port}, certificate mqtt.${DOMAIN} from the platform CA; plain 31883 closed"
+    elif [[ -z "$out" ]] || grep -qi "connect:errno\|Connection refused\|connect error" <<<"$out"; then
+        _record FAIL "$name" "nothing answers on ${host}:${port} (Mosquitto's TLS listener, ./deploy-infra.sh)"
+    else
+        _record FAIL "$name" "${host}:${port}: $(grep -m1 -i "verify error\|Verify return code\|error" <<<"$out" | tr -s ' ' | cut -c1-110)"
+    fi
+}
+
+# =============================================================================
 # Check: Juju model/application unit status
 # target: MODEL_NAME or MODEL_NAME/APP_NAME
 #   MODEL_NAME       — checks all applications in that Juju model
@@ -1526,6 +1559,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         k8s)  check_k8s  "$name" "$target" ;;
         http) check_http "$name" "$target" "$options" ;;
         tcp)  check_tcp  "$name" "$target" ;;
+        mqtttls) check_mqtttls "$name" "$target" ;;
         pvc)  check_pvc  "$name" "$target" ;;
         juju) check_juju "$name" "$target" ;;
         iamchain) check_iamchain "$name" "$target" ;;

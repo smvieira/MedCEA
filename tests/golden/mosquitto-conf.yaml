@@ -25,3 +25,8 @@ data:
     listener 1883
     listener 9001
     protocol websockets
+    # The boards' only way in from the LAN (NodePort 31884): TLS, the broker's own
+    # certificate (Secret mosquitto-tls, by deploy-infra.sh from the platform CA).
+    listener 8883
+    certfile /mosquitto/certs/tls.crt
+    keyfile /mosquitto/certs/tls.key

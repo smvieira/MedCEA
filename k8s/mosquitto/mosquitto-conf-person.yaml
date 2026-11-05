@@ -27,3 +27,11 @@ data:
     allow_anonymous false
     password_file /mosquitto/auth/passwd-ws
     acl_file /mosquitto/auth/acl-ws
+    # The boards' only way in from the LAN (NodePort 31884): TLS, the broker's own
+    # certificate (Secret mosquitto-tls); the same accounts as 1883, services and boards.
+    listener 8883
+    certfile /mosquitto/certs/tls.crt
+    keyfile /mosquitto/certs/tls.key
+    allow_anonymous false
+    password_file /mosquitto/auth/passwd
+    acl_file /mosquitto/auth/acl

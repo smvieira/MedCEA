@@ -676,8 +676,12 @@ and two of its properties are findings in the fleet assessment:
   (username = its name), writes it into `device_cfg.py` and the provisioned
   record, and registers only its hash with the platform; the broker's ACL keeps
   the board to its own slot's topics, and deactivating the device revokes it.
-  The password sits in plaintext on the board's filesystem like the PSK, so the
-  remaining gaps are flash encryption and an image without WebREPL.
+  Since 5 Nov 2026 the board connects over TLS only (broker port 31884): it checks
+  the broker's certificate against the platform CA (`mqtt_ca.der`, copied at
+  onboarding) and by the name `mqtt.<domain>` before it sends the password, so the
+  password no longer crosses the LAN in clear. It still sits in plaintext on the
+  board's filesystem like the PSK, so the remaining gaps are flash encryption and an
+  image without WebREPL.
 
 What onboarding *does* bound is blast radius by identity: a board publishes only
 under its own slot's topic, and the one-SENSE-one-CONTROL rule means a second

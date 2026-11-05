@@ -436,6 +436,9 @@ def render(spec):
         "WIFI_PSK": spec.get("wifi_psk", ""),
         "MQTT_HOST": spec.get("mqtt_host", ""),
         "MQTT_PORT": int(spec.get("mqtt_port", 1883)),
+        # TLS (5 Nov 2026): the name in the broker's certificate, verified against the
+        # platform CA in mqtt_ca.der, which flash-device.sh copies next to this file.
+        "MQTT_TLS_NAME": spec.get("mqtt_tls_name", ""),
         # The board's own broker credential. Only here (and in the provisioned
         # record): the component rows below carry host/port but never this,
         # because the API role can read them.

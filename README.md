@@ -16,7 +16,7 @@ An IoT platform deployer for Ubuntu. Two commands install and wire together a co
 | **User Manager** | Access requests, users, roles, e-mail (admins) | `https://access.<domain>` |
 | **Grafana** | Dashboards — reads from Postgres | `https://grafana.<domain>` |
 | **Node-RED** | Flow-based IoT logic (behind SSO) | `https://node-red.<domain>` |
-| **Mosquitto** | MQTT broker (every client authenticates) | `mqtt://<LAN-IP>:31883` |
+| **Mosquitto** | MQTT broker (every client authenticates; boards over TLS only) | `mqtts://<LAN-IP>:31884` |
 | **MQTT Explorer** | Browser-based MQTT topic browser | `https://mqtt-explorer.<domain>` |
 | **AI Workbench** | JupyterHub — notebooks and VS Code, per-user (SSO) | `https://ai-workbench.<domain>` |
 | **Recipe Schedule Manager** | Schedule grow recipes, manage unit permissions, run/stop cycles | `https://scheduler.<domain>` |
@@ -140,7 +140,7 @@ After the settings, the infrastructure stage (`deploy-infra.sh`) does:
 3. **Deploys PostgreSQL** (Bitnami Helm chart)
 4. **Deploys Keycloak** (official `quay.io/keycloak/keycloak:26.0` image, HTTPS ingress) with the `medcea` login theme
 5. **Creates Keycloak realm `medcea`**: confidential OAuth2 clients for `node-red`, `grafana`, `workbench`, `portal`, `config`, `access` and `edge-wizard` (secrets written to `config.env`), the platform roles `operator` / `qa` / `auditor` / `admin`, the `groups` scope the portal checks, and the `organisation` profile field
-6. **Deploys Mosquitto** (MQTT broker — TCP port 31883 for the boards; password + ACL authentication kept in sync from the database by a sidecar)
+6. **Deploys Mosquitto** (MQTT broker — TLS port 31884 for the boards, certificate `mqtt.<domain>` from the platform CA; password + ACL authentication kept in sync from the database by a sidecar)
 7. **Deploys Node-RED** behind OAuth2 Proxy (Keycloak SSO)
 8. **Deploys Grafana** with Keycloak SSO and PostgreSQL datasource pre-wired
 9. **Deploys pgAdmin** with PostgreSQL connection pre-configured and Keycloak sign-in (admins only)
@@ -339,7 +339,7 @@ Scheduler:     https://scheduler.<domain>       (recipe schedules)
 Onboarding:    https://onboard-device.<domain>  (device wizard, runs on the host — login via Keycloak)
 pgAdmin:       https://pgadmin.<domain>         (Keycloak sign-in, role admin)
 MQTT Explorer: https://mqtt-explorer.<domain>   (browser MQTT tool; its broker socket is wss://…/mqtt)
-Mosquitto:     mqtt://<LAN-IP>:31883           (boards on the LAN, per-device credentials)
+Mosquitto:     mqtts://<LAN-IP>:31884          (boards on the LAN, TLS only, per-device credentials)
 Postgres:      rdbms-postgresql.medcea.svc.cluster.local:5432  (internal)
 ```
 
@@ -549,7 +549,7 @@ flashed before broker authentication have no credential: re-onboard them.
 
 | Transport | Address | Port | Use |
 |---|---|---|---|
-| MQTT (TCP) | `<server-LAN-IP>` | `31883` | boards on the LAN |
+| MQTT (TLS) | `<server-LAN-IP>` | `31884` | boards on the LAN; plain 31883 closed since 5 Nov 2026 |
 | MQTT (TCP) | `mosquitto.medcea.svc.cluster.local` | `1883` | services in the cluster |
 | WebSocket | `wss://mqtt-explorer.<domain>/mqtt` | 443 | only through the MQTT Explorer's sign-in |
 
@@ -560,7 +560,7 @@ flashed before broker authentication have no credential: re-onboard them.
 ip route get 8.8.8.8 | awk '/src/{print $7}'  # run on the server
 ```
 
-> **Stability tip:** The LAN IP can change if your router reassigns it via DHCP. To avoid breakage, set a **DHCP reservation** in your router for the server's MAC address. Alternatively, IoT devices on the LAN can resolve the server by hostname: `<hostname>.local:31883` (requires Avahi/mDNS, which is installed by default on Ubuntu Desktop).
+> **Stability tip:** The LAN IP can change if your router reassigns it via DHCP. To avoid breakage, set a **DHCP reservation** in your router for the server's MAC address. Alternatively, IoT devices on the LAN can resolve the server by hostname: `<hostname>.local:31884` (TLS) (requires Avahi/mDNS, which is installed by default on Ubuntu Desktop).
 
 ### Connection examples
 
@@ -570,10 +570,16 @@ other clients. Use a credential with the topics it is allowed (table above).
 **MicroPython (umqtt.simple)**
 
 ```python
+import ssl
 from umqtt.simple import MQTTClient
 
-client = MQTTClient("unit01-s-zone01-test", "192.168.1.102", port=31883,
-                    user="unit01-s-zone01", password="<from edge/provisioned/unit01-s-zone01.json>")
+# TLS only (port 31884): the platform CA as DER (mqtt_ca.der, copied to each board at onboarding)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.verify_mode = ssl.CERT_REQUIRED
+ctx.load_verify_locations(cadata=open("mqtt_ca.der", "rb").read())
+client = MQTTClient("unit01-s-zone01-test", "192.168.1.102", port=31884,
+                    user="unit01-s-zone01", password="<from edge/provisioned/unit01-s-zone01.json>",
+                    ssl=ctx, ssl_params={"server_hostname": "mqtt.medcea"})
 client.connect()
 client.publish(b"medcea/UNIT01/ZONE01/sense/humidity", b"65")
 client.disconnect()
@@ -867,7 +873,7 @@ Two things do not go through the ingress and use raw ports:
 
 | Service | Address | Note |
 |---|---|---|
-| Mosquitto (IoT devices) | `mqtt://<lan-ip>:31883` | LAN NodePort — set a DHCP reservation |
+| Mosquitto (IoT devices) | `mqtts://<lan-ip>:31884` | LAN NodePort, TLS only — set a DHCP reservation |
 | Onboarding wizard | `https://onboard-device.<domain>` | Runs on the host (port 8088 behind the ingress); needs the USB port |
 
 Remember that each browsing device also needs the platform CA installed — see

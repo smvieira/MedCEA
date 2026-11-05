@@ -59,7 +59,8 @@ Options:
                         device row. The slot stays free.
       --mqtt-host ADDR  Broker address to put on the board
                         (default: the LAN address from config.env)
-      --mqtt-port PORT  Broker port (default 31883, the Mosquitto NodePort)
+      --mqtt-port PORT  Broker port (default 31884, the broker's TLS NodePort)
+      --mqtt-tls-name N Name in the broker's certificate (default mqtt.<DOMAIN>)
       --topic-root ROOT Topic root (default: PROJECT_NAME from config.env)
   -p, --port PATH       Serial port (default: autodetect, prompt if ambiguous)
   -f, --firmware PATH   Use this .bin and skip the selection menu entirely
@@ -142,7 +143,7 @@ EOF
 PORT=""; FIRMWARE=""; BAUD="460800"; SSID=""; PSK=""; DO_ERASE=1; ASSUME_YES=0
 OFFLINE=0; WANT_PREVIEW=0
 ROLE=""; UNIT_WANTED=""; ZONE_WANTED=""; UNREGISTERED=0; DO_REGISTER=1
-ASK_ADVANCED=0; MQTT_HOST=""; MQTT_PORT=""; TOPIC_ROOT=""
+ASK_ADVANCED=0; MQTT_HOST=""; MQTT_PORT=""; TOPIC_ROOT=""; MQTT_TLS_NAME=""
 CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
 UI=0; UI_PORT=8088; UI_BIND="0.0.0.0"; UI_DIR=""; UI_PID=""; UI_TOKEN=""; STAGE=""; WIFI_TRY_DIR=""
 UI_INSECURE=0; UI_MANAGED=0; TOKEN_FD=""
@@ -170,6 +171,7 @@ while [ $# -gt 0 ]; do
     --advanced)    ASK_ADVANCED=1;        shift ;;
     --mqtt-host)   MQTT_HOST="${2:-}";    shift 2 ;;
     --mqtt-port)   MQTT_PORT="${2:-}";    shift 2 ;;
+    --mqtt-tls-name) MQTT_TLS_NAME="${2:-}"; shift 2 ;;
     --topic-root)  TOPIC_ROOT="${2:-}";   shift 2 ;;
     --no-erase)    DO_ERASE=0;        shift ;;
     -y|--yes)      ASSUME_YES=1;      shift ;;
@@ -211,7 +213,12 @@ PROJECT_NAME="${PROJECT_NAME:-medcea}"
 # nothing. Give the host a DHCP reservation — this address ends up baked into
 # every board flashed today.
 TOPIC_ROOT="${TOPIC_ROOT:-$PROJECT_NAME}"
-MQTT_PORT="${MQTT_PORT:-31883}"        # the Mosquitto NodePort, deploy-infra.sh
+MQTT_PORT="${MQTT_PORT:-31884}"        # the broker's TLS NodePort (listener 8883), deploy-infra.sh
+# TLS (5 Nov 2026): the broker takes boards over TLS only. The board checks the broker's
+# certificate against the platform CA (.ca/ca.crt, copied to it as mqtt_ca.der) and by
+# this name, which deploy-infra.sh puts in the certificate; it need not resolve.
+MQTT_TLS_NAME="${MQTT_TLS_NAME:-${DOMAIN:+mqtt.$DOMAIN}}"
+MQTT_CA="$REPO_ROOT/.ca/ca.crt"
 if [ -z "$MQTT_HOST" ]; then
   MQTT_HOST="${_LAN_IP:-}"
   [ -n "$MQTT_HOST" ] || MQTT_HOST="$(ip route get 8.8.8.8 2>/dev/null \
@@ -995,8 +1002,8 @@ if [ "$UNREGISTERED" != 1 ]; then
 
   mapfile -t TPL < <(python3 "$TEMPLATE_TOOL" drivers "$ROLE") \
     || die "cannot read the $ROLE template"
-  printf '%s\n' "${TPL[@]}" | grep -q '^DRIVER' \
-    || die "the $ROLE template offers no drivers"
+  grep -q '^DRIVER' <<<"$(printf '%s\n' "${TPL[@]}")" \
+    || die "the $ROLE template offers no drivers"   # no pipe: grep -q's early exit is SIGPIPE
 
   # Say what will be filled in without asking. Printing it is the difference
   # between "inferred" and "silently assumed".
@@ -1185,7 +1192,9 @@ print("%d channel(s), %d actuator(s) from the editor"
   MQTT_USER="$SLOT_DNS"
   MQTT_PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
   MQTT_PASS_HASH="$(printf '%s' "$MQTT_PASS" | python3 "$REPO_ROOT/infra/mqtt-passwd.py")"
-  info "mqtt       : $MQTT_HOST:$MQTT_PORT as $MQTT_USER"
+  [ -n "$MQTT_TLS_NAME" ] || die "no broker certificate name: DOMAIN is not set in config.env (or pass --mqtt-tls-name)"
+  [ -r "$MQTT_CA" ] || die "the platform CA $MQTT_CA is missing or unreadable: run ./deploy-infra.sh (the board must verify the broker)"
+  info "mqtt       : $MQTT_HOST:$MQTT_PORT over TLS (certificate $MQTT_TLS_NAME) as $MQTT_USER"
   if [ "$ROLE" = "SENSE" ]; then
     info "publishes  : $TOPIC_BASE/sense/<tag>"
   else
@@ -1223,12 +1232,12 @@ if [ -z "$PORT" ]; then
     *) info "More than one serial device is present:"
        for i in "${!PORTS[@]}"; do
          d="$(udevadm info -q property -n "${PORTS[$i]}" 2>/dev/null \
-              | sed -n 's/^ID_VENDOR_FROM_DATABASE=//p' | head -1)"
+              | sed -n 's/^ID_VENDOR_FROM_DATABASE=//p' | head -1 || true)"
          printf '      [%d] %s  %s%s%s\n' "$((i+1))" "${PORTS[$i]}" "$DIM" "${d:-}" "$N"
        done
        CHOICES=(); for i in "${!PORTS[@]}"; do
          d="$(udevadm info -q property -n "${PORTS[$i]}" 2>/dev/null \
-              | sed -n 's/^ID_VENDOR_FROM_DATABASE=//p' | head -1)"
+              | sed -n 's/^ID_VENDOR_FROM_DATABASE=//p' | head -1 || true)"
          CHOICES+=("${PORTS[$i]}|${d:-}")
        done
        ui_waiting
@@ -1774,7 +1783,7 @@ else
     STAGE="$STAGE" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" ZONE_CODE="$ZONE_CODE" \
     ZONE_ID="$ZONE_ID" HOSTNAME="$HOSTNAME" \
     SSID="$SSID" PSK="$PSK" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" \
-    MQTT_USER="$MQTT_USER" MQTT_PASS="$MQTT_PASS" \
+    MQTT_TLS_NAME="$MQTT_TLS_NAME" MQTT_USER="$MQTT_USER" MQTT_PASS="$MQTT_PASS" \
     TOPIC_ROOT="$TOPIC_ROOT" MESSAGE_INTERVAL="${MESSAGE_INTERVAL:-30}" \
     POLL_MS="${POLL_MS:-100}" CONTROL_DRIVER="$CONTROL_DRIVER" \
     MAC="$MAC" FW_NAME="$FW_NAME" FW_SHA="$FW_SHA" TS="$TS" \
@@ -1791,6 +1800,7 @@ spec = {
     "hostname": e["HOSTNAME"],
     "wifi_ssid": e["SSID"], "wifi_psk": e["PSK"],
     "mqtt_host": e["MQTT_HOST"], "mqtt_port": int(e["MQTT_PORT"]),
+    "mqtt_tls_name": e["MQTT_TLS_NAME"],
     "mqtt_user": e["MQTT_USER"], "mqtt_pass": e["MQTT_PASS"],
     "topic_root": e["TOPIC_ROOT"],
     "message_interval": int(e["MESSAGE_INTERVAL"]),
@@ -1846,11 +1856,16 @@ print(" ".join(json.loads(os.environ["ANSWER"])["written"]))'); do
 fi
 
 printf 'PASS = %s\n' "'$WEBREPL_PASS'" > "$STAGE/webrepl_cfg.py"
+# The platform CA, DER, for the board's TLS check of the broker (cea_edge_functions).
+if [ -n "${MQTT_USER:-}" ]; then
+  openssl x509 -in "$MQTT_CA" -outform der -out "$STAGE/mqtt_ca.der" \
+    || die "could not convert the platform CA for the board"
+fi
 
 # The application tree. Identical on every board — role, slot and pins are all
 # in device_cfg.py — so a fix here reaches the whole fleet on the next onboard
 # instead of needing nine hand edits.
-for f in "$STAGE"/*.py "$STAGE"/*.json; do
+for f in "$STAGE"/*.py "$STAGE"/*.json "$STAGE"/*.der; do
   [ -e "$f" ] || continue
   mpy_cp "$f" ":$(basename "$f")" || die "failed to copy $(basename "$f") to the board"
   info "copied $(basename "$f")"
@@ -1934,7 +1949,7 @@ if [ -n "$HOSTNAME_OK" ] && [ -n "$IP" ]; then
   if [ -z "$RESOLVES" ]; then
     # The system resolver refuses single-label names; the router may still know
     # it. Worth reporting, because it tells you the DHCP registration worked.
-    gw="$(ip route | awk '/^default/{print $3; exit}')"
+    gw="$(ip route | awk '/^default/{print $3; exit}' || true)"   # awk's early exit is SIGPIPE (141) under pipefail
     if [ -n "$gw" ] && command -v nslookup >/dev/null 2>&1; then
       got="$(timeout 4 nslookup "$HOSTNAME_OK" "$gw" 2>/dev/null | awk '/^Address: /{print $2}' | tail -1 || true)"
       [ "$got" = "$IP" ] && RESOLVES="$HOSTNAME_OK (via $gw only)"
@@ -2045,7 +2060,7 @@ HOSTNAME_OK="$HOSTNAME_OK" RESOLVES="$RESOLVES" \
 ESPTOOL_VER="$ESPTOOL_VER" MPREMOTE_VER="$MPREMOTE_VER" RECORD="$RECORD" \
 UNREGISTERED="$UNREGISTERED" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" \
 ZONE_CODE="$ZONE_CODE" ZONE_ID="$ZONE_ID" REGISTERED_ID="$REGISTERED_ID" \
-MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" TOPIC_ROOT="$TOPIC_ROOT" \
+MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" TOPIC_ROOT="$TOPIC_ROOT" MQTT_TLS_NAME="$MQTT_TLS_NAME" \
 MQTT_USER="${MQTT_USER:-}" MQTT_PASS="${MQTT_PASS:-}" \
 DB_COMPONENTS="$DB_COMPONENTS" REGISTERED_BY="$REGISTERED_BY" \
 "$VENV_DIR/bin/python" - <<'PY'
@@ -2068,6 +2083,7 @@ rec = {
     # The board's broker credential sits here in plaintext like its Wi-Fi PSK
     # (this file is mode 600 in a 700 directory); the platform keeps only a hash.
     "mqtt": None if unreg else {"host": e["MQTT_HOST"], "port": int(e["MQTT_PORT"]),
+                                "tls_name": e["MQTT_TLS_NAME"],
                                 "topic_root": e["TOPIC_ROOT"],
                                 "username": e["MQTT_USER"], "password": e["MQTT_PASS"]},
     "components": json.loads(e["DB_COMPONENTS"] or "[]"),
@@ -2109,7 +2125,7 @@ if ui_on; then
   UNREGISTERED="$UNREGISTERED" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" \
   ZONE_CODE="$ZONE_CODE" REGISTERED_ID="$REGISTERED_ID" \
   REGISTERED_BY_NAME="${REGISTERED_BY:+$EDGE_NAME ($REGISTERED_BY)}" \
-  TOPIC_BASE="${TOPIC_BASE:-}" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" \
+  TOPIC_BASE="${TOPIC_BASE:-}" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" MQTT_TLS_NAME="$MQTT_TLS_NAME" \
   python3 -c '
 import json, os
 e = os.environ
@@ -2120,7 +2136,7 @@ if not unreg:
     f += [["hostname", e["HOSTNAME"], True],
           ["unit / zone", "%s / %s" % (e["UNIT_CODE"], e["ZONE_CODE"]), False],
           ["role", e["ROLE"], False],
-          ["broker", "%s:%s" % (e["MQTT_HOST"], e["MQTT_PORT"]), False]]
+          ["broker", "%s:%s (TLS, %s)" % (e["MQTT_HOST"], e["MQTT_PORT"], e["MQTT_TLS_NAME"]), False]]
     if e["ROLE"] == "CONTROL":
         f += [["subscribes", e["TOPIC_BASE"] + "/control/#", False],
               ["reports", e["TOPIC_BASE"] + "/control_setpoint", False]]
@@ -2208,7 +2224,7 @@ if [ "$UNREGISTERED" != 1 ]; then
 ${B} Platform${N}
   unit / zone  ${B}$UNIT_CODE / $ZONE_CODE${N}   ${DIM}(zone_id $ZONE_ID)${N}
   role         $ROLE
-  broker       $MQTT_HOST:$MQTT_PORT  (as $MQTT_USER)
+  broker       $MQTT_HOST:$MQTT_PORT  (TLS, certificate $MQTT_TLS_NAME; as $MQTT_USER)
 EOF
   if [ "$ROLE" = "CONTROL" ]; then
     echo "  subscribes   $TOPIC_BASE/control/#"

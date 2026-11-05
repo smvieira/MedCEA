@@ -47,6 +47,7 @@ spec:
         ports:
         - containerPort: 1883
         - containerPort: 9001
+        - containerPort: 8883
         volumeMounts:
         - name: config
           mountPath: /mosquitto/config
@@ -54,6 +55,9 @@ spec:
           mountPath: /mosquitto/data
         - name: auth
           mountPath: /mosquitto/auth
+          readOnly: true
+        - name: tls
+          mountPath: /mosquitto/certs
           readOnly: true
       - name: mqtt-auth-sync
         image: python:3.12-alpine
@@ -93,6 +97,12 @@ spec:
       - name: sync-script
         configMap:
           name: mqtt-auth-sync
+      # The broker's certificate (deploy-infra.sh, platform CA). 0444: Mosquitto drops to
+      # its own user before it reads the key; the volume is this pod's alone.
+      - name: tls
+        secret:
+          secretName: mosquitto-tls
+          defaultMode: 0444
 ---
 apiVersion: v1
 kind: Service
@@ -100,19 +110,33 @@ metadata:
   name: mosquitto
   namespace: ${NAMESPACE}
 spec:
+  # In-cluster only (5 Nov 2026): the platform's services connect here, plain, by
+  # mosquitto.<ns>.svc:1883. The plain LAN NodePort 31883 is closed: boards come in
+  # over TLS through mosquitto-tls below. The WebSocket listener is mosquitto-ws:
+  # browsers reach it as wss://<MQTTX_DOMAIN>/mqtt through the MQTT Explorer's proxy.
+  type: ClusterIP
+  selector:
+    app: mosquitto
+  ports:
+  - name: mqtt
+    port: 1883
+    targetPort: 1883
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mosquitto-tls
+  namespace: ${NAMESPACE}
+spec:
+  # The boards' LAN port: TLS only (listener 8883), verified by the name mqtt.<DOMAIN>.
   type: NodePort
   selector:
     app: mosquitto
   ports:
-  # 1883 on the LAN NodePort for the boards. The WebSocket listener is on its
-  # own ClusterIP Service below: a port in a NodePort Service always gets a
-  # node port, and the old 31901 is gone on purpose — browsers reach the
-  # broker as wss://<MQTTX_DOMAIN>/mqtt through the MQTT Explorer's
-  # oauth2-proxy only.
-  - name: mqtt
-    port: 1883
-    targetPort: 1883
-    nodePort: 31883
+  - name: mqtts
+    port: 8883
+    targetPort: 8883
+    nodePort: 31884
 ---
 apiVersion: v1
 kind: Service
