@@ -230,15 +230,26 @@ class IamPolicy(unittest.TestCase):
         self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk}})
         self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|Access policy version|version 1 (bootstrap), skeleton"))
 
-    def test_an_approved_version_waits_for_4_5(self):
-        # IAM 4.4 (design §14.7.6): nothing approved is applied before 4.5
+    def test_an_approved_version_waits_for_its_apply(self):
+        # IAM 4.5 (design §14.8.8): the instruction is apply.sh N; after a reverted apply the
+        # version is approved again (_mark_reverted), and the detail says so
         self.t.write_host()
         self.t.st["open_versions"] = [{"version": 2, "kind": "change", "status": "approved", "age_days": 0,
-                                       "skeleton_digest": self.t.st["accepted"]["digest"], "diff_from": None}]
+                                       "skeleton_digest": self.t.st["accepted"]["digest"], "diff_from": None,
+                                       "reverted": False}]
         self.assertEqual(self.run_check(self.t.write_state()),
-                         "WARN|Access policy version|version 2 (change) is approved; applying it arrives with IAM 4.5 "
-                         "(./apps/iam/apply.sh 2)")
-        self.t.st["open_versions"][0]["status"] = "submitted"
+                         "WARN|Access policy version|version 2 (change) is approved: ./apps/iam/apply.sh 2 --by <you> "
+                         "applies it")
+        self.t.st["open_versions"][0]["reverted"] = True
+        self.assertEqual(self.run_check(self.t.write_state()),
+                         "WARN|Access policy version|version 2 (change) is approved again after a reverted apply: "
+                         "./apps/iam/apply.sh 2 --by <you>")
+        # a five-digit version and the longest kind still fit health-check.sh's 160 characters
+        self.t.st["open_versions"][0].update(version=12345, kind="skeleton")
+        out = self.run_check(self.t.write_state())
+        self.assertTrue(out.endswith("./apps/iam/apply.sh 12345 --by <you>"), out)
+        self.assertLessEqual(len(out.split("|", 2)[2]), 160, out)
+        self.t.st["open_versions"][0].update(version=2, kind="change", status="submitted")
         self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|"))
 
     def test_a_stale_skeleton_proposal_warns(self):
@@ -273,18 +284,31 @@ class IamPolicy(unittest.TestCase):
                                        "skeleton_digest": wide, "diff_from": self.t.st["accepted"]["digest"]}]
         out = self.run_check(self.t.write_state())
         self.assertTrue(out.startswith("FAIL|Access policy version|"), out)
-        # through health-check.sh, which cuts each detail at 160 characters: the whole instruction
-        self.assertIn("the git skeleton widens: a deploy refuses it (proposed as version 2, approved: put HEAD back "
-                      "at the accepted skeleton; the proposal waits on its branch)", out)
-        self.assertIn("version 2 (skeleton) is approved; applying it arrives with IAM 4.5", out)
+        # through health-check.sh, which cuts each detail at 160 characters: the whole instruction.
+        # IAM 4.5 (design §14.8.8): an approved proposal names its apply
+        self.assertIn("the git skeleton widens: a deploy refuses it (approved as version 2: ./apps/iam/apply.sh 2 "
+                      "--by <you>)", out)
+        self.assertIn("version 2 (skeleton) is approved: ./apps/iam/apply.sh 2 --by <you> applies it", out)
         # the whole detail (health-check.sh cuts each at 160 characters), from the scratch tree's judge
         p = subprocess.run([sys.executable, self.t.path("apps", "iam", "apply_check.py"), "health", "--state",
                             self.t.write_state(), "--host-file", self.t.path("state", "policy-applied.yaml")],
                            capture_output=True, text=True, env=self.t.env(), timeout=300)
-        self.assertIn("FAIL|the git skeleton widens: a deploy refuses it (proposed as version 2, approved: put "
-                      "HEAD back at the accepted skeleton; the proposal waits on its branch)", p.stdout.splitlines())
+        self.assertIn("FAIL|the git skeleton widens: a deploy refuses it (approved as version 2: ./apps/iam/apply.sh 2 "
+                      "--by <you>)", p.stdout.splitlines())
         for line in p.stdout.splitlines():
             self.assertLessEqual(len(line.split("|", 1)[1]), 160, line)
+        # --status names the approved version too (the scratch tree's judge: its git skeleton)
+        p = subprocess.run([sys.executable, self.t.path("apps", "iam", "apply_check.py"), "status", "--state",
+                            self.t.write_state(), "--gate-rc", "3"],
+                           capture_output=True, text=True, env=self.t.env(), timeout=300, cwd=self.t.root)
+        self.assertIn("WIDENING: refused by every deploy; approved as skeleton version 2: ./apps/iam/apply.sh 2 "
+                      "--by <you> applies it", p.stdout)
+        # a proposal still submitted: the old instruction (put HEAD back)
+        self.t.st["open_versions"][0]["status"] = "submitted"
+        out = self.run_check(self.t.write_state())
+        self.assertIn("the git skeleton widens: a deploy refuses it (proposed as version 2, submitted: put HEAD back "
+                      "at the accepted skeleton; the proposal waits on its branch)", out)
+        self.t.st["open_versions"][0]["status"] = "approved"
         # the longest status and a five-digit version still fit
         self.t.st["open_versions"][0].update(version=12345, status="submitted")
         p = subprocess.run([sys.executable, self.t.path("apps", "iam", "apply_check.py"), "health", "--state",
@@ -396,6 +420,179 @@ class IamPolicy(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
         self.assertEqual(calls[0][:4], ["exec", "-n", "medcea", "deployment/iam-api"])
         self.assertIn("http://127.0.0.1:8083/healthz", calls[0][-1])
+
+
+class Apply45(unittest.TestCase):
+    """IAM 4.5 (design §14.8.8): what health says around apply.sh N, its revert and --rollback-to.
+    Every detail goes through health-check.sh's check_iampolicy (cut at 160 characters)."""
+
+    NAME = "Access policy version"
+
+    def setUp(self):
+        self.t = Tree()
+        self.t.write_host()
+
+    def tearDown(self):
+        self.t.close()
+
+    def run_check(self, scenario=None):
+        if scenario is not None:
+            self.t.scenario(scenario)
+        setup = f'POLICY_SOURCE_STATE_FILE={self.t.write_state()}\nPOLICY_SOURCE_VERDICT=ok\nPOLICY_SOURCE_DETAIL=""'
+        return self.t.fn("check_iampolicy", f'check_iampolicy "{self.NAME}" medcea_db', setup)
+
+    def details(self, out):
+        level, name, detail = out.split("|", 2)
+        self.assertEqual(name, self.NAME)
+        parts = detail.split(";")
+        for d in parts:
+            self.assertLessEqual(len(d), 160, d)
+        return level, parts
+
+    def as_version(self, v, kind):
+        """The applied version renumbered (its host file rewritten to match)."""
+        self.t.st.update(state=f"version-{v}", version=v, kind=kind, unconfirmed=[])
+        self.t.st["entries_digest"] = source.entries_digest(kind, self.t.st["groups"], self.t.st["roles"],
+                                                            self.t.st["entries"], self.t.st["waivers"])
+        self.t.write_host()
+
+    def test_a_clean_revert_ends_with_applied_under_the_previous_version(self):
+        # the revert's records: apply_reverted and partial_apply {reverted} under N, then
+        # applied {reverted_from: N} under prev, the latest apply event again
+        self.t.st["last_apply_event"] = {"event": "applied", "event_id": 60, "at": "x", "outcome": None}
+        self.t.st["last_events"] = [{"event_id": 60, "event": "applied", "version": 1},
+                                    {"event_id": 59, "event": "partial_apply", "version": 2},
+                                    {"event_id": 58, "event": "apply_reverted", "version": 2},
+                                    {"event_id": 57, "event": "apply_started", "version": 2}]
+        self.assertTrue(self.run_check().startswith("OK|"))
+        # without the closing applied the rule still FAILs (no tolerance was added)
+        self.t.st["last_events"] = self.t.st["last_events"][1:]
+        level, parts = self.details(self.run_check())
+        self.assertEqual(level, "FAIL")
+        self.assertIn("the latest apply event (apply_reverted 58) names version 2, the applied one is 1", parts)
+
+    def test_partial_apply_fails_and_an_unfinished_revert_says_so(self):
+        self.t.st["last_apply_event"] = {"event": "partial_apply", "event_id": 61, "at": "x", "outcome": "mixed"}
+        self.assertEqual(self.run_check(), f"FAIL|{self.NAME}|version 1: partial_apply "
+                                           "(./apps/iam/apply.sh --resume --by <you>)")
+        self.t.st["last_apply_event"]["outcome"] = "reverting"
+        self.assertEqual(self.run_check(), f"FAIL|{self.NAME}|version 1: a revert is unfinished "
+                                           "(./apps/iam/apply.sh --resume --by <you>)")
+
+    def test_the_sequence_finding_waits_while_an_apply_runs(self):
+        self.t.st["last_apply_event"] = {"event": "apply_started", "event_id": 40, "at": "x"}
+        self.t.st["audit_findings"] = [{"version": 1, "finding": "sequence"}]
+        level, parts = self.details(self.run_check())
+        self.assertEqual(level, "FAIL")
+        self.assertIn("audit_versions(): version 1 sequence", parts)
+        self.assertTrue(any(p.startswith("version 1 was committed but its apply did not record its end") for p in parts))
+        lock = self.t.path(".medcea.lock")
+        # it must outlive two checks, each of which can take seconds; its own session, so the
+        # finally kills its sleep too (an orphan would keep the lock and the test's output open)
+        p = subprocess.Popen(["bash", "-c", 'exec 9>>"$1"; sleep 600; :', "apps/iam/apply.sh", lock],
+                             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(200):
+                if os.path.exists(f"/proc/{p.pid}/fd/9"):
+                    break
+                import time
+                time.sleep(0.05)
+            self.assertEqual(self.run_check(), f"WARN|{self.NAME}|an apply is in progress")
+            # another version's sequence finding, or another finding, is still a FAIL
+            self.t.st["audit_findings"] = [{"version": 1, "finding": "sequence"}, {"version": 1, "finding": "approval_mismatch"}]
+            level, parts = self.details(self.run_check())
+            self.assertEqual(level, "FAIL")
+            self.assertEqual(sorted(parts), ["an apply is in progress", "audit_versions(): version 1 approval_mismatch"])
+        finally:
+            os.killpg(p.pid, 9)
+            p.wait()
+
+    def _accept(self, **rv):
+        """An accept whose to_body widens over its from_body (a route removed from 'from')."""
+        to = self.t.st["accepted"]["body"]
+        frm = json.loads(json.dumps(to))
+        api = [m for m in frm["resource_groups"]["recipes"]["members"] if m.get("type") == "api"
+               and m.get("service") == "scheduler"]
+        self.assertEqual(api[0]["routes"], {"GET /api/recipes": "R"})
+        api[0]["routes"] = {}
+        a = {"event_id": 70, "from": "f" * 64, "to": self.t.st["accepted"]["digest"], "from_body": frm, "to_body": to,
+             "version": 1, "reviewed_by_version": 2, "entries": self.t.st["entries"], "waivers": self.t.st["waivers"]}
+        a.update(rv)
+        self.t.st["accepts"] = [a]
+
+    def test_the_accepts_audit_checks_reviewed_by_version(self):
+        acc = self.t.st["accepted"]["digest"]
+        want = f"FAIL|{self.NAME}|skeleton {acc[:12]} was accepted at event 70 but widens over {'f' * 12}"
+        # a forged summary: no such version
+        self._accept(rv_kind=None, rv_status=None, rv_skeleton=None)
+        self.assertEqual(self.run_check(), want)
+        # a change version, an approved (not applied) skeleton version, another digest: recomputed
+        for bad in ({"rv_kind": "change", "rv_status": "applied", "rv_skeleton": acc},
+                    {"rv_kind": "skeleton", "rv_status": "approved", "rv_skeleton": acc},
+                    {"rv_kind": "skeleton", "rv_status": "applied", "rv_skeleton": "e" * 64}):
+            self._accept(**bad)
+            self.assertEqual(self.run_check(), want, bad)
+        # the applied (or since superseded) skeleton version proposing that digest: reviewed
+        for status in ("applied", "superseded"):
+            self._accept(rv_kind="skeleton", rv_status=status, rv_skeleton=acc)
+            self.assertTrue(self.run_check().startswith("OK|"), status)
+
+    def _narrow_git(self):
+        pol = self.t.path("apps", "iam", "policy", "defaults.yaml")
+        with open(pol) as f:
+            text = f.read()
+        a = '"GET /api/algorithms": R, "PUT /api/algorithms/<id>": U, "GET /api/param-sets": R}'
+        self.assertEqual(text.count(a), 1)
+        with open(pol, "w") as f:
+            f.write(text.replace(a, '"GET /api/algorithms": R, "PUT /api/algorithms/<id>": U}'))
+
+    def test_a_narrowing_git_skeleton_would_undo_an_applied_skeleton_version(self):
+        self._narrow_git()
+        self.t.st["last_events"] = []
+        self.assertEqual(self.run_check(), f"WARN|{self.NAME}|the git skeleton narrows: accepted at the next deploy")
+        self.t.st["accepted"]["reviewed_by_version"] = 12345
+        self.assertEqual(self.run_check(), f"WARN|{self.NAME}|git skeleton narrows: a deploy would undo skeleton "
+                                           "version 12345; keep its commit on the deployed branch")
+        gate = os.path.join(self.t.fd, "gate.json")
+        with open(gate, "w") as f:
+            json.dump({"verdict": "narrowing"}, f)
+        p = subprocess.run([sys.executable, self.t.path("apps", "iam", "apply_check.py"), "status", "--state",
+                            self.t.write_state(), "--gate", gate], capture_output=True, text=True, env=self.t.env(),
+                           timeout=300, cwd=self.t.root)
+        self.assertIn("narrowing: a deploy would accept it and undo skeleton version 12345", p.stdout)
+
+    def test_an_unconfirmed_or_disputed_rollback(self):
+        self.as_version(3, "rollback")
+        sk = self.t.st["accepted"]["digest"]
+        live = {"iam_healthz": {"policy_port": True, "applied_version": 3, "skeleton_digest": sk}}
+        self.t.st["unconfirmed"] = [{"version": 3, "kind": "rollback", "status": "applied"}]
+        self.assertEqual(self.run_check(live), f"WARN|{self.NAME}|version 3 (rollback) is not confirmed by qa yet "
+                                               "(the Policy UI)")
+        self.t.st.update(unconfirmed=[], disputed_at="2026-11-04T10:00:00Z", disputed_not_superseded=[3])
+        self.assertEqual(self.run_check(live), f"FAIL|{self.NAME}|version 3 is disputed and not superseded")
+        self.t.st.update(disputed_at=None, disputed_not_superseded=[], confirmed_at="2026-11-04T10:00:00Z")
+        self.assertTrue(self.run_check(live).startswith(f"OK|{self.NAME}|version 3 (rollback), skeleton"))
+
+    def test_the_state_query_reads_what_these_need(self):
+        """The --full query: the reverted_unreviewed window from the reverted version's
+        apply_started; the accept's reviewed version; the outcome of the last apply event;
+        the accepted skeleton's reviewed_by_version; an open version's earlier revert."""
+        sql = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-policy-source.sh"; _ps_state_sql true'],
+                             capture_output=True, text=True, env=clean_env()).stdout
+        i, j = sql.index("\\if :has_decisions"), sql.index("\\else\nSELECT '[]' AS reverted_unreviewed")
+        self.assertIn("WHERE a.event = 'apply_started' AND a.event_id < h.event_id", sql[i:j])
+        self.assertNotIn("'bootstrap_applied') AND a.event_id < h.event_id", sql[i:j])
+        self.assertIn("'rv_kind', rv.kind, 'rv_status', rv.status, 'rv_skeleton', rv.skeleton_digest", sql)
+        self.assertIn("LEFT JOIN iam_policy.version rv ON rv.version = CASE WHEN h.payload ->> 'reviewed_by_version' "
+                      "~ '^[0-9]+$'", sql)
+        self.assertIn("'outcome', h.payload ->> 'outcome'", sql)
+        self.assertIn("'reviewed_by_version', s.reviewed_by_version", sql)
+        self.assertIn("'reverted', EXISTS (SELECT 1 FROM iam_policy.history r WHERE r.version = v.version "
+                      "AND r.event = 'apply_reverted')", sql)
+        base = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-policy-source.sh"; _ps_state_sql false'],
+                              capture_output=True, text=True, env=clean_env()).stdout
+        self.assertIn("'outcome', h.payload ->> 'outcome'", base)
+        self.assertNotIn("rv_kind", base)
 
 
 class IamArtefacts(unittest.TestCase):

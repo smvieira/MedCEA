@@ -629,6 +629,90 @@ class I17(Base):
         self.assertIn('I17', API.i17_violation(S, new_role='superqa'))   # a composite that includes qa
 
 
+# ── 11b. dual_control (IAM 4.5, design §14.8.9) ──────────────────────────────
+class DualControlTest(Base):
+    """The maker and approver roles come from routes.json's dual_control, not from the
+    literals admin/qa: here qp approves and production_manager makes. Without the key
+    the literals apply (never weaker)."""
+    DUAL = {g: {'approver_roles': ['qp'], 'maker_roles': ['production_manager']} for g in ('iam_policy', 'iam_users')}
+
+    def setUp(self):
+        super().setUp()
+        self._table = API._table
+        table = dict(TABLE, dual_control=self.DUAL)
+        API._table = lambda: table
+        API._DUAL['warned'] = False
+        self.w.user(A, 'alice', roles=['admin'], person='pA')
+        self.w.user(Q, 'quinn', roles=['qa'], person='pQ')
+        self.w.user(S, 'pat', roles=['qp'], person='pP')
+        self.w.user(T, 'maker', roles=['production_manager'], person='pM')
+
+    def tearDown(self):
+        API._table = self._table
+        super().tearDown()
+
+    def test_the_helper_and_its_fallback(self):
+        self.assertEqual(API.dual('iam_users', 'approver_roles'), ['qp'])
+        self.assertEqual(API.dual_roles('maker_roles'), ['production_manager'])
+        API._table = lambda: dict(TABLE)        # a routes.json from before 4.1: the literals, logged once
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(API.dual('iam_users', 'approver_roles'), ['qa'])
+            self.assertEqual(API.dual('iam_policy', 'maker_roles'), ['admin'])
+        self.assertEqual(out.getvalue().count('has no dual_control'), 1, out.getvalue())
+
+    def test_guard_last_holds_the_compiled_roles(self):
+        with self.assertRaises(API.Refused) as e:
+            API.guard_last(S)
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn('last enabled qp', e.exception.payload['error'])
+        with self.assertRaises(API.Refused) as e:
+            API.guard_last(T, new_role='operator')
+        self.assertIn('last enabled production_manager', e.exception.payload['error'])
+        API.guard_last(A)                       # admin and qa are no longer guarded here
+        API.guard_last(Q)
+        self.w.user(X, 'pat2', roles=['qp'], person='pP2')
+        API.guard_last(S)                       # another enabled qp
+        API._table = lambda: dict(TABLE)        # without the key: the literals
+        with self.assertRaises(API.Refused) as e:
+            API.guard_last(A)
+        self.assertIn('last enabled administrator', e.exception.payload['error'])
+
+    def test_i17_across_the_compiled_sides(self):
+        self.assertIsNone(API.i17_violation(S))
+        self.w.users[T]['attributes']['person_id'] = ['pP']    # the qp's person also makes
+        self.assertIn('I17', API.i17_violation(S))
+        self.assertIn('I17', API.i17_violation(A, new_role='production_manager', new_person='pP'))
+        self.w.users[Q]['attributes']['person_id'] = ['pA']    # admin and qa: no longer the sides
+        self.assertIsNone(API.i17_violation(Q))
+        API._table = lambda: dict(TABLE)
+        self.assertIn('I17', API.i17_violation(Q))
+
+    def test_the_approver_must_hold_the_compiled_role_live(self):
+        API._live_approver({'sub': S, 'person_id': 'pP', 'username': 'pat'})
+        with self.assertRaises(API.Refused):
+            API._live_approver({'sub': Q, 'person_id': 'pQ', 'username': 'quinn'})
+        API._table = lambda: dict(TABLE)
+        API._live_approver({'sub': Q, 'person_id': 'pQ', 'username': 'quinn'})
+        with self.assertRaises(API.Refused):
+            API._live_approver({'sub': S, 'person_id': 'pP', 'username': 'pat'})
+
+    def test_staff_beside_an_applicant_are_both_sides(self):
+        self.w.user('aaaaaaaa-0000-4000-8000-000000000009', 'newbie', enabled=False, person=None)
+        row = {c: None for c in API.DEC_COLS}
+        row.update(decision_id=80, kind='grant', keycloak_user_id='aaaaaaaa-0000-4000-8000-000000000009',
+                   username='newbie', to_role='operator', status='pending_qa', reason='r', request_id=5,
+                   made_by_sub=A, made_by_person='pA', made_by_name='alice')
+        self.w.on('FROM iam.account_decision d LEFT JOIN',
+                  [tuple(row[c] for c in API.DEC_COLS) + (None, None, False)])
+        self.w.on('FROM iam.access_request WHERE request_id',
+                  [(5, 'newbie@x.org', 'New', 'Bie', None, None, 'operator')])
+        self.as_(QA)
+        status, body = self.call('GET', '/api/decisions?status=pending_qa')
+        self.assertEqual(status, 200, body)
+        self.assertEqual(sorted(x['username'] for x in body['decisions'][0]['lookalikes']), ['maker', 'pat'])
+
+
 # ── 12. roles outside ROLES, two-role accounts ────────────────────────────────
 class Roles(Base):
     def test_activate_qp(self):

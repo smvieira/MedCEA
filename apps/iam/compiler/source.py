@@ -7,10 +7,19 @@ the *applied* one. The host keeps it, composed with the accepted skeleton, in
 state/policy-applied.yaml (the **host applied file**), written only under the deploy lock
 (infra/lib-policy-source.sh, apps/iam/apply.sh; from slice 4.2a).
 
-resolve(path, defaults) picks the source, in this order (model.load and cli.py both use it):
+resolve(path, defaults, staged) picks the source, in this order (model.load and cli.py both use it):
   1. path (cli.py --file F)   an offline draft or a test; never a deploy script
   2. defaults=True            policy/defaults.yaml (cli.py --defaults, model.load_defaults():
                               the offline tests and the iam-db fixture)
+  2b. staged (cli.py --staged F, IAM 4.5, design §14.8.4.1)
+                              the host-file text of the version apps/iam/apply.sh applies, in
+                              its mode-700 stage: read with every check of read_host_file, and
+                              only when its sha256 is MEDCEA_POLICY_STAGED_SHA256 (else
+                              SourceError), which apply.sh pins after binding the body to the
+                              version's rows; label version-N. Never an unchecked YAML file
+                              (that is --file), and never with MEDCEA_POLICY_FILE. Its deploy
+                              path is dba_policy_bundle's _dba_src, honoured only under the run
+                              that holds the verified deploy lock
   3. MEDCEA_POLICY_FILE       only with MEDCEA_POLICY_BREAK_GLASS=<reason>; without the reason
                               SourceError (cli.py exits 2). A deploy uses it only after
                               policy_source_init recorded it (break_glass_seen) and pointed it
@@ -50,6 +59,8 @@ The applied state (policy_db_state's JSON document, lib-policy-source.sh):
   expected_body(state)        (body, dropped): {matrix, waivers} the host file must carry,
                               dropped against the accepted body's keys (whatever git says)
   host_file_text(state, ...)  the file's text; host_file_differs(state, path) None|absent|different
+  body_binding(state, path)   None when a staged file is the state's rows (IAM 4.5, apply.sh step 5.3)
+  read_staged(path)           cli.py --staged: the staged file, sha256-pinned (IAM 4.5)
   host_file_problems(...)     [(FAIL|WARN, detail)]: the read-only init and health
   write_host_file(path, text) atomic, mode 600 in state/ 700, under a verified lock
   verify_lock()               the Python twin of infra/lib-lock.sh medcea_lock_verify
@@ -131,7 +142,7 @@ class SourceError(Exception):
 
 
 class Source:
-    """Where a policy came from. kind: file | defaults | break-glass | host."""
+    """Where a policy came from. kind: file | defaults | staged | break-glass | host."""
 
     def __init__(self, kind, path, data, version=None, reason=None, header=None):
         self.kind, self.path, self.data = kind, path, data
@@ -145,6 +156,10 @@ def _read_yaml(path, what):
             text = f.read()
     except OSError as e:
         raise SourceError(f"cannot read {what} {path}: {e.strerror}") from None
+    return _parse_yaml(text, path, what)
+
+
+def _parse_yaml(text, path, what):
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
@@ -241,6 +256,12 @@ def read_host_file(path=None):
     if not _host_file_present(path):
         return None
     text, data = _read_yaml(path, "the host applied file")
+    return _host_source(path, text, data)
+
+
+def _host_source(path, text, data):
+    """read_host_file's checks on a text already read (the staged file is hashed and parsed
+    from the same bytes)."""
     header = parse_header(text)
     bad = f"{path}: its header does not match its body (edited by hand, or truncated): {RESTORE}"
     if skeleton_digest(data) != header["skeleton_digest"]:
@@ -264,15 +285,46 @@ def file_sha256(path):
     return h.hexdigest()
 
 
-def resolve(path=None, defaults=False, env=None, host_file=None):
+def read_staged(path, env=None):
+    """The staged host file of a version apps/iam/apply.sh applies (design §14.8.4.1) as a
+    Source of kind staged: its sha256 must be MEDCEA_POLICY_STAGED_SHA256 (the pin apply.sh
+    sets after step 5's body binding), then every header check of read_host_file. An edit
+    between the staging and the bundle's compile, or a file of another run, is SourceError."""
+    env = os.environ if env is None else env
+    want = env.get("MEDCEA_POLICY_STAGED_SHA256", "")
+    if not _HEX64.match(want):
+        raise SourceError("--staged needs MEDCEA_POLICY_STAGED_SHA256 (the sha256 apps/iam/apply.sh pinned): "
+                          "only apply.sh's bundle compiles a staged version")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        raise SourceError(f"cannot read the staged policy file {path}: {e.strerror}") from None
+    have = hashlib.sha256(raw).hexdigest()
+    if have != want:
+        raise SourceError(f"the staged policy file {path} is not the one apply.sh staged (sha256 {have[:12]}, "
+                          f"pinned {want[:12]}): it changed after staging; nothing is compiled from it")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SourceError(f"the staged policy file {path} is not UTF-8 text") from None
+    src = _host_source(path, *_parse_yaml(text, path, "the staged policy file"))
+    return Source("staged", path, src.data, version=src.version, header=src.header)
+
+
+def resolve(path=None, defaults=False, env=None, host_file=None, staged=None):
     """The Source of this compile (the order in the module docstring)."""
     env = os.environ if env is None else env
-    if path and defaults:
-        raise SourceError("--file and --defaults are two sources: give one")
+    if sum(bool(x) for x in (path, defaults, staged)) > 1:
+        raise SourceError("--file, --defaults and --staged are three sources: give one")
     if path:
         return Source("file", path, _read_yaml(path, "policy file")[1])
     if defaults:
         return Source("defaults", DEFAULTS, factory())
+    if staged:
+        if env.get("MEDCEA_POLICY_FILE", ""):
+            raise SourceError("--staged and MEDCEA_POLICY_FILE are two sources: break-glass never applies a version")
+        return read_staged(staged, env)
     override = env.get("MEDCEA_POLICY_FILE", "")
     if override:
         reason = env.get("MEDCEA_POLICY_BREAK_GLASS", "").strip()
@@ -312,7 +364,7 @@ def label(src, given=None, warn=None):
         return given
     if src.kind == "break-glass":
         return f"break-glass:{src.reason}"
-    if src.kind == "host":
+    if src.kind in ("host", "staged"):
         return f"version-{src.version}"
     if src.kind == "file":
         if warn:
@@ -325,6 +377,8 @@ def describe(src):
     """One line for a human: where this compile read the policy."""
     if src.kind == "host":
         return f"source: version {src.version} ({src.header['kind']}), {src.path}"
+    if src.kind == "staged":
+        return f"source: staged version {src.version} ({src.header['kind']}), {src.path} (apply.sh)"
     if src.kind == "break-glass":
         return f"source: BREAK-GLASS {src.path} ({src.reason})"
     if src.kind == "file":
@@ -621,6 +675,29 @@ def host_file_differs(state, path=None):
     return None
 
 
+def body_binding(state, path):
+    """None when the staged host file at `path` is the version of `state` (a simulated state
+    document of the version apply.sh applies), else why not (design §14.8.4 step 5.3, the
+    second link of §14.8.4.1). read_host_file checks the entries digest only when no row was
+    dropped and the keys are the version's; this binds the body in every case: line 1's
+    version, kind and entries digest are the state's, and line 2's body_digest and dropped
+    are expected_body(state)'s, computed from the database rows, never from the file."""
+    try:
+        src = read_host_file(path)
+    except SourceError as e:
+        return str(e)
+    if src is None:
+        return f"{path} is absent"
+    h = src.header
+    if int(h["version"]) != int(state.get("version")) or h["kind"] != state.get("kind") \
+            or h["entries_digest"] != state.get("entries_digest"):
+        return f"{path} names version {h['version']} ({h['kind']}), not the staged version {state.get('version')}"
+    want, dropped = expected_body(state)
+    if h["body"]["body_digest"] != body_digest(want) or h["body"]["dropped"] != dropped:
+        return f"{path}'s body is not version {state.get('version')}'s rows"
+    return None
+
+
 def _body_line(state):
     """Line 2's fields (parse_body_header's shape) a host file of this state carries."""
     want, dropped = expected_body(state)
@@ -825,12 +902,14 @@ def git_commit(root=None):
     return head.stdout.strip() + ("-dirty" if dirty.returncode != 0 or dirty.stdout.strip() else "")
 
 
-def compiler_digest():
-    """sha256 over the compiler's own sources (name and content of compiler/*.py)."""
+def compiler_digest(d=None):
+    """sha256 over the compiler's own sources (name and content of compiler/*.py); d: another
+    compiler directory (cli.py audit-version's archive of a recorded commit)."""
+    d = d or HERE
     h = hashlib.sha256()
-    for name in sorted(f for f in os.listdir(HERE) if f.endswith(".py")):
+    for name in sorted(f for f in os.listdir(d) if f.endswith(".py")):
         h.update(name.encode() + b"\0")
-        with open(os.path.join(HERE, name), "rb") as f:
+        with open(os.path.join(d, name), "rb") as f:
             h.update(f.read() + b"\0")
     return h.hexdigest()
 

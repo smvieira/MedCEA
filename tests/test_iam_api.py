@@ -334,6 +334,9 @@ class PolicyCursor:
             cols, rows = ["x"], [("",)]
         elif "iam_policy.why_not(" in q:
             cols, rows = ["may_approve", "why_not_code", "needs_token_path"], [(True, None, True)]
+        elif q.startswith("SELECT DISTINCT ON (h.version) h.version, h.event"):
+            cols = ["version", "event", "outcome"]
+            rows = [(n, e, o) for n, (e, o) in sorted(d.apply_events.items())]
         elif "FROM iam_policy.history h WHERE h.version = %s AND h.event IN" in q:
             cols, rows = ["name", "person"], [("admin", "p-admin")]
         elif "FROM iam_policy.skeleton s WHERE s.accepted_at" in q:
@@ -380,6 +383,7 @@ class PolicyDB(FakeDB):
         self.entries = {1: [dict(e) for e in ew["entries"]]}
         self.fail, self.fail_fn, self.vdiff, self.bg_open = {}, {}, {}, []
         self.corrupt_save, self.submit_digest = False, None
+        self.apply_events = {1: ("bootstrap_applied", None)}   # {version: (latest apply event, outcome)}
 
     def digest(self, n):
         v = self.versions[n]
@@ -933,6 +937,52 @@ class PolicyAdminTest(IamApiTest):
         self.assertEqual(self.pdb.log[actor][1], (SUB, "p-qa", "quinn.q", "qa"))
         self.assertIn("LEFT JOIN iam_policy.skeleton s", self.pdb.log[self.first("FROM iam_policy.version v")][0])
         self.assertFalse(self.pdb.committed)
+
+    def test_apply_state_per_version(self):
+        """§14.8.12: rollout incomplete (apply_started with no later end, partial_apply mixed or
+        reverting), reverted (apply_reverted or partial_apply reverted on an approved version)."""
+        d = self.pdb
+        cases = {   # version: (kind, status, latest apply event, outcome, want)
+            2: ("change", "approved", "apply_reverted", None, "reverted"),
+            3: ("change", "approved", "partial_apply", "reverted", "reverted"),
+            4: ("change", "superseded", "apply_started", None, "rollout incomplete"),
+            5: ("change", "superseded", "partial_apply", "mixed", "rollout incomplete"),
+            6: ("rollback", "withdrawn", "partial_apply", "reverted", None),
+            7: ("change", "superseded", "applied", None, None),
+            8: ("rollback", "superseded", "partial_apply", "reverting", "rollout incomplete"),
+            9: ("change", "approved", None, None, None),
+        }
+        for n, (kind, status, event, outcome, _want) in cases.items():
+            d.versions[n] = dict(version=n, kind=kind, status=status, reason="test", based_on=1,
+                                 groups=d.versions[1]["groups"], roles=d.versions[1]["roles"])
+            d.entries[n] = d.entries[1]
+            if event:
+                d.apply_events[n] = (event, outcome)
+        status, body, _ = self.req("/api/policy", self.ptoken(["auditor"], person="p-aud"))
+        self.assertEqual(status, 200, body)
+        got = {v["version"]: v["apply_state"] for v in body["versions"]}
+        self.assertEqual(got, {1: None, **{n: c[4] for n, c in cases.items()}})
+        q = self.pdb.log[self.first("SELECT DISTINCT ON (h.version)")][0]
+        self.assertIn("ORDER BY h.version, h.event_id DESC", q)
+        self.assertEqual(set(re.findall(r"'([a-z_]+)'", q.split(" IN (", 1)[1])), set(self.pa.APPLY_EVENTS))
+        self.assertEqual(set(self.pa.APPLY_EVENTS),
+                         {"apply_started", "applied", "bootstrap_applied", "partial_apply", "apply_reverted"})
+        self.assertFalse(self.pdb.committed)
+
+    def test_apply_state_events_are_the_sources(self):
+        """Each event of APPLY_EVENTS is one policy_db_state reads as an apply event."""
+        with open(os.path.join(REPO, "infra", "lib-policy-source.sh")) as f:
+            ps = f.read()
+        lst = re.search(r"h\.event IN \(('apply_started'[^)]*)\)", ps).group(1)
+        self.assertLessEqual(set(self.pa.APPLY_EVENTS), set(re.findall(r"'([a-z_]+)'", lst)))
+        # the apply state of one event in isolation, the status deciding "reverted"
+        f = self.pa.apply_state
+        self.assertEqual(f("partial_apply", "reverted", "approved"), "reverted")
+        self.assertIsNone(f("partial_apply", "reverted", "withdrawn"))
+        self.assertIsNone(f("apply_reverted", None, "applied"))
+        self.assertEqual(f("apply_started", None, "applied"), "rollout incomplete")
+        self.assertIsNone(f("bootstrap_applied", None, "applied"))
+        self.assertIsNone(f(None, None, "draft"))
 
     def test_who_can_identities_break_glass(self):
         tok = self.ptoken(["admin"], person="p-admin")

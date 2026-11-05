@@ -151,9 +151,11 @@ _ps_state_sql() {
     if [[ "$full" == true ]]; then
         # apply_reverted's account decisions still waiting for qa's review (design §14.4.14
         # WARN, F-18): per apply_reverted event, the decisions made between the reverted
-        # version's apply and the revert that are still 'applied' (a pure narrowing qa has
-        # not reviewed). iam.account_decision belongs to the access component, so the
-        # query runs only when it exists (psql \if; a static reference would fail without it).
+        # version's latest apply_started before it and the revert that are still 'applied'
+        # (a pure narrowing qa has not reviewed). From apply_started, not applied (IAM 4.5,
+        # §14.8.8): a step 8/9 revert comes before the version ever records applied.
+        # iam.account_decision belongs to the access component, so the query runs only
+        # when it exists (psql \if; a static reference would fail without it).
         pre="SELECT pg_catalog.to_regclass('iam.account_decision') IS NOT NULL AS has_decisions \\gset
 \\if :has_decisions
 SELECT coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('event_id', r.event_id, 'version', r.version,
@@ -162,7 +164,7 @@ SELECT coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('even
                      (SELECT pg_catalog.count(*) FROM iam.account_decision d
                        WHERE d.status = 'applied' AND d.made_at <= h.at
                          AND d.made_at >= (SELECT pg_catalog.max(a.at) FROM iam_policy.history a
-                                            WHERE a.event IN ('applied', 'bootstrap_applied') AND a.event_id < h.event_id
+                                            WHERE a.event = 'apply_started' AND a.event_id < h.event_id
                                               AND a.version = (h.payload ->> 'version')::int)) AS n
                 FROM iam_policy.history h
                WHERE h.event = 'apply_reverted' AND h.payload ->> 'version' ~ '^[0-9]+\$') r
@@ -172,12 +174,16 @@ SELECT '[]' AS reverted_unreviewed \\gset
 \\endif"
         # open_versions (IAM 4.4, design §14.7.6): a skeleton version's proposed digest and the
         # accepted digest its diff was computed on (diff_from: health's stale WARN), approved_at
-        # (the "waits for 4.5" WARN), and the reason and authors apply.sh --withdraw-open shows
+        # (the "is approved" WARN; reverted: approved again after a reverted apply, IAM 4.5),
+        # and the reason and authors apply.sh --withdraw-open shows. accepts (IAM 4.5,
+        # §14.8.8): the version an accept names as reviewed_by_version, so health trusts the
+        # name only for an applied skeleton version proposing that digest
         extra="|| pg_catalog.jsonb_build_object(
   'reverted_unreviewed', :'reverted_unreviewed'::jsonb,
   'open_versions', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('version', v.version, 'status', v.status,
         'kind', v.kind, 'age_days', pg_catalog.floor(EXTRACT(EPOCH FROM pg_catalog.now() - v.created_at) / 86400)::int,
         'skeleton_digest', v.skeleton_digest, 'approved_at', v.approved_at, 'reason', v.reason,
+        'reverted', EXISTS (SELECT 1 FROM iam_policy.history r WHERE r.version = v.version AND r.event = 'apply_reverted'),
         'diff_from', (SELECT x.diff -> 'skeleton' ->> 'from' FROM iam_policy.version_diff x WHERE x.version = v.version),
         'authors', coalesce((SELECT pg_catalog.jsonb_agg(DISTINCT h.actor_name) FROM iam_policy.history h
                               WHERE h.version = v.version AND h.actor_name IS NOT NULL
@@ -209,6 +215,7 @@ SELECT '[]' AS reverted_unreviewed \\gset
   'accepts', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('event_id', h.event_id,
         'from', h.payload ->> 'from', 'to', h.payload ->> 'digest', 'from_body', fs.body, 'to_body', ts.body,
         'version', h.version, 'reviewed_by_version', h.payload -> 'reviewed_by_version',
+        'rv_kind', rv.kind, 'rv_status', rv.status, 'rv_skeleton', rv.skeleton_digest,
         'entries', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('role', e.role, 'group_code', e.group_code,
                    'level', e.level::text, 'constraint_name', e.constraint_name)) FROM iam_policy.entry e WHERE e.version = h.version), '[]'),
         'waivers', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version' ORDER BY w.id COLLATE \"C\")
@@ -216,6 +223,8 @@ SELECT '[]' AS reverted_unreviewed \\gset
         FROM iam_policy.history h
         LEFT JOIN iam_policy.skeleton fs ON fs.digest = h.payload ->> 'from'
         LEFT JOIN iam_policy.skeleton ts ON ts.digest = h.payload ->> 'digest'
+        LEFT JOIN iam_policy.version rv ON rv.version = CASE WHEN h.payload ->> 'reviewed_by_version' ~ '^[0-9]+\$'
+                                                             THEN (h.payload ->> 'reviewed_by_version')::int END
        WHERE h.event = 'skeleton_accepted' AND h.payload ->> 'from' IS NOT NULL), '[]'))"
     fi
     cat <<SQL
@@ -231,7 +240,8 @@ SELECT (pg_catalog.jsonb_build_object(
   'version', ap.version, 'kind', ap.kind, 'status', ap.status, 'entries_digest', ap.entries_digest,
   'groups', pg_catalog.to_jsonb(ap.groups), 'roles', pg_catalog.to_jsonb(ap.roles), 'based_on', ap.based_on,
   'confirmed_at', ap.confirmed_at, 'disputed_at', ap.disputed_at, 'claimed_by_person', ap.claimed_by_person,
-  'accepted', (SELECT pg_catalog.jsonb_build_object('digest', s.digest, 'body', s.body, 'git_commit', s.git_commit)
+  'accepted', (SELECT pg_catalog.jsonb_build_object('digest', s.digest, 'body', s.body, 'git_commit', s.git_commit,
+                                                    'reviewed_by_version', s.reviewed_by_version)
                  FROM iam_policy.skeleton s WHERE s.digest = iam_policy._accepted()),
   'entries', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('role', e.role, 'group_code', e.group_code,
                  'level', e.level::text, 'constraint_name', e.constraint_name)
@@ -239,7 +249,8 @@ SELECT (pg_catalog.jsonb_build_object(
                  FROM iam_policy.entry e WHERE e.version = ap.version), '[]'),
   'waivers', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version' ORDER BY w.id COLLATE "C")
                  FROM iam_policy.waiver w WHERE w.version = ap.version), '[]'),
-  'last_apply_event', (SELECT pg_catalog.jsonb_build_object('event', h.event, 'event_id', h.event_id, 'at', h.at)
+  'last_apply_event', (SELECT pg_catalog.jsonb_build_object('event', h.event, 'event_id', h.event_id, 'at', h.at,
+                                                            'outcome', h.payload ->> 'outcome')
                  FROM iam_policy.history h WHERE h.version = ap.version
                   AND h.event IN ('apply_started', 'applied', 'bootstrap_applied', 'apply_reverted', 'partial_apply', 'apply_deferred')
                  ORDER BY h.event_id DESC LIMIT 1),
@@ -256,6 +267,9 @@ SELECT (pg_catalog.jsonb_build_object(
                          FROM iam_policy.history h
                         WHERE h.event = 'break_glass_seen' AND h.payload ->> 'source' = 'file') b
                 WHERE b.open <> '[]'::jsonb), '[]'),
+  'approved_skeleton_versions', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('version', v.version,
+                 'skeleton_digest', v.skeleton_digest) ORDER BY v.version) FROM iam_policy.version v
+                 WHERE v.kind = 'skeleton' AND v.status = 'approved' AND v.based_on = ap.version), '[]'),
   'system_functions', pg_catalog.jsonb_build_object(
                  'system_as', pg_catalog.to_regprocedure('iam_policy._system_as(text[])') IS NOT NULL,
                  'record', pg_catalog.to_regprocedure('iam_policy._record(text,jsonb)') IS NOT NULL)

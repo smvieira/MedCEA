@@ -2,6 +2,10 @@
 """tests/test_policy.py — the access policy passes its own invariants, and the checker
 catches every kind of violation it claims to.
 
+IAM 4.5 (design §14.8.11): ApplyEventSetParity (new_draft's guard and policy_db_state read
+one set of apply events), RollbackBoundTest (explain.rollback_bound), AuditVersionTest
+(cli.py audit-version, the RS256 verifier), StagedResolutionTest (cli.py --staged).
+
 Run from the repository root:  python3 tests/test_policy.py [--update-golden]
 Read-only; needs python3-yaml (infra/lib-prereqs.sh). No cluster, no lock.
 --update-golden rewrites tests/iam-grants.golden.json from the policy (the compiled
@@ -3038,6 +3042,390 @@ class BreakGlassPredicateParity(unittest.TestCase):
         self.assertEqual(len(a[1]), 2)
         self.assertIn("'own_widening'", self.why_not)
         self.assertIn("widens role %, which you hold", self.approve)
+
+
+class ApplyEventSetParity(unittest.TestCase):
+    """IAM 4.5 (design §14.8.3): new_draft's S-D4 guard reads the applied version's latest
+    apply event over the set policy_db_state's last_apply_event uses, so a seed fact or a
+    skeleton accept filed under the applied version cannot mask an unfinished apply."""
+
+    EVENTS = re.compile(r"h\.event IN \(([^)]*)\)")
+
+    @staticmethod
+    def events(text):
+        return frozenset(re.findall(r"'([a-z_]+)'", text))
+
+    def test_one_set(self):
+        with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
+            sql = f.read()
+        with open(os.path.join(REPO, "infra/lib-policy-source.sh")) as f:
+            lib = f.read()
+        i = sql.index("CREATE OR REPLACE FUNCTION iam_policy.new_draft(")
+        body = sql[i:sql.index("$$;", i)]
+        guard = body[:body.index("IF last_ev IN ('apply_started', 'partial_apply')")]
+        guard = guard[guard.rindex("SELECT h.event INTO last_ev"):]
+        j = lib.index("'last_apply_event'")
+        state = lib[j:lib.index("LIMIT 1", j)]
+        a, b = self.EVENTS.findall(guard), self.EVENTS.findall(state)
+        self.assertEqual((len(a), len(b)), (1, 1), (guard, state))
+        want = frozenset({"apply_started", "applied", "bootstrap_applied", "apply_reverted", "partial_apply",
+                          "apply_deferred"})
+        self.assertEqual(self.events(a[0]), want)
+        self.assertEqual(self.events(b[0]), want)
+        self.assertNotIn("status_changed", guard)
+        self.assertIn("IF last_ev IN ('apply_started', 'partial_apply') THEN", body)
+
+
+class RollbackBoundTest(unittest.TestCase):
+    """apply.sh --rollback-to's bound (design §14.8.7 step 5, OA-c): version K's rows under
+    today's skeleton reach nothing they did not reach under the skeleton K was approved
+    under (explain.rollback_bound, explain.bound_skeleton)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from compiler import explain, source
+        cls.explain, cls.source = explain, source
+        cls.f = model.load_defaults().data
+        cls.rows = source.entries_and_waivers(cls.f)
+
+    @staticmethod
+    def jsonb(obj):
+        """obj as psql returns a jsonb value: every dict's keys by length, then bytes."""
+        if isinstance(obj, dict):
+            return {k: RollbackBoundTest.jsonb(obj[k]) for k in sorted(obj, key=lambda k: (len(k.encode()), k.encode()))}
+        if isinstance(obj, list):
+            return [RollbackBoundTest.jsonb(x) for x in obj]
+        return obj
+
+    def narrower(self):
+        k = copy.deepcopy(self.f)
+        api = next(m for m in k["resource_groups"]["portal"]["members"] if m["type"] == "api")
+        api["routes"].pop("GET /_account/api/me")
+        return k
+
+    def test_a_skeleton_that_widens_k_is_refused(self):
+        b = self.explain.rollback_bound(self.f, self.narrower(), self.rows)
+        self.assertIn("qa", b["added"])
+        self.assertTrue(any(t[0] == "route" and t[2] == "GET /_account/api/me" for t in b["added"]["qa"]))
+        self.assertEqual(b["dropped"], {"today": 0, "k": 0})
+        msg = self.explain.rollback_refusal(4, b)
+        self.assertTrue(msg.startswith("version 4 under today's skeleton grants more than was approved ("), msg)
+        self.assertIn("admin: route access-profile GET /_account/api/me | auditor: ", msg)
+        self.assertIn(f"| {len(b['added']) - 3} more role(s)): ", msg)
+        self.assertTrue(msg.endswith("draft from version 4 in the Policy UI (Changes → New draft from version 4) "
+                                     "and have qa approve it"), msg)
+        # the other way round (today narrower than K's) holds
+        b = self.explain.rollback_bound(self.narrower(), self.f, self.rows)
+        self.assertEqual(b["added"], {})
+        self.assertIsNone(self.explain.rollback_refusal(4, b))
+        self.assertEqual(self.explain.rollback_bound(self.f, self.f, self.rows)["added"], {})
+
+    def test_rows_naming_a_retired_group_are_dropped(self):
+        today = copy.deepcopy(self.f)
+        del today["resource_groups"]["portal"]
+        n = sum(len(self.source._cell_levels(c)) for c in self.f["matrix"]["portal"].values())
+        b = self.explain.rollback_bound(today, self.f, self.rows)
+        self.assertEqual(b["added"], {})
+        self.assertEqual(b["dropped"], {"today": n, "k": 0})
+
+    def test_jsonb_body_reordered_reaches_as_its_yaml(self):
+        k = self.narrower()
+        digest = self.source.skeleton_digest(k)
+        body = self.jsonb(json.loads(json.dumps(self.source.skeleton(k))))
+        self.assertNotEqual(list(body["levels"]), list(k["levels"]))      # jsonb sorted them
+        skel_j, how = self.explain.bound_skeleton(digest, k_yaml=None, k_body=body, ref=self.f)
+        self.assertEqual(how, "jsonb")
+        self.assertEqual(list(skel_j["levels"]), list(k["levels"]))      # the git order back
+        skel_y, how = self.explain.bound_skeleton(digest, k_yaml=k, k_body=body, ref=self.f)
+        self.assertEqual(how, "yaml")
+        p_j = model.Policy(self.source.compose(skel_j, self.rows, drop_unknown=True))
+        p_y = model.Policy(self.source.compose(skel_y, self.rows, drop_unknown=True))
+        from compiler import explain
+        for r in sorted(self.f["roles"]):
+            self.assertEqual(explain.reach(p_j, r), explain.reach(p_y, r), r)
+        self.assertEqual(self.explain.rollback_bound(self.f, skel_j, self.rows),
+                         self.explain.rollback_bound(self.f, skel_y, self.rows))
+        # a YAML of another skeleton falls back to the body; neither carrying the digest raises
+        self.assertEqual(self.explain.bound_skeleton(digest, k_yaml=self.f, k_body=body, ref=self.f)[1], "jsonb")
+        with self.assertRaises(self.source.SourceError):
+            self.explain.bound_skeleton(digest, k_yaml=self.f, k_body=self.source.skeleton(self.f), ref=self.f)
+
+
+def _rsa_key(bits=2048, seed=45):
+    """(n, e, d) of a deterministic RSA key, pure Python (no `cryptography` needed)."""
+    import random
+    rnd = random.Random(seed)
+    small = [q for q in range(3, 2000, 2) if all(q % x for x in range(3, int(q ** 0.5) + 1, 2))]
+
+    def probable_prime(c):
+        d, r = c - 1, 0
+        while d % 2 == 0:
+            d, r = d // 2, r + 1
+        for _ in range(24):
+            x = pow(rnd.randrange(2, c - 2), d, c)
+            if x in (1, c - 1):
+                continue
+            for _ in range(r - 1):
+                x = pow(x, 2, c)
+                if x == c - 1:
+                    break
+            else:
+                return False
+        return True
+
+    def prime(b):
+        while True:
+            c = rnd.getrandbits(b) | (1 << (b - 1)) | (1 << (b - 2)) | 1
+            if all(c % q for q in small) and probable_prime(c):
+                return c
+    e = 65537
+    while True:
+        p, q = prime(bits // 2), prime(bits // 2)
+        if p != q and (p - 1) % e and (q - 1) % e:
+            return p * q, e, pow(e, -1, (p - 1) * (q - 1))
+
+
+def _b64u(b):
+    import base64
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _sign_rs256(key, header, claims):
+    n, _, d = key
+    k = (n.bit_length() + 7) // 8
+    h = _b64u(json.dumps(header).encode()) + "." + _b64u(json.dumps(claims).encode())
+    info = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(h.encode()).digest()
+    em = b"\x00\x01" + b"\xff" * (k - 3 - len(info)) + b"\x00" + info
+    return h + "." + _b64u(pow(int.from_bytes(em, "big"), d, n).to_bytes(k, "big"))
+
+
+class AuditVersionTest(unittest.TestCase):
+    """cli.py audit-version --record F (IAM 4.5, design §14.8.10): a recorded change version
+    (rows, apply_started, applied with its jwk, the approval and its evidence) recompiles to
+    its digests; a changed row is 1; a commit it cannot reproduce is 2; the JWS and claim
+    checks of §14.8.5 against the recorded key."""
+
+    ISS = "https://keycloak.medcea/realms/medcea"
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        from compiler import cli, source
+        import apply_check
+        cls.cli, cls.source, cls.ac = cli, source, apply_check
+        r = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True)
+        cls.head = r.stdout.strip() if r.returncode == 0 else None
+        if not cls.head:
+            return
+        cls.f = model.load_defaults().data
+        cls.key = _rsa_key()
+        cls.artefacts = apply_check.digests_of(apply_check.compile_all(["--defaults"]), cls.head)
+
+    def setUp(self):
+        if not self.head:
+            self.skipTest("no git")
+
+    def record(self, commit=None, compiler=None, artefacts=None, claims=None):
+        src, f, n = self.source, self.f, self.key[0]
+        commit = commit or self.head
+        ew = src.entries_and_waivers(f)
+        rows = {"entries": json.loads(json.dumps(ew["entries"])),
+                "waivers": json.loads(json.dumps([src.waiver_row(w) for w in ew["waivers"]]))}
+        groups, roles = sorted(f["resource_groups"]), sorted(f["roles"])
+        started = {"version": 2, "kind": "change", "previous": 1, "commit": commit,
+                   "skeleton_digest": src.skeleton_digest(f), "compiler_digest": compiler or src.compiler_digest()}
+        sub, person = "6f1c0a52-8b1e-4c55-9d0f-3c2a1b7e9a10", "p-qa-1"
+        c = {"sub": sub, "person_id": person, "jti": "jti-2", "iat": 1793000000, "exp": 1793000300,
+             "azp": "policy", "aud": ["medcea-api", "account"], "typ": "Bearer", "iss": self.ISS,
+             "groups": ["qa", "auditor", "default-roles-medcea"]}
+        c.update(claims or {})
+        jws = _sign_rs256(self.key, {"alg": "RS256", "kid": "k1", "typ": "JWT"}, c)
+        return {
+            "version": {"version": 2, "kind": "change", "status": "applied",
+                        "entries_digest": src.entries_digest("change", groups, roles, ew["entries"], ew["waivers"]),
+                        "groups": groups, "roles": roles, "based_on": 1, "approved_by_sub": sub,
+                        "approved_by_person": person, "approved_at": self.at(40.5),
+                        "approved_iat": 1793000000},
+            "entries": rows["entries"], "waivers": rows["waivers"],
+            "apply_started": started,
+            "applied": {"event": "applied", "event_id": 90,
+                        "payload": {"version": 2, "git_commit": commit, "artefacts": artefacts or self.artefacts,
+                                    "jwk": {"kid": "k1", "kty": "RSA", "n": _b64u(n.to_bytes(256, "big")),
+                                            "e": _b64u((65537).to_bytes(3, "big"))}}},
+            "approval": {"event": {"event_id": 80, "payload": {
+                "version": 2, "source": "token", "role": "qa", "person": person, "sub": sub, "iat": 1793000000,
+                "jti": "jti-2", "azp": "policy", "jws_sha256": hashlib.sha256(jws.encode()).hexdigest()}},
+                "evidence": {"jws": jws, "claims": c}, "other_approved_jti": ["jti-1"]},
+            "previous": {"version": 1, "kind": "bootstrap", "entries": rows["entries"], "waivers": rows["waivers"],
+                         "apply_started": dict(started, version=1, kind="bootstrap", previous=None)},
+            "audit_findings": [], "chain": {"ok": True}, "issuer": self.ISS}
+
+    @staticmethod
+    def at(seconds_after_iat):
+        """approved_at as psql's JSON writes a timestamptz, `seconds_after_iat` after the token's iat"""
+        import datetime
+        return datetime.datetime.fromtimestamp(1793000000 + seconds_after_iat, datetime.timezone.utc).isoformat()
+
+    def audit(self, doc):
+        rc, lines = self.cli.audit_version(doc)
+        return rc, "\n".join(f"{c} {t}" for c, t in lines)
+
+    def test_a_record_recompiles_to_its_digests(self):
+        rc, out = self.audit(self.record())
+        self.assertEqual(rc, 0, out)
+        self.assertIn("OK approval: the token verifies against the recorded jwk (kid k1)", out)
+        self.assertIn("artefact routes:", out)
+        self.assertNotIn("FAIL", out)
+
+    def test_a_changed_row_is_a_mismatch(self):
+        doc = self.record()
+        e = next(x for x in doc["entries"] if x["group_code"] == "master_data" and x["role"] == "engineer"
+                 and x["level"] == "U")
+        doc["entries"].remove(e)
+        rc, out = self.audit(doc)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL entries digest recomputed from the rows", out)
+        self.assertIn("FAIL artefact grants_document", out)
+        doc = self.record(artefacts=dict(self.artefacts, routes="0" * 64))
+        rc, out = self.audit(doc)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL artefact routes: recompiled", out)
+
+    def test_an_unreproducible_commit_is_2(self):
+        for commit in (self.head + "-dirty", "unknown", "f" * 40):
+            rc, out = self.audit(self.record(commit=commit))
+            self.assertEqual(rc, 2, (commit, out))
+            self.assertIn("CANNOT", out)
+        doc = self.record()
+        del doc["apply_started"]
+        self.assertEqual(self.audit(doc)[0], 2)
+
+    def test_the_approval_checks(self):
+        """§14.8.5's checks against the record (cli._claims_problems, which audit_version runs
+        before its recompile; one full audit below proves the wiring)."""
+        p_prev = model.load_defaults()
+
+        def problems(doc):
+            return self.cli._claims_problems(doc, doc["version"], p_prev)
+        self.assertEqual(problems(self.record()), [])
+        jws = self.record()["approval"]["evidence"]["jws"]
+        cases = {
+            "signature": lambda d: d["approval"]["evidence"].__setitem__(
+                "jws", jws[:-4] + ("AAAA" if not jws.endswith("AAAA") else "BBBB")),
+            "replayed jti": lambda d: d["approval"]["other_approved_jti"].append("jti-2"),
+            "stored claims": lambda d: d["approval"]["evidence"]["claims"].__setitem__("jti", "other"),
+            "other key": lambda d: d["applied"]["payload"]["jwk"].__setitem__("kid", "k2"),
+            "no jwk": lambda d: d["applied"]["payload"].pop("jwk"),
+            "issuer": lambda d: d.__setitem__("issuer", "https://elsewhere/realms/medcea"),
+            "approved late": lambda d: d["version"].__setitem__("approved_at", self.at(331)),
+            "approved early": lambda d: d["version"].__setitem__("approved_at", self.at(-31)),
+            "person": lambda d: d["version"].__setitem__("approved_by_person", "p-other"),
+            "iat": lambda d: d["version"].__setitem__("approved_iat", 1793000001),
+            "not a token": lambda d: d["approval"]["event"]["payload"].__setitem__("source", "set_actor"),
+            "jws_sha256": lambda d: d["approval"]["event"]["payload"].__setitem__("jws_sha256", "0" * 64),
+            "no approval": lambda d: d.__setitem__("approval", None),
+        }
+        for name, change in cases.items():
+            doc = self.record()
+            change(doc)
+            self.assertNotEqual(problems(doc), [], name)
+        for name, claims in (("azp config", {"azp": "config"}), ("two own roles", {"groups": ["qa", "admin"]}),
+                             ("not an approver", {"groups": ["auditor"]}), ("not Bearer", {"typ": "ID"}),
+                             ("aud", {"aud": "account"}), ("sub", {"sub": "00000000-0000-0000-0000-000000000000"})):
+            self.assertNotEqual(problems(self.record(claims=claims)), [], name)
+        # composites collapse: qa + auditor (qa includes auditor) is one own role, qa
+        self.assertEqual(problems(self.record(claims={"groups": ["qa", "auditor"]})), [])
+        # a jti another version's confirm or dispute carried is no replay (§14.8.5): only
+        # other_approved_jti counts, which apply.sh --audit fills from approved evidence alone
+        self.assertEqual(problems(self.record()), [])
+        doc = self.record()
+        doc["approval"]["other_approved_jti"].append("jti-2")
+        rc, out = self.audit(doc)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL approval: the approval token was also used to approve another version", out)
+
+    def test_rs256_refusals(self):
+        n, e, _ = self.key
+        jwk = {"kid": "k1", "n": _b64u(n.to_bytes(256, "big")), "e": _b64u(e.to_bytes(3, "big"))}
+        good = _sign_rs256(self.key, {"alg": "RS256", "kid": "k1"}, {"sub": "x"})
+        self.assertIsNone(self.cli.rs256_problem(good, jwk))
+        h, p, sig = good.split(".")
+        self.assertIsNotNone(self.cli.rs256_problem(f"{h}.{_b64u(b'{\"sub\": \"y\"}')}.{sig}", jwk))
+        for header in ({"alg": "none", "kid": "k1"}, {"alg": "HS256", "kid": "k1"}, {"alg": "RS256", "kid": "k9"}):
+            t = _b64u(json.dumps(header).encode()) + "." + p + "." + sig
+            self.assertIsNotNone(self.cli.rs256_problem(t, jwk), header)
+        raw = self.cli._b64url(sig)
+        self.assertIn("malformed", self.cli.rs256_problem(f"{h}.{p}.{_b64u(raw[1:])}", jwk))
+        self.assertIn("malformed", self.cli.rs256_problem(f"{h}.{p}.{_b64u(n.to_bytes(256, 'big'))}", jwk))
+        self.assertIsNotNone(self.cli.rs256_problem(f"{h}.{p}", jwk))
+
+    def test_the_compiler_of_the_recorded_commit(self):
+        """A record whose compiler is not this tree's recompiles with that commit's (git archive
+        of apps/iam/compiler): 05c1af9's compiler gives the same digests (Phase45Delta)."""
+        import shutil
+        import subprocess
+        import tempfile
+        pre = "05c1af9"
+        tmp = tempfile.mkdtemp(prefix="medcea-audit-test-")
+        try:
+            r = subprocess.run(f'git -C "{REPO}" archive {pre} apps/iam/compiler | tar -x -C "{tmp}"',
+                               shell=True, capture_output=True, text=True)
+            if r.returncode != 0:
+                self.skipTest(f"no git archive of {pre}")
+            cd = self.source.compiler_digest(os.path.join(tmp, "apps", "iam", "compiler"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if cd == self.source.compiler_digest():
+            self.skipTest("this tree's compiler is 05c1af9's")
+        rc, out = self.audit(self.record(commit=pre, compiler=cd))
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"compiled with the compiler of {pre}", out)
+        rc, out = self.audit(self.record(commit=pre, compiler="0" * 64))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"FAIL the compiler of commit {pre} is", out)
+
+
+class StagedResolutionTest(unittest.TestCase):
+    """cli.py --staged (IAM 4.5, design §14.8.4.1) through source.resolve: a bad header is
+    exit 2, the label is version-N; tests/test_policy_source.py Staged covers the pin."""
+
+    def test_resolve_and_label(self):
+        import shutil
+        import subprocess
+        from compiler import source
+        root = scratch_root()
+        cli = os.path.join(root, "apps", "iam", "compiler", "cli.py")
+        f = model.load_defaults().data
+        ew = source.entries_and_waivers(f)
+        st = {"state": "version-9", "version": 9, "kind": "change", "entries_digest": source.policy_entries_digest(f, "change"),
+              "groups": sorted(f["resource_groups"]), "roles": sorted(f["roles"]),
+              "accepted": {"digest": source.skeleton_digest(f), "body": source.skeleton(f)},
+              "entries": ew["entries"], "waivers": [source.waiver_row(w) for w in ew["waivers"]]}
+        d = os.path.join(root, "stage-test")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        try:
+            path = os.path.join(d, "policy-applied.yaml")
+            text = source.host_file_text(st, "abc1234", "2026-11-04T00:00:00Z")
+            with open(path, "w") as fh:
+                fh.write(text)
+            sha = hashlib.sha256(text.encode()).hexdigest()
+            src = source.resolve(staged=path, env={"MEDCEA_POLICY_STAGED_SHA256": sha})
+            self.assertEqual((src.kind, src.version, source.label(src)), ("staged", 9, "version-9"))
+            self.assertEqual(src.data["matrix"], f["matrix"])
+            for env in ({}, {"MEDCEA_POLICY_STAGED_SHA256": sha.replace(sha[0], "f" if sha[0] != "f" else "e", 1)}):
+                with self.assertRaises(source.SourceError):
+                    source.resolve(staged=path, env=env)
+            with self.assertRaises(source.SourceError):
+                source.resolve(path=path, staged=path, env={"MEDCEA_POLICY_STAGED_SHA256": sha})
+            bad = text.replace("# medcea-applied: version=9", "# medcea-applied: version=x", 1)
+            with open(path, "w") as fh:
+                fh.write(bad)
+            r = subprocess.run([sys.executable, cli, "--staged", path, "compile", "routes"], capture_output=True,
+                               text=True, env=clean_env(MEDCEA_POLICY_STAGED_SHA256=hashlib.sha256(bad.encode()).hexdigest()))
+            self.assertEqual((r.returncode, r.stdout), (2, ""), r.stderr)
+            self.assertIn("header names version 'x'", r.stderr)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class AppGateTest(unittest.TestCase):

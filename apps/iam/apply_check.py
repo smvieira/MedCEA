@@ -74,8 +74,52 @@ tested without a cluster (tests/test_apply.py), as units_bootstrap.py is for uni
         a warning line when U's realm roles (Keycloak's role-mappings/realm/composite answer
         F) hold no maker role of iam_policy (dual_control); nothing otherwise
 
-Not in 4.4: the JWS verification, the eligibility rule and the version-widening check of an
-approver's person (design §6.1 step 4 items 1-4: IAM 4.5).
+IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
+  approval-sql --version N [--audit] --out SQL
+        the version read of step 3 (one READ ONLY transaction): its row, the SQL entries
+        digest, the approved event and its evidence, every other version's approved jti,
+        _authors(), its rows, its diff, the skeletons it names, apply_started, audit_versions()
+        and the pending account decisions; --audit adds the applied record, the version
+        applied before it and verify_chain() (cli.py audit-version's document)
+  audit-doc --in F --issuer I --out F    apply.sh --audit's document from that answer
+  gate --state S --doc D --gate G --gate-rc RC --mode apply|rollback --version N [--head-has]
+        step 2.4: the skeleton gate, and its exception for exactly an approved skeleton
+        version's digest (exit 0 go on, 1 refused, 2 deploy first)
+  state-check --state S --doc D --version N
+        step 3 (exit 1 refused, 2 a bootstrap or rollback version): approved, based on the
+        applied version, nothing unfinished, no break-glass, no audit finding, the entries
+        digest in SQL, stored, approved and recomputed, no pending account decision (S-E5)
+  account-skeleton --state S [--doc D] --out F
+        the skeleton whose roles Keycloak's holders are read for (with a skeleton version:
+        accepted and proposed includes merged)
+  host-file --state S [--check-only]
+        step 2.3: state/policy-applied.yaml rewritten as the applied version's when absent
+        or different, composed with the accepted skeleton (not HEAD's); --check-only
+        composes it and writes nothing
+  stage --state S --doc D --out DIR --commit C [--rollback K --next V]
+        step 5: the staged host file bound to the rows, the checker, its compile, the
+        applied version's file from the state document and its compile, the targets that
+        change, the artefact digests (DIR/stage.json, DIR/digests.json)
+  diff-check --state S --doc D --stage DIR
+        step 6: the recomputed diff is byte for byte the approved one; the summary
+  check-approval --doc D --kc DIR --jwks F --stage DIR --issuer I --mode apply|rollback
+                 --version N [--state S] [--out F]
+        step 4: the JWS (verify_rs256, stdlib), its claims, the approver's eligibility now
+        (OA-b, I17), Keycloak's composites, S-B4, someone can still approve (S-E2); one
+        REFUSED line each (exit 1), --rollback-to only the last, as WARNINGs
+  signing-keys --in JWKS --out F   the realm's RS256 signing keys (infra/jwks-sig.py)
+  rollback-check --state S --doc D --jwks F --version K
+        §14.8.7 step 3 and the bound (OA-c): K is a rollback target and today's skeleton with
+        its rows grants no role more than the skeleton it was approved under
+  rollback-diff --state S --stage DIR    the rollback's diff against the applied version
+  verify-conf --out F [--drop T]   step 9's conf (eight checks)
+  health-results --in LOG --out F  {check: OK|WARN|FAIL|SKIP} from health-check.sh's output
+  verify-judge --baseline B --now N [--drop T]
+        the checks FAIL now and not in step 6b's baseline (revert-driving)
+  verify-host --reference DIR      the written host file compiles to exactly DIR
+  deferred-check --command C       the step-9 check a deferred scoped command drops
+  bundle-sql --kind change|skeleton|rollback --stage DIR --doc D ... | --kind revert --stage DIR
+        step 7's PRE and POST, and the revert bundle's (§14.8.6)
 """
 import argparse
 import base64
@@ -83,6 +127,7 @@ import contextlib
 import copy
 import datetime
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -430,8 +475,8 @@ def bundle_sql(state, by_sub, by_person, log, commit=None, digests=None, data=No
 
 
 def record_sql(event, payload, actor="system:apply"):
-    if event not in ("bootstrap_applied", "applied", "apply_deferred"):
-        die(f"apply-record records bootstrap_applied, applied or apply_deferred, not {event!r}")
+    if event not in ("bootstrap_applied", "applied", "apply_deferred", "partial_apply"):
+        die(f"apply-record records bootstrap_applied, applied, apply_deferred or partial_apply, not {event!r}")
     if actor not in ACTORS:
         die(f"bad actor {actor!r}")
     return "\n".join([
@@ -441,7 +486,26 @@ def record_sql(event, payload, actor="system:apply"):
         ""])
 
 
-def apply_payload(state, by_sub, by_person, log, commit, chain_head, digests, resumed=False):
+def apply_payload(state, by_sub, by_person, log, commit, chain_head, digests, resumed=False, extra=None):
+    """The step-10 record (design §2.5). extra (IAM 4.5, §14.8.6 step 10): the fields of a
+    change, skeleton or rollback apply (rollback_of, approved_by, changed, deferred, jwk,
+    attempts, pre_failing, apply_log_sha256, reason, reverted_from, outcome …), last."""
+    p = _apply_payload(state, by_sub, by_person, log, commit, chain_head, digests, resumed)
+    p.update(extra or {})
+    return p
+
+
+def log_sha256(log):
+    """(sha256, "copy at record") of a copy of the live log taken now (tee keeps writing the
+    live one, §14.4.21 sec-13c); (None, None) without a log."""
+    if not log or not os.path.isfile(log):
+        return None, None
+    with open(log, "rb") as f:
+        data = f.read()
+    return hashlib.sha256(data).hexdigest(), "copy at record"
+
+
+def _apply_payload(state, by_sub, by_person, log, commit, chain_head, digests, resumed=False):
     hid, _, hhash = (chain_head or "").partition(":")
     return {"version": int(state["version"]), "kind": state["kind"], "os_user": os_user(),
             "claimed_by_sub": by_sub.lower(), "claimed_by_person": by_person, "git_commit": commit,
@@ -655,6 +719,1083 @@ def maker_warning(dual, role_names, username, group=ATTEST_ROLES_GROUP):
             "recorded with that claim all the same")
 
 
+# ── IAM 4.5: applying an approved version (design §14.8) ──────────────────────────────
+LEEWAY = 30                   # seconds of clock skew, medcea_iam.LEEWAY (apps/iam/lib/medcea_iam.py)
+AUDIENCE = "medcea-api"
+APPROVE_RPC = "approve_policy"
+# DigestInfo of SHA-256 (RFC 8017 §9.2): the fixed prefix of an RS256 signature's encoding
+SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+# Step 9 (design §14.8.6): the checks of what a version changes, through health-check.sh -c
+VERIFY_CHECKS = (("iamgrants", "$POSTGRES_DB"), ("iamenforce", "$NAMESPACE"), ("grafanarole", "$NAMESPACE"),
+                 ("iamworkbench", "$NAMESPACE"), ("onboardroles", ""), ("pgadminroles", "$NAMESPACE"),
+                 ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"))
+# A scoped command's exit 4 (deferred) drops the check that would FAIL on the old setting
+DEFER_CHECK = {"./apps/edge-wizard/deploy.sh --gate-only": "onboardroles"}
+RESULT = re.compile(r"\[\s*(OK|WARN|FAIL|SKIP)\s*\]\s+step9:([a-z]+)")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class JwsError(Exception):
+    """The stored approval token does not verify (a refusal)."""
+
+
+class UnknownKid(JwsError):
+    """The realm no longer publishes the key that signed the approval."""
+
+    def __init__(self, kid):
+        super().__init__(kid)
+        self.kid = kid
+
+
+def _b64url(seg):
+    if not isinstance(seg, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", seg):
+        raise JwsError("the approval's token is not base64url")
+    return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+
+def verify_rs256(jws, jwks):
+    """(header, payload, jwk) of a compact JWS that carries a valid RS256 signature by one of
+    `jwks`' keys ({keys: [...]} or a list); JwsError (UnknownKid) otherwise. Stdlib only
+    (design §14.8.5): the stored token split as stored, never re-encoded; the signature as a
+    k-byte integer below n; m = s^e mod n compared as whole bytes with the expected PKCS#1
+    v1.5 encoding (00 01 FF..FF 00 DigestInfo sha256), never parsed."""
+    parts = jws.split(".") if isinstance(jws, str) else []
+    if len(parts) != 3:
+        raise JwsError("the approval's token is not a compact JWS")
+    try:
+        header = json.loads(_b64url(parts[0]))
+        payload = json.loads(_b64url(parts[1]))
+    except (ValueError, UnicodeDecodeError):
+        raise JwsError("the approval's token does not decode") from None
+    if not isinstance(header, dict) or header.get("alg") != "RS256":
+        raise JwsError("the approval's token is not RS256")
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise JwsError("the approval's token names no key (kid)")
+    keys = jwks.get("keys") if isinstance(jwks, dict) else jwks
+    jwk = next((k for k in keys or [] if isinstance(k, dict) and k.get("kid") == kid), None)
+    if jwk is None:
+        raise UnknownKid(kid)
+    n, e = int.from_bytes(_b64url(jwk.get("n")), "big"), int.from_bytes(_b64url(jwk.get("e")), "big")
+    k = (n.bit_length() + 7) // 8
+    if k < len(SHA256_DIGEST_INFO) + 32 + 11 or e < 3:
+        raise JwsError(f"the realm key {kid} is not an RSA signing key")
+    sig = _b64url(parts[2])
+    s = int.from_bytes(sig, "big")
+    if len(sig) != k or s >= n:
+        raise JwsError("the approval's signature is malformed (its length, or not below the modulus)")
+    digest = hashlib.sha256((parts[0] + "." + parts[1]).encode("ascii")).digest()
+    want = b"\x00\x01" + b"\xff" * (k - 3 - len(SHA256_DIGEST_INFO) - 32) + b"\x00" + SHA256_DIGEST_INFO + digest
+    if not hmac.compare_digest(pow(s, e, n).to_bytes(k, "big"), want):
+        raise JwsError(f"the approval's signature does not verify against the realm key {kid}")
+    if not isinstance(payload, dict):
+        raise JwsError("the approval's token carries no claims object")
+    return header, payload, {"kid": kid, "n": jwk["n"], "e": jwk["e"]}
+
+
+def signing_keys(jwks):
+    """The realm's RS256 signing keys: infra/jwks-sig.py's signing_keys() (the filter
+    deploy-infra applies to Secret medcea-jwks), loaded by path (its name has a hyphen)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jwks_sig", os.path.join(source.REPO_ROOT, "infra", "jwks-sig.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return {"keys": mod.signing_keys(jwks)}
+
+
+# ── the version read (step 3) and apply.sh --audit's document ─────────────────────────
+def approval_doc_sql(version, audit=False):
+    """One READ ONLY transaction (as postgres, through apply.sh's q) printing the JSON
+    document of version `version` (design §14.8.4 step 3): its row, the SQL entries digest,
+    the latest approved event, its approval_evidence row, every other version's approved
+    jti, _authors(), its rows, its version_diff, the skeletons it names, its latest
+    apply_started, the applied version, audit_versions() and the pending account
+    decisions (null without iam.account_decision). audit adds what cli.py audit-version
+    reads (§14.8.10): the applied record, the version applied before it, the chain."""
+    v = int(version)
+    rows = lambda x: (  # noqa: E731 — the rows of a version, as policy_db_state reads them
+        f"'entries', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('role', e.role, "
+        f"'group_code', e.group_code, 'level', e.level::text, 'constraint_name', e.constraint_name) "
+        f"ORDER BY e.role COLLATE \"C\", e.group_code COLLATE \"C\", e.level::text COLLATE \"C\") "
+        f"FROM iam_policy.entry e WHERE e.version = {x}), '[]'),\n"
+        f"  'waivers', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version' ORDER BY w.id COLLATE \"C\") "
+        f"FROM iam_policy.waiver w WHERE w.version = {x}), '[]')")
+    started = lambda x: (  # noqa: E731
+        f"(SELECT h.payload FROM iam_policy.history h WHERE h.version = {x} AND h.event = 'apply_started' "
+        f"ORDER BY h.event_id DESC LIMIT 1)")
+    audit_sql = ""
+    if audit:
+        prev = f"(SELECT (h.payload ->> 'previous')::int FROM iam_policy.history h WHERE h.version = {v} " \
+               f"AND h.event = 'apply_started' AND h.payload ->> 'previous' ~ '^[0-9]+$' ORDER BY h.event_id DESC LIMIT 1)"
+        audit_sql = f""",
+  'applied', (SELECT pg_catalog.jsonb_build_object('event', h.event, 'event_id', h.event_id, 'payload', h.payload)
+                FROM iam_policy.history h WHERE h.version = {v} AND h.event IN ('applied', 'bootstrap_applied')
+                 AND NOT (h.payload ? 'reverted_from') ORDER BY h.event_id DESC LIMIT 1),
+  'previous', (SELECT pg_catalog.jsonb_build_object('version', p.version, 'kind', p.kind,
+                {rows('p.version')},
+                'apply_started', {started('p.version')})
+                 FROM iam_policy.version p WHERE p.version = {prev}),
+  'chain', (SELECT pg_catalog.jsonb_build_object('ok', vc.ok) FROM iam_policy.verify_chain() vc)"""
+    return f"""BEGIN TRANSACTION READ ONLY;
+-- apply_check.py approval-doc (design §14.8.4 step 3; --audit: §14.8.10)
+SELECT pg_catalog.to_regclass('iam.account_decision') IS NOT NULL AS has_decisions \\gset
+\\if :has_decisions
+SELECT coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('decision_id', d.decision_id, 'kind', d.kind,
+        'username', d.username, 'made_at', d.made_at) ORDER BY d.decision_id)
+        FROM iam.account_decision d WHERE d.status = 'pending_qa'), '[]')::text AS pending \\gset
+\\else
+SELECT 'null' AS pending \\gset
+\\endif
+SELECT (pg_catalog.jsonb_build_object(
+  'version', (SELECT pg_catalog.to_jsonb(x) - 'apply_log' FROM iam_policy.version x WHERE x.version = {v}),
+  'entries_digest_sql', iam_policy.entries_digest({v}),
+  'applied_version', (SELECT x.version FROM iam_policy.version x WHERE x.status = 'applied'),
+  'approval', (SELECT pg_catalog.jsonb_build_object(
+        'event', pg_catalog.jsonb_build_object('event_id', h.event_id, 'payload', h.payload, 'actor_name', h.actor_name),
+        'evidence', (SELECT pg_catalog.jsonb_build_object('jws', e.jws, 'claims', e.claims) FROM iam_policy.approval_evidence e
+                      WHERE e.version = {v} AND e.history_id = h.event_id AND e.event = 'approved'),
+        'other_approved', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('version', o.version,
+                                    'jti', o.claims ->> 'jti') ORDER BY o.version)
+                                    FROM iam_policy.approval_evidence o WHERE o.event = 'approved' AND o.version <> {v}), '[]'),
+        'other_approved_jti', coalesce((SELECT pg_catalog.jsonb_agg(o.claims ->> 'jti' ORDER BY o.version)
+                                    FROM iam_policy.approval_evidence o WHERE o.event = 'approved' AND o.version <> {v}), '[]'))
+        FROM iam_policy.history h WHERE h.version = {v} AND h.event = 'approved' ORDER BY h.event_id DESC LIMIT 1),
+  'authors', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('sub', a.sub, 'person', a.person))
+                         FROM iam_policy._authors({v}) a), '[]'),
+  {rows(v)},
+  'diff', (SELECT pg_catalog.jsonb_build_object('diff', x.diff::text, 'diff_digest', x.diff_digest)
+             FROM iam_policy.version_diff x WHERE x.version = {v}),
+  'skeletons', coalesce((SELECT pg_catalog.jsonb_object_agg(s.digest, pg_catalog.jsonb_build_object('body', s.body,
+                   'git_commit', s.git_commit)) FROM iam_policy.skeleton s
+                  WHERE s.digest IN (SELECT x.skeleton_digest FROM iam_policy.version x WHERE x.version = {v}
+                                     UNION SELECT x.approved_skeleton_digest FROM iam_policy.version x WHERE x.version = {v}
+                                     UNION SELECT {started(v)} ->> 'skeleton_digest')), '{{}}'),
+  'apply_started', {started(v)},
+  'audit_findings', coalesce((SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(a)) FROM iam_policy.audit_versions() a
+                               WHERE a.version = {v} OR a.version = (SELECT x.version FROM iam_policy.version x
+                                                                       WHERE x.status = 'applied')), '[]'),
+  'pending', :'pending'::jsonb{audit_sql}
+))::text;
+COMMIT;
+"""
+
+
+def load_doc(path):
+    """apply.sh's approval document (psql's output: the last line is the JSON object)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+        d = json.loads(lines[-1])
+        if not isinstance(d, dict):
+            raise ValueError("not an object")
+        return d
+    except (OSError, ValueError, IndexError) as e:
+        die(f"cannot read the version document {path}: {e}")
+
+
+def _claims_of(x):
+    return json.loads(x) if isinstance(x, str) else x
+
+
+# ── step 2.4: the skeleton gate and its exception for an approved skeleton version ──────
+def gate_decision(state, doc, gate, gate_rc, mode, version, head_has=None):
+    """(rc, lines): the gate of design §14.8.4 step 2.4 (`<N>`) or §14.8.7 step 2
+    (--rollback-to). rc 0 go on, 1 refused, 2 a precondition; lines start ERROR/WARNING."""
+    verdict = (gate or {}).get("verdict")
+    v = doc.get("version") or {}
+    if gate_rc == 0 and verdict == "equal":
+        if mode == "apply" and v.get("kind") == "skeleton":
+            return 1, [f"ERROR: version {version} proposes skeleton {str(v.get('skeleton_digest'))[:12]}; HEAD carries "
+                       f"the accepted one: check out the proposal's commit "
+                       f"{((doc.get('skeletons') or {}).get(v.get('skeleton_digest')) or {}).get('git_commit') or '?'} "
+                       "(or a merge of it), then re-run"]
+        return 0, []
+    if gate_rc == 0 and verdict == "narrowing":
+        if mode == "rollback":
+            return 2, ["ERROR: the git skeleton narrows over the accepted one: deploy first (./apps/iam/deploy.sh accepts "
+                       "it), then roll back"]
+        return 2, ["ERROR: the git skeleton narrows over the accepted one: a deploy accepts it first (./apps/iam/deploy.sh), "
+                   f"then re-run apply.sh {version}; step 6 compares the diff on the new skeleton"]
+    if gate_rc != 3 or mode == "rollback":
+        return 1, ["ERROR: the skeleton gate refuses the git skeleton (above): nothing was changed"
+                   + ("; a rollback never widens the skeleton" if gate_rc == 3 else "")]
+    # rc 3, a widening: only exactly the approved skeleton version's digest goes on (§4 step 5)
+    acc = state.get("accepted") or {}
+    git = source.factory()
+    git_digest = source.skeleton_digest(git)
+    why = None
+    body = ((doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}).get("body")
+    diff = (doc.get("diff") or {}).get("diff")
+    try:
+        frm = (json.loads(diff).get("skeleton") or {}).get("from") if isinstance(diff, str) else None
+    except ValueError:
+        frm = None
+    if not v or v.get("kind") != "skeleton":
+        why = f"version {version} is not a skeleton version"
+    elif v.get("status") != "approved":
+        why = f"skeleton version {version} is {v.get('status')}, not approved"
+    elif v.get("based_on") != state.get("version"):
+        why = f"skeleton version {version} was approved on version {v.get('based_on')}, version {state.get('version')} is applied"
+    elif git_digest != v.get("skeleton_digest"):
+        why = f"HEAD's skeleton {git_digest[:12]} is not the one version {version} proposes ({str(v.get('skeleton_digest'))[:12]})"
+    elif not isinstance(body, dict) or source.canonical(source.skeleton(git)) != source.canonical(body):
+        why = f"HEAD's skeleton is not the body stored for version {version}"
+    elif frm != acc.get("digest"):
+        return 1, [f"ERROR: version {version} was proposed against {str(frm)[:12]}, the accepted one is now "
+                   f"{str(acc.get('digest'))[:12]}: withdraw it and propose again"]
+    if why:
+        return 1, [f"ERROR: the git skeleton widens over the accepted one (above), and {why}: nothing was changed"]
+    lines = [f"the git skeleton widens: admitted as skeleton version {version} (approved, digest {git_digest[:12]})"]
+    commit = ((doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}).get("git_commit")
+    if head_has is False:
+        lines.append(f"WARNING: the proposal's commit {commit} is not an ancestor of HEAD: the digest is the binding, "
+                     "not the commit; keep the change on the deployed branch")
+    return 0, lines
+
+
+# ── step 3: the state ──────────────────────────────────────────────────────────────────
+def state_problems(state, doc, version):
+    """(rc, lines) of design §14.8.4 step 3 for `<N>` (the chain is apply.sh's check_chain)."""
+    out, rc = [], 0
+    v = doc.get("version")
+    a = state.get("version")
+    if not isinstance(v, dict):
+        return 1, [f"ERROR: no policy version {version}"]
+    if v.get("kind") in ("bootstrap", "rollback"):
+        return 2, [f"ERROR: version {version} is a {v['kind']} version: apply.sh applies change and skeleton versions; "
+                   "see --rollback-to"]
+    if v.get("status") != "approved":
+        return 1, [f"ERROR: version {version} is {v.get('status')}: nothing to apply"]
+    if v.get("based_on") != a:
+        out.append(f"ERROR: version {version} was approved on version {v.get('based_on')}, but version {a} is applied: "
+                   "withdraw it and draft again")
+    last = (state.get("last_apply_event") or {}).get("event")
+    if last in ("apply_started", "partial_apply"):
+        out.append(f"ERROR: finish version {a} first ({last}): ./apps/iam/apply.sh --resume --by <you>")
+    for b in state.get("break_glass_open") or []:
+        out.append(f"ERROR: a policy break-glass is open (event {b.get('event_id')}) for {', '.join(b.get('open') or [])}: "
+                   "deploy them again without MEDCEA_POLICY_FILE")
+    for f in doc.get("audit_findings") or []:
+        if f.get("version") in (int(version), a):
+            out.append(f"ERROR: audit_versions(): version {f.get('version')} {f.get('finding')}")
+    ev = ((doc.get("approval") or {}).get("event") or {}).get("payload") or {}
+    rows = source.state_rows(doc)
+    py = source.entries_digest(v.get("kind"), v.get("groups"), v.get("roles"), rows["entries"], rows["waivers"])
+    if not (doc.get("entries_digest_sql") == v.get("entries_digest") == ev.get("entries_digest") == py):
+        out.append(f"ERROR: version {version}'s entries digest does not hold (SQL {str(doc.get('entries_digest_sql'))[:12]}, "
+                   f"stored {str(v.get('entries_digest'))[:12]}, approved {str(ev.get('entries_digest'))[:12]}, "
+                   f"recomputed {py[:12]}): nothing was changed")
+    out += pending_problems(doc, refuse=True)
+    acc = state.get("accepted") or {}
+    body = acc.get("body") or {}
+    if v.get("kind") == "skeleton":
+        body = ((doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}).get("body") or {}
+    keys = (sorted(body.get("resource_groups") or {}, key=source._bytes), sorted(body.get("roles") or {}, key=source._bytes))
+    for what, mine, theirs in (("groups", v.get("groups") or [], keys[0]), ("roles", v.get("roles") or [], keys[1])):
+        only_v, only_s = sorted(set(mine) - set(theirs)), sorted(set(theirs) - set(mine))
+        if not (only_v or only_s):
+            continue
+        if v.get("kind") == "skeleton":
+            out.append(f"ERROR: skeleton version {version}'s {what} are not its proposed skeleton's: nothing was changed")
+        else:
+            out.append(f"note: version {version}'s {what} snapshot differs from the accepted skeleton (only the version: "
+                       f"{', '.join(only_v) or '-'}; only the skeleton: {', '.join(only_s) or '-'}): rows naming a "
+                       "retired key are dropped, step 6's diff decides")
+    if any(l.startswith("ERROR") for l in out):
+        rc = 1
+    return rc, out
+
+
+def pending_problems(doc, refuse):
+    """S-E5: the account decisions waiting for qa (null: no iam.account_decision)."""
+    pend = doc.get("pending") or []
+    if not pend:
+        return []
+    head = (f"ERROR: {len(pend)} account decision(s) wait for qa (the User Manager's Decisions tab): they were "
+            "classified under the applied matrix; confirm, refuse or withdraw them first" if refuse else
+            f"{len(pend)} account decision(s) wait for qa (the User Manager's Decisions tab): listed, not refused")
+    return [head] + [f"  #{p.get('decision_id')} {p.get('kind')} {p.get('username')} {str(p.get('made_at'))[:19]}"
+                     for p in pend]
+
+
+# ── step 5: the checker and the staged compile ─────────────────────────────────────────
+def git_skeleton_of(digest, body, commit):
+    """A policy dict whose skeleton is `digest`, in its YAML key order when it can be had:
+    (a) defaults.yaml at `commit` (a clean commit) when its skeleton digest is `digest`;
+    (b) else the stored jsonb body with the factory's level order, then the rest sorted,
+    never unreordered (jsonb sorts keys, §14.8.7). explain.bound_skeleton decides, so the
+    rollback bound and every composition here use one rule."""
+    k_yaml = None
+    if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{7,40}", commit):
+        try:
+            k_yaml = git_policy(commit)
+        except source.SourceError:
+            pass
+    return explain.bound_skeleton(digest, k_yaml, body, ref=source.factory())[0]
+
+
+def host_file_first(state, check_only=False):
+    """Step 2.3 (design §14.8.4): (line, text or None) — the host file of the applied version
+    A when it is absent or different, composed with the accepted skeleton in its YAML order
+    (git_skeleton_of), never HEAD's: for a skeleton version HEAD carries the proposed one,
+    which compose_applied refuses. --check-only composes it too and writes nothing."""
+    v, kind = int(state["version"]), state["kind"]
+    what = source.host_file_differs(state)
+    if what is None:
+        return f"[policy] state/policy-applied.yaml: version {v} ({kind}) unchanged", None
+    acc = source._need_version(state)
+    data = None
+    if source.skeleton_digest(source.factory()) != acc["digest"]:
+        data = git_skeleton_of(acc["digest"], acc.get("body"), acc.get("git_commit"))
+    text = source.host_file_text(state, source.git_commit(), now(), data)
+    if check_only:
+        return f"WARNING: state/policy-applied.yaml is not version {v}'s ({what}): the apply rewrites it first", None
+    return (f"[policy] state/policy-applied.yaml: version {v} ({kind}) "
+            + ("rewritten: it differed from the database" if what == "different" else "written")), text
+
+
+def sim_state(doc, state, kind=None, version=None, accepted=None, rows=None, groups=None, roles=None):
+    """The state document version N would have once committed (step 5.1): its rows, its key
+    snapshot, its stored entries digest; accepted the skeleton it applies under."""
+    v = doc.get("version") or {}
+    kind = kind or v.get("kind")
+    rows = rows if rows is not None else {"entries": doc.get("entries") or [], "waivers": doc.get("waivers") or []}
+    groups = groups if groups is not None else v.get("groups")
+    roles = roles if roles is not None else v.get("roles")
+    version = int(version if version is not None else v.get("version"))
+    if kind == "rollback":
+        r = source.state_rows(rows)
+        ed = source.entries_digest("rollback", groups, roles, r["entries"], r["waivers"])
+    else:
+        ed = v.get("entries_digest")
+    return {"state": f"version-{version}", "version": version, "kind": kind, "status": "applied",
+            "entries_digest": ed, "groups": groups, "roles": roles, "based_on": state.get("version"),
+            "accepted": accepted or state.get("accepted"), "entries": rows["entries"], "waivers": rows["waivers"],
+            "last_apply_event": None, "break_glass_open": []}
+
+
+def _write_private(path, text):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def compare_all(base, other):
+    """Every target that differs between two compiles (compare() stops at the first)."""
+    return sorted(n for n in set(base) | set(other) if compare({n: base[n]} if n in base else {},
+                                                               {n: other[n]} if n in other else {}))
+
+
+def stage(state, doc, out, commit, written_at=None, sim=None, prev_data=None):
+    """(rc, lines) of design §14.8.4 step 5 into the directory `out` (mode 700): the staged
+    host file of version N (staged/policy-applied.yaml) bound to the database rows, the
+    checker on it whatever checker_verdict says, its compile (staged-outs), the applied
+    version's file built from the state document (prev.yaml, bound the same way) and its
+    compile (prev), the targets that differ, the artefact digests (digests.json) and
+    stage.json {version, kind, staged_sha256, prev_sha256, changed, skeleton_digest}."""
+    from compiler import invariants
+    strip_policy_env()
+    written_at = written_at or now()
+    v = doc.get("version") or {}
+    if sim is None:
+        acc = state.get("accepted")
+        if v.get("kind") == "skeleton":
+            sk = (doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}
+            acc = {"digest": v.get("skeleton_digest"), "body": sk.get("body"), "git_commit": sk.get("git_commit")}
+        sim = sim_state(doc, state, accepted=acc)
+        if v.get("kind") == "skeleton":
+            prev_data = git_skeleton_of(state["accepted"]["digest"], state["accepted"].get("body"),
+                                        state["accepted"].get("git_commit"))
+    os.makedirs(out, mode=0o700, exist_ok=True)
+    os.chmod(out, 0o700)
+    staged = os.path.join(out, "staged", "policy-applied.yaml")
+    prev = os.path.join(out, "prev.yaml")
+    _write_private(staged, source.host_file_text(sim, commit, written_at))
+    bad = source.body_binding(sim, staged)
+    if bad:
+        return 1, [f"internal: the staged file of version {sim['version']} is not its rows ({bad}): nothing was changed"]
+    errors = invariants.check(model.Policy(source.read_host_file(staged).data))[0]
+    if errors:
+        return 1, [f"version {sim['version']} fails the checker now: withdraw it"] + [f"  FAIL: {e}" for e in errors]
+    _write_private(prev, source.host_file_text(state, commit, written_at, prev_data))
+    bad = source.body_binding(state, prev)
+    if bad:
+        return 1, [f"internal: the applied version's file is not its rows ({bad}): nothing was changed"]
+    outs = compile_all([], host_file=staged)
+    save(os.path.join(out, "staged-outs"), outs)
+    base = compile_all([], host_file=prev)
+    save(os.path.join(out, "prev"), base)
+    changed = compare_all(base, outs)
+    acc_digest = sim["accepted"]["digest"]
+    with open(os.path.join(out, "digests.json"), "w", encoding="utf-8") as f:
+        json.dump(digests_of(outs, commit, skeleton_digest=acc_digest), f, sort_keys=True)
+    with open(os.path.join(out, "prev-digests.json"), "w", encoding="utf-8") as f:   # a revert's record
+        json.dump(digests_of(base, commit, skeleton_digest=state["accepted"]["digest"]), f, sort_keys=True)
+    meta = {"version": sim["version"], "kind": sim["kind"], "entries_digest": sim["entries_digest"],
+            "staged_sha256": source.file_sha256(staged), "prev_sha256": source.file_sha256(prev),
+            "prev_version": int(state["version"]), "prev_entries_digest": state.get("entries_digest"),
+            "changed": changed, "skeleton_digest": acc_digest, "rollback_of": sim.get("rollback_of")}
+    with open(os.path.join(out, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, sort_keys=True)
+    with open(os.path.join(out, "sim-state.json"), "w", encoding="utf-8") as f:
+        json.dump(sim, f)
+    return 0, [f"version {sim['version']} ({sim['kind']}) staged and bound to its rows; the checker passes; "
+               f"{len(changed)} of {len(outs)} targets change: {', '.join(changed) or 'none'}"]
+
+
+# ── step 6: the diff qa saw ────────────────────────────────────────────────────────────
+def change_doc(state, doc):
+    """iam-api's change diff (policy_api.change_diff) recomputed on the host: both sides
+    composed with the tree's skeleton exactly as compose_rows composes them."""
+    v = doc["version"]
+    skel = source.skeleton(source.factory())
+
+    def composed(entries, waivers):
+        ew = {"entries": [dict(e, level=str(e["level"]).strip()) for e in entries],
+              "waivers": [source.waiver_from_row(w) for w in waivers]}
+        return model.Policy(source.compose_counted(skel, ew, drop_unknown=True)[0])
+    return explain.diff_document("change", int(v["version"]), int(state["version"]), v["entries_digest"],
+                                 composed(state.get("entries") or [], state.get("waivers") or []),
+                                 composed(doc.get("entries") or [], doc.get("waivers") or []))
+
+
+def skeleton_doc(state, doc):
+    """A skeleton version's diff recomputed as apply.sh --propose-skeleton built it."""
+    v = doc["version"]
+    acc = source._need_version(state)
+    git = source.factory()
+    rows = source.state_rows(doc)
+    p_old, p_new, acc_skel, git_skel = _composed(acc["body"], git, rows)
+    body = source.skeleton(git)
+    groups = sorted(body.get("resource_groups") or {}, key=source._bytes)
+    roles = sorted(body.get("roles") or {}, key=source._bytes)
+    ed = source.entries_digest("skeleton", groups, roles, rows["entries"], rows["waivers"])
+    skel = {"from": acc["digest"], "to": source.skeleton_digest(git), "sections": explain.sections(acc_skel, git_skel)}
+    return explain.diff_document("skeleton", int(v["version"]), int(state["version"]), ed, p_old, p_new, skeleton=skel)
+
+
+def _widening_roles(prev_routes, staged_routes):
+    """The roles whose row of routes.json's widening moves ({old or "-": {new: pairs}}): a
+    grant into a role (from "-") adds exactly that role's pairs, so a role moved when its
+    "-" entry did."""
+    a = (prev_routes.get("widening") or {}).get("-") or {}
+    b = (staged_routes.get("widening") or {}).get("-") or {}
+    return sorted(r for r in set(a) | set(b) if a.get(r) != b.get(r))
+
+
+def summary_lines(stage_dir, doc_diff=None):
+    """Step 6's summary: per target changed/unchanged, each role's reach, the 503 window."""
+    with open(os.path.join(stage_dir, "stage.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    prev, staged = load_saved(os.path.join(stage_dir, "prev")), load_saved(os.path.join(stage_dir, "staged-outs"))
+    out = [f"  {n:28} {'changed' if n in meta['changed'] else 'unchanged'}" for n in sorted(staged)]
+    out += _changed_detail(prev, staged, meta["changed"])
+    for r, d in sorted(((doc_diff or {}).get("roles") or {}).items()):
+        out.append(f"  role {r}: {len(d.get('added') or [])} added, {len(d.get('removed') or [])} removed"
+                   + "".join(f"\n    + {explain._describe(t)}" for t in (d.get("added") or [])[:10])
+                   + "".join(f"\n    - {explain._describe(t)}" for t in (d.get("removed") or [])[:10]))
+    try:
+        wid = _widening_roles(json.loads(prev["routes"][1]), json.loads(staged["routes"][1]))
+    except (KeyError, ValueError):
+        wid = []
+    if wid:
+        out.append(f"  access-api answers 503 to account decisions that change into or out of {', '.join(wid)} for "
+                   "about a minute after the commit (design §6.4)")
+    return out
+
+
+TOOL_TARGETS = ("grafana", "jupyterhub-allowed", "jupyterhub-admin", "node-red", "edge-wizard", "pgadmin",
+                "egress-notebooks")
+
+
+def _changed_detail(prev, staged, changed):
+    """Step 6's before → after of the changed targets a person reads (design §14.8.4): each
+    host's admitted roles, the tools' settings, the MQTT rows per role, the NetworkPolicies
+    that differ. A target that does not parse is shown only as changed."""
+    def text(outs, n):
+        return (outs.get(n) or (1, "", ""))[1].strip()
+
+    def load(outs, n):
+        try:
+            return json.loads(text(outs, n))
+        except ValueError:
+            return None
+    out = []
+    for n in sorted(changed):
+        if n.startswith("proxy-"):
+            a, b = load(prev, n), load(staged, n)
+            if isinstance(a, list) and isinstance(b, list):
+                out.append(f"  host {n[6:]}: {', '.join(a) or 'nobody'} → {', '.join(b) or 'nobody'}"
+                           + "".join(f" (+{r})" for r in b if r not in a) + "".join(f" (-{r})" for r in a if r not in b))
+        elif n in TOOL_TARGETS:
+            a, b = text(prev, n), text(staged, n)
+            cut = lambda x: x if len(x) <= 300 else x[:297] + "..."
+            out.append(f"  tool {n}: {cut(a) or '(none)'}\n    → {cut(b) or '(none)'}")
+        elif n == "mqtt":
+            a, b = load(prev, n) or {}, load(staged, n) or {}
+            rows = lambda d, r: {(x.get("access"), x.get("topic"), x.get("constraint")) for x in (d.get("roles") or {}).get(r) or []}
+            for r in sorted(set(a.get("roles") or {}) | set(b.get("roles") or {})):
+                ra, rb = rows(a, r), rows(b, r)
+                for sign, ts in (("+", sorted(rb - ra, key=str)), ("-", sorted(ra - rb, key=str))):
+                    out += [f"  mqtt {r}: {sign} {acc} {top}" + (f" ({con})" if con else "") for acc, top, con in ts]
+        elif n == "netpol":
+            a, b = load(prev, n) or {}, load(staged, n) or {}
+            pol = lambda d: {(i.get("metadata") or {}).get("name"): i for i in d.get("items") or []}
+            pa, pb = pol(a), pol(b)
+            for name in sorted(set(pa) | set(pb), key=str):
+                if pa.get(name) != pb.get(name):
+                    out.append(f"  netpol {name}: " + ("added" if name not in pa else "removed" if name not in pb else "changed"))
+    return out
+
+
+def diff_check(state, doc, stage_dir):
+    """(rc, lines) of design §14.8.4 step 6: the recomputed diff of version N is byte for
+    byte the one qa approved (a change: iam-api's composition; a skeleton version: the
+    proposal's document, also = version_diff's digest)."""
+    v = doc["version"]
+    n = v["version"]
+    try:
+        d = skeleton_doc(state, doc) if v["kind"] == "skeleton" else change_doc(state, doc)
+    except (source.SourceError, ValueError, KeyError) as e:
+        return 1, [f"the diff of version {n} cannot be recomputed: {e}"]
+    digest = explain.diff_digest(d)
+    ev = ((doc.get("approval") or {}).get("event") or {}).get("payload") or {}
+    want = {v.get("diff_digest"), ev.get("diff_digest")}
+    if v["kind"] == "skeleton":
+        want.add((doc.get("diff") or {}).get("diff_digest"))
+    if want != {digest}:
+        if v["kind"] == "skeleton":
+            return 1, [f"the diff of skeleton version {n} is not the one qa approved (recomputed {digest[:12]}, approved "
+                       f"{str(v.get('diff_digest'))[:12]}: a compiler change since the proposal): withdraw it and propose again"]
+        return 1, [f"the diff of version {n} is not the one qa approved (recomputed {digest[:12]}, approved "
+                   f"{str(v.get('diff_digest'))[:12]}; a skeleton or compiler change since the approval alters what it "
+                   "grants): withdraw it and draft again"]
+    return 0, [f"the diff of version {n} is the one qa approved ({digest[:12]}):"] + summary_lines(stage_dir, d)
+
+
+# ── step 4 (§14.8.5): the evidence, the approver now, dual control ─────────────────────
+def expected_azp(grants_doc):
+    """The one client whose only_rpc names approve_policy in a grants-json document."""
+    hits = sorted(c for c, fns in (grants_doc.get("only_rpc") or {}).items() if APPROVE_RPC in (fns or []))
+    return hits[0] if len(hits) == 1 else None
+
+
+def own_roles(groups, includes):
+    """The held platform roles minus every role another held one includes (access-api's
+    own_roles, SQL _own_role)."""
+    held = {g for g in groups or [] if isinstance(g, str) and g in includes}
+    covered = {i for r in held for i in (includes.get(r) or [])}
+    return sorted(held - covered)
+
+
+def evidence_problems(doc, jwks, prev_routes, prev_grants, issuer, version):
+    """(refusals, jwk) of step 4.1: the approved event, its stored JWS verified against the
+    realm's keys fetched now, and the claims of §14.8.5."""
+    v = doc.get("version") or {}
+    ap = doc.get("approval") or {}
+    ev = (ap.get("event") or {}).get("payload") or {}
+    evid = ap.get("evidence") or {}
+    out = []
+    sub = str(v.get("approved_by_sub") or "").lower()
+    if ev.get("source") != "token":
+        return [f"version {version}'s approval is not from a token (source {ev.get('source')!r}): withdraw it and draft again"], None
+    if str(ev.get("sub") or "").lower() != sub or not sub:
+        out.append(f"version {version}'s approved event names sub {ev.get('sub')}, the version {sub or '-'}")
+    jws = evid.get("jws") or ""
+    if not jws or hashlib.sha256(jws.encode("utf-8")).hexdigest() != ev.get("jws_sha256"):
+        return out + [f"version {version}'s stored approval token is not the one its approved event hashed"], None
+    try:
+        _, claims, jwk = verify_rs256(jws, jwks)
+    except UnknownKid as e:
+        return out + [f"the realm key that signed the approval (kid {e.kid}) is no longer published: withdraw version "
+                      f"{version} and draft again"], None
+    except JwsError as e:
+        return out + [str(e)], None
+    if claims != _claims_of(evid.get("claims")):
+        return out + ["the approval token's claims are not the ones recorded with it"], jwk
+    if str(claims.get("sub") or "").lower() != sub:
+        out.append("the approval token's sub is not approved_by_sub")
+    if claims.get("person_id") != v.get("approved_by_person"):
+        out.append("the approval token's person_id is not approved_by_person")
+    if not claims.get("jti") or claims.get("jti") != ev.get("jti"):
+        out.append("the approval token's jti is not the approved event's")
+    if claims.get("iat") != ev.get("iat") or claims.get("iat") != v.get("approved_iat"):
+        out.append("the approval token's iat is not approved_iat and the event's")
+    azp = expected_azp(prev_grants)
+    if azp is None:
+        raise source.SourceError("the applied policy names no single client for approve_policy")
+    if claims.get("azp") != azp:
+        out.append(f"the approval token's azp is {claims.get('azp')!r}, not the policy host's client {azp!r}")
+    aud = claims.get("aud")
+    if AUDIENCE not in (aud if isinstance(aud, list) else [aud]):
+        out.append(f"the approval token's aud lacks {AUDIENCE}")
+    if claims.get("typ") != "Bearer":
+        out.append(f"the approval token's typ is {claims.get('typ')!r}, not Bearer")
+    if claims.get("iss") != issuer:
+        out.append(f"the approval token's iss is {claims.get('iss')!r}, not {issuer}")
+    try:
+        at = datetime.datetime.fromisoformat(str(v.get("approved_at"))).timestamp()
+        if not (float(claims["iat"]) - LEEWAY <= at <= float(claims["exp"]) + LEEWAY):
+            out.append("the approval was recorded outside its token's lifetime (iat - 30 s .. exp + 30 s)")
+    except (KeyError, TypeError, ValueError):
+        out.append("approved_at or the token's iat/exp cannot be read")
+    approvers = ((prev_routes.get("dual_control") or {}).get("iam_policy") or {}).get("approver_roles") or []
+    own = own_roles(claims.get("groups"), prev_routes.get("role_includes") or {})
+    if len(own) != 1 or own[0] != ev.get("role") or own[0] not in approvers:
+        out.append(f"the approval token's own role {own} is not the event's {ev.get('role')!r} among the approver "
+                   f"roles {approvers}")
+    for o in ap.get("other_approved") or []:
+        if o.get("jti") and o.get("jti") == claims.get("jti"):
+            out.append(f"the approval token of version {version} was also used to approve version {o.get('version')}")
+    return out, jwk
+
+
+def _kc_json(d, *p):
+    path = os.path.join(d, *p)
+    return load_json(path) if os.path.exists(path) else None
+
+
+def _pid(u):
+    return ((u.get("attributes") or {}).get("person_id") or [None])[0] if isinstance(u, dict) else None
+
+
+def eligibility_problems(doc, kc, accounts, prev_routes, version):
+    """Step 4.2 (OA-b): by approved_by_sub, Keycloak's account now: enabled, an approver
+    role of the applied policy (effective, composites included), the approved person_id, no
+    author's person, no enabled maker's person (I17). No account decision is consulted."""
+    v = doc.get("version") or {}
+    person = str(v.get("approved_by_person") or "")
+    u = _kc_json(kc, "approver.json")
+    if not isinstance(u, dict):
+        return [f"the approver's account ({v.get('approved_by_sub')}) no longer exists in Keycloak"]
+    out = []
+    dual = prev_routes.get("dual_control") or {}
+    approvers = (dual.get("iam_policy") or {}).get("approver_roles") or []
+    makers = (dual.get("iam_policy") or {}).get("maker_roles") or []
+    name = u.get("username") or v.get("approved_by_sub")
+    if not u.get("enabled"):
+        out.append(f"the approver {name} is disabled now")
+    held = {r.get("name") for r in (_kc_json(kc, "approver-roles.json") or []) if isinstance(r, dict)}
+    if not held & set(approvers):
+        out.append(f"the approver {name} no longer holds an approver role of iam_policy ({', '.join(approvers)})")
+    if (_pid(u) or "") != person or not person:
+        out.append(f"the approver {name}'s person_id is not the approved person ({person or '-'})")
+    low = person.lower()
+    for a in doc.get("authors") or []:
+        cur = _pid(_kc_json(kc, "authors", f"{a.get('sub')}.json"))
+        if str(a.get("person") or "").lower() == low or str(a.get("sub") or "").lower() == str(v.get("approved_by_sub")).lower() \
+                or (cur and cur.lower() == low):
+            out.append(f"the approver's person is an author of version {version} (another qa person approves it)")
+            break
+    for a in accounts:
+        if a.get("enabled") and set(a.get("roles") or ()) & set(makers) and str(a.get("person_id") or "").lower() == low:
+            out.append(f"the approver's person also holds the enabled maker account {a.get('username')} (I17): "
+                       "another qa person approves it, or disable that account")
+    return out
+
+
+def composite_problems(kc, accepted_skel, proposed_skel=None):
+    """Step 4.3: Keycloak's composites are the accepted skeleton's includes; a skeleton
+    version does not change includes (owner decision 4: not applied in 4.5)."""
+    out = []
+    roles = accepted_skel.get("roles") or {}
+    for r, d in sorted(roles.items()):
+        inc = sorted((d or {}).get("includes") or [])
+        comps = _kc_json(kc, "composites", f"{r}.json")
+        names = sorted(c.get("name") for c in comps or [] if isinstance(c, dict) and not c.get("clientRole"))
+        if inc and names != inc:
+            out.append(f"Keycloak's role {r} includes {names or 'nothing'}, the accepted skeleton {inc}: "
+                       "./deploy-infra.sh adds the composites")
+    if proposed_skel is not None:
+        pr = proposed_skel.get("roles") or {}
+        if any(sorted((pr.get(r) or {}).get("includes") or []) != sorted((roles.get(r) or {}).get("includes") or [])
+               for r in set(pr) | set(roles)):
+            out.append("this skeleton version changes role composites, which no apply step sets yet (deploy-infra only "
+                       "adds them): not applied in 4.5")
+    return out
+
+
+def person_widening_problems(doc, accounts, p_applied, p_n, version):
+    """Step 4.4 (S-B4): no role held by an enabled account of the approver's person (its
+    includes expanded) gains reach in version N. A role version N adds counts too: its whole
+    reach is new (explain.reach of an absent role is empty)."""
+    low = str((doc.get("version") or {}).get("approved_by_person") or "").lower()
+    out = []
+    for a in accounts:
+        if not a.get("enabled") or str(a.get("person_id") or "").lower() != low:
+            continue
+        for r in sorted(a.get("roles") or []):
+            if r in p_n.roles and model.widening_between(p_applied, p_n, r):
+                out.append(f"version {version} widens role {r}, which {a.get('username')} (an enabled account of the "
+                           "approver's person) holds: another qa person approves it")
+    return out
+
+
+def account_skeleton(state, doc=None):
+    """The skeleton whose roles fetch_accounts lists and whose includes expand them: the
+    accepted one; for a skeleton version the union of accepted and proposed includes."""
+    skel = copy.deepcopy(source.skeleton((state.get("accepted") or {}).get("body") or source.factory()))
+    v = (doc or {}).get("version") or {}
+    if v.get("kind") == "skeleton":
+        body = ((doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}).get("body") or {}
+        roles = skel.setdefault("roles", {})
+        for r, d in (body.get("roles") or {}).items():
+            cur = roles.setdefault(r, {})
+            cur["includes"] = sorted(set(cur.get("includes") or []) | set((d or {}).get("includes") or []))
+    return skel
+
+
+def check_approval(doc, kc, jwks, stage_dir, issuer, mode, version, state=None):
+    """(refusals, warnings, notes, info) of design §14.8.4 step 4 for `<N>` (mode apply) or
+    only its item 5 for --rollback-to (problems there are warnings, S-C4)."""
+    def outs(d):
+        return load_saved(os.path.join(stage_dir, d))
+    prev, staged = outs("prev"), outs("staged-outs")
+    prev_routes, staged_routes = json.loads(prev["routes"][1]), json.loads(staged["routes"][1])
+    prev_grants = json.loads(prev["grants-json"][1])
+    skel = load_json(os.path.join(kc, "skeleton.json")) if os.path.exists(os.path.join(kc, "skeleton.json")) else None
+    accounts = accounts_from_dir(kc, skel)
+    refusals, warnings, notes, info = [], [], [], {}
+    if mode == "apply":
+        v = doc.get("version") or {}
+        ev, jwk = evidence_problems(doc, jwks, prev_routes, prev_grants, issuer, version)
+        refusals += ev
+        info["jwk"] = jwk
+        info["event_id"] = ((doc.get("approval") or {}).get("event") or {}).get("event_id")
+        refusals += eligibility_problems(doc, kc, accounts, prev_routes, version)
+        acc_body = source.skeleton(((state or {}).get("accepted") or {}).get("body") or source.factory())
+        proposed = None
+        if v.get("kind") == "skeleton":
+            proposed = ((doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}).get("body") or {}
+        refusals += composite_problems(kc, acc_body, proposed)
+        p_applied = model.Policy(source.read_host_file(os.path.join(stage_dir, "prev.yaml")).data)
+        p_n = model.Policy(source.read_host_file(os.path.join(stage_dir, "staged", "policy-applied.yaml")).data)
+        refusals += person_widening_problems(doc, accounts, p_applied, p_n, version)
+        for f in ((state or {}).get("seeded") or {}).get(str(v.get("approved_by_sub")).lower()) or []:
+            notes.append(f"the approver's account fact: event {f.get('event_id')} {f.get('fact')} {f.get('username')} "
+                         f"{f.get('role') or '-'} {f.get('person_id') or '-'}")
+    probs = can_approve(staged_routes, accounts)
+    if mode == "apply":
+        refusals += [f"after version {version}: {p}" for p in probs]
+    else:
+        warnings += [f"after this rollback: {p}" for p in probs]
+    return refusals, warnings, notes, info
+
+
+# ── --rollback-to K (§14.8.7): K eligible, and the bound (OA-c) ───────────────────────
+def rollback_problems(doc, state, jwks, k):
+    """(refusals, warnings) of §14.8.7 step 3: K is a target."""
+    v = doc.get("version")
+    if not isinstance(v, dict):
+        return [f"version {k} cannot be rolled back to: there is no version {k}"], []
+    out, warn = [], []
+    if v.get("status") != "superseded":
+        out.append(f"it is {v.get('status')}, not superseded (only a version once applied)")
+    if v.get("disputed_at"):
+        out.append("qa disputed it")
+    if v.get("kind") in ("change", "skeleton"):
+        ap = doc.get("approval") or {}
+        ev = (ap.get("event") or {}).get("payload") or {}
+        jws = (ap.get("evidence") or {}).get("jws")
+        if ev.get("source") != "token" or not jws:
+            out.append("its approval has no token evidence")
+        else:
+            try:
+                _, claims, _ = verify_rs256(jws, jwks)
+                if claims != _claims_of((ap.get("evidence") or {}).get("claims")):
+                    out.append("its approval token's claims are not the ones recorded")
+            except UnknownKid:
+                warn.append(f"version {k}'s realm key is no longer published: the approval stands on its record")
+            except JwsError as e:
+                out.append(f"its approval token does not verify ({e})")
+    elif not v.get("confirmed_at"):
+        out.append(f"this {v.get('kind')} version was never confirmed by qa")
+    for f in doc.get("audit_findings") or []:
+        if f.get("version") == k:
+            out.append(f"audit_versions(): {f.get('finding')}")
+    last = (state.get("last_apply_event") or {}).get("event")
+    pre = []
+    if last in ("apply_started", "partial_apply"):
+        pre.append(f"finish version {state.get('version')} first ({last}): ./apps/iam/apply.sh --resume --by <you>")
+    return pre + [f"version {k} cannot be rolled back to: {why}" for why in out], warn
+
+
+def rollback_skeleton_digest(doc):
+    v = doc.get("version") or {}
+    if v.get("kind") == "change":
+        return v.get("approved_skeleton_digest")
+    if v.get("kind") == "skeleton":
+        return v.get("skeleton_digest")
+    return (doc.get("apply_started") or {}).get("skeleton_digest")
+
+
+def rollback_bound(doc, k):
+    """(refusals, notes) of the bound (OA-c), explain.rollback_bound's (the one rule,
+    RollbackBoundTest): every person role reaches under today's skeleton S with K's rows no
+    more than under the skeleton K was approved under, S_K, with K's rows. A row naming a key
+    S retired is dropped (counted), never refused."""
+    d_k = rollback_skeleton_digest(doc)
+    sk = (doc.get("skeletons") or {}).get(d_k) or {}
+    commit = (doc.get("apply_started") or {}).get("commit")
+    try:
+        s_k = git_skeleton_of(d_k, sk.get("body"), commit)
+    except source.SourceError as e:
+        return [f"version {k}'s skeleton cannot be composed: {e}"], []
+    bound = explain.rollback_bound(source.factory(), s_k, source.state_rows(doc))
+    msg = explain.rollback_refusal(k, bound)
+    dropped = bound["dropped"]["today"]
+    notes = [f"{dropped} row(s) of version {k} name a group or role today's skeleton retired: dropped"] if dropped else []
+    return ([msg] if msg else []), notes
+
+
+def rollback_sim(state, doc, next_version, k):
+    """The state document of the rollback version `_build_version('rollback', …)` creates:
+    K's rows, the accepted skeleton's keys, the entries digest it will store."""
+    acc = source._need_version(state)
+    groups = sorted(acc["body"].get("resource_groups") or {}, key=source._bytes)
+    roles = sorted(acc["body"].get("roles") or {}, key=source._bytes)
+    sim = sim_state(doc, state, kind="rollback", version=next_version, accepted=state["accepted"],
+                    rows={"entries": doc.get("entries") or [], "waivers": doc.get("waivers") or []},
+                    groups=groups, roles=roles)
+    sim["rollback_of"] = int(k)
+    return sim
+
+
+def rollback_diff_lines(state, stage_dir):
+    """The rollback's diff against the applied version (the change shape, not hashed)."""
+    p_from = model.Policy(source.read_host_file(os.path.join(stage_dir, "prev.yaml")).data)
+    p_to = model.Policy(source.read_host_file(os.path.join(stage_dir, "staged", "policy-applied.yaml")).data)
+    d = explain.diff(p_from, p_to)
+    return [f"rollback diff against version {state.get('version')}: {len(d['cells'])} cell(s) differ"] + \
+        summary_lines(stage_dir, d)
+
+
+# ── step 6b/9: the verify conf and its results ────────────────────────────────────────
+def verify_conf(drop=()):
+    lines = ["# apps/iam/apply.sh step 9 (design §14.8.6): what a policy version changes"]
+    for t, target in VERIFY_CHECKS:
+        if t not in drop:
+            lines.append(f"step9:{t} | {t} | {target} |")
+    return "\n".join(lines) + "\n"
+
+
+def health_results(text):
+    """{check type: OK|WARN|FAIL|SKIP} from health-check.sh's output of verify_conf()."""
+    out = {}
+    for line in ANSI.sub("", text).splitlines():
+        m = RESULT.search(line)
+        if m:
+            out[m.group(2)] = m.group(1)
+    return out
+
+
+def verify_judge(baseline, now_, expected):
+    """The checks that count as failed (design §14.8.6 step 9): FAIL now (or no result)
+    and not FAIL in the baseline of step 6b."""
+    return [t for t in expected if now_.get(t, "FAIL") == "FAIL" and baseline.get(t) != "FAIL"]
+
+
+# ── step 7: the bundle's PRE and POST for a change, skeleton, rollback or revert ──────
+def _assert_sql(tag, body):
+    return "\n".join([f"DO ${tag}$", "BEGIN", body, f"END ${tag}$;"])
+
+
+def apply_bundle_sql(kind, meta, by_sub, by_person, log, commit, digests, diff_digest=None, skeleton=None,
+                     rollback=None):
+    """(pre, post) of `<N>`'s or --rollback-to's bundle (design §14.8.4 step 7, §14.8.7
+    step 7): every value base64 in a psql variable; PRE re-reads the version FOR UPDATE and
+    asserts what was approved (change, skeleton) or builds the rollback version from K's rows
+    read in SQL; POST marks it applied and asserts the staged header's entries digest."""
+    if not UUID.fullmatch(by_sub or ""):
+        die(f"--by-sub {by_sub!r} is not a uuid")
+    if not (by_person or "").strip():
+        die("--by-person is empty")
+    ed = meta["entries_digest"]
+    if not re.fullmatch(r"[0-9a-f]{64}", ed or ""):
+        die("the staged version has no entries digest")
+    J, T = source._jsonb, source._text
+    pre = [f"-- apps/iam/apply.sh {'--rollback-to' if kind == 'rollback' else meta['version']}: PRE "
+           "(apply_check.py bundle-sql; design §14.8.4 step 7)",
+           f"\\set want_entries '{ed}'"]
+    if kind in ("change", "skeleton"):
+        if not re.fullmatch(r"[0-9a-f]{64}", diff_digest or ""):
+            die("the approved diff digest is missing")
+        pre += [f"\\set v '{int(meta['version'])}'",
+                f"\\set want_diff '{diff_digest}'",
+                "SELECT pg_catalog.set_config('medcea.apply_version', :'v', true),",
+                "       pg_catalog.set_config('medcea.apply_entries', :'want_entries', true),",
+                "       pg_catalog.set_config('medcea.apply_diff', :'want_diff', true) \\g /dev/null",
+                "SELECT x.version FROM iam_policy.version x WHERE x.version = :v FOR UPDATE \\g /dev/null",
+                _assert_sql("pre", "\n".join([
+                    "    IF (SELECT x.status FROM iam_policy.version x",
+                    "         WHERE x.version = pg_catalog.current_setting('medcea.apply_version')::integer) IS DISTINCT FROM 'approved' THEN",
+                    "        RAISE EXCEPTION 'version % is not approved any more: nothing was applied',",
+                    "            pg_catalog.current_setting('medcea.apply_version');",
+                    "    END IF;",
+                    "    IF iam_policy.entries_digest(pg_catalog.current_setting('medcea.apply_version')::integer)",
+                    "       IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries')",
+                    "       OR (SELECT x.entries_digest FROM iam_policy.version x",
+                    "            WHERE x.version = pg_catalog.current_setting('medcea.apply_version')::integer)",
+                    "       IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries') THEN",
+                    "        RAISE EXCEPTION 'version % does not store the entries of the staged file: nothing was applied',",
+                    "            pg_catalog.current_setting('medcea.apply_version');",
+                    "    END IF;",
+                    "    IF (SELECT x.diff_digest FROM iam_policy.version x",
+                    "         WHERE x.version = pg_catalog.current_setting('medcea.apply_version')::integer)",
+                    "       IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_diff') THEN",
+                    "        RAISE EXCEPTION 'version % carries another diff digest than the one checked: nothing was applied',",
+                    "            pg_catalog.current_setting('medcea.apply_version');",
+                    "    END IF;"]))]
+    if kind == "skeleton":
+        digest, body, scommit = skeleton
+        summary = {"narrowed": [], "unchanged": [], "reviewed_by_version": int(meta["version"])}
+        pre += [f"\\set skel_digest '{digest}'",
+                _set("skel_body", source.canonical(body).decode("utf-8")),
+                _set("skel_commit", scommit),
+                _set("skel_compiler", source.compiler_digest()),
+                _set("skel_summary", summary),
+                f"SELECT iam_policy._accept_skeleton(:'skel_digest', {J('skel_body')}, {T('skel_commit')}, "
+                f"{T('skel_compiler')}, {J('skel_summary')}) \\g /dev/null",
+                f"SELECT iam_policy._sync_skeleton({J('skel_body')}, {T('skel_commit')}) \\g /dev/null",
+                _assert_sql("acc", "\n".join([
+                    "    IF iam_policy._accepted() IS DISTINCT FROM (SELECT x.skeleton_digest FROM iam_policy.version x",
+                    "         WHERE x.version = pg_catalog.current_setting('medcea.apply_version')::integer) THEN",
+                    "        RAISE EXCEPTION 'the accepted skeleton is not version %''s', pg_catalog.current_setting('medcea.apply_version');",
+                    "    END IF;"]))]
+    if kind == "rollback":
+        k, applied, reason = rollback
+        pre += [f"\\set k '{int(k)}'",
+                f"\\set applied '{int(applied)}'",
+                f"\\set want_version '{int(meta['version'])}'",
+                _set("rb_reason", reason),
+                _set("rb_withdraw", f"withdrawn by rollback to version {int(k)}: {reason}"),
+                f"SELECT iam_policy._withdraw_open({T('rb_withdraw')}) \\g /dev/null",
+                "SELECT iam_policy._build_version('rollback',",
+                "    (SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('role', e.role, 'group_code', e.group_code,",
+                "             'level', e.level::text, 'constraint_name', e.constraint_name)), '[]'::jsonb)",
+                "       FROM iam_policy.entry e WHERE e.version = :k),",
+                "    (SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w) - 'version'), '[]'::jsonb)",
+                "       FROM iam_policy.waiver w WHERE w.version = :k),",
+                f"    :applied, :k, {T('rb_reason')}) AS v \\gset",
+                "SELECT pg_catalog.set_config('medcea.apply_version', :'v', true),",
+                "       pg_catalog.set_config('medcea.apply_want', :'want_version', true),",
+                "       pg_catalog.set_config('medcea.apply_entries', :'want_entries', true) \\g /dev/null",
+                _assert_sql("rb", "\n".join([
+                    "    IF pg_catalog.current_setting('medcea.apply_version') <> pg_catalog.current_setting('medcea.apply_want') THEN",
+                    "        RAISE EXCEPTION 'another version was created meanwhile (got %, staged %): nothing was applied',",
+                    "            pg_catalog.current_setting('medcea.apply_version'), pg_catalog.current_setting('medcea.apply_want');",
+                    "    END IF;",
+                    "    IF iam_policy.entries_digest(pg_catalog.current_setting('medcea.apply_version')::integer)",
+                    "       IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries') THEN",
+                    "        RAISE EXCEPTION 'version % does not store the entries of the staged file: nothing was applied',",
+                    "            pg_catalog.current_setting('medcea.apply_version');",
+                    "    END IF;"]))]
+    digests = dict(digests or {}, git_commit=commit, compiler_digest=source.compiler_digest(),
+                   skeleton_digest=meta["skeleton_digest"])
+    post_checks = [
+        "    IF (SELECT x.status FROM iam_policy.version x",
+        "         WHERE x.version = pg_catalog.current_setting('medcea.apply_version')::integer) IS DISTINCT FROM 'applied'",
+        "       OR iam_policy.entries_digest(pg_catalog.current_setting('medcea.apply_version')::integer)",
+        "          IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries') THEN",
+        "        RAISE EXCEPTION 'version % is not applied with the staged entries', pg_catalog.current_setting('medcea.apply_version');",
+        "    END IF;"]
+    if kind == "skeleton":
+        post_checks += [
+            "    IF iam_policy._accepted() IS DISTINCT FROM (SELECT x.skeleton_digest FROM iam_policy.version x",
+            "         WHERE x.version = pg_catalog.current_setting('medcea.apply_version')::integer) THEN",
+            "        RAISE EXCEPTION 'the accepted skeleton is not version %''s', pg_catalog.current_setting('medcea.apply_version');",
+            "    END IF;"]
+    post = [f"-- apps/iam/apply.sh: POST (apply_check.py bundle-sql, {kind}); :v is the version",
+            _set("apply_digests", digests),
+            _set("apply_os_user", os_user()),
+            f"\\set apply_by_sub '{by_sub.lower()}'",
+            _set("apply_by_person", by_person),
+            _set("apply_log", log or ""),
+            f"SELECT iam_policy._mark_applied(:v, {J('apply_digests')}, {T('apply_os_user')}, :'apply_by_sub'::uuid, "
+            f"{T('apply_by_person')}, NULLIF({T('apply_log')}, '')) \\g /dev/null",
+            _assert_sql("post", "\n".join(post_checks))]
+    return "\n".join(pre + [""]), "\n".join(post + [""])
+
+
+def revert_bundle_sql(prev_header, reverted, why, failed):
+    """(pre, post) of the revert bundle (design §14.8.6): PRE binds prev.yaml to the
+    database (its header's version is the one `reverted` superseded, its entries digest the
+    stored one); POST puts it back (_mark_reverted), asserts it, and files partial_apply
+    {outcome: reverting} under it, so the unfinished revert is visible from its COMMIT on."""
+    prev, ed = int(prev_header["version"]), prev_header["entries_digest"]
+    if not re.fullmatch(r"[0-9a-f]{64}", ed or ""):
+        die("prev.yaml's header has no entries digest")
+    J, T = source._jsonb, source._text
+    pre = ["-- apps/iam/apply.sh: the revert's PRE (apply_check.py bundle-sql --kind revert; design §14.8.6)",
+           f"\\set prev '{prev}'",
+           f"\\set rv '{int(reverted)}'",
+           f"\\set want_entries '{ed}'",
+           "SELECT pg_catalog.set_config('medcea.revert_prev', :'prev', true),",
+           "       pg_catalog.set_config('medcea.revert_version', :'rv', true),",
+           "       pg_catalog.set_config('medcea.apply_entries', :'want_entries', true) \\g /dev/null",
+           _assert_sql("rpre", "\n".join([
+               "    IF (SELECT h.payload ->> 'previous' FROM iam_policy.history h",
+               "         WHERE h.version = pg_catalog.current_setting('medcea.revert_version')::integer AND h.event = 'apply_started'",
+               "         ORDER BY h.event_id DESC LIMIT 1) IS DISTINCT FROM pg_catalog.current_setting('medcea.revert_prev') THEN",
+               "        RAISE EXCEPTION 'version % did not supersede version %: the revert file is another version''s',",
+               "            pg_catalog.current_setting('medcea.revert_version'), pg_catalog.current_setting('medcea.revert_prev');",
+               "    END IF;",
+               "    IF iam_policy.entries_digest(pg_catalog.current_setting('medcea.revert_prev')::integer)",
+               "       IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries')",
+               "       OR (SELECT x.entries_digest FROM iam_policy.version x",
+               "            WHERE x.version = pg_catalog.current_setting('medcea.revert_prev')::integer)",
+               "       IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries') THEN",
+               "        RAISE EXCEPTION 'version % does not store the entries of the revert file', pg_catalog.current_setting('medcea.revert_prev');",
+               "    END IF;"])), ""]
+    payload = {"version": prev, "outcome": "reverting", "reverted_version": int(reverted),
+               "failed_targets": list(failed or []), "os_user": os_user()}
+    post = ["-- apps/iam/apply.sh: the revert's POST",
+            _set("revert_why", why),
+            _set("revert_payload", payload),
+            f"SELECT iam_policy._mark_reverted(:rv, :prev, {T('revert_why')}) \\g /dev/null",
+            _assert_sql("rpost", "\n".join([
+                "    IF (SELECT x.status FROM iam_policy.version x",
+                "         WHERE x.version = pg_catalog.current_setting('medcea.revert_prev')::integer) IS DISTINCT FROM 'applied'",
+                "       OR iam_policy.entries_digest(pg_catalog.current_setting('medcea.revert_prev')::integer)",
+                "          IS DISTINCT FROM pg_catalog.current_setting('medcea.apply_entries') THEN",
+                "        RAISE EXCEPTION 'version % is not back with the revert file''s entries', pg_catalog.current_setting('medcea.revert_prev');",
+                "    END IF;"])),
+            f"SELECT iam_policy._record('partial_apply', {J('revert_payload')}) \\g /dev/null", ""]
+    return "\n".join(pre), "\n".join(post)
+
+
+def apply_extra(doc, meta, mode, attempts, check=None, deferred=(), pre_failing=(), reason=None):
+    """The applied event's fields beyond the bootstrap's (design §14.8.6 step 10)."""
+    v = doc.get("version") or {}
+    out = {"rollback_of": meta.get("rollback_of"), "changed": list(meta.get("changed") or []),
+           "deferred": list(deferred), "attempts": int(attempts), "pre_failing": list(pre_failing)}
+    if mode == "apply":
+        out["approved_by"] = {"sub": v.get("approved_by_sub"), "person": v.get("approved_by_person"),
+                              "event_id": (check or {}).get("event_id")}
+        out["jwk"] = (check or {}).get("jwk")
+        out["reason"] = f"version {meta['version']} ({meta['kind']}) applied, approved by {v.get('approved_by_name')}"
+    else:
+        out["reason"] = reason or f"version {meta['version']}: rollback to version {meta.get('rollback_of')}"
+    return out
+
+
+def verify_host(ref_dir):
+    """The written host file compiles to exactly the reference compile (design §14.8.4,
+    after the COMMIT: bootstrap-targets --source host generalised)."""
+    strip_policy_env()
+    if source.read_host_file() is None:
+        die("no state/policy-applied.yaml to compile", 1)
+    host = compile_all([], host_file=source.HOST_FILE)
+    diff = compare(load_saved(ref_dir), host)
+    if diff:
+        print(f"state/policy-applied.yaml compiles differently from the staged version: {diff[0]} ({diff[1]})",
+              file=sys.stderr)
+        return 1
+    print(f"[policy] state/policy-applied.yaml compiles to exactly the staged version ({len(host)} targets)")
+    return 0
+
+
 # ── the targets (design §14.4.10) ──────────────────────────────────────────────────────
 def targets(p):
     """[(name, cli argv)] of every target, describe-gate excluded (it needs the proxy list)."""
@@ -773,15 +1914,17 @@ def load_saved(d):
     return outs
 
 
-def digests_of(outs, commit=None):
-    """_mark_applied's p_digests from compiled outputs (design §14.4.9)."""
+def digests_of(outs, commit=None, skeleton_digest=None):
+    """_mark_applied's p_digests from compiled outputs (design §14.4.9). skeleton_digest: the
+    skeleton the version is applied under (IAM 4.5, design §14.8.4 step 5.8; default the git
+    tree's, which the bootstrap applies)."""
     def h(name):
         rc, text, _ = outs.get(name, (1, "", ""))
         return sha(text) if rc == 0 else None
     routes_doc = json.loads(outs["routes"][1])
     mqtt_doc = json.loads(outs["mqtt"][1])
     return {"git_commit": commit or source.git_commit(), "compiler_digest": source.compiler_digest(),
-            "skeleton_digest": source.skeleton_digest(source.factory()),
+            "skeleton_digest": skeleton_digest or source.skeleton_digest(source.factory()),
             "routes": routes_doc.get("digest"), "mqtt": mqtt_doc.get("digest"),
             "grants_document": h("grants-json"), "netpol": h("netpol"),
             "proxy": {n[len("proxy-"):]: h(n) for n in sorted(outs) if n.startswith("proxy-")},
@@ -930,11 +2073,18 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
             # IAM 4.4: still a FAIL (a deploy refuses it), even when a version proposes it
             prop = [o for o in opens if o.get("kind") == "skeleton" and o.get("skeleton_digest") == source.skeleton_digest(git)]
             # health-check.sh cuts a detail at 160 characters: with a proposal the base is shorter,
-            # so the whole instruction fits up to version 99999 (tests/test_health_policy.py)
-            out.append(("FAIL", (
-                f"the git skeleton widens: a deploy refuses it (proposed as version {prop[0].get('version')}, "
-                f"{prop[0].get('status')}: put HEAD back at the accepted skeleton; the proposal waits on its branch)"
-                if prop else "the git skeleton widens over the accepted one: a deploy would refuse it (cli.py skeleton-gate)")))
+            # so the whole instruction fits up to version 99999 (tests/test_health_policy.py).
+            # IAM 4.5 (design §14.8.8): an approved proposal is applied by apply.sh N, whose
+            # gate exception admits exactly this digest
+            if prop and prop[0].get("status") == "approved":
+                n = prop[0].get("version")
+                out.append(("FAIL", f"the git skeleton widens: a deploy refuses it (approved as version {n}: "
+                                    f"./apps/iam/apply.sh {n} --by <you>)"))
+            else:
+                out.append(("FAIL", (
+                    f"the git skeleton widens: a deploy refuses it (proposed as version {prop[0].get('version')}, "
+                    f"{prop[0].get('status')}: put HEAD back at the accepted skeleton; the proposal waits on its branch)"
+                    if prop else "the git skeleton widens over the accepted one: a deploy would refuse it (cli.py skeleton-gate)")))
         elif g["verdict"] == "error":
             out.append(("FAIL", f"the skeleton gate could not be computed: {g['error']}"))
         else:
@@ -945,10 +2095,19 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
             if errs:
                 out.append(("FAIL", f"the git skeleton narrows but fails the checker with the applied matrix "
                                     f"({len(errs)} violation(s): {errs[0]}): a deploy would refuse it"))
+            elif acc.get("reviewed_by_version") is not None:
+                # IAM 4.5 (design §14.8.4 step 2): the accepted skeleton is an applied skeleton
+                # version; HEAD back at the older one would be accepted with no review
+                out.append(("WARN", f"git skeleton narrows: a deploy would undo skeleton version "
+                                    f"{acc.get('reviewed_by_version')}; keep its commit on the deployed branch"))
             else:
                 out.append(("WARN", "the git skeleton narrows: accepted at the next deploy"))
     for a in state.get("accepts") or []:
-        if a.get("reviewed_by_version") is not None:
+        # IAM 4.5 (design §14.8.8): an accept names the skeleton version qa approved only when
+        # that version really is one, applied (or since superseded), proposing exactly this
+        # digest; a forged summary is recomputed like any other accept
+        if (a.get("reviewed_by_version") is not None and a.get("rv_kind") == "skeleton"
+                and a.get("rv_status") in ("applied", "superseded") and a.get("rv_skeleton") == a.get("to")):
             continue
         if not isinstance(a.get("from_body"), dict) or not isinstance(a.get("to_body"), dict):
             out.append(("FAIL", f"skeleton {str(a.get('to'))[:12]} accepted at event {a.get('event_id')}: "
@@ -960,20 +2119,32 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
             out.append(("FAIL", f"skeleton {str(a.get('to'))[:12]} was accepted at event {a.get('event_id')} "
                                 f"but widens over {str(a.get('from'))[:12]}"))
     last = state.get("last_apply_event") or {}
+    running = False
     if last.get("event") == "apply_started":
-        if _apply_running(holders):
+        running = _apply_running(holders)
+        if running:
             out.append(("WARN", "an apply is in progress"))
         else:
             out.append(("FAIL", f"version {v} was committed but its apply did not record its end "
                                 "(./apps/iam/apply.sh --resume --by <you>)"))
     elif last.get("event") == "partial_apply":
-        out.append(("FAIL", f"version {v}: partial_apply (./apps/iam/apply.sh --resume --by <you>)"))
+        # IAM 4.5 (design §14.8.6): the revert bundle files partial_apply {reverting} under the
+        # version it put back; until the revert's rollout and records finish, it is unfinished
+        if last.get("outcome") == "reverting":
+            out.append(("FAIL", f"version {v}: a revert is unfinished (./apps/iam/apply.sh --resume --by <you>)"))
+        else:
+            out.append(("FAIL", f"version {v}: partial_apply (./apps/iam/apply.sh --resume --by <you>)"))
     for x in state.get("disputed_not_superseded") or []:
         out.append(("FAIL", f"version {x} is disputed and not superseded"))
     for b in state.get("break_glass_open") or []:
         out.append(("FAIL", f"policy break-glass event {b.get('event_id')} ({b.get('reason')}) still open for "
                             f"{', '.join(b.get('open') or [])}: deploy them again without MEDCEA_POLICY_FILE"))
     for f in state.get("audit_findings") or []:
+        # IAM 4.5 (design §14.8.8): while apply.sh runs, the applied version's events are
+        # apply_started without its applied yet, which audit_versions() reports as 'sequence';
+        # "an apply is in progress" already says it (partial_apply keeps both FAILs)
+        if running and f.get("finding") == "sequence" and f.get("version") == v:
+            continue
         out.append(("FAIL", f"audit_versions(): version {f.get('version')} {f.get('finding')}"))
     if state.get("chain_ok") is False:
         out.append(("FAIL", "verify_chain() is false: the policy history was altered"))
@@ -1005,10 +2176,12 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
     for o in state.get("open_versions") or []:
         if (o.get("age_days") or 0) > 7:
             out.append(("WARN", f"version {o.get('version')} is {o.get('status')} for {o.get('age_days')} days"))
-    for o in opens:   # IAM 4.4 (design §14.7.6): nothing approved is applied before 4.5
+    for o in opens:   # IAM 4.5 (design §14.8.8): an approved version waits for the host operator
         if o.get("status") == "approved":
-            out.append(("WARN", f"version {o.get('version')} ({o.get('kind')}) is approved; applying it arrives with "
-                                f"IAM 4.5 (./apps/iam/apply.sh {o.get('version')})"))
+            n = o.get("version")
+            out.append(("WARN", f"version {n} ({o.get('kind')}) is approved again after a reverted apply: "
+                                f"./apps/iam/apply.sh {n} --by <you>" if o.get("reverted") else
+                                f"version {n} ({o.get('kind')}) is approved: ./apps/iam/apply.sh {n} --by <you> applies it"))
         if o.get("kind") == "skeleton" and o.get("diff_from") and o.get("diff_from") != acc.get("digest"):
             out.append(("WARN", f"skeleton version {o.get('version')} was proposed against skeleton "
                                 f"{str(o.get('diff_from'))[:12]}, the accepted one is now {str(acc.get('digest'))[:12]}: "
@@ -1075,13 +2248,23 @@ def status_text(state, gate=None, gate_rc=None, live_routes=None, live_mqtt=None
         else:
             verdict = "equal" if git_digest == acc.get("digest") else "unknown"
         prop = [o for o in state.get("open_versions") or [] if o.get("kind") == "skeleton"]
-        widening = "WIDENING: refused until an approved skeleton can be applied (4.5)"
-        if prop:
-            widening += (f"; skeleton version {prop[0].get('version')} ({prop[0].get('status')}) proposes "
-                         f"{str(prop[0].get('skeleton_digest'))[:12]}")
+        if prop and prop[0].get("status") == "approved" and prop[0].get("skeleton_digest") == git_digest:
+            # IAM 4.5 (design §14.8.8): the approved version is what applies it
+            n = prop[0].get("version")
+            widening = (f"WIDENING: refused by every deploy; approved as skeleton version {n}: "
+                        f"./apps/iam/apply.sh {n} --by <you> applies it")
+        elif prop:
+            widening = (f"WIDENING: refused until a skeleton version proposing it is approved and applied; skeleton "
+                        f"version {prop[0].get('version')} ({prop[0].get('status')}) proposes "
+                        f"{str(prop[0].get('skeleton_digest'))[:12]}")
         else:
-            widening += "; propose it from a commit: ./apps/iam/apply.sh --propose-skeleton --from-git <rev>"
-        word = {"equal": "equal", "narrowing": "narrowing: accepted at the next deploy",
+            widening = ("WIDENING: refused until a skeleton version proposing it is approved and applied; propose it "
+                        "from a commit: ./apps/iam/apply.sh --propose-skeleton --from-git <rev>")
+        if acc.get("reviewed_by_version") is not None:
+            narrowing = f"narrowing: a deploy would accept it and undo skeleton version {acc['reviewed_by_version']}"
+        else:
+            narrowing = "narrowing: accepted at the next deploy"
+        word = {"equal": "equal", "narrowing": narrowing,
                 "widening": widening,
                 "refused": "REFUSED: it narrows, but fails the checker with the applied matrix (fix it in git)"}.get(verdict, verdict)
         L.append(f"skeleton: accepted {acc['digest'][:12]}, git {git_digest[:12]}: {word}")
@@ -1133,6 +2316,7 @@ def main(argv=None):
     c.add_argument("--accounts", required=True)
     c = sub.add_parser("accounts")
     c.add_argument("--dir", required=True)
+    c.add_argument("--skeleton", help="the skeleton (JSON) whose includes expand the roles (account-skeleton)")
     c = sub.add_parser("by-user")
     c.add_argument("--in", dest="inp", required=True)
     c.add_argument("--username", required=True)
@@ -1152,14 +2336,102 @@ def main(argv=None):
     c.add_argument("--out", required=True)
     c.add_argument("--commit")
     c = sub.add_parser("bundle-sql")
-    c.add_argument("--kind", required=True)
-    c.add_argument("--state", required=True)
-    c.add_argument("--by-sub", required=True)
-    c.add_argument("--by-person", required=True)
+    c.add_argument("--kind", required=True, choices=["bootstrap", "change", "skeleton", "rollback", "revert"])
+    c.add_argument("--state", help="bootstrap: the simulated state document")
+    c.add_argument("--stage", help="change, skeleton, rollback, revert: apply.sh's stage directory (stage)")
+    c.add_argument("--doc", help="change, skeleton, rollback: the version document (approval-sql)")
+    c.add_argument("--by-sub", default="")
+    c.add_argument("--by-person", default="")
     c.add_argument("--log", default="")
     c.add_argument("--out", required=True)
     c.add_argument("--commit")
     c.add_argument("--digests")
+    c.add_argument("--reason-file", help="rollback: the reason; revert: why")
+    c.add_argument("--failed", default="", help="revert: the failed targets, one per line, in a file")
+    c = sub.add_parser("approval-sql")
+    c.add_argument("--version", type=int, required=True)
+    c.add_argument("--audit", action="store_true")
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("audit-doc")
+    c.add_argument("--in", dest="inp", required=True)
+    c.add_argument("--issuer", required=True)
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("gate")
+    c.add_argument("--state", required=True)
+    c.add_argument("--doc", required=True)
+    c.add_argument("--gate", required=True)
+    c.add_argument("--gate-rc", type=int, required=True)
+    c.add_argument("--mode", choices=["apply", "rollback"], required=True)
+    c.add_argument("--version", type=int, required=True)
+    c.add_argument("--head-has", choices=["yes", "no", "unknown"], default="unknown")
+    c = sub.add_parser("state-check")
+    c.add_argument("--state", required=True)
+    c.add_argument("--doc", required=True)
+    c.add_argument("--version", type=int, required=True)
+    c = sub.add_parser("account-skeleton")
+    c.add_argument("--state", required=True)
+    c.add_argument("--doc")
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("host-file")
+    c.add_argument("--state", required=True)
+    c.add_argument("--check-only", action="store_true")
+    c = sub.add_parser("stage")
+    c.add_argument("--state", required=True)
+    c.add_argument("--doc", required=True)
+    c.add_argument("--out", required=True)
+    c.add_argument("--commit", required=True)
+    c.add_argument("--rollback", type=int, help="K: stage the rollback version to K")
+    c.add_argument("--next", type=int, help="with --rollback: the number the rollback version gets")
+    c = sub.add_parser("diff-check")
+    c.add_argument("--state", required=True)
+    c.add_argument("--doc", required=True)
+    c.add_argument("--stage", required=True)
+    c = sub.add_parser("check-approval")
+    c.add_argument("--doc", required=True)
+    c.add_argument("--kc", required=True)
+    c.add_argument("--jwks", required=True)
+    c.add_argument("--stage", required=True)
+    c.add_argument("--issuer", required=True)
+    c.add_argument("--mode", choices=["apply", "rollback"], required=True)
+    c.add_argument("--version", type=int, required=True)
+    c.add_argument("--state")
+    c.add_argument("--out")
+    c = sub.add_parser("signing-keys")
+    c.add_argument("--in", dest="inp", required=True)
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("rollback-check")
+    c.add_argument("--state", required=True)
+    c.add_argument("--doc", required=True)
+    c.add_argument("--jwks", required=True)
+    c.add_argument("--version", type=int, required=True)
+    c = sub.add_parser("rollback-diff")
+    c.add_argument("--state", required=True)
+    c.add_argument("--stage", required=True)
+    c = sub.add_parser("verify-conf")
+    c.add_argument("--out", required=True)
+    c.add_argument("--drop", action="append", default=[])
+    c = sub.add_parser("health-results")
+    c.add_argument("--in", dest="inp", required=True)
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("verify-judge")
+    c.add_argument("--baseline", required=True)
+    c.add_argument("--now", required=True)
+    c.add_argument("--drop", action="append", default=[])
+    c = sub.add_parser("verify-host")
+    c.add_argument("--reference", required=True)
+    c = sub.add_parser("deferred-check")
+    c.add_argument("--command", required=True)
+    c = sub.add_parser("apply-extra")
+    c.add_argument("--doc", required=True)
+    c.add_argument("--stage", required=True)
+    c.add_argument("--mode", choices=["apply", "rollback"], required=True)
+    c.add_argument("--attempts", type=int, required=True)
+    c.add_argument("--check")
+    c.add_argument("--deferred", action="append", default=[])
+    c.add_argument("--pre-failing", action="append", default=[])
+    c.add_argument("--reason-file")
+    c.add_argument("--set", action="append", default=[], help="KEY=JSON, merged last")
+    c.add_argument("--out", required=True)
     c = sub.add_parser("apply-record")
     c.add_argument("--event", required=True)
     c.add_argument("--state", required=True)
@@ -1170,6 +2442,7 @@ def main(argv=None):
     c.add_argument("--chain-head", default="")
     c.add_argument("--digests")
     c.add_argument("--resumed", action="store_true")
+    c.add_argument("--extra", help="IAM 4.5: a JSON object merged into the payload last")
     c.add_argument("--out", required=True)
     c = sub.add_parser("bootstrap-targets")
     c.add_argument("--out", required=True)
@@ -1224,7 +2497,7 @@ def main(argv=None):
                 print(line)
             return 0
         if a.cmd == "accounts":
-            print(json.dumps(accounts_from_dir(a.dir), sort_keys=True))
+            print(json.dumps(accounts_from_dir(a.dir, load_json(a.skeleton) if a.skeleton else None), sort_keys=True))
             return 0
         if a.cmd == "by-user":
             sub_, pid = by_user(load_json(a.inp), a.username)
@@ -1246,10 +2519,49 @@ def main(argv=None):
                 json.dump(simulate_state(commit=a.commit), f)
             return 0
         if a.cmd == "bundle-sql":
-            if a.kind != "bootstrap":
-                die(f"bundle-sql --kind {a.kind}: arrives with IAM 4.5")
             digests = load_json(a.digests) if a.digests else None
-            pre, post = bundle_sql(load_json(a.state), a.by_sub, a.by_person, a.log, a.commit, digests)
+            reason = ""
+            if a.reason_file:
+                with open(a.reason_file, encoding="utf-8") as f:
+                    reason = f.read()
+            if a.kind == "bootstrap":
+                if not a.state:
+                    die("bundle-sql --kind bootstrap needs --state")
+                pre, post = bundle_sql(load_json(a.state), a.by_sub, a.by_person, a.log, a.commit, digests)
+            elif a.kind == "revert":
+                meta = load_json(os.path.join(a.stage, "stage.json"))
+                hdr = source.read_host_file(os.path.join(a.stage, "prev.yaml")).header
+                if int(hdr["version"]) != meta["prev_version"] or hdr["entries_digest"] != meta["prev_entries_digest"]:
+                    die("prev.yaml is not the version the stage read as applied", 1)
+                failed = []
+                if a.failed:
+                    with open(a.failed, encoding="utf-8") as f:
+                        failed = [l.strip() for l in f if l.strip()]
+                if not reason.strip():
+                    die("the revert needs its reason")
+                pre, post = revert_bundle_sql(hdr, meta["version"], reason, failed)
+            else:
+                meta = load_json(os.path.join(a.stage, "stage.json"))
+                if meta.get("kind") != a.kind:
+                    die(f"the stage holds a {meta.get('kind')} version, not {a.kind}", 1)
+                hdr = source.read_host_file(os.path.join(a.stage, "staged", "policy-applied.yaml")).header
+                if int(hdr["version"]) != meta["version"] or hdr["entries_digest"] != meta["entries_digest"]:
+                    die("the staged file is not the staged version", 1)
+                doc = load_doc(a.doc)
+                v = doc.get("version") or {}
+                skel = None
+                if a.kind == "skeleton":
+                    sk = (doc.get("skeletons") or {}).get(v.get("skeleton_digest")) or {}
+                    skel = (v.get("skeleton_digest"), source.skeleton(sk.get("body") or {}), sk.get("git_commit") or "unknown")
+                    if source.skeleton_digest(skel[1]) != skel[0]:
+                        die("the stored body of the proposed skeleton does not hash to its digest", 1)
+                rb = None
+                if a.kind == "rollback":
+                    if not reason.strip():
+                        die("a rollback needs its reason")
+                    rb = (meta["rollback_of"], meta["prev_version"], reason)
+                pre, post = apply_bundle_sql(a.kind, meta, a.by_sub, a.by_person, a.log, a.commit, digests,
+                                             v.get("diff_digest"), skel, rb)
             os.makedirs(a.out, mode=0o700, exist_ok=True)
             for name, text in (("pre.sql", pre), ("post.sql", post)):
                 fd = os.open(os.path.join(a.out, name), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
@@ -1260,10 +2572,136 @@ def main(argv=None):
             if not UUID.fullmatch(a.by_sub):
                 die(f"--by-sub {a.by_sub!r} is not a uuid")
             digests = load_json(a.digests) if a.digests else {}
+            extra = load_json(a.extra) if a.extra else None
+            if extra is not None:
+                if not isinstance(extra, dict):
+                    die("--extra is not a JSON object")
+                if not str(extra.get("reason") or "").strip():   # else the bootstrap's text goes into the chain
+                    die(f"--extra of {a.event} has no reason: every 4.5 record says its own")
+                sha, of = log_sha256(a.log)
+                extra = dict({"apply_log_sha256": sha, "apply_log_sha256_of": of}, **extra)
             payload = apply_payload(load_json(a.state), a.by_sub, a.by_person, a.log, a.commit, a.chain_head,
-                                    digests, a.resumed)
+                                    digests, a.resumed, extra)
             with open(a.out, "w", encoding="utf-8") as f:
                 f.write(record_sql(a.event, payload))
+            return 0
+        if a.cmd == "approval-sql":
+            _write_private(os.path.abspath(a.out), approval_doc_sql(a.version, a.audit))
+            return 0
+        if a.cmd == "audit-doc":
+            d = load_doc(a.inp)
+            n = (d.get("version") or {}).get("version")
+            d["audit_findings"] = [f for f in d.get("audit_findings") or [] if f.get("version") == n]
+            d["issuer"] = a.issuer
+            _write_private(os.path.abspath(a.out), json.dumps(d))
+            return 0
+        if a.cmd == "gate":
+            g = load_json(a.gate) if os.path.getsize(a.gate) else {}
+            rc, lines = gate_decision(load_json(a.state), load_doc(a.doc), g, a.gate_rc, a.mode, a.version,
+                                      {"yes": True, "no": False}.get(a.head_has))
+            for l in lines:
+                print(l, file=sys.stderr if l.startswith(("ERROR", "WARNING")) else sys.stdout)
+            return rc
+        if a.cmd == "state-check":
+            rc, lines = state_problems(load_json(a.state), load_doc(a.doc), a.version)
+            for l in lines:
+                print(l, file=sys.stderr if l.startswith(("ERROR", "  #")) and rc else sys.stdout)
+            return rc
+        if a.cmd == "account-skeleton":
+            _write_private(os.path.abspath(a.out), json.dumps(account_skeleton(load_json(a.state),
+                                                                               load_doc(a.doc) if a.doc else None)))
+            return 0
+        if a.cmd == "host-file":
+            line, text = host_file_first(load_json(a.state), a.check_only)
+            if text is not None:
+                source.write_host_file(source.HOST_FILE, text)
+            print(line, file=sys.stderr if line.startswith("WARNING") else sys.stdout)
+            return 0
+        if a.cmd == "stage":
+            state, doc = load_json(a.state), load_doc(a.doc)
+            sim = None
+            if a.rollback:
+                if not a.next:
+                    die("stage --rollback needs --next")
+                sim = rollback_sim(state, doc, a.next, a.rollback)
+            rc, lines = stage(state, doc, a.out, a.commit, sim=sim)
+            for l in lines:
+                print(("ERROR: " + l) if rc else l, file=sys.stderr if rc else sys.stdout)
+            return rc
+        if a.cmd == "diff-check":
+            rc, lines = diff_check(load_json(a.state), load_doc(a.doc), a.stage)
+            for l in lines:
+                print(("ERROR: " + l) if rc else l, file=sys.stderr if rc else sys.stdout)
+            return rc
+        if a.cmd == "check-approval":
+            refusals, warnings, notes, info = check_approval(load_doc(a.doc), a.kc, load_json(a.jwks), a.stage, a.issuer,
+                                                             a.mode, a.version, load_json(a.state) if a.state else None)
+            for l in notes:
+                print(l)
+            for l in warnings:
+                print(f"WARNING: {l}", file=sys.stderr)
+            for l in refusals:
+                print(f"REFUSED: {l}", file=sys.stderr)
+            if a.out:
+                _write_private(os.path.abspath(a.out), json.dumps(info, sort_keys=True))
+            return 1 if refusals else 0
+        if a.cmd == "signing-keys":
+            keys = signing_keys(load_json(a.inp))
+            if not keys["keys"]:
+                die("the realm publishes no RS256 signing key")
+            _write_private(os.path.abspath(a.out), json.dumps(keys, sort_keys=True))
+            return 0
+        if a.cmd == "rollback-check":
+            state, doc = load_json(a.state), load_doc(a.doc)
+            refusals, warnings = rollback_problems(doc, state, load_json(a.jwks), a.version)
+            if not refusals:
+                more, notes = rollback_bound(doc, a.version)
+                refusals += more
+                warnings += notes
+            for l in warnings:
+                print(f"WARNING: {l}", file=sys.stderr)
+            for l in pending_problems(doc, refuse=False):
+                print(l if l.startswith("  #") else f"WARNING: {l}", file=sys.stderr)
+            for l in refusals:
+                print(f"ERROR: {l}", file=sys.stderr)
+            return 1 if refusals else 0
+        if a.cmd == "rollback-diff":
+            for l in rollback_diff_lines(load_json(a.state), a.stage):
+                print(l)
+            return 0
+        if a.cmd == "verify-conf":
+            _write_private(os.path.abspath(a.out), verify_conf(a.drop))
+            return 0
+        if a.cmd == "health-results":
+            with open(a.inp, encoding="utf-8", errors="replace") as f:
+                res = health_results(f.read())
+            _write_private(os.path.abspath(a.out), json.dumps(res, sort_keys=True))
+            for t, s in sorted(res.items()):
+                print(f"{t} {s}")
+            return 0
+        if a.cmd == "verify-judge":
+            want = [t for t, _ in VERIFY_CHECKS if t not in a.drop]
+            for t in verify_judge(load_json(a.baseline), load_json(a.now), want):
+                print(t)
+            return 0
+        if a.cmd == "verify-host":
+            return verify_host(a.reference)
+        if a.cmd == "deferred-check":
+            c = DEFER_CHECK.get(a.command)
+            if c:
+                print(c)
+            return 0
+        if a.cmd == "apply-extra":
+            reason = None
+            if a.reason_file:
+                with open(a.reason_file, encoding="utf-8") as f:
+                    reason = f.read()
+            x = apply_extra(load_doc(a.doc), load_json(os.path.join(a.stage, "stage.json")), a.mode, a.attempts,
+                            load_json(a.check) if a.check else None, a.deferred, a.pre_failing, reason)
+            for kv in a.set:
+                k, _, val = kv.partition("=")
+                x[k] = json.loads(val)
+            _write_private(os.path.abspath(a.out), json.dumps(x, sort_keys=True))
             return 0
         if a.cmd == "deferred-record":
             with open(a.out, "w", encoding="utf-8") as f:

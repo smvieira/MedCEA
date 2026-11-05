@@ -45,7 +45,19 @@
 #             a second fresh database (medcea_pa2) a failing statement in the bundle and a
 #             REPEATABLE READ default each roll the whole bundle back (no version row);
 #             then, with the access component and apply true, the bundle under
-#             IAM_DB_ROLES=true commits version 1 (POST runs as system:apply again)
+#             IAM_DB_ROLES=true commits version 1 (POST runs as system:apply again).
+#             IAM 4.5, under this run's lock (DBA_STAGED needs it; taken for these steps
+#             only), every bundle compiled by cli.py --staged from the version's staged
+#             host file: P38 a change version applied (true on medcea_pa, false on
+#             medcea_pa2: superseded, the new grants, role_widening's digest, applied
+#             recorded); P41 the PRE/POST asserts refuse a file of another version
+#             (forward and revert), a skipped skeleton accept and a withdrawn version;
+#             P39 the revert to the previous version (its grants back, partial_apply
+#             {reverting} then {reverted} and applied {reverted_from}, one_open);
+#             P40 a skeleton version (accepted, reviewed_by_version, apply_started);
+#             P42 a rollback to the confirmed version 1 (its rows read in SQL, the open
+#             draft withdrawn); P44 confirmed by another qa person only; P45 a forged
+#             checker verdict refused by cli.py --staged check; P46 008c re-run twice
 #   cycle     false -> A; B0 vs A differs only by the declared delta; false = A;
 #             true twice equal; false = A; true = the earlier true
 #   logins M  every svc_* role and rr_admin_login logs in over TCP with its password
@@ -98,7 +110,7 @@
 set -uo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
-    sed -n '2,94p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,106p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -398,6 +410,7 @@ pa_bundle() {
 
 cmd_policy_apply() {  # IAM 4.2a, after policy (a fresh database: medcea_pa, medcea_pa2)
     policy_apply_steps
+    policy_apply_45   # IAM 4.5, on the same two databases (version 1 applied on each)
     # whatever the steps did: their applies ran IAM_DB_ROLES=false, and role LOGIN and
     # membership are cluster-wide, so medcea_db's mode goes back to the roles (as fresh
     # does); and the two databases go, or access_svc cannot be dropped by purge-access
@@ -491,7 +504,640 @@ SQL
     [[ $rc -eq 0 && "$ev" == "1:bootstrap:applied" ]] \
         && pass P22 "the bootstrap bundle under IAM_DB_ROLES=true: committed, version 1 applied" \
         || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P22 "the bootstrap under true: exit $rc, versions $ev"; }
+    # apply.sh files bootstrap_applied after the COMMIT; without it new_draft refuses (P43)
+    out="$(fx medcea_pa2 -q -tA -v ON_ERROR_STOP=1 2>&1 <<'SQL'
+SELECT medcea_auth._set_internal_actor('system:apply') \g /dev/null
+SELECT iam_policy._record('bootstrap_applied', '{"version": 1, "kind": "bootstrap", "os_user": "iam-db-fixture", "changed": [], "deferred": []}'::jsonb) \g /dev/null
+SELECT (SELECT count(*) FROM iam_policy.audit_versions()) || '|' || (SELECT ok FROM iam_policy.verify_chain())::text;
+SQL
+)"
+    [[ "$out" == "0|true" ]] && pass P22 "bootstrap_applied recorded on medcea_pa2: audit_versions() empty, the chain verifies" \
+        || fail P22 "bootstrap_applied on medcea_pa2 (findings|chain): $out"
     rm -rf "$dir"
+}
+
+# ── IAM 4.5: apply for real, the database half (design §14.8.11 P38-P42, P44-P46) ──────
+# The fixture has no Keycloak, realm key or proxies: approvals carry hand-set claims and an
+# unsigned JWS (the database compares, apply.sh verifies), and the PRE/POST are apply.sh's
+# own (apply_check.py bundle-sql, pa45_ship), run through the real dba_policy_bundle with
+# DBA_STAGED: grants, asserts and functions
+# compiled by cli.py --staged from the version's staged host file (sha256 pinned, under
+# this run's verified lock).
+
+# pa45_py CMD ARGS — the Python half: pick (a cell of a role nobody holds that loses a
+# table privilege and passes the checker), forge (a cell the checker refuses), skel (a
+# prose-only skeleton change: another digest, the same compile), stage (a version
+# document from the database → the staged host file, as apply.sh's step 5 writes it,
+# body-bound; prints its sha256, header version and entries digest), shipstage (bundle-sql's
+# stage directory and version document from a staged file), rollback-doc
+pa45_py() {
+    python3 - "$REPO_ROOT" "$@" <<'PY'
+import copy, datetime, json, os, sys
+sys.path.insert(0, sys.argv[1] + "/apps/iam")
+from compiler import grants, invariants, model, source
+
+TAG = " (iam-db-fixture: a skeleton version)"
+
+
+def alt():
+    """factory() with one prose change: another skeleton digest, the same compile."""
+    d = source.factory()
+    r = sorted(d["roles"], key=source._bytes)[0]
+    d["roles"][r]["description"] = (d["roles"][r].get("description") or "") + TAG
+    return d
+
+
+def cells(d):
+    return {(r, g): c for g, row in d["matrix"].items() for r, c in row.items()}
+
+
+def table_privs(p, role):
+    return {(o, priv) for (g, k, o, priv) in grants.privileges(p) if g == role and k == "table"}
+
+
+def pick(earlier):
+    """role, group, save_entry levels after, the db role, and a table privilege it loses: one
+    level less on an unconstrained cell, roles nobody on an install holds first
+    (maintenance, qc; owner decision 11), passing the checker. `earlier`:
+    role/group=<levels json> changes already in the version it is drafted on."""
+    d = source.factory()
+    for e in earlier:
+        rg, _, lv = e.partition("=")
+        r, g = rg.split("/")
+        lv = list(json.loads(lv))
+        if lv:
+            d["matrix"][g][r] = lv
+        else:
+            del d["matrix"][g][r]
+    p0 = model.Policy(d)
+    done = {e.partition("=")[0] for e in earlier}
+    for role in ["maintenance", "qc"] + [r for r in d["roles"] if r not in ("maintenance", "qc")]:
+        db_role = d["roles"][role].get("db_role", "rr_" + role)
+        before = table_privs(p0, db_role)
+        for (r, g), c in sorted(cells(d).items()):
+            if r != role or not isinstance(c, list) or f"{r}/{g}" in done:
+                continue
+            for lvl in c:
+                d2 = copy.deepcopy(d)
+                rest = [x for x in c if x != lvl]
+                if rest:
+                    d2["matrix"][g][r] = rest
+                else:
+                    del d2["matrix"][g][r]
+                p2 = model.Policy(d2)
+                if invariants.check(p2)[0]:
+                    continue
+                lost = sorted(before - table_privs(p2, db_role))
+                if lost:
+                    print("\t".join([r, g, json.dumps({x: None for x in rest}), db_role, lost[0][0], lost[0][1]]))
+                    return
+    sys.exit("no unconstrained cell loses a table privilege without failing the checker")
+
+
+def forge():
+    d = source.factory()
+    for g in ("iam_policy", "iam_users"):
+        for r in ("admin", "qa", "operator"):
+            d2 = copy.deepcopy(d)
+            d2["matrix"].setdefault(g, {})[r] = ["R", "C", "U", "A"]
+            if invariants.check(model.Policy(d2))[0]:
+                print("\t".join([r, g, json.dumps({x: None for x in "RCUA"})]))
+                return
+    sys.exit("no cell the checker refuses")
+
+
+def stage(doc_path, out, data_kind):
+    with open(doc_path) as f:
+        doc = json.load(f)
+    state = dict(doc, state=f"version-{doc['version']}")
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    text = source.host_file_text(state, "unknown", now, data=alt() if data_kind == "alt" else source.factory())
+    exp, dropped = source.expected_body(state)
+    body = source.parse_body_header(text)
+    if source.body_digest(exp) != body["body_digest"] or dropped != body["dropped"]:
+        sys.exit("internal: the staged file is not the version's rows")
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    head = source.parse_header(text)
+    print("\t".join([source.file_sha256(out), str(head["version"]), head["entries_digest"]]))
+
+
+def rollback_doc(k_doc, next_v, out):
+    with open(k_doc) as f:
+        k = json.load(f)
+    acc = k["accepted"]
+    groups = sorted(acc["body"].get("resource_groups") or {}, key=source._bytes)
+    roles = sorted(acc["body"].get("roles") or {}, key=source._bytes)
+    doc = {"version": int(next_v), "kind": "rollback", "groups": groups, "roles": roles,
+           "entries": k["entries"], "waivers": k["waivers"], "accepted": acc,
+           "entries_digest": source.entries_digest("rollback", groups, roles, k["entries"], k["waivers"])}
+    with open(out, "w") as f:
+        json.dump(doc, f)
+
+
+def shipstage(kind, d, path, dd, *extra):
+    """stage.json, the staged (or prev.yaml) file and the version document for bundle-sql."""
+    import shutil
+    text = open(path, encoding="utf-8").read()
+    h = source.parse_header(text)
+    os.makedirs(os.path.join(d, "staged"), mode=0o700)
+    meta = {"version": int(h["version"]), "kind": kind, "entries_digest": h["entries_digest"],
+            "skeleton_digest": h["skeleton_digest"]}
+    doc = {"version": {"version": int(h["version"]), "diff_digest": dd, "skeleton_digest": h["skeleton_digest"]}}
+    if kind == "revert":
+        shutil.copy(path, os.path.join(d, "prev.yaml"))
+        meta = {"version": int(extra[0]), "prev_version": int(h["version"]), "prev_entries_digest": h["entries_digest"]}
+    else:
+        shutil.copy(path, os.path.join(d, "staged", "policy-applied.yaml"))
+    if kind == "skeleton":
+        sd, bodyf = extra
+        doc["version"]["skeleton_digest"] = sd
+        doc["skeletons"] = {sd: {"body": json.load(open(bodyf)), "git_commit": "iam-db-fixture"}}
+    if kind == "rollback":
+        meta.update(rollback_of=int(extra[0]), prev_version=int(extra[1]))
+    with open(os.path.join(d, "stage.json"), "w") as f:
+        json.dump(meta, f)
+    with open(os.path.join(d, "doc.json"), "w") as f:
+        json.dump(doc, f)
+
+
+cmd, args = sys.argv[2], sys.argv[3:]
+if cmd == "pick":
+    pick(args)
+elif cmd == "forge":
+    forge()
+elif cmd == "skel":
+    s = source.skeleton(alt())
+    print(json.dumps({"digest": source.skeleton_digest(s), "body": json.loads(source.canonical(s))}, sort_keys=True))
+elif cmd == "stage":
+    stage(*args)
+elif cmd == "rollback-doc":
+    rollback_doc(*args)
+elif cmd == "shipstage":
+    shipstage(*args)
+else:
+    sys.exit(f"pa45_py: {cmd}?")
+PY
+}
+
+# pa45_q DB — SQL on stdin, one psql session, stops at the first error (its output on stdout)
+pa45_q() { fx "$1" -q -tA -v ON_ERROR_STOP=1 2>&1; }
+
+# pa45_doc DB V OUT — version V as the state document shows a version (rows in byte order,
+# waivers without their version), with the skeleton it applies under: a skeleton
+# version's proposed one, else the accepted one
+pa45_doc() {
+    pa45_q "$1" > "$3" <<SQL
+SELECT json_build_object('version', v.version, 'kind', v.kind, 'entries_digest', v.entries_digest,
+       'groups', to_json(v.groups), 'roles', to_json(v.roles),
+       'entries', coalesce((SELECT json_agg(json_build_object('role', e.role, 'group_code', e.group_code, 'level', e.level::text,
+                                                          'constraint_name', e.constraint_name)
+                                   ORDER BY e.role COLLATE "C", e.group_code COLLATE "C", e.level::text COLLATE "C")
+                              FROM iam_policy.entry e WHERE e.version = v.version), '[]'),
+       'waivers', coalesce((SELECT json_agg(to_jsonb(w) - 'version' ORDER BY w.id COLLATE "C")
+                              FROM iam_policy.waiver w WHERE w.version = v.version), '[]'),
+       'accepted', (SELECT json_build_object('digest', s.digest, 'body', s.body) FROM iam_policy.skeleton s
+                     WHERE s.digest = CASE WHEN v.kind = 'skeleton' THEN v.skeleton_digest ELSE iam_policy._accepted() END))
+  FROM iam_policy.version v WHERE v.version = $2;
+SQL
+}
+
+# pa45_stage DB V NAME [alt] — the staged host file of version V in $PA45/NAME.yaml:
+# sets ST_FILE, ST_SHA, ST_VER (its header's version) and ST_ED (its entries digest)
+pa45_stage() {
+    local out
+    ST_FILE="$PA45/$3.yaml"; ST_SHA=""; ST_VER=""; ST_ED=""
+    pa45_doc "$1" "$2" "$PA45/$3.json" || { fail P38 "version $2 on $1: $(head -c 300 "$PA45/$3.json")"; return 1; }
+    out="$(pa45_py stage "$PA45/$3.json" "$ST_FILE" "${4:-factory}" 2>&1)" || { fail P38 "staging version $2: $out"; return 1; }
+    IFS=$'\t' read -r ST_SHA ST_VER ST_ED <<<"$out"
+}
+
+# pa45_bundle DB PRE POST FILE SHA [MODE] — apply.sh's bundle (step 7): system:apply,
+# compiled from FILE (DBA_STAGED, pinned by SHA, under this run's lock); IAM_DB_ROLES=MODE
+pa45_bundle() {
+    load_passwords
+    IAM_DB_ROLES="${6:-true}" CEA_DB="$1" DBA_ACTOR=system:apply DBA_SERVICE_LOGINS="" \
+        DBA_STAGED="$4" DBA_STAGED_BY="$MEDCEA_LOCK_HELD" DBA_STAGED_SHA256="$5" \
+        dba_policy_bundle "$FX_NS" "$FX_POD" auto "$2" "$3" --with-functions 2>&1
+}
+
+pa45_uuid() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+pa45_dd() { printf 'iam-db-fixture %s %s' "$1" "$PA45_H" | sha256sum | cut -d' ' -f1; }   # a diff digest per name
+pa45_claims() {  # SUB PERSON — a policy-host qa token's claims, issued two minutes ago
+    printf '{"typ":"Bearer","azp":"policy","aud":"medcea-api","sub":"%s","person_id":"%s","preferred_username":"test-%s","groups":["qa"],"iat":%s,"exp":%s,"jti":"%s"}' \
+        "$1" "$2" "$2" "$PA45_IAT" "$((PA45_IAT + 300))" "$(pa45_uuid)"
+}
+# pa45_token SUB PERSON PATH — PostgREST's session for that token: claims, the
+# Authorization header (an unsigned JWS of the claims), pre_request
+pa45_token() {
+    local c jws
+    c="$(pa45_claims "$1" "$2")"
+    jws="$(python3 -c 'import base64,sys; b=lambda s: base64.urlsafe_b64encode(s.encode()).decode().rstrip("="); print(b("{\"alg\":\"RS256\",\"kid\":\"iam-db-fixture\"}") + "." + b(sys.argv[1]) + ".c2ln")' "$c")"
+    cat <<SQL
+SET SESSION AUTHORIZATION authenticator;
+SET ROLE anon;
+SELECT set_config('request.jwt.claims', '$c', true), set_config('request.method', 'POST', true),
+       set_config('request.path', '$3', true), set_config('request.headers', '{"authorization": "Bearer $jws"}', true) \\g /dev/null
+SELECT medcea_auth.pre_request() \\g /dev/null
+SQL
+}
+pa45_iam() {  # SUB PERSON ROLE — iam-api (iam_svc) acting for that person
+    printf 'SET SESSION AUTHORIZATION iam_svc;\n'
+    echo "SELECT medcea_auth.set_actor('$1', '$2', 'test-$2', '$3') \\g /dev/null"
+}
+
+# pa45_change DB ROLE GROUP LEVELS DD — admin A drafts from the applied version, saves one
+# cell, submits; qa Q approves it on diff digest DD: prints the version number
+pa45_change() {
+    local out v ed acc
+    out="$(pa45_q "$1" <<SQL
+BEGIN;
+$(pa45_iam "$PA45_A" "$PA45_PA" admin)
+SELECT iam_policy.new_draft('applied', 'iam-db-fixture: IAM 4.5', $PA45_IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, '$2', '$3', '$4'::jsonb, 'iam-db-fixture: IAM 4.5',
+                             '{"ok": true, "errors": [], "checker_digest": "iam-db-fixture"}'::jsonb, $PA45_IAT) \\g /dev/null
+SELECT iam_policy.submit(:d, 'iam-db-fixture: IAM 4.5', $PA45_IAT) AS ed \\gset
+COMMIT;
+RESET ROLE;
+RESET SESSION AUTHORIZATION;
+SELECT 'v|' || :d || '|' || :'ed' || '|' || iam_policy._accepted();
+SQL
+)" || { echo "$out" | grep -m3 ERROR >&2; return 1; }
+    IFS='|' read -r _ v ed acc <<<"$(grep '^v|' <<<"$out")"
+    out="$(pa45_q "$1" <<SQL
+BEGIN;
+$(pa45_token "$PA45_Q" "$PA45_PQ" /rpc/approve_policy)
+SELECT medcea.approve_policy($v, 'iam-db-fixture note', '$ed', '$5', '$acc') \\g /dev/null
+COMMIT;
+SQL
+)" || { echo "$out" | grep -m3 ERROR >&2; return 1; }
+    echo "$v"
+}
+
+# The bundles are apply.sh's own (apply_check.py bundle-sql, design §14.8.4 step 7, §14.8.6,
+# §14.8.7 step 7): pa45_ship builds the stage directory and version document bundle-sql
+# reads (stage.json, staged/policy-applied.yaml, prev.yaml; {version, skeletons}) from a
+# staged file, runs it, and leaves OUT.pre.sql / OUT.post.sql. A negative case changes one
+# input of that SQL (another file's entries digest, the accept left out), never the asserts.
+# pa45_ship KIND OUT FILE DD [K APPLIED | SD BODY_FILE | REVERTED] — BY is $PA45_BY
+pa45_ship() {
+    local kind="$1" out="$2" st="$2.stage" why
+    rm -rf "$st"
+    pa45_py shipstage "$kind" "$st" "$3" "${@:4}" || return 1
+    why=()
+    if [[ "$kind" == rollback || "$kind" == revert ]]; then
+        printf 'iam-db-fixture: %s' "$kind" > "$st/why"
+        why=(--reason-file "$st/why")
+        [[ "$kind" == revert ]] && { echo iam-db-fixture > "$st/failed"; why+=(--failed "$st/failed"); }
+    fi
+    python3 "$REPO_ROOT/apps/iam/apply_check.py" bundle-sql --kind "$kind" --stage "$st" --doc "$st/doc.json" \
+        --by-sub "${PA45_BY%%|*}" --by-person "${PA45_BY#*|}" --log iam-db-fixture --commit iam-db-fixture \
+        "${why[@]}" --out "$st/out" || return 1
+    cp "$st/out/pre.sql" "$out.pre.sql"
+    cp "$st/out/post.sql" "$out.post.sql"
+}
+
+# pa45_forward OUT V FILE DD [WANT] — version V's bundle (change), staged from FILE; WANT
+# replaces the staged entries digest PRE asserts (a stage of another version's file)
+pa45_forward() {
+    PA45_BY="$PA45_A|$PA45_PA" pa45_ship change "$1" "$3" "$4" || return 1
+    [[ -z "${5:-}" ]] || sed -i "s/^\\\\set want_entries '[0-9a-f]*'\$/\\\\set want_entries '$5'/" "$1.pre.sql"
+}
+# pa45_forward_skel OUT FILE DD SD BODY_FILE [no-accept] — a skeleton version's bundle;
+# no-accept drops the _accept_skeleton/_sync_skeleton lines, so its assert must refuse
+pa45_forward_skel() {
+    PA45_BY="$PA45_A|$PA45_PA" pa45_ship skeleton "$1" "$2" "$3" "$4" "$5" || return 1
+    [[ "${6:-}" != no-accept ]] || sed -i '/iam_policy\._accept_skeleton(\|iam_policy\._sync_skeleton(/d' "$1.pre.sql"
+}
+# pa45_revert OUT V PREV_FILE — the revert of version V to the version in PREV_FILE
+pa45_revert() { PA45_BY="$PA45_A|$PA45_PA" pa45_ship revert "$1" "$3" - "$2"; }
+# pa45_rollback OUT K APPLIED FILE — the rollback to K staged in FILE, as qa Q2
+pa45_rollback() { PA45_BY="$PA45_Q2|$PA45_PQ2" pa45_ship rollback "$1" "$4" - "$2" "$3"; }
+
+# pa45_record DB EVENT PAYLOAD_JSON — apply.sh's record after the bundle (system:apply)
+pa45_record() {
+    pa45_q "$1" <<SQL
+BEGIN;
+SELECT medcea_auth._set_internal_actor('system:apply') \\g /dev/null
+SELECT iam_policy._record('$2', '$3'::jsonb) \\g /dev/null
+COMMIT;
+SQL
+}
+
+# pa45_has DB ROLE OBJECT PRIV — has_table_privilege, t or f
+pa45_has() { pa45_q "$1" <<<"SELECT has_table_privilege('$2', '$3', '$4');"; }
+
+# pa45_status DB — every version as V:kind:status, in order
+pa45_status() { pa45_q "$1" <<<"SELECT string_agg(version || ':' || kind || ':' || status, ' ' ORDER BY version) FROM iam_policy.version;"; }
+
+# pa45_routes FILE SHA — the routes digest compiled from a staged file
+pa45_routes() {
+    MEDCEA_POLICY_STAGED_SHA256="$2" python3 "$CLI" --staged "$1" compile routes \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])'
+}
+
+policy_apply_45() {
+    step "IAM 4.5: change, revert, skeleton and rollback bundles through DBA_STAGED (fresh databases)"
+    # DBA_STAGED is honoured only under this run's verified lock (_dba_src): take it here,
+    # in this shell, for the 4.5 steps only, unless a parent already holds it
+    local took=false
+    if [[ -z "${MEDCEA_LOCK_HELD:-}" ]]; then
+        if ! ( exec 8>>"$MEDCEA_LOCK_FILE" && flock -n 8 ); then
+            fail P38 "the deploy lock is held by another run: the staged bundles need it (DBA_STAGED_BY)"
+            return
+        fi
+        medcea_lock
+        took=true
+    fi
+    if medcea_lock_verify; then
+        PA45="$(mktemp -d "$IAMTEST_DIR/pa45-XXXXXX")"
+        policy_apply_45_steps
+        rm -rf "$PA45"
+    else
+        fail P38 "medcea_lock_verify failed: this run does not hold the deploy lock"
+    fi
+    if [[ "$took" == true ]]; then
+        exec 9>&-
+        unset MEDCEA_LOCK_HELD
+    fi
+}
+
+policy_apply_45_steps() {
+    local db=medcea_pa out rc ok c1 c2 s r f snap1 snap2 ev acc sd hd v
+    local r1 g1 l1 dbr1 obj1 priv1 r2 g2 l2 dbr2 obj2 priv2 c1_file c1_sha c1_ed c2_file c2_sha c2_ed
+    local h; h="$(openssl rand -hex 3)"; PA45_H="$h"
+    PA45_A="$(pa45_uuid)"; PA45_Q="$(pa45_uuid)"; PA45_Q2="$(pa45_uuid)"
+    PA45_PA="p-pa45-a-$h"; PA45_PQ="p-pa45-q-$h"; PA45_PQ2="p-pa45-q2-$h"
+    PA45_IAT=$(( $(date +%s) - 120 ))   # a token issued two minutes ago
+    out="$(pa45_py pick 2>&1)" || { fail P38 "no cell to change: $out"; return; }
+    IFS=$'\t' read -r r1 g1 l1 dbr1 obj1 priv1 <<<"$out"
+    out="$(pa45_py pick "$r1/$g1=$l1" 2>&1)" || { fail P39 "no second cell to change: $out"; return; }
+    IFS=$'\t' read -r r2 g2 l2 dbr2 obj2 priv2 <<<"$out"
+    echo "        change 1: $r1/$g1 -> $l1 ($dbr1 loses $priv1 on $obj1); change 2: $r2/$g2 -> $l2 ($dbr2 loses $priv2 on $obj2)"
+
+    # version 1 confirmed by qa Q (its recorded person is the bootstrap's): a rollback target
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+$(pa45_token "$PA45_Q" "$PA45_PQ" /rpc/confirm_policy)
+SELECT medcea.confirm_policy(1, 'iam-db-fixture', 'I did not run apply.sh for this version.') \\g /dev/null
+COMMIT;
+SQL
+)" || { echo "$out" | grep -m3 ERROR; fail P42 "qa confirms version 1 on $db"; return; }
+
+    # P38 — a change version committed through the bundle (IAM_DB_ROLES=true)
+    [[ "$(pa45_has "$db" "$dbr1" "$obj1" "$priv1")" == t ]] || { fail P38 "$dbr1 lacks $priv1 on $obj1 before the change: the probe proves nothing"; return; }
+    c1="$(pa45_change "$db" "$r1" "$g1" "$l1" "$(pa45_dd c1)")" || { fail P38 "drafting and approving change 1 on $db"; return; }
+    pa45_stage "$db" "$c1" c1 || return
+    c1_file="$ST_FILE"; c1_sha="$ST_SHA"; c1_ed="$ST_ED"
+    pa45_forward "$PA45/c1" "$c1" "$c1_file" "$(pa45_dd c1)" || { fail P38 "bundle-sql for change $c1"; return; }
+    out="$(pa45_bundle "$db" "$PA45/c1.pre.sql" "$PA45/c1.post.sql" "$c1_file" "$c1_sha")"; rc=$?
+    [[ $rc -eq 0 ]] || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P38 "the change bundle (true) exit $rc"; return; }
+    out="$(pa45_status "$db")"
+    [[ "$out" == "1:bootstrap:superseded $c1:change:applied" ]] && pass P38 "true: change $c1 applied by the bundle, version 1 superseded" \
+        || fail P38 "true: versions after the change bundle: $out"
+    [[ "$(pa45_has "$db" "$dbr1" "$obj1" "$priv1")" == f ]] && pass P38 "true: the new matrix's grants in the catalog ($dbr1 lost $priv1 on $obj1)" \
+        || fail P38 "true: $dbr1 still holds $priv1 on $obj1 after the change"
+    out="$(pa45_q "$db" <<<"SELECT obj_description('medcea_auth.role_widening(text,text)'::regprocedure, 'pg_proc');")"
+    [[ "$out" == "policy $(pa45_routes "$c1_file" "$c1_sha")" ]] && pass P38 "true: role_widening()'s comment is the staged routes digest" \
+        || fail P38 "true: role_widening()'s comment: $out"
+    out="$(pa45_record "$db" applied "{\"version\": $c1, \"kind\": \"change\"}" && pa45_q "$db" <<SQL
+SELECT (SELECT string_agg(event, ',' ORDER BY event_id) FROM iam_policy.history WHERE version = $c1 AND event <> 'status_changed')
+       || '|' || (SELECT count(*) FROM iam_policy.audit_versions()) || '|' || (SELECT ok FROM iam_policy.verify_chain())::text;
+SQL
+)"
+    [[ "$out" == "draft_created,entry_saved,submitted,approved,apply_started,applied|0|true" ]] \
+        && pass P38 "true: applied recorded; audit_versions() empty, the chain verifies" || fail P38 "true: after the record (events|findings|chain): $out"
+
+    # P41 — the forward PRE refuses a staged file of another version (the whole bundle rolls back)
+    c2="$(pa45_change "$db" "$r2" "$g2" "$l2" "$(pa45_dd c2)")" || { fail P41 "drafting and approving change 2 on $db"; return; }
+    pa45_stage "$db" "$c2" c2 || return
+    c2_file="$ST_FILE"; c2_sha="$ST_SHA"; c2_ed="$ST_ED"
+    pa45_forward "$PA45/c2-stale" "$c2" "$c2_file" "$(pa45_dd c2)" "$c1_ed" || { fail P41 "bundle-sql for change $c2"; return; }
+    out="$(pa45_bundle "$db" "$PA45/c2-stale.pre.sql" "$PA45/c2-stale.post.sql" "$c1_file" "$c1_sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"does not store the entries of the staged file"* && "$(pa45_status "$db")" == *"$c1:change:applied $c2:change:approved" ]] \
+        && pass P41 "forward: a staged file of another version refused by PRE, nothing applied" \
+        || fail P41 "forward with version $c1's file: exit $rc, versions $(pa45_status "$db")"
+
+    # change 2 applied, then the revert (P39) to change 1
+    pa45_forward "$PA45/c2" "$c2" "$c2_file" "$(pa45_dd c2)" || { fail P39 "bundle-sql for change $c2"; return; }
+    out="$(pa45_bundle "$db" "$PA45/c2.pre.sql" "$PA45/c2.post.sql" "$c2_file" "$c2_sha")"; rc=$?
+    [[ $rc -eq 0 && "$(pa45_has "$db" "$dbr2" "$obj2" "$priv2")" == f ]] && pass P39 "change $c2 applied ($dbr2 lost $priv2 on $obj2)" \
+        || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P39 "the change 2 bundle exit $rc"; return; }
+    # P41 — the revert's PRE refuses a file of another version than the previous one
+    pa45_revert "$PA45/rv-wrong" "$c2" "$c2_file" || { fail P41 "bundle-sql --kind revert"; return; }
+    out="$(pa45_bundle "$db" "$PA45/rv-wrong.pre.sql" "$PA45/rv-wrong.post.sql" "$c2_file" "$c2_sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"did not supersede version $c2"* && "$(pa45_status "$db")" == *"$c1:change:superseded $c2:change:applied" ]] \
+        && pass P41 "revert: a staged file of another version refused by PRE, nothing reverted" \
+        || fail P41 "revert with version $c2's file: exit $rc, versions $(pa45_status "$db")"
+    # P39 — the previous version's file built from the database (as from the state document)
+    pa45_stage "$db" "$c1" c1-prev || return
+    [[ "$ST_VER" == "$c1" ]] || { fail P39 "the previous version's file is version $ST_VER"; return; }
+    pa45_revert "$PA45/rv" "$c2" "$ST_FILE" || { fail P39 "bundle-sql --kind revert"; return; }
+    out="$(pa45_bundle "$db" "$PA45/rv.pre.sql" "$PA45/rv.post.sql" "$ST_FILE" "$ST_SHA")"; rc=$?
+    [[ $rc -eq 0 ]] || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P39 "the revert bundle exit $rc"; return; }
+    out="$(pa45_status "$db")"
+    [[ "$out" == *"$c1:change:applied $c2:change:approved" ]] && pass P39 "the revert: change $c2 approved again, change $c1 applied" \
+        || fail P39 "versions after the revert: $out"
+    [[ "$(pa45_has "$db" "$dbr2" "$obj2" "$priv2")" == t && "$(pa45_has "$db" "$dbr1" "$obj1" "$priv1")" == f ]] \
+        && pass P39 "the previous version's grants back ($dbr2 holds $priv2 on $obj2 again; $dbr1 still without $priv1)" \
+        || fail P39 "grants after the revert are not version $c1's"
+    out="$(pa45_record "$db" partial_apply "{\"version\": $c2, \"outcome\": \"reverted\", \"failed_targets\": [\"iam-db-fixture\"], \"attempts\": 3}" \
+           && pa45_record "$db" applied "{\"version\": $c1, \"reverted_from\": $c2, \"resumed\": false}" && pa45_q "$db" <<SQL
+SELECT (SELECT h.event || ':' || coalesce(h.payload ->> 'outcome', '') || ':' || coalesce(h.payload ->> 'reverted_version', '')
+          FROM iam_policy.history h WHERE h.version = $c1 AND h.event = 'partial_apply' ORDER BY h.event_id DESC LIMIT 1)
+       || '|' || (SELECT h.event FROM iam_policy.history h WHERE h.version = $c1
+                   AND h.event IN ('apply_started', 'applied', 'bootstrap_applied', 'apply_reverted', 'partial_apply', 'apply_deferred')
+                 ORDER BY h.event_id DESC LIMIT 1)
+       || '|' || (SELECT string_agg(h.event, ',' ORDER BY h.event_id) FROM iam_policy.history h
+                   WHERE h.version = $c2 AND h.event IN ('apply_reverted', 'partial_apply'))
+       || '|' || (SELECT count(*) FROM iam_policy.audit_versions()) || '|' || (SELECT ok FROM iam_policy.verify_chain())::text;
+SQL
+)"
+    [[ "$out" == "partial_apply:reverting:$c2|applied|apply_reverted,partial_apply|0|true" ]] \
+        && pass P39 "partial_apply {reverting} under $c1, then {reverted} under $c2 and applied {reverted_from}: the latest apply event applied" \
+        || fail P39 "the revert's records (reverting|latest|$c2's|findings|chain): $out"
+    out="$(pa45_q "$db" <<SQL 2>&1
+BEGIN;
+$(pa45_iam "$PA45_A" "$PA45_PA" admin)
+SELECT iam_policy.new_draft('applied', 'iam-db-fixture', $PA45_IAT, '[]'::jsonb, '[]'::jsonb);
+ROLLBACK;
+SQL
+)"
+    [[ "$out" == *"version $c2 is still open"* ]] && pass P39 "new_draft refused while the reverted change is open (one_open)" \
+        || fail P39 "new_draft after the revert: ${out:0:300}"
+
+    # P41 — a version no longer approved at the FOR UPDATE re-read: withdrawn, then its bundle
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+$(pa45_iam "$PA45_A" "$PA45_PA" admin)
+SELECT iam_policy.withdraw($c2, 'iam-db-fixture: P41', $PA45_IAT) \\g /dev/null
+COMMIT;
+SQL
+)" || { echo "$out" | grep -m3 ERROR; fail P41 "withdrawing change $c2"; }
+    out="$(pa45_bundle "$db" "$PA45/c2.pre.sql" "$PA45/c2.post.sql" "$c2_file" "$c2_sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not approved any more"* && "$(pa45_status "$db")" == *"$c1:change:applied $c2:change:withdrawn" ]] \
+        && pass P41 "a version withdrawn before its bundle: refused at the FOR UPDATE re-read, nothing applied" \
+        || fail P41 "the withdrawn version's bundle: exit $rc, versions $(pa45_status "$db")"
+
+    # P40 — a skeleton version: proposed (system:apply), approved with the attestation, applied
+    out="$(pa45_py skel)" || { fail P40 "the skeleton change: $out"; return; }
+    sd="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["digest"])' "$out")"
+    python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["body"], sort_keys=True))' "$out" > "$PA45/skel-body.json"
+    acc="$(pa45_q "$db" <<<"SELECT iam_policy._accepted();")"
+    hd="$(pa45_dd skel)"
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+SELECT medcea_auth._set_internal_actor('system:apply') \\g /dev/null
+SELECT iam_policy._propose_skeleton('$sd', \$sk\$$(cat "$PA45/skel-body.json")\$sk\$::jsonb, 'iam-db-fixture',
+       '{"schema": 1, "kind": "skeleton", "skeleton": {"from": "$acc", "to": "$sd", "sections": []}, "cells": [],
+         "waivers": {"added": [], "removed": []}, "roles": {}, "system": {"added": [], "removed": []}}'::jsonb,
+       '$hd', '$PA45_A', '$PA45_PA', 'iam-db-fixture: P40') AS s \\gset
+COMMIT;
+SELECT 's|' || :s || '|' || entries_digest FROM iam_policy.version WHERE version = :s;
+SQL
+)" || { echo "$out" | grep -m3 ERROR; fail P40 "_propose_skeleton"; return; }
+    local s_ed; IFS='|' read -r _ s s_ed <<<"$(grep '^s|' <<<"$out")"
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+$(pa45_token "$PA45_Q" "$PA45_PQ" /rpc/approve_policy)
+SELECT medcea.approve_policy($s, 'I did not run apply.sh --propose-skeleton for this version. iam-db-fixture',
+       '$s_ed', '$hd', '$sd') \\g /dev/null
+COMMIT;
+SQL
+)" || { echo "$out" | grep -m3 ERROR; fail P40 "qa approves skeleton version $s"; return; }
+    pa45_stage "$db" "$s" skel alt || return
+    # P41 — a skeleton version's bundle without the accept: the skeleton assert refuses
+    pa45_forward_skel "$PA45/s-noaccept" "$ST_FILE" "$hd" "$sd" "$PA45/skel-body.json" no-accept || { fail P41 "bundle-sql --kind skeleton"; return; }
+    out="$(pa45_bundle "$db" "$PA45/s-noaccept.pre.sql" "$PA45/s-noaccept.post.sql" "$ST_FILE" "$ST_SHA")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"the accepted skeleton is not version ${s}'s"* && "$(pa45_q "$db" <<<"SELECT iam_policy._accepted();")" == "$acc" ]] \
+        && pass P41 "a skeleton version whose accept was skipped: refused, the accepted skeleton unchanged" \
+        || fail P41 "skeleton without the accept: exit $rc"
+    pa45_forward_skel "$PA45/s" "$ST_FILE" "$hd" "$sd" "$PA45/skel-body.json" || { fail P40 "bundle-sql --kind skeleton"; return; }
+    out="$(pa45_bundle "$db" "$PA45/s.pre.sql" "$PA45/s.post.sql" "$ST_FILE" "$ST_SHA")"; rc=$?
+    [[ $rc -eq 0 ]] || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P40 "the skeleton bundle exit $rc"; return; }
+    pa45_record "$db" applied "{\"version\": $s, \"kind\": \"skeleton\"}" >/dev/null || fail P40 "applied record of $s"
+    out="$(pa45_q "$db" <<SQL
+SELECT (iam_policy._accepted() = '$sd')::text
+       || '|' || (SELECT reviewed_by_version FROM iam_policy.skeleton WHERE digest = '$sd')
+       || '|' || (SELECT h.payload ->> 'skeleton_digest' = '$sd' FROM iam_policy.history h
+                   WHERE h.version = $s AND h.event = 'apply_started' ORDER BY h.event_id DESC LIMIT 1)::text
+       || '|' || (SELECT status FROM iam_policy.version WHERE version = $s);
+SQL
+)"
+    [[ "$out" == "true|$s|true|applied" ]] \
+        && pass P40 "skeleton version $s applied: accepted, reviewed_by_version $s, apply_started names its digest" \
+        || fail P40 "after the skeleton bundle (accepted|reviewed_by_version|apply_started|status): $out"
+
+    # P42 — a rollback to version 1 (a confirmed bootstrap, superseded) with a draft open
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+$(pa45_iam "$PA45_A" "$PA45_PA" admin)
+SELECT 'o|' || iam_policy.new_draft('applied', 'iam-db-fixture: P42', $PA45_IAT, '[]'::jsonb, '[]'::jsonb);
+COMMIT;
+SQL
+)" || { echo "$out" | grep -m3 ERROR; fail P42 "a draft to withdraw"; return; }
+    local o; o="$(grep '^o|' <<<"$out" | cut -d'|' -f2)"
+    v="$(pa45_q "$db" <<<"SELECT max(version) + 1 FROM iam_policy.version;")"
+    pa45_doc "$db" 1 "$PA45/k.json" && pa45_py rollback-doc "$PA45/k.json" "$v" "$PA45/r.json" \
+        || { fail P42 "the rollback's document"; return; }
+    out="$(pa45_py stage "$PA45/r.json" "$PA45/r.yaml" alt 2>&1)" || { fail P42 "staging the rollback: $out"; return; }
+    IFS=$'\t' read -r ST_SHA ST_VER ST_ED <<<"$out"
+    pa45_rollback "$PA45/r" 1 "$s" "$PA45/r.yaml" || { fail P42 "bundle-sql --kind rollback"; return; }
+    out="$(pa45_bundle "$db" "$PA45/r.pre.sql" "$PA45/r.post.sql" "$PA45/r.yaml" "$ST_SHA")"; rc=$?
+    [[ $rc -eq 0 ]] || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P42 "the rollback bundle exit $rc"; return; }
+    r="$v"
+    pa45_record "$db" applied "{\"version\": $r, \"kind\": \"rollback\", \"rollback_of\": 1}" >/dev/null || fail P42 "applied record of $r"
+    out="$(pa45_q "$db" <<SQL
+SELECT (SELECT status || ':' || kind || ':' || rollback_of || ':' || based_on FROM iam_policy.version WHERE version = $r)
+       || '|' || (NOT EXISTS ((SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = $r
+                               EXCEPT SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = 1)
+                              UNION ALL
+                              (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = 1
+                               EXCEPT SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = $r)))::text
+       || '|' || (SELECT status || ':' || withdrawn_by FROM iam_policy.version WHERE version = $o);
+SQL
+)"
+    [[ "$out" == "applied:rollback:1:$s|true|withdrawn:system:apply" ]] \
+        && pass P42 "rollback $r to version 1: applied, its rows version 1's (read in SQL), draft $o withdrawn by system:apply" \
+        || fail P42 "after the rollback bundle (status:kind:rollback_of:based_on|rows equal|draft): $out"
+
+    # P44 — the rollback is confirmed afterwards, never by the person apply.sh recorded
+    out="$(pa45_q "$db" <<SQL 2>&1
+BEGIN;
+$(pa45_token "$PA45_Q2" "$PA45_PQ2" /rpc/confirm_policy)
+SELECT medcea.confirm_policy($r, 'iam-db-fixture', 'I did not run apply.sh for this version.');
+ROLLBACK;
+SQL
+)"
+    [[ "$out" == *"recorded you as running"* ]] && pass P44 "confirm by the person apply.sh recorded: refused" \
+        || fail P44 "confirm by the recorded person: ${out:0:300}"
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+$(pa45_token "$PA45_Q" "$PA45_PQ" /rpc/confirm_policy)
+SELECT medcea.confirm_policy($r, 'iam-db-fixture', 'I did not run apply.sh for this version.') \\g /dev/null
+COMMIT;
+RESET ROLE;
+RESET SESSION AUTHORIZATION;
+SELECT (SELECT confirmed_by_person FROM iam_policy.version WHERE version = $r) || '|' || (SELECT count(*) FROM iam_policy.audit_versions())
+       || '|' || (SELECT ok FROM iam_policy.verify_chain())::text;
+SQL
+)"
+    [[ "$out" == *"$PA45_PQ|0|true" ]] && pass P44 "confirmed by another qa person; audit_versions() empty, the chain verifies" \
+        || fail P44 "confirm by another qa person (person|findings|chain): ${out:0:300}"
+
+    # P45 — the forged verdict: a submitted version whose saved verdict says ok, rows the checker refuses
+    out="$(pa45_py forge 2>&1)" || { fail P45 "$out"; return; }
+    local fr fg fl; IFS=$'\t' read -r fr fg fl <<<"$out"
+    out="$(pa45_q "$db" <<SQL
+BEGIN;
+$(pa45_iam "$PA45_A" "$PA45_PA" admin)
+SELECT iam_policy.new_draft('applied', 'iam-db-fixture: P45', $PA45_IAT, '[]'::jsonb, '[]'::jsonb) AS d \\gset
+SELECT iam_policy.save_entry(:d, '$fr', '$fg', '$fl'::jsonb, 'iam-db-fixture: P45',
+                             '{"ok": true, "errors": [], "checker_digest": "forged"}'::jsonb, $PA45_IAT) \\g /dev/null
+SELECT iam_policy.submit(:d, 'iam-db-fixture: P45', $PA45_IAT) \\g /dev/null
+COMMIT;
+RESET ROLE;
+RESET SESSION AUTHORIZATION;
+SELECT 'f|' || :d || '|' || (SELECT checker_verdict FROM iam_policy.version WHERE version = :d)::text;
+SQL
+)" || { echo "$out" | grep -m3 ERROR; fail P45 "submitting the forged version"; return; }
+    IFS='|' read -r _ f ok <<<"$(grep '^f|' <<<"$out")"
+    pa45_stage "$db" "$f" forged alt || return
+    out="$(MEDCEA_POLICY_STAGED_SHA256="$ST_SHA" python3 "$CLI" --staged "$ST_FILE" check 2>&1)"; rc=$?
+    [[ "$ok" == true && $rc -ne 0 && "$out" == *"FAIL:"* && "$(pa45_status "$db")" == *"$r:rollback:applied $f:change:submitted" ]] \
+        && pass P45 "version $f (checker_verdict true) fails cli.py --staged check before any bundle ($fr/$fg)" \
+        || fail P45 "the forged verdict: verdict $ok, check exit $rc, versions $(pa45_status "$db")"
+
+    # P46 — 008c re-run twice with change, skeleton and rollback versions present
+    cmd_apply true "$db"
+    snap1="$(CEA_DB="$db" policy_snapshot)" && snapshot_whole "$snap1" || { fail P46 "policy_snapshot failed"; return; }
+    ev="$(pa45_q "$db" <<<"SELECT max(event_id) FROM iam_policy.history;")"
+    cmd_apply true "$db"
+    snap2="$(CEA_DB="$db" policy_snapshot)" && snapshot_whole "$snap2" || { fail P46 "policy_snapshot failed after the re-run"; return; }
+    [[ "$snap1" == "$snap2" ]] && pass P46 "008c re-run with change, skeleton and rollback versions: catalog and versions unchanged" \
+        || { fail P46 "008c re-run changed the catalog or the versions:"; diff <(echo "$snap1") <(echo "$snap2") | head -20; }
+    out="$(pa45_q "$db" <<<"SELECT coalesce(string_agg(event, ','), '') FROM iam_policy.history WHERE event_id > $ev AND version IS NOT NULL;")"
+    [[ -z "$out" ]] && pass P46 "the re-run wrote no event under a version" || fail P46 "the re-run wrote: $out"
+
+    # P38 under IAM_DB_ROLES=false, on medcea_pa2 (version 1 applied there under true):
+    # approved on the token path while true, then the database flipped to false
+    db=medcea_pa2
+    c1="$(pa45_change "$db" "$r1" "$g1" "$l1" "$(pa45_dd pa2)")" || { fail P38 "drafting and approving the change on $db"; return; }
+    cmd_apply false "$db"
+    [[ "$(pa45_has "$db" "$dbr1" "$obj1" "$priv1")" == t ]] || { fail P38 "false: $dbr1 lacks $priv1 on $obj1 before the change"; return; }
+    pa45_stage "$db" "$c1" pa2 || return
+    pa45_forward "$PA45/pa2" "$c1" "$ST_FILE" "$(pa45_dd pa2)" || { fail P38 "bundle-sql for change $c1 ($db)"; return; }
+    out="$(pa45_bundle "$db" "$PA45/pa2.pre.sql" "$PA45/pa2.post.sql" "$ST_FILE" "$ST_SHA" false)"; rc=$?
+    [[ $rc -eq 0 ]] || { grep -E 'ERROR|DETAIL' <<<"$out" | head; fail P38 "the change bundle (false) exit $rc"; return; }
+    [[ "$(pa45_status "$db")" == "1:bootstrap:superseded $c1:change:applied" && "$(pa45_has "$db" "$dbr1" "$obj1" "$priv1")" == f ]] \
+        && pass P38 "false: change $c1 applied, version 1 superseded, $dbr1 lost $priv1 on $obj1" \
+        || fail P38 "false: versions $(pa45_status "$db")"
+    out="$(pa45_q "$db" <<<"SELECT obj_description('medcea_auth.role_widening(text,text)'::regprocedure, 'pg_proc');")"
+    [[ "$out" == "policy $(pa45_routes "$ST_FILE" "$ST_SHA")" ]] && pass P38 "false: role_widening()'s comment is the staged routes digest" \
+        || fail P38 "false: role_widening()'s comment: $out"
+    out="$(pa45_record "$db" applied "{\"version\": $c1, \"kind\": \"change\"}" && pa45_q "$db" <<<"SELECT count(*) FROM iam_policy.audit_versions();")"
+    [[ "$out" == 0 ]] && pass P38 "false: applied recorded, audit_versions() empty" || fail P38 "false: findings after the record: $out"
 }
 
 cmd_access() {  # MODE (after apply MODE)

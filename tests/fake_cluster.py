@@ -11,6 +11,9 @@ Installed as several names in one bin directory (symlinks); argv[0] says which:
   pgrep      prints the file $FAKE_PGREP (the wizard daemon's argv)
   sleep, fuser, loginctl, journalctl, sudo → nothing
 
+FAKE_HELM_FAIL=<release>[:n] (IAM 4.5, tests/test_apply.py): helm upgrade/install of
+<release> fails, the first n times only with :n (fault injection, offline only).
+
 FAKE_STATE (JSON: {"kind/name": object}) is the cluster; FAKE_LOG gets one JSON line per
 call: {"cmd", "argv", "write", "stdin" (sha256 of what it read, written_at redacted),
 "values" (sha256 of each helm --values file)}. A write is anything that would change the
@@ -355,6 +358,10 @@ def helm(args):
         i += 1
     if len(pos) > 1:
         chart = pos[1]
+    if helm_fails(rel, args[0]):
+        log("helm", args, False, values=digests)
+        print(f"Error: UPGRADE FAILED: {rel}: injected by FAKE_HELM_FAIL", file=sys.stderr)
+        return 1
     log("helm", args, True, values=digests)
     if args[0] == "uninstall":
         return 0
@@ -378,6 +385,32 @@ def helm(args):
         st["deployment/hub"] = {"kind": "Deployment", "metadata": {"name": "hub"}, "spec": {"template": {"metadata": {}}}}
     save(st)
     return 0
+
+
+def helm_fails(rel, verb):
+    """IAM 4.5's fault injection, offline only (design §14.8.11): FAKE_HELM_FAIL=<release>[:n]
+    fails the first n upgrades or installs of <release> (every one without :n); counted from
+    FAKE_LOG, so a retry sees its earlier attempts."""
+    spec = os.environ.get("FAKE_HELM_FAIL", "")
+    if verb == "uninstall" or not spec:
+        return False
+    name, _, n = spec.partition(":")
+    if name != rel:
+        return False
+    if not n:
+        return True
+    seen = 0
+    try:
+        with open(os.environ["FAKE_LOG"]) as f:
+            for line in f:
+                rec = json.loads(line)
+                a = rec.get("argv") or []
+                if rec.get("cmd") == "helm" and a[:1] in (["upgrade"], ["install"]) and \
+                        [x for x in a[1:] if not x.startswith("-")][:1] == [rel]:
+                    seen += 1
+    except (KeyError, OSError):
+        pass
+    return seen < int(n)
 
 
 def merge(a, b):

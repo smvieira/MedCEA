@@ -166,10 +166,14 @@ case "$_ST" in
   none)        warn "policy bootstrap waits for ./apps/database/deploy.sh (no migration 008c yet)" ;;
   unreachable) die "PostgreSQL is not Ready (the init above would have refused)" ;;
   version-*)
-    if [[ "$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("last_apply_event") or {}).get("event",""))' "$_PS_DIR/state.json")" == apply_started ]]; then
+    _LAE="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("last_apply_event") or {}).get("event",""))' "$_PS_DIR/state.json")"
+    if [[ "$_LAE" == apply_started ]]; then
       warn "version ${_ST#version-} was committed but its apply did not record its end: finishing it (apply.sh --resume)"
       MEDCEA_CONFIRMED=1 "$SCRIPT_DIR/apply.sh" --resume --by "${MEDCEA_POLICY_BOOTSTRAP_BY:-$ADMIN_USER}" \
         || die "the apply of version ${_ST#version-} is still not finished: ./apps/iam/apply.sh --resume --by <you>"
+    elif [[ "$_LAE" == partial_apply ]]; then
+      # IAM 4.5 (design §14.8.6, owner decision 9): a mixed or reverting outcome wants a person to look; never resumed here
+      warn "version ${_ST#version-} ended in partial_apply: ./apps/iam/apply.sh --resume --by <you>"
     fi
     log "  applied: ${_ST#version-} (./apps/iam/apply.sh --status)" ;;
   partial)     die "policy versions exist but none is applied: ./apps/iam/apply.sh --status" ;;

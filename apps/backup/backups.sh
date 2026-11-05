@@ -89,7 +89,7 @@ cmd_list() {
 cmd_verify() {
     need_dir
     folder_arg "${1:-}"
-    local f="$DIR/$FOLDER" listed actual
+    local f="$DIR/$FOLDER" listed actual head
     [[ -f "$f/SHA256SUMS" ]] || die "$FOLDER has no SHA256SUMS."
     echo "Checking $f against its SHA256SUMS..."
     (cd "$f" && sha256sum --quiet --strict -c SHA256SUMS) || die "$FOLDER: a file is missing or differs from the checksum written at backup time."
@@ -97,6 +97,10 @@ cmd_verify() {
     actual="$(cd "$f" && find db volumes -type f -print | LC_ALL=C sort)"
     [[ "$listed" == "$actual" ]] || die "$FOLDER: files present that SHA256SUMS does not list: $(comm -13 <(echo "$listed") <(echo "$actual") | tr '\n' ' ')"
     echo "OK: $FOLDER, $(grep -c . "$f/SHA256SUMS") files match the checksums written at backup time."
+    # IAM 4.5 (design §14.8.10): the access policy's chain head the job read before the dump
+    # (a folder from before 4.5 has no such line)
+    head="$(grep -m1 '^# policy chain head' "$f/MANIFEST" 2>/dev/null || true)"
+    echo "${head:-# policy chain head: not recorded (a backup from before IAM 4.5)}" | sed 's/^# //'
 }
 
 cmd_now() {
@@ -137,7 +141,9 @@ cmd_now() {
 cmd_restore_help() {
     need_dir
     folder_arg "${1:-}"
-    local f="$DIR/$FOLDER" ns="$NAMESPACE" db="$POSTGRES_DB" k="microk8s kubectl -n $NAMESPACE"
+    local f="$DIR/$FOLDER" ns="$NAMESPACE" db="$POSTGRES_DB" k="microk8s kubectl -n $NAMESPACE" head
+    head="$(grep -m1 '^# policy chain head' "$f/MANIFEST" 2>/dev/null | sed 's/^# //')" || true
+    head="${head:-policy chain head: not recorded (a backup from before IAM 4.5)}"
     # shellcheck disable=SC2016  # $(cat …), $POSTGRES_PASSWORD_FILE, $PV and $D are printed for the reader's shell or the pod's
     local pw='PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"'
     cat <<EOF
@@ -161,6 +167,11 @@ A. The platform database ($db)
   3. ./apps/database/deploy.sh   (migrations, grants and the role passwords of this config.env)
   4. $k scale deployment node-red scheduler monitor config-api dbmgmt access iam-api --replicas=1
      then ./health-check.sh (Access policy history must be OK: the restored hash chain verifies).
+  5. (IAM 4.5) Compare the chain with the head the backup recorded before its dump
+     ($head):
+       $k exec -i rdbms-postgresql-0 -- sh -c '$pw exec psql -X -U postgres -d $db -tA' <<<"SELECT (SELECT ok FROM iam_policy.verify_chain()), (SELECT hash FROM iam_policy.history WHERE event_id = <id>)"
+     verify_chain() must be true and event <id> must carry that hash: a chain that ends below it,
+     or holds another hash there, was cut or rewritten after the backup.
 
 B. Keycloak (accounts, roles, password hashes, clients)
   1. $k scale deployment keycloak --replicas=0

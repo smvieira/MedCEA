@@ -54,7 +54,12 @@
 #                _withdraw_open, submit's and save_entry's refusals and the whole-cell
 #                rule, new_draft's bases and merge, why_not as iam_svc, a stale
 #                skeleton proposal, a proposal widening the approver's own role, and
-#                iam_svc taking the version lock before save_entry
+#                iam_svc taking the version lock before save_entry.
+#                IAM 4.5, P42-P44 (--mode true): the rollback bundle's PRE (K's rows read
+#                in SQL, the open version withdrawn, an unconfirmed or withdrawn K
+#                refused), new_draft's guard on the apply events only (a seed fact or a
+#                skeleton accept no longer masks apply_started or partial_apply), and a
+#                rollback confirmed by another qa person, never the recorded one
 #   drift        an extra grant, a revoked one, an extra policy, a dropped trigger:
 #                each must make `grants --mode verify` fail
 #
@@ -75,7 +80,7 @@ set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,77p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -2668,10 +2673,10 @@ elif want access; then
 fi
 
 # ── policy (IAM Phase 4, slice 4.1: migration 008c) ─────────────────────────────
-# P1 reads the catalog (any namespace); P2-P37 (4.2a: P19-P26; 4.4: P27-P37) are write probes on medcea-iamtest, each
+# P1 reads the catalog (any namespace); P2-P44 (4.2a: P19-P26; 4.4: P27-P37; 4.5: P42-P44) are write probes on medcea-iamtest, each
 # in BEGIN … ROLLBACK, building version 1 inside the probe through the owner functions
 # (a reduced skeleton: the factory's role and group keys). The token probes (P7-P10,
-# P12, P20's applies, P27-P30, P31's approved versions, P35-P37) need IAM_DB_ROLES=true
+# P12, P20's applies, P27-P30, P31's approved versions, P35-P37, P42-P44) need IAM_DB_ROLES=true
 # (authenticator's memberships, pre_request's role); P26 needs IAM_DB_ROLES=false.
 if want policy && [[ "$MODE" != legacy ]]; then
     echo ""
@@ -3925,8 +3930,152 @@ SELECT 'CHECK|the lock held by this session', :'held'::boolean;
 SELECT 'CHECK|the cell saved', array_agg(level::text ORDER BY level) = '{R,X}'
   FROM iam_policy.entry WHERE version = :d AND role = 'qa' AND group_code = 'portal';
 SQL
+        # ── IAM 4.5: apply for real (design §14.8.3, §14.8.7, §14.8.11; the committed
+        # bundles, P38-P42, P45 and P46, are tests/iam-db-fixture.sh's policy-apply) ──
+        # applied_change — draft_chain's :d approved by Q and applied by system:apply (the
+        # bundle's _mark_applied: apply_started under :d, :v1 superseded), no record yet
+        applied_change() {
+            cat <<SQL
+$(draft_chain)
+$(qa_token "$QA_CLAIMS" POST /rpc/approve_policy)
+$(approve_sql)
+$(as_system system:apply)
+SELECT iam_policy._mark_applied(:d, '{"git_commit": "iam-db"}'::jsonb, 'iam-db', NULL, NULL, NULL) \\g /dev/null
+SQL
+        }
+        # later_events — what a deploy files under the applied version after the apply (the
+        # S-D4 mask): a seed fact (system:deploy) and a narrowing accepted (P_DG2)
+        later_events() {
+            as_system system:deploy
+            cat <<SQL
+SELECT iam_policy._record('account_seeded', \$j\$$SEED\$j\$::jsonb) \\g /dev/null
+SELECT iam_policy._accept_skeleton('$P_DG2', \$j\$$P_SKEL2\$j\$::jsonb, 'iam-db', NULL,
+                                   '{"narrowed": [], "unchanged": [], "reviewed_by_version": null}'::jsonb) \\g /dev/null
+SQL
+            clear_actor
+        }
+        # rollback_to K BASED_ON [CLAIMED_SUB CLAIMED_PERSON] — the rollback bundle's PRE and
+        # POST (§14.8.7 step 7) as SQL: the open version withdrawn, K's rows read in this
+        # transaction, :r applied and recorded
+        rollback_to() {
+            local by_sub=NULL by_person=NULL
+            [[ -n "${3:-}" ]] && by_sub="'$3'::uuid" && by_person="$(sqlq "$4")"
+            as_system system:apply
+            cat <<SQL
+SELECT iam_policy._withdraw_open('withdrawn by rollback to version ' || $1 || ': iam-db probe') \\g /dev/null
+SELECT iam_policy._build_version('rollback',
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('role', e.role, 'group_code', e.group_code, 'level', e.level::text,
+                                                  'constraint_name', e.constraint_name)), '[]')
+       FROM iam_policy.entry e WHERE e.version = $1),
+    (SELECT coalesce(jsonb_agg(to_jsonb(w) - 'version'), '[]') FROM iam_policy.waiver w WHERE w.version = $1),
+    $2, $1, 'iam-db rollback') AS r \\gset
+SELECT iam_policy._mark_applied(:r, '{"git_commit": "iam-db"}'::jsonb, 'iam-db', $by_sub, $by_person, NULL) \\g /dev/null
+SELECT iam_policy._record('applied', jsonb_build_object('version', :r, 'rollback_of', $1)) \\g /dev/null
+SQL
+            clear_actor
+        }
+        # P43 — new_draft's S-D4 guard reads the apply events only: a seed fact or a skeleton
+        # accept filed under the applied version no longer masks an unfinished apply
+        probe P43 "after applied, a seed fact and a skeleton accept: new_draft goes on (the control)" ok <<SQL
+$(build_v1)
+$(applied_change)
+SELECT iam_policy._record('applied', jsonb_build_object('version', :d)) \\g /dev/null
+$(later_events)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS d2 \\gset
+--CHECKS
+SELECT 'CHECK|account_seeded and skeleton_accepted filed under the applied change',
+       count(DISTINCT event) = 2 FROM iam_policy.history WHERE version = :d AND event IN ('account_seeded', 'skeleton_accepted');
+SELECT 'CHECK|a draft on the applied change', status = 'draft' AND based_on = :d FROM iam_policy.version WHERE version = :d2;
+SQL
+        probe P43 "after apply_started, a seed fact and a skeleton accept (the D1 mask)" "22023:is being applied (apply_started)" <<SQL
+$(build_v1)
+$(applied_change)
+$(later_events)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+        probe P43 "after partial_apply, then a seed fact" "22023:is being applied (partial_apply)" <<SQL
+$(build_v1)
+$(applied_change)
+SELECT iam_policy._record('partial_apply', jsonb_build_object('version', :d, 'outcome', 'mixed')) \\g /dev/null
+$(later_events)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb);
+SQL
+        # P42 — the rollback bundle's PRE: K's rows read in SQL, the open version withdrawn
+        probe P42 "a rollback to a confirmed bootstrap: K's rows read in SQL, an open draft withdrawn by system:apply" ok <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.') \\g /dev/null
+$(applied_change)
+SELECT iam_policy._record('applied', jsonb_build_object('version', :d)) \\g /dev/null
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.new_draft('applied', 'iam-db probe', $IAT, '[]'::jsonb, '[]'::jsonb) AS o \\gset
+$(rollback_to :v1 :d)
+--CHECKS
+SELECT 'CHECK|applied, kind rollback of v1, based on the change', status = 'applied' AND kind = 'rollback' AND rollback_of = :v1
+          AND based_on = :d FROM iam_policy.version WHERE version = :r;
+SELECT 'CHECK|its entries are v1''s (EXCEPT both ways empty)', NOT EXISTS (
+          (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :r
+           EXCEPT SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :v1)
+          UNION ALL
+          (SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :v1
+           EXCEPT SELECT role, group_code, level, constraint_name FROM iam_policy.entry WHERE version = :r));
+SELECT 'CHECK|its waivers are v1''s', NOT EXISTS (
+          (SELECT to_jsonb(w) - 'version' FROM iam_policy.waiver w WHERE version = :r
+           EXCEPT SELECT to_jsonb(w) - 'version' FROM iam_policy.waiver w WHERE version = :v1)
+          UNION ALL
+          (SELECT to_jsonb(w) - 'version' FROM iam_policy.waiver w WHERE version = :v1
+           EXCEPT SELECT to_jsonb(w) - 'version' FROM iam_policy.waiver w WHERE version = :r));
+SELECT 'CHECK|the same entries digest as v1 but for the kind', entries_digest IS NOT NULL
+          AND entries_digest = iam_policy.entries_digest(:r) FROM iam_policy.version WHERE version = :r;
+SELECT 'CHECK|the open draft withdrawn by system:apply', status = 'withdrawn' AND withdrawn_by = 'system:apply'
+  FROM iam_policy.version WHERE version = :o;
+SELECT 'CHECK|its withdrawn event names system:apply', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :o
+          AND event = 'withdrawn' AND payload ->> 'by' = 'system:apply');
+SQL
+        probe P42 "a rollback to a bootstrap K nobody confirmed" "22023:cannot be rolled back to" <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(applied_change)
+SELECT iam_policy._record('applied', jsonb_build_object('version', :d)) \\g /dev/null
+$(rollback_to :v1 :d)
+SQL
+        probe P42 "a rollback to a withdrawn K" "22023:cannot be rolled back to" <<SQL
+$(build_v1)
+$(draft_chain)
+$(as_iam "$A" "$PA" test-pa admin)
+SELECT iam_policy.withdraw(:d, 'iam-db probe', $IAT) \\g /dev/null
+$(rollback_to :d :v1)
+SQL
+        # P44 — a rollback is confirmed afterwards, never by the person apply.sh recorded
+        probe P44 "confirm_applied of the rollback by the person apply.sh recorded" "42501:recorded you as running" <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.') \\g /dev/null
+$(applied_change)
+SELECT iam_policy._record('applied', jsonb_build_object('version', :d)) \\g /dev/null
+$(rollback_to :v1 :d "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q2" "$PQ2")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:r, 'iam-db', 'I did not run apply.sh for this version.');
+SQL
+        probe P44 "confirm_applied of the rollback by another qa person: confirmed, audit_versions() clean" ok <<SQL
+$(build_v1 record "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:v1, 'iam-db', 'I did not run apply.sh for this version.') \\g /dev/null
+$(applied_change)
+SELECT iam_policy._record('applied', jsonb_build_object('version', :d)) \\g /dev/null
+$(rollback_to :v1 :d "$Q2" "$PQ2")
+$(qa_token "$(pclaims "$Q" "$PQ")" POST /rpc/confirm_policy)
+SELECT medcea.confirm_policy(:r, 'iam-db', 'I did not run apply.sh for this version.') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|confirmed by Q', confirmed_by_person = '$PQ' AND confirmed_at IS NOT NULL AND disputed_at IS NULL
+  FROM iam_policy.version WHERE version = :r;
+SELECT 'CHECK|a confirmed event under the rollback', EXISTS (SELECT 1 FROM iam_policy.history WHERE version = :r AND event = 'confirmed');
+SELECT 'CHECK|audit_versions(): no finding', NOT EXISTS (SELECT 1 FROM iam_policy.audit_versions());
+SQL
     else
-        note policy "P7-P10, P12, P20's applies, P27-P31's and P35-P37 (the token path) need --mode true"
+        note policy "P7-P10, P12, P20's applies, P27-P31's, P35-P37 and P42-P44 (the token path) need --mode true"
         # P26 — pre_request's only_rpc block under IAM_DB_ROLES=false (L6)
         probe P26 "IAM_DB_ROLES=false, policy token: GET /recipe" "28000:may only call" <<SQL
 $(qa_token "$QA_CLAIMS" GET /recipe)
@@ -3938,7 +4087,7 @@ SQL
     fi
     fi
 elif want policy; then
-    note policy "P2-P37 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
+    note policy "P2-P44 skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"
 fi
 
 # ── drift ────────────────────────────────────────────────────────────────────────

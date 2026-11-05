@@ -195,11 +195,29 @@
 <tr><td>Draft and edit a change of the matrix (who holds which level), submit it, withdraw it</td><td><span class="role">admin</span></td><td>Access Policy → <strong>Changes</strong> and <strong>Matrix</strong></td></tr>
 <tr><td>Propose a change of the platform skeleton (roles, groups, routes, hosts, network rules) from a git commit</td><td>The host operator</td><td><code>./apps/iam/apply.sh --propose-skeleton … --from-git &lt;commit&gt;</code> (see <a href="#admin-apply">apply.sh</a>)</td></tr>
 <tr><td>Approve or return a submitted version</td><td>A <span class="role">qa</span> person who is none of its authors and whose role it does not widen; for a skeleton version also not the person <code>apply.sh</code> named, with the attestation</td><td>Access Policy → <strong>Approval</strong></td></tr>
-<tr><td>Apply an approved version</td><td>The host operator</td><td><code>./apps/iam/apply.sh &lt;version&gt;</code>: slice 4.5, not built yet. Nothing approved changes anyone's access before then.</td></tr>
+<tr><td>Apply an approved version</td><td>The host operator</td><td><code>./apps/iam/apply.sh &lt;version&gt; --by &lt;username&gt;</code> (since slice 4.5; <code>./guide.sh</code> → Policy → <strong>Apply an approved policy version</strong>). Nothing approved changes anyone's access before then.</td></tr>
+<tr><td>Roll back to an earlier version</td><td>The host operator, then a <span class="role">qa</span> person who did not run it</td><td><code>./apps/iam/apply.sh --rollback-to &lt;K&gt; --by &lt;username&gt; --reason "&lt;why&gt;"</code>, confirmed afterwards in Access Policy → <strong>Confirm</strong></td></tr>
 </tbody></table></div>
+<p><strong>Applying, step by step</strong> (the host operator, from the repository root, on a committed tree):</p>
+<ol class="steps">
+<li><code>./apps/iam/apply.sh N --check-only --by &lt;you&gt;</code>: every check below, the diff summary and the health baseline; nothing is written.</li>
+<li><code>./apps/iam/apply.sh N --by &lt;you&gt;</code>: the same checks, then <code>[y/N]</code>; Keycloak and the version are read again after your answer. Then one database transaction applies the version with its grants, and the artefacts follow (gates, route table, network policies, tool settings).</li>
+<li>For a skeleton version, check out the approved commit first (the refusal names it), and run <code>./apps/iam/deploy.sh</code> afterwards: the Access Policy still ships the old skeleton until then.</li>
+</ol>
+<p>Refusals you may meet, each with nothing changed (exit 1 unless said):</p>
+<ul>
+<li>"version N is &lt;status&gt;: nothing to apply" (withdrawn, superseded, applied, draft, submitted); "version N is a &lt;kind&gt; version: apply.sh applies change and skeleton versions; see --rollback-to" (exit 2);</li>
+<li>"version N was approved on version B, but version A is applied: withdraw it and draft again"; "finish version A first: ./apps/iam/apply.sh --resume";</li>
+<li>the approval's token: not a realm signature, an unknown key, claims that are not the record's, a token already used for another approval;</li>
+<li>the approver now: disabled, no approver role any more, another <code>person_id</code>, one of the authors' persons, the person of an enabled <span class="role">admin</span> account (I17); "version N widens role R, which &lt;account&gt; (an enabled account of the approver's person) holds: another qa person approves it";</li>
+<li>"N account decision(s) wait for qa (the User Manager's Decisions tab): … confirm, refuse or withdraw them first";</li>
+<li>"the diff of version N is not the one qa approved (… a skeleton or compiler change since the approval alters what it grants): withdraw it and draft again";</li>
+<li>"these checks fail before the apply (above): fix them first" (exit 2); "apps/iam has uncommitted changes"; "something changed while the confirmation waited (above): … run it again".</li>
+</ul>
+<p>If the artefacts cannot be brought to the new version after three attempts, a change or rollback version is reverted to the previous one and the command says so (exit 1); see <a href="#admin-apply">apply.sh</a> for what a revert does not undo and for <code>--resume</code>.</p>
 <ul>
 <li><strong>The two switches.</strong> Approving and returning go to the database with the <span class="role">qa</span> person's own sign-in token, so they need <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> to be <code>true</code> (see <a href="#admin-switches">IAM switches</a>); otherwise the page says approving is not possible yet. Drafting does not need them.</li>
-<li><strong>One version in flight.</strong> At most one change or skeleton version is open (draft, submitted or approved) at a time. An open change blocks a skeleton proposal and an open skeleton proposal blocks a new draft, until it is applied, withdrawn or returned.</li>
+<li><strong>One version in flight.</strong> At most one change or skeleton version is open (draft, submitted or approved) at a time. An open change blocks a skeleton proposal and an open skeleton proposal blocks a new draft, until it is applied, withdrawn or returned. A draft also waits while the applied version's last apply has not finished (<code>apply.sh --resume</code>).</li>
 <li><strong>Returning.</strong> A <span class="role">qa</span> person returns a version with a note. A returned change becomes a draft again for its authors; a returned skeleton version is withdrawn, and the host operator proposes again.</li>
 <li><strong>Withdrawing.</strong> Any <span class="role">admin</span> withdraws the open version in the Access Policy (<strong>Withdraw…</strong>), approved ones included. When the page cannot (a rollback, a broken page), the host operator runs <code>./apps/iam/apply.sh --withdraw-open --by &lt;username&gt; --reason "&lt;why&gt;"</code>.</li>
 <li><strong>Break-glass blocks approvals.</strong> While a policy break-glass is open nothing can be approved, until a normal deploy ends it.</li>

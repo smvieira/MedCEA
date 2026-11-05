@@ -260,6 +260,31 @@ def platform_roles():
     return list(_table().get('roles') or ROLES)
 
 
+# Who makes and who approves a change to the platform's access (IAM 4.5, design §14.8.9):
+# routes.json's dual_control, compiled from the policy (approvers hold A on the group,
+# makers its MAKER_LEVELS, composites included). Without the key, today's literals: never
+# weaker (without routes.json the admin port already answers 503 through check()).
+DUAL_FALLBACK = {'approver_roles': ['qa'], 'maker_roles': ['admin']}
+DUAL_GROUPS = ('iam_users', 'iam_policy')
+_DUAL = {'warned': False}
+
+
+def dual(group, side):
+    """The roles on one side ('approver_roles' or 'maker_roles') of a group's dual control."""
+    roles = ((_table().get('dual_control') or {}).get(group) or {}).get(side)
+    if isinstance(roles, list) and roles:
+        return list(roles)
+    if not _DUAL['warned']:
+        log('routes.json has no dual_control for %s.%s: the literals %s apply' % (group, side, DUAL_FALLBACK[side]))
+        _DUAL['warned'] = True
+    return list(DUAL_FALLBACK[side])
+
+
+def dual_roles(side, groups=DUAL_GROUPS):
+    """One side of dual control over every guarded group, sorted."""
+    return sorted({r for g in groups for r in dual(g, side)})
+
+
 def role_includes():
     return _table().get('role_includes') or {}
 
@@ -459,11 +484,12 @@ def last_enabled(user_id, role):
 
 def guard_last(user_id, new_role=None):
     """409 when a deactivation (new_role None) or a change to new_role would leave no
-    enabled admin, or no enabled qa (break-glass: CLAUDE.md, deploy-infra QA_USER)."""
+    enabled holder of one of iam_users' maker or approver roles (today admin and qa;
+    break-glass: CLAUDE.md, deploy-infra QA_USER)."""
     after = effective(new_role) if new_role else set()
-    for role, what in (('admin', 'administrator'), ('qa', 'qa person')):
+    for role in dict.fromkeys(dual('iam_users', 'maker_roles') + dual('iam_users', 'approver_roles')):
         if role not in after and last_enabled(user_id, role):
-            raise Refused(409, 'this is the last enabled %s' % what)
+            raise Refused(409, 'this is the last enabled %s' % {'admin': 'administrator', 'qa': 'qa person'}.get(role, role))
 
 
 _KEEP = object()
@@ -472,8 +498,10 @@ _KEEP = object()
 def i17_violation(subject_uid, new_role=_KEEP, new_person=None, subject=None):
     """I17: no person holds both an admin-side and a qa-side account. Applies the
     proposed change (role and/or person) to the subject and checks the subject's person,
-    accounts enabled or not. Returns the refusal text, or None."""
-    sides = {'admin': {'admin', *roles_including('admin')}, 'qa': {'qa', *roles_including('qa')}}
+    accounts enabled or not. Returns the refusal text, or None. The admin side is the maker
+    roles of iam_users and iam_policy, the qa side their approver roles (dual_control)."""
+    sides = {s: {x for r in dual_roles(k) for x in (r, *roles_including(r))}
+             for s, k in (('admin', 'maker_roles'), ('qa', 'approver_roles'))}
     acc = {}
     for side, roles in sides.items():
         for r in sorted(roles):
@@ -888,15 +916,16 @@ _COMP_FAILED, _comp_lock = [], threading.Lock()
 
 
 def _live_approver(who):
-    """The approver, live: enabled, effectively qa, and declaring the person the token
-    names. The token can be up to 300 s old."""
+    """The approver, live: enabled, effectively holding one of iam_users' approver roles
+    (dual_control; today qa), and declaring the person the token names. The token can be
+    up to 300 s old."""
     try:
         u = kc_user(who['sub'])
         _, eff, _ = kc('GET', '/users/%s/role-mappings/realm/composite' % who['sub'])
     except KCError as e:
         log('approver check for %s failed: %s' % (who.get('username'), e))
         raise Refused(409, 'sign in again: your account changed')
-    if not u.get('enabled') or 'qa' not in {r.get('name') for r in eff or []} \
+    if not u.get('enabled') or not set(dual('iam_users', 'approver_roles')) & {r.get('name') for r in eff or []} \
             or attr_person(u) != who.get('person_id'):
         raise Refused(409, 'sign in again: your account changed')
 
@@ -1323,7 +1352,7 @@ def list_decisions(q, who):
     by_id = {u['id']: u for u in users}
     inc = role_includes()
     eff = lambda roles: {x for r in roles for x in ({r} | set(inc.get(r) or []))}
-    staff = [u for u in users if eff(held.get(u['id'], [])) & {'admin', 'qa'}]
+    staff = [u for u in users if eff(held.get(u['id'], [])) & set(dual_roles('maker_roles') + dual_roles('approver_roles'))]
     can_a = allows((who or {}).get('roles'), 'POST', '/api/decisions/1/confirm')
     for r in rows:
         if isinstance(r['widening'], str):

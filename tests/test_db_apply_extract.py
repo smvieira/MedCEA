@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """IAM Phase 4, slice 4.2a (design §14.4.8, §14.4.2 item 5): apps/database/lib-db-apply.sh
 after the extraction of dba_compiled_functions, dba_mode_live, dba_service_logins and
-dba_policy_bundle, and dba_record_event's routing to iam_policy._record.
+dba_policy_bundle, and dba_record_event's routing to iam_policy._record; IAM 4.5 (design
+§14.8.4.1): _dba_src's staged source (DBA_STAGED), honoured only under the run's own lock.
 
 Offline: every psql call goes to a fake _dba_psql that records its arguments and stdin
 and answers the few questions db_apply asks; nothing reaches a cluster. The grants are
 compiled for real (`cli.py --defaults`, namespace medcea-iamtest), the same compiler on
 both sides of the byte comparison, so only the library differs.
 """
+import json
 import os
 import re
 import shutil
@@ -312,6 +314,154 @@ class RecordEventRouting(unittest.TestCase):
         body = simulate_record_event(self.sql, "break_glass_seen", "42a")
         self.assertIn("p ? 'reason'", body)
         self.assertIn("jsonb_build_object('reason', :'why')", body)
+
+
+STAGED_HARNESS = r'''
+set -uo pipefail
+ROOT="$1"; OUT="$2"; shift 2
+export PROJECT_NAME=medcea CEA_DB=medcea_db KUBECTL=false REPO_ROOT="$ROOT"
+source "$ROOT/infra/lib-lock.sh"
+source "$ROOT/apps/database/lib-db-apply.sh"
+_dba_psql() {
+    local n
+    n=$(( $(cat "$OUT/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$OUT/n"
+    cat > "$OUT/psql-$n.in"
+    return 0
+}
+_dba_scram() { return 0; }
+case "${FAKE_LOCK:-}" in
+    take) medcea_lock; export DBA_STAGED_BY="${FAKE_BY:-$MEDCEA_LOCK_HELD}" ;;
+    forge) export MEDCEA_LOCK_HELD=$$ DBA_STAGED_BY=$$ ;;
+esac
+"$@"; rc=$?
+# what a later command of the caller sees: the pin lived only in the compile
+bash -c 'echo "after=${MEDCEA_POLICY_STAGED_SHA256-unset}"'
+exit $rc
+'''
+
+# a cli.py stand-in: records its argv and the pin it was given, prints marker SQL
+FAKE_CLI = r'''import json, os, sys
+with open(os.environ["FAKE_CLI_LOG"], "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "sha": os.environ.get("MEDCEA_POLICY_STAGED_SHA256")}) + "\n")
+a = sys.argv[1:]
+if "--part" in a:
+    print(f"SELECT 'CLI-{a[a.index('--part') + 1]}';")
+'''
+
+
+class StagedSource(unittest.TestCase):
+    """IAM 4.5 (design §14.8.4.1): _dba_src compiles from DBA_STAGED (cli.py --staged, the
+    sha256 pinned as MEDCEA_POLICY_STAGED_SHA256) only for the run that holds the deploy
+    lock; anything else is refused before a compile or a psql call."""
+
+    SHA = "ab" * 32
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dba-staged-")
+        for rel in ("infra/lib-lock.sh", "apps/database/lib-db-apply.sh",
+                    "apps/database/medcea_db_migrations_down_008b.sql", "apps/database/medcea_db_migrations_008b_enforce.sql"):
+            os.makedirs(os.path.join(self.root, os.path.dirname(rel)), exist_ok=True)
+            shutil.copy(os.path.join(REPO, rel), os.path.join(self.root, rel))
+        os.makedirs(os.path.join(self.root, "apps/iam/compiler"))
+        with open(os.path.join(self.root, "apps/iam/compiler/cli.py"), "w") as f:
+            f.write(FAKE_CLI)
+        self.staged = os.path.join(self.root, "staged.yaml")
+        with open(self.staged, "w") as f:
+            f.write("# medcea-applied: version=2\n")
+        self.pre = os.path.join(self.root, "pre.sql")
+        self.post = os.path.join(self.root, "post.sql")
+        for p in (self.pre, self.post):
+            with open(p, "w") as f:
+                f.write("SELECT 'MARK';\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def run_h(self, *cmd, env=None):
+        out = tempfile.mkdtemp(prefix="dba-staged-out-")
+        log = os.path.join(out, "cli.log")
+        e = {k: v for k, v in os.environ.items() if not k.startswith(("MEDCEA_", "DBA_", "IAM_"))}
+        e.update({"FAKE_CLI_LOG": log, "MEDCEA_POLICY_STAGED_SHA256": "operator-exported"}, **(env or {}))
+        p = subprocess.run(["bash", "-c", STAGED_HARNESS, "harness", self.root, out, *cmd], env=e, capture_output=True,
+                           stdin=subprocess.DEVNULL, text=True, timeout=60)
+        calls = []
+        if os.path.exists(log):
+            with open(log) as f:
+                calls = [json.loads(x) for x in f]
+        psql = len([f for f in os.listdir(out) if f.startswith("psql-")])
+        shutil.rmtree(out)
+        return p, calls, psql
+
+    def bundle(self, ns="medcea", lock="take", **env):
+        e = {"FAKE_LOCK": lock, "DBA_STAGED": self.staged, "DBA_STAGED_SHA256": self.SHA,
+             "DBA_IAM_FLAG": "", "DBA_SERVICE_LOGINS": "", "DBA_ACTOR": "system:apply"}
+        e.update(env)
+        return self.run_h("dba_policy_bundle", ns, "pod", "false", self.pre, self.post, "--with-functions", env=e)
+
+    def test_staged_under_the_lock(self):
+        p, calls, psql = self.bundle()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        compiles = [c for c in calls if "compile" in c["argv"]]
+        self.assertEqual(len(compiles), 3)                     # body, asserts, functions
+        for c in compiles:
+            self.assertEqual(c["argv"][:2], ["--staged", self.staged])
+            self.assertEqual(c["sha"], self.SHA)
+        self.assertEqual(psql, 1)
+        self.assertIn("after=operator-exported", p.stdout)     # the pin ended with the bundle
+
+    def test_staged_replaces_defaults_on_the_fixture(self):
+        p, calls, _ = self.bundle(ns="medcea-iamtest")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for c in calls:
+            self.assertNotIn("--defaults", c["argv"])
+        self.assertTrue(all(c["argv"][:2] == ["--staged", self.staged] for c in calls if "compile" in c["argv"]))
+
+    def test_dba_compiled_functions_too(self):
+        p, calls, psql = self.run_h("dba_compiled_functions", "medcea", "pod",
+                                    env={"FAKE_LOCK": "take", "DBA_STAGED": self.staged, "DBA_STAGED_SHA256": self.SHA})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([c["argv"][:2] for c in calls], [["--staged", self.staged]])
+        self.assertEqual(calls[0]["sha"], self.SHA)
+
+    def test_refusals_compile_nothing(self):
+        cases = {
+            "no lock": dict(lock=""),
+            "an inherited MEDCEA_LOCK_HELD without the lock": dict(lock="forge"),
+            "DBA_STAGED_BY another run's": dict(FAKE_BY="1"),
+            "no sha256": dict(DBA_STAGED_SHA256=""),
+            "a sha256 that is not one": dict(DBA_STAGED_SHA256="xyz"),
+            "an unreadable file": dict(DBA_STAGED=os.path.join(self.root, "absent.yaml")),
+        }
+        for name, env in cases.items():
+            with self.subTest(name):
+                p, calls, psql = self.bundle(**env)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertFalse([c for c in calls if "compile" in c["argv"]], name)
+                self.assertEqual(psql, 0, name)
+                self.assertIn("DBA_STAGED", p.stderr)
+        p, calls, psql = self.run_h("dba_compiled_functions", "medcea", "pod",
+                                    env={"DBA_STAGED": self.staged, "DBA_STAGED_SHA256": self.SHA})
+        self.assertEqual((p.returncode, calls, psql), (2, [], 0))
+        p, calls, psql = self.run_h("db_apply", "medcea-iamtest", "pod", "false",
+                                    env={"DBA_STAGED": self.staged, "DBA_STAGED_SHA256": self.SHA})
+        self.assertEqual((p.returncode, calls, psql), (2, [], 0))
+
+    def test_without_staged_unchanged(self):
+        # no DBA_STAGED: the source rule's (nothing) or --defaults, and an operator's exported
+        # MEDCEA_POLICY_STAGED_SHA256 never reaches cli.py
+        for ns, want in (("medcea", []), ("medcea-iamtest", ["--defaults"])):
+            p, calls, _ = self.bundle(ns=ns, lock="", DBA_STAGED="", DBA_STAGED_SHA256="")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            for c in calls:
+                if "compile" in c["argv"]:
+                    self.assertEqual(c["argv"][:len(want)], want)
+                    self.assertNotIn("--staged", c["argv"])
+                    self.assertEqual(c["sha"] or "", "")
+
+    def test_one_line_names_staged(self):
+        with open(LIB) as f:
+            lines = [l for l in f if "--staged" in l]
+        self.assertEqual([l.strip() for l in lines], ['[[ -n "${DBA_STAGED:-}" ]] && src=(--staged "$DBA_STAGED")'])
 
 
 if __name__ == "__main__":

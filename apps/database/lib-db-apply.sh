@@ -42,6 +42,9 @@
 #                             the asserts last. db_apply passes /dev/null twice.
 #                             DBA_IAM_FLAG / DBA_SERVICE_LOGINS (env), when set, are used
 #                             instead of asking dba_iam_flag / dba_service_logins.
+#                             DBA_STAGED / DBA_STAGED_BY / DBA_STAGED_SHA256 (env, IAM
+#                             4.5, apps/iam/apply.sh only): compile from that staged
+#                             host file instead (_dba_src)
 #
 # Needs: KUBECTL, REPO_ROOT, PROJECT_NAME, CEA_DB. Optional: DBPW_<role> (plaintext
 # passwords: DBPW_authenticator, DBPW_mqtt_auth, DBPW_svc_ingest, … — each sent only as
@@ -154,8 +157,8 @@ dba_iam_flag() {
 
 db_apply() {
     local ns="$1" pod="$2" mode="$3" out nonce got grants_mode down_or_enforce verifier r flag
-    local iam_flag=() src=()
-    _dba_src "$ns"
+    local iam_flag=() src=() MEDCEA_POLICY_STAGED_SHA256=""
+    _dba_src "$ns" || return $?
     _DBA_NS="$ns"; _DBA_POD="$pod"
     [[ "$mode" == "false" || "$mode" == "true" ]] || { echo "db_apply: MODE must be false or true" >&2; return 2; }
     [[ "$PROJECT_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || { echo "db_apply: PROJECT_NAME is not ^[a-z][a-z0-9-]{1,30}$" >&2; return 2; }
@@ -276,10 +279,29 @@ SQL
 # Phase 4). The throwaway fixture namespace always compiles the factory policy, which its
 # probes expect; every other namespace the source rule's (compiler/source.py: the
 # applied version, else defaults.yaml).
+# IAM 4.5 (design §14.8.4.1): DBA_STAGED names the staged host file of the version
+# apps/iam/apply.sh applies (its mode-700 stage, header-checked by cli.py and pinned by
+# sha256), which then replaces both. It is honoured only for the run that holds the lock
+# (DBA_STAGED_BY = MEDCEA_LOCK_HELD, medcea_lock_verify), so a variable exported in an
+# operator's shell compiles nothing: it is refused (2), never silently ignored, and never
+# falls back to the host file of the previous version. The sha256 reaches cli.py as
+# MEDCEA_POLICY_STAGED_SHA256, exported into the caller's own local of that name, so it
+# lives as long as the caller's compile.
 _dba_src() {
     local ns="$1"
     src=()
     [[ "$ns" == medcea-iamtest ]] && src=(--defaults)
+    if [[ -n "${DBA_STAGED:-}" ]]; then
+        if [[ -z "${MEDCEA_LOCK_HELD:-}" || "${DBA_STAGED_BY:-}" != "$MEDCEA_LOCK_HELD" ]] \
+           || ! declare -F medcea_lock_verify >/dev/null || ! medcea_lock_verify; then
+            echo "DBA_STAGED is set, but not by the run that holds the deploy lock: unset DBA_STAGED (only apps/iam/apply.sh sets it, for its bundle)" >&2
+            return 2
+        fi
+        [[ "${DBA_STAGED_SHA256:-}" =~ ^[0-9a-f]{64}$ && -r "$DBA_STAGED" ]] \
+            || { echo "DBA_STAGED needs a readable file and DBA_STAGED_SHA256 (64 hex characters)" >&2; return 2; }
+        export MEDCEA_POLICY_STAGED_SHA256="$DBA_STAGED_SHA256"
+    fi
+    [[ -n "${DBA_STAGED:-}" ]] && src=(--staged "$DBA_STAGED")
     return 0
 }
 
@@ -293,7 +315,7 @@ _dba_src() {
 # factory file past the source rule (--defaults only for medcea-iamtest, CLAUDE.md); the
 # one argument a caller does choose is §14.4.8's `<iam flag>`, i.e. --without-iam.
 dba_compiled_functions() {
-    local ns="$1" pod="$2" a src=() iam_flag=()
+    local ns="$1" pod="$2" a src=() iam_flag=() MEDCEA_POLICY_STAGED_SHA256=""
     shift 2
     for a in "$@"; do
         case "$a" in
@@ -301,7 +323,7 @@ dba_compiled_functions() {
             *) echo "dba_compiled_functions: unknown argument $a" >&2; return 2 ;;
         esac
     done
-    _dba_src "$ns"
+    _dba_src "$ns" || return $?
     _DBA_NS="$ns"; _DBA_POD="$pod"
     _dba_log "Compiled policy functions..."
     python3 "$REPO_ROOT/apps/iam/compiler/cli.py" "${src[@]}" compile grants --mode additive --part functions "${iam_flag[@]}" \
@@ -374,13 +396,13 @@ dba_service_logins() {
 dba_policy_bundle() {
     local ns="$1" pod="$2" mode="$3" pre="${4:-}" post="${5:-}" withfn=false
     local src=() iam_flag=() flag live cfg grants_mode down_or_enforce body asserts fns="" out r verifier sl
-    local actor="${DBA_ACTOR:-system:deploy}" logins=()
+    local actor="${DBA_ACTOR:-system:deploy}" logins=() MEDCEA_POLICY_STAGED_SHA256=""
     if [[ $# -eq 6 && "$6" == --with-functions ]]; then withfn=true
     elif [[ $# -ne 5 ]]; then echo "dba_policy_bundle: NS POD MODE PRE_SQL POST_SQL [--with-functions]" >&2; return 2; fi
     [[ -r "$pre" && -r "$post" ]] || { echo "dba_policy_bundle: cannot read $pre or $post" >&2; return 2; }
     [[ "$actor" =~ ^system:[a-z0-9:_-]+$ ]] || { echo "dba_policy_bundle: DBA_ACTOR must be system:<name>, not '$actor'" >&2; return 2; }
     _DBA_NS="$ns"; _DBA_POD="$pod"
-    _dba_src "$ns"
+    _dba_src "$ns" || return 2
     case "$mode" in
         true|false) ;;
         auto)

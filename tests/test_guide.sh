@@ -85,6 +85,16 @@
 #      [y/N]; apply.sh asks its own [y/N] (no MEDCEA_CONFIRMED) and takes its own lock
 #  42  Policy → Withdraw the open policy version from the host: the command, the [y/N],
 #      apply.sh's own lock; Health → the policy drafting and approval test (tests/iam-policy.sh)
+#  43  Policy → Deploy IAM 4.5: database, access, iam, backup in that order under one lock; the
+#      notes (order, nobody's access changes); a failure stops the chain
+#  44  Policy → Apply an approved policy version: the version asked again on -1 and x; --check-only
+#      first ([Y/n], read-only), then the apply ([y/N], apply.sh asks its own and takes its own
+#      lock); the commands printed with printf %q; a failed or cancelled check offers no apply
+#  45  Policy → Roll back to an earlier policy version: the typed word yes (y cancels), --by
+#      remembered, the reason; apply.sh asks its own yes (no MEDCEA_CONFIRMED) and locks itself
+#  46  Policy → Audit an applied version: --audit N, read-only, no lock; 0 re-asked
+#  47  Health → the live policy test's three modes: default, --apply, --change, each described;
+#      b goes back; the test takes its own lock
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -979,10 +989,127 @@ real $'8\n21\nsvieira\ntest: why\ny\nq\n'
 has   "real: apply.sh ran" "STUB apps/iam/apply.sh --withdraw-open --by svieira --reason test: why"
 grep -q '^ENV_BY= ENV_CONFIRMED=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
     && pass "real: apply.sh asks and locks itself" || fail "real: confirmed or locked by the guide"
-guide $'6\n17\ny\nq\n'
+guide $'6\n17\n1\ny\nq\n'
 has   "the live test (dry)" "[dry run] not executed: tests/iam-policy.sh"
-has   "throwaway accounts" "4 throwaway accounts"
+has   "throwaway accounts" "4 or 5 throwaway accounts"
 no_stub
+
+echo "43 deploy IAM 4.5 (applying versions)"
+mkcfg true true
+guide $'8\n22\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./apps/database/deploy.sh && ./apps/access/deploy.sh && ./apps/iam/deploy.sh && ./apps/backup/deploy.sh"
+has   "one lock" "held by the guide for all four"
+has   "a change ([y/N])" "Kind:        changes the platform"
+has   "the order" "Order: the database deploy first"
+has   "nobody's access changes" "Nobody's access changes at the deploy"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'8\n22\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: database, access, iam, backup in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/database/deploy.sh", "STUB apps/access/deploy.sh",
+                          "STUB apps/iam/deploy.sh", "STUB apps/backup/deploy.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 4 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 4 ]] \
+    && pass "real: all four under the guide's lock" || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+OUT="$(printf '8\n22\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/database/deploy.sh"
+hasnt "the access deploy did not run" "STUB apps/access/deploy.sh"
+
+echo "44 apply an approved policy version"
+mkcfg true true
+guide $'8\n23\n-1\nx\n07\n7\n-x\nops@site.example\n\ny\nq\n'
+rc_is "quits with 0" 0
+has   "-1 is re-asked" "'-1': a version number"
+has   "x is re-asked" "'x': a version number"
+has   "07 is re-asked" "'07': a version number"
+has   "a --by starting with - is re-asked" "'-x': letters, digits and . _ @ -"
+has   "the check (printf %q, dry)" "[dry run] not executed: ./apps/iam/apply.sh 7 --check-only --by ops@site.example"
+has   "then the apply (dry)" "[dry run] not executed: ./apps/iam/apply.sh 7 --by ops@site.example"
+python3 - "$OUT" <<'PY2' && pass "the check comes first, read-only [Y/n], then the apply [y/N]" || fail "wrong order or levels"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("Kind:        read-only", "Run it? [Y/n]", "not executed: ./apps/iam/apply.sh 7 --check-only",
+                          "Then the apply itself", "Kind:        changes the platform", "Run it? [y/N]",
+                          "not executed: ./apps/iam/apply.sh 7 --by")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+has   "apply.sh asks its own" "asks its own [y/N] here (no MEDCEA_CONFIRMED)"
+has   "the 503 window" "access-api answers 503"
+no_stub
+guide $'8\n23\n7\nsvieira\nn\nq\n'
+has   "a cancelled check" "Cancelled; nothing was run."
+hasnt "offers no apply" "Then the apply itself"
+real $'8\n23\n7\nsvieira\n\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the check ran" "STUB apps/iam/apply.sh 7 --check-only --by svieira"
+has   "real: then the apply" "STUB apps/iam/apply.sh 7 --by svieira"
+[[ "$(grep -c '^ENV_BY= ENV_CONFIRMED=$' <<<"$OUT")" == 2 ]] && pass "real: no MEDCEA_CONFIRMED (apply.sh asks)" \
+    || fail "real: MEDCEA_CONFIRMED passed"
+[[ "$(grep -c '^LOCK_PROBE=free$' <<<"$OUT")" == 2 && "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 2 ]] \
+    && pass "real: apply.sh takes its own lock (none inherited)" || fail "real: the guide held the lock"
+OUT="$(printf '8\n23\n7\nsvieira\n\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "real: a failed check" "the check did not pass (exit 1)"
+hasnt "real: no apply after it" "STUB apps/iam/apply.sh 7 --by"
+
+echo "45 roll back to an earlier policy version"
+mkcfg true true
+guide $'8\n24\n0\n3\nsvieira\n-why\ntest: why\ny\nb\n24\n3\n\ntest: why\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "0 is re-asked" "'0': a version number"
+has   "a reason starting with - is re-asked" "'-why': a reason is required"
+has   "destructive" "Kind:        DESTRUCTIVE"
+has   "y is not yes" "Cancelled; nothing was run."
+has   "--by remembered" "Your Keycloak username (--by) [svieira]:"
+has   "the command (printf %q, dry)" "[dry run] not executed: ./apps/iam/apply.sh --rollback-to 3 --by svieira --reason test:\ why"
+has   "apply.sh asks its own yes" "asks you to type yes itself"
+has   "qa confirms afterwards" "a qa person other than svieira confirms the rollback"
+no_stub
+real $'8\n24\n3\nsvieira\ntest: why\nyes\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: apply.sh ran" "STUB apps/iam/apply.sh --rollback-to 3 --by svieira --reason test: why"
+grep -q '^ENV_BY= ENV_CONFIRMED=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: apply.sh asks its own yes and locks itself" || fail "real: confirmed or locked by the guide"
+
+echo "46 audit an applied version"
+mkcfg true true
+guide $'8\n25\n0\n4\n\nq\n'
+rc_is "quits with 0" 0
+has   "0 is re-asked" "'0': a version number"
+has   "the command (dry)" "[dry run] not executed: ./apps/iam/apply.sh --audit 4"
+has   "read-only" "Kind:        read-only"
+has   "[Y/n]" "Run it? [Y/n]"
+has   "no lock" "Deploy lock: no"
+no_stub
+real $'8\n25\n4\n\nq\n'
+has   "real: apply.sh ran" "STUB apps/iam/apply.sh --audit 4"
+grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: no lock" || fail "real: ran under a lock"
+
+echo "47 the live policy test's three modes"
+mkcfg true true
+guide $'6\n17\n2\ny\nb\n17\n3\ny\nb\n17\nb\nq\n'
+rc_is "quits with 0" 0
+has   "default described" "Drafted, approved and withdrawn: nothing is applied"
+has   "--apply described" "A no-op version applied for real"
+has   "--change described" "One narrowing applied, then rolled back"
+has   "--apply (dry)" "[dry run] not executed: tests/iam-policy.sh --apply"
+has   "--change (dry)" "[dry run] not executed: tests/iam-policy.sh --change"
+has   "five accounts" "5 throwaway accounts"
+has   "--apply leaves its version applied" "it becomes the applied version"
+has   "--change rolls back in its trap" "rolls it back and has the rollback confirmed"
+has   "the precondition" "Refused (exit 2) while one of the eight checks"
+[[ "$(grep -c 'Run it? \[y/N\]' <<<"$OUT")" == 2 ]] && pass "two [y/N], b goes back without a plan" || fail "b planned something"
+no_stub
+real $'6\n17\n3\ny\nq\n'
+has   "real: the test ran" "STUB tests/iam-policy.sh --change"
+grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
+    && pass "real: the test takes its own lock" || fail "real: ran under the guide's lock"
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

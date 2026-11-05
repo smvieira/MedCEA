@@ -24,6 +24,8 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
   Phase44Delta     against PRE_44 (slice 4.3, 31df34b): every output byte-identical, the
                    hosts listing included; skeleton, matrix and waivers equal; cli.py
                    skeleton-gate --check --against-git 31df34b prints equal
+  Phase45Delta     against PRE_45 (slice 4.4 deployed, 05c1af9): the same for slice 4.5
+                   (applying versions changes no compiled artefact and no skeleton)
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -34,7 +36,12 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    the git key order, waiver rows, export-applied
   Gate             (4.2a) the skeleton gate: equal, narrowing, person and system widening, the
                    sections, the prose keys, cli.py's exit codes, --check, --against-git;
-                   (4.4) the refusal's --propose-skeleton line
+                   (4.4) the refusal's --propose-skeleton line; (4.5) both texts of its way
+                   on: an approved skeleton version HEAD carries is named, else the proposal
+  Staged           (4.5) cli.py --staged: the sha256 pin, the header checks, label version-N,
+                   never with --file/--defaults/MEDCEA_POLICY_FILE; source.body_binding refuses
+                   a dropped>0 file whose body was edited and body_digest recomputed (which
+                   read_host_file alone passes)
   LibSource        (4.2a) policy_source_init and friends against a fake kubectl/psql in a
                    scratch tree: every state, the gate (narrowing accepted as system:deploy,
                    widening 2 with nothing written), --precheck, --read-only, the lock,
@@ -91,6 +98,7 @@ PRE_41 = "bdc7d48"
 PRE_42A = "08fab15"
 PRE_43 = "e18b4ee"   # slice 4.2b deployed: 4.3 changes no compiled artefact and no skeleton
 PRE_44 = "31df34b"   # slice 4.3 built: 4.4 changes no compiled artefact, no listing and no skeleton
+PRE_45 = "05c1af9"   # slice 4.4 deployed: 4.5 changes no compiled artefact, no listing and no skeleton
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -807,19 +815,53 @@ class Gate(unittest.TestCase):
             else d["resource_groups"]["dashboards"]["tool"].__setitem__("x", 1))
 
     def test_message_names_the_proposal(self):
-        """4.4 (design §14.7.6): the refusal names apply.sh --propose-skeleton --from-git as the
-        way on; applying an approved skeleton version is 4.5's."""
+        """4.4 (design §14.7.6), worded for 4.5 (§14.8.4): the refusal names apply.sh
+        --propose-skeleton --from-git as the way on, then checking the commit out and applying
+        the approved version; with an approved version HEAD carries, that version."""
         g = self.widening(lambda d: d["public_routes"].append({"service": "monitor", "route": "GET /api/e13-public",
                                                                "why": "E13"}), "_system")
         lines = explain.gate_message(g).splitlines()
         self.assertEqual(lines[-3], "This change needs a qa-approved skeleton version: put HEAD back at the accepted "
                          "skeleton, keep the change as a commit on a branch, and run ./apps/iam/apply.sh "
-                         "--propose-skeleton --by <you> --reason \"<why>\" --from-git <commit>; qa approves it in "
-                         "the Policy UI. Applying an approved skeleton version arrives with IAM 4.5.")
+                         "--propose-skeleton --by <you> --reason \"<why>\" --from-git <commit>; once qa approves it, "
+                         "check that commit out and run ./apps/iam/apply.sh <version>.")
         self.assertEqual(lines[-2], "Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the "
                          "matrix, never the skeleton.")
         self.assertEqual(lines[-1], "Nothing was changed.")
         self.assertNotIn("It cannot deploy until", "\n".join(lines))
+        self.assertNotIn("arrives with IAM 4.5", "\n".join(lines))
+        lines = explain.gate_message(dict(g, approved_version=7)).splitlines()
+        self.assertEqual(lines[-3], "This skeleton is approved as version 7: run ./apps/iam/apply.sh 7 --by <you> "
+                         "to apply it (deploys refuse it until then).")
+        self.assertEqual(lines[-2:], ["Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the "
+                                      "matrix, never the skeleton.", "Nothing was changed."])
+
+    def test_cli_names_the_approved_version(self):
+        """cli.py skeleton-gate --state reads approved_skeleton_versions (policy_db_state's base
+        document, 4.5) and names the one whose digest HEAD carries; another digest is not named."""
+        import argparse
+        import contextlib
+        import io
+        wider = copy.deepcopy(self.f)
+        wider["public_routes"] = [r for r in wider["public_routes"] if r["route"] != "GET /register"]
+        git_digest = source.skeleton_digest(self.f)
+        root = tempfile.mkdtemp(prefix="medcea-gate45-")
+        try:
+            sf = os.path.join(root, "st.json")
+            for listed, want in (([{"version": 7, "skeleton_digest": git_digest}], 7),
+                                 ([{"version": 8, "skeleton_digest": "0" * 64}], None), ([], None)):
+                with open(sf, "w") as fh:
+                    json.dump(make_state(self.f, accepted=wider, approved_skeleton_versions=listed), fh)
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=None, state=sf, check=True))
+                g = json.loads(out.getvalue())
+                self.assertEqual((rc, g["verdict"], g.get("approved_version")), (3, "widening", want), err.getvalue())
+                named = "This skeleton is approved as version 7: run ./apps/iam/apply.sh 7 --by <you>"
+                self.assertEqual(named in err.getvalue(), want == 7)
+                self.assertEqual("--propose-skeleton" in err.getvalue(), want is None)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_system_widening(self):
         g = self.widening(lambda d: d["public_routes"].append({"service": "monitor", "route": "GET /api/e13-public",
@@ -1140,6 +1182,18 @@ class LibSource(unittest.TestCase):
     def writes(self):
         return [b for b in self.log("log.sql").split("\n----\n")
                 if b.strip() and "BEGIN TRANSACTION READ ONLY" not in b and "pg_catalog.pg_database" not in b]
+
+    def test_approved_skeleton_versions_in_the_base_document(self):
+        """IAM 4.5 (design §14.8.4): policy_db_state's base document lists the approved
+        skeleton versions based on the applied one, so the gate's refusal can name the one HEAD
+        carries (a read, no database change)."""
+        lib = read("infra/lib-policy-source.sh")
+        i = lib.index("'approved_skeleton_versions'")
+        q = lib[i:i + 700]
+        self.assertIn("kind = 'skeleton'", q)
+        self.assertIn("status = 'approved'", q)
+        self.assertIn("based_on = ap.version", q)
+        self.assertIn("skeleton_digest", q)
 
     def test_usage(self):
         self.assertEqual(self.run_("policy_source_init")[0], 2)
@@ -1795,6 +1849,33 @@ class Wiring(unittest.TestCase):
         self.assertIn('[[ "$ns" == medcea-iamtest ]] && src=(--defaults)', lib)
         self.assertEqual(lib.count("--defaults"), 1)
 
+    def test_staged_is_the_bundles_alone(self):
+        """IAM 4.5 (design §14.8.4.1): lib-db-apply.sh names --staged in one line only, the
+        branch of _dba_src honoured for the run that holds the verified lock; apps/iam/apply.sh
+        is the only script that sets DBA_STAGED; no other deploy passes --staged."""
+        lib = code(read("apps/database/lib-db-apply.sh"))
+        self.assertEqual([l.strip() for l in lib.splitlines() if "--staged" in l],
+                         ['[[ -n "${DBA_STAGED:-}" ]] && src=(--staged "$DBA_STAGED")'])
+        body = lib[lib.index("_dba_src() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn('"${DBA_STAGED_BY:-}" != "$MEDCEA_LOCK_HELD"', body)
+        self.assertIn("medcea_lock_verify", body)
+        self.assertIn('export MEDCEA_POLICY_STAGED_SHA256="$DBA_STAGED_SHA256"', body)
+        setters = []
+        for d, _, files in os.walk(REPO):
+            rel = os.path.relpath(d, REPO)
+            if rel.startswith((".git", "docs", "codeplan", "logs", "tests")) or "__pycache__" in rel:
+                continue
+            for f in files:
+                if f.endswith(".sh") or f in ("guide.sh",):
+                    p = os.path.normpath(os.path.join(rel, f))
+                    t = code(read(p))
+                    if re.search(r"\bDBA_STAGED=", t):
+                        setters.append(p)
+                    if p != "apps/database/lib-db-apply.sh":
+                        self.assertNotRegex(t, r"cli\.py\"?[^\n|]*--staged\b", p)
+        self.assertEqual(setters, ["apps/iam/apply.sh"])
+
     def test_function_libraries_and_edge_do_not_init(self):
         # review finding 5: edge/ sources lib-policy-tools.sh at boot and without the
         # microk8s group; a library defines functions only
@@ -2109,6 +2190,163 @@ class Phase44Delta(unittest.TestCase):
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+class Phase45Delta(unittest.TestCase):
+    """Slice 4.5 (applying versions) compiles every artefact byte for byte as PRE_45, the
+    hosts listing included, and leaves the skeleton, the matrix and the waivers as they were
+    (design §14.8.0: no skeleton change; the deploy moves nothing compiled)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_45, "medcea-pre45-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_45}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        for key, want in self.want.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_45}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_skeleton_and_matrix_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_data = yaml.safe_load(f)
+        self.assertEqual(source.skeleton_digest(old_data), source.skeleton_digest(self.p.data))
+        self.assertEqual(old_data["matrix"], self.p.data["matrix"])
+        self.assertEqual(old_data["waivers"], self.p.data["waivers"])
+
+    def test_skeleton_gate_against_pre45_is_equal(self):
+        """`cli.py skeleton-gate --check --against-git 05c1af9` prints equal (in-process, as
+        Phase44Delta)."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_45, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_45}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+        self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+class Staged(unittest.TestCase):
+    """cli.py --staged F (IAM 4.5, design §14.8.4.1): the bundle's compile source."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.factory = model.load_defaults().data
+
+    def setUp(self):
+        self.root = scratch_repo()
+        self.cli = os.path.join(self.root, "apps", "iam", "compiler", "cli.py")
+        self.stage = os.path.join(self.root, "stage")
+        os.mkdir(self.stage, 0o700)
+        self.f = os.path.join(self.stage, "policy-applied.yaml")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def stage_text(self, text):
+        with open(self.f, "w") as fh:
+            fh.write(text)
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def test_pinned_header_checked_and_labelled(self):
+        d = copy.deepcopy(self.factory)
+        del d["matrix"]["portal"]["engineer"]
+        st = make_state(d, version=12, kind="change", accepted=self.factory)
+        sha = self.stage_text(source.host_file_text(st, "abc1234", "2026-11-04T00:00:00Z", data=self.factory))
+        rc, out, err = run_cli(["--staged", self.f, "compile", "routes"], cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha)
+        self.assertEqual(rc, 0, err)
+        doc = json.loads(out)
+        self.assertEqual((doc["source"], doc["applied_version"]), ("version-12", 12))
+        self.assertEqual(out, routes.dumps(routes.compile(model.Policy(d), "version-12", 12)) + "\n")
+        self.assertEqual(err, "")
+        rc, out, err = run_cli(["--staged", self.f, "check"], cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(out.startswith(f"source: staged version 12 (change), {self.f} (apply.sh)\n"), out)
+        # the grants carry the staged version's label, as the bundle compiles them
+        rc, out, err = run_cli(["--staged", self.f, "compile", "grants", "--mode", "verify", "--part", "assert"],
+                               cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, grants.sql(model.Policy(d), "verify", False, "assert", [], False, "version-12"))
+        # no pin, a wrong pin, a file edited after the pin: exit 2, nothing printed
+        for env in ({}, {"MEDCEA_POLICY_STAGED_SHA256": "0" * 64}, {"MEDCEA_POLICY_STAGED_SHA256": "x"}):
+            rc, out, err = run_cli(["--staged", self.f, "compile", "routes"], cli=self.cli, **env)
+            self.assertEqual((rc, out), (2, ""), env)
+        with open(self.f, "a") as fh:
+            fh.write("# edited\n")
+        rc, out, err = run_cli(["--staged", self.f, "compile", "routes"], cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha)
+        self.assertEqual((rc, out), (2, ""))
+        self.assertIn("changed after staging", err)
+
+    def test_refusals(self):
+        good = source.host_file_text(make_state(self.factory, 2, "change"), "abc1234", "2026-11-04T00:00:00Z")
+        bad = {"no header": good.split("\n", 1)[1],
+               "a body edit": good.replace("    qa:\n    - R\n", "    qa:\n    - R\n    - X\n", 1),
+               "not yaml": good + "\n[unclosed\n"}
+        for name, text in bad.items():
+            sha = self.stage_text(text)
+            rc, out, err = run_cli(["--staged", self.f, "compile", "routes"], cli=self.cli,
+                                   MEDCEA_POLICY_STAGED_SHA256=sha)
+            self.assertEqual((rc, out), (2, ""), name)
+        sha = self.stage_text(good)
+        for argv in (["--staged", self.f, "--defaults", "compile", "routes"],
+                     ["--staged", self.f, "--file", DEFAULTS, "compile", "routes"],
+                     ["--staged", self.f, "db-roles", "--names"],
+                     ["--staged", self.f, "skeleton-gate", "--against-git", "HEAD"],
+                     ["--staged", self.f, "write-applied", "--state", self.f]):
+            rc, out, _ = run_cli(argv, cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha)
+            self.assertEqual((rc, out), (2, ""), argv)
+        rc, out, err = run_cli(["--staged", self.f, "compile", "routes"], cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha,
+                               MEDCEA_POLICY_FILE=DEFAULTS, MEDCEA_POLICY_BREAK_GLASS="x")
+        self.assertEqual((rc, out), (2, ""))
+        self.assertIn("break-glass never applies a version", err)
+        rc, out, err = run_cli(["--staged", self.f, "compile", "routes"], cli=self.cli, MEDCEA_POLICY_STAGED_SHA256=sha)
+        self.assertEqual(rc, 0, err)
+
+    def test_body_binding_catches_a_consistent_edit_with_dropped_rows(self):
+        """§14.8.4 step 5.3 / C1: with dropped > 0 read_host_file cannot recompute the entries
+        digest, so a body edited with its body_digest recomputed passes it; body_binding,
+        from the database rows, does not."""
+        gone = "portal"
+        skel = copy.deepcopy(self.factory)
+        del skel["resource_groups"][gone]
+        st = make_state(self.factory, version=5, kind="change", accepted=skel)
+        good = source.host_file_text(st, "abc1234", "2026-11-04T00:00:00Z", data=skel)
+        self.assertNotIn(" dropped=0 ", good.split("\n")[1])
+        self.stage_text(good)
+        self.assertIsNone(source.body_binding(st, self.f))
+        lines = good.split("\n")
+        body = yaml.safe_load(good)
+        body["matrix"]["master_data"]["qc"] = ["R", "C", "U"]
+        old_bd = source.parse_body_header(good)["body_digest"]
+        lines[1] = lines[1].replace(old_bd, source.body_digest(body))
+        forged = "\n".join(lines[:4]) + "\n" + yaml.safe_dump(body, sort_keys=False, allow_unicode=True, width=1000)
+        self.stage_text(forged)
+        self.assertEqual(source.read_host_file(self.f).version, 5)          # its own checks pass
+        self.assertEqual(source.body_binding(st, self.f), f"{self.f}'s body is not version 5's rows")
+        # another version's file, and a file that fails its own checks
+        other = make_state(self.factory, version=6, kind="change", accepted=skel)
+        self.stage_text(good)
+        self.assertIn("not the staged version 6", source.body_binding(other, self.f))
+        self.stage_text(good.replace(" dropped=", " dropped=9", 1))
+        self.assertIsNotNone(source.body_binding(st, self.f))
 
 
 class Phase42aDelta(unittest.TestCase):

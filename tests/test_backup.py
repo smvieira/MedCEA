@@ -11,7 +11,9 @@
   Node-RED and Grafana and of nothing else (not PostgreSQL's, the broker's, the hub's or
   another namespace's volume); SHA256SUMS that sha256sum -c accepts; MANIFEST with sizes;
   OK last; the password in no argument, output or file. A failing pg_dump: exit 1, no OK,
-  nothing deleted.
+  nothing deleted. MANIFEST names the access policy's chain head (IAM 4.5), read with a
+  fake psql before the first dump; unavailable without the schema or when psql fails, and
+  the backup still completes.
 - Retention (backup-job.sh prune): only folders named like 20261102-023000Z and older than
   KEEP_DAYS go; never the newest complete one, never a symbolic link, never another name;
   a bad KEEP_DAYS deletes nothing.
@@ -139,6 +141,17 @@ class JobRun(unittest.TestCase):
                 'printf "PGDMP %s\\n" "$*" > "$f"\n')
         for n in ("pg_dump", "pg_dumpall"):
             write(os.path.join(self.bin, n), fake, 0o755)
+        # psql answers the chain-head query (stdin, kept for the test) as FAKE_PSQL says
+        write(os.path.join(self.bin, "psql"),
+              '#!/bin/sh\necho "psql $*" >> "$FAKE_LOG"\ncat > "$FAKE_LOG.sql"\n'
+              'case "${FAKE_PSQL:-head}" in\n'
+              '  head) echo "head 41 ' + "ab" * 32 + ' t" ;;\n'
+              '  broken) echo "head 41 ' + "ab" * 32 + ' f" ;;\n'
+              '  empty) echo "head none - t" ;;\n'
+              '  noschema) echo "no-schema" ;;\n'
+              '  garbage) echo "head 41 not-a-hash t" ;;\n'
+              '  fail) echo "psql: error: connection to server failed: Connection refused" >&2; exit 2 ;;\n'
+              'esac\n', 0o755)
         for claim in ("claim-alice", "claim-bob-2esmith", "node-red", "grafana",
                       "data-rdbms-postgresql-0", "mosquitto-data", "hub-db-dir"):
             write(os.path.join(self.st, f"medcea-{claim}-pvc-{UID}", "file.txt"), f"data of {claim}\n")
@@ -189,6 +202,48 @@ class JobRun(unittest.TestCase):
             for f in fs:
                 with open(os.path.join(r, f), "rb") as fh:
                     self.assertNotIn(SENTINEL.encode(), fh.read(), f)
+
+    def manifest_head(self, **extra):
+        p = self.run_job(BACKUP_NOW="1793586600", **extra)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        d = os.path.join(self.out, "20261102-023000Z")
+        with open(os.path.join(d, "MANIFEST")) as fh:
+            heads = [l for l in fh.read().splitlines() if l.startswith("# policy chain head")]
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        shutil.rmtree(d)
+        self.assertEqual(len(heads), 1)
+        return heads[0], p
+
+    def test_the_policy_chain_head_is_read_before_the_dump(self):
+        # IAM 4.5 (design §14.8.10, owner decision 10): read first, so the dump holds at least it
+        head, p = self.manifest_head()
+        self.assertEqual(head, "# policy chain head (read before the dump): 41 " + "ab" * 32 + " verify_chain=t")
+        self.assertIn("backup: policy chain head (read before the dump): 41", p.stdout)
+        with open(self.log) as fh:
+            calls = fh.read().splitlines()
+        first = [i for i, c in enumerate(calls) if c.startswith(("psql", "pg_dump "))]
+        self.assertTrue(calls[first[0]].startswith("psql --no-password"), calls)
+        self.assertIn("--dbname=medcea_db", calls[first[0]])
+        self.assertNotIn(SENTINEL, calls[first[0]])
+        with open(self.log + ".sql") as fh:
+            sql = fh.read()
+        self.assertIn("BEGIN TRANSACTION READ ONLY;", sql)
+        self.assertIn("iam_policy.history h ORDER BY h.event_id DESC LIMIT 1", sql)
+        self.assertIn("\\if :has_chain", sql)
+        self.assertIn("iam_policy.verify_chain()", sql)
+        # POLICY_DB names another database
+        head, _ = self.manifest_head(POLICY_DB="other_db")
+        with open(self.log) as fh:
+            self.assertIn("--dbname=other_db", [c for c in fh.read().splitlines() if c.startswith("psql")][-1])
+        self.assertTrue(self.manifest_head(FAKE_PSQL="broken")[0].endswith(" verify_chain=f"))
+
+    def test_an_unavailable_head_does_not_stop_the_backup(self):
+        for mode, why in (("noschema", "no iam_policy schema in medcea_db"),
+                          ("empty", "iam_policy.history is empty"),
+                          ("garbage", "unexpected answer from psql"),
+                          ("fail", "psql exit 2: psql: error: connection to server failed: Connection refused")):
+            head, _ = self.manifest_head(FAKE_PSQL=mode)
+            self.assertEqual(head, f"# policy chain head: unavailable ({why})", mode)
 
     def test_a_failed_dump_leaves_no_ok_and_deletes_nothing(self):
         old = os.path.join(self.out, "20200101-023000Z")
@@ -398,6 +453,8 @@ class HostCommand(unittest.TestCase):
         write(os.path.join(d, "volumes", "claim-alice.tar.gz"), "tar\n")
         subprocess.run("sha256sum db/medcea_db.dump volumes/claim-alice.tar.gz > SHA256SUMS", shell=True, cwd=d, check=True)
         write(os.path.join(d, "OK"), f"{e} x\n")
+        self.head = "policy chain head (read before the dump): 41 " + "ab" * 32 + " verify_chain=t"
+        write(os.path.join(d, "MANIFEST"), "# MedCEA backup\n# " + self.head + "\n")
         os.makedirs(os.path.join(self.dir, stamp(e + 60)))   # a later run without OK
 
     def tearDown(self):
@@ -428,6 +485,11 @@ class HostCommand(unittest.TestCase):
         p = self.run_cmd("verify")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn(f"OK: {self.name}, 2 files match", p.stdout)
+        # IAM 4.5: the chain head the job recorded, or that a folder from before 4.5 has none
+        self.assertEqual(p.stdout.splitlines()[-1], self.head)
+        os.remove(os.path.join(self.dir, self.name, "MANIFEST"))
+        self.assertEqual(self.run_cmd("verify").stdout.splitlines()[-1],
+                         "policy chain head: not recorded (a backup from before IAM 4.5)")
         write(os.path.join(self.dir, self.name, "volumes", "extra.tar.gz"), "x")
         p = self.run_cmd("verify", self.name)
         self.assertEqual(p.returncode, 1)
@@ -463,6 +525,12 @@ class HostCommand(unittest.TestCase):
         self.assertLess(a2, a3)
         self.assertIn("bash -c 'source infra/lib-lock.sh && medcea_lock && source infra/lib-policy-source.sh"
                       " && policy_state_retire restore'", out[a2:a3])
+        # IAM 4.5 (design §14.8.10): step 5 compares the restored chain with the recorded head
+        a5 = out.index("  5. (IAM 4.5)")
+        self.assertLess(a3, a5)
+        self.assertLess(a5, out.index("B. Keycloak"))
+        self.assertIn(f"({self.head})", out[a5:])
+        self.assertIn("iam_policy.verify_chain()", out[a5:])
 
     def test_now(self):
         p = self.run_cmd("now", "--timeout", "10")

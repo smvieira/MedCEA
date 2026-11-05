@@ -1,4 +1,4 @@
-"""The Policy UI's page, offline (apps/iam/html/policy.html, IAM 4.3, 4.4).
+"""The Policy UI's page, offline (apps/iam/html/policy.html, IAM 4.3–4.5).
 
 - The policy-logic block (pure functions between /* policy-logic:begin */ and
   /* policy-logic:end */) runs under node (skipped without node): cell classes (none, red
@@ -14,6 +14,11 @@
   a skeleton version without the attestation), whyNotText for every why_not code,
   describeTuple for every reach and system tuple kind, makersOf (a skeleton version's
   claimed person, never its fixed created_by_name).
+- IAM 4.5 (design §14.8.12): the apply state per version in words (statusText: "applied —
+  rollout incomplete", "approved — a previous apply was reverted"), what the host operator
+  does about it (applyStateNote), and the version a rollback restores with its reason
+  (rollbackTarget, the Confirm card); the stale "IAM 4.5" texts are gone, and the states the
+  page knows are exactly policy_api.apply_state's.
 - Every refusal the page translates is a RAISE of the author functions, iam_policy._qa,
   approve, return_version, confirm_applied, dispute_applied, _evidence,
   medcea_auth._approver or _person_actor in apps/database/medcea_db_migrations.sql (a
@@ -333,6 +338,36 @@ class Logic(unittest.TestCase):
         for (src, want), text in zip(cases.items(), got):
             self.assertIn(want, text, src)
 
+    def test_apply_state_words(self):
+        """§14.8.12: the Changes tab and the version selectors."""
+        got = run_node("""[statusText({status: 'applied', apply_state: 'rollout incomplete'}),
+            statusText({status: 'approved', apply_state: 'reverted'}),
+            statusText({status: 'withdrawn', apply_state: 'reverted'}),
+            statusText({status: 'superseded', apply_state: null}), statusText({status: 'draft'}), statusText(null)]""")
+        self.assertEqual(got, ["applied — rollout incomplete", "approved — a previous apply was reverted",
+                               "withdrawn", "superseded", "draft", ""])
+
+    def test_apply_state_notes(self):
+        got = run_node("""[applyStateNote({version: 8, status: 'applied', apply_state: 'rollout incomplete'}),
+            applyStateNote({version: 9, status: 'approved', apply_state: 'reverted'}),
+            applyStateNote({version: 9, status: 'withdrawn', apply_state: 'reverted'}),
+            applyStateNote({version: 1, status: 'applied', apply_state: null}), applyStateNote(null)]""")
+        self.assertIn("./apps/iam/apply.sh --resume", got[0])
+        self.assertIn("Version 8", got[0])
+        self.assertIn("./apps/iam/apply.sh 9 again", got[1])
+        self.assertIn("No draft can start while it is open", got[1])
+        self.assertEqual(got[2:], ["", "", ""])
+
+    def test_rollback_target(self):
+        vs = [{"version": 9, "kind": "rollback", "rollback_of": 1, "reason": "E19"},
+              {"version": 7, "kind": "change", "rollback_of": None, "reason": "narrow qc"},
+              {"version": 1, "kind": "bootstrap", "reason": "the factory policy"},
+              {"version": 10, "kind": "rollback", "rollback_of": 4, "reason": "x"}]
+        got = run_node("(vs => [rollbackTarget(vs[0], vs), rollbackTarget(vs[1], vs), rollbackTarget(vs[3], vs), "
+                       "rollbackTarget(vs[0], null), rollbackTarget(null, vs)])(%s)" % json.dumps(vs))
+        self.assertEqual(got, [{"version": 1, "reason": "the factory policy"}, None, {"version": 4, "reason": None},
+                               {"version": 1, "reason": None}, None])
+
 
 # The RAISE leads of design §14.7.12 the page translates, as the SQL writes them.
 LEADS_43 = ("apply.sh recorded you as running version %", "version % is already %",
@@ -448,6 +483,31 @@ class Sources(unittest.TestCase):
         acts = set(re.findall(r"'(\w+)':", m.group(1)))
         self.assertEqual(acts, {"draft", "edit", "submit", "withdraw", "approve", "return"})
         self.assertEqual(set(re.findall(r"ME\.acts\.(\w+)", read(PAGE))), acts)
+
+    def test_45_texts(self):
+        """§14.8.12: the stale "IAM 4.5" texts are gone; the apply states shown are iam-api's;
+        every version list the page renders goes through statusText; the Confirm card names
+        the rollback's target."""
+        page = read(PAGE)
+        shown = re.sub(r"^\s*//.*$", "", page, flags=re.M)     # the logic block's comments name the slice
+        self.assertNotIn("IAM 4.5", shown)
+        self.assertNotIn("arrives with", shown)
+        self.assertIn("Nothing approved is applied until the host operator runs <code>./apps/iam/apply.sh N</code>", page)
+        self.assertIn("your other accounts are checked when the version is applied.", page)
+        self.assertIn("It is applied when the host operator runs ./apps/iam/apply.sh ${n}.", page)
+        self.assertNotRegex(page, r"\$\{esc\((?:v|open|meta)\.status\)\}")
+        self.assertNotIn("meta.status ||", page)
+        api = read(API)
+        body = api[api.index("def apply_state("):]
+        body = body[:body.index("\n\n\n")]
+        self.assertEqual(set(re.findall(r"return '([a-z ]+)'", body)), {"rollout incomplete", "reverted"})
+        logic = logic_block()
+        for state in ("rollout incomplete", "reverted"):
+            self.assertIn("v.apply_state === '%s'" % state, logic)
+        pending = page[page.index("async function loadPending("):]
+        pending = pending[:pending.index("\n}\n")]
+        self.assertIn("rollbackTarget(v, VERSIONS)", pending)
+        self.assertIn("rollback to version ${rb.version}", pending)
 
     def test_diff_is_hashed_from_the_bytes(self):
         """fetchDiff hashes the response's ArrayBuffer and parses the same buffer (§14.7.3)."""

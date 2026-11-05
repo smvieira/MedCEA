@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """tests/iam_policy_flow.py — IAM 4.4's drafting and approval through the Policy UI with real
-tokens (design §14.7.8). Called by tests/iam-policy.sh, which creates the throwaway accounts
-and passes them on stdin as JSON:
+tokens (design §14.7.8), and the Policy UI half of IAM 4.5's live applies (design §14.8.11).
+Called by tests/iam-policy.sh, which creates the throwaway accounts and passes them on stdin as
+JSON:
 
   {"users": {"admin": {...}, "admin2": {...}, "qa": {...}, "qa2": {...}},
    "cacert": PATH-or-null, "out": PATH}
   each user: {"id": KEYCLOAK_ID, "username": U, "password": P, "person_id": PID, "role": R}
 
   tests/iam_policy_flow.py run        steps 0-12 (13, health, is the shell's)
+  tests/iam_policy_flow.py run --apply
+                                      steps 0-11 with the cell back at its applied levels
+                                      (a true no-op version), left approved for apply.sh
+  tests/iam_policy_flow.py run --change
+                                      steps 0-11 with the harmless narrowing, left approved
   tests/iam_policy_flow.py withdraw   the trap's first step: test-admin withdraws the version
                                       this run created ("out"), when it is still open
+  tests/iam_policy_flow.py confirm V  test-qa confirms rollback version V in the Policy UI
+                                      (the Confirm tab's call, with the attestation /api/me gives)
 
 Every account signs in the way a browser does (tests/iam_signin_flow.py's sign_in: host →
 Keycloak's form → the proxy's callback) and then calls iam-api :8083 with its session cookie,
@@ -17,10 +25,16 @@ as the page does: JSON bodies, Content-Type application/json and Origin https://
 The cells it edits are chosen offline with the checker (compiler/invariants.py) from the
 applied policy (model.load(), the host file the read-only init pointed at): a harmless
 narrowing of a role outside qa's closure (so step 10's own-widening check passes) and a cell
-that breaks I16 (step 4). The version number goes to "out" as soon as it exists, so the trap
-can withdraw it. Step 8 runs psql as iam_svc in the PostgreSQL pod (KUBECTL, NAMESPACE,
-POSTGRES_DB and IAM_SVC_DB_PASS from the environment; the password on stdin). Prints one line
-per step; exit 1 on any failure. Passwords and tokens are never printed.
+that breaks I16 (step 4). Under --apply and --change a guard runs before anything is drafted:
+the applied policy and the version that would be applied are compiled (apply_check.compile_all,
+every target) and the run stops with exit 2 when a target outside routes and grants-* would
+change, so a cell that moves a gate, Grafana, pgAdmin, MQTT or a NetworkPolicy never reaches
+production (design §14.8.11). The version number goes to "out" as soon as it exists, so the
+trap can withdraw it; under --change "out" also gets the table privileges the narrowing
+removes ("lost": [grantee, object, privilege]), which the shell checks with has_table_privilege.
+Step 8 runs psql as iam_svc in the PostgreSQL pod (KUBECTL, NAMESPACE, POSTGRES_DB and
+IAM_SVC_DB_PASS from the environment; the password on stdin). Prints one line per step; exit 1
+on any failure, 2 when the guard refuses. Passwords and tokens are never printed.
 """
 import copy
 import hashlib
@@ -30,6 +44,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,7 +53,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 sys.path.insert(0, os.path.join(REPO, "tests"))
 
-from compiler import invariants, model  # noqa: E402
+from compiler import grants, invariants, model  # noqa: E402
 from iam_signin_flow import opener, sign_in  # noqa: E402
 
 DOMAIN = os.environ.get("POLICY_DOMAIN", "")
@@ -46,6 +61,13 @@ ORIGIN = "https://%s" % DOMAIN
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 OPEN = ("draft", "submitted", "approved")
 FAILS = []
+# what a live --apply/--change may move (design §14.8.11): anything else would roll a proxy,
+# Grafana, pgAdmin, the broker's rows or a NetworkPolicy on production for a test
+GUARD_ALLOWED = re.compile(r"^(routes|grants-.*)$")
+
+
+class Refuse(Exception):
+    """The guard's refusal: exit 2, nothing drafted."""
 
 
 def ok(step, msg):
@@ -168,6 +190,40 @@ def pick_cells(p):
     return None, None
 
 
+def guard(p, p_new):
+    """The targets outside GUARD_ALLOWED that differ between the applied policy and p_new,
+    each compiled from its own file with the same label (apply_check.compile_all: every
+    target, the checker first). Raises Refuse when either side does not compile."""
+    import apply_check
+    import yaml
+    with tempfile.TemporaryDirectory() as d:
+        outs = []
+        for name, pol in (("applied.yaml", p), ("draft.yaml", p_new)):
+            path = os.path.join(d, name)
+            with open(path, "w") as f:
+                yaml.safe_dump(pol.data, f, sort_keys=False)
+            try:
+                outs.append(apply_check.compile_all(["--file", path, "--label", "iam-policy-guard"]))
+            except SystemExit as e:
+                raise Refuse("the %s side does not compile (exit %s)" % (name[:-5], e.code))
+    old, new = outs
+    return sorted(t for t in set(old) | set(new)
+                  if not GUARD_ALLOWED.match(t) and old.get(t) != new.get(t))
+
+
+def lost_privileges(p, p_new, role):
+    """[grantee, object, privilege] of the table privileges role's database role holds under p
+    and not under p_new (grants.privileges, the compile the bundle applies)."""
+    dbr = grants.people(p)[role]
+    gone = set(grants.privileges(p)) - set(grants.privileges(p_new))
+    return sorted([g, o, pr] for g, k, o, pr in gone if g == dbr and k == "table")
+
+
+def write_out(data, info):
+    with open(data["out"], "w") as f:
+        json.dump(info, f)
+
+
 # ── step 8: iam_svc in the PostgreSQL pod ───────────────────────────────────────────────
 def iam_svc_approve(v, qa):
     """psql as iam_svc, set_actor as the qa person, then medcea.approve_policy: (rc, output)."""
@@ -189,7 +245,7 @@ def iam_svc_approve(v, qa):
 
 
 # ── the steps ───────────────────────────────────────────────────────────────────────────
-def steps(data, ops):
+def steps(data, ops, mode="default"):
     us = data["users"]
     for k in ("admin", "admin2", "qa", "qa2"):
         ops[k] = opener(data.get("cacert"))
@@ -222,6 +278,19 @@ def steps(data, ops):
     g, r, (lv0, cons0), (lv1, cons1) = harmless
     print("  ....       the harmless cell: %s on %s, %s → %s" % (
         r, g, "".join(sorted(lv0, key=list(p.levels).index)), "".join(sorted(lv1, key=list(p.levels).index))))
+    # where steps 2-4 leave the cell: --apply puts it back at its applied levels (a no-op
+    # version, design §14.8.11), the other modes keep the narrowing
+    fin = (lv0, cons0) if mode == "apply" else (lv1, cons1)
+    info = {}
+    if mode != "default":
+        p_new = with_cell(p, g, r, lv1, cons1)
+        moved = guard(p, p_new)
+        if moved:
+            raise Refuse("the harmless cell (%s on %s) would also change %s: only routes and grants-* may "
+                         "move in a live apply; nothing was drafted" % (r, g, ", ".join(moved)))
+        ok("guard", "the narrowing changes only routes and grants-* targets (the rest compile byte-identical)")
+        info = {"group": g, "role": r, "mode": mode,
+                "lost": lost_privileges(p, p_new, r) if mode == "change" else []}
 
     # 1 — a draft from applied, its verdict recorded at creation
     status, d = call(adm, "POST", "/api/policy/draft", {"from": "applied", "reason": "test: iam-policy.sh step 1"})
@@ -229,8 +298,8 @@ def steps(data, ops):
     if status != 201 or not isinstance(v, int):
         bad("1", "draft from applied: %s %s" % (status, err(d)))
         return
-    with open(data["out"], "w") as f:
-        json.dump({"version": v}, f)
+    info["version"] = v
+    write_out(data, info)
     _, row = version_row(adm, v)
     (ok if verdict(d).get("ok") is True and row.get("status") == "draft" and row.get("kind") == "change"
      else bad)("1", "admin drafted version %s from applied (%s, %s, checker %s)" % (
@@ -260,10 +329,13 @@ def steps(data, ops):
         s5, f = call(adm, "POST", "/api/policy/%d/submit" % v, {"reason": "test: iam-policy.sh step 4"})
         (ok if s5 == 409 and isinstance(f, dict) and f.get("errors") else bad)(
             "4", "submit while red: %s %s" % (s5, err(f)))
-        s6, e = put(adm2, lv1, cons1, 4, "reverted")
+        s6, e = put(adm2, fin[0], fin[1], 4, "reverted" if mode != "apply" else "back at its applied levels")
         (ok if s6 == 200 and verdict(e).get("ok") is True else bad)("4", "admin2 reverted it: %s" % s6)
     else:
         bad("4", "the applied policy offers no cell that breaks I16 from the harmless one")
+        if mode == "apply":   # the cell still holds step 3's narrowing: never apply that
+            s6, e = put(adm2, lv0, cons0, 4, "back at its applied levels")
+            (ok if s6 == 200 and verdict(e).get("ok") is True else bad)("4", "admin2 put the cell back: %s" % s6)
 
     # 5 — submitted
     s, sub = call(adm, "POST", "/api/policy/%d/submit" % v, {"reason": "test: iam-policy.sh step 5"})
@@ -307,9 +379,14 @@ def steps(data, ops):
         bad("10", "qa could not fetch the diff: HTTP %s" % s)
         return
     cells = [(c.get("group"), c.get("role")) for c in d10["doc"].get("cells") or []]
-    (ok if d10["diff_digest"] == d10["header_digest"] and (g, r) in cells else bad)(
-        "10", "the diff loaded intact (sha256 = X-Medcea-Diff-Digest: %s) and lists %s on %s" % (
-            d10["diff_digest"] == d10["header_digest"], r, g))
+    if mode == "apply":   # the no-op version: its diff lists no cell
+        (ok if d10["diff_digest"] == d10["header_digest"] and not cells else bad)(
+            "10", "the diff loaded intact (sha256 = X-Medcea-Diff-Digest: %s) and lists no cell (%d)" % (
+                d10["diff_digest"] == d10["header_digest"], len(cells)))
+    else:
+        (ok if d10["diff_digest"] == d10["header_digest"] and (g, r) in cells else bad)(
+            "10", "the diff loaded intact (sha256 = X-Medcea-Diff-Digest: %s) and lists %s on %s" % (
+                d10["diff_digest"] == d10["header_digest"], r, g))
     s, x = call(qa, "POST", "/api/policy/%d/approve" % v, approval_body(d10, "test: iam-policy.sh step 10"))
     doc, row = version_row(qa, v)
     good = (s == 200 and row.get("status") == "approved" and row.get("diff_digest") == d10["diff_digest"]
@@ -328,16 +405,22 @@ def steps(data, ops):
     (ok if s == 200 and isinstance(c, dict) and c.get("ok") is True else bad)(
         "11", "verify_chain: %s" % (c.get("detail") or c.get("ok") if isinstance(c, dict) else c))
 
-    # 12 — withdrawn by an admin
+    # 12 — withdrawn by an admin; --apply and --change leave it approved for apply.sh (the shell)
+    if mode != "default":
+        return
     s, x = call(adm, "POST", "/api/policy/%d/withdraw" % v, {"reason": "test: iam-policy.sh step 12"})
     _, row = version_row(adm, v)
     (ok if s == 200 and row.get("status") == "withdrawn" else bad)(
         "12", "admin withdrew version %s: %s; %s" % (v, s, row.get("status")))
 
 
-def run(data):
+def run(data, mode="default"):
     ops = {}
-    steps(data, ops)
+    try:
+        steps(data, ops, mode)
+    except Refuse as e:
+        print("  STOP  guard %s" % e)
+        return 2
     return 1 if FAILS else 0
 
 
@@ -363,12 +446,41 @@ def withdraw(data):
     return 0 if s == 200 else 1
 
 
+def confirm(data, v):
+    """test-qa confirms rollback version v in the Policy UI (the Confirm tab's call: a note and
+    the attestation text /api/me gives, forwarded to config-api with test-qa's own token)."""
+    op = opener(data.get("cacert"))
+    status, url, _ = sign_in(op, DOMAIN, data["users"]["qa"])
+    if status != 200:
+        bad("conf", "test-qa could not sign in to confirm version %s (HTTP %s)" % (v, status))
+        return 1
+    _, me = call(op, "GET", "/api/me")
+    attest = me.get("attest") if isinstance(me, dict) else None
+    _, row = version_row(op, v)
+    if row.get("confirmed_at"):
+        ok("conf", "version %s is already confirmed" % v)
+        return 0
+    s, x = call(op, "POST", "/api/policy/%d/confirm" % v,
+                {"note": "test: iam-policy.sh confirms the rollback", "attest": attest or ""})
+    _, row = version_row(op, v)
+    (ok if s == 200 and row.get("confirmed_at") else bad)(
+        "conf", "test-qa confirmed rollback version %s: %s %s; confirmed %s" % (
+            v, s, "" if s == 200 else err(x), bool(row.get("confirmed_at"))))
+    return 1 if FAILS else 0
+
+
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ("run", "withdraw"):
-        print("usage: tests/iam_policy_flow.py run|withdraw  (accounts JSON on stdin)", file=sys.stderr)
-        return 2
-    data = json.load(sys.stdin)
-    return run(data) if sys.argv[1] == "run" else withdraw(data)
+    a = sys.argv[1:]
+    usage = "usage: tests/iam_policy_flow.py run [--apply|--change] | withdraw | confirm V  (accounts JSON on stdin)"
+    if a[:1] == ["run"] and len(a) <= 2 and (len(a) == 1 or a[1] in ("--apply", "--change")):
+        mode = a[1][2:] if len(a) == 2 else "default"
+        return run(json.load(sys.stdin), mode)
+    if a == ["withdraw"]:
+        return withdraw(json.load(sys.stdin))
+    if len(a) == 2 and a[0] == "confirm" and re.fullmatch(r"[1-9][0-9]{0,8}", a[1]):
+        return confirm(json.load(sys.stdin), int(a[1]))
+    print(usage, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

@@ -588,14 +588,14 @@ class Resume(unittest.TestCase):
             text = f.read()
         i = text.index("'apply_deferred_open'")
         self.assertIn("c.event IN ('applied', 'bootstrap_applied')", text[i:i + 600])
-        self.assertIn("'apply_deferred')", text[text.index("'last_apply_event'"):][:400])
+        self.assertIn("'apply_deferred')", text[text.index("'last_apply_event'"):][:600])
 
     def test_resume_accepts_a_deferral(self):
         with open(os.path.join(REPO, "apps/iam/apply.sh")) as f:
             text = f.read()
         self.assertRegex(text, r"\n    apply_deferred\) log ")
-        self.assertIn('done < <(py "$CHECK" owners --scoped)', text)
-        self.assertIn("4) DEFERRED+=", text)
+        self.assertIn('mapfile -t cmds < <(py "$CHECK" owners --scoped)', text)   # AS.rollout (4.5)
+        self.assertRegex(text, r"\n +4\) if \[\[ ! \" \$\{DEFERRED\[\*\]\} \" == \*\" \$cmd \"\* \]\]; then\n +DEFERRED\+=")
 
 
 if __name__ == "__main__":

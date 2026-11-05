@@ -45,6 +45,12 @@ skeleton version changes, the document qa approves: cells, waivers, reach per ro
 system reach both ways. diff_bytes() is source.canonical() of it and diff_digest() its
 sha256, the one serialisation iam-api serves, the browser hashes and apply.sh stores.
 who_can(p, obj) (§14.7.5) is one object's holders, from the same tuples.
+
+rollback_bound(today, k_skel, rows) (IAM 4.5, design §14.8.7, OA-c) is apply.sh
+--rollback-to's limit: version K's rows under today's accepted skeleton may reach, per person
+role, nothing they did not reach under the skeleton K was approved under. bound_skeleton()
+picks that skeleton's body (the YAML at K's commit when it carries the digest, else the jsonb
+body with the gate's level order, level_order()).
 """
 import copy
 import hashlib
@@ -292,11 +298,7 @@ def gate(accepted, git, ew):
         out["verdict"] = "equal"
         return out
     # the accepted body may come from jsonb (keys sorted): compose it with the git level order
-    acc_skel = copy.deepcopy(acc_skel)
-    if isinstance(acc_skel.get("levels"), dict) and isinstance(git_skel.get("levels"), dict):
-        order = [l for l in git_skel["levels"] if l in acc_skel["levels"]]
-        order += sorted(l for l in acc_skel["levels"] if l not in order)
-        acc_skel["levels"] = {l: acc_skel["levels"][l] for l in order}
+    acc_skel = level_order(acc_skel, git_skel)
     p_old = model.Policy(source.compose(acc_skel, ew, drop_unknown=True))
     p_new = model.Policy(source.compose(git_skel, ew, drop_unknown=True))
     for role in sorted(set(p_old.roles) | set(p_new.roles)):
@@ -315,6 +317,18 @@ def gate(accepted, git, ew):
         out["added"]["_sections"] = _listed(sec)
     out["verdict"] = "widening" if out["added"] else "narrowing"
     return out
+
+
+def level_order(skel, ref):
+    """A copy of skeleton `skel` (a jsonb body: keys sorted) with its levels in `ref`'s order,
+    then the rest sorted: the order feeds compose's cells, so a jsonb body is never composed
+    unreordered (gate, rollback_bound; apply_check._composed does the same)."""
+    skel = copy.deepcopy(skel)
+    if isinstance(skel.get("levels"), dict) and isinstance(ref.get("levels"), dict):
+        order = [l for l in ref["levels"] if l in skel["levels"]]
+        order += sorted(l for l in skel["levels"] if l not in order)
+        skel["levels"] = {l: skel["levels"][l] for l in order}
+    return skel
 
 
 def checker_errors(git, ew):
@@ -345,8 +359,9 @@ def _describe(t):
 
 
 def gate_message(g, first=10):
-    """The refusal text (exit 3) of a widening gate, before IAM 4.5 (design §14.4.5; the proposal
-    line since 4.4, §14.7.6)."""
+    """The refusal text (exit 3) of a widening gate (design §14.4.5; the proposal line since
+    4.4, §14.7.6; since 4.5, §14.8.4, the way on names the approved skeleton version whose
+    digest HEAD carries, g["approved_version"], when cli.py skeleton-gate found one)."""
     lines = [f"ERROR: this git change gives access that has not been approved "
              f"(skeleton {g['git_digest'][:12]} over the accepted {g['accepted_digest'][:12]}):"]
     for role, ts in g["added"].items():
@@ -361,13 +376,63 @@ def gate_message(g, first=10):
         lines.append(f"  anonymous and services: {'; '.join(_describe(t) for t in ts[:first])}{more}")
     if g["added"].get("_sections"):
         lines.append("  checker: " + "; ".join(_describe(t) for t in g["added"]["_sections"]))
-    lines += ["This change needs a qa-approved skeleton version: put HEAD back at the accepted skeleton, keep the "
-              "change as a commit on a branch, and run ./apps/iam/apply.sh --propose-skeleton --by <you> "
-              "--reason \"<why>\" --from-git <commit>; qa approves it in the Policy UI. Applying an approved "
-              "skeleton version arrives with IAM 4.5.",
-              "Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the matrix, never the skeleton.",
+    if g.get("approved_version"):
+        v = g["approved_version"]
+        lines.append(f"This skeleton is approved as version {v}: run ./apps/iam/apply.sh {v} --by <you> to apply it "
+                     "(deploys refuse it until then).")
+    else:
+        lines.append("This change needs a qa-approved skeleton version: put HEAD back at the accepted skeleton, keep "
+                     "the change as a commit on a branch, and run ./apps/iam/apply.sh --propose-skeleton --by <you> "
+                     "--reason \"<why>\" --from-git <commit>; once qa approves it, check that commit out and run "
+                     "./apps/iam/apply.sh <version>.")
+    lines += ["Break-glass (MEDCEA_POLICY_FILE) does not bypass this check: it changes the matrix, never the skeleton.",
               "Nothing was changed."]
     return "\n".join(lines)
+
+
+# ── the rollback bound (IAM 4.5, design §14.8.7 step 5, OA-c) ──────────────────────────
+def bound_skeleton(k_digest, k_yaml=None, k_body=None, ref=None):
+    """(skeleton, how) of the skeleton version K was approved under, digest k_digest: K's
+    commit's defaults.yaml (k_yaml, its own key order) when its skeleton digest is k_digest,
+    how "yaml"; else the stored jsonb body k_body with its levels in ref's order (the git
+    skeleton's: level_order), how "jsonb". SourceError when neither carries the digest."""
+    if k_yaml is not None and source.skeleton_digest(k_yaml) == k_digest:
+        return source.skeleton(k_yaml), "yaml"
+    if isinstance(k_body, dict) and source.skeleton_digest(k_body) == k_digest:
+        return level_order(source.skeleton(k_body), source.skeleton(ref or source.factory())), "jsonb"
+    raise source.SourceError(f"no skeleton body carries the digest {str(k_digest)[:12]} version K was approved under")
+
+
+def rollback_bound(today, k_skel, rows):
+    """apply.sh --rollback-to's bound: {added: {role: [tuples]}, dropped: {today, k}}. K's
+    rows `rows` (entries_and_waivers shape) composed with today's accepted skeleton `today`
+    and with K's own skeleton `k_skel` (bound_skeleton), rows naming a key a skeleton lacks
+    dropped and counted (never refused: retired keys stay in iam_policy's tables); added is,
+    for every person role of today's skeleton, reach(today + K) - reach(K's + K)
+    (model.widening_between). Empty added: the bound holds."""
+    p_today, d_today = source.compose_counted(source.skeleton(today), rows, drop_unknown=True)
+    p_k, d_k = source.compose_counted(source.skeleton(k_skel), rows, drop_unknown=True)
+    p_today, p_k = model.Policy(p_today), model.Policy(p_k)
+    added = {}
+    for role in sorted(p_today.roles, key=_bytes):
+        extra = model.widening_between(p_k, p_today, role)
+        if extra:
+            added[role] = _listed(extra)
+    return {"added": added, "dropped": {"today": d_today, "k": d_k}}
+
+
+def rollback_refusal(k, bound, first=3):
+    """The refusal of a rollback past its bound (design §14.8.7 step 5), naming the first
+    `first` roles and, for each, its first `first` tuples; None when the bound holds."""
+    if not bound["added"]:
+        return None
+    parts = []
+    for role, ts in list(bound["added"].items())[:first]:
+        parts.append(f"{role}: " + "; ".join(_describe(t) for t in ts[:first]) + (" …" if len(ts) > first else ""))
+    if len(bound["added"]) > first:
+        parts.append(f"{len(bound['added']) - first} more role(s)")
+    return (f"version {k} under today's skeleton grants more than was approved ({' | '.join(parts)}): draft from "
+            f"version {k} in the Policy UI (Changes → New draft from version {k}) and have qa approve it")
 
 
 # ── cell: one matrix cell explained (IAM 4.3, the Policy UI's "See more") ─────────────

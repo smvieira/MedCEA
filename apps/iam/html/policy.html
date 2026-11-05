@@ -114,7 +114,8 @@ details pre { white-space: pre-wrap; font: 12px var(--mono); margin: 4px 0; }
   </section>
 
   <section class="view" id="view-changes" hidden>
-    <div class="note">Every version of the access policy. A change is drafted by an administrator, edited cell by cell in the Matrix, submitted, and approved by a quality assurance person who is none of its authors. Nothing approved is applied until the host operator runs <code>apply.sh</code> (IAM 4.5).</div>
+    <div class="note">Every version of the access policy. A change is drafted by an administrator, edited cell by cell in the Matrix, submitted, and approved by a quality assurance person who is none of its authors. Nothing approved is applied until the host operator runs <code>./apps/iam/apply.sh N</code>.</div>
+    <div id="apply-notes"></div>
     <div id="draft-form"></div>
     <div id="open-card"></div>
     <table class="list" id="changes"></table>
@@ -410,6 +411,32 @@ function makersOf(v) {
 function draftSources(versions) {
   return ['applied', 'defaults'].concat((versions || []).filter(v => v.status !== 'draft').map(v => String(v.version)));
 }
+
+// ── IAM 4.5: the apply state (GET /api/policy's apply_state, design §14.8.12) ─────────
+// A version's status as the Changes tab and the version selectors show it.
+function statusText(v) {
+  if (!v) return '';
+  if (v.apply_state === 'rollout incomplete') return `${v.status} — rollout incomplete`;
+  if (v.apply_state === 'reverted' && v.status === 'approved') return 'approved — a previous apply was reverted';
+  return v.status || '';
+}
+
+// What the host operator does about a version's apply state ('' when nothing).
+function applyStateNote(v) {
+  if (!v) return '';
+  if (v.apply_state === 'rollout incomplete')
+    return `Version ${v.version}: the apply is committed but its rollout is not finished. The host operator runs ./apps/iam/apply.sh --resume.`;
+  if (v.apply_state === 'reverted' && v.status === 'approved')
+    return `Version ${v.version}: its apply failed and was reverted; the version is approved again. The host operator fixes the cause and runs ./apps/iam/apply.sh ${v.version} again, or it is withdrawn. No draft can start while it is open.`;
+  return '';
+}
+
+// The version a rollback restores, as its Confirm card shows it: {version, reason} or null.
+function rollbackTarget(v, versions) {
+  if (!v || v.kind !== 'rollback' || v.rollback_of == null) return null;
+  const k = (versions || []).find(x => x.version === v.rollback_of);
+  return { version: v.rollback_of, reason: k ? k.reason : null };
+}
 /* policy-logic:end */
 
 const $ = id => document.getElementById(id);
@@ -488,8 +515,8 @@ async function refreshVersions() {
   VERSIONS = LIST.versions || [];
   const cur = $('ver').value;
   $('ver').innerHTML = VERSIONS.map(v =>
-    `<option value="${v.version}"${(cur ? String(v.version) === cur : v.status === 'applied') ? ' selected' : ''}>${v.version} (${esc(v.kind)}, ${esc(v.status)})</option>`).join('');
-  $('wc-ver').innerHTML = '<option value="applied">applied</option>' + VERSIONS.map(v => `<option value="${v.version}">${v.version} (${esc(v.kind)}, ${esc(v.status)})</option>`).join('');
+    `<option value="${v.version}"${(cur ? String(v.version) === cur : v.status === 'applied') ? ' selected' : ''}>${v.version} (${esc(v.kind)}, ${esc(statusText(v))})</option>`).join('');
+  $('wc-ver').innerHTML = '<option value="applied">applied</option>' + VERSIONS.map(v => `<option value="${v.version}">${v.version} (${esc(v.kind)}, ${esc(statusText(v))})</option>`).join('');
   const hv = $('hist-ver').value;
   $('hist-ver').innerHTML = '<option value="">all</option>' + VERSIONS.map(v => `<option value="${v.version}"${String(v.version) === hv ? ' selected' : ''}>${v.version}</option>`).join('');
 }
@@ -500,10 +527,11 @@ async function loadMatrix(v) {
   } catch (e) { return refused(e); }
   const roles = DOC.roles, groups = DOC.groups;
   const meta = metaOf(DOC.version);
-  $('ver-info').textContent = `version ${DOC.version} (${meta.kind || '?'}, ${meta.status || '?'})` +
+  $('ver-info').textContent = `version ${DOC.version} (${meta.kind || '?'}, ${statusText(meta) || '?'})` +
     (meta.confirmed_at ? ', confirmed' : meta.disputed_at ? ', DISPUTED' : meta.needs_confirmation ? ', waiting for confirmation' : '');
   let banner = '';
   if (meta.kind === 'skeleton') banner += '<div class="note">Kind skeleton: its entries are the applied ones; what changes is the platform skeleton (Approval → diff).</div>';
+  if (applyStateNote(meta)) banner += `<div class="note">${esc(applyStateNote(meta))}</div>`;
   if (editing()) banner += `<div class="note">Edit mode: version ${DOC.version} is a draft. Click a cell to change it; each save records the checker's verdict. Submit stays disabled while the checker lists errors.</div>`;
   $('ver-banner').innerHTML = banner;
   const ck = DOC.checker || {};
@@ -618,9 +646,11 @@ function checkersOf(v) {
 async function loadChanges() {
   try { await refreshVersions(); } catch (e) { return refused(e); }
   const open = LIST.open == null ? null : metaOf(LIST.open);
+  const notes = VERSIONS.map(applyStateNote).filter(Boolean);
+  $('apply-notes').innerHTML = notes.map(x => `<div class="error">${esc(x)}</div>`).join('');
   if (ME.acts && ME.acts.draft) {
     $('draft-form').innerHTML = `<div class="card"><h3 style="margin-top:0">New draft</h3>` +
-      (open ? `<div class="note">Version ${open.version} (${esc(open.kind)}, ${esc(open.status)}) is still open: take it through or withdraw it before you start another draft.</div>` : '') +
+      (open ? `<div class="note">Version ${open.version} (${esc(open.kind)}, ${esc(statusText(open))}) is still open: take it through or withdraw it before you start another draft.</div>` : '') +
       `<div class="bar"><label>Start from <select id="dr-from">${draftSources(VERSIONS).map(x => `<option value="${esc(x)}">${esc(x === 'applied' ? 'the applied version' : x === 'defaults' ? 'the factory defaults' : 'version ' + x)}</option>`).join('')}</select></label></div>
       <label>Reason (required)<textarea id="dr-reason" maxlength="2000"></textarea></label>
       <div class="row"><button class="btn" id="dr-go" disabled>Create the draft</button></div></div>`;
@@ -639,9 +669,10 @@ async function loadChanges() {
   $('open-card').innerHTML = '';
   if (open && ME.acts && (ME.acts.submit || ME.acts.withdraw)) await openCard(open);
   $('changes').innerHTML = '<tr><th>#</th><th>Kind, status</th><th>Made by</th><th>Checked by</th><th>Reason</th></tr>' + VERSIONS.map(v =>
-    `<tr><td><a href="#" data-matrix="${v.version}">${v.version}</a></td><td>${esc(v.kind)}, <b>${esc(v.status)}</b>` +
+    `<tr><td><a href="#" data-matrix="${v.version}">${v.version}</a></td><td>${esc(v.kind)}, <b>${esc(statusText(v))}</b>` +
       (v.kind === 'skeleton' && v.skeleton_commit ? `<br>git commit <code>${esc(v.skeleton_commit)}</code>` : '') +
-      (v.based_on != null ? `<br>based on ${v.based_on}` : '') + `</td>` +
+      (v.based_on != null ? `<br>based on ${v.based_on}` : '') +
+      (v.kind === 'rollback' && v.rollback_of != null ? `<br>rollback to version ${v.rollback_of}` : '') + `</td>` +
     `<td>${esc(makersOf(v).join('; ') || v.created_by_name || '')}<br><span class="mono">${when(v.created_at)}</span></td>` +
     `<td>${esc(checkersOf(v).join('; '))}${v.return_note ? `<br>returned by qa ${when(v.returned_at)}: ${esc(v.return_note)}` : ''}` +
       (v.withdrawn_at ? `<br>withdrawn ${when(v.withdrawn_at)}${v.withdrawn_by ? ' by ' + esc(v.withdrawn_by) : ''}` : '') + `</td>` +
@@ -659,7 +690,7 @@ async function openCard(v) {
   }
   const canSubmit = ME.acts.submit && v.kind === 'change' && v.status === 'draft';
   const ok = submitEnabled(doc, v);
-  $('open-card').innerHTML = `<div class="card"><h3 style="margin-top:0">Open: version ${v.version} (${esc(v.kind)}, ${esc(v.status)})</h3>
+  $('open-card').innerHTML = `<div class="card"><h3 style="margin-top:0">Open: version ${v.version} (${esc(v.kind)}, ${esc(statusText(v))})</h3>
     <dl><dt>Made by</dt><dd>${esc(makersOf(v).join('; '))}</dd><dt>Reason</dt><dd>${esc(v.reason)}</dd>
     ${v.return_note ? `<dt>Returned by qa</dt><dd>${esc(v.return_note)}</dd>` : ''}</dl>
     ${canSubmit && !ok ? `<div class="note">Submit stays disabled while the checker lists errors${doc ? ` (${(doc.checker.errors || []).length})` : ''}: fix the red cells in the <a href="#" data-matrix="${v.version}">Matrix</a>.</div>` : ''}
@@ -720,7 +751,7 @@ async function openApproval(n) {
   h += '</div>';
   if (own.length) h += `<div class="error"><b>This version widens a role you hold.</b> You may not approve a version that widens a role you hold.` +
     own.map(r => `<p>${esc(r)}:</p>${tupleList(d.roles[r].added)}`).join('') +
-    '<p>This check covers only the role you signed in with; your other accounts are checked when the version is applied (IAM 4.5).</p></div>';
+    '<p>This check covers only the role you signed in with; your other accounts are checked when the version is applied.</p></div>';
   h += '<h3>What changes, per role</h3>';
   const roles = Object.keys(d.roles || {}).sort();
   h += roles.length ? roles.map(r => `<div class="card"><b>${esc(r)}</b>` +
@@ -754,7 +785,7 @@ async function openApproval(n) {
   if ($('ap-approve')) $('ap-approve').addEventListener('click', async () => {
     const body = { note: $('ap-note').value, entries_digest: d.entries_digest, diff_digest: DIFF.digest, skeleton_digest: DIFF.skeletonDigest };
     if (sk) body.attest = $('ap-attest').checked ? SKELETON_ATTEST : '';
-    try { await send('POST', `/api/policy/${n}/approve`, body); await loadApproval(); show('ok', `Version ${n} approved. It is applied when the host operator runs apply.sh (IAM 4.5).`); }
+    try { await send('POST', `/api/policy/${n}/approve`, body); await loadApproval(); show('ok', `Version ${n} approved. It is applied when the host operator runs ./apps/iam/apply.sh ${n}.`); }
     catch (e) { refused(e); }
   });
   if ($('ap-return')) $('ap-return').addEventListener('click', async () => {
@@ -844,9 +875,9 @@ async function loadHistory() {
 async function loadPending() {
   const list = pendingVersions(VERSIONS);
   if (!list.length) { $('pending').innerHTML = '<p>Nothing waits for confirmation.</p>'; return; }
-  $('pending').innerHTML = list.map(v => { const own = ownClaim(v, ME); return `<div class="card" data-v="${v.version}"${own ? ' data-own="1"' : ''}>
-    <b>Version ${v.version}</b> (${esc(v.kind)}, ${esc(v.status)})
-    <dl><dt>Applied</dt><dd>${esc(String(v.applied_at || '').slice(0, 19).replace('T', ' '))} UTC</dd>
+  $('pending').innerHTML = list.map(v => { const own = ownClaim(v, ME), rb = rollbackTarget(v, VERSIONS); return `<div class="card" data-v="${v.version}"${own ? ' data-own="1"' : ''}>
+    <b>Version ${v.version}</b> (${esc(v.kind)}, ${esc(statusText(v))})${rb ? ` — rollback to version ${rb.version}` : ''}
+    <dl>${rb ? `<dt>Restores</dt><dd>version ${rb.version}${rb.reason ? ': ' + esc(rb.reason) : ''}</dd>` : ''}<dt>Applied</dt><dd>${esc(String(v.applied_at || '').slice(0, 19).replace('T', ' '))} UTC</dd>
     <dt>Reason</dt><dd>${esc(v.reason)}</dd><dt>Claimed by person</dt><dd><code>${esc(v.claimed_by_person)}</code>${own ? ' (you)' : ''}</dd></dl>
     ${own ? '<div class="note">You applied this version (apply.sh recorded your person), so you cannot confirm it: another quality assurance person signs in and confirms it. You can still dispute it.</div>'
           : '<p>Before confirming, read the <a href="#" data-goto="matrix">matrix</a> and the <a href="#" data-goto="history">history</a> of this version.</p>'}

@@ -60,12 +60,28 @@
                                         and from a simulated host file, byte-identical (routes minus
                                         source/applied_version), else exit 1; --source host compiles
                                         the written state/policy-applied.yaml against DIR's --defaults
+  cli.py audit-version --record F       re-check one applied version offline (IAM 4.5, design
+                                        §14.8.10) from apply.sh --audit's document F: its entries
+                                        digest, audit_versions() and the chain, the approval's JWS
+                                        against the JWK its applied event recorded (change and
+                                        skeleton versions), and every artefact digest recompiled
+                                        from its rows with the skeleton (git show of the recorded
+                                        commit) and, when it differs from the tree's, the compiler
+                                        of that commit; one line per check; exit 0 all match,
+                                        1 a mismatch, 2 cannot reproduce (a -dirty or unknown
+                                        commit, a commit git does not have, a document lacking a
+                                        part)
 
 Where the policy comes from (compiler/source.py, IAM Phase 4; one rule for every command):
   --file F       an offline draft or a test (never a deploy script; its label is the file
                  name, with a warning, unless --label is given)
   --defaults     apps/iam/policy/defaults.yaml, whatever this host has applied (the offline
                  tests and the iam-db fixture)
+  --staged F     the staged host file of the version apps/iam/apply.sh applies (IAM 4.5,
+                 design §14.8.4.1): every header check of the host file, and exit 2 unless
+                 its sha256 is MEDCEA_POLICY_STAGED_SHA256; label version-N. Only
+                 dba_policy_bundle passes it, for the run that holds the verified lock, and
+                 apply.sh's checker step; never with MEDCEA_POLICY_FILE
   otherwise      MEDCEA_POLICY_FILE, only with MEDCEA_POLICY_BREAK_GLASS=<reason> (exit 2
                  without it); else the host applied file state/policy-applied.yaml (written
                  from the database's applied version, from slice 4.2a; a header that does not
@@ -77,16 +93,22 @@ they take the git tree's defaults.yaml unless --file is given, so they work with
 all (apps/database/uninstall.sh --purge-data); so does skeleton-gate (the git skeleton and the
 state document only). write-applied reads the state document and the git skeleton, never the
 host file it replaces; export-applied reads the host file only; bootstrap-targets names its
-sources itself (MEDCEA_POLICY_* stripped). Exit 2 for a source error.
+sources itself (MEDCEA_POLICY_* stripped); audit-version composes the recorded version itself
+(git show of its commit, --file to the compiler in a subprocess). Exit 2 for a source error.
 """
 import argparse
+import base64
 import datetime
+import hashlib
+import hmac
 import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -96,7 +118,7 @@ from compiler import explain, grants, invariants, model, mqtt, netpol, proxies, 
 # Commands that read only the skeleton: no source, no database (F-15).
 SKELETON_ONLY = ("db-roles", "describe-gate", "skeleton-gate")
 # Commands that never resolve a source: they build or read the host file themselves.
-OWN_SOURCE = ("skeleton-gate", "write-applied", "export-applied", "bootstrap-targets")
+OWN_SOURCE = ("skeleton-gate", "write-applied", "export-applied", "bootstrap-targets", "audit-version")
 
 
 def _load_state(path):
@@ -129,6 +151,11 @@ def cmd_skeleton_gate(args):
         acc = source._need_version(state)
         accepted, acc_digest, ew, check = acc["body"], acc["digest"], source.state_rows(state), args.check
     git_digest = source.skeleton_digest(git)
+    # IAM 4.5 (design §14.8.4): an approved skeleton version whose digest HEAD carries is named
+    # in the refusal (policy_db_state's approved_skeleton_versions; none with --against-git)
+    approved = [] if args.against_git else [
+        a.get("version") for a in (state.get("approved_skeleton_versions") or [])
+        if isinstance(a, dict) and a.get("skeleton_digest") == git_digest and isinstance(a.get("version"), int)]
     if git_digest == acc_digest:
         g = {"verdict": "equal", "git_digest": git_digest, "accepted_digest": acc_digest, "added": {},
              "narrowed": [], "unchanged": []}
@@ -154,6 +181,8 @@ def cmd_skeleton_gate(args):
             return 2
     if g["verdict"] == "narrowing" and not check:
         g["body"] = source.skeleton(git)
+    if g["verdict"] == "widening" and approved:
+        g["approved_version"] = max(approved)
     print(json.dumps(g, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
     if g["verdict"] == "widening":
         print(explain.gate_message(g), file=sys.stderr)
@@ -225,6 +254,301 @@ def cmd_bootstrap_targets(args):
     return apply_check.bootstrap_targets(args.out, args.source == "host", state_path=args.state)
 
 
+# ── audit-version (IAM 4.5, design §14.8.10) ────────────────────────────────────────
+# apply.sh --audit's document (one READ ONLY transaction, apps/iam/apply.sh; every part
+# required unless said):
+#   version          the version row: version, kind, entries_digest, groups, roles, based_on,
+#                    approved_by_sub, approved_by_person, approved_at, approved_iat
+#   entries, waivers its rows (policy_db_state's shapes)
+#   apply_started    the payload of its latest apply_started (commit, skeleton_digest,
+#                    compiler_digest: _mark_applied's)
+#   applied          {event, event_id, payload}: its applied (or bootstrap_applied) record
+#   approval         change/skeleton: {event: {event_id, payload}, evidence: {jws, claims},
+#                    other_approved_jti: [...]}: the approved event, its approval_evidence
+#                    row and every other version's approved jti (§14.8.5)
+#   previous         change/skeleton: the version applied before it, {version, kind, entries,
+#                    waivers, apply_started}: whose policy names the approval's azp and
+#                    approver roles (the rule qa approved under)
+#   audit_findings   audit_versions()' rows for the version; chain: {ok} of verify_chain()
+#   issuer           https://<KEYCLOAK_DOMAIN>/realms/<KEYCLOAK_REALM>
+ARTEFACT_KEYS = ("routes", "mqtt", "grants_document", "netpol", "proxy", "tools")
+LEEWAY = 30                                   # medcea_iam.LEEWAY, seconds
+_SEG = re.compile(r"[A-Za-z0-9_-]+")
+_SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+class Unreproducible(Exception):
+    """audit-version cannot reproduce the record (exit 2)."""
+
+
+def _b64url(seg):
+    if not _SEG.fullmatch(seg or ""):
+        raise ValueError("not base64url")
+    return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+
+def rs256_problem(jws, jwk):
+    """None when `jws` (compact, as stored, never re-encoded) carries a valid RS256 signature
+    by `jwk` {kid, n, e}; else why not. PKCS#1 v1.5 compared as whole bytes against the
+    expected encoding, never parsed (design §14.8.5)."""
+    parts = (jws or "").split(".")
+    if len(parts) != 3:
+        return "the approval's token is not a compact JWS"
+    try:
+        header = json.loads(_b64url(parts[0]))
+        sig = _b64url(parts[2])
+        n = int.from_bytes(_b64url(jwk.get("n")), "big")
+        e = int.from_bytes(_b64url(jwk.get("e")), "big")
+    except (ValueError, TypeError, AttributeError):
+        return "the approval's token or the recorded key does not decode"
+    if not isinstance(header, dict) or header.get("alg") != "RS256":
+        return "the approval's token is not RS256"
+    if not header.get("kid") or header.get("kid") != jwk.get("kid"):
+        return f"the approval's token names kid {header.get('kid')!r}, the applied event recorded {jwk.get('kid')!r}"
+    k = (n.bit_length() + 7) // 8
+    if k < len(_SHA256_DIGEST_INFO) + 32 + 11 or e < 3:
+        return "the recorded key is not an RSA signing key"
+    s = int.from_bytes(sig, "big")
+    if len(sig) != k or s >= n:
+        return "the approval's signature is malformed"
+    digest = hashlib.sha256((parts[0] + "." + parts[1]).encode("ascii")).digest()
+    want = b"\x00\x01" + b"\xff" * (k - 3 - len(_SHA256_DIGEST_INFO) - 32) + b"\x00" + _SHA256_DIGEST_INFO + digest
+    if not hmac.compare_digest(pow(s, e, n).to_bytes(k, "big"), want):
+        return "the approval's signature does not verify against the recorded key"
+    return None
+
+
+def _git_policy(commit):
+    """defaults.yaml at a recorded commit (Unreproducible for -dirty, unknown, or a commit
+    git does not have)."""
+    import yaml
+    if not re.fullmatch(r"[0-9a-f]{7,40}", str(commit or "")):
+        raise Unreproducible(f"commit {commit!r} cannot be reproduced (a -dirty or unknown commit)")
+    r = subprocess.run(["git", "-C", source.REPO_ROOT, "show", f"{commit}:apps/iam/policy/defaults.yaml"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Unreproducible(f"git has no commit {commit} (git show: {r.stderr.strip()[:200]})")
+    data = yaml.safe_load(r.stdout)
+    if not isinstance(data, dict):
+        raise Unreproducible(f"{commit}:apps/iam/policy/defaults.yaml is not a policy")
+    return data
+
+
+def _recorded_policy(rec, what):
+    """(policy dict, dropped) of a recorded version: its rows composed with the skeleton of
+    its commit's defaults.yaml, which must carry the skeleton digest its apply_started names
+    (ValueError naming the mismatch otherwise)."""
+    started = rec.get("apply_started")
+    if not isinstance(started, dict):
+        raise Unreproducible(f"the record of {what} has no apply_started payload")
+    data = _git_policy(started.get("commit"))
+    if source.skeleton_digest(data) != started.get("skeleton_digest"):
+        raise ValueError(f"{what}: the skeleton of commit {started.get('commit')} is not the recorded "
+                         f"{str(started.get('skeleton_digest'))[:12]}")
+    rows = source.state_rows({"entries": rec.get("entries") or [], "waivers": rec.get("waivers") or []})
+    return source.compose_counted(source.skeleton(data), rows, policy_version=data.get("policy_version"),
+                                  drop_unknown=True)
+
+
+_DRIVER = r"""
+import contextlib, io, json, sys
+sys.path.insert(0, sys.argv[1])
+from compiler import cli
+out = {}
+for name, argv in json.load(sys.stdin):
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        try:
+            rc = cli.main(argv)
+        except SystemExit as x:
+            rc = x.code if isinstance(x.code, int) else 2
+    out[name] = [rc, o.getvalue(), e.getvalue()]
+json.dump(out, sys.stdout)
+"""
+
+
+def _compile_targets(iam_dir, policy_file, label, names_argv):
+    """{target: (rc, stdout, stderr)}: each cli.py argv of names_argv run with --file
+    policy_file --label label by the compiler under iam_dir, in one subprocess (no
+    MEDCEA_POLICY_* inherited; an archived compiler is never imported into this process)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MEDCEA_POLICY_")}
+    job = [[n, ["--file", policy_file, "--label", label] + a] for n, a in names_argv]
+    r = subprocess.run([sys.executable, "-I", "-c", _DRIVER, iam_dir], input=json.dumps(job),
+                       capture_output=True, text=True, env=env, cwd=os.path.dirname(policy_file))
+    if r.returncode != 0:
+        raise Unreproducible(f"the compiler under {iam_dir} did not run: {r.stderr.strip()[-300:]}")
+    return {n: tuple(v) for n, v in json.loads(r.stdout).items()}
+
+
+def _claims_problems(doc, v, p_prev):
+    """The approval's claim checks of design §14.8.5 against the record: [why]."""
+    out = []
+    ap = doc.get("approval")
+    if not isinstance(ap, dict) or not isinstance(ap.get("event"), dict) or not isinstance(ap.get("evidence"), dict):
+        return ["no approval with token evidence is recorded"]
+    ev = ap["event"].get("payload") or {}
+    jws, stored = ap["evidence"].get("jws") or "", ap["evidence"].get("claims")
+    sub = str(v.get("approved_by_sub") or "").lower()
+    if ev.get("source") != "token" or str(ev.get("sub") or "").lower() != sub or not sub:
+        out.append("the approved event is not a token approval by approved_by_sub")
+    if hashlib.sha256(jws.encode("utf-8")).hexdigest() != ev.get("jws_sha256"):
+        out.append("sha256 of the stored token is not the approved event's jws_sha256")
+    jwk = ((doc.get("applied") or {}).get("payload") or {}).get("jwk")
+    if not isinstance(jwk, dict):
+        return out + ["the applied event records no jwk"]
+    bad = rs256_problem(jws, jwk)
+    if bad:
+        return out + [bad]
+    claims = json.loads(_b64url(jws.split(".")[1]))
+    if not isinstance(claims, dict) or claims != stored:
+        return out + ["the token's payload is not the stored claims"]
+    if str(claims.get("sub") or "").lower() != sub:
+        out.append("the token's sub is not approved_by_sub")
+    if claims.get("person_id") != v.get("approved_by_person"):
+        out.append("the token's person_id is not approved_by_person")
+    if claims.get("jti") != ev.get("jti") or not claims.get("jti"):
+        out.append("the token's jti is not the approved event's")
+    iat = claims.get("iat")
+    if not isinstance(iat, (int, float)) or iat != ev.get("iat") or iat != v.get("approved_iat"):
+        out.append("the token's iat is not approved_iat and the event's")
+    clients = sorted(c for c, fns in grants.only_rpc_clients(p_prev).items() if "approve_policy" in fns)
+    if len(clients) != 1:
+        out.append("the applied policy names no single client for approve_policy")
+    elif claims.get("azp") != clients[0]:
+        out.append(f"the token's azp {claims.get('azp')!r} is not {clients[0]!r}")
+    aud = claims.get("aud")
+    if "medcea-api" not in (aud if isinstance(aud, list) else [aud]):
+        out.append("the token's aud lacks medcea-api")
+    if claims.get("typ") != "Bearer":
+        out.append("the token's typ is not Bearer")
+    if not doc.get("issuer") or claims.get("iss") != doc.get("issuer"):
+        out.append("the token's iss is not the realm's issuer")
+    try:
+        at = datetime.datetime.fromisoformat(str(v.get("approved_at"))).timestamp()
+        if not (claims["iat"] - LEEWAY <= at <= claims["exp"] + LEEWAY):
+            out.append("approved_at is outside the token's lifetime")
+    except (KeyError, TypeError, ValueError):
+        out.append("approved_at or the token's iat/exp cannot be read")
+    table = routes.compile(p_prev)
+    includes = table.get("role_includes") or {}
+    held = set(claims.get("groups") or []) & set(p_prev.roles)
+    own = sorted(held - {i for r in held for i in (includes.get(r) or [])})
+    approvers = ((table.get("dual_control") or {}).get("iam_policy") or {}).get("approver_roles") or []
+    if len(own) != 1 or own[0] != ev.get("role") or own[0] not in approvers:
+        out.append(f"the token's own role {own} is not the event's {ev.get('role')!r} among the approvers {approvers}")
+    if claims.get("jti") in (ap.get("other_approved_jti") or []):
+        out.append("the approval token was also used to approve another version")
+    return out
+
+
+def audit_version(doc):
+    """(rc, [(OK|FAIL|CANNOT, line)]) of design §14.8.10's checks on apply.sh --audit's
+    document; rc 0 all match, 1 a mismatch, 2 cannot reproduce."""
+    import apply_check
+    lines = []
+
+    def say(code, text):
+        lines.append((code, text))
+    v = doc.get("version") if isinstance(doc, dict) else None
+    if not isinstance(v, dict) or not isinstance(v.get("version"), int) or v.get("kind") not in source.KINDS:
+        return 2, [("CANNOT", "the record has no version row")]
+    n, kind = v["version"], v["kind"]
+    started = doc.get("apply_started") or {}
+    applied = (doc.get("applied") or {}).get("payload")
+    if not isinstance(applied, dict) or not isinstance(started, dict) or not started:
+        return 2, [("CANNOT", f"version {n} has no apply_started and applied record")]
+    # 1. the entries digest from the rows
+    rows = source.state_rows({"entries": doc.get("entries") or [], "waivers": doc.get("waivers") or []})
+    d = source.entries_digest(kind, v.get("groups"), v.get("roles"), rows["entries"], rows["waivers"])
+    say("OK" if d == v.get("entries_digest") else "FAIL",
+        f"entries digest recomputed from the rows: {d[:12]} (stored {str(v.get('entries_digest'))[:12]})")
+    # 2. audit_versions() and the chain
+    findings = doc.get("audit_findings") or []
+    say("OK" if not findings else "FAIL", f"audit_versions(): {len(findings)} finding(s) for version {n}")
+    say("OK" if (doc.get("chain") or {}).get("ok") is True else "FAIL", "verify_chain()")
+    try:
+        # 3. the approval, against the key the applied event recorded
+        if kind in ("change", "skeleton"):
+            prev = doc.get("previous")
+            if not isinstance(prev, dict):
+                raise Unreproducible(f"version {n}'s record names no previous version")
+            p_prev = model.Policy(_recorded_policy(prev, f"version {prev.get('version')}")[0])
+            probs = _claims_problems(doc, v, p_prev)
+            for why in probs:
+                say("FAIL", f"approval: {why}")
+            if not probs:
+                say("OK", "approval: the token verifies against the recorded jwk "
+                          f"(kid {((applied.get('jwk') or {}).get('kid'))}) and its claims are the record's")
+        # 4. recompile with the recorded skeleton and compiler
+        if applied.get("git_commit") not in (None, started.get("commit")):
+            say("FAIL", f"the applied event's commit {applied.get('git_commit')} is not apply_started's {started.get('commit')}")
+        composed, dropped = _recorded_policy(doc, f"version {n}")
+        p = model.Policy(composed)
+        errors = invariants.check(p)[0]
+        say("OK" if not errors else "FAIL", f"the checker on version {n}: {len(errors)} violation(s)")
+        commit, want_cd = started["commit"], started.get("compiler_digest")
+        tmp = tempfile.mkdtemp(prefix="medcea-audit-")
+        try:
+            iam_dir = os.path.dirname(source.HERE)
+            if want_cd != source.compiler_digest():
+                r = subprocess.run(f'git -C "{source.REPO_ROOT}" archive {commit} apps/iam/compiler | tar -x -C "{tmp}"',
+                                   shell=True, capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise Unreproducible(f"git archive {commit} apps/iam/compiler: {r.stderr.strip()[:200]}")
+                iam_dir = os.path.join(tmp, "apps", "iam")
+                have_cd = source.compiler_digest(os.path.join(iam_dir, "compiler"))
+                if have_cd != want_cd:
+                    say("FAIL", f"the compiler of commit {commit} is {have_cd[:12]}, the record names {str(want_cd)[:12]}")
+                    return max(1, _rc(lines)), lines
+            say("OK", f"compiled with the compiler of {'this tree' if iam_dir == os.path.dirname(source.HERE) else commit} "
+                      f"({str(want_cd)[:12]}), skeleton {str(started.get('skeleton_digest'))[:12]} of {commit}"
+                      + (f", {dropped} row(s) dropped" if dropped else ""))
+            pf = os.path.join(tmp, "composed.yaml")
+            import yaml
+            with open(pf, "w", encoding="utf-8") as f:
+                yaml.safe_dump(composed, f, sort_keys=False, allow_unicode=True, width=1000)
+            outs = _compile_targets(iam_dir, pf, f"version-{n}", apply_check.targets(p))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        # 5. the digests against the applied event's artefacts
+        have = apply_check.digests_of(outs, commit)
+        want = applied.get("artefacts") or {}
+        for k in ARTEFACT_KEYS:
+            if k not in want:
+                say("FAIL", f"artefact {k}: not in the applied event")
+            elif have.get(k) != want.get(k):
+                say("FAIL", f"artefact {k}: recompiled {_short(have.get(k))}, recorded {_short(want.get(k))}")
+            else:
+                say("OK", f"artefact {k}: {_short(want.get(k))}")
+    except Unreproducible as e:
+        say("CANNOT", str(e))
+    except ValueError as e:
+        say("FAIL", str(e))
+    return _rc(lines), lines
+
+
+def _short(x):
+    if isinstance(x, str):
+        return x[:12]
+    if isinstance(x, dict):
+        return hashlib.sha256(source.canonical(x)).hexdigest()[:12] + f" ({len(x)} entries)"
+    return repr(x)
+
+
+def _rc(lines):
+    codes = {c for c, _ in lines}
+    return 2 if "CANNOT" in codes else 1 if "FAIL" in codes else 0
+
+
+def cmd_audit_version(args):
+    rc, lines = audit_version(_load_state(args.record))
+    for code, text in lines:
+        print(f"{code:6} {text}")
+    print({0: "version reproduced: every check matches", 1: "MISMATCH: the record does not reproduce (above)",
+           2: "cannot reproduce this record (above)"}[rc])
+    return rc
+
+
 def source_label(src, given=None):
     """The one source label (routes.json `source`, role_widening()'s digest comment)."""
     return source.label(src, given, warn=lambda m: print(m, file=sys.stderr))
@@ -234,6 +558,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="cli.py", description=__doc__.splitlines()[0])
     ap.add_argument("--file", help="an offline policy file (never in a deploy script)")
     ap.add_argument("--defaults", action="store_true", help="read apps/iam/policy/defaults.yaml, whatever is applied")
+    ap.add_argument("--staged", help="apply.sh's staged host file (sha256 pinned by MEDCEA_POLICY_STAGED_SHA256)")
     ap.add_argument("--label", help="the source name routes.json and role_widening() record")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
@@ -265,6 +590,8 @@ def main(argv=None):
     wa.add_argument("--state", required=True, help="policy_db_state's JSON document")
     wa.add_argument("--if-different", action="store_true", help="write only when absent or different")
     sub.add_parser("export-applied")
+    av = sub.add_parser("audit-version")
+    av.add_argument("--record", required=True, help="apply.sh --audit's document")
     bt = sub.add_parser("bootstrap-targets")
     bt.add_argument("--out", required=True, help="the staging directory (apply.sh's, mode 700)")
     bt.add_argument("--source", choices=["host"], help="compile the written host file against DIR's reference (or --defaults)")
@@ -277,23 +604,27 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.cmd in OWN_SOURCE:
-        if args.file or args.defaults or args.label:
-            print(f"ERROR: {args.cmd} takes no --file, --defaults or --label", file=sys.stderr)
+        if args.file or args.defaults or args.label or args.staged:
+            print(f"ERROR: {args.cmd} takes no --file, --defaults, --staged or --label", file=sys.stderr)
             return 2
         try:
             return {"skeleton-gate": cmd_skeleton_gate, "write-applied": cmd_write_applied,
-                    "export-applied": cmd_export_applied, "bootstrap-targets": cmd_bootstrap_targets}[args.cmd](args)
+                    "export-applied": cmd_export_applied, "bootstrap-targets": cmd_bootstrap_targets,
+                    "audit-version": cmd_audit_version}[args.cmd](args)
         except source.SourceError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
         except (KeyError, TypeError, ValueError, grants.GrantsError, routes.RouteError) as e:
             print(f"ERROR: {args.cmd}: {type(e).__name__}: {e}", file=sys.stderr)
             return 2
+    if args.staged and args.cmd in SKELETON_ONLY:
+        print(f"ERROR: {args.cmd} reads only the skeleton: it takes no --staged", file=sys.stderr)
+        return 2
     try:
         if args.cmd in SKELETON_ONLY and not args.file:
             src = source.Source("defaults", source.DEFAULTS, source.factory())
         else:
-            src = source.resolve(args.file, args.defaults)
+            src = source.resolve(args.file, args.defaults, staged=args.staged)
     except source.SourceError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
@@ -411,7 +742,7 @@ def main(argv=None):
     if args.cmd == "compile" and args.target == "routes":
         try:
             print(routes.dumps(routes.compile(p, source_label(src, args.label),
-                                              src.version if src.kind == "host" else None)))
+                                              src.version if src.kind in ("host", "staged") else None)))
         except routes.RouteError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

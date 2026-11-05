@@ -1,4 +1,4 @@
-"""policy_api: the Policy UI's port of iam-api (IAM Phase 4, slices 4.3 and 4.4; design §5, §14.6, §14.7).
+"""policy_api: the Policy UI's port of iam-api (IAM Phase 4, slices 4.3–4.5; design §5, §14.6–§14.8).
 
   :8083  iam  reached only as the upstream of iam-oauth2-proxy (POLICY_DOMAIN; network:
               admits that proxy and the node).
@@ -10,7 +10,8 @@ role, and iam._changed_since(sub, person, iat) false. POSTs and PUTs are JSON (4
 the Policy UI's own Origin (403).
 
 Reads run as iam_svc (SELECT on iam_policy): the version list (why_not after set_actor, so
-it answers for the viewer), a version's matrix composed with the skeleton this pod ships
+it answers for the viewer; since 4.5 each version's apply state, from the latest of its apply
+events: rollout incomplete, or reverted), a version's matrix composed with the skeleton this pod ships
 (ConfigMap iam-compiler: apps/iam/compiler and policy/defaults.yaml, so a version is shown
 with the skeleton the platform accepted), explain.cell, a version's approval diff
 (explain.diff_document, served as its canonical bytes), who can reach an object, the
@@ -77,6 +78,13 @@ SELECT b.event_id, b.at, b.open AS components
 POLICY_EVENTS = """(h.version IS NOT NULL OR h.event IN ('account_seeded', 'break_glass_seen', 'break_glass_ended')
                     OR h.event LIKE 'skeleton\\_%%' OR h.event LIKE 'apply\\_%%' OR h.event LIKE 'bootstrap\\_%%'
                     OR h.event LIKE 'waiver\\_%%' OR h.event LIKE 'policy\\_%%')"""
+# A version's apply state (IAM 4.5, design §14.8.12): the latest of these events filed under it
+APPLY_EVENTS = ('apply_started', 'applied', 'bootstrap_applied', 'partial_apply', 'apply_reverted')
+APPLY_LATEST = """
+SELECT DISTINCT ON (h.version) h.version, h.event, h.payload ->> 'outcome' AS outcome
+  FROM iam_policy.history h
+ WHERE h.version IS NOT NULL AND h.event IN (%s)
+ ORDER BY h.version, h.event_id DESC""" % ', '.join("'%s'" % e for e in APPLY_EVENTS)
 VERSION_COLS = ('version', 'kind', 'status', 'reason', 'based_on', 'rollback_of', 'created_at', 'created_by_name',
                 'submitted_at', 'submitted_by_name', 'approved_at', 'approved_by_name', 'applied_at',
                 'confirmed_at', 'confirm_note', 'disputed_at', 'dispute_note', 'withdrawn_at', 'superseded_at',
@@ -575,10 +583,23 @@ def medcea_iam_mod():
     return medcea_iam() if callable(medcea_iam) else medcea_iam
 
 
+def apply_state(event, outcome, status):
+    """A version's apply state from the latest of its APPLY_EVENTS (design §14.8.12):
+    'rollout incomplete' (apply_started with no later end, or partial_apply mixed or
+    reverting: apply.sh --resume finishes it), 'reverted' (the latest is the revert of a
+    failed apply and the version is approved again), else None."""
+    if event == 'apply_started' or (event == 'partial_apply' and outcome in ('mixed', 'reverting')):
+        return 'rollout incomplete'
+    if status == 'approved' and (event == 'apply_reverted' or (event == 'partial_apply' and outcome == 'reverted')):
+        return 'reverted'
+    return None
+
+
 def versions(cur, actor=None):
     cols = ', '.join('v.' + c for c in VERSION_COLS)
     vs = rows(cur, 'SELECT %s, s.git_commit AS skeleton_commit FROM iam_policy.version v '
                    'LEFT JOIN iam_policy.skeleton s ON s.digest = v.skeleton_digest ORDER BY v.version DESC' % cols)
+    latest = {r['version']: r for r in rows(cur, APPLY_LATEST)}
     if actor is not None and any(v['status'] in OPEN for v in vs):
         # why_not answers for the viewer only with an actor (request_actor()); rolled back with the read
         cur.execute('SELECT medcea_auth.set_actor(%s, %s, %s, %s)', actor)
@@ -593,6 +614,8 @@ def versions(cur, actor=None):
                 open_v = v['version']
         d['needs_confirmation'] = (v['kind'] in ('bootstrap', 'rollback') and v['status'] in ('applied', 'superseded')
                                    and v['confirmed_at'] is None and v['disputed_at'] is None)
+        a = latest.get(v['version']) or {}
+        d['apply_state'] = apply_state(a.get('event'), a.get('outcome'), v['status'])
         out.append(d)
     return 200, {'versions': out, 'applied': applied_version(cur), 'open': open_v,
                  'accepted_skeleton_digest': accepted_skeleton(cur),

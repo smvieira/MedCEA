@@ -4547,8 +4547,12 @@ BEGIN
         RAISE EXCEPTION 'no policy version is applied yet: the host operator runs ./apps/iam/apply.sh --bootstrap first'
             USING ERRCODE = '22023';
     END IF;
+    -- the apply events only (policy_db_state's set, IAM 4.5): a seed fact, a
+    -- skeleton accept or sync filed under the applied version must not mask an
+    -- unfinished apply (S-D4)
     SELECT h.event INTO last_ev FROM iam_policy.history h WHERE h.version = applied
-       AND h.event <> 'status_changed' ORDER BY h.event_id DESC LIMIT 1;
+       AND h.event IN ('apply_started', 'applied', 'bootstrap_applied', 'apply_reverted', 'partial_apply', 'apply_deferred')
+     ORDER BY h.event_id DESC LIMIT 1;
     IF last_ev IN ('apply_started', 'partial_apply') THEN
         RAISE EXCEPTION 'version % is being applied (%): wait for apply.sh, or have the host operator run ./apps/iam/apply.sh --resume',
             applied, last_ev USING ERRCODE = '22023';

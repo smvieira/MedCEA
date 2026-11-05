@@ -16,6 +16,8 @@
 #                  is <NAMESPACE>-<claim>-pvc-<uid> in it
 #   NAMESPACE      the platform namespace
 #   DATABASES      the databases to dump, custom format (pg_restore reads them)
+#   POLICY_DB      the platform database whose access-policy hash chain head goes into
+#                  MANIFEST (default: the first of DATABASES)
 #   VOLUMES        claim name patterns to copy, e.g. "claim-* node-red grafana"
 #   PGHOST PGUSER  libpq's own variables; PGPASSWORD comes from Secret
 #   PGPASSWORD     rdbms-postgresql (secretKeyRef), so libpq reads it from the
@@ -31,6 +33,12 @@
 # OK and exits 1 (the Job shows Failed); it is deleted with the others once it is
 # older than KEEP_DAYS. Deleting touches only names of that exact form, never the
 # folder just written, never the newest complete one, and never a symbolic link.
+#
+# MANIFEST also names the head of the access policy's hash chain (iam_policy.history,
+# IAM 4.5, design §14.8.10), read before the dumps: the chain is append-only, so the
+# dump holds at least that head, and a restore that verifies a shorter chain was cut.
+# Without the schema, or when the read fails, the line says unavailable and the
+# backup goes on.
 
 set -eu
 umask 077
@@ -74,6 +82,47 @@ wanted() {
     return "$_hit"
 }
 
+# chain_head: one line for MANIFEST, never fails. psql reads the query on stdin; the
+# \if keeps a database without iam_policy (no access policy yet) from an error.
+chain_head() {
+    _hdb="${POLICY_DB:-${DATABASES%% *}}"
+    _rc=0
+    _ans="$(psql --no-password --no-psqlrc -X -q -tA -v ON_ERROR_STOP=1 --dbname="$_hdb" 2>&1 <<'SQL'
+BEGIN TRANSACTION READ ONLY;
+SELECT pg_catalog.to_regclass('iam_policy.history') IS NOT NULL
+   AND pg_catalog.to_regprocedure('iam_policy.verify_chain()') IS NOT NULL AS has_chain \gset
+\if :has_chain
+SELECT 'head ' || coalesce((SELECT h.event_id || ' ' || h.hash FROM iam_policy.history h ORDER BY h.event_id DESC LIMIT 1),
+                           'none -')
+       || ' ' || CASE WHEN (SELECT vc.ok FROM iam_policy.verify_chain() vc) THEN 't' ELSE 'f' END;
+\else
+SELECT 'no-schema';
+\endif
+COMMIT;
+SQL
+)" || _rc=$?
+    # one line, no control characters, bounded: it goes into MANIFEST and the Job's log
+    _one="$(printf '%s\n' "$_ans" | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 1 | tr -c '[:print:]\n' ' ' | cut -c1-200)"
+    if [ "$_rc" -ne 0 ]; then
+        echo "# policy chain head: unavailable (psql exit $_rc: ${_one:-no message})"
+        return 0
+    fi
+    set -f; set -- $_one; set +f
+    case "${1:-}" in
+        no-schema) echo "# policy chain head: unavailable (no iam_policy schema in $_hdb)"; return 0 ;;
+        head) ;;
+        *) echo "# policy chain head: unavailable (unexpected answer from psql)"; return 0 ;;
+    esac
+    if [ "${2:-}" = none ]; then
+        echo "# policy chain head: unavailable (iam_policy.history is empty)"
+        return 0
+    fi
+    case "${2:-}" in ''|*[!0-9]*) echo "# policy chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    case "${3:-}" in ''|*[!0-9a-f]*) echo "# policy chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    case "${4:-}" in t|f) ;; *) echo "# policy chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    echo "# policy chain head (read before the dump): $2 $3 verify_chain=$4"
+}
+
 prune() {
     _keep="${KEEP_DAYS:-14}"
     case "$_keep" in ''|*[!0-9]*) die "KEEP_DAYS '$_keep' is not a whole number of days" ;; esac
@@ -103,7 +152,7 @@ run() {
     [ -n "${BACKUP_OUT:-}" ] && [ -d "$BACKUP_OUT" ] || die "BACKUP_OUT is not a directory"
     [ -n "${STORAGE:-}" ] && [ -d "$STORAGE" ] || die "STORAGE is not a directory"
     : "${NAMESPACE:?}" "${DATABASES:?}" "${VOLUMES:?}"
-    for _c in pg_dump pg_dumpall tar gzip sha256sum find stat sort sed; do
+    for _c in pg_dump pg_dumpall psql tar gzip sha256sum find stat sort sed; do
         command -v "$_c" >/dev/null 2>&1 || die "this image has no $_c"
     done
 
@@ -118,6 +167,9 @@ run() {
     say "folder $CURRENT in BACKUP_DIR"
 
     # --- databases -----------------------------------------------------------
+    # The policy chain's head first: the dump then holds at least this head.
+    _head="$(chain_head)"
+    say "${_head#\# }"
     for _db in $DATABASES; do
         say "pg_dump $_db"
         pg_dump --no-password --format=custom --file="$DIR/db/$_db.dump" --dbname="$_db" \
@@ -166,6 +218,7 @@ run() {
             echo "# namespace: $NAMESPACE"
             echo "# databases: $DATABASES"
             echo "# volume patterns: $VOLUMES"
+            echo "$_head"
             echo "# bytes	sha256	path"
             _total=0
             while read -r _sum _f; do
