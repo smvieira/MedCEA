@@ -83,6 +83,7 @@ _ps_load
 _ps_say()  { echo -e "\033[0;32m[policy]\033[0m $*"; }
 _ps_warn() { echo -e "\033[0;33mWARNING: [policy] $*\033[0m" >&2; }
 _ps_err()  { echo -e "\033[0;31mERROR: [policy] $*\033[0m" >&2; }
+_ps_nonspace() { local s="$1"; printf %s "${s//[[:space:]]/}"; }   # the text without whitespace (set -u safe)
 
 # _ps_py CODE ARGS... — python3 with apps/iam on sys.path (from compiler import source)
 _ps_py() {
@@ -589,7 +590,7 @@ policy_source_init() {
         return $?
     fi
     # 2. break-glass needs its reason
-    if [[ -n "${MEDCEA_POLICY_FILE:-}" && -z "${MEDCEA_POLICY_BREAK_GLASS//[[:space:]]/}" ]]; then
+    if [[ -n "${MEDCEA_POLICY_FILE:-}" && -z "$(_ps_nonspace "${MEDCEA_POLICY_BREAK_GLASS:-}")" ]]; then
         _ps_err "MEDCEA_POLICY_FILE is a break-glass override: set MEDCEA_POLICY_BREAK_GLASS=<reason>, or unset MEDCEA_POLICY_FILE"
         return 1
     fi
@@ -672,7 +673,7 @@ _ps_precheck() {
         _ps_warn "precheck: the policy state could not be read; the full read after PostgreSQL decides"
         rm -rf "$dir"; return 0
     fi
-    if [[ -n "${MEDCEA_POLICY_FILE:-}" && -z "${MEDCEA_POLICY_BREAK_GLASS//[[:space:]]/}" ]]; then
+    if [[ -n "${MEDCEA_POLICY_FILE:-}" && -z "$(_ps_nonspace "${MEDCEA_POLICY_BREAK_GLASS:-}")" ]]; then
         _ps_err "MEDCEA_POLICY_FILE is a break-glass override: set MEDCEA_POLICY_BREAK_GLASS=<reason>, or unset MEDCEA_POLICY_FILE"
         rm -rf "$dir"; return 1
     fi

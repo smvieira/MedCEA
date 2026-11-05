@@ -1536,6 +1536,14 @@ class LibSource(unittest.TestCase):
         rc, _, err = self.bg(MEDCEA_POLICY_BREAK_GLASS=" ")
         self.assertEqual(rc, 1)
         self.assertIn("set MEDCEA_POLICY_BREAK_GLASS=<reason>", err)
+        # no reason at all, under set -u as every deploy script runs (E13 found an unbound-variable
+        # abort here instead of the message): the write-mode check and deploy-infra's precheck
+        for mode in ("", "--precheck"):
+            rc, _, err, _ = self.run_(f'set -u; policy_source_init medcea {mode}; exit $?',
+                                      MEDCEA_POLICY_FILE=self.break_glass_file())
+            self.assertEqual(rc, 1, (mode, err))
+            self.assertIn("set MEDCEA_POLICY_BREAK_GLASS=<reason>", err, mode)
+            self.assertNotIn("unbound variable", err, mode)
         rc, _, err = self.bg()   # no terminal, not asked by deploy-apps
         self.assertEqual(rc, 1)
         self.assertIn("needs a person at the terminal", err)
