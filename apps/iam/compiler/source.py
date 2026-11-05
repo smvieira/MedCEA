@@ -914,6 +914,18 @@ def compiler_digest(d=None):
     return h.hexdigest()
 
 
+def claims_recorded(token_claims, stored):
+    """True when the stored request.jwt.claims are the token's payload. PostgREST adds the
+    role it took (contract C1: always anon, the role claim key is one nobody issues), and only
+    that, only when the token carries no role of its own. apply.sh's check-approval and
+    cli.py audit-version both decide by this one rule."""
+    if not isinstance(stored, dict) or not isinstance(token_claims, dict):
+        return False
+    if "role" not in token_claims and stored.get("role") == "anon":
+        stored = {k: v for k, v in stored.items() if k != "role"}
+    return token_claims == stored
+
+
 def fact_id(fact):
     """The content hash of an account_seeded fact (migration 008c _record): sha256 of the
     jsonb text of {fact, username, sub, role, person_id}, a missing key as null."""

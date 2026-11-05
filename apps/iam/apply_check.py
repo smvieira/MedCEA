@@ -898,15 +898,8 @@ def _claims_of(x):
 
 
 def claims_recorded(token_claims, stored):
-    """True when the stored request.jwt.claims are the token's: PostgREST adds the role it
-    took (contract C1: always anon, the role claim key is one nobody issues), and only that,
-    only when the token carries no role of its own."""
-    stored = _claims_of(stored)
-    if not isinstance(stored, dict) or not isinstance(token_claims, dict):
-        return False
-    if "role" not in token_claims and stored.get("role") == "anon":
-        stored = {k: v for k, v in stored.items() if k != "role"}
-    return token_claims == stored
+    """source.claims_recorded on the stored value as read (jsonb text or an object)."""
+    return source.claims_recorded(token_claims, _claims_of(stored))
 
 
 # ── step 2.4: the skeleton gate and its exception for an approved skeleton version ──────
@@ -2232,7 +2225,7 @@ def status_text(state, gate=None, gate_rc=None, live_routes=None, live_mqtt=None
         elif state.get("disputed_at"):
             conf = f"DISPUTED {state['disputed_at']}"
         elif state.get("kind") in ("bootstrap", "rollback"):
-            conf = "waiting for qa (4.3)"
+            conf = "waiting for qa to confirm it (Policy UI → Confirm)"
         else:
             conf = "approved by qa"
         last = state.get("last_apply_event") or {}

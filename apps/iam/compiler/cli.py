@@ -400,7 +400,12 @@ def _claims_problems(doc, v, p_prev):
     if bad:
         return out + [bad]
     claims = json.loads(_b64url(jws.split(".")[1]))
-    if not isinstance(claims, dict) or claims != stored:
+    if isinstance(stored, str):
+        try:
+            stored = json.loads(stored)
+        except ValueError:
+            stored = None
+    if not source.claims_recorded(claims, stored):
         return out + ["the token's payload is not the stored claims"]
     if str(claims.get("sub") or "").lower() != sub:
         out.append("the token's sub is not approved_by_sub")

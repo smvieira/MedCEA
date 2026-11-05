@@ -1008,7 +1008,7 @@ class ReadOnlyModes(unittest.TestCase):
         p = self.t.run("--status")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("applied: version 1 (bootstrap)", p.stdout)
-        self.assertIn("waiting for qa (4.3)", p.stdout)
+        self.assertIn("waiting for qa to confirm it (Policy UI → Confirm)", p.stdout)
         self.assertIn(": equal", p.stdout)
         self.assertIn("host file: absent", p.stdout)
         self.assertEqual(writes(self.t.calls()), [])

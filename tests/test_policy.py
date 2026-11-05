@@ -3333,6 +3333,17 @@ class AuditVersionTest(unittest.TestCase):
                              ("not an approver", {"groups": ["auditor"]}), ("not Bearer", {"typ": "ID"}),
                              ("aud", {"aud": "account"}), ("sub", {"sub": "00000000-0000-0000-0000-000000000000"})):
             self.assertNotEqual(problems(self.record(claims=claims)), [], name)
+        # PostgREST stores the claims with the role it took (anon under contract C1): the
+        # record still reproduces; any other role, or an added key, does not (source.claims_recorded)
+        doc = self.record()
+        doc["approval"]["evidence"]["claims"]["role"] = "anon"
+        self.assertEqual(problems(doc), [])
+        doc["approval"]["evidence"]["claims"] = json.dumps(doc["approval"]["evidence"]["claims"])
+        self.assertEqual(problems(doc), [], "jsonb text as read from the database")
+        for bad in ({"role": "rr_qa"}, {"role": "anon", "extra": 1}):
+            doc = self.record()
+            doc["approval"]["evidence"]["claims"].update(bad)
+            self.assertNotEqual(problems(doc), [], bad)
         # composites collapse: qa + auditor (qa includes auditor) is one own role, qa
         self.assertEqual(problems(self.record(claims={"groups": ["qa", "auditor"]})), [])
         # a jti another version's confirm or dispute carried is no replay (§14.8.5): only
