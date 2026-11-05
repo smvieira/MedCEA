@@ -361,7 +361,7 @@ def register(base, spec):
     the unit and zone codes, so renaming a code would make the next onboarding miss
     the slot's row and insert a second one. dns_name is the fallback for a spec
     without a zone. Components are replaced wholesale
-    rather than merged: the pins the operator just chose ARE the component, and
+    (the old ones retired, is_active N, never deleted) rather than merged: the pins the operator just chose ARE the component, and
     a half-updated pin map is worse than either version of it.
     """
     dns = spec["dns_name"]
@@ -402,7 +402,12 @@ def register(base, spec):
     if target is not None:
         device_id = target
         _request(base, "/device?device_id=eq.%d" % device_id, "PATCH", row)
-        _request(base, "/component?device_id=eq.%d" % device_id, "DELETE")
+        # The earlier board's components are retired, not deleted (5 Nov 2026): no person
+        # holds DELETE on platform data (level D, "records are retired"), so under
+        # IAM_DB_ROLES=true the DELETE was refused and a re-onboarding never registered.
+        # Readers take active components only (the runner: c.is_active = 'Y').
+        _request(base, "/component?device_id=eq.%d&is_active=eq.Y" % device_id, "PATCH",
+                 {"is_active": "N"})
     else:
         device_id = _insert_device(base, row)["device_id"]
 

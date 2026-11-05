@@ -172,7 +172,7 @@
           <button type="submit" class="btn btn-primary">Save Location</button>
           <button type="button" class="btn btn-ghost" onclick="closeLocForm()">Cancel</button>
           <div class="spacer"></div>
-          <button type="button" class="btn btn-danger hidden" id="loc-del-btn" onclick="deleteLoc()">Delete</button>
+          <span class="muted hidden" style="max-width:340px" id="loc-del-btn" title="Nothing is deleted from the platform: an inactive location stays on record and can be made active again">Locations are retired, not deleted: set Status to Inactive and save.</span>
         </div>
       </form>
     </div>
@@ -314,7 +314,7 @@
           <button type="submit" class="btn btn-primary">Save Unit</button>
           <button type="button" class="btn btn-ghost" onclick="closeUnitForm()">Cancel</button>
           <div class="spacer"></div>
-          <button type="button" class="btn btn-danger hidden" id="unit-del-btn" onclick="deleteUnit()">Delete</button>
+          <span class="muted hidden" style="max-width:340px" id="unit-del-btn" title="Nothing is deleted from the platform: an inactive unit stays on record and can be made active again">Units are retired, not deleted: set Status to Inactive and save.</span>
         </div>
       </form>
     </div>
@@ -938,7 +938,7 @@
           <button type="submit" class="btn btn-primary">Save Zone</button>
           <button type="button" class="btn btn-ghost" onclick="closeZoneModal()">Cancel</button>
           <div class="spacer"></div>
-          <button type="button" class="btn btn-danger hidden" id="zone-del-btn" onclick="deleteZone()">Delete</button>
+          <span class="muted hidden" style="max-width:340px" id="zone-del-btn" title="Nothing is deleted from the platform: an inactive zone stays on record and can be made active again">Zones are retired, not deleted: set Status to Inactive and save.</span>
         </div>
       </form>
     </div>
@@ -982,7 +982,7 @@
           <button type="submit" class="btn btn-primary">Save Device</button>
           <button type="button" class="btn btn-ghost" onclick="closeDeviceModal()">Cancel</button>
           <div class="spacer"></div>
-          <button type="button" class="btn btn-danger hidden" id="device-del-btn" onclick="deleteDevice()">Delete</button>
+          <span class="muted hidden" style="max-width:340px" id="device-del-btn" title="Nothing is deleted from the platform: an inactive device stays on record and can be made active again">Devices are retired, not deleted: set Status to Inactive and save. Its broker credential then stops within about 15 seconds and the slot is free.</span>
         </div>
       </form>
     </div>
@@ -1014,7 +1014,7 @@
           <button type="submit" class="btn btn-primary">Save Component</button>
           <button type="button" class="btn btn-ghost" onclick="closeComponentModal()">Cancel</button>
           <div class="spacer"></div>
-          <button type="button" class="btn btn-danger hidden" id="component-del-btn" onclick="deleteComponent()">Delete</button>
+          <span class="muted hidden" style="max-width:340px" id="component-del-btn" title="Nothing is deleted from the platform: an inactive component stays on record and can be made active again">Components are retired, not deleted: set Status to Inactive and save.</span>
         </div>
       </form>
     </div>
@@ -1693,11 +1693,8 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteLoc() {
-      if (!confirm('Delete this location?\nFails if units are assigned to it.')) return;
-      try { await api('DELETE', '/cea_location?location_id=eq.' + editLocId); toast('Location deleted'); await loadLocations(); closeLocForm(); }
-      catch(err) { toast(err.message, false); }
-    }
+    // deleteLoc() is gone (5 Nov 2026): no person may delete platform data (access policy,
+    // level D); a location is retired by setting its Status to Inactive.
 
     // ── Units ─────────────────────────────────────────────────
     async function loadUnits() {
@@ -2015,16 +2012,8 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteZone() {
-      if (!confirm('Delete this zone?')) return;
-      try {
-        await api('DELETE', '/cea_zone?zone_id=eq.' + zoneModal.zoneId);
-        toast('Zone deleted');
-        closeZoneModal();
-        if (unitZoneCounts[zoneModal.unitId] > 0) unitZoneCounts[zoneModal.unitId]--;
-        await refreshZonesPanel(zoneModal.unitId);
-      } catch(err) { toast(err.message, false); }
-    }
+    // deleteZone() is gone (5 Nov 2026): no person may delete platform data (access policy,
+    // level D); a zone is retired by setting its Status to Inactive.
 
     // ── Unit form ─────────────────────────────────────────────
     function openUnitForm(id) {
@@ -2060,11 +2049,8 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteUnit() {
-      if (!confirm('Delete this unit?\nAll zones and devices will also be deleted.')) return;
-      try { await api('DELETE', '/cea_unit?unit_id=eq.' + editUnitId); toast('Unit deleted'); await loadUnits(); closeUnitForm(); }
-      catch(err) { toast(err.message, false); }
-    }
+    // deleteUnit() is gone (5 Nov 2026): no person may delete platform data (access policy,
+    // level D); a unit is retired by setting its Status to Inactive.
 
     // ── Quick-add location modal ──────────────────────────────
     function openLocModal() { document.getElementById('modal-loc-form').reset(); document.getElementById('modal-bg').classList.add('open'); }
@@ -2302,16 +2288,8 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteDevice() {
-      if (!confirm('Delete this device? All components will also be deleted.')) return;
-      try {
-        await api('DELETE', '/component?device_id=eq.' + deviceModal.deviceId);
-        await api('DELETE', '/device?device_id=eq.' + deviceModal.deviceId);
-        toast('Device deleted');
-        closeDeviceModal();
-        await loadAllDevices();
-      } catch(err) { toast(err.message, false); }
-    }
+    // deleteDevice() is gone (5 Nov 2026): no person may delete platform data (access policy,
+    // level D); a device is retired by setting its Status to Inactive.
 
     // ── Component modal ───────────────────────────────────────
     function openComponentModal(deviceId, componentId) {
@@ -2351,15 +2329,8 @@
       } catch(err) { toast(err.message, false); }
     }
 
-    async function deleteComponent() {
-      if (!confirm('Delete this component?')) return;
-      try {
-        await api('DELETE', '/component?component_id=eq.' + componentModal.componentId);
-        toast('Component deleted');
-        closeComponentModal();
-        await refreshComponentsPanel(componentModal.deviceId);
-      } catch(err) { toast(err.message, false); }
-    }
+    // deleteComponent() is gone (5 Nov 2026): no person may delete platform data (access policy,
+    // level D); a component is retired by setting its Status to Inactive.
 
     // ── Helpers ───────────────────────────────────────────────
     function formData(form, floats = [], ints = []) {
@@ -3291,7 +3262,7 @@
     async function buildDevicePayload(deviceId) {
       const [devRows, comps] = await Promise.all([
         api('GET', '/device?device_id=eq.' + deviceId),
-        api('GET', '/component?device_id=eq.' + deviceId)
+        api('GET', '/component?device_id=eq.' + deviceId + '&is_active=eq.Y')   // retired ones are not fitted
       ]);
       const d = devRows[0];
       if (!d) throw new Error('Device not found');

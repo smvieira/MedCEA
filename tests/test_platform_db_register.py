@@ -68,5 +68,33 @@ class RegisterCredential(unittest.TestCase):
         self.assertIn("onboard it again", str(e.exception))
 
 
+
+class ReOnboarding(unittest.TestCase):
+    def test_old_components_are_retired_not_deleted(self):
+        """No person holds DELETE on platform data (level D: records are retired); the
+        re-onboarding of a registered slot was refused "permission denied for table
+        component" under IAM_DB_ROLES=true (5 Nov 2026)."""
+        m = load()
+        calls = []
+        retire = ("PATCH", "/component?device_id=eq.1&is_active=eq.Y", {"is_active": "N"})
+
+        def fake(base, path, method="GET", body=None):
+            calls.append((method, path, body))
+            if method == "GET" and path.startswith("/device?select=device_id"):
+                return [{"device_id": 1}]
+            if path.startswith("/rpc/register_mqtt_credential"):
+                return "unit01-s-zone01"
+            return []
+        m._request = fake
+        m._insert_component = lambda base, comp: calls.append(("INSERT", "/component", comp))
+        spec = dict(SPEC, dns_name="unit01-s-zone01", zone_id=1, model="ESP32-S3",
+                    components=[{"component_type": "SENSOR", "parameters": {}}])
+        self.assertEqual(m.register("http://x", spec), (1, "updated"))
+        self.assertNotIn("DELETE", [c[0] for c in calls])
+        self.assertIn(retire, calls)
+        insert = [i for i, c in enumerate(calls) if c[0] == "INSERT"][0]
+        self.assertLess(calls.index(retire), insert)        # retired first, then the new rows
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -205,7 +205,7 @@ Move this board from unit01-s-zone01 to UNIT01 / ZONE02?</code></pre>
 </ul>
 <p>A sidecar next to the broker rebuilds the broker's password and access files from the database every 15 seconds. Two things follow from that:</p>
 <ul>
-<li><strong>Deactivation revokes within about 15 seconds.</strong> When a device is marked Inactive, or its record is deleted, its credential drops out at the next rebuild. The broker then refuses its next connection and denies its publishes.</li>
+<li><strong>Deactivation revokes within about 15 seconds.</strong> When a device is marked Inactive (devices are retired, never deleted), its credential drops out at the next rebuild. The broker then refuses its next connection and denies its publishes.</li>
 <li><strong>The first connections of a new board may be refused.</strong> The board boots before it is registered. Until the registration lands and the next rebuild picks it up, which takes up to about 15 seconds, the broker refuses the board. The board restarts after 10 seconds and tries again, so this clears by itself.</li>
 </ul>
 <p>A board that is not registered (the run was refused, the board had no IP, or <code>--no-register</code>) has a password that the broker does not know, so it cannot publish. Onboard it again once the cause is fixed.</p>

@@ -480,6 +480,11 @@ class ApprovalsStatic(unittest.TestCase):
                 self.assertRegex(m.group(1), r"^\s*status:\s*'retired'\s*$", m.group(0))
         self.assertNotRegex(self.html, r"status:\s*'(approved|draft)'")
         self.assertNotRegex(self.html, r"api\('DELETE',\s*'/(recipe|recipe_line|unit_algorithm_params)\b")
+        # 5 Nov 2026: no person may delete platform data (level D): locations, units, zones,
+        # devices and components are retired (Status Inactive), and the UI sends no DELETE at all
+        self.assertNotIn("api('DELETE'", self.html)
+        for bid in ("loc-del-btn", "unit-del-btn", "zone-del-btn", "device-del-btn", "component-del-btn"):
+            self.assertRegex(self.html, r'<span class="muted hidden"[^>]*id="%s"[^>]*>[^<]*retired, not deleted' % bid)
         self.assertNotIn("function deleteRecipe(", self.html)
         self.assertNotIn("function deleteRecipeLine(", self.html)
 
