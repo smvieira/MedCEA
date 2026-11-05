@@ -420,6 +420,9 @@ PAGE = """<!doctype html>
     border-radius:4px;background:var(--surface-2);color:var(--ink);font-size:.95rem;
     font-family:ui-monospace,Menlo,monospace}
   input:focus{outline:2px solid var(--accent);outline-offset:1px}
+  #pfree{display:flex;gap:.5rem;align-items:center}
+  #pfree[hidden]{display:none}
+  #pshow{flex:none}
   .row{display:flex;gap:.6rem;margin-top:.8rem;flex-wrap:wrap}
   button.go{background:var(--accent);color:#fff;border:0;border-radius:4px;padding:.55rem 1.1rem;
     font-size:.92rem;font-weight:600;cursor:pointer}
@@ -482,7 +485,7 @@ __CHANNELMAP_CSS__
     <p class="hint" id="phint" hidden></p>
     <div class="opts" id="popts"></div>
     <div id="pmap" hidden></div>
-    <div id="pfree" hidden><input type="text" id="pinput" autocomplete="off"></div>
+    <div id="pfree" hidden><input type="text" id="pinput" autocomplete="off"><button class="alt" type="button" id="pshow" hidden aria-pressed="false">Show</button></div>
     <div class="row" id="prow"><button class="go" id="psend">Continue</button>
       <button class="alt" id="preset" hidden>Reset to reference wiring</button>
       <span class="hint" id="pmapwarn" hidden></span></div>
@@ -580,6 +583,18 @@ function renderPrompt(p) {
     free.hidden = false;
     inp.type = p.kind === "secret" ? "password" : "text";
     inp.value = p.default && p.kind !== "secret" ? p.default : "";
+    // A secret (the WiFi passphrase) can be shown to check what was typed; hidden again at
+    // every new question. Only this browser sees it: the answer goes to the run as before.
+    const show = $("pshow");
+    show.hidden = p.kind !== "secret";
+    show.textContent = "Show"; show.setAttribute("aria-pressed", "false");
+    show.onclick = () => {
+      const on = inp.type === "password";
+      inp.type = on ? "text" : "password";
+      show.textContent = on ? "Hide" : "Show";
+      show.setAttribute("aria-pressed", String(on));
+      inp.focus();
+    };
     inp.onkeydown = e => { if (e.key === "Enter") send(); };
     setTimeout(() => inp.focus(), 30);
   }
@@ -745,11 +760,13 @@ async function tick() {
     $("startcard").hidden = !idle;
     if (idle) renderStore(s.catalog || [], !!(s.done || s.finished));
     $("idlecard").hidden = !!(s.prompt || s.done || idle);
-    if (s.finished && !s.done) {
-      $("idletext").textContent = s.exit && s.exit !== "0"
-        ? "The run stopped with exit code " + s.exit + " \u2014 see the log."
-        : "The run has finished.";
-    }
+    // Set on every tick: a run's outcome must not stay on the page into the next run
+    // (until 5 Nov 2026 "stopped with exit code 1" stayed up while the next run worked).
+    $("idletext").textContent = s.finished && !s.done
+      ? (s.exit && s.exit !== "0"
+          ? "The run stopped with exit code " + s.exit + " \u2014 see the log."
+          : "The run has finished.")
+      : "Waiting for the script\u2026";
   } catch (e) { $("phase").textContent = "disconnected"; }
 }
 tick(); setInterval(tick, 700);

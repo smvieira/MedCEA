@@ -144,7 +144,7 @@ OFFLINE=0; WANT_PREVIEW=0
 ROLE=""; UNIT_WANTED=""; ZONE_WANTED=""; UNREGISTERED=0; DO_REGISTER=1
 ASK_ADVANCED=0; MQTT_HOST=""; MQTT_PORT=""; TOPIC_ROOT=""
 CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
-UI=0; UI_PORT=8088; UI_BIND="0.0.0.0"; UI_DIR=""; UI_PID=""; UI_TOKEN=""; STAGE=""
+UI=0; UI_PORT=8088; UI_BIND="0.0.0.0"; UI_DIR=""; UI_PID=""; UI_TOKEN=""; STAGE=""; WIFI_TRY_DIR=""
 UI_INSECURE=0; UI_MANAGED=0; TOKEN_FD=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -633,6 +633,54 @@ ask_param() {
 # value, and on the next printf it resets the cursor to column 0 and overwrites
 # the start of the line — and lands in the provisioning record as "192.168.1.1\r".
 mpy() { $SUDO "$MPREMOTE" connect "$PORT" "$@" | tr -d '\r'; }
+# mpy_cp SRC DST — copy one file to the board. A copy can fail once on a serial hiccup
+# right after the board resets (mpremote soft-resets it on every connect, which runs
+# the boot.py just copied), so it is tried three times, 2 s apart; it is idempotent.
+# The run's stderr goes nowhere under the wizard, so on the last failure mpremote's own
+# error (its last lines) goes into the run's log; a copy that needed a retry says so.
+mpy_cp() {
+  local src="$1" dst="$2" err n
+  err="$(mktemp)" || return 1
+  for n in 1 2 3; do
+    if mpy fs cp "$src" "$dst" >/dev/null 2>"$err"; then
+      if [ "$n" -gt 1 ]; then info "copied $(basename "$src") on attempt $n"; fi
+      rm -f "$err"; return 0
+    fi
+    [ "$n" -lt 3 ] && sleep 2
+  done
+  warn "mpremote: $(tr -d '\r' < "$err" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')"
+  rm -f "$err"
+  return 1
+}
+# wifi_try — the board joins $SSID with $PSK now (src/bootstrap/wifi_try.py), so a
+# refused passphrase is caught at its question, not after every file is written
+# (5 Nov 2026). Sets WIFI_RES (GOT_IP, REFUSED, NO_AP_FOUND, TIMEOUT, ERROR, or REASON_<n>;
+# empty when the board did not answer) and WIFI_IP. The two values reach the board as
+# Python literals in a file in a mode-700 directory, removed at once; never in argv.
+wifi_try() {
+  local d out="" line="" n
+  WIFI_RES=""; WIFI_IP=""
+  d="$(mktemp -d "${TMPDIR:-/tmp}/cea-wifi.XXXXXX")" || return 0
+  WIFI_TRY_DIR="$d"   # cleanup() removes it if a signal ends the run during the check
+  if SSID="$SSID" PSK="$PSK" python3 - "$SRC_DIR/wifi_try.py" > "$d/wifi_try.py" <<'PY'
+import os, sys
+with open(sys.argv[1]) as f:
+    body = f.read()
+sys.stdout.write("SSID = %r\nPSK = %r\n%s" % (os.environ["SSID"], os.environ["PSK"], body))
+PY
+  then
+    # A second run only when the board gave no answer at all (an mpremote hiccup).
+    for n in 1 2; do
+      out="$(mpy run "$d/wifi_try.py" 2>/dev/null || true)"
+      line="$(grep $'^WIFI\t' <<<"$out" | tail -n 1 || true)"
+      [ -n "$line" ] && break
+      [ "$n" = 1 ] && sleep 2
+    done
+  fi
+  rm -rf "$d"; WIFI_TRY_DIR=""
+  [ -n "${line:-}" ] && IFS=$'\t' read -r _ WIFI_RES WIFI_IP <<<"$line"
+  return 0
+}
 
 # ------------------------------------------------------------- cleanup --------
 # One trap for everything: the staging dir, the spool dir and the server. Set
@@ -651,6 +699,7 @@ cleanup() {
   token_close 2>/dev/null || true
   [ -n "$UI_PID" ] && kill "$UI_PID" 2>/dev/null || true
   [ -n "$STAGE" ]  && rm -rf "$STAGE" 2>/dev/null || true
+  [ -n "${WIFI_TRY_DIR:-}" ] && rm -rf "$WIFI_TRY_DIR" 2>/dev/null || true   # the passphrase, on a signal
   # Only remove the spool if this run created it. Under --ui-spool the daemon
   # owns it and is still serving the summary from it.
   if [ "$UI_MANAGED" != 1 ] && [ -n "$UI_DIR" ]; then rm -rf "$UI_DIR" 2>/dev/null || true; fi
@@ -1550,6 +1599,9 @@ info "${GRN}REPL up${N} — MicroPython $MPY_VER"
 
 # ---------------------------------------------------- 7. choose network -------
 step "WiFi"
+# One pass per network and passphrase, until the board itself has joined (wifi_try)
+# or the operator chooses to go on without that.
+while :; do
 if [ -z "$SSID" ]; then
   while :; do
     info "scanning from the board's own radio…"
@@ -1620,6 +1672,43 @@ if [ -z "$PSK" ]; then
   PSK="$ANSWER"
 fi
 [ -n "$PSK" ] || warn "empty passphrase — only valid for an open network"
+
+# The board tries the network now, before anything else is written (5 Nov 2026).
+info "checking: the board joins '$SSID'…"
+wifi_try
+case "$WIFI_RES" in
+  GOT_IP) info "${GRN}joined${N} '$SSID': the board got $WIFI_IP"; break ;;
+  REFUSED)
+    warn "'$SSID' refused the board: a wrong passphrase, or the access point gave up on the handshake." ;;
+  NO_AP_FOUND)
+    warn "the board cannot see '$SSID' (out of range, 5 GHz only, or the name is mistyped)." ;;
+  TIMEOUT)
+    warn "the board did not get an address on '$SSID' within 20 s (no DHCP answer, or a slow access point)." ;;
+  *) warn "the board could not join '$SSID' (${WIFI_RES:-no answer from the board})." ;;
+esac
+if [ "$ASSUME_YES" = 1 ] && ! ui_on && [ ! -t 0 ]; then
+  [ "$WIFI_RES" = REFUSED ] \
+    && die "'$SSID' refused the passphrase; nothing but the firmware was written. Check it and run again."
+  warn "going on (--yes, no terminal): the board is checked again after its reset and is not registered without an address."
+  break
+fi
+if ui_on; then
+  CHOICES=("Type the passphrase again|" "Choose another network|"
+           "Continue anyway|the board is not registered unless it gets an address after its reset")
+else
+  echo "      [1]  type the passphrase again"
+  echo "      [2]  choose another network"
+  echo "      [3]  continue anyway (the board is not registered unless it gets an address after its reset)"
+fi
+ui_waiting
+prompt_choice "The board could not join '$SSID'. What next?" "1" \
+       "It tried just now, from where it is. The Show button reveals what you typed."
+case "$ANSWER" in
+  3) warn "going on without a confirmed connection"; break ;;
+  2) SSID=""; PSK="" ;;
+  *) PSK="" ;;
+esac
+done
 
 # ---------------------------------------------------- 8. WebREPL password -----
 step "WebREPL credential"
@@ -1763,22 +1852,33 @@ printf 'PASS = %s\n' "'$WEBREPL_PASS'" > "$STAGE/webrepl_cfg.py"
 # instead of needing nine hand edits.
 for f in "$STAGE"/*.py "$STAGE"/*.json; do
   [ -e "$f" ] || continue
-  mpy fs cp "$f" ":$(basename "$f")" >/dev/null || die "failed to copy $(basename "$f") to the board"
+  mpy_cp "$f" ":$(basename "$f")" || die "failed to copy $(basename "$f") to the board"
   info "copied $(basename "$f")"
 done
+# boot.py goes last, main.py just before it (5 Nov 2026): mpremote soft-resets the board
+# on every connect, and a soft reset runs boot.py (main.py only outside the raw REPL);
+# once boot.py and its modules are there it joins WiFi for up to 30 s, longer than
+# mpremote waits for the raw REPL (10 s), and the next copy cuts the join off. A dozen
+# cut-off handshakes made the access point refuse the board for minutes ("wrong
+# passphrase") and copies fail. With boot.py last no connect follows it before the reset.
 for f in "$APP_DIR"/*.py; do
-  mpy fs cp "$f" ":$(basename "$f")" >/dev/null || die "failed to copy $(basename "$f") to the board"
+  case "$(basename "$f")" in boot.py|main.py) continue ;; esac
+  mpy_cp "$f" ":$(basename "$f")" || die "failed to copy $(basename "$f") to the board"
 done
-info "copied $(ls -1 "$APP_DIR"/*.py | wc -l) application module(s)"
 for pkg in umqtt sensor_pack_2; do
   [ -d "$APP_DIR/$pkg" ] || continue
   mpy fs mkdir ":$pkg" >/dev/null 2>&1 || true   # already there on a re-flash
   for f in "$APP_DIR/$pkg"/*.py; do
-    mpy fs cp "$f" ":$pkg/$(basename "$f")" >/dev/null \
+    mpy_cp "$f" ":$pkg/$(basename "$f")" \
       || die "failed to copy $pkg/$(basename "$f") to the board"
   done
   info "copied $pkg/"
 done
+for f in "$APP_DIR"/main.py "$APP_DIR"/boot.py; do
+  [ -e "$f" ] || continue
+  mpy_cp "$f" ":$(basename "$f")" || die "failed to copy $(basename "$f") to the board"
+done
+info "copied $(ls -1 "$APP_DIR"/*.py | wc -l) application module(s), boot.py last"
 
 # ---------------------------------------------------- 10. verify --------------
 # The acceptance test is the real boot path, not a simulation of it: hard-reset
