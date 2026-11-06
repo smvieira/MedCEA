@@ -31,7 +31,7 @@
 <tr><td><a href="#training-e21">E21 Log out of the Node-RED editor</a></td><td><span class="role">engineer</span></td><td>The editor's Logout ends the platform sign-in too, so the next person on the browser must sign in.</td><td>5 Nov 2026</td></tr>
 <tr><td><a href="#training-e22">E22 Onboard a board over TLS</a></td><td><span class="role">engineer</span>, host operator</td><td>A wrong WiFi passphrase is caught at its question; a registered board reaches the broker over TLS only, and the plain port is closed.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e23">E23 Go back and cancel during onboarding</a></td><td><span class="role">engineer</span> (two accounts)</td><td>A wrong planning answer can be corrected with Back; a run can be cancelled only by the person who started it, and says what state it left.</td><td>Not yet</td></tr>
-<tr><td><a href="#training-e24">E24 Superset is skipped until its policy is applied</a></td><td>host operator (<span class="role">admin</span>), <span class="role">bio_scientist</span></td><td>Superset's code installs nothing and admits nobody while the applied access policy has no Superset, and the deploy still succeeds.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e24">E24 Superset is skipped until its policy is applied</a></td><td>host operator (<span class="role">admin</span>), <span class="role">bio_scientist</span></td><td>Superset's code installs nothing and admits nobody while the applied access policy has no Superset, and the deploy still succeeds.</td><td>6 Nov 2026, as expected (step 6 not yet in a browser)</td></tr>
 </tbody>
 </table></div>
 
@@ -778,7 +778,7 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 <li>Opening <code>https://superset.&lt;domain&gt;</code> directly: no Superset answers (no address is set up for it yet, so the browser cannot reach it, warns about the certificate, or the platform answers "404 Not Found").</li>
 </ul>
 <p><strong>Afterwards.</strong> Nothing to undo: nothing was created.</p>
-<p><strong>Last done.</strong> Not yet: run on the live platform once the stage B code is committed.</p>
+<p><strong>Last done.</strong> 6 November 2026, commit <code>176463e</code>, applied version 14 (rollback), by the host operator, as part of <code>./deploy-apps.sh --all</code>. Step 1: <code>exit 1</code>, nothing printed. Step 2: <code>[superset] skipped: Superset is not in the applied access policy yet (stage C)</code>, the component reported installed and the run ended "All done". Step 3: <code>No resources found in medcea namespace.</code> Step 4: <code>SUPERSET_DOMAIN (superset): not deployed (./apps/superset/deploy.sh installs it)</code>, <code>exit 0</code>. Step 5: 56 checks, 54 OK, 1 warning (Platform manual: the portal still served edition 6, since the commit changed the manual), 0 failures; Superset roles SKIP with the expected text. Step 6: the portal page the platform serves holds the Superset card in its disabled form (<code>card-dis</code>, no link); not yet looked at in a browser. Found while doing it: the card said Superset queries "telemetry, runs and master data", which D7 contradicts; corrected to "telemetry and master data" (live after the next <code>./deploy-infra.sh</code>).</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>

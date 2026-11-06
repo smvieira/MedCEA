@@ -132,7 +132,7 @@ data:
               <div class="card card-dis" data-href="https://${SUPERSET_DOMAIN}">
                 <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg></div>
                 <div class="cl">Superset</div><div class="ct">Data analysis</div>
-                <div class="cd">Build your own charts and dashboards, and query telemetry, runs and master data.</div>
+                <div class="cd">Build your own charts and dashboards, and query telemetry and master data.</div>
                 <div class="ck">https://${SUPERSET_DOMAIN} <span class="ck-a">&rarr;</span></div>
               </div><!--/card-->
             </div>
