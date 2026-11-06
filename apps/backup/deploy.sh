@@ -10,7 +10,7 @@
 #      database's dumps, people's homes with their git tokens.
 #   2. ConfigMap medcea-backup-script (apps/backup/backup-job.sh)
 #   3. CronJob medcea-backup (apps/backup/k8s/backup-cronjob.yaml), daily at 02:30 UTC:
-#      pg_dump (custom format) of $POSTGRES_DB and keycloak, the roles without their
+#      pg_dump (custom format) of $POSTGRES_DB and keycloak (and superset when it exists), the roles without their
 #      passwords, and a tar of every AI workbench home (claim-*), Node-RED's /data
 #      and Grafana's volume; one dated folder per run with MANIFEST, SHA256SUMS and a
 #      final OK; folders older than BACKUP_KEEP_DAYS (default 14) are deleted.

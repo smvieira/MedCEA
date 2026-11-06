@@ -25,6 +25,9 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    hosts listing included; skeleton, matrix and waivers equal; cli.py
                    skeleton-gate --check --against-git 31df34b prints equal
   Phase45Delta     against PRE_45 (slice 4.4 deployed, 05c1af9): the same for slice 4.5
+  PhaseSupersetBDelta  against PRE_SB (90e8dcb): the same for Superset stage B (the superset
+                   tool kind in tools.py and cli.py, a comment in defaults.yaml); `compile
+                   superset` refuses, `has-tool superset` says none
                    (applying versions changes no compiled artefact and no skeleton)
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
@@ -99,6 +102,8 @@ PRE_42A = "08fab15"
 PRE_43 = "e18b4ee"   # slice 4.2b deployed: 4.3 changes no compiled artefact and no skeleton
 PRE_44 = "31df34b"   # slice 4.3 built: 4.4 changes no compiled artefact, no listing and no skeleton
 PRE_45 = "05c1af9"   # slice 4.4 deployed: 4.5 changes no compiled artefact, no listing and no skeleton
+PRE_SB = "90e8dcb"   # IAM Phase 4 complete: Superset stage B adds code only (the superset tool kind),
+                     # no compiled artefact, no listing and no skeleton moves
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -1664,7 +1669,7 @@ class LibTools(unittest.TestCase):
         self.assertEqual((rc, out), (0, artefacts(model.load_defaults())["edge-wizard"]), err)
 
     def test_inherited_override_is_refused(self):
-        for tool in ("edge-wizard", "pgadmin"):
+        for tool in ("edge-wizard", "pgadmin", "superset"):
             rc, out, err = tools_bash(f"policy_tool {tool}", MEDCEA_POLICY_FILE=DEFAULTS,
                                       MEDCEA_POLICY_BREAK_GLASS="trial")
             self.assertEqual((rc, out), (1, ""), tool)
@@ -1692,6 +1697,12 @@ class LibTools(unittest.TestCase):
         rc, out, _ = tools_bash("policy_tool pgadmin", IAM_GATES="false", MEDCEA_POLICY_FILE="/nonexistent")
         self.assertEqual((rc, out), (0, "{'groups': ['admin']}\n"))
 
+    def test_superset_gates_off_compiles_nothing(self):
+        """Superset stage B: no pre-policy setting, so IAM_GATES=false is rc 3 and no compile."""
+        rc, out, err = tools_bash("policy_tool superset", IAM_GATES="false", MEDCEA_POLICY_FILE="/nonexistent")
+        self.assertEqual((rc, out), (3, ""))
+        self.assertIn("no pre-policy setting", err)
+
 
 def read(rel):
     with open(os.path.join(REPO, rel)) as f:
@@ -1702,7 +1713,7 @@ def read(rel):
 # lib-policy-tools.sh or lib-db-apply.sh's db_apply), and how they call the init.
 WRITERS = ["deploy-infra.sh", "infra/deploy-workbench.sh", "infra/deploy-policy.sh"] + [
     f"apps/{c}/deploy.sh" for c in ("access", "database", "edge-wizard", "frontend", "iam", "monitor",
-                                    "mqtt-explorer", "scheduler")]
+                                    "mqtt-explorer", "scheduler", "superset")]
 READERS = ["health-check.sh", "tests/iam-hosts.sh", "tests/iam-schema.sh", "tests/iam-signin.sh",
            "tests/iam-mqtt.sh", "tests/iam-access.sh"]
 # Fixture-only: they compile the factory policy (--defaults / db_apply on medcea-iamtest).
@@ -2247,6 +2258,87 @@ class Phase45Delta(unittest.TestCase):
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_45, state=None, check=True))
             except source.SourceError as e:
                 self.skipTest(f"no git revision {PRE_45}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+        self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+class PhaseSupersetBDelta(unittest.TestCase):
+    """Superset stage B (6 Nov 2026) adds the superset tool kind (tools.py KINDS,
+    SETTING_LEVELS, SERVICE_IDENTITY, superset_roles_mapping; cli.py compile superset and
+    has-tool) and a comment in defaults.yaml: every artefact, the hosts listing included,
+    compiles byte for byte as PRE_SB, and the skeleton, the matrix and the waivers are equal.
+    The policy carries no superset tool until stage C, an approved skeleton version."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_SB, "medcea-presb-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_SB}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        self.assertNotIn("superset", self.want)   # stage C adds the key, conditionally
+        for key, want in self.want.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_SB}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_check_output_identical(self):
+        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
+        root = scratch_repo("medcea-sb-")
+        try:
+            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual((rc, out), (rc_old, out_old), err)
+
+    def test_skeleton_and_matrix_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_text = f.read()
+        old_data = yaml.safe_load(old_text)
+        self.assertEqual(old_data, self.p.data)   # a comment changed, nothing else
+        self.assertEqual(source.skeleton_digest(old_data), source.skeleton_digest(self.p.data))
+        with open(DEFAULTS) as f:
+            new_text = f.read()
+        code_lines = lambda t: [l for l in t.splitlines() if not l.lstrip().startswith("#")]  # noqa: E731
+        self.assertEqual(code_lines(old_text), code_lines(new_text))
+
+    def test_no_superset_tool_yet(self):
+        self.assertEqual(tools.groups(self.p, "superset"), [])
+        root = scratch_repo("medcea-sb-")
+        try:
+            cli = os.path.join(root, "apps", "iam", "compiler", "cli.py")
+            rc, out, err = run_cli(["compile", "superset"], cli=cli)
+            self.assertEqual((rc, out), (1, ""))
+            self.assertIn("no group has a superset tool block", err)
+            rc, out, _ = run_cli(["has-tool", "superset"], cli=cli)
+            self.assertEqual((rc, out), (1, ""))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_skeleton_gate_against_presb_is_equal(self):
+        """`cli.py skeleton-gate --check --against-git 90e8dcb` prints equal (in-process, as
+        Phase45Delta); HEAD is checked by hand before the commit."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SB, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_SB}: {e}")
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])

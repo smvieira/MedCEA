@@ -12,6 +12,11 @@
 #   - Grafana's database, PersistentVolumeClaim grafana (decision of 1 Nov 2026):
 #     the dashboards Editors created or saved as copies, folders, annotations,
 #     alert rules. The provisioned dashboards come from git and come back.
+# One more thing people make in the browser lives in no volume of its own: Superset's
+# dashboards, charts, saved queries and its users are its metadata database
+# `superset`, inside PostgreSQL's volume (data-rdbms-postgresql-0) with the platform
+# database and Keycloak's; the nightly backup dumps it (db/superset.dump) when it
+# exists. It is named while deployment/superset exists.
 # Deleting the namespace (or a Helm uninstall of grafana) deletes the claims, and
 # hostpath-storage deletes the data with them, so every path that deletes the
 # namespace or MicroK8s calls this BEFORE it asks for confirmation:
@@ -36,6 +41,7 @@ data_volumes_warn() {
         echo -e "\033[0;31mCould not list the AI workbench homes (claim-<name>) or Grafana's volume in '$ns'.\033[0m"
         echo -e "\033[0;31mIf people keep notebooks or their own dashboards there, this deletes them: answer no,\033[0m"
         echo -e "\033[0;31mhave them push notebooks to git and export their dashboards first.\033[0m"
+        echo -e "\033[0;31mWith Superset installed, its dashboards and charts (database superset, inside PostgreSQL) go too.\033[0m"
         echo ""
         return 0
     fi
@@ -50,10 +56,13 @@ for i in items:
     if name.startswith("claim-") or name == "grafana":
         print("%s\t%s\t%s" % (name, (i.get("spec") or {}).get("volumeName") or "-",
                               ((i.get("status") or {}).get("capacity") or {}).get("storage") or "?"))
-' <<<"$json" 2>/dev/null)" || return 0
-    [[ -n "$rows" ]] || return 0
-    local line claim pv size path homes=() grafana=""
-    while IFS= read -r line; do
+' <<<"$json" 2>/dev/null)" || rows=""
+    local line claim pv size path homes=() grafana="" superset=""
+    # -o name, compared exactly: anything else (no such deployment, no answer) is "not installed"
+    [[ "$(timeout 10 ${KUBECTL:-microk8s kubectl} get deployment superset -n "$ns" -o name 2>/dev/null </dev/null || true)" \
+        == deployment.apps/superset ]] && superset=yes
+    [[ -n "$rows" || -n "$superset" ]] || return 0
+    [[ -n "$rows" ]] && while IFS= read -r line; do
         IFS=$'\t' read -r claim pv size <<<"$line"
         path="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pv "$pv" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null </dev/null || true)"
         if [[ "$claim" == grafana ]]; then
@@ -87,6 +96,18 @@ for i in items:
         echo "        sudo cp -a <directory> ~/grafana-backup/"
         echo "      (grafana.db, Grafana's whole database: a copy to look things up in, or to hand back"
         echo "      to an administrator; it also holds the old accounts and sessions)."
+        echo ""
+    fi
+    if [[ -n "$superset" ]]; then
+        echo -e "\033[0;31m\033[1mSuperset's database, which this deletes ($backed1):\033[0m"
+        echo "  - database superset, inside PostgreSQL's volume (data-rdbms-postgresql-0)"
+        echo "  It holds the dashboards, charts, datasets and saved queries people made in Superset,"
+        echo "  and its own copy of the accounts that signed in. The connection to the platform data"
+        echo "  and the platform's own dashboards come back with ./apps/superset/deploy.sh. To keep the"
+        echo "  rest, answer no now and first:"
+        echo "    - have each builder export what they want (Dashboards → select → Export) and import it"
+        echo "      after the reinstall (Dashboards → Import), and/or"
+        echo "    - rely on the nightly backup's db/superset.dump (./apps/backup/backups.sh now takes one)."
         echo ""
     fi
 }

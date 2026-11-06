@@ -11,12 +11,14 @@ itself with a two-line check list, through policy_source_init --read-only, so th
 document really comes from the read-only init and its directory is removed at exit.
 Nothing here touches a cluster or the repository's state/.
 """
+import base64
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import yaml
@@ -741,6 +743,183 @@ class EndToEnd(unittest.TestCase):
             t.close()
 
 
+SS_KUBECTL = r"""#!/bin/sh
+# a fake kubectl for check_supersetroles: read verbs only, answers from $FAKE_DIR
+echo "$*" >> "$FAKE_DIR/calls.log"
+case "$*" in
+  "get deployment superset -n medcea") test -f "$FAKE_DIR/deploy.json" ;;
+  "get deployment,replicaset -n medcea -l app=superset -o json") test -f "$FAKE_DIR/deploy.json" && cat "$FAKE_DIR/deploy.json" ;;
+  "get secret superset-secrets -n medcea -o json") test -f "$FAKE_DIR/secret.json" && cat "$FAKE_DIR/secret.json" ;;
+  *) echo "fake kubectl: unexpected $*" >&2; exit 99 ;;
+esac
+"""
+
+SS_KEY = "ab" * 32
+SS_PASS = "Zq8sY1pXv0rT4mN7bW2c"
+SS_MAP = {"engineer": ["Alpha", "sql_lab"], "qp": ["Gamma", "MedCEA Viewer"]}
+
+
+def ss_deploy(env=None, image="docker.io/apache/superset:6.1.0@sha256:" + "8b" * 32, rs_env=None, init_env=None):
+    base = [{"name": "SUPERSET_DB_USER", "value": "svc_superset"},
+            {"name": "SUPERSET_PORT", "value": "8088"},
+            {"name": "SUPERSET_SECRET_KEY", "valueFrom": {"secretKeyRef": {"name": "superset-secrets",
+                                                                           "key": "SUPERSET_SECRET_KEY"}}}]
+
+    def obj(kind, name, env_):
+        return {"kind": kind, "metadata": {"name": name},
+                "spec": {"template": {"spec": {
+                    "initContainers": [{"name": "superset-deps", "image": image, "env": init_env or []}],
+                    "containers": [{"name": "superset", "image": image, "env": env_}]}}}}
+    items = [obj("Deployment", "superset", env if env is not None else base)]
+    if rs_env is not None:
+        items.append(obj("ReplicaSet", "superset-old", rs_env))
+    return {"kind": "List", "items": items}
+
+
+def ss_secret(key=SS_KEY, mapping=SS_MAP, drop=()):
+    data = {"SUPERSET_SECRET_KEY": key, "SUPERSET_META_DB_PASS": SS_PASS, "SVC_SUPERSET_DB_PASS": "Kp3vW9xT2qL8nB5mR1sD",
+            "SUPERSET_CLIENT_SECRET": "c" * 32, "SUPERSET_ROLES_MAPPING": json.dumps(mapping)}
+    return {"kind": "Secret", "metadata": {"name": "superset-secrets"},
+            "data": {k: base64.b64encode(v.encode()).decode() for k, v in data.items() if k not in drop}}
+
+
+class SupersetRoles(unittest.TestCase):
+    """check_supersetroles (Superset stage B): a fake kubectl, policy_tool stubbed or, once,
+    the real library in a scratch tree (the policy there has no superset tool yet: rc 5)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="medcea-ss-")
+        self.fd = os.path.join(self.tmp, "fake")
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.fd)
+        os.makedirs(self.bin)
+        with open(os.path.join(self.bin, "kubectl"), "w") as f:
+            f.write(SS_KUBECTL)
+        os.chmod(os.path.join(self.bin, "kubectl"), 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def cluster(self, deploy=None, secret=None):
+        for n, doc in (("deploy.json", deploy), ("secret.json", secret)):
+            if doc is not None:
+                with open(os.path.join(self.fd, n), "w") as f:
+                    json.dump(doc, f)
+
+    def run_check(self, want=None, rc=0, stub=True, root=None, **env):
+        setup = ""
+        if stub:
+            setup = ('policy_tool() { [ "$1" = superset ] || return 2; [ "$FAKE_RC" = 0 ] || return "$FAKE_RC"; '
+                     'echo "$FAKE_WANT"; }')
+        script = (f'_record() {{ echo "$1|$2|$3"; }}\nSCRIPT_DIR={root or self.tmp}\nTIMEOUT=5\nKUBECTL=kubectl\n'
+                  f'NAMESPACE=medcea\n{setup}\n{body("check_supersetroles")}\ncheck_supersetroles "Superset roles" medcea\n')
+        e = clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], FAKE_DIR=self.fd, FAKE_RC=str(rc),
+                      FAKE_WANT=json.dumps(want if want is not None else SS_MAP), MEDCEA_NO_LOG="1", **env)
+        p = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e, timeout=120)
+        out = p.stdout.strip()
+        for secret in (SS_KEY, SS_PASS, "Kp3vW9xT2qL8nB5mR1sD", "c" * 32):
+            self.assertNotIn(secret, out + p.stderr)
+        with open(os.path.join(self.fd, "calls.log")) as f:
+            for call in f:
+                self.assertRegex(call, r"^get ", call)
+        status, _, msg = out.split("|", 2)
+        return status, msg
+
+    def test_skip_when_not_deployed(self):
+        status, msg = self.run_check()
+        self.assertEqual(status, "SKIP", msg)
+        self.assertIn("stage C", msg)
+
+    def test_ok(self):
+        self.cluster(ss_deploy(), ss_secret())
+        status, msg = self.run_check(want={"qp": ["MedCEA Viewer", "Gamma"], "engineer": ["sql_lab", "Alpha"]})
+        self.assertEqual(status, "OK", msg)
+        self.assertIn("maps engineer, qp from the access policy", msg)
+
+    def test_mapping_drift_fails(self):
+        self.cluster(ss_deploy(), ss_secret(mapping=dict(SS_MAP, qa=["Gamma", "MedCEA Viewer"])))
+        status, msg = self.run_check()
+        self.assertEqual(status, "FAIL", msg)
+        self.assertIn("AUTH_ROLES_MAPPING is", msg)
+        self.assertIn('"qa"', msg)
+        self.cluster(secret=ss_secret(mapping={"engineer": ["Admin"]}))
+        self.assertEqual(self.run_check()[0], "FAIL")
+
+    def test_plain_env_secret_fails(self):
+        cases = {
+            "by name": dict(env=[{"name": "SUPERSET_DB_USER", "value": "svc_superset"},
+                                 {"name": "SUPERSET_SECRET_KEY", "value": "x"}]),
+            "by value": dict(env=[{"name": "SUPERSET_DB_USER", "value": "svc_superset"},
+                                  {"name": "SQLA_URL", "value": SS_PASS}]),
+            "in an init container": dict(init_env=[{"name": "SUPERSET_META_DB_PASS", "value": "y"}]),
+            "in a kept ReplicaSet": dict(rs_env=[{"name": "SUPERSET_CLIENT_SECRET", "value": "z"}]),
+        }
+        for why, kw in cases.items():
+            with self.subTest(why):
+                self.cluster(ss_deploy(**kw), ss_secret())
+                status, msg = self.run_check()
+                self.assertEqual(status, "FAIL", msg)
+                self.assertIn("plain env values in", msg)
+
+    def test_secret_problems_fail(self):
+        for secret, want in ((None, "Secret superset-secrets is missing"),
+                             (ss_secret(key=""), "SUPERSET_SECRET_KEY is empty"),
+                             (ss_secret(drop=("SUPERSET_SECRET_KEY",)), "SUPERSET_SECRET_KEY is empty"),
+                             (ss_secret(key="CHANGE_ME_TO_A_COMPLEX_RANDOM_SECRET"), "is default"),
+                             (ss_secret(key="short"), "is short"),
+                             (ss_secret(drop=("SUPERSET_ROLES_MAPPING",)), "AUTH_ROLES_MAPPING is ?")):
+            with self.subTest(want):
+                for n in ("deploy.json", "secret.json"):
+                    if os.path.exists(os.path.join(self.fd, n)):
+                        os.remove(os.path.join(self.fd, n))
+                self.cluster(ss_deploy(), secret)
+                status, msg = self.run_check()
+                self.assertEqual(status, "FAIL", msg)
+                self.assertIn(want, msg)
+
+    def test_connection_user_and_image(self):
+        self.cluster(ss_deploy(env=[{"name": "SUPERSET_DB_USER", "value": "postgres"}]), ss_secret())
+        status, msg = self.run_check()
+        self.assertEqual((status, "logs in as postgres, not svc_superset" in msg), ("FAIL", True), msg)
+        self.cluster(ss_deploy(env=[]), ss_secret())
+        self.assertIn("logs in as -", self.run_check()[1])
+        self.cluster(ss_deploy(image="apache/superset:6.1.0"), ss_secret())
+        status, msg = self.run_check()
+        self.assertEqual(status, "FAIL", msg)
+        self.assertIn("not pinned by digest: apache/superset:6.1.0", msg)
+
+    def test_policy_tool_answers(self):
+        self.cluster(ss_deploy(), ss_secret())
+        status, msg = self.run_check(rc=3)
+        self.assertEqual(status, "WARN", msg)
+        self.assertIn("IAM_GATES=false", msg)
+        status, msg = self.run_check(rc=5)
+        self.assertEqual(status, "FAIL", msg)
+        self.assertIn("has no superset tool", msg)
+        status, msg = self.run_check(rc=1)
+        self.assertEqual(status, "FAIL", msg)
+        self.assertIn("cannot compile", msg)
+
+    def test_unreadable_fails(self):
+        self.cluster(ss_deploy(), ss_secret())
+        with open(os.path.join(self.fd, "deploy.json"), "w") as f:
+            f.write("not json")
+        status, msg = self.run_check()
+        self.assertEqual(status, "FAIL", msg)
+        self.assertIn("cannot read", msg)
+
+    def test_the_real_library_today(self):
+        # the applied policy has no superset tool before stage C: a deployed Superset FAILs
+        root = scratch_repo("medcea-ss-")
+        try:
+            self.cluster(ss_deploy(), ss_secret())
+            status, msg = self.run_check(stub=False, root=root, IAM_GATES="true")
+            self.assertEqual(status, "FAIL", msg)
+            self.assertIn("has no superset tool", msg)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class Wiring(unittest.TestCase):
     """The conf lines, the dispatch and the help, as design §14.4.14 names them."""
 
@@ -752,13 +931,18 @@ class Wiring(unittest.TestCase):
         i = names.index("Database grants")
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
-        self.assertEqual(len(lines), 55)
+        self.assertEqual(len(lines), 56)
+        # Superset stage B: one more check, SKIP until Superset is deployed
+        row = [l for l in lines if l.split("|")[0].strip() == "Superset roles"]
+        self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["supersetroles", "$NAMESPACE"])
         with open(os.path.join(REPO, "health-check.sh")) as f:
             src = f.read()
         self.assertIn('iampolicy)    check_iampolicy "$name" "$target" ;;', src)
         self.assertIn('iamartefacts) check_iamartefacts "$name" "$target" ;;', src)
         self.assertIn("${CYAN}iampolicy${NC}", src)
         self.assertIn("${CYAN}iamartefacts${NC}", src)
+        self.assertIn('supersetroles) check_supersetroles "$name" "$target" ;;', src)
+        self.assertIn("${CYAN}supersetroles${NC}", src)
         # the state document's directory is removed at exit
         self.assertRegex(src, r"trap 'rm -rf \"\$\(dirname \"\$POLICY_SOURCE_STATE_FILE\"\)\"' EXIT")
 

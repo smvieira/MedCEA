@@ -15,7 +15,13 @@
 #   STORAGE        microk8s-hostpath's PV directory, mounted read-only; each volume
 #                  is <NAMESPACE>-<claim>-pvc-<uid> in it
 #   NAMESPACE      the platform namespace
-#   DATABASES      the databases to dump, custom format (pg_restore reads them)
+#   DATABASES      the databases to dump, custom format (pg_restore reads them);
+#                  one that cannot be dumped fails the run
+#   OPTIONAL_DATABASES  databases dumped the same way only when they exist (asked in
+#                  database postgres first): "superset", which only an install with
+#                  Superset has. An absent one is a MANIFEST line and a log line, never
+#                  a failure; a question psql cannot answer fails the run, since the
+#                  database might exist and would then be missing from the backup.
 #   POLICY_DB      the platform database whose access-policy hash chain head goes into
 #                  MANIFEST (default: the first of DATABASES)
 #   VOLUMES        claim name patterns to copy, e.g. "claim-* node-red grafana"
@@ -123,6 +129,21 @@ SQL
     echo "# policy chain head (read before the dump): $2 $3 verify_chain=$4"
 }
 
+# db_exists NAME: prints t or f; fails when psql cannot answer. The name goes in as
+# a psql variable, quoted by psql (:'name'), and must look like a database name.
+db_exists() {
+    case "$1" in ''|*[!a-z0-9_]*) die "OPTIONAL_DATABASES: '$1' is not a plain database name" ;; esac
+    _ex="$(psql --no-password --no-psqlrc -X -q -tA -v ON_ERROR_STOP=1 --dbname=postgres -v "name=$1" 2>/dev/null <<'SQL'
+SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = :'name');
+SQL
+)" || return 1
+    case "$(printf '%s' "$_ex" | tr -d '[:space:]')" in
+        t) echo t ;;
+        f) echo f ;;
+        *) return 1 ;;
+    esac
+}
+
 prune() {
     _keep="${KEEP_DAYS:-14}"
     case "$_keep" in ''|*[!0-9]*) die "KEEP_DAYS '$_keep' is not a whole number of days" ;; esac
@@ -175,6 +196,20 @@ run() {
         pg_dump --no-password --format=custom --file="$DIR/db/$_db.dump" --dbname="$_db" \
             || die "pg_dump of $_db failed"
     done
+    _dumped="$DATABASES"
+    _absent=""
+    for _db in ${OPTIONAL_DATABASES:-}; do
+        _e="$(db_exists "$_db")" || die "could not ask PostgreSQL whether database $_db exists"
+        if [ "$_e" = f ]; then
+            say "skipped $_db (no such database on this install)"
+            _absent="${_absent:+$_absent }$_db"
+            continue
+        fi
+        say "pg_dump $_db"
+        pg_dump --no-password --format=custom --file="$DIR/db/$_db.dump" --dbname="$_db" \
+            || die "pg_dump of $_db failed"
+        _dumped="$_dumped $_db"
+    done
     # Roles and memberships without their passwords: a reference for a restore into
     # a new install, whose own deploys set the passwords from its config.env.
     say "pg_dumpall --globals-only --no-role-passwords"
@@ -216,7 +251,8 @@ run() {
         {
             echo "# MedCEA backup $CURRENT (started $(iso_of "$_start"))"
             echo "# namespace: $NAMESPACE"
-            echo "# databases: $DATABASES"
+            echo "# databases: $_dumped"
+            [ -z "$_absent" ] || echo "# databases skipped (absent): $_absent"
             echo "# volume patterns: $VOLUMES"
             echo "$_head"
             echo "# bytes	sha256	path"

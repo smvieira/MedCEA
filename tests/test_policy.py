@@ -91,6 +91,39 @@ def _pop(path):
     return apply
 
 
+def add_superset(d):
+    """Superset stage C as a test fixture (Superset stage B, 6 Nov 2026: the code exists, the
+    policy carries no superset tool until stage C; decisions D7 and D8): host SUPERSET_DOMAIN,
+    group analysis (Alpha from U, Gamma from R), service identity svc_superset reading
+    master_data and measurements only (no runs: I5 unchanged), builders bio_scientist,
+    control_scientist and engineer, viewers qp, qc and production_manager (no qa, no auditor)."""
+    ceiling = {"master_data": ["R"], "measurements": ["R"]}
+    d["hosts"]["SUPERSET_DOMAIN"] = {"label": "Superset", "client": "superset", "serves": ["superset"]}
+    d["service_identities"]["svc_superset"] = {
+        "label": "Superset datasource", "description": "Superset's charts and SQL Lab; reads telemetry of every unit.",
+        "db_role": "svc_superset", "db_password": "SVC_SUPERSET_DB_PASS", "ceiling": copy.deepcopy(ceiling)}
+    d["resource_groups"]["analysis"] = {
+        "label": "Superset analysis", "class": "config", "description": "Charts, dashboards and SQL Lab in Superset.",
+        "why_this_class": "Presentation configuration.", "risk": "SQL Lab runs any SELECT svc_superset may run.",
+        "reaches": copy.deepcopy(ceiling),
+        "members": [{"type": "ui", "host": "SUPERSET_DOMAIN"}],
+        "tool": {"kind": "superset", "host": "SUPERSET_DOMAIN", "service_identity": "svc_superset",
+                 "settings": [{"setting": "Alpha", "levels": ["U"]}, {"setting": "Gamma", "levels": ["R"]}],
+                 "otherwise": "refuse", "help": "U gives Alpha with SQL Lab, R gives Gamma with MedCEA Viewer."}}
+    d["matrix"]["analysis"] = {r: ["R", "C", "U"] for r in ("bio_scientist", "control_scientist", "engineer")}
+    d["matrix"]["analysis"].update({r: ["R"] for r in ("production_manager", "qc", "qp")})
+    return d
+
+
+def _superset(*mutations):
+    """A mutation of the policy with the Superset fixture added first."""
+    def apply(d):
+        add_superset(d)
+        for m in mutations:
+            m(d)
+    return apply
+
+
 # Each case must make the checker fail. The expected text is a fragment of the first
 # matching error, so a case that fails for the wrong reason is caught too.
 MUTATIONS = {
@@ -242,6 +275,24 @@ MUTATIONS = {
                                                "ttl_hours"),
     "iam-mqttx not reachable from the Explorer proxy": (_set(["network", "pods", "iam", "ingress", 0, "from"], ["node"]),
                                                         "MQTTX_DOMAIN serves iam-mqttx"),
+    # Superset stage B: the superset tool kind, on the stage C fixture (add_superset)
+    "Superset Alpha by R": (_superset(_set(["resource_groups", "analysis", "tool", "settings", 0, "levels"], ["R"])),
+                            "cannot give superset's Alpha"),
+    "Superset Admin from a cell": (_superset(_append(["resource_groups", "analysis", "tool", "settings"],
+                                                     {"setting": "Admin", "levels": ["K"]})),
+                                   "is not one the policy may give for superset"),
+    "Superset without its datasource identity": (_superset(_pop(["resource_groups", "analysis", "tool", "service_identity"])),
+                                                 "is not a service identity"),
+    "Superset reaches less than svc_superset": (_superset(_set(["resource_groups", "analysis", "reaches"], {"master_data": ["R"]})),
+                                                "svc_superset reads"),
+    "role admitted to Superset without a setting": (_superset(_pop(["resource_groups", "analysis", "tool", "settings", 1])),
+                                                    "SUPERSET_DOMAIN admits"),
+    "constrained analysis cell": (_superset(_set(["matrix", "analysis", "engineer"],
+                                                 {"levels": ["R", "C", "U"], "constraint": "own_unit"})),
+                                  "cannot evaluate"),
+    "Superset reads runs for the scientists": (_superset(_set(["service_identities", "svc_superset", "ceiling", "runs"], ["R"]),
+                                                         _set(["resource_groups", "analysis", "reaches", "runs"], ["R"])),
+                                               "I5"),
 }
 
 
@@ -407,6 +458,109 @@ class ToolsTest(unittest.TestCase):
         d = copy.deepcopy(self.policy.data)
         del d["resource_groups"]["research_workbench"]["tool"]
         self.assertEqual(routes.compile(model.Policy(d))["digest"], routes.compile(self.policy)["digest"])
+
+
+class SupersetToolTest(unittest.TestCase):
+    """Superset stage B (6 Nov 2026): the superset tool kind and AUTH_ROLES_MAPPING. The
+    applied policy carries no superset tool until stage C, so the mapping is tested on the
+    stage C fixture (add_superset); the defaults compile nothing for Superset."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.defaults = model.load_defaults()
+        cls.p = model.Policy(add_superset(copy.deepcopy(cls.defaults.data)))
+
+    def test_fixture_passes_the_checker(self):
+        errors, _ = invariants.check(self.p)
+        self.assertEqual(errors, [], "\n" + "\n".join(errors))
+
+    def test_kind_settings_and_identity(self):
+        self.assertEqual(tools.KINDS["superset"], {"Alpha", "Gamma"})
+        self.assertEqual(tools.SETTING_LEVELS[("superset", "Alpha")], {"U"})
+        self.assertIn("superset", tools.SERVICE_IDENTITY)
+        self.assertEqual(tools.SUPERSET_ROLES, {"Alpha": ["Alpha", "sql_lab"], "Gamma": ["Gamma", "MedCEA Viewer"]})
+        for fab_roles in tools.SUPERSET_ROLES.values():
+            self.assertNotIn("Admin", fab_roles)   # never from the policy
+
+    def test_mapping(self):
+        alpha, gamma = ["Alpha", "sql_lab"], ["Gamma", "MedCEA Viewer"]
+        mapping = tools.superset_roles_mapping(self.p)
+        self.assertEqual(mapping, {"bio_scientist": alpha, "control_scientist": alpha, "engineer": alpha,
+                                   "production_manager": gamma, "qc": gamma, "qp": gamma})
+        self.assertEqual(sorted(mapping), proxies.admitted(self.p, "SUPERSET_DOMAIN"))
+        for refused in ("qa", "auditor", "admin", "operator", "maintenance"):   # D8
+            self.assertNotIn(refused, mapping)
+        self.assertEqual(dict(tools.settings(self.p, "analysis")),
+                         {"Alpha": ["bio_scientist", "control_scientist", "engineer"],
+                          "Gamma": ["production_manager", "qc", "qp"]})
+
+    def test_ceiling_reads_no_runs(self):
+        """D7: master_data and measurements only, so I5 needs no change."""
+        self.assertEqual(self.p.services["svc_superset"]["ceiling"], {"master_data": ["R"], "measurements": ["R"]})
+        reaches = self.p.groups["analysis"]["reaches"]
+        for g, lv in self.p.services["svc_superset"]["ceiling"].items():
+            self.assertLessEqual(set(lv), self.p.closure(reaches.get(g, [])), g)
+
+    def test_absent_is_an_error(self):
+        self.assertEqual(tools.groups(self.defaults, "superset"), [])
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            tools.superset_roles_mapping(self.defaults)
+
+    def test_empty_mapping_is_an_error(self):
+        d = copy.deepcopy(self.p.data)
+        d["matrix"]["analysis"] = {}
+        with self.assertRaisesRegex(ValueError, "admit nobody"):
+            tools.superset_roles_mapping(model.Policy(d))
+
+    def test_two_superset_groups_are_an_error(self):
+        d = copy.deepcopy(self.p.data)
+        d["resource_groups"]["analysis_copy"] = copy.deepcopy(d["resource_groups"]["analysis"])
+        with self.assertRaisesRegex(ValueError, "found 2"):
+            tools.superset_roles_mapping(model.Policy(d))
+
+    def test_alpha_given_by_r_is_refused(self):
+        d = copy.deepcopy(self.p.data)
+        d["resource_groups"]["analysis"]["tool"]["settings"][0]["levels"] = ["R"]
+        errors, _ = invariants.check(model.Policy(d))
+        self.assertTrue(any("cannot give superset's Alpha" in e for e in errors), errors)
+
+    def test_tool_block_does_not_change_route_digest(self):
+        d = copy.deepcopy(self.p.data)
+        del d["resource_groups"]["analysis"]["tool"]
+        self.assertEqual(routes.compile(model.Policy(d))["digest"], routes.compile(self.p)["digest"])
+
+    def test_cli(self):
+        import subprocess
+        import tempfile
+        import yaml
+        cli_py = os.path.join(REPO, "apps", "iam", "compiler", "cli.py")
+        defaults = [sys.executable, cli_py, "--defaults"]   # the factory file, never the host's
+        with_file = [sys.executable, cli_py, "--file"]
+        out = subprocess.run(defaults + ["compile", "superset"], capture_output=True, text=True)
+        self.assertEqual((out.returncode, out.stdout), (1, ""))
+        self.assertIn("no group has a superset tool block", out.stderr)
+        self.assertEqual(subprocess.run(defaults + ["has-tool", "superset"], capture_output=True).returncode, 1)
+        self.assertEqual(subprocess.run(defaults + ["has-tool", "grafana"], capture_output=True).returncode, 0)
+        self.assertEqual(subprocess.run(defaults + ["has-tool", "zeppelin"], capture_output=True).returncode, 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            f = os.path.join(tmp, "superset.yaml")
+            with open(f, "w") as fh:
+                yaml.safe_dump(self.p.data, fh)
+            out = subprocess.run(with_file + [f, "--label", "fixture", "compile", "superset"],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout, json.dumps(tools.superset_roles_mapping(self.p), sort_keys=True) + "\n")
+            self.assertEqual(subprocess.run(with_file + [f, "--label", "fixture", "has-tool", "superset"],
+                                            capture_output=True).returncode, 0)
+            bad = copy.deepcopy(self.p.data)
+            bad["resource_groups"]["analysis"]["tool"]["settings"][0]["levels"] = ["R"]
+            with open(f, "w") as fh:
+                yaml.safe_dump(bad, fh)
+            out = subprocess.run(with_file + [f, "--label", "fixture", "compile", "superset"],
+                                 capture_output=True, text=True)
+            self.assertEqual((out.returncode, out.stdout), (1, ""))
+            self.assertEqual(subprocess.run(with_file + [f, "--label", "fixture", "has-tool", "superset"],
+                                            capture_output=True).returncode, 2)
 
 
 class RoutesTest(unittest.TestCase):
@@ -1966,6 +2120,49 @@ class WiringTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(r.stdout, "")
         self.assertEqual(run("zeppelin", {}).returncode, 2)
+
+    def test_policy_tool_superset_shell(self):
+        """Superset stage B: rc 5 while the policy has no superset tool, 3 under IAM_GATES=false,
+        1 on a broken policy, the compiled mapping once a group carries the tool; never a
+        word on stdout but the mapping."""
+        import shutil
+        import subprocess
+        import yaml
+
+        def run(root, env, repo=None):
+            e = clean_env(REPO_ROOT=repo or root, **env)
+            e.pop("EDGE_WIZARD_ROLE", None)
+            return subprocess.run(["bash", "-c", f'source "{root}/infra/lib-policy-tools.sh"; policy_tool superset'],
+                                  capture_output=True, text=True, env=e)
+        r = run(scratch_root(), {"IAM_GATES": "true"})
+        self.assertEqual((r.returncode, r.stdout), (5, ""), r.stderr)
+        self.assertIn("not in the applied access policy yet", r.stderr)
+        r = run(scratch_root(), {"IAM_GATES": "false"})
+        self.assertEqual((r.returncode, r.stdout), (3, ""))
+        self.assertIn("IAM_GATES=false", r.stderr)
+        r = run(scratch_root(), {"IAM_GATES": "true", "MEDCEA_POLICY_FILE": os.path.join(REPO, "apps/iam/policy/defaults.yaml"),
+                                 "MEDCEA_POLICY_BREAK_GLASS": "trial"})
+        self.assertEqual((r.returncode, r.stdout), (1, ""))     # an inherited override is refused
+        self.assertIn("MEDCEA_POLICY_FILE is set", r.stderr)
+        root = scratch_repo("medcea-test-superset-")
+        try:
+            data = add_superset(copy.deepcopy(model.load_defaults().data))
+            target = os.path.join(root, "apps", "iam", "policy", "defaults.yaml")
+            with open(target, "w") as fh:
+                yaml.safe_dump(data, fh)
+            r = run(root, {"IAM_GATES": "true"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout), tools.superset_roles_mapping(model.Policy(data)))
+            self.assertEqual(r.stdout.count("\n"), 1)
+            data["resource_groups"]["analysis"]["tool"]["settings"][0]["levels"] = ["R"]   # broken: Alpha by R
+            with open(target, "w") as fh:
+                yaml.safe_dump(data, fh)
+            r = run(root, {"IAM_GATES": "true"})
+            self.assertEqual((r.returncode, r.stdout), (1, ""))
+            r = run(root, {"IAM_GATES": "true"}, repo="/nonexistent")
+            self.assertEqual((r.returncode, r.stdout), (1, ""))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_node_red_wiring(self):
         """IAM 3.3: Node-RED's adminAuth is rendered from the policy; tokens never in argv."""

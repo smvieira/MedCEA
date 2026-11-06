@@ -361,10 +361,20 @@ check_tailscale
 [[ -n "$(cfg_get GRAFANA_BREAKGLASS_PASS)" ]] || cfg_set GRAFANA_BREAKGLASS_PASS "$(gen_password)"
 # The database roles' passwords (IAM plan 3.6; apps/database/deploy.sh writes them
 # into Secrets db-<role>). Generated, never asked, never shown.
+# SVC_SUPERSET_DB_PASS is Superset's connection role, used from Superset stage C on.
 for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
-          SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS; do
+          SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS \
+          SVC_SUPERSET_DB_PASS SUPERSET_META_DB_PASS; do
     [[ -n "$(cfg_get "$_v")" ]] || cfg_set "$_v" "$(gen_password)"
 done
+# Superset's session-signing and connection-encryption key (apps/superset): hex, so
+# it stays inside the password charset; Superset refuses to start on its default.
+if [[ -z "$(cfg_get SUPERSET_SECRET_KEY)" ]]; then
+    _k="$(openssl rand -hex 32 2>/dev/null)" || _k=""
+    [[ "$_k" =~ ^[0-9a-f]{64}$ ]] || die "openssl rand -hex 32 gave no key for SUPERSET_SECRET_KEY"
+    cfg_set SUPERSET_SECRET_KEY "$_k"
+    unset _k
+fi
 
 if [[ "$MODE" == "missing" ]]; then
     MISSING=()

@@ -19,6 +19,13 @@
                                         IAM 3.3) from the flows group's `tool:` block
   cli.py compile edge-wizard [--file F] the onboarding wizard's --required-role, comma-separated (IAM 3.4)
   cli.py compile pgadmin [--file F]     pgAdmin's OAUTH2_ADDITIONAL_CLAIMS, a Python literal (IAM 3.4)
+  cli.py compile superset [--file F]    Superset's AUTH_ROLES_MAPPING, {role: [FAB role, ...]} as one JSON
+                                        line, sorted keys (Superset stage B); exit 1 "no group has a
+                                        superset tool block" while the policy has none (stage C adds it)
+  cli.py has-tool KIND [--file F]       exit 0 when exactly one group carries a `tool:` block of KIND,
+                                        1 when none does, 2 when several do, KIND is unknown or the
+                                        policy fails its checks; prints nothing on stdout
+                                        (policy_tool superset's "not applied yet")
   cli.py compile mqtt [--file F]        the MQTT Explorer's per-person credential rows (mqtt.json of ConfigMap
                                         medcea-iam-lib, read by iam-api; IAM 3.5), canonical, one line
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
@@ -568,12 +575,14 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
     sub.add_parser("hosts")
+    ht = sub.add_parser("has-tool")
+    ht.add_argument("kind")
     desc = sub.add_parser("describe-gate")
     desc.add_argument("host")
     desc.add_argument("roles")
     comp = sub.add_parser("compile")
     comp.add_argument("target", choices=["proxy", "routes", "netpol", "egress", "grants", "grafana", "jupyterhub", "node-red",
-                                         "edge-wizard", "pgadmin", "mqtt"])
+                                         "edge-wizard", "pgadmin", "mqtt", "superset"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
     comp.add_argument("--setting", choices=["allowed_groups", "admin_groups"], help="compile jupyterhub: which list")
@@ -647,6 +656,20 @@ def main(argv=None):
             print("  FAIL:", e)
         print("OK" if not errors else f"{len(errors)} violation(s)")
         return 1 if errors else 0
+
+    if args.cmd == "has-tool":
+        if args.kind not in tools.KINDS:
+            print(f"ERROR: unknown tool kind {args.kind}; known: {', '.join(sorted(tools.KINDS))}", file=sys.stderr)
+            return 2
+        errors, _ = invariants.check(p)
+        if errors:
+            print(f"refusing to answer: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
+            return 2
+        found = tools.groups(p, args.kind)
+        if len(found) > 1:
+            print(f"ERROR: {len(found)} groups carry a {args.kind} tool block: {', '.join(found)}", file=sys.stderr)
+            return 2
+        return 0 if found else 1
 
     if args.cmd == "hosts":
         for h in p.hosts:
@@ -737,6 +760,17 @@ def main(argv=None):
     if args.cmd == "compile" and args.target in ("edge-wizard", "pgadmin"):
         try:
             print(",".join(tools.edge_wizard_roles(p)) if args.target == "edge-wizard" else tools.pgadmin_claims(p))
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "compile" and args.target == "superset":
+        if not tools.groups(p, "superset"):
+            print("ERROR: no group has a superset tool block: Superset is not in this access policy "
+                  "(found 0 groups; stage C adds it)", file=sys.stderr)
+            return 1
+        try:
+            print(json.dumps(tools.superset_roles_mapping(p), sort_keys=True))
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

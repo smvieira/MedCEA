@@ -321,7 +321,7 @@ fi
 # one: with --break-glass, the one read that asks, snapshots and records the break-glass
 # (the components then take its marker); otherwise one look at PostgreSQL, so a database
 # that is not Ready stops the run once instead of failing every component after a wait.
-POLICY_COMPILING=(access database edge-wizard frontend iam monitor mqtt-explorer scheduler)
+POLICY_COMPILING=(access database edge-wizard frontend iam monitor mqtt-explorer scheduler superset)
 declare -a _POLICY_SEL=()
 for c in "${SELECTED[@]}"; do
     printf '%s\n' "${POLICY_COMPILING[@]}" | grep -qx "$c" && _POLICY_SEL+=("$c")

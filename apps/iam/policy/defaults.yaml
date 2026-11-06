@@ -689,6 +689,11 @@ service_identities:
 #    constraint_enforced_by: <text>, otherwise: refuse, help: <text>}   (--required-role, IAM 3.4)
 #   {kind: pgadmin, host: PGADMIN_DOMAIN, settings: [{setting: sign_in, levels: [K]}],
 #    otherwise: refuse, help: <text>}   (OAUTH2_ADDITIONAL_CLAIMS, IAM 3.4)
+#   {kind: superset, host: SUPERSET_DOMAIN, service_identity: svc_superset,
+#    settings: [{setting: Alpha, levels: [U]}, {setting: Gamma, levels: [R]}],
+#    otherwise: refuse, help: <text>}   (AUTH_ROLES_MAPPING: Alpha → Alpha + sql_lab, Gamma →
+#    Gamma + "MedCEA Viewer"; Alpha only from U; `cli.py compile superset`. The code exists
+#    since Superset stage B, 6 Nov 2026; no group carries this block until stage C)
 # A role gets the first setting whose levels it holds unconstrained; every role the host
 # admits must get one, and nobody else. `reaches` must cover the service identity's ceiling.
 # `constraint_enforced_by` (a tool with no service identity: it acts with the person's own

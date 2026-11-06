@@ -1,0 +1,189 @@
+# apps/superset/k8s/superset.yaml — Superset's web pod, Service and Ingress (stage B of
+# "Superset for data analysis"; owner decisions of 6 Nov 2026: plain manifests, no Helm
+# chart (D1); no Redis and no Celery worker (D2); the three missing Python packages from
+# a hash-checked init container (D3)). Rendered by apps/superset/deploy.sh with the
+# explicit list _POD_VARS, shared with k8s/superset-init.yaml; this file uses NAMESPACE
+# KEYCLOAK_DOMAIN KEYCLOAK_REALM SUPERSET_DOMAIN PORTAL_DOMAIN PLATFORM_IP
+# SUPERSET_CONFIG_CHECKSUM SUPERSET_DB_USER.
+#
+# No secret is a plain value: everything secret is a secretKeyRef (Secret
+# superset-secrets, and db-svc-superset for the data connection the init Job writes).
+# The root filesystem is read-only: gunicorn's heartbeat goes to /tmp, Superset's
+# DATA_DIR is $SUPERSET_HOME, the packages are in /opt/extra; all three are emptyDirs.
+# The init container needs PyPI at every start (D3): without it Superset stays down.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: superset
+  namespace: ${NAMESPACE}
+  labels:
+    app: superset
+spec:
+  replicas: 1
+  # No old ReplicaSets: Roll back with git and ./apps/superset/deploy.sh.
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: superset
+      component: web
+  template:
+    metadata:
+      labels:
+        app: superset
+        component: web
+      annotations:
+        # sha256 of Secret superset-secrets as rendered and ConfigMap superset-config
+        # (deploy.sh): a rotated key, a new role mapping or a config change restarts it
+        medcea/config-checksum: "${SUPERSET_CONFIG_CHECKSUM}"
+    spec:
+      automountServiceAccountToken: false
+      # A Service named superset injects SUPERSET_PORT=tcp://<ip>:8088 into every pod
+      # of the namespace; run-server.sh would bind to that. Off, and set below.
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000   # the image's user superset (1000:1000)
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Authlib reads Keycloak's metadata, tokens and keys by the public name (the
+      # issuer in the ID token must match it); cluster DNS does not know a name-based
+      # domain, so point that one name at the node, whose ingress serves it.
+      hostAliases:
+      - ip: "${PLATFORM_IP}"
+        hostnames: ["${KEYCLOAK_DOMAIN}"]
+      initContainers:
+      - name: superset-deps
+        # Pinned 6.1.0 by the index digest (the tag was re-pushed on 7 Sep 2026; Python
+        # 3.10.21, user superset 1000:1000). Docker Hub's apache/superset, not the Scarf
+        # gateway. To move it: read the new digest, replace it in both templates, check
+        # the image's Python against requirements.txt, ./apps/superset/deploy.sh.
+        image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
+        command: ["/usr/local/bin/pip3", "install", "--isolated", "--no-deps", "--require-hashes",
+                  "--only-binary=:all:", "--no-cache-dir", "--disable-pip-version-check",
+                  "--index-url", "https://pypi.org/simple", "--target", "/opt/extra",
+                  "-r", "/app/pythonpath/requirements.txt"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {memory: "128Mi", cpu: "100m"}
+          limits: {memory: "512Mi", cpu: "1"}
+        volumeMounts:
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+        - {name: home, mountPath: /app/superset_home}
+        - {name: config, mountPath: /app/pythonpath, readOnly: true}
+      containers:
+      - name: superset
+        image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
+        # the image's CMD, /app/docker/entrypoints/run-server.sh (gunicorn gthread)
+        env:
+        - {name: SUPERSET_CONFIG_PATH, value: "/app/pythonpath/superset_config.py"}
+        - {name: PYTHONPATH, value: "/opt/extra:/app/pythonpath"}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: SUPERSET_PORT, value: "8088"}
+        - {name: SERVER_WORKER_AMOUNT, value: "1"}
+        - {name: GUNICORN_TIMEOUT, value: "60"}
+        - {name: REQUESTS_CA_BUNDLE, value: "/etc/medcea-ca/ca.crt"}
+        - {name: MEDCEA_NAMESPACE, value: "${NAMESPACE}"}
+        - {name: KEYCLOAK_DOMAIN, value: "${KEYCLOAK_DOMAIN}"}
+        - {name: KEYCLOAK_REALM, value: "${KEYCLOAK_REALM}"}
+        - {name: SUPERSET_DOMAIN, value: "${SUPERSET_DOMAIN}"}
+        - {name: PORTAL_DOMAIN, value: "${PORTAL_DOMAIN}"}
+        # the data connection's login (db_clients_live reads it); its password is
+        # used only by the init Job, which stores it encrypted in the metadata database
+        - name: SUPERSET_DB_USER
+          value: "${SUPERSET_DB_USER}"
+        - name: SUPERSET_SECRET_KEY
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_SECRET_KEY}}
+        - name: SUPERSET_META_DB_PASS
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_META_DB_PASS}}
+        - name: SUPERSET_CLIENT_SECRET
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_CLIENT_SECRET}}
+        - name: SUPERSET_ROLES_MAPPING
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_ROLES_MAPPING}}
+        ports:
+        - {containerPort: 8088, name: http}
+        startupProbe:
+          httpGet: {path: /health, port: 8088}
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          httpGet: {path: /health, port: 8088}
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: {path: /health, port: 8088}
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 4
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {memory: "768Mi", cpu: "200m"}
+          limits: {memory: "1536Mi", cpu: "1500m"}
+        volumeMounts:
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: home, mountPath: /app/superset_home}
+        - {name: config, mountPath: /app/pythonpath, readOnly: true}
+        - {name: ca, mountPath: /etc/medcea-ca, readOnly: true}
+      volumes:
+      - {name: extra, emptyDir: {sizeLimit: 256Mi}}
+      - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+      - {name: home, emptyDir: {sizeLimit: 256Mi}}
+      - name: config
+        configMap:
+          name: superset-config
+      - name: ca
+        configMap:
+          name: cea-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: superset
+  namespace: ${NAMESPACE}
+  labels:
+    app: superset
+spec:
+  selector:
+    app: superset
+    component: web
+  ports:
+  - {name: http, port: 8088, targetPort: 8088}
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: superset
+  namespace: ${NAMESPACE}
+  labels:
+    app: superset
+  annotations:
+    # SQL Lab may run up to SQLLAB_TIMEOUT (30 s) plus the page's own waits
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  tls:
+  - hosts: [${SUPERSET_DOMAIN}]
+    secretName: cea-tls
+  ingressClassName: nginx
+  rules:
+  - host: ${SUPERSET_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: superset
+            port:
+              number: 8088

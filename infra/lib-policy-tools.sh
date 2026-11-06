@@ -7,15 +7,22 @@
 #                             engineer,maintenance (any one admits)
 #   policy_tool pgadmin       pgAdmin's OAUTH2_ADDITIONAL_CLAIMS, a Python literal,
 #                             e.g. {'groups': ['admin']}
+#   policy_tool superset      Superset's AUTH_ROLES_MAPPING, one JSON line, e.g.
+#                             {"engineer": ["Alpha", "sql_lab"], "qp": ["Gamma", "MedCEA Viewer"]}
+#                             (Superset stage B, 6 Nov 2026)
 #
-# Both come from `cli.py compile <tool>` (apps/iam/compiler/tools.py, the group's
+# Each comes from `cli.py compile <tool>` (apps/iam/compiler/tools.py, the group's
 # `tool:` block). IAM_GATES=false prints the pre-policy setting with a warning:
 # EDGE_WIZARD_ROLE for the wizard (empty: any signed-in account may onboard) and
-# {'groups': ['admin']} for pgAdmin. With IAM_GATES=true a set EDGE_WIZARD_ROLE is
+# {'groups': ['admin']} for pgAdmin. Superset has no pre-policy setting: under
+# IAM_GATES=false it returns 3 and prints nothing (apps/superset/deploy.sh skips). While the
+# policy has no group with a superset tool block (`cli.py has-tool superset` exit 1:
+# Superset stage C adds it) it returns 5 and prints nothing, so the deploy can tell "not in
+# the applied policy yet" (skip) from a broken policy (1, refuse). With IAM_GATES=true a set EDGE_WIZARD_ROLE is
 # ignored with a warning: the policy is the one source. A broken policy returns 1
 # and prints nothing, so a caller stops rather than open the tool.
 # Used by deploy-infra.sh (pgAdmin), edge/wizard-daemon.sh, edge/flash-device.sh,
-# apps/edge-wizard/deploy.sh, health-check.sh and tests/iam-hosts.sh.
+# apps/edge-wizard/deploy.sh, apps/superset/deploy.sh, health-check.sh and tests/iam-hosts.sh.
 #
 # The source (IAM Phase 4): this library never chooses one (it does not source
 # lib-policy-source.sh), but it refuses MEDCEA_POLICY_FILE unless this run's entry script
@@ -28,9 +35,13 @@
 policy_tool() {
     local out
     case "$1" in
-        edge-wizard|pgadmin) ;;
-        *) echo "policy_tool: unknown tool '$1' (edge-wizard, pgadmin)" >&2; return 2 ;;
+        edge-wizard|pgadmin|superset) ;;
+        *) echo "policy_tool: unknown tool '$1' (edge-wizard, pgadmin, superset)" >&2; return 2 ;;
     esac
+    if [[ "${IAM_GATES:-true}" == "false" && "$1" == superset ]]; then
+        echo -e "\033[0;33mWARNING: IAM_GATES=false — Superset has no pre-policy setting: it is not deployed.\033[0m" >&2
+        return 3
+    fi
     if [[ "${IAM_GATES:-true}" == "false" ]]; then
         echo -e "\033[0;33mWARNING: IAM_GATES=false — $1 gets the pre-policy setting, not the access policy.\033[0m" >&2
         if [[ "$1" == pgadmin ]]; then
@@ -51,6 +62,16 @@ policy_tool() {
             echo -e "\033[0;31mERROR: MEDCEA_POLICY_FILE ($MEDCEA_POLICY_FILE) is not the break-glass file this run recorded (event ${MEDCEA_POLICY_BREAK_GLASS_EVENT}): its sha256 differs.\033[0m" >&2
             return 1
         fi
+    fi
+    if [[ "$1" == superset ]]; then
+        local rc=0
+        python3 "$REPO_ROOT/apps/iam/compiler/cli.py" has-tool superset || rc=$?
+        case "$rc" in
+            0) ;;
+            1) echo "policy_tool: Superset is not in the applied access policy yet (no group has a superset tool block)." >&2
+               return 5 ;;
+            *) return 1 ;;
+        esac
     fi
     out="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile "$1")" || return 1
     [[ -n "$out" ]] || return 1

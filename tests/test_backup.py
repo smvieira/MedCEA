@@ -104,6 +104,7 @@ class CronJobRender(unittest.TestCase):
         self.assertNotIn("value", env["PGPASSWORD"])
         self.assertNotRegex(" ".join(self.c["command"]), r"(?i)pass")
         self.assertEqual(env["DATABASES"]["value"], "medcea_db keycloak")
+        self.assertEqual(env["OPTIONAL_DATABASES"]["value"], "superset")
         self.assertEqual(env["VOLUMES"]["value"], "claim-* node-red grafana")
 
     def test_mounts(self):
@@ -143,7 +144,11 @@ class JobRun(unittest.TestCase):
             write(os.path.join(self.bin, n), fake, 0o755)
         # psql answers the chain-head query (stdin, kept for the test) as FAKE_PSQL says
         write(os.path.join(self.bin, "psql"),
-              '#!/bin/sh\necho "psql $*" >> "$FAKE_LOG"\ncat > "$FAKE_LOG.sql"\n'
+              '#!/bin/sh\necho "psql $*" >> "$FAKE_LOG"\ncat > "$FAKE_LOG.in"\n'
+              # the existence question of OPTIONAL_DATABASES: answered from FAKE_EXISTS
+              'if grep -q pg_database "$FAKE_LOG.in"; then cat "$FAKE_LOG.in" >> "$FAKE_LOG.exists.sql"\n'
+              '  case "${FAKE_EXISTS:-t}" in t|f) echo "${FAKE_EXISTS:-t}"; exit 0 ;; *) echo "psql: error" >&2; exit 2 ;; esac\n'
+              'fi\nmv "$FAKE_LOG.in" "$FAKE_LOG.sql"\n'
               'case "${FAKE_PSQL:-head}" in\n'
               '  head) echo "head 41 ' + "ab" * 32 + ' t" ;;\n'
               '  broken) echo "head 41 ' + "ab" * 32 + ' f" ;;\n'
@@ -244,6 +249,62 @@ class JobRun(unittest.TestCase):
                           ("fail", "psql exit 2: psql: error: connection to server failed: Connection refused")):
             head, _ = self.manifest_head(FAKE_PSQL=mode)
             self.assertEqual(head, f"# policy chain head: unavailable ({why})", mode)
+
+    def optional_run(self, **extra):
+        p = self.run_job(**dict({"BACKUP_NOW": "1793586600", "OPTIONAL_DATABASES": "superset"}, **extra))
+        d = os.path.join(self.out, "20261102-023000Z")
+        manifest = ""
+        if os.path.exists(os.path.join(d, "MANIFEST")):
+            with open(os.path.join(d, "MANIFEST")) as fh:
+                manifest = fh.read()
+        with open(self.log) as fh:
+            calls = fh.read()
+        return p, d, manifest, calls
+
+    def test_an_absent_optional_database_is_skipped(self):
+        # Superset (stage B): database superset exists only on installs with Superset
+        p, d, manifest, calls = self.optional_run(FAKE_EXISTS="f")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        self.assertFalse(os.path.exists(os.path.join(d, "db", "superset.dump")))
+        self.assertNotIn("--dbname=superset", calls)
+        self.assertIn("backup: skipped superset (no such database on this install)", p.stdout)
+        self.assertIn("# databases: medcea_db keycloak\n", manifest)
+        self.assertIn("# databases skipped (absent): superset\n", manifest)
+        with open(self.log + ".exists.sql") as fh:
+            sql = fh.read()
+        self.assertIn("pg_catalog.pg_database WHERE datname = :'name'", sql)
+        self.assertIn("psql --no-password --no-psqlrc -X -q -tA -v ON_ERROR_STOP=1 --dbname=postgres -v name=superset", calls)
+
+    def test_a_present_optional_database_is_dumped(self):
+        p, d, manifest, calls = self.optional_run(FAKE_EXISTS="t")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        self.assertTrue(os.path.exists(os.path.join(d, "db", "superset.dump")))
+        self.assertIn("--dbname=superset", calls)
+        self.assertIn("# databases: medcea_db keycloak superset\n", manifest)
+        self.assertNotIn("skipped", manifest)
+        self.assertIn("\tdb/superset.dump\n", manifest)
+        v = subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=d, capture_output=True, text=True)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertNotIn(SENTINEL, calls + p.stdout + p.stderr)
+
+    def test_an_optional_database_that_cannot_be_asked_fails(self):
+        p, d, _, _ = self.optional_run(FAKE_EXISTS="error")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("could not ask PostgreSQL whether database superset exists", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(d, "OK")))
+        # and a failed dump of a present one fails like any dump
+        shutil.rmtree(d)
+        p, d, _, _ = self.optional_run(FAKE_EXISTS="t", FAKE_FAIL="--dbname=superset")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("pg_dump of superset failed", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(d, "OK")))
+
+    def test_an_optional_database_name_is_checked(self):
+        p, d, _, calls = self.optional_run(OPTIONAL_DATABASES="x';drop")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("is not a plain database name", p.stderr)
 
     def test_a_failed_dump_leaves_no_ok_and_deletes_nothing(self):
         old = os.path.join(self.out, "20200101-023000Z")

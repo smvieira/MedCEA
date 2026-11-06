@@ -483,6 +483,37 @@ esac""")
         self.assertNotIn("AI workbench homes", out)
         self.assertTrue(out.rstrip().endswith("rc=0"))
 
+    def test_names_superset_database(self):
+        # Superset (stage B): its metadata database sits inside PostgreSQL's volume
+        out = self.run_warn("""case "$*" in
+  "get pvc -n medcea -o json") echo '{"items": []}' ;;
+  "get deployment superset -n medcea -o name") echo deployment.apps/superset ;;
+  *) exit 1 ;;
+esac""")
+        self.assertIn("Superset's database, which this deletes (nothing backs it up)", out)
+        self.assertIn("database superset, inside PostgreSQL's volume (data-rdbms-postgresql-0)", out)
+        self.assertIn("db/superset.dump", out)
+        self.assertNotIn("AI workbench homes", out)
+        self.assertNotIn("Grafana's volume", out)
+        self.assertTrue(out.rstrip().endswith("rc=0"))
+        # with homes too, and a backup named
+        b = self.backup_fixture(ok=True)
+        out = self.run_warn(f"""case "$*" in
+  "get pvc -n medcea -o json") echo '{self.BOTH}' ;;
+  "get deployment superset -n medcea -o name") echo deployment.apps/superset ;;
+  *) exit 1 ;;
+esac""", b)
+        self.assertIn("AI workbench homes that this deletes", out)
+        self.assertIn("Superset's database, which this deletes (newest nightly backup: 20261102-023000Z", out)
+
+    def test_no_superset_no_words(self):
+        for body in ("echo '{\"items\": []}'",
+                     'case "$*" in "get deployment superset -n medcea -o name") echo "Error from server (NotFound)" >&2; exit 1 ;; *) echo \'{"items": []}\' ;; esac'):
+            out = self.run_warn(body)
+            self.assertNotIn("Superset", out, body)
+        out = self.run_warn("exit 1")
+        self.assertIn("database superset, inside PostgreSQL", out)
+
     def test_no_homes_no_words(self):
         self.assertEqual(self.run_warn("""echo '{"items": []}'""").strip(), "rc=0")
 

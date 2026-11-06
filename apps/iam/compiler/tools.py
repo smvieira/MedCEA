@@ -1,8 +1,8 @@
 """apps/iam/compiler/tools.py — a tool's own role setting, compiled from a group's `tool:` block.
 
 A tool that signs people in itself (Grafana in IAM 3.1, JupyterHub in 3.2, Node-RED's
-editor in 3.3, the edge wizard and pgAdmin in 3.4) cannot read the route table, so its role
-setting is compiled here. The level-to-setting mapping is policy data under the group
+editor in 3.3, the edge wizard and pgAdmin in 3.4, Superset from stage B of 6 Nov 2026)
+cannot read the route table, so its role setting is compiled here. The level-to-setting mapping is policy data under the group
 (schema_version 3), not a constant in this file:
 
   tool: {kind: grafana, host: GRAFANA_DOMAIN, service_identity: svc_grafana,
@@ -30,15 +30,23 @@ from compiler import proxies
 # kind -> the settings the policy may name. Grafana's Admin and GrafanaAdmin are left out on
 # purpose: only the local break-glass account holds them (allow_assign_grafana_admin false).
 KINDS = {"grafana": {"Editor", "Viewer"}, "jupyterhub": {"admin", "user"}, "node-red": {"editor"},
-         "edge-wizard": {"onboard"}, "pgadmin": {"sign_in"}}
+         "edge-wizard": {"onboard"}, "pgadmin": {"sign_in"}, "superset": {"Alpha", "Gamma"}}
 # (kind, setting) -> the only levels that may give it. JupyterHub's admin is administration
 # (K, which I13 keeps with admin): a hub admin given by R would be every notebook user.
 # Node-RED's editor deploys code that runs with svc_ingest: Update, never Read.
 # The edge wizard erases a board before it registers it: only who may register (C) or
 # re-register (U). pgAdmin shows the whole schema: administration (K) only.
+# Superset's Alpha builds charts, datasets and dashboards and opens SQL Lab (any SELECT the
+# datasource account may run): Update, never Read alone (Superset stage B, 6 Nov 2026).
 SETTING_LEVELS = {("jupyterhub", "admin"): {"K"}, ("node-red", "editor"): {"U"},
-                  ("edge-wizard", "onboard"): {"C", "U"}, ("pgadmin", "sign_in"): {"K"}}
-SERVICE_IDENTITY = {"grafana", "node-red"}   # kinds that read the platform with their own credential
+                  ("edge-wizard", "onboard"): {"C", "U"}, ("pgadmin", "sign_in"): {"K"},
+                  ("superset", "Alpha"): {"U"}}
+SERVICE_IDENTITY = {"grafana", "node-red", "superset"}   # kinds that read the platform with their own credential
+# Superset's Flask-AppBuilder roles per setting (AUTH_ROLES_MAPPING, re-synced at each sign-in).
+# Alpha: builders, with SQL Lab; Gamma: viewers, whose only data access is the custom role
+# "MedCEA Viewer" (database_access on the MedCEA connection, made by apps/superset/bootstrap.py).
+# Admin is never given from the policy.
+SUPERSET_ROLES = {"Alpha": ["Alpha", "sql_lab"], "Gamma": ["Gamma", "MedCEA Viewer"]}
 # Node-RED adminAuth permissions per setting: every editor scope but nodes.write, so palette
 # modules arrive only from apps/node-red/packages.txt in git (IAM 3.3 decision). Node-RED's
 # own "read" is no setting on purpose: GET /flows returns the postgreSQLConfig password.
@@ -127,6 +135,18 @@ def pgadmin_claims(p):
     """pgAdmin's OAUTH2_ADDITIONAL_CLAIMS as a Python literal ({'groups': [...]}):
     PGADMIN_CONFIG_* is written verbatim into config_distro.py. Never empty."""
     return repr({"groups": _admitted_roles(p, "pgadmin", "pgAdmin would admit nobody")})
+
+
+def superset_roles_mapping(p):
+    """Superset's AUTH_ROLES_MAPPING, {role: [FAB role, ...]}: every role the analysis tool
+    gives a setting, keyed by the `groups` claim value. Never empty (Superset's sign-in view
+    refuses an unmapped person with a 403; an empty mapping would refuse everyone, so it is
+    an error here). ValueError when no group, or more than one, carries a superset tool."""
+    g = _one(p, "superset")
+    mapping = {r: list(SUPERSET_ROLES[s]) for s, roles in settings(p, g) for r in roles}
+    if not mapping:
+        raise ValueError("no role is given a superset setting: Superset would admit nobody")
+    return mapping
 
 
 def check(p):

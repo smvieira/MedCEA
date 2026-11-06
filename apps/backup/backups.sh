@@ -180,6 +180,13 @@ B. Keycloak (accounts, roles, password hashes, clients)
   3. $k scale deployment keycloak --replicas=1, then ./deploy-infra.sh (client secrets, break-glass
      and realm settings back to this config.env). Every account change since $FOLDER is lost.
 
+B2. Superset (its own database; only when $f/db/superset.dump exists)
+  1. $k scale deployment superset --replicas=0
+  2. $k exec -i rdbms-postgresql-0 -- sh -c '$pw exec psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS superset WITH (FORCE)"'
+     $k exec -i rdbms-postgresql-0 -- sh -c '$pw exec pg_restore -U postgres -d postgres --create --exit-on-error' < $f/db/superset.dump
+  3. ./apps/superset/deploy.sh (the owner's password and the MedCEA connection back to this
+     config.env; it starts Superset). Dashboards and charts made since $FOLDER are lost.
+
 C. One person's AI workbench home (claim-<name>; the list: ls $f/volumes)
   1. The person's server is stopped (they sign out, or AI Workbench admin page → Stop). After a
      reinstall they sign in once first, so the new home exists, and stop it again.

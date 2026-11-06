@@ -147,9 +147,22 @@ class ClientsLive(unittest.TestCase):
         self.assertEqual((rc, out), (0, "end"))
 
     def test_roles(self):
-        rc, out, _ = lib("for c in scheduler monitor dbmgmt node-red grafana pgadmin iam-api; do db_client_role $c; done")
+        rc, out, _ = lib("for c in scheduler monitor dbmgmt node-red grafana pgadmin iam-api superset; do db_client_role $c; done")
         self.assertEqual(out.split(), ["svc_scheduler", "svc_monitor", "svc_dbexport", "svc_ingest",
-                                       "svc_grafana", "rr_admin_login", "iam_svc"])
+                                       "svc_grafana", "rr_admin_login", "iam_svc", "svc_superset"])
+
+    def test_superset(self):
+        # Superset (stage B): no Deployment before the policy has a superset tool (stage C),
+        # so today's list is unchanged; once deployed, its connection user is read
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler")
+        self.assertEqual((rc, out), (0, "scheduler svc_scheduler"))
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler",
+                         FAKE_DEPLOY_superset="svc_superset")
+        self.assertEqual((rc, out.splitlines()), (0, ["scheduler svc_scheduler", "superset svc_superset"]))
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_superset="")
+        self.assertEqual((rc, out), (0, "superset ?"))
+        lib_sh = read("infra/lib-db-roles.sh")
+        self.assertIn('env[?(@.name=="SUPERSET_DB_USER")]', lib_sh)
 
 
 # ── the wiring ────────────────────────────────────────────────────────────────────
@@ -242,6 +255,33 @@ class Wiring(unittest.TestCase):
         sh = read("apps/iam/deploy.sh")
         self.assertIn('[[ "$DBC_USER" == "iam_svc" ]]', sh)
         self.assertIn("SERVICE_ROLE = 'iam_svc'", read("apps/iam/iam-api.py"))
+
+    @unittest.skipUnless(os.path.exists(os.path.join(ROOT, "apps/superset/deploy.sh")),
+                         "apps/superset/deploy.sh is not in this tree")
+    def test_superset_never_on_postgres(self):
+        # like iam-api: the connection is svc_superset's or nothing (stage B plan #5)
+        sh = read("apps/superset/deploy.sh")
+        self.assertRegex(sh, r'db_client "\$NAMESPACE" svc_superset\b')
+        self.assertIn("infra/lib-db-roles.sh", sh)
+        self.assertIn('[[ "$DBC_USER" == "svc_superset" ]]', sh)
+        tpl = read("apps/superset/k8s/superset.yaml")
+        self.assertRegex(tpl, r"- name: SUPERSET_DB_USER\n\s+value: ")
+
+    def test_superset_keys_generated_before_the_early_exit(self):
+        # Superset stage B: generated on every configure run (so an existing install gets
+        # them), within the password charset, and documented in the template
+        conf, example = read("infra/configure.sh"), read("config.env.example")
+        early_exit = conf.index("[[ ${#MISSING[@]} -eq 0")
+        for var in ("SVC_SUPERSET_DB_PASS", "SUPERSET_META_DB_PASS", "SUPERSET_SECRET_KEY"):
+            with self.subTest(var=var):
+                self.assertIn(f'{var}=""', example)
+                self.assertLess(conf.index(var), early_exit)
+        self.assertIn("cfg_set SUPERSET_SECRET_KEY", conf)
+        self.assertIn("openssl rand -hex 32", conf)
+        self.assertRegex(conf, r"\^\[0-9a-f\]\{64\}\$")
+        self.assertRegex(conf, r"PASS_RE='\^\[A-Za-z0-9\._~-\]\{8,64\}\$'")   # 64 hex characters fit it
+        self.assertIn('SUPERSET_DOMAIN="superset.$DOMAIN"', example)
+        self.assertNotIn("SUPERSET_ENABLED", example)   # D4: no switch
 
     def test_flag_documented(self):
         self.assertIn('IAM_DB_SERVICE_ROLES="false"', read("config.env.example"))

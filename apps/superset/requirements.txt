@@ -1,0 +1,22 @@
+# apps/superset/requirements.txt — the three packages apache/superset:6.1.0 (lean) lacks.
+# Installed at every pod start by the init container superset-deps (k8s/superset.yaml,
+# k8s/superset-init.yaml) with
+#   pip install --isolated --no-deps --require-hashes --only-binary=:all: --target /opt/extra
+# so every line pins one wheel by sha256 and nothing else is pulled in. The image's
+# Python is 3.10.21 (image config of the pinned digest, not the 6.1.0 Dockerfile's
+# default 3.11): every wheel must be cp310 or py3-none-any, and joserfc 1.8.0 (Python
+# >= 3.11) does not install. Hashes read from PyPI's JSON on 6 Nov 2026.
+#
+# Authlib: FAB 5.0.2's OAuth path (Authlib >=0.14,<2.0). 1.9.5, not 1.6.x: the October
+#   2026 advisories (JWS empty signature, empty HMAC key, algorithm confusion, the ID
+#   token nonce bypass) are fixed only in 1.9.0/1.9.1. Needs joserfc >= 1.6.8 and
+#   cryptography >= 45.0.1 (the image has 46.0.5).
+# joserfc: 1.7.7, the newest for Python 3.10 (past the joserfc 1.7.5/1.7.6 fixes).
+# psycopg2-binary: 2.9.9, the version Superset 6.1.0's own `postgres` extra pins.
+#
+# To move a pin: read https://pypi.org/pypi/<name>/<version>/json, take the sha256 of
+# the cp310 manylinux x86_64 (or py3-none-any) wheel, replace both, re-run
+# python3 tests/test_superset_render.py, then ./apps/superset/deploy.sh.
+psycopg2-binary==2.9.9 --hash=sha256:ed1184ab8f113e8d660ce49a56390ca181f2981066acc27cf637d5c1e10ce46e
+Authlib==1.9.5 --hash=sha256:e32a63e3d869196b61816b2602231862179a2ffc29358c009d1f022c8b86a8b2
+joserfc==1.7.7 --hash=sha256:06979cfbab78bc802f14c0358f32969826cc26720e13cb38926ffdc86bc0cb2c

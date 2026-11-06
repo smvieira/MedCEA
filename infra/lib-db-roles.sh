@@ -17,6 +17,10 @@
 #   grafana (datasource)                  svc_grafana     deploy-infra.sh
 #   pgadmin (server entry)                rr_admin_login  deploy-infra.sh
 #   iam-api (MQTT Explorer credentials)   iam_svc         apps/iam/deploy.sh (never postgres: it refuses)
+#   superset (the "MedCEA" connection)    svc_superset    apps/superset/deploy.sh (never postgres: it refuses;
+#                                         read from the Deployment's plain env SUPERSET_DB_USER. No
+#                                         Deployment exists before the policy has a superset tool,
+#                                         stage C, so until then it prints nothing)
 #
 # A client moves to its own role only when IAM_DB_SERVICE_ROLES=true AND the role
 # can already log in; otherwise it stays on postgres and says why. The database
@@ -52,6 +56,7 @@ db_client_role() {
         grafana)   echo svc_grafana ;;
         pgadmin)   echo rr_admin_login ;;
         iam-api)   echo iam_svc ;;
+        superset)  echo svc_superset ;;
         *)         return 1 ;;
     esac
 }
@@ -113,6 +118,13 @@ db_clients_live() {
             -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="PG_USER")]}{.value}{"\n"}{end}' 2>/dev/null | head -1)" || u=""
         echo "$d ${u:-?}"
     done
+    # Superset: the user of its "MedCEA" connection, a plain env value (the password
+    # is a secretKeyRef). Its own metadata database (superset_meta) is no client here.
+    if $KUBECTL get deployment superset -n "$ns" >/dev/null 2>&1; then
+        u="$($KUBECTL get deployment superset -n "$ns" \
+            -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="SUPERSET_DB_USER")]}{.value}{"\n"}{end}' 2>/dev/null | head -1)" || u=""
+        echo "superset ${u:-?}"
+    fi
     if $KUBECTL get deployment node-red -n "$ns" >/dev/null 2>&1; then
         # A Node-RED with no flows deployed yet (a fresh persistent /data after
         # ./deploy-infra.sh, before ./apps/node-red/deploy.sh) opens no database

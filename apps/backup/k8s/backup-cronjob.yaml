@@ -57,6 +57,10 @@ spec:
               value: "${NAMESPACE}"
             - name: DATABASES
               value: "${POSTGRES_DB} keycloak"
+            # Dumped only when they exist (an absent one is skipped, not a failure):
+            # Superset's metadata (dashboards, charts, its users), on installs with Superset.
+            - name: OPTIONAL_DATABASES
+              value: "superset"
             # The AI workbench homes, Node-RED's /data and Grafana's database. Not
             # PostgreSQL's own volume (dumped above), the broker's or the hub's.
             - name: VOLUMES

@@ -564,7 +564,7 @@ class Health(unittest.TestCase):
     def test_wiring(self):
         conf = read("health-checks.conf")
         lines = [l for l in conf.splitlines() if l.strip() and not l.startswith("#")]
-        self.assertEqual(len(lines), 55)
+        self.assertEqual(len(lines), 56)
         row = [l for l in lines if l.split("|")[0].strip() == "Platform manual"]
         self.assertEqual(len(row), 1)
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["manual", "$NAMESPACE"])

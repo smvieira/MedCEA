@@ -1,0 +1,111 @@
+# apps/superset/k8s/superset-init.yaml — the one-shot Job of every Superset deploy:
+#   superset db upgrade   the metadata database (superset, owned by superset_meta)
+#   superset init         Admin/Alpha/Gamma/sql_lab and their permissions
+#   bootstrap.py          the connection "MedCEA" as svc_superset, role "MedCEA Viewer",
+#                         nobody Admin, Public empty (apps/superset/bootstrap.py)
+# apps/superset/deploy.sh deletes the previous Job (a Job's pod template is immutable),
+# applies this one and waits for it before the web Deployment rolls. Same image,
+# init container, mounts and environment as the Deployment (k8s/superset.yaml): the
+# config is loaded the same way, and a missing secret fails here first.
+# Render list (deploy.sh _POD_VARS, which also carries PLATFORM_IP): NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM SUPERSET_DOMAIN PORTAL_DOMAIN
+# SUPERSET_CONFIG_CHECKSUM PG_SECRET PG_SECRET_KEY SUPERSET_DB_USER POSTGRES_DB.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: superset-init
+  namespace: ${NAMESPACE}
+  labels:
+    app: superset
+    component: init
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1200
+  template:
+    metadata:
+      labels:
+        app: superset
+        component: init
+      annotations:
+        medcea/config-checksum: "${SUPERSET_CONFIG_CHECKSUM}"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      # A Service named superset would inject SUPERSET_PORT=tcp://…, which the
+      # image's run-server.sh takes as its port.
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000   # the image's user superset (1000:1000)
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - name: superset-deps
+        # The three packages the lean image lacks (apps/superset/requirements.txt),
+        # each pinned by sha256: no other package, no sdist, no index but PyPI.
+        # /usr/local/bin/pip3: the image's /app/.venv (uv) has no pip.
+        image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
+        command: ["/usr/local/bin/pip3", "install", "--isolated", "--no-deps", "--require-hashes",
+                  "--only-binary=:all:", "--no-cache-dir", "--disable-pip-version-check",
+                  "--index-url", "https://pypi.org/simple", "--target", "/opt/extra",
+                  "-r", "/app/pythonpath/requirements.txt"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {memory: "128Mi", cpu: "100m"}
+          limits: {memory: "512Mi", cpu: "1"}
+        volumeMounts:
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+        - {name: home, mountPath: /app/superset_home}
+        - {name: config, mountPath: /app/pythonpath, readOnly: true}
+      containers:
+      - name: superset-init
+        image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
+        command: ["sh", "-c", "superset db upgrade && superset init && python /app/pythonpath/bootstrap.py"]
+        env:
+        - {name: SUPERSET_CONFIG_PATH, value: "/app/pythonpath/superset_config.py"}
+        - {name: PYTHONPATH, value: "/opt/extra:/app/pythonpath"}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: SUPERSET_PORT, value: "8088"}
+        - {name: MEDCEA_NAMESPACE, value: "${NAMESPACE}"}
+        - {name: KEYCLOAK_DOMAIN, value: "${KEYCLOAK_DOMAIN}"}
+        - {name: KEYCLOAK_REALM, value: "${KEYCLOAK_REALM}"}
+        - {name: SUPERSET_DOMAIN, value: "${SUPERSET_DOMAIN}"}
+        - {name: PORTAL_DOMAIN, value: "${PORTAL_DOMAIN}"}
+        - {name: MEDCEA_DATA_DB_USER, value: "${SUPERSET_DB_USER}"}
+        - {name: MEDCEA_DATA_DB_NAME, value: "${POSTGRES_DB}"}
+        - name: MEDCEA_DATA_DB_PASS
+          valueFrom: {secretKeyRef: {name: "${PG_SECRET}", key: "${PG_SECRET_KEY}"}}
+        - name: SUPERSET_SECRET_KEY
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_SECRET_KEY}}
+        - name: SUPERSET_META_DB_PASS
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_META_DB_PASS}}
+        - name: SUPERSET_CLIENT_SECRET
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_CLIENT_SECRET}}
+        - name: SUPERSET_ROLES_MAPPING
+          valueFrom: {secretKeyRef: {name: superset-secrets, key: SUPERSET_ROLES_MAPPING}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {memory: "512Mi", cpu: "200m"}
+          limits: {memory: "1536Mi", cpu: "1"}
+        volumeMounts:
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: home, mountPath: /app/superset_home}
+        - {name: config, mountPath: /app/pythonpath, readOnly: true}
+      volumes:
+      - {name: extra, emptyDir: {sizeLimit: 256Mi}}
+      - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+      - {name: home, emptyDir: {sizeLimit: 256Mi}}
+      - name: config
+        configMap:
+          name: superset-config

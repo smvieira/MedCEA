@@ -157,6 +157,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         pgadmin, or the deployment still holds the OAuth2 config or default password as plain"
     echo -e "         env (./deploy-infra.sh); WARN while IAM_GATES=false; SKIP without the deployment"
     echo ""
+    echo -e "  ${CYAN}supersetroles${NC} Superset admits the access policy's roles (Superset stage B): NAMESPACE"
+    echo -e "         FAIL when SUPERSET_ROLES_MAPPING in Secret superset-secrets differs from policy_tool"
+    echo -e "         superset (or the policy has no superset tool), a secret is a plain env value in the"
+    echo -e "         deployment or a ReplicaSet, the secret key is empty or the default, the connection"
+    echo -e "         is not svc_superset, or the image has no digest; WARN while IAM_GATES=false;"
+    echo -e "         SKIP without the deployment (until the policy has Superset, stage C)"
+    echo ""
     echo -e "  ${CYAN}backupage${NC} the nightly backup (apps/backup): NAMESPACE"
     echo -e "         OK while the newest OK marker in BACKUP_DIR is at most 26 h old, WARN beyond,"
     echo -e "         FAIL beyond 72 h; SKIP without CronJob medcea-backup, and on its first day"
@@ -1306,6 +1313,130 @@ PY
 }
 
 # =============================================================================
+# Check: Superset's sign-in roles are the policy's (Superset stage B) — read-only
+# target: NAMESPACE. Superset signs people in itself; the role each platform role gets
+# (AUTH_ROLES_MAPPING) is SUPERSET_ROLES_MAPPING in Secret superset-secrets, next to
+# its secret key and passwords, so the Deployment, its ReplicaSets and the Secret
+# reach python on stdin, which prints only verdicts, variable names and the mapping
+# (role names, no secret). SKIP without the Deployment: apps/superset/deploy.sh skips
+# until the applied policy has a superset tool (stage C).
+# FAIL: a secret as a plain env value (in the Deployment or a ReplicaSet it kept, by
+# name or because the value equals one of the Secret's), the Secret missing, its
+# SUPERSET_SECRET_KEY empty or Superset's default, the mapping not policy_tool
+# superset's (or the policy no longer has a superset tool), the connection user not
+# svc_superset, an image not pinned by digest; WARN while IAM_GATES=false.
+# =============================================================================
+check_supersetroles() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" doc have=() line want rc=0 same
+    timeout "$TIMEOUT" $KUBECTL get deployment superset -n "$ns" >/dev/null 2>&1 \
+        || { _record SKIP "$name" "no Superset deployment in $ns (it waits for the access policy, stage C)"; return; }
+    doc="$( { timeout "$TIMEOUT" $KUBECTL get deployment,replicaset -n "$ns" -l app=superset -o json 2>/dev/null || echo null
+              echo
+              timeout "$TIMEOUT" $KUBECTL get secret superset-secrets -n "$ns" -o json 2>/dev/null || echo null; } \
+        | python3 -c '
+import base64, json, re, sys
+SECRET_NAMES = {"SUPERSET_SECRET_KEY", "SUPERSET_META_DB_PASS", "SUPERSET_CLIENT_SECRET", "SVC_SUPERSET_DB_PASS"}
+DEFAULT_KEYS = {"CHANGE_ME_TO_A_COMPLEX_RANDOM_SECRET", "CHANGE_ME_SECRET_KEY", "thisISaSECRET_1234"}
+text, dec, objs, i = sys.stdin.read(), json.JSONDecoder(), [], 0
+try:
+    while len(objs) < 2:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        o, i = dec.raw_decode(text, i)
+        objs.append(o)
+    lst, sec = objs
+    if not lst or not any(o.get("kind") == "Deployment" for o in lst.get("items", [])):
+        raise ValueError("no deployment")
+except Exception:
+    print("unreadable"); sys.exit(0)
+data = {}
+if sec:
+    try:
+        data = {k: base64.b64decode(v).decode() for k, v in (sec.get("data") or {}).items()}
+    except Exception:
+        print("unreadable"); sys.exit(0)
+else:
+    print("nosecret")
+values = {v for k, v in data.items() if k != "SUPERSET_ROLES_MAPPING" and len(v) >= 8}
+held, dbuser, images = [], [], set()
+for o in lst["items"]:
+    spec = o["spec"]["template"]["spec"]
+    names = []
+    for c in spec.get("initContainers", []) + spec.get("containers", []):
+        images.add(c.get("image", ""))
+        for e in c.get("env", []):
+            if "value" not in e:
+                continue
+            if e["name"] in SECRET_NAMES or e["name"] == "SUPERSET_ROLES_MAPPING" \
+                    or re.search(r"(?i)pass|secret|token", e["name"]) or e["value"] in values:
+                names.append(e["name"])
+            if o["kind"] == "Deployment" and e["name"] == "SUPERSET_DB_USER":
+                dbuser.append(e["value"])
+    if names:
+        held.append("%s/%s (%s)" % (o["kind"].lower(), o["metadata"]["name"], ", ".join(sorted(set(names)))))
+if held:
+    print("plain " + "; ".join(held))
+if sec:
+    k = data.get("SUPERSET_SECRET_KEY", "")
+    print("key " + ("empty" if not k else "default" if k in DEFAULT_KEYS else "short" if len(k) < 32 else "ok"))
+    try:
+        m = json.loads(data["SUPERSET_ROLES_MAPPING"])
+        assert isinstance(m, dict)
+        print("mapping " + json.dumps({r: sorted(v) for r, v in m.items()}, sort_keys=True))
+    except Exception:
+        print("mapping ?")
+print("dbuser " + (dbuser[0] if dbuser else "-"))
+bad = sorted(x for x in images if "@sha256:" not in x)
+print("unpinned " + " ".join(bad) if bad else "pinned")
+')"
+    mapfile -t have <<<"$doc"
+    _ssr_get() { local l; for l in "${have[@]}"; do [[ "$l" == "$1 "* ]] && { echo "${l#"$1" }"; return; }; done; }
+    if [[ "$doc" == unreadable || -z "$doc" ]]; then
+        _record FAIL "$name" "cannot read Superset's deployment, ReplicaSets or Secret superset-secrets in $ns"
+        return
+    elif [[ -n "$(_ssr_get plain)" ]]; then
+        _record FAIL "$name" "Superset's secrets are plain env values in $(_ssr_get plain), not from Secret superset-secrets (./apps/superset/deploy.sh)"
+        return
+    elif printf '%s\n' "${have[@]}" | grep -qx nosecret; then
+        _record FAIL "$name" "Secret superset-secrets is missing in $ns (./apps/superset/deploy.sh)"
+        return
+    elif [[ "$(_ssr_get key)" != ok ]]; then
+        _record FAIL "$name" "Superset's SUPERSET_SECRET_KEY is $(_ssr_get key) in Secret superset-secrets (./deploy-infra.sh generates it, then ./apps/superset/deploy.sh)"
+        return
+    elif [[ "$(_ssr_get dbuser)" != svc_superset ]]; then
+        _record FAIL "$name" "Superset's connection logs in as $(_ssr_get dbuser), not svc_superset (./apps/superset/deploy.sh)"
+        return
+    elif [[ "$(_ssr_get unpinned)" != "" ]]; then
+        _record FAIL "$name" "Superset's image is not pinned by digest: $(_ssr_get unpinned)"
+        return
+    fi
+    # shellcheck source=/dev/null
+    declare -F policy_tool >/dev/null || REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-policy-tools.sh" \
+        || { _record FAIL "$name" "cannot load infra/lib-policy-tools.sh"; return; }
+    want="$(REPO_ROOT="$SCRIPT_DIR" policy_tool superset 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) ;;
+        3) _record WARN "$name" "IAM_GATES=false: Superset has no pre-policy setting; it runs with $(_ssr_get mapping) (./apps/superset/uninstall.sh, or IAM_GATES=true)"
+           return ;;
+        5) _record FAIL "$name" "Superset is deployed, but the applied access policy has no superset tool: it still admits $(_ssr_get mapping) (./apps/superset/uninstall.sh)"
+           return ;;
+        *) _record FAIL "$name" "cannot compile Superset's roles (python3 apps/iam/compiler/cli.py check)"
+           return ;;
+    esac
+    same="$(python3 -c 'import json, sys
+try:
+    a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+    print({r: sorted(v) for r, v in a.items()} == {r: sorted(v) for r, v in b.items()})
+except Exception:
+    print(False)' "$(_ssr_get mapping)" "$want" 2>/dev/null)"
+    if [[ "$same" != True ]]; then
+        _record FAIL "$name" "AUTH_ROLES_MAPPING is $(_ssr_get mapping), the policy compiles $want (./apps/superset/deploy.sh --gate-only)"
+    else
+        _record OK "$name" "maps $(python3 -c 'import json,sys; print(", ".join(sorted(json.loads(sys.argv[1]))))' "$want" 2>/dev/null) from the access policy (checked at sign-in only); connection svc_superset"
+    fi
+}
+
+# =============================================================================
 # Check: the flows Node-RED runs against git (IAM 3.3, waiver W1's control) — read-only
 # target: NAMESPACE. Reads /data/flows.json as dbclients does; apps/node-red/flows_diff.py
 # prints ids, types, names and key names, never a value (the ingest password is in it).
@@ -1579,6 +1710,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         noderedauth)  check_noderedauth "$name" "$target" ;;
         onboardroles) check_onboardroles "$name" ;;
         pgadminroles) check_pgadminroles "$name" "$target" ;;
+        supersetroles) check_supersetroles "$name" "$target" ;;
         backupage)    check_backupage "$name" "$target" ;;
         manual)       check_manual "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)

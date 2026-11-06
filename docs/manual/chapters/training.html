@@ -27,10 +27,11 @@
 <tr><td><a href="#training-e17">E17 Change the access policy (to approved, then withdrawn)</a></td><td><span class="role">admin</span>, <span class="role">qa</span> (two accounts)</td><td>A change to the policy is drafted by one person, checked by the checker, and approved only by a <span class="role">qa</span> person who is none of its authors, on exactly the diff shown; nothing approved is applied in 4.4.</td><td>4 Nov 2026: version 5, approved by <code>svieira</code>, withdrawn</td></tr>
 <tr><td><a href="#training-e18">E18 Propose a git skeleton change and approve it</a></td><td>host operator (<span class="role">admin</span>), <span class="role">qa</span></td><td>A git change that gives access reaches no deploy: it is proposed from a commit as a skeleton version and approved with the attestation by a <span class="role">qa</span> person who did not propose it.</td><td>4 Nov 2026: version 6, approved by <code>sergio_qa</code> with the attestation, withdrawn</td></tr>
 <tr><td><a href="#training-e19">E19 Apply a policy change, roll it back and confirm it</a></td><td>host operator (<span class="role">admin</span>), <span class="role">qa</span> (two accounts)</td><td>An approved change takes effect only through <code>apply.sh</code>, which checks the approval on the host first; a rollback restores the earlier version and is confirmed afterwards by a <span class="role">qa</span> person who did not run it.</td><td>5 Nov 2026</td></tr>
-<tr><td><a href="#training-e20">E20 Open a dashboard tool from the portal</a></td><td><span class="role">engineer</span>, <span class="role">operator</span>; later <span class="role">bio_scientist</span></td><td>The MedCEA Dashboard card offers the dashboard tools; each tool admits only the roles the access policy gives it.</td><td>Grafana part 4 Nov 2026; Superset part after IAM 4.5</td></tr>
+<tr><td><a href="#training-e20">E20 Open a dashboard tool from the portal</a></td><td><span class="role">engineer</span>, <span class="role">operator</span>; later <span class="role">bio_scientist</span></td><td>The MedCEA Dashboard card offers the dashboard tools; each tool admits only the roles the access policy gives it.</td><td>Grafana part 4 Nov 2026; Superset part after Superset stage C</td></tr>
 <tr><td><a href="#training-e21">E21 Log out of the Node-RED editor</a></td><td><span class="role">engineer</span></td><td>The editor's Logout ends the platform sign-in too, so the next person on the browser must sign in.</td><td>5 Nov 2026</td></tr>
 <tr><td><a href="#training-e22">E22 Onboard a board over TLS</a></td><td><span class="role">engineer</span>, host operator</td><td>A wrong WiFi passphrase is caught at its question; a registered board reaches the broker over TLS only, and the plain port is closed.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e23">E23 Go back and cancel during onboarding</a></td><td><span class="role">engineer</span> (two accounts)</td><td>A wrong planning answer can be corrected with Back; a run can be cancelled only by the person who started it, and says what state it left.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e24">E24 Superset is skipped until its policy is applied</a></td><td>host operator (<span class="role">admin</span>), <span class="role">bio_scientist</span></td><td>Superset's code installs nothing and admits nobody while the applied access policy has no Superset, and the deploy still succeeds.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -636,7 +637,7 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 <p><strong>Last done.</strong> 5 Nov 2026, on production, cell <span class="role">maintenance</span> R on <code>device_history</code> (no account of the install holds <span class="role">maintenance</span>, checked with <code>units.sh list</code>). Version 13 (change): drafted by <code>admin</code> at 16:17 UTC (event 192), submitted (197), approved by <code>sergio_qa</code> (199); the dry run showed only <span class="role">maintenance</span> changing (two removed: SELECT on <code>medcea.device_slot_history</code> and level R on <code>device_history</code>; the grants and the route table changed, every proxy and tool unchanged) and the eight baseline checks OK; applied with <code>--by admin</code> (<code>apply_started</code> 202, <code>applied</code> 203 at 16:35, chain head before 199). Then <code>has_table_privilege</code> read <code>false</code> and <code>tests/iam-schema.sh</code> had no failure. Version 14 (rollback to 12): <code>draft_created</code> 211, <code>applied</code> 215 at 16:46, the privilege back (<code>true</code>); the health check warned "version 14 (rollback) is not confirmed by qa yet" until <code>svieira</code> confirmed it (event 216, 17:07). Afterwards no open version, 55 checks passed with no warning. The first <code>apply.sh --audit 13</code> failed "approval: the token's payload is not the stored claims": the audit compared the claims exactly, and PostgREST stores them with the role it took (<code>anon</code>), the defect the live test had found in the apply check the same morning; with both checks on one rule (<code>source.claims_recorded</code>) the audit printed "version reproduced: every check matches". The three accounts belong to one human (as in E17 and E18), so the run proves the mechanism, not independent review.</p>
 
 <h3 id="training-e20">E20 Open a dashboard tool from the portal</h3>
-<p><strong>Goal.</strong> Choose a dashboard tool from the portal's <strong>MedCEA Dashboard</strong> page, and see that each tool admits only the roles the access policy gives it. The exercise shows the decision of 4 November 2026 "Superset for data analysis" (see the <a href="#compliance-decisions">decision record</a>). The Superset steps wait until Superset is installed, after IAM slice 4.5; until then do the Grafana part. E19 belongs to slice 4.5.</p>
+<p><strong>Goal.</strong> Choose a dashboard tool from the portal's <strong>MedCEA Dashboard</strong> page, and see that each tool admits only the roles the access policy gives it. The exercise shows the decision of 4 November 2026 "Superset for data analysis" (see the <a href="#compliance-decisions">decision record</a>). The Superset steps wait until Superset is installed, once its access policy is approved and applied (Superset stage C; until then <a href="#training-e24">E24</a> shows that it is skipped); until then do the Grafana part. E19 belongs to slice 4.5.</p>
 <p><strong>Accounts and roles.</strong> An <span class="role">engineer</span> (Grafana Editor; a Superset builder later), an <span class="role">operator</span> (no Grafana or Superset sign-in) and, for the Superset part, a <span class="role">bio_scientist</span>. On this install they are <a href="#compliance-test-accounts">test accounts</a>; give each its own browser session.</p>
 <p><strong>Before you start.</strong> <code>./deploy-infra.sh</code> of 4 November 2026 or later has run, so the portal has the dashboard chooser. For the Superset part: Superset is installed (<code>./apps/superset/deploy.sh</code>) and its card is no longer greyed out.</p>
 <p><strong>Steps.</strong></p>
@@ -661,9 +662,11 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 <li>Before Superset is installed: clicking the greyed-out Superset card does nothing.</li>
 <li><span class="role">operator</span> on Superset (Superset part): refused at Superset's sign-in; no Superset account is created.</li>
 <li>A viewing role, for example <span class="role">qc</span>, on Superset (Superset part): dashboards open, but there is no SQL Lab and no chart editing.</li>
+<li><span class="role">qa</span> or <span class="role">auditor</span> on Superset (Superset part): "No access to Superset" (decision of 6 November 2026); they keep Grafana as viewers.</li>
+<li><span class="role">bio_scientist</span> in SQL Lab (Superset part): a <code>SELECT</code> on <code>medcea.recipe_run</code> is refused by the database ("permission denied"): Superset reads no runs.</li>
 </ul>
 <p><strong>Afterwards.</strong> Nothing to undo. Charts made in step 4 stay in Superset; delete them if they were only for the exercise.</p>
-<p><strong>Last done.</strong> Grafana part, 4 November 2026, on production after <code>./deploy-infra.sh</code> at 22:53 (commit 44443e9; health 55/55): the MedCEA Dashboard page showed Grafana and Superset, Superset greyed out with "Not installed yet" and not clickable; the <span class="role">engineer</span> opened Grafana as Editor; the <span class="role">operator</span> was refused at Grafana's sign-in. Superset part: not yet (after IAM 4.5).</p>
+<p><strong>Last done.</strong> Grafana part, 4 November 2026, on production after <code>./deploy-infra.sh</code> at 22:53 (commit 44443e9; health 55/55): the MedCEA Dashboard page showed Grafana and Superset, Superset greyed out with "Not installed yet" and not clickable; the <span class="role">engineer</span> opened Grafana as Editor; the <span class="role">operator</span> was refused at Grafana's sign-in. Superset part: not yet (after Superset stage C).</p>
 
 <h3 id="training-e21">E21 Log out of the Node-RED editor</h3>
 <p><strong>Goal.</strong> See that the Node-RED editor's <strong>Logout</strong> signs you out of the whole platform, not only out of the editor, so whoever opens Node-RED next on that browser must sign in. The exercise proves the decision of 5 November 2026 "The Node-RED editor's Logout signs out of the platform" (see the <a href="#compliance-decisions">decision record</a>).</p>
@@ -744,6 +747,38 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 </ul>
 <p><strong>Afterwards.</strong> Onboard the board for real (exercise E22).</p>
 <p><strong>Last done.</strong> Not yet: run after the wizard restart that brings it.</p>
+
+<h3 id="training-e24">E24 Superset is skipped until its policy is applied</h3>
+<p><strong>Goal.</strong> See that Superset's code, which is in the platform since 6 November 2026, installs nothing and lets nobody in while the applied access policy has no Superset, and that its deploy still succeeds, so <code>./deploy-apps.sh --all</code> and <code>./install.sh</code> stay green. The exercise proves the decision of 6 November 2026 "Superset stage B: the code without its policy" (D4, see the <a href="#compliance-decisions">decision record</a>). Once Superset's policy is applied (stage C), this exercise no longer applies; <a href="#training-e20">E20</a>'s Superset part takes over.</p>
+<p><strong>Accounts and roles.</strong> The host operator (<span class="role">admin</span>, at the server's terminal, in the repository folder); for step 6 a <span class="role">bio_scientist</span> (or any role), a <a href="#compliance-test-accounts">test account</a> in its own browser session.</p>
+<p><strong>Before you start.</strong> The repository holds the Superset stage B code (<code>apps/superset/</code> exists); the applied access policy is any version without Superset (<code>./apps/iam/apply.sh --status</code> shows it); no other deploy is running.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Host operator: <code>python3 apps/iam/compiler/cli.py has-tool superset; echo "exit $?"</code>.</li>
+<li>Host operator: <code>./apps/superset/deploy.sh; echo "exit $?"</code>.</li>
+<li>Host operator: <code>microk8s kubectl -n medcea get deployment,job,service,ingress,secret,configmap -l app=superset</code>.</li>
+<li>Host operator: <code>./apps/superset/deploy.sh --gate-only; echo "exit $?"</code>.</li>
+<li>Host operator: <code>./health-check.sh</code>, and read the <strong>Superset roles</strong> line and the count.</li>
+<li><span class="role">bio_scientist</span>: open <code>https://portal.&lt;domain&gt;</code>, click <strong>MedCEA Dashboard</strong>, then the <strong>Superset</strong> card.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: <code>exit 1</code>, with nothing on standard output: no group of the applied policy has a Superset tool.</li>
+<li>Step 2: <code>[superset] skipped: Superset is not in the applied access policy yet (stage C)</code>, then <code>exit 0</code>. Nothing is created: no database, no Secret, no pod.</li>
+<li>Step 3: <code>No resources found in medcea namespace.</code></li>
+<li>Step 4: <code>mode: gate-only</code>, <code>SUPERSET_DOMAIN (superset): not deployed (./apps/superset/deploy.sh installs it)</code>, <code>exit 0</code>.</li>
+<li>Step 5: 56 checks; <strong>Superset roles</strong> SKIP "no Superset deployment in medcea (it waits for the access policy, stage C)". The other checks are as before.</li>
+<li>Step 6: the Superset card is greyed out, says "Not installed yet" and cannot be clicked.</li>
+</ul>
+<div class="record"><p>Nothing is written to the policy history or the database: the skip changes nothing. The deploy's output is in <code>logs/app-superset-deploy-&lt;time&gt;.log</code> (one per run of steps 2 and 4), the health check's in <code>logs/health-check-&lt;time&gt;.log</code>. Write the date, the commit (<code>git rev-parse --short HEAD</code>), the applied version and what steps 2, 4 and 5 printed under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li><code>./apps/superset/deploy.sh --x</code>: <code>ERROR: unknown arguments: --x (usage: ./apps/superset/deploy.sh [--gate-only])</code>, exit 2, before any log or lock.</li>
+<li><code>./apps/superset/uninstall.sh --x</code>: refused the same way (exit 2); the uninstall takes only <code>--purge-data</code>. Do not run the uninstall itself: it would only grey out the card again and find nothing to remove.</li>
+<li>Opening <code>https://superset.&lt;domain&gt;</code> directly: no Superset answers (no address is set up for it yet, so the browser cannot reach it, warns about the certificate, or the platform answers "404 Not Found").</li>
+</ul>
+<p><strong>Afterwards.</strong> Nothing to undo: nothing was created.</p>
+<p><strong>Last done.</strong> Not yet: run on the live platform once the stage B code is committed.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
