@@ -846,7 +846,7 @@ _create_client() {
 # user (CLAUDE.md pitfall). Password and implicit grants are off explicitly.
 _create_client_multi() {
     local CLIENT_ID="$1" REDIRECT_JSON="$2" DEVICE_GRANT="${3:-false}" TOK UUID BODY
-    BODY="{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"implicitFlowEnabled\":false,\"serviceAccountsEnabled\":false,\"redirectUris\":${REDIRECT_JSON},\"attributes\":{\"post.logout.redirect.uris\":\"+\",\"oauth2.device.authorization.grant.enabled\":\"${DEVICE_GRANT}\"}}"
+    BODY="{\"clientId\":\"${CLIENT_ID}\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"implicitFlowEnabled\":false,\"serviceAccountsEnabled\":false,\"redirectUris\":${REDIRECT_JSON},\"attributes\":{\"post.logout.redirect.uris\":\"+${4:+##$4}\",\"oauth2.device.authorization.grant.enabled\":\"${DEVICE_GRANT}\"}}"
     TOK=$(_kc_token)
     curl -s -o /dev/null -X POST \
       "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients" \
@@ -964,7 +964,10 @@ hosts = ['127.0.0.1', 'localhost'] + [h for h in (e.get('EW_LAN'), e.get('EW_TS'
 uris = ['http://%s:%s/oauth2/callback' % (h, port) for h in hosts]
 if e.get('EW_ONBOARD'): uris.append('https://%s/oauth2/callback' % e['EW_ONBOARD'])
 print(json.dumps(uris))")"
-_EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS" true)
+# Fourth argument: the post-logout URIs the wizard's Sign out returns to (the
+# workbench's /hub/logout, the portal's proxy sign-out), besides "+" (its own).
+_EDGE_WIZARD_SECRET=$(_create_client_multi "edge-wizard" "$_EW_URIS" true \
+    "${_HUB_LOGOUT_URI}##https://${PORTAL_DOMAIN}/*")
 echo -e "${YELLOW}  Creating client 'access'...${NC}"
 # Two jobs, one client: the browser login for the User Manager (its oauth2-proxy)
 # and the service account apps/access uses to create, enable, role-map and

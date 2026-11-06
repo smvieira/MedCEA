@@ -1593,8 +1593,14 @@ else
       FIRMWARE="$FW_DIR/$fname"
       # micropython.org publishes no .sha256 sidecar, so the hash we record is
       # the one computed here, from the bytes actually written to the board.
-      sha256sum "$FIRMWARE" | sed "s#$FW_DIR/##" >> "$FW_DIR/SHA256SUMS"
-      info "recorded in $FW_DIR/SHA256SUMS"
+      # Once per image: a second download of the same file adds no line.
+      fw_line="$(sha256sum "$FIRMWARE" | sed "s#$FW_DIR/##")"
+      if grep -qxF "$fw_line" "$FW_DIR/SHA256SUMS" 2>/dev/null; then
+        info "already in $FW_DIR/SHA256SUMS"
+      else
+        printf '%s\n' "$fw_line" >> "$FW_DIR/SHA256SUMS"
+        info "recorded in $FW_DIR/SHA256SUMS"
+      fi
     fi
   fi
 fi

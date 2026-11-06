@@ -56,6 +56,7 @@ STATE = {
     "oidc": None,             # discovery document
     "client_id": None, "client_secret": None,
     "required_role": None,
+    "logout_return": "",      # where Keycloak's end-session returns (the platform chain)
     "ssl_ctx": None,
     "hosts": {},              # Host: value -> scheme we build a redirect_uri with
     "sessions": {},           # sid -> {"user", "sub", "exp", "id_token", "tok": TokenSet}
@@ -987,7 +988,16 @@ class Handler(BaseHTTPRequestHandler):
             ra.end_session(sess["sub"])
         dest = "/"
         end = (STATE["oidc"] or {}).get("end_session_endpoint")
-        if end:
+        if end and STATE["logout_return"]:
+            # The daemon (5 Nov 2026 review, E23): the platform's one-hop sign-out,
+            # as the user menu and the other tools do it. Keycloak's end-session
+            # returns to the workbench's /hub/logout (or the portal's proxy
+            # sign-out), so the portal's own cookie ends too instead of living up
+            # to its 4-min refresh. client_id and post_logout_redirect_uri only,
+            # never id_token_hint: no token in a URL, Keycloak asks to confirm.
+            dest = end + "?" + urlencode({"client_id": STATE["client_id"],
+                                          "post_logout_redirect_uri": STATE["logout_return"]})
+        elif end:
             # id_token_hint is how Keycloak identifies the session to end. No
             # post_logout_redirect_uri: it must be pre-registered, and Keycloak's
             # own confirmation page is a clearer end state than a silent bounce.
@@ -1191,6 +1201,10 @@ def main():
     ap.add_argument("--required-role", default="",
                     help="roles that may provision hardware, comma-separated; any one "
                          "admits (edge/wizard-daemon.sh passes the access policy's list)")
+    ap.add_argument("--logout-return", default="",
+                    help="https URL Keycloak's end-session returns to after sign out "
+                         "(registered on the client; edge/wizard-daemon.sh passes the "
+                         "workbench's /hub/logout or the portal's proxy sign-out)")
     ap.add_argument("--allowed-host", action="append", default=[],
                     help="host:port the browser may reach this on directly, or "
                          "https://host when it comes through a TLS proxy; repeatable")
@@ -1231,6 +1245,10 @@ def main():
     STATE["client_secret"] = secret
     STATE["run_id"] = secrets.token_hex(8)       # a --ui run's id; the daemon sets one per start
     STATE["required_role"] = edge_auth.roles_of(a.required_role)
+    if a.logout_return and not a.logout_return.startswith("https://"):
+        print("--logout-return must be an https URL", file=sys.stderr)
+        return 2
+    STATE["logout_return"] = a.logout_return
     # "host:port" is reached directly over http; "https://host" through the
     # TLS ingress (apps/edge-wizard), which keeps the Host header.
     STATE["hosts"] = {}

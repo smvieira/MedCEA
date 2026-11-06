@@ -121,6 +121,20 @@ _roles="$(policy_tool edge-wizard)" || {
 ROLE_ARGS=()
 [ -n "$_roles" ] && ROLE_ARGS=(--required-role "$_roles")
 
+# Sign out ends the platform session, not only this page (E23, 6 Nov 2026): after
+# Keycloak's end-session the browser goes on to the workbench's /hub/logout, which
+# chains to the portal's proxy sign-out, or straight to the latter without the
+# workbench, as the user menu's Sign out does. Both are registered on client
+# edge-wizard by deploy-infra.sh.
+LOGOUT_ARGS=()
+if [ -n "${PORTAL_DOMAIN:-}" ]; then
+  if [ "${WORKBENCH_ENABLED:-true}" = "true" ] && [ -n "${WORKBENCH_DOMAIN:-}" ]; then
+    LOGOUT_ARGS=(--logout-return "https://$WORKBENCH_DOMAIN/hub/logout")
+  else
+    LOGOUT_ARGS=(--logout-return "https://$PORTAL_DOMAIN/oauth2/sign_out?rd=%2F")
+  fi
+fi
+
 echo "CEA edge onboarding wizard on port $PORT — sign in with Keycloak realm ${KEYCLOAK_REALM:-medcea}"
 echo "  runs act as the person who presses Start"
 if [ -n "$_roles" ]; then
@@ -141,4 +155,4 @@ EDGE_WIZARD_SECRET="$EDGE_WIZARD_SECRET" exec python3 "$SCRIPT_DIR/src/host/wiza
   --auth keycloak \
   --issuer "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM:-medcea}" \
   --client-id "${EDGE_WIZARD_CLIENT:-edge-wizard}" \
-  --oidc-insecure "${ROLE_ARGS[@]}" "${HOST_ARGS[@]}"
+  --oidc-insecure "${ROLE_ARGS[@]}" "${LOGOUT_ARGS[@]}" "${HOST_ARGS[@]}"

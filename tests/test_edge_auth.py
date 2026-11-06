@@ -885,6 +885,52 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(ts.state, "reauth")
         self.assertEqual(ts.access, "")
 
+    def logout_location(self, sid):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), self.ws.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request("http://127.0.0.1:%d/logout" % srv.server_address[1],
+                                         headers={"Cookie": "%s=%s" % (self.ws.COOKIE, sid)})
+
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *a, **k):
+                    return None
+            try:
+                urllib.request.build_opener(NoRedirect).open(req, timeout=10)
+            except urllib.error.HTTPError as e:
+                e.close()
+                self.assertEqual(e.code, 302)
+                return e.headers["Location"]
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.fail("no redirect")
+
+    def test_logout_follows_the_platform_chain(self):
+        # The daemon (E23, 6 Nov 2026): end-session for this client, returning to
+        # the workbench's /hub/logout, never with the ID token in the URL.
+        back = "https://ai-workbench.medcea/hub/logout"
+        self.ws.STATE["logout_return"] = back
+        try:
+            sid, _ = self.session(tokenset())
+            loc = self.logout_location(sid)
+        finally:
+            self.ws.STATE["logout_return"] = ""
+        url = urllib.parse.urlsplit(loc)
+        q = urllib.parse.parse_qs(url.query)
+        self.assertTrue(loc.startswith(self.kc.oidc()["end_session_endpoint"] + "?"))
+        self.assertEqual(q["client_id"], [self.ws.STATE["client_id"]])
+        self.assertEqual(q["post_logout_redirect_uri"], [back])
+        self.assertNotIn("id_token_hint", q)
+
+    def test_logout_without_a_return_keeps_the_hint(self):
+        # flash-device.sh --ui registers no return address: Keycloak's own page.
+        self.ws.STATE["logout_return"] = ""
+        sid, _ = self.session(tokenset())
+        loc = self.logout_location(sid)
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query)
+        self.assertNotIn("post_logout_redirect_uri", q)
+
     def test_role_is_read_from_the_access_token(self):
         # The ID token carries no roles at all; the access token decides.
         status, _ = self.callback(token_response(roles=("engineer",)), role="engineer")
