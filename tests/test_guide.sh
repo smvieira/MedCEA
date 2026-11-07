@@ -1138,13 +1138,23 @@ rec unit01-c-zone01 REGISTERED CONTROL
 rec unit01-s-zone09 REGISTERED SENSE null
 rec unit01-s-zone08 REGISTERED SENSE '{"username":"unit01-s-zone08","password":""}'
 rec unit01-v-zone01 REGISTERED VALVE
-guide $'7\n3\n--yes\nunit09-s-zone01\ncea-un-a1b2c3\nunit01-s-zone01\n\nq\n'
+# One board onboarded twice (moved from UNIT02 to UNIT03): only its later record is offered.
+for n_at in "unit02-s-zone01 2026-11-06T17:16:21+00:00" "unit03-s-zone01 2026-11-07T07:39:04+00:00"; do
+    set -- $n_at
+    printf '{"state":"REGISTERED","role":"SENSE","hostname":"%s","mac":"A4:CB:8F:DE:73:9C","flashed_at":"%s","mqtt":{"username":"%s","password":"guide-test-pw"}}\n' \
+        "$1" "$2" "$1" >"$S/edge/provisioned/$1.json"
+done
+set --
+guide $'7\n3\n--yes\nunit09-s-zone01\ncea-un-a1b2c3\nunit02-s-zone01\nunit01-s-zone01\n\nq\n'
 rc_is "quits with 0" 0
 has   "the records listed" "    unit01-c-zone01"
 for n in cea-un-a1b2c3 unit01-x-zone01 unit01-s-zone09 unit01-s-zone08 unit01-v-zone01; do
     hasnt "not listed: $n" "    $n"
 done
-has   "the others counted" "(5 other record(s) left out: unregistered, or without a broker credential.)"
+has   "the later record of a moved board listed" "    unit03-s-zone01"
+hasnt "the record a moved board left behind not listed" "    unit02-s-zone01"
+has   "the record a moved board left behind is re-asked" "no record of a registered board edge/provisioned/unit02-s-zone01.json"
+has   "the others counted" "(6 other record(s) left out: unregistered, without a broker credential, or an older record of a board onboarded again since.)"
 hasnt "no record value printed" "guide-test-p"
 has   "a leading - is re-asked" "'--yes': a board name is lower-case"
 has   "a name without a record is re-asked" "no record of a registered board edge/provisioned/unit09-s-zone01.json"

@@ -33,6 +33,7 @@ Explorer (tag _test) or the measurement table is where it shows up.
 import argparse
 import datetime
 import json
+import os
 import re
 import secrets
 import socket
@@ -152,6 +153,52 @@ def check_record(rec):
         raise UsageError("the record has no usable mac")
     return {"role": role, "user": user, "password": pw, "root": root, "unit": unit,
             "zone": zone, "dns": dns, "device_id": forms[0], "mac": forms[1]}
+
+
+def _flashed_key(rec, path):
+    # flashed_at is ISO 8601 UTC (sorts as text); a record without one counts by its file time.
+    at = rec.get("flashed_at")
+    if isinstance(at, str) and at:
+        return at
+    try:
+        return "%020.6f" % os.path.getmtime(path)
+    except OSError:
+        return ""
+
+
+def superseded_by(path, rec):
+    """The name of a later record of the same board in the same folder, or None.
+
+    A board that moves to another slot, or is onboarded again under another name,
+    leaves its old record behind; the old name's broker credential was retired with
+    the move, so a test sent as it is refused by the broker. Same board = same MAC;
+    later = flashed later. Only names are compared and returned, never content."""
+    mine = _mac_forms(rec.get("mac"))
+    if mine is None:
+        return None
+    me = os.path.abspath(path)
+    key = _flashed_key(rec, path)
+    folder = os.path.dirname(me)
+    newer = None
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    for name in names:
+        other = os.path.join(folder, name)
+        if not name.endswith(".json") or other == me:
+            continue
+        try:
+            with open(other, encoding="utf-8") as f:
+                o = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(o, dict) or _mac_forms(o.get("mac")) != mine:
+            continue
+        k = _flashed_key(o, other)
+        if k > key and (newer is None or k > newer[0]):
+            newer = (k, name[:-5])
+    return newer and newer[1]
 
 
 def topic_of(info):
@@ -403,6 +450,11 @@ def main(argv=None):
     try:
         rec = load_record(a.record)
         known = _secrets_of(rec)
+        later = superseded_by(a.record, rec)
+        if later:
+            raise UsageError("this record is superseded: the same board was onboarded later as %s "
+                             "(moved or re-onboarded; its old credential is retired). Send as %s."
+                             % (later, later))
         result = send_test(rec, a.host, a.port, a.tls_name, a.ca, a.source,
                            note=a.note, timeout=a.timeout)
     except UsageError as e:

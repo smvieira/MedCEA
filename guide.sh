@@ -1931,7 +1931,10 @@ DNS_RE='^[a-z0-9][a-z0-9-]{0,31}$'                 # a board's one name (flash-d
 # credential (mqtt_test.py's check_record refuses the rest with exit 2). It prints the
 # file names that pass, one per line, and never a value of any record.
 SENDABLE_PY='
-import json, os, sys
+import json, os, re, sys
+# A board onboarded again (moved, renamed) leaves its old record: only the latest
+# record of each MAC is offered (mqtt_test.superseded_by, the same rule).
+latest = {}
 for path in sys.argv[1:]:
     try:
         with open(path, encoding="utf-8") as f:
@@ -1940,8 +1943,14 @@ for path in sys.argv[1:]:
         ok = (rec.get("state") == "REGISTERED" and rec.get("role") in ("SENSE", "CONTROL")
               and isinstance(mq, dict) and all(isinstance(mq.get(k), str) and mq.get(k)
                                                for k in ("username", "password")))
+        mac = re.sub(r"[:.-]", "", str(rec.get("mac") or "").lower()) or path
+        at = rec.get("flashed_at") if isinstance(rec.get("flashed_at"), str) else ""
+        at = at or "%020.6f" % os.path.getmtime(path)
     except (OSError, ValueError, AttributeError):
-        ok = False
+        continue
+    if mac not in latest or at > latest[mac][0]:
+        latest[mac] = (at, path, ok)
+for at, path, ok in sorted(latest.values(), key=lambda v: v[1]):
     if ok:
         print(os.path.basename(path)[:-5])
 '
@@ -1962,7 +1971,7 @@ a_send_test() {
     echo "  Registered boards with a provisioned record (edge/provisioned/):"
     printf '    %s\n' "${names[@]}"
     (( ${#files[@]} > ${#names[@]} )) && \
-        echo "  ($(( ${#files[@]} - ${#names[@]} )) other record(s) left out: unregistered, or without a broker credential.)"
+        echo "  ($(( ${#files[@]} - ${#names[@]} )) other record(s) left out: unregistered, without a broker credential, or an older record of a board onboarded again since.)"
     while :; do
         ask_match "Board name (as listed)" "$DNS_RE" "a board name is lower-case letters, digits and -, starting with a letter or digit (e.g. unit01-s-zone01)"
         in_list "$ANSWER" "${names[@]}" && break

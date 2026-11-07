@@ -358,6 +358,33 @@ class MqttTestSender(unittest.TestCase):
                 self.assertIs(out["ok"], False)
                 self.assertEqual(set(out), {"ok", "error"})
 
+    def test_a_record_the_board_left_behind_exit_2(self):
+        # The board moved (or was onboarded again under another name): its old
+        # record's credential is retired, so the sender refuses it and names the
+        # later one, before any connection. Another board's record does not count.
+        folder = tempfile.mkdtemp(dir=self.tmp)          # its own: the other tests share self.tmp
+        old = os.path.join(folder, "unit02-s-zone01.json")
+        with open(old, "w") as f:
+            json.dump(self.record(flashed_at="2026-11-06T17:16:21+00:00"), f)
+        new = self.record(hostname="unit01-s-zone01", unit_code="UNIT01",
+                          mac="34:b7:da:0a:1b:2c", flashed_at="2026-11-07T07:39:04+00:00")
+        new["mqtt"] = dict(new["mqtt"], username="unit01-s-zone01")
+        new_path = os.path.join(folder, "unit01-s-zone01.json")
+        with open(new_path, "w") as f:
+            json.dump(new, f)
+        with open(os.path.join(folder, "other-board.json"), "w") as f:
+            json.dump(self.record(mac="34:B7:DA:FF:FF:FF", flashed_at="2027-01-01T00:00:00+00:00"), f)
+        rc, out = self.run_cli(old, 1)                       # never reaches the port
+        self.assertEqual(rc, 2, out)
+        self.assertIn("superseded", out["error"])
+        self.assertIn("unit01-s-zone01", out["error"])
+        spec = importlib.util.spec_from_file_location("mqtt_test_mod", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertIsNone(mod.superseded_by(new_path, new))      # the latest record is not
+        self.assertEqual(mod.superseded_by(old, self.record(flashed_at="2026-11-06T17:16:21+00:00")),
+                         "unit01-s-zone01")
+
     def test_unreadable_and_not_json_exit_2(self):
         rc, out = self.run_cli(os.path.join(self.tmp, "missing.json"), 1)
         self.assertEqual(rc, 2)
