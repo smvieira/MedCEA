@@ -1,0 +1,67 @@
+{
+ "components": [
+  {
+   "component_type": "SENSE",
+   "manufacturer": "Sensirion",
+   "model": "SCD30",
+   "parameters": {
+    "driver": "scd30",
+    "message_interval": 30,
+    "mqtt": {
+     "host": "192.0.2.10",
+     "port": 31884
+    },
+    "params": {
+     "scl_pin": 5,
+     "sda_pin": 4
+    },
+    "tags": [
+     {
+      "UoM": "ppm",
+      "tag": "co2",
+      "topic": "medcea/UNIT02/ZONE01/sense/co2"
+     },
+     {
+      "UoM": "C",
+      "tag": "air_temperature",
+      "topic": "medcea/UNIT02/ZONE01/sense/air_temperature"
+     },
+     {
+      "UoM": "RH%",
+      "tag": "air_humidity",
+      "topic": "medcea/UNIT02/ZONE01/sense/air_humidity"
+     }
+    ],
+    "topic_base": "medcea/UNIT02/ZONE01/sense"
+   }
+  },
+  {
+   "component_type": "SENSE",
+   "manufacturer": "Maxim",
+   "model": "DS18B20",
+   "parameters": {
+    "driver": "ground_temperature",
+    "message_interval": 30,
+    "mqtt": {
+     "host": "192.0.2.10",
+     "port": 31884
+    },
+    "params": {
+     "data_pin": 17
+    },
+    "tags": [
+     {
+      "UoM": "C",
+      "tag": "ground_temperature",
+      "topic": "medcea/UNIT02/ZONE01/sense/ground_temperature"
+     }
+    ],
+    "topic_base": "medcea/UNIT02/ZONE01/sense"
+   }
+  }
+ ],
+ "topic_base": "medcea/UNIT02/ZONE01",
+ "written": [
+  "device_cfg.py"
+ ]
+}

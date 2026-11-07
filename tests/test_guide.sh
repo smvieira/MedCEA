@@ -95,6 +95,9 @@
 #  46  Policy → Audit an applied version: --audit N, read-only, no lock; 0 re-asked
 #  47  Health → the live policy test's three modes: default, --apply, --change, each described;
 #      b goes back; the test takes its own lock
+#  48  Edge devices → Send a test message as a board: no records → says so, runs nothing; the
+#      records listed by name; a name starting with - or with no record re-asked; the command
+#      printed with printf %q; [Y/n]; real against the stub
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -1110,6 +1113,51 @@ real $'6\n17\n3\ny\nq\n'
 has   "real: the test ran" "STUB tests/iam-policy.sh --change"
 grep -q '^LOCK_HELD=$' <<<"$OUT" && grep -q '^LOCK_PROBE=free$' <<<"$OUT" \
     && pass "real: the test takes its own lock" || fail "real: ran under the guide's lock"
+
+echo "48 send a test message as a board"
+mkcfg true true
+guide $'7\n3\nq\n'
+rc_is "no records: quits with 0" 0
+has   "no records: says so" "No provisioned records in edge/provisioned/"
+hasnt "no records: nothing planned" "Run it?"
+mkdir -p "$S/edge/provisioned"
+rec() {   # rec NAME STATE ROLE [mqtt-json]: a provisioned record with a dummy credential
+    local mq="${4:-}"
+    [[ -n "$mq" ]] || mq='{"username":"'"$1"'","password":"guide-test-pw"}'
+    printf '{"state":"%s","role":"%s","hostname":"%s","wifi_psk":"guide-test-psk","mqtt":%s}\n' \
+        "$2" "$3" "$1" "$mq" >"$S/edge/provisioned/$1.json"
+}
+printf '{}\n' >"$S/edge/provisioned/unit01-x-zone01.json"
+rec cea-un-a1b2c3 UNREGISTERED SENSE
+guide $'7\n3\nq\n'
+rc_is "only unsendable records: quits with 0" 0
+has   "only unsendable records: says so" "No record in edge/provisioned/ belongs to a registered"
+hasnt "only unsendable records: nothing planned" "Run it?"
+rec unit01-s-zone01 REGISTERED SENSE
+rec unit01-c-zone01 REGISTERED CONTROL
+rec unit01-s-zone09 REGISTERED SENSE null
+rec unit01-s-zone08 REGISTERED SENSE '{"username":"unit01-s-zone08","password":""}'
+rec unit01-v-zone01 REGISTERED VALVE
+guide $'7\n3\n--yes\nunit09-s-zone01\ncea-un-a1b2c3\nunit01-s-zone01\n\nq\n'
+rc_is "quits with 0" 0
+has   "the records listed" "    unit01-c-zone01"
+for n in cea-un-a1b2c3 unit01-x-zone01 unit01-s-zone09 unit01-s-zone08 unit01-v-zone01; do
+    hasnt "not listed: $n" "    $n"
+done
+has   "the others counted" "(5 other record(s) left out: unregistered, or without a broker credential.)"
+hasnt "no record value printed" "guide-test-p"
+has   "a leading - is re-asked" "'--yes': a board name is lower-case"
+has   "a name without a record is re-asked" "no record of a registered board edge/provisioned/unit09-s-zone01.json"
+has   "an unregistered board is re-asked" "no record of a registered board edge/provisioned/cea-un-a1b2c3.json"
+has   "the command (dry)" "[dry run] not executed: ./edge/flash-device.sh --send-test unit01-s-zone01"
+has   "[Y/n]" "Run it? [Y/n]"
+has   "no lock" "Deploy lock: no"
+has   "what it publishes" "publishes one TS message (tag _test)"
+no_stub
+real $'7\n3\nunit01-c-zone01\n\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: flash-device.sh ran" "STUB edge/flash-device.sh --send-test unit01-c-zone01"
+rm -rf "$S/edge/provisioned"
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

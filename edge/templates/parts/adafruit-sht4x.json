@@ -1,0 +1,98 @@
+{
+ "id": "adafruit-sht4x",
+ "title": "Adafruit SHT4x",
+ "svg": "adafruit-sht4x.svg",
+ "size": [
+  77.175,
+  50.4
+ ],
+ "connectors": {
+  "VCC": {
+   "fx": 0.3141,
+   "fy": 0.8571
+  },
+  "VCC_2": {
+   "fx": 0.9732,
+   "fy": 0.5399
+  },
+  "VCC_3": {
+   "fx": 0.0271,
+   "fy": 0.4576
+  },
+  "3.3V": {
+   "fx": 0.4074,
+   "fy": 0.8571
+  },
+  "SCL": {
+   "fx": 0.594,
+   "fy": 0.8571
+  },
+  "SCL_2": {
+   "fx": 0.9732,
+   "fy": 0.36
+  },
+  "SCL_3": {
+   "fx": 0.0271,
+   "fy": 0.6375
+  },
+  "SDA": {
+   "fx": 0.6873,
+   "fy": 0.8571
+  },
+  "SDA_2": {
+   "fx": 0.9732,
+   "fy": 0.4499
+  },
+  "SDA_3": {
+   "fx": 0.0271,
+   "fy": 0.5476
+  },
+  "GND": {
+   "fx": 0.5007,
+   "fy": 0.8571
+  },
+  "GND_2": {
+   "fx": 0.9732,
+   "fy": 0.6299
+  },
+  "GND_3": {
+   "fx": 0.0271,
+   "fy": 0.3676
+  }
+ },
+ "functions": {
+  "VCC": [
+   "VCC",
+   "VCC_2",
+   "VCC_3"
+  ],
+  "3V3_OUT": [
+   "3.3V"
+  ],
+  "SCL": [
+   "SCL",
+   "SCL_2",
+   "SCL_3"
+  ],
+  "SDA": [
+   "SDA",
+   "SDA_2",
+   "SDA_3"
+  ],
+  "GND": [
+   "GND",
+   "GND_2",
+   "GND_3"
+  ]
+ },
+ "drawn": "fritzing",
+ "attribution": {
+  "source": "Fritzing part Adafruit SHT4x",
+  "url": "https://github.com/adafruit/Fritzing-Library/blob/c7bbe2d58a78ebc7b3499351c0f77356cd701c96/parts/Adafruit%20SHT4x.fzpz",
+  "commit": "c7bbe2d58a78ebc7b3499351c0f77356cd701c96",
+  "file": "parts/Adafruit SHT4x.fzpz",
+  "author": "kattni",
+  "licence": "CC BY-SA 3.0",
+  "changes": "breadboard view only; metadata, ids and editor attributes removed, numbers rounded, scripts and external references stripped; connector centres computed by import-fritzing.py"
+ }
+}

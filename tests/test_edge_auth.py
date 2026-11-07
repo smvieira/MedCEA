@@ -694,9 +694,17 @@ class WizardTests(unittest.TestCase):
         (\\n inside a JS string) arrives as a real line break, a syntax error that stops the
         whole script and leaves the page at "connecting..." (5 Nov 2026). Check what the
         browser gets, not the source text."""
-        page = self.ws.PAGE.replace("__CHANNELMAP_JS__", self.ws.ui_asset("channelmap.js"))
+        assets = {"__CHANNELMAP_JS__": "channelmap.js", "__DRAWFLOW_JS__": "vendor/drawflow.min.js",
+                  "__WIRING_JS__": "wiring.js"}
+        page = self.ws.PAGE
+        for ph, name in assets.items():
+            asset = self.ws.ui_asset(name)
+            # An inlined asset that said </script would end its <script> early.
+            self.assertNotIn("</script", asset.lower(), name)
+            self.assertNotIn("not found in", asset[:80], name)
+            page = page.replace(ph, asset)
         scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
-        self.assertEqual(len(scripts), 2)
+        self.assertEqual(len(scripts), 4)
         for i, js in enumerate(scripts):
             path = os.path.join(self.tmp, "page%d.js" % i)
             with open(path, "w") as f:

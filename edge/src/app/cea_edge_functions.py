@@ -4,6 +4,7 @@ import ntptime
 import utime
 # Import the network module for working wlan.
 import network
+import ujson
 # Import the CEA configurations.
 import config as cfg
 # Import the MQTT module
@@ -103,6 +104,73 @@ def get_timestamp():
     """ Returns the current timestamp string"""
     t = utime.localtime()
     return '{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}'.format(t[0], t[1], t[2], t[3], t[4], t[5])
+
+
+TEST_TAG = "_test"
+
+
+def _wlan_ip():
+    """The board's address on its network, or None (not connected, no WLAN)."""
+    try:
+        w = network.WLAN(network.STA_IF)
+        if not w.isconnected():
+            return None
+        ip = w.ifconfig()[0]
+        return ip if ip and ip != "0.0.0.0" else None
+    except Exception:
+        return None
+
+
+def _wlan_mac():
+    """The station MAC as aa:bb:cc:dd:ee:ff, or None."""
+    try:
+        import ubinascii
+        return ubinascii.hexlify(network.WLAN(network.STA_IF).config("mac"), ":").decode().lower()
+    except Exception:
+        return None
+
+
+def _firmware():
+    try:
+        import os
+        return os.uname().release
+    except Exception:
+        return None
+
+
+def status_message(msg_type, tag, timestamp=None):
+    """The metadata of a health (HB) or test (TS) message: the fields of a reading
+    (cea_sense.Board._message) plus the board's ip and mac, None when unreadable.
+
+    The one builder for both roles, so the two cannot drift. Readings (AP) and
+    CONTROL's reports (SP) do not use it and carry no ip or mac: their payloads
+    are what Node-RED and the measurement views have always read."""
+    return {
+        "unit_code": cfg.unit_code,
+        "zone_code": cfg.zone_code,
+        "msg_type": msg_type,
+        "timestamp": timestamp or get_timestamp(),
+        "device_id": cfg.device_id,
+        "device_dns": cfg.device_dns,
+        "tag": tag,
+        "ip": _wlan_ip(),
+        "mac": _wlan_mac(),
+    }
+
+
+def publish_test(client, source="board-boot"):
+    """One TS message on <topic_pub>/_test (sense/_test, or control_setpoint/_test,
+    the only class a CONTROL board may write). Node-RED stores it as TS from the
+    topic. False when the publish failed: the caller counts it, it resets nothing."""
+    message = status_message("TS", TEST_TAG)
+    message["source"] = source
+    message["firmware"] = _firmware()
+    try:
+        client.publish(cfg.topic_pub + "/" + TEST_TAG, ujson.dumps(message))
+    except OSError as e:
+        print("publish to %s failed: %s" % (TEST_TAG, e))
+        return False
+    return True
 
 
 # Define a function to set the device's real-time clock (RTC) using NTP.

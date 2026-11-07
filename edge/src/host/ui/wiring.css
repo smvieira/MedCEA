@@ -1,0 +1,113 @@
+/* The SENSE wiring screen, as a component.
+ *
+ * Like channelmap.css: every colour is one of the wizard's tokens with a
+ * fallback, and everything is scoped under .wr so the prompt card around it
+ * keeps its own button, input and .row rules. The Drawflow rules below restyle
+ * vendor/drawflow.min.css (cyan boxes, red selection) into the page's palette
+ * without editing the vendored file. */
+
+.wr{--wr-ok:var(--ok,#1d6b4f);--wr-warn:var(--warn,#96581a);--wr-crit:var(--crit,#a52c1c);
+  --wr-accent:var(--accent,#0b6f78);--wr-soft:var(--accent-soft,#dceff0);
+  --wr-line:var(--line,#d3dee2);--wr-surface:var(--surface,#fff);
+  --wr-surface2:var(--surface-2,#f6f9fa);--wr-ink:var(--ink,#101a1e);
+  --wr-ink2:var(--ink-2,#33474f);--wr-muted:var(--muted,#647f89);
+  --wr-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--wr-ink);font-size:14px;line-height:1.5}
+.wr *{box-sizing:border-box}
+
+.wr input,.wr select,.wr textarea{font:inherit;font-family:var(--wr-mono);font-size:.82rem;
+  color:var(--wr-ink);background:var(--wr-surface2);border:1px solid var(--wr-line);
+  border-radius:4px;padding:.35rem .5rem;width:100%;min-width:0}
+.wr input[type=checkbox]{width:auto;padding:0;margin:0}
+.wr input:focus,.wr select:focus,.wr textarea:focus,.wr button:focus-visible{
+  outline:2px solid var(--wr-accent);outline-offset:1px}
+.wr button{font:inherit;font-size:.8rem;cursor:pointer;border-radius:4px;
+  border:1px solid var(--wr-line);background:var(--wr-surface2);color:var(--wr-ink);
+  padding:.3rem .6rem}
+.wr button:hover{border-color:var(--wr-accent)}
+.wr button.wr-remove{color:var(--wr-crit);border-color:transparent;background:transparent;
+  margin-top:.6rem;padding-left:0}
+.wr button.wr-remove:hover{text-decoration:underline}
+
+.wr .wr-bar{display:grid;grid-template-columns:minmax(9rem,14rem) 1fr;gap:.6rem;margin-bottom:.6rem}
+.wr .wr-field{display:flex;flex-direction:column;gap:.15rem;margin:0 0 .5rem}
+.wr .wr-flabel{font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--wr-muted);
+  font-family:var(--wr-mono)}
+.wr .wr-note{font-size:.76rem;color:var(--wr-muted);margin:0 0 .5rem}
+.wr .wr-check{display:flex;gap:.4rem;align-items:center;font-size:.8rem}
+
+.wr .wr-palette{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin-bottom:.6rem}
+.wr .wr-pallabel{font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--wr-muted);
+  font-family:var(--wr-mono);margin-right:.2rem}
+
+.wr .wr-body{display:grid;grid-template-columns:1fr 17rem;gap:.7rem;align-items:start}
+@media (max-width:52rem){.wr .wr-body{grid-template-columns:1fr}}
+.wr .wr-canvas{height:30rem;border:1px solid var(--wr-line);border-radius:6px;
+  background:var(--wr-surface2);
+  background-image:radial-gradient(color-mix(in srgb,var(--wr-line) 85%,transparent) 1px,transparent 1px);
+  background-size:18px 18px}
+.wr .wr-side{border:1px solid var(--wr-line);border-radius:6px;background:var(--wr-surface);
+  padding:.7rem .8rem;max-height:30rem;overflow:auto}
+.wr .wr-side h3{font-size:.9rem;margin:0 0 .3rem}
+.wr .wr-side h4{font-size:.78rem;margin:.2rem 0 .4rem;font-family:var(--wr-mono)}
+.wr .wr-bus{border-top:1px solid var(--wr-line);padding-top:.5rem;margin-top:.5rem}
+.wr .wr-tagrow{display:grid;grid-template-columns:8.5rem 1fr;gap:.4rem;align-items:center;margin-bottom:.3rem}
+
+.wr .wr-notice{border-left:3px solid var(--wr-warn);background:var(--warn-soft,#fbeddb);
+  padding:.45rem .7rem;border-radius:3px;font-size:.82rem;margin:.6rem 0 0}
+.wr .wr-findings{list-style:none;margin:.6rem 0 0;padding:0;font-size:.8rem}
+.wr .wr-findings li{display:flex;gap:.5rem;align-items:baseline;padding:.25rem 0;
+  border-bottom:1px solid var(--wr-line)}
+.wr .wr-findings li:last-child{border-bottom:0}
+.wr .wr-findings code{margin-left:auto;font-family:var(--wr-mono);font-size:.7rem;color:var(--wr-muted)}
+.wr .wr-lvl{font-family:var(--wr-mono);font-size:.66rem;text-transform:uppercase;letter-spacing:.06em;
+  flex:none;min-width:4.6rem}
+.wr .wr-err .wr-lvl{color:var(--wr-crit)}
+.wr .wr-warn .wr-lvl{color:var(--wr-warn)}
+.wr .wr-ok{color:var(--wr-ok)}
+.wr li.wr-err{color:var(--wr-ink)}
+
+.wr .wr-save{border:1px solid var(--wr-line);border-radius:6px;margin:.8rem 0 0;padding:.5rem .8rem}
+.wr .wr-save legend{font-size:.82rem;display:flex;gap:.4rem;align-items:center;padding:0 .3rem}
+.wr .wr-savegrid{display:grid;grid-template-columns:1fr 1fr;gap:0 .7rem;margin-top:.3rem}
+.wr .wr-savegrid[hidden]{display:none}
+.wr textarea.wr-json{width:100%;font-size:.78rem}
+
+/* -- Drawflow, in the page's palette -- */
+.wr .drawflow .drawflow-node{background:var(--wr-surface);border:1px solid var(--wr-line);
+  color:var(--wr-ink);border-radius:6px;padding:.45rem .55rem;width:13rem;min-height:3rem;
+  box-shadow:0 4px 16px -12px rgba(0,0,0,.6)}
+.wr .drawflow .drawflow-node.wr-board{width:15rem}
+.wr .drawflow .drawflow-node.selected{background:var(--wr-surface);border-color:var(--wr-accent);
+  box-shadow:0 0 0 2px var(--wr-soft)}
+.wr .drawflow .drawflow-node .input,.wr .drawflow .drawflow-node .output{width:14px;height:14px;
+  border:2px solid var(--wr-accent);background:var(--wr-surface);margin-bottom:9px}
+.wr .drawflow .drawflow-node .input{left:-17px;background:var(--wr-surface)}
+.wr .drawflow .drawflow-node .output{right:-6px}
+.wr .drawflow .drawflow-node .input:hover,.wr .drawflow .drawflow-node .output:hover{
+  background:var(--wr-accent)}
+/* Port names sit outside the box, next to the port they name. */
+.wr .drawflow .drawflow-node .input::after,.wr .drawflow .drawflow-node .output::after{
+  content:attr(data-label);position:absolute;top:-4px;white-space:nowrap;pointer-events:none;
+  font:600 .64rem/1.5 ui-monospace,Menlo,monospace;color:var(--wr-muted)}
+.wr .drawflow .drawflow-node .output::after{left:15px}
+.wr .drawflow .drawflow-node .input::after{right:15px}
+.wr .drawflow .connection .main-path{stroke:var(--wr-accent);stroke-width:3px}
+.wr .drawflow .connection .main-path:hover,.wr .drawflow .connection .main-path.selected{
+  stroke:var(--wr-warn)}
+.wr .drawflow-delete{background:var(--wr-crit);border-color:var(--wr-surface);width:24px;height:24px;
+  line-height:22px;font-size:.8rem}
+
+.wr .wr-nh{font-size:.8rem;font-weight:600;margin-bottom:.3rem;line-height:1.3}
+.wr .wr-nk{display:block;font:.6rem/1.4 ui-monospace,Menlo,monospace;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--wr-muted);font-weight:400}
+.wr .wr-nf{font:.7rem/1.4 ui-monospace,Menlo,monospace;color:var(--wr-ink2);margin-top:.3rem}
+.wr .wr-pic{position:relative;width:100%}
+.wr .wr-pic img{display:block;width:100%;height:100%;pointer-events:none}
+.wr .wr-box{border:1px dashed var(--wr-line);border-radius:4px;padding:.9rem .4rem;text-align:center;
+  font-size:.74rem;color:var(--wr-muted)}
+.wr .wr-pad{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;
+  border:2px solid var(--wr-warn);background:color-mix(in srgb,var(--wr-warn) 35%,transparent);
+  pointer-events:none}
+@media (prefers-reduced-motion:no-preference){.wr .wr-pad{animation:wrp 1s ease-in-out infinite}}
+@keyframes wrp{50%{transform:scale(1.35)}}

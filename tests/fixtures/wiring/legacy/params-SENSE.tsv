@@ -1,0 +1,18 @@
+PARAM	scl_pin	pin	5	SCL pin (I2C clock)	GPIO the sensor's SCL line is on. YELLOW on the reference build.	0
+PARAM	sda_pin	pin	4	SDA pin (I2C data)	GPIO the sensor's SDA line is on. GREEN on the reference build.	0
+PARAM	i2c_id	choice	0	I2C bus	Hardware I2C peripheral. Either works with any GPIO on an S3.	0
+OPTION	i2c_id	0	I2C0
+OPTION	i2c_id	1	I2C1
+PARAM	i2c_freq	int	400000	I2C frequency (Hz)	400 kHz is the SCD4x maximum. Drop to 50000 on long wiring.	1
+PARAM	altitude_masl	int	160	Altitude (m above sea level)	The SCD4x corrects CO2 for air pressure. A wrong value biases every reading.	0
+PARAM	disable_auto_cal	bool	true	Disable automatic self-calibration	ASC assumes the sensor sees fresh air weekly. In a sealed chamber it does not, so leave this on.	0
+PARAM	scl_pin	pin	5	SCL pin (I2C clock)	GPIO the sensor's SCL line is on.	0
+PARAM	sda_pin	pin	4	SDA pin (I2C data)	GPIO the sensor's SDA line is on.	0
+PARAM	data_pin	pin	17	1-Wire data pin	The probe's yellow/white line. Needs a 4.7k pull-up to 3V3.	0
+PARAM	signal_pin	pin	34	Signal pin (ADC)	Must be an ADC-capable GPIO. On a classic ESP32 use ADC1: GPIO32-39.	0
+PARAM	power_pin	pin	25	Power pin	Drives the probe. Held low between readings — a continuously powered probe corrodes.	0
+PARAM	max_water_level	int	1500	ADC reading at 100%	Raw ADC count with the reservoir full. Calibrate once per install.	0
+PARAM	uart_id	int	1	UART id	Only used by probe variants that also report over serial.	1
+PARAM	tx_pin	pin	16	UART TX pin		1
+PARAM	rx_pin	pin	17	UART RX pin		1
+PARAM	baudrate	int	115200	UART baud rate		1

@@ -5598,3 +5598,61 @@ INSERT INTO medcea.platform_setting (key, value) VALUES ('008c:last_nonce', :'de
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 COMMIT;
+
+-- ── Migration 009: msg_type HB and TS (stored health and test messages) ──────
+-- A SENSE board's _health message is stored as HB and a test message (tag
+-- _test, from a board at boot or from the host as that board) as TS. Node-RED
+-- takes the type from the topic (…/_health, …/_test), so neither can be stored
+-- as a reading. The domain's CHECK was three regex matches (~ 'AP' …); it is
+-- now the exact list. A row outside the list keeps the new CHECK NOT VALID (new
+-- rows are still checked) with a WARNING naming the values: old rows never
+-- fail the deploy. Already in place (HB admitted, validated): nothing is
+-- altered and no table is scanned or locked.
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE in_place boolean; c record; vals text; bad text;
+BEGIN
+    IF pg_catalog.to_regtype('medcea.msg_type') IS NULL THEN
+        RETURN;
+    END IF;
+    -- the old CHECK refuses HB and TS, the new one admits them
+    BEGIN
+        PERFORM 'HB'::medcea.msg_type, 'TS'::medcea.msg_type;
+        in_place := true;
+    EXCEPTION WHEN check_violation THEN
+        in_place := false;
+    END;
+    IF NOT in_place THEN
+        ALTER DOMAIN medcea.msg_type DROP CONSTRAINT IF EXISTS msg_type_check;
+        ALTER DOMAIN medcea.msg_type ADD CONSTRAINT msg_type_check
+            CHECK (VALUE IN ('AP', 'CT', 'SP', 'HB', 'TS')) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+                    WHERE contypid = 'medcea.msg_type'::regtype AND conname = 'msg_type_check'
+                      AND NOT convalidated) THEN
+        RETURN;
+    END IF;
+    BEGIN
+        ALTER DOMAIN medcea.msg_type VALIDATE CONSTRAINT msg_type_check;
+    EXCEPTION WHEN check_violation THEN
+        -- every table column of the domain (a partition is read through its parent)
+        FOR c IN SELECT a.attrelid::regclass AS rel, a.attname
+                   FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class r ON r.oid = a.attrelid
+                  WHERE a.atttypid = 'medcea.msg_type'::regtype AND a.attnum > 0 AND NOT a.attisdropped
+                    AND r.relkind IN ('r', 'p') AND NOT r.relispartition LOOP
+            EXECUTE pg_catalog.format('SELECT string_agg(DISTINCT pg_catalog.quote_literal(%1$I::text), '', '') FROM %2$s '
+                                      'WHERE %1$I::text NOT IN (''AP'', ''CT'', ''SP'', ''HB'', ''TS'')', c.attname, c.rel)
+                INTO vals;
+            IF vals IS NOT NULL THEN
+                bad := concat_ws('; ', bad, c.rel::text || '.' || c.attname || ' ' || vals);
+            END IF;
+        END LOOP;
+        RAISE WARNING 'medcea.msg_type: msg_type_check stays NOT VALID (new rows are checked): rows outside AP, CT, SP, HB, TS: %',
+                      left(coalesce(bad, '?'), 500);
+    END;
+END $$;
+
+COMMIT;

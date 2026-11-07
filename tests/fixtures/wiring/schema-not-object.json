@@ -1,0 +1,11 @@
+{
+ "variant": "esp32s3",
+ "doc": [],
+ "expect": [
+  [
+   "error",
+   "E_SCHEMA",
+   ""
+  ]
+ ]
+}

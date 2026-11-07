@@ -1,0 +1,8 @@
+drawflow 0.0.60 (MIT, Copyright (c) 2020 Jero Soler; DRAWFLOW-LICENSE)
+source: https://registry.npmjs.org/drawflow/-/drawflow-0.0.60.tgz
+tarball sha512 (= the registry's dist.integrity): sha512-UGj1+1DnWCVY6vJXBb6Ayt7KpPINBGqncVqpYDumVeBdIKxlBGn0tksp2yciVzQjkYsjFwMMDEdoVyWzUa2wkA==
+tarball sha256: e587758f8c4e8e02aca57de4f6c63f88f57a46c6a033f470e7c8f3acea080021
+copied unmodified from package/dist/ and package/LICENSE:
+caf8c4f15b75e27169632ed2122715e52aeb5930b9adca6f519bd82a485a31e2  drawflow.min.js
+57e5b37f72d95f97597263f17ef0ae9f0a0cd7b966e039b9f43508040d5dedf2  drawflow.min.css
+daf3d5445e32f01fd8c1fa52d1956daae15c506ef8a657b189837f60c2c6639c  DRAWFLOW-LICENSE

@@ -21,6 +21,14 @@ publishing where nothing is listening.
     pins       ROLE [VARIANT]      the silicon's pin reference, as a table
     render                         stdin JSON -> the board's files
 
+  SENSE wiring (the on-screen wiring screen; the rules are wiring.py's):
+    wiring-spec      SENSE [VARIANT] [--initial FILE]   the screen's catalogue, JSON
+    validate-wiring  SENSE VARIANT       stdin document -> findings, exit 1 if fatal
+    board-templates  SENSE [VARIANT]     saved and shipped boards, TSV
+    board-template   SLUG                one board template's wiring document
+    save-board-template SLUG --title T [--description D] --by USER [--replace]
+                                         stdin document -> edge/board-templates/SLUG.json
+
 Which device family the templates come from is CEA_DEVICE_FAMILY (default
 esp32). Everything pin-shaped lives behind the template's `binding` block, so a
 family that drives Modbus coils or HTTP endpoints is a new template rather than
@@ -30,15 +38,25 @@ The output is line-oriented TSV so flash-device.sh stays the engine and this
 stays a table.
 """
 
+import datetime
 import json
 import os
+import re
 import sys
+import tempfile
 
 import bindings
+import wiring
 
-TEMPLATE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "templates")
+EDGE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TEMPLATE_DIR = os.path.join(EDGE_DIR, "templates")
+
+# Board templates: a wiring document with a name. The shipped ones come with
+# git; the saved ones are written by the wizard on this host and are tracked in
+# git too, so a board someone saved can be reviewed and shared. Not in the
+# database: a new table would widen the access policy's skeleton.
+SHIPPED_BOARDS_DIR = os.path.join(TEMPLATE_DIR, "boards")
+SLUG_RX = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 
 ROLES = ("SENSE", "CONTROL")
 
@@ -54,6 +72,10 @@ DEFAULT_FAMILY = "esp32"
 
 class TemplateError(Exception):
     pass
+
+
+class UsageError(Exception):
+    """A command line the CLI cannot act on: exit 2."""
 
 
 def family():
@@ -116,6 +138,11 @@ def driver(role, driver_id):
     raise TemplateError("the %s template has no driver %r" % (role, driver_id))
 
 
+def saved_boards_dir():
+    return os.environ.get("CEA_BOARD_TEMPLATES_DIR") or os.path.join(EDGE_DIR,
+                                                                    "board-templates")
+
+
 def _t(*fields):
     return "\t".join(str(f).replace("\t", " ").replace("\n", " ") for f in fields)
 
@@ -126,6 +153,10 @@ def cmd_drivers(role):
     print(_t("ROLE", tpl["role"], tpl["component_type"],
              "multi" if tpl.get("multi") else "single"))
     for d in tpl.get("drivers", []):
+        # A wiring-only driver has no pins of its own to ask for: it lives on a
+        # bus the wiring screen draws, so the question loop cannot place it.
+        if d.get("wiring_only"):
+            continue
         tags = ",".join(t["tag"] for t in d.get("tags", []))
         print(_t("DRIVER", d["id"], d.get("name", d["id"]),
                  d.get("subtitle", ""), tags))
@@ -454,12 +485,34 @@ def render(spec):
     written = []
     components = []
 
-    if role == "SENSE":
+    if role == "SENSE" and spec.get("wiring") is not None:
+        # The wiring screen's document. wiring.py checks it again here and
+        # refuses on any error: the board is about to be erased.
+        tpl = load("SENSE")
+        cfg["MESSAGE_INTERVAL"] = int(spec.get("message_interval", 30))
+        try:
+            got = wiring.render_sense(
+                spec["wiring"], tpl, spec.get("variant"), base_topic=base_topic,
+                message_interval=cfg["MESSAGE_INTERVAL"],
+                mqtt={"host": cfg["MQTT_HOST"], "port": cfg["MQTT_PORT"]},
+                coerce=coerce, base_dir=TEMPLATE_DIR)
+        except wiring.WiringError as e:
+            raise TemplateError(str(e))
+        except bindings.BindingError as e:
+            raise TemplateError("the GPIO table is unusable: %s" % e)
+        cfg.update(got["cfg"])
+        components.extend(got["components"])
+
+    elif role == "SENSE":
         tpl = load("SENSE")
         cfg["MESSAGE_INTERVAL"] = int(spec.get("message_interval", 30))
         sensors = []
         for chosen in spec.get("components", []):
             d = driver("SENSE", chosen["driver"])
+            if d.get("wiring_only"):
+                raise TemplateError(
+                    "%s has no pins of its own: wire it on screen (or with --wiring)"
+                    % d["id"])
             params = {}
             for p in d.get("params", []):
                 name = p["name"]
@@ -573,6 +626,281 @@ def render(spec):
             "topic_base": base_topic, "config": cfg}
 
 
+# ------------------------------------------------------------- wiring ----
+def _sense_only(role):
+    if (role or "").upper() != "SENSE":
+        raise UsageError("wiring and board templates are for SENSE boards only")
+    return load("SENSE")
+
+
+def _gpio(tpl):
+    try:
+        return wiring.gpio_binding(tpl, TEMPLATE_DIR)
+    except bindings.BindingError as e:
+        raise TemplateError("the GPIO table is unusable: %s" % e)
+
+
+def _read_json(path, what):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError as e:
+        raise TemplateError("cannot read %s %s: %s" % (what, path, e))
+    except ValueError as e:
+        raise TemplateError("%s %s is not valid JSON: %s" % (what, path, e))
+
+
+def board_templates(tpl, variant=None):
+    """Every board template, shipped first, each validated.
+
+    `variant` is the chip to check against; without one each template is
+    checked against its own board. An invalid template is listed with its
+    first error, never hidden: "why is my board greyed out" needs an answer.
+    """
+    out, seen = [], set()
+    for source, d in (("shipped", SHIPPED_BOARDS_DIR), ("saved", saved_boards_dir())):
+        try:
+            names = sorted(n for n in os.listdir(d) if n.endswith(".json"))
+        except OSError:
+            continue
+        for name in names:
+            slug = name[:-5]
+            if slug in seen or not SLUG_RX.match(slug):
+                continue
+            try:
+                rec = _read_json(os.path.join(d, name), "board template")
+            except TemplateError as e:
+                rec, broken = {}, str(e)
+            else:
+                broken = None if isinstance(rec, dict) else "not a JSON object"
+                rec = rec if isinstance(rec, dict) else {}
+            seen.add(slug)
+            doc = rec.get("wiring")
+            if broken:
+                findings = [{"level": "error", "message": broken}]
+            else:
+                findings = wiring.validate(doc, tpl, variant, TEMPLATE_DIR)
+            errs = wiring.errors(findings)
+            board = doc.get("board") if isinstance(doc, dict) else None
+            out.append({
+                "slug": slug, "title": str(rec.get("title") or slug),
+                "description": str(rec.get("description") or ""),
+                "variant": str(rec.get("variant") or
+                               (board.get("variant") if isinstance(board, dict) else "")
+                               or ""),
+                "source": source, "valid": not errs,
+                "first_error": errs[0]["message"] if errs else None,
+                "wiring": doc,
+            })
+    return out
+
+
+def find_board_template(slug):
+    for d in (SHIPPED_BOARDS_DIR, saved_boards_dir()):
+        path = os.path.join(d, slug + ".json")
+        if SLUG_RX.match(slug or "") and os.path.exists(path):
+            rec = _read_json(path, "board template")
+            if not isinstance(rec, dict) or not isinstance(rec.get("wiring"), dict):
+                raise TemplateError("board template %s has no wiring document" % path)
+            return rec
+    raise TemplateError("no board template %r" % slug)
+
+
+def cmd_wiring_spec(role, args):
+    """The wiring screen's whole catalogue, as one JSON object.
+
+    It rides in every /api/state poll while the screen is up, so it carries no
+    pictures (those come once, from /api/parts) and must stay under 32 KB.
+    """
+    tpl = _sense_only(role)
+    variant, initial = None, None
+    i = 0
+    while i < len(args):
+        if args[i] == "--initial":
+            if i + 1 >= len(args):
+                raise IndexError
+            initial = _read_json(args[i + 1], "initial wiring")
+            # The provisioned record and a board template both carry the
+            # document under "wiring"; a bare document has a version. Only
+            # the document is ever passed on: a record also holds the board's
+            # passwords, and the spec goes to the browser.
+            if isinstance(initial, dict) and "version" not in initial:
+                initial = initial.get("wiring")
+            if not isinstance(initial, dict):
+                initial = None
+            i += 2
+        elif args[i].startswith("-"):
+            raise TemplateError("unknown option %s" % args[i])
+        else:
+            variant = args[i]
+            i += 1
+    gpio = _gpio(tpl)
+    variant = variant or gpio.variant
+    if variant not in gpio.variants:
+        raise TemplateError("unknown chip variant %r (known: %s)"
+                            % (variant, ", ".join(sorted(gpio.variants))))
+    drivers = []
+    for d in tpl.get("drivers", []):
+        if not d.get("bus"):
+            continue
+        drivers.append({
+            "id": d["id"], "name": d.get("name", d["id"]),
+            "subtitle": d.get("subtitle", ""), "model": d.get("model", ""),
+            "manufacturer": d.get("manufacturer", ""), "part": d.get("part", ""),
+            "bus": d["bus"], "power": d.get("power") or {},
+            "quantities": d.get("quantities") or [],
+            # Which quantities a NEW instance starts with switched off (the
+            # SCD30's T/RH: the reference board reads those from the SHT45).
+            "default_off": d.get("default_off") or [],
+            "params": [p for p in d.get("params", []) if not p.get("legacy_bus")],
+        })
+    json.dump({
+        "role": "SENSE", "family": tpl.get("family", family()), "variant": variant,
+        "variants": [{"id": v, "label": gpio.variant_label(v)}
+                     for v in sorted(gpio.variants)],
+        "pins": gpio.variants[variant],
+        "drivers": drivers,
+        "hubs": tpl.get("hubs") or [],
+        "boards": tpl.get("boards") or [],
+        "templates": board_templates(tpl, variant),
+        "initial": initial,
+    }, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_validate_wiring(role, variant):
+    """stdin: a wiring document. stdout: its findings. Exit 1 if any is fatal."""
+    tpl = _sense_only(role)
+    try:
+        doc = json.load(sys.stdin)
+    except ValueError as e:
+        doc = None
+        findings = [{"level": "error", "code": "E_SCHEMA", "where": "",
+                     "message": "The wiring is not JSON: %s" % e}]
+    else:
+        try:
+            findings = wiring.validate(doc, tpl, variant, TEMPLATE_DIR)
+        except bindings.BindingError as e:
+            raise TemplateError("the GPIO table is unusable: %s" % e)
+    json.dump({"findings": findings,
+               "errors": sum(1 for f in findings if f["level"] == "error"),
+               "warnings": sum(1 for f in findings if f["level"] == "warn")},
+              sys.stdout)
+    sys.stdout.write("\n")
+    return 1 if any(f["level"] == "error" for f in findings) else 0
+
+
+def cmd_board_templates(role, variant=None):
+    tpl = _sense_only(role)
+    # Every field non-empty ("-"): the shell reads these with IFS=$'\t' read,
+    # which merges empty fields and shifts the rest one variable left.
+    for t in board_templates(tpl, variant):
+        print(_t(t["slug"], t["title"].strip() or "-", t["variant"] or "-", t["source"],
+                 "1" if t["valid"] else "0", t["first_error"] or "-"))
+    return 0
+
+
+def cmd_board_template(slug):
+    json.dump(find_board_template(slug)["wiring"], sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_save_board_template(args):
+    """Save a wiring as a board template on this host. stdin: the document.
+
+    Refused with nothing written: a bad slug, a shipped slug, an existing saved
+    slug without --replace, or a document with any error. The write is atomic
+    (temporary file, then link or rename), so a reader never sees half a file.
+    """
+    if not args or args[0].startswith("-"):
+        raise IndexError
+    slug, opts, flags = args[0], {}, set()
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a in ("--title", "--description", "--by"):
+            if i + 1 >= len(args):
+                raise IndexError
+            opts[a[2:]] = args[i + 1]
+            i += 2
+        elif a == "--replace":
+            flags.add("replace")
+            i += 1
+        else:
+            raise UsageError("unknown option %s" % a)
+    title = (opts.get("title") or "").strip()
+    by = (opts.get("by") or "").strip()
+    if not title or not by:
+        raise UsageError("save-board-template needs --title and --by")
+    if not SLUG_RX.match(slug):
+        raise TemplateError("%r is not a usable name: a lower-case letter, then 1-40 "
+                            "lower-case letters, digits or -" % slug)
+    if os.path.exists(os.path.join(SHIPPED_BOARDS_DIR, slug + ".json")):
+        raise TemplateError("%s is a shipped board template; choose another name" % slug)
+    for text, what in ((title, "title"), (opts.get("description") or "", "description")):
+        if any(ord(c) < 32 for c in text) or len(text) > 400:
+            raise TemplateError("the %s must be one line of at most 400 characters"
+                                % what)
+    tpl = _sense_only("SENSE")
+    try:
+        doc = json.load(sys.stdin)
+    except ValueError as e:
+        raise TemplateError("the wiring is not JSON: %s" % e)
+    doc = wiring.normalise(doc)
+    findings = wiring.validate(doc, tpl, None, TEMPLATE_DIR)
+    errs = wiring.errors(findings)
+    if errs:
+        raise TemplateError("the wiring has %d error(s) and was not saved:\n  %s"
+                            % (len(errs), "\n  ".join("%s %s — %s"
+                                                     % (f["code"], f["where"] or "-",
+                                                        f["message"]) for f in errs)))
+    d = saved_boards_dir()
+    path = os.path.join(d, slug + ".json")
+    exists = os.path.exists(path)
+    if exists and "replace" not in flags:
+        raise TemplateError("a board template %s already exists; tick replace to "
+                            "overwrite it" % slug)
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rec = {"slug": slug, "title": title,
+           "description": (opts.get("description") or "").strip(),
+           "variant": doc["board"]["variant"], "saved_by": by, "saved_at": now}
+    if exists:
+        # A replacement keeps when the template first appeared; replaced_at says
+        # when its wiring last changed. An unreadable old file just starts afresh.
+        try:
+            with open(path, encoding="utf-8") as f:
+                old = json.load(f).get("saved_at")
+            if isinstance(old, str) and old:
+                rec["saved_at"] = old
+        except (OSError, ValueError, AttributeError):
+            pass
+        rec["replaced_at"] = now
+    rec["wiring"] = doc
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".%s." % slug, suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(rec, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp, 0o644)
+        if exists:
+            os.replace(tmp, path)
+        else:
+            # link() refuses an existing name, so two saves of one new slug
+            # cannot overwrite each other.
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise TemplateError("a board template %s was saved meanwhile" % slug)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print(path)
+    return 0
+
+
 def cmd_render():
     spec = json.load(sys.stdin)
     result = render(spec)
@@ -603,6 +931,21 @@ def main(argv):
             return cmd_pins(argv[2], argv[3] if len(argv) > 3 else None)
         if cmd == "render":
             return cmd_render()
+        if cmd == "wiring-spec":
+            return cmd_wiring_spec(argv[2], argv[3:])
+        if cmd == "validate-wiring":
+            if len(argv) != 4:
+                raise IndexError
+            return cmd_validate_wiring(argv[2], argv[3])
+        if cmd == "board-templates":
+            return cmd_board_templates(argv[2], argv[3] if len(argv) > 3 else None)
+        if cmd == "board-template":
+            return cmd_board_template(argv[2])
+        if cmd == "save-board-template":
+            return cmd_save_board_template(argv[2:])
+    except UsageError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     except bindings.BindingError as e:
         print(str(e), file=sys.stderr)
         return 1

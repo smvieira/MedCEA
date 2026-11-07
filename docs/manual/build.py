@@ -30,10 +30,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHAPTERS = ['overview', 'access', 'apps', 'devices', 'compliance', 'admin', 'training', 'reference', 'revisions']
 EDITION = {
-    'EDITION': '6',
-    'COVERS': 'IAM phases 0 to 4 complete; boards over TLS; onboarding with a WiFi check, Back and Cancel',
-    'DATE': '5 Nov 2026',
-    'COMMIT': 'a685a3b (branch iam/phase-4.5)',
+    'EDITION': '7',
+    'COVERS': 'IAM phases 0 to 4 complete; boards over TLS; onboarding with a WiFi check, Back and Cancel; SENSE wiring on screen; health and test messages',
+    'DATE': '6 Nov 2026',
+    'COMMIT': '17fd591 + branch edge/sense-wiring (uncommitted)',
 }
 
 # What --standalone puts before shell.html's own <title>, <link> and <style> (which the

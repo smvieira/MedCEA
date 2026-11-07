@@ -10,6 +10,7 @@ cheerfully drives an unconnected GPIO.
 
 The published half is not decoration: it is the only evidence that a command
 reached hardware, and it is what the measurement table records as msg_type 'SP'.
+At boot the board also publishes one test message (TS) on control_setpoint/_test.
 """
 
 import sys
@@ -164,6 +165,9 @@ def run():
     client.subscribe(cfg.topic_sub)
     print("\nCONTROL loop: subscribed to %s, reporting to %s"
           % (cfg.topic_sub, cfg.topic_pub))
+    # Once per boot, as SENSE does: a TS on control_setpoint/_test. A failure only
+    # prints; a connection that is really gone fails the loop's next check_msg.
+    ef.publish_test(client)
 
     # A CONTROL board publishes only when a command arrives, so while no run sends
     # any it would send nothing, and the broker drops a client silent for 1.5 x

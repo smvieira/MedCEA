@@ -28,10 +28,12 @@ the spool or a log line.
 """
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import posixpath
+import re
 import secrets
 import shutil
 import socket
@@ -384,6 +386,147 @@ def ui_asset(name):
     return _UI_CACHE[name]
 
 
+# The wiring screen's part pictures (edge/templates/parts): served on their own
+# URL, behind the same session check as /api/state, and fetched by the page only
+# when a wiring question first appears, so ~300 KB of SVG is neither in every
+# page load nor in the 700 ms state poll.
+PARTS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "..", "..", "templates", "parts"))
+_PARTS = {}
+_SVG_BAD = re.compile(r"<\s*script|<\s*foreignObject|\son[a-z]+\s*=|"
+                      r"(?:xlink:)?href\s*=\s*[\"']\s*(?!#|data:image/(?:png|jpe?g|gif|webp)[;,])", re.I)
+
+
+def parts_payload():
+    """(body, etag) of GET /api/parts: {"parts": {id: {"meta", "svg"}}}.
+
+    Read once and cached, like ui_asset. A picture that could reach outside
+    itself (a script, an event handler, an href to anything but its own ids or
+    an embedded raster image) is left out with a line on stderr: the page shows
+    that part as a labelled box.
+    The browser draws them as <img> data: URIs, which run nothing anyway; this
+    keeps a bad import from ever being served.
+    """
+    if "body" not in _PARTS:
+        out = {}
+        try:
+            names = sorted(n for n in os.listdir(PARTS_DIR) if n.endswith(".json"))
+        except OSError:
+            names = []
+        for n in names:
+            try:
+                with open(os.path.join(PARTS_DIR, n), encoding="utf-8") as f:
+                    meta = json.load(f)
+                svg_name = meta.get("svg") if isinstance(meta, dict) else None
+                if not svg_name or os.path.basename(svg_name) != svg_name or not svg_name.endswith(".svg"):
+                    raise ValueError("no svg file named")
+                with open(os.path.join(PARTS_DIR, svg_name), encoding="utf-8") as f:
+                    svg = f.read()
+                if _SVG_BAD.search(svg):
+                    raise ValueError("the svg has a script, a handler or an external href")
+            except (OSError, ValueError) as e:
+                print("wizard: part %s left out: %s" % (n, e), file=sys.stderr)
+                continue
+            out[str(meta.get("id") or n[:-5])] = {"meta": meta, "svg": svg}
+        body = json.dumps({"parts": out}, sort_keys=True, separators=(",", ":")).encode()
+        _PARTS["body"] = body
+        _PARTS["etag"] = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    return _PARTS["body"], _PARTS["etag"]
+
+
+# Send test message (owner decision, 6 Nov 2026): one TS message, tag _test, sent
+# from this host as the board the last run onboarded, with that board's own broker
+# credential from its record. The checkout is the one this server runs from (the
+# daemon's and --ui's alike), and so is the record directory flash-device.sh writes.
+_HOST_DIR = os.path.dirname(os.path.abspath(__file__))
+_EDGE_DIR = os.path.normpath(os.path.join(_HOST_DIR, "..", ".."))
+MQTT_TEST = os.path.join(_HOST_DIR, "mqtt_test.py")
+MQTT_CA = os.path.join(os.path.dirname(_EDGE_DIR), ".ca", "ca.crt")
+PROVISIONED_DIR = os.path.join(_EDGE_DIR, "provisioned")
+TEST_MSG_GAP = 5            # seconds between two test messages of one run
+TEST_MSG_TIMEOUT = 20       # the whole send, TLS handshake to PUBACK
+_DNS_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+
+def finished_board():
+    """((record path, mqtt dict), None) for the board the last run onboarded, or (None, why).
+
+    The board comes from the run, never from a request: the summary flash-device.sh
+    posted (done.json's "record" field) names the record, which must be a board record
+    in PROVISIONED_DIR, named after its own hostname, registered, with a broker
+    address. Only a run that exited 0 counts.
+    """
+    if run_active():
+        return None, "the run is still going"
+    if read("finished").strip() != "0" or not os.path.exists(spool("done.json")):
+        return None, "the run did not finish onboarding a board"
+    try:
+        done = json.loads(read("done.json") or "null")
+    except ValueError:
+        done = None
+    fields = done.get("fields") if isinstance(done, dict) else None
+    path = next((f[1] for f in fields if isinstance(f, list) and len(f) >= 2
+                 and f[0] == "record"), None) if isinstance(fields, list) else None
+    if not isinstance(path, str) or not path:
+        return None, "the run left no board record"
+    real = os.path.realpath(path)
+    name = os.path.basename(real)
+    if os.path.dirname(real) != os.path.realpath(PROVISIONED_DIR) or not name.endswith(".json") \
+            or not _DNS_NAME.match(name[:-5]):
+        return None, "the run's record is not a board record in edge/provisioned"
+    try:
+        with open(real, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None, "cannot read the board's record"
+    mq = rec.get("mqtt") if isinstance(rec, dict) else None
+    if not isinstance(mq, dict) or rec.get("state") != "REGISTERED" \
+            or rec.get("role") not in ("SENSE", "CONTROL") or rec.get("hostname") != name[:-5]:
+        return None, "this board was not registered, so it has no broker credential"
+    port = mq.get("port")
+    if not isinstance(mq.get("host"), str) or not mq["host"] or not isinstance(mq.get("tls_name"), str) \
+            or not mq["tls_name"] or isinstance(port, bool) or not isinstance(port, int) \
+            or not 0 < port < 65536:
+        return None, "the board's record has no broker address"
+    return (real, mq), None
+
+
+def send_test_message(path, mq):
+    """Run mqtt_test.py for one board: (http status, result dict).
+
+    The argv holds no secret (the password stays in the record, which mqtt_test.py
+    reads), every value goes as --opt=value so none can pass for an option, and only
+    mqtt_test's documented result keys are passed on. Its stderr is dropped.
+    """
+    argv = [sys.executable, MQTT_TEST, "--record=" + path, "--host=" + mq["host"],
+            "--port=%d" % mq["port"], "--tls-name=" + mq["tls_name"], "--ca=" + MQTT_CA,
+            "--source=wizard", "--timeout=%d" % max(1, TEST_MSG_TIMEOUT - 5)]
+    try:
+        p = subprocess.run(argv, cwd=os.path.dirname(_EDGE_DIR), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=TEST_MSG_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 502, {"ok": False, "error": "no answer within %d s" % TEST_MSG_TIMEOUT}
+    except OSError as e:
+        return 502, {"ok": False, "error": "cannot run the test sender: %s" % (e.strerror or e)}
+    out = None
+    for line in reversed(p.stdout.decode("utf-8", "replace").splitlines()):
+        if line.strip():
+            try:
+                out = json.loads(line)
+            except ValueError:
+                pass
+            break
+    if not isinstance(out, dict):
+        return 502, {"ok": False, "error": "the test sender gave no result (exit %d)" % p.returncode}
+    res = {k: str(out[k])[:300] for k in ("topic", "client_id", "timestamp", "msg_type", "error")
+           if isinstance(out.get(k), (str, int, float)) and not isinstance(out.get(k), bool)}
+    res["ok"] = out.get("ok") is True and p.returncode == 0
+    if not res["ok"]:
+        res.setdefault("error", "the test sender failed (exit %d)" % p.returncode)
+    return (200 if res["ok"] else 502), res
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -483,6 +626,8 @@ PAGE = """<!doctype html>
   .tile .cta{margin-top:.6rem;font-size:.84rem;font-weight:600;color:var(--accent)}
   .tile.off .cta{color:var(--muted);font-weight:400}
 __CHANNELMAP_CSS__
+__DRAWFLOW_CSS__
+__WIRING_CSS__
 </style></head><body>
 <header><div class="hin">
   <h1>Flash an ESP32</h1>
@@ -498,6 +643,7 @@ __CHANNELMAP_CSS__
     <p class="hint" id="phint" hidden></p>
     <div class="opts" id="popts"></div>
     <div id="pmap" hidden></div>
+    <div id="pwire" hidden></div>
     <div id="pfree" hidden><input type="text" id="pinput" autocomplete="off"><button class="alt" type="button" id="pshow" hidden aria-pressed="false">Show</button></div>
     <div class="row" id="prow"><button class="alt" type="button" id="pback" hidden>Back</button><button class="go" id="psend">Continue</button>
       <button class="alt" id="preset" hidden>Reset to reference wiring</button>
@@ -517,22 +663,41 @@ __CHANNELMAP_CSS__
     <span class="hint" id="runhint">Stops the run at its next step. A flash write in progress finishes first.</span></div></div>
   <div class="card" id="idlecard" hidden><div class="idle"><span class="dot"></span><span id="idletext">Waiting for the script&hellip;</span></div></div>
   <div class="card" id="donecard" hidden></div>
+  <div class="card" id="testcard" hidden><div class="row" style="margin-top:0">
+    <button class="alt" type="button" id="ptest">Send test message</button>
+    <span class="hint" id="testres"></span></div></div>
   <div class="card"><pre class="log" id="log"></pre></div>
 </main>
 <script>__CHANNELMAP_JS__</script>
+<script>__DRAWFLOW_JS__</script>
+<script>__WIRING_JS__</script>
 <script>
 const T = new URLSearchParams(location.search).get("t") || "";
 // 401 means the session expired mid-run; a reload re-enters the login flow.
 function reauth() { location.reload(); }
 const $ = i => document.getElementById(i);
-let curId = null, sel = null, lastLog = "", mapCtl = null;
+let curId = null, curKind = null, sel = null, lastLog = "", mapCtl = null, wireCtl = null;
 
 function api(p, o) { return fetch(p + (p.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(T), o); }
 
+// The part pictures for the wiring screen, fetched once, on the first wiring
+// question. A failure is not cached: the screen then draws labelled boxes.
+let partsP = null;
+function loadParts() {
+  if (!partsP) {
+    partsP = api("/api/parts").then(r => {
+      if (r.status === 401) { reauth(); return {}; }
+      if (!r.ok) { partsP = null; return {}; }
+      return r.json();
+    }).catch(() => { partsP = null; return {}; });
+  }
+  return partsP;
+}
+
 function renderPrompt(p) {
-  if (!p) { $("promptcard").hidden = true; curId = null; return; }
+  if (!p) { $("promptcard").hidden = true; curId = null; curKind = null; return; }
   if (p.id === curId) return;
-  curId = p.id; sel = null;
+  curId = p.id; curKind = p.kind; sel = null;
   $("promptcard").hidden = false;
   $("plabel").textContent = p.label || "";
   $("phint").textContent = p.hint || ""; $("phint").hidden = !p.hint;
@@ -542,6 +707,7 @@ function renderPrompt(p) {
   // changes — the poll loop calls this every second, and re-mounting on each
   // tick would throw away whatever the operator had half-typed.
   map.hidden = true; map.innerHTML = ""; mapCtl = null;
+  const wire = $("pwire"); wire.hidden = true; wire.innerHTML = ""; wireCtl = null;
   $("preset").hidden = true; $("pmapwarn").hidden = true;
 
   if (p.kind === "channelmap") {
@@ -561,6 +727,32 @@ function renderPrompt(p) {
     });
     $("preset").hidden = false;
     $("preset").onclick = () => mapCtl && mapCtl.reset((p.spec || {}).reference);
+  } else if (p.kind === "wiring") {
+    free.hidden = true; wire.hidden = false;
+    wire.textContent = "Loading the part pictures\u2026";
+    const id = p.id, spec = p.spec || {};
+    loadParts().then(parts => {
+      if (curId !== id) return;            // answered, or another question, meanwhile
+      wire.textContent = "";
+      if (typeof Wiring === "undefined") {
+        wire.textContent = "The wiring screen did not load (wiring.js is missing from this install). " +
+          "Go Back and choose to answer one sensor at a time.";
+        return;
+      }
+      wireCtl = Wiring.mount({
+        el: wire, spec, initial: spec.initial, parts: (parts || {}).parts || {},
+        onchange: ctl => {
+          const n = ctl.errors();
+          // As for the channel map: the shell re-checks and dies before the
+          // erase, but a screen that cannot send a broken board is the point.
+          $("psend").disabled = n > 0;
+          $("pmapwarn").hidden = n === 0;
+          $("pmapwarn").textContent = n
+            ? n + (n === 1 ? " error" : " errors") + " to fix before this can be sent"
+            : "";
+        }
+      });
+    });
   } else if (p.kind === "choice") {
     free.hidden = true;
     let n = 0;
@@ -615,7 +807,8 @@ function renderPrompt(p) {
     setTimeout(() => inp.focus(), 30);
   }
   $("psend").hidden = (p.kind === "confirm");
-  $("psend").disabled = false;
+  // A wiring question can be sent only once its screen is up and has no error.
+  $("psend").disabled = p.kind === "wiring" && !wireCtl;
   // Back (5 Nov 2026): only where the script offers it (questions before the board is
   // touched, and the WiFi network and passphrase).
   $("pback").hidden = !p.back;
@@ -634,7 +827,7 @@ function post(path, body) {
 }
 function goBack() {
   if (curId === null) return;
-  const id = curId; curId = null; mapCtl = null;
+  const id = curId; curId = null; mapCtl = null; wireCtl = null;
   $("promptcard").hidden = true;
   post("/api/answer", { id, back: true });
 }
@@ -647,6 +840,35 @@ $("pcancel").onclick = () => {
   post("/api/cancel", { run: runId });
 };
 
+// Send test message (6 Nov 2026): one message with tag _test, sent from this host as
+// the board the run just onboarded. The server picks the board from the run; the
+// page names only the run.
+const TEST_HINT = "Publishes one message with tag _test as this board, with its own broker credential.";
+let testRun = null;
+$("ptest").onclick = async () => {
+  const b = $("ptest"), out = $("testres");
+  b.disabled = true; out.textContent = "Sending\u2026";
+  try {
+    const r = await api("/api/test-message", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run: runId })
+    });
+    if (r.status === 401) { reauth(); return; }
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.ok) {
+      out.textContent = "Sent at " + (j.timestamp || "?") + " on " + (j.topic || "?") +
+        "; look for tag _test in the MQTT Explorer.";
+    } else if (r.status === 429) {
+      out.textContent = "One test message every 5 seconds \u2014 try again in a moment.";
+    } else {
+      out.textContent = "Not sent: " + (j.error || ("error " + r.status));
+    }
+  } catch (e) {
+    out.textContent = "Not sent: the wizard did not answer.";
+  } finally {
+    setTimeout(() => { b.disabled = false; }, 1000);
+  }
+};
+
 function send() {
   if (curId === null) return;
   let p;
@@ -655,11 +877,18 @@ function send() {
     // The board it was checked against goes with it: the shell re-checks the
     // map against the chip it reads off the silicon, and cannot without this.
     p = JSON.stringify({ config: mapCtl.value(), variant: mapCtl.variant() });
+  } else if (wireCtl) {
+    if (wireCtl.errors() > 0) return;
+    // Our wiring document only, never Drawflow's export (which carries every
+    // node's HTML and pictures): a few KB, checked again by the shell.
+    p = JSON.stringify({ wiring: wireCtl.value(), variant: wireCtl.variant(), save_as: wireCtl.saveAs() });
+  } else if (curKind === "wiring") {
+    return;                               // the screen is not up yet
   } else {
     p = $("pfree").hidden ? sel : $("pinput").value;
   }
   if (p === null || p === undefined) return;
-  const id = curId; curId = null; mapCtl = null;
+  const id = curId; curId = null; mapCtl = null; wireCtl = null;
   $("promptcard").hidden = true;
   api("/api/answer", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -812,6 +1041,8 @@ async function tick() {
     // (until 5 Nov 2026 "stopped with exit code 1" stayed up while the next run worked).
     runId = s.run_id;
     $("runcard").hidden = !s.cancellable;
+    if (s.run_id !== testRun) { testRun = s.run_id; $("testres").textContent = TEST_HINT; }
+    $("testcard").hidden = !s.test_message;
     $("idletext").textContent = s.finished && !s.done
       ? (s.exit === "130"
           ? "The run was cancelled \u2014 the log says what state the board was left in."
@@ -1041,7 +1272,11 @@ class Handler(BaseHTTPRequestHandler):
             page = (PAGE.replace("__ONBOARD__", html.escape(STATE["onboard_url"], quote=True))
                         .replace("__WHO__", who)
                         .replace("__CHANNELMAP_CSS__", ui_asset("channelmap.css"))
-                        .replace("__CHANNELMAP_JS__", ui_asset("channelmap.js")))
+                        .replace("__CHANNELMAP_JS__", ui_asset("channelmap.js"))
+                        .replace("__DRAWFLOW_CSS__", ui_asset("vendor/drawflow.min.css"))
+                        .replace("__DRAWFLOW_JS__", ui_asset("vendor/drawflow.min.js"))
+                        .replace("__WIRING_CSS__", ui_asset("wiring.css"))
+                        .replace("__WIRING_JS__", ui_asset("wiring.js")))
             return self._send(200, "text/html; charset=utf-8", page.encode())
         if path == "/api/state":
             prompt = None
@@ -1070,9 +1305,38 @@ class Handler(BaseHTTPRequestHandler):
                 "cancellable": cancellable(),
                 "run_id": STATE.get("run_id"),
                 "exit": read("finished").strip() or None,
+                "test_message": self._may_send_test(),
             }).encode()
             return self._send(200, "application/json", body)
+        if path == "/api/parts":
+            return self._send_parts()
         self._send(404, "text/plain", b"not found\n")
+
+    def _send_parts(self):
+        """GET /api/parts: cacheable (unlike everything else here, which is
+        no-store) because the pictures are the same for every person and run;
+        private, so no shared cache keeps them."""
+        body, etag = parts_payload()
+        seen = [t.strip() for t in self.headers.get("If-None-Match", "").split(",")]
+        if etag in seen or ("W/" + etag) in seen:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
 
     def do_POST(self):
         path = posixpath.normpath(urlparse(self.path).path)
@@ -1093,6 +1357,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, "application/json", b'{"ok":true}')
         if path == "/api/cancel":
             return self._cancel()
+        if path == "/api/test-message":
+            return self._test_message()
         if path != "/api/answer":
             return self._send(404, "text/plain", b"not found\n")
         try:
@@ -1181,6 +1447,95 @@ def _cancel(self):
 
 
 Handler._cancel = _cancel
+
+
+def _same_origin_json(self):
+    """A JSON POST from this page's own origin: a cross-site form cannot send JSON without
+    a preflight (never answered here), and fetch sends Origin on every POST."""
+    ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    if ctype != "application/json":
+        self._send(415, "application/json", b'{"error":"send JSON (Content-Type: application/json)"}')
+        return False
+    host = self.headers.get("Host", "")
+    want = self._base_url() or ("http://%s" % host if host else "")
+    if not want or self.headers.get("Origin") != want:
+        self._send(403, "application/json", b'{"error":"cross-origin request refused"}')
+        return False
+    return True
+
+
+def _may_send_test(self):
+    """Whether this viewer is offered Send test message: the last run finished onboarding
+    a registered board and (under Keycloak) this session is that run's owner."""
+    if STATE["auth"] == "keycloak":
+        owner = STATE["run_owner"]
+        if not owner or (getattr(self, "session", None) or {}).get("sub") != owner["sub"]:
+            return False
+    return finished_board()[0] is not None
+
+
+def _test_message(self):
+    """POST /api/test-message {"run": <run_id>} (6 Nov 2026): one TS message as the board
+    the run onboarded. The run's owner only, their onboarding role checked again on a
+    refreshed token as Start does, once the run has finished with a registered board, at
+    most one per TEST_MSG_GAP s per run. 200 with mqtt_test's result, 502 when it failed."""
+    if not self._same_origin_json():
+        return
+    try:
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n).decode()) if 0 < n <= 4096 else {}
+    except (ValueError, OSError):
+        body = {}
+    run_id = STATE.get("run_id")
+    if not isinstance(body, dict) or not run_id or body.get("run") != run_id:
+        return self._send(409, "application/json",
+                          b'{"error":"that onboarding run is not the last one here: reload the page"}')
+    owner = STATE["run_owner"]
+    me = getattr(self, "session", None) or {}
+    if STATE["auth"] == "keycloak" and (not owner or me.get("sub") != owner["sub"]):
+        # A message sent as the board is the owner's act, as an answer is; a run that
+        # acted for nobody (an unbound --ui run) has no one who may.
+        return self._send(403, "application/json", json.dumps({
+            "error": "this run belongs to %s — only they can send its test message"
+                     % ((owner or {}).get("user") or "nobody")}).encode())
+    board, why = finished_board()
+    if board is None:
+        return self._send(409, "application/json", json.dumps({"error": why}).encode())
+    if STATE["auth"] == "keycloak":
+        tok = me.get("tok")
+        kind, msg = "reauth", None
+        if tok is not None:
+            kind, msg = edge_auth.fresh(tok, STATE["oidc"], STATE["client_id"],
+                                        STATE["client_secret"], STATE["ssl_ctx"],
+                                        edge_auth.FORCE_TTL,
+                                        required_role=STATE["required_role"])
+        if kind == "role":
+            drop_sessions(sid=me.get("sid"))
+            return self._send(403, "application/json", json.dumps({"error": msg}).encode())
+        if kind != "ok":
+            drop_sessions(sid=me.get("sid"))
+            return self._send(401, "application/json", b'{"error":"login required"}')
+    # The slot is taken only once the re-check passed, so a 401/403 that sent nothing
+    # does not hold the next attempt back; check and set stay under one lock, so two
+    # requests at once still send one message.
+    with STATE["lock"]:
+        last = STATE.get("test_sent")
+        now = time.time()
+        if last and last[0] == run_id and now - last[1] < TEST_MSG_GAP:
+            return self._send(429, "application/json", json.dumps({
+                "error": "one test message every %d s" % TEST_MSG_GAP}).encode())
+        STATE["test_sent"] = (run_id, now)
+    status, res = send_test_message(*board)
+    # The journal line names the board and the person, never a credential.
+    print("wizard: test message as %s by %s: %s" % (
+        os.path.basename(board[0])[:-5], me.get("user") or (owner or {}).get("user") or "-",
+        res.get("topic") if res["ok"] else "failed: %s" % res.get("error")), file=sys.stderr)
+    return self._send(status, "application/json", json.dumps(res).encode())
+
+
+Handler._same_origin_json = _same_origin_json
+Handler._may_send_test = _may_send_test
+Handler._test_message = _test_message
 
 
 def main():

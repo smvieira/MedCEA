@@ -1,0 +1,101 @@
+{
+ "variant": "esp32s3",
+ "doc": {
+  "version": 1,
+  "board": {
+   "variant": "esp32s3",
+   "part": "esp32-s3-devkitc-1"
+  },
+  "buses": [
+   {
+    "id": "i2c0",
+    "kind": "i2c",
+    "sda": 8,
+    "scl": 9,
+    "freq": 100000,
+    "impl": "soft",
+    "pullups": "external"
+   }
+  ],
+  "hubs": [
+   {
+    "id": "board",
+    "kind": "tca9548a",
+    "bus": "i2c0",
+    "addr": 112
+   }
+  ],
+  "sensors": [
+   {
+    "id": "sht45_1",
+    "driver": "sht4x",
+    "bus": "i2c0",
+    "hub": "mux0",
+    "channel": 0,
+    "addr": 68,
+    "params": {},
+    "tags": [
+     {
+      "q": "temperature",
+      "tag": "air_temperature"
+     },
+     {
+      "q": "humidity",
+      "tag": "air_humidity"
+     }
+    ]
+   },
+   {
+    "id": "scd30_1",
+    "driver": "scd30",
+    "bus": "i2c0",
+    "hub": "mux0",
+    "channel": 1,
+    "addr": 97,
+    "params": {},
+    "tags": [
+     {
+      "q": "co2",
+      "tag": "co2"
+     },
+     {
+      "q": "temperature",
+      "tag": null
+     },
+     {
+      "q": "humidity",
+      "tag": null
+     }
+    ]
+   },
+   {
+    "id": "lux_1",
+    "driver": "sen0562",
+    "bus": "i2c0",
+    "hub": "mux0",
+    "channel": 2,
+    "addr": 35,
+    "params": {},
+    "tags": [
+     {
+      "q": "lux",
+      "tag": "light_intensity"
+     }
+    ]
+   }
+  ],
+  "layout": {
+   "sht45_1": [
+    420,
+    40
+   ]
+  }
+ },
+ "expect": [
+  [
+   "error",
+   "E_SCHEMA",
+   "hubs.board"
+  ]
+ ]
+}

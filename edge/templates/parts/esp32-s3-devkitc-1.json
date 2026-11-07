@@ -1,0 +1,323 @@
+{
+ "id": "esp32-s3-devkitc-1",
+ "title": "ESP32-S3-DevKitC-1 (N8R8)",
+ "svg": "esp32-s3-devkitc-1.svg",
+ "size": [
+  116.0,
+  195.591
+ ],
+ "connectors": {
+  "3V3": {
+   "fx": 0.2207,
+   "fy": 0.1534
+  },
+  "3V3_2": {
+   "fx": 0.2207,
+   "fy": 0.1902
+  },
+  "RST": {
+   "fx": 0.2207,
+   "fy": 0.227
+  },
+  "GPIO4": {
+   "fx": 0.2207,
+   "fy": 0.2638
+  },
+  "GPIO5": {
+   "fx": 0.2207,
+   "fy": 0.3006
+  },
+  "GPIO6": {
+   "fx": 0.2207,
+   "fy": 0.3374
+  },
+  "GPIO7": {
+   "fx": 0.2207,
+   "fy": 0.3743
+  },
+  "GPIO15": {
+   "fx": 0.2207,
+   "fy": 0.4111
+  },
+  "GPIO16": {
+   "fx": 0.2207,
+   "fy": 0.4479
+  },
+  "GPIO17": {
+   "fx": 0.2207,
+   "fy": 0.4847
+  },
+  "GPIO18": {
+   "fx": 0.2207,
+   "fy": 0.5215
+  },
+  "GPIO8": {
+   "fx": 0.2207,
+   "fy": 0.5583
+  },
+  "GPIO3": {
+   "fx": 0.2207,
+   "fy": 0.5951
+  },
+  "GPIO46": {
+   "fx": 0.2207,
+   "fy": 0.6319
+  },
+  "GPIO9": {
+   "fx": 0.2207,
+   "fy": 0.6687
+  },
+  "GPIO10": {
+   "fx": 0.2207,
+   "fy": 0.7056
+  },
+  "GPIO11": {
+   "fx": 0.2207,
+   "fy": 0.7424
+  },
+  "GPIO12": {
+   "fx": 0.2207,
+   "fy": 0.7792
+  },
+  "GPIO13": {
+   "fx": 0.2207,
+   "fy": 0.816
+  },
+  "GPIO14": {
+   "fx": 0.2207,
+   "fy": 0.8528
+  },
+  "5V": {
+   "fx": 0.2207,
+   "fy": 0.8896
+  },
+  "GND": {
+   "fx": 0.2207,
+   "fy": 0.9264
+  },
+  "GND_2": {
+   "fx": 0.7793,
+   "fy": 0.1534
+  },
+  "GPIO43": {
+   "fx": 0.7793,
+   "fy": 0.1902
+  },
+  "GPIO44": {
+   "fx": 0.7793,
+   "fy": 0.227
+  },
+  "GPIO1": {
+   "fx": 0.7793,
+   "fy": 0.2638
+  },
+  "GPIO2": {
+   "fx": 0.7793,
+   "fy": 0.3006
+  },
+  "GPIO42": {
+   "fx": 0.7793,
+   "fy": 0.3374
+  },
+  "GPIO41": {
+   "fx": 0.7793,
+   "fy": 0.3743
+  },
+  "GPIO40": {
+   "fx": 0.7793,
+   "fy": 0.4111
+  },
+  "GPIO39": {
+   "fx": 0.7793,
+   "fy": 0.4479
+  },
+  "GPIO38": {
+   "fx": 0.7793,
+   "fy": 0.4847
+  },
+  "GPIO37": {
+   "fx": 0.7793,
+   "fy": 0.5215
+  },
+  "GPIO36": {
+   "fx": 0.7793,
+   "fy": 0.5583
+  },
+  "GPIO35": {
+   "fx": 0.7793,
+   "fy": 0.5951
+  },
+  "GPIO0": {
+   "fx": 0.7793,
+   "fy": 0.6319
+  },
+  "GPIO45": {
+   "fx": 0.7793,
+   "fy": 0.6687
+  },
+  "GPIO48": {
+   "fx": 0.7793,
+   "fy": 0.7056
+  },
+  "GPIO47": {
+   "fx": 0.7793,
+   "fy": 0.7424
+  },
+  "GPIO21": {
+   "fx": 0.7793,
+   "fy": 0.7792
+  },
+  "GPIO20": {
+   "fx": 0.7793,
+   "fy": 0.816
+  },
+  "GPIO19": {
+   "fx": 0.7793,
+   "fy": 0.8528
+  },
+  "GND_3": {
+   "fx": 0.7793,
+   "fy": 0.8896
+  },
+  "GND_4": {
+   "fx": 0.7793,
+   "fy": 0.9264
+  }
+ },
+ "functions": {
+  "3V3": [
+   "3V3",
+   "3V3_2"
+  ],
+  "RST": [
+   "RST"
+  ],
+  "GPIO4": [
+   "GPIO4"
+  ],
+  "GPIO5": [
+   "GPIO5"
+  ],
+  "GPIO6": [
+   "GPIO6"
+  ],
+  "GPIO7": [
+   "GPIO7"
+  ],
+  "GPIO15": [
+   "GPIO15"
+  ],
+  "GPIO16": [
+   "GPIO16"
+  ],
+  "GPIO17": [
+   "GPIO17"
+  ],
+  "GPIO18": [
+   "GPIO18"
+  ],
+  "GPIO8": [
+   "GPIO8"
+  ],
+  "GPIO3": [
+   "GPIO3"
+  ],
+  "GPIO46": [
+   "GPIO46"
+  ],
+  "GPIO9": [
+   "GPIO9"
+  ],
+  "GPIO10": [
+   "GPIO10"
+  ],
+  "GPIO11": [
+   "GPIO11"
+  ],
+  "GPIO12": [
+   "GPIO12"
+  ],
+  "GPIO13": [
+   "GPIO13"
+  ],
+  "GPIO14": [
+   "GPIO14"
+  ],
+  "5V": [
+   "5V"
+  ],
+  "GND": [
+   "GND",
+   "GND_2",
+   "GND_3",
+   "GND_4"
+  ],
+  "GPIO43": [
+   "GPIO43"
+  ],
+  "GPIO44": [
+   "GPIO44"
+  ],
+  "GPIO1": [
+   "GPIO1"
+  ],
+  "GPIO2": [
+   "GPIO2"
+  ],
+  "GPIO42": [
+   "GPIO42"
+  ],
+  "GPIO41": [
+   "GPIO41"
+  ],
+  "GPIO40": [
+   "GPIO40"
+  ],
+  "GPIO39": [
+   "GPIO39"
+  ],
+  "GPIO38": [
+   "GPIO38"
+  ],
+  "GPIO37": [
+   "GPIO37"
+  ],
+  "GPIO36": [
+   "GPIO36"
+  ],
+  "GPIO35": [
+   "GPIO35"
+  ],
+  "GPIO0": [
+   "GPIO0"
+  ],
+  "GPIO45": [
+   "GPIO45"
+  ],
+  "GPIO48": [
+   "GPIO48"
+  ],
+  "GPIO47": [
+   "GPIO47"
+  ],
+  "GPIO21": [
+   "GPIO21"
+  ],
+  "GPIO20": [
+   "GPIO20"
+  ],
+  "GPIO19": [
+   "GPIO19"
+  ]
+ },
+ "drawn": "medcea",
+ "attribution": {
+  "source": "Drawn from Espressif's ESP32-S3-DevKitC-1 v1.1 user guide (header blocks J1/J3)",
+  "url": "https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/esp32-s3-devkitc-1/user_guide_v1.1.html",
+  "commit": "",
+  "file": "esp32-s3-devkitc-1.svg",
+  "author": "MedCEA",
+  "licence": "CC BY-SA 3.0 (MedCEA)",
+  "changes": "drawn for MedCEA"
+ }
+}

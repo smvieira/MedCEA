@@ -1,0 +1,51 @@
+{
+ "id": "dfrobot-sen0562",
+ "title": "DFRobot SEN0562 IP68 ambient light sensor",
+ "svg": "dfrobot-sen0562.svg",
+ "size": [
+  216.0,
+  108.0
+ ],
+ "connectors": {
+  "VCC": {
+   "fx": 0.9005,
+   "fy": 0.2778
+  },
+  "GND": {
+   "fx": 0.9005,
+   "fy": 0.463
+  },
+  "SCL": {
+   "fx": 0.9005,
+   "fy": 0.6481
+  },
+  "SDA": {
+   "fx": 0.9005,
+   "fy": 0.8333
+  }
+ },
+ "functions": {
+  "VCC": [
+   "VCC"
+  ],
+  "GND": [
+   "GND"
+  ],
+  "SCL": [
+   "SCL"
+  ],
+  "SDA": [
+   "SDA"
+  ]
+ },
+ "drawn": "medcea",
+ "attribution": {
+  "source": "Drawn from DFRobot's SEN0562 wiki page (pinout: red VCC, blue GND, yellow SCL, green SDA)",
+  "url": "https://wiki.dfrobot.com/sen0562/",
+  "commit": "",
+  "file": "dfrobot-sen0562.svg",
+  "author": "MedCEA",
+  "licence": "CC BY-SA 3.0 (MedCEA)",
+  "changes": "drawn for MedCEA"
+ }
+}

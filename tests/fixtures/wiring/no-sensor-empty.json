@@ -1,0 +1,48 @@
+{
+ "variant": "esp32s3",
+ "doc": {
+  "version": 1,
+  "board": {
+   "variant": "esp32s3",
+   "part": "esp32-s3-devkitc-1"
+  },
+  "buses": [
+   {
+    "id": "i2c0",
+    "kind": "i2c",
+    "sda": 8,
+    "scl": 9,
+    "freq": 100000,
+    "impl": "soft",
+    "pullups": "external"
+   }
+  ],
+  "hubs": [
+   {
+    "id": "mux0",
+    "kind": "tca9548a",
+    "bus": "i2c0",
+    "addr": 112
+   }
+  ],
+  "sensors": [],
+  "layout": {
+   "sht45_1": [
+    420,
+    40
+   ]
+  }
+ },
+ "expect": [
+  [
+   "error",
+   "E_NO_SENSOR",
+   ""
+  ],
+  [
+   "warn",
+   "W_HUB_UNUSED",
+   "hubs.mux0"
+  ]
+ ]
+}

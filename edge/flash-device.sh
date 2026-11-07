@@ -36,6 +36,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 usage() {
   cat <<'EOF'
 Usage: ./edge/flash-device.sh [options]
+       ./edge/flash-device.sh --send-test DNS [--mqtt-host ADDR] [--mqtt-port PORT]
 
 Flashes MicroPython onto one ESP32/ESP32-S3 over USB, gives it a slot from the
 platform database, ships its role's application, and registers it as the device
@@ -52,6 +53,13 @@ Options:
       --zone CODE       Restrict the slot menu to this zone (e.g. ZONE01)
       --advanced        Also ask the parameters the template marks advanced
                         (I2C frequency, UART pins) instead of taking defaults
+      --wiring FILE     SENSE only: take the board's wiring (buses, hub, sensors,
+                        addresses, tags) from this wiring document instead of
+                        asking. A board template file is accepted too. It is
+                        checked before the board is erased.
+      --board-template SLUG
+                        SENSE only: take the wiring from this board template
+                        (edge/templates/boards/ or edge/board-templates/)
       --unregistered    Skip the slot, the application and the database. Brings
                         the board up on WiFi with no platform identity, for a
                         bench with no platform deployed.
@@ -62,6 +70,14 @@ Options:
       --mqtt-port PORT  Broker port (default 31884, the broker's TLS NodePort)
       --mqtt-tls-name N Name in the broker's certificate (default mqtt.<DOMAIN>)
       --topic-root ROOT Topic root (default: PROJECT_NAME from config.env)
+      --send-test DNS   Flash nothing: publish one test message (msg_type TS, tag
+                        _test) as the already onboarded board DNS (e.g.
+                        unit01-s-zone01), with its own broker credential from
+                        edge/provisioned/DNS.json, to the broker above over TLS.
+                        No USB, no sign-in. Prints one JSON line (ok, topic,
+                        timestamp); exit 0 sent, 1 refused or unreachable, 2 no
+                        usable record. Only --mqtt-host, --mqtt-port and
+                        --mqtt-tls-name may go with it.
   -p, --port PATH       Serial port (default: autodetect, prompt if ambiguous)
   -f, --firmware PATH   Use this .bin and skip the selection menu entirely
   -b, --baud RATE       Flash baud rate (default: 460800; falls back to 115200)
@@ -145,11 +161,20 @@ OFFLINE=0; WANT_PREVIEW=0
 ROLE=""; UNIT_WANTED=""; ZONE_WANTED=""; UNREGISTERED=0; DO_REGISTER=1
 ASK_ADVANCED=0; MQTT_HOST=""; MQTT_PORT=""; TOPIC_ROOT=""; MQTT_TLS_NAME=""
 CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
+WIRING_FILE=""; BOARD_TEMPLATE=""; SENSE_WIRING_JSON=""; SENSE_VARIANT=""; SENSE_SAVE_AS=""
 UI=0; UI_PORT=8088; UI_BIND="0.0.0.0"; UI_DIR=""; UI_PID=""; UI_TOKEN=""; STAGE=""; WIFI_TRY_DIR=""
 UI_INSECURE=0; UI_MANAGED=0; TOKEN_FD=""
+SEND_TEST=""; SEND_TEST_GIVEN=0; FLASH_OPTS=()
 while [ $# -gt 0 ]; do
+  # --send-test publishes and flashes nothing: every option but the broker's is
+  # remembered so that it can be refused together with it.
+  case "$1" in
+    --send-test|--mqtt-host|--mqtt-port|--mqtt-tls-name|-h|--help) ;;
+    *) FLASH_OPTS+=("$1") ;;
+  esac
   case "$1" in
     -h|--help)     usage; exit 0 ;;
+    --send-test)   SEND_TEST_GIVEN=1; SEND_TEST="${2:-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
     --ui)          UI=1;             shift ;;
     --ui-insecure) UI=1; UI_INSECURE=1; shift ;;
     --ui-spool)    UI=1; UI_MANAGED=1; UI_DIR="${2:-}"; shift 2 ;;
@@ -169,6 +194,8 @@ while [ $# -gt 0 ]; do
     --unregistered) UNREGISTERED=1;       shift ;;
     --no-register) DO_REGISTER=0;         shift ;;
     --advanced)    ASK_ADVANCED=1;        shift ;;
+    --wiring)      WIRING_FILE="${2:-}";  shift 2 ;;
+    --board-template) BOARD_TEMPLATE="${2:-}"; shift 2 ;;
     --mqtt-host)   MQTT_HOST="${2:-}";    shift 2 ;;
     --mqtt-port)   MQTT_PORT="${2:-}";    shift 2 ;;
     --mqtt-tls-name) MQTT_TLS_NAME="${2:-}"; shift 2 ;;
@@ -178,10 +205,32 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown option: $1" >&2; echo >&2; usage >&2; exit 2 ;;
   esac
 done
+if [ "$SEND_TEST_GIVEN" = 1 ]; then
+  # The board's one name (slot_hostname, or cea-un-<mac6>); the rule also keeps a
+  # value starting with "-" from being read as an option, and a path out of OUT_DIR.
+  [[ "$SEND_TEST" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] \
+    || { echo "--send-test: not a board name: '$SEND_TEST' (e.g. unit01-s-zone01)" >&2; exit 2; }
+  [ "${#FLASH_OPTS[@]}" = 0 ] \
+    || { echo "--send-test flashes nothing: not with ${FLASH_OPTS[*]} (only --mqtt-host, --mqtt-port, --mqtt-tls-name)" >&2; exit 2; }
+  [ -r "$OUT_DIR/$SEND_TEST.json" ] \
+    || { echo "--send-test: no readable record $OUT_DIR/$SEND_TEST.json (onboard the board first)" >&2; exit 2; }
+fi
 if [ -n "$TOKEN_FD" ]; then
   [[ "$TOKEN_FD" =~ ^[0-9]+$ ]] || { echo "--token-fd: not a descriptor number: $TOKEN_FD" >&2; exit 2; }
   [ "$UI_MANAGED" = 1 ] || { echo "--token-fd is only for --ui-spool (set by the wizard daemon)" >&2; exit 2; }
   { : >&"$TOKEN_FD"; } 2>/dev/null || { echo "--token-fd $TOKEN_FD is not open" >&2; exit 2; }
+fi
+if [ -n "$WIRING_FILE" ] || [ -n "$BOARD_TEMPLATE" ]; then
+  [ -z "$WIRING_FILE" ] || [ -z "$BOARD_TEMPLATE" ] \
+    || { echo "--wiring and --board-template: give one of them" >&2; exit 2; }
+  [ -z "$WIRING_FILE" ] || [ -r "$WIRING_FILE" ] \
+    || { echo "--wiring: cannot read $WIRING_FILE" >&2; exit 2; }
+  # The slug rule of save-board-template; it also keeps a value starting with "-"
+  # from reaching device_template.py's argv as an option.
+  [ -z "$BOARD_TEMPLATE" ] || [[ "$BOARD_TEMPLATE" =~ ^[a-z][a-z0-9-]{1,40}$ ]] \
+    || { echo "--board-template: not a template name: $BOARD_TEMPLATE" >&2; exit 2; }
+  [ "$UNREGISTERED" != 1 ] || { echo "--wiring/--board-template need a slot: not with --unregistered" >&2; exit 2; }
+  [ -z "$ROLE" ] || [ "$ROLE" = SENSE ] || { echo "--wiring/--board-template are for a SENSE board" >&2; exit 2; }
 fi
 
 set -e
@@ -223,6 +272,22 @@ if [ -z "$MQTT_HOST" ]; then
   MQTT_HOST="${_LAN_IP:-}"
   [ -n "$MQTT_HOST" ] || MQTT_HOST="$(ip route get 8.8.8.8 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+fi
+
+# --send-test: one TS message as the board, then out, before any USB, sign-in or venv
+# work. mqtt_test.py is stdlib only; it reads the board's credential from the record
+# itself (never argv) and prints one JSON line without it. The broker values are the
+# ones a board onboarded now would get.
+if [ "$SEND_TEST_GIVEN" = 1 ]; then
+  [ -n "$MQTT_HOST" ] || { echo "--send-test: no broker address: set _LAN_IP in config.env or pass --mqtt-host" >&2; exit 2; }
+  [ -n "$MQTT_TLS_NAME" ] || { echo "--send-test: no broker certificate name: DOMAIN is not set in config.env (or pass --mqtt-tls-name)" >&2; exit 2; }
+  [ -r "$MQTT_CA" ] || { echo "--send-test: the platform CA $MQTT_CA is missing or unreadable: run ./deploy-infra.sh" >&2; exit 2; }
+  echo "Sending a test message as $SEND_TEST to $MQTT_HOST:$MQTT_PORT (TLS, $MQTT_TLS_NAME)" >&2
+  _rc=0
+  python3 "$SRC_HOST/mqtt_test.py" --record "$OUT_DIR/$SEND_TEST.json" --host "$MQTT_HOST" \
+    --port "$MQTT_PORT" --tls-name "$MQTT_TLS_NAME" --ca "$MQTT_CA" --source cli || _rc=$?
+  [ "$_rc" = 0 ] && echo "Sent: look for tag _test (msg_type TS) in the MQTT Explorer, https://${MQTTX_DOMAIN:-mqtt-explorer.<domain>}" >&2
+  exit "$_rc"
 fi
 
 APP_DIR="$SCRIPT_DIR/src/app"
@@ -365,6 +430,24 @@ prompt_channelmap() { # label spec-file [hint]  -> $ANSWER = the edited config J
   CHOICES=()
   ui_wait_answer "$(
     KIND=channelmap LABEL="$1" SPECF="$2" HINT="${3:-}" BACK="$BACK_OK" \
+    ID="$RANDOM$$$(date +%s%N)" python3 -c '
+import json, os
+e = os.environ
+with open(e["SPECF"], encoding="utf-8") as f:
+    spec = json.load(f)
+print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
+                  "default": "", "hint": e["HINT"], "submit_on_click": False,
+                  "back": e["BACK"] == "1", "options": [], "spec": spec}))')"
+}
+# A SENSE board's wiring (6 Nov 2026) is the same kind of question: one document
+# (buses, hub, sensors with their addresses and tags) drawn on the wiring screen.
+# The spec file is device_template.py wiring-spec's output; the answer is
+# {"wiring": DOC, "variant": V, "save_as": null | {slug, title, description, replace}}.
+prompt_wiring() { # label spec-file [hint]  -> $ANSWER = the answer JSON
+  ui_on || { ANSWER=""; return 0; }
+  CHOICES=()
+  ui_wait_answer "$(
+    KIND=wiring LABEL="$1" SPECF="$2" HINT="${3:-}" BACK="$BACK_OK" \
     ID="$RANDOM$$$(date +%s%N)" python3 -c '
 import json, os
 e = os.environ
@@ -1040,6 +1123,247 @@ plan_slot() {
   info "hostname   : ${B}$SLOT_DNS${N}   ${DIM}(DHCP name, dns_name and MQTT device_dns)${N}"
 }
 
+# The old SENSE questions: one sensor at a time, each driver at most once. The
+# terminal's way of asking, and the browser's third answer to "How is this board
+# wired?". Back sets PLAN_BACK and returns, as every planning question does.
+sense_questions() {
+  # A SENSE board can carry several probes — the reference UNIT01_SENSE01
+  # carries a water-level probe and a substrate thermometer — so this loops
+  # until the operator says it is done rather than asking for one sensor.
+  SENSORS_TSV=""
+  while :; do
+    menu_reset
+    _avail=0
+    while IFS=$'\t' read -r kind did dname dsub dtags; do
+      [ "$kind" = "DRIVER" ] || continue
+      driver_chosen "$did" && continue
+      _avail=$((_avail+1)); menu_add "$dname" "$dtags"
+    done < <(printf '%s\n' "${TPL[@]}")
+    _added="$(chosen_count)"
+    if [ "$_avail" -eq 0 ]; then
+      info "every sensor this template knows about is already on the board"
+      break
+    fi
+    if [ "$_added" -gt 0 ]; then
+      menu_head "or"
+      menu_add "Done - $_added sensor(s) on this board" ""
+    fi
+    ui_waiting
+    menu_ask "Which sensor is wired to this board?" \
+      "Pick one at a time. A SENSE board may carry several; each publishes its own tags."
+    if is_back; then PLAN_BACK=1; return 0; fi
+    _pick="$ANSWER"
+    # The Done entry, when present, is always the last one.
+    if [ "$_added" -gt 0 ] && [ "$_pick" -gt "$_avail" ]; then break; fi
+
+    _n=0; DRIVER_ID=""; DRIVER_NAME=""
+    while IFS=$'\t' read -r kind did dname dsub dtags; do
+      [ "$kind" = "DRIVER" ] || continue
+      driver_chosen "$did" && continue
+      _n=$((_n+1))
+      if [ "$_n" -eq "$_pick" ]; then DRIVER_ID="$did"; DRIVER_NAME="$dname"; break; fi
+    done < <(printf '%s\n' "${TPL[@]}")
+    [ -n "$DRIVER_ID" ] || die "internal: no driver at menu position $_pick"
+
+    info "configuring ${B}$DRIVER_NAME${N}"
+    # A driver with no parameters at all still has to be recorded as present.
+    SENSORS_TSV+="$DRIVER_ID"$'\t'$'\t'$'\n'
+    mapfile -t PARAMS < <(python3 "$TEMPLATE_TOOL" params "$ROLE" "$DRIVER_ID")
+    # `for` over the array, NOT `while read ... done < <(...)`. A redirected
+    # loop hands its stdin to the loop BODY too, so the `read` inside every
+    # prompt swallows the next template line and answers the question with
+    # it — silently, and with a plausible-looking number.
+    for _line in "${PARAMS[@]}"; do
+      IFS=$'\t' read -r kind pname pkind pdef plabel phint padv <<<"$_line"
+      [ "$kind" = "PARAM" ] || continue
+      if [ "$padv" = "1" ] && [ "$ASK_ADVANCED" != 1 ]; then
+        info "  ${DIM}$pname = $pdef   (advanced; --advanced to be asked)${N}"
+        SENSORS_TSV+="$DRIVER_ID"$'\t'"$pname"$'\t'"$pdef"$'\n'
+        continue
+      fi
+      ask_param "$pname" "$pkind" "$pdef" "$plabel" "$phint"
+      if is_back; then PLAN_BACK=1; return 0; fi
+      SENSORS_TSV+="$DRIVER_ID"$'\t'"$pname"$'\t'"$ANSWER"$'\n'
+    done
+  done
+  [ -n "$SENSORS_TSV" ] || die "a SENSE board with no sensor would publish nothing"
+}
+
+# --- SENSE wiring document (6 Nov 2026) --------------------------------------
+# device_template.py decides whether a wiring is valid (validate-wiring); the wiring
+# screen only mirrors it. Everything that reaches SENSE_WIRING_JSON is checked here
+# again, so a hand-crafted POST or a page/script version skew dies before the erase.
+
+# stdin: the browser's answer {wiring, variant, save_as}, a board template file
+# {slug, title, …, wiring} or a bare wiring document. Sets SENSE_WIRING_JSON (one
+# line), SENSE_VARIANT (the answer's, else the document's board.variant, else
+# esp32s3) and, only when $1 is 1, SENSE_SAVE_AS (JSON or empty).
+sense_wiring_take() { # with_save_as < json
+  local _p
+  _p="$(python3 -c '
+import json, re, sys
+a = json.load(sys.stdin)
+if isinstance(a, dict) and "wiring" in a and "version" not in a:
+    doc, v, s = a["wiring"], a.get("variant"), a.get("save_as")
+else:
+    doc, v, s = a, None, None
+if not isinstance(doc, dict):
+    sys.exit("not a wiring document")
+v = v or (doc.get("board") or {}).get("variant") or "esp32s3"
+if not isinstance(v, str) or not re.fullmatch(r"[a-z0-9]{1,16}", v):
+    sys.exit("not a board variant: %r" % (v,))
+print(v)
+print(json.dumps(s, separators=(",", ":")) if s and sys.argv[1] == "1" else "")
+print(json.dumps(doc, separators=(",", ":")))' "$1")" || return 1
+  { IFS= read -r SENSE_VARIANT; IFS= read -r SENSE_SAVE_AS; IFS= read -r SENSE_WIRING_JSON; } <<<"$_p"
+  [ -n "$SENSE_WIRING_JSON" ]
+}
+
+# stdin: validate-wiring's output; one "where - message" line per finding of
+# level $1. Anything that is not its JSON (an unknown variant fails before the
+# check runs) is printed as it is, rather than turned into silence.
+wiring_findings() { # level
+  python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    findings = json.loads(raw)["findings"]
+except (ValueError, KeyError, TypeError):
+    if sys.argv[1] == "error" and raw.strip():
+        print(raw.strip())
+    sys.exit(0)
+for f in findings:
+    if f.get("level") == sys.argv[1]:
+        print("%s - %s" % (f.get("where") or "(document)", f.get("message", "")))' "$1"
+}
+
+# Check SENSE_WIRING_JSON against a variant: 0 and the warnings shown, or 1 and
+# the errors shown. Through warn, so the browser's log gets them too.
+sense_wiring_check() { # variant
+  local _out _err _rc=0 _l
+  _err="$(mktemp "${TMPDIR:-/tmp}/cea-wiring-check.XXXXXX")"
+  _out="$(printf '%s' "$SENSE_WIRING_JSON" \
+          | python3 "$TEMPLATE_TOOL" validate-wiring SENSE "$1" 2>"$_err")" || _rc=$?
+  if [ "$_rc" = 0 ]; then
+    rm -f "$_err"
+    while IFS= read -r _l; do [ -n "$_l" ] && warn "  $_l"; done <<<"$(printf '%s' "$_out" | wiring_findings warn)"
+    info "wiring accepted, checked against ${B}$1${N}"
+    return 0
+  fi
+  [ -n "$_out" ] || _out="$(cat "$_err")"
+  rm -f "$_err"
+  while IFS= read -r _l; do [ -n "$_l" ] && warn "  !! $_l"; done <<<"$(printf '%s' "$_out" | wiring_findings error)"
+  return 1
+}
+
+# The browser's first SENSE question: draw the wiring, start from a board template,
+# or the old questions. Back from the screen or from the first sensor question
+# comes back here; Back here goes to the slot (or role).
+sense_wiring_ui() {
+  local _back0="$BACK_OK" _i _n _pick _slug _wvar _wspec _winit _t _v _src _ok _ferr
+  local -a _bt _bts _btv _args
+  mapfile -t _bt < <(python3 "$TEMPLATE_TOOL" board-templates SENSE 2>/dev/null || true)
+  while :; do
+    BACK_OK="$_back0"; SENSORS_TSV=""; SENSE_WIRING_JSON=""; SENSE_VARIANT=""; SENSE_SAVE_AS=""
+    menu_reset; _bts=(); _btv=()
+    menu_add "Wire the sensors on screen" "drag the bus from the board to the hub and the sensors"
+    for _i in "${_bt[@]}"; do
+      [ -n "$_i" ] || continue
+      IFS=$'\t' read -r _slug _t _v _src _ok _ferr <<<"$_i"
+      if [ "$_ok" = 1 ]; then
+        menu_add "Start from a saved board: $_t" "$_v · $_src"
+        _bts+=("$_slug"); _btv+=("$_v")
+      else
+        info "${DIM}not offered: board template $_slug ($_t): $_ferr${N}"
+      fi
+    done
+    menu_add "Answer one sensor at a time (questions)" ""
+    _n="$(menu_count)"
+    ui_waiting
+    menu_ask "How is this board wired?" \
+      "On screen: draw the wiring and see it checked as you go. A saved board opens on the same screen, to check or change. Questions: one sensor at a time, as in a terminal."
+    if is_back; then PLAN_BACK=1; return 0; fi
+    _pick="$ANSWER"
+    BACK_OK=1
+    if [ "$_pick" -eq "$_n" ]; then
+      sense_questions
+      if [ "$PLAN_BACK" = 1 ]; then PLAN_BACK=0; continue; fi
+      BACK_OK="$_back0"; return 0
+    fi
+    _wvar=esp32s3; _args=()
+    _wspec="$(mktemp "${TMPDIR:-/tmp}/cea-wiring.XXXXXX.json")"
+    _winit=""
+    if [ "$_pick" -gt 1 ]; then
+      _slug="${_bts[$((_pick-2))]}"
+      [ "${_btv[$((_pick-2))]}" = - ] || _wvar="${_btv[$((_pick-2))]}"
+      _winit="$(mktemp "${TMPDIR:-/tmp}/cea-wiring-initial.XXXXXX.json")"
+      python3 "$TEMPLATE_TOOL" board-template "$_slug" > "$_winit" \
+        || { rm -f "$_wspec" "$_winit"; die "cannot read board template $_slug"; }
+      _args=(--initial "$_winit")
+    elif [ -n "$SLOT_DNS" ] && [ -r "$OUT_DIR/$SLOT_DNS.json" ]; then
+      # Onboarding this slot again: the screen starts from the wiring its last
+      # record carries. wiring-spec takes only the document from it (the record
+      # also holds passwords); a record it cannot read starts the screen empty.
+      python3 "$TEMPLATE_TOOL" wiring-spec SENSE "$_wvar" --initial "$OUT_DIR/$SLOT_DNS.json" \
+        > /dev/null 2>&1 && _args=(--initial "$OUT_DIR/$SLOT_DNS.json")
+    fi
+    python3 "$TEMPLATE_TOOL" wiring-spec SENSE "$_wvar" "${_args[@]}" > "$_wspec" \
+      || { rm -f "$_wspec" ${_winit:+"$_winit"}; die "cannot build the wiring screen"; }
+    rm -f ${_winit:+"$_winit"}
+    ui_waiting
+    prompt_wiring "Wire the sensors to the board" "$_wspec" \
+      "Drag the bus from the board to the hub and the sensors. Each sensor's address and tags are in its panel; a tag switched off is not published."
+    rm -f "$_wspec"
+    is_back && continue
+    [ -n "$ANSWER" ] || die "the browser returned an empty wiring"
+    sense_wiring_take 1 <<<"$ANSWER" || die "the browser returned a wiring that is not a wiring document"
+    sense_wiring_check "$SENSE_VARIANT" || die "the wiring has errors and was not accepted"
+    # The questions after this one (publish interval) go back as they always did:
+    # to the slot or the role, from where this question is asked again.
+    BACK_OK="$_back0"; return 0
+  done
+}
+
+# save_as from the wiring screen: the accepted document becomes a board template
+# (device_template.py save-board-template), saved_by the signed-in person. A
+# template is a convenience: a refusal (a name taken, no sign-in) is a warning and
+# the run goes on. device_template.py takes the word after --title/--description/--by
+# as its value whatever it starts with, and the slug is checked here first.
+sense_save_template() {
+  local _out _slug _l
+  local -a _a
+  [ -n "$SENSE_SAVE_AS" ] && [ -n "$SENSE_WIRING_JSON" ] || return 0
+  if [ -z "$EDGE_USER" ]; then
+    warn "the board template was not saved: nobody is signed in to record as its author"
+    return 0
+  fi
+  mapfile -d '' -t _a < <(SAVE_AS="$SENSE_SAVE_AS" BY="$EDGE_USER" python3 -c '
+import json, os, re, sys
+s = json.loads(os.environ["SAVE_AS"])
+slug = str(s.get("slug") or "")
+if not re.fullmatch(r"[a-z][a-z0-9-]{1,40}", slug):
+    sys.exit(1)
+a = [slug, "--title", str(s.get("title") or slug), "--by", os.environ["BY"]]
+if s.get("description"):
+    a += ["--description", str(s["description"])]
+if s.get("replace") is True:
+    a.append("--replace")
+sys.stdout.write("".join(x.replace("\0", "") + "\0" for x in a))' || true)
+  _slug="${_a[0]:-}"
+  if [ -z "$_slug" ]; then
+    warn "the board template was not saved: not a template name (a-z, 0-9 and -, starting with a letter)"
+    return 0
+  fi
+  if _out="$(printf '%s' "$SENSE_WIRING_JSON" \
+             | python3 "$TEMPLATE_TOOL" save-board-template "${_a[@]}" 2>&1)"; then
+    info "saved board template ${B}$_slug${N}  ${DIM}$_out${N}"
+  else
+    warn "the board template $_slug was not saved:"
+    while IFS= read -r _l; do [ -n "$_l" ] && warn "  $_l"; done <<<"$_out"
+  fi
+  return 0
+}
+
 # ------------------------------------------------- 0.6 what is wired up -------
 # The questions come from edge/templates/<role>.json, not from here — adding a
 # supported sensor is adding an entry there plus a branch in cea_sense.py. Only
@@ -1051,6 +1375,7 @@ plan_wiring() {
   # Every pass starts as a straight run does: Back to another slot or role must not
   # leave an earlier pass's sensors or channel map behind.
   SENSORS_TSV=""; CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
+  SENSE_WIRING_JSON=""; SENSE_VARIANT=""; SENSE_SAVE_AS=""
   MESSAGE_INTERVAL=""; POLL_MS=""
   BACK_OK=0
   if [ "$ROLE_ASKED" = 1 ] || [ "$SLOT_ASKED" = 1 ]; then BACK_OK=1; fi
@@ -1069,68 +1394,30 @@ plan_wiring() {
   done < <(printf '%s\n' "${TPL[@]}")
 
   if [ "$ROLE" = "SENSE" ]; then
-    # A SENSE board can carry several probes — the reference UNIT01_SENSE01
-    # carries a water-level probe and a substrate thermometer — so this loops
-    # until the operator says it is done rather than asking for one sensor.
-    SENSORS_TSV=""
-    while :; do
-      menu_reset
-      _avail=0
-      while IFS=$'\t' read -r kind did dname dsub dtags; do
-        [ "$kind" = "DRIVER" ] || continue
-        driver_chosen "$did" && continue
-        _avail=$((_avail+1)); menu_add "$dname" "$dtags"
-      done < <(printf '%s\n' "${TPL[@]}")
-      _added="$(chosen_count)"
-      if [ "$_avail" -eq 0 ]; then
-        info "every sensor this template knows about is already on the board"
-        break
+    if [ -n "$WIRING_FILE" ] || [ -n "$BOARD_TEMPLATE" ]; then
+      # Named on the command line: nothing to ask, but still checked here, before
+      # the board is touched.
+      if [ -n "$WIRING_FILE" ]; then
+        sense_wiring_take 0 < "$WIRING_FILE" || die "--wiring $WIRING_FILE is not a wiring document"
+        info "wiring from ${B}$WIRING_FILE${N}"
+      else
+        _WDOC="$(python3 "$TEMPLATE_TOOL" board-template "$BOARD_TEMPLATE")" \
+          || die "no board template $BOARD_TEMPLATE (device_template.py board-templates SENSE lists them)"
+        sense_wiring_take 0 <<<"$_WDOC" || die "board template $BOARD_TEMPLATE is not a wiring document"
+        info "wiring from board template ${B}$BOARD_TEMPLATE${N}"
       fi
-      if [ "$_added" -gt 0 ]; then
-        menu_head "or"
-        menu_add "Done - $_added sensor(s) on this board" ""
-      fi
-      ui_waiting
-      menu_ask "Which sensor is wired to this board?" \
-        "Pick one at a time. A SENSE board may carry several; each publishes its own tags."
-      if is_back; then PLAN_BACK=1; return 0; fi
-      _pick="$ANSWER"
-      # The Done entry, when present, is always the last one.
-      if [ "$_added" -gt 0 ] && [ "$_pick" -gt "$_avail" ]; then break; fi
-
-      _n=0; DRIVER_ID=""; DRIVER_NAME=""
-      while IFS=$'\t' read -r kind did dname dsub dtags; do
-        [ "$kind" = "DRIVER" ] || continue
-        driver_chosen "$did" && continue
-        _n=$((_n+1))
-        if [ "$_n" -eq "$_pick" ]; then DRIVER_ID="$did"; DRIVER_NAME="$dname"; break; fi
-      done < <(printf '%s\n' "${TPL[@]}")
-      [ -n "$DRIVER_ID" ] || die "internal: no driver at menu position $_pick"
-
-      info "configuring ${B}$DRIVER_NAME${N}"
-      # A driver with no parameters at all still has to be recorded as present.
-      SENSORS_TSV+="$DRIVER_ID"$'\t'$'\t'$'\n'
-      mapfile -t PARAMS < <(python3 "$TEMPLATE_TOOL" params "$ROLE" "$DRIVER_ID")
-      # `for` over the array, NOT `while read ... done < <(...)`. A redirected
-      # loop hands its stdin to the loop BODY too, so the `read` inside every
-      # prompt swallows the next template line and answers the question with
-      # it — silently, and with a plausible-looking number.
-      for _line in "${PARAMS[@]}"; do
-        IFS=$'\t' read -r kind pname pkind pdef plabel phint padv <<<"$_line"
-        [ "$kind" = "PARAM" ] || continue
-        if [ "$padv" = "1" ] && [ "$ASK_ADVANCED" != 1 ]; then
-          info "  ${DIM}$pname = $pdef   (advanced; --advanced to be asked)${N}"
-          SENSORS_TSV+="$DRIVER_ID"$'\t'"$pname"$'\t'"$pdef"$'\n'
-          continue
-        fi
-        ask_param "$pname" "$pkind" "$pdef" "$plabel" "$phint"
-        if is_back; then PLAN_BACK=1; return 0; fi
-        SENSORS_TSV+="$DRIVER_ID"$'\t'"$pname"$'\t'"$ANSWER"$'\n'
-      done
-    done
-    [ -n "$SENSORS_TSV" ] || die "a SENSE board with no sensor would publish nothing"
+      sense_wiring_check "$SENSE_VARIANT" || die "the wiring has errors and was not accepted"
+    elif ui_on; then
+      sense_wiring_ui
+      if [ "$PLAN_BACK" = 1 ]; then return 0; fi
+    else
+      sense_questions
+      if [ "$PLAN_BACK" = 1 ]; then return 0; fi
+    fi
 
   else
+    [ -z "$WIRING_FILE" ] && [ -z "$BOARD_TEMPLATE" ] \
+      || die "--wiring and --board-template are for a SENSE board, and this one is $ROLE"
     # CONTROL: one relay board, and the only question is which GPIO drives what.
     # Offering the reference wiring as a single yes is not laziness — it is the
     # layout every chamber built to the reference design actually has, and ten
@@ -1262,6 +1549,9 @@ if [ "$UNREGISTERED" != 1 ]; then
     esac
   done
   BACK_OK=0
+  # After the loop, not at the wiring question: Back and a second pass must not
+  # save the same template twice. Still before the board is touched.
+  [ "$ROLE" != SENSE ] || sense_save_template
 
   # --- what was inferred, said out loud -------------------------------------
   TOPIC_BASE="$TOPIC_ROOT/$UNIT_CODE/$ZONE_CODE"
@@ -1462,6 +1752,23 @@ for f in findings:
   fi
   info "re-checked against $CHIP: still valid"
   CONTROL_VARIANT="$CHIP"
+fi
+# The same meeting for a SENSE wiring: GPIO 8/9, the S3's I2C defaults, are flash
+# pins on an original ESP32. The document's board.variant is set to the chip first,
+# so the check, the render and the record all name the silicon that is there.
+if [ "$ROLE" = SENSE ] && [ -n "$SENSE_WIRING_JSON" ] && [ -n "$SENSE_VARIANT" ] \
+   && [ "$SENSE_VARIANT" != "$CHIP" ]; then
+  warn "the wiring was checked against $SENSE_VARIANT, but this board is $CHIP."
+  SENSE_WIRING_JSON="$(DOC="$SENSE_WIRING_JSON" CHIP="$CHIP" python3 -c '
+import json, os
+d = json.loads(os.environ["DOC"])
+if isinstance(d.get("board"), dict):
+    d["board"]["variant"] = os.environ["CHIP"]
+print(json.dumps(d, separators=(",", ":")))')" || die "internal: the wiring document is not JSON"
+  # Not "pick $CHIP on the screen": the screen offers the ESP32-S3-DevKitC-1 alone
+  # (wiring-spec carries one variant's pin table), so it cannot be done there.
+  sense_wiring_check "$CHIP" || die "the wiring cannot work on this $CHIP. The wiring screen offers only the ESP32-S3 board so far: re-run and choose \"Answer one sensor at a time (questions)\", or give --wiring FILE whose board.variant is $CHIP (with no board.part)."
+  SENSE_VARIANT="$CHIP"
 fi
 [ -n "$FLASH_SIZE" ] && info "flash:  $FLASH_SIZE"
 info "offset: $OFFSET  (correct for $CHIP)"
@@ -1887,6 +2194,7 @@ else
     SENSORS_TSV="$SENSORS_TSV" CONTROL_PINS_TSV="$CONTROL_PINS_TSV" \
     CONTROL_ACTUATOR_JSON="$CONTROL_ACTUATOR_JSON" \
     CONTROL_VARIANT="$CONTROL_VARIANT" \
+    SENSE_WIRING_JSON="$SENSE_WIRING_JSON" SENSE_VARIANT="$SENSE_VARIANT" \
     python3 -c '
 import json, os, sys
 e = os.environ
@@ -1905,7 +2213,12 @@ spec = {
     "mac": e["MAC"], "firmware": e["FW_NAME"],
     "firmware_sha256": e["FW_SHA"], "flashed_at": e["TS"],
 }
-if e["ROLE"] == "SENSE":
+if e["ROLE"] == "SENSE" and e.get("SENSE_WIRING_JSON"):
+    # The wiring document (screen, board template or --wiring): render() checks it
+    # again and refuses on any error, so nothing invalid reaches an erased board.
+    spec["wiring"] = json.loads(e["SENSE_WIRING_JSON"])
+    spec["variant"] = e.get("SENSE_VARIANT") or None
+elif e["ROLE"] == "SENSE":
     # "<driver>\t<param>\t<value>" lines, in the order they were answered; the
     # marker line with an empty param name is what records a driver that has no
     # parameters at all.
@@ -2165,6 +2478,7 @@ ZONE_CODE="$ZONE_CODE" ZONE_ID="$ZONE_ID" REGISTERED_ID="$REGISTERED_ID" \
 MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" TOPIC_ROOT="$TOPIC_ROOT" MQTT_TLS_NAME="$MQTT_TLS_NAME" \
 MQTT_USER="${MQTT_USER:-}" MQTT_PASS="${MQTT_PASS:-}" \
 DB_COMPONENTS="$DB_COMPONENTS" REGISTERED_BY="$REGISTERED_BY" \
+SENSE_WIRING_JSON="$SENSE_WIRING_JSON" \
 "$VENV_DIR/bin/python" - <<'PY'
 import datetime, getpass, json, os, socket
 e = os.environ
@@ -2189,6 +2503,10 @@ rec = {
                                 "topic_root": e["TOPIC_ROOT"],
                                 "username": e["MQTT_USER"], "password": e["MQTT_PASS"]},
     "components": json.loads(e["DB_COMPONENTS"] or "[]"),
+    # A SENSE board's wiring document as checked against its chip, or None (the
+    # one-sensor-at-a-time questions, CONTROL, unregistered). wiring-spec reads it
+    # back as the screen's starting point when the board is onboarded again.
+    "wiring": json.loads(e["SENSE_WIRING_JSON"]) if e["SENSE_WIRING_JSON"] else None,
     "hostname": e["HOSTNAME"],
     "hostname_verified": e["HOSTNAME_OK"] or None,
     "resolves_as": e["RESOLVES"] or None,
@@ -2334,7 +2652,14 @@ EOF
     echo "  relays       $(grep -c . <<<"$CONTROL_PINS_TSV") channel(s) assigned"
   else
     echo "  publishes    $TOPIC_BASE/sense/<tag>"
-    echo "  sensors      $(awk -F'\t' 'NF && !s[$1]++{printf "%s%s", sep, $1; sep=", "}' <<<"$SENSORS_TSV")"
+    if [ -n "$SENSE_WIRING_JSON" ]; then
+      echo "  sensors      $(DOC="$SENSE_WIRING_JSON" python3 -c '
+import json, os
+d = json.loads(os.environ["DOC"])
+print(", ".join("%s (%s)" % (x.get("id"), x.get("driver")) for x in d.get("sensors") or []))' || true)"
+    else
+      echo "  sensors      $(awk -F'\t' 'NF && !s[$1]++{printf "%s%s", sep, $1; sep=", "}' <<<"$SENSORS_TSV")"
+    fi
     echo "  every        ${MESSAGE_INTERVAL:-30}s"
   fi
   if [ -n "$REGISTERED_ID" ]; then

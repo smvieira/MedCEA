@@ -11,7 +11,20 @@
     "",
     "Adding a sensor the fleet already supports is adding an entry here plus a",
     "read_<id> function in edge/src/app/cea_sensors.py. Nothing else changes.",
-    "Defaults are the wiring of the reference build, not arbitrary values."
+    "Defaults are the wiring of the reference build, not arbitrary values.",
+    "",
+    "WIRING (the on-screen wiring screen, edge/src/host/wiring.py): a driver with",
+    "a `bus` block can be placed on a shared bus, behind a hub, more than once.",
+    "  part            the picture in edge/templates/parts/<part>.json",
+    "  bus             kind, the addresses it answers (addrs, default_addr), the",
+    "                  fastest clock it takes (max_freq), clock_stretch (informative:",
+    "                  the firmware's 250 ms bus timeout covers it on soft and hw)",
+    "  power.rails     what it may be powered from; no 3V3 = a warning",
+    "  quantities[]    what it measures: q, the default published tag, uom",
+    "  wiring_only     no legacy pin params: not offered by the question loop",
+    "  params[].legacy_bus  asked only by the question loop (its own bus pins)",
+    "Drivers without a `bus` block are the question loop's only.",
+    "hubs[], boards[] and gpio_reference describe the rest of the picture."
   ],
   "role": "SENSE",
   "family": "esp32",
@@ -102,6 +115,43 @@
       "subtitle": "CO2, air temperature, air humidity over I2C",
       "model": "SCD30",
       "manufacturer": "Sensirion",
+      "part": "adafruit-scd30",
+      "bus": {
+        "kind": "i2c",
+        "addrs": [
+          97
+        ],
+        "default_addr": 97,
+        "max_freq": 100000,
+        "clock_stretch": true
+      },
+      "power": {
+        "rails": [
+          "3V3",
+          "5V"
+        ]
+      },
+      "quantities": [
+        {
+          "q": "co2",
+          "tag": "co2",
+          "uom": "ppm"
+        },
+        {
+          "q": "temperature",
+          "tag": "air_temperature",
+          "uom": "C"
+        },
+        {
+          "q": "humidity",
+          "tag": "air_humidity",
+          "uom": "RH%"
+        }
+      ],
+      "default_off": [
+        "temperature",
+        "humidity"
+      ],
       "tags": [
         {
           "tag": "co2",
@@ -122,16 +172,105 @@
           "kind": "pin",
           "default": 5,
           "label": "SCL pin (I2C clock)",
-          "hint": "GPIO the sensor's SCL line is on."
+          "hint": "GPIO the sensor's SCL line is on.",
+          "legacy_bus": true
         },
         {
           "name": "sda_pin",
           "kind": "pin",
           "default": 4,
           "label": "SDA pin (I2C data)",
-          "hint": "GPIO the sensor's SDA line is on."
+          "hint": "GPIO the sensor's SDA line is on.",
+          "legacy_bus": true
         }
       ]
+    },
+    {
+      "id": "sht4x",
+      "name": "Sensirion SHT45",
+      "subtitle": "Air temperature and humidity over I2C",
+      "model": "SHT45",
+      "manufacturer": "Sensirion",
+      "part": "adafruit-sht4x",
+      "wiring_only": true,
+      "bus": {
+        "kind": "i2c",
+        "addrs": [
+          68,
+          69,
+          70
+        ],
+        "default_addr": 68,
+        "max_freq": 1000000,
+        "clock_stretch": false
+      },
+      "power": {
+        "rails": [
+          "3V3",
+          "5V"
+        ]
+      },
+      "quantities": [
+        {
+          "q": "temperature",
+          "tag": "air_temperature",
+          "uom": "C"
+        },
+        {
+          "q": "humidity",
+          "tag": "air_humidity",
+          "uom": "RH%"
+        }
+      ],
+      "tags": [
+        {
+          "tag": "air_temperature",
+          "uom": "C"
+        },
+        {
+          "tag": "air_humidity",
+          "uom": "RH%"
+        }
+      ],
+      "params": []
+    },
+    {
+      "id": "sen0562",
+      "name": "DFRobot SEN0562 (IP68 ambient light)",
+      "subtitle": "Light intensity (lux) over I2C",
+      "model": "SEN0562",
+      "manufacturer": "DFRobot",
+      "part": "dfrobot-sen0562",
+      "wiring_only": true,
+      "bus": {
+        "kind": "i2c",
+        "addrs": [
+          35
+        ],
+        "default_addr": 35,
+        "max_freq": 400000,
+        "clock_stretch": false
+      },
+      "power": {
+        "rails": [
+          "3V3",
+          "5V"
+        ]
+      },
+      "quantities": [
+        {
+          "q": "lux",
+          "tag": "light_intensity",
+          "uom": "lx"
+        }
+      ],
+      "tags": [
+        {
+          "tag": "light_intensity",
+          "uom": "lx"
+        }
+      ],
+      "params": []
     },
     {
       "id": "ground_temperature",
@@ -221,6 +360,46 @@
       ]
     }
   ],
+  "hubs": [
+    {
+      "id": "tca9548a",
+      "name": "TCA9548A I2C hub",
+      "part": "adafruit-tca9548a",
+      "addrs": [
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119
+      ],
+      "default_addr": 112,
+      "channels": 8,
+      "max_freq": 400000,
+      "power": {
+        "rails": [
+          "3V3",
+          "5V"
+        ]
+      }
+    }
+  ],
+  "boards": [
+    {
+      "part": "esp32-s3-devkitc-1",
+      "name": "ESP32-S3-DevKitC-1",
+      "variants": [
+        "esp32s3"
+      ],
+      "i2c_defaults": {
+        "sda": 8,
+        "scl": 9
+      }
+    }
+  ],
+  "gpio_reference": "esp32-gpio.json",
   "device_params": [
     {
       "name": "message_interval",

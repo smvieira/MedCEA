@@ -49,7 +49,7 @@
         "type": "function",
         "z": "9d9546577d74092f",
         "name": "Stringify JSON",
-        "func": "msg.payload.fullmsg = JSON.stringify(msg.payload);\nreturn msg;",
+        "func": "// A health or test message's type comes from its topic, never its payload, and\n// only from the board's own topic, <root>/<unit>/<zone>/<class>/<tag>: sense/_health\n// is HB (a SENSE board's health), sense/_test and control_setpoint/_test are TS (a\n// test message). A CONTROL pin report is control_setpoint/<tag>/<pin description>,\n// one segment longer, so a pin labelled _test stays SP. On any other topic the\n// payload keeps its own type, but it may not claim HB or TS: such a message is\n// dropped (the database refused both values until migration 009).\nif (msg.payload && typeof msg.payload === 'object' && !Array.isArray(msg.payload)) {\n    const topic = String(msg.topic || '');\n    if (/^[^/]+\\/[^/]+\\/[^/]+\\/sense\\/_health$/.test(topic)) {\n        msg.payload.msg_type = 'HB';\n    } else if (/^[^/]+\\/[^/]+\\/[^/]+\\/(sense|control_setpoint)\\/_test$/.test(topic)) {\n        msg.payload.msg_type = 'TS';\n    } else if (msg.payload.msg_type === 'HB' || msg.payload.msg_type === 'TS') {\n        node.warn('dropped: ' + msg.payload.msg_type + ' is not allowed on ' + topic);\n        return null;\n    }\n}\nmsg.payload.fullmsg = JSON.stringify(msg.payload);\nreturn msg;",
         "outputs": 1,
         "timeout": "",
         "noerr": 0,

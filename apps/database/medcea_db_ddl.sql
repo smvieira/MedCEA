@@ -53,7 +53,7 @@ ALTER DOMAIN medcea.light_types OWNER TO medcea_owner;
 --
 
 CREATE DOMAIN medcea.msg_type AS character varying(2)
-	CONSTRAINT msg_type_check CHECK ((((VALUE)::text ~ 'AP'::text) OR ((VALUE)::text ~ 'CT'::text) OR ((VALUE)::text ~ 'SP'::text)));
+	CONSTRAINT msg_type_check CHECK (((VALUE)::text = ANY ((ARRAY['AP'::character varying, 'CT'::character varying, 'SP'::character varying, 'HB'::character varying, 'TS'::character varying])::text[])));
 
 
 ALTER DOMAIN medcea.msg_type OWNER TO medcea_owner;

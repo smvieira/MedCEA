@@ -1,0 +1,34 @@
+{
+ "components": [
+  {
+   "driver": "scd4x",
+   "params": {
+    "altitude_masl": "160",
+    "disable_auto_cal": "y",
+    "i2c_freq": "400000",
+    "i2c_id": "0",
+    "scl_pin": "5",
+    "sda_pin": "4"
+   }
+  }
+ ],
+ "firmware": "ESP32_GENERIC_S3.bin",
+ "firmware_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+ "flashed_at": "20261106120000",
+ "hostname": "unit02-s-zone01",
+ "mac": "aa:bb:cc:dd:ee:ff",
+ "message_interval": 30,
+ "mqtt_host": "192.0.2.10",
+ "mqtt_pass": "fixture-pass",
+ "mqtt_port": 31884,
+ "mqtt_tls_name": "mqtt.medcea",
+ "mqtt_user": "unit02-s-zone01",
+ "out_dir": null,
+ "role": "SENSE",
+ "topic_root": "medcea",
+ "unit_code": "UNIT02",
+ "wifi_psk": "not-a-secret",
+ "wifi_ssid": "bench",
+ "zone_code": "ZONE01",
+ "zone_id": 7
+}

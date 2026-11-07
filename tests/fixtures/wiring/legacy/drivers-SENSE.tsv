@@ -1,0 +1,13 @@
+ROLE	SENSE	SENSE	multi
+DRIVER	scd4x	Sensirion SCD40 / SCD41	CO2, air temperature, air humidity over I2C	co2,air_temperature,air_humidity
+DRIVER	scd30	Sensirion SCD30	CO2, air temperature, air humidity over I2C	co2,air_temperature,air_humidity
+DRIVER	ground_temperature	DS18B20 substrate probe	Substrate temperature over 1-Wire	ground_temperature
+DRIVER	water_level	Analogue water level probe	Reservoir level on an ADC pin, powered only while reading	water_level
+DEVPARAM	message_interval	int	30	Publish interval (seconds)	How often the board reads its sensors and publishes. 30s matches the existing fleet.	0
+INFERRED	mqtt_server	config.env	LAN address of the Mosquitto NodePort
+INFERRED	mqtt_port	config.env	31884, the broker's TLS NodePort (certificate mqtt.<domain>)
+INFERRED	topic_pub	slot	<root>/<unit>/<zone>/sense, one sub-topic per tag
+INFERRED	client_id	slot + MAC	unique per board, so two boards cannot evict each other
+INFERRED	unit_code	slot	
+INFERRED	zone_code	slot	
+INFERRED	hostname	slot	lower(unit)-s|c-lower(zone): DHCP name, dns_name and payload device_dns

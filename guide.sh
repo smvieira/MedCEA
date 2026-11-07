@@ -1926,6 +1926,55 @@ a_flash_help() {
     EFFECT="nothing (prints every option)"
     plan_run
 }
+DNS_RE='^[a-z0-9][a-z0-9-]{0,31}$'                 # a board's one name (flash-device.sh --send-test)
+# Which records can be sent as: a REGISTERED SENSE or CONTROL board with a broker
+# credential (mqtt_test.py's check_record refuses the rest with exit 2). It prints the
+# file names that pass, one per line, and never a value of any record.
+SENDABLE_PY='
+import json, os, sys
+for path in sys.argv[1:]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+        mq = rec.get("mqtt")
+        ok = (rec.get("state") == "REGISTERED" and rec.get("role") in ("SENSE", "CONTROL")
+              and isinstance(mq, dict) and all(isinstance(mq.get(k), str) and mq.get(k)
+                                               for k in ("username", "password")))
+    except (OSError, ValueError, AttributeError):
+        ok = False
+    if ok:
+        print(os.path.basename(path)[:-5])
+'
+a_send_test() {
+    local -a files=() names=()
+    local f n
+    for f in edge/provisioned/*.json; do [[ -f "$f" ]] && files+=("$f"); done
+    if (( ${#files[@]} == 0 )); then
+        echo "  No provisioned records in edge/provisioned/: onboard a board first (Flash and register a board)."
+        return 0
+    fi
+    while IFS= read -r n; do [[ -n "$n" ]] && names+=("$n"); done < <(python3 -c "$SENDABLE_PY" "${files[@]}")
+    if (( ${#names[@]} == 0 )); then
+        echo "  No record in edge/provisioned/ belongs to a registered SENSE or CONTROL board with a broker"
+        echo "  credential (an --unregistered board has none): onboard one first (Flash and register a board)."
+        return 0
+    fi
+    echo "  Registered boards with a provisioned record (edge/provisioned/):"
+    printf '    %s\n' "${names[@]}"
+    (( ${#files[@]} > ${#names[@]} )) && \
+        echo "  ($(( ${#files[@]} - ${#names[@]} )) other record(s) left out: unregistered, or without a broker credential.)"
+    while :; do
+        ask_match "Board name (as listed)" "$DNS_RE" "a board name is lower-case letters, digits and -, starting with a letter or digit (e.g. unit01-s-zone01)"
+        in_list "$ANSWER" "${names[@]}" && break
+        warn "no record of a registered board edge/provisioned/$ANSWER.json"
+    done
+    CMD=(./edge/flash-device.sh --send-test "$ANSWER")
+    EFFECT="nothing stored on the host; publishes one TS message (tag _test) as $ANSWER, which ingest stores in medcea.measurement"
+    CFG_NEEDED=yes
+    NOTES=("Connects with the board's own broker credential from its record, over TLS; no USB, no sign-in."
+           "Look for tag _test in the MQTT Explorer, or msg_type TS in medcea.measurement.")
+    plan_run
+}
 a_wizard_service() {
     CMD=(./apps/edge-wizard/deploy.sh)
     EFFECT="host: the cea-edge-wizard systemd user service, linger, edge/.venv; cluster: its Service, Endpoints and Ingress"
@@ -2105,6 +2154,7 @@ AREA_HEALTH=(
 AREA_EDGE=(
     "a_flash|Flash and register a board|./edge/flash-device.sh: an ESP32 over USB into a unit/zone slot."
     "a_flash_help|Show flash-device.sh's options|Read-only."
+    "a_send_test|Send a test message as a board|./edge/flash-device.sh --send-test <dns_name>: one TS message as that board (needs its provisioned record)."
     "a_wizard_service|Install or update the browser wizard service|./apps/edge-wizard/deploy.sh."
     "a_wizard_unit|Print the wizard's systemd unit|./edge/wizard-daemon.sh --install-unit (writes nothing)."
 )

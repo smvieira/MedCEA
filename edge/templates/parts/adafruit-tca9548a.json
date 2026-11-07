@@ -1,0 +1,223 @@
+{
+ "id": "adafruit-tca9548a",
+ "title": "Adafruit TCA9548A",
+ "svg": "adafruit-tca9548a.svg",
+ "size": [
+  50.4,
+  86.4
+ ],
+ "connectors": {
+  "2SDA": {
+   "fx": 0.9286,
+   "fy": 0.9583
+  },
+  "2SCL": {
+   "fx": 0.9286,
+   "fy": 0.875
+  },
+  "3SDA": {
+   "fx": 0.9286,
+   "fy": 0.7917
+  },
+  "3SCL": {
+   "fx": 0.9286,
+   "fy": 0.7083
+  },
+  "4SDA": {
+   "fx": 0.9286,
+   "fy": 0.625
+  },
+  "4SCL": {
+   "fx": 0.9286,
+   "fy": 0.5417
+  },
+  "5SDA": {
+   "fx": 0.9286,
+   "fy": 0.4583
+  },
+  "5SCL": {
+   "fx": 0.9286,
+   "fy": 0.375
+  },
+  "6SDA": {
+   "fx": 0.9286,
+   "fy": 0.2917
+  },
+  "6SCL": {
+   "fx": 0.9286,
+   "fy": 0.2083
+  },
+  "7SDA": {
+   "fx": 0.9286,
+   "fy": 0.125
+  },
+  "7SCL": {
+   "fx": 0.9286,
+   "fy": 0.0417
+  },
+  "VCC": {
+   "fx": 0.0714,
+   "fy": 0.0417
+  },
+  "GND": {
+   "fx": 0.0714,
+   "fy": 0.125
+  },
+  "INPUTSDA": {
+   "fx": 0.0714,
+   "fy": 0.2083
+  },
+  "INPUTSCL": {
+   "fx": 0.0714,
+   "fy": 0.2917
+  },
+  "RESET": {
+   "fx": 0.0714,
+   "fy": 0.375
+  },
+  "A0": {
+   "fx": 0.0714,
+   "fy": 0.4583
+  },
+  "A1": {
+   "fx": 0.0714,
+   "fy": 0.5417
+  },
+  "A2": {
+   "fx": 0.0714,
+   "fy": 0.625
+  },
+  "0SDA": {
+   "fx": 0.0714,
+   "fy": 0.7083
+  },
+  "0SCL": {
+   "fx": 0.0714,
+   "fy": 0.7917
+  },
+  "1SDA": {
+   "fx": 0.0714,
+   "fy": 0.875
+  },
+  "1SCL": {
+   "fx": 0.0714,
+   "fy": 0.9583
+  }
+ },
+ "functions": {
+  "SD2": [
+   "2SDA"
+  ],
+  "SC2": [
+   "2SCL"
+  ],
+  "SD3": [
+   "3SDA"
+  ],
+  "SC3": [
+   "3SCL"
+  ],
+  "SD4": [
+   "4SDA"
+  ],
+  "SC4": [
+   "4SCL"
+  ],
+  "SD5": [
+   "5SDA"
+  ],
+  "SC5": [
+   "5SCL"
+  ],
+  "SD6": [
+   "6SDA"
+  ],
+  "SC6": [
+   "6SCL"
+  ],
+  "SD7": [
+   "7SDA"
+  ],
+  "SC7": [
+   "7SCL"
+  ],
+  "VCC": [
+   "VCC"
+  ],
+  "GND": [
+   "GND"
+  ],
+  "SDA": [
+   "INPUTSDA"
+  ],
+  "SCL": [
+   "INPUTSCL"
+  ],
+  "RESET": [
+   "RESET"
+  ],
+  "A0": [
+   "A0"
+  ],
+  "A1": [
+   "A1"
+  ],
+  "A2": [
+   "A2"
+  ],
+  "SD0": [
+   "0SDA"
+  ],
+  "SC0": [
+   "0SCL"
+  ],
+  "SD1": [
+   "1SDA"
+  ],
+  "SC1": [
+   "1SCL"
+  ],
+  "ch0": [
+   "0SDA",
+   "0SCL"
+  ],
+  "ch1": [
+   "1SDA",
+   "1SCL"
+  ],
+  "ch2": [
+   "2SDA",
+   "2SCL"
+  ],
+  "ch3": [
+   "3SDA",
+   "3SCL"
+  ],
+  "ch4": [
+   "4SDA",
+   "4SCL"
+  ],
+  "ch5": [
+   "5SDA",
+   "5SCL"
+  ],
+  "ch6": [
+   "6SDA",
+   "6SCL"
+  ],
+  "ch7": [
+   "7SDA",
+   "7SCL"
+  ]
+ },
+ "drawn": "fritzing",
+ "attribution": {
+  "source": "Fritzing part Adafruit TCA9548A",
+  "url": "https://github.com/adafruit/Fritzing-Library/blob/c7bbe2d58a78ebc7b3499351c0f77356cd701c96/parts/Adafruit%20TCA9548A.fzpz",
+  "commit": "c7bbe2d58a78ebc7b3499351c0f77356cd701c96",
+  "file": "parts/Adafruit TCA9548A.fzpz",
+  "author": "ladyada",
+  "licence": "CC BY-SA 3.0",
+  "changes": "breadboard view only; metadata, ids and editor attributes removed, numbers rounded, scripts and external references stripped; connector centres computed by import-fritzing.py"
+ }
+}

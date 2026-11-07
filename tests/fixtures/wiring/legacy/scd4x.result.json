@@ -1,0 +1,47 @@
+{
+ "components": [
+  {
+   "component_type": "SENSE",
+   "manufacturer": "Sensirion",
+   "model": "SCD4x",
+   "parameters": {
+    "driver": "scd4x",
+    "message_interval": 30,
+    "mqtt": {
+     "host": "192.0.2.10",
+     "port": 31884
+    },
+    "params": {
+     "altitude_masl": 160,
+     "disable_auto_cal": true,
+     "i2c_freq": 400000,
+     "i2c_id": 0,
+     "scl_pin": 5,
+     "sda_pin": 4
+    },
+    "tags": [
+     {
+      "UoM": "ppm",
+      "tag": "co2",
+      "topic": "medcea/UNIT02/ZONE01/sense/co2"
+     },
+     {
+      "UoM": "C",
+      "tag": "air_temperature",
+      "topic": "medcea/UNIT02/ZONE01/sense/air_temperature"
+     },
+     {
+      "UoM": "RH%",
+      "tag": "air_humidity",
+      "topic": "medcea/UNIT02/ZONE01/sense/air_humidity"
+     }
+    ],
+    "topic_base": "medcea/UNIT02/ZONE01/sense"
+   }
+  }
+ ],
+ "topic_base": "medcea/UNIT02/ZONE01",
+ "written": [
+  "device_cfg.py"
+ ]
+}

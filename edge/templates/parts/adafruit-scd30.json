@@ -1,0 +1,105 @@
+{
+ "id": "adafruit-scd30",
+ "title": "Adafruit SCD30",
+ "svg": "adafruit-scd30.svg",
+ "size": [
+  147.168,
+  72.002
+ ],
+ "connectors": {
+  "VCC": {
+   "fx": 0.9511,
+   "fy": 0.75
+  },
+  "VCC_2": {
+   "fx": 0.0137,
+   "fy": 0.3185
+  },
+  "VCC_3": {
+   "fx": 0.0137,
+   "fy": 0.6185
+  },
+  "3.3V": {
+   "fx": 0.9511,
+   "fy": 0.65
+  },
+  "SCL": {
+   "fx": 0.9511,
+   "fy": 0.45
+  },
+  "SCL_2": {
+   "fx": 0.0137,
+   "fy": 0.4445
+  },
+  "SCL_3": {
+   "fx": 0.0137,
+   "fy": 0.7445
+  },
+  "SDA": {
+   "fx": 0.9511,
+   "fy": 0.35
+  },
+  "SDA_2": {
+   "fx": 0.0137,
+   "fy": 0.3815
+  },
+  "SDA_3": {
+   "fx": 0.0137,
+   "fy": 0.6815
+  },
+  "RDY": {
+   "fx": 0.9511,
+   "fy": 0.25
+  },
+  "GND": {
+   "fx": 0.9511,
+   "fy": 0.55
+  },
+  "GND_2": {
+   "fx": 0.0137,
+   "fy": 0.2555
+  },
+  "GND_3": {
+   "fx": 0.0137,
+   "fy": 0.5555
+  }
+ },
+ "functions": {
+  "VCC": [
+   "VCC",
+   "VCC_2",
+   "VCC_3"
+  ],
+  "3V3_OUT": [
+   "3.3V"
+  ],
+  "SCL": [
+   "SCL",
+   "SCL_2",
+   "SCL_3"
+  ],
+  "SDA": [
+   "SDA",
+   "SDA_2",
+   "SDA_3"
+  ],
+  "RDY": [
+   "RDY"
+  ],
+  "GND": [
+   "GND",
+   "GND_2",
+   "GND_3"
+  ]
+ },
+ "drawn": "fritzing",
+ "attribution": {
+  "source": "Fritzing part Adafruit SCD30",
+  "url": "https://github.com/adafruit/Fritzing-Library/blob/c7bbe2d58a78ebc7b3499351c0f77356cd701c96/parts/Adafruit%20SCD30.fzpz",
+  "commit": "c7bbe2d58a78ebc7b3499351c0f77356cd701c96",
+  "file": "parts/Adafruit SCD30.fzpz",
+  "author": "ladyada",
+  "licence": "CC BY-SA 3.0",
+  "changes": "breadboard view only; metadata, ids and editor attributes removed, numbers rounded, scripts and external references stripped; connector centres computed by import-fritzing.py"
+ }
+}
