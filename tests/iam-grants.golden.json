@@ -3973,6 +3973,84 @@
    "table",
    "medcea.unit_algorithm_params",
    "UPDATE"
+  ],
+  [
+   "svc_superset",
+   "function",
+   "medcea.unit_commissioning()",
+   "EXECUTE"
+  ],
+  [
+   "svc_superset",
+   "schema",
+   "medcea",
+   "USAGE"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.cea_location",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.cea_unit",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.cea_zone",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.component",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.measurement",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.msg_actual_points",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.msg_controls",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.msg_set_points",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.v_ap_measurements",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.v_ct_measurements",
+   "SELECT"
+  ],
+  [
+   "svc_superset",
+   "table",
+   "medcea.v_sp_measurements",
+   "SELECT"
   ]
  ],
  "rls": [
@@ -4094,6 +4172,14 @@
    "name": "iam_s_svc_monitor_0ebc343a",
    "object": "medcea.measurement",
    "role": "svc_monitor",
+   "using": "true"
+  },
+  {
+   "check": null,
+   "cmd": "SELECT",
+   "name": "iam_s_svc_superset_0ebc343a",
+   "object": "medcea.measurement",
+   "role": "svc_superset",
    "using": "true"
   },
   {

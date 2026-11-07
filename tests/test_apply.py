@@ -670,8 +670,10 @@ class Bootstrap(unittest.TestCase):
         self.assertIn(f"\\set v1_by_sub '{ADMIN}'", sql)
         digests = json.loads(b64var(sql, "v1_digests"))
         self.assertEqual(digests["routes"], V1)
+        # superset since Superset stage C's commit B: the factory file's analysis group gives
+        # six roles a setting (apply_check.digests_of, F3)
         self.assertEqual(set(digests["tools"]), {"grafana", "jupyterhub_allowed", "jupyterhub_admin", "node_red",
-                                                 "edge_wizard", "pgadmin"})
+                                                 "edge_wizard", "pgadmin", "superset"})
         self.assertIn("v1_want", sql)
         want = re.search(r"\\set v1_want '([0-9a-f]{64})'", sql).group(1)
         self.assertEqual(want, source.policy_entries_digest(source.factory(), "bootstrap"))
@@ -2344,8 +2346,10 @@ class SupersetTargets(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import test_policy
-        cls.defaults = model.load_defaults()
-        cls.full = model.Policy(test_policy.add_superset(copy.deepcopy(cls.defaults.data)))
+        # defaults: the policy of versions 1-14 (commit A's, without_superset); full: the
+        # factory file since stage C's commit B; skel: the skeleton version alone
+        cls.full = model.load_defaults()
+        cls.defaults = model.Policy(test_policy.without_superset(copy.deepcopy(cls.full.data)))
         d = copy.deepcopy(cls.full.data)
         del d["matrix"]["analysis"]
         cls.skel = model.Policy(d)
@@ -3279,6 +3283,10 @@ class AuditMode(unittest.TestCase):
                 capture_output=True, text=True, env=clean_env(), cwd=old)
             self.assertEqual(r.returncode, 0, r.stderr[-2000:])
             recorded = json.loads(r.stdout)
+            # version 14's rows and skeleton: 12d70b2's factory file (stage C's commit B moved
+            # this tree's skeleton and matrix, so the record is built from the old one)
+            with open(os.path.join(iam, "policy", "defaults.yaml"), encoding="utf-8") as f:
+                v14 = yaml.safe_load(f)
         finally:
             shutil.rmtree(old, ignore_errors=True)
         self.assertNotIn("superset", recorded["a"]["tools"])
@@ -3292,7 +3300,7 @@ class AuditMode(unittest.TestCase):
         for compiler, how in ((recorded["cd"], f"compiled with the compiler of {commit}"),
                               (source.compiler_digest(), "compiled with the compiler of this tree")):
             with self.subTest(how):
-                doc = case.record(commit=commit, compiler=compiler, artefacts=recorded["a"])
+                doc = case.record(commit=commit, compiler=compiler, artefacts=recorded["a"], f=v14)
                 rc, lines = cli.audit_version(doc)
                 text = "\n".join(f"{c} {t}" for c, t in lines)
                 self.assertEqual(rc, 0, text)

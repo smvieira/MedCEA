@@ -25,14 +25,23 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    hosts listing included; skeleton, matrix and waivers equal; cli.py
                    skeleton-gate --check --against-git 31df34b prints equal
   Phase45Delta     against PRE_45 (slice 4.4 deployed, 05c1af9): the same for slice 4.5
-  PhaseSupersetBDelta  against PRE_SB (90e8dcb): the same for Superset stage B (the superset
-                   tool kind in tools.py and cli.py, a comment in defaults.yaml); `compile
-                   superset` refuses, `has-tool superset` says none
   PhaseStageCADelta  against PRE_SC (12d70b2): the same for Superset stage C's commit A
                    (proxies.ENFORCEMENT's SUPERSET_DOMAIN, tools.admits_anyone, has-tool
                    --admitting, apply_check's conditional superset target); apply_check
                    compiles the same targets from the factory policy
-                   (applying versions changes no compiled artefact and no skeleton)
+                   (applying versions changes no compiled artefact and no skeleton).
+                   PhaseSupersetBDelta (against 90e8dcb) was retired with commit B: its
+                   "no superset tool yet" is no longer true, and Phase45Delta and
+                   PhaseStageCADelta, which span stage B, still pin its byte identity
+  PhaseStageCBDelta  against PRE_SCB (e2d9a94): Superset stage C's commit B, the policy
+                   (host SUPERSET_DOMAIN, group analysis with the superset tool, svc_superset,
+                   pod superset, the six factory cells): skeleton-gate --against-git e2d9a94
+                   says widening (exit 3) with exactly the pinned system tuples and residue
+                   sections and no person reach; every person role's reach under commit A's
+                   matrix (version 14's rows) unchanged; the cells leave the skeleton digest
+                   alone; exactly the declared artefacts move.
+                   The delta classes before it compile the factory policy as commit A had
+                   it (ref_tree()): they pin what each slice's code moved
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -106,10 +115,10 @@ PRE_42A = "08fab15"
 PRE_43 = "e18b4ee"   # slice 4.2b deployed: 4.3 changes no compiled artefact and no skeleton
 PRE_44 = "31df34b"   # slice 4.3 built: 4.4 changes no compiled artefact, no listing and no skeleton
 PRE_45 = "05c1af9"   # slice 4.4 deployed: 4.5 changes no compiled artefact, no listing and no skeleton
-PRE_SB = "90e8dcb"   # IAM Phase 4 complete: Superset stage B adds code only (the superset tool kind),
-                     # no compiled artefact, no listing and no skeleton moves
 PRE_SC = "12d70b2"   # Superset stage B live: stage C's commit A adds code only (the policy, the
                      # skeleton version, comes with commit B), no artefact, listing or skeleton moves
+PRE_SCB = "e2d9a94"  # Superset stage C's commit A: commit B changes the policy itself, the first
+                     # change of defaults.yaml's access since slice 4.2a (PhaseStageCBDelta)
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -137,6 +146,31 @@ def as_of_43(key, out):
     marks POLICY_DOMAIN [compiled] since its proxy exists (proxies.ENFORCEMENT is code, not
     skeleton; Phase43Delta pins that it is the only line that moved)."""
     return out.replace("[not deployed (Phase 4)]", "[compiled]") if key == "hosts" else out
+
+
+_REF = []
+
+
+def ref_tree():
+    """(root, cli.py, Policy) of a scratch tree holding this tree's compiler and PRE_SCB's
+    defaults.yaml: the factory policy before Superset stage C's commit B. The delta classes
+    of earlier slices compare against it, since they pin what each slice's code moved and
+    commit B moves the policy. unittest.SkipTest without git or that commit."""
+    if not _REF:
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_SCB}:apps/iam/policy/defaults.yaml"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise unittest.SkipTest(f"no git revision {PRE_SCB}: {r.stderr.strip()}")
+        root = scratch_tree()
+        with open(os.path.join(root, "apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            f.write(r.stdout)
+        _REF.append((root, os.path.join(root, "apps", "iam", "compiler", "cli.py"), model.Policy(yaml.safe_load(r.stdout))))
+    return _REF[0]
+
+
+def tearDownModule():
+    for root, _, _ in _REF:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def run_cli(args, cli=CLI, **env):
@@ -203,6 +237,8 @@ def artefacts(p, label="defaults.yaml"):
         "grants-json": json.dumps(grants.document(p, False, False), indent=1, sort_keys=True) + "\n",
         "grants-json-smoke-without-iam": json.dumps(grants.document(p, True, True), indent=1, sort_keys=True) + "\n",
     }
+    if tools.groups(p, "superset") and tools.admits_anyone(p, "superset"):   # stage C (apply_check.targets)
+        out["superset"] = json.dumps(tools.superset_roles_mapping(p), sort_keys=True) + "\n"
     for s in ("allowed_groups", "admin_groups"):
         out["jupyterhub-" + s] = proxies.toml_list(tools.jupyterhub_groups(p, s)) + "\n"
     for c in sorted((p.data["network"].get("clients") or {})):
@@ -230,7 +266,7 @@ def artefacts(p, label="defaults.yaml"):
 
 def cli_argv(key):
     """The cli.py arguments that print artefacts()[key]."""
-    if key in ("routes", "mqtt", "grafana", "node-red", "edge-wizard", "pgadmin"):
+    if key in ("routes", "mqtt", "grafana", "node-red", "edge-wizard", "pgadmin", "superset"):
         return ["compile", key]
     if key in ("hosts", "check"):
         return [key]
@@ -290,12 +326,13 @@ class SourceIdentity(unittest.TestCase):
             if r.returncode != 0:
                 self.skipTest(f"no git archive of {PRE_40}: {r.stderr.strip()}")
             old_cli = os.path.join(old, "apps", "iam", "compiler", "cli.py")
-            for key in list(self.want) + ["check"]:
+            _, ref_cli, ref_p = ref_tree()   # the policy before stage C's commit B: code is compared
+            for key in list(artefacts(ref_p)) + ["check"]:
                 if moved_in_41(key):
                     continue   # Phase41Delta
                 argv = cli_argv(key)
                 rc_old, want, err_old = run_cli(argv, cli=old_cli)
-                rc, got, err = run_cli(argv, cli=self.cli)
+                rc, got, err = run_cli(argv, cli=ref_cli)
                 self.assertEqual(rc_old, 0, f"{key} (pre-4.0): {err_old}")
                 self.assertEqual(rc, 0, f"{key}: {err}")
                 if key == "check":
@@ -2038,8 +2075,7 @@ class Phase41Delta(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_41, "medcea-pre41-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree()[2]   # the factory policy before stage C's commit B
         cls.want = artefacts(cls.p)
 
     @classmethod
@@ -2126,8 +2162,7 @@ class Phase43Delta(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_43, "medcea-pre43-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree()[2]   # the factory policy before stage C's commit B
         cls.want = artefacts(cls.p)
 
     @classmethod
@@ -2157,7 +2192,7 @@ class Phase43Delta(unittest.TestCase):
     def test_only_the_policy_hosts_status_moves(self):
         rc, old, err = run_cli(["--defaults", "hosts"], cli=self.old_cli)
         self.assertEqual(rc, 0, err)
-        rc, new, err = run_cli(["--defaults", "hosts"])
+        rc, new, err = run_cli(["--defaults", "hosts"], cli=ref_tree()[1])
         self.assertEqual(rc, 0, err)
         changed = [(a, b) for a, b in zip(old.splitlines(), new.splitlines()) if a != b]
         self.assertEqual(len(changed), 1, changed)
@@ -2173,8 +2208,7 @@ class Phase44Delta(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_44, "medcea-pre44-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree()[2]   # the factory policy before stage C's commit B
         cls.want = artefacts(cls.p)
 
     @classmethod
@@ -2207,7 +2241,10 @@ class Phase44Delta(unittest.TestCase):
         import contextlib
         import io
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        from unittest import mock
+        # git's side is the factory policy before stage C's commit B (ref_tree): the code is compared
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_44, state=None, check=True))
             except source.SourceError as e:
@@ -2225,8 +2262,7 @@ class Phase45Delta(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_45, "medcea-pre45-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree()[2]   # the factory policy before stage C's commit B
         cls.want = artefacts(cls.p)
 
     @classmethod
@@ -2259,92 +2295,14 @@ class Phase45Delta(unittest.TestCase):
         import contextlib
         import io
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        from unittest import mock
+        # git's side is the factory policy before stage C's commit B (ref_tree): the code is compared
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_45, state=None, check=True))
             except source.SourceError as e:
                 self.skipTest(f"no git revision {PRE_45}: {e}")
-        g = json.loads(out.getvalue())
-        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
-        self.assertEqual(g["git_digest"], g["accepted_digest"])
-
-
-class PhaseSupersetBDelta(unittest.TestCase):
-    """Superset stage B (6 Nov 2026) adds the superset tool kind (tools.py KINDS,
-    SETTING_LEVELS, SERVICE_IDENTITY, superset_roles_mapping; cli.py compile superset and
-    has-tool) and a comment in defaults.yaml: every artefact, the hosts listing included,
-    compiles byte for byte as PRE_SB, and the skeleton, the matrix and the waivers are equal.
-    The policy carries no superset tool until stage C, an approved skeleton version."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.old, cls.old_cli = archive_cli(PRE_SB, "medcea-presb-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
-        cls.want = artefacts(cls.p)
-
-    @classmethod
-    def tearDownClass(cls):
-        if cls.old:
-            shutil.rmtree(cls.old, ignore_errors=True)
-
-    def setUp(self):
-        if not self.old:
-            self.skipTest(f"no git archive of {PRE_SB}: {self.old_cli}")
-
-    def test_every_artefact_byte_identical(self):
-        self.assertIn("hosts", self.want)
-        self.assertNotIn("superset", self.want)   # stage C adds the key, conditionally
-        for key, want in self.want.items():
-            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
-            self.assertEqual(rc, 0, f"{key} ({PRE_SB}): {err}")
-            self.assertEqual(out, want, key)
-
-    def test_check_output_identical(self):
-        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
-        root = scratch_repo("medcea-sb-")
-        try:
-            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-        self.assertEqual((rc, out), (rc_old, out_old), err)
-
-    def test_skeleton_and_matrix_unchanged(self):
-        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
-            old_text = f.read()
-        old_data = yaml.safe_load(old_text)
-        self.assertEqual(old_data, self.p.data)   # a comment changed, nothing else
-        self.assertEqual(source.skeleton_digest(old_data), source.skeleton_digest(self.p.data))
-        with open(DEFAULTS) as f:
-            new_text = f.read()
-        code_lines = lambda t: [l for l in t.splitlines() if not l.lstrip().startswith("#")]  # noqa: E731
-        self.assertEqual(code_lines(old_text), code_lines(new_text))
-
-    def test_no_superset_tool_yet(self):
-        self.assertEqual(tools.groups(self.p, "superset"), [])
-        root = scratch_repo("medcea-sb-")
-        try:
-            cli = os.path.join(root, "apps", "iam", "compiler", "cli.py")
-            rc, out, err = run_cli(["compile", "superset"], cli=cli)
-            self.assertEqual((rc, out), (1, ""))
-            self.assertIn("no group has a superset tool block", err)
-            rc, out, _ = run_cli(["has-tool", "superset"], cli=cli)
-            self.assertEqual((rc, out), (1, ""))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_skeleton_gate_against_presb_is_equal(self):
-        """`cli.py skeleton-gate --check --against-git 90e8dcb` prints equal (in-process, as
-        Phase45Delta); HEAD is checked by hand before the commit."""
-        import argparse
-        import contextlib
-        import io
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SB, state=None, check=True))
-            except source.SourceError as e:
-                self.skipTest(f"no git revision {PRE_SB}: {e}")
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])
@@ -2360,8 +2318,7 @@ class PhaseStageCADelta(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_SC, "medcea-presc-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree()[2]   # the factory policy before stage C's commit B
         cls.want = artefacts(cls.p)
 
     @classmethod
@@ -2384,17 +2341,13 @@ class PhaseStageCADelta(unittest.TestCase):
 
     def test_check_output_identical(self):
         rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
-        root = scratch_repo("medcea-sc-")
-        try:
-            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        rc, out, err = run_cli(["check"], cli=ref_tree()[1])   # a scratch tree: no state/
         self.assertEqual((rc, out), (rc_old, out_old), err)
 
     def test_policy_file_unchanged(self):
         with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
             old_text = f.read()
-        with open(DEFAULTS) as f:
+        with open(os.path.join(ref_tree()[0], "apps", "iam", "policy", "defaults.yaml")) as f:
             self.assertEqual(f.read(), old_text)   # commit B changes it, not A
         self.assertEqual(source.skeleton_digest(yaml.safe_load(old_text)), source.skeleton_digest(self.p.data))
 
@@ -2416,23 +2369,22 @@ class PhaseStageCADelta(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), [[n, a] for n, a in apply_check.targets(self.p)])
 
     def test_superset_still_absent(self):
-        root = scratch_repo("medcea-sc-")
-        try:
-            cli = os.path.join(root, "apps", "iam", "compiler", "cli.py")
-            for args in (["has-tool", "superset"], ["has-tool", "superset", "--admitting"]):
-                self.assertEqual(run_cli(args, cli=cli)[:2], (1, ""), args)
-            rc, out, err = run_cli(["compile", "superset"], cli=cli)
-            self.assertEqual((rc, out), (1, ""))
-            self.assertIn("no group has a superset tool block", err)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        cli = ref_tree()[1]
+        for args in (["has-tool", "superset"], ["has-tool", "superset", "--admitting"]):
+            self.assertEqual(run_cli(args, cli=cli)[:2], (1, ""), args)
+        rc, out, err = run_cli(["compile", "superset"], cli=cli)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("no group has a superset tool block", err)
 
     def test_skeleton_gate_against_presc_is_equal(self):
         import argparse
         import contextlib
         import io
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        from unittest import mock
+        # git's side is the factory policy before stage C's commit B (ref_tree): the code is compared
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SC, state=None, check=True))
             except source.SourceError as e:
@@ -2440,6 +2392,286 @@ class PhaseStageCADelta(unittest.TestCase):
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _sql_without_stage_c(text):
+    """A compiled grants SQL file with stage C's own lines taken out: svc_superset's role,
+    password block, privilege rows and RLS policy, the `analysis` rows of role_widening(),
+    svc_superset's names in the role and policy lists. Every sha256 is a placeholder and a
+    line's trailing `,`/`)` is dropped (a list's last row moves). What is left must equal
+    the same file compiled without stage C (PhaseStageCBDelta)."""
+    lines, out, i = text.splitlines(), [], 0
+    while i < len(lines):
+        line = lines[i]
+        if line == r"\if :{?pw_svc_superset}":        # \if, ALTER ROLE … PASSWORD, \endif
+            i += 3
+            continue
+        if "polname = 'iam_s_svc_superset_" in line and line.endswith("THEN"):   # IF, CREATE POLICY, END IF
+            i += 3
+            continue
+        s = line.lstrip()
+        if (s.startswith(("('svc_superset'", "('medcea.measurement', 'iam_s_svc_superset_"))
+                or "ROLE svc_superset" in line or "rolname = 'svc_superset'" in line or "'analysis'" in line):
+            i += 1
+            continue
+        line = re.sub(r", 'iam_s_svc_superset_[0-9a-f]{8}'", "", line.replace("'svc_superset', ", ""))
+        out.append(_SHA256.sub("<sha256>", line).rstrip(",)"))
+        i += 1
+    return out
+
+
+def _grants_doc_args(key):
+    """grants.document()'s (smoke, without_iam) for an artefacts() grants key."""
+    return (True, True) if key.endswith("smoke-without-iam") else (False, False)
+
+
+class PhaseStageCBDelta(unittest.TestCase):
+    """Superset stage C, commit B (7 Nov 2026): the policy. defaults.yaml gains host
+    SUPERSET_DOMAIN, group analysis (the superset tool: Alpha from U, Gamma from R),
+    service identity svc_superset (master_data and measurements R, D7), pod superset (N3)
+    and the six factory cells (N1, N2). Against PRE_SCB (commit A, whose matrix is version
+    14's rows): the skeleton gate says widening in system reach only, with exactly these
+    tuples and residue sections, so it deploys only as an approved skeleton version (OA-a);
+    no person role reaches anything new under version 14's rows; the checker passes on those
+    rows (the proposal's precondition); the cells leave the skeleton digest alone, so the
+    change version that applies them is a plain change version; and exactly the declared
+    artefacts move, every other one compiling byte for byte as commit A's cli.py does."""
+
+    SYSTEM = [
+        ["azp", "SUPERSET_DOMAIN", "superset"],
+        ["ingress", "superset", 8088, "ingress"],
+        ["ingress", "superset", 8088, "node"],
+        ["rls", "medcea.measurement", "svc_superset", "SELECT", "true", None],
+        ["serves", "SUPERSET_DOMAIN", "superset"],
+        ["svc", "svc_superset", "function", "medcea.unit_commissioning()", "EXECUTE"],
+        ["svc", "svc_superset", "schema", "medcea", "USAGE"],
+    ] + [["svc", "svc_superset", "table", f"medcea.{t}", "SELECT"]
+         for t in ("cea_location", "cea_unit", "cea_zone", "component", "measurement", "msg_actual_points",
+                   "msg_controls", "msg_set_points", "v_ap_measurements", "v_ct_measurements", "v_sp_measurements")]
+    SECTIONS = [
+        ["section", "network.pods.superset.selector.app"],
+        ["section", "resource_groups.analysis.class"],
+        ["section", "resource_groups.analysis.risk"],
+        ["section", "service_identities.svc_superset.db_password"],
+        ["section", "service_identities.svc_superset.db_role"],
+    ]
+    # what moves (artefacts() keys); everything else is byte-identical to commit A's cli.py
+    NEW = {"superset", "proxy-SUPERSET_DOMAIN", "describe-gate-SUPERSET_DOMAIN"}
+    CHANGED = {"routes", "netpol", "hosts", "db-roles-names", "db-roles-logins", "db-roles-passwords"}
+    MAPPING = {"bio_scientist": ["Alpha", "sql_lab"], "control_scientist": ["Alpha", "sql_lab"],
+               "engineer": ["Alpha", "sql_lab"], "production_manager": ["Gamma", "MedCEA Viewer"],
+               "qc": ["Gamma", "MedCEA Viewer"], "qp": ["Gamma", "MedCEA Viewer"]}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_SCB, "medcea-prescb-")
+        cls.a = ref_tree()[2]
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+        cls.was = artefacts(cls.a)
+        cls.v14 = source.entries_and_waivers(cls.a.data)   # version 14's rows = commit A's factory matrix
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_SCB}: {self.old_cli}")
+
+    @staticmethod
+    def moved(key):
+        return key in PhaseStageCBDelta.NEW or key in PhaseStageCBDelta.CHANGED or key.startswith("grants-")
+
+    def test_skeleton_gate_against_commit_a_widens(self):
+        """`cli.py skeleton-gate --against-git e2d9a94 --check` (in-process): widening, exit 3,
+        nothing narrowed, no person role in it."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SCB, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_SCB}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(set(g["added"]), {"_system", "_sections"})   # no person role widens
+        self.assertEqual(g["added"]["_system"], self.SYSTEM)
+        self.assertEqual(g["added"]["_sections"], self.SECTIONS)
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(g["accepted_digest"], source.skeleton_digest(self.a.data))
+        self.assertEqual(g["git_digest"], source.skeleton_digest(self.p.data))
+        self.assertIn("--propose-skeleton", err.getvalue())
+        self.assertIn("Nothing was changed.", err.getvalue())
+
+    def test_gate_is_the_same_under_version_14s_rows(self):
+        """explain.gate(accepted = commit A, git = B, version 14's rows): what --propose-skeleton
+        and every deploy before the apply compute; and the checker passes (its precondition)."""
+        g = explain.gate(self.a.data, self.p.data, self.v14)
+        self.assertEqual(g["verdict"], "widening")
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(explain.checker_errors(self.p.data, self.v14), [])
+
+    def test_no_person_reach_under_version_14s_rows(self):
+        composed = model.Policy(source.compose(source.skeleton(self.p.data), self.v14))
+        self.assertEqual(invariants.check(composed)[0], [])
+        for role in sorted(self.p.roles):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(composed, role), explain.reach(self.a, role))
+        # the skeleton version alone gives Superset nobody (F1): no setting, no proxy target
+        self.assertFalse(tools.admits_anyone(composed, "superset"))
+
+    def test_the_cells_are_matrix_only(self):
+        """N2: the six cells leave the skeleton digest alone; apart from them the matrix and
+        the waivers are commit A's (= version 14's), so version 16 is exactly the cells."""
+        d = copy.deepcopy(self.p.data)
+        cells = d["matrix"].pop("analysis")
+        self.assertEqual(source.skeleton_digest(d), source.skeleton_digest(self.p.data))
+        self.assertEqual(d["matrix"], self.a.data["matrix"])
+        self.assertEqual(d["waivers"], self.a.data["waivers"])
+        self.assertEqual(cells, {r: ["R", "C", "U"] for r in ("bio_scientist", "control_scientist", "engineer")}
+                         | {r: ["R"] for r in ("production_manager", "qc", "qp")})
+        self.assertEqual(source.skeleton(self.p.data), source.skeleton(source.compose(source.skeleton(self.p.data),
+                                                                                      self.v14)))
+
+    def test_exactly_the_declared_artefacts_move(self):
+        self.assertEqual(set(self.want) - set(self.was), self.NEW)
+        self.assertEqual(set(self.was) - set(self.want), set())
+        moved = {k for k in self.was if self.was[k] != self.want[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, self.CHANGED)
+        for key, want in self.want.items():
+            if self.moved(key):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)   # commit A's code and policy
+                self.assertEqual(rc, 0, f"{key} ({PRE_SCB}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_moved_artefacts(self):
+        self.assertEqual(json.loads(self.want["superset"]), self.MAPPING)
+        self.assertEqual(json.loads(self.want["proxy-SUPERSET_DOMAIN"]), sorted(self.MAPPING))
+        # hosts: one line more, the rest as it was
+        self.assertEqual(self.want["hosts"], self.was["hosts"] + "SUPERSET_DOMAIN    [tool (Superset AUTH_ROLES_MAPPING)] "
+                         "bio_scientist control_scientist engineer production_manager qc qp\n")
+        for key in ("db-roles-names", "db-roles-logins", "db-roles-passwords"):
+            new = self.want[key].splitlines()
+            gained = [line for line in new if line not in self.was[key].splitlines()]
+            self.assertEqual(gained, ["svc_superset SVC_SUPERSET_DB_PASS" if key.endswith("passwords") else "svc_superset"], key)
+            self.assertEqual(len(new), len(self.was[key].splitlines()) + 1, key)
+        # netpol: one NetworkPolicy more, iam-superset (Ingress only), none changed
+        old = {i["metadata"]["name"]: i for i in json.loads(self.was["netpol"])["items"]}
+        new = {i["metadata"]["name"]: i for i in json.loads(self.want["netpol"])["items"]}
+        self.assertEqual(set(new) - set(old), {"iam-superset"})
+        self.assertEqual([k for k in old if old[k] != new[k]], [])
+        spec = new["iam-superset"]["spec"]
+        self.assertEqual(spec["policyTypes"], ["Ingress"])
+        self.assertEqual(spec["podSelector"], {"matchLabels": {"app": "superset"}})
+        self.assertEqual(spec["ingress"], [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress"}}},
+                                                     {"ipBlock": {"cidr": "10.0.0.5/32"}}],
+                                            "ports": [{"protocol": "TCP", "port": 8088}]}])
+        # grants: exactly svc_superset's 13 privileges and its one RLS row (the golden's diff)
+        go, gn = json.loads(self.was["grants-json"]), json.loads(self.want["grants-json"])
+        self.assertEqual(go["memberships"], gn["memberships"])
+        added = [x for x in gn["privileges"] if x not in go["privileges"]]
+        self.assertEqual([x for x in go["privileges"] if x not in gn["privileges"]], [])
+        self.assertEqual(sorted(map(tuple, added)), sorted(tuple(t[1:]) for t in self.SYSTEM if t[0] == "svc"))
+        self.assertEqual([x for x in go["rls"] if x not in gn["rls"]], [])
+        rls = [x for x in gn["rls"] if x not in go["rls"]]
+        self.assertEqual([(x["object"], x["role"], x["cmd"], x["using"], x["check"]) for x in rls],
+                         [("medcea.measurement", "svc_superset", "SELECT", "true", None)])
+        # the same for the document the smoke --without-iam bundle carries
+        go, gn = json.loads(self.was["grants-json-smoke-without-iam"]), json.loads(self.want["grants-json-smoke-without-iam"])
+        self.assertEqual({k for k in set(go) | set(gn) if go.get(k) != gn.get(k)}, {"privileges", "rls", "digest"})
+        self.assertEqual([x for x in go["privileges"] if x not in gn["privileges"]], [])
+        self.assertEqual(sorted(tuple(x) for x in gn["privileges"] if x not in go["privileges"]),
+                         sorted(tuple(t[1:]) for t in self.SYSTEM if t[0] == "svc"))
+        self.assertEqual([x for x in go["rls"] if x not in gn["rls"]], [])
+        self.assertEqual([(x["object"], x["role"]) for x in gn["rls"] if x not in go["rls"]],
+                         [("medcea.measurement", "svc_superset")])
+        # the 403 page of the new host (describe-gate): its label and the roles it is given
+        self.assertEqual(self.want["describe-gate-SUPERSET_DOMAIN"], "Superset\t" + self.p.roles["admin"]["label"] + "\n")
+        # every SQL form: nothing moves but svc_superset's lines, the analysis rows of
+        # role_widening(), and the two digests (the grants document's and the route table's)
+        r_old, r_new = json.loads(self.was["routes"])["digest"], json.loads(self.want["routes"])["digest"]
+        sql_keys = [k for k in self.want if k.startswith("grants-") and not k.startswith("grants-json")]
+        self.assertEqual(len(sql_keys), 16)
+        for key in sql_keys:
+            with self.subTest(key):
+                self.assertEqual(_sql_without_stage_c(self.want[key]), _sql_without_stage_c(self.was[key]))
+                d_old = grants.document(self.a, *_grants_doc_args(key))["digest"]
+                d_new = grants.document(self.p, *_grants_doc_args(key))["digest"]
+                h_old, h_new = set(_SHA256.findall(self.was[key])), set(_SHA256.findall(self.want[key]))
+                self.assertEqual((h_old - h_new, h_new - h_old), ({r_old, d_old}, {r_new, d_new}))
+                self.assertNotIn("svc_superset", "\n".join(_sql_without_stage_c(self.want[key])))
+
+    def test_the_change_version(self):
+        """Version 16 (the cells) against version 15 (commit B's skeleton, version 14's rows):
+        what apply.sh 16's step 6 summary shows (exercise E27 step 7). The privileges do not
+        move (grants-json both ways unchanged), but every grants SQL form does: role_widening()'s
+        body gains the analysis rows (the 12 cells and their widening pairs) and its COMMENT the
+        new routes digest; routes and hosts change, the superset target appears, the Superset
+        proxy list (and compile_all's describe-gate, which takes it) fills; and the widening
+        table names the six roles, so the summary announces access-api's 503 minute for them."""
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        import apply_check
+        v15 = model.Policy(source.compose(source.skeleton(self.p.data), self.v14))
+        a15, a16 = artefacts(v15), artefacts(self.p)
+        self.assertEqual(set(a16) - set(a15), {"superset"})
+        self.assertEqual(set(a15) - set(a16), set())
+        moved = {k for k in a15 if a15[k] != a16[k]}
+        sql_keys = {k for k in a16 if k.startswith("grants-") and not k.startswith("grants-json")}
+        self.assertEqual(moved, {"routes", "hosts", "proxy-SUPERSET_DOMAIN"} | sql_keys)
+        self.assertEqual(json.loads(a15["proxy-SUPERSET_DOMAIN"]), [])
+        self.assertEqual(json.loads(a16["proxy-SUPERSET_DOMAIN"]), sorted(self.MAPPING))
+        r15, r16 = json.loads(a15["routes"])["digest"], json.loads(a16["routes"])["digest"]
+        cells = [(r, lv) for r, lvs in self.p.data["matrix"]["analysis"].items() for lv in lvs]
+        self.assertEqual(len(cells), 12)
+        for key in sorted(sql_keys):
+            with self.subTest(key):
+                old, new = a15[key].splitlines(), a16[key].splitlines()
+                self.assertEqual([x for x in old if x not in new], [x for x in old if r15 in x])
+                gained = [x for x in new if x not in old]
+                self.assertTrue(gained)
+                self.assertEqual([x for x in gained if "'analysis'" not in x and r16 not in x], [])
+        # the 503 notice of summary_lines: the roles whose widening rows change
+        self.assertEqual(apply_check._widening_roles(json.loads(a15["routes"]), json.loads(a16["routes"])),
+                         sorted(self.MAPPING))
+
+    def test_the_route_table(self):
+        """routes.json: no service's routes move; access-profile (a shared upstream) accepts
+        the new client's tokens as it does every host's; the widening table gains only
+        (analysis, level) pairs; the digest moves (role_widening(): a database deploy)."""
+        old, new = json.loads(self.was["routes"]), json.loads(self.want["routes"])
+        self.assertEqual({k for k in set(old) | set(new) if old.get(k) != new.get(k)}, {"digest", "services", "widening"})
+        for svc in set(old["services"]) | set(new["services"]):
+            o, n = old["services"].get(svc), new["services"].get(svc)
+            if svc == "access-profile":
+                self.assertEqual(set(n["clients"]) - set(o["clients"]), {"superset"})
+                self.assertEqual({k: v for k, v in o.items() if k != "clients"}, {k: v for k, v in n.items() if k != "clients"})
+            else:
+                self.assertEqual(o, n, svc)
+        for frm in set(old["widening"]) | set(new["widening"]):
+            ow, nw = old["widening"].get(frm, {}), new["widening"].get(frm, {})
+            for to in set(ow) | set(nw):
+                a, b = {tuple(x) for x in ow.get(to, [])}, {tuple(x) for x in nw.get(to, [])}
+                self.assertEqual(a - b, set(), (frm, to))
+                self.assertEqual({g for g, _ in b - a} <= {"analysis"}, True, (frm, to))
+
+    def test_apply_targets(self):
+        """apply_check.targets(): the superset target and its host's proxy, nothing else new."""
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        import apply_check
+        names = lambda p: [n for n, _ in apply_check.targets(p)]   # noqa: E731
+        self.assertEqual(set(names(self.p)) - set(names(self.a)), {"superset", "proxy-SUPERSET_DOMAIN"})
+        self.assertEqual(set(names(self.a)) - set(names(self.p)), set())
+        self.assertEqual((len(names(self.a)), len(names(self.p))), (32, 34))
 
 
 class Staged(unittest.TestCase):
@@ -2553,8 +2785,7 @@ class Phase42aDelta(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_42A, "medcea-pre42a-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree()[2]   # the factory policy before stage C's commit B
         cls.want = artefacts(cls.p)
         cls.outs = {}
 
@@ -2582,7 +2813,7 @@ class Phase42aDelta(unittest.TestCase):
             self.assertEqual(as_of_43(key, self.old_out(key)), want, key)
         # check: the same text; the skeleton digest moves (defaults.yaml's one 4.2a edit,
         # iam_policy._system_as(text[]) in infrastructure_functions), which check does not print
-        rc, out, err = run_cli(["--defaults", "check"])
+        rc, out, err = run_cli(["--defaults", "check"], cli=ref_tree()[1])
         self.assertEqual(rc, 0, err)
         rc, old, err = run_cli(["--defaults", "check"], cli=self.old_cli)
         self.assertEqual(rc, 0, err)

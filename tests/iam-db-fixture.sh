@@ -1184,6 +1184,8 @@ probes() {  # MODE
 # and a caller without a person gets no names, reasons or rights from it.
 # Production may run IAM_DB_ROLES=true: B0 is then compared with the first apply
 # true (T1) instead, and the seed has reset the database setting the flag lives in.
+# Superset stage C: until production applies the skeleton version that adds
+# svc_superset, its RLS policy on measurement exists in the fixture's apply only.
 DELTA='^[<>] owner\|
 ^[<>] secdef\|
 ^[<>] trigger\|
@@ -1200,7 +1202,8 @@ DELTA='^[<>] owner\|
 ^< role\|(rr_|svc_|iam_svc)
 ^< member\|rr_admin\|rr_admin_login\|
 ^> constraint\|
-^[<>] acl\|access_svc\|'
+^[<>] acl\|access_svc\|
+^> policy\|medcea\.measurement\|iam_s_svc_superset_[0-9a-f]+\|svc_superset\|'
 # every fact but the grants of roles outside the comparison (the managed roles are
 # compared exactly by the bundle's own assertions)
 scoped() { grep -vE '^acl\|' "$1"; grep -E '^acl\|(anon|authenticator|mqtt_auth|access_svc|PUBLIC)\|' "$1"; }

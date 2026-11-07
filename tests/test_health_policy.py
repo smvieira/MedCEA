@@ -796,9 +796,10 @@ def ss_pods(*checksums, phase="Running"):
 
 
 class SupersetRoles(unittest.TestCase):
-    """check_supersetroles (Superset stages B and C): a fake kubectl, policy_tool stubbed or,
-    once, the real library in a scratch tree (the policy there has no superset tool yet:
-    rc 5); the live-pod checksum through apps/superset/lib-superset.sh, the deploy's own."""
+    """check_supersetroles (Superset stages B and C): a fake kubectl, policy_tool stubbed or
+    the real library in a scratch tree (commit A's policy without the tool: rc 5; the factory
+    policy since commit B: the mapping); the live-pod checksum through
+    apps/superset/lib-superset.sh, the deploy's own."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="medcea-ss-")
@@ -988,15 +989,32 @@ class SupersetRoles(unittest.TestCase):
         self.assertIn("cannot read", msg)
 
     def test_the_real_library_today(self):
-        # the factory policy has no superset tool before stage C's commit B: a deployed
-        # Superset FAILs
+        """The real policy_tool in a scratch tree: commit A's policy (no superset tool) FAILs a
+        deployed Superset; the factory policy since stage C's commit B gives the six roles
+        their mapping (N1, N2), and a Secret holding it is OK."""
+        sys.path.insert(0, HERE)
+        import test_policy
+        from compiler import model, tools
+        factory = model.load_defaults()
         root = scratch_repo("medcea-ss-")
         try:
             self.put_lib(root)
+            with open(os.path.join(root, "apps", "iam", "policy", "defaults.yaml"), "w") as f:
+                yaml.safe_dump(test_policy.without_superset(json.loads(json.dumps(factory.data))), f)
             self.cluster(ss_deploy(), ss_secret())
             status, msg = self.run_check(stub=False, root=root, IAM_GATES="true")
             self.assertEqual(status, "FAIL", msg)
             self.assertIn("has no superset tool", msg)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        root = scratch_repo("medcea-ss-")
+        try:
+            self.put_lib(root)
+            mapping = tools.superset_roles_mapping(factory)
+            self.cluster(ss_deploy(), ss_secret(mapping=mapping))
+            status, msg = self.run_check(stub=False, root=root, IAM_GATES="true")
+            self.assertEqual(status, "OK", msg)
+            self.assertIn("maps bio_scientist, control_scientist, engineer, production_manager, qc, qp", msg)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

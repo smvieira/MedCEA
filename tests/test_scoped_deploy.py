@@ -35,6 +35,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 PRE_42B = "8a65abe"
+PRE_SCB = "e2d9a94"   # Superset stage C's commit A: the last policy whose artefacts are PRE_42B's
 FAKE = os.path.join(HERE, "fake_cluster.py")
 FAKE_NAMES = ("microk8s", "curl", "systemctl", "pgrep", "sleep", "fuser", "loginctl", "journalctl", "sudo")
 
@@ -145,7 +146,9 @@ def _gate_def(text):
 class Env:
     """a scratch tree, its fake bin directory and its fake cluster"""
 
-    def __init__(self, rev=None):
+    def __init__(self, rev=None, policy_at=None):
+        """rev: a git archive of that commit, else the working tree; policy_at: defaults.yaml
+        from that commit instead (Transcript compares code, so both sides compile one policy)"""
         self.root = tempfile.mkdtemp(prefix="medcea-scoped-")
         self.tree = os.path.join(self.root, "tree")
         os.makedirs(self.tree)
@@ -161,6 +164,11 @@ class Env:
                     dst = os.path.join(self.tree, f)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.copy2(src, dst)
+        if policy_at:
+            text = subprocess.run(["git", "-C", REPO, "show", f"{policy_at}:apps/iam/policy/defaults.yaml"],
+                                  check=True, capture_output=True).stdout
+            with open(os.path.join(self.tree, "apps", "iam", "policy", "defaults.yaml"), "wb") as f:
+                f.write(text)
         with open(os.path.join(self.tree, "config.env"), "w") as f:
             f.write(CONFIG)
         self.bin = os.path.join(self.root, "bin")
@@ -263,11 +271,14 @@ _MQP=false
 
 class Transcript(unittest.TestCase):
     maxDiff = None
-    """the full deploys issue PRE_42B's commands (§14.5.6)"""
+    """the full deploys issue PRE_42B's commands (§14.5.6). The code is compared, not the
+    policy: since Superset stage C's commit B the policy compiles other routes, NetworkPolicies
+    and grants (tests/test_policy_source.py PhaseStageCBDelta pins those), so today's tree
+    compiles commit A's defaults.yaml, the last one PRE_42B's compiles alike."""
 
     @classmethod
     def setUpClass(cls):
-        cls.old, cls.new = Env(PRE_42B), Env()
+        cls.old, cls.new = Env(PRE_42B), Env(policy_at=PRE_SCB)
 
     @classmethod
     def tearDownClass(cls):

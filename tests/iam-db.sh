@@ -2238,11 +2238,12 @@ SQL
     }
 
     # D1 / D2 — a widening waits, a narrowing applies with its status history
-    probe D1 "operator -> production_manager: pending_qa with 12 widening pairs" ok <<SQL
+    # 13 since Superset stage C: (analysis, R) is the 13th pair production_manager holds.
+    probe D1 "operator -> production_manager: pending_qa with 13 widening pairs" ok <<SQL
 $(pending_d1)
 --CHECKS
 SELECT 'CHECK|pending_qa', :'d1_st' = 'pending_qa';
-SELECT 'CHECK|12 pairs', :d1_nw = 12;
+SELECT 'CHECK|13 pairs', :d1_nw = 13;
 SELECT 'CHECK|the row', widens AND made_by_sub = '$A' AND made_by_person = '$PA' AND from_role = 'operator'
           AND to_role = 'production_manager' AND checked_at IS NULL
   FROM iam.account_decision WHERE decision_id = :d1;

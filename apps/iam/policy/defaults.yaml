@@ -244,6 +244,7 @@ hosts:
   WORKBENCH_DOMAIN: {label: AI Workbench,            client: workbench,     serves: [jupyterhub]}
   ONBOARD_DOMAIN:   {label: Device onboarding,       client: edge-wizard,   serves: [edge-wizard, config-api]}
   PGADMIN_DOMAIN:   {label: pgAdmin,                 client: pgadmin,       serves: [pgadmin]}
+  SUPERSET_DOMAIN:  {label: Superset,                client: superset,      serves: [superset]}
 
 # Upstreams mounted on every signed-in host. They never count towards a host's admission
 # (otherwise the profile, which every role may use, would open every host to every role),
@@ -360,6 +361,11 @@ network:
       carries: {}
       ingress:
         - {port: 1880, from: ["proxy:NODE_RED_DOMAIN", node], why: "the Node-RED editor (IAM 3.3); kubelet probes; health-check.sh from the host (deploy.sh's port-forward enters inside the pod)"}
+    superset:
+      selector: {app: superset}
+      carries: {}
+      ingress:
+        - {port: 8088, from: [ingress, node], why: "Superset signs people in itself (no oauth2-proxy): ingress-nginx for SUPERSET_DOMAIN; kubelet probes on /health. The selector also matches the pods of the Jobs superset-init and superset-wheels, which listen on nothing; the policy is Ingress-only, so their egress (database, PyPI) is untouched"}
   clients:
     notebooks:
       # The AI workbench's notebook servers (KubeSpawner's labels; release = the helm
@@ -625,6 +631,16 @@ service_identities:
     db_role: svc_grafana
     db_password: SVC_GRAFANA_DB_PASS
     ceiling: {master_data: [R], measurements: [R], runs: [R]}
+  svc_superset:
+    label: Superset datasource
+    description: >
+      The connection "MedCEA" of Superset's charts, dashboards and SQL Lab (apps/superset/bootstrap.py:
+      no DML, CTAS, CVAS, upload or impersonation); reads master data and telemetry of every unit.
+      No runs (owner decision D7: I5). Superset's own metadata database is owned by superset_meta,
+      outside the platform database and this policy.
+    db_role: svc_superset
+    db_password: SVC_SUPERSET_DB_PASS
+    ceiling: {master_data: [R], measurements: [R]}
   svc_dbexport:
     label: dbmgmt-api.py
     description: Exports exactly the groups where the signed-in person holds X, and logs each export.
@@ -692,8 +708,8 @@ service_identities:
 #   {kind: superset, host: SUPERSET_DOMAIN, service_identity: svc_superset,
 #    settings: [{setting: Alpha, levels: [U]}, {setting: Gamma, levels: [R]}],
 #    otherwise: refuse, help: <text>}   (AUTH_ROLES_MAPPING: Alpha → Alpha + sql_lab, Gamma →
-#    Gamma + "MedCEA Viewer"; Alpha only from U; `cli.py compile superset`. The code exists
-#    since Superset stage B, 6 Nov 2026; no group carries this block until stage C)
+#    Gamma + "MedCEA Viewer"; Alpha only from U; `cli.py compile superset`; Superset stage C,
+#    7 Nov 2026: the group analysis)
 # A role gets the first setting whose levels it holds unconstrained; every role the host
 # admits must get one, and nobody else. `reaches` must cover the service identity's ceiling.
 # `constraint_enforced_by` (a tool with no service identity: it acts with the person's own
@@ -1036,6 +1052,37 @@ resource_groups:
         apps/node-red/deploy.sh. Node-RED's read-only mode shows the ingest password, so
         the group is held with U or not at all (R alone would admit to an editor that gives
         nothing). Every deploy is logged with the person's name.
+
+  analysis:
+    label: Superset analysis
+    class: config
+    description: Charts, dashboards and SQL Lab in Apache Superset over master data and telemetry.
+    why_this_class: Presentation configuration; the data it shows stays in its own groups.
+    risk: >
+      Superset reads through its own database account, so anyone admitted reads telemetry of
+      every unit, whatever their own constraint elsewhere. SQL Lab (Alpha) runs any SELECT
+      svc_superset may run, and a Gamma viewer can still send the queries its charts make: the
+      bound is svc_superset's grants (master data and measurements, no runs), not the charts.
+      A builder's charts and saved queries live in Superset's own database, not in git, and a
+      dashboard a builder publishes is shown to every viewer without review (DASHBOARD_RBAC off).
+    reaches: {master_data: [R], measurements: [R]}
+    tool:
+      kind: superset
+      host: SUPERSET_DOMAIN
+      service_identity: svc_superset   # its ceiling must be covered by reaches
+      settings:                        # first match wins
+        - {setting: Alpha, levels: [U]}   # Alpha + sql_lab: build charts and dashboards, SQL Lab
+        - {setting: Gamma, levels: [R]}   # Gamma + "MedCEA Viewer": view dashboards
+      otherwise: refuse                # medcea_security.py: no mapping, a 403 before any Superset user exists
+      help: >
+        Superset's own role comes from this group: U gives Alpha with SQL Lab (build charts,
+        dashboards and queries on the MedCEA connection), R gives Gamma with the MedCEA Viewer
+        role (view dashboards shared with it). Any other role cannot sign in to Superset.
+        Superset's Admin role is never given from the policy, and there is no local
+        administrator. Superset reads the role at each sign-in; a session lasts at most an
+        hour and ends after 5 idle minutes.
+    members:
+      - {type: ui, host: SUPERSET_DOMAIN}
 
   mqtt_sense:
     label: Telemetry topics
@@ -1426,6 +1473,13 @@ matrix:
     qp: [R]
     engineer: [R, C, U]
     auditor: [R]
+  analysis:
+    production_manager: [R]
+    qc: [R]
+    qp: [R]
+    engineer: [R, C, U]
+    bio_scientist: [R, C, U]
+    control_scientist: [R, C, U]
   flows:
     engineer: [R, C, U]
   mqtt_sense:
