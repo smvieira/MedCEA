@@ -433,11 +433,16 @@ except Exception:
             fail gate "OAUTH2_ADDITIONAL_CLAIMS is $have, want $want (./deploy-infra.sh)"
         fi
     fi
+    # Since 1 Nov 2026 (OAUTH2_AUTO_LOGIN) /login sends the browser straight to
+    # Keycloak's authorization endpoint for client pgadmin; before, it showed a button.
+    where="$(curl -sk -o /dev/null -m 15 -w '%{redirect_url}' "https://$host/login")"
     page="$(curl -sk -L -m 15 "https://$host/login")"
-    if grep -q '"OAUTH2_NAME": "keycloak"' <<<"$page"; then
+    if [[ "$where" == "https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM/protocol/openid-connect/auth?"*"client_id=pgadmin&"* ]]; then
+        pass sign-in "pgAdmin's login page signs in through Keycloak at once (client pgadmin)"
+    elif grep -q '"OAUTH2_NAME": "keycloak"' <<<"$page"; then
         pass sign-in "pgAdmin's login page offers the MedCEA sign-in"
     else
-        fail sign-in "pgAdmin's login page has no keycloak sign-in button"
+        fail sign-in "pgAdmin's login page neither redirects to Keycloak (client pgadmin) nor offers its sign-in button"
     fi
     reach_of "$host" "$(python3 -c 'import ast, sys; print(" ".join(ast.literal_eval(sys.argv[1])["groups"]))' "$want")"
 }
