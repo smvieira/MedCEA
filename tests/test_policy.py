@@ -512,6 +512,41 @@ class SupersetToolTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "admit nobody"):
             tools.superset_roles_mapping(model.Policy(d))
 
+    def test_present_without_cells(self):
+        """Stage C's skeleton version alone (F1): the tool block with no cell passes the
+        checker; has-tool says present (0), has-tool --admitting says nobody (3), compile
+        refuses (1). policy_tool maps that 3 to its "not in the applied policy" 5."""
+        import subprocess
+        import tempfile
+        import yaml
+        d = copy.deepcopy(self.p.data)
+        del d["matrix"]["analysis"]
+        skel = model.Policy(d)
+        self.assertEqual(invariants.check(skel)[0], [])
+        self.assertFalse(tools.admits_anyone(skel, "superset"))
+        self.assertTrue(tools.admits_anyone(self.p, "superset"))
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            tools.admits_anyone(self.defaults, "superset")
+        cli_py = os.path.join(REPO, "apps", "iam", "compiler", "cli.py")
+        defaults = [sys.executable, cli_py, "--defaults"]   # the factory file, never the host's
+        with_file = [sys.executable, cli_py, "--file"]
+        r = subprocess.run(defaults + ["has-tool", "superset", "--admitting"], capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, data, want in (("skel", d, (0, 3)), ("full", self.p.data, (0, 0))):
+                f = os.path.join(tmp, f"{name}.yaml")
+                with open(f, "w") as fh:
+                    yaml.safe_dump(data, fh)
+                with self.subTest(name):
+                    for extra, rc in (([], want[0]), (["--admitting"], want[1])):
+                        r = subprocess.run(with_file + [f, "--label", name, "has-tool", "superset"] + extra,
+                                           capture_output=True, text=True)
+                        self.assertEqual((r.returncode, r.stdout), (rc, ""), extra)
+            r = subprocess.run(with_file + [os.path.join(tmp, "skel.yaml"), "--label", "skel", "compile", "superset"],
+                               capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (1, ""))
+            self.assertIn("Superset would admit nobody", r.stderr)
+
     def test_two_superset_groups_are_an_error(self):
         d = copy.deepcopy(self.p.data)
         d["resource_groups"]["analysis_copy"] = copy.deepcopy(d["resource_groups"]["analysis"])
@@ -1295,8 +1330,16 @@ class WiringTest(unittest.TestCase):
             self.assertNotIn("own_unit: would refuse", src)
             self.assertNotIn("run_logs: would refuse", src)
 
+    # Superset stage C, commit A: the status is code and goes in before the host is in the
+    # policy (the skeleton version adds it). Commit B, which adds the host, drops this.
+    TOOL_HOSTS_PENDING = {"SUPERSET_DOMAIN"}
+
     def test_every_host_has_an_enforcement_status(self):
-        self.assertEqual(set(proxies.ENFORCEMENT), set(self.policy.hosts))
+        extra = set(proxies.ENFORCEMENT) - set(self.policy.hosts)
+        self.assertLessEqual(extra, self.TOOL_HOSTS_PENDING)
+        self.assertEqual(set(proxies.ENFORCEMENT) - extra, set(self.policy.hosts))
+        for h in extra:
+            self.assertTrue(proxies.ENFORCEMENT[h].startswith("tool"), h)   # never a compiled gate
 
     def test_compiled_gates_are_rendered_from_the_policy(self):
         # values template → (script that renders it, host variable it compiles)
@@ -1476,8 +1519,11 @@ class WiringTest(unittest.TestCase):
         self.assertEqual((tail.count("BEGIN;"), tail.count("COMMIT;")), (1, 1))
         self.assertIn("'008b:last_nonce', :'deploy_nonce'", tail)
         # 008c (IAM 4.1) is a second transaction after it, with the same nonce, read back too
-        tail_c = migrations[migrations.index("Migration 008c"):]
+        tail_c = migrations[migrations.index("Migration 008c"):migrations.index("Migration 009")]
         self.assertEqual((tail_c.count("BEGIN;"), tail_c.count("COMMIT;")), (1, 1))
+        # each later migration (009, msg_type HB/TS) is a transaction of its own
+        tail_9 = migrations[migrations.index("Migration 009"):]
+        self.assertEqual(tail_9.count("BEGIN;"), tail_9.count("COMMIT;"))
         self.assertIn("'008c:last_nonce', :'deploy_nonce'", tail_c)
         self.assertIn("key = '008c:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own
@@ -1580,7 +1626,7 @@ class WiringTest(unittest.TestCase):
     def test_onboarding_and_pgadmin_wiring(self):
         """IAM 3.4: the wizard's --required-role and pgAdmin's claims come from policy_tool."""
         self.assertEqual({h for h, st in proxies.ENFORCEMENT.items() if st.startswith("tool")},
-                         {"GRAFANA_DOMAIN", "WORKBENCH_DOMAIN", "ONBOARD_DOMAIN", "PGADMIN_DOMAIN"})
+                         {"GRAFANA_DOMAIN", "WORKBENCH_DOMAIN", "ONBOARD_DOMAIN", "PGADMIN_DOMAIN", "SUPERSET_DOMAIN"})
         tmpl = self.read("k8s/pgadmin/pgadmin.yaml")
         self.assertIn("'OAUTH2_ADDITIONAL_CLAIMS': ${PGADMIN_OAUTH2_CLAIMS}}]", tmpl)
         self.assertNotIn("{'groups': [", tmpl)
@@ -2122,9 +2168,10 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(run("zeppelin", {}).returncode, 2)
 
     def test_policy_tool_superset_shell(self):
-        """Superset stage B: rc 5 while the policy has no superset tool, 3 under IAM_GATES=false,
-        1 on a broken policy, the compiled mapping once a group carries the tool; never a
-        word on stdout but the mapping."""
+        """Superset stage B: rc 5 while the policy has no superset tool, and (stage C, F1) while
+        its group gives no role a setting, 3 under IAM_GATES=false, 1 on a broken policy, the
+        compiled mapping once a group carries the tool and its cells; never a word on stdout
+        but the mapping."""
         import shutil
         import subprocess
         import yaml
@@ -2136,7 +2183,7 @@ class WiringTest(unittest.TestCase):
                                   capture_output=True, text=True, env=e)
         r = run(scratch_root(), {"IAM_GATES": "true"})
         self.assertEqual((r.returncode, r.stdout), (5, ""), r.stderr)
-        self.assertIn("not in the applied access policy yet", r.stderr)
+        self.assertIn("not in the applied access policy (no group has a superset tool block)", r.stderr)
         r = run(scratch_root(), {"IAM_GATES": "false"})
         self.assertEqual((r.returncode, r.stdout), (3, ""))
         self.assertIn("IAM_GATES=false", r.stderr)
@@ -2148,6 +2195,13 @@ class WiringTest(unittest.TestCase):
         try:
             data = add_superset(copy.deepcopy(model.load_defaults().data))
             target = os.path.join(root, "apps", "iam", "policy", "defaults.yaml")
+            skel = copy.deepcopy(data)   # the skeleton version alone: the block, no cell
+            del skel["matrix"]["analysis"]
+            with open(target, "w") as fh:
+                yaml.safe_dump(skel, fh)
+            r = run(root, {"IAM_GATES": "true"})
+            self.assertEqual((r.returncode, r.stdout), (5, ""), r.stderr)
+            self.assertIn("gives no role a setting", r.stderr)
             with open(target, "w") as fh:
                 yaml.safe_dump(data, fh)
             r = run(root, {"IAM_GATES": "true"})
@@ -2946,6 +3000,30 @@ class ExplainCellTest(unittest.TestCase):
         self.assertEqual(d["constraints"]["R"]["name"], "own_unit")
         with self.assertRaises(KeyError):
             explain.cell(self.p, None, "nobody", "runs")
+
+    def test_a_superset_cell(self):
+        """Stage C on the add_superset fixture: a builder's cell gives the host, its levels and
+        Alpha; a viewer's Gamma; a role without a cell nothing. Against the skeleton version
+        alone (no cell applied) the change version's cell adds exactly what it gives."""
+        from compiler import explain
+        p = model.Policy(add_superset(copy.deepcopy(self.p.data)))
+        d = copy.deepcopy(p.data)
+        del d["matrix"]["analysis"]
+        skel = model.Policy(d)
+        eng = explain.cell(p, skel, "engineer", "analysis")
+        self.assertEqual(eng["levels"], ["C", "R", "U"])
+        self.assertIn(["tool", "analysis", "Alpha", None], eng["gives"])
+        self.assertIn(["host", "SUPERSET_DOMAIN", None], eng["gives"])
+        self.assertNotIn(["tool", "analysis", "Gamma", None], eng["gives"])
+        self.assertFalse(eng["changed"]["same"])
+        self.assertEqual(sorted(map(str, eng["changed"]["adds"])), sorted(map(str, eng["gives"])))
+        self.assertEqual(eng["changed"]["removes"], [])
+        qp = explain.cell(p, None, "qp", "analysis")
+        self.assertEqual(qp["levels"], ["R"])
+        self.assertIn(["tool", "analysis", "Gamma", None], qp["gives"])
+        self.assertNotIn(["tool", "analysis", "Alpha", None], qp["gives"])
+        for r in ("qa", "auditor", "admin", "operator", "maintenance"):   # D8
+            self.assertEqual(explain.cell(p, None, r, "analysis")["gives"], [], r)
 
     def test_compiler_configmap_size(self):
         sys.path.insert(0, os.path.join(REPO, "apps", "iam"))

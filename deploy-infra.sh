@@ -481,10 +481,10 @@ _SVC_DOMAINS=()
 ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"   # older config.env files lack it
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"             # likewise
 POLICY_DOMAIN="${POLICY_DOMAIN:-policy.$DOMAIN}"             # likewise (the Policy UI, IAM 4.3)
-SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"       # likewise (the portal's dashboard chooser)
+SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"       # likewise (Superset, the portal's dashboard chooser)
 for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
           SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN \
-          ONBOARD_DOMAIN ACCESS_DOMAIN POLICY_DOMAIN; do
+          ONBOARD_DOMAIN ACCESS_DOMAIN POLICY_DOMAIN SUPERSET_DOMAIN; do
     [[ -n "${!_v:-}" ]] && _SVC_DOMAINS+=("${!_v}")
 done
 _ALIAS_ON=false
@@ -788,6 +788,8 @@ _create_client() {
     # log out?" page while the browser has a Keycloak session; with none it
     # redirects at once.
     local ORIGIN="${REDIRECT_URI%%/oauth2/*}"; ORIGIN="${ORIGIN%%/login/*}"; ORIGIN="${ORIGIN%%/hub/*}"
+    # Superset's callback is Flask-AppBuilder's /oauth-authorized/<provider>.
+    ORIGIN="${ORIGIN%%/oauth-authorized/*}"
     # A fifth argument adds one more post-logout URI (Keycloak's "##" list): the
     # workbench's /hub/logout returns to the portal, and each user-menu host's
     # end-session returns to /hub/logout (one-hop sign-out, 1 Nov 2026).
@@ -982,6 +984,15 @@ _ACCESS_COOKIE_SECRET="${ACCESS_COOKIE_SECRET:-$(openssl rand -base64 24)}"
 echo -e "${YELLOW}  Creating client 'policy'...${NC}"
 _POLICY_SECRET=$(_create_client "policy" "https://${POLICY_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
 _POLICY_COOKIE_SECRET="${POLICY_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+# Superset signs people in itself (Flask-AppBuilder, apps/superset/medcea_security.py),
+# like Grafana: no oauth2-proxy, no cookie secret. Created whether or not the policy
+# has Superset yet (stage C, N5): a client no deployed app uses is inert. Its Sign out
+# is the platform's one-hop chain (superset_logout_return): Keycloak returns to the
+# workbench's /hub/logout under WORKBENCH_ENABLED=true, else to the portal's proxy
+# sign-out, so both are registered whatever WORKBENCH_ENABLED says (as for edge-wizard).
+echo -e "${YELLOW}  Creating client 'superset'...${NC}"
+_SUPERSET_SECRET=$(_create_client "superset" "https://${SUPERSET_DOMAIN}/oauth-authorized/keycloak" false "" \
+    "${_HUB_LOGOUT_URI}##https://${PORTAL_DOMAIN}/*")
 _ACCESS_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=access" \
   -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
 if [[ -n "$_ACCESS_UUID" ]]; then
@@ -1458,7 +1469,7 @@ if [[ -n "$_GS_ID" ]]; then
     # Every client of the access policy's hosts (apps/iam/policy/defaults.yaml);
     # a client asking for "groups" without having the scope gets invalid_scope.
     # workbench-notebook has no host: it is network.clients.notebooks' token_client.
-    for _c in portal access policy config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana workbench-notebook; do
+    for _c in portal access policy config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana superset workbench-notebook; do
         _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
           -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
         [[ -n "$_C_UUID" ]] || continue
@@ -1586,19 +1597,33 @@ if [[ -z "$_NODE_RED_SECRET" || -z "$_GRAFANA_SECRET" || -z "$_WORKBENCH_SECRET"
     exit 1
 fi
 
-# Patch config.env in place with the generated secrets
+# Patch config.env in place with the generated secrets. _config_env_set KEY VALUE
+# rewrites every KEY= line (nothing when there is none); the value reaches awk in its
+# environment, never in argv: any account on the host can read /proc/<pid>/cmdline of a
+# `sed -i "s|…|<secret>|"`. Through a temporary file and `cat >`, which keeps the file's
+# mode and owner, as sed -i did.
+_config_env_set() {
+    local tmp
+    tmp="$(mktemp config.env.XXXXXX)" || return 1
+    if K="$1" V="$2" awk 'index($0, ENVIRON["K"] "=") == 1 { print ENVIRON["K"] "=\"" ENVIRON["V"] "\""; next } { print }' \
+           config.env >"$tmp" && cat "$tmp" >config.env; then
+        rm -f "$tmp"
+    else
+        rm -f "$tmp"; echo -e "${RED}ERROR: could not write ${1} to config.env.${NC}" >&2; return 1
+    fi
+}
 echo -e "${YELLOW}  Writing secrets to config.env...${NC}"
-sed -i "s|^OAUTH2_PROXY_SECRET=.*|OAUTH2_PROXY_SECRET=\"${_NODE_RED_SECRET}\"|" config.env
-sed -i "s|^GRAFANA_OAUTH_SECRET=.*|GRAFANA_OAUTH_SECRET=\"${_GRAFANA_SECRET}\"|" config.env
+_config_env_set OAUTH2_PROXY_SECRET "${_NODE_RED_SECRET}" || exit 1
+_config_env_set GRAFANA_OAUTH_SECRET "${_GRAFANA_SECRET}" || exit 1
 if grep -q '^WORKBENCH_SECRET=' config.env; then
-    sed -i "s|^WORKBENCH_SECRET=.*|WORKBENCH_SECRET=\"${_WORKBENCH_SECRET}\"|" config.env
+    _config_env_set WORKBENCH_SECRET "${_WORKBENCH_SECRET}" || exit 1
 else
     printf '\n# JupyterHub workbench (infra/deploy-workbench.sh) — Keycloak client\nWORKBENCH_SECRET="%s"\n' \
         "${_WORKBENCH_SECRET}" >> config.env
 fi
-sed -i "s|^OAUTH2_COOKIE_SECRET=.*|OAUTH2_COOKIE_SECRET=\"${_COOKIE_SECRET}\"|" config.env
-sed -i "s|^PORTAL_OAUTH2_PROXY_SECRET=.*|PORTAL_OAUTH2_PROXY_SECRET=\"${_PORTAL_SECRET}\"|" config.env
-sed -i "s|^PORTAL_COOKIE_SECRET=.*|PORTAL_COOKIE_SECRET=\"${_PORTAL_COOKIE_SECRET}\"|" config.env
+_config_env_set OAUTH2_COOKIE_SECRET "${_COOKIE_SECRET}" || exit 1
+_config_env_set PORTAL_OAUTH2_PROXY_SECRET "${_PORTAL_SECRET}" || exit 1
+_config_env_set PORTAL_COOKIE_SECRET "${_PORTAL_COOKIE_SECRET}" || exit 1
 for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=${_CONFIG_COOKIE_SECRET}" \
            "ACCESS_CLIENT_SECRET=${_ACCESS_SECRET}" "ACCESS_COOKIE_SECRET=${_ACCESS_COOKIE_SECRET}" \
            "POLICY_CLIENT_SECRET=${_POLICY_SECRET}" "POLICY_COOKIE_SECRET=${_POLICY_COOKIE_SECRET}" "POLICY_DOMAIN=${POLICY_DOMAIN}" \
@@ -1606,13 +1631,13 @@ for _kv in "CONFIG_OAUTH2_PROXY_SECRET=${_CONFIG_SECRET}" "CONFIG_COOKIE_SECRET=
            "SCHEDULER_CLIENT_SECRET=${_SCHEDULER_SECRET}" "SCHEDULER_COOKIE_SECRET=${_SCHEDULER_COOKIE_SECRET}" \
            "DBMGMT_CLIENT_SECRET=${_DBMGMT_SECRET}" "DBMGMT_COOKIE_SECRET=${_DBMGMT_COOKIE_SECRET}" \
            "MQTTX_CLIENT_SECRET=${_MQTTX_SECRET}" "MQTTX_COOKIE_SECRET=${_MQTTX_COOKIE_SECRET}" \
-           "PGADMIN_OAUTH_SECRET=${_PGADMIN_SECRET}" \
+           "PGADMIN_OAUTH_SECRET=${_PGADMIN_SECRET}" "SUPERSET_CLIENT_SECRET=${_SUPERSET_SECRET}" \
            "MQTT_NODE_RED_PASS=${_MQTT_NODE_RED_PASS}" "MQTT_SCHEDULER_PASS=${_MQTT_SCHEDULER_PASS}" \
            "MQTT_AUTH_DB_PASS=${_MQTT_AUTH_DB_PASS}" \
            "KC_DEPLOYER_SECRET=${KC_DEPLOYER_SECRET:-}"; do
     _k="${_kv%%=*}"
     if grep -q "^${_k}=" config.env; then
-        sed -i "s|^${_k}=.*|${_k}=\"${_kv#*=}\"|" config.env
+        _config_env_set "$_k" "${_kv#*=}" || exit 1
     else
         printf '%s="%s"\n' "$_k" "${_kv#*=}" >> config.env
     fi
@@ -1622,7 +1647,7 @@ done
 # than sed-replace: a plain sed would silently do nothing and the edge wizard
 # would then refuse to start with no explanation.
 if grep -q '^EDGE_WIZARD_SECRET=' config.env; then
-    sed -i "s|^EDGE_WIZARD_SECRET=.*|EDGE_WIZARD_SECRET=\"${_EDGE_WIZARD_SECRET}\"|" config.env
+    _config_env_set EDGE_WIZARD_SECRET "${_EDGE_WIZARD_SECRET}" || exit 1
 else
     printf '\n# Edge provisioning wizard (edge/flash-device.sh --ui) — Keycloak client\nEDGE_WIZARD_SECRET="%s"\nEDGE_WIZARD_PORT="%s"\nEDGE_WIZARD_ROLE=""\n' \
         "${_EDGE_WIZARD_SECRET}" "${_EW_PORT}" >> config.env

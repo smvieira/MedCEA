@@ -8,7 +8,8 @@
 # init container, mounts and environment as the Deployment (k8s/superset.yaml): the
 # config is loaded the same way, and a missing secret fails here first.
 # Render list (deploy.sh _POD_VARS, which also carries PLATFORM_IP): NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM SUPERSET_DOMAIN PORTAL_DOMAIN
-# SUPERSET_CONFIG_CHECKSUM PG_SECRET PG_SECRET_KEY SUPERSET_DB_USER POSTGRES_DB.
+# SUPERSET_CONFIG_CHECKSUM PG_SECRET PG_SECRET_KEY SUPERSET_DB_USER POSTGRES_DB
+# MEDCEA_LOGOUT_RETURN SUPERSET_WHEEL_DIR SUPERSET_WHEEL_UID SUPERSET_WHEEL_GID.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -43,14 +44,20 @@ spec:
       initContainers:
       - name: superset-deps
         # The three packages the lean image lacks (apps/superset/requirements.txt),
-        # each pinned by sha256: no other package, no sdist, no index but PyPI.
+        # each pinned by sha256: no other package, no sdist, no index — only the wheel
+        # cache SUPERSET_WHEEL_DIR the full deploy filled (k8s/superset-wheels.yaml).
         # /usr/local/bin/pip3: the image's /app/.venv (uv) has no pip.
         image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
         command: ["/usr/local/bin/pip3", "install", "--isolated", "--no-deps", "--require-hashes",
                   "--only-binary=:all:", "--no-cache-dir", "--disable-pip-version-check",
-                  "--index-url", "https://pypi.org/simple", "--target", "/opt/extra",
+                  "--no-index", "--find-links", "/wheels", "--target", "/opt/extra",
                   "-r", "/app/pythonpath/requirements.txt"]
+        env:
+        - {name: HOME, value: "/tmp"}   # an account the image's /etc/passwd may not know
         securityContext:
+          # the wheel cache's owner (mode 700): the main container reads /opt/extra as 1000
+          runAsUser: ${SUPERSET_WHEEL_UID}
+          runAsGroup: ${SUPERSET_WHEEL_GID}
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
@@ -60,6 +67,7 @@ spec:
           limits: {memory: "512Mi", cpu: "1"}
         volumeMounts:
         - {name: extra, mountPath: /opt/extra}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
         - {name: tmp, mountPath: /tmp}
         - {name: home, mountPath: /app/superset_home}
         - {name: config, mountPath: /app/pythonpath, readOnly: true}
@@ -77,6 +85,9 @@ spec:
         - {name: KEYCLOAK_REALM, value: "${KEYCLOAK_REALM}"}
         - {name: SUPERSET_DOMAIN, value: "${SUPERSET_DOMAIN}"}
         - {name: PORTAL_DOMAIN, value: "${PORTAL_DOMAIN}"}
+        # where Keycloak's end-session returns (N4: superset_logout_return, the
+        # platform's one-hop sign-out chain; registered on client superset)
+        - {name: MEDCEA_LOGOUT_RETURN, value: "${MEDCEA_LOGOUT_RETURN}"}
         - {name: MEDCEA_DATA_DB_USER, value: "${SUPERSET_DB_USER}"}
         - {name: MEDCEA_DATA_DB_NAME, value: "${POSTGRES_DB}"}
         - name: MEDCEA_DATA_DB_PASS
@@ -104,6 +115,10 @@ spec:
         - {name: config, mountPath: /app/pythonpath, readOnly: true}
       volumes:
       - {name: extra, emptyDir: {sizeLimit: 256Mi}}
+      - name: wheels
+        hostPath:
+          path: ${SUPERSET_WHEEL_DIR}
+          type: Directory
       - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
       - {name: home, emptyDir: {sizeLimit: 256Mi}}
       - name: config

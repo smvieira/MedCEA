@@ -28,6 +28,10 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
   PhaseSupersetBDelta  against PRE_SB (90e8dcb): the same for Superset stage B (the superset
                    tool kind in tools.py and cli.py, a comment in defaults.yaml); `compile
                    superset` refuses, `has-tool superset` says none
+  PhaseStageCADelta  against PRE_SC (12d70b2): the same for Superset stage C's commit A
+                   (proxies.ENFORCEMENT's SUPERSET_DOMAIN, tools.admits_anyone, has-tool
+                   --admitting, apply_check's conditional superset target); apply_check
+                   compiles the same targets from the factory policy
                    (applying versions changes no compiled artefact and no skeleton)
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
@@ -104,6 +108,8 @@ PRE_44 = "31df34b"   # slice 4.3 built: 4.4 changes no compiled artefact, no lis
 PRE_45 = "05c1af9"   # slice 4.4 deployed: 4.5 changes no compiled artefact, no listing and no skeleton
 PRE_SB = "90e8dcb"   # IAM Phase 4 complete: Superset stage B adds code only (the superset tool kind),
                      # no compiled artefact, no listing and no skeleton moves
+PRE_SC = "12d70b2"   # Superset stage B live: stage C's commit A adds code only (the policy, the
+                     # skeleton version, comes with commit B), no artefact, listing or skeleton moves
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -2339,6 +2345,98 @@ class PhaseSupersetBDelta(unittest.TestCase):
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SB, state=None, check=True))
             except source.SourceError as e:
                 self.skipTest(f"no git revision {PRE_SB}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+        self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+class PhaseStageCADelta(unittest.TestCase):
+    """Superset stage C, commit A (7 Nov 2026): SUPERSET_DOMAIN's enforcement status (code,
+    listed before the host is in the policy), tools.admits_anyone, `has-tool --admitting` and
+    apply_check's superset target while a group gives a setting. defaults.yaml is not
+    changed: every artefact, the hosts listing included, compiles byte for byte as PRE_SC,
+    the skeleton is equal, and apply_check compiles the same targets (no superset)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_SC, "medcea-presc-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_SC}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        self.assertNotIn("superset", self.want)
+        self.assertNotIn("SUPERSET_DOMAIN", self.want["hosts"])   # an ENFORCEMENT entry prints nothing
+        for key, want in self.want.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_SC}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_check_output_identical(self):
+        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
+        root = scratch_repo("medcea-sc-")
+        try:
+            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual((rc, out), (rc_old, out_old), err)
+
+    def test_policy_file_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_text = f.read()
+        with open(DEFAULTS) as f:
+            self.assertEqual(f.read(), old_text)   # commit B changes it, not A
+        self.assertEqual(source.skeleton_digest(yaml.safe_load(old_text)), source.skeleton_digest(self.p.data))
+
+    def test_apply_targets_unchanged(self):
+        """apply_check.targets() of the factory policy, PRE_SC's against this tree's: the
+        superset target is not there, so digests_of records the same keys (F3)."""
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_SC}:apps/iam/apply_check.py"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = ("import json, sys; sys.path.insert(0, sys.argv[1]); import apply_check; from compiler import model; "
+                "print(json.dumps(apply_check.targets(model.load_defaults())))")
+        r = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(self.old, "apps", "iam")],
+                           capture_output=True, text=True, env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        import apply_check
+        self.assertEqual(json.loads(r.stdout), [[n, a] for n, a in apply_check.targets(self.p)])
+
+    def test_superset_still_absent(self):
+        root = scratch_repo("medcea-sc-")
+        try:
+            cli = os.path.join(root, "apps", "iam", "compiler", "cli.py")
+            for args in (["has-tool", "superset"], ["has-tool", "superset", "--admitting"]):
+                self.assertEqual(run_cli(args, cli=cli)[:2], (1, ""), args)
+            rc, out, err = run_cli(["compile", "superset"], cli=cli)
+            self.assertEqual((rc, out), (1, ""))
+            self.assertIn("no group has a superset tool block", err)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_skeleton_gate_against_presc_is_equal(self):
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SC, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_SC}: {e}")
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])

@@ -15,6 +15,7 @@ applies or deletes anything, and that --check-only and --status write nothing.
 """
 import base64
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -37,7 +38,7 @@ sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
 from _scratch import clean_env, scratch_repo  # noqa: E402
 
 import apply_check  # noqa: E402
-from compiler import model, source  # noqa: E402
+from compiler import model, source, tools  # noqa: E402
 
 ADMIN = "11111111-1111-4111-8111-111111111111"
 QA = "22222222-2222-4222-8222-222222222222"
@@ -500,7 +501,7 @@ class Tree:
         # n runs of <rel> (all without :n) with exit rc
         for rel in ("deploy-infra.sh", "infra/deploy-workbench.sh") + tuple(
                 f"apps/{c}/deploy.sh" for c in ("access", "edge-wizard", "frontend", "monitor", "mqtt-explorer",
-                                                 "scheduler")):
+                                                 "scheduler", "superset")):
             dst = os.path.join(self.root, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(dst, "w") as f:
@@ -583,6 +584,7 @@ def b64var(sql, name):
 
 
 V1 = None
+PRE_STAGE_C = "12d70b2"   # Superset stage C, commit A's base: version 14 was applied with its compiler
 
 
 def read_repo(rel):
@@ -947,7 +949,7 @@ class AfterCommit(unittest.TestCase):
         with open(os.path.join(self.t.fd, "scoped.log")) as f:
             ran = f.read().splitlines()
         self.assertEqual(ran[:2], ["deploy-infra.sh --policy-only", "infra/deploy-workbench.sh --policy-only"])
-        self.assertEqual(len(ran), 8)
+        self.assertEqual(len(ran), 9)   # superset's --gate-only since stage C
         self.assertTrue(all(r.endswith(" --gate-only") for r in ran[2:]), ran)
 
     def test_a_signal_after_the_commit_is_exit_3(self):
@@ -1097,9 +1099,17 @@ class FreshInstallOrder(unittest.TestCase):
 
     BEFORE = ("access", "database", "frontend")
     AFTER = ("monitor", "scheduler")
+    # Superset stage C: the real component, last (alphabetical), with config.env's default
+    # switches (no IAM_DB_SERVICE_ROLES): it skips with exit 0, so a fresh install stays green
+    # (F7), whichever of its two skips the factory policy reaches
+    SKIP_NOT_IN_POLICY = "skipped: Superset is not in the applied access policy, or no role is given a setting"
+    SKIP_NEEDS_SVC_ROLES = "skipped: Superset needs IAM_DB_SERVICE_ROLES=true (its data connection is svc_superset)"
 
     def tree(self, **sc):
         t = Tree(configmap=None, comment=None, **sc)
+        shutil.rmtree(t.path("apps", "superset"))
+        shutil.copytree(os.path.join(REPO, "apps", "superset"), t.path("apps", "superset"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(os.path.join(REPO, "deploy-apps.sh"), t.path("deploy-apps.sh"))
         # a scratch tree: the host package check is not under test
         with open(t.path("infra/lib-prereqs.sh"), "w") as f:
@@ -1138,6 +1148,14 @@ class FreshInstallOrder(unittest.TestCase):
             self.assertEqual(len(builds), 1)
             self.assertEqual(t.read_state()["last_apply_event"]["event"], "bootstrap_applied")
             self.assertFalse([w for w in writes(t.calls()) if w[0] != "psql"])
+            # the real Superset deploy ran after scheduler, saw version 1 and skipped
+            out = p.stdout + p.stderr
+            factory = model.load_defaults()
+            admits = bool(tools.groups(factory, "superset")) and tools.admits_anyone(factory, "superset")
+            self.assertIn(self.SKIP_NEEDS_SVC_ROLES if admits else self.SKIP_NOT_IN_POLICY, out)
+            self.assertNotIn("ERROR", out[out.index("skipped: Superset"):])
+            self.assertFalse([c for c in t.calls() if c["kind"] == "kubectl" and "superset" in " ".join(c["argv"])
+                              and c["argv"][:1] != ["get"]])
         finally:
             t.close()
 
@@ -2312,6 +2330,73 @@ class SummaryDetail(unittest.TestCase):
         self.assertIn("  mqtt engineer: + write +/+/control/# (commissioning_unit)", lines)
         self.assertIn("  netpol iam-access: changed", lines)
         self.assertEqual(apply_check._changed_detail(a, a, []), [])
+        # Superset stage C: the change version that gives the cells adds the target
+        mapping = '{"engineer": ["Alpha", "sql_lab"], "qp": ["Gamma", "MedCEA Viewer"]}'
+        lines = apply_check._changed_detail(a, dict(a, superset=(0, mapping + "\n", "")), ["superset"])
+        self.assertEqual(lines, [f"  tool superset: (none)\n    → {mapping}"])
+
+
+class SupersetTargets(unittest.TestCase):
+    """Superset stage C (F3): the superset target and its digest exist only while a group
+    carries the tool and gives some role a setting, so versions 1-14 (no tool) and the
+    skeleton version (the block, no cell) compile and record exactly what they did before."""
+
+    @classmethod
+    def setUpClass(cls):
+        import test_policy
+        cls.defaults = model.load_defaults()
+        cls.full = model.Policy(test_policy.add_superset(copy.deepcopy(cls.defaults.data)))
+        d = copy.deepcopy(cls.full.data)
+        del d["matrix"]["analysis"]
+        cls.skel = model.Policy(d)
+
+    def test_targets(self):
+        names = lambda p: [n for n, _ in apply_check.targets(p)]   # noqa: E731
+        self.assertNotIn("superset", names(self.defaults))
+        self.assertNotIn("superset", names(self.skel))
+        self.assertIn(("superset", ["compile", "superset"]), apply_check.targets(self.full))
+        # the skeleton version adds its host's proxy target, and nothing else of Superset's
+        self.assertEqual(set(names(self.skel)) - set(names(self.defaults)), {"proxy-SUPERSET_DOMAIN"})
+        self.assertEqual(set(names(self.full)) - set(names(self.skel)), {"superset"})
+
+    def test_digests_of(self):
+        outs = {"routes": (0, json.dumps({"digest": "r" * 64}), ""), "mqtt": (0, json.dumps({"digest": "m" * 64}), ""),
+                "grafana": (0, "x\n", "")}
+        tools_v1 = apply_check.digests_of(outs, "c0ffee", "s" * 64)["tools"]
+        self.assertEqual(set(tools_v1), {"grafana", "jupyterhub_allowed", "jupyterhub_admin", "node_red",
+                                         "edge_wizard", "pgadmin"})   # as every version 1-14 recorded it
+        with_ss = apply_check.digests_of(dict(outs, superset=(0, "{}\n", "")), "c0ffee", "s" * 64)["tools"]
+        self.assertEqual(with_ss, dict(tools_v1, superset=hashlib.sha256(b"{}\n").hexdigest()))
+        failed = apply_check.digests_of(dict(outs, superset=(1, "", "nobody")), "c0ffee", "s" * 64)["tools"]
+        self.assertIsNone(failed["superset"])
+
+    def test_owners_and_verify(self):
+        self.assertEqual(apply_check.HOST_OWNER["SUPERSET_DOMAIN"], "./apps/superset/deploy.sh --gate-only")
+        self.assertEqual(apply_check.TARGET_OWNER["superset"], "./apps/superset/deploy.sh --gate-only")
+        self.assertIn("superset", apply_check.TOOL_TARGETS)
+        self.assertEqual(apply_check.scoped_commands().count("./apps/superset/deploy.sh --gate-only"), 1)
+        self.assertIn("./apps/superset/deploy.sh", apply_check.full_deploys())
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 9)
+        self.assertEqual(apply_check.VERIFY_CHECKS[-1], ("supersetroles", "$NAMESPACE"))
+        self.assertIn("step9:supersetroles | supersetroles | $NAMESPACE |", apply_check.verify_conf().splitlines())
+        self.assertIn("step 9's conf (nine checks)", apply_check.__doc__)
+        self.assertIn("step 9's conf (nine checks)", read_repo("apps/iam/apply.sh"))
+        self.assertNotIn("eight checks", read_repo("apps/iam/apply.sh"))
+
+    def test_an_incomplete_wheel_cache_is_a_deferral(self):
+        # --gate-only exits 4 when a re-render would restart the pod without its wheels (N10):
+        # recorded as apply_deferred with its own reason, supersetroles dropped from step 9
+        cmd = "./apps/superset/deploy.sh --gate-only"
+        self.assertEqual(apply_check.DEFER_CHECK[cmd], "supersetroles")
+        out = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "apply_check.py"),
+                              "deferred-reason", "--command", cmd], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.splitlines(), ["Superset's wheel cache is incomplete",
+                                                   "once ./apps/superset/deploy.sh has filled the wheel cache"])
+        self.assertEqual(apply_check.DEFER_REASON["./apps/edge-wizard/deploy.sh --gate-only"][0],
+                         "an onboarding run is in progress")   # as every apply_deferred before stage C
+        self.assertEqual(set(apply_check.DEFER_REASON), set(apply_check.DEFER_CHECK))
+        self.assertIn('--reason "${why[0]}"', read_repo("apps/iam/apply.sh"))
 
 
 class GateDecision(unittest.TestCase):
@@ -2625,7 +2710,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("is not approved any more", sql)
         self.assertIn("is not applied with the staged entries", sql)
         # every scoped mode once, then the record with 4.5's fields
-        self.assertEqual(len(self.scoped()), 8)
+        self.assertEqual(len(self.scoped()), 9)   # 8 stubs before Superset stage C
         recs = self.records()
         self.assertEqual([r["event"] for r in recs], ["applied"])
         pl = recs[0]["payload"]
@@ -2637,12 +2722,12 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("routes", pl["changed"])
         self.assertEqual(pl["reason"], "version 2 (change) applied, approved by quinn")
         self.assertIn("chain head before the apply: 41:" + "ab" * 32, p.stdout)
-        # step 9's eight checks; iampolicy never inside it
+        # step 9's nine checks (supersetroles since stage C); iampolicy never inside it
         confs = [c["conf"] for c in calls if c["kind"] == "health" and any(l.startswith("step9:") for l in c["conf"])]
         self.assertEqual(len(confs), 2)              # the baseline and one verify
         self.assertEqual([l.split("|")[1].strip() for l in confs[1]],
                          ["iamgrants", "iamenforce", "grafanarole", "iamworkbench", "onboardroles", "pgadminroles",
-                          "noderedauth", "iamartefacts"])
+                          "noderedauth", "iamartefacts", "supersetroles"])
         self.assertFalse(any("iampolicy" in l for c in confs for l in c))
         self.assertEqual([w for w in writes(calls) if w[0] != "psql"], [])
 
@@ -2945,6 +3030,31 @@ class ApplyVersion(unittest.TestCase):
         confs = [c["conf"] for c in self.t.calls() if c["kind"] == "health" and any(l.startswith("step9:") for l in c["conf"])]
         self.assertTrue(any("onboardroles" in l for l in confs[0]))             # the baseline asks it
         self.assertFalse(any("onboardroles" in l for l in confs[-1]))           # step 9 drops it
+        # the record's reason and the hint are the wizard's, unchanged by stage C
+        self.assertEqual(recs[1]["payload"]["target"], "edge-wizard")
+        self.assertEqual(recs[1]["payload"]["reason"], "an onboarding run is in progress")
+        self.assertRegex(p.stderr, r"deferred: \./apps/edge-wizard/deploy\.sh --gate-only \(apply_deferred, event \d+\): "
+                                   r"run \./apps/iam/apply\.sh --resume --by <you> once the onboarding run has finished")
+
+    def test_a_deferred_superset(self):
+        # Superset's --gate-only exits 4 only while its wheel cache is incomplete and the
+        # running Superset admits nothing the version takes away (apps/superset/deploy.sh)
+        self.reset()
+        p = self.run_(FAKE_SCOPED="apps/superset/deploy.sh=4")
+        self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+        recs = self.records()
+        self.assertEqual([r["event"] for r in recs], ["applied", "apply_deferred"])
+        self.assertEqual(recs[0]["payload"]["deferred"], ["./apps/superset/deploy.sh --gate-only"])
+        self.assertEqual(recs[1]["payload"]["target"], "superset")
+        self.assertEqual(recs[1]["payload"]["command"], "./apps/superset/deploy.sh --gate-only")
+        self.assertEqual(recs[1]["payload"]["reason"], "Superset's wheel cache is incomplete")
+        self.assertRegex(p.stderr, r"deferred: \./apps/superset/deploy\.sh --gate-only \(apply_deferred, event \d+\): "
+                                   r"run \./apps/iam/apply\.sh --resume --by <you> once \./apps/superset/deploy\.sh "
+                                   r"has filled the wheel cache")
+        confs = [c["conf"] for c in self.t.calls() if c["kind"] == "health" and any(l.startswith("step9:") for l in c["conf"])]
+        self.assertTrue(any("supersetroles" in l for l in confs[0]))            # the baseline asks it
+        self.assertFalse(any("supersetroles" in l for l in confs[-1]))          # step 9 drops it
+        self.assertTrue(any("onboardroles" in l for l in confs[-1]))            # and nothing else
 
     def test_resume_with_an_unrelated_fail(self):
         st = dict(self.post, last_apply_event={"event": "apply_started", "event_id": 50})
@@ -2961,6 +3071,39 @@ class ApplyVersion(unittest.TestCase):
         p = self.t.run("--resume", "--by", "admin", FAKE_SCOPED="apps/edge-wizard/deploy.sh=4")
         self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
         self.assertEqual([r["event"] for r in self.records()], ["applied", "apply_deferred"])
+
+
+class DeferRecords(unittest.TestCase):
+    """apply.sh's defer_records, run from its own text with stubs: a deferred-reason that fails
+    or prints nothing is exit 3 (committed; --resume finishes it), never apply_deferred
+    {reason: ""}; a good one passes its first line as --reason and its second to the hint."""
+
+    def run_fn(self, reason_rc, reason_out):
+        with open(os.path.join(REPO, "apps", "iam", "apply.sh")) as f:
+            src = f.read()
+        fn = re.search(r"^defer_records\(\) \{.*?^\}\n", src, re.S | re.M).group(0)
+        stubs = ('py() { shift; if [[ "$1" == deferred-reason ]]; then printf "%s" "$REASON_OUT"; return "$REASON_RC"; fi; '
+                 'echo "record $*" >&2; }\n'
+                 'q() { echo 42; }\nwarn() { echo "WARN $*" >&2; }\nfail3() { echo "FAIL3 $*" >&2; exit 3; }\n'
+                 'CHECK=x STATE=s STAGE="$(mktemp -d)"; : >"$STAGE/deferred.sql"; trap \'rm -rf "$STAGE"\' EXIT\n'
+                 'DEFERRED=("./apps/superset/deploy.sh --gate-only")\n')
+        return subprocess.run(["bash", "-c", stubs + fn + "defer_records"], capture_output=True, text=True,
+                              env=dict(os.environ, REASON_RC=str(reason_rc), REASON_OUT=reason_out))
+
+    def test_reason_and_hint(self):
+        p = self.run_fn(0, "the cache is incomplete\nonce it is full\n")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--target superset --reason the cache is incomplete --command", p.stderr)
+        self.assertIn("WARN deferred: ./apps/superset/deploy.sh --gate-only (apply_deferred, event 42): "
+                      "run ./apps/iam/apply.sh --resume --by <you> once it is full", p.stderr)
+
+    def test_no_reason_is_not_recorded(self):
+        for rc, out in ((2, ""), (0, ""), (0, "only a reason\n"), (2, "a reason\nand when\n")):
+            with self.subTest(rc=rc, out=out):
+                p = self.run_fn(rc, out)
+                self.assertEqual(p.returncode, 3, p.stderr)
+                self.assertIn("FAIL3 cannot tell why ./apps/superset/deploy.sh --gate-only deferred", p.stderr)
+                self.assertNotIn("record ", p.stderr)
 
 
 SKEL_WIDE = ('routes: {"POST /_mqtt-credential": R}}',
@@ -3109,6 +3252,52 @@ class AuditMode(unittest.TestCase):
             self.assertEqual([c for c in t.calls() if c["kind"] == "curl"], [])
         finally:
             t.close()
+
+    def test_a_version_applied_before_stage_c_reproduces(self):
+        """F3: version 14 was applied with the compiler of 12d70b2, whose digests_of knew no
+        superset key. Its record must audit green with stage C's code, both through the
+        recorded commit's compiler (what --audit 14 does on the host) and through this
+        tree's (which compiles the same bytes: PhaseStageCADelta)."""
+        import test_policy
+        base = PRE_STAGE_C
+        r = subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", "-q", base + "^{commit}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {base}")
+        commit = r.stdout.strip()
+        old = tempfile.mkdtemp(prefix="medcea-audit-presc-")
+        try:
+            r = subprocess.run(f'git -C "{REPO}" archive {commit} apps/iam | tar -x -C "{old}"',
+                               shell=True, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            iam = os.path.join(old, "apps", "iam")
+            # the artefacts as 12d70b2's apply_check recorded them (its own compiler and factory file)
+            r = subprocess.run([sys.executable, "-I", "-c", (
+                "import json, sys; sys.path.insert(0, sys.argv[1]); import apply_check; from compiler import source; "
+                "print(json.dumps({'a': apply_check.digests_of(apply_check.compile_all(['--defaults']), sys.argv[2]), "
+                "'cd': source.compiler_digest()}))"), iam, commit],
+                capture_output=True, text=True, env=clean_env(), cwd=old)
+            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            recorded = json.loads(r.stdout)
+        finally:
+            shutil.rmtree(old, ignore_errors=True)
+        self.assertNotIn("superset", recorded["a"]["tools"])
+        self.assertNotEqual(recorded["cd"], source.compiler_digest())   # stage C moved the compiler
+        av = test_policy.AuditVersionTest
+        av.setUpClass()
+        if not av.head:
+            self.skipTest("no git")
+        case = av("test_a_record_recompiles_to_its_digests")
+        from compiler import cli
+        for compiler, how in ((recorded["cd"], f"compiled with the compiler of {commit}"),
+                              (source.compiler_digest(), "compiled with the compiler of this tree")):
+            with self.subTest(how):
+                doc = case.record(commit=commit, compiler=compiler, artefacts=recorded["a"])
+                rc, lines = cli.audit_version(doc)
+                text = "\n".join(f"{c} {t}" for c, t in lines)
+                self.assertEqual(rc, 0, text)
+                self.assertIn(how, text)
+                self.assertIn("OK artefact tools:", text)
 
     def test_the_document(self):
         d = tempfile.mkdtemp()

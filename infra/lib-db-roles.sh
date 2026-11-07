@@ -19,8 +19,9 @@
 #   iam-api (MQTT Explorer credentials)   iam_svc         apps/iam/deploy.sh (never postgres: it refuses)
 #   superset (the "MedCEA" connection)    svc_superset    apps/superset/deploy.sh (never postgres: it refuses;
 #                                         read from the Deployment's plain env SUPERSET_DB_USER. No
-#                                         Deployment exists before the policy has a superset tool,
-#                                         stage C, so until then it prints nothing)
+#                                         Deployment exists while the applied policy gives no role a
+#                                         Superset setting or IAM_DB_SERVICE_ROLES is not true, so
+#                                         then it prints nothing)
 #
 # A client moves to its own role only when IAM_DB_SERVICE_ROLES=true AND the role
 # can already log in; otherwise it stays on postgres and says why. The database

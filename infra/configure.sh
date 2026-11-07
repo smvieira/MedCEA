@@ -361,7 +361,8 @@ check_tailscale
 [[ -n "$(cfg_get GRAFANA_BREAKGLASS_PASS)" ]] || cfg_set GRAFANA_BREAKGLASS_PASS "$(gen_password)"
 # The database roles' passwords (IAM plan 3.6; apps/database/deploy.sh writes them
 # into Secrets db-<role>). Generated, never asked, never shown.
-# SVC_SUPERSET_DB_PASS is Superset's connection role, used from Superset stage C on.
+# SVC_SUPERSET_DB_PASS is Superset's connection role (svc_superset), used once the applied
+# access policy gives a role a Superset setting.
 for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
           SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS \
           SVC_SUPERSET_DB_PASS SUPERSET_META_DB_PASS; do

@@ -112,12 +112,13 @@ IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
         §14.8.7 step 3 and the bound (OA-c): K is a rollback target and today's skeleton with
         its rows grants no role more than the skeleton it was approved under
   rollback-diff --state S --stage DIR    the rollback's diff against the applied version
-  verify-conf --out F [--drop T]   step 9's conf (eight checks)
+  verify-conf --out F [--drop T]   step 9's conf (nine checks)
   health-results --in LOG --out F  {check: OK|WARN|FAIL|SKIP} from health-check.sh's output
   verify-judge --baseline B --now N [--drop T]
         the checks FAIL now and not in step 6b's baseline (revert-driving)
   verify-host --reference DIR      the written host file compiles to exactly DIR
   deferred-check --command C       the step-9 check a deferred scoped command drops
+  deferred-reason --command C      why it deferred (line 1) and when --resume closes it (line 2)
   bundle-sql --kind change|skeleton|rollback --stage DIR --doc D ... | --kind revert --stage DIR
         step 7's PRE and POST, and the revert bundle's (§14.8.6)
 """
@@ -139,7 +140,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from compiler import explain, model, source  # noqa: E402
+from compiler import explain, model, source, tools  # noqa: E402
 
 # Host → the command that owns its gate (design §6.7). The scoped modes (--policy-only,
 # --gate-only, IAM 4.2b) re-render only what drifted; apply.sh --resume runs them all
@@ -158,6 +159,7 @@ HOST_OWNER = {
     "ACCESS_DOMAIN": "./apps/access/deploy.sh --gate-only",
     "POLICY_DOMAIN": "./apps/iam/deploy.sh --gate-only",
     "ONBOARD_DOMAIN": "./apps/edge-wizard/deploy.sh --gate-only",
+    "SUPERSET_DOMAIN": "./apps/superset/deploy.sh --gate-only",   # Superset stage C
 }
 # The other targets (not a host's gate) and their owners.
 TARGET_OWNER = {
@@ -168,6 +170,7 @@ TARGET_OWNER = {
     "jupyterhub-allowed": "./infra/deploy-workbench.sh --policy-only",
     "jupyterhub-admin": "./infra/deploy-workbench.sh --policy-only",
     "edge-wizard": "./apps/edge-wizard/deploy.sh --gate-only",
+    "superset": "./apps/superset/deploy.sh --gate-only",
     "grants": "./apps/database/deploy.sh",
 }
 NETPOL_ARGS = ["--namespace", "medcea", "--node-ip", "192.0.2.1"]   # a fixed placeholder, both sides
@@ -728,9 +731,15 @@ SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
 # Step 9 (design §14.8.6): the checks of what a version changes, through health-check.sh -c
 VERIFY_CHECKS = (("iamgrants", "$POSTGRES_DB"), ("iamenforce", "$NAMESPACE"), ("grafanarole", "$NAMESPACE"),
                  ("iamworkbench", "$NAMESPACE"), ("onboardroles", ""), ("pgadminroles", "$NAMESPACE"),
-                 ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"))
+                 ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"), ("supersetroles", "$NAMESPACE"))
 # A scoped command's exit 4 (deferred) drops the check that would FAIL on the old setting
-DEFER_CHECK = {"./apps/edge-wizard/deploy.sh --gate-only": "onboardroles"}
+DEFER_CHECK = {"./apps/edge-wizard/deploy.sh --gate-only": "onboardroles",
+               "./apps/superset/deploy.sh --gate-only": "supersetroles"}
+# ... and why it deferred (apply_deferred's reason), and when --resume can close it
+DEFER_REASON = {"./apps/edge-wizard/deploy.sh --gate-only":
+                ("an onboarding run is in progress", "once the onboarding run has finished"),
+                "./apps/superset/deploy.sh --gate-only":
+                ("Superset's wheel cache is incomplete", "once ./apps/superset/deploy.sh has filled the wheel cache")}
 RESULT = re.compile(r"\[\s*(OK|WARN|FAIL|SKIP)\s*\]\s+step9:([a-z]+)")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -1211,7 +1220,7 @@ def summary_lines(stage_dir, doc_diff=None):
 
 
 TOOL_TARGETS = ("grafana", "jupyterhub-allowed", "jupyterhub-admin", "node-red", "edge-wizard", "pgadmin",
-                "egress-notebooks")
+                "superset", "egress-notebooks")
 
 
 def _changed_detail(prev, staged, changed):
@@ -1812,6 +1821,11 @@ def targets(p):
          ("jupyterhub-admin", ["compile", "jupyterhub", "--setting", "admin_groups"]),
          ("node-red", ["compile", "node-red"]), ("edge-wizard", ["compile", "edge-wizard"]),
          ("pgadmin", ["compile", "pgadmin"])]
+    # Superset (stage C) only while its group gives some role a setting: a policy without the
+    # tool, or with the block but no cell, compiles exactly the targets (and digests) it did
+    # before, so versions 1-14 audit as recorded (F3)
+    if tools.groups(p, "superset") and tools.admits_anyone(p, "superset"):
+        t.append(("superset", ["compile", "superset"]))
     t += [(f"proxy-{h}", ["compile", "proxy", h]) for h in p.hosts]
     for iam in ([], ["--without-iam"]):
         tag = "-without-iam" if iam else ""
@@ -1935,7 +1949,8 @@ def digests_of(outs, commit=None, skeleton_digest=None):
             "proxy": {n[len("proxy-"):]: h(n) for n in sorted(outs) if n.startswith("proxy-")},
             "tools": {"grafana": h("grafana"), "jupyterhub_allowed": h("jupyterhub-allowed"),
                       "jupyterhub_admin": h("jupyterhub-admin"), "node_red": h("node-red"),
-                      "edge_wizard": h("edge-wizard"), "pgadmin": h("pgadmin")}}
+                      "edge_wizard": h("edge-wizard"), "pgadmin": h("pgadmin"),
+                      **({"superset": h("superset")} if "superset" in outs else {})}}
 
 
 def strip_policy_env():
@@ -2426,6 +2441,8 @@ def main(argv=None):
     c.add_argument("--reference", required=True)
     c = sub.add_parser("deferred-check")
     c.add_argument("--command", required=True)
+    c = sub.add_parser("deferred-reason")
+    c.add_argument("--command", required=True)
     c = sub.add_parser("apply-extra")
     c.add_argument("--doc", required=True)
     c.add_argument("--stage", required=True)
@@ -2695,6 +2712,10 @@ def main(argv=None):
             c = DEFER_CHECK.get(a.command)
             if c:
                 print(c)
+            return 0
+        if a.cmd == "deferred-reason":
+            print("\n".join(DEFER_REASON.get(a.command, ("its scoped mode deferred it (exit 4)",
+                                                         "once that command succeeds"))))
             return 0
         if a.cmd == "apply-extra":
             reason = None

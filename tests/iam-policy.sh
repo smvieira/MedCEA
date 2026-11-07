@@ -36,9 +36,9 @@
 #       accepted skeleton
 #   11  the chain holds `approved` with its evidence, and verifies
 #   12  admin withdraws → withdrawn (default mode only)
-# --apply and --change, before any account is created: the eight checks apply.sh verifies
+# --apply and --change, before any account is created: the nine checks apply.sh verifies
 # against (iamgrants, iamenforce, grafanarole, iamworkbench, onboardroles, pgadminroles,
-# noderedauth, iamartefacts) must not FAIL (apply.sh N refuses an apply onto a failing
+# noderedauth, iamartefacts, supersetroles) must not FAIL (apply.sh N refuses an apply onto a failing
 # platform), else exit 2 naming them; under --change the applied version must be one
 # --rollback-to may return to (a bootstrap or rollback version confirmed and not disputed).
 # Before step 1 the flow's guard compiles the version that would be applied and stops with
@@ -54,7 +54,7 @@
 #   18  --change: apply.sh --rollback-to <applied before the run> → a rollback version
 #       applied, the privileges and the routes digest back
 #   19  --change: test-qa confirms the rollback in the Policy UI (token path)
-#   13  health shows no new FAIL (under --apply/--change the eight checks too)
+#   13  health shows no new FAIL (under --apply/--change the nine checks too)
 # Its trap, in this order: (1) a version this run created that is still open is withdrawn with
 # test-admin's token; if that fails, MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --withdraw-open
 # --by test-admin-<hex> (the run holds the lock, which apply.sh inherits); (2) under --change, a
@@ -233,7 +233,7 @@ if [[ -n "$OPEN_NOW" ]]; then
     exit 2
 fi
 
-# health: the policy checks (step 13) and, under --apply/--change, the eight checks apply.sh
+# health: the policy checks (step 13) and, under --apply/--change, the nine checks apply.sh
 # verifies against (design §14.8.6 step 9), whose FAILs before the run refuse it
 HC="$WORK/health.conf"
 HC_NAMES=("Access policy history" "Access policy version" "Policy artefacts" "Database grants")
@@ -244,7 +244,7 @@ printf '%s\n' '# tests/iam-policy.sh step 13' \
     'Database grants          | iamgrants    | $POSTGRES_DB |' > "$HC"
 HC8="$WORK/apply.conf"
 HC8_NAMES=("Database grants" "Service enforcement" "Grafana roles" "AI Workbench gate"
-           "Onboarding roles" "pgAdmin roles" "Node-RED editor rights" "Policy artefacts")
+           "Onboarding roles" "pgAdmin roles" "Node-RED editor rights" "Policy artefacts" "Superset roles")
 printf '%s\n' '# tests/iam-policy.sh: the checks of apply.sh step 9' \
     'Database grants          | iamgrants    | $POSTGRES_DB |' \
     'Service enforcement      | iamenforce   | $NAMESPACE   |' \
@@ -253,10 +253,12 @@ printf '%s\n' '# tests/iam-policy.sh: the checks of apply.sh step 9' \
     'Onboarding roles         | onboardroles |              |' \
     'pgAdmin roles            | pgadminroles | $NAMESPACE   |' \
     'Node-RED editor rights   | noderedauth  | $NAMESPACE   |' \
-    'Policy artefacts         | iamartefacts | $NAMESPACE   |' > "$HC8"
+    'Policy artefacts         | iamartefacts | $NAMESPACE   |' \
+    'Superset roles           | supersetroles | $NAMESPACE  |' > "$HC8"
 if [[ "$MODE" != default ]]; then
     tail -n +2 "$HC8" | grep -vF 'Database grants' | grep -vF 'Policy artefacts' >> "$HC"
-    HC_NAMES+=("Service enforcement" "Grafana roles" "AI Workbench gate" "Onboarding roles" "pgAdmin roles" "Node-RED editor rights")
+    HC_NAMES+=("Service enforcement" "Grafana roles" "AI Workbench gate" "Onboarding roles" "pgAdmin roles" "Node-RED editor rights"
+               "Superset roles")
 fi
 health_fails() {   # CONF NAME… → the names of the FAILing checks, one per line, sorted
     local conf="$1" out name

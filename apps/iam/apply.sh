@@ -26,7 +26,7 @@
 # §14.8.4.1). A step-9 check FAILing before the apply refuses it (exit 2: fix it first).
 # Then one transaction commits the version with its grants and functions compiled from it;
 # after the COMMIT the host file is rewritten, every scoped mode re-renders what drifted
-# (IAM 4.2b) and step 9's eight checks run against that baseline, up to 3 attempts 20 s
+# (IAM 4.2b) and step 9's nine checks run against that baseline, up to 3 attempts 20 s
 # apart. A change or rollback version whose rollout still fails is reverted (a second
 # bundle puts the previous version back, files partial_apply {reverting} under it, re-renders
 # it, then partial_apply {reverted} under N and applied {reverted_from} under the previous:
@@ -543,7 +543,7 @@ host_file_first() {   # §14.8.4 step 2.3: the host file is the applied version'
         || die 1 "cannot write state/policy-applied.yaml (above): nothing was changed"
     [[ -z "$out" || "$out" == *unchanged ]] || log "$out"
 }
-verify_run() {   # OUT [--drop=T]... — step 9's conf (eight checks) through health-check.sh; the results into OUT
+verify_run() {   # OUT [--drop=T]... — step 9's conf (nine checks) through health-check.sh; the results into OUT
     local out="$1"
     shift
     py "$CHECK" verify-conf --out "$STAGE/verify9.conf" "$@" || return 1
@@ -689,14 +689,20 @@ json.dump({"version": v, "kind": kind, "outcome": outcome, "attempts": int(sys.a
           open(sys.argv[7], "w"))' "$VERSION" "$KIND_B" "$1" "${2:-$ATTEMPTS}" "$A" "$STAGE/failed.txt" "$STAGE/pa.json"
 }
 defer_records() {   # each deferral after the applied record (open until the next applied record)
-    local cmd id
+    local cmd id why=()
     for cmd in "${DEFERRED[@]}"; do
+        # the reason, then when --resume closes it; read in full first, so a broken
+        # deferred-reason never records an apply_deferred without a reason
+        why="$(py "$CHECK" deferred-reason --command "$cmd")" || why=""
+        mapfile -t why <<<"$why"
+        [[ ${#why[@]} -eq 2 && -n "${why[0]}" && -n "${why[1]}" ]] \
+            || fail3 "cannot tell why $cmd deferred (apply_check.py deferred-reason, above)"
         py "$CHECK" deferred-record --state "$STATE" --target "$(basename "$(dirname "${cmd%% *}")")" \
-            --reason "an onboarding run is in progress" --command "$cmd" --out "$STAGE/deferred.sql" \
+            --reason "${why[0]}" --command "$cmd" --out "$STAGE/deferred.sql" \
             || fail3 "cannot build the apply_deferred record (above)"
         id="$(q -1 < "$STAGE/deferred.sql" | tr -d '[:space:]')" || id=""
         [[ "$id" =~ ^[0-9]+$ ]] || fail3 "could not record apply_deferred in iam_policy.history (above)"
-        warn "deferred: $cmd (apply_deferred, event $id): run ./apps/iam/apply.sh --resume --by <you> once the onboarding run has finished"
+        warn "deferred: $cmd (apply_deferred, event $id): run ./apps/iam/apply.sh --resume --by <you> ${why[1]}"
     done
 }
 follow_report() {   # V SINCE — step 9's reported part (design §14.8.6): iam-api's /healthz

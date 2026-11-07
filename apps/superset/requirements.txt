@@ -1,7 +1,10 @@
 # apps/superset/requirements.txt — the three packages apache/superset:6.1.0 (lean) lacks.
-# Installed at every pod start by the init container superset-deps (k8s/superset.yaml,
-# k8s/superset-init.yaml) with
-#   pip install --isolated --no-deps --require-hashes --only-binary=:all: --target /opt/extra
+# Downloaded once into the host's wheel cache SUPERSET_WHEEL_DIR by the full deploy
+# (Job superset-wheels: pip download --require-hashes --only-binary=:all:, owner decision
+# N10), then installed at every pod start by the init container superset-deps
+# (k8s/superset.yaml, k8s/superset-init.yaml) from that folder alone with
+#   pip install --isolated --no-deps --require-hashes --only-binary=:all: --no-index
+#               --find-links /wheels --target /opt/extra
 # so every line pins one wheel by sha256 and nothing else is pulled in. The image's
 # Python is 3.10.21 (image config of the pinned digest, not the 6.1.0 Dockerfile's
 # default 3.11): every wheel must be cp310 or py3-none-any, and joserfc 1.8.0 (Python
@@ -16,7 +19,8 @@
 #
 # To move a pin: read https://pypi.org/pypi/<name>/<version>/json, take the sha256 of
 # the cp310 manylinux x86_64 (or py3-none-any) wheel, replace both, re-run
-# python3 tests/test_superset_render.py, then ./apps/superset/deploy.sh.
+# python3 tests/test_superset_render.py, then ./apps/superset/deploy.sh (it downloads
+# the new wheel into the cache; the old one may stay, nothing installs it).
 psycopg2-binary==2.9.9 --hash=sha256:ed1184ab8f113e8d660ce49a56390ca181f2981066acc27cf637d5c1e10ce46e
 Authlib==1.9.5 --hash=sha256:e32a63e3d869196b61816b2602231862179a2ffc29358c009d1f022c8b86a8b2
 joserfc==1.7.7 --hash=sha256:06979cfbab78bc802f14c0358f32969826cc26720e13cb38926ffdc86bc0cb2c

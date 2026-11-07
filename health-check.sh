@@ -157,12 +157,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         pgadmin, or the deployment still holds the OAuth2 config or default password as plain"
     echo -e "         env (./deploy-infra.sh); WARN while IAM_GATES=false; SKIP without the deployment"
     echo ""
-    echo -e "  ${CYAN}supersetroles${NC} Superset admits the access policy's roles (Superset stage B): NAMESPACE"
+    echo -e "  ${CYAN}supersetroles${NC} Superset admits the access policy's roles (Superset stages B, C): NAMESPACE"
     echo -e "         FAIL when SUPERSET_ROLES_MAPPING in Secret superset-secrets differs from policy_tool"
-    echo -e "         superset (or the policy has no superset tool), a secret is a plain env value in the"
-    echo -e "         deployment or a ReplicaSet, the secret key is empty or the default, the connection"
-    echo -e "         is not svc_superset, or the image has no digest; WARN while IAM_GATES=false;"
-    echo -e "         SKIP without the deployment (until the policy has Superset, stage C)"
+    echo -e "         superset (or the policy has no superset tool, or gives no role a setting), a running"
+    echo -e "         pod was started with another Secret or ConfigMap (medcea/config-checksum), a secret"
+    echo -e "         is a plain env value in the deployment or a ReplicaSet, the secret key is empty or"
+    echo -e "         the default, the connection is not svc_superset, or the image has no digest; WARN"
+    echo -e "         while IAM_GATES=false or IAM_DB_SERVICE_ROLES is not true; SKIP without the deployment"
     echo ""
     echo -e "  ${CYAN}backupage${NC} the nightly backup (apps/backup): NAMESPACE"
     echo -e "         OK while the newest OK marker in BACKUP_DIR is at most 26 h old, WARN beyond,"
@@ -1313,23 +1314,36 @@ PY
 }
 
 # =============================================================================
-# Check: Superset's sign-in roles are the policy's (Superset stage B) — read-only
+# Check: Superset's sign-in roles are the policy's (Superset stages B and C) — read-only
 # target: NAMESPACE. Superset signs people in itself; the role each platform role gets
 # (AUTH_ROLES_MAPPING) is SUPERSET_ROLES_MAPPING in Secret superset-secrets, next to
 # its secret key and passwords, so the Deployment, its ReplicaSets and the Secret
 # reach python on stdin, which prints only verdicts, variable names and the mapping
 # (role names, no secret). SKIP without the Deployment: apps/superset/deploy.sh skips
-# until the applied policy has a superset tool (stage C).
+# while the applied policy gives no role a Superset setting, and while
+# IAM_DB_SERVICE_ROLES is not true (its connection is svc_superset).
+# The pod reads the mapping as a secretKeyRef env, at start only (F10): so a running
+# pod's medcea/config-checksum must equal superset_config_checksum
+# (apps/superset/lib-superset.sh, the deploy's own function) of the live Secret and
+# ConfigMap, or it still admits what an older Secret said.
 # FAIL: a secret as a plain env value (in the Deployment or a ReplicaSet it kept, by
 # name or because the value equals one of the Secret's), the Secret missing, its
 # SUPERSET_SECRET_KEY empty or Superset's default, the mapping not policy_tool
-# superset's (or the policy no longer has a superset tool), the connection user not
-# svc_superset, an image not pinned by digest; WARN while IAM_GATES=false.
+# superset's (or the policy no longer has a superset tool, or gives no role a setting),
+# a running pod started with another Secret or ConfigMap, the connection user not
+# svc_superset, an image not pinned by digest; WARN while IAM_GATES=false, while
+# IAM_DB_SERVICE_ROLES is not true (the next deploy stops it) and with no running pod.
 # =============================================================================
 check_supersetroles() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" doc have=() line want rc=0 same
-    timeout "$TIMEOUT" $KUBECTL get deployment superset -n "$ns" >/dev/null 2>&1 \
-        || { _record SKIP "$name" "no Superset deployment in $ns (it waits for the access policy, stage C)"; return; }
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" doc have=() line want rc=0 same sum pods
+    if ! timeout "$TIMEOUT" $KUBECTL get deployment superset -n "$ns" >/dev/null 2>&1; then
+        if [[ "${IAM_DB_SERVICE_ROLES:-false}" != "true" ]]; then
+            _record SKIP "$name" "no Superset deployment in $ns: it needs IAM_DB_SERVICE_ROLES=true (its data connection is svc_superset)"
+        else
+            _record SKIP "$name" "no Superset deployment in $ns (./apps/superset/deploy.sh installs it once the applied access policy gives a role a Superset setting)"
+        fi
+        return
+    fi
     doc="$( { timeout "$TIMEOUT" $KUBECTL get deployment,replicaset -n "$ns" -l app=superset -o json 2>/dev/null || echo null
               echo
               timeout "$TIMEOUT" $KUBECTL get secret superset-secrets -n "$ns" -o json 2>/dev/null || echo null; } \
@@ -1418,7 +1432,7 @@ print("unpinned " + " ".join(bad) if bad else "pinned")
         0) ;;
         3) _record WARN "$name" "IAM_GATES=false: Superset has no pre-policy setting; it runs with $(_ssr_get mapping) (./apps/superset/uninstall.sh, or IAM_GATES=true)"
            return ;;
-        5) _record FAIL "$name" "Superset is deployed, but the applied access policy has no superset tool: it still admits $(_ssr_get mapping) (./apps/superset/uninstall.sh)"
+        5) _record FAIL "$name" "Superset is deployed, but the applied access policy has no superset tool, or no role is given a setting: it still admits $(_ssr_get mapping) (./apps/superset/deploy.sh --gate-only stops it)"
            return ;;
         *) _record FAIL "$name" "cannot compile Superset's roles (python3 apps/iam/compiler/cli.py check)"
            return ;;
@@ -1431,6 +1445,22 @@ except Exception:
     print(False)' "$(_ssr_get mapping)" "$want" 2>/dev/null)"
     if [[ "$same" != True ]]; then
         _record FAIL "$name" "AUTH_ROLES_MAPPING is $(_ssr_get mapping), the policy compiles $want (./apps/superset/deploy.sh --gate-only)"
+        return
+    fi
+    # The running pods against the live Secret and ConfigMap (F10): the deploy's own checksum.
+    # shellcheck source=/dev/null
+    declare -F superset_config_checksum >/dev/null || source "$SCRIPT_DIR/apps/superset/lib-superset.sh" \
+        || { _record FAIL "$name" "cannot load apps/superset/lib-superset.sh"; return; }
+    sum="$(KUBECTL="timeout $TIMEOUT $KUBECTL" superset_config_checksum "$ns")" || sum=""
+    pods="$(KUBECTL="timeout $TIMEOUT $KUBECTL" superset_web_pods "$ns")" || pods="?"
+    if [[ -z "$sum" || "$pods" == "?" ]]; then
+        _record FAIL "$name" "cannot compare the running Superset with Secret superset-secrets and ConfigMap superset-config in $ns"
+    elif [[ -z "$pods" ]]; then
+        _record WARN "$name" "no running Superset pod in $ns (kubectl -n $ns get pod -l app=superset)"
+    elif [[ -n "$(awk -v s="$sum" '$2 != s {print $1}' <<<"$pods")" ]]; then
+        _record FAIL "$name" "pod $(awk -v s="$sum" '$2 != s {print $1; exit}' <<<"$pods") was started with another Secret or ConfigMap (medcea/config-checksum): it may still admit an older mapping (./apps/superset/deploy.sh)"
+    elif [[ "${IAM_DB_SERVICE_ROLES:-false}" != "true" ]]; then
+        _record WARN "$name" "IAM_DB_SERVICE_ROLES is not true: the next ./apps/superset/deploy.sh (or --gate-only) stops Superset, whose connection is svc_superset"
     else
         _record OK "$name" "maps $(python3 -c 'import json,sys; print(", ".join(sorted(json.loads(sys.argv[1]))))' "$want" 2>/dev/null) from the access policy (checked at sign-in only); connection svc_superset"
     fi

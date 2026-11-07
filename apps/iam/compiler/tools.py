@@ -74,6 +74,14 @@ def settings(p, group):
     return out
 
 
+def admits_anyone(p, kind):
+    """True when the one group carrying a `kind` tool block gives some role a setting. A tool
+    present but admitting nobody (Superset stage C: the skeleton version adds the block, a
+    later change version the cells) is not deployed: its compile would refuse (an empty
+    setting fails closed). ValueError, as _one, unless exactly one group carries it."""
+    return any(roles for _, roles in settings(p, _one(p, kind)))
+
+
 def _one(p, kind):
     gs = groups(p, kind)
     if len(gs) != 1:

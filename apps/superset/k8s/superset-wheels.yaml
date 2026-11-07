@@ -1,0 +1,72 @@
+# apps/superset/k8s/superset-wheels.yaml — the one-off Job that fills Superset's wheel
+# cache (owner decision N10, 7 Nov 2026): pip download of the three hash-pinned wheels
+# of requirements.txt into SUPERSET_WHEEL_DIR on the host. apps/superset/deploy.sh runs
+# it only when a pinned wheel is missing there (superset_wheels_missing, lib-superset.sh),
+# before it applies anything the pods read, with requirements.txt in a ConfigMap of its
+# own (superset-wheels: superset-config is covered by the pods' checksum), and deletes
+# both afterwards; --gate-only never runs it. The init containers of
+# k8s/superset.yaml and k8s/superset-init.yaml then install from that folder alone
+# (--no-index), so a pod start needs no PyPI.
+# Same image as the pods, so pip picks the wheels their Python (3.10) installs. It runs
+# as the folder's owner (the deploying account, mode 700): that uid writes the wheels and
+# the init containers read them as it.
+# Render list (deploy.sh _WHEEL_VARS): NAMESPACE SUPERSET_WHEEL_DIR SUPERSET_WHEEL_UID
+# SUPERSET_WHEEL_GID.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: superset-wheels
+  namespace: ${NAMESPACE}
+  labels:
+    app: superset
+    component: wheels
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: superset
+        component: wheels
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: ${SUPERSET_WHEEL_UID}
+        runAsGroup: ${SUPERSET_WHEEL_GID}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: superset-wheels
+        image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
+        # each wheel checked against its pinned sha256 before it is written; no sdist,
+        # no dependency, no index but PyPI
+        command: ["/usr/local/bin/pip3", "download", "--isolated", "--no-deps", "--require-hashes",
+                  "--only-binary=:all:", "--no-cache-dir", "--disable-pip-version-check",
+                  "--index-url", "https://pypi.org/simple", "--dest", "/wheels",
+                  "-r", "/app/pythonpath/requirements.txt"]
+        env:
+        - {name: HOME, value: "/tmp"}   # an account the image's /etc/passwd may not know
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {memory: "128Mi", cpu: "100m"}
+          limits: {memory: "512Mi", cpu: "1"}
+        volumeMounts:
+        - {name: wheels, mountPath: /wheels}
+        - {name: tmp, mountPath: /tmp}
+        - {name: config, mountPath: /app/pythonpath, readOnly: true}
+      volumes:
+      - name: wheels
+        hostPath:
+          path: ${SUPERSET_WHEEL_DIR}
+          type: Directory
+      - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+      - name: config
+        configMap:
+          name: superset-wheels   # requirements.txt alone, created and deleted with this Job

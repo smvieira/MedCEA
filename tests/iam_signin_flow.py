@@ -60,6 +60,18 @@ when the pod restarts (no volume). The pgAdmin form fields follow pgAdmin 9 and 
 updating after an image update (`dpage/pgadmin4:9`). IAM_GATES=false: the wizard expects
 EDGE_WIZARD_ROLE (empty: every account, the role-less one included), pgAdmin admin.
 
+Superset (stage C, [tool (Superset AUTH_ROLES_MAPPING)]) signs people in itself too: / →
+/login/ → /login/keycloak → Keycloak → /oauth-authorized/keycloak. Its own 403 "No access to
+Superset" (medcea_security.py, before a Superset user exists) is refused, a 200 at its index
+is in. Where in, GET /api/v1/me/roles/ must list exactly the FAB roles the compiled mapping
+gives the role (tools.superset_roles_mapping), and /sqllab/ must open for the builders
+(Alpha with sql_lab) only. Each admitted account leaves a Superset user behind (ab_user,
+which its logs and ownerships reference); iam-signin.sh's exit trap deactivates this run's
+(owner decision N7). A host the applied policy does not have yet is skipped (an ENFORCEMENT
+entry ahead of its policy), and so is Superset under IAM_GATES=false (no pre-policy
+sign-in: it is stopped) and while deployment/superset is absent (SUPERSET_DEPLOYED, set by
+iam-signin.sh): its sign-in would only test an Ingress with nothing behind it.
+
 Where it got in, the account then calls one API of each service behind the host (PROBES)
 with its session, so the access token goes through the proxy to the service's
 medcea_iam.check(). The calls go to "probes_out" with whether the route table lets that
@@ -123,13 +135,32 @@ PROBES = {
 FORM = re.compile(r'<form id="kc-form-login"[^>]*\baction="([^"]+)"')
 
 
-def gated_hosts(p):
-    """[(VAR, domain, label, expected roles)] for the hosts whose gate is deployed."""
+# Tool hosts that may be in the policy before anything runs there: host variable -> the
+# environment variable iam-signin.sh sets to "true" while the tool is deployed.
+DEPLOYED_ENV = {"SUPERSET_DOMAIN": "SUPERSET_DEPLOYED"}
+
+
+def gated_hosts(p, skipped=None):
+    """[(VAR, domain, label, expected roles)] for the hosts whose gate is deployed. A host
+    left out for a reason (not in the policy, not deployed) is appended to `skipped` as
+    (VAR, why)."""
     out = []
+    gates_off = os.environ.get("IAM_GATES", "true") == "false"
+    note = skipped.append if skipped is not None else (lambda _: None)
     for var, status in proxies.ENFORCEMENT.items():
         if status != "compiled" and not status.startswith("tool"):
             continue
-        if os.environ.get("IAM_GATES", "true") == "false":
+        if var not in p.hosts:   # ENFORCEMENT names it ahead of the applied policy
+            note((var, "not in the applied access policy"))
+            continue
+        if var in DEPLOYED_ENV:
+            if gates_off:
+                note((var, "IAM_GATES=false: no pre-policy sign-in, the tool is stopped"))
+                continue
+            if os.environ.get(DEPLOYED_ENV[var]) != "true":
+                note((var, "not deployed"))
+                continue
+        if gates_off:
             # apps/access/deploy.sh: admin only, never the portal's pre-policy list;
             # Grafana's pre-3.1 setting: any enabled account, with or without a role
             # Node-RED and the MQTT Explorer keep their compiled list (IAM 3.3 decision)
@@ -343,6 +374,32 @@ def node_red_revoke(op, domain, user_role, token, bearer, check_gone):
     return []
 
 
+def superset_checks(op, domain, p, user_role):
+    """Stage C: Superset gave the account exactly the FAB roles the compiled mapping gives
+    its role, and SQL Lab opens for a builder (Alpha with sql_lab) only. A Gamma account's
+    /sqllab/ ends elsewhere (FAB's has_access sends it to the index) or is refused."""
+    try:
+        want = sorted(tools.superset_roles_mapping(p).get(user_role) or [])
+    except ValueError:   # the policy maps nobody (a skeleton without cells): any role is wrong
+        want = []
+    code, _, body = fetch(op, f"https://{domain}/api/v1/me/roles/")
+    try:
+        roles = json.loads(body)["result"]["roles"]   # {FAB role: [[permission, view], ...]}
+        got = sorted(roles if isinstance(roles, dict) else (r["name"] if isinstance(r, dict) else r for r in roles))
+    except (ValueError, LookupError, TypeError):
+        return [f"{user_role:18} {domain:24} GET /api/v1/me/roles/ answered {code}: {body[:80]}"]
+    out = []
+    if got != want:
+        out.append(f"{user_role:18} {domain:24} Superset roles {got}, the policy gives {want}")
+    code, url, _ = fetch(op, f"https://{domain}/sqllab/")
+    parts = urllib.parse.urlsplit(url)
+    opened = code == 200 and parts.hostname == domain and parts.path.rstrip("/") == "/sqllab"
+    if opened != ("sql_lab" in want):
+        out.append(f"{user_role:18} {domain:24} SQL Lab {'opens' if opened else 'does not open'} "
+                   f"(HTTP {code} at {parts.path}) for {'+'.join(got) or 'no role'}")
+    return out
+
+
 HUB_START = "/hub/login?next=%2Fhub%2Fhome"   # never /hub/ (redirect_to_server spawns)
 
 
@@ -436,7 +493,10 @@ def main():
         return compare(sys.argv[2], sys.argv[3])
     data = json.load(sys.stdin)
     p = model.load()
-    hosts = gated_hosts(p)
+    skipped = []
+    hosts = gated_hosts(p, skipped)
+    for var, why in skipped:
+        print(f"  SKIP {var}: {why}")
     users = data["users"]
     table = routes.compile(p)
     lib = _library()
@@ -469,6 +529,9 @@ def main():
                 continue
             if var == "GRAFANA_DOMAIN":
                 fails.extend(grafana_checks(op, domain, p, u["role"], gf_role))
+                continue
+            if var == "SUPERSET_DOMAIN":
+                fails.extend(superset_checks(op, domain, p, u["role"]))
                 continue
             if var == "NODE_RED_DOMAIN":
                 fails.extend(node_red_checks(op, domain, p, u["role"]))

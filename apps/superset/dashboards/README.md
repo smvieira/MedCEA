@@ -1,8 +1,9 @@
 # apps/superset/dashboards/
 
-Dashboards as code for Superset. **Empty on purpose in stage B**: `apps/superset/deploy.sh`
-refuses while this folder holds any file but this README ("importing dashboards is not
-built yet (stage C)").
+Dashboards as code for Superset. **Empty on purpose**: importing dashboards is not built
+(owner decision N9, 7 Nov 2026: deferred; dashboards are made in Superset's UI), and
+`apps/superset/deploy.sh` refuses while this folder holds any file but this README
+("importing dashboards is not built").
 
 What the importer will have to respect (read from Superset 6.1.0's code, 6 Nov 2026):
 

@@ -21,11 +21,15 @@
   cli.py compile pgadmin [--file F]     pgAdmin's OAUTH2_ADDITIONAL_CLAIMS, a Python literal (IAM 3.4)
   cli.py compile superset [--file F]    Superset's AUTH_ROLES_MAPPING, {role: [FAB role, ...]} as one JSON
                                         line, sorted keys (Superset stage B); exit 1 "no group has a
-                                        superset tool block" while the policy has none (stage C adds it)
-  cli.py has-tool KIND [--file F]       exit 0 when exactly one group carries a `tool:` block of KIND,
+                                        superset tool block" while the policy has none, and "would admit
+                                        nobody" while its group gives no role a setting
+  cli.py has-tool KIND [--admitting] [--file F]
+                                        exit 0 when exactly one group carries a `tool:` block of KIND,
                                         1 when none does, 2 when several do, KIND is unknown or the
-                                        policy fails its checks; prints nothing on stdout
-                                        (policy_tool superset's "not applied yet")
+                                        policy fails its checks; with --admitting also 3 when that
+                                        group gives no role a setting (Superset stage C: the block
+                                        before its cells); prints nothing on stdout (policy_tool
+                                        superset's "not in the applied policy")
   cli.py compile mqtt [--file F]        the MQTT Explorer's per-person credential rows (mqtt.json of ConfigMap
                                         medcea-iam-lib, read by iam-api; IAM 3.5), canonical, one line
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
@@ -577,6 +581,7 @@ def main(argv=None):
     sub.add_parser("hosts")
     ht = sub.add_parser("has-tool")
     ht.add_argument("kind")
+    ht.add_argument("--admitting", action="store_true", help="exit 3 when the tool's group gives no role a setting")
     desc = sub.add_parser("describe-gate")
     desc.add_argument("host")
     desc.add_argument("roles")
@@ -669,7 +674,9 @@ def main(argv=None):
         if len(found) > 1:
             print(f"ERROR: {len(found)} groups carry a {args.kind} tool block: {', '.join(found)}", file=sys.stderr)
             return 2
-        return 0 if found else 1
+        if not found:
+            return 1
+        return 3 if args.admitting and not tools.admits_anyone(p, args.kind) else 0
 
     if args.cmd == "hosts":
         for h in p.hosts:
@@ -767,7 +774,7 @@ def main(argv=None):
     if args.cmd == "compile" and args.target == "superset":
         if not tools.groups(p, "superset"):
             print("ERROR: no group has a superset tool block: Superset is not in this access policy "
-                  "(found 0 groups; stage C adds it)", file=sys.stderr)
+                  "(found 0 groups)", file=sys.stderr)
             return 1
         try:
             print(json.dumps(tools.superset_roles_mapping(p), sort_keys=True))

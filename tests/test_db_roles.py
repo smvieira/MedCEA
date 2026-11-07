@@ -152,8 +152,9 @@ class ClientsLive(unittest.TestCase):
                                        "svc_grafana", "rr_admin_login", "iam_svc", "svc_superset"])
 
     def test_superset(self):
-        # Superset (stage B): no Deployment before the policy has a superset tool (stage C),
-        # so today's list is unchanged; once deployed, its connection user is read
+        # Superset: no Deployment while the applied policy gives no role a Superset setting
+        # (or IAM_DB_SERVICE_ROLES is not true), so the list is unchanged; once deployed,
+        # its connection user is read
         rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler")
         self.assertEqual((rc, out), (0, "scheduler svc_scheduler"))
         rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler",

@@ -20,6 +20,10 @@ ENFORCEMENT = {
     "GRAFANA_DOMAIN": "tool (Grafana role_attribute_path)", "WORKBENCH_DOMAIN": "tool (JupyterHub allowed_groups)",
     "ONBOARD_DOMAIN": "tool (edge wizard --required-role)", "PGADMIN_DOMAIN": "tool (pgAdmin OAUTH2_ADDITIONAL_CLAIMS)",
     "POLICY_DOMAIN": "compiled",   # proof-gated like ACCESS_DOMAIN (apps/iam/deploy.sh, IAM 4.3)
+    # Superset signs people in itself (no oauth2-proxy, never proof-gated). Listed before the
+    # host is in the policy (Superset stage C): `cli.py hosts` iterates p.hosts, so an entry
+    # for a host the policy lacks prints nothing.
+    "SUPERSET_DOMAIN": "tool (Superset AUTH_ROLES_MAPPING)",
 }
 
 

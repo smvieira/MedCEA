@@ -49,11 +49,28 @@
 #   sign-in  signed out, the host redirects to Keycloak (the wizard) or shows pgAdmin's
 #            MedCEA sign-in button (pgAdmin)
 #   reach    some enabled account holds a role the tool admits
+# Superset [tool (Superset AUTH_ROLES_MAPPING)] (SUPERSET_DOMAIN, stage C; SKIP without
+# deployment/superset):
+#   gate     the live SUPERSET_ROLES_MAPPING (Secret superset-secrets, read on stdin)
+#            equals `policy_tool superset` (IAM_GATES=false, or no role given a setting:
+#            nobody, so a running Superset is a FAIL)
+#   secret   neither the Deployment nor a ReplicaSet it kept holds a secret as plain env
+#            (by name or by a Secret value)
+#   live     every running pod's medcea/config-checksum equals superset_config_checksum
+#            (apps/superset/lib-superset.sh) of the live Secret and ConfigMap: the mapping
+#            is a secretKeyRef env, read at start only
+#   sign-in  /login/ → /login/keycloak → Keycloak's login page with scope `groups`
+#   reach    some enabled account holds a role the mapping admits
 # Hosts whose gate is not compiled yet are listed as SKIP with the phase that adds it.
 # Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
 # account, and the realm's discovery document lists device_authorization_endpoint; and
 # the workbench-notebook client (IAM 3.2b): public, device grant only (no browser flow,
-# no password grant, no service account), default scopes groups and medcea-identity.
+# no password grant, no service account), default scopes groups and medcea-identity; and
+# the superset client (stage C, created by ./deploy-infra.sh whether or not Superset is in
+# the policy yet): enabled, its redirect URIs admit Superset's callback and nothing off its
+# host, its post-logout URIs admit the one-hop sign-out's return (the running pod's
+# MEDCEA_LOGOUT_RETURN, else superset_logout_return), and `groups` is a default scope.
+# The clients are read from Keycloak's database (no admin token, no login event).
 #
 # Read-only: no lock, no Keycloak account, no change to the cluster. It proves the
 # configured gates, not a sign-in per role; that matrix is a Phase 1 test.
@@ -62,7 +79,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,73p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -75,6 +92,7 @@ if [[ ! -f config.env ]]; then
 fi
 # shellcheck disable=SC1091
 source config.env
+SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"   # deploy-infra.sh's default
 source infra/lib-mk8s.sh
 source infra/lib-oauth2-proxy.sh
 source infra/lib-policy-tools.sh
@@ -424,6 +442,114 @@ except Exception:
     reach_of "$host" "$(python3 -c 'import ast, sys; print(" ".join(ast.literal_eval(sys.argv[1])["groups"]))' "$want")"
 }
 
+# Superset (stage C) signs people in itself, like Grafana: its gate is
+# AUTH_ROLES_MAPPING, from Secret superset-secrets, which also holds its keys and
+# passwords: python reads the Secret on stdin and prints only the verdicts.
+check_superset() {
+    local host="$1" want rc=0 doc same pods sum out code url first
+    if ! $KUBECTL get deployment superset -n "$NAMESPACE" >/dev/null 2>&1; then
+        skip gate "no Superset deployment in $NAMESPACE (./apps/superset/deploy.sh installs it)"
+        return
+    fi
+    # The Deployment and every ReplicaSet it kept, then the Secret ("?" = unreadable)
+    doc="$( { $KUBECTL get deployment,replicaset -n "$NAMESPACE" -l app=superset -o json 2>/dev/null || echo null
+              echo
+              $KUBECTL get secret superset-secrets -n "$NAMESPACE" -o json 2>/dev/null || echo null; } \
+        | python3 -c '
+import base64, json, re, sys
+text, dec, objs, i = sys.stdin.read(), json.JSONDecoder(), [], 0
+try:
+    while len(objs) < 2:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        o, i = dec.raw_decode(text, i)
+        objs.append(o)
+    lst, sec = objs
+    if not lst or not any(o.get("kind") == "Deployment" for o in lst.get("items", [])):
+        raise ValueError("no deployment")
+    data = {k: base64.b64decode(v).decode() for k, v in ((sec or {}).get("data") or {}).items()}
+except Exception:
+    print("?"); sys.exit(0)
+values = {v for k, v in data.items() if k != "SUPERSET_ROLES_MAPPING" and len(v) >= 8}
+held = []
+for o in lst["items"]:
+    spec = o["spec"]["template"]["spec"]
+    names = sorted({e["name"] for c in spec.get("initContainers", []) + spec.get("containers", [])
+                    for e in c.get("env", []) if "value" in e
+                    and (re.search(r"(?i)pass|secret|token|roles_mapping", e["name"]) or e["value"] in values)})
+    if names:
+        held.append("%s/%s (%s)" % (o["kind"].lower(), o["metadata"]["name"], ", ".join(names)))
+print("plain\t" + "; ".join(held))
+if not sec:
+    print("mapping\t-")
+else:
+    try:
+        m = json.loads(data["SUPERSET_ROLES_MAPPING"])
+        print("mapping\t" + json.dumps({r: sorted(v) for r, v in m.items()}, sort_keys=True))
+    except Exception:
+        print("mapping\t?")')"
+    declare -A S=()
+    local k x
+    while IFS=$'\t' read -r k x; do [[ -n "$k" ]] && S[$k]="$x"; done <<<"$doc"
+    if [[ "$doc" == "?" ]]; then
+        fail secret "cannot read Superset's Deployment, ReplicaSets or Secret superset-secrets in $NAMESPACE"
+    elif [[ -n "${S[plain]:-}" ]]; then
+        fail secret "Superset's secrets are plain env values in ${S[plain]} (./apps/superset/deploy.sh)"
+    elif [[ "${S[mapping]:-}" == "-" ]]; then
+        fail secret "Secret superset-secrets is missing in $NAMESPACE (./apps/superset/deploy.sh)"
+    else
+        pass secret "keys, passwords and the role mapping come from Secret superset-secrets"
+    fi
+
+    want="$(policy_tool superset 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) same="$(python3 -c '
+import json, sys
+try:
+    w = {r: sorted(v) for r, v in json.loads(sys.argv[2]).items()}
+    print(json.loads(sys.argv[1]) == w)
+except Exception:
+    print(False)' "${S[mapping]:-?}" "$want")"
+           if [[ "$same" == True ]]; then
+               pass gate "AUTH_ROLES_MAPPING admits $(python3 -c 'import json, sys; print(" ".join(sorted(json.loads(sys.argv[1]))))' "$want"), from the policy"
+           else
+               fail gate "Superset's live role mapping ${S[mapping]:-?} is not the compiled $want (./apps/superset/deploy.sh --gate-only)"
+           fi ;;
+        3) fail gate "IAM_GATES=false: Superset has no pre-policy setting, yet it runs (./apps/superset/deploy.sh stops it)" ;;
+        5) fail gate "Superset runs, but the applied policy gives no role a Superset setting (./apps/superset/deploy.sh --gate-only stops it)" ;;
+        *) fail gate "policy_tool superset failed (cli.py check)"; return ;;
+    esac
+
+    # shellcheck source=/dev/null
+    declare -F superset_config_checksum >/dev/null || source apps/superset/lib-superset.sh 2>/dev/null
+    pods="$($KUBECTL get pods -n "$NAMESPACE" -l app=superset,component=web --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.metadata.annotations.medcea/config-checksum}{"\n"}{end}' 2>/dev/null | sort -u)"
+    if ! declare -F superset_config_checksum >/dev/null; then
+        fail live "apps/superset/lib-superset.sh has no superset_config_checksum"
+    elif ! sum="$(superset_config_checksum "$NAMESPACE")" || [[ -z "$sum" ]]; then
+        fail live "cannot recompute Superset's config checksum (Secret superset-secrets or ConfigMap superset-config unreadable)"
+    elif [[ -z "$pods" ]]; then
+        fail live "no running Superset pod"
+    elif [[ "$pods" != "$sum" ]]; then
+        fail live "a running Superset pod was started with another Secret or ConfigMap than the live ones (./apps/superset/deploy.sh)"
+    else
+        pass live "the running pod reads the live Secret and ConfigMap"
+    fi
+
+    first="$(curl -sk -o /dev/null -m 10 -w '%{http_code} %{redirect_url}' "https://$host/login/")"
+    out="$(curl -sk -L --max-redirs 6 -o /dev/null -m 15 -w '%{http_code} %{url_effective}' "https://$host/login/")"
+    code="${out%% *}" url="${out#* }"
+    if [[ "${first%% *}" != 302 || "${first#* }" != "https://$host/login/keycloak"* ]]; then
+        fail sign-in "signed out, https://$host/login/ answered ${first:0:100} (want 302 to /login/keycloak)"
+    elif [[ "$code" == 200 && "$url" == "https://$KEYCLOAK_DOMAIN/"* && "$url" == *scope=*groups* ]]; then
+        pass sign-in "Keycloak shows the login page for scopes $(grep -o 'scope=[^&]*' <<<"$url" | cut -d= -f2)"
+    else
+        fail sign-in "Superset's sign-in ended at $code ${url:0:100} (want Keycloak's login page, scope with groups)"
+    fi
+
+    (( rc == 0 )) && reach_of "$host" "$(python3 -c 'import json, sys; print(" ".join(sorted(json.loads(sys.argv[1]))))' "$want")"
+}
+
 HOSTS="$(python3 apps/iam/compiler/cli.py hosts)" || { echo "cli.py hosts failed" >&2; exit 2; }
 INGRESSES="$($KUBECTL get ingress -n "$NAMESPACE" -o \
     jsonpath='{range .items[*]}{.spec.rules[0].host}{" "}{.metadata.labels.app\.kubernetes\.io/instance}{"\n"}{end}')"
@@ -443,6 +569,8 @@ while IFS= read -r line; do
                 check_onboard "$host"
             elif [[ "$var" == PGADMIN_DOMAIN ]]; then
                 check_pgadmin "$host"
+            elif [[ "$var" == SUPERSET_DOMAIN ]]; then
+                check_superset "$host"
             else
                 check_grafana "$host" "${line##*]}"
             fi
@@ -605,6 +733,60 @@ else
     fail device "no device_authorization_endpoint in https://$KEYCLOAK_DOMAIN/realms/$KEYCLOAK_REALM discovery — run ./deploy-infra.sh"
 fi
 
+# Superset signs people in on client superset (stage C). deploy-infra.sh creates it
+# whether or not the policy has Superset yet, so this runs before Superset is deployed.
+echo ""
+echo -e "${BOLD}superset client${NC}  (Superset's own sign-in and sign-out)"
+_ss_return=""
+if $KUBECTL get deployment superset -n "$NAMESPACE" >/dev/null 2>&1; then
+    _ss_return="$($KUBECTL get deployment superset -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="superset")].env[?(@.name=="MEDCEA_LOGOUT_RETURN")].value}' 2>/dev/null)"
+fi
+[[ -z "$_ss_return" ]] && declare -F superset_logout_return >/dev/null && _ss_return="$(superset_logout_return 2>/dev/null)"
+_ss="$($KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+    'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -v realm="$0"' \
+    "$KEYCLOAK_REALM" 2>/dev/null <<'SQL'
+SELECT json_build_object(
+         'enabled', c.enabled,
+         'redirect', (SELECT coalesce(json_agg(u.value ORDER BY u.value), '[]') FROM redirect_uris u WHERE u.client_id = c.id),
+         'post_logout', (SELECT a.value FROM client_attributes a
+                          WHERE a.client_id = c.id AND a.name = 'post.logout.redirect.uris'),
+         'groups', EXISTS (SELECT 1 FROM client_scope_client d JOIN client_scope s ON s.id = d.scope_id
+                            WHERE d.client_id = c.id AND d.default_scope AND s.name = 'groups'))
+  FROM client c JOIN realm r ON r.id = c.realm_id AND r.name = :'realm'
+ WHERE c.client_id = 'superset';
+SQL
+)" || _ss=""
+# Keycloak's matching: an exact URI, or a registered one ending in * as a prefix
+_ss_verdict="$(python3 -c '
+import json, sys
+c, host, back = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+ok = lambda uri, pats: any(uri == p or (p.endswith("*") and uri.startswith(p[:-1])) for p in pats)
+redirect, logout = c.get("redirect") or [], [x for x in (c.get("post_logout") or "").split("##") if x]
+off = [u for u in redirect if not u.startswith("https://%s/" % host)]
+if not c.get("enabled"):
+    print("the client is disabled")
+elif not ok("https://%s/oauth-authorized/keycloak" % host, redirect):
+    print("its redirect URIs %s do not admit the Superset callback /oauth-authorized/keycloak" % redirect)
+elif off:
+    print("redirect URIs outside https://%s/: %s" % (host, ", ".join(off)))
+elif not ok("https://%s/" % host, logout):
+    print("its post-logout URIs %s do not admit https://%s/" % (logout, host))
+elif back and not ok(back, logout):
+    print("its post-logout URIs %s do not admit the sign-out return %s: Keycloak answers Invalid redirect uri" % (logout, back))
+elif not c.get("groups"):
+    print("groups is not a default scope: Superset asks for it, Keycloak answers invalid_scope")
+else:
+    print("ok")' "${_ss:-null}" "$SUPERSET_DOMAIN" "$_ss_return" 2>/dev/null)"
+if [[ -z "$_ss" ]]; then
+    fail client "superset not found in Keycloak's database (or it is not readable) — run ./deploy-infra.sh"
+elif [[ "$_ss_verdict" != ok ]]; then
+    fail client "superset: ${_ss_verdict:-cannot read the client} — run ./deploy-infra.sh"
+elif [[ -z "$_ss_return" ]]; then
+    pass client "callback on https://$SUPERSET_DOMAIN only, groups a default scope (no sign-out return known to check)"
+else
+    pass client "callback on https://$SUPERSET_DOMAIN only, sign-out returns to $_ss_return, groups a default scope"
+fi
 echo ""
 if [[ $FAILS -eq 0 ]]; then
     echo -e "${GREEN}${BOLD}All checked gates match the policy.${NC}"

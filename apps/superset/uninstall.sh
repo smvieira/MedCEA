@@ -15,6 +15,9 @@
 # database component only, so it never reaches here. Never touches the platform
 # database, svc_superset (apps/database owns that role) or the Keycloak client
 # superset (deploy-infra.sh's). ConfigMap cea-ca and Secret cea-tls are infrastructure.
+# The wheel cache SUPERSET_WHEEL_DIR on the host (three public, hash-pinned wheels) stays:
+# delete the folder by hand if Superset is gone for good. The Job and ConfigMap
+# superset-wheels, if a failed download left them behind, go with the app=superset objects.
 #
 # Idempotent: safe to re-run.
 

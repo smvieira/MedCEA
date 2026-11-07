@@ -9,16 +9,18 @@
 #                             e.g. {'groups': ['admin']}
 #   policy_tool superset      Superset's AUTH_ROLES_MAPPING, one JSON line, e.g.
 #                             {"engineer": ["Alpha", "sql_lab"], "qp": ["Gamma", "MedCEA Viewer"]}
-#                             (Superset stage B, 6 Nov 2026)
+#                             (Superset stages B and C, 6–7 Nov 2026)
 #
 # Each comes from `cli.py compile <tool>` (apps/iam/compiler/tools.py, the group's
 # `tool:` block). IAM_GATES=false prints the pre-policy setting with a warning:
 # EDGE_WIZARD_ROLE for the wizard (empty: any signed-in account may onboard) and
 # {'groups': ['admin']} for pgAdmin. Superset has no pre-policy setting: under
 # IAM_GATES=false it returns 3 and prints nothing (apps/superset/deploy.sh skips). While the
-# policy has no group with a superset tool block (`cli.py has-tool superset` exit 1:
-# Superset stage C adds it) it returns 5 and prints nothing, so the deploy can tell "not in
-# the applied policy yet" (skip) from a broken policy (1, refuse). With IAM_GATES=true a set EDGE_WIZARD_ROLE is
+# policy has no group with a superset tool block (`cli.py has-tool superset --admitting`
+# exit 1), or that group gives no role a setting yet (exit 3: the skeleton version before
+# the change version with its cells), it returns 5 and prints nothing, so the deploy can
+# tell "not in the applied policy, or nobody admitted" (skip) from a broken policy (1,
+# refuse). With IAM_GATES=true a set EDGE_WIZARD_ROLE is
 # ignored with a warning: the policy is the one source. A broken policy returns 1
 # and prints nothing, so a caller stops rather than open the tool.
 # Used by deploy-infra.sh (pgAdmin), edge/wizard-daemon.sh, edge/flash-device.sh,
@@ -65,10 +67,12 @@ policy_tool() {
     fi
     if [[ "$1" == superset ]]; then
         local rc=0
-        python3 "$REPO_ROOT/apps/iam/compiler/cli.py" has-tool superset || rc=$?
+        python3 "$REPO_ROOT/apps/iam/compiler/cli.py" has-tool superset --admitting || rc=$?
         case "$rc" in
             0) ;;
-            1) echo "policy_tool: Superset is not in the applied access policy yet (no group has a superset tool block)." >&2
+            1) echo "policy_tool: Superset is not in the applied access policy (no group has a superset tool block)." >&2
+               return 5 ;;
+            3) echo "policy_tool: Superset's policy group gives no role a setting yet" >&2
                return 5 ;;
             *) return 1 ;;
         esac

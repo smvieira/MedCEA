@@ -8,14 +8,17 @@
 #             API on :1880 (IAM 3.3), nor iam-api's MQTT credential port :8085 (IAM 3.5,
 #             when deployed) nor its Policy port :8083 (IAM 4.1: nothing listens there
 #             before 4.3, so only the policy's drop gives a timeout; a refusal would mean
-#             the packet got through) — every attempt times out
+#             the packet got through), nor Superset's :8088 (stage C, when deployed:
+#             its ProxyFix trusts a caller's X-Forwarded-* headers) — every attempt
+#             times out
 #   control   the same pod does reach Keycloak (no policy of ours), so "blocked" is the
 #             policy and not a pod without a network
 #   allowed   the Config UI's nginx reaches config-api and the scheduler; the host reaches
 #             config-api (edge wizard, platform_db.py); ingress-nginx serves the public
 #             access request form; the host gets 401 from Node-RED's admin API (adminAuth);
 #             iam-api reaches config-api :3000 (IAM 4.1, network.clients.iam-approvals:
-#             the approval forwarder of 4.4; python urllib, the image has no wget)
+#             the approval forwarder of 4.4; python urllib, the image has no wget);
+#             ingress-nginx serves Superset's /health (stage C, when deployed)
 # Real sessions through every proxy are tests/iam-signin.sh.
 #
 # Takes the deploy lock (it starts a pod, deleted on exit). Run from the repository root:
@@ -24,7 +27,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -81,6 +84,11 @@ podip() {
     local ip; ip="$($KUBECTL get pod -n "$NS" -l "app=$1" -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
     echo "${ip:-no-pod-for-app-$1}"
 }
+ss_podip() {   # the web pod only: app=superset also labels the init Job's pod
+    local ip; ip="$($KUBECTL get pod -n "$NS" -l app=superset,component=web --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
+    echo "${ip:-no-superset-web-pod}"
+}
 nr_podip() {
     local ip; ip="$($KUBECTL get pod -n "$NS" -l app.kubernetes.io/name=node-red -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
     echo "${ip:-no-node-red-pod}"
@@ -95,7 +103,9 @@ for url in http://scheduler.$NS/ http://monitor.$NS/ http://dbmgmt.$NS/ http://c
            "http://$(podip access):8080/register" "http://$(podip access):8081/healthz" "http://$(podip access):8082/_account/" \
            "http://node-red.$NS:1880/flows" "http://$(nr_podip):1880/flows" \
            $($KUBECTL get deployment iam-api -n "$NS" >/dev/null 2>&1 \
-               && echo "http://iam-mqttx.$NS:8085/healthz http://$(podip iam-api):8085/healthz http://$(podip iam-api):8083/"); do
+               && echo "http://iam-mqttx.$NS:8085/healthz http://$(podip iam-api):8085/healthz http://$(podip iam-api):8083/") \
+           $($KUBECTL get deployment superset -n "$NS" >/dev/null 2>&1 \
+               && echo "http://superset.$NS:8088/health http://$(ss_podip):8088/health"); do
     r="$(reach "pod/$PROBE" "$PROBE" "$url")"
     case "$r" in
         blocked) pass blocked "$url" ;;
@@ -143,6 +153,11 @@ code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$nr_ip:1880/flows")"
 code="$(curl -sk -o /dev/null -m 6 -w '%{http_code}' "https://$ACCESS_DOMAIN/register")"
 [[ "$code" == 200 ]] && pass allowed "ingress → access-public (https://$ACCESS_DOMAIN/register: $code)" \
     || fail allowed "https://$ACCESS_DOMAIN/register answered $code: the request form is down"
+if $KUBECTL get deployment superset -n "$NS" >/dev/null 2>&1; then
+    code="$(curl -sk -o /dev/null -m 6 -w '%{http_code}' "https://${SUPERSET_DOMAIN:-superset.$DOMAIN}/health")"
+    [[ "$code" == 200 ]] && pass allowed "ingress → superset:8088 (https://${SUPERSET_DOMAIN:-superset.$DOMAIN}/health: $code)" \
+        || fail allowed "https://${SUPERSET_DOMAIN:-superset.$DOMAIN}/health answered $code: Superset is unreachable"
+fi
 
 echo ""
 if [[ $FAILS -eq 0 ]]; then

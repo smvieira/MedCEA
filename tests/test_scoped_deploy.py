@@ -14,7 +14,8 @@ cluster, its lock or its state/.
   Scoped       against a cluster seeded by the full functions, ./deploy-infra.sh
                --policy-only, ./infra/deploy-workbench.sh --policy-only and every app's
                --gate-only print "unchanged" and write nothing; one drift re-renders
-               exactly that target, with no rollout restart.
+               exactly that target, with no rollout restart; Superset's (stage C) says
+               "not deployed" on a cluster without it.
   Arguments    an unknown option exits 2 and runs nothing.
   Wizard       a drift with a flash in the unit's cgroup exits 4 and restarts nothing.
   Resume       owners --scoped, the apply_deferred record, and health counting only the
@@ -469,6 +470,15 @@ class Scoped(unittest.TestCase):
         w = writes(calls)
         self.assertEqual([c["cmd"] for c in w], ["helm"], w)   # not the examples ConfigMap
 
+    def test_superset_gate_not_deployed(self):
+        """Superset stage C: owners --scoped runs superset's --gate-only too; with no
+        deployment/superset it says so, compiles nothing and writes nothing (apply.sh's
+        rollout of the skeleton and change versions before the first install)."""
+        r, calls = self.run_scoped("./apps/superset/deploy.sh --gate-only")
+        self.assertIn("SUPERSET_DOMAIN (superset): not deployed", r.stdout)
+        self.assertEqual(writes(calls), [])
+        self.assertNotIn("re-rendered", r.stdout)
+
     def test_frontend_gate_only_never_pgrst(self):
         st = self.e.store()
         st.pop("deployment/config-oauth2-proxy")
@@ -492,7 +502,7 @@ class Arguments(unittest.TestCase):
                     "./apps/frontend/deploy.sh --policy-only", "./apps/scheduler/deploy.sh x",
                     "./apps/monitor/deploy.sh --gate-only x", "./apps/mqtt-explorer/deploy.sh -h",
                     "./apps/access/deploy.sh --all", "./apps/iam/deploy.sh --bootstrap",
-                    "./apps/edge-wizard/deploy.sh --x"):
+                    "./apps/edge-wizard/deploy.sh --x", "./apps/superset/deploy.sh --policy-only"):
             with self.subTest(cmd=cmd):
                 self.e.reset_log()
                 r = self.e.bash(cmd)

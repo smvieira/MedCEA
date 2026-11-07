@@ -144,6 +144,22 @@ print("https://%s/oauth2/sign_out?rd=%s" % (nr, q(end)))
 PY
 }
 
+# superset_logout_return — prints where Keycloak's end-session sends a person who signs
+# out of Superset (MEDCEA_LOGOUT_RETURN: superset_config.py's post_logout_redirect_uri;
+# Superset stage C, N4). The platform's one-hop chain, as the edge wizard's
+# --logout-return: the workbench's /hub/logout when the workbench is deployed
+# (WORKBENCH_ENABLED=true; the hub ends its session and goes on to the portal's), else
+# the portal's proxy sign-out. Superset's own logout ends only its session and Keycloak's,
+# so without it the portal and workbench cookies outlived it. https only; both addresses
+# are registered on client superset by deploy-infra.sh (_create_client's fifth argument).
+superset_logout_return() {
+    if [[ "${WORKBENCH_ENABLED:-true}" == "true" ]]; then
+        printf 'https://%s/hub/logout\n' "${WORKBENCH_DOMAIN:?}"
+    else
+        printf 'https://%s/oauth2/sign_out?rd=%%2F\n' "${PORTAL_DOMAIN:?}"
+    fi
+}
+
 #   policy_workbench_egress || exit 1
 #
 # The notebooks' platform hops (IAM 3.2b): WORKBENCH_EGRESS, the workbench chart's

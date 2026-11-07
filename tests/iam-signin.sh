@@ -22,7 +22,13 @@
 # throwaway admin then removes the hub users the sign-ins created (not itself). The
 # onboarding wizard and pgAdmin (IAM 3.4) are signed in too: the wizard admits engineer
 # and maintenance and shows its own 403 to the rest; pgAdmin admits admin, through its
-# own MedCEA sign-in button. 12 accounts × 12 hosts = 144 sign-ins.
+# own MedCEA sign-in button. Superset (stage C) once deployed: the builders and viewers
+# the policy maps get in with exactly their FAB roles, SQL Lab for builders only, the rest
+# get its own 403; each admitted account leaves a Superset user, which the exit trap
+# deactivates (active = false, as postgres in the PostgreSQL pod, SQL on stdin, only this
+# run's test-<role>-<random> names; owner decision N7: Superset's logs and ownerships
+# reference the row, so it is not deleted). 12 accounts × 12 hosts = 144 sign-ins,
+# 13 hosts = 156 with Superset.
 #
 # Takes the deploy lock (it creates accounts). Calls the Keycloak admin API as the deploy
 # scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a Keycloak login event in the
@@ -32,7 +38,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -58,8 +64,33 @@ R="$KEYCLOAK_REALM"
 
 CREATED=()        # Keycloak user ids, deleted on exit
 PF_PID=""
+SUFFIX=""
+# The Superset users this run's sign-ins created (N7): deactivated, never deleted, in
+# Superset's metadata database; nothing when it or its ab_user table does not exist.
+superset_cleanup() {
+    local out
+    [[ -n "$SUFFIX" ]] || return 0
+    out="$($KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres -tA -v suffix="$0"' \
+        "$SUFFIX" 2>&1 <<'SQL'
+SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'superset') AS have_db \gset
+\if :have_db
+\c superset
+SELECT to_regclass('public.ab_user') IS NOT NULL AS have_users \gset
+\if :have_users
+WITH u AS (UPDATE ab_user SET active = false
+            WHERE username LIKE 'test-%-' || :'suffix' AND active IS DISTINCT FROM false
+           RETURNING 1)
+SELECT 'deactivated ' || count(*) FROM u;
+\endif
+\endif
+SQL
+)" || { echo -e "${RED}  could not deactivate this run's Superset users (test-*-$SUFFIX): ${out:0:160}${NC}" >&2; return 0; }
+    [[ "$out" == "deactivated 0" || -z "$out" ]] || echo "Superset: ${out#deactivated } test user(s) deactivated (test-*-$SUFFIX)."
+}
 cleanup() {
     local id code n=0
+    superset_cleanup
     for id in "${CREATED[@]}"; do
         code="$(_kc_send DELETE "realms/$R/users/$id")"
         [[ "$code" == 204 || "$code" == 404 ]] && n=$((n + 1)) \
@@ -85,6 +116,10 @@ fi
 
 echo -e "${BOLD}Sign-in per role${NC} (realm $R, Keycloak admin API as $KC_ADMIN_MODE)"
 SUFFIX="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
+# Superset's sign-ins only once it runs (stage C); iam_signin_flow.py skips it otherwise
+SUPERSET_DEPLOYED=false
+$KUBECTL get deployment superset -n "$NAMESPACE" >/dev/null 2>&1 && SUPERSET_DEPLOYED=true
+export SUPERSET_DEPLOYED
 ROLES="$(python3 -c '
 import sys; sys.path.insert(0, "apps/iam")
 from compiler import model

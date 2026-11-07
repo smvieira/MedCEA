@@ -34,7 +34,9 @@ What it decides, and why it is not left to FAB's defaults:
 * **Sign-out ends the Keycloak session** in one hop: FAB's logout, then the session
   cleared (FAB's logout_user leaves the rest of it), then Keycloak's end-session with
   client_id and post_logout_redirect_uri and never id_token_hint (Keycloak then shows
-  its confirmation page, as for every other MedCEA host).
+  its confirmation page, as for every other MedCEA host). The return address is the
+  platform's one-hop chain (MEDCEA_LOGOUT_RETURN in superset_config.py, stage C N4), so
+  the portal and workbench sessions end with it.
 
 Never logs a token, a secret or a cookie.
 """

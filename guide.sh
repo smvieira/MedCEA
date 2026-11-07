@@ -254,6 +254,7 @@ component_purpose() {
         node-red)      echo "Node-RED palette packages and platform flows" ;;
         report)        echo "Grafana dashboards" ;;
         scheduler)     echo "Recipe Schedule Manager" ;;
+        superset)      echo "Superset (data analysis), once the applied access policy gives roles a setting" ;;
         *)             echo "" ;;
     esac
 }
@@ -690,6 +691,7 @@ a_apps_uninstall_one() {
             fi ;;
         iam) EFFECT="removes iam-api (Service iam-mqttx); never the policy, its versions, its history, state/policy-applied.yaml or the credential tables"
              NOTES+=("While IAM_MQTT_PERSON=true the MQTT Explorer then gets no credential: roll the switch back first.") ;;
+        superset) superset_uninstall_plan ;;
     esac
     plan_run
 }
@@ -701,6 +703,43 @@ purge_word() {   # --purge-data: yes, then the project name, as deploy-apps.sh a
 a_apps_list() {
     CMD=(./deploy-apps.sh --help)
     EFFECT="nothing (prints the usage and the components found)"
+    plan_run
+}
+# Superset (stage C): deployed only while the applied access policy has its tool and gives
+# some role a setting, and IAM_DB_SERVICE_ROLES=true; otherwise its deploy says skipped
+# and exits 0 (and stops a running Superset).
+a_superset_deploy() {
+    CMD=(./apps/superset/deploy.sh "&&" ./health-check.sh)
+    EFFECT="cluster and database: database superset and role superset_meta (first time), Secret superset-secrets, ConfigMap superset-config, the init Job, Deployment superset, the portal card; then the health check (read-only)"
+    LOCK="the deploy takes its own; the health check none"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while the applied access policy has no Superset tool or gives no role a setting, under IAM_GATES=false, and while IAM_DB_SERVICE_ROLES is not true; a running Superset is then stopped (its database is kept)."
+           "Who may sign in, and as Alpha or Gamma, comes from the applied policy's analysis group (Policy → Superset stage C)."
+           "The first install pulls the image and waits for the init Job (up to ~20 minutes). Health: Superset roles must be OK.")
+    plan_run
+}
+a_superset_gate() {
+    CMD=(./apps/superset/deploy.sh --gate-only)
+    EFFECT="only Superset's role mapping, when it differs from the applied policy's compile (Secret superset-secrets, ConfigMap superset-config, then a restart); unchanged: nothing"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Prints one line: unchanged, re-rendered or not deployed. A policy that no longer gives any role a setting stops Superset and disables its card; the data is kept."
+           "./apps/iam/apply.sh runs it itself; Policy → Re-render the policy artefacts includes it.")
+    plan_run
+}
+superset_uninstall_plan() {   # Superset's uninstall: --purge-data asked, then yes and the project name
+    EFFECT="removes Superset (Deployment, init Job, Service, Ingress, Secret, ConfigMap) and disables its card; keeps database superset (dashboards, charts, saved queries, its users)"
+    NOTES+=("Never touches medcea_db, role svc_superset or the Keycloak client superset."
+           "The applied policy is not changed: the next ./deploy-apps.sh --all installs Superset again while it gives roles a setting.")
+    if ask_yn "Also DROP database superset and role superset_meta: every dashboard, chart, saved query and Superset user (--purge-data)?" n; then
+        CMD+=(--purge-data)
+        EFFECT="removes Superset and its card, then DROPS database superset and role superset_meta (every dashboard, chart, saved query and Superset user)"
+        purge_word
+    fi
+}
+a_superset_uninstall() {
+    CMD=(./apps/superset/uninstall.sh)
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    superset_uninstall_plan
+    NOTES+=("No confirmation of its own: this guide's is the only one.")
     plan_run
 }
 
@@ -1613,7 +1652,7 @@ a_policy_apply() {
     CMD=(./apps/iam/apply.sh "$v" --check-only --by "$BY_USER")
     EFFECT="nothing (--check-only: no lock, no file, read-only transactions; Keycloak and the realm's keys read through a port-forward; the health baseline)"
     SUDO=mk8s; CFG_NEEDED=yes
-    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the eight checks apply.sh verifies against FAILs now."
+    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the nine checks apply.sh verifies against FAILs now."
            "It prints what the version changes per target and per role; the apply itself is offered after it.")
     plan_run
     [[ "$PLAN_GO" == yes ]] || return 0
@@ -1665,16 +1704,42 @@ a_policy_audit() {
 a_policy_scoped() {
     CMD=(./deploy-infra.sh --policy-only "&&" ./infra/deploy-workbench.sh --policy-only)
     local c
-    for c in access edge-wizard frontend iam monitor mqtt-explorer scheduler; do
+    for c in access edge-wizard frontend iam monitor mqtt-explorer scheduler superset; do
         CMD+=("&&" "./apps/$c/deploy.sh" --gate-only)
     done
-    EFFECT="only the policy artefacts that differ from the applied policy's compile (route table, NetworkPolicies, Node-RED's rights, Grafana's roles, pgAdmin's claims, every sign-in gate, the workbench's gate and hops, the wizard's roles); unchanged ones are left alone"
+    EFFECT="only the policy artefacts that differ from the applied policy's compile (route table, NetworkPolicies, Node-RED's rights, Grafana's roles, pgAdmin's claims, every sign-in gate, the workbench's gate and hops, the wizard's roles, Superset's role mapping); unchanged ones are left alone"
     LOCK="yes, held by the guide for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
     LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Each prints one line per target: unchanged, re-rendered or not deployed. On a platform that matches the policy nothing changes and nothing restarts."
            "A drifted sign-in gate rolls only its proxy. Grafana and pgAdmin, when their roles drifted, redeploy their whole section (they restart; pgAdmin's sessions end)."
-           "The onboarding wizard restarts only when its roles changed, and never during an onboarding run: then it says deferred and the chain stops (exit 4); run this again when the run has finished."
+           "The onboarding wizard restarts only when its roles changed, and never during an onboarding run: then it says deferred and the chain stops (exit 4); run this again when the run has finished. Superset likewise defers a drifted mapping while its wheel cache is incomplete: run ./apps/superset/deploy.sh first."
            "Use it when ./health-check.sh's Policy artefacts names a stale target. ./apps/iam/apply.sh --resume runs the same modes itself.")
+    plan_run
+}
+# Superset stage C (plan §4 B-5, B-8): after the skeleton version that adds Superset's host,
+# group and service identity is applied, the database deploy gives svc_superset its password
+# and Secret, and the iam deploy ships that skeleton to the Policy UI.
+a_policy_superset_skeleton() {
+    CMD=(./apps/database/deploy.sh "&&" env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh "&&" ./health-check.sh)
+    EFFECT="database: svc_superset's password (a SCRAM verifier) and Secret db-svc-superset; iam-api: ConfigMap iam-compiler with the applied skeleton (iam-api restarts); then the health check (read-only)"
+    LOCK="yes, held by the guide for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Run it right after ./apps/iam/apply.sh N of the skeleton version (Superset's host, group analysis, svc_superset), from that checkout. Between the git checkout of the proposal's commit and the end of that apply every compiling deploy exits 2 (the skeleton gate): run nothing else in between."
+           "Order: the database deploy first (Superset's data connection cannot sign in without it), then the iam deploy (MEDCEA_CONFIRMED=1: it may finish an interrupted apply without asking)."
+           "Draft the change version with Superset's cells only after this has finished: the Policy UI checks a draft against the skeleton its own pod ships, and 'from defaults' reads that pod's defaults.yaml."
+           "Do not run ./deploy-apps.sh --all instead: it is not needed here, and Superset skips until a version gives roles a setting."
+           "Health: the Access policy version check WARNs that git may lag the applied matrix until the change version is applied; nothing FAILs.")
+    plan_run
+}
+a_policy_superset_install() {
+    CMD=(./apps/superset/deploy.sh "&&" ./health-check.sh "&&" tests/iam-hosts.sh "&&" tests/iam-network.sh "&&" tests/iam-signin.sh
+         "&&" ./apps/backup/backups.sh now "&&" ./apps/backup/backups.sh verify)
+    EFFECT="Superset's first install (database superset, role superset_meta, Secret, ConfigMap, the init Job, Deployment superset, the portal card); the checks: health, live gates, a throwaway probe pod (deleted), one throwaway Keycloak account per role (deleted on exit); then one backup run (a new dated folder in BACKUP_DIR)"
+    LOCK="yes, held by the guide for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Only after the change version with Superset's cells is applied (./apps/iam/apply.sh N): its rollout printed 'not deployed' for Superset, so this is the first install."
+           "The first install pulls the image and waits for the init Job (up to ~20 minutes). Each step runs only if the one before it succeeded."
+           "Expected: Superset roles OK in the health check; superset:8088 times out from the probe pod; every role the policy maps signs in, the others are refused with \"No access to Superset\"; the backup lists db/superset.dump.")
     plan_run
 }
 a_policy_export() {
@@ -1828,7 +1893,7 @@ a_iam_policy() {
     esac
     NOTES=("Needs IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true, run after Deploy IAM 4.4. Refused while a change or skeleton version is open."
            "If it stops half-way it withdraws its version (in the Policy UI, else apply.sh --withdraw-open) before deleting the accounts.")
-    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the eight checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
+    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the nine checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
                              "If it stops after its apply it finishes it (--resume)$([[ "$m" == --change ]] && echo ", rolls it back and has the rollback confirmed") before deleting the accounts.")
     plan_run
 }
@@ -2123,6 +2188,9 @@ AREA_APPS=(
     "a_apps_uninstall|Uninstall components|./deploy-apps.sh --uninstall: all, or the ones you name."
     "a_apps_uninstall_one|Uninstall one component directly|./apps/<component>/uninstall.sh (no confirmation of its own)."
     "a_apps_list|List the components|./deploy-apps.sh --help."
+    "a_superset_deploy|Install Superset|./apps/superset/deploy.sh, then the health check; skipped until the applied policy gives roles a setting."
+    "a_superset_gate|Re-render Superset's gate|./apps/superset/deploy.sh --gate-only: only the role mapping, only when it drifted."
+    "a_superset_uninstall|Uninstall Superset|./apps/superset/uninstall.sh: its data kept unless purged."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."
@@ -2193,6 +2261,8 @@ AREA_POLICY=(
     "a_policy_apply|Apply an approved policy version|./apps/iam/apply.sh N: --check-only first (read-only), then the apply."
     "a_policy_rollback|Roll back to an earlier policy version|./apps/iam/apply.sh --rollback-to K: a new rollback version, confirmed by qa afterwards."
     "a_policy_audit|Audit an applied version|./apps/iam/apply.sh --audit N (read-only)."
+    "a_policy_superset_skeleton|Superset stage C: after the skeleton version|The database and iam deploys, then health, under one lock: svc_superset's password and the Policy UI's skeleton."
+    "a_policy_superset_install|Superset stage C: install Superset|After the change version: the Superset deploy, health, the live gate, network and sign-in tests, a backup, under one lock."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -2208,7 +2278,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, the IAM 4.1, 4.2a and 4.3 deploys, the IAM 4.4 deploy, skeleton proposals and the host withdraw, and the IAM 4.5 deploy, applying, rolling back and auditing versions."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, the IAM 4.1, 4.2a and 4.3 deploys, the IAM 4.4 deploy, skeleton proposals and the host withdraw, and the IAM 4.5 deploy, applying, rolling back and auditing versions, and Superset stage C."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

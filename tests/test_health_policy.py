@@ -750,6 +750,8 @@ case "$*" in
   "get deployment superset -n medcea") test -f "$FAKE_DIR/deploy.json" ;;
   "get deployment,replicaset -n medcea -l app=superset -o json") test -f "$FAKE_DIR/deploy.json" && cat "$FAKE_DIR/deploy.json" ;;
   "get secret superset-secrets -n medcea -o json") test -f "$FAKE_DIR/secret.json" && cat "$FAKE_DIR/secret.json" ;;
+  "get configmap superset-config -n medcea -o json") test -f "$FAKE_DIR/cm.json" && cat "$FAKE_DIR/cm.json" ;;
+  "get pod -n medcea -l app=superset,component=web -o json") test -f "$FAKE_DIR/pods.json" && cat "$FAKE_DIR/pods.json" ;;
   *) echo "fake kubectl: unexpected $*" >&2; exit 99 ;;
 esac
 """
@@ -783,9 +785,20 @@ def ss_secret(key=SS_KEY, mapping=SS_MAP, drop=()):
             "data": {k: base64.b64encode(v.encode()).decode() for k, v in data.items() if k not in drop}}
 
 
+SS_CM = {"kind": "ConfigMap", "metadata": {"name": "superset-config"},
+         "data": {"superset_config.py": "APP_NAME = 'x'\n", "requirements.txt": "a==1 --hash=sha256:" + "0" * 64 + "\n"}}
+
+
+def ss_pods(*checksums, phase="Running"):
+    return {"kind": "List", "items": [
+        {"metadata": {"name": "superset-%d" % i, "annotations": {"medcea/config-checksum": c} if c else {}},
+         "status": {"phase": phase}} for i, c in enumerate(checksums)]}
+
+
 class SupersetRoles(unittest.TestCase):
-    """check_supersetroles (Superset stage B): a fake kubectl, policy_tool stubbed or, once,
-    the real library in a scratch tree (the policy there has no superset tool yet: rc 5)."""
+    """check_supersetroles (Superset stages B and C): a fake kubectl, policy_tool stubbed or,
+    once, the real library in a scratch tree (the policy there has no superset tool yet:
+    rc 5); the live-pod checksum through apps/superset/lib-superset.sh, the deploy's own."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="medcea-ss-")
@@ -796,15 +809,36 @@ class SupersetRoles(unittest.TestCase):
         with open(os.path.join(self.bin, "kubectl"), "w") as f:
             f.write(SS_KUBECTL)
         os.chmod(os.path.join(self.bin, "kubectl"), 0o755)
+        self.put_lib(self.tmp)
+
+    @staticmethod
+    def put_lib(root):
+        os.makedirs(os.path.join(root, "apps", "superset"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "apps", "superset", "lib-superset.sh"),
+                    os.path.join(root, "apps", "superset", "lib-superset.sh"))
+
+    def live_sum(self):
+        """What apps/superset/deploy.sh writes into the pod template for the fake cluster."""
+        p = subprocess.run(["bash", "-c", 'source "$1"; superset_config_checksum medcea', "x",
+                            os.path.join(REPO, "apps", "superset", "lib-superset.sh")],
+                           env=clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], FAKE_DIR=self.fd,
+                                         KUBECTL="kubectl"), capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def cluster(self, deploy=None, secret=None):
-        for n, doc in (("deploy.json", deploy), ("secret.json", secret)):
+    def cluster(self, deploy=None, secret=None, cm=SS_CM, pods=True):
+        for n, doc in (("deploy.json", deploy), ("secret.json", secret), ("cm.json", cm)):
             if doc is not None:
                 with open(os.path.join(self.fd, n), "w") as f:
                     json.dump(doc, f)
+        if pods is True:   # one running pod started with the live Secret and ConfigMap
+            pods = ss_pods(self.live_sum()) if secret is not None else ss_pods()
+        if pods is not None:
+            with open(os.path.join(self.fd, "pods.json"), "w") as f:
+                json.dump(pods, f)
 
     def run_check(self, want=None, rc=0, stub=True, root=None, **env):
         setup = ""
@@ -813,8 +847,9 @@ class SupersetRoles(unittest.TestCase):
                      'echo "$FAKE_WANT"; }')
         script = (f'_record() {{ echo "$1|$2|$3"; }}\nSCRIPT_DIR={root or self.tmp}\nTIMEOUT=5\nKUBECTL=kubectl\n'
                   f'NAMESPACE=medcea\n{setup}\n{body("check_supersetroles")}\ncheck_supersetroles "Superset roles" medcea\n')
-        e = clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], FAKE_DIR=self.fd, FAKE_RC=str(rc),
-                      FAKE_WANT=json.dumps(want if want is not None else SS_MAP), MEDCEA_NO_LOG="1", **env)
+        e = clean_env(**dict(dict(PATH=self.bin + os.pathsep + os.environ["PATH"], FAKE_DIR=self.fd, FAKE_RC=str(rc),
+                                  FAKE_WANT=json.dumps(want if want is not None else SS_MAP), MEDCEA_NO_LOG="1",
+                                  IAM_DB_SERVICE_ROLES="true"), **env))
         p = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e, timeout=120)
         out = p.stdout.strip()
         for secret in (SS_KEY, SS_PASS, "Kp3vW9xT2qL8nB5mR1sD", "c" * 32):
@@ -828,7 +863,50 @@ class SupersetRoles(unittest.TestCase):
     def test_skip_when_not_deployed(self):
         status, msg = self.run_check()
         self.assertEqual(status, "SKIP", msg)
-        self.assertIn("stage C", msg)
+        self.assertIn("once the applied access policy gives a role a Superset setting", msg)
+        self.assertNotIn("stage C", msg)
+        # F7: a fresh install has IAM_DB_SERVICE_ROLES=false, and the deploy skips for it
+        for v in ("false", ""):
+            status, msg = self.run_check(IAM_DB_SERVICE_ROLES=v)
+            self.assertEqual(status, "SKIP", msg)
+            self.assertIn("it needs IAM_DB_SERVICE_ROLES=true (its data connection is svc_superset)", msg)
+
+    def test_service_roles_false_while_deployed_warns(self):
+        self.cluster(ss_deploy(), ss_secret())
+        status, msg = self.run_check(IAM_DB_SERVICE_ROLES="false")
+        self.assertEqual(status, "WARN", msg)
+        self.assertIn("the next ./apps/superset/deploy.sh (or --gate-only) stops Superset", msg)
+
+    def test_live_checksum(self):
+        # F10: the mapping is a secretKeyRef env, read at start only. A pod started before
+        # the Secret changed FAILs although the Secret itself matches the policy.
+        self.cluster(ss_deploy(), ss_secret())
+        good = self.live_sum()
+        self.assertRegex(good, r"^[0-9a-f]{64}$")
+        self.assertEqual(self.run_check()[0], "OK")
+        for pods, why in ((ss_pods("f" * 64), "another checksum"), (ss_pods(None), "no annotation"),
+                          (ss_pods(good, "e" * 64), "one of two pods")):
+            with self.subTest(why):
+                self.cluster(ss_deploy(), ss_secret(), pods=pods)
+                status, msg = self.run_check()
+                self.assertEqual(status, "FAIL", msg)
+                self.assertIn("was started with another Secret or ConfigMap (medcea/config-checksum)", msg)
+        # the ConfigMap counts as much as the Secret
+        self.cluster(ss_deploy(), ss_secret(), pods=ss_pods(good),
+                     cm=dict(SS_CM, data={"superset_config.py": "APP_NAME = 'y'\n"}))
+        self.assertEqual(self.run_check()[0], "FAIL")
+        # no running pod (a pending one does not count): WARN; unreadable pods or ConfigMap: FAIL
+        self.cluster(ss_deploy(), ss_secret(), pods=ss_pods(good, phase="Pending"))
+        status, msg = self.run_check()
+        self.assertEqual(status, "WARN", msg)
+        self.assertIn("no running Superset pod", msg)
+        os.remove(os.path.join(self.fd, "pods.json"))
+        status, msg = self.run_check()
+        self.assertEqual(status, "FAIL", msg)
+        self.assertIn("cannot compare the running Superset", msg)
+        self.cluster(ss_deploy(), ss_secret(), pods=ss_pods(good))
+        os.remove(os.path.join(self.fd, "cm.json"))
+        self.assertEqual(self.run_check()[0], "FAIL")
 
     def test_ok(self):
         self.cluster(ss_deploy(), ss_secret())
@@ -895,7 +973,8 @@ class SupersetRoles(unittest.TestCase):
         self.assertIn("IAM_GATES=false", msg)
         status, msg = self.run_check(rc=5)
         self.assertEqual(status, "FAIL", msg)
-        self.assertIn("has no superset tool", msg)
+        self.assertIn("has no superset tool, or no role is given a setting", msg)
+        self.assertIn("./apps/superset/deploy.sh --gate-only stops it", msg)
         status, msg = self.run_check(rc=1)
         self.assertEqual(status, "FAIL", msg)
         self.assertIn("cannot compile", msg)
@@ -909,9 +988,11 @@ class SupersetRoles(unittest.TestCase):
         self.assertIn("cannot read", msg)
 
     def test_the_real_library_today(self):
-        # the applied policy has no superset tool before stage C: a deployed Superset FAILs
+        # the factory policy has no superset tool before stage C's commit B: a deployed
+        # Superset FAILs
         root = scratch_repo("medcea-ss-")
         try:
+            self.put_lib(root)
             self.cluster(ss_deploy(), ss_secret())
             status, msg = self.run_check(stub=False, root=root, IAM_GATES="true")
             self.assertEqual(status, "FAIL", msg)
@@ -932,7 +1013,7 @@ class Wiring(unittest.TestCase):
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
         self.assertEqual(len(lines), 56)
-        # Superset stage B: one more check, SKIP until Superset is deployed
+        # Superset stage B: one more check, SKIP until Superset is deployed (stage C: none more)
         row = [l for l in lines if l.split("|")[0].strip() == "Superset roles"]
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["supersetroles", "$NAMESPACE"])
         with open(os.path.join(REPO, "health-check.sh")) as f:

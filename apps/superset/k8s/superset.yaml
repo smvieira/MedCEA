@@ -1,16 +1,19 @@
-# apps/superset/k8s/superset.yaml — Superset's web pod, Service and Ingress (stage B of
-# "Superset for data analysis"; owner decisions of 6 Nov 2026: plain manifests, no Helm
-# chart (D1); no Redis and no Celery worker (D2); the three missing Python packages from
-# a hash-checked init container (D3)). Rendered by apps/superset/deploy.sh with the
-# explicit list _POD_VARS, shared with k8s/superset-init.yaml; this file uses NAMESPACE
-# KEYCLOAK_DOMAIN KEYCLOAK_REALM SUPERSET_DOMAIN PORTAL_DOMAIN PLATFORM_IP
-# SUPERSET_CONFIG_CHECKSUM SUPERSET_DB_USER.
+# apps/superset/k8s/superset.yaml — Superset's web pod, Service and Ingress ("Superset
+# for data analysis"; owner decisions of 6 Nov 2026: plain manifests, no Helm chart (D1);
+# no Redis and no Celery worker (D2); the three missing Python packages from a
+# hash-checked init container (D3), installed from the host's wheel cache (N10, 7 Nov
+# 2026)). Rendered by apps/superset/deploy.sh with the explicit list _POD_VARS, shared
+# with k8s/superset-init.yaml; this file uses NAMESPACE KEYCLOAK_DOMAIN KEYCLOAK_REALM
+# SUPERSET_DOMAIN PORTAL_DOMAIN PLATFORM_IP SUPERSET_CONFIG_CHECKSUM SUPERSET_DB_USER
+# MEDCEA_LOGOUT_RETURN SUPERSET_WHEEL_DIR SUPERSET_WHEEL_UID SUPERSET_WHEEL_GID.
 #
 # No secret is a plain value: everything secret is a secretKeyRef (Secret
 # superset-secrets, and db-svc-superset for the data connection the init Job writes).
 # The root filesystem is read-only: gunicorn's heartbeat goes to /tmp, Superset's
 # DATA_DIR is $SUPERSET_HOME, the packages are in /opt/extra; all three are emptyDirs.
-# The init container needs PyPI at every start (D3): without it Superset stays down.
+# The init container installs from SUPERSET_WHEEL_DIR (a hostPath, read-only, no index):
+# a pod start needs no PyPI; an incomplete cache keeps Superset down (the full deploy
+# fills it).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -62,9 +65,14 @@ spec:
         image: docker.io/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
         command: ["/usr/local/bin/pip3", "install", "--isolated", "--no-deps", "--require-hashes",
                   "--only-binary=:all:", "--no-cache-dir", "--disable-pip-version-check",
-                  "--index-url", "https://pypi.org/simple", "--target", "/opt/extra",
+                  "--no-index", "--find-links", "/wheels", "--target", "/opt/extra",
                   "-r", "/app/pythonpath/requirements.txt"]
+        env:
+        - {name: HOME, value: "/tmp"}   # an account the image's /etc/passwd may not know
         securityContext:
+          # the wheel cache's owner (mode 700): the main container reads /opt/extra as 1000
+          runAsUser: ${SUPERSET_WHEEL_UID}
+          runAsGroup: ${SUPERSET_WHEEL_GID}
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
@@ -74,6 +82,7 @@ spec:
           limits: {memory: "512Mi", cpu: "1"}
         volumeMounts:
         - {name: extra, mountPath: /opt/extra}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
         - {name: tmp, mountPath: /tmp}
         - {name: home, mountPath: /app/superset_home}
         - {name: config, mountPath: /app/pythonpath, readOnly: true}
@@ -94,6 +103,9 @@ spec:
         - {name: KEYCLOAK_REALM, value: "${KEYCLOAK_REALM}"}
         - {name: SUPERSET_DOMAIN, value: "${SUPERSET_DOMAIN}"}
         - {name: PORTAL_DOMAIN, value: "${PORTAL_DOMAIN}"}
+        # where Keycloak's end-session returns (N4: superset_logout_return, the
+        # platform's one-hop sign-out chain; registered on client superset)
+        - {name: MEDCEA_LOGOUT_RETURN, value: "${MEDCEA_LOGOUT_RETURN}"}
         # the data connection's login (db_clients_live reads it); its password is
         # used only by the init Job, which stores it encrypted in the metadata database
         - name: SUPERSET_DB_USER
@@ -137,6 +149,10 @@ spec:
         - {name: ca, mountPath: /etc/medcea-ca, readOnly: true}
       volumes:
       - {name: extra, emptyDir: {sizeLimit: 256Mi}}
+      - name: wheels
+        hostPath:
+          path: ${SUPERSET_WHEEL_DIR}
+          type: Directory
       - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
       - {name: home, emptyDir: {sizeLimit: 256Mi}}
       - name: config

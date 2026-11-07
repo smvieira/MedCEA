@@ -7,12 +7,13 @@ are lower case. Every secret arrives as an environment variable from a secretKey
 (Secret superset-secrets, and db-svc-superset for the data connection in bootstrap.py);
 a missing one is a KeyError, so Superset does not start rather than start open.
 
-Decisions (decision record "Superset for data analysis", stage B, 6 Nov 2026):
+Decisions (decision record "Superset for data analysis", stages B and C, 6–7 Nov 2026):
 no Redis and no Celery worker (D2: every cache is NullCache or the metadata database,
 no async queries, alerts, reports or thumbnails); sessions 5 min idle and 1 h at most
 (D6, medcea_security.py); sign-in through Keycloak only, refused unless a realm role
 maps (AUTH_ROLES_MAPPING is compiled from the access policy); no local admin, no
-public role, no self-registration, no telemetry hosts in the content security policy.
+public role, no self-registration, no telemetry hosts in the content security policy;
+the sign-out follows the platform's one-hop chain (N4).
 """
 import hashlib
 import hmac
@@ -78,7 +79,14 @@ AUTH_RATE_LIMITED = True
 
 MEDCEA_CALLBACK_URL = "https://%s/oauth-authorized/%s" % (_superset, medcea_security.PROVIDER)
 MEDCEA_PORTAL_URL = "https://%s/" % _env["PORTAL_DOMAIN"]
-MEDCEA_LOGOUT_URL = medcea_security.end_session_url(_keycloak, _realm, "superset", "https://%s/" % _superset)
+# Where Keycloak's end-session sends the person (N4, stage C): the platform's one-hop
+# chain, built by superset_logout_return (infra/lib-oauth2-proxy.sh) — the workbench's
+# /hub/logout, else the portal's proxy sign-out — so the portal and workbench sessions
+# end too. Registered on client superset by deploy-infra.sh; https only, else no start.
+MEDCEA_LOGOUT_RETURN = _env["MEDCEA_LOGOUT_RETURN"]
+if not MEDCEA_LOGOUT_RETURN.startswith("https://") or any(c.isspace() for c in MEDCEA_LOGOUT_RETURN):
+    raise RuntimeError("MEDCEA_LOGOUT_RETURN must be an https:// address")
+MEDCEA_LOGOUT_URL = medcea_security.end_session_url(_keycloak, _realm, "superset", MEDCEA_LOGOUT_RETURN)
 LOGOUT_REDIRECT_URL = MEDCEA_LOGOUT_URL
 
 # --- sessions (D6): 5 min idle, 1 h at most ---------------------------------------

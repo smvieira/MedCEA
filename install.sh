@@ -209,6 +209,19 @@ iam_switches_hint() {
     return 0
 }
 
+# One line when the applications stage skipped Superset because IAM_DB_SERVICE_ROLES is
+# not true (Superset stage C, A2b: its data connection is svc_superset, never postgres).
+# Read from the newest deploy-apps log, which holds apps/superset/deploy.sh's skip line;
+# the fix is that switch's recipe, then the Superset deploy. Never fails the install.
+superset_skip_hint() {
+    local log
+    log="$(ls -t logs/deploy-apps-*.log 2>/dev/null | head -1)"
+    [[ -n "$log" ]] || return 0
+    grep -qF "skipped: Superset needs IAM_DB_SERVICE_ROLES=true" "$log" 2>/dev/null || return 0
+    echo -e "${YELLOW}Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true. Turn it on (./guide.sh → IAM switches → IAM_DB_SERVICE_ROLES, or \"Bring IAM to full enforcement\"), then ./apps/superset/deploy.sh.${NC}"
+    return 0
+}
+
 # One line when deploy-infra added this account to dialout but could not restart
 # its user service manager (a desktop run): the onboarding wizard's process still
 # lacks the group, so it cannot open the USB port until a reboot. Never fails.
@@ -234,6 +247,7 @@ install)
     echo ""
     echo -e "${GREEN}${BOLD}MedCEA is installed.${NC} Start at the service portal: https://$( (source ./config.env; echo "$PORTAL_DOMAIN") 2>/dev/null)"
     iam_switches_hint || true      # before the box, which stays the last thing on screen
+    superset_skip_hint || true
     usb_group_hint || true
     finish_with_credentials
     ;;
@@ -245,6 +259,7 @@ infra)
 apps)
     [[ -f config.env ]] || { echo -e "${RED}No config.env — install the infrastructure first: ./install.sh${NC}" >&2; exit 1; }
     run_stage "Applications" deploy-apps with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
+    superset_skip_hint || true
     ;;
 # -----------------------------------------------------------------------------
 uninstall-apps)

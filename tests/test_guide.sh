@@ -98,6 +98,16 @@
 #  48  Edge devices → Send a test message as a board: no records → says so, runs nothing; the
 #      records listed by name; a name starting with - or with no record re-asked; the command
 #      printed with printf %q; [Y/n]; real against the stub
+#  49  Applications → Install Superset: the deploy, then the health check; the skip explained;
+#      [y/N]; real: the deploy takes its own lock (the guide holds none); a failure stops it
+#  50  Applications → Re-render Superset's gate: --gate-only alone, [y/N], dry and real
+#  51  Applications → Uninstall Superset: the typed word yes (y cancels); --purge-data asks the
+#      project name too (a wrong one cancels); the same through Uninstall one component
+#  52  Policy → Superset stage C: after the skeleton version: database, iam (MEDCEA_CONFIRMED=1),
+#      then health, under the guide's one lock; the notes (the skeleton gate's window, draft
+#      the cells only afterwards, not deploy-apps --all); a failure stops the chain
+#  53  Policy → Superset stage C: install Superset: the deploy, health, iam-hosts, iam-network,
+#      iam-signin, backups now and verify, in that order under one lock
 #
 #   tests/test_guide.sh      exit 1 on any FAIL
 
@@ -889,7 +899,7 @@ echo "38 re-render the policy artefacts (scoped)"
 mkcfg true true
 guide $'8\n16\ny\nq\n'
 rc_is "quits with 0" 0
-has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh --policy-only && ./infra/deploy-workbench.sh --policy-only && ./apps/access/deploy.sh --gate-only && ./apps/edge-wizard/deploy.sh --gate-only && ./apps/frontend/deploy.sh --gate-only && ./apps/iam/deploy.sh --gate-only && ./apps/monitor/deploy.sh --gate-only && ./apps/mqtt-explorer/deploy.sh --gate-only && ./apps/scheduler/deploy.sh --gate-only"
+has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh --policy-only && ./infra/deploy-workbench.sh --policy-only && ./apps/access/deploy.sh --gate-only && ./apps/edge-wizard/deploy.sh --gate-only && ./apps/frontend/deploy.sh --gate-only && ./apps/iam/deploy.sh --gate-only && ./apps/monitor/deploy.sh --gate-only && ./apps/mqtt-explorer/deploy.sh --gate-only && ./apps/scheduler/deploy.sh --gate-only && ./apps/superset/deploy.sh --gate-only"
 has   "a change ([y/N])" "Kind:        changes the platform"
 has   "one lock" "held by the guide for all of them"
 has   "the deferral is explained" "never during an onboarding run"
@@ -898,8 +908,8 @@ lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock hel
 real $'8\n16\ny\nq\n'
 rc_is "real: quits with 0" 0
 has   "real: deploy-infra --policy-only ran" "STUB deploy-infra.sh --policy-only"
-has   "real: the last gate ran" "STUB apps/scheduler/deploy.sh --gate-only"
-[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 9 ]] && pass "real: all nine under the guide's lock" \
+has   "real: the last gate ran" "STUB apps/superset/deploy.sh --gate-only"
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 10 ]] && pass "real: all ten under the guide's lock" \
     || fail "real: a step ran without the guide's lock"
 OUT="$(printf '8\n16\ny\nq\n' | NO_COLOR=1 STUB_RC=4 "$S/guide.sh" 2>&1)"
 has   "a deferral (exit 4) stops the chain" "STUB deploy-infra.sh --policy-only"
@@ -1106,7 +1116,7 @@ has   "--change (dry)" "[dry run] not executed: tests/iam-policy.sh --change"
 has   "five accounts" "5 throwaway accounts"
 has   "--apply leaves its version applied" "it becomes the applied version"
 has   "--change rolls back in its trap" "rolls it back and has the rollback confirmed"
-has   "the precondition" "Refused (exit 2) while one of the eight checks"
+has   "the precondition" "Refused (exit 2) while one of the nine checks"
 [[ "$(grep -c 'Run it? \[y/N\]' <<<"$OUT")" == 2 ]] && pass "two [y/N], b goes back without a plan" || fail "b planned something"
 no_stub
 real $'6\n17\n3\ny\nq\n'
@@ -1168,6 +1178,118 @@ real $'7\n3\nunit01-c-zone01\n\nq\n'
 rc_is "real: quits with 0" 0
 has   "real: flash-device.sh ran" "STUB edge/flash-device.sh --send-test unit01-c-zone01"
 rm -rf "$S/edge/provisioned"
+
+echo "49 install Superset (Applications)"
+mkcfg true true
+guide $'3\n7\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./apps/superset/deploy.sh && ./health-check.sh"
+has   "a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "while IAM_DB_SERVICE_ROLES is not true"
+has   "its lock" "the deploy takes its own; the health check none"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'3\n7\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: the deploy, then health" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/superset/deploy.sh", "STUB health-check.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 2 ]] && pass "real: the guide holds no lock" || fail "real: ran under the guide's lock"
+OUT="$(printf '3\n7\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/superset/deploy.sh"
+hasnt "no health check after it" "STUB health-check.sh"
+
+echo "50 re-render Superset's gate (Applications)"
+mkcfg true true
+guide $'3\n8\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the command (dry)" "[dry run] not executed: ./apps/superset/deploy.sh --gate-only"
+has   "a change ([y/N])" "Kind:        changes the platform"
+has   "what it prints" "unchanged, re-rendered or not deployed"
+no_stub
+real $'3\n8\ny\nq\n'
+has   "real: the gate ran" "STUB apps/superset/deploy.sh --gate-only"
+
+echo "51 uninstall Superset (Applications)"
+mkcfg true true
+guide $'3\n9\nn\ny\nb\n9\nn\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "y is not yes" "Cancelled; nothing was run."
+has   "yes runs it (dry)" "[dry run] not executed: ./apps/superset/uninstall.sh"
+hasnt "no --purge-data unasked" "uninstall.sh --purge-data"
+has   "the data is kept" "keeps database superset"
+no_stub
+guide $'3\n9\ny\nyes\nmedcea\nb\n9\ny\nyes\nnope\nq\n'
+rc_is "purge: quits with 0" 0
+has   "purge: asks for the project name" "Type the project name ('medcea')"
+has   "purge: the name runs it (dry)" "[dry run] not executed: ./apps/superset/uninstall.sh --purge-data"
+[[ "$(grep -c 'not executed: ./apps/superset/uninstall.sh' <<<"$OUT")" == 1 ]] \
+    && pass "purge: a wrong name cancels" || fail "purge: a wrong name did not cancel"
+has   "purge: says what goes" "DROPS database superset and role superset_meta"
+no_stub
+I="$(menu_index uninstall superset)"
+guide "3"$'\n'"5"$'\n'"$I"$'\n'"y"$'\n'"yes"$'\n'"medcea"$'\n'"q"$'\n'
+has   "one component: --purge-data offered for superset" "[dry run] not executed: ./apps/superset/uninstall.sh --purge-data"
+has   "one component: no confirmation of its own" "No confirmation of its own"
+no_stub
+real $'3\n9\ny\nyes\nmedcea\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the uninstall ran" "STUB apps/superset/uninstall.sh --purge-data"
+
+echo "52 Superset stage C: after the skeleton version"
+mkcfg true true
+guide $'8\n26\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./apps/database/deploy.sh && env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh && ./health-check.sh"
+has   "one lock" "held by the guide for all three"
+has   "a change ([y/N])" "Run it? [y/N]"
+has   "the skeleton gate's window" "every compiling deploy exits 2"
+has   "draft the cells only afterwards" "Draft the change version with Superset's cells only after this has finished"
+has   "not deploy-apps --all" "Do not run ./deploy-apps.sh --all instead"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+real $'8\n26\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: database, iam, health in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/database/deploy.sh", "STUB apps/iam/deploy.sh", "STUB health-check.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^ENV_BY= ENV_CONFIRMED=1$' <<<"$OUT")" == 1 ]] \
+    && pass "real: MEDCEA_CONFIRMED=1 reaches the iam deploy only" || fail "real: MEDCEA_CONFIRMED not passed as planned"
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 3 ]] \
+    && pass "real: all three under the guide's lock" || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+OUT="$(printf '8\n26\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/database/deploy.sh"
+hasnt "the iam deploy did not run" "STUB apps/iam/deploy.sh"
+
+echo "53 Superset stage C: install Superset"
+mkcfg true true
+guide $'8\n27\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the chain (dry)" "[dry run] not executed: ./apps/superset/deploy.sh && ./health-check.sh && tests/iam-hosts.sh && tests/iam-network.sh && tests/iam-signin.sh && ./apps/backup/backups.sh now && ./apps/backup/backups.sh verify"
+has   "one lock" "held by the guide for all of them"
+has   "after the change version" "Only after the change version with Superset's cells is applied"
+has   "the expected refusal" '"No access to Superset"'
+no_stub
+real $'8\n27\ny\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: all seven in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("STUB apps/superset/deploy.sh", "STUB health-check.sh", "STUB tests/iam-hosts.sh",
+                          "STUB tests/iam-network.sh", "STUB tests/iam-signin.sh",
+                          "STUB apps/backup/backups.sh now", "STUB apps/backup/backups.sh verify")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 7 ]] && pass "real: all seven under the guide's lock" \
+    || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"
