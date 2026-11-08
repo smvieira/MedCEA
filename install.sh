@@ -3,7 +3,9 @@
 # install.sh — the one entry point: install, update and uninstall MedCEA
 # =============================================================================
 # Runs the existing scripts in order and adds nothing they do not already do:
-#   install    deploy-infra.sh → deploy-apps.sh --all → health-check.sh
+#   install    deploy-infra.sh → deploy-apps.sh --all [→ deploy-infra.sh] → health-check.sh
+#              (the second deploy-infra.sh only while IAM_DB_SERVICE_ROLES is true:
+#              Grafana and pgAdmin onto their own database roles)
 #   uninstall  deploy-apps.sh --uninstall / deploy-infra.sh --reset / --uninstall
 # Each of those also works on its own. Run from anywhere; it changes to the
 # repository root because every script reads config.env relative to it.
@@ -22,7 +24,10 @@ Install / update
   (no option)            Install or update everything: infrastructure, then the
                          applications, then a health check. Asks for any missing
                          settings first. Safe to re-run: finished steps are
-                         skipped or updated in place.
+                         skipped or updated in place. While IAM_DB_SERVICE_ROLES is
+                         true (a new config.env's default) the infrastructure is
+                         deployed once more after the applications, so Grafana and
+                         pgAdmin move onto their own database roles.
   --configure            Review every setting (current values as defaults), then install.
   --infra-only           Only the infrastructure (MicroK8s, Postgres, Keycloak, Grafana,
                          Node-RED, portal, AI workbench).
@@ -47,8 +52,9 @@ Uninstall
   --uninstall-infra      Remove every platform service, every application and ALL data
                          (the whole namespace). Keeps MicroK8s, so reinstalling is fast.
   --uninstall-all        Total uninstall: everything above plus MicroK8s itself, the
-                         onboarding wizard service, edge/.venv, logs and credentials
-                         files. Asks before deleting config.env and the platform CA.
+                         onboarding wizard service, edge/.venv, Superset's wheel cache,
+                         logs and credentials files. Asks before deleting config.env and
+                         the platform CA.
 
   -h, --help             Show this help.
 
@@ -191,19 +197,26 @@ finish_with_credentials() {
     [[ -n "$f" ]] && show_credentials "$f"
 }
 
-# One line after a fresh install: a new config.env has the sign-in gates and network
-# policies on, but token checks, database roles and enforcement off (each has its own
-# rollback). config.env is read the way guide.sh reads it — never sourced: each switch
+# cfg_switch KEY — the value of KEY's one active line in config.env, unquoted; nothing when
+# config.env is missing or KEY has zero or several active lines.
+cfg_switch() {
+    local k="$1" hits
+    [[ -f config.env ]] || return 0
+    hits="$(grep -cE "^[[:space:]]*(export[[:space:]]+)?${k}=" config.env 2>/dev/null)" || true
+    [[ "$hits" == 1 ]] || return 0
+    grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" config.env | sed -E "s/^[^=]*=//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//; s/^[\"']//; s/[\"']$//"
+}
+
+# One line after a fresh install: a new config.env has the sign-in gates, network
+# policies and the services' own database logins on, but token checks, database roles
+# and enforcement off (each has its own rollback). config.env is read the way guide.sh reads it — never sourced: each switch
 # must be one active line, literally "true" or "false"; anything else is not counted.
 # Never fails the install.
 iam_switches_hint() {
-    local k hits v off=0
+    local k off=0
     [[ -f config.env ]] || return 0
     for k in IAM_GATES IAM_NETPOL IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON; do
-        hits="$(grep -cE "^[[:space:]]*(export[[:space:]]+)?${k}=" config.env 2>/dev/null)" || true
-        [[ "$hits" == 1 ]] || continue
-        v="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" config.env | sed -E "s/^[^=]*=//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//; s/^[\"']//; s/[\"']$//")"
-        [[ "$v" == false ]] && off=$(( off + 1 ))
+        [[ "$(cfg_switch "$k")" == false ]] && off=$(( off + 1 ))
     done
     (( off )) && echo -e "${YELLOW}$off IAM switch(es) still false. To turn on the rest in order: ./guide.sh → IAM switches → \"Bring IAM to full enforcement\".${NC}"
     return 0
@@ -212,13 +225,61 @@ iam_switches_hint() {
 # One line when the applications stage skipped Superset because IAM_DB_SERVICE_ROLES is
 # not true (Superset stage C, A2b: its data connection is svc_superset, never postgres).
 # Read from the newest deploy-apps log, which holds apps/superset/deploy.sh's skip line;
-# the fix is that switch's recipe, then the Superset deploy. Never fails the install.
+# the fix is that switch's recipe, then the Superset deploy. A new config.env has the switch
+# true, but a reinstall that kept its config.env (or an older install) keeps false, so the
+# hint stays for those. Never fails the install.
 superset_skip_hint() {
     local log
     log="$(ls -t logs/deploy-apps-*.log 2>/dev/null | head -1)"
     [[ -n "$log" ]] || return 0
-    grep -qF "skipped: Superset needs IAM_DB_SERVICE_ROLES=true" "$log" 2>/dev/null || return 0
-    echo -e "${YELLOW}Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true. Turn it on (./guide.sh → IAM switches → IAM_DB_SERVICE_ROLES, or \"Bring IAM to full enforcement\"), then ./apps/superset/deploy.sh.${NC}"
+    if grep -qF "skipped: Superset needs IAM_DB_SERVICE_ROLES=true" "$log" 2>/dev/null; then
+        echo -e "${YELLOW}Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true. Turn it on (./guide.sh → IAM switches → IAM_DB_SERVICE_ROLES, or \"Bring IAM to full enforcement\"), then ./apps/superset/deploy.sh.${NC}"
+    # The version-N guard: the iam deploy's bootstrap waited (apply.sh --bootstrap rc 2), and
+    # nothing later in the install deploys Superset again.
+    elif grep -qF "skipped: no version of the access policy is applied yet" "$log" 2>/dev/null; then
+        echo -e "${YELLOW}Still to do: Superset was skipped, no version of the access policy is applied yet. Once ./apps/iam/deploy.sh has applied version 1 (./apps/iam/apply.sh --status), run ./apps/superset/deploy.sh.${NC}"
+    fi
+    return 0
+}
+
+# --apps-only under IAM_DB_SERVICE_ROLES=true: the full install runs deploy-infra once more
+# after the applications (Grafana and pgAdmin onto their roles); this mode does not run the
+# infrastructure, so it says so instead. Never fails.
+service_roles_infra_hint() {
+    [[ "$(cfg_switch IAM_DB_SERVICE_ROLES)" == true ]] || return 0
+    echo -e "${YELLOW}Still to do, unless ./deploy-infra.sh has run since this database deploy: ./deploy-infra.sh, so Grafana and pgAdmin move onto their own database roles (IAM_DB_SERVICE_ROLES is true; health-check dbclients names any client still on postgres).${NC}"
+    return 0
+}
+
+# remove_wheel_cache — Superset's wheel cache, which deploy-infra.sh created (a cache:
+# unlike BACKUP_DIR it holds nothing that is not on PyPI). Only its *.whl files are deleted,
+# then the folder and /var/lib/<project> with rmdir, so a SUPERSET_WHEEL_DIR pointed at a
+# folder holding anything else keeps it (said so). sudo for what the account may not
+# remove: the parent is root's. Never fails the uninstall.
+remove_wheel_cache() {
+    local d parent prompt
+    d="$( ( [[ -f config.env ]] && source ./config.env
+            source "$SCRIPT_DIR/apps/superset/lib-superset.sh"
+            superset_wheel_dir ) 2>/dev/null)" || return 0
+    [[ -n "$d" && -d "$d" ]] || return 0
+    parent="/var/lib/$( ( [[ -f config.env ]] && source ./config.env; echo "${PROJECT_NAME:-medcea}") 2>/dev/null)"
+    prompt="[sudo] password for %u (to remove Superset's wheel cache $d): "
+    find "$d" -maxdepth 1 -type f -name '*.whl' -delete 2>/dev/null \
+        || sudo -p "$prompt" find "$d" -maxdepth 1 -type f -name '*.whl' -delete || true
+    if [[ -n "$(ls -A "$d" 2>/dev/null)" ]]; then
+        echo -e "  ${YELLOW}kept $d: it holds more than Superset's wheels${NC}"
+        return 0
+    fi
+    if rmdir "$d" 2>/dev/null || sudo -p "$prompt" rmdir "$d"; then
+        echo "  removed Superset's wheel cache $d"
+    else
+        echo -e "  ${YELLOW}could not remove $d${NC}"
+        return 0
+    fi
+    if [[ "$(dirname "$d")" == "$parent" && -d "$parent" ]] && [[ -z "$(ls -A "$parent" 2>/dev/null)" ]]; then
+        { rmdir "$parent" 2>/dev/null || sudo -p "$prompt" rmdir "$parent"; } \
+            && echo "  removed $parent (empty)"
+    fi
     return 0
 }
 
@@ -242,6 +303,17 @@ case "$MODE" in
 install)
     run_stage "1/3  Infrastructure" deploy-infra ./deploy-infra.sh $CONFIGURE
     run_stage "2/3  Applications"   deploy-apps  with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
+    # config.env is read only now: the first stage creates or completes it.
+    if [[ "$(cfg_switch IAM_DB_SERVICE_ROLES)" == true ]]; then
+        # The switch's enable recipe (guide.sh): the database deploy in the applications
+        # stage has just let the service roles log in, and Grafana and pgAdmin, deployed by
+        # the first stage before that, are still on postgres. Under the same lock and
+        # MEDCEA_INSTALLER (the credentials box stays last); with --break-glass this run
+        # records its break_glass_seen too. A failure stops here like any stage.
+        echo ""
+        echo "IAM_DB_SERVICE_ROLES is true: the infrastructure runs once more, so Grafana and pgAdmin move onto their own database roles (svc_grafana, rr_admin_login) now that the database lets them log in."
+        run_stage "2/3  Infrastructure again (Grafana and pgAdmin onto their database roles)" deploy-infra with_mk8s_group ./deploy-infra.sh
+    fi
     stage "3/3  Health check"
     with_mk8s_group ./health-check.sh || echo -e "${YELLOW}Some checks failed — see above. Services that are still starting usually pass a minute later: ./health-check.sh${NC}"
     echo ""
@@ -260,6 +332,7 @@ apps)
     [[ -f config.env ]] || { echo -e "${RED}No config.env — install the infrastructure first: ./install.sh${NC}" >&2; exit 1; }
     run_stage "Applications" deploy-apps with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
     superset_skip_hint || true
+    service_roles_infra_hint || true
     ;;
 # -----------------------------------------------------------------------------
 uninstall-apps)
@@ -290,6 +363,7 @@ uninstall-all)
     echo "    copied only by the nightly backup, if deployed: BACKUP_DIR is kept)"
     echo "  - MicroK8s (and Juju, if an old install left it), all cluster data and ~/.kube"
     echo "  - the onboarding wizard user service (cea-edge-wizard), edge/.venv"
+    echo "  - Superset's wheel cache (SUPERSET_WHEEL_DIR; and /var/lib/<project> when that is left empty)"
     echo "  - the MedCEA block in /etc/hosts (name-based domain)"
     echo "  - logs/ and credentials-*.txt"
     echo "  You will be asked separately about config.env and the platform CA (.ca/)."
@@ -308,6 +382,7 @@ uninstall-all)
         echo "  removed the cea-edge-wizard user service"
     fi
     rm -rf edge/.venv && echo "  removed edge/.venv"
+    remove_wheel_cache
     rm -f credentials-*.txt && echo "  removed credentials files"
     rm -rf logs && echo "  removed logs/"
     if [[ -d .ca ]] && ask_delete "Delete the platform CA (.ca/)? Clients that trust it must trust the new one after a reinstall."; then

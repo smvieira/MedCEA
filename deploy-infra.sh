@@ -318,6 +318,8 @@ set -e
 source "$SCRIPT_DIR/infra/lib-policy-source.sh"
 # The compiled artefacts' blocks (IAM 4.2b): moved there unchanged, shared with --policy-only.
 source "$SCRIPT_DIR/infra/lib-policy-artefacts.sh"
+# Superset's wheel cache folder: the same checks apps/superset/deploy.sh makes (below).
+source "$SCRIPT_DIR/apps/superset/lib-superset.sh"
 
 # Docker Hub credentials were asked for by infra/configure.sh if they were empty.
 DOCKERHUB_PASS="$DOCKERHUB_PAT"
@@ -439,6 +441,48 @@ sudo systemctl restart snap.microk8s.daemon-containerd
 # Give containerd a moment to come back up before any image pulls
 sleep 5
 fi
+
+# =============================================================================
+# SUPERSET WHEEL CACHE (owner decision of 8 Nov 2026: Superset installed by default)
+# =============================================================================
+# The folder Superset's init containers install its three hash-pinned wheels from
+# (SUPERSET_WHEEL_DIR, default /var/lib/$PROJECT_NAME/superset-wheels; decision N10).
+# Its parent is root's, so creating it takes sudo: done here, where this script asks
+# for sudo anyway, so the applications stage (and an unattended ./deploy-apps.sh)
+# needs none. apps/superset/deploy.sh keeps its own creation as the fallback.
+# After the bootstrap, so the StorageClass exists: the folder is checked against the
+# volumes' directory exactly as the Superset deploy checks it (superset_wheel_dir_ok,
+# apps/superset/lib-superset.sh), and a SUPERSET_WHEEL_DIR it would refuse stops
+# here. Created whether or not Superset is installed (an empty folder, mode 700, the
+# deploying account's; ./install.sh --uninstall-all removes it). Never as root: the
+# init containers run as the folder's owner, never root.
+_superset_wheel_cache() {
+    local uid gid owner
+    uid="$(id -u)"; gid="$(id -g)"
+    if (( uid == 0 )); then
+        echo -e "${YELLOW}  Running as root: Superset's wheel cache is not created here (the init containers run as its owner, never root). ./apps/superset/deploy.sh, run as the deploying account, creates it.${NC}"
+        return 0
+    fi
+    superset_wheel_dir_ok || { echo -e "${RED}ERROR: $WHEELS_WHY${NC}"; return 1; }
+    if [[ ! -d "$SUPERSET_WHEEL_DIR" ]]; then
+        echo "  Creating $SUPERSET_WHEEL_DIR (mode 700, owner $(id -un))..."
+        if ! install -d -m 700 "$SUPERSET_WHEEL_DIR" 2>/dev/null \
+           && ! sudo -p "[sudo] password for %u (to create $SUPERSET_WHEEL_DIR for Superset's wheels): " \
+                install -d -m 700 -o "$uid" -g "$gid" "$SUPERSET_WHEEL_DIR"; then
+            echo -e "${YELLOW}  Could not create $SUPERSET_WHEEL_DIR: ./apps/superset/deploy.sh tries again (it asks for sudo itself).${NC}"
+            return 0
+        fi
+    fi
+    owner="$(stat -L -c %u "$SUPERSET_WHEEL_DIR" 2>/dev/null || true)"
+    if [[ "$owner" != "$uid" ]]; then
+        echo -e "${YELLOW}  $SUPERSET_WHEEL_DIR belongs to uid ${owner:-?}, not to $(id -un): ./apps/superset/deploy.sh refuses it until it is yours (sudo chown $(id -un): $SUPERSET_WHEEL_DIR) or SUPERSET_WHEEL_DIR names another folder.${NC}"
+        return 0
+    fi
+    chmod 700 "$SUPERSET_WHEEL_DIR"
+    echo -e "${GREEN}  Superset wheel cache: $SUPERSET_WHEEL_DIR${NC}"
+}
+echo -e "${YELLOW}Superset's wheel cache folder...${NC}"
+_superset_wheel_cache || exit 1
 
 echo -e "${YELLOW}Logging Helm into Docker Hub for OCI chart pulls...${NC}"
 echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \

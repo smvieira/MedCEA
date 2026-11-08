@@ -866,7 +866,8 @@ class SupersetRoles(unittest.TestCase):
         self.assertEqual(status, "SKIP", msg)
         self.assertIn("once the applied access policy gives a role a Superset setting", msg)
         self.assertNotIn("stage C", msg)
-        # F7: a fresh install has IAM_DB_SERVICE_ROLES=false, and the deploy skips for it
+        # F7: a config.env that keeps IAM_DB_SERVICE_ROLES=false (a new one has true since
+        # 8 Nov 2026), and the deploy skips for it
         for v in ("false", ""):
             status, msg = self.run_check(IAM_DB_SERVICE_ROLES=v)
             self.assertEqual(status, "SKIP", msg)

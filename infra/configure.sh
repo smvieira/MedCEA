@@ -320,6 +320,13 @@ else
     # Variables added to the template since config.env was made appear with
     # their defaults; keys only config.env has (appended by older deploys) are
     # kept at the end. Nothing is written when the result would be identical.
+    # One exception to "their defaults": IAM_DB_SERVICE_ROLES became true for a new
+    # config.env on 8 Nov 2026 (Superset installed by default), but a config.env from
+    # before Phase 2.5 has no line for it and ran with false, so it gets false, said once
+    # below: turning it on moves pgAdmin onto rr_admin's grants and is the owner's
+    # decision (./guide.sh → IAM switches).
+    _KEPT_OFF=()
+    grep -q '^IAM_DB_SERVICE_ROLES=' "$CONFIG_FILE" || _KEPT_OFF+=('IAM_DB_SERVICE_ROLES="false"')
     awk '
         FNR == NR { if (match($0, /^[A-Za-z_][A-Za-z0-9_]*=/)) { k = substr($0, 1, RLENGTH - 1); if (!(k in old)) { old[k] = $0; order[++n] = k } } next }
         match($0, /^[A-Za-z_][A-Za-z0-9_]*=/) { k = substr($0, 1, RLENGTH - 1); seen[k] = 1; print ((k in old) ? old[k] : $0); next }
@@ -330,7 +337,7 @@ else
                 if (!hdr) { print ""; print "# --- Kept from the previous config.env (not in config.env.example) ---"; hdr = 1 }
                 print old[order[i]]
             }
-        }' "$CONFIG_FILE" "$EXAMPLE_FILE" > "$CONFIG_FILE.merged"
+        }' <(cat "$CONFIG_FILE"; echo; printf '%s\n' "${_KEPT_OFF[@]}") "$EXAMPLE_FILE" > "$CONFIG_FILE.merged"
     if cmp -s "$CONFIG_FILE.merged" "$CONFIG_FILE"; then
         rm -f "$CONFIG_FILE.merged"
     else
@@ -338,6 +345,9 @@ else
         cat "$CONFIG_FILE.merged" > "$CONFIG_FILE"
         rm -f "$CONFIG_FILE.merged"
         echo -e "${GREEN}Rebased $CONFIG_FILE on config.env.example, keeping your values${NC} (previous copy: $CONFIG_FILE.bak)."
+    fi
+    if (( ${#_KEPT_OFF[@]} )); then
+        echo -e "${YELLOW}Note: $CONFIG_FILE had no IAM_DB_SERVICE_ROLES line; it is set to false, as this install has run (a new config.env has true). To turn it on: ./guide.sh → IAM switches → IAM_DB_SERVICE_ROLES.${NC}"
     fi
 fi
 # It is about to hold every platform password.

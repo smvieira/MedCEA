@@ -464,9 +464,11 @@ no_stub
 # ── Bring IAM to full enforcement (area 5, item 9) ──
 SW_ALL=(IAM_GATES IAM_NETPOL IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON)
 swcfg() {   # swcfg FILE KEY=VAL…: the template with those switches set
+    # IAM_DB_SERVICE_ROLES starts false (an older config.env's value: a new one has true
+    # since 8 Nov 2026), so the chain covers that switch's recipe too; a KEY=VAL overrides it.
     local f="$1" kv; shift
     cp "$REPO/config.env.example" "$f"; chmod 600 "$f"
-    for kv in "$@"; do sed -i "s/^${kv%%=*}=.*/${kv%%=*}=\"${kv#*=}\"/" "$f"; done
+    for kv in IAM_DB_SERVICE_ROLES=false "$@"; do sed -i "s/^${kv%%=*}=.*/${kv%%=*}=\"${kv#*=}\"/" "$f"; done
 }
 sw_is() {   # sw_is FILE KEY VAL
     grep -q "^$2=\"$3\"\$" "$1" && pass "$2 is $3" || fail "$2 is not $3: $(grep "^$2=" "$1")"
@@ -529,7 +531,7 @@ lock_free && fail "could not take the lock for the test"
 guide $'5\n9\ny\ny\ny\ny\ny\n\nq\n'
 kill "$LOCKER" 2>/dev/null; wait "$LOCKER" 2>/dev/null; LOCKER=""
 rc_is "quits with 0" 0
-has   "fresh install: 5 switches" "Plan: 5 switch(es) → true, in this order"
+has   "an older config.env: 5 switches" "Plan: 5 switch(es) → true, in this order"
 hasnt "IAM_GATES (true) skipped" "IAM_GATES → true"
 has   "IAM_DB_ROLES planned, not refused" "3. IAM_DB_ROLES → true"
 hasnt "no refusal" "enable it first"
@@ -543,9 +545,18 @@ hasnt "never refused for the lock" "another MedCEA deploy is running"
 no_stub
 [[ "$(sha256sum "$T/config.env" | cut -d' ' -f1)" == "$SUM_BEFORE" ]] && pass "config.env untouched" || fail "config.env changed"
 compgen -G "$T/config.env.guide*" >/dev/null && fail "a backup or temp file was made" || pass "no backup made"
+# a new config.env (the template as it is): IAM_DB_SERVICE_ROLES is already true
+cp "$REPO/config.env.example" "$T/config.env"; chmod 600 "$T/config.env"
+guide $'5\n9\nn\n\nq\n'
+rc_is "a new config.env: quits with 0" 0
+has   "a new config.env: 4 switches" "Plan: 4 switch(es) → true, in this order"
+hasnt "a new config.env: IAM_DB_SERVICE_ROLES (true) skipped" "IAM_DB_SERVICE_ROLES → true"
+has   "a new config.env: IAM_DB_ROLES second" "2. IAM_DB_ROLES → true"
+no_stub
 
 echo "25 full enforcement: a real chain against stubs"
 swcfg "$S/config.env"
+cp -p "$S/config.env" "$T/chain-base.env"
 rm -f "$S"/config.env.guide-*.bak
 # run; JWT checklist; IAM_DB_ROLES checklist; IAM_ENFORCE's; IAM_MQTT_PERSON's; redeploy the apps; delete backups (Enter)
 chain $'5\n9\ny\ny\ny\ny\ny\ny\n\n\nq\n'
@@ -582,7 +593,7 @@ has   "done" "IAM is at full enforcement: IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES
 has   "the backups are offered for deletion" "Delete these 5 backups now?"
 compgen -G "$S/config.env.guide-*.bak" >/dev/null && fail "Enter did not delete the backups" || pass "Enter deletes the backups"
 lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
-[[ "$(diff "$S/config.env.example" "$S/config.env" | grep -c '^[<>]')" == 10 ]] \
+[[ "$(diff "$T/chain-base.env" "$S/config.env" | grep -c '^[<>]')" == 10 ]] \
     && pass "only the five switch lines changed" || fail "other lines changed"
 
 echo "26 full enforcement: a refused checklist stops the chain; running again resumes"

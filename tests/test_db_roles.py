@@ -285,7 +285,8 @@ class Wiring(unittest.TestCase):
         self.assertNotIn("SUPERSET_ENABLED", example)   # D4: no switch
 
     def test_flag_documented(self):
-        self.assertIn('IAM_DB_SERVICE_ROLES="false"', read("config.env.example"))
+        # a new config.env's default since 8 Nov 2026 (Superset installed by default, option B)
+        self.assertIn('IAM_DB_SERVICE_ROLES="true"', read("config.env.example"))
         conf = read("health-checks.conf")
         self.assertRegex(conf, r"\|\s*dbclients\s*\|")
 

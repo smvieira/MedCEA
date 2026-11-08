@@ -830,7 +830,10 @@ class Scripts(unittest.TestCase):
             f.write('MK8S="%s"; KUBECTL="%s"\n' % (kubectl, kubectl))
         with open(os.path.join(self.root, "infra", "lib-policy-source.sh"), "w") as f:
             f.write('policy_source_init() { echo "init $*" >> "$STUB_LOG"; }\n'
-                    'policy_source_finish() { echo "finish $*" >> "$STUB_LOG"; }\n')
+                    'policy_source_finish() { echo "finish $*" >> "$STUB_LOG"; }\n'
+                    # the state the version guard asks for (apps/iam/deploy.sh's call)
+                    'policy_db_state() { echo "policy_db_state $1" >> "$STUB_LOG"; [[ -n "${STUB_PS_FAIL:-}" ]] && return 1; '
+                    'echo "${STUB_PS_STATE:-version-3}"; }\n')
         with open(os.path.join(self.root, "infra", "lib-policy-tools.sh"), "w") as f:
             f.write('policy_tool() { echo "policy_tool $*" >> "$STUB_LOG"; '
                     '[[ "$STUB_TOOL_RC" == 0 ]] && echo "$STUB_TOOL_OUT"; return "$STUB_TOOL_RC"; }\n')
@@ -983,7 +986,7 @@ class Scripts(unittest.TestCase):
         self.assertFalse(any(c.startswith(("apply", "scale")) for c in calls))
 
     def test_service_roles_false_skips_and_stops(self):
-        # F7: a fresh install (IAM_DB_SERVICE_ROLES=false by default) with the tool in the
+        # F7: an install whose config.env keeps IAM_DB_SERVICE_ROLES=false, with the tool in the
         # policy: a skip, exit 0, before any secret is asked for or any object applied
         for deployed in ("", "1"):
             with self.subTest(deployed=bool(deployed)):
@@ -1016,6 +1019,46 @@ class Scripts(unittest.TestCase):
         self.assertIn("would log in as postgres, not svc_superset", r.out)
         self.assertNotIn("finish medcea superset", calls)
         self.assertFalse(any(c.startswith(("apply", "exec")) for c in calls), calls)
+
+    def test_no_applied_version_skips_and_says_what_to_run(self):
+        # the iam bootstrap waited (state empty) or 008c is missing (none): the mapping came
+        # from defaults.yaml, so a skip, exit 0, before any secret or object; after the
+        # bootstrap nothing redeploys Superset, so the message names the command
+        self.full_config()
+        tool = dict(STUB_TOOL_RC="0", STUB_TOOL_OUT=json.dumps(MAPPING))
+        for st in ("empty", "none"):
+            for deployed in ("", "1"):
+                with self.subTest(state=st, deployed=bool(deployed)):
+                    r, calls = self.run_script("deploy.sh", STUB_PS_STATE=st, STUB_DEPLOYED=deployed, **tool)
+                    self.assertEqual(r.returncode, 0, r.out)
+                    self.assertIn(f"skipped: no version of the access policy is applied yet (state {st})", r.stdout)
+                    self.assertIn("run ./apps/superset/deploy.sh once ./apps/iam/deploy.sh has applied version 1",
+                                  r.stdout)
+                    self.assertNotIn("Sign-in roles", r.out)
+                    self.assertIn("policy_db_state medcea", calls)
+                    self.assertEqual(calls[-1], "finish medcea superset")
+                    self.assertFalse(any(c.startswith(("apply", "scale", "exec", "create", "db_client")) for c in calls),
+                                     calls)
+                    stopped = any(c.startswith("delete deployment superset -n medcea") for c in calls)
+                    self.assertEqual(stopped, bool(deployed), calls)
+                    self.assertFalse(os.path.exists(self.wheels))   # not even the cache
+        # asked after the earlier skips: not in the policy, or IAM_DB_SERVICE_ROLES false,
+        # need no database
+        r, calls = self.run_script("deploy.sh", STUB_PS_STATE="empty")
+        self.assertIn("skipped: Superset is not in the applied access policy", r.stdout)
+        self.assertNotIn("policy_db_state medcea", calls)
+        # unreadable, or a state the init should have refused: a failure, never a skip
+        for env in (dict(STUB_PS_FAIL="1"), dict(STUB_PS_STATE="partial")):
+            with self.subTest(**env):
+                r, calls = self.run_script("deploy.sh", **env, **tool)
+                self.assertEqual(r.returncode, 1, r.out)
+                self.assertIn("./apps/iam/apply.sh --status", r.out)
+                self.assertNotIn("finish medcea superset", calls)
+                self.assertFalse(any(c.startswith(("apply", "exec", "delete")) for c in calls), calls)
+        # --gate-only does not ask: apply.sh runs it with a version applied
+        self.fill_cache()
+        r, calls = self.run_script("deploy.sh", "--gate-only", STUB_PS_STATE="empty", **tool)
+        self.assertNotIn("policy_db_state medcea", calls)
 
     def test_gate_only(self):
         r, calls = self.run_script("deploy.sh", "--gate-only")

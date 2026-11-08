@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# apps/superset/lib-superset.sh — what apps/superset/deploy.sh and health-check.sh
-# (supersetroles) share, so the deploy and the check compute the same things the same
-# way (Superset stage C). Sourced; defines functions only, takes no lock. Needs $KUBECTL
+# apps/superset/lib-superset.sh — what apps/superset/deploy.sh, health-check.sh
+# (supersetroles) and deploy-infra.sh (the wheel cache's folder) share, so the deploy and
+# the check compute the same things the same way (Superset stage C). Sourced; defines functions only, takes no lock. Needs $KUBECTL
 # (a caller may prefix it, e.g. KUBECTL="timeout 10 $KUBECTL").
 #
 #   superset_config_checksum NS
@@ -21,6 +21,16 @@
 #   superset_wheel_dir
 #       SUPERSET_WHEEL_DIR (config.env; default /var/lib/$PROJECT_NAME/superset-wheels),
 #       validated as BACKUP_DIR is; returns 1 with a message on stderr otherwise.
+#   superset_wheel_dir_ok
+#       superset_wheel_dir, never inside or around the volumes' directory (StorageClass
+#       microk8s-hostpath's pvDir, read through $KUBECTL; the nightly backup copies that,
+#       and a PVC is no place for host state). Sets SUPERSET_WHEEL_DIR; returns 1 with
+#       WHEELS_WHY set otherwise. deploy.sh checks the cache with it, and deploy-infra.sh
+#       before it creates the folder, so deploy-infra never makes one the deploy refuses.
+#   superset_wheel_owner_ok
+#       SUPERSET_WHEEL_UID/SUPERSET_WHEEL_GID: the owner of SUPERSET_WHEEL_DIR, the uid/gid
+#       the init containers read it as; returns 1 with WHEELS_WHY set when it cannot be
+#       read or is root (they never run as root).
 #   superset_wheels_missing DIR REQUIREMENTS
 #       prints, one per line, each requirement whose pinned sha256 no *.whl in DIR has
 #       (nothing when the cache is complete); returns 1 when DIR cannot be read.
@@ -84,6 +94,33 @@ superset_wheel_dir() {
     d="${d%/}"
     [[ -n "$d" ]] || { echo "SUPERSET_WHEEL_DIR must not be /." >&2; return 1; }
     echo "$d"
+}
+
+superset_wheel_dir_ok() {
+    local storage d
+    if ! d="$(superset_wheel_dir 2>/dev/null)"; then
+        WHEELS_WHY="$(superset_wheel_dir 2>&1 >/dev/null)"; return 1
+    fi
+    SUPERSET_WHEEL_DIR="$d"
+    storage="$($KUBECTL get storageclass microk8s-hostpath -o jsonpath='{.parameters.pvDir}' 2>/dev/null || true)"
+    storage="${storage:-/var/snap/microk8s/common/default-storage}"
+    case "$SUPERSET_WHEEL_DIR/" in
+        "$storage"/*) WHEELS_WHY="SUPERSET_WHEEL_DIR=$SUPERSET_WHEEL_DIR is inside the volumes' directory $storage: choose another folder (config.env)."; return 1 ;;
+    esac
+    case "$storage/" in
+        "$SUPERSET_WHEEL_DIR"/*) WHEELS_WHY="SUPERSET_WHEEL_DIR=$SUPERSET_WHEEL_DIR contains the volumes' directory $storage: choose another folder (config.env)."; return 1 ;;
+    esac
+}
+
+superset_wheel_owner_ok() {
+    if ! { SUPERSET_WHEEL_UID="$(stat -L -c %u "$SUPERSET_WHEEL_DIR" 2>/dev/null)" \
+           && SUPERSET_WHEEL_GID="$(stat -L -c %g "$SUPERSET_WHEEL_DIR" 2>/dev/null)"; }; then
+        WHEELS_WHY="cannot read the owner of $SUPERSET_WHEEL_DIR"; return 1
+    fi
+    if [[ "$SUPERSET_WHEEL_UID" == 0 ]]; then
+        WHEELS_WHY="$SUPERSET_WHEEL_DIR belongs to root: the init containers run as its owner, never root. Make it the deploying account's (sudo chown \$(id -un): $SUPERSET_WHEEL_DIR), then re-run."
+        return 1
+    fi
 }
 
 superset_wheels_missing() {

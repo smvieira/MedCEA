@@ -1101,13 +1101,20 @@ class FreshInstallOrder(unittest.TestCase):
 
     BEFORE = ("access", "database", "frontend")
     AFTER = ("monitor", "scheduler")
-    # Superset stage C: the real component, last (alphabetical), with config.env's default
-    # switches (no IAM_DB_SERVICE_ROLES): it skips with exit 0, so a fresh install stays green
-    # (F7), whichever of its two skips the factory policy reaches
+    # Superset stage C: the real component, last (alphabetical). Under IAM_DB_SERVICE_ROLES=true
+    # (config.env.example's default since 8 Nov 2026, option B) it takes its full path; under
+    # false (an older config.env, kept by a reinstall) it skips with exit 0, so such an
+    # install stays green (F7), whichever of its two skips the factory policy reaches
     SKIP_NOT_IN_POLICY = "skipped: Superset is not in the applied access policy, or no role is given a setting"
     SKIP_NEEDS_SVC_ROLES = "skipped: Superset needs IAM_DB_SERVICE_ROLES=true (its data connection is svc_superset)"
+    SKIP_NO_VERSION = "skipped: no version of the access policy is applied yet (state empty)"
+    FULL_PATH = "[superset]\x1b[0m Sign-in roles (compiled): "
+    # what config.env needs for the full path (infra/configure.sh and deploy-infra.sh write them)
+    SUPERSET_CONFIG = ('SUPERSET_SECRET_KEY="%s"\nSUPERSET_META_DB_PASS="metaPass.0123456789"\n'
+                       'SUPERSET_CLIENT_SECRET="clientSecret0123456789"\nSVC_SUPERSET_DB_PASS="svcPass0123456789"\n'
+                       % ("s" * 64))
 
-    def tree(self, **sc):
+    def tree(self, svc_roles=None, **sc):
         t = Tree(configmap=None, comment=None, **sc)
         shutil.rmtree(t.path("apps", "superset"))
         shutil.copytree(os.path.join(REPO, "apps", "superset"), t.path("apps", "superset"),
@@ -1121,6 +1128,9 @@ class FreshInstallOrder(unittest.TestCase):
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w") as f:
                 f.write(STUB_DEPLOY)
+        if svc_roles is not None:
+            with open(t.path("config.env"), "a") as f:
+                f.write(f'IAM_DB_SERVICE_ROLES="{svc_roles}"\n' + self.SUPERSET_CONFIG)
         return t
 
     def order(self, t):
@@ -1130,34 +1140,91 @@ class FreshInstallOrder(unittest.TestCase):
         except FileNotFoundError:
             return []
 
+    def superset_out(self, p):
+        out = p.stdout + p.stderr
+        return out[out.index("Installing: superset"):]
+
+    def assertNoSupersetWrite(self, t):
+        self.assertFalse([c for c in t.calls() if c["kind"] == "kubectl" and "superset" in " ".join(c["argv"])
+                          and c["argv"][:1] != ["get"]])
+
     def test_bootstrap_runs_in_iam_and_later_components_see_version_1(self):
-        t = self.tree()
+        for svc_roles in ("false", None):   # None: a config.env from before the switch existed
+            with self.subTest(IAM_DB_SERVICE_ROLES=svc_roles):
+                t = self.tree(svc_roles)
+                try:
+                    # no migration 008c answer yet would be "none": the database deploy moves it
+                    # to empty; with the stubs the fake cluster starts at empty (008c applied, no
+                    # version)
+                    p = t.run("--all", script="deploy-apps.sh", MEDCEA_POLICY_BOOTSTRAP_BY="admin")
+                    self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+                    self.assertIn("version 1 (bootstrap) applied", p.stdout + p.stderr)
+                    seen = self.order(t)
+                    self.assertEqual([s[0] for s in seen], list(self.BEFORE + self.AFTER))
+                    for comp, st, host in seen:
+                        with self.subTest(comp):
+                            if comp in self.BEFORE:
+                                self.assertEqual((st, host), ("empty", "absent"))
+                            else:
+                                self.assertEqual((st, host), ("version-1", "present"))
+                    builds = [c for c in t.calls() if c["kind"] == "psql" and "_build_version('bootstrap'" in c["sql"]]
+                    self.assertEqual(len(builds), 1)
+                    self.assertEqual(t.read_state()["last_apply_event"]["event"], "bootstrap_applied")
+                    self.assertFalse([w for w in writes(t.calls()) if w[0] != "psql"])
+                    # the real Superset deploy ran after scheduler, saw version 1 and skipped
+                    out = self.superset_out(p)
+                    factory = model.load_defaults()
+                    admits = bool(tools.groups(factory, "superset")) and tools.admits_anyone(factory, "superset")
+                    self.assertIn(self.SKIP_NEEDS_SVC_ROLES if admits else self.SKIP_NOT_IN_POLICY, out)
+                    self.assertNotIn("ERROR", out[out.index("skipped: Superset"):])
+                    self.assertNoSupersetWrite(t)
+                finally:
+                    t.close()
+
+    def test_under_service_roles_superset_takes_its_full_path(self):
+        """Option B: under IAM_DB_SERVICE_ROLES=true Superset sees version 1, passes the
+        version guard and every skip, and reaches the full path. With the database deploy a
+        stub, Secret db-svc-superset is never written, so db_client falls back to postgres
+        and the deploy refuses there, before it changes anything (the full path against a
+        stub cluster is tests/test_superset_render.py's test_full_path)."""
+        with open(os.path.join(REPO, "config.env.example")) as f:
+            self.assertIn('IAM_DB_SERVICE_ROLES="true"', f.read().splitlines())
+        factory = model.load_defaults()
+        if not (tools.groups(factory, "superset") and tools.admits_anyone(factory, "superset")):
+            self.skipTest("the factory policy gives no role a Superset setting")
+        t = self.tree("true")
         try:
-            # no migration 008c answer yet would be "none": the database deploy moves it to
-            # empty; with the stubs the fake cluster starts at empty (008c applied, no version)
             p = t.run("--all", script="deploy-apps.sh", MEDCEA_POLICY_BOOTSTRAP_BY="admin")
-            self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
             self.assertIn("version 1 (bootstrap) applied", p.stdout + p.stderr)
-            seen = self.order(t)
-            self.assertEqual([s[0] for s in seen], list(self.BEFORE + self.AFTER))
-            for comp, st, host in seen:
-                with self.subTest(comp):
-                    if comp in self.BEFORE:
-                        self.assertEqual((st, host), ("empty", "absent"))
-                    else:
-                        self.assertEqual((st, host), ("version-1", "present"))
-            builds = [c for c in t.calls() if c["kind"] == "psql" and "_build_version('bootstrap'" in c["sql"]]
-            self.assertEqual(len(builds), 1)
-            self.assertEqual(t.read_state()["last_apply_event"]["event"], "bootstrap_applied")
-            self.assertFalse([w for w in writes(t.calls()) if w[0] != "psql"])
-            # the real Superset deploy ran after scheduler, saw version 1 and skipped
-            out = p.stdout + p.stderr
-            factory = model.load_defaults()
-            admits = bool(tools.groups(factory, "superset")) and tools.admits_anyone(factory, "superset")
-            self.assertIn(self.SKIP_NEEDS_SVC_ROLES if admits else self.SKIP_NOT_IN_POLICY, out)
-            self.assertNotIn("ERROR", out[out.index("skipped: Superset"):])
-            self.assertFalse([c for c in t.calls() if c["kind"] == "kubectl" and "superset" in " ".join(c["argv"])
-                              and c["argv"][:1] != ["get"]])
+            out = self.superset_out(p)
+            self.assertIn(self.FULL_PATH, out)
+            self.assertNotIn("skipped: ", out)
+            self.assertIn("would log in as postgres, not svc_superset", out)
+            # only Superset failed: every other component (the stubs and iam) installed
+            self.assertEqual(p.returncode, 1, out)
+            self.assertIn("1 component(s) failed", out)
+            self.assertIn("\u2717 superset", out)
+            self.assertEqual([s[0] for s in self.order(t)], list(self.BEFORE + self.AFTER))
+            self.assertNoSupersetWrite(t)
+        finally:
+            t.close()
+
+    def test_without_an_applied_version_superset_skips(self):
+        """The version guard: the iam bootstrap waits (here: --by names nobody Keycloak has,
+        apply.sh exit 2), so the state stays empty; Superset skips, exit 0, and says to run
+        ./apps/superset/deploy.sh after the bootstrap."""
+        t = self.tree("true")
+        try:
+            p = t.run("--all", script="deploy-apps.sh", MEDCEA_POLICY_BOOTSTRAP_BY="nobody")
+            self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+            self.assertIn("policy bootstrap waits", p.stdout + p.stderr)
+            self.assertEqual(t.read_state()["state"], "empty")
+            out = self.superset_out(p)
+            self.assertIn(self.SKIP_NO_VERSION, out)
+            self.assertIn("run ./apps/superset/deploy.sh once ./apps/iam/deploy.sh has applied version 1", out)
+            self.assertNotIn(self.FULL_PATH, out)
+            self.assertNotIn("ERROR", out)
+            self.assertNoSupersetWrite(t)
         finally:
             t.close()
 

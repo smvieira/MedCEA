@@ -18,7 +18,9 @@
 # and exits 0, so deploy-apps.sh --all and install.sh stay green. Under IAM_GATES=false
 # it is skipped too: there is no pre-policy Superset. So it is while
 # IAM_DB_SERVICE_ROLES is not true (its data connection is svc_superset, never
-# postgres: a fresh install has the switch false). If the policy loses Superset (or
+# postgres), and while no version of the policy is applied (the iam bootstrap waits:
+# run this again once ./apps/iam/deploy.sh has applied version 1; --gate-only, which
+# apply.sh runs, has a version by then). If the policy loses Superset (or
 # IAM_GATES or IAM_DB_SERVICE_ROLES turns false) while it runs, it is stopped (its
 # Deployment deleted; the metadata database, Secret and ConfigMap stay), never left open.
 #
@@ -179,37 +181,15 @@ _logout_return() {
     MEDCEA_LOGOUT_RETURN="$(superset_logout_return)" && [[ "$MEDCEA_LOGOUT_RETURN" == https://* ]] \
         || die "cannot build Superset's sign-out return address (superset_logout_return, infra/lib-oauth2-proxy.sh)"
 }
-# The wheel cache (N10): SUPERSET_WHEEL_DIR, never inside or around the volumes' directory
-# (the nightly backup copies that; a PVC is no place for host state). Sets SUPERSET_WHEEL_DIR
-# and the uid/gid the init containers read it as: its owner. The *_ok forms return 1 with
-# WHEELS_WHY set, for --gate-only, where a cache problem is a deferral or a stop, never a
-# failure apply.sh would revert the version for; the full deploy dies with the same text.
-_wheel_dir_ok() {
-    local storage d
-    if ! d="$(superset_wheel_dir 2>/dev/null)"; then
-        WHEELS_WHY="$(superset_wheel_dir 2>&1 >/dev/null)"; return 1
-    fi
-    SUPERSET_WHEEL_DIR="$d"
-    storage="$($KUBECTL get storageclass microk8s-hostpath -o jsonpath='{.parameters.pvDir}' 2>/dev/null || true)"
-    storage="${storage:-/var/snap/microk8s/common/default-storage}"
-    case "$SUPERSET_WHEEL_DIR/" in
-        "$storage"/*) WHEELS_WHY="SUPERSET_WHEEL_DIR=$SUPERSET_WHEEL_DIR is inside the volumes' directory $storage: choose another folder (config.env)."; return 1 ;;
-    esac
-    case "$storage/" in
-        "$SUPERSET_WHEEL_DIR"/*) WHEELS_WHY="SUPERSET_WHEEL_DIR=$SUPERSET_WHEEL_DIR contains the volumes' directory $storage: choose another folder (config.env)."; return 1 ;;
-    esac
-}
+# The wheel cache (N10): SUPERSET_WHEEL_DIR, never inside or around the volumes' directory,
+# and its owner the uid/gid the init containers read it as: superset_wheel_dir_ok and
+# superset_wheel_owner_ok (lib-superset.sh, shared with deploy-infra.sh, which creates the
+# folder). The *_ok forms return 1 with WHEELS_WHY set, for --gate-only, where a cache
+# problem is a deferral or a stop, never a failure apply.sh would revert the version for;
+# the full deploy dies with the same text.
+_wheel_dir_ok() { superset_wheel_dir_ok; }
 _wheel_dir() { _wheel_dir_ok || die "$WHEELS_WHY"; }
-_wheel_owner_ok() {
-    if ! { SUPERSET_WHEEL_UID="$(stat -L -c %u "$SUPERSET_WHEEL_DIR" 2>/dev/null)" \
-           && SUPERSET_WHEEL_GID="$(stat -L -c %g "$SUPERSET_WHEEL_DIR" 2>/dev/null)"; }; then
-        WHEELS_WHY="cannot read the owner of $SUPERSET_WHEEL_DIR"; return 1
-    fi
-    if [[ "$SUPERSET_WHEEL_UID" == 0 ]]; then
-        WHEELS_WHY="$SUPERSET_WHEEL_DIR belongs to root: the init containers run as its owner, never root. Make it the deploying account's (sudo chown \$(id -un): $SUPERSET_WHEEL_DIR), then re-run."
-        return 1
-    fi
-}
+_wheel_owner_ok() { superset_wheel_owner_ok; }
 _wheel_owner() { _wheel_owner_ok || die "$WHEELS_WHY"; }
 # Full deploy only, before anything changes: the folder, mode 700, the deploying account's.
 _own_wheel_dir() {
@@ -282,7 +262,7 @@ _wheels_ready() {
     _wheel_owner_ok
 }
 # Its data connection is svc_superset, which the platform gives a login only under
-# IAM_DB_SERVICE_ROLES=true (IAM 2.5): false (a fresh install's default) is a skip, not
+# IAM_DB_SERVICE_ROLES=true (IAM 2.5): false (an older config.env's value) is a skip, not
 # a fault. Under true a postgres fallback in _db_login is one (a missing Secret or
 # password), and dies.
 _service_roles_on() { [[ "${IAM_DB_SERVICE_ROLES:-false}" == "true" ]]; }
@@ -396,6 +376,27 @@ if ! _service_roles_on; then
     policy_source_finish "$NAMESPACE" superset
     exit 0
 fi
+# Only from an applied version: with none yet (empty: the iam bootstrap waits; none: no
+# migration 008c) the mapping above came from defaults.yaml. Write-mode
+# policy_source_init leaves no state behind, so it is asked here, as apps/iam/deploy.sh
+# does. Nothing redeploys Superset after a later bootstrap (it runs no owners), hence
+# the message. partial and unreachable never get here: the init refuses them.
+_PS_DIR="$(mktemp -d)"
+_ST="$(policy_db_state "$NAMESPACE" "$_PS_DIR/state.json")" || _ST=""
+rm -rf "$_PS_DIR"
+case "$_ST" in
+    version-*) ;;
+    none|empty)
+        log "skipped: no version of the access policy is applied yet (state $_ST), and Superset deploys only from an applied one: run ./apps/superset/deploy.sh once ./apps/iam/deploy.sh has applied version 1 (./apps/iam/apply.sh --status)"
+        if _deployed; then
+            _stop
+            warn "the running Superset was stopped (Deployment deleted; its database is kept) and its portal card disabled"
+        fi
+        policy_source_finish "$NAMESPACE" superset
+        exit 0 ;;
+    "") die "cannot read the policy versions (./apps/iam/apply.sh --status)" ;;
+    *)  die "the access policy's versions are in state $_ST (./apps/iam/apply.sh --status)" ;;
+esac
 log "Sign-in roles (compiled): $SUPERSET_ROLES_MAPPING"
 _need_secrets
 _db_login
