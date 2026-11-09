@@ -92,7 +92,7 @@ print(json.dumps({"issuer": e["ISSUER"], "audience": "medcea-api",
     fi
     [[ "${IAM_ENFORCE:-false}" == "true" ]] \
         && echo -e "${GREEN}  IAM_ENFORCE=true: services refuse what the policy does not allow (live within about a minute).${NC}" \
-        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./guide.sh).${NC}"
+        || echo -e "${YELLOW}  IAM_ENFORCE=false: services only log what they would refuse (report-only; IAM 2.6 switch via ./medcea.sh).${NC}"
 elif [[ "${IAM_GATES:-true}" == "false" ]]; then
     echo -e "${YELLOW}WARNING: IAM_GATES=false and the access policy does not compile — ConfigMap medcea-iam-lib left as it is.${NC}" >&2
 else

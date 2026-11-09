@@ -210,7 +210,7 @@
 </tbody></table></div>
 
 <h3 id="reference-settings">Settings</h3>
-<p>The settings an administrator may change in <code>config.env</code>, with the default from <code>config.env.example</code>. Change them with <code>./infra/configure.sh</code> or, for the IAM switches, with <code>./guide.sh</code>, which runs the deploys each switch needs in the right order. A changed setting takes effect at the next deploy of the parts that read it.</p>
+<p>The settings an administrator may change in <code>config.env</code>, with the default from <code>config.env.example</code>. Change them with <code>./infra/configure.sh</code> or, for the IAM switches, with <code>./medcea.sh</code>, which runs the deploys each switch needs in the right order. A changed setting takes effect at the next deploy of the parts that read it.</p>
 <h4>Identity and network</h4>
 <div class="table-wrap"><table>
 <thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
@@ -238,7 +238,7 @@
 </tbody>
 </table></div>
 <h4>IAM switches</h4>
-<p>Change these with <code>./guide.sh</code> (IAM switches), which checks each switch's preconditions and runs its enable or rollback steps. After a fresh install, IAM switches → Bring IAM to full enforcement turns on every switch still false, in order (see <a href="#admin-fresh">After a fresh install</a>).</p>
+<p>Change these with <code>./medcea.sh</code> (IAM switches), which checks each switch's preconditions and runs its enable or rollback steps. After a fresh install, IAM switches → Bring IAM to full enforcement turns on every switch still false, in order (see <a href="#admin-fresh">After a fresh install</a>).</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Name</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
@@ -286,7 +286,9 @@
 <thead><tr><th>Command</th><th>What it does</th><th>Takes the lock</th></tr></thead>
 <tbody>
 <tr><td><code>./install.sh</code></td><td>Installs or updates everything: infrastructure, then applications, then (while <code>IAM_DB_SERVICE_ROLES</code> is true) the infrastructure once more, then a health check. <code>--uninstall-apps</code>, <code>--uninstall-infra</code> and <code>--uninstall-all</code> remove parts of the platform. <code>--break-glass "&lt;reason&gt;"</code> (with <code>MEDCEA_POLICY_FILE</code> exported) is policy break-glass for the whole install, asked once (see <a href="#admin-policy-break-glass">Policy break-glass</a>).</td><td>yes</td></tr>
-<tr><td><code>./guide.sh</code></td><td>Question-and-answer guide to every command below: shows the exact command and runs it on confirmation. Also the way to turn the IAM switches on and off, one at a time or, with Bring IAM to full enforcement, every switch still false in order. <code>--dry-run</code> runs nothing.</td><td>for a switch recipe, once for all its steps (for Bring IAM to full enforcement, once for the whole chain); other commands take their own</td></tr>
+<tr><td><code>./medcea.sh</code></td><td>The MedCEA menus: question and answer for every command below; shows the exact command and runs it on confirmation. Also the way to turn the IAM switches on and off, one at a time or, with Bring IAM to full enforcement, every switch still false in order. <code>--dry-run</code> runs nothing. At a terminal its menus and questions are dialog boxes with a read-only status header (host, kernel, git commit, the last health check, the applied policy version, the deploy lock), the MedCEA logo above the first menu on a large terminal, and after each command (or recipe) a box with its result, its log and the end of its output; <code>--plain</code> or <code>MEDCEA_PLAIN=1</code> (also <code>GUIDE_PLAIN=1</code>) keeps the numbered questions, which piped input always gets (see <a href="#admin-guide-dialogs">Dialog boxes</a>). Named after the platform: the same name whatever <code>PROJECT_NAME</code> is.</td><td>for a switch recipe, once for all its steps (for Bring IAM to full enforcement, once for the whole chain); other commands take their own</td></tr>
+<tr><td><code>./guide.sh</code></td><td><strong>Deprecated</strong>: the old name of <code>./medcea.sh</code> (until 9 November 2026). Prints "guide.sh is now ./medcea.sh (this name will be removed in a later release)" and runs <code>./medcea.sh</code> with the same options and its exit code. Will be removed in a later release.</td><td>as <code>./medcea.sh</code></td></tr>
+<tr><td><code>infra/lib-banner.sh</code></td><td>Not a command: the MedCEA logo, shared by <code>./deploy-infra.sh</code> (the coloured logo when a deploy starts) and <code>./medcea.sh</code> (the first menu, and the numbered mode's start).</td><td>no</td></tr>
 <tr><td><code>./deploy-infra.sh</code></td><td>Deploys the infrastructure: MicroK8s, PostgreSQL, Keycloak and its clients, Node-RED, Grafana, pgAdmin, the portal, the AI workbench. Publishes the IAM settings to the services. <code>--configure</code> reviews settings; <code>--reset</code> wipes the namespace; <code>--uninstall</code> removes MicroK8s; <code>--policy-only</code> re-renders only the policy artefacts that drifted (see <a href="#admin-policy-scoped">Re-rendering only what drifted</a>). Any other option is refused.</td><td>yes</td></tr>
 <tr><td><code>./infra/configure.sh</code></td><td>Fills <code>config.env</code> by question and answer. <code>--missing</code> asks only for required values that are empty.</td><td>yes</td></tr>
 <tr><td><code>./infra/bootstrap-infra.sh</code></td><td>Sets up MicroK8s. Called by <code>./deploy-infra.sh</code>.</td><td>yes</td></tr>
@@ -327,7 +329,7 @@
 <tr><td>Node-RED flows vs git</td><td>The flows Node-RED runs against the flows in the repository. FAIL when a repository node was changed or deleted, or no flows run (run <code>./apps/node-red/deploy.sh</code>); WARN on flows or settings that exist only in the editor.</td></tr>
 <tr><td>Node-RED editor rights</td><td>The editor's own sign-in is on, with the rights compiled from the access policy, and its admin interface refuses a call without a sign-in. FAIL on any difference (run <code>./deploy-infra.sh</code>).</td></tr>
 <tr><td>Backups</td><td>The newest complete backup in <code>BACKUP_DIR</code> (its <code>OK</code> marker) is at most 26 hours old. WARN beyond 26 hours, FAIL beyond 72; SKIP before <code>./apps/backup/deploy.sh</code>, and on its first day. Run it as the account that deployed the backup, which owns the folder.</td></tr>
-<tr><td>Platform manual</td><td>The manual the portal serves at <code>/manual/</code> is the one the repository's chapters build now (a digest of a fresh build against the one published). WARN when it lags or is not published (<code>./guide.sh</code> → Infrastructure → Publish the manual to the portal), or the portal does not mount it; FAIL when the chapters do not build or the published copy is not the page it claims to be; SKIP before the portal exists.</td></tr>
+<tr><td>Platform manual</td><td>The manual the portal serves at <code>/manual/</code> is the one the repository's chapters build now (a digest of a fresh build against the one published). WARN when it lags or is not published (<code>./medcea.sh</code> → Infrastructure → Publish the manual to the portal), or the portal does not mount it; FAIL when the chapters do not build or the published copy is not the page it claims to be; SKIP before the portal exists.</td></tr>
 <tr><td>Mosquitto MQTT (TLS)</td><td>The boards' broker port <code>31884</code> answers TLS with the certificate each board checks (signed by the platform's certificate authority for <code>mqtt.&lt;domain&gt;</code>). FAIL when it does not, or when the plain port <code>31883</code>, closed on 5 November 2026, answers again.</td></tr>
 <tr><td>Onboarding wizard</td><td>The wizard service on the host (<code>$PLATFORM_IP:$EDGE_WIZARD_PORT</code>) answers.</td></tr>
 <tr><td>Onboarding roles</td><td>The running wizard admits exactly the roles compiled from the access policy (<span class="role">engineer</span>, <span class="role">maintenance</span>). FAIL on any difference, or when it admits any signed-in account (run <code>./apps/edge-wizard/deploy.sh</code> when no run is active). WARN while <code>IAM_GATES</code> is false. SKIP when the wizard is not running.</td></tr>
@@ -357,7 +359,7 @@
 <tr><td>Annex 11</td><td>EU GMP Annex 11, the rules for computerised systems.</td></tr>
 <tr><td>Break-glass</td><td>Emergency access outside the normal rules, recorded when used: the Keycloak console account and the administrator's access to the host.</td></tr>
 <tr><td>CA</td><td>Certificate authority. The platform's own CA ("CEA Platform CA") signs the HTTPS certificates of its addresses.</td></tr>
-<tr><td>CEA</td><td>Controlled environment agriculture. MedCEA is CEA for medicinal plants and fungi.</td></tr>
+<tr><td>CEA</td><td>Controlled environment agriculture. MedCEA is a specialised subclass of it (<a href="#overview-what">What MedCEA is</a>).</td></tr>
 <tr><td>EBR</td><td>Electronic batch record. Planned, not implemented yet.</td></tr>
 <tr><td>EPCIS</td><td>GS1 Electronic Product Code Information Services, a standard for traceability events. Planned, not implemented yet.</td></tr>
 <tr><td>ESP32</td><td>The microcontroller boards used as sensor and control devices.</td></tr>

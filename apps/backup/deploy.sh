@@ -18,7 +18,7 @@
 # It needs the infrastructure first: the image and Secret of rdbms-postgresql (the
 # job runs pg_dump from the server's own image, already on the node). No portal
 # card: the host command is ./apps/backup/backups.sh (now, list, verify,
-# restore-help), and ./guide.sh → Backups asks for it. health-check.sh "Backups"
+# restore-help), and ./medcea.sh → Backups asks for it. health-check.sh "Backups"
 # (backupage) reads the newest OK marker. ./apps/backup/uninstall.sh leaves
 # BACKUP_DIR and every backup in it.
 #

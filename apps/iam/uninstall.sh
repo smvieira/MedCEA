@@ -7,7 +7,7 @@
 # Never the policy tables, their history, the MQTT person credentials or the database
 # roles, which belong to apps/database and the Compliance Plane, and never ConfigMap
 # medcea-iam-lib (deploy-infra.sh's). While IAM_MQTT_PERSON=true the MQTT Explorer then
-# gets 502 on /_mqtt-credential: roll the switch back first (./guide.sh).
+# gets 502 on /_mqtt-credential: roll the switch back first (./medcea.sh).
 #
 # Idempotent: safe to re-run.
 
@@ -23,7 +23,7 @@ source "$REPO_ROOT/infra/lib-mk8s.sh"   # mk8s / $MK8S / $KUBECTL (sudo fallback
 NAMESPACE="${NAMESPACE:-medcea}"
 
 if [[ "${IAM_MQTT_PERSON:-false}" == "true" ]]; then
-    echo -e "\033[0;33m[iam] IAM_MQTT_PERSON=true: the MQTT Explorer can no longer get a credential (502) until iam-api is back or the switch is rolled back (./guide.sh).\033[0m" >&2
+    echo -e "\033[0;33m[iam] IAM_MQTT_PERSON=true: the MQTT Explorer can no longer get a credential (502) until iam-api is back or the switch is rolled back (./medcea.sh).\033[0m" >&2
 fi
 echo "[iam] Removing the Policy UI's sign-in proxy (iam-oauth2-proxy) and its portal card..."
 $MK8S helm3 uninstall iam-oauth2-proxy -n "$NAMESPACE" 2>/dev/null || true

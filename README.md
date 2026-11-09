@@ -1,8 +1,9 @@
 # MedCEA
 
-**Controlled Environment Agriculture for Medicinal Plants and Fungi (MedCEA)** is an open IIoT platform for the reproducible,
-regulatory-compliant production of bioactive compounds in medicinal plants and fungi. It is the
-prototype artefact of the MedCEA PhD project (ISCTE-IUL). The concept is in
+**Controlled Environment Agriculture for Medicinal Plants and Fungi (MedCEA)** is a specialised
+subclass of Controlled Environment Agriculture in which the primary production objective is the optimised, reproducible, and regulatory-compliant biosynthesis of target
+bioactive compounds in medicinal plant and fungal species. This repository holds the open IIoT
+platform for it, developed as part of PhD research at Iscte-IUL, Instituto de Telecomunicações. The concept is in
 [docs/medcea-concept.md](docs/medcea-concept.md). [docs/architecture.md](docs/architecture.md) maps the
 four-layer stack and the Compliance Plane to this code and lists what is still to be built. The
 baseline was forked from `pfplatform`. Licensed under [MIT](LICENSE).
@@ -77,7 +78,7 @@ One command installs everything: the infrastructure, then the applications, then
 
 If a stage fails, the installer names it and its log; fix the cause and run `./install.sh` again.
 
-Not sure which command you need? `./guide.sh` asks what you want to do (install, an application, an operator's units, an IAM switch, a test, a board), asks for the values, shows the exact command and what it changes, and runs it once you confirm. `./guide.sh --dry-run` only shows.
+Not sure which command you need? `./medcea.sh` asks what you want to do (install, an application, an operator's units, an IAM switch, a test, a board), asks for the values, shows the exact command and what it changes, and runs it once you confirm. `./medcea.sh --dry-run` only shows.
 
 **It starts by asking for its settings.** There is no file to edit by hand: on the first run it creates `config.env` from [config.env.example](config.env.example) and asks for each setting, with the default in `[brackets]` (press Enter to accept):
 
@@ -151,7 +152,7 @@ Then the applications stage (`deploy-apps.sh --all`, next section) and `health-c
 
 **At the very end it shows your credentials.** Every password a person needs (platform admin, Keycloak, Grafana users, pgAdmin, PostgreSQL) is written to `credentials-<timestamp>.txt` in the repository root, readable only by you. Its content is shown on the terminal, never in the log. **Save it in a password manager, then delete the file**; the installer prints the exact `rm` command and lists any files left over from earlier runs. `config.env` keeps its own copy, because re-deploys need it.
 
-**Then turn on the rest of the access controls.** A fresh install has only the sign-in gates and the network policies on (`IAM_GATES`, `IAM_NETPOL`); token checks, database roles, service enforcement and the MQTT Explorer's personal credentials (`IAM_POSTGREST_JWT`, `IAM_DB_SERVICE_ROLES`, `IAM_DB_ROLES`, `IAM_ENFORCE`, `IAM_MQTT_PERSON`) are off, so the health check never says "All checks passed" and the MQTT Explorer has no credential. Run `./guide.sh` → **IAM switches** → **Bring IAM to full enforcement**: it turns them on in order and, at its end, offers `./deploy-apps.sh --all` (answer yes when no run is active) so every app pod carries the new `IAM_ENFORCE`. The manual's "After a fresh install" section explains its checklists (operators' units confirmed by qa, a report-only trial before `IAM_ENFORCE`).
+**Then turn on the rest of the access controls.** A fresh install has only the sign-in gates and the network policies on (`IAM_GATES`, `IAM_NETPOL`); token checks, database roles, service enforcement and the MQTT Explorer's personal credentials (`IAM_POSTGREST_JWT`, `IAM_DB_SERVICE_ROLES`, `IAM_DB_ROLES`, `IAM_ENFORCE`, `IAM_MQTT_PERSON`) are off, so the health check never says "All checks passed" and the MQTT Explorer has no credential. Run `./medcea.sh` → **IAM switches** → **Bring IAM to full enforcement**: it turns them on in order and, at its end, offers `./deploy-apps.sh --all` (answer yes when no run is active) so every app pod carries the new `IAM_ENFORCE`. The manual's "After a fresh install" section explains its checklists (operators' units confirmed by qa, a report-only trial before `IAM_ENFORCE`).
 
 > **Note:** Charmed Kubeflow was retired — it cost 37 Juju charm units and nothing in the codebase used it. JupyterHub replaced it and authenticates against Keycloak directly, which also removed Dex, oidc-gatekeeper, Istio, MetalLB and the static LAN IP.
 
@@ -419,7 +420,7 @@ psql in the PostgreSQL pod.
 `IAM_ENFORCE=true` (IAM 2.6, off by default) makes the scheduler, monitor and
 Config UI services refuse every call the route table does not allow, instead of
 only logging it. Database Management and the User Manager's admin side always
-refuse. Switch it with `./guide.sh IAM_ENFORCE` after a report-only soak, once
+refuse. Switch it with `./medcea.sh` → IAM switches → IAM_ENFORCE after a report-only soak, once
 `IAM_DB_ROLES` is true (only the database checks which runs an operator may
 start or stop).
 
@@ -1033,7 +1034,7 @@ container image, which on this platform is roughly 10 GB.
 
 A rebuilt platform starts from `config.env`'s IAM switches. After an
 `--uninstall-all` that also deleted `config.env`, they are back to a fresh
-install's (only `IAM_GATES` and `IAM_NETPOL` on): run `./guide.sh` → IAM
+install's (only `IAM_GATES` and `IAM_NETPOL` on): run `./medcea.sh` → IAM
 switches → **Bring IAM to full enforcement**, then let it redeploy the apps
 (`./deploy-apps.sh --all`) at its end.
 

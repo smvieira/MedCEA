@@ -324,7 +324,7 @@ else
     # config.env on 8 Nov 2026 (Superset installed by default), but a config.env from
     # before Phase 2.5 has no line for it and ran with false, so it gets false, said once
     # below: turning it on moves pgAdmin onto rr_admin's grants and is the owner's
-    # decision (./guide.sh → IAM switches).
+    # decision (./medcea.sh → IAM switches).
     _KEPT_OFF=()
     grep -q '^IAM_DB_SERVICE_ROLES=' "$CONFIG_FILE" || _KEPT_OFF+=('IAM_DB_SERVICE_ROLES="false"')
     awk '
@@ -347,7 +347,7 @@ else
         echo -e "${GREEN}Rebased $CONFIG_FILE on config.env.example, keeping your values${NC} (previous copy: $CONFIG_FILE.bak)."
     fi
     if (( ${#_KEPT_OFF[@]} )); then
-        echo -e "${YELLOW}Note: $CONFIG_FILE had no IAM_DB_SERVICE_ROLES line; it is set to false, as this install has run (a new config.env has true). To turn it on: ./guide.sh → IAM switches → IAM_DB_SERVICE_ROLES.${NC}"
+        echo -e "${YELLOW}Note: $CONFIG_FILE had no IAM_DB_SERVICE_ROLES line; it is set to false, as this install has run (a new config.env has true). To turn it on: ./medcea.sh → IAM switches → IAM_DB_SERVICE_ROLES.${NC}"
     fi
 fi
 # It is about to hold every platform password.

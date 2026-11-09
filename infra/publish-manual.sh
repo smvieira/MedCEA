@@ -8,7 +8,7 @@
 # Builds into a temporary file (docs/manual/build.py --out; the working tree is not
 # touched), refuses when build.py refuses or the page would not fit in a ConfigMap,
 # replaces ConfigMap portal-manual, restarts the portal and waits for it. Takes the deploy
-# lock; logs to logs/publish-manual-<ts>.log. ./guide.sh → Infrastructure → Publish the
+# lock; logs to logs/publish-manual-<ts>.log. ./medcea.sh → Infrastructure → Publish the
 # manual to the portal runs it. infra/lib-manual.sh does the work.
 
 set -euo pipefail

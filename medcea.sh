@@ -1,0 +1,2999 @@
+#!/usr/bin/env bash
+# medcea.sh — the MedCEA menus: a question-and-answer front end to the MedCEA commands
+#
+#   ./medcea.sh [--dry-run] [--help]
+#   ./medcea.sh --plain [--dry-run]    numbered questions instead of dialog boxes
+#
+# Named after the platform, MedCEA, not after PROJECT_NAME: an install with another
+# PROJECT_NAME still runs ./medcea.sh. ./guide.sh, its old name, forwards here for now.
+#
+# Walks a tree of menus — area (install, infrastructure, applications, operators and
+# units, IAM switches, health and tests, edge devices, policy, backups) → action → the questions
+# that action needs — then shows the exact command, what it changes, whether it takes
+# the deploy lock or needs sudo, and runs it once you confirm: [Y/n] for a read-only
+# command, [y/N] for one that changes something, and the word yes typed in full for a
+# destructive one (an uninstall, --purge-data, --reset, --bootstrap, erasing a board).
+# Answers are checked the way the target script checks them (unit codes, uuids, component
+# names on disk); the --by username is remembered for the session.
+#
+# IAM switches (IAM_GATES, IAM_NETPOL, IAM_ENFORCE, IAM_POSTGREST_JWT,
+# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES, IAM_MQTT_PERSON) and WORKBENCH_ENABLED: shows the current value (the
+# one active line in config.env; zero or several active lines are refused), the ordered
+# recipe for enabling or rolling back with its preconditions, then sets the value (that
+# one line, a backup config.env.guide-<timestamp>.bak next to it, the diff shown) and runs
+# the steps in order, stopping at the first that fails. After a recipe that completed it
+# offers to delete the backup (it holds every password); ./install.sh --uninstall-all
+# deletes any that are left together with config.env.
+#
+# "Bring IAM to full enforcement" (IAM switches area) runs the enable recipe of every
+# IAM switch still false, in order (IAM_GATES, IAM_NETPOL, IAM_POSTGREST_JWT,
+# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES, IAM_ENFORCE, IAM_MQTT_PERSON): the whole plan, one
+# [y/N], one deploy lock for the chain, each switch's checklist at its turn, a look at the
+# operators' units before IAM_DB_ROLES. It stops at the first refusal or failure; run it
+# again to resume (switches already true are skipped).
+#
+# --dry-run  run nothing and change nothing: print each command, and each config.env
+#            change, that would have been made. Every question and confirmation is
+#            still asked.
+# --plain    numbered menus and typed answers, as with piped input (also MEDCEA_PLAIN=1;
+#            GUIDE_PLAIN=1, the old name, still works).
+#
+# At a terminal (stdin and stdout a terminal that is the controlling one, at least 44
+# columns by 18 rows, whiptail installed, TERM set and not dumb) the menus and questions
+# are whiptail dialog boxes: arrows move, Enter selects, Tab reaches the buttons. Esc in a
+# menu goes back; Cancel or Esc in a question box leaves the action with nothing run; Esc
+# at a yes/no question answers no. A dialog box that fails (whiptail cannot start, is
+# killed) ends the menus (exit 1): run ./medcea.sh --plain. Every menu starts with a read-only
+# status header: host, kernel, git branch and commit, the last health check, the applied
+# policy version, whether the deploy lock is held, and the dry-run banner; the main menu
+# has the MedCEA logo above it when the terminal is large enough. A command runs on the
+# plain terminal, as without dialogs. With util-linux script installed it runs under
+# script, which records its output in a private file: when it ends, a dialog box says
+# Finished or Failed with the exit code, the log it wrote and the last lines of its
+# output (Menu, or Quit); the recorded file is deleted at once. A switch recipe or the
+# full-enforcement chain shows one such box at its end, for all its steps. Without
+# script, Enter returns to the menu. Piped input always gets the plain mode.
+# MEDCEA_TUI_FORCE=1 with MEDCEA_TUI_TTY=FILE forces the dialogs with FILE as their
+# terminal (for tests only).
+#
+# Never asks for a password or a secret: the commands it runs prompt for their own.
+# Runs every command with this terminal, so their own prompts work. The commands take
+# the deploy lock themselves; a switch recipe takes it once for all its steps (refused
+# while another deploy runs), so config.env cannot change under a running deploy, and
+# exports MEDCEA_LOCK_HELD so its steps skip their own. Ctrl-C during a recipe stops it
+# and says whether config.env was already changed and how to restore it. Answers are
+# read from stdin; end of input (Ctrl-D) leaves the menus. MEDCEA_GUIDE_CONFIG=FILE
+# reads FILE instead of ./config.env, with --dry-run only (for tests).
+#
+# Exit 0 on quit; 1 when input ends; 2 for a usage error; 130 after Ctrl-C in a recipe.
+# Run from anywhere:  ./medcea.sh --dry-run
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    sed -n "2,$(grep -n '^# Run from anywhere' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+# No set -e: a command that fails is reported and the guide goes on.
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+else
+    RED=''; YELLOW=''; GREEN=''; CYAN=''; BOLD=''; NC=''
+fi
+# The MedCEA logo (infra/lib-banner.sh): the plain mode prints the full one once at a
+# terminal; the dialog mode's main menu shows the compact one when there is room.
+# shellcheck source=infra/lib-banner.sh
+source "$SCRIPT_DIR/infra/lib-banner.sh" 2>/dev/null || true
+warn() { echo -e "${YELLOW}[medcea.sh] $*${NC}" >&2; }
+die()  { local c="$1"; shift; echo -e "${RED}[medcea.sh] $*${NC}" >&2; exit "$c"; }
+bye()  { echo "Bye."; exit 0; }
+
+DRY_RUN=false
+PLAIN=false
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY_RUN=true ;;
+        --plain) PLAIN=true ;;
+        -h|--help) sed -n "2,$(grep -n '^# Run from anywhere' "$0" | cut -d: -f1)p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die 2 "unknown argument '$a'  (./medcea.sh --help)" ;;
+    esac
+done
+
+# Every MedCEA script runs from the repository root (config.env is read from there).
+cd "$SCRIPT_DIR" || die 2 "cannot cd to $SCRIPT_DIR"
+
+CFG="config.env"
+if [[ -n "${MEDCEA_GUIDE_CONFIG:-}" ]]; then
+    # The commands it runs read ./config.env, so editing another file and then deploying
+    # would deploy something else than what was shown.
+    $DRY_RUN || die 2 "MEDCEA_GUIDE_CONFIG works with --dry-run only (the commands read ./config.env)"
+    CFG="$MEDCEA_GUIDE_CONFIG"
+fi
+
+# ── Dialog boxes (whiptail) ──────────────────────────────────────────────────
+# At a terminal the questions are whiptail dialog boxes; everything else stays as in the
+# plain mode, which piped input (the tests), --plain and MEDCEA_PLAIN=1 keep byte for byte.
+# whiptail clears the screen, so the guide's own output (fd 1 and 2: echoes, warn, the
+# plan, recipe_show, cfg_set's diff) goes into a screen buffer (a mode-600 file in a
+# private mktemp folder) and becomes the text of the next dialog, which empties it. The
+# real terminal is kept on fd 7 and 8: whiptail draws on the terminal and answers on its
+# stderr (never inside the buffer), and a command runs with fd 1/2 = 7/8 and the guide's
+# stdin, exactly as in the plain mode (sudo, the commands' own questions) — under
+# util-linux script when it is installed and stdin is the terminal, which records the
+# output for the end-of-command dialog (run_array_script, tui_end_dialog). The EXIT trap
+# prints what is left in the buffer (die, bye) to the terminal and removes the folder.
+# newt turns the tty's interrupt character off while a dialog is up, so Ctrl-C in a dialog
+# is no signal (Esc goes back). whiptail runs as a tracked background child that the guide
+# waits for: a trapped signal runs its trap at once (a chain question stops the chain), and
+# the EXIT trap kills a whiptail still up and puts back the terminal mode saved at the
+# start (newt leaves the tty raw, Ctrl-C dead, when a signal kills it). whiptail gets
+# neither the saved terminal (fd 7/8) nor the deploy lock (fd 9): an orphan would keep it.
+# Cancel or Esc in a question box sets ASK_CANCELLED: every later question of that action
+# answers at once without a box (empty, no, back), plan_run runs nothing, and run_area
+# goes back to the menu with "Cancelled; nothing was run." A failed box is never an answer.
+TUI=false
+TUI_TTY=""; TUI_DIR=""; TUI_BUF=""; TUI_ANS=""; TUI_LOCALE=""; TUI_SEP=" - "
+TUI_STTY=""            # the terminal's mode at the start (stty -g), put back on exit
+TUI_PID=""             # the whiptail being waited for
+TUI_NOTE=""            # why a terminal gets the plain mode (shown at the start)
+TUI_MIN_ROWS=18; TUI_MIN_COLS=44
+ASK_CANCELLED=false    # Cancel or Esc in a question box: the action is left, nothing run
+CHAIN_ASKING=false     # a chain question is up (a failed box stops the chain, as a signal does)
+TUI_DIRTY=false        # a command's output is on the terminal: let it be read before a dialog
+TUI_TOP=false          # the top-level menu: its Cancel button quits
+TUI_TITLE="MedCEA"
+TUI_BACKTITLE="MedCEA"
+TUI_HEADER=""
+TUI_BANNER=""; TUI_BANNER_H=0; TUI_BANNER_W=0   # the compact logo, the main menu's top (when it fits)
+# The end-of-command dialog: with util-linux script a command runs under script, on a
+# pseudo-terminal of its own (colours, sudo and its own questions, Ctrl-C reach it as at
+# the plain terminal) while its output is recorded into TUI_DIR/run.typescript (600). The
+# file is read into memory right after the command ends and deleted at once: it holds
+# whatever the command printed on the terminal (deploy-infra's credentials box goes to
+# /dev/tty), so it is never kept, copied or put into the screen buffer. Output holding the
+# credentials box gets no end dialog at all: it stays on the terminal, with the Enter
+# prompt, so that the box is not cleared before it is read, and its text never reaches
+# whiptail's arguments (another local user could read those in /proc).
+TUI_SCRIPT=false       # commands run under util-linux script (stdin a terminal, script on PATH)
+TUI_RUNS=()            # this action's commands run under script: "$ command → result" (+ its log)
+TUI_TAIL=""            # the last lines of the last one's output, escapes stripped (memory only)
+TUI_TAIL_CMD=""
+TUI_SECRET=false       # a recorded output held the credentials box: no end dialog for this action
+TUI_END_TITLE=""       # the end dialog's title when the action stopped although its last recorded step passed (a stopped chain)
+RUN_RECORDED=false     # the last run_array ran under script (Ctrl-C reached only the command)
+
+tui_choose() {   # → status 0 for the dialog boxes (TUI_TTY set)
+    if [[ -n "${MEDCEA_TUI_FORCE:-}" ]]; then
+        [[ -n "${MEDCEA_TUI_TTY:-}" ]] || die 2 "MEDCEA_TUI_FORCE needs MEDCEA_TUI_TTY=<file> (a test hook; for the dialog boxes just run ./medcea.sh at a terminal)"
+    fi
+    $PLAIN && return 1
+    # MEDCEA_PLAIN, or GUIDE_PLAIN (its name before 9 Nov 2026, still accepted)
+    [[ -n "${MEDCEA_PLAIN:-}" && "${MEDCEA_PLAIN}" != 0 ]] && return 1
+    [[ -n "${GUIDE_PLAIN:-}" && "${GUIDE_PLAIN}" != 0 ]] && return 1
+    if [[ -n "${MEDCEA_TUI_FORCE:-}" ]]; then
+        command -v whiptail >/dev/null 2>&1 || die 2 "MEDCEA_TUI_FORCE: whiptail is not on PATH"
+        TUI_TTY="$MEDCEA_TUI_TTY"
+        return 0
+    fi
+    local s r c
+    [[ -t 0 && -t 1 ]] || return 1
+    [[ -n "${TERM:-}" && "$TERM" != dumb ]] || return 1
+    command -v whiptail >/dev/null 2>&1 || return 1
+    # The boxes are drawn on /dev/tty: a terminal on fd 0/1 that is not this process's
+    # controlling one (setsid, some launchers) would fail every box.
+    if ! { : <>/dev/tty; } 2>/dev/null; then
+        TUI_NOTE="no controlling terminal (/dev/tty): numbered menus instead of dialog boxes"
+        return 1
+    fi
+    s="$(stty size </dev/tty 2>/dev/null)" || s=""
+    r="${s% *}"; c="${s#* }"
+    if [[ "$r" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ ]] && (( r > 0 && c > 0 )) \
+       && (( r < TUI_MIN_ROWS || c < TUI_MIN_COLS )); then
+        TUI_NOTE="the terminal is ${c}×${r}, smaller than ${TUI_MIN_COLS}×${TUI_MIN_ROWS}: numbered menus instead of dialog boxes"
+        return 1
+    fi
+    TUI_TTY=/dev/tty
+}
+
+tui_start() {   # the buffer, the saved terminal, the EXIT trap, the colours
+    local cm
+    TUI_DIR="$(mktemp -d "${TMPDIR:-/tmp}/medcea-tui.XXXXXX")" \
+        || die 1 "cannot create a folder for the dialog boxes' screen buffer: run ./medcea.sh --plain"
+    chmod 700 "$TUI_DIR"
+    TUI_BUF="$TUI_DIR/screen"; TUI_ANS="$TUI_DIR/answer"
+    ( umask 077; : >"$TUI_BUF"; : >"$TUI_ANS" )
+    TUI_STTY="$(stty -g <"$TUI_TTY" 2>/dev/null)" || TUI_STTY=""
+    exec 7>&1 8>&2
+    # Appending: after the buffer is emptied, the next write starts at its new end.
+    exec >>"$TUI_BUF" 2>&1
+    trap tui_exit EXIT
+    if [[ -z "${NEWT_COLORS+x}" && -z "${NEWT_COLORS_FILE+x}" ]]; then
+        export NEWT_COLORS='root=white,black roottext=brightcyan,black
+window=white,black border=cyan,black shadow=black,black title=brightcyan,black
+textbox=white,black acttextbox=black,cyan label=white,black helpline=white,black
+listbox=white,black actlistbox=black,cyan sellistbox=brightcyan,black actsellistbox=black,cyan
+button=black,cyan actbutton=black,brightgreen compactbutton=white,black
+entry=black,lightgray disentry=gray,black checkbox=white,black actcheckbox=black,cyan
+emptyscale=,black fullscale=,cyan'
+    fi
+    # The menus' labels hold UTF-8 (—): counted and cut as characters, shown as such.
+    cm="$(locale charmap 2>/dev/null)"
+    if [[ "$cm" != UTF-8 ]] && locale -a 2>/dev/null | grep -qixE 'c\.utf-?8'; then
+        TUI_LOCALE=C.UTF-8; cm=UTF-8
+    fi
+    [[ "$cm" == UTF-8 ]] && TUI_SEP=" — "
+    TUI_DIRTY=false
+    # Only with the terminal on stdin: script forwards its stdin to the command's pty and
+    # would swallow piped answers meant for the menus (the dialogs' test hook pipes them).
+    if [[ -t 0 ]] && command -v script >/dev/null 2>&1 && script --version 2>/dev/null | grep -q util-linux; then
+        TUI_SCRIPT=true
+    fi
+    if declare -F medcea_banner >/dev/null; then
+        local l
+        TUI_BANNER="$(medcea_banner compact 2>/dev/null)" || TUI_BANNER=""
+        TUI_BANNER_H=0; TUI_BANNER_W=0
+        while IFS= read -r l; do
+            TUI_BANNER_H=$(( TUI_BANNER_H + 1 )); (( ${#l} > TUI_BANNER_W )) && TUI_BANNER_W=${#l}
+        done <<<"$TUI_BANNER"
+    fi
+}
+
+tui_restore() {   # the terminal mode saved at the start, back (newt killed by a signal leaves it raw)
+    [[ -n "$TUI_STTY" ]] && stty "$TUI_STTY" <"$TUI_TTY" 2>/dev/null
+    return 0
+}
+
+tui_exit() {   # EXIT trap: a whiptail still up killed, the terminal mode back, the buffer shown, the folder removed
+    local rc=$?
+    if [[ -n "$TUI_PID" ]]; then
+        kill "$TUI_PID" 2>/dev/null; wait "$TUI_PID" 2>/dev/null
+        TUI_PID=""
+    fi
+    tui_restore
+    exec >&7 2>&8
+    [[ -s "$TUI_BUF" ]] && cat -- "$TUI_BUF"
+    rm -rf -- "$TUI_DIR"
+    exit "$rc"
+}
+
+tui_take() {   # → TUI_CTX: the guide's output since the last dialog, colours stripped; buffer emptied
+    TUI_CTX="$(sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/\r$//' -- "$TUI_BUF")"
+    : >"$TUI_BUF"
+    local nl=$'\n'
+    TUI_CTX="${TUI_CTX#"${TUI_CTX%%[!$nl]*}"}"             # leading blank lines
+}
+
+tui_text() {   # tui_text PROMPT → TUI_TEXT: the context, then PROMPT
+    tui_take
+    if [[ -n "$TUI_CTX" && -n "$1" ]]; then TUI_TEXT="$TUI_CTX"$'\n\n'"$1"; else TUI_TEXT="$TUI_CTX$1"; fi
+}
+
+tui_size() {   # → TUI_ROWS, TUI_COLS of the terminal (24×80 when it cannot be read); never above them
+    local s
+    s="$(stty size <"$TUI_TTY" 2>/dev/null)" || s=""
+    TUI_ROWS="${s% *}"; TUI_COLS="${s#* }"
+    if ! [[ "$TUI_ROWS" =~ ^[0-9]+$ && "$TUI_COLS" =~ ^[0-9]+$ ]] || (( TUI_ROWS == 0 || TUI_COLS == 0 )); then
+        TUI_ROWS=24; TUI_COLS=80
+    fi
+    # Not raised above the terminal: a box taller or wider than it hides its buttons. The
+    # guide starts the boxes only from 44×18 (tui_choose); a terminal made smaller later
+    # gets cramped boxes.
+    TUI_W=$(( TUI_COLS - 4 )); (( TUI_W > 116 )) && TUI_W=116; (( TUI_W < 1 )) && TUI_W=1
+    TUI_MAXH=$(( TUI_ROWS - 2 )); (( TUI_MAXH < 1 )) && TUI_MAXH=1
+}
+
+tui_lines() {   # tui_lines TEXT WIDTH → TUI_NLINES: about how many lines TEXT takes wrapped
+    if [[ -n "$TUI_LOCALE" ]]; then local LC_ALL="$TUI_LOCALE"; fi
+    local l n=0 w="$2"
+    while IFS= read -r l; do
+        if (( ${#l} == 0 )); then n=$(( n + 1 )); else n=$(( n + (${#l} + w - 1) / w )); fi
+    done <<<"$1"
+    TUI_NLINES=$n
+}
+
+tui_cut() {   # tui_cut TEXT MAX → TUI_CUT: at most MAX characters (never half a UTF-8 character)
+    if [[ -n "$TUI_LOCALE" ]]; then local LC_ALL="$TUI_LOCALE"; fi
+    TUI_CUT="$1"
+    if (( ${#TUI_CUT} > $2 )); then
+        if [[ "$TUI_SEP" == " — " ]]; then TUI_CUT="${TUI_CUT:0:$2 - 1}…"; else TUI_CUT="${TUI_CUT:0:$2 - 3}..."; fi
+    fi
+}
+
+tui_geom() {   # tui_geom TEXT EXTRA → TUI_H, TUI_W, TUI_SCROLL: sized to the terminal
+    tui_size
+    tui_lines "$1" $(( TUI_W - 6 ))
+    TUI_H=$(( TUI_NLINES + $2 )); TUI_SCROLL=()
+    if (( TUI_H > TUI_MAXH )); then TUI_H=$TUI_MAXH; TUI_SCROLL=(--scrolltext); fi
+}
+
+tui_dialog() {   # tui_dialog TITLE WHIPTAIL-ARGS… → TUI_OUT, TUI_RC (0 OK/Yes, 1 Cancel/No, 255 Esc); a failure dies
+    local title="$1" first; shift
+    # Drawn on the terminal, read from it; the answer comes back on whiptail's stderr (a
+    # mode-600 file in the private folder). A background child, waited for: a trapped
+    # signal runs its trap at once and the EXIT trap can kill it. Without fd 7/8 (the
+    # terminal kept) and fd 9 (the deploy lock, under a recipe).
+    if [[ -n "$TUI_LOCALE" ]]; then
+        LC_ALL="$TUI_LOCALE" whiptail --title "$title" --backtitle "$TUI_BACKTITLE" "$@" \
+            2>"$TUI_ANS" >>"$TUI_TTY" <"$TUI_TTY" 7>&- 8>&- 9>&- &
+    else
+        whiptail --title "$title" --backtitle "$TUI_BACKTITLE" "$@" \
+            2>"$TUI_ANS" >>"$TUI_TTY" <"$TUI_TTY" 7>&- 8>&- 9>&- &
+    fi
+    TUI_PID=$!
+    while :; do
+        wait "$TUI_PID"; TUI_RC=$?
+        # > 128 with whiptail still there: a trapped signal (recorded) interrupted the wait
+        (( TUI_RC > 128 )) && kill -0 "$TUI_PID" 2>/dev/null && continue
+        break
+    done
+    TUI_PID=""
+    TUI_OUT="$(cat -- "$TUI_ANS")"; : >"$TUI_ANS"
+    (( TUI_RC >= 128 )) && tui_restore
+    (( TUI_RC == 0 )) && return 0
+    (( TUI_RC == 1 || TUI_RC == 255 )) && [[ -z "$TUI_OUT" ]] && return 0
+    # Anything else (a usage error, a terminal it cannot open, killed: 128+n) is no answer.
+    first="${TUI_OUT%%$'\n'*}"; first="${first:0:200}"
+    $CHAIN_ASKING && chain_prompt_stop "a failed dialog box (whiptail exit $TUI_RC${first:+: $first})"
+    die 1 "the dialog box failed (whiptail exit $TUI_RC${first:+: $first}): run ./medcea.sh --plain"
+}
+
+tui_flush() {   # the buffer to the terminal (kept for the next dialog)
+    cat -- "$TUI_BUF" >&7
+}
+
+tui_pause() {   # a command's output is on the terminal: let it be read before a dialog clears it
+    local a
+    $TUI_DIRTY || return 0
+    TUI_DIRTY=false
+    tui_flush
+    printf '\n%s' "Press Enter to continue: " >&7
+    IFS= read -r a || true
+}
+
+tui_terminal() {   # before a command: the screen cleared (once), then what the guide printed
+    $TUI_DIRTY || { [[ -t 7 ]] && printf '\033[H\033[2J' >&7; }
+    cat -- "$TUI_BUF" >&7
+    : >"$TUI_BUF"
+}
+
+tui_input() {   # tui_input PROMPT DEFAULT → ANSWER; Cancel or Esc: ANSWER "" and ASK_CANCELLED=true
+    ANSWER=""
+    $ASK_CANCELLED && return 0          # the action was left: no more boxes
+    tui_pause
+    tui_text "$1"
+    tui_geom "$TUI_TEXT" 8
+    tui_dialog "$TUI_TITLE" "${TUI_SCROLL[@]}" --inputbox "$TUI_TEXT" "$TUI_H" "$TUI_W" "$2"
+    if (( TUI_RC == 0 )); then ANSWER="$TUI_OUT"; else ASK_CANCELLED=true; fi
+}
+
+tui_yesno() {   # tui_yesno PROMPT y|n → status 0 for yes (Esc is no)
+    local -a dn=()
+    $ASK_CANCELLED && return 1          # the action was left: no
+    [[ "$2" == n ]] && dn=(--defaultno)
+    tui_pause
+    tui_text "$1"
+    tui_geom "$TUI_TEXT" 7
+    tui_dialog "$TUI_TITLE" "${TUI_SCROLL[@]}" "${dn[@]}" --yesno "$TUI_TEXT" "$TUI_H" "$TUI_W"
+    (( TUI_RC == 0 ))
+}
+
+tui_msgbox() {   # tui_msgbox TITLE: the buffer in a box with OK
+    tui_pause
+    tui_text ""
+    tui_geom "$TUI_TEXT" 7
+    tui_dialog "$1" "${TUI_SCROLL[@]}" --msgbox "$TUI_TEXT" "$TUI_H" "$TUI_W"
+}
+
+tui_menu() {   # tui_menu TITLE "label|purpose"… → PICK (1..N, or b for Back, Quit and Esc)
+    local title="$1"; shift
+    local -a items=("$@") args=()
+    local n=${#items[@]} i label purpose item text tl hl room listh shown cancel=Back
+    if $ASK_CANCELLED; then PICK=b; return 0; fi    # the action was left: back
+    $TUI_TOP && cancel=Quit
+    tui_pause
+    status_header
+    tui_take
+    text="$TUI_HEADER"
+    [[ -n "$TUI_CTX" ]] && text+=$'\n\n'"$TUI_CTX"
+    tui_size
+    for (( i = 0; i < n; i++ )); do
+        label="${items[i]%%|*}"; purpose="${items[i]#*|}"
+        item="$label"
+        [[ "$purpose" != "${items[i]}" && -n "$purpose" ]] && item+="$TUI_SEP$purpose"
+        tui_cut "$item" $(( TUI_W - 12 ))
+        args+=("$(( i + 1 ))" "$TUI_CUT")
+    done
+    tui_lines "$text" $(( TUI_W - 6 )); tl=$TUI_NLINES
+    tui_lines "$TUI_HEADER" $(( TUI_W - 6 )); hl=$(( TUI_NLINES + 1 ))
+    (( hl > tl )) && hl=$tl
+    # The logo above the header: the main menu only, and only when the logo (unwrapped),
+    # a blank line, the whole header and every entry fit; otherwise left out, silently.
+    if $TUI_TOP && [[ -n "$TUI_BANNER" ]] && (( TUI_BANNER_W <= TUI_W - 6 )) \
+       && (( TUI_BANNER_H + 1 + hl + n <= TUI_MAXH - 7 )); then
+        text="$TUI_BANNER"$'\n\n'"$text"
+        tl=$(( tl + TUI_BANNER_H + 1 )); hl=$(( hl + TUI_BANNER_H + 1 ))
+    fi
+    # The text (the header first) gets the room the list leaves; the list keeps up to 6
+    # rows (it scrolls), but gives rows up, down to 2, so that the whole header and the
+    # line after it stay on screen: a menu's text cannot be scrolled from the keyboard.
+    room=$(( TUI_MAXH - 7 ))
+    listh=$n; (( listh > 6 )) && listh=6
+    if (( room - listh < hl )); then
+        listh=$(( room - hl )); (( listh < 2 )) && listh=2; (( listh > n )) && listh=$n
+    fi
+    shown=$(( room - listh )); TUI_SCROLL=()
+    if (( tl > shown )); then TUI_SCROLL=(--scrolltext); else shown=$tl; fi
+    listh=$(( room - shown )); (( listh > n )) && listh=$n; (( listh < 1 )) && listh=1
+    tui_dialog "$title" "${TUI_SCROLL[@]}" --ok-button Select --cancel-button "$cancel" \
+        --menu "$text" $(( shown + listh + 7 )) "$TUI_W" "$listh" "${args[@]}"
+    if (( TUI_RC == 0 )) && [[ "$TUI_OUT" =~ ^[0-9]{1,3}$ ]] && (( 10#$TUI_OUT >= 1 && 10#$TUI_OUT <= n )); then
+        PICK=$(( 10#$TUI_OUT ))
+    else
+        PICK=b
+    fi
+}
+
+tui_confirm() {   # plan_run's confirmation: the plan above is the dialog's text → status 0 to go ahead
+    local TUI_TITLE
+    case "$LEVEL" in
+        read)    TUI_TITLE="Run this read-only command?"; tui_yesno "Run it?" y ;;
+        change)  TUI_TITLE="This changes the platform"; tui_yesno "Run it?" n ;;
+        destroy) TUI_TITLE="DESTRUCTIVE"
+                 ask "This is destructive. Type yes to go ahead (anything else cancels)"
+                 [[ "$ANSWER" == yes ]] || return 1
+                 [[ -z "$CONFIRM_WORD" ]] && return 0
+                 ask "Type the project name ('$CONFIRM_WORD') to drop the data (anything else cancels)"
+                 [[ "$ANSWER" == "$CONFIRM_WORD" ]] ;;
+    esac
+}
+
+tui_after() {   # after an action: the end dialog after recorded commands; Enter on the terminal after others; else Back/Quit when there is text
+    local a
+    if (( ${#TUI_RUNS[@]} )) && ! $TUI_SECRET; then
+        TUI_DIRTY=false
+        tui_end_dialog
+        return 0
+    fi
+    if $TUI_SECRET; then
+        echo "(Its output holds the credentials box: it stays on this terminal; no summary box.)"
+    fi
+    TUI_RUNS=(); TUI_TAIL=""; TUI_TAIL_CMD=""; TUI_SECRET=false; TUI_END_TITLE=""
+    if $TUI_DIRTY; then
+        TUI_DIRTY=false
+        cat -- "$TUI_BUF" >&7; : >"$TUI_BUF"
+        printf '\n%s' "Enter = back to the menu, q = quit: " >&7
+        if ! IFS= read -r a; then echo >&7; die 1 "input ended (EOF); leaving medcea.sh"; fi
+        a="${a%$'\r'}"
+        case "${a,,}" in q|quit) bye ;; esac
+        return 0
+    fi
+    tui_text ""
+    [[ -n "${TUI_TEXT//[[:space:]]/}" ]] || return 0
+    tui_geom "$TUI_TEXT" 7
+    tui_dialog "MedCEA" "${TUI_SCROLL[@]}" --yes-button "Back to the menu" --no-button Quit \
+        --yesno "$TUI_TEXT" "$TUI_H" "$TUI_W"
+    (( TUI_RC == 1 )) && bye
+    return 0
+}
+
+tui_end_dialog() {   # "Finished: exit code 0" / "Failed: exit code N": each command, its log, the guide's text, the output's tail; Menu or Quit
+    local title text r n=${#TUI_RUNS[@]}
+    # A stopped chain whose recorded steps all passed is not finished (TUI_END_TITLE)
+    if (( LAST_RC != 0 )); then title="Failed: exit code $LAST_RC"
+    elif [[ -n "$TUI_END_TITLE" ]]; then title="$TUI_END_TITLE"
+    else title="Finished: exit code 0"; fi
+    TUI_END_TITLE=""
+    tui_take                                   # what the guide printed after them (a recipe's result)
+    text=""
+    for r in "${TUI_RUNS[@]}"; do text+="${text:+$'\n'}$r"; done
+    [[ -n "$TUI_CTX" ]] && text+=$'\n\n'"$TUI_CTX"
+    if [[ -n "$TUI_TAIL" ]]; then
+        if (( n > 1 )); then text+=$'\n\n'"The last lines of the last command's output ($TUI_TAIL_CMD):"
+        else text+=$'\n\n'"The last lines of its output:"; fi
+        text+=$'\n'"$TUI_TAIL"
+    else
+        text+=$'\n\n'"(no output)"
+    fi
+    TUI_RUNS=(); TUI_TAIL=""; TUI_TAIL_CMD=""
+    tui_geom "$text" 7
+    # Esc is Menu (255); Quit (1) leaves
+    tui_dialog "$title" --scrolltext --yes-button Menu --no-button Quit --yesno "$text" "$TUI_H" "$TUI_W"
+    (( TUI_RC == 1 )) && bye
+    return 0
+}
+
+# ── The status header (dialog mode, top of every menu) ───────────────────────
+# Read-only and fast: files and /proc only, git under a timeout. No cluster, no psql, no
+# kubectl, and the lock is never taken or probed with flock (a probe takes it for an
+# instant, and a deploy starting then would be refused): whether it is held is read from
+# /proc/locks, and its file only names the run that took it.
+STATUS_TO=()
+command -v timeout >/dev/null 2>&1 && STATUS_TO=(timeout 2)
+
+status_age() {   # status_age EPOCH → STATUS_AGE ("12 min ago")
+    local d=$(( $(date +%s) - $1 ))
+    if (( d < 60 )); then STATUS_AGE="just now"
+    elif (( d < 3600 )); then STATUS_AGE="$(( d / 60 )) min ago"
+    elif (( d < 172800 )); then STATUS_AGE="$(( d / 3600 )) h ago"
+    else STATUS_AGE="$(( d / 86400 )) days ago"; fi
+}
+
+status_git() {   # → STATUS_GIT, STATUS_COMMIT
+    local g=(git -C "$SCRIPT_DIR") branch commit porcelain rc
+    STATUS_GIT="not a git checkout"; STATUS_COMMIT=""
+    command -v git >/dev/null 2>&1 || return 0
+    [[ "$("${STATUS_TO[@]}" "${g[@]}" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]] || return 0
+    branch="$("${STATUS_TO[@]}" "${g[@]}" symbolic-ref --short -q HEAD 2>/dev/null)" || branch="(detached HEAD)"
+    commit="$("${STATUS_TO[@]}" "${g[@]}" rev-parse --short HEAD 2>/dev/null)" || commit="no commit yet"
+    porcelain="$("${STATUS_TO[@]}" "${g[@]}" --no-optional-locks status --porcelain 2>/dev/null)"; rc=$?
+    STATUS_GIT="$branch @ $commit"
+    if (( rc != 0 )); then STATUS_GIT+=" (clean or dirty: git status did not answer)"
+    elif [[ -n "$porcelain" ]]; then STATUS_GIT+=" dirty"; fi
+    STATUS_COMMIT="$commit"
+}
+
+status_health() {   # → STATUS_HEALTH: the newest logs/health-check-*.log's summary and age
+    local f newest="" line
+    for f in "$SCRIPT_DIR"/logs/health-check-*.log; do
+        [[ -f "$f" ]] || continue
+        if [[ -z "$newest" || "$f" -nt "$newest" ]]; then newest="$f"; fi
+    done
+    if [[ -z "$newest" ]]; then STATUS_HEALTH="no health check logged yet"; return 0; fi
+    status_age "$(stat -c %Y -- "$newest" 2>/dev/null || date +%s)"
+    if [[ ! -r "$newest" ]]; then STATUS_HEALTH="its log is unreadable ($STATUS_AGE)"; return 0; fi
+    line="$("${STATUS_TO[@]}" sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/\r$//' -- "$newest" 2>/dev/null \
+        | grep -aE '(All [0-9]+ checks passed\.|— [0-9]+ checks)[[:space:]]*$' | tail -n 1)"
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    if [[ -n "$line" ]]; then STATUS_HEALTH="$line ($STATUS_AGE)"
+    else STATUS_HEALTH="its last run has no summary, interrupted? ($STATUS_AGE)"; fi
+}
+
+status_policy() {   # → STATUS_POLICY: line 1 of state/policy-applied.yaml (version=N kind=K)
+    local d="$SCRIPT_DIR/state" f="$SCRIPT_DIR/state/policy-applied.yaml" l1="" v k
+    if [[ -d "$d" && ! -x "$d" ]]; then STATUS_POLICY="unreadable (state/)"; return 0; fi
+    if [[ ! -e "$f" ]]; then STATUS_POLICY="none applied on this host"; return 0; fi
+    if ! { IFS= read -r l1 || [[ -n "$l1" ]]; } <"$f" 2>/dev/null; then STATUS_POLICY="unreadable"; return 0; fi
+    if [[ "$l1" == "# medcea-applied:"* && "$l1" =~ [[:space:]]version=([^[:space:]]+) ]]; then
+        v="${BASH_REMATCH[1]}"
+        [[ "$l1" =~ [[:space:]]kind=([^[:space:]]+) ]] && k="${BASH_REMATCH[1]}" || k="?"
+        STATUS_POLICY="version=$v kind=$k"
+    else
+        STATUS_POLICY="unreadable (unexpected first line)"
+    fi
+}
+
+status_lock() {   # → STATUS_LOCK: held (by whom) or free, from /proc/locks; the file names the taker
+    local lf="$SCRIPT_DIR/.medcea.lock" lfp pid="" rest="" cmd fd t named=false
+    lfp="$(cd "$SCRIPT_DIR" && pwd -P)/.medcea.lock"
+    STATUS_LOCK="free"
+    [[ -e "$lf" ]] || return 0
+    status_flock "$lf"
+    [[ "$STATUS_FLOCK" == free ]] && return 0       # a PID in the file may be reused: it says nothing
+    if [[ -r "$lf" ]]; then { IFS=$'\t' read -r pid rest || true; } <"$lf" 2>/dev/null; fi
+    if [[ "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]]; then
+        cmd="${rest#*, terminal *: }"
+        tui_cut "$cmd" 60; cmd="$TUI_CUT"
+        if [[ -r "/proc/$pid/fd" && -x "/proc/$pid/fd" ]]; then
+            for fd in /proc/"$pid"/fd/*; do
+                t="$(readlink -- "$fd" 2>/dev/null)" || continue
+                [[ "$t" == "$lf" || "$t" == "$lfp" ]] && { named=true; break; }
+            done
+        elif [[ "$STATUS_FLOCK" == held ]]; then
+            STATUS_LOCK="held: its last taker, pid $pid ($cmd), is another user's process"; return 0
+        else
+            STATUS_LOCK="unknown: its last taker, pid $pid ($cmd), is another user's process"; return 0
+        fi
+    fi
+    if $named; then
+        STATUS_LOCK="held by $cmd (pid $pid)"
+    elif [[ "$STATUS_FLOCK" == held ]]; then
+        STATUS_LOCK="held, not by the run its file names (ended): a process it left holds it (fuser -v .medcea.lock)"
+    fi                                                # /proc/locks unreadable and nobody named: free
+}
+
+status_flock() {   # status_flock FILE → STATUS_FLOCK: held | free (from /proc/locks) | unknown
+    local ino l
+    local -a f
+    STATUS_FLOCK=unknown
+    [[ -r /proc/locks ]] || return 0
+    ino="$(stat -L -c %i -- "$1" 2>/dev/null)" || return 0
+    # A line names the file MAJOR:MINOR:INODE. Compared by inode only: btrfs shows another
+    # device number than stat does; another flocked file with the same inode number on
+    # another filesystem would read "held", never "free".
+    STATUS_FLOCK=free
+    while IFS= read -r l; do
+        read -ra f <<<"$l"
+        [[ "${f[1]}" == "->" ]] && continue                # a waiter, not a holder
+        [[ "${f[1]}" == FLOCK && "${f[5]##*:}" == "$ino" ]] && { STATUS_FLOCK=held; return 0; }
+    done </proc/locks 2>/dev/null
+}
+
+status_header() {   # → TUI_HEADER (the lines), TUI_BACKTITLE
+    local host kern
+    host="$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname 2>/dev/null)"; host="${host:-unknown host}"
+    kern="$(uname -r 2>/dev/null)"; kern="${kern:-unknown}"
+    status_git; status_health; status_policy; status_lock
+    TUI_HEADER="Host:    $host    Kernel: $kern"$'\n'
+    TUI_HEADER+="Git:     $STATUS_GIT"$'\n'
+    TUI_HEADER+="Health:  $STATUS_HEALTH"$'\n'
+    TUI_HEADER+="Policy:  $STATUS_POLICY"$'\n'
+    TUI_HEADER+="Lock:    $STATUS_LOCK"
+    $DRY_RUN && TUI_HEADER+=$'\n'"DRY RUN: nothing is run and config.env is not changed."
+    TUI_BACKTITLE="MedCEA  |  $host  |  $kern${STATUS_COMMIT:+  |  $STATUS_COMMIT}"
+}
+
+tui_choose && TUI=true
+
+# ── Answers ──────────────────────────────────────────────────────────────────
+# Every helper leaves its result in a global (ANSWER, PICK, LIST, COMPS) instead of
+# printf -v into a caller's name, which a helper's own local of the same name would
+# swallow (CLAUDE.md). End of input dies: a re-asking loop on a closed stdin would spin.
+
+# A value spliced in as a positional argument never starts with '-': units.sh (and
+# flash-device.sh) would read it as an option (a "unit code" --bootstrap would skip the
+# guide's typed-yes guard).
+UNIT_RE='^[A-Za-z0-9][A-Za-z0-9_-]*$'              # apps/iam/units.sh, no leading -
+UNIT_HINT="a unit code is letters, digits, _ and -, starting with a letter or digit"
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+USER_RE='^[A-Za-z0-9][A-Za-z0-9._@+-]*$'            # a Keycloak username, no spaces, no leading -
+USER_HINT="letters, digits and . _ @ + -, starting with a letter or digit"
+NS_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'             # a Kubernetes namespace
+POD_RE='^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+DB_RE='^[A-Za-z_][A-Za-z0-9_]*$'
+INT_RE='^[1-9][0-9]{0,4}$'
+IPV4_RE='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+STAMP_RE='^[0-9]{8}-[0-9]{6}Z$'                    # a backup folder (apps/backup), no leading -
+BY_USER=""                                          # --by, remembered for the session
+
+ask() {   # ask PROMPT [DEFAULT] → ANSWER (trimmed; DEFAULT when empty; "" and no default once ASK_CANCELLED)
+    local prompt="$1" def="${2-}"
+    if $TUI; then
+        tui_input "$prompt" "$def"            # Cancel and Esc leave the action (ASK_CANCELLED)
+        $ASK_CANCELLED && { ANSWER=""; return 0; }   # never the default
+    else
+        if [[ -n "$def" ]]; then printf '%s [%s]: ' "$prompt" "$def"; else printf '%s: ' "$prompt"; fi
+        if ! IFS= read -r ANSWER; then
+            echo
+            die 1 "input ended (EOF); leaving medcea.sh"
+        fi
+    fi
+    ANSWER="${ANSWER%$'\r'}"
+    ANSWER="${ANSWER#"${ANSWER%%[![:space:]]*}"}"
+    ANSWER="${ANSWER%"${ANSWER##*[![:space:]]}"}"
+    [[ -z "$ANSWER" && -n "$def" ]] && ANSWER="$def"
+    return 0
+}
+
+ask_match() {   # ask_match PROMPT REGEX HINT [DEFAULT] [optional] → ANSWER ("" if optional and empty)
+    local prompt="$1" re="$2" hint="$3" def="${4-}" optional="${5-}"
+    while :; do
+        ask "$prompt" "$def"
+        $ASK_CANCELLED && return 0
+        [[ -z "$ANSWER" && -n "$optional" ]] && return 0
+        [[ "$ANSWER" =~ $re ]] && return 0
+        warn "'$ANSWER': $hint"
+    done
+}
+
+ask_text() {   # ask_text PROMPT → ANSWER: free text, "" allowed, no control characters
+    while :; do
+        ask "$1"
+        $ASK_CANCELLED && return 0
+        [[ "$ANSWER" != *[[:cntrl:]]* ]] && return 0
+        warn "no control characters, please"
+    done
+}
+
+ask_yn() {   # ask_yn PROMPT y|n → status 0 for yes
+    local q="$1" d="$2" hint="y/N"
+    if $TUI; then tui_yesno "$q" "$d"; return; fi
+    [[ "$d" == y ]] && hint="Y/n"
+    while :; do
+        ask "$q [$hint]"
+        case "${ANSWER,,}" in
+            "")     [[ "$d" == y ]]; return ;;
+            y|yes)  return 0 ;;
+            n|no)   return 1 ;;
+            *)      warn "answer y or n" ;;
+        esac
+    done
+}
+
+ask_list() {   # ask_list PROMPT REGEX HINT min|opt → LIST (words, duplicates kept out)
+    local prompt="$1" re="$2" hint="$3" need="$4" w ok
+    local -a words
+    while :; do
+        ask "$prompt"
+        LIST=(); ok=1
+        $ASK_CANCELLED && return 0
+        read -ra words <<<"$ANSWER"
+        for w in "${words[@]}"; do
+            if [[ "$w" =~ $re ]]; then
+                in_list "$w" "${LIST[@]}" || LIST+=("$w")
+            else
+                warn "'$w': $hint"; ok=0
+            fi
+        done
+        if (( ok )) && [[ "$need" == min && ${#LIST[@]} -eq 0 ]]; then
+            warn "at least one, please"; ok=0
+        fi
+        (( ok )) && return 0
+    done
+}
+
+in_list() { local x="$1" y; shift; for y in "$@"; do [[ "$x" == "$y" ]] && return 0; done; return 1; }
+
+menu() {   # menu TITLE "label|purpose"... → PICK (1..N, or b)
+    local title="$1"; shift
+    if $TUI; then tui_menu "$title" "$@"; return 0; fi
+    local -a items=("$@")
+    local n=${#items[@]} i label purpose
+    echo
+    echo -e "${BOLD}${title}${NC}"
+    for (( i = 0; i < n; i++ )); do
+        label="${items[i]%%|*}"; purpose="${items[i]#*|}"
+        printf '  %2d) %s\n' $(( i + 1 )) "$label"
+        [[ "$purpose" != "${items[i]}" && -n "$purpose" ]] && printf '      %s\n' "$purpose"
+    done
+    echo "   b) back    q) quit"
+    while :; do
+        ask "Choice"
+        case "${ANSWER,,}" in
+            q|quit) bye ;;
+            b|back) PICK=b; return 0 ;;
+        esac
+        if [[ "$ANSWER" =~ ^[0-9]{1,3}$ ]] && (( 10#$ANSWER >= 1 && 10#$ANSWER <= n )); then
+            PICK=$(( 10#$ANSWER )); return 0
+        fi
+        warn "not a choice: '$ANSWER' — type a number from 1 to $n, b or q"
+    done
+}
+
+ask_by() {   # the --by username: your own Keycloak account, remembered for the session
+    echo "  --by is YOUR Keycloak username: recorded as the decision's maker, so you cannot confirm it yourself."
+    ask_match "Your Keycloak username (--by)" "$USER_RE" "$USER_HINT" "$BY_USER"
+    $ASK_CANCELLED || BY_USER="$ANSWER"
+}
+
+pick_components() {   # pick_components deploy|uninstall → COMPS (empty = all)
+    local kind="$1" f c w i ok
+    local -a avail=() words
+    for f in apps/*/"$kind".sh; do
+        [[ -f "$f" ]] || continue
+        c="${f#apps/}"; avail+=("${c%%/*}")
+    done
+    echo "  Components with apps/<name>/$kind.sh:"
+    for (( i = 0; i < ${#avail[@]}; i++ )); do printf '    %2d) %s\n' $(( i + 1 )) "${avail[i]}"; done
+    while :; do
+        ask "Names or numbers, separated by spaces (Enter = all)"
+        COMPS=(); ok=1
+        $ASK_CANCELLED && return 0          # not "all": the action is left
+        [[ -z "$ANSWER" ]] && return 0
+        read -ra words <<<"$ANSWER"
+        for w in "${words[@]}"; do
+            if [[ "$w" =~ ^[0-9]{1,3}$ ]] && (( 10#$w >= 1 && 10#$w <= ${#avail[@]} )); then w="${avail[10#$w - 1]}"; fi
+            if in_list "$w" "${avail[@]}"; then
+                in_list "$w" "${COMPS[@]}" || COMPS+=("$w")
+            else
+                warn "unknown component '$w' (no apps/$w/$kind.sh)"; ok=0
+            fi
+        done
+        (( ok )) && return 0
+    done
+}
+
+pick_one_component() {   # pick_one_component deploy|uninstall → ANSWER (name) or status 1 for back
+    local kind="$1" f c
+    local -a avail=() items=()
+    for f in apps/*/"$kind".sh; do
+        [[ -f "$f" ]] || continue
+        c="${f#apps/}"; c="${c%%/*}"; avail+=("$c"); items+=("$c|$(component_purpose "$c")")
+    done
+    menu "Which component?" "${items[@]}"
+    [[ "$PICK" == b ]] && return 1
+    ANSWER="${avail[PICK - 1]}"
+}
+
+component_purpose() {
+    case "$1" in
+        access)        echo "Access requests and the User Manager" ;;
+        backup)        echo "Nightly backups of the databases and volumes into BACKUP_DIR" ;;
+        database)      echo "medcea_db: schema, migrations, roles, grants, the IAM_DB_ROLES bundle" ;;
+        edge-wizard)   echo "Device onboarding wizard (host service) at the onboard address" ;;
+        frontend)      echo "System Configuration UI, config-api (PostgREST) and Database Management" ;;
+        iam)           echo "Policy check, version 1 of the policy (once), and iam-api: the MQTT Explorer's personal credentials (:8085)" ;;
+        monitor)       echo "Run Monitor dashboard" ;;
+        mqtt-explorer) echo "Browser MQTT Explorer" ;;
+        node-red)      echo "Node-RED palette packages and platform flows" ;;
+        report)        echo "Grafana dashboards" ;;
+        scheduler)     echo "Recipe Schedule Manager" ;;
+        superset)      echo "Superset (data analysis), once the applied access policy gives roles a setting" ;;
+        *)             echo "" ;;
+    esac
+}
+
+# ── config.env, read without sourcing it ─────────────────────────────────────
+# Sourcing would run its expressions (tailscale ip …) and put every password in this
+# shell; the guide only needs a few literal values.
+
+cfg_check_one() {   # cfg_check_one KEY [quiet] → CFG_LINE, CFG_VAL; status 1 (with a reason) unless exactly one active line
+    local key="$1" quiet="${2-}" raw
+    local -a hits
+    CFG_LINE=""; CFG_VAL=""
+    if [[ ! -f "$CFG" ]]; then
+        [[ -n "$quiet" ]] || warn "$CFG not found: install first (./install.sh), which creates it"
+        return 1
+    fi
+    mapfile -t hits < <(grep -nE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$CFG")
+    if (( ${#hits[@]} == 0 )); then
+        [[ -n "$quiet" ]] || warn "$CFG has no active $key= line. Copy it from config.env.example ($(grep -E "^${key}=" config.env.example 2>/dev/null || echo "$key=\"false\"")), then come back."
+        return 1
+    fi
+    if (( ${#hits[@]} > 1 )); then
+        local lines="" h
+        for h in "${hits[@]}"; do lines+="${h%%:*} "; done
+        [[ -n "$quiet" ]] || warn "$key is set on ${#hits[@]} active lines of $CFG (lines ${lines% }). The last one wins when a script sources it, so editing one could leave the other in force. Keep one line (comment out the others), then come back."
+        return 1
+    fi
+    CFG_LINE="${hits[0]%%:*}"
+    raw="${hits[0]#*:}"; raw="${raw#*"${key}"=}"
+    raw="${raw%%[[:space:]]#*}"                      # a trailing comment
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    raw="${raw#\"}"; raw="${raw%\"}"; raw="${raw#\'}"; raw="${raw%\'}"
+    CFG_VAL="$raw"
+    # The full-enforcement chain plans (and dry-runs) each recipe as if the switches
+    # before it were already set; config.env itself is never touched for that.
+    [[ -n "${CHAIN_SIM[$key]+x}" ]] && CFG_VAL="${CHAIN_SIM[$key]}"
+    return 0
+}
+declare -A CHAIN_SIM=()
+
+cfg_literal() {   # cfg_literal KEY DEFAULT → ANSWER: KEY's value, one $VAR resolved, else DEFAULT
+    local key="$1" def="$2" ref
+    if cfg_check_one "$key" quiet; then
+        ANSWER="$CFG_VAL"
+        if [[ "$ANSWER" =~ ^\$\{?([A-Z_][A-Z0-9_]*)\}?$ ]]; then
+            ref="${BASH_REMATCH[1]}"
+            if cfg_check_one "$ref" quiet && [[ "$CFG_VAL" != *'$'* ]]; then ANSWER="$CFG_VAL"; else ANSWER="$def"; fi
+        fi
+        [[ "$ANSWER" == *'$'* || -z "$ANSWER" ]] && ANSWER="$def"
+    else
+        ANSWER="$def"
+    fi
+}
+
+CFG_BACKUP=""
+cfg_set() {   # cfg_set KEY VALUE: replace that one line; first call backs config.env up
+    local key="$1" val="$2" line prefix newline tmp
+    cfg_check_one "$key" || return 1
+    line="$(sed -n "${CFG_LINE}p" "$CFG")"
+    prefix="${line%%"${key}"=*}"                      # keeps leading space or "export "
+    newline="${prefix}${key}=\"${val}\""
+    if [[ -z "$CFG_BACKUP" ]]; then
+        local ts n=1
+        ts="$(date +%Y%m%d-%H%M%S)"
+        CFG_BACKUP="${CFG}.guide-${ts}.bak"
+        # A chain of recipes makes one backup per switch, possibly within one second.
+        while [[ -e "$CFG_BACKUP" ]]; do CFG_BACKUP="${CFG}.guide-${ts}-$(( n++ )).bak"; done
+        cp -p "$CFG" "$CFG_BACKUP" || { warn "could not back up $CFG"; CFG_BACKUP=""; return 1; }
+        chmod 600 "$CFG_BACKUP"
+        echo "  Backup: $CFG_BACKUP"
+    fi
+    tmp="$(mktemp "${CFG}.guide.XXXXXX")" || return 1
+    if NEWLINE="$newline" awk -v n="$CFG_LINE" 'NR == n { print ENVIRON["NEWLINE"]; next } { print }' "$CFG" >"$tmp" \
+       && cat "$tmp" >"$CFG"; then                    # cat keeps the file's mode and owner
+        rm -f "$tmp"
+    else
+        rm -f "$tmp"; warn "could not write $CFG"; return 1
+    fi
+    # -U0: only the changed line, never its neighbours (they may be passwords)
+    diff -U0 "$CFG_BACKUP" "$CFG" | sed '1,2d; s/^/    /'
+    return 0
+}
+
+# ── The deploy lock, held for a whole switch recipe ──────────────────────────
+# A recipe edits config.env and then deploys; a deploy already running elsewhere would
+# read the new value halfway through (each apps/<c>/deploy.sh sources config.env), and
+# configure.sh would write back what it read before. So the recipe takes the lock before
+# its first step, as every script that changes config.env does, and exports
+# MEDCEA_LOCK_HELD so its steps skip their own (infra/lib-lock.sh). Not medcea_lock
+# itself: that exits on refusal, and the guide reports and goes on. The guide starts no
+# background job while it holds the lock (a job would inherit fd 9), but for whiptail,
+# which tui_dialog starts with fd 9 closed.
+
+GUIDE_LOCKED=false
+guide_lock() {   # guide_lock → status 0 holding the lock; 1 with the reason printed
+    [[ -n "${MEDCEA_LOCK_HELD:-}" ]] && return 0          # a parent holds it for us
+    if ! source infra/lib-lock.sh 2>/dev/null || [[ -z "${MEDCEA_LOCK_FILE:-}" ]]; then
+        warn "cannot read infra/lib-lock.sh: run ./medcea.sh from a complete MedCEA tree"
+        return 1
+    fi
+    exec 9>>"$MEDCEA_LOCK_FILE" || { warn "cannot open $MEDCEA_LOCK_FILE"; return 1; }
+    if ! flock -n 9; then
+        local pid holder who
+        IFS=$'\t' read -r pid holder <"$MEDCEA_LOCK_FILE" 2>/dev/null
+        exec 9>&-
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            who="PID $pid, $holder"
+        else   # the file names a run that has ended: a child it left, or a run under sudo
+            who="its holder is not named; find it with: fuser -v $MEDCEA_LOCK_FILE (sudo for a run under sudo)"
+        fi
+        warn "another MedCEA deploy is running ($who). Wait for it to finish, then come back."
+        return 1
+    fi
+    local term
+    term="$(tty 2>/dev/null)" || term="none"
+    printf '%s\tstarted %s, terminal %s: %s\n' "$$" "$(date '+%F %T')" "${term#/dev/}" "./medcea.sh (switch recipe)" >"$MEDCEA_LOCK_FILE"
+    export MEDCEA_LOCK_HELD=$$
+    GUIDE_LOCKED=true
+}
+guide_unlock() {
+    $GUIDE_LOCKED || return 0
+    exec 9>&-
+    unset MEDCEA_LOCK_HELD
+    GUIDE_LOCKED=false
+}
+
+# ── Planning and running one command ─────────────────────────────────────────
+# Each action sets these, then calls plan_run:
+#   CMD=(…)      the command, one word per element (run as an array: no eval); an
+#                element that is exactly && separates commands run one after the other,
+#                each only when the one before it exited 0
+#   PIPE=(…)     optional: CMD's output is piped into it (read-only formatting only)
+#   EFFECT       what it changes, in one line
+#   LOCK         yes | no — takes the deploy lock (infra/lib-lock.sh)
+#   SUDO         no | mk8s (sudo only without the microk8s group) | free text
+#   LEVEL        read ([Y/n]) | change ([y/N]) | destroy (type yes)
+#   CONFIRM_WORD with LEVEL=destroy: a second word to type after yes (the project name
+#                for --purge-data, as deploy-apps.sh asks it)
+#   NOTES=(…)    extra lines shown before the confirmation
+#   CFG_NEEDED   yes when the command refuses without config.env
+#   HOLD_LOCK    yes: the guide takes the deploy lock itself and holds it for every
+#                command of the && chain (MEDCEA_LOCK_HELD exported, so each skips its
+#                own), as a switch recipe does: nothing else deploys between them
+
+reset_plan() { CMD=(); PIPE=(); EFFECT=""; LOCK=no; SUDO=no; LEVEL=read; CONFIRM_WORD=""; NOTES=(); CFG_NEEDED=no; HOLD_LOCK=no; }
+PLAN_GO=no   # plan_run: yes once the person confirmed (a two-stage entry reads it, with LAST_RC)
+
+qwords() {   # qwords WORD… → the words as they would be typed (printf %q), space-separated
+    local out
+    out="$(printf '%q ' "$@")"
+    printf '%s' "${out% }"
+}
+
+cmd_text() {   # CMD (&& CMD…) (| PIPE) as it would be typed
+    local out="" w
+    local -a seg=()
+    for w in "${CMD[@]}" "&&"; do
+        if [[ "$w" == "&&" ]]; then
+            [[ -n "$out" ]] && out+=" && "
+            out+="$(qwords "${seg[@]}")"; seg=()
+        else
+            seg+=("$w")
+        fi
+    done
+    (( ${#PIPE[@]} )) && out+=" | $(qwords "${PIPE[@]}")"
+    printf '%s' "$out"
+}
+
+sudo_text() {
+    case "$SUDO" in
+        no)   echo "no" ;;
+        mk8s) if id -nG 2>/dev/null | grep -qw microk8s; then
+                  echo "no (this session is in group microk8s)"
+              else
+                  echo "yes: this session is not in group microk8s, so its microk8s calls go through sudo (it asks for your password)"
+              fi ;;
+        *)    echo "$SUDO" ;;
+    esac
+}
+
+confirm_level() {   # confirm_level → status 0 to go ahead
+    if $TUI; then tui_confirm; return; fi
+    case "$LEVEL" in
+        read)    ask_yn "Run it?" y ;;
+        change)  ask_yn "Run it?" n ;;
+        destroy) echo -e "${RED}${BOLD}This is destructive.${NC}"
+                 ask "Type yes to go ahead (anything else cancels)"
+                 [[ "$ANSWER" == yes ]] || return 1
+                 [[ -z "$CONFIRM_WORD" ]] && return 0
+                 ask "Type the project name ('$CONFIRM_WORD') to drop the data (anything else cancels)"
+                 [[ "$ANSWER" == "$CONFIRM_WORD" ]] ;;
+    esac
+}
+
+LAST_RC=0
+run_array() {   # runs CMD (&& CMD…) (| PIPE) with this terminal; LAST_RC
+    RUN_RECORDED=false
+    if $TUI; then
+        # On the real terminal, as in the plain mode: the screen cleared, what the guide
+        # printed since the last dialog, then the command with fd 1/2 = the terminal
+        # (under script when it is installed: its output recorded for the end dialog).
+        tui_terminal
+        if $TUI_SCRIPT; then run_array_script; else run_array_here >&7 2>&8; fi
+        TUI_DIRTY=true
+        return 0
+    fi
+    run_array_here
+}
+run_array_script() {   # CMD under util-linux script → LAST_RC; TUI_RUNS, TUI_TAIL (memory), TUI_SECRET
+    local ts="$TUI_DIR/run.typescript" line f newest="" result
+    local -A seen=()
+    for f in logs/*.log; do [[ -f "$f" ]] && seen["$f"]=1; done
+    line="$(cmd_text)"
+    echo -e "${CYAN}\$ ${line}${NC}" >&7
+    rm -f -- "$ts"; ( umask 077; : >"$ts" ) || { run_array_here >&7 2>&8; return 0; }
+    # bash -c runs the command text exactly as shown (printf %q words, && and |); pipefail
+    # keeps the exit code of a failing command before the pipe, as run_array_here does.
+    # script inherits this shell's environment and fds but 7/8 (as a step does today: a
+    # recipe's MEDCEA_LOCK_HELD and fd 9, the lock, reach the command); -e: the command's
+    # exit code, 128+n after a signal. Its stdin is the terminal (raw while it runs, so
+    # Ctrl-C reaches only the command, through script's pty).
+    if (( ${#PIPE[@]} )); then
+        SHELL=/bin/bash script -q -e -f -c "set -o pipefail; $line" "$ts" >&7 2>&8 7>&- 8>&-
+    else
+        SHELL=/bin/bash script -q -e -f -c "$line" "$ts" >&7 2>&8 7>&- 8>&-
+    fi
+    LAST_RC=$?
+    RUN_RECORDED=true
+    if (( LAST_RC == 0 )); then echo -e "${GREEN}Finished: exit code 0.${NC}" >&7; result="Finished: exit code 0"
+    else echo -e "${RED}Failed: exit code $LAST_RC.${NC}" >&7; result="Failed: exit code $LAST_RC"; fi
+    # The log the command wrote: the newest logs/*.log that was not there before it ran
+    # (never read here).
+    for f in logs/*.log; do
+        [[ -f "$f" && -z "${seen[$f]+x}" ]] || continue
+        if [[ -z "$newest" || "$f" -nt "$newest" ]]; then newest="$f"; fi
+    done
+    result="\$ $line  →  $result"
+    [[ -n "$newest" ]] && result+=$'\n'"  Log: $newest"
+    TUI_RUNS+=("$result")
+    TUI_TAIL_CMD="$line"; TUI_TAIL=""
+    if grep -qF ' CREDENTIALS — ' -- "$ts" 2>/dev/null; then
+        TUI_SECRET=true                       # infra/lib-credentials.sh's box: never read further
+    else
+        tui_tail "$ts"
+    fi
+    rm -f -- "$ts"
+}
+tui_tail() {   # tui_tail FILE → TUI_TAIL: its last ~300 lines as shown, escapes stripped, each cut at 300 characters
+    if [[ -n "$TUI_LOCALE" ]]; then local LC_ALL="$TUI_LOCALE"; fi
+    local raw l out="" nl=$'\n'
+    local -a lines=()
+    # script's own first and last lines; a line's last \r wins (progress lines), \r\n is
+    # the pty's newline; OSC (titles, links) and CSI/other escapes go; a backspace takes
+    # the character before it; other control characters but tab go.
+    raw="$(sed -e '1{/^Script started on /d}' -- "$1" 2>/dev/null | tail -n 400 \
+        | sed -E -e '${/^Script done on /d}' -e 's/\r+$//' -e 's/.*\r//' \
+            -e 's#\x1b\][^\x07\x1b]*(\x07|\x1b\\)?##g' \
+            -e 's#\x1b\[[0-?]*[ -/]*[@-~]##g' \
+            -e 's#\x1b[ -/]*[0-~]##g' \
+            -e ':b' -e 's#[^\x08]\x08##' -e 'tb' -e 's#\x08##g' \
+        | tr -d '\000-\010\013-\037\177')"
+    mapfile -t lines <<<"$raw"
+    (( ${#lines[@]} > 300 )) && lines=("${lines[@]: -300}")
+    for l in "${lines[@]}"; do
+        (( ${#l} > 300 )) && l="${l:0:299}…"
+        out+="$l$nl"
+    done
+    out="${out#"${out%%[!$nl]*}"}"; out="${out%"${out##*[!$nl]}"}"     # blank lines at both ends
+    # whiptail takes it as one argument (at most 128 KiB): the oldest lines go first
+    while (( $(LC_ALL=C; echo "${#out}") > 100000 )) && [[ "$out" == *"$nl"* ]]; do out="${out#*"$nl"}"; done
+    TUI_TAIL="$out"
+}
+run_array_here() {
+    local w
+    local -a seg=()
+    echo -e "${CYAN}\$ $(cmd_text)${NC}"
+    if (( ${#PIPE[@]} )); then
+        "${CMD[@]}" | "${PIPE[@]}"; LAST_RC=$?
+    else
+        LAST_RC=0
+        for w in "${CMD[@]}" "&&"; do
+            if [[ "$w" != "&&" ]]; then seg+=("$w"); continue; fi
+            "${seg[@]}"; LAST_RC=$?; seg=()
+            (( LAST_RC == 0 )) || break
+        done
+    fi
+    if (( LAST_RC == 0 )); then echo -e "${GREEN}Finished: exit code 0.${NC}"
+    else echo -e "${RED}Failed: exit code $LAST_RC.${NC}"; fi
+}
+
+plan_run() {
+    local n kind
+    if $ASK_CANCELLED; then PLAN_GO=no; return 0; fi    # a question was cancelled: nothing runs
+    case "$LEVEL" in read) kind="read-only" ;; change) kind="changes the platform" ;; *) kind="DESTRUCTIVE" ;; esac
+    echo
+    echo -e "${BOLD}Command${NC}"
+    echo "  $(cmd_text)"
+    echo "  Kind:        $kind"
+    echo "  Changes:     $EFFECT"
+    case "$LOCK" in
+        yes) echo "  Deploy lock: takes it (refused while another deploy runs)" ;;
+        no)  echo "  Deploy lock: no" ;;
+        *)   echo "  Deploy lock: $LOCK" ;;
+    esac
+    echo "  sudo:        $(sudo_text)"
+    for n in "${NOTES[@]}"; do echo "  - $n"; done
+    [[ "$CFG_NEEDED" == yes && ! -f "$CFG" ]] && warn "this command needs config.env, which does not exist yet: run ./install.sh first"
+    PLAN_GO=no
+    if ! confirm_level; then echo "Cancelled; nothing was run."; return 0; fi
+    PLAN_GO=yes
+    if $DRY_RUN; then
+        echo "[dry run] not executed: $(cmd_text)"
+        $TUI && tui_msgbox "Dry run"
+        return 0
+    fi
+    if [[ "$HOLD_LOCK" == yes ]]; then
+        guide_lock || { echo "Nothing was run."; return 0; }
+        run_array
+        guide_unlock
+        return 0
+    fi
+    run_array
+}
+
+# ── The catalogue ────────────────────────────────────────────────────────────
+# To add a command: write an a_* function that asks its values (ask, ask_match, ask_yn,
+# ask_list, pick_components), fills the plan fields above and ends with plan_run; then
+# add one "function|label|one-line purpose" entry to its area's array (AREA_*). A
+# function that returns 10 means "back" (no "back to the menu / quit" question after).
+# A config.env switch: one case per direction in recipe() and an entry calling
+# switch_flow KEY in AREA_SWITCHES.
+
+# ── Install and uninstall ──
+a_install() {
+    CMD=(./install.sh)
+    ask_yn "Review every setting in config.env first (--configure)?" n && CMD+=(--configure)
+    EFFECT="cluster and config.env (asks only empty required values); the credentials box comes last"
+    LOCK=yes; LEVEL=change; SUDO="maybe: a first install, MicroK8s and the /etc/hosts block ask for your sudo password"
+    NOTES=("Runs ./deploy-infra.sh, then ./deploy-apps.sh --all, then ./health-check.sh; safe to re-run.")
+    plan_run
+}
+a_install_infra() {
+    CMD=(./install.sh --infra-only)
+    ask_yn "Review every setting in config.env first (--configure)?" n && CMD+=(--configure)
+    EFFECT="cluster and config.env (missing values only)"
+    LOCK=yes; LEVEL=change; SUDO="maybe: MicroK8s and the /etc/hosts block ask for your sudo password"
+    NOTES=("Afterwards run the applications: ./install.sh --apps-only")
+    plan_run
+}
+a_install_apps() {
+    CMD=(./install.sh --apps-only)
+    EFFECT="cluster and database (every application component)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_uninstall_apps() {
+    pick_components uninstall
+    CMD=(./install.sh --uninstall-apps "${COMPS[@]}")
+    EFFECT="removes ${COMPS[*]:-every application component}; the infrastructure keeps running"
+    if (( ${#COMPS[@]} == 0 )) || in_list database "${COMPS[@]}"; then
+        if ask_yn "Also DROP the database medcea_db with ALL its data (--purge-data)?" n; then
+            CMD+=(--purge-data); EFFECT+="; DROPS medcea_db, its roles and Secrets (all data)"
+        fi
+    else
+        echo "  (--purge-data is offered only when database is among the components)"
+    fi
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("install.sh then asks you to type 'apps' (and the project name with --purge-data)."
+           "Reinstall: ./install.sh --apps-only")
+    plan_run
+}
+a_uninstall_infra() {
+    CMD=(./install.sh --uninstall-infra)
+    EFFECT="removes every platform service, every application and ALL data (the whole namespace, PVCs included); keeps MicroK8s, config.env and .ca/"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s
+    NOTES=("install.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Reinstall: ./install.sh")
+    plan_run
+}
+a_uninstall_all() {
+    CMD=(./install.sh --uninstall-all)
+    EFFECT="removes MicroK8s and all cluster data, ~/.kube, the /etc/hosts block, the wizard service, edge/.venv, logs/ and credentials files; asks about .ca/ and config.env (with medcea.sh's backups of it)"
+    LOCK=yes; LEVEL=destroy; SUDO="yes (snap remove, /etc/hosts)"
+    NOTES=("install.sh then asks you to type 'uninstall'. edge/provisioned/ and edge/firmware/ are kept." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
+    plan_run
+}
+
+# ── Infrastructure ──
+a_infra_deploy() {
+    CMD=(./deploy-infra.sh)
+    EFFECT="cluster (Postgres, Keycloak, Mosquitto, Grafana, Node-RED, proxies, IAM ConfigMaps and NetworkPolicies, workbench), config.env (missing values, generated secrets), /etc/hosts"
+    LOCK=yes; LEVEL=change; SUDO="maybe: MicroK8s, containerd registry login and the /etc/hosts block ask for your sudo password"
+    NOTES=("Run it after pulling IAM changes and after rotating or removing a realm key."
+           "Follow with the applications: ./deploy-apps.sh --all")
+    plan_run
+}
+a_infra_configure() {
+    CMD=(./deploy-infra.sh --configure)
+    EFFECT="config.env (every setting asked, current values as defaults), then the cluster"
+    LOCK=yes; LEVEL=change; SUDO="maybe: as ./deploy-infra.sh"
+    plan_run
+}
+a_configure_only() {
+    CMD=(./infra/configure.sh)
+    ask_yn "Only the required values that are still empty (--missing)?" n && CMD+=(--missing)
+    EFFECT="config.env only (generates missing database passwords; may offer apt-get for host prerequisites); deploys nothing"
+    LOCK=yes; LEVEL=change; SUDO="maybe: only to install missing host packages"
+    NOTES=("Enter keeps a line as it is, expressions included. Passwords: letters, digits and . _ ~ - only.")
+    plan_run
+}
+a_workbench() {
+    CMD=(./infra/deploy-workbench.sh)
+    EFFECT="cluster (the JupyterHub Helm release, ConfigMap workbench-examples); keeps every home volume"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Needs WORKBENCH_SECRET in config.env (written by ./deploy-infra.sh)."
+           "Notebooks reach Keycloak and config-api (each person's own sign-in) only while IAM_POSTGREST_JWT and IAM_DB_ROLES are true. WORKBENCH_NOTEBOOK_REPO (OWNER/REPO) is the research repository the git guide names; WORKBENCH_IMAGE is pinned."
+           "Who may sign in, and who is hub administrator, come from the access policy (IAM_GATES=false: any realm account); a policy that does not compile stops the deploy and leaves the running hub as it is.")
+    plan_run
+}
+a_workbench_switch() { switch_flow WORKBENCH_ENABLED; }
+a_infra_reset() {
+    CMD=(./deploy-infra.sh --reset)
+    EFFECT="uninstalls every Helm release and deletes the namespace with ALL its data (PVCs: database, Keycloak users, Grafana, workbench homes); keeps MicroK8s"
+    if ask_yn "Also blank the generated secrets in config.env (--secrets)?" n; then
+        CMD+=(--secrets); EFFECT+="; blanks generated secrets in config.env"
+    fi
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s
+    NOTES=("deploy-infra.sh then asks you to type 'reset'." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first." "Afterwards both: ./deploy-infra.sh && ./deploy-apps.sh --all")
+    plan_run
+}
+a_infra_uninstall() {
+    CMD=(./deploy-infra.sh --uninstall)
+    EFFECT="removes MicroK8s (and Juju), all cluster data, ~/.kube and the /etc/hosts block; keeps config.env, .ca/, edge/.venv, logs"
+    LOCK=yes; LEVEL=destroy; SUDO="yes (snap remove, /etc/hosts)"
+    NOTES=("deploy-infra.sh then asks you to type 'yes'. Reinstalling is slow (images are pulled again)." "It deletes every AI workbench home (each person's notebooks; copied only by the nightly backup, if deployed): it lists them with their directories and how to keep them before it asks. Have people push to git first.")
+    plan_run
+}
+a_manual_publish() {
+    CMD=(./infra/publish-manual.sh)
+    EFFECT="ConfigMap portal-manual (the manual built from docs/manual/chapters now), then a restart of the portal; nothing else"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("After a change to the manual: it builds into a temporary file (the working tree is not touched) and refuses when docs/manual/build.py refuses."
+           "Everyone the portal admits reads it at https://<PORTAL_DOMAIN>/manual/ (the Platform manual card). ./deploy-infra.sh publishes it too."
+           "On an install whose portal predates the manual it only stores it (no restart) and says so: run ./deploy-infra.sh once to add the /manual/ route and the card."
+           "The health check's Platform manual WARNs while the portal serves an older build than the repository's.")
+    plan_run
+}
+a_infra_help() {
+    CMD=(./deploy-infra.sh --help)
+    EFFECT="nothing (prints the usage)"
+    plan_run
+}
+
+# ── Applications ──
+a_apps_menu() {
+    CMD=(./deploy-apps.sh)
+    EFFECT="cluster and database (the components you tick)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Its own menu: numbers toggle, a = all, n = none, Enter = confirm, q = quit.")
+    plan_run
+}
+a_apps_all() {
+    CMD=(./deploy-apps.sh --all)
+    EFFECT="cluster and database (every component, alphabetical order)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_apps_one() {
+    pick_one_component deploy || return 10
+    local c="$ANSWER"
+    CMD=("./apps/$c/deploy.sh")
+    EFFECT="$(component_purpose "$c")"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    case "$c" in
+        access)    NOTES=("Order: ./deploy-infra.sh first. Runs ./apps/database/deploy.sh itself when access_svc lacks its grants.") ;;
+        database)  NOTES=("Behaviour comes from config.env (IAM_DB_ROLES, IAM_DB_SERVICE_ROLES); restarts config-api when IAM_DB_ROLES changed.") ;;
+        frontend)  NOTES=("IAM_POSTGREST_JWT in config.env decides config-api's mode; a switch costs config-api up to ~15 s, by design.") ;;
+        scheduler) NOTES=("Refuses until the database deploy has created retire_schedule and start_run.") ;;
+        iam)       NOTES=("Checks the policy; while no policy version exists it bootstraps version 1 (apply.sh --bootstrap --by \$ADMIN_USER, or MEDCEA_POLICY_BOOTSTRAP_BY; Policy → Deploy IAM 4.2a asks it), and finishes an interrupted apply."
+                          "Then deploys iam-api on iam_svc (IAM_DB_SERVICE_ROLES=true; after ./apps/database/deploy.sh and ./apps/access/deploy.sh). Skipped with a warning until then while IAM_MQTT_PERSON=false.") ;;
+        edge-wizard) SUDO="no (a systemd user service); mk8s for the Ingress" ;;
+    esac
+    plan_run
+}
+a_apps_uninstall() {
+    pick_components uninstall
+    CMD=(./deploy-apps.sh --uninstall)
+    EFFECT="removes ${COMPS[*]:-every application component} (reverse alphabetical order); the infrastructure keeps running"
+    if (( ${#COMPS[@]} == 0 )) || in_list database "${COMPS[@]}"; then
+        if ask_yn "Also DROP the database medcea_db with ALL its data (--purge-data)?" n; then
+            CMD+=(--purge-data); EFFECT+="; DROPS medcea_db, its roles and Secrets (all data)"
+        fi
+    fi
+    CMD+=("${COMPS[@]}")
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("deploy-apps.sh then asks you to type 'apps' (and the project name with --purge-data).")
+    plan_run
+}
+a_apps_uninstall_one() {
+    pick_one_component uninstall || return 10
+    local c="$ANSWER"
+    CMD=("./apps/$c/uninstall.sh")
+    EFFECT="removes what ./apps/$c/deploy.sh created"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("No confirmation of its own: medcea.sh's is the only one.")
+    case "$c" in
+        database)
+            EFFECT="nothing without --purge-data (data kept)"
+            if ask_yn "DROP the database medcea_db, every platform role and the db-<role> Secrets (--purge-data)?" n; then
+                CMD+=(--purge-data); EFFECT="DROPS medcea_db, every platform database role and the db-<role> Secrets (all data)"
+                purge_word
+                NOTES+=("Warns, does not refuse, while config-api runs JWT: config-api will not connect until the database and frontend deploys run again.")
+            fi ;;
+        access)
+            if ask_yn "Also DROP schema iam (requests, decisions, histories) and role access_svc (--purge-data)?" n; then
+                CMD+=(--purge-data); EFFECT+="; DROPS schema iam and role access_svc"
+                purge_word
+                NOTES+=("Unit assignments in iam_policy.user_unit stay in effect without their decisions; waiting ones are lost. The next access deploy records survivors again as pending_qa.")
+            fi ;;
+        iam) EFFECT="removes iam-api (Service iam-mqttx); never the policy, its versions, its history, state/policy-applied.yaml or the credential tables"
+             NOTES+=("While IAM_MQTT_PERSON=true the MQTT Explorer then gets no credential: roll the switch back first.") ;;
+        superset) superset_uninstall_plan ;;
+    esac
+    plan_run
+}
+purge_word() {   # --purge-data: yes, then the project name, as deploy-apps.sh asks it
+    cfg_literal PROJECT_NAME medcea
+    CONFIRM_WORD="$ANSWER"
+    NOTES+=("--purge-data: after yes you type the project name ('$CONFIRM_WORD'), as ./deploy-apps.sh --uninstall asks it.")
+}
+a_apps_list() {
+    CMD=(./deploy-apps.sh --help)
+    EFFECT="nothing (prints the usage and the components found)"
+    plan_run
+}
+# Superset (stage C): deployed only while the applied access policy has its tool and gives
+# some role a setting, and IAM_DB_SERVICE_ROLES=true; otherwise its deploy says skipped
+# and exits 0 (and stops a running Superset).
+a_superset_deploy() {
+    CMD=(./apps/superset/deploy.sh "&&" ./health-check.sh)
+    EFFECT="cluster and database: database superset and role superset_meta (first time), Secret superset-secrets, ConfigMap superset-config, the init Job, Deployment superset, the portal card; then the health check (read-only)"
+    LOCK="the deploy takes its own; the health check none"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while the applied access policy has no Superset tool or gives no role a setting, under IAM_GATES=false, and while IAM_DB_SERVICE_ROLES is not true; a running Superset is then stopped (its database is kept)."
+           "Who may sign in, and as Alpha or Gamma, comes from the applied policy's analysis group (Policy → Superset stage C)."
+           "The first install pulls the image and waits for the init Job (up to ~20 minutes). Health: Superset roles must be OK.")
+    plan_run
+}
+a_superset_gate() {
+    CMD=(./apps/superset/deploy.sh --gate-only)
+    EFFECT="only Superset's role mapping, when it differs from the applied policy's compile (Secret superset-secrets, ConfigMap superset-config, then a restart); unchanged: nothing"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Prints one line: unchanged, re-rendered or not deployed. A policy that no longer gives any role a setting stops Superset and disables its card; the data is kept."
+           "./apps/iam/apply.sh runs it itself; Policy → Re-render the policy artefacts includes it.")
+    plan_run
+}
+superset_uninstall_plan() {   # Superset's uninstall: --purge-data asked, then yes and the project name
+    EFFECT="removes Superset (Deployment, init Job, Service, Ingress, Secret, ConfigMap) and disables its card; keeps database superset (dashboards, charts, saved queries, its users)"
+    NOTES+=("Never touches medcea_db, role svc_superset or the Keycloak client superset."
+           "The applied policy is not changed: the next ./deploy-apps.sh --all installs Superset again while it gives roles a setting.")
+    if ask_yn "Also DROP database superset and role superset_meta: every dashboard, chart, saved query and Superset user (--purge-data)?" n; then
+        CMD+=(--purge-data)
+        EFFECT="removes Superset and its card, then DROPS database superset and role superset_meta (every dashboard, chart, saved query and Superset user)"
+        purge_word
+    fi
+}
+a_superset_uninstall() {
+    CMD=(./apps/superset/uninstall.sh)
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    superset_uninstall_plan
+    NOTES+=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
+
+# ── Operators and units ──
+a_units_list() {
+    ask_match "One account only? Keycloak username (Enter = everyone)" "$USER_RE" "$USER_HINT" "" optional
+    CMD=(./apps/iam/units.sh list)
+    [[ -n "$ANSWER" ]] && CMD+=("$ANSWER")
+    EFFECT="nothing (lists units in effect and units waiting for qa)"
+    LOCK=yes; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Takes the deploy lock and port-forwards Keycloak on 18091.")
+    plan_run
+}
+units_tail() {   # --by, --reason; shared by assign and remove
+    ask_by
+    CMD+=(--by "$BY_USER")
+    ask_text "Reason to record (Enter = the default reason)"
+    [[ -n "$ANSWER" ]] && CMD+=(--reason "$ANSWER")
+}
+a_units_assign() {
+    local who
+    ask_match "Operator's Keycloak username" "$USER_RE" "$USER_HINT"; who="$ANSWER"
+    ask_list "Unit codes, separated by spaces (e.g. UNIT01 UNIT02; case does not matter)" "$UNIT_RE" "$UNIT_HINT" min
+    CMD=(./apps/iam/units.sh assign "$who" "${LIST[@]}")
+    units_tail
+    [[ "${BY_USER,,}" == "${who,,}" ]] && warn "--by is the account being changed: units.sh only warns, but nobody should propose their own widening"
+    EFFECT="database: one iam.account_decision per unit, waiting for qa; NOT in effect until a qa person other than you confirms it in the User Manager's Decisions tab"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    echo "  --bootstrap puts the units in effect at once, before any check. units.sh refuses it"
+    echo "  while another enabled qa person could confirm instead."
+    if ask_yn "Use --bootstrap (only when nobody else could ever confirm)?" n; then
+        CMD+=(--bootstrap); LEVEL=destroy
+        EFFECT="database: the units are IN EFFECT AT ONCE (iam_policy.user_unit); their decisions still wait for qa, and a refusal removes them"
+    fi
+    NOTES=("Needs ./apps/database/deploy.sh and ./apps/access/deploy.sh to have run.")
+    plan_run
+}
+a_units_remove() {
+    local who
+    ask_match "Keycloak username whose units go" "$USER_RE" "$USER_HINT"; who="$ANSWER"
+    ask_list "Unit codes to remove, separated by spaces" "$UNIT_RE" "$UNIT_HINT" min
+    CMD=(./apps/iam/units.sh remove "$who" "${LIST[@]}")
+    units_tail
+    EFFECT="database: the units go at once (a narrowing, reviewed later); one still waiting for qa is withdrawn instead"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Under IAM_DB_ROLES=true the operator stops seeing those units' telemetry and runs at once.")
+    plan_run
+}
+a_units_remove_sub() {
+    local sub
+    echo "  For an account Keycloak no longer has: './apps/iam/units.sh list' prints its id."
+    ask_match "Keycloak user id (uuid)" "$UUID_RE" "a uuid looks like 8-4-4-4-12 hex digits"; sub="${ANSWER,,}"
+    ask_list "Unit codes to remove, separated by spaces" "$UNIT_RE" "$UNIT_HINT" min
+    CMD=(./apps/iam/units.sh remove --sub "$sub" "${LIST[@]}")   # --sub before the codes
+    units_tail
+    EFFECT="database: the units go at once; one still waiting for qa is withdrawn"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+
+# ── IAM switches ──
+a_sw_gates()   { switch_flow IAM_GATES; }
+a_sw_netpol()  { switch_flow IAM_NETPOL; }
+a_sw_enforce() { switch_flow IAM_ENFORCE; }
+a_sw_jwt()     { switch_flow IAM_POSTGREST_JWT; }
+a_sw_svc()     { switch_flow IAM_DB_SERVICE_ROLES; }
+a_sw_dbroles() { switch_flow IAM_DB_ROLES; }
+a_sw_mqtt()    { switch_flow IAM_MQTT_PERSON; }
+a_rollback_27() {
+    # Shown, never run: it needs a 2.7 commit, a git revert and psql in the PostgreSQL pod.
+    local ns db
+    cfg_literal NAMESPACE medcea; ns="$ANSWER"
+    [[ "$ns" =~ $NS_RE ]] || ns="medcea"
+    cfg_literal POSTGRES_DB medcea_db; db="$ANSWER"
+    [[ "$db" =~ $DB_RE ]] || db="medcea_db"
+    echo
+    echo -e "${BOLD}IAM 2.7 rollback — the steps, in order (medcea.sh runs none of them)${NC}"
+    echo "  1. Narrow the User Manager to realm role admin:  IAM_GATES=false ./apps/access/deploy.sh"
+    echo "  2. git revert the 2.7 commits."
+    echo "  3. As postgres, once, in one transaction: apps/access/rollback-2.7.sql from the 2.7 tree"
+    echo "     (namespace and database from $CFG; the password is read inside the pod, as in the file's header):"
+    echo "       git show <2.7 commit>:apps/access/rollback-2.7.sql | microk8s kubectl exec -i -n $ns rdbms-postgresql-0 -- \\"
+    # shellcheck disable=SC2016  # $(cat …) and $POSTGRES_PASSWORD_FILE are for the pod's sh, printed literally
+    echo '         sh -c '\''PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" psql -X -1 -v ON_ERROR_STOP=1 -U postgres -d '"$db"' -f -'\'
+    echo "     It parks mail_settings decisions in schema iam_retired_27 and revokes the 2.7 privileges outside iam."
+    echo "  4. ./apps/access/deploy.sh   (the reverted one)"
+    echo "  5. ./deploy-infra.sh"
+    echo "  6. ./apps/database/deploy.sh"
+    echo "  See CLAUDE.md, 'apps/access/ account decisions (IAM 2.7)'."
+    return 0
+}
+
+# recipe KEY enable|rollback → PRE (checklist), STEPS ("set KEY VALUE" | "run word…"),
+# AFTER (notes), REFUSE (a reason not to start). Every switch's recipe lives here.
+dep_switch() {   # dep_switch KEY → DEP (true|false); status 1 with REFUSE set
+    # A switch another recipe's order depends on: exactly one active line, literally true
+    # or false. A duplicate or an expression is not read as "not true" (the order would
+    # then be wrong and the deploy refuse after config.env was already changed).
+    DEP=""
+    if ! cfg_check_one "$1"; then
+        REFUSE="this recipe's order depends on $1, which must be on exactly one active line of $CFG."
+        return 1
+    fi
+    case "$CFG_VAL" in
+        true|false) DEP="$CFG_VAL" ;;
+        *) REFUSE="this recipe's order depends on $1, which is '$CFG_VAL' on line $CFG_LINE of $CFG: write it as \"true\" or \"false\", then come back."
+           return 1 ;;
+    esac
+}
+
+# The AI workbench notebooks' hops to config-api and Keycloak follow IAM_POSTGREST_JWT and
+# IAM_DB_ROLES, and only ./infra/deploy-workbench.sh renders them (IAM 3.2b): the recipes
+# that change IAM_DB_ROLES run it — first on a rollback (the hop closes before anon gets
+# its grants back), last on an enable. Not while WORKBENCH_ENABLED is false: it would
+# install a workbench nobody asked for.
+workbench_on() {   # leaves CFG_LINE/CFG_VAL as the caller had them
+    local line="$CFG_LINE" val="$CFG_VAL" rc=0
+    cfg_check_one WORKBENCH_ENABLED quiet && [[ "$CFG_VAL" == false ]] && rc=1
+    CFG_LINE="$line"; CFG_VAL="$val"
+    return "$rc"
+}
+
+recipe() {
+    local key="$1" dir="$2" dbroles="" jwt="" svc="" wb=()
+    PRE=(); STEPS=(); AFTER=(); REFUSE=""
+    workbench_on && wb=("run ./infra/deploy-workbench.sh")
+    case "$key:$dir" in
+        IAM_POSTGREST_JWT:rollback|IAM_DB_SERVICE_ROLES:rollback)
+            dep_switch IAM_DB_ROLES || return 0; dbroles="$DEP" ;;
+        IAM_DB_ROLES:enable)
+            dep_switch IAM_POSTGREST_JWT || return 0; jwt="$DEP"
+            dep_switch IAM_DB_SERVICE_ROLES || return 0; svc="$DEP" ;;
+    esac
+    case "$key:$dir" in
+        IAM_GATES:enable)
+            STEPS=("set IAM_GATES true" "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
+            AFTER=("The User Manager widens beyond admin only once every access pod proves it enforces (the access deploy checks)."
+                   "Grafana's role setting comes from the policy again (Editor: engineer; Viewer: roles holding R on dashboards; others cannot sign in); the grafana_* roles are retired."
+                   "The AI workbench admits the roles the policy compiles; the hub administrator (role workbench-admin) cannot open others' servers or mint their tokens. It is redeployed by ./deploy-infra.sh (WORKBENCH_ENABLED=true)."
+                   "Device onboarding admits the policy's roles (engineer, maintenance) and pgAdmin admin; ./deploy-apps.sh --all restarts the onboarding wizard and refuses while a flash run is active."
+                   "Verify: tests/iam-hosts.sh (Grafana's role setting, the AI workbench, the wizard and pgAdmin included), tests/iam-workbench.sh and ./health-check.sh (Grafana roles, AI Workbench gate, Onboarding roles, pgAdmin roles)") ;;
+        IAM_GATES:rollback)
+            STEPS=("run env IAM_GATES=false ./apps/access/deploy.sh" "set IAM_GATES false"
+                   "run ./deploy-infra.sh" "run ./deploy-apps.sh --all")
+            AFTER=("Every gate goes back to operator, qa, auditor, admin; the User Manager to admin only. Each deploy warns while false."
+                   "Node-RED and the MQTT Explorer keep their compiled list (engineer): they reach telemetry and device control. Node-RED's editor keeps its rights from the policy (adminAuth)."
+                   "Accounts holding production_manager, maintenance, qc, qp, engineer, bio_scientist or control_scientist lose the portal and every other gated host until IAM_GATES is true again."
+                   "Grafana goes back to any enabled account (at least Viewer); the grafana_* roles are re-created, so Editor/Admin only for the built-in accounts that still exist."
+                   "The AI workbench goes back to any realm account, with ADMIN_USER as hub administrator through the workbench-admin role (it still cannot open others' servers, and removing a hub user still keeps the home)."
+                   "Device onboarding goes back to EDGE_WIZARD_ROLE (empty: any signed-in account may erase and flash a board); pgAdmin stays admin only.") ;;
+        IAM_NETPOL:enable)
+            PRE=("Every caller of an application pod is listed under network: in apps/iam/policy/defaults.yaml (an unlisted caller times out).")
+            STEPS=("set IAM_NETPOL true" "run ./deploy-infra.sh")
+            AFTER=("Verify: tests/iam-network.sh (takes the deploy lock).") ;;
+        IAM_NETPOL:rollback)
+            STEPS=("set IAM_NETPOL false" "run ./deploy-infra.sh")
+            AFTER=("At once, without a deploy: microk8s kubectl -n <namespace> delete netpol -l medcea/iam-netpol=true (lasts until the next ./deploy-infra.sh while IAM_NETPOL=true).") ;;
+        IAM_ENFORCE:enable)
+            PRE=("The IAM 2.6 code is deployed with IAM_ENFORCE still false (./deploy-infra.sh, ./apps/database/deploy.sh, then ./deploy-apps.sh --all since the last pull)."
+                 "IAM_DB_ROLES is true (./medcea.sh IAM_DB_ROLES): only the database functions check an operator's assigned_run (execute, stop, status, trigger); without it an operator can stop another unit's run (health-check iamenforce FAILs)."
+                 "A report-only soak is over: the services' 'medcea_iam: would refuse' lines from real people are all intended policy (each becomes a 401/403)."
+                 "Enabled accounts hold the roles the work needs (production_manager: runs and schedules; engineer: recipes, devices, algorithms); admin keeps no access to recipes, runs or exports."
+                 "Every operator has a unit in effect (./apps/iam/units.sh list, run before medcea.sh: it takes the deploy lock), or the Monitor and the scheduler show them no runs or telemetry.")
+            STEPS=("run python3 tests/iam-routes-diff.py --strict" "set IAM_ENFORCE true" "run ./deploy-infra.sh")
+            AFTER=("Services read it from ConfigMap medcea-iam-lib per request: live within about a minute (kubelet sync), no restart. Refusals are 401/403/503 from then on."
+                   "The pods' IAM_ENFORCE copy (used only when /iam/ is missing, and then it lets everything through) stays false until each app's next deploy: ./health-check.sh FAILs (iamenforce) until then, so redeploy them when no run is active (./deploy-apps.sh --all; Bring IAM to full enforcement asks for it at its end)."
+                   "Verify: tests/iam-check.sh (every pod 'enforce', a forged request 'refused' 401), ./health-check.sh, tests/iam-signin.sh (takes the deploy lock).") ;;
+        IAM_ENFORCE:rollback)
+            STEPS=("set IAM_ENFORCE false" "run ./deploy-infra.sh")
+            AFTER=("Services log 'would refuse' and let the request through again within about a minute. The access Admin port and dbmgmt enforce whatever this says."
+                   "The pods' copy stays true until each app's next deploy; it only fails closed when /iam/ is missing.") ;;
+        IAM_POSTGREST_JWT:enable)
+            PRE=("AUTHENTICATOR_DB_PASS in config.env is set and differs from POSTGRES_PASS (the frontend deploy refuses otherwise).")
+            STEPS=("run ./deploy-infra.sh" "set IAM_POSTGREST_JWT true" "run ./apps/frontend/deploy.sh")
+            AFTER=("config-api serves nothing for 0 to ~15 s during the switch, by design."
+                   "After rotating or removing a realm key, run ./deploy-infra.sh again.") ;;
+        IAM_POSTGREST_JWT:rollback)
+            if [[ "$dbroles" == true ]]; then
+                STEPS=("set IAM_DB_ROLES false" "${wb[@]}" "run ./apps/database/deploy.sh")
+                AFTER=("IAM_DB_ROLES is true, so it goes back to false first (config-api refuses legacy mode while the database enforces).")
+                (( ${#wb[@]} )) && AFTER+=("The workbench deploy first closes the notebooks' hop to config-api; reading platform data from a notebook stops until both switches are true again.")
+            fi
+            STEPS+=("set IAM_POSTGREST_JWT false" "run ./apps/frontend/deploy.sh")
+            AFTER+=("config-api serves nothing for 0 to ~15 s during the switch, by design."
+                    "Any git revert only after this: a reverted deploy breaks a config-api still in JWT mode.") ;;
+        IAM_DB_SERVICE_ROLES:enable)
+            STEPS=("set IAM_DB_SERVICE_ROLES true" "run ./deploy-apps.sh --all" "run ./deploy-infra.sh")
+            AFTER=("Verify: ./health-check.sh shows dbclients OK."
+                   "A statement a service's grants do not cover is now 'permission denied' (intended); pgAdmin can only read.") ;;
+        IAM_DB_SERVICE_ROLES:rollback)
+            [[ "$dbroles" == true ]] && REFUSE="IAM_DB_ROLES is true, and it requires IAM_DB_SERVICE_ROLES=true: roll back IAM_DB_ROLES first."
+            STEPS=("set IAM_DB_SERVICE_ROLES false" "run ./deploy-apps.sh --all" "run ./deploy-infra.sh" "run ./apps/database/deploy.sh")
+            AFTER=("The last database deploy makes the service roles NOLOGIN again.") ;;
+        IAM_DB_ROLES:enable)
+            [[ "$jwt" == true ]] || REFUSE="IAM_POSTGREST_JWT is '${jwt:-unset}': enable it first (medcea.sh, IAM_POSTGREST_JWT → enable)."
+            [[ -z "$REFUSE" && "$svc" != true ]] && REFUSE="IAM_DB_SERVICE_ROLES is '${svc:-unset}': enable it first, and check dbclients OK in ./health-check.sh."
+            PRE=("Operators have their units, confirmed by qa: ./apps/iam/units.sh list shows no enabled operator without a unit (without one they see nothing and start nothing)."
+                 "Every database client logs in as its own role: ./health-check.sh shows dbclients OK."
+                 "AUTHENTICATOR_DB_PASS is set and differs from POSTGRES_PASS.")
+            STEPS=("set IAM_DB_ROLES true" "run ./apps/database/deploy.sh" "${wb[@]}")
+            AFTER=("If the database deploy refuses, it says 'nothing was changed' but config.env already says true: restore it as shown."
+                   "The deploy restarts config-api itself.")
+            (( ${#wb[@]} )) && AFTER+=("The workbench deploy, last, opens the notebooks' hop to config-api and Keycloak: scientists, engineers and qa can then read platform data in a notebook with their own sign-in (read only). A running server needs a stop and start for the endpoints.") ;;
+        IAM_DB_ROLES:rollback)
+            STEPS=("set IAM_DB_ROLES false" "${wb[@]}" "run ./apps/database/deploy.sh")
+            AFTER=("The deploy restarts config-api. health-check iamdbroles WARNs while false, by design."
+                   "The AI workbench notebooks' hop to config-api closes before the database gives anon its old grants back (the database deploy closes it on a running workbench; the workbench deploy brings its settings in line). Reading platform data from a notebook stops until both switches are true again."
+                   "While IAM_ENFORCE is true, nothing checks an operator's assigned_run any more (health-check iamenforce FAILs): roll IAM_ENFORCE back too unless this is brief."
+                   "While false, nobody can retire a Q-table from the Config UI (config-api runs every token as anon, which may execute no function). If one must start cold meanwhile: medcea.retire_algorithm_state in psql in the PostgreSQL pod, which records no person."
+                   "Before a git revert of the Phase 2 code, also run medcea_db_migrations_down_008b.sql with -v full=1 as postgres (by hand; see CLAUDE.md).") ;;
+        IAM_MQTT_PERSON:enable)
+            PRE=("IAM_DB_SERVICE_ROLES is true and ./apps/database/deploy.sh has let iam_svc log in: iam-api never runs as postgres (the recipe's iam deploy refuses otherwise). ./apps/access/deploy.sh has run since the IAM 3.5 pull (a confirmed role change ends a credential)."
+                 "IAM_DB_ROLES is true: the broker reads the person credentials as mqtt_auth through its compiled grants."
+                 "No run is active: ./deploy-infra.sh restarts the broker (the boards reconnect within seconds).")
+            STEPS=("set IAM_MQTT_PERSON true" "run ./apps/iam/deploy.sh" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
+            AFTER=("The iam deploy refuses while iam-api cannot be deployed, so the recipe stops before the broker changes: restore config.env as shown."
+                   "iam-api reads the switch from ConfigMap medcea-iam-lib within about a minute; the Explorer deploy waits for it."
+                   "Engineers reload the Explorer: it signs them in to the broker with their own 8 h credential. They read every unit's sense, control and control_setpoint topics; sending works only to a unit flagged for commissioning (test mode) with no run in progress: an engineer flags it in the Configuration UI's Units tab (Commissioning) and a qa person approves it."
+                   "Between the two deploys an open Explorer page is refused for under a minute."
+                   "Verify: ./health-check.sh (MQTT person credentials, iammqtt) and tests/iam-mqtt.sh (takes the deploy lock).") ;;
+        IAM_MQTT_PERSON:rollback)
+            STEPS=("set IAM_MQTT_PERSON false" "run ./deploy-infra.sh" "run ./apps/mqtt-explorer/deploy.sh")
+            AFTER=("The MQTT Explorer then has no broker credential: its page says it needs IAM_MQTT_PERSON=true (the shared mqtt-explorer account was removed and does not come back). iam-api answers 409 within about a minute."
+                   "The infra deploy ends every person credential (inactive, recorded in the policy history); nothing is deleted, and a later enable issues new ones.") ;;
+        WORKBENCH_ENABLED:enable)
+            STEPS=("set WORKBENCH_ENABLED true" "run ./deploy-infra.sh")
+            AFTER=("About 2 GB of images. To redeploy only the workbench later: ./infra/deploy-workbench.sh") ;;
+        WORKBENCH_ENABLED:rollback)
+            STEPS=("set WORKBENCH_ENABLED false" "run ./deploy-infra.sh")
+            AFTER=("This does not remove a workbench that is already running; later deploys only skip it.") ;;
+        *) REFUSE="no recipe for $key $dir" ;;
+    esac
+}
+
+switch_purpose() {
+    case "$1" in
+        IAM_GATES)            echo "Each sign-in gate, Grafana's role setting, the AI workbench's hub, the onboarding wizard and pgAdmin admit the roles the policy compiles for their host (false: the pre-policy lists; Node-RED and the MQTT Explorer keep theirs)." ;;
+        IAM_NETPOL)           echo "One NetworkPolicy per application pod: only its listed callers can connect." ;;
+        IAM_ENFORCE)          echo "Python services refuse what the route table does not allow (false: they only log 'would refuse')." ;;
+        IAM_POSTGREST_JWT)    echo "config-api (PostgREST) verifies the person's token (Phase 2b)." ;;
+        IAM_DB_SERVICE_ROLES) echo "Each database client logs in as its own role instead of postgres (Phase 2.5)." ;;
+        IAM_DB_ROLES)         echo "The database enforces per-role grants, RLS and guard triggers (Phase 2a)." ;;
+        IAM_MQTT_PERSON)      echo "The MQTT Explorer connects with a short-lived personal credential, on the broker's WebSocket listener only (false: the Explorer has no credential and says so)." ;;
+        WORKBENCH_ENABLED)    echo "deploy-infra.sh also deploys the AI workbench (JupyterHub)." ;;
+    esac
+}
+
+step_text() {   # step_text STEP → how it reads in the recipe
+    local -a w
+    read -ra w <<<"$1"
+    case "${w[0]}" in
+        set) local old=""
+             cfg_check_one "${w[1]}" quiet && old="$CFG_VAL"
+             printf 'config.env: %s="%s"   (line %s, now "%s")' "${w[1]}" "${w[2]}" "${CFG_LINE:-?}" "$old" ;;
+        run) qwords "${w[@]:1}" ;;
+    esac
+}
+
+# The recipe machinery, shared by switch_flow (one switch) and a_sw_full (the chain).
+# recipe() fills PRE/STEPS/AFTER/REFUSE; these show, lock and run them.
+
+recipe_sets_ok() {   # every key STEPS sets is one clean line (the reason printed otherwise)
+    local s
+    local -a w
+    for s in "${STEPS[@]}"; do
+        read -ra w <<<"$s"
+        if [[ "${w[0]}" == set ]]; then cfg_check_one "${w[1]}" || return 1; fi
+    done
+    return 0
+}
+
+recipe_show() {   # recipe_show INDENT: PRE as a checklist, STEPS numbered, AFTER as notes
+    local ind="$1" i s
+    if (( ${#PRE[@]} )); then
+        echo "${ind}Before you start, check:"
+        for s in "${PRE[@]}"; do echo "${ind}  [ ] $s"; done
+    fi
+    echo "${ind}Steps, in order (stops at the first that fails):"
+    for (( i = 0; i < ${#STEPS[@]}; i++ )); do
+        printf '%s  %d. %s\n' "$ind" $(( i + 1 )) "$(step_text "${STEPS[i]}")"
+    done
+    if (( ${#AFTER[@]} )); then
+        echo "${ind}Notes:"
+        for s in "${AFTER[@]}"; do echo "${ind}  - $s"; done
+    fi
+}
+
+recipe_begin() {   # the deploy lock and the signal traps, once for everything that follows
+    $ASK_CANCELLED && return 1          # a question was cancelled: nothing runs
+    $DRY_RUN && return 0
+    guide_lock || return 1
+    # Ctrl-C reaches the step's command too, which stops; the guide then reports
+    # instead of dying with config.env changed and nothing said (switch_failed).
+    RECIPE_SIG=""
+    recipe_traps
+}
+
+recipe_traps() {   # a signal is recorded, and acted on once the running step has ended
+    trap 'RECIPE_SIG="Ctrl-C (SIGINT)"' INT
+    trap 'RECIPE_SIG=SIGTERM' TERM
+    trap 'RECIPE_SIG=SIGHUP' HUP
+}
+
+FAILED_STEP=0
+recipe_steps() {   # runs STEPS in order → 0 all done; 1 a step failed, 130 a signal (FAILED_STEP, LAST_RC, RECIPE_SIG)
+    local i
+    local -a w
+    RECIPE_SIG="${RECIPE_SIG-}"
+    for (( i = 0; i < ${#STEPS[@]}; i++ )); do
+        # A signal that came before this step (e.g. at a question) stops before it runs.
+        [[ -n "$RECIPE_SIG" ]] && { FAILED_STEP=$i; LAST_RC=130; return 130; }
+        read -ra w <<<"${STEPS[i]}"
+        echo
+        echo -e "${BOLD}Step $(( i + 1 ))/${#STEPS[@]}${NC}: $(step_text "${STEPS[i]}")"
+        if $DRY_RUN; then
+            if [[ "${w[0]}" == set ]]; then
+                cfg_check_one "${w[1]}" quiet
+                echo "[dry run] would set $CFG line $CFG_LINE: ${w[1]}=\"$CFG_VAL\" → ${w[1]}=\"${w[2]}\"  ($CFG not touched)"
+            else
+                echo "[dry run] would run: $(qwords "${w[@]:1}")"
+            fi
+            continue
+        fi
+        if [[ "${w[0]}" == set ]]; then
+            cfg_set "${w[1]}" "${w[2]}"; LAST_RC=$?
+        else
+            reset_plan; CMD=("${w[@]:1}")
+            run_array
+            # Under script the terminal is raw while the step runs: Ctrl-C reaches the step
+            # (through script's pty), never this shell's trap. A step that ends 130 was
+            # interrupted that way: the recipe stops as for a Ctrl-C (exit 130).
+            if $RUN_RECORDED && (( LAST_RC == 130 )) && [[ -z "$RECIPE_SIG" ]]; then
+                RECIPE_SIG="Ctrl-C (SIGINT)"
+            fi
+        fi
+        FAILED_STEP=$i
+        [[ -n "$RECIPE_SIG" ]] && return 130
+        (( LAST_RC == 0 )) || return 1
+    done
+    return 0
+}
+
+switch_flow() {   # switch_flow KEY: current value → enable|roll back → recipe → run
+    local key="$1" cur dir target rc
+    echo
+    echo -e "${BOLD}${key}${NC}: $(switch_purpose "$key")"
+    cfg_check_one "$key" || { echo "Nothing was changed."; return 0; }
+    cur="$CFG_VAL"
+    echo "  Now: ${key}=\"${cur}\"   ($CFG line $CFG_LINE)"
+    menu "$key: what do you want to do?" \
+        "Enable (set ${key}=true)|$( [[ "$cur" == true ]] && echo 'already true: re-runs the deploys' || echo 'the enable recipe')" \
+        "Roll back (set ${key}=false)|$( [[ "$cur" == false ]] && echo 'already false: re-runs the deploys' || echo 'the rollback recipe')"
+    [[ "$PICK" == b ]] && return 10
+    if (( PICK == 1 )); then dir=enable; target=true; else dir=rollback; target=false; fi
+    recipe "$key" "$dir"
+    if [[ -n "$REFUSE" ]]; then
+        warn "$REFUSE"
+        echo "Nothing was changed."
+        return 0
+    fi
+    # Every key the recipe sets must be one clean line before anything is touched.
+    recipe_sets_ok || { echo "Nothing was changed."; return 0; }
+    echo
+    echo -e "${BOLD}Recipe: $key → $target${NC}"
+    recipe_show "  "
+    echo "  Every step takes the deploy lock; deploys use sudo only without the microk8s group (deploy-infra may ask for it)."
+    if (( ${#PRE[@]} )); then
+        ask_yn "Is every item in 'Before you start' true?" n || { echo "Do those first. Nothing was changed."; return 0; }
+    fi
+    ask_yn "Run these ${#STEPS[@]} steps?" n || { echo "Cancelled. Nothing was changed."; return 0; }
+
+    recipe_begin || { echo "Nothing was changed."; return 0; }
+    CFG_BACKUP=""
+    recipe_steps; rc=$?
+    if (( rc )); then
+        switch_failed "$FAILED_STEP" "$LAST_RC" "$( (( rc == 130 )) && echo "$RECIPE_SIG")"
+        recipe_end
+        (( rc == 130 )) && exit 130
+        return 0
+    fi
+    echo
+    if $DRY_RUN; then echo -e "${GREEN}[dry run] recipe shown; nothing was run or changed.${NC}"; return 0; fi
+    recipe_end
+    echo -e "${GREEN}All ${#STEPS[@]} steps done: ${key}=\"${target}\".${NC}"
+    offer_backup_delete "$CFG_BACKUP"
+    return 0
+}
+
+offer_backup_delete() {   # offer_backup_delete FILE…: after a completed recipe (or chain)
+    local f
+    local -a files=()
+    for f in "$@"; do [[ -n "$f" && -f "$f" ]] && files+=("$f"); done
+    (( ${#files[@]} )) || return 0
+    if (( ${#files[@]} == 1 )); then
+        echo "  ${files[0]} is a full copy of the old config.env, passwords included; the only change is shown above."
+    else
+        echo "  These are full copies of config.env as it was before each switch, passwords included; the changes are shown above:"
+        for f in "${files[@]}"; do echo "    $f"; done
+    fi
+    if ask_yn "Delete $( (( ${#files[@]} == 1 )) && echo 'that backup' || echo "these ${#files[@]} backups") now?" y; then
+        rm -f -- "${files[@]}" && echo "  Deleted."
+    else
+        echo "  Kept. ./install.sh --uninstall-all deletes them together with config.env."
+    fi
+}
+
+recipe_end() {   # after a real recipe: the lock and the signal traps go
+    $DRY_RUN && return 0
+    trap - INT TERM HUP
+    guide_unlock
+}
+
+switch_failed() {   # switch_failed INDEX RC [WHY]
+    local i="$1" rc="$2" why="${3-}"
+    echo
+    if [[ -n "$why" ]]; then
+        echo -e "${RED}Stopped by $why during step $(( i + 1 )) (exit code $rc): $(step_text "${STEPS[i]}")${NC}"
+        echo "  That step may not have finished; the steps after it were not run."
+    else
+        echo -e "${RED}Step $(( i + 1 )) failed (exit code $rc): $(step_text "${STEPS[i]}")${NC}"
+        echo "  The steps after it were not run."
+    fi
+    if [[ -n "$CFG_BACKUP" ]]; then
+        echo -e "  ${YELLOW}config.env has already been changed.${NC} Fix the cause and run this recipe again"
+        echo "  (each step is safe to repeat), or put the old file back with:"
+        echo "      cp -p $(printf '%q' "$CFG_BACKUP") $(printf '%q' "$CFG")"
+        echo "  Restoring config.env does not undo the steps that already ran."
+    else
+        echo "  config.env was not changed."
+    fi
+}
+
+# ── Bring IAM to full enforcement: every enable recipe still due, in order ──
+# Each switch's own enable recipe from recipe(), run by the same machinery (recipe_show,
+# recipe_sets_ok, its checklist, cfg_set's backup, recipe_steps), under one deploy lock
+# for the whole chain. A switch already true is skipped, so after a stop the action run
+# again resumes from the switch that stopped. Planning reads each recipe as if the
+# switches before it were already true (CHAIN_SIM), since e.g. IAM_DB_ROLES's enable is
+# refused until IAM_POSTGREST_JWT and IAM_DB_SERVICE_ROLES are; when its turn comes the
+# recipe is read again from config.env as it then is.
+CHAIN_ORDER=(IAM_GATES IAM_NETPOL IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON)
+
+a_sw_full() {
+    local rc
+    chain_flow; rc=$?
+    CHAIN_SIM=()
+    return "$rc"
+}
+
+chain_sim_steps() {   # what STEPS would set, as CHAIN_SIM (planning and dry runs only)
+    local s
+    local -a w
+    for s in "${STEPS[@]}"; do
+        read -ra w <<<"$s"
+        [[ "${w[0]}" == set ]] && CHAIN_SIM[${w[1]}]="${w[2]}"
+    done
+    return 0
+}
+
+chain_flow() {
+    local key i s n_steps=0 rc
+    local -a todo=() done_keys=() backups=()
+    echo
+    echo -e "${BOLD}Bring IAM to full enforcement${NC}: each IAM switch that is still false, by its own enable recipe, in order."
+    for key in "${CHAIN_ORDER[@]}"; do
+        cfg_check_one "$key" || { echo "Nothing was changed."; return 1; }
+        case "$CFG_VAL" in
+            true)  ;;
+            false) todo+=("$key") ;;
+            *) warn "$key is '$CFG_VAL' on line $CFG_LINE of $CFG: write it as \"true\" or \"false\", then come back."
+               echo "Nothing was changed."; return 1 ;;
+        esac
+        printf '  %-22s %s\n' "$key" "$CFG_VAL"
+    done
+    if (( ${#todo[@]} == 0 )); then
+        echo -e "${GREEN}Every IAM switch is already true: nothing to do.${NC}"
+        return 0
+    fi
+
+    echo
+    echo -e "${BOLD}Plan: ${#todo[@]} switch(es) → true, in this order${NC}"
+    CHAIN_SIM=()
+    for (( i = 0; i < ${#todo[@]}; i++ )); do
+        key="${todo[i]}"
+        echo
+        echo -e "  ${BOLD}$(( i + 1 )). ${key} → true${NC}: $(switch_purpose "$key")"
+        recipe "$key" enable
+        if [[ -n "$REFUSE" ]]; then
+            warn "$key: $REFUSE"
+            echo "Nothing was changed."; return 1
+        fi
+        recipe_sets_ok || { echo "Nothing was changed."; return 1; }
+        recipe_show "     "
+        [[ "$key" == IAM_DB_ROLES ]] && echo "     Before its checklist: ./apps/iam/units.sh list (read-only, under the chain's lock); if an enabled operator has no unit in effect, you are asked whether to go on."
+        n_steps=$(( n_steps + ${#STEPS[@]} ))
+        chain_sim_steps
+    done
+    CHAIN_SIM=()
+    if [[ " ${todo[*]} " == *" IAM_ENFORCE "* ]]; then
+        echo
+        echo -e "  ${BOLD}Last: ./deploy-apps.sh --all${NC} (asked when the switches are done; no run may be active): every app pod"
+        echo "     then carries IAM_ENFORCE=\"true\" (until then ./health-check.sh FAILs iamenforce)."
+    fi
+    echo
+    echo "  The chain takes the deploy lock once for all its steps (refused while another deploy runs);"
+    echo "  deploys use sudo only without the microk8s group. Each switch's checklist is asked when its"
+    echo "  turn comes. It stops at the first refused precondition, failed step or Ctrl-C; switches"
+    echo "  already true are skipped, so running this again resumes from the one that stopped."
+    ask_yn "Run these ${#todo[@]} recipes (${n_steps} steps)?" n || { echo "Cancelled. Nothing was changed."; return 0; }
+
+    recipe_begin || { echo "Nothing was changed."; return 1; }
+    for (( i = 0; i < ${#todo[@]}; i++ )); do
+        key="${todo[i]}"
+        echo
+        echo -e "${BOLD}━━ Switch $(( i + 1 ))/${#todo[@]}: ${key} → true ━━${NC}"
+        CFG_BACKUP=""                                   # this switch's own backup, made by its first set
+        CHAIN_KEY="$key"; CHAIN_DONE="${done_keys[*]}"; CHAIN_REST="${todo[*]:i+1}"; CHAIN_BACKUPS=("${backups[@]}")
+        recipe "$key" enable
+        if [[ -n "$REFUSE" ]]; then
+            warn "$REFUSE"
+            chain_stopped "$key" "its recipe was refused" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+            recipe_end; return 1
+        fi
+        if ! recipe_sets_ok; then
+            chain_stopped "$key" "config.env cannot be changed as the recipe needs" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+            recipe_end; return 1
+        fi
+        if [[ "$key" == IAM_DB_ROLES ]]; then
+            chain_units_check; rc=$?
+            if (( rc == 130 )); then
+                echo -e "${RED}Stopped by $RECIPE_SIG while reading the operators' units.${NC}"
+                chain_stopped "$key" "Ctrl-C before its steps" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+                recipe_end; exit 130
+            fi
+            if (( rc )); then
+                chain_stopped "$key" "you chose not to go on while operators have no unit in effect" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+                recipe_end; return 1
+            fi
+        fi
+        if (( ${#PRE[@]} )); then
+            echo "  Before you start, check:"
+            for s in "${PRE[@]}"; do echo "    [ ] $s"; done
+            if ! chain_ask_yn "Is every item in 'Before you start' true for ${key}?" n; then
+                chain_stopped "$key" "its checklist was answered no (do those first)" "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+                recipe_end; return 1
+            fi
+        fi
+        recipe_steps; rc=$?
+        [[ -n "$CFG_BACKUP" ]] && backups+=("$CFG_BACKUP")
+        if (( rc )); then
+            switch_failed "$FAILED_STEP" "$LAST_RC" "$( (( rc == 130 )) && echo "$RECIPE_SIG")"
+            chain_stopped "$key" "step $(( FAILED_STEP + 1 )) $( (( rc == 130 )) && echo 'was interrupted' || echo 'failed')" \
+                "${done_keys[*]}" "${todo[*]:i+1}" "${backups[@]}"
+            recipe_end
+            (( rc == 130 )) && exit 130
+            return 1
+        fi
+        $DRY_RUN && chain_sim_steps
+        done_keys+=("$key")
+        if $DRY_RUN; then echo "[dry run] ${key}'s recipe shown."
+        else echo -e "${GREEN}${key}=\"true\": all ${#STEPS[@]} steps done.${NC}"; fi
+    done
+    local apps_pending=false
+    if [[ " ${done_keys[*]} " == *" IAM_ENFORCE "* ]]; then
+        CHAIN_DONE="${done_keys[*]}"
+        chain_redeploy_apps || apps_pending=true
+    fi
+    echo
+    if $DRY_RUN; then
+        echo -e "${GREEN}[dry run] the whole chain shown; nothing was run or changed, and no lock was taken.${NC}"
+        return 0
+    fi
+    recipe_end
+    if $apps_pending; then
+        TUI_END_TITLE="Not finished: the apps were not redeployed"
+        echo -e "${YELLOW}Every IAM switch is true (${done_keys[*]} turned on), but the apps were not redeployed.${NC}"
+        echo "  Still to do, with no run active: ./deploy-apps.sh --all (medcea.sh: Applications). Until then the app pods"
+        echo "  carry IAM_ENFORCE=\"false\" and ./health-check.sh FAILs (iamenforce). Each recipe's notes are in the plan above."
+    else
+        echo -e "${GREEN}IAM is at full enforcement: ${done_keys[*]} turned on; every IAM switch is true.${NC}"
+        echo "  Each recipe's notes are in the plan above. Verify with ./health-check.sh."
+    fi
+    offer_backup_delete "${backups[@]}"
+    return 0
+}
+
+# After IAM_ENFORCE: every app pod keeps the IAM_ENFORCE copy its last deploy rendered
+# (false, on a fresh install), and health-check iamenforce FAILs on it. The switch's own
+# recipe leaves the redeploy out because it restarts the scheduler while runs may be
+# active, so the chain asks for it once, under its lock. → 0 done, 1 skipped or failed.
+chain_redeploy_apps() {
+    local rc
+    echo
+    echo -e "${BOLD}━━ Last: redeploy the apps ━━${NC}"
+    echo "  The app pods (scheduler, monitor, config UI, User Manager, database management) still carry the"
+    echo "  IAM_ENFORCE copy of their last deploy; ./health-check.sh FAILs (iamenforce) until they are redeployed."
+    echo "  ./deploy-apps.sh --all restarts the scheduler, so no run may be active."
+    STEPS=("run ./deploy-apps.sh --all")
+    if ! $DRY_RUN; then
+        [[ -n "$RECIPE_SIG" ]] && chain_apps_stop "$RECIPE_SIG"
+        trap 'chain_apps_stop "Ctrl-C (SIGINT)"' INT
+        trap 'chain_apps_stop SIGTERM' TERM
+        trap 'chain_apps_stop SIGHUP' HUP
+        ask_yn "No run is active: redeploy the apps now?" n; rc=$?
+        recipe_traps
+        (( rc )) && return 1
+    fi
+    recipe_steps; rc=$?
+    if (( rc == 130 )); then
+        echo -e "${RED}Stopped by $RECIPE_SIG during ./deploy-apps.sh --all.${NC}"
+        chain_apps_stop "$RECIPE_SIG"
+    fi
+    if (( rc )); then
+        warn "./deploy-apps.sh --all failed (exit code $LAST_RC): fix the cause and run it again (config.env is not changed by it)."
+        return 1
+    fi
+    return 0
+}
+
+chain_apps_stop() {   # chain_apps_stop SIGNAME → exit 130
+    trap - INT TERM HUP
+    echo
+    echo -e "${RED}Stopped by $1 before the apps were redeployed.${NC}"
+    echo "  Every IAM switch is true (this run turned on: ${CHAIN_DONE})."
+    echo "  Still to do, with no run active: ./deploy-apps.sh --all; until then ./health-check.sh FAILs (iamenforce)."
+    recipe_end
+    exit 130
+}
+
+chain_stopped() {   # chain_stopped KEY WHAT "DONE…" "NOT_STARTED…" BACKUP…
+    local key="$1" what="$2" done_list="$3" rest="$4" b
+    shift 4
+    TUI_END_TITLE="Stopped: full enforcement not finished"
+    echo
+    echo -e "${RED}Bring IAM to full enforcement stopped at ${key}: ${what}.${NC}"
+    if [[ -n "$done_list" ]]; then
+        echo "  Already done, now true in config.env and deployed: ${done_list}."
+    else
+        echo "  No switch was finished by this run."
+    fi
+    [[ -n "$rest" ]] && echo "  Not started: ${rest}."
+    if (( $# )); then
+        echo "  Backups of config.env, one before each switch this run changed (each a full copy, passwords included):"
+        for b in "$@"; do echo "    $b"; done
+        echo "  Putting back an earlier one also turns off the switches after it, whose deploys already ran: don't, unless you roll those back too."
+    fi
+    if [[ -n "$CFG_BACKUP" ]]; then
+        # Its set step ran: config.env says true although its deploys did not all run, and
+        # a plain re-run would skip it as done.
+        echo -e "  ${YELLOW}${key} is already \"true\" in config.env, but its recipe did not finish${NC}, so running this"
+        echo "  action again as it is would skip it. Fix the cause, then either put its backup back (only ${key} changes):"
+        echo "      cp -p $(printf '%q' "$CFG_BACKUP") $(printf '%q' "$CFG")"
+        echo "  and run this action again (IAM switches → Bring IAM to full enforcement): switches already"
+        echo "  true are skipped, so it resumes from ${key}; or finish ${key} with its own entry (IAM switches →"
+        echo "  ${key} → Enable, which runs every step again), then run this action for the rest."
+    else
+        echo "  config.env was not changed for ${key}."
+        echo "  Fix the cause, then run this action again (IAM switches → Bring IAM to full enforcement):"
+        echo "  switches already true are skipped, so it resumes from ${key}."
+    fi
+}
+
+chain_units_check() {   # → 0 go on, 1 stop (answered no), 130 a signal
+    local out rc name role en units rest line readable=true
+    local -a missing=()
+    echo
+    echo -e "${BOLD}Before IAM_DB_ROLES: operators and their units${NC}"
+    echo "  Under IAM_DB_ROLES=true an operator with no unit in effect sees no telemetry or runs and starts none."
+    if $DRY_RUN; then
+        echo "[dry run] would run: ./apps/iam/units.sh list   (read-only, under the chain's lock), and ask whether to go on if an enabled operator has no unit in effect"
+        return 0
+    fi
+    # MEDCEA_NO_LOG: units.sh would otherwise tee itself to logs/ and print "Log: …" as its
+    # first line. The table is still taken from its USERNAME header on, so any line
+    # before it (a log line, a warning on stdout) cannot make the list unreadable.
+    if $TUI; then                       # on the real terminal, like run_array; the table captured
+        tui_terminal
+        echo -e "${CYAN}\$ ./apps/iam/units.sh list${NC}" >&7
+        out="$(MEDCEA_NO_LOG=1 ./apps/iam/units.sh list 2>&8)"; rc=$?
+        TUI_DIRTY=true
+    else
+        echo -e "${CYAN}\$ ./apps/iam/units.sh list${NC}"
+        out="$(MEDCEA_NO_LOG=1 ./apps/iam/units.sh list)"; rc=$?
+    fi
+    [[ -n "$RECIPE_SIG" ]] && return 130
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    [[ "$out" == *$'\n'USERNAME$'\t'* ]] && out="USERNAME"$'\t'"${out#*$'\n'USERNAME$'\t'}"
+    if (( rc != 0 )) || [[ "${out%%$'\n'*}" != USERNAME$'\t'* ]]; then
+        readable=false
+    else
+        while IFS= read -r line; do
+            IFS=$'\t' read -r name role en units rest <<<"$line"
+            [[ "$name" == USERNAME || "$name" == "(no such account)" ]] && continue
+            [[ "$role" == operator && "$en" == true && ( -z "$units" || "$units" == - ) ]] && missing+=("$name")
+        done <<<"$out"
+    fi
+    if $readable && (( ${#missing[@]} == 0 )); then
+        echo "  Every enabled operator has a unit in effect."
+        return 0
+    fi
+    if $readable; then
+        warn "enabled operator(s) with no unit in effect: ${missing[*]}"
+    else
+        warn "could not read the operators' units (./apps/iam/units.sh list exited $rc): whether every operator has one is unknown."
+    fi
+    echo "  Once IAM_DB_ROLES is true they see no telemetry or runs (an empty Monitor) and start none."
+    echo "  To give one a unit: ./apps/iam/units.sh assign <operator> <UNIT>… --by <your username>"
+    echo "  (or medcea.sh: Operators and units → Assign units), then a qa person other than you confirms it"
+    echo "  in the User Manager (Decisions); an assignment waiting for qa is not in effect."
+    chain_ask_yn "Go on with IAM_DB_ROLES anyway?" n
+}
+
+# A question asked while the chain holds the lock. recipe_traps only records a signal,
+# and bash's read does not return on a trapped Ctrl-C: the answer typed afterwards would
+# be taken and the next step run before the stop. So around the question a signal stops
+# the chain at once, at that switch, before any of its steps (nothing of it changed).
+CHAIN_KEY=""; CHAIN_DONE=""; CHAIN_REST=""; CHAIN_BACKUPS=()
+chain_prompt_stop() {   # chain_prompt_stop SIGNAME → exit 130
+    trap - INT TERM HUP
+    CHAIN_ASKING=false
+    echo
+    echo -e "${RED}Stopped by $1 at a question for ${CHAIN_KEY}; none of its steps ran.${NC}"
+    chain_stopped "$CHAIN_KEY" "stopped by $1 before its steps" "$CHAIN_DONE" "$CHAIN_REST" "${CHAIN_BACKUPS[@]}"
+    recipe_end
+    exit 130
+}
+
+chain_ask_yn() {   # ask_yn under the chain's lock: a signal while it waits stops the chain
+    local rc
+    $DRY_RUN && { ask_yn "$@"; return; }
+    [[ -n "$RECIPE_SIG" ]] && chain_prompt_stop "$RECIPE_SIG"
+    trap 'chain_prompt_stop "Ctrl-C (SIGINT)"' INT
+    trap 'chain_prompt_stop SIGTERM' TERM
+    trap 'chain_prompt_stop SIGHUP' HUP
+    CHAIN_ASKING=true
+    ask_yn "$@"; rc=$?
+    CHAIN_ASKING=false
+    recipe_traps
+    return "$rc"
+}
+
+# ── Health and tests ──
+a_health() {
+    CMD=(./health-check.sh)
+    ask_yn "Show detail for passing checks too (--verbose)?" n && CMD+=(--verbose)
+    ask_match "Per-check timeout in seconds (Enter = 8)" "$INT_RE" "a whole number of seconds, 1 or more" "" optional
+    [[ -n "$ANSWER" ]] && CMD+=(--timeout "$ANSWER")
+    while :; do
+        ask_text "Check list file (Enter = health-checks.conf)"
+        [[ -z "$ANSWER" ]] && break
+        [[ -f "$ANSWER" ]] && { CMD+=(--config "$ANSWER"); break; }
+        warn "no such file: $ANSWER"
+    done
+    EFFECT="nothing (OK/WARN/FAIL per check; exit 1 on any FAIL)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("iamdbroles WARNs while IAM_DB_ROLES=false, by design.")
+    plan_run
+}
+a_routes_diff() {
+    CMD=(python3 tests/iam-routes-diff.py)
+    EFFECT="nothing (offline: compiled route table vs the routes each service serves)"
+    plan_run
+}
+# IAM 4.1 (slice 4.1, design §14.2.7): the three deploys that ship migration 008c and the
+# Phase 4 policy, in the order that keeps access-api's 503 window shortest, under one lock.
+a_policy_41_deploy() {
+    CMD=(./apps/access/deploy.sh "&&" ./apps/database/deploy.sh "&&" ./deploy-infra.sh)
+    EFFECT="access_db.sql (iam._changed_since); migration 008c, the compiled functions and grants; the route table, NetworkPolicies and the rest of deploy-infra"
+    LOCK="yes, held by medcea.sh for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the access deploy first (the database deploy refuses without iam._changed_since), then the database, then deploy-infra at once."
+           "From the database deploy's commit until deploy-infra has written the route table (about 1-2 minutes), the User Manager answers 503 to a grant, an activation or a role change into qa, qp, admin or auditor: do not grant or change roles until all three have finished. A refused decision can simply be repeated."
+           "Each command runs only if the one before it succeeded. Health is green after the third (iamgrants is red in between)."
+           "Nothing calls the new policy functions yet (no Policy UI, no apply.sh): IAM 4.2a on.")
+    plan_run
+}
+# IAM 4.2a (design §14.4.16): version 1 of the access policy and the skeleton gate.
+POLICY_BY_RE='^[A-Za-z0-9][A-Za-z0-9._@-]*$'   # apps/iam/apply.sh's --by rule (no +, no leading -)
+ask_policy_by() {   # --by for apply.sh: the applier's claim on the record, remembered for the session
+    echo "  --by is YOUR Keycloak username: recorded as the person who applied the version (a claim);"
+    echo "  a qa person other than you confirms it in the Policy UI (IAM 4.3)."
+    ask_match "Your Keycloak username (--by)" "$POLICY_BY_RE" "letters, digits and . _ @ -, starting with a letter or digit" "$BY_USER"
+    BY_USER="$ANSWER"
+}
+a_policy_42a_deploy() {
+    ask_policy_by
+    CMD=(./apps/database/deploy.sh "&&" ./deploy-infra.sh "&&" env "MEDCEA_POLICY_BOOTSTRAP_BY=$BY_USER" ./apps/iam/deploy.sh)
+    EFFECT="migration 008c's 4.2a functions and the grants bundle; the route table's digest (it no longer hashes the source label) and the rest of deploy-infra; then version 1 of the access policy (a permanent record) and state/policy-applied.yaml"
+    LOCK="yes, held by medcea.sh for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the database deploy first (the 4.2a functions the other two record through), then deploy-infra at once, then the iam deploy, which bootstraps version 1 because no version exists yet."
+           "Before: git status -- apps/iam must be clean: the bootstrap refuses uncommitted changes there (version 1 is the committed factory policy)."
+           "No 503 window: nobody's access changes. Between the first two deploys the health check's iamenforce and tests/iam-schema.sh are red for a few minutes (the route table's digest moves once)."
+           "The iam deploy bootstraps version 1 from apps/iam/policy/defaults.yaml, claimed by $BY_USER; it changes no artefact (it proves every compile is identical first) and restarts iam-api as every iam deploy does."
+           "Afterwards ./health-check.sh shows two new checks, Access policy version and Policy artefacts (55 checks with the Platform manual)."
+           "From now on every deploy refuses a git change that widens access (the skeleton gate), break-glass included: such a change is proposed as a skeleton version, approved by qa and applied with ./apps/iam/apply.sh N (IAM 4.5).")
+    plan_run
+}
+a_policy_status() {
+    CMD=(./apps/iam/apply.sh --status)
+    EFFECT="nothing (the applied version, the accepted and git skeletons, the host file, the last policy events)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_policy_bootstrap_check() {
+    ask_policy_by
+    CMD=(./apps/iam/apply.sh --bootstrap --check-only --by "$BY_USER")
+    EFFECT="nothing (--check-only: no lock, no file, no database write; Keycloak read through a port-forward)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Says whether version 1 would bootstrap: no version yet, a clean apps/iam, your account found in Keycloak, every compile identical to defaults.yaml's, and the live route table and grants already at that compile.")
+    plan_run
+}
+a_policy_bootstrap() {
+    ask_policy_by
+    CMD=(env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --bootstrap --by "$BY_USER")
+    EFFECT="version 1 of the access policy, a PERMANENT record claimed by $BY_USER (only while no version exists); state/policy-applied.yaml; no artefact changes"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Normally the iam deploy does this itself (Deploy IAM 4.2a); use this entry only when it waited (Keycloak down, an unknown --by)."
+           "Your typed yes here is apply.sh's confirmation (MEDCEA_CONFIRMED=1), so it does not ask again."
+           "Exit 3 means version 1 is committed but not finished: run 'Finish an interrupted apply'.")
+    plan_run
+}
+a_policy_resume() {
+    ask_policy_by
+    CMD=(env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --resume --by "$BY_USER")
+    EFFECT="finishes an apply that was committed but did not record its end, or one with a deferred target: rewrites state/policy-applied.yaml, re-renders what drifted (every scoped mode), checks the grants, records the end (no database change to the version itself)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Says 'nothing to resume' and exits 0 when the last apply recorded its end."
+           "Your [y/N] here is apply.sh's confirmation (MEDCEA_CONFIRMED=1).")
+    plan_run
+}
+# IAM 4.3 (design §14.6): the Policy UI — its Keycloak client and certificate, the User
+# Manager's link and Sign out, then iam-api's :8083 and its proof-gated proxy.
+a_policy_43_deploy() {
+    CMD=(./deploy-infra.sh "&&" ./apps/access/deploy.sh "&&" ./apps/iam/deploy.sh)
+    EFFECT="Keycloak client policy, POLICY_DOMAIN in the certificate and DNS, the portal card; the User Manager's Policy link and Sign out; iam-api's second port :8083 (the Policy UI), ConfigMap iam-compiler and the sign-in proxy iam-oauth2-proxy"
+    LOCK="yes, held by medcea.sh for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: deploy-infra first (the client and the certificate), then the access deploy (the Policy link, Sign out on the new host), then the iam deploy."
+           "Nobody's access changes and nothing is written to the policy: the Policy UI reads; only a qa person's confirmation of version 1 writes, later (exercise E16)."
+           "The proxy admits admin only until every iam-api pod proves it enforces on :8083, then admin, auditor, qa and qp."
+           "Afterwards ./health-check.sh warns once: version 1 waits for a qa person's confirmation in the Policy UI.")
+    plan_run
+}
+a_policy_open_ui() {
+    cfg_literal POLICY_DOMAIN "policy.<DOMAIN>"
+    CMD=(echo "https://$ANSWER/")
+    EFFECT="nothing (prints the Policy UI's address)"
+    NOTES=("Sign in as admin, auditor, qa or qp. qa confirms a bootstrap or rollback version there (Confirm tab).")
+    plan_run
+}
+# IAM 4.4 (design §14.7): drafting and approval — two function bodies in 008c, then iam-api's
+# write side, the diff and the new tabs; apply.sh's skeleton proposal and host withdraw.
+a_policy_44_deploy() {
+    CMD=(./apps/database/deploy.sh "&&" ./apps/iam/deploy.sh)
+    EFFECT="migration 008c's approve and why_not bodies (break-glass and skeleton-version refusals); iam-api :8083's drafting and approval routes, the Policy UI's new tabs and ConfigMap iam-compiler (iam-api restarts)"
+    LOCK="yes, held by medcea.sh for both (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the database deploy first (the two function bodies), then the iam deploy. deploy-infra and the access deploy are not needed."
+           "Nobody's access changes: no route table, gate, grant or skeleton moves, and there is no 503 window. In the minute between the two the old page serves and cannot write."
+           "Approvals need both IAM switches, IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true: qa approves with their own token through config-api."
+           "Nothing approved is applied until the host operator runs ./apps/iam/apply.sh N (Policy → Apply an approved policy version, IAM 4.5).")
+    plan_run
+}
+POLICY_USER_RE='^[A-Za-z0-9][A-Za-z0-9_-]*$'   # --by of the IAM 4.4 modes (§14.7.7), no leading -
+POLICY_REASON_RE='^[^-]'                        # apply.sh's --reason rule: non-empty, not starting with -
+POLICY_REV_RE='^[A-Za-z0-9][A-Za-z0-9._/~^-]*$' # a git revision, no leading -
+policy_by_reason() {   # --by (a Keycloak username, remembered) and --reason → CMD += both
+    ask_match "Your Keycloak username (--by)" "$POLICY_USER_RE" "letters, digits, _ and -, starting with a letter or digit" "$BY_USER"
+    BY_USER="$ANSWER"
+    while :; do
+        ask_match "Reason to record (--reason)" "$POLICY_REASON_RE" "a reason is required, and it may not start with -"
+        [[ "$ANSWER" != *[[:cntrl:]]* ]] && break
+        warn "no control characters, please"
+    done
+    CMD+=(--by "$BY_USER" --reason "$ANSWER")
+}
+a_policy_propose_skeleton() {
+    echo "  --by is YOUR Keycloak username: recorded as the proposer (a claim), with your OS user;"
+    echo "  a qa person who did not run the proposal approves it in the Policy UI (Approval)."
+    CMD=(./apps/iam/apply.sh --propose-skeleton)
+    policy_by_reason
+    echo "  The change must be a commit (on a branch): this tree stays at the accepted skeleton."
+    ask_match "Git revision holding the skeleton change (--from-git)" "$POLICY_REV_RE" "a commit, branch or tag: letters, digits and . _ / ~ ^ -, starting with a letter or digit"
+    CMD+=(--from-git "$ANSWER")
+    EFFECT="database: a version of kind skeleton, submitted with its diff (a permanent record); no file, no artefact, no deploy"
+    LOCK="apply.sh's own (refused while another deploy runs)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("apply.sh prints what the change adds per role and both digests, then asks its own [y/N] here."
+           "Refused (nothing changed) when the commit's skeleton equals the accepted one or only narrows (deploy it as usual), fails the checker, or another change or skeleton version is open."
+           "Keycloak is read through a port-forward to resolve --by. Once qa approves it: check out the commit, then Policy → Apply an approved policy version (keep the commit on the deployed branch).")
+    plan_run
+}
+a_policy_withdraw_open() {
+    CMD=(./apps/iam/apply.sh --withdraw-open)
+    echo "  --by is YOUR Keycloak username, recorded in the reason (it is not looked up in Keycloak)."
+    policy_by_reason
+    EFFECT="database: the one open change or skeleton version (draft, submitted or approved) becomes withdrawn, by system:apply (a permanent record); nothing when none is open"
+    LOCK="apply.sh's own (refused while another deploy runs)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("The normal path is the Policy UI's Withdraw (an admin). This is for when the page cannot: a rollback of IAM 4.4, an aborted live test."
+           "apply.sh shows the open version and asks its own [y/N] here. An approved IAM 4.4 version must not survive a revert of 4.4: withdraw it first.")
+    plan_run
+}
+# IAM 4.5 (design §14.8): applying an approved version, rolling back to an earlier one, the
+# audit of an applied one; the deploy that ships it.
+a_policy_45_deploy() {
+    CMD=(./apps/database/deploy.sh "&&" ./apps/access/deploy.sh "&&" ./apps/iam/deploy.sh "&&" ./apps/backup/deploy.sh)
+    EFFECT="migration 008c's new_draft body; access-api reads dual_control; iam-api :8083's apply states and the Policy UI's rollback card, ConfigMap iam-compiler (iam-api restarts); the backup job's chain-head line"
+    LOCK="yes, held by medcea.sh for all four (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Order: the database deploy first (new_draft's guard), then the access deploy (dual_control; proof-gated, no access change), the iam deploy, then the backup deploy (the job script). deploy-infra is not needed."
+           "Nobody's access changes at the deploy: no route table, gate, grant or skeleton moves, and there is no 503 window. A window opens only when a version is applied."
+           "apply.sh, apply_check.py, health-check.sh and lib-policy-source.sh are host-side: they are current as soon as the tree is."
+           "Then: Policy → Apply an approved policy version.")
+    plan_run
+}
+POLICY_VERSION_RE='^[1-9][0-9]{0,8}$'   # apply.sh's <N> and <K>
+ask_policy_version() {   # ask_policy_version PROMPT → ANSWER
+    ask_match "$1" "$POLICY_VERSION_RE" "a version number: digits, not starting with 0 (apply.sh --status lists them)"
+}
+a_policy_apply() {
+    local v
+    ask_policy_version "Version to apply (approved by qa in the Policy UI)"
+    v="$ANSWER"
+    echo "  --by is YOUR Keycloak username: recorded as the person who applied the version (a claim, with"
+    echo "  your OS user). The approval is checked again against Keycloak before anything changes."
+    ask_match "Your Keycloak username (--by)" "$POLICY_BY_RE" "letters, digits and . _ @ -, starting with a letter or digit" "$BY_USER"
+    BY_USER="$ANSWER"
+    # first the check: read-only, no lock
+    CMD=(./apps/iam/apply.sh "$v" --check-only --by "$BY_USER")
+    EFFECT="nothing (--check-only: no lock, no file, read-only transactions; Keycloak and the realm's keys read through a port-forward; the health baseline)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the nine checks apply.sh verifies against FAILs now."
+           "It prints what the version changes per target and per role; the apply itself is offered after it.")
+    plan_run
+    [[ "$PLAN_GO" == yes ]] || return 0
+    if ! $DRY_RUN && (( LAST_RC != 0 )); then
+        warn "the check did not pass (exit $LAST_RC): nothing was changed, and the apply is not offered. Fix what it names, then run this again."
+        return 0
+    fi
+    reset_plan
+    echo
+    echo "  Then the apply itself:"
+    CMD=(./apps/iam/apply.sh "$v" --by "$BY_USER")
+    EFFECT="database: version $v applied in one transaction (its grants, functions and settings), the previous version superseded (a permanent record); state/policy-applied.yaml; every artefact that differs re-rendered (scoped modes)"
+    LOCK="apply.sh's own (refused while another deploy runs)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("apply.sh shows the per-target summary again and asks its own [y/N] here (no MEDCEA_CONFIRMED); it re-reads Keycloak right before the commit."
+           "If the version moves access-api's widening table, access-api answers 503 to account decisions into or out of those roles for about a minute."
+           "Exit 1: refused, or a failed rollout was reverted (the previous version is back). Exit 3: committed but not finished: Policy → Finish an interrupted apply."
+           "A skeleton version applies only from a checkout of its proposal's commit; afterwards ./apps/iam/deploy.sh (the Policy UI ships the skeleton).")
+    plan_run
+}
+a_policy_rollback() {
+    local k
+    ask_policy_version "Version to roll back to (an earlier applied version, superseded since)"
+    k="$ANSWER"
+    ask_policy_by
+    while :; do
+        ask_match "Reason to record (--reason)" "$POLICY_REASON_RE" "a reason is required, and it may not start with -"
+        [[ "$ANSWER" != *[[:cntrl:]]* ]] && break
+        warn "no control characters, please"
+    done
+    CMD=(./apps/iam/apply.sh --rollback-to "$k" --by "$BY_USER" --reason "$ANSWER")
+    EFFECT="database: version $k's matrix and waivers restored as a NEW version of kind rollback, applied at once (a permanent record); an open change or skeleton version is withdrawn; state/policy-applied.yaml; every artefact that differs re-rendered"
+    LOCK="apply.sh's own (refused while another deploy runs)"; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Allowed only to a superseded version that qa approved (change, skeleton) or confirmed (bootstrap, rollback), and refused when today's skeleton would make it grant more than was approved."
+           "apply.sh then shows the diff against the applied version and asks you to type yes itself, on this terminal (no MEDCEA_CONFIRMED)."
+           "To see first whether it would apply: the same command with --check-only (read-only)."
+           "Afterwards a qa person other than $BY_USER confirms the rollback in the Policy UI (Confirm); health WARNs until then.")
+    plan_run
+}
+a_policy_audit() {
+    ask_policy_version "Version to audit (an applied or superseded one)"
+    CMD=(./apps/iam/apply.sh --audit "$ANSWER")
+    EFFECT="nothing (one read-only transaction; the version recompiled at its recorded commit, offline)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Checks its entries digest, the chain, the approval's signature against the key recorded at apply, and that its recorded artefact digests recompile."
+           "Exit 0: all match; 1: a mismatch; 2: it cannot be reproduced (a dirty or unknown commit, a commit not in this repository).")
+    plan_run
+}
+# IAM 4.2b (design §14.5): every scoped mode, each re-rendering only what drifted.
+a_policy_scoped() {
+    CMD=(./deploy-infra.sh --policy-only "&&" ./infra/deploy-workbench.sh --policy-only)
+    local c
+    for c in access edge-wizard frontend iam monitor mqtt-explorer scheduler superset; do
+        CMD+=("&&" "./apps/$c/deploy.sh" --gate-only)
+    done
+    EFFECT="only the policy artefacts that differ from the applied policy's compile (route table, NetworkPolicies, Node-RED's rights, Grafana's roles, pgAdmin's claims, every sign-in gate, the workbench's gate and hops, the wizard's roles, Superset's role mapping); unchanged ones are left alone"
+    LOCK="yes, held by medcea.sh for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Each prints one line per target: unchanged, re-rendered or not deployed. On a platform that matches the policy nothing changes and nothing restarts."
+           "A drifted sign-in gate rolls only its proxy. Grafana and pgAdmin, when their roles drifted, redeploy their whole section (they restart; pgAdmin's sessions end)."
+           "The onboarding wizard restarts only when its roles changed, and never during an onboarding run: then it says deferred and the chain stops (exit 4); run this again when the run has finished. Superset likewise defers a drifted mapping while its wheel cache is incomplete: run ./apps/superset/deploy.sh first."
+           "Use it when ./health-check.sh's Policy artefacts names a stale target. ./apps/iam/apply.sh --resume runs the same modes itself.")
+    plan_run
+}
+# Superset stage C (plan §4 B-5, B-8): after the skeleton version that adds Superset's host,
+# group and service identity is applied, the database deploy gives svc_superset its password
+# and Secret, and the iam deploy ships that skeleton to the Policy UI.
+a_policy_superset_skeleton() {
+    CMD=(./apps/database/deploy.sh "&&" env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh "&&" ./health-check.sh)
+    EFFECT="database: svc_superset's password (a SCRAM verifier) and Secret db-svc-superset; iam-api: ConfigMap iam-compiler with the applied skeleton (iam-api restarts); then the health check (read-only)"
+    LOCK="yes, held by medcea.sh for all three (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Run it right after ./apps/iam/apply.sh N of the skeleton version (Superset's host, group analysis, svc_superset), from that checkout. Between the git checkout of the proposal's commit and the end of that apply every compiling deploy exits 2 (the skeleton gate): run nothing else in between."
+           "Order: the database deploy first (Superset's data connection cannot sign in without it), then the iam deploy (MEDCEA_CONFIRMED=1: it may finish an interrupted apply without asking)."
+           "Draft the change version with Superset's cells only after this has finished: the Policy UI checks a draft against the skeleton its own pod ships, and 'from defaults' reads that pod's defaults.yaml."
+           "Do not run ./deploy-apps.sh --all instead: it is not needed here, and Superset skips until a version gives roles a setting."
+           "Health: the Access policy version check WARNs that git may lag the applied matrix until the change version is applied; nothing FAILs.")
+    plan_run
+}
+a_policy_superset_install() {
+    CMD=(./apps/superset/deploy.sh "&&" ./health-check.sh "&&" tests/iam-hosts.sh "&&" tests/iam-network.sh "&&" tests/iam-signin.sh
+         "&&" ./apps/backup/backups.sh now "&&" ./apps/backup/backups.sh verify)
+    EFFECT="Superset's first install (database superset, role superset_meta, Secret, ConfigMap, the init Job, Deployment superset, the portal card); the checks: health, live gates, a throwaway probe pod (deleted), one throwaway Keycloak account per role (deleted on exit); then one backup run (a new dated folder in BACKUP_DIR)"
+    LOCK="yes, held by medcea.sh for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Only after the change version with Superset's cells is applied (./apps/iam/apply.sh N): its rollout printed 'not deployed' for Superset, so this is the first install."
+           "The first install pulls the image and waits for the init Job (up to ~20 minutes). Each step runs only if the one before it succeeded."
+           "Expected: Superset roles OK in the health check; superset:8088 times out from the probe pod; every role the policy maps signs in, the others are refused with \"No access to Superset\"; the backup lists db/superset.dump.")
+    plan_run
+}
+a_policy_export() {
+    CMD=("${POLICY_CLI[@]}" export-applied)
+    EFFECT="nothing (prints defaults.yaml with its matrix: and waivers: replaced by the applied version's; medcea.sh never writes the file)"
+    NOTES=("To commit it: python3 apps/iam/compiler/cli.py export-applied > apps/iam/policy/defaults.yaml, review the diff, commit. Git may lag the applied version; that is allowed (health WARNs 'git may lag')."
+           "Exit 2 when no version is applied on this host (no state/policy-applied.yaml).")
+    plan_run
+}
+a_policy_break_glass() {
+    # Shown, never run: break-glass is typed at the terminal by a person, and recorded.
+    echo
+    echo -e "${BOLD}Policy break-glass — how it works (medcea.sh runs none of it)${NC}"
+    echo "  Break-glass compiles one deploy from a policy file of your own instead of the applied version:"
+    echo "    MEDCEA_POLICY_FILE=<file.yaml> MEDCEA_POLICY_BREAK_GLASS=\"<reason>\" ./apps/<component>/deploy.sh"
+    echo "  (or ./deploy-infra.sh). The deploy then asks you to type the word break-glass at the terminal;"
+    echo "  without a terminal it refuses. With MEDCEA_POLICY_FILE exported, ./deploy-apps.sh --break-glass \"<reason>\""
+    echo "  asks once and records one event for every component it runs; ./install.sh --break-glass \"<reason>\""
+    echo "  asks once and records two (infrastructure, applications). Without --break-glass both ignore an"
+    echo "  exported MEDCEA_POLICY_FILE."
+    echo "  - It changes only the matrix and the waivers. The file's skeleton must equal the accepted one,"
+    echo "    and its iam_policy and iam_users rows must equal the applied version's: break-glass can never"
+    echo "    change who approves policy or account changes."
+    echo "  - It does NOT bypass the skeleton gate: a git change that widens access is refused under"
+    echo "    break-glass too, before anything is recorded."
+    echo "  - The file is copied to state/break-glass/<time>-<pid>.yaml (that copy is what is compiled) and"
+    echo "    recorded as break_glass_seen (file sha256, reason, your OS user, the components) before any compile."
+    echo "  - Health (Access policy version) FAILs while it is open. It ends per component: the next normal"
+    echo "    deploy of that component (without MEDCEA_POLICY_FILE) records break_glass_ended."
+    echo "    ./deploy-infra.sh and ./deploy-apps.sh --all end it everywhere."
+    echo "  - Write the decision in your operations log. See docs/manual: admin, Policy break-glass."
+    return 0
+}
+a_policy_tests() {
+    CMD=(python3 tests/test_policy.py)
+    EFFECT="nothing (offline policy unit tests)"
+    plan_run
+}
+a_iam_check() {
+    CMD=(tests/iam-check.sh)
+    EFFECT="nothing (pod mounts; a forged request inside each pod, which must be logged as refused)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_iam_hosts() {
+    CMD=(tests/iam-hosts.sh)
+    EFFECT="nothing (each host's live gate, 403 page, pod freshness and scopes against the policy)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_iam_schema() {
+    CMD=(tests/iam-schema.sh)
+    EFFECT="nothing (route-table copies, schemas, grants, hash chain; the chain probe is rolled back)"
+    SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_iam_db() {
+    local ns db s
+    cfg_literal NAMESPACE medcea; ns="$ANSWER"
+    cfg_literal POSTGRES_DB medcea_db; db="$ANSWER"
+    echo "  Read-only (default_transaction_read_only); tests/iam-db.sh's own default is the throwaway fixture."
+    ask_match "Namespace of the PostgreSQL pod" "$NS_RE" "a Kubernetes namespace: lower-case letters, digits and -" "$ns"; ns="$ANSWER"
+    ask_match "PostgreSQL pod" "$POD_RE" "a pod name: lower-case letters, digits, - and ." "rdbms-postgresql-0"; local pod="$ANSWER"
+    ask_match "Database" "$DB_RE" "letters, digits and _" "$db"; db="$ANSWER"
+    ask_match "Mode (auto reads the database's setting)" '^(auto|false|true|legacy)$' "auto, false, true or legacy" "auto"; local mode="$ANSWER"
+    CMD=(tests/iam-db.sh --namespace "$ns" --pod "$pod" --db "$db" --mode "$mode")
+    ask_list "Sections, separated by spaces (Enter = catalog matrix prerequest actor writes drift)" \
+        '^(catalog|matrix|prerequest|actor|writes|drift)$' "one of catalog matrix prerequest actor writes drift" opt
+    for s in "${LIST[@]}"; do CMD+=(--section "$s"); done
+    EFFECT="nothing (read-only session; write sections skipped)"
+    SUDO=mk8s
+    plan_run
+}
+a_iam_db_probes() {
+    local s
+    CMD=(tests/iam-db.sh --write-probes)
+    ask_match "Mode" '^(auto|false|true|legacy)$' "auto, false, true or legacy" "auto"
+    CMD+=(--mode "$ANSWER")
+    ask_list "Sections, separated by spaces (Enter = the default set)" \
+        '^(catalog|matrix|prerequest|actor|writes|access|drift)$' "one of catalog matrix prerequest actor writes access drift" opt
+    for s in "${LIST[@]}"; do CMD+=(--section "$s"); done
+    EFFECT="the throwaway fixture only (namespace medcea-iamtest; every probe rolled back)"
+    LEVEL=change; SUDO=mk8s
+    NOTES=("Needs a fixture that is up, loaded and applied: first 'Build the throwaway database and keep it' (Health and tests). 'Build and test the throwaway database' (run) deletes its fixture when it ends, so it leaves nothing to probe."
+           "Refused against any other namespace. Afterwards: 'Delete the throwaway database'.")
+    plan_run
+}
+a_iam_signin() {
+    CMD=(tests/iam-signin.sh)
+    EFFECT="Keycloak: one throwaway account per role (test-<role>-<hex>), deleted on exit; login events stay"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_iam_workbench() {
+    CMD=(tests/iam-workbench.sh)
+    EFFECT="Keycloak: two throwaway accounts (test-admin-/test-bio-<hex>), deleted on exit; cluster: one notebook server and its home volume, deleted on exit; the throwaway admin stays a hub user"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Needs WORKBENCH_ENABLED=true and IAM_GATES=true. Starts one notebook server (the first start pulls the image).")
+    plan_run
+}
+a_iam_network() {
+    CMD=(tests/iam-network.sh)
+    EFFECT="cluster: a busybox probe pod, deleted on exit"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Meaningful only with IAM_NETPOL=true.")
+    plan_run
+}
+a_iam_access() {
+    CMD=(tests/iam-access.sh)
+    EFFECT="Keycloak: 4 throwaway accounts, deleted on exit; database: their decisions stay in append-only iam.account_decision"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    echo "  --with-review creates THIS QUARTER'S access review as test-qa2: permanent, one per quarter."
+    if ask_yn "Add --with-review (never on a platform whose qa has yet to make this quarter's review)?" n; then
+        CMD+=(--with-review); LEVEL=destroy
+        EFFECT+="; a PERMANENT access review for this quarter"
+    fi
+    NOTES=("Run after ./apps/access/deploy.sh. It leaves permanent append-only records.")
+    plan_run
+}
+a_iam_mqtt() {
+    CMD=(tests/iam-mqtt.sh)
+    EFFECT="Keycloak: 3 throwaway accounts, deleted on exit; database: one applied deactivation decision stays (append-only); cluster: short-lived probe pods"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    echo "  --commissioning UNIT (M11) flags an existing unit for commissioning for up to a minute"
+    echo "  (no run may be running or scheduled on it) and leaves append-only proposal records."
+    if ask_yn "Also test commissioning on one unit (--commissioning UNIT)?" n; then
+        ask_match "Unit code (no run running or scheduled on it)" "$UNIT_RE" "$UNIT_HINT"
+        CMD+=(--commissioning "$ANSWER")
+        EFFECT="Keycloak: 4 throwaway accounts (one qa), deleted on exit; database: one applied deactivation decision, the unit's commissioning proposals, approvals and policy-history events stay (append-only); the unit is flagged for up to a minute; cluster: short-lived probe pods"
+    fi
+    NOTES=("Needs IAM_MQTT_PERSON=true. Run after ./apps/iam/deploy.sh and ./apps/mqtt-explorer/deploy.sh.")
+    plan_run
+}
+a_iam_policy() {
+    local m
+    local -a modes=("" --apply --change)
+    echo "  tests/iam-policy.sh creates 4 or 5 throwaway accounts in Keycloak (deleted on exit); the modes differ in what they leave on production."
+    menu "Which mode?" \
+        "default|Drafted, approved and withdrawn: nothing is applied (IAM 4.4)." \
+        "--apply|A no-op version applied for real: production's access does not change, the version stays applied (IAM 4.5)." \
+        "--change|One narrowing applied, then rolled back to the version applied before, the rollback confirmed by a throwaway qa (IAM 4.5)."
+    [[ "$PICK" == b ]] && return 10
+    m="${modes[PICK - 1]}"
+    CMD=(tests/iam-policy.sh)
+    [[ -n "$m" ]] && CMD+=("$m")
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    case "$m" in
+        "") EFFECT="Keycloak: 4 throwaway accounts, deleted on exit; database: one change version drafted, approved and withdrawn, its events and approval evidence stay (append-only)" ;;
+        --apply) EFFECT="Keycloak: 5 throwaway accounts, deleted on exit; production: one change version with the applied content applied for real (a permanent record; it becomes the applied version, no grant, route or gate changes)" ;;
+        --change) EFFECT="Keycloak: 5 throwaway accounts, deleted on exit; production: one narrowing (a role outside qa's loses a privilege) applied for real, then a rollback version applied and confirmed (permanent records); the role's access changes for the minutes in between" ;;
+    esac
+    NOTES=("Needs IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true, run after Deploy IAM 4.4. Refused while a change or skeleton version is open."
+           "If it stops half-way it withdraws its version (in the Policy UI, else apply.sh --withdraw-open) before deleting the accounts.")
+    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the nine checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
+                             "If it stops after its apply it finishes it (--resume)$([[ "$m" == --change ]] && echo ", rolls it back and has the rollback confirmed") before deleting the accounts.")
+    plan_run
+}
+a_fixture_run() {
+    CMD=(tests/iam-db-fixture.sh run)
+    EFFECT="cluster: creates namespace medcea-iamtest, runs the whole IAM Phase 2 sequence there and deletes it on exit; production is only read"
+    LOCK="yes, while it reads production (load)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+a_fixture_keep() {
+    ask_match "Database deploy mode to apply in the fixture" '^(false|true)$' "false or true" "false"
+    CMD=(tests/iam-db-fixture.sh up "&&" tests/iam-db-fixture.sh load "&&" tests/iam-db-fixture.sh apply "$ANSWER")
+    EFFECT="cluster: creates namespace medcea-iamtest with production's schema and medcea data (read-only from production) and KEEPS it; production is only read"
+    LOCK="yes, while it reads production (load)"; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Each command runs only if the one before it succeeded."
+           "Then: 'Database write probes (fixture only)'. When done: 'Delete the throwaway database'.")
+    [[ "$ANSWER" == true ]] && NOTES+=("The full run applies true only after the services step; if apply true refuses here, use false.")
+    plan_run
+}
+a_fixture_down() {
+    CMD=(tests/iam-db-fixture.sh down)
+    EFFECT="deletes namespace medcea-iamtest (the fixture only, never production)"
+    LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    plan_run
+}
+
+# ── Edge devices ──
+a_flash() {
+    local erase=true
+    CMD=(./edge/flash-device.sh)
+    echo "  Plug the ESP32 in over USB first. WiFi name and passphrase are asked by the script itself."
+    if ask_yn "Bench board with no platform identity (--unregistered: WiFi only, no slot, no database)?" n; then
+        CMD+=(--unregistered)
+        EFFECT="the board's flash; no database row, no sign-in"
+    else
+        CFG_NEEDED=yes
+        menu "Role of the board" "Ask me in the wizard|" "SENSE|sensors: publishes telemetry" "CONTROL|relays: switches equipment"
+        [[ "$PICK" == b ]] && return 10
+        (( PICK == 2 )) && CMD+=(--role SENSE)
+        (( PICK == 3 )) && CMD+=(--role CONTROL)
+        # flash-device.sh matches these exactly (awk $2==u), unlike units.sh
+        echo "  Unit and zone codes here are matched exactly: type them as the Units tab shows them (case matters)."
+        ask_match "Restrict the slot menu to one unit code, exact case (Enter = any)" "$UNIT_RE" "$UNIT_HINT" "" optional
+        [[ -n "$ANSWER" ]] && CMD+=(--unit "$ANSWER")
+        ask_match "Restrict the slot menu to one zone code, exact case (Enter = any)" "$UNIT_RE" "$UNIT_HINT" "" optional
+        [[ -n "$ANSWER" ]] && CMD+=(--zone "$ANSWER")
+        ask_yn "Also ask the advanced template parameters (--advanced)?" n && CMD+=(--advanced)
+        ask_yn "Flash and configure, but do NOT write the device row (--no-register)?" n && CMD+=(--no-register)
+        flash_ui_question
+        EFFECT="the board's flash, medcea.device/component rows and its MQTT credential, edge/provisioned/<hostname>.json"
+        NOTES+=("A registered run signs you in to Keycloak (device code, or the --ui link).")
+    fi
+    while :; do
+        ask_text "Serial port (Enter = autodetect /dev/ttyUSB*, /dev/ttyACM*)"
+        [[ -z "$ANSWER" ]] && break
+        if [[ "$ANSWER" =~ ^/dev/[A-Za-z0-9._/-]+$ && -e "$ANSWER" ]]; then CMD+=(--port "$ANSWER"); break; fi
+        warn "no such device: $ANSWER"
+    done
+    ask_yn "Use only firmware already in edge/firmware/ (--offline)?" n && CMD+=(--offline)
+    if ask_yn "Skip erasing the flash (--no-erase; only for a board you erased once already)?" n; then
+        CMD+=(--no-erase); erase=false
+    fi
+    if $erase; then LEVEL=destroy; EFFECT="ERASES the board's flash; then $EFFECT"; else LEVEL=change; fi
+    id -nG 2>/dev/null | grep -qw dialout || NOTES+=("This session is not in group dialout: the serial port may be refused.")
+    SUDO=no
+    plan_run
+}
+flash_ui_question() {   # --ui only when its port is free (it cannot move under Keycloak)
+    # flash-device.sh --ui binds 8088 unless --ui-port; Keycloak's redirect URI for
+    # client edge-wizard is registered on EDGE_WIZARD_PORT, where the cea-edge-wizard
+    # service also listens.
+    local port busy=""
+    cfg_literal EDGE_WIZARD_PORT 8088; port="$ANSWER"
+    [[ "$port" =~ $INT_RE ]] || port=8088
+    if systemctl --user is-active --quiet cea-edge-wizard 2>/dev/null; then
+        busy="the cea-edge-wizard service (./apps/edge-wizard/deploy.sh) is running and listens on it"
+    elif command -v ss >/dev/null 2>&1 && [[ -n "$(ss -ltnH "sport = :$port" 2>/dev/null)" ]]; then
+        busy="something already listens on it"
+    fi
+    if [[ -n "$busy" ]]; then
+        cfg_literal ONBOARD_DOMAIN ""
+        echo "  --ui is not offered: it needs port $port (Keycloak's redirect URI is fixed to it), and $busy."
+        echo "  For a browser, use the always-on wizard instead: ${ANSWER:+https://$ANSWER, }the link in the Config UI's Devices tab."
+        return 0
+    fi
+    echo "  --ui serves this run's wizard on port $port, which must stay free (the cea-edge-wizard service uses it too)."
+    if ask_yn "Also serve the wizard in a browser (--ui; open the printed link with ?t=)?" n; then
+        CMD+=(--ui)
+        [[ "$port" != 8088 ]] && CMD+=(--ui-port "$port")
+    fi
+    return 0
+}
+a_flash_help() {
+    CMD=(./edge/flash-device.sh --help)
+    EFFECT="nothing (prints every option)"
+    plan_run
+}
+DNS_RE='^[a-z0-9][a-z0-9-]{0,31}$'                 # a board's one name (flash-device.sh --send-test)
+# Which records can be sent as: a REGISTERED SENSE or CONTROL board with a broker
+# credential (mqtt_test.py's check_record refuses the rest with exit 2). It prints the
+# file names that pass, one per line, and never a value of any record.
+SENDABLE_PY='
+import json, os, re, sys
+# A board onboarded again (moved, renamed) leaves its old record: only the latest
+# record of each MAC is offered (mqtt_test.superseded_by, the same rule).
+latest = {}
+for path in sys.argv[1:]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+        mq = rec.get("mqtt")
+        ok = (rec.get("state") == "REGISTERED" and rec.get("role") in ("SENSE", "CONTROL")
+              and isinstance(mq, dict) and all(isinstance(mq.get(k), str) and mq.get(k)
+                                               for k in ("username", "password")))
+        mac = re.sub(r"[:.-]", "", str(rec.get("mac") or "").lower()) or path
+        at = rec.get("flashed_at") if isinstance(rec.get("flashed_at"), str) else ""
+        at = at or "%020.6f" % os.path.getmtime(path)
+    except (OSError, ValueError, AttributeError):
+        continue
+    if mac not in latest or at > latest[mac][0]:
+        latest[mac] = (at, path, ok)
+for at, path, ok in sorted(latest.values(), key=lambda v: v[1]):
+    if ok:
+        print(os.path.basename(path)[:-5])
+'
+a_send_test() {
+    local -a files=() names=()
+    local f n
+    for f in edge/provisioned/*.json; do [[ -f "$f" ]] && files+=("$f"); done
+    if (( ${#files[@]} == 0 )); then
+        echo "  No provisioned records in edge/provisioned/: onboard a board first (Flash and register a board)."
+        return 0
+    fi
+    while IFS= read -r n; do [[ -n "$n" ]] && names+=("$n"); done < <(python3 -c "$SENDABLE_PY" "${files[@]}")
+    if (( ${#names[@]} == 0 )); then
+        echo "  No record in edge/provisioned/ belongs to a registered SENSE or CONTROL board with a broker"
+        echo "  credential (an --unregistered board has none): onboard one first (Flash and register a board)."
+        return 0
+    fi
+    echo "  Registered boards with a provisioned record (edge/provisioned/):"
+    printf '    %s\n' "${names[@]}"
+    (( ${#files[@]} > ${#names[@]} )) && \
+        echo "  ($(( ${#files[@]} - ${#names[@]} )) other record(s) left out: unregistered, without a broker credential, or an older record of a board onboarded again since.)"
+    while :; do
+        ask_match "Board name (as listed)" "$DNS_RE" "a board name is lower-case letters, digits and -, starting with a letter or digit (e.g. unit01-s-zone01)"
+        in_list "$ANSWER" "${names[@]}" && break
+        $ASK_CANCELLED && return 0
+        warn "no record of a registered board edge/provisioned/$ANSWER.json"
+    done
+    CMD=(./edge/flash-device.sh --send-test "$ANSWER")
+    EFFECT="nothing stored on the host; publishes one TS message (tag _test) as $ANSWER, which ingest stores in medcea.measurement"
+    CFG_NEEDED=yes
+    NOTES=("Connects with the board's own broker credential from its record, over TLS; no USB, no sign-in."
+           "Look for tag _test in the MQTT Explorer, or msg_type TS in medcea.measurement.")
+    plan_run
+}
+a_wizard_service() {
+    CMD=(./apps/edge-wizard/deploy.sh)
+    EFFECT="host: the cea-edge-wizard systemd user service, linger, edge/.venv; cluster: its Service, Endpoints and Ingress"
+    LOCK=yes; LEVEL=change; SUDO="mk8s (the Ingress); the user service needs none"; CFG_NEEDED=yes
+    NOTES=("Needs EDGE_WIZARD_SECRET in config.env (written by ./deploy-infra.sh).")
+    plan_run
+}
+a_wizard_unit() {
+    CMD=(./edge/wizard-daemon.sh --install-unit)
+    EFFECT="nothing (prints the systemd user unit; writes nothing)"
+    CFG_NEEDED=yes
+    plan_run
+}
+
+# ── Policy (read-only compiler commands, no cluster) ──
+POLICY_CLI=(python3 apps/iam/compiler/cli.py)
+a_pol_check() {
+    CMD=("${POLICY_CLI[@]}" check)
+    EFFECT="nothing (exit 1 on a violated invariant)"
+    plan_run
+}
+a_pol_hosts() {
+    CMD=("${POLICY_CLI[@]}" hosts)
+    EFFECT="nothing"
+    plan_run
+}
+a_pol_proxy() {
+    local -a hosts items=()
+    local h
+    mapfile -t hosts < <("${POLICY_CLI[@]}" hosts 2>/dev/null | awk '$1 ~ /^[A-Z_]+_DOMAIN$/ { print $1 }')
+    if (( ${#hosts[@]} == 0 )); then
+        warn "'cli.py hosts' listed no host (is the policy valid? try Policy → check)"; return 0
+    fi
+    for h in "${hosts[@]}"; do items+=("$h|"); done
+    menu "Which host?" "${items[@]}"
+    [[ "$PICK" == b ]] && return 10
+    CMD=("${POLICY_CLI[@]}" compile proxy "${hosts[PICK - 1]}")
+    EFFECT="nothing (prints the allowed_groups that host's gate gets)"
+    plan_run
+}
+a_pol_routes() {
+    CMD=("${POLICY_CLI[@]}" compile routes)
+    PIPE=(python3 -m json.tool)
+    EFFECT="nothing (the route table as in ConfigMap medcea-iam-lib, pretty-printed)"
+    plan_run
+}
+a_pol_dbroles() {
+    menu "Which list?" "--names|the database roles the policy manages" \
+        "--passwords|each role and its config.env password VARIABLE (names, not passwords)" \
+        "--logins|the login roles"
+    [[ "$PICK" == b ]] && return 10
+    local -a f=(--names --passwords --logins)
+    CMD=("${POLICY_CLI[@]}" db-roles "${f[PICK - 1]}")
+    EFFECT="nothing"
+    plan_run
+}
+a_pol_grants() {
+    ask_match "Mode" '^(additive|enforce|verify)$' "additive, enforce or verify" "verify"
+    CMD=("${POLICY_CLI[@]}" compile grants --mode "$ANSWER")
+    ask_yn "Leave schema iam and access_svc out (--without-iam)?" n && CMD+=(--without-iam)
+    EFFECT="nothing (prints SQL; runs none)"
+    NOTES=("Never pipe it into psql by hand: ./apps/database/deploy.sh applies it.")
+    plan_run
+}
+a_pol_netpol() {
+    local s
+    cfg_literal NAMESPACE medcea
+    ask_match "Namespace" "$NS_RE" "a Kubernetes namespace: lower-case letters, digits and -" "$ANSWER"
+    CMD=("${POLICY_CLI[@]}" compile netpol --namespace "$ANSWER")
+    ask_list "Node IP address(es), separated by spaces (Enter = none)" "$IPV4_RE" "an IPv4 address like 192.168.1.10" opt
+    for s in "${LIST[@]}"; do CMD+=(--node-ip "$s"); done
+    EFFECT="nothing (prints the NetworkPolicies as JSON; ./deploy-infra.sh applies the real ones)"
+    plan_run
+}
+
+# ── Backups (apps/backup) ──
+backup_folder() {   # → ANSWER: a dated backup folder, or "" for the newest complete one
+    ask_match "Backup folder, e.g. 20261102-023000Z (Enter = the newest complete one)" "$STAMP_RE" \
+        "a folder name like 20261102-023000Z (Backups → List the backups shows them)" "" optional
+}
+a_backup_now() {
+    CMD=(./apps/backup/backups.sh now)
+    EFFECT="one run of the nightly backup now (a Job): a new dated folder in BACKUP_DIR; folders older than BACKUP_KEEP_DAYS are deleted after it"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Waits for the Job (up to an hour) and prints its log, which names files and sizes, never a secret."
+           "Needs ./apps/backup/deploy.sh first (Applications → Deploy one component → backup).")
+    plan_run
+}
+a_backup_list() {
+    CMD=(./apps/backup/backups.sh list)
+    EFFECT="nothing (the dated folders in BACKUP_DIR: complete or not, size, files)"
+    CFG_NEEDED=yes
+    plan_run
+}
+a_backup_verify() {
+    backup_folder
+    CMD=(./apps/backup/backups.sh verify)
+    [[ -n "$ANSWER" ]] && CMD+=("$ANSWER")
+    EFFECT="nothing (every file against the folder's SHA256SUMS, written at backup time)"
+    CFG_NEEDED=yes
+    plan_run
+}
+a_backup_restore() {
+    backup_folder
+    CMD=(./apps/backup/backups.sh restore-help)
+    [[ -n "$ANSWER" ]] && CMD+=("$ANSWER")
+    EFFECT="nothing: prints the restore steps (database, Keycloak, a workbench home, Node-RED, Grafana) with that folder's paths"
+    CFG_NEEDED=yes
+    NOTES=("Shown, not run: a restore stops services and drops databases; you run the steps you need.")
+    plan_run
+}
+
+# Areas: "function|label|purpose". The order is the menu's.
+AREA_INSTALL=(
+    "a_install|Install or update everything|Infrastructure, then every application, then a health check."
+    "a_install_infra|Infrastructure only|MicroK8s, Postgres, Keycloak, Grafana, Node-RED, portal, AI workbench."
+    "a_install_apps|Applications only|Database schema, wizard, config UI, scheduler, monitor, reports, flows, access, backups."
+    "a_uninstall_apps|Uninstall applications|All, or the ones you name; infrastructure keeps running; data kept unless purged."
+    "a_uninstall_infra|Uninstall the infrastructure|Every service, every application and ALL data; keeps MicroK8s."
+    "a_uninstall_all|Uninstall everything|All of the above plus MicroK8s, the wizard service, logs and credentials files."
+)
+AREA_INFRA=(
+    "a_infra_deploy|Deploy or update the infrastructure|./deploy-infra.sh: after a pull, a config change or a realm key rotation."
+    "a_infra_configure|Review every setting, then deploy|./deploy-infra.sh --configure."
+    "a_configure_only|Edit settings only, no deploy|./infra/configure.sh: config.env by question and answer."
+    "a_workbench|Redeploy only the AI workbench|./infra/deploy-workbench.sh (JupyterHub)."
+    "a_workbench_switch|Turn the AI workbench on or off|WORKBENCH_ENABLED in config.env, then ./deploy-infra.sh."
+    "a_infra_reset|Reset: wipe the namespace, keep MicroK8s|./deploy-infra.sh --reset: every service and ALL data."
+    "a_infra_uninstall|Remove MicroK8s entirely|./deploy-infra.sh --uninstall: all cluster data."
+    "a_infra_help|Show deploy-infra.sh's help|Read-only."
+    "a_manual_publish|Publish the manual to the portal|./infra/publish-manual.sh: build docs/manual and serve it at /manual/; nothing else."
+)
+AREA_APPS=(
+    "a_apps_menu|Pick components from a menu|./deploy-apps.sh (its own checkbox menu)."
+    "a_apps_all|Install or update every component|./deploy-apps.sh --all."
+    "a_apps_one|Deploy one component|./apps/<component>/deploy.sh."
+    "a_apps_uninstall|Uninstall components|./deploy-apps.sh --uninstall: all, or the ones you name."
+    "a_apps_uninstall_one|Uninstall one component directly|./apps/<component>/uninstall.sh (no confirmation of its own)."
+    "a_apps_list|List the components|./deploy-apps.sh --help."
+    "a_superset_deploy|Install Superset|./apps/superset/deploy.sh, then the health check; skipped until the applied policy gives roles a setting."
+    "a_superset_gate|Re-render Superset's gate|./apps/superset/deploy.sh --gate-only: only the role mapping, only when it drifted."
+    "a_superset_uninstall|Uninstall Superset|./apps/superset/uninstall.sh: its data kept unless purged."
+)
+AREA_UNITS=(
+    "a_units_list|List operators and their units|Units in effect and units waiting for qa."
+    "a_units_assign|Assign units to an operator|Proposes it; a qa person other than you confirms it."
+    "a_units_remove|Remove units from an account|At once; one still waiting for qa is withdrawn."
+    "a_units_remove_sub|Remove units of a deleted account|By its Keycloak id (units.sh list prints it)."
+)
+AREA_SWITCHES=(
+    "a_sw_gates|IAM_GATES — sign-in gates from the policy|Each oauth2-proxy, Grafana's role setting, the AI workbench, the onboarding wizard and pgAdmin admit the roles the policy compiles for their host."
+    "a_sw_netpol|IAM_NETPOL — NetworkPolicies per pod|Only each application pod's listed callers can connect."
+    "a_sw_enforce|IAM_ENFORCE — services refuse|Python services refuse instead of logging 'would refuse'."
+    "a_sw_jwt|IAM_POSTGREST_JWT — config-api verifies tokens|Phase 2b: PostgREST checks the person's token."
+    "a_sw_svc|IAM_DB_SERVICE_ROLES — own database roles|Phase 2.5: each client logs in as its own role, not postgres."
+    "a_sw_dbroles|IAM_DB_ROLES — the database enforces|Phase 2a: per-role grants, RLS, guard triggers."
+    "a_rollback_27|IAM 2.7 rollback (shows the steps)|Account decisions back out; shown, not run."
+    "a_sw_mqtt|IAM_MQTT_PERSON — personal MQTT Explorer credentials|IAM 3.5: each person's own topics; the shared account retired."
+    "a_sw_full|Bring IAM to full enforcement|Every switch still false, by its own enable recipe, in order, under one lock; run again to resume."
+)
+AREA_HEALTH=(
+    "a_health|Health check|Every service and IAM control: OK / WARN / FAIL."
+    "a_routes_diff|Route table vs code (offline)|python3 tests/iam-routes-diff.py."
+    "a_policy_tests|Policy unit tests (offline)|python3 tests/test_policy.py."
+    "a_iam_check|IAM mounts and forged requests|tests/iam-check.sh (read-only)."
+    "a_iam_hosts|Live gates vs the policy|tests/iam-hosts.sh (read-only)."
+    "a_iam_schema|Route-table copies, schemas, hash chain|tests/iam-schema.sh (read-only)."
+    "a_iam_db|Database IAM checks, read-only|tests/iam-db.sh against production."
+    "a_iam_db_probes|Database write probes (fixture only)|tests/iam-db.sh --write-probes, every probe rolled back."
+    "a_iam_signin|Sign-in test, one account per role|tests/iam-signin.sh: throwaway Keycloak accounts."
+    "a_iam_network|NetworkPolicy test|tests/iam-network.sh: a throwaway probe pod."
+    "a_iam_access|Account decisions test|tests/iam-access.sh: throwaway accounts, permanent decision records."
+    "a_fixture_run|Build and test the throwaway database|tests/iam-db-fixture.sh run: the whole sequence, then deletes namespace medcea-iamtest."
+    "a_fixture_keep|Build the throwaway database and keep it|tests/iam-db-fixture.sh up, load, apply: for the write probes."
+    "a_fixture_down|Delete the throwaway database|tests/iam-db-fixture.sh down."
+    "a_iam_workbench|Workbench: admin cannot open others' servers|tests/iam-workbench.sh: throwaway accounts, takes the deploy lock."
+    "a_iam_mqtt|MQTT Explorer personal credentials test|tests/iam-mqtt.sh: throwaway accounts, takes the deploy lock."
+    "a_iam_policy|Policy drafting, approval and apply test (IAM 4.4, 4.5)|tests/iam-policy.sh: throwaway accounts; a version withdrawn, or applied for real (--apply, --change)."
+)
+AREA_EDGE=(
+    "a_flash|Flash and register a board|./edge/flash-device.sh: an ESP32 over USB into a unit/zone slot."
+    "a_flash_help|Show flash-device.sh's options|Read-only."
+    "a_send_test|Send a test message as a board|./edge/flash-device.sh --send-test <dns_name>: one TS message as that board (needs its provisioned record)."
+    "a_wizard_service|Install or update the browser wizard service|./apps/edge-wizard/deploy.sh."
+    "a_wizard_unit|Print the wizard's systemd unit|./edge/wizard-daemon.sh --install-unit (writes nothing)."
+)
+AREA_POLICY=(
+    "a_pol_check|Check the policy's invariants|cli.py check."
+    "a_pol_hosts|Who each host admits|cli.py hosts."
+    "a_pol_proxy|One host's allowed_groups|cli.py compile proxy <HOST_VAR>."
+    "a_pol_routes|The compiled route table|cli.py compile routes (pretty-printed)."
+    "a_pol_dbroles|Database roles the policy manages|cli.py db-roles."
+    "a_pol_grants|The grants SQL|cli.py compile grants (printed, never run)."
+    "a_pol_netpol|The NetworkPolicies|cli.py compile netpol (printed, never applied)."
+    "a_policy_41_deploy|Deploy IAM 4.1 (policy versions schema)|The access, database and infra deploys in order, under one lock; explains the short 503 window first."
+    "a_policy_42a_deploy|Deploy IAM 4.2a (version 1 and the skeleton gate)|The database, infra and iam deploys in order, under one lock; the iam deploy bootstraps version 1."
+    "a_policy_status|Policy versions: status|./apps/iam/apply.sh --status (read-only)."
+    "a_policy_bootstrap_check|Would version 1 bootstrap?|./apps/iam/apply.sh --bootstrap --check-only (read-only)."
+    "a_policy_bootstrap|Bootstrap version 1 by hand|./apps/iam/apply.sh --bootstrap: a permanent record; only when the iam deploy waited."
+    "a_policy_resume|Finish an interrupted apply|./apps/iam/apply.sh --resume: the host file, the checks and the record of a committed apply."
+    "a_policy_export|Print the applied policy as defaults.yaml|cli.py export-applied (printed; never written)."
+    "a_policy_break_glass|How to use policy break-glass (shows the steps)|Shown, never run: what it changes, what it never bypasses, how it ends."
+    "a_policy_scoped|Re-render the policy artefacts (scoped)|Every --policy-only/--gate-only, under one lock: only what drifted from the applied policy."
+    "a_policy_43_deploy|Deploy IAM 4.3 (the Policy UI)|deploy-infra, access and iam deploys in order, under one lock; nobody's access changes."
+    "a_policy_open_ui|Open the Policy UI|Prints its address (https://policy.<domain>/)."
+    "a_policy_44_deploy|Deploy IAM 4.4 (drafting and approval)|The database and iam deploys in order, under one lock; nobody's access changes."
+    "a_policy_propose_skeleton|Propose a git skeleton change for approval (IAM 4.4)|./apps/iam/apply.sh --propose-skeleton --from-git <rev>: a qa person approves it in the Policy UI."
+    "a_policy_withdraw_open|Withdraw the open policy version from the host (IAM 4.4)|./apps/iam/apply.sh --withdraw-open: when the Policy UI cannot."
+    "a_policy_45_deploy|Deploy IAM 4.5 (applying versions)|The database, access, iam and backup deploys in order, under one lock; nobody's access changes."
+    "a_policy_apply|Apply an approved policy version|./apps/iam/apply.sh N: --check-only first (read-only), then the apply."
+    "a_policy_rollback|Roll back to an earlier policy version|./apps/iam/apply.sh --rollback-to K: a new rollback version, confirmed by qa afterwards."
+    "a_policy_audit|Audit an applied version|./apps/iam/apply.sh --audit N (read-only)."
+    "a_policy_superset_skeleton|Superset stage C: after the skeleton version|The database and iam deploys, then health, under one lock: svc_superset's password and the Policy UI's skeleton."
+    "a_policy_superset_install|Superset stage C: install Superset|After the change version: the Superset deploy, health, the live gate, network and sign-in tests, a backup, under one lock."
+)
+AREA_BACKUP=(
+    "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
+    "a_backup_list|List the backups|./apps/backup/backups.sh list."
+    "a_backup_verify|Check a backup's checksums|./apps/backup/backups.sh verify [folder]."
+    "a_backup_restore|How to restore (shows the steps)|./apps/backup/backups.sh restore-help [folder]: printed, not run."
+)
+AREAS=(
+    "AREA_INSTALL|Install and uninstall|Install, update or remove the whole platform."
+    "AREA_INFRA|Infrastructure|deploy-infra.sh and its settings: cluster services, workbench, reset."
+    "AREA_APPS|Applications|deploy-apps.sh and the components under apps/."
+    "AREA_UNITS|Operators and units|Which units an operator works in (apps/iam/units.sh)."
+    "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
+    "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
+    "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, the IAM 4.1, 4.2a and 4.3 deploys, the IAM 4.4 deploy, skeleton proposals and the host withdraw, and the IAM 4.5 deploy, applying, rolling back and auditing versions, and Superset stage C."
+    "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
+)
+
+after_action() {
+    if $TUI; then tui_after; return 0; fi
+    while :; do
+        ask "Back to the menu (b) or quit (q)" "b"
+        case "${ANSWER,,}" in
+            b|back) return 0 ;;
+            q|quit) bye ;;
+            *) warn "type b or q" ;;
+        esac
+    done
+}
+
+run_area() {   # run_area ARRAY_NAME TITLE
+    local -n _guide_area="$1"
+    local title="$2" e fn rc
+    local -a labels=()
+    for e in "${_guide_area[@]}"; do labels+=("${e#*|}"); done
+    while :; do
+        menu "$title" "${labels[@]}"
+        [[ "$PICK" == b ]] && return 0
+        e="${_guide_area[PICK - 1]}"; fn="${e%%|*}"
+        reset_plan; ASK_CANCELLED=false
+        TUI_RUNS=(); TUI_TAIL=""; TUI_TAIL_CMD=""; TUI_SECRET=false; TUI_END_TITLE=""
+        "$fn"; rc=$?
+        if $ASK_CANCELLED; then              # Cancel or Esc in a question box: back to this menu
+            ASK_CANCELLED=false
+            TUI_RUNS=(); TUI_TAIL=""; TUI_TAIL_CMD=""; TUI_SECRET=false; TUI_END_TITLE=""
+            : >"$TUI_BUF"                    # the skipped questions' lines (the box before showed the rest)
+            echo "Cancelled; nothing was run."
+            continue
+        fi
+        (( rc == 10 )) || after_action
+    done
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+if $TUI; then
+    tui_start                            # the status header shows the dry run
+else
+    # The logo once, only on a terminal (piped or captured output stays as it was).
+    [[ -t 1 ]] && declare -F medcea_banner >/dev/null && medcea_banner full
+    echo -e "${BOLD}MedCEA${NC} — answer the questions; every command is shown before it runs."
+    $DRY_RUN && echo -e "${YELLOW}Dry run: nothing is run and config.env is not changed.${NC}"
+    [[ -n "$TUI_NOTE" ]] && echo "($TUI_NOTE.)"
+fi
+[[ -f "$CFG" ]] || warn "$CFG not found: most commands need it. Install first (Install and uninstall → 1)."
+declare -a AREA_LABELS=()
+for e in "${AREAS[@]}"; do AREA_LABELS+=("${e#*|}"); done
+while :; do
+    TUI_TOP=true
+    menu "What do you want to do?" "${AREA_LABELS[@]}"
+    TUI_TOP=false
+    [[ "$PICK" == b ]] && bye
+    e="${AREAS[PICK - 1]}"; title="${e#*|}"
+    run_area "${e%%|*}" "${title%%|*}"
+done

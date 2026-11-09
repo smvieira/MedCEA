@@ -249,7 +249,7 @@ _watch_hint() {
   if [ "${IAM_MQTT_PERSON:-false}" = true ]; then
     echo "                                    ${DIM}(your own MQTT Explorer sign-in)${N}"
   else
-    echo "                                    ${DIM}(needs IAM_MQTT_PERSON=true: ./guide.sh → IAM switches)${N}"
+    echo "                                    ${DIM}(needs IAM_MQTT_PERSON=true: ./medcea.sh → IAM switches)${N}"
   fi
 }
 PROJECT_NAME="${PROJECT_NAME:-medcea}"

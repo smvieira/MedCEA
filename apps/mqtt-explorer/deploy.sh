@@ -93,7 +93,7 @@ case "${IAM_MQTT_PERSON:-false}" in
         fi ;;
     false)
         _MODE=off
-        echo "WARNING: IAM_MQTT_PERSON=false: the MQTT Explorer has no broker credential (the shared account was removed); its page says it needs IAM_MQTT_PERSON=true (./guide.sh, IAM switches)." >&2 ;;
+        echo "WARNING: IAM_MQTT_PERSON=false: the MQTT Explorer has no broker credential (the shared account was removed); its page says it needs IAM_MQTT_PERSON=true (./medcea.sh, IAM switches)." >&2 ;;
     *)  echo "ERROR: IAM_MQTT_PERSON='${IAM_MQTT_PERSON}' must be \"true\" or \"false\"." >&2; exit 1 ;;
 esac
 

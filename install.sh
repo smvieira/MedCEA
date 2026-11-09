@@ -209,7 +209,7 @@ cfg_switch() {
 
 # One line after a fresh install: a new config.env has the sign-in gates, network
 # policies and the services' own database logins on, but token checks, database roles
-# and enforcement off (each has its own rollback). config.env is read the way guide.sh reads it — never sourced: each switch
+# and enforcement off (each has its own rollback). config.env is read the way medcea.sh reads it — never sourced: each switch
 # must be one active line, literally "true" or "false"; anything else is not counted.
 # Never fails the install.
 iam_switches_hint() {
@@ -218,7 +218,7 @@ iam_switches_hint() {
     for k in IAM_GATES IAM_NETPOL IAM_POSTGREST_JWT IAM_DB_SERVICE_ROLES IAM_DB_ROLES IAM_ENFORCE IAM_MQTT_PERSON; do
         [[ "$(cfg_switch "$k")" == false ]] && off=$(( off + 1 ))
     done
-    (( off )) && echo -e "${YELLOW}$off IAM switch(es) still false. To turn on the rest in order: ./guide.sh → IAM switches → \"Bring IAM to full enforcement\".${NC}"
+    (( off )) && echo -e "${YELLOW}$off IAM switch(es) still false. To turn on the rest in order: ./medcea.sh → IAM switches → \"Bring IAM to full enforcement\".${NC}"
     return 0
 }
 
@@ -233,7 +233,7 @@ superset_skip_hint() {
     log="$(ls -t logs/deploy-apps-*.log 2>/dev/null | head -1)"
     [[ -n "$log" ]] || return 0
     if grep -qF "skipped: Superset needs IAM_DB_SERVICE_ROLES=true" "$log" 2>/dev/null; then
-        echo -e "${YELLOW}Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true. Turn it on (./guide.sh → IAM switches → IAM_DB_SERVICE_ROLES, or \"Bring IAM to full enforcement\"), then ./apps/superset/deploy.sh.${NC}"
+        echo -e "${YELLOW}Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true. Turn it on (./medcea.sh → IAM switches → IAM_DB_SERVICE_ROLES, or \"Bring IAM to full enforcement\"), then ./apps/superset/deploy.sh.${NC}"
     # The version-N guard: the iam deploy's bootstrap waited (apply.sh --bootstrap rc 2), and
     # nothing later in the install deploys Superset again.
     elif grep -qF "skipped: no version of the access policy is applied yet" "$log" 2>/dev/null; then
@@ -305,7 +305,7 @@ install)
     run_stage "2/3  Applications"   deploy-apps  with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
     # config.env is read only now: the first stage creates or completes it.
     if [[ "$(cfg_switch IAM_DB_SERVICE_ROLES)" == true ]]; then
-        # The switch's enable recipe (guide.sh): the database deploy in the applications
+        # The switch's enable recipe (medcea.sh): the database deploy in the applications
         # stage has just let the service roles log in, and Grafana and pgAdmin, deployed by
         # the first stage before that, are still on postgres. Under the same lock and
         # MEDCEA_INSTALLER (the credentials box stays last); with --break-glass this run
@@ -389,9 +389,9 @@ uninstall-all)
         rm -rf .ca && echo "  removed .ca/"
     fi
     if [[ -f config.env ]] && ask_delete "Delete config.env (all settings and passwords)?"; then
-        # guide.sh's backups (config.env.guide-*.bak) and any temp file it left are full
+        # medcea.sh's backups (config.env.guide-*.bak) and any temp file it left are full
         # copies of config.env, passwords included.
-        rm -f config.env config.env.bak config.env.guide-*.bak config.env.guide.* && echo "  removed config.env (and guide.sh's backups of it)"
+        rm -f config.env config.env.bak config.env.guide-*.bak config.env.guide.* && echo "  removed config.env (and medcea.sh's backups of it)"
     fi
     echo ""
     echo -e "${GREEN}Total uninstall complete.${NC} Reinstall with: ${BOLD}./install.sh${NC}"

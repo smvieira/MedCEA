@@ -229,7 +229,7 @@ class Manifests(unittest.TestCase):
         block = infra[infra.index("_MQ_PASSWD="):infra.index("kubectl create secret generic mosquitto-service-auth")]
         self.assertNotIn("mqtt-explorer", block)
         for f in (("deploy-infra.sh",), ("config.env.example",), ("apps", "mqtt-explorer", "deploy.sh"),
-                  ("apps", "mqtt-explorer", "html", "index.html"), ("guide.sh",)):
+                  ("apps", "mqtt-explorer", "html", "index.html"), ("medcea.sh",)):
             text = self.read(*f)
             for line in text.splitlines():
                 if "MQTT_EXPLORER_PASS" in line:

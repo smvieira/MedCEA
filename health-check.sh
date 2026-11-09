@@ -175,7 +175,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
-    echo -e "         docs/manual/build.py --out --standalone (a temp file); WARN when it lags or is missing (./guide.sh"
+    echo -e "         docs/manual/build.py --out --standalone (a temp file); WARN when it lags or is missing (./medcea.sh"
     echo -e "         → Infrastructure → Publish the manual to the portal), or the portal does not mount it;"
     echo -e "         FAIL when build.py refuses or the content differs from its annotation; SKIP without the portal"
     echo ""
@@ -714,7 +714,7 @@ for h, r in (model.load().data.get("network", {}).get("proxies") or {}).items():
 # =============================================================================
 check_manual() {
     local name="$1" ns="${2:-${NAMESPACE:-medcea}}" rc=0 tmp out
-    local fix="./guide.sh → Infrastructure → Publish the manual to the portal"
+    local fix="./medcea.sh → Infrastructure → Publish the manual to the portal"
     if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
     # Files, not variables: the ConfigMap is ~210 KiB of JSON, over the 128 KiB a single
     # command-line argument may hold.
@@ -965,7 +965,7 @@ check_iamenforce() {
     # assigned_run (an operator's execute/stop/status/trigger) is checked only by the
     # database functions under IAM_DB_ROLES=true: no route-level check by decision
     if [[ "$want" == "true" && "${IAM_DB_ROLES:-false}" != "true" ]]; then
-        _record FAIL "$name" "IAM_ENFORCE=true with IAM_DB_ROLES=false: operators can start and stop other units' runs (./guide.sh IAM_DB_ROLES, or IAM_ENFORCE back to false)"
+        _record FAIL "$name" "IAM_ENFORCE=true with IAM_DB_ROLES=false: operators can start and stop other units' runs (./medcea.sh IAM_DB_ROLES, or IAM_ENFORCE back to false)"
     elif [[ ${#stale[@]} -gt 0 && "$want" == "true" ]]; then
         _record FAIL "$name" "pod IAM_ENFORCE copy still false: ${stale[*]} (without /iam/ they let every request through: redeploy them, no run active)"
     elif [[ ${#stale[@]} -gt 0 ]]; then
@@ -1038,7 +1038,7 @@ sys.exit(0 if t and (datetime.datetime.now(datetime.timezone.utc) - t).total_sec
     elif [[ "$want" == false ]]; then
         $KUBECTL get deployment iam-api -n "$ns" >/dev/null 2>&1 \
             || warns+=("iam-api is not deployed (./apps/iam/deploy.sh, needed before the switch)")
-        _record WARN "$name" "IAM_MQTT_PERSON=false: the MQTT Explorer has no broker credential (no shared account any more); set it true with ./guide.sh${warns:+; ${warns[*]}}"
+        _record WARN "$name" "IAM_MQTT_PERSON=false: the MQTT Explorer has no broker credential (no shared account any more); set it true with ./medcea.sh${warns:+; ${warns[*]}}"
     elif [[ ${#warns[@]} -gt 0 ]]; then
         local IFS=';'; _record WARN "$name" "${warns[*]}"
     else

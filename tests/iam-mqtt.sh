@@ -52,7 +52,7 @@ set -a   # the flow reads MQTTX_DOMAIN, ACCESS_DOMAIN and PROJECT_NAME from the 
 # shellcheck disable=SC1091
 source config.env
 set +a
-[[ "${IAM_MQTT_PERSON:-false}" == "true" ]] || { echo "IAM_MQTT_PERSON is not true: nothing to test (./guide.sh)." >&2; exit 2; }
+[[ "${IAM_MQTT_PERSON:-false}" == "true" ]] || { echo "IAM_MQTT_PERSON is not true: nothing to test (./medcea.sh)." >&2; exit 2; }
 source infra/lib-lock.sh; medcea_lock
 source infra/lib-mk8s.sh
 source infra/lib-policy-source.sh; policy_source_init "${NAMESPACE:-medcea}" --read-only   # compile what the deploys compiled

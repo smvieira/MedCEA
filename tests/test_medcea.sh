@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# tests/test_guide.sh — ./guide.sh walks its question tree and builds the right commands.
-# Offline, and never against the real scripts: every case runs a copy of guide.sh in a
+# tests/test_medcea.sh — ./medcea.sh walks its question tree and builds the right commands.
+# Offline, and never against the real scripts: every case runs a copy of medcea.sh in a
 # scratch tree whose scripts are stubs that only print their name and arguments (every
-# path guide.sh names, and apps/<c>/{deploy,uninstall}.sh for each real component), plus
+# path medcea.sh names, and apps/<c>/{deploy,uninstall}.sh for each real component), plus
 # the real infra/lib-lock.sh. A broken dry-run guard therefore runs stubs, never a deploy.
 # Dry runs read a scratch config.env (MEDCEA_GUIDE_CONFIG).
 #   1  units assign: an invalid unit code is re-asked; --by is remembered for the session
@@ -108,8 +108,39 @@
 #      the cells only afterwards, not deploy-apps --all); a failure stops the chain
 #  53  Policy → Superset stage C: install Superset: the deploy, health, iam-hosts, iam-network,
 #      iam-signin, backups now and verify, in that order under one lock
+#  54  dialog boxes (a stub whiptail, MEDCEA_TUI_FORCE + MEDCEA_TUI_TTY): the main menu (numbered,
+#      label — purpose, cut with …, Select/Quit, the back title), an area (Back), a read-only
+#      command's yes/no with the plan as its text (Yes the default), the dry run's box
+#  55  Esc goes back (the main menu's quits); No and Esc at a confirmation cancel; a change's
+#      [y/N] is --defaultno; the text left after an action comes back with Back/Quit
+#  56  a destructive command: an input box titled DESTRUCTIVE needs yes (y cancels); then
+#      the project name for --purge-data
+#  57  Cancel at a required input box and an invalid answer re-ask it with the hint; echoed
+#      text (ask_by's line) is the next dialog's text; [y/N] questions are --defaultno
+#  58  the status header: host, kernel, git (none; a checkout: branch @ commit dirty), the
+#      newest health log's summary (colours stripped) and age, the applied policy version
+#      (none, version=N kind=K, unreadable file or state/, an unexpected line), the lock
+#      (free; held by the named process only while it has the file open), the dry-run banner
+#  59  --plain, MEDCEA_PLAIN=1 (and GUIDE_PLAIN=1, its old name) and piped input keep the numbered questions (whiptail never
+#      called); MEDCEA_TUI_FORCE without MEDCEA_TUI_TTY is refused (exit 2)
+#  60  a real command runs on the terminal ($ line, its output, Finished/Failed), then the
+#      plain prompt: Enter = back to the menu, q = quit
+#  61  a signal while a chain question's dialog is up: exit 130 once whiptail returns, none
+#      of IAM_DB_ROLES's steps, the stop text flushed by the EXIT trap, the lock free
+#  62  Cancel, Esc and a failed box are never an answer
+#  63  dialogs at a real terminal (a pty): piped stdin, TERM dumb/empty, no controlling
+#      terminal, small terminals, the menu's height, the terminal mode after a killed whiptail
+#  64  ./guide.sh forwards to ./medcea.sh: arguments, exit code, the note on stderr
+#  65  the MedCEA logo: lib-banner.sh's full = deploy-infra's old banner but the tagline
+#      colour, compact = the approved lines; plain mode at a terminal only; the main
+#      menu's top on a large terminal, never on a small one or in a sub-menu
+#  66  the end-of-command dialog under util-linux script (a pty): title, command, log, the
+#      output's tail stripped of escapes, Menu/Quit/Esc, the recorded file 600 and gone;
+#      the credentials box keeps the Enter prompt; a recipe: one dialog, the steps keep
+#      the deploy lock (fd 9, MEDCEA_LOCK_HELD, medcea_lock_verify); a stopped chain whose
+#      steps passed is titled Stopped, never Finished; Ctrl-C in a step: 130
 #
-#   tests/test_guide.sh      exit 1 on any FAIL
+#   tests/test_medcea.sh     exit 1 on any FAIL
 
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -127,8 +158,8 @@ REAL_BEFORE="$(sum_real)"
 
 # ── The scratch tree ─────────────────────────────────────────────────────────
 S="$T/tree"; mkdir -p "$S/infra"
-cp "$REPO/guide.sh" "$REPO/config.env.example" "$S/"
-cp "$REPO/infra/lib-lock.sh" "$S/infra/"
+cp "$REPO/medcea.sh" "$REPO/guide.sh" "$REPO/config.env.example" "$S/"
+cp "$REPO/infra/lib-lock.sh" "$REPO/infra/lib-banner.sh" "$S/infra/"
 mkstub() {   # mkstub RELPATH: prints "STUB RELPATH args", the lock it inherited, exits $STUB_RC
     local p="$1" f="$S/$1"
     mkdir -p "$(dirname "$f")"
@@ -143,20 +174,25 @@ mkstub() {   # mkstub RELPATH: prints "STUB RELPATH args", the lock it inherited
             "echo \"LOCK_STAMP=\$(stat -c %y $(printf %q "$S/.medcea.lock") 2>/dev/null)\"" \
             "flock -n $(printf %q "$S/.medcea.lock") true 9>&- && echo LOCK_PROBE=free || echo LOCK_PROBE=held" \
             'echo "ENV_BY=${MEDCEA_POLICY_BOOTSTRAP_BY:-} ENV_CONFIRMED=${MEDCEA_CONFIRMED:-}"' \
+            '[ -n "${STUB_FANCY:-}" ] && printf "\033[0;32mGREEN\033[0m text\r\nprogress 10%%\rprogress 100%%\r\nback\bX\n"' \
+            '[ -n "${STUB_CRED:-}" ] && echo " CREDENTIALS — /tmp/credentials-test.txt" && echo "secret-line-xyz"' \
+            '[ -n "${STUB_TS:-}" ] && for f in "$STUB_TS"/medcea-tui.*/run.typescript; do [ -f "$f" ] && echo "TS_MODE=$(stat -c %a "$f")"; done' \
+            "[ -n \"\${STUB_VERIFY:-}\" ] && { echo \"FD9=\$(readlink /proc/\$\$/fd/9 2>/dev/null)\"; bash -c '. \"\$0\"; medcea_lock_verify && echo VERIFY=ok || echo VERIFY=fail' $(printf %q "$S/infra/lib-lock.sh"); }" \
+            '[ -n "${STUB_LOG:-}" ] && { mkdir -p logs; echo x >"logs/stub-$$.log"; }' \
             '[ -n "${STUB_INT:-}" ] && kill -INT 0' \
             'exit "${STUB_RC:-0}"' >"$f"
     fi
     chmod +x "$f"
 }
 while IFS= read -r p; do
-    case "$p" in guide.sh|infra/lib-lock.sh) continue ;; esac
+    case "$p" in medcea.sh|guide.sh|infra/lib-lock.sh|infra/lib-banner.sh) continue ;; esac
     mkstub "$p"
-done < <(grep -oE '(\./)?(apps|infra|edge|tests)/[A-Za-z0-9_./-]+\.(sh|py)|\./[a-z-]+\.sh' "$REPO/guide.sh" | sed 's#^\./##' | sort -u)
+done < <(grep -oE '(\./)?(apps|infra|edge|tests)/[A-Za-z0-9_./-]+\.(sh|py)|\./[a-z-]+\.sh' "$REPO/medcea.sh" | sed 's#^\./##' | sort -u)
 for f in "$REPO"/apps/*/deploy.sh "$REPO"/apps/*/uninstall.sh; do mkstub "${f#"$REPO"/}"; done
-# Nothing in the tree is a real script but guide.sh and lib-lock.sh.
-REAL_IN_TREE="$(cd "$S" && find . -type f \( -name '*.sh' -o -name '*.py' \) ! -name guide.sh ! -name lib-lock.sh \
+# Nothing in the tree is a real script but medcea.sh (and its guide.sh alias), lib-lock.sh and lib-banner.sh.
+REAL_IN_TREE="$(cd "$S" && find . -type f \( -name '*.sh' -o -name '*.py' \) ! -name medcea.sh ! -name guide.sh ! -name lib-lock.sh ! -name lib-banner.sh \
     -exec grep -L '^.*STUB ' {} + 2>/dev/null)"
-[[ -z "$REAL_IN_TREE" ]] && echo "  (scratch tree: $(find "$S" -name '*.sh' -o -name '*.py' | wc -l) scripts, all stubs but guide.sh and lib-lock.sh)" \
+[[ -z "$REAL_IN_TREE" ]] && echo "  (scratch tree: $(find "$S" -name '*.sh' -o -name '*.py' | wc -l) scripts, all stubs but medcea.sh, its guide.sh alias, lib-lock.sh and lib-banner.sh)" \
     || { echo "scratch tree has non-stub scripts: $REAL_IN_TREE"; exit 1; }
 
 # A scratch config.env from the template; IAM_DB_ROLES and IAM_POSTGREST_JWT as given.
@@ -167,11 +203,11 @@ mkcfg() {   # mkcfg DBROLES JWT
 
 OUT=""; RC=0
 guide() {   # guide INPUT → OUT, RC: a dry run of the scratch copy
-    OUT="$(printf '%s' "$1" | NO_COLOR=1 MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/guide.sh" --dry-run 2>&1)"
+    OUT="$(printf '%s' "$1" | NO_COLOR=1 MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/medcea.sh" --dry-run 2>&1)"
     RC=$?
 }
 real() {    # real INPUT → OUT, RC: a real run of the scratch copy (stubs, $S/config.env)
-    OUT="$(printf '%s' "$1" | NO_COLOR=1 "$S/guide.sh" 2>&1)"
+    OUT="$(printf '%s' "$1" | NO_COLOR=1 "$S/medcea.sh" 2>&1)"
     RC=$?
 }
 has()  { grep -qF -- "$2" <<<"$OUT" && pass "$1" || { fail "$1 — missing: $2"; }; }
@@ -256,13 +292,13 @@ has   "stops" "Do those first. Nothing was changed."
 hasnt "no step ran" "[dry run] would"
 
 echo "9  --help and arguments"
-mkdir -p "$T/copy"; cp "$REPO/guide.sh" "$T/copy/guide.sh"
-OUT="$(cd "$T/copy" && ./guide.sh --help 2>&1)"; RC=$?
+mkdir -p "$T/copy"; cp "$REPO/medcea.sh" "$T/copy/medcea.sh"
+OUT="$(cd "$T/copy" && ./medcea.sh --help 2>&1)"; RC=$?
 rc_is "--help exits 0 with no config.env" 0
-has   "--help prints the usage" "./guide.sh [--dry-run] [--help]"
-OUT="$("$S/guide.sh" --bogus </dev/null 2>&1)"; RC=$?
+has   "--help prints the usage" "./medcea.sh [--dry-run] [--help]"
+OUT="$("$S/medcea.sh" --bogus </dev/null 2>&1)"; RC=$?
 rc_is "an unknown argument exits 2" 2
-OUT="$(MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/guide.sh" </dev/null 2>&1)"; RC=$?
+OUT="$(MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/medcea.sh" </dev/null 2>&1)"; RC=$?
 rc_is "MEDCEA_GUIDE_CONFIG without --dry-run exits 2" 2
 
 echo "11 a real switch against stubs (scratch tree only)"
@@ -289,7 +325,7 @@ real $'5\n2\n1\ny\ny\n\nq\n'
 rc_is "enable again: quits with 0" 0
 grep -q '^IAM_NETPOL="true"$' "$S/config.env" && pass "enable again: set" || fail "enable again: not set"
 compgen -G "$S/config.env.guide-*.bak" >/dev/null && fail "Enter did not delete the backup" || pass "Enter deletes the backup"
-OUT="$(printf '5\n2\n2\ny\nq\n' | NO_COLOR=1 STUB_RC=3 "$S/guide.sh" 2>&1)"; RC=$?
+OUT="$(printf '5\n2\n2\ny\nq\n' | NO_COLOR=1 STUB_RC=3 "$S/medcea.sh" 2>&1)"; RC=$?
 has   "the failing step is named" "Step 2 failed (exit code 3): ./deploy-infra.sh"
 has   "says config.env changed" "config.env has already been changed."
 has   "says how to restore" "cp -p config.env.guide-"
@@ -321,7 +357,7 @@ if command -v setsid >/dev/null; then
     sed -i 's/^IAM_NETPOL=.*/IAM_NETPOL="true"/' "$S/config.env"
     # Its own process group, so the stub's kill -INT 0 is a Ctrl-C to the guide and the
     # step only, never to this script.
-    OUT="$(setsid -w bash -c 'printf "5\n2\n2\ny\nq\n" | NO_COLOR=1 STUB_INT=1 "$1"' _ "$S/guide.sh" 2>&1)"; RC=$?
+    OUT="$(setsid -w bash -c 'printf "5\n2\n2\ny\nq\n" | NO_COLOR=1 STUB_INT=1 "$1"' _ "$S/medcea.sh" 2>&1)"; RC=$?
     rc_is "exits 130" 130
     has   "says it was interrupted" "Stopped by Ctrl-C (SIGINT) during step 2"
     has   "says config.env changed" "config.env has already been changed."
@@ -379,7 +415,7 @@ real $'6\n13\n\ny\nq\n'
 has   "real: up ran" "STUB tests/iam-db-fixture.sh up"
 has   "real: then load" "STUB tests/iam-db-fixture.sh load"
 has   "real: then apply" "STUB tests/iam-db-fixture.sh apply false"
-OUT="$(printf '6\n13\n\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '6\n13\n\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB tests/iam-db-fixture.sh up"
 hasnt "load did not run" "STUB tests/iam-db-fixture.sh load"
 
@@ -486,7 +522,7 @@ printf '%s\n' '#!/bin/sh' \
     'esac' >"$S/apps/iam/units.sh"
 chain() {   # chain INPUT [ENV=VAL…] → OUT, RC: a real run of the scratch copy
     local in="$1"; shift
-    OUT="$(printf '%s' "$in" | env NO_COLOR=1 "$@" "$S/guide.sh" 2>&1)"; RC=$?
+    OUT="$(printf '%s' "$in" | env NO_COLOR=1 "$@" "$S/medcea.sh" 2>&1)"; RC=$?
 }
 
 echo "22 full enforcement: nothing to do, or refused"
@@ -687,7 +723,7 @@ rm -f "$S"/config.env.guide-*.bak
 echo "29 full enforcement: Ctrl-C"
 if command -v setsid >/dev/null; then
     swcfg "$S/config.env" IAM_POSTGREST_JWT=true
-    OUT="$(setsid -w bash -c 'printf "5\n9\ny\n" | NO_COLOR=1 STUB_INT=1 "$1"' _ "$S/guide.sh" 2>&1)"; RC=$?
+    OUT="$(setsid -w bash -c 'printf "5\n9\ny\n" | NO_COLOR=1 STUB_INT=1 "$1"' _ "$S/medcea.sh" 2>&1)"; RC=$?
     rc_is "exits 130" 130
     has   "says it was interrupted" "Stopped by Ctrl-C (SIGINT) during step 2"
     has   "the chain says where" "stopped at IAM_DB_SERVICE_ROLES: step 2 was interrupted"
@@ -725,7 +761,7 @@ rc = p.wait(timeout=30)
 os.set_blocking(p.stdout.fileno(), True)
 out += p.stdout.read() or b""
 sys.stdout.write(out.decode(errors="replace")); sys.exit(rc)
-' "$S/guide.sh" "$in" "$prompt" 2>&1)"; RC=$?
+' "$S/medcea.sh" "$in" "$prompt" 2>&1)"; RC=$?
 }
 swcfg "$S/config.env" IAM_POSTGREST_JWT=true
 rm -f "$S"/config.env.guide-*.bak
@@ -771,7 +807,7 @@ guide $'8\n8\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain, in order" "[dry run] not executed: ./apps/access/deploy.sh && ./apps/database/deploy.sh && ./deploy-infra.sh"
 has   "the 503 window is explained" "the User Manager answers 503"
-has   "one lock for all three" "held by the guide for all three"
+has   "one lock for all three" "held by medcea.sh for all three"
 has   "a change ([y/N])" "Kind:        changes the platform"
 no_stub
 lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
@@ -789,7 +825,7 @@ PY
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 3 ]] \
     && pass "real: each step runs under the guide's lock" || fail "real: a step ran without the guide's lock"
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
-OUT="$(printf '8\n8\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n8\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB apps/access/deploy.sh"
 hasnt "the database deploy did not run" "STUB apps/database/deploy.sh"
 lock_free && pass "the lock is free after a failure" || fail "the lock is still held after a failure"
@@ -811,7 +847,7 @@ guide $'8\n9\n-x\nsvieira\ny\nq\n'
 rc_is "quits with 0" 0
 has   "a --by starting with - is re-asked" "'-x': letters, digits and . _ @ -"
 has   "the chain, in order, --by to the iam deploy" "[dry run] not executed: ./apps/database/deploy.sh && ./deploy-infra.sh && env MEDCEA_POLICY_BOOTSTRAP_BY=svieira ./apps/iam/deploy.sh"
-has   "one lock for all three" "held by the guide for all three"
+has   "one lock for all three" "held by medcea.sh for all three"
 has   "a change ([y/N])" "Kind:        changes the platform"
 has   "the order is explained" "Order: the database deploy first"
 has   "no 503 window" "No 503 window"
@@ -833,7 +869,7 @@ grep -q '^ENV_BY=svieira ENV_CONFIRMED=$' <<<"$OUT" && pass "real: the iam deplo
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 3 ]] \
     && pass "real: each step runs under the guide's lock" || fail "real: a step ran without the guide's lock"
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
-OUT="$(printf '8\n9\nsvieira\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n9\nsvieira\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB apps/database/deploy.sh"
 hasnt "deploy-infra did not run" "STUB deploy-infra.sh"
 hasnt "the iam deploy did not run" "STUB apps/iam/deploy.sh"
@@ -867,7 +903,7 @@ has   "resume (dry)" "[dry run] not executed: env MEDCEA_CONFIRMED=1 ./apps/iam/
 [[ "$(grep -c 'Kind:        read-only' <<<"$OUT")" == 3 ]] && pass "status, export, check-only: read-only" || fail "not read-only"
 [[ "$(grep -c 'Run it? \[Y/n\]' <<<"$OUT")" == 3 ]] && pass "three [Y/n]" || fail "not [Y/n]"
 has   "resume asks [y/N]" "Run it? [y/N]"
-has   "export never writes" "the guide never writes the file"
+has   "export never writes" "medcea.sh never writes the file"
 no_stub
 real $'8\n10\n\nq\n'
 has   "real: status ran" "STUB apps/iam/apply.sh --status"
@@ -912,7 +948,7 @@ guide $'8\n16\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh --policy-only && ./infra/deploy-workbench.sh --policy-only && ./apps/access/deploy.sh --gate-only && ./apps/edge-wizard/deploy.sh --gate-only && ./apps/frontend/deploy.sh --gate-only && ./apps/iam/deploy.sh --gate-only && ./apps/monitor/deploy.sh --gate-only && ./apps/mqtt-explorer/deploy.sh --gate-only && ./apps/scheduler/deploy.sh --gate-only && ./apps/superset/deploy.sh --gate-only"
 has   "a change ([y/N])" "Kind:        changes the platform"
-has   "one lock" "held by the guide for all of them"
+has   "one lock" "held by medcea.sh for all of them"
 has   "the deferral is explained" "never during an onboarding run"
 no_stub
 lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
@@ -922,7 +958,7 @@ has   "real: deploy-infra --policy-only ran" "STUB deploy-infra.sh --policy-only
 has   "real: the last gate ran" "STUB apps/superset/deploy.sh --gate-only"
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 10 ]] && pass "real: all ten under the guide's lock" \
     || fail "real: a step ran without the guide's lock"
-OUT="$(printf '8\n16\ny\nq\n' | NO_COLOR=1 STUB_RC=4 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n16\ny\nq\n' | NO_COLOR=1 STUB_RC=4 "$S/medcea.sh" 2>&1)"
 has   "a deferral (exit 4) stops the chain" "STUB deploy-infra.sh --policy-only"
 hasnt "nothing after it" "STUB infra/deploy-workbench.sh"
 
@@ -931,7 +967,7 @@ mkcfg true true
 guide $'8\n17\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh && ./apps/access/deploy.sh && ./apps/iam/deploy.sh"
-has   "one lock" "held by the guide for all three"
+has   "one lock" "held by medcea.sh for all three"
 has   "the order" "Order: deploy-infra first"
 has   "the proof" "admits admin only until every iam-api pod proves it enforces"
 has   "the expected WARN" "version 1 waits for a qa person's confirmation"
@@ -955,7 +991,7 @@ mkcfg true true
 guide $'8\n19\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain (dry)" "[dry run] not executed: ./apps/database/deploy.sh && ./apps/iam/deploy.sh"
-has   "one lock" "held by the guide for both"
+has   "one lock" "held by medcea.sh for both"
 has   "a change ([y/N])" "Kind:        changes the platform"
 has   "the order" "Order: the database deploy first"
 has   "nobody's access changes" "Nobody's access changes"
@@ -973,7 +1009,7 @@ PY2
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 2 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 2 ]] \
     && pass "real: both under the guide's lock" || fail "real: a step ran without the guide's lock"
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
-OUT="$(printf '8\n19\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n19\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB apps/database/deploy.sh"
 hasnt "the iam deploy did not run" "STUB apps/iam/deploy.sh"
 
@@ -1023,7 +1059,7 @@ mkcfg true true
 guide $'8\n22\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain (dry)" "[dry run] not executed: ./apps/database/deploy.sh && ./apps/access/deploy.sh && ./apps/iam/deploy.sh && ./apps/backup/deploy.sh"
-has   "one lock" "held by the guide for all four"
+has   "one lock" "held by medcea.sh for all four"
 has   "a change ([y/N])" "Kind:        changes the platform"
 has   "the order" "Order: the database deploy first"
 has   "nobody's access changes" "Nobody's access changes at the deploy"
@@ -1041,7 +1077,7 @@ PY2
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 4 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 4 ]] \
     && pass "real: all four under the guide's lock" || fail "real: a step ran without the guide's lock"
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
-OUT="$(printf '8\n22\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n22\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB apps/database/deploy.sh"
 hasnt "the access deploy did not run" "STUB apps/access/deploy.sh"
 
@@ -1077,7 +1113,7 @@ has   "real: then the apply" "STUB apps/iam/apply.sh 7 --by svieira"
     || fail "real: MEDCEA_CONFIRMED passed"
 [[ "$(grep -c '^LOCK_PROBE=free$' <<<"$OUT")" == 2 && "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 2 ]] \
     && pass "real: apply.sh takes its own lock (none inherited)" || fail "real: the guide held the lock"
-OUT="$(printf '8\n23\n7\nsvieira\n\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n23\n7\nsvieira\n\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "real: a failed check" "the check did not pass (exit 1)"
 hasnt "real: no apply after it" "STUB apps/iam/apply.sh 7 --by"
 
@@ -1209,7 +1245,7 @@ i = [o.index(x) for x in ("STUB apps/superset/deploy.sh", "STUB health-check.sh"
 sys.exit(0 if i == sorted(i) else 1)
 PY2
 [[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 2 ]] && pass "real: the guide holds no lock" || fail "real: ran under the guide's lock"
-OUT="$(printf '3\n7\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '3\n7\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB apps/superset/deploy.sh"
 hasnt "no health check after it" "STUB health-check.sh"
 
@@ -1255,7 +1291,7 @@ mkcfg true true
 guide $'8\n26\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain (dry)" "[dry run] not executed: ./apps/database/deploy.sh && env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh && ./health-check.sh"
-has   "one lock" "held by the guide for all three"
+has   "one lock" "held by medcea.sh for all three"
 has   "a change ([y/N])" "Run it? [y/N]"
 has   "the skeleton gate's window" "every compiling deploy exits 2"
 has   "draft the cells only afterwards" "Draft the change version with Superset's cells only after this has finished"
@@ -1275,7 +1311,7 @@ PY2
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 3 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 3 ]] \
     && pass "real: all three under the guide's lock" || fail "real: a step ran without the guide's lock"
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
-OUT="$(printf '8\n26\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/guide.sh" 2>&1)"
+OUT="$(printf '8\n26\ny\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
 has   "a failure stops the chain" "STUB apps/database/deploy.sh"
 hasnt "the iam deploy did not run" "STUB apps/iam/deploy.sh"
 
@@ -1284,7 +1320,7 @@ mkcfg true true
 guide $'8\n27\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the chain (dry)" "[dry run] not executed: ./apps/superset/deploy.sh && ./health-check.sh && tests/iam-hosts.sh && tests/iam-network.sh && tests/iam-signin.sh && ./apps/backup/backups.sh now && ./apps/backup/backups.sh verify"
-has   "one lock" "held by the guide for all of them"
+has   "one lock" "held by medcea.sh for all of them"
 has   "after the change version" "Only after the change version with Superset's cells is applied"
 has   "the expected refusal" '"No access to Superset"'
 no_stub
@@ -1301,6 +1337,635 @@ PY2
 [[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 7 ]] && pass "real: all seven under the guide's lock" \
     || fail "real: a step ran without the guide's lock"
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+
+# ── The dialog boxes (whiptail) ──────────────────────────────────────────────
+# A stub whiptail on PATH logs its arguments (one "=== CALL n" block per dialog, one
+# [argument] per line) and answers from a queue file, one "RC|ANSWER" line per dialog:
+# the answer on stderr, exit RC (0 OK/Yes, 1 Cancel/No, 255 Esc, anything else a failure
+# with ANSWER as its message; "sleepN" waits N seconds, then answers 0; "rawN" puts its
+# terminal in raw mode, as newt does, and exits N without restoring it, as a newt killed
+# by a signal does). An empty queue is Esc. Each call also logs "=== FD n open" for an
+# inherited fd 7, 8 or 9, and "=== MODES <folder> <buffer>" for the guide's screen buffer
+# folder. MEDCEA_TUI_FORCE=1 + MEDCEA_TUI_TTY=<file> force the dialog mode without a
+# terminal; stdin still carries the plain terminal prompts (Enter after a command's output).
+WTB="$T/wtbin"; mkdir -p "$WTB"
+printf '%s\n' '#!/usr/bin/env bash' \
+    'n=$(( $(cat "$WT_N" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$WT_N"' \
+    '{ printf "=== CALL %d\n" "$n"; for a in "$@"; do printf "[%s]\n" "$a"; done' \
+    '  for f in 7 8 9; do [ -e "/proc/$$/fd/$f" ] && echo "=== FD $f open"; done' \
+    '  for d in "${TMPDIR:-/tmp}"/medcea-tui.*/; do [ -d "$d" ] && echo "=== MODES $(stat -c %a "$d") $(stat -c %a "$d/screen")"; done' \
+    '  for d in "${TMPDIR:-/tmp}"/medcea-tui.*/; do [ -d "$d" ] && echo "=== FILES $(ls -A "$d" | tr "\n" " ")"; done' \
+    '} >>"$WT_LOG"' \
+    'line="$(head -n 1 "$WT_QUEUE")"; sed -i 1d "$WT_QUEUE"' \
+    '[ -z "$line" ] && { echo "=== QUEUE EMPTY" >>"$WT_LOG"; exit 255; }' \
+    'rc="${line%%|*}"; ans="${line#*|}"' \
+    'case "$rc" in sleep*) : >"$WT_MARK"; sleep "${rc#sleep}"; rc=0 ;; raw*) stty raw -echo 2>/dev/null; rc="${rc#raw}" ;; esac' \
+    'printf "%s" "$ans" >&2' \
+    'exit "$rc"' >"$WTB/whiptail"
+chmod +x "$WTB/whiptail"
+WT=""
+mkdir -p "$T/tmpdir"                     # the guide's screen buffer folders (removed on exit)
+tui_env() { env TMPDIR="$T/tmpdir" PATH="$WTB:$PATH" NO_COLOR=1 MEDCEA_TUI_FORCE=1 MEDCEA_TUI_TTY="$T/tty" \
+    WT_QUEUE="$T/wt.queue" WT_LOG="$T/wt.log" WT_N="$T/wt.n" WT_MARK="$T/wt.mark" "$@"; }
+tui_reset() { printf '%s' "$1" >"$T/wt.queue"; : >"$T/wt.log"; rm -f "$T/wt.n" "$T/wt.mark"; : >"$T/tty"; }
+tui() {   # tui QUEUE STDIN [ENV=VAL…] → OUT, RC, WT: a dry run of the scratch copy with dialogs
+    local q="$1" in="$2"; shift 2
+    tui_reset "$q"
+    OUT="$(printf '%s' "$in" | tui_env MEDCEA_GUIDE_CONFIG="$T/config.env" "$@" timeout 30 "$S/medcea.sh" --dry-run 2>&1)"; RC=$?
+    WT="$(cat "$T/wt.log")"
+}
+tui_real() {   # tui_real QUEUE STDIN [ENV=VAL…] → OUT, RC, WT: a real run (stubs, $S/config.env)
+    local q="$1" in="$2"; shift 2
+    tui_reset "$q"
+    OUT="$(printf '%s' "$in" | tui_env "$@" timeout 30 "$S/medcea.sh" 2>&1)"; RC=$?
+    WT="$(cat "$T/wt.log")"
+}
+wt_has()  { grep -qF -- "$2" <<<"$WT" && pass "$1" || fail "$1 — no dialog has: $2"; }
+wt_hasnt(){ grep -qF -- "$2" <<<"$WT" && fail "$1 — a dialog has: $2" || pass "$1"; }
+wt_calls(){ grep -c '^=== CALL ' <<<"$WT"; }
+wt_one() {   # wt_one DESC PATTERN…: one dialog's arguments hold every PATTERN
+    local desc="$1" blk p ok; shift
+    while IFS= read -r -d $'\x01' blk; do
+        ok=1
+        for p in "$@"; do grep -qF -- "$p" <<<"$blk" || { ok=0; break; }; done
+        (( ok )) && [[ -n "$blk" ]] && { pass "$desc"; return; }
+    done < <(sed 's/^=== CALL /\x01&/' <<<"$WT"; printf '\x01')
+    fail "$desc — no single dialog with: $*"
+}
+wt_none() {   # wt_none DESC PATTERN…: no dialog holds every PATTERN
+    local desc="$1" blk p ok; shift
+    while IFS= read -r -d $'\x01' blk; do
+        ok=1
+        for p in "$@"; do grep -qF -- "$p" <<<"$blk" || { ok=0; break; }; done
+        (( ok )) && [[ -n "$blk" ]] && { fail "$desc — a dialog has: $*"; return; }
+    done < <(sed 's/^=== CALL /\x01&/' <<<"$WT"; printf '\x01')
+    pass "$desc"
+}
+
+echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
+mkcfg false false
+tui $'0|6\n0|2\n0|\n0|\n1|\n1|\n' ''
+rc_is "quits with 0" 0
+has   "Bye. reaches the terminal (the EXIT trap prints the buffer)" "Bye."
+[[ "$(wt_calls)" == 6 ]] && pass "six dialogs" || fail "dialogs: $(wt_calls)"
+wt_one "the main menu: numbered, Select, Quit" "=== CALL 1" "[--menu]" "[What do you want to do?]" "[--ok-button]" "[Select]" "[Quit]" "[6]"
+wt_one "items read label — purpose" "=== CALL 1" "[Health and tests — Health check, IAM checks and tests.]"
+wt_one "a long item is cut with …" "=== CALL 1" "[Install and uninstall — Install, update or remove the whole pla…]"
+wt_one "the window's back title" "=== CALL 1" "[--backtitle]" "[MedCEA  |  "
+wt_one "the area menu: Back" "=== CALL 2" "[Health and tests]" "[Back]" "[Health check — Every service and IAM control: OK / WARN / FAIL.]"
+wt_one "the confirmation is a yes/no with the plan as its text" "=== CALL 3" "[--yesno]" "[Run this read-only command?]" \
+    "  python3 tests/iam-routes-diff.py" "  Kind:        read-only" "  Deploy lock: no" "Run it?"
+wt_none "read-only: Yes is the default" "=== CALL 3" "--defaultno"
+wt_one "the dry run's box" "=== CALL 4" "[--msgbox]" "[Dry run]" "[dry run] not executed: python3 tests/iam-routes-diff.py"
+wt_none "the plan is not repeated in the box" "=== CALL 4" "Kind:"
+hasnt "nothing of the dialogs on the guide's output" "Kind:"
+hasnt "no command ran: no 'Press Enter' before a dialog" "Press Enter to continue: "
+wt_hasnt "whiptail does not get the saved terminal (fd 7)" "=== FD 7 open"
+wt_hasnt "whiptail does not get the saved terminal (fd 8)" "=== FD 8 open"
+wt_one "the screen buffer: folder 700, file 600" "=== CALL 1" "=== MODES 700 600"
+no_stub
+
+echo "55 dialogs: Back and Esc, Esc at a confirmation, a change defaults to No"
+tui $'0|1\n255|\n255|\n' ''
+rc_is "Esc, Esc: quits with 0" 0
+[[ "$(wt_calls)" == 3 ]] && pass "Esc in the area goes back to the main menu; Esc there quits" || fail "dialogs: $(wt_calls)"
+wt_one "the second main menu" "=== CALL 3" "[What do you want to do?]"
+tui $'0|2\n0|9\n1|\n0|\n255|\n1|\n' ''
+rc_is "quits with 0" 0
+wt_one "a change: [y/N] is --defaultno" "[--defaultno]" "[--yesno]" "[This changes the platform]" "./infra/publish-manual.sh" "Kind:        changes the platform"
+wt_one "No cancels; the text comes back with Back/Quit" "[Back to the menu]" "[Quit]" "Cancelled; nothing was run."
+wt_one "Back to the menu reaches the area again" "=== CALL 5" "[Infrastructure]" "[--menu]"
+no_stub
+tui $'0|2\n0|9\n255|\n1|\n' ''
+rc_is "Esc at a confirmation, then Quit: exit 0" 0
+wt_one "Esc at the confirmation is No" "=== CALL 4" "Cancelled; nothing was run."
+no_stub
+
+echo "56 dialogs: a destructive command needs the typed yes"
+tui $'0|1\n0|5\n0|y\n0|\n0|5\n0|yes\n0|\n1|\n1|\n' ''
+rc_is "quits with 0" 0
+wt_one "an input box titled DESTRUCTIVE" "=== CALL 3" "[--inputbox]" "[DESTRUCTIVE]" "Type yes to go ahead" "./install.sh --uninstall-infra" "Kind:        DESTRUCTIVE"
+wt_one "y is not yes" "=== CALL 4" "Cancelled; nothing was run."
+wt_one "yes: the dry run's box" "=== CALL 7" "[--msgbox]" "[dry run] not executed: ./install.sh --uninstall-infra"
+no_stub
+tui $'0|3\n0|9\n0|y\n0|yes\n0|medcea\n0|\n1|\n1|\n' ''
+wt_one "--purge-data: the project name in a second box" "=== CALL 5" "[DESTRUCTIVE]" "Type the project name ('medcea')"
+wt_one "the name: the dry run's box" "[--msgbox]" "[dry run] not executed: ./apps/superset/uninstall.sh --purge-data"
+no_stub
+tui $'0|3\n0|9\n0|y\n0|yes\n0|wrong\n0|\n1|\n1|\n' ''
+rc_is "a wrong project name: quits with 0" 0
+wt_one "a wrong project name cancels" "=== CALL 6" "Cancelled; nothing was run."
+wt_hasnt "no dry-run line for --purge-data" "[dry run] not executed: ./apps/superset/uninstall.sh"
+wt_none "no dry run's box" "[--msgbox]"
+no_stub
+
+echo "57 dialogs: an input box re-asked with the hint; the guide's output in the next dialog"
+mkcfg false false
+tui $'0|4\n0|2\n0|\n0|developer\n0|UNIT;03 X\n0|UNIT03 unit04\n0|svieira\n0|\n1|\n0|\n0|\n1|\n1|\n' ''
+rc_is "quits with 0" 0
+wt_one "an empty answer at a required question re-asks it with the hint" "=== CALL 4" "[--inputbox]" "'': letters, digits" "Operator's Keycloak username"
+wt_one "an invalid unit code: the hint in the next box" "=== CALL 6" "'UNIT;03': a unit code is letters" "Unit codes, separated by spaces"
+wt_one "echoed text reaches the next dialog (ask_by's line, then the question)" "=== CALL 7" \
+    "--by is YOUR Keycloak username" "Your Keycloak username (--by)"
+wt_one "--bootstrap: a yes/no defaulting to No" "=== CALL 9" "[--yesno]" "[--defaultno]" "--bootstrap puts the units in effect at once" "Use --bootstrap"
+wt_one "the command built from the boxes" "[dry run] not executed: ./apps/iam/units.sh assign developer UNIT03 unit04 --by svieira"
+# --by remembered for the session: the second assign's box is prefilled with it, and OK keeps it
+tui $'0|4\n0|2\n0|dev\n0|U1\n0|svieira\n0|\n1|\n0|\n0|\n0|2\n0|dev2\n0|U2\n0|\n0|\n1|\n0|\n0|\n1|\n1|\n' ''
+rc_is "twice: quits with 0" 0
+wt_one "the remembered --by is the box's initial text" "=== CALL 13" "[--inputbox]" "Your Keycloak username (--by)" "[svieira]"
+wt_one "and is used" "[dry run] not executed: ./apps/iam/units.sh assign dev2 U2 --by svieira"
+no_stub
+
+echo "58 dialogs: the status header"
+mkcfg false false
+rm -rf "$S/logs" "$S/state"; rm -f "$S/.medcea.lock"
+tui $'1|\n' ''
+wt_one "host and kernel" "=== CALL 1" "Host:    $(cat /proc/sys/kernel/hostname)    Kernel: $(uname -r)"
+wt_one "no git checkout" "=== CALL 1" "Git:     not a git checkout"
+wt_one "no health log" "=== CALL 1" "Health:  no health check logged yet"
+wt_one "no policy file" "=== CALL 1" "Policy:  none applied on this host"
+wt_one "no lock file: free" "=== CALL 1" "Lock:    free"
+wt_one "the dry-run banner" "=== CALL 1" "DRY RUN: nothing is run and config.env is not changed."
+mkdir -p "$S/logs" "$S/state"; chmod 700 "$S/state"
+printf 'old run\n\033[0;32m\033[1mAll 50 checks passed.\033[0m\n' >"$S/logs/health-check-20261101-090000.log"
+touch -d '3 days ago' "$S/logs/health-check-20261101-090000.log"
+printf '\033[0;32m[OK]\033[0m apparmor\n\033[1;33m\033[1m56 OK, 1 warning(s), 0 failures\033[0m\033[2m — 57 checks\033[0m\n' >"$S/logs/health-check-20261109-100000.log"
+touch -d '12 minutes ago' "$S/logs/health-check-20261109-100000.log"
+printf '%s\n' '# medcea-applied: version=3 kind=change entries_digest=abc skeleton_digest=def git_commit=e50647d written_at=2026-11-09T10:00:00Z' \
+    '# medcea-applied-body: body_digest=x groups=1 roles=1 dropped=0 keys=y' >"$S/state/policy-applied.yaml"
+printf '%s\t%s\n' "$$" "started 2026-11-09 10:00:00, terminal pts/9: ./deploy-infra.sh" >"$S/.medcea.lock"
+tui $'1|\n' ''
+wt_one "the newest log's summary, colours stripped, and its age" "=== CALL 1" "Health:  56 OK, 1 warning(s), 0 failures — 57 checks (12 min ago)"
+wt_hasnt "not the older log" "All 50 checks passed."
+wt_one "the applied version from line 1" "=== CALL 1" "Policy:  version=3 kind=change"
+wt_one "a live process named in the file but without it open: free" "=== CALL 1" "Lock:    free"
+lock_free && pass "the header took no lock" || fail "the lock is held"
+( exec 8>>"$S/.medcea.lock"; flock -n 8; printf '%s\t%s\n' "$BASHPID" "started 2026-11-09 10:00:00, terminal pts/9: ./deploy-infra.sh --configure" >"$S/.medcea.lock"; exec sleep 60 ) &
+LOCKER=$!
+for _ in $(seq 50); do [[ -s "$S/.medcea.lock" && "$(cut -f1 "$S/.medcea.lock")" == "$LOCKER" ]] && break; sleep 0.1; done
+tui $'1|\n' ''
+wt_one "a process with the file open: held, named" "=== CALL 1" "Lock:    held by ./deploy-infra.sh --configure (pid $LOCKER)"
+kill "$LOCKER" 2>/dev/null; wait "$LOCKER" 2>/dev/null; LOCKER=""
+tui $'1|\n' ''
+wt_one "its process gone: free" "=== CALL 1" "Lock:    free"
+# Its taker killed while a child it started still holds the lock (kill of a deploy whose
+# helm --wait runs on): held, whatever the PID in the file says.
+( exec 8>>"$S/.medcea.lock"; flock -n 8; printf '%s\t%s\n' "$BASHPID" "started 2026-11-09 10:00:00, terminal pts/9: ./deploy-infra.sh" >"$S/.medcea.lock"
+  sleep 60 & echo "$!" >"$T/leftover.pid"; exec sleep 60 ) &
+LOCKER=$!
+for _ in $(seq 50); do [[ -s "$T/leftover.pid" && "$(cut -f1 "$S/.medcea.lock")" == "$LOCKER" ]] && break; sleep 0.1; done
+kill -9 "$LOCKER" 2>/dev/null; wait "$LOCKER" 2>/dev/null; LOCKER=""
+tui $'1|\n' ''
+wt_one "its taker gone, a leftover child holds it: held" "=== CALL 1" "Lock:    held, not by the run its file names"
+kill "$(cat "$T/leftover.pid")" 2>/dev/null; rm -f "$T/leftover.pid"
+for _ in $(seq 50); do lock_free && break; sleep 0.1; done
+tui $'1|\n' ''
+wt_one "the leftover gone: free" "=== CALL 1" "Lock:    free"
+# A PID from an old run, now another user's process (pid 1), and nothing holds the lock
+printf '%s\t%s\n' 1 "started 2026-11-01 10:00:00, terminal pts/9: ./deploy-infra.sh" >"$S/.medcea.lock"
+tui $'1|\n' ''
+wt_one "a reused PID of another user, nothing holding it: free" "=== CALL 1" "Lock:    free"
+if (( EUID != 0 )); then
+    chmod 000 "$S/state/policy-applied.yaml"
+    tui $'1|\n' ''
+    wt_one "an unreadable policy file" "=== CALL 1" "Policy:  unreadable"
+    rc_is "an unreadable file does not fail the guide" 0
+    chmod 600 "$S/state/policy-applied.yaml"; chmod 000 "$S/state"
+    tui $'1|\n' ''
+    wt_one "an unreadable state/" "=== CALL 1" "Policy:  unreadable (state/)"
+    chmod 700 "$S/state"
+fi
+printf 'no header here\n' >"$S/state/policy-applied.yaml"
+tui $'1|\n' ''
+wt_one "an unexpected first line" "=== CALL 1" "Policy:  unreadable (unexpected first line)"
+if command -v git >/dev/null; then
+    git -C "$S" init -q 2>/dev/null && git -C "$S" add medcea.sh \
+        && git -C "$S" -c user.name=t -c user.email=t@example.org -c commit.gpgsign=false commit -qm t \
+        && git -C "$S" branch -M guide-test
+    C="$(git -C "$S" rev-parse --short HEAD 2>/dev/null)"
+    tui $'1|\n' ''
+    wt_one "branch, commit, dirty (untracked files)" "=== CALL 1" "Git:     guide-test @ $C dirty"
+    wt_one "the commit in the back title" "=== CALL 1" "[MedCEA  |  $(cat /proc/sys/kernel/hostname)  |  $(uname -r)  |  $C]"
+    rm -rf "$S/.git"
+fi
+tui_reset $'1|\n'
+OUT="$(printf '' | tui_env timeout 30 "$S/medcea.sh" 2>&1)"; RC=$?; WT="$(cat "$T/wt.log")"
+wt_hasnt "no dry-run banner on a real run" "DRY RUN"
+rm -rf "$S/logs" "$S/state"; rm -f "$S/.medcea.lock"
+
+echo "59 dialogs: --plain, MEDCEA_PLAIN, GUIDE_PLAIN, piped input, and the test hook's refusal"
+tui_reset $'0|1\n'
+OUT="$(printf 'q\n' | tui_env MEDCEA_GUIDE_CONFIG="$T/config.env" timeout 30 "$S/medcea.sh" --dry-run --plain 2>&1)"; RC=$?; WT="$(cat "$T/wt.log")"
+rc_is "--plain: quits with 0" 0
+has   "--plain: the numbered menu" "   b) back    q) quit"
+[[ -z "$WT" ]] && pass "--plain: whiptail never called" || fail "--plain: whiptail called"
+tui_reset $'0|1\n'
+for pv in MEDCEA_PLAIN GUIDE_PLAIN; do
+    tui_reset $'0|1\n'
+    OUT="$(printf 'q\n' | tui_env "$pv=1" MEDCEA_GUIDE_CONFIG="$T/config.env" timeout 30 "$S/medcea.sh" --dry-run 2>&1)"; RC=$?; WT="$(cat "$T/wt.log")"
+    has   "$pv=1: the numbered menu" "Choice: "
+    [[ -z "$WT" ]] && pass "$pv=1: whiptail never called" || fail "$pv=1: whiptail called"
+done
+tui_reset $'0|1\n'
+OUT="$(printf 'q\n' | env PATH="$WTB:$PATH" NO_COLOR=1 TERM=xterm WT_QUEUE="$T/wt.queue" WT_LOG="$T/wt.log" WT_N="$T/wt.n" \
+    MEDCEA_GUIDE_CONFIG="$T/config.env" timeout 30 "$S/medcea.sh" --dry-run 2>&1)"; RC=$?; WT="$(cat "$T/wt.log")"
+has   "piped input: the numbered menu" "Choice: "
+[[ -z "$WT" ]] && pass "piped input with whiptail on PATH: never called" || fail "piped input: whiptail called"
+OUT="$(printf 'q\n' | env TMPDIR="$T/tmpdir" PATH="$WTB:$PATH" MEDCEA_TUI_FORCE=1 MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/medcea.sh" --dry-run 2>&1)"; RC=$?
+rc_is "MEDCEA_TUI_FORCE without MEDCEA_TUI_TTY: exit 2" 2
+has   "says why" "MEDCEA_TUI_FORCE needs MEDCEA_TUI_TTY"
+
+echo "60 dialogs: a real command runs on the terminal, then Enter = back"
+mkcfg false false
+tui_real $'0|2\n0|9\n0|\n1|\n1|\n' $'\n'
+rc_is "quits with 0" 0
+has   "the command ran" "STUB infra/publish-manual.sh"
+has   "its \$ line on the terminal" "\$ ./infra/publish-manual.sh"
+has   "Finished on the terminal" "Finished: exit code 0."
+has   "the plain prompt after it" "Enter = back to the menu, q = quit: "
+wt_one "then the area menu again" "=== CALL 4" "[Infrastructure]" "[--menu]"
+tui_real $'0|2\n0|9\n0|\n' $'q\n'
+rc_is "q at the prompt quits with 0" 0
+has   "Bye." "Bye."
+[[ "$(wt_calls)" == 3 ]] && pass "no dialog after q" || fail "dialogs: $(wt_calls)"
+tui_reset $'0|2\n0|9\n0|\n1|\n1|\n'
+OUT="$(printf '\n' | tui_env STUB_RC=4 timeout 30 "$S/medcea.sh" 2>&1)"; RC=$?
+has   "a failure is reported on the terminal" "Failed: exit code 4."
+
+echo "61 dialogs: a signal at a chain question still stops the chain (exit 130)"
+swcfg "$S/config.env" IAM_POSTGREST_JWT=true
+rm -f "$S"/config.env.guide-*.bak
+tui_reset $'0|5\n0|9\n0|\nsleep2|\n'
+OUT="$(tui_env python3 -c '
+import os, signal, subprocess, sys, time
+guide, mark = sys.argv[1:3]
+p = subprocess.Popen([guide], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                     preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+p.stdin.write(b"\n\n\n\n"); p.stdin.flush(); p.stdin.close()
+deadline = time.time() + 30
+while not os.path.exists(mark) and time.time() < deadline and p.poll() is None:
+    time.sleep(0.05)
+time.sleep(0.3)                        # whiptail (the stub) is up, the guide waits for it
+p.send_signal(signal.SIGINT)           # to the guide only, as test 30 does
+out, _ = p.communicate(timeout=60)
+sys.stdout.write(out.decode(errors="replace")); sys.exit(p.returncode)
+' "$S/medcea.sh" "$T/wt.mark" 2>&1)"; RC=$?
+WT="$(cat "$T/wt.log")"
+rc_is "exits 130" 130
+wt_one "the checklist was a dialog" "Is every item in 'Before you start' true for IAM_DB_ROLES?"
+has   "says where (flushed by the EXIT trap)" "Stopped by Ctrl-C (SIGINT) at a question for IAM_DB_ROLES; none of its steps ran."
+has   "the chain says where" "stopped at IAM_DB_ROLES: stopped by Ctrl-C (SIGINT) before its steps"
+has   "the steps before it ran on the terminal" "STUB deploy-apps.sh --all"
+has   "the units list ran on the terminal" "STUB apps/iam/units.sh list"
+has   "its output waited for Enter before the checklist dialog" "Press Enter to continue: "
+wt_hasnt "whiptail does not hold the deploy lock (fd 9)" "=== FD 9 open"
+hasnt "no step of IAM_DB_ROLES" "STUB apps/database/deploy.sh"
+sw_is "$S/config.env" IAM_DB_SERVICE_ROLES true
+sw_is "$S/config.env" IAM_DB_ROLES false
+lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
+rm -f "$S"/config.env.guide-*.bak
+
+echo "62 dialogs: Cancel, Esc and a failed box are never an answer"
+mkcfg false false
+# Applications → Uninstall components: Esc at "Names or numbers (Enter = all)" is not "all"
+tui $'0|3\n0|4\n255|\n1|\n1|\n' ''
+rc_is "Esc at a question: quits with 0" 0
+[[ "$(wt_calls)" == 5 ]] && pass "Esc leaves the action: back to the area menu, then out" || fail "dialogs: $(wt_calls)"
+wt_one "the area menu again, saying so" "=== CALL 4" "[--menu]" "[Applications]" "Cancelled; nothing was run."
+wt_none "no --purge-data question" "(--purge-data)?"
+wt_hasnt "no plan, no DESTRUCTIVE box" "DESTRUCTIVE"
+wt_hasnt "never every application component" "every application component"
+tui $'0|3\n0|4\n1|\n1|\n1|\n' ''
+wt_one "Cancel there: the same" "=== CALL 4" "[--menu]" "Cancelled; nothing was run."
+wt_hasnt "Cancel: no DESTRUCTIVE box" "DESTRUCTIVE"
+# An optional question with a meaning for Enter (Health check's timeout): Esc is not Enter
+tui $'0|6\n0|1\n1|\n255|\n1|\n1|\n' ''
+wt_none "Esc at an optional question: no plan" "[Run this read-only command?]"
+wt_one "back at the area menu" "=== CALL 5" "[--menu]" "Cancelled; nothing was run."
+# A question with a default (the remembered --by): Esc neither takes it nor forgets it
+tui $'0|4\n0|2\n0|dev\n0|U1\n0|svieira\n0|\n1|\n0|\n0|\n0|2\n0|dev2\n0|U2\n255|\n0|2\n0|dev3\n0|U3\n0|\n0|\n1|\n0|\n0|\n1|\n1|\n' ''
+rc_is "--by: quits with 0" 0
+wt_hasnt "Esc at the prefilled --by: no command for dev2" "units.sh assign dev2"
+wt_one "the area menu says so" "=== CALL 14" "[--menu]" "Cancelled; nothing was run."
+wt_one "--by is still remembered" "=== CALL 17" "[--inputbox]" "Your Keycloak username (--by)" "[svieira]"
+wt_one "and used" "[dry run] not executed: ./apps/iam/units.sh assign dev3 U3 --by svieira"
+# A failed box: killed (143), or a usage error (exit 1 with whiptail's message)
+tui $'0|3\n0|4\n143|Terminated\n' ''
+rc_is "a killed whiptail: exit 1" 1
+has   "says so, with the way out" "the dialog box failed (whiptail exit 143: Terminated): run ./medcea.sh --plain"
+[[ "$(wt_calls)" == 3 ]] && pass "no box after it" || fail "dialogs: $(wt_calls)"
+wt_hasnt "a failed box is not an answer: no DESTRUCTIVE box" "DESTRUCTIVE"
+tui $'0|3\n0|4\n1|--foo: unknown option\n' ''
+rc_is "whiptail's own error (exit 1 with a message): exit 1" 1
+has   "says so" "the dialog box failed (whiptail exit 1: --foo: unknown option)"
+tui $'0|6\n0|1\n143|Terminated\n' ''
+rc_is "a failed yes/no box: exit 1, not no" 1
+wt_none "no plan after it" "[Run this read-only command?]"
+no_stub
+
+echo "63 dialogs at a real terminal (a pty)"
+# The guide on a pseudo-terminal: python3 opens it, sets its size, makes it the guide's
+# controlling terminal (or, CTTY=0, another session's, as under setsid from a shell), and
+# compares the terminal mode before and after.
+PTY_PY='
+import os, pty, sys, subprocess, termios, fcntl, struct, select, time
+guide, mode, ctty, rows, cols, data = sys.argv[1:7]
+try:
+    m, s = pty.openpty()
+except OSError:
+    print("=== NO PTY"); sys.exit(77)
+fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
+before = termios.tcgetattr(s)
+holder = None
+if ctty == "0":     # the terminal of another session (as under setsid from a shell)
+    holder = subprocess.Popen(["sleep", "60"], stdin=s, preexec_fn=lambda: (os.setsid(), fcntl.ioctl(0, termios.TIOCSCTTY, 0)))
+def pre():
+    os.setsid()
+    if ctty == "1":
+        fcntl.ioctl(1, termios.TIOCSCTTY, 0)
+p = subprocess.Popen([guide] + sys.argv[7:], stdin=(subprocess.PIPE if mode == "pipe" else s),
+                     stdout=s, stderr=s, preexec_fn=pre)
+if mode == "pipe":
+    p.stdin.write(data.encode()); p.stdin.close()
+else:
+    os.write(m, data.encode())
+out = b""; end = time.time() + 30
+while True:
+    r, _, _ = select.select([m], [], [], 0.1)
+    if r:
+        try:
+            out += os.read(m, 65536)
+        except OSError:
+            break
+    elif p.poll() is not None:
+        break
+    if time.time() > end:
+        p.kill(); break
+rc = p.wait()
+if holder:
+    holder.kill(); holder.wait()
+sys.stdout.write(out.decode(errors="replace").replace("\r", ""))
+print("=== TTY " + ("restored" if termios.tcgetattr(s) == before else "changed"))
+sys.exit(rc)
+'
+ptyrun() {   # ptyrun QUEUE STDIN(pty|pipe) CTTY(1|0) ROWS COLS INPUT [ENV=VAL…] → OUT, RC, WT: a dry run on a pty
+    local q="$1" mode="$2" ctty="$3" rows="$4" cols="$5" in="$6"; shift 6
+    tui_reset "$q"
+    OUT="$(env -u GUIDE_PLAIN -u MEDCEA_PLAIN -u MEDCEA_TUI_FORCE -u MEDCEA_TUI_TTY TMPDIR="$T/tmpdir" PATH="$WTB:$PATH" NO_COLOR=1 TERM=xterm \
+        WT_QUEUE="$T/wt.queue" WT_LOG="$T/wt.log" WT_N="$T/wt.n" WT_MARK="$T/wt.mark" MEDCEA_GUIDE_CONFIG="$T/config.env" "$@" \
+        python3 -c "$PTY_PY" "$S/medcea.sh" "$mode" "$ctty" "$rows" "$cols" "$in" --dry-run 2>&1)"; RC=$?
+    WT="$(cat "$T/wt.log")"
+}
+ptyrun $'1|\n' pty 1 24 80 ''
+if [[ "$OUT" == *"=== NO PTY"* ]]; then
+    pass "no pseudo-terminal on this host: the pty cases are skipped"
+else
+    rc_is "a terminal: quits with 0" 0
+    wt_one "the dialog boxes, on the controlling terminal" "=== CALL 1" "[--menu]" "[What do you want to do?]"
+    hasnt "not the numbered menu" "Choice: "
+    has   "the terminal mode as before" "=== TTY restored"
+    ptyrun $'1|\n' pipe 1 24 80 $'q\n'
+    rc_is "stdin piped, stdout a terminal: quits with 0" 0
+    has   "stdin piped, stdout a terminal: the numbered menu" "Choice: "
+    [[ -z "$WT" ]] && pass "stdin piped, stdout a terminal: whiptail never called" || fail "stdin piped: whiptail called"
+    ptyrun $'1|\n' pty 1 24 80 $'q\n' TERM=dumb
+    has   "TERM=dumb: the numbered menu" "Choice: "
+    [[ -z "$WT" ]] && pass "TERM=dumb: whiptail never called" || fail "TERM=dumb: whiptail called"
+    ptyrun $'1|\n' pty 1 24 80 $'q\n' TERM=
+    [[ -z "$WT" ]] && pass "TERM empty: whiptail never called" || fail "TERM empty: whiptail called"
+    ptyrun $'1|\n' pty 0 24 80 $'q\n'
+    rc_is "a terminal that is not the controlling one (setsid): quits with 0" 0
+    has   "no /dev/tty: the numbered menu" "Choice: "
+    has   "says why" "no controlling terminal (/dev/tty): numbered menus instead of dialog boxes"
+    [[ -z "$WT" ]] && pass "no /dev/tty: whiptail never called" || fail "no /dev/tty: whiptail called"
+    ptyrun $'1|\n' pty 1 17 80 $'q\n'
+    has   "17 rows: the numbered menu" "Choice: "
+    has   "says why" "the terminal is 80×17, smaller than 44×18"
+    ptyrun $'1|\n' pty 1 24 43 $'q\n'
+    has   "43 columns: the numbered menu" "Choice: "
+    ptyrun $'1|\n' pty 1 20 80 ''
+    wt_one "20 rows: the menu fits the terminal" "=== CALL 1" "[--menu]" "[18]" "[76]"
+    wt_none "the whole header without scrolling (the list gives rows up)" "=== CALL 1" "[--scrolltext]"
+    wt_one "the header's last line is in the text" "=== CALL 1" "DRY RUN: nothing is run and config.env is not changed."
+    # newt killed by a signal leaves the terminal raw; the guide puts the mode back
+    ptyrun $'raw143|Terminated\n' pty 1 24 80 ''
+    rc_is "a killed whiptail: exit 1" 1
+    has   "says so" "the dialog box failed (whiptail exit 143: Terminated): run ./medcea.sh --plain"
+    has   "the terminal mode is put back" "=== TTY restored"
+fi
+
+echo "64 ./guide.sh forwards to ./medcea.sh"
+OUT="$(cd / && "$S/guide.sh" --help 2>"$T/alias.err")"; RC=$?
+rc_is "--help through the alias: exit 0" 0
+has   "medcea.sh's usage" "./medcea.sh [--dry-run] [--help]"
+grep -qxF "guide.sh is now ./medcea.sh (this name will be removed in a later release)" "$T/alias.err" \
+    && pass "the note on stderr" || fail "no note on stderr: $(cat "$T/alias.err")"
+hasnt "the note is not on stdout" "guide.sh is now"
+OUT="$("$S/guide.sh" --bogus </dev/null 2>&1)"; RC=$?
+rc_is "a bad argument through the alias: medcea.sh's exit 2" 2
+has   "medcea.sh's refusal" "unknown argument '--bogus'  (./medcea.sh --help)"
+mkcfg false false
+OUT="$(printf '6\n13\n\ny\nq\n' | NO_COLOR=1 MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/guide.sh" --dry-run 2>&1)"; RC=$?
+rc_is "arguments forwarded (--dry-run): quits with 0" 0
+has   "the dry run's line" "[dry run] not executed:"
+OUT="$(printf '1\n' | NO_COLOR=1 MEDCEA_GUIDE_CONFIG="$T/config.env" "$S/guide.sh" --dry-run 2>&1)"; RC=$?
+rc_is "end of input through the alias: medcea.sh's exit 1" 1
+OUT="$("$S/medcea.sh" --help 2>&1)"; RC=$?
+rc_is "./medcea.sh --help: exit 0" 0
+has   "its usage line" "./medcea.sh --plain [--dry-run]"
+has   "named after the platform, not PROJECT_NAME" "not after PROJECT_NAME"
+no_stub
+
+echo "65 the MedCEA logo (infra/lib-banner.sh)"
+COLS_SET="GREEN='\033[0;32m' YELLOW='\033[0;33m' NC='\033[0m'"
+NEW_FULL="$(bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh" | od -c)"
+if OLD_SRC="$(git -C "$REPO" show e50647d:deploy-infra.sh 2>/dev/null)"; then
+    sed -n '/^_print_banner() {/,/^}/p' <<<"$OLD_SRC" >"$T/old-banner.sh"
+    OLD_FULL="$(bash -c "$COLS_SET; source \"\$0\"; _print_banner" "$T/old-banner.sh" | od -c)"
+    [[ "$OLD_FULL" != "$NEW_FULL" ]] && pass "the tagline's colour changed (it never matched *Medical*)" || fail "full is unchanged"
+    sed -i 's/\*Medical\*/*Medicinal*/' "$T/old-banner.sh"
+    OLD_FIXED="$(bash -c "$COLS_SET; source \"\$0\"; _print_banner" "$T/old-banner.sh" | od -c)"
+    [[ "$OLD_FIXED" == "$NEW_FULL" ]] && pass "full = deploy-infra's _print_banner of e50647d, byte for byte, but the tagline's colour" \
+        || fail "full differs from the old banner beyond the tagline colour"
+else
+    pass "no git history (e50647d): the old banner comparison is skipped"
+fi
+bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh" | grep -qF $'\033[0;36m Controlled Environment Agriculture for Medicinal Plants and Fungi' \
+    && pass "the tagline is cyan" || fail "the tagline is not cyan"
+cat >"$T/compact.want" <<'COMPACT'
+  .--.  .--.    __  __          _  ___  ___    _       .-~~~~-.
+ (    \/    )  |  \/  | ___  __| |/ __|| __|  /_\   .' o  .  O '.
+  '--.||.--'   | |\/| |/ -_)/ _` | (__ | _|  / _ \ (____________)
+   ___||___    |_|  |_|\___|\__,_|\___||___|/_/ \_\     |    |
+   \______/    Controlled Environment Agriculture   ,,,|____|,,,
+               for Medicinal Plants and Fungi
+COMPACT
+bash -c 'source "$0"; medcea_banner compact' "$REPO/infra/lib-banner.sh" | cmp -s - "$T/compact.want" \
+    && pass "compact = the approved six lines" || fail "compact differs"
+[[ "$(awk '{ if (length($0) > m) m = length($0) } END { print m }' "$T/compact.want")" == 65 ]] && pass "compact: 65 columns" || fail "compact is not 65 columns"
+bash -c 'NC=; GREEN=; YELLOW=; source "$0"; medcea_banner full' "$REPO/infra/lib-banner.sh" | grep -q $'\033' \
+    && fail "full has colours with the caller's colours off" || pass "full has no colour when the caller's NC is empty"
+grep -q '^source "$SCRIPT_DIR/infra/lib-banner.sh"$' "$REPO/deploy-infra.sh" && grep -q '^medcea_banner full$' "$REPO/deploy-infra.sh" \
+    && ! grep -q '_print_banner' "$REPO/deploy-infra.sh" && pass "deploy-infra sources it and prints the full logo" || fail "deploy-infra is not wired"
+guide $'q\n'
+hasnt "plain mode, output not a terminal: no logo" "Controlled Environment Agriculture"
+BANNER_L2=' (    \/    )  |  \/  | ___  __| |/ __|| __|  /_\   .'"'"' o  .  O '"'"'.'
+ptyrun $'1|\n' pipe 1 24 80 $'q\n'
+if [[ "$OUT" == *"=== NO PTY"* ]]; then
+    pass "no pseudo-terminal: the logo's terminal cases are skipped"
+else
+    has   "plain mode at a terminal: the full logo once" "Controlled Environment Agriculture for Medicinal Plants and Fungi"
+    [[ "$(grep -c 'Controlled Environment Agriculture' <<<"$OUT")" == 1 ]] && pass "only once" || fail "the logo more than once"
+    ptyrun $'0|6\n1|\n1|\n' pty 1 40 100 ''
+    rc_is "a large terminal: quits with 0" 0
+    wt_one "a large terminal: the compact logo atop the main menu" "=== CALL 1" "[--menu]" "[What do you want to do?]" "$BANNER_L2" "for Medicinal Plants and Fungi" "Host:    "
+    wt_none "never in a sub-menu" "=== CALL 2" "for Medicinal Plants and Fungi"
+    wt_one "the main menu again, with it" "=== CALL 3" "[What do you want to do?]" "for Medicinal Plants and Fungi"
+    wt_none "the logo is not scrolled away (its text fits)" "=== CALL 1" "[--scrolltext]"
+    ptyrun $'1|\n' pty 1 24 80 ''
+    wt_none "24 rows: no room, no logo" "=== CALL 1" "for Medicinal Plants and Fungi"
+    wt_one "24 rows: the header as before" "=== CALL 1" "Host:    "
+    ptyrun $'1|\n' pty 1 40 74 ''
+    wt_none "74 columns: the logo would wrap, no logo" "=== CALL 1" "for Medicinal Plants and Fungi"
+fi
+tui $'1|\n' ''
+wt_none "the test hook's terminal (no size: 24×80): no logo" "=== CALL 1" "for Medicinal Plants and Fungi"
+
+echo "66 dialogs: the end-of-command dialog (util-linux script, a pty)"
+# A real run on a pty, so stdin is a terminal and the command runs under script. Input
+# is typed only once MARK has appeared on the terminal: typed earlier, script would hand
+# it to the command.
+PTY_REAL_PY='
+import os, pty, sys, subprocess, termios, fcntl, struct, select, time
+guide, rows, cols, mark, data = sys.argv[1:6]
+try:
+    m, s = pty.openpty()
+except OSError:
+    print("=== NO PTY"); sys.exit(77)
+fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
+def pre():
+    os.setsid(); fcntl.ioctl(1, termios.TIOCSCTTY, 0)
+p = subprocess.Popen([guide] + sys.argv[6:], stdin=s, stdout=s, stderr=s, preexec_fn=pre)
+out = b""; end = time.time() + 40; sent = not mark
+while True:
+    r, _, _ = select.select([m], [], [], 0.1)
+    if r:
+        try:
+            out += os.read(m, 65536)
+        except OSError:
+            break
+    elif p.poll() is not None:
+        break
+    if not sent and mark.encode() in out:
+        time.sleep(0.2); os.write(m, data.encode()); sent = True
+    if time.time() > end:
+        p.kill(); break
+rc = p.wait()
+sys.stdout.write(out.decode(errors="replace").replace("\r", ""))
+sys.exit(rc)
+'
+ptyreal() {   # ptyreal QUEUE MARK INPUT [ENV=VAL…] → OUT, RC, WT: a real run (stubs, $S/config.env) on a 30×100 pty
+    local q="$1" mark="$2" in="$3"; shift 3
+    tui_reset "$q"
+    OUT="$(env -u GUIDE_PLAIN -u MEDCEA_PLAIN -u MEDCEA_TUI_FORCE -u MEDCEA_TUI_TTY TMPDIR="$T/tmpdir" PATH="$WTB:$PATH" NO_COLOR=1 TERM=xterm \
+        WT_QUEUE="$T/wt.queue" WT_LOG="$T/wt.log" WT_N="$T/wt.n" WT_MARK="$T/wt.mark" STUB_TS="$T/tmpdir" "$@" \
+        python3 -c "$PTY_REAL_PY" "$S/medcea.sh" 30 100 "$mark" "$in" 2>&1)"; RC=$?
+    WT="$(cat "$T/wt.log")"
+}
+if ! command -v script >/dev/null 2>&1 || ! script --version 2>/dev/null | grep -q util-linux; then
+    pass "no util-linux script on this host: the end dialog is not offered (tests 60: the Enter prompt)"
+else
+    mkcfg false false; cp "$T/config.env" "$S/config.env"; chmod 600 "$S/config.env"
+    rm -rf "$S/logs"
+    # Infrastructure → Publish the manual → Yes → (the command) → the end dialog: Menu → Back → Quit
+    ptyreal $'0|2\n0|9\n0|\n0|\n1|\n1|\n' '' '' STUB_FANCY=1 STUB_LOG=1
+    if [[ "$OUT" == *"=== NO PTY"* ]]; then
+        pass "no pseudo-terminal: skipped"
+    else
+        rc_is "quits with 0" 0
+        has   "the command ran (on the terminal)" "STUB infra/publish-manual.sh"
+        has   "its \$ line on the terminal" "\$ ./infra/publish-manual.sh"
+        has   "Finished on the terminal" "Finished: exit code 0."
+        hasnt "no Enter prompt" "Enter = back to the menu"
+        wt_one "the end dialog: title, Menu/Quit, scrollable" "=== CALL 4" "[--title]" "[Finished: exit code 0]" "[--scrolltext]" \
+            "[--yes-button]" "[Menu]" "[--no-button]" "[Quit]" "[--yesno]"
+        wt_one "the command line and its result" "=== CALL 4" "\$ ./infra/publish-manual.sh  →  Finished: exit code 0"
+        wt_one "the log it wrote" "=== CALL 4" "  Log: logs/stub-"
+        wt_one "its output's tail" "=== CALL 4" "The last lines of its output:" "STUB infra/publish-manual.sh" "LOCK_HELD="
+        wt_one "colours stripped" "=== CALL 4" "GREEN text"
+        wt_none "no escape left" "=== CALL 4" $'\033'
+        wt_one "a carriage return: the text after the last one" "=== CALL 4" "progress 100%"
+        wt_none "not the overwritten text" "=== CALL 4" "progress 10%"
+        wt_one "a backspace takes the character before it" "=== CALL 4" "bacX"
+        wt_none "script's own lines left out" "=== CALL 4" "Script started on"
+        wt_one "the recorded file was mode 600 while the command ran" "=== CALL 4" "TS_MODE=600"
+        wt_none "and is gone once the dialog is built" "=== CALL 4" "run.typescript"
+        wt_none "no later dialog has the output (it never reached the screen buffer)" "=== CALL 5" "GREEN text"
+        wt_one "Menu: the area menu again" "=== CALL 5" "[Infrastructure]" "[--menu]"
+        wt_hasnt "whiptail never gets fd 9" "=== FD 9 open"
+        # Quit
+        ptyreal $'0|2\n0|9\n0|\n1|\n' '' ''
+        rc_is "Quit: exit 0" 0
+        has   "Bye." "Bye."
+        [[ "$(wt_calls)" == 4 ]] && pass "no dialog after Quit" || fail "dialogs: $(wt_calls)"
+        # Esc is Menu
+        ptyreal $'0|2\n0|9\n0|\n255|\n1|\n1|\n' '' ''
+        wt_one "Esc: the area menu again" "=== CALL 5" "[Infrastructure]" "[--menu]"
+        # A failure
+        ptyreal $'0|2\n0|9\n0|\n0|\n1|\n1|\n' '' '' STUB_RC=4
+        wt_one "a failure: its title" "=== CALL 4" "[Failed: exit code 4]" "\$ ./infra/publish-manual.sh  →  Failed: exit code 4"
+        hasnt "no log written: none named" "  Log: "
+        # The credentials box: no end dialog, the output stays on the terminal with the prompt
+        ptyreal $'0|2\n0|9\n0|\n1|\n1|\n' "Enter = back to the menu, q = quit: " $'\n' STUB_CRED=1
+        rc_is "credentials: quits with 0" 0
+        has   "the box stays on the terminal" " CREDENTIALS — /tmp/credentials-test.txt"
+        has   "says why there is no summary" "(Its output holds the credentials box: it stays on this terminal; no summary box.)"
+        has   "the Enter prompt instead" "Enter = back to the menu, q = quit: "
+        wt_hasnt "no dialog has it" "secret-line-xyz"
+        wt_hasnt "no end dialog" "[Finished: exit code 0]"
+        # A switch recipe under script: one end dialog for all its steps; the steps keep the
+        # deploy lock (MEDCEA_LOCK_HELD and fd 9, as without script)
+        sed 's/^IAM_NETPOL=.*/IAM_NETPOL="true"/' "$REPO/config.env.example" >"$S/config.env"; chmod 600 "$S/config.env"
+        rm -f "$S"/config.env.guide-*.bak
+        ptyreal $'0|5\n0|2\n0|2\n0|\n0|\n1|\n1|\n' '' '' STUB_RC=3 STUB_VERIFY=1
+        rc_is "a failed recipe: quits with 0" 0
+        wt_one "one end dialog after the recipe" "=== CALL 5" "[Failed: exit code 3]" "\$ ./deploy-infra.sh  →  Failed: exit code 3" \
+            "Step 2 failed (exit code 3): ./deploy-infra.sh" "cp -p config.env.guide-"
+        wt_one "the step kept the guide's lock: fd 9 inherited through script" "=== CALL 5" "FD9=$S/.medcea.lock" "LOCK_PROBE=held"
+        wt_one "MEDCEA_LOCK_HELD inherited, and medcea_lock_verify passes in the step" "=== CALL 5" "VERIFY=ok"
+        grep -qE 'LOCK_HELD=[0-9]+' <<<"$WT" && pass "LOCK_HELD names medcea.sh" || fail "the step had no MEDCEA_LOCK_HELD"
+        lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
+        rm -f "$S"/config.env.guide-*.bak
+        sed 's/^IAM_NETPOL=.*/IAM_NETPOL="true"/' "$REPO/config.env.example" >"$S/config.env"; chmod 600 "$S/config.env"
+        # The full-enforcement chain stopped after a switch whose recorded steps all passed:
+        # its end dialog must not say Finished (LAST_RC is still 0)
+        swcfg "$S/config.env" "${SW_ALL[@]/%/=true}" IAM_GATES=false IAM_DB_ROLES=false
+        rm -f "$S"/config.env.guide-*.bak
+        # IAM switches → full enforcement → Run? yes → (IAM_GATES' steps) → Enter → IAM_DB_ROLES' checklist: no
+        ptyreal $'0|5\n0|9\n0|\n1|\n0|\n1|\n1|\n' "Press Enter to continue: " $'\n'
+        rc_is "a stopped chain: quits with 0" 0
+        wt_one "its end dialog is titled Stopped: the steps that passed, the stop text" "[Stopped: full enforcement not finished]" \
+            "\$ ./deploy-infra.sh  →  Finished: exit code 0" \
+            "Bring IAM to full enforcement stopped at IAM_DB_ROLES: its checklist was answered no"
+        wt_hasnt "never titled Finished" "[Finished: exit code 0]"
+        sw_is "$S/config.env" IAM_GATES true
+        sw_is "$S/config.env" IAM_DB_ROLES false
+        lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
+        rm -f "$S"/config.env.guide-*.bak
+        sed 's/^IAM_NETPOL=.*/IAM_NETPOL="true"/' "$REPO/config.env.example" >"$S/config.env"; chmod 600 "$S/config.env"
+        # Ctrl-C in a step (raw terminal: only the step gets it): the recipe stops, exit 130
+        ptyreal $'0|5\n0|2\n0|2\n0|\n' '' '' STUB_INT=1
+        rc_is "Ctrl-C in a recorded step: exit 130" 130
+        has   "stopped as by Ctrl-C" "Stopped by Ctrl-C (SIGINT) during step 2"
+        has   "says config.env changed" "config.env has already been changed."
+        lock_free && pass "the lock is free afterwards" || fail "the lock is still held"
+        rm -f "$S"/config.env.guide-*.bak
+        rm -rf "$S/logs"
+    fi
+fi
+
+[[ -z "$(ls -A "$T/tmpdir")" ]] && pass "every screen buffer's folder was removed on exit (also after exit 1, 130 and 2)" \
+    || fail "left behind: $(ls -A "$T/tmpdir")"
 
 echo "10 the real config.env"
 [[ "$(sum_real)" == "$REAL_BEFORE" ]] && pass "unchanged" || fail "the repository's config.env changed"

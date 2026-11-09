@@ -18,7 +18,7 @@
 #                                 MANUAL_SERVED=yes only after the restart, no otherwise.
 #
 # Callers: deploy-infra.sh section 9 (every infra deploy publishes it), infra/publish-manual.sh
-# (./guide.sh → Infrastructure → Publish the manual to the portal: a docs change needs no
+# (./medcea.sh → Infrastructure → Publish the manual to the portal: a docs change needs no
 # full deploy), and health-check.sh's `manual` check (manual_build only: read-only).
 #
 # Needs KUBECTL for manual_publish. The portal's nginx (k8s/portal/nginx.conf) serves the

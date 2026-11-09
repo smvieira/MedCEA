@@ -1789,7 +1789,7 @@ class Wiring(unittest.TestCase):
         return out
 
     def test_every_compiling_entry_script_is_wired(self):
-        listed = set(WRITERS + READERS + FIXTURE + EITHER + ["guide.sh"])
+        listed = set(WRITERS + READERS + FIXTURE + EITHER + ["medcea.sh"])
         for p in self.entry_scripts():
             if COMPILES.search(code(read(p))):
                 self.assertIn(p, listed, f"{p} compiles the policy: wire it (tests/test_policy_source.py)")
@@ -1929,7 +1929,7 @@ class Wiring(unittest.TestCase):
             if rel.startswith((".git", "docs", "codeplan", "logs", "tests")) or "__pycache__" in rel:
                 continue
             for f in files:
-                if f.endswith(".sh") or f in ("guide.sh",):
+                if f.endswith(".sh") or f in ("medcea.sh",):
                     p = os.path.normpath(os.path.join(rel, f))
                     t = code(read(p))
                     if re.search(r"\bDBA_STAGED=", t):
@@ -1947,7 +1947,7 @@ class Wiring(unittest.TestCase):
             self.assertNotIn("lib-policy-source.sh", code(read(p)), p)
 
     def test_offline_tests_read_the_factory_policy(self):
-        # iam-routes-diff.py too: offline, run by guide.sh (which does not init), and its
+        # iam-routes-diff.py too: offline, run by medcea.sh (which does not init), and its
         # routes are skeleton, compared with the code on disk
         offline = [f for f in os.listdir(os.path.join(REPO, "tests"))
                    if f.startswith("test_") and f.endswith(".py") and f != "test_policy_source.py"]

@@ -96,7 +96,7 @@ set +a
 NAMESPACE="${NAMESPACE:-medcea}"
 POLICY_DOMAIN="${POLICY_DOMAIN:-policy.$DOMAIN}"; export POLICY_DOMAIN
 if [[ "${IAM_POSTGREST_JWT:-false}" != true || "${IAM_DB_ROLES:-false}" != true ]]; then
-    echo "Approvals need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true: nothing to test (./guide.sh)." >&2
+    echo "Approvals need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true: nothing to test (./medcea.sh)." >&2
     exit 2
 fi
 source infra/lib-lock.sh; medcea_lock

@@ -20,7 +20,7 @@
 #   PORTAL_DOMAIN    the portal's gate (helm, no forced restart)
 #
 # Run by deploy-infra.sh (exec, right after its --help branch), by apply.sh --resume
-# and by ./guide.sh → Policy → Re-render the policy artefacts. Takes the deploy lock
+# and by ./medcea.sh → Policy → Re-render the policy artefacts. Takes the deploy lock
 # unless a parent holds it.
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then

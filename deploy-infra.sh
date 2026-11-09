@@ -26,58 +26,9 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 # =============================================================================
-# BANNER
+# BANNER (infra/lib-banner.sh: the MedCEA logo, shared with ./medcea.sh)
 # =============================================================================
-_print_banner() {
-    # Herb on the left, mushroom on the right: the two crops MedCEA grows.
-    # Strings are $'...' so the backslashes and the backtick in the "d" stay literal;
-    # printf %s prints them uninterpreted (echo -e would read \c, \b, ... as escapes).
-    local -a plant=(
-        $'   .--.  .--.'
-        $'  (    \\/    )'
-        $'   \'--.||.--\''
-        $' .--.  ||  .--.'
-        $'(    \\_||_/    )'
-        $' \'--.__||__.--\''
-        $'       ||'
-        $'   ____||____'
-        $'   \\        /'
-        $'    \\______/'
-    )
-    local -a title=(
-        ''
-        ''
-        $' __  __            _   ____  _____     _'
-        $'|  \\/  |  ___   __| | / ___|| ____|   / \\'
-        $'| |\\/| | / _ \\ / _` || |    |  _|    / _ \\'
-        $'| |  | ||  __/| (_| || |___ | |___  / ___ \\'
-        $'|_|  |_| \\___| \\__,_| \\____||_____|/_/   \\_\\'
-        ''
-        $' Controlled Environment Agriculture for Medicinal Plants and Fungi'
-        ''
-    )
-    local -a mush=(
-        ''
-        ''
-        $'      .-~~~~-.'
-        $'   .-\' o   .  \'-.'
-        $'  /  .    O   o  \\'
-        $' (  o   .     .   )'
-        $'  \'-.__________.-\''
-        $'       |    |'
-        $'       |    |'
-        $'    ,,,|____|,,,'
-    )
-    local B='\033[1m' CY='\033[0;36m' RD='\033[0;31m' i pc tc mc
-    echo ""
-    for i in "${!plant[@]}"; do
-        pc="$GREEN"; (( i >= 7 )) && pc="$YELLOW"        # leaves / pot
-        tc="$B$GREEN"; [[ "${title[$i]}" == *Medical* ]] && tc="$CY"
-        mc="$RD"; (( i >= 7 )) && mc="$NC"; (( i == 9 )) && mc="$GREEN"  # cap / stem / grass
-        printf " ${pc}%-16s${NC}  ${tc}%-44s${NC}  ${mc}%s${NC}\n" "${plant[$i]}" "${title[$i]}" "${mush[$i]}"
-    done
-    echo ""
-}
+source "$SCRIPT_DIR/infra/lib-banner.sh"
 
 # =============================================================================
 # --help
@@ -308,7 +259,7 @@ LOG_FILE="logs/deploy-infra-$(date +%Y%m%d-%H%M%S).log"
 export MEDCEA_LOG_FILE="$LOG_FILE"   # the component scripts log here, not in a log of their own (infra/lib-log.sh)
 exec > >(tee "$LOG_FILE") 2>&1
 echo "Deploy started: $(date)"
-_print_banner
+medcea_banner full
 
 source config.env
 set -e

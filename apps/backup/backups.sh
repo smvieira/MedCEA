@@ -17,7 +17,7 @@
 #
 # The restore is shown, not run: it stops services and drops databases, and which
 # parts to restore (one person's home, or everything after a reinstall) is a decision
-# this script cannot take. ./guide.sh → Backups asks for each of these.
+# this script cannot take. ./medcea.sh → Backups asks for each of these.
 
 set -euo pipefail
 

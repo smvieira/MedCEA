@@ -1,12 +1,12 @@
 # The MedCEA Concept
 
-**Controlled Environment Agriculture for Medicinal Plants and Fungi (MedCEA)** is a specialised subclass of CEA. Its primary
-production objective is the optimised, reproducible and regulatory-compliant biosynthesis of target
-bioactive compounds in medicinal plant and fungal species, not biomass yield.
+**Controlled Environment Agriculture for Medicinal Plants and Fungi (MedCEA)** is a specialised
+subclass of Controlled Environment Agriculture in which the primary production objective is the optimised, reproducible, and regulatory-compliant biosynthesis of target
+bioactive compounds in medicinal plant and fungal species.
 
-This repository holds the open-source (MIT) IIoT platform that instantiates the concept. It is the
-artefact of a Design Science Research PhD project (ISCTE-IUL / Instituto de Telecomunicações, with
-ESACB, 2025–2028). The primary model organism is *Hericium erinaceus* (lion's mane).
+This repository holds the open-source (MIT) IIoT platform that instantiates the concept. It was
+developed as part of PhD research at Iscte-IUL, Instituto de Telecomunicações. The primary model
+organism is *Hericium erinaceus* (lion's mane).
 
 ## Research question
 

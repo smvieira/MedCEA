@@ -1,7 +1,7 @@
 # Contains real credentials — never commit
 config.env
 config.env.bak
-# guide.sh backs config.env up before changing a switch
+# medcea.sh backs config.env up before changing a switch
 config.env.guide-*.bak
 config.env.guide.*
 config.env.merged

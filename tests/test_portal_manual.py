@@ -462,7 +462,7 @@ class Publish(unittest.TestCase):
         self.assertIn('manual_publish "$NAMESPACE"', src)
         self.assertNotIn("--no-roll", src.split("set -euo pipefail")[1])
         self.assertTrue(os.access(os.path.join(REPO, "infra/publish-manual.sh"), os.X_OK))
-        self.assertIn('"a_manual_publish|Publish the manual to the portal|', read("guide.sh"))
+        self.assertIn('"a_manual_publish|Publish the manual to the portal|', read("medcea.sh"))
         # the served URL is claimed only after the restart happened
         tail = src.split('manual_publish "$NAMESPACE"')[1]
         self.assertLess(tail.index('"$MANUAL_SERVED" == yes'), tail.index("/manual/"))
@@ -532,7 +532,7 @@ class Health(unittest.TestCase):
         status, msg = self.run_check()
         self.assertEqual(status, "WARN", msg)
         self.assertIn("the portal serves the manual of abc1234", msg)
-        self.assertIn("./guide.sh → Infrastructure → Publish the manual to the portal", msg)
+        self.assertIn("./medcea.sh → Infrastructure → Publish the manual to the portal", msg)
 
     def test_not_published(self):
         self.put("deployment", "portal", self.dep)

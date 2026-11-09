@@ -11,7 +11,7 @@ later) are listed, not failed. Then proves the diff catches each kind of differe
 
 Run from the repository root:  python3 tests/iam-routes-diff.py [--strict]
 --strict also fails while a planned removal is still served (it would be refused under
-IAM_ENFORCE=true): the guide's IAM_ENFORCE enable step runs it. It reads the source on
+IAM_ENFORCE=true): medcea.sh's IAM_ENFORCE enable step runs it. It reads the source on
 disk, not the running pods.
 Read-only; needs python3-yaml. No cluster, no lock.
 """
