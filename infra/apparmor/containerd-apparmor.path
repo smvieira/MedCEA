@@ -1,0 +1,12 @@
+# Rendered by infra/lib-apparmor.sh (aa_containerd_fix) into
+# /etc/systemd/system/${AA_UNIT}.path. MicroK8s's containerd wrapper copies its own
+# profile over this file at every containerd start; the service puts the rules back.
+[Unit]
+Description=${PROJECT_NAME}: watch MicroK8s's container AppArmor profile
+
+[Path]
+PathChanged=/etc/apparmor.d/cri-containerd.apparmor.d
+Unit=${AA_UNIT}.service
+
+[Install]
+WantedBy=paths.target

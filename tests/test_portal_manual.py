@@ -173,7 +173,7 @@ case "$*" in
   "get cm portal-html"*) cat {src} ;;
   "create configmap portal-html"*) cat > {out}.yaml ;;
   "apply -f -") cat > /dev/null ;;
-  "rollout restart"*) : ;;
+  "rollout restart"*) echo restart >> {out}.restarts ;;
   *) echo "fake kubectl: $*" >&2; exit 98 ;;
 esac
 """)
@@ -182,6 +182,13 @@ esac
                            cwd=REPO, env=dict(os.environ, KUBECTL=fake, NAMESPACE="medcea"), check=True)
             # the fake records what create configmap read from stdin (--from-file=index.html=/dev/stdin)
             enabled = open(out + ".yaml").read()
+            self.assertEqual(open(out + ".restarts").read(), "restart\n")
+            # deploy-infra's call: the card changes, the restart is left to the caller
+            os.remove(out + ".yaml"); os.remove(out + ".restarts")
+            subprocess.run(["bash", "-c", 'source infra/lib-portal.sh; portal_card enable "https://superset_domain.example"'],
+                           cwd=REPO, env=dict(os.environ, KUBECTL=fake, NAMESPACE="medcea", PORTAL_CARD_NO_RESTART="1"), check=True)
+            self.assertTrue(os.path.exists(out + ".yaml"))
+            self.assertFalse(os.path.exists(out + ".restarts"))
         self.assertIn('<a class="card" href="https://superset_domain.example" target="_blank" rel="noopener">', enabled)
         self.assertNotIn('data-href="https://superset_domain.example"', enabled)
 
@@ -189,7 +196,7 @@ esac
         src = read("deploy-infra.sh")
         sec = src[src.index('render "$SCRIPT_DIR/k8s/portal/portal.yaml"'):src.index("rollout restart deployment/portal")]
         self.assertIn('kubectl get deployment superset -n "$NAMESPACE"', sec)
-        self.assertIn('portal_card enable "https://${SUPERSET_DOMAIN}"', sec)
+        self.assertIn('PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"', sec)
         self.assertIn('SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"', src)
         self.assertIn('SUPERSET_DOMAIN="superset.$DOMAIN"', read("config.env.example"))
 
@@ -564,7 +571,7 @@ class Health(unittest.TestCase):
     def test_wiring(self):
         conf = read("health-checks.conf")
         lines = [l for l in conf.splitlines() if l.strip() and not l.startswith("#")]
-        self.assertEqual(len(lines), 56)
+        self.assertEqual(len(lines), 57)  # 57 with Container AppArmor (8 Nov 2026)
         row = [l for l in lines if l.split("|")[0].strip() == "Platform manual"]
         self.assertEqual(len(row), 1)
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["manual", "$NAMESPACE"])

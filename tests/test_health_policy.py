@@ -1031,7 +1031,7 @@ class Wiring(unittest.TestCase):
         i = names.index("Database grants")
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
-        self.assertEqual(len(lines), 56)
+        self.assertEqual(len(lines), 57)  # 57 with Container AppArmor (8 Nov 2026)
         # Superset stage B: one more check, SKIP until Superset is deployed (stage C: none more)
         row = [l for l in lines if l.split("|")[0].strip() == "Superset roles"]
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["supersetroles", "$NAMESPACE"])

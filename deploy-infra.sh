@@ -53,7 +53,7 @@ _print_banner() {
         $'| |  | ||  __/| (_| || |___ | |___  / ___ \\'
         $'|_|  |_| \\___| \\__,_| \\____||_____|/_/   \\_\\'
         ''
-        $' Medical Controlled Environment Agriculture'
+        $' Controlled Environment Agriculture for Medicinal Plants and Fungi'
         ''
     )
     local -a mush=(
@@ -183,6 +183,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         echo "  MicroK8s not installed — skipping."
         kill_orphan_pods
     fi
+
+    # The AppArmor units and the host profiles they disabled (infra/lib-apparmor.sh).
+    source "$SCRIPT_DIR/infra/lib-apparmor.sh"
+    aa_containerd_remove || echo -e "${YELLOW}WARNING: the AppArmor units were not all removed (above).${NC}" >&2
 
     # The /etc/hosts entries for a name-based domain (infra/lib-dns.sh).
     source "$SCRIPT_DIR/infra/lib-dns.sh"
@@ -385,6 +389,18 @@ if [[ ! "$PROJECT_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]]; then
     echo -e "${RED}ERROR: PROJECT_NAME='$PROJECT_NAME' must match ^[a-z][a-z0-9-]{1,30}\$ (it is the MQTT topic root, namespace and realm).${NC}"
     exit 1
 fi
+
+# =============================================================================
+# 0. APPARMOR RULES FOR CONTAINERS (8 Nov 2026; infra/lib-apparmor.sh)
+# On Ubuntu kernels from 7.0.0-41 a container's processes carry a stacked AppArmor
+# label that MicroK8s's profile does not name, so signals inside a container are
+# denied and PostgreSQL never finishes starting. Installed before the bootstrap, so a
+# fresh install's first containerd start is already covered; sudo only when it
+# changes something. A failure warns and goes on (health check "Container AppArmor").
+# =============================================================================
+echo -e "${YELLOW}AppArmor rules for the cluster's containers...${NC}"
+source "$SCRIPT_DIR/infra/lib-apparmor.sh"
+aa_containerd_fix || true
 
 # =============================================================================
 # 1. BOOTSTRAP (MicroK8s + Kubeflow)
@@ -1928,7 +1944,8 @@ rm -f "$_PORTAL_BG_TMP"
 # re-render must not grey out a Superset that is installed.
 if $MK8S kubectl get deployment superset -n "$NAMESPACE" >/dev/null 2>&1; then
   source "$SCRIPT_DIR/infra/lib-portal.sh"
-  KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"
+  # Its own restart left to the one below (two within a second: kubectl refuses the second).
+  PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"
 fi
 
 # The HTML (and the nginx config) is mounted with subPath, and a subPath ConfigMap mount does NOT

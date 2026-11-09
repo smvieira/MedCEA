@@ -17,7 +17,9 @@
 # bootstrap-infra.sh installs.
 
 # test|apt-package|what needs it — the test is evaluated, so it can check more
-# than a command (python3-venv is a module, not a binary).
+# than a command (python3-venv is a module, not a binary). The fields are split
+# on '|', so a test must not contain one (no `||`, no pipe): use test's -o/-a.
+# tests/test_apparmor.py checks every entry has exactly three fields.
 _PREREQS=(
     "command -v curl|curl|Keycloak/Grafana API calls, readiness checks, downloads"
     "[ -s /etc/ssl/certs/ca-certificates.crt ]|ca-certificates|HTTPS downloads (Docker Hub, Tailscale, Helm charts)"
@@ -30,10 +32,11 @@ _PREREQS=(
     "command -v pgrep|procps|process checks (health-check onboardroles, the edge-wizard deploy)"
     "python3 -c 'import yaml' 2>/dev/null|python3-yaml|the access-policy compiler (apps/iam/compiler)"
     "command -v snap|snapd|installing MicroK8s"
+    "test ! -d /sys/kernel/security/apparmor -o -x /usr/sbin/apparmor_parser -o -x /sbin/apparmor_parser|apparmor|the AppArmor rules for containers (infra/lib-apparmor.sh)"
 )
 
 check_prereqs() {
-    local entry test pkg why sudo="" ans
+    local entry test pkg why
     local -a missing=() reasons=()
     for entry in "${_PREREQS[@]}"; do
         IFS='|' read -r test pkg why <<<"$entry"
@@ -42,6 +45,40 @@ check_prereqs() {
     done
     [[ ${#missing[@]} -eq 0 ]] && return 0
 
+    # Anything to report is logged (logs/prereqs-<ts>.log, mode 600, or the
+    # caller's log when it already keeps one): this runs before deploy-infra's and
+    # deploy-apps' own logs start, and a failure here used to leave no record. The
+    # prompt is shown through tee; what is typed, and sudo's password, are not logged.
+    local log
+    log="$(_prereqs_log)"
+    if [[ -n "$log" ]]; then
+        ( _prereqs_install ) > >(tee -a "$log") 2>&1 || { local rc=$?; sleep 0.2; echo "  (log: $log)" >&2; exit "$rc"; }
+        sleep 0.2
+    else
+        ( _prereqs_install ) || exit $?
+    fi
+    [[ " ${missing[*]} " == *" snapd "* ]] && export PATH="$PATH:/snap/bin"
+    return 0
+}
+
+# Where check_prereqs reports: the caller's log, else a log of its own; empty
+# under MEDCEA_NO_LOG=1 or when logs/ cannot be written.
+_prereqs_log() {
+    [[ "${MEDCEA_NO_LOG:-}" == 1 ]] && return 0
+    [[ -n "${MEDCEA_LOG_FILE:-}" ]] && { echo "$MEDCEA_LOG_FILE"; return 0; }
+    local dir f
+    dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    f="$dir/prereqs-$(date +%Y%m%d-%H%M%S).log"
+    (umask 077; : >> "$f") 2>/dev/null || return 0
+    echo "$f"
+}
+
+# The report, the question and apt-get, in a subshell (its exits are the caller's
+# exit code). Reads check_prereqs' locals: missing, reasons.
+_prereqs_install() {
+    local entry test pkg why sudo="" ans
+    echo "Host package check: $(date)"
     if [[ $EUID -ne 0 ]]; then
         command -v sudo >/dev/null 2>&1 \
             || { echo -e "\033[0;31mERROR: missing ${missing[*]}, and sudo is not available. Run as root or install sudo.\033[0m" >&2; exit 1; }

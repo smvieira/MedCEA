@@ -40,7 +40,7 @@
         </svg>
         <div>
             <div class="brand-name">MedCEA Platform</div>
-            <div class="brand-sub">Medical Controlled Environment Agriculture</div>
+            <div class="brand-sub">Controlled Environment Agriculture for Medicinal Plants and Fungi</div>
         </div>
     </div>
 

@@ -1,0 +1,13 @@
+# Rendered by infra/lib-apparmor.sh (aa_containerd_fix) into
+# /etc/systemd/system/${AA_UNIT}.service. Runs the root-owned copy of
+# infra/apparmor/containerd-apparmor.sh; the .path unit starts it on every rewrite.
+[Unit]
+Description=${PROJECT_NAME}: stacked-peer rules in MicroK8s's container AppArmor profile
+After=apparmor.service
+
+[Service]
+Type=oneshot
+ExecStart=${AA_LIB_DIR}/reapply
+
+[Install]
+WantedBy=multi-user.target

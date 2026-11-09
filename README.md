@@ -1,7 +1,7 @@
 # MedCEA
 
-**Medicinal Controlled Environment Agriculture** is an open IIoT platform for the reproducible,
-regulatory-compliant production of bioactive compounds in medicinal mushrooms and plants. It is the
+**Controlled Environment Agriculture for Medicinal Plants and Fungi (MedCEA)** is an open IIoT platform for the reproducible,
+regulatory-compliant production of bioactive compounds in medicinal plants and fungi. It is the
 prototype artefact of the MedCEA PhD project (ISCTE-IUL). The concept is in
 [docs/medcea-concept.md](docs/medcea-concept.md). [docs/architecture.md](docs/architecture.md) maps the
 four-layer stack and the Compliance Plane to this code and lists what is still to be built. The

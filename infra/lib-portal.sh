@@ -9,6 +9,9 @@
 # operation whichever app owns it, and enable/disable are exact inverses: an
 # uninstalled app's card comes back when the app is deployed again. A no-op
 # when the portal or the card is absent (e.g. infra not deployed).
+# PORTAL_CARD_NO_RESTART=1 leaves the portal's restart to the caller: deploy-infra
+# restarts it right after, and kubectl refuses a second rollout restart within the
+# same second, which stopped a deploy (9 Nov 2026).
 
 portal_card() {
     local action="$1" url="$2" current updated
@@ -33,5 +36,6 @@ sys.stdout.write(html)
             --from-file=index.html=/dev/stdin --dry-run=client -o yaml \
         | $KUBECTL apply -f - >/dev/null
     # nginx serves the file from a ConfigMap volume; a restart picks it up at once.
+    [[ "${PORTAL_CARD_NO_RESTART:-}" == 1 ]] && return 0
     $KUBECTL rollout restart deployment/portal -n "$NAMESPACE" >/dev/null 2>&1 || true
 }

@@ -72,6 +72,10 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         verifies against the platform CA (.ca/ca.crt) for mqtt.\$DOMAIN, and the"
     echo -e "         plain port 31883 is closed; e.g. localhost:31884"
     echo ""
+    echo -e "  ${CYAN}apparmor${NC} the stacked-peer rules in MicroK8s's container AppArmor profile"
+    echo -e "         (infra/lib-apparmor.sh): units installed, rules loaded, no signal denial"
+    echo -e "         inside a container since, no host profile attached inside one; no target"
+    echo ""
     echo -e "  ${CYAN}pvc${NC}    a PersistentVolumeClaim is Bound: NAMESPACE/NAME"
     echo -e "         e.g. medcea/grafana; WARN when it is missing or not Bound (the service"
     echo -e "         then keeps nothing across a restart, or does not start)"
@@ -208,6 +212,8 @@ fi
 
 # backup_dir, backup_newest_ok, backup_age_status (check backupage); read-only
 source "${SCRIPT_DIR}/apps/backup/lib-backup.sh"
+# aa_status (check apparmor); read-only
+source "${SCRIPT_DIR}/infra/lib-apparmor.sh"
 
 # Every policy compile below reads what the deploys compiled (IAM Phase 4): an inherited
 # MEDCEA_POLICY_FILE (break-glass) or a parent's "already verified" marker is dropped
@@ -333,6 +339,18 @@ check_pvc() {
 # each folder to the account that deployed it): WARN over 26 h, FAIL over 72 h. With
 # no complete backup yet, the CronJob's own age stands in (SKIP on its first day).
 # =============================================================================
+# =============================================================================
+# Check: the AppArmor rules for containers (infra/lib-apparmor.sh) — read-only
+# SKIP without AppArmor or MicroK8s; FAIL when the units are missing, the profile lacks
+# the rules, the last run failed, a signal was denied inside a container since the
+# rules were loaded, or a host profile (mosquitto) is attached inside a container.
+# =============================================================================
+check_apparmor() {
+    local name="$1" res
+    res="$(aa_status)"
+    _record "${res%%|*}" "$name" "${res#*|}"
+}
+
 check_backupage() {
     local name="$1" ns="${2:-${NAMESPACE:-medcea}}" created created_epoch dir newest res
     if ! created="$(timeout "$TIMEOUT" $KUBECTL get cronjob medcea-backup -n "$ns" \
@@ -1741,6 +1759,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         onboardroles) check_onboardroles "$name" ;;
         pgadminroles) check_pgadminroles "$name" "$target" ;;
         supersetroles) check_supersetroles "$name" "$target" ;;
+        apparmor)     check_apparmor "$name" ;;
         backupage)    check_backupage "$name" "$target" ;;
         manual)       check_manual "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
