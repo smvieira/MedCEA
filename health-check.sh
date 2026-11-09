@@ -81,7 +81,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         then keeps nothing across a restart, or does not start)"
     echo ""
     echo -e "  ${CYAN}iamchain${NC} the access policy history's hash chain: DATABASE"
-    echo -e "         e.g. \$POSTGRES_DB   (iam_policy.verify_chain(); SKIP before migration 008a)"
+    echo -e "         e.g. \$POSTGRES_DB   (iam_policy.verify_chain(); SKIP before migration 008a); WARN when"
+    echo -e "         verify_chain() is not SECURITY DEFINER or iam_svc may not execute it (the Policy UI's History)"
     echo ""
     echo -e "  ${CYAN}iamdbroles${NC} IAM_DB_ROLES (Phase 2): DATABASE"
     echo -e "         WARN while it is false (the database still serves the pre-policy grants),"
@@ -93,7 +94,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "  ${CYAN}iamgrants${NC} the database's grants equal the compiled policy: DATABASE"
     echo -e "         (cli.py compile grants --mode verify, in a read-only transaction; drift is a FAIL;"
     echo -e "         --without-iam while schema iam is absent, from dba_iam_flag; a stale"
-    echo -e "         medcea_auth.role_widening digest is drift too)"
+    echo -e "         medcea_auth.role_widening digest is drift too). SKIP only when the first ERROR is the missing"
+    echo -e "         medcea.platform_setting or a missing medcea_auth function (migration 008b), never on a DETAIL;"
+    echo -e "         under IAM_DB_ROLES=false a medcea table or view in no group is a WARN (I15's classification)"
     echo ""
     echo -e "  ${CYAN}iampolicy${NC} the applied access policy version (IAM 4.2a): DATABASE"
     echo -e "         SKIP before migration 008c or without kubectl; FAIL when PostgreSQL cannot be read,"
@@ -102,12 +105,39 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         the accepted one, an earlier accept widened, an apply did not record its end, a policy"
     echo -e "         break-glass is still open, audit_versions() finds anything, the chain is broken, or a"
     echo -e "         waiver's review date has passed; WARN on queued account facts, an apply in progress,"
-    echo -e "         a narrowing git skeleton, git lagging the applied matrix, a waiver due within 30 days"
+    echo -e "         a narrowing git skeleton, git lagging the applied matrix, a waiver due within 30 days,"
+    echo -e "         the Policy UI's compiler_digest not this checkout's compiler (./apps/iam/deploy.sh)"
     echo ""
     echo -e "  ${CYAN}iamartefacts${NC} the live route table, MQTT rows and sign-in gates are the applied"
     echo -e "         version's compile (IAM 4.2a): NAMESPACE. SKIP without ConfigMap medcea-iam-lib;"
     echo -e "         FAIL on a digest or gate that differs (the message names the deploy); WARN while the"
     echo -e "         User Manager's gate is admin-only; hosts whose proxy is not deployed are counted"
+    echo ""
+    echo -e "  ${CYAN}iamloaded${NC} every Running pod of the six route-checking services loads the routes.json"
+    echo -e "         the ConfigMap holds (read-only kubectl exec: python3 prints the digest and applied_version"
+    echo -e "         only): NAMESPACE. FAIL when a pod's digest differs from medcea/routes-digest 120 s or more"
+    echo -e "         after the ConfigMap's last write (its newest managedFields time; unreadable = past), or the file is missing"
+    echo -e "         where the service enforces (access, dbmgmt, iam-api always; the rest under enforce=true);"
+    echo -e "         WARN inside the 120 s, on a missing file otherwise, an unreadable pod; services not"
+    echo -e "         deployed are counted; applied_version is information only"
+    echo ""
+    echo -e "  ${CYAN}jwks${NC}   the realm's signing keys against Secret medcea-jwks, always on: NAMESPACE"
+    echo -e "         FAIL when the Secret or a key in it is missing, unparseable or without an RS256 signing"
+    echo -e "         key, jwks-sig.json is not infra/jwks-sig.py's signing_keys(jwks.json), the Secret holds a"
+    echo -e "         key id the realm no longer publishes, or the realm signs with a key id the Secret lacks"
+    echo -e "         (./deploy-infra.sh); WARN when the realm does not answer (the Keycloak checks report it)"
+    echo ""
+    echo -e "  ${CYAN}kcscopes${NC} Keycloak's client scopes: REALM (Keycloak's database, read-only psql in the pod)"
+    echo -e "         every client of infra/lib-keycloak-clients.sh has groups and medcea-identity as default"
+    echo -e "         scopes, groups maps realm roles to the groups claim, medcea-identity carries the medcea-api"
+    echo -e "         audience and person_id. FAIL for a scope or mapper missing in the realm, and for a missing"
+    echo -e "         client or scope on a client whose tokens reach a platform API (KC_API_CLIENTS); WARN on a"
+    echo -e "         tool-only client, an optional-only scope, full_scope_allowed=false, an audience in the ID"
+    echo -e "         token, a client-level mapper writing groups/person_id/aud, an unreadable database"
+    echo ""
+    echo -e "  ${CYAN}iamnetpol${NC} the application pods' NetworkPolicies (IAM_NETPOL): NAMESPACE"
+    echo -e "         true: every compiled iam-<pod> policy present (else FAIL), a stale labelled one WARNs;"
+    echo -e "         false: WARN, also while labelled policies remain (./deploy-infra.sh deletes them)"
     echo ""
     echo -e "  ${CYAN}iamdecisions${NC} account decisions waiting for qa (IAM 2.7): DATABASE"
     echo -e "         SKIP without schema iam or role access_svc; FAIL without iam.confirm_decision"
@@ -122,20 +152,23 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo ""
     echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
     echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
-    echo -e "         Secret medcea-jwks, every key id there is still published by the realm"
-    echo -e "         (else FAIL: run ./deploy-infra.sh), and a forged token gets 401; false: WARN"
+    echo -e "         Secret medcea-jwks and a forged token gets 401; false: WARN. The realm's key ids"
+    echo -e "         against the Secret are the jwks check's, in either mode"
     echo ""
     echo -e "  ${CYAN}iamenforce${NC} the Python services enforce the route table (IAM_ENFORCE, IAM 2.6): NAMESPACE"
     echo -e "         FAIL when ConfigMap medcea-iam-lib disagrees with config.env (./deploy-infra.sh),"
     echo -e "         and on IAM_ENFORCE=true with IAM_DB_ROLES=false (assigned_run unchecked) or a pod copy"
-    echo -e "         still false (fails open without /iam/); WARN on a pod copy still true, or while false"
+    echo -e "         still false (fails open without /iam/), and when settings.json has no enforce key; WARN on"
+    echo -e "         a pod copy still true, while false, or when settings.json's switches differ from config.env"
     echo ""
     echo -e "  ${CYAN}iammqtt${NC} the MQTT Explorer's personal credentials (IAM_MQTT_PERSON, IAM 3.5): NAMESPACE"
     echo -e "         FAIL when config.env, the broker (pod annotation, sidecar, conf), the Explorer page"
     echo -e "         and iam-api disagree on the mode; under true also when the shared mqtt-explorer"
     echo -e "         account or a person credential is in the 1883 file, another name is in the"
     echo -e "         WebSocket file, or IAM_DB_ROLES is false; WARN while false, or when the broker's"
-    echo -e "         sidecar last read the database over 5 minutes ago. Usernames only, never a hash"
+    echo -e "         sidecar last read the database over 5 minutes ago. Under true every Running iam-api pod's"
+    echo -e "         mqtt_digest must be medcea/mqtt-digest: WARN within 120 s of the ConfigMap's last write,"
+    echo -e "         FAIL after (./apps/iam/deploy.sh). Usernames only, never a hash"
     echo ""
     echo -e "  ${CYAN}grafanarole${NC} Grafana's role setting is the access policy's (IAM 3.1): NAMESPACE"
     echo -e "         FAIL when the live role path differs from the compiled one (./deploy-infra.sh),"
@@ -418,17 +451,29 @@ check_http() {
 # =============================================================================
 # Check: the access policy's hash-chained history
 # target: DATABASE (iam_policy.verify_chain(), migration 008a). Runs as postgres
-# inside the PostgreSQL pod; the password is read there, never on a command line.
+# inside the PostgreSQL pod in a read-only session (PGOPTIONS default_transaction_read_only,
+# as every database check; verify_chain() is STABLE); the password is read there, never
+# on a command line.
+# Phase 5 (G13): the Policy UI's History tab runs verify_chain() as iam_svc, which may not
+# execute the owner-only history functions, so verify_chain() must be SECURITY DEFINER and
+# executable by iam_svc (tests/iam-db.sh's catalog check, here too): a WARN when either is
+# false, nothing said when role iam_svc does not exist.
 # =============================================================================
 check_iamchain() {
-    local name="$1" db="$2" out exit_code=0
+    local name="$1" db="$2" out exit_code=0 definer
     # The SQL comes from the here-document, not the loop's stdin (the config file).
-    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
         'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -U postgres -d "$0" -tA -F "|"' "$db" 2>&1 <<'SQL'
 SELECT CASE WHEN to_regprocedure('iam_policy.verify_chain()') IS NULL THEN 'absent' ELSE 'present' END;
+SELECT 'definer|' || p.prosecdef::text || '|'
+       || CASE WHEN NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'iam_svc') THEN 'norole'
+               WHEN pg_catalog.has_function_privilege('iam_svc', p.oid, 'EXECUTE') THEN 'true' ELSE 'false' END
+  FROM pg_catalog.pg_proc p WHERE p.oid = to_regprocedure('iam_policy.verify_chain()');
 SELECT ok, events, first_bad_event, detail FROM iam_policy.verify_chain();
 SQL
 ) || exit_code=$?
+    definer="$(grep -m1 '^definer|' <<<"$out")"
     if grep -qx absent <<<"$out"; then   # stderr may come first: match the line
         _record SKIP "$name" "iam_policy.verify_chain() not in ${db} yet (migration 008a: ./apps/database/deploy.sh)"
         return
@@ -439,7 +484,15 @@ SQL
     if [[ $exit_code -ne 0 || ( "$ok" != "t" && "$ok" != "f" ) ]]; then
         _record FAIL "$name" "verify_chain() did not run: ${out:0:120}"
     elif [[ "$ok" == "t" ]]; then
-        _record OK "$name" "hash chain intact, ${events} event(s)"
+        local dwarn=()
+        [[ -z "$definer" || "$definer" == "definer|true|"* ]] \
+            || dwarn+=("verify_chain() is not SECURITY DEFINER: the Policy UI cannot verify the chain as iam_svc")
+        [[ "$definer" == *"|false" ]] && dwarn+=("iam_svc may not execute verify_chain() (the Policy UI's History tab)")
+        if ((${#dwarn[@]})); then
+            local IFS=';'; _record WARN "$name" "hash chain intact, ${events} event(s), but ${dwarn[*]} (./apps/database/deploy.sh)"
+        else
+            _record OK "$name" "hash chain intact, ${events} event(s)"
+        fi
     else
         _record FAIL "$name" "hash chain broken at event ${bad}: ${detail}"
     fi
@@ -522,14 +575,31 @@ check_iamgrants() {
     flag="$(grep -x -- '--without-iam' <<<"$out" || true)"
     sql="$(python3 "${SCRIPT_DIR}/apps/iam/compiler/cli.py" compile grants --mode verify $flag 2>&1)" || {
         _record FAIL "$name" "cli.py compile grants failed: ${sql:0:120}"; return; }
+    # Phase 5 (G4): the assertion set that ran, and under IAM_DB_ROLES=false I15's classification
+    # as a read-only query (a WARN, not drift); appended here, so the compiled verify SQL (a
+    # recorded target) stays byte for byte what every applied version recorded
+    local cls first mode unclassified
+    cls="$(python3 "${SCRIPT_DIR}/apps/iam/apply_check.py" classify-sql $flag 2>&1)" || {
+        _record FAIL "$name" "apply_check.py classify-sql failed: ${cls:0:120}"; return; }
     out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
         env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
         'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA' "$db" \
-        2>&1 <<<"$sql") || exit_code=$?
-    if grep -q 'medcea.platform_setting" does not exist\|function medcea_auth' <<<"$out" && [[ $exit_code -ne 0 ]]; then
+        2>&1 <<<"$sql"$'\n'"$cls") || exit_code=$?
+    # G1: only the first ERROR line decides a SKIP, and only these two errors (migration 008b
+    # missing); a DETAIL naming a medcea_auth function is drift, never a SKIP
+    first="$(grep -m1 -E '(^|: )ERROR: ' <<<"$out")"
+    mode="$(sed -n 's/^mode|//p' <<<"$out" | head -1)"
+    unclassified="$(sed -n 's/^unclassified|//p' <<<"$out" | head -1)"
+    if [[ $exit_code -ne 0 ]] && grep -qE 'ERROR: +(relation "medcea\.platform_setting" does not exist|function medcea_auth\.[a-z_0-9]+\(.*\) does not exist)' <<<"$first"; then
         _record SKIP "$name" "migration 008b not applied yet (./apps/database/deploy.sh)"
     elif [[ $exit_code -eq 0 ]] && grep -q 'grants verified' <<<"$out"; then
-        _record OK "$name" "database grants equal the compiled policy${flag:+ ($flag: no access component)}"
+        local set_ran="IAM_DB_ROLES=true: every grantee, RLS, triggers and classification"
+        [[ "$mode" == f ]] && set_ran="IAM_DB_ROLES=false: managed-role and legacy set only"
+        if [[ "$mode" == f && -n "$unclassified" ]]; then
+            _record WARN "$name" "grants equal the compiled policy ($set_ran), but ${unclassified%%|*} medcea object(s) belong to no group: $(cut -c1-120 <<<"${unclassified#*|}") (I15; a FAIL once IAM_DB_ROLES=true)"
+        else
+            _record OK "$name" "database grants equal the compiled policy ($set_ran)${flag:+ ($flag: no access component)}"
+        fi
     else
         _record FAIL "$name" "grant drift: $(grep -m1 -E 'ERROR|DETAIL' <<<"$out" | cut -c1-200)"
     fi
@@ -873,10 +943,11 @@ SQL
 
 # =============================================================================
 # Check: config-api verifies tokens (IAM plan Phase 2b) — read-only
-# target: NAMESPACE (default $NAMESPACE)
+# target: NAMESPACE (default $NAMESPACE). The env contract, the key checksum config-api
+# started with and a forged token; the realm's key ids are check_jwks's.
 # =============================================================================
 check_postgrest() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" envs mode want problems=() sum ann b64 realm ip code
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" envs mode want problems=() sum ann ip code
     envs="$(timeout "$TIMEOUT" $KUBECTL get deployment config-api -n "$ns" \
         -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{.valueFrom.secretKeyRef.name}/{.valueFrom.secretKeyRef.key}{"\n"}{end}' 2>&1)" \
         || { _record FAIL "$name" "cannot read deployment config-api: ${envs:0:120}"; return; }
@@ -906,30 +977,14 @@ check_postgrest() {
     ann="$($KUBECTL get deployment config-api -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.medcea/auth-secret-version}' 2>/dev/null)"
     sum="$($KUBECTL get secret db-authenticator -n "$ns" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null)"
     [[ -n "$ann" && "$ann" == "$sum" ]] || problems+=("Secret db-authenticator changed since config-api started (./apps/frontend/deploy.sh)")
-    # every key id we hand out must still be published by the realm
-    ip="$($KUBECTL get svc keycloak -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
-    realm="$(curl -s -m "$TIMEOUT" "http://${ip}/realms/${KEYCLOAK_REALM:-medcea}/protocol/openid-connect/certs" 2>/dev/null)"
-    local k stale=""
-    for k in jwks-sig.json jwks.json; do
-        b64="$($KUBECTL get secret medcea-jwks -n "$ns" -o jsonpath="{.data.${k//./\\.}}" 2>/dev/null)"
-        stale+="$(REALM="$realm" python3 -c '
-import json, os, sys
-try:
-    live = {k.get("kid") for k in json.loads(os.environ["REALM"])["keys"]}
-    ours = {k.get("kid") for k in json.loads(sys.stdin.read())["keys"]}
-except Exception:
-    print(" unreadable(" + sys.argv[1] + ")"); sys.exit()
-gone = sorted(x for x in ours - live if x)
-print("".join(" %s:%s" % (sys.argv[1], g) for g in gone) or ("" if ours else " empty(" + sys.argv[1] + ")"))
-' "$k" < <(base64 -d <<<"$b64" 2>/dev/null))"
-    done
-    [[ -z "$stale" ]] || problems+=("key ids the realm no longer publishes or unreadable:${stale} (./deploy-infra.sh)")
+    # The realm's key ids against the Secret moved to the always-on jwks check (Phase 5, G3):
+    # one FAIL, in either IAM_POSTGREST_JWT mode.
     # a forged token must be refused, never served as anon
     ip="$($KUBECTL get svc config-api -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
     code="$(curl -s -o /dev/null -w '%{http_code}' -m "$TIMEOUT" -H 'Authorization: Bearer x.y.z' "http://${ip}:3000/cea_unit?limit=1" 2>/dev/null)"
     [[ "$code" == 401 ]] || problems+=("a forged Bearer token got HTTP ${code:-no answer}, not 401")
     if [[ ${#problems[@]} -eq 0 ]]; then
-        _record OK "$name" "config-api verifies tokens; keys current; forged token refused"
+        _record OK "$name" "config-api verifies tokens with Secret medcea-jwks; forged token refused (realm key ids: jwks)"
     else
         local IFS=';'; _record FAIL "$name" "${problems[*]}"
     fi
@@ -939,16 +994,41 @@ print("".join(" %s:%s" % (sys.argv[1], g) for g in gone) or ("" if ours else " e
 # Check: the Python services enforce the route table (IAM_ENFORCE, IAM 2.6) — read-only
 # target: NAMESPACE (default $NAMESPACE). Reads the ConfigMap and the deployments only:
 # the NetworkPolicies admit no host traffic to scheduler, monitor or dbmgmt.
+# Phase 5 (G11): settings.json without an enforce key FAILs (it read as false and passed
+# silently under false); its switches block (IAM_GATES, IAM_NETPOL, IAM_POSTGREST_JWT,
+# IAM_MQTT_PERSON as deploy-infra last wrote them, which the access review shows) is compared
+# with config.env with the writer's defaults (lib-policy-artefacts.sh pa_iam_lib): a WARN.
 # =============================================================================
 check_iamenforce() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" json mode want dc v stale=()
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" json mode want dc v stale=() sw
     want=false; [[ "${IAM_ENFORCE:-false}" == "true" ]] && want=true
     json="$(timeout "$TIMEOUT" $KUBECTL get configmap medcea-iam-lib -n "$ns" -o jsonpath='{.data.settings\.json}' 2>/dev/null)"
-    mode="$(python3 -c 'import json, sys; print(str(json.load(sys.stdin).get("enforce") is True).lower())' <<<"$json" 2>/dev/null)"
+    mode="$(python3 -c 'import json, sys
+d = json.load(sys.stdin)
+print("missing" if "enforce" not in d else str(d["enforce"] is True).lower())' <<<"$json" 2>/dev/null)"
     if [[ -z "$mode" ]]; then
         _record FAIL "$name" "ConfigMap medcea-iam-lib missing or unreadable (./deploy-infra.sh)"
         return
     fi
+    if [[ "$mode" == missing ]]; then
+        _record FAIL "$name" "settings.json in ConfigMap medcea-iam-lib has no enforce key: the services read it as false (./deploy-infra.sh)"
+        return
+    fi
+    # the switches block against config.env, as pa_iam_lib derives each value (never a secret)
+    sw="$(SW_GATES="${IAM_GATES:-true}" SW_NETPOL="${IAM_NETPOL:-true}" SW_JWT="${IAM_POSTGREST_JWT:-false}" \
+        SW_MQTT="${IAM_MQTT_PERSON:-false}" python3 -c 'import json, os, sys
+e = os.environ
+want = {"IAM_GATES": e["SW_GATES"] != "false", "IAM_NETPOL": e["SW_NETPOL"] != "false",
+        "IAM_POSTGREST_JWT": e["SW_JWT"] == "true", "IAM_MQTT_PERSON": e["SW_MQTT"] == "true"}
+have = json.load(sys.stdin).get("switches")
+if not isinstance(have, dict):
+    print("settings.json has no switches block (./deploy-infra.sh writes it)")
+else:
+    bad = ["%s=%s (config.env %s)" % (k, str(have.get(k)).lower() if k in have else "absent", str(w).lower())
+           for k, w in sorted(want.items()) if have.get(k) is not w]
+    if bad:
+        print("settings.json switches differ from config.env: %s, as of deploy-infra %s (./deploy-infra.sh)"
+              % (", ".join(bad), have.get("written_at", "?")))' <<<"$json" 2>/dev/null)" || sw="cannot read settings.json switches"
     if [[ "$mode" != "$want" ]]; then
         _record FAIL "$name" "ConfigMap says enforce=$mode, config.env IAM_ENFORCE=${IAM_ENFORCE:-false} (./deploy-infra.sh)"
         return
@@ -967,13 +1047,15 @@ check_iamenforce() {
     if [[ "$want" == "true" && "${IAM_DB_ROLES:-false}" != "true" ]]; then
         _record FAIL "$name" "IAM_ENFORCE=true with IAM_DB_ROLES=false: operators can start and stop other units' runs (./medcea.sh IAM_DB_ROLES, or IAM_ENFORCE back to false)"
     elif [[ ${#stale[@]} -gt 0 && "$want" == "true" ]]; then
-        _record FAIL "$name" "pod IAM_ENFORCE copy still false: ${stale[*]} (without /iam/ they let every request through: redeploy them, no run active)"
+        _record FAIL "$name" "pod IAM_ENFORCE copy still false: ${stale[*]} (without /iam/ they let every request through: redeploy them, no run active)${sw:+; $sw}"
     elif [[ ${#stale[@]} -gt 0 ]]; then
-        _record WARN "$name" "pod IAM_ENFORCE copy differs: ${stale[*]} (redeploy them; the copy is used only when /iam/ is missing)"
+        _record WARN "$name" "pod IAM_ENFORCE copy differs: ${stale[*]} (redeploy them; the copy is used only when /iam/ is missing)${sw:+; $sw}"
     elif [[ "$want" == "false" ]]; then
-        _record WARN "$name" "IAM_ENFORCE=false: services only log what they would refuse (IAM 2.6)"
+        _record WARN "$name" "IAM_ENFORCE=false: services only log what they would refuse (IAM 2.6)${sw:+; $sw}"
+    elif [[ -n "$sw" ]]; then
+        _record WARN "$name" "$sw"
     else
-        _record OK "$name" "services refuse what the route table does not allow; every pod agrees"
+        _record OK "$name" "services refuse what the route table does not allow; every pod agrees; switches match config.env"
     fi
 }
 
@@ -1011,14 +1093,35 @@ check_iammqtt() {
     users="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd 2>/dev/null)"
     grep -qx 'mqtt-explorer' <<<"$users" && problems+=("the removed shared mqtt-explorer account is still in the broker's password file (./deploy-infra.sh)")
     if [[ "$want" == true ]]; then
-        api="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/iam-api -- python3 -c \
-            'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8085/healthz", timeout=5).read().decode())' 2>/dev/null)"
-        case "$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print(str(d.get("mode") is True).lower() + ("" if d.get("mqtt_digest") else "-nodoc"))' "$api" 2>/dev/null)" in
-            true) ;;
-            true-nodoc) problems+=("iam-api has no valid mqtt.json (./deploy-infra.sh)") ;;
-            false) problems+=("iam-api still reads IAM_MQTT_PERSON=false (./deploy-infra.sh; it follows within a minute)") ;;
-            *) problems+=("iam-mqttx does not answer (./apps/iam/deploy.sh)") ;;
-        esac
+        # Phase 5 (G7): every Running iam-api pod, its mqtt_digest against medcea/mqtt-digest; a
+        # credential is bound to the mqtt.json it was issued under, so a pod on an older one
+        # issues stale rows. WARN inside the kubelet's sync (120 s after the ConfigMap's last
+        # write, _iamlib_meta), FAIL after it.
+        local meta mq_ann="" age="?" pods pod rcp=0 seen=0 got
+        meta="$(_iamlib_meta "$ns")" && read -r _ mq_ann _ age <<<"$meta"
+        pods="$(_running_pods "$ns" iam-api)" || rcp=$?
+        for pod in $pods; do
+            seen=$((seen + 1))
+            api="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" "$pod" -c iam-api -- python3 -c \
+                'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8085/healthz", timeout=5).read().decode())' 2>/dev/null)"
+            got="$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print(str(d.get("mode") is True).lower() + " " + (d.get("mqtt_digest") or "-"))' "$api" 2>/dev/null)"
+            case "$got" in
+                "true -") problems+=("iam-api pod $pod has no valid mqtt.json (./deploy-infra.sh)") ;;
+                true\ *)
+                    if [[ -z "$mq_ann" || "$mq_ann" == "-" ]]; then
+                        warns+=("cannot read medcea/mqtt-digest of ConfigMap medcea-iam-lib: iam-api's mqtt.json not compared")
+                    elif [[ "${got#true }" != "$mq_ann" ]]; then
+                        if [[ "$age" =~ ^[0-9]+$ ]] && (( age < 120 )); then
+                            warns+=("iam-api pod $pod reads mqtt.json ${got:5:12}, the ConfigMap holds ${mq_ann:0:12} since ${age} s (the kubelet syncs within 120 s)")
+                        else
+                            problems+=("iam-api pod $pod reads mqtt.json ${got:5:12}, the ConfigMap holds ${mq_ann:0:12} $(_iamlib_since "$age") (./apps/iam/deploy.sh)")
+                        fi
+                    fi ;;
+                false\ *) problems+=("iam-api pod $pod still reads IAM_MQTT_PERSON=false (./deploy-infra.sh; it follows within a minute)") ;;
+                *) problems+=("iam-mqttx does not answer in pod $pod (./apps/iam/deploy.sh)") ;;
+            esac
+        done
+        ((seen)) || problems+=("iam-mqttx does not answer: no Running iam-api pod$( ((rcp == 3)) && echo ', no deployment iam-api') (./apps/iam/deploy.sh)")
         [[ "${IAM_DB_ROLES:-false}" == "true" ]] || problems+=("IAM_DB_ROLES=false: the broker cannot read person credentials (mqtt_auth's grants)")
         ws="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" deployment/mosquitto -c mqtt-auth-sync -- cut -d: -f1 /mosquitto/auth/passwd-ws 2>/dev/null)"
         grep -q '^explorer-' <<<"$users" && problems+=("a person credential is in the 1883 file")
@@ -1489,9 +1592,12 @@ except Exception:
 # target: NAMESPACE. Reads /data/flows.json as dbclients does; apps/node-red/flows_diff.py
 # prints ids, types, names and key names, never a value (the ingest password is in it).
 # FAIL: a git node missing or changed, or no flows; WARN: nodes or keys outside git.
+# Phase 5 (G9): flows_diff.py reads the working tree, so a flow file that git does not have
+# committed (git status --porcelain -- apps/node-red/flows; --no-optional-locks, so the index
+# is never refreshed) is at least a WARN; without git or a checkout, only a note.
 # =============================================================================
 check_noderedflows() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" out rc
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" out rc dirty="" gitnote="" n
     timeout "$TIMEOUT" $KUBECTL get deployment node-red -n "$ns" >/dev/null 2>&1 \
         || { _record SKIP "$name" "no Node-RED deployment in $ns"; return; }
     REPO_ROOT="$SCRIPT_DIR"
@@ -1501,12 +1607,23 @@ check_noderedflows() {
         | python3 -I "$SCRIPT_DIR/apps/node-red/flows_diff.py" diff --git "$SCRIPT_DIR/apps/node-red/flows" \
             --values <(nr_flow_values "$ns") 2>/dev/null)"; rc=$?
     out="$(sed 's/^\(OK\|WARN\|FAIL\|UNREADABLE\) //' <<<"$out" | paste -sd ';' | cut -c1-300)"
+    if ! command -v git >/dev/null 2>&1; then
+        gitnote="no git: uncommitted flow files not checked"
+    elif ! dirty="$(timeout "$TIMEOUT" git -C "$SCRIPT_DIR" --no-optional-locks status --porcelain -- apps/node-red/flows 2>/dev/null)"; then
+        gitnote="not a git checkout (or git did not answer): uncommitted flow files not checked"
+        dirty=""
+    fi
+    if [[ -n "$dirty" ]]; then
+        n="$(grep -c . <<<"$dirty")"
+        dirty="$n flow file(s) not committed to git: $(sed 's/^...//; s#^apps/node-red/flows/##' <<<"$dirty" | head -3 | paste -sd ' ' | cut -c1-120)$( ((n > 3)) && echo ' …') (W1 covers committed flows: commit them)"
+    fi
     case "$rc" in
-        0) _record OK   "$name" "$out" ;;
-        1) _record WARN "$name" "$out (review them; W1 covers only flows from git)" ;;
+        0) if [[ -n "$dirty" ]]; then _record WARN "$name" "$out; $dirty"
+           else _record OK "$name" "$out${gitnote:+ ($gitnote)}"; fi ;;
+        1) _record WARN "$name" "$out (review them; W1 covers only flows from git)${dirty:+; $dirty}" ;;
         2) [[ "$out" == *deploy.sh* ]] || out+=" — ./apps/node-red/deploy.sh puts git's flows back; or commit the change to git"
-           _record FAIL "$name" "$out" ;;
-        *) _record FAIL "$name" "cannot read Node-RED's flows ($out)" ;;
+           _record FAIL "$name" "$out${dirty:+; $dirty}" ;;
+        *) _record FAIL "$name" "cannot read Node-RED's flows ($out)${dirty:+; $dirty}" ;;
     esac
 }
 
@@ -1550,6 +1667,425 @@ check_noderedauth() {
         _record OK "$name" "adminAuth on; editor rights from the access policy; the admin API refuses anonymous calls"
     else
         local IFS=';'; _record FAIL "$name" "${problems[*]}"
+    fi
+}
+
+# =============================================================================
+# Helpers of the Phase 5 checks (iamloaded, iammqtt) — read-only
+# _iamlib_meta NS: ConfigMap medcea-iam-lib read once; prints
+#   "<routes digest> <mqtt digest> <enforce: true|false|missing> <age in s|?>"
+# (each digest the annotation, else the data's digest field, else "-"). The age is the time
+# since the ConfigMap's last write: the newest metadata.managedFields[].time (the API server
+# stamps it at every write that changes the object; a no-op apply stamps nothing), against
+# this host's clock (the API server runs on this host). kubectl (1.21 and later) leaves
+# managedFields out of -o json unless --show-managed-fields is given, hence the flag.
+# Without a readable managedFields time the age is "?" (never creationTimestamp, which is
+# the first install's time on an object updated in place): the callers count it as past
+# the 120 s grace and say the write time is unknown. rc 3: no ConfigMap; rc 1: unreadable.
+# =============================================================================
+_iamlib_meta() {
+    local ns="$1" cm rc=0
+    cm="$(timeout "$TIMEOUT" $KUBECTL get configmap medcea-iam-lib -n "$ns" -o json --show-managed-fields 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        grep -qiE 'NotFound|not found' <<<"$cm" && return 3
+        return 1
+    fi
+    python3 -c '
+import datetime, json, sys
+cm, now = json.load(sys.stdin), int(sys.argv[1])
+meta, data = cm.get("metadata") or {}, cm.get("data") or {}
+ann = meta.get("annotations") or {}
+def dig(a, k):
+    if ann.get(a):
+        return ann[a]
+    try:
+        return json.loads(data.get(k) or "")["digest"] or "-"
+    except Exception:
+        return "-"
+try:
+    s = json.loads(data.get("settings.json") or "")
+    enf = "missing" if "enforce" not in s else str(s["enforce"] is True).lower()
+except Exception:
+    enf = "missing"
+def ts(x):
+    return datetime.datetime.strptime(x, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+times = []
+for f in meta.get("managedFields") or []:
+    try:
+        times.append(ts(f["time"]))
+    except Exception:
+        pass
+age = str(max(0, now - int(max(times)))) if times else "?"
+print(dig("medcea/routes-digest", "routes.json"), dig("medcea/mqtt-digest", "mqtt.json"), enf, age)
+' "$(date -u +%s)" <<<"$cm" 2>/dev/null || return 1
+}
+
+# _iamlib_since AGE: "since N s", or, for an unreadable write time ("?"), words that say so
+# (the callers count it as past the 120 s grace).
+_iamlib_since() {
+    if [[ "$1" =~ ^[0-9]+$ ]]; then echo "since $1 s"; else echo "since an unknown time (no write time readable on the ConfigMap)"; fi
+}
+
+# _running_pods NS DEPLOYMENT: the Running pods (not terminating) of the Deployment's
+# selector, one name per line. rc 3: no such Deployment; rc 1: unreadable.
+_running_pods() {
+    local ns="$1" dep="$2" js rc=0 sel pods
+    js="$(timeout "$TIMEOUT" $KUBECTL get deployment "$dep" -n "$ns" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        grep -qiE 'NotFound|not found' <<<"$js" && return 3
+        return 1
+    fi
+    sel="$(python3 -c 'import json, sys
+m = ((json.load(sys.stdin).get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+print(",".join("%s=%s" % kv for kv in sorted(m.items())))' <<<"$js" 2>/dev/null)" || return 1
+    [[ -n "$sel" ]] || return 1
+    pods="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$ns" -l "$sel" -o json 2>/dev/null)" || return 1
+    python3 -c 'import json, sys
+for p in json.load(sys.stdin).get("items") or []:
+    if (p.get("status") or {}).get("phase") == "Running" and not (p.get("metadata") or {}).get("deletionTimestamp"):
+        print(p["metadata"]["name"])' <<<"$pods" 2>/dev/null || return 1
+}
+
+# =============================================================================
+# Check: every service pod loads the route table the ConfigMap holds (Phase 5, G5) — read-only
+# target: NAMESPACE. For each Running pod of the six route-checking services (apply.sh's
+# wait_routes list; NotFound counts the service as not deployed), a read-only
+# `kubectl exec POD -c CTR -- python3 -c` prints only /iam/routes.json's digest and
+# applied_version ("missing" without the file). FAIL: a digest that is not ConfigMap
+# medcea-iam-lib's medcea/routes-digest 120 s or more after its last write (_iamlib_meta),
+# or no file where the service enforces (access, dbmgmt and iam-api always; the others while
+# settings.json's enforce is true). WARN: a differing digest inside the 120 s, a missing file
+# otherwise, a pod or service that cannot be read. applied_version is unhashed and only
+# reported: the digest is the proof (an older applied_version with the current digest is OK).
+# SKIP without kubectl or the ConfigMap (iamartefacts reports it).
+# =============================================================================
+check_iamloaded() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" meta rc=0 want enforce age dc dep ctr pods pod got dig ver
+    local probs=() warns=() absent=() norun=() services=0 n=0 enforcing fix
+    local -A VERS=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    meta="$(_iamlib_meta "$ns")" || rc=$?
+    if [[ $rc -eq 3 ]]; then
+        _record SKIP "$name" "no ConfigMap medcea-iam-lib in $ns yet (./deploy-infra.sh)"; return
+    elif [[ $rc -ne 0 || -z "$meta" ]]; then
+        _record WARN "$name" "cannot read ConfigMap medcea-iam-lib in $ns: the pods' route tables are not compared"; return
+    fi
+    read -r want _ enforce age <<<"$meta"
+    [[ "$enforce" == missing ]] && enforce="${IAM_ENFORCE:-false}"   # iamenforce FAILs a missing key
+    local probe='import json
+try:
+    d = json.load(open("/iam/routes.json"))
+except FileNotFoundError:
+    print("missing")
+except Exception:
+    print("unreadable")
+else:
+    print(d.get("digest") or "-", d.get("applied_version"))'
+    for dc in scheduler:api:scheduler monitor:api:monitor dbmgmt:api:frontend config-ui:recipe-fileserver:frontend \
+              access:api:access iam-api:iam-api:iam; do
+        IFS=: read -r dep ctr fix <<<"$dc"
+        fix="./apps/$fix/deploy.sh"
+        rc=0; pods="$(_running_pods "$ns" "$dep")" || rc=$?
+        if [[ $rc -eq 3 ]]; then absent+=("$dep"); continue
+        elif [[ $rc -ne 0 ]]; then warns+=("cannot read the pods of $dep"); continue
+        elif [[ -z "$pods" ]]; then norun+=("$dep"); continue
+        fi
+        services=$((services + 1))
+        enforcing=false
+        [[ "$dep" == access || "$dep" == dbmgmt || "$dep" == iam-api || "$enforce" == true ]] && enforcing=true
+        for pod in $pods; do
+            n=$((n + 1))
+            got="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" "$pod" -c "$ctr" -- python3 -c "$probe" 2>/dev/null | tail -n1)" || got=""
+            read -r dig ver <<<"$got"
+            if [[ -z "$dig" ]]; then
+                warns+=("cannot read /iam/routes.json in pod $pod")
+            elif [[ "$dig" == missing ]]; then
+                if $enforcing; then probs+=("pod $pod has no /iam/routes.json while $dep enforces: it refuses every request ($fix)")
+                else warns+=("pod $pod has no /iam/routes.json ($fix)"); fi
+            elif [[ "$dig" == unreadable || "$dig" == "-" ]]; then
+                if $enforcing; then probs+=("pod $pod cannot parse /iam/routes.json while $dep enforces ($fix)")
+                else warns+=("pod $pod cannot parse /iam/routes.json ($fix)"); fi
+            elif [[ "$dig" != "$want" ]]; then
+                if [[ "$age" =~ ^[0-9]+$ ]] && (( age < 120 )); then
+                    warns+=("pod $pod loads routes ${dig:0:12}, the ConfigMap holds ${want:0:12} since ${age} s (the kubelet syncs within 120 s)")
+                else
+                    probs+=("pod $pod loads routes ${dig:0:12}, the ConfigMap holds ${want:0:12} $(_iamlib_since "$age") ($fix)")
+                fi
+            else
+                VERS[${ver:-None}]=1
+            fi
+        done
+    done
+    local tail_=""
+    ((${#absent[@]})) && tail_+="; ${#absent[@]} not deployed (${absent[*]})"
+    ((${#norun[@]})) && tail_+="; no Running pod: ${norun[*]}"
+    if ((${#probs[@]})); then
+        local IFS=';'; _record FAIL "$name" "${probs[*]}${warns:+;${warns[*]}}"
+    elif ((${#warns[@]})); then
+        local IFS=';'; _record WARN "$name" "${warns[*]}"
+    elif (( n == 0 )); then
+        _record OK "$name" "no route-checking service runs a pod${tail_}"
+    else
+        _record OK "$name" "$n pods in $services services load routes ${want:0:12} (applied_version $(printf '%s\n' "${!VERS[@]}" | sort | paste -sd ',' -), information only)${tail_}"
+    fi
+}
+
+# =============================================================================
+# Check: the realm's signing keys and Secret medcea-jwks agree (Phase 5, G3) — read-only
+# target: NAMESPACE. Always on, whatever IAM_POSTGREST_JWT says: six services verify tokens
+# against /jwks/jwks.json and config-api against jwks-sig.json. The Secret (public keys only)
+# reaches python on stdin; only key ids are printed. The realm's certs come from the keycloak
+# Service (curl -m TIMEOUT). FAIL: the Secret or a key missing, unparseable or without an
+# RS256 signing key; jwks-sig.json != infra/jwks-sig.py signing_keys(jwks.json); a key id of
+# the Secret the realm no longer publishes; a realm RS256 signing key id the Secret lacks
+# (tokens signed with it are refused everywhere). WARN: the realm does not answer (the
+# Keycloak checks FAIL that; the Secret is not blamed), the Secret unreadable. SKIP: no kubectl.
+# =============================================================================
+check_jwks() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" sec rc=0 ip realm="" out lvl msg worst="" details=() ok=""
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    sec="$(timeout "$TIMEOUT" $KUBECTL get secret medcea-jwks -n "$ns" -o json 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if timeout "$TIMEOUT" $KUBECTL get secret medcea-jwks -n "$ns" -o name 2>&1 | grep -qiE 'NotFound|not found'; then
+            _record FAIL "$name" "Secret medcea-jwks is missing in $ns: no service can verify a token (./deploy-infra.sh)"
+        else
+            _record WARN "$name" "cannot read Secret medcea-jwks in $ns"
+        fi
+        return
+    fi
+    ip="$(timeout "$TIMEOUT" $KUBECTL get svc keycloak -n "$ns" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)" || ip=""
+    [[ -n "$ip" ]] && realm="$(curl -s -m "$TIMEOUT" "http://${ip}/realms/${KEYCLOAK_REALM:-medcea}/protocol/openid-connect/certs" 2>/dev/null)"
+    out="$(REALM="$realm" python3 -c '
+import base64, importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("jwks_sig", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+try:
+    data = json.load(sys.stdin).get("data") or {}
+except Exception:
+    print("WARN|cannot parse Secret medcea-jwks"); sys.exit()
+def key(n):
+    if n not in data:
+        return "absent"
+    try:
+        d = json.loads(base64.b64decode(data[n]))
+        return d if isinstance(d, dict) and isinstance(d.get("keys"), list) else None
+    except Exception:
+        return None
+full, sig = key("jwks.json"), key("jwks-sig.json")
+bad = False
+for n, d in (("jwks.json", full), ("jwks-sig.json", sig)):
+    if d == "absent":
+        print("FAIL|Secret medcea-jwks has no %s (./deploy-infra.sh)" % n); bad = True
+    elif d is None:
+        print("FAIL|%s in Secret medcea-jwks is not a JWKS (./deploy-infra.sh)" % n); bad = True
+    elif not mod.signing_keys(d):
+        print("FAIL|%s in Secret medcea-jwks holds no RS256 signing key: no token verifies (./deploy-infra.sh)" % n); bad = True
+if bad:
+    sys.exit()
+if {"keys": mod.signing_keys(full)} != sig:
+    print("FAIL|jwks-sig.json is not the RS256 signing keys of jwks.json (infra/jwks-sig.py): config-api and the services verify against different keys (./deploy-infra.sh)")
+k12 = lambda xs: ", ".join(str(x)[:12] for x in xs)
+ours_sig = sorted({k["kid"] for k in mod.signing_keys(sig)})
+try:
+    live = json.loads(os.environ.get("REALM") or "")
+    assert isinstance(live, dict) and isinstance(live.get("keys"), list)
+except Exception:
+    print("WARN|the realm %s did not answer on the keycloak Service: its key ids are not compared (the Keycloak checks report the realm)" % sys.argv[2])
+    sys.exit()
+pub = {k.get("kid") for k in live["keys"] if isinstance(k, dict) and k.get("kid")}
+ours = {k.get("kid") for d in (full, sig) for k in d["keys"] if isinstance(k, dict) and k.get("kid")}
+gone = sorted(ours - pub)
+new = sorted({k["kid"] for k in mod.signing_keys(live)} - set(ours_sig))
+if gone:
+    print("FAIL|Secret medcea-jwks holds key id(s) the realm no longer publishes: %s (./deploy-infra.sh)" % k12(gone))
+if new:
+    print("FAIL|the realm signs with key id(s) Secret medcea-jwks lacks: %s, every service refuses those tokens (./deploy-infra.sh)" % k12(new))
+print("OK|%d signing key(s) (%s) equal the realm%s; jwks-sig.json = jwks.json%ss signing keys" % (len(ours_sig), k12(ours_sig), chr(39) + "s", chr(39)))
+' "$SCRIPT_DIR/infra/jwks-sig.py" "${KEYCLOAK_REALM:-medcea}" <<<"$sec" 2>&1)" || out="FAIL|cannot compare the keys: $(tail -n1 <<<"$out" | cut -c1-120)"
+    while IFS='|' read -r lvl msg; do
+        case "$lvl" in
+            FAIL) worst=FAIL; details+=("$msg") ;;
+            WARN) [[ "$worst" == FAIL ]] || worst=WARN; details+=("$msg") ;;
+            OK)   ok="$msg" ;;
+        esac
+    done <<<"$out"
+    if [[ -n "$worst" ]]; then
+        local IFS=';'; _record "$worst" "$name" "${details[*]}"
+    elif [[ -n "$ok" ]]; then
+        _record OK "$name" "$ok"
+    else
+        _record FAIL "$name" "cannot compare the keys: $(tail -n1 <<<"$out" | cut -c1-120)"
+    fi
+}
+
+# =============================================================================
+# Check: the Keycloak clients' scopes and mappers (Phase 5, G2) — read-only
+# target: REALM. Keycloak's own database, as tests/iam-hosts.sh reads it: one psql as
+# postgres in rdbms-postgresql-0, -d keycloak, PGOPTIONS default_transaction_read_only=on,
+# the SQL on stdin, the password read inside the pod; no admin token, no port-forward, no
+# lock. The clients are infra/lib-keycloak-clients.sh's (deploy-infra.sh's scope loop).
+# FAIL: scope groups or medcea-identity absent from the realm; groups without its
+# realm-role mapper (claim groups, access token); medcea-identity without the audience
+# mapper (medcea-api, access token) or the person_id mapper; and on a client whose tokens
+# reach a platform API (KC_API_CLIENTS): the client missing, or either scope not attached.
+# WARN: the same on a tool-only client; a scope attached as optional only; full_scope_allowed
+# false; the audience also in the ID token; a client-level mapper writing groups, person_id
+# or aud (matched by type and claim, not by name); the database unreadable.
+# =============================================================================
+check_kcscopes() {
+    local name="$1" realm="${2:-${KEYCLOAK_REALM:-medcea}}" ns="${NAMESPACE:-medcea}" out lvl msg worst="" details=() ok=""
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh" || { _record FAIL "$name" "cannot read infra/lib-keycloak-clients.sh"; return; }
+    out="$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$ns" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -v realm="$0" -v clients="$1"' \
+        "$realm" "${KC_SCOPE_CLIENTS[*]}" 2>/dev/null <<'SQL'
+SELECT coalesce((
+  SELECT json_build_object(
+    'scopes', (SELECT coalesce(json_object_agg(s.name, json_build_object(
+                  'mappers', (SELECT coalesce(json_agg(json_build_object('type', m.protocol_mapper_name, 'name', m.name,
+                                  'config', (SELECT coalesce(json_object_agg(pc.name, pc.value), '{}'::json)
+                                               FROM protocol_mapper_config pc WHERE pc.protocol_mapper_id = m.id))), '[]'::json)
+                                FROM protocol_mapper m WHERE m.client_scope_id = s.id))), '{}'::json)
+                 FROM client_scope s WHERE s.realm_id = r.id AND s.name IN ('groups', 'medcea-identity')),
+    'clients', (SELECT coalesce(json_object_agg(c.client_id, json_build_object(
+                  'full_scope', c.full_scope_allowed,
+                  'default', (SELECT coalesce(json_agg(s.name), '[]'::json) FROM client_scope_client d
+                                JOIN client_scope s ON s.id = d.scope_id
+                               WHERE d.client_id = c.id AND d.default_scope AND s.name IN ('groups', 'medcea-identity')),
+                  'optional', (SELECT coalesce(json_agg(s.name), '[]'::json) FROM client_scope_client d
+                                 JOIN client_scope s ON s.id = d.scope_id
+                                WHERE d.client_id = c.id AND NOT d.default_scope AND s.name IN ('groups', 'medcea-identity')),
+                  'mappers', (SELECT coalesce(json_agg(json_build_object('type', m.protocol_mapper_name, 'name', m.name,
+                                  'config', (SELECT coalesce(json_object_agg(pc.name, pc.value), '{}'::json)
+                                               FROM protocol_mapper_config pc WHERE pc.protocol_mapper_id = m.id))), '[]'::json)
+                                FROM protocol_mapper m WHERE m.client_id = c.id))), '{}'::json)
+                  FROM client c WHERE c.realm_id = r.id
+                   AND c.client_id = ANY (pg_catalog.string_to_array(:'clients', ' '))))
+    FROM realm r WHERE r.name = :'realm'), 'null'::json);
+SQL
+)" || out=""
+    out="$(python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.stdin.read().strip().splitlines()[-1])
+except Exception:
+    print("WARN|cannot read Keycloak database keycloak: the client scopes are not checked"); sys.exit()
+realm, wanted, api = sys.argv[1], sys.argv[2].split(), set(sys.argv[3].split())
+if doc is None:
+    print("FAIL|realm %s is not in Keycloak database keycloak (./deploy-infra.sh)" % realm); sys.exit()
+cfg = lambda m: m.get("config") or {}
+def has(mappers, pred):
+    return any(pred(m) for m in mappers or [])
+scopes = doc.get("scopes") or {}
+for s in ("groups", "medcea-identity"):
+    if s not in scopes:
+        print("FAIL|client scope %s is not in realm %s: every client asking for it gets invalid_scope (./deploy-infra.sh)" % (s, realm))
+g = (scopes.get("groups") or {}).get("mappers")
+if "groups" in scopes and not has(g, lambda m: m.get("type") == "oidc-usermodel-realm-role-mapper"
+                                   and cfg(m).get("claim.name") == "groups" and cfg(m).get("access.token.claim") == "true"):
+    print("FAIL|scope groups has no realm-role mapper to claim groups in the access token: no gate admits anyone by role (./deploy-infra.sh)")
+i = (scopes.get("medcea-identity") or {}).get("mappers")
+aud = lambda m: m.get("type") == "oidc-audience-mapper" and cfg(m).get("included.custom.audience") == "medcea-api"
+if "medcea-identity" in scopes:
+    if not has(i, lambda m: aud(m) and cfg(m).get("access.token.claim") == "true"):
+        print("FAIL|scope medcea-identity has no medcea-api audience mapper for the access token: every service refuses the tokens (./deploy-infra.sh)")
+    elif has(i, lambda m: aud(m) and cfg(m).get("id.token.claim") == "true"):
+        print("WARN|the medcea-api audience is also in the ID token (oauth2-proxy verifies the ID token audience as the client)")
+    if not has(i, lambda m: m.get("type") == "oidc-usermodel-attribute-mapper" and cfg(m).get("claim.name") == "person_id"
+               and cfg(m).get("user.attribute") == "person_id" and cfg(m).get("access.token.claim") == "true"):
+        print("FAIL|scope medcea-identity has no person_id mapper for the access token: the services cannot tell the person (./deploy-infra.sh)")
+clients = doc.get("clients") or {}
+miss = {"FAIL": [], "WARN": []}
+noscope = {}
+optional, fullscope, own = [], [], []
+for c in wanted:
+    lvl = "FAIL" if c in api else "WARN"
+    if c not in clients:
+        miss[lvl].append(c); continue
+    d = clients[c]
+    for s in ("groups", "medcea-identity"):
+        if s in (d.get("default") or []):
+            continue
+        if s in (d.get("optional") or []):
+            optional.append("%s/%s" % (c, s))
+        else:
+            noscope.setdefault((lvl, s), []).append(c)
+    if d.get("full_scope") is False:
+        fullscope.append(c)
+    for m in d.get("mappers") or []:
+        claim = cfg(m).get("claim.name")
+        if m.get("type") == "oidc-audience-mapper" or claim in ("groups", "person_id", "aud"):
+            own.append("%s (%s)" % (c, claim or "aud"))
+for lvl in ("FAIL", "WARN"):
+    if miss[lvl]:
+        print("%s|client(s) missing in realm %s: %s (./deploy-infra.sh)" % (lvl, realm, ", ".join(miss[lvl])))
+    for s in ("groups", "medcea-identity"):
+        if noscope.get((lvl, s)):
+            print("%s|%s is not a default scope of %s (./deploy-infra.sh)" % (lvl, s, ", ".join(noscope[(lvl, s)])))
+if optional:
+    print("WARN|attached as optional scope only: %s (./deploy-infra.sh makes them default)" % ", ".join(optional))
+if fullscope:
+    print("WARN|full_scope_allowed is false on %s: the groups claim holds only the client role mappings" % ", ".join(fullscope))
+if own:
+    print("WARN|client-level mapper(s) writing a platform claim: %s; the scopes are its one source" % ", ".join(own))
+n = len([c for c in wanted if c in clients])
+print("OK|%d clients: groups and medcea-identity default on each (%d of them reach a platform API)" % (n, len([c for c in wanted if c in clients and c in api])))
+' "$realm" "${KC_SCOPE_CLIENTS[*]}" "${KC_API_CLIENTS[*]}" <<<"${out:-}" 2>&1)" \
+        || out="FAIL|cannot judge the client scopes: $(tail -n1 <<<"$out" | cut -c1-120)"
+    while IFS='|' read -r lvl msg; do
+        case "$lvl" in
+            FAIL) worst=FAIL; details+=("$msg") ;;
+            WARN) [[ "$worst" == FAIL ]] || worst=WARN; details+=("$msg") ;;
+            OK)   ok="$msg" ;;
+        esac
+    done <<<"$out"
+    if [[ -n "$worst" ]]; then
+        local IFS=';'; _record "$worst" "$name" "${details[*]}"
+    else
+        _record OK "$name" "$ok"
+    fi
+}
+
+# =============================================================================
+# Check: the application pods' NetworkPolicies follow IAM_NETPOL (Phase 5, G10) — read-only
+# target: NAMESPACE. The labelled policies (medcea/iam-netpol=true) by name against
+# `cli.py compile netpol` (names only: a placeholder node address, as apply_check's
+# NETPOL_ARGS). true: a compiled one missing FAILs (its pod admits any caller), a labelled
+# one not compiled WARNs (./deploy-infra.sh deletes it); false: WARN, naming any that remain.
+# SKIP without kubectl.
+# =============================================================================
+check_iamnetpol() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" live rc=0 want missing extra
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    live="$(timeout "$TIMEOUT" $KUBECTL get netpol -n "$ns" -l medcea/iam-netpol=true -o jsonpath='{.items[*].metadata.name}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the NetworkPolicies in $ns: $(tail -n1 <<<"$live" | cut -c1-120)"; return
+    fi
+    live="$(tr ' ' '\n' <<<"$live" | grep . | sort -u)"
+    if [[ "${IAM_NETPOL:-true}" == false ]]; then
+        if [[ -n "$live" ]]; then
+            _record WARN "$name" "IAM_NETPOL=false, yet $(grep -c . <<<"$live") labelled NetworkPolicies remain: $(paste -sd ' ' <<<"$live" | cut -c1-120) (./deploy-infra.sh deletes them)"
+        else
+            _record WARN "$name" "IAM_NETPOL=false: the application pods accept connections from anywhere in the cluster"
+        fi
+        return
+    fi
+    want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --namespace "$ns" --node-ip 192.0.2.1 2>/dev/null \
+        | python3 -c 'import json, sys; print("\n".join(sorted(i["metadata"]["name"] for i in json.load(sys.stdin)["items"])))' 2>/dev/null)"
+    if [[ -z "$want" ]]; then
+        _record FAIL "$name" "the applied policy compiles no NetworkPolicy (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$live") | paste -sd ' ')"
+    extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$live" | grep .) | paste -sd ' ')"
+    if [[ -n "$missing" ]]; then
+        _record FAIL "$name" "IAM_NETPOL=true, missing: $missing: those pods admit any caller in the cluster (./deploy-infra.sh)${extra:+; not compiled: $extra}"
+    elif [[ -n "$extra" ]]; then
+        _record WARN "$name" "labelled NetworkPolicies the policy no longer compiles: $extra (./deploy-infra.sh deletes them)"
+    else
+        _record OK "$name" "$(grep -c . <<<"$want") NetworkPolicies of the application pods, the compiled set"
     fi
 }
 
@@ -1762,6 +2298,10 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         apparmor)     check_apparmor "$name" ;;
         backupage)    check_backupage "$name" "$target" ;;
         manual)       check_manual "$name" "$target" ;;
+        iamloaded)    check_iamloaded "$name" "$target" ;;
+        jwks)         check_jwks "$name" "$target" ;;
+        kcscopes)     check_kcscopes "$name" "$target" ;;
+        iamnetpol)    check_iamnetpol "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

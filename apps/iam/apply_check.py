@@ -113,6 +113,9 @@ IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
         its rows grants no role more than the skeleton it was approved under
   rollback-diff --state S --stage DIR    the rollback's diff against the applied version
   verify-conf --out F [--drop T]   step 9's conf (nine checks)
+  classify-sql [--without-iam]     health-check iamgrants' tail after the verify SQL (Phase 5,
+        G4): the assertion set that ran, and under IAM_DB_ROLES=false I15's classification as a
+        read-only query (a WARN there); never part of a compiled target or a bundle
   health-results --in LOG --out F  {check: OK|WARN|FAIL|SKIP} from health-check.sh's output
   verify-judge --baseline B --now N [--drop T]
         the checks FAIL now and not in step 6b's baseline (revert-driving)
@@ -2057,6 +2060,29 @@ def _gate_against(acc_body, git, rows):
         return {"verdict": "error", "error": f"{type(e).__name__}: {e}"}
 
 
+def classify_sql(p, without_iam=False):
+    """health-check iamgrants' tail (Phase 5, G4), run in the verify session after `grants
+    verified`, so :iam_enforcing is the verify SQL's own. Prints `mode|t|f`, and under
+    IAM_DB_ROLES=false `unclassified|<count>|<objects>` when a relation of the member schemas
+    is in no group: I15's classification query of grants._enforce_asserts, but a row, never an
+    exception (a WARN; under true the verify SQL already raises it). Read-only."""
+    from compiler import grants
+    members = grants._array(sorted(o for o in grants.member_objects(p) if not (without_iam and grants._iam(o))))
+    return f"""-- health-check iamgrants (Phase 5, G4): read-only, after the verify SQL
+SELECT 'mode|' || :'iam_enforcing';
+\\if :iam_enforcing
+\\else
+SELECT 'unclassified|' || pg_catalog.count(*) || '|'
+       || pg_catalog.string_agg(pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.relname), ', '
+                                ORDER BY n.nspname, c.relname)
+      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname IN ({grants._in_list(grants.member_schemas(without_iam))}) AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+       AND NOT (c.oid = ANY (SELECT pg_catalog.to_regclass(x) FROM pg_catalog.unnest({members}) x WHERE pg_catalog.to_regclass(x) IS NOT NULL))
+    HAVING pg_catalog.count(*) > 0;
+\\endif
+"""
+
+
 def health(state, host_file, holders="", policy_port="absent", today=None, live=None):
     """[(STATUS, detail)] for iampolicy. live: iam-api's /healthz on :8083 (IAM 4.3) when
     policy_port is "true": its applied_version must be the database's (FAIL), its
@@ -2191,6 +2217,12 @@ def health(state, host_file, holders="", policy_port="absent", today=None, live=
         if live.get("skeleton_digest") != acc.get("digest"):
             out.append(("WARN", f"the Policy UI ships skeleton {str(live.get('skeleton_digest'))[:12]}, the accepted one "
                                 f"is {str(acc.get('digest'))[:12]} (./apps/iam/deploy.sh)"))
+        # Phase 5 (G8): the compiler the Policy UI runs (ConfigMap iam-compiler) against this
+        # checkout's; applied_version above is a database read, not proof of a loaded routes.json
+        # (that is health-check iamloaded's)
+        if live.get("compiler_digest") and live.get("compiler_digest") != source.compiler_digest():
+            out.append(("WARN", f"the Policy UI compiles with compiler {str(live.get('compiler_digest'))[:12]}, this "
+                                f"checkout's is {source.compiler_digest()[:12]} (./apps/iam/deploy.sh)"))
     if unconfirmed and policy_port == "true":
         out.append(("WARN", f"version {v} ({state.get('kind')}) is not confirmed by qa yet (the Policy UI)"))
     for o in state.get("open_versions") or []:
@@ -2477,6 +2509,8 @@ def main(argv=None):
     c.add_argument("--holders", default="")
     c.add_argument("--policy-port", choices=["true", "false", "absent"], default="absent")
     c.add_argument("--live", help="iam-api's /healthz JSON on :8083 (IAM 4.3)")
+    c = sub.add_parser("classify-sql")
+    c.add_argument("--without-iam", action="store_true")
     c = sub.add_parser("status")
     c.add_argument("--state", required=True)
     c.add_argument("--gate")
@@ -2775,6 +2809,9 @@ def main(argv=None):
             return 0
         if a.cmd == "bootstrap-targets":
             return bootstrap_targets(a.out, a.source == "host", a.commit, a.state)
+        if a.cmd == "classify-sql":
+            sys.stdout.write(classify_sql(model.load(), a.without_iam))
+            return 0
         if a.cmd == "health":
             live = None
             if a.live:

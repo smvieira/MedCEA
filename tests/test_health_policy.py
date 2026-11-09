@@ -232,6 +232,22 @@ class IamPolicy(unittest.TestCase):
         self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk}})
         self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|Access policy version|version 1 (bootstrap), skeleton"))
 
+    def test_the_policy_uis_compiler_digest(self):
+        # Phase 5 (G8): compiler_digest of iam-api's /healthz against this checkout's compiler
+        self.t.write_host()
+        st = dict(self.t.st, unconfirmed=[], confirmed_at="2026-11-04T10:00:00Z")
+        self.t.st = st
+        self.t.write_host()
+        sk = st["accepted"]["digest"]
+        self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk,
+                                         "compiler_digest": source.compiler_digest()}})
+        self.assertTrue(self.run_check(self.t.write_state()).startswith("OK|Access policy version|"))
+        self.t.scenario({"iam_healthz": {"policy_port": True, "applied_version": 1, "skeleton_digest": sk,
+                                         "compiler_digest": "c" * 64}})
+        self.assertEqual(self.run_check(self.t.write_state()),
+                         "WARN|Access policy version|the Policy UI compiles with compiler cccccccccccc, this checkout's "
+                         f"is {source.compiler_digest()[:12]} (./apps/iam/deploy.sh)")
+
     def test_an_approved_version_waits_for_its_apply(self):
         # IAM 4.5 (design §14.8.8): the instruction is apply.sh N; after a reverted apply the
         # version is approved again (_mark_reverted), and the detail says so
@@ -1031,7 +1047,12 @@ class Wiring(unittest.TestCase):
         i = names.index("Database grants")
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
-        self.assertEqual(len(lines), 57)  # 57 with Container AppArmor (8 Nov 2026)
+        # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5's iamloaded, jwks, kcscopes, iamnetpol
+        self.assertEqual(len(lines), 61)
+        types = [l.split("|")[1].strip() for l in lines]
+        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol"):
+            self.assertEqual(types.count(t), 1, t)
+        self.assertEqual(types[types.index("iamartefacts") + 1], "iamloaded")
         # Superset stage B: one more check, SKIP until Superset is deployed (stage C: none more)
         row = [l for l in lines if l.split("|")[0].strip() == "Superset roles"]
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["supersetroles", "$NAMESPACE"])
@@ -1043,6 +1064,9 @@ class Wiring(unittest.TestCase):
         self.assertIn("${CYAN}iamartefacts${NC}", src)
         self.assertIn('supersetroles) check_supersetroles "$name" "$target" ;;', src)
         self.assertIn("${CYAN}supersetroles${NC}", src)
+        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol"):
+            self.assertRegex(src, r"(?m)^        %s\)\s+check_%s \"\$name\" \"\$target\" ;;$" % (t, t))
+            self.assertIn("${CYAN}%s${NC}" % t, src)
         # the state document's directory is removed at exit
         self.assertRegex(src, r"trap 'rm -rf \"\$\(dirname \"\$POLICY_SOURCE_STATE_FILE\"\)\"' EXIT")
 

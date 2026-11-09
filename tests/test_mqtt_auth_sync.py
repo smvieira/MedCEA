@@ -264,8 +264,10 @@ class HealthChecks(unittest.TestCase):
         with open(k, "w") as fh:
             fh.write("#!/bin/sh\n" + kubectl + "\n")
         os.chmod(k, 0o755)
+        # the Phase 5 helpers check_iammqtt reads every iam-api pod through (G7)
+        helpers = "\n".join(_health_fn(h) for h in ("_iamlib_meta", "_running_pods"))
         script = (f'_record() {{ echo "$1|$2|$3"; }}\nTIMEOUT=5\nKUBECTL="{k}"\nNAMESPACE=medcea\n'
-                  f"{_health_fn(fn)}\n{call}\n")
+                  f"{helpers}\n{_health_fn(fn)}\n{call}\n")
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                            env=dict(os.environ, **(env or {})))
         return r.stdout.strip()
@@ -288,8 +290,11 @@ class HealthChecks(unittest.TestCase):
   *"/mosquitto/auth/passwd-ws"*) printf 'explorer-eng-abc123\\n' ;;
   *"/mosquitto/auth/passwd"*) printf '{users}' ;;
   *status.json*) exit 1 ;;
+  *"get configmap medcea-iam-lib -n medcea -o json"*) printf '%s' '{{"metadata": {{"annotations": {{"medcea/mqtt-digest": "x"}}}}}}' ;;
+  *"get deployment iam-api -n medcea -o json"*) printf '%s' '{{"spec": {{"selector": {{"matchLabels": {{"app": "iam-api"}}}}}}}}' ;;
+  *"get pods -n medcea -l app=iam-api -o json"*) printf '%s' '{{"items": [{{"metadata": {{"name": "iam-api-1"}}, "status": {{"phase": "Running"}}}}]}}' ;;
   *"get deployment iam-api"*) exit 0 ;;
-  *"deployment/iam-api"*) printf '%s' '{{"mode": true, "mqtt_digest": "x"}}' ;;
+  *"exec -n medcea iam-api-1 -c iam-api"*) printf '%s' '{{"mode": true, "mqtt_digest": "x"}}' ;;
   *) exit 1 ;;
 esac"""
 

@@ -147,15 +147,66 @@ class ClientBodies(unittest.TestCase):
                 self.assertEqual(writes[0]["attributes"]["post.logout.redirect.uris"].split("##")[0], origin + "/*")
 
 
+def lib_array(name):
+    """An array of infra/lib-keycloak-clients.sh, as bash reads it (Phase 5, G2)."""
+    p = subprocess.run(["bash", "-c", 'source "$1"; printf "%s\\n" "${' + name + '[@]}"', "_",
+                        os.path.join(REPO, "infra", "lib-keycloak-clients.sh")],
+                       capture_output=True, text=True, check=True)
+    return p.stdout.split()
+
+
 class Scopes(unittest.TestCase):
 
     def test_every_client_gets_the_groups_scope(self):
-        loop = re.search(r"^    for _c in (portal access [^;]*); do$", SRC, re.M).group(1).split()
+        self.assertRegex(SRC, r'(?m)^    for _c in "\$\{KC_SCOPE_CLIENTS\[@\]\}"; do$')
+        loop = lib_array("KC_SCOPE_CLIENTS")
         self.assertIn("superset", loop)
         made = set(re.findall(r'_create_client(?:_multi)? "([a-z-]+)"', SRC))
         made |= set(re.findall(r'_create_public_device_client "([a-z-]+)"', SRC))
         self.assertIn("superset", made)
         self.assertEqual(made - set(loop), set())
+
+
+class SharedClientList(unittest.TestCase):
+    """Phase 5 (G2): deploy-infra.sh's scope loop and health-check.sh's kcscopes read one list,
+    infra/lib-keycloak-clients.sh; the loop's clients and their order are what they were."""
+
+    BEFORE = ("portal access policy config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red "
+              "workbench grafana superset workbench-notebook").split()
+
+    def test_the_loop_is_unchanged(self):
+        self.assertEqual(lib_array("KC_SCOPE_CLIENTS"), self.BEFORE)
+
+    def test_deploy_infra_sources_it_before_the_loop(self):
+        src = SRC.index('source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh"')
+        loop = SRC.index('for _c in "${KC_SCOPE_CLIENTS[@]}"; do')
+        self.assertLess(src, loop)
+        self.assertNotRegex(SRC, r"for _c in portal access ")
+
+    def test_health_check_reads_the_same_list(self):
+        hc = read("health-check.sh")
+        body = re.search(r"(?ms)^check_kcscopes\(\) \{.*?^\}", hc).group(0)
+        self.assertIn('source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh"', body)
+        self.assertIn('"${KC_SCOPE_CLIENTS[*]}"', body)
+        self.assertIn('"${KC_API_CLIENTS[*]}"', body)
+        self.assertNotRegex(body, r"\bportal access\b")
+        conf = read("health-checks.conf")
+        self.assertRegex(conf, r"(?m)^Keycloak client scopes\s*\| kcscopes \| \$KEYCLOAK_REALM\s*\|")
+
+    def test_api_clients(self):
+        """KC_API_CLIENTS: every HOST_CLIENTS client of the access deploy, every token client of
+        config-api, the edge wizard; the rest of the loop signs people in to a tool only."""
+        loop, api = lib_array("KC_SCOPE_CLIENTS"), lib_array("KC_API_CLIENTS")
+        self.assertLessEqual(set(api), set(loop))
+        dep = read("apps/access/deploy.sh")
+        hosts = set(re.findall(r"=([a-z-]+)(?:[,\"])", "".join(l for l in dep.splitlines() if l.startswith("HOST_CLIENTS"))))
+        self.assertTrue(hosts)
+        self.assertLessEqual(hosts, set(api))
+        import sys
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        from compiler import grants, model
+        self.assertLessEqual(set(grants.token_clients(model.load_defaults())), set(api))
+        self.assertEqual(set(loop) - set(api), {"pgadmin", "node-red", "workbench", "grafana", "superset"})
 
 
 class Domains(unittest.TestCase):

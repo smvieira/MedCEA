@@ -717,6 +717,8 @@ sleep 5
 # on an install from before the split, the legacy admin — is decided once by
 # kc_admin_select (infra/lib-keycloak-admin.sh).
 source "$SCRIPT_DIR/infra/lib-keycloak-admin.sh"
+# KC_SCOPE_CLIENTS: the clients of the groups/medcea-identity scope loop (shared with kcscopes)
+source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh"
 _kc_token() { kc_admin_token; }
 
 # Retry up to 12 times (60s) in case the port-forward needs extra time
@@ -1480,7 +1482,8 @@ if [[ -n "$_GS_ID" ]]; then
     # Every client of the access policy's hosts (apps/iam/policy/defaults.yaml);
     # a client asking for "groups" without having the scope gets invalid_scope.
     # workbench-notebook has no host: it is network.clients.notebooks' token_client.
-    for _c in portal access policy config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana superset workbench-notebook; do
+    # The list is infra/lib-keycloak-clients.sh, which health-check.sh (kcscopes) reads too.
+    for _c in "${KC_SCOPE_CLIENTS[@]}"; do
         _C_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
           -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
         [[ -n "$_C_UUID" ]] || continue
@@ -1513,7 +1516,7 @@ _JWKS="$(curl -sf "http://localhost:18080/realms/${KEYCLOAK_REALM}/protocol/open
 # (infra/jwks-sig.py), which config-api reads as its jwt-secret when
 # IAM_POSTGREST_JWT=true. PostgREST reads it only at start, so a changed set
 # restarts config-api (pgrst_roll_if_changed). After rotating or removing a realm
-# key, re-run this script; health-check.sh (postgrest) FAILs until then.
+# key, re-run this script; health-check.sh (jwks) FAILs until then.
 _JWKS_TMP="$(mktemp -d)"; chmod 700 "$_JWKS_TMP"
 trap 'rm -rf "$_JWKS_TMP"' EXIT
 if printf '%s' "$_JWKS" > "$_JWKS_TMP/jwks.json" \
