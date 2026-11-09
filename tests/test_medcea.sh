@@ -135,7 +135,7 @@
 #      colour, compact = the approved lines; plain mode at a terminal only; the main
 #      menu's top on a large terminal, never on a small one or in a sub-menu
 #  66  the end-of-command dialog under util-linux script (a pty): title, command, log, the
-#      output's tail stripped of escapes, Menu/Quit/Esc, the recorded file 600 and gone;
+#      output's tail stripped of escapes (also in a non-C UTF-8 locale), Menu/Quit/Esc, the recorded file 600 and gone;
 #      the credentials box keeps the Enter prompt; a recipe: one dialog, the steps keep
 #      the deploy lock (fd 9, MEDCEA_LOCK_HELD, medcea_lock_verify); a stopped chain whose
 #      steps passed is titled Stopped, never Finished; Ctrl-C in a step: 130
@@ -1903,6 +1903,21 @@ else
         wt_none "no later dialog has the output (it never reached the screen buffer)" "=== CALL 5" "GREEN text"
         wt_one "Menu: the area menu again" "=== CALL 5" "[Infrastructure]" "[--menu]"
         wt_hasnt "whiptail never gets fd 9" "=== FD 9 open"
+        # The same run in a UTF-8 locale whose collation orders ranges (en_US.UTF-8 …):
+        # sed refused the escape ranges there ("Invalid range end", 9 Nov 2026) and the
+        # dialog showed "(no output)"
+        loc="$(locale -a 2>/dev/null | grep -ivE '^(c|posix)([.]|$)' | grep -iE '[.]utf-?8$' | head -1)"
+        if [[ -z "$loc" ]]; then
+            pass "no UTF-8 locale but C on this host: the collation case is not testable here"
+        else
+            ptyreal $'0|2\n0|9\n0|\n0|\n1|\n1|\n' '' '' STUB_FANCY=1 STUB_LOG=1 LC_ALL="$loc"
+            rc_is "$loc: quits with 0" 0
+            hasnt "$loc: no sed error" "Invalid range"
+            wt_hasnt "$loc: no sed error in a dialog" "Invalid range"
+            wt_one "$loc: its output's tail, stripped" "=== CALL 4" "STUB infra/publish-manual.sh" "GREEN text" "progress 100%" "bacX"
+            wt_none "$loc: no escape left" "=== CALL 4" $'\033'
+            wt_none "$loc: not (no output)" "=== CALL 4" "(no output)"
+        fi
         # Quit
         ptyreal $'0|2\n0|9\n0|\n1|\n' '' ''
         rc_is "Quit: exit 0" 0

@@ -134,7 +134,7 @@ fi
 # answers at once without a box (empty, no, back), plan_run runs nothing, and run_area
 # goes back to the menu with "Cancelled; nothing was run." A failed box is never an answer.
 TUI=false
-TUI_TTY=""; TUI_DIR=""; TUI_BUF=""; TUI_ANS=""; TUI_LOCALE=""; TUI_SEP=" - "
+TUI_TTY=""; TUI_DIR=""; TUI_BUF=""; TUI_ANS=""; TUI_LOCALE=""; TUI_STRIP_LOCALE=C; TUI_SEP=" - "
 TUI_STTY=""            # the terminal's mode at the start (stty -g), put back on exit
 TUI_PID=""             # the whiptail being waited for
 TUI_NOTE=""            # why a terminal gets the plain mode (shown at the start)
@@ -220,8 +220,9 @@ emptyscale=,black fullscale=,cyan'
     fi
     # The menus' labels hold UTF-8 (—): counted and cut as characters, shown as such.
     cm="$(locale charmap 2>/dev/null)"
-    if [[ "$cm" != UTF-8 ]] && locale -a 2>/dev/null | grep -qixE 'c\.utf-?8'; then
-        TUI_LOCALE=C.UTF-8; cm=UTF-8
+    if locale -a 2>/dev/null | grep -qixE 'c\.utf-?8'; then
+        TUI_STRIP_LOCALE=C.UTF-8
+        [[ "$cm" != UTF-8 ]] && { TUI_LOCALE=C.UTF-8; cm=UTF-8; }
     fi
     [[ "$cm" == UTF-8 ]] && TUI_SEP=" — "
     TUI_DIRTY=false
@@ -1061,16 +1062,19 @@ tui_tail() {   # tui_tail FILE → TUI_TAIL: its last ~300 lines as shown, escap
     if [[ -n "$TUI_LOCALE" ]]; then local LC_ALL="$TUI_LOCALE"; fi
     local raw l out="" nl=$'\n'
     local -a lines=()
+    # The escape ranges ([0-?], [@-~] …) are byte/code-point ranges: in a locale such as
+    # en_US.UTF-8 glibc reads them by collation and sed refuses them ("Invalid range end",
+    # 9 Nov 2026), so the stripping runs in C.UTF-8 (C when the host has none).
     # script's own first and last lines; a line's last \r wins (progress lines), \r\n is
     # the pty's newline; OSC (titles, links) and CSI/other escapes go; a backspace takes
     # the character before it; other control characters but tab go.
-    raw="$(sed -e '1{/^Script started on /d}' -- "$1" 2>/dev/null | tail -n 400 \
-        | sed -E -e '${/^Script done on /d}' -e 's/\r+$//' -e 's/.*\r//' \
+    raw="$(LC_ALL="$TUI_STRIP_LOCALE" sed -e '1{/^Script started on /d}' -- "$1" 2>/dev/null | tail -n 400 \
+        | LC_ALL="$TUI_STRIP_LOCALE" sed -E -e '${/^Script done on /d}' -e 's/\r+$//' -e 's/.*\r//' \
             -e 's#\x1b\][^\x07\x1b]*(\x07|\x1b\\)?##g' \
             -e 's#\x1b\[[0-?]*[ -/]*[@-~]##g' \
             -e 's#\x1b[ -/]*[0-~]##g' \
             -e ':b' -e 's#[^\x08]\x08##' -e 'tb' -e 's#\x08##g' \
-        | tr -d '\000-\010\013-\037\177')"
+        | LC_ALL="$TUI_STRIP_LOCALE" tr -d '\000-\010\013-\037\177')"
     mapfile -t lines <<<"$raw"
     (( ${#lines[@]} > 300 )) && lines=("${lines[@]: -300}")
     for l in "${lines[@]}"; do
