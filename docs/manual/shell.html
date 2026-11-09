@@ -7,6 +7,7 @@
   --warn: #9c5700; --warn-bg: #fdf4e6;
   --record: #44546a; --record-bg: #f2f4f7;
   --code-bg: #f3f5f8;
+  --lg-leaf: #2e7d32; --lg-pot: #8d6200; --lg-word: #2e7d32; --lg-tag: #00727f; --lg-cap: #b3261e; --lg-stem: #5f6b7a;
   --display: "Century Gothic", "URW Gothic", "URW Gothic L", "Avant Garde", "Gill Sans", Calibri, Carlito, sans-serif;
   --body: Calibri, Carlito, "Segoe UI", "Liberation Sans", Arial, sans-serif;
   --mono: Consolas, "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
@@ -15,12 +16,14 @@
   --bg: #111821; --paper: #17202c; --ink: #e4e8ee; --muted: #a3b0c2; --line: #2c3a4c;
   --accent: #9cc0e8; --accent-2: #6fa3dc; --link: #8ab8f0; --accent-soft: #1d2c40;
   --note: #8ab8f0; --note-bg: #182538; --warn: #e8b464; --warn-bg: #2e2412;
-  --record: #b4c0d0; --record-bg: #1c2532; --code-bg: #1c2633; color-scheme: dark } }
+  --record: #b4c0d0; --record-bg: #1c2532; --code-bg: #1c2633; color-scheme: dark;
+  --lg-leaf: #81c784; --lg-pot: #e0b050; --lg-word: #81c784; --lg-tag: #5cc8d4; --lg-cap: #ff8a7a; --lg-stem: #a3b0c2 } }
 :root[data-theme="dark"] {
   --bg: #111821; --paper: #17202c; --ink: #e4e8ee; --muted: #a3b0c2; --line: #2c3a4c;
   --accent: #9cc0e8; --accent-2: #6fa3dc; --link: #8ab8f0; --accent-soft: #1d2c40;
   --note: #8ab8f0; --note-bg: #182538; --warn: #e8b464; --warn-bg: #2e2412;
-  --record: #b4c0d0; --record-bg: #1c2532; --code-bg: #1c2633; color-scheme: dark }
+  --record: #b4c0d0; --record-bg: #1c2532; --code-bg: #1c2633; color-scheme: dark;
+  --lg-leaf: #81c784; --lg-pot: #e0b050; --lg-word: #81c784; --lg-tag: #5cc8d4; --lg-cap: #ff8a7a; --lg-stem: #a3b0c2 }
 
 html { scroll-padding-top: 16px; }
 body { background: var(--bg); color: var(--ink); font: 17px/1.55 var(--body); margin: 0; }
@@ -29,6 +32,11 @@ body { background: var(--bg); color: var(--ink); font: 17px/1.55 var(--body); ma
 /* document control */
 .doc { border-bottom: 2px solid var(--accent-2); padding-bottom: 18px; margin-bottom: 28px;
   display: grid; grid-template-columns: 1fr auto; gap: 16px 40px; align-items: end; }
+.doc .logo { grid-column: 1 / -1; font: 400 clamp(6.5px, 1.75vw, 13px)/1.15 var(--mono); margin: 0; padding: 0;
+  background: none; border: 0; white-space: pre; overflow-x: auto; color: var(--muted); }
+.logo .lg-leaf { color: var(--lg-leaf); } .logo .lg-pot { color: var(--lg-pot); }
+.logo .lg-word { color: var(--lg-word); font-weight: 700; } .logo .lg-tag { color: var(--lg-tag); }
+.logo .lg-cap { color: var(--lg-cap); } .logo .lg-stem { color: var(--lg-stem); } .logo .lg-grass { color: var(--lg-leaf); }
 .doc h1 { font: 700 2.2rem/1.15 var(--display); color: var(--accent); margin: 0; }
 .doc .sub { color: var(--muted); margin: 8px 0 0; max-width: 62ch; }
 .doc dl { display: grid; grid-template-columns: auto auto; margin: 0; font-size: .85rem; border: 1px solid var(--line); }
@@ -113,6 +121,12 @@ footer { color: var(--muted); font-size: .85rem; }
 
 <div class="page">
   <header class="doc">
+    <pre class="logo" role="img" aria-label="MedCEA — Controlled Environment Agriculture for Medicinal Plants and Fungi">  <span class="lg-leaf">.--.  .--.</span>    <span class="lg-word">__  __          _  ___  ___    _</span>       <span class="lg-cap">.-~~~~-.</span>
+ <span class="lg-leaf">(    \/    )</span>  <span class="lg-word">|  \/  | ___  __| |/ __|| __|  /_\</span>   <span class="lg-cap">.' o  .  O '.</span>
+  <span class="lg-leaf">'--.||.--'</span>   <span class="lg-word">| |\/| |/ -_)/ _` | (__ | _|  / _ \</span> <span class="lg-cap">(____________)</span>
+   <span class="lg-pot">___||___</span>    <span class="lg-word">|_|  |_|\___|\__,_|\___||___|/_/ \_\</span>     <span class="lg-stem">|    |</span>
+   <span class="lg-pot">\______/</span>    <span class="lg-tag">Controlled Environment Agriculture</span>   <span class="lg-grass">,,,|____|,,,</span>
+               <span class="lg-tag">for Medicinal Plants and Fungi</span></pre>
     <div>
       <h1>MedCEA Platform Manual</h1>
       <p class="sub">How to get access to, use and run the MedCEA platform for regulated controlled-environment cultivation: the web apps, the edge devices, the access controls and the records they keep.</p>

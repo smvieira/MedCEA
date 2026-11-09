@@ -317,6 +317,25 @@ class Tree:
 
 
 class Build(unittest.TestCase):
+    LOGO = re.compile(r'<pre class="logo" role="img" aria-label="([^"]+)">(.*?)</pre>', re.S)
+
+    def test_the_logo_is_medcea_banner_compact(self):
+        # One drawing: the manual's logo, tags removed, is infra/lib-banner.sh's compact
+        # banner byte for byte, so the two cannot drift (9 Nov 2026)
+        banner = subprocess.run(["bash", "-c", 'source infra/lib-banner.sh; medcea_banner compact'],
+                                cwd=REPO, capture_output=True, text=True, check=True).stdout.rstrip("\n")
+        for rel in ("docs/manual/shell.html", "docs/manual/index.html"):
+            found = self.LOGO.findall(read(rel))
+            self.assertEqual(len(found), 1, rel)
+            label, body = found[0]
+            import html as _html
+            self.assertEqual(_html.unescape(re.sub(r"<[^>]+>", "", body)), banner, rel)
+            self.assertEqual(label, "MedCEA — Controlled Environment Agriculture for Medicinal Plants and Fungi")
+            self.assertNotIn("style=", body)
+        shell = read("docs/manual/shell.html")
+        for token in ("--lg-leaf", "--lg-pot", "--lg-word", "--lg-tag", "--lg-cap", "--lg-stem"):
+            self.assertEqual(shell.count(token + ":"), 3, token)   # light, dark (system), dark (toggle)
+
     def test_out_leaves_index_html_alone(self):
         idx = os.path.join(REPO, "docs/manual/index.html")
         before = (sha(idx), os.stat(idx).st_mtime_ns)
