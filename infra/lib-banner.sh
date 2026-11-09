@@ -73,13 +73,13 @@ _medcea_banner_full() {
     echo ""
 }
 
-_medcea_banner_compact() {   # the owner-approved variation (9 Nov 2026), printed as it is
+_medcea_banner_compact() {   # the owner-approved variation (9 Nov 2026; mushroom centred on one column, owner, same day), printed as it is
     cat <<'MEDCEA_BANNER'
-  .--.  .--.    __  __          _  ___  ___    _       .-~~~~-.
+  .--.  .--.    __  __          _  ___  ___    _      .-~~~~~-.
  (    \/    )  |  \/  | ___  __| |/ __|| __|  /_\   .' o  .  O '.
-  '--.||.--'   | |\/| |/ -_)/ _` | (__ | _|  / _ \ (____________)
-   ___||___    |_|  |_|\___|\__,_|\___||___|/_/ \_\     |    |
-   \______/    Controlled Environment Agriculture   ,,,|____|,,,
+  '--.||.--'   | |\/| |/ -_)/ _` | (__ | _|  / _ \  (___________)
+   ___||___    |_|  |_|\___|\__,_|\___||___|/_/ \_\     |   |
+   \______/    Controlled Environment Agriculture    ,,,|___|,,,
                for Medicinal Plants and Fungi
 MEDCEA_BANNER
 }

@@ -1793,11 +1793,11 @@ fi
 bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh" | grep -qF $'\033[0;36m Controlled Environment Agriculture for Medicinal Plants and Fungi' \
     && pass "the tagline is cyan" || fail "the tagline is not cyan"
 cat >"$T/compact.want" <<'COMPACT'
-  .--.  .--.    __  __          _  ___  ___    _       .-~~~~-.
+  .--.  .--.    __  __          _  ___  ___    _      .-~~~~~-.
  (    \/    )  |  \/  | ___  __| |/ __|| __|  /_\   .' o  .  O '.
-  '--.||.--'   | |\/| |/ -_)/ _` | (__ | _|  / _ \ (____________)
-   ___||___    |_|  |_|\___|\__,_|\___||___|/_/ \_\     |    |
-   \______/    Controlled Environment Agriculture   ,,,|____|,,,
+  '--.||.--'   | |\/| |/ -_)/ _` | (__ | _|  / _ \  (___________)
+   ___||___    |_|  |_|\___|\__,_|\___||___|/_/ \_\     |   |
+   \______/    Controlled Environment Agriculture    ,,,|___|,,,
                for Medicinal Plants and Fungi
 COMPACT
 bash -c 'source "$0"; medcea_banner compact' "$REPO/infra/lib-banner.sh" | cmp -s - "$T/compact.want" \
