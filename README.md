@@ -152,7 +152,7 @@ Then the applications stage (`deploy-apps.sh --all`, next section) and `health-c
 
 **At the very end it shows your credentials.** Every password a person needs (platform admin, Keycloak, Grafana users, pgAdmin, PostgreSQL) is written to `credentials-<timestamp>.txt` in the repository root, readable only by you. Its content is shown on the terminal, never in the log. **Save it in a password manager, then delete the file**; the installer prints the exact `rm` command and lists any files left over from earlier runs. `config.env` keeps its own copy, because re-deploys need it.
 
-**Then turn on the rest of the access controls.** A fresh install has only the sign-in gates and the network policies on (`IAM_GATES`, `IAM_NETPOL`); token checks, database roles, service enforcement and the MQTT Explorer's personal credentials (`IAM_POSTGREST_JWT`, `IAM_DB_SERVICE_ROLES`, `IAM_DB_ROLES`, `IAM_ENFORCE`, `IAM_MQTT_PERSON`) are off, so the health check never says "All checks passed" and the MQTT Explorer has no credential. Run `./medcea.sh` → **IAM switches** → **Bring IAM to full enforcement**: it turns them on in order and, at its end, offers `./deploy-apps.sh --all` (answer yes when no run is active) so every app pod carries the new `IAM_ENFORCE`. The manual's "After a fresh install" section explains its checklists (operators' units confirmed by qa, a report-only trial before `IAM_ENFORCE`).
+**Then turn on the rest of the access controls.** A fresh install has the sign-in gates, the network policies and the services' own database roles on (`IAM_GATES`, `IAM_NETPOL`, `IAM_DB_SERVICE_ROLES`); token checks, database roles for people, service enforcement and the MQTT Explorer's personal credentials (`IAM_POSTGREST_JWT`, `IAM_DB_ROLES`, `IAM_ENFORCE`, `IAM_MQTT_PERSON`) are off, so the health check never says "All checks passed" and the MQTT Explorer has no credential. Run `./medcea.sh` → **IAM switches** → **Bring IAM to full enforcement**: it turns them on in order and, at its end, offers `./deploy-apps.sh --all` (answer yes when no run is active) so every app pod carries the new `IAM_ENFORCE`. The manual's "After a fresh install" section explains its checklists (operators' units confirmed by qa, a report-only trial before `IAM_ENFORCE`).
 
 > **Note:** Charmed Kubeflow was retired — it cost 37 Juju charm units and nothing in the codebase used it. JupyterHub replaced it and authenticates against Keycloak directly, which also removed Dex, oidc-gatekeeper, Istio, MetalLB and the static LAN IP.
 
@@ -340,6 +340,9 @@ Scheduler:     https://scheduler.<domain>       (recipe schedules)
 Onboarding:    https://onboard-device.<domain>  (device wizard, runs on the host — login via Keycloak)
 pgAdmin:       https://pgadmin.<domain>         (Keycloak sign-in, role admin)
 MQTT Explorer: https://mqtt-explorer.<domain>   (browser MQTT tool; its broker socket is wss://…/mqtt)
+Access Policy: https://policy.<domain>          (Policy UI: draft, approve, history — admin, qa, qp, auditor)
+Superset:      https://superset.<domain>        (data analysis, once its access policy is applied)
+Manual:        https://portal.<domain>/manual/  (the platform manual)
 Mosquitto:     mqtts://<LAN-IP>:31884          (boards on the LAN, TLS only, per-device credentials)
 Postgres:      rdbms-postgresql.medcea.svc.cluster.local:5432  (internal)
 ```
@@ -399,28 +402,31 @@ built in this prototype yet:
 | `auditor` | Auditor / Inspector | reading and exporting records and audit trails |
 
 Which role reaches which service is **compiled from the policy** into the sign-in
-gates of the portal, Config UI, scheduler, Monitor, Database Management, MQTT
-Explorer and Node-RED. `python3 apps/iam/compiler/cli.py hosts` lists every host
-with the roles it admits and whether that gate is enforced yet; Grafana, the AI
-Workbench, onboarding and the User Manager (admin only) follow in later phases.
-Finer permissions inside each service are the next steps of the IAM plan.
+gates of every web host (`IAM_GATES`, on by default), and into the role settings
+of the tools that sign people in themselves (Grafana, the AI Workbench, Node-RED's
+editor, the onboarding wizard, pgAdmin, Superset). `python3 apps/iam/compiler/cli.py hosts`
+lists every host with the roles it admits and how its gate is enforced; the
+User Manager stays admin-only until every access pod has proved it enforces. See
+[Access policy](#access-policy) below.
 
-Three database-side steps exist but are off by default. With
+The deeper controls are switches in `config.env`. A fresh install has
+`IAM_GATES`, `IAM_NETPOL` and `IAM_DB_SERVICE_ROLES` on and the rest off; turn
+the rest on with `./medcea.sh` → **IAM switches** → **Bring IAM to full
+enforcement** (see [Installation](#2-install)). With
 `IAM_POSTGREST_JWT=true` (Phase 2b) the config API (PostgREST) verifies the
 person's token on every Config UI and onboarding call. A forged or expired token
 is refused, and writes are attributed to the person. `IAM_DB_ROLES=true`
 (Phase 2a) gives each realm role its own database role; it needs Phase 2b and
-the services on their own roles first. `IAM_DB_SERVICE_ROLES=true` (Phase 2.5)
-does that: the scheduler, monitor, Database Management, Node-RED, Grafana and
-pgAdmin each log in with their own database role instead of the superuser, while
-nothing else is enforced yet. Turn it on, then run `./deploy-apps.sh --all` and
-`./deploy-infra.sh`; pgAdmin can then only read, so schema changes go through
-psql in the PostgreSQL pod.
+the services on their own roles first. `IAM_DB_SERVICE_ROLES=true` (Phase 2.5,
+on by default since 8 November 2026) does that: the scheduler, monitor, Database
+Management, Node-RED, Grafana, pgAdmin and Superset each log in with their own
+database role instead of the superuser; pgAdmin can then only read, so schema
+changes go through psql in the PostgreSQL pod.
 
-`IAM_ENFORCE=true` (IAM 2.6, off by default) makes the scheduler, monitor and
+`IAM_ENFORCE=true` (IAM 2.6) makes the scheduler, monitor and
 Config UI services refuse every call the route table does not allow, instead of
 only logging it. Database Management and the User Manager's admin side always
-refuse. Switch it with `./medcea.sh` → IAM switches → IAM_ENFORCE after a report-only soak, once
+refuse. The full-enforcement chain switches it after a report-only trial, once
 `IAM_DB_ROLES` is true (only the database checks which runs an operator may
 start or stop).
 
@@ -441,17 +447,6 @@ waits *pending qa* and takes effect only when a qa person other than you confirm
 it in the User Manager's Decisions tab; a refusal applies nothing. Only when no
 other qa account exists, `assign --bootstrap` puts the unit in effect at once and
 still leaves the decision for qa.
-
-**Existing accounts after this change** keep their role and its meaning, but
-some lose services the policy does not give them:
-
-| Account | Role | Loses | Still reaches |
-|---|---|---|---|
-| `admin` (platform) | admin | Monitor, Database Management, MQTT Explorer, Node-RED | portal, Config UI, scheduler, User Manager, pgAdmin, Grafana, Workbench |
-| `developer` | operator | Database Management, MQTT Explorer, Node-RED | portal, Config UI, scheduler, Monitor |
-| `viewer` | auditor | MQTT Explorer, Node-RED | portal, Config UI, scheduler, Monitor, Database Management |
-| `QA_USER` (new) | qa | — | as auditor, plus approvals |
-| `ENGINEER_USER` (new) | engineer | — | Node-RED, MQTT Explorer and everything an engineer drafts |
 
 The install creates two people from `config.env`, each with a temporary password
 (and no name yet — Keycloak asks for both at first sign-in): the first **qa
@@ -523,6 +518,41 @@ or delete (the Compliance Plane rule):
 | `iam.account_decision` | account decisions — today the unit assignments and removals made with `apps/iam/units.sh`: whose account, which unit, why, and whether qa has confirmed it |
 | `iam_policy.history` | the hash-chained history of the access policy, including every unit assignment (`unit_assigned`) and removal (`unit_removed`) |
 | `medcea.row_change` | every change to recipes, algorithms, parameter sets, schedules, runs and devices, with the actor stamped on the row (`created_by_*`/`updated_by_*`): the person whose token was verified, `system:scheduler` for a schedule firing (attributed to the person who created it), or `db:<login>` when no person is known |
+
+---
+
+## Access policy
+
+Who may do what is one file, [apps/iam/policy/defaults.yaml](apps/iam/policy/defaults.yaml)
+(roles, access levels, resource groups with their routes, tables and hosts,
+constraints and the rules a policy must keep), and one compiler,
+[apps/iam/compiler/](apps/iam/compiler/), turns it into everything that enforces it:
+the sign-in gates, the services' route table, the database grants and row rules,
+the tools' role settings, the MQTT rows and the network policies.
+`python3 apps/iam/compiler/cli.py check` runs the checker, `… hosts` lists who
+each host admits.
+
+After the first install the policy changes only as a **version**:
+
+1. An `admin` drafts it in the **Access Policy** (`https://policy.<domain>`) and submits it; the checker runs on every save.
+2. A `qa` person who did not author it reviews the diff and approves it.
+3. The host operator applies it with `./apps/iam/apply.sh <version> --by <you>` (`--check-only` first), which checks the approval again and re-renders only what changed.
+4. qa confirms the applied version in the Access Policy. `./apps/iam/apply.sh --rollback-to <version> --by <you> --reason "<why>"` (`--check-only` first) goes back to an earlier one.
+
+A change to the git skeleton that gives any role more access is refused by every
+deploy until it goes through the same approval (`apply.sh --propose-skeleton`).
+Every step is an event in a hash-chained history (`iam_policy.history`), waivers
+carry a review date, and the health check proves the result: the policy version
+and its waivers (`iampolicy`), the history (`iamchain`), the compiled artefacts
+(`iamartefacts`), the route table each service pod loaded (`iamloaded`), the
+database grants (`iamgrants`), the realm's signing keys and token claims (`jwks`,
+`kcscopes`) and the network policies (`iamnetpol`).
+
+The full procedure, the screens and the refusals are in the platform manual,
+chapter **Getting access and roles** → **Changing the access policy**
+([docs/manual/index.html#access-policy-changes](docs/manual/index.html#access-policy-changes);
+the portal serves the same manual at `https://portal.<domain>/manual/`), and the
+checks in **Running the platform** → **The health check**.
 
 ---
 
