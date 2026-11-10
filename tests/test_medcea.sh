@@ -131,8 +131,8 @@
 #  63  dialogs at a real terminal (a pty): piped stdin, TERM dumb/empty, no controlling
 #      terminal, small terminals, the menu's height, the terminal mode after a killed whiptail
 #  64  ./guide.sh forwards to ./medcea.sh: arguments, exit code, the note on stderr
-#  65  the MedCEA logo: lib-banner.sh's full = deploy-infra's old banner but the tagline
-#      colour, compact = the approved lines; plain mode at a terminal only; the main
+#  65  the MedCEA logo: lib-banner.sh's full = deploy-infra's old banner down to the wordmark,
+#      the tagline cyan on two rows, the mushroom aligned on every row; compact = the approved lines; plain mode at a terminal only; the main
 #      menu's top on a large terminal, never on a small one or in a sub-menu
 #  66  the end-of-command dialog under util-linux script (a pty): title, command, log, the
 #      output's tail stripped of escapes (also in a non-C UTF-8 locale), Menu/Quit/Esc, the recorded file 600 and gone;
@@ -1778,20 +1778,25 @@ no_stub
 
 echo "65 the MedCEA logo (infra/lib-banner.sh)"
 COLS_SET="GREEN='\033[0;32m' YELLOW='\033[0;33m' NC='\033[0m'"
-NEW_FULL="$(bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh" | od -c)"
 if OLD_SRC="$(git -C "$REPO" show e50647d:deploy-infra.sh 2>/dev/null)"; then
     sed -n '/^_print_banner() {/,/^}/p' <<<"$OLD_SRC" >"$T/old-banner.sh"
-    OLD_FULL="$(bash -c "$COLS_SET; source \"\$0\"; _print_banner" "$T/old-banner.sh" | od -c)"
-    [[ "$OLD_FULL" != "$NEW_FULL" ]] && pass "the tagline's colour changed (it never matched *Medical*)" || fail "full is unchanged"
-    sed -i 's/\*Medical\*/*Medicinal*/' "$T/old-banner.sh"
-    OLD_FIXED="$(bash -c "$COLS_SET; source \"\$0\"; _print_banner" "$T/old-banner.sh" | od -c)"
-    [[ "$OLD_FIXED" == "$NEW_FULL" ]] && pass "full = deploy-infra's _print_banner of e50647d, byte for byte, but the tagline's colour" \
-        || fail "full differs from the old banner beyond the tagline colour"
+    OLD_FULL="$(bash -c "$COLS_SET; source \"\$0\"; _print_banner" "$T/old-banner.sh")"
+    NEW_RAW="$(bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh")"
+    [[ "$(head -n 9 <<<"$OLD_FULL" | od -c)" == "$(head -n 9 <<<"$NEW_RAW" | od -c)" ]] \
+        && pass "full = deploy-infra's _print_banner of e50647d, byte for byte, down to the wordmark (the tagline rows changed on 10 Nov 2026)" \
+        || fail "full differs from the old banner above the tagline"
 else
     pass "no git history (e50647d): the old banner comparison is skipped"
 fi
-bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh" | grep -qF $'\033[0;36m Controlled Environment Agriculture for Medicinal Plants and Fungi' \
-    && pass "the tagline is cyan" || fail "the tagline is not cyan"
+FULL_COL="$(bash -c "$COLS_SET; source \"\$0\"; medcea_banner full" "$REPO/infra/lib-banner.sh")"
+grep -qF $'\033[0;36m Controlled Environment Agriculture ' <<<"$FULL_COL" && grep -qF $'\033[0;36m for Medicinal Plants and Fungi ' <<<"$FULL_COL" \
+    && pass "the tagline is cyan, on two rows" || fail "the tagline is not cyan on two rows"
+# The mushroom starts on the same column on every row: the title field is 44 columns, so a
+# longer title row pushed it right (the stem printed after the tagline until 10 Nov 2026).
+bash -c 'NC=; GREEN=; YELLOW=; source "$0"; medcea_banner full' "$REPO/infra/lib-banner.sh" \
+    | awk 'length($0) == 0 { next } length($0) < 65 || substr($0, 64, 2) != "  " { bad = 1 } END { exit bad }' \
+    && pass "full: every row keeps the title within its 44 columns, so the mushroom is aligned" \
+    || fail "full: a title row overruns its column and shifts the mushroom"
 cat >"$T/compact.want" <<'COMPACT'
   .--.  .--.    __  __          _  ___  ___    _      .-~~~~~-.
  (    \/    )  |  \/  | ___  __| |/ __|| __|  /_\   .' o  .  O '.
@@ -1814,7 +1819,8 @@ ptyrun $'1|\n' pipe 1 24 80 $'q\n'
 if [[ "$OUT" == *"=== NO PTY"* ]]; then
     pass "no pseudo-terminal: the logo's terminal cases are skipped"
 else
-    has   "plain mode at a terminal: the full logo once" "Controlled Environment Agriculture for Medicinal Plants and Fungi"
+    has   "plain mode at a terminal: the full logo once" "Controlled Environment Agriculture"
+    has   "plain mode at a terminal: the tagline's second row" " for Medicinal Plants and Fungi"
     [[ "$(grep -c 'Controlled Environment Agriculture' <<<"$OUT")" == 1 ]] && pass "only once" || fail "the logo more than once"
     ptyrun $'0|6\n1|\n1|\n' pty 1 40 100 ''
     rc_is "a large terminal: quits with 0" 0

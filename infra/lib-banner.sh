@@ -36,6 +36,9 @@ _medcea_banner_full() {
         $'   \\        /'
         $'    \\______/'
     )
+    # Every title row fits the 44-column title field (the printf below): a longer row
+    # pushes the mushroom to the right on that row (the stem printed after the tagline,
+    # until 10 Nov 2026), so the tagline is split over two rows, as in compact.
     local -a title=(
         ''
         ''
@@ -45,8 +48,8 @@ _medcea_banner_full() {
         $'| |  | ||  __/| (_| || |___ | |___  / ___ \\'
         $'|_|  |_| \\___| \\__,_| \\____||_____|/_/   \\_\\'
         ''
-        $' Controlled Environment Agriculture for Medicinal Plants and Fungi'
-        ''
+        $' Controlled Environment Agriculture'
+        $' for Medicinal Plants and Fungi'
     )
     local -a mush=(
         ''
@@ -66,7 +69,7 @@ _medcea_banner_full() {
     echo ""
     for i in "${!plant[@]}"; do
         pc="$GREEN"; (( i >= 7 )) && pc="$YELLOW"        # leaves / pot
-        tc="$B$GREEN"; [[ "${title[$i]}" == *Medicinal* ]] && tc="$CY"
+        tc="$B$GREEN"; (( i >= 8 )) && tc="$CY"             # wordmark / tagline
         mc="$RD"; (( i >= 7 )) && mc="$NC"; (( i == 9 )) && mc="$GREEN"  # cap / stem / grass
         printf " ${pc}%-16s${NC}  ${tc}%-44s${NC}  ${mc}%s${NC}\n" "${plant[$i]}" "${title[$i]}" "${mush[$i]}"
     done
