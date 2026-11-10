@@ -438,6 +438,7 @@
 <li>Write a note (required to refuse) and click <strong>Confirm</strong> or <strong>Refuse</strong>.</li>
 <li>Decisions that acted at once (deactivations, narrowings) appear under <strong>To review</strong>. Click <strong>Mark reviewed</strong> after checking them.</li>
 </ol>
+<p>A red banner at the top of the Decisions tab, "Keycloak differs from the decisions", lists every account whose state in Keycloak the record does not explain: a role no confirmed decision gives, an account enabled while its grant waits, a failed compensation, and (since 9 November 2026) an enabled account that no access request, decision or status change names at all and that <code>./deploy-infra.sh</code> did not create or record ("… is enabled, but no access request, decision or status change records it (not a seeded account)"). The health check's <strong>Account drift</strong> counts the same list every 10 minutes, without names.</p>
 <p>You cannot check a decision that you made, or one about your own account. The page says why when that is the case.</p>
 
 <h4>E-mail settings and templates (admin)</h4>
@@ -460,7 +461,7 @@
 </ul>
 The snapshot never changes afterwards.</li>
 <li>Read the review, including <strong>Unexplained at the time of the review</strong>.</li>
-<li>Optionally write a note and click <strong>Sign off</strong>. Signing off cannot be undone, and it accepts any unexplained roles listed.</li>
+<li>Optionally write a note and click <strong>Sign off</strong>. Signing off cannot be undone, and it accepts any unexplained roles listed, until the next review is signed off (that review no longer lists them, so they count again unless a decision explains them). It does not accept unrecorded accounts: only accounts <code>./deploy-infra.sh</code> seeded are exempt; any other account needs an access request and its decision, or removal.</li>
 </ol>
 
 <h3 id="apps-policy">Access Policy</h3>

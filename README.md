@@ -543,10 +543,12 @@ A change to the git skeleton that gives any role more access is refused by every
 deploy until it goes through the same approval (`apply.sh --propose-skeleton`).
 Every step is an event in a hash-chained history (`iam_policy.history`), waivers
 carry a review date, and the health check proves the result: the policy version
-and its waivers (`iampolicy`), the history (`iamchain`), the compiled artefacts
-(`iamartefacts`), the route table each service pod loaded (`iamloaded`), the
-database grants (`iamgrants`), the realm's signing keys and token claims (`jwks`,
-`kcscopes`) and the network policies (`iamnetpol`).
+and its waivers (`iampolicy`), the history (`iamchain`) and its head against the
+newest backup (`iamanchor`), the compiled artefacts (`iamartefacts`), the route
+table each service pod loaded (`iamloaded`), the database grants (`iamgrants`)
+and catalog (`iamcatalog`), the realm's signing keys and token claims (`jwks`,
+`kcscopes`), the network policies (`iamnetpol`) and Keycloak's accounts against
+the account record (`iamdrift`).
 
 The full procedure, the screens and the refusals are in the platform manual,
 chapter **Getting access and roles** → **Changing the access policy**
