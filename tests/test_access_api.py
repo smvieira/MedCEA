@@ -12,6 +12,7 @@ own parse_request/do_* (BaseHTTPRequestHandler.handle_one_request on in-memory f
     python3 tests/test_access_api.py
 """
 import contextlib
+import datetime
 import importlib.util
 import io
 import json
@@ -137,7 +138,7 @@ class World:
             us = [dict(u) for u in self.users.values()]
             if 'username' in q:
                 us = [u for u in us if u['username'] == q['username'][0]]
-            return 200, us, {}
+            return 200, self.page(us, q), {}
         if seg[:1] == ['users'] and len(seg) >= 2:
             uid = seg[1]
             if uid not in self.users:
@@ -169,10 +170,17 @@ class World:
         if seg[:1] == ['roles'] and len(seg) == 2:
             return 200, {'name': seg[1], 'id': seg[1]}, {}
         if seg[:1] == ['roles'] and seg[2:] == ['users']:
-            return 200, [dict(self.users[u]) for u, rs in self.maps.items() if seg[1] in rs and u in self.users], {}
+            return 200, self.page([dict(self.users[u]) for u, rs in self.maps.items() if seg[1] in rs and u in self.users],
+                                  q), {}
         if seg == ['events']:
             return 200, [], {}
         raise AssertionError('fake Keycloak: unhandled %s %s' % (method, path))
+
+    @staticmethod
+    def page(items, q):
+        """Keycloak's first/max (a list call without them gets everything, as before)."""
+        first = int(q.get('first', ['0'])[0])
+        return items[first:first + int(q['max'][0])] if 'max' in q else items[first:]
 
     def kc_writes(self):
         return [e for e in self.events if e[0] == 'kc' and e[1] != 'GET']
@@ -336,7 +344,9 @@ class Enforcement(Base):
         self.assertEqual(self.call('GET', '/api/me')[0], 503)
         self.assertEqual(self.call('POST', '/api/users/%s/role' % S, {'role': 'qa'})[0], 503)
         status, body = self.call('GET', '/healthz')
+        drift = body.pop('drift')                # Phase 5, G6: counts only (DriftReport)
         self.assertEqual((status, body), (200, {'ok': True, 'access_version': '2.7', 'enforce_always': True}))
+        self.assertIsNone(drift['computed_at'])
 
     def test_check_exception_and_missing_table_keep_healthz(self):
         self.check_error = RuntimeError('boom')
@@ -1388,6 +1398,210 @@ class ReviewFixes(Base):
         # a record after the sign-off replaces what the review accepted
         self.assertEqual(self.drift([(S, 'operator', 1), (S, 'operator', 9)], (snap, 5)), [('sam', 'engineer')])
 
+
+
+# ── Phase 5, G6: the background drift report (counts only on the admin /healthz) ──
+U1, U2, U3, U4, U5, U6, U7 = ('bbbbbbbb-0000-4000-8000-00000000000%d' % i for i in range(1, 8))
+
+
+class DriftReport(Base):
+    """compute_drift's unrecorded_account kind and its seeded exemption, the paged
+    Keycloak lists, and the thread's published report (no names, read-only)."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved = (API.KC_LIST_CEILING, API.KC_PAGE, dict(API._drift))
+
+    def tearDown(self):
+        API.KC_LIST_CEILING, API.KC_PAGE, saved = self._saved
+        API._drift.clear()
+        API._drift.update(saved)
+        super().tearDown()
+
+    def realm(self):
+        """alice (admin, recorded), sam (unrecorded), seedy (seeded by sub), byname (a
+        seed fact without a sub), off (disabled, unrecorded), a service account, acked
+        (listed as unrecorded by the latest signed-off review: still drift, owner decision
+        of 9 Nov 2026), obs (seeded by an `observed` backfill as engineer, later observed
+        with admin too: admin stays unexplained)."""
+        self.w.user(A, 'alice', roles=['admin'], person='pA')
+        self.w.user(U1, 'sam', roles=[])
+        self.w.user(U2, 'seedy', roles=['qa'])
+        self.w.user(U3, 'byname', roles=[])
+        self.w.user(U4, 'off', enabled=False)
+        self.w.user(U5, 'service-account-access')
+        self.w.users[U5]['serviceAccountClientId'] = 'access'
+        self.w.user(U6, 'acked')
+        self.w.user(U7, 'obs', roles=['admin', 'engineer'])
+        self.w.on('UNION SELECT keycloak_user_id', [(A,)])
+        self.w.on("event = 'account_seeded'", [(U2, 'seedy'), (U7, 'obs'), (None, 'byname'), ('', 'ghost')])
+        self.w.on("payload ->> 'role'", [(U2, 'created', 'qa', None), (U7, 'observed', 'engineer', None),
+                                         (U7, 'observed', 'admin,engineer', None), (None, 'created', 'admin', None)])
+        self.w.on('FROM iam.access_review', [(json.dumps({'drift': [
+            {'kind': 'unrecorded_account', 'user_id': U6, 'username': 'acked'}]}), None)])
+        self.w.on('FROM iam.user_status_history', [(A, 'admin', None, 1)])
+
+    def kinds(self, drift, kind):
+        return sorted(x['username'] for x in drift if x['kind'] == kind)
+
+    def test_unrecorded_account_and_the_seeded_exemption(self):
+        self.realm()
+        users = list(self.w.users.values())
+        drift = API.compute_drift(self.w.connect().cursor(), users, dict(self.w.maps))
+        # sub match for seedy, username only for the fact without a sub; disabled and
+        # service accounts never count; a signed-off review exempts nobody
+        self.assertEqual(self.kinds(drift, 'unrecorded_account'), ['acked', 'sam'])
+        # the role deploy-infra gave a seeded account explains it (a fresh install is not
+        # red); a role only a later `observed` fact shows does not
+        self.assertEqual(sorted((x['username'], x['role']) for x in drift if x['kind'] == 'unexplained_role'),
+                         [('obs', 'admin')])
+        roles_sql = next(e[1] for e in self.w.events if e[0] == 'sql' and "payload ->> 'role'" in e[1])
+        self.assertIn("IN ('created', 'observed')", roles_sql)
+        self.assertIn('ORDER BY event_id', roles_sql)
+        self.assertNotIn('service-account-access', json.dumps(drift))
+        seed = next(e for e in self.w.events if e[0] == 'sql' and 'account_seeded' in e[1] and '= ANY' in e[1])
+        self.assertEqual(seed[2], (['created', 'person_id_set', 'observed'],))
+        self.assertTrue(any(e[0] == 'sql' and e[1] == 'RELEASE SAVEPOINT seeded_read' for e in self.w.events))
+
+    def test_a_review_never_accepts_an_unrecorded_account(self):
+        # Owner decision of 9 Nov 2026: seeded accounts only. Two reviews in a row, both
+        # signed off, the first listing acked as unrecorded: acked counts after each.
+        self.realm()
+        for snap in ({'drift': [{'kind': 'unrecorded_account', 'user_id': U6, 'username': 'acked'}]}, {'drift': []}):
+            self.w.on('FROM iam.access_review', [(json.dumps(snap), None)])
+            drift = API.compute_drift(self.w.connect().cursor(), list(self.w.users.values()), dict(self.w.maps))
+            self.assertIn('acked', self.kinds(drift, 'unrecorded_account'))
+
+    def test_a_later_record_replaces_the_seeded_role(self):
+        # a status history row after the seed (the role changed through a decision) replaces it
+        self.realm()
+        seeded = datetime.datetime(2026, 11, 1, tzinfo=datetime.timezone.utc)
+        self.w.on("payload ->> 'role'", [(U2, 'created', 'qa', seeded)])
+        self.w.on('FROM iam.user_status_history', [(A, 'admin', None, 1),
+                                                   (U2, 'engineer', seeded + datetime.timedelta(days=1), 2)])
+        drift = API.compute_drift(self.w.connect().cursor(), list(self.w.users.values()), dict(self.w.maps))
+        self.assertIn(('seedy', 'qa'), [(x['username'], x['role']) for x in drift if x['kind'] == 'unexplained_role'])
+
+    def test_a_record_of_any_kind_is_enough(self):
+        self.realm()
+        self.w.on('UNION SELECT keycloak_user_id', [(A,), (U1,), (U6,)])
+        drift = API.compute_drift(self.w.connect().cursor(), list(self.w.users.values()), dict(self.w.maps))
+        self.assertEqual(self.kinds(drift, 'unrecorded_account'), [])
+        sql = next(e[1] for e in self.w.events if e[0] == 'sql' and 'UNION SELECT keycloak_user_id' in e[1])
+        for t in ('iam.access_request', 'iam.account_decision', 'iam.user_status_history'):
+            self.assertIn(t, sql)
+
+    def test_an_unreadable_history_exempts_nobody(self):
+        self.realm()
+        self.w.on("event = 'account_seeded'", error=PgErr('42501', 'permission denied for table history'))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            drift = API.compute_drift(self.w.connect().cursor(), list(self.w.users.values()), dict(self.w.maps))
+        self.assertEqual(self.kinds(drift, 'unrecorded_account'), ['acked', 'byname', 'obs', 'sam', 'seedy'])
+        self.assertTrue(any(e[0] == 'sql' and e[1] == 'ROLLBACK TO SAVEPOINT seeded_read' for e in self.w.events))
+        # nor does it explain a role: seedy's qa is unexplained again
+        self.assertTrue(any(e[0] == 'sql' and e[1] == 'ROLLBACK TO SAVEPOINT seeded_roles_read' for e in self.w.events))
+        self.assertIn('seedy', self.kinds(drift, 'unexplained_role'))
+        self.assertIn('42501', out.getvalue())
+        self.assertFalse(API._seed_read['ok'])
+
+    def test_paging_reads_past_the_old_2000_cap(self):
+        API.KC_PAGE = 3
+        for i in range(8):
+            self.w.user('cccccccc-0000-4000-8000-%012d' % i, 'u%d' % i, roles=['operator'])
+        users, cut = API.kc_users()
+        self.assertEqual((len(users), cut), (8, False))
+        calls = [e[2] for e in self.w.events if e[0] == 'kc' and e[2].startswith('/users')]
+        self.assertEqual(calls, ['/users?briefRepresentation=false&first=%d&max=3' % f for f in (0, 3, 6)])
+        self.assertEqual(len(API.role_members()), 8)
+        self.assertFalse(any('max=2000' in e[2] for e in self.w.events if e[0] == 'kc'))
+
+    def test_the_ceiling_truncates(self):
+        API.KC_PAGE, API.KC_LIST_CEILING = 3, 5
+        for i in range(9):
+            self.w.user('cccccccc-0000-4000-8000-%012d' % i, 'u%d' % i, roles=['operator'])
+        with contextlib.redirect_stdout(io.StringIO()):
+            users, cut = API.kc_users()
+            cutr = []
+            held = API.role_members(cutr)
+        self.assertEqual((len(users), cut, len(held), cutr), (5, True, 5, [True]))
+        # exactly at the ceiling is not truncated
+        API.KC_LIST_CEILING = 9
+        self.assertEqual([len(x) if isinstance(x, list) else x for x in API.kc_users()], [9, False])
+
+    def test_the_published_report_has_counts_only(self):
+        self.realm()
+        API._COMP_FAILED.append({'user_id': U2, 'username': 'seedy', 'decision_id': 7, 'kind': 'compensation_failed',
+                                 'detail': 'seedy: undo failed', 'role': 'qa', 'held': True})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(API.refresh_drift(now=1000.0))
+        d = API.drift_status()
+        self.assertEqual(d['counts'], {'unexplained_role': 1, 'enabled_while_pending': 0, 'compensation_failed': 1,
+                                       'unrecorded_account': 2})
+        self.assertEqual((d['computed_at'], d['accounts'], d['truncated'], d['live_error'], d['seeded_readable']),
+                         (1000.0, 7, False, None, True))
+        status, body = self.call('GET', '/healthz')
+        self.assertEqual((status, body['drift']['counts']), (200, d['counts']))
+        text = json.dumps(body)
+        for u in self.w.users.values():
+            for leak in (u['username'], u['id'], u['email']):
+                self.assertNotIn(leak, text)
+        # read-only: no Keycloak write, the session READ ONLY and rolled back, never committed
+        self.assertEqual(self.w.kc_writes(), [])
+        sql = [e for e in self.w.events if e[0] in ('sql', 'commit', 'rollback')]
+        self.assertEqual(sql[0][:2], ('sql', 'SET TRANSACTION READ ONLY'))
+        self.assertEqual(sql[-1], ('rollback',))
+        self.assertNotIn(('commit',), sql)
+
+    def test_a_failure_keeps_the_last_counts_and_names_nobody(self):
+        self.realm()
+        with contextlib.redirect_stdout(io.StringIO()):
+            API.refresh_drift(now=1000.0)
+        self.w.fail.append(('GET', r'/users', API.KCError(503, 'user sam unavailable'), False))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertFalse(API.refresh_drift(now=2000.0))
+        d = API.drift_status()
+        self.assertEqual((d['computed_at'], d['attempted_at'], d['live_error']),
+                         (1000.0, 2000.0, 'Keycloak answered HTTP 503'))
+        self.assertEqual(d['counts']['unrecorded_account'], 2)
+        self.assertIn('user sam unavailable', out.getvalue())          # the pod log has the detail
+        self.w.fail[:] = []
+        self.w.on('FROM iam.account_decision WHERE kind NOT IN', error=PgErr('42501', 'denied for sam'))
+        with contextlib.redirect_stdout(io.StringIO()):
+            API.refresh_drift(now=3000.0)
+        self.assertEqual(API.drift_status()['live_error'], 'database refused (SQLSTATE 42501)')
+        self.assertEqual(API._drift_error('Keycloak', OSError('x')), 'Keycloak unreachable (OSError)')
+
+    def test_the_interval_has_a_floor_and_a_failure_retries_sooner(self):
+        self.assertEqual([API.drift_interval(v) for v in (None, '', '5', '900', 'ten')], [600, 600, 60, 900, 600])
+        slept, results = [], iter([True, False])
+
+        class Stop(Exception):
+            pass
+
+        def sleep(n):
+            slept.append(n)
+            if len(slept) == 2:
+                raise Stop
+
+        orig = API.refresh_drift
+        API.refresh_drift = lambda: next(results)
+        try:
+            with self.assertRaises(Stop):
+                API.drift_loop(600, sleep)
+        finally:
+            API.refresh_drift = orig
+        self.assertEqual(slept, [600, 120])
+
+    def test_healthz_reads_nothing_live(self):
+        status, body = self.call('GET', '/healthz')
+        self.assertEqual(status, 200)
+        self.assertEqual(self.w.events, [])
+        self.assertEqual(body['drift']['interval_s'], API.DRIFT_INTERVAL)
+        # the thread is started by the entry point only, never by importing the module
+        src = open(os.path.join(REPO, 'apps', 'access', 'access-api.py')).read()
+        main = src[src.index("if __name__ == '__main__':"):]
+        self.assertIn("threading.Thread(target=drift_loop, name='drift', daemon=True).start()", main)
+        self.assertEqual(src.count('target=drift_loop'), 1)
 
 
 class ReviewSwitches(unittest.TestCase):

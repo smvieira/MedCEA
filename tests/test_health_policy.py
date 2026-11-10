@@ -1047,12 +1047,18 @@ class Wiring(unittest.TestCase):
         i = names.index("Database grants")
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
-        # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5's iamloaded, jwks, kcscopes, iamnetpol
-        self.assertEqual(len(lines), 61)
+        # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5's iamloaded, jwks, kcscopes, iamnetpol;
+        # 64 with Phase 5 round 2's iamdrift, iamanchor, iamcatalog
+        self.assertEqual(len(lines), 64)
         types = [l.split("|")[1].strip() for l in lines]
-        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol"):
+        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog"):
             self.assertEqual(types.count(t), 1, t)
         self.assertEqual(types[types.index("iamartefacts") + 1], "iamloaded")
+        self.assertEqual(types[types.index("iampending") + 1], "iamdrift")
+        self.assertEqual(types[types.index("iamchain") + 1], "iamanchor")
+        self.assertEqual(types[types.index("iamgrants") - 1], "iamcatalog")
+        for t in ("iamanchor", "iamcatalog"):
+            self.assertEqual(lines[types.index(t)].split("|")[2].strip(), "$POSTGRES_DB", t)
         # Superset stage B: one more check, SKIP until Superset is deployed (stage C: none more)
         row = [l for l in lines if l.split("|")[0].strip() == "Superset roles"]
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["supersetroles", "$NAMESPACE"])
@@ -1064,7 +1070,7 @@ class Wiring(unittest.TestCase):
         self.assertIn("${CYAN}iamartefacts${NC}", src)
         self.assertIn('supersetroles) check_supersetroles "$name" "$target" ;;', src)
         self.assertIn("${CYAN}supersetroles${NC}", src)
-        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol"):
+        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog"):
             self.assertRegex(src, r"(?m)^        %s\)\s+check_%s \"\$name\" \"\$target\" ;;$" % (t, t))
             self.assertIn("${CYAN}%s${NC}" % t, src)
         # the state document's directory is removed at exit

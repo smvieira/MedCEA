@@ -439,23 +439,69 @@ def person_of(u):
     return attr_person(u) or u['id']
 
 
-def role_users(role):
+# Keycloak lists are read in pages (first/max) up to a hard ceiling (Phase 5, G6; until
+# then one call with max=2000, which silently dropped the rest). A list longer than the
+# ceiling is cut there and reported as truncated, never read without end.
+KC_PAGE = 500
+KC_LIST_CEILING = 10000
+
+
+def kc_paged(path, ceiling=None, page=None):
+    """(items, truncated) of a Keycloak list endpoint, read in pages of `page`; at most
+    `ceiling` items, truncated when there were more. Items are de-duplicated by id (a
+    user created between two pages can shift the order)."""
+    ceiling, page = ceiling or KC_LIST_CEILING, page or KC_PAGE
+    sep = '&' if '?' in path else '?'
+    out, seen, first = [], set(), 0
+    while True:
+        want = min(page, ceiling + 1 - first)
+        _, batch, _ = kc('GET', '%s%sfirst=%d&max=%d' % (path, sep, first, want))
+        batch = batch or []
+        for x in batch:
+            k = x.get('id') if isinstance(x, dict) else None
+            if k is None or k not in seen:
+                seen.add(k)
+                out.append(x)
+        first += len(batch)
+        if len(batch) < want or first > ceiling:
+            break
+    return out[:ceiling], len(out) > ceiling or first > ceiling
+
+
+def kc_users():
+    """(every realm account, full representation, truncated)."""
+    users, truncated = kc_paged('/users?briefRepresentation=false')
+    if truncated:
+        log('Keycloak lists more than %d accounts: only the first %d are read' % (KC_LIST_CEILING, KC_LIST_CEILING))
+    return users, truncated
+
+
+def is_service_account(u):
+    return (u.get('username') or '').startswith('service-account-') or bool(u.get('serviceAccountClientId'))
+
+
+def role_users(role, truncated=None):
     """Accounts holding `role` directly (full representations); [] for a role the realm
-    does not have."""
+    does not have. A list cut at the ceiling is logged, and noted in `truncated` (a
+    one-element list) when given."""
     try:
-        _, users, _ = kc('GET', '/roles/%s/users?briefRepresentation=false&max=2000' % urllib.parse.quote(role))
+        users, cut = kc_paged('/roles/%s/users?briefRepresentation=false' % urllib.parse.quote(role))
     except KCError as e:
         if e.status == 404:
             return []
         raise
-    return users or []
+    if cut:
+        log('Keycloak lists more than %d holders of %s: only the first %d are read' % (KC_LIST_CEILING, role, KC_LIST_CEILING))
+        if truncated is not None:
+            truncated[:] = [True]
+    return users
 
 
-def role_members():
-    """user id -> platform roles held directly (one call per role, not per user)."""
+def role_members(truncated=None):
+    """user id -> platform roles held directly (one paged list per role, not per user)."""
     held = {}
     for role in platform_roles():
-        for u in role_users(role):
+        for u in role_users(role, truncated):
             held.setdefault(u['id'], []).append(role)
     return held
 
@@ -1341,8 +1387,7 @@ def list_decisions(q, who):
             applicants = {r[0]: row_dict(('request_id', 'email', 'first_name', 'last_name', 'organisation',
                                           'registered_at', 'requested_role'), r) for r in cur.fetchall()}
         try:
-            users = [u for u in (kc('GET', '/users?max=2000&briefRepresentation=false')[1] or [])
-                     if not u['username'].startswith('service-account-')]
+            users = [u for u in kc_users()[0] if not is_service_account(u)]
             held = role_members()
             drift, live_error = compute_drift(cur, users, held), None
         except (KCError, OSError) as e:
@@ -1397,16 +1442,30 @@ def _when(ts):
     return ts if ts.tzinfo else ts.replace(tzinfo=datetime.timezone.utc)
 
 
-def expected_roles(cur):
+_UNREAD = object()
+
+
+def signed_off_review(cur):
+    """(snapshot, signed_off_at) of the latest signed-off access review, or (None, None)."""
+    cur.execute('SELECT snapshot, signed_off_at FROM iam.access_review WHERE signed_off_at IS NOT NULL'
+                ' ORDER BY signed_off_at DESC LIMIT 1')
+    row = cur.fetchone()
+    if not row:
+        return None, None
+    return (json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})), row[1]
+
+
+def expected_roles(cur, review=_UNREAD):
     """account -> the platform roles the record says it holds now (§5.8). Records, in
     time order: a status history row that ends with a role (every applied or
     confirmed grant, role change and activation writes one, and so did the role
     changes before 2.7) sets the expected role; an access request approved before 2.7
     (no decision) sets its granted role; the latest signed-off access review adds the
     roles it listed as unexplained — the qa person signing it off accepted them — and
-    nothing else. A later record replaces what an earlier one said, so a role
+    nothing else; and (Phase 5 round 2) the role deploy-infra gave an account it
+    seeded (seeded_roles). A later record replaces what an earlier one said, so a role
     narrowed away and re-added outside the decisions is unexplained again."""
-    ev = []
+    ev = [(sub, _when(at), 0, 0, 'set', roles) for sub, at, roles in seeded_roles(cur)]
     cur.execute('SELECT keycloak_user_id, to_role, occurred_at, event_id FROM iam.user_status_history'
                 ' WHERE to_role IS NOT NULL')
     ev += [(uid, _when(at), 0, eid or 0, 'set', {to}) for uid, to, at, eid in cur.fetchall()]
@@ -1414,19 +1473,91 @@ def expected_roles(cur):
                 " WHERE r.status = 'approved' AND r.keycloak_user_id IS NOT NULL AND r.granted_role IS NOT NULL"
                 " AND NOT EXISTS (SELECT 1 FROM iam.account_decision d WHERE d.request_id = r.request_id)")
     ev += [(uid, _when(at), 0, 0, 'set', {g}) for uid, g, at in cur.fetchall()]
-    cur.execute('SELECT snapshot, signed_off_at FROM iam.access_review WHERE signed_off_at IS NOT NULL'
-                ' ORDER BY signed_off_at DESC LIMIT 1')
-    row = cur.fetchone()
-    if row:
-        snap = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+    snap, signed_at = signed_off_review(cur) if review is _UNREAD else review
+    if snap is not None:
         acks = {}
         for x in snap.get('drift') or []:
             if x.get('kind') == 'unexplained_role' and x.get('user_id') and x.get('role'):
                 acks.setdefault(x['user_id'], set()).add(x['role'])
-        ev += [(uid, _when(row[1]), 1, 0, 'ack', roles) for uid, roles in acks.items()]
+        ev += [(uid, _when(signed_at), 1, 0, 'ack', roles) for uid, roles in acks.items()]
     out = {}
     for uid, _, _, _, what, roles in sorted(ev, key=lambda e: e[1:4]):
         out[uid] = (out.get(uid, set()) | roles) if what == 'ack' else set(roles)
+    return out
+
+
+# The seed facts that exempt an account from unrecorded_account (owner decision of 9 Nov
+# 2026, Phase 5 G6): deploy-infra's account_seeded facts on the policy history.
+SEED_FACTS = ('created', 'person_id_set', 'observed')
+
+
+def recorded_accounts(cur):
+    """Keycloak ids the record knows at all: an access request, an account decision or a
+    status history row names them."""
+    cur.execute('SELECT keycloak_user_id FROM iam.access_request WHERE keycloak_user_id IS NOT NULL'
+                ' UNION SELECT keycloak_user_id FROM iam.account_decision'
+                ' UNION SELECT keycloak_user_id FROM iam.user_status_history')
+    return {r[0] for r in cur.fetchall() if r and r[0]}
+
+
+def seeded_accounts(cur):
+    """(subs, usernames) of the accounts deploy-infra seeded (account_seeded, fact created,
+    person_id_set or observed). Matched by sub; by username only for a fact without a sub
+    (deploy-infra records none such: _seed_fact needs the sub). None when the history
+    cannot be read (a savepoint keeps the caller's transaction usable)."""
+    cur.execute('SAVEPOINT seeded_read')
+    try:
+        cur.execute("SELECT payload ->> 'sub', payload ->> 'username' FROM iam_policy.history"
+                    " WHERE event = 'account_seeded' AND payload ->> 'fact' = ANY(%s)", (list(SEED_FACTS),))
+        rows = cur.fetchall()
+    except Exception as e:                       # noqa: BLE001 — older grants, or no 008b yet
+        cur.execute('ROLLBACK TO SAVEPOINT seeded_read')
+        _seed_read['ok'] = False
+        log('the seeded accounts could not be read (%s): none is exempt from unrecorded_account'
+            % (sqlstate(e)[0] or type(e).__name__))
+        return None
+    cur.execute('RELEASE SAVEPOINT seeded_read')
+    _seed_read['ok'] = True
+    subs = {sub for sub, _ in rows if sub}
+    names = {name for sub, name in rows if not sub and name}
+    return subs, names
+
+
+def seeded_roles(cur):
+    """[(sub, at, roles)]: the platform roles deploy-infra gave the accounts it seeded,
+    from its account_seeded facts, so a fresh install's seeded qa and engineer accounts
+    are not unexplained_role before any decision or review (Phase 5 round 2). Only the
+    role deploy-infra itself assigned counts: a `created` fact, or for an account with
+    none, its FIRST `observed` fact (the one-time backfill of QA_USER/ENGINEER_USER/ADMIN_USER as
+    they were). A later `observed` fact is deploy-infra noticing a changed role, which
+    would otherwise launder a role added in Keycloak outside the record at the next
+    deploy-infra run: it explains nothing. `observed` stores the roles sorted and
+    comma-joined. Matched by sub only. [] when the history cannot be read (a savepoint
+    keeps the caller's transaction usable)."""
+    cur.execute('SAVEPOINT seeded_roles_read')
+    try:
+        cur.execute("SELECT payload ->> 'sub', payload ->> 'fact', payload ->> 'role', at FROM iam_policy.history"
+                    " WHERE event = 'account_seeded' AND payload ->> 'fact' IN ('created', 'observed')"
+                    " AND coalesce(payload ->> 'role', '') <> '' ORDER BY event_id")
+        rows = cur.fetchall()
+    except Exception as e:                       # noqa: BLE001 — older grants, or no 008b yet
+        cur.execute('ROLLBACK TO SAVEPOINT seeded_roles_read')
+        log('the seeded roles could not be read (%s): none explains a role'
+            % (sqlstate(e)[0] or type(e).__name__))
+        return []
+    cur.execute('RELEASE SAVEPOINT seeded_roles_read')
+    created = {sub for sub, fact, _, _ in rows if sub and fact == 'created'}
+    out, seen = [], set()
+    for sub, fact, role, at in rows:
+        if not sub:
+            continue
+        if fact == 'observed' and (sub in created or sub in seen):
+            continue
+        if fact == 'observed':
+            seen.add(sub)
+        roles = {r.strip() for r in (role or '').split(',') if r.strip()}
+        if roles:
+            out.append((sub, at, roles))
     return out
 
 
@@ -1434,12 +1565,23 @@ def compute_drift(cur, users, held):
     """Accounts whose Keycloak state the record does not explain (§5.8): a platform role
     that is not the one the latest record gives the account (expected_roles); an
     enabled account whose latest decision is a waiting grant or activation; a failed
-    compensation, until Keycloak no longer shows it."""
-    expected = expected_roles(cur)
+    compensation, until Keycloak no longer shows it; and (Phase 5, G6) an enabled
+    account the record does not name at all (unrecorded_account: no access request,
+    account decision or status history row), unless deploy-infra seeded it
+    (seeded_accounts; owner decision of 9 Nov 2026: nothing else is exempt, a signed-off
+    review does not accept one). Service accounts are never drift."""
+    review = signed_off_review(cur)
+    expected = expected_roles(cur, review)
     cur.execute("SELECT DISTINCT ON (keycloak_user_id) keycloak_user_id, decision_id, kind, status"
                 " FROM iam.account_decision WHERE kind NOT IN ('unit_assign', 'unit_remove', 'zone_assign', 'zone_remove')"
                 " ORDER BY keycloak_user_id, decision_id DESC")
     latest = {r[0]: r[1:] for r in cur.fetchall()}
+    users = [u for u in users if not is_service_account(u)]
+    recorded = None
+    if any(u.get('enabled') for u in users):
+        recorded = recorded_accounts(cur)
+        seeded = seeded_accounts(cur) or (set(), set())
+        recorded |= {u['id'] for u in users if u['id'] in seeded[0] or u['username'] in seeded[1]}
     out = []
     for u in users:
         for role in held.get(u['id'], []):
@@ -1452,6 +1594,10 @@ def compute_drift(cur, users, held):
             out.append({'user_id': u['id'], 'username': u['username'], 'kind': 'enabled_while_pending',
                         'decision_id': last[0],
                         'detail': '%s is enabled while %s #%s waits for qa' % (u['username'], last[1], last[0])})
+        if u.get('enabled') and recorded is not None and u['id'] not in recorded:
+            out.append({'user_id': u['id'], 'username': u['username'], 'kind': 'unrecorded_account',
+                        'detail': '%s is enabled, but no access request, decision or status change records it'
+                                  ' (not a seeded account)' % u['username']})
     by_id = {u['id']: u for u in users}
 
     def still(c):
@@ -1467,6 +1613,113 @@ def compute_drift(cur, users, held):
         _COMP_FAILED[:] = [c for c in _COMP_FAILED if still(c)]
         out += [{k: v for k, v in c.items() if k not in ('held', 'enabled', 'person')} for c in _COMP_FAILED]
     return out
+
+
+# ── Drift report for the health check (Phase 5, G6) ──────────────────────────
+# A daemon thread computes compute_drift() every DRIFT_INTERVAL seconds with the service
+# account access-api already uses, and the Admin port's /healthz publishes COUNTS ONLY
+# (never a name, username, sub or e-mail), so health-check iamdrift reads them with one
+# kubectl exec and mints no token. The thread never writes: its database session is READ
+# ONLY and rolled back. A failure keeps the last counts and sets live_error (no names
+# either: the error's kind only; the pod log has the rest).
+DRIFT_KINDS = ('unexplained_role', 'enabled_while_pending', 'compensation_failed', 'unrecorded_account')
+DRIFT_INTERVAL_DEFAULT, DRIFT_INTERVAL_FLOOR, DRIFT_RETRY = 600, 60, 120
+
+
+def drift_interval(value):
+    """DRIFT_INTERVAL_SECONDS: default 600, never below 60 (Keycloak is read in full)."""
+    try:
+        n = int(value) if value not in (None, '') else DRIFT_INTERVAL_DEFAULT
+    except ValueError:
+        log('DRIFT_INTERVAL_SECONDS=%r is not a number: %d s' % (value, DRIFT_INTERVAL_DEFAULT))
+        n = DRIFT_INTERVAL_DEFAULT
+    return max(DRIFT_INTERVAL_FLOOR, n)
+
+
+DRIFT_INTERVAL = drift_interval(E.get('DRIFT_INTERVAL_SECONDS'))
+_drift_lock = threading.Lock()
+_drift = {'computed_at': None, 'attempted_at': None, 'accounts': None, 'counts': None,
+          'truncated': False, 'live_error': None, 'seeded_readable': None}
+_seed_read = {'ok': None}                        # the last seeded_accounts() read
+
+
+def drift_counts(drift):
+    counts = dict.fromkeys(DRIFT_KINDS, 0)
+    for x in drift or []:
+        if x.get('kind') in counts:
+            counts[x['kind']] += 1
+    return counts
+
+
+def _drift_error(stage, e):
+    """The published live_error: where it failed and the error's kind, no message text
+    (a Keycloak or database message can name an account)."""
+    if isinstance(e, KCError):
+        return '%s answered HTTP %s' % (stage, e.status)
+    code = sqlstate(e)[0]
+    if code:
+        return '%s refused (SQLSTATE %s)' % (stage, code)
+    if isinstance(e, (OSError, urllib.error.URLError)):
+        return '%s unreachable (%s)' % (stage, type(e).__name__)
+    return '%s failed (%s)' % (stage, type(e).__name__)
+
+
+def compute_drift_report():
+    """One computation: the drift counts of every non-service account (paged, up to the
+    ceiling), read-only. Raises with .stage set on failure."""
+    stage = 'Keycloak'
+    _seed_read['ok'] = None
+    try:
+        users, truncated = kc_users()
+        users = [u for u in users if not is_service_account(u)]
+        cut = []
+        held = role_members(cut)
+        stage = 'database'
+        con = db()
+        try:
+            cur = con.cursor()
+            cur.execute('SET TRANSACTION READ ONLY')
+            drift = compute_drift(cur, users, held)
+            con.rollback()
+        finally:
+            con.close()
+    except Exception as e:                       # noqa: BLE001
+        e.stage = stage
+        raise
+    return {'accounts': len(users), 'counts': drift_counts(drift), 'truncated': bool(truncated or cut),
+            'seeded_readable': _seed_read['ok']}
+
+
+def refresh_drift(now=None):
+    """Computes once and publishes; True on success. Never raises."""
+    t = time.time() if now is None else now
+    try:
+        rep = compute_drift_report()
+    except Exception as e:                       # noqa: BLE001
+        err = _drift_error(getattr(e, 'stage', 'access-api'), e)
+        log('drift report: %s: %r' % (err, e))
+        with _drift_lock:
+            _drift.update(attempted_at=t, live_error=err)
+        return False
+    with _drift_lock:
+        _drift.update(rep, computed_at=t, attempted_at=t, live_error=None)
+    return True
+
+
+def drift_status():
+    """What /healthz publishes: counts, times (epoch seconds), truncated, live_error."""
+    with _drift_lock:
+        d = dict(_drift)
+    d['counts'] = dict(d['counts']) if d['counts'] is not None else None
+    d['interval_s'] = DRIFT_INTERVAL
+    return d
+
+
+def drift_loop(interval=None, sleep=time.sleep):
+    interval = interval or DRIFT_INTERVAL
+    while True:
+        ok = refresh_drift()
+        sleep(interval if ok else min(interval, DRIFT_RETRY))
 
 
 # ── User Manager (admin) ──────────────────────────────────────────────────────
@@ -1582,8 +1835,7 @@ STATUS_COLS = ('event_id', 'keycloak_user_id', 'username', 'action', 'reason', '
 
 
 def list_users():
-    _, users, _ = kc('GET', '/users?max=2000&briefRepresentation=false')
-    users = [u for u in users or [] if not u['username'].startswith('service-account-')]
+    users = [u for u in kc_users()[0] if not is_service_account(u)]
     held = role_members()
     order = platform_roles()
     con = db()
@@ -1859,11 +2111,11 @@ def review_snapshot():
     """The service's part of the snapshot; iam.create_review adds the database's (units,
     pending decisions, decisions since, iam_db_roles, service_logins, the chain verdict)
     over any key of the same name, so the service cannot misreport them."""
-    _, users, _ = kc('GET', '/users?max=2000&briefRepresentation=false')
+    users, _ = kc_users()
     held = role_members()
     accounts = []
     for u in sorted(users or [], key=lambda u: u['username']):
-        if u['username'].startswith('service-account-'):
+        if is_service_account(u):
             continue
         accounts.append({'id': u['id'], 'username': u['username'], 'enabled': bool(u.get('enabled')),
                          'created': u.get('createdTimestamp'), 'role': ', '.join(own_roles(held.get(u['id'], []))) or None,
@@ -1879,7 +2131,7 @@ def review_snapshot():
     # a signed-off review explains the roles it lists here, and nothing it does not.
     con = db()
     try:
-        drift = compute_drift(con.cursor(), [u for u in users or [] if not u['username'].startswith('service-account-')],
+        drift = compute_drift(con.cursor(), [u for u in users or [] if not is_service_account(u)],
                               held)
     finally:
         con.close()
@@ -2161,7 +2413,9 @@ class Admin(Base):
     def do_GET(self):
         p = urllib.parse.urlparse(self.path)
         if p.path == '/healthz':
-            return self.send(200, {'ok': True, 'access_version': ACCESS_VERSION, 'enforce_always': True})
+            # drift: counts only (Phase 5, G6), read by health-check iamdrift
+            return self.send(200, {'ok': True, 'access_version': ACCESS_VERSION, 'enforce_always': True,
+                                   'drift': drift_status()})
         if p.path == '/':
             return self.page('admin.html')
         if p.path == '/api/me':
@@ -2282,5 +2536,7 @@ if __name__ == '__main__':
         sys.exit('KC_CLIENT_SECRET is empty — run ./deploy-infra.sh to create the access client')
     threading.Thread(target=serve, args=(Admin, 8081), daemon=True).start()
     threading.Thread(target=serve, args=(Profile, 8082), daemon=True).start()
+    threading.Thread(target=drift_loop, name='drift', daemon=True).start()
+    log('drift report: every %d s (DRIFT_INTERVAL_SECONDS), counts on the admin port\'s /healthz' % DRIFT_INTERVAL)
     log('listening: public :8080, admin :8081, profile :8082')
     serve(Public, 8080)

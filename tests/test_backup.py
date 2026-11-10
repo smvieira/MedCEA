@@ -426,6 +426,50 @@ class LibAge(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class LibChainHead(unittest.TestCase):
+    """backup_chain_head: what health-check iamanchor reads from a MANIFEST (Phase 5, G12)."""
+
+    def head(self, line, manifest=True):
+        d = tempfile.mkdtemp()
+        try:
+            if manifest:
+                write(os.path.join(d, "MANIFEST"), "# MedCEA backup x\n# namespace: medcea\n"
+                      + (line + "\n" if line is not None else "") + "# bytes\tsha256\tpath\n")
+            r = lib(f'backup_chain_head "{d}"')
+            return r.returncode, r.stdout.strip()
+        finally:
+            shutil.rmtree(d)
+
+    def test_the_job_s_own_lines(self):
+        h = "ab" * 32
+        self.assertEqual(self.head(f"# policy chain head (read before the dump): 41 {h} verify_chain=t"),
+                         (0, f"head 41 {h} t"))
+        self.assertEqual(self.head(f"# policy chain head (read before the dump): 7 {h} verify_chain=f"),
+                         (0, f"head 7 {h} f"))
+        for why in ("no iam_policy schema in medcea_db", "iam_policy.history is empty",
+                    "unexpected answer from psql", "psql exit 2: could not connect"):
+            self.assertEqual(self.head(f"# policy chain head: unavailable ({why})"), (0, f"unavailable ({why})"))
+
+    def test_nothing_else_passes_as_a_head(self):
+        self.assertEqual(self.head(None), (0, "none"))
+        self.assertEqual(self.head("", manifest=False)[0], 1)
+        for bad in ("# policy chain head (read before the dump): 41 ABAB verify_chain=t",
+                    "# policy chain head (read before the dump): x1 abab verify_chain=t",
+                    "# policy chain head (read before the dump): 41 abab verify_chain=t; rm -rf /",
+                    "# policy chain head (read before the dump): 41 abab"):
+            self.assertEqual(self.head(bad), (0, "unavailable (an unexpected chain head line in MANIFEST)"), bad)
+        rc, out = self.head("# policy chain head: unavailable (psql exit 2: $(id); `x` | y)")
+        self.assertEqual(rc, 0)
+        for c in "$`|;":
+            self.assertNotIn(c, out)
+
+    def test_it_reads_the_line_the_job_writes(self):
+        # the job's echo and the reader's pattern are the same text
+        job = read("apps/backup/backup-job.sh")
+        self.assertIn('echo "# policy chain head (read before the dump): $2 $3 verify_chain=$4"', job)
+        self.assertIn('echo "# policy chain head: unavailable (', job)
+
+
 class HealthCheck(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

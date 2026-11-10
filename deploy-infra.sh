@@ -1297,6 +1297,17 @@ except Exception:
 echo -e "${YELLOW}  Ensuring the first qa person and the first engineer...${NC}"
 _seed_person "${QA_USER:-}"       "${QA_EMAIL:-}"       "${QA_INITIAL_PASS:-}"       qa       "Quality Assurance"
 _seed_person "${ENGINEER_USER:-}" "${ENGINEER_EMAIL:-}" "${ENGINEER_INITIAL_PASS:-}" engineer "Automation Engineer"
+# Phase 5 round 2: the platform admin is a seeded account too. When this run created it
+# (and gave it admin, above), that is a created fact like the two above, so access-api's
+# drift report explains its role; an existing one gets the observed backfill below.
+if [[ "${_ADMIN_NEW:-0}" == 1 && -n "${ADMIN_USER:-}" && "$_SEED_CREATED" != *" $ADMIN_USER "* ]]; then
+    _SEED_CREATED+="$ADMIN_USER "
+    _seed_fact created "$ADMIN_USER" "$(_seed_user_json "$ADMIN_USER" | python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin)["id"])
+except Exception:
+    pass' 2>/dev/null || true)" admin ""
+fi
 # No enabled qa person: every account decision that waits for qa — the grant of a
 # new qa person included — can never be confirmed (IAM 2.7). Break-glass is a new
 # QA_USER (a person who never held an account here) and another run of this
@@ -1374,7 +1385,7 @@ done
 
 # IAM 4.2a: the seeded accounts on the policy record (account_seeded; design §14.4.12, OA-b).
 # The facts of this run (created, person_id_set) and, once the 4.2a database functions exist,
-# the one-time backfill of QA_USER and ENGINEER_USER as they are now (observed; recorded again
+# the one-time backfill of QA_USER, ENGINEER_USER and (Phase 5 round 2) ADMIN_USER as they are now (observed; recorded again
 # only when their role or person_id changes: the fact_id is the content hash). Each goes
 # through iam_policy._record as system:deploy (dba_record_event); without _system_as (no
 # database yet, no 008c, or the 4.1 bodies) they are queued in state/seed-facts.jsonl (under
@@ -1396,7 +1407,7 @@ if $_SEED_SYSAS; then
     _SEED_ROLES="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1])
 from compiler import model
 print(" ".join(model.load_defaults().roles))' "$SCRIPT_DIR/apps/iam" 2>/dev/null || true)"
-    for _su in "${QA_USER:-}" "${ENGINEER_USER:-}"; do
+    for _su in "${QA_USER:-}" "${ENGINEER_USER:-}" "${ADMIN_USER:-}"; do
         [[ -n "$_su" && "$_SEED_CREATED" != *" $_su "* ]] || continue
         _SU_JSON="$(_seed_user_json "$_su")"
         [[ -n "$_SU_JSON" ]] || continue

@@ -43,6 +43,9 @@ spec:
         # empty (back to the host; apps/access/deploy.sh)
         - {name: SIGNOUT_HUB, value: "${SIGNOUT_HUB}"}
         - {name: IAM_ENFORCE, value: "${IAM_ENFORCE}"}   # also in /iam/settings.json; covers a missing mount
+        # Phase 5 (G6): how often the drift report for health-check iamdrift is computed
+        # (seconds, at least 60; counts only, on the admin port's /healthz)
+        - {name: DRIFT_INTERVAL_SECONDS, value: "600"}
         envFrom:
         - secretRef: {name: access-secrets}
         readinessProbe:

@@ -84,6 +84,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         e.g. \$POSTGRES_DB   (iam_policy.verify_chain(); SKIP before migration 008a); WARN when"
     echo -e "         verify_chain() is not SECURITY DEFINER or iam_svc may not execute it (the Policy UI's History)"
     echo ""
+    echo -e "  ${CYAN}iamanchor${NC} the history chain's head anchored in the newest nightly backup (Phase 5): DATABASE"
+    echo -e "         the event the newest complete backup's MANIFEST names must be in iam_policy.history with"
+    echo -e "         the recorded hash (read-only psql). FAIL when it is missing or its hash differs; WARN"
+    echo -e "         without a readable backup or head, a backup over 48 h old, an unreadable database."
+    echo -e "         Not proof against a superuser who altered both the database and BACKUP_DIR"
+    echo ""
     echo -e "  ${CYAN}iamdbroles${NC} IAM_DB_ROLES (Phase 2): DATABASE"
     echo -e "         WARN while it is false (the database still serves the pre-policy grants),"
     echo -e "         so a default install does not print \"All checks passed\" — on purpose"
@@ -97,6 +103,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         medcea_auth.role_widening digest is drift too). SKIP only when the first ERROR is the missing"
     echo -e "         medcea.platform_setting or a missing medcea_auth function (migration 008b), never on a DETAIL;"
     echo -e "         under IAM_DB_ROLES=false a medcea table or view in no group is a WARN (I15's classification)"
+    echo ""
+    echo -e "  ${CYAN}iamcatalog${NC} the database catalog (Phase 5, tests/iam-db.sh's statements): DATABASE"
+    echo -e "         FAIL when an object in medcea, medcea_auth, iam_policy or iam is not owned by medcea_owner,"
+    echo -e "         a freeze/append-only trigger (or user_unit_audit_trg, commissioning_history_trg) is not"
+    echo -e "         ENABLE ALWAYS, or a medcea view lacks security_invoker (names the first five); WARN when"
+    echo -e "         the database cannot be read; SKIP before ./apps/database/deploy.sh"
     echo ""
     echo -e "  ${CYAN}iampolicy${NC} the applied access policy version (IAM 4.2a): DATABASE"
     echo -e "         SKIP before migration 008c or without kubectl; FAIL when PostgreSQL cannot be read,"
@@ -149,6 +161,14 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         SKIP before the approval functions exist (./apps/database/deploy.sh);"
     echo -e "         WARN on a pending change (commissioning proposal, log setting, review of"
     echo -e "         a commissioning end) waiting for over 7 days: Config UI → Approvals"
+    echo ""
+    echo -e "  ${CYAN}iamdrift${NC} Keycloak's accounts against the account record (Phase 5): NAMESPACE"
+    echo -e "         access-api computes the drift every 10 min and its admin /healthz gives counts only"
+    echo -e "         (read-only kubectl exec, no token, no names). FAIL on an unexplained platform role or a"
+    echo -e "         failed compensation; WARN on an account enabled while its grant waits for qa, an enabled"
+    echo -e "         account with no record that was not seeded, a result older than 30 min, a failed or"
+    echo -e "         truncated computation, a fresh pod, an access-api older than the report"
+    echo -e "         (./apps/access/deploy.sh); SKIP without access"
     echo ""
     echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
     echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
@@ -499,6 +519,97 @@ SQL
 }
 
 # =============================================================================
+# Check: the history chain's head is anchored outside the database (Phase 5, G12)
+# target: DATABASE. The anchor is the chain head the newest complete nightly backup
+# recorded in its MANIFEST (apps/backup/backup-job.sh chain_head, read before the dump;
+# backup_newest_ok and backup_chain_head of apps/backup/lib-backup.sh, as backupage reads
+# BACKUP_DIR: the account that deployed the backup owns it, mode 700, and nothing here uses
+# sudo). That event must still be in iam_policy.history with the recorded hash: one psql
+# as postgres in the PostgreSQL pod, read-only session, SQL on stdin, the event id (digits
+# only) a psql variable. FAIL when the event is missing (or the table) or its hash differs:
+# the history was cut or rewritten after the backup (or the database was restored from an
+# older backup). WARN when BACKUP_DIR, a complete backup, its MANIFEST or a head in it is
+# missing or unreadable, the newest backup is over 48 h old, the chain did not verify when
+# the backup ran, or the database cannot be read, and (no anchor yet) when the newest
+# backup completed before the chain's first event (h.at of the lowest event_id): a backup
+# of an earlier database, kept in BACKUP_DIR across a new install or --purge-data. It does
+# not prove what a superuser with host access did to both the database and BACKUP_DIR (one
+# who rebuilds the whole history with a newer first event gets this WARN, not a FAIL).
+# =============================================================================
+check_iamanchor() {
+    local name="$1" db="$2" max_h="${ANCHOR_MAX_H:-48}" dir newest bname ok_epoch rec kind id hash vc age h out exit_code=0 line got since genesis
+    dir="$(backup_dir)"
+    if [[ ! -d "$dir" ]]; then
+        _record WARN "$name" "no anchor: ${dir} (BACKUP_DIR) does not exist (./apps/backup/deploy.sh)"; return
+    fi
+    if [[ ! -r "$dir" || ! -x "$dir" ]]; then
+        _record WARN "$name" "no anchor: cannot read ${dir} (BACKUP_DIR, mode 700): run this as the account that ran ./apps/backup/deploy.sh"; return
+    fi
+    newest="$(backup_newest_ok "$dir")"
+    if [[ -z "$newest" ]]; then
+        _record WARN "$name" "no anchor: no complete backup in ${dir} yet (./apps/backup/backups.sh now)"; return
+    fi
+    bname="${newest%% *}"; ok_epoch="${newest#* }"
+    if ! rec="$(backup_chain_head "$dir/$bname")"; then
+        _record WARN "$name" "no anchor: cannot read the MANIFEST of backup ${bname}"; return
+    fi
+    case "$rec" in
+        none) _record WARN "$name" "no anchor: backup ${bname} records no chain head (a backup from before IAM 4.5)"; return ;;
+        unavailable*) _record WARN "$name" "no anchor: backup ${bname} could not read the chain head ${rec#unavailable }"; return ;;
+    esac
+    read -r kind id hash vc <<<"$rec"
+    age=$(( $(date -u +%s) - ok_epoch )); (( age < 0 )) && age=0; h=$(( age / 3600 ))
+    # The SQL comes from the here-document; the id goes in as psql variable anchor_id.
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|" -v "anchor_id=$1"' \
+        "$db" "$id" 2>&1 <<'SQL'
+SELECT pg_catalog.to_regclass('iam_policy.history') IS NOT NULL AS has_history \gset
+\if :has_history
+SELECT 'anchor', coalesce((SELECT h.hash FROM iam_policy.history h WHERE h.event_id = :anchor_id), '-'),
+       (SELECT count(*) FROM iam_policy.history h WHERE h.event_id > :anchor_id),
+       coalesce((SELECT floor(extract(epoch FROM h.at))::bigint::text FROM iam_policy.history h
+                 ORDER BY h.event_id LIMIT 1), '-');
+\else
+SELECT 'nohistory';
+\endif
+SQL
+) || exit_code=$?
+    line="$(grep -m1 -E '^(anchor\||nohistory$)' <<<"$out")"
+    if [[ $exit_code -ne 0 || -z "$line" ]]; then
+        _record WARN "$name" "cannot read iam_policy.history to compare with backup ${bname}: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"
+        return
+    fi
+    if [[ "$line" == nohistory ]]; then
+        _record FAIL "$name" "backup ${bname} anchors event ${id}, but ${db} has no iam_policy.history (dropped, or restored from before IAM 4.5)"
+        return
+    fi
+    IFS='|' read -r _ got since genesis <<<"$line"
+    # A backup completed before this chain's first event was written belongs to an earlier
+    # database (a new install, or --purge-data and a redeploy: BACKUP_DIR is kept on
+    # purpose). Its head says nothing about this chain: WARN until the next nightly backup.
+    # A restore from an older backup keeps the old first event, so it still FAILs below.
+    if [[ "$got" != "$hash" && "$genesis" =~ ^[0-9]+$ ]] && (( genesis > ok_epoch )); then
+        _record WARN "$name" "no anchor: the newest complete backup ${bname} predates this database (its first history event is newer; a new install or a purged database): no anchor until the next nightly backup"
+        return
+    fi
+    if [[ "$got" == "-" ]]; then
+        _record FAIL "$name" "event ${id}, the chain head backup ${bname} recorded, is missing from iam_policy.history: the history was cut after that backup (or restored from an older one)"
+    elif [[ "$got" != "$hash" ]]; then
+        _record FAIL "$name" "event ${id}'s hash is ${got:0:12}..., backup ${bname} recorded ${hash:0:12}...: the history was rewritten after that backup"
+    else
+        local warns=()
+        (( age > max_h * 3600 )) && warns+=("the newest complete backup ${bname} is ${h} h old (over ${max_h} h: ./apps/backup/backups.sh list)")
+        [[ "$vc" == f ]] && warns+=("the chain did not verify when backup ${bname} ran (verify_chain=f in its MANIFEST)")
+        if ((${#warns[@]})); then
+            local IFS=';'; _record WARN "$name" "event ${id} has the hash backup ${bname} recorded, but ${warns[*]}"
+        else
+            _record OK "$name" "event ${id} has the hash backup ${bname} recorded (${h} h old), ${since} event(s) since"
+        fi
+    fi
+}
+
+# =============================================================================
 # Check: IAM_DB_ROLES (Phase 2) — the mode the database records, against config.env
 # =============================================================================
 check_iamdbroles() {
@@ -602,6 +713,94 @@ check_iamgrants() {
         fi
     else
         _record FAIL "$name" "grant drift: $(grep -m1 -E 'ERROR|DETAIL' <<<"$out" | cut -c1-200)"
+    fi
+}
+
+# =============================================================================
+# Check: the database catalog's tamper-relevant properties (Phase 5, G14)
+# target: DATABASE. tests/iam-db.sh's catalog section checks these on the throwaway
+# fixture; here the same statements run on the platform database, one psql as postgres in
+# the PostgreSQL pod, read-only session, SQL on stdin. The decision statements (owner,
+# iamalways, invoker, always, unitalways, commalways) are tests/iam-db.sh's text word for
+# word (tests/test_health_phase5b.py CatalogParity); only the *names lines, which list the
+# first five offenders for the message, are this check's own. FAIL on any hit: an object in
+# medcea, medcea_auth, iam_policy or iam not owned by medcea_owner; a freeze or append-only
+# trigger of schema iam, an append-only/no-truncate trigger of medcea or iam_policy, or
+# user_unit_audit_trg / commissioning_history_trg not ENABLE ALWAYS (tgenabled 'A': an
+# ENABLE REPLICA session would skip it); a medcea view without security_invoker. Object names
+# are not secrets. WARN when the database cannot be read; SKIP before the database deploy
+# (no role medcea_owner or schema medcea). The fixture's trigger counts (7, 8, 14) are not
+# checked here: they pin the fixture's build, not a property of the live catalog.
+# =============================================================================
+check_iamcatalog() {
+    local name="$1" db="$2" out exit_code=0
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' "$db" 2>&1 <<'SQL'
+SELECT pg_catalog.to_regrole('medcea_owner') IS NOT NULL AND pg_catalog.to_regnamespace('medcea') IS NOT NULL AS has_owner,
+       pg_catalog.to_regnamespace('iam_policy') IS NOT NULL AS has_policy \gset
+\if :has_owner
+SELECT 'owner', count(*) FROM (
+    SELECT c.relowner AS o FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam') AND c.relkind IN ('r', 'v', 'm', 'p', 'S', 'f')
+    UNION ALL SELECT p.proowner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam')
+    UNION ALL SELECT nspowner FROM pg_namespace WHERE nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam')) x
+ WHERE o <> 'medcea_owner'::regrole;
+SELECT 'ownernames', coalesce(string_agg(x.n, ' ' ORDER BY x.n), '') FROM (SELECT y.n FROM (
+    SELECT c.relowner AS o, n.nspname || '.' || c.relname AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam') AND c.relkind IN ('r', 'v', 'm', 'p', 'S', 'f')
+    UNION ALL SELECT p.proowner, replace(p.oid::regprocedure::text, ' ', '') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam')
+    UNION ALL SELECT nspowner, 'schema:' || nspname FROM pg_namespace WHERE nspname IN ('medcea', 'medcea_auth', 'iam_policy', 'iam')) y
+ WHERE y.o <> 'medcea_owner'::regrole ORDER BY y.n LIMIT 5) x;
+SELECT 'iamalways', count(*) FILTER (WHERE t.tgenabled <> 'A'), count(*),
+       coalesce(string_agg(c.relname || '.' || t.tgname, ',') FILTER (WHERE t.tgenabled <> 'A'), '')
+  FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE c.relnamespace = to_regnamespace('iam') AND NOT t.tgisinternal AND (t.tgtype & 2) <> 0
+   AND c.relname IN ('account_decision', 'access_review', 'user_status_history', 'access_request_history', 'config_history');
+SELECT 'invoker', count(*) FROM pg_class c WHERE c.relnamespace = 'medcea'::regnamespace AND c.relkind = 'v'
+   AND NOT coalesce('security_invoker=true' = ANY (c.reloptions), false);
+SELECT 'invokernames', coalesce(string_agg(x.relname, ',' ORDER BY x.relname), '') FROM (SELECT c.relname FROM pg_class c
+ WHERE c.relnamespace = 'medcea'::regnamespace AND c.relkind = 'v'
+   AND NOT coalesce('security_invoker=true' = ANY (c.reloptions), false) ORDER BY c.relname LIMIT 5) x;
+\if :has_policy
+SELECT 'always', string_agg(c.relname || '.' || t.tgname, ',') FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE (t.tgname LIKE '%\_append\_only' OR t.tgname LIKE '%\_no\_truncate' OR t.tgname = 'schedule_retired_guard_trg')
+   AND t.tgenabled <> 'A'
+   AND c.relnamespace IN ('medcea'::regnamespace, 'iam_policy'::regnamespace);
+\endif
+SELECT 'unitalways', tgenabled FROM pg_trigger WHERE tgname = 'user_unit_audit_trg';
+SELECT 'commalways', tgenabled FROM pg_trigger WHERE tgname = 'commissioning_history_trg';
+\else
+SELECT 'nodb';
+\endif
+SQL
+) || exit_code=$?
+    if grep -qx nodb <<<"$out"; then
+        _record SKIP "$name" "no role medcea_owner or schema medcea in ${db} yet (./apps/database/deploy.sh)"; return
+    fi
+    _cat_get() { grep -m1 "^$1|" <<<"$out" | cut -d'|' -f2-; }
+    local owner invoker iam n_off n_all off_list always t hits=()
+    owner="$(_cat_get owner)"; invoker="$(_cat_get invoker)"; iam="$(_cat_get iamalways)"
+    if [[ $exit_code -ne 0 || ! "$owner" =~ ^[0-9]+$ || ! "$invoker" =~ ^[0-9]+$ || ! "$iam" =~ ^[0-9]+\|[0-9]+\| ]]; then
+        _record WARN "$name" "cannot read the catalog of ${db}: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"; return
+    fi
+    _cat_first5() { local IFS=,; local a; read -ra a <<<"$1"; local s="${a[*]:0:5}"; (( ${#a[@]} > 5 )) && s+=",..."; echo "$s"; }
+    (( owner > 0 )) && hits+=("${owner} object(s) not owned by medcea_owner: $(_cat_get ownernames)$( (( owner > 5 )) && echo ' ...')")
+    IFS='|' read -r n_off n_all off_list <<<"$iam"
+    (( n_off > 0 )) && hits+=("${n_off} iam freeze/append-only trigger(s) not ENABLE ALWAYS: $(_cat_first5 "$off_list")")
+    always="$(_cat_get always)"
+    [[ -n "$always" ]] && hits+=("append-only/no-truncate trigger(s) not ENABLE ALWAYS: $(_cat_first5 "$always")")
+    for t in unitalways:user_unit_audit_trg commalways:commissioning_history_trg; do
+        local v; v="$(_cat_get "${t%%:*}")"
+        [[ -n "$v" && "$v" != A ]] && hits+=("${t#*:} is tgenabled '${v}', not ENABLE ALWAYS")
+    done
+    (( invoker > 0 )) && hits+=("${invoker} medcea view(s) without security_invoker: $(_cat_get invokernames)$( (( invoker > 5 )) && echo ',...')")
+    if ((${#hits[@]})); then
+        local IFS=';'; _record FAIL "$name" "${hits[*]} (./apps/database/deploy.sh; then find who changed it)"
+    else
+        _record OK "$name" "every object owned by medcea_owner, ${n_all} iam and all append-only triggers ENABLE ALWAYS, every medcea view security_invoker"
     fi
 }
 
@@ -847,7 +1046,7 @@ else:
 # =============================================================================
 # Check: account decisions waiting for qa (IAM 2.7) — read-only, no Keycloak
 # target: DATABASE. Drift between Keycloak and the decisions is not computed here
-# (that would mint admin tokens): the User Manager's Decisions tab shows it.
+# (that would mint admin tokens): access-api computes it and check_iamdrift reads it.
 # =============================================================================
 check_iamdecisions() {
     local name="$1" db="$2" out exit_code=0
@@ -938,6 +1137,88 @@ SQL
         _record WARN "$name" "${stale} change(s) waiting for qa for over 7 days (oldest #${stale_id}; ${stale_comm} commissioning): Config UI → Approvals"
     else
         _record OK "$name" "${pending} change(s) waiting for qa, none older than 7 days"
+    fi
+}
+
+# =============================================================================
+# Check: account drift between Keycloak and the record (Phase 5, G6) — read-only
+# target: NAMESPACE. access-api computes compute_drift() in a background thread (every
+# DRIFT_INTERVAL_SECONDS, 600 by default) with its own service account and publishes
+# counts only on its Admin port's /healthz (answered before the access check). One bounded
+# `kubectl exec POD -c api -- python3 -c` per Running access pod GETs it on 127.0.0.1:8081;
+# no token is minted, nothing is written, and no name, username, sub or e-mail is printed
+# (the probe prints numbers and the error's kind only).
+# FAIL: compensation_failed > 0 (Keycloak wider than the database says) or
+# unexplained_role > 0 (a platform role no confirmed decision or signed-off review gives).
+# WARN: enabled_while_pending > 0, unrecorded_account > 0 (an enabled account with no
+# request, decision or status row that deploy-infra did not seed), the result older than
+# 30 min, live_error set, the account list truncated at the ceiling, the seeded accounts
+# unreadable, not computed yet (a fresh pod), an access-api that predates the report
+# (./apps/access/deploy.sh), a pod that cannot be read. SKIP: access not deployed.
+# =============================================================================
+check_iamdrift() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" rc=0 pods pod got n=0 pre
+    local state age accounts unexp ewp comp unrec trunc seeded interval err
+    local probs=() warns=() oks=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    pods="$(_running_pods "$ns" access)" || rc=$?
+    if [[ $rc -eq 3 ]]; then _record SKIP "$name" "access is not deployed (./apps/access/deploy.sh)"; return
+    elif [[ $rc -ne 0 ]]; then _record WARN "$name" "cannot read the access pods in $ns"; return
+    elif [[ -z "$pods" ]]; then _record WARN "$name" "no Running access pod: the drift report cannot be read"; return
+    fi
+    local probe='import json, re, time, urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=4) as r:
+        d = json.load(r)
+except Exception:
+    print("unreachable"); raise SystemExit
+x = d.get("drift")
+if not isinstance(x, dict):
+    print("predates"); raise SystemExit
+c = x.get("counts") if isinstance(x.get("counts"), dict) else {}
+num = lambda v: str(int(v)) if isinstance(v, (int, float)) and not isinstance(v, bool) else "-"
+at = x.get("computed_at")
+err = re.sub(r"[^A-Za-z0-9 ().:_-]", "", str(x.get("live_error") or ""))[:80]
+print("ok" if isinstance(at, (int, float)) and c else "notyet",
+      num(time.time() - at) if isinstance(at, (int, float)) else "-", num(x.get("accounts")),
+      *(num(c.get(k)) for k in ("unexplained_role", "enabled_while_pending", "compensation_failed", "unrecorded_account")),
+      int(x.get("truncated") is True), {True: "1", False: "0"}.get(x.get("seeded_readable"), "-"),
+      num(x.get("interval_s")), err)'
+    local npods; npods="$(wc -w <<<"$pods")"
+    for pod in $pods; do
+        n=$((n + 1))
+        pre=""; (( npods > 1 )) && pre="pod $pod: "
+        got="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" "$pod" -c api -- python3 -c "$probe" 2>/dev/null | tail -n1)" || got=""
+        read -r state age accounts unexp ewp comp unrec trunc seeded interval err <<<"$got"
+        case "$state" in
+            ok) ;;
+            predates) warns+=("${pre}this access-api predates the drift report: ./apps/access/deploy.sh"); continue ;;
+            notyet)
+                if [[ -n "$err" ]]; then warns+=("${pre}drift not computed yet; its last attempt failed: $err")
+                else warns+=("${pre}drift not computed yet (the access pod started recently; every ${interval:-?} s)"); fi
+                continue ;;
+            unreachable) warns+=("${pre}access-api's admin /healthz does not answer in pod $pod"); continue ;;
+            *) warns+=("cannot read the drift report in pod $pod"); continue ;;
+        esac
+        if ! [[ "$age" =~ ^[0-9]+$ && "$unexp" =~ ^[0-9]+$ && "$ewp" =~ ^[0-9]+$ && "$comp" =~ ^[0-9]+$ && "$unrec" =~ ^[0-9]+$ ]]; then
+            warns+=("cannot read the drift report in pod $pod"); continue
+        fi
+        (( comp > 0 ))  && probs+=("${pre}${comp} failed compensation(s): Keycloak is wider than the record (User Manager → Decisions)")
+        (( unexp > 0 )) && probs+=("${pre}${unexp} platform role(s) no confirmed decision or signed-off review explains (User Manager → Decisions)")
+        (( ewp > 0 ))   && warns+=("${pre}${ewp} account(s) enabled while their grant or activation waits for qa")
+        (( unrec > 0 )) && warns+=("${pre}${unrec} enabled account(s) with no request, decision or status record and not seeded: review them (User Manager → Users)")
+        (( age > 1800 )) && warns+=("${pre}the drift was computed $((age / 60)) min ago (over 30 min)")
+        [[ -n "$err" ]] && warns+=("${pre}the last drift computation failed: $err")
+        [[ "$trunc" == 1 ]] && warns+=("${pre}Keycloak's account list was cut at access-api's ceiling: the counts are incomplete")
+        [[ "$seeded" == 0 ]] && warns+=("${pre}the seeded accounts could not be read: none is exempt")
+        oks+=("${pre}${accounts} accounts: ${unexp} unexplained roles, ${comp} failed compensations, ${ewp} enabled while pending, ${unrec} unrecorded; computed ${age} s ago (every ${interval} s)")
+    done
+    if ((${#probs[@]})); then
+        local IFS=';'; _record FAIL "$name" "${probs[*]}${warns:+;${warns[*]}}"
+    elif ((${#warns[@]})); then
+        local IFS=';'; _record WARN "$name" "${warns[*]}"
+    else
+        local IFS=';'; _record OK "$name" "${oks[*]}"
     fi
 }
 
@@ -2278,12 +2559,15 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         pvc)  check_pvc  "$name" "$target" ;;
         juju) check_juju "$name" "$target" ;;
         iamchain) check_iamchain "$name" "$target" ;;
+        iamanchor)  check_iamanchor "$name" "$target" ;;
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
+        iamcatalog) check_iamcatalog "$name" "$target" ;;
         iampolicy)    check_iampolicy "$name" "$target" ;;
         iamartefacts) check_iamartefacts "$name" "$target" ;;
         iamdecisions) check_iamdecisions "$name" "$target" ;;
         iampending)   check_iampending "$name" "$target" ;;
+        iamdrift)     check_iamdrift "$name" "$target" ;;
         dbclients)  check_dbclients "$name" ;;
         postgrest)  check_postgrest "$name" "$target" ;;
         iamenforce)   check_iamenforce "$name" "$target" ;;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # apps/backup/lib-backup.sh — read the nightly backups in BACKUP_DIR from the host.
-# Sourced by health-check.sh (check backupage) and apps/backup/backups.sh. Read-only.
+# Sourced by health-check.sh (checks backupage, iamanchor) and apps/backup/backups.sh. Read-only.
 #
 #   backup_dir                     BACKUP_DIR as config.env sets it (default
 #                                  /var/backups/$PROJECT_NAME)
@@ -13,6 +13,12 @@
 #                                  WARN beyond, FAIL beyond BACKUP_FAIL_H (72). Without
 #                                  any OK, the CronJob's age stands in, and SKIP while
 #                                  it is younger than the WARN limit (the first night).
+#   backup_chain_head DIR/NAME     the access policy's chain head MANIFEST records (Phase 5,
+#                                  health-check iamanchor): "head EVENT_ID HASH VERIFY" (VERIFY
+#                                  t or f) when the line is well formed; "unavailable REASON"
+#                                  when the job could not read it; "none" without the line (a
+#                                  backup from before IAM 4.5); status 1 when MANIFEST cannot
+#                                  be read. Only digits and lowercase hex pass as id and hash.
 #
 # A folder is complete only with OK in it, written last by the job (backup-job.sh);
 # a folder without OK is a run that failed or is still running.
@@ -74,4 +80,19 @@ backup_age_status() {
         return
     fi
     echo "$status|newest complete backup ${name:-?} is ${h} h old (over ${limit} h: ./apps/backup/backups.sh list; microk8s kubectl -n ${NAMESPACE:-medcea} get jobs -l app=medcea-backup)"
+}
+
+backup_chain_head() {
+    local m="$1/MANIFEST" line id hash vc rest
+    [[ -f "$m" && -r "$m" ]] || return 1
+    line="$(grep -m1 '^# policy chain head' "$m" 2>/dev/null)" || { echo none; return 0; }
+    if [[ "$line" =~ ^#\ policy\ chain\ head\ \(read\ before\ the\ dump\):\ ([0-9]+)\ ([0-9a-f]+)\ verify_chain=([tf])$ ]]; then
+        id="${BASH_REMATCH[1]}"; hash="${BASH_REMATCH[2]}"; vc="${BASH_REMATCH[3]}"
+        echo "head $id $hash $vc"
+    elif [[ "$line" == "# policy chain head: unavailable"* ]]; then
+        rest="${line#\# policy chain head: unavailable}"; rest="${rest# }"
+        echo "unavailable $(printf '%s' "${rest:0:160}" | tr -c '[:alnum:] ().:_/-' ' ')"
+    else
+        echo "unavailable (an unexpected chain head line in MANIFEST)"
+    fi
 }

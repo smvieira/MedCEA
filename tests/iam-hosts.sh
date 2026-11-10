@@ -156,8 +156,10 @@ check_grafana() {
     fi
 
     local dep_time pod_time
-    # the spec's last write, not the controller's status updates
-    dep_time="$($KUBECTL get deployment grafana -n "$NAMESPACE" -o json 2>/dev/null | python3 -c '
+    # the spec's last write, not the controller's status updates (--show-managed-fields:
+    # kubectl 1.21 and later leave managedFields out of -o json without it, which made
+    # dep_time empty and this comparison always pass; health-check's round-1 fix)
+    dep_time="$($KUBECTL get deployment grafana -n "$NAMESPACE" -o json --show-managed-fields 2>/dev/null | python3 -c '
 import json, sys
 try:
     mf = json.load(sys.stdin)["metadata"].get("managedFields", [])
@@ -638,9 +640,11 @@ while IFS= read -r line; do
     fi
 
     # The chart mounts the config; a pod older than its last write runs the old gate.
-    cfg_time="$({ $KUBECTL get configmap "$release" -n "$NAMESPACE" \
+    # --show-managed-fields: kubectl get drops managedFields from its printed objects
+    # without it (the same fix as the Grafana Deployment's time above).
+    cfg_time="$({ $KUBECTL get configmap "$release" -n "$NAMESPACE" --show-managed-fields \
                     -o jsonpath='{range .metadata.managedFields[*]}{.time}{"\n"}{end}'
-                  $KUBECTL get configmap "$page_cm" -n "$NAMESPACE" \
+                  $KUBECTL get configmap "$page_cm" -n "$NAMESPACE" --show-managed-fields \
                     -o jsonpath='{range .metadata.managedFields[*]}{.time}{"\n"}{end}' 2>/dev/null
                 } | sort | tail -1)"
     pod_time="$($KUBECTL get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$release" \
