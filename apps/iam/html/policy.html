@@ -204,7 +204,9 @@ const REFUSALS = [
   [/^a note is required/, () => 'Write a note.'],
   [/^your access changed since you signed in/, () => 'Your access changed since you signed in. Reload the page.'],
   [/^approve access-policy versions in the Policy UI/, () => 'This request did not come through the Policy UI\'s sign-in. Reload the page and try again.'],
-  [/^confirmation needs IAM_POSTGREST_JWT and IAM_DB_ROLES/, () => 'Confirming is not possible on this platform yet (IAM_POSTGREST_JWT and IAM_DB_ROLES must be true). Ask the administrator.'],
+  // policy_api.py: '<confirmation|approvals> need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true' (503)
+  [/^confirmation need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true/, () => 'Confirming is not possible on this platform yet (IAM_POSTGREST_JWT and IAM_DB_ROLES must be true). Ask the administrator.'],
+  [/^approvals need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true/, () => 'Approving is not possible on this platform yet (IAM_POSTGREST_JWT and IAM_DB_ROLES must be true). Ask the administrator.'],
   // IAM 4.4: the author functions (new_draft, save_entry, submit, withdraw)
   [/^a reason is required/, () => 'Write a reason.'],
   [/^no policy version is applied yet/, () => 'No policy version is applied on this host yet: the host operator runs ./apps/iam/apply.sh --bootstrap first.'],

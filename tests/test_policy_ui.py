@@ -397,6 +397,10 @@ LEADS_APPROVER = ("approvals are made by a person signed in through the API, not
 LEADS_IAM_API = ("the diff you approved is not the one the Policy service computes now",
                  "version % fails the checker now", "version % changed while it was checked",
                  "only a change or skeleton version has an approval diff", "version % widens role %, which you hold")
+# the 503s policy_api.py builds while IAM_POSTGREST_JWT or IAM_DB_ROLES is false (test_switch_refusals_*)
+SWITCH_REFUSALS = ("confirmation need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true",
+                   "approvals need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true",
+                   "approvals need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true (the database refused: permission denied for function approve_policy)")
 
 
 def sql_between(text, start, end):
@@ -437,6 +441,24 @@ class Sources(unittest.TestCase):
             with self.subTest(lead=lead):
                 pat = r"".join(re.escape(x) if x != "%" else r"(?:%[sdr]|\{[^}]*\}|'\s*\+[^+]+\+\s*')" for x in re.split(r"(%)", lead))
                 self.assertRegex(api, pat, lead)
+
+    def test_switch_refusals_are_the_apis(self):
+        """The 503 for confirm/dispute/approve/return while a switch is off is built from parts."""
+        api = read(API)
+        self.assertIn("('confirmation' if verb in ('confirm', 'dispute') else 'approvals')", api)
+        self.assertIn("+ ' need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true')", api)
+        self.assertIn("'approvals need IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true (the database refused: %s)'", api)
+
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_switch_refusals_are_translated(self):
+        """E28 step 4 meets this text: friendlyRefusal must answer it in words, not with the raw text."""
+        samples = SWITCH_REFUSALS
+        got = run_node("[" + ", ".join("friendlyRefusal(%s)" % json.dumps(x) for x in samples) + "]")
+        for src, text in zip(samples, got):
+            self.assertNotEqual(src, text, src)
+        self.assertIn("Confirming is not possible", got[0])
+        self.assertIn("Approving is not possible", got[1])
+        self.assertIn("Approving is not possible", got[2])
 
     @unittest.skipUnless(NODE, "node is not installed")
     def test_every_lead_is_translated(self):
