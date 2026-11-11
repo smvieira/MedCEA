@@ -15,4 +15,13 @@
 <tr><td>1</td><td>31 Oct 2026</td><td><code>a9639b7</code></td><td>First edition. Describes the platform as built through IAM phases 0, 1 and 2 up to step 2.6, deployed in report-only mode: all eleven roles offered, run logs compressed and never deleted, Q-tables retired rather than deleted, exports limited to the person's export groups and logged, operators limited to their assigned units. <code>IAM_ENFORCE</code> is still off at this edition.</td></tr>
 </tbody>
 </table></div>
+<h3 id="revisions-installs">Installs</h3>
+<p>A reinstall starts a new database and Keycloak realm, so records cited with an earlier date belong to the install that made them (see <a href="#compliance-test-accounts">test accounts</a>).</p>
+<div class="table-wrap"><table>
+<thead><tr><th>From</th><th>To</th><th>Release</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>11 Nov 2026</td><td>now</td><td><code>v0.5.0</code> (<code>0726640</code>)</td><td>Fresh install (<code>./install.sh --uninstall-all</code>, then <code>./install.sh</code>; the platform CA kept), exercise <a href="#training-e28">E28</a>. Described by edition 9 (10 November 2026) and the changes since; no new edition.</td></tr>
+<tr><td>Oct 2026</td><td>11 Nov 2026</td><td>up to <code>v0.4.0</code>, then later commits</td><td>Upgraded in place on 1 November 2026 to v0.4.0, not reinstalled, then updated in place with later commits; editions 1 to 9 were written on it.</td></tr>
+</tbody>
+</table></div>
 </section>
