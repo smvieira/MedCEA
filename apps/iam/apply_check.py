@@ -601,6 +601,14 @@ def closure(roles, role):
     return out
 
 
+def barred_approvers(roles, added):
+    """The roles whose holders may not approve a skeleton version (byte order): the role, or
+    one it includes, gains reach (`added` = explain.gate's, `_system` and other `_` keys
+    left out). --propose-skeleton prints them; the approval rule refuses them."""
+    widened = {r for r in added if not r.startswith("_")}
+    return sorted((r for r in roles if closure(roles, r) & widened), key=source._bytes)
+
+
 def propose(state, git, by_sub, by_person, reason, commit, version):
     """apply.sh --propose-skeleton's step 4 (design §14.7.6): (rc, lines, sql). rc 1 refuses
     (lines say why), 0 builds the diff document of skeleton version `version` and the one
@@ -634,8 +642,7 @@ def propose(state, git, by_sub, by_person, reason, commit, version):
     skel = {"from": acc["digest"], "to": git_digest, "sections": explain.sections(acc_skel, git_skel)}
     doc = explain.diff_document("skeleton", int(version), int(state["version"]), entries_digest, p_old, p_new, skeleton=skel)
     diff_bytes, diff_digest = explain.diff_bytes(doc), explain.diff_digest(doc)   # source.canonical (§14.7.3)
-    widened = {r for r in g["added"] if not r.startswith("_")}
-    barred = sorted((r for r in (body.get("roles") or {}) if closure(body["roles"], r) & widened), key=source._bytes)
+    barred = barred_approvers(body.get("roles") or {}, g["added"])
     lines = [f"skeleton version {version}: skeleton {git_digest[:12]} (commit {commit}) over the accepted "
              f"{acc['digest'][:12]}, with the entries of applied version {state['version']}; it adds:"]
     lines += [l for l in explain.gate_message(g).splitlines() if l.startswith("  ")]

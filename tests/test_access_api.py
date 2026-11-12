@@ -55,8 +55,7 @@ TABLE = {
         'GET /api/users': {'group': 'iam_users', 'levels': ['K'], 'roles': {'admin': None}},
         'POST /api/decisions/<id>/confirm': {'group': 'iam_users', 'levels': ['A'], 'roles': {'qa': None, 'superqa': None}},
         'POST /api/decisions/<id>/withdraw': {'group': 'iam_users', 'levels': ['K'], 'roles': {'admin': None}},
-        'GET /api/users/<id>/units': {'group': 'zones', 'levels': ['R', 'K'],
-                                      'roles': {'admin': None, 'auditor': None, 'qa': None, 'superqa': None}},
+        'GET /api/users/<id>/units': {'group': 'zones', 'levels': ['K'], 'roles': {'admin': None}},
         'POST /api/users/<id>/units': {'group': 'zones', 'levels': ['K'], 'roles': {'admin': None}},
         'GET /api/config-history': {'group': 'audit_histories', 'levels': ['R'],
                                     'roles': {'auditor': None, 'qa': None, 'qp': None, 'superqa': None}},
@@ -1098,8 +1097,10 @@ def under_lock(world, change, row):
 
 # ── units of an operator (IAM units UI, commit B) ─────────────────────────────
 class Units(Base):
-    """GET/POST /api/users/<id>/units: zones R/K, iam.record_unit_decision with the
-    signed-in admin as the maker; an assignment needs an enabled operator with a person_id."""
+    """GET/POST /api/users/<id>/units: zones K (admin only: owner decision of 12 Nov 2026,
+    since qa could not approve a version widening its own reach), iam.record_unit_decision
+    with the signed-in admin as the maker; an assignment needs an enabled operator with a
+    person_id."""
     UNITS = 'FROM medcea.cea_unit u LEFT JOIN LATERAL'
 
     def setUp(self):
@@ -1128,7 +1129,7 @@ class Units(Base):
                                (4, 'U4', False, 13, 'unit_remove', 'applied', 'alice', at),
                                (5, 'U5', True, 14, 'unit_assign', 'confirmed', 'alice', at),
                                (6, 'U6', False, None, None, None, None, None)])
-        for who in (ADMIN, QA, AUDITOR):
+        for who in (ADMIN,):
             self.routed(who)
             status, body = self.call('GET', self.path)
             self.assertEqual(status, 200, (who['username'], body))
@@ -1248,17 +1249,20 @@ class Units(Base):
                                    headers={'Origin': 'https://evil.test'})[0], 403)
         self.assertEqual(self.w.events, [])
 
-    def test_qa_may_read_but_not_change(self):
-        self.routed(QA)
-        self.assertEqual(self.post()[0], 403)
-        self.assertEqual(self.w.events, [])
+    def test_qa_and_auditor_may_neither_read_nor_change(self):
+        """Admin only (12 Nov 2026): qa sees unit decisions in the Decisions tab instead."""
+        for who in (QA, AUDITOR):
+            self.routed(who)
+            self.assertEqual(self.call('GET', self.path)[0], 403, who['username'])
+            self.assertEqual(self.post()[0], 403, who['username'])
+            self.assertEqual(self.w.events, [])
 
     def test_me_capabilities(self):
-        for who, write in ((ADMIN, True), (QA, False), (AUDITOR, False)):
+        for who, allowed in ((ADMIN, True), (QA, False), (AUDITOR, False)):
             self.as_(who)
             can = self.call('GET', '/api/me')[1]['can']
-            self.assertIs(can['units'], write, who['username'])
-            self.assertIs(can['units_read'], True, who['username'])
+            self.assertIs(can['units'], allowed, who['username'])
+            self.assertIs(can['units_read'], allowed, who['username'])
         self.as_(dict(ADMIN, roles=['engineer']))
         can = self.call('GET', '/api/me')[1]['can']
         self.assertEqual((can['units'], can['units_read']), (False, False))

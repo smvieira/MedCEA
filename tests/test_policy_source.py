@@ -50,9 +50,9 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
   PhaseUnitsBDelta  against PRE_UB (32ae560, commit A): the policy of the User Manager's
                    units (zones gains iam.record_unit_decision and GET/POST
                    /api/users/<id>/units): skeleton-gate --against-git 32ae560 says widening
-                   with exactly access_svc's EXECUTE, admin's two routes and qa's and auditor's
-                   GET; no other role's reach, the matrix untouched, the checker clean, only
-                   the route table and the grants forms move
+                   with exactly access_svc's EXECUTE and admin's two routes (qa and auditor
+                   unchanged; qa may approve it); no other role's reach, the matrix
+                   untouched, the checker clean, only the route table and the grants forms move
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -2477,10 +2477,12 @@ class PhaseUnitsADelta(unittest.TestCase):
 class PhaseUnitsBDelta(unittest.TestCase):
     """The User Manager's units, commit B (12 Nov 2026): the policy. Group zones gains
     iam.record_unit_decision (K, svc_access only) and the access routes
-    GET/POST /api/users/<id>/units ([R, K] and K); svc_access's ceiling on zones gains K.
-    Against PRE_UB (commit A): the skeleton gate says widening with exactly access_svc's
-    EXECUTE in system reach, admin's two routes (under qa_dual_control) and qa's and
-    auditor's GET route; no other role's reach moves; the matrix is commit A's; the checker
+    GET/POST /api/users/<id>/units (both K: admin only, owner decision of 12 Nov 2026, since
+    qa could not approve a version that widens its own or auditor's reach); svc_access's
+    ceiling on zones gains K. Against PRE_UB (commit A): the skeleton gate says widening
+    with exactly access_svc's EXECUTE in system reach and admin's two routes (under
+    qa_dual_control); no other role's reach moves (qa and auditor unchanged); qa may
+    approve it; the matrix is commit A's; the checker
     passes on commit A's rows (the proposal's precondition); and exactly the declared
     artefacts move (the route table and the grants forms), every other one compiling byte
     for byte as commit A's cli.py does."""
@@ -2489,9 +2491,7 @@ class PhaseUnitsBDelta(unittest.TestCase):
     ROUTE_POST = ["route", "access", "POST /api/users/<id>/units"]
     FUNCTION = "iam.record_unit_decision(text,text,text,text,integer,text)"
     SYSTEM = [["svc", "access_svc", "function", FUNCTION, "EXECUTE"]]
-    PERSONS = {"admin": [ROUTE_GET + [["qa_dual_control"]], ROUTE_POST + [["qa_dual_control"]]],
-               "auditor": [ROUTE_GET + [None]],
-               "qa": [ROUTE_GET + [None]]}
+    PERSONS = {"admin": [ROUTE_GET + [["qa_dual_control"]], ROUTE_POST + [["qa_dual_control"]]]}
     CHANGED = {"routes"}   # plus every grants- form
 
     @classmethod
@@ -2545,6 +2545,29 @@ class PhaseUnitsBDelta(unittest.TestCase):
         self.assertEqual(g["verdict"], "widening")
         self.assertEqual(g["added"], self.expected_added())
         self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+
+    def test_qa_may_approve_the_proposal(self):
+        """apply_check.barred_approvers, the list --propose-skeleton prints as "no one holding
+        these roles may approve it": admin (and any role including it) only, never qa or
+        auditor, so a qa person can approve the skeleton version."""
+        import apply_check
+        roles = self.p.data["roles"]
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))   # as propose() reads it
+        barred = apply_check.barred_approvers(roles, g["added"])
+        self.assertIn("admin", barred)
+        self.assertNotIn("qa", barred)
+        self.assertNotIn("auditor", barred)
+        self.assertEqual(barred, sorted((r for r in roles if "admin" in apply_check.closure(roles, r)),
+                                        key=source._bytes))
+        # the two checks that refuse an approver agree: the UI approve (the diff document's
+        # roles[r].added) and apply.sh N's person_widening_problems (model.widening_between)
+        p_old, p_new, *_ = apply_check._composed(self.a.data, self.p.data, self.rows)
+        diff_roles = explain.diff(p_old, p_new)["roles"]
+        for r in ("qa", "auditor"):
+            with self.subTest(r):
+                self.assertFalse((diff_roles.get(r) or {}).get("added"))
+                self.assertFalse(model.widening_between(p_old, p_new, r))
+        self.assertTrue(model.widening_between(p_old, p_new, "admin"))
 
     def test_no_other_role_reach_moves(self):
         composed = model.Policy(source.compose(source.skeleton(self.p.data), self.rows))

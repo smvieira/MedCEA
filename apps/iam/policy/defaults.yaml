@@ -1208,7 +1208,7 @@ resource_groups:
       - type: api
         service: access
         routes:
-          "GET /api/users/<id>/units": [R, K]
+          "GET /api/users/<id>/units": K
           "POST /api/users/<id>/units": K
       - {type: infra, object: "apps/iam/units.sh assign/remove --by <admin>: the host path and break-glass (the host operator, under medcea_lock; an assignment waits for qa as an iam.account_decision, as one made in the User Manager does)"}
 

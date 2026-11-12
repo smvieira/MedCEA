@@ -2076,7 +2076,7 @@ def set_user_person(user_id, body, who, role):
     return 202, {'status': dec['status'], 'decision': dec}
 
 
-# ── Units of an operator (IAM units UI; zones K, read at R) ──────────────────
+# ── Units of an operator (IAM units UI; zones K, admin only) ─────────────────
 # One row per unit with whether the account holds it and its latest unit decision for
 # (user, unit) — units.sql's rule, and list_decisions' in_effect: an assigned unit whose
 # latest unit decision is a waiting unit_assign is in effect before the check.
