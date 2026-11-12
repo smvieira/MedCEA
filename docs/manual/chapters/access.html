@@ -93,7 +93,7 @@
 <tr><td>Superset</td><td><code>superset.</code></td><td><span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span> (builders); <span class="role">production_manager</span>, <span class="role">qc</span>, <span class="role">qp</span> (viewers)</td><td>Checked by Superset's own sign-in (since 8 November 2026)</td></tr>
 </tbody>
 </table></div>
-<p>Opening a web app is only the first gate. What you may do inside it (create a recipe, start a run, approve a change, export data) is decided again for each action by the service and by the database, from the same policy. For example, every role can open the Configuration UI, but only some roles can save a draft there and only <span class="role">qa</span> can approve one.</p>
+<p>Opening a web app is only the first gate. What you may do inside it (create a recipe, start a run, approve a change, export data) is decided again for each action by the service and by the database, from the same policy. For example, every role can open the Configuration UI, but only some roles can save a draft there and only <span class="role">qa</span> can approve one. The Configuration UI asks the database, when it opens, which changes your role may make, and hides the buttons the database would refuse (<a href="#apps-config-rights">what your role sees</a>); the database still decides every save.</p>
 <div class="note"><p>The service portal shows every card to everyone. A card for an app your role cannot open leads to the "No access" page described in <a href="#access-noaccess">Why can't I open an app</a>.</p></div>
 
 <h3 id="access-signin">Signing in and out</h3>

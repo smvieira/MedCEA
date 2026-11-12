@@ -100,6 +100,7 @@
     .toast-err { background: #450a0a; color: #fca5a5; border: 1px solid #991b1b; }
     .empty { text-align: center; padding: 44px 20px; color: #475569; font-size: .875rem; }
     .hidden { display: none !important; }
+    body.rights-pending [data-needs] { visibility: hidden; }
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     .req { color: #ef4444; }
     .algo-badge { display:inline-block; background:#1e293b; border:1px solid #334155; color:#a5b4fc; border-radius:4px; padding:1px 7px; font-size:.72rem; font-weight:600; letter-spacing:.04em; }
@@ -109,7 +110,7 @@
     .algo-panel-table textarea { width:100%; background:#0f172a; border:1px solid #2a364e; border-radius:6px; color:#e2e8f0; padding:6px 8px; font:0.78rem/1.5 monospace; min-height:54px; resize:vertical; }
   </style>
 </head>
-<body>
+<body class="rights-pending">
   <div id="bg"></div>
   <div id="app">
   <header class="hdr">
@@ -142,9 +143,9 @@
       <div class="panel-hdr">
         <span class="panel-title">Locations</span>
         <div style="display:flex;gap:8px">
-          <button class="btn btn-ghost btn-sm" onclick="openLocImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" data-needs="cea_location" onclick="openLocImportChoice()">↑ Import</button>
           <button class="btn btn-ghost btn-sm" onclick="openExportAllLocsChoice()">↓ Export All</button>
-          <button class="btn btn-primary btn-sm" onclick="openLocForm(null)">+ New Location</button>
+          <button class="btn btn-primary btn-sm" data-needs="cea_location" onclick="openLocForm(null)">+ New Location</button>
         </div>
       </div>
       <div id="loc-table-wrap"><div class="empty">Loading…</div></div>
@@ -216,7 +217,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="cea_location" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeLocExportChoice();exportLoc(currentLocExportId,'platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -238,7 +239,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="cea_location" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeExportAllLocsChoice();exportAllLocs('platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -268,9 +269,9 @@
       <div class="panel-hdr">
         <span class="panel-title">Production Units</span>
         <div style="display:flex;gap:8px">
-          <button class="btn btn-ghost btn-sm" onclick="openUnitImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" data-needs="cea_unit cea_zone" onclick="openUnitImportChoice()">↑ Import</button>
           <button class="btn btn-ghost btn-sm" onclick="openExportAllUnitsChoice()">↓ Export All</button>
-          <button class="btn btn-primary btn-sm" onclick="openUnitForm(null)">+ New Unit</button>
+          <button class="btn btn-primary btn-sm" data-needs="cea_unit" onclick="openUnitForm(null)">+ New Unit</button>
         </div>
       </div>
       <div id="unit-table-wrap"><div class="empty">Loading…</div></div>
@@ -302,7 +303,7 @@
             <label>Location <span class="req">*</span></label>
             <div class="loc-row">
               <div class="fg"><select name="location_id" id="unit-loc-sel" required><option value="">— Select location —</option></select></div>
-              <button type="button" class="btn btn-ghost btn-sm" onclick="openLocModal()">+ New</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-needs="cea_location" onclick="openLocModal()">+ New</button>
             </div>
           </div>
           <div class="fg"><label>Area (m²)</label><input name="area" type="number" step="any" min="0" placeholder="0.0"></div>
@@ -322,7 +323,7 @@
     <div class="panel" id="perm-matrix-panel">
       <div class="panel-hdr">
         <span class="panel-title">Recipe ↔ Unit Permissions</span>
-        <span style="font-size:.82rem;color:#94a3b8">Check a cell to allow that recipe to run on that unit. Grey = inactive.</span>
+        <span style="font-size:.82rem;color:#94a3b8" id="perm-matrix-hint">Check a cell to allow that recipe to run on that unit. Grey = inactive.</span>
       </div>
       <div id="security-table-wrap" style="overflow:auto"><div class="empty">Loading…</div></div>
     </div>
@@ -393,7 +394,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="cea_unit" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeUnitExportChoice();exportUnit(currentUnitExportId,'platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -415,7 +416,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="cea_unit" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeExportAllUnitsChoice();exportAllUnits('platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -445,11 +446,11 @@
       <div class="panel-hdr">
         <span class="panel-title">Devices</span>
         <div style="display:flex;gap:8px">
-          <button class="btn btn-ghost btn-sm" onclick="openDeviceImportChoice()">↑ Import</button>
-          <button class="btn btn-ghost btn-sm" onclick="openExportAllDevicesChoice()">↓ Export All</button>
-          <button class="btn btn-ghost btn-sm" onclick="openDeviceModal(null)">+ Add Record</button>
-          <a class="btn btn-primary btn-sm" href="$EDGE_WIZARD_URL" target="_blank" rel="noopener"
-             title="Flash and onboard a board plugged into the platform host over USB">⚡ Onboard Device</a>
+          <button class="btn btn-ghost btn-sm" data-needs="device" onclick="openDeviceImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" id="dev-export-all-btn" onclick="openExportAllDevicesChoice()">↓ Export All</button>
+          <button class="btn btn-ghost btn-sm" data-needs="device" onclick="openDeviceModal(null)">+ Add Record</button>
+          <a class="btn btn-primary btn-sm" data-needs="device" href="$EDGE_WIZARD_URL" target="_blank" rel="noopener"
+             title="Flash and onboard a board plugged into the platform host over USB. Onboarding registers the device under your own sign-in.">⚡ Onboard Device</a>
         </div>
       </div>
       <div style="padding:8px 14px;font-size:12px;color:var(--muted,#8a8a8a);border-bottom:1px solid rgba(128,128,128,.18)">
@@ -500,7 +501,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="device" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeDeviceExportChoice();exportDevice(currentDeviceExportId,'platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -522,7 +523,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="device" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeExportAllDevicesChoice();exportAllDevices('platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -577,7 +578,7 @@
           <select id="ps-filter-algo" style="width:auto" onchange="renderParamSets()"><option value="">All algorithms</option></select>
           <label class="muted" style="display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" id="ps-show-retired" style="width:auto" onchange="renderParamSets()"> Show retired</label>
           <button class="btn btn-ghost btn-sm" onclick="loadParamSets()">↻ Refresh</button>
-          <button class="btn btn-primary btn-sm" onclick="openParamSetModal(null)">+ New Parameter Set</button>
+          <button class="btn btn-primary btn-sm" data-needs="unit_algorithm_params" onclick="openParamSetModal(null)">+ New Parameter Set</button>
         </div>
       </div>
       <div id="ps-wrap" style="overflow-x:auto"><div class="empty">Loading…</div></div>
@@ -610,10 +611,10 @@
       <div class="panel-hdr">
         <span class="panel-title">Recipes</span>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <label class="muted" style="display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" id="recipe-show-retired" style="width:auto" onchange="renderRecipeTable()"> Show retired</label>
-          <button class="btn btn-ghost btn-sm" onclick="openImportChoice()">↑ Import</button>
-          <button class="btn btn-ghost btn-sm" onclick="openExportAllChoice()">↓ Export All</button>
-          <button class="btn btn-primary btn-sm" onclick="openRecipeForm(null)">+ New Recipe</button>
+          <label class="muted" id="recipe-show-retired-label" style="display:flex;gap:5px;align-items:center;white-space:nowrap"><input type="checkbox" id="recipe-show-retired" style="width:auto" onchange="renderRecipeTable()"> Show retired</label>
+          <button class="btn btn-ghost btn-sm" data-needs="recipe recipe_line" onclick="openImportChoice()">↑ Import</button>
+          <button class="btn btn-ghost btn-sm" id="recipe-export-all-btn" onclick="openExportAllChoice()">↓ Export All</button>
+          <button class="btn btn-primary btn-sm" data-needs="recipe" onclick="openRecipeForm(null)">+ New Recipe</button>
         </div>
       </div>
       <div id="recipe-table-wrap"><div class="empty">Loading…</div></div>
@@ -657,7 +658,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="recipe" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeExportChoice();exportRecipe(currentRecipeId,'platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -679,7 +680,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download to Local Machine
           </button>
-          <button class="btn btn-ghost" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
+          <button class="btn btn-ghost" data-needs="recipe" style="justify-content:flex-start;padding:14px 18px;font-size:.95rem"
             onclick="closeExportAllChoice();exportAllRecipes('platform')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             Save to Platform Library
@@ -1051,9 +1052,10 @@
     }
 
     // ── Toast ─────────────────────────────────────────────────
-    function toast(msg, ok = true) {
+    function toast(msg, ok = true, title = '') {
       const el = document.getElementById('toast');
       el.textContent = msg;
+      el.title = title || '';
       el.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
       clearTimeout(el._t);
       el._t = setTimeout(() => el.classList.remove('show'), 3500);
@@ -1081,7 +1083,7 @@
         try { e = await r.clone().json(); } catch(_) {}
         if (e && e.code === '42501') {
           sessionStorage.removeItem('cfgReauth');
-          throw dbError(r.status, e, e.message || 'refused by the database');
+          throw dbError(r.status, e, e.message || 'refused by the database', method);
         }
       }
       if (r.status === 401 || r.status === 403) {
@@ -1099,7 +1101,7 @@
       if (!r.ok) {
         let msg = 'Request failed', e = null;
         try { e = await r.json(); msg = e.message || e.detail || msg; } catch(_) {}
-        throw dbError(r.status, e, msg);
+        throw dbError(r.status, e, msg, method);
       }
       const text = await r.text();
       return text ? JSON.parse(text) : null;
@@ -1108,8 +1110,9 @@
     // The thrown Error keeps the HTTP status, PostgREST's code (SQLSTATE or PGRSTnnn)
     // and the database's own message (raw), so a caller maps a refusal in its own
     // context (friendlyApprovalError, retireError) and a probe tells 42501 from 404.
-    function dbError(status, e, msg) {
-      const err = new Error(friendlyDbError(msg));
+    // A refused write (any method but GET) gets the plain words of friendlyWriteError.
+    function dbError(status, e, msg, method) {
+      const err = new Error(method && method !== 'GET' ? friendlyWriteError(msg) : friendlyDbError(msg));
       err.status = status;
       err.code = (e && e.code) || null;
       err.raw = msg;
@@ -1129,6 +1132,9 @@
       // with friendlyApprovalError().
       if (/permission denied for function retire_algorithm_state/.test(msg))
         return 'Retiring learned state needs a qa person signed in (approval on controllers_state).';
+      // A read the role cannot make (a panel that does not handle 42501 itself).
+      const t = /permission denied for table (\w+)/.exec(msg || '');
+      if (t && typeof refusalText === 'function') return refusalText(t[1]);
       return msg;
     }
 
@@ -1632,8 +1638,206 @@
     }
     /* commissioning-logic:end */
 
+    /* rights-logic:begin */
+    // Pure functions (no DOM, no fetch) for what the page offers to the signed-in role;
+    // tests/test_config_ui_rights.py runs this block under node. The database alone
+    // decides: a write control is hidden only when the database itself answered a
+    // zero-row write probe with a refusal (42501); any other answer (unknown) keeps the
+    // control and the database decides at save time. No role name is written here.
+    //
+    // One zero-row PATCH per table the page writes (POST or PATCH through api(), and
+    // control_algorithm through the scheduler, which writes as the person): every
+    // person role holding UPDATE on these tables also holds INSERT
+    // (tests/iam-grants.golden.json), so one probe gates New, Edit and Import. pk is a
+    // real key column (no row has -1), col a real column set to null: the body must
+    // never be empty (PostgREST then runs no UPDATE and reports a false right), and null
+    // needs no cast. The probe never asks PostgREST to roll back (a Prefer tx header):
+    // config-api does not set PGRST_DB_TX_END to allow one, and nothing is written anyway.
+    const PROBES = {
+      cea_location:           { pk: 'location_id',  col: 'name' },
+      cea_unit:               { pk: 'unit_id',      col: 'unit_code' },
+      cea_zone:               { pk: 'zone_id',      col: 'zone_code' },
+      component:              { pk: 'component_id', col: 'model' },
+      device:                 { pk: 'device_id',    col: 'serial_number' },
+      recipe:                 { pk: 'recipe_id',    col: 'recipe_name' },
+      recipe_line:            { pk: 'recipe_id',    col: 'notes' },
+      recipe_unit_permission: { pk: 'recipe_id',    col: 'allowed' },
+      control_algorithm:      { pk: 'algorithm_id', col: 'algorithm_name' },
+      unit_algorithm_params:  { pk: 'params_id',    col: 'name' }
+    };
+    const RIGHTS_LABELS = {
+      cea_location: 'locations', cea_unit: 'units', cea_zone: 'zones', component: 'device components',
+      device: 'devices', recipe: 'recipes', recipe_line: 'recipe steps',
+      recipe_unit_permission: 'recipe unit permissions', control_algorithm: 'control algorithms',
+      unit_algorithm_params: 'parameter sets', controllers_state: 'learned state'
+    };
+
+    function probeRequest(table) {
+      const p = PROBES[table];
+      return { method: 'PATCH', path: '/' + table + '?' + p.pk + '=eq.-1', body: { [p.col]: null },
+               headers: { 'Prefer': 'return=minimal' } };
+    }
+
+    // true: the database accepts the write; false: it refused it (42501, which
+    // PostgREST answers 403, or 401 while the request runs as anon); null: unknown
+    // (a token problem, PGRSTnnn, 404, a network error), which shows the control.
+    function classifyProbe(status, body) {
+      if (status >= 200 && status < 300) return true;
+      if ((status === 401 || status === 403) && body && body.code === '42501') return false;
+      return null;
+    }
+
+    function can(rights, table) { return !rights || rights[table] !== false; }
+    function canAll(rights, needs) { return String(needs || '').split(/\s+/).filter(Boolean).every(t => can(rights, t)); }
+
+    function rightsLabel(table) { return RIGHTS_LABELS[table] || String(table || 'this').replace(/_/g, ' '); }
+
+    // "Your role does not read X." for a table or a list of tables.
+    function refusalText(tables) {
+      const list = [].concat(tables || []).filter(Boolean);
+      if (!list.length) return 'Your role does not read this.';
+      return 'Your role does not read ' + list.map(rightsLabel).join(' or ') + '.';
+    }
+
+    function isRefusal(reason) { return !!(reason && reason.code === '42501'); }
+
+    // A panel's reads (Promise.allSettled results), spec[i] = {table, primary}. A refused
+    // primary read makes the panel say so ('refused'); a refused secondary read only
+    // takes something away ('ok' with refusedAux). Any other failure of a primary read is
+    // an 'error' with its message.
+    function panelOutcome(settled, spec, refusedMessage) {
+      const out = { state: 'ok', refused: [], refusedAux: [], failedAux: [], message: '' };
+      let error = null;
+      (settled || []).forEach((s, i) => {
+        const sp = spec[i] || {};
+        if (!s || s.status !== 'rejected') return;
+        if (sp.primary) {
+          if (isRefusal(s.reason)) out.refused.push(sp.table);
+          else if (!error) error = s.reason;
+        } else if (isRefusal(s.reason)) out.refusedAux.push(sp.table);
+        else out.failedAux.push(sp.table);
+      });
+      if (error) {
+        out.state = 'error';
+        out.message = String((error && (error.message || error)) || 'Request failed');
+      } else if (out.refused.length) {
+        out.state = 'refused';
+        out.message = refusedMessage || refusalText(out.refused);
+      }
+      return out;
+    }
+
+    // A refused write in plain words: the table grant (a race, or an unknown probe) and
+    // the constraints' own RAISE texts (apps/database/medcea_db_migrations.sql), which
+    // arrive at save time whatever the probe says. Anything else is returned as given.
+    function friendlyWriteError(raw) {
+      const m = String(raw || '');
+      let g;
+      if ((g = /permission denied for table (\w+)/.exec(m))) return 'Your role cannot change ' + rightsLabel(g[1]) + '.';
+      if (/draft_only: the recipe of this line is not a draft/.test(m))
+        return 'This recipe is no longer a draft (approved or retired meanwhile), so its steps cannot change. ⎘ Copy makes a new draft.';
+      if ((g = /draft_only: \w+\.\w+ is (\w+), not a draft/.exec(m)))
+        return 'Only a draft can be changed, and this one is ' + g[1] + ' now. Copy it to a new draft to change it.';
+      if ((g = /assign_only: recipe (\d+) is not approved, or changed since/.exec(m)))
+        return 'Only an approved recipe can be allowed on a unit: recipe #' + g[1] + ' is not approved, or changed since its approval. qa approves it in the Approvals tab.';
+      if ((g = /assign_only: parameter set (\d+) is not approved, or changed since/.exec(m)))
+        return 'Only an approved parameter set can be assigned: set #' + g[1] + ' is not approved, or changed since its approval.';
+      // format('%s', NULL) is '': a device without a zone (an import, '— Unassigned —')
+      // or without a type leaves an empty group and a double space.
+      if ((g = /existing_slot: zone (\S*) ?has no (.*?) ?slot to re-onboard into/.exec(m))) {
+        if (!g[1])
+          return 'Your role registers a device only into an existing slot of a zone; choose its zone. '
+               + 'Registering an unassigned device is an engineer\'s change.';
+        return 'Your role registers a device only into an existing slot: zone ' + g[1] + ' has no inactive '
+             + (g[2] ? g[2] + ' device' : 'device of that type') + ' to replace. A new slot, or a move to another zone or type, is an engineer\'s change.';
+      }
+      return typeof friendlyDbError === 'function' ? friendlyDbError(m) : m;
+    }
+
+    // A platform-api refusal (the route gate, IAM_ENFORCE): plain words, the gate's own
+    // reason as a title. text is the response body: the gate answers {error} as JSON; a
+    // 403 without it comes from the sign-in proxy (an expired session), not the policy.
+    function libraryRefusal(status, text, verb) {
+      let reason = '', gate = false;
+      try { const d = JSON.parse(text); reason = String((d && (d.error || d.message)) || ''); gate = !!(d && d.error); }
+      catch(_) { reason = String(text || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200); }
+      const read = verb === 'read';
+      if (status === 403 && gate)
+        return { refused: true, title: reason,
+                 text: 'The access policy does not let your role ' + (read ? 'read' : 'save to') + ' the platform library.' };
+      if (status === 403)
+        return { refused: false, title: reason, text: 'The platform library refused this (403); if your sign-in has expired, reload the page.' };
+      if (status === 401) return { refused: false, title: reason, text: 'Your sign-in has expired; reload the page.' };
+      return { refused: false, title: reason, text: 'Server error ' + status + (reason ? ': ' + reason : '') };
+    }
+
+    // A scheduler-api read that did not answer 2xx (d: its JSON body or null).
+    function schedReadText(status, d, table) {
+      const why = d && d.error ? String(d.error) : '';
+      if (status === 403) return table ? refusalText(table) : 'Your role does not read this.';
+      if (status === 401) return 'Your sign-in has expired; reload the page.';
+      return 'Failed to load (' + status + ')' + (why ? ': ' + why : '');
+    }
+    /* rights-logic:end */
+
+    // What the database lets this person write, asked once per page load: one raw fetch
+    // per table (never api(), so a refusal never sends the browser through the sign-in
+    // again, and nothing touches cfgReauth). Every render that shows write controls
+    // awaits rightsReady first.
+    let rights = {};
+    async function loadRights() {
+      const tables = Object.keys(PROBES);
+      // A PATCH waits behind a SHARE-class lock (CREATE TRIGGER/INDEX during a migration)
+      // that reads pass, and every panel awaits these: a probe that does not answer
+      // within PROBE_TIMEOUT_MS is unknown (null), so its control shows and the panels load.
+      const answers = await Promise.all(tables.map(async t => {
+        const q = probeRequest(t);
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), PROBE_TIMEOUT_MS);
+        try {
+          const r = await fetch(API + q.path, {
+            method: q.method,
+            headers: Object.assign({ 'Accept': 'application/json', 'Content-Type': 'application/json' }, q.headers),
+            body: JSON.stringify(q.body),
+            signal: ac.signal
+          });
+          let body = null;
+          if (!r.ok) { try { body = await r.json(); } catch(_) {} }
+          return classifyProbe(r.status, body);
+        } catch(_) { return null; }
+        finally { clearTimeout(timer); }
+      }));
+      const got = {};
+      tables.forEach((t, i) => { got[t] = answers[i]; });
+      rights = got;
+      applyRights();
+      return rights;
+    }
+    const PROBE_TIMEOUT_MS = 4000;
+
+    // Static controls carry data-needs="<table> [<table>…]"; hidden while a probe refused.
+    // Until then body.rights-pending keeps them invisible (CSS), so no control the role
+    // cannot use flashes before the probes answer; unknown (null) still shows it after.
+    function applyRights() {
+      document.querySelectorAll('[data-needs]').forEach(el => el.classList.toggle('hidden', !canAll(rights, el.dataset.needs)));
+      document.body.classList.remove('rights-pending');
+    }
+    // Fail open: should loadRights itself throw, every control shows and the database decides.
+    const rightsReady = loadRights().catch(() => { rights = {}; applyRights(); return rights; });
+
+    // A platform-api answer that is not 2xx, as an Error with plain words.
+    async function libraryError(r, fname, verb) {
+      const text = await r.text().catch(() => '');
+      const x = libraryRefusal(r.status, text, verb);
+      const err = new Error(x.text + (fname && !x.refused ? ' saving ' + fname : ''));
+      err.refusal = x.refused;
+      err.title = x.title;
+      return err;
+    }
+
     // ── Locations ─────────────────────────────────────────────
     async function loadLocations() {
+      await rightsReady;
       try {
         locations = await api('GET', '/cea_location?order=name');
         renderLocTable(); fillLocDropdown();
@@ -1649,8 +1853,9 @@
           + '<td>' + esc(l.address || '—') + '</td>'
           + '<td>' + esc(l.contact_person || '—') + '</td>'
           + '<td><span class="badge badge-' + (l.is_active === 'Y' ? 'y' : 'n') + '">' + (l.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
-          + '<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="openLocForm(' + l.location_id + ')">Edit</button>'
-          + ' <button class="btn btn-ghost btn-sm" onclick="openLocExportChoiceFor(' + l.location_id + ')">↓ Export</button></td>'
+          + '<td style="white-space:nowrap">'
+          + (can(rights, 'cea_location') ? '<button class="btn btn-ghost btn-sm" onclick="openLocForm(' + l.location_id + ')">Edit</button> ' : '')
+          + '<button class="btn btn-ghost btn-sm" onclick="openLocExportChoiceFor(' + l.location_id + ')">↓ Export</button></td>'
           + '</tr>').join('') + '</tbody></table>';
     }
 
@@ -1698,6 +1903,7 @@
 
     // ── Units ─────────────────────────────────────────────────
     async function loadUnits() {
+      await rightsReady;
       try {
         // unit_commissioning() alone may fail (anon under IAM_DB_ROLES=false, or before
         // the database deploy): the column then falls back to cea_unit.commissioning,
@@ -1751,8 +1957,8 @@
           + '<td><span class="badge badge-' + (u.is_active === 'Y' ? 'y' : 'n') + '">' + (u.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
           + '<td style="min-width:190px;max-width:300px">' + commissioningCellHtml(u) + '</td>'
           + '<td style="white-space:nowrap">'
-          + '<button class="btn btn-ghost btn-sm" onclick="openUnitForm(' + u.unit_id + ')">Edit</button>'
-          + ' <button class="btn btn-ghost btn-sm" onclick="openUnitExportChoiceFor(' + u.unit_id + ')">↓ Export</button>'
+          + (can(rights, 'cea_unit') ? '<button class="btn btn-ghost btn-sm" onclick="openUnitForm(' + u.unit_id + ')">Edit</button> ' : '')
+          + '<button class="btn btn-ghost btn-sm" onclick="openUnitExportChoiceFor(' + u.unit_id + ')">↓ Export</button>'
           + ' <button class="btn btn-ghost btn-sm" id="ztb-' + u.unit_id + '" onclick="toggleZones(' + u.unit_id + ', this)">'
           + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>'
           + ' Zones' + warnIcon + '</button>'
@@ -1887,47 +2093,62 @@
       await refreshZonesPanel(unitId);
     }
 
+    // Zones are the panel's own read; the device counts are secondary: a role that does
+    // not read devices still sees the zones, with '—' and a note.
     async function refreshZonesPanel(unitId) {
       const panel = document.getElementById('zc-' + unitId);
       if (!panel) return;
+      await rightsReady;
+      let zones;
       try {
-        const zones = await api('GET', '/cea_zone?unit_id=eq.' + unitId + '&order=zone_code');
-        unitZoneCounts[unitId] = zones.length;
-        // Fetch device counts per zone (zone_id now correctly refs cea_zone)
-        let devByZone = {};
-        if (zones.length) {
-          const zIds = zones.map(z => z.zone_id).join(',');
-          const devs = await api('GET', '/device?zone_id=in.(' + zIds + ')&select=zone_id,device_id,serial_number,dns_name,device_type,is_active&order=dns_name');
-          devs.forEach(d => { if (!devByZone[d.zone_id]) devByZone[d.zone_id] = []; devByZone[d.zone_id].push(d); });
-        }
-        renderZonesPanel(panel, unitId, zones, devByZone);
+        zones = await api('GET', '/cea_zone?unit_id=eq.' + unitId + '&order=zone_code');
       } catch(e) {
-        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">Failed to load zones</div>';
+        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">'
+          + esc(isRefusal(e) ? refusalText('cea_zone') : 'Failed to load zones: ' + e.message) + '</div>';
+        return;
       }
+      unitZoneCounts[unitId] = zones.length;
+      let devByZone = {};
+      if (zones.length) {
+        const zIds = zones.map(z => z.zone_id).join(',');
+        const [d] = await Promise.allSettled([
+          api('GET', '/device?zone_id=in.(' + zIds + ')&select=zone_id,device_id,serial_number,dns_name,device_type,is_active&order=dns_name')]);
+        const o = panelOutcome([d], [{ table: 'device', primary: false }]);
+        if (d.status === 'fulfilled') d.value.forEach(x => { if (!devByZone[x.zone_id]) devByZone[x.zone_id] = []; devByZone[x.zone_id].push(x); });
+        else devByZone = o.refusedAux.length ? null : undefined;
+      }
+      renderZonesPanel(panel, unitId, zones, devByZone);
     }
 
+    // devByZone: zone_id → devices; null when the role does not read devices,
+    // undefined when the device read failed otherwise (counts then show '—').
     function renderZonesPanel(panel, unitId, zones, devByZone) {
+      const zoneWrite = can(rights, 'cea_zone'), devKnown = !!devByZone;
       let html = '<div class="zones-hdr">'
         + '<span class="zones-label">Zones (' + zones.length + ')</span>'
         + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
-        + '<button class="btn btn-ghost btn-sm" onclick="openZoneModal(' + unitId + ', null)" style="font-size:.78rem">+ Add Zone</button>'
-        + '</div></div>';
+        + (zoneWrite ? '<button class="btn btn-ghost btn-sm" onclick="openZoneModal(' + unitId + ', null)" style="font-size:.78rem">+ Add Zone</button>' : '')
+        + '</div></div>'
+        + (devByZone === null ? '<div class="muted" style="padding:4px 0 8px">' + esc(refusalText('device')) + ' Device counts show —.</div>'
+           : devByZone === undefined && zones.length ? '<div class="muted" style="padding:4px 0 8px">The devices could not be loaded; counts show —.</div>' : '');
 
       if (zones.length) {
         html += '<table class="ztbl"><thead><tr><th>Code</th><th>Description</th><th>Status</th><th></th></tr></thead><tbody>';
         zones.forEach(z => {
-          const zoneDev = devByZone[z.zone_id] || [];
-          const devWarn = zoneDev.length === 0
+          const zoneDev = devKnown ? (devByZone[z.zone_id] || []) : [];
+          const devWarn = devKnown && zoneDev.length === 0
             ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5" style="vertical-align:middle;margin-left:2px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><circle cx="12" cy="17" r="1" fill="#f59e0b"/></svg>' : '';
           html += '<tr>'
             + '<td><strong>' + esc(z.zone_code) + '</strong></td>'
             + '<td>' + esc(z.zone_description || '—') + '</td>'
             + '<td><span class="badge badge-' + (z.is_active === 'Y' ? 'y' : 'n') + '">' + (z.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
             + '<td style="white-space:nowrap">'
-            + '<button class="btn btn-ghost btn-sm" onclick="openZoneModal(' + unitId + ',' + z.zone_id + ')">Edit</button>'
-            + ' <button class="btn btn-ghost btn-sm" id="zdtb-' + z.zone_id + '" onclick="toggleZoneDevices(' + z.zone_id + ', this)">'
-            + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>'
-            + ' Devices (' + zoneDev.length + ')' + devWarn + '</button>'
+            + (zoneWrite ? '<button class="btn btn-ghost btn-sm" onclick="openZoneModal(' + unitId + ',' + z.zone_id + ')">Edit</button> ' : '')
+            + (devKnown
+               ? '<button class="btn btn-ghost btn-sm" id="zdtb-' + z.zone_id + '" onclick="toggleZoneDevices(' + z.zone_id + ', this)">'
+                 + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>'
+                 + ' Devices (' + zoneDev.length + ')' + devWarn + '</button>'
+               : '<span class="muted">Devices (—)</span>')
             + '</td></tr>'
             + '<tr class="zones-row hidden" id="zdr-' + z.zone_id + '">'
             + '<td colspan="4" style="padding:0!important;border-bottom:2px solid #2a364e!important;background:#0d131f">'
@@ -1971,13 +2192,14 @@
             + '<td>' + esc(d.model || '—') + '</td>'
             + '<td style="font-size:.75rem;color:#64748b">' + esc(d.serial_number) + '</td>'
             + '<td><span class="badge badge-' + (d.is_active === 'Y' ? 'y' : 'n') + '">' + (d.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
-            + '<td><button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button></td>'
+            + '<td>' + (can(rights, 'device') ? '<button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button>' : '') + '</td>'
             + '</tr>';
         });
         h += '</tbody></table>';
         panel.innerHTML = h;
       } catch(e) {
-        panel.innerHTML = '<div style="color:#fca5a5;font-size:.82rem;padding:6px 0">Failed to load devices: ' + e.message + '</div>';
+        panel.innerHTML = '<div style="color:#fca5a5;font-size:.82rem;padding:6px 0">'
+          + esc(isRefusal(e) ? refusalText('device') : 'Failed to load devices: ' + e.message) + '</div>';
       }
     }
 
@@ -1992,7 +2214,7 @@
         api('GET', '/cea_zone?zone_id=eq.' + zoneId).then(rows => {
           const z = rows[0];
           if (z) { form.elements['zone_code'].value = z.zone_code; form.elements['zone_description'].value = z.zone_description || ''; form.elements['is_active'].value = z.is_active; }
-        });
+        }).catch(e => toast('Could not load the zone: ' + e.message, false));
       }
       document.getElementById('zone-modal-bg').classList.add('open');
     }
@@ -2074,18 +2296,21 @@
     let allZones = [];
 
     async function loadAllDevices() {
-      document.getElementById('dev-content').innerHTML = '<div class="empty" style="padding:30px">Loading…</div>';
-      try {
-        if (!units.length) await loadUnits();
-        const [devices, zones] = await Promise.all([
-          api('GET', '/device?order=serial_number'),
-          api('GET', '/cea_zone?order=zone_code&select=zone_id,zone_code,zone_description,unit_id')
-        ]);
-        allZones = zones;
-        renderDevContent(devices);
-      } catch(e) {
-        document.getElementById('dev-content').innerHTML = '<div style="color:#fca5a5;padding:20px">Failed: ' + e.message + '</div>';
-      }
+      const el = document.getElementById('dev-content');
+      el.innerHTML = '<div class="empty" style="padding:30px">Loading…</div>';
+      await rightsReady;
+      if (!units.length) await loadUnits();
+      const settled = await Promise.allSettled([
+        api('GET', '/device?order=serial_number'),
+        api('GET', '/cea_zone?order=zone_code&select=zone_id,zone_code,zone_description,unit_id')
+      ]);
+      const o = panelOutcome(settled, [{ table: 'device', primary: true }, { table: 'cea_zone', primary: false }]);
+      // Nothing to export for a role that does not read devices.
+      document.getElementById('dev-export-all-btn').classList.toggle('hidden', o.state === 'refused');
+      if (o.state === 'refused') { el.innerHTML = '<div class="empty" style="padding:30px">' + esc(o.message) + '</div>'; return; }
+      if (o.state === 'error') { el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed: ' + esc(o.message) + '</div>'; return; }
+      allZones = settled[1].status === 'fulfilled' ? settled[1].value : [];
+      renderDevContent(settled[0].value);
     }
 
     function zoneLabel(zoneId) {
@@ -2097,7 +2322,8 @@
 
     function renderDevContent(devices) {
       if (!devices.length) {
-        document.getElementById('dev-content').innerHTML = '<div class="empty" style="padding:30px">No devices yet. Click "+ Add Device" to get started.</div>';
+        document.getElementById('dev-content').innerHTML = '<div class="empty" style="padding:30px">No devices yet.'
+          + (can(rights, 'device') ? ' Click "+ Add Record" or "⚡ Onboard Device" to get started.' : '') + '</div>';
         return;
       }
       const checkAllBtn = '<button onclick="checkAllDevicesOnline()" title="Check all devices" style="margin-left:6px;background:none;border:none;cursor:pointer;color:#64748b;font-size:.85rem;padding:0 2px" id="check-all-btn">⟳</button>';
@@ -2120,7 +2346,7 @@
           + ' <button onclick="checkDeviceOnline(' + d.device_id + ',\'' + esc(d.dns_name) + '\')" title="Check now" style="background:none;border:none;cursor:pointer;color:#64748b;font-size:.85rem;padding:0 2px">⟳</button>'
           + '</td>'
           + '<td style="white-space:nowrap">'
-          + '<button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button>'
+          + (can(rights, 'device') ? '<button class="btn btn-ghost btn-sm" onclick="openDeviceModal(' + d.device_id + ')">Edit</button>' : '')
           + '</td>'
           + '<td style="white-space:nowrap">'
           + '<button class="btn btn-ghost btn-sm" id="ctb-' + d.device_id + '" onclick="toggleComponents(' + d.device_id + ', this)">'
@@ -2213,17 +2439,21 @@
     async function refreshComponentsPanel(deviceId) {
       const panel = document.getElementById('cc-' + deviceId);
       if (!panel) return;
+      await rightsReady;
       try {
         const comps = await api('GET', '/component?device_id=eq.' + deviceId + '&order=component_id');
         renderComponentsPanel(panel, deviceId, comps);
       } catch(e) {
-        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">Failed to load components</div>';
+        panel.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:.82rem">'
+          + esc(isRefusal(e) ? refusalText('component') : 'Failed to load components: ' + e.message) + '</div>';
       }
     }
 
     function renderComponentsPanel(panel, deviceId, comps) {
+      const compWrite = can(rights, 'component');
       let html = '<div class="zones-hdr"><span class="zones-label">Components (' + comps.length + ')</span>'
-        + '<button class="btn btn-ghost btn-sm" onclick="openComponentModal(' + deviceId + ', null)" style="font-size:.78rem">+ Add Component</button></div>';
+        + (compWrite ? '<button class="btn btn-ghost btn-sm" onclick="openComponentModal(' + deviceId + ', null)" style="font-size:.78rem">+ Add Component</button>' : '')
+        + '</div>';
       if (comps.length) {
         html += '<table class="ztbl"><thead><tr><th>Type</th><th>Model</th><th>Manufacturer</th><th>Status</th><th></th></tr></thead><tbody>';
         comps.forEach(c => {
@@ -2232,7 +2462,7 @@
             + '<td>' + esc(c.model || '—') + '</td>'
             + '<td>' + esc(c.manufacturer || '—') + '</td>'
             + '<td><span class="badge badge-' + (c.is_active === 'Y' ? 'y' : 'n') + '">' + (c.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
-            + '<td><button class="btn btn-ghost btn-sm" onclick="openComponentModal(' + deviceId + ',' + c.component_id + ')">Edit</button></td>'
+            + '<td>' + (compWrite ? '<button class="btn btn-ghost btn-sm" onclick="openComponentModal(' + deviceId + ',' + c.component_id + ')">Edit</button>' : '') + '</td>'
             + '</tr>';
         });
         html += '</tbody></table>';
@@ -2268,7 +2498,7 @@
             await onModalDevUnitChange(String(z.unit_id));
             document.getElementById('modal-dev-zone').value = d.zone_id;
           }
-        });
+        }).catch(e => toast('Could not load the device: ' + e.message, false));
       }
       document.getElementById('device-modal-bg').classList.add('open');
     }
@@ -2306,7 +2536,7 @@
             const el = form.elements[k]; if (el && c[k] != null) el.value = c[k];
           });
           if (c.parameters) form.elements['parameters'].value = JSON.stringify(c.parameters, null, 2);
-        });
+        }).catch(e => toast('Could not load the component: ' + e.message, false));
       }
       document.getElementById('component-modal-bg').classList.add('open');
     }
@@ -2347,11 +2577,31 @@
     let currentRecipeId = null;
     let recipeLineModal = { recipeId: null, seqId: null }; // seqId=null means new
 
+    // A role that does not read recipes gets a panel message and no toast (qp after a
+    // Release: the toast would replace "Released").
+    // While refused, Show retired and Export All are hidden (nothing to show or export),
+    // and renderRecipeTable keeps the panel message.
+    let recipesRefused = false;
+    function setRecipesRefused(v) {
+      recipesRefused = v;
+      document.getElementById('recipe-show-retired-label').classList.toggle('hidden', v);
+      document.getElementById('recipe-export-all-btn').classList.toggle('hidden', v);
+    }
     async function loadRecipes() {
+      await rightsReady;
       try {
         recipes = await api('GET', '/recipe?order=recipe_name');
+        setRecipesRefused(false);
         renderRecipeTable();
-      } catch(e) { toast('Load recipes failed: ' + e.message, false); }
+      } catch(e) {
+        recipes = [];
+        if (isRefusal(e)) {
+          setRecipesRefused(true);
+          renderRecipeTable();
+          return;
+        }
+        toast('Load recipes failed: ' + e.message, false);
+      }
     }
 
     // The approval status (medcea.recipe.status) of each recipe, with who last edited
@@ -2359,9 +2609,11 @@
     // (⎘ Copy), which qa approves in the Approvals tab.
     function renderRecipeTable() {
       const w = document.getElementById('recipe-table-wrap');
+      if (recipesRefused) { w.innerHTML = '<div class="empty">' + esc(refusalText('recipe')) + '</div>'; return; }
       const showRetired = document.getElementById('recipe-show-retired').checked;
       const list = recipes.filter(r => showRetired || r.status !== 'retired');
-      if (!list.length) { w.innerHTML = '<div class="empty">No recipes yet. Create one to get started.</div>'; return; }
+      const write = can(rights, 'recipe'), copy = canAll(rights, 'recipe recipe_line');
+      if (!list.length) { w.innerHTML = '<div class="empty">No recipes yet.' + (write ? ' Create one to get started.' : '') + '</div>'; return; }
       w.innerHTML = '<table class="tbl"><thead><tr>'
         + '<th>Name</th><th>Description</th><th>Approval</th><th>Active</th><th>Created</th><th></th>'
         + '</tr></thead><tbody>'
@@ -2376,9 +2628,9 @@
           + '<td><span class="badge badge-' + (r.is_active === 'Y' ? 'y' : 'n') + '">' + (r.is_active === 'Y' ? 'Active' : 'Inactive') + '</span></td>'
           + '<td>' + (r.timestamp_cre ? r.timestamp_cre.slice(0,10) : '—') + '</td>'
           + '<td style="white-space:nowrap">'
-          + '<button class="btn btn-ghost btn-sm" onclick="openRecipeForm(' + r.recipe_id + ')">' + (isFrozen(r.status) ? 'View' : 'Edit') + '</button>'
+          + '<button class="btn btn-ghost btn-sm" onclick="openRecipeForm(' + r.recipe_id + ')">' + (!write ? 'View' : (isFrozen(r.status) ? 'View' : 'Edit')) + '</button>'
           + ' <button class="btn btn-teal btn-sm" onclick="openRecipeDetail(' + r.recipe_id + ')">Steps →</button>'
-          + ' <button class="btn btn-ghost btn-sm" onclick="copyRecipeById(' + r.recipe_id + ')" title="' + (r.status === 'draft' ? 'Duplicate this recipe' : 'Copy to a new draft') + '">⎘ Copy</button>'
+          + (copy ? ' <button class="btn btn-ghost btn-sm" onclick="copyRecipeById(' + r.recipe_id + ')" title="' + (r.status === 'draft' ? 'Duplicate this recipe' : 'Copy to a new draft') + '">⎘ Copy</button>' : '')
           + ' <button class="btn btn-ghost btn-sm" onclick="openExportChoiceFor(' + r.recipe_id + ')" title="Export this recipe">↓ Export</button>'
           + '</td></tr>'; }).join('')
         + '</tbody></table>';
@@ -2430,31 +2682,38 @@
     // Approved or retired: frozen here in both modes (the database refuses the edit
     // under IAM_DB_ROLES=true and would demote the recipe under false). A draft is
     // edited as before. r null: a new recipe.
+    // Without the write right (the recipe probe) the detail is read-only, rendered
+    // like a frozen recipe but without the frozen banner.
     function renderRecipeFreeze(r) {
       const status = r ? r.status : 'draft';
-      const frozen = isFrozen(status);
+      const locked = isFrozen(status), write = can(rights, 'recipe');
+      const frozen = locked || !write;
       const b = statusBadge(status);
       document.getElementById('recipe-status-line').innerHTML = r
         ? '<span class="badge ' + b.cls + '">' + esc(b.text) + '</span> <span class="muted">Last edited by '
           + esc(r.updated_by_name || r.created_by_name || 'unknown') + ', ' + esc(fmtWhen(r.timestamp_upd || r.timestamp_cre)) + '</span>'
         : '';
       const banner = document.getElementById('recipe-frozen-banner');
-      banner.classList.toggle('hidden', !frozen);
+      banner.classList.toggle('hidden', !locked);
+      // The ⎘ Copy sentence only for a role that has ⎘ Copy.
+      const copy = canAll(rights, 'recipe recipe_line');
       banner.textContent = status === 'retired'
-        ? 'Retired: this recipe is kept for the record and cannot be changed. ⎘ Copy makes a new draft from it.'
-        : 'Approved: this recipe is frozen. To change it, use ⎘ Copy. The copy is a new draft that qa approves.';
+        ? 'Retired: this recipe is kept for the record and cannot be changed.' + (copy ? ' ⎘ Copy makes a new draft from it.' : '')
+        : 'Approved: this recipe is frozen.' + (copy ? ' To change it, use ⎘ Copy. The copy is a new draft that qa approves.' : '');
       const form = document.getElementById('recipe-header-form');
       Array.from(form.elements).forEach(el => { el.disabled = frozen; });
       document.getElementById('recipe-save-btn').classList.toggle('hidden', frozen);
-      document.getElementById('recipe-addstep-btn').classList.toggle('hidden', frozen);
-      document.getElementById('recipe-del-btn').classList.toggle('hidden', !r || status === 'retired');
-      document.getElementById('recipe-copy-btn').textContent = frozen ? '⎘ Copy to a new draft' : '⎘ Copy';
+      document.getElementById('recipe-addstep-btn').classList.toggle('hidden', frozen || !can(rights, 'recipe_line'));
+      document.getElementById('recipe-del-btn').classList.toggle('hidden', !r || status === 'retired' || !write);
+      document.getElementById('recipe-copy-btn').textContent = locked ? '⎘ Copy to a new draft' : '⎘ Copy';
+      document.getElementById('recipe-copy-btn').classList.toggle('hidden', !r || !canAll(rights, 'recipe recipe_line'));
       document.getElementById('recipe-draft-hint').classList.toggle('hidden', frozen || !r);
     }
 
+    // Frozen, or read-only for this role (no right to change its steps).
     function currentRecipeFrozen() {
       const r = recipes.find(x => x.recipe_id === currentRecipeId);
-      return !!(r && isFrozen(r.status));
+      return !!(r && isFrozen(r.status)) || !canAll(rights, 'recipe recipe_line');
     }
 
     function closeRecipeDetail() {
@@ -2506,13 +2765,16 @@
         const lines = await api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id');
         renderRecipeLines(lines);
       } catch(e) {
-        w.innerHTML = '<div style="color:#fca5a5;padding:16px">Failed to load steps: ' + e.message + '</div>';
+        w.innerHTML = '<div style="color:#fca5a5;padding:16px">' + esc(isRefusal(e) ? refusalText('recipe_line') : 'Failed to load steps: ' + e.message) + '</div>';
       }
     }
 
     function renderRecipeLines(lines) {
       const w = document.getElementById('recipe-lines-wrap');
-      if (!lines.length) { w.innerHTML = '<div class="empty">No steps yet. Add the first step above.</div>'; return; }
+      if (!lines.length) {
+        w.innerHTML = '<div class="empty">No steps yet.' + (currentRecipeFrozen() ? '' : ' Add the first step above.') + '</div>';
+        return;
+      }
       const lightBadge = lt => {
         const colors = { UV:'#312e81:#a5b4fc', BLUE:'#1e3a5f:#93c5fd', RED:'#450a0a:#fca5a5', DARK:'#1e293b:#94a3b8' };
         const [bg, fg] = (colors[lt] || '#1e293b:#94a3b8').split(':');
@@ -2554,7 +2816,7 @@
            'substrate_temperature_upper_limit','notes'].forEach(k => {
             const el = form.elements[k]; if (el && l[k] != null) el.value = l[k];
           });
-        });
+        }).catch(e => toast('Could not load the step: ' + e.message, false));
       } else {
         // Auto-suggest next seq id
         const w = document.getElementById('recipe-lines-wrap');
@@ -2645,10 +2907,10 @@
             headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
             body: json
           });
-          if (!r.ok) throw new Error('Server error ' + r.status);
+          if (!r.ok) throw await libraryError(r);
           toast('Saved "' + fname + '" to platform library');
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     async function importPayload(payload) {
@@ -2778,13 +3040,13 @@
               headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
               body: json
             });
-            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            if (!r.ok) throw await libraryError(r, fname);
             saved++;
           }
           const msg = 'Saved ' + saved + ' to platform library' + (skipped ? ' (' + skipped + ' skipped)' : '');
           toast(msg);
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     // ── Platform Library ──────────────────────────────────────
@@ -2802,7 +3064,7 @@
       el.innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
       try {
         const r = await fetch(PLATFORM_API);
-        if (!r.ok) throw new Error('Status ' + r.status);
+        if (!r.ok) throw await libraryError(r, null, 'read');
         const files = await r.json();
         if (!files.length) {
           el.innerHTML = '<div class="empty" style="padding:20px">No recipes in platform library yet.<br>Use "↑ Save to Platform" from a recipe to add one.</div>';
@@ -2822,7 +3084,7 @@
             + '</tr>').join('')
           + '</tbody></table>';
       } catch(e) {
-        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">' + esc(e.refusal ? e.message : 'Failed to reach platform library: ' + e.message) + '</div>';
       }
     }
 
@@ -2835,7 +3097,7 @@
     async function importSelectedRecipes() {
       const checked = [...document.querySelectorAll('.recipe-lib-chk:checked')].map(cb => cb.value);
       if (!checked.length) { toast('Select at least one recipe', false); return; }
-      let ok = 0, skip = 0, lastId = null;
+      let ok = 0, skip = 0, lastId = null, firstErr = '';
       for (const fname of checked) {
         try {
           const r = await fetch(PLATFORM_API + encodeURIComponent(fname));
@@ -2847,11 +3109,12 @@
           }
           lastId = await importPayload(payload);
           ok++;
-        } catch(e) { skip++; }
+        } catch(e) { skip++; if (!firstErr) firstErr = fname + ': ' + e.message; }
       }
       await loadRecipes();
       closePlatformLibrary();
-      toast('Imported ' + ok + (skip ? ', ' + skip + ' failed' : '') + ' recipe' + (ok !== 1 ? 's' : ''));
+      toast('Imported ' + ok + (skip ? ', ' + skip + ' failed' : '') + ' recipe' + (ok !== 1 ? 's' : '')
+            + (firstErr ? ' — ' + firstErr : ''), !skip);
       if (lastId && ok === 1) await openRecipeDetail(lastId);
     }
 
@@ -2900,7 +3163,7 @@
       const el = document.getElementById('loc-platform-lib-content');
       try {
         const r = await fetch(LOC_API);
-        if (!r.ok) throw new Error('Status ' + r.status);
+        if (!r.ok) throw await libraryError(r, null, 'read');
         const files = await r.json();
         if (!files.length) {
           el.innerHTML = '<div class="empty" style="padding:20px">No locations in platform library yet.<br>Use "↓ Export" from a location row to add one.</div>';
@@ -2916,7 +3179,7 @@
             + '</tr>').join('')
           + '</tbody></table>';
       } catch(e) {
-        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">' + esc(e.refusal ? e.message : 'Failed to reach platform library: ' + e.message) + '</div>';
       }
     }
 
@@ -2994,10 +3257,10 @@
             headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
             body: json
           });
-          if (!r.ok) throw new Error('Server error ' + r.status);
+          if (!r.ok) throw await libraryError(r);
           toast('Saved "' + fname + '" to platform location library');
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     async function exportAllLocs(target) {
@@ -3037,13 +3300,13 @@
               headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
               body: json
             });
-            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            if (!r.ok) throw await libraryError(r, fname);
             saved++;
           }
           const msg = 'Saved ' + saved + ' to platform location library' + (skipped ? ' (' + skipped + ' skipped)' : '');
           toast(msg);
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     // ── Unit Import / Export ──────────────────────────────────
@@ -3068,7 +3331,7 @@
       const el = document.getElementById('unit-platform-lib-content');
       try {
         const r = await fetch(UNIT_API);
-        if (!r.ok) throw new Error('Status ' + r.status);
+        if (!r.ok) throw await libraryError(r, null, 'read');
         const files = await r.json();
         if (!files.length) {
           el.innerHTML = '<div class="empty" style="padding:20px">No units in platform library yet.<br>Use "↓ Export" from a unit row to add one.</div>';
@@ -3084,7 +3347,7 @@
             + '</tr>').join('')
           + '</tbody></table>';
       } catch(e) {
-        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">' + esc(e.refusal ? e.message : 'Failed to reach platform library: ' + e.message) + '</div>';
       }
     }
 
@@ -3191,10 +3454,10 @@
             headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
             body: json
           });
-          if (!r.ok) throw new Error('Server error ' + r.status);
+          if (!r.ok) throw await libraryError(r);
           toast('Saved "' + fname + '" to platform unit library');
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     async function exportAllUnits(target) {
@@ -3236,13 +3499,13 @@
               headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
               body: json
             });
-            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            if (!r.ok) throw await libraryError(r, fname);
             saved++;
           }
           const msg = 'Saved ' + saved + ' to platform unit library' + (skipped ? ' (' + skipped + ' skipped)' : '');
           toast(msg);
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     // ── Device Import / Export ────────────────────────────────
@@ -3297,10 +3560,10 @@
             headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
             body: json
           });
-          if (!r.ok) throw new Error('Server error ' + r.status);
+          if (!r.ok) throw await libraryError(r);
           toast('Saved "' + fname + '" to platform device library');
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     function openExportAllDevicesChoice()  { document.getElementById('dev-export-all-choice-bg').classList.add('open'); }
@@ -3346,22 +3609,34 @@
               headers: { 'Content-Type': 'application/json', 'Content-Length': json.length },
               body: json
             });
-            if (!r.ok) throw new Error('Server error ' + r.status + ' saving ' + fname);
+            if (!r.ok) throw await libraryError(r, fname);
             saved++;
           }
           const msg = 'Saved ' + saved + ' to platform device library' + (skipped ? ' (' + skipped + ' skipped)' : '');
           toast(msg);
         }
-      } catch(e) { toast('Export failed: ' + e.message, false); }
+      } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
     async function importDevicePayload(payload) {
       if (!payload.serial_number) throw new Error('JSON missing serial_number');
+      // Refused before anything is written, so no device is left without its components.
+      if (Array.isArray(payload.components) && payload.components.length && !can(rights, 'component'))
+        throw new Error('"' + payload.serial_number + '" has components, and your role cannot add components; nothing was imported.');
       const d = { serial_number: payload.serial_number };
       ['device_type','model','manufacturer','dns_name','connection_type','installation_date','is_active'].forEach(k => {
         if (payload[k] != null) d[k] = payload[k];
       });
-      const resp = await api('POST', '/device', d);
+      // An import carries no zone: a role limited to existing slots (existing_slot) is
+      // always refused here, so say that instead of "choose its zone".
+      let resp;
+      try { resp = await api('POST', '/device', d); }
+      catch(e) {
+        if (/existing_slot:/.test(e.raw || ''))
+          throw new Error('"' + payload.serial_number + '" was not imported: an import carries no zone, and your role registers a device '
+                          + 'only into an existing slot of a zone. Use + Add Record with its zone, or ask an engineer to import it.');
+        throw e;
+      }
       const newId = resp[0]?.device_id ?? (await api('GET', '/device?serial_number=eq.' + encodeURIComponent(payload.serial_number) + '&order=device_id.desc&limit=1'))[0]?.device_id;
       if (!newId) throw new Error('Could not get new device ID');
       if (Array.isArray(payload.components) && payload.components.length) {
@@ -3395,7 +3670,7 @@
       el.innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
       try {
         const r = await fetch(DEVICE_API);
-        if (!r.ok) throw new Error('Status ' + r.status);
+        if (!r.ok) throw await libraryError(r, null, 'read');
         const files = await r.json();
         if (!files.length) {
           el.innerHTML = '<div class="empty" style="padding:20px">No devices in platform library yet.<br>Use "↓ Export" → "Save to Platform" from a device row.</div>';
@@ -3415,7 +3690,7 @@
             + '</tr>').join('')
           + '</tbody></table>';
       } catch(e) {
-        el.innerHTML = '<div style="color:#fca5a5;padding:20px">Failed to reach platform library: ' + e.message + '</div>';
+        el.innerHTML = '<div style="color:#fca5a5;padding:20px">' + esc(e.refusal ? e.message : 'Failed to reach platform library: ' + e.message) + '</div>';
       }
     }
 
@@ -3428,7 +3703,7 @@
     async function importSelectedDevices() {
       const checked = [...document.querySelectorAll('.dev-lib-chk:checked')].map(cb => cb.value);
       if (!checked.length) { toast('Select at least one device', false); return; }
-      let ok = 0, skip = 0, skipped = [];
+      let ok = 0, skip = 0, skipped = [], firstErr = '';
       for (const fname of checked) {
         try {
           const r = await fetch(DEVICE_API + encodeURIComponent(fname));
@@ -3438,12 +3713,13 @@
           if (existing.length) { skip++; skipped.push(payload.serial_number); continue; }
           await importDevicePayload(payload);
           ok++;
-        } catch(e) { skip++; }
+        } catch(e) { skip++; if (!firstErr) firstErr = fname + ': ' + e.message; }
       }
       await loadAllDevices();
       closeDevicePlatformLibrary();
       let msg = 'Imported ' + ok + ' device' + (ok !== 1 ? 's' : '');
       if (skipped.length) msg += ' — ' + skipped.length + ' skipped (already exist): ' + skipped.join(', ');
+      if (firstErr) msg += ' — not imported: ' + firstErr;
       toast(msg, skip === 0 || ok > 0);
     }
 
@@ -3470,28 +3746,48 @@
     let permRecipes = [], permUnits = [], permAlgos = [];
     let permMap = new Map(); // key "recipeId:unitId" -> {allowed, algorithm_id, algorithm_params}
     let _permModalRecipeId = null, _permModalUnitId = null;
+    let permAlgosRefused = false, permAlgosFailed = false;
 
+    // recipe, cea_unit and recipe_unit_permission are the panel's own reads; the
+    // control algorithms only label the cells, so a role that does not read them still
+    // sees the matrix.
     async function loadPermissionMatrix() {
       const w = document.getElementById('security-table-wrap');
       w.innerHTML = '<div class="empty">Loading…</div>';
-      try {
-        const [recs, units, perms, algos] = await Promise.all([
-          api('GET', '/recipe?order=recipe_name'),
-          api('GET', '/cea_unit?order=unit_code'),
-          api('GET', '/recipe_unit_permission'),
-          api('GET', '/control_algorithm?is_active=eq.Y&order=algorithm_id')
-        ]);
-        permRecipes = recs;
-        permUnits = units;
-        permAlgos = algos;
-        permMap = new Map(perms.map(p => [p.recipe_id + ':' + p.unit_id,
-          {allowed: p.allowed, algorithm_id: p.algorithm_id, algorithm_params: p.algorithm_params}]));
-        renderPermMatrix();
-      } catch(e) { w.innerHTML = '<div class="empty">Load failed: ' + e.message + '</div>'; }
+      await rightsReady;
+      const settled = await Promise.allSettled([
+        api('GET', '/recipe?order=recipe_name'),
+        api('GET', '/cea_unit?order=unit_code'),
+        api('GET', '/recipe_unit_permission'),
+        api('GET', '/control_algorithm?is_active=eq.Y&order=algorithm_id')
+      ]);
+      const o = panelOutcome(settled, [{ table: 'recipe', primary: true }, { table: 'cea_unit', primary: true },
+                                       { table: 'recipe_unit_permission', primary: true }, { table: 'control_algorithm', primary: false }],
+                             'Your role does not read recipes or their unit permissions.');
+      if (o.state !== 'ok') {
+        w.innerHTML = '<div class="empty">' + esc(o.state === 'refused' ? o.message : 'Load failed: ' + o.message) + '</div>';
+        document.getElementById('perm-matrix-hint').textContent = '';
+        return;
+      }
+      const [recs, units, perms, algos] = settled.map(x => x.status === 'fulfilled' ? x.value : []);
+      permRecipes = recs;
+      permUnits = units;
+      permAlgos = algos;
+      permAlgosRefused = o.refusedAux.length > 0;
+      permAlgosFailed = o.failedAux.length > 0;
+      permMap = new Map(perms.map(p => [p.recipe_id + ':' + p.unit_id,
+        {allowed: p.allowed, algorithm_id: p.algorithm_id, algorithm_params: p.algorithm_params}]));
+      renderPermMatrix();
     }
 
+    // The ○ grant and ✓ settings buttons only for a role the recipe_unit_permission
+    // probe did not refuse (the upsert needs INSERT and UPDATE); otherwise plain glyphs.
     function renderPermMatrix() {
       const w = document.getElementById('security-table-wrap');
+      const write = can(rights, 'recipe_unit_permission');
+      document.getElementById('perm-matrix-hint').textContent = write
+        ? 'Check a cell to allow that recipe to run on that unit. Grey = inactive.'
+        : 'Read-only for your role: ✓ allowed, – not allowed. Grey = inactive.';
       if (!permRecipes.length || !permUnits.length) {
         w.innerHTML = '<div class="empty">No recipes or units defined.</div>';
         return;
@@ -3528,23 +3824,31 @@
             html += '<span style="color:#334155;font-size:1.1rem" title="' + (recInactive ? 'Recipe inactive' : 'Unit inactive') + '">—</span>';
           } else if (allowed) {
             html += '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
-              + '<button onclick="openPermAlgoModal(' + r.recipe_id + ',' + u.unit_id + ')"'
-              + ' title="Allowed — click to edit algorithm" style="background:none;border:none;cursor:pointer;font-size:1.25rem;line-height:1;padding:2px 4px;border-radius:4px">'
-              + '<span style="color:#22c55e">✓</span></button>'
-              + '<span style="font-size:.68rem;color:' + (algoObj ? '#a78bfa' : '#475569') + ';white-space:nowrap">'
-              + (algoObj ? algoObj.algorithm_code : 'IF_THEN_ELSE') + '</span>'
+              + (write
+                 ? '<button onclick="openPermAlgoModal(' + r.recipe_id + ',' + u.unit_id + ')"'
+                   + ' title="Allowed — click to edit algorithm" style="background:none;border:none;cursor:pointer;font-size:1.25rem;line-height:1;padding:2px 4px;border-radius:4px">'
+                   + '<span style="color:#22c55e">✓</span></button>'
+                 : '<span style="color:#22c55e;font-size:1.25rem;line-height:1;padding:2px 4px" title="Allowed">✓</span>')
+              + (permAlgosRefused || permAlgosFailed ? ''
+                 : '<span style="font-size:.68rem;color:' + (algoObj ? '#a78bfa' : '#475569') + ';white-space:nowrap">'
+                   + esc(algoObj ? algoObj.algorithm_code : 'IF_THEN_ELSE') + '</span>')
               + '</div>';
-          } else {
+          } else if (write) {
             html += '<button onclick="grantPermission(' + r.recipe_id + ',' + u.unit_id + ')"'
               + ' title="Not allowed — click to grant"'
               + ' style="background:none;border:none;cursor:pointer;font-size:1.25rem;line-height:1;padding:2px 4px;border-radius:4px">'
               + '<span style="color:#334155">○</span></button>';
+          } else {
+            html += '<span style="color:#334155;font-size:1.1rem" title="Not allowed">–</span>';
           }
           html += '</td>';
         });
         html += '</tr>';
       });
       html += '</tbody></table>';
+      if (permAlgosRefused || permAlgosFailed)
+        html += '<p class="muted" style="margin-top:8px">'
+          + esc((permAlgosRefused ? refusalText('control_algorithm') : 'The control algorithms could not be loaded.') + ' The algorithm of each permission is not shown.') + '</p>';
       w.innerHTML = html;
     }
 
@@ -3653,10 +3957,25 @@
       toast(`${what}${why ? ' (' + why + ')' : ''}: ${d.error || res.statusText || 'unknown error'}`, false);
     }
 
+    // A refusal (403 under IAM_ENFORCE) says so, never "No algorithms found". Save only
+    // when the control_algorithm probe did not refuse: the scheduler writes as the person.
     async function loadAlgorithms() {
-      const res = await fetch(`${SCHED_API}/algorithms`);
-      const algorithms = await res.json();
       const tb = document.getElementById('algo-tbody');
+      await rightsReady;
+      let res, d = null;
+      try {
+        res = await fetch(`${SCHED_API}/algorithms`);
+        d = await res.json().catch(() => null);
+      } catch(e) {
+        tb.innerHTML = '<tr><td colspan="5" class="empty" style="padding:28px;color:#fca5a5">' + esc('Failed to reach the scheduler: ' + e.message) + '</td></tr>';
+        return;
+      }
+      if (!res.ok) {
+        tb.innerHTML = '<tr><td colspan="5" class="empty" style="padding:28px">' + esc(schedReadText(res.status, d, 'control_algorithm')) + '</td></tr>';
+        return;
+      }
+      const algorithms = Array.isArray(d) ? d : [];
+      const algoWrite = can(rights, 'control_algorithm');
       if (!algorithms.length) {
         tb.innerHTML = '<tr><td colspan="5" class="empty" style="padding:28px">No algorithms found.</td></tr>';
         return;
@@ -3673,8 +3992,8 @@
           <td><span class="algo-badge">${esc(a.algorithm_code)}</span>${a.status ? `<div style="margin-top:5px"><span class="badge ${b.cls}" title="Runs use approved definitions only once the database enforces approvals">${esc(b.text)}</span></div>` : ''}</td>
           <td style="font-weight:600;color:#e2e8f0">${esc(a.algorithm_name)}</td>
           <td style="font-size:.82rem;color:#94a3b8">${esc(a.description || '')}</td>
-          <td><textarea id="algo-params-${a.algorithm_id}"${frozen ? ' readonly title="' + why + '"' : ''}>${esc(params)}</textarea></td>
-          <td><button class="btn btn-sm btn-purple" onclick="saveAlgorithm(${a.algorithm_id})"${frozen ? ' disabled title="' + why + '"' : ''}>Save</button></td>
+          <td><textarea id="algo-params-${a.algorithm_id}"${frozen || !algoWrite ? ' readonly' : ''}${frozen ? ' title="' + why + '"' : ''}>${esc(params)}</textarea></td>
+          <td>${algoWrite ? `<button class="btn btn-sm btn-purple" onclick="saveAlgorithm(${a.algorithm_id})"${frozen ? ' disabled title="' + why + '"' : ''}>Save</button>` : ''}</td>
         </tr>`;
       }).join('');
     }
@@ -3695,9 +4014,20 @@
     }
 
     async function loadUnitMemory() {
-      const res = await fetch(`${SCHED_API}/units`);
-      const units = await res.json();
       const tb = document.getElementById('units-memory-tbody');
+      let res, d = null;
+      try {
+        res = await fetch(`${SCHED_API}/units`);
+        d = await res.json().catch(() => null);
+      } catch(e) {
+        tb.innerHTML = '<tr><td colspan="4" class="empty" style="padding:28px;color:#fca5a5">' + esc('Failed to reach the scheduler: ' + e.message) + '</td></tr>';
+        return;
+      }
+      if (!res.ok) {
+        tb.innerHTML = '<tr><td colspan="4" class="empty" style="padding:28px">' + esc(schedReadText(res.status, d, null)) + '</td></tr>';
+        return;
+      }
+      const units = Array.isArray(d) ? d : [];
       if (!units.length) { tb.innerHTML = '<tr><td colspan="4" class="empty" style="padding:28px">No units found.</td></tr>'; return; }
       const rows = [];
       units.forEach(u => {
@@ -3746,7 +4076,13 @@
       document.getElementById('algo-state-modal-body').innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
       document.getElementById('algo-state-modal-bg').classList.add('open');
       try {
-        const rows = await (await fetch(`${SCHED_API}/units/${uid}/algorithm-state/${algo}`)).json();
+        const res = await fetch(`${SCHED_API}/units/${uid}/algorithm-state/${algo}`);
+        const d = await res.json().catch(() => null);
+        if (!res.ok) {
+          document.getElementById('algo-state-modal-body').innerHTML = '<div class="empty" style="padding:20px">' + esc(schedReadText(res.status, d, 'controllers_state')) + '</div>';
+          return;
+        }
+        const rows = Array.isArray(d) ? d : [];
         if (!rows.length) {
           document.getElementById('algo-state-modal-body').innerHTML = '<div class="empty" style="padding:20px">No records found.</div>';
           return;
@@ -3760,7 +4096,7 @@
               <td style="white-space:nowrap;color:#64748b;font-size:.8rem">${r.updated_at ? new Date(r.updated_at).toLocaleString() : '—'}</td>
             </tr>`).join('')}</tbody>
           </table>`;
-      } catch(e) { document.getElementById('algo-state-modal-body').innerHTML = `<div class="empty" style="padding:20px;color:#f87171">Failed to load: ${e.message}</div>`; }
+      } catch(e) { document.getElementById('algo-state-modal-body').innerHTML = `<div class="empty" style="padding:20px;color:#f87171">Failed to load: ${esc(e.message)}</div>`; }
     }
 
     function closeAlgoStateModal() {
@@ -3775,6 +4111,7 @@
 
     async function loadParamSets() {
       const w = document.getElementById('ps-wrap');
+      await rightsReady;
       try {
         const [sets, algs, us] = await Promise.all([
           api('GET', '/unit_algorithm_params?select=params_id,name,algorithm_id,unit_id,params,status,created_by_name,updated_by_name,timestamp_cre,timestamp_upd&order=name'),
@@ -3817,7 +4154,7 @@
             + '<td><span class="badge ' + b.cls + '">' + esc(b.text) + '</span></td>'
             + '<td class="muted">' + esc(p.updated_by_name || p.created_by_name || '—') + '<br>' + esc(fmtWhen(p.timestamp_upd || p.timestamp_cre)) + '</td>'
             + '<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="openParamSetModal(' + p.params_id + ')">'
-            + (isFrozen(p.status) ? 'View' : 'Edit') + '</button></td>'
+            + (isFrozen(p.status) || !can(rights, 'unit_algorithm_params') ? 'View' : 'Edit') + '</button></td>'
             + '</tr>';
         }).join('') + '</tbody></table>';
     }
@@ -3845,7 +4182,9 @@
         onParamSetAlgoChange();
       }
       const status = p ? p.status : 'draft';
-      const frozen = isFrozen(status);
+      // locked: approved or retired; frozen: locked, or read-only for this role
+      const locked = isFrozen(status), psWrite = can(rights, 'unit_algorithm_params');
+      const frozen = locked || !psWrite;
       Array.from(form.elements).forEach(el => { if (el.tagName !== 'BUTTON') el.disabled = frozen; });
       document.getElementById('ps-modal-title').textContent = p ? (frozen ? 'Parameter Set' : 'Edit Parameter Set')
                                                                  : (copyFrom ? 'New Draft from “' + copyFrom.name + '”' : 'New Parameter Set');
@@ -3855,13 +4194,13 @@
           + esc(p.updated_by_name || p.created_by_name || 'unknown') + ', ' + esc(fmtWhen(p.timestamp_upd || p.timestamp_cre)) + '</span>'
         : '';
       const banner = document.getElementById('ps-frozen-banner');
-      banner.classList.toggle('hidden', !frozen);
+      banner.classList.toggle('hidden', !locked);
       banner.textContent = status === 'retired'
         ? 'Retired: this parameter set is kept for the record and cannot be changed.'
-        : 'Approved: this parameter set is frozen. To change it, copy it to a new draft, which qa approves.';
+        : 'Approved: this parameter set is frozen.' + (psWrite ? ' To change it, copy it to a new draft, which qa approves.' : '');
       document.getElementById('ps-save-btn').classList.toggle('hidden', frozen);
-      document.getElementById('ps-copy-btn').classList.toggle('hidden', !p);
-      document.getElementById('ps-retire-btn').classList.toggle('hidden', !p || status === 'retired');
+      document.getElementById('ps-copy-btn').classList.toggle('hidden', !p || !psWrite);
+      document.getElementById('ps-retire-btn').classList.toggle('hidden', !p || status === 'retired' || !psWrite);
       document.getElementById('ps-modal-bg').classList.add('open');
       form.elements['params'].oninput = () => { psModal.touched = true; };
     }
