@@ -45,7 +45,14 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
   PhaseUnitsADelta  against PRE_UA (aeeb51f, release v0.5.0 + docs): the User Manager's
                    units, commit A (iam.record_unit_decision, database and deploy code only): defaults.yaml
                    unchanged, every artefact and the hosts listing byte-identical, check the
-                   same, skeleton-gate --against-git aeeb51f equal
+                   same, skeleton-gate --against-git aeeb51f equal; commit A's defaults.yaml
+                   (ref_tree(PRE_UB)), since commit B moves the policy
+  PhaseUnitsBDelta  against PRE_UB (32ae560, commit A): the policy of the User Manager's
+                   units (zones gains iam.record_unit_decision and GET/POST
+                   /api/users/<id>/units): skeleton-gate --against-git 32ae560 says widening
+                   with exactly access_svc's EXECUTE, admin's two routes and qa's and auditor's
+                   GET; no other role's reach, the matrix untouched, the checker clean, only
+                   the route table and the grants forms move
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -126,6 +133,8 @@ PRE_SCB = "e2d9a94"  # Superset stage C's commit A: commit B changes the policy 
 PRE_UA = "aeeb51f"   # the accepted skeleton (release v0.5.0, plus docs): the User Manager's units,
                      # commit A, adds database and deploy code only (iam.record_unit_decision), no artefact,
                      # listing or skeleton moves (PhaseUnitsADelta)
+PRE_UB = "32ae560"   # the User Manager's units, commit A: commit B changes the policy (the zones
+                     # group's function and routes; PhaseUnitsBDelta)
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -155,28 +164,30 @@ def as_of_43(key, out):
     return out.replace("[not deployed (Phase 4)]", "[compiled]") if key == "hosts" else out
 
 
-_REF = []
+_REF = {}
 
 
-def ref_tree():
-    """(root, cli.py, Policy) of a scratch tree holding this tree's compiler and PRE_SCB's
-    defaults.yaml: the factory policy before Superset stage C's commit B. The delta classes
-    of earlier slices compare against it, since they pin what each slice's code moved and
-    commit B moves the policy. unittest.SkipTest without git or that commit."""
-    if not _REF:
-        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_SCB}:apps/iam/policy/defaults.yaml"],
+def ref_tree(rev=None):
+    """(root, cli.py, Policy) of a scratch tree holding this tree's compiler and `rev`'s
+    defaults.yaml (default PRE_SCB: the factory policy before Superset stage C's commit B).
+    The delta classes of earlier slices compare against it, since they pin what each slice's
+    code moved and a later commit moves the policy (PRE_SCB's commit B; PRE_UB's units, commit
+    B). unittest.SkipTest without git or that commit."""
+    rev = rev or PRE_SCB
+    if rev not in _REF:
+        r = subprocess.run(["git", "-C", REPO, "show", f"{rev}:apps/iam/policy/defaults.yaml"],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            raise unittest.SkipTest(f"no git revision {PRE_SCB}: {r.stderr.strip()}")
+            raise unittest.SkipTest(f"no git revision {rev}: {r.stderr.strip()}")
         root = scratch_tree()
         with open(os.path.join(root, "apps", "iam", "policy", "defaults.yaml"), "w") as f:
             f.write(r.stdout)
-        _REF.append((root, os.path.join(root, "apps", "iam", "compiler", "cli.py"), model.Policy(yaml.safe_load(r.stdout))))
-    return _REF[0]
+        _REF[rev] = (root, os.path.join(root, "apps", "iam", "compiler", "cli.py"), model.Policy(yaml.safe_load(r.stdout)))
+    return _REF[rev]
 
 
 def tearDownModule():
-    for root, _, _ in _REF:
+    for root, _, _ in _REF.values():
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -2404,15 +2415,16 @@ class PhaseStageCADelta(unittest.TestCase):
 class PhaseUnitsADelta(unittest.TestCase):
     """The User Manager's units, commit A (iam.record_unit_decision in access_db.sql and its
     iam-db probes, the access deploy's owner check, the 2.7 rollback's list): database and
-    deploy code only, no policy change. defaults.yaml is PRE_UA's byte for
-    byte, every artefact, the hosts listing included, compiles byte for byte as PRE_UA's
-    cli.py does, check prints the same, and the skeleton gate against PRE_UA says equal."""
+    deploy code only, no policy change. Commit A's defaults.yaml (ref_tree(PRE_UA): commit B
+    moves the policy) is PRE_UA's byte for byte, every artefact, the hosts listing included,
+    compiles byte for byte as PRE_UA's cli.py does, check prints the same, and the skeleton
+    gate against PRE_UA says equal."""
 
     @classmethod
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_UA, "medcea-preua-")
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.ref = ref_tree(PRE_UB)   # the factory policy as commit A has it, this tree's compiler
+        cls.p = cls.ref[2]
         cls.want = artefacts(cls.p)
 
     @classmethod
@@ -2433,27 +2445,26 @@ class PhaseUnitsADelta(unittest.TestCase):
 
     def test_check_output_identical(self):
         rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
-        root = scratch_tree()   # this tree's compiler and policy, its own (empty) state/
-        try:
-            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        rc, out, err = run_cli(["check"], cli=self.ref[1])   # a scratch tree: its own (empty) state/
         self.assertEqual((rc, out), (rc_old, out_old), err)
 
     def test_policy_file_unchanged(self):
         with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
             old_text = f.read()
-        with open(DEFAULTS) as f:
-            self.assertEqual(f.read(), old_text)
+        with open(os.path.join(self.ref[0], "apps", "iam", "policy", "defaults.yaml")) as f:
+            self.assertEqual(f.read(), old_text)   # commit B changes it, not A
         self.assertEqual(source.skeleton_digest(yaml.safe_load(old_text)), source.skeleton_digest(self.p.data))
 
     def test_skeleton_gate_against_preua_is_equal(self):
-        """`cli.py skeleton-gate --check --against-git aeeb51f` prints equal (in-process)."""
+        """`cli.py skeleton-gate --check --against-git aeeb51f` prints equal (in-process), with
+        commit A's factory policy as git's side: the code is compared."""
         import argparse
         import contextlib
         import io
+        from unittest import mock
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_UA, state=None, check=True))
             except source.SourceError as e:
@@ -2461,6 +2472,150 @@ class PhaseUnitsADelta(unittest.TestCase):
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+class PhaseUnitsBDelta(unittest.TestCase):
+    """The User Manager's units, commit B (12 Nov 2026): the policy. Group zones gains
+    iam.record_unit_decision (K, svc_access only) and the access routes
+    GET/POST /api/users/<id>/units ([R, K] and K); svc_access's ceiling on zones gains K.
+    Against PRE_UB (commit A): the skeleton gate says widening with exactly access_svc's
+    EXECUTE in system reach, admin's two routes (under qa_dual_control) and qa's and
+    auditor's GET route; no other role's reach moves; the matrix is commit A's; the checker
+    passes on commit A's rows (the proposal's precondition); and exactly the declared
+    artefacts move (the route table and the grants forms), every other one compiling byte
+    for byte as commit A's cli.py does."""
+
+    ROUTE_GET = ["route", "access", "GET /api/users/<id>/units"]
+    ROUTE_POST = ["route", "access", "POST /api/users/<id>/units"]
+    FUNCTION = "iam.record_unit_decision(text,text,text,text,integer,text)"
+    SYSTEM = [["svc", "access_svc", "function", FUNCTION, "EXECUTE"]]
+    PERSONS = {"admin": [ROUTE_GET + [["qa_dual_control"]], ROUTE_POST + [["qa_dual_control"]]],
+               "auditor": [ROUTE_GET + [None]],
+               "qa": [ROUTE_GET + [None]]}
+    CHANGED = {"routes"}   # plus every grants- form
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_UB, "medcea-preub-")
+        cls.a = ref_tree(PRE_UB)[2]
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+        cls.was = artefacts(cls.a)
+        cls.rows = source.entries_and_waivers(cls.a.data)   # commit A's factory matrix
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_UB}: {self.old_cli}")
+
+    def expected_added(self):
+        return dict(self.PERSONS, _system=self.SYSTEM)
+
+    def test_skeleton_gate_against_commit_a_widens(self):
+        """`cli.py skeleton-gate --against-git 32ae560 --check` (in-process): widening, exit 3,
+        exactly the pinned tuples, nothing narrowed."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_UB, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_UB}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(g["added"], self.expected_added())
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(sorted(g["unchanged"]), sorted(set(self.p.roles) - set(self.PERSONS)))
+        self.assertEqual(g["accepted_digest"], source.skeleton_digest(self.a.data))
+        self.assertEqual(g["git_digest"], source.skeleton_digest(self.p.data))
+        self.assertIn("--propose-skeleton", err.getvalue())
+        self.assertIn("Nothing was changed.", err.getvalue())
+
+    def test_gate_and_checker_under_commit_a_rows(self):
+        """explain.gate(accepted = commit A, git = B, commit A's rows): what --propose-skeleton
+        computes; the checker passes on those rows (its precondition)."""
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))   # tuples as the CLI prints them
+        self.assertEqual(g["verdict"], "widening")
+        self.assertEqual(g["added"], self.expected_added())
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+
+    def test_no_other_role_reach_moves(self):
+        composed = model.Policy(source.compose(source.skeleton(self.p.data), self.rows))
+        self.assertEqual(invariants.check(composed)[0], [])
+        for role in sorted(set(self.p.roles) - set(self.PERSONS)):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(composed, role), explain.reach(self.a, role))
+
+    def test_matrix_untouched(self):
+        self.assertEqual(self.p.data["matrix"], self.a.data["matrix"])
+        self.assertEqual(self.p.data["waivers"], self.a.data["waivers"])
+        self.assertEqual(source.entries_and_waivers(self.p.data), self.rows)
+
+    def test_exactly_the_declared_artefacts_move(self):
+        self.assertEqual(set(self.want), set(self.was))
+        moved = {k for k in self.was if self.was[k] != self.want[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, self.CHANGED)
+        for key, want in self.want.items():
+            if key in self.CHANGED or key.startswith("grants-"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)   # commit A's code and policy
+                self.assertEqual(rc, 0, f"{key} ({PRE_UB}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_route_table(self):
+        """routes.json: only the access service gains the two routes; the digest moves."""
+        old, new = json.loads(self.was["routes"]), json.loads(self.want["routes"])
+        self.assertEqual({k for k in set(old) | set(new) if old.get(k) != new.get(k)}, {"digest", "services"})
+        for svc in set(old["services"]) | set(new["services"]):
+            o, n = old["services"].get(svc), new["services"].get(svc)
+            if svc != "access":
+                self.assertEqual(o, n, svc)
+                continue
+            self.assertEqual({k: v for k, v in o.items() if k != "routes"}, {k: v for k, v in n.items() if k != "routes"})
+            gone = {r for r in o["routes"] if o["routes"][r] != n["routes"].get(r)}
+            self.assertEqual(gone, set())
+            self.assertEqual(set(n["routes"]) - set(o["routes"]),
+                             {"GET /api/users/<id>/units", "POST /api/users/<id>/units"})
+
+    def test_the_grants(self):
+        """grants-json: exactly access_svc's EXECUTE on the new function; the SQL forms move
+        only by that function's lines and the two digests."""
+        go, gn = json.loads(self.was["grants-json"]), json.loads(self.want["grants-json"])
+        self.assertEqual({k for k in set(go) | set(gn) if go.get(k) != gn.get(k)}, {"privileges", "digest"})
+        self.assertEqual([x for x in go["privileges"] if x not in gn["privileges"]], [])
+        self.assertEqual([tuple(x) for x in gn["privileges"] if x not in go["privileges"]],
+                         [tuple(t[1:]) for t in self.SYSTEM])
+        r_old, r_new = json.loads(self.was["routes"])["digest"], json.loads(self.want["routes"])["digest"]
+        sql_keys = [k for k in self.want if k.startswith("grants-") and not k.startswith("grants-json")]
+        self.assertEqual(len(sql_keys), 16)
+        for key in sql_keys:
+            with self.subTest(key):
+                d_old = grants.document(self.a, *_grants_doc_args(key))["digest"]
+                d_new = grants.document(self.p, *_grants_doc_args(key))["digest"]
+                self.assertEqual(self.want[key].count("'" + self.FUNCTION + "'"),
+                                 len(self.want[key].split("record_unit_decision")) - 1)   # every mention is the grant's
+
+                def strip(text):
+                    out = []
+                    for x in text.splitlines():
+                        if x.lstrip().startswith("('access_svc', 'function', 'iam.record_unit_decision("):
+                            continue   # its privilege row
+                        x = x.replace("'" + self.FUNCTION + "', ", "").replace(", '" + self.FUNCTION + "'", "")
+                        out.append(_SHA256.sub("<sha256>", x).rstrip(",)"))
+                    return out
+                self.assertEqual(strip(self.want[key]), strip(self.was[key]))
+                h_old, h_new = set(_SHA256.findall(self.was[key])), set(_SHA256.findall(self.want[key]))
+                self.assertEqual(h_new - h_old <= {r_new, d_new}, True, h_new - h_old)
+                self.assertEqual(h_old - h_new <= {r_old, d_old}, True, h_old - h_new)
+                self.assertEqual("record_unit_decision" in self.was[key], False)
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -2538,8 +2693,9 @@ class PhaseStageCBDelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_SCB, "medcea-prescb-")
         cls.a = ref_tree()[2]
-        with open(DEFAULTS) as f:
-            cls.p = model.Policy(yaml.safe_load(f))
+        # commit B's defaults.yaml, which PRE_UB still has (the units' commit B moves the policy
+        # again; PhaseUnitsBDelta pins that step)
+        cls.p = ref_tree(PRE_UB)[2]
         cls.want = artefacts(cls.p)
         cls.was = artefacts(cls.a)
         cls.v14 = source.entries_and_waivers(cls.a.data)   # version 14's rows = commit A's factory matrix
@@ -2563,8 +2719,11 @@ class PhaseStageCBDelta(unittest.TestCase):
         import argparse
         import contextlib
         import io
+        from unittest import mock
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # git's side is stage C's commit B policy (ref_tree(PRE_UB)), not the working tree's
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SCB, state=None, check=True))
             except source.SourceError as e:

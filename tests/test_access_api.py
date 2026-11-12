@@ -55,6 +55,9 @@ TABLE = {
         'GET /api/users': {'group': 'iam_users', 'levels': ['K'], 'roles': {'admin': None}},
         'POST /api/decisions/<id>/confirm': {'group': 'iam_users', 'levels': ['A'], 'roles': {'qa': None, 'superqa': None}},
         'POST /api/decisions/<id>/withdraw': {'group': 'iam_users', 'levels': ['K'], 'roles': {'admin': None}},
+        'GET /api/users/<id>/units': {'group': 'zones', 'levels': ['R', 'K'],
+                                      'roles': {'admin': None, 'auditor': None, 'qa': None, 'superqa': None}},
+        'POST /api/users/<id>/units': {'group': 'zones', 'levels': ['K'], 'roles': {'admin': None}},
         'GET /api/config-history': {'group': 'audit_histories', 'levels': ['R'],
                                     'roles': {'auditor': None, 'qa': None, 'qp': None, 'superqa': None}},
     }}},
@@ -1093,6 +1096,184 @@ def under_lock(world, change, row):
     return rows
 
 
+# ── units of an operator (IAM units UI, commit B) ─────────────────────────────
+class Units(Base):
+    """GET/POST /api/users/<id>/units: zones R/K, iam.record_unit_decision with the
+    signed-in admin as the maker; an assignment needs an enabled operator with a person_id."""
+    UNITS = 'FROM medcea.cea_unit u LEFT JOIN LATERAL'
+
+    def setUp(self):
+        super().setUp()
+        self.staff()
+        self.w.user(S, 'sam', roles=['operator'], person='pS')
+        self.path = '/api/users/%s/units' % S
+
+    def routed(self, who):
+        """The route table decides (LIB.allows), not a scripted Decision."""
+        w = dict(who)
+
+        def chk(service, method, path, headers):
+            ok = LIB.allows(w['roles'], service, method, path.split('?')[0])
+            return LIB.Decision(ok, 200 if ok else 403, 'allowed' if ok else 'refused', w)
+        LIB._check = chk
+
+    def post(self, action='assign', unit=3, reason='needs U3', uid=S):
+        return self.call('POST', '/api/users/%s/units' % uid, {'action': action, 'unit': unit, 'reason': reason})
+
+    def test_get_shape(self):
+        at = datetime.datetime(2026, 11, 12, 9, 0, tzinfo=datetime.timezone.utc)
+        self.w.on(self.UNITS, [(1, 'U1', True, None, None, None, None, None),            # backfilled, no decision
+                               (2, 'U2', True, 11, 'unit_assign', 'pending_qa', 'system:deploy (bootstrap, by alice)', at),
+                               (3, 'U3', False, 12, 'unit_assign', 'pending_qa', 'alice', at),
+                               (4, 'U4', False, 13, 'unit_remove', 'applied', 'alice', at),
+                               (5, 'U5', True, 14, 'unit_assign', 'confirmed', 'alice', at),
+                               (6, 'U6', False, None, None, None, None, None)])
+        for who in (ADMIN, QA, AUDITOR):
+            self.routed(who)
+            status, body = self.call('GET', self.path)
+            self.assertEqual(status, 200, (who['username'], body))
+            self.assertEqual(body, {
+                'assigned': [{'unit_id': 1, 'unit_code': 'U1', 'before_check': False, 'decision_id': None},
+                             {'unit_id': 2, 'unit_code': 'U2', 'before_check': True, 'decision_id': 11},
+                             {'unit_id': 5, 'unit_code': 'U5', 'before_check': False, 'decision_id': 14}],
+                'waiting': [{'unit_id': 3, 'unit_code': 'U3', 'decision_id': 12, 'made_by_name': 'alice',
+                             'made_at': at.isoformat()}],
+                'available': [{'unit_id': 4, 'unit_code': 'U4'}, {'unit_id': 6, 'unit_code': 'U6'}]})
+        sql, params = next((e[1], e[2]) for e in self.w.events if e[0] == 'sql' and self.UNITS in e[1])
+        self.assertEqual(params, (S, S))
+        self.assertIn('FROM iam_policy.user_unit uu', sql)
+        self.assertIn("('unit_assign', 'unit_remove') ORDER BY d.decision_id DESC LIMIT 1", sql)
+        self.assertFalse(any(e[0] == 'commit' or 'set_actor' in (e[1] if e[0] == 'sql' else '') for e in self.w.events))
+        self.assertEqual(self.w.kc_writes(), [])
+
+    def test_get_refused_for_an_engineer_and_unknown_path(self):
+        self.routed(dict(ADMIN, sub=T, person_id='pT', username='eve', roles=['engineer']))
+        self.assertEqual(self.call('GET', self.path)[0], 403)
+        self.assertEqual(self.w.events, [])
+        self.routed(ADMIN)
+        self.assertEqual(self.call('GET', '/api/users/not-a-uuid/units')[0], 404)
+
+    def test_assign_proposed(self):
+        self.w.on('iam.record_unit_decision', [('proposed', 'U3', 80)])
+        status, body = self.post()
+        self.assertEqual((status, body), (202, {'status': 'pending_qa', 'decision': 80, 'unit_code': 'U3'}))
+        self.order('set_actor', 'iam.record_unit_decision', 'commit')
+        call = next(e for e in self.w.events if e[0] == 'sql' and 'iam.record_unit_decision' in e[1])
+        self.assertEqual(call[2], ('assign', S, 'sam', 'pS', 3, 'needs U3'))
+        actor = next(e for e in self.w.events if e[0] == 'sql' and 'set_actor' in e[1])
+        self.assertEqual(actor[2], (A, 'pA', 'alice', 'admin'))
+        self.assertEqual(self.w.kc_writes(), [])
+
+    def test_assign_to_a_production_manager_counts_as_operator(self):
+        self.w.user(S, 'sam', roles=['production_manager'], person='pS')
+        self.w.on('iam.record_unit_decision', [('proposed', 'U3', 80)])
+        self.assertEqual(self.post()[0], 202)
+
+    def test_assign_waiting(self):
+        self.w.on('iam.record_unit_decision', [('waiting', 'U3', 79)])
+        status, body = self.post(unit='3')
+        self.assertEqual((status, body), (202, {'status': 'waiting', 'decision': 79, 'unit_code': 'U3'}))
+
+    def test_other_outcomes_are_200(self):
+        for outcome, did, action in (('removed', 81, 'remove'), ('withdrawn', 80, 'remove'),
+                                     ('unchanged', None, 'remove'), ('unchanged', 12, 'assign')):
+            self.w.on('iam.record_unit_decision', [(outcome, 'U3', did)], once=True)
+            status, body = self.post(action=action)
+            self.assertEqual((status, body), (200, {'ok': True, 'status': outcome, 'decision': did,
+                                                    'unit_code': 'U3'}), outcome)
+        self.assertEqual(sum(1 for e in self.w.events if e == ('commit',)), 4)
+
+    def test_assign_refused_when_the_account_changed_meanwhile(self):
+        def disable():
+            self.w.users[S]['enabled'] = False
+        self.w.on('iam.record_unit_decision', under_lock(self.w, disable, ('proposed', 'U3', 80)))
+        status, body = self.post()
+        self.assertEqual((status, body['error']), (409, API.CHANGED_NOW))
+        self.assertNotIn(('commit',), self.w.events)
+        self.assertIn(('rollback',), self.w.events)
+
+    def test_bad_input_is_400(self):
+        for body in ({'action': 'grant', 'unit': 3, 'reason': 'r'}, {'unit': 3, 'reason': 'r'},
+                     {'action': 'assign', 'unit': 'U3', 'reason': 'r'}, {'action': 'assign', 'unit': True, 'reason': 'r'},
+                     {'action': 'assign', 'unit': 0, 'reason': 'r'}, {'action': 'assign', 'reason': 'r'},
+                     {'action': 'assign', 'unit': 3}, {'action': 'assign', 'unit': 3, 'reason': '  '},
+                     {'action': 'remove', 'unit': 3, 'reason': 5}):
+            self.assertEqual(self.call('POST', self.path, body)[0], 400, body)
+        self.assertEqual(self.w.events, [])
+
+    def test_own_and_service_accounts(self):
+        status, body = self.post(uid=A)
+        self.assertEqual(status, 400)
+        self.assertIn('your own account', body['error'])
+        self.w.user(T, 'service-account-access')
+        status, body = self.post(action='remove', uid=T)
+        self.assertEqual(status, 400)
+        self.assertIn('service accounts', body['error'])
+        self.assertEqual(self.w.sql(), [])
+
+    def test_assign_needs_an_enabled_operator_with_a_person(self):
+        cases = ((dict(roles=['engineer'], person='pS'), 'operator role'),
+                 (dict(roles=['operator'], person='pS', enabled=False), 'disabled'),
+                 (dict(roles=['operator']), 'no person_id'))
+        for kw, words in cases:
+            self.w.user(S, 'sam', **kw)
+            status, body = self.post()
+            self.assertEqual(status, 409, kw)
+            self.assertIn(words, body['error'])
+            self.assertIn('sam', body['error'])
+            self.assertEqual(self.w.sql(), [], 'refused before the database')
+            # removing a leftover unit stays allowed for any account
+            self.w.on('iam.record_unit_decision', [('removed', 'U3', 81)], once=True)
+            self.assertEqual(self.post(action='remove')[0], 200, kw)
+            call = next(e for e in self.w.events if e[0] == 'sql' and 'iam.record_unit_decision' in e[1])
+            # the attribute itself, never the account id: the database's own refusal stays reachable
+            self.assertEqual(call[2][3], kw.get('person'))
+            self.w.events[:] = []
+
+    def test_database_refusals(self):
+        self.w.on('iam.record_unit_decision', error=PgErr('42501', 'role admin holds no K on zones'), once=True)
+        status, body = self.post()
+        self.assertEqual((status, body['error']), (403, 'role admin holds no K on zones'))
+        self.w.on('iam.record_unit_decision', error=PgErr('22023', 'decision #80 is no longer waiting'), once=True)
+        status, body = self.post(action='remove')
+        self.assertEqual((status, body['error']), (409, 'decision #80 is no longer waiting'))
+        self.assertNotIn(('commit',), self.w.events)
+        self.assertEqual(self.w.events.count(('rollback',)), 2)
+
+    def test_csrf(self):
+        status, _ = self.call('POST', self.path, raw_body=b'action=assign&unit=3',
+                              headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        self.assertEqual(status, 415)
+        self.assertEqual(self.call('POST', self.path, {'action': 'assign', 'unit': 3, 'reason': 'r'},
+                                   headers={'Origin': 'https://evil.test'})[0], 403)
+        self.assertEqual(self.w.events, [])
+
+    def test_qa_may_read_but_not_change(self):
+        self.routed(QA)
+        self.assertEqual(self.post()[0], 403)
+        self.assertEqual(self.w.events, [])
+
+    def test_me_capabilities(self):
+        for who, write in ((ADMIN, True), (QA, False), (AUDITOR, False)):
+            self.as_(who)
+            can = self.call('GET', '/api/me')[1]['can']
+            self.assertIs(can['units'], write, who['username'])
+            self.assertIs(can['units_read'], True, who['username'])
+        self.as_(dict(ADMIN, roles=['engineer']))
+        can = self.call('GET', '/api/me')[1]['can']
+        self.assertEqual((can['units'], can['units_read']), (False, False))
+
+    def test_refusal_texts_point_to_the_units_section(self):
+        with open(os.path.join(REPO, 'apps', 'access', 'access_db.sql')) as fh:
+            sql = fh.read()
+        self.assertNotIn('until IAM 4.3', sql)
+        self.assertNotIn('undo it with apps/iam/units.sh remove', sql)
+        self.assertIn("'units are assigned in the account''s Units section of the User Manager"
+                      " (or with apps/iam/units.sh on the host)'", sql)
+        self.assertIn("'decision #% is a unit decision: withdraw it in the account''s Units section of the"
+                      " User Manager (or apps/iam/units.sh remove on the host)'", sql)
+
+
 class LockedReads(Base):
     def setUp(self):
         super().setUp()
@@ -1278,6 +1459,24 @@ class LiveChecks(Base):
         self.assertEqual(body['applied'], ['UNIT03 assigned to op2'])
         self.order('medcea_auth.set_actor', 'iam.confirm_decision', 'FROM medcea.cea_unit WHERE unit_id', 'commit')
         self.assertEqual(self.w.kc_writes(), [])
+
+    def test_unit_confirm_rechecks_the_owner_rule_for_a_user_manager_row(self):
+        # made in the User Manager, then the account was disabled: no unit for it
+        self.w.user(S, 'op2', roles=['operator'], person='pS', enabled=False)
+        self.unit_row('pS')
+        self.w.on('SELECT made_by_sub, made_by_name FROM iam.account_decision', [(A, 'alice')])
+        status, body = self.call('POST', '/api/decisions/30/confirm', {'note': ''})
+        self.assertEqual(status, 409, body)
+        self.assertIn('disabled', body['error'])
+        self.assertIn('refuse this decision', body['error'])
+        self.assertNotIn(('commit',), self.w.events)
+        # a units.sh row only warns, as the script does
+        self.w.events[:] = []
+        self.unit_row('pS')
+        self.w.on('SELECT made_by_sub, made_by_name FROM iam.account_decision', [(A, 'system:deploy (by alice)')])
+        self.w.on('FROM medcea.cea_unit WHERE unit_id', [('UNIT03',)])
+        status, body = self.call('POST', '/api/decisions/30/confirm', {'note': API.ATTEST})
+        self.assertEqual(status, 200, body)
 
     def test_unit_confirm_a_deleted_unit_is_refused(self):
         # iam.confirm_decision raises 22023 when the unit is gone (FK 23503 on the insert)

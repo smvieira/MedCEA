@@ -569,13 +569,18 @@ function selectUser(u) {
     };
   }
   if (st !== 'pending' && !mine) { roleSection(d, u); personSection(d, u); }
+  let reloadDecisions = null;                          // set below; the Units section calls it after an action
+  if (st !== 'pending' && !mine && ME.can.units_read) unitsSection(d, u, () => { if (reloadDecisions) reloadDecisions(); });
   if (ME.can.decisions_read) {
     const ul = el('ul', 'hist');
     d.append(el('h3', null, 'Decisions about this account'), ul);
-    api('/api/decisions?status=all&user=' + u.id).then(out => {
+    reloadDecisions = () => api('/api/decisions?status=all&user=' + u.id).then(out => {
+      if (ucurrent !== u) return;
+      ul.replaceChildren();
       if (!out.decisions.length) ul.append(el('li', 'when', 'No account decisions recorded.'));
       out.decisions.forEach(x => { const li = el('li'); li.append(el('div', null, '#' + x.decision_id + ' ' + kindLabel(x) + ' — ' + x.status + ', by ' + x.made_by_name), el('div', 'when', fmt(x.made_at))); if (x.reason) li.append(el('div', 'n', x.reason)); ul.append(li); });
-    }).catch(() => ul.append(el('li', null, 'Decisions unavailable.')));
+    }).catch(() => ul.replaceChildren(el('li', null, 'Decisions unavailable.')));
+    reloadDecisions();
   }
   if (!ME.can.histories) return;
   const ul = el('ul', 'hist');
@@ -654,6 +659,94 @@ function personSection(d, u) {
           f.res.className = 'res good'; f.res.textContent = WAIT(out.decision.decision_id); setTimeout(() => loadUsers(u.id), 900); }
     catch (e) { f.res.className = 'res bad'; f.res.textContent = 'Not recorded: ' + e.message; f.go.disabled = false; }
   };
+}
+// The operator's units (own_unit): assigned, waiting for qa, and — for an admin — the
+// Assign form. An assignment waits for qa; a removal applies at once; removing a
+// waiting assignment withdraws it. The API refuses an assignment to an account that
+// is not an enabled operator with a person_id, and says why.
+function unitsSection(d, u, after) {
+  d.append(el('h3', null, 'Units'));
+  const box = el('div'); d.append(box);
+  const decisionNo = x => x && typeof x === 'object' ? x.decision_id : x;
+  async function paint(keep) {
+    let out;
+    try { out = await api('/api/users/' + u.id + '/units'); }
+    catch (e) { box.replaceChildren(el('div', 'note re', 'Units unavailable: ' + e.message)); return; }
+    if (ucurrent !== u) return;                        // another account was selected meanwhile
+    box.replaceChildren();
+    box.append(el('div', 'help', 'The units this account works in (operators see and run only these). Assigning waits for a qa person; removing applies at once.'));
+    const res = el('div', 'res');
+    if (keep) { res.className = keep.className; res.textContent = keep.textContent; }
+    let reason = null;
+    const act = async (action, unit, label, q) => {
+      if (!reason.value.trim()) { res.className = 'res bad'; res.textContent = 'Give a reason.'; reason.focus(); return; }
+      if (!confirm(q)) return;
+      box.querySelectorAll('button').forEach(b => b.disabled = true);
+      try {
+        const r = await post('/api/users/' + u.id + '/units', { action, unit, reason: reason.value });
+        const code = r.unit_code || label;
+        res.className = 'res good';
+        res.textContent = r.status === 'pending_qa' ? WAIT(decisionNo(r.decision))
+          : r.status === 'waiting' ? code + ' already waits for qa' + (decisionNo(r.decision) ? ' (decision #' + decisionNo(r.decision) + ')' : '') + '; nothing recorded.'
+          : r.status === 'removed' ? code + ' removed.'
+          : r.status === 'withdrawn' ? 'The waiting assignment of ' + code + ' was withdrawn.'
+          : 'Nothing changed: ' + (action === 'assign' ? code + ' is already assigned.' : code + ' is not assigned.');
+        setTimeout(() => { paint(res); if (after) after(); }, 900);
+      } catch (e) {
+        res.className = 'res bad'; res.textContent = 'Not changed: ' + e.message;
+        box.querySelectorAll('button').forEach(b => b.disabled = false);
+      }
+    };
+    const assigned = out.assigned || [], waiting = out.waiting || [], available = out.available || [];
+    const ua = el('ul', 'hist');
+    if (!assigned.length) ua.append(el('li', 'when', 'No unit assigned.'));
+    assigned.forEach(x => {
+      const li = el('li'), t = el('div', null, unitName(x));
+      if (x.before_check) t.append(el('span', 'tag', 'in effect before the check'));
+      li.append(t);
+      if (x.before_check && x.decision_id) li.append(el('div', 'when', 'decision #' + x.decision_id + ' still waits for qa'));
+      if (ME.can.units) {
+        const b = el('button', 'btn', 'Remove');
+        b.setAttribute('aria-label', 'Remove ' + unitName(x));
+        b.onclick = () => act('remove', x.unit_id, unitName(x), 'Remove ' + unitName(x) + ' from ' + u.display_name + '? It applies at once.');
+        const a = el('div', 'acts'); a.append(b); li.append(a);
+      }
+      ua.append(li);
+    });
+    box.append(el('div', 'note', 'Assigned'), ua);
+    if (waiting.length) {
+      const uw = el('ul', 'hist');
+      waiting.forEach(x => {
+        const li = el('li');
+        li.append(el('div', null, unitName(x) + ' — decision #' + x.decision_id), el('div', 'when', 'by ' + (x.made_by_name || '—') + ', ' + fmt(x.made_at)));
+        if (ME.can.units) {
+          const b = el('button', 'btn', 'Withdraw');
+          b.setAttribute('aria-label', 'Withdraw decision #' + x.decision_id + ' (' + unitName(x) + ')');
+          b.onclick = () => act('remove', x.unit_id, unitName(x), 'Withdraw decision #' + x.decision_id + ' (' + unitName(x) + ' for ' + u.display_name + ')? Nothing it proposed is applied.');
+          const a = el('div', 'acts'); a.append(b); li.append(a);
+        }
+        uw.append(li);
+      });
+      box.append(el('div', 'note', 'Waiting for qa (not in effect yet)'), uw);
+    }
+    if (!ME.can.units) { box.append(res); return; }
+    const ls = el('label', null, 'Assign a unit'); ls.htmlFor = 'uunit';
+    const sel = el('select'); sel.id = 'uunit';
+    available.forEach(x => { const o = el('option', null, unitName(x)); o.value = x.unit_id; sel.append(o); });
+    if (!available.length) { const o = el('option', null, 'no unit left to assign'); o.value = ''; sel.append(o); sel.disabled = true; }
+    box.append(ls, sel);
+    const f = actionForm(box, 'uureason', 'Reason', true, 'Assign (waits for qa)', 'btn pri');
+    reason = f.ta;
+    box.removeChild(f.res); box.append(res);
+    f.go.disabled = !available.length;
+    f.go.onclick = () => {
+      const x = available.find(a => String(a.unit_id) === sel.value);
+      if (!x) return;
+      act('assign', x.unit_id, unitName(x), 'Assign ' + unitName(x) + ' to ' + u.display_name + '? A qa person must confirm it.');
+    };
+  }
+  box.append(el('div', 'note', 'Loading…'));
+  paint();
 }
 $('utabs').addEventListener('click', e => {
   if (!e.target.dataset.u) return;
@@ -745,6 +838,12 @@ function selectDecision(x) {
        : x.in_effect ? 'In effect before the check; refusing removes the unit.'
        : 'Not in effect: ' + unitName(x) + ' is assigned when you confirm; refusing applies nothing.')
     : 'Applied at once by units.sh.'));
+  // A unit decision made in the User Manager's Units section (IAM 4.3 units): an
+  // assignment waits for qa, a removal applied at once.
+  else if (x.kind === 'unit_assign' && x.status === 'pending_qa')
+    d.append(el('div', 'note re', x.superseded ? 'Superseded: decision #' + x.superseded_by + ' governs this unit now; refuse this one, which changes nothing.'
+      : 'Not in effect: ' + unitName(x) + ' is assigned when you confirm; refusing applies nothing.'));
+  else if (x.kind === 'unit_remove') d.append(el('div', 'note', 'Applied at once in the User Manager.'));
   if (x.applicant) {
     const a = x.applicant;
     d.append(el('h3', null, 'Applicant'));
@@ -814,6 +913,12 @@ function selectDecision(x) {
   }
   if (ME.can.decisions_withdraw && x.status === 'pending_qa' && !/^unit_|^zone_/.test(x.kind))
     withdrawSection(d, x.decision_id, () => loadDecisions(x.decision_id));
+  else if (ME.can.decisions_withdraw && x.status === 'pending_qa' && /^unit_/.test(x.kind))
+    d.append(el('div', 'note', x.kind !== 'unit_assign' || x.superseded
+      ? 'Not withdrawn here: a qa person refuses or reviews it.'
+      : x.in_effect
+        ? 'Not withdrawn here: remove the unit in the account\'s Units section (Users; the decision then stays for qa to refuse), or have qa refuse it.'
+        : 'Not withdrawn here: withdraw it in the account\'s Units section (Users).'));
 }
 
 // ── E-mail settings ──────────────────────────────────────────────────────────

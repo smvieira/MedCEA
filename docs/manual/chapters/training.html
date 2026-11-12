@@ -9,7 +9,7 @@
 <thead><tr><th>Exercise</th><th>Roles</th><th>What it proves</th><th>Last done</th></tr></thead>
 <tbody>
 <tr><td><a href="#training-e1">E1 Request access and grant a role</a></td><td>applicant, <span class="role">admin</span>, <span class="role">qa</span></td><td>An approved request gives no access until a second person confirms it.</td><td>Not recorded here</td></tr>
-<tr><td><a href="#training-e2">E2 Assign a unit to an operator</a></td><td>host operator, <span class="role">qa</span>, <span class="role">operator</span></td><td>An operator sees a unit only after <span class="role">qa</span> confirms the assignment, with the attestation.</td><td>Partly (confirmation only): 31 Oct 2026, UNIT01 (decision 14)</td></tr>
+<tr><td><a href="#training-e2">E2 Assign a unit to an operator</a></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">operator</span></td><td>An administrator assigns a unit in the User Manager, and the operator sees it only after a different <span class="role">qa</span> person confirms it.</td><td>Not yet run in the User Manager (with <code>units.sh</code>: partly, 31 Oct 2026)</td></tr>
 <tr><td><a href="#training-e3">E3 Draft and approve a parameter set</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>A draft is used only after another person approves it, and is frozen afterwards.</td><td>31 Oct 2026, <code>q_test</code> (approval #6)</td></tr>
 <tr><td><a href="#training-e4">E4 Return and withdraw</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>Work can be sent back with a reason or taken back by its proposer, and both are recorded.</td><td>Not yet on production</td></tr>
 <tr><td><a href="#training-e5">E5 Test mode and the MQTT Explorer</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>Commands reach a unit only while <span class="role">qa</span> has approved test mode, and stop when it ends.</td><td>31 Oct 2026, two cycles on UNIT01</td></tr>
@@ -110,28 +110,31 @@
 <p><strong>Last done.</strong> Not recorded here.</p>
 
 <h3 id="training-e2">E2 Assign a unit to an operator</h3>
-<p><strong>Goal.</strong> Give an operator a unit and see that the operator sees nothing of it until <span class="role">qa</span> confirms.</p>
-<p><strong>Accounts and roles.</strong> The person who runs <code>units.sh</code> on the host (recorded as maker with <code>--by</code>), a <span class="role">qa</span> person who did not run it (<code>svieira</code>), and an <span class="role">operator</span> account (from <a href="#training-e1">E1</a>). The script cannot prove who ran it, so <span class="role">qa</span> attests that they did not.</p>
-<p><strong>Before you start.</strong> An enabled <span class="role">operator</span> account; the unit exists in the Units tab; a shell on the platform host in the repository folder. <code>units.sh</code> takes the deploy lock, so no deploy may be running.</p>
+<p><strong>Goal.</strong> Give an operator a unit in the User Manager and see that the operator sees nothing of it until a <span class="role">qa</span> person confirms; then take it away again.</p>
+<p><strong>Accounts and roles.</strong> An <span class="role">admin</span> account (the maker), a <span class="role">qa</span> account of another person (the checker), an <span class="role">operator</span> account (from <a href="#training-e1">E1</a>) and, for one refusal, an enabled account with another role, such as an <span class="role">engineer</span>.</p>
+<p><strong>Before you start.</strong> The operator account is enabled and has a <code>person_id</code>; the unit (here UNIT01) exists in the Config UI's Units tab and is not yet assigned to the operator. The Units section is deployed (see <a href="#admin-units">Operators and units</a>, its rollout).</p>
 <p><strong>Steps.</strong></p>
 <ol class="steps">
 <li>Operator: open the Scheduler and the Run Monitor. Note what you see.</li>
-<li>Host: run <code>./apps/iam/units.sh assign &lt;operator username&gt; UNIT01 --by &lt;your username&gt;</code>. For <code>--by</code>, name an account that is not the <span class="role">qa</span> person who will confirm.</li>
-<li>Host: run <code>./apps/iam/units.sh list</code>. The unit is listed under <code>WAITING_QA</code>.</li>
+<li><span class="role">admin</span>: User Manager, <strong>Users</strong>, select the operator. In <strong>Units</strong>, choose UNIT01 under <strong>Assign a unit</strong>, write a reason and click <strong>Assign (waits for qa)</strong>; confirm the question.</li>
+<li><span class="role">admin</span>: the section now lists UNIT01 under <strong>Waiting for qa (not in effect yet)</strong> with its decision number.</li>
 <li>Operator: reload the Scheduler. Still nothing.</li>
-<li><span class="role">qa</span>: User Manager, <strong>Decisions</strong>, <strong>Waiting for qa</strong>. Select the unit assignment. Read the note that <code>units.sh</code> recorded its maker but cannot verify it. Tick "I did not run units.sh for this assignment.", write an optional note and click <strong>Confirm</strong>.</li>
-<li>Host: <code>./apps/iam/units.sh list</code> again. Operator: reload the Scheduler and the Run Monitor.</li>
+<li><span class="role">qa</span>: User Manager, <strong>Decisions</strong>, <strong>Waiting for qa</strong>. Select the unit assignment. It reads "Not in effect: UNIT01 is assigned when you confirm; refusing applies nothing." and asks for no attestation. Write an optional note and click <strong>Confirm</strong>.</li>
+<li><span class="role">admin</span>: select the operator again: UNIT01 is under <strong>Assigned</strong>. Operator: reload the Scheduler and the Run Monitor.</li>
 </ol>
-<p><strong>What you should see.</strong> Before the confirmation the operator sees no runs and no telemetry and can start nothing. After it, the operator sees UNIT01's runs, cycles and logs in the Scheduler and its telemetry in the Run Monitor, and <code>list</code> shows the unit under <code>UNITS</code>.</p>
-<div class="record"><p>One account decision per unit, with the maker as "system:deploy (by &lt;username&gt;)", the checker, the note with the attestation, and the times: <strong>Decisions</strong>, tab <strong>All</strong>. The unit taking effect appends <code>unit_assigned</code> to the policy history, with the <span class="role">qa</span> person as actor (<code>iamchain</code>). The command's output is in <code>logs/app-iam-units-&lt;timestamp&gt;.log</code>.</p></div>
+<p><strong>What you should see.</strong> Before the confirmation the operator sees no runs and no telemetry and can start nothing. After it, the operator sees UNIT01's runs, cycles and logs in the Scheduler and its telemetry in the Run Monitor, and the Units section lists UNIT01 as assigned, without the tag "in effect before the check".</p>
+<div class="record"><p>One account decision (<code>unit_assign</code>) with the reason, the <span class="role">admin</span> as maker (their own name, not <code>system:deploy</code>), the checker with the note, and the times: <strong>Decisions</strong>, tab <strong>All</strong>. The unit taking effect appends <code>unit_assigned</code> to the policy history, with the <span class="role">qa</span> person as actor (<code>iamchain</code>).</p></div>
 <p><strong>Refusals worth trying.</strong></p>
 <ul>
-<li><strong>Confirm</strong> stays off until the attestation box is ticked.</li>
-<li>Run the assignment with <code>--by</code> naming the <span class="role">qa</span> account, then open it as that account: "You cannot check this decision:" with the reason that you made it. Refuse it from another <span class="role">qa</span> account or remove it with <code>units.sh remove</code>.</li>
-<li><code>units.sh assign</code> without <code>--by</code> is a usage error (exit 2) and records nothing.</li>
+<li>Sign in as <span class="role">qa</span>: the User Manager has no <strong>Users</strong> tab, so there is no Assign form; the assign route itself answers 403 for <span class="role">qa</span>.</li>
+<li>As <span class="role">admin</span>, select your own account: it has no Units section, and the User Manager refuses any change to your own account.</li>
+<li>As <span class="role">admin</span>, assign a unit to the <span class="role">engineer</span> account: "Not changed:" with the reason that the account does not hold the operator role; nothing is recorded. A disabled account or one without a <code>person_id</code> is refused the same way.</li>
+<li>As the <span class="role">admin</span> who made it, open the decision under <strong>Decisions</strong>: it can be read but has no <strong>Confirm</strong>. The maker never confirms: only a <span class="role">qa</span> person who is neither the maker nor the operator can, and the database refuses anyone else.</li>
+<li>Click <strong>Assign</strong> with an empty reason: "Give a reason."; nothing is sent.</li>
+<li>In <strong>Decisions</strong>, a waiting unit assignment has no Withdraw button; the page says to withdraw it in the account's Units section.</li>
 </ul>
-<p><strong>Afterwards.</strong> Keep the assignment if the operator is needed for <a href="#training-e6">E6</a>. Otherwise run <code>./apps/iam/units.sh remove &lt;operator username&gt; UNIT01 --by &lt;your username&gt;</code>: a removal acts at once and <span class="role">qa</span> marks it reviewed under <strong>To review</strong>. See <a href="#compliance-units">unit assignments</a>.</p>
-<p><strong>Last done.</strong> 31 October 2026: an assignment of UNIT01 confirmed by <code>svieira</code> at 22:13 (decision 14). The operator's view (steps 1, 4 and 6) was not checked: no operator account was enabled.</p>
+<p><strong>Afterwards.</strong> Keep the assignment if the operator is needed for <a href="#training-e6">E6</a>. Otherwise click <strong>Remove</strong> beside UNIT01 (with a reason): a removal acts at once, appends <code>unit_removed</code>, and <span class="role">qa</span> marks it reviewed under <strong>To review</strong>. See <a href="#compliance-units">unit assignments</a>.</p>
+<p><strong>Last done.</strong> Not yet run in the User Manager. Earlier, with <code>units.sh</code> on the host: 31 October 2026, an assignment of UNIT01 confirmed by <code>svieira</code> at 22:13 (decision 14), with the attestation. The operator's view was not checked then: no operator account was enabled.</p>
 
 <h3 id="training-e3">E3 Draft and approve a parameter set</h3>
 <p><strong>Goal.</strong> Make a parameter set the way every configuration item is made: an engineer drafts, a different person approves, and the approved set is frozen.</p>

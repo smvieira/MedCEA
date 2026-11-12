@@ -1144,6 +1144,18 @@ def confirm_decision(did, body, who, role):
             # rolls the insert back, as for every other kind.
             if u is None and d['kind'] == 'unit_assign':
                 raise Refused(409, 'the account no longer exists: refuse this decision')
+            if d['kind'] == 'unit_assign':
+                # A User Manager assignment keeps the owner rule at confirmation too: the
+                # account may have been disabled, lost operator or its person_id since it
+                # was made (a units.sh row only warns, as the script does).
+                cur.execute('SELECT made_by_sub, made_by_name FROM iam.account_decision WHERE decision_id = %s',
+                            (did,))
+                mk = cur.fetchone()
+                if mk and not needs_attestation({'kind': 'unit_assign', 'made_by_sub': mk[0],
+                                                 'made_by_name': mk[1]}):
+                    why = _unit_assign_refusal(u)
+                    if why:
+                        raise Refused(409, why + ': refuse this decision')
             applied = []
             if d['kind'] == 'unit_assign':
                 cur.execute('SELECT unit_code FROM medcea.cea_unit WHERE unit_id = %s', (d['unit_id'],))
@@ -2064,6 +2076,97 @@ def set_user_person(user_id, body, who, role):
     return 202, {'status': dec['status'], 'decision': dec}
 
 
+# ── Units of an operator (IAM units UI; zones K, read at R) ──────────────────
+# One row per unit with whether the account holds it and its latest unit decision for
+# (user, unit) — units.sql's rule, and list_decisions' in_effect: an assigned unit whose
+# latest unit decision is a waiting unit_assign is in effect before the check.
+_UNITS_SQL = (
+    'SELECT u.unit_id, u.unit_code,'
+    ' EXISTS (SELECT 1 FROM iam_policy.user_unit uu'
+    '   WHERE uu.person_sub::text = lower(%s) AND uu.unit_id = u.unit_id) AS assigned,'
+    ' l.decision_id, l.kind, l.status, l.made_by_name, l.made_at'
+    ' FROM medcea.cea_unit u LEFT JOIN LATERAL (SELECT d.decision_id, d.kind, d.status, d.made_by_name, d.made_at'
+    '   FROM iam.account_decision d WHERE d.keycloak_user_id = lower(%s) AND d.unit_id = u.unit_id'
+    "   AND d.kind IN ('unit_assign', 'unit_remove') ORDER BY d.decision_id DESC LIMIT 1) l ON true"
+    ' ORDER BY u.unit_code, u.unit_id')
+UNIT_ACTIONS = ('assign', 'remove')
+
+
+def user_units(user_id):
+    """GET /api/users/<id>/units: assigned (before_check: in effect while its unit_assign
+    still waits for qa), waiting for qa (no row yet) and available."""
+    con = db()
+    try:
+        cur = con.cursor()
+        cur.execute(_UNITS_SQL, (user_id, user_id))
+        rows = cur.fetchall()
+    finally:
+        con.close()
+    out = {'assigned': [], 'waiting': [], 'available': []}
+    for unit_id, code, assigned, did, kind, status, made_by, made_at in rows:
+        waits = kind == 'unit_assign' and status == 'pending_qa'
+        if assigned:
+            out['assigned'].append({'unit_id': unit_id, 'unit_code': code, 'before_check': waits,
+                                    'decision_id': did if kind == 'unit_assign' else None})
+        elif waits:
+            out['waiting'].append({'unit_id': unit_id, 'unit_code': code, 'decision_id': did,
+                                   'made_by_name': made_by,
+                                   'made_at': made_at.isoformat() if hasattr(made_at, 'isoformat') else made_at})
+        else:
+            out['available'].append({'unit_id': unit_id, 'unit_code': code})
+    return 200, out
+
+
+def _unit_assign_refusal(u):
+    """Why `u` may not be given a unit, or None: owner choice — only an enabled operator
+    (directly or through a composite) with a person_id. A removal is never refused here."""
+    if not u.get('enabled'):
+        return 'the account %s is disabled: only an enabled operator is assigned units' % u['username']
+    held = {x for r in mapped_platform(u['id']) for x in effective(r.get('name'))}
+    if 'operator' not in held:
+        return 'the account %s does not hold the operator role: only an operator is assigned units' % u['username']
+    if not attr_person(u):
+        return 'the account %s has no person_id: give the account one before assigning a unit' % u['username']
+    return None
+
+
+def set_user_units(user_id, body, who, role):
+    """POST /api/users/<id>/units {action, unit, reason}: iam.record_unit_decision with
+    this person as the maker. An assignment waits for qa (202); a removal applies at once."""
+    action = body.get('action')
+    unit = body.get('unit')
+    reason = (body.get('reason') or '').strip()[:2000] if isinstance(body.get('reason'), str) else ''
+    if action not in UNIT_ACTIONS:
+        return 400, {'error': 'action: assign or remove'}
+    if isinstance(unit, str) and unit.isdigit():
+        unit = int(unit)
+    if not isinstance(unit, int) or isinstance(unit, bool) or not 0 < unit < 2 ** 31:
+        return 400, {'error': 'unit: a unit id'}
+    if not reason:
+        return 400, {'error': 'give a reason for the unit change; it is recorded'}
+    u = _managed_user(user_id, who, 'assign units to' if action == 'assign' else 'remove units from')
+    if action == 'assign':
+        why = _unit_assign_refusal(u)
+        if why:
+            return 409, {'error': why}
+    with tx(who, role) as (con, cur):
+        cur.execute('SELECT action, unit_code, decision_id FROM iam.record_unit_decision(%s, %s, %s, %s, %s, %s)',
+                    (action, user_id, u['username'], attr_person(u), unit, reason))
+        outcome, code, did = cur.fetchone()
+        if outcome == 'proposed':
+            # the account lock is held: what a concurrent change committed is visible now
+            now = kc_user(user_id)
+            if person_of(now) != person_of(u) or _unit_assign_refusal(now):
+                raise Refused(409, CHANGED_NOW)
+        con.commit()
+    log('unit %s of %s: %s %s by %s%s' % (code, u['username'], action, outcome, who.get('username'),
+                                          ' (decision #%s)' % did if did else ''))
+    if outcome in ('proposed', 'waiting'):
+        return 202, {'status': 'pending_qa' if outcome == 'proposed' else 'waiting', 'decision': did,
+                     'unit_code': code}
+    return 200, {'ok': True, 'status': outcome, 'decision': did, 'unit_code': code}
+
+
 # ── Quarterly access review (audit_histories) ────────────────────────────────
 REVIEW_COLS = ('review_id', 'period', 'created_by', 'created_at', 'signed_off_by_name', 'signed_off_at')
 
@@ -2376,6 +2479,7 @@ class Admin(Base):
             'settings': ('GET', '/api/settings'), 'templates': ('GET', '/api/templates'),
             'decisions_read': ('GET', '/api/decisions'), 'decisions_check': ('POST', '/api/decisions/1/confirm'),
             'decisions_withdraw': ('POST', '/api/decisions/1/withdraw'),
+            'units': ('POST', '/api/users/1/units'), 'units_read': ('GET', '/api/users/1/units'),
             'review_read': ('GET', '/api/review'), 'review_write': ('POST', '/api/review'),
             'histories': ('GET', '/api/config-history')}.items()}
         out = {'user': w.get('username'), 'sub': w.get('sub'), 'has_person': bool(w.get('person_id')), 'role': role,
@@ -2434,6 +2538,9 @@ class Admin(Base):
         m = re.fullmatch(r'/api/users/(%s)/history' % UUID_RE, p.path)
         if m:
             return self.guarded(lambda: (200, user_status_history(m.group(1))))
+        m = re.fullmatch(r'/api/users/(%s)/units' % UUID_RE, p.path)
+        if m:
+            return self.guarded(lambda: user_units(m.group(1)))
         if p.path == '/api/requests':
             status = q.get('status', ['pending'])[0]
             return self.guarded(lambda: (200, list_requests(status)))
@@ -2464,9 +2571,10 @@ class Admin(Base):
             return self.guarded(lambda: save_settings(self.body_json(), who, self.role()))
         if path == '/api/settings/test':
             return self.guarded(lambda: self.test_mail(self.body_json(), who))
-        m = re.fullmatch(r'/api/users/(%s)/(status|role|person)' % UUID_RE, path)
+        m = re.fullmatch(r'/api/users/(%s)/(status|role|person|units)' % UUID_RE, path)
         if m:
-            fn = {'status': set_user_status, 'role': set_user_role, 'person': set_user_person}[m.group(2)]
+            fn = {'status': set_user_status, 'role': set_user_role, 'person': set_user_person,
+                  'units': set_user_units}[m.group(2)]
             return self.guarded(lambda: fn(m.group(1), self.body_json(), who, self.role()))
         m = re.fullmatch(r'/api/templates/([a-z-]+)(/reset)?', path)
         if m:

@@ -1084,7 +1084,8 @@ class GrantsTest(unittest.TestCase):
         self.assertEqual(self.holders("medcea.algorithm_state", "UPDATE"), {"svc_scheduler"})  # W2's objects
         self.assertEqual(self.holders("medcea_auth.my_zones()"), {"rr_operator"})
         self.assertEqual(self.holders("medcea_auth.my_units()"), {"rr_operator"})
-        # iam_svc lost zones in IAM 4.1 (propose_unit is not built: units stay in the User Manager)
+        # iam_svc lost zones in IAM 4.1 (propose_unit was dropped); access_svc writes it through
+        # the decision functions and iam.record_unit_decision (the User Manager's Units section)
         self.assertEqual(self.holders("iam_policy.user_unit"),
                          {"access_svc", "rr_auditor", "rr_qa", "svc_dbexport", "svc_monitor", "svc_scheduler"})
         self.assertEqual(self.holders("medcea.release_run(integer)"), {"rr_qp"})
@@ -1106,7 +1107,9 @@ class GrantsTest(unittest.TestCase):
                    "iam.withdraw_decision(integer,text)", "iam.confirm_decision(integer,text)",
                    "iam.refuse_decision(integer,text)", "iam.review_decision(integer,text)",
                    "iam.create_review(jsonb)", "iam.sign_off_review(integer,text)",
-                   "medcea.revoke_person_mqtt(uuid,text)"):
+                   "medcea.revoke_person_mqtt(uuid,text)",
+                   # zones: an admin assigns or removes a unit in the User Manager (units, commit B)
+                   "iam.record_unit_decision(text,text,text,text,integer,text)"):
             self.assertEqual(self.holders(fn), {"access_svc"}, fn)
         self.assertIn("access_svc", self.holders("medcea_auth.set_actor(text,text,text,text)"))
         self.assertEqual(self.holders("medcea_auth.role_widening(text,text)"), set())

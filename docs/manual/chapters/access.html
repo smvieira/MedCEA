@@ -68,7 +68,7 @@
 </ul>
 
 <h4>Operators and their units</h4>
-<p>An <span class="role">operator</span> works only in the units assigned to them: they see the telemetry, runs and run logs of those units and start or stop runs only there. With no unit assigned they see none of this. The administrator assigns units on the platform host with <code>apps/iam/units.sh</code>, not in the User Manager. Each assignment waits until a <span class="role">qa</span> person other than the administrator confirms it in the User Manager under <strong>Decisions</strong>; a removal takes effect at once. A <span class="role">production_manager</span> is not limited to assigned units. The <a href="#admin">Administration</a> chapter describes how assignments are made.</p>
+<p>An <span class="role">operator</span> works only in the units assigned to them: they see the telemetry, runs and run logs of those units and start or stop runs only there. With no unit assigned they see none of this. An administrator assigns units in the User Manager, in the <strong>Units</strong> section of the operator's account under <strong>Users</strong> (on the platform host, <code>apps/iam/units.sh</code> does the same). Each assignment waits until a <span class="role">qa</span> person other than the administrator confirms it in the User Manager under <strong>Decisions</strong>; a removal takes effect at once. A <span class="role">production_manager</span> is not limited to assigned units. The <a href="#admin">Administration</a> chapter describes how assignments are made.</p>
 
 <h3 id="access-apps">Which web apps each role can open</h3>
 <p>Each web app sits behind a sign-in gate that admits only the roles the access policy names for it. The administrator can print the current list from the policy with:</p>
@@ -168,13 +168,14 @@
 <div class="note"><p>An administrator sets the mail account in the User Manager under <strong>E-mail settings</strong>. The change takes effect, and the <strong>Forgot password?</strong> link appears, only after a <span class="role">qa</span> person confirms it under <strong>Decisions</strong>. This stops an administrator from sending password-reset mail through a mailbox they read.</p></div>
 
 <h3 id="access-changes">When your role changes or your account is deactivated</h3>
-<p>Only an administrator changes a role, activates or deactivates an account, in the User Manager under <strong>Users</strong>. A role change and a deactivation need a reason; for an activation the reason is optional. An administrator cannot change their own account.</p>
+<p>Only an administrator changes a role, activates or deactivates an account, or assigns and removes an operator's units, in the User Manager under <strong>Users</strong>. A role change and a deactivation need a reason; for an activation the reason is optional. An administrator cannot change their own account.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Change</th><th>When it takes effect</th></tr></thead>
 <tbody>
 <tr><td>Role change that gives more access</td><td>Waits under <strong>Decisions</strong> until a <span class="role">qa</span> person confirms it. When it is confirmed, any MQTT Explorer credentials you hold are revoked; the Explorer then asks for a new one with your new role.</td></tr>
 <tr><td>Role change that only removes access</td><td>Applied at once. Any MQTT Explorer credentials you hold are revoked: the broker refuses them within about 15 seconds.</td></tr>
 <tr><td>Activation of a disabled account</td><td>Always waits for a <span class="role">qa</span> confirmation.</td></tr>
+<tr><td>A unit assigned to an operator</td><td>Waits for a <span class="role">qa</span> confirmation. Removing a unit applies at once.</td></tr>
 <tr><td>Deactivation</td><td>Applied at once. Every platform sign-in session is ended (Grafana, pgAdmin, Superset and AI Workbench sessions as described below the table), MQTT Explorer credentials are revoked (the broker refuses them within about 15 seconds, and no new one is issued on the old sign-in), and any decision still waiting about the account is withdrawn, except unit assignments.</td></tr>
 </tbody>
 </table></div>
@@ -211,7 +212,7 @@
 <li>"version N was approved on version B, but version A is applied: withdraw it and draft again"; "finish version A first: ./apps/iam/apply.sh --resume";</li>
 <li>the approval's token: not a realm signature, an unknown key, claims that are not the record's, a token already used for another approval;</li>
 <li>the approver now: disabled, no approver role any more, another <code>person_id</code>, one of the authors' persons, the person of an enabled <span class="role">admin</span> account (I17); "version N widens role R, which &lt;account&gt; (an enabled account of the approver's person) holds: another qa person approves it";</li>
-<li>"N account decision(s) wait for qa (the User Manager's Decisions tab): … confirm, refuse or withdraw them first";</li>
+<li>"N account decision(s) wait for qa (the User Manager's Decisions tab): … confirm, refuse or withdraw them first" (a unit assignment is withdrawn in the account's <strong>Units</strong> section);</li>
 <li>"the diff of version N is not the one qa approved (… a skeleton or compiler change since the approval alters what it grants): withdraw it and draft again";</li>
 <li>"these checks fail before the apply (above): fix them first" (exit 2); "apps/iam has uncommitted changes"; "something changed while the confirmation waited (above): … run it again".</li>
 </ul>

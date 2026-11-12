@@ -658,7 +658,7 @@ service_identities:
     description: Account requests, decisions, role and status changes, mail settings; revokes MQTT credentials of a deactivated account. master_data R shows unit codes on the qa screen.
     db_role: access_svc
     managed_by: "apps/access/deploy.sh (role shell and password; its grants are compiled from this ceiling)"
-    ceiling: {master_data: [R], iam_users: [R, C, U, A, K], zones: [R, A], mqtt_explorer: [R, U], audit_histories: [R, C]}
+    ceiling: {master_data: [R], iam_users: [R, C, U, A, K], zones: [R, A, K], mqtt_explorer: [R, U], audit_histories: [R, C]}
   svc_iam:
     label: iam-api.py (Policy UI and MQTT Explorer credentials)
     description: "Policy drafts and submissions (never approvals: qa approves with their own token through PostgREST); per-person MQTT Explorer credentials."
@@ -1200,11 +1200,17 @@ resource_groups:
       record: iam.account_decision (pending_qa → confirmed | refused; applied → reviewed)
       functions: ["iam.confirm_decision(int, text)", "iam.refuse_decision(int, text)", "iam.review_decision(int, text)"]
       effect: blocking
-      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it — apps/iam/units.sh assign --by <username> records it as pending_qa, and the User Manager's Decisions tab confirms it (the unit is assigned then) or refuses it (nothing is applied); units.sh remove withdraws one still waiting. Bootstrap exception (like the policy's --bootstrap) — units.sh assign --bootstrap, allowed only while no other enabled qa account could confirm, applies the assignment at once and records it as pending_qa; a refusal then removes the unit while it is the latest decision for that user and unit.
+      help: A new unit assignment takes effect when a qa person who is neither the maker nor the subject confirms it — an administrator assigns it in the account's Units section of the User Manager (or, on the host, apps/iam/units.sh assign --by <username>), which records it as pending_qa, and the User Manager's Decisions tab confirms it (the unit is assigned then) or refuses it (nothing is applied); removing a unit, there or with units.sh remove, applies at once, and removing one still waiting withdraws it. Bootstrap exception (like the policy's --bootstrap) — units.sh assign --bootstrap, allowed only while no other enabled qa account could confirm, applies the assignment at once and records it as pending_qa; a refusal then removes the unit while it is the latest decision for that user and unit.
     members:
       - {type: data, object: iam_policy.user_unit, written_by: functions}
       - {type: data, object: iam_policy.user_zone, written_by: functions, note: "unused since unit assignments; kept for the history that names it"}
-      - {type: infra, object: "apps/iam/units.sh assign/remove --by <admin> (the host operator, under medcea_lock; an assignment waits for qa as an iam.account_decision). iam-api's planned propose_unit and its /api/zones routes were dropped in IAM 4.1: units stay in the User Manager and units.sh (owner decision 4)"}
+      - {type: data, function: "iam.record_unit_decision(text, text, text, text, integer, text)", level: K, service_only: [svc_access], writes: [iam.account_decision, iam_policy.user_unit], note: "an admin assigns (pending_qa, applied when qa confirms) or removes (at once; a waiting assignment is withdrawn) one unit in the User Manager; the maker is the admin's own account (K on zones), never their own account as the subject"}
+      - type: api
+        service: access
+        routes:
+          "GET /api/users/<id>/units": [R, K]
+          "POST /api/users/<id>/units": K
+      - {type: infra, object: "apps/iam/units.sh assign/remove --by <admin>: the host path and break-glass (the host operator, under medcea_lock; an assignment waits for qa as an iam.account_decision, as one made in the User Manager does)"}
 
   iam_policy:
     label: Access policy

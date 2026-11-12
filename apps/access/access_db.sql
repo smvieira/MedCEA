@@ -724,7 +724,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM medcea_auth._account_actor('iam_users', 'K');
     IF p_kind IN ('unit_assign', 'unit_remove', 'zone_assign', 'zone_remove') THEN
-        RAISE EXCEPTION 'units are assigned with apps/iam/units.sh until IAM 4.3' USING ERRCODE = '22023';
+        RAISE EXCEPTION 'units are assigned in the account''s Units section of the User Manager (or with apps/iam/units.sh on the host)' USING ERRCODE = '22023';
     END IF;
     IF p_kind IS NULL OR p_kind NOT IN ('grant', 'role_change', 'activate', 'deactivate', 'person_id', 'mail_settings') THEN
         RAISE EXCEPTION 'record_decision: unknown kind %', p_kind USING ERRCODE = '22023';
@@ -858,7 +858,8 @@ END $$;
 
 -- withdraw_decision: the maker, or any admin, takes back a waiting non-unit
 -- decision (K on iam_users); no Keycloak effect. A unit assignment is undone
--- with apps/iam/units.sh remove instead.
+-- in the account's Units section of the User Manager (record_unit_decision
+-- remove), or with apps/iam/units.sh remove on the host, instead.
 CREATE OR REPLACE FUNCTION iam.withdraw_decision(p_decision integer, p_reason text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam, pg_temp AS $$
 DECLARE
@@ -877,7 +878,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('iam.account'), hashtext(v_user));
     SELECT * INTO d FROM iam.account_decision x WHERE x.decision_id = p_decision FOR UPDATE;
     IF d.kind IN ('unit_assign', 'unit_remove', 'zone_assign', 'zone_remove') THEN
-        RAISE EXCEPTION 'decision #% is a unit decision: undo it with apps/iam/units.sh remove', p_decision
+        RAISE EXCEPTION 'decision #% is a unit decision: withdraw it in the account''s Units section of the User Manager (or apps/iam/units.sh remove on the host)', p_decision
             USING ERRCODE = '22023';
     END IF;
     IF d.status <> 'pending_qa' THEN

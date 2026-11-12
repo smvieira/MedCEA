@@ -101,6 +101,12 @@
   [
    "access_svc",
    "function",
+   "iam.record_unit_decision(text,text,text,text,integer,text)",
+   "EXECUTE"
+  ],
+  [
+   "access_svc",
+   "function",
    "iam.refuse_decision(integer,text)",
    "EXECUTE"
   ],
