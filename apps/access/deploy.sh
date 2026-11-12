@@ -314,24 +314,33 @@ fi
 # --purge-data) or the first deploy of IAM 2.7 holds none: the new code would fail
 # every write and the Decisions tab. So it runs here, before the new pod; the
 # deploy lock is inherited (MEDCEA_LOCK_HELD). If it fails, nothing below runs:
-# the running pod keeps serving behind the gate it has.
+# the running pod keeps serving behind the gate it has. The database deploy is
+# also what hands a function access_db.sql has just created to medcea_owner
+# (medcea_db_owner.sql): iam.record_unit_decision (IAM units UI) is checked as the
+# probe of that, since freeze_record() lets only the owner close a row and the
+# health checks iamcatalog and iam-db's owner FAIL on one owned by postgres.
 _grants_held() {
     local v
     v="$(_psql -tA -c "SELECT CASE WHEN pg_catalog.to_regprocedure('iam.record_decision(text,text,text,text,text,text,text,text,bigint)') IS NULL
+                                     OR pg_catalog.to_regprocedure('iam.record_unit_decision(text,text,text,text,integer,text)') IS NULL
                                  THEN 'nofunction'
-                                 ELSE pg_catalog.has_function_privilege('access_svc',
-                                      'iam.record_decision(text,text,text,text,text,text,text,text,bigint)', 'EXECUTE')::text END" 2>&1)" \
+                                 ELSE (pg_catalog.has_function_privilege('access_svc',
+                                       'iam.record_decision(text,text,text,text,text,text,text,text,bigint)', 'EXECUTE')
+                                       AND coalesce((SELECT p.proowner = pg_catalog.to_regrole('medcea_owner')
+                                                       FROM pg_catalog.pg_proc p
+                                                      WHERE p.oid = pg_catalog.to_regprocedure('iam.record_unit_decision(text,text,text,text,integer,text)')),
+                                                    false))::text END" 2>&1)" \
         || { echo "$v" >&2; die "could not read access_svc's privileges"; }
-    [[ "$v" == nofunction ]] && die "access_db.sql did not create iam.record_decision (is this IAM 2.7's apps/access?)"
+    [[ "$v" == nofunction ]] && die "access_db.sql did not create iam.record_decision or iam.record_unit_decision (is this the IAM units UI's apps/access?)"
     [[ "$v" == true ]]
 }
 if _grants_held; then
-    log "access_svc holds its compiled grants."
+    log "access_svc holds its compiled grants and iam.* is owned by medcea_owner."
 else
-    log "access_svc lacks its compiled grants: running ./apps/database/deploy.sh..."
+    log "access_svc lacks its compiled grants or iam.* is not owned by medcea_owner: running ./apps/database/deploy.sh..."
     "$REPO_ROOT/apps/database/deploy.sh" \
         || die "./apps/database/deploy.sh failed; the access service and its gate were not changed."
-    _grants_held || die "access_svc still lacks EXECUTE on iam.record_decision after the database deploy."
+    _grants_held || die "access_svc lacks its grants or iam.* is not owned by medcea_owner after the database deploy (EXECUTE on iam.record_decision, the owner of iam.record_unit_decision)."
 fi
 
 # =============================================================================

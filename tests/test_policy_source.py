@@ -42,6 +42,10 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    alone; exactly the declared artefacts move.
                    The delta classes before it compile the factory policy as commit A had
                    it (ref_tree()): they pin what each slice's code moved
+  PhaseUnitsADelta  against PRE_UA (aeeb51f, release v0.5.0 + docs): the User Manager's
+                   units, commit A (iam.record_unit_decision, database and deploy code only): defaults.yaml
+                   unchanged, every artefact and the hosts listing byte-identical, check the
+                   same, skeleton-gate --against-git aeeb51f equal
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -119,6 +123,9 @@ PRE_SC = "12d70b2"   # Superset stage B live: stage C's commit A adds code only 
                      # skeleton version, comes with commit B), no artefact, listing or skeleton moves
 PRE_SCB = "e2d9a94"  # Superset stage C's commit A: commit B changes the policy itself, the first
                      # change of defaults.yaml's access since slice 4.2a (PhaseStageCBDelta)
+PRE_UA = "aeeb51f"   # the accepted skeleton (release v0.5.0, plus docs): the User Manager's units,
+                     # commit A, adds database and deploy code only (iam.record_unit_decision), no artefact,
+                     # listing or skeleton moves (PhaseUnitsADelta)
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -2389,6 +2396,68 @@ class PhaseStageCADelta(unittest.TestCase):
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_SC, state=None, check=True))
             except source.SourceError as e:
                 self.skipTest(f"no git revision {PRE_SC}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+        self.assertEqual(g["git_digest"], g["accepted_digest"])
+
+
+class PhaseUnitsADelta(unittest.TestCase):
+    """The User Manager's units, commit A (iam.record_unit_decision in access_db.sql and its
+    iam-db probes, the access deploy's owner check, the 2.7 rollback's list): database and
+    deploy code only, no policy change. defaults.yaml is PRE_UA's byte for
+    byte, every artefact, the hosts listing included, compiles byte for byte as PRE_UA's
+    cli.py does, check prints the same, and the skeleton gate against PRE_UA says equal."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_UA, "medcea-preua-")
+        with open(DEFAULTS) as f:
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_UA}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        for key, want in self.want.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_UA}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_check_output_identical(self):
+        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
+        root = scratch_tree()   # this tree's compiler and policy, its own (empty) state/
+        try:
+            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual((rc, out), (rc_old, out_old), err)
+
+    def test_policy_file_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_text = f.read()
+        with open(DEFAULTS) as f:
+            self.assertEqual(f.read(), old_text)
+        self.assertEqual(source.skeleton_digest(yaml.safe_load(old_text)), source.skeleton_digest(self.p.data))
+
+    def test_skeleton_gate_against_preua_is_equal(self):
+        """`cli.py skeleton-gate --check --against-git aeeb51f` prints equal (in-process)."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_UA, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_UA}: {e}")
         g = json.loads(out.getvalue())
         self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
         self.assertEqual(g["git_digest"], g["accepted_digest"])

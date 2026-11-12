@@ -33,7 +33,11 @@
 #                D1-D19: record, withdraw, confirm, refuse, review as access_svc with
 #                set_actor; the who-may rules, units.sql refusals, the attestation,
 #                append-only histories, role_widening's stub, the review, template
-#                reset, MQTT revocation, rr_qa without EXECUTE
+#                reset, MQTT revocation, rr_qa without EXECUTE; D20-D24 the User
+#                Manager's unit decisions (iam.record_unit_decision: assign, an assigned
+#                unit answered with its waiting decision, remove, a remove for a subject
+#                without a person_id that qa reviews, its refusals, a confirm without
+#                the attestation, parity with units.sql)
 #   policy       (not in the default set) IAM 4.1, migration 008c: P1 the catalog
 #                (read-only: 14 tables, the freeze trigger ALWAYS, ownership, the
 #                wrappers, the constraints, the nonce); with --write-probes P2-P18: the
@@ -2182,7 +2186,8 @@ fi
 # IAM 2.7: the account decision functions in schema iam (D1-D18 of the spec, 8.2), as
 # access-api runs them: SET SESSION AUTHORIZATION access_svc (session_user access_svc,
 # so set_actor records 'person via access_svc'), then set_actor for the person of the
-# token. Fresh accounts and persons each run: A (admin), Q and Q2 (qa), S (the subject).
+# token. Fresh accounts and persons each run: A (admin), Q and Q2 (qa), S (the subject),
+# T (D24's second subject).
 if want access && [[ "$WRITES" == true && "$MODE" != legacy ]]; then
     echo ""
     _u() { python3 -c 'import uuid; print(uuid.uuid4())'; }
@@ -2668,6 +2673,289 @@ $(um_qa)
 SELECT * FROM iam.refuse_decision(:d1, 'iam-db D19') \\g /dev/null
 --CHECKS
 SELECT 'CHECK|still active', active FROM medcea.mqtt_service_credential WHERE username = 'iamt-person-$_h';
+SQL
+    # D20-D24 — iam.record_unit_decision (the User Manager's units, commit A): one unit,
+    # the signed-in admin as the maker, the per-unit rule of apps/iam/units.sql. The
+    # factory policy grants access_svc no EXECUTE on it yet, so each probe grants it as
+    # postgres first, inside its own rolled-back transaction.
+    T="$(_u)"; PT="p-t-$_h"
+    urd_grant="GRANT EXECUTE ON FUNCTION iam.record_unit_decision(text, text, text, text, integer, text) TO access_svc;"
+    # urd VAR ACTION [USER] [PERSON] [UNIT] [REASON] — record_unit_decision as the current
+    # actor (default: S, PS, IAMT01, 'iam-db probe'); sets :VAR_act and :VAR (unset when NULL)
+    urd() {
+        echo "SELECT action AS ${1}_act, decision_id AS $1 FROM iam.record_unit_decision($(sqlq "$2"), '${3:-$S}', 'test-s', $(sqlq "${4-$PS}"), ${5:-:uid}, $(sqlq "${6-iam-db probe}")) \\gset"
+    }
+    # unit_in_effect SUB — the user_unit row written as postgres (the deploy's internal actor)
+    unit_in_effect() {
+        as_postgres
+        echo "SELECT medcea_auth._set_internal_actor('system:deploy') \\g /dev/null"
+        echo "INSERT INTO iam_policy.user_unit (person_sub, unit_id) VALUES ('$1'::uuid, :uid);"
+    }
+    # unit_state SUB VAR — 'in effect/latest unit decision kind:status' for (SUB, IAMT01), into :VAR
+    unit_state() {
+        as_postgres
+        echo "SELECT (EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$1'::uuid AND unit_id = :uid))::text || '/'
+       || coalesce((SELECT kind || ':' || status FROM iam.account_decision WHERE keycloak_user_id = '$1' AND unit_id = :uid
+                       AND kind IN ('unit_assign', 'unit_remove') ORDER BY decision_id DESC LIMIT 1), '-') AS $2 \\gset"
+    }
+    # D20 — assign
+    probe D20 "assign: proposed (pending_qa by A as a person), not in effect, no chain event" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u1 assign)
+--CHECKS
+SELECT 'CHECK|proposed', :'u1_act' = 'proposed';
+SELECT 'CHECK|one pending_qa unit_assign made by A', count(*) = 1
+          AND bool_and(decision_id = :u1 AND widens AND status = 'pending_qa' AND unit_id = :uid
+                       AND made_by_sub = '$A' AND made_by_person = '$PA' AND made_by_name = 'test-a'
+                       AND subject_person = '$PS' AND username = 'test-s' AND reason = 'iam-db probe'
+                       AND from_role IS NULL AND to_role IS NULL AND new_person_id IS NULL
+                       AND checked_at IS NULL AND withdrawn_at IS NULL)
+  FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind IN ('unit_assign', 'unit_remove');
+SELECT 'CHECK|not in effect', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|no chain event', NOT EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE payload ->> 'person_sub' = '$S' OR payload ->> 'keycloak_user_id' = '$S');
+SQL
+    probe D20 "assign again: waiting, with the first decision; nothing written" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u1 assign)
+$(urd u2 assign)
+--CHECKS
+SELECT 'CHECK|waiting', :'u2_act' = 'waiting';
+SELECT 'CHECK|the waiting decision', :u2 = :u1;
+SELECT 'CHECK|still one unit_assign', count(*) = 1 FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign';
+SQL
+    probe D20 "assign a unit in effect: unchanged, no decision" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(unit_in_effect "$S")
+$(um_admin)
+$(urd u1 assign)
+--CHECKS
+SELECT 'CHECK|unchanged', :'u1_act' = 'unchanged';
+SELECT 'CHECK|no decision id (none waits)', NOT :{?u1};
+SELECT 'CHECK|no unit decision', NOT EXISTS (SELECT 1 FROM iam.account_decision
+        WHERE keycloak_user_id = '$S' AND kind IN ('unit_assign', 'unit_remove'));
+SQL
+    probe D20 "assign a unit in effect whose decision waits (bootstrap row): unchanged, with that decision (units.sql parity)" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(bootstrap_row)
+$(um_admin)
+$(urd u1 assign)
+--CHECKS
+SELECT 'CHECK|unchanged', :'u1_act' = 'unchanged';
+SELECT 'CHECK|the waiting decision', :{?u1} AND :'u1' = :'bd';
+SELECT 'CHECK|still one unit_assign', count(*) = 1 FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign';
+SQL
+    # D21 — remove
+    probe D21 "remove a unit in effect: removed, applied unit_remove by A, unit_removed with A as the actor" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(unit_in_effect "$S")
+$(um_admin)
+$(urd r remove)
+--CHECKS
+SELECT 'CHECK|removed', :'r_act' = 'removed';
+SELECT 'CHECK|user_unit row gone', NOT EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|applied unit_remove made by A', NOT widens AND status = 'applied' AND kind = 'unit_remove' AND unit_id = :uid
+          AND made_by_sub = '$A' AND made_by_person = '$PA' AND made_by_name = 'test-a' AND checked_at IS NULL
+  FROM iam.account_decision WHERE decision_id = :r;
+SELECT 'CHECK|unit_removed with A as the actor', count(*) = 1 AND bool_and(actor_sub = '$A'::uuid AND actor_person = '$PA')
+  FROM iam_policy.history WHERE event = 'unit_removed' AND payload ->> 'person_sub' = '$S';
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D21 "remove a waiting assignment: withdrawn by A, account_decision_withdrawn chained" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u1 assign)
+$(urd r remove)
+--CHECKS
+SELECT 'CHECK|withdrawn', :'r_act' = 'withdrawn';
+SELECT 'CHECK|the waiting decision', :r = :u1;
+SELECT 'CHECK|withdrawn by A', status = 'withdrawn' AND withdrawn_by_sub = '$A' AND withdrawn_by_person = '$PA'
+          AND withdrawn_by_name = 'test-a' AND withdraw_reason = 'iam-db probe' AND withdrawn_at IS NOT NULL
+          AND checked_at IS NULL
+  FROM iam.account_decision WHERE decision_id = :u1;
+SELECT 'CHECK|no unit_remove decision', NOT EXISTS (SELECT 1 FROM iam.account_decision
+        WHERE keycloak_user_id = '$S' AND kind = 'unit_remove');
+SELECT 'CHECK|account_decision_withdrawn with A as the actor', count(*) = 1 AND bool_and(actor_sub = '$A'::uuid
+          AND (payload ->> 'decision_id')::bigint = :u1 AND payload ->> 'kind' = 'unit_assign'
+          AND (payload ->> 'unit_id')::int = :uid)
+  FROM iam_policy.history WHERE event = 'account_decision_withdrawn' AND payload ->> 'keycloak_user_id' = '$S';
+SELECT 'CHECK|no unit event', NOT EXISTS (SELECT 1 FROM iam_policy.history
+        WHERE event IN ('unit_assigned', 'unit_removed') AND payload ->> 'person_sub' = '$S');
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D21 "remove for a subject without a person_id: the stored subject is the account, qa reviews it" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(unit_in_effect "$S")
+$(um_admin)
+$(urd r remove "$S" '')
+$(um_qa)
+SELECT iam.review_decision(:r, NULL) \\g /dev/null
+--CHECKS
+SELECT 'CHECK|removed', :'r_act' = 'removed';
+SELECT 'CHECK|subject_person is the account', subject_person = '$S' FROM iam.account_decision WHERE decision_id = :r;
+SELECT 'CHECK|reviewed by Q', status = 'reviewed' AND checked_by_sub = '$Q' FROM iam.account_decision WHERE decision_id = :r;
+SQL
+    probe D21 "remove again: unchanged, nothing written" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u1 assign)
+$(urd r remove)
+$(urd r2 remove)
+--CHECKS
+SELECT 'CHECK|unchanged', :'r2_act' = 'unchanged';
+SELECT 'CHECK|one unit decision', count(*) = 1 FROM iam.account_decision
+ WHERE keycloak_user_id = '$S' AND kind IN ('unit_assign', 'unit_remove');
+SELECT 'CHECK|one withdrawal event', count(*) = 1 FROM iam_policy.history
+ WHERE event = 'account_decision_withdrawn' AND payload ->> 'keycloak_user_id' = '$S';
+SQL
+    # D22 — refusals: who acts (42501), then the arguments (22023)
+    probe D22 "record_unit_decision as a qa person" "42501:holds no K on zones" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_qa)
+$(urd u assign)
+SQL
+    probe D22 "record_unit_decision as an engineer" "42501:holds no K on zones" <<SQL
+$urd_grant
+$unit_id_sql
+$(as_um "$X" "$PX" test-x engineer)
+$(urd u assign)
+SQL
+    probe D22 "record_unit_decision without set_actor" "42501:made in the User Manager" <<SQL
+$urd_grant
+$unit_id_sql
+SET SESSION AUTHORIZATION access_svc;
+$(urd u assign)
+SQL
+    probe D22 "record_unit_decision on the admin's own account" "42501:not_own_author" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u assign "$A" "$PA")
+SQL
+    probe D22 "an action other than assign or remove" "22023:assign or remove" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u grant)
+SQL
+    probe D22 "an account that is not a Keycloak user id" "22023:Keycloak user id" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u assign test-s)
+SQL
+    probe D22 "a unit that does not exist" "22023:no unit #-1" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u assign "$S" "$PS" -1)
+SQL
+    probe D22 "a blank reason" "22023:a reason is required" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u remove "$S" "$PS" :uid '  ')
+SQL
+    probe D22 "assign for a subject without a person_id" "22023:has no person_id" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u assign "$S" '')
+SQL
+    # D23 — a qa person confirms a UI-made assignment without the units.sh attestation
+    # (the maker is a verified person); the maker's person on another account cannot
+    probe D23 "qa confirms a UI-made unit_assign without the attestation: the unit is assigned" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u1 assign)
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:u1, 'iam-db D23') \\g /dev/null
+--CHECKS
+SELECT 'CHECK|user_unit row made by the confirm', EXISTS (SELECT 1 FROM iam_policy.user_unit WHERE person_sub = '$S' AND unit_id = :uid);
+SELECT 'CHECK|confirmed by Q with its note', status = 'confirmed' AND checked_by_sub = '$Q' AND checked_by_person = '$PQ'
+          AND check_note = 'iam-db D23'
+  FROM iam.account_decision WHERE decision_id = :u1;
+SELECT 'CHECK|unit_assigned with Q as the actor', count(*) = 1 AND bool_and(actor_sub = '$Q'::uuid)
+  FROM iam_policy.history WHERE event = 'unit_assigned' AND payload ->> 'person_sub' = '$S';
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
+SQL
+    probe D23 "the maker's person, on a qa account, confirms it" "42501:same person as the maker" <<SQL
+$urd_grant
+$unit_id_sql
+$(um_admin)
+$(urd u1 assign)
+$(as_um "$Q2" "$PA" test-q2 qa)
+SELECT * FROM iam.confirm_decision(:u1, 'iam-db D23');
+SQL
+    # D24 — parity: the same scenario through units.sql (on S, as W7 and D8 run it) and
+    # through the function (on T) reaches the same user_unit and status states at each step
+    probe D24 "units.sql and record_unit_decision reach the same states" ok <<SQL
+$urd_grant
+$unit_id_sql
+$(units "$A" "$PA" test-a true)
+$(unit_state "$S" a1)
+$(units "$A" "$PA" test-a true)
+$(unit_state "$S" a2)
+$(units "$A" "$PA" test-a false)
+$(unit_state "$S" a3)
+$(units "$A" "$PA" test-a true)
+SELECT max(decision_id) AS du FROM iam.account_decision WHERE keycloak_user_id = '$S' AND kind = 'unit_assign' \\gset
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:du, '$ATTEST') \\g /dev/null
+$(unit_state "$S" a4)
+$(units "$A" "$PA" test-a true)
+$(unit_state "$S" a5)
+$(units "$A" "$PA" test-a false)
+$(unit_state "$S" a6)
+$(units "$A" "$PA" test-a false)
+$(unit_state "$S" a7)
+$(um_admin)
+$(urd f1 assign "$T" "$PT")
+$(unit_state "$T" b1)
+$(um_admin)
+$(urd f2 assign "$T" "$PT")
+$(unit_state "$T" b2)
+$(um_admin)
+$(urd f3 remove "$T" "$PT")
+$(unit_state "$T" b3)
+$(um_admin)
+$(urd f4 assign "$T" "$PT")
+$(um_qa)
+SELECT * FROM iam.confirm_decision(:f4, 'iam-db D24') \\g /dev/null
+$(unit_state "$T" b4)
+$(um_admin)
+$(urd f5 assign "$T" "$PT")
+$(unit_state "$T" b5)
+$(um_admin)
+$(urd f6 remove "$T" "$PT")
+$(unit_state "$T" b6)
+$(um_admin)
+$(urd f7 remove "$T" "$PT")
+$(unit_state "$T" b7)
+--CHECKS
+SELECT 'CHECK|assign: ' || :'a1', :'a1' = :'b1' AND :'a1' = 'false/unit_assign:pending_qa';
+SELECT 'CHECK|assign again: ' || :'a2', :'a2' = :'b2' AND :'a2' = 'false/unit_assign:pending_qa';
+SELECT 'CHECK|remove the waiting one: ' || :'a3', :'a3' = :'b3' AND :'a3' = 'false/unit_assign:withdrawn';
+SELECT 'CHECK|assign, qa confirms: ' || :'a4', :'a4' = :'b4' AND :'a4' = 'true/unit_assign:confirmed';
+SELECT 'CHECK|assign while in effect: ' || :'a5', :'a5' = :'b5' AND :'a5' = 'true/unit_assign:confirmed';
+SELECT 'CHECK|remove: ' || :'a6', :'a6' = :'b6' AND :'a6' = 'false/unit_remove:applied';
+SELECT 'CHECK|remove again: ' || :'a7', :'a7' = :'b7' AND :'a7' = 'false/unit_remove:applied';
+SELECT 'CHECK|the function answered as units.sql prints', :'f1_act' = 'proposed' AND :'f2_act' = 'waiting'
+          AND :'f3_act' = 'withdrawn' AND :'f4_act' = 'proposed' AND :'f5_act' = 'unchanged'
+          AND :'f6_act' = 'removed' AND :'f7_act' = 'unchanged';
+SELECT 'CHECK|chain verifies', (SELECT ok FROM iam_policy.verify_chain());
 SQL
 elif want access; then
     note access "skipped (needs --write-probes, on medcea-iamtest only, and a mode other than legacy)"

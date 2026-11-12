@@ -14,6 +14,7 @@
 #   4  IAM_GATES=false                    → ["admin"], exit 0
 #   5  the database deploy fails          → exit 1, no rollout, no helm
 #   6  access_svc already holds its grants → no database deploy
+#   8  EXECUTE held, iam.record_unit_decision not owned by medcea_owner → database deploy runs
 #   7  Sign out (1 Nov 2026): SIGNOUT_HUB, where Keycloak returns, is the workbench's /hub/logout,
 #      empty with WORKBENCH_ENABLED=false; HOST_CLIENTS (Change password) unchanged
 #
@@ -68,7 +69,7 @@ cat > "$R/apps/database/deploy.sh" <<'SH'
 #!/usr/bin/env bash
 echo "DBDEPLOY lock=${MEDCEA_LOCK_HELD:-none}" >> "$FAKE_LOG"
 [[ "${FAKE_DB_FAILS:-0}" == 1 ]] && exit 1
-touch "$FAKE_DIR/granted"
+touch "$FAKE_DIR/granted" "$FAKE_DIR/owned"
 SH
 chmod +x "$R/apps/database/deploy.sh"
 
@@ -110,7 +111,11 @@ case "$a" in
     *"exec -i"*rdbms-postgresql-0*psql*)
         if [[ "$a" == *has_function_privilege* ]]; then
             echo "PSQL grants" >> "$L"
-            [[ -f "$D/granted" ]] && echo true || echo false
+            # true only with EXECUTE held and, when the query asks about the owner of
+            # iam.record_unit_decision (it must), that function owned by medcea_owner
+            if [[ -f "$D/granted" ]] && { [[ -f "$D/owned" ]] || [[ "$a" != *record_unit_decision*medcea_owner* ]]; }; then
+                echo true
+            else echo false; fi
         else
             sql="$(cat)"
             if [[ "$sql" == *"unit_backfill.sql"* ]]; then echo "PSQL backfill" >> "$L"; echo "backfilled|7|11111111-1111-4111-8111-111111111111|3"
@@ -134,7 +139,7 @@ chmod +x "$T/bin/microk8s"
 # run CASE [env...] — one deploy; sets OUT, RC, LOG
 run() {
     local name="$1"; shift
-    rm -f "$T/fake/log" "$T/fake/granted" "$T/fake/applied"
+    rm -f "$T/fake/log" "$T/fake/granted" "$T/fake/owned" "$T/fake/applied"
     : > "$T/fake/log"
     OUT="$(cd "$R" && env -i HOME="$HOME" PATH="$T/bin:$PATH" TMPDIR="$T" FAKE_LOG="$T/fake/log" FAKE_DIR="$T/fake" \
              "$@" bash "$R/apps/access/deploy.sh" 2>&1)"
@@ -198,10 +203,21 @@ grep -qE '^(ROLLOUT|HELM)' <<<"$LOG" && fail "rolled out or deployed the gate: $
 # 6 — grants already in place: no database deploy
 setup 27 27 'access-new True\n' 'access-new\n'
 rm -f "$T/fake/log"; : > "$T/fake/log"
-OUT="$(cd "$R" && touch "$T/fake/granted" && env -i HOME="$HOME" PATH="$T/bin:$PATH" TMPDIR="$T" FAKE_LOG="$T/fake/log" FAKE_DIR="$T/fake" \
+OUT="$(cd "$R" && touch "$T/fake/granted" "$T/fake/owned" && env -i HOME="$HOME" PATH="$T/bin:$PATH" TMPDIR="$T" FAKE_LOG="$T/fake/log" FAKE_DIR="$T/fake" \
          bash "$R/apps/access/deploy.sh" 2>&1)"; RC=$?; LOG="$(cat "$T/fake/log")"
 echo -e "\n${BOLD}6 access_svc already holds its grants${NC} (exit $RC)"
 [[ $RC -eq 0 ]] && ! grep -q '^DBDEPLOY' <<<"$LOG" && pass "no database deploy" || fail "exit $RC, log $(tr '\n' ';' <<<"$LOG")"
+
+# 8 — EXECUTE held, but iam.record_unit_decision is still owned by postgres (an
+#     access-only deploy after access_db.sql created it): the database deploy runs
+setup 27 27 'access-new True\n' 'access-new\n'
+rm -f "$T/fake/log" "$T/fake/owned"; : > "$T/fake/log"
+OUT="$(cd "$R" && touch "$T/fake/granted" && env -i HOME="$HOME" PATH="$T/bin:$PATH" TMPDIR="$T" FAKE_LOG="$T/fake/log" FAKE_DIR="$T/fake" \
+         bash "$R/apps/access/deploy.sh" 2>&1)"; RC=$?; LOG="$(cat "$T/fake/log")"
+echo -e "\n${BOLD}8 EXECUTE held, iam.record_unit_decision not owned by medcea_owner${NC} (exit $RC)"
+[[ $RC -eq 0 ]] && grep -q '^DBDEPLOY' <<<"$LOG" && pass "the database deploy runs" || fail "exit $RC, log $(tr '\n' ';' <<<"$LOG")"
+grep -q 'not owned by medcea_owner: running ./apps/database/deploy.sh' <<<"$OUT" && pass "says why" || fail "message: $(grep -i 'database' <<<"$OUT" | head -3)"
+[[ "$(line_of '^DBDEPLOY')" -lt "$(line_of '^ROLLOUT restart deployment/access$')" ]] && pass "before the rollout" || fail "order: $(tr '\n' ';' <<<"$LOG")"
 
 # 7 — Sign out: Keycloak returns to the workbench's own logout, or to the host without the workbench
 signout_of() { grep 'name: SIGNOUT_HUB' "$T/fake/applied" 2>/dev/null | sed -n 's/.*value: "\(.*\)"}.*/\1/p'; }

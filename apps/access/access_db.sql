@@ -513,7 +513,7 @@ BEGIN
             array_to_string(closers, ' or ') USING ERRCODE = 'insufficient_privilege';
     END IF;
     IF current_user <> 'medcea_owner' THEN
-        RAISE EXCEPTION 'iam.%: only iam.confirm_decision, refuse_decision, review_decision, withdraw_decision, record_decision or sign_off_review close a record', TG_TABLE_NAME
+        RAISE EXCEPTION 'iam.%: only iam.confirm_decision, refuse_decision, review_decision, withdraw_decision, record_decision, record_unit_decision or sign_off_review close a record', TG_TABLE_NAME
             USING ERRCODE = 'insufficient_privilege';
     END IF;
     RETURN NEW;
@@ -893,6 +893,125 @@ BEGIN
     END IF;
     PERFORM medcea_auth._owner_write(false);
     RETURN d.decision_id;
+END $$;
+
+-- record_unit_decision: an admin assigns or removes one unit (K on zones), in the
+-- User Manager (IAM units UI). The per-unit rule of apps/iam/units.sql for one
+-- unit, with the signed-in person as the maker instead of units.sh's --by:
+-- assign — a unit already assigned is 'unchanged' (with the waiting unit_assign's
+-- id when one is the latest unit decision, as units.sql reports it); one whose latest unit
+-- decision is a waiting unit_assign is 'waiting' (that decision, nothing
+-- written); else a pending_qa unit_assign is recorded ('proposed') and
+-- iam.confirm_decision inserts the iam_policy.user_unit row. The subject's
+-- person_id is required: a unit row without one could not be confirmed.
+-- remove — an assigned unit is deleted at once (its trigger chains unit_removed
+-- with this person as the actor) and an applied unit_remove recorded
+-- ('removed'); else a waiting unit_assign is withdrawn with this person as the
+-- withdrawer and account_decision_withdrawn on the chain ('withdrawn'); else
+-- 'unchanged', nothing written. A remove for a subject without a person_id
+-- records it as its own account (subject_person = the user id), as
+-- record_decision does, so a qa person can review it (rule 7). A row made here names its maker (made_by_sub),
+-- so a qa person confirms it without units.sh's attestation, and the maker's
+-- person never can. Locks: the account, then the (user, unit) — the keys
+-- iam._lock_decision and apps/iam/units.sql take.
+CREATE OR REPLACE FUNCTION iam.record_unit_decision(p_action text, p_user text, p_username text,
+    p_subject_person text, p_unit integer, p_reason text)
+RETURNS TABLE (action text, unit_code text, decision_id bigint)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = iam, pg_temp AS $$
+#variable_conflict use_column
+DECLARE
+    a          record;
+    v_user     text := lower(p_user);
+    v_subject  text := nullif(btrim(coalesce(p_subject_person, '')), '');
+    v_code     text;
+    v_assigned boolean;
+    v_wait     bigint;
+    v_id       bigint;
+    v_action   text;
+BEGIN
+    SELECT * INTO a FROM medcea_auth._account_actor('zones', 'K');
+    IF p_action IS NULL OR p_action NOT IN ('assign', 'remove') THEN
+        RAISE EXCEPTION 'record_unit_decision: the action is assign or remove, not %', p_action USING ERRCODE = '22023';
+    END IF;
+    IF v_user IS NULL OR v_user !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+        RAISE EXCEPTION 'record_unit_decision: the account must be a Keycloak user id, not %', p_user USING ERRCODE = '22023';
+    END IF;
+    IF v_user = lower(a.sub) THEN
+        RAISE EXCEPTION 'not_own_author: you cannot decide on your own account' USING ERRCODE = '42501';
+    END IF;
+    IF coalesce(btrim(p_username), '') = '' THEN
+        RAISE EXCEPTION 'record_unit_decision: the username is required' USING ERRCODE = '22023';
+    END IF;
+    IF coalesce(btrim(p_reason), '') = '' THEN
+        RAISE EXCEPTION 'a reason is required' USING ERRCODE = '22023';
+    END IF;
+    SELECT u.unit_code INTO v_code FROM medcea.cea_unit u WHERE u.unit_id = p_unit;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no unit #%', p_unit USING ERRCODE = '22023';
+    END IF;
+    IF p_action = 'assign' AND v_subject IS NULL THEN
+        RAISE EXCEPTION 'the subject has no person_id: give the account one before assigning a unit' USING ERRCODE = '22023';
+    END IF;
+
+    -- iam._lock_decision's order: the account, then the (user, unit)
+    PERFORM pg_advisory_xact_lock(hashtext('iam.account'), hashtext(v_user));
+    PERFORM pg_advisory_xact_lock(hashtext('iam.user_unit'), hashtext(v_user || ':' || p_unit));
+
+    -- units.sql's st: assigned, and the waiting unit_assign that is the latest unit decision
+    v_assigned := EXISTS (SELECT 1 FROM iam_policy.user_unit uu
+                           WHERE uu.person_sub = v_user::uuid AND uu.unit_id = p_unit);
+    SELECT CASE WHEN l.kind = 'unit_assign' AND l.status = 'pending_qa' THEN l.decision_id END INTO v_wait
+      FROM iam.account_decision l
+     WHERE l.keycloak_user_id = v_user AND l.unit_id = p_unit AND l.kind IN ('unit_assign', 'unit_remove')
+     ORDER BY l.decision_id DESC LIMIT 1;
+
+    IF p_action = 'assign' THEN
+        IF v_assigned THEN
+            -- units.sql's coalesce(d.decision_id, s.waiting): the waiting decision, if any
+            v_action := 'unchanged'; v_id := v_wait;
+        ELSIF v_wait IS NOT NULL THEN
+            v_action := 'waiting'; v_id := v_wait;
+        ELSE
+            PERFORM medcea_auth._owner_write(true);
+            INSERT INTO iam.account_decision AS x (kind, keycloak_user_id, username, subject_person, unit_id,
+                                                   widens, status, reason, made_by_sub, made_by_person, made_by_name)
+            VALUES ('unit_assign', v_user, p_username, v_subject, p_unit,
+                    true, 'pending_qa', p_reason, a.sub, a.person, a.name)
+            RETURNING x.decision_id INTO v_id;
+            PERFORM medcea_auth._owner_write(false);
+            v_action := 'proposed';
+        END IF;
+    ELSIF v_assigned THEN
+        PERFORM medcea_auth._owner_write(true);
+        DELETE FROM iam_policy.user_unit uu WHERE uu.person_sub = v_user::uuid AND uu.unit_id = p_unit;
+        INSERT INTO iam.account_decision AS x (kind, keycloak_user_id, username, subject_person, unit_id,
+                                               widens, status, reason, made_by_sub, made_by_person, made_by_name)
+        VALUES ('unit_remove', v_user, p_username, coalesce(v_subject, v_user), p_unit,
+                false, 'applied', p_reason, a.sub, a.person, a.name)
+        RETURNING x.decision_id INTO v_id;
+        PERFORM medcea_auth._owner_write(false);
+        v_action := 'removed';
+    ELSIF v_wait IS NOT NULL THEN
+        -- runs as medcea_owner (SECURITY DEFINER): iam.freeze_record() lets it close the row
+        PERFORM medcea_auth._owner_write(true);
+        UPDATE iam.account_decision x
+           SET status = 'withdrawn', withdrawn_by_sub = a.sub, withdrawn_by_person = a.person,
+               withdrawn_by_name = a.name, withdrawn_at = now(), withdraw_reason = p_reason
+         WHERE x.decision_id = v_wait AND x.status = 'pending_qa';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'decision #% is no longer waiting', v_wait USING ERRCODE = '22023';
+        END IF;
+        PERFORM medcea_auth._owner_write(false);
+        PERFORM iam_policy.append_history('account_decision_withdrawn',
+            jsonb_build_object('decision_id', v_wait, 'kind', 'unit_assign',
+                               'keycloak_user_id', v_user, 'unit_id', p_unit), p_reason);
+        v_action := 'withdrawn'; v_id := v_wait;
+    ELSE
+        v_action := 'unchanged';
+    END IF;
+
+    action := v_action; unit_code := v_code; decision_id := v_id;
+    RETURN NEXT;
 END $$;
 
 -- _lock_decision: the closing functions' locks (account, I17, unit) and the row

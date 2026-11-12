@@ -66,7 +66,7 @@ BEGIN
               WHERE p.pronamespace = 'iam'::regnamespace
                 AND p.proname IN ('record_decision', 'withdraw_decision', 'confirm_decision', 'refuse_decision',
                                   'review_decision', 'create_review', 'sign_off_review', '_check_rules',
-                                  '_lock_decision', '_later_unit_decision') LOOP
+                                  '_lock_decision', '_later_unit_decision', 'record_unit_decision') LOOP
         EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         FOR r IN SELECT DISTINCT a.grantee::regrole::text AS g
                    FROM pg_catalog.pg_proc p, pg_catalog.aclexplode(p.proacl) a
