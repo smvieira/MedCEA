@@ -8,6 +8,41 @@ import paho.mqtt.client as mqtt
 import cea  # Assuming this is a local module
 #import psycopg2 # Removed this, cea.py likely uses it, so we don't need to import it directly.
 print("Starting run_recipe.py...")
+
+
+def read_control_loops(unit_code, conn):
+    """The unit's loop map, read once per run (feedback control Phase 2, D4): it goes
+    into every cycle's run_params, so the run records what it controlled. A
+    RuntimeError (no actuator, an invalid control_loop row) fails the run at start."""
+    loopset = cea.get_control_loops(unit_code, conn)
+    for w in loopset['warnings']:
+        print(f"WARNING: {w}", file=sys.stderr)
+    print(f"Control loops: {loopset['source']}, {len(loopset['loops'])} loop(s)")
+    return loopset
+
+
+def with_loops(run_params, loopset):
+    """run_params (a list, or its JSON text) with control_loops and
+    control_loops_source in its first element."""
+    rp = json.loads(run_params) if isinstance(run_params, str) else run_params
+    if rp and isinstance(rp, list):
+        rp[0]['control_loops'] = loopset['loops']
+        rp[0]['control_loops_source'] = loopset['source']
+    return rp
+
+
+def check_restart_loops(status_df, loopset):
+    """A re-executed run: warn when its completed cycles ran another loop map."""
+    try:
+        done = status_df[status_df['recipe_line_cycle_run_status'] == 'C']
+        for rp in done['run_params']:
+            rp = json.loads(rp) if isinstance(rp, str) else rp
+            if rp and isinstance(rp, list) and isinstance(rp[0], dict):
+                if rp[0].get('control_loops') != loopset['loops']:
+                    print("WARNING: control loops differ from the run's completed cycles", file=sys.stderr)
+                return
+    except Exception as e:  # noqa: BLE001 — advisory only
+        print(f"WARNING: could not compare the control loops with the completed cycles: {e!r}", file=sys.stderr)
 def run_recipe(unit_code, recipe_name):
     """
     Executes a specified growth recipe in a given CEA production unit.
@@ -46,6 +81,7 @@ def run_recipe(unit_code, recipe_name):
     print(f"Connecting to MQTT broker at {mqtt_url}:{mqtt_port}...")
 
     conn = None  # Initialize conn
+    recipe_run_id = None  # set once the run is known; the except marks only a known run F
     try:
         # Connect to the database
         conn = cea.connect_to_db(db_config)
@@ -65,12 +101,17 @@ def run_recipe(unit_code, recipe_name):
             sys.exit(1)
         conn.rollback()
 
-        # Check unit availability and create/retrieve recipe run ID.
+        # Check unit availability (read only) and retrieve an existing recipe run ID.
         recipe_run_df = cea.check_unit_availability(recipe_name=recipe_name, unit_code=unit_code, conn=conn)
+        if not recipe_run_df.empty:
+            recipe_run_id = int(recipe_run_df['recipe_run_id'].iloc[0])
+
+        # The loop map, once per run, before anything is written: a failure marks an
+        # existing run F (the except below) and creates no new one.
+        loopset = read_control_loops(unit_code, conn)
+
         if recipe_run_df.empty:
             recipe_run_id = cea.create_recipe_run(recipe_name=recipe_name, unit_code=unit_code, conn=conn)
-        else:
-            recipe_run_id = int(recipe_run_df['recipe_run_id'].iloc[0])
 
         # Get initial recipe run status
         recipe_run_status_df = cea.get_recipe_run_status(recipe_run_id, conn=conn)
@@ -116,7 +157,7 @@ def run_recipe(unit_code, recipe_name):
             if _rp and isinstance(_rp, list):
                 _rp[0]['control_algorithm']        = _algo
                 _rp[0]['control_algorithm_params'] = _params
-                run_params = json.dumps(_rp)
+                run_params = json.dumps(with_loops(_rp, loopset))
 
             print(f"Processing recipe: {recipe_name}, item seq ID {recipe_item_seq_id} with {cycle_number} cycles (algo={_algo})")
 
@@ -189,8 +230,9 @@ def run_recipe(unit_code, recipe_name):
     except Exception as e:
         # Handle errors, print to standard error, and set recipe run status to 'Failed'
         print(f"Error: {e}", file=sys.stderr)
-        if conn: #check if connection is still valid
+        if conn and recipe_run_id is not None: #check if connection is still valid
            try:
+               conn.rollback()  # a failed statement leaves the transaction aborted
                cea.update_recipe_run(recipe_run_id, status='F', conn=conn)
            except:
                print(f"Error updating recipe run status to Failed", file=sys.stderr)
@@ -261,6 +303,7 @@ def run_recipe_by_id(run_id, unit_code, recipe_name):
         else:
             algo = (os.getenv('CONTROL_ALGORITHM', 'IF_THEN_ELSE') or 'IF_THEN_ELSE').upper()
             params = json.loads(os.getenv('CONTROL_ALGORITHM_PARAMS', '{}') or '{}')
+        loopset = read_control_loops(unit_code, conn)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         conn.close()
@@ -276,6 +319,7 @@ def run_recipe_by_id(run_id, unit_code, recipe_name):
     try:
         status_df = cea.get_recipe_run_status(run_id, conn=conn)
         conn.rollback()
+        check_restart_loops(status_df, loopset)
         for _, row in status_df.drop_duplicates(subset=['recipe_id', 'recipe_item_seq_id', 'recipe_run_id']).iterrows():
             recipe_id = int(row['recipe_id'])
             seq_id = int(row['recipe_item_seq_id'])
@@ -286,6 +330,7 @@ def run_recipe_by_id(run_id, unit_code, recipe_name):
             if run_params and isinstance(run_params, list):
                 run_params[0]['control_algorithm'] = algo
                 run_params[0]['control_algorithm_params'] = params
+                run_params = with_loops(run_params, loopset)
             print(f"Processing recipe: {recipe_name}, item seq ID {seq_id} with {cycles} cycles (algo={algo})")
             for cycle_num in range(1, cycles + 1):
                 done = status_df[(status_df['recipe_id'] == recipe_id) &

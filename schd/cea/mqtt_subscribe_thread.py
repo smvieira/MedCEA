@@ -1,11 +1,19 @@
-def mqtt_subscribe_thread(client, mqtt_topics, instance_shared_data, data_lock, stop_event):
-    """Thread for MQTT subscription."""
-    import threading
+def mqtt_subscribe_thread(client, mqtt_topics, instance_shared_data, data_lock, stop_event,
+                          root=None, unit_code=None):
+    """Thread for MQTT subscription.
+
+    mqtt_topics: a list of <root>/<unit>/<zone>/sense/# (every zone of the loop map;
+    re-subscribed after a reconnect). Each reading is parsed by
+    loop_resolver.parse_reading_topic (5- and 6-segment topics, Q12) and stored as
+    instance_shared_data[(zone, tag, sensor)] = (value, receive time), the receive
+    time being this process's time.monotonic() (the board's timestamp is never
+    trusted). Anything else (_health, _test, other units) is ignored.
+    """
     import json
     import os
     import time
     import sys
-    #data_lock = threading.Lock()  # Ensure threading is used from the imported module
+    from cea import loop_resolver
     shared_data = instance_shared_data  # Assuming shared_data is defined in the imported module
 
     mqtt_url=os.getenv('MQTT_URL')
@@ -31,13 +39,21 @@ def mqtt_subscribe_thread(client, mqtt_topics, instance_shared_data, data_lock, 
 
 
 
-    # in on_message within mqtt_subscribe_thread.py
+    _bad_value_logged = set()
+
     def on_message(client, userdata, msg):
         current_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        recv_t = time.monotonic()
         try:
             payload = json.loads(msg.payload.decode())
+            key = loop_resolver.parse_reading_topic(msg.topic, root, unit_code, payload)
+            if key is None:
+                return
             with data_lock:
-                shared_data[msg.topic] = payload
+                stored = loop_resolver.update_readings(shared_data, key, payload, recv_t)
+            if not stored and loop_resolver.reading_value(payload) is None and key not in _bad_value_logged:
+                _bad_value_logged.add(key)
+                print(f"[{current_time}] <Warning> no numeric value on {msg.topic} (logged once per sensor)", file=sys.stderr)
         except json.JSONDecodeError as jde:
             print(f"[{current_time}] <Error> MQTT JSONDecodeError for topic {msg.topic}: {jde}. Payload: {msg.payload.decode(errors='replace')}", file=sys.stderr)
         except Exception as e:

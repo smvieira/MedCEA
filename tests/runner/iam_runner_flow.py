@@ -20,13 +20,18 @@ database as postgres. Exit 1 on any FAIL.
        inline parameters are refused
   R2   a schedule triggered by an operator: created as the schedule's creator, started
        by the operator, completed by the runner; params_id only under true; a schedule
-       whose set's algorithm differs from the assignment's runs (B1)
+       whose set's algorithm differs from the assignment's runs (B1); the cycle's
+       run_params carry the loop map read once at run start (control_loops,
+       control_loops_source): IAMT01 has no control_loop rows, so the default map of
+       its actuator zone Z02 (feedback control Phase 2, Q11/Q20)
   R3   a run created by a production manager, executed by an operator, completed
   R4   execute's algorithm: false from the body, true from the set (body ignored)
   R5   stop: F at once, SIGTERM, the runner writes nothing more
   R6   PATCH status: S is a no-op, F -> S, C refused once released (and under true)
   R7   DELETE retires; a retired schedule cannot be edited (API 409, old SQL 42501)
   R8   (false) the runner of the previous commit and this one leave the same run
+       (run_params compared without control_loops/control_loops_source, which only the
+       new runner writes; those are checked on their own: the default map of Z02)
   R9   a migration:008 schedule: no person-less re-save makes it fire under true
   R10  the cron path (_schedule_trigger_job): fires as the schedule's creator
   R11  log retention: saved (false), proposed for qa, 202 (true)
@@ -47,6 +52,13 @@ database as postgres. Exit 1 on any FAIL.
        operator lists only their unit's runs, another unit's run, log and cycles are
        404/404/[]; report-only otherwise; the composite production manager sees every
        run; a role with runs R but no run_logs R gets log null under IAM_ENFORCE=true
+  R20  (with migration 010) a control_loop row on IAMT01/Z02, inserted as the owner:
+       an executed run records control_loops_source 'table' and the row in run_params,
+       and the run log holds the STOP to medcea/IAMT01/Z02/control/all_controllers_off
+       (loop and light publishes are not asserted: a 0-minute cycle races the 10-s
+       loop); the same row with output.mode 'boost' fails the run at start (F, the
+       database's own words "output.mode must be command", no cycle written); the
+       rows are deleted afterwards
 """
 import argparse
 import importlib.util
@@ -61,6 +73,14 @@ import uuid
 
 import psycopg2
 import psycopg2.extras
+
+def _loop_resolver(cur_dir="/work/cur"):
+    """schd/cea/loop_resolver.py by path (pure: no cea package, no database)."""
+    spec = importlib.util.spec_from_file_location("loop_resolver", os.path.join(cur_dir, "schd", "cea", "loop_resolver.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 
 PG = dict(host=os.environ.get("PG_HOST", "rdbms-postgresql"), dbname=os.environ.get("PG_DATABASE", "medcea_db"))
 ISSUER = "https://keycloak.iamtest.invalid/realms/medcea"
@@ -406,6 +426,10 @@ def main():
         ok("R2", "the cycle's run_params is a list naming the algorithm",
            isinstance(rp, list) and rp[0].get("control_algorithm") == "IF_THEN_ELSE"
            and rp[0].get("control_algorithm_params", {}).get("iamt_runner") == 0, rp)
+        lr = _loop_resolver()
+        ok("R2", "the cycle's run_params carry the default loop map of IAMT01's actuator zone Z02",
+           rp[0].get("control_loops_source") == "default" and rp[0].get("control_loops") == lr.build_default_map(["Z02"]),
+           (rp[0].get("control_loops_source"), rp[0].get("control_loops")))
         ch = changes("medcea.recipe_line_cycle_run", [q("SELECT min(recipe_line_cycle_run_id) AS v FROM medcea.recipe_line_cycle_run "
                                                         "WHERE recipe_run_id = %s", (rid,), one=True)["v"]])
         ok("R2", "cycles are written as system:scheduler for the run's creator",
@@ -538,11 +562,20 @@ def main():
         env = {"PYTHONPATH": "/work/cur/tests/runner/stub",
                "CONTROL_ALGORITHM": "PID", "CONTROL_ALGORITHM_PARAMS": json.dumps({})}
         p, rid_old = run_legacy_cli(os.path.join(prev_root, "schd"), i, env)
-        new_c = [(x["recipe_item_seq_id"], x["recipe_item_seq_cycle_num"], x["st"], json.dumps(x["rp"], sort_keys=True)) for x in cycles(rid3)]
+        new_only = ("control_loops", "control_loops_source")
+
+        def without_loops(rp):
+            return [{k: v for k, v in e.items() if k not in new_only} if isinstance(e, dict) else e for e in (rp or [])]
+        new_c = [(x["recipe_item_seq_id"], x["recipe_item_seq_cycle_num"], x["st"], json.dumps(without_loops(x["rp"]), sort_keys=True))
+                 for x in cycles(rid3)]
         old_c = [(x["recipe_item_seq_id"], x["recipe_item_seq_cycle_num"], x["st"], json.dumps(x["rp"], sort_keys=True)) for x in cycles(rid_old)]
         ok("R8", "the previous commit's runner and this one: the same run (status, cycles, run_params)",
            p.returncode == 0 and run_row(rid_old)["recipe_run_status"] == run_row(rid3)["recipe_run_status"] == "C"
            and old_c == new_c, {"rc": p.returncode, "old": old_c, "new": new_c, "stderr": p.stderr[-300:]})
+        rp3 = (cycles(rid3) or [{}])[0].get("rp") or [{}]
+        ok("R8", "this runner's run_params add the default loop map of Z02 (source default)",
+           rp3[0].get("control_loops_source") == "default"
+           and rp3[0].get("control_loops") == _loop_resolver().build_default_map(["Z02"]), rp3)
         old_actors = {x["actor_sub"] for x in changes("medcea.recipe_run", [rid_old])}
         new_actors = {x["actor_sub"] for x in changes("medcea.recipe_run", [rid3])}
         note("R8", f"expected differences — run actors: previous {sorted(old_actors)}, now {sorted(new_actors)}; "
@@ -826,6 +859,56 @@ def main():
         except psycopg2.Error as e:   # end_open_runs() still closes the S runs
             note("R19", f"cleanup: {type(e).__name__}")
     end_open_runs()
+
+    # R20 ──────────────────────────────────────────────────────────────────────────
+    if q("SELECT to_regclass('medcea.control_loop') IS NOT NULL AS v", one=True)["v"]:
+        end_open_runs()
+        z2 = q("SELECT zone_id FROM medcea.cea_zone WHERE unit_id = %s AND zone_code = 'Z02'", (i["u1"],), one=True)["zone_id"]
+        inp = {"tag": "air_temperature", "sources": ["sht45_1"], "rule": "reference", "reference": "sht45_1"}
+        out = {"actuator": "air_temperature", "mode": "command"}
+        loop_ids = []
+        try:
+            loop_ids = [r["loop_id"] for r in owner(
+                """INSERT INTO medcea.control_loop (zone_id, loop_code, recipe_lower, recipe_upper, input, output)
+                   VALUES (%s, 'air_temperature', 'air_temperature_lower_limit', 'air_temperature_upper_limit',
+                           %s::jsonb, %s::jsonb) RETURNING loop_id""", (z2, json.dumps(inp), json.dumps(out)))]
+
+            def execute_run():
+                r = c.post("/api/runs", json={"unit_id": i["u1"], "recipe_id": i["r0"]}, headers=H(T_PM))
+                rid = (r.get_json() or {}).get("recipe_run_id")
+                r = c.post(f"/api/runs/{rid}/execute", json={"control_algorithm": "IF_THEN_ELSE", "control_algorithm_params": {}},
+                           headers=H(T_OP))
+                return rid, r.status_code, (wait_run(api, rid) if rid and r.status_code == 200 else None)
+
+            rid20, code20, st20 = execute_run()
+            rp = (cycles(rid20) or [{}])[0].get("rp") or [{}] if rid20 else [{}]
+            want = [{"zone_code": "Z02", "loop_id": loop_ids[0], "loop_code": "air_temperature",
+                     "recipe_lower": "air_temperature_lower_limit", "recipe_upper": "air_temperature_upper_limit",
+                     "input": inp, "output": out}]
+            ok("R20", "a control_loop row: the run completes with control_loops_source 'table' and the row in run_params",
+               code20 == 200 and st20 == "C" and rp[0].get("control_loops_source") == "table"
+               and rp[0].get("control_loops") == want,
+               (code20, st20, rp[0].get("control_loops_source"), rp[0].get("control_loops"), log_of(api, rid20)[-600:] if rid20 else ""))
+            ok("R20", "the run log holds the STOP to medcea/IAMT01/Z02/control/all_controllers_off",
+               "publish medcea/IAMT01/Z02/control/all_controllers_off" in (log_of(api, rid20) if rid20 else ""),
+               log_of(api, rid20)[-600:] if rid20 else "")
+            end_open_runs()
+            owner("UPDATE medcea.control_loop SET output = %s::jsonb WHERE loop_id = %s",
+                  (json.dumps(dict(out, mode="boost")), loop_ids[0]))
+            rid20b, code20b, st20b = execute_run()
+            log20b = log_of(api, rid20b) if rid20b else ""
+            ok("R20", "a row with output.mode boost: the run fails at start (F), in the database's words, no cycle written",
+               code20b == 200 and st20b == "F" and "output.mode must be command" in log20b and cycles(rid20b) == [],
+               (code20b, st20b, cycles(rid20b) if rid20b else None, log20b[-600:]))
+        finally:
+            end_open_runs()
+            if loop_ids:
+                try:
+                    owner("DELETE FROM medcea.control_loop WHERE loop_id = ANY(%s)", (loop_ids,))
+                except psycopg2.Error as e:
+                    note("R20", f"cleanup: {type(e).__name__}: {e}")
+    else:
+        note("R20", "no medcea.control_loop (migration 010 not deployed): skipped")
 
     # the new runner's command-line path with 008b: works while false, refused while true
     p, rid_cli = run_legacy_cli("/schd", i, svc=svc)
