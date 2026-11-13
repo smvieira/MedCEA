@@ -220,14 +220,14 @@ class Migration009Test(unittest.TestCase):
         text = read("medcea_db_migrations.sql")
         cls.full = text
         start = text.index("-- ── Migration 009")
-        cls.block = text[start:]
+        cls.block = text[start:text.index("-- ── Migration 010")]   # 010 (feedback control) follows
         cls.before = text[:start]
 
     def test_last_and_after_008c(self):
         self.assertTrue(self.before.rstrip().endswith("COMMIT;"), "009 follows 008c's COMMIT")
         self.assertIn("'008c:last_nonce'", self.before)
         self.assertEqual(self.full.count("Migration 009"), 1)
-        self.assertNotIn("Migration 01", self.block)
+        self.assertTrue(self.block.rstrip().endswith("COMMIT;"), "009 ends with its COMMIT, before 010")
 
     def test_its_own_transaction(self):
         stmts = [x for x in re.sub(r"--[^\n]*", "", self.block).split("\n") if x.strip()]

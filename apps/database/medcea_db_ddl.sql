@@ -562,7 +562,8 @@ CREATE VIEW medcea.msg_actual_points AS
     (msg ->> 'UoM'::text) AS uom,
     (msg ->> 'device_id'::text) AS device_id,
     "timestamp" AS record_timestamp,
-    msg
+    msg,
+    COALESCE(NULLIF(msg ->> 'sensor', ''), 'default') AS sensor
    FROM medcea.measurement
   WHERE ((msg_type)::text = 'AP'::text);
 
@@ -855,7 +856,8 @@ CREATE VIEW medcea.v_ap_measurements AS
     ((msg ->> 'value'::text))::numeric AS value,
     (msg ->> 'UoM'::text) AS unit_of_measurement,
     ((msg ->> 'timestamp'::text))::timestamp without time zone AS message_timestamp,
-    msg
+    msg,
+    COALESCE(NULLIF(msg ->> 'sensor', ''), 'default') AS sensor
    FROM medcea.measurement
   WHERE ((msg_type)::text = 'AP'::text);
 

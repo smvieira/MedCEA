@@ -63,8 +63,9 @@
 #   1  CREATE DATABASE if missing; then dba_iam_flag: is schema iam (apps/access) compiled?
 #      (1a: schema iam must also have iam._changed_since, IAM 4.1: the compiled grants name it)
 #   2  medcea_db_ddl.sql (no ON_ERROR_STOP; "already exists" filtered, as before)
-#   3  medcea_db_migrations.sql with -v deploy_nonce; 008b and 008c (IAM 4.1, the
-#      access policy's versions) must both have committed it
+#   3  medcea_db_migrations.sql with -v deploy_nonce; 008b, 008c (IAM 4.1, the
+#      access policy's versions) and 010 (feedback control's loops) must all have
+#      committed it
 #   3a recipe_recipe_id_seq fix (was deploy.sh step 4)
 #   4  medcea_db_owner.sql (iam too, IAM 2.7)       (-1, ON_ERROR_STOP)
 #   4a the policy's compiled functions              (-1, ON_ERROR_STOP)
@@ -217,6 +218,14 @@ SQL
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '008c:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
         echo "ERROR: migration 008c did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 010 (feedback control: medcea.control_loop, the readings' sensor) is a third
+    # transaction with the same nonce: without it the runner would quietly fall back
+    # to its default map and the wizard's loop picker would answer "not deployed"
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '010:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 010 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
         return 1
     fi
 

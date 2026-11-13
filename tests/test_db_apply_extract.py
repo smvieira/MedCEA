@@ -112,6 +112,12 @@ class DbApplyExtraction(unittest.TestCase):
         p_new, new = run(LIB, "db_apply", "medcea-iamtest", "pod", mode, env=env)
         self.assertEqual(p_old.returncode, 0, p_old.stderr[-2000:])
         self.assertEqual(p_new.returncode, 0, p_new.stderr[-2000:])
+        # migration 010 (feedback control) adds one read-back of its nonce after 008c's:
+        # the one call the old library lacks
+        n010 = [i for i, (a, _) in enumerate(new) if any("010:last_nonce" in x for x in a)]
+        self.assertEqual(len(n010), 1, "one 010 nonce read-back")
+        self.assertTrue(any("008c:last_nonce" in x for x in new[n010[0] - 1][0]), "right after 008c's")
+        new = new[:n010[0]] + new[n010[0] + 1:]
         self.assertEqual(len(old), len(new))
         nonce = re.compile(r"deploy_nonce=[0-9a-f]+")
         for (a_old, i_old), (a_new, i_new) in zip(old, new):

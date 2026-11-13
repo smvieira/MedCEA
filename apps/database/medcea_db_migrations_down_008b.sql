@@ -130,13 +130,16 @@ GRANT EXECUTE ON FUNCTION medcea.register_mqtt_credential(text, text, integer, t
 GRANT USAGE ON SCHEMA medcea_auth TO anon;
 GRANT EXECUTE ON FUNCTION medcea_auth.pre_request() TO anon;
 -- 008b's tables are not the API's (the blanket grant reached them), nor their
--- identity sequences. grants.LEGACY_ANON_EXCLUDED is this list.
+-- identity sequences; nor migration 010's control_loop (feedback control: read by
+-- the runner, written through save_zone_loops()). grants.LEGACY_ANON_EXCLUDED is
+-- this list.
 DO $$
 DECLARE s regclass; t text;
 BEGIN
     -- guarded: after a full down they are parked in medcea_retired_008b (section 4)
     FOREACH t IN ARRAY ARRAY['approval', 'pending_change', 'run_release', 'algorithm_state_event', 'row_change',
-                             'unit_algorithm_params', 'mqtt_service_credential', 'mqtt_service_acl'] LOOP
+                             'unit_algorithm_params', 'mqtt_service_credential', 'mqtt_service_acl',
+                             'control_loop'] LOOP
         IF pg_catalog.to_regclass('medcea.' || t) IS NOT NULL THEN
             EXECUTE pg_catalog.format('REVOKE ALL ON medcea.%I FROM anon', t);
         END IF;
@@ -148,7 +151,7 @@ BEGIN
                AND d.deptype IN ('a', 'i') AND t.relnamespace = 'medcea'::regnamespace
                AND t.relname IN ('mqtt_credential', 'platform_setting', 'approval', 'pending_change', 'run_release',
                                  'algorithm_state_event', 'row_change', 'unit_algorithm_params',
-                                 'mqtt_service_credential', 'mqtt_service_acl') LOOP
+                                 'mqtt_service_credential', 'mqtt_service_acl', 'control_loop') LOOP
         EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM anon', s);
     END LOOP;
 END $$;

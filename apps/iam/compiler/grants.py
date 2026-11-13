@@ -65,7 +65,7 @@ NOT_BUILT = {
 # each of them, so `verify` in false mode and the down file describe one set.
 LEGACY_ANON_EXCLUDED = ("mqtt_credential", "platform_setting", "approval", "pending_change", "run_release",
                         "algorithm_state_event", "row_change", "unit_algorithm_params",
-                        "mqtt_service_credential", "mqtt_service_acl")
+                        "mqtt_service_credential", "mqtt_service_acl", "control_loop")
 LEGACY_ANON_READ_ONLY = ("device_slot_history",)
 LEGACY_V1 = "medcea.register_mqtt_credential(text,text,integer,text,text)"
 NEVER = ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")

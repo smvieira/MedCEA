@@ -348,6 +348,14 @@ class ApprovalsLogicUnderNode(unittest.TestCase):
         self.assertNotIn("target=", h["all"])
         self.assertIn("target=in.(medcea.recipe)", h["recipes"])
         self.assertIn("medcea.cea_unit", h["reviews"])
+        # every row approve_change() reviews is in the reviews filter (feedback control
+        # added medcea.control_loop, migration 010)
+        allowed = re.search(r"IF p_target NOT IN \(([^)]*)\) THEN\s+RAISE EXCEPTION 'approve_change:", self.mig)
+        self.assertIsNotNone(allowed, "approve_change's target list")
+        targets = re.findall(r"'(medcea\.[a-z_]+)'", allowed.group(1))
+        self.assertIn("medcea.control_loop", targets)
+        for t in targets:
+            self.assertIn(t, h["reviews"], t)
         self.assertIn("medcea.recipe_run", h["releases"])
         self.assertIn("medcea.algorithm_state", h["qtables"])
         for q in self.out["history"]:

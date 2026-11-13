@@ -59,7 +59,10 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    owner decision Q19): skeleton-gate --against-git db270f9 says widening with
                    exactly svc_scheduler's SELECT in system reach; no person role's reach moves,
                    no one is barred from approving it, the matrix untouched, the checker clean,
-                   only the grants forms move (by that one privilege row)
+                   only the grants forms move (by that one privilege row); and migration 010's
+                   commit (C2): grants.LEGACY_ANON_EXCLUDED gains control_loop, which moves only
+                   the five grants verify forms (as_of_fc, applied by every class that compares
+                   an older CLI's grants output with today's compiler)
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -146,6 +149,18 @@ PRE_FC = "db270f9"   # main after the units' commit C (skeleton version 3, propo
                      # the same defaults.yaml) and the Config UI rights: feedback control Phase 2a
                      # changes the policy (master_data gains medcea.control_loop for svc_scheduler
                      # only, owner decision Q19; PhaseLoopsADelta)
+
+def as_of_fc(key, out):
+    """An older commit's output with feedback control commit C2's one compiler change applied:
+    grants.LEGACY_ANON_EXCLUDED gains control_loop (migration 010; CLAUDE.md's rule for a new
+    medcea table), which only the grants verify forms print (the legacy CTE's lists).
+    PhaseLoopsADelta.test_only_the_verify_forms_move_by_the_legacy_list pins that nothing
+    else moved."""
+    if key.startswith("grants-verify-"):
+        return out.replace("'mqtt_service_acl'", "'mqtt_service_acl', 'control_loop'")
+    return out
+
+
 # What slice 4.1 moves on purpose (design §14.2.7): the route table (new iam routes,
 # policy_page, dual_control, exports), the grants (pre_request's only_rpc block, the 008c
 # members), three NetworkPolicies, check's counts, and the new client's egress. Phase41Delta
@@ -2209,7 +2224,7 @@ class Phase43Delta(unittest.TestCase):
                 continue          # its POLICY_DOMAIN line: test_only_the_policy_hosts_status_moves
             rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
             self.assertEqual(rc, 0, f"{key} ({PRE_43}): {err}")
-            self.assertEqual(out, want, key)
+            self.assertEqual(as_of_fc(key, out), want, key)
 
     def test_skeleton_and_matrix_unchanged(self):
         with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
@@ -2254,7 +2269,7 @@ class Phase44Delta(unittest.TestCase):
         for key, want in self.want.items():
             rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
             self.assertEqual(rc, 0, f"{key} ({PRE_44}): {err}")
-            self.assertEqual(out, want, key)
+            self.assertEqual(as_of_fc(key, out), want, key)
 
     def test_skeleton_and_matrix_unchanged(self):
         with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
@@ -2308,7 +2323,7 @@ class Phase45Delta(unittest.TestCase):
         for key, want in self.want.items():
             rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
             self.assertEqual(rc, 0, f"{key} ({PRE_45}): {err}")
-            self.assertEqual(out, want, key)
+            self.assertEqual(as_of_fc(key, out), want, key)
 
     def test_skeleton_and_matrix_unchanged(self):
         with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
@@ -2366,7 +2381,7 @@ class PhaseStageCADelta(unittest.TestCase):
         for key, want in self.want.items():
             rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
             self.assertEqual(rc, 0, f"{key} ({PRE_SC}): {err}")
-            self.assertEqual(out, want, key)
+            self.assertEqual(as_of_fc(key, out), want, key)
 
     def test_check_output_identical(self):
         rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
@@ -2452,7 +2467,7 @@ class PhaseUnitsADelta(unittest.TestCase):
         for key, want in self.want.items():
             rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
             self.assertEqual(rc, 0, f"{key} ({PRE_UA}): {err}")
-            self.assertEqual(out, want, key)
+            self.assertEqual(as_of_fc(key, out), want, key)
 
     def test_check_output_identical(self):
         rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
@@ -2792,7 +2807,26 @@ class PhaseLoopsADelta(unittest.TestCase):
                 h_old, h_new = set(_SHA256.findall(self.was[key])), set(_SHA256.findall(self.want[key]))
                 self.assertEqual(h_new - h_old <= {d_new}, True, h_new - h_old)
                 self.assertEqual(h_old - h_new <= {d_old}, True, h_old - h_new)
-                self.assertEqual("control_loop" in self.was[key], False)
+                self.assertNotIn(self.TABLE, self.was[key])
+                # migration 010's commit: the bare name only in the legacy anon lists (as_of_fc)
+                self.assertEqual("control_loop" in self.was[key], key.startswith("grants-verify-"), key)
+
+    def test_only_the_verify_forms_move_by_the_legacy_list(self):
+        """Migration 010's commit (C2) changes one compiler constant, grants.LEGACY_ANON_EXCLUDED
+        (+ control_loop): PRE_FC's CLI on PRE_FC's policy differs from today's compiler on that
+        policy only in the five grants verify forms, and as_of_fc() is exactly that difference."""
+        verify = {"grants-verify-all", "grants-verify-assert", "grants-verify-body", "grants-verify-functions",
+                  "grants-verify-smoke-without-iam"}
+        self.assertEqual({k for k in self.was if k.startswith("grants-verify-")}, verify)
+        moved = set()
+        for key, was in self.was.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)   # PRE_FC's code and policy
+            self.assertEqual(rc, 0, f"{key} ({PRE_FC}): {err}")
+            if out != was:
+                moved.add(key)
+            with self.subTest(key):
+                self.assertEqual(as_of_fc(key, out), was, key)
+        self.assertEqual(moved, verify)
 
     def test_member_shape(self):
         """The member sits in master_data right after medcea.component, read by svc_scheduler
@@ -3223,7 +3257,7 @@ class Phase42aDelta(unittest.TestCase):
         if key not in self.outs:
             rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
             self.assertEqual(rc, 0, f"{key} ({PRE_42A}): {err}")
-            self.outs[key] = out
+            self.outs[key] = as_of_fc(key, out)
         return self.outs[key]
 
     def test_unmoved_outputs_byte_identical(self):
