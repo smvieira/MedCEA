@@ -1,0 +1,17 @@
+{
+ "note": "nothing ticked and no Stop all",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": []
+ },
+ "expect": [
+  [
+   "error",
+   "L_EMPTY",
+   "answer.loops"
+  ]
+ ]
+}

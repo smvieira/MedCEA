@@ -1,0 +1,16 @@
+{
+ "note": "a page of another version",
+ "context": "single",
+ "role": "ZONE",
+ "answer": "initial",
+ "expect": [
+  [
+   "error",
+   "L_SCHEMA",
+   "spec.version"
+  ]
+ ],
+ "spec_patch": {
+  "version": 2
+ }
+}

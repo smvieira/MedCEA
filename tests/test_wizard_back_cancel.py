@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """edge/flash-device.sh's Back and Cancel (5 Nov 2026), offline: the real planning functions
-(plan_role, plan_slot, plan_wiring) and their loop, taken from the script and run with the
+(plan_role, plan_slot, plan_wiring, plan_loops) and their loop, taken from the script and run with the
 browser's answers scripted; the prompt helpers; cancel at a question. The server side
 (/api/cancel, Back only where offered) is in tests/test_edge_auth.py WizardTests."""
+import importlib.util
 import json
 import os
 import re
@@ -35,7 +36,9 @@ HELPERS = ("step", "info", "warn", "die", "cancel_check", "cancelled", "is_back"
            "prompt_choice", "prompt_secret", "menu_reset", "menu_add", "menu_head", "menu_count",
            "menu_ask", "ask_param", "driver_chosen", "chosen_count", "plan_role", "plan_slot",
            "plan_wiring", "prompt_wiring", "sense_questions", "sense_wiring_take", "wiring_findings",
-           "sense_wiring_check", "sense_wiring_ui", "sense_save_template")
+           "sense_wiring_check", "sense_wiring_ui", "sense_save_template",
+           "plan_loops", "prompt_loops", "loops_terminal", "loops_field", "auth_report",
+           "loops_refusal")
 
 # The browser: answers the prompts in order from ANSWERS (one per line; "BACK" is Back)
 # and logs each prompt it saw. A stand-in for the page + wizard_server.
@@ -60,7 +63,7 @@ SLOTS = ("SLOT\tUNIT01\tZONE01\t1\tCONTROL\tfree\tunit01-c-zone01\t\t\t\t\n"
 
 
 class PlanningBack(unittest.TestCase):
-    def run_plan(self, answers, role="", tool=None, extra=None, after=""):
+    def run_plan(self, answers, role="", tool=None, extra=None, after="", stubs=""):
         src = read(SCRIPT)
         tmp = tempfile.mkdtemp()
         self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
@@ -77,7 +80,7 @@ class PlanningBack(unittest.TestCase):
             "UNIT_WANTED=''; ZONE_WANTED=''; OUT_DIR=\"${T_OUT_DIR:-$UI_DIR/provisioned}\"",
             "WIRING_FILE=\"${T_WIRING_FILE:-}\"; BOARD_TEMPLATE=\"${T_BOARD_TEMPLATE:-}\"",
             "SENSE_WIRING_JSON=''; SENSE_VARIANT=''; SENSE_SAVE_AS=''; EDGE_USER=\"${T_EDGE_USER:-}\"",
-            defs, FAKE_BROWSER,
+            defs, FAKE_BROWSER, stubs,
             'set -e',
             loop,
             '  BACK_OK=0',
@@ -169,6 +172,9 @@ elif cmd == "validate-wiring":
         sys.exit(1)
     print(json.dumps({"findings": [{"level": "warn", "code": "W_PULLUPS", "where": "buses.i2c0",
                                     "message": "fit 2.2 kOhm pull-ups"}], "errors": 0, "warnings": 1}))
+elif cmd == "sense-sources":
+    sys.stdin.read()
+    print(json.dumps([{"instance": "sht45_1", "driver": "sht4x", "tags": ["air_temperature", "air_humidity"]}]))
 elif cmd == "save-board-template":
     sys.stdin.read()
     if a[1] == "taken":
@@ -344,6 +350,353 @@ class SenseWiring(unittest.TestCase):
         self.assertIn("--wiring FILE", line)
         self.assertIn('spec["wiring"] = json.loads(e["SENSE_WIRING_JSON"])', src)
         self.assertIn('"wiring": json.loads(e["SENSE_WIRING_JSON"])', src)
+
+
+# The control-loop picker (Q20): a signed-in run, platform_db's `loops` answered from
+# $T_CTX, the real loops.py and (CONTROL) the real device_template.py.
+LOOP_STUBS = r"""
+TOK_W=1; EDGE_ROLE="${T_ROLE:-engineer}"; EDGE_USER=eng; EDGE_TOKEN=""; EDGE_AUTH_CODE=""; EDGE_AUTH_MSG=""
+token_get() { if [ -n "${T_NO_TOKEN:-}" ]; then EDGE_AUTH_CODE=expired; EDGE_AUTH_MSG="the sign-in expired"; return 1; fi
+              EDGE_TOKEN=tok; return 0; }
+token_close() { :; }
+phase2() { return 0; }
+platdb() { case "$1" in loops) cat "$T_CTX" ;; *) echo "platdb $*" >&2; return 1 ;; esac; }
+LOOPS_TOOL="$T_LOOPS_TOOL"; CONTROL_DRIVER=relay8; ASSUME_YES="${T_YES:-0}"
+"""
+LOOPS_PY = os.path.join(ROOT, "edge", "src", "host", "loops.py")
+PDB = os.path.join(ROOT, "edge", "src", "host", "platform_db.py")
+_spec = importlib.util.spec_from_file_location("pdb_loops_fake_t", os.path.join(ROOT, "tests", "test_platform_db_loops.py"))
+PDB_T = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(PDB_T)
+with open(os.path.join(ROOT, "tests", "fixtures", "loops", "_contexts.json")) as _f:
+    LOOP_CTX = json.load(_f)
+SKIP = json.dumps({"skip": True})
+
+
+class LoopPicker(unittest.TestCase):
+    """The `loops` planning stage after `wiring`: asked with Back when the zone has both
+    boards, never asked when it cannot be (no counterpart, a run, a role, IAM_DB_ROLES)."""
+
+    def ctx_file(self, state="ok", context=None, why=""):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        path = os.path.join(tmp, "ctx.json")
+        with open(path, "w") as f:
+            json.dump({"state": state, "why": why, "context": context}, f)
+        return path
+
+    def run_loops(self, answers, role="CONTROL", ctx=None, tool=None, extra=None, after=""):
+        env = dict(extra or {}, T_CTX=ctx or self.ctx_file(context=LOOP_CTX["single"]), T_LOOPS_TOOL=LOOPS_PY)
+        after = after + '\necho "LOOPS note=$LOOPS_NOTE skipped=$LOOPS_SKIPPED json=$LOOPS_JSON"'
+        r, prompts = PlanningBack.run_plan(self, answers, role="" if role == "CONTROL" else role, tool=tool,
+                                           extra=env, after=after, stubs=LOOP_STUBS)
+        return r, prompts
+
+    def labels(self, prompts):
+        return [(p["label"].split(" [")[0], p["back"]) for p in prompts]
+
+    def test_control_asks_after_the_reference_wiring(self):
+        r, prompts = self.run_loops(["2", "1", "y", SKIP])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.labels(prompts)[-2:], [("Use this reference wiring?", True),
+                                                     ("Which sensor does each loop control on?", True)])
+        p = prompts[-1]
+        self.assertEqual((p["kind"], p["options"], p["submit_on_click"]), ("loops", [], False))
+        spec = p["spec"]
+        self.assertEqual((spec["role"], spec["unit_code"], spec["zone_code"]), ("CONTROL", "UNIT01", "ZONE01"))
+        # the planned map (reference wiring) is the zone's actuators; light is a types actuator
+        acts = {a["name"]: a["kind"] for a in spec["actuators"]}
+        self.assertEqual(acts["light"], "types")
+        self.assertEqual(acts["co2"], "commands")
+        self.assertEqual([l["loop_code"] for l in spec["initial"]["loops"]],
+                         ["air_temperature", "air_humidity", "co2", "substrate_temperature"])
+        self.assertIn("LOOPS note=decided later (the zone stays on the default map) skipped=1", r.stdout)
+
+    def test_back_goes_to_the_wiring(self):
+        r, prompts = self.run_loops(["2", "1", "y", "BACK", "y", SKIP])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.labels(prompts)[2:], [
+            ("Use this reference wiring?", True), ("Which sensor does each loop control on?", True),
+            ("Use this reference wiring?", True), ("Which sensor does each loop control on?", True)])
+
+    def test_back_skips_a_wiring_stage_that_asked_nothing(self):
+        # --wiring/--board-template with no device parameter asked: plan_wiring asks
+        # nothing, so Back from the picker goes to the slot, not straight back here.
+        silent = (LOOP_STUBS + '\neval "real_plan_wiring () $(declare -f plan_wiring | tail -n +2)"\n'
+                  'plan_wiring() { local _n="${PROMPTS_ASKED:-0}"; real_plan_wiring; PROMPTS_ASKED="$_n"; }\n')
+        env = dict(T_CTX=self.ctx_file(context=LOOP_CTX["single"]), T_LOOPS_TOOL=LOOPS_PY)
+        r, prompts = PlanningBack.run_plan(self, ["2", "1", "y", "BACK", "1", "y", SKIP], extra=env,
+                                           stubs=silent)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([l for l, _ in self.labels(prompts)], [
+            "What is this board for?", "Which unit and zone is this board going into?",
+            "Use this reference wiring?", "Which sensor does each loop control on?",
+            "Which unit and zone is this board going into?", "Use this reference wiring?",
+            "Which sensor does each loop control on?"])
+
+    def test_a_chosen_answer_is_kept_for_the_save(self):
+        r, prompts = self.run_loops(["2", "1", "y", SKIP])
+        spec = prompts[-1]["spec"]
+        r, _ = self.run_loops(["2", "1", "y", json.dumps(spec["initial"])])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LOOPS note=chosen, not saved yet skipped=0 json={\"skip\":false", r.stdout)
+        self.assertIn("control loops: air_temperature, air_humidity, co2, substrate_temperature", r.stdout)
+
+    def test_an_invalid_answer_dies_before_the_board_is_touched(self):
+        r, prompts = self.run_loops(["2", "1", "y", json.dumps({"skip": False, "stop_all": False, "loops": []})])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the control loops have errors and were not accepted", r.stderr)
+        self.assertIn("answer.loops - no loop is ticked", r.stderr)
+        self.assertNotIn("RESULT", r.stdout)
+        src = read(SCRIPT)
+        self.assertLess(src.index("      loops)  plan_loops"), src.index("BOARD_TOUCHED=1   #"))
+
+    def test_two_sensors_are_never_chosen_for_the_person(self):
+        r, prompts = self.run_loops(["2", "1", "y", SKIP], ctx=self.ctx_file(context=LOOP_CTX["bench"]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = {x["loop_code"]: x for x in prompts[-1]["spec"]["rows"]}
+        self.assertIsNone(rows["air_humidity"]["loop"]["input"]["reference"])
+        self.assertIn("air_humidity has 2 sensors: no data and an alarm in a run", r.stdout)
+
+    def test_no_sense_board_no_prompt(self):
+        ctx = dict(LOOP_CTX["single"], sensors=[])
+        r, prompts = self.run_loops(["2", "1", "y"], ctx=self.ctx_file(context=ctx))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("loops", [p["kind"] for p in prompts])
+        self.assertIn("no SENSE board with named sensors in UNIT01 / ZONE01 yet", r.stdout)
+
+    def test_a_run_means_no_prompt_and_the_words(self):
+        ctx = dict(LOOP_CTX["existing"], busy={"run_id": 42, "run_status": "R"})
+        r, prompts = self.run_loops(["2", "1", "y"], ctx=self.ctx_file(context=ctx))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("loops", [p["kind"] for p in prompts])
+        self.assertIn("Unit UNIT01 has run 42 running. The loops of UNIT01 / ZONE01 change only while no run "
+                      "is running or scheduled", r.stderr)
+        self.assertIn("LOOPS note=not changed (unit has run 42 running)", r.stdout)
+
+    def refused_ctx(self, message="permission denied for function zone_loop_context"):
+        """What platform_db.py really prints for config-api's answer to a refused call:
+        HTTP 401 with SQLSTATE 42501, which config-api sends in both IAM_DB_ROLES modes."""
+        fake = PDB_T.Fake()
+        self.addCleanup(fake.close)
+        fake.answers.append((401, PDB_T.err("42501", message)))
+        env = dict(os.environ, CEA_CONFIG_API=fake.base, IAM_POSTGREST_JWT="false")
+        env.pop("PLATFORM_DB_TOKEN_FD", None)
+        r = subprocess.run(["python3", PDB, "loops", "3"], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(json.loads(r.stdout)["state"], "refused", r.stdout + r.stderr)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        path = os.path.join(tmp, "ctx.json")
+        with open(path, "w") as f:
+            f.write(r.stdout)
+        return path
+
+    def test_maintenance_is_told_and_not_asked(self):
+        # D-c: IAM_DB_ROLES=true, a maintenance token, config-api's 401 + 42501
+        r, prompts = self.run_loops(["2", "1", "y"], ctx=self.refused_ctx(
+            "zone_loop_context: role maintenance holds no U on master_data"),
+            extra={"T_ROLE": "maintenance", "IAM_DB_ROLES": "true"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("loops", [p["kind"] for p in prompts])
+        self.assertIn("maintenance does not choose control loops: an engineer does", r.stdout)
+        self.assertNotIn("IAM_DB_ROLES", r.stdout + r.stderr)
+        self.assertIn("LOOPS note=not changed (role maintenance)", r.stdout)
+
+    def test_iam_db_roles_false_is_said(self):
+        # D-b: the same 401 + 42501 under IAM_DB_ROLES=false, for any role
+        for role in ("engineer", "maintenance"):
+            r, prompts = self.run_loops(["2", "1", "y"], ctx=self.refused_ctx(),
+                                        extra={"T_ROLE": role, "IAM_DB_ROLES": "false"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("loops", [p["kind"] for p in prompts])
+            self.assertIn("control loops can be chosen only with IAM_DB_ROLES=true", r.stdout)
+            self.assertNotIn("maintenance does not choose", r.stdout)
+            self.assertIn("LOOPS note=not chosen (needs IAM_DB_ROLES=true)", r.stdout)
+
+    def test_engineer_refused_under_db_roles(self):
+        # IAM_DB_ROLES=true, not maintenance: the role, or version 2c not applied yet
+        r, prompts = self.run_loops(["2", "1", "y"], ctx=self.refused_ctx(),
+                                    extra={"IAM_DB_ROLES": "true"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("loops", [p["kind"] for p in prompts])
+        self.assertIn("your role (engineer) may not change control loops (engineer only), or policy "
+                      "version 2c is not applied yet", r.stderr)
+        self.assertNotIn("IAM_DB_ROLES", r.stdout + r.stderr)
+        self.assertIn("LOOPS note=not changed (role engineer)", r.stdout)
+
+    def test_own_sign_in_is_said_as_is(self):
+        r, _ = self.run_loops(["2", "1", "y"], ctx=self.refused_ctx(
+            "zone_loop_context: a person's own token is required"), extra={"IAM_DB_ROLES": "true"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("own sign-in is required", r.stderr)
+        self.assertIn("LOOPS note=not changed (own sign-in required)", r.stdout)
+
+    def test_no_valid_sign_in(self):
+        r, prompts = self.run_loops(["2", "1", "y"], extra={"T_NO_TOKEN": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("the control loops are not read or saved", r.stderr)
+        self.assertNotIn("loops", [p["kind"] for p in prompts])
+
+    def test_sense_planned_sensors_and_the_stale_report(self):
+        tool = SenseWiring.stub(self)
+        r, prompts = self.run_loops(["1", SenseWiring.ANSWER, "30", SKIP], role="SENSE", tool=tool,
+                                    ctx=self.ctx_file(context=LOOP_CTX["existing"]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        spec = prompts[-1]["spec"]
+        self.assertEqual(prompts[-1]["kind"], "loops")
+        self.assertEqual([(s["instance"], s["from"]) for s in spec["sources"]], [("sht45_1", "plan")])
+        # the stored co2 loop reads scd30_1, which this board no longer has: said, never dropped
+        self.assertIn("control loop co2 reads scd30_1, which zone ZONE01 will no longer have", r.stderr)
+        self.assertEqual([s["loop_code"] for s in spec["stale"]], ["co2"])
+
+    def plan_loops_alone(self, stdin, ctx, extra=None):
+        src = read(SCRIPT)
+        defs = "\n".join(function(src, n) for n in HELPERS if n != "ui_wait_answer")
+        token = [l for l in src.splitlines() if l.startswith("BACK_TOKEN=")][0]
+        script = "\n".join([
+            "set -uo pipefail", "B=''; N=''; DIM=''; RED=''; YEL=''; GRN=''", token,
+            "UI=0; UI_DIR=''; UNREGISTERED=0; MENU=(); CHOICES=(); ANSWER=''; BACK_OK=0; PLAN_BACK=0",
+            "BOARD_TOUCHED=0; CANCEL_CLOSED=0; ROLE=''; UNIT_CODE=UNIT01; ZONE_CODE=ZONE01; ZONE_ID=1",
+            "SENSE_WIRING_JSON=''; SENSORS_TSV=''; CONTROL_PINS_TSV=''; CONTROL_ACTUATOR_JSON=''",
+            "ROLE_ASKED=0; SLOT_ASKED=0; WIRING_ASKED=\"${T_WIRING_ASKED:-1}\"",
+            "TEMPLATE_TOOL=/nonexistent", defs,
+            "ui_append() { :; }; ui_phase() { :; }; ui_waiting() { :; }", LOOP_STUBS,
+            "ask() { local p=\"$1\" d=\"${2:-}\" r; read -r r || { echo EOF >&2; exit 98; }; echo \"${r:-$d}\"; }",
+            "set -e", "plan_loops",
+            'echo "LOOPS back=$PLAN_BACK note=$LOOPS_NOTE json=$LOOPS_JSON"'])
+        env = dict(os.environ, T_CTX=self.ctx_file(context=ctx), T_LOOPS_TOOL=LOOPS_PY, **(extra or {}))
+        return subprocess.run(["bash", "-c", script], input=stdin, capture_output=True, text=True, env=env,
+                              cwd=ROOT, timeout=120)
+
+    def test_the_terminal_asks_each_tag_with_several_sensors(self):
+        # air_temperature: 3 = the mean; air_humidity: 2 = sht45_1, then fallback 2 = scd30_1
+        r = self.plan_loops_alone("3\n2\n2\n", LOOP_CTX["bench"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("co2 controls on scd30_1, its only sensor", r.stdout)
+        self.assertEqual(r.stdout.count("[ 3] the mean of all 2"), 2)       # one menu per tag
+        self.assertIn("fall back to scd30_1 when sht45_1 has no fresh reading", r.stdout)
+        got = json.loads(r.stdout.split("json=", 1)[1].strip())
+        loops = {l["loop_code"]: l["input"] for l in got["loops"]}
+        self.assertEqual(loops["air_temperature"]["rule"], "mean")
+        self.assertEqual((loops["air_humidity"]["reference"], loops["air_humidity"]["fallback"]), ("sht45_1", "scd30_1"))
+        self.assertEqual(loops["co2"]["reference"], "scd30_1")
+
+    def test_terminal_back_and_yes_without_a_terminal(self):
+        r = self.plan_loops_alone("<\n", LOOP_CTX["bench"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LOOPS back=1", r.stdout)
+        # nothing was asked before the picker: no Back to offer, "<" is no answer
+        r = self.plan_loops_alone("<\n", LOOP_CTX["bench"], extra={"T_WIRING_ASKED": "0"})
+        self.assertEqual(r.returncode, 98, r.stdout)
+        self.assertNotIn("LOOPS back=1", r.stdout)
+        r = self.plan_loops_alone("", LOOP_CTX["bench"], extra={"T_YES": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no terminal to choose the control loops (--yes): decided later", r.stderr)
+        self.assertIn('json={"skip":true}', r.stdout)
+
+    def test_the_save_and_the_record(self):
+        src = read(SCRIPT)
+        save = src.index('loops_save "The board is registered and working"')
+        self.assertLess(src.index('info "${GRN}$REG_ACTION device $REGISTERED_ID${N}'), save)
+        self.assertLess(save, src.index("# The run needs no further token: end the channel"))
+        self.assertIn('"control_loops": None if unreg else {', src)
+        self.assertIn('the control loops you chose were not saved, because the board was not registered', src)
+        self.assertIn('platdb save-loops "$ZONE_ID"', function(src, "loops_save"))
+        self.assertIn('auth_report loops', function(src, "loops_save"))
+        # --loops-only: out before the toolchain, never a board
+        self.assertLess(src.index("  loops_only_main\n  exit 0"), src.index('step "Toolchain"'))
+
+
+class LoopsOnly(unittest.TestCase):
+    """flash-device.sh --loops-only: the zone, the picker, the save; refused with anything
+    that names a board."""
+
+    def run_main(self, stdin, ctx, save, unit="", zone="", extra=None):
+        src = read(SCRIPT)
+        defs = "\n".join(function(src, n) for n in HELPERS + ("loops_save", "loops_only_main")
+                         if n != "ui_wait_answer")
+        token = [l for l in src.splitlines() if l.startswith("BACK_TOKEN=")][0]
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        for name, doc in (("ctx.json", {"state": "ok", "why": "", "context": ctx}), ("save.json", save)):
+            with open(os.path.join(tmp, name), "w") as f:
+                json.dump(doc, f)
+        script = "\n".join([
+            "set -uo pipefail", "B=''; N=''; DIM=''; RED=''; YEL=''; GRN=''", token,
+            "UI=0; UI_DIR=''; UNREGISTERED=0; MENU=(); CHOICES=(); ANSWER=''; BACK_OK=0; PLAN_BACK=0; LOOPS_ONLY=1",
+            "BOARD_TOUCHED=0; CANCEL_CLOSED=0; UNIT_WANTED='%s'; ZONE_WANTED='%s'" % (unit, zone),
+            "SLOTS=$'SLOT\\tUNIT01\\tZONE01\\t1\\tSENSE\\ttaken\\nSLOT\\tUNIT01\\tZONE01\\t1\\tCONTROL\\ttaken\\n"
+            "SLOT\\tUNIT01\\tZONE02\\t2\\tSENSE\\tfree\\n'",
+            "TEMPLATE_TOOL=/nonexistent", defs,
+            "ui_append() { :; }; ui_phase() { :; }; ui_waiting() { :; }", LOOP_STUBS,
+            'platdb() { case "$1" in loops) cat "$T_CTX" ;; save-loops) cat > "$T_DIR/posted"; cat "$T_DIR/save.json" ;; esac; }',
+            "ask() { local p=\"$1\" d=\"${2:-}\" r; read -r r || { echo EOF >&2; exit 98; }; echo \"${r:-$d}\"; }",
+            "set -e", "loops_only_main"])
+        env = dict(os.environ, T_CTX=os.path.join(tmp, "ctx.json"), T_DIR=tmp, T_LOOPS_TOOL=LOOPS_PY,
+                   **(extra or {}))
+        r = subprocess.run(["bash", "-c", script], input=stdin, capture_output=True, text=True, env=env,
+                           cwd=ROOT, timeout=120)
+        posted = os.path.join(tmp, "posted")
+        return r, (json.loads(read(posted)) if os.path.exists(posted) else None)
+
+    def test_zone_picker_save(self):
+        res = {"state": "ok", "why": "", "problems": [], "result": {
+            "changed": True, "inserted": [{"loop_code": "co2"}], "updated": [], "deactivated": [], "unchanged": []}}
+        # two zones: pick 1; the bench zone: air_temperature off (6), air_humidity sht45_1 (2), no fallback (1)
+        r, posted = self.run_main("1\n6\n2\n1\n", LOOP_CTX["bench"], res)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("zone: UNIT01 / ZONE01", r.stdout)
+        self.assertEqual([l["loop_code"] for l in posted], ["air_humidity", "co2"])
+        self.assertNotIn("fallback", posted[0]["input"])
+        self.assertIn("control loops saved: created co2", r.stdout)
+        self.assertIn("Control loops — UNIT01 / ZONE01", r.stdout)
+
+    def test_busy_save_is_said(self):
+        res = {"state": "busy", "why": "the control loops were not saved: unit UNIT01 has run 42 running (R); "
+                                      "loops change only while no run is running or scheduled", "problems": [], "result": None}
+        r, posted = self.run_main("6\n2\n1\n", LOOP_CTX["bench"], res, unit="UNIT01", zone="ZONE01")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(posted)
+        self.assertIn("The control loops were not saved: unit UNIT01 has run 42 running (R); loops change only "
+                      "while no run is running or scheduled. Nothing else was changed; choose the loops again once "
+                      "the run has finished", r.stderr)
+        self.assertIn("not saved (the control loops were not saved", r.stdout)
+
+    def test_a_refused_save_is_worded_by_mode_and_role(self):
+        res = {"state": "refused", "why": "the database refused save_zone_loops for eng: permission denied",
+               "problems": [], "result": None}
+        for extra, said, note in (
+                ({"IAM_DB_ROLES": "false"}, "control loops can be chosen only with IAM_DB_ROLES=true",
+                 "not saved (needs IAM_DB_ROLES=true)"),
+                ({"IAM_DB_ROLES": "true", "T_ROLE": "maintenance"},
+                 "maintenance does not choose control loops: an engineer does", "not saved (role maintenance)"),
+                ({"IAM_DB_ROLES": "true"}, "your role (engineer) may not change control loops (engineer only), "
+                 "or policy version 2c is not applied yet", "not saved (role engineer)")):
+            r, posted = self.run_main("6\n2\n1\n", LOOP_CTX["bench"], res, unit="UNIT01", zone="ZONE01",
+                                      extra=extra)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIsNotNone(posted)
+            self.assertIn("the control loops were not saved: " + said, r.stderr)
+            self.assertIn(note, r.stdout)
+
+    def test_refusals(self):
+        for args, msg in ((["--loops-only", "--unregistered"], "not with --unregistered or --no-register"),
+                          (["--loops-only", "--no-register"], "not with --unregistered or --no-register"),
+                          (["--loops-only", "--role", "SENSE"], "touches no board"),
+                          (["--loops-only", "-p", "/dev/ttyUSB0"], "touches no board"),
+                          (["--loops-only", "--wiring", SCRIPT], "touches no board")):
+            r = subprocess.run(["bash", SCRIPT] + args, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                               timeout=60)
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertIn(msg, r.stderr)
+
+    def test_help_and_send_test(self):
+        r = subprocess.run(["bash", SCRIPT, "--help"], capture_output=True, text=True)
+        self.assertIn("--loops-only", r.stdout)
+        r = subprocess.run(["bash", SCRIPT, "--send-test", "unit01-s-zone01", "--loops-only"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not with --loops-only", r.stderr)
 
 
 class CancelAtAQuestion(unittest.TestCase):

@@ -1,0 +1,105 @@
+{
+ "note": "0, 3601 and 90.5 seconds",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": [
+   {
+    "loop_code": "co2",
+    "recipe_lower": "co2_lower_limit",
+    "recipe_upper": "co2_upper_limit",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 0
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   },
+   {
+    "loop_code": "air_humidity",
+    "recipe_lower": "hr_lower_limit",
+    "recipe_upper": "hr_upper_limit",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 3601
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "air_temperature",
+    "recipe_lower": "air_temperature_lower_limit",
+    "recipe_upper": "air_temperature_upper_limit",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90.5
+    },
+    "output": {
+     "actuator": "air_temperature",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "substrate_temperature",
+    "recipe_lower": "substrate_temperature_lower_limit",
+    "recipe_upper": "substrate_temperature_upper_limit",
+    "input": {
+     "tag": "ground_temperature",
+     "sources": [
+      "ground_temperature"
+     ],
+     "rule": "reference",
+     "reference": "ground_temperature",
+     "max_age_s": 3600
+    },
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_MAX_AGE",
+   "loops.co2.input.max_age_s"
+  ],
+  [
+   "error",
+   "L_MAX_AGE",
+   "loops.air_humidity.input.max_age_s"
+  ],
+  [
+   "error",
+   "L_MAX_AGE",
+   "loops.air_temperature.input.max_age_s"
+  ]
+ ]
+}

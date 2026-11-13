@@ -1,0 +1,51 @@
+{
+ "note": "the SHT45 publishes no co2",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": [
+   {
+    "loop_code": "co2",
+    "recipe_lower": "co2_lower_limit",
+    "recipe_upper": "co2_upper_limit",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "sht45_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_SOURCE_TAG",
+   "loops.co2.input.sources.sht45_1"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_humidity"
+  ]
+ ]
+}

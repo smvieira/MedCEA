@@ -1,0 +1,41 @@
+{
+ "note": "Stop all sends no loops",
+ "context": "existing",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": true,
+  "loops": [
+   {
+    "loop_code": "co2",
+    "recipe_lower": "co2_lower_limit",
+    "recipe_upper": "co2_upper_limit",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_SCHEMA",
+   "answer.stop_all"
+  ]
+ ]
+}

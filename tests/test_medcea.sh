@@ -98,6 +98,8 @@
 #  48  Edge devices → Send a test message as a board: no records → says so, runs nothing; the
 #      records listed by name; a name starting with - or with no record re-asked; the command
 #      printed with printf %q; [Y/n]; real against the stub
+#  48b Edge devices → Choose a zone's control loops: flash-device.sh --loops-only with the
+#      exact unit and zone, a leading - re-asked, [y/N], no lock; real against the stub
 #  49  Applications → Install Superset: the deploy, then the health check; the skip explained;
 #      [y/N]; real: the deploy takes its own lock (the guide holds none); a failure stops it
 #  50  Applications → Re-render Superset's gate: --gate-only alone, [y/N], dry and real
@@ -1225,6 +1227,19 @@ real $'7\n3\nunit01-c-zone01\n\nq\n'
 rc_is "real: quits with 0" 0
 has   "real: flash-device.sh ran" "STUB edge/flash-device.sh --send-test unit01-c-zone01"
 rm -rf "$S/edge/provisioned"
+
+echo "48b choose a zone's control loops (Edge devices)"
+guide $'7\n6\n--bootstrap\nUNIT01\nZONE01\ny\nq\n'
+rc_is "quits with 0" 0
+has   "a leading - is re-asked" "'--bootstrap'"
+has   "the command (dry)" "[dry run] not executed: ./edge/flash-device.sh --loops-only --unit UNIT01 --zone ZONE01"
+has   "a change ([y/N])" "Run it? [y/N]"
+has   "no lock" "Deploy lock: no"
+has   "what it changes" "the zone's medcea.control_loop rows"
+no_stub
+real $'7\n6\n\n\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: flash-device.sh ran" "STUB edge/flash-device.sh --loops-only"
 
 echo "49 install Superset (Applications)"
 mkcfg true true

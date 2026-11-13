@@ -1,0 +1,56 @@
+{
+ "note": "loop_code@zone_code over 50 characters",
+ "context": "longzone",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": [
+   {
+    "loop_code": "co2",
+    "recipe_lower": "co2_lower_limit",
+    "recipe_upper": "co2_upper_limit",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_STATE_KEY",
+   "loops.co2.loop_code"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.substrate_temperature"
+  ]
+ ]
+}

@@ -1,0 +1,547 @@
+{
+ "bench": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": []
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   }
+  ],
+  "loops": [],
+  "allowed": {},
+  "sensors": [
+   {
+    "instance": "scd30_1",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ]
+   },
+   {
+    "instance": "sht45_1",
+    "driver": "sht4x",
+    "model": "SHT4X",
+    "component_id": 20,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature"
+    ]
+   }
+  ]
+ },
+ "single": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": []
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   }
+  ],
+  "loops": [],
+  "allowed": {},
+  "sensors": [
+   {
+    "instance": "ground_temperature",
+    "driver": "ground_temperature",
+    "model": "GROUND_TEMPERATURE",
+    "component_id": 22,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "ground_temperature"
+    ]
+   },
+   {
+    "instance": "scd30",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ]
+   }
+  ]
+ },
+ "existing": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": []
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   }
+  ],
+  "loops": [
+   {
+    "loop_id": 7,
+    "loop_code": "air_humidity",
+    "recipe_lower": "hr_lower_limit",
+    "recipe_upper": "hr_upper_limit",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "sht45_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    },
+    "problems": []
+   },
+   {
+    "loop_id": 8,
+    "loop_code": "co2",
+    "recipe_lower": "co2_lower_limit",
+    "recipe_upper": "co2_upper_limit",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "problems": []
+   }
+  ],
+  "allowed": {},
+  "sensors": [
+   {
+    "instance": "scd30_1",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ]
+   },
+   {
+    "instance": "sht45_1",
+    "driver": "sht4x",
+    "model": "SHT4X",
+    "component_id": 20,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature"
+    ]
+   }
+  ]
+ },
+ "old": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [
+   {
+    "component_id": 9,
+    "device_id": 3,
+    "dns_name": "unit01-s-zone01",
+    "driver": "scd30",
+    "tags": [
+     "co2"
+    ]
+   }
+  ],
+  "sensor_problems": [
+   "component 10 publishes co2 as sensor default, a reserved name: re-onboard it with another sensor id"
+  ],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": []
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   }
+  ],
+  "loops": [],
+  "allowed": {},
+  "sensors": [
+   {
+    "instance": "ground_temperature",
+    "driver": "ground_temperature",
+    "model": "GROUND_TEMPERATURE",
+    "component_id": 22,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "ground_temperature"
+    ]
+   },
+   {
+    "instance": "scd30",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ]
+   }
+  ]
+ },
+ "longzone": {
+  "zone_id": 1,
+  "zone_code": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": []
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ]
+   }
+  ],
+  "loops": [],
+  "allowed": {},
+  "sensors": [
+   {
+    "instance": "ground_temperature",
+    "driver": "ground_temperature",
+    "model": "GROUND_TEMPERATURE",
+    "component_id": 22,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "ground_temperature"
+    ]
+   },
+   {
+    "instance": "scd30",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ]
+   }
+  ]
+ }
+}

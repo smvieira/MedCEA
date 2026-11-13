@@ -1,0 +1,29 @@
+{
+ "note": "re-onboarding the SENSE board without the SHT45: its loop is kept, in error, until stopped",
+ "context": "existing",
+ "role": "SENSE",
+ "answer": "initial",
+ "expect": [
+  [
+   "error",
+   "L_SOURCE",
+   "loops.air_humidity.input.sources.sht45_1"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ]
+ ],
+ "plan_sources": [
+  {
+   "instance": "scd30_1",
+   "driver": "scd30",
+   "tags": [
+    "co2",
+    "air_temperature",
+    "air_humidity"
+   ]
+  }
+ ]
+}

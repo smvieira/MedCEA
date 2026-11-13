@@ -13,11 +13,19 @@ oauth2-proxy, no port-forward. The address is looked up with kubectl at call
 time rather than cached in config.env, because a redeployed Service gets a new
 one and a stale address would fail long after the deploy that caused it.
 
-Three commands, all line-oriented so the shell stays the engine:
+The commands, all line-oriented so the shell stays the engine:
 
     slots           one line per (unit, zone, role) slot, free or taken
     board SERIAL    where a board (by serial = MAC hex) is registered, if anywhere
     register        read a device description on stdin, write it to the database
+    loops ZONE_ID   the zone's control-loop context (medcea.zone_loop_context):
+                    one JSON line {"state": ok|not_deployed|refused|problem|
+                    error, "why", "context"}; always exit 0
+    save-loops ZONE_ID
+                    the JSON array on stdin (every loop the zone keeps) to
+                    medcea.save_zone_loops; one JSON line {"state": ok|busy|
+                    problem|refused|not_deployed|error, "why",
+                    "problems", "result"}; exit 1 on a refusal, its words on stderr
 
 A unit/zone has one and only one SENSE and one and only one CONTROL. That rule
 is enforced here, against the live table, rather than in the wizard's head.
@@ -260,6 +268,144 @@ def _request(base, path, method="GET", body=None, prefer=None):
         return json.loads(raw)
     except ValueError as e:
         raise PlatformError("the platform database returned unparseable JSON") from e
+
+
+# ------------------------------------------------------------ control loops --
+# The two functions of migration 010 (feedback control Phase 2, Q19, Q20), granted
+# by the policy's version 2c to engineer (master_data U). They are judged by their
+# SQLSTATE (PostgREST's "code"), not their HTTP status alone:
+#   42501  refused. Always HTTP 401 here, whatever IAM_DB_ROLES says: the request's
+#          PostgREST role is anon in both modes (PGRST_JWT_ROLE_CLAIM_KEY names a claim
+#          nobody issues; under true pre_request only SET LOCAL ROLEs to rr_<role>), so
+#          the status cannot tell anon (IAM_DB_ROLES=false, D-b) from a person's role
+#          (maintenance, D-c, or version 2c not applied). One state, "refused"; the
+#          caller (flash-device.sh, which reads config.env and the person's role) words it;
+#   PGRST202 / 404  the functions are not in this database yet; 55000 the table;
+#   55006  the unit has a run running or scheduled (the save, or the table's guard);
+#   22023  the loops were refused: the list is in "details" (a JSON array).
+class RpcError(PlatformError):
+    """A refused /rpc call, with PostgREST's error body."""
+
+    def __init__(self, status, code, message, details, said=None):
+        self.status, self.code, self.message, self.details, self.said = status, code, message, details, said
+        super().__init__(said or "HTTP %d %s %s" % (status, code, message))
+
+
+def _rpc(base, fn, body):
+    """POST /rpc/<fn> with the person's token (the same credential as _request)."""
+    path = "/rpc/" + fn
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    headers.update(_auth_headers("POST", path))     # raises before any network I/O
+    req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers=headers,
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            raw = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:16384]
+        finally:
+            e.close()
+        try:
+            err = json.loads(detail)
+        except ValueError:
+            err = {}
+        if not isinstance(err, dict):
+            err = {}
+        code = str(err.get("code") or "")
+        said = None
+        # The token's own problems (PGRST30x, pre_request's 28000) in what-to-do words.
+        if _phase2() and (code.startswith("PGRST30") or code == "28000"):
+            said = _phase2_error(e.code, detail)
+        raise RpcError(e.code, code, str(err.get("message") or detail[:400]),
+                       err.get("details"), said) from None
+    except (urllib.error.URLError, OSError) as e:
+        raise PlatformError("cannot reach the platform database at %s: %s" % (base, e)) from e
+    try:
+        return json.loads(raw) if raw.strip() else None
+    except ValueError as e:
+        raise PlatformError("the platform database returned unparseable JSON") from e
+
+
+NOT_DEPLOYED = ("the control-loop functions are not in this database yet "
+                "(./apps/database/deploy.sh)")
+
+
+def _who():
+    return _claims(_token()).get("preferred_username") or "this account"
+
+
+def _classify(e, fn):
+    """(state, words) for a refused loop RPC."""
+    if e.said:
+        return "error", e.said
+    if e.code == "PGRST202" or (e.status == 404 and not e.code):
+        return "not_deployed", NOT_DEPLOYED
+    if e.code == "55000":
+        return "not_deployed", ("the control_loop table is not in this database yet "
+                                "(./apps/database/deploy.sh)")
+    if e.code == "42501":
+        # Never decided on e.status (see the comment above RpcError).
+        if "own token is required" in e.message:
+            return "refused", ("%s: a person's own sign-in is required (sign in again with your "
+                               "own account)" % fn)
+        return "refused", ("the database refused %s for %s: %s" % (fn, _who(), e.message))
+    if e.code == "55006":
+        m = re.search(r"unit (\S+) has run (\d+) in ([RS])", e.message)
+        if m:
+            unit, run, st = m.groups()
+            return "busy", ("the control loops were not saved: unit %s has run %s %s (%s); loops "
+                            "change only while no run is running or scheduled"
+                            % (unit, run, "running" if st == "R" else "scheduled", st))
+        return "busy", "the control loops were not saved: " + e.message
+    if e.code == "22023":
+        return "problem", e.message
+    return "error", "HTTP %d %s %s" % (e.status, e.code, e.message)
+
+
+def _problems(e):
+    d = e.details
+    if isinstance(d, str):
+        try:
+            d = json.loads(d)
+        except ValueError:
+            d = None
+    if isinstance(d, list) and all(isinstance(x, str) for x in d):
+        return d
+    msg = re.sub(r"^save_zone_loops: ", "", e.message or "")
+    return [x for x in msg.split("; ") if x] if e.code == "22023" else []
+
+
+def zone_loops(base, zone_id):
+    """medcea.zone_loop_context(zone) as {"state", "why", "context"}; never raises."""
+    try:
+        ctx = _rpc(base, "zone_loop_context", {"p_zone_id": int(zone_id)})
+    except RpcError as e:
+        state, why = _classify(e, "zone_loop_context")
+        return {"state": state, "why": why, "context": None}
+    except PlatformError as e:
+        return {"state": "error", "why": str(e), "context": None}
+    if not isinstance(ctx, dict):
+        return {"state": "error", "why": "zone_loop_context returned no object", "context": None}
+    if ctx.get("deployed") is False:
+        return {"state": "not_deployed", "why": "the control_loop table is not in this database yet "
+                "(./apps/database/deploy.sh)", "context": ctx}
+    return {"state": "ok", "why": "", "context": ctx}
+
+
+def save_loops(base, zone_id, loops):
+    """medcea.save_zone_loops(zone, loops): the zone keeps exactly these loops.
+    {"state": "ok", "result": {...}} or a refusal {"state", "why", "problems"}."""
+    if not isinstance(loops, list):
+        return {"state": "problem", "why": "the loops must be a JSON array", "problems": [], "result": None}
+    try:
+        res = _rpc(base, "save_zone_loops", {"p_zone_id": int(zone_id), "p_loops": loops})
+    except RpcError as e:
+        state, why = _classify(e, "save_zone_loops")
+        return {"state": state, "why": why, "problems": _problems(e), "result": None}
+    except PlatformError as e:
+        return {"state": "error", "why": str(e), "problems": [], "result": None}
+    return {"state": "ok", "why": "", "problems": [], "result": res}
 
 
 # ---------------------------------------------------------------- hostname ----
@@ -543,7 +689,14 @@ def main(argv):
     # inherits it and the writer is never left blocked.
     _token()
     try:
-        base = api_base()
+        try:
+            base = api_base()
+        except PlatformError as e:
+            if cmd == "loops":
+                # Always one JSON line and exit 0: the state says what happened.
+                print(json.dumps({"state": "error", "why": str(e), "context": None}))
+                return 0
+            raise
         if cmd == "ping":
             _request(base, "/cea_unit?select=unit_id&limit=1")
             print(base)
@@ -564,6 +717,25 @@ def main(argv):
             spec = json.load(sys.stdin)
             device_id, action = register(base, spec)
             print("%s\t%d" % (action, device_id))
+            return 0
+        if cmd in ("loops", "save-loops"):
+            if len(argv) < 3 or not argv[2].isdigit():
+                print("usage: %s ZONE_ID" % cmd, file=sys.stderr)
+                return 2
+            if cmd == "loops":
+                print(json.dumps(zone_loops(base, int(argv[2]))))
+                return 0
+            try:
+                loops = json.load(sys.stdin)
+            except ValueError:
+                loops = None
+            out = save_loops(base, int(argv[2]), loops)
+            print(json.dumps(out))
+            if out["state"] != "ok":
+                print(out["why"], file=sys.stderr)
+                for p in out["problems"]:
+                    print("  " + p, file=sys.stderr)
+                return 1
             return 0
     except PlatformError as e:
         print(str(e), file=sys.stderr)

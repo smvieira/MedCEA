@@ -1,0 +1,73 @@
+{
+ "note": "reference with fallback, mean of two, co2 with its map",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": [
+   {
+    "loop_code": "air_temperature",
+    "recipe_lower": "air_temperature_lower_limit",
+    "recipe_upper": "air_temperature_upper_limit",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "scd30_1",
+      "sht45_1"
+     ],
+     "rule": "mean",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_temperature",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "air_humidity",
+    "recipe_lower": "hr_lower_limit",
+    "recipe_upper": "hr_upper_limit",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "sht45_1",
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "fallback": "scd30_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "co2",
+    "recipe_lower": "co2_lower_limit",
+    "recipe_upper": "co2_upper_limit",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   }
+  ]
+ },
+ "expect": []
+}

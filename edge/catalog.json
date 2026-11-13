@@ -14,6 +14,8 @@
     "              inside the run, not here: it is the wizard's first question,",
     "              because a unit/zone holds one and only one SENSE and one and",
     "              only one CONTROL and the free slots differ per role.",
+    "  args        optional fixed long options passed before --ui-spool (plain",
+    "              --name options only, e.g. [\"--loops-only\"])",
     "",
     "The 'planned' entries below are illustrative placeholders. Delete them or",
     "replace them with real ones; nothing depends on them existing."
@@ -33,6 +35,21 @@
       ],
       "description": "Erases the board, flashes a pinned MicroPython build, joins it to WiFi from its own radio scan, gives it a unit/zone slot from the platform database, ships the application for its role with the pins you choose, and registers it as the device in that slot.",
       "script": "edge/flash-device.sh"
+    },
+    {
+      "id": "control-loops",
+      "name": "Control loops of a zone",
+      "subtitle": "Which sensor each loop controls on",
+      "icon": "🔁",
+      "status": "available",
+      "connection": "none",
+      "vendor": "MedCEA",
+      "roles": [],
+      "description": "Choose, for one unit and zone, which sensor each recipe quantity is controlled on (or the mean, lowest or highest of several) and which actuator it drives, without touching a board: sign-in, the zone, the picker, the save. Refused while the unit has a run running or scheduled.",
+      "script": "edge/flash-device.sh",
+      "args": [
+        "--loops-only"
+      ]
     },
     {
       "id": "esp32-cam",

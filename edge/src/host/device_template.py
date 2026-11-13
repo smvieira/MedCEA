@@ -20,6 +20,12 @@ publishing where nothing is listening.
     validate   ROLE [VARIANT]      stdin config -> findings, exit 1 if fatal
     pins       ROLE [VARIANT]      the silicon's pin reference, as a table
     render                         stdin JSON -> the board's files
+    actuator-map CONTROL DRIVER [VARIANT]
+                                   stdin "<function>\t<pin>" lines -> {"actuator_definitions"}
+                                   as render() derives them (the control-loop picker)
+    sense-sources SENSE            stdin {"wiring", "variant"} or {"sensors_tsv"} ->
+                                   [{instance, driver, tags}] of the components render()
+                                   writes (the control-loop picker's planned sensors)
 
   SENSE wiring (the on-screen wiring screen; the rules are wiring.py's):
     wiring-spec      SENSE [VARIANT] [--initial FILE]   the screen's catalogue, JSON
@@ -912,6 +918,86 @@ def cmd_save_board_template(args):
     return 0
 
 
+def cmd_actuator_map(role, driver_id, variant=None):
+    """The actuator definitions a CONTROL board gets from one address per function
+    (stdin, CONTROL_PINS_TSV's "<function>\t<pin>" lines), exactly as render()
+    derives them: the control-loop picker's planned actuators, before the board is
+    touched. The channel-map editor's table needs no call: it is already one."""
+    if (role or "").upper() != "CONTROL":
+        raise UsageError("actuator-map is for CONTROL boards")
+    tpl = load("CONTROL")
+    d = driver("CONTROL", driver_id)
+    b = bindings.from_template(tpl, TEMPLATE_DIR)
+    if variant:
+        b = b.select(variant)
+    pins = {}
+    for line in sys.stdin.read().splitlines():
+        if not line.strip():
+            continue
+        fid, _, raw = line.partition("\t")
+        if b.is_unassigned(raw):
+            continue
+        try:
+            pins[fid] = b.normalise(raw)
+        except bindings.BindingError as e:
+            raise TemplateError("%s: %s" % (fid, e))
+    cfg = render_actuator_config(d, pins, b) if pins else {"actuator_definitions": {}}
+    json.dump({"actuator_definitions": cfg["actuator_definitions"]}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def sense_sources(plan):
+    """[{instance, driver, tags}] of the SENSE board render() would write for this
+    plan ({"wiring", "variant"}, or {"sensors_tsv"}: the questions' lines). Taken
+    from the very components render() returns, so the instance is the last segment
+    of each reading topic, as the database (_zone_inventory) and the runner read it."""
+    with tempfile.TemporaryDirectory() as d:
+        spec = {"out_dir": d, "role": "SENSE", "hostname": "sense-sources",
+                "unit_code": "UNIT", "zone_code": "ZONE", "topic_root": "medcea"}
+        if plan.get("wiring") is not None:
+            spec["wiring"] = plan["wiring"]
+            spec["variant"] = plan.get("variant") or None
+        else:
+            comps, order = {}, []
+            for line in (plan.get("sensors_tsv") or "").splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                drv = parts[0]
+                if drv not in comps:
+                    comps[drv] = {"driver": drv, "params": {}}
+                    order.append(drv)
+                if len(parts) >= 3 and parts[1]:
+                    comps[drv]["params"][parts[1]] = parts[2]
+            spec["components"] = [comps[x] for x in order]
+        got = render(spec)
+    out = []
+    for c in got["components"]:
+        p = c.get("parameters") or {}
+        tags, inst = [], None
+        for t in p.get("tags") or []:
+            if not isinstance(t, dict) or not isinstance(t.get("topic"), str):
+                continue
+            inst = t["topic"].rsplit("/", 1)[-1]
+            tags.append(t.get("tag"))
+        out.append({"instance": inst if inst is not None else p.get("instance"),
+                    "driver": p.get("driver"), "tags": tags})
+    return out
+
+
+def cmd_sense_sources(role):
+    if (role or "").upper() != "SENSE":
+        raise UsageError("sense-sources is for SENSE boards")
+    try:
+        plan = json.load(sys.stdin)
+    except ValueError:
+        raise UsageError("sense-sources: stdin is not JSON")
+    json.dump(sense_sources(plan), sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
 def cmd_render():
     spec = json.load(sys.stdin)
     result = render(spec)
@@ -954,6 +1040,10 @@ def main(argv):
             return cmd_board_template(argv[2])
         if cmd == "save-board-template":
             return cmd_save_board_template(argv[2:])
+        if cmd == "actuator-map":
+            return cmd_actuator_map(argv[2], argv[3], argv[4] if len(argv) > 4 else None)
+        if cmd == "sense-sources":
+            return cmd_sense_sources(argv[2])
     except UsageError as e:
         print(str(e), file=sys.stderr)
         return 2

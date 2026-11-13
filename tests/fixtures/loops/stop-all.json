@@ -1,0 +1,17 @@
+{
+ "note": "Stop all, confirmed: back to the default map",
+ "context": "existing",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": true,
+  "loops": []
+ },
+ "expect": [
+  [
+   "warn",
+   "W_DEFAULT_MAP",
+   "answer.stop_all"
+  ]
+ ]
+}

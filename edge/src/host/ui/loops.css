@@ -1,0 +1,39 @@
+/* The control-loop picker, as a component (edge/src/host/ui/loops.js).
+ *
+ * Like wiring.css: every colour is one of the wizard's tokens with a fallback,
+ * and everything is scoped under .lp so the prompt card keeps its own rules. */
+
+.lp{--lp-warn:var(--warn,#96581a);--lp-crit:var(--crit,#a52c1c);--lp-accent:var(--accent,#0b6f78);
+  --lp-line:var(--line,#d3dee2);--lp-surface2:var(--surface-2,#f6f9fa);--lp-ink:var(--ink,#101a1e);
+  --lp-muted:var(--muted,#647f89);--lp-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--lp-ink);font-size:14px;line-height:1.5}
+.lp *{box-sizing:border-box}
+.lp p{margin:.2rem 0 .6rem}
+.lp .lp-note{color:var(--lp-muted);font-size:.85rem}
+.lp-table{width:100%;border-collapse:collapse;margin:.4rem 0}
+.lp-table th{text-align:left;font-size:.75rem;font-weight:600;color:var(--lp-muted);
+  border-bottom:1px solid var(--lp-line);padding:.3rem .4rem}
+.lp-table td{vertical-align:top;border-bottom:1px solid var(--lp-line);padding:.4rem}
+.lp-table tr.lp-off td{color:var(--lp-muted)}
+.lp select,.lp input[type=number]{font:inherit;font-family:var(--lp-mono);font-size:.8rem;
+  color:var(--lp-ink);background:var(--lp-surface2);border:1px solid var(--lp-line);
+  border-radius:4px;padding:.25rem .4rem;display:block;margin-bottom:.25rem;max-width:100%}
+.lp input[type=number]{width:6rem}
+.lp select:focus,.lp input:focus,.lp button:focus-visible{outline:2px solid var(--lp-accent);outline-offset:1px}
+.lp button{font:inherit;font-size:.8rem;cursor:pointer;border-radius:4px;border:1px solid var(--lp-line);
+  background:var(--lp-surface2);color:var(--lp-ink);padding:.3rem .6rem}
+.lp button:hover{border-color:var(--lp-accent)}
+.lp .lp-stop{display:block;margin-top:.4rem;color:var(--lp-crit)}
+.lp .lp-label{font-weight:600}
+.lp .lp-tag,.lp .lp-map{font-family:var(--lp-mono);font-size:.75rem;color:var(--lp-muted)}
+.lp .lp-badge{margin-top:.3rem;font-size:.78rem;color:var(--lp-crit)}
+.lp .lp-ticks label{display:block;font-family:var(--lp-mono);font-size:.8rem}
+.lp .lp-na{font-style:italic}
+.lp-bar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-top:.6rem}
+.lp-modenote{font-size:.85rem;color:var(--lp-muted)}
+.lp-findings{list-style:none;padding:0;margin:.6rem 0 0}
+.lp-findings li{font-size:.83rem;padding:.15rem 0}
+.lp-findings li.lp-err{color:var(--lp-crit)}
+.lp-findings li.lp-warn{color:var(--lp-warn)}
+@media (max-width:640px){.lp-table thead{display:none}.lp-table td{display:block;border:0}
+  .lp-table tr{display:block;border-bottom:1px solid var(--lp-line)}}

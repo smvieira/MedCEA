@@ -2712,6 +2712,21 @@ a_send_test() {
            "Look for tag _test in the MQTT Explorer, or msg_type TS in medcea.measurement.")
     plan_run
 }
+a_loops_only() {
+    # flash-device.sh --loops-only: a zone's control loops (Q20) without touching a board.
+    CMD=(./edge/flash-device.sh --loops-only)
+    echo "  No board, no USB: sign in, the zone, which sensor each control loop controls on, the save."
+    echo "  Unit and zone codes here are matched exactly: type them as the Units tab shows them (case matters)."
+    ask_match "Unit code, exact case (Enter = choose in the wizard)" "$UNIT_RE" "$UNIT_HINT" "" optional
+    [[ -n "$ANSWER" ]] && CMD+=(--unit "$ANSWER")
+    ask_match "Zone code, exact case (Enter = choose in the wizard)" "$UNIT_RE" "$UNIT_HINT" "" optional
+    [[ -n "$ANSWER" ]] && CMD+=(--zone "$ANSWER")
+    EFFECT="the zone's medcea.control_loop rows (through save_zone_loops, as you); no board is touched"
+    LEVEL=change; SUDO=no; CFG_NEEDED=yes
+    NOTES+=("Signs you in to Keycloak (device code). Engineer only, with IAM_DB_ROLES=true; refused while the unit has a run running or scheduled."
+            "In a browser: the wizard's Control loops of a zone tile.")
+    plan_run
+}
 a_wizard_service() {
     CMD=(./apps/edge-wizard/deploy.sh)
     EFFECT="host: the cea-edge-wizard systemd user service, linger, edge/.venv; cluster: its Service, Endpoints and Ingress"
@@ -2897,6 +2912,7 @@ AREA_EDGE=(
     "a_send_test|Send a test message as a board|./edge/flash-device.sh --send-test <dns_name>: one TS message as that board (needs its provisioned record)."
     "a_wizard_service|Install or update the browser wizard service|./apps/edge-wizard/deploy.sh."
     "a_wizard_unit|Print the wizard's systemd unit|./edge/wizard-daemon.sh --install-unit (writes nothing)."
+    "a_loops_only|Choose a zone's control loops|./edge/flash-device.sh --loops-only: which sensor each loop controls on; no board is touched."
 )
 AREA_POLICY=(
     "a_pol_check|Check the policy's invariants|cli.py check."

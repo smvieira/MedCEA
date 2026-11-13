@@ -1,0 +1,18 @@
+{
+ "note": "Q20: two sensors on a tag, nothing preselected",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": "initial",
+ "expect": [
+  [
+   "error",
+   "L_CHOOSE",
+   "loops.air_temperature.input.reference"
+  ],
+  [
+   "error",
+   "L_CHOOSE",
+   "loops.air_humidity.input.reference"
+  ]
+ ]
+}

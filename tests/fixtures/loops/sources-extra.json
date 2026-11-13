@@ -1,0 +1,47 @@
+{
+ "note": "rule reference: sources hold the reference and fallback only (critique 1.6)",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": [
+   {
+    "loop_code": "air_humidity",
+    "recipe_lower": "hr_lower_limit",
+    "recipe_upper": "hr_upper_limit",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "sht45_1",
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_SOURCES_EXTRA",
+   "loops.air_humidity.input.sources"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.co2"
+  ]
+ ]
+}

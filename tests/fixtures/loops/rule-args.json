@@ -1,0 +1,47 @@
+{
+ "note": "mean takes no reference",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "loops": [
+   {
+    "loop_code": "air_humidity",
+    "recipe_lower": "hr_lower_limit",
+    "recipe_upper": "hr_upper_limit",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "sht45_1",
+      "scd30_1"
+     ],
+     "rule": "mean",
+     "max_age_s": 90,
+     "reference": "sht45_1"
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_RULE_ARGS",
+   "loops.air_humidity.input.rule"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.co2"
+  ]
+ ]
+}

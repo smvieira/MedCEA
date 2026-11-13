@@ -1,0 +1,7 @@
+{
+ "note": "one sensor per tag: everything preselected, sendable as it is",
+ "context": "single",
+ "role": "ZONE",
+ "answer": "initial",
+ "expect": []
+}

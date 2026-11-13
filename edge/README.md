@@ -101,6 +101,11 @@ Two things the server does with this, both deliberate:
   resolves outside the repo is downgraded to `unavailable` at startup rather than
   failing when someone presses it. A tile is a promise that pressing it works.
 
+An entry may carry fixed `args`, passed before `--ui-spool`: plain long options
+only (`^--[a-z][a-z-]+$`, no values); anything else makes the tile `unavailable`.
+The **Control loops of a zone** tile is `edge/flash-device.sh` with
+`"args": ["--loops-only"]` (below).
+
 It runs on the host, not in the cluster, because onboarding is over USB and
 `/dev/ttyACM0` belongs to the host. That is also why it needs to run as a user
 in the `dialout` group.
@@ -408,6 +413,67 @@ the board — a check worth having twice, because the alternative is finding out
 after the flash has already erased the device. In a terminal the same step falls
 back to asking for one address at a time; a table with a live verdict on it is
 not a thing a terminal does well.
+
+### The zone's control loops (feedback control Phase 2, Q20)
+
+After the wiring and before anything touches the board comes one more planning
+stage, `loops` (Back returns to the wiring, or to the slot or role when the wiring
+stage asked nothing, as with `--wiring`/`--board-template`): which sensor each recipe quantity of
+the zone is controlled on, and which actuator it drives. It is asked only when
+the zone has both boards — the one being onboarded counts with its *planned*
+sensors (`device_template.py sense-sources`, the instance names `render()` will
+write) or its planned channel map (`device_template.py actuator-map`, or the
+editor's table) — and only for a signed-in person whose role may change loops.
+The four quantities and their recipe limits are one table in three places:
+`edge/src/host/loops.py` `QUANTITIES`, the database's `_loop_quantities()`
+(migration 010) and the runner's `schd/cea/loop_resolver.py`; `tests/test_loops.py`
+compares them.
+
+```
+air_temperature        air_temperature_lower/upper_limit    tag air_temperature
+air_humidity           hr_lower/upper_limit                 tag air_humidity
+co2                    co2_lower/upper_limit                tag co2, command map DOWN->UP, UP->OFF, OFF->OFF (fixed)
+substrate_temperature  substrate_temperature_lower/upper_limit   tag ground_temperature
+```
+
+- **The reference is always the person's choice (Q20).** A tag published by one
+  sensor is preselected. With several, nothing is: the row is in error
+  (`L_CHOOSE`) until the reference (and optionally a fallback), or the mean,
+  lowest or highest of the ticked sensors, is chosen, or the quantity is
+  unticked. A zone with no loop rows runs on the runner's default map (a tag
+  with one fresh sensor uses it; several give no data and an alarm), decided
+  per zone; a zone with rows controls only its ticked quantities.
+- **Replace-all.** The answer is every loop the zone keeps;
+  `medcea.save_zone_loops(zone, loops)` deactivates a code left out. *Decide
+  later* (`{"skip": true}`) is local and posts nothing; an empty list is sent
+  only after the explicit *Stop all loops* confirmation (`stop_all`). One loop
+  per actuator, `max_age_s` a whole number from 1 to 3600, command mode only
+  (level/boost need Phase 3), `default` is never a source.
+- **Checked three times.** `loops.js` (between `/* loops-logic:begin */` and
+  `:end */`) mirrors `loops.py validate()` word for word on every fixture in
+  `tests/fixtures/loops/` (`tests/test_loops_ui.py`); the shell re-checks with
+  `loops.py validate` before the erase and dies on an error; the database
+  re-checks at the save.
+- **Saved after the registration**, with the person's token, through
+  `platform_db.py save-loops ZONE_ID` (never fatal: the board is up). Read with
+  `platform_db.py loops ZONE_ID` (`zone_loop_context`). Refusals by SQLSTATE:
+  42501 is one state, `refused` (config-api answers it 401 in both
+  `IAM_DB_ROLES` modes, since the request's PostgREST role is anon either way,
+  so the status says nothing); flash-device words it from config.env and the
+  person's role: `IAM_DB_ROLES` not `true` → "control loops can be chosen only
+  with IAM_DB_ROLES=true" (no picker); else maintenance → the step is skipped
+  with a sentence; else the role may not change loops (engineer only) or policy
+  version 2c is not applied yet. The same at the save. PGRST202/404/55000 not
+  deployed; 55006 a run in R or S, said in words; 22023 the problem list.
+- **Re-onboarding never deletes silently.** Every stored loop whose sensor or
+  actuator the new board takes away is reported (`STALE`), kept in the picker
+  in error, and goes only when someone stops it or chooses again.
+- A run in R or S: no prompt, the reason in words. `--yes` without a terminal
+  chooses nothing (decided later). In a terminal: one menu per tag with several
+  sensors, then the fallback.
+- **`--loops-only [--unit U --zone Z]`** does only this: sign-in, the zone (any
+  zone, taken slots included), the picker, the save. No USB, no toolchain, no
+  erase. The record of a board run carries `control_loops`.
 
 The same editor is available on its own, away from the platform, for inspecting
 or hand-correcting a map:
@@ -722,12 +788,15 @@ edge/
     host/                      runs on THIS machine
       list_firmware.py         scrapes micropython.org's build list
       wizard_server.py         the --ui web front-end (stdlib only)
-      platform_db.py           units, zones, free slots, device registration
+      platform_db.py           units, zones, free slots, device registration,
+                               the zone's control loops (loops / save-loops)
       device_template.py       template -> questions -> the board's files
       bindings.py              how a command reaches equipment; the validator
+      loops.py                 the control-loop picker's spec and rules (Q20)
       ui/
         channelmap.js          the channel-map editor, inlined by the wizard
         channelmap.css         its styles, themed from the wizard's tokens
+        loops.js loops.css     the control-loop picker, inlined by the wizard
     bootstrap/                 driven from the host, over the serial link
       scan_networks.py         prints the board's own WiFi scan
     app/                       RUNS ON THE BOARD - identical on every device

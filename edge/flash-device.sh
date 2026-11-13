@@ -78,6 +78,13 @@ Options:
                         timestamp); exit 0 sent, 1 refused or unreachable, 2 no
                         usable record. Only --mqtt-host, --mqtt-port and
                         --mqtt-tls-name may go with it.
+      --loops-only      Touch no board: sign in, pick a unit and zone (--unit and
+                        --zone pick it without asking), choose the zone's control
+                        loops (which sensor each recipe quantity is controlled on,
+                        and which actuator it drives), save them. No USB, no
+                        toolchain, no erase. Needs a role allowed to change
+                        control loops (engineer) and IAM_DB_ROLES=true; refused
+                        while the unit has a run running or scheduled.
   -p, --port PATH       Serial port (default: autodetect, prompt if ambiguous)
   -f, --firmware PATH   Use this .bin and skip the selection menu entirely
   -b, --baud RATE       Flash baud rate (default: 460800; falls back to 115200)
@@ -140,7 +147,9 @@ Prerequisites:
 
 What gets asked, and what does not:
   Asked      role, unit/zone slot, which sensors or relay channels are wired
-             up and to which GPIO, WiFi network and passphrase.
+             up and to which GPIO, which sensor each control loop of the zone
+             controls on (when the zone has both boards), WiFi network and
+             passphrase.
   Inferred   MQTT host and port from config.env; topics, client id and
              the hostname from the slot; pin defaults from the reference build.
   The questions live in edge/templates/<role>.json. Adding a supported sensor
@@ -164,7 +173,7 @@ CONTROL_PINS_TSV=""; CONTROL_ACTUATOR_JSON=""; CONTROL_VARIANT=""
 WIRING_FILE=""; BOARD_TEMPLATE=""; SENSE_WIRING_JSON=""; SENSE_VARIANT=""; SENSE_SAVE_AS=""
 UI=0; UI_PORT=8088; UI_BIND="0.0.0.0"; UI_DIR=""; UI_PID=""; UI_TOKEN=""; STAGE=""; WIFI_TRY_DIR=""
 UI_INSECURE=0; UI_MANAGED=0; TOKEN_FD=""
-SEND_TEST=""; SEND_TEST_GIVEN=0; FLASH_OPTS=()
+SEND_TEST=""; SEND_TEST_GIVEN=0; FLASH_OPTS=(); LOOPS_ONLY=0
 while [ $# -gt 0 ]; do
   # --send-test publishes and flashes nothing: every option but the broker's is
   # remembered so that it can be refused together with it.
@@ -192,6 +201,7 @@ while [ $# -gt 0 ]; do
     --unit)        UNIT_WANTED="${2:-}";  shift 2 ;;
     --zone)        ZONE_WANTED="${2:-}";  shift 2 ;;
     --unregistered) UNREGISTERED=1;       shift ;;
+    --loops-only)  LOOPS_ONLY=1;          shift ;;
     --no-register) DO_REGISTER=0;         shift ;;
     --advanced)    ASK_ADVANCED=1;        shift ;;
     --wiring)      WIRING_FILE="${2:-}";  shift 2 ;;
@@ -231,6 +241,15 @@ if [ -n "$WIRING_FILE" ] || [ -n "$BOARD_TEMPLATE" ]; then
     || { echo "--board-template: not a template name: $BOARD_TEMPLATE" >&2; exit 2; }
   [ "$UNREGISTERED" != 1 ] || { echo "--wiring/--board-template need a slot: not with --unregistered" >&2; exit 2; }
   [ -z "$ROLE" ] || [ "$ROLE" = SENSE ] || { echo "--wiring/--board-template are for a SENSE board" >&2; exit 2; }
+fi
+
+if [ "$LOOPS_ONLY" = 1 ]; then
+  # A zone's control loops only: no board, so nothing that names one or skips the
+  # platform goes with it.
+  [ "$UNREGISTERED" != 1 ] && [ "$DO_REGISTER" = 1 ] \
+    || { echo "--loops-only reads and saves a zone's control loops: not with --unregistered or --no-register" >&2; exit 2; }
+  [ -z "$WIRING_FILE$BOARD_TEMPLATE$ROLE$PORT$FIRMWARE$SSID" ] \
+    || { echo "--loops-only touches no board: not with --wiring, --board-template, --role, --port, --firmware or --ssid" >&2; exit 2; }
 fi
 
 set -e
@@ -362,7 +381,7 @@ ask()   {
 # One question, answered in whichever surface is active. In UI mode the shell
 # blocks on a file the server writes, so the script remains the single engine —
 # there is no second copy of the flow to drift out of sync.
-CHOICES=(); ANSWER=""
+CHOICES=(); ANSWER=""; PROMPTS_ASKED=0
 # Back (5 Nov 2026): a question asked with BACK_OK=1 offers Back (the page's button, or
 # "<" in a terminal); the answer is then BACK_TOKEN, which nothing can type into the
 # page, and the caller goes to the previous stage. Only the questions before the board
@@ -405,18 +424,22 @@ print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
   < <(printf '%s\0' "${CHOICES[@]:-}")
 }
 prompt_text()    { # label default [hint]   -> $ANSWER
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
   if ui_on; then CHOICES=(); ui_wait_answer "$(ui_prompt_json text "$1" "${2:-}" "${3:-}")"
   else ANSWER="$(ask "$1" "${2:-}")"; term_back; fi
 }
 prompt_secret()  { # label [hint]          -> $ANSWER
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
   if ui_on; then CHOICES=(); ui_wait_answer "$(ui_prompt_json secret "$1" "" "${2:-}")"
   else read -r -s -p "    $1" ANSWER; echo; term_back; fi
 }
 prompt_confirm() { # label [hint]          -> $ANSWER = y|n
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
   if ui_on; then CHOICES=(); ui_wait_answer "$(ui_prompt_json confirm "$1" n "${2:-}")"
   else ANSWER="$(ask "$1 [y/N]: " n)"; term_back; fi
 }
 prompt_choice()  { # label default [hint]  -> $ANSWER, options in CHOICES
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
   if ui_on; then ui_wait_answer "$(ui_prompt_json choice "$1" "${2:-}" "${3:-}")"
   else ANSWER="$(ask "$1" "${2:-}")"; term_back; fi
 }
@@ -427,6 +450,7 @@ prompt_choice()  { # label default [hint]  -> $ANSWER, options in CHOICES
 # dying when there is no UI.
 prompt_channelmap() { # label spec-file [hint]  -> $ANSWER = the edited config JSON
   ui_on || { ANSWER=""; return 0; }
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
   CHOICES=()
   ui_wait_answer "$(
     KIND=channelmap LABEL="$1" SPECF="$2" HINT="${3:-}" BACK="$BACK_OK" \
@@ -445,9 +469,29 @@ print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
 # {"wiring": DOC, "variant": V, "save_as": null | {slug, title, description, replace}}.
 prompt_wiring() { # label spec-file [hint]  -> $ANSWER = the answer JSON
   ui_on || { ANSWER=""; return 0; }
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
   CHOICES=()
   ui_wait_answer "$(
     KIND=wiring LABEL="$1" SPECF="$2" HINT="${3:-}" BACK="$BACK_OK" \
+    ID="$RANDOM$$$(date +%s%N)" python3 -c '
+import json, os
+e = os.environ
+with open(e["SPECF"], encoding="utf-8") as f:
+    spec = json.load(f)
+print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
+                  "default": "", "hint": e["HINT"], "submit_on_click": False,
+                  "back": e["BACK"] == "1", "options": [], "spec": spec}))')"
+}
+# The control-loop picker (Q20) is a table with a live verdict too: one prompt whose
+# spec is loops.py spec's output; the answer is {"skip": true} (Decide later) or
+# {"skip": false, "stop_all": bool, "loops": [every loop the zone keeps]}. Without
+# the UI it returns empty and plan_loops asks in the terminal instead.
+prompt_loops() { # label spec-file [hint]  -> $ANSWER = the answer JSON
+  ui_on || { ANSWER=""; return 0; }
+  PROMPTS_ASKED=$(( ${PROMPTS_ASKED:-0} + 1 ))
+  CHOICES=()
+  ui_wait_answer "$(
+    KIND=loops LABEL="$1" SPECF="$2" HINT="${3:-}" BACK="$BACK_OK" \
     ID="$RANDOM$$$(date +%s%N)" python3 -c '
 import json, os
 e = os.environ
@@ -617,12 +661,13 @@ auth_report() {
     token_close
     case "$1" in
       signin|board|erase) die "$_msg" ;;
-      register) warn "$_msg"; return 1 ;;
+      register|loops) warn "$_msg"; return 1 ;;
     esac
   fi
   case "$1" in
     signin)
       [ "$EDGE_AUTH_CODE" = denied ] && die "$_msg"
+      [ "$LOOPS_ONLY" = 1 ] && die "$_msg: control loops are read and saved as a signed-in person"
       if ! phase2; then
         warn "$_msg — platform calls are anonymous, refused from IAM Phase 2"
         return 0
@@ -644,6 +689,10 @@ auth_report() {
       warn "no valid sign-in ($_msg) — this step would be refused from IAM Phase 2"
       phase2 && return 1
       return 0 ;;
+    loops)
+      # Control loops are only ever read and saved as a person (no anonymous path).
+      warn "no valid sign-in ($_msg): the control loops are not read or saved"
+      return 1 ;;
   esac
 }
 
@@ -987,6 +1036,7 @@ fi
 # and an operator retyping them is only an opportunity to get them wrong.
 PLATDB="$SRC_HOST/platform_db.py"
 TEMPLATE_TOOL="$SRC_HOST/device_template.py"
+LOOPS_TOOL="$SRC_HOST/loops.py"
 UNIT_CODE=""; ZONE_CODE=""; ZONE_ID=""; SLOT_DNS=""
 SENSORS_TSV=""; CONTROL_PINS_TSV=""; CONTROL_DRIVER="relay8"
 MESSAGE_INTERVAL=""; POLL_MS=""
@@ -1025,6 +1075,7 @@ if [ "$UNREGISTERED" != 1 ]; then
   if ! SLOTS="$(platdb slots 2>&1)" || ! grep -q '^SLOT' <<<"$SLOTS"; then
     warn "the platform database did not answer:"
     printf '%s\n' "$SLOTS" | sed 's/^/       /' >&2
+    [ "$LOOPS_ONLY" = 1 ] && die "the zones live in the platform database: without it there are no control loops to choose"
     echo "    Units and zones live in the database, so without it this board"
     echo "    cannot be given a slot. It can still be brought up unregistered."
     ui_waiting
@@ -1533,6 +1584,357 @@ print("%d channel(s), %d actuator(s) from the editor"
 
 }
 
+# --- the zone's control loops (feedback control Phase 2, Q20) -----------------
+# Which sensor each recipe quantity is controlled on, and which actuator it drives.
+# Asked after the wiring, before the board is touched, when the zone has both a
+# SENSE and a CONTROL board (the one being onboarded counts with its planned
+# sensors or channel map); saved after a successful registration, with the
+# person's token, through medcea.save_zone_loops (every loop the zone keeps). The
+# database decides who may (engineer, IAM_DB_ROLES=true) and refuses while the unit
+# has a run in R or S. Nothing here is ever fatal after the planning: the board is
+# up whatever happens to its loops.
+LOOPS_JSON=""; LOOPS_NOTE=""; LOOPS_STALE_TSV=""; LOOPS_SKIPPED=0; LOOPS_SAVED=""; LOOPS_RESULT_JSON=""
+LOOPS_ZONE_ASKED=0
+loops_field() { # FIELD < json  -> the field (objects and lists as JSON, true/false, "" when absent)
+  python3 -c '
+import json, sys
+try:
+    v = json.load(sys.stdin)
+except ValueError:
+    v = None
+for k in sys.argv[1].split("."):
+    v = v.get(k) if isinstance(v, dict) else None
+print("" if v is None else ("true" if v is True else "false" if v is False
+      else json.dumps(v) if isinstance(v, (dict, list)) else v))' "$1"
+}
+
+# The terminal's way of asking: one menu per ticked quantity whose tag has several
+# sensors (nothing preselected, Q20) and per stale loop; a tag with one sensor is
+# said, not asked. Back at any of them goes back to the wiring.
+loops_terminal() { # spec-file -> $ANSWER = the answer JSON (or BACK)
+  local _spec="$1" _kind _a _b _line _lines="" _tok _fb _qs=() _o _opts _fbo
+  while IFS=$'\t' read -r _kind _a _b; do
+    case "$_kind" in
+      INFO) info "$_a" ;;
+      Q)    _qs+=("$_a"$'\t'"$_b") ;;
+    esac
+  done < <(python3 "$LOOPS_TOOL" questions --spec "$_spec")
+  # `for`, not a redirected `while read`: menu_ask reads the terminal.
+  for _line in "${_qs[@]}"; do
+    IFS=$'\t' read -r _a _b <<<"$_line"
+    mapfile -t _opts < <(python3 "$LOOPS_TOOL" options --spec "$_spec" --code "$_a")
+    menu_reset
+    for _o in "${_opts[@]}"; do IFS=$'\t' read -r _ _tok _kind <<<"$_o"; menu_add "$_kind"; done
+    menu_ask "$_b" "Q20: with several sensors on a tag nothing is chosen for you. Not controlled leaves the quantity alone."
+    is_back && return 0
+    IFS=$'\t' read -r _ _tok _ <<<"${_opts[$((ANSWER-1))]}"
+    _fb=""
+    if [[ "$_tok" == ref:* ]]; then
+      mapfile -t _fbo < <(python3 "$LOOPS_TOOL" options --spec "$_spec" --code "$_a" --fallback-for "${_tok#ref:}")
+      if [ "${#_fbo[@]}" -gt 1 ]; then
+        menu_reset
+        for _o in "${_fbo[@]}"; do IFS=$'\t' read -r _ _ _kind <<<"$_o"; menu_add "$_kind"; done
+        menu_ask "$_a: a fallback sensor?" "Used, with an alarm, while ${_tok#ref:} has no fresh reading." 1
+        is_back && return 0
+        IFS=$'\t' read -r _ _fb _ <<<"${_fbo[$((ANSWER-1))]}"
+      fi
+    fi
+    _lines+="$_a"$'\t'"$_tok"$'\t'"$_fb"$'\n'
+  done
+  ANSWER="$(printf '%s' "$_lines" | python3 "$LOOPS_TOOL" terminal-answer --spec "$_spec")" \
+    || die "internal: loops.py could not build the answer"
+}
+
+# A 42501 from the loop functions, in words. config-api answers it 401 in both
+# IAM_DB_ROLES modes (the request's PostgREST role is anon either way), so the status
+# cannot say why: config.env's IAM_DB_ROLES and the person's role do. $1 = platform_db's
+# "why". Sets LOOPS_REFUSAL (the sentence), LOOPS_REFUSAL_KIND (no_db_roles|maintenance|
+# token|role) and LOOPS_REFUSAL_NOTE (the reason in a few words).
+loops_refusal() {
+  local _why="$1"
+  if [[ "$_why" == *"own sign-in is required"* ]]; then
+    LOOPS_REFUSAL_KIND=token; LOOPS_REFUSAL="$_why"; LOOPS_REFUSAL_NOTE="own sign-in required"
+  elif [ "${IAM_DB_ROLES:-false}" != true ]; then
+    # D-b: no picker under IAM_DB_ROLES=false (anon holds no grant on the functions).
+    LOOPS_REFUSAL_KIND=no_db_roles
+    LOOPS_REFUSAL="control loops can be chosen only with IAM_DB_ROLES=true"
+    LOOPS_REFUSAL_NOTE="needs IAM_DB_ROLES=true"
+  elif [ "${EDGE_ROLE:-}" = maintenance ]; then
+    # D-c: maintenance reads no loops; the step is skipped with a sentence.
+    LOOPS_REFUSAL_KIND=maintenance
+    LOOPS_REFUSAL="maintenance does not choose control loops: an engineer does (./edge/flash-device.sh --loops-only --unit $UNIT_CODE --zone $ZONE_CODE)"
+    LOOPS_REFUSAL_NOTE="role maintenance"
+  else
+    LOOPS_REFUSAL_KIND=role
+    LOOPS_REFUSAL="your role (${EDGE_ROLE:-?}) may not change control loops (engineer only), or policy version 2c is not applied yet${_why:+ ($_why)}"
+    LOOPS_REFUSAL_NOTE="role ${EDGE_ROLE:-?}"
+  fi
+}
+
+plan_loops() {
+  LOOPS_JSON=""; LOOPS_NOTE=""; LOOPS_STALE_TSV=""; LOOPS_SKIPPED=0
+  [ "${UNREGISTERED:-0}" != 1 ] && [ "${DO_REGISTER:-1}" = 1 ] || return 0
+  step "Control loops"
+  if [ -z "${TOK_W:-}" ]; then
+    info "not signed in: the control loops of $UNIT_CODE / $ZONE_CODE are not read or chosen"
+    LOOPS_NOTE="not read (no sign-in)"
+    return 0
+  fi
+  if ! token_get 120 "read the control loops"; then
+    auth_report loops || true
+    LOOPS_NOTE="not read (no valid sign-in)"
+    return 0
+  fi
+  local _ctx _state _why _d _role _n _l _code _msg _answer _out _a _b
+  _ctx="$(platdb loops "$ZONE_ID" 2>/dev/null || true)"
+  _state="$(printf '%s' "$_ctx" | loops_field state)"
+  _why="$(printf '%s' "$_ctx" | loops_field why)"
+  case "$_state" in
+    ok) ;;
+    refused)
+      loops_refusal "$_why"
+      case "$LOOPS_REFUSAL_KIND" in
+        no_db_roles) info "$LOOPS_REFUSAL; the loops of $UNIT_CODE / $ZONE_CODE stay as they are" ;;
+        maintenance) info "$LOOPS_REFUSAL. The loops of $UNIT_CODE / $ZONE_CODE stay as they are; after re-onboarding a SENSE board, ask an engineer to check them." ;;
+        *)           warn "$LOOPS_REFUSAL: the loops of $UNIT_CODE / $ZONE_CODE stay as they are" ;;
+      esac
+      if [ "$LOOPS_REFUSAL_KIND" = no_db_roles ]; then LOOPS_NOTE="not chosen ($LOOPS_REFUSAL_NOTE)"
+      else LOOPS_NOTE="not changed ($LOOPS_REFUSAL_NOTE)"; fi
+      return 0 ;;
+    not_deployed)
+      warn "$_why: the loops of $UNIT_CODE / $ZONE_CODE stay as they are"
+      LOOPS_NOTE="not changed (not deployed)"; return 0 ;;
+    *)
+      warn "the control loops could not be read: ${_why:-no answer}; the loops of $UNIT_CODE / $ZONE_CODE stay as they are"
+      LOOPS_NOTE="not read"; return 0 ;;
+  esac
+
+  _d="$(mktemp -d "${TMPDIR:-/tmp}/cea-loops.XXXXXX")"
+  printf '%s' "$_ctx" | python3 -c 'import json, sys; json.dump(json.load(sys.stdin)["context"], sys.stdout)' > "$_d/context.json"
+  _role="${ROLE:-ZONE}"; [ "${LOOPS_ONLY:-0}" = 1 ] && _role=ZONE
+  local _plan=()
+  if [ "$_role" = SENSE ]; then
+    # The planned sensors, named as render() will name them; the database still
+    # holds the board's old components until register retires them.
+    if [ -n "$SENSE_WIRING_JSON" ]; then
+      DOC="$SENSE_WIRING_JSON" VAR="$SENSE_VARIANT" python3 -c '
+import json, os
+print(json.dumps({"wiring": json.loads(os.environ["DOC"]), "variant": os.environ["VAR"] or None}))'
+    else
+      TSV="$SENSORS_TSV" python3 -c 'import json, os; print(json.dumps({"sensors_tsv": os.environ["TSV"]}))'
+    fi | python3 "$TEMPLATE_TOOL" sense-sources SENSE > "$_d/plan.json" \
+      || { warn "could not name this board's sensors for the control loops: they stay as they are"; rm -rf "$_d"; LOOPS_NOTE="not chosen"; return 0; }
+    _plan=(--plan-sources "$_d/plan.json")
+  elif [ "$_role" = CONTROL ]; then
+    if [ -n "$CONTROL_ACTUATOR_JSON" ]; then
+      printf '%s' "$CONTROL_ACTUATOR_JSON" > "$_d/plan.json"
+    else
+      printf '%s' "$CONTROL_PINS_TSV" \
+        | python3 "$TEMPLATE_TOOL" actuator-map CONTROL "${CONTROL_DRIVER:-relay8}" ${CONTROL_VARIANT:+"$CONTROL_VARIANT"} > "$_d/plan.json" \
+        || { warn "could not derive this board's actuators for the control loops: they stay as they are"; rm -rf "$_d"; LOOPS_NOTE="not chosen"; return 0; }
+    fi
+    _plan=(--plan-actuators "$_d/plan.json")
+  fi
+  python3 "$LOOPS_TOOL" spec "$_role" --context "$_d/context.json" "${_plan[@]}" > "$_d/spec.json" \
+    || { warn "could not build the control-loop picker: the loops stay as they are"; rm -rf "$_d"; LOOPS_NOTE="not chosen"; return 0; }
+
+  # Re-onboarding: every loop whose sensor or actuator goes away is said, never
+  # deleted silently (it stays until someone stops it or chooses again).
+  while IFS=$'\t' read -r _l _code _msg; do
+    [ "$_l" = STALE ] || continue
+    warn "control loop $_msg"
+    LOOPS_STALE_TSV+="$_code"$'\t'"$_msg"$'\n'
+  done < <(python3 "$LOOPS_TOOL" stale --spec "$_d/spec.json")
+
+  _n="$(python3 -c '
+import json, sys
+s = json.load(open(sys.argv[1]))
+print(len(s["sources"]), len(s["actuators"]), 1 if any(r["offered"] for r in s["rows"]) or s["existing"] else 0,
+      len(s["old_boards"]))' "$_d/spec.json")"
+  read -r _a _b _l _code <<<"$_n"
+  if [ "$_a" = 0 ] || [ "$_b" = 0 ] || [ "$_l" = 0 ]; then
+    if [ "$_a" = 0 ] && [ "$_code" != 0 ]; then
+      info "the SENSE board of $UNIT_CODE / $ZONE_CODE was flashed before its readings carried a sensor name: re-onboard it to choose the control loops (until then the zone runs on the default map)"
+    elif [ "$_a" = 0 ]; then
+      info "no SENSE board with named sensors in $UNIT_CODE / $ZONE_CODE yet: its control loops are chosen when the SENSE board is onboarded"
+    elif [ "$_b" = 0 ]; then
+      info "no CONTROL board in $UNIT_CODE / $ZONE_CODE yet: its control loops are chosen when the CONTROL board is onboarded"
+    else
+      info "no sensor of $UNIT_CODE / $ZONE_CODE publishes what an actuator of it controls: no control loop to choose"
+    fi
+    LOOPS_NOTE="${LOOPS_STALE_TSV:+not changed (stale loops reported)}"
+    LOOPS_NOTE="${LOOPS_NOTE:-nothing to choose}"
+    rm -rf "$_d"; return 0
+  fi
+  _l="$(loops_field busy < "$_d/spec.json")"
+  if [ -n "$_l" ]; then
+    _a="$(printf '%s' "$_l" | loops_field run_id)"; _b="$(printf '%s' "$_l" | loops_field run_status)"
+    [ "$_b" = S ] && _b=scheduled || _b=running
+    warn "Unit $UNIT_CODE has run $_a $_b. The loops of $UNIT_CODE / $ZONE_CODE change only while no run is running or scheduled, so this goes on and leaves them as they are. Choose them once the run has finished (./edge/flash-device.sh --loops-only --unit $UNIT_CODE --zone $ZONE_CODE)."
+    [ -n "$LOOPS_STALE_TSV" ] && warn "during run $_a a loop whose sensor is gone reads no data and holds its last command, with an alarm"
+    LOOPS_NOTE="not changed (unit has run $_a $_b)"
+    rm -rf "$_d"; return 0
+  fi
+
+  # Back goes to the last stage that asked something (wiring, slot, role); none -> no Back.
+  BACK_OK=0
+  if [ "${WIRING_ASKED:-0}" = 1 ] || [ "${SLOT_ASKED:-0}" = 1 ] || [ "${ROLE_ASKED:-0}" = 1 ]; then BACK_OK=1; fi
+  [ "${LOOPS_ONLY:-0}" = 1 ] && BACK_OK="${LOOPS_ZONE_ASKED:-0}"
+  if ui_on; then
+    ui_waiting
+    prompt_loops "Which sensor does each loop control on?" "$_d/spec.json" \
+      "One row per recipe quantity. A tag with one sensor is chosen for you; with several, choose the reference (and a fallback), or the mean, lowest or highest, or untick it. Decide later saves nothing."
+  elif [ "${ASSUME_YES:-0}" = 1 ] && [ ! -t 0 ]; then
+    # Q20: with nobody to choose, nothing is chosen.
+    warn "no terminal to choose the control loops (--yes): decided later; the loops of $UNIT_CODE / $ZONE_CODE stay as they are"
+    ANSWER='{"skip": true}'
+  else
+    loops_terminal "$_d/spec.json"
+  fi
+  if is_back; then PLAN_BACK=1; rm -rf "$_d"; return 0; fi
+  _answer="$ANSWER"
+  [ -n "$_answer" ] || { rm -rf "$_d"; die "the browser returned an empty control-loop answer"; }
+  # Checked here, before anything touches the board, as the channel map and the
+  # wiring are: a hand-crafted POST or a page of another version stops the run.
+  if ! _out="$(printf '%s' "$_answer" | python3 "$LOOPS_TOOL" validate --spec "$_d/spec.json")"; then
+    printf '%s' "$_out" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    d = {"findings": []}
+for f in d["findings"]:
+    if f["level"] == "error":
+        print("    !! %s - %s" % (f["where"], f["message"]))' >&2
+    rm -rf "$_d"
+    die "the control loops have errors and were not accepted"
+  fi
+  while IFS= read -r _msg; do [ -n "$_msg" ] && warn "$_msg"; done < <(printf '%s' "$_out" | python3 -c '
+import json, sys
+for f in json.load(sys.stdin)["findings"]:
+    if f["level"] != "error":
+        print(f["message"])')
+  LOOPS_JSON="$(printf '%s' "$_answer" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))')"
+  if [ "$(printf '%s' "$LOOPS_JSON" | loops_field skip)" = true ]; then
+    LOOPS_SKIPPED=1
+    _msg="$(python3 -c '
+import json, sys
+s = json.load(open(sys.argv[1]))
+many = [r for r in s["rows"] if r["offered"] and len(r["candidates"]) > 1]
+if s["existing"]:
+    print("the zone keeps its loops")
+elif many:
+    print("; ".join("%s has %d sensors: no data and an alarm in a run" % (r["loop_code"], len(r["candidates"])) for r in many))
+else:
+    print("the zone stays on the default map")' "$_d/spec.json")"
+    info "control loops: decided later ($_msg)"
+    LOOPS_NOTE="decided later ($_msg)"
+  else
+    info "control loops: $(printf '%s' "$LOOPS_JSON" | python3 -c '
+import json, sys
+a = json.load(sys.stdin)
+print("stop all" if a.get("stop_all") else ", ".join(l["loop_code"] for l in a["loops"]) or "none") ') — saved after the board is registered"
+    LOOPS_NOTE="chosen, not saved yet"
+  fi
+  rm -rf "$_d"
+}
+
+# Saves the loops chosen in plan_loops: every loop the zone keeps, with the
+# person's token. Never fatal. $1 says what stays true when it is refused.
+loops_save() {
+  [ -n "$LOOPS_JSON" ] && [ "$LOOPS_SKIPPED" != 1 ] || return 0
+  local _payload _out _state _why _res
+  _payload="$(printf '%s' "$LOOPS_JSON" | python3 "$LOOPS_TOOL" payload)" \
+    || { warn "internal: the control loops could not be read back: not saved"; LOOPS_NOTE="not saved"; return 0; }
+  [ "$_payload" != skip ] || return 0
+  if ! token_get 120 "save the control loops"; then
+    auth_report loops || true
+    LOOPS_NOTE="not saved (no valid sign-in)"
+    return 0
+  fi
+  _out="$(printf '%s' "$_payload" | platdb save-loops "$ZONE_ID" 2>/dev/null || true)"
+  _state="$(printf '%s' "$_out" | loops_field state)"
+  _why="$(printf '%s' "$_out" | loops_field why)"
+  if [ "$_state" = ok ]; then
+    _res="$(printf '%s' "$_out" | loops_field result)"
+    LOOPS_RESULT_JSON="$_res"
+    LOOPS_SAVED="$(printf '%s' "$_res" | python3 "$LOOPS_TOOL" result-text)"
+    info "${GRN}$LOOPS_SAVED${N}"
+    LOOPS_NOTE="${LOOPS_SAVED#control loops }"
+    return 0
+  fi
+  case "$_state" in
+    busy) warn "${_why^}. $1; choose the loops again once the run has finished (./edge/flash-device.sh --loops-only --unit $UNIT_CODE --zone $ZONE_CODE)." ;;
+    "")   warn "the control loops were not saved: the platform database did not answer. $1." ;;
+    refused)
+          loops_refusal "$_why"
+          warn "the control loops were not saved: $LOOPS_REFUSAL. $1."
+          LOOPS_NOTE="not saved ($LOOPS_REFUSAL_NOTE)"; return 0 ;;
+    *)    warn "the control loops were not saved: $_why"
+          while IFS= read -r _res; do [ -n "$_res" ] && warn "  $_res"; done < <(printf '%s' "$_out" | python3 -c '
+import json, sys
+for p in json.load(sys.stdin).get("problems") or []:
+    print(p)')
+          warn "$1." ;;
+  esac
+  LOOPS_NOTE="not saved (${_why:-no answer})"
+}
+
+# --loops-only: sign-in and the zone are done; the picker and the save, then out.
+# No toolchain, no USB, no erase.
+loops_only_main() {
+  local _z _zs=() _sel _a _b
+  ROLE=""
+  mapfile -t _zs < <(awk -F'\t' -v u="$UNIT_WANTED" -v z="$ZONE_WANTED" \
+    '$1=="SLOT" && (u=="" || $2==u) && (z=="" || $3==z) && !seen[$4]++ {print $2"\t"$3"\t"$4}' <<<"$SLOTS")
+  [ "${#_zs[@]}" -gt 0 ] && [ -n "${_zs[0]}" ] \
+    || die "no zone${UNIT_WANTED:+ in unit $UNIT_WANTED}${ZONE_WANTED:+ called $ZONE_WANTED} (the Units tab lists them)"
+  while :; do
+    PLAN_BACK=0
+    if [ "${#_zs[@]}" -eq 1 ]; then
+      _sel="${_zs[0]}"
+    else
+      menu_reset
+      for _z in "${_zs[@]}"; do IFS=$'\t' read -r _a _b _ <<<"$_z"; menu_add "$_a / $_b"; done
+      LOOPS_ZONE_ASKED=1; BACK_OK=0
+      ui_waiting
+      menu_ask "Which unit and zone?" "The control loops of one zone are chosen at a time."
+      _sel="${_zs[$((ANSWER-1))]}"
+    fi
+    IFS=$'\t' read -r UNIT_CODE ZONE_CODE ZONE_ID <<<"$_sel"
+    info "zone: ${B}$UNIT_CODE / $ZONE_CODE${N}"
+    plan_loops
+    [ "$PLAN_BACK" = 1 ] && [ "${LOOPS_ZONE_ASKED:-0}" = 1 ] && continue
+    break
+  done
+  BACK_OK=0
+  loops_save "Nothing else was changed"
+  token_close
+  if ui_on; then
+    UNIT_CODE="$UNIT_CODE" ZONE_CODE="$ZONE_CODE" NOTE="$LOOPS_NOTE" STALE="$LOOPS_STALE_TSV" UI_DIR="$UI_DIR" \
+    python3 -c '
+import json, os
+e = os.environ
+f = [["unit / zone", "%s / %s" % (e["UNIT_CODE"], e["ZONE_CODE"]), False],
+     ["control loops", e["NOTE"] or "not changed", False]]
+for line in e["STALE"].splitlines():
+    code, _, msg = line.partition("\t")
+    f.append(["stale loop", msg, False])
+out = {"title": "Control loops - %s / %s" % (e["UNIT_CODE"], e["ZONE_CODE"]), "fields": f,
+       "note": "No board was touched. A run reads the loops when it starts.", "onboard_url": ""}
+with open(os.path.join(e["UI_DIR"], "done.json.tmp"), "w") as fh:
+    json.dump(out, fh)
+os.replace(os.path.join(e["UI_DIR"], "done.json.tmp"), os.path.join(e["UI_DIR"], "done.json"))'
+  fi
+  printf '\n%s Control loops — %s / %s%s\n  control loops  %s\n' "$B" "$UNIT_CODE" "$ZONE_CODE" "$N" "${LOOPS_NOTE:-not changed}"
+  return 0
+}
+
+if [ "$LOOPS_ONLY" = 1 ]; then
+  loops_only_main
+  exit 0
+fi
+
 if [ "$UNREGISTERED" != 1 ]; then
   ROLE_ASKED=0; SLOT_ASKED=0; PLAN_STAGE=role
   ui_on || info "${DIM}type < at a question to go back${N}"
@@ -1542,8 +1944,16 @@ if [ "$UNREGISTERED" != 1 ]; then
       role)   plan_role; PLAN_STAGE=slot ;;
       slot)   plan_slot
               if [ "$PLAN_BACK" = 1 ]; then ROLE=""; PLAN_STAGE=role; else PLAN_STAGE=wiring; fi ;;
-      wiring) plan_wiring
+      wiring) _PA0="${PROMPTS_ASKED:-0}"; plan_wiring
+              # Back from the loop picker returns here only when this stage asked
+              # something (--wiring/--board-template may ask nothing at all).
+              WIRING_ASKED=0; [ "${PROMPTS_ASKED:-0}" -gt "$_PA0" ] && WIRING_ASKED=1
+              if [ "$PLAN_BACK" != 1 ]; then PLAN_STAGE=loops
+              elif [ "$SLOT_ASKED" = 1 ]; then PLAN_STAGE=slot
+              else ROLE=""; PLAN_STAGE=role; fi ;;
+      loops)  plan_loops
               if [ "$PLAN_BACK" != 1 ]; then break
+              elif [ "$WIRING_ASKED" = 1 ]; then PLAN_STAGE=wiring
               elif [ "$SLOT_ASKED" = 1 ]; then PLAN_STAGE=slot
               else ROLE=""; PLAN_STAGE=role; fi ;;
     esac
@@ -2449,6 +2859,9 @@ import json, os; print(len(json.loads(os.environ["ANSWER"])))')"
       IFS=$'\t' read -r REG_ACTION REGISTERED_ID <<<"$REG_OUT"
       info "${GRN}$REG_ACTION device $REGISTERED_ID${N} — the slot is now taken"
       [ -n "$EDGE_TOKEN" ] && REGISTERED_BY="$EDGE_USER"
+      # The loops chosen at planning, now that the database holds this board's
+      # sensors or actuators (save_zone_loops checks them against the zone).
+      loops_save "The board is registered and working"
     else
       # Not fatal. The board is flashed, online and running; what failed is the
       # bookkeeping, and re-running the wizard for the same slot updates the row
@@ -2461,6 +2874,10 @@ import json, os; print(len(json.loads(os.environ["ANSWER"])))')"
       warn "cannot publish. Onboard it again once fixed (the slot's row is updated in place)."
     fi
   fi
+fi
+if [ -n "$LOOPS_JSON" ] && [ "$LOOPS_SKIPPED" != 1 ] && [ -z "$REGISTERED_ID" ]; then
+  warn "the control loops you chose were not saved, because the board was not registered"
+  LOOPS_NOTE="not saved (the board was not registered)"
 fi
 # The run needs no further token: end the channel (and the agent's refresh token).
 token_close
@@ -2479,6 +2896,8 @@ MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" TOPIC_ROOT="$TOPIC_ROOT" MQTT_TLS_
 MQTT_USER="${MQTT_USER:-}" MQTT_PASS="${MQTT_PASS:-}" \
 DB_COMPONENTS="$DB_COMPONENTS" REGISTERED_BY="$REGISTERED_BY" \
 SENSE_WIRING_JSON="$SENSE_WIRING_JSON" \
+LOOPS_RESULT_JSON="$LOOPS_RESULT_JSON" LOOPS_SKIPPED="$LOOPS_SKIPPED" LOOPS_NOTE="$LOOPS_NOTE" \
+LOOPS_STALE_TSV="$LOOPS_STALE_TSV" \
 "$VENV_DIR/bin/python" - <<'PY'
 import datetime, getpass, json, os, socket
 e = os.environ
@@ -2507,6 +2926,15 @@ rec = {
     # one-sensor-at-a-time questions, CONTROL, unregistered). wiring-spec reads it
     # back as the screen's starting point when the board is onboarded again.
     "wiring": json.loads(e["SENSE_WIRING_JSON"]) if e["SENSE_WIRING_JSON"] else None,
+    # The zone's control loops (Q20): what save_zone_loops answered, or None; whether
+    # the person chose Decide later; what was said; the loops whose sensor or
+    # actuator this onboarding takes away.
+    "control_loops": None if unreg else {
+        "saved": json.loads(e["LOOPS_RESULT_JSON"]) if e["LOOPS_RESULT_JSON"] else None,
+        "skipped": e["LOOPS_SKIPPED"] == "1",
+        "note": e["LOOPS_NOTE"] or None,
+        "stale": [{"loop_code": l.partition("\t")[0], "message": l.partition("\t")[2]}
+                  for l in e["LOOPS_STALE_TSV"].splitlines() if l.strip()]},
     "hostname": e["HOSTNAME"],
     "hostname_verified": e["HOSTNAME_OK"] or None,
     "resolves_as": e["RESOLVES"] or None,
@@ -2544,7 +2972,7 @@ if ui_on; then
   RECORD="$RECORD" ONBOARD_URL="${ONBOARD_URL:-}" UI_DIR="$UI_DIR" \
   UNREGISTERED="$UNREGISTERED" ROLE="$ROLE" UNIT_CODE="$UNIT_CODE" \
   ZONE_CODE="$ZONE_CODE" REGISTERED_ID="$REGISTERED_ID" \
-  REGISTERED_BY_NAME="${REGISTERED_BY:+$EDGE_NAME ($REGISTERED_BY)}" \
+  REGISTERED_BY_NAME="${REGISTERED_BY:+$EDGE_NAME ($REGISTERED_BY)}" LOOPS_NOTE="$LOOPS_NOTE" \
   TOPIC_BASE="${TOPIC_BASE:-}" MQTT_HOST="$MQTT_HOST" MQTT_PORT="$MQTT_PORT" MQTT_TLS_NAME="$MQTT_TLS_NAME" \
   python3 -c '
 import json, os
@@ -2566,6 +2994,8 @@ if not unreg:
                             else "NOT REGISTERED - see the log", False]]
     if e["REGISTERED_BY_NAME"]:
         f += [["recorded by", e["REGISTERED_BY_NAME"], False]]
+    if e["LOOPS_NOTE"]:
+        f += [["control loops", e["LOOPS_NOTE"], False]]
 else:
     f += [["hostname", e["HOSTNAME"], False]]
 f += [["webrepl", "ws://%s:8266/" % ip, True],
@@ -2669,6 +3099,7 @@ print(", ".join("%s (%s)" % (x.get("id"), x.get("driver")) for x in d.get("senso
   else
     echo "  registered   ${RED}NO — the platform does not know this board exists${N}"
   fi
+  [ -z "$LOOPS_NOTE" ] || echo "  loops        $LOOPS_NOTE"
 fi
 
 cat <<EOF
