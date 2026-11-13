@@ -1,5 +1,5 @@
 {
- "note": "SHT45 and SCD30 both on air_temperature would interleave one series.",
+ "note": "SCD30 publishing temperature and humidity both as air_temperature: one sensor, one tag, two series on one topic.",
  "variant": "esp32s3",
  "doc": {
   "version": 1,
@@ -65,7 +65,7 @@
      },
      {
       "q": "humidity",
-      "tag": null
+      "tag": "air_temperature"
      }
     ]
    },
@@ -96,7 +96,7 @@
   [
    "error",
    "E_TAG_DUP",
-   "sensors.scd30_1.tags.temperature"
+   "sensors.scd30_1.tags.humidity"
   ]
  ]
 }

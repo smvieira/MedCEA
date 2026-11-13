@@ -2,8 +2,10 @@
 """A SENSE board's wiring (edge/src/host/wiring.py), offline: every fixture in
 tests/fixtures/wiring/ gives exactly its (level, code, where) set (the UI's
 parity test reads the same files), render_sense() and the render() branch, the
-legacy question-loop render byte for byte against the golden taken before the
-wiring branch existed, and the CLI (wiring-spec size, validate-wiring exits)."""
+legacy question-loop render (device_cfg.py byte for byte against the golden taken
+before the wiring branch existed; the *.result.json goldens changed on purpose in
+feedback-control Phase 1, when each component row gained its sensor "instance" and
+each topic its /<instance> segment), and the CLI (wiring-spec size, validate-wiring exits)."""
 import copy
 import glob
 import json
@@ -27,7 +29,8 @@ import wiring  # noqa: E402
 CODES = {
     "error": ("E_SCHEMA", "E_VARIANT", "E_DRIVER", "E_PIN_RANGE", "E_PIN_GROUP", "E_PIN_DUP",
               "E_BUS_REF", "E_BUS_KIND", "E_BUS_FREQ", "E_ADDR_RANGE", "E_ADDR_OPTION",
-              "E_ADDR_CLASH", "E_HUB", "E_UNWIRED", "E_TAG", "E_TAG_DUP", "E_NO_SENSOR"),
+              "E_ADDR_CLASH", "E_HUB", "E_UNWIRED", "E_TAG", "E_TAG_DUP", "E_NO_SENSOR",
+              "E_ID_RESERVED"),
     "warn": ("W_PIN_GROUP", "W_PULLUPS", "W_HUB_UNUSED", "W_TAG_OFF",
              "W_POWER"),
 }
@@ -94,6 +97,13 @@ class Fixtures(unittest.TestCase):
         fx = fixtures()
         self.assertEqual(fx["ok-reference-board"]["expect"], [])
         self.assertEqual(fx["ok-same-driver-two-channels"]["expect"], [])
+        # two sensors on one tag are legal (each has its own instance topic) ...
+        self.assertEqual(fx["ok-tag-shared-two-sensors"]["expect"], [])
+        # ... one sensor using one tag twice is not
+        self.assertEqual(fx["tag-dup"]["expect"],
+                         [["error", "E_TAG_DUP", "sensors.scd30_1.tags.humidity"]])
+        self.assertEqual(fx["id-reserved-default"]["expect"],
+                         [["error", "E_ID_RESERVED", "sensors.default"]])
         self.assertIn(["error", "E_PIN_GROUP", "buses.i2c0.sda"], fx["gpio8-on-esp32"]["expect"])
         self.assertEqual(fx["ok-reference-board"]["doc"], reference())
 
@@ -206,6 +216,25 @@ class Render(unittest.TestCase):
                 with open(os.path.join(LEGACY, name + ".result.json")) as f:
                     self.assertEqual(json.loads(json.dumps(res)), json.load(f))
 
+    def test_legacy_instances(self):
+        # A legacy row names its sensor as the firmware does (cea_sense.Board):
+        # the driver, then <driver>_<position> for a repeat.
+        with open(os.path.join(LEGACY, "scd30_ground.spec.json")) as f:
+            spec = json.load(f)
+        spec["out_dir"] = self.tmp
+        comps = device_template.render(spec)["components"]
+        self.assertEqual([c["parameters"]["instance"] for c in comps],
+                         ["scd30", "ground_temperature"])
+        topics = [t["topic"] for c in comps for t in c["parameters"]["tags"]]
+        self.assertTrue(any(t.endswith("/sense/co2/scd30") for t in topics), topics)
+        self.assertTrue(any(t.endswith("/sense/ground_temperature/ground_temperature")
+                            for t in topics), topics)
+        scd30 = [c for c in spec["components"] if c["driver"] == "scd30"][0]
+        spec["components"] = [scd30, scd30]
+        comps = device_template.render(spec)["components"]
+        self.assertEqual([c["parameters"]["instance"] for c in comps], ["scd30", "scd30_2"])
+        self.assertTrue(comps[1]["parameters"]["tags"][0]["topic"].endswith("/co2/scd30_2"))
+
     def test_legacy_driver_listing_unchanged(self):
         r = run(["drivers", "SENSE"])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -225,7 +254,7 @@ class Render(unittest.TestCase):
         doc = reference()
         doc["sensors"].append({"id": "sht45_2", "driver": "sht4x", "bus": "i2c0", "hub": "mux0",
                                "channel": 3, "addr": 68, "params": {},
-                               "tags": [{"q": "temperature", "tag": "air_temperature_2"},
+                               "tags": [{"q": "temperature", "tag": "air_temperature"},
                                         {"q": "humidity", "tag": None}]})
         spec = dict(BASE_SPEC, out_dir=self.tmp, wiring=doc, variant="esp32s3")
         res = device_template.render(spec)
@@ -239,9 +268,11 @@ class Render(unittest.TestCase):
             "id": "sht45_1", "driver": "sht4x", "bus": "i2c0", "hub": "mux0", "channel": 0,
             "addr": 68, "params": {}, "tags": [["temperature", "air_temperature", "C"],
                                                ["humidity", "air_humidity", "RH%"]]})
-        self.assertEqual(cfg["SENSORS"][1]["tags"], [["co2", "co2", "ppm"]])
+        self.assertEqual(cfg["SENSORS"][1]["tags"], [["co2", "co2", "ppm"],
+                                                     ["temperature", "air_temperature", "C"],
+                                                     ["humidity", "air_humidity", "RH%"]])
         self.assertEqual(cfg["SENSORS"][1]["params"], {})     # scl/sda are the bus's now
-        self.assertEqual(cfg["SENSORS"][3]["tags"], [["temperature", "air_temperature_2", "C"]])
+        self.assertEqual(cfg["SENSORS"][3]["tags"], [["temperature", "air_temperature", "C"]])
         # one row per instance, the driver twice
         comps = res["components"]
         self.assertEqual([c["parameters"]["instance"] for c in comps],
@@ -253,7 +284,13 @@ class Render(unittest.TestCase):
         self.assertEqual(p["wiring"], {"bus": {"kind": "i2c", "sda": 8, "scl": 9, "freq": 100000},
                                        "hub": {"kind": "tca9548a", "addr": 112, "channel": 2}})
         self.assertEqual(p["tags"], [{"tag": "light_intensity", "UoM": "lx",
-                                      "topic": "medcea/UNIT02/ZONE01/sense/light_intensity"}])
+                                      "topic": "medcea/UNIT02/ZONE01/sense/light_intensity/lux_1"}])
+        # three sensors on air_temperature: three topics, one per instance
+        self.assertEqual([t["topic"] for c in comps for t in c["parameters"]["tags"]
+                          if t["tag"] == "air_temperature"],
+                         ["medcea/UNIT02/ZONE01/sense/air_temperature/sht45_1",
+                          "medcea/UNIT02/ZONE01/sense/air_temperature/scd30_1",
+                          "medcea/UNIT02/ZONE01/sense/air_temperature/sht45_2"])
         self.assertEqual(p["topic_base"], "medcea/UNIT02/ZONE01/sense")
         self.assertEqual(p["mqtt"], {"host": "192.0.2.10", "port": 31884})
         self.assertNotIn("fixture-pass", json.dumps(comps))
@@ -273,8 +310,9 @@ class Render(unittest.TestCase):
 
     def test_render_refuses_errors_and_writes_nothing(self):
         for variant, mutate in (("esp32", lambda d: None),
+                                # E_TAG_DUP: the SCD30's temperature on its own co2 tag
                                 ("esp32s3", lambda d: d["sensors"][1]["tags"][1].update(
-                                    tag="air_temperature"))):
+                                    tag="co2"))):
             doc = reference()
             mutate(doc)
             with self.assertRaises(device_template.TemplateError) as ctx:
@@ -326,7 +364,7 @@ class Cli(unittest.TestCase):
         self.assertEqual(spec["pins"]["ranges"], [[0, 21], [26, 48]])
         self.assertEqual([d["id"] for d in spec["drivers"]], ["scd30", "sht4x", "sen0562"])
         self.assertEqual(spec["drivers"][0]["params"], [])
-        self.assertEqual(spec["drivers"][0]["default_off"], ["temperature", "humidity"])
+        self.assertEqual(spec["drivers"][0]["default_off"], [])     # none since Q13
         self.assertEqual([(t["slug"], t["source"], t["valid"], t["first_error"])
                           for t in spec["templates"]],
                          [("sense-hub-bench-sht45-scd30", "shipped", True, None),

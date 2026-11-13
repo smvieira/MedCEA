@@ -65,7 +65,9 @@ class BoardTemplates(unittest.TestCase):
     def test_the_bench_template_is_the_tested_wiring(self):
         # The owner's bench test (i2c_hub_test.py rev3, 6 Nov 2026) passed on exactly
         # this: hardware I2C(0), GPIO8/9, 100 kHz, a TCA9548A at 0x70, SHT45 on ch7,
-        # SCD30 on ch6 with CO2 only, nothing else on the hub or the root bus.
+        # SCD30 on ch6, nothing else on the hub or the root bus. The bench read the
+        # SCD30's CO2 and its own T/RH, so all three are published (Q13), beside
+        # the SHT45's T/RH under their own instance (sense/<tag>/scd30_1).
         got = self.run_tool(["board-template", BENCH_SLUG])
         self.assertEqual(got.returncode, 0, got.stderr)
         doc = json.loads(got.stdout)
@@ -75,7 +77,8 @@ class BoardTemplates(unittest.TestCase):
         self.assertEqual(sorted((s["driver"], s["hub"], s["channel"], s["addr"]) for s in doc["sensors"]),
                          [("scd30", "mux0", 6, 0x61), ("sht4x", "mux0", 7, 0x44)])
         tags = {s["driver"]: {t["q"]: t["tag"] for t in s["tags"]} for s in doc["sensors"]}
-        self.assertEqual(tags["scd30"], {"co2": "co2", "temperature": None, "humidity": None})
+        self.assertEqual(tags["scd30"], {"co2": "co2", "temperature": "air_temperature",
+                                         "humidity": "air_humidity"})
         self.assertEqual(tags["sht4x"], {"temperature": "air_temperature", "humidity": "air_humidity"})
         v = self.run_tool(["validate-wiring", "SENSE", "esp32s3"], got.stdout)
         self.assertEqual(json.loads(v.stdout), {"findings": [], "errors": 0, "warnings": 0})
@@ -143,7 +146,7 @@ class BoardTemplates(unittest.TestCase):
 
     def test_refusals(self):
         bad_doc = reference()
-        bad_doc["sensors"][1]["tags"][1]["tag"] = "air_temperature"     # E_TAG_DUP
+        bad_doc["sensors"][1]["tags"][1]["tag"] = "co2"    # E_TAG_DUP (one sensor, one tag twice)
         for slug, doc, why in (("Bench", None, "usable name"), ("b", None, "usable name"),
                                ("x" * 42, None, "usable name"), ("bench_one", None, "usable name"),
                                (REF_SLUG, None, "shipped"), ("bench-bad", bad_doc, "E_TAG_DUP")):

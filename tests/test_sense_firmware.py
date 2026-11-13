@@ -296,9 +296,26 @@ class FakeClient:
     def tests(self):
         return [(t, p) for t, p in self.sent if t.endswith("/_test")]
 
-    def readings(self):
-        return dict((p["tag"], p) for t, p in self.sent
-                    if not t.endswith("/_health") and not t.endswith("/_test"))
+    def _readings(self):
+        return [(t, p) for t, p in self.sent
+                if not t.endswith("/_health") and not t.endswith("/_test")]
+
+    def readings(self, sensor=None):
+        """{tag: payload}, of one sensor when `sensor` is given. Without it, no
+        tag may come from two sensors (the dict would silently keep one):
+        use instances() for a board where two sensors share a tag."""
+        got = [(t, p) for t, p in self._readings() if sensor is None or p["sensor"] == sensor]
+        if sensor is None:
+            by_tag = {}
+            for _t, p in got:
+                by_tag.setdefault(p["tag"], set()).add(p["sensor"])
+            shared = sorted(k for k, v in by_tag.items() if len(v) > 1)
+            assert not shared, "%s come from two sensors: use instances()" % shared
+        return dict((p["tag"], p) for t, p in got)
+
+    def instances(self):
+        """{"<tag>/<instance>": payload} for every reading."""
+        return dict((t.split("/sense/", 1)[1], p) for t, p in self._readings())
 
 
 class FakeWlan:
@@ -337,7 +354,9 @@ REFERENCE = dict(
          "addr": 0x44, "params": {},
          "tags": [["temperature", "air_temperature", "C"], ["humidity", "air_humidity", "RH%"]]},
         {"id": "scd30_1", "driver": "scd30", "bus": "i2c0", "hub": "mux0", "channel": 1,
-         "addr": 0x61, "params": {}, "tags": [["co2", "co2", "ppm"]]},
+         "addr": 0x61, "params": {},
+         "tags": [["co2", "co2", "ppm"], ["temperature", "air_temperature", "C"],
+                  ["humidity", "air_humidity", "RH%"]]},
         {"id": "lux_1", "driver": "sen0562", "bus": "i2c0", "hub": "mux0", "channel": 2,
          "addr": 0x23, "params": {}, "tags": [["lux", "light_intensity", "lx"]]},
     ])
@@ -467,7 +486,7 @@ class SensorDriverTest(FirmwareCase):
         self.assertEqual(self.sht.resets, 1)
         self.sht.busy = 2                  # two NACKs, the third read answers
         board.cycle(self.clock.ms // 1000)
-        self.assertIn("air_temperature", self.client.readings())
+        self.assertIn("air_temperature", self.client.readings("sht45_1"))
         self.sht.busy = 3                  # three NACKs: a failed read, health says so
         board.cycle(self.clock.ms // 1000 + 60)
         self.assertFalse([s for s in board.slots if s.id == "sht45_1"][0].ok)
@@ -597,18 +616,46 @@ class WiredBoardTest(FirmwareCase):
         self.assertTrue(self.scd.started)
 
         board.cycle(self.clock.ms // 1000)
-        got = self.client.readings()
-        self.assertEqual(sorted(got), ["air_humidity", "air_temperature", "co2", "light_intensity"])
-        self.assertAlmostEqual(got["air_temperature"]["value"], 21.5, places=1)
-        self.assertAlmostEqual(got["air_humidity"]["value"], 55.0, places=1)
-        self.assertAlmostEqual(got["co2"]["value"], 612.0, places=1)
-        self.assertAlmostEqual(got["light_intensity"]["value"], 1000.0, places=1)
-        self.assertEqual(got["light_intensity"]["UoM"], "lx")
-        self.assertEqual(got["co2"]["msg_type"], "AP")
-        self.assertIn("medcea/UNIT01/ZONE01/sense/co2", self.client.topics())
-        self.assertEqual(set(got["co2"]), {"unit_code", "zone_code", "msg_type", "timestamp",
-                                           "device_id", "device_dns", "tag", "value", "UoM"})
+        got = self.client.instances()
+        # The SHT45 and the SCD30 both publish air temperature and humidity (Q13):
+        # two series, told apart by the instance in the topic and the payload.
+        self.assertEqual(sorted(got), ["air_humidity/scd30_1", "air_humidity/sht45_1",
+                                       "air_temperature/scd30_1", "air_temperature/sht45_1",
+                                       "co2/scd30_1", "light_intensity/lux_1"])
+        self.assertAlmostEqual(got["air_temperature/sht45_1"]["value"], 21.5, places=1)
+        self.assertAlmostEqual(got["air_humidity/sht45_1"]["value"], 55.0, places=1)
+        self.assertAlmostEqual(got["air_temperature/scd30_1"]["value"], 22.0, places=1)
+        self.assertAlmostEqual(got["air_humidity/scd30_1"]["value"], 50.0, places=1)
+        self.assertAlmostEqual(got["co2/scd30_1"]["value"], 612.0, places=1)
+        self.assertAlmostEqual(got["light_intensity/lux_1"]["value"], 1000.0, places=1)
+        self.assertEqual(got["light_intensity/lux_1"]["UoM"], "lx")
+        self.assertEqual(got["co2/scd30_1"]["msg_type"], "AP")
+        self.assertEqual(got["co2/scd30_1"]["sensor"], "scd30_1")
+        self.assertEqual(got["air_temperature/sht45_1"]["sensor"], "sht45_1")
+        self.assertIn("medcea/UNIT01/ZONE01/sense/co2/scd30_1", self.client.topics())
+        self.assertEqual(set(got["co2/scd30_1"]),
+                         {"unit_code", "zone_code", "msg_type", "timestamp", "device_id",
+                          "device_dns", "sensor", "tag", "value", "UoM"})
         self.assert_select_discipline({0x44: [0], 0x61: [1], 0x23: [2]})
+
+    def test_two_sensors_on_one_tag_publish_two_topics(self):
+        # Q13: the SHT45 and the SCD30 both publish air_temperature. Each reading
+        # goes to <tag>/<instance> and names its sensor, so they stay two series.
+        self.reference_bus()
+        cfg = dict(REFERENCE)
+        cfg["SENSORS"] = [s for s in REFERENCE["SENSORS"] if s["id"] != "lux_1"]
+        board = self.boot(self.load(cfg))
+        board.cycle(self.clock.ms // 1000)
+        topics = self.client.topics()
+        self.assertIn("medcea/UNIT01/ZONE01/sense/air_temperature/sht45_1", topics)
+        self.assertIn("medcea/UNIT01/ZONE01/sense/air_temperature/scd30_1", topics)
+        got = self.client.instances()
+        self.assertAlmostEqual(got["air_temperature/sht45_1"]["value"], 21.5, places=1)
+        self.assertEqual(got["air_temperature/sht45_1"]["sensor"], "sht45_1")
+        self.assertAlmostEqual(got["air_temperature/scd30_1"]["value"], 22.0, places=1)
+        self.assertEqual(got["air_temperature/scd30_1"]["sensor"], "scd30_1")
+        with self.assertRaises(AssertionError):     # a tag-keyed view would merge them
+            self.client.readings()
 
     def test_reference_is_what_the_design_template_renders(self):
         # REFERENCE stands for the shipped chamber design map; if the template
@@ -627,8 +674,10 @@ class WiredBoardTest(FirmwareCase):
         kind, kw = self.buses_made[0]
         self.assertEqual((kind, kw["freq"], kw["timeout"]), ("soft", 100000, 250000))
         board.cycle(self.clock.ms // 1000)
-        self.assertEqual(sorted(self.client.readings()),
-                         ["air_humidity", "air_temperature", "co2", "light_intensity"])
+        self.assertEqual(sorted(self.client.instances()),
+                         ["air_humidity/scd30_1", "air_humidity/sht45_1",
+                          "air_temperature/scd30_1", "air_temperature/sht45_1",
+                          "co2/scd30_1", "light_intensity/lux_1"])
 
         h = self.client.health()
         self.assertEqual(len(h), 1, "health only at boot while nothing changes")
@@ -676,11 +725,12 @@ class WiredBoardTest(FirmwareCase):
         board = self.boot(sense)
         self.sht.bad_crc = True
         board.cycle(self.clock.ms // 1000)
-        got = self.client.readings()
-        self.assertNotIn("air_temperature", got)
-        self.assertNotIn("air_humidity", got)
-        self.assertIn("co2", got)               # the others still report
-        self.assertIn("light_intensity", got)
+        got = self.client.instances()
+        self.assertNotIn("air_temperature/sht45_1", got)
+        self.assertNotIn("air_humidity/sht45_1", got)
+        self.assertIn("air_temperature/scd30_1", got)   # the tag still comes from the SCD30
+        self.assertIn("co2/scd30_1", got)               # the others still report
+        self.assertIn("light_intensity/lux_1", got)
         h = self.client.health()
         self.assertEqual(len(h), 2)
         sht = h[-1]["sensors"][0]
@@ -727,10 +777,10 @@ class WiredBoardTest(FirmwareCase):
         board = self.boot(sense)
         self.bus.put(0, 0x44, sht)              # plugged in after boot
         board.cycle(self.clock.ms // 1000)
-        self.assertNotIn("air_temperature", self.client.readings())
+        self.assertNotIn("air_temperature", self.client.readings("sht45_1"))
         self.clock.advance(sense.RETRY_SECONDS * 1000)
         board.cycle(self.clock.ms // 1000)
-        self.assertIn("air_temperature", self.client.readings())
+        self.assertIn("air_temperature", self.client.readings("sht45_1"))
         self.assertTrue(self.client.health()[-1]["sensors"][0]["ok"])
 
     def test_a_missing_bus_is_named_in_health(self):
@@ -748,12 +798,12 @@ class WiredBoardTest(FirmwareCase):
         sense = self.load(REFERENCE)
         board = self.boot(sense)
         board.cycle(self.clock.ms // 1000)
-        self.assertNotIn("co2", self.client.readings())
+        self.assertNotIn("co2", self.client.readings("scd30_1"))
         self.scd.zeros = 1                  # then a first reading of co2 0
         board.cycle(self.clock.ms // 1000)
-        self.assertNotIn("co2", self.client.readings())
+        self.assertNotIn("co2", self.client.readings("scd30_1"))
         board.cycle(self.clock.ms // 1000)
-        self.assertIn("co2", self.client.readings())
+        self.assertIn("co2", self.client.readings("scd30_1"))
         self.assertEqual(len(self.client.health()), 1, "no false down/up pair on _health")
         # Past the window the same states are faults.
         self.clock.advance(sense.SCD30_WARMUP_MS)
@@ -845,10 +895,14 @@ class BenchBoardTest(FirmwareCase):
         self.assertEqual((kind, hw_id, kw["freq"], kw["timeout"]), ("hw", 0, 100000, 250000))
         self.assertEqual((kw["scl"].n, kw["sda"].n), (9, 8))
         board.cycle(self.clock.ms // 1000)
-        got = self.client.readings()
-        self.assertEqual(sorted(got), ["air_humidity", "air_temperature", "co2"])
-        self.assertAlmostEqual(got["air_temperature"]["value"], 20.8, places=1)
-        self.assertAlmostEqual(got["co2"]["value"], 655.0, places=1)
+        self.assertEqual(sorted(self.client.instances()),
+                         ["air_humidity/scd30_1", "air_humidity/sht45_1",
+                          "air_temperature/scd30_1", "air_temperature/sht45_1", "co2/scd30_1"])
+        self.assertAlmostEqual(self.client.readings("sht45_1")["air_temperature"]["value"],
+                               20.8, places=1)
+        self.assertAlmostEqual(self.client.readings("scd30_1")["air_temperature"]["value"],
+                               21.0, places=1)
+        self.assertAlmostEqual(self.client.readings("scd30_1")["co2"]["value"], 655.0, places=1)
         self.assert_select_discipline({0x44: [7], 0x61: [6]})
         self.assertEqual(self.client.health()[0]["sensors"],
                          [{"id": "sht45_1", "ok": True, "err": None},
@@ -883,7 +937,9 @@ class BenchBoardTest(FirmwareCase):
         self.assertFalse(h["sht45_1"]["ok"])
         self.assertTrue(h["scd30_1"]["ok"])
         board.cycle(self.clock.ms // 1000)
-        self.assertEqual(sorted(self.client.readings()), ["co2"])
+        # Only the SCD30 reports: its CO2 and its own T/RH.
+        self.assertEqual(sorted(self.client.instances()),
+                         ["air_humidity/scd30_1", "air_temperature/scd30_1", "co2/scd30_1"])
 
 
 class LegacyBoardTest(FirmwareCase):
@@ -916,11 +972,38 @@ class LegacyBoardTest(FirmwareCase):
         self.assertEqual(sorted(got), ["air_humidity", "air_temperature", "co2"])
         self.assertEqual(got["air_temperature"]["value"], 23.46)
         self.assertEqual(got["co2"]["UoM"], "ppm")
+        # A legacy entry's instance is its driver (device_template's rows agree).
+        self.assertIn("medcea/UNIT01/ZONE01/sense/co2/scd30", self.client.topics())
+        self.assertEqual(got["co2"]["sensor"], "scd30")
         # No bus layer at all: no cea_bus, no SoftI2C from cea_sense.
         self.assertNotIn("cea_bus", sys.modules)
         self.assertEqual(self.buses_made, [])
         self.assertEqual(self.client.health()[0]["sensors"],
                          [{"id": "scd30", "ok": True, "err": None}])
+
+    def test_legacy_instances_match_the_component_rows(self):
+        # A legacy SENSORS entry has no id: the firmware names it (Board.__init__)
+        # and device_template names its component row; the two must agree, or a
+        # loop picked from the rows would wait on a topic nobody publishes.
+        sys.path.insert(0, os.path.join(ROOT, "edge", "src", "host"))
+        try:
+            import device_template
+        finally:
+            sys.path.pop(0)
+        legacy = os.path.join(ROOT, "tests", "fixtures", "wiring", "legacy")
+        with open(os.path.join(legacy, "scd30_ground.spec.json"), encoding="utf-8") as f:
+            spec = json.load(f)
+        scd30, ground = spec["components"]
+        spec["components"] = [scd30, ground, scd30]
+        with tempfile.TemporaryDirectory() as tmp:
+            spec["out_dir"] = tmp
+            res = device_template.render(spec)
+        rows = [c["parameters"]["instance"] for c in res["components"]]
+        self.bus = FakeBus()
+        sense = self.load({"SENSORS": res["config"]["SENSORS"]})
+        slots = [s.id for s in sense.Board(res["config"]["SENSORS"]).slots]
+        self.assertEqual(rows, slots)
+        self.assertEqual(rows, ["scd30", "ground_temperature", "scd30_3"])
 
     def test_legacy_sensor_that_does_not_initialise(self):
         self.bus = FakeBus()
@@ -936,13 +1019,16 @@ class LegacyBoardTest(FirmwareCase):
                          [{"id": "scd30", "ok": False, "err": "did not initialise"}])
 
 
-# The fields every reading has (cea_sense.Board._message); HB and TS add ip and mac.
+# A reading's fields except "sensor" (cea_sense.Board._message): HB and TS are
+# board-level, carry these and add ip and mac.
 READING_KEYS = {"unit_code", "zone_code", "msg_type", "timestamp", "device_id", "device_dns", "tag"}
 
 
 class StatusMessageTest(FirmwareCase):
     """HB and TS carry a reading's metadata plus ip and mac, built once in
-    cea_edge_functions.status_message; AP readings and SP reports do not change."""
+    cea_edge_functions.status_message (without "sensor": they are board-level). AP
+    readings carry their sensor instance since feedback-control Phase 1; SP reports
+    do not change."""
 
     def test_health_carries_the_reading_metadata_and_ip_and_mac(self):
         self.reference_bus()
@@ -978,19 +1064,19 @@ class StatusMessageTest(FirmwareCase):
         self.assertEqual((m["ip"], m["mac"]), (None, None))
         self.assertEqual(m["device_id"], "aabbccddeeff")
 
-    def test_an_ap_reading_is_unchanged(self):
+    def test_an_ap_reading_carries_its_sensor(self):
         self.reference_bus()
         sense = self.load(REFERENCE)
         board = self.boot(sense)
         board.cycle(self.clock.ms // 1000)
-        topic, co2 = [(t, p) for t, p in self.client.sent if t.endswith("/co2")][0]
-        self.assertEqual(topic, "medcea/UNIT01/ZONE01/sense/co2")
+        topic, co2 = [(t, p) for t, p in self.client.sent if "/sense/co2/" in t][0]
+        self.assertEqual(topic, "medcea/UNIT01/ZONE01/sense/co2/scd30_1")
         self.assertEqual(co2, {"unit_code": "UNIT01", "zone_code": "ZONE01", "msg_type": "AP",
                                "timestamp": "2026-11-06 12:00:00", "device_id": "aabbccddeeff",
-                               "device_dns": "unit01-s-zone01", "tag": "co2",
-                               "value": 612.0, "UoM": "ppm"})
+                               "device_dns": "unit01-s-zone01", "sensor": "scd30_1",
+                               "tag": "co2", "value": 612.0, "UoM": "ppm"})
         self.assertEqual(list(co2), ["unit_code", "zone_code", "msg_type", "timestamp",
-                                     "device_id", "device_dns", "tag", "value", "UoM"])
+                                     "device_id", "device_dns", "sensor", "tag", "value", "UoM"])
 
     def test_firmware_is_null_when_unreadable(self):
         self.bus = FakeBus()
@@ -1024,7 +1110,7 @@ class BootTestMessageTest(FirmwareCase):
         self.clock.budget = 3000                # many cycles
         with self.assertRaises(StopLoop):
             sense.run()
-        self.assertGreater(len(self.client.readings()), 0)
+        self.assertGreater(len(self.client.instances()), 0)
         tests = self.client.tests()
         self.assertEqual(len(tests), 1, "once per boot, never per cycle")
         topic, ts = tests[0]
@@ -1055,7 +1141,7 @@ class BootTestMessageTest(FirmwareCase):
         with self.assertRaises(StopLoop):
             sense.run()
         self.assertEqual(self.resets, 0)
-        self.assertIn("co2", self.client.readings())
+        self.assertIn("co2", self.client.readings("scd30_1"))
         self.assertEqual(boards[0].mqtt_failures, 0)
 
     def test_a_board_with_nothing_up_still_sends_it(self):

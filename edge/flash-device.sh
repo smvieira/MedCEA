@@ -1566,7 +1566,7 @@ if [ "$UNREGISTERED" != 1 ]; then
   [ -r "$MQTT_CA" ] || die "the platform CA $MQTT_CA is missing or unreadable: run ./deploy-infra.sh (the board must verify the broker)"
   info "mqtt       : $MQTT_HOST:$MQTT_PORT over TLS (certificate $MQTT_TLS_NAME) as $MQTT_USER"
   if [ "$ROLE" = "SENSE" ]; then
-    info "publishes  : $TOPIC_BASE/sense/<tag>"
+    info "publishes  : $TOPIC_BASE/sense/<tag>/<sensor>"
   else
     info "subscribes : $TOPIC_BASE/control/#"
     info "reports    : $TOPIC_BASE/control_setpoint/<tag>/<pin>"
@@ -2561,7 +2561,7 @@ if not unreg:
         f += [["subscribes", e["TOPIC_BASE"] + "/control/#", False],
               ["reports", e["TOPIC_BASE"] + "/control_setpoint", False]]
     else:
-        f += [["publishes", e["TOPIC_BASE"] + "/sense/<tag>", False]]
+        f += [["publishes", e["TOPIC_BASE"] + "/sense/<tag>/<sensor>", False]]
     f += [["registered as", ("medcea.device %s" % e["REGISTERED_ID"]) if e["REGISTERED_ID"]
                             else "NOT REGISTERED - see the log", False]]
     if e["REGISTERED_BY_NAME"]:
@@ -2651,7 +2651,7 @@ EOF
     echo "  reports      $TOPIC_BASE/control_setpoint/<tag>/<pin>"
     echo "  relays       $(grep -c . <<<"$CONTROL_PINS_TSV") channel(s) assigned"
   else
-    echo "  publishes    $TOPIC_BASE/sense/<tag>"
+    echo "  publishes    $TOPIC_BASE/sense/<tag>/<sensor>"
     if [ -n "$SENSE_WIRING_JSON" ]; then
       echo "  sensors      $(DOC="$SENSE_WIRING_JSON" python3 -c '
 import json, os

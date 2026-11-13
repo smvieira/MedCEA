@@ -371,10 +371,20 @@ entry there** plus a branch in `edge/src/app/cea_sense.py`. Nothing in
 `flash-device.sh` changes.
 
 ```
-SENSE    medcea/UNIT01/ZONE01/sense/<tag>            one topic per tag published
+SENSE    medcea/UNIT01/ZONE01/sense/<tag>/<sensor>   one topic per tag and sensor
 CONTROL  medcea/UNIT01/ZONE01/control/#              subscribed
          medcea/UNIT01/ZONE01/control_setpoint/...   what it actually did
 ```
+
+`<sensor>` is the sensor instance: its id on the wiring screen (`sht45_1`), or
+for a board set up through the questions its driver (`scd30`, then `scd30_3`
+for a repeat at position 3). Each reading's payload carries it as `"sensor"`,
+so two sensors may publish one tag (an SHT45 and an SCD30 both on
+`air_temperature`) and stay two series; one sensor may not publish two of its
+readings on one tag (`E_TAG_DUP`), and `default` is reserved (`E_ID_RESERVED`:
+the platform's name for the sensor of a reading from a board flashed before
+instances, whose topics end at `<tag>`). `_health` and `_test` keep their
+5-segment topics and carry no `sensor`.
 
 A SENSE board may carry several probes — the reference `UNIT01_SENSE01` carries
 a water-level probe and a substrate thermometer — so the sensor question loops

@@ -25,6 +25,9 @@
 
   /* wiring-logic:begin */
   var ID_RX = /^[a-z][a-z0-9_]{0,23}$/, TAG_RX = /^[a-z][a-z0-9_]{0,47}$/;
+  // A sensor id ends its reading topic (<base>/sense/<tag>/<id>); "default" is
+  // the platform's name for the sensor of a reading that names none.
+  var RESERVED_SENSOR_IDS = ["default"];
   var SLUG_RX = /^[a-z][a-z0-9-]{1,40}$/;
   var TOP_KEYS = ["version", "board", "buses", "hubs", "sensors", "layout"];
   var BOARD_KEYS = ["variant", "part"];
@@ -175,6 +178,9 @@
     var placed = [], published = {}, npub = { n: 0 };
     sensors.forEach(function (s) {
       var where = "sensors." + s.id, d = has(drivers, s.driver) ? drivers[s.driver] : null;
+      if (RESERVED_SENSOR_IDS.indexOf(s.id) >= 0)
+        add("error", "E_ID_RESERVED", where, s.id + " is reserved: the platform calls the sensor of a reading " +
+            "that names none \"" + s.id + "\". Give this sensor another id.");
       if (!d) add("error", "E_DRIVER", where, s.driver + " is not a sensor the wiring screen can place.");
       addrCheck(add, where, s.addr, d && d.bus.addrs, d && d.name);
       if (d) power(add, where, d, d.name || d.id);
@@ -357,7 +363,9 @@
     if (rails.length && rails.indexOf("3V3") < 0)
       add("warn", "W_POWER", where, "Power " + name + " from " + rails.join(" or ") + ", not from the board's 3V3.");
   }
-  /* E_TAG / E_TAG_DUP / W_TAG_OFF for one sensor; counts what it publishes. */
+  /* E_TAG / E_TAG_DUP / W_TAG_OFF for one sensor; counts what it publishes.
+     Two sensors may publish one tag (each reading goes to <tag>/<sensor id>);
+     one sensor publishing two of its quantities on one tag is E_TAG_DUP. */
   function tagChecks(add, where, tags, d, published, npub) {
     var tw = where + ".tags";
     var ok = Array.isArray(tags) && tags.every(function (t) {
@@ -365,7 +373,7 @@
              typeof t.q === "string" && (t.tag === null || typeof t.tag === "string");
     });
     if (!ok) { add("error", "E_TAG", tw, "tags must be a list of {q, tag}, tag being a name or null."); return; }
-    var qs = d ? (d.quantities || []).map(function (q) { return q.q; }) : null, seen = {};
+    var qs = d ? (d.quantities || []).map(function (q) { return q.q; }) : null, seen = {}, mine = {};
     tags.forEach(function (t) {
       var q = t.q, name = t.tag, qw = tw + "." + q;
       if (qs && qs.indexOf(q) < 0) { add("error", "E_TAG", qw, d.name + " does not measure " + q + "."); return; }
@@ -377,12 +385,13 @@
             "letters, digits or _.");
         return;
       }
-      if (has(published, name)) {
-        add("error", "E_TAG_DUP", qw, name + " is already published by " + published[name] +
-            ": two sensors on one tag would interleave one series.");
+      if (has(mine, name)) {
+        add("error", "E_TAG_DUP", qw, where.split(".").slice(1).join(".") + " already publishes " +
+            mine[name] + " as " + name + ": one sensor cannot publish two readings on one tag.");
         return;
       }
-      published[name] = where.split(".").slice(1).join(".");
+      mine[name] = q;
+      if (!has(published, name)) published[name] = where.split(".").slice(1).join(".");
       npub.n += 1;
     });
     (qs || []).forEach(function (q) {
@@ -862,16 +871,14 @@
       return ys.length ? Math.max.apply(null, ys) + 30 : 30;
     }
     function addSensor(drv) {
-      var d = drivers[drv], used = {};
-      Object.keys(model).forEach(function (k) {
-        if (model[k].kind === "sensor") (model[k].sensor.tags || []).forEach(function (t) { if (t.tag) used[t.tag] = 1; });
-      });
-      // A new instance publishes what nobody on the board publishes yet (a second
-      // air temperature would interleave with the first under one name), and not
-      // what its driver switches off by default (the SCD30's T/RH).
+      var d = drivers[drv];
+      // A new instance publishes its driver's default tags, except any its
+      // driver switches off by default (none ships since Q13: the SCD30's T/RH
+      // are on). Two sensors on one tag are told apart by their instance, the
+      // last segment of the reading topic.
       var off = d.default_off || [];
       var tags = (d.quantities || []).map(function (q) {
-        var on = q.tag && off.indexOf(q.q) < 0 && !used[q.tag];
+        var on = q.tag && off.indexOf(q.q) < 0;
         return { q: q.q, tag: on ? q.tag : null };
       });
       var id = addNode({ kind: "sensor", sensor: { id: freeId(drv), driver: drv,

@@ -229,8 +229,8 @@ def firmware_of(rec):
 
 
 def build_payload(rec, info, source, note=None, now=None):
-    """The TS message: a reading's metadata (cea_sense.Board._message), the board's
-    ip and mac, and what sent it. `sent_from: host` marks it as not the board's own."""
+    """The TS message: a reading's metadata except "sensor" (cea_sense.Board._message),
+    the board's ip and mac, and what sent it. `sent_from: host` marks it as not the board's own."""
     msg = {
         "unit_code": info["unit"],
         "zone_code": info["zone"],

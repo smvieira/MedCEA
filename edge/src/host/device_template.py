@@ -507,7 +507,8 @@ def render(spec):
         tpl = load("SENSE")
         cfg["MESSAGE_INTERVAL"] = int(spec.get("message_interval", 30))
         sensors = []
-        for chosen in spec.get("components", []):
+        seen = set()
+        for i, chosen in enumerate(spec.get("components", [])):
             d = driver("SENSE", chosen["driver"])
             if d.get("wiring_only"):
                 raise TemplateError(
@@ -518,6 +519,14 @@ def render(spec):
                 name = p["name"]
                 raw = chosen.get("params", {}).get(name, p.get("default"))
                 params[name] = coerce(p.get("kind", "int"), raw)
+            # The sensor instance: the last segment of its reading topic and the
+            # "sensor" of its readings. A legacy SENSORS entry has no id, so the
+            # firmware names it by cea_sense.Board.__init__'s rule (its driver,
+            # then <driver>_<position> for a repeat); this row says the same.
+            inst = d["id"]
+            if inst in seen:
+                inst = "%s_%d" % (inst, i + 1)
+            seen.add(inst)
             tags = [t["tag"] for t in d.get("tags", [])]
             sensors.append({"driver": d["id"], "params": params, "tags": tags})
             components.append({
@@ -526,12 +535,13 @@ def render(spec):
                 "manufacturer": d.get("manufacturer", tpl.get("manufacturer", "")),
                 "parameters": {
                     "driver": d["id"],
+                    "instance": inst,
                     "params": params,
                     "topic_base": base_topic + "/sense",
                     "message_interval": cfg["MESSAGE_INTERVAL"],
                     "mqtt": {"host": cfg["MQTT_HOST"], "port": cfg["MQTT_PORT"]},
                     "tags": [{"tag": t["tag"], "UoM": t.get("uom", ""),
-                              "topic": "%s/sense/%s" % (base_topic, t["tag"])}
+                              "topic": "%s/sense/%s/%s" % (base_topic, t["tag"], inst)}
                              for t in d.get("tags", [])],
                 },
             })
@@ -749,8 +759,9 @@ def cmd_wiring_spec(role, args):
             "manufacturer": d.get("manufacturer", ""), "part": d.get("part", ""),
             "bus": d["bus"], "power": d.get("power") or {},
             "quantities": d.get("quantities") or [],
-            # Which quantities a NEW instance starts with switched off (the
-            # SCD30's T/RH: the reference board reads those from the SHT45).
+            # Which quantities a NEW instance starts with switched off. Generic;
+            # none ships since Q13 (the SCD30's T/RH are on, told apart from
+            # the SHT45's by the sensor instance in the topic).
             "default_off": d.get("default_off") or [],
             "params": [p for p in d.get("params", []) if not p.get("legacy_bus")],
         })

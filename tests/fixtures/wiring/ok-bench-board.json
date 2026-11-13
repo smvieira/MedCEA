@@ -61,11 +61,11 @@
      },
      {
       "q": "temperature",
-      "tag": null
+      "tag": "air_temperature"
      },
      {
       "q": "humidity",
-      "tag": null
+      "tag": "air_humidity"
      }
     ]
    }
