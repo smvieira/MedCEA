@@ -67,7 +67,7 @@ INSERT INTO medcea.device (zone_id, device_type, serial_number, dns_name, is_act
 VALUES (:z1b, 'CONTROL', 'iamt-aa:bb:cc:00:00:02', 'iamt01-c-z02', 'Y') RETURNING device_id AS dctl \gset
 INSERT INTO medcea.mqtt_credential (username, password_hash, device_id, role, topic_base)
 VALUES ('iamt01-c-z02', '$7$101$c2VlZHNhbHQ=$c2VlZGhhc2g=', :dctl, 'CONTROL', 'medcea/IAMT01/Z02');
--- its relay: get_feedback_control_loop_params finds a unit's actuators
+-- its relay: the runner finds a zone's actuators (get_control_loops)
 INSERT INTO medcea.component (component_id, device_id, component_type, model, parameters, is_active)
 VALUES (nextval('medcea.component_component_id_seq'), :dctl, 'ACTUATOR', 'iamt-relay',
         '{"pin_descriptions": {}, "seed": "tests/sql/iam-db-seed.sql"}', 'Y');

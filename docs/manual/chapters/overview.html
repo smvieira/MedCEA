@@ -69,8 +69,8 @@
 <div class="table-wrap"><table>
 <thead><tr><th>Topic</th><th>Who publishes</th><th>Who listens</th><th>Content</th></tr></thead>
 <tbody>
-<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;</code></td><td>SENSE board</td><td>Node-RED, the run in progress</td><td>A reading, for example tag <code>co2</code>, <code>air_temperature</code> or <code>air_humidity</code></td></tr>
-<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control/&lt;tag&gt;</code></td><td>The run in progress (Scheduler); an engineer during commissioning</td><td>CONTROL board</td><td>A command for the equipment that affects that reading, or <code>light</code> for the grow lights</td></tr>
+<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;/&lt;sensor&gt;</code></td><td>SENSE board</td><td>Node-RED, the run in progress</td><td>A reading, for example tag <code>co2</code>, <code>air_temperature</code> or <code>air_humidity</code>, from the sensor named in the last level (for example <code>sht45_1</code>). A board flashed before 13 November 2026 still publishes on <code>…/sense/&lt;tag&gt;</code>; its sensor is called <code>default</code>.</td></tr>
+<tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control/&lt;actuator&gt;</code></td><td>The run in progress (Scheduler); an engineer during commissioning</td><td>CONTROL board</td><td>A command for one actuator, from the zone's control loop that drives it (see <a href="#devices-loops">Control loops of a zone</a>), or <code>light</code> for the grow lights</td></tr>
 <tr><td><code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/control_setpoint/&lt;tag&gt;</code></td><td>CONTROL board</td><td>Node-RED</td><td>What the board actually switched</td></tr>
 </tbody>
 </table></div>
@@ -79,7 +79,7 @@
 <h3 id="overview-flow">How data flows</h3>
 <h4>From a sensor to a dashboard</h4>
 <ol class="steps">
-<li>The SENSE board in a zone reads its sensors and publishes each value on <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;</code>, with a timestamp and the board's name.</li>
+<li>The SENSE board in a zone reads its sensors and publishes each value on <code>medcea/&lt;UNIT&gt;/&lt;ZONE&gt;/sense/&lt;tag&gt;/&lt;sensor&gt;</code>, with a timestamp, the board's name and the sensor's name.</li>
 <li>Mosquitto checks the board's credential and topic, then passes the message on.</li>
 <li>Node-RED receives every message under <code>medcea/</code> and stores it in the database table of measurements.</li>
 <li>Grafana dashboards and the Run Monitor read the measurements from the database and show them.</li>
@@ -89,8 +89,8 @@
 <li>An engineer writes a recipe in the Config UI: a sequence of steps, each with a number of cycles, light ON and light OFF minutes, a light type (UV, BLUE, RED or DARK), and lower and upper limits for air temperature, humidity, CO2 and (optionally) substrate temperature.</li>
 <li>The recipe is allowed on a unit in the Recipe ↔ Unit Permissions panel of the Config UI's Units tab, with a control algorithm and its parameters.</li>
 <li>In the Scheduler someone starts a run (Run Now) or creates a schedule that starts it later. The run is recorded with the person who started it, or, for a schedule, the person who created the schedule.</li>
-<li>The run goes through the steps in order and repeats each step for its number of cycles. During a cycle it listens to the <code>sense</code> topics of the unit. At present a run follows one zone per unit.</li>
-<li>For each reading the control algorithm compares the value with the step's limits and decides UP, DOWN or OFF, and the run publishes that on the matching <code>control</code> topic. Once per pass it also publishes ON or OFF for the grow lights on <code>control/light</code>: ON during the light ON minutes of the cycle, OFF after.</li>
+<li>The run goes through the steps in order and repeats each step for its number of cycles. During a cycle it listens to the <code>sense</code> topics of every zone of the unit that has control loops or a CONTROL board (since 13 November 2026; before, a run followed one zone per unit).</li>
+<li>For each control loop of each zone, the control algorithm compares the loop's reading (from the sensor chosen at onboarding, or by the default map) with the step's limits and decides UP, DOWN or OFF, and the run publishes that on the <code>control</code> topic of the actuator the loop drives (see <a href="#devices-loops">Control loops of a zone</a>). Without a fresh reading the loop keeps its last command and the run log shows an alarm. Once per pass it also publishes ON or OFF for the grow lights on each zone's <code>control/light</code>: ON during the light ON minutes of the cycle, OFF after.</li>
 <li>The CONTROL board looks the command up in its channel map and switches the relay of the right equipment, for example the heater for UP on air temperature.</li>
 <li>The board publishes what it did on <code>control_setpoint</code>. Node-RED stores that too, so the record shows not only the command but that it reached the hardware.</li>
 <li>When the last cycle ends, the run is marked Completed. A stopped or crashed run is marked Failed.</li>
