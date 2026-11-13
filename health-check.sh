@@ -170,6 +170,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         truncated computation, a fresh pod, an access-api older than the report"
     echo -e "         (./apps/access/deploy.sh); SKIP without access"
     echo ""
+    echo -e "  ${CYAN}controlloops${NC} the feedback control loops (Q11/Q20): DATABASE (read-only psql)"
+    echo -e "         WARN on an active zone with actuators and no active medcea.control_loop rows (the"
+    echo -e "         runner's default map), on such a zone whose tag has two or more named sensors (no_data"
+    echo -e "         + ALARM ambiguous_source: choose the reference in onboarding) or with sensor problems"
+    echo -e "         in _zone_inventory (re-onboard), and on an active loop medcea._loop_problems() rejects;"
+    echo -e "         never FAIL; SKIP before migration 010"
+    echo ""
     echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
     echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
     echo -e "         Secret medcea-jwks and a forged token gets 401; false: WARN. The realm's key ids"
@@ -1137,6 +1144,127 @@ SQL
         _record WARN "$name" "${stale} change(s) waiting for qa for over 7 days (oldest #${stale_id}; ${stale_comm} commissioning): Config UI → Approvals"
     else
         _record OK "$name" "${pending} change(s) waiting for qa, none older than 7 days"
+    fi
+}
+
+# =============================================================================
+# Check: the feedback control loops (Q11, Q20) — read-only, WARN only
+# target: DATABASE. One psql as postgres in rdbms-postgresql-0 (read-only session, SQL on
+# stdin). A zone counts when it and its unit are active and it has an active ACTUATOR
+# component on an active device (schd/cea/get_control_loops.py's selection). Such a zone
+# without an active medcea.control_loop row runs on the default map; among those, a zone
+# where one of the four loop tags (_loop_quantities) has two or more sensors (the named ones
+# of _zone_inventory, plus 'default' when an old 5-segment board publishes the tag) gets
+# no_data + ALARM ambiguous_source whenever two are fresh, until the reference is chosen in
+# onboarding. A default-map zone whose _zone_inventory reports sensor problems (a sensor
+# published as 'default', a topic's sensor that is not the component's instance, a sensor
+# name two components claim, a malformed topic) WARNs too: those components still publish
+# and the runner counts them on the default map, so the zone may get ambiguous_source
+# without being named above. An active loop of an active zone whose
+# medcea._loop_problems(...) is not empty is one the loop picker rejects; the runner refuses
+# the rule errors and runs the inventory ones (sensor or actuator not on an active board of
+# the zone) with no_data or an absent actuator. Never FAIL (the severity rule: nothing here lets anyone in); a check that cannot
+# read WARNs; SKIP before migration 010.
+# =============================================================================
+check_controlloops() {
+    local name="$1" db="$2" out exit_code=0
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' "$db" 2>&1 <<'SQL'
+SELECT pg_catalog.to_regclass('medcea.control_loop') IS NOT NULL AS has_table \gset
+\if :has_table
+SELECT pg_catalog.to_regprocedure('medcea._loop_problems(jsonb,text,jsonb,jsonb)') IS NOT NULL
+   AND pg_catalog.to_regprocedure('medcea._zone_inventory(integer)') IS NOT NULL
+   AND pg_catalog.to_regprocedure('medcea._loop_quantities()') IS NOT NULL AS built \gset
+\if :built
+WITH zn AS (
+    SELECT z.zone_id, z.zone_code::text AS zone_code, u.unit_code::text || '/' || z.zone_code::text AS zname,
+           EXISTS (SELECT 1 FROM medcea.device d JOIN medcea.component c ON c.device_id = d.device_id
+                    WHERE d.zone_id = z.zone_id AND coalesce(d.is_active, 'Y') = 'Y'
+                      AND c.component_type = 'ACTUATOR' AND c.is_active = 'Y') AS has_act,
+           EXISTS (SELECT 1 FROM medcea.control_loop l WHERE l.zone_id = z.zone_id AND l.is_active = 'Y') AS has_loops
+      FROM medcea.cea_zone z JOIN medcea.cea_unit u ON u.unit_id = z.unit_id
+     WHERE u.is_active = 'Y' AND z.is_active = 'Y'
+), inv AS (
+    SELECT zn.*, i.sensors, i.old_boards, i.problems, i.actuators
+      FROM zn CROSS JOIN LATERAL medcea._zone_inventory(zn.zone_id) i
+     WHERE zn.has_act OR zn.has_loops
+), dm AS (
+    SELECT * FROM inv WHERE has_act AND NOT has_loops
+), amb AS (
+    SELECT dm.zname, string_agg(t.tag || ': ' || t.names, ', ' ORDER BY t.tag) AS tags
+      FROM dm CROSS JOIN LATERAL (
+            SELECT q.tag, string_agg(s.sensor, ',' ORDER BY s.sensor) AS names
+              FROM (SELECT DISTINCT v ->> 'tag' AS tag FROM jsonb_each(medcea._loop_quantities()) e(k, v)) q
+              JOIN (SELECT n ->> 'instance' AS sensor, n -> 'tags' AS tags FROM jsonb_array_elements(dm.sensors) n
+                    UNION ALL
+                    SELECT 'default', b -> 'tags' FROM jsonb_array_elements(dm.old_boards) b) s
+                ON jsonb_typeof(s.tags) = 'array' AND s.tags ? q.tag
+             GROUP BY q.tag HAVING count(DISTINCT s.sensor) >= 2) t
+     GROUP BY dm.zname
+), sp AS (
+    SELECT dm.zname, jsonb_array_length(dm.problems) AS n, dm.problems ->> 0 AS first
+      FROM dm WHERE jsonb_typeof(dm.problems) = 'array' AND jsonb_array_length(dm.problems) > 0
+), bad AS (
+    SELECT inv.zname, l.loop_code::text AS code,
+           medcea._loop_problems(jsonb_build_object('loop_code', l.loop_code::text, 'recipe_lower', l.recipe_lower::text,
+                                                    'recipe_upper', l.recipe_upper::text, 'input', l.input,
+                                                    'output', l.output),
+                                 inv.zone_code, inv.sensors, inv.actuators) AS p
+      FROM inv JOIN medcea.control_loop l ON l.zone_id = inv.zone_id AND l.is_active = 'Y'
+)
+SELECT 'zones|' || (SELECT count(*) FROM zn WHERE has_act) || '|' || (SELECT count(*) FROM bad)
+UNION ALL
+SELECT 'default|' || (SELECT count(*) FROM dm) || '|'
+       || coalesce((SELECT string_agg(x.zname, ' ' ORDER BY x.zname) FROM (SELECT zname FROM dm ORDER BY zname LIMIT 5) x), '')
+UNION ALL
+SELECT 'ambiguous|' || (SELECT count(*) FROM amb) || '|'
+       || coalesce((SELECT string_agg(x.zname || ' ' || x.tags, '; ' ORDER BY x.zname)
+                      FROM (SELECT zname, tags FROM amb ORDER BY zname LIMIT 3) x), '')
+UNION ALL
+SELECT 'sensors|' || (SELECT count(*) FROM sp) || '|'
+       || coalesce((SELECT string_agg(x.zname || ' ' || left(x.first, 120), '; ' ORDER BY x.zname)
+                      FROM (SELECT zname, first FROM sp ORDER BY zname LIMIT 3) x), '')
+UNION ALL
+SELECT 'problems|' || (SELECT count(*) FROM bad WHERE cardinality(p) > 0) || '|'
+       || coalesce((SELECT string_agg(x.zname || ' ' || left(x.p[1], 120), '; ' ORDER BY x.zname, x.code)
+                      FROM (SELECT zname, code, p FROM bad WHERE cardinality(p) > 0 ORDER BY zname, code LIMIT 3) x), '');
+\else
+SELECT 'state|partial';
+\endif
+\else
+SELECT 'state|unbuilt';
+\endif
+SQL
+) || exit_code=$?
+    local state zones loops n_def def_list n_amb amb_list n_sp sp_list n_bad bad_list hits=()
+    state="$(grep -m1 '^state|' <<<"$out" | cut -d'|' -f2)"
+    IFS='|' read -r _ zones loops <<<"$(grep -m1 '^zones|' <<<"$out")"
+    IFS='|' read -r _ n_def def_list <<<"$(grep -m1 '^default|' <<<"$out")"
+    IFS='|' read -r _ n_amb amb_list <<<"$(grep -m1 '^ambiguous|' <<<"$out")"
+    IFS='|' read -r _ n_sp sp_list <<<"$(grep -m1 '^sensors|' <<<"$out")"
+    IFS='|' read -r _ n_bad bad_list <<<"$(grep -m1 '^problems|' <<<"$out")"
+    if [[ "$state" == unbuilt && $exit_code -eq 0 ]]; then
+        _record SKIP "$name" "no medcea.control_loop table yet (./apps/database/deploy.sh, migration 010)"; return
+    fi
+    if [[ "$state" == partial && $exit_code -eq 0 ]]; then
+        _record WARN "$name" "medcea.control_loop exists without _loop_problems/_zone_inventory/_loop_quantities: ./apps/database/deploy.sh"; return
+    fi
+    if [[ $exit_code -ne 0 || ! "$zones" =~ ^[0-9]+$ || ! "$loops" =~ ^[0-9]+$ || ! "$n_def" =~ ^[0-9]+$
+          || ! "$n_amb" =~ ^[0-9]+$ || ! "$n_sp" =~ ^[0-9]+$ || ! "$n_bad" =~ ^[0-9]+$ ]]; then
+        _record WARN "$name" "cannot read the control loops of ${db}: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"; return
+    fi
+    (( n_def > 0 )) && hits+=("${n_def} zone(s) run on the default map (no control_loop rows; Q20): ${def_list}$( (( n_def > 5 )) && echo ' ...')")
+    (( n_amb > 0 )) && hits+=("${n_amb} of them with several sensors on a tag (no_data + ALARM ambiguous_source: choose the reference in onboarding): ${amb_list}$( (( n_amb > 3 )) && echo '; ...')")
+    (( n_sp > 0 )) && hits+=("${n_sp} of them with sensor problems (their readings still count on the default map: re-onboard): ${sp_list}$( (( n_sp > 3 )) && echo '; ...')")
+    (( n_bad > 0 )) && hits+=("${n_bad} active loop(s) break the loop rules (the loop picker rejects them; the runner refuses rule errors and gets no_data or no actuator for the rest; re-save in onboarding): ${bad_list}$( (( n_bad > 3 )) && echo '; ...')")
+    if ((${#hits[@]})); then
+        local IFS='|'; local msg="${hits[*]}"
+        _record WARN "$name" "${msg//|/; }"
+    elif (( zones == 0 )); then
+        _record OK "$name" "no active zone has actuators"
+    else
+        _record OK "$name" "${zones} zone(s) with actuators, all on valid control_loop rows (${loops} active loop(s))"
     fi
 }
 
@@ -2563,6 +2691,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamdbroles) check_iamdbroles "$name" "$target" ;;
         iamgrants)  check_iamgrants "$name" "$target" ;;
         iamcatalog) check_iamcatalog "$name" "$target" ;;
+        controlloops) check_controlloops "$name" "$target" ;;
         iampolicy)    check_iampolicy "$name" "$target" ;;
         iamartefacts) check_iamartefacts "$name" "$target" ;;
         iamdecisions) check_iamdecisions "$name" "$target" ;;
