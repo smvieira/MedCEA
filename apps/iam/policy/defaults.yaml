@@ -612,8 +612,9 @@ service_identities:
       One identity: run_recipe.py and run_agent.py run as subprocesses inside the
       scheduler pod with its environment, so they cannot hold a separate credential.
       Splitting the runner into its own pod is listed in plan Section 7. devices R:
-      the runner finds a unit's actuators through medcea.device and medcea.component
-      (get_feedback_control_loop_params); never the credential table (service_only).
+      the runner reads a unit's loop map from medcea.control_loop (feedback control
+      Phase 2), its actuators through medcea.device and medcea.component; never the
+      credential table (service_only).
       Run, cycle and log reads are limited to the person's units for operators (own_unit).
     db_role: svc_scheduler
     db_password: SVC_SCHEDULER_DB_PASS
@@ -748,7 +749,7 @@ resource_groups:
   master_data:
     label: Master data (locations, units, zones, components)
     class: config
-    description: The physical plant as the platform knows it — sites, cultivation units, zones and installed components.
+    description: The physical plant as the platform knows it — sites, cultivation units, zones, installed components and each zone's control loops.
     why_this_class: Defines the plant; changes are configuration, reviewed by qa.
     risk: A wrong unit or zone code misroutes telemetry and commands. Setting a unit's commissioning flag opens MQTT write to it, so that one change waits for qa.
     approval:
@@ -768,6 +769,7 @@ resource_groups:
       - {type: data, object: medcea.cea_unit}
       - {type: data, object: medcea.cea_zone}
       - {type: data, object: medcea.component}
+      - {type: data, object: medcea.control_loop, service_only: [svc_scheduler], written_by: functions, note: "the loop map per zone (feedback control Phase 2): read by the runner only; written only by functions (the engineer's write path comes as its own skeleton version); qa reviews a row with approve_change() and reads every change in medcea.row_change"}
       - {type: data, function: "medcea.approve_change(text, bigint, text)", level: A, note: "a review of a master_data or devices row (row id), or the approval of a pending_change (its id), which applies it"}
       - {type: data, function: "medcea.propose_commissioning(int, boolean, text)", level: U, writes: [medcea.pending_change], note: "cea_unit.commissioning changes only through this and approve_change(): on waits for qa (refused while a run is in R or S), off applies at once and waits for qa's review"}
       - {type: data, function: "medcea.return_change(text, bigint, text)", level: A, note: "qa sends a waiting proposal (medcea.pending_change) or a draft (recipe, control algorithm, parameter set) back with a reason; recorded as approval action 'return', which no approval rule counts"}

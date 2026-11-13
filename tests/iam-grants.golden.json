@@ -3881,6 +3881,12 @@
   [
    "svc_scheduler",
    "table",
+   "medcea.control_loop",
+   "SELECT"
+  ],
+  [
+   "svc_scheduler",
+   "table",
    "medcea.device",
    "SELECT"
   ],
