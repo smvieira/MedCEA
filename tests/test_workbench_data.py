@@ -6,10 +6,12 @@
     denied, expired), the token checks (azp, audience, groups), refresh before expiry and
     after the session ended, the Bearer header, a 401 about the token retried once after
     a refresh (a 42501 never), the refusals turned into what to do, and the query strings
-    (percent-encoded, never quoted; the measurement window, newest first, capped). Tokens are unsigned JWT-shaped strings: the helper reads
+    (percent-encoded, never quoted; the measurement window, newest first, capped; the
+    reading's sensor column and the sensor= filter, feedback control Phase 1; a database
+    without the column, 42703, says to run the database deploy). Tokens are unsigned JWT-shaped strings: the helper reads
     them for display only, config-api verifies them. The DataFrame helpers run when
     pandas is installed (it is in the workbench image), and are skipped otherwise.
-  - the example notebooks: valid nbformat 4, no outputs or execution counts (what
+  - the example notebooks: one chart line per sensor; valid nbformat 4, no outputs or execution counts (what
     nbstripout would leave), ConfigMap-safe names, under 200 KiB (kubectl apply copies
     the ConfigMap into an annotation, and an object's annotations hold 256 KiB).
   - the policy: scientists hold R (not X) on measurements; config-api accepts the
@@ -256,6 +258,9 @@ class HelperTest(unittest.TestCase):
                 ((401, {"code": "42501", "message": "permission denied for view v_ap_measurements"}), "your role may not read"),
                 ((403, {"code": "42501", "message": "permission denied for view v_ap_measurements"}), "your role may not read"),
                 ((500, {"code": "PGRST300", "message": "Server lacks JWT secret"}), "IAM_POSTGREST_JWT"),
+                # a database from before migration 010 (the views without sensor)
+                ((400, {"code": "42703", "message": "column v_ap_measurements.sensor does not exist"}),
+                 "./apps/database/deploy.sh"),
                 ((403, {"code": "28000", "message": "no platform role"}), "no platform role")):
             with self.subTest(answer):
                 self.fake.answers.pop("/api/v_ap_measurements", None)
@@ -292,7 +297,10 @@ class HelperTest(unittest.TestCase):
         self.assertIn("measure_timestamp=gte.2026-10-31T10%3A30%3A00%2B00%3A00", qs)   # '+' never a space
         self.assertIn("order=measure_timestamp.desc", qs)   # a capped window keeps its newest rows
         self.assertIn("limit=50000", qs)
-        self.assertIn("select=measure_timestamp,unit_code,zone_code,tag,value,unit_of_measurement", qs)
+        self.assertIn("select=measure_timestamp,unit_code,zone_code,tag,value,unit_of_measurement,sensor&", qs)
+        self.assertNotIn("sensor=", qs)                     # every sensor unless one is asked for
+        _, params = md.measurement_query("U", "Z", "air_humidity", 5, now=now, sensor="sht45_1")
+        self.assertIn("&tag=eq.air_humidity&sensor=eq.sht45_1&", md.query_string(params))
         for bad in (("", "Z", "t", 5), ("U", "Z", "t", 0), ("U", "Z", "t", -1)):
             with self.subTest(bad), self.assertRaises(ValueError):
                 md.measurement_query(*bad)
@@ -302,10 +310,11 @@ class HelperTest(unittest.TestCase):
         self.signed_in()
         self.fake.queue("/api/v_ap_measurements", (200, [
             {"measure_timestamp": "2026-10-31T11:00:00+00:00", "unit_code": "UNIT01", "zone_code": "ZONE01",
-             "tag": "air_temperature", "value": 21.5, "unit_of_measurement": "C"}]))
+             "tag": "air_temperature", "value": 21.5, "unit_of_measurement": "C", "sensor": "sht45_1"}]))
         df = self.s.measurements("UNIT01", "ZONE01", minutes=60)
         self.assertEqual(list(df.columns), list(md.MEASUREMENT_COLUMNS))
         self.assertEqual(float(df["value"].iloc[0]), 21.5)
+        self.assertEqual(df["sensor"].iloc[0], "sht45_1")
         self.fake.queue("/api/cea_zone", (200, [{"zone_id": 3, "unit_id": 1, "zone_code": "ZONE01",
                                                   "zone_description": "", "is_active": "Y"}]))
         self.fake.queue("/api/cea_unit", (200, [{"unit_id": 1, "unit_code": "UNIT01", "description": "", "is_active": "Y"}]))
@@ -316,7 +325,8 @@ class HelperTest(unittest.TestCase):
     def test_capped_window_warns_and_sorts(self):
         self.signed_in()
         rows = [{"measure_timestamp": "2026-10-31T11:0%d:00+00:00" % m, "unit_code": "UNIT01", "zone_code": "ZONE01",
-                 "tag": "air_temperature", "value": m, "unit_of_measurement": "C"} for m in (2, 1)]
+                 "tag": "air_temperature", "value": m, "unit_of_measurement": "C", "sensor": "default"}
+                for m in (2, 1)]
         self.fake.queue("/api/v_ap_measurements", (200, rows))
         with self.assertWarnsRegex(UserWarning, "only the latest 2 readings"):
             df = self.s.measurements("UNIT01", "ZONE01", minutes=60, limit=2)
@@ -361,8 +371,16 @@ class ExamplesTest(unittest.TestCase):
         with open(os.path.join(EXAMPLES, "02-air-temperature.ipynb")) as f:
             cells = json.load(f)["cells"]
         first_code = "".join(next(c for c in cells if c["cell_type"] == "code")["source"])
-        for var in ("UNIT =", "ZONE =", "MINUTES ="):
+        for var in ("UNIT =", "ZONE =", "MINUTES =", "SENSOR ="):
             self.assertIn(var, first_code)
+
+    def test_chart_one_line_per_sensor(self):
+        # two sensors of one tag (SHT45 and SCD30) never become one zig-zag line
+        with open(os.path.join(EXAMPLES, "02-air-temperature.ipynb")) as f:
+            code = "\n".join("".join(c["source"]) for c in json.load(f)["cells"] if c["cell_type"] == "code")
+        self.assertIn('for name, part in df.groupby("sensor"):', code)
+        self.assertIn("sensor=SENSOR", code)
+        self.assertNotIn('ax.plot(df["measure_timestamp"]', code)
 
 
 class PolicyTest(unittest.TestCase):

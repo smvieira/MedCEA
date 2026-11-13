@@ -72,6 +72,7 @@ body{background:#0f1117;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-seri
 .bar-out{background:#ef4444}
 .bar-norange{background:#eab308}
 .gauge-range{font-size:.72rem;color:#475569;margin-top:1px}
+.gauge-stale{opacity:.45}
 .tag-val-only{font-size:.82rem;color:#94a3b8;display:flex;justify-content:space-between}
 .tag-val-only .tv-name{color:#64748b}
 .no-data{color:#334155;font-size:.82rem;font-style:italic}
@@ -99,6 +100,7 @@ body{background:#0f1117;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-seri
   <div id="content"><div class="empty">Loading&hellip;</div></div>
 </div>
 <script>
+/* monitor-logic:begin */
 // -------------------------------------------------------------------
 // Tag → recipe_line limit column mapping (client-side config)
 // -------------------------------------------------------------------
@@ -108,6 +110,62 @@ const TAG_MAP = {
   air_humidity:          { low: 'hr_lower_limit',              high: 'hr_upper_limit',              label: 'Humidity',      unit: '%'    },
   substrate_temperature: { low: 'substrate_temperature_lower_limit', high: 'substrate_temperature_upper_limit', label: 'Substrate Temp', unit: '\u00b0C' },
 };
+
+// A reading is one per zone, tag and sensor (GET /api/measurements). 'default' is
+// the sensor of a board flashed before sensor ids existed (feedback control Phase 1).
+const STALE_MS = 10 * 60 * 1000;   // older than this (database receive time): dimmed
+
+// A board writes tag, sensor, zone and UoM: they reach innerHTML only through esc().
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+// TAG_MAP order (unknown tags last, by name), then zone, then sensor; a null tag sorts as ''.
+function orderMeasurements(meas) {
+  const tagged = Object.keys(TAG_MAP);
+  const rank = t => { const i = tagged.indexOf(t); return i === -1 ? tagged.length : i; };
+  const str = v => (v == null ? '' : String(v));
+  return [...meas].sort((a, b) =>
+    (rank(a.tag) - rank(b.tag))
+    || str(a.tag).localeCompare(str(b.tag))
+    || str(a.zone_code).localeCompare(str(b.zone_code))
+    || str(a.sensor).localeCompare(str(b.sensor)));
+}
+
+// What the labels need to know about the unit's rows: more than one zone, and
+// which (zone, tag) pairs have more than one sensor.
+function labelContext(meas) {
+  const count = {};
+  for (const m of meas) {
+    const k = `${m.zone_code}\u0000${m.tag}`;
+    count[k] = (count[k] || 0) + 1;
+  }
+  return {
+    multiZone: new Set(meas.map(m => m.zone_code)).size > 1,
+    shared: new Set(Object.keys(count).filter(k => count[k] > 1)),
+  };
+}
+
+// "Humidity", then " · ZONE01" when the unit has several zones, then " · sht45_1":
+// a named sensor is always shown; 'default' only when the same zone and tag also
+// have another sensor (a board re-onboarded beside its old readings).
+function gaugeLabel(m, ctx) {
+  const cfg = TAG_MAP[m.tag];
+  let label = cfg ? cfg.label : (m.tag == null ? '\u2014' : String(m.tag));
+  if (ctx && ctx.multiZone) label += ' \u00b7 ' + (m.zone_code == null ? '\u2014' : m.zone_code);
+  const sensor = m.sensor == null || m.sensor === '' ? 'default' : String(m.sensor);
+  if (sensor !== 'default' || (ctx && ctx.shared.has(`${m.zone_code}\u0000${m.tag}`)))
+    label += ' \u00b7 ' + sensor;
+  return label;
+}
+
+// Older than STALE_MS by the database's receive time; unparseable or missing: not stale.
+function isStale(m, nowMs) {
+  const t = Date.parse(m && m.db_timestamp);
+  return Number.isFinite(t) && nowMs - t > STALE_MS;
+}
+/* monitor-logic:end */
 
 // -------------------------------------------------------------------
 // State
@@ -168,11 +226,16 @@ function fmtDate(iso) {
 // -------------------------------------------------------------------
 // Gauge rendering
 // -------------------------------------------------------------------
-function renderGauge(tag, value, uom, step) {
-  const cfg = TAG_MAP[tag];
+function renderGauge(m, step, ctx, nowMs) {
+  const cfg   = TAG_MAP[m.tag];
+  const value = m.value;
+  const label = esc(gaugeLabel(m, ctx));
+  const stale = isStale(m, nowMs);
+  const staleCls  = stale ? ' gauge-stale' : '';
+  const staleLine = stale ? `<div class="gauge-range">last ${esc(fmtDate(m.db_timestamp))}</div>` : '';
   if (!cfg) {
     // Unknown tag: value only
-    return `<div class="tag-val-only"><span class="tv-name">${tag}</span><span>${value != null ? value : '—'} ${uom || ''}</span></div>`;
+    return `<div${stale ? ' class="gauge-stale"' : ''}><div class="tag-val-only"><span class="tv-name">${label}</span><span>${value != null ? esc(value) : '—'} ${esc(m.unit_of_measurement)}</span></div>${staleLine}</div>`;
   }
 
   const low  = step ? step[cfg.low]  : null;
@@ -194,12 +257,13 @@ function renderGauge(tag, value, uom, step) {
   }
 
   const dispVal = val != null ? val : '—';
-  return `<div class="gauge-row">
+  return `<div class="gauge-row${staleCls}">
     <div class="gauge-label-row">
-      <span class="gauge-label">${cfg.label}</span>
+      <span class="gauge-label">${label}</span>
       <span><span class="gauge-val">${dispVal}</span><span class="gauge-uom">${cfg.unit}</span></span>
     </div>
     ${barHtml}
+    ${staleLine}
   </div>`;
 }
 
@@ -301,24 +365,11 @@ function renderUnit(run) {
     if (meas.length === 0) {
       measHtml = '<div class="no-data">No measurements available.</div>';
     } else {
-      // Order: TAG_MAP tags first (in declaration order), then remaining
-      const tagged = Object.keys(TAG_MAP);
-      const ordered = [
-        ...meas.filter(m => tagged.includes(m.tag)),
-        ...meas.filter(m => !tagged.includes(m.tag)),
-      ];
-      // Sort tagged by TAG_MAP order
-      ordered.sort((a, b) => {
-        const ia = tagged.indexOf(a.tag);
-        const ib = tagged.indexOf(b.tag);
-        if (ia === -1 && ib === -1) return a.tag.localeCompare(b.tag);
-        if (ia === -1) return 1;
-        if (ib === -1) return -1;
-        return ia - ib;
-      });
-
+      // One gauge per zone, tag and sensor, in TAG_MAP order
+      const ctx   = labelContext(meas);
+      const nowMs = Date.now();
       measHtml = `<div class="gauges">${
-        ordered.map(m => renderGauge(m.tag, m.value, m.unit_of_measurement, curStep)).join('')
+        orderMeasurements(meas).map(m => renderGauge(m, curStep, ctx, nowMs)).join('')
       }</div>`;
     }
   }

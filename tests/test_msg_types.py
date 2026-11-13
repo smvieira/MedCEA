@@ -8,6 +8,11 @@
   report labelled _test or _health stays SP; any other topic claiming HB or TS is
   dropped (with a node.warn); otherwise, and for a payload that is not an object, it
   behaves exactly as the function in git HEAD did.
+- Six-segment reading topics (feedback control Phase 1, Q12):
+  <root>/<unit>/<zone>/sense/<tag>/<sensor> is stored as the board sent it (AP, its
+  `sensor` key kept) with no flow change; the five-segment form still works and gains no
+  `sensor` (the views supply 'default'); an instance segment never makes HB or TS, and
+  such a topic claiming HB or TS is dropped; the `mqtt in` node subscribes every depth.
 - Migration 009 (apps/database/medcea_db_migrations.sql): the last block, its own
   transaction after 008c's COMMIT, the exact list, NOT VALID then VALIDATE with a
   WARNING on old rows, and nothing altered or scanned once it is in place.
@@ -90,6 +95,11 @@ class FlowShapeTest(unittest.TestCase):
         _, insert = feeder(flow_nodes())
         self.assertIn("'{{msg.payload.msg_type}}'", insert["query"])
         self.assertIn("'{{{msg.payload.fullmsg}}}'", insert["query"])
+
+    def test_subscribes_every_depth(self):
+        # a six-segment reading topic reaches the function: the one subscription is root/#
+        subs = [n for n in flow_nodes() if n.get("type") == "mqtt in"]
+        self.assertEqual([(n["topic"], n["wires"]) for n in subs], [("__TOPIC_ROOT__/#", [[NODE_ID]])])
 
     def test_the_only_drop_is_a_false_hb_or_ts_claim(self):
         fn, _ = feeder(flow_nodes())
@@ -185,12 +195,41 @@ class IngestFunctionTest(unittest.TestCase):
             with self.subTest(topic=topic):
                 self.assertEqual(self.stored(topic, dict(payload)), payload)
 
+    def test_a_six_segment_reading_is_stored_as_sent(self):
+        # <root>/<unit>/<zone>/sense/<tag>/<sensor>: the board's record, unchanged, AP
+        for sensor, value in (("sht45_1", 91.4), ("scd30", 88.0)):
+            with self.subTest(sensor=sensor):
+                payload = reading(tag="air_humidity", sensor=sensor, value=value, UoM="RH%")
+                p = self.stored("medcea/UNIT01/ZONE01/sense/air_humidity/" + sensor, dict(payload))
+                self.assertEqual(p, payload)
+                self.assertEqual((p["msg_type"], p["sensor"]), ("AP", sensor))
+        # the five-segment form of a board flashed before Phase 1: stored as sent, and
+        # Node-RED adds no sensor (the views' COALESCE gives 'default')
+        p = self.stored("medcea/UNIT01/ZONE01/sense/co2", reading())
+        self.assertEqual(p, reading())
+        self.assertNotIn("sensor", p)
+
+    def test_an_instance_segment_never_makes_hb_or_ts(self):
+        topics = ("medcea/U/Z/sense/_health/sht45_1", "medcea/U/Z/sense/_test/scd30",
+                  "medcea/U/Z/sense/co2/_health", "medcea/U/Z/sense/co2/_test")
+        for topic in topics:
+            with self.subTest(topic=topic):
+                self.assertEqual(self.stored(topic, reading(sensor="scd30"))["msg_type"], "AP")
+            for claim in ("HB", "TS"):
+                with self.subTest(topic=topic, claim=claim):
+                    r = run_func(self.func, [{"topic": topic, "payload": reading(msg_type=claim)}])[0]
+                    self.assertTrue(r["ok"], r)
+                    self.assertIsNone(r["out"])
+                    self.assertEqual(r["warned"], ["dropped: %s is not allowed on %s" % (claim, topic)])
+
     def test_same_as_head_off_the_two_suffixes(self):
         # any other topic not claiming HB or TS, and any payload that is not an object, behaves as before:
         # the same result, or the same error (a null payload throws, as it always did)
         if not self.head:
             self.skipTest("git show HEAD unavailable")
         cases = [{"topic": "medcea/U/Z/sense/co2", "payload": reading()},
+                 {"topic": "medcea/U/Z/sense/air_humidity/sht45_1",
+                  "payload": reading(tag="air_humidity", sensor="sht45_1")},
                  {"topic": "medcea/U/Z/sense/co2", "payload": reading(msg_type="SP")},
                  {"topic": "medcea/U/Z/control_setpoint/light/_test", "payload": reading(msg_type="SP")},
                  {"topic": "medcea/U/Z/control/fan", "payload": reading(msg_type="CT")},

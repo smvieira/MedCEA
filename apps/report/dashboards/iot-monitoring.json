@@ -98,7 +98,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT record_timestamp AS \"time\", value::numeric AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_temperature' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nORDER BY record_timestamp",
+          "rawSql": "SELECT record_timestamp AS \"time\", concat_ws(' / ', zone_code, sensor) AS metric,\n  value::numeric AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_temperature' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nORDER BY record_timestamp",
           "format": "time_series",
           "refId": "A"
         }
@@ -174,7 +174,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT record_timestamp AS \"time\", value::numeric AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_humidity' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nORDER BY record_timestamp",
+          "rawSql": "SELECT record_timestamp AS \"time\", concat_ws(' / ', zone_code, sensor) AS metric,\n  value::numeric AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_humidity' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nORDER BY record_timestamp",
           "format": "time_series",
           "refId": "A"
         }
@@ -250,7 +250,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT record_timestamp AS \"time\", value::numeric AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'co2' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nORDER BY record_timestamp",
+          "rawSql": "SELECT record_timestamp AS \"time\", concat_ws(' / ', zone_code, sensor) AS metric,\n  value::numeric AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'co2' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nORDER BY record_timestamp",
           "format": "time_series",
           "refId": "A"
         }
@@ -351,7 +351,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT $__timeGroup(record_timestamp, $__interval) AS \"time\",\n  zone_code AS metric, avg(value::numeric) AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_temperature' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nGROUP BY 1, zone_code ORDER BY 1",
+          "rawSql": "SELECT $__timeGroup(record_timestamp, $__interval) AS \"time\",\n  concat_ws(' / ', zone_code, sensor) AS metric, avg(value::numeric) AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_temperature' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nGROUP BY 1, 2 ORDER BY 1",
           "format": "time_series",
           "refId": "A"
         }
@@ -439,7 +439,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT $__timeGroup(record_timestamp, $__interval) AS \"time\",\n  zone_code AS metric, avg(value::numeric) AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_humidity' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nGROUP BY 1, zone_code ORDER BY 1",
+          "rawSql": "SELECT $__timeGroup(record_timestamp, $__interval) AS \"time\",\n  concat_ws(' / ', zone_code, sensor) AS metric, avg(value::numeric) AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'air_humidity' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nGROUP BY 1, 2 ORDER BY 1",
           "format": "time_series",
           "refId": "A"
         }
@@ -526,7 +526,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT $__timeGroup(record_timestamp, $__interval) AS \"time\",\n  zone_code AS metric, avg(value::numeric) AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'co2' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nGROUP BY 1, zone_code ORDER BY 1",
+          "rawSql": "SELECT $__timeGroup(record_timestamp, $__interval) AS \"time\",\n  concat_ws(' / ', zone_code, sensor) AS metric, avg(value::numeric) AS value\nFROM medcea.msg_actual_points\nWHERE tag = 'co2' AND unit_code = '$unit'\n  AND $__timeFilter(record_timestamp)\nGROUP BY 1, 2 ORDER BY 1",
           "format": "time_series",
           "refId": "A"
         }
@@ -705,7 +705,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "PA68174188487FD5C"
           },
-          "rawSql": "SELECT zone_code AS \"Zone\", device_dns AS \"Device\",\n  MAX(CASE WHEN tag='air_temperature' THEN ROUND(value::numeric,1) END) AS \"Temp (\u00b0C)\",\n  MAX(CASE WHEN tag='air_humidity'    THEN ROUND(value::numeric,1) END) AS \"Humidity (%)\",\n  MAX(CASE WHEN tag='co2'             THEN ROUND(value::numeric,0) END) AS \"CO\u2082 (ppm)\",\n  MAX(record_timestamp) AS \"Last Seen\"\nFROM medcea.msg_actual_points\nWHERE unit_code = '$unit' AND $__timeFilter(record_timestamp)\nGROUP BY zone_code, device_dns ORDER BY zone_code",
+          "rawSql": "SELECT zone_code AS \"Zone\", device_dns AS \"Device\", sensor AS \"Sensor\",\n  MAX(CASE WHEN tag='air_temperature' THEN ROUND(value::numeric,1) END) AS \"Temp (\u00b0C)\",\n  MAX(CASE WHEN tag='air_humidity'    THEN ROUND(value::numeric,1) END) AS \"Humidity (%)\",\n  MAX(CASE WHEN tag='co2'             THEN ROUND(value::numeric,0) END) AS \"CO\u2082 (ppm)\",\n  MAX(record_timestamp) AS \"Last Seen\"\nFROM (SELECT DISTINCT ON (zone_code, device_dns, sensor, tag)\n             zone_code, device_dns, sensor, tag, value, record_timestamp\n        FROM medcea.msg_actual_points\n       WHERE unit_code = '$unit' AND $__timeFilter(record_timestamp)\n         AND tag IN ('air_temperature','air_humidity','co2')\n       ORDER BY zone_code, device_dns, sensor, tag, record_timestamp DESC) l\nGROUP BY zone_code, device_dns, sensor ORDER BY zone_code, device_dns, sensor",
           "format": "table",
           "refId": "A"
         }

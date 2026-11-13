@@ -43,7 +43,10 @@ PLATFORM_ROLES = ("operator", "production_manager", "maintenance", "qc", "qa", "
                   "engineer", "bio_scientist", "control_scientist", "admin", "auditor")
 REFRESH_MARGIN = 60          # refresh when the access token has less than this left (s)
 TIMEOUT = 20
-MEASUREMENT_COLUMNS = ("measure_timestamp", "unit_code", "zone_code", "tag", "value", "unit_of_measurement")
+# sensor: the reading's instance (sht45_1, scd30, ...); "default" for a board flashed
+# before sensor ids existed. Two sensors of one tag are two series: group or filter by it.
+MEASUREMENT_COLUMNS = ("measure_timestamp", "unit_code", "zone_code", "tag", "value", "unit_of_measurement",
+                       "sensor")
 # What a network failure looks like: a connection refused or timed out is the workbench's
 # NetworkPolicy (the hop is open only while the platform verifies tokens).
 NET_ERRORS = (OSError,)
@@ -96,11 +99,13 @@ def zones_query():
                         ("order", "unit_id.asc,zone_code.asc")]
 
 
-def measurement_query(unit, zone, tag="air_temperature", minutes=60, now=None, limit=50000):
+def measurement_query(unit, zone, tag="air_temperature", minutes=60, now=None, limit=50000, sensor=None):
     """(path, params) for one unit, zone and tag over the last `minutes`, newest first, at
     most `limit` rows (so a window that holds more keeps its latest readings; measurements()
     sorts them oldest first and warns). Reads the view v_ap_measurements (actual points),
-    which the database filters by your role's row security like the table under it."""
+    which the database filters by your role's row security like the table under it.
+    One row per reading: `sensor` names the instance (`default` for a board not yet
+    re-onboarded); group or filter by it (sensor="sht45_1"), or two sensors mix."""
     if not unit or not zone or not tag:
         raise ValueError("unit, zone and tag are required")
     minutes = float(minutes)
@@ -111,6 +116,7 @@ def measurement_query(unit, zone, tag="air_temperature", minutes=60, now=None, l
     return "v_ap_measurements", [
         ("select", ",".join(MEASUREMENT_COLUMNS)),
         ("unit_code", f"eq.{unit}"), ("zone_code", f"eq.{zone}"), ("tag", f"eq.{tag}"),
+        *([("sensor", f"eq.{sensor}")] if sensor else []),
         ("measure_timestamp", f"gte.{since}"),
         ("order", "measure_timestamp.desc"), ("limit", str(int(limit))),
     ]
@@ -123,6 +129,9 @@ def _refusal(status, body):
     if status == 500 and code == "PGRST300":
         return AccessError("config-api does not verify tokens yet (IAM_POSTGREST_JWT=false); ask an "
                            "administrator", status, code)
+    if code == "42703" and "sensor" in msg:   # the views gained sensor in migration 010
+        return AccessError("the platform database is older than this notebook helper (no sensor column); "
+                           "ask an administrator to run ./apps/database/deploy.sh", status, code)
     if code == "42501":   # 401 or 403: PostgREST picks by the token's role, not the refusal
         return AccessError("your role may not read this (%s)" % msg, status, code)
     if status == 401:
@@ -328,9 +337,9 @@ class Session:
         return zones.merge(units, on="unit_id", how="left")[
             ["unit_code", "zone_code", "zone_description", "is_active", "unit_id", "zone_id"]]
 
-    def measurements(self, unit, zone, tag="air_temperature", minutes=60, limit=50000):
+    def measurements(self, unit, zone, tag="air_temperature", minutes=60, limit=50000, sensor=None):
         import pandas as pd
-        rows = self.get(*measurement_query(unit, zone, tag, minutes, limit=limit))
+        rows = self.get(*measurement_query(unit, zone, tag, minutes, limit=limit, sensor=sensor))
         df = pd.DataFrame(rows, columns=list(MEASUREMENT_COLUMNS))
         df["measure_timestamp"] = pd.to_datetime(df["measure_timestamp"], utc=True)
         df["value"] = pd.to_numeric(df["value"])
@@ -389,5 +398,5 @@ def zones():
     return session().zones()
 
 
-def measurements(unit, zone, tag="air_temperature", minutes=60, limit=50000):
-    return session().measurements(unit, zone, tag, minutes, limit)
+def measurements(unit, zone, tag="air_temperature", minutes=60, limit=50000, sensor=None):
+    return session().measurements(unit, zone, tag, minutes, limit, sensor=sensor)

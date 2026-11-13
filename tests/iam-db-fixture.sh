@@ -1612,8 +1612,13 @@ UPDATE medcea.measurement SET msg = msg WHERE device_id = 'iamt-aa:bb:cc:00:00:0
 SQL
     svcprobe svc_grafana "the dashboard's queries" ok <<'SQL'
 SELECT DISTINCT unit_code FROM medcea.msg_actual_points ORDER BY unit_code;
-SELECT zone_code, device_dns, MAX(CASE WHEN tag = 'air_temperature' THEN ROUND(value::numeric, 1) END), MAX(record_timestamp)
-  FROM medcea.msg_actual_points WHERE unit_code = 'IAMT02' GROUP BY zone_code, device_dns ORDER BY zone_code;
+SELECT zone_code, device_dns, sensor, MAX(CASE WHEN tag = 'air_temperature' THEN ROUND(value::numeric, 1) END), MAX(record_timestamp)
+  FROM (SELECT DISTINCT ON (zone_code, device_dns, sensor, tag) zone_code, device_dns, sensor, tag, value, record_timestamp
+          FROM medcea.msg_actual_points WHERE unit_code = 'IAMT02'
+         ORDER BY zone_code, device_dns, sensor, tag, record_timestamp DESC) l
+ GROUP BY zone_code, device_dns, sensor ORDER BY zone_code, device_dns, sensor;
+SELECT concat_ws(' / ', zone_code, sensor) AS metric, avg(value::numeric)
+  FROM medcea.msg_actual_points WHERE tag = 'air_humidity' AND unit_code = 'IAMT02' GROUP BY 1;
 SQL
     svcprobe rr_admin_login "pgAdmin reads master data through rr_admin" ok <<'SQL'
 SELECT count(*) FROM medcea.cea_unit;

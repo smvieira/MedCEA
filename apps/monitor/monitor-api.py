@@ -6,7 +6,7 @@ Read-only Flask API for active recipe runs, step progress, and live measurements
 Endpoints:
   GET /api/runs                    — units with non-completed recipe runs
   GET /api/run/<run_id>            — steps + cycle progress for a run
-  GET /api/measurements/<unit_code> — latest measurement per tag for a unit
+  GET /api/measurements/<unit_code> — latest measurement per zone, tag and sensor for a unit
   GET /api/actions/<unit_code>     — latest actuator action per tag for a unit
 
 own_unit (IAM 2.6): an operator sees only the runs of their units (iam_policy.user_unit)
@@ -243,24 +243,35 @@ def get_measurements(unit_code):
         cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         sub = _unit_scope(cur)
         if sub is None:
+            # one value per zone, tag and sensor: zones of a unit made from one
+            # template share sensor ids, so (tag, sensor) alone would still merge
+            # them; db_timestamp (the database's receive time) drives the page's
+            # staleness display, board clocks can be wrong
             cur.execute("""
-            SELECT DISTINCT ON (tag) tag, value, unit_of_measurement, measure_timestamp
+            SELECT DISTINCT ON (zone_code, tag, sensor) zone_code, tag, sensor, value,
+                   unit_of_measurement, measure_timestamp, db_timestamp
             FROM medcea.v_ap_measurements
             WHERE unit_code = %s
-            ORDER BY tag, measure_timestamp DESC
+            ORDER BY zone_code, tag, sensor, measure_timestamp DESC
         """, (unit_code,))
         else:
-            # v_ap_measurements' expressions (it has no zone_id) plus the RLS rule
-            # zone_id = ANY(my_zones()): a reading without a zone (an unregistered
-            # board) is never shown to an operator
+            # v_ap_measurements' expressions repeated word for word (it has no
+            # zone_id), sensor included (migration 010; tests/test_unit_scope.py
+            # pins the parity), plus the RLS rule zone_id = ANY(my_zones()): a
+            # reading without a zone (an unregistered board) is never shown to an
+            # operator
             cur.execute("""
-            SELECT DISTINCT ON (tag) tag, value, unit_of_measurement, measure_timestamp
-            FROM (SELECT m.msg ->> 'tag' AS tag, (m.msg ->> 'value')::numeric AS value,
-                         m.msg ->> 'UoM' AS unit_of_measurement, m.measure_timestamp
+            SELECT DISTINCT ON (zone_code, tag, sensor) zone_code, tag, sensor, value,
+                   unit_of_measurement, measure_timestamp, db_timestamp
+            FROM (SELECT m.msg ->> 'zone_code' AS zone_code, m.msg ->> 'tag' AS tag,
+                         COALESCE(NULLIF(m.msg ->> 'sensor', ''), 'default') AS sensor,
+                         (m.msg ->> 'value')::numeric AS value,
+                         m.msg ->> 'UoM' AS unit_of_measurement, m.measure_timestamp,
+                         m."timestamp" AS db_timestamp
                     FROM medcea.measurement m
                    WHERE m.msg_type::text = 'AP' AND m.msg ->> 'unit_code' = %s
                      AND m.zone_id IN """ + _MY_ZONES + """) v
-            ORDER BY tag, measure_timestamp DESC
+            ORDER BY zone_code, tag, sensor, measure_timestamp DESC
         """, (unit_code, sub))
         rows = cur.fetchall()
         result = []
