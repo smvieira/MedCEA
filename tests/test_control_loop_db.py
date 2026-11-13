@@ -11,8 +11,9 @@
   `sensor` column with security_invoker re-stated, in parity with the DDL.
 - The engineer's write path (owner decision Q19, version 2c), created INERT:
   medcea.zone_loop_context(integer) and medcea.save_zone_loops(integer, jsonb),
-  SECURITY DEFINER with a search_path, REVOKE ALL FROM PUBLIC, no GRANT, not named by
-  the policy yet; their helpers; the validation rules (loop_code tied to the four
+  SECURITY DEFINER with a search_path, REVOKE ALL FROM PUBLIC, no GRANT in the migration;
+  policy version 2c names them (master_data, level U: rr_engineer's EXECUTE only, from the
+  compiled grants), never the guard or the helpers; their helpers; the validation rules (loop_code tied to the four
   quantities and their recipe_line columns, co2's command map, a commands actuator
   holding every command the loop sends, one loop per actuator, rule reference =>
   sources [reference(, fallback)], max_age_s 1..3600, mode command, 'default' never a
@@ -25,6 +26,7 @@
 
 No database is needed. Run: python3 tests/test_control_loop_db.py
 """
+import json
 import os
 import re
 import sys
@@ -332,14 +334,27 @@ class LoopFunctionsTest(unittest.TestCase):
             self.assertTrue(self.block[end:].lstrip().startswith(f"REVOKE ALL ON FUNCTION {m.group(1)}("), m.group(1))
         self.assertNotRegex(self.block, r"\bGRANT\b")
 
-    def test_not_named_by_the_policy_yet(self):
+    def test_named_by_the_policy_2c(self):
+        """Version 2c names the two entry points (master_data, level U): engineer alone gets
+        EXECUTE on each; the guard and the helpers stay unnamed and ungranted."""
         p = model.load_defaults()
         declared = set(grants.declared_functions(p))
-        for sig in (SAVE, CONTEXT, GUARD) + HELPERS:
+        privs = grants.privileges(p)
+        for sig in (SAVE, CONTEXT):
+            self.assertIn(sig, declared, sig)
+            self.assertEqual([tuple(x) for x in privs if x[2] == sig],
+                             [("rr_engineer", "function", sig, "EXECUTE")], sig)
+        for sig in (GUARD,) + HELPERS:
             self.assertNotIn(sig, declared, sig)
-            self.assertFalse([x for x in grants.privileges(p) if x[2] == sig], sig)
+            self.assertFalse([x for x in privs if x[2] == sig], sig)
         with open(os.path.join(ROOT, "tests", "iam-grants.golden.json")) as f:
-            self.assertNotIn("zone_loop", f.read())
+            golden = json.load(f)
+        named = [x for x in golden["privileges"] if "zone_loop" in json.dumps(x)]
+        self.assertEqual(sorted(map(tuple, named)),
+                         sorted(("rr_engineer", "function", sig, "EXECUTE") for sig in (SAVE, CONTEXT)))
+        for k, v in golden.items():
+            if k != "privileges":
+                self.assertNotIn("zone_loop", json.dumps(v), k)
         self.assertEqual([f for f in grants.NOT_BUILT if "loop" in f], [])
 
     def test_creatable_before_the_table(self):

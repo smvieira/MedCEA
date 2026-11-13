@@ -63,6 +63,14 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    commit (C2): grants.LEGACY_ANON_EXCLUDED gains control_loop, which moves only
                    the five grants verify forms (as_of_fc, applied by every class that compares
                    an older CLI's grants output with today's compiler)
+                   commit 2a's defaults.yaml (ref_tree(PRE_2A)), since version 2c moves the policy
+  PhaseLoopsCDelta  against PRE_2A (d8a91f8): feedback control version 2c, the policy (master_data
+                   gains medcea.zone_loop_context(int) and medcea.save_zone_loops(int, jsonb) at U,
+                   save writing medcea.control_loop; owner decision Q19): skeleton-gate
+                   --against-git d8a91f8 says widening with exactly engineer's two EXECUTE;
+                   no other role's reach moves (qa and auditor unchanged), so only engineer is
+                   barred from approving it; the matrix untouched, the checker clean, only the
+                   grants forms move (by those two rows; as_of_fc for d8a91f8's CLI)
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -149,6 +157,9 @@ PRE_FC = "db270f9"   # main after the units' commit C (skeleton version 3, propo
                      # the same defaults.yaml) and the Config UI rights: feedback control Phase 2a
                      # changes the policy (master_data gains medcea.control_loop for svc_scheduler
                      # only, owner decision Q19; PhaseLoopsADelta)
+PRE_2A = "d8a91f8"   # feedback control's policy 2a (master_data gains medcea.control_loop for
+                     # svc_scheduler, proposed as skeleton version 2a): version 2c adds the
+                     # engineer's two loop functions (PhaseLoopsCDelta)
 
 def as_of_fc(key, out):
     """An older commit's output with feedback control commit C2's one compiler change applied:
@@ -2681,7 +2692,8 @@ class PhaseLoopsADelta(unittest.TestCase):
     it (qa may); the matrix is PRE_FC's; the checker passes on PRE_FC's rows (the proposal's
     precondition); only the grants forms move, by exactly that privilege row (and the
     member's object_group row in the functions part), every other artefact compiling byte
-    for byte as PRE_FC's cli.py does."""
+    for byte as PRE_FC's cli.py does. Commit 2a's defaults.yaml is PRE_2A's
+    (ref_tree(PRE_2A)): version 2c moves the policy again (PhaseLoopsCDelta pins that step)."""
 
     TABLE = "medcea.control_loop"
     SYSTEM = [["svc", "svc_scheduler", "table", TABLE, "SELECT"]]
@@ -2691,8 +2703,7 @@ class PhaseLoopsADelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_FC, "medcea-prefc-")
         cls.a = ref_tree(PRE_FC)[2]
-        with open(DEFAULTS) as f:   # the next policy commit (Phase 2c) re-pins this to its parent
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree(PRE_2A)[2]   # commit 2a's defaults.yaml (version 2c moves the working tree's)
         cls.want = artefacts(cls.p)
         cls.was = artefacts(cls.a)
         cls.rows = source.entries_and_waivers(cls.a.data)   # PRE_FC's factory matrix
@@ -2712,8 +2723,11 @@ class PhaseLoopsADelta(unittest.TestCase):
         import argparse
         import contextlib
         import io
+        from unittest import mock
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # git's side is commit 2a's policy (ref_tree(PRE_2A)), not the working tree's
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_FC, state=None, check=True))
             except source.SourceError as e:
@@ -2843,6 +2857,189 @@ class PhaseLoopsADelta(unittest.TestCase):
         self.assertEqual([f for f in grants.NOT_BUILT if "control_loop" in f], [])
         self.assertEqual([x for x in grants.privileges(self.p) if x[2] == self.TABLE],
                          [tuple(t[1:]) for t in self.SYSTEM])
+
+
+class PhaseLoopsCDelta(unittest.TestCase):
+    """Feedback control version 2c (13 Nov 2026): the policy. Group master_data gains, right
+    after medcea.unit_commissioning(), the function members medcea.zone_loop_context(int) and
+    medcea.save_zone_loops(int, jsonb) (writes medcea.control_loop), both at U (owner decision
+    Q19: widen only the writing role; at R every master_data reader, qa and auditor included,
+    would widen and qa could not approve). The functions exist since migration 010 (inert:
+    REVOKE FROM PUBLIC). Against PRE_2A (d8a91f8, version 2a): the skeleton gate says
+    widening with exactly engineer's two EXECUTE; no other role's reach moves, so only
+    engineer is barred from approving it (qa may); the matrix is 2a's; the checker passes on
+    2a's rows; only the grants forms move, by exactly those two privilege rows, every other
+    artefact compiling byte for byte as d8a91f8's cli.py does (the grants verify forms differ
+    from d8a91f8's CLI by as_of_fc, migration 010's compiler change)."""
+
+    SAVE = "medcea.save_zone_loops(integer,jsonb)"
+    CONTEXT = "medcea.zone_loop_context(integer)"
+    PERSONS = {"engineer": [["db", SAVE, "EXECUTE", None], ["db", CONTEXT, "EXECUTE", None]]}
+    GRANTEE = "rr_engineer"
+    CHANGED = set()   # plus every grants- form; routes.json does not move
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_2A, "medcea-pre2a-")
+        cls.a = ref_tree(PRE_2A)[2]
+        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+        cls.was = artefacts(cls.a)
+        cls.rows = source.entries_and_waivers(cls.a.data)   # 2a's factory matrix
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_2A}: {self.old_cli}")
+
+    def test_skeleton_gate_against_2a_widens(self):
+        """`cli.py skeleton-gate --against-git d8a91f8 --check` (in-process): widening, exit 3,
+        exactly engineer's two EXECUTE, nothing narrowed, every other role unchanged."""
+        import argparse
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_2A, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_2A}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(g["added"], self.PERSONS)
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(sorted(g["unchanged"]), sorted(set(self.p.roles) - set(self.PERSONS)))
+        self.assertEqual(len(g["unchanged"]), 10)
+        self.assertEqual(g["accepted_digest"], source.skeleton_digest(self.a.data))
+        self.assertEqual(g["git_digest"], source.skeleton_digest(self.p.data))
+        self.assertIn("--propose-skeleton", err.getvalue())
+        self.assertIn("Nothing was changed.", err.getvalue())
+
+    def test_gate_and_checker_under_2a_rows(self):
+        """explain.gate(accepted = 2a, git = 2c, 2a's rows): what --propose-skeleton computes;
+        the checker passes on those rows (its precondition)."""
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))   # tuples as the CLI prints them
+        self.assertEqual(g["verdict"], "widening")
+        self.assertEqual(g["added"], self.PERSONS)
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+
+    def test_qa_may_approve_the_proposal(self):
+        """apply_check.barred_approvers is exactly ['engineer'] (no role includes engineer), so a
+        qa person can approve it; the UI's diff and apply.sh N's person_widening_problems agree:
+        qa and auditor do not widen, engineer does."""
+        import apply_check
+        roles = self.p.data["roles"]
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))   # as propose() reads it
+        self.assertEqual(apply_check.barred_approvers(roles, g["added"]), ["engineer"])
+        p_old, p_new, *_ = apply_check._composed(self.a.data, self.p.data, self.rows)
+        diff_roles = explain.diff(p_old, p_new)["roles"]
+        for r in ("qa", "auditor"):
+            with self.subTest(r):
+                self.assertFalse((diff_roles.get(r) or {}).get("added"))
+                self.assertFalse(model.widening_between(p_old, p_new, r))
+        self.assertTrue((diff_roles.get("engineer") or {}).get("added"))
+        self.assertTrue(model.widening_between(p_old, p_new, "engineer"))
+
+    def test_no_other_role_reach_moves(self):
+        composed = model.Policy(source.compose(source.skeleton(self.p.data), self.rows))
+        self.assertEqual(invariants.check(composed)[0], [])
+        for role in sorted(set(self.p.roles) - set(self.PERSONS)):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(composed, role), explain.reach(self.a, role))
+
+    def test_matrix_untouched(self):
+        self.assertEqual(self.p.data["matrix"], self.a.data["matrix"])
+        self.assertEqual(self.p.data["waivers"], self.a.data["waivers"])
+        self.assertEqual(source.entries_and_waivers(self.p.data), self.rows)
+
+    def test_exactly_the_declared_artefacts_move(self):
+        self.assertEqual(set(self.want), set(self.was))
+        moved = {k for k in self.was if self.was[k] != self.want[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, self.CHANGED)
+        for key, want in self.want.items():
+            if key in self.CHANGED or key.startswith("grants-"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)   # d8a91f8's code and policy
+                self.assertEqual(rc, 0, f"{key} ({PRE_2A}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_old_cli_differs_only_by_as_of_fc(self):
+        """d8a91f8's CLI on its own policy = today's compiler on that policy but for
+        migration 010's LEGACY_ANON_EXCLUDED (as_of_fc), which only the verify forms print."""
+        verify = {"grants-verify-all", "grants-verify-assert", "grants-verify-body", "grants-verify-functions",
+                  "grants-verify-smoke-without-iam"}
+        self.assertEqual({k for k in self.was if k.startswith("grants-verify-")}, verify)
+        moved = set()
+        for key, was in self.was.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_2A}): {err}")
+            if out != was:
+                moved.add(key)
+            with self.subTest(key):
+                self.assertEqual(as_of_fc(key, out), was, key)
+        self.assertEqual(moved, verify)
+
+    def test_the_grants(self):
+        """grants-json: exactly rr_engineer's EXECUTE on the two functions; the SQL forms move
+        only by those two rows, the functions' names in the lists and the digests."""
+        go, gn = json.loads(self.was["grants-json"]), json.loads(self.want["grants-json"])
+        self.assertEqual({k for k in set(go) | set(gn) if go.get(k) != gn.get(k)}, {"privileges", "digest"})
+        self.assertEqual([x for x in go["privileges"] if x not in gn["privileges"]], [])
+        self.assertEqual(sorted(tuple(x) for x in gn["privileges"] if x not in go["privileges"]),
+                         sorted((self.GRANTEE, "function", f, "EXECUTE") for f in (self.SAVE, self.CONTEXT)))
+        self.assertEqual(self.was["routes"], self.want["routes"])   # no route table rollout
+        sql_keys = [k for k in self.want if k.startswith("grants-") and not k.startswith("grants-json")]
+        self.assertEqual(len(sql_keys), 16)
+        for key in sql_keys:
+            with self.subTest(key):
+                d_old = grants.document(self.a, *_grants_doc_args(key))["digest"]
+                d_new = grants.document(self.p, *_grants_doc_args(key))["digest"]
+
+                def strip(text):
+                    out = []
+                    for x in text.splitlines():
+                        if x.lstrip().startswith(tuple(f"('{self.GRANTEE}', 'function', '{f}'"
+                                                       for f in (self.SAVE, self.CONTEXT))):
+                            continue   # their privilege rows
+                        for f in (self.SAVE, self.CONTEXT):
+                            x = x.replace("'" + f + "', ", "").replace(", '" + f + "'", "")
+                        out.append(_SHA256.sub("<sha256>", x).rstrip(",)"))
+                    return out
+                self.assertEqual(strip(self.want[key]), strip(self.was[key]))
+                h_old, h_new = set(_SHA256.findall(self.was[key])), set(_SHA256.findall(self.want[key]))
+                self.assertEqual(h_new - h_old <= {d_new}, True, h_new - h_old)
+                self.assertEqual(h_old - h_new <= {d_old}, True, h_old - h_new)
+                self.assertNotIn("zone_loop_context", self.was[key])
+                self.assertNotIn("save_zone_loops", self.was[key])
+
+    def test_member_shape(self):
+        """The two functions follow medcea.unit_commissioning() in master_data at U, save writes
+        medcea.control_loop; neither is in grants.NOT_BUILT (which would hide its EXECUTE from
+        the gate); qa and auditor hold no U on master_data; the table member is 2a's."""
+        members = [m for m in self.p.groups["master_data"]["members"] if m.get("type") == "data"]
+        objs = [m.get("object") or m.get("function") for m in members]
+        i = objs.index("medcea.unit_commissioning()")
+        self.assertEqual(objs[i + 1:i + 3], ["medcea.zone_loop_context(int)", "medcea.save_zone_loops(int, jsonb)"])
+        ctx, save = members[i + 1], members[i + 2]
+        self.assertEqual((ctx["level"], save["level"]), ("U", "U"))
+        self.assertNotIn("writes", ctx)
+        self.assertEqual(save["writes"], ["medcea.control_loop"])
+        self.assertEqual([f for f in grants.NOT_BUILT if "zone_loop" in f], [])
+        for r in ("qa", "auditor"):
+            with self.subTest(r):
+                self.assertNotIn("U", grants._person_levels(self.p, "master_data", r))
+        old = next(m for m in self.a.groups["master_data"]["members"] if m.get("object") == "medcea.control_loop")
+        new = next(m for m in self.p.groups["master_data"]["members"] if m.get("object") == "medcea.control_loop")
+        self.assertEqual({k: v for k, v in new.items() if k != "note"}, {k: v for k, v in old.items() if k != "note"})
+        self.assertEqual(sorted(x for x in grants.privileges(self.p) if x[2] in (self.SAVE, self.CONTEXT)),
+                         sorted((self.GRANTEE, "function", f, "EXECUTE") for f in (self.SAVE, self.CONTEXT)))
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")

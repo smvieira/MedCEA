@@ -1409,6 +1409,12 @@
   [
    "rr_engineer",
    "function",
+   "medcea.save_zone_loops(integer,jsonb)",
+   "EXECUTE"
+  ],
+  [
+   "rr_engineer",
+   "function",
    "medcea.unit_commissioning()",
    "EXECUTE"
   ],
@@ -1416,6 +1422,12 @@
    "rr_engineer",
    "function",
    "medcea.withdraw_change(bigint,text)",
+   "EXECUTE"
+  ],
+  [
+   "rr_engineer",
+   "function",
+   "medcea.zone_loop_context(integer)",
    "EXECUTE"
   ],
   [
