@@ -100,6 +100,85 @@ class MpyCpTest(unittest.TestCase):
         self.assertLess(last, verify)
 
 
+FAKE_DIR = r"""#!/bin/bash
+# fake mpremote: connect PORT fs mkdir|ls :DIR. Every call fails while the counter is below
+# FAIL_TIMES (a serial hiccup); then mkdir makes the folder, or refuses it when it exists,
+# and ls answers only for an existing folder.
+n=$(cat "$COUNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$COUNT"
+echo "$4 $5" >> "$CALLS"
+if [ "$n" -lt "$FAIL_TIMES" ]; then
+  echo "mpremote.transport.TransportError: could not enter raw repl" >&2; exit 1
+fi
+d="$BOARD/${5#:}"
+case "$4" in
+  mkdir) if [ -d "$d" ]; then echo "mpremote: mkdir: $5: File exists." >&2; exit 1; fi; mkdir "$d" ;;
+  ls) [ -d "$d" ] || { echo "mpremote: ls: $5: No such file or directory." >&2; exit 1; } ;;
+esac
+"""
+
+
+class MpyMkdirTest(unittest.TestCase):
+    """mpy_mkdir (14 Nov 2026): one silent `mkdir || true` left no umqtt/ after a serial
+    hiccup, and every copy into it failed. Now tried three times like mpy_cp, an existing
+    folder counts as made, and a failure is shown."""
+
+    def run_mkdir(self, fail_times, exists=False):
+        src = read(SCRIPT)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        board = os.path.join(tmp, "board")
+        os.makedirs(os.path.join(board, "umqtt") if exists else board)
+        fake = os.path.join(tmp, "mpremote")
+        with open(fake, "w") as f:
+            f.write(FAKE_DIR)
+        os.chmod(fake, stat.S_IRWXU)
+        log = os.path.join(tmp, "uilog")
+        body = "\n".join(function(src, n) for n in ("info", "warn", "mpy", "mpy_mkdir"))
+        script = ('set -uo pipefail\nui_append() { printf "%s\\n" "$*" >> "$UILOG"; }\nsleep() { :; }\n'
+                  + body + '\nmpy_mkdir umqtt; echo "rc=$?"')
+        env = dict(os.environ, MPREMOTE=fake, PORT="/dev/null", SUDO="", COUNT=os.path.join(tmp, "n"),
+                   CALLS=os.path.join(tmp, "calls"), BOARD=board,
+                   FAIL_TIMES=str(fail_times), UILOG=log, YEL="", RED="", N="")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        ui = read(log) if os.path.exists(log) else ""
+        made = os.path.isdir(os.path.join(board, "umqtt"))
+        return r.stdout, ui, read(os.path.join(tmp, "calls")).split("\n")[:-1], made
+
+    def test_first_try(self):
+        out, ui, calls, made = self.run_mkdir(0)
+        self.assertIn("rc=0", out)
+        self.assertEqual((calls, ui, made), (["mkdir :umqtt"], "", True))
+
+    def test_an_existing_folder_counts_as_made(self):
+        out, ui, calls, made = self.run_mkdir(0, exists=True)
+        self.assertIn("rc=0", out)
+        self.assertEqual((calls, ui, made), (["mkdir :umqtt", "ls :umqtt"], "", True))
+
+    def test_a_hiccup_is_retried_and_said(self):
+        # attempt 1: mkdir and ls both hit the hiccup; attempt 2: mkdir works
+        out, ui, calls, made = self.run_mkdir(2)
+        self.assertIn("rc=0", out)
+        self.assertTrue(made)
+        self.assertEqual(calls, ["mkdir :umqtt", "ls :umqtt", "mkdir :umqtt"])
+        self.assertIn("made umqtt/ on attempt 2", ui)
+
+    def test_three_failures_show_mpremote_error(self):
+        out, ui, calls, made = self.run_mkdir(99)
+        self.assertIn("rc=1", out)
+        self.assertFalse(made)
+        self.assertEqual(len(calls), 6)
+        self.assertIn("mpremote: ", ui)
+        self.assertIn("could not enter raw repl", ui)
+
+    def test_the_package_loop_uses_it_and_stops_on_failure(self):
+        src = read(SCRIPT)
+        loop = src[src.index('for pkg in umqtt sensor_pack_2; do'):]
+        loop = loop[:loop.index("done\n  info")]
+        self.assertIn('mpy_mkdir "$pkg" || die ', loop)
+        self.assertNotIn("|| true", loop)
+        self.assertEqual(re.findall(r"mpy fs mkdir", src), ["mpy fs mkdir"])   # only inside mpy_mkdir
+
+
 BOARD = os.path.join(ROOT, "edge", "src", "bootstrap", "wifi_try.py")
 
 FAKE_NETWORK = r"""

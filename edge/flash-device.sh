@@ -828,6 +828,25 @@ mpy_cp() {
   rm -f "$err"
   return 1
 }
+# mpy_mkdir DIR — a folder on the board, tried like mpy_cp. It was one silent attempt
+# (`|| true`, so a folder left by an earlier flash was no error): on 14 Nov 2026 a serial
+# hiccup made it fail, no umqtt/ was made, and every copy into it failed ("cp:
+# umqtt/__init__.py: No such file or directory"). A folder that already exists counts as
+# made: mkdir refuses it, then `fs ls` answers.
+mpy_mkdir() {
+  local dir="$1" err n
+  err="$(mktemp)" || return 1
+  for n in 1 2 3; do
+    if mpy fs mkdir ":$dir" >/dev/null 2>"$err" || mpy fs ls ":$dir" >/dev/null 2>>"$err"; then
+      if [ "$n" -gt 1 ]; then info "made $dir/ on attempt $n"; fi
+      rm -f "$err"; return 0
+    fi
+    [ "$n" -lt 3 ] && sleep 2
+  done
+  warn "mpremote: $(tr -d '\r' < "$err" | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' ')"
+  rm -f "$err"
+  return 1
+}
 # wifi_try — the board joins $SSID with $PSK now (src/bootstrap/wifi_try.py), so a
 # refused passphrase is caught at its question, not after every file is written
 # (5 Nov 2026). Sets WIFI_RES (GOT_IP, REFUSED, NO_AP_FOUND, TIMEOUT, ERROR, or REASON_<n>;
@@ -2702,7 +2721,7 @@ for f in "$APP_DIR"/*.py; do
 done
 for pkg in umqtt sensor_pack_2; do
   [ -d "$APP_DIR/$pkg" ] || continue
-  mpy fs mkdir ":$pkg" >/dev/null 2>&1 || true   # already there on a re-flash
+  mpy_mkdir "$pkg" || die "could not make the folder $pkg/ on the board"
   for f in "$APP_DIR/$pkg"/*.py; do
     mpy_cp "$f" ":$pkg/$(basename "$f")" \
       || die "failed to copy $pkg/$(basename "$f") to the board"
