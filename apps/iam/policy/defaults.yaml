@@ -749,7 +749,7 @@ resource_groups:
   master_data:
     label: Master data (locations, units, zones, components)
     class: config
-    description: The physical plant as the platform knows it — sites, cultivation units, zones, installed components and each zone's control loops.
+    description: The physical plant as the platform knows it — sites, cultivation units, zones, installed components, each zone's control loops and the recipe types with the quantities they control.
     why_this_class: Defines the plant; changes are configuration, reviewed by qa.
     risk: A wrong unit or zone code misroutes telemetry and commands. Setting a unit's commissioning flag opens MQTT write to it, so that one change waits for qa.
     approval:
@@ -770,6 +770,9 @@ resource_groups:
       - {type: data, object: medcea.cea_zone}
       - {type: data, object: medcea.component}
       - {type: data, object: medcea.control_loop, service_only: [svc_scheduler], written_by: functions, note: "the loop map per zone (feedback control Phase 2): read by the runner only; written only by functions (people change it only through medcea.save_zone_loops(), the onboarding wizard's loop step, added by version 2c); qa reviews a row with approve_change() and reads every change in medcea.row_change"}
+      - {type: data, object: medcea.control_quantity, service_only: [svc_scheduler], written_by: functions, note: "the catalogue of controlled quantities (recipe types, 15 Nov 2026): unit, sense tag, actuator commands, phase; seeded and changed only by the database deploy from apps/database/recipe_types.yaml (git is its editor); read by the runner only, people get the same file as static JSON"}
+      - {type: data, object: medcea.recipe_type, service_only: [svc_scheduler], written_by: functions, note: "the recipe types (PLANT, FUNGI), master templates of the recipes; cea_unit.unit_type and recipe.recipe_type_id name one; seeded like control_quantity"}
+      - {type: data, object: medcea.recipe_type_quantity, service_only: [svc_scheduler], written_by: functions, note: "which quantities each recipe type sets (required or optional); seeded like control_quantity"}
       - {type: data, function: "medcea.approve_change(text, bigint, text)", level: A, note: "a review of a master_data or devices row (row id), or the approval of a pending_change (its id), which applies it"}
       - {type: data, function: "medcea.propose_commissioning(int, boolean, text)", level: U, writes: [medcea.pending_change], note: "cea_unit.commissioning changes only through this and approve_change(): on waits for qa (refused while a run is in R or S), off applies at once and waits for qa's review"}
       - {type: data, function: "medcea.return_change(text, bigint, text)", level: A, note: "qa sends a waiting proposal (medcea.pending_change) or a draft (recipe, control algorithm, parameter set) back with a reason; recorded as approval action 'return', which no approval rule counts"}

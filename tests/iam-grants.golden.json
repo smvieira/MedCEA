@@ -3899,6 +3899,12 @@
   [
    "svc_scheduler",
    "table",
+   "medcea.control_quantity",
+   "SELECT"
+  ],
+  [
+   "svc_scheduler",
+   "table",
    "medcea.device",
    "SELECT"
   ],
@@ -3930,6 +3936,18 @@
    "svc_scheduler",
    "table",
    "medcea.recipe_run",
+   "SELECT"
+  ],
+  [
+   "svc_scheduler",
+   "table",
+   "medcea.recipe_type",
+   "SELECT"
+  ],
+  [
+   "svc_scheduler",
+   "table",
+   "medcea.recipe_type_quantity",
    "SELECT"
   ],
   [
