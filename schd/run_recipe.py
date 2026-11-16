@@ -31,6 +31,14 @@ def with_loops(run_params, loopset):
     return rp
 
 
+def _comparable(loops):
+    """A loop map without what migration 011 changed in its shape (the recipe columns
+    became setpoints, phase was added) or what a row's identity is: a run re-executed
+    across that deploy compares what it controls, not how it was written down."""
+    drop = ('recipe_lower', 'recipe_upper', 'loop_id', 'phase')
+    return [{k: v for k, v in lp.items() if k not in drop} for lp in (loops or []) if isinstance(lp, dict)]
+
+
 def check_restart_loops(status_df, loopset):
     """A re-executed run: warn when its completed cycles ran another loop map."""
     try:
@@ -38,7 +46,7 @@ def check_restart_loops(status_df, loopset):
         for rp in done['run_params']:
             rp = json.loads(rp) if isinstance(rp, str) else rp
             if rp and isinstance(rp, list) and isinstance(rp[0], dict):
-                if rp[0].get('control_loops') != loopset['loops']:
+                if _comparable(rp[0].get('control_loops')) != _comparable(loopset['loops']):
                     print("WARNING: control loops differ from the run's completed cycles", file=sys.stderr)
                 return
     except Exception as e:  # noqa: BLE001 — advisory only

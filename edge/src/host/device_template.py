@@ -204,6 +204,28 @@ def cmd_functions(role, driver_id):
     return 0
 
 
+RECIPE_TYPES = os.path.join(os.path.dirname(EDGE_DIR), "apps", "database", "recipe_types.yaml")
+
+
+def loop_quantities(tpl_driver=None):
+    """[{code, label}] of the loopable quantities (apps/database/recipe_types.yaml,
+    the catalogue migration 011 seeds): what a commands actuator may declare it acts
+    on. Without PyYAML or the file, the quantities the template's actuators declare."""
+    try:
+        import yaml
+        with open(RECIPE_TYPES, encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+        return [{"code": q["code"], "label": q.get("label", q["code"])}
+                for q in doc.get("quantities") or [] if q.get("loopable")]
+    except (ImportError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        seen = []
+        for a in ((tpl_driver or {}).get("actuators") or {}).values():
+            q = a.get("quantity")
+            if isinstance(q, str) and q not in seen:
+                seen.append(q)
+        return [{"code": q, "label": q} for q in seen]
+
+
 def cmd_channelmap(role, driver_id, variant=None):
     """Everything the browser editor needs, as one JSON document on stdout.
 
@@ -231,6 +253,8 @@ def cmd_channelmap(role, driver_id, variant=None):
         # The reference wiring, already rendered, so the editor opens on a real
         # working table rather than an empty form.
         "reference": render_actuator_config(d, pins, b),
+        # what a commands actuator may say it acts on (its "quantity")
+        "quantities": loop_quantities(d),
     }, sys.stdout)
     sys.stdout.write("\n")
     return 0
@@ -399,6 +423,10 @@ def render_actuator_config(tpl_driver, pins, binding=None):
             # scheduler can control, so it does not go in the table at all.
             if "UP" in cmds:
                 defs[name] = {"comment": spec.get("comment", ""), "commands": cmds}
+                if isinstance(spec.get("quantity"), str):
+                    # the recipe quantity it acts on (the loop picker's first
+                    # choice for it); the board ignores the key
+                    defs[name]["quantity"] = spec["quantity"]
 
     return {b.descriptions_key: descriptions, "actuator_definitions": defs}
 
@@ -431,6 +459,10 @@ def _normalise_config(b, cfg):
                 types[tname] = {c: _normalise_branch(b, br) for c, br in tspec.items()}
             out["types"] = types
         else:
+            if "quantity" in spec:
+                # validate_config refuses anything but a quantity code, and a
+                # quantity on a typed actuator
+                out["quantity"] = spec["quantity"].strip() if isinstance(spec["quantity"], str) else spec["quantity"]
             out["commands"] = {c: _normalise_branch(b, br)
                                for c, br in (spec.get("commands") or {}).items()}
         defs[name] = out
@@ -948,10 +980,11 @@ def cmd_actuator_map(role, driver_id, variant=None):
 
 
 def sense_sources(plan):
-    """[{instance, driver, tags}] of the SENSE board render() would write for this
+    """[{instance, driver, tags, uoms}] of the SENSE board render() would write for this
     plan ({"wiring", "variant"}, or {"sensors_tsv"}: the questions' lines). Taken
     from the very components render() returns, so the instance is the last segment
-    of each reading topic, as the database (_zone_inventory) and the runner read it."""
+    of each reading topic, as the database (_zone_inventory) and the runner read it;
+    uoms is {tag: UoM | None}, which the loop picker's UoM rule reads (migration 011)."""
     with tempfile.TemporaryDirectory() as d:
         spec = {"out_dir": d, "role": "SENSE", "hostname": "sense-sources",
                 "unit_code": "UNIT", "zone_code": "ZONE", "topic_root": "medcea"}
@@ -975,14 +1008,15 @@ def sense_sources(plan):
     out = []
     for c in got["components"]:
         p = c.get("parameters") or {}
-        tags, inst = [], None
+        tags, uoms, inst = [], {}, None
         for t in p.get("tags") or []:
             if not isinstance(t, dict) or not isinstance(t.get("topic"), str):
                 continue
             inst = t["topic"].rsplit("/", 1)[-1]
             tags.append(t.get("tag"))
+            uoms[t.get("tag")] = t.get("UoM") or None
         out.append({"instance": inst if inst is not None else p.get("instance"),
-                    "driver": p.get("driver"), "tags": tags})
+                    "driver": p.get("driver"), "tags": tags, "uoms": uoms})
     return out
 
 

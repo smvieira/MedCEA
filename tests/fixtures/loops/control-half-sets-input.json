@@ -1,0 +1,129 @@
+{
+ "note": "a CONTROL onboarding sets the output half only",
+ "context": "control_only",
+ "role": "CONTROL",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "output",
+  "loops": [
+   {
+    "loop_code": "air_temperature",
+    "output": {
+     "actuator": "air_temperature",
+     "mode": "command"
+    },
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "sht45_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1"
+    }
+   },
+   {
+    "loop_code": "air_humidity",
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "co2",
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   },
+   {
+    "loop_code": "substrate_temperature",
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_HALF",
+   "loops.air_temperature.input"
+  ],
+  [
+   "error",
+   "L_SOURCE",
+   "loops.air_temperature.input.sources.sht45_1"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.substrate_temperature"
+  ]
+ ],
+ "plan_actuators": {
+  "actuator_definitions": {
+   "air_temperature": {
+    "quantity": "air_temperature",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "air_humidity": {
+    "quantity": "air_humidity",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "co2": {
+    "quantity": "co2",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "substrate_temperature": {
+    "quantity": "substrate_temperature",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "light": {
+    "types": {
+     "RED": {
+      "ON": {},
+      "OFF": {}
+     }
+    }
+   }
+  }
+ }
+}

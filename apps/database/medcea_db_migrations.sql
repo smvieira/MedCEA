@@ -992,8 +992,15 @@ BEGIN
     END IF;
     j := medcea_auth._content(j, true);
     IF rel = 'medcea.recipe'::regclass THEN
+        -- the eight limit columns are left out since migration 011 (their values live in
+        -- setpoints; read-only, NULL on a line written since; 012 drops them), so dropping
+        -- them moves no digest
         j := j || pg_catalog.jsonb_build_object('lines', (
             SELECT coalesce(pg_catalog.jsonb_agg(medcea_auth._content(pg_catalog.to_jsonb(l), true)
+                                                 - ARRAY['air_temperature_lower_limit', 'air_temperature_upper_limit',
+                                                         'co2_lower_limit', 'co2_upper_limit', 'hr_lower_limit',
+                                                         'hr_upper_limit', 'substrate_temperature_lower_limit',
+                                                         'substrate_temperature_upper_limit']
                                                  ORDER BY l.recipe_item_seq_id), '[]'::jsonb)
               FROM medcea.recipe_line l WHERE l.recipe_id = (p_key ->> 0)::integer));
     ELSIF rel = 'medcea.recipe_run'::regclass THEN
@@ -6379,6 +6386,1109 @@ COMMENT ON FUNCTION medcea.save_zone_loops(integer, jsonb) IS 'Replaces a zone''
 NOTIFY pgrst, 'reload schema';
 
 INSERT INTO medcea.platform_setting (key, value) VALUES ('010:last_nonce', :'deploy_nonce')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+COMMIT;
+
+-- ── Migration 011: recipe types and metadata-driven setpoints (15 Nov 2026) ───
+-- (owner decisions of 15 Nov 2026; plan: recipe types.) Recipe types (PLANT,
+-- FUNGI) are master templates listing the quantities their recipes control; the
+-- catalogue (control_quantity, recipe_type, recipe_type_quantity) is seeded on
+-- every deploy from apps/database/recipe_types.yaml, which db_apply passes as
+-- -v recipe_types_b64 (git is the catalogue's editor; the tables are the
+-- runner's, service_only in the policy's recipe-types version, which must be
+-- applied first). recipe_line keeps its photoperiod (light_type,
+-- light_on_minutes, light_off_minutes) and gains setpoints jsonb
+-- {quantity: {lower, upper}}: every controlled value, as many as the recipe's
+-- type lists; the eight limit columns become nullable and read-only until
+-- migration 012 drops them. cea_unit.unit_type becomes a recipe type code
+-- (Greens -> PLANT, Mushrooms -> FUNGI); recipe.recipe_type (a code) names
+-- the recipe's. A recipe permitted, scheduled or run on a unit of another type is a
+-- policy refusal (a WARNING while IAM_DB_ROLES=false, 42501 while true);
+-- approving a recipe a line of which lacks a required quantity is refused.
+-- control_loop: loop_code is a quantity code; input (written by a SENSE
+-- onboarding) and output (written by a CONTROL onboarding) may each be NULL: a
+-- loop is live once both are set (save_zone_loops' {half, loops} form).
+-- Data steps run as medcea_owner with the actor migration:011. Re-run safe;
+-- a steady-state deploy alters nothing but the catalogue rows that changed,
+-- the functions and the comments. deploy.sh reads 011:last_nonce back.
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SELECT pg_catalog.set_config('medcea011.doc',
+       pg_catalog.convert_from(pg_catalog.decode(:'recipe_types_b64', 'base64'), 'UTF8'), true);
+
+-- 1. The catalogue
+CREATE TABLE IF NOT EXISTS medcea.recipe_type (
+    recipe_type_id    integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    recipe_type_code  varchar(20) NOT NULL CONSTRAINT recipe_type_code_uk UNIQUE
+                      CONSTRAINT recipe_type_code_chk CHECK (recipe_type_code ~ '^[A-Z][A-Z0-9_]*$'),
+    label             text NOT NULL,
+    legacy_unit_type  text,
+    is_default        boolean NOT NULL DEFAULT false,
+    ordinal           integer NOT NULL DEFAULT 0
+);
+REVOKE ALL ON TABLE medcea.recipe_type FROM PUBLIC, anon, authenticator;
+REVOKE ALL ON SEQUENCE medcea.recipe_type_recipe_type_id_seq FROM PUBLIC, anon, authenticator;
+
+CREATE TABLE IF NOT EXISTS medcea.control_quantity (
+    quantity_id    integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    quantity_code  varchar(40) NOT NULL CONSTRAINT control_quantity_code_uk UNIQUE
+                   CONSTRAINT control_quantity_code_chk CHECK (quantity_code ~ '^[a-z][a-z0-9_]*$'),
+    label          text NOT NULL,
+    unit           text NOT NULL,
+    sense_uoms     text[] NOT NULL,
+    default_tag    varchar(40) NOT NULL CONSTRAINT control_quantity_tag_chk CHECK (default_tag ~ '^[a-z][a-z0-9_]*$'),
+    commands       text[] NOT NULL,
+    command_map    jsonb CONSTRAINT control_quantity_map_chk CHECK (command_map IS NULL OR jsonb_typeof(command_map) = 'object'),
+    phase          text NOT NULL CONSTRAINT control_quantity_phase_chk CHECK (phase IN ('always', 'light_on')),
+    loopable       boolean NOT NULL,
+    min_value      numeric NOT NULL,
+    max_value      numeric NOT NULL,
+    ordinal        integer NOT NULL DEFAULT 0,
+    CONSTRAINT control_quantity_range_chk CHECK (min_value < max_value)
+);
+REVOKE ALL ON TABLE medcea.control_quantity FROM PUBLIC, anon, authenticator;
+REVOKE ALL ON SEQUENCE medcea.control_quantity_quantity_id_seq FROM PUBLIC, anon, authenticator;
+
+CREATE TABLE IF NOT EXISTS medcea.recipe_type_quantity (
+    recipe_type_id  integer NOT NULL REFERENCES medcea.recipe_type(recipe_type_id),
+    quantity_id     integer NOT NULL REFERENCES medcea.control_quantity(quantity_id),
+    required        boolean NOT NULL,
+    ordinal         integer NOT NULL DEFAULT 0,
+    PRIMARY KEY (recipe_type_id, quantity_id)
+);
+REVOKE ALL ON TABLE medcea.recipe_type_quantity FROM PUBLIC, anon, authenticator;
+
+-- 2. Seed from the YAML (as postgres; upsert by code, a row the file no longer
+--    lists is deleted while nothing refers to it, else the deploy stops)
+DO $$
+DECLARE
+    doc   jsonb := current_setting('medcea011.doc')::jsonb;
+    q     jsonb;
+    t     jsonb;
+    k     text;
+    v     jsonb;
+    i     integer := 0;
+    tid   integer;
+    qid   integer;
+    gone  text;
+BEGIN
+    IF jsonb_typeof(doc -> 'quantities') IS DISTINCT FROM 'array' OR jsonb_typeof(doc -> 'recipe_types') IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'migration 011: recipe_types.yaml has no quantities or recipe_types list' USING ERRCODE = '22023';
+    END IF;
+    FOR q IN SELECT e FROM jsonb_array_elements(doc -> 'quantities') e LOOP
+        i := i + 1;
+        INSERT INTO medcea.control_quantity AS c (quantity_code, label, unit, sense_uoms, default_tag, commands,
+                                                  command_map, phase, loopable, min_value, max_value, ordinal)
+        VALUES (q ->> 'code', q ->> 'label', q ->> 'unit',
+                ARRAY(SELECT jsonb_array_elements_text(q -> 'sense_uoms')), q ->> 'default_tag',
+                ARRAY(SELECT jsonb_array_elements_text(q -> 'commands') ORDER BY 1),
+                q -> 'command_map', q ->> 'phase', (q ->> 'loopable')::boolean,
+                (q ->> 'min')::numeric, (q ->> 'max')::numeric, i)
+        ON CONFLICT (quantity_code) DO UPDATE SET
+            label = EXCLUDED.label, unit = EXCLUDED.unit, sense_uoms = EXCLUDED.sense_uoms,
+            default_tag = EXCLUDED.default_tag, commands = EXCLUDED.commands, command_map = EXCLUDED.command_map,
+            phase = EXCLUDED.phase, loopable = EXCLUDED.loopable, min_value = EXCLUDED.min_value,
+            max_value = EXCLUDED.max_value, ordinal = EXCLUDED.ordinal
+        WHERE (c.label, c.unit, c.sense_uoms, c.default_tag, c.commands, c.command_map, c.phase, c.loopable,
+               c.min_value, c.max_value, c.ordinal)
+              IS DISTINCT FROM (EXCLUDED.label, EXCLUDED.unit, EXCLUDED.sense_uoms, EXCLUDED.default_tag,
+               EXCLUDED.commands, EXCLUDED.command_map, EXCLUDED.phase, EXCLUDED.loopable,
+               EXCLUDED.min_value, EXCLUDED.max_value, EXCLUDED.ordinal);
+    END LOOP;
+    i := 0;
+    FOR t IN SELECT e FROM jsonb_array_elements(doc -> 'recipe_types') e LOOP
+        i := i + 1;
+        INSERT INTO medcea.recipe_type AS r (recipe_type_code, label, legacy_unit_type, is_default, ordinal)
+        VALUES (t ->> 'code', t ->> 'label', t ->> 'legacy_unit_type', (t ->> 'code') = (doc ->> 'default_type'), i)
+        ON CONFLICT (recipe_type_code) DO UPDATE SET label = EXCLUDED.label, legacy_unit_type = EXCLUDED.legacy_unit_type,
+            is_default = EXCLUDED.is_default, ordinal = EXCLUDED.ordinal
+        WHERE (r.label, r.legacy_unit_type, r.is_default, r.ordinal)
+              IS DISTINCT FROM (EXCLUDED.label, EXCLUDED.legacy_unit_type, EXCLUDED.is_default, EXCLUDED.ordinal);
+        SELECT recipe_type_id INTO tid FROM medcea.recipe_type WHERE recipe_type_code = t ->> 'code';
+        FOR k, v IN SELECT key, value FROM jsonb_each(t -> 'quantities') LOOP
+            SELECT quantity_id INTO qid FROM medcea.control_quantity WHERE quantity_code = k;
+            IF qid IS NULL THEN
+                RAISE EXCEPTION 'migration 011: recipe type % lists %, which is not a quantity', t ->> 'code', k USING ERRCODE = '22023';
+            END IF;
+            INSERT INTO medcea.recipe_type_quantity AS x (recipe_type_id, quantity_id, required, ordinal)
+            VALUES (tid, qid, v::text::boolean, (SELECT ordinal FROM medcea.control_quantity WHERE quantity_id = qid))
+            ON CONFLICT (recipe_type_id, quantity_id) DO UPDATE SET required = EXCLUDED.required, ordinal = EXCLUDED.ordinal
+            WHERE (x.required, x.ordinal) IS DISTINCT FROM (EXCLUDED.required, EXCLUDED.ordinal);
+        END LOOP;
+        DELETE FROM medcea.recipe_type_quantity x USING medcea.control_quantity c
+         WHERE x.recipe_type_id = tid AND c.quantity_id = x.quantity_id AND NOT (t -> 'quantities') ? c.quantity_code;
+    END LOOP;
+    IF (SELECT count(*) FROM medcea.recipe_type WHERE is_default) <> 1 THEN
+        RAISE EXCEPTION 'migration 011: recipe_types.yaml default_type must name one of its recipe types' USING ERRCODE = '22023';
+    END IF;
+    SELECT string_agg(recipe_type_code, ', ') INTO gone FROM medcea.recipe_type
+     WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(doc -> 'recipe_types') e WHERE e ->> 'code' = recipe_type_code);
+    IF gone IS NOT NULL THEN
+        DELETE FROM medcea.recipe_type_quantity WHERE recipe_type_id IN
+            (SELECT recipe_type_id FROM medcea.recipe_type WHERE recipe_type_code = ANY (string_to_array(gone, ', ')));
+        DELETE FROM medcea.recipe_type WHERE recipe_type_code = ANY (string_to_array(gone, ', '));   -- a unit or recipe of it stops the deploy (foreign key)
+    END IF;
+    SELECT string_agg(quantity_code, ', ') INTO gone FROM medcea.control_quantity
+     WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(doc -> 'quantities') e WHERE e ->> 'code' = quantity_code);
+    IF gone IS NOT NULL THEN
+        DELETE FROM medcea.control_quantity WHERE quantity_code = ANY (string_to_array(gone, ', '));   -- a loop of it stops the deploy (foreign key)
+    END IF;
+END $$;
+
+-- the catalogue is medcea_owner's before the data steps (they run as it and add
+-- foreign keys to it)
+DO $$
+DECLARE t regclass;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['medcea.recipe_type'::regclass, 'medcea.control_quantity'::regclass,
+                             'medcea.recipe_type_quantity'::regclass] LOOP
+        IF (SELECT relowner FROM pg_catalog.pg_class WHERE oid = t) <> 'medcea_owner'::regrole THEN
+            EXECUTE pg_catalog.format('ALTER TABLE %s OWNER TO medcea_owner', t);
+        END IF;
+    END LOOP;
+END $$;
+
+SELECT medcea_auth._set_internal_actor('migration:011');
+SET LOCAL ROLE medcea_owner;
+
+-- 3. cea_unit.unit_type: the recipe type's code (the old domain is left unused)
+DO $$
+DECLARE bad text; m text;
+BEGIN
+    IF (SELECT t.typname FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+         WHERE a.attrelid = 'medcea.cea_unit'::regclass AND a.attname = 'unit_type') = 'unit_type' THEN
+        SELECT string_agg(format('%s (%s)', u.unit_code, u.unit_type), ', ' ORDER BY u.unit_code) INTO bad
+          FROM medcea.cea_unit u
+         WHERE NOT EXISTS (SELECT 1 FROM medcea.recipe_type r
+                            WHERE r.legacy_unit_type = u.unit_type::text OR r.recipe_type_code = u.unit_type::text);
+        IF bad IS NOT NULL THEN
+            RAISE EXCEPTION 'migration 011: units whose type is no recipe type: %; set each to Greens or Mushrooms in the Configuration UI (Units) and deploy again', bad
+                USING ERRCODE = '22023';
+        END IF;
+        -- a USING expression may hold no subquery: the mapping is spelled out from the catalogue
+        SELECT string_agg(format('WHEN %L THEN %L', r.legacy_unit_type, r.recipe_type_code), ' ')
+          INTO m FROM medcea.recipe_type r WHERE r.legacy_unit_type IS NOT NULL;
+        EXECUTE format('ALTER TABLE medcea.cea_unit ALTER COLUMN unit_type TYPE varchar(20) USING '
+                       'CASE unit_type::text %s ELSE unit_type::text END', coalesce(m, ''));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = 'medcea.cea_unit'::regclass
+                                                          AND conname = 'cea_unit_recipe_type_fkey') THEN
+        ALTER TABLE medcea.cea_unit ADD CONSTRAINT cea_unit_recipe_type_fkey
+            FOREIGN KEY (unit_type) REFERENCES medcea.recipe_type(recipe_type_code);
+    END IF;
+END $$;
+
+-- 4. recipe.recipe_type (a code: people read recipes, not the catalogue): from
+--    the permitted units' type, else the default (listed)
+DO $$
+DECLARE guessed text; def text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe'::regclass
+                                                       AND attname = 'recipe_type' AND NOT attisdropped) THEN
+        ALTER TABLE medcea.recipe ADD COLUMN recipe_type varchar(20)
+            CONSTRAINT recipe_recipe_type_fkey REFERENCES medcea.recipe_type(recipe_type_code);
+    END IF;
+    IF EXISTS (SELECT 1 FROM medcea.recipe WHERE recipe_type IS NULL) THEN
+        SELECT recipe_type_code INTO def FROM medcea.recipe_type WHERE is_default;
+        WITH guess AS (
+            SELECT r.recipe_id,
+                   (SELECT CASE WHEN count(DISTINCT u.unit_type) = 1 THEN min(u.unit_type) END
+                      FROM medcea.recipe_unit_permission p JOIN medcea.cea_unit u ON u.unit_id = p.unit_id
+                     WHERE p.recipe_id = r.recipe_id AND coalesce(p.allowed, true)) AS t
+              FROM medcea.recipe r WHERE r.recipe_type IS NULL)
+        UPDATE medcea.recipe r SET recipe_type = coalesce(g.t, def) FROM guess g WHERE g.recipe_id = r.recipe_id;
+        SELECT string_agg(format('%s (%s)', r.recipe_name, r.recipe_id), ', ' ORDER BY r.recipe_id) INTO guessed
+          FROM medcea.recipe r
+         WHERE r.recipe_type = def
+           AND (SELECT count(DISTINCT u.unit_type) FROM medcea.recipe_unit_permission p JOIN medcea.cea_unit u ON u.unit_id = p.unit_id
+                 WHERE p.recipe_id = r.recipe_id AND coalesce(p.allowed, true)) <> 1;
+        IF guessed IS NOT NULL THEN
+            RAISE WARNING 'migration 011: no single unit type tells the recipe type of %; given the default %: check each in the Configuration UI (a recipe without lines may change type)',
+                guessed, def;
+        END IF;
+    END IF;
+    IF NOT (SELECT attnotnull FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe'::regclass AND attname = 'recipe_type') THEN
+        ALTER TABLE medcea.recipe ALTER COLUMN recipe_type SET NOT NULL;
+    END IF;
+END $$;
+
+-- 5. recipe_line.setpoints, backfilled from the limit columns (proved to round-trip),
+--    which then become nullable (read-only by the trigger below; 012 drops them)
+DO $$
+DECLARE c text; bad integer;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe_line'::regclass
+                                                       AND attname = 'setpoints' AND NOT attisdropped) THEN
+        ALTER TABLE medcea.recipe_line ADD COLUMN setpoints jsonb NOT NULL DEFAULT '{}'::jsonb
+            CONSTRAINT recipe_line_setpoints_chk CHECK (jsonb_typeof(setpoints) = 'object');
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe_line'::regclass
+                                                   AND attname = 'air_temperature_lower_limit' AND NOT attisdropped) THEN
+        EXECUTE $q$
+        WITH src AS (
+            SELECT l.recipe_id, l.recipe_item_seq_id,
+                   jsonb_strip_nulls(jsonb_build_object(
+                     'air_temperature', CASE WHEN l.air_temperature_lower_limit IS NOT NULL AND l.air_temperature_upper_limit IS NOT NULL
+                          THEN jsonb_build_object('lower', l.air_temperature_lower_limit, 'upper', l.air_temperature_upper_limit) END,
+                     'air_humidity', CASE WHEN l.hr_lower_limit IS NOT NULL AND l.hr_upper_limit IS NOT NULL
+                          THEN jsonb_build_object('lower', l.hr_lower_limit, 'upper', l.hr_upper_limit) END,
+                     'co2', CASE WHEN l.co2_lower_limit IS NOT NULL AND l.co2_upper_limit IS NOT NULL
+                          THEN jsonb_build_object('lower', l.co2_lower_limit, 'upper', l.co2_upper_limit) END,
+                     'substrate_temperature', CASE WHEN l.substrate_temperature_lower_limit IS NOT NULL AND l.substrate_temperature_upper_limit IS NOT NULL
+                          THEN jsonb_build_object('lower', l.substrate_temperature_lower_limit, 'upper', l.substrate_temperature_upper_limit) END)) AS sp
+              FROM medcea.recipe_line l
+             WHERE l.setpoints = '{}'::jsonb
+               AND (l.air_temperature_lower_limit IS NOT NULL OR l.hr_lower_limit IS NOT NULL OR l.co2_lower_limit IS NOT NULL
+                    OR l.substrate_temperature_lower_limit IS NOT NULL))
+        UPDATE medcea.recipe_line l SET setpoints = src.sp
+          FROM src WHERE src.recipe_id = l.recipe_id AND src.recipe_item_seq_id = l.recipe_item_seq_id
+        $q$;
+        -- the proof: every line's limit columns read back from its setpoints
+        EXECUTE $q$
+        SELECT count(*) FROM medcea.recipe_line l
+         WHERE (l.air_temperature_lower_limit IS NOT NULL OR l.hr_lower_limit IS NOT NULL OR l.co2_lower_limit IS NOT NULL
+                OR l.substrate_temperature_lower_limit IS NOT NULL)
+           AND ((l.setpoints #>> '{air_temperature,lower}')::numeric IS DISTINCT FROM l.air_temperature_lower_limit
+             OR (l.setpoints #>> '{air_temperature,upper}')::numeric IS DISTINCT FROM l.air_temperature_upper_limit
+             OR (l.setpoints #>> '{air_humidity,lower}')::numeric IS DISTINCT FROM l.hr_lower_limit
+             OR (l.setpoints #>> '{air_humidity,upper}')::numeric IS DISTINCT FROM l.hr_upper_limit
+             OR (l.setpoints #>> '{co2,lower}')::numeric IS DISTINCT FROM l.co2_lower_limit
+             OR (l.setpoints #>> '{co2,upper}')::numeric IS DISTINCT FROM l.co2_upper_limit
+             OR ((l.setpoints #>> '{substrate_temperature,lower}')::numeric IS DISTINCT FROM l.substrate_temperature_lower_limit
+                 AND (l.substrate_temperature_upper_limit IS NOT NULL))
+             OR ((l.setpoints #>> '{substrate_temperature,upper}')::numeric IS DISTINCT FROM l.substrate_temperature_upper_limit
+                 AND (l.substrate_temperature_lower_limit IS NOT NULL)))
+        $q$ INTO bad;
+        IF bad > 0 THEN
+            RAISE EXCEPTION 'migration 011: % recipe line(s) whose setpoints do not read back as their limit columns', bad
+                USING ERRCODE = 'XX000';
+        END IF;
+        FOREACH c IN ARRAY ARRAY['air_temperature_lower_limit', 'air_temperature_upper_limit', 'co2_lower_limit', 'co2_upper_limit',
+                                 'hr_lower_limit', 'hr_upper_limit'] LOOP
+            IF (SELECT attnotnull FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe_line'::regclass AND attname = c) THEN
+                EXECUTE format('ALTER TABLE medcea.recipe_line ALTER COLUMN %I DROP NOT NULL', c);
+            END IF;
+        END LOOP;
+    END IF;
+END $$;
+
+-- 6. Guards
+-- _recipe_quantities(recipe): the quantities of the recipe's type, keyed by code:
+-- {required, min, max, label, unit}. INVOKER, for the definer functions below.
+CREATE OR REPLACE FUNCTION medcea._recipe_quantities(p_recipe_type text) RETURNS jsonb
+    LANGUAGE sql STABLE SET search_path = medcea, pg_temp AS $$
+    SELECT coalesce(jsonb_object_agg(c.quantity_code, jsonb_build_object(
+               'required', x.required, 'min', c.min_value, 'max', c.max_value, 'label', c.label, 'unit', c.unit)), '{}'::jsonb)
+      FROM medcea.recipe_type t
+      JOIN medcea.recipe_type_quantity x ON x.recipe_type_id = t.recipe_type_id
+      JOIN medcea.control_quantity c ON c.quantity_id = x.quantity_id
+     WHERE t.recipe_type_code = p_recipe_type
+$$;
+REVOKE ALL ON FUNCTION medcea._recipe_quantities(text) FROM PUBLIC;
+
+-- recipe_line_setpoints_guard(): a line's setpoints are {quantity: {lower, upper}}
+-- with every quantity one of its recipe type's, numbers within the catalogue's
+-- range, lower <= upper; the eight limit columns are read-only (a new line has
+-- none). Structural: raises in both modes (22023). SECURITY DEFINER: the writer
+-- may not read the catalogue.
+CREATE OR REPLACE FUNCTION medcea.recipe_line_setpoints_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE
+    qs     jsonb;
+    k      text;
+    v      jsonb;
+    lo     numeric;
+    hi     numeric;
+    legacy text[] := ARRAY['air_temperature_lower_limit', 'air_temperature_upper_limit', 'co2_lower_limit', 'co2_upper_limit',
+                           'hr_lower_limit', 'hr_upper_limit', 'substrate_temperature_lower_limit', 'substrate_temperature_upper_limit'];
+    nj     jsonb := to_jsonb(NEW);
+    oj     jsonb;
+    c      text;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN oj := to_jsonb(OLD); END IF;
+    FOREACH c IN ARRAY legacy LOOP
+        IF nj ? c AND ((TG_OP = 'INSERT' AND (nj -> c) <> 'null'::jsonb)
+                       OR (TG_OP = 'UPDATE' AND (nj -> c) IS DISTINCT FROM (oj -> c))) THEN
+            RAISE EXCEPTION 'recipe_line.%: the limit columns are read-only since migration 011; write setpoints {"<quantity>": {"lower": …, "upper": …}}', c
+                USING ERRCODE = '22023';
+        END IF;
+    END LOOP;
+    IF TG_OP = 'UPDATE' AND NEW.setpoints IS NOT DISTINCT FROM OLD.setpoints AND NEW.recipe_id = OLD.recipe_id THEN
+        RETURN NEW;
+    END IF;
+    qs := medcea._recipe_quantities((SELECT r.recipe_type::text FROM medcea.recipe r WHERE r.recipe_id = NEW.recipe_id));
+    FOR k, v IN SELECT key, value FROM jsonb_each(NEW.setpoints) LOOP
+        IF NOT qs ? k THEN
+            RAISE EXCEPTION 'recipe_line setpoints: % is not a quantity of the recipe''s type (%)', left(k, 60),
+                (SELECT string_agg(y, ', ' ORDER BY y) FROM jsonb_object_keys(qs) y) USING ERRCODE = '22023';
+        END IF;
+        IF jsonb_typeof(v) IS DISTINCT FROM 'object' OR jsonb_typeof(v -> 'lower') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(v -> 'upper') IS DISTINCT FROM 'number'
+           OR EXISTS (SELECT 1 FROM jsonb_object_keys(v) y WHERE y NOT IN ('lower', 'upper')) THEN
+            RAISE EXCEPTION 'recipe_line setpoints: % must be {"lower": <number>, "upper": <number>}', k USING ERRCODE = '22023';
+        END IF;
+        lo := (v ->> 'lower')::numeric; hi := (v ->> 'upper')::numeric;
+        IF lo > hi THEN
+            RAISE EXCEPTION 'recipe_line setpoints: % lower % is above upper %', k, lo, hi USING ERRCODE = '22023';
+        END IF;
+        IF lo < (qs -> k ->> 'min')::numeric OR hi > (qs -> k ->> 'max')::numeric THEN
+            RAISE EXCEPTION 'recipe_line setpoints: % must be within % and % %', k, qs -> k ->> 'min', qs -> k ->> 'max', qs -> k ->> 'unit'
+                USING ERRCODE = '22023';
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION medcea.recipe_line_setpoints_guard() FROM PUBLIC;
+
+-- recipe_type_fixed(): a recipe changes type only while it has no lines.
+CREATE OR REPLACE FUNCTION medcea.recipe_type_fixed() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+BEGIN
+    IF NEW.recipe_type IS DISTINCT FROM OLD.recipe_type
+       AND EXISTS (SELECT 1 FROM medcea.recipe_line l WHERE l.recipe_id = NEW.recipe_id) THEN
+        RAISE EXCEPTION 'recipe %: its type is fixed once it has lines (copy it into a new recipe of the other type)', NEW.recipe_id
+            USING ERRCODE = '22023';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION medcea.recipe_type_fixed() FROM PUBLIC;
+
+-- recipe_type_match(): a recipe is permitted (allowed), scheduled or run (S, R)
+-- only on a unit of its type: a policy refusal (WARNING while false, 42501 true).
+CREATE OR REPLACE FUNCTION medcea.recipe_type_match() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE rt text; ut text; rname text; ucode text;
+BEGIN
+    -- one IF per table: PL/pgSQL resolves every NEW.<field> of an expression, so a
+    -- field of another table's row must never share one with the table test
+    IF TG_TABLE_NAME = 'recipe_unit_permission' THEN
+        IF NOT coalesce(NEW.allowed, true) THEN RETURN NEW; END IF;
+    ELSIF TG_TABLE_NAME = 'recipe_run' THEN
+        IF NOT (NEW.recipe_run_status::text IN ('S', 'R')) THEN RETURN NEW; END IF;
+    ELSIF TG_TABLE_NAME = 'schedule' THEN
+        IF NOT NEW.enabled OR NEW.retired_at IS NOT NULL THEN RETURN NEW; END IF;
+    END IF;
+    SELECT r.recipe_type::text, r.recipe_name INTO rt, rname FROM medcea.recipe r WHERE r.recipe_id = NEW.recipe_id;
+    SELECT u.unit_type, u.unit_code INTO ut, ucode FROM medcea.cea_unit u WHERE u.unit_id = NEW.unit_id;
+    IF rt IS NOT NULL AND ut IS NOT NULL AND rt <> ut THEN
+        PERFORM medcea_auth.policy_refuse(format('recipe_type: recipe %s is a %s recipe and unit %s a %s unit', rname, rt, ucode, ut));
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION medcea.recipe_type_match() FROM PUBLIC;
+
+-- approval_recipe_complete(): approving a recipe needs every required quantity of
+-- its type on every line. Structural (22023).
+CREATE OR REPLACE FUNCTION medcea.approval_recipe_complete() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE rid integer; rtype text; missing text;
+BEGIN
+    IF NEW.target <> 'medcea.recipe' OR NEW.action <> 'approve' THEN
+        RETURN NEW;
+    END IF;
+    rid := (NEW.row_key ->> 0)::integer;
+    SELECT recipe_type INTO rtype FROM medcea.recipe WHERE recipe_id = rid;
+    SELECT string_agg(format('line %s lacks %s', l.recipe_item_seq_id, c.quantity_code), '; '
+                      ORDER BY l.recipe_item_seq_id, c.ordinal) INTO missing
+      FROM medcea.recipe_line l
+      JOIN medcea.recipe_type t ON t.recipe_type_code = rtype
+      JOIN medcea.recipe_type_quantity x ON x.recipe_type_id = t.recipe_type_id AND x.required
+      JOIN medcea.control_quantity c ON c.quantity_id = x.quantity_id
+     WHERE l.recipe_id = rid AND NOT l.setpoints ? c.quantity_code;
+    IF missing IS NOT NULL THEN
+        RAISE EXCEPTION 'approve_recipe: recipe % misses required setpoints: %', rid, missing USING ERRCODE = '22023';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION medcea.approval_recipe_complete() FROM PUBLIC;
+
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT * FROM (VALUES
+            ('medcea.recipe_line', 'recipe_line_setpoints_trg', 'BEFORE INSERT OR UPDATE', 'medcea.recipe_line_setpoints_guard()'),
+            ('medcea.recipe', 'recipe_type_fixed_trg', 'BEFORE UPDATE OF recipe_type', 'medcea.recipe_type_fixed()'),
+            ('medcea.recipe_unit_permission', 'recipe_type_match_trg', 'BEFORE INSERT OR UPDATE', 'medcea.recipe_type_match()'),
+            ('medcea.schedule', 'recipe_type_match_trg', 'BEFORE INSERT OR UPDATE', 'medcea.recipe_type_match()'),
+            ('medcea.recipe_run', 'recipe_type_match_trg', 'BEFORE INSERT OR UPDATE OF recipe_id, unit_id, recipe_run_status', 'medcea.recipe_type_match()'),
+            ('medcea.approval', 'approval_recipe_complete_trg', 'BEFORE INSERT', 'medcea.approval_recipe_complete()')) v(rel, name, timing, fn) LOOP
+        IF pg_catalog.to_regclass(r.rel) IS NULL THEN CONTINUE; END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = pg_catalog.to_regclass(r.rel) AND tgname = r.name) THEN
+            EXECUTE format('CREATE TRIGGER %I %s ON %s FOR EACH ROW EXECUTE FUNCTION %s', r.name, r.timing, r.rel, r.fn);
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = pg_catalog.to_regclass(r.rel) AND tgname = r.name
+                                                       AND tgenabled <> 'A') THEN
+            EXECUTE format('ALTER TABLE %s ENABLE ALWAYS TRIGGER %I', r.rel, r.name);
+        END IF;
+    END LOOP;
+END $$;
+
+-- 7. control_loop: loop_code is a quantity; input and output may each be NULL
+--    (a half-bound loop; live once both are set)
+DO $$
+DECLARE def text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = 'medcea.control_loop'::regclass
+                                                          AND conname = 'control_loop_quantity_fkey') THEN
+        ALTER TABLE medcea.control_loop ADD CONSTRAINT control_loop_quantity_fkey
+            FOREIGN KEY (loop_code) REFERENCES medcea.control_quantity(quantity_code);
+    END IF;
+    IF (SELECT attnotnull FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.control_loop'::regclass AND attname = 'input') THEN
+        FOREACH def IN ARRAY ARRAY['input', 'output'] LOOP
+            EXECUTE format('ALTER TABLE medcea.control_loop ALTER COLUMN %I DROP NOT NULL', def);
+        END LOOP;
+        SELECT pg_catalog.pg_get_constraintdef(oid) INTO def FROM pg_catalog.pg_constraint
+         WHERE conrelid = 'medcea.control_loop'::regclass AND conname = 'control_loop_input_chk';
+        ALTER TABLE medcea.control_loop DROP CONSTRAINT control_loop_input_chk;
+        EXECUTE 'ALTER TABLE medcea.control_loop ADD CONSTRAINT control_loop_input_chk CHECK (input IS NULL OR '
+                || substr(def, 7) || ')';
+        SELECT pg_catalog.pg_get_constraintdef(oid) INTO def FROM pg_catalog.pg_constraint
+         WHERE conrelid = 'medcea.control_loop'::regclass AND conname = 'control_loop_output_chk';
+        ALTER TABLE medcea.control_loop DROP CONSTRAINT control_loop_output_chk;
+        EXECUTE 'ALTER TABLE medcea.control_loop ADD CONSTRAINT control_loop_output_chk CHECK (output IS NULL OR '
+                || substr(def, 7) || ')';
+        ALTER TABLE medcea.control_loop ADD CONSTRAINT control_loop_half_chk
+            CHECK (is_active = 'N' OR input IS NOT NULL OR output IS NOT NULL);
+    END IF;
+END $$;
+
+-- 8. The views carry the setpoints (appended; 012 drops the limit columns)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.run_history'::regclass
+                                                       AND attname = 'setpoints' AND NOT attisdropped) THEN
+        CREATE OR REPLACE VIEW medcea.run_history WITH (security_invoker = true) AS
+         SELECT r.recipe_id, r.recipe_name, r.recipe_description, rl.recipe_item_seq_name, rl.recipe_item_seq_id,
+            rl.cycle_number, rlcr.recipe_item_seq_cycle_num, rlcr.recipe_line_seq_cycle_run_start,
+            COALESCE(rlcr.recipe_line_seq_cycle_run_end, rlcr.recipe_line_seq_cycle_run_start) AS recipe_line_seq_cycle_run_end,
+            rl.air_temperature_lower_limit, rl.air_temperature_upper_limit, rl.light_type, rl.light_on_minutes,
+            rl.light_off_minutes, rl.co2_lower_limit, rl.co2_upper_limit, rl.hr_lower_limit, rl.hr_upper_limit,
+            rl.substrate_temperature_lower_limit, rl.substrate_temperature_upper_limit, rr.recipe_run_id, rr.unit_id,
+            rl.setpoints
+           FROM (((medcea.recipe r
+             JOIN medcea.recipe_line rl ON ((r.recipe_id = rl.recipe_id)))
+             JOIN medcea.recipe_run rr ON ((rr.recipe_id = r.recipe_id)))
+             LEFT JOIN medcea.recipe_line_cycle_run rlcr ON (((rr.recipe_run_id = rlcr.recipe_run_id) AND (rl.recipe_id = rlcr.recipe_id) AND (rl.recipe_item_seq_id = rlcr.recipe_item_seq_id))))
+          ORDER BY rl.recipe_id, rl.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.run_watch'::regclass
+                                                       AND attname = 'setpoints' AND NOT attisdropped) THEN
+        CREATE OR REPLACE VIEW medcea.run_watch WITH (security_invoker = true) AS
+         SELECT r.recipe_id, r.recipe_name, r.recipe_description, rl.recipe_item_seq_name, rl.recipe_item_seq_id,
+            rl.cycle_number, rlcr.recipe_item_seq_cycle_num, rlcr.recipe_line_seq_cycle_run_start,
+            rlcr.recipe_line_seq_cycle_run_end,
+            rl.air_temperature_lower_limit, rl.air_temperature_upper_limit, rl.light_type, rl.light_on_minutes,
+            rl.light_off_minutes, rl.co2_lower_limit, rl.co2_upper_limit, rl.hr_lower_limit, rl.hr_upper_limit,
+            rl.substrate_temperature_lower_limit, rl.substrate_temperature_upper_limit, rr.recipe_run_id, rr.unit_id,
+            rl.setpoints
+           FROM (((medcea.recipe r
+             JOIN medcea.recipe_line rl ON ((r.recipe_id = rl.recipe_id)))
+             JOIN medcea.recipe_run rr ON ((rr.recipe_id = r.recipe_id)))
+             LEFT JOIN medcea.recipe_line_cycle_run rlcr ON (((rr.recipe_run_id = rlcr.recipe_run_id) AND (rl.recipe_id = rlcr.recipe_id) AND (rl.recipe_item_seq_id = rlcr.recipe_item_seq_id))))
+          WHERE ((rr.recipe_run_status)::text <> 'C'::text)
+          ORDER BY rl.recipe_id, rl.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num;
+    END IF;
+END $$;
+
+-- 9. The loop functions, now driven by the catalogue (010 re-creates its own
+--    bodies first on every deploy; these replace them in the same deploy).
+-- _loop_quantities(): every quantity, keyed by code: {tag (the default sense
+-- tag), label, unit, sense_uoms, commands, command_map?, phase, loopable}.
+CREATE OR REPLACE FUNCTION medcea._loop_quantities() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+    SELECT coalesce(jsonb_object_agg(c.quantity_code, jsonb_strip_nulls(jsonb_build_object(
+               'tag', c.default_tag, 'label', c.label, 'unit', c.unit, 'sense_uoms', to_jsonb(c.sense_uoms),
+               'commands', to_jsonb(c.commands), 'command_map', c.command_map, 'phase', c.phase,
+               'loopable', c.loopable, 'min', c.min_value, 'max', c.max_value, 'ordinal', c.ordinal))), '{}'::jsonb)
+      FROM medcea.control_quantity c
+$$;
+REVOKE ALL ON FUNCTION medcea._loop_quantities() FROM PUBLIC;
+
+-- _unit_quantities(unit): the quantities of the unit's recipe type, as
+-- _loop_quantities() plus required.
+CREATE OR REPLACE FUNCTION medcea._unit_quantities(p_unit_id integer) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+    SELECT coalesce(jsonb_object_agg(c.quantity_code, (medcea._loop_quantities() -> c.quantity_code)
+                                                      || jsonb_build_object('required', x.required)), '{}'::jsonb)
+      FROM medcea.cea_unit u
+      JOIN medcea.recipe_type t ON t.recipe_type_code = u.unit_type
+      JOIN medcea.recipe_type_quantity x ON x.recipe_type_id = t.recipe_type_id
+      JOIN medcea.control_quantity c ON c.quantity_id = x.quantity_id
+     WHERE u.unit_id = p_unit_id
+$$;
+REVOKE ALL ON FUNCTION medcea._unit_quantities(integer) FROM PUBLIC;
+
+-- _zone_inventory(zone): 010's, plus each named sensor's uoms {tag: UoM} and each
+-- actuator's declared quantity (parameters.actuator_definitions.<a>.quantity).
+CREATE OR REPLACE FUNCTION medcea._zone_inventory(p_zone_id integer, OUT sensors jsonb, OUT old_boards jsonb,
+                                                  OUT problems jsonb, OUT actuators jsonb)
+    LANGUAGE plpgsql STABLE SET search_path = medcea, pg_temp AS $$
+BEGIN
+    WITH comp AS (
+        SELECT d.device_id, d.dns_name::text AS dns_name, c.component_id, c.model::text AS model,
+               CASE WHEN json_typeof(c.parameters) = 'object' THEN c.parameters::jsonb ELSE '{}'::jsonb END AS p
+          FROM medcea.device d JOIN medcea.component c ON c.device_id = d.device_id
+         WHERE d.zone_id = p_zone_id AND coalesce(d.is_active, 'Y') = 'Y' AND upper(d.device_type) = 'SENSE'
+           AND upper(coalesce(c.component_type, '')) = 'SENSE' AND coalesce(c.is_active, 'Y') = 'Y'
+    ), tg AS (
+        SELECT comp.*, t ->> 'tag' AS tag, t ->> 'topic' AS topic, string_to_array(t ->> 'topic', '/') AS seg,
+               nullif(t ->> 'UoM', '') AS uom,
+               CASE WHEN jsonb_typeof(comp.p -> 'instance') = 'string' THEN comp.p ->> 'instance' END AS declared
+          FROM comp CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(comp.p -> 'tags') = 'array'
+                                                                THEN comp.p -> 'tags' ELSE '[]'::jsonb END) t
+         WHERE jsonb_typeof(t -> 'tag') = 'string' AND jsonb_typeof(t -> 'topic') = 'string'
+    ), cls AS (
+        SELECT tg.*,
+               CASE WHEN cardinality(tg.seg) = 5 AND tg.seg[4] = 'sense' AND tg.seg[5] = tg.tag THEN 'old'
+                    WHEN cardinality(tg.seg) <> 6 OR tg.seg[4] <> 'sense' OR tg.seg[5] <> tg.tag THEN 'bad'
+                    WHEN tg.seg[6] = 'default' THEN 'reserved'
+                    WHEN tg.seg[6] !~ '^[a-z][a-z0-9_]*$' THEN 'bad'
+                    WHEN tg.declared IS NOT NULL AND tg.declared <> tg.seg[6] THEN 'mismatch'
+                    ELSE 'named' END AS kind,
+               CASE WHEN cardinality(tg.seg) = 6 THEN tg.seg[6] END AS inst
+          FROM tg
+    )
+    SELECT (SELECT coalesce(jsonb_agg(jsonb_build_object('instance', s.inst, 'driver', s.driver, 'model', s.model,
+                                                         'component_id', s.component_id, 'device_id', s.device_id,
+                                                         'dns_name', s.dns_name, 'tags', s.tags, 'uoms', s.uoms) ORDER BY s.inst), '[]'::jsonb)
+              FROM (SELECT x.inst, min(x.p ->> 'driver') AS driver, min(x.model) AS model, min(x.component_id) AS component_id,
+                           min(x.device_id) AS device_id, min(x.dns_name) AS dns_name,
+                           jsonb_agg(DISTINCT x.tag ORDER BY x.tag) AS tags,
+                           jsonb_object_agg(x.tag, x.uom) AS uoms
+                      FROM cls x WHERE x.kind = 'named' GROUP BY x.inst
+                    HAVING count(DISTINCT x.component_id) = 1) s),
+           (SELECT coalesce(jsonb_agg(jsonb_build_object('component_id', o.component_id, 'device_id', o.device_id,
+                                                         'dns_name', o.dns_name, 'driver', o.driver, 'tags', o.tags)
+                                      ORDER BY o.component_id), '[]'::jsonb)
+              FROM (SELECT x.component_id, min(x.device_id) AS device_id, min(x.dns_name) AS dns_name,
+                           min(x.p ->> 'driver') AS driver, jsonb_agg(DISTINCT x.tag ORDER BY x.tag) AS tags
+                      FROM cls x WHERE x.kind = 'old' GROUP BY x.component_id) o),
+           (SELECT coalesce(jsonb_agg(q.msg ORDER BY q.msg), '[]'::jsonb)
+              FROM (SELECT CASE x.kind
+                             WHEN 'reserved' THEN format('component %s publishes %s as sensor default, a reserved name: re-onboard it with another sensor id',
+                                                         x.component_id, x.tag)
+                             WHEN 'mismatch' THEN format('component %s publishes %s as sensor %s but is named %s: re-onboard it',
+                                                         x.component_id, x.tag, x.inst, x.declared)
+                             ELSE format('component %s publishes %s on topic %s, not <root>/<unit>/<zone>/sense/<tag>/<sensor>',
+                                         x.component_id, x.tag, x.topic) END AS msg
+                      FROM cls x WHERE x.kind IN ('reserved', 'mismatch', 'bad')
+                    UNION
+                    SELECT format('sensor %s is named by components %s: re-onboard one of them',
+                                  x.inst, string_agg(DISTINCT x.component_id::text, ', '))
+                      FROM cls x WHERE x.kind = 'named' GROUP BY x.inst HAVING count(DISTINCT x.component_id) > 1) q)
+      INTO sensors, old_boards, problems;
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+               'actuator', e.key, 'component_id', c.component_id, 'device_id', d.device_id, 'dns_name', d.dns_name,
+               'kind', CASE WHEN jsonb_typeof(e.value -> 'commands') = 'object' THEN 'commands'
+                            WHEN jsonb_typeof(e.value -> 'types') = 'object' THEN 'types' ELSE 'unknown' END,
+               'commands', CASE WHEN jsonb_typeof(e.value -> 'commands') = 'object'
+                                THEN (SELECT coalesce(jsonb_agg(k ORDER BY k), '[]'::jsonb)
+                                        FROM jsonb_object_keys(e.value -> 'commands') k)
+                                ELSE '[]'::jsonb END,
+               'quantity', CASE WHEN jsonb_typeof(e.value -> 'quantity') = 'string' THEN e.value -> 'quantity' END)
+           ORDER BY e.key, c.component_id), '[]'::jsonb)
+      INTO actuators
+      FROM medcea.device d JOIN medcea.component c ON c.device_id = d.device_id
+     CROSS JOIN LATERAL (SELECT CASE WHEN json_typeof(c.parameters) = 'object' THEN c.parameters::jsonb
+                                     ELSE '{}'::jsonb END AS p) j
+     CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(j.p -> 'actuator_definitions') = 'object'
+                                        THEN j.p -> 'actuator_definitions' ELSE '{}'::jsonb END) e
+     WHERE d.zone_id = p_zone_id AND coalesce(d.is_active, 'Y') = 'Y' AND upper(d.device_type) = 'CONTROL'
+       AND upper(coalesce(c.component_type, '')) = 'ACTUATOR' AND coalesce(c.is_active, 'Y') = 'Y';
+END $$;
+REVOKE ALL ON FUNCTION medcea._zone_inventory(integer) FROM PUBLIC;
+
+-- _loop_check(loop, zone_code, sensors, actuators, quantities, half): every reason
+-- one loop is refused, each prefixed '<loop_code>: '. half: input (a SENSE
+-- onboarding: input only), output (a CONTROL onboarding: output only), both (each
+-- present half checked, at least one). The runner's loop_resolver.loop_problems
+-- and the wizard's loops.py/loops.js mirror these rules and texts:
+--   * loop_code a loopable quantity of `quantities`; <loop_code>@<zone_code> at
+--     most 50 characters; keys loop_code, input, output only;
+--   * input: keys tag, sources, rule, reference, fallback, max_age_s only; tag a
+--     tag name every source publishes, in one of the quantity's sense_uoms (a tag
+--     without a UoM passes); sources distinct named sensors of the zone, never
+--     'default'; rule reference|mean|min|max; reference => sources =
+--     [reference(, fallback)]; max_age_s an integer from 1 to 3600;
+--   * output: keys actuator, mode, command_map only; mode command; command_map
+--     exactly the quantity's when it has one, else none; the actuator a commands
+--     actuator of the zone taking every command the loop sends, and, when it
+--     declares a quantity, this one.
+CREATE OR REPLACE FUNCTION medcea._loop_check(p_loop jsonb, p_zone_code text, p_sensors jsonb, p_actuators jsonb,
+                                              p_quantities jsonb, p_half text)
+    RETURNS text[] LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    q     jsonb;
+    code  text;
+    pre   text;
+    errs  text[] := '{}';
+    inp   jsonb;
+    outp  jsonb;
+    x     jsonb;
+    k     text;
+    s     text;
+    tag   text;
+    uom   text;
+    srcs  text[] := '{}';
+    ref   text;
+    fb    text;
+    act   text;
+    aq    text;
+    need  text[];
+    n     numeric;
+BEGIN
+    IF jsonb_typeof(p_loop) IS DISTINCT FROM 'object' THEN
+        RETURN ARRAY['a loop must be a JSON object'];
+    END IF;
+    IF jsonb_typeof(p_loop -> 'loop_code') IS DISTINCT FROM 'string' THEN
+        RETURN ARRAY['a loop needs a loop_code'];
+    END IF;
+    code := p_loop ->> 'loop_code';
+    q := p_quantities -> code;
+    IF q IS NULL THEN
+        RETURN ARRAY[format('loop_code %s is not one of %s', left(code, 60),
+                            coalesce((SELECT string_agg(y, ', ' ORDER BY y) FROM jsonb_object_keys(p_quantities) y
+                                       WHERE (p_quantities -> y ->> 'loopable')::boolean), 'none'))];
+    END IF;
+    pre := code || ': ';
+    IF NOT coalesce((q ->> 'loopable')::boolean, false) THEN
+        RETURN ARRAY[pre || 'a setpoint only, without a feedback loop yet'];
+    END IF;
+    IF char_length(code) + 1 + char_length(coalesce(p_zone_code, '')) > 50 THEN
+        errs := errs || (pre || format('the runner''s state key %s@%s is longer than 50 characters', code, p_zone_code));
+    END IF;
+    FOR k IN SELECT jsonb_object_keys(p_loop) LOOP
+        IF k <> ALL (ARRAY['loop_code', 'input', 'output']) THEN
+            errs := errs || (pre || format('unknown key %s', left(k, 60)));
+        END IF;
+    END LOOP;
+    inp := p_loop -> 'input';
+    IF inp = 'null'::jsonb THEN inp := NULL; END IF;
+    outp := p_loop -> 'output';
+    IF outp = 'null'::jsonb THEN outp := NULL; END IF;
+    IF p_half = 'input' AND outp IS NOT NULL THEN
+        errs := errs || (pre || 'a SENSE onboarding sets the input only');
+    ELSIF p_half = 'output' AND inp IS NOT NULL THEN
+        errs := errs || (pre || 'a CONTROL onboarding sets the output only');
+    END IF;
+    IF p_half = 'input' AND inp IS NULL THEN
+        errs := errs || (pre || 'input must be an object');
+    ELSIF p_half = 'output' AND outp IS NULL THEN
+        errs := errs || (pre || 'output must be an object');
+    ELSIF p_half = 'both' AND inp IS NULL AND outp IS NULL THEN
+        errs := errs || (pre || 'a loop needs an input or an output');
+    END IF;
+
+    IF inp IS NOT NULL AND jsonb_typeof(inp) IS DISTINCT FROM 'object' THEN
+        errs := errs || (pre || 'input must be an object');
+    ELSIF inp IS NOT NULL THEN
+        FOR k IN SELECT jsonb_object_keys(inp) LOOP
+            IF k <> ALL (ARRAY['tag', 'sources', 'rule', 'reference', 'fallback', 'max_age_s']) THEN
+                errs := errs || (pre || format('unknown key input.%s', left(k, 60)));
+            END IF;
+        END LOOP;
+        IF jsonb_typeof(inp -> 'tag') IS DISTINCT FROM 'string' OR (inp ->> 'tag') !~ '^[a-z][a-z0-9_]*$' THEN
+            errs := errs || (pre || 'input.tag must be a tag name');
+        ELSE
+            tag := inp ->> 'tag';
+        END IF;
+        IF jsonb_typeof(inp -> 'sources') IS DISTINCT FROM 'array' THEN
+            errs := errs || (pre || 'input.sources must be a non-empty list of sensor names');
+        ELSIF jsonb_array_length(inp -> 'sources') = 0 THEN
+            errs := errs || (pre || 'input.sources must be a non-empty list of sensor names');
+        ELSE
+            FOR x IN SELECT e FROM jsonb_array_elements(inp -> 'sources') e LOOP
+                IF jsonb_typeof(x) IS DISTINCT FROM 'string' THEN
+                    errs := errs || (pre || 'input.sources must hold sensor names (strings)');
+                    CONTINUE;
+                END IF;
+                s := x #>> '{}';
+                IF s = ANY (srcs) THEN
+                    errs := errs || (pre || format('sensor %s is listed twice', left(s, 60)));
+                    CONTINUE;
+                END IF;
+                srcs := srcs || s;
+                IF s = 'default' THEN
+                    errs := errs || (pre || 'sensor default is reserved for readings without a sensor name (a board flashed before Phase 1): re-onboard the board and choose its named sensor');
+                ELSIF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(p_sensors, '[]'::jsonb)) e WHERE e ->> 'instance' = s) THEN
+                    errs := errs || (pre || format('sensor %s is not on an active SENSE board of zone %s', left(s, 60), p_zone_code));
+                ELSIF tag IS NOT NULL THEN
+                    IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(p_sensors, '[]'::jsonb)) e
+                                    WHERE e ->> 'instance' = s AND jsonb_typeof(e -> 'tags') = 'array' AND (e -> 'tags') ? tag) THEN
+                        errs := errs || (pre || format('sensor %s does not publish %s', s, tag));
+                    ELSE
+                        SELECT e -> 'uoms' ->> tag INTO uom FROM jsonb_array_elements(coalesce(p_sensors, '[]'::jsonb)) e
+                         WHERE e ->> 'instance' = s LIMIT 1;
+                        IF coalesce(uom, '') <> '' AND jsonb_typeof(q -> 'sense_uoms') = 'array'
+                           AND NOT (q -> 'sense_uoms') ? uom THEN
+                            errs := errs || (pre || format('sensor %s publishes %s in %s, not %s', s, tag, uom,
+                                (SELECT string_agg(y, ' or ' ORDER BY y) FROM jsonb_array_elements_text(q -> 'sense_uoms') y)));
+                        END IF;
+                    END IF;
+                END IF;
+            END LOOP;
+        END IF;
+        IF jsonb_typeof(inp -> 'rule') IS DISTINCT FROM 'string' THEN
+            errs := errs || (pre || 'input.rule must be one of reference, mean, min, max');
+        ELSIF (inp ->> 'rule') <> ALL (ARRAY['reference', 'mean', 'min', 'max']) THEN
+            errs := errs || (pre || 'input.rule must be one of reference, mean, min, max');
+        ELSIF inp ->> 'rule' = 'reference' THEN
+            IF jsonb_typeof(inp -> 'reference') IS DISTINCT FROM 'string' THEN
+                errs := errs || (pre || 'rule reference needs input.reference, one of the sources');
+            ELSE
+                ref := inp ->> 'reference';
+                IF NOT (ref = ANY (srcs)) THEN
+                    errs := errs || (pre || format('input.reference %s is not one of the sources', left(ref, 60)));
+                END IF;
+            END IF;
+            IF inp ? 'fallback' THEN
+                IF jsonb_typeof(inp -> 'fallback') IS DISTINCT FROM 'string' THEN
+                    errs := errs || (pre || 'input.fallback must be a sensor name');
+                ELSE
+                    fb := inp ->> 'fallback';
+                    IF fb = ref THEN
+                        errs := errs || (pre || 'input.fallback must be another sensor than the reference');
+                    ELSIF NOT (fb = ANY (srcs)) THEN
+                        errs := errs || (pre || format('input.fallback %s is not one of the sources', left(fb, 60)));
+                    END IF;
+                END IF;
+            END IF;
+            IF EXISTS (SELECT 1 FROM unnest(srcs) y WHERE y IS DISTINCT FROM ref AND y IS DISTINCT FROM fb) THEN
+                errs := errs || (pre || 'with rule reference, input.sources holds only the reference and the fallback');
+            END IF;
+        ELSIF inp ? 'reference' OR inp ? 'fallback' THEN
+            errs := errs || (pre || format('rule %s takes no reference or fallback', inp ->> 'rule'));
+        END IF;
+        IF inp ? 'max_age_s' THEN
+            IF jsonb_typeof(inp -> 'max_age_s') IS DISTINCT FROM 'number' THEN
+                errs := errs || (pre || 'input.max_age_s must be a whole number of seconds from 1 to 3600');
+            ELSE
+                n := (inp ->> 'max_age_s')::numeric;
+                IF n <> trunc(n) OR n < 1 OR n > 3600 THEN
+                    errs := errs || (pre || 'input.max_age_s must be a whole number of seconds from 1 to 3600');
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
+    IF outp IS NULL THEN
+        RETURN errs;
+    END IF;
+    IF jsonb_typeof(outp) IS DISTINCT FROM 'object' THEN
+        RETURN errs || (pre || 'output must be an object');
+    END IF;
+    FOR k IN SELECT jsonb_object_keys(outp) LOOP
+        IF k <> ALL (ARRAY['actuator', 'mode', 'command_map']) THEN
+            errs := errs || (pre || format('unknown key output.%s', left(k, 60)));
+        END IF;
+    END LOOP;
+    IF (outp -> 'mode') IS DISTINCT FROM '"command"'::jsonb THEN
+        errs := errs || (pre || 'output.mode must be command (level and boost need Phase 3''s PWM outputs)');
+    END IF;
+    IF jsonb_typeof(q -> 'command_map') = 'object' THEN
+        IF (outp -> 'command_map') IS DISTINCT FROM (q -> 'command_map') THEN
+            errs := errs || (pre || format('output.command_map must be exactly %s', (q -> 'command_map')::text));
+        END IF;
+        need := ARRAY(SELECT DISTINCT v FROM jsonb_each_text(q -> 'command_map') m(c, v) ORDER BY v);
+    ELSE
+        IF outp ? 'command_map' THEN
+            errs := errs || (pre || 'output.command_map is only for a quantity whose catalogue entry has one');
+        END IF;
+        need := ARRAY(SELECT jsonb_array_elements_text(coalesce(q -> 'commands', '["DOWN","OFF","UP"]'::jsonb)) ORDER BY 1);
+    END IF;
+    IF jsonb_typeof(outp -> 'actuator') IS DISTINCT FROM 'string' THEN
+        errs := errs || (pre || 'output.actuator must be an actuator name');
+    ELSIF (outp ->> 'actuator') !~ '^[A-Za-z0-9_]+$' THEN
+        errs := errs || (pre || 'output.actuator must be an actuator name');
+    ELSE
+        act := outp ->> 'actuator';
+        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(p_actuators, '[]'::jsonb)) e WHERE e ->> 'actuator' = act) THEN
+            errs := errs || (pre || format('actuator %s is not on an active CONTROL board of zone %s', act, p_zone_code));
+        ELSIF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(p_actuators, '[]'::jsonb)) e
+                           WHERE e ->> 'actuator' = act AND e ->> 'kind' = 'commands'
+                             AND jsonb_typeof(e -> 'commands') = 'array' AND (e -> 'commands') ?& need) THEN
+            errs := errs || (pre || format('actuator %s does not take every command the loop sends (%s)',
+                                           act, array_to_string(need, ', ')));
+        ELSE
+            SELECT e ->> 'quantity' INTO aq FROM jsonb_array_elements(coalesce(p_actuators, '[]'::jsonb)) e
+             WHERE e ->> 'actuator' = act AND e ->> 'quantity' IS NOT NULL LIMIT 1;
+            IF aq IS NOT NULL AND aq <> code THEN
+                errs := errs || (pre || format('actuator %s acts on %s, not %s', act, aq, code));
+            END IF;
+        END IF;
+    END IF;
+    RETURN errs;
+END $$;
+REVOKE ALL ON FUNCTION medcea._loop_check(jsonb, text, jsonb, jsonb, jsonb, text) FROM PUBLIC;
+
+-- _loop_problems(): 010's signature, kept for its callers: _loop_check with every
+-- quantity and both halves.
+CREATE OR REPLACE FUNCTION medcea._loop_problems(p_loop jsonb, p_zone_code text, p_sensors jsonb, p_actuators jsonb)
+    RETURNS text[] LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+    SELECT medcea._loop_check(p_loop, p_zone_code, p_sensors, p_actuators, medcea._loop_quantities(), 'both')
+$$;
+REVOKE ALL ON FUNCTION medcea._loop_problems(jsonb, text, jsonb, jsonb) FROM PUBLIC;
+
+-- zone_loop_context(zone): 010's, plus the unit's recipe type and its quantities
+-- (allowed.quantities: those of the type), each loop's live flag (both halves
+-- set) and its problems against the type.
+CREATE OR REPLACE FUNCTION medcea.zone_loop_context(p_zone_id integer) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE
+    a      record;
+    z      record;
+    inv    record;
+    busy   record;
+    lp     record;
+    loops  jsonb := '[]'::jsonb;
+    qs     jsonb;
+    dep    boolean;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.sub IS NULL OR coalesce(btrim(a.person), '') = ''
+       OR NOT coalesce(a.source = 'token' OR a.source LIKE 'person via %', false) THEN
+        RAISE EXCEPTION 'zone_loop_context: a person''s own token is required' USING ERRCODE = '42501';
+    END IF;
+    IF medcea_auth.policy_holds(a.role, 'master_data', 'U') IS NULL THEN
+        RAISE EXCEPTION 'zone_loop_context: role % holds no U on master_data', a.role USING ERRCODE = '42501';
+    END IF;
+    SELECT cz.zone_id, cz.zone_code::text AS zone_code, cz.unit_id, cu.unit_code::text AS unit_code,
+           cu.unit_type::text AS recipe_type, coalesce(cz.is_active, 'Y') = 'Y' AS active
+      INTO z FROM medcea.cea_zone cz JOIN medcea.cea_unit cu ON cu.unit_id = cz.unit_id WHERE cz.zone_id = p_zone_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'zone_loop_context: no zone %', p_zone_id USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO inv FROM medcea._zone_inventory(p_zone_id);
+    SELECT * INTO busy FROM medcea._unit_busy(z.unit_id);
+    qs := medcea._unit_quantities(z.unit_id);
+    dep := pg_catalog.to_regclass('medcea.control_loop') IS NOT NULL;
+    IF dep THEN
+        FOR lp IN SELECT cl.loop_id AS id, cl.loop_code::text AS code, cl.input AS inp, cl.output AS outp
+                    FROM medcea.control_loop cl WHERE cl.zone_id = p_zone_id AND cl.is_active = 'Y'
+                   ORDER BY cl.loop_code LOOP
+            loops := loops || jsonb_build_object(
+                'loop_id', lp.id, 'loop_code', lp.code, 'input', lp.inp, 'output', lp.outp,
+                'live', lp.inp IS NOT NULL AND lp.outp IS NOT NULL,
+                'problems', to_jsonb(medcea._loop_check(
+                    jsonb_build_object('loop_code', lp.code)
+                    || CASE WHEN lp.inp IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('input', lp.inp) END
+                    || CASE WHEN lp.outp IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('output', lp.outp) END,
+                    z.zone_code, inv.sensors, inv.actuators, qs, 'both')));
+        END LOOP;
+    END IF;
+    RETURN jsonb_build_object(
+        'zone_id', z.zone_id, 'zone_code', z.zone_code, 'unit_id', z.unit_id, 'unit_code', z.unit_code,
+        'recipe_type', z.recipe_type, 'active', z.active, 'deployed', dep,
+        'busy', CASE WHEN busy.run_id IS NULL THEN NULL
+                     ELSE jsonb_build_object('run_id', busy.run_id, 'run_status', busy.run_status) END,
+        'sensors', inv.sensors, 'old_boards', inv.old_boards, 'sensor_problems', inv.problems,
+        'actuators', inv.actuators, 'loops', loops,
+        'allowed', jsonb_build_object('rules', '["reference", "mean", "min", "max"]'::jsonb,
+                                      'modes', '["command"]'::jsonb,
+                                      'halves', '["input", "output", "both"]'::jsonb,
+                                      'quantities', qs,
+                                      'max_age_s', '{"min": 1, "max": 3600, "default": 90}'::jsonb));
+END $$;
+REVOKE ALL ON FUNCTION medcea.zone_loop_context(integer) FROM PUBLIC;
+
+-- save_zone_loops(zone, loops): p_loops is either a JSON array (half both: every
+-- loop the zone keeps; a code left out is deactivated) or {"half": "input" |
+-- "output" | "both", "loops": [...]}: a half save replaces only that half of the
+-- zone's loops (a listed code gets it, an unlisted one loses it) and leaves the
+-- other half as it is; a loop left with neither half is deactivated. A new code
+-- is inserted with the other half NULL (half-bound: the runner skips it until the
+-- other onboarding binds it). Order and refusals as 010's: token (42501), U on
+-- master_data, deployed (55000), zone FOR SHARE, unit FOR NO KEY UPDATE, every
+-- problem (22023, the list in DETAIL), nothing to change -> changed:false, a run
+-- in R or S (55006), then the writes.
+CREATE OR REPLACE FUNCTION medcea.save_zone_loops(p_zone_id integer, p_loops jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
+DECLARE
+    a       record;
+    z       record;
+    inv     record;
+    busy    record;
+    r       record;
+    l       jsonb;
+    lst     jsonb;
+    half    text;
+    qs      jsonb;
+    v_id    integer;
+    n_in    jsonb;
+    n_out   jsonb;
+    errs    text[] := '{}';
+    codes   text[] := '{}';
+    acts    text[] := '{}';
+    seen    text[] := '{}';
+    drops   integer[] := '{}';
+    upds    jsonb := '[]'::jsonb;
+    deact   jsonb := '[]'::jsonb;
+    updated jsonb := '[]'::jsonb;
+    same    jsonb := '[]'::jsonb;
+    ins     jsonb := '[]'::jsonb;
+    c       text;
+BEGIN
+    SELECT * INTO a FROM medcea_auth.request_actor();
+    IF a.sub IS NULL OR coalesce(btrim(a.person), '') = ''
+       OR NOT coalesce(a.source = 'token' OR a.source LIKE 'person via %', false) THEN
+        RAISE EXCEPTION 'save_zone_loops: a person''s own token is required' USING ERRCODE = '42501';
+    END IF;
+    IF medcea_auth.policy_holds(a.role, 'master_data', 'U') IS DISTINCT FROM 'free' THEN
+        RAISE EXCEPTION 'save_zone_loops: role % holds no U on master_data', a.role USING ERRCODE = '42501';
+    END IF;
+    IF pg_catalog.to_regclass('medcea.control_loop') IS NULL THEN
+        RAISE EXCEPTION 'save_zone_loops: medcea.control_loop is not deployed yet (./apps/database/deploy.sh after the policy version)'
+            USING ERRCODE = '55000';
+    END IF;
+    IF jsonb_typeof(p_loops) = 'array' THEN
+        half := 'both'; lst := p_loops;
+    ELSIF jsonb_typeof(p_loops) = 'object' AND jsonb_typeof(p_loops -> 'loops') = 'array'
+          AND p_loops ->> 'half' IN ('input', 'output', 'both')
+          AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(p_loops) y WHERE y NOT IN ('half', 'loops')) THEN
+        half := p_loops ->> 'half'; lst := p_loops -> 'loops';
+    ELSE
+        RAISE EXCEPTION 'save_zone_loops: the loops must be a JSON array, or {"half": "input"|"output"|"both", "loops": [...]}'
+            USING ERRCODE = '22023';
+    END IF;
+    IF jsonb_array_length(lst) > 16 THEN
+        RAISE EXCEPTION 'save_zone_loops: at most 16 loops' USING ERRCODE = '22023';
+    END IF;
+    SELECT cz.zone_id, cz.zone_code::text AS zone_code, cz.unit_id, coalesce(cz.is_active, 'Y') = 'Y' AS active
+      INTO z FROM medcea.cea_zone cz WHERE cz.zone_id = p_zone_id FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'save_zone_loops: no zone %', p_zone_id USING ERRCODE = '22023';
+    END IF;
+    IF NOT z.active THEN
+        RAISE EXCEPTION 'save_zone_loops: zone % is not active', z.zone_code USING ERRCODE = '22023';
+    END IF;
+    PERFORM 1 FROM medcea.cea_unit cu WHERE cu.unit_id = z.unit_id FOR NO KEY UPDATE;
+
+    SELECT * INTO inv FROM medcea._zone_inventory(p_zone_id);
+    qs := medcea._unit_quantities(z.unit_id);
+    FOR l IN SELECT e FROM jsonb_array_elements(lst) e LOOP
+        errs := errs || medcea._loop_check(l, z.zone_code, inv.sensors, inv.actuators, qs, half);
+        IF jsonb_typeof(l) = 'object' AND jsonb_typeof(l -> 'loop_code') = 'string' THEN
+            c := l ->> 'loop_code';
+            IF c = ANY (codes) THEN
+                errs := errs || format('%s: listed twice', c);
+            END IF;
+            codes := codes || c;
+            IF jsonb_typeof(l -> 'output') = 'object' AND jsonb_typeof(l -> 'output' -> 'actuator') = 'string' THEN
+                IF (l -> 'output' ->> 'actuator') = ANY (acts) THEN
+                    errs := errs || format('%s: actuator %s is driven by another loop of the zone', c, l -> 'output' ->> 'actuator');
+                END IF;
+                acts := acts || (l -> 'output' ->> 'actuator');
+            END IF;
+        END IF;
+    END LOOP;
+    IF cardinality(errs) > 0 THEN
+        RAISE EXCEPTION '%', 'save_zone_loops: ' || array_to_string(errs, '; ')
+            USING ERRCODE = '22023', DETAIL = array_to_json(errs)::text;
+    END IF;
+
+    -- plan without writing
+    FOR r IN SELECT cl.loop_id AS id, cl.loop_code::text AS code, cl.input AS inp, cl.output AS outp
+               FROM medcea.control_loop cl WHERE cl.zone_id = p_zone_id AND cl.is_active = 'Y'
+              ORDER BY cl.loop_id FOR UPDATE LOOP
+        seen := seen || r.code;
+        l := (SELECT e FROM jsonb_array_elements(lst) e WHERE e ->> 'loop_code' = r.code LIMIT 1);
+        IF half = 'input' THEN
+            n_in := CASE WHEN l IS NULL THEN NULL ELSE nullif(l -> 'input', 'null'::jsonb) END; n_out := r.outp;
+        ELSIF half = 'output' THEN
+            n_in := r.inp; n_out := CASE WHEN l IS NULL THEN NULL ELSE nullif(l -> 'output', 'null'::jsonb) END;
+        ELSIF l IS NULL THEN
+            n_in := NULL; n_out := NULL;
+        ELSE
+            n_in := nullif(l -> 'input', 'null'::jsonb); n_out := nullif(l -> 'output', 'null'::jsonb);
+        END IF;
+        IF n_in IS NULL AND n_out IS NULL THEN
+            drops := drops || r.id;
+            deact := deact || jsonb_build_object('loop_id', r.id, 'loop_code', r.code);
+        ELSIF (r.inp, r.outp) IS DISTINCT FROM (n_in, n_out) THEN
+            upds := upds || jsonb_build_object('loop_id', r.id, 'input', n_in, 'output', n_out);
+            updated := updated || jsonb_build_object('loop_id', r.id, 'loop_code', r.code);
+        ELSE
+            same := same || jsonb_build_object('loop_id', r.id, 'loop_code', r.code);
+        END IF;
+    END LOOP;
+    IF cardinality(drops) = 0 AND jsonb_array_length(upds) = 0 AND codes <@ seen THEN
+        RETURN jsonb_build_object('zone_id', z.zone_id, 'zone_code', z.zone_code, 'half', half, 'changed', false,
+                                  'inserted', '[]'::jsonb, 'updated', '[]'::jsonb, 'deactivated', '[]'::jsonb,
+                                  'unchanged', same);
+    END IF;
+
+    SELECT * INTO busy FROM medcea._unit_busy(z.unit_id);
+    IF busy.run_id IS NOT NULL THEN
+        RAISE EXCEPTION 'control_loop: unit % has run % in %; change its loops when no run is running or scheduled',
+                        (SELECT cu.unit_code FROM medcea.cea_unit cu WHERE cu.unit_id = z.unit_id),
+                        busy.run_id, busy.run_status USING ERRCODE = '55006';
+    END IF;
+
+    IF cardinality(drops) > 0 THEN
+        UPDATE medcea.control_loop SET is_active = 'N' WHERE loop_id = ANY (drops);
+    END IF;
+    FOR l IN SELECT e FROM jsonb_array_elements(upds) e LOOP
+        UPDATE medcea.control_loop
+           SET input = nullif(l -> 'input', 'null'::jsonb), output = nullif(l -> 'output', 'null'::jsonb)
+         WHERE loop_id = (l ->> 'loop_id')::integer;
+    END LOOP;
+    FOR l IN SELECT e FROM jsonb_array_elements(lst) e WHERE NOT ((e ->> 'loop_code') = ANY (seen)) LOOP
+        INSERT INTO medcea.control_loop (zone_id, loop_code, input, output)
+        VALUES (p_zone_id, l ->> 'loop_code',
+                CASE WHEN half = 'output' THEN NULL ELSE nullif(l -> 'input', 'null'::jsonb) END,
+                CASE WHEN half = 'input' THEN NULL ELSE nullif(l -> 'output', 'null'::jsonb) END)
+        RETURNING loop_id INTO v_id;
+        ins := ins || jsonb_build_object('loop_id', v_id, 'loop_code', l ->> 'loop_code');
+    END LOOP;
+    RETURN jsonb_build_object('zone_id', z.zone_id, 'zone_code', z.zone_code, 'half', half, 'changed', true,
+                              'inserted', ins, 'updated', updated, 'deactivated', deact, 'unchanged', same);
+END $$;
+REVOKE ALL ON FUNCTION medcea.save_zone_loops(integer, jsonb) FROM PUBLIC;
+
+-- 10. Ownership (the definer functions must be medcea_owner's; this block runs as it
+--     for its data steps, so the objects it created are already its own)
+RESET ROLE;
+DO $$
+DECLARE f regprocedure; t regclass;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['medcea.recipe_type'::regclass, 'medcea.control_quantity'::regclass,
+                             'medcea.recipe_type_quantity'::regclass] LOOP
+        IF (SELECT relowner FROM pg_catalog.pg_class WHERE oid = t) <> 'medcea_owner'::regrole THEN
+            EXECUTE pg_catalog.format('ALTER TABLE %s OWNER TO medcea_owner', t);
+        END IF;
+    END LOOP;
+    FOREACH f IN ARRAY ARRAY[pg_catalog.to_regprocedure('medcea._recipe_quantities(text)'),
+                             pg_catalog.to_regprocedure('medcea.recipe_line_setpoints_guard()'),
+                             pg_catalog.to_regprocedure('medcea.recipe_type_fixed()'),
+                             pg_catalog.to_regprocedure('medcea.recipe_type_match()'),
+                             pg_catalog.to_regprocedure('medcea.approval_recipe_complete()'),
+                             pg_catalog.to_regprocedure('medcea._loop_quantities()'),
+                             pg_catalog.to_regprocedure('medcea._unit_quantities(integer)'),
+                             pg_catalog.to_regprocedure('medcea._zone_inventory(integer)'),
+                             pg_catalog.to_regprocedure('medcea._loop_check(jsonb,text,jsonb,jsonb,jsonb,text)'),
+                             pg_catalog.to_regprocedure('medcea._loop_problems(jsonb,text,jsonb,jsonb)'),
+                             pg_catalog.to_regprocedure('medcea.zone_loop_context(integer)'),
+                             pg_catalog.to_regprocedure('medcea.save_zone_loops(integer,jsonb)')] LOOP
+        IF (SELECT proowner FROM pg_catalog.pg_proc WHERE oid = f) <> 'medcea_owner'::regrole THEN
+            EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO medcea_owner', f);
+        END IF;
+    END LOOP;
+END $$;
+
+COMMENT ON TABLE medcea.control_quantity IS 'The controlled quantities (migration 011): unit, sense UoMs, default sense tag, actuator commands, command map, phase, loopable, range. Seeded from apps/database/recipe_types.yaml by every database deploy; read by the runner (svc_scheduler) only.';
+COMMENT ON TABLE medcea.recipe_type IS 'The recipe types (PLANT, FUNGI): master templates of the recipes. cea_unit.unit_type and recipe.recipe_type name one. Seeded from apps/database/recipe_types.yaml.';
+COMMENT ON TABLE medcea.recipe_type_quantity IS 'Which quantities each recipe type sets; required ones must be on every line before approval. Seeded from apps/database/recipe_types.yaml.';
+COMMENT ON COLUMN medcea.recipe_line.setpoints IS '{"<quantity_code>": {"lower": n, "upper": n}} for the quantities of the recipe''s type (migration 011); the eight *_limit columns are read-only until migration 012 drops them.';
+COMMENT ON COLUMN medcea.control_loop.loop_code IS 'A loopable quantity of medcea.control_quantity (the runner''s state key, with @zone_code on a unit of several zones).';
+COMMENT ON COLUMN medcea.control_loop.input IS 'Set by a SENSE onboarding: {tag, sources: [sensor instance…], rule: reference|mean|min|max, reference?, fallback?, max_age_s?}; NULL until bound.';
+COMMENT ON COLUMN medcea.control_loop.output IS 'Set by a CONTROL onboarding: {actuator, mode: command, command_map? (the quantity''s)}; NULL until bound. The runner runs a loop with both halves set.';
+COMMENT ON FUNCTION medcea.save_zone_loops(integer, jsonb) IS 'Replaces a zone''s control loops: a JSON array (both halves, absent codes deactivated) or {half: input|output|both, loops} (only that half); refused while the unit has a run in R or S. U on master_data (policy version 2c).';
+
+NOTIFY pgrst, 'reload schema';
+
+INSERT INTO medcea.platform_setting (key, value) VALUES ('011:last_nonce', :'deploy_nonce')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 COMMIT;

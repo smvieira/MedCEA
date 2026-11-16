@@ -79,6 +79,11 @@ for _BG_FILE in "$REPO_ROOT/apps/portal/bg.jpg" "$REPO_ROOT/apps/portal/bg.png" 
 done
 _BG_TMP=$(mktemp)
 echo -n "${_BG_STYLE}" > "$_BG_TMP"
+# recipe-types.json (migration 011): the quantities' labels, units and default sense tags
+# (apps/database/recipe_types.yaml as JSON), served beside the page for the gauges
+_RT_JSON=$(mktemp)
+python3 "$REPO_ROOT/apps/database/recipe_types.py" json > "$_RT_JSON" || {
+    rm -f "$_RT_JSON" "$_BG_TMP"; echo "ERROR: apps/database/recipe_types.yaml is not valid (above)" >&2; exit 1; }
 python3 -c "
 import sys
 html  = open(sys.argv[1]).read()
@@ -87,8 +92,9 @@ sys.stdout.write(html.replace('__BG_STYLE__', style))
 " "$SCRIPT_DIR/html/monitor.html" "$_BG_TMP" \
   | $KUBECTL create configmap monitor-html -n "$NAMESPACE" \
     --from-file=index.html=/dev/stdin \
+    --from-file=recipe-types.json="$_RT_JSON" \
     --dry-run=client -o yaml > /tmp/monitor-html-cm.yaml
-rm -f "$_BG_TMP"
+rm -f "$_BG_TMP" "$_RT_JSON"
 $KUBECTL replace -f /tmp/monitor-html-cm.yaml 2>/dev/null || $KUBECTL create -f /tmp/monitor-html-cm.yaml
 rm -f /tmp/monitor-html-cm.yaml
 

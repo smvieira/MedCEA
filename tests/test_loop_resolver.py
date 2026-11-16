@@ -10,12 +10,14 @@ schd/cea/get_control_loops.py; owner decisions Q8, Q11, Q12, Q20 per zone).
   rule (one fresh sensor ok, two -> no_data + ambiguous_source, a stale 'default'
   ignored), F1 (substrate reads ground_temperature), F4 (no substring match), zone
   isolation, the start grace.
-- DefaultMap: one loop per quantity per zone, the exact recipe columns, F11's co2 map,
-  the same table as the database's _loop_quantities().
-- Validate: every rule of the database's _loop_problems but the zone inventory, in its
-  words (each runner message matches a literal of the migration's function, and every
-  non-inventory literal is produced); one loop per actuator; NULL limit columns warn.
-- Limits: a NULL recipe value or column makes the loop inactive.
+- DefaultMap: one loop per loopable quantity per zone, F11's co2 map, the actuator that
+  declares a quantity, the built-in quantities equal to apps/database/recipe_types.yaml.
+- Validate: every rule of the database's _loop_check (migration 011) but the zone
+  inventory and the half rules, in its words (each runner message matches a literal
+  of the migration's function, and every other literal is produced); one loop per
+  actuator; a non-loopable quantity (light_intensity) refused.
+- Limits: the recipe line's setpoints[loop_code]; a line without it is inactive;
+  in_phase holds a light_on loop while the light is off.
 - Decide: Q8 (no compute and never OFF on no_data; hold the last command).
 - Topics, StateKey, Alarms (ALARM, repeat after 300 s, ALARM_CLEARED, ambiguous_source).
 - GetControlLoops against a fake connection: table / default / mixed per zone, the
@@ -69,8 +71,7 @@ def table_loop(zone="Z01", code="air_humidity", sources=("sht45_1", "scd30_1"), 
     out = {"actuator": actuator or code, "mode": "command"}
     if "command_map" in q:
         out["command_map"] = dict(q["command_map"])
-    lp = {"zone_code": zone, "loop_id": 7, "loop_code": code,
-          "recipe_lower": q["recipe_lower"], "recipe_upper": q["recipe_upper"], "input": inp, "output": out}
+    lp = {"zone_code": zone, "loop_id": 7, "loop_code": code, "phase": q["phase"], "input": inp, "output": out}
     lp.update(extra)
     return lp
 
@@ -264,11 +265,9 @@ class DefaultMap(unittest.TestCase):
         self.assertEqual([l["zone_code"] for l in m], ["Z01"] * 4 + ["Z02"] * 4)
         by = {(l["zone_code"], l["loop_code"]): l for l in m}
         self.assertEqual({c for _, c in by}, {"air_temperature", "air_humidity", "co2", "substrate_temperature"})
-        h = by[("Z01", "air_humidity")]
-        self.assertEqual((h["recipe_lower"], h["recipe_upper"]), ("hr_lower_limit", "hr_upper_limit"))
         self.assertEqual(by[("Z01", "substrate_temperature")]["input"]["tag"], "ground_temperature")
-        self.assertEqual((by[("Z01", "air_temperature")]["recipe_lower"], by[("Z01", "co2")]["recipe_upper"]),
-                         ("air_temperature_lower_limit", "co2_upper_limit"))
+        self.assertTrue(all(l["phase"] == "always" for l in m))
+        self.assertNotIn("light_intensity", {l["loop_code"] for l in m})
         for l in m:
             self.assertEqual(l["input"]["sources"], "*")
             self.assertEqual(l["input"]["rule"], "single")
@@ -290,33 +289,53 @@ class DefaultMap(unittest.TestCase):
     def test_validates(self):
         self.assertEqual(lr.validate_loops(lr.build_default_map(["Z01", "Z02"])), ([], []))
 
-    def test_same_table_as_the_database(self):
-        sql = _read(MIGRATIONS)
-        m = re.search(r"FUNCTION medcea\._loop_quantities\(\).*?SELECT '(.*?)'::jsonb", sql, re.S)
-        self.assertIsNotNone(m)
-        self.assertEqual(json.loads(m.group(1)), lr.QUANTITIES)
+    def test_declared_actuator(self):
+        """A CONTROL board whose actuator declares a quantity drives that loop, whatever
+        its name; a quantity two actuators declare falls back to the name."""
+        acts = {"Z01": {"fan_a": {"quantity": "air_humidity", "commands": {}},
+                        "heat": {"quantity": "air_temperature"}, "heat2": {"quantity": "air_temperature"}}}
+        by = {l["loop_code"]: l for l in lr.build_default_map(["Z01"], None, acts)}
+        self.assertEqual(by["air_humidity"]["output"]["actuator"], "fan_a")
+        self.assertEqual(by["air_temperature"]["output"]["actuator"], "air_temperature")
+        self.assertEqual(lr.validate_loops(list(by.values())), ([], []))
 
-    def test_recipe_columns_exist(self):
-        ddl = _read(os.path.join(ROOT, "apps", "database", "medcea_db_ddl.sql"))
-        block = re.search(r"CREATE TABLE medcea\.recipe_line \((.*?)\n\);", ddl, re.S).group(1)
-        for col in lr.LIMIT_COLUMNS:
-            self.assertRegex(block, r"\b%s\b" % col)
+    def test_same_table_as_the_yaml(self):
+        """The built-in quantities are recipe_types.yaml's (the catalogue migration 011
+        seeds), in the shape get_control_loops reads from the database."""
+        import yaml
+        with open(os.path.join(ROOT, "apps", "database", "recipe_types.yaml"), encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+        want = {}
+        for q in doc["quantities"]:
+            d = {"tag": q["default_tag"], "sense_uoms": q["sense_uoms"], "commands": sorted(q["commands"]),
+                 "phase": q["phase"], "loopable": q["loopable"]}
+            if q.get("command_map"):
+                d["command_map"] = q["command_map"]
+            want[q["code"]] = d
+        self.assertEqual(want, lr.QUANTITIES)
+        self.assertEqual(list(want), list(lr.QUANTITIES))
+
+    def test_the_details_read_setpoints(self):
         details = _read(os.path.join(CEA, "get_recipe_line_item_seq_details.py"))
-        for col in lr.LIMIT_COLUMNS:
-            self.assertIn("'%s'" % col, details)
+        self.assertIn("setpoints", details)
+        self.assertNotIn("_lower_limit", details.split('"""', 2)[2])
 
 
 def _problem_literals():
-    """The message literals of medcea._loop_problems (migration 010), '' unescaped."""
+    """The message literals of medcea._loop_check (migration 011), '' unescaped."""
     sql = _read(MIGRATIONS)
-    body = re.search(r"FUNCTION medcea\._loop_problems\(.*?\$\$(.*?)END \$\$;", sql, re.S).group(1)
-    lits = re.findall(r"(?:\(pre \|\| |RETURN ARRAY\[)(?:format\()?'((?:[^']|'')*)'", body)
+    body = re.search(r"FUNCTION medcea\._loop_check\(.*?\$\$(.*?)END \$\$;", sql, re.S).group(1)
+    lits = re.findall(r"(?:\(pre \|\| |RETURN ARRAY\[(?:pre \|\| )?)(?:format\()?'((?:[^']|'')*)'", body)
     return {x.replace("''", "'") for x in lits}
 
 
 INVENTORY = {"sensor %s is not on an active SENSE board of zone %s", "sensor %s does not publish %s",
+             "sensor %s publishes %s in %s, not %s",
              "actuator %s is not on an active CONTROL board of zone %s",
-             "actuator %s does not take every command the loop sends (%s)"}
+             "actuator %s does not take every command the loop sends (%s)",
+             "actuator %s acts on %s, not %s"}
+HALVES = {"a SENSE onboarding sets the input only", "a CONTROL onboarding sets the output only",
+          "a loop needs an input or an output"}
 
 
 class Validate(unittest.TestCase):
@@ -340,18 +359,25 @@ class Validate(unittest.TestCase):
                            "loop_code foo is not one of air_humidity, air_temperature, co2, substrate_temperature")
         self.assertProblem(table_loop(loop_code=None), "a loop needs a loop_code")
 
-    def test_limits_tied_to_loop_code(self):
-        self.assertProblem(table_loop(recipe_lower="co2_lower_limit"), "air_humidity: recipe_lower must be hr_lower_limit")
-        self.assertProblem(table_loop(recipe_upper="x; DROP TABLE medcea.recipe"),
-                           "air_humidity: recipe_upper must be hr_upper_limit")
+    def test_not_loopable(self):
+        lp = table_loop()
+        lp["loop_code"] = "light_intensity"
+        self.assertProblem(lp, "light_intensity: a setpoint only, without a feedback loop yet")
+
+    def test_recipe_columns_are_gone(self):
+        row = {k: v for k, v in table_loop().items() if k in ("loop_code", "input", "output")}
+        self.assertIn("air_humidity: unknown key recipe_lower",
+                      lr.loop_problems(dict(row, recipe_lower="hr_lower_limit"), "Z01"))
 
     def test_tag(self):
+        """Any tag name the sources publish (the database checks the UoM); a renamed
+        SENSE tag feeds the loop."""
         lp = table_loop()
         lp["input"]["tag"] = "air_humidity_scd30"
-        self.assertProblem(lp, "air_humidity: input.tag must be air_humidity")
-        lp = table_loop(code="substrate_temperature")
-        lp["input"]["tag"] = "substrate_temperature"
-        self.assertProblem(lp, "input.tag must be ground_temperature")
+        self.assertEqual(self.errs(lp), [])
+        for bad in ("Air", "a/b", "", 3, None):
+            lp["input"]["tag"] = bad
+            self.assertProblem(lp, "air_humidity: input.tag must be a tag name")
 
     def test_sources(self):
         lp = table_loop()
@@ -406,7 +432,7 @@ class Validate(unittest.TestCase):
         self.assertProblem(lp, "output.command_map must be exactly")
         lp = table_loop()
         lp["output"]["command_map"] = CO2_MAP
-        self.assertProblem(lp, "air_humidity: output.command_map is only for co2")
+        self.assertProblem(lp, "air_humidity: output.command_map is only for a quantity whose catalogue entry has one")
 
     def test_unknown_keys(self):
         lp = table_loop()
@@ -459,11 +485,6 @@ class Validate(unittest.TestCase):
         self.assertTrue(lr.validate_loops(lr.build_default_map(["Z#"]))[0])
         self.assertEqual(lr.validate_loops([]), (["no control loops"], []))
 
-    def test_null_limit_column_is_a_warning(self):
-        errs, warns = lr.validate_loops([table_loop(recipe_lower=None)])
-        self.assertEqual(errs, [])
-        self.assertEqual(warns, ["zone Z01: air_humidity: recipe_lower is NULL: the loop is inactive"])
-
     def test_parity_with_the_migration(self):
         """Every runner message is a literal of _loop_problems (or save_zone_loops'
         two map-wide checks), and every non-inventory literal is produced."""
@@ -475,8 +496,9 @@ class Validate(unittest.TestCase):
         pats = {l: re.compile(re.escape(l).replace("%s", ".*")) for l in lits}
         bad = [
             "x", dict(table_loop(), loop_code=3), dict(table_loop(), loop_code="foo"),
-            dict(table_loop(zone="Z" * 40), extra=1, recipe_lower="a", recipe_upper="b", input=[1], output="x"),
-            dict(table_loop(), input={"tag": "t", "sources": "x", "rule": "r", "w": 1}),
+            dict(table_loop(zone="Z" * 40), extra=1, input=[1], output="x"),
+            dict(table_loop(), loop_code="light_intensity"),
+            dict(table_loop(), input={"tag": "T", "sources": "x", "rule": "r", "w": 1}),
             dict(table_loop(), input={"tag": "air_humidity", "sources": ["a", 1, "a", "default"], "rule": "reference",
                                       "reference": "q", "fallback": "z", "max_age_s": 0}),
             dict(table_loop(), input={"tag": "air_humidity", "sources": ["a"], "rule": "reference", "fallback": 1}),
@@ -488,7 +510,7 @@ class Validate(unittest.TestCase):
         ]
         produced, matched = [], set()
         for lp in bad:
-            row = {k: v for k, v in lp.items() if k not in ("zone_code", "loop_id")} if isinstance(lp, dict) else lp
+            row = {k: v for k, v in lp.items() if k not in ("zone_code", "loop_id", "phase")} if isinstance(lp, dict) else lp
             produced += lr.loop_problems(row, lp.get("zone_code", "Z01") if isinstance(lp, dict) else "Z01")
         for msg in produced:
             m = re.match(r"(?:[a-z_0-9]+: )?(.*)$", msg, re.S)
@@ -496,25 +518,31 @@ class Validate(unittest.TestCase):
             hits = [l for l, p in pats.items() if p.fullmatch(text)]
             self.assertTrue(hits, msg)
             matched.update(hits)
-        self.assertEqual(lits - INVENTORY - matched, set())
+        self.assertEqual(lits - INVENTORY - HALVES - matched, set())
 
 
 class Limits(unittest.TestCase):
     def test_values(self):
         lp = lr.default_loop("Z01", "air_humidity")
-        self.assertEqual(lr.limits(lp, {"hr_lower_limit": 70, "hr_upper_limit": 90}), (70.0, 90.0, None))
+        line = {"setpoints": {"air_humidity": {"lower": 70, "upper": 90}}}
+        self.assertEqual(lr.limits(lp, line), (70.0, 90.0, None))
+        self.assertEqual(lr.limits(lp, {"setpoints": json.dumps(line["setpoints"])}), (70.0, 90.0, None))
 
-    def test_null_recipe_value_inactive(self):
+    def test_missing_setpoint_inactive(self):
         lp = lr.default_loop("Z01", "substrate_temperature")
-        lo, hi, why = lr.limits(lp, {"substrate_temperature_lower_limit": None, "substrate_temperature_upper_limit": 20})
-        self.assertEqual((lo, hi), (None, None))
-        self.assertIn("substrate_temperature_lower_limit", why)
-        self.assertIn("inactive", why)
+        for line in ({"setpoints": {"air_humidity": {"lower": 1, "upper": 2}}}, {"setpoints": {}}, {},
+                     {"setpoints": {"substrate_temperature": {"lower": None, "upper": 20}}},
+                     {"substrate_temperature_lower_limit": 1, "substrate_temperature_upper_limit": 2}):
+            lo, hi, why = lr.limits(lp, line)
+            self.assertEqual((lo, hi), (None, None), line)
+            self.assertEqual(why, "the recipe line has no substrate_temperature setpoint: inactive")
 
-    def test_null_column_inactive(self):
-        lo, hi, why = lr.limits(table_loop(recipe_upper=None), {"hr_lower_limit": 1, "hr_upper_limit": 2})
-        self.assertIsNone(lo)
-        self.assertIn("inactive", why)
+    def test_phase(self):
+        self.assertTrue(lr.in_phase(lr.default_loop("Z01", "co2"), False))
+        lux = lr.default_loop("Z01", "light_intensity")
+        self.assertEqual(lux["phase"], "light_on")
+        self.assertTrue(lr.in_phase(lux, True))
+        self.assertFalse(lr.in_phase(lux, False))
 
 
 class FakeAlgo:
@@ -624,14 +652,20 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.conn.executed.append((sql, params))
-        if "to_regclass" in sql:
+        if "to_regclass('medcea.recipe_type_quantity')" in sql:
+            self.result = [(self.conn.has_catalogue,)]
+        elif "to_regclass" in sql:
             self.result = [(self.conn.has_table,)]
+        elif "medcea.control_quantity c" in sql:
+            self.result = [(code, q["tag"], q["sense_uoms"], q["commands"], q.get("command_map"), q["phase"],
+                            q["loopable"]) for code, q in self.conn.quantities.items()]
         elif "medcea.control_loop l" in sql:
             if self.conn.denied:
                 raise PermissionError("42501 permission denied for table control_loop")
             self.result = list(self.conn.rows)
         elif "component_type = 'ACTUATOR'" in sql:
-            self.result = [(z,) for z in self.conn.actuator_zones]
+            self.result = [(z, json.dumps({"actuator_definitions": self.conn.definitions.get(z, {})}))
+                           for z in self.conn.actuator_zones]
         else:
             raise AssertionError(sql)
 
@@ -646,8 +680,12 @@ class FakeCursor:
 
 
 class FakeConn:
-    def __init__(self, has_table=True, rows=(), actuator_zones=(), denied=False):
+    def __init__(self, has_table=True, rows=(), actuator_zones=(), denied=False, has_catalogue=True,
+                 quantities=None, definitions=None):
         self.has_table, self.rows, self.actuator_zones, self.denied = has_table, rows, actuator_zones, denied
+        self.has_catalogue = has_catalogue
+        self.quantities = lr.QUANTITIES if quantities is None else quantities
+        self.definitions = definitions or {}
         self.executed, self.rollbacks, self.closed_cursors = [], 0, 0
 
     def cursor(self):
@@ -657,9 +695,9 @@ class FakeConn:
         self.rollbacks += 1
 
 
-def row(lp):
-    return (lp["zone_code"], lp["loop_id"], lp["loop_code"], lp["recipe_lower"], lp["recipe_upper"],
-            lp["input"], json.dumps(lp["output"]))
+def row(lp, inp=True, out=True):
+    return (lp["zone_code"], lp["loop_id"], lp["loop_code"],
+            lp["input"] if inp else None, json.dumps(lp["output"]) if out else None)
 
 
 class GetControlLoops(unittest.TestCase):
@@ -695,7 +733,73 @@ class GetControlLoops(unittest.TestCase):
         res = gcl.get_control_loops(UNIT, conn)
         self.assertEqual(res["source"], "mixed")
         self.assertEqual([(l["zone_code"], l["loop_code"]) for l in res["loops"]],
-                         [("Z01", "air_humidity")] + [("Z02", c) for c in lr.QUANTITIES])
+                         [("Z01", "air_humidity")] + [("Z02", c) for c in lr.loopable(lr.QUANTITIES)])
+
+    def test_half_bound_rows_run_on_the_default_half(self):
+        """A row with only one onboarding's half runs with the default map's other half
+        (the zone ran on it before anyone chose), with a warning; the chosen half is
+        still validated."""
+        a = table_loop()
+        b = table_loop(code="co2", sources=("scd30_1",), reference="scd30_1", fallback=None)
+        c = table_loop(code="air_temperature", sources=("sht45_1",), reference="sht45_1", fallback=None,
+                       actuator="heat")
+        conn = FakeConn(rows=[row(a), row(b, out=False), row(c, inp=False)], actuator_zones=["Z01"],
+                        definitions={"Z01": {"fan": {"quantity": "co2"}, "heat": {"quantity": "air_temperature"}}})
+        res = gcl.get_control_loops(UNIT, conn)
+        by = {l["loop_code"]: l for l in res["loops"]}
+        self.assertEqual(sorted(by), ["air_humidity", "air_temperature", "co2"])
+        self.assertEqual(by["co2"]["output"], {"actuator": "fan", "mode": "command", "command_map": CO2_MAP})
+        self.assertEqual(by["co2"]["input"], b["input"])
+        self.assertEqual(by["co2"]["completed"], "output")
+        self.assertEqual(by["air_temperature"]["input"]["sources"], "*")
+        self.assertEqual(by["air_temperature"]["output"]["actuator"], "heat")
+        self.assertNotIn("completed", by["air_humidity"])
+        self.assertIn("zone Z01: loop co2 is half-bound: its output is the default map's (actuator fan) until a "
+                      "CONTROL onboarding chooses it", res["warnings"])
+        self.assertTrue(any("loop air_temperature is half-bound: its input is the default map's (every sensor of tag "
+                            "air_temperature" in w for w in res["warnings"]))
+        bad = dict(table_loop(code="co2", sources=("scd30_1",), reference="scd30_1", fallback=None))
+        bad["input"]["rule"] = "median"
+        with self.assertRaisesRegex(RuntimeError, "input.rule must be one of"):
+            gcl.get_control_loops(UNIT, FakeConn(rows=[row(bad, out=False)], actuator_zones=["Z01"],
+                                                 definitions={"Z01": {"co2": {}}}))
+
+    def test_completed_half_must_be_the_default(self):
+        lp = lr.complete_half(dict(table_loop(), output=None), None, {"air_humidity": {}})
+        self.assertEqual(lr.validate_loops([lp]), ([], []))
+        lp["output"] = {"actuator": "x", "mode": "command", "command_map": {}}
+        self.assertTrue(any("not the default map's output" in e for e in lr.validate_loops([lp])[0]))
+        self.assertIsNone(lr.complete_half(dict(table_loop(), input=None, output=None)))
+
+    def test_no_phantom_actuator(self):
+        """An input-only loop in a zone without an actuator for its quantity is not run
+        (nothing would listen); with one it is."""
+        lp = dict(table_loop(), output=None)
+        self.assertIsNone(lr.complete_half(lp, None, {}))
+        self.assertIsNone(lr.complete_half(lp, None, {"heat": {"quantity": "air_temperature"}}))
+        self.assertEqual(lr.complete_half(lp, None, {"air_humidity": {}})["output"]["actuator"], "air_humidity")
+        self.assertEqual(lr.complete_half(lp, None, {"fan": {"quantity": "air_humidity"}})["output"]["actuator"], "fan")
+        a = table_loop()
+        res = gcl.get_control_loops(UNIT, FakeConn(rows=[row(a, out=False), row(table_loop(zone="Z02"))],
+                                                   actuator_zones=["Z02"]))
+        self.assertEqual([(l["zone_code"], l["loop_code"]) for l in res["loops"]], [("Z02", "air_humidity")])
+        self.assertIn("zone Z01: loop air_humidity has its sensor but no actuator: the zone has no CONTROL board "
+                      "actuator for it yet: not run", res["warnings"])
+
+    def test_the_unit_types_quantities(self):
+        """Only the unit's recipe type's loopable quantities are defaulted; the
+        declared actuator drives its quantity."""
+        qs = {k: v for k, v in lr.QUANTITIES.items() if k in ("air_temperature", "co2", "light_intensity")}
+        res = gcl.get_control_loops(UNIT, FakeConn(actuator_zones=["Z01"], quantities=qs,
+                                                   definitions={"Z01": {"fan": {"quantity": "co2"}}}))
+        self.assertEqual([(l["loop_code"], l["output"]["actuator"]) for l in res["loops"]],
+                         [("air_temperature", "air_temperature"), ("co2", "fan")])
+        self.assertEqual(res["quantities"], qs)
+
+    def test_no_catalogue(self):
+        res = gcl.get_control_loops(UNIT, FakeConn(actuator_zones=["Z01"], has_catalogue=False))
+        self.assertTrue(any("catalogue is not deployed yet" in w for w in res["warnings"]))
+        self.assertEqual(res["loops"], lr.build_default_map(["Z01"]))
 
     def test_nothing(self):
         with self.assertRaisesRegex(RuntimeError, r"^No active actuator found for unit code: IAMT01$"):
@@ -726,7 +830,7 @@ class GetControlLoops(unittest.TestCase):
         for f in ("u.is_active = 'Y'", "z.is_active = 'Y'", "l.is_active = 'Y'", "u.unit_code = %s"):
             self.assertIn(f, rows_sql)
         for f in ("c.is_active = 'Y'", "component_type = 'ACTUATOR'", "z.is_active = 'Y'"):
-            self.assertIn(f, gcl.SQL_ACTUATOR_ZONES)
+            self.assertIn(f, gcl.SQL_ACTUATORS)
         src = _read(os.path.join(CEA, "get_control_loops.py"))
         self.assertNotRegex(src, r"execute\(\s*f[\"']")
         self.assertNotRegex(src, r"execute\([^)]*%\s*\(")

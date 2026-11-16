@@ -1579,10 +1579,15 @@ class WiringTest(unittest.TestCase):
         # each later migration (009, msg_type HB/TS) is a transaction of its own
         tail_9 = migrations[migrations.index("Migration 009"):migrations.index("Migration 010")]
         self.assertEqual(tail_9.count("BEGIN;"), tail_9.count("COMMIT;"))
-        tail_10 = migrations[migrations.index("Migration 010"):]
+        tail_10 = migrations[migrations.index("Migration 010"):migrations.index("Migration 011")]
         self.assertEqual((tail_10.count("BEGIN;"), tail_10.count("COMMIT;")), (1, 1))
         self.assertIn("'010:last_nonce', :'deploy_nonce'", tail_10)
         self.assertIn("key = '010:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
+        # 011 (recipe types) the same, last
+        tail_11 = migrations[migrations.index("Migration 011"):]
+        self.assertEqual((tail_11.count("BEGIN;"), tail_11.count("COMMIT;")), (1, 1))
+        self.assertIn("'011:last_nonce', :'deploy_nonce'", tail_11)
+        self.assertIn("key = '011:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         self.assertIn("'008c:last_nonce', :'deploy_nonce'", tail_c)
         self.assertIn("key = '008c:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own

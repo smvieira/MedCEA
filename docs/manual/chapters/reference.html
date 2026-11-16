@@ -80,7 +80,7 @@
 <tr><td><code>portal</code></td><td>Service portal and profile</td><td>config</td></tr>
 <tr><td><code>user_manager</code></td><td>User Manager page</td><td>config</td></tr>
 <tr><td><code>policy_page</code></td><td>Access Policy page (IAM 4.1: the Policy UI's page and the person's own capabilities; <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">admin</span>, <span class="role">auditor</span> read it)</td><td>config</td></tr>
-<tr><td><code>master_data</code></td><td>Master data (locations, units, zones, components), and since 13 November 2026 the control loops: the table <code>medcea.control_loop</code>, read by the runner's account <code>svc_scheduler</code> only and written only through functions (skeleton version 2a), and the functions <code>medcea.zone_loop_context(integer)</code> and <code>medcea.save_zone_loops(integer, jsonb)</code> at level U, which only <span class="role">engineer</span> holds (skeleton version 2c; see <a href="#admin-loops">Control loops</a>)</td><td>config</td></tr>
+<tr><td><code>master_data</code></td><td>Master data (locations, units, zones, components), and since 13 November 2026 the control loops: the table <code>medcea.control_loop</code>, read by the runner's account <code>svc_scheduler</code> only and written only through functions (skeleton version 2a), and the functions <code>medcea.zone_loop_context(integer)</code> and <code>medcea.save_zone_loops(integer, jsonb)</code> at level U, which only <span class="role">engineer</span> holds (skeleton version 2c; see <a href="#admin-loops">Control loops</a>); since 15 November 2026 the recipe-type catalogue, <code>medcea.control_quantity</code>, <code>medcea.recipe_type</code> and <code>medcea.recipe_type_quantity</code>, read by <code>svc_scheduler</code> only and written only by the database deploy (skeleton version 6; see <a href="#admin-recipe-types">Recipe types</a>)</td><td>config</td></tr>
 <tr><td><code>devices</code></td><td>Devices and provisioning</td><td>config</td></tr>
 <tr><td><code>onboarding</code></td><td>Device onboarding (edge wizard)</td><td>config</td></tr>
 <tr><td><code>device_history</code></td><td>Device placement history</td><td>history</td></tr>
@@ -208,6 +208,29 @@
 <tr><td><code>cli.py bootstrap-targets --out DIR [--source host]</code></td><td>Compiles every policy output from <code>defaults.yaml</code>, from version 1 and from a simulated host file (or the written one) and compares them byte for byte; <code>apply.sh</code> runs it.</td></tr>
 <tr><td><code>apps/iam/apply_check.py</code></td><td>The offline parts of <code>apply.sh</code> and of the health check: <code>can-approve</code>, <code>accounts</code>, <code>by-user</code>, <code>seed-fact</code>, <code>seed-build</code>, <code>seed-queue</code>, <code>simulate-state</code>, <code>bundle-sql</code>, <code>apply-record</code>, <code>bootstrap-targets</code>, <code>health</code>, <code>status</code>, <code>owners</code>, and since slice 4.4 <code>propose</code> (the skeleton proposal: gate, checker, open version, diff and its SQL), <code>open-version</code>, <code>withdraw-sql</code> and <code>maker-warn</code>. It reads JSON and prints text; it never holds a secret.</td></tr>
 </tbody></table></div>
+
+<h3 id="reference-recipe-model">Recipe types and setpoints (migration 011)</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Object</th><th>What it holds</th><th>Who reads and writes it</th></tr></thead>
+<tbody>
+<tr><td><code>medcea.control_quantity</code></td><td>One row per quantity: <code>quantity_code</code>, <code>label</code>, <code>unit</code>, <code>sense_uoms</code>, <code>default_tag</code>, <code>commands</code>, <code>command_map</code>, <code>phase</code> (<code>always</code> or <code>light_on</code>), <code>loopable</code>, <code>min_value</code>, <code>max_value</code>.</td><td>Read by <code>svc_scheduler</code>; written only by the database deploy, from <code>apps/database/recipe_types.yaml</code>.</td></tr>
+<tr><td><code>medcea.recipe_type</code></td><td>PLANT and FUNGI: <code>recipe_type_code</code>, <code>label</code>, <code>legacy_unit_type</code>, <code>is_default</code>.</td><td>As above.</td></tr>
+<tr><td><code>medcea.recipe_type_quantity</code></td><td>Which quantities each type sets, <code>required</code> or not.</td><td>As above.</td></tr>
+<tr><td><code>medcea.cea_unit.unit_type</code></td><td>A recipe type code (foreign key).</td><td>Unchanged: the <code>master_data</code> rights.</td></tr>
+<tr><td><code>medcea.recipe.recipe_type</code></td><td>The recipe's type code (foreign key); fixed once the recipe has steps.</td><td>Unchanged: the <code>recipes</code> rights (drafts only for <span class="role">engineer</span>).</td></tr>
+<tr><td><code>medcea.recipe_line.setpoints</code></td><td><code>{"&lt;quantity&gt;": {"lower": n, "upper": n}}</code>. The eight <code>*_limit</code> columns are read-only until migration 012 drops them.</td><td>As <code>recipe_line</code>.</td></tr>
+<tr><td><code>medcea.control_loop</code></td><td><code>loop_code</code> is a quantity code (foreign key); <code>input</code> and <code>output</code> may each be empty (a half-bound loop).</td><td>As before (<a href="#admin-loops">Control loops</a>).</td></tr>
+</tbody></table></div>
+<h4 id="reference-recipe-file">The recipe file (format 2)</h4>
+<p>The Configuration UI's <strong>↓ Export</strong> writes, and <strong>↑ Import</strong> and the Platform Recipe Library read:</p>
+<pre><code>{"format": 2, "recipe_name": "Pleurotus ostreatus", "recipe_description": null, "recipe_type": "FUNGI",
+ "steps": [{"recipe_item_seq_id": 1, "recipe_item_seq_name": "Colonisation", "cycle_number": 14,
+            "light_type": "DARK", "light_on_minutes": 0, "light_off_minutes": 1440,
+            "setpoints": {"air_temperature": {"lower": 22, "upper": 25},
+                          "air_humidity": {"lower": 85, "upper": 95},
+                          "co2": {"lower": 400, "upper": 5000}},
+            "notes": "…"}]}</code></pre>
+<p>An older file (format 1) has no <code>format</code> or <code>recipe_type</code> and the eight limit columns on each step (<code>air_temperature_lower_limit</code> … <code>substrate_temperature_upper_limit</code>, <code>hr_*</code> for humidity); its import asks for the recipe type and maps the limits to setpoints (substrate only when both are present).</p>
 
 <h3 id="reference-settings">Settings</h3>
 <p>The settings an administrator may change in <code>config.env</code>, with the default from <code>config.env.example</code>. Change them with <code>./infra/configure.sh</code> or, for the IAM switches, with <code>./medcea.sh</code>, which runs the deploys each switch needs in the right order. A changed setting takes effect at the next deploy of the parts that read it.</p>

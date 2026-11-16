@@ -4,6 +4,7 @@
  "role": "ZONE",
  "answer": {
   "skip": false,
+  "half": "both",
   "loops": {
    "co2": 1
   }

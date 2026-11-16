@@ -17,7 +17,8 @@
 --      grants would assert functions that no longer exist)
 --   2. the guard trigger, then the two functions, their helpers and the guard
 --   3. medcea.control_loop parked in schema medcea_retired_010 (no grants), with
---      its rows, identity sequence, index and attribution triggers: the reverted
+--      its rows, identity sequence and index (not its attribution triggers, which a
+--      later full down of 008b could not survive; 010 re-creates them): the reverted
 --      YAML has no member for it and I15 refuses an unclassified relation of
 --      medcea, which would roll the reverted deploy's whole bundle back; 010
 --      moves it back if it is re-applied
@@ -64,6 +65,11 @@ BEGIN
             REVOKE ALL ON SCHEMA medcea_retired_010 FROM PUBLIC;
         END IF;
         ALTER TABLE medcea.control_loop SET SCHEMA medcea_retired_010;
+        -- its attribution triggers go too: they call 008b's stamp_actor() and
+        -- log_row_change(), which a full down of 008b (-v full=1) drops; 010
+        -- re-creates both when it moves the table back
+        DROP TRIGGER IF EXISTS stamp_actor_trg ON medcea_retired_010.control_loop;
+        DROP TRIGGER IF EXISTS row_change_trg ON medcea_retired_010.control_loop;
         -- no grants: every grantee but the owner loses the table
         FOR g IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(r.rolname) END
                    FROM pg_catalog.pg_class c

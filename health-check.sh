@@ -1207,13 +1207,21 @@ WITH zn AS (
       FROM dm WHERE jsonb_typeof(dm.problems) = 'array' AND jsonb_array_length(dm.problems) > 0
 ), bad AS (
     SELECT inv.zname, l.loop_code::text AS code,
-           medcea._loop_problems(jsonb_build_object('loop_code', l.loop_code::text, 'recipe_lower', l.recipe_lower::text,
-                                                    'recipe_upper', l.recipe_upper::text, 'input', l.input,
-                                                    'output', l.output),
+           medcea._loop_problems(jsonb_build_object('loop_code', l.loop_code::text)
+                                 || CASE WHEN l.input IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('input', l.input) END
+                                 || CASE WHEN l.output IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('output', l.output) END,
                                  inv.zone_code, inv.sensors, inv.actuators) AS p
       FROM inv JOIN medcea.control_loop l ON l.zone_id = inv.zone_id AND l.is_active = 'Y'
+), half AS (
+    SELECT inv.zname, l.loop_code::text AS code, CASE WHEN l.input IS NULL THEN 'input' ELSE 'output' END AS missing
+      FROM inv JOIN medcea.control_loop l ON l.zone_id = inv.zone_id AND l.is_active = 'Y'
+     WHERE l.input IS NULL OR l.output IS NULL
 )
 SELECT 'zones|' || (SELECT count(*) FROM zn WHERE has_act) || '|' || (SELECT count(*) FROM bad)
+UNION ALL
+SELECT 'half|' || (SELECT count(*) FROM half) || '|'
+       || coalesce((SELECT string_agg(x.zname || ' ' || x.code || ' (no ' || x.missing || ')', '; ' ORDER BY x.zname, x.code)
+                      FROM (SELECT zname, code, missing FROM half ORDER BY zname, code LIMIT 3) x), '')
 UNION ALL
 SELECT 'default|' || (SELECT count(*) FROM dm) || '|'
        || coalesce((SELECT string_agg(x.zname, ' ' ORDER BY x.zname) FROM (SELECT zname FROM dm ORDER BY zname LIMIT 5) x), '')
@@ -1237,13 +1245,14 @@ SELECT 'state|unbuilt';
 \endif
 SQL
 ) || exit_code=$?
-    local state zones loops n_def def_list n_amb amb_list n_sp sp_list n_bad bad_list hits=()
+    local state zones loops n_def def_list n_amb amb_list n_sp sp_list n_bad bad_list n_half half_list hits=()
     state="$(grep -m1 '^state|' <<<"$out" | cut -d'|' -f2)"
     IFS='|' read -r _ zones loops <<<"$(grep -m1 '^zones|' <<<"$out")"
     IFS='|' read -r _ n_def def_list <<<"$(grep -m1 '^default|' <<<"$out")"
     IFS='|' read -r _ n_amb amb_list <<<"$(grep -m1 '^ambiguous|' <<<"$out")"
     IFS='|' read -r _ n_sp sp_list <<<"$(grep -m1 '^sensors|' <<<"$out")"
     IFS='|' read -r _ n_bad bad_list <<<"$(grep -m1 '^problems|' <<<"$out")"
+    IFS='|' read -r _ n_half half_list <<<"$(grep -m1 '^half|' <<<"$out")"
     if [[ "$state" == unbuilt && $exit_code -eq 0 ]]; then
         _record SKIP "$name" "no medcea.control_loop table yet (./apps/database/deploy.sh, migration 010)"; return
     fi
@@ -1251,11 +1260,13 @@ SQL
         _record WARN "$name" "medcea.control_loop exists without _loop_problems/_zone_inventory/_loop_quantities: ./apps/database/deploy.sh"; return
     fi
     if [[ $exit_code -ne 0 || ! "$zones" =~ ^[0-9]+$ || ! "$loops" =~ ^[0-9]+$ || ! "$n_def" =~ ^[0-9]+$
-          || ! "$n_amb" =~ ^[0-9]+$ || ! "$n_sp" =~ ^[0-9]+$ || ! "$n_bad" =~ ^[0-9]+$ ]]; then
+          || ! "$n_amb" =~ ^[0-9]+$ || ! "$n_sp" =~ ^[0-9]+$ || ! "$n_bad" =~ ^[0-9]+$
+          || ! "${n_half:-0}" =~ ^[0-9]+$ ]]; then
         _record WARN "$name" "cannot read the control loops of ${db}: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"; return
     fi
     (( n_def > 0 )) && hits+=("${n_def} zone(s) run on the default map (no control_loop rows; Q20): ${def_list}$( (( n_def > 5 )) && echo ' ...')")
     (( n_amb > 0 )) && hits+=("${n_amb} of them with several sensors on a tag (no_data + ALARM ambiguous_source: choose the reference in onboarding): ${amb_list}$( (( n_amb > 3 )) && echo '; ...')")
+    (( ${n_half:-0} > 0 )) && hits+=("${n_half} loop(s) half-bound, running on the default map's other half until its onboarding chooses it: ${half_list}$( (( n_half > 3 )) && echo '; ...')")
     (( n_sp > 0 )) && hits+=("${n_sp} of them with sensor problems (their readings still count on the default map: re-onboard): ${sp_list}$( (( n_sp > 3 )) && echo '; ...')")
     (( n_bad > 0 )) && hits+=("${n_bad} active loop(s) break the loop rules (the loop picker rejects them; the runner refuses rule errors and gets no_data or no actuator for the rest; re-save in onboarding): ${bad_list}$( (( n_bad > 3 )) && echo '; ...')")
     if ((${#hits[@]})); then

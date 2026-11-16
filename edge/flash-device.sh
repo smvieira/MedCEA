@@ -484,7 +484,8 @@ print(json.dumps({"id": e["ID"], "kind": e["KIND"], "label": e["LABEL"],
 }
 # The control-loop picker (Q20) is a table with a live verdict too: one prompt whose
 # spec is loops.py spec's output; the answer is {"skip": true} (Decide later) or
-# {"skip": false, "stop_all": bool, "loops": [every loop the zone keeps]}. Without
+# {"skip": false, "stop_all": bool, "half": input|output|both, "loops": [this
+# onboarding's half of every loop the zone keeps]}. Without
 # the UI it returns empty and plan_loops asks in the terminal instead.
 prompt_loops() { # label spec-file [hint]  -> $ANSWER = the answer JSON
   ui_on || { ANSWER=""; return 0; }
@@ -1604,11 +1605,13 @@ print("%d channel(s), %d actuator(s) from the editor"
 }
 
 # --- the zone's control loops (feedback control Phase 2, Q20) -----------------
-# Which sensor each recipe quantity is controlled on, and which actuator it drives.
-# Asked after the wiring, before the board is touched, when the zone has both a
-# SENSE and a CONTROL board (the one being onboarded counts with its planned
-# sensors or channel map); saved after a successful registration, with the
-# person's token, through medcea.save_zone_loops (every loop the zone keeps). The
+# Which sensor each quantity of the unit's recipe type is controlled on, and which
+# actuator it drives (migration 011). Each board binds its own half, in either order:
+# a SENSE onboarding the inputs (its planned sensors), a CONTROL onboarding the
+# outputs (its planned channel map), --loops-only both; a loop with one half runs
+# on the default for the other half until that board chooses it. Asked after the wiring, before the board is
+# touched; saved after a successful registration, with the person's token, through
+# medcea.save_zone_loops ({"half", "loops"}: that half of every loop). The
 # database decides who may (engineer, IAM_DB_ROLES=true) and refuses while the unit
 # has a run in R or S. Nothing here is ever fatal after the planning: the board is
 # up whatever happens to its loops.
@@ -1628,8 +1631,9 @@ print("" if v is None else ("true" if v is True else "false" if v is False
 }
 
 # The terminal's way of asking: one menu per ticked quantity whose tag has several
-# sensors (nothing preselected, Q20) and per stale loop; a tag with one sensor is
-# said, not asked. Back at any of them goes back to the wiring.
+# sensors (nothing preselected, Q20), per quantity several undeclared actuators could
+# drive, and per stale loop; a tag with one sensor, or an actuator declaring the
+# quantity, is said, not asked. Back at any of them goes back to the wiring.
 loops_terminal() { # spec-file -> $ANSWER = the answer JSON (or BACK)
   local _spec="$1" _kind _a _b _line _lines="" _tok _fb _qs=() _o _opts _fbo
   while IFS=$'\t' read -r _kind _a _b; do
@@ -1644,7 +1648,11 @@ loops_terminal() { # spec-file -> $ANSWER = the answer JSON (or BACK)
     mapfile -t _opts < <(python3 "$LOOPS_TOOL" options --spec "$_spec" --code "$_a")
     menu_reset
     for _o in "${_opts[@]}"; do IFS=$'\t' read -r _ _tok _kind <<<"$_o"; menu_add "$_kind"; done
-    menu_ask "$_b" "Q20: with several sensors on a tag nothing is chosen for you. Not controlled leaves the quantity alone."
+    if [[ "${_opts[0]}" == OPT$'\t'act:* ]]; then
+      menu_ask "$_b" "Several actuators can do it and none says it acts on this quantity: choose one. Not controlled leaves the quantity alone."
+    else
+      menu_ask "$_b" "Q20: with several sensors on a tag nothing is chosen for you. Not controlled leaves the quantity alone."
+    fi
     is_back && return 0
     IFS=$'\t' read -r _ _tok _ <<<"${_opts[$((ANSWER-1))]}"
     _fb=""
@@ -1765,25 +1773,36 @@ print(json.dumps({"wiring": json.loads(os.environ["DOC"]), "variant": os.environ
     LOOPS_STALE_TSV+="$_code"$'\t'"$_msg"$'\n'
   done < <(python3 "$LOOPS_TOOL" stale --spec "$_d/spec.json")
 
+  # Each onboarding binds its own half of the zone's loops (migration 011), in either
+  # order: a SENSE board the inputs, a CONTROL board the outputs, --loops-only both. A
+  # loop with one half runs on the default for the other until that board chooses it.
+  local _half
   _n="$(python3 -c '
 import json, sys
 s = json.load(open(sys.argv[1]))
-print(len(s["sources"]), len(s["actuators"]), 1 if any(r["offered"] for r in s["rows"]) or s["existing"] else 0,
-      len(s["old_boards"]))' "$_d/spec.json")"
-  read -r _a _b _l _code <<<"$_n"
-  if [ "$_a" = 0 ] || [ "$_b" = 0 ] || [ "$_l" = 0 ]; then
-    if [ "$_a" = 0 ] && [ "$_code" != 0 ]; then
+print(s["half"], len(s["sources"]), len(s["actuators"]),
+      1 if any(r["offered"] for r in s["rows"]) or s["existing"] else 0, len(s["old_boards"]))' "$_d/spec.json")"
+  read -r _half _a _b _l _code <<<"$_n"
+  if [ "$_l" = 0 ]; then
+    if [ "$_half" = input ]; then
+      info "this board publishes no reading a control loop of $UNIT_CODE / $ZONE_CODE uses (its recipe type's quantities): no control loop to choose"
+    elif [ "$_half" = output ]; then
+      info "this board has no actuator a control loop of $UNIT_CODE / $ZONE_CODE drives: no control loop to choose"
+    elif [ "$_a" = 0 ] && [ "$_code" != 0 ]; then
       info "the SENSE board of $UNIT_CODE / $ZONE_CODE was flashed before its readings carried a sensor name: re-onboard it to choose the control loops (until then the zone runs on the default map)"
-    elif [ "$_a" = 0 ]; then
-      info "no SENSE board with named sensors in $UNIT_CODE / $ZONE_CODE yet: its control loops are chosen when the SENSE board is onboarded"
-    elif [ "$_b" = 0 ]; then
-      info "no CONTROL board in $UNIT_CODE / $ZONE_CODE yet: its control loops are chosen when the CONTROL board is onboarded"
+    elif [ "$_a" = 0 ] && [ "$_b" = 0 ]; then
+      info "no SENSE or CONTROL board in $UNIT_CODE / $ZONE_CODE yet: each binds its half of the control loops when it is onboarded"
     else
-      info "no sensor of $UNIT_CODE / $ZONE_CODE publishes what an actuator of it controls: no control loop to choose"
+      info "no sensor or actuator of $UNIT_CODE / $ZONE_CODE matches a quantity of its recipe type: no control loop to choose"
     fi
     LOOPS_NOTE="${LOOPS_STALE_TSV:+not changed (stale loops reported)}"
     LOOPS_NOTE="${LOOPS_NOTE:-nothing to choose}"
     rm -rf "$_d"; return 0
+  fi
+  if [ "$_half" = input ] && [ "$_b" = 0 ]; then
+    info "no CONTROL board in $UNIT_CODE / $ZONE_CODE yet: the loops this board feeds wait for their actuators, chosen when the CONTROL board is onboarded"
+  elif [ "$_half" = output ] && [ "$_a" = 0 ]; then
+    info "no SENSE board with named sensors in $UNIT_CODE / $ZONE_CODE yet: the loops this board drives wait for their sensors, chosen when the SENSE board is onboarded"
   fi
   _l="$(loops_field busy < "$_d/spec.json")"
   if [ -n "$_l" ]; then
@@ -1801,8 +1820,14 @@ print(len(s["sources"]), len(s["actuators"]), 1 if any(r["offered"] for r in s["
   [ "${LOOPS_ONLY:-0}" = 1 ] && BACK_OK="${LOOPS_ZONE_ASKED:-0}"
   if ui_on; then
     ui_waiting
-    prompt_loops "Which sensor does each loop control on?" "$_d/spec.json" \
-      "One row per recipe quantity. A tag with one sensor is chosen for you; with several, choose the reference (and a fallback), or the mean, lowest or highest, or untick it. Decide later saves nothing."
+    case "$_half" in
+      input)  prompt_loops "Which sensor does each loop control on?" "$_d/spec.json" \
+                "One row per quantity of the unit's recipe type. A tag with one sensor is chosen for you; with several, choose the reference (and a fallback), or the mean, lowest or highest, or untick it. The actuator is chosen when the CONTROL board is onboarded. Decide later saves nothing." ;;
+      output) prompt_loops "Which actuator does each loop drive?" "$_d/spec.json" \
+                "One row per quantity of the unit's recipe type. An actuator that declares the quantity is chosen for you. The sensor is chosen when the SENSE board is onboarded. Decide later saves nothing." ;;
+      *)      prompt_loops "Which sensor and actuator does each loop use?" "$_d/spec.json" \
+                "One row per quantity of the unit's recipe type. A tag with one sensor is chosen for you; with several, choose the reference (and a fallback), or the mean, lowest or highest, or untick it. Decide later saves nothing." ;;
+    esac
   elif [ "${ASSUME_YES:-0}" = 1 ] && [ ! -t 0 ]; then
     # Q20: with nobody to choose, nothing is chosen.
     warn "no terminal to choose the control loops (--yes): decided later; the loops of $UNIT_CODE / $ZONE_CODE stay as they are"
@@ -1852,14 +1877,16 @@ else:
     info "control loops: $(printf '%s' "$LOOPS_JSON" | python3 -c '
 import json, sys
 a = json.load(sys.stdin)
-print("stop all" if a.get("stop_all") else ", ".join(l["loop_code"] for l in a["loops"]) or "none") ') — saved after the board is registered"
+print("stop all" if a.get("stop_all") else ", ".join(l["loop_code"] for l in a["loops"]) or "none") ')$(
+      case "$_half" in input) printf ' (their sensors)' ;; output) printf ' (their actuators)' ;; esac) — saved after the board is registered"
     LOOPS_NOTE="chosen, not saved yet"
   fi
   rm -rf "$_d"
 }
 
-# Saves the loops chosen in plan_loops: every loop the zone keeps, with the
-# person's token. Never fatal. $1 says what stays true when it is refused.
+# Saves the loops chosen in plan_loops: this onboarding's half of every loop
+# ({"half", "loops"}: SENSE the inputs, CONTROL the outputs, --loops-only both), with
+# the person's token. Never fatal. $1 says what stays true when it is refused.
 loops_save() {
   [ -n "$LOOPS_JSON" ] && [ "$LOOPS_SKIPPED" != 1 ] || return 0
   local _payload _out _state _why _res

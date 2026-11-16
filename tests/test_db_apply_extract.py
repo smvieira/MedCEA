@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -117,12 +118,25 @@ class DbApplyExtraction(unittest.TestCase):
         n010 = [i for i, (a, _) in enumerate(new) if any("010:last_nonce" in x for x in a)]
         self.assertEqual(len(n010), 1, "one 010 nonce read-back")
         self.assertTrue(any("008c:last_nonce" in x for x in new[n010[0] - 1][0]), "right after 008c's")
-        new = new[:n010[0]] + new[n010[0] + 1:]
+        # migration 011 (recipe types) adds one more, right after 010's, and passes the
+        # catalogue as -v recipe_types_b64 (recipe_types.py b64) to the migrations' psql
+        n011 = [i for i, (a, _) in enumerate(new) if any("011:last_nonce" in x for x in a)]
+        self.assertEqual(n011, [n010[0] + 1], "one 011 nonce read-back, right after 010's")
+        new = new[:n010[0]] + new[n010[0] + 2:]
         self.assertEqual(len(old), len(new))
         nonce = re.compile(r"deploy_nonce=[0-9a-f]+")
+        b64 = subprocess.run([sys.executable, os.path.join(REPO, "apps", "database", "recipe_types.py"), "b64"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+
+        def args(a, mine):
+            out = [nonce.sub("deploy_nonce=N", x) for x in a]
+            if mine and any(x.startswith("deploy_nonce=") for x in out):
+                i = out.index("recipe_types_b64=" + b64)
+                self.assertEqual(out[i - 1], "-v")
+                out = out[:i - 1] + out[i + 1:]
+            return out
         for (a_old, i_old), (a_new, i_new) in zip(old, new):
-            self.assertEqual([nonce.sub("deploy_nonce=N", x) for x in a_old],
-                             [nonce.sub("deploy_nonce=N", x) for x in a_new])
+            self.assertEqual(args(a_old, False), args(a_new, True))
             if ISOLATION in i_new and ISOLATION not in i_old:
                 self.assertEqual(i_new.count(ISOLATION), 1)
                 actor = "SELECT medcea_auth._set_internal_actor('system:deploy');\n"

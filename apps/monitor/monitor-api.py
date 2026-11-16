@@ -182,13 +182,8 @@ def get_run(run_id):
               rl.recipe_item_seq_id,
               rl.recipe_item_seq_name,
               rl.cycle_number                        AS total_cycles,
-              rl.air_temperature_lower_limit,
-              rl.air_temperature_upper_limit,
               rl.light_type, rl.light_on_minutes, rl.light_off_minutes,
-              rl.co2_lower_limit, rl.co2_upper_limit,
-              rl.hr_lower_limit, rl.hr_upper_limit,
-              rl.substrate_temperature_lower_limit,
-              rl.substrate_temperature_upper_limit,
+              rl.setpoints,                          -- {quantity: {lower, upper}} (migration 011)
               rl.notes,
               COALESCE(
                 MAX(rlcr.recipe_item_seq_cycle_num)
@@ -216,12 +211,8 @@ def get_run(run_id):
             WHERE rr.recipe_run_id = %s
             """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n            " if sub else "") + """GROUP BY
               rl.recipe_item_seq_id, rl.recipe_item_seq_name, rl.cycle_number,
-              rl.air_temperature_lower_limit, rl.air_temperature_upper_limit,
               rl.light_type, rl.light_on_minutes, rl.light_off_minutes,
-              rl.co2_lower_limit, rl.co2_upper_limit,
-              rl.hr_lower_limit, rl.hr_upper_limit,
-              rl.substrate_temperature_lower_limit, rl.substrate_temperature_upper_limit,
-              rl.notes, rlcr.recipe_run_id
+              rl.setpoints, rl.notes, rlcr.recipe_run_id
             ORDER BY rl.recipe_item_seq_id
         """, (run_id, sub) if sub else (run_id,))
         rows = cur.fetchall()

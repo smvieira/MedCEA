@@ -97,7 +97,7 @@ class Migration010Test(unittest.TestCase):
     def setUpClass(cls):
         cls.full = read("medcea_db_migrations.sql")
         start = cls.full.index("-- ── Migration 010")
-        cls.block = cls.full[start:]
+        cls.block = cls.full[start:cls.full.index("-- ── Migration 011")]   # 011 (recipe types) follows
         cls.before = cls.full[:start]
         cls.lib = read("lib-db-apply.sh")
         cls.ddl = read("medcea_db_ddl.sql")
@@ -106,7 +106,8 @@ class Migration010Test(unittest.TestCase):
         self.assertTrue(self.before.rstrip().endswith("COMMIT;"), "010 follows 009's COMMIT")
         self.assertIn("Migration 009", self.before)
         self.assertEqual(self.full.count("Migration 010"), 1)
-        self.assertNotIn("Migration 011", self.full)
+        self.assertEqual(self.full.count("-- ── Migration 011"), 1)   # recipe types, right after 010's COMMIT
+        self.assertTrue(self.block.rstrip().endswith("COMMIT;"))
 
     def test_its_own_transaction(self):
         st = statements(self.block)
@@ -302,7 +303,7 @@ class LoopFunctionsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         full = read("medcea_db_migrations.sql")
-        cls.block = full[full.index("-- ── Migration 010"):]
+        cls.block = full[full.index("-- ── Migration 010"):full.index("-- ── Migration 011")]
         cls.save = function(cls.block, "medcea.save_zone_loops")
         cls.context = function(cls.block, "medcea.zone_loop_context")
         cls.problems = function(cls.block, "medcea._loop_problems")
@@ -423,11 +424,10 @@ class LoopFunctionsTest(unittest.TestCase):
         for code, (tag, lo, up) in QUANTITIES.items():
             self.assertIn(f'"{code}": {{"tag": "{tag}", "recipe_lower": "{lo}", "recipe_upper": "{up}"', q)
             for col in (lo, up):
-                # the columns exist in recipe_line, and the runner reads them
+                # the columns exist in recipe_line (migration 011 backfills setpoints from
+                # them; the runner reads setpoints since then)
                 rl = self.ddl[self.ddl.index("CREATE TABLE medcea.recipe_line ("):]
                 self.assertRegex(rl[:rl.index(");")], rf"\n    {col} integer")
-                with open(os.path.join(ROOT, "schd", "cea", "get_recipe_line_item_seq_details.py")) as f:
-                    self.assertIn(col, f.read())
         self.assertIn('"command_map": ' + CO2_MAP, q)
         self.assertEqual(q.count("command_map"), 1)
         self.assertEqual(len(re.findall(r'"([a-z0-9_]+)": \{"tag"', q)), 4)
@@ -509,7 +509,7 @@ class DownTest(unittest.TestCase):
         cls.down_b = read("medcea_db_migrations_down_008b.sql")
         cls.down = read("medcea_db_migrations_down_010.sql")
         full = read("medcea_db_migrations.sql")
-        cls.block = full[full.index("-- ── Migration 010"):]
+        cls.block = full[full.index("-- ── Migration 010"):full.index("-- ── Migration 011")]
 
     def test_anon_excluded(self):
         self.assertIn("control_loop", grants.LEGACY_ANON_EXCLUDED)

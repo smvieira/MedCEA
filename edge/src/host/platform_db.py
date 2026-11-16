@@ -22,8 +22,9 @@ The commands, all line-oriented so the shell stays the engine:
                     one JSON line {"state": ok|not_deployed|refused|problem|
                     error, "why", "context"}; always exit 0
     save-loops ZONE_ID
-                    the JSON array on stdin (every loop the zone keeps) to
-                    medcea.save_zone_loops; one JSON line {"state": ok|busy|
+                    the JSON on stdin to medcea.save_zone_loops: an array (every
+                    loop the zone keeps) or {"half": input|output|both, "loops"}
+                    (that half of every loop); one JSON line {"state": ok|busy|
                     problem|refused|not_deployed|error, "why",
                     "problems", "result"}; exit 1 on a refusal, its words on stderr
 
@@ -394,10 +395,15 @@ def zone_loops(base, zone_id):
 
 
 def save_loops(base, zone_id, loops):
-    """medcea.save_zone_loops(zone, loops): the zone keeps exactly these loops.
-    {"state": "ok", "result": {...}} or a refusal {"state", "why", "problems"}."""
-    if not isinstance(loops, list):
-        return {"state": "problem", "why": "the loops must be a JSON array", "problems": [], "result": None}
+    """medcea.save_zone_loops(zone, loops): a JSON array (both halves: the zone keeps
+    exactly these loops) or {"half": "input"|"output"|"both", "loops": [...]} (that half
+    of every loop: a SENSE onboarding binds the inputs, a CONTROL one the outputs;
+    migration 011). {"state": "ok", "result": {...}} or a refusal {"state", "why", "problems"}."""
+    half_form = (isinstance(loops, dict) and set(loops) == {"half", "loops"}
+                 and loops.get("half") in ("input", "output", "both") and isinstance(loops.get("loops"), list))
+    if not isinstance(loops, list) and not half_form:
+        return {"state": "problem", "why": 'the loops must be a JSON array, or {"half": "input"|"output"|"both", '
+                '"loops": [...]}', "problems": [], "result": None}
     try:
         res = _rpc(base, "save_zone_loops", {"p_zone_id": int(zone_id), "p_loops": loops})
     except RpcError as e:

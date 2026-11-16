@@ -30,8 +30,9 @@ database as postgres. Exit 1 on any FAIL.
   R6   PATCH status: S is a no-op, F -> S, C refused once released (and under true)
   R7   DELETE retires; a retired schedule cannot be edited (API 409, old SQL 42501)
   R8   (false) the runner of the previous commit and this one leave the same run
-       (run_params compared without control_loops/control_loops_source, which only the
-       new runner writes; those are checked on their own: the default map of Z02)
+       (run_params compared without control_loops/control_loops_source and setpoints,
+       which only the new runner writes, and the previous runner's *_limit columns;
+       the loop map is checked on its own: the default map of Z02)
   R9   a migration:008 schedule: no person-less re-save makes it fire under true
   R10  the cron path (_schedule_trigger_job): fires as the schedule's creator
   R11  log retention: saved (false), proposed for qa, 202 (true)
@@ -562,13 +563,18 @@ def main():
         env = {"PYTHONPATH": "/work/cur/tests/runner/stub",
                "CONTROL_ALGORITHM": "PID", "CONTROL_ALGORITHM_PARAMS": json.dumps({})}
         p, rid_old = run_legacy_cli(os.path.join(prev_root, "schd"), i, env)
-        new_only = ("control_loops", "control_loops_source")
+        # what only one of the two runners writes: the loop map (Phase 2, this runner),
+        # the line's setpoints (migration 011, this runner) and the eight limit columns
+        # (the previous runner's SELECT; NULL on a line written since 011)
+        new_only = ("control_loops", "control_loops_source", "setpoints")
 
         def without_loops(rp):
-            return [{k: v for k, v in e.items() if k not in new_only} if isinstance(e, dict) else e for e in (rp or [])]
+            return [{k: v for k, v in e.items() if k not in new_only and not k.endswith("_limit")}
+                    if isinstance(e, dict) else e for e in (rp or [])]
         new_c = [(x["recipe_item_seq_id"], x["recipe_item_seq_cycle_num"], x["st"], json.dumps(without_loops(x["rp"]), sort_keys=True))
                  for x in cycles(rid3)]
-        old_c = [(x["recipe_item_seq_id"], x["recipe_item_seq_cycle_num"], x["st"], json.dumps(x["rp"], sort_keys=True)) for x in cycles(rid_old)]
+        old_c = [(x["recipe_item_seq_id"], x["recipe_item_seq_cycle_num"], x["st"], json.dumps(without_loops(x["rp"]), sort_keys=True))
+                 for x in cycles(rid_old)]
         ok("R8", "the previous commit's runner and this one: the same run (status, cycles, run_params)",
            p.returncode == 0 and run_row(rid_old)["recipe_run_status"] == run_row(rid3)["recipe_run_status"] == "C"
            and old_c == new_c, {"rc": p.returncode, "old": old_c, "new": new_c, "stderr": p.stderr[-300:]})
@@ -869,9 +875,9 @@ def main():
         loop_ids = []
         try:
             loop_ids = [r["loop_id"] for r in owner(
-                """INSERT INTO medcea.control_loop (zone_id, loop_code, recipe_lower, recipe_upper, input, output)
-                   VALUES (%s, 'air_temperature', 'air_temperature_lower_limit', 'air_temperature_upper_limit',
-                           %s::jsonb, %s::jsonb) RETURNING loop_id""", (z2, json.dumps(inp), json.dumps(out)))]
+                """INSERT INTO medcea.control_loop (zone_id, loop_code, input, output)
+                   VALUES (%s, 'air_temperature', %s::jsonb, %s::jsonb) RETURNING loop_id""",
+                (z2, json.dumps(inp), json.dumps(out)))]
 
             def execute_run():
                 r = c.post("/api/runs", json={"unit_id": i["u1"], "recipe_id": i["r0"]}, headers=H(T_PM))
@@ -882,8 +888,7 @@ def main():
 
             rid20, code20, st20 = execute_run()
             rp = (cycles(rid20) or [{}])[0].get("rp") or [{}] if rid20 else [{}]
-            want = [{"zone_code": "Z02", "loop_id": loop_ids[0], "loop_code": "air_temperature",
-                     "recipe_lower": "air_temperature_lower_limit", "recipe_upper": "air_temperature_upper_limit",
+            want = [{"zone_code": "Z02", "loop_id": loop_ids[0], "loop_code": "air_temperature", "phase": "always",
                      "input": inp, "output": out}]
             ok("R20", "a control_loop row: the run completes with control_loops_source 'table' and the row in run_params",
                code20 == 200 and st20 == "C" and rp[0].get("control_loops_source") == "table"

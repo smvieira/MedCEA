@@ -5,11 +5,10 @@
  "answer": {
   "skip": false,
   "stop_all": false,
+  "half": "both",
   "loops": [
    {
     "loop_code": "air_humidity",
-    "recipe_lower": "hr_lower_limit",
-    "recipe_upper": "hr_upper_limit",
     "input": {
      "tag": "air_humidity",
      "sources": [

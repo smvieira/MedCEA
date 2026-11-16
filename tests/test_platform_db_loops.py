@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """edge/src/host/platform_db.py's control-loop calls (feedback control Phase 2, Q19, Q20),
 offline against a local stand-in for config-api: `loops ZONE_ID` (medcea.zone_loop_context)
-and `save-loops ZONE_ID` (medcea.save_zone_loops, every loop the zone keeps), the bodies
+and `save-loops ZONE_ID` (medcea.save_zone_loops: every loop the zone keeps, or {half, loops}, migration 011), the bodies
 they send, the person's token as Bearer under IAM_POSTGREST_JWT=true, and the refusals
 mapped by SQLSTATE: 42501 refused whatever the HTTP status (config-api answers it 401 in both
 IAM_DB_ROLES modes: the request's PostgREST role is anon either way, so flash-device words it from
@@ -147,7 +147,7 @@ class ZoneLoops(unittest.TestCase):
 
 
 class SaveLoops(unittest.TestCase):
-    LOOPS = [{"loop_code": "co2", "recipe_lower": "co2_lower_limit", "recipe_upper": "co2_upper_limit",
+    LOOPS = [{"loop_code": "co2",
               "input": {"tag": "co2", "sources": ["scd30_1"], "rule": "reference", "reference": "scd30_1"},
               "output": {"actuator": "co2", "mode": "command", "command_map": {"DOWN": "UP", "UP": "OFF", "OFF": "OFF"}}}]
 
@@ -165,6 +165,22 @@ class SaveLoops(unittest.TestCase):
         self.assertEqual(out, {"state": "ok", "why": "", "problems": [], "result": res})
         self.assertEqual(self.fake.seen[0]["path"], "/rpc/save_zone_loops")
         self.assertEqual(self.fake.seen[0]["body"], {"p_zone_id": 3, "p_loops": self.LOOPS})
+
+    def test_the_half_form_is_sent_as_it_is(self):
+        """migration 011: a SENSE onboarding saves {"half": "input", "loops"}, a CONTROL one
+        {"half": "output", ...}: the object reaches save_zone_loops unchanged."""
+        body = {"half": "input", "loops": [{"loop_code": "co2", "input": self.LOOPS[0]["input"]}]}
+        self.fake.answers.append((200, {"changed": True, "half": "input", "inserted": [{"loop_code": "co2"}],
+                                        "updated": [], "deactivated": [], "unchanged": []}))
+        out = self.m.save_loops(self.fake.base, 3, body)
+        self.assertEqual(out["state"], "ok")
+        self.assertEqual(self.fake.seen[0]["body"], {"p_zone_id": 3, "p_loops": body})
+        for bad in ({"half": "sideways", "loops": []}, {"loops": []}, {"half": "input", "loops": {}},
+                    {"half": "input", "loops": [], "extra": 1}):
+            with self.subTest(bad=bad):
+                out = self.m.save_loops(self.fake.base, 3, bad)
+                self.assertEqual(out["state"], "problem")
+        self.assertEqual(len(self.fake.seen), 1)          # refused locally, nothing sent
 
     def test_busy_in_words(self):
         # the exact text of the save's (and the table guard's) RAISE

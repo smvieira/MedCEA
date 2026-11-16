@@ -1,0 +1,70 @@
+{
+ "note": "light_intensity is a setpoint of the recipe type, no loop yet (and offered as no row)",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "co2",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   },
+   {
+    "loop_code": "light_intensity",
+    "input": {
+     "tag": "light_intensity",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30"
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_NOT_LOOPABLE",
+   "loops.light_intensity.loop_code"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.substrate_temperature"
+  ]
+ ]
+}

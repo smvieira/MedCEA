@@ -1,0 +1,44 @@
+{
+ "note": "a sensor tag without a unit is used, but not checked",
+ "context": "sense_only",
+ "role": "SENSE",
+ "answer": "initial",
+ "expect": [
+  [
+   "warn",
+   "W_NO_UOM",
+   "loops.co2.input.sources.scd30_1"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ]
+ ],
+ "plan_sources": [
+  {
+   "instance": "scd30_1",
+   "driver": "scd30",
+   "tags": [
+    "co2",
+    "air_temperature",
+    "air_humidity"
+   ],
+   "uoms": {
+    "co2": null,
+    "air_temperature": "C",
+    "air_humidity": "RH%"
+   }
+  }
+ ]
+}

@@ -1,5 +1,7 @@
 {
+  "format": 2,
   "recipe_name": "Pleurotus ostreatus old",
   "recipe_description": "Recipe for Pleurotus ostreatus",
+  "recipe_type": "FUNGI",
   "steps": []
 }

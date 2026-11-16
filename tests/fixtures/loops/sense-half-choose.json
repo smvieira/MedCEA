@@ -1,0 +1,61 @@
+{
+ "note": "a SENSE board in a zone with no CONTROL board yet binds its inputs: two sensors on a tag are never chosen for the person (Q20); co2 is half-bound",
+ "context": "sense_only",
+ "role": "SENSE",
+ "answer": "initial",
+ "expect": [
+  [
+   "error",
+   "L_CHOOSE",
+   "loops.air_temperature.input.reference"
+  ],
+  [
+   "error",
+   "L_CHOOSE",
+   "loops.air_humidity.input.reference"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ]
+ ],
+ "plan_sources": [
+  {
+   "instance": "sht45_1",
+   "driver": "sht4x",
+   "tags": [
+    "air_temperature",
+    "air_humidity"
+   ],
+   "uoms": {
+    "air_temperature": "C",
+    "air_humidity": "RH%"
+   }
+  },
+  {
+   "instance": "scd30_1",
+   "driver": "scd30",
+   "tags": [
+    "co2",
+    "air_temperature",
+    "air_humidity"
+   ],
+   "uoms": {
+    "co2": "ppm",
+    "air_temperature": "C",
+    "air_humidity": "RH%"
+   }
+  }
+ ]
+}

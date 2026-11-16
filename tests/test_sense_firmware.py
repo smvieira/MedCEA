@@ -1163,12 +1163,12 @@ ACTUATORS = {
 
 class ControlBoardTest(FirmwareCase):
 
-    def load_control(self):
+    def load_control(self, actuators=None):
         tmp = tempfile.mkdtemp(prefix="cea-control-")
         self.addCleanup(shutil.rmtree, tmp, True)
         path = os.path.join(tmp, "actuator_config.json")
         with open(path, "w") as f:
-            json.dump(ACTUATORS, f)
+            json.dump(actuators or ACTUATORS, f)
         self.bus = FakeBus()
         self.load({"ROLE": "CONTROL", "HOSTNAME": "unit01-c-zone01", "ACTUATOR_CONFIG": path})
         return importlib.import_module("cea_control")
@@ -1213,6 +1213,21 @@ class ControlBoardTest(FirmwareCase):
                               "tag": "heater_relay"})
         self.assertEqual(list(sp), ["pin", "value", "unit_code", "zone_code", "timestamp",
                                     "msg_type", "device_id", "device_dns", "tag"])
+
+    def test_the_quantity_key_is_ignored(self):
+        """A commands actuator's "quantity" (recipe types, migration 011: what the loop
+        picker offers it for) is host-side metadata: the board drives and parks it as
+        if the key were not there."""
+        acts = json.loads(json.dumps(ACTUATORS))
+        acts["actuator_definitions"]["heater"]["quantity"] = "air_temperature"
+        control = self.load_control(acts)
+        control.load()
+        control.apply(self.client, {"tag": "heater", "command": "ON"})
+        self.assertEqual([(t, sp["pin"], sp["value"]) for t, sp in self.client.sent],
+                         [("medcea/UNIT01/ZONE01/control_setpoint/heater/heater_relay", 5, 1)])
+        self.assertEqual(control.all_off(), [("heater", 5)])
+        with open(os.path.join(APP, "cea_control.py")) as f:
+            self.assertNotIn("quantity", f.read())
 
 
 class CopyStepTest(unittest.TestCase):

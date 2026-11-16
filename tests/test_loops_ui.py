@@ -32,7 +32,10 @@ let raw = ""; process.stdin.on("data", c => raw += c).on("end", () => {
     if (c.op === "validate") return L.validate(c.spec, c.answer);
     if (c.op === "rowFor") return L.rowFor(c.spec, c.code, c.state);
     if (c.op === "stateOf") return L.stateOf(c.row);
-    if (c.op === "table") return L.QUANTITIES;
+    if (c.op === "pairs") return L.pairs(c.spec, L.qmap(c.spec)[c.code]);
+    if (c.op === "candidates") return L.candidates(c.spec, c.code, c.tag);
+    if (c.op === "sends") return L.sends(c.q);
+    if (c.op === "jsonbText") return L.jsonbText(c.obj);
     throw new Error("unknown op " + c.op);
   });
   process.stdout.write(JSON.stringify(out));
@@ -86,26 +89,53 @@ class LogicParity(unittest.TestCase):
                 self.assertEqual(TL.triples(got), sorted(tuple(e) for e in expect))
                 self.assertEqual(got, TL.lp.validate(spec, answer))
 
-    def test_table(self):
-        self.assertEqual(self.run_js([{"op": "table"}])[0], TL.lp.QUANTITIES)
+    def test_helpers(self):
+        """pairs, candidates, sends and jsonbText as loops.py's."""
+        ctx = TL.contexts()
+        cases, want = [], []
+        for name, role in (("bench", "ZONE"), ("single", "ZONE"), ("halfbound", "ZONE")):
+            spec = TL.lp.build_spec(role, ctx[name])
+            for q in spec["quantities"]:
+                cases.append({"op": "pairs", "spec": spec, "code": q["loop_code"]})
+                want.append(TL.lp.pairs(spec, q))
+                for tag in ("air_temperature", "air_humidity", "co2", "ground_temperature", None):
+                    cases.append({"op": "candidates", "spec": spec, "code": q["loop_code"], "tag": tag})
+                    want.append(TL.lp.candidates(spec, q["loop_code"], tag))
+                cases.append({"op": "sends", "q": q})
+                want.append(TL.lp.sends(q))
+                if q.get("command_map"):
+                    cases.append({"op": "jsonbText", "obj": q["command_map"]})
+                    want.append(TL.lp.jsonb_text(q["command_map"]))
+        self.assertEqual(self.run_js(cases), want)
 
     def test_row_for_and_state_of(self):
         ctx = TL.contexts()
-        spec = TL.lp.build_spec("ZONE", ctx["bench"])
         states = [
-            {"rule": "reference", "reference": "sht45_1", "fallback": "scd30_1", "max_age_s": 60, "actuator": "air_humidity"},
-            {"rule": "reference", "reference": None, "fallback": None, "max_age_s": 90, "actuator": "air_humidity"},
-            {"rule": "reference", "reference": "sht45_1", "fallback": "sht45_1", "max_age_s": 90, "actuator": None},
-            {"rule": "mean", "sensors": ["sht45_1", "scd30_1"], "max_age_s": 90, "actuator": "air_humidity"},
-            {"rule": "min", "sensors": [], "actuator": "air_humidity"},
+            {"tag": "air_humidity", "rule": "reference", "reference": "sht45_1", "fallback": "scd30_1",
+             "max_age_s": 60, "actuator": "air_humidity"},
+            {"tag": "air_humidity", "rule": "reference", "reference": None, "fallback": None, "max_age_s": 90,
+             "actuator": "air_humidity"},
+            {"tag": "air_humidity", "rule": "reference", "reference": "sht45_1", "fallback": "sht45_1",
+             "max_age_s": 90, "actuator": None},
+            {"tag": "air_humidity", "rule": "mean", "sensors": ["sht45_1", "scd30_1"], "max_age_s": 90,
+             "actuator": "air_humidity"},
+            {"tag": None, "rule": "min", "sensors": [], "actuator": "air_humidity"},
+            {"tag": "air_temperature", "rule": "max", "sensors": ["sht45_1"], "input": False, "actuator": "co2"},
+            {"tag": "air_humidity", "rule": "reference", "reference": "sht45_1", "output": False},
         ]
-        cases = [{"op": "rowFor", "spec": spec, "code": c, "state": st}
-                 for c in ("air_humidity", "co2") for st in states]
-        rows = [r["loop"] for r in spec["rows"] if r["loop"]] + [
-            {k: l[k] for k in TL.lp.LOOP_KEYS} for l in ctx["existing"]["loops"]]
+        cases, rows = [], []
+        for name, role, plan in (("bench", "ZONE", None), ("sense_only", "SENSE", None), ("control_only", "CONTROL", {})):
+            spec = TL.lp.build_spec(role, ctx[name], None if role != "SENSE" else [
+                {"instance": "sht45_1", "tags": ["air_humidity"], "uoms": {"air_humidity": "RH%"}}],
+                {"actuator_definitions": {}} if role == "CONTROL" else None)
+            cases += [{"op": "rowFor", "spec": spec, "code": c, "state": st}
+                      for c in ("air_humidity", "co2") for st in states]
+            rows += [r["loop"] for r in spec["rows"] if r["loop"]]
+        rows += [{k: l[k] for k in TL.lp.LOOP_KEYS} for l in ctx["existing"]["loops"]]
+        rows += [{k: l[k] for k in TL.lp.LOOP_KEYS if l[k] is not None} for l in ctx["halfbound"]["loops"]]
         cases += [{"op": "stateOf", "row": r} for r in rows]
         got = self.run_js(cases)
-        want = [TL.lp.row_for(spec, c["code"], c["state"]) for c in cases if c["op"] == "rowFor"] + \
+        want = [TL.lp.row_for(c["spec"], c["code"], c["state"]) for c in cases if c["op"] == "rowFor"] + \
                [TL.lp.state_of(r) for r in rows]
         self.assertEqual(got, want)
 

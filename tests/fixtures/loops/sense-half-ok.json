@@ -1,0 +1,39 @@
+{
+ "note": "a SENSE board alone: every tag with one sensor is bound; each loop waits for its actuator",
+ "context": "sense_only",
+ "role": "SENSE",
+ "answer": "initial",
+ "expect": [
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ]
+ ],
+ "plan_sources": [
+  {
+   "instance": "scd30_1",
+   "driver": "scd30",
+   "tags": [
+    "co2",
+    "air_temperature",
+    "air_humidity"
+   ],
+   "uoms": {
+    "co2": "ppm",
+    "air_temperature": "C",
+    "air_humidity": "RH%"
+   }
+  }
+ ]
+}

@@ -374,8 +374,10 @@ SKIP = json.dumps({"skip": True})
 
 
 class LoopPicker(unittest.TestCase):
-    """The `loops` planning stage after `wiring`: asked with Back when the zone has both
-    boards, never asked when it cannot be (no counterpart, a run, a role, IAM_DB_ROLES)."""
+    """The `loops` planning stage after `wiring`: asked with Back, each board binding its
+    own half of the zone's loops (migration 011: CONTROL the outputs, SENSE the inputs,
+    in either order: no counterpart board needed), never asked when it cannot be (nothing
+    of the board matches a quantity, a run, a role, IAM_DB_ROLES)."""
 
     def ctx_file(self, state="ok", context=None, why=""):
         tmp = tempfile.mkdtemp()
@@ -399,25 +401,29 @@ class LoopPicker(unittest.TestCase):
         r, prompts = self.run_loops(["2", "1", "y", SKIP])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.labels(prompts)[-2:], [("Use this reference wiring?", True),
-                                                     ("Which sensor does each loop control on?", True)])
+                                                     ("Which actuator does each loop drive?", True)])
         p = prompts[-1]
         self.assertEqual((p["kind"], p["options"], p["submit_on_click"]), ("loops", [], False))
         spec = p["spec"]
-        self.assertEqual((spec["role"], spec["unit_code"], spec["zone_code"]), ("CONTROL", "UNIT01", "ZONE01"))
+        self.assertEqual((spec["role"], spec["half"], spec["unit_code"], spec["zone_code"]),
+                         ("CONTROL", "output", "UNIT01", "ZONE01"))
         # the planned map (reference wiring) is the zone's actuators; light is a types actuator
         acts = {a["name"]: a["kind"] for a in spec["actuators"]}
         self.assertEqual(acts["light"], "types")
         self.assertEqual(acts["co2"], "commands")
         self.assertEqual([l["loop_code"] for l in spec["initial"]["loops"]],
                          ["air_temperature", "air_humidity", "co2", "substrate_temperature"])
+        # the CONTROL board binds the outputs only; each actuator declares its quantity
+        self.assertEqual({tuple(sorted(l)) for l in spec["initial"]["loops"]}, {("loop_code", "output")})
+        self.assertEqual({a["name"]: a["quantity"] for a in spec["actuators"]}["co2"], "co2")
         self.assertIn("LOOPS note=decided later (the zone stays on the default map) skipped=1", r.stdout)
 
     def test_back_goes_to_the_wiring(self):
         r, prompts = self.run_loops(["2", "1", "y", "BACK", "y", SKIP])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.labels(prompts)[2:], [
-            ("Use this reference wiring?", True), ("Which sensor does each loop control on?", True),
-            ("Use this reference wiring?", True), ("Which sensor does each loop control on?", True)])
+            ("Use this reference wiring?", True), ("Which actuator does each loop drive?", True),
+            ("Use this reference wiring?", True), ("Which actuator does each loop drive?", True)])
 
     def test_back_skips_a_wiring_stage_that_asked_nothing(self):
         # --wiring/--board-template with no device parameter asked: plan_wiring asks
@@ -430,9 +436,9 @@ class LoopPicker(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([l for l, _ in self.labels(prompts)], [
             "What is this board for?", "Which unit and zone is this board going into?",
-            "Use this reference wiring?", "Which sensor does each loop control on?",
+            "Use this reference wiring?", "Which actuator does each loop drive?",
             "Which unit and zone is this board going into?", "Use this reference wiring?",
-            "Which sensor does each loop control on?"])
+            "Which actuator does each loop drive?"])
 
     def test_a_chosen_answer_is_kept_for_the_save(self):
         r, prompts = self.run_loops(["2", "1", "y", SKIP])
@@ -440,10 +446,12 @@ class LoopPicker(unittest.TestCase):
         r, _ = self.run_loops(["2", "1", "y", json.dumps(spec["initial"])])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("LOOPS note=chosen, not saved yet skipped=0 json={\"skip\":false", r.stdout)
-        self.assertIn("control loops: air_temperature, air_humidity, co2, substrate_temperature", r.stdout)
+        self.assertIn("control loops: air_temperature, air_humidity, co2, substrate_temperature (their actuators)",
+                      r.stdout)
 
     def test_an_invalid_answer_dies_before_the_board_is_touched(self):
-        r, prompts = self.run_loops(["2", "1", "y", json.dumps({"skip": False, "stop_all": False, "loops": []})])
+        r, prompts = self.run_loops(["2", "1", "y", json.dumps({"skip": False, "stop_all": False, "half": "output",
+                                                                "loops": []})])
         self.assertEqual(r.returncode, 1)
         self.assertIn("the control loops have errors and were not accepted", r.stderr)
         self.assertIn("answer.loops - no loop is ticked", r.stderr)
@@ -451,19 +459,33 @@ class LoopPicker(unittest.TestCase):
         src = read(SCRIPT)
         self.assertLess(src.index("      loops)  plan_loops"), src.index("BOARD_TOUCHED=1   #"))
 
-    def test_two_sensors_are_never_chosen_for_the_person(self):
+    def test_an_answer_of_the_other_half_is_refused(self):
         r, prompts = self.run_loops(["2", "1", "y", SKIP], ctx=self.ctx_file(context=LOOP_CTX["bench"]))
         self.assertEqual(r.returncode, 0, r.stderr)
-        rows = {x["loop_code"]: x for x in prompts[-1]["spec"]["rows"]}
-        self.assertIsNone(rows["air_humidity"]["loop"]["input"]["reference"])
-        self.assertIn("air_humidity has 2 sensors: no data and an alarm in a run", r.stdout)
+        spec = prompts[-1]["spec"]
+        bad = dict(spec["initial"], loops=[dict(l, input={"tag": "co2", "sources": ["scd30_1"], "rule": "reference",
+                                                         "reference": "scd30_1"}) for l in spec["initial"]["loops"]])
+        r, _ = self.run_loops(["2", "1", "y", json.dumps(bad)], ctx=self.ctx_file(context=LOOP_CTX["bench"]))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("co2: a CONTROL onboarding sets the output only", r.stderr)
 
-    def test_no_sense_board_no_prompt(self):
+    def test_no_sense_board_still_binds_the_outputs(self):
+        # migration 011: no ordering rule; the loops wait for the SENSE board's inputs
         ctx = dict(LOOP_CTX["single"], sensors=[])
+        r, prompts = self.run_loops(["2", "1", "y", SKIP], ctx=self.ctx_file(context=ctx))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(prompts[-1]["kind"], "loops")
+        self.assertIn("no SENSE board with named sensors in UNIT01 / ZONE01 yet: the loops this board drives wait "
+                      "for their sensors", r.stdout)
+
+    def test_nothing_this_board_could_bind_no_prompt(self):
+        ctx = dict(LOOP_CTX["single"], allowed=dict(LOOP_CTX["single"]["allowed"], quantities={
+            "light_intensity": LOOP_CTX["single"]["allowed"]["quantities"]["light_intensity"]}))
         r, prompts = self.run_loops(["2", "1", "y"], ctx=self.ctx_file(context=ctx))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("loops", [p["kind"] for p in prompts])
-        self.assertIn("no SENSE board with named sensors in UNIT01 / ZONE01 yet", r.stdout)
+        self.assertIn("this board has no actuator a control loop of UNIT01 / ZONE01 drives", r.stdout)
+        self.assertIn("LOOPS note=nothing to choose", r.stdout)
 
     def test_a_run_means_no_prompt_and_the_words(self):
         ctx = dict(LOOP_CTX["existing"], busy={"run_id": 42, "run_status": "R"})
@@ -646,8 +668,10 @@ class LoopsOnly(unittest.TestCase):
         r, posted = self.run_main("1\n6\n2\n1\n", LOOP_CTX["bench"], res)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("zone: UNIT01 / ZONE01", r.stdout)
-        self.assertEqual([l["loop_code"] for l in posted], ["air_humidity", "co2"])
-        self.assertNotIn("fallback", posted[0]["input"])
+        self.assertEqual(posted["half"], "both")
+        self.assertEqual([l["loop_code"] for l in posted["loops"]], ["air_humidity", "co2"])
+        self.assertNotIn("fallback", posted["loops"][0]["input"])
+        self.assertEqual(posted["loops"][0]["output"]["actuator"], "air_humidity")
         self.assertIn("control loops saved: created co2", r.stdout)
         self.assertIn("Control loops — UNIT01 / ZONE01", r.stdout)
 

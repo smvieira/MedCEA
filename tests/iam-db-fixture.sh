@@ -1267,6 +1267,22 @@ cmd_fulldown() {
     out="$(fx medcea_db -q -1 -v ON_ERROR_STOP=1 < apps/database/medcea_db_migrations_down_008b.sql 2>&1)" \
         && pass fulldown "medcea_db_migrations_down_008b.sql by hand after true" || { echo "$out" | grep ERROR; fail fulldown "the down file failed"; return; }
     cmd_logins false
+    # the documented revert order (CLAUDE.md, the down files' headers): the policy's
+    # version 2c first (its two EXECUTEs, which down_010 refuses while held), then
+    # down_011 (recipe types) and down_010 (control loops), then the full down of 008b;
+    # without them 010's and 011's definer functions stay behind owned by postgres
+    fx medcea_db -q -c "DO \$\$ DECLARE r text; BEGIN
+        FOR r IN SELECT DISTINCT a.grantee::regrole::text FROM pg_proc p
+                 CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                  WHERE p.oid IN (to_regprocedure('medcea.save_zone_loops(integer,jsonb)'),
+                                  to_regprocedure('medcea.zone_loop_context(integer)'))
+                    AND a.grantee <> p.proowner AND a.grantee <> 0 LOOP
+            EXECUTE format('REVOKE EXECUTE ON FUNCTION medcea.save_zone_loops(integer,jsonb), medcea.zone_loop_context(integer) FROM %I', r);
+        END LOOP; END \$\$;" >/dev/null
+    for f in medcea_db_migrations_down_011.sql medcea_db_migrations_down_010.sql; do
+        out="$(fx medcea_db -q -1 -v ON_ERROR_STOP=1 < "apps/database/$f" 2>&1)" \
+            && pass fulldown "$f by hand before the full down" || { echo "$out" | grep ERROR; fail fulldown "$f failed"; return; }
+    done
     out="$(fx medcea_db -q -1 -v ON_ERROR_STOP=1 -v full=1 < apps/database/medcea_db_migrations_down_008b.sql 2>&1)" \
         && pass fulldown "medcea_db_migrations_down_008b.sql -v full=1" || { echo "$out" | grep ERROR; fail fulldown "the full down file failed"; return; }
     cmd_logins false
@@ -1469,6 +1485,9 @@ cmd_purge() {
         -c 'DROP DATABASE IF EXISTS medcea_old27 WITH (FORCE);' -c 'DROP DATABASE IF EXISTS medcea_pa WITH (FORCE);' \
         -c 'DROP DATABASE IF EXISTS medcea_pa2 WITH (FORCE);' >/dev/null
     fx postgres -q -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'access_svc') THEN DROP ROLE access_svc; END IF; END \$\$;" >/dev/null
+    # Superset's metadata role (instance-wide, loaded with production's roles): its own
+    # component drops it (apps/superset/uninstall.sh --purge-data), never purge.sql
+    fx postgres -q -c "DROP ROLE IF EXISTS superset_meta;" >/dev/null
     roles="$(python3 "$CLI" db-roles --names | paste -sd, -),medcea_owner,authenticator,anon"
     out="$({ printf "\\\\set roles '%s'\n" "$roles"; cat apps/database/purge.sql; } | fx postgres -q -v ON_ERROR_STOP=1 2>&1)" \
         || { echo "$out"; fail purge "purge.sql"; return; }

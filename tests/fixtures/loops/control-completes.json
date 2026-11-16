@@ -1,0 +1,67 @@
+{
+ "note": "the CONTROL board of a zone whose SENSE board bound air_humidity: its output makes that loop live; co2 keeps its stored actuator",
+ "context": "halfbound",
+ "role": "CONTROL",
+ "answer": "initial",
+ "expect": [
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.substrate_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ]
+ ],
+ "plan_actuators": {
+  "actuator_definitions": {
+   "air_temperature": {
+    "quantity": "air_temperature",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "air_humidity": {
+    "quantity": "air_humidity",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "co2": {
+    "quantity": "co2",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "substrate_temperature": {
+    "quantity": "substrate_temperature",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "light": {
+    "types": {
+     "RED": {
+      "ON": {},
+      "OFF": {}
+     }
+    }
+   }
+  }
+ }
+}

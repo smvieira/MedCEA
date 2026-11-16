@@ -414,28 +414,36 @@ after the flash has already erased the device. In a terminal the same step falls
 back to asking for one address at a time; a table with a live verdict on it is
 not a thing a terminal does well.
 
-### The zone's control loops (feedback control Phase 2, Q20)
+### The zone's control loops (feedback control Phase 2, Q20; recipe types, migration 011)
 
 After the wiring and before anything touches the board comes one more planning
 stage, `loops` (Back returns to the wiring, or to the slot or role when the wiring
-stage asked nothing, as with `--wiring`/`--board-template`): which sensor each recipe quantity of
-the zone is controlled on, and which actuator it drives. It is asked only when
-the zone has both boards — the one being onboarded counts with its *planned*
-sensors (`device_template.py sense-sources`, the instance names `render()` will
+stage asked nothing, as with `--wiring`/`--board-template`). A loop has two halves
+and **each board binds its own, in either order**: a SENSE onboarding the *input*
+(which tag of which sensor a quantity is controlled on), a CONTROL onboarding the
+*output* (which actuator it drives), `--loops-only` both. A loop with one half is
+*half-bound*: saved and shown, never run, until the other board's onboarding binds
+the rest. The board being onboarded counts with its *planned* sensors
+(`device_template.py sense-sources`, the instance names and UoMs `render()` will
 write) or its planned channel map (`device_template.py actuator-map`, or the
-editor's table) — and only for a signed-in person whose role may change loops.
-The four quantities and their recipe limits are one table in three places:
-`edge/src/host/loops.py` `QUANTITIES`, the database's `_loop_quantities()`
-(migration 010) and the runner's `schd/cea/loop_resolver.py`; `tests/test_loops.py`
-compares them.
+editor's table); asked only for a signed-in person whose role may change loops.
 
-```
-air_temperature        air_temperature_lower/upper_limit    tag air_temperature
-air_humidity           hr_lower/upper_limit                 tag air_humidity
-co2                    co2_lower/upper_limit                tag co2, command map DOWN->UP, UP->OFF, OFF->OFF (fixed)
-substrate_temperature  substrate_temperature_lower/upper_limit   tag ground_temperature
-```
+The rows are the loopable quantities of the zone's unit's recipe type
+(`zone_loop_context`'s `allowed.quantities`, seeded from
+`apps/database/recipe_types.yaml`): their default sense tag, the UoMs a feeding
+tag may carry, the commands the actuator must take, and co2's fixed command map
+(DOWN->UP, UP->OFF, OFF->OFF). `loops.py FALLBACK_QUANTITIES` (used only without
+a catalogue) equals the YAML's (`tests/test_loops.py`).
 
+- **The input is a (sensor, tag) choice in the quantity's unit.** Any tag whose
+  UoM is one of the quantity's (`C`, `RH%`, `ppm`, `lx`) may feed it; the default
+  tag is preferred and the only one ticked by default (a tag without a UoM only
+  when it is the default tag, with a note, `W_NO_UOM`).
+- **The output is an actuator that declares the quantity.** A `commands`
+  actuator of `edge/templates/esp32-control.json` (and of the channel-map editor)
+  carries `"quantity"`; the picker offers the declaring ones, else those taking
+  every command the loop sends (an undeclared actuator is never a default unless
+  named after the quantity). The board ignores the key.
 - **The reference is always the person's choice (Q20).** A tag published by one
   sensor is preselected. With several, nothing is: the row is in error
   (`L_CHOOSE`) until the reference (and optionally a fallback), or the mean,
@@ -443,8 +451,9 @@ substrate_temperature  substrate_temperature_lower/upper_limit   tag ground_temp
   unticked. A zone with no loop rows runs on the runner's default map (a tag
   with one fresh sensor uses it; several give no data and an alarm), decided
   per zone; a zone with rows controls only its ticked quantities.
-- **Replace-all.** The answer is every loop the zone keeps;
-  `medcea.save_zone_loops(zone, loops)` deactivates a code left out. *Decide
+- **Replace that half.** The answer is this onboarding's half of every loop the
+  zone keeps: `medcea.save_zone_loops(zone, {"half", "loops"})` takes that half
+  from a code left out (a loop left with neither is deactivated). *Decide
   later* (`{"skip": true}`) is local and posts nothing; an empty list is sent
   only after the explicit *Stop all loops* confirmation (`stop_all`). One loop
   per actuator, `max_age_s` a whole number from 1 to 3600, command mode only

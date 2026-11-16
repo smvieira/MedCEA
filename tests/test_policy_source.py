@@ -174,9 +174,14 @@ def as_of_fc(key, out):
     grants.LEGACY_ANON_EXCLUDED gains control_loop (migration 010; CLAUDE.md's rule for a new
     medcea table), which only the grants verify forms print (the legacy CTE's lists).
     PhaseLoopsADelta.test_only_the_verify_forms_move_by_the_legacy_list pins that nothing
-    else moved."""
+    else moved. Migration 011's compiler change (the recipe types' catalogue, three more
+    names after control_loop in the same lists) is applied too: an output that already
+    names control_loop (a CLI from after C2) gets only that."""
     if key.startswith("grants-verify-"):
-        return out.replace("'mqtt_service_acl'", "'mqtt_service_acl', 'control_loop'")
+        if "'control_loop'" not in out:
+            out = out.replace("'mqtt_service_acl'", "'mqtt_service_acl', 'control_loop'")
+        if "'control_quantity'" not in out:
+            out = out.replace("'control_loop'", "'control_loop', 'control_quantity', 'recipe_type', 'recipe_type_quantity'")
     return out
 
 

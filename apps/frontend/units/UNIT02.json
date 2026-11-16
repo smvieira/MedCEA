@@ -1,6 +1,6 @@
 {
   "unit_code": "UNIT02",
-  "unit_type": "Greens",
+  "unit_type": "PLANT",
   "area": 0.5,
   "height": 0.3,
   "is_active": "Y",

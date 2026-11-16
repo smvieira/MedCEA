@@ -1,17 +1,16 @@
 {
- "note": "substrate reads ground_temperature (F1)",
+ "note": "input.tag must be a tag name (the tag is the person's choice since migration 011, any tag of the sensor in the right unit)",
  "context": "single",
  "role": "ZONE",
  "answer": {
   "skip": false,
   "stop_all": false,
+  "half": "both",
   "loops": [
    {
     "loop_code": "substrate_temperature",
-    "recipe_lower": "substrate_temperature_lower_limit",
-    "recipe_upper": "substrate_temperature_upper_limit",
     "input": {
-     "tag": "substrate_temperature",
+     "tag": "Ground-Temp",
      "sources": [
       "ground_temperature"
      ],
@@ -26,8 +25,6 @@
    },
    {
     "loop_code": "co2",
-    "recipe_lower": "co2_lower_limit",
-    "recipe_upper": "co2_upper_limit",
     "input": {
      "tag": "co2",
      "sources": [
@@ -49,8 +46,6 @@
    },
    {
     "loop_code": "air_humidity",
-    "recipe_lower": "hr_lower_limit",
-    "recipe_upper": "hr_upper_limit",
     "input": {
      "tag": "air_humidity",
      "sources": [
@@ -67,8 +62,6 @@
    },
    {
     "loop_code": "air_temperature",
-    "recipe_lower": "air_temperature_lower_limit",
-    "recipe_upper": "air_temperature_upper_limit",
     "input": {
      "tag": "air_temperature",
      "sources": [

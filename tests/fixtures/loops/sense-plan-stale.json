@@ -23,7 +23,12 @@
     "co2",
     "air_temperature",
     "air_humidity"
-   ]
+   ],
+   "uoms": {
+    "co2": "ppm",
+    "air_temperature": "C",
+    "air_humidity": "RH%"
+   }
   }
  ]
 }

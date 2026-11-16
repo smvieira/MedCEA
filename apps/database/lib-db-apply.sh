@@ -204,10 +204,17 @@ SQL
 
     # ── 3. migrations ─────────────────────────────────────────────────────────
     nonce="$(openssl rand -hex 8)"
+    # migration 011 seeds the recipe-type catalogue from recipe_types.yaml (checked
+    # here first, so a broken file stops the deploy before anything is applied)
+    local rt_b64
+    rt_b64="$(python3 "$dir/recipe_types.py" b64)" || {
+        echo "ERROR: apps/database/recipe_types.yaml is not valid (above); nothing was applied" >&2
+        return 1
+    }
     _dba_log "Applying post-DDL migrations (008b nonce ${nonce})..."
     # no ON_ERROR_STOP, as before: earlier migrations rely on "already exists" being
     # skipped; 008b is one transaction, and the nonce below says whether it committed
-    out="$(_dba_psql "$CEA_DB" -q -v deploy_nonce="$nonce" -f - < "$dir/medcea_db_migrations.sql" 2>&1 || true)"
+    out="$(_dba_psql "$CEA_DB" -q -v deploy_nonce="$nonce" -v recipe_types_b64="$rt_b64" -f - < "$dir/medcea_db_migrations.sql" 2>&1 || true)"
     grep -v 'NOTICE' <<<"$out" | grep -E 'ERROR|WARNING' | sed 's/^psql:[^ ]* //' >&2 || true
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '008b:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
@@ -226,6 +233,13 @@ SQL
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '010:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
         echo "ERROR: migration 010 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 011 (recipe types: the catalogue, recipe_line.setpoints, the unit's type, the
+    # half-bound loops) is a fourth transaction with the same nonce
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '011:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 011 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
         return 1
     fi
 

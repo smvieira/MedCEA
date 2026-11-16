@@ -1,9 +1,12 @@
-/* The control-loop picker (feedback control Phase 2, owner decision Q20).
+/* The control-loop picker (feedback control Phase 2, owner decision Q20; recipe
+ * types, migration 011).
  *
- * One row per recipe quantity: whether the zone controls it, on which sensor
- * (the reference, with an optional fallback) or on the mean/min/max of the
- * sensors ticked, how old a reading may be, and which actuator it drives. A tag
- * with one sensor comes preselected; a tag with several stays in error until the
+ * One row per loopable quantity of the zone's unit's recipe type. A loop has two
+ * halves, each bound by its own board's onboarding, in either order: a SENSE board
+ * binds the input (which tag of which sensor, or the mean/min/max of the sensors of
+ * one tag, how old a reading may be), a CONTROL board the output (which actuator).
+ * A loop with one half ("half-bound") runs on the default for the other. A default
+ * tag with one sensor comes preselected; with several it stays in error until the
  * person chooses (nothing is preselected), or unticks the quantity.
  *
  * The checks between loops-logic:begin and :end mirror edge/src/host/loops.py's
@@ -15,36 +18,20 @@
  * Every string reaches the page through textContent, never innerHTML.
  *
  *   Loops.mount({el, spec, onchange}) -> {value, errors, findings, skip}
- *   Loops.logic = {validate, rowFor, stateOf, sends, candidates, QUANTITIES}
+ *   Loops.logic = {validate, rowFor, stateOf, sends, candidates, pairs, qmap, ...}
  */
 (function (root) {
   "use strict";
 
   /* loops-logic:begin */
-  var SPEC_VERSION = 1;
-  var QUANTITIES = [
-    { loop_code: "air_temperature", label: "Air temperature", tag: "air_temperature",
-      recipe_lower: "air_temperature_lower_limit", recipe_upper: "air_temperature_upper_limit",
-      actuator: "air_temperature" },
-    { loop_code: "air_humidity", label: "Air humidity", tag: "air_humidity",
-      recipe_lower: "hr_lower_limit", recipe_upper: "hr_upper_limit",
-      actuator: "air_humidity" },
-    { loop_code: "co2", label: "CO2", tag: "co2",
-      recipe_lower: "co2_lower_limit", recipe_upper: "co2_upper_limit",
-      actuator: "co2", command_map: { DOWN: "UP", UP: "OFF", OFF: "OFF" } },
-    { loop_code: "substrate_temperature", label: "Substrate temperature", tag: "ground_temperature",
-      recipe_lower: "substrate_temperature_lower_limit",
-      recipe_upper: "substrate_temperature_upper_limit",
-      actuator: "substrate_temperature" }
-  ];
-  var QMAP = {};
-  QUANTITIES.forEach(function (q) { QMAP[q.loop_code] = q; });
+  var SPEC_VERSION = 2;
   var RULES = ["reference", "mean", "min", "max"];
   var MAX_AGE_MIN = 1, MAX_AGE_MAX = 3600, MAX_AGE_DEFAULT = 90;
   var MAX_LOOPS = 16, STATE_KEY_MAX = 50, RESERVED = "default";
   var ACTUATOR_RX = /^[A-Za-z0-9_]+$/;
-  var ANSWER_KEYS = ["skip", "stop_all", "loops"];
-  var LOOP_KEYS = ["loop_code", "recipe_lower", "recipe_upper", "input", "output"];
+  var TAG_RX = /^[a-z][a-z0-9_]*$/;
+  var ANSWER_KEYS = ["skip", "stop_all", "half", "loops"];
+  var LOOP_KEYS = ["loop_code", "input", "output"];
   var INPUT_KEYS = ["tag", "sources", "rule", "reference", "fallback", "max_age_s"];
   var OUTPUT_KEYS = ["actuator", "mode", "command_map"];
 
@@ -52,28 +39,56 @@
   function has(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
   function isStr(v) { return typeof v === "string"; }
   function isBool(v) { return v === true || v === false; }
+  function copyOf(v) { return JSON.parse(JSON.stringify(v)); }
 
   function sends(q) {
-    if (q.command_map) {
+    if (isObj(q.command_map) && Object.keys(q.command_map).length) {
       var vals = {};
       Object.keys(q.command_map).forEach(function (k) { vals[q.command_map[k]] = true; });
       return Object.keys(vals).sort();
     }
-    return ["DOWN", "OFF", "UP"];
+    return (q.commands && q.commands.length ? q.commands.slice() : ["DOWN", "OFF", "UP"]).sort();
   }
-  function candidates(spec, tag) {
-    return (spec.sources || []).filter(function (s) { return (s.tags || []).indexOf(tag) >= 0; })
-                               .map(function (s) { return s.instance; });
+  function jsonbText(obj) {
+    var keys = Object.keys(obj).sort(function (a, b) {
+      return a.length !== b.length ? a.length - b.length : (a < b ? -1 : a > b ? 1 : 0);
+    });
+    return "{" + keys.map(function (k) { return JSON.stringify(k) + ": " + JSON.stringify(obj[k]); }).join(", ") + "}";
+  }
+  function qmap(spec) {
+    var m = {};
+    (spec.quantities || []).forEach(function (q) { m[q.loop_code] = q; });
+    return m;
+  }
+  function source(spec, name) {
+    var all = spec.sources || [];
+    for (var i = 0; i < all.length; i++) if (all[i].instance === name) return all[i];
+    return null;
+  }
+  function uomOk(q, uom) { return !uom || (q.sense_uoms || []).indexOf(uom) >= 0; }
+  function candidates(spec, code, tag) {
+    var q = qmap(spec)[code];
+    if (!q || !tag) return [];
+    return (spec.sources || []).filter(function (s) {
+      return (s.tags || []).indexOf(tag) >= 0 && uomOk(q, (s.uoms || {})[tag]);
+    }).map(function (s) { return s.instance; });
+  }
+  function pairs(spec, q) {
+    var first = [], rest = [];
+    (spec.sources || []).forEach(function (s) {
+      (s.tags || []).forEach(function (t) {
+        var uom = (s.uoms || {})[t] || null;
+        if (uom === null && t !== q.tag) return;
+        if (!uomOk(q, uom)) return;
+        (t === q.tag ? first : rest).push({ instance: s.instance, tag: t, uom: uom });
+      });
+    });
+    return first.concat(rest);
   }
   function findActuator(spec, name) {
     var all = spec.actuators || [];
     for (var i = 0; i < all.length; i++) if (all[i].name === name) return all[i];
     return null;
-  }
-  function fit(spec, name, q) {
-    var a = findActuator(spec, name);
-    return a !== null && a.kind === "commands" &&
-      sends(q).every(function (c) { return (a.commands || []).indexOf(c) >= 0; });
   }
   function sameMap(a, b) {
     if (!isObj(a) || !isObj(b)) return false;
@@ -83,36 +98,195 @@
   }
   function isWhole(n) { return typeof n === "number" && Number.isInteger(n); }
   function show(v) { return isStr(v) ? v.slice(0, 60) : JSON.stringify(v === undefined ? null : v); }
+  function hasHalf(half, ex) {
+    if (half === "input") return ex.input !== null && ex.input !== undefined;
+    if (half === "output") return ex.output !== null && ex.output !== undefined;
+    return true;
+  }
+  function stopAllText(half, zone) {
+    if (half === "input")
+      return "no sensor of zone " + zone + " feeds a loop after this is saved: a loop keeps its actuator and " +
+        "waits for a sensor (a loop with neither is stopped)";
+    if (half === "output")
+      return "no actuator of zone " + zone + " is driven by a loop after this is saved: a loop keeps its sensor and " +
+        "waits for an actuator (a loop with neither is stopped)";
+    return "every loop of zone " + zone + " stops: the zone goes back to the default map (a tag with one sensor " +
+      "uses it; a tag with several gets no data and an alarm)";
+  }
 
   function rowFor(spec, code, st) {
-    var q = QMAP[code], rule = st.rule || "reference", inp = { tag: q.tag };
-    if (rule === "reference") {
-      var ref = st.reference, fb = st.fallback;
-      inp.sources = [ref, fb].filter(function (x) { return isStr(x) && x !== ""; });
-      inp.rule = "reference";
-      inp.reference = isStr(ref) && ref !== "" ? ref : null;
-      if (isStr(fb) && fb !== "" && fb !== ref) inp.fallback = fb;
-    } else {
-      var ticked = st.sensors || [];
-      inp.sources = candidates(spec, q.tag).filter(function (s) { return ticked.indexOf(s) >= 0; });
-      inp.rule = rule;
+    var q = qmap(spec)[code], half = spec.half, out = { loop_code: code };
+    var wantIn = half === "input" || (half === "both" && st.input !== false);
+    var wantOut = half === "output" || (half === "both" && st.output !== false);
+    if (wantIn) {
+      var tag = isStr(st.tag) && st.tag !== "" ? st.tag : null;
+      var rule = st.rule || "reference", inp = { tag: tag };
+      if (rule === "reference") {
+        var ref = st.reference, fb = st.fallback;
+        inp.sources = [ref, fb].filter(function (x) { return isStr(x) && x !== ""; });
+        inp.rule = "reference";
+        inp.reference = isStr(ref) && ref !== "" ? ref : null;
+        if (isStr(fb) && fb !== "" && fb !== ref) inp.fallback = fb;
+      } else {
+        var ticked = st.sensors || [];
+        inp.sources = candidates(spec, code, tag).filter(function (s) { return ticked.indexOf(s) >= 0; });
+        inp.rule = rule;
+      }
+      inp.max_age_s = has(st, "max_age_s") ? st.max_age_s : MAX_AGE_DEFAULT;
+      out.input = inp;
     }
-    inp.max_age_s = has(st, "max_age_s") ? st.max_age_s : MAX_AGE_DEFAULT;
-    var out = { actuator: st.actuator || q.actuator, mode: "command" };
-    if (q.command_map) out.command_map = JSON.parse(JSON.stringify(q.command_map));
-    return { loop_code: code, recipe_lower: q.recipe_lower, recipe_upper: q.recipe_upper, input: inp, output: out };
+    if (wantOut) {
+      var o = { actuator: st.actuator || null, mode: "command" };
+      if (isObj(q.command_map)) o.command_map = copyOf(q.command_map);
+      out.output = o;
+    }
+    return out;
   }
 
   function stateOf(row) {
     var inp = isObj(row.input) ? row.input : {}, out = isObj(row.output) ? row.output : {};
     var rule = RULES.indexOf(inp.rule) >= 0 ? inp.rule : "reference";
     var srcs = (Array.isArray(inp.sources) ? inp.sources : []).filter(isStr);
-    return { rule: rule,
+    return { tag: isStr(inp.tag) ? inp.tag : null,
+             rule: rule,
              reference: rule === "reference" && has(inp, "reference") ? inp.reference : null,
              fallback: rule === "reference" && has(inp, "fallback") ? inp.fallback : null,
              sensors: rule !== "reference" ? srcs : [],
              max_age_s: has(inp, "max_age_s") ? inp.max_age_s : MAX_AGE_DEFAULT,
-             actuator: has(out, "actuator") ? out.actuator : null };
+             actuator: isStr(out.actuator) ? out.actuator : null,
+             input: isObj(row.input),
+             output: isObj(row.output) };
+  }
+
+  function checkInput(spec, f, q, code, w, inp, zone) {
+    if (!isObj(inp)) { f("error", "L_SCHEMA", w + ".input", code + ": input must be an object"); return; }
+    Object.keys(inp).forEach(function (k) {
+      if (INPUT_KEYS.indexOf(k) < 0) f("error", "L_SCHEMA", w + ".input", code + ": unknown key input." + k.slice(0, 60));
+    });
+    var tag = has(inp, "tag") ? inp.tag : null, noTag = tag === null;
+    if (!noTag && (!isStr(tag) || !TAG_RX.test(tag))) {
+      f("error", "L_TAG", w + ".input.tag", code + ": input.tag must be a tag name");
+      tag = null;
+    }
+    var rule = inp.rule;
+    if (!isStr(rule) || RULES.indexOf(rule) < 0)
+      f("error", "L_RULE", w + ".input.rule", code + ": input.rule must be one of reference, mean, min, max");
+    var srcs = inp.sources, seen = [];
+    var units = (q.sense_uoms || []).slice().sort().join(" or ");
+    if (!Array.isArray(srcs)) {
+      f("error", "L_SCHEMA", w + ".input.sources", code + ": input.sources must be a non-empty list of sensor names");
+    } else {
+      srcs.forEach(function (s) {
+        if (!isStr(s)) { f("error", "L_SCHEMA", w + ".input.sources", code + ": input.sources must hold sensor names (strings)"); return; }
+        if (seen.indexOf(s) >= 0) {
+          f("error", "L_SCHEMA", w + ".input.sources", code + ": sensor " + s.slice(0, 60) + " is listed twice");
+          return;
+        }
+        seen.push(s);
+        var src = source(spec, s);
+        if (s === RESERVED)
+          f("error", "L_SOURCE_RESERVED", w + ".input.sources." + s,
+            code + ": sensor default is reserved for readings without a sensor name (a board flashed before " +
+            "Phase 1): re-onboard the board and choose its named sensor");
+        else if (src === null)
+          f("error", "L_SOURCE", w + ".input.sources." + s,
+            code + ": sensor " + s.slice(0, 60) + " is not on an active SENSE board of zone " + zone);
+        else if (tag !== null) {
+          if ((src.tags || []).indexOf(tag) < 0)
+            f("error", "L_SOURCE_TAG", w + ".input.sources." + s, code + ": sensor " + s + " does not publish " + tag);
+          else {
+            var uom = (src.uoms || {})[tag] || "";
+            if (uom && (q.sense_uoms || []).indexOf(uom) < 0)
+              f("error", "L_UOM", w + ".input.sources." + s,
+                code + ": sensor " + s + " publishes " + tag + " in " + uom + ", not " + units);
+            else if (!uom)
+              f("warn", "W_NO_UOM", w + ".input.sources." + s,
+                code + ": sensor " + s + " publishes " + tag + " without a unit, so it is not checked to be in " + units);
+          }
+        }
+      });
+    }
+    var cands = tag !== null ? candidates(spec, code, tag) : [];
+    var choose = noTag || (rule === "reference" && (inp.reference === undefined || inp.reference === null));
+    if (noTag) {
+      var reads = pairs(spec, q).map(function (p) { return p.instance + " " + p.tag; });
+      f("error", "L_CHOOSE", w + ".input.tag",
+        code + " can read " + (reads.join(", ") || "nothing on this board") +
+        ": choose the tag and the sensor it controls on, or mark it not controlled");
+    } else if (choose) {
+      f("error", "L_CHOOSE", w + ".input.reference",
+        code + " has " + cands.length + " sensors (" + cands.join(", ") +
+        "): choose the one it controls on, or mean/min/max, or mark it not controlled");
+    } else if (Array.isArray(srcs) && srcs.length === 0) {
+      f("error", "L_SOURCES_EMPTY", w + ".input.sources", code + ": input.sources must be a non-empty list of sensor names");
+    }
+    if (rule === "reference" && !choose) {
+      var ref = inp.reference, fb = null;
+      if (!isStr(ref))
+        f("error", "L_REFERENCE", w + ".input.reference", code + ": rule reference needs input.reference, one of the sources");
+      else if (seen.indexOf(ref) < 0)
+        f("error", "L_REFERENCE", w + ".input.reference", code + ": input.reference " + ref.slice(0, 60) + " is not one of the sources");
+      if (has(inp, "fallback")) {
+        fb = inp.fallback;
+        if (!isStr(fb)) {
+          f("error", "L_FALLBACK", w + ".input.fallback", code + ": input.fallback must be a sensor name");
+          fb = null;
+        } else if (fb === ref) {
+          f("error", "L_FALLBACK", w + ".input.fallback", code + ": input.fallback must be another sensor than the reference");
+        } else if (seen.indexOf(fb) < 0) {
+          f("error", "L_FALLBACK", w + ".input.fallback", code + ": input.fallback " + fb.slice(0, 60) + " is not one of the sources");
+        }
+      }
+      var rs = isStr(ref) ? ref : null;
+      if (seen.some(function (s) { return s !== rs && s !== fb; }))
+        f("error", "L_SOURCES_EXTRA", w + ".input.sources",
+          code + ": with rule reference, input.sources holds only the reference and the fallback");
+    } else if ((rule === "mean" || rule === "min" || rule === "max") && (has(inp, "reference") || has(inp, "fallback"))) {
+      f("error", "L_RULE_ARGS", w + ".input.rule", code + ": rule " + rule + " takes no reference or fallback");
+    }
+    if (has(inp, "max_age_s")) {
+      var n = inp.max_age_s;
+      if (!isWhole(n) || n < MAX_AGE_MIN || n > MAX_AGE_MAX)
+        f("error", "L_MAX_AGE", w + ".input.max_age_s",
+          code + ": input.max_age_s must be a whole number of seconds from 1 to 3600");
+    }
+  }
+
+  function checkOutput(spec, f, q, code, w, outp, zone, acts) {
+    if (!isObj(outp)) { f("error", "L_SCHEMA", w + ".output", code + ": output must be an object"); return; }
+    Object.keys(outp).forEach(function (k) {
+      if (OUTPUT_KEYS.indexOf(k) < 0) f("error", "L_SCHEMA", w + ".output", code + ": unknown key output." + k.slice(0, 60));
+    });
+    if (outp.mode !== "command")
+      f("error", "L_MODE", w + ".output.mode",
+        code + ": output.mode must be command (level and boost need Phase 3's PWM outputs)");
+    if (isObj(q.command_map)) {
+      if (!sameMap(outp.command_map, q.command_map))
+        f("error", "L_COMMAND_MAP", w + ".output.command_map",
+          code + ": output.command_map must be exactly " + jsonbText(q.command_map));
+    } else if (has(outp, "command_map")) {
+      f("error", "L_COMMAND_MAP", w + ".output.command_map",
+        code + ": output.command_map is only for a quantity whose catalogue entry has one");
+    }
+    var act = outp.actuator;
+    if (!isStr(act) || !ACTUATOR_RX.test(act)) {
+      f("error", "L_ACTUATOR", w + ".output.actuator", code + ": output.actuator must be an actuator name");
+      return;
+    }
+    var a = findActuator(spec, act), need = sends(q);
+    if (a === null)
+      f("error", "L_ACTUATOR", w + ".output.actuator",
+        code + ": actuator " + act + " is not on an active CONTROL board of zone " + zone);
+    else if (a.kind !== "commands" || !need.every(function (c) { return (a.commands || []).indexOf(c) >= 0; }))
+      f("error", "L_ACTUATOR_KIND", w + ".output.actuator",
+        code + ": actuator " + act + " does not take every command the loop sends (" + need.join(", ") + ")");
+    else if (a.quantity !== null && a.quantity !== undefined && a.quantity !== code)
+      f("error", "L_ACTUATOR_QUANTITY", w + ".output.actuator",
+        code + ": actuator " + act + " acts on " + a.quantity + ", not " + code);
+    if (has(acts, act))
+      f("error", "L_ACTUATOR_SHARED", w + ".output.actuator",
+        code + ": actuator " + act + " is driven by another loop of the zone");
+    else acts[act] = code;
   }
 
   function validate(spec, answer) {
@@ -122,7 +296,7 @@
       f("error", "L_SCHEMA", "spec.version", "the page and the wizard are of different versions: reload the page");
       return out;
     }
-    var zone = spec.zone_code || "";
+    var zone = spec.zone_code || "", half = spec.half, qs = qmap(spec);
     (spec.old_boards || []).forEach(function (o) {
       f("warn", "W_OLD_BOARD", "old_boards." + (o.component_id === undefined || o.component_id === null ? "None" : o.component_id),
         (o.dns_name || "a board") + " publishes " + (o.tags || []).join(", ") +
@@ -144,7 +318,7 @@
         f("error", "L_SCHEMA", "answer.skip", "Decide later sends nothing else");
         return out;
       }
-      if (!(spec.existing || []).length) {
+      if (half !== "output" && !(spec.existing || []).length) {
         (spec.rows || []).forEach(function (r) {
           var c = r.candidates || [];
           if (r.offered && c.length > 1)
@@ -157,6 +331,11 @@
     }
     var stopAll = has(answer, "stop_all") ? answer.stop_all : false;
     if (!isBool(stopAll)) { f("error", "L_SCHEMA", "answer.stop_all", "stop_all must be true or false"); return out; }
+    if (answer.half !== half) {
+      f("error", "L_SCHEMA", "answer.half",
+        "the answer sets the " + show(answer.half) + " half, this page the " + half + " half: reload the page");
+      return out;
+    }
     var loops = answer.loops;
     if (!Array.isArray(loops)) {
       f("error", "L_SCHEMA", "answer.loops", "loops must be a list (every loop the zone keeps)");
@@ -165,150 +344,92 @@
     if (stopAll && loops.length > 0) f("error", "L_SCHEMA", "answer.stop_all", "Stop all sends no loops");
     if (!stopAll && loops.length === 0)
       f("error", "L_EMPTY", "answer.loops", "no loop is ticked: tick at least one, choose Decide later, or Stop all loops");
-    if (stopAll && loops.length === 0)
-      f("warn", "W_DEFAULT_MAP", "answer.stop_all",
-        "every loop of zone " + zone + " stops: the zone goes back to the default map (a tag with one sensor " +
-        "uses it; a tag with several gets no data and an alarm)");
+    if (stopAll && loops.length === 0) f("warn", "W_DEFAULT_MAP", "answer.stop_all", stopAllText(half, zone));
     if (loops.length > MAX_LOOPS) f("error", "L_SCHEMA", "answer.loops", "at most " + MAX_LOOPS + " loops");
-    var srcsAll = (spec.sources || []).map(function (s) { return s.instance; });
-    var codes = [], acts = {};
+    var loopable = Object.keys(qs).filter(function (c) { return qs[c].loopable; }).sort();
+    var codes = [], acts = {}, sides = {};
     loops.forEach(function (lp, i) {
       if (!isObj(lp)) { f("error", "L_SCHEMA", "loops." + i, "a loop must be a JSON object"); return; }
       var code = lp.loop_code;
-      if (!isStr(code) || !has(QMAP, code)) {
+      if (!isStr(code)) { f("error", "L_QUANTITY", "loops." + i + ".loop_code", "a loop needs a loop_code"); return; }
+      var q = has(qs, code) ? qs[code] : null;
+      if (q === null) {
         f("error", "L_QUANTITY", "loops." + i + ".loop_code",
-          "loop_code " + show(code) + " is not one of " + QUANTITIES.map(function (q) { return q.loop_code; }).join(", "));
+          "loop_code " + code.slice(0, 60) + " is not one of " + (loopable.join(", ") || "none"));
         return;
       }
       var w = "loops." + code;
+      if (!q.loopable) {
+        f("error", "L_NOT_LOOPABLE", w + ".loop_code", code + ": a setpoint only, without a feedback loop yet");
+        return;
+      }
       if (codes.indexOf(code) >= 0) { f("error", "L_DUP", w + ".loop_code", code + ": listed twice"); return; }
       codes.push(code);
-      var q = QMAP[code];
       if (code.length + 1 + zone.length > STATE_KEY_MAX)
         f("error", "L_STATE_KEY", w + ".loop_code",
           code + ": the runner's state key " + code + "@" + zone + " is longer than " + STATE_KEY_MAX + " characters");
       Object.keys(lp).forEach(function (k) {
         if (LOOP_KEYS.indexOf(k) < 0) f("error", "L_SCHEMA", w, code + ": unknown key " + k.slice(0, 60));
       });
-      if (lp.recipe_lower !== q.recipe_lower || lp.recipe_upper !== q.recipe_upper)
-        f("error", "L_LIMITS", w + ".recipe",
-          code + ": the limits are the recipe's " + q.recipe_lower + " and " + q.recipe_upper);
-      var inp = lp.input, cands = candidates(spec, q.tag);
-      if (!isObj(inp)) {
+      var inp = has(lp, "input") ? lp.input : null, outp = has(lp, "output") ? lp.output : null;
+      sides[code] = [inp !== null, outp !== null];
+      if (half === "input" && outp !== null)
+        f("error", "L_HALF", w + ".output", code + ": a SENSE onboarding sets the input only");
+      else if (half === "output" && inp !== null)
+        f("error", "L_HALF", w + ".input", code + ": a CONTROL onboarding sets the output only");
+      if (half === "input" && inp === null)
         f("error", "L_SCHEMA", w + ".input", code + ": input must be an object");
-      } else {
-        Object.keys(inp).forEach(function (k) {
-          if (INPUT_KEYS.indexOf(k) < 0) f("error", "L_SCHEMA", w + ".input", code + ": unknown key input." + k.slice(0, 60));
-        });
-        if (inp.tag !== q.tag) f("error", "L_TAG", w + ".input.tag", code + ": input.tag must be " + q.tag);
-        var rule = inp.rule;
-        if (!isStr(rule) || RULES.indexOf(rule) < 0)
-          f("error", "L_RULE", w + ".input.rule", code + ": the rule must be one of " + RULES.join(", "));
-        var srcs = inp.sources, seen = [];
-        if (!Array.isArray(srcs)) {
-          f("error", "L_SCHEMA", w + ".input.sources", code + ": sources must be a list of sensor names");
-        } else {
-          srcs.forEach(function (s) {
-            if (!isStr(s)) { f("error", "L_SCHEMA", w + ".input.sources", code + ": sources must be sensor names"); return; }
-            if (seen.indexOf(s) >= 0) {
-              f("error", "L_SCHEMA", w + ".input.sources", code + ": sensor " + s.slice(0, 60) + " is listed twice");
-              return;
-            }
-            seen.push(s);
-            if (s === RESERVED)
-              f("error", "L_SOURCE_RESERVED", w + ".input.sources." + s,
-                code + ": sensor default is reserved for readings without a sensor name: re-onboard " +
-                "that board and choose its named sensor");
-            else if (srcsAll.indexOf(s) < 0)
-              f("error", "L_SOURCE", w + ".input.sources." + s,
-                code + ": sensor " + s.slice(0, 60) + " is not on the SENSE board of zone " + zone);
-            else if (cands.indexOf(s) < 0)
-              f("error", "L_SOURCE_TAG", w + ".input.sources." + s, code + ": sensor " + s + " does not publish " + q.tag);
-          });
-        }
-        var choose = rule === "reference" && (inp.reference === undefined || inp.reference === null);
-        if (choose)
-          f("error", "L_CHOOSE", w + ".input.reference",
-            code + " has " + cands.length + " sensors (" + cands.join(", ") +
-            "): choose the one it controls on, or mean/min/max, or mark it not controlled");
-        else if (Array.isArray(srcs) && srcs.length === 0)
-          f("error", "L_SOURCES_EMPTY", w + ".input.sources", code + ": tick at least one sensor");
-        if (rule === "reference" && !choose) {
-          var ref = inp.reference;
-          if (!isStr(ref) || seen.indexOf(ref) < 0)
-            f("error", "L_REFERENCE", w + ".input.reference", code + ": the reference must be one of the sources");
-          if (has(inp, "fallback")) {
-            var fb = inp.fallback;
-            if (!isStr(fb) || fb === ref || seen.indexOf(fb) < 0)
-              f("error", "L_FALLBACK", w + ".input.fallback",
-                code + ": the fallback must be another of the sources than the reference");
-          }
-          var extra = seen.filter(function (s) { return s !== ref && s !== inp.fallback; });
-          if (extra.length)
-            f("error", "L_SOURCES_EXTRA", w + ".input.sources",
-              code + ": with rule reference the sources are the reference and the fallback only (not " +
-              extra.join(", ") + ")");
-        } else if ((rule === "mean" || rule === "min" || rule === "max") && (has(inp, "reference") || has(inp, "fallback"))) {
-          f("error", "L_RULE_ARGS", w + ".input.rule", code + ": rule " + rule + " takes no reference or fallback");
-        }
-        if (has(inp, "max_age_s")) {
-          var n = inp.max_age_s;
-          if (!isWhole(n) || n < MAX_AGE_MIN || n > MAX_AGE_MAX)
-            f("error", "L_MAX_AGE", w + ".input.max_age_s",
-              code + ": max age must be a whole number of seconds from " + MAX_AGE_MIN + " to " + MAX_AGE_MAX);
-        }
-      }
-      var outp = lp.output;
-      if (!isObj(outp)) { f("error", "L_SCHEMA", w + ".output", code + ": output must be an object"); return; }
-      Object.keys(outp).forEach(function (k) {
-        if (OUTPUT_KEYS.indexOf(k) < 0) f("error", "L_SCHEMA", w + ".output", code + ": unknown key output." + k.slice(0, 60));
-      });
-      if (outp.mode !== "command")
-        f("error", "L_MODE", w + ".output.mode",
-          code + ": the mode is command in this release (level and boost need the PWM outputs of Phase 3)");
-      if (q.command_map) {
-        if (!sameMap(outp.command_map, q.command_map))
-          f("error", "L_COMMAND_MAP", w + ".output.command_map",
-            code + ": the command map is fixed: DOWN to UP, UP to OFF, OFF to OFF (the fans)");
-      } else if (has(outp, "command_map")) {
-        f("error", "L_COMMAND_MAP", w + ".output.command_map", code + ": a command map is only for co2");
-      }
-      var act = outp.actuator;
-      if (!isStr(act) || !ACTUATOR_RX.test(act)) {
-        f("error", "L_ACTUATOR", w + ".output.actuator", code + ": choose an actuator");
-        return;
-      }
-      if (findActuator(spec, act) === null)
-        f("error", "L_ACTUATOR", w + ".output.actuator",
-          code + ": actuator " + act + " is not on the CONTROL board of zone " + zone);
-      else if (!fit(spec, act, q))
-        f("error", "L_ACTUATOR_KIND", w + ".output.actuator",
-          code + ": actuator " + act + " does not take every command the loop sends (" + sends(q).join(", ") + ")");
-      if (has(acts, act))
-        f("error", "L_ACTUATOR_SHARED", w + ".output.actuator",
-          code + ": actuator " + act + " is driven by " + acts[act] + " already (one loop per actuator)");
-      else acts[act] = code;
+      else if (half === "output" && outp === null)
+        f("error", "L_SCHEMA", w + ".output", code + ": output must be an object");
+      else if (half === "both" && inp === null && outp === null)
+        f("error", "L_HALF", w, code + ": a loop needs an input or an output");
+      if (inp !== null) checkInput(spec, f, q, code, w, inp, zone);
+      if (outp !== null) checkOutput(spec, f, q, code, w, outp, zone, acts);
     });
     if (!stopAll) {
       (spec.existing || []).forEach(function (r) {
-        if (codes.indexOf(r.loop_code) < 0)
-          f("warn", "W_STOPPED", "loops." + r.loop_code, r.loop_code + " stops: its loop is deactivated when this is saved");
+        if (codes.indexOf(r.loop_code) < 0 && hasHalf(half, r)) {
+          var msg = half === "input"
+            ? r.loop_code + " loses its sensor when this is saved: until one is chosen again, a run reads the only fresh sensor of its default tag"
+            : half === "output"
+            ? r.loop_code + " loses its actuator when this is saved: until one is chosen again, a run drives the zone's actuator for it, if it has one"
+            : r.loop_code + " stops: its loop is deactivated when this is saved";
+          f("warn", "W_STOPPED", "loops." + r.loop_code, msg);
+        }
       });
       if (loops.length > 0) {
         (spec.rows || []).forEach(function (r) {
-          if (r.offered && r.default_actuator && codes.indexOf(r.loop_code) < 0 &&
-              !(spec.existing || []).some(function (x) { return x.loop_code === r.loop_code; }))
-            f("warn", "W_NOT_CONTROLLED", "loops." + r.loop_code,
-              r.loop_code + " is not controlled: the zone has its sensor and actuator, but no loop");
+          var c = r.loop_code;
+          if (r.offered && r.default && codes.indexOf(c) < 0 &&
+              !(spec.existing || []).some(function (x) { return x.loop_code === c && hasHalf(half, x); })) {
+            var msg = half === "input"
+              ? c + " gets no sensor: this board publishes " + r.default_tag + ", but it is not ticked"
+              : half === "output"
+              ? c + " gets no actuator: this board has " + r.default_actuator + ", but it is not ticked"
+              : c + " is not controlled: the zone has its sensor and actuator, but no loop";
+            f("warn", "W_NOT_CONTROLLED", "loops." + c, msg);
+          }
         });
       }
+      codes.forEach(function (c) {
+        var hasIn = sides[c][0], hasOut = sides[c][1], ex = null;
+        (spec.existing || []).forEach(function (x) { if (ex === null && x.loop_code === c) ex = x; });
+        if (half === "input") hasOut = !!(ex && ex.output !== null && ex.output !== undefined);
+        else if (half === "output") hasIn = !!(ex && ex.input !== null && ex.input !== undefined);
+        if (hasIn && !hasOut)
+          f("warn", "W_HALF_BOUND", "loops." + c,
+            c + " waits for its actuator: until a CONTROL board's onboarding chooses one, a run drives the zone's actuator for it, if it has one");
+        else if (hasOut && !hasIn)
+          f("warn", "W_HALF_BOUND", "loops." + c,
+            c + " waits for its sensor: until a SENSE board's onboarding chooses one, a run reads the only fresh sensor of its default tag");
+      });
     }
     return out;
   }
 
   var logic = { validate: validate, rowFor: rowFor, stateOf: stateOf, sends: sends,
-                candidates: candidates, QUANTITIES: QUANTITIES, RULES: RULES,
-                MAX_AGE_DEFAULT: MAX_AGE_DEFAULT };
+                candidates: candidates, pairs: pairs, qmap: qmap, jsonbText: jsonbText, RULES: RULES,
+                MAX_AGE_DEFAULT: MAX_AGE_DEFAULT, SPEC_VERSION: SPEC_VERSION };
   if (typeof module !== "undefined" && module.exports) module.exports = logic;
   /* loops-logic:end */
 
@@ -331,6 +452,8 @@
 
   function mount(o) {
     var el = o.el, spec = o.spec || {}, onchange = o.onchange || function () {};
+    var half = spec.half, QM = qmap(spec);
+    var inSide = half !== "output", outSide = half !== "input";
     var rows = {}, skip = false, stopAll = false, findings = [];
     (spec.rows || []).forEach(function (r) {
       rows[r.loop_code] = { r: r, ticked: !!r.ticked, touched: false,
@@ -343,19 +466,26 @@
     var w = h("div", "lp");
     el.appendChild(w);
     w.appendChild(h("p", "lp-zone", "Zone " + (spec.unit_code || "?") + " / " + (spec.zone_code || "?") +
-      (spec.role === "SENSE" ? " — the sensors of the board you are onboarding" :
-       spec.role === "CONTROL" ? " — the actuators of the board you are onboarding" : "")));
+      (spec.recipe_type ? " (" + spec.recipe_type + " recipes)" : "") +
+      (half === "input" ? " — which sensor each loop reads, from the board you are onboarding" :
+       half === "output" ? " — which actuator each loop drives, on the board you are onboarding" : "")));
+    var halfNote = half === "input"
+      ? "Each loop's actuator is chosen when the zone's CONTROL board is onboarded; until then a run drives the zone's actuator for it, if it has one."
+      : half === "output"
+      ? "Each loop's sensor is chosen when the zone's SENSE board is onboarded; until then a run reads the only fresh sensor of its default tag."
+      : "A loop with only one half runs on the default for the other until it is chosen.";
     if ((spec.existing || []).length === 0)
       w.appendChild(h("p", "lp-note", "This zone has no control loops yet, so it runs on the default map: " +
-        "a tag with one sensor uses it, a tag with several gets no data and an alarm. Saving the loops below " +
-        "replaces the default map for this zone; a quantity left unticked is then not controlled."));
+        "a tag with one sensor uses it, a tag with several gets no data and an alarm. " + halfNote));
     else
-      w.appendChild(h("p", "lp-note", "Saving replaces this zone's loops with the ticked rows: " +
-        "a loop you untick is stopped."));
+      w.appendChild(h("p", "lp-note", "Saving replaces this part of the zone's loops with the ticked rows: " +
+        "a loop you untick loses it. " + halfNote));
 
     var table = h("table", "lp-table");
-    var head = h("tr");
-    ["Control", "Quantity", "Sensor", "Max age (s)", "Actuator", "Mode"].forEach(function (t) { head.appendChild(h("th", null, t)); });
+    var head = h("tr"), cols = ["Control", "Quantity"];
+    if (inSide) cols.push("Sensor", "Max age (s)");
+    if (outSide) cols.push("Actuator", "Mode");
+    cols.forEach(function (t) { head.appendChild(h("th", null, t)); });
     var thead = h("thead"); thead.appendChild(head); table.appendChild(thead);
     var tbody = h("tbody"); table.appendChild(tbody);
     w.appendChild(table);
@@ -364,7 +494,7 @@
     var later = h("button", "lp-later", "Decide later"); later.type = "button";
     var stopBtn = h("button", "lp-stopall", "Stop all loops"); stopBtn.type = "button";
     bar.appendChild(later);
-    if ((spec.existing || []).length) bar.appendChild(stopBtn);
+    if ((spec.existing || []).some(function (x) { return hasHalf(half, x); })) bar.appendChild(stopBtn);
     var modeNote = h("span", "lp-modenote");
     bar.appendChild(modeNote);
     w.appendChild(bar);
@@ -376,9 +506,7 @@
       redraw();
     };
     stopBtn.onclick = function () {
-      if (!stopAll && !confirm("Stop every control loop of zone " + spec.zone_code + "?\n\n" +
-          "The zone goes back to the default map: a tag with one sensor uses it, a tag with several gets " +
-          "no data and an alarm in a run.")) return;
+      if (!stopAll && !confirm(stopAllText(half, spec.zone_code))) return;
       stopAll = !stopAll; if (stopAll) skip = false;
       redraw();
     };
@@ -391,15 +519,39 @@
     }
     function value() {
       if (skip) return { skip: true };
-      if (stopAll) return { skip: false, stop_all: true, loops: [] };
+      if (stopAll) return { skip: false, stop_all: true, half: half, loops: [] };
       var loops = [];
       (spec.rows || []).forEach(function (r) { var l = current(r.loop_code); if (l) loops.push(l); });
-      return { skip: false, stop_all: false, loops: loops };
+      return { skip: false, stop_all: false, half: half, loops: loops };
     }
     function touch(code) { rows[code].touched = true; check(); }
 
     function sensorCell(code, x) {
-      var td = h("td", "lp-sensor"), cands = x.r.candidates || [], st = x.st;
+      var td = h("td", "lp-sensor"), st = x.st, r = x.r;
+      if (half === "both") {
+        var use = h("select", "lp-use");
+        opt(use, "1", "reads a sensor", st.input !== false);
+        opt(use, "0", "no sensor yet", st.input === false);
+        use.onchange = function () { st.input = use.value === "1"; touch(code); drawRow(code); };
+        td.appendChild(use);
+        if (st.input === false) return td;
+      }
+      var tags = (r.tags || []).slice();
+      if (st.tag && tags.indexOf(st.tag) < 0) tags.push(st.tag);
+      if (tags.length > 1 || !st.tag) {
+        var tg = h("select", "lp-tagsel");
+        if (!st.tag) opt(tg, "", "— choose the reading —", true);
+        tags.forEach(function (t) { opt(tg, t, t === r.default_tag ? t : t + " (another tag)", st.tag === t); });
+        tg.onchange = function () {
+          st.tag = tg.value || null; st.reference = null; st.fallback = null;
+          var c = candidates(spec, code, st.tag);
+          if (c.length === 1) st.reference = c[0];
+          st.sensors = c.slice();
+          touch(code); drawRow(code);
+        };
+        td.appendChild(tg);
+      }
+      var cands = st.tag ? candidates(spec, code, st.tag) : [];
       var how = h("select", "lp-rule");
       opt(how, "reference", "on one sensor", st.rule === "reference");
       if (cands.length > 1) {
@@ -449,12 +601,33 @@
         });
         td.appendChild(box);
       }
+      (r.pairs || []).forEach(function (p) {
+        if (p.tag === st.tag && !p.uom)
+          td.appendChild(h("div", "lp-tag", p.instance + " gives " + p.tag + " no unit: it is not checked"));
+      });
+      return td;
+    }
+
+    function actuatorCell(code, x) {
+      var td = h("td"), st = x.st, r = x.r;
+      var act = h("select", "lp-act");
+      var fits = (r.actuators || []).slice();
+      if (half === "both") opt(act, "", "no actuator yet", st.output === false);
+      else if (!st.actuator) opt(act, "", "— choose the actuator —", true);
+      if (st.actuator && fits.indexOf(st.actuator) < 0) opt(act, st.actuator, st.actuator + " (cannot)", st.output !== false);
+      fits.forEach(function (n) { opt(act, n, n, st.output !== false && st.actuator === n); });
+      act.onchange = function () {
+        if (act.value === "" && half === "both") { st.output = false; }
+        else { st.output = true; st.actuator = act.value || null; }
+        touch(code);
+      };
+      td.appendChild(act);
       return td;
     }
 
     var trs = {};
     function drawRow(code) {
-      var x = rows[code], r = x.r, q = QMAP[code];
+      var x = rows[code], r = x.r, q = QM[code] || { label: code, tag: "" };
       var tr = trs[code] || h("tr");
       tr.innerHTML = "";
       tr.className = x.ticked ? "lp-on" : "lp-off";
@@ -471,34 +644,36 @@
       tr.appendChild(tdc);
       var tdq = h("td", "lp-q");
       tdq.appendChild(h("div", "lp-label", q.label));
-      tdq.appendChild(h("div", "lp-tag", q.tag + (r.existing ? " · saved" : "")));
+      var state = !r.existing ? "" : r.live ? " · live" :
+        r.has_input ? " · waits for its actuator" : r.has_output ? " · waits for its sensor" : "";
+      tdq.appendChild(h("div", "lp-tag", (q.tag || "") + state));
       if (stale[code]) tdq.appendChild(h("div", "lp-badge", stale[code].message));
       tr.appendChild(tdq);
+      var span = (inSide ? 2 : 0) + (outSide ? 2 : 0);
       if (!r.offered) {
         var na = h("td", "lp-na", r.reason || "nothing to control");
-        na.colSpan = 4; tr.appendChild(na);
+        na.colSpan = span; tr.appendChild(na);
       } else if (!x.ticked) {
         var nc = h("td", "lp-na", r.existing ? "stopped when saved" : "not controlled");
-        nc.colSpan = 4; tr.appendChild(nc);
+        nc.colSpan = span; tr.appendChild(nc);
       } else {
-        tr.appendChild(sensorCell(code, x));
-        var tda = h("td"), age = h("input", "lp-age");
-        age.type = "number"; age.min = String(MAX_AGE_MIN); age.max = String(MAX_AGE_MAX); age.step = "1";
-        age.value = String(x.st.max_age_s);
-        age.oninput = function () { x.st.max_age_s = age.value === "" ? null : Number(age.value); touch(code); };
-        tda.appendChild(age); tr.appendChild(tda);
-        var tdo = h("td"), act = h("select", "lp-act");
-        var fits = (r.actuators || []).slice();
-        if (x.st.actuator && fits.indexOf(x.st.actuator) < 0) opt(act, x.st.actuator, x.st.actuator + " (cannot)", true);
-        fits.forEach(function (n) { opt(act, n, n, x.st.actuator === n); });
-        act.onchange = function () { x.st.actuator = act.value; touch(code); };
-        tdo.appendChild(act); tr.appendChild(tdo);
-        var tdm = h("td"), mode = h("select", "lp-mode");
-        opt(mode, "command", "command", true); mode.disabled = true;
-        mode.title = "level and boost: Phase 3 (PWM outputs)";
-        tdm.appendChild(mode);
-        if (q.command_map) tdm.appendChild(h("div", "lp-map", "fans: DOWN→UP, UP→OFF"));
-        tr.appendChild(tdm);
+        if (inSide) {
+          tr.appendChild(sensorCell(code, x));
+          var tda = h("td"), age = h("input", "lp-age");
+          age.type = "number"; age.min = String(MAX_AGE_MIN); age.max = String(MAX_AGE_MAX); age.step = "1";
+          age.value = String(x.st.max_age_s);
+          age.oninput = function () { x.st.max_age_s = age.value === "" ? null : Number(age.value); touch(code); };
+          tda.appendChild(age); tr.appendChild(tda);
+        }
+        if (outSide) {
+          tr.appendChild(actuatorCell(code, x));
+          var tdm = h("td"), mode = h("select", "lp-mode");
+          opt(mode, "command", "command", true); mode.disabled = true;
+          mode.title = "level and boost: Phase 3 (PWM outputs)";
+          tdm.appendChild(mode);
+          if (isObj(q.command_map)) tdm.appendChild(h("div", "lp-map", "fans: DOWN→UP, UP→OFF"));
+          tr.appendChild(tdm);
+        }
       }
       if (!trs[code]) { trs[code] = tr; tbody.appendChild(tr); }
     }
@@ -508,7 +683,7 @@
       stopBtn.textContent = stopAll ? "Keep the loops" : "Stop all loops";
       table.hidden = skip || stopAll;
       modeNote.textContent = skip ? "Nothing is saved; the zone's loops stay as they are." :
-        stopAll ? "Every loop of this zone stops when saved." : "";
+        stopAll ? stopAllText(half, spec.zone_code) : "";
       check();
     }
 

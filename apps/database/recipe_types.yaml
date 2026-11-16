@@ -1,0 +1,40 @@
+# The recipe types and the quantities they control (owner decisions of 15 Nov 2026).
+#
+# This file is the one editor of the catalogue: migration 011 seeds medcea.control_quantity,
+# medcea.recipe_type and medcea.recipe_type_quantity from it on every database deploy
+# (apps/database/recipe_types.py renders the SQL; tests/test_recipe_model.py keeps the two
+# equal), the Configuration UI and the Run Monitor get it as static JSON, the onboarding
+# wizard through medcea.zone_loop_context(). A change is a commit plus ./apps/database/deploy.sh.
+#
+# quantities:
+#   code         the loop code, the setpoint key in recipe_line.setpoints, the runner's
+#                learned-state channel: never rename one (a rename orphans learned state)
+#   sense_uoms   the UoM strings a SENSE tag may carry to feed it (the edge's strings:
+#                edge/templates/esp32-sense.json)
+#   default_tag  the tag a SENSE board publishes it on by default
+#   commands     what its actuator must accept (the runner sends these)
+#   command_map  what the runner sends instead of the algorithm's command (co2: fans only)
+#   phase        always | light_on (the setpoint holds only while the light is on)
+#   loopable     false: a setpoint and a gauge, no feedback loop yet
+#   min, max     plausible setpoint values (the recipe editor and the database refuse others)
+# recipe_types:
+#   quantities   code: required (true) or optional (false); a required one must be on every
+#                line before a recipe of the type can be approved
+version: 1
+default_type: PLANT     # a recipe whose permitted units do not tell its type (migration 011)
+quantities:
+  - {code: air_temperature, label: Air temperature, unit: "°C", sense_uoms: [C], default_tag: air_temperature,
+     commands: ["DOWN", "OFF", "UP"], phase: always, loopable: true, min: -10, max: 60}
+  - {code: air_humidity, label: Air humidity, unit: "%RH", sense_uoms: ["RH%"], default_tag: air_humidity,
+     commands: ["DOWN", "OFF", "UP"], phase: always, loopable: true, min: 0, max: 100}
+  - {code: co2, label: CO₂, unit: ppm, sense_uoms: [ppm], default_tag: co2,
+     commands: ["OFF", "UP"], command_map: {"DOWN": "UP", "UP": "OFF", "OFF": "OFF"}, phase: always, loopable: true, min: 0, max: 40000}
+  - {code: substrate_temperature, label: Substrate temperature, unit: "°C", sense_uoms: [C], default_tag: ground_temperature,
+     commands: ["DOWN", "OFF", "UP"], phase: always, loopable: true, min: -10, max: 60}
+  - {code: light_intensity, label: Light intensity, unit: lx, sense_uoms: [lx], default_tag: light_intensity,
+     commands: ["DOWN", "OFF", "UP"], phase: light_on, loopable: false, min: 0, max: 200000}
+recipe_types:
+  - {code: PLANT, label: Plants, legacy_unit_type: Greens,
+     quantities: {air_temperature: true, air_humidity: true, co2: true, substrate_temperature: false, light_intensity: false}}
+  - {code: FUNGI, label: Fungi, legacy_unit_type: Mushrooms,
+     quantities: {air_temperature: true, air_humidity: true, co2: true, substrate_temperature: false, light_intensity: false}}

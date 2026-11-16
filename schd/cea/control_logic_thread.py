@@ -12,9 +12,9 @@ def control_logic_thread(client, run_params, recipe_line_seq_cycle_run_start,
     the process value from the readings the subscriber stored ((zone, tag, sensor) ->
     (value, receive time)), decide, and publish the command to
     <root>/<unit>/<zone>/control/<output.actuator> (the board dispatches on "tag" =
-    the actuator). Limits come from the recipe line's columns the loop names
-    (recipe_lower/recipe_upper); a NULL limit makes that loop inactive for the line,
-    with one warning. Q8: a fallback sensor keeps controlling, with an ALARM line; on
+    the actuator). Limits come from the recipe line's setpoints[loop_code] (migration
+    011); a line without that setpoint makes the loop inactive for the line, with one
+    warning. A light_on loop (lux) holds while the light is off. Q8: a fallback sensor keeps controlling, with an ALARM line; on
     no_data the last command is held (re-sent, state "hold") and ALARM lines repeat;
     nothing is sent before a first command, so no_data never switches fans OFF.
     The light is time-based: once per iteration per zone of the map, readings or not.
@@ -94,8 +94,11 @@ def control_logic_thread(client, run_params, recipe_line_seq_cycle_run_start,
             with data_lock:
                 snap = dict(shared_data)
 
+            light_on = now_aware < day_end_time
             for loop, key in active:
                 try:
+                    if not lr.in_phase(loop, light_on):
+                        continue      # outside its phase: nothing sent, the board keeps the last command
                     r = lr.resolve(loop, snap, now, started_at)
                     for line in alarms.update((loop['zone_code'], loop['loop_code']), r['alarm'], now,
                                               lr.alarm_detail(r, last_cmd.get(key))):
@@ -113,7 +116,7 @@ def control_logic_thread(client, run_params, recipe_line_seq_cycle_run_start,
                 except Exception as loop_e:     # one loop's failure never stops the others
                     log(f"ERROR in {func_name}: loop {key}: {loop_e!r}", err=True)
 
-            light_command = "ON" if now_aware < day_end_time else "OFF"
+            light_command = "ON" if light_on else "OFF"
             for zone in zones:
                 try:
                     mqtt_publish_control_message(

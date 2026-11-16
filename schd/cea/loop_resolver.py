@@ -7,11 +7,19 @@ this file by path (the host python has no psycopg2, which cea/__init__ pulls in)
 
 A loop is the dict the runner keeps in run_params[0]['control_loops']:
 
-    {"zone_code", "loop_id" (None on the default map), "loop_code",
-     "recipe_lower", "recipe_upper",            recipe_line columns of its limits
+    {"zone_code", "loop_id" (None on the default map), "loop_code" (a quantity),
+     "phase": "always" | "light_on",          from the quantity catalogue
      "input":  {"tag", "sources": [sensor…] | "*", "rule", "reference"?,
                 "fallback"?, "max_age_s"?},
      "output": {"actuator", "mode": "command", "command_map"?}}
+
+Its limits are the recipe line's setpoints[loop_code] = {"lower", "upper"}
+(migration 011, recipe types). The quantities (the catalogue medcea.control_quantity
+of the unit's recipe type: default tag, commands, command map, phase, loopable) are
+passed in by get_control_loops; QUANTITIES below is the built-in copy of
+apps/database/recipe_types.yaml's loopable quantities, used when the database has
+no catalogue yet and by the offline tests (tests/test_loop_resolver.py compares it
+with the YAML).
 
 Readings are keyed (zone, tag, sensor). A reading topic is
 <root>/<unit>/<zone>/sense/<tag>/<sensor> (a board onboarded since Phase 1) or
@@ -19,11 +27,14 @@ Readings are keyed (zone, tag, sensor). A reading topic is
 when present, else 'default', a reserved sensor id). Both are accepted (Q12).
 
 The default map (Q11, Q20, owner D-a): a zone with active control_loop rows uses
-them; a zone with an actuator and no rows gets one loop per quantity with the
-internal rule 'single' over every sensor of the tag ("*"): exactly one fresh sensor
-is used; two or more give no_data and ALARM ambiguous_source (the reference is the
-user's onboarding choice); none give no_data. Substrate reads ground_temperature
-(F1); CO2 maps the algorithm's DOWN to fans UP (F11).
+them (rows with both halves; a half-bound row is reported and skipped); a zone with
+an actuator and no rows gets one loop per loopable quantity of the unit's type with
+the internal rule 'single' over every sensor of its default tag ("*"): exactly one
+fresh sensor is used; two or more give no_data and ALARM ambiguous_source (the
+reference is the user's onboarding choice); none give no_data. The actuator is the
+one declaring the quantity (actuator_definitions.<a>.quantity), else the one named
+after it. Substrate reads ground_temperature (F1); CO2 maps the algorithm's DOWN to
+fans UP (F11).
 
 no_data never synthesises a command (Q8): the last command is held, with an ALARM
 line every ALARM_REPEAT_S; a fallback sensor in use keeps controlling, with an
@@ -43,24 +54,29 @@ ALARM_REPEAT_S = 300
 LIGHT_ACTUATOR = "light"         # the time-based light command's actuator, no loop's
 STATE_KEY_MAX = 50              # medcea.algorithm_state.channel varchar(50)
 ACTUATOR_RE = re.compile(r"[A-Za-z0-9_]+")
+TAG_RE = re.compile(r"[a-z][a-z0-9_]*")
 TOPIC_UNSAFE = ("+", "#", "/")
 
-# The four loops of this release, keyed by loop_code: the same table as the
-# database's medcea._loop_quantities() (migration 010) and the wizard's QUANTITIES.
-# Phase 5 extends all three together (tests/test_loop_resolver.py compares them).
+# The built-in quantities: apps/database/recipe_types.yaml's, in the shape of the
+# database's medcea._loop_quantities() (migration 011) but for the label, unit,
+# range and ordinal (tests/test_loop_resolver.py compares them with the YAML).
 QUANTITIES = {
-    "air_temperature": {"tag": "air_temperature",
-                        "recipe_lower": "air_temperature_lower_limit",
-                        "recipe_upper": "air_temperature_upper_limit"},
-    "air_humidity": {"tag": "air_humidity",
-                     "recipe_lower": "hr_lower_limit", "recipe_upper": "hr_upper_limit"},
-    "co2": {"tag": "co2", "recipe_lower": "co2_lower_limit", "recipe_upper": "co2_upper_limit",
-            "command_map": {"DOWN": "UP", "UP": "OFF", "OFF": "OFF"}},
-    "substrate_temperature": {"tag": "ground_temperature",
-                              "recipe_lower": "substrate_temperature_lower_limit",
-                              "recipe_upper": "substrate_temperature_upper_limit"},
+    "air_temperature": {"tag": "air_temperature", "sense_uoms": ["C"], "commands": ["DOWN", "OFF", "UP"],
+                        "phase": "always", "loopable": True},
+    "air_humidity": {"tag": "air_humidity", "sense_uoms": ["RH%"], "commands": ["DOWN", "OFF", "UP"],
+                     "phase": "always", "loopable": True},
+    "co2": {"tag": "co2", "sense_uoms": ["ppm"], "commands": ["OFF", "UP"],
+            "command_map": {"DOWN": "UP", "UP": "OFF", "OFF": "OFF"}, "phase": "always", "loopable": True},
+    "substrate_temperature": {"tag": "ground_temperature", "sense_uoms": ["C"], "commands": ["DOWN", "OFF", "UP"],
+                              "phase": "always", "loopable": True},
+    "light_intensity": {"tag": "light_intensity", "sense_uoms": ["lx"], "commands": ["DOWN", "OFF", "UP"],
+                        "phase": "light_on", "loopable": False},
 }
-LIMIT_COLUMNS = tuple(sorted({q[k] for q in QUANTITIES.values() for k in ("recipe_lower", "recipe_upper")}))
+
+
+def loopable(quantities):
+    """The codes of the quantities that have a feedback loop, in table order."""
+    return [c for c, q in quantities.items() if q.get("loopable")]
 
 ALARM_KINDS = ("fallback_in_use", "no_fresh_data", "ambiguous_source")
 
@@ -236,26 +252,44 @@ def decide(loop, resolved, algo, last_cmd):
 
 
 # ── the default map ──────────────────────────────────────────────────────────────
-def default_loop(zone_code, loop_code):
-    q = QUANTITIES[loop_code]
-    out = {"actuator": loop_code, "mode": "command"}
-    if "command_map" in q:
+def default_loop(zone_code, loop_code, quantities=None, actuator=None):
+    q = (quantities or QUANTITIES)[loop_code]
+    out = {"actuator": actuator or loop_code, "mode": "command"}
+    if q.get("command_map"):
         out["command_map"] = dict(q["command_map"])
     return {"zone_code": zone_code, "loop_id": None, "loop_code": loop_code,
-            "recipe_lower": q["recipe_lower"], "recipe_upper": q["recipe_upper"],
+            "phase": q.get("phase", "always"),
             "input": {"tag": q["tag"], "sources": ALL_SOURCES, "rule": DEFAULT_RULE,
                       "max_age_s": DEFAULT_MAX_AGE_S},
             "output": out}
 
 
-def build_default_map(zone_codes):
-    """One loop per quantity per zone (zones sorted, de-duplicated). The legacy
-    actuators carry the loop_code's name (edge/templates/esp32-control.json), so
-    algorithm_state keys stay the old channel names."""
+def declared_actuators(zone_actuators):
+    """{quantity: actuator} from a zone's actuator_definitions (a dict name ->
+    definition); a quantity two actuators declare is left out (ambiguous)."""
+    seen = {}
+    for name, d in sorted((zone_actuators or {}).items()):
+        q = d.get("quantity") if isinstance(d, dict) else None
+        if isinstance(q, str):
+            seen.setdefault(q, []).append(name)
+    return {q: names[0] for q, names in seen.items() if len(names) == 1}
+
+
+def build_default_map(zone_codes, quantities=None, actuators=None):
+    """One loop per loopable quantity per zone (zones sorted, de-duplicated). The
+    actuator is the zone's one declaring the quantity (actuators: zone ->
+    actuator_definitions), else the one named after it, as the legacy actuators of
+    edge/templates/esp32-control.json are, so algorithm_state keys stay the old
+    channel names."""
+    quantities = quantities or QUANTITIES
     zones = sorted({z for z in zone_codes})
     if not zones:
         raise ValueError("the default loop map needs at least one zone")
-    return [default_loop(z, code) for z in zones for code in QUANTITIES]
+    out = []
+    for z in zones:
+        decl = declared_actuators((actuators or {}).get(z))
+        out += [default_loop(z, code, quantities, decl.get(code)) for code in loopable(quantities)]
+    return out
 
 
 build_legacy_map = build_default_map      # the name runner.md used
@@ -278,42 +312,46 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def loop_problems(loop, zone_code):
-    """Every reason one table row is refused, in medcea._loop_problems' words and
-    order (migration 010), but for the two inventory rules the runner cannot see
-    (a sensor on an active SENSE board, an actuator on an active CONTROL board).
-    `loop` holds loop_code, recipe_lower, recipe_upper, input, output only. A NULL
-    recipe column is not a problem here: limits() makes that loop inactive."""
+def loop_problems(loop, zone_code, quantities=None, halves=("input", "output")):
+    """Every reason one table row is refused, in medcea._loop_check's words and order
+    (migration 011, half 'both' with both halves required: the runner runs only a
+    loop with both), but for the zone inventory rules the runner cannot see (a
+    sensor on an active SENSE board publishing the tag in a UoM of the quantity, an
+    actuator on an active CONTROL board taking the commands and declaring this
+    quantity). `loop` holds loop_code, input, output only. halves: the halves to
+    check (a half-bound row completed with the default half checks its own only)."""
+    quantities = quantities or QUANTITIES
     if not isinstance(loop, dict):
         return ["a loop must be a JSON object"]
     code = loop.get("loop_code")
     if not isinstance(code, str):
         return ["a loop needs a loop_code"]
-    q = QUANTITIES.get(code)
+    q = quantities.get(code)
     if q is None:
-        return ["loop_code %s is not one of %s" % (code[:60], ", ".join(sorted(QUANTITIES)))]
+        return ["loop_code %s is not one of %s" % (code[:60], ", ".join(sorted(loopable(quantities))) or "none")]
     pre = code + ": "
+    if not q.get("loopable"):
+        return [pre + "a setpoint only, without a feedback loop yet"]
     errs = []
     if len(code) + 1 + len(zone_code or "") > STATE_KEY_MAX:
         errs.append(pre + "the runner's state key %s@%s is longer than 50 characters" % (code, zone_code))
     for k in loop:
-        if k not in ("loop_code", "recipe_lower", "recipe_upper", "input", "output"):
+        if k not in ("loop_code", "input", "output"):
             errs.append(pre + "unknown key %s" % str(k)[:60])
-    for col in ("recipe_lower", "recipe_upper"):
-        if loop.get(col) is not None and loop.get(col) != q[col]:
-            errs.append(pre + "%s must be %s" % (col, q[col]))
 
     inp = loop.get("input")
-    tag = q["tag"]
     srcs = []
-    if not isinstance(inp, dict):
+    if "input" not in halves:
+        pass
+    elif not isinstance(inp, dict):
         errs.append(pre + "input must be an object")
     else:
         for k in inp:
             if k not in ("tag", "sources", "rule", "reference", "fallback", "max_age_s"):
                 errs.append(pre + "unknown key input.%s" % str(k)[:60])
-        if inp.get("tag", None) != tag or not isinstance(inp.get("tag"), str):
-            errs.append(pre + "input.tag must be %s" % tag)
+        tag = inp.get("tag")
+        if not isinstance(tag, str) or not TAG_RE.fullmatch(tag):
+            errs.append(pre + "input.tag must be a tag name")
         sources = inp.get("sources")
         if not isinstance(sources, list) or len(sources) == 0:
             errs.append(pre + "input.sources must be a non-empty list of sensor names")
@@ -359,6 +397,8 @@ def loop_problems(loop, zone_code):
                 errs.append(pre + "input.max_age_s must be a whole number of seconds from 1 to 3600")
 
     outp = loop.get("output")
+    if "output" not in halves:
+        return errs
     if not isinstance(outp, dict):
         errs.append(pre + "output must be an object")
         return errs
@@ -367,11 +407,11 @@ def loop_problems(loop, zone_code):
             errs.append(pre + "unknown key output.%s" % str(k)[:60])
     if outp.get("mode", None) != "command" or not isinstance(outp.get("mode"), str):
         errs.append(pre + "output.mode must be command (level and boost need Phase 3's PWM outputs)")
-    if "command_map" in q:
+    if isinstance(q.get("command_map"), dict):
         if outp.get("command_map", None) != q["command_map"]:
             errs.append(pre + "output.command_map must be exactly %s" % _jsonb_text(q["command_map"]))
     elif "command_map" in outp:
-        errs.append(pre + "output.command_map is only for co2")
+        errs.append(pre + "output.command_map is only for a quantity whose catalogue entry has one")
     act = outp.get("actuator")
     if not isinstance(act, str) or not ACTUATOR_RE.fullmatch(act):
         errs.append(pre + "output.actuator must be an actuator name")
@@ -397,7 +437,32 @@ def _runner_only_problems(row):
     return errs
 
 
-def validate_loops(loops):
+def complete_half(loop, quantities=None, zone_actuators=None):
+    """A half-bound loop (its row has only an input or only an output) completed with
+    the default map's half: an output from the zone's actuator declaring the
+    quantity (else the one named after it), an input over every sensor of the
+    quantity's default tag (rule 'single'). The loop gets "completed": the half that
+    came from the default; None when the row has neither half, or lacks its output in
+    a zone with no actuator declaring the quantity or named after it (no CONTROL board
+    yet: nothing would listen to the command)."""
+    inp, outp = loop.get("input"), loop.get("output")
+    if inp is not None and outp is not None:
+        return loop
+    if inp is None and outp is None:
+        return None
+    code = loop["loop_code"]
+    act = declared_actuators(zone_actuators).get(code)
+    if outp is None and act is None and code not in (zone_actuators or {}):
+        return None
+    d = default_loop(loop["zone_code"], code, quantities, act)
+    out = dict(loop)
+    half = "input" if inp is None else "output"
+    out[half] = d[half]
+    out["completed"] = half
+    return out
+
+
+def validate_loops(loops, quantities=None):
     """(errors, warnings) for a unit's loop map. A table row gets loop_problems();
     a default-map loop must be exactly default_loop(zone, code). Across the map:
     a zone code usable in a topic, one loop per (zone, loop_code) and one loop per
@@ -417,19 +482,28 @@ def validate_loops(loops):
             errs.append("zone code %r cannot be used in an MQTT topic" % (zone,))
             continue
         where = "zone %s: " % zone
-        if is_default(lp):
-            if code not in QUANTITIES or lp != default_loop(zone, code):
+        if lp.get("completed") in ("input", "output"):
+            half = lp["completed"]
+            own = "output" if half == "input" else "input"
+            row = {"loop_code": code, own: lp.get(own)}
+            errs += [where + e for e in loop_problems(row, zone, quantities, halves=(own,))]
+            errs += [where + e for e in _runner_only_problems(row)]
+            qs = quantities or QUANTITIES
+            if code in loopable(qs):
+                d = default_loop(zone, code, qs, (lp.get("output") or {}).get("actuator"))
+                if lp.get(half) != d[half]:
+                    errs.append(where + "%s: not the default map's %s" % (code, half))
+        elif is_default(lp):
+            qs = quantities or QUANTITIES
+            if code not in loopable(qs) or lp != default_loop(zone, code, qs, (lp.get("output") or {}).get("actuator")):
                 errs.append(where + "%s: not the default map's loop" % code)
             elif len(code) + 1 + len(zone) > STATE_KEY_MAX:
                 errs.append(where + "%s: the runner's state key %s@%s is longer than 50 characters"
                             % (code, code, zone))
         else:
-            row = {k: lp[k] for k in ("loop_code", "recipe_lower", "recipe_upper", "input", "output") if k in lp}
-            errs += [where + e for e in loop_problems(row, zone)]
+            row = {k: lp[k] for k in ("loop_code", "input", "output") if k in lp}
+            errs += [where + e for e in loop_problems(row, zone, quantities)]
             errs += [where + e for e in _runner_only_problems(row)]
-            for col in ("recipe_lower", "recipe_upper"):
-                if lp.get(col) is None and isinstance(code, str):
-                    warns.append(where + "%s: %s is NULL: the loop is inactive" % (code, col))
         if isinstance(code, str):
             if (zone, code) in codes:
                 errs.append(where + "%s: listed twice" % code)
@@ -442,27 +516,36 @@ def validate_loops(loops):
     return errs, warns
 
 
-def loop_from_row(row):
-    """A control_loop row (dict; input/output jsonb as dicts or JSON text) as a loop."""
+def loop_from_row(row, quantities=None):
+    """A control_loop row (dict; input/output jsonb as dicts or JSON text) as a loop;
+    phase from the quantity (always when the catalogue does not know it)."""
     def obj(v):
         return json.loads(v) if isinstance(v, (str, bytes)) else v
+    q = (quantities or QUANTITIES).get(row["loop_code"]) or {}
     return {"zone_code": row["zone_code"], "loop_id": row.get("loop_id"), "loop_code": row["loop_code"],
-            "recipe_lower": row.get("recipe_lower"), "recipe_upper": row.get("recipe_upper"),
-            "input": obj(row["input"]), "output": obj(row["output"])}
+            "phase": q.get("phase", "always"), "input": obj(row["input"]), "output": obj(row["output"])}
 
 
 # ── per run ──────────────────────────────────────────────────────────────────────
 def limits(loop, recipe_line):
-    """(lower, upper, None) or (None, None, why): a loop whose recipe column is
-    NULL, or whose recipe line has no value there, is inactive for the line."""
-    cols = (loop.get("recipe_lower"), loop.get("recipe_upper"))
-    if None in cols:
-        return None, None, "%s has no recipe limit column: inactive" % loop.get("loop_code")
-    lo, hi = recipe_line.get(cols[0]), recipe_line.get(cols[1])
-    if lo is None or hi is None:
-        missing = ", ".join(c for c, v in zip(cols, (lo, hi)) if v is None)
-        return None, None, "the recipe line has no %s: inactive" % missing
+    """(lower, upper, None) or (None, None, why) from the recipe line's
+    setpoints[loop_code] (migration 011): a line without that setpoint (an optional
+    quantity left out) makes the loop inactive for the line."""
+    sp = recipe_line.get("setpoints")
+    if isinstance(sp, (str, bytes)):
+        sp = json.loads(sp)
+    code = loop.get("loop_code")
+    e = sp.get(code) if isinstance(sp, dict) else None
+    lo = e.get("lower") if isinstance(e, dict) else None
+    hi = e.get("upper") if isinstance(e, dict) else None
+    if not (_num(lo) and _num(hi)):
+        return None, None, "the recipe line has no %s setpoint: inactive" % code
     return float(lo), float(hi), None
+
+
+def in_phase(loop, light_on):
+    """A light_on loop (lux) runs only while the light is on; it holds otherwise."""
+    return loop.get("phase", "always") != "light_on" or bool(light_on)
 
 
 def zones_of(loops):

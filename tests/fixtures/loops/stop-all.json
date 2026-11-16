@@ -5,6 +5,7 @@
  "answer": {
   "skip": false,
   "stop_all": true,
+  "half": "both",
   "loops": []
  },
  "expect": [

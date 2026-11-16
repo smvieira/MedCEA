@@ -34,6 +34,8 @@ import os
 import re
 
 LEVELS = ("error", "warn")
+# A commands actuator's "quantity": a quantity code of the recipe-type catalogue.
+QUANTITY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class BindingError(Exception):
@@ -392,6 +394,9 @@ def validate_config(binding, cfg):
                             % (where, binding.label, addr), where)
                 seen[str(addr)] = val
 
+        if "types" in spec and "quantity" in spec:
+            add("error", "Typed actuator “%s” names a quantity. Only an UP/DOWN/OFF "
+                         "actuator acts on a quantity." % name, name)
         if "types" in spec:
             for tname, tspec in (spec.get("types") or {}).items():
                 w = "%s · %s" % (name, tname)
@@ -415,6 +420,10 @@ def validate_config(binding, cfg):
                             % (w, binding.label, ", ".join(stranded)), w + " · OFF")
         else:
             cmds = spec.get("commands") or {}
+            if "quantity" in spec and not (isinstance(spec.get("quantity"), str)
+                                           and QUANTITY_RE.match(spec["quantity"])):
+                add("error", "Actuator “%s” names its quantity “%s”, which is no quantity "
+                             "code (lower case, digits, _)." % (name, spec.get("quantity")), name)
             if "UP" not in cmds:
                 add("error", "Actuator “%s” has no UP. The whole actuator is "
                              "dropped at render time, so the scheduler never sees it."

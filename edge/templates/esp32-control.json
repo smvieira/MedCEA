@@ -16,7 +16,12 @@
     "               whatever is fitted (every OFF, and DARK).",
     "",
     "Values in 'set' are LOGICAL (1 = equipment running). active_low inverts",
-    "them on the way to the pin, because these relay boards close on a low."
+    "them on the way to the pin, because these relay boards close on a low.",
+    "",
+    "  quantity     (commands actuators) the recipe quantity this actuator acts",
+    "               on: a loopable code of apps/database/recipe_types.yaml. The",
+    "               loop picker offers it first for that quantity; the board",
+    "               ignores the key."
   ],
   "role": "CONTROL",
   "family": "esp32",
@@ -193,6 +198,7 @@
         },
         "air_temperature": {
           "kind": "commands",
+          "quantity": "air_temperature",
           "comment": "Heat or cool the chamber air. UP and DOWN are mutually exclusive by construction.",
           "commands": {
             "UP": {
@@ -230,6 +236,7 @@
         },
         "air_humidity": {
           "kind": "commands",
+          "quantity": "air_humidity",
           "comment": "Humidify, or dry the chamber by moving air through it.",
           "commands": {
             "UP": {
@@ -263,6 +270,7 @@
         },
         "co2": {
           "kind": "commands",
+          "quantity": "co2",
           "comment": "CO2 exchange: the fan moves it, the steriliser conditions it.",
           "commands": {
             "UP": {
@@ -294,6 +302,7 @@
         },
         "substrate_temperature": {
           "kind": "commands",
+          "quantity": "substrate_temperature",
           "comment": "Substrate heat mat, with the air flow fan as the only way down.",
           "commands": {
             "UP": {

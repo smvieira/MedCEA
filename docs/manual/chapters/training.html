@@ -44,6 +44,8 @@
 <tr><td><a href="#training-e34">E34 Two sensors on one reading in the Monitor and Grafana</a></td><td><span class="role">engineer</span>, <span class="role">qa</span></td><td>An SHT45 and an SCD30 on the same readings stay two series, named by sensor, from the board's topics to the Run Monitor and Grafana; an old board's readings show as <code>default</code>.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e35">E35 The runner's default map, fallback and alarms</a></td><td><span class="role">production_manager</span>, <span class="role">engineer</span></td><td>A zone without loops never guesses between two sensors (no data and an alarm), the fallback takes over when the reference stops, and a loop without data holds its last command.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e36">E36 Choose a zone's control loops, and the refusals</a></td><td><span class="role">engineer</span>, <span class="role">qa</span>, <span class="role">production_manager</span>, host operator</td><td>Only an engineer saves a zone's loops, the reference among several sensors is always chosen by a person, and nothing changes while the unit has a run running or scheduled.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e37">E37 A Fungi recipe with setpoints</a></td><td><span class="role">engineer</span>, <span class="role">production_manager</span>, <span class="role">qa</span></td><td>A recipe's steps carry one limit per quantity of its recipe type, the type is fixed once it has steps, a recipe file of format 2 round-trips, a recipe runs only on units of its type, and an incomplete recipe cannot be approved.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e38">E38 Bind a zone's loops board by board</a></td><td><span class="role">engineer</span>, host operator</td><td>Each board's onboarding binds its own half of the zone's loops, in either order; a half-bound loop is shown as such and runs on the default map's other half until the other board binds it.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -1262,6 +1264,73 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 </ul>
 <p><strong>Afterwards.</strong> Keep the loops for <a href="#training-e35">E35</a>, or stop them (<strong>Stop all loops</strong>, confirmed) to give the zone back to the default map.</p>
 <p><strong>Last done.</strong> Not yet run (written 13 November 2026, before the rollout of Phases 1 and 2).</p>
+
+<h3 id="training-e37">E37 A Fungi recipe with setpoints</h3>
+<p><strong>Goal.</strong> Write a recipe of a recipe type, with one lower and upper limit per quantity of the type on each step; export it and import it again; see that a recipe runs only on units of its type and that an incomplete recipe cannot be approved. The exercise proves the decisions on recipe types, the setpoints map and the unit's type in the <a href="#compliance-decisions">decision record</a>; the screens are in <a href="#apps-config">Configuration UI</a>.</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) writes the recipe; a <span class="role">production_manager</span> account assigns it; <code>qa_user</code> (<span class="role">qa</span>) approves it. The separation shown: the engineer writes, the production manager plans, <span class="role">qa</span> approves what someone else wrote.</p>
+<p><strong>Before you start.</strong> Migration 011 is deployed with the Configuration UI and the Run Monitor (<a href="#admin-recipe-types-rollout">Rollout of the recipe types</a>). UNIT01 is a Fungi unit. For the refusals that the database decides, note whether <code>IAM_DB_ROLES</code> is <code>true</code> (refused) or still <code>false</code> during the build (a warning only).</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>eng</code>: Recipes tab, <strong>+ New Recipe</strong>, Name <code>E37 Pleurotus test</code>, Recipe Type <strong>Fungi</strong>, Save.</li>
+<li><strong>Steps →</strong>, <strong>+ Add Step</strong>: Step # 1, Cycles 1, light type DARK, 0 and 60 minutes; air temperature 20–24, air humidity 85–95; leave CO<sub>2</sub> empty and try <strong>Save Step</strong>; then fill CO<sub>2</sub> 400–1200 and save.</li>
+<li>Open the recipe again and look at <strong>Recipe Type</strong>.</li>
+<li><strong>↓ Export</strong> the recipe; open the file in a text editor; <strong>↑ Import</strong> it again (it becomes a second recipe with the same steps).</li>
+<li>Import an old file from the Platform Recipe Library (one of the <code>Basilico</code> files before 15 November 2026, or any file without <code>recipe_type</code>).</li>
+<li>Production manager: Units tab, <strong>Recipe ↔ Unit Permissions</strong>: look at the cell of the recipe and UNIT01, and at a Plants recipe's cell.</li>
+<li><code>qa_user</code>: Approvals tab, approve <code>E37 Pleurotus test</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 2: one lower and upper pair per quantity of the Fungi type, the required ones marked; the step is not saved while CO<sub>2</sub> is empty; once saved, the step table's <strong>Setpoints</strong> column lists the three ranges.</li>
+<li>Step 3: the field is greyed, "Fixed: the recipe has steps."</li>
+<li>Step 4: the file has <code>"format": 2</code>, <code>"recipe_type": "FUNGI"</code> and each step's <code>setpoints</code> (<a href="#reference-recipe-file">the recipe file</a>); the imported copy has the same steps.</li>
+<li>Step 5: the import asks which recipe type it is, and the old limits arrive as setpoints.</li>
+<li>Step 6: the Fungi recipe's cell can be ticked; the Plants recipe's cell on UNIT01 shows ≠, "a recipe runs only on units of its type".</li>
+<li>Step 7: the approval is recorded and the recipe reads approved.</li>
+</ul>
+<div class="record"><p>The step's limits are the <code>setpoints</code> of its row in <code>medcea.recipe_line</code>, and the recipe's type <code>medcea.recipe.recipe_type</code>; each change is a row of <code>medcea.row_change</code> with the person, and the approval a row of <code>medcea.approval</code> whose digest covers the setpoints. Write the date, the commit, the recipe and approval numbers and each refusal's text under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>A step with air humidity 80–120: refused by the form, and by the database ("recipe_line setpoints: air_humidity must be within 0 and 100 %RH").</li>
+<li>A lower limit above the upper one: "recipe_line setpoints: … lower … is above upper …".</li>
+<li><code>qa_user</code> approves a recipe one of whose steps lacks a required quantity (an old step written before the form required it): "approve_recipe: recipe … misses required setpoints: line … lacks co2".</li>
+<li>A Plants recipe assigned to UNIT01 or run on it through the API: under <code>IAM_DB_ROLES=true</code> refused with "recipe_type: recipe … is a PLANT recipe and unit UNIT01 a FUNGI unit"; while it is <code>false</code> it goes through, and the database's warning says "IAM_DB_ROLES=false, would refuse: recipe_type: …".</li>
+<li><code>qa_user</code> approves the recipe <code>eng</code> wrote, as <code>eng</code>: refused, the author rule (<a href="#apps-config">Drafts, approval and the author rule</a>).</li>
+</ul>
+<p><strong>Afterwards.</strong> Retire the test recipes (<strong>Retire…</strong>), or keep one for <a href="#training-e38">E38</a>'s run.</p>
+<p><strong>Last done.</strong> Not yet run (written 15 November 2026, before the rollout of the recipe types).</p>
+
+<h3 id="training-e38">E38 Bind a zone's loops board by board</h3>
+<p><strong>Goal.</strong> See that each board's onboarding binds its own half of the zone's control loops, in either order: the SENSE board the sensors, the CONTROL board the actuators; that a half-bound loop is shown as such and that a run uses the default map's other half meanwhile; and that <code>--loops-only</code> binds both. The exercise proves the decision on half-by-half binding and the implementation choice on half-bound loops in the <a href="#compliance-decisions">decision record</a>; the picker is in <a href="#devices-loops">Control loops of a zone</a>.</p>
+<p><strong>Accounts and roles.</strong> <code>eng</code> (<span class="role">engineer</span>) onboards and chooses; the host operator reads the run log and the health check. The separation shown: only the engineer's role saves loops.</p>
+<p><strong>Before you start.</strong> The recipe types are deployed, with <code>IAM_DB_ROLES=true</code> (the picker needs it). UNIT01 / ZONE01 has its SENSE board (SHT45 and SCD30) and no saved loops; a CONTROL board is at hand for the zone. No run on UNIT01 is running or scheduled.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>eng</code>: re-onboard the SENSE board into UNIT01 / ZONE01 (or, with no board on the bench, the tile <strong>Control loops of a zone</strong>). At the Control loops step, choose <code>sht45_1</code> for air temperature and air humidity, <code>scd30_1</code> for CO<sub>2</sub>.</li>
+<li>Host operator: <code>./health-check.sh</code>, the <strong>Control loops</strong> line.</li>
+<li>Host operator: start a short run of a Fungi recipe on UNIT01 and read the start of its run log; stop it.</li>
+<li><code>eng</code>: onboard the CONTROL board into UNIT01 / ZONE01; at the Control loops step, look at the actuator chosen for each quantity and continue.</li>
+<li><code>eng</code>: open the tile <strong>Control loops of a zone</strong> for UNIT01 / ZONE01.</li>
+<li>Host operator: <code>./health-check.sh</code> again.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: "Which sensor does each loop control on?", one row per loop of the Fungi type, with no actuator question; when the zone has no CONTROL board, "no CONTROL board in UNIT01 / ZONE01 yet: the loops this board feeds wait for their actuators, chosen when the CONTROL board is onboarded".</li>
+<li>Step 2: <strong>Control loops</strong> warns of half-bound loops, "… running on the default map's other half until its onboarding chooses it: UNIT01/ZONE01 air_humidity (no output); …".</li>
+<li>Step 3: the run log has "WARNING: zone ZONE01: loop … is half-bound: its output is the default map's (actuator …) until a CONTROL onboarding chooses it".</li>
+<li>Step 4: "Which actuator does each loop drive?", each actuator that declares a quantity already chosen for it; the sensors are not asked again.</li>
+<li>Step 5: each row reads live.</li>
+<li>Step 6: no half-bound warning.</li>
+</ul>
+<div class="record"><p>Each half is written through <code>medcea.save_zone_loops</code> with <code>eng</code>'s sign-in: the SENSE onboarding's save fills <code>input</code>, the CONTROL onboarding's <code>output</code> of the same <code>medcea.control_loop</code> row, and each is a row of <code>medcea.row_change</code>. The run's cycle records the loops it ran with, a half-bound one marked <code>"completed"</code>. Write the date, the commit, what was bound in which order and each text under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>In the picker, choose for CO<sub>2</sub> a sensor tag in another unit: "sensor … publishes … in …, not ppm".</li>
+<li>For a CONTROL board whose fan actuator declares CO<sub>2</sub>, choose it for air humidity: "actuator … acts on co2, not air_humidity".</li>
+<li>A loop for light intensity: not offered ("light_intensity: a setpoint only, without a feedback loop yet").</li>
+</ul>
+<p><strong>Afterwards.</strong> Keep the loops, or <strong>Stop all loops</strong> from <code>--loops-only</code> to give the zone back to the default map.</p>
+<p><strong>Last done.</strong> Not yet run (written 15 November 2026, before the rollout of the recipe types).</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
