@@ -135,7 +135,7 @@ CEA_DB="medcea_db"
 PROJECT_NAME="${PROJECT_NAME:-medcea}"
 IAMTEST_DIR="${IAMTEST_DIR:-${TMPDIR:-/tmp}/medcea-iamtest}"
 PREV_REV="${PREV_REV:-9ef9852}"   # the last commit before Phase 2a (e97aab6)
-PREV_SCHD_REV="${PREV_SCHD_REV:-e97aab6}"   # the scheduler code before 2.4
+PREV_SCHD_REV="${PREV_SCHD_REV:-f572961}"   # R8's reference runner: migration 011's (e97aab6, the code before 2.4, read the limit columns 012 dropped)
 PREV27_REV="${PREV27_REV:-b65cb2d}"   # the access component before IAM 2.7
 CLI="$REPO_ROOT/apps/iam/compiler/cli.py"
 KEEP=false
@@ -1269,7 +1269,7 @@ cmd_fulldown() {
     cmd_logins false
     # the documented revert order (CLAUDE.md, the down files' headers): the policy's
     # version 2c first (its two EXECUTEs, which down_010 refuses while held), then
-    # down_011 (recipe types) and down_010 (control loops), then the full down of 008b;
+    # down_012 (the limit columns back), down_011 (recipe types) and down_010 (control loops), then the full down of 008b;
     # without them 010's and 011's definer functions stay behind owned by postgres
     fx medcea_db -q -c "DO \$\$ DECLARE r text; BEGIN
         FOR r IN SELECT DISTINCT a.grantee::regrole::text FROM pg_proc p
@@ -1279,7 +1279,18 @@ cmd_fulldown() {
                     AND a.grantee <> p.proowner AND a.grantee <> 0 LOOP
             EXECUTE format('REVOKE EXECUTE ON FUNCTION medcea.save_zone_loops(integer,jsonb), medcea.zone_loop_context(integer) FROM %I', r);
         END LOOP; END \$\$;" >/dev/null
-    for f in medcea_db_migrations_down_011.sql medcea_db_migrations_down_010.sql; do
+    for f in medcea_db_migrations_down_012.sql medcea_db_migrations_down_011.sql medcea_db_migrations_down_010.sql; do
+        if [[ "$f" == medcea_db_migrations_down_011.sql ]] \
+           && [[ "$(fx medcea_db -q -tA -c "SELECT count(*) FROM medcea.recipe_line WHERE setpoints ? 'light_intensity'")" != 0 ]]; then
+            # production's copy holds a lux setpoint, which 010's columns cannot hold: down_011
+            # must refuse it; then this throwaway copy drops the key so the revert can go on
+            out="$(fx medcea_db -q -1 -v ON_ERROR_STOP=1 < "apps/database/$f" 2>&1)" \
+                && { fail fulldown "$f ran with a light_intensity setpoint"; return; }
+            grep -q 'cannot hold' <<<"$out" && pass fulldown "$f refuses a light_intensity setpoint" \
+                || { echo "$out" | grep ERROR; fail fulldown "$f failed for another reason"; return; }
+            fx medcea_db -q -c "UPDATE medcea.recipe_line SET setpoints = setpoints - 'light_intensity' WHERE setpoints ? 'light_intensity'" >/dev/null \
+                || { fail fulldown "could not drop the light_intensity setpoints in the copy"; return; }
+        fi
         out="$(fx medcea_db -q -1 -v ON_ERROR_STOP=1 < "apps/database/$f" 2>&1)" \
             && pass fulldown "$f by hand before the full down" || { echo "$out" | grep ERROR; fail fulldown "$f failed"; return; }
     done

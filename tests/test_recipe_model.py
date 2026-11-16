@@ -48,7 +48,12 @@ def read(path):
 
 def block():
     full = read(os.path.join(DB, "medcea_db_migrations.sql"))
-    return full, full[full.index("-- ── Migration 011"):]
+    return full, full[full.index("-- ── Migration 011"):full.index("-- ── Migration 012")]
+
+
+def block012():
+    full = read(os.path.join(DB, "medcea_db_migrations.sql"))
+    return full[full.index("-- ── Migration 012"):]
 
 
 def function(sql, name):
@@ -219,6 +224,96 @@ class Migration011(unittest.TestCase):
         ddl = read(os.path.join(DB, "medcea_db_ddl.sql"))
         for t in TABLES:
             self.assertNotIn("medcea.%s " % t, ddl)
+
+
+LEGACY = ("air_temperature_lower_limit", "air_temperature_upper_limit", "co2_lower_limit", "co2_upper_limit",
+          "hr_lower_limit", "hr_upper_limit", "substrate_temperature_lower_limit", "substrate_temperature_upper_limit")
+
+
+class Migration012(unittest.TestCase):
+    """Migration 012 drops the eight limit columns and control_loop.recipe_lower/upper."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.full = read(os.path.join(DB, "medcea_db_migrations.sql"))
+        cls.block = block012()
+        cls.lib = read(os.path.join(DB, "lib-db-apply.sh"))
+        cls.ddl = read(os.path.join(DB, "medcea_db_ddl.sql"))
+        cls.down = read(os.path.join(DB, "medcea_db_migrations_down_012.sql"))
+
+    def test_last_and_own_transaction(self):
+        before = self.full[:self.full.index("-- ── Migration 012")]
+        self.assertTrue(before.rstrip().endswith("COMMIT;"))
+        stmts = re.findall(r"(?m)^(BEGIN|COMMIT);", re.sub(r"\$(\w*)\$.*?\$\1\$", "$$", self.block, flags=re.S))
+        self.assertEqual(stmts, ["BEGIN", "COMMIT"])
+        self.assertTrue(self.block.rstrip().endswith("COMMIT;"))
+
+    def test_nonce(self):
+        self.assertIn("VALUES ('012:last_nonce', :'deploy_nonce')", self.block)
+        self.assertLess(self.lib.index("key = '011:last_nonce'"), self.lib.index("key = '012:last_nonce'"))
+
+    def test_proof_before_any_drop(self):
+        b = self.block
+        proof = b.index("do not read back from their setpoints; nothing was dropped")
+        self.assertLess(proof, b.index("DROP VIEW medcea.run_watch"))
+        self.assertLess(proof, b.index("ALTER TABLE medcea.recipe_line DROP COLUMN %I"))
+        for col in LEGACY:
+            self.assertIn("'%s'" % col, b)
+            self.assertIn("l." + col, b)
+        self.assertIn("has only some of the limit columns", b)
+
+    def test_views_rebuilt_without_the_columns(self):
+        b = self.block
+        for v in ("run_history", "run_watch"):
+            i = b.index("CREATE VIEW medcea.%s WITH (security_invoker = true) AS" % v)
+            body = b[i:b.index(";", i)]
+            self.assertIn("rl.setpoints", body)
+            for col in LEGACY:
+                self.assertNotIn(col, body)
+            self.assertIn("ALTER VIEW medcea.%s OWNER TO medcea_owner;" % v, b)
+        self.assertIn("REVOKE ALL ON medcea.run_history, medcea.run_watch FROM PUBLIC, anon, authenticator;", b)
+
+    def test_control_loop_columns(self):
+        self.assertIn("DROP COLUMN IF EXISTS recipe_lower, DROP COLUMN IF EXISTS recipe_upper", self.block)
+
+    def test_010_comments_guarded(self):
+        """010 runs before 012 on every deploy: its comments on the dropped columns must not fail."""
+        m010 = self.full[self.full.index("-- ── Migration 010"):self.full.index("-- ── Migration 011")]
+        for m in re.finditer(r"COMMENT ON COLUMN medcea\.control_loop\.recipe_(lower|upper)", m010):
+            guard = m010.rfind("IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute", 0, m.start())
+            self.assertGreater(guard, m010.rfind(";\nCOMMENT", 0, m.start()), "unguarded comment")
+            self.assertIn("attname = 'recipe_lower'", m010[guard:m.start()])
+
+    def test_ddl_has_the_post_012_shape(self):
+        rl = self.ddl[self.ddl.index("CREATE TABLE medcea.recipe_line ("):]
+        rl = rl[:rl.index("\n);")]
+        for col in LEGACY:
+            self.assertNotIn(col, self.ddl)
+        self.assertIn("setpoints jsonb DEFAULT '{}'::jsonb NOT NULL", rl)
+        self.assertIn("CONSTRAINT recipe_line_setpoints_chk CHECK (jsonb_typeof(setpoints) = 'object')", rl)
+        for v in ("run_history", "run_watch"):
+            i = self.ddl.index("CREATE VIEW medcea.%s AS" % v)
+            self.assertIn("rl.setpoints", self.ddl[i:self.ddl.index(";", i)])
+
+    def test_row_digest_leaves_the_columns_out(self):
+        rd = self.full[self.full.index("j := j || pg_catalog.jsonb_build_object('lines'"):]
+        rd = rd[:rd.index("ORDER BY l.recipe_item_seq_id")]
+        for col in LEGACY:
+            self.assertIn("'%s'" % col, rd)
+
+    def test_down(self):
+        d = self.down
+        self.assertIn("recipe_line already has its limit columns; nothing to undo", d)
+        self.assertIn("are not whole numbers", d)
+        dis, upd, en = (d.index("DISABLE TRIGGER recipe_line_setpoints_trg"), d.index("UPDATE medcea.recipe_line SET"),
+                        d.index("ENABLE ALWAYS TRIGGER recipe_line_setpoints_trg"))
+        self.assertLess(dis, upd)
+        self.assertLess(upd, en)
+        self.assertIn("_set_internal_actor('migration:down012')", d)
+        for col in LEGACY:
+            self.assertIn("ADD COLUMN %s integer" % col, d)
+        self.assertIn("DELETE FROM medcea.platform_setting WHERE key = '012:last_nonce';", d)
+        self.assertNotRegex(d, r"(?m)^(BEGIN|COMMIT);")   # psql -1 wraps it
 
 
 class Policy(unittest.TestCase):

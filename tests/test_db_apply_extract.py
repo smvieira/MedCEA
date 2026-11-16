@@ -122,7 +122,10 @@ class DbApplyExtraction(unittest.TestCase):
         # catalogue as -v recipe_types_b64 (recipe_types.py b64) to the migrations' psql
         n011 = [i for i, (a, _) in enumerate(new) if any("011:last_nonce" in x for x in a)]
         self.assertEqual(n011, [n010[0] + 1], "one 011 nonce read-back, right after 010's")
-        new = new[:n010[0]] + new[n010[0] + 2:]
+        # migration 012 (the limit columns dropped) one more, right after 011's
+        n012 = [i for i, (a, _) in enumerate(new) if any("012:last_nonce" in x for x in a)]
+        self.assertEqual(n012, [n011[0] + 1], "one 012 nonce read-back, right after 011's")
+        new = new[:n010[0]] + new[n010[0] + 3:]
         self.assertEqual(len(old), len(new))
         nonce = re.compile(r"deploy_nonce=[0-9a-f]+")
         b64 = subprocess.run([sys.executable, os.path.join(REPO, "apps", "database", "recipe_types.py"), "b64"],

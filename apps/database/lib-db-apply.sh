@@ -242,6 +242,13 @@ SQL
         echo "ERROR: migration 011 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
         return 1
     fi
+    # 012 (the eight recipe_line limit columns and control_loop.recipe_lower/upper
+    # dropped, after 011's proof is checked again) is a fifth transaction
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '012:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 012 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
 
     # ── 3a. recipe_id sequence (tables created without one) ───────────────────
     _dba_psql "$CEA_DB" -q -v ON_ERROR_STOP=1 -f - <<'SQL' || return 1

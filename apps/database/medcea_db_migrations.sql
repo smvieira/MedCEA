@@ -6378,8 +6378,15 @@ COMMENT ON TABLE medcea.control_loop IS 'One feedback loop of a zone: input (tag
 COMMENT ON COLUMN medcea.control_loop.loop_code IS 'One of _loop_quantities(): air_temperature, air_humidity, co2, substrate_temperature (the runner''s state key, with @zone_code on a unit of several zones).';
 COMMENT ON COLUMN medcea.control_loop.input IS '{tag, sources: [sensor instance…], rule: reference|mean|min|max, reference?, fallback?, max_age_s?}; a sensor is segment 6 of the reading topic (msg sensor), never ''default''.';
 COMMENT ON COLUMN medcea.control_loop.output IS '{actuator, mode: command (level|boost from Phase 3), command_map? (co2 only: {"DOWN":"UP","UP":"OFF","OFF":"OFF"})}.';
-COMMENT ON COLUMN medcea.control_loop.recipe_lower IS 'The recipe_line column of the lower limit; a NULL value in a recipe line makes the loop inactive for that step (the runner warns).';
-COMMENT ON COLUMN medcea.control_loop.recipe_upper IS 'The recipe_line column of the upper limit.';
+-- recipe_lower/recipe_upper: dropped by migration 012, so their comments only while they exist
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.control_loop'::regclass
+                                                   AND attname = 'recipe_lower' AND NOT attisdropped) THEN
+        COMMENT ON COLUMN medcea.control_loop.recipe_lower IS 'The recipe_line column of the lower limit; a NULL value in a recipe line makes the loop inactive for that step (the runner warns).';
+        COMMENT ON COLUMN medcea.control_loop.recipe_upper IS 'The recipe_line column of the upper limit.';
+    END IF;
+END $$;
 COMMENT ON FUNCTION medcea.zone_loop_context(integer) IS 'The loop picker''s view of a zone: sensors, old boards, actuators, active loops with their problems, a run in R or S. U on master_data (policy version 2c).';
 COMMENT ON FUNCTION medcea.save_zone_loops(integer, jsonb) IS 'Replaces a zone''s active control loops (absent codes deactivated); refused while the unit has a run in R or S. U on master_data (policy version 2c).';
 
@@ -7489,6 +7496,118 @@ COMMENT ON FUNCTION medcea.save_zone_loops(integer, jsonb) IS 'Replaces a zone''
 NOTIFY pgrst, 'reload schema';
 
 INSERT INTO medcea.platform_setting (key, value) VALUES ('011:last_nonce', :'deploy_nonce')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+COMMIT;
+
+-- ── Migration 012: the eight limit columns are gone (16 Nov 2026) ─────────────
+-- (recipe types, step 4.) Migration 011 copied recipe_line's eight *_limit
+-- columns into setpoints with a round-trip proof and made them read-only; since
+-- then no writer sets them. 012 checks the proof once more (a line whose limit
+-- values do not read back from its setpoints refuses the whole migration, with
+-- nothing changed), rebuilds run_history and run_watch without the columns (a
+-- view cannot lose a column through CREATE OR REPLACE), drops the eight columns
+-- and control_loop.recipe_lower/recipe_upper (a loop's limits are
+-- setpoints[loop_code] since 011). row_digest already leaves the eight keys out
+-- (011), so no approved recipe's digest moves. The DDL has the post-012 shape
+-- (a fresh install never has the columns). Re-run safe: a deploy after it
+-- finds nothing to drop. Down: medcea_db_migrations_down_012.sql (by hand,
+-- before down_011). deploy.sh reads 012:last_nonce back.
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+    legacy text[] := ARRAY['air_temperature_lower_limit', 'air_temperature_upper_limit', 'co2_lower_limit', 'co2_upper_limit',
+                           'hr_lower_limit', 'hr_upper_limit', 'substrate_temperature_lower_limit',
+                           'substrate_temperature_upper_limit'];
+    have   text[];
+    bad    integer;
+    c      text;
+BEGIN
+    SELECT coalesce(array_agg(attname::text), '{}') INTO have FROM pg_catalog.pg_attribute
+     WHERE attrelid = 'medcea.recipe_line'::regclass AND NOT attisdropped AND attname::text = ANY (legacy);
+
+    IF cardinality(have) > 0 THEN
+        IF cardinality(have) <> 8 THEN
+            RAISE EXCEPTION 'migration 012: recipe_line has only some of the limit columns (%); fix by hand', have
+                USING ERRCODE = 'XX000';
+        END IF;
+        -- the proof again: 011's rule (substrate only when both of its columns are set)
+        EXECUTE $q$
+        SELECT count(*) FROM medcea.recipe_line l
+         WHERE ((l.air_temperature_lower_limit IS NOT NULL OR l.air_temperature_upper_limit IS NOT NULL)
+                AND ((l.setpoints #>> '{air_temperature,lower}')::numeric IS DISTINCT FROM l.air_temperature_lower_limit
+                  OR (l.setpoints #>> '{air_temperature,upper}')::numeric IS DISTINCT FROM l.air_temperature_upper_limit))
+            OR ((l.hr_lower_limit IS NOT NULL OR l.hr_upper_limit IS NOT NULL)
+                AND ((l.setpoints #>> '{air_humidity,lower}')::numeric IS DISTINCT FROM l.hr_lower_limit
+                  OR (l.setpoints #>> '{air_humidity,upper}')::numeric IS DISTINCT FROM l.hr_upper_limit))
+            OR ((l.co2_lower_limit IS NOT NULL OR l.co2_upper_limit IS NOT NULL)
+                AND ((l.setpoints #>> '{co2,lower}')::numeric IS DISTINCT FROM l.co2_lower_limit
+                  OR (l.setpoints #>> '{co2,upper}')::numeric IS DISTINCT FROM l.co2_upper_limit))
+            OR ((l.substrate_temperature_lower_limit IS NOT NULL AND l.substrate_temperature_upper_limit IS NOT NULL)
+                AND ((l.setpoints #>> '{substrate_temperature,lower}')::numeric IS DISTINCT FROM l.substrate_temperature_lower_limit
+                  OR (l.setpoints #>> '{substrate_temperature,upper}')::numeric IS DISTINCT FROM l.substrate_temperature_upper_limit))
+        $q$ INTO bad;
+        IF bad > 0 THEN
+            RAISE EXCEPTION 'migration 012: % recipe line(s) whose limit columns do not read back from their setpoints; nothing was dropped', bad
+                USING ERRCODE = 'XX000';
+        END IF;
+    END IF;
+
+    -- the views: rebuilt without the columns whenever one of them still has one
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                WHERE attrelid IN ('medcea.run_history'::regclass, 'medcea.run_watch'::regclass)
+                  AND NOT attisdropped AND attname::text = ANY (legacy)) THEN
+        DROP VIEW medcea.run_watch;
+        DROP VIEW medcea.run_history;
+        CREATE VIEW medcea.run_history WITH (security_invoker = true) AS
+         SELECT r.recipe_id, r.recipe_name, r.recipe_description, rl.recipe_item_seq_name, rl.recipe_item_seq_id,
+            rl.cycle_number, rlcr.recipe_item_seq_cycle_num, rlcr.recipe_line_seq_cycle_run_start,
+            COALESCE(rlcr.recipe_line_seq_cycle_run_end, rlcr.recipe_line_seq_cycle_run_start) AS recipe_line_seq_cycle_run_end,
+            rl.light_type, rl.light_on_minutes, rl.light_off_minutes, rr.recipe_run_id, rr.unit_id, rl.setpoints
+           FROM (((medcea.recipe r
+             JOIN medcea.recipe_line rl ON ((r.recipe_id = rl.recipe_id)))
+             JOIN medcea.recipe_run rr ON ((rr.recipe_id = r.recipe_id)))
+             LEFT JOIN medcea.recipe_line_cycle_run rlcr ON (((rr.recipe_run_id = rlcr.recipe_run_id) AND (rl.recipe_id = rlcr.recipe_id) AND (rl.recipe_item_seq_id = rlcr.recipe_item_seq_id))))
+          ORDER BY rl.recipe_id, rl.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num;
+        CREATE VIEW medcea.run_watch WITH (security_invoker = true) AS
+         SELECT r.recipe_id, r.recipe_name, r.recipe_description, rl.recipe_item_seq_name, rl.recipe_item_seq_id,
+            rl.cycle_number, rlcr.recipe_item_seq_cycle_num, rlcr.recipe_line_seq_cycle_run_start,
+            rlcr.recipe_line_seq_cycle_run_end,
+            rl.light_type, rl.light_on_minutes, rl.light_off_minutes, rr.recipe_run_id, rr.unit_id, rl.setpoints
+           FROM (((medcea.recipe r
+             JOIN medcea.recipe_line rl ON ((r.recipe_id = rl.recipe_id)))
+             JOIN medcea.recipe_run rr ON ((rr.recipe_id = r.recipe_id)))
+             LEFT JOIN medcea.recipe_line_cycle_run rlcr ON (((rr.recipe_run_id = rlcr.recipe_run_id) AND (rl.recipe_id = rlcr.recipe_id) AND (rl.recipe_item_seq_id = rlcr.recipe_item_seq_id))))
+          WHERE ((rr.recipe_run_status)::text <> 'C'::text)
+          ORDER BY rl.recipe_id, rl.recipe_item_seq_id, rlcr.recipe_item_seq_cycle_num;
+        ALTER VIEW medcea.run_history OWNER TO medcea_owner;
+        ALTER VIEW medcea.run_watch OWNER TO medcea_owner;
+        -- new relations: postgres's default ACL gives anon arwd; the mode bundle
+        -- that follows grants what the policy compiles (and, while
+        -- IAM_DB_ROLES=false, the down file's blanket grant)
+        REVOKE ALL ON medcea.run_history, medcea.run_watch FROM PUBLIC, anon, authenticator;
+    END IF;
+
+    FOREACH c IN ARRAY have LOOP
+        EXECUTE pg_catalog.format('ALTER TABLE medcea.recipe_line DROP COLUMN %I', c);
+    END LOOP;
+    IF cardinality(have) > 0 THEN
+        RAISE NOTICE 'migration 012: dropped recipe_line''s eight limit columns';
+    END IF;
+
+    IF pg_catalog.to_regclass('medcea.control_loop') IS NOT NULL THEN
+        ALTER TABLE medcea.control_loop DROP COLUMN IF EXISTS recipe_lower, DROP COLUMN IF EXISTS recipe_upper;
+    END IF;
+END $$;
+
+COMMENT ON COLUMN medcea.recipe_line.setpoints IS '{"<quantity_code>": {"lower": n, "upper": n}} for the quantities of the recipe''s type (migration 011; the eight *_limit columns it replaced were dropped by migration 012).';
+
+NOTIFY pgrst, 'reload schema';
+
+INSERT INTO medcea.platform_setting (key, value) VALUES ('012:last_nonce', :'deploy_nonce')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 COMMIT;

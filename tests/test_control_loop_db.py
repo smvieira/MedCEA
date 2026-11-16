@@ -311,6 +311,7 @@ class LoopFunctionsTest(unittest.TestCase):
         cls.quantities = function(cls.block, "medcea._loop_quantities")
         cls.guard = function(cls.block, "medcea.control_loop_busy_guard")
         cls.ddl = read("medcea_db_ddl.sql")
+        cls.down012 = read("medcea_db_migrations_down_012.sql")
 
     def test_created_inert(self):
         flat = collapse(self.block)
@@ -424,10 +425,9 @@ class LoopFunctionsTest(unittest.TestCase):
         for code, (tag, lo, up) in QUANTITIES.items():
             self.assertIn(f'"{code}": {{"tag": "{tag}", "recipe_lower": "{lo}", "recipe_upper": "{up}"', q)
             for col in (lo, up):
-                # the columns exist in recipe_line (migration 011 backfills setpoints from
-                # them; the runner reads setpoints since then)
-                rl = self.ddl[self.ddl.index("CREATE TABLE medcea.recipe_line ("):]
-                self.assertRegex(rl[:rl.index(");")], rf"\n    {col} integer")
+                # 010's own body names recipe_line columns migration 012 dropped (011 replaces
+                # this function in the same deploy); down_012 puts them back
+                self.assertIn(f"ADD COLUMN {col} integer", self.down012)
         self.assertIn('"command_map": ' + CO2_MAP, q)
         self.assertEqual(q.count("command_map"), 1)
         self.assertEqual(len(re.findall(r'"([a-z0-9_]+)": \{"tag"', q)), 4)

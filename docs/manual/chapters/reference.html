@@ -218,7 +218,7 @@
 <tr><td><code>medcea.recipe_type_quantity</code></td><td>Which quantities each type sets, <code>required</code> or not.</td><td>As above.</td></tr>
 <tr><td><code>medcea.cea_unit.unit_type</code></td><td>A recipe type code (foreign key).</td><td>Unchanged: the <code>master_data</code> rights.</td></tr>
 <tr><td><code>medcea.recipe.recipe_type</code></td><td>The recipe's type code (foreign key); fixed once the recipe has steps.</td><td>Unchanged: the <code>recipes</code> rights (drafts only for <span class="role">engineer</span>).</td></tr>
-<tr><td><code>medcea.recipe_line.setpoints</code></td><td><code>{"&lt;quantity&gt;": {"lower": n, "upper": n}}</code>. The eight <code>*_limit</code> columns are read-only until migration 012 drops them.</td><td>As <code>recipe_line</code>.</td></tr>
+<tr><td><code>medcea.recipe_line.setpoints</code></td><td><code>{"&lt;quantity&gt;": {"lower": n, "upper": n}}</code>. It replaced the eight <code>*_limit</code> columns (migration 011 copied them in; migration 012 dropped them).</td><td>As <code>recipe_line</code>.</td></tr>
 <tr><td><code>medcea.control_loop</code></td><td><code>loop_code</code> is a quantity code (foreign key); <code>input</code> and <code>output</code> may each be empty (a half-bound loop).</td><td>As before (<a href="#admin-loops">Control loops</a>).</td></tr>
 </tbody></table></div>
 <h4 id="reference-recipe-file">The recipe file (format 2)</h4>
