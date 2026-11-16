@@ -695,7 +695,7 @@ class WizardTests(unittest.TestCase):
         whole script and leaves the page at "connecting..." (5 Nov 2026). Check what the
         browser gets, not the source text."""
         assets = {"__CHANNELMAP_JS__": "channelmap.js", "__DRAWFLOW_JS__": "vendor/drawflow.min.js",
-                  "__WIRING_JS__": "wiring.js"}
+                  "__WIRING_JS__": "wiring.js", "__LOOPS_JS__": "loops.js"}
         page = self.ws.PAGE
         for ph, name in assets.items():
             asset = self.ws.ui_asset(name)
@@ -704,7 +704,7 @@ class WizardTests(unittest.TestCase):
             self.assertNotIn("not found in", asset[:80], name)
             page = page.replace(ph, asset)
         scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
-        self.assertEqual(len(scripts), 4)
+        self.assertEqual(len(scripts), 5)
         for i, js in enumerate(scripts):
             path = os.path.join(self.tmp, "page%d.js" % i)
             with open(path, "w") as f:

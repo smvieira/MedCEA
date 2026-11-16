@@ -1,6 +1,6 @@
 {
   "unit_code": "UNIT01",
-  "unit_type": "Mushrooms",
+  "unit_type": "FUNGI",
   "area": 0.5,
   "height": 0.5,
   "is_active": "Y",

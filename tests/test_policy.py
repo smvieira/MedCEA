@@ -1577,8 +1577,17 @@ class WiringTest(unittest.TestCase):
         tail_c = migrations[migrations.index("Migration 008c"):migrations.index("Migration 009")]
         self.assertEqual((tail_c.count("BEGIN;"), tail_c.count("COMMIT;")), (1, 1))
         # each later migration (009, msg_type HB/TS) is a transaction of its own
-        tail_9 = migrations[migrations.index("Migration 009"):]
+        tail_9 = migrations[migrations.index("Migration 009"):migrations.index("Migration 010")]
         self.assertEqual(tail_9.count("BEGIN;"), tail_9.count("COMMIT;"))
+        tail_10 = migrations[migrations.index("Migration 010"):migrations.index("Migration 011")]
+        self.assertEqual((tail_10.count("BEGIN;"), tail_10.count("COMMIT;")), (1, 1))
+        self.assertIn("'010:last_nonce', :'deploy_nonce'", tail_10)
+        self.assertIn("key = '010:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
+        # 011 (recipe types) the same, last
+        tail_11 = migrations[migrations.index("Migration 011"):]
+        self.assertEqual((tail_11.count("BEGIN;"), tail_11.count("COMMIT;")), (1, 1))
+        self.assertIn("'011:last_nonce', :'deploy_nonce'", tail_11)
+        self.assertIn("key = '011:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         self.assertIn("'008c:last_nonce', :'deploy_nonce'", tail_c)
         self.assertIn("key = '008c:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own
@@ -2647,7 +2656,7 @@ class Phase41Test(unittest.TestCase):
         cls.privs = grants.privileges(cls.policy)
         with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
             cls.mig = f.read()
-        cls.c = cls.mig[cls.mig.index("Migration 008c"):]
+        cls.c = cls.mig[cls.mig.index("Migration 008c"):cls.mig.index("Migration 009")]
         with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008c.sql")) as f:
             cls.down_c = f.read()
         with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008b.sql")) as f:
@@ -2912,7 +2921,7 @@ class Phase42aTest(unittest.TestCase):
         cls.policy = model.load_defaults()
         with open(os.path.join(REPO, "apps/database/medcea_db_migrations.sql")) as f:
             mig = f.read()
-        cls.c = mig[mig.index("Migration 008c"):]
+        cls.c = mig[mig.index("Migration 008c"):mig.index("Migration 009")]
         with open(os.path.join(REPO, "apps/database/medcea_db_migrations_down_008c.sql")) as f:
             cls.down_c = f.read()
 

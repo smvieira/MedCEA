@@ -8,7 +8,8 @@ from .create_recipe_run import create_recipe_run
 from .update_recipe_run import update_recipe_run
 from .upsert_recipe_line_cycle_run import upsert_recipe_line_cycle_run
 from .get_recipe_line_item_seq_details import get_recipe_line_item_seq_details
-from .get_feedback_control_loop_params import get_feedback_control_loop_params
+from . import loop_resolver
+from .get_control_loops import get_control_loops
 from .mqtt_subscribe_thread import mqtt_subscribe_thread
 from .control_logic_thread import control_logic_thread
 from .calculate_minutes_to_run import calculate_minutes_to_run
@@ -32,7 +33,8 @@ __all__ = [
     "update_recipe_run",
     "upsert_recipe_line_cycle_run",
     "get_recipe_line_item_seq_details",
-    "get_feedback_control_loop_params",
+    "loop_resolver",
+    "get_control_loops",
     "mqtt_subscribe_thread",
     "control_logic_thread",
     "calculate_minutes_to_run",
@@ -53,7 +55,6 @@ __all__ = [
     "run_status",
     "record_cycle",
     "finish",
-    sys
 ]
 
 # Custom exceptions for the module

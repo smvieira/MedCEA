@@ -1,0 +1,19 @@
+{
+ "note": "loops must be a list",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "half": "both",
+  "loops": {
+   "co2": 1
+  }
+ },
+ "expect": [
+  [
+   "error",
+   "L_SCHEMA",
+   "answer.loops"
+  ]
+ ]
+}

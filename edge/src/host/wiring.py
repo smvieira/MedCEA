@@ -38,6 +38,11 @@ VERSION = 1
 
 ID_RX = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
 TAG_RX = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
+# A sensor id is the last segment of its reading topic (<base>/sense/<tag>/<id>)
+# and the "sensor" of its readings. "default" is what the platform calls the
+# sensor of a reading that names none (a board flashed before instances), so no
+# wired sensor may take it (E_ID_RESERVED).
+RESERVED_SENSOR_IDS = ("default",)
 
 TOP_KEYS = ("version", "board", "buses", "hubs", "sensors", "layout")
 BOARD_KEYS = ("variant", "part")
@@ -365,9 +370,13 @@ def validate(doc, tpl, variant=None, base_dir=None):
 
     # -- sensors -----------------------------------------------------------
     placed = []                 # (sensor, bus id, hub id or None, channel or None)
-    published = {}              # tag name -> where it was first published
+    published = {}              # tag name -> the first sensor publishing it (E_NO_SENSOR)
     for s in sensors:
         where = "sensors." + s["id"]
+        if s["id"] in RESERVED_SENSOR_IDS:
+            add("error", "E_ID_RESERVED", where,
+                "%s is reserved: the platform calls the sensor of a reading that names "
+                "none \"%s\". Give this sensor another id." % (s["id"], s["id"]))
         d = drivers.get(s["driver"])
         if d is None:
             add("error", "E_DRIVER", where,
@@ -498,7 +507,11 @@ def _power(add, where, part, name):
 
 
 def _tags(add, where, tags, d, published):
-    """E_TAG / E_TAG_DUP / W_TAG_OFF for one sensor; records what it publishes."""
+    """E_TAG / E_TAG_DUP / W_TAG_OFF for one sensor; records what it publishes.
+
+    Two sensors may publish one tag: each reading goes to <tag>/<sensor id>, so
+    they stay two series. One sensor publishing two of its quantities on one tag
+    would put two series on one topic: that is E_TAG_DUP."""
     tw = where + ".tags"
     ok = isinstance(tags, list) and all(
         isinstance(t, dict) and set(t) == set(TAG_KEYS) and isinstance(t["q"], str)
@@ -509,6 +522,7 @@ def _tags(add, where, tags, d, published):
         return
     quantities = [q["q"] for q in d.get("quantities", [])] if d else None
     seen = set()
+    mine = {}                   # tag name -> the quantity of this sensor on it
     for t in tags:
         q, name = t["q"], t["tag"]
         qw = "%s.%s" % (tw, q)
@@ -526,12 +540,13 @@ def _tags(add, where, tags, d, published):
                 "%r is not a tag name: a lower-case letter, then up to 47 letters, "
                 "digits or _." % name)
             continue
-        if name in published:
+        if name in mine:
             add("error", "E_TAG_DUP", qw,
-                "%s is already published by %s: two sensors on one tag would "
-                "interleave one series." % (name, published[name]))
+                "%s already publishes %s as %s: one sensor cannot publish two "
+                "readings on one tag." % (where.split(".", 1)[1], mine[name], name))
             continue
-        published[name] = where.split(".", 1)[1]
+        mine[name] = q
+        published.setdefault(name, where.split(".", 1)[1])
     for q in quantities or []:
         if q not in seen:
             add("error", "E_TAG", "%s.%s" % (tw, q),
@@ -640,7 +655,7 @@ def render_sense(doc, tpl, variant=None, base_topic="", message_interval=30,
                 "message_interval": message_interval,
                 "mqtt": {"host": mqtt.get("host", ""), "port": mqtt.get("port")},
                 "tags": [{"tag": tag, "UoM": u,
-                          "topic": "%s/sense/%s" % (base_topic, tag)}
+                          "topic": "%s/sense/%s/%s" % (base_topic, tag, s["id"])}
                          for _q, tag, u in tags],
             },
         })

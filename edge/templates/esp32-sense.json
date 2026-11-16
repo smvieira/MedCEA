@@ -21,6 +21,10 @@
     "                  the firmware's 250 ms bus timeout covers it on soft and hw)",
     "  power.rails     what it may be powered from; no 3V3 = a warning",
     "  quantities[]    what it measures: q, the default published tag, uom",
+    "  default_off     quantities a newly placed instance starts with switched",
+    "                  off (optional; none ships: the SCD30's T/RH are on, Q13)",
+    "  each reading is published on <base>/sense/<tag>/<sensor id>, so two",
+    "                  sensors may publish one tag; one sensor may not use a tag twice",
     "  wiring_only     no legacy pin params: not offered by the question loop",
     "  params[].legacy_bus  asked only by the question loop (its own bus pins)",
     "Drivers without a `bus` block are the question loop's only.",
@@ -147,10 +151,6 @@
           "tag": "air_humidity",
           "uom": "RH%"
         }
-      ],
-      "default_off": [
-        "temperature",
-        "humidity"
       ],
       "tags": [
         {

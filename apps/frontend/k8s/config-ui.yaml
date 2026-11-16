@@ -39,6 +39,9 @@ spec:
         - name: html
           mountPath: /usr/share/nginx/html/index.html
           subPath: index.html
+        - name: html             # the recipe types (apps/database/recipe_types.yaml as JSON)
+          mountPath: /usr/share/nginx/html/recipe-types.json
+          subPath: recipe-types.json
         - name: nginx-conf
           mountPath: /etc/nginx/conf.d/default.conf
           subPath: default.conf

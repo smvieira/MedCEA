@@ -1,0 +1,50 @@
+{
+ "note": "an actuator that declares another quantity",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "air_temperature",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_ACTUATOR_QUANTITY",
+   "loops.air_temperature.output.actuator"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.co2"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.substrate_temperature"
+  ]
+ ]
+}

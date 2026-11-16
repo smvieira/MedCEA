@@ -1,0 +1,1860 @@
+{
+ "bench": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "scd30_1",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   },
+   {
+    "instance": "sht45_1",
+    "driver": "sht4x",
+    "model": "SHT4X",
+    "component_id": 20,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "single": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "ground_temperature",
+    "driver": "ground_temperature",
+    "model": "GROUND_TEMPERATURE",
+    "component_id": 22,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "ground_temperature"
+    ],
+    "uoms": {
+     "ground_temperature": "C"
+    }
+   },
+   {
+    "instance": "scd30",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "existing": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [
+   {
+    "loop_id": 7,
+    "loop_code": "air_humidity",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "sht45_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    },
+    "problems": [],
+    "live": true
+   },
+   {
+    "loop_id": 8,
+    "loop_code": "co2",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "problems": [],
+    "live": true
+   }
+  ],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "scd30_1",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   },
+   {
+    "instance": "sht45_1",
+    "driver": "sht4x",
+    "model": "SHT4X",
+    "component_id": 20,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "old": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [
+   {
+    "component_id": 9,
+    "device_id": 3,
+    "dns_name": "unit01-s-zone01",
+    "driver": "scd30",
+    "tags": [
+     "co2"
+    ]
+   }
+  ],
+  "sensor_problems": [
+   "component 10 publishes co2 as sensor default, a reserved name: re-onboard it with another sensor id"
+  ],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "ground_temperature",
+    "driver": "ground_temperature",
+    "model": "GROUND_TEMPERATURE",
+    "component_id": 22,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "ground_temperature"
+    ],
+    "uoms": {
+     "ground_temperature": "C"
+    }
+   },
+   {
+    "instance": "scd30",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "longzone": {
+  "zone_id": 1,
+  "zone_code": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "ground_temperature",
+    "driver": "ground_temperature",
+    "model": "GROUND_TEMPERATURE",
+    "component_id": 22,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "ground_temperature"
+    ],
+    "uoms": {
+     "ground_temperature": "C"
+    }
+   },
+   {
+    "instance": "scd30",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "halfbound": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [
+   {
+    "loop_id": 7,
+    "loop_code": "air_humidity",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "sht45_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "max_age_s": 90
+    },
+    "output": null,
+    "problems": [],
+    "live": false
+   },
+   {
+    "loop_id": 8,
+    "loop_code": "co2",
+    "input": null,
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "problems": [],
+    "live": false
+   }
+  ],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "scd30_1",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   },
+   {
+    "instance": "sht45_1",
+    "driver": "sht4x",
+    "model": "SHT4X",
+    "component_id": 20,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "sense_only": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [],
+  "loops": [],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [
+   {
+    "instance": "scd30_1",
+    "driver": "scd30",
+    "model": "SCD30",
+    "component_id": 21,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature",
+     "co2"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C",
+     "co2": "ppm"
+    }
+   },
+   {
+    "instance": "sht45_1",
+    "driver": "sht4x",
+    "model": "SHT4X",
+    "component_id": 20,
+    "device_id": 11,
+    "dns_name": "unit01-s-zone01",
+    "tags": [
+     "air_humidity",
+     "air_temperature"
+    ],
+    "uoms": {
+     "air_humidity": "RH%",
+     "air_temperature": "C"
+    }
+   }
+  ],
+  "recipe_type": "PLANT"
+ },
+ "control_only": {
+  "zone_id": 1,
+  "zone_code": "ZONE01",
+  "unit_id": 1,
+  "unit_code": "UNIT01",
+  "active": true,
+  "deployed": true,
+  "busy": null,
+  "old_boards": [],
+  "sensor_problems": [],
+  "actuators": [
+   {
+    "actuator": "air_humidity",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_humidity"
+   },
+   {
+    "actuator": "air_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "air_temperature"
+   },
+   {
+    "actuator": "co2",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "co2"
+   },
+   {
+    "actuator": "light",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "types",
+    "commands": [],
+    "quantity": null
+   },
+   {
+    "actuator": "substrate_temperature",
+    "component_id": 31,
+    "device_id": 12,
+    "dns_name": "unit01-c-zone01",
+    "kind": "commands",
+    "commands": [
+     "DOWN",
+     "OFF",
+     "UP"
+    ],
+    "quantity": "substrate_temperature"
+   }
+  ],
+  "loops": [],
+  "allowed": {
+   "rules": [
+    "reference",
+    "mean",
+    "min",
+    "max"
+   ],
+   "modes": [
+    "command"
+   ],
+   "halves": [
+    "input",
+    "output",
+    "both"
+   ],
+   "quantities": {
+    "air_temperature": {
+     "tag": "air_temperature",
+     "label": "Air temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 1,
+     "required": true
+    },
+    "air_humidity": {
+     "tag": "air_humidity",
+     "label": "Air humidity",
+     "unit": "%RH",
+     "sense_uoms": [
+      "RH%"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 100,
+     "ordinal": 2,
+     "required": true
+    },
+    "co2": {
+     "tag": "co2",
+     "label": "CO\u2082",
+     "unit": "ppm",
+     "sense_uoms": [
+      "ppm"
+     ],
+     "commands": [
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": 0,
+     "max": 40000,
+     "ordinal": 3,
+     "required": true,
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "substrate_temperature": {
+     "tag": "ground_temperature",
+     "label": "Substrate temperature",
+     "unit": "\u00b0C",
+     "sense_uoms": [
+      "C"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "always",
+     "loopable": true,
+     "min": -10,
+     "max": 60,
+     "ordinal": 4,
+     "required": false
+    },
+    "light_intensity": {
+     "tag": "light_intensity",
+     "label": "Light intensity",
+     "unit": "lx",
+     "sense_uoms": [
+      "lx"
+     ],
+     "commands": [
+      "DOWN",
+      "OFF",
+      "UP"
+     ],
+     "phase": "light_on",
+     "loopable": false,
+     "min": 0,
+     "max": 200000,
+     "ordinal": 5,
+     "required": false
+    }
+   },
+   "max_age_s": {
+    "min": 1,
+    "max": 3600,
+    "default": 90
+   }
+  },
+  "sensors": [],
+  "recipe_type": "PLANT"
+ }
+}

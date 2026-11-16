@@ -124,6 +124,14 @@ def load_catalog(path, repo_root):
                   "vendor", "roles", "description")}
         script = e.get("script")
         entry["_script"] = None
+        # Fixed options of the entry (e.g. ["--loops-only"] for the control-loop tile),
+        # from this file only, never from a request. Only plain long options: a value
+        # or anything else would make the catalogue a way to pass arbitrary argv.
+        args = e.get("args") or []
+        entry["_args"] = [a for a in args if isinstance(a, str) and re.match(r"^--[a-z][a-z-]{1,30}$", a)] \
+            if isinstance(args, list) else []
+        if len(entry["_args"]) != (len(args) if isinstance(args, list) else 1):
+            entry["status"] = "unavailable"
         if entry.get("status") == "available":
             if not script:
                 entry["status"] = "unavailable"
@@ -203,7 +211,7 @@ def start_run(sess, device_id):
     with open(os.path.join(d, "log"), "w") as f:
         f.write("%s — started by %s\n" % (entry["name"], user))
     STATE["run_owner"] = {"sub": ts.sub, "user": ts.user} if ts is not None else None
-    cmd = [entry["_script"], "--ui-spool", d]
+    cmd = [entry["_script"]] + entry.get("_args", []) + ["--ui-spool", d]
     parent = child = None
     if ts is not None:
         parent, child = socket.socketpair()
@@ -628,6 +636,7 @@ PAGE = """<!doctype html>
 __CHANNELMAP_CSS__
 __DRAWFLOW_CSS__
 __WIRING_CSS__
+__LOOPS_CSS__
 </style></head><body>
 <header><div class="hin">
   <h1>Flash an ESP32</h1>
@@ -644,6 +653,7 @@ __WIRING_CSS__
     <div class="opts" id="popts"></div>
     <div id="pmap" hidden></div>
     <div id="pwire" hidden></div>
+    <div id="ploops" hidden></div>
     <div id="pfree" hidden><input type="text" id="pinput" autocomplete="off"><button class="alt" type="button" id="pshow" hidden aria-pressed="false">Show</button></div>
     <div class="row" id="prow"><button class="alt" type="button" id="pback" hidden>Back</button><button class="go" id="psend">Continue</button>
       <button class="alt" id="preset" hidden>Reset to reference wiring</button>
@@ -671,12 +681,13 @@ __WIRING_CSS__
 <script>__CHANNELMAP_JS__</script>
 <script>__DRAWFLOW_JS__</script>
 <script>__WIRING_JS__</script>
+<script>__LOOPS_JS__</script>
 <script>
 const T = new URLSearchParams(location.search).get("t") || "";
 // 401 means the session expired mid-run; a reload re-enters the login flow.
 function reauth() { location.reload(); }
 const $ = i => document.getElementById(i);
-let curId = null, curKind = null, sel = null, lastLog = "", mapCtl = null, wireCtl = null;
+let curId = null, curKind = null, sel = null, lastLog = "", mapCtl = null, wireCtl = null, loopCtl = null;
 
 function api(p, o) { return fetch(p + (p.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(T), o); }
 
@@ -708,6 +719,7 @@ function renderPrompt(p) {
   // tick would throw away whatever the operator had half-typed.
   map.hidden = true; map.innerHTML = ""; mapCtl = null;
   const wire = $("pwire"); wire.hidden = true; wire.innerHTML = ""; wireCtl = null;
+  const lps = $("ploops"); lps.hidden = true; lps.innerHTML = ""; loopCtl = null;
   $("preset").hidden = true; $("pmapwarn").hidden = true;
 
   if (p.kind === "channelmap") {
@@ -753,6 +765,29 @@ function renderPrompt(p) {
         }
       });
     });
+  } else if (p.kind === "loops") {
+    // The control-loop picker (Q20): one row per recipe quantity. "Decide later"
+    // sends {skip: true}, which saves nothing; errors block Continue otherwise.
+    free.hidden = true; lps.hidden = false;
+    if (typeof Loops === "undefined") {
+      lps.textContent = "The loop picker did not load (loops.js is missing from this install): " +
+        "choose Decide later by sending this question as it is.";
+      loopCtl = { value: () => ({ skip: true }), errors: () => 0, skip: () => true };
+    } else {
+      loopCtl = Loops.mount({
+        el: lps, spec: p.spec || {},
+        onchange: ctl => {
+          const n = ctl.skip() ? 0 : ctl.errors();
+          // The shell re-checks before the board is touched and the database
+          // re-checks at the save; a picker that cannot send a broken answer is the point.
+          $("psend").disabled = n > 0;
+          $("pmapwarn").hidden = n === 0;
+          $("pmapwarn").textContent = n
+            ? n + (n === 1 ? " error" : " errors") + " to fix, or choose Decide later"
+            : "";
+        }
+      });
+    }
   } else if (p.kind === "choice") {
     free.hidden = true;
     let n = 0;
@@ -808,7 +843,8 @@ function renderPrompt(p) {
   }
   $("psend").hidden = (p.kind === "confirm");
   // A wiring question can be sent only once its screen is up and has no error.
-  $("psend").disabled = p.kind === "wiring" && !wireCtl;
+  $("psend").disabled = (p.kind === "wiring" && !wireCtl) ||
+    (p.kind === "loops" && !!loopCtl && !loopCtl.skip() && loopCtl.errors() > 0);
   // Back (5 Nov 2026): only where the script offers it (questions before the board is
   // touched, and the WiFi network and passphrase).
   $("pback").hidden = !p.back;
@@ -827,7 +863,7 @@ function post(path, body) {
 }
 function goBack() {
   if (curId === null) return;
-  const id = curId; curId = null; mapCtl = null; wireCtl = null;
+  const id = curId; curId = null; mapCtl = null; wireCtl = null; loopCtl = null;
   $("promptcard").hidden = true;
   post("/api/answer", { id, back: true });
 }
@@ -882,13 +918,17 @@ function send() {
     // Our wiring document only, never Drawflow's export (which carries every
     // node's HTML and pictures): a few KB, checked again by the shell.
     p = JSON.stringify({ wiring: wireCtl.value(), variant: wireCtl.variant(), save_as: wireCtl.saveAs() });
+  } else if (loopCtl) {
+    if (loopCtl.errors() > 0 && !loopCtl.skip()) return;
+    // {skip: true} once Decide later is chosen; else every loop the zone keeps.
+    p = JSON.stringify(loopCtl.value());
   } else if (curKind === "wiring") {
     return;                               // the screen is not up yet
   } else {
     p = $("pfree").hidden ? sel : $("pinput").value;
   }
   if (p === null || p === undefined) return;
-  const id = curId; curId = null; mapCtl = null; wireCtl = null;
+  const id = curId; curId = null; mapCtl = null; wireCtl = null; loopCtl = null;
   $("promptcard").hidden = true;
   api("/api/answer", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1276,7 +1316,9 @@ class Handler(BaseHTTPRequestHandler):
                         .replace("__DRAWFLOW_CSS__", ui_asset("vendor/drawflow.min.css"))
                         .replace("__DRAWFLOW_JS__", ui_asset("vendor/drawflow.min.js"))
                         .replace("__WIRING_CSS__", ui_asset("wiring.css"))
-                        .replace("__WIRING_JS__", ui_asset("wiring.js")))
+                        .replace("__WIRING_JS__", ui_asset("wiring.js"))
+                        .replace("__LOOPS_CSS__", ui_asset("loops.css"))
+                        .replace("__LOOPS_JS__", ui_asset("loops.js")))
             return self._send(200, "text/html; charset=utf-8", page.encode())
         if path == "/api/state":
             prompt = None

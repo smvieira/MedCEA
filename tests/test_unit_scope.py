@@ -81,6 +81,9 @@ class DB:
     """Every statement (sql, params); medcea.iam_db_roles is DB.db_roles; a run lookup
     finds one run."""
     log, db_roles, connects = [], False, 0
+    reading = {'zone_code': 'Z1', 'tag': 'air_humidity', 'sensor': 'sht45_1', 'value': 91.4,
+               'unit_of_measurement': 'RH%', 'measure_timestamp': '2026-11-13T10:00:00',
+               'db_timestamp': '2026-11-13T10:00:01'}
 
     class Cursor:
         def execute(self, sql, params=None):
@@ -96,6 +99,8 @@ class DB:
             return None
 
         def fetchall(self):
+            if 'v_ap_measurements' in self._sql or "msg_type::text = 'AP'" in self._sql:
+                return [dict(DB.reading)]
             return []
 
     class Conn:
@@ -258,6 +263,73 @@ class UnitScopeTest(unittest.TestCase):
             self.assertIn('rl.released_at, rl.released_by_name, rl.released_by_role', sql, path)
             self.assertIn('AND rr.unit_id IN ' + SCH._MY_UNITS, sql, path)
         self.assertIsNone(call('scheduler', '/api/runs/7', lambda: SCH.get_run(7), ['qp'])[1]['released_at'])
+
+
+class MeasurementsPerSensorTest(unittest.TestCase):
+    """Live Measurements (feedback control Phase 1): the latest reading per zone, tag
+    and sensor, never per tag alone (two sensors on one tag, or two zones made from one
+    template, would merge). The operator's query repeats the views' sensor expression
+    of migration 010 word for word."""
+    OUTER = ('SELECT DISTINCT ON (zone_code, tag, sensor) zone_code, tag, sensor, value, '
+             'unit_of_measurement, measure_timestamp, db_timestamp')
+    ORDER = 'ORDER BY zone_code, tag, sensor, measure_timestamp DESC'
+    SENSOR = "COALESCE(NULLIF(m.msg ->> 'sensor', ''), 'default') AS sensor"
+
+    def setUp(self):
+        ENFORCE['v'], DB.db_roles = False, False
+        MON._REPORTED.clear()
+
+    @staticmethod
+    def flat(sql):
+        return ' '.join(sql.split())
+
+    def measurements(self):
+        stmts, out = call('monitor', '/api/measurements/U1', lambda: MON.get_measurements('U1'), ['operator'])
+        return stmts[-1], out
+
+    def test_plain_path(self):
+        (sql, params), out = self.measurements()
+        self.assertIn(self.OUTER, self.flat(sql))
+        self.assertIn(self.ORDER, self.flat(sql))
+        self.assertIn('FROM medcea.v_ap_measurements', sql)
+        self.assertNotIn("msg ->> 'sensor'", sql)          # the plain path reads the view's column
+        self.assertEqual(params, ('U1',))
+        self.assertEqual(out[0]['sensor'], 'sht45_1')
+
+    def test_scoped_path(self):
+        ENFORCE['v'] = True
+        (sql, params), out = self.measurements()
+        flat = self.flat(sql)
+        self.assertIn(self.OUTER, flat)
+        self.assertIn(self.ORDER, flat)
+        self.assertIn(self.SENSOR, flat)
+        self.assertIn("m.msg ->> 'zone_code' AS zone_code", flat)
+        self.assertIn('m."timestamp" AS db_timestamp', flat)
+        self.assertIn('m.zone_id IN ' + MON._MY_ZONES, sql)
+        self.assertEqual(params, ('U1', UID))
+        self.assertEqual((out[0]['zone_code'], out[0]['sensor']), ('Z1', 'sht45_1'))
+
+    def test_sensor_expression_matches_the_views(self):
+        # the expression of migration 010's views and of the DDL, lower-cased and
+        # whitespace-collapsed, equals the monitor's without the m. prefix
+        mine = self.flat(self.SENSOR.replace('m.msg', 'msg')).lower()
+        for name in ('medcea_db_migrations.sql', 'medcea_db_ddl.sql'):
+            with open(os.path.join(REPO, 'apps', 'database', name)) as fh:
+                text = fh.read()
+            if name == 'medcea_db_migrations.sql':
+                text = text[text.index('-- ── Migration 010'):]
+            verb = 'CREATE OR REPLACE VIEW ' if name == 'medcea_db_migrations.sql' else 'CREATE VIEW '
+            for view in ('medcea.msg_actual_points', 'medcea.v_ap_measurements'):
+                at = text.index(verb + view)
+                body = self.flat(text[at:text.index(';', at)]).lower()
+                self.assertIn(mine, body, (name, view))
+        with open(os.path.join(REPO, 'apps', 'monitor', 'monitor-api.py')) as fh:
+            self.assertIn(self.SENSOR, self.flat(fh.read()))
+
+    def test_actions_unchanged(self):
+        # get_actions still keys DISTINCT ON (tag) (Phase 3/4 note): not touched here
+        stmts, _ = call('monitor', '/api/actions/U1', lambda: MON.get_actions('U1'), ['operator'])
+        self.assertIn('SELECT DISTINCT ON (tag) tag, command', stmts[-1][0])
 
 
 if __name__ == '__main__':

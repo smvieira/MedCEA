@@ -614,7 +614,7 @@ client = MQTTClient("unit01-s-zone01-test", "192.168.1.102", port=31884,
                     user="unit01-s-zone01", password="<from edge/provisioned/unit01-s-zone01.json>",
                     ssl=ctx, ssl_params={"server_hostname": "mqtt.medcea"})
 client.connect()
-client.publish(b"medcea/UNIT01/ZONE01/sense/humidity", b"65")
+client.publish(b"medcea/UNIT01/ZONE01/sense/air_humidity/sht45_1", b"65")  # <tag>/<sensor>; the old five-segment form is read as sensor "default"
 client.disconnect()
 ```
 
@@ -651,14 +651,16 @@ shows the topics that person's role may read, with a "Your rights" note; with `f
 has no credential and says it needs `IAM_MQTT_PERSON=true`. Click any topic to see its message
 history; use the Publish panel at the bottom to send messages.
 
-### Recommended topic structure
+### Topic structure
 
-There is no enforced topic schema — use whatever works for your project. A common convention for IoT platforms:
+The broker's access rules and the platform's consumers expect this structure (root = `PROJECT_NAME`):
 
 ```
-sensors/<device-id>/<metric>       # e.g.  sensors/esp32-01/temperature
-actuators/<device-id>/<command>    # e.g.  actuators/relay-01/state
-status/<device-id>/online          # e.g.  status/esp32-01/online
+medcea/<UNIT>/<ZONE>/sense/<tag>/<sensor>      # a reading, e.g. sense/air_temperature/sht45_1
+medcea/<UNIT>/<ZONE>/sense/<tag>               # the same from a board flashed before 13 Nov 2026 (sensor "default")
+medcea/<UNIT>/<ZONE>/sense/_health | _test     # a SENSE board's health and test messages
+medcea/<UNIT>/<ZONE>/control/<actuator>        # a command from the run (or commissioning)
+medcea/<UNIT>/<ZONE>/control_setpoint/...      # what the CONTROL board did
 ```
 
 ---
@@ -828,6 +830,8 @@ The scheduler API rejects an execute request with **HTTP 409** if a live `run_re
 
 All CEA grow-chamber control loops use a pluggable algorithm that maps a sensor reading to one of three actuator commands: `UP`, `DOWN`, or `OFF`. The algorithm is selected per permission (or per run) and receives `lower_limit` / `upper_limit` bounds from the recipe line item.
 
+Which reading each loop uses and which actuator it drives is the zone's **control loop** map (feedback control Phases 1+2, 13 Nov 2026): rows of `medcea.control_loop`, chosen by an engineer in the onboarding wizard (`./edge/flash-device.sh --loops-only` without a board), or, for a zone without rows, a default map that uses a reading's only fresh sensor and raises `ALARM ambiguous_source` when there are several. See the platform manual (devices: *Control loops of a zone*; administration: *Control loops*) and CLAUDE.md.
+
 ### Available algorithms
 
 | Code | Name | Description | Default params |
@@ -966,8 +970,11 @@ schd/
     │   ├── mpc.py           # Model Predictive Control implementation
     │   ├── q_learning.py    # Q-Learning implementation
     │   └── __init__.py      # Registry + get_algorithm() factory
-    ├── control_logic_thread.py  # Per-run sensor→actuator control loop
-    ├── mqtt_subscribe_thread.py # Inbound sensor data thread
+    ├── control_logic_thread.py  # Per-run control loops: one algorithm per zone loop → control/<actuator>
+    ├── loop_resolver.py         # Pure: topics (5/6 segments), readings per (zone, tag, sensor),
+    │                            #   reference/fallback/mean/min/max, the default map, alarms
+    ├── get_control_loops.py     # Reads medcea.control_loop (or the default map per zone) at run start
+    ├── mqtt_subscribe_thread.py # Inbound sensor data thread (newest reading per zone, tag, sensor)
     ├── run_agent.py             # Algorithm wiring + state persistence
     ├── load_algorithm_state.py  # Load Q-table state from DB
     └── save_algorithm_state.py  # Save Q-table state to DB

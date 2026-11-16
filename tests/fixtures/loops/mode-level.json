@@ -1,0 +1,50 @@
+{
+ "note": "level needs Phase 3",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "air_humidity",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "level"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_MODE",
+   "loops.air_humidity.output.mode"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.co2"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.substrate_temperature"
+  ]
+ ]
+}

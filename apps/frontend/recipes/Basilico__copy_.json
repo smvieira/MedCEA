@@ -1,6 +1,8 @@
 {
+  "format": 2,
   "recipe_name": "Basilico (copy)",
   "recipe_description": "Recipe for Basilico (Ocimum basillicum)",
+  "recipe_type": "PLANT",
   "steps": [
     {
       "recipe_item_seq_id": 1,
@@ -9,14 +11,24 @@
       "light_type": "DARK",
       "light_on_minutes": 0,
       "light_off_minutes": 1440,
-      "air_temperature_lower_limit": 21,
-      "air_temperature_upper_limit": 26,
-      "co2_lower_limit": 400,
-      "co2_upper_limit": 750,
-      "hr_lower_limit": 70,
-      "hr_upper_limit": 90,
-      "substrate_temperature_lower_limit": 21,
-      "substrate_temperature_upper_limit": 26,
+      "setpoints": {
+        "air_temperature": {
+          "lower": 21,
+          "upper": 26
+        },
+        "air_humidity": {
+          "lower": 70,
+          "upper": 90
+        },
+        "co2": {
+          "lower": 400,
+          "upper": 750
+        },
+        "substrate_temperature": {
+          "lower": 21,
+          "upper": 26
+        }
+      },
       "notes": "Literature-based values for basil germination. Total darkness. Optimal warmth and humidity. Original 7 days.  (upper limit co2 600)"
     },
     {
@@ -26,14 +38,24 @@
       "light_type": "BLUE",
       "light_on_minutes": 960,
       "light_off_minutes": 480,
-      "air_temperature_lower_limit": 20,
-      "air_temperature_upper_limit": 26,
-      "co2_lower_limit": 750,
-      "co2_upper_limit": 1000,
-      "hr_lower_limit": 50,
-      "hr_upper_limit": 70,
-      "substrate_temperature_lower_limit": 19,
-      "substrate_temperature_upper_limit": 24,
+      "setpoints": {
+        "air_temperature": {
+          "lower": 20,
+          "upper": 26
+        },
+        "air_humidity": {
+          "lower": 50,
+          "upper": 70
+        },
+        "co2": {
+          "lower": 750,
+          "upper": 1000
+        },
+        "substrate_temperature": {
+          "lower": 19,
+          "upper": 24
+        }
+      },
       "notes": "Literature-based values for basil vegetative growth. Light type from existing record for this recipe. Original 28 days/cycles"
     }
   ]

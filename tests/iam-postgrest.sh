@@ -172,7 +172,7 @@ seed() {
 INSERT INTO medcea.cea_location (name, description, is_active)
 SELECT 'IAMP site', 'tests/iam-postgrest.sh', 'Y' WHERE NOT EXISTS (SELECT 1 FROM medcea.cea_location WHERE name = 'IAMP site');
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
-SELECT 'Other', 'iam-postgrest', l.location_id, 'Y', 'IAMP01' FROM medcea.cea_location l
+SELECT 'FUNGI', 'iam-postgrest', l.location_id, 'Y', 'IAMP01' FROM medcea.cea_location l
  WHERE l.name = 'IAMP site' AND NOT EXISTS (SELECT 1 FROM medcea.cea_unit WHERE unit_code = 'IAMP01');
 -- the probe RPC: who PostgREST runs as, and the headers/cookies SQL would see.
 -- Test-only; dropped on exit (it would fail the next bundle's catalog assertions).

@@ -1,0 +1,16 @@
+{
+ "note": "Decide later sends nothing else",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": true,
+  "loops": []
+ },
+ "expect": [
+  [
+   "error",
+   "L_SCHEMA",
+   "answer.skip"
+  ]
+ ]
+}

@@ -16,6 +16,13 @@ cfg.SENSORS comes in two shapes:
 Adding a wired sensor type is: an entry with a `bus` block in
 edge/templates/esp32-sense.json, and a (setup, read) pair in DRIVERS.
 
+Each reading goes to <topic_pub>/<tag>/<instance>, and its payload carries
+"sensor": <instance>, so two sensors publishing one tag (an SHT45 and an SCD30
+both on air_temperature) stay two series. The instance is the entry's "id"
+(wired), or its driver with "_<n>" (its position) for a repeat of the same
+driver (legacy); device_template.py names legacy component rows by the same
+rule. _health and _test keep their topics and carry no "sensor".
+
 A sensor that fails does not reboot the board: the board connects, says which
 sensor is down on <topic_pub>/_health, keeps publishing the others, and tries
 the failed ones again every RETRY_SECONDS. Only a broker that keeps refusing
@@ -238,7 +245,9 @@ class Board:
         seen = set()
         for i, e in enumerate(entries):
             # A legacy entry has no id: its driver names it (a second one of the
-            # same driver gets its position).
+            # same driver gets its position). This id is also the last segment
+            # of the reading topic and the payload's "sensor";
+            # device_template.py's legacy component rows use the same rule.
             sid = e.get("id") or e.get("driver") or "sensor"
             if sid in seen:
                 sid = "%s_%d" % (sid, i + 1)
@@ -280,7 +289,7 @@ class Board:
         self.last_retry = time.time()
 
     def read(self, slot):
-        """[(tag, value, uom), ...] for one sensor; sets its ok/err."""
+        """[(tag, value, uom, instance), ...] for one sensor; sets its ok/err."""
         e = slot.entry
         try:
             if "bus" in e:
@@ -290,10 +299,10 @@ class Board:
                 for q, tag, uom in e.get("tags", []):
                     v = vals.get(q)
                     if v is not None:
-                        got.append((tag, round(v, 2), uom))
+                        got.append((tag, round(v, 2), uom, slot.id))
                 slot.ok, slot.err = True, None
                 return got
-            got = _read(e, slot.handle)
+            got = [(tag, v, uom, slot.id) for tag, v, uom in _read(e, slot.handle)]
         except Exception as ex:
             slot.ok, slot.err = False, _err(ex)
             print("sensor %s: %s" % (slot.id, slot.err))
@@ -302,7 +311,7 @@ class Board:
         slot.ok, slot.err = (True, None) if got else (False, "no reading")
         return got
 
-    def _message(self, timestamp, tag):
+    def _message(self, timestamp, tag, sensor):
         return {
             "unit_code": cfg.unit_code,
             "zone_code": cfg.zone_code,
@@ -310,6 +319,7 @@ class Board:
             "timestamp": timestamp,
             "device_id": cfg.device_id,
             "device_dns": cfg.device_dns,
+            "sensor": sensor,
             "tag": tag,
         }
 
@@ -346,15 +356,16 @@ class Board:
         if not readings:
             print("no sensor produced a reading this cycle")
         else:
-            for tag, value, uom in readings:
-                message = self._message(timestamp, tag)
+            for tag, value, uom, sid in readings:
+                message = self._message(timestamp, tag, sid)
                 message["value"] = value
                 message["UoM"] = uom
                 try:
-                    self.client.publish(cfg.topic_pub + "/" + tag, ujson.dumps(message))
+                    self.client.publish(cfg.topic_pub + "/" + tag + "/" + sid,
+                                        ujson.dumps(message))
                     time.sleep_ms(100)
                 except OSError as e:
-                    print("publish to %s failed: %s" % (tag, e))
+                    print("publish to %s/%s failed: %s" % (tag, sid, e))
                     ok = False
                     break
             published = ok

@@ -33,16 +33,25 @@ DELETE FROM medcea.platform_setting WHERE key IN ('008b:definitions_grandfathere
 UPDATE medcea.platform_setting SET value = 'false' WHERE key = 'iam_db_roles';
 SELECT format('ALTER DATABASE %I RESET "medcea.iam_db_roles"', current_database()) \gexec
 
+-- production's schema before or after migration 011 (recipe types): the unit type is
+-- a label (Greens/Mushrooms) or a recipe type code, the limits are columns or
+-- setpoints; 011 converts the old form when the fixture applies it
+SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe_line'::regclass
+                                                   AND attname = 'setpoints' AND NOT attisdropped) AS has_011,
+       CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'medcea.recipe_line'::regclass
+                                                             AND attname = 'setpoints' AND NOT attisdropped)
+            THEN 'FUNGI' ELSE 'Mushrooms' END AS ut \gset
+
 INSERT INTO medcea.cea_location (name, description, is_active) VALUES ('IAMTEST site', 'tests/iam-db-fixture.sh', 'Y')
 RETURNING location_id AS loc \gset
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
-VALUES ('Mushrooms', 'iamtest unit 1', :loc, 'Y', 'IAMT01') RETURNING unit_id AS u1 \gset
+VALUES (:'ut', 'iamtest unit 1', :loc, 'Y', 'IAMT01') RETURNING unit_id AS u1 \gset
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
-VALUES ('Mushrooms', 'iamtest unit 2', :loc, 'Y', 'IAMT02') RETURNING unit_id AS u2 \gset
+VALUES (:'ut', 'iamtest unit 2', :loc, 'Y', 'IAMT02') RETURNING unit_id AS u2 \gset
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
-VALUES ('Other', 'iamtest: a space in the code', :loc, 'Y', 'IAM T03') RETURNING unit_id AS u3 \gset
+VALUES (:'ut', 'iamtest: a space in the code', :loc, 'Y', 'IAM T03') RETURNING unit_id AS u3 \gset
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
-VALUES ('Other', 'iamtest: a + in the code', :loc, 'Y', 'IAM+04') RETURNING unit_id AS u4 \gset
+VALUES (:'ut', 'iamtest: a + in the code', :loc, 'Y', 'IAM+04') RETURNING unit_id AS u4 \gset
 INSERT INTO medcea.cea_zone (unit_id, zone_code, is_active) VALUES (:u1, 'Z01', 'Y') RETURNING zone_id AS z1a \gset
 INSERT INTO medcea.cea_zone (unit_id, zone_code, is_active) VALUES (:u1, 'Z02', 'Y') RETURNING zone_id AS z1b \gset
 INSERT INTO medcea.cea_zone (unit_id, zone_code, is_active) VALUES (:u2, 'Z01', 'Y') RETURNING zone_id AS z2a \gset
@@ -67,12 +76,25 @@ INSERT INTO medcea.device (zone_id, device_type, serial_number, dns_name, is_act
 VALUES (:z1b, 'CONTROL', 'iamt-aa:bb:cc:00:00:02', 'iamt01-c-z02', 'Y') RETURNING device_id AS dctl \gset
 INSERT INTO medcea.mqtt_credential (username, password_hash, device_id, role, topic_base)
 VALUES ('iamt01-c-z02', '$7$101$c2VlZHNhbHQ=$c2VlZGhhc2g=', :dctl, 'CONTROL', 'medcea/IAMT01/Z02');
--- its relay: get_feedback_control_loop_params finds a unit's actuators
+-- its relay: the runner finds a zone's actuators (get_control_loops)
 INSERT INTO medcea.component (component_id, device_id, component_type, model, parameters, is_active)
 VALUES (nextval('medcea.component_component_id_seq'), :dctl, 'ACTUATOR', 'iamt-relay',
         '{"pin_descriptions": {}, "seed": "tests/sql/iam-db-seed.sql"}', 'Y');
 
 -- recipes and their lines
+\if :has_011
+INSERT INTO medcea.recipe (recipe_name, recipe_description, recipe_type) VALUES ('IAMTEST-R1', 'iamtest recipe 1', 'FUNGI') RETURNING recipe_id AS r1 \gset
+INSERT INTO medcea.recipe (recipe_name, recipe_description, recipe_type) VALUES ('IAMTEST-R2', 'iamtest recipe 2', 'FUNGI') RETURNING recipe_id AS r2 \gset
+INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
+    light_type, light_on_minutes, light_off_minutes, setpoints)
+VALUES (:r1, 1, 'IAMT step 1', 1, 'BLUE', 60, 60, '{"air_temperature": {"lower": 18, "upper": 24}, "co2": {"lower": 400, "upper": 1200}, "air_humidity": {"lower": 70, "upper": 90}}'),
+       (:r2, 1, 'IAMT step 1', 1, 'RED', 60, 60, '{"air_temperature": {"lower": 18, "upper": 24}, "co2": {"lower": 400, "upper": 1200}, "air_humidity": {"lower": 70, "upper": 90}}');
+-- R0: a run of it finishes at once (two cycles of 0 + 0 minutes)
+INSERT INTO medcea.recipe (recipe_name, recipe_description, recipe_type) VALUES ('IAMTEST-R0', 'iamtest: 0-minute runner recipe', 'FUNGI') RETURNING recipe_id AS r0 \gset
+INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
+    light_type, light_on_minutes, light_off_minutes, setpoints)
+VALUES (:r0, 1, 'IAMT zero', 2, 'BLUE', 0, 0, '{"air_temperature": {"lower": 18, "upper": 24}, "co2": {"lower": 400, "upper": 1200}, "air_humidity": {"lower": 70, "upper": 90}}');
+\else
 INSERT INTO medcea.recipe (recipe_name, recipe_description) VALUES ('IAMTEST-R1', 'iamtest recipe 1') RETURNING recipe_id AS r1 \gset
 INSERT INTO medcea.recipe (recipe_name, recipe_description) VALUES ('IAMTEST-R2', 'iamtest recipe 2') RETURNING recipe_id AS r2 \gset
 INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
@@ -86,6 +108,8 @@ INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_n
     air_temperature_lower_limit, air_temperature_upper_limit, light_type, light_on_minutes, light_off_minutes,
     co2_lower_limit, co2_upper_limit, hr_lower_limit, hr_upper_limit)
 VALUES (:r0, 1, 'IAMT zero', 2, 18, 24, 'BLUE', 0, 0, 400, 1200, 70, 90);
+
+\endif
 
 -- assignments (recipe x unit) and schedules
 SELECT algorithm_id AS pid FROM medcea.control_algorithm WHERE algorithm_code = 'PID' \gset

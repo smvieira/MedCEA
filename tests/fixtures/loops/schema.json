@@ -1,0 +1,113 @@
+{
+ "note": "unknown keys at every level, a source that is no name",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "co2",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    },
+    "note": "x"
+   },
+   {
+    "loop_code": "air_humidity",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90,
+     "weight": 2
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "air_temperature",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_temperature",
+     "mode": "command",
+     "pwm": 3
+    }
+   },
+   {
+    "loop_code": "substrate_temperature",
+    "input": {
+     "tag": "ground_temperature",
+     "sources": [
+      "ground_temperature",
+      5
+     ],
+     "rule": "reference",
+     "reference": "ground_temperature",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   }
+  ],
+  "extra": 1
+ },
+ "expect": [
+  [
+   "error",
+   "L_SCHEMA",
+   "answer"
+  ],
+  [
+   "error",
+   "L_SCHEMA",
+   "loops.co2"
+  ],
+  [
+   "error",
+   "L_SCHEMA",
+   "loops.air_humidity.input"
+  ],
+  [
+   "error",
+   "L_SCHEMA",
+   "loops.air_temperature.output"
+  ],
+  [
+   "error",
+   "L_SCHEMA",
+   "loops.substrate_temperature.input.sources"
+  ]
+ ]
+}

@@ -1,7 +1,7 @@
 {
   "slug": "sense-hub-bench-sht45-scd30",
   "title": "Sense board as bench-tested 6 Nov 2026: hub + SHT45 ch7 + SCD30 ch6",
-  "description": "The wiring the owner's I2C hub bench test (i2c_hub_test.py rev3, 6 Nov 2026) passed on: ESP32-S3-DevKitC-1, hardware I2C(0) on GPIO8 (SDA) / GPIO9 (SCL) at 100 kHz with a 250 ms timeout, a TCA9548A at 0x70 (SparkFun Qwiic Mux BOB-16784) alone on the root bus, SHT45 (0x44) on channel 7 for air temperature and humidity, SCD30 (0x61) on channel 6 for CO2 only, channels 0-5 empty, no SEN0562 fitted.",
+  "description": "The wiring the owner's I2C hub bench test (i2c_hub_test.py rev3, 6 Nov 2026) passed on: ESP32-S3-DevKitC-1, hardware I2C(0) on GPIO8 (SDA) / GPIO9 (SCL) at 100 kHz with a 250 ms timeout, a TCA9548A at 0x70 (SparkFun Qwiic Mux BOB-16784) alone on the root bus, SHT45 (0x44) on channel 7 for air temperature and humidity, SCD30 (0x61) on channel 6 for CO2 and its own air temperature and humidity (the bench test read all three; published as sensor scd30_1, beside the SHT45's sht45_1), channels 0-5 empty, no SEN0562 fitted.",
   "variant": "esp32s3",
   "saved_by": "medcea",
   "saved_at": "2026-11-07T00:00:00Z",
@@ -65,11 +65,11 @@
           },
           {
             "q": "temperature",
-            "tag": null
+            "tag": "air_temperature"
           },
           {
             "q": "humidity",
-            "tag": null
+            "tag": "air_humidity"
           }
         ]
       }

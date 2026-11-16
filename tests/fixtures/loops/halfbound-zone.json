@@ -1,0 +1,23 @@
+{
+ "note": "--loops-only on a zone whose loops are half-bound: kept as they are, each said",
+ "context": "halfbound",
+ "role": "ZONE",
+ "answer": "initial",
+ "expect": [
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ]
+ ]
+}

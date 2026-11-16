@@ -291,12 +291,9 @@
             <input name="unit_code" required maxlength="10" placeholder="e.g. GRN-001">
           </div>
           <div class="fg">
-            <label>Unit Type <span class="req">*</span></label>
-            <select name="unit_type" required>
+            <label>Recipe Type <span class="req">*</span> <small style="color:#334155;text-transform:none;font-weight:400">(the recipes it runs)</small></label>
+            <select name="unit_type" id="unit-type-select" required>
               <option value="">— Select —</option>
-              <option value="Greens">Greens</option>
-              <option value="Mushrooms">Mushrooms</option>
-              <option value="Other">Other</option>
             </select>
           </div>
           <div class="fg full">
@@ -718,6 +715,8 @@
       <form id="recipe-header-form" onsubmit="submitRecipeHeader(event)" style="margin-bottom:20px">
         <div class="form-grid">
           <div class="fg"><label>Name <span class="req">*</span></label><input name="recipe_name" required placeholder="e.g. Lettuce 21-day"></div>
+          <div class="fg"><label>Recipe Type <span class="req">*</span></label><select name="recipe_type" id="recipe-type-select" required><option value="">— Select —</option></select>
+            <small id="recipe-type-hint" class="muted" style="text-transform:none"></small></div>
           <div class="fg full"><label>Description</label><textarea name="recipe_description" rows="2" placeholder="Optional description"></textarea></div>
           <div class="fg"><label>Status</label><select name="is_active"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
         </div>
@@ -878,14 +877,8 @@
           </div>
           <div class="fg"><label>Light ON (min) <span class="req">*</span></label><input name="light_on_minutes" type="number" min="0" required placeholder="e.g. 960"></div>
           <div class="fg"><label>Light OFF (min) <span class="req">*</span></label><input name="light_off_minutes" type="number" min="0" required placeholder="e.g. 480"></div>
-          <div class="fg"><label>Air Temp Min °C <span class="req">*</span></label><input name="air_temperature_lower_limit" type="number" required placeholder="e.g. 18"></div>
-          <div class="fg"><label>Air Temp Max °C <span class="req">*</span></label><input name="air_temperature_upper_limit" type="number" required placeholder="e.g. 24"></div>
-          <div class="fg"><label>CO₂ Min (ppm) <span class="req">*</span></label><input name="co2_lower_limit" type="number" min="0" required placeholder="e.g. 400"></div>
-          <div class="fg"><label>CO₂ Max (ppm) <span class="req">*</span></label><input name="co2_upper_limit" type="number" min="0" required placeholder="e.g. 1200"></div>
-          <div class="fg"><label>Humidity Min % <span class="req">*</span></label><input name="hr_lower_limit" type="number" min="0" max="100" required placeholder="e.g. 60"></div>
-          <div class="fg"><label>Humidity Max % <span class="req">*</span></label><input name="hr_upper_limit" type="number" min="0" max="100" required placeholder="e.g. 80"></div>
-          <div class="fg"><label>Substrate Temp Min °C</label><input name="substrate_temperature_lower_limit" type="number" placeholder="optional"></div>
-          <div class="fg"><label>Substrate Temp Max °C</label><input name="substrate_temperature_upper_limit" type="number" placeholder="optional"></div>
+          <!-- one lower/upper pair per quantity of the recipe's type (recipe-types.json) -->
+          <div class="fg full" id="rline-setpoints"></div>
           <div class="fg full"><label>Notes</label><textarea name="notes" rows="2" placeholder="Optional notes for this step"></textarea></div>
         </div>
         <div class="form-actions">
@@ -1138,6 +1131,164 @@
       return msg;
     }
 
+    /* recipe-types-logic:begin */
+    // Pure functions (no DOM, no fetch) for the recipe types and a recipe line's
+    // setpoints (migration 011): `doc` is /recipe-types.json, the same document as
+    // apps/database/recipe_types.yaml (python3 apps/database/recipe_types.py json),
+    // which the database seeds its catalogue from. tests/test_config_ui_recipe_types.py
+    // runs this block under node. The database alone decides (recipe_line_setpoints_trg,
+    // recipe_type_match_trg); these checks only say so before a save.
+    const LEGACY_LIMITS = {   // a v1 file's limit columns → its setpoint keys
+      air_temperature: ['air_temperature_lower_limit', 'air_temperature_upper_limit'],
+      air_humidity: ['hr_lower_limit', 'hr_upper_limit'],
+      co2: ['co2_lower_limit', 'co2_upper_limit'],
+      substrate_temperature: ['substrate_temperature_lower_limit', 'substrate_temperature_upper_limit'],
+    };
+    const STEP_FIELDS = ['recipe_item_seq_id', 'recipe_item_seq_name', 'cycle_number', 'light_type',
+                         'light_on_minutes', 'light_off_minutes'];
+
+    function rtTypes(doc) {
+      return ((doc && doc.recipe_types) || []).map(t => ({ code: t.code, label: t.label || t.code,
+                                                         legacy: t.legacy_unit_type || null }));
+    }
+    // A recipe type code from a code or an old unit label (Greens, Mushrooms); null otherwise.
+    function rtTypeCode(doc, v) {
+      if (v == null || v === '') return null;
+      const t = rtTypes(doc).find(x => x.code === v || x.legacy === v);
+      return t ? t.code : null;
+    }
+    function rtTypeLabel(doc, code) {
+      if (code == null || code === '') return '—';
+      const t = rtTypes(doc).find(x => x.code === code);
+      return t ? t.label : String(code);
+    }
+    // The quantities of a recipe type, in the catalogue's order.
+    function rtQuantities(doc, typeCode) {
+      const t = ((doc && doc.recipe_types) || []).find(x => x.code === typeCode);
+      if (!t) return [];
+      return ((doc && doc.quantities) || []).filter(q => t.quantities && q.code in t.quantities)
+        .map(q => ({ code: q.code, label: q.label || q.code, unit: q.unit || '', min: q.min, max: q.max,
+                     required: t.quantities[q.code] === true }));
+    }
+    function rtQuantityLabel(doc, code) {
+      const q = ((doc && doc.quantities) || []).find(x => x.code === code);
+      return q ? q.label : code;
+    }
+
+    // One setpoint {lower, upper} against its quantity: the problem text, or null.
+    function setpointProblem(q, v) {
+      const name = q.label || q.code;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return name + ': needs a lower and an upper value';
+      const lo = v.lower, hi = v.upper;
+      if (typeof lo !== 'number' || typeof hi !== 'number' || !Number.isFinite(lo) || !Number.isFinite(hi))
+        return name + ': lower and upper must be numbers';
+      if (lo > hi) return name + ': the lower value is above the upper one';
+      if ((q.min != null && lo < q.min) || (q.max != null && hi > q.max))
+        return name + ': must be within ' + q.min + ' and ' + q.max + (q.unit ? ' ' + q.unit : '');
+      return null;
+    }
+
+    // Every problem of a line's setpoints against its type's quantities.
+    function setpointsProblems(sp, quantities) {
+      const errs = [];
+      const obj = sp && typeof sp === 'object' && !Array.isArray(sp) ? sp : {};
+      const known = new Set(quantities.map(q => q.code));
+      Object.keys(obj).forEach(k => { if (!known.has(k)) errs.push(k + ' is not a quantity of this recipe type'); });
+      quantities.forEach(q => {
+        if (!(q.code in obj)) { if (q.required) errs.push((q.label || q.code) + ' is required'); return; }
+        const p = setpointProblem(q, obj[q.code]);
+        if (p) errs.push(p);
+      });
+      return errs;
+    }
+
+    // The line form's inputs ({code: {lower: '18', upper: ''}}) → {setpoints, errors}: an
+    // optional quantity left empty is left out; a half-filled one is an error.
+    function setpointsFromInputs(values, quantities) {
+      const setpoints = {}, errors = [];
+      quantities.forEach(q => {
+        const v = (values || {})[q.code] || {};
+        const lo = String(v.lower ?? '').trim(), hi = String(v.upper ?? '').trim();
+        if (lo === '' && hi === '') { if (q.required) errors.push((q.label || q.code) + ' is required'); return; }
+        if (lo === '' || hi === '') { errors.push((q.label || q.code) + ': needs a lower and an upper value'); return; }
+        const sp = { lower: Number(lo), upper: Number(hi) };
+        const p = setpointProblem(q, sp);
+        if (p) errors.push(p); else setpoints[q.code] = sp;
+      });
+      return { setpoints, errors };
+    }
+
+    // A v1 step's limit columns → setpoints (a quantity only when both its columns are set).
+    function setpointsFromV1(step) {
+      const sp = {};
+      Object.entries(LEGACY_LIMITS).forEach(([code, [lo, hi]]) => {
+        if (step[lo] != null && step[hi] != null) sp[code] = { lower: Number(step[lo]), upper: Number(step[hi]) };
+      });
+      return sp;
+    }
+
+    // A recipe line (or an exported step) as a v2 step: the step fields, setpoints, notes.
+    function v2Step(l) {
+      const s = {};
+      STEP_FIELDS.forEach(k => { if (l[k] != null) s[k] = l[k]; });
+      s.setpoints = (l.setpoints && typeof l.setpoints === 'object' && !Array.isArray(l.setpoints))
+        ? l.setpoints : setpointsFromV1(l);
+      if (l.notes != null && l.notes !== '') s.notes = l.notes;
+      return s;
+    }
+
+    // A recipe file (v2, or v1 with the limit columns) → {recipe_name, recipe_description,
+    // recipe_type, steps, errors}. A v1 file names no type: typeIfV1 is the person's choice.
+    function normaliseRecipeImport(payload, doc, typeIfV1) {
+      const errors = [];
+      if (!payload || typeof payload !== 'object') return { errors: ['not a recipe file'] };
+      if (!payload.recipe_name) errors.push('JSON missing recipe_name');
+      if (!Array.isArray(payload.steps)) errors.push('JSON missing steps array');
+      const v2 = payload.format === 2 || payload.recipe_type != null;
+      const type = v2 ? rtTypeCode(doc, payload.recipe_type) : rtTypeCode(doc, typeIfV1);
+      if (!type) errors.push(v2 ? 'recipe_type ' + payload.recipe_type + ' is not a recipe type' : 'choose a recipe type');
+      const quantities = type ? rtQuantities(doc, type) : [];
+      const steps = (Array.isArray(payload.steps) ? payload.steps : []).map(v2Step);
+      steps.forEach(s => {
+        const where = 'Step ' + (s.recipe_item_seq_id ?? '?') + ': ';
+        STEP_FIELDS.forEach(f => { if (s[f] == null) errors.push(where + 'missing field ' + f); });
+        if (type) setpointsProblems(s.setpoints, quantities).forEach(e => errors.push(where + e));
+      });
+      steps.sort((a, b) => a.recipe_item_seq_id - b.recipe_item_seq_id);
+      return { recipe_name: payload.recipe_name, recipe_description: payload.recipe_description || null,
+               recipe_type: type, steps, errors };
+    }
+
+    // The export (format 2) of a recipe row and its lines.
+    function recipeExport(r, lines) {
+      return { format: 2, recipe_name: r.recipe_name, recipe_description: r.recipe_description || null,
+               recipe_type: r.recipe_type || null, steps: (lines || []).map(v2Step) };
+    }
+
+    // "Air temperature 18–24 °C · CO₂ 400–1200 ppm": the catalogue's order, unknown keys last.
+    function setpointsText(sp, doc) {
+      const obj = sp && typeof sp === 'object' && !Array.isArray(sp) ? sp : {};
+      const order = ((doc && doc.quantities) || []).map(q => q.code);
+      const keys = Object.keys(obj).sort((a, b) => {
+        const ia = order.indexOf(a), ib = order.indexOf(b);
+        return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib) || a.localeCompare(b);
+      });
+      if (!keys.length) return '—';
+      return keys.map(k => {
+        const q = ((doc && doc.quantities) || []).find(x => x.code === k);
+        const v = obj[k] || {};
+        return (q ? q.label : k) + ' ' + v.lower + '–' + v.upper + (q && q.unit ? ' ' + q.unit : '');
+      }).join(' · ');
+    }
+
+    // A recipe may be permitted on a unit of its type only; unknown on either side passes
+    // (the database decides).
+    function typesMatch(recipe, unit) {
+      const a = recipe && recipe.recipe_type, b = unit && unit.unit_type;
+      return !a || !b || a === b;
+    }
+    /* recipe-types-logic:end */
+
     /* approvals-logic:begin */
     // Pure functions (no DOM, no fetch) for the Approvals tab, the approval status of
     // recipes, algorithms and parameter sets, and the parameter-set editor;
@@ -1152,6 +1303,7 @@
       co2_lower_limit: 'CO₂ min (ppm)', co2_upper_limit: 'CO₂ max (ppm)',
       hr_lower_limit: 'Humidity min %', hr_upper_limit: 'Humidity max %',
       substrate_temperature_lower_limit: 'Substrate temp min °C', substrate_temperature_upper_limit: 'Substrate temp max °C',
+      setpoints: 'Setpoints', recipe_type: 'Recipe type',
       notes: 'Notes', algorithm_code: 'Code', algorithm_name: 'Name', description: 'Description',
       default_params: 'Default params', params: 'Params', name: 'Name', unit_id: 'Unit', algorithm_id: 'Algorithm'
     };
@@ -1381,7 +1533,8 @@
       algorithms: ['medcea.control_algorithm'],
       params: ['medcea.unit_algorithm_params'],
       pending: ['medcea.pending_change'],
-      reviews: ['medcea.cea_location', 'medcea.cea_unit', 'medcea.cea_zone', 'medcea.component', 'medcea.device'],
+      reviews: ['medcea.cea_location', 'medcea.cea_unit', 'medcea.cea_zone', 'medcea.component', 'medcea.device',
+                'medcea.control_loop'],
       releases: ['medcea.recipe_run'],
       qtables: ['medcea.algorithm_state']
     };
@@ -1950,7 +2103,7 @@
         html += '<tbody>'
           + '<tr class="unit-row">'
           + '<td><strong>' + esc(u.unit_code) + '</strong></td>'
-          + '<td>' + esc(u.unit_type) + '</td>'
+          + '<td>' + esc(rtTypeLabel(recipeTypes, u.unit_type)) + '</td>'
           + '<td>' + esc(locName(u.location_id)) + '</td>'
           + '<td>' + (u.area   != null ? u.area   + ' m²' : '—') + '</td>'
           + '<td>' + (u.height != null ? u.height + ' m'  : '—') + '</td>'
@@ -2409,7 +2562,7 @@
       const sel = document.getElementById('modal-dev-unit');
       sel.innerHTML = '<option value="">— Unassigned —</option>'
         + units.map(u => '<option value="' + u.unit_id + '"' + (u.unit_id === keepUnitId ? ' selected' : '') + '>'
-          + esc(u.unit_code) + ' — ' + esc(u.unit_type) + '</option>').join('');
+          + esc(u.unit_code) + ' — ' + esc(rtTypeLabel(recipeTypes, u.unit_type)) + '</option>').join('');
     }
 
     async function onModalDevUnitChange(val) {
@@ -2572,8 +2725,43 @@
     }
     function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+    // ── Recipe types (migration 011) ──────────────────────────
+    // /recipe-types.json is apps/database/recipe_types.yaml as JSON, served beside this
+    // page (people cannot read the catalogue tables). Without it the type selects stay
+    // empty and a step cannot be edited; the database still decides every write.
+    let recipeTypes = null;
+    const recipeTypesReady = fetch('/recipe-types.json', { cache: 'no-cache' })
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(doc => {
+        recipeTypes = doc && Array.isArray(doc.recipe_types) ? doc : null;
+        fillRecipeTypeSelects();
+        if (typeof units !== 'undefined' && units.length) renderUnitTable();
+        return recipeTypes;
+      });
+    function recipeTypeOptions(selected) {
+      return '<option value="">— Select —</option>' + rtTypes(recipeTypes).map(t =>
+        '<option value="' + esc(t.code) + '"' + (t.code === selected ? ' selected' : '') + '>' + esc(t.label) + '</option>').join('');
+    }
+    function fillRecipeTypeSelects() {
+      ['unit-type-select', 'recipe-type-select'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { const v = el.value; el.innerHTML = recipeTypeOptions(v); el.value = v; }
+      });
+    }
+    // A v1 recipe file names no type: ask (default PLANT).
+    function askRecipeType(name) {
+      const codes = rtTypes(recipeTypes).map(t => t.code);
+      if (!codes.length) throw new Error('the recipe types could not be loaded (recipe-types.json)');
+      const v = prompt('Recipe type of "' + name + '" (' + codes.join(' or ') + '):', codes.includes('PLANT') ? 'PLANT' : codes[0]);
+      if (v == null) throw new Error('import cancelled');
+      const code = rtTypeCode(recipeTypes, v.trim().toUpperCase());
+      if (!code) throw new Error(v + ' is not a recipe type (' + codes.join(', ') + ')');
+      return code;
+    }
+
     // ── Recipes ───────────────────────────────────────────────
     let recipes = [];
+    let currentRecipeHasLines = false;
     let currentRecipeId = null;
     let recipeLineModal = { recipeId: null, seqId: null }; // seqId=null means new
 
@@ -2647,6 +2835,7 @@
           form.elements['recipe_name'].value = r.recipe_name;
           form.elements['recipe_description'].value = r.recipe_description || '';
           form.elements['is_active'].value = r.is_active || 'Y';
+          form.elements['recipe_type'].value = r.recipe_type || '';
         }
         openRecipeDetail(id);
       } else {
@@ -2657,7 +2846,9 @@
         document.getElementById('recipe-list-panel').classList.add('hidden');
         document.getElementById('recipe-detail-panel').classList.remove('hidden');
         document.getElementById('recipe-lines-wrap').innerHTML = '<div class="empty">Save the recipe first, then add steps.</div>';
+        currentRecipeHasLines = false;
         renderRecipeFreeze(null);
+        lockRecipeType();
       }
     }
 
@@ -2672,6 +2863,7 @@
         form.elements['recipe_name'].value = r.recipe_name;
         form.elements['recipe_description'].value = r.recipe_description || '';
         form.elements['is_active'].value = r.is_active || 'Y';
+        form.elements['recipe_type'].value = r.recipe_type || '';
       }
       document.getElementById('recipe-list-panel').classList.add('hidden');
       document.getElementById('recipe-detail-panel').classList.remove('hidden');
@@ -2729,6 +2921,11 @@
       const desc = e.target.elements['recipe_description'].value.trim();
       if (desc) data.recipe_description = desc;
       data.is_active = e.target.elements['is_active'].value;
+      const typeEl = e.target.elements['recipe_type'];
+      if (!typeEl.disabled) {
+        if (!typeEl.value) { toast('Choose the recipe type', false); return; }
+        data.recipe_type = typeEl.value;
+      }
       try {
         if (currentRecipeId) {
           await api('PATCH', '/recipe?recipe_id=eq.' + currentRecipeId, data);
@@ -2763,10 +2960,23 @@
       const w = document.getElementById('recipe-lines-wrap');
       try {
         const lines = await api('GET', '/recipe_line?recipe_id=eq.' + recipeId + '&order=recipe_item_seq_id');
+        currentRecipeHasLines = lines.length > 0;
+        lockRecipeType();
         renderRecipeLines(lines);
       } catch(e) {
         w.innerHTML = '<div style="color:#fca5a5;padding:16px">' + esc(isRefusal(e) ? refusalText('recipe_line') : 'Failed to load steps: ' + e.message) + '</div>';
       }
+    }
+
+    // The type is fixed once the recipe has steps (the database refuses the change:
+    // recipe_type_fixed_trg); a frozen recipe is read-only anyway.
+    function lockRecipeType() {
+      const el = document.getElementById('recipe-header-form').elements['recipe_type'];
+      const r = recipes.find(x => x.recipe_id === currentRecipeId);
+      const frozen = !!(r && isFrozen(r.status)) || !can(rights, 'recipe');
+      el.disabled = frozen || currentRecipeHasLines;
+      document.getElementById('recipe-type-hint').textContent = currentRecipeHasLines && !frozen
+        ? 'Fixed: the recipe has steps. ⎘ Copy cannot change it either; build a new recipe of the other type.' : '';
     }
 
     function renderRecipeLines(lines) {
@@ -2782,7 +2992,7 @@
       };
       w.innerHTML = '<table class="tbl"><thead><tr>'
         + '<th>#</th><th>Name</th><th>Cycles</th><th>Light</th><th>Light ON/OFF (min)</th>'
-        + '<th>Air Temp °C</th><th>CO₂ ppm</th><th>Humidity %</th><th></th>'
+        + '<th>Setpoints</th><th></th>'
         + '</tr></thead><tbody>'
         + lines.map(l => '<tr>'
           + '<td><strong>' + l.recipe_item_seq_id + '</strong></td>'
@@ -2790,19 +3000,45 @@
           + '<td>' + l.cycle_number + '</td>'
           + '<td>' + lightBadge(l.light_type) + '</td>'
           + '<td>' + l.light_on_minutes + ' / ' + l.light_off_minutes + '</td>'
-          + '<td>' + l.air_temperature_lower_limit + '–' + l.air_temperature_upper_limit + '</td>'
-          + '<td>' + l.co2_lower_limit + '–' + l.co2_upper_limit + '</td>'
-          + '<td>' + l.hr_lower_limit + '–' + l.hr_upper_limit + '</td>'
+          + '<td>' + esc(setpointsText(l.setpoints, recipeTypes)) + '</td>'
           + '<td>' + (currentRecipeFrozen() ? '' : '<button class="btn btn-ghost btn-sm" onclick="openRecipeLineModal(' + l.recipe_item_seq_id + ')">Edit</button>') + '</td>'
           + '</tr>').join('')
         + '</tbody></table>';
     }
 
-    function openRecipeLineModal(seqId) {
+    // One lower/upper pair per quantity of the recipe's type; the inputs carry no name
+    // (formData skips them) and are read back by data-sp/data-side.
+    function renderSetpointInputs(quantities, sp) {
+      const w = document.getElementById('rline-setpoints');
+      if (!quantities.length) {
+        w.innerHTML = '<div class="warn-banner">' + esc(recipeTypes
+          ? 'This recipe has no type with quantities: save its type first.'
+          : 'The recipe types could not be loaded (recipe-types.json): the setpoints cannot be edited.') + '</div>';
+        return;
+      }
+      const val = (c, side) => sp && sp[c] && sp[c][side] != null ? ' value="' + esc(sp[c][side]) + '"' : '';
+      w.innerHTML = '<div class="form-grid">' + quantities.map(q => {
+        const u = q.unit ? ' ' + esc(q.unit) : '', req = q.required ? ' <span class="req">*</span>' : ' <small class="muted">(optional)</small>';
+        const lim = ' min="' + esc(q.min) + '" max="' + esc(q.max) + '" step="any"';
+        return '<div class="fg"><label>' + esc(q.label) + ' min' + u + req + '</label>'
+             + '<input type="number" data-sp="' + esc(q.code) + '" data-side="lower"' + lim + (q.required ? ' required' : ' placeholder="optional"') + val(q.code, 'lower') + '></div>'
+             + '<div class="fg"><label>' + esc(q.label) + ' max' + u + req + '</label>'
+             + '<input type="number" data-sp="' + esc(q.code) + '" data-side="upper"' + lim + (q.required ? ' required' : ' placeholder="optional"') + val(q.code, 'upper') + '></div>';
+      }).join('') + '</div>';
+    }
+
+    function currentRecipeQuantities() {
+      const r = recipes.find(x => x.recipe_id === currentRecipeId);
+      return rtQuantities(recipeTypes, r && r.recipe_type);
+    }
+
+    async function openRecipeLineModal(seqId) {
       if (currentRecipeFrozen()) { toast('This recipe is frozen; ⎘ Copy makes a new draft to change', false); return; }
+      await recipeTypesReady;
       recipeLineModal = { recipeId: currentRecipeId, seqId };
       const form = document.getElementById('rline-form');
       form.reset();
+      renderSetpointInputs(currentRecipeQuantities(), null);
       document.getElementById('rline-modal-title').textContent = seqId ? 'Edit Step' : 'Add Step';
       document.getElementById('rline-del-btn').classList.toggle('hidden', !seqId);
       if (seqId) {
@@ -2810,12 +3046,10 @@
           const l = rows[0];
           if (!l) return;
           ['recipe_item_seq_id','recipe_item_seq_name','cycle_number','light_type',
-           'light_on_minutes','light_off_minutes','air_temperature_lower_limit',
-           'air_temperature_upper_limit','co2_lower_limit','co2_upper_limit',
-           'hr_lower_limit','hr_upper_limit','substrate_temperature_lower_limit',
-           'substrate_temperature_upper_limit','notes'].forEach(k => {
+           'light_on_minutes','light_off_minutes','notes'].forEach(k => {
             const el = form.elements[k]; if (el && l[k] != null) el.value = l[k];
           });
+          renderSetpointInputs(currentRecipeQuantities(), l.setpoints);
         }).catch(e => toast('Could not load the step: ' + e.message, false));
       } else {
         // Auto-suggest next seq id
@@ -2830,12 +3064,18 @@
 
     async function submitRecipeLineForm(e) {
       e.preventDefault();
-      const ints = ['recipe_item_seq_id','cycle_number','light_on_minutes','light_off_minutes',
-                    'air_temperature_lower_limit','air_temperature_upper_limit',
-                    'co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit',
-                    'substrate_temperature_lower_limit','substrate_temperature_upper_limit'];
+      const ints = ['recipe_item_seq_id','cycle_number','light_on_minutes','light_off_minutes'];
       const data = formData(e.target, [], ints);
       data.recipe_id = recipeLineModal.recipeId;
+      const quantities = currentRecipeQuantities();
+      if (!quantities.length) { toast('The setpoints cannot be edited: the recipe type is unknown', false); return; }
+      const values = {};
+      document.querySelectorAll('#rline-setpoints input[data-sp]').forEach(el => {
+        (values[el.dataset.sp] = values[el.dataset.sp] || {})[el.dataset.side] = el.value;
+      });
+      const sp = setpointsFromInputs(values, quantities);
+      if (sp.errors.length) { toast(sp.errors.join('; '), false); return; }
+      data.setpoints = sp.setpoints;
       try {
         if (recipeLineModal.seqId) {
           await api('PATCH',
@@ -2871,20 +3111,7 @@
       ]);
       const r = recipeRows[0];
       if (!r) throw new Error('Recipe not found');
-      const fields = ['recipe_item_seq_id','recipe_item_seq_name','cycle_number',
-        'light_type','light_on_minutes','light_off_minutes',
-        'air_temperature_lower_limit','air_temperature_upper_limit',
-        'co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit',
-        'substrate_temperature_lower_limit','substrate_temperature_upper_limit','notes'];
-      return {
-        recipe_name: r.recipe_name,
-        recipe_description: r.recipe_description || null,
-        steps: lines.map(l => {
-          const s = {};
-          fields.forEach(k => { if (l[k] != null) s[k] = l[k]; });
-          return s;
-        })
-      };
+      return recipeExport(r, lines);   // format 2: recipe_type, steps[].setpoints
     }
 
     async function exportRecipe(recipeId, target) {
@@ -2913,26 +3140,23 @@
       } catch(e) { toast('Export failed: ' + e.message, false, e.title); }
     }
 
+    // A v2 file (recipe_type, steps[].setpoints) or a v1 one (the limit columns; its type
+    // is asked): checked against the type's quantities before anything is written.
     async function importPayload(payload) {
-      if (!payload.recipe_name) throw new Error('JSON missing recipe_name');
+      await recipeTypesReady;
+      if (!recipeTypes) throw new Error('the recipe types could not be loaded (recipe-types.json)');
+      if (!payload || !payload.recipe_name) throw new Error('JSON missing recipe_name');
       if (!Array.isArray(payload.steps)) throw new Error('JSON missing steps array');
-      const required = ['recipe_item_seq_id','recipe_item_seq_name','cycle_number','light_type',
-        'light_on_minutes','light_off_minutes','air_temperature_lower_limit',
-        'air_temperature_upper_limit','co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit'];
-      for (const step of payload.steps) {
-        for (const f of required) {
-          if (step[f] == null) throw new Error('Step ' + (step.recipe_item_seq_id || '?') + ' missing field: ' + f);
-        }
-      }
+      const v2 = payload.format === 2 || payload.recipe_type != null;
+      const n = normaliseRecipeImport(payload, recipeTypes, v2 ? null : askRecipeType(payload.recipe_name));
+      if (n.errors.length) throw new Error(n.errors.slice(0, 3).join('; ') + (n.errors.length > 3 ? ' (+' + (n.errors.length - 3) + ' more)' : ''));
       const rows = await api('POST', '/recipe', {
-        recipe_name: payload.recipe_name,
-        recipe_description: payload.recipe_description || null
+        recipe_name: n.recipe_name,
+        recipe_description: n.recipe_description,
+        recipe_type: n.recipe_type
       });
       const newId = rows[0].recipe_id;
-      if (payload.steps.length) {
-        const sorted = [...payload.steps].sort((a, b) => a.recipe_item_seq_id - b.recipe_item_seq_id);
-        await api('POST', '/recipe_line', sorted.map(s => ({ ...s, recipe_id: newId })));
-      }
+      if (n.steps.length) await api('POST', '/recipe_line', n.steps.map(s => ({ ...s, recipe_id: newId })));
       return newId;
     }
 
@@ -2967,21 +3191,12 @@
           .filter(l => !opts.skipSeq || l.recipe_item_seq_id !== opts.skipSeq);
         const rows = await api('POST', '/recipe', {
           recipe_name: newName.trim(),
-          recipe_description: src.recipe_description || null
+          recipe_description: src.recipe_description || null,
+          recipe_type: src.recipe_type
         });
         const newId = rows[0].recipe_id;
-        if (lines.length) {
-          const fields = ['recipe_item_seq_id','recipe_item_seq_name','cycle_number',
-            'light_type','light_on_minutes','light_off_minutes',
-            'air_temperature_lower_limit','air_temperature_upper_limit',
-            'co2_lower_limit','co2_upper_limit','hr_lower_limit','hr_upper_limit',
-            'substrate_temperature_lower_limit','substrate_temperature_upper_limit','notes'];
-          await api('POST', '/recipe_line', lines.map(l => {
-            const s = { recipe_id: newId };
-            fields.forEach(k => { if (l[k] != null) s[k] = l[k]; });
-            return s;
-          }));
-        }
+        if (lines.length)   // the step fields and setpoints, never the read-only limit columns
+          await api('POST', '/recipe_line', lines.map(l => ({ ...v2Step(l), recipe_id: newId })));
         let msg = 'Copied as "' + newName.trim() + '" (a new draft)';
         if (opts.retireSource) {
           try { await api('PATCH', '/recipe?recipe_id=eq.' + recipeId, { status: 'retired' }); msg += '; "' + src.recipe_name + '" retired'; }
@@ -3403,6 +3618,12 @@
       const unitFields = ['unit_code','unit_type','area','height','description','is_active'];
       const d = {};
       unitFields.forEach(k => { if (payload[k] != null) d[k] = payload[k]; });
+      if (d.unit_type != null) {   // Greens/Mushrooms (files from before migration 011) → PLANT/FUNGI
+        await recipeTypesReady;
+        const code = rtTypeCode(recipeTypes, d.unit_type);
+        if (!code) throw new Error('unit_type ' + d.unit_type + ' is not a recipe type');
+        d.unit_type = code;
+      }
       if (locationId) d.location_id = locationId;
       const resp = await api('POST', '/cea_unit', d);
       const newId = resp[0]?.unit_id;
@@ -3755,6 +3976,7 @@
       const w = document.getElementById('security-table-wrap');
       w.innerHTML = '<div class="empty">Loading…</div>';
       await rightsReady;
+      await recipeTypesReady;   // the type labels of the mismatched pairs
       const settled = await Promise.allSettled([
         api('GET', '/recipe?order=recipe_name'),
         api('GET', '/cea_unit?order=unit_code'),
@@ -3819,9 +4041,21 @@
           const algoId = perm.algorithm_id;
           const algoObj = algoId ? permAlgos.find(a => a.algorithm_id === algoId) : null;
           const disabled = recInactive || unitInactive;
+          // A recipe runs only on units of its type (migration 011): a mismatched pair is
+          // not offered; one allowed before the types existed is shown amber, to revoke.
+          const mismatch = !typesMatch(r, u);
+          const mismatchText = 'A ' + rtTypeLabel(recipeTypes, r.recipe_type) + ' recipe on a '
+            + rtTypeLabel(recipeTypes, u.unit_type) + ' unit: a recipe runs only on units of its type';
           html += '<td style="text-align:center;padding:4px 2px">';
           if (disabled) {
             html += '<span style="color:#334155;font-size:1.1rem" title="' + (recInactive ? 'Recipe inactive' : 'Unit inactive') + '">—</span>';
+          } else if (mismatch && allowed) {
+            html += write
+              ? '<button onclick="openPermAlgoModal(' + r.recipe_id + ',' + u.unit_id + ')" title="' + esc(mismatchText + ' (allowed before the types existed; the database refuses it once IAM is enforced): click to revoke') + '"'
+                + ' style="background:none;border:none;cursor:pointer;font-size:1.25rem;line-height:1;padding:2px 4px;border-radius:4px"><span style="color:#f59e0b">✓</span></button>'
+              : '<span style="color:#f59e0b;font-size:1.25rem" title="' + esc(mismatchText) + '">✓</span>';
+          } else if (mismatch) {
+            html += '<span style="color:#334155;font-size:1.1rem" title="' + esc(mismatchText) + '">≠</span>';
           } else if (allowed) {
             html += '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
               + (write
@@ -4355,16 +4589,15 @@
       if (r.kind === 'recipe') {
         const hot = changedSteps(r.changes);
         const lines = d.lines || [];
-        return '<p><strong>' + esc(d.recipe_name) + '</strong> · ' + (d.is_active === 'Y' ? 'Active' : 'Inactive')
+        return '<p><strong>' + esc(d.recipe_name) + '</strong> · '
+          + (d.recipe_type ? esc(rtTypeLabel(typeof recipeTypes !== 'undefined' ? recipeTypes : null, d.recipe_type)) + ' · ' : '')
+          + (d.is_active === 'Y' ? 'Active' : 'Inactive')
           + (d.recipe_description ? '<div class="muted">' + esc(d.recipe_description) + '</div>' : '') + '</p>'
-          + (lines.length ? '<div style="overflow-x:auto;margin-top:8px"><table class="tbl"><thead><tr><th>#</th><th>Name</th><th>Cycles</th><th>Light</th><th>ON/OFF</th><th>Air °C</th><th>CO₂</th><th>RH %</th><th>Substrate °C</th></tr></thead><tbody>'
+          + (lines.length ? '<div style="overflow-x:auto;margin-top:8px"><table class="tbl"><thead><tr><th>#</th><th>Name</th><th>Cycles</th><th>Light</th><th>ON/OFF</th><th>Setpoints</th></tr></thead><tbody>'
             + lines.map(l => '<tr' + (hot.has(Number(l.recipe_item_seq_id)) ? ' class="tr-changed" title="changed since the last approval"' : '') + '>'
               + '<td>' + l.recipe_item_seq_id + '</td><td>' + esc(l.recipe_item_seq_name) + '</td><td>' + l.cycle_number + '</td>'
               + '<td>' + esc(l.light_type) + '</td><td>' + l.light_on_minutes + ' / ' + l.light_off_minutes + '</td>'
-              + '<td>' + l.air_temperature_lower_limit + '–' + l.air_temperature_upper_limit + '</td>'
-              + '<td>' + l.co2_lower_limit + '–' + l.co2_upper_limit + '</td>'
-              + '<td>' + l.hr_lower_limit + '–' + l.hr_upper_limit + '</td>'
-              + '<td>' + (l.substrate_temperature_lower_limit ?? '—') + '–' + (l.substrate_temperature_upper_limit ?? '—') + '</td></tr>').join('')
+              + '<td>' + esc(setpointsText(l.setpoints || setpointsFromV1(l), typeof recipeTypes !== 'undefined' ? recipeTypes : null)) + '</td></tr>').join('')
             + '</tbody></table></div>' + (hot.size ? '<p class="muted" style="margin-top:6px">Highlighted steps changed since the last approval.</p>' : '')
             : '<p class="muted">No steps.</p>');
       }

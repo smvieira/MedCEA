@@ -6,6 +6,7 @@
    "model": "SCD4x",
    "parameters": {
     "driver": "scd4x",
+    "instance": "scd4x",
     "message_interval": 30,
     "mqtt": {
      "host": "192.0.2.10",
@@ -23,17 +24,17 @@
      {
       "UoM": "ppm",
       "tag": "co2",
-      "topic": "medcea/UNIT02/ZONE01/sense/co2"
+      "topic": "medcea/UNIT02/ZONE01/sense/co2/scd4x"
      },
      {
       "UoM": "C",
       "tag": "air_temperature",
-      "topic": "medcea/UNIT02/ZONE01/sense/air_temperature"
+      "topic": "medcea/UNIT02/ZONE01/sense/air_temperature/scd4x"
      },
      {
       "UoM": "RH%",
       "tag": "air_humidity",
-      "topic": "medcea/UNIT02/ZONE01/sense/air_humidity"
+      "topic": "medcea/UNIT02/ZONE01/sense/air_humidity/scd4x"
      }
     ],
     "topic_base": "medcea/UNIT02/ZONE01/sense"

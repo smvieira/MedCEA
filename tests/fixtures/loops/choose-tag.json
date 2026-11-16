@@ -1,0 +1,48 @@
+{
+ "note": "a quantity whose default tag no sensor publishes: the tag is the person's choice",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "substrate_temperature",
+    "input": {
+     "tag": null,
+     "sources": [],
+     "rule": "reference",
+     "reference": null,
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_CHOOSE",
+   "loops.substrate_temperature.input.tag"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.co2"
+  ]
+ ]
+}

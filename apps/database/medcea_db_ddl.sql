@@ -562,7 +562,8 @@ CREATE VIEW medcea.msg_actual_points AS
     (msg ->> 'UoM'::text) AS uom,
     (msg ->> 'device_id'::text) AS device_id,
     "timestamp" AS record_timestamp,
-    msg
+    msg,
+    COALESCE(NULLIF(msg ->> 'sensor', ''), 'default') AS sensor
    FROM medcea.measurement
   WHERE ((msg_type)::text = 'AP'::text);
 
@@ -650,20 +651,16 @@ CREATE TABLE medcea.recipe_line (
     recipe_item_seq_id integer NOT NULL,
     recipe_item_seq_name character varying NOT NULL,
     cycle_number integer NOT NULL,
-    air_temperature_lower_limit integer NOT NULL,
-    air_temperature_upper_limit integer NOT NULL,
     light_type medcea.light_types NOT NULL,
     light_on_minutes integer NOT NULL,
     light_off_minutes integer NOT NULL,
-    co2_lower_limit integer NOT NULL,
-    co2_upper_limit integer NOT NULL,
-    hr_lower_limit integer NOT NULL,
-    hr_upper_limit integer NOT NULL,
     timestamp_cre timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     timestamp_upd timestamp with time zone,
-    substrate_temperature_lower_limit integer,
-    substrate_temperature_upper_limit integer,
-    notes character varying
+    notes character varying,
+    -- {"<quantity_code>": {"lower": n, "upper": n}} (migrations 011/012: the eight
+    -- *_limit columns before them; an older database gets the same shape from them)
+    setpoints jsonb DEFAULT '{}'::jsonb NOT NULL
+        CONSTRAINT recipe_line_setpoints_chk CHECK (jsonb_typeof(setpoints) = 'object')
 );
 
 
@@ -780,19 +777,12 @@ CREATE VIEW medcea.run_history AS
     rlcr.recipe_item_seq_cycle_num,
     rlcr.recipe_line_seq_cycle_run_start,
     COALESCE(rlcr.recipe_line_seq_cycle_run_end, rlcr.recipe_line_seq_cycle_run_start) AS recipe_line_seq_cycle_run_end,
-    rl.air_temperature_lower_limit,
-    rl.air_temperature_upper_limit,
     rl.light_type,
     rl.light_on_minutes,
     rl.light_off_minutes,
-    rl.co2_lower_limit,
-    rl.co2_upper_limit,
-    rl.hr_lower_limit,
-    rl.hr_upper_limit,
-    rl.substrate_temperature_lower_limit,
-    rl.substrate_temperature_upper_limit,
     rr.recipe_run_id,
-    rr.unit_id
+    rr.unit_id,
+    rl.setpoints
    FROM (((medcea.recipe r
      JOIN medcea.recipe_line rl ON ((r.recipe_id = rl.recipe_id)))
      JOIN medcea.recipe_run rr ON ((rr.recipe_id = r.recipe_id)))
@@ -816,19 +806,12 @@ CREATE VIEW medcea.run_watch AS
     rlcr.recipe_item_seq_cycle_num,
     rlcr.recipe_line_seq_cycle_run_start,
     rlcr.recipe_line_seq_cycle_run_end,
-    rl.air_temperature_lower_limit,
-    rl.air_temperature_upper_limit,
     rl.light_type,
     rl.light_on_minutes,
     rl.light_off_minutes,
-    rl.co2_lower_limit,
-    rl.co2_upper_limit,
-    rl.hr_lower_limit,
-    rl.hr_upper_limit,
-    rl.substrate_temperature_lower_limit,
-    rl.substrate_temperature_upper_limit,
     rr.recipe_run_id,
-    rr.unit_id
+    rr.unit_id,
+    rl.setpoints
    FROM (((medcea.recipe r
      JOIN medcea.recipe_line rl ON ((r.recipe_id = rl.recipe_id)))
      JOIN medcea.recipe_run rr ON ((rr.recipe_id = r.recipe_id)))
@@ -855,7 +838,8 @@ CREATE VIEW medcea.v_ap_measurements AS
     ((msg ->> 'value'::text))::numeric AS value,
     (msg ->> 'UoM'::text) AS unit_of_measurement,
     ((msg ->> 'timestamp'::text))::timestamp without time zone AS message_timestamp,
-    msg
+    msg,
+    COALESCE(NULLIF(msg ->> 'sensor', ''), 'default') AS sensor
    FROM medcea.measurement
   WHERE ((msg_type)::text = 'AP'::text);
 

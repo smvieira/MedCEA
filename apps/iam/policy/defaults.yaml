@@ -612,8 +612,9 @@ service_identities:
       One identity: run_recipe.py and run_agent.py run as subprocesses inside the
       scheduler pod with its environment, so they cannot hold a separate credential.
       Splitting the runner into its own pod is listed in plan Section 7. devices R:
-      the runner finds a unit's actuators through medcea.device and medcea.component
-      (get_feedback_control_loop_params); never the credential table (service_only).
+      the runner reads a unit's loop map from medcea.control_loop (feedback control
+      Phase 2), its actuators through medcea.device and medcea.component; never the
+      credential table (service_only).
       Run, cycle and log reads are limited to the person's units for operators (own_unit).
     db_role: svc_scheduler
     db_password: SVC_SCHEDULER_DB_PASS
@@ -748,7 +749,7 @@ resource_groups:
   master_data:
     label: Master data (locations, units, zones, components)
     class: config
-    description: The physical plant as the platform knows it — sites, cultivation units, zones and installed components.
+    description: The physical plant as the platform knows it — sites, cultivation units, zones, installed components, each zone's control loops and the recipe types with the quantities they control.
     why_this_class: Defines the plant; changes are configuration, reviewed by qa.
     risk: A wrong unit or zone code misroutes telemetry and commands. Setting a unit's commissioning flag opens MQTT write to it, so that one change waits for qa.
     approval:
@@ -768,10 +769,16 @@ resource_groups:
       - {type: data, object: medcea.cea_unit}
       - {type: data, object: medcea.cea_zone}
       - {type: data, object: medcea.component}
+      - {type: data, object: medcea.control_loop, service_only: [svc_scheduler], written_by: functions, note: "the loop map per zone (feedback control Phase 2): read by the runner only; written only by functions (people change it only through medcea.save_zone_loops(), the onboarding wizard's loop step, added by version 2c); qa reviews a row with approve_change() and reads every change in medcea.row_change"}
+      - {type: data, object: medcea.control_quantity, service_only: [svc_scheduler], written_by: functions, note: "the catalogue of controlled quantities (recipe types, 15 Nov 2026): unit, sense tag, actuator commands, phase; seeded and changed only by the database deploy from apps/database/recipe_types.yaml (git is its editor); read by the runner only, people get the same file as static JSON"}
+      - {type: data, object: medcea.recipe_type, service_only: [svc_scheduler], written_by: functions, note: "the recipe types (PLANT, FUNGI), master templates of the recipes; cea_unit.unit_type and recipe.recipe_type_id name one; seeded like control_quantity"}
+      - {type: data, object: medcea.recipe_type_quantity, service_only: [svc_scheduler], written_by: functions, note: "which quantities each recipe type sets (required or optional); seeded like control_quantity"}
       - {type: data, function: "medcea.approve_change(text, bigint, text)", level: A, note: "a review of a master_data or devices row (row id), or the approval of a pending_change (its id), which applies it"}
       - {type: data, function: "medcea.propose_commissioning(int, boolean, text)", level: U, writes: [medcea.pending_change], note: "cea_unit.commissioning changes only through this and approve_change(): on waits for qa (refused while a run is in R or S), off applies at once and waits for qa's review"}
       - {type: data, function: "medcea.return_change(text, bigint, text)", level: A, note: "qa sends a waiting proposal (medcea.pending_change) or a draft (recipe, control algorithm, parameter set) back with a reason; recorded as approval action 'return', which no approval rule counts"}
       - {type: data, function: "medcea.unit_commissioning()", level: R, note: "each unit's commissioning flag, the waiting proposal, an off waiting for review, the last change and the caller's rights; the blocking run only for roles reading every unit's runs; proposers' names and reasons only for engineer, qa, qp, auditor and the proposer, the approver's name only for audit_histories readers"}
+      - {type: data, function: "medcea.zone_loop_context(int)", level: U, note: "the onboarding wizard's loop picker (feedback control, Q19/Q20): a zone's named sensors, its actuators, its active loops with their problems now, and a run in R or S; at U, not R: a read function at R would widen every master_data reader, qa and auditor included, and qa could not approve the version"}
+      - {type: data, function: "medcea.save_zone_loops(int, jsonb)", level: U, writes: [medcea.control_loop], note: "replaces a zone's active loops in one transaction (a code left out is deactivated, a changed one updated in place, a new one inserted); validated against the zone's sensors and actuators; command mode only; refused while the unit has a run in R or S (55006), though a save that changes nothing passes; stamped with the person (row_change), which qa reviews"}
       - type: api
         service: platform-api
         routes: {"GET /locations": R, "GET /locations/<file>": R, "PUT /locations/<file>": U, "GET /units": R, "GET /units/<file>": R, "PUT /units/<file>": U}

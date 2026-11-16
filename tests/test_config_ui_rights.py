@@ -481,6 +481,7 @@ RENDER_HARNESS = r"""
 const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const scenario = process.argv[3];
+const CATALOGUE = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'));   // /recipe-types.json
 const script = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
 const els = {};
 function mk(id) {
@@ -506,11 +507,12 @@ const S = {
   noread:  { probe: 'refuse', deny: ['recipe', 'device'] },
 }[scenario];
 const rows = {
-  cea_unit: [{ unit_id: 1, unit_code: 'U1', unit_type: 'Greens', location_id: 1, is_active: 'Y' }],
+  cea_unit: [{ unit_id: 1, unit_code: 'U1', unit_type: 'PLANT', location_id: 1, is_active: 'Y' }],
   cea_location: [{ location_id: 1, name: 'L', is_active: 'Y' }],
   cea_zone: [{ zone_id: 5, unit_id: 1, zone_code: 'Z1', is_active: 'Y' }],
-  recipe: [{ recipe_id: 3, recipe_name: 'Lettuce', status: 'draft', is_active: 'Y' },
-           { recipe_id: 4, recipe_name: 'Basil', status: 'approved', is_active: 'Y' }],
+  recipe: [{ recipe_id: 3, recipe_name: 'Lettuce', recipe_type: 'PLANT', status: 'draft', is_active: 'Y' },
+           { recipe_id: 4, recipe_name: 'Basil', recipe_type: 'PLANT', status: 'approved', is_active: 'Y' },
+           { recipe_id: 5, recipe_name: 'Oyster', recipe_type: 'FUNGI', status: 'draft', is_active: 'Y' }],
   recipe_unit_permission: [{ recipe_id: 3, unit_id: 1, allowed: true }],
   control_algorithm: [{ algorithm_id: 1, algorithm_code: 'PID', algorithm_name: 'PID', status: 'draft' }],
   unit_algorithm_params: [{ params_id: 1, name: 'p', algorithm_id: 1, status: 'draft' }],
@@ -518,6 +520,7 @@ const rows = {
 };
 const resp = (status, b) => ({ ok: status < 300, status, json: async () => b, text: async () => JSON.stringify(b), clone() { return this; } });
 global.fetch = (url, opts = {}) => {
+  if (url === '/recipe-types.json') return Promise.resolve(resp(200, CATALOGUE));
   const m = /^\/api\/(rpc\/)?(\w+)/.exec(url);
   if (url.startsWith('/scheduler-api/algorithms')) return Promise.resolve(resp(200, rows.control_algorithm));
   if (url.startsWith('/scheduler-api/')) return Promise.resolve(resp(200, []));
@@ -541,6 +544,7 @@ const main = async () => {
   await loadRecipes(); await loadAllDevices(); await loadParamSets();
   const h = id => document.getElementById(id).innerHTML;
   out.loc = h('loc-table-wrap'); out.unit = h('unit-table-wrap'); out.matrix = h('security-table-wrap');
+  out.unitTypeOptions = h('unit-type-select'); out.recipeTypeOptions = h('recipe-type-select');
   out.recipes = h('recipe-table-wrap'); out.ps = h('ps-wrap'); out.dev = h('dev-content');
   document.getElementById('recipe-show-retired').checked = true; renderRecipeTable();
   out.recipesRetired = h('recipe-table-wrap');
@@ -567,8 +571,12 @@ class RenderUnderNode(unittest.TestCase):
         with open(js, "w", encoding="utf-8") as f:
             f.write(RENDER_HARNESS)
         cls.out = {}
+        cat = os.path.join(tmp, "recipe-types.json")
+        with open(cat, "w", encoding="utf-8") as f:
+            f.write(subprocess.run(["python3", os.path.join(ROOT, "apps", "database", "recipe_types.py"), "json"],
+                                   capture_output=True, text=True, check=True).stdout)
         for scenario in ("none", "all", "noread", "hang"):
-            r = subprocess.run([NODE, js, INDEX, scenario], capture_output=True, text=True, timeout=60)
+            r = subprocess.run([NODE, js, INDEX, scenario, cat], capture_output=True, text=True, timeout=60)
             if r.returncode:
                 raise AssertionError(scenario + ": " + r.stderr)
             cls.out[scenario] = json.loads(r.stdout.strip().splitlines()[-1])
@@ -608,6 +616,19 @@ class RenderUnderNode(unittest.TestCase):
         self.assertFalse(o["pendingAfter"])
         self.assertFalse(any(o["staticHidden"]))
         self.assertIn("openUnitForm(", o["unit"])
+
+    def test_recipe_types(self):
+        """Migration 011: the type selects come from /recipe-types.json, the unit table shows
+        the type's label, and a recipe is offered only to units of its type (Oyster, FUNGI,
+        is not grantable on U1, PLANT; Basil is)."""
+        o = self.out["all"]
+        for sel in ("unitTypeOptions", "recipeTypeOptions"):
+            self.assertIn('<option value="PLANT">Plants</option>', o[sel])
+            self.assertIn('<option value="FUNGI">Fungi</option>', o[sel])
+        self.assertIn("<td>Plants</td>", o["unit"])
+        self.assertIn("grantPermission(4,1)", o["matrix"])
+        self.assertNotIn("grantPermission(5,1)", o["matrix"])
+        self.assertIn("A Fungi recipe on a Plants unit: a recipe runs only on units of its type", o["matrix"])
 
     def test_refused_reads_keep_their_message(self):
         o = self.out["noread"]

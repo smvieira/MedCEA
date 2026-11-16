@@ -1,0 +1,45 @@
+{
+ "note": "substrate temperature read from another tag in the same unit (C): allowed, it is the person's choice",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "substrate_temperature",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "sht45_1"
+     ],
+     "rule": "reference",
+     "reference": "sht45_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_NOT_CONTROLLED",
+   "loops.co2"
+  ]
+ ]
+}

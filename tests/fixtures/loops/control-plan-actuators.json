@@ -1,0 +1,33 @@
+{
+ "note": "onboarding a CONTROL board without the humidifier: its stored loop is kept, in error",
+ "context": "existing",
+ "role": "CONTROL",
+ "answer": "initial",
+ "expect": [
+  [
+   "error",
+   "L_ACTUATOR",
+   "loops.air_humidity.output.actuator"
+  ]
+ ],
+ "plan_actuators": {
+  "actuator_definitions": {
+   "co2": {
+    "comment": "",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "light": {
+    "comment": "",
+    "types": {
+     "RED": {
+      "ON": {}
+     }
+    }
+   }
+  }
+ }
+}

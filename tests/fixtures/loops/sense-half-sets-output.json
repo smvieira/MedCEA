@@ -1,0 +1,95 @@
+{
+ "note": "a SENSE onboarding sets the input half only",
+ "context": "sense_only",
+ "role": "SENSE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "input",
+  "loops": [
+   {
+    "loop_code": "air_temperature",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "air_humidity",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    }
+   },
+   {
+    "loop_code": "co2",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30_1"
+     ],
+     "rule": "reference",
+     "reference": "scd30_1",
+     "max_age_s": 90
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_HALF",
+   "loops.air_temperature.output"
+  ],
+  [
+   "error",
+   "L_ACTUATOR",
+   "loops.air_temperature.output.actuator"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ]
+ ],
+ "plan_sources": [
+  {
+   "instance": "scd30_1",
+   "driver": "scd30",
+   "tags": [
+    "co2",
+    "air_temperature",
+    "air_humidity"
+   ],
+   "uoms": {
+    "co2": "ppm",
+    "air_temperature": "C",
+    "air_humidity": "RH%"
+   }
+  }
+ ]
+}

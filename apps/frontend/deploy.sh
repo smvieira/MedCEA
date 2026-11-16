@@ -151,13 +151,21 @@ print(urllib.parse.quote(inner, safe=''))
 " "$KEYCLOAK_DOMAIN" "$KEYCLOAK_REALM" "$CONFIG_DOMAIN")
 
 # replace/create, never apply: apply copies the page into its last-applied annotation,
-# which holds 256 KiB, and index.html is past that (the scheduler page does the same)
+# which holds 256 KiB, and index.html is past that (the scheduler page does the same).
+# recipe-types.json (migration 011): apps/database/recipe_types.yaml as JSON, the recipe
+# types and their quantities, which people cannot read from the database; served beside
+# the page (subPath, so the rollout restart below picks a change up).
+_RT_JSON="$(mktemp)"
+python3 "$REPO_ROOT/apps/database/recipe_types.py" json > "$_RT_JSON" || {
+    rm -f "$_RT_JSON"; log "ERROR: apps/database/recipe_types.yaml is not valid (above)"; exit 1; }
 _CONFIG_UI_CM="$(sed -e "s|\$PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
     -e "s|\$EDGE_WIZARD_URL|$_EDGE_WIZARD_URL|g" \
     -e "s|\$KEYCLOAK_LOGOUT_URL|$_KEYCLOAK_LOGOUT_URL|g" "$SCRIPT_DIR/html/index.html" \
   | $KUBECTL create configmap config-ui-html -n "$NAMESPACE" \
     --from-file=index.html=/dev/stdin \
+    --from-file=recipe-types.json="$_RT_JSON" \
     --dry-run=client -o yaml)"
+rm -f "$_RT_JSON"
 if $KUBECTL get configmap config-ui-html -n "$NAMESPACE" >/dev/null 2>&1; then
     $KUBECTL replace -f - <<<"$_CONFIG_UI_CM"
 else

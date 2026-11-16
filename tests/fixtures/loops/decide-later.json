@@ -1,0 +1,20 @@
+{
+ "note": "Decide later: nothing saved, the run gets no data for a tag with two sensors",
+ "context": "bench",
+ "role": "ZONE",
+ "answer": {
+  "skip": true
+ },
+ "expect": [
+  [
+   "warn",
+   "W_DECIDE_LATER",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_DECIDE_LATER",
+   "loops.air_humidity"
+  ]
+ ]
+}

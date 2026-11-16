@@ -6,6 +6,7 @@
    "model": "SCD30",
    "parameters": {
     "driver": "scd30",
+    "instance": "scd30",
     "message_interval": 30,
     "mqtt": {
      "host": "192.0.2.10",
@@ -19,17 +20,17 @@
      {
       "UoM": "ppm",
       "tag": "co2",
-      "topic": "medcea/UNIT02/ZONE01/sense/co2"
+      "topic": "medcea/UNIT02/ZONE01/sense/co2/scd30"
      },
      {
       "UoM": "C",
       "tag": "air_temperature",
-      "topic": "medcea/UNIT02/ZONE01/sense/air_temperature"
+      "topic": "medcea/UNIT02/ZONE01/sense/air_temperature/scd30"
      },
      {
       "UoM": "RH%",
       "tag": "air_humidity",
-      "topic": "medcea/UNIT02/ZONE01/sense/air_humidity"
+      "topic": "medcea/UNIT02/ZONE01/sense/air_humidity/scd30"
      }
     ],
     "topic_base": "medcea/UNIT02/ZONE01/sense"
@@ -41,6 +42,7 @@
    "model": "DS18B20",
    "parameters": {
     "driver": "ground_temperature",
+    "instance": "ground_temperature",
     "message_interval": 30,
     "mqtt": {
      "host": "192.0.2.10",
@@ -53,7 +55,7 @@
      {
       "UoM": "C",
       "tag": "ground_temperature",
-      "topic": "medcea/UNIT02/ZONE01/sense/ground_temperature"
+      "topic": "medcea/UNIT02/ZONE01/sense/ground_temperature/ground_temperature"
      }
     ],
     "topic_base": "medcea/UNIT02/ZONE01/sense"

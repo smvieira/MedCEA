@@ -139,8 +139,9 @@ def _firmware():
 
 
 def status_message(msg_type, tag, timestamp=None):
-    """The metadata of a health (HB) or test (TS) message: the fields of a reading
-    (cea_sense.Board._message) plus the board's ip and mac, None when unreadable.
+    """The metadata of a health (HB) or test (TS) message: a reading's fields except
+    "sensor" (cea_sense.Board._message) plus the board's ip and mac, None when
+    unreadable. HB and TS are board-level, so they name no sensor instance.
 
     The one builder for both roles, so the two cannot drift. Readings (AP) and
     CONTROL's reports (SP) do not use it and carry no ip or mac: their payloads

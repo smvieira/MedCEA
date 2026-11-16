@@ -1,7 +1,7 @@
 {
   "slug": "sense-hub-sht45-scd30-lux",
   "title": "Sense board, chamber design map: hub + SHT45 ch0 + SCD30 ch1 + SEN0562 ch2",
-  "description": "ESP32-S3-DevKitC-1 (N8R8/N16R8). Hardware I2C(0) on GPIO8 (SDA) / GPIO9 (SCL) at 100 kHz, external pull-ups, a TCA9548A hub at 0x70 (SparkFun Qwiic Mux BOB-16784): SHT45 (0x44) on channel 0 for air temperature and humidity, SCD30 (0x61) on channel 1 for CO2 only, SEN0562 (0x23) on channel 2 for light intensity. The design map of the Edge Layer note (Section 2.2); the SEN0562 is not bench-tested yet.",
+  "description": "ESP32-S3-DevKitC-1 (N8R8/N16R8). Hardware I2C(0) on GPIO8 (SDA) / GPIO9 (SCL) at 100 kHz, external pull-ups, a TCA9548A hub at 0x70 (SparkFun Qwiic Mux BOB-16784): SHT45 (0x44) on channel 0 for air temperature and humidity, SCD30 (0x61) on channel 1 for CO2 and its own air temperature and humidity (published as sensor scd30_1, beside the SHT45's sht45_1), SEN0562 (0x23) on channel 2 for light intensity. The design map of the Edge Layer note (Section 2.2); the SEN0562 is not bench-tested yet.",
   "variant": "esp32s3",
   "saved_by": "medcea",
   "saved_at": "2026-11-07T00:00:00Z",
@@ -65,11 +65,11 @@
           },
           {
             "q": "temperature",
-            "tag": null
+            "tag": "air_temperature"
           },
           {
             "q": "humidity",
-            "tag": null
+            "tag": "air_humidity"
           }
         ]
       },

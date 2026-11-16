@@ -146,6 +146,7 @@
           }) };
       }
       return { id: uid(), name: name, kind: "commands", comment: spec.comment || "",
+        quantity: typeof spec.quantity === "string" ? spec.quantity : "",
         commands: Object.keys(spec.commands || {}).map(function (c) {
           return mkBranch(A, c, spec.commands[c]); }) };
     });
@@ -263,6 +264,7 @@
         } else {
           var cs = {}; a.commands.forEach(function (b) { cs[b.cmd] = br(b); });
           defs[a.name] = { comment: a.comment, commands: cs };
+          if (a.quantity) defs[a.name].quantity = a.quantity;
         }
       });
       var out = {}; out[A.key] = descs; out.actuator_definitions = defs;
@@ -345,6 +347,9 @@
         });
 
         if (a.kind === "commands") {
+          if (a.quantity && !/^[a-z][a-z0-9_]*$/.test(a.quantity))
+            add("error", "Actuator “" + an + "” names its quantity “" + a.quantity + "”, which is no " +
+                "quantity code (lower case, digits, _).", an, a.id);
           var have = {}, dupe = {};
           a.commands.forEach(function (b) {
             if (dupe[b.cmd]) add("error", "Actuator “" + an + "” declares " + b.cmd + " twice.", an, b.id);
@@ -436,6 +441,21 @@
           '" aria-label="Remove command">&times;</button></div>' + actionsHTML(b) + "</div>";
     }
 
+    /* What a commands actuator acts on: a quantity of the recipe-type catalogue
+       (spec.quantities). The control-loop picker offers it first for that
+       quantity; "no quantity" leaves the choice to the commands it takes. */
+    function quantitySelect(a) {
+      var qs = (spec.quantities || []).slice(), known = false;
+      qs.forEach(function (q) { if (q.code === a.quantity) known = true; });
+      if (a.quantity && !known) qs.push({ code: a.quantity, label: a.quantity + " (unknown)" });
+      return '<select data-cm-f="quantity" data-cm-id="' + a.id + '" title="The recipe quantity this actuator acts on">' +
+        '<option value=""' + (a.quantity ? "" : " selected") + ">no quantity</option>" +
+        qs.map(function (q) {
+          return '<option value="' + esc(q.code) + '"' + (q.code === a.quantity ? " selected" : "") +
+            ">acts on " + esc(q.label || q.code) + "</option>";
+        }).join("") + "</select>";
+    }
+
     function render() {
       qChans.innerHTML = st.channels.map(function (c) {
         return '<div class="cm-crow" data-cm-chan="' + c.id + '">' +
@@ -477,6 +497,7 @@
             '<option value="commands"' + (a.kind === "commands" ? " selected" : "") + ">UP / DOWN / OFF</option>" +
             '<option value="types"' + (a.kind === "types" ? " selected" : "") + ">Typed (ON / OFF)</option>" +
           "</select>" +
+          (a.kind === "commands" ? quantitySelect(a) : "") +
           '<button type="button" class="cm-x" data-cm-del="act" data-cm-id="' + a.id +
             '" aria-label="Remove actuator">&times;</button></div>' +
           '<div class="cm-actbody"><div class="cm-comment">' +
@@ -657,6 +678,7 @@
       }
       if (f === "addr") { o = action(id); if (o) { o.addr = n.value; refresh(); } return; }
       if (f === "cmd") { o = branch(id); if (o) { o.b.cmd = n.value; refresh(); } return; }
+      if (f === "quantity") { o = act(id); if (o) { o.quantity = n.value; refresh(); } return; }
       if (f === "kind") {
         var a = act(id); if (!a || a.kind === n.value) return;
         if (n.value === "types") {

@@ -315,8 +315,8 @@ print("\n".join(sorted("%s %s" % (g, o.replace(" ", "")) for g, k, o, p in d["pr
     [[ "$(get invoker)" == 0 ]] && pass catalog "every medcea view is security_invoker" || fail catalog "$(get invoker) view(s) without security_invoker"
     [[ -z "$(get always)" && "$(get appendonly)" -ge 8 ]] && pass catalog "$(get appendonly) append-only triggers, all ENABLE ALWAYS" \
         || fail catalog "append-only triggers not ENABLE ALWAYS: $(get always) (count $(get appendonly))"
-    [[ "$(get stamp)" == 14 && "$(get rowchange)" == 14 ]] && pass catalog "stamp_actor_trg and row_change_trg on the 14 tables" \
-        || fail catalog "stamp_actor_trg on $(get stamp), row_change_trg on $(get rowchange) table(s) (want 14)"
+    [[ "$(get stamp)" == 15 && "$(get rowchange)" == 15 ]] && pass catalog "stamp_actor_trg and row_change_trg on the 15 tables" \
+        || fail catalog "stamp_actor_trg on $(get stamp), row_change_trg on $(get rowchange) table(s) (want 15)"
     [[ "$(get guard)" == 8 ]] && pass catalog "status_guard_trg on 8 tables" || fail catalog "status_guard_trg on $(get guard) table(s) (want 8)"
     [[ -z "$(get single)" ]] && pass catalog "zone, serial, ACL root, Q-table, zone- and unit-audit triggers present" || fail catalog "missing: $(get single)"
     [[ -z "$(get definer)" ]] && pass catalog "every SECURITY DEFINER function pins search_path ... pg_temp" || fail catalog "definer without search_path: $(get definer)"
@@ -567,13 +567,23 @@ SELECT nextval('medcea.component_component_id_seq'), device_id, 'SENSOR', 'iamt'
 UPDATE medcea.component SET model = 'iamt2' WHERE model = 'iamt';
 DELETE FROM medcea.component WHERE model = 'iamt2';
 SQL
+        # legacy mode runs against the code before Phase 2a (no migration 011): the old wide columns there
         probe W1 "config UI: recipe and line create, edit, delete (anon)" ok <<SQL
+SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'medcea.recipe_line'::regclass
+                AND attname = 'setpoints' AND NOT attisdropped) AS w1_has_011 \gset
 $(as_anon)
+\if :w1_has_011
+INSERT INTO medcea.recipe (recipe_name, recipe_type) VALUES ('IAMT probe recipe', 'FUNGI');
+INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
+    light_type, light_on_minutes, light_off_minutes, setpoints)
+SELECT recipe_id, 1, 'p', 1, 'BLUE', 1, 1, '{"air_temperature": {"lower": 18, "upper": 24}, "co2": {"lower": 400, "upper": 900}, "air_humidity": {"lower": 70, "upper": 90}}' FROM medcea.recipe WHERE recipe_name = 'IAMT probe recipe';
+\else
 INSERT INTO medcea.recipe (recipe_name) VALUES ('IAMT probe recipe');
 INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
     air_temperature_lower_limit, air_temperature_upper_limit, light_type, light_on_minutes, light_off_minutes,
     co2_lower_limit, co2_upper_limit, hr_lower_limit, hr_upper_limit)
 SELECT recipe_id, 1, 'p', 1, 18, 24, 'BLUE', 1, 1, 400, 900, 70, 90 FROM medcea.recipe WHERE recipe_name = 'IAMT probe recipe';
+\endif
 UPDATE medcea.recipe_line SET light_on_minutes = 2 WHERE recipe_item_seq_name = 'p';
 DELETE FROM medcea.recipe_line WHERE recipe_item_seq_name = 'p';
 DELETE FROM medcea.recipe WHERE recipe_name = 'IAMT probe recipe';
@@ -665,7 +675,7 @@ SQL
         if [[ "$MODE" != legacy ]]; then
             probe W1 "config UI: deleting a unit whose assignment has a parameter set" ok <<SQL
 INSERT INTO medcea.cea_unit (unit_type, location_id, is_active, unit_code)
-SELECT 'Other', location_id, 'Y', 'IAMTDEL' FROM medcea.cea_location WHERE name = 'IAMTEST site' RETURNING unit_id AS ud \gset
+SELECT 'FUNGI', location_id, 'Y', 'IAMTDEL' FROM medcea.cea_location WHERE name = 'IAMTEST site' RETURNING unit_id AS ud \gset
 INSERT INTO medcea.recipe_unit_permission (recipe_id, unit_id, allowed) SELECT recipe_id, :ud, true FROM medcea.recipe WHERE recipe_name = 'IAMTEST-R1';
 SET ROLE medcea_owner;
 INSERT INTO medcea.unit_algorithm_params (algorithm_id, unit_id, name, params)
@@ -687,7 +697,7 @@ SQL
         else w2_writer="$(as_anon)"; w2_who="anon"; fi
         probe W2 "control: $w2_who edits a draft recipe" ok <<SQL
 $w2_writer
-INSERT INTO medcea.recipe (recipe_name) VALUES ('IAMT draft') RETURNING recipe_id AS rd \gset
+INSERT INTO medcea.recipe (recipe_name, recipe_type) VALUES ('IAMT draft', 'FUNGI') RETURNING recipe_id AS rd \gset
 UPDATE medcea.recipe SET recipe_description = 'x' WHERE recipe_id = :rd;
 --CHECKS
 SELECT 'CHECK|still draft', status = 'draft' FROM medcea.recipe WHERE recipe_id = :rd;
@@ -695,7 +705,7 @@ SQL
         if [[ "$MODE" == false ]]; then
             probe W2 "anon sets status approved" "42501:approval function" <<SQL
 $(as_anon)
-INSERT INTO medcea.recipe (recipe_name) VALUES ('IAMT draft') RETURNING recipe_id AS rd \gset
+INSERT INTO medcea.recipe (recipe_name, recipe_type) VALUES ('IAMT draft', 'FUNGI') RETURNING recipe_id AS rd \gset
 UPDATE medcea.recipe SET status = 'approved' WHERE recipe_id = :rd;
 SQL
             probe W2 "anon sets commissioning" "42501:commissioning" <<SQL
@@ -1043,7 +1053,7 @@ SELECT medcea.release_run(:run, 'not mine to release');
 SQL
         recipe_setup="
 $(as_token "$T_EN")
-INSERT INTO medcea.recipe (recipe_name) VALUES ('IAMT approval probe') RETURNING recipe_id AS ra \\gset"
+INSERT INTO medcea.recipe (recipe_name, recipe_type) VALUES ('IAMT approval probe', 'FUNGI') RETURNING recipe_id AS ra \\gset"
         probe W4 "control: qa approves an engineer's draft" ok <<SQL
 $recipe_setup
 $(as_token "$T_QA")
@@ -1074,14 +1084,13 @@ SQL
         new_unit="
 $(as_token "$T_EN")
 INSERT INTO medcea.cea_unit (unit_type, description, location_id, is_active, unit_code)
-SELECT 'Mushrooms', 'iam-db commissioning probe', location_id, 'Y', 'IAMTC1' FROM medcea.cea_location
+SELECT 'FUNGI', 'iam-db commissioning probe', location_id, 'Y', 'IAMTC1' FROM medcea.cea_location
  WHERE name = 'IAMTEST site' RETURNING unit_id AS cu \\gset"
         line_by_en2="
 $(as_token "$T_EN2")
 INSERT INTO medcea.recipe_line (recipe_id, recipe_item_seq_id, recipe_item_seq_name, cycle_number,
-    air_temperature_lower_limit, air_temperature_upper_limit, light_type, light_on_minutes, light_off_minutes,
-    co2_lower_limit, co2_upper_limit, hr_lower_limit, hr_upper_limit)
-VALUES (:ra, 1, 'iam-db step', 1, 18, 24, 'BLUE', 60, 60, 400, 1200, 70, 90);"
+    light_type, light_on_minutes, light_off_minutes, setpoints)
+VALUES (:ra, 1, 'iam-db step', 1, 'BLUE', 60, 60, '{\"air_temperature\": {\"lower\": 18, \"upper\": 24}, \"co2\": {\"lower\": 400, \"upper\": 1200}, \"air_humidity\": {\"lower\": 70, \"upper\": 90}}');"
         probe W4 "control: qa approves with a note (2-argument overload)" ok <<SQL
 $recipe_setup
 $(as_token "$T_QA")

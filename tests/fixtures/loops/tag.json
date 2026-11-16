@@ -1,0 +1,88 @@
+{
+ "note": "input.tag must be a tag name (the tag is the person's choice since migration 011, any tag of the sensor in the right unit)",
+ "context": "single",
+ "role": "ZONE",
+ "answer": {
+  "skip": false,
+  "stop_all": false,
+  "half": "both",
+  "loops": [
+   {
+    "loop_code": "substrate_temperature",
+    "input": {
+     "tag": "Ground-Temp",
+     "sources": [
+      "ground_temperature"
+     ],
+     "rule": "reference",
+     "reference": "ground_temperature",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "substrate_temperature",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "co2",
+    "input": {
+     "tag": "co2",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "co2",
+     "mode": "command",
+     "command_map": {
+      "DOWN": "UP",
+      "UP": "OFF",
+      "OFF": "OFF"
+     }
+    }
+   },
+   {
+    "loop_code": "air_humidity",
+    "input": {
+     "tag": "air_humidity",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_humidity",
+     "mode": "command"
+    }
+   },
+   {
+    "loop_code": "air_temperature",
+    "input": {
+     "tag": "air_temperature",
+     "sources": [
+      "scd30"
+     ],
+     "rule": "reference",
+     "reference": "scd30",
+     "max_age_s": 90
+    },
+    "output": {
+     "actuator": "air_temperature",
+     "mode": "command"
+    }
+   }
+  ]
+ },
+ "expect": [
+  [
+   "error",
+   "L_TAG",
+   "loops.substrate_temperature.input.tag"
+  ]
+ ]
+}

@@ -1,0 +1,72 @@
+{
+ "note": "a CONTROL board in a zone with no SENSE board yet: every quantity gets its declared actuator; each loop waits for its sensor",
+ "context": "control_only",
+ "role": "CONTROL",
+ "answer": "initial",
+ "expect": [
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_temperature"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.air_humidity"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.co2"
+  ],
+  [
+   "warn",
+   "W_HALF_BOUND",
+   "loops.substrate_temperature"
+  ]
+ ],
+ "plan_actuators": {
+  "actuator_definitions": {
+   "air_temperature": {
+    "quantity": "air_temperature",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "air_humidity": {
+    "quantity": "air_humidity",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "co2": {
+    "quantity": "co2",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "substrate_temperature": {
+    "quantity": "substrate_temperature",
+    "commands": {
+     "UP": {},
+     "DOWN": {},
+     "OFF": {}
+    }
+   },
+   "light": {
+    "types": {
+     "RED": {
+      "ON": {},
+      "OFF": {}
+     }
+    }
+   }
+  }
+ }
+}

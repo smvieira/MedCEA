@@ -63,8 +63,9 @@
 #   1  CREATE DATABASE if missing; then dba_iam_flag: is schema iam (apps/access) compiled?
 #      (1a: schema iam must also have iam._changed_since, IAM 4.1: the compiled grants name it)
 #   2  medcea_db_ddl.sql (no ON_ERROR_STOP; "already exists" filtered, as before)
-#   3  medcea_db_migrations.sql with -v deploy_nonce; 008b and 008c (IAM 4.1, the
-#      access policy's versions) must both have committed it
+#   3  medcea_db_migrations.sql with -v deploy_nonce; 008b, 008c (IAM 4.1, the
+#      access policy's versions) and 010 (feedback control's loops) must all have
+#      committed it
 #   3a recipe_recipe_id_seq fix (was deploy.sh step 4)
 #   4  medcea_db_owner.sql (iam too, IAM 2.7)       (-1, ON_ERROR_STOP)
 #   4a the policy's compiled functions              (-1, ON_ERROR_STOP)
@@ -203,10 +204,17 @@ SQL
 
     # ── 3. migrations ─────────────────────────────────────────────────────────
     nonce="$(openssl rand -hex 8)"
+    # migration 011 seeds the recipe-type catalogue from recipe_types.yaml (checked
+    # here first, so a broken file stops the deploy before anything is applied)
+    local rt_b64
+    rt_b64="$(python3 "$dir/recipe_types.py" b64)" || {
+        echo "ERROR: apps/database/recipe_types.yaml is not valid (above); nothing was applied" >&2
+        return 1
+    }
     _dba_log "Applying post-DDL migrations (008b nonce ${nonce})..."
     # no ON_ERROR_STOP, as before: earlier migrations rely on "already exists" being
     # skipped; 008b is one transaction, and the nonce below says whether it committed
-    out="$(_dba_psql "$CEA_DB" -q -v deploy_nonce="$nonce" -f - < "$dir/medcea_db_migrations.sql" 2>&1 || true)"
+    out="$(_dba_psql "$CEA_DB" -q -v deploy_nonce="$nonce" -v recipe_types_b64="$rt_b64" -f - < "$dir/medcea_db_migrations.sql" 2>&1 || true)"
     grep -v 'NOTICE' <<<"$out" | grep -E 'ERROR|WARNING' | sed 's/^psql:[^ ]* //' >&2 || true
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '008b:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
@@ -217,6 +225,28 @@ SQL
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '008c:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
         echo "ERROR: migration 008c did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 010 (feedback control: medcea.control_loop, the readings' sensor) is a third
+    # transaction with the same nonce: without it the runner would quietly fall back
+    # to its default map and the wizard's loop picker would answer "not deployed"
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '010:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 010 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 011 (recipe types: the catalogue, recipe_line.setpoints, the unit's type, the
+    # half-bound loops) is a fourth transaction with the same nonce
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '011:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 011 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 012 (the eight recipe_line limit columns and control_loop.recipe_lower/upper
+    # dropped, after 011's proof is checked again) is a fifth transaction
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '012:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 012 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
         return 1
     fi
 

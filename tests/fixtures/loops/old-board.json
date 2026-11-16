@@ -1,0 +1,18 @@
+{
+ "note": "a board flashed before Phase 1, and a sensor named default",
+ "context": "old",
+ "role": "ZONE",
+ "answer": "initial",
+ "expect": [
+  [
+   "warn",
+   "W_OLD_BOARD",
+   "old_boards.9"
+  ],
+  [
+   "warn",
+   "W_SENSOR_PROBLEM",
+   "sensor_problems.0"
+  ]
+ ]
+}
