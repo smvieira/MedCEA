@@ -1,0 +1,16 @@
+# The controller libraries of schd/cea/algorithms/ in the scheduler pod (python:3.11-slim,
+# manylinux x86_64): gekko for MPC, scikit-fuzzy for FLC. Without them both run as
+# bang-bang (research sandbox Phase 1, owner decision of 17 Nov 2026; MPC's sign was
+# fixed first). Shipped in ConfigMap scheduler-api (apps/scheduler/deploy.sh) and
+# installed by k8s/scheduler.yaml with --require-hashes --no-deps AFTER the unpinned
+# pip line, so the pinned numpy replaces the one pandas pulled. pandas (unpinned) needs
+# numpy >= 1.23.2 (pandas 2.x on python 3.11) or >= 1.26.0 (pandas 3.0): 2.4.6 meets both.
+# packaging: scikit-fuzzy 0.5.0 imports it without declaring it. networkx: scikit-fuzzy's
+# dependency. Health check `controllers` WARNs when gekko or skfuzzy is missing or not
+# the version below. The host's research venv pins its own set (research/requirements.txt).
+gekko==1.3.3 --hash=sha256:70552837864e2bf864322fe4ac5522f1e8ae20965c772dffc0ee545c386e183e
+networkx==3.6.1 --hash=sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762
+numpy==2.4.6 --hash=sha256:89cd468399cfd2504718f0ba50e410dca55a170b61a02ad92bb18c8a65186e93
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+scikit-fuzzy==0.5.0 --hash=sha256:e456c365146bc5c58d9f593f4127ac783112e2daf89f87b12c6ef3c38e4087dd
+scipy==1.17.1 --hash=sha256:43af8d1f3bea642559019edfe64e9b11192a8978efbd1539d7bc2aaa23d92de4

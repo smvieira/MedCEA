@@ -1,0 +1,14 @@
+# Research sandbox, Phase 1: the libraries production's FLC and MPC need,
+# for the host's python3 (3.14). Every wheel is pinned by version and sha256;
+# lib-venv.sh installs with --require-hashes --only-binary=:all:, so a missing
+# or changed hash refuses the install. packaging is listed because
+# scikit-fuzzy 0.5.0 imports it without declaring it (FLC otherwise falls
+# back to bang-bang). networkx is scikit-fuzzy's dependency. PyYAML is the
+# harness's own (campaign specs, scenarios, recipe_types.yaml).
+gekko==1.3.3 --hash=sha256:70552837864e2bf864322fe4ac5522f1e8ae20965c772dffc0ee545c386e183e
+networkx==3.7 --hash=sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0
+numpy==2.5.5 --hash=sha256:c48960d420e90cf305cb1fde0d4e6082cc90512cda87a9acf0b6e04e91cf4abe
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+PyYAML==6.0.3 --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5
+scikit-fuzzy==0.5.0 --hash=sha256:e456c365146bc5c58d9f593f4127ac783112e2daf89f87b12c6ef3c38e4087dd
+scipy==1.18.1 --hash=sha256:ac0333bdf38309aa3dcbe7e3fa7ea29e7a2c37c6ea306a757b700ded8e4596ad

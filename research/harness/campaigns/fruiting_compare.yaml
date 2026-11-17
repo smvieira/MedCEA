@@ -1,0 +1,19 @@
+# Controller comparison on the Pleurotus ostreatus fruiting scenario (48 simulated
+# hours, warm room, door opening at 24 h, room warming from 30 h): the five controller
+# codes at their default parameters (params.py), three seeds, three clock offsets.
+# 5 x 3 x 3 = 45 runs of 48 h each; the campaign's own estimate (one calibration run
+# per code) is printed in manifest.json as cpu_hours_estimate and refused over
+# --max-cpu-hours (default 4).
+#
+#   research/.venv/bin/python -m research.harness.campaign research/harness/campaigns/fruiting_compare.yaml
+description: five controllers at their defaults on fungi_pleurotus_fruiting
+scenarios:
+  - ../scenarios/fungi_pleurotus_fruiting.yaml
+controllers:
+  - {code: IF_THEN_ELSE}
+  - {code: PID}
+  - {code: Q_LEARNING}
+  - {code: FLC}
+  - {code: MPC}
+seeds: [1, 2, 3]
+clock_offsets_s: [0, 5, 9.99]

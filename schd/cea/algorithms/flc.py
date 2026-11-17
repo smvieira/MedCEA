@@ -1,4 +1,28 @@
+import sys as _sys
 from .base import ControlAlgorithm
+
+# Fallback reporting (research sandbox Phase 1, owner decision of 17 Nov 2026): FLC used
+# to fall back to bang-bang silently (scikit-fuzzy 0.5.0 also needs `packaging`, which it
+# does not declare). FALLBACK_TOTAL counts every fallback in this process; each instance
+# keeps fallback_count and last_fallback (the reason). One stderr line the first time an
+# instance falls back, then one every REPORT_EVERY fallbacks (one an hour at the 10-s tick).
+FALLBACK_TOTAL = 0
+REPORT_EVERY = 360
+
+
+def _one_line(text, limit=200):
+    return " ".join(str(text).split())[:limit]
+
+
+def _note_fallback(algo, reason):
+    global FALLBACK_TOTAL
+    FALLBACK_TOTAL += 1
+    algo.fallback_count += 1
+    algo.last_fallback = reason
+    if (algo.fallback_count - 1) % REPORT_EVERY == 0:
+        print("WARNING flc fallback: %s; bang-bang used (fallback %d of this controller,"
+              " reported every %d)" % (reason, algo.fallback_count, REPORT_EVERY),
+              file=_sys.stderr, flush=True)
 
 
 class FLCAlgorithm(ControlAlgorithm):
@@ -20,7 +44,8 @@ class FLCAlgorithm(ControlAlgorithm):
     Output membership: DOWN (positive error), OFF (near zero), UP (negative error).
     Defuzzification → centroid → thresholded to discrete command.
 
-    Falls back to BANG_BANG behaviour if scikit-fuzzy is not installed.
+    Falls back to BANG_BANG behaviour if scikit-fuzzy is not installed or compute fails,
+    and reports it (fallback_count, last_fallback, a rate-limited stderr WARNING).
     """
 
     def __init__(self, lower_limit: float, upper_limit: float,
@@ -30,6 +55,9 @@ class FLCAlgorithm(ControlAlgorithm):
         self._span       = max(upper_limit - lower_limit, 1e-9)
         self._prev_error = 0.0
         self._ctrl       = None  # lazy-initialised fuzzy controller
+        self._import_error  = None  # why scikit-fuzzy could not be imported
+        self.fallback_count = 0     # compute() calls answered by the bang-bang fallback
+        self.last_fallback  = None  # the reason of the latest fallback
         self._build_controller()
 
     def _build_controller(self):
@@ -79,9 +107,11 @@ class FLCAlgorithm(ControlAlgorithm):
             system      = ctrl.ControlSystem(rules)
             self._ctrl  = ctrl.ControlSystemSimulation(system)
 
-        except ImportError:
-            # scikit-fuzzy not installed — fall back silently
+        except ImportError as e:
+            # scikit-fuzzy (or numpy, or packaging) not installed: compute() falls back
+            # to bang-bang and reports it
             self._ctrl = None
+            self._import_error = "scikit-fuzzy is not usable (%s)" % _one_line(e)
 
     def compute(self, sensor_value: float) -> str:
         error = (sensor_value - self.setpoint) / self._span
@@ -98,8 +128,11 @@ class FLCAlgorithm(ControlAlgorithm):
                 if abs(output) <= db:
                     return "OFF"
                 return "DOWN" if output > 0 else "UP"
-            except Exception:
-                pass  # fall through to bang-bang
+            except Exception as e:
+                # fall through to bang-bang, reported
+                _note_fallback(self, "compute failed (%s: %s)" % (type(e).__name__, _one_line(e)))
+        else:
+            _note_fallback(self, self._import_error or "the fuzzy controller is not built")
 
         # Fallback: bang-bang
         if sensor_value > self.upper_limit:

@@ -48,10 +48,12 @@ substrate moisture/pH) and actuators (heating, cooling, humidification, ventilat
 | Identity / SSO | Keycloak realm `medcea` |
 
 **TODO:** recipe phases with explicit transition conditions and setpoint ramps. Controller rotation
-scheduling for Exp 1 (time-sliced AI vs rule-based per chamber/phase). RMSD and boundary-hugging metrics.
-A per-chamber digital twin and simulation harness for pre-deployment evaluation. MES batch/lot entities with
+scheduling for Exp 1 (time-sliced AI vs rule-based per chamber/phase). RMSD and boundary-hugging metrics
+on real runs (the sandbox computes them on simulated ones). MES batch/lot entities with
 genotype and substrate registration. Linking post-harvest analytical results (HPLC-MS, β-glucan,
 ICP-MS) to batches.
+
+**Phase 1 built: `research/`** — the Research Sandbox's chamber model (`twin_plant/`, uncalibrated until Phase 3) and simulation harness (`harness/`: production's controllers and `loop_resolver` loaded by path, metrics, hash-pinned campaigns); loosely coupled through four interfaces (manual chapter `research`). Still TODO: the per-chamber calibration, the biological twin and phases 2–8.
 
 ## Layer 4 — Enterprise / Regulatory Interface
 

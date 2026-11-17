@@ -1,0 +1,18 @@
+# Smoke campaign: every controller code on the one-hour smoke scenario, each with a
+# two-value grid of one parameter (params.py's schema), two seeds and two clock
+# offsets. 9 parameter sets x 2 seeds x 2 offsets = 36 runs, a few minutes of CPU
+# (MPC solves an optimisation at every tick). The offsets 0 and 9.99 s are the two
+# ends of PID's 10-s duty-cycle window (manual, "PID depends on the clock").
+#
+#   research/.venv/bin/python -m research.harness.campaign research/harness/campaigns/smoke.yaml
+description: smoke campaign, five controllers with small grids on smoke_air_temperature
+scenarios:
+  - ../scenarios/smoke_air_temperature.yaml
+controllers:
+  - {code: IF_THEN_ELSE}
+  - {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}
+  - {code: Q_LEARNING, params_grid: {alpha: [0.1, 0.3]}}
+  - {code: FLC, params_grid: {deadband_fraction: [0.1, 0.2]}}
+  - {code: MPC, params_grid: {horizon: [4, 6]}}
+seeds: [1, 2]
+clock_offsets_s: [0, 9.99]

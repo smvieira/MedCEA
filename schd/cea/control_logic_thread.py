@@ -139,5 +139,14 @@ def control_logic_thread(client, run_params, recipe_line_seq_cycle_run_start,
                 state = algo.get_state()
                 if state:
                     result_states[key] = state
+        # Release what an algorithm holds outside the process (MPC: GEKKO's temp
+        # directory), after its state was collected. One failure never stops the rest.
+        for key, algo in algorithms.items():
+            close = getattr(algo, 'close', None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as close_e:
+                    print(f"WARNING in {func_name}: closing loop {key}: {close_e!r}", file=sys.stderr)
 
         print(f"Control logic thread '{func_name}' stopped.")

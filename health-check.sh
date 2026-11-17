@@ -177,6 +177,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         in _zone_inventory (re-onboard), and on an active loop medcea._loop_problems() rejects;"
     echo -e "         never FAIL; SKIP before migration 010"
     echo ""
+    echo -e "  ${CYAN}controllers${NC} the controller libraries in the scheduler pod (MPC: gekko, FLC: scikit-fuzzy): NAMESPACE"
+    echo -e "         read-only kubectl exec into each Running scheduler pod, versions only; WARN (never FAIL)"
+    echo -e "         when either is missing, broken or not apps/scheduler/requirements-controllers.txt's pin"
+    echo -e "         (MPC and FLC then run as bang-bang); SKIP without the scheduler"
+    echo ""
     echo -e "  ${CYAN}postgrest${NC} config-api verifies tokens (IAM_POSTGREST_JWT, Phase 2b): NAMESPACE"
     echo -e "         true: config-api's env is the JWT template's, its key checksum matches"
     echo -e "         Secret medcea-jwks and a forged token gets 401; false: WARN. The realm's key ids"
@@ -2167,6 +2172,74 @@ for p in json.load(sys.stdin).get("items") or []:
 }
 
 # =============================================================================
+# Check: the controller libraries in the scheduler pod (research sandbox Phase 1) — read-only
+# target: NAMESPACE. MPC needs gekko and FLC scikit-fuzzy (with packaging, which 0.5.0 does
+# not declare); without them both run as bang-bang (schd/cea/algorithms/, which now report
+# each fallback). One bounded `kubectl exec POD -c api -- python3 -c` per Running scheduler
+# pod imports both and prints only their versions (or which module is missing). The versions
+# wanted are apps/scheduler/requirements-controllers.txt's pins (k8s/scheduler.yaml installs
+# it with --require-hashes). WARN, never FAIL (the severity rule: nothing here lets anyone in):
+# a library missing, broken or not the pinned version, the pins unreadable, no Running pod, a
+# pod that cannot be read. SKIP without the scheduler.
+# =============================================================================
+check_controllers() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" rc=0 pods pod got gk sf want_gk want_sf reqs
+    local warns=() oks=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    reqs="$SCRIPT_DIR/apps/scheduler/requirements-controllers.txt"
+    want_gk="$(sed -n 's/^gekko==\([^ ]*\) .*/\1/p' "$reqs" 2>/dev/null | head -n1)"
+    want_sf="$(sed -n 's/^scikit-fuzzy==\([^ ]*\) .*/\1/p' "$reqs" 2>/dev/null | head -n1)"
+    pods="$(_running_pods "$ns" scheduler)" || rc=$?
+    if [[ $rc -eq 3 ]]; then _record SKIP "$name" "the scheduler is not deployed (./apps/scheduler/deploy.sh)"; return
+    elif [[ $rc -ne 0 ]]; then _record WARN "$name" "cannot read the scheduler pods in $ns"; return
+    elif [[ -z "$pods" ]]; then _record WARN "$name" "no Running scheduler pod: its controller libraries cannot be read"; return
+    fi
+    if [[ -z "$want_gk" || -z "$want_sf" ]]; then
+        warns+=("cannot read the pinned versions in apps/scheduler/requirements-controllers.txt")
+    fi
+    local probe='import importlib, re
+def ver(mod, subs=()):
+    try:
+        m = importlib.import_module(mod)
+        for s in subs:
+            importlib.import_module(s)
+    except ModuleNotFoundError as e:
+        return "missing:" + re.sub(r"[^A-Za-z0-9._-]", "", str(e.name or mod))[:40]
+    except Exception as e:
+        return "broken:" + type(e).__name__
+    return re.sub(r"[^A-Za-z0-9.+_-]", "", str(getattr(m, "__version__", "") or "unknown"))[:40]
+print(ver("gekko"), ver("skfuzzy", ("skfuzzy.control",)))'
+    for pod in $pods; do
+        got="$(timeout "$TIMEOUT" $KUBECTL exec -n "$ns" "$pod" -c api -- python3 -c "$probe" 2>/dev/null | tail -n1)" || got=""
+        gk=""; sf=""; read -r gk sf <<<"$got"
+        if [[ -z "$gk" || -z "$sf" ]]; then warns+=("cannot read the controller libraries in pod $pod"); continue; fi
+        local lib v want label fb
+        for lib in gekko:MPC skfuzzy:FLC; do
+            label="${lib%%:*}"; fb="${lib##*:}"
+            if [[ "$label" == gekko ]]; then v="$gk"; want="$want_gk"; else v="$sf"; want="$want_sf"; fi
+            case "$v" in
+                missing:*)
+                    if [[ "${v#missing:}" == "$label" ]]; then
+                        warns+=("pod $pod: $label is not installed: $fb runs as bang-bang (./apps/scheduler/deploy.sh)")
+                    else
+                        warns+=("pod $pod: $label cannot import ${v#missing:}: $fb runs as bang-bang (./apps/scheduler/deploy.sh)")
+                    fi ;;
+                broken:*) warns+=("pod $pod: $label fails to import (${v#broken:}): $fb runs as bang-bang") ;;
+                *)  if [[ -n "$want" && "$v" != "$want" ]]; then
+                        warns+=("pod $pod: $label $v is not the pinned $want (./apps/scheduler/deploy.sh)")
+                    fi ;;
+            esac
+        done
+        oks+=("pod $pod: gekko $gk, scikit-fuzzy $sf")
+    done
+    if ((${#warns[@]})); then
+        local IFS=';'; _record WARN "$name" "${warns[*]}"
+    else
+        local IFS=';'; _record OK "$name" "${oks[*]} (the pinned versions)"
+    fi
+}
+
+# =============================================================================
 # Check: every service pod loads the route table the ConfigMap holds (Phase 5, G5) — read-only
 # target: NAMESPACE. For each Running pod of the six route-checking services (apply.sh's
 # wait_routes list; NotFound counts the service as not deployed), a read-only
@@ -2703,6 +2776,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamgrants)  check_iamgrants "$name" "$target" ;;
         iamcatalog) check_iamcatalog "$name" "$target" ;;
         controlloops) check_controlloops "$name" "$target" ;;
+        controllers)  check_controllers "$name" "$target" ;;
         iampolicy)    check_iampolicy "$name" "$target" ;;
         iamartefacts) check_iamartefacts "$name" "$target" ;;
         iamdecisions) check_iamdecisions "$name" "$target" ;;

@@ -29,3 +29,9 @@ codeplan/
 # Database Management platform exports (dbmgmt-api.py EXPORT_DIR)
 apps/database/exports/
 apps/database/medcea_export_*.sql
+
+# Research sandbox virtualenv (research/lib-venv.sh)
+research/.venv/
+
+# Research sandbox campaign output (research/harness/campaign.py --out default)
+research/runs/

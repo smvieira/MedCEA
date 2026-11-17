@@ -1583,11 +1583,16 @@ class WiringTest(unittest.TestCase):
         self.assertEqual((tail_10.count("BEGIN;"), tail_10.count("COMMIT;")), (1, 1))
         self.assertIn("'010:last_nonce', :'deploy_nonce'", tail_10)
         self.assertIn("key = '010:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
-        # 011 (recipe types) the same, last
-        tail_11 = migrations[migrations.index("Migration 011"):]
+        # 011 (recipe types) the same
+        tail_11 = migrations[migrations.index("Migration 011"):migrations.index("── Migration 012")]
         self.assertEqual((tail_11.count("BEGIN;"), tail_11.count("COMMIT;")), (1, 1))
         self.assertIn("'011:last_nonce', :'deploy_nonce'", tail_11)
         self.assertIn("key = '011:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
+        # 012 (the limit columns dropped) the same, last
+        tail_12 = migrations[migrations.index("── Migration 012"):]
+        self.assertEqual((tail_12.count("BEGIN;"), tail_12.count("COMMIT;")), (1, 1))
+        self.assertIn("'012:last_nonce', :'deploy_nonce'", tail_12)
+        self.assertIn("key = '012:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         self.assertIn("'008c:last_nonce', :'deploy_nonce'", tail_c)
         self.assertIn("key = '008c:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own

@@ -1,0 +1,146 @@
+<section id="research" data-title="Research sandbox">
+<h2>Research sandbox</h2>
+<p class="lede">The research sandbox is where control models and recipes are tried on a simulated chamber before anyone proposes them to the platform. It is its own application beside the operational services. It runs production's own controllers and loop rules, reads production's own catalogue and board definitions, and never writes to the operational services. This chapter says what the sandbox is and is not, the four interfaces through which it touches the rest of MedCEA, what Phase 1 built (the chamber model, the simulation harness, the metrics and campaigns), how to run a controller comparison campaign, what its manifest proves, and what is not built yet.</p>
+
+<h3 id="research-what">What the sandbox is, and what it is not</h3>
+<p>The reference architecture (version 2, section 4) places a Research Sandbox beside the Compliance Plane. When it is complete it holds:</p>
+<ul>
+<li>a pseudonymised copy of operational data (measurements, runs, recipes), taken as snapshots;</li>
+<li>the digital twins of the chamber and of the crop, and a closed-loop <strong>simulation harness</strong> that runs a controller against a twin;</li>
+<li>an optimisation engine that searches for better parameter sets and recipes;</li>
+<li>an <strong>agent harness</strong>: AI agents that run campaigns and write up what they find, whose output is only ever <em>proposed</em>;</li>
+<li>a candidate registry, from which a candidate reaches the platform only through a gateway, as a draft that <span class="role">qa</span> approves like any other;</li>
+<li>a validation vault: data kept back for validation, which no developer and no agent can read.</li>
+</ul>
+<p>It is <strong>not</strong>:</p>
+<ul>
+<li><strong>A way to change a chamber.</strong> Nothing the sandbox produces drives equipment. A parameter set or recipe from it runs on a chamber only after it was written into the Configuration UI as a draft and approved by a <span class="role">qa</span> person who did not author it (<a href="#compliance-approvals">Approvals of configuration</a>).</li>
+<li><strong>A second operational database.</strong> It never connects to the platform's database (<a href="#research-contract">the coupling contract</a>). What it knows about real runs it learns from snapshots.</li>
+<li><strong>A regulated record.</strong> A campaign's results are evidence for a proposal, attached to it. The regulated records stay where they are: the approval, the policy history and the run records of the platform.</li>
+<li><strong>A place for production code.</strong> The controllers it runs are production's, loaded from the repository; a change to a controller is made in <code>schd/cea/algorithms/</code> and deployed to the scheduler the usual way.</li>
+</ul>
+<p>The owner decided on 16 November 2026 to build the whole sandbox, in eight phases; to give each agent session the choice of a hosted model (Claude) or a local model on the host's CPUs; to write the agent loop ourselves, minimal and in Python; and to start with controller campaigns for the <span class="role">control_scientist</span>: comparing and tuning on/off (If-Then-Else), PID, FLC, MPC and Q-learning on the chamber model, to prepare Experiment 1 (May 2027). The decisions are in the <a href="#compliance-decisions">decision record</a>.</p>
+
+<h3 id="research-contract">The coupling contract</h3>
+<p>The sandbox is loosely coupled to the rest of MedCEA (owner direction of 17 November 2026). Only four interfaces touch the platform; each is versioned and checked on both sides, and nothing else is shared: no import of an operational service, no shared database table, no write path but the gateway.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Interface</th><th>What crosses it</th><th>Built</th></tr></thead>
+<tbody>
+<tr><td>1. Identity: shared</td><td>One Keycloak realm, the platform roles and the access policy. Research services check every request against the same compiled route table as every other service (<a href="#compliance-layers">How the policy is enforced</a>).</td><td>Phase 2 (Phase 1 runs on the host and has no service)</td></tr>
+<tr><td>2. Data: snapshots, never a live connection</td><td>The sandbox never holds a connection to the operational database (owner decision of 17 November 2026). An exporter that runs in the platform's own namespace reads read-only research views of measurements, runs, recipes and setpoints, units and zones, control loops and approved parameter sets, pseudonymises person identifiers, and writes an immutable, numbered snapshot into the research database. Each view carries a contract version; the sandbox refuses a version it does not know. Data kept back for validation is left out of every snapshot.</td><td>Phase 3</td></tr>
+<tr><td>3. Metadata: production's own sources, never copies</td><td>The quantity catalogue (<code>apps/database/recipe_types.yaml</code>: quantities, units, ranges, commands, command map, phase), the recipe file format 2 and its setpoint rules, the controller interface and the list of controller codes (<code>schd/cea/algorithms/</code>, with each controller's parameter schema in <code>params.py</code>), the loop rules (<code>schd/cea/loop_resolver.py</code>) and the CONTROL board's command semantics (<code>edge/templates/esp32-control.json</code>, including the relay several actuators share, <code>air_flow_fan</code>). They are read from the repository at the commit a campaign names, and every file read is named in its manifest by its git blob hash.</td><td>Phase 1</td></tr>
+<tr><td>4. Candidates out: one gateway</td><td>A candidate leaves the sandbox only through the gateway, which first runs production's own checks: a recipe through the format-2 import checks, its type's required quantities and the catalogue's ranges; a parameter set through the controller's parameter schema; loop changes through the loop rules. Then it writes a draft, nothing else.</td><td>Phase 6</td></tr>
+</tbody>
+</table></div>
+<p>Because the metadata is read, not copied, a recipe or parameter set made in the sandbox is checked against exactly the rules that will judge it on the platform. A change to one of those sources changes the sandbox's behaviour at the next campaign, and the manifest's blob hashes show which version a result came from.</p>
+
+<h3 id="research-plant">The chamber model</h3>
+<p>The chamber model (<code>research/twin_plant/chamber.py</code>, standard library only) is one 60 × 60 × 60 cm chamber (0.216 m³) described by four quantities: air temperature, substrate temperature (published as <code>ground_temperature</code>), water vapour in the air (from which relative humidity follows) and CO<sub>2</sub>. They change through simple balances, advanced in steps of at most one second:</p>
+<ul>
+<li><strong>Air temperature</strong>: heat through the walls and with the air exchanged with the room, to and from the substrate, from the heater, the fans, the lamps and the fungi, minus what the cooler pumps out and the latent heat of the humidifier's mist. With the fans off and the door shut its time constant is 146 minutes by construction.</li>
+<li><strong>Substrate temperature</strong>: to and from the air (four times faster while the air flow fan runs), to the room through the floor, and from the substrate heater.</li>
+<li><strong>Humidity</strong>: water from the humidifier and the fungi, and the air exchange with the room; capped at saturation.</li>
+<li><strong>CO<sub>2</sub></strong>: the fungi's respiration and the air exchange with the room. The CO<sub>2</sub> fan exchanges much more air than the leak.</li>
+</ul>
+<p>The fungi's respiration, water and heat follow the substrate temperature with a Q<sub>10</sub> of 2. The relays are the CONTROL board's (<code>air_heater</code>, <code>air_cooler</code>, <code>air_humidifier</code>, <code>air_flow_fan</code>, <code>co2_fan</code>, <code>co2_steriliser</code>, <code>substrate_heater</code> and the red, blue and UV lamps); each relay's energy is its power times its time on.</p>
+<div class="warn"><p><strong>Every number below is an assumption until Phase 3.</strong> Only the volume is a hardware fact, and the 146-minute time constant an estimate from the chamber's own data. The rest are assumed nameplates and textbook figures, to be calibrated against the chamber's recorded measurements once snapshots exist. Results from Phase 1 compare controllers with one another on the same model; they do not predict a real chamber's numbers.</p></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Parameter</th><th>Value</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>Volume</td><td>0.216 m³</td><td>60 × 60 × 60 cm, hardware</td></tr>
+<tr><td>Air time constant (fans off, door shut)</td><td>146 min</td><td>Estimated from chamber data; to calibrate</td></tr>
+<tr><td>Air node heat capacity (air, walls, fittings)</td><td>60 000 J/K</td><td>Assumption</td></tr>
+<tr><td>Heater, cooler (electrical), cooler COP</td><td>100 W, 60 W, 0.5</td><td>Assumed nameplates (Peltier-class cooler)</td></tr>
+<tr><td>Humidifier</td><td>15 W, 10 g/h of mist</td><td>Assumption</td></tr>
+<tr><td>Substrate heater, air flow fan, CO<sub>2</sub> fan, CO<sub>2</sub> steriliser</td><td>30 W, 3 W, 5 W, 8 W</td><td>Assumed nameplates</td></tr>
+<tr><td>Lamps (red, blue, UV)</td><td>10 W, 10 W, 5 W, all of it heat in the air</td><td>Assumption</td></tr>
+<tr><td>Air exchange: leak, air flow fan, CO<sub>2</sub> fan, open door</td><td>0.5, +2, +30, +60 changes per hour</td><td>Assumption</td></tr>
+<tr><td>Substrate: heat capacity, to air (still), to room</td><td>6000 J/K, 0.3 W/K, 0.2 W/K</td><td>Assumption (about 2 kg of wet substrate)</td></tr>
+<tr><td>Fungal respiration at 20 °C</td><td>110 mL CO<sub>2</sub>/h, 1 g/h water, 0.5 W</td><td>Assumption from respiration figures for <em>Pleurotus</em>; to calibrate</td></tr>
+<tr><td>Room</td><td>20 °C, 50 %RH, 420 ppm</td><td>Assumed lab conditions; each scenario may set its own</td></tr>
+</tbody>
+</table></div>
+<p><strong>The sensors</strong> (<code>research/twin_plant/sensors.py</code>) turn the model's true values into what a SENSE board would publish: an SHT45 (air temperature and humidity), an SCD30 (CO<sub>2</sub>, air temperature and humidity) and a DS18B20 on the substrate. A datasheet accuracy of ±a is taken as two standard deviations of independent noise per message (an assumption: real sensors also drift, which a scenario can add as a constant bias); the SCD30's CO<sub>2</sub> noise has its fixed part (30 ppm) and its 3 % part. Values are quantised as the sensor and the board do (two decimals; 0.0625 °C for the DS18B20). Each sensor publishes every 30 seconds (the SENSE board's default interval), offset from the others, and a scenario may add latency and lost messages. All of it is drawn from random number streams seeded by the scenario's seed, one per sensor, so the same seed gives the same readings. The SEN0562 light sensor is not modelled: light intensity is not a quantity a loop controls yet, and the chamber model has no light balance (<a href="#research-later">Not built yet</a>). A starting value a scenario leaves out is the room's, the substrate's included.</p>
+
+<h3 id="research-harness">The simulation harness</h3>
+<p>The harness (<code>research/harness/</code>) runs one scenario as production would run it: the runner's 10-second control tick, re-expressed with the same functions of <code>schd/cea/loop_resolver.py</code> in the same order. At each tick it takes the newest readings, decides whether the light is on, and for each active loop resolves its input (the reference sensor, its fallback, or the default map's rule), asks the controller, applies the loop's command map (CO<sub>2</sub>: DOWN means fans on) and publishes the command. The board model applies the commands in publishing order with the template's semantics, so the shared <code>air_flow_fan</code> ends a tick as the last command left it, as on the real board. At each recipe cycle's end the controllers restart and keep their state as production's runner does: new controller instances and a new alarm tracker, and readings that reached the old cycle's subscriber are not carried into the new one. A loop whose controller raises an error is counted and the run marked invalid, while the other loops and the light go on, as in production. A loop whose input is something the chamber model does not compute, or that no configured sensor publishes, is refused before the run.</p>
+<p>A scenario (YAML, in <code>research/harness/scenarios/</code>) names a recipe type, one recipe step's setpoints, the light, the starting state, the room, disturbances (a door opening, extra heat, the room changing) and, optionally, the zone's control loop rows as onboarding saves them. Its setpoints are checked by the database's own rules for a recipe step (the trigger <code>recipe_line_setpoints_trg</code>, with the same messages), and its loops by <code>loop_resolver</code>'s, so a scenario the platform would refuse is refused here too. Two scenarios ship: <code>smoke_air_temperature</code> (one hour, starting below the air temperature band) and <code>fungi_pleurotus_fruiting</code> (48 hours of the <em>Pleurotus ostreatus</em> fruiting step in a warm room, with a door opening and the room warming).</p>
+<p><strong>Production's code, loaded by path.</strong> The harness loads <code>schd/cea/algorithms/</code> and <code>loop_resolver.py</code> from the repository by their paths, never through the scheduler's package, which would pull in the database and broker libraries. It replaces two things for the length of a run: PID's clock (<a href="#research-pid">below</a>) and Q-learning's random source, both seeded by the scenario. It refuses a controller code that is not in the list of codes, because production's factory silently runs on/off control for an unknown code, and a parameter set the controller's schema refuses.</p>
+
+<h4>Fallbacks are counted, and make a run invalid</h4>
+<p>FLC needs scikit-fuzzy and MPC needs GEKKO. Without the library, or when the fuzzy computation or the solver fails, each falls back to on/off control. Since 17 November 2026 both count it (per controller, with the reason) and write one line the first time, then at most one an hour: <code>WARNING flc fallback: …</code> or <code>WARNING mpc fallback: …</code>. The harness counts per loop how many ticks the controller answered with its library, how many by the fallback, and how many it was not asked at all (no data). <strong>A run in which an FLC or MPC controller fell back even once is marked invalid</strong> (<code>"valid": false</code>, with the reason), because its numbers would be on/off control's under another name. The host's own <code>python3</code> has neither library, so a campaign run with it marks every FLC and MPC run invalid; build the virtual environment first (<a href="#research-run">below</a>).</p>
+
+<h4 id="research-pid">PID depends on the clock: a property of production PID</h4>
+<p>Production's PID turns its output into a duty cycle within a repeating window of <code>cycle_time</code> seconds (default 10): it commands UP or DOWN while <code>now % cycle_time</code> is below <code>|output| × cycle_time</code>, else OFF. <code>now</code> is the host's monotonic clock, whose origin is arbitrary. With the default window equal to the 10-second tick, <code>now % cycle_time</code> is nearly the same at every tick, so whether PID ever fires depends on where in the window the ticks happen to fall: at a phase near 0 it fires whenever its output is not zero (like on/off control), at a phase near 9.99 seconds only when its output is above 0.999. Which of these a real run gets is decided by when the scheduler pod started. The harness therefore sets the clock's origin per run (<code>clock_offsets_s</code>) and campaigns sweep it; tick jitter (<code>jitter_s</code>: production waits 10 seconds plus the time one pass takes) moves the phase slowly. This is how production PID behaves today, not a defect of the harness. A different <code>cycle_time</code> is a parameter set like any other, proposed and approved through the Configuration UI.</p>
+
+<h3 id="research-metrics">Metrics</h3>
+<p>Each run is scored on the model's true values (never a sensor reading), sampled once per tick, from the scenario's <code>metrics_from_h</code> on (its settling time). Per loop, with lower limit L, upper limit U, band width W = U − L, midpoint M = (L + U) / 2 and the N samples x<sub>i</sub>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Metric</th><th>Formula</th><th>Reads as</th></tr></thead>
+<tbody>
+<tr><td><code>rmsd_mid</code></td><td>√( (1/N) Σ (x<sub>i</sub> − M)² )</td><td>Distance from the middle of the band, in the quantity's unit. Lower is closer to the middle.</td></tr>
+<tr><td><code>out_of_band</code></td><td>(1/N) · #{ i : x<sub>i</sub> &lt; L or x<sub>i</sub> &gt; U }</td><td>Share of the time outside the band.</td></tr>
+<tr><td><code>mean_abs_error</code></td><td>(1/N) Σ max(L − x<sub>i</sub>, 0, x<sub>i</sub> − U)</td><td>How far outside the band, on average (0 inside it).</td></tr>
+<tr><td><code>boundary_hugging</code></td><td>#{ in band and within 0.1 W of an edge } / #{ in band }</td><td>Share of the in-band time spent next to an edge. On/off control parks the value near an edge and scores high. Empty when no sample is in band.</td></tr>
+<tr><td><code>command_changes</code></td><td>number of ticks whose published command differs from the loop's previous one</td><td>How restless the loop is.</td></tr>
+</tbody>
+</table></div>
+<p>Per relay: <code>switches</code>, the number of ticks at which the relay's state differs from the previous tick (the shared air flow fan counts once per tick), and <code>energy_wh</code>, its power times its time on over the whole run, settling included; <code>energy_total_wh</code> is their sum. The formulas are version 1 (<code>metrics_version</code> in every result); any change to a formula raises the version, and campaigns are compared only within one version.</p>
+
+<h3 id="research-run">Running a campaign</h3>
+<p>Phase 1 runs on the platform host, in the repository, as the account that holds the checkout. It reads nothing from the cluster and writes only its output folder. The harness itself needs only Python and PyYAML; FLC and MPC need the virtual environment <code>research/.venv</code>, which <code>research/lib-venv.sh</code> builds from <code>research/requirements.txt</code>: numpy, scipy, scikit-fuzzy, GEKKO, networkx, <code>packaging</code> (which scikit-fuzzy needs but does not declare) and PyYAML, each pinned by version and sha256 and installed binary only, so a changed file on PyPI is refused. It needs <code>python3-venv</code> and access to PyPI the first time; a second run installs nothing.</p>
+<pre><code>source research/lib-venv.sh &amp;&amp; ensure_research_venv
+research/.venv/bin/python -m research.harness.campaign SPEC.yaml [--out DIR] [--jobs N] [--max-cpu-hours H] [--allow-dirty]</code></pre>
+<p>Two specs ship in <code>research/harness/campaigns/</code>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Spec</th><th>What it runs</th><th>Command</th></tr></thead>
+<tbody>
+<tr><td><code>smoke.yaml</code></td><td>The five controllers, each with a two-value grid of one parameter, on the one-hour smoke scenario; two seeds, clock offsets 0 and 9.99 s: 36 runs, a few CPU-minutes.</td><td><code>research/.venv/bin/python -m research.harness.campaign research/harness/campaigns/smoke.yaml</code></td></tr>
+<tr><td><code>fruiting_compare.yaml</code></td><td>The five controllers at their default parameters on the 48-hour <em>Pleurotus</em> fruiting scenario; three seeds, three clock offsets: 45 runs. The estimate is about 11 CPU-hours, nearly all MPC, so the default cap of 4 refuses it and the command raises it.</td><td><code>research/.venv/bin/python -m research.harness.campaign research/harness/campaigns/fruiting_compare.yaml --max-cpu-hours 12</code></td></tr>
+</tbody>
+</table></div>
+<p>Neither command needs <code>--allow-dirty</code> on a committed checkout. Add it only to try uncommitted changes to the contract sources or to <code>research/</code>; the manifest then lists the changed files, and the result cannot be reproduced from a commit.</p>
+<p>A campaign spec lists scenarios (files, relative to the spec, or written inline), controllers (<code>{code, params, params_grid}</code>; a grid is expanded to every combination), seeds, clock offsets and jitter. Every combination is one run. The output folder (default <code>research/runs/&lt;spec name&gt;</code>) gets <code>results.jsonl</code>, one line per run in a fixed order, and <code>manifest.json</code>. The command prints one line, for example "campaign: 30 runs (0 invalid), results in …, digest 6ea56c3f…".</p>
+<p>Before it runs anything the campaign refuses (exit 2, nothing written):</p>
+<ul>
+<li>an unknown controller code or a parameter outside the controller's schema;</li>
+<li>a scenario the catalogue or the loop rules would refuse;</li>
+<li>a repository whose contract sources (<code>schd/cea/</code>, the catalogue, the CONTROL template) or the sandbox's own code (<code>research/</code>, but its virtual environment and <code>research/runs/</code>) differ from the committed version, unless <code>--allow-dirty</code>, which records the changed files in the manifest;</li>
+<li>a campaign whose estimated CPU time is over its cap. One short calibration run per controller measures CPU seconds per simulated hour (GEKKO's solver included); the estimate is that rate times every run's length. The default cap is 4 CPU-hours.</li>
+</ul>
+<p>The runs are spread over at most the CPUs this process may use (the cgroup's quota, else half the host's CPUs), never more than <code>--jobs</code>. The result file does not depend on how many processes ran it. The exercise is <a href="#training-e39">E39 Run a controller comparison campaign</a>.</p>
+
+<h3 id="research-manifest">What the manifest proves</h3>
+<p><code>manifest.json</code> names everything a result depends on:</p>
+<ul>
+<li><code>code</code>: the commit, whether the contract sources or <code>research/</code> were dirty and which files, the git blob hash of every file loaded (each controller module, <code>loop_resolver.py</code>, <code>params.py</code>, the catalogue, the CONTROL template, the database migration file that holds the setpoint rules) and of the sandbox's own code, scenarios, specs and pins, the coupling contract's version (<code>contract_version</code>), the library versions, whether FLC and MPC had their libraries, and the Python version;</li>
+<li><code>spec_digest</code>: the sha256 of the spec with every scenario file inlined and every default filled in;</li>
+<li>the seeds, clock offsets, jitter, metrics version, number of runs and of invalid runs, and the CPU estimate and cap;</li>
+<li><code>result_digest</code>: the sha256 of <code>results.jsonl</code>.</li>
+</ul>
+<p>The same spec on the same commit, with the same library versions, gives the same <code>result_digest</code>, whoever runs it and with however many processes. That is what makes a campaign evidence: anyone can rerun it from the manifest and compare one hash. A different digest means something listed in the manifest differs. The manifest proves which code and inputs produced the numbers; it does not prove that the chamber model matches a real chamber (Phase 3), and on its own it is not a record of who ran the campaign.</p>
+
+<h3 id="research-production">Controller libraries in production</h3>
+<p>Building Phase 1 found two defects in production's controllers, fixed with the owner's approval on 17 November 2026 (<a href="#compliance-decisions">decision record</a>):</p>
+<ul>
+<li><strong>MPC's command was inverted.</strong> Below its band it answered DOWN (cool) and above it UP (heat). No run ever used MPC, because the scheduler pod did not have GEKKO, so MPC always ran as on/off control. The sign is fixed.</li>
+<li><strong>FLC fell back to on/off control even with scikit-fuzzy installed</strong>, because scikit-fuzzy 0.5.0 needs <code>packaging</code> without declaring it.</li>
+</ul>
+<p>The scheduler pod now installs GEKKO, scikit-fuzzy and their dependencies, pinned by version and checksum (<code>apps/scheduler/requirements-controllers.txt</code>), and the health check <strong>Controller libraries</strong> warns when they are missing (<a href="#admin-loops">Control loops</a>; exercise <a href="#training-e40">E40</a>). The libraries are deployed with <code>./apps/scheduler/deploy.sh</code> while no run is active. Choosing MPC or FLC for a unit, or a new parameter set for either, is a configuration change approved by <span class="role">qa</span> as before.</p>
+
+<h3 id="research-later">Not built yet</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Phase</th><th>What it adds</th></tr></thead>
+<tbody>
+<tr><td>2</td><td>The research namespaces (deny-all networks, quotas, low priority so production always wins), the research database, the AI workbench moved into the research zone, and the orchestrator that runs simulations as Kubernetes Jobs. Research roles get their first rights through a skeleton version and a change version, each approved by <span class="role">qa</span>.</td></tr>
+<tr><td>3</td><td>The exporter and pseudonymiser, the data lake of snapshots, the reservation of data kept back for validation, and the calibration of the chamber model from the snapshots.</td></tr>
+<tr><td>4</td><td>The agent harness with the local model: a supervised agent runs a campaign through the orchestrator.</td></tr>
+<tr><td>5</td><td>The hosted model, through a gateway with recorded egress.</td></tr>
+<tr><td>6</td><td>The candidate registry and the promotion gateway: a tuned parameter set reaches the platform as a draft with its evidence on the policy history, for <span class="role">qa</span> to approve. No MPC or FLC candidate is promoted while the scheduler lacks their libraries.</td></tr>
+<tr><td>7</td><td>The validation vault, which only the validation job reads.</td></tr>
+<tr><td>8</td><td>The optimisation engine, the biological twin of the crop, and recipe promotion.</td></tr>
+<tr><td>With the lux loop</td><td>The SEN0562 light sensor and the light intensity in the chamber model. Phase 1 models the SHT45, SCD30 and DS18B20 only, because light intensity is not a quantity a loop controls yet; it comes with the lux loop of the feedback control plan (its Phase 5).</td></tr>
+</tbody>
+</table></div>
+<div class="note"><p><strong>Who may run a campaign in Phase 1.</strong> No access check applies yet: Phase 1 is a command on the host, and anyone with a shell in the repository can run it. It reads no platform data and changes nothing on the platform, so the access policy has nothing to protect there; the research roles' rights begin with Phase 2.</p></div>
+</section>

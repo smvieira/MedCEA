@@ -23,13 +23,21 @@ spec:
         - name: nginx-conf
           mountPath: /etc/nginx/conf.d
       # --- scheduler-api: Flask + APScheduler ---
+      # It also spawns the runner (schd/run_recipe.py, from the hostPath /schd), so the
+      # controller libraries of schd/cea/algorithms/ are installed here: the hash-pinned
+      # requirements-controllers.txt (ConfigMap scheduler-api) after the unpinned line, so
+      # its numpy wins. A failed pinned install does not stop the API: MPC and FLC then
+      # fall back to bang-bang, report it, and health check `controllers` WARNs.
       - name: api
         image: python:3.11-slim
         command:
         - bash
         - -c
         - |
-          pip install --quiet flask 'pyjwt[crypto]' apscheduler             paho-mqtt python-dotenv pandas pytz psycopg2-binary requests dnspython &&           python /scripts/scheduler-api.py
+          pip install --quiet flask 'pyjwt[crypto]' apscheduler             paho-mqtt python-dotenv pandas pytz psycopg2-binary requests dnspython &&
+          { pip install --quiet --require-hashes --no-deps -r /scripts/requirements-controllers.txt ||
+            echo "WARNING controller libraries not installed: MPC and FLC fall back to bang-bang (health check controllers)" >&2; } &&
+          python /scripts/scheduler-api.py
         ports:
         - containerPort: 8082
         env:

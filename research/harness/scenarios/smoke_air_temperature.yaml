@@ -1,0 +1,34 @@
+# Smoke scenario for the tests and a quick campaign check (one simulated hour).
+# The chamber starts 4 C below the air temperature band in a 20 C room; the heater
+# (100 W, an assumed nameplate in twin_plant/chamber.py) brings it in within about
+# 20-30 minutes, so metrics count from 0.5 h. Setpoints are inside the FUNGI ranges of
+# apps/database/recipe_types.yaml. No disturbance; default sensors (SHT45, SCD30, DS18B20).
+name: smoke_air_temperature
+description: one hour, start below the band, bang-bang should settle inside it
+duration_h: 1
+metrics_from_h: 0.5
+recipe_type: FUNGI
+recipe_line:
+  setpoints:
+    air_temperature: {lower: 18, upper: 22}
+    air_humidity: {lower: 80, upper: 95}
+    co2: {lower: 500, upper: 5000}
+  light_type: DARK
+  light_on_minutes: 0
+  light_off_minutes: 0
+loops:
+  # control_loop rows as the onboarding wizard saves them: the SHT45 is the reference for
+  # air temperature and humidity, the SCD30 its fallback (both publish both tags; without
+  # a row the default map's 'single' rule would see two sensors and hold).
+  air_temperature:
+    input: {tag: air_temperature, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+  air_humidity:
+    input: {tag: air_humidity, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+initial:
+  air_temperature: 16
+  air_humidity: 85
+  co2: 800
+ambient:
+  temperature: 20
+  humidity: 50
+  co2: 420

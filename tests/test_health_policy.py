@@ -1048,8 +1048,9 @@ class Wiring(unittest.TestCase):
         self.assertEqual(names[i + 1:i + 3], ["Access policy version", "Policy artefacts"])
         self.assertEqual([l.split("|")[1].strip() for l in lines[i + 1:i + 3]], ["iampolicy", "iamartefacts"])
         # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5's iamloaded, jwks, kcscopes, iamnetpol;
-        # 64 with Phase 5 round 2's iamdrift, iamanchor, iamcatalog; 65 with feedback control's controlloops
-        self.assertEqual(len(lines), 65)
+        # 64 with Phase 5 round 2's iamdrift, iamanchor, iamcatalog; 65 with feedback control's controlloops;
+        # 66 with the research sandbox's controllers (Phase 1, 17 Nov 2026)
+        self.assertEqual(len(lines), 66)
         types = [l.split("|")[1].strip() for l in lines]
         for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog"):
             self.assertEqual(types.count(t), 1, t)

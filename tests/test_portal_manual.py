@@ -590,7 +590,7 @@ class Health(unittest.TestCase):
     def test_wiring(self):
         conf = read("health-checks.conf")
         lines = [l for l in conf.splitlines() if l.strip() and not l.startswith("#")]
-        self.assertEqual(len(lines), 65)  # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5; 64 with round 2 (iamdrift, iamanchor, iamcatalog); 65 with controlloops (feedback control, 13 Nov 2026)
+        self.assertEqual(len(lines), 66)  # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5; 64 with round 2 (iamdrift, iamanchor, iamcatalog); 65 with controlloops (feedback control, 13 Nov 2026); 66 with controllers (research sandbox Phase 1, 17 Nov 2026)
         row = [l for l in lines if l.split("|")[0].strip() == "Platform manual"]
         self.assertEqual(len(row), 1)
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["manual", "$NAMESPACE"])
