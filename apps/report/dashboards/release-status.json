@@ -1,0 +1,431 @@
+{
+  "title": "Run Release Status",
+  "uid": "medcea-release-status",
+  "description": "Standard report: completed runs and whether a qp person has released them, who released each and when; unreleased runs first.",
+  "tags": [
+    "medcea",
+    "report",
+    "runs",
+    "release"
+  ],
+  "timezone": "browser",
+  "refresh": "5m",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "schemaVersion": 38,
+  "graphTooltip": 1,
+  "editable": false,
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "unit",
+        "label": "Unit",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "definition": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "sort": 0,
+        "current": {},
+        "allValue": "SELECT unit_id FROM medcea.cea_unit"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "report"
+      ],
+      "asDropdown": true,
+      "title": "Standard reports",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "panels": [
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Completed runs",
+      "description": "Runs that completed (status C) with their end in the selected time range.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nWHERE rr.unit_id IN ($unit) AND rr.recipe_run_status::text = 'C' AND $__timeFilter(rr.recipe_run_end)",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Released",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nJOIN medcea.run_release rel ON rel.recipe_run_id = rr.recipe_run_id\nWHERE rr.unit_id IN ($unit) AND rr.recipe_run_status::text = 'C' AND $__timeFilter(rr.recipe_run_end)",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Not released",
+      "description": "Completed runs that no qp person has released yet.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nLEFT JOIN medcea.run_release rel ON rel.recipe_run_id = rr.recipe_run_id\nWHERE rr.unit_id IN ($unit) AND rr.recipe_run_status::text = 'C' AND $__timeFilter(rr.recipe_run_end) AND rel.recipe_run_id IS NULL",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 4,
+      "title": "Completed runs and their release",
+      "description": "Completed runs, unreleased first (orange). A run is released in the Configuration UI's Approvals tab by a qp person who did not create, change or execute it; a failed run is never released and is not listed.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Release"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Released": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "Not released": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Waiting for"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Completed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Released at"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT rr.recipe_run_id AS \"Run\", u.unit_code AS \"Unit\", rr.recipe_id AS \"Recipe\",\n  rr.recipe_run_end AS \"Completed\",\n  CASE WHEN rel.recipe_run_id IS NULL THEN 'Not released' ELSE 'Released' END AS \"Release\",\n  rel.released_at AS \"Released at\", rel.released_by_name AS \"Released by\",\n  rel.released_by_role AS \"Role\", rel.note AS \"Note\",\n  CASE WHEN rel.recipe_run_id IS NULL THEN extract(epoch FROM now() - rr.recipe_run_end) END AS \"Waiting for\"\nFROM medcea.recipe_run rr\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nLEFT JOIN medcea.run_release rel ON rel.recipe_run_id = rr.recipe_run_id\nWHERE rr.unit_id IN ($unit) AND rr.recipe_run_status::text = 'C' AND $__timeFilter(rr.recipe_run_end)\nORDER BY (rel.recipe_run_id IS NULL) DESC, rr.recipe_run_end DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 5,
+      "title": "Releases recorded",
+      "description": "Every release recorded in the selected time range (medcea.run_release is append-only).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Released at"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT rel.released_at AS \"Released at\", rel.recipe_run_id AS \"Run\", u.unit_code AS \"Unit\",\n  rr.recipe_id AS \"Recipe\", rel.released_by_name AS \"Released by\", rel.released_by_role AS \"Role\",\n  rel.released_by_source AS \"Source\", rel.note AS \"Note\"\nFROM medcea.run_release rel\nJOIN medcea.recipe_run rr ON rr.recipe_run_id = rel.recipe_run_id\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rel.released_at)\nORDER BY rel.released_at DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,368 @@
+{
+  "title": "Run History",
+  "uid": "medcea-run-history",
+  "description": "Standard report: every recipe run in the selected time range with unit, recipe, status, start, end, duration, cycles completed and release, filterable by unit, recipe and status.",
+  "tags": [
+    "medcea",
+    "report",
+    "runs"
+  ],
+  "timezone": "browser",
+  "refresh": "5m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "schemaVersion": 38,
+  "graphTooltip": 1,
+  "editable": false,
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "unit",
+        "label": "Unit",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "definition": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "sort": 0,
+        "current": {},
+        "allValue": "SELECT unit_id FROM medcea.cea_unit"
+      },
+      {
+        "name": "recipe",
+        "label": "Recipe",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT DISTINCT recipe_id AS __value, 'Recipe ' || recipe_id AS __text FROM medcea.recipe_run ORDER BY 1",
+        "definition": "SELECT DISTINCT recipe_id AS __value, 'Recipe ' || recipe_id AS __text FROM medcea.recipe_run ORDER BY 1",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "sort": 0,
+        "current": {},
+        "allValue": "SELECT recipe_id FROM medcea.recipe_run"
+      },
+      {
+        "name": "status",
+        "label": "Status",
+        "type": "custom",
+        "query": "Scheduled : S,Running : R,Completed : C,Failed : F",
+        "options": [],
+        "multi": true,
+        "includeAll": true,
+        "current": {},
+        "allValue": "'S', 'R', 'C', 'F'"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "report"
+      ],
+      "asDropdown": true,
+      "title": "Standard reports",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "panels": [
+    {
+      "type": "table",
+      "id": 1,
+      "title": "Run history",
+      "description": "Every run that overlaps the selected time range (started before its end and not ended before its start), filtered by the Unit, Recipe and Status variables. Duration of a running run counts up to now. Cycles are recipe steps the runner recorded as completed or failed. Recipes are shown by number: Grafana's database account may not read the recipe table.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Scheduled": {
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "Running": {
+                        "color": "green",
+                        "index": 1
+                      },
+                      "Completed": {
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "Failed": {
+                        "color": "red",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "End"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Release"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Released": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "Not released": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT rr.recipe_run_id AS \"Run\", u.unit_code AS \"Unit\", rr.recipe_id AS \"Recipe\",\n  CASE rr.recipe_run_status::text WHEN 'S' THEN 'Scheduled' WHEN 'R' THEN 'Running' WHEN 'C' THEN 'Completed' WHEN 'F' THEN 'Failed' ELSE rr.recipe_run_status::text END AS \"Status\",\n  rr.recipe_run_start AS \"Start\", rr.recipe_run_end AS \"End\",\n  extract(epoch FROM COALESCE(rr.recipe_run_end, CASE WHEN rr.recipe_run_status::text = 'R' THEN now() END)\n                     - rr.recipe_run_start) AS \"Duration\",\n  COALESCE(c.done, 0) AS \"Cycles completed\", COALESCE(c.failed, 0) AS \"Cycles failed\",\n  rr.executed_by_name AS \"Started by\", rr.executed_by_role AS \"Role\",\n  CASE WHEN rel.recipe_run_id IS NOT NULL THEN 'Released'\n       WHEN rr.recipe_run_status::text = 'C' THEN 'Not released' END AS \"Release\"\nFROM medcea.recipe_run rr\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nLEFT JOIN (SELECT recipe_run_id,\n                  count(*) FILTER (WHERE recipe_line_cycle_run_status::text = 'C') AS done,\n                  count(*) FILTER (WHERE recipe_line_cycle_run_status::text = 'F') AS failed\n           FROM medcea.recipe_line_cycle_run GROUP BY recipe_run_id) c ON c.recipe_run_id = rr.recipe_run_id\nLEFT JOIN medcea.run_release rel ON rel.recipe_run_id = rr.recipe_run_id\nWHERE rr.unit_id IN ($unit) AND rr.recipe_id IN ($recipe) AND rr.recipe_run_status::text IN ($status)\n  AND rr.recipe_run_start <= $__timeTo() AND COALESCE(rr.recipe_run_end, now()) >= $__timeFrom()\nORDER BY rr.recipe_run_start DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 2,
+      "title": "Cycles of the runs shown",
+      "description": "The recorded cycles (recipe steps) of the runs in the table above, at most 1000.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Scheduled": {
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "Running": {
+                        "color": "green",
+                        "index": 1
+                      },
+                      "Completed": {
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "Failed": {
+                        "color": "red",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "End"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT c.recipe_run_id AS \"Run\", u.unit_code AS \"Unit\", c.recipe_item_seq_id AS \"Step\",\n  c.recipe_item_seq_cycle_num AS \"Cycle\",\n  CASE c.recipe_line_cycle_run_status::text WHEN 'S' THEN 'Scheduled' WHEN 'R' THEN 'Running'\n       WHEN 'C' THEN 'Completed' WHEN 'F' THEN 'Failed' ELSE c.recipe_line_cycle_run_status::text END AS \"Status\",\n  c.recipe_line_seq_cycle_run_start AS \"Start\", c.recipe_line_seq_cycle_run_end AS \"End\",\n  extract(epoch FROM c.recipe_line_seq_cycle_run_end - c.recipe_line_seq_cycle_run_start) AS \"Duration\"\nFROM medcea.recipe_line_cycle_run c\nJOIN medcea.recipe_run rr ON rr.recipe_run_id = c.recipe_run_id\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nWHERE rr.unit_id IN ($unit) AND rr.recipe_id IN ($recipe) AND rr.recipe_run_status::text IN ($status)\n  AND rr.recipe_run_start <= $__timeTo() AND COALESCE(rr.recipe_run_end, now()) >= $__timeFrom()\nORDER BY c.recipe_run_id DESC, c.recipe_item_seq_id, c.recipe_item_seq_cycle_num\nLIMIT 1000",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

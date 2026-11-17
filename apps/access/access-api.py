@@ -82,6 +82,21 @@ def signout_hub(value):
 
 
 SIGNOUT_HUB = signout_hub(E.get('SIGNOUT_HUB', ''))
+# The platform manual, linked from every user menu between Profile and Sign out (owner
+# decision of 17 Nov 2026: the portal's card went). It lives on the portal host only
+# (k8s/portal/nginx.conf, infra/lib-manual.sh), so the menu on another host needs its full
+# address: https://<portal host>/manual/, from PORTAL_URL, never from a request. Anything
+# else gives no link (user-menu.js checks the same shape).
+_MANUAL_RE = re.compile(r'https://[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?/manual/')
+
+
+def manual_url(portal_url):
+    """https://<portal host>/manual/, or '' when PORTAL_URL is not exactly https://<host>."""
+    url = (portal_url or '').strip().rstrip('/') + '/manual/'
+    return url if _MANUAL_RE.fullmatch(url) else ''
+
+
+MANUAL_URL = manual_url(PORTAL_URL)
 # What /healthz on the admin port reports; apps/access/deploy.sh widens the proxy only
 # after every Ready pod answers with it (invariant W, never fail open).
 ACCESS_VERSION = '2.7'
@@ -2620,7 +2635,7 @@ class Profile(Base):
                 u = kc_user_by_username(user)
                 if not u:
                     return 404, {'error': 'account not found'}
-                return 200, dict(profile_of(u), **account_links(self.headers.get('Host', '').split(':')[0]))
+                return 200, dict(profile_of(u), manual=MANUAL_URL, **account_links(self.headers.get('Host', '').split(':')[0]))
             return self.guarded(me)
         self.send(404, {'error': 'not found'})
 

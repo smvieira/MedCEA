@@ -4,6 +4,9 @@
 # Deploys:
 #   - grafana-dashboard-provider  ConfigMap  → /etc/grafana/provisioning/dashboards/
 #   - grafana-dashboards          ConfigMap  → /var/lib/grafana/dashboards/
+#     (every dashboards/*.json: the live telemetry dashboard and the standard
+#     reports, all in Grafana folder "MedCEA"; their SQL may read only what
+#     svc_grafana may SELECT, tests/test_report_dashboards.py)
 #   - Mounts both into the Grafana deployment (idempotent)
 #   - Checks, as Grafana's break-glass admin, that each dashboard is provisioned
 #

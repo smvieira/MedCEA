@@ -1,0 +1,724 @@
+{
+  "title": "Device and Zone Health",
+  "uid": "medcea-device-zone-health",
+  "description": "Standard report: per zone the last reading and control report and how old they are, per board the sensors of its latest health message, and every board heard in the time range.",
+  "tags": [
+    "medcea",
+    "report",
+    "devices",
+    "zones"
+  ],
+  "timezone": "browser",
+  "refresh": "5m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "schemaVersion": 38,
+  "graphTooltip": 1,
+  "editable": false,
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "unit",
+        "label": "Unit",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "definition": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "sort": 0,
+        "current": {},
+        "allValue": "SELECT unit_id FROM medcea.cea_unit"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "report"
+      ],
+      "asDropdown": true,
+      "title": "Standard reports",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "panels": [
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Active zones",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Zones\"\nFROM medcea.cea_zone z\nWHERE z.unit_id IN ($unit) AND z.is_active::text = 'Y'",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Active zones without a fresh reading",
+      "description": "Active zones whose newest reading arrived more than 10 minutes ago (the Run Monitor's stale rule), or that have had none for a day.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Zones\"\nFROM medcea.cea_zone z\nLEFT JOIN LATERAL (SELECT m.timestamp FROM medcea.measurement m\n    WHERE m.zone_id = z.zone_id AND m.measure_timestamp >= now() - interval '1 day'\n      AND m.msg_type::text = 'AP'\n    ORDER BY m.measure_timestamp DESC LIMIT 1) ap ON true\nWHERE z.unit_id IN ($unit) AND z.is_active::text = 'Y'\n  AND (ap.timestamp IS NULL OR ap.timestamp < now() - interval '600 seconds')",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Sensors failing (latest health message)",
+      "description": "Sensors that the newest health (HB) message of an active zone's board, within the selected time range, reports as not ok. A board sends HB at boot and when a sensor's state changes, so a board with no HB in the time range is not counted.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Sensors\"\nFROM medcea.cea_zone z\nJOIN LATERAL (SELECT m.device_dns, m.timestamp, m.msg::jsonb AS msg FROM medcea.measurement m\n    WHERE m.zone_id = z.zone_id AND m.measure_timestamp >= $__timeFrom() AND m.msg_type::text = 'HB'\n    ORDER BY m.measure_timestamp DESC LIMIT 1) h ON true\nCROSS JOIN LATERAL jsonb_array_elements(COALESCE(h.msg -> 'sensors', '[]'::jsonb)) s\nWHERE z.unit_id IN ($unit) AND z.is_active::text = 'Y'\n  AND NOT (s ->> 'ok')::boolean",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Boards heard in the time range",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(DISTINCT m.device_dns) AS \"Boards\"\nFROM medcea.measurement m\nWHERE m.zone_id IN (SELECT zone_id FROM medcea.cea_zone WHERE unit_id IN ($unit))\n  AND $__timeFilter(m.measure_timestamp)",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 5,
+      "title": "Zones: last reading and last control report",
+      "description": "Every zone of the selected units, active or not, with the newest reading (AP) in the selected time range and the board that sent it, the newest control report (SP) of the zone's CONTROL board and the newest health message (HB). A reading older than 10 minutes is stale (orange), older than an hour red; none in the time range is red too.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Reading age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 600
+                    },
+                    {
+                      "color": "red",
+                      "value": 3600
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "none in the time range",
+                        "color": "red",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Zone state"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Active": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "Inactive": {
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last reading"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last control report"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last health message"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT u.unit_code AS \"Unit\", z.zone_code AS \"Zone\",\n  CASE WHEN z.is_active::text = 'Y' THEN 'Active' ELSE 'Inactive' END AS \"Zone state\",\n  ap.device_dns AS \"Sensor board\", ap.timestamp AS \"Last reading\",\n  extract(epoch FROM now() - ap.timestamp) AS \"Reading age\",\n  sp.device_dns AS \"Control board\", sp.timestamp AS \"Last control report\",\n  hb.timestamp AS \"Last health message\"\nFROM medcea.cea_zone z\nJOIN medcea.cea_unit u ON u.unit_id = z.unit_id\nLEFT JOIN LATERAL (SELECT m.device_dns, m.timestamp FROM medcea.measurement m\n    WHERE m.zone_id = z.zone_id AND m.measure_timestamp >= $__timeFrom() AND m.msg_type::text = 'AP'\n    ORDER BY m.measure_timestamp DESC LIMIT 1) ap ON true\nLEFT JOIN LATERAL (SELECT m.device_dns, m.timestamp FROM medcea.measurement m\n    WHERE m.zone_id = z.zone_id AND m.measure_timestamp >= $__timeFrom() AND m.msg_type::text = 'SP'\n    ORDER BY m.measure_timestamp DESC LIMIT 1) sp ON true\nLEFT JOIN LATERAL (SELECT m.timestamp FROM medcea.measurement m\n    WHERE m.zone_id = z.zone_id AND m.measure_timestamp >= $__timeFrom() AND m.msg_type::text = 'HB'\n    ORDER BY m.measure_timestamp DESC LIMIT 1) hb ON true\nWHERE z.unit_id IN ($unit)\nORDER BY u.unit_code, z.zone_code",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 6,
+      "title": "Board health: sensors in the latest health message",
+      "description": "Each SENSE board publishes a health message (HB, topic …/sense/_health) at boot and whenever a sensor's state changes; this shows each sensor of the newest one per active zone within the selected time range. A board with no HB in the time range has no row (widen the range to see an older verdict). Report age is coloured like Reading age; since HB is sent only on a change, an old report is not by itself a fault.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "OK": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "Failing": {
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Report age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 600
+                    },
+                    {
+                      "color": "red",
+                      "value": 3600
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Reported"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT h.device_dns AS \"Board\", h.msg ->> 'unit_code' AS \"Unit\", z.zone_code AS \"Zone\",\n  h.timestamp AS \"Reported\", extract(epoch FROM now() - h.timestamp) AS \"Report age\",\n  s ->> 'id' AS \"Sensor\",\n  CASE WHEN (s ->> 'ok')::boolean THEN 'OK' ELSE 'Failing' END AS \"State\",\n  s ->> 'err' AS \"Error\", h.msg ->> 'ip' AS \"IP address\"\nFROM medcea.cea_zone z\nJOIN LATERAL (SELECT m.device_dns, m.timestamp, m.msg::jsonb AS msg FROM medcea.measurement m\n    WHERE m.zone_id = z.zone_id AND m.measure_timestamp >= $__timeFrom() AND m.msg_type::text = 'HB'\n    ORDER BY m.measure_timestamp DESC LIMIT 1) h ON true\nCROSS JOIN LATERAL jsonb_array_elements(COALESCE(h.msg -> 'sensors', '[]'::jsonb)) s\nWHERE z.unit_id IN ($unit) AND z.is_active::text = 'Y'\nORDER BY \"State\", h.device_dns, \"Sensor\"",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 7,
+      "title": "Boards heard in the time range",
+      "description": "Every board that sent anything from a zone of the selected units in the selected time range, with its message counts by type: readings (AP), control reports (SP), health (HB) and test messages (TS). Whether a board is registered as active is not shown: Grafana's database account may not read the device table.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 600
+                    },
+                    {
+                      "color": "red",
+                      "value": 3600
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last message"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT m.device_dns AS \"Board\", u.unit_code AS \"Unit\", z.zone_code AS \"Zone\",\n  max(m.timestamp) AS \"Last message\",\n  extract(epoch FROM now() - max(m.timestamp)) AS \"Age\",\n  count(*) FILTER (WHERE m.msg_type::text = 'AP') AS \"Readings\",\n  count(*) FILTER (WHERE m.msg_type::text = 'SP') AS \"Control reports\",\n  count(*) FILTER (WHERE m.msg_type::text = 'HB') AS \"Health messages\",\n  count(*) FILTER (WHERE m.msg_type::text = 'TS') AS \"Test messages\"\nFROM medcea.measurement m\nJOIN medcea.cea_zone z ON z.zone_id = m.zone_id\nJOIN medcea.cea_unit u ON u.unit_id = z.unit_id\nWHERE m.zone_id IN (SELECT zone_id FROM medcea.cea_zone WHERE unit_id IN ($unit))\n  AND $__timeFilter(m.measure_timestamp)\nGROUP BY m.device_dns, u.unit_code, z.zone_code\nORDER BY \"Last message\" DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

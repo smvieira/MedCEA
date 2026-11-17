@@ -8,7 +8,7 @@
 <thead><tr><th>App</th><th>Default address</th><th>Roles admitted</th></tr></thead>
 <tbody>
 <tr><td>Portal</td><td><code>portal.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
-<tr><td>Platform manual (this manual)</td><td><code>portal.&lt;domain&gt;/manual/</code></td><td>All eleven platform roles (the portal's gate)</td></tr>
+<tr><td>Platform manual (this manual; the user menu's <strong>Platform manual</strong>)</td><td><code>portal.&lt;domain&gt;/manual/</code></td><td>All eleven platform roles (the portal's gate)</td></tr>
 <tr><td>Configuration UI (System Configuration)</td><td><code>config.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
 <tr><td>Scheduler (Recipe Schedule Manager)</td><td><code>scheduler.&lt;domain&gt;</code></td><td>All eleven platform roles</td></tr>
 <tr><td>Run Monitor</td><td><code>monitor.&lt;domain&gt;</code></td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">bio_scientist</span> and <span class="role">control_scientist</span> for telemetry only (no runs)</td></tr>
@@ -34,45 +34,32 @@
 <p>Database Management, the User Manager and the Access Policy always enforce, whatever the switch says. The changes you save in the Configuration UI go straight to the database, which adds its own checks once <code>IAM_DB_ROLES</code> is <code>true</code>; the page asks the database once, when it opens, which changes your role may make, and shows only those buttons (<a href="#apps-config-rights">what your role sees</a>). Each app section notes where the two modes differ. The switches themselves are explained in the <a href="#admin">administration chapter</a>.</p>
 
 <h4>The user menu</h4>
-<p>Every signed-in app except Grafana, the AI Workbench, Node-RED and pgAdmin shows your name at the top right. It opens a menu with two entries:</p>
+<p>Every signed-in app except Grafana, the AI Workbench, Node-RED and pgAdmin shows your name at the top right. It opens a menu with three entries:</p>
 <ul>
 <li><strong>Profile</strong>: your personal details and your password.</li>
+<li><strong>Platform manual</strong>: this manual, in a new tab (see <a href="#apps-manual">the platform manual</a>).</li>
 <li><strong>Sign out</strong>: ends your session on the platform, not only in that app.</li>
 </ul>
 <p>The AI Workbench's <strong>File → Log Out</strong> and the Node-RED editor's <strong>Logout</strong> do the same from inside those apps.</p>
 
 <h3 id="apps-portal">Portal</h3>
 <p>The portal is the start page. It lists the apps as cards; clicking a card opens that app in a new browser tab. Every platform role can open the portal. An account without a platform role gets the page <strong>No access yet</strong>, which explains that an administrator still has to approve the access request.</p>
-<p>The main page, <strong>MedCEA Platform</strong>, shows four cards:</p>
+<p>The main page, <strong>MedCEA Platform</strong>, shows four areas, grouped by where their data comes from. Each opens a page of its own, with a <strong>Back</strong> button to the main page and a line saying what data its apps work on:</p>
 <ul>
-<li><strong>Dashboards</strong>: the <strong>MedCEA Dashboard</strong> page, where you choose the dashboard tool (below).</li>
-<li><strong>JupyterHub</strong>: the AI Workbench.</li>
-<li><strong>Documentation</strong>: the <strong>Platform manual</strong>, this manual (see <a href="#apps-manual">below</a>).</li>
-<li><strong>Administration</strong>: opens the <strong>Platform Management</strong> page.</li>
+<li><strong>Operations</strong>: the daily work on live data. Run Monitor, Recipe Schedule Manager (Scheduling) and System Configuration.</li>
+<li><strong>Reports</strong>: Grafana's <strong>Standard reports</strong>, the platform's prepared reports kept in git (see <a href="#apps-grafana">Grafana</a>), and Superset's <strong>Ad-hoc analysis</strong>, your own charts and SQL on live telemetry and master data (see <a href="#apps-superset">Superset</a>; greyed out with "Not installed yet" where it is not installed). Live data.</li>
+<li><strong>Research workbench</strong>: the AI Workbench's <strong>Notebooks</strong>, for the scientists and engineers, and <strong>Agent campaigns</strong>, greyed out until the research sandbox's agent harness is built. Today the notebooks read platform data with your own role's rights; when the workbench moves into the research sandbox they read pseudonymised snapshots instead (see <a href="#research">Research sandbox</a>).</li>
+<li><strong>Platform Management</strong>: administration. Node-RED, MQTT Explorer, Database Management, User Manager, Access Policy and pgAdmin.</li>
 </ul>
-<p>The <strong>MedCEA Dashboard</strong> page (<strong>Back</strong> returns to the main page) holds one card per dashboard tool:</p>
-<ul>
-<li><strong>Grafana</strong> (Live dashboards): the platform's prepared dashboards of telemetry and runs.</li>
-<li><strong>Superset</strong> (Data analysis): your own charts and dashboards, and queries over telemetry and master data (no runs). Installed since 8 November 2026; where it is not installed, its card is greyed out with "Not installed yet". See <a href="#apps-superset">Superset</a>.</li>
-</ul>
-<p>Platform Management holds the cards for these apps:</p>
-<ul>
-<li>Node-RED</li>
-<li>Database Management</li>
-<li>MQTT Explorer</li>
-<li>Configuration</li>
-<li>Scheduling (Recipe Schedule Manager)</li>
-<li>Operations (Run Monitor)</li>
-<li>User Manager</li>
-</ul>
-<p>The portal shows every card to every role. A card for an app your role may not open still opens it, and the app's gate answers with an error page. When an administrator uninstalls an app, its card stays on the page, greyed out, not clickable and marked "Not installed yet", and it comes back when the app is deployed again.</p>
+<p>The manual is not a card: it is in the user menu of every signed-in app (above).</p>
+<p>The portal shows every card to every role. A card for an app your role may not open still opens it, and the app's gate answers with an error page. When an administrator uninstalls an app, its card stays on the page, greyed out, not clickable and marked "Not installed yet", and it comes back when the app is deployed again. The Notebooks card is greyed out on an install with <code>WORKBENCH_ENABLED=false</code>.</p>
 <ol class="steps">
 <li>Open <code>https://portal.&lt;domain&gt;</code> and sign in with your platform account.</li>
-<li>Click a card. For the apps under Platform Management, click <strong>Administration</strong> first.</li>
+<li>Click the area, then the app's card.</li>
 <li>Use <strong>Back</strong> to return to the main page, or the user menu to sign out.</li>
 </ol>
 <h4 id="apps-manual">The platform manual in the portal</h4>
-<p>Since 3 November 2026 this manual is part of the platform. The <strong>Platform manual</strong> card on the portal's main page opens it in a new tab at <code>https://portal.&lt;domain&gt;/manual/</code>; <code>/manual</code> without the slash leads there too. It sits behind the portal's own sign-in, so everyone the portal admits can read it (every platform role) and nobody else: signed out, the address leads to the platform sign-in page, and an account without a platform role gets the portal's <strong>No access yet</strong> page. It is not in the user menu.</p>
+<p>Since 3 November 2026 this manual is part of the platform. <strong>Platform manual</strong> in the user menu, between Profile and Sign out, opens it in a new tab at <code>https://portal.&lt;domain&gt;/manual/</code> from any signed-in app (until 17 November 2026 it was a card on the portal's main page); <code>/manual</code> without the slash leads there too. It sits behind the portal's own sign-in, so everyone the portal admits can read it (every platform role) and nobody else: signed out, the address leads to the platform sign-in page, and an account without a platform role gets the portal's <strong>No access yet</strong> page.</p>
 <p>The copy you read there is built from the manual's chapters in the repository each time it is published, by every <code>./deploy-infra.sh</code> and by <code>./medcea.sh</code> → Infrastructure → <strong>Publish the manual to the portal</strong> (see <a href="#admin-manual">the manual in the portal</a>). Your browser checks for a newer copy at every load, so a republished manual shows at once on reload. Reading it leaves no event in the platform's records; a read appears only in the access logs of the sign-in proxy and of the portal's web server. The <strong>Updated</strong> and <strong>Code</strong> lines at the top say which edition you read.</p>
 
 <h3 id="apps-config">Configuration UI</h3>
@@ -574,7 +561,18 @@ The snapshot never changes afterwards.</li>
 <div class="warn"><p>The flows connect to the message broker as the <code>node-red</code> service account, which reads every topic under the platform root, and to the database with the ingest login <code>svc_ingest</code>, which may read master data and insert telemetry rows. Code in a flow runs with both. A broken or deleted ingest flow stops telemetry from being stored. Export a copy of the flow before you change it. The flow kept in the repository is <code>apps/node-red/flows/message-processing.json</code>.</p></div>
 
 <h3 id="apps-grafana">Grafana</h3>
-<p>Grafana shows telemetry as dashboards. The portal's Grafana card opens it, and you are signed in with your platform account without a further prompt. The provided dashboard, <strong>IoT Environmental Monitoring</strong>, has these panels:</p>
+<p>Grafana is the platform's tool for <strong>standard reports</strong>: dashboards kept in the repository, the same for everyone who may open them. The portal's <strong>Reports</strong> area opens it (card <strong>Standard reports</strong>), and you are signed in with your platform account without a further prompt. Since 17 November 2026 the reports are in Grafana's <strong>MedCEA</strong> folder:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Report</th><th>What it shows</th></tr></thead>
+<tbody>
+<tr><td><strong>IoT Environmental Monitoring</strong></td><td>Live telemetry (below).</td></tr>
+<tr><td><strong>Runs per Unit</strong></td><td>Runs started, completed and failed in the time range, and running or scheduled now; runs by unit and status; runs started per day; the running and scheduled runs; the 25 latest runs. Filter: unit. Default range 30 days.</td></tr>
+<tr><td><strong>Run History</strong></td><td>Every run in the time range with its unit, recipe number, status, start, end, duration, cycles completed and failed, who started it with which role, and whether a completed run is released; below, the cycles of those runs. Filters: unit, recipe, status.</td></tr>
+<tr><td><strong>Run Release Status</strong></td><td>Completed runs and their release: those not released yet first, in orange, with how long they have waited; then who released each and when, with the note. A run is released by a <span class="role">qp</span> person in the Configuration UI's Approvals tab; a failed run is never released and is not listed. Default range 90 days.</td></tr>
+<tr><td><strong>Device and Zone Health</strong></td><td>Per zone, active or not, the newest reading in the time range and its age (orange after 10 minutes, the Run Monitor's rule; red after an hour), the control board's last report and the last health message; for each active zone, each sensor in its board's latest health message within the time range (OK or failing, with the error; a board sends one at start-up and when a sensor's state changes, so widen the range to see an older verdict); the boards heard in the time range with their counts of readings, control reports, health and test messages. Default range 24 hours; refreshes every 5 minutes.</td></tr>
+</tbody>
+</table></div>
+<p>Recipes appear by number, and device registration (active or inactive) is not shown: Grafana's database account may not read the recipe or device tables, and the reports were made without widening it. A board flashed before health messages existed has no row in the health table. The reports read the measurements zone by zone and only within their time range, so they stay fast as the history grows; a filter left on <strong>All</strong> shows empty tables, not an error, on an install with no runs yet. The first report, <strong>IoT Environmental Monitoring</strong>, has these panels:</p>
 <ul>
 <li>live readings of air temperature, relative humidity and CO<sub>2</sub>, one gauge per zone and sensor ("ZONE01 / sht45_1")</li>
 <li>historical trends of the same readings, one line per zone and sensor</li>
@@ -594,7 +592,7 @@ The snapshot never changes afterwards.</li>
 
 <h3 id="apps-superset">Superset (data analysis)</h3>
 <div class="note"><p><strong>Installed since 8 November 2026.</strong> Superset's code is part of the platform since 6 November 2026 (stage B); its access policy, two versions approved by <span class="role">qa</span>, was applied on 8 November 2026 (stage C, versions 15 and 16), and Superset was installed the same day. A fresh install installs it with everything else. Superset is skipped, and its portal card stays greyed out with "Not installed yet", only on an install whose administrator has not turned on the services' own database accounts (<code>IAM_DB_SERVICE_ROLES</code>, true on a new install) or whose access policy has no applied version yet. The decisions behind it are in the <a href="#compliance-decisions">decision record</a> ("Superset for data analysis", 4 November 2026, "Superset stage B", 6 November 2026, "Superset stage C", 7 November 2026, and "Superset installed by default", 8 November 2026).</p></div>
-<p>Apache Superset (version 6.1.0) is the platform's tool for your own analysis: charts and dashboards you build yourself, and SQL queries in <strong>SQL Lab</strong>, over telemetry (measurements) and master data (units, zones, devices, recipes). It does not read runs or run logs. Grafana stays the tool for the platform's prepared dashboards. The portal's <strong>MedCEA Dashboard</strong> page opens it at <code>https://superset.&lt;domain&gt;</code>.</p>
+<p>Apache Superset (version 6.1.0) is the platform's tool for your own analysis: charts and dashboards you build yourself, and SQL queries in <strong>SQL Lab</strong>, over telemetry (measurements) and master data (units, zones, devices, recipes). It does not read runs or run logs. Grafana is the tool for the platform's standard reports. The portal's <strong>Reports</strong> area opens Superset (card <strong>Ad-hoc analysis</strong>) at <code>https://superset.&lt;domain&gt;</code>. The live Superset ends when the AI Workbench moves into the research sandbox (Phase 2b, decision of 17 November 2026); a Superset on snapshots for the scientists comes later, when a scientist needs it.</p>
 <p>Superset gives each person one of two kinds of access, compiled from the access policy:</p>
 <ul>
 <li><strong>Builders</strong>, for <span class="role">bio_scientist</span>, <span class="role">control_scientist</span> and <span class="role">engineer</span>: create and change charts, datasets and dashboards, and write queries in SQL Lab (Superset's roles Alpha and <code>sql_lab</code>).</li>
@@ -618,7 +616,7 @@ The snapshot never changes afterwards.</li>
 <li>The workspace runs as the container's own account, <code>jovyan</code>, so file paths start with <code>/home/jovyan</code>. You are still shown as yourself: a terminal's prompt reads <code>&lt;your username&gt;@workbench</code>, and your commits carry your username as the author name (see <a href="#apps-workbench-git">Saving your notebooks to git</a>).</li>
 </ul>
 <ol class="steps">
-<li>Click the <strong>JupyterHub</strong> card on the portal. You go straight to the platform sign-in.</li>
+<li>On the portal, click <strong>Research workbench</strong>, then the <strong>Notebooks</strong> card (label AI Workbench). You go straight to the platform sign-in.</li>
 <li>Wait while your workspace starts, then work in JupyterLab.</li>
 </ol>
 <p>Who may sign in comes from the access policy: <span class="role">admin</span>, <span class="role">bio_scientist</span>, <span class="role">control_scientist</span>, <span class="role">engineer</span>, <span class="role">qa</span>. Anyone else sees the workbench's "No access to AI Workbench" page. Every person admitted gets a full workspace that runs code; the workbench has no read-only mode.</p>

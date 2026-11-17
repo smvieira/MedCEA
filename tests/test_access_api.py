@@ -951,7 +951,7 @@ class SignOutLinks(Base):
         import subprocess
         with open(os.path.join(REPO, 'apps', 'access', 'html', 'user-menu.js')) as fh:
             js = fh.read()
-        self.assertIn("mount(host, { display_name: 'Account', sign_out: '/oauth2/sign_out' })", js)
+        self.assertIn("mount(host, { display_name: 'Account', sign_out: '/oauth2/sign_out', manual: localManual() })", js)
         fn = re.search(r'function signOutHref\(u\) \{.*?\n  \}', js, re.S)
         self.assertIsNotNone(fn)
         if not shutil.which('node'):
@@ -964,6 +964,36 @@ class SignOutLinks(Base):
         r = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), [real, '/oauth2/sign_out?rd=https%3A%2F%2Fk'] + ['/oauth2/sign_out'] * 9)
+
+    def test_manual_link(self):
+        """Owner decision of 17 Nov 2026: every user menu links the platform manual on the
+        portal host, from PORTAL_URL only; user-menu.js takes only that exact shape."""
+        self.assertEqual(API.manual_url('https://portal.medcea'), 'https://portal.medcea/manual/')
+        self.assertEqual(API.manual_url('https://portal.medcea/'), 'https://portal.medcea/manual/')
+        for bad in ('', None, 'http://portal.medcea', 'https://portal.medcea/x', '//portal.medcea',
+                    'https://evil@portal.medcea', 'javascript:alert(1)', 'https://Portal.medcea'):
+            self.assertEqual(API.manual_url(bad), '', bad)
+        saved = API.MANUAL_URL
+        self.addCleanup(setattr, API, 'MANUAL_URL', saved)
+        API.MANUAL_URL = 'https://portal.medcea/manual/'
+        self.w.user(S, 'sam')
+        status, body = self.call('GET', '/_account/api/me', cls=API.Profile,
+                                 headers={'X-Forwarded-Preferred-Username': 'sam', 'Host': 'config.medcea'})
+        self.assertEqual((status, body['manual']), (200, 'https://portal.medcea/manual/'))
+        import shutil
+        import subprocess
+        with open(os.path.join(REPO, 'apps', 'access', 'html', 'user-menu.js')) as fh:
+            js = fh.read()
+        fn = re.search(r'function manualHref\(u\) \{.*?\n  \}', js, re.S)
+        self.assertIsNotNone(fn)
+        if not shutil.which('node'):
+            self.skipTest('node is not installed')
+        cases = ['https://portal.medcea/manual/', 'https://portal.medcea:8443/manual/', 'http://portal.medcea/manual/',
+                 'https://portal.medcea/manual/x', '//evil.example/manual/', '/manual/', 'javascript:alert(1)', '', None, 7]
+        r = subprocess.run(['node', '-e', fn.group(0) + '\nconsole.log(JSON.stringify(%s.map(manualHref)));' % json.dumps(cases)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), cases[:2] + [None] * 8)
 
 
 # ── 14. CSRF ──────────────────────────────────────────────────────────────────

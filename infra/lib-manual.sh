@@ -112,7 +112,7 @@ sys.exit(0 if any((v.get("configMap") or {}).get("name") == sys.argv[1] for v in
 ' "$MANUAL_CM" <<<"$dep"; then
         echo "  manual: stored in ConfigMap $MANUAL_CM, but the portal in $ns is not set up to serve it yet"
         echo "  (its Deployment does not mount $MANUAL_CM). Run ./deploy-infra.sh once: its section 9"
-        echo "  adds the mount, the portal's /manual/ route and the Platform manual card. Not restarted."
+        echo "  adds the mount and the portal's /manual/ route (linked from every user menu). Not restarted."
         return 0
     fi
     # The ConfigMap is a directory mount, which kubelet refreshes within about a minute

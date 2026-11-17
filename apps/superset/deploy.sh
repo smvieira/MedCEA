@@ -483,7 +483,7 @@ _pods_current || die "a running Superset pod still carries another configuration
 wait_for_http "https://$SUPERSET_DOMAIN/health" 180 "Superset" || exit 1
 
 # =============================================================================
-# 6. Portal card (the MedCEA Dashboard view)
+# 6. Portal card (the Reports view)
 # =============================================================================
 source "$REPO_ROOT/infra/lib-portal.sh"
 portal_card enable "https://$SUPERSET_DOMAIN"

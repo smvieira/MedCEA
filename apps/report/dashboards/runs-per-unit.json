@@ -1,0 +1,805 @@
+{
+  "title": "Runs per Unit",
+  "uid": "medcea-runs-per-unit",
+  "description": "Standard report: recipe runs per unit and status over the selected time range, the runs active now and the latest runs.",
+  "tags": [
+    "medcea",
+    "report",
+    "runs"
+  ],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "schemaVersion": 38,
+  "graphTooltip": 1,
+  "editable": false,
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "unit",
+        "label": "Unit",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "definition": "SELECT unit_id AS __value, unit_code AS __text FROM medcea.cea_unit ORDER BY unit_code",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "sort": 0,
+        "current": {},
+        "allValue": "SELECT unit_id FROM medcea.cea_unit"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "report"
+      ],
+      "asDropdown": true,
+      "title": "Standard reports",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "In the selected time range",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Runs started",
+      "description": "Runs whose start lies in the selected time range.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rr.recipe_run_start)",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Completed",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rr.recipe_run_start) AND rr.recipe_run_status::text = 'C'",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Failed",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rr.recipe_run_start) AND rr.recipe_run_status::text = 'F'",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Running or scheduled now",
+      "description": "Runs in status Running or Scheduled at this moment, whatever the time range.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT count(*) AS \"Runs\"\nFROM medcea.recipe_run rr\nWHERE rr.unit_id IN ($unit) AND rr.recipe_run_status::text IN ('R', 'S')",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "id": 6,
+      "title": "Runs by unit and status",
+      "description": "Runs started in the selected time range, per unit, stacked by status.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Scheduled"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Completed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "stacking": "normal",
+        "orientation": "auto",
+        "xField": "Unit",
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "barWidth": 0.6,
+        "groupWidth": 0.7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT u.unit_code AS \"Unit\",\n  count(*) FILTER (WHERE rr.recipe_run_status::text = 'S') AS \"Scheduled\",\n  count(*) FILTER (WHERE rr.recipe_run_status::text = 'R') AS \"Running\",\n  count(*) FILTER (WHERE rr.recipe_run_status::text = 'C') AS \"Completed\",\n  count(*) FILTER (WHERE rr.recipe_run_status::text = 'F') AS \"Failed\"\nFROM medcea.recipe_run rr\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rr.recipe_run_start)\nGROUP BY u.unit_code\nORDER BY u.unit_code",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Runs started per day",
+      "description": "Runs started per day in the selected time range, by status.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "stacking": {
+              "mode": "normal"
+            },
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Scheduled"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Completed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT $__timeGroupAlias(rr.recipe_run_start, '1d'),\n  CASE rr.recipe_run_status::text WHEN 'S' THEN 'Scheduled' WHEN 'R' THEN 'Running' WHEN 'C' THEN 'Completed' WHEN 'F' THEN 'Failed' ELSE rr.recipe_run_status::text END AS metric,\n  count(*) AS value\nFROM medcea.recipe_run rr\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rr.recipe_run_start)\nGROUP BY 1, 2\nORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 8,
+      "title": "Runs",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "id": 9,
+      "title": "Running and scheduled runs",
+      "description": "Every run now in status Running or Scheduled, whatever the time range. Recipes are shown by number: Grafana's database account may not read the recipe table.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 24,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Scheduled": {
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "Running": {
+                        "color": "green",
+                        "index": 1
+                      },
+                      "Completed": {
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "Failed": {
+                        "color": "red",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running for"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT rr.recipe_run_id AS \"Run\", u.unit_code AS \"Unit\", rr.recipe_id AS \"Recipe\",\n  CASE rr.recipe_run_status::text WHEN 'S' THEN 'Scheduled' WHEN 'R' THEN 'Running' WHEN 'C' THEN 'Completed' WHEN 'F' THEN 'Failed' ELSE rr.recipe_run_status::text END AS \"Status\",\n  rr.recipe_run_start AS \"Start\",\n  CASE WHEN rr.recipe_run_status::text = 'R' THEN extract(epoch FROM now() - rr.recipe_run_start) END AS \"Running for\",\n  (SELECT count(*) FROM medcea.recipe_line_cycle_run c WHERE c.recipe_run_id = rr.recipe_run_id\n     AND c.recipe_line_cycle_run_status::text = 'C') AS \"Cycles completed\",\n  rr.executed_by_name AS \"Started by\"\nFROM medcea.recipe_run rr\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nWHERE rr.unit_id IN ($unit) AND rr.recipe_run_status::text IN ('R', 'S')\nORDER BY rr.recipe_run_start",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 10,
+      "title": "Latest runs",
+      "description": "The 25 most recent runs started in the selected time range.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Scheduled": {
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "Running": {
+                        "color": "green",
+                        "index": 1
+                      },
+                      "Completed": {
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "Failed": {
+                        "color": "red",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "End"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "rawSql": "SELECT rr.recipe_run_id AS \"Run\", u.unit_code AS \"Unit\", rr.recipe_id AS \"Recipe\",\n  CASE rr.recipe_run_status::text WHEN 'S' THEN 'Scheduled' WHEN 'R' THEN 'Running' WHEN 'C' THEN 'Completed' WHEN 'F' THEN 'Failed' ELSE rr.recipe_run_status::text END AS \"Status\",\n  rr.recipe_run_start AS \"Start\", rr.recipe_run_end AS \"End\",\n  rr.executed_by_name AS \"Started by\"\nFROM medcea.recipe_run rr\nJOIN medcea.cea_unit u ON u.unit_id = rr.unit_id\nWHERE rr.unit_id IN ($unit) AND $__timeFilter(rr.recipe_run_start)\nORDER BY rr.recipe_run_start DESC\nLIMIT 25",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

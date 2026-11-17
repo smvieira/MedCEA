@@ -1255,8 +1255,8 @@ a_manual_publish() {
     EFFECT="ConfigMap portal-manual (the manual built from docs/manual/chapters now), then a restart of the portal; nothing else"
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("After a change to the manual: it builds into a temporary file (the working tree is not touched) and refuses when docs/manual/build.py refuses."
-           "Everyone the portal admits reads it at https://<PORTAL_DOMAIN>/manual/ (the Platform manual card). ./deploy-infra.sh publishes it too."
-           "On an install whose portal predates the manual it only stores it (no restart) and says so: run ./deploy-infra.sh once to add the /manual/ route and the card."
+           "Everyone the portal admits reads it at https://<PORTAL_DOMAIN>/manual/ (Platform manual in the user menu of every signed-in app). ./deploy-infra.sh publishes it too."
+           "On an install whose portal predates the manual it only stores it (no restart) and says so: run ./deploy-infra.sh once to add the /manual/ route."
            "The health check's Platform manual WARNs while the portal serves an older build than the repository's.")
     plan_run
 }

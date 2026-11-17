@@ -33,7 +33,7 @@ NAMESPACE="${NAMESPACE:-medcea}"
 echo "Publishing the platform manual to the portal (namespace $NAMESPACE)..."
 manual_publish "$NAMESPACE"
 if [[ "$MANUAL_SERVED" == yes ]]; then
-    echo "Done: https://${PORTAL_DOMAIN:-portal.<domain>}/manual/ (the portal's Platform manual card)."
+    echo "Done: https://${PORTAL_DOMAIN:-portal.<domain>}/manual/ (Platform manual in the user menu)."
 else
     echo "Done: the manual is stored, but not served yet (see above)."
 fi

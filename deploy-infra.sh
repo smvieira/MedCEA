@@ -1912,6 +1912,12 @@ if $MK8S kubectl get deployment superset -n "$NAMESPACE" >/dev/null 2>&1; then
   # Its own restart left to the one below (two within a second: kubectl refuses the second).
   PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"
 fi
+# The page renders the Workbench's Notebooks card enabled; with WORKBENCH_ENABLED=false no
+# hub is deployed, so the card is greyed out ("Not installed yet") instead of a dead link.
+if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then
+  source "$SCRIPT_DIR/infra/lib-portal.sh"
+  PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card disable "https://${WORKBENCH_DOMAIN}"
+fi
 
 # The HTML (and the nginx config) is mounted with subPath, and a subPath ConfigMap mount does NOT
 # update in a running pod — kubelet only refreshes whole-directory mounts. So an

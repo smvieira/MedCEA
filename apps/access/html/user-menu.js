@@ -1,4 +1,4 @@
-/* MedCEA user menu — the signed-in person's name, opening Profile and Sign out.
+/* MedCEA user menu — the signed-in person's name, opening Profile, Platform manual and Sign out.
  * One script for every signed-in page (portal, config UI, User Manager). Each
  * host serves it at /_account/user-menu.js through its own oauth2-proxy, and
  * /_account/api/me answers for whoever that proxy signed in.
@@ -31,6 +31,7 @@
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + d + '</svg>';
   }
   var ICON_USER = icon('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
+  var ICON_BOOK = icon('<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>');
   var ICON_OUT = icon('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 
   function initials(name) {
@@ -44,6 +45,13 @@
   // (another origin, a scheme, "//host") falls back to the plain proxy sign-out.
   function signOutHref(u) {
     return (typeof u === 'string' && /^\/(?![\/\\])/.test(u)) ? u : '/oauth2/sign_out';
+  }
+
+  // The platform manual lives on the portal host (/manual/); /_account/api/me gives its
+  // full address (access-api.py manual_url). Only exactly https://<host>/manual/ is taken;
+  // anything else, or no answer, leaves the entry out.
+  function manualHref(u) {
+    return (typeof u === 'string' && /^https:\/\/[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?\/manual\/$/.test(u)) ? u : null;
   }
 
   function mount(host, me) {
@@ -63,7 +71,15 @@
     var sep = document.createElement('div'); sep.className = 'um-sep';
     var out = document.createElement('a'); out.href = signOutHref(me.sign_out); out.setAttribute('role', 'menuitem');
     out.innerHTML = ICON_OUT; out.append(document.createTextNode('Sign out'));
-    dd.append(prof, sep, out);
+    var items = [prof];
+    var mh = manualHref(me.manual);
+    if (mh) {
+      var man = document.createElement('a'); man.href = mh; man.target = '_blank'; man.rel = 'noopener';
+      man.setAttribute('role', 'menuitem');
+      man.innerHTML = ICON_BOOK; man.append(document.createTextNode('Platform manual'));
+      items.push(man);
+    }
+    dd.append.apply(dd, items.concat([sep, out]));
     root.append(btn, dd);
 
     function set(open) { root.classList.toggle('open', open); btn.setAttribute('aria-expanded', String(open)); }
@@ -74,15 +90,22 @@
     (host || document.body).appendChild(root);
   }
 
+  // Without an answer from /_account/api/me, a page that serves the manual itself (the
+  // portal: <meta name="medcea-manual" content="/manual/">) still links it on its own origin.
+  function localManual() {
+    var m = document.querySelector('meta[name="medcea-manual"]');
+    return (m && m.getAttribute('content') === '/manual/' && location.protocol === 'https:') ? location.origin + '/manual/' : '';
+  }
+
   function start() {
     var style = document.createElement('style'); style.textContent = css; document.head.appendChild(style);
     var host = document.getElementById('user-menu');
     fetch('/_account/api/me', { credentials: 'same-origin' })
       .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-      .then(function (me) { mount(host, me); })
+      .then(function (me) { if (!me.manual) me.manual = localManual(); mount(host, me); })
       .catch(function () {
         // Profile service unavailable: never leave someone without a way out.
-        mount(host, { display_name: 'Account', sign_out: '/oauth2/sign_out' });
+        mount(host, { display_name: 'Account', sign_out: '/oauth2/sign_out', manual: localManual() });
       });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();

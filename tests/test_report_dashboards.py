@@ -14,13 +14,40 @@ wrote last, an average of a self-heating SCD30 with an SHT45, a table's MAX over
 - the "Latest Readings" table shows the latest value per zone, device and sensor, not
   a MAX over the time window.
 
+The standard reports (owner decision of 17 Nov 2026: Grafana is the platform's tool for
+standard reports; runs per unit, run history, release status, device and zone health):
+
+- every dashboard has a uid and a title of its own, and the four reports exist;
+- every rawSql and every query variable reads only what svc_grafana, the datasource's
+  login, may SELECT: the set is compiled from the policy (`cli.py --defaults compile
+  grants --mode enforce --format json`, run in a scratch_repo() copy), and every
+  FROM/JOIN names a schema-qualified object of it (a view of it must also not read a
+  table outside it: run_history/run_watch are granted but security_invoker over recipe
+  and recipe_line, which svc_grafana may not read, so they are refused here);
+- deploy.sh and uninstall.sh take every file in dashboards/ (a glob, not a list), the
+  file names are valid ConfigMap keys, and all of them together stay well under the
+  256 KiB that kubectl apply's last-applied annotation may hold;
+- the provider keeps allowUiUpdates: false and puts them in one folder;
+- a variable with All that a query uses in `IN ($var)` has an allValue (a subquery or a
+  literal list), since Grafana expands All over no options to `IN ()`, a syntax error
+  on an install with no unit or run yet; its objects are checked like any query;
+- every read of medcea.measurement in Device and Zone Health is driven by zone_id and
+  bounded in time (its only index is (zone_id, measure_timestamp) and the table is never
+  pruned), and that dashboard refreshes no more often than every 5 minutes.
+
 Run: python3 tests/test_report_dashboards.py
 """
 import glob
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _scratch import clean_env, scratch_repo  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASHBOARDS = sorted(glob.glob(os.path.join(ROOT, "apps", "report", "dashboards", "*.json")))
@@ -31,6 +58,11 @@ TAG_FILTER = re.compile(r"\btag\s*(=|IN\b)", re.I)
 def load(path):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def read(rel):
+    with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+        return fh.read()
 
 
 def panels(doc):
@@ -44,6 +76,44 @@ def targets(doc):
         for t in p.get("targets", []):
             if "rawSql" in t:
                 yield p, t
+
+
+def queries(doc):
+    """(where, sql) for every panel rawSql and every query variable."""
+    for p, t in targets(doc):
+        yield "panel %s %r" % (p.get("id"), p.get("title")), t["rawSql"]
+    for v in doc.get("templating", {}).get("list", []):
+        if v.get("type") == "query":
+            yield "variable %s" % v.get("name"), v["query"]
+        if v.get("allValue"):
+            yield "variable %s allValue" % v.get("name"), v["allValue"]
+
+
+REPORTS = {   # file → uid, the standard report set of 17 Nov 2026
+    "runs-per-unit.json": "medcea-runs-per-unit",
+    "run-history.json": "medcea-run-history",
+    "release-status.json": "medcea-release-status",
+    "device-zone-health.json": "medcea-device-zone-health",
+}
+# Granted to svc_grafana but security_invoker views over tables it may not read.
+UNREADABLE_VIEWS = {"medcea.run_history", "medcea.run_watch"}
+RELATION = re.compile(r"\b(?:FROM|JOIN)\s+(?:LATERAL\s+)?([A-Za-z_][\w.]*)(\s*\()?", re.I)
+EXTRACT = re.compile(r"\b(extract|substring|trim)\s*\(\s*\w+\s+FROM\b", re.I)   # not a relation
+QUALIFIED = re.compile(r"\b(medcea|medcea_auth|iam|iam_policy|public|pg_catalog|information_schema)\.(\w+)\b")
+
+
+def grafana_select_set():
+    """The tables and views svc_grafana may SELECT, compiled from defaults.yaml offline."""
+    root = scratch_repo()
+    try:
+        out = subprocess.run(
+            [sys.executable, os.path.join(root, "apps", "iam", "compiler", "cli.py"), "--defaults",
+             "compile", "grants", "--mode", "enforce", "--format", "json"],
+            capture_output=True, text=True, env=clean_env(), check=True).stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return {obj for role, kind, obj, priv in json.loads(out)["privileges"]
+            if role == "svc_grafana" and kind == "table" and priv == "SELECT"}
 
 
 class DashboardTest(unittest.TestCase):
@@ -82,6 +152,99 @@ class DashboardTest(unittest.TestCase):
                  for m in p["fieldConfig"].get("overrides", []) if m["matcher"]["id"] == "byName"}
         for name in names:
             self.assertIn('"%s"' % name, sql)
+
+
+class StandardReportsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.docs = {os.path.basename(p): load(p) for p in DASHBOARDS}
+        cls.readable = grafana_select_set()
+
+    def test_the_reports_exist(self):
+        for name, uid in REPORTS.items():
+            self.assertIn(name, self.docs)
+            self.assertEqual(self.docs[name]["uid"], uid, name)
+            self.assertIn("report", self.docs[name].get("tags", []), name)
+
+    def test_unique_uids_and_titles(self):
+        uids = [d.get("uid") for d in self.docs.values()]
+        titles = [d.get("title") for d in self.docs.values()]
+        self.assertTrue(all(uids) and all(titles))
+        self.assertEqual(len(uids), len(set(uids)))
+        self.assertEqual(len(titles), len(set(titles)))
+        for uid in uids:
+            self.assertRegex(uid, r"^[A-Za-z0-9_-]{1,40}$")
+
+    def test_the_datasource_is_the_platform_one(self):
+        for name, doc in self.docs.items():
+            for p in panels(doc):
+                if p.get("type") == "row":
+                    continue
+                self.assertEqual(p["datasource"]["uid"], "PA68174188487FD5C", (name, p.get("id")))
+                for t in p.get("targets", []):
+                    self.assertEqual(t["datasource"]["uid"], "PA68174188487FD5C", (name, p.get("id")))
+
+    def test_the_compiled_set(self):
+        # what this test checks against; a policy change that moves it is a decision
+        self.assertTrue({"medcea.recipe_run", "medcea.recipe_line_cycle_run", "medcea.run_release",
+                         "medcea.measurement", "medcea.cea_unit", "medcea.cea_zone",
+                         "medcea.msg_actual_points"} <= self.readable, sorted(self.readable))
+        for unreadable in ("medcea.recipe", "medcea.recipe_line", "medcea.device"):
+            self.assertNotIn(unreadable, self.readable)
+
+    def test_every_query_reads_only_what_svc_grafana_may(self):
+        allowed = self.readable - UNREADABLE_VIEWS
+        seen = 0
+        for name, doc in self.docs.items():
+            for where, sql in queries(doc):
+                seen += 1
+                at = "%s: %s" % (name, where)
+                for m in QUALIFIED.finditer(sql):
+                    self.assertIn(m.group(0), allowed, at)
+                for m in RELATION.finditer(EXTRACT.sub(r"\1(", sql)):
+                    if m.group(2):          # a function call: jsonb_array_elements(…)
+                        continue
+                    self.assertIn(m.group(1), allowed, at)
+        self.assertGreaterEqual(seen, 30)
+
+    def test_deploy_ships_every_file(self):
+        deploy, uninstall = (read(os.path.join("apps", "report", f)) for f in ("deploy.sh", "uninstall.sh"))
+        self.assertIn('for f in "$DASHBOARDS_DIR"/*.json; do echo "--from-file=$(basename "$f")=$f"; done', deploy)
+        self.assertIn('for DASHBOARD_FILE in "$DASHBOARDS_DIR"/*.json; do', deploy)
+        self.assertIn('for f in "$DASHBOARDS_DIR"/*.json; do', uninstall)
+        files = os.listdir(os.path.join(ROOT, "apps", "report", "dashboards"))
+        self.assertEqual(sorted(f for f in files if not f.endswith(".json")), [])
+        for f in files:
+            self.assertRegex(f, r"^[-._a-zA-Z0-9]+$")
+        self.assertLess(sum(os.path.getsize(p) for p in DASHBOARDS), 160 * 1024)
+
+    def test_all_never_expands_to_an_empty_list(self):
+        used = 0
+        for name, doc in self.docs.items():
+            sql = " ".join(t["rawSql"] for _, t in targets(doc))
+            for v in doc.get("templating", {}).get("list", []):
+                if v.get("includeAll") and ("IN ($%s)" % v["name"]) in sql:
+                    used += 1
+                    self.assertTrue((v.get("allValue") or "").strip(), (name, v["name"]))
+        self.assertGreaterEqual(used, 6)    # $unit in the four reports, $recipe and $status
+
+    def test_measurement_reads_are_zone_driven_and_bounded(self):
+        doc = self.docs["device-zone-health.json"]
+        self.assertEqual(doc["refresh"], "5m")
+        reads = 0
+        for where, sql in queries(doc):
+            for chunk in sql.split("FROM medcea.measurement")[1:]:
+                reads += 1
+                head = chunk[:400]
+                self.assertRegex(head, r"\bm\.zone_id\s*(=|IN\b)", where)
+                self.assertRegex(head, r"\$__timeFrom\(\)|\$__timeFilter\(m\.measure_timestamp\)|"
+                                       r"m\.measure_timestamp >= now\(\) - interval", where)
+        self.assertGreaterEqual(reads, 8)
+
+    def test_the_provider(self):
+        provider = read(os.path.join("apps", "report", "k8s", "dashboard-provider.yaml"))
+        self.assertIn("allowUiUpdates: false", provider)
+        self.assertIn("folder: MedCEA", provider)
 
 
 if __name__ == "__main__":

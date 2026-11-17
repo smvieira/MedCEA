@@ -6,11 +6,10 @@ behind the portal's oauth2-proxy (no policy change), from ConfigMap portal-manua
 infra/lib-manual.sh builds from docs/manual/chapters at deploy time and stores gzipped.
 
   Render     k8s/portal/portal.yaml rendered with deploy-infra.sh's own render list: it
-             parses, / still serves portal-html with its readiness probe, the landing page
-             has the "Platform manual" card, the nginx config and the manual are mounted;
-             the MedCEA Dashboard card opens the dashboard chooser (Grafana, and Superset
-             greyed out until installed), which lib-portal's portal_card enables and
-             deploy-infra keeps enabled for an installed Superset
+             parses, / still serves portal-html with its readiness probe; the landing page
+             has four areas by data zone (owner decision of 17 Nov 2026) and no manual card
+             (the user menu links it); Superset sits greyed out in Reports until installed,
+             which lib-portal's portal_card enables and deploy-infra keeps enabled
   Nginx      k8s/portal/nginx.conf routes /, /images/ and /manual/ (gzip_static always,
              gunzip, charset, no-cache) onto the mount's path; deploy-infra writes it and
              publishes the manual before the portal's manifest; apps/frontend no longer does
@@ -131,32 +130,59 @@ class Render(unittest.TestCase):
         mounts = {m["mountPath"]: m for m in c["volumeMounts"]}
         self.assertEqual(mounts["/usr/share/nginx/html/index.html"], {"name": "html", "mountPath": "/usr/share/nginx/html/index.html", "subPath": "index.html"})
 
-    def test_the_card(self):
+    def view(self, name):
         html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
-        main = html[html.index('id="v-portal"'):html.index('id="v-management"')]
-        m = re.search(r'<a class="card" href="/manual/" target="_blank" rel="noopener">(.*?)</a>', main, re.S)
-        self.assertIsNotNone(m, "no Platform manual card on the landing page")
-        card = m.group(1)
-        self.assertIn('<div class="ct">Platform manual</div>', card)
-        for cls in ("ci", "cl", "cd", "ck", "ck-a"):
-            self.assertIn(f'class="{cls}"', card)
-        self.assertIn("https://portal.example/manual/", card)
-        # not on the management sub-page, and the user menu is not touched
-        self.assertNotIn("/manual/", html[html.index('id="v-management"'):])
-        self.assertNotIn("manual", read("apps/access/html/user-menu.js").lower())
-        # lib-portal's card switch never matches it (its URLs are https://<host>)
-        self.assertEqual(html.count('href="/manual/"'), 1)
+        i = html.index('<div id="v-%s"' % name)
+        j = html.find('<div id="v-', i + 1)
+        return html[i:j if j > 0 else html.index("<script>", i)]
 
-    def test_dashboard_chooser(self):
+    def test_no_manual_card_the_user_menu_links_it(self):
+        """Owner decision of 17 Nov 2026: the manual is not a card; every user menu links it
+        between Profile and Sign out (apps/access/html/user-menu.js, access-api manual_url)."""
         html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
-        main = html[html.index('id="v-portal"'):html.index('id="v-dashboards"')]
-        # the landing card opens the chooser instead of linking Grafana
-        self.assertIn("""<div class="card" onclick="show('dashboards')">""", main)
-        self.assertIn('<div class="ct">MedCEA Dashboard</div>', main)
-        self.assertNotIn("grafana_domain.example", main)
-        view = html[html.index('id="v-dashboards"'):html.index('id="v-management"')]
-        self.assertIn("onclick=\"show('portal')\"", view)
+        self.assertNotIn('href="/manual/"', html)
+        self.assertNotIn("Platform manual</div>", html)
+        js = read("apps/access/html/user-menu.js")
+        self.assertIn("Platform manual", js)
+        # the order of the menu: Profile, the manual, the separator, Sign out
+        self.assertIn("var items = [prof];", js)
+        self.assertIn("dd.append.apply(dd, items.concat([sep, out]));", js)
+        # without /_account/api/me (access down or not deployed) the portal still links its own manual
+        self.assertIn('<meta name="medcea-manual" content="/manual/">', html)
+        self.assertIn("manual: localManual() })", js)
+
+    def test_four_areas_by_data_zone(self):
+        """Owner decision of 17 Nov 2026: the landing page has four areas, split by where
+        their data comes from; each area's cards sit in its own view."""
+        main = self.view("portal")
+        for v, title in (("operations", "Operations"), ("reports", "Reports"),
+                         ("research", "Research workbench"), ("management", "Platform Management")):
+            self.assertIn(f"""<div class="card" onclick="show('{v}')">""", main)
+            self.assertIn(f'<div class="ct">{title}</div>', main)
+            self.assertIn("onclick=\"show('portal')\"", self.view(v))
+            self.assertIn('class="ph-data"', self.view(v))
+        self.assertNotIn("https://", re.sub(r'<a href="https://ciencia[^"]*"|<img src="https://[^"]*"', "", main))
+        cards = {v: re.findall(r'<a class="card" href="https://([a-z_]+)\.example"', self.view(v))
+                 for v in ("operations", "reports", "research", "management")}
+        self.assertEqual(cards, {
+            "operations": ["monitor_domain", "scheduler_domain", "config_domain"],
+            "reports": ["grafana_domain"],
+            "research": ["workbench_domain"],
+            "management": ["node_red_domain", "mqttx_domain", "dbmgmt_domain", "access_domain", "policy_domain", "pgadmin_domain"],
+        })
+        # every URL lib-portal switches by is on the page exactly once
+        html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
+        for host in sum(cards.values(), []) + ["superset_domain"]:
+            self.assertEqual(len(re.findall(r'(?:href|data-href)="https://%s\.example"' % host, html)), 1, host)
+        # the agent campaigns placeholder has no URL, so portal_card never matches it
+        self.assertRegex(self.view("research"), r'<div class="card card-dis">\s*<div class="ci">')
+        self.assertIn('<div id="bg" style="', html)       # apps/frontend/deploy.sh rewrites it
+
+    def test_reports_view(self):
+        html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
+        view = self.view("reports")
         self.assertIn('<a class="card" href="https://grafana_domain.example" target="_blank" rel="noopener">', view)
+        self.assertIn('<div class="ct">Standard reports</div>', view)
         # Superset: exactly the disabled form lib-portal's portal_card enable matches
         self.assertRegex(view, r'(?s)<div class="card card-dis" data-href="https://superset_domain\.example">.*?</div><!--/card-->')
         self.assertIn(".card-dis .cd::after", html)
@@ -198,6 +224,12 @@ esac
         self.assertIn('kubectl get deployment superset -n "$NAMESPACE"', sec)
         self.assertIn('PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"', sec)
         self.assertIn('SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"', src)
+
+    def test_deploy_infra_greys_out_notebooks_without_a_workbench(self):
+        src = read("deploy-infra.sh")
+        sec = src[src.index('render "$SCRIPT_DIR/k8s/portal/portal.yaml"'):src.index("rollout restart deployment/portal")]
+        self.assertIn('if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then', sec)
+        self.assertIn('PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card disable "https://${WORKBENCH_DOMAIN}"', sec)
         self.assertIn('SUPERSET_DOMAIN="superset.$DOMAIN"', read("config.env.example"))
 
     def test_mounts(self):

@@ -132,8 +132,9 @@ research/.venv/bin/python -m research.harness.campaign SPEC.yaml [--out DIR] [--
 <div class="table-wrap"><table>
 <thead><tr><th>Phase</th><th>What it adds</th></tr></thead>
 <tbody>
-<tr><td>2</td><td>The research namespaces (deny-all networks, quotas, low priority so production always wins), the research database, the AI workbench moved into the research zone, and the orchestrator that runs simulations as Kubernetes Jobs. Research roles get their first rights through a skeleton version and a change version, each approved by <span class="role">qa</span>.</td></tr>
-<tr><td>3</td><td>The exporter and pseudonymiser, the data lake of snapshots, the reservation of data kept back for validation, and the calibration of the chamber model from the snapshots.</td></tr>
+<tr><td>2a</td><td>The research namespaces (deny-all networks, quotas, low priority so production always wins), the research database, the reservation of data kept back for the final validation, the research views and the exporter that writes pseudonymised snapshots. The AI Workbench is not touched and still reads live data. Research roles get their first rights through a skeleton version and a change version, each approved by <span class="role">qa</span>.</td></tr>
+<tr><td>2b</td><td>One switchover: the AI Workbench moves into the research zone and its notebooks read snapshots instead of the live database, under the same names; the notebooks' live sign-in client is disabled; the orchestrator that runs simulations as Kubernetes Jobs; the scientists' live data and the live Superset end (<a href="#compliance-decisions">decision record</a>, 17 November 2026). The reservation is effective from here.</td></tr>
+<tr><td>3</td><td>The calibration of the chamber model from the snapshots, and the controller comparisons run again on it.</td></tr>
 <tr><td>4</td><td>The agent harness with the local model: a supervised agent runs a campaign through the orchestrator.</td></tr>
 <tr><td>5</td><td>The hosted model, through a gateway with recorded egress.</td></tr>
 <tr><td>6</td><td>The candidate registry and the promotion gateway: a tuned parameter set reaches the platform as a draft with its evidence on the policy history, for <span class="role">qa</span> to approve. No MPC or FLC candidate is promoted while the scheduler lacks their libraries.</td></tr>

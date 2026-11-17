@@ -2,6 +2,9 @@ apiVersion: 1
 providers:
 - name: default
   type: file
+  # Every provisioned dashboard (live telemetry and the standard reports) sits in
+  # one folder; a folder named here is created by Grafana at start.
+  folder: MedCEA
   disableDeletion: false
   updateIntervalSeconds: 30
   # Dashboards change only through git and ./apps/report/deploy.sh (IAM 3.1);
