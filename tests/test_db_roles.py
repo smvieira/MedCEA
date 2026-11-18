@@ -28,6 +28,7 @@ def read(*p):
 
 # FAKE_* variables are the cluster: FAKE_LOGIN = roles that may log in, FAKE_SECRETS
 # = Secrets that exist, FAKE_DEPLOY_<name> = a deployment's PG_USER (set = deployed),
+# FAKE_CRON_<name> = a CronJob's OP_USER (set = deployed),
 # FAKE_FLOWS / FAKE_GRAFANA_B64 / FAKE_SERVERS = Node-RED's flows, Grafana's
 # datasources.yaml (base64) and pgAdmin's servers.json.
 FAKE = r"""
@@ -47,6 +48,9 @@ fake_kubectl() {
         "get deployment "*"-o jsonpath"*)
             v="FAKE_DEPLOY_${3//-/_}"; [[ -n "${!v+x}" ]] || return 1; printf '%s\n' "${!v}" ;;
         "get deployment "*) v="FAKE_DEPLOY_${3//-/_}"; [[ -n "${!v+x}" ]] ;;
+        "get cronjob "*"-o jsonpath"*)
+            v="FAKE_CRON_${3//-/_}"; [[ -n "${!v+x}" ]] || return 1; printf '%s\n' "${!v}" ;;
+        "get cronjob "*) v="FAKE_CRON_${3//-/_}"; [[ -n "${!v+x}" ]] ;;
         *) echo "fake_kubectl: unexpected: $a" >&2; return 1 ;;
     esac
 }
@@ -147,9 +151,28 @@ class ClientsLive(unittest.TestCase):
         self.assertEqual((rc, out), (0, "end"))
 
     def test_roles(self):
-        rc, out, _ = lib("for c in scheduler monitor dbmgmt node-red grafana pgadmin iam-api superset; do db_client_role $c; done")
+        rc, out, _ = lib("for c in scheduler monitor dbmgmt node-red grafana pgadmin iam-api superset research-export; "
+                         "do db_client_role $c; done")
         self.assertEqual(out.split(), ["svc_scheduler", "svc_monitor", "svc_dbexport", "svc_ingest",
-                                       "svc_grafana", "rr_admin_login", "iam_svc", "svc_superset"])
+                                       "svc_grafana", "rr_admin_login", "iam_svc", "svc_superset",
+                                       "svc_research_export"])
+        rc, out, _ = lib("db_role_secret svc_research_export")
+        self.assertEqual(out, "db-svc-research-export")
+
+    def test_research_export(self):
+        # research sandbox Phase 2a: a CronJob, not a Deployment; absent (switch off, no research
+        # zone in the applied policy) it prints nothing, deployed its OP_USER is read from the
+        # job template, unreadable is "?"
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler")
+        self.assertEqual((rc, out), (0, "scheduler svc_scheduler"))
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_DEPLOY_scheduler="svc_scheduler",
+                         FAKE_CRON_research_export="svc_research_export")
+        self.assertEqual((rc, out.splitlines()), (0, ["scheduler svc_scheduler", "research-export svc_research_export"]))
+        rc, out, _ = lib("db_clients_live medcea-x", strict=True, FAKE_CRON_research_export="")
+        self.assertEqual((rc, out), (0, "research-export ?"))
+        lib_sh = read("infra/lib-db-roles.sh")
+        self.assertIn('.spec.jobTemplate.spec.template.spec.containers[*].env[?(@.name=="OP_USER")]', lib_sh)
+        self.assertRegex(read("apps/research-export/k8s/cronjob.yaml"), r'- name: OP_USER\n\s+value: "\$\{OP_DB_USER\}"')
 
     def test_superset(self):
         # Superset: no Deployment while the applied policy gives no role a Superset setting
@@ -267,6 +290,17 @@ class Wiring(unittest.TestCase):
         self.assertIn('[[ "$DBC_USER" == "svc_superset" ]]', sh)
         tpl = read("apps/superset/k8s/superset.yaml")
         self.assertRegex(tpl, r"- name: SUPERSET_DB_USER\n\s+value: ")
+
+    def test_research_export_never_on_postgres(self):
+        # research sandbox Phase 2a: svc_research_export or nothing, and the password only by reference
+        sh = read("apps/research-export/deploy.sh")
+        self.assertRegex(sh, r'db_client "\$NAMESPACE" svc_research_export\b')
+        self.assertIn("infra/lib-db-roles.sh", sh)
+        self.assertIn('[[ "$DBC_USER" == "svc_research_export" ]]', sh)
+        tpl = read("apps/research-export/k8s/cronjob.yaml")
+        self.assertRegex(tpl, r"- name: OP_PASSWORD\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: \$\{OP_SECRET\}\n"
+                              r"\s+key: \$\{OP_SECRET_KEY\}")
+        self.assertNotIn("POSTGRES_PASS", tpl + sh)
 
     def test_superset_keys_generated_before_the_early_exit(self):
         # Superset stage B: generated on every configure run (so an existing install gets

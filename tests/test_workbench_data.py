@@ -410,7 +410,7 @@ class PolicyTest(unittest.TestCase):
 
 
 class HomesTest(unittest.TestCase):
-    def run_warn(self, kubectl_body, backup_dir=None):
+    def run_warn(self, kubectl_body, backup_dir=None, **env):
         d = tempfile.mkdtemp()
         k = os.path.join(d, "kubectl")
         with open(k, "w") as f:
@@ -421,7 +421,8 @@ class HomesTest(unittest.TestCase):
             backup_dir = os.path.join(d, "no-backups")
             os.makedirs(backup_dir)
         r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-data-volumes.sh"; data_volumes_warn medcea; echo "rc=$?"'],
-                           env=dict(os.environ, KUBECTL=k, BACKUP_DIR=backup_dir), capture_output=True, text=True)
+                           env=dict({k_: v for k_, v in os.environ.items() if k_ != "RESEARCH_NAMESPACE"},
+                                    KUBECTL=k, BACKUP_DIR=backup_dir, **env), capture_output=True, text=True)
         return r.stdout
 
     BOTH = json.dumps({"items": [
@@ -540,6 +541,39 @@ esac""", b)
         self.assertIn("Could not list the AI workbench homes", out)
         self.assertIn("Grafana's volume", out)
         self.assertTrue(out.rstrip().endswith("rc=0"))
+
+    RS_PVC = """  "get pvc data-research-postgresql-0 -n medcea-research "*) printf 'pvc-r\\t10Gi' ;;
+  "get pv pvc-r -o jsonpath={.spec.hostPath.path}") printf /var/snap/microk8s/common/default-storage/medcea-research-data-research-postgresql-0-pvc-r ;;
+"""
+
+    def test_names_the_research_database(self):
+        """Research sandbox (Phase 2a): the research database's volume, in RESEARCH_NAMESPACE,
+        is named after the platform's, alone or with homes; also when the platform's list
+        cannot be read."""
+        for platform, has_homes in (("""  "get pvc -n medcea -o json") echo '{"items": []}' ;;\n""", False),
+                                    ("""  "get pvc -n medcea -o json") echo '%s' ;;\n""" % self.BOTH, True),
+                                    ("", False)):
+            with self.subTest(homes=has_homes, platform=bool(platform)):
+                out = self.run_warn('case "$*" in\n' + platform + self.RS_PVC + "  *) exit 1 ;;\nesac",
+                                    RESEARCH_NAMESPACE="medcea-research")
+                self.assertIn("The research database's volume, which this deletes (nothing backs it up)", out)
+                self.assertIn("data-research-postgresql-0 (10Gi) in namespace medcea-research, on this host in "
+                              "/var/snap/microk8s/common/default-storage/medcea-research-data-research-postgresql-0-pvc-r", out)
+                self.assertIn("medcea_research", out)
+                self.assertEqual("AI workbench homes that this deletes" in out, has_homes)
+                if has_homes:
+                    self.assertLess(out.index("Grafana's volume"), out.index("The research database's volume"))
+                self.assertTrue(out.rstrip().endswith("rc=0"))
+
+    def test_no_research_no_words(self):
+        """No such claim, no RESEARCH_NAMESPACE, or one equal to the platform's: nothing said."""
+        body = 'case "$*" in\n  "get pvc -n medcea -o json") echo \'{"items": []}\' ;;\n  *) exit 1 ;;\nesac'
+        for env in ({}, {"RESEARCH_NAMESPACE": "medcea-research"}, {"RESEARCH_NAMESPACE": "medcea"}):
+            with self.subTest(env=env):
+                self.assertEqual(self.run_warn(body, **env).strip(), "rc=0")
+        out = self.run_warn('case "$*" in\n  "get pvc -n medcea -o json") echo \'{"items": []}\' ;;\n' + self.RS_PVC
+                            + "  *) exit 1 ;;\nesac", RESEARCH_NAMESPACE="medcea")
+        self.assertNotIn("research database", out)
 
     def test_every_uninstall_path_warns_before_it_asks(self):
         with open(os.path.join(REPO, "deploy-infra.sh")) as f:

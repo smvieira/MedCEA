@@ -372,10 +372,14 @@ check_tailscale
 # The database roles' passwords (IAM plan 3.6; apps/database/deploy.sh writes them
 # into Secrets db-<role>). Generated, never asked, never shown.
 # SVC_SUPERSET_DB_PASS is Superset's connection role (svc_superset), used once the applied
-# access policy gives a role a Superset setting.
+# access policy gives a role a Superset setting. The research sandbox's four (Phase 2a):
+# research-postgresql's superuser, its rs_export_writer and rs_backup logins, and the
+# export's svc_research_export on the platform database; generated whether or not
+# RESEARCH_ENABLED is true, so switching it on asks nothing.
 for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
           SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS \
-          SVC_SUPERSET_DB_PASS SUPERSET_META_DB_PASS; do
+          SVC_SUPERSET_DB_PASS SUPERSET_META_DB_PASS \
+          RESEARCH_DB_PASS RS_EXPORT_WRITER_DB_PASS RS_BACKUP_DB_PASS SVC_RESEARCH_EXPORT_DB_PASS; do
     [[ -n "$(cfg_get "$_v")" ]] || cfg_set "$_v" "$(gen_password)"
 done
 # Superset's session-signing and connection-encryption key (apps/superset): hex, so

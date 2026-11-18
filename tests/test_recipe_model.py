@@ -53,7 +53,7 @@ def block():
 
 def block012():
     full = read(os.path.join(DB, "medcea_db_migrations.sql"))
-    return full[full.index("-- ── Migration 012"):]
+    return full[full.index("-- ── Migration 012"):full.index("-- ── Migration 013")]
 
 
 def function(sql, name):

@@ -19,8 +19,10 @@ CONTRACT_VERSION = 1
 INTERFACES = (
     ("identity", "one Keycloak realm, the platform roles and the access policy's route table"),
     ("data", "snapshots only, never a live connection: an exporter in namespace medcea reads the "
-             "read-only research views medcea.v_*_research and writes immutable, pseudonymised "
-             "snapshots into the research database; each view has a contract version (Phase 3)"),
+             "owner-run read functions medcea.research_*() (EXECUTE only, no view over the base "
+             "tables, no person column) and writes append-only snapshots up to a high-water mark "
+             "into the research database medcea_research, minus the held-out ranges; "
+             "medcea.research_contract_version() is the contract version (Phase 2a)"),
     ("metadata", "recipe_types.yaml, recipe format 2, the controller contract, loop_resolver, "
                  "esp32-control.json, read at a pinned commit"),
     ("candidates", "one gateway running production's validators, writing only a draft (Phase 6)"),

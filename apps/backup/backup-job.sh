@@ -22,6 +22,23 @@
 #                  Superset has. An absent one is a MANIFEST line and a log line, never
 #                  a failure; a question psql cannot answer fails the run, since the
 #                  database might exist and would then be missing from the backup.
+#   RESEARCH_DB_HOST  the research sandbox's PostgreSQL (research-postgresql.<ns>-research),
+#                  always rendered by the deploy, whatever RESEARCH_ENABLED says (research
+#                  sandbox Phase 2a), so research enabled later is backed up without a
+#                  backup redeploy
+#   RESEARCH_DB    its database (medcea_research), dumped like the others into
+#                  db/<RESEARCH_DB>.dump only when the host is set, RESEARCH_PGPASSWORD is
+#                  set (Secret research-backup, optional) and the database exists. Without
+#                  the Secret: "skipped … (no research database on this install: no Secret
+#                  research-backup)" and "# databases skipped (no Secret research-backup, …)"
+#                  in MANIFEST; a server that answers without it: "# databases skipped
+#                  (absent)". A server that does not answer while the Secret exists is no
+#                  failure of the platform's backup: its line is "# databases not reached"
+#                  (the health check rsexport reports the research database itself). A dump
+#                  that fails once the database is known to exist fails the run, as any
+#                  dump does.
+#   RESEARCH_PGUSER RESEARCH_PGPASSWORD  its login (rs_backup, pg_read_all_data), given to
+#                  psql and pg_dump only as PGUSER/PGPASSWORD in their own environment
 #   POLICY_DB      the platform database whose access-policy hash chain head goes into
 #                  MANIFEST (default: the first of DATABASES)
 #   VOLUMES        claim name patterns to copy, e.g. "claim-* node-red grafana"
@@ -144,6 +161,23 @@ SQL
     esac
 }
 
+# research_db_exists: t or f for RESEARCH_DB on RESEARCH_DB_HOST, asked as RESEARCH_PGUSER
+# in database postgres; fails when psql cannot answer. Its password goes into psql's own
+# environment only.
+research_db_exists() {
+    _ex="$(PGHOST="$RESEARCH_DB_HOST" PGPORT="${RESEARCH_PGPORT:-5432}" PGUSER="${RESEARCH_PGUSER:-rs_backup}" \
+        PGPASSWORD="$RESEARCH_PGPASSWORD" \
+        psql --no-password --no-psqlrc -X -q -tA -v ON_ERROR_STOP=1 --dbname=postgres -v "name=$RESEARCH_DB" 2>/dev/null <<'SQL'
+SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = :'name');
+SQL
+)" || return 1
+    case "$(printf '%s' "$_ex" | tr -d '[:space:]')" in
+        t) echo t ;;
+        f) echo f ;;
+        *) return 1 ;;
+    esac
+}
+
 prune() {
     _keep="${KEEP_DAYS:-14}"
     case "$_keep" in ''|*[!0-9]*) die "KEEP_DAYS '$_keep' is not a whole number of days" ;; esac
@@ -210,6 +244,35 @@ run() {
             || die "pg_dump of $_db failed"
         _dumped="$_dumped $_db"
     done
+    # The research sandbox's database, on its own server (Phase 2a). Three outcomes
+    # kept apart in the log and in MANIFEST: no Secret research-backup (research is not
+    # installed here, or ./apps/research/deploy.sh has not run yet), a server that
+    # answers without the database, and a server that does not answer.
+    _unreached=""
+    _nosecret=""
+    if [ -n "${RESEARCH_DB:-}" ]; then
+        case "$RESEARCH_DB" in *[!a-z0-9_]*) die "RESEARCH_DB: '$RESEARCH_DB' is not a plain database name" ;; esac
+        _e=nosecret
+        if [ -n "${RESEARCH_DB_HOST:-}" ] && [ -n "${RESEARCH_PGPASSWORD:-}" ]; then
+            _e="$(research_db_exists)" || _e=unreached
+        fi
+        case "$_e" in
+            nosecret)
+                say "skipped $RESEARCH_DB (no research database on this install: no Secret research-backup)"
+                _nosecret="$RESEARCH_DB" ;;
+            f)  say "skipped $RESEARCH_DB (${RESEARCH_DB_HOST} answered: no such database on it)"
+                _absent="${_absent:+$_absent }$RESEARCH_DB" ;;
+            unreached)
+                say "warning: $RESEARCH_DB_HOST did not answer although Secret research-backup exists: $RESEARCH_DB is not in this backup (the platform's databases are)"
+                _unreached="$RESEARCH_DB" ;;
+            t)  say "pg_dump $RESEARCH_DB ($RESEARCH_DB_HOST)"
+                PGHOST="$RESEARCH_DB_HOST" PGPORT="${RESEARCH_PGPORT:-5432}" PGUSER="${RESEARCH_PGUSER:-rs_backup}" \
+                    PGPASSWORD="$RESEARCH_PGPASSWORD" \
+                    pg_dump --no-password --format=custom --file="$DIR/db/$RESEARCH_DB.dump" --dbname="$RESEARCH_DB" \
+                    || die "pg_dump of $RESEARCH_DB failed"
+                _dumped="$_dumped $RESEARCH_DB" ;;
+        esac
+    fi
     # Roles and memberships without their passwords: a reference for a restore into
     # a new install, whose own deploys set the passwords from its config.env.
     say "pg_dumpall --globals-only --no-role-passwords"
@@ -253,6 +316,8 @@ run() {
             echo "# namespace: $NAMESPACE"
             echo "# databases: $_dumped"
             [ -z "$_absent" ] || echo "# databases skipped (absent): $_absent"
+            [ -z "$_nosecret" ] || echo "# databases skipped (no Secret research-backup, no research database on this install): $_nosecret"
+            [ -z "$_unreached" ] || echo "# databases not reached: $_unreached"
             echo "# volume patterns: $VOLUMES"
             echo "$_head"
             echo "# bytes	sha256	path"

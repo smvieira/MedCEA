@@ -217,6 +217,87 @@ canon = lambda d: json.dumps(d, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
 }
 
+#   _pa_rs_zone
+#
+# Research sandbox (Phase 2a): 0 when the applied access policy has the research zone
+# (cli.py has-zone research), 1 when it has not; a policy that does not compile is fatal.
+_pa_rs_zone() {
+    local _rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone research >/dev/null || _rc=$?
+    case $_rc in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) echo -e "${RED:-}ERROR: cannot tell whether the access policy has the research zone (python3 apps/iam/compiler/cli.py has-zone research exited $_rc).${NC:-}" >&2
+           exit 1 ;;
+    esac
+}
+
+#   pa_rsnetpol [full|scoped]
+#
+# The research zone's NetworkPolicies in RESEARCH_NAMESPACE (Phase 2a): rs-default-deny
+# (every pod, ingress and egress), rs-dns (egress to kube-dns only) and one rs-<pod> per
+# pod of the zone with its compiled sources and hops; label medcea/rs-netpol=true, a label
+# of their own, so pa_netpol's stale delete and health iamnetpol never see them. Compiled
+# with --zone research; the node's addresses are read as pa_netpol reads them (the
+# kubelet's probes arrive from them). IAM_NETPOL does not apply: the default-deny is what
+# keeps the sandbox away from production, and it has no off switch but RESEARCH_ENABLED.
+# A labelled policy the compile no longer has is deleted, in the research namespace only.
+# Called by infra/deploy-research-namespace.sh (full, after the namespace exists) and by
+# its --policy-only and infra/deploy-policy.sh (scoped), only while RESEARCH_ENABLED is
+# true and the applied policy has the zone. Scoped: "not deployed" while the namespace
+# does not exist (a full ./deploy-infra.sh creates it); equal when the labelled set has
+# exactly the compiled names and specs.
+pa_rsnetpol() {
+    local _pa_mode="${1:-full}" _rns="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}" _rc=0 _ip _np
+    local _rs_ips=() _rs_netpol _rs_want
+    if [[ "$_pa_mode" == scoped ]]; then
+        if [[ "$($MK8S kubectl get namespace "$_rns" -o name 2>/dev/null || true)" != "namespace/$_rns" ]]; then
+            _pa_line rsnetpol "not deployed"
+            return 0
+        fi
+        _pa_rsnetpol_equal || _rc=$?
+        if [[ $_rc == 0 ]]; then _pa_line rsnetpol unchanged; return 0; fi
+        [[ $_rc == 1 ]] || { echo -e "${RED:-}ERROR: cannot compare the research zone's NetworkPolicies with the compile.${NC:-}" >&2; exit 1; }
+    fi
+    echo -e "\n${GREEN:-}[Research] Network policies of the research zone ($_rns)...${NC:-}"
+    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
+        _rs_ips+=(--node-ip "${_ip%/*}")
+    done
+    if ! _rs_netpol="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --zone research \
+                         --namespace "$_rns" --platform-namespace "$NAMESPACE" "${_rs_ips[@]}")"; then
+        echo -e "${RED:-}ERROR: the research zone's network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC:-}" >&2
+        exit 1
+    fi
+    _rs_want="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_rs_netpol")"
+    if [[ -n "$_rs_want" ]]; then $MK8S kubectl apply -f - <<<"$_rs_netpol"; fi
+    # A pod dropped from the zone keeps no stale policy (research namespace only).
+    for _np in $($MK8S kubectl get netpol -n "$_rns" -l medcea/rs-netpol=true -o jsonpath='{.items[*].metadata.name}'); do
+        [[ " $_rs_want " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$_rns" "$_np"
+    done
+    [[ "$_pa_mode" == scoped ]] && _pa_line rsnetpol re-rendered
+    return 0
+}
+
+# 0 equal, 1 different, 2 cannot tell
+_pa_rsnetpol_equal() {
+    local live want ips=() ip rns="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    live="$($MK8S kubectl get netpol -n "$rns" -l medcea/rs-netpol=true -o json 2>/dev/null)" || return 2
+    for ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
+        ips+=(--node-ip "${ip%/*}")
+    done
+    want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --zone research \
+              --namespace "$rns" --platform-namespace "$NAMESPACE" "${ips[@]}")" || return 2
+    WANT="$want" python3 -c '
+import json, os, sys
+try:
+    live = {i["metadata"]["name"]: i.get("spec") for i in json.load(sys.stdin).get("items") or []}
+    want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
+except (ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(2)
+canon = lambda d: json.dumps(d, sort_keys=True)
+sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
+}
+
 #   pa_node_red_auth [full|scoped]
 #
 # ConfigMap node-red-auth (permissions.json, cli.py compile node-red). A directory

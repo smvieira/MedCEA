@@ -224,8 +224,9 @@ TMP = re.compile(r"/tmp/[^\s/'\"]+")
 def normalise(calls, declared=True, root=None):
     """the transcript: the scratch tree and temporary paths replaced, the background
     port-forwards (racing the next command) counted rather than placed; with declared, the
-    gate page's sha256 (its read and its --set) and db_clients_live's question whether
-    Superset is deployed (stage B, read-only, prints nothing without it) dropped"""
+    gate page's sha256 (its read and its --set) and db_clients_live's questions whether
+    Superset is deployed (stage B) and whether the research export is (research sandbox
+    Phase 2a; both read-only, printing nothing without it) dropped"""
     out, forwards = [], 0
     for c in calls:
         argv = [a.replace(root, "TREE") if root else a for a in c["argv"]]
@@ -238,6 +239,8 @@ def normalise(calls, declared=True, root=None):
                and argv[2].endswith("-templates") and any(a.startswith("jsonpath=") for a in argv):
                 continue
             if c["cmd"] == "kubectl" and argv[:3] == ["get", "deployment", "superset"]:
+                continue
+            if c["cmd"] == "kubectl" and argv[:3] == ["get", "cronjob", "research-export"]:
                 continue
             keep = []
             for a in argv:

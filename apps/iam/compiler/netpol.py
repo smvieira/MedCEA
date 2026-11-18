@@ -32,6 +32,40 @@ pod carrying `service` (grants.token_clients: config-api's azp list); read_only=
 those whose client says `read_only: true` (pre_request serves them reads only).
 only_rpc(policy, service) returns {token_client: sorted function names} of the clients with
 `only_rpc` that reach the pod carrying `service` (pre_request's only_rpc block, IAM 4.1).
+
+Zones (research sandbox Phase 2a). `network.zones` maps a zone name (only `research`, ZONES)
+to its settings ({} so far). A pod or client may say `zone: <name>`; without it, it is in
+the platform zone, the namespace `compile` is given. Each zone has a namespace of its own
+(RESEARCH_NAMESPACE), which denies all ingress and egress by default. Shape:
+
+    network:
+      zones: {research: {}}
+      pods:
+        research-postgresql:
+          zone: research
+          selector: {app.kubernetes.io/instance: research-postgresql, app.kubernetes.io/name: postgresql}
+          ingress:
+            - {port: 5432, from: ["client:research-export", "client:backup", node]}
+          egress:                       # zone pods only, optional: the hops this pod opens
+            - {pod: <a pod of any zone>, port: N}
+      clients:
+        research-export: {selector: {app: research-export}, egress: [{pod: research-postgresql, port: 5432}]}
+
+A `pod:`/`client:` source in another zone than the pod it reaches resolves to ONE peer
+carrying both a namespaceSelector (kubernetes.io/metadata.name = that zone's namespace) and
+the podSelector, so both must match (AND); a `proxy:` source is a platform pod. A platform
+pod admits only platform sources (its compile knows no zone namespace). A zone pod's egress
+hop names a pod that admits `pod:<it>` on that port, and a zone pod admitted elsewhere as
+`pod:<x>` must have that hop (its egress is denied otherwise).
+
+compile(policy, namespace, node_ips) compiles the platform zone only: today's output byte for
+byte while no pod carries a zone. compile_zone(policy, zone, namespace, platform_namespace,
+node_ips) returns the zone's List, labelled medcea/<prefix>-netpol=true (research: rs):
+<prefix>-default-deny (every pod, Ingress and Egress, nothing allowed), <prefix>-dns (every
+pod may reach kube-system's k8s-app=kube-dns on UDP and TCP 53; Calico matches egress after
+DNAT, so the pods, not the ClusterIP) and <prefix>-<pod> per zone pod (Ingress from its
+sources, Egress to its hops; the `egress` key only when it has hops, since the API server
+drops an empty list). An empty List while the policy has no such zone.
 """
 
 import re
@@ -39,6 +73,11 @@ import re
 LABEL = "medcea/iam-netpol"
 _RPC = re.compile(r"^[a-z_][a-z0-9_]*$")
 KINDS = ("proxy:", "pod:", "client:")
+# zone → (name prefix, label key). A zone name not listed here is an error.
+ZONES = {"research": ("rs", "medcea/rs-netpol")}
+SOURCE = "apps/iam/policy/defaults.yaml"
+DNS_NAMESPACE = "kube-system"
+DNS_SELECTOR = {"k8s-app": "kube-dns"}
 
 
 def _sources(net):
@@ -46,6 +85,81 @@ def _sources(net):
         for rule in pd.get("ingress") or []:
             for src in rule.get("from") or []:
                 yield name, rule, src
+
+
+def zones(data):
+    """The zone names of a policy (a model.Policy or its data dict), in file order."""
+    data = getattr(data, "data", data) or {}
+    z = (data.get("network") or {}).get("zones")
+    return list(z) if isinstance(z, dict) else []
+
+
+def has_zone(data, zone):
+    return zone in zones(data)
+
+
+def _zone_of(net, src):
+    """The zone of a source (None: the platform zone; a proxy, ingress or node is platform)."""
+    if src.startswith("pod:"):
+        return ((net.get("pods") or {}).get(src[4:]) or {}).get("zone")
+    if src.startswith("client:"):
+        return ((net.get("clients") or {}).get(src[7:]) or {}).get("zone")
+    return None
+
+
+def _zone_check(net, errors):
+    zs = net.get("zones")
+    if zs is not None and not isinstance(zs, dict):
+        errors.append("network: zones must map a zone name to its settings")
+        zs = {}
+    zs = zs or {}
+    for z, zd in zs.items():
+        if z not in ZONES:
+            errors.append(f"network: unknown zone {z!r} (known: {', '.join(ZONES)})")
+        if zd is not None and not isinstance(zd, dict):
+            errors.append(f"network: zone {z}: settings must be a mapping")
+    pods = net.get("pods") or {}
+    clients = net.get("clients") or {}
+    for kind, entries in (("pod", pods), ("client", clients)):
+        for name, d in entries.items():
+            if "zone" in d and (not isinstance(d["zone"], str) or d["zone"] not in zs):
+                errors.append(f"network: {kind} {name}: zone {d['zone']!r} is not in network.zones")
+    for name, rule, src in _sources(net):
+        if pods[name].get("zone") is None and _zone_of(net, src) is not None:
+            errors.append(f"network: pod {name} port {rule.get('port')}: source {src} is in zone "
+                          f"{_zone_of(net, src)}; a platform pod admits only platform sources")
+    for name, pd in pods.items():
+        hops = pd.get("egress")
+        if hops is None:
+            continue
+        if pd.get("zone") is None:
+            errors.append(f"network: pod {name}: egress hops are compiled only for a zone pod")
+            continue
+        if not isinstance(hops, list):
+            errors.append(f"network: pod {name}: egress must be a list of hops")
+            continue
+        for hop in hops:
+            if not isinstance(hop, dict) or "pod" not in hop or set(hop) - {"pod", "port", "why"}:
+                errors.append(f"network: pod {name}: a zone pod's hop is {{pod, port}}")
+                continue
+            if not isinstance(hop.get("port"), int):
+                errors.append(f"network: pod {name}: hop port {hop.get('port')!r} is not an integer")
+            if hop["pod"] not in pods:
+                errors.append(f"network: pod {name}: hop to unknown pod {hop['pod']}")
+            elif not any(f"pod:{name}" in (r.get("from") or []) and r.get("port") == hop.get("port")
+                         for r in pods[hop["pod"]].get("ingress") or []):
+                errors.append(f"network: pod {name} reaches pod {hop['pod']} port {hop.get('port')}, "
+                              f"which does not admit pod:{name}")
+    for name, rule, src in _sources(net):
+        if not src.startswith("pod:") or src[4:] not in pods:
+            continue
+        other = pods[src[4:]]
+        if other.get("zone") is None:
+            continue
+        if not any(isinstance(h, dict) and h.get("pod") == name and h.get("port") == rule.get("port")
+                   for h in other.get("egress") or []):
+            errors.append(f"network: pod {name} port {rule.get('port')} admits {src}, a zone pod "
+                          f"with no egress hop there (its egress is denied by default)")
 
 
 def check(p):
@@ -58,6 +172,7 @@ def check(p):
     for h in proxies:
         if h not in p.hosts:
             errors.append(f"network: proxy for unknown host {h}")
+    _zone_check(net, errors)
     for name, pd in pods.items():
         if not pd.get("selector"):
             errors.append(f"network: pod {name} has no selector")
@@ -172,54 +287,152 @@ def check(p):
     return errors
 
 
-def _peer(net, src, node_ips):
+def _ns_selector(ns):
+    return {"matchLabels": {"kubernetes.io/metadata.name": ns}}
+
+
+def _in(peer, src_zone, here, namespaces):
+    """peer (a podSelector element) as seen from a pod of zone `here`: unchanged within the
+    zone, else one element with the source zone's namespaceSelector too (AND)."""
+    if src_zone == here:
+        return peer
+    if namespaces is None or not namespaces.get(src_zone):
+        raise ValueError(f"a peer in zone {src_zone or 'platform'} needs that zone's namespace")
+    return {"namespaceSelector": _ns_selector(namespaces[src_zone]), **peer}
+
+
+def _peer(net, src, node_ips, here=None, namespaces=None):
     if src.startswith("proxy:"):
-        return [{"podSelector": {"matchLabels": {"app.kubernetes.io/instance": net["proxies"][src[6:]]}}}]
+        return [_in({"podSelector": {"matchLabels": {"app.kubernetes.io/instance": net["proxies"][src[6:]]}}},
+                    None, here, namespaces)]
     if src.startswith("pod:"):
-        return [{"podSelector": {"matchLabels": dict(net["pods"][src[4:]]["selector"])}}]
+        pd = net["pods"][src[4:]]
+        return [_in({"podSelector": {"matchLabels": dict(pd["selector"])}}, pd.get("zone"), here, namespaces)]
     if src.startswith("client:"):
-        return [{"podSelector": {"matchLabels": dict(net["clients"][src[7:]]["selector"])}}]
+        cd = net["clients"][src[7:]]
+        return [_in({"podSelector": {"matchLabels": dict(cd["selector"])}}, cd.get("zone"), here, namespaces)]
     if src == "ingress":
-        return [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": net["ingress_namespace"]}}}]
+        return [{"namespaceSelector": _ns_selector(net["ingress_namespace"])}]
     if src == "node":
         return [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in node_ips]
     raise ValueError(src)
 
 
+def _ingress_rules(net, pd, node_ips, here=None, namespaces=None):
+    rules = []
+    for rule in pd["ingress"]:
+        peers = [peer for src in rule["from"] for peer in _peer(net, src, sorted(set(node_ips)), here, namespaces)]
+        rules.append({"from": peers, "ports": [{"protocol": "TCP", "port": rule["port"]}]})
+    return rules
+
+
+def _needs_node(net, zone):
+    return any(src == "node" for name, _, src in _sources(net) if net["pods"][name].get("zone") == zone)
+
+
 def compile(p, namespace, node_ips):
-    """The Kubernetes List of NetworkPolicies. node_ips: the node's own addresses."""
+    """The Kubernetes List of the platform zone's NetworkPolicies (pods without a zone).
+    node_ips: the node's own addresses."""
     net = p.data["network"]
-    if not node_ips and any(src == "node" for _, _, src in _sources(net)):
+    if not node_ips and _needs_node(net, None):
         raise ValueError("the network section admits `node`, but no node address was given")
     items = []
     for name, pd in net["pods"].items():
-        rules = []
-        for rule in pd["ingress"]:
-            peers = [peer for src in rule["from"] for peer in _peer(net, src, sorted(set(node_ips)))]
-            rules.append({"from": peers, "ports": [{"protocol": "TCP", "port": rule["port"]}]})
+        if pd.get("zone") is not None:
+            continue
         items.append({
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
             "metadata": {"name": f"iam-{name}", "namespace": namespace, "labels": {LABEL: "true"},
-                         "annotations": {"medcea/source": "apps/iam/policy/defaults.yaml network.pods." + name}},
+                         "annotations": {"medcea/source": f"{SOURCE} network.pods." + name}},
             "spec": {"podSelector": {"matchLabels": dict(pd["selector"])}, "policyTypes": ["Ingress"],
-                     "ingress": rules},
+                     "ingress": _ingress_rules(net, pd, node_ips)},
         })
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
 
-def egress(p, client):
-    """The NetworkPolicyEgressRules of network.clients.<client>: one per hop, TCP only."""
+def zone_label(zone):
+    """The label key of a zone's NetworkPolicies (medcea/rs-netpol for research)."""
+    if zone not in ZONES:
+        raise ValueError(f"unknown zone {zone!r}; known: {', '.join(ZONES)}")
+    return ZONES[zone][1]
+
+
+def compile_zone(p, zone, namespace, platform_namespace, node_ips):
+    """The Kubernetes List of zone `zone`'s NetworkPolicies in `namespace`: the default deny,
+    the DNS allow and one per zone pod; empty while the policy has no such zone."""
+    label = zone_label(zone)
+    prefix = ZONES[zone][0]
+    if not has_zone(p, zone):
+        return {"apiVersion": "v1", "kind": "List", "items": []}
+    if not namespace or not platform_namespace:
+        raise ValueError("a zone's NetworkPolicies need its namespace and the platform namespace")
+    net = p.data["network"]
+    if not node_ips and _needs_node(net, zone):
+        raise ValueError(f"zone {zone} admits `node`, but no node address was given")
+    # another zone's namespace is not known here: a peer between two zones raises
+    namespaces = {None: platform_namespace, zone: namespace}
+
+    def item(name, src, spec):
+        return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                "metadata": {"name": f"{prefix}-{name}", "namespace": namespace, "labels": {label: "true"},
+                             "annotations": {"medcea/source": f"{SOURCE} {src}"}},
+                "spec": spec}
+    items = [
+        item("default-deny", f"network.zones.{zone}", {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]}),
+        item("dns", f"network.zones.{zone}", {
+            "podSelector": {}, "policyTypes": ["Egress"],
+            "egress": [{"to": [{"namespaceSelector": _ns_selector(DNS_NAMESPACE),
+                                "podSelector": {"matchLabels": dict(DNS_SELECTOR)}}],
+                        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]}]}),
+    ]
+    for name, pd in net["pods"].items():
+        if pd.get("zone") != zone:
+            continue
+        spec = {"podSelector": {"matchLabels": dict(pd["selector"])}, "policyTypes": ["Ingress", "Egress"],
+                "ingress": _ingress_rules(net, pd, node_ips, zone, namespaces)}
+        hops = [{"to": [_in({"podSelector": {"matchLabels": dict(net["pods"][h["pod"]]["selector"])}},
+                            net["pods"][h["pod"]].get("zone"), zone, namespaces)],
+                 "ports": [{"protocol": "TCP", "port": h["port"]}]} for h in pd.get("egress") or []]
+        if hops:
+            spec["egress"] = hops
+        items.append(item(name, f"network.pods.{name}", spec))
+    return {"apiVersion": "v1", "kind": "List", "items": items}
+
+
+def egress(p, client, namespaces=None):
+    """The NetworkPolicyEgressRules of network.clients.<client>: one per hop, TCP only. A hop
+    to a pod of another zone than the client's carries that zone's namespaceSelector (AND),
+    so it needs namespaces = {zone or None: namespace}."""
     net = p.data.get("network") or {}
     cd = (net.get("clients") or {}).get(client)
     if cd is None:
         raise ValueError(f"no network client {client!r}; known: {', '.join(net.get('clients') or {}) or 'none'}")
     rules = []
     for hop in cd["egress"]:
-        sel = net["pods"][hop["pod"]]["selector"] if "pod" in hop else hop["selector"]
-        rules.append({"to": [{"podSelector": {"matchLabels": dict(sel)}}],
-                      "ports": [{"protocol": "TCP", "port": hop["port"]}]})
+        if "pod" in hop:
+            pd = net["pods"][hop["pod"]]
+            peer = _in({"podSelector": {"matchLabels": dict(pd["selector"])}}, pd.get("zone"), cd.get("zone"),
+                       namespaces)
+        else:
+            peer = {"podSelector": {"matchLabels": dict(hop["selector"])}}
+        rules.append({"to": [peer], "ports": [{"protocol": "TCP", "port": hop["port"]}]})
     return rules
+
+
+def egress_zones(p, client):
+    """The zones (None: the platform zone) that network.clients.<client>'s egress needs a
+    namespace for: its own and every hop pod's, when a hop crosses zones; [] otherwise (a
+    client whose hops all stay in its zone compiles without namespaces, as before Phase 2a)."""
+    net = p.data.get("network") or {}
+    cd = (net.get("clients") or {}).get(client)
+    if cd is None:
+        raise ValueError(f"no network client {client!r}; known: {', '.join(net.get('clients') or {}) or 'none'}")
+    here = cd.get("zone")
+    there = {net["pods"][h["pod"]].get("zone") for h in cd.get("egress") or [] if "pod" in h}
+    if not there - {here}:
+        return []
+    return sorted(there | {here}, key=lambda z: (z is not None, z or ""))
 
 
 def token_clients(p, service, read_only=False):

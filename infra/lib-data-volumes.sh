@@ -27,6 +27,12 @@
 # and never fails the caller (no such claims: it says nothing; no cluster answer:
 # a short warning).
 #
+# The research sandbox (Phase 2a) keeps its database in a namespace of its own:
+# RESEARCH_NAMESPACE (from the caller's config.env), PersistentVolumeClaim
+# data-research-postgresql-0, the snapshots exported from the platform and the held-out
+# reservations. It is named whenever that claim exists, whatever RESEARCH_ENABLED says,
+# since --reset deletes that namespace too and --uninstall the whole cluster.
+#
 # Needs $KUBECTL (e.g. "microk8s kubectl"). Read-only. BACKUP_DIR comes from the
 # caller's config.env; the newest complete backup in it is named when there is one.
 data_volumes_warn() {
@@ -43,6 +49,7 @@ data_volumes_warn() {
         echo -e "\033[0;31mhave them push notebooks to git and export their dashboards first.\033[0m"
         echo -e "\033[0;31mWith Superset installed, its dashboards and charts (database superset, inside PostgreSQL) go too.\033[0m"
         echo ""
+        _dv_research "$ns" "$backed1"
         return 0
     fi
     rows="$(python3 -c '
@@ -61,7 +68,7 @@ for i in items:
     # -o name, compared exactly: anything else (no such deployment, no answer) is "not installed"
     [[ "$(timeout 10 ${KUBECTL:-microk8s kubectl} get deployment superset -n "$ns" -o name 2>/dev/null </dev/null || true)" \
         == deployment.apps/superset ]] && superset=yes
-    [[ -n "$rows" || -n "$superset" ]] || return 0
+    [[ -n "$rows" || -n "$superset" ]] || { _dv_research "$ns" "$backed1"; return 0; }
     [[ -n "$rows" ]] && while IFS= read -r line; do
         IFS=$'\t' read -r claim pv size <<<"$line"
         path="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pv "$pv" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null </dev/null || true)"
@@ -110,4 +117,27 @@ for i in items:
         echo "    - rely on the nightly backup's db/superset.dump (./apps/backup/backups.sh now takes one)."
         echo ""
     fi
+    _dv_research "$ns" "$backed1"
+}
+
+# _dv_research NS BACKED — the research database's volume (Phase 2a), in RESEARCH_NAMESPACE
+# when that names a namespace other than NS; nothing when the claim does not exist or the
+# cluster does not answer (the namespace is only there once research was switched on).
+_dv_research() {
+    local ns="$1" backed="$2" rns="${RESEARCH_NAMESPACE:-}" row pv size path
+    [[ -n "$rns" && "$rns" != "$ns" && "$rns" =~ ^[a-z][a-z0-9-]{1,62}$ ]] || return 0
+    row="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pvc data-research-postgresql-0 -n "$rns" \
+             -o jsonpath='{.spec.volumeName}{"\t"}{.status.capacity.storage}' 2>/dev/null </dev/null)" || return 0
+    [[ -n "$row" ]] || return 0
+    IFS=$'\t' read -r pv size <<<"$row"
+    [[ -n "$pv" ]] && path="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pv "$pv" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null </dev/null || true)"
+    echo -e "\033[0;31m\033[1mThe research database's volume, which this deletes ($backed):\033[0m"
+    echo "  - data-research-postgresql-0 (${size:-?}) in namespace $rns${path:+, on this host in $path}"
+    echo "  It holds database medcea_research: the snapshots exported from the platform and the"
+    echo "  held-out ranges qa reserved. The platform's own data is not in it, but the snapshots are"
+    echo "  the research record (what each campaign read) and the reservations are not exported again."
+    echo "  To keep it, answer no now and first copy the directory above off the volume, e.g."
+    echo "        sudo cp -a <directory> ~/research-db-backup/"
+    echo ""
+    return 0
 }

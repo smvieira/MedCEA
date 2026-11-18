@@ -141,6 +141,19 @@
 #      the credentials box keeps the Enter prompt; a recipe: one dialog, the steps keep
 #      the deploy lock (fd 9, MEDCEA_LOCK_HELD, medcea_lock_verify); a stopped chain whose
 #      steps passed is titled Stopped, never Finished; Ctrl-C in a step: 130
+#  67  Infrastructure → Deploy the research namespace: the script alone, a change ([y/N]), the
+#      skip explained; real: it takes its own lock (the guide holds none)
+#  68  RESEARCH_ENABLED (Infrastructure → Turn the research sandbox on or off): enable = set,
+#      deploy-infra, the platform database (svc_research_export's Secret), the research database,
+#      the backup (medcea_research in the nightly dump), the export, in that order, after a
+#      checklist; rollback = set,
+#      the export's and the database's uninstalls; a real enable against stubs under the
+#      guide's one lock, exactly that line changed
+#  69  Applications → the research database and export: deploy, uninstall (the typed word
+#      yes; --purge-data asks the project name too), dry and real
+#  70  Applications → Reserve a held-out range: unit, optional zone, times and a reason checked
+#      (a leading - and a bad time re-asked), --by remembered; the typed word yes (y cancels);
+#      reserve.sh gets MEDCEA_CONFIRMED=1; List the reservations is read-only
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1416,6 +1429,131 @@ wt_none() {   # wt_none DESC PATTERN…: no dialog holds every PATTERN
     done < <(sed 's/^=== CALL /\x01&/' <<<"$WT"; printf '\x01')
     pass "$desc"
 }
+
+echo "67 deploy the research namespace (Infrastructure)"
+mkcfg true true
+guide $'2\n10\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the command (dry)" "[dry run] not executed: ./infra/deploy-research-namespace.sh"
+has   "a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "Skipped (one line, nothing changed) while RESEARCH_ENABLED is not true"
+has   "the policy-only mode named" "./infra/deploy-research-namespace.sh --policy-only"
+no_stub
+real $'2\n10\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the script ran" "STUB infra/deploy-research-namespace.sh"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: the guide holds no lock (the script takes its own)" \
+    || fail "real: ran under the guide's lock"
+
+echo "68 RESEARCH_ENABLED: enable and roll back"
+mkcfg true true
+guide $'2\n11\n1\ny\ny\nq\n'
+rc_is "quits with 0" 0
+has   "the purpose" "RESEARCH_ENABLED: The research sandbox"
+has   "shows the current value" 'Now: RESEARCH_ENABLED="false"'
+has   "a checklist: the research zone" "The applied access policy has the research zone"
+has   "step 1 sets the switch" '1. config.env: RESEARCH_ENABLED="true"'
+has   "step 2 is the infra deploy" '2. ./deploy-infra.sh'
+has   "step 3 is the platform database" '3. ./apps/database/deploy.sh'
+has   "step 4 is the research database" '4. ./apps/research/deploy.sh'
+has   "step 5 is the backup" '5. ./apps/backup/deploy.sh'
+has   "step 6 is the export" '6. ./apps/research-export/deploy.sh'
+has   "why the database deploy" "svc_research_export's password and Secret db-svc-research-export"
+has   "why the backup deploy" "the nightly backup dumps medcea_research from now on"
+has   "verify the backup holds it" "its MANIFEST lists medcea_research"
+has   "reserve before the first export" "Reserve a held-out range"
+no_stub
+guide $'2\n11\n1\nn\nq\n'
+has   "the checklist answered no stops" "Do those first. Nothing was changed."
+hasnt "no step ran" "[dry run] would"
+guide $'2\n11\n2\ny\nq\n'
+rc_is "rollback: quits with 0" 0
+has   "rollback: step 1 sets the switch back" '1. config.env: RESEARCH_ENABLED="false"'
+has   "rollback: step 2 stops the export" '2. ./apps/research-export/uninstall.sh'
+has   "rollback: step 3 removes the research database" '3. ./apps/research/uninstall.sh'
+has   "rollback: the data and the namespace stay" "its volume (every snapshot and reservation) and the research namespace stay"
+hasnt "rollback: no purge" "uninstall.sh --purge-data"
+no_stub
+cp "$REPO/config.env.example" "$S/config.env"; chmod 600 "$S/config.env"
+real $'2\n11\n1\ny\ny\n\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: infra, database, research, backup, export in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+steps = ("STUB deploy-infra.sh", "STUB apps/database/deploy.sh", "STUB apps/research/deploy.sh",
+         "STUB apps/backup/deploy.sh", "STUB apps/research-export/deploy.sh")
+if any(o.count(x) != 1 for x in steps):
+    sys.exit(1)
+i = [o.index(x) for x in steps]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 5 ]] && pass "real: every step under the guide's lock" \
+    || fail "real: a step without MEDCEA_LOCK_HELD"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+[[ "$(grep -c '^RESEARCH_ENABLED=' "$S/config.env")" == 1 ]] && grep -q '^RESEARCH_ENABLED="true"$' "$S/config.env" \
+    && pass "real: exactly that line set" || fail "real: RESEARCH_ENABLED not replaced"
+[[ "$(diff "$S/config.env.example" "$S/config.env" | grep -c '^[<>]')" == 2 ]] \
+    && pass "real: nothing else changed" || fail "real: other lines changed"
+rm -f "$S"/config.env.guide-*.bak
+
+echo "69 the research database and export (Applications)"
+mkcfg true true
+guide $'3\n10\ny\nq\n'
+rc_is "quits with 0" 0
+has   "database deploy (dry)" "[dry run] not executed: ./apps/research/deploy.sh"
+has   "the skip explained" "Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true"
+no_stub
+guide $'3\n11\nn\ny\nb\n11\nn\nyes\nq\n'
+rc_is "uninstall: quits with 0" 0
+has   "uninstall: y is not yes" "Cancelled; nothing was run."
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/research/uninstall.sh"
+hasnt "uninstall: no --purge-data unasked" "uninstall.sh --purge-data"
+has   "uninstall: the data is kept" "keeps its volume"
+no_stub
+guide $'3\n11\ny\nyes\nmedcea\nb\n11\ny\nyes\nnope\nq\n'
+has   "purge: asks for the project name" "Type the project name ('medcea')"
+has   "purge: the name runs it (dry)" "[dry run] not executed: ./apps/research/uninstall.sh --purge-data"
+[[ "$(grep -c 'not executed: ./apps/research/uninstall.sh' <<<"$OUT")" == 1 ]] \
+    && pass "purge: a wrong name cancels" || fail "purge: a wrong name did not cancel"
+has   "purge: says what goes" "DROPS database medcea_research"
+no_stub
+guide $'3\n12\ny\nb\n13\nyes\nq\n'
+rc_is "export: quits with 0" 0
+has   "export deploy (dry)" "[dry run] not executed: ./apps/research-export/deploy.sh"
+has   "export deploy names what it needs first" "Needs ./apps/database/deploy.sh first"
+has   "export uninstall (dry)" "[dry run] not executed: ./apps/research-export/uninstall.sh"
+has   "export uninstall keeps the snapshots" "the research database keeps every snapshot"
+no_stub
+real $'3\n10\ny\nb\n12\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the database deploy ran" "STUB apps/research/deploy.sh"
+has   "real: the export deploy ran" "STUB apps/research-export/deploy.sh"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 2 ]] && pass "real: the guide holds no lock" || fail "real: ran under the guide's lock"
+
+echo "70 reserve a held-out range; list the reservations (Applications)"
+mkcfg true true
+guide $'3\n14\nUNIT01\n\n2026-11-01\n8 Nov\n2026-11-08T06:00Z\n-x\nheld out for E42\n-qa\nqa1\nyes\nb\n14\nUNIT01\nZONE_2\n2026-11-01\n2026-11-02\nagain\n\ny\nq\n'
+rc_is "quits with 0" 0
+has   "a bad time is re-asked" "'8 Nov': a date such as 2026-11-01"
+has   "a reason starting with - is re-asked" "'-x': a reason is required"
+has   "a --by starting with - is re-asked" "'-qa':"
+has   "the command (dry)" "[dry run] not executed: env MEDCEA_CONFIRMED=1 ./apps/research/reserve.sh add --by qa1 --unit UNIT01 --from 2026-11-01 --to 2026-11-08T06:00Z --reason held\ out\ for\ E42"
+has   "permanent" "a PERMANENT held-out reservation"
+has   "--by remembered" "Your Keycloak username (--by) [qa1]:"
+has   "y is not yes" "Cancelled; nothing was run."
+has   "the zone is passed" "--unit UNIT01 --zone ZONE_2 --from 2026-11-01 --to 2026-11-02 --reason again"
+hasnt "the zone run was cancelled" "not executed: env MEDCEA_CONFIRMED=1 ./apps/research/reserve.sh add --by qa1 --unit UNIT01 --zone"
+no_stub
+guide $'3\n15\ny\nq\n'
+rc_is "list: quits with 0" 0
+has   "list (dry)" "[dry run] not executed: ./apps/research/reserve.sh list"
+has   "list is read-only ([Y/n])" "[Y/n]"
+no_stub
+real $'3\n14\nUNIT01\nZONE_2\n2026-11-01\n2026-11-02\nwhy\nqa1\nyes\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: reserve.sh got the zone" "STUB apps/research/reserve.sh add --by qa1 --unit UNIT01 --zone ZONE_2 --from 2026-11-01 --to 2026-11-02 --reason why"
+has   "real: MEDCEA_CONFIRMED=1" "ENV_CONFIRMED=1"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: reserve.sh takes its own lock" || fail "real: ran under the guide's lock"
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false

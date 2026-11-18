@@ -1,0 +1,10 @@
+# k8s/research/namespace.yaml — the research sandbox's namespace (Phase 2a).
+# Applied by infra/deploy-research-namespace.sh. Render list: RESEARCH_NAMESPACE
+# The label marks the zone; network policies select namespaces by the automatic
+# kubernetes.io/metadata.name label, never by this one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${RESEARCH_NAMESPACE}
+  labels:
+    medcea/zone: research

@@ -6,11 +6,21 @@
                                         printed as ["a", "b"] for an oauth2-proxy values file
   cli.py compile routes [--file F]      the route table (routes.json of ConfigMap medcea-iam-lib)
   cli.py compile netpol --namespace NS --node-ip IP [--node-ip IP ...]
-                                        the NetworkPolicies of `network:` as a JSON List
-  cli.py compile egress CLIENT [--file F]
+                                        the NetworkPolicies of `network:` as a JSON List (the
+                                        platform zone: every pod without a `zone`)
+  cli.py compile netpol --zone Z --namespace ZNS --platform-namespace NS [--node-ip IP ...]
+                                        zone Z's NetworkPolicies in its namespace ZNS (research
+                                        sandbox Phase 2a: rs-default-deny, rs-dns, rs-<pod>,
+                                        labelled medcea/rs-netpol=true); an empty List while the
+                                        policy has no zone Z
+  cli.py compile egress CLIENT [--zone Z --namespace ZNS --platform-namespace NS] [--file F]
                                         the egress hops of network.clients.CLIENT, a JSON list of
                                         NetworkPolicyEgressRules on one line (the workbench chart's
-                                        singleuser.networkPolicy.egress for `notebooks`, IAM 3.2b)
+                                        singleuser.networkPolicy.egress for `notebooks`, IAM 3.2b);
+                                        a client whose hops cross zones (research sandbox Phase 2a:
+                                        research-export, backup) needs zone Z's namespace ZNS and
+                                        the platform namespace NS, which go into each hop's
+                                        namespaceSelector; without them such a client is exit 2
   cli.py compile grafana [--file F]     Grafana's role_attribute_path (Editor, Viewer or '' = refused,
                                         role_attribute_strict) from the dashboards group's `tool:` block
   cli.py compile jupyterhub --setting allowed_groups|admin_groups [--file F]
@@ -30,6 +40,9 @@
                                         group gives no role a setting (Superset stage C: the block
                                         before its cells); prints nothing on stdout (policy_tool
                                         superset's "not in the applied policy")
+  cli.py has-zone Z [--file F]          exit 0 when the policy has network.zones.Z, 1 when not, 2 when
+                                        Z is unknown or the policy fails its checks; prints nothing
+                                        on stdout (the research deploys' skip)
   cli.py compile mqtt [--file F]        the MQTT Explorer's per-person credential rows (mqtt.json of ConfigMap
                                         medcea-iam-lib, read by iam-api; IAM 3.5), canonical, one line
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
@@ -283,6 +296,7 @@ def cmd_bootstrap_targets(args):
 #   audit_findings   audit_versions()' rows for the version; chain: {ok} of verify_chain()
 #   issuer           https://<KEYCLOAK_DOMAIN>/realms/<KEYCLOAK_REALM>
 ARTEFACT_KEYS = ("routes", "mqtt", "grants_document", "netpol", "proxy", "tools")
+OPTIONAL_ARTEFACT_KEYS = ("netpol_research",)   # apply_check.digests_of: only while the policy has the zone
 LEEWAY = 30                                   # medcea_iam.LEEWAY, seconds
 _SEG = re.compile(r"[A-Za-z0-9_-]+")
 _SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
@@ -529,7 +543,9 @@ def audit_version(doc):
         # 5. the digests against the applied event's artefacts
         have = apply_check.digests_of(outs, commit)
         want = applied.get("artefacts") or {}
-        for k in ARTEFACT_KEYS:
+        # an artefact only some versions have (a zone's NetworkPolicies, research sandbox
+        # Phase 2a) is compared whenever either side carries it
+        for k in ARTEFACT_KEYS + tuple(x for x in OPTIONAL_ARTEFACT_KEYS if x in want or x in have):
             if k not in want:
                 say("FAIL", f"artefact {k}: not in the applied event")
             elif have.get(k) != want.get(k):
@@ -582,6 +598,8 @@ def main(argv=None):
     ht = sub.add_parser("has-tool")
     ht.add_argument("kind")
     ht.add_argument("--admitting", action="store_true", help="exit 3 when the tool's group gives no role a setting")
+    hz = sub.add_parser("has-zone")
+    hz.add_argument("zone")
     desc = sub.add_parser("describe-gate")
     desc.add_argument("host")
     desc.add_argument("roles")
@@ -590,6 +608,9 @@ def main(argv=None):
                                          "edge-wizard", "pgadmin", "mqtt", "superset"])
     comp.add_argument("host", nargs="?")
     comp.add_argument("--namespace")
+    comp.add_argument("--zone", help="compile netpol: a zone of network.zones (research), not the platform zone; "
+                                      "compile egress: the zone whose namespace --namespace names")
+    comp.add_argument("--platform-namespace", help="compile netpol --zone / egress --zone: the platform zone's namespace")
     comp.add_argument("--setting", choices=["allowed_groups", "admin_groups"], help="compile jupyterhub: which list")
     comp.add_argument("--node-ip", action="append", default=[])
     comp.add_argument("--mode", choices=["additive", "enforce", "verify"])
@@ -678,6 +699,16 @@ def main(argv=None):
             return 1
         return 3 if args.admitting and not tools.admits_anyone(p, args.kind) else 0
 
+    if args.cmd == "has-zone":
+        if args.zone not in netpol.ZONES:
+            print(f"ERROR: unknown zone {args.zone}; known: {', '.join(netpol.ZONES)}", file=sys.stderr)
+            return 2
+        errors, _ = invariants.check(p)
+        if errors:
+            print(f"refusing to answer: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
+            return 2
+        return 0 if netpol.has_zone(p, args.zone) else 1
+
     if args.cmd == "hosts":
         for h in p.hosts:
             status = proxies.ENFORCEMENT.get(h, "unknown")
@@ -711,15 +742,40 @@ def main(argv=None):
         if not args.namespace:
             print("ERROR: compile netpol needs --namespace", file=sys.stderr)
             return 2
+        if args.zone is not None and args.zone not in netpol.ZONES:
+            print(f"ERROR: unknown zone {args.zone}; known: {', '.join(netpol.ZONES)}", file=sys.stderr)
+            return 2
+        if args.zone is not None and not args.platform_namespace:
+            print("ERROR: compile netpol --zone needs --platform-namespace", file=sys.stderr)
+            return 2
+        if args.zone is None and args.platform_namespace:
+            print("ERROR: --platform-namespace goes only with --zone", file=sys.stderr)
+            return 2
         try:
-            print(json.dumps(netpol.compile(p, args.namespace, args.node_ip), indent=1))
+            if args.zone is None:
+                print(json.dumps(netpol.compile(p, args.namespace, args.node_ip), indent=1))
+            else:
+                print(json.dumps(netpol.compile_zone(p, args.zone, args.namespace, args.platform_namespace,
+                                                     args.node_ip), indent=1))
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         return 0
     if args.cmd == "compile" and args.target == "egress":
+        namespaces = None
+        if args.zone is not None:
+            if args.zone not in netpol.ZONES:
+                print(f"ERROR: unknown zone {args.zone}; known: {', '.join(netpol.ZONES)}", file=sys.stderr)
+                return 2
+            if not args.namespace or not args.platform_namespace:
+                print("ERROR: compile egress --zone needs --namespace and --platform-namespace", file=sys.stderr)
+                return 2
+            namespaces = {None: args.platform_namespace, args.zone: args.namespace}
+        elif args.namespace or args.platform_namespace:
+            print("ERROR: compile egress: --namespace and --platform-namespace go only with --zone", file=sys.stderr)
+            return 2
         try:
-            print(json.dumps(netpol.egress(p, args.host or ""), sort_keys=True, separators=(",", ":")))
+            print(json.dumps(netpol.egress(p, args.host or "", namespaces), sort_keys=True, separators=(",", ":")))
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2

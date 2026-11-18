@@ -53,7 +53,9 @@ on real runs (the sandbox computes them on simulated ones). MES batch/lot entiti
 genotype and substrate registration. Linking post-harvest analytical results (HPLC-MS, β-glucan,
 ICP-MS) to batches.
 
-**Phase 1 built: `research/`** — the Research Sandbox's chamber model (`twin_plant/`, uncalibrated until Phase 3) and simulation harness (`harness/`: production's controllers and `loop_resolver` loaded by path, metrics, hash-pinned campaigns); loosely coupled through four interfaces (manual chapter `research`). Still TODO: the per-chamber calibration, the biological twin and phases 2–8.
+**Phase 1 built: `research/`** — the Research Sandbox's chamber model (`twin_plant/`, uncalibrated until Phase 3) and simulation harness (`harness/`: production's controllers and `loop_resolver` loaded by path, metrics, hash-pinned campaigns); loosely coupled through four interfaces (manual chapter `research`). Still TODO: the per-chamber calibration, the biological twin and phases 2b–8.
+
+**Phase 2a built in branch `research/phase-2a` (commit A, not deployed): the research zone and the snapshot export** — namespace `${NAMESPACE}-research` with its own default-deny NetworkPolicies compiled from the access policy (`rs-default-deny`, `rs-dns`, `rs-<pod>`), a low PriorityClass, a quota and limits (`infra/deploy-research-namespace.sh`); the research database `medcea_research` on its own PostgreSQL (`apps/research/`: an append-only lake of snapshots, qa's held-out reservations in `vault`); the nightly export (`apps/research-export/`), which reads production only through the inert read functions `medcea.research_*()` of migration 013 and writes no person column; both research health checks (`rsnetpol`, `rsexport`). It all skips (`RESEARCH_ENABLED`, opt-in, and the research zone) until commit B, a skeleton version qa approves, gives the policy the zone. **TODO (2b–8):** the Workbench moved into the research zone and reading snapshots (2b), calibration from snapshots (3), the agent harness (4), and phases 5–8.
 
 ## Layer 4 — Enterprise / Regulatory Interface
 

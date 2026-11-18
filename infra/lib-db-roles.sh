@@ -22,6 +22,10 @@
 #                                         Deployment exists while the applied policy gives no role a
 #                                         Superset setting or IAM_DB_SERVICE_ROLES is not true, so
 #                                         then it prints nothing)
+#   research-export (the nightly CronJob) svc_research_export  apps/research-export/deploy.sh (never postgres:
+#                                         it refuses; read from the CronJob's plain env OP_USER. No
+#                                         CronJob exists while RESEARCH_ENABLED is not true or the
+#                                         applied policy has no research zone, so then it prints nothing)
 #
 # A client moves to its own role only when IAM_DB_SERVICE_ROLES=true AND the role
 # can already log in; otherwise it stays on postgres and says why. The database
@@ -58,6 +62,7 @@ db_client_role() {
         pgadmin)   echo rr_admin_login ;;
         iam-api)   echo iam_svc ;;
         superset)  echo svc_superset ;;
+        research-export) echo svc_research_export ;;
         *)         return 1 ;;
     esac
 }
@@ -125,6 +130,14 @@ db_clients_live() {
         u="$($KUBECTL get deployment superset -n "$ns" \
             -o jsonpath='{range .spec.template.spec.containers[*].env[?(@.name=="SUPERSET_DB_USER")]}{.value}{"\n"}{end}' 2>/dev/null | head -1)" || u=""
         echo "superset ${u:-?}"
+    fi
+    # The research export (research sandbox Phase 2a): a CronJob, so its login is read from
+    # the job template; OP_USER is a plain value (the password is a secretKeyRef). Its
+    # research-side login (rs_export_writer) is in another database and no client here.
+    if $KUBECTL get cronjob research-export -n "$ns" >/dev/null 2>&1; then
+        u="$($KUBECTL get cronjob research-export -n "$ns" \
+            -o jsonpath='{range .spec.jobTemplate.spec.template.spec.containers[*].env[?(@.name=="OP_USER")]}{.value}{"\n"}{end}' 2>/dev/null | head -1)" || u=""
+        echo "research-export ${u:-?}"
     fi
     if $KUBECTL get deployment node-red -n "$ns" >/dev/null 2>&1; then
         # A Node-RED with no flows deployed yet (a fresh persistent /data after

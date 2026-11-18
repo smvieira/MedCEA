@@ -633,7 +633,7 @@ class Readme(unittest.TestCase):
         items = dict(re.findall(r"^(\d)\. (\w+)", sec, re.M))
         self.assertEqual([items.get(str(i), "").lower() for i in range(1, 5)],
                          [name for name, _ in contract.INTERFACES])
-        for word in ("Keycloak", "route table", "v_*_research", "snapshot", "contract version", "recipe_types.yaml",
+        for word in ("Keycloak", "route table", "medcea.research_*()", "snapshot", "contract version", "recipe_types.yaml",
                      "ALGORITHM_NAMES", "loop_resolver", "esp32-control.json", "gateway", "draft",
                      "Nothing else is shared"):
             self.assertIn(word, sec)

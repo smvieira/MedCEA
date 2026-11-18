@@ -236,8 +236,30 @@ superset_skip_hint() {
         echo -e "${YELLOW}Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true. Turn it on (./medcea.sh → IAM switches → IAM_DB_SERVICE_ROLES, or \"Bring IAM to full enforcement\"), then ./apps/superset/deploy.sh.${NC}"
     # The version-N guard: the iam deploy's bootstrap waited (apply.sh --bootstrap rc 2), and
     # nothing later in the install deploys Superset again.
-    elif grep -qF "skipped: no version of the access policy is applied yet" "$log" 2>/dev/null; then
+    # (Superset's own line: the research components skip on no version with the same opening words.)
+    elif grep -qF "and Superset deploys only from an applied one" "$log" 2>/dev/null; then
         echo -e "${YELLOW}Still to do: Superset was skipped, no version of the access policy is applied yet. Once ./apps/iam/deploy.sh has applied version 1 (./apps/iam/apply.sh --status), run ./apps/superset/deploy.sh.${NC}"
+    fi
+    return 0
+}
+
+# One line when RESEARCH_ENABLED is true (config.env, read as medcea.sh reads it) but the
+# infrastructure stage skipped the research sandbox's namespace because the applied access
+# policy has no research zone yet (infra/deploy-research-namespace.sh's skip line, in the
+# newest deploy-infra log, or a research component's in the newest deploy-apps log): the zone comes with an approved skeleton version, after which
+# ./deploy-infra.sh creates the namespace and the research components can be deployed.
+# Never fails the install.
+research_skip_hint() {
+    local log hit=""
+    [[ "$(cfg_switch RESEARCH_ENABLED)" == true ]] || return 0
+    # the newest infrastructure log (not a reset's or a --policy-only's) and the newest
+    # applications log (the research components skip with the same words)
+    for log in "$(ls -t logs/deploy-infra-[0-9]*.log 2>/dev/null | head -1)" \
+               "$(ls -t logs/deploy-apps-*.log 2>/dev/null | head -1)"; do
+        [[ -n "$log" ]] && grep -qF "skipped: the applied access policy has no research zone yet" "$log" 2>/dev/null && hit=1
+    done
+    if [[ -n "$hit" ]]; then
+        echo -e "${YELLOW}Still to do: RESEARCH_ENABLED is true, but the research sandbox was skipped: the applied access policy has no research zone yet. Once its skeleton version is approved and applied (./apps/iam/apply.sh --status), run ./deploy-infra.sh, then ./apps/research/deploy.sh and ./apps/research-export/deploy.sh.${NC}"
     fi
     return 0
 }
@@ -320,18 +342,21 @@ install)
     echo -e "${GREEN}${BOLD}MedCEA is installed.${NC} Start at the service portal: https://$( (source ./config.env; echo "$PORTAL_DOMAIN") 2>/dev/null)"
     iam_switches_hint || true      # before the box, which stays the last thing on screen
     superset_skip_hint || true
+    research_skip_hint || true
     usb_group_hint || true
     finish_with_credentials
     ;;
 infra)
     run_stage "Infrastructure" deploy-infra ./deploy-infra.sh $CONFIGURE
     echo -e "${YELLOW}The applications are not installed yet: ./install.sh --apps-only${NC}"
+    research_skip_hint || true
     finish_with_credentials
     ;;
 apps)
     [[ -f config.env ]] || { echo -e "${RED}No config.env — install the infrastructure first: ./install.sh${NC}" >&2; exit 1; }
     run_stage "Applications" deploy-apps with_mk8s_group ./deploy-apps.sh --all "${APPS_BG[@]}"
     superset_skip_hint || true
+    research_skip_hint || true
     service_roles_infra_hint || true
     ;;
 # -----------------------------------------------------------------------------

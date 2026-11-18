@@ -7611,3 +7611,401 @@ INSERT INTO medcea.platform_setting (key, value) VALUES ('012:last_nonce', :'dep
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 COMMIT;
+
+-- ── Migration 013: the research sandbox's read functions (18 Nov 2026) ───────
+-- (research sandbox Phase 2a, commit A; owner decisions P, F and S of 18 Nov
+-- 2026.) The research exporter reads production only through these eleven
+-- functions, never through views over the base tables: each returns a fixed set
+-- of columns, and none returns a person (no *_by_*, no sub, no pseudonym), a
+-- name, a description, a note, a reason, a location, a device identifier, an
+-- address or a message's raw JSON. They are created INERT: owned by
+-- medcea_owner, SECURITY DEFINER, STABLE, SET search_path = pg_catalog, medcea, pg_temp
+-- (pg_temp last, as tests/iam-db.sh requires of every definer; every name in
+-- the bodies is schema-qualified), REVOKE ALL … FROM PUBLIC and
+-- no grant; commit B names them in the policy (group research_export, EXECUTE
+-- for svc_research_export only). Not in the DDL: they read tables that only the
+-- migrations create (control_loop, control_quantity, recipe_type,
+-- unit_algorithm_params). A cycle's algorithm, parameters and loop map are
+-- extracted from run_params as schd/run_recipe.py writes them (a JSON array whose
+-- first element carries control_algorithm, control_algorithm_params and
+-- control_loops); the raw run_params never leaves. Re-run safe: CREATE OR
+-- REPLACE with the same signatures, ownership moved only when it differs, and a
+-- check first that every table they read exists (else the transaction fails and
+-- the nonce is not written). Down: medcea_db_migrations_down_013.sql (by hand;
+-- refused while svc_research_export may execute one). deploy.sh reads
+-- 013:last_nonce back.
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+-- 1. Every relation the functions read must exist (010/011 created the newest)
+DO $$
+DECLARE r text; missing text[] := '{}';
+BEGIN
+    FOREACH r IN ARRAY ARRAY['medcea.measurement', 'medcea.cea_unit', 'medcea.cea_zone', 'medcea.recipe',
+                             'medcea.recipe_line', 'medcea.recipe_run', 'medcea.recipe_line_cycle_run',
+                             'medcea.control_loop', 'medcea.unit_algorithm_params', 'medcea.control_algorithm',
+                             'medcea.control_quantity', 'medcea.recipe_type', 'medcea.recipe_type_quantity'] LOOP
+        IF pg_catalog.to_regclass(r) IS NULL THEN
+            missing := missing || r;
+        END IF;
+    END LOOP;
+    IF cardinality(missing) > 0 THEN
+        RAISE EXCEPTION 'migration 013: % missing; migrations 008b to 012 must have run first', missing
+            USING ERRCODE = 'XX000';
+    END IF;
+END $$;
+
+-- 2. The functions
+
+-- research_contract_version(): the version of the research contract these
+-- functions implement; a change to any result column bumps it, and the sandbox
+-- refuses a version it does not know.
+CREATE OR REPLACE FUNCTION medcea.research_contract_version() RETURNS integer
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT 1
+$$;
+
+-- research_measurements(after, upto): the AP readings whose ingest time
+-- (measurement."timestamp") is in (p_after, p_upto]; p_after NULL = from the
+-- beginning, p_upto NULL = nothing. A value that is not a plain number (at most
+-- 64 characters, an exponent of at most three digits) is NULL, so no reading
+-- can make the export fail on a cast.
+CREATE OR REPLACE FUNCTION medcea.research_measurements(p_after timestamptz, p_upto timestamptz)
+    RETURNS TABLE(ingested_at timestamptz, measured_at timestamptz, unit_code text, zone_code text, tag text,
+                  sensor text, value numeric, uom text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT m."timestamp",
+           m.measure_timestamp,
+           (m.msg ->> 'unit_code')::text,
+           (m.msg ->> 'zone_code')::text,
+           (m.msg ->> 'tag')::text,
+           COALESCE(NULLIF(m.msg ->> 'sensor', ''), 'default')::text,
+           CASE WHEN pg_catalog.length(m.msg ->> 'value') <= 64
+                 AND (m.msg ->> 'value') ~ '^\s*[-+]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]{1,3})?\s*$'
+                THEN (m.msg ->> 'value')::numeric END,
+           (m.msg ->> 'UoM')::text
+      FROM medcea.measurement m
+     WHERE (m.msg_type)::text = 'AP'
+       AND (p_after IS NULL OR m."timestamp" > p_after)
+       AND m."timestamp" <= p_upto
+     ORDER BY m."timestamp", m.measure_timestamp
+$$;
+
+-- research_units(): every unit, its recipe type code, size and state
+CREATE OR REPLACE FUNCTION medcea.research_units()
+    RETURNS TABLE(unit_code text, recipe_type text, area numeric, height numeric, is_active text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT u.unit_code::text, u.unit_type::text, u.area::numeric, u.height::numeric, u.is_active::text
+      FROM medcea.cea_unit u
+     ORDER BY u.unit_code
+$$;
+
+-- research_zones(): every zone by its unit's code
+CREATE OR REPLACE FUNCTION medcea.research_zones()
+    RETURNS TABLE(unit_code text, zone_code text, is_active text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT u.unit_code::text, z.zone_code::text, z.is_active::text
+      FROM medcea.cea_zone z
+      JOIN medcea.cea_unit u ON u.unit_id = z.unit_id
+     ORDER BY u.unit_code, z.zone_code
+$$;
+
+-- research_recipes(): the approved and retired recipes (never a draft)
+CREATE OR REPLACE FUNCTION medcea.research_recipes()
+    RETURNS TABLE(recipe_id integer, recipe_type text, status text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT r.recipe_id::integer, r.recipe_type::text, r.status::text
+      FROM medcea.recipe r
+     WHERE r.status IN ('approved', 'retired')
+     ORDER BY r.recipe_id
+$$;
+
+-- research_recipe_lines(): the lines of those recipes (no line name, no notes)
+CREATE OR REPLACE FUNCTION medcea.research_recipe_lines()
+    RETURNS TABLE(recipe_id integer, seq integer, cycle_number integer, light_type text,
+                  light_on_minutes integer, light_off_minutes integer, setpoints jsonb)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT l.recipe_id::integer, l.recipe_item_seq_id::integer, l.cycle_number::integer, l.light_type::text,
+           l.light_on_minutes::integer, l.light_off_minutes::integer, l.setpoints::jsonb
+      FROM medcea.recipe_line l
+      JOIN medcea.recipe r ON r.recipe_id = l.recipe_id
+     WHERE r.status IN ('approved', 'retired')
+     ORDER BY l.recipe_id, l.recipe_item_seq_id
+$$;
+
+-- research_runs(): every run, by its unit's code (no schedule, no actor)
+CREATE OR REPLACE FUNCTION medcea.research_runs()
+    RETURNS TABLE(run_id integer, recipe_id integer, unit_code text, started_at timestamptz,
+                  ended_at timestamptz, status text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT rr.recipe_run_id::integer, rr.recipe_id::integer, u.unit_code::text, rr.recipe_run_start::timestamptz,
+           rr.recipe_run_end::timestamptz, rr.recipe_run_status::text
+      FROM medcea.recipe_run rr
+      LEFT JOIN medcea.cea_unit u ON u.unit_id = rr.unit_id
+     ORDER BY rr.recipe_run_id
+$$;
+
+-- Nothing a person typed may reach the lake through a jsonb column, so the jsonb
+-- the functions below return is rebuilt, never passed on (review of 18 Nov 2026):
+--   parameters (research_param_sets.params, research_cycles.algorithm_params):
+--     only keys ^[a-z][a-z0-9_]{0,39}$ whose value is a JSON number or boolean
+--     (schd/cea/algorithms/params.py: every parameter is an int or a float); an
+--     object left with none is {}; anything but an object is NULL.
+--   a loop's input: tag (a name), sources (the string "*" of the default map, or
+--     the names in the array), rule (reference|mean|min|max|single), reference
+--     and fallback (names), max_age_s (a number); output: actuator
+--     (^[A-Za-z0-9_]{1,48}$, _loop_check's own rule), mode (a name), command_map
+--     (entries whose key and value match ^[A-Z]{1,10}$). A name is
+--     ^[a-z][a-z0-9_]{0,47}$ (wiring.py's TAG_RX; sensor ids are shorter). Any
+--     other key, or a value of another type or shape, is dropped (the key with it);
+--     anything but an object is NULL. Same rules in research_cycles' loop map and
+--     research_control_loops (schd/cea/loop_resolver.py reads no other key).
+
+-- research_cycles(): every cycle of every run, with the fields of its run_params
+-- the runner wrote (first element of the array): control_algorithm (a code, else
+-- NULL), control_algorithm_params (rebuilt as above; not an object: NULL) and
+-- control_loops (each loop reduced to zone_code, loop_code, phase, input, output,
+-- completed; input and output rebuilt as above)
+CREATE OR REPLACE FUNCTION medcea.research_cycles()
+    RETURNS TABLE(run_id integer, seq integer, cycle_num integer, started_at timestamptz, ended_at timestamptz,
+                  status text, algorithm_code text, algorithm_params jsonb, control_loops jsonb)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT c.recipe_run_id::integer, c.recipe_item_seq_id::integer, c.recipe_item_seq_cycle_num::integer,
+           c.recipe_line_seq_cycle_run_start::timestamptz, c.recipe_line_seq_cycle_run_end::timestamptz,
+           c.recipe_line_cycle_run_status::text,
+           CASE WHEN pg_catalog.jsonb_typeof(rp.e -> 'control_algorithm') = 'string'
+                 AND (rp.e ->> 'control_algorithm') ~ '^[A-Z][A-Z0-9_]{0,39}$'
+                THEN (rp.e ->> 'control_algorithm')::text END,
+           CASE WHEN pg_catalog.jsonb_typeof(rp.e -> 'control_algorithm_params') = 'object'
+                THEN (SELECT COALESCE(pg_catalog.jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
+                        FROM pg_catalog.jsonb_each(rp.e -> 'control_algorithm_params') kv
+                       WHERE kv.key ~ '^[a-z][a-z0-9_]{0,39}$'
+                         AND pg_catalog.jsonb_typeof(kv.value) IN ('number', 'boolean')) END,
+           CASE WHEN pg_catalog.jsonb_typeof(rp.e -> 'control_loops') = 'array'
+                THEN (SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                                 'zone_code', x.v -> 'zone_code', 'loop_code', x.v -> 'loop_code',
+                                 'phase', x.v -> 'phase',
+                                 'input', (SELECT CASE WHEN pg_catalog.jsonb_typeof(i.j) = 'object' THEN
+                                     (SELECT COALESCE(pg_catalog.jsonb_object_agg(f.k, f.v), '{}'::jsonb) FROM (
+                                         SELECT 'tag'::text AS k, i.j -> 'tag' AS v
+                                          WHERE pg_catalog.jsonb_typeof(i.j -> 'tag') = 'string'
+                                            AND (i.j ->> 'tag') ~ '^[a-z][a-z0-9_]{0,47}$'
+                                         UNION ALL
+                                         SELECT 'sources', i.j -> 'sources'
+                                          WHERE (i.j -> 'sources') = '"*"'::jsonb
+                                         UNION ALL
+                                         SELECT 'sources',
+                                                (SELECT COALESCE(pg_catalog.jsonb_agg(e.v ORDER BY e.n), '[]'::jsonb)
+                                                   FROM pg_catalog.jsonb_array_elements(i.j -> 'sources')
+                                                        WITH ORDINALITY AS e(v, n)
+                                                  WHERE pg_catalog.jsonb_typeof(e.v) = 'string'
+                                                    AND (e.v #>> '{}') ~ '^[a-z][a-z0-9_]{0,47}$')
+                                          WHERE pg_catalog.jsonb_typeof(i.j -> 'sources') = 'array'
+                                         UNION ALL
+                                         SELECT 'rule', i.j -> 'rule'
+                                          WHERE pg_catalog.jsonb_typeof(i.j -> 'rule') = 'string'
+                                            AND (i.j ->> 'rule') IN ('reference', 'mean', 'min', 'max', 'single')
+                                         UNION ALL
+                                         SELECT 'reference', i.j -> 'reference'
+                                          WHERE pg_catalog.jsonb_typeof(i.j -> 'reference') = 'string'
+                                            AND (i.j ->> 'reference') ~ '^[a-z][a-z0-9_]{0,47}$'
+                                         UNION ALL
+                                         SELECT 'fallback', i.j -> 'fallback'
+                                          WHERE pg_catalog.jsonb_typeof(i.j -> 'fallback') = 'string'
+                                            AND (i.j ->> 'fallback') ~ '^[a-z][a-z0-9_]{0,47}$'
+                                         UNION ALL
+                                         SELECT 'max_age_s', i.j -> 'max_age_s'
+                                          WHERE pg_catalog.jsonb_typeof(i.j -> 'max_age_s') = 'number') f) END
+                                     FROM (SELECT x.v -> 'input' AS j) i),
+                                 'output', (SELECT CASE WHEN pg_catalog.jsonb_typeof(o.j) = 'object' THEN
+                                     (SELECT COALESCE(pg_catalog.jsonb_object_agg(f.k, f.v), '{}'::jsonb) FROM (
+                                         SELECT 'actuator'::text AS k, o.j -> 'actuator' AS v
+                                          WHERE pg_catalog.jsonb_typeof(o.j -> 'actuator') = 'string'
+                                            AND (o.j ->> 'actuator') ~ '^[A-Za-z0-9_]{1,48}$'
+                                         UNION ALL
+                                         SELECT 'mode', o.j -> 'mode'
+                                          WHERE pg_catalog.jsonb_typeof(o.j -> 'mode') = 'string'
+                                            AND (o.j ->> 'mode') ~ '^[a-z][a-z0-9_]{0,47}$'
+                                         UNION ALL
+                                         SELECT 'command_map',
+                                                (SELECT COALESCE(pg_catalog.jsonb_object_agg(cm.key, cm.value), '{}'::jsonb)
+                                                   FROM pg_catalog.jsonb_each(o.j -> 'command_map') cm
+                                                  WHERE cm.key ~ '^[A-Z]{1,10}$'
+                                                    AND pg_catalog.jsonb_typeof(cm.value) = 'string'
+                                                    AND (cm.value #>> '{}') ~ '^[A-Z]{1,10}$')
+                                          WHERE pg_catalog.jsonb_typeof(o.j -> 'command_map') = 'object') f) END
+                                     FROM (SELECT x.v -> 'output' AS j) o),
+                                 'completed', x.v -> 'completed') ORDER BY x.n)
+                        FROM pg_catalog.jsonb_array_elements(rp.e -> 'control_loops') WITH ORDINALITY AS x(v, n)
+                       WHERE pg_catalog.jsonb_typeof(x.v) = 'object') END
+      FROM medcea.recipe_line_cycle_run c
+      CROSS JOIN LATERAL (
+          SELECT CASE WHEN pg_catalog.strpos(c.run_params::text, '\u0000') > 0 THEN NULL   -- jsonb refuses it
+                      WHEN pg_catalog.json_typeof(c.run_params) = 'array'  THEN (c.run_params -> 0)::jsonb
+                      WHEN pg_catalog.json_typeof(c.run_params) = 'object' THEN c.run_params::jsonb END AS e) rp
+     ORDER BY c.recipe_run_id, c.recipe_item_seq_id, c.recipe_item_seq_cycle_num
+$$;
+
+-- research_control_loops(): the active loops of every zone (either half may still
+-- be NULL: a half-bound loop); input and output rebuilt
+-- as research_cycles' loop map
+CREATE OR REPLACE FUNCTION medcea.research_control_loops()
+    RETURNS TABLE(unit_code text, zone_code text, loop_code text, input jsonb, output jsonb)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT u.unit_code::text, z.zone_code::text, cl.loop_code::text,
+           (SELECT CASE WHEN pg_catalog.jsonb_typeof(i.j) = 'object' THEN
+               (SELECT COALESCE(pg_catalog.jsonb_object_agg(f.k, f.v), '{}'::jsonb) FROM (
+                   SELECT 'tag'::text AS k, i.j -> 'tag' AS v
+                    WHERE pg_catalog.jsonb_typeof(i.j -> 'tag') = 'string'
+                      AND (i.j ->> 'tag') ~ '^[a-z][a-z0-9_]{0,47}$'
+                   UNION ALL
+                   SELECT 'sources', i.j -> 'sources'
+                    WHERE (i.j -> 'sources') = '"*"'::jsonb
+                   UNION ALL
+                   SELECT 'sources',
+                          (SELECT COALESCE(pg_catalog.jsonb_agg(e.v ORDER BY e.n), '[]'::jsonb)
+                             FROM pg_catalog.jsonb_array_elements(i.j -> 'sources')
+                                  WITH ORDINALITY AS e(v, n)
+                            WHERE pg_catalog.jsonb_typeof(e.v) = 'string'
+                              AND (e.v #>> '{}') ~ '^[a-z][a-z0-9_]{0,47}$')
+                    WHERE pg_catalog.jsonb_typeof(i.j -> 'sources') = 'array'
+                   UNION ALL
+                   SELECT 'rule', i.j -> 'rule'
+                    WHERE pg_catalog.jsonb_typeof(i.j -> 'rule') = 'string'
+                      AND (i.j ->> 'rule') IN ('reference', 'mean', 'min', 'max', 'single')
+                   UNION ALL
+                   SELECT 'reference', i.j -> 'reference'
+                    WHERE pg_catalog.jsonb_typeof(i.j -> 'reference') = 'string'
+                      AND (i.j ->> 'reference') ~ '^[a-z][a-z0-9_]{0,47}$'
+                   UNION ALL
+                   SELECT 'fallback', i.j -> 'fallback'
+                    WHERE pg_catalog.jsonb_typeof(i.j -> 'fallback') = 'string'
+                      AND (i.j ->> 'fallback') ~ '^[a-z][a-z0-9_]{0,47}$'
+                   UNION ALL
+                   SELECT 'max_age_s', i.j -> 'max_age_s'
+                    WHERE pg_catalog.jsonb_typeof(i.j -> 'max_age_s') = 'number') f) END
+               FROM (SELECT cl.input AS j) i),
+           (SELECT CASE WHEN pg_catalog.jsonb_typeof(o.j) = 'object' THEN
+               (SELECT COALESCE(pg_catalog.jsonb_object_agg(f.k, f.v), '{}'::jsonb) FROM (
+                   SELECT 'actuator'::text AS k, o.j -> 'actuator' AS v
+                    WHERE pg_catalog.jsonb_typeof(o.j -> 'actuator') = 'string'
+                      AND (o.j ->> 'actuator') ~ '^[A-Za-z0-9_]{1,48}$'
+                   UNION ALL
+                   SELECT 'mode', o.j -> 'mode'
+                    WHERE pg_catalog.jsonb_typeof(o.j -> 'mode') = 'string'
+                      AND (o.j ->> 'mode') ~ '^[a-z][a-z0-9_]{0,47}$'
+                   UNION ALL
+                   SELECT 'command_map',
+                          (SELECT COALESCE(pg_catalog.jsonb_object_agg(cm.key, cm.value), '{}'::jsonb)
+                             FROM pg_catalog.jsonb_each(o.j -> 'command_map') cm
+                            WHERE cm.key ~ '^[A-Z]{1,10}$'
+                              AND pg_catalog.jsonb_typeof(cm.value) = 'string'
+                              AND (cm.value #>> '{}') ~ '^[A-Z]{1,10}$')
+                    WHERE pg_catalog.jsonb_typeof(o.j -> 'command_map') = 'object') f) END
+               FROM (SELECT cl.output AS j) o)
+      FROM medcea.control_loop cl
+      JOIN medcea.cea_zone z ON z.zone_id = cl.zone_id
+      JOIN medcea.cea_unit u ON u.unit_id = z.unit_id
+     WHERE (cl.is_active)::text = 'Y'
+     ORDER BY u.unit_code, z.zone_code, cl.loop_code
+$$;
+
+-- research_param_sets(): the approved parameter sets (unit_code NULL: any unit;
+-- no set name, no source; params rebuilt as above)
+CREATE OR REPLACE FUNCTION medcea.research_param_sets()
+    RETURNS TABLE(params_id integer, algorithm_code text, unit_code text, params jsonb)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT p.params_id::integer, a.algorithm_code::text, u.unit_code::text,
+           CASE WHEN pg_catalog.jsonb_typeof(p.params) = 'object'
+                THEN (SELECT COALESCE(pg_catalog.jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
+                        FROM pg_catalog.jsonb_each(p.params) kv
+                       WHERE kv.key ~ '^[a-z][a-z0-9_]{0,39}$'
+                         AND pg_catalog.jsonb_typeof(kv.value) IN ('number', 'boolean')) END
+      FROM medcea.unit_algorithm_params p
+      JOIN medcea.control_algorithm a ON a.algorithm_id = p.algorithm_id
+      LEFT JOIN medcea.cea_unit u ON u.unit_id = p.unit_id
+     WHERE p.status = 'approved'
+     ORDER BY p.params_id
+$$;
+
+-- research_catalogue(): the quantity catalogue (migration 011, from
+-- apps/database/recipe_types.yaml) as rows: kind quantity (code = quantity_code),
+-- recipe_type (code = recipe_type_code) and recipe_type_quantity (code =
+-- <recipe_type_code>/<quantity_code>); no label
+CREATE OR REPLACE FUNCTION medcea.research_catalogue()
+    RETURNS TABLE(kind text, code text, doc jsonb)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, medcea, pg_temp AS $$
+    SELECT k, c, d FROM (
+        SELECT 1 AS o, 'quantity'::text AS k, q.quantity_code::text AS c,
+               pg_catalog.jsonb_build_object(
+                   'unit', q.unit, 'sense_uoms', pg_catalog.to_jsonb(q.sense_uoms), 'default_tag', q.default_tag,
+                   'commands', pg_catalog.to_jsonb(q.commands), 'command_map', q.command_map, 'phase', q.phase,
+                   'loopable', q.loopable, 'min', q.min_value, 'max', q.max_value, 'ordinal', q.ordinal) AS d
+          FROM medcea.control_quantity q
+        UNION ALL
+        SELECT 2, 'recipe_type', t.recipe_type_code::text,
+               pg_catalog.jsonb_build_object('is_default', t.is_default, 'ordinal', t.ordinal)
+          FROM medcea.recipe_type t
+        UNION ALL
+        SELECT 3, 'recipe_type_quantity', t.recipe_type_code::text || '/' || q.quantity_code::text,
+               pg_catalog.jsonb_build_object('recipe_type', t.recipe_type_code, 'quantity', q.quantity_code,
+                                             'required', x.required, 'ordinal', x.ordinal)
+          FROM medcea.recipe_type_quantity x
+          JOIN medcea.recipe_type t ON t.recipe_type_id = x.recipe_type_id
+          JOIN medcea.control_quantity q ON q.quantity_id = x.quantity_id) s
+     ORDER BY s.o, s.c
+$$;
+
+-- 3. Owned by medcea_owner; nobody else may execute them (the policy's grants,
+--    from commit B, name svc_research_export)
+DO $$
+DECLARE f regprocedure;
+BEGIN
+    FOREACH f IN ARRAY ARRAY['medcea.research_contract_version()'::regprocedure,
+                             'medcea.research_measurements(timestamptz,timestamptz)'::regprocedure,
+                             'medcea.research_units()'::regprocedure,
+                             'medcea.research_zones()'::regprocedure,
+                             'medcea.research_recipes()'::regprocedure,
+                             'medcea.research_recipe_lines()'::regprocedure,
+                             'medcea.research_runs()'::regprocedure,
+                             'medcea.research_cycles()'::regprocedure,
+                             'medcea.research_control_loops()'::regprocedure,
+                             'medcea.research_param_sets()'::regprocedure,
+                             'medcea.research_catalogue()'::regprocedure] LOOP
+        IF (SELECT proowner FROM pg_catalog.pg_proc WHERE oid = f) <> 'medcea_owner'::regrole THEN
+            EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO medcea_owner', f);
+        END IF;
+    END LOOP;
+END $$;
+
+REVOKE ALL ON FUNCTION medcea.research_contract_version() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_measurements(timestamptz, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_units() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_zones() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_recipes() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_recipe_lines() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_runs() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_cycles() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_control_loops() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_param_sets() FROM PUBLIC;
+REVOKE ALL ON FUNCTION medcea.research_catalogue() FROM PUBLIC;
+
+COMMENT ON FUNCTION medcea.research_contract_version() IS 'The research contract version the medcea.research_*() functions implement (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_measurements(timestamptz, timestamptz) IS 'AP readings ingested in (p_after, p_upto], without device, message or person fields (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_units() IS 'Every unit: code, recipe type code, area, height, state (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_zones() IS 'Every zone: unit code, zone code, state (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_recipes() IS 'The approved and retired recipes: id, recipe type, status (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_recipe_lines() IS 'The lines of the approved and retired recipes, without names or notes (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_runs() IS 'Every run: id, recipe, unit code, start, end, status; no actor (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_cycles() IS 'Every cycle with the algorithm code, its parameters and the loop map extracted from run_params (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_control_loops() IS 'The active control loops: unit code, zone code, loop code, input, output (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_param_sets() IS 'The approved parameter sets: id, algorithm code, unit code (NULL: any), params (migration 013). Research export only.';
+COMMENT ON FUNCTION medcea.research_catalogue() IS 'The quantity catalogue as rows of kind quantity, recipe_type and recipe_type_quantity (migration 013). Research export only.';
+
+NOTIFY pgrst, 'reload schema';
+
+INSERT INTO medcea.platform_setting (key, value) VALUES ('013:last_nonce', :'deploy_nonce')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+COMMIT;

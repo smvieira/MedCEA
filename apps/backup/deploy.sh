@@ -10,7 +10,9 @@
 #      database's dumps, people's homes with their git tokens.
 #   2. ConfigMap medcea-backup-script (apps/backup/backup-job.sh)
 #   3. CronJob medcea-backup (apps/backup/k8s/backup-cronjob.yaml), daily at 02:30 UTC:
-#      pg_dump (custom format) of $POSTGRES_DB and keycloak (and superset when it exists), the roles without their
+#      pg_dump (custom format) of $POSTGRES_DB and keycloak (and superset when it exists;
+#      and medcea_research, the research sandbox's database, whenever Secret research-backup
+#      and the database exist: dumped as rs_backup through Service research-postgresql), the roles without their
 #      passwords, and a tar of every AI workbench home (claim-*), Node-RED's /data
 #      and Grafana's volume; one dated folder per run with MANIFEST, SHA256SUMS and a
 #      final OK; folders older than BACKUP_KEEP_DAYS (default 14) are deleted.
@@ -105,16 +107,30 @@ $KUBECTL create configmap medcea-backup-script -n "$NAMESPACE" \
     --from-file=backup-job.sh="$SCRIPT_DIR/backup-job.sh" --dry-run=client -o yaml \
   | $KUBECTL apply -f -
 
+# The research sandbox's database (research sandbox Phase 2a): its host is rendered
+# always, whatever RESEARCH_ENABLED says now, so research enabled later is backed up
+# without a backup redeploy (the job skips the database, saying so, while Secret
+# research-backup is absent). Its login rs_backup comes from that Secret
+# (./apps/research/deploy.sh writes it), mounted optional, so this deploy may run before
+# the research one. pg_dump is the rdbms image's: both releases are
+# bitnamicharts/postgresql 18.4.0 (deploy-infra.sh, apps/research/deploy.sh;
+# tests/test_backup.py keeps them equal), so pg_dump is the research server's version too.
+RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-$NAMESPACE-research}"
+[[ "$RESEARCH_NAMESPACE" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "RESEARCH_NAMESPACE='$RESEARCH_NAMESPACE' is not a Kubernetes namespace name (config.env)"
+RESEARCH_DB_HOST="research-postgresql.$RESEARCH_NAMESPACE"
+
 # =============================================================================
 # 3. The CronJob
 # =============================================================================
 log "Deploying CronJob medcea-backup (daily 02:30 UTC, image $BACKUP_IMAGE)..."
 render "$SCRIPT_DIR/k8s/backup-cronjob.yaml" NAMESPACE BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_IMAGE \
-    BACKUP_UID BACKUP_GID STORAGE_DIR POSTGRES_DB \
+    BACKUP_UID BACKUP_GID STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST \
   | $KUBECTL apply -f -
 
 log ""
 log "Backups deployed."
 log "  Folder:   $BACKUP_DIR (mode 700, $(id -un)); $(df -hP "$BACKUP_DIR" | awk 'NR==2 {print $4}') free"
 log "  Schedule: daily 02:30 UTC; folders older than $BACKUP_KEEP_DAYS days are deleted after a good run"
+log "  Research: medcea_research on $RESEARCH_DB_HOST whenever Secret research-backup exists (./apps/research/deploy.sh)"
 log "  Run one now: ./apps/backup/backups.sh now    List: ./apps/backup/backups.sh list"

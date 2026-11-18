@@ -151,6 +151,14 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         true: every compiled iam-<pod> policy present (else FAIL), a stale labelled one WARNs;"
     echo -e "         false: WARN, also while labelled policies remain (./deploy-infra.sh deletes them)"
     echo ""
+    echo -e "  ${CYAN}rsnetpol${NC} the research zone's NetworkPolicies (research sandbox): NAMESPACE"
+    echo -e "         every NetworkPolicy in RESEARCH_NAMESPACE (else NAMESPACE-research) against"
+    echo -e "         cli.py compile netpol --zone research, specs compared, the default deny included:"
+    echo -e "         FAIL when a compiled one is missing or differs, or any other policy is there"
+    echo -e "         (labelled or not: it widens the zone); WARN when unreadable;"
+    echo -e "         SKIP while RESEARCH_ENABLED is not true and the namespace is absent (WARN when it remains),"
+    echo -e "         and while the applied policy has no research zone"
+    echo ""
     echo -e "  ${CYAN}iamdecisions${NC} account decisions waiting for qa (IAM 2.7): DATABASE"
     echo -e "         SKIP without schema iam or role access_svc; FAIL without iam.confirm_decision"
     echo -e "         (./apps/access/deploy.sh) or when access_svc may not execute it"
@@ -237,6 +245,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "  ${CYAN}backupage${NC} the nightly backup (apps/backup): NAMESPACE"
     echo -e "         OK while the newest OK marker in BACKUP_DIR is at most 26 h old, WARN beyond,"
     echo -e "         FAIL beyond 72 h; SKIP without CronJob medcea-backup, and on its first day"
+    echo ""
+    echo -e "  ${CYAN}rsexport${NC} the research export's newest snapshot (apps/research-export): NAMESPACE"
+    echo -e "         read-only psql in research-postgresql-0: OK while the newest lake.snapshot is at most"
+    echo -e "         26 h old, WARN beyond, FAIL beyond 72 h; FAIL when rows of it fall in a held-out"
+    echo -e "         reservation (vault.reserved_rows_in); WARN with no reservation or unreadable;"
+    echo -e "         SKIP without CronJob research-export, and on its first day"
     echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
@@ -432,6 +446,136 @@ check_backupage() {
     newest="$(backup_newest_ok "$dir")"
     res="$(backup_age_status "$(date -u +%s)" "${newest#* }" "$created_epoch" "${newest%% *}")"
     _record "${res%%|*}" "$name" "${res#*|}"
+}
+
+# rsexport_age_status NOW LAST CREATED  →  "STATUS|message" (pure; tests call it alone)
+# NOW: epoch seconds; LAST: the newest lake.snapshot's created_at as epoch seconds, empty
+# when there is none; CREATED: CronJob research-export's creationTimestamp as epoch seconds.
+# The export runs daily at 03:00 UTC: OK up to 26 h, WARN beyond, FAIL beyond 72 h (the
+# backup rule); no snapshot is SKIP while the CronJob is at most 26 h old.
+RSEXPORT_WARN_H=26
+RSEXPORT_FAIL_H=72
+rsexport_age_status() {
+    local now="$1" last="$2" created="${3:-0}" age h status limit
+    local how="microk8s kubectl -n ${NAMESPACE:-medcea} get jobs -l app=research-export"
+    if [[ -z "$last" ]]; then
+        [[ "$created" =~ ^[0-9]+$ ]] || created=0
+        age=$(( now - created )); h=$(( age / 3600 ))
+        if (( age <= RSEXPORT_WARN_H * 3600 )); then
+            echo "SKIP|no snapshot yet: the first export runs at 03:00 UTC (now: microk8s kubectl -n ${NAMESPACE:-medcea} create job --from=cronjob/research-export research-export-now)"
+            return
+        fi
+        status=WARN; (( age > RSEXPORT_FAIL_H * 3600 )) && status=FAIL
+        echo "$status|no snapshot since the CronJob was created ${h} h ago ($how)"
+        return
+    fi
+    age=$(( now - last )); (( age < 0 )) && age=0
+    h=$(( age / 3600 ))
+    if (( age > RSEXPORT_FAIL_H * 3600 )); then
+        status=FAIL; limit="$RSEXPORT_FAIL_H"
+    elif (( age > RSEXPORT_WARN_H * 3600 )); then
+        status=WARN; limit="$RSEXPORT_WARN_H"
+    else
+        echo "OK|newest snapshot ${h} h old"
+        return
+    fi
+    echo "$status|newest snapshot is ${h} h old (over ${limit} h: $how)"
+}
+
+# =============================================================================
+# Check: the research export (research sandbox Phase 2a) — read-only
+# target: NAMESPACE (CronJob research-export lives there; the research database is
+# research-postgresql-0 in RESEARCH_NAMESPACE, else NAMESPACE-research). One read-only psql
+# as postgres (the chart's $POSTGRES_PASSWORD_FILE, as rdbms), SQL on stdin, guarded by
+# to_regclass('lake.snapshot'): the newest snapshot's id and created_at,
+# vault.reserved_rows_in(newest) and the number of reservations. FAIL when held-out rows
+# reached the lake, and on the age past 72 h (rsexport_age_status); WARN past 26 h, with no
+# reservation (nothing is held out for validation), and when anything cannot be read; SKIP
+# without the CronJob and on its first day with no snapshot.
+# =============================================================================
+check_rsexport() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" rns created created_epoch out rc=0 line
+    local sid="" sepoch="" reserved="" nres="" state="" res status _tag
+    local fails=() warns=() oks=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    rns="${RESEARCH_NAMESPACE:-${ns}-research}"
+    created="$(timeout "$TIMEOUT" $KUBECTL get cronjob research-export -n "$ns" \
+        -o jsonpath='{.metadata.creationTimestamp}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'NotFound' <<<"$created"; then
+            _record SKIP "$name" "no CronJob research-export in ${ns} (./apps/research-export/deploy.sh)"
+        else
+            _record WARN "$name" "cannot read CronJob research-export in ${ns}: $(tail -n1 <<<"$created" | cut -c1-120)"
+        fi
+        return
+    fi
+    created_epoch="$(date -u -d "$created" +%s 2>/dev/null || echo 0)"
+    rc=0
+    out=$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$rns" research-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' medcea_research 2>&1 <<'SQL'
+SELECT pg_catalog.to_regclass('lake.snapshot') IS NOT NULL AS has_lake \gset
+\if :has_lake
+SELECT pg_catalog.to_regclass('vault.reservation') IS NOT NULL
+   AND pg_catalog.to_regprocedure('vault.reserved_rows_in(bigint)') IS NOT NULL AS has_vault \gset
+\if :has_vault
+SELECT 'snap|' || coalesce((SELECT s.snapshot_id::text || '|' || floor(extract(epoch FROM s.created_at))::bigint::text
+                              FROM lake.snapshot s ORDER BY s.snapshot_id DESC LIMIT 1), '|');
+SELECT 'reserved|' || coalesce((SELECT vault.reserved_rows_in(m.id)::text
+                                  FROM (SELECT max(snapshot_id) AS id FROM lake.snapshot) m
+                                 WHERE m.id IS NOT NULL), '-');
+SELECT 'reservations|' || count(*) FROM vault.reservation;
+\else
+SELECT 'state|partial';
+\endif
+\else
+SELECT 'state|unbuilt';
+\endif
+SQL
+) || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the research database in ${rns}: $(grep -m1 -E 'ERROR|error|NotFound' <<<"$out" | cut -c1-120)"
+        return
+    fi
+    state="$(grep -m1 '^state|' <<<"$out" | cut -d'|' -f2)"
+    if [[ -n "$state" ]]; then
+        _record WARN "$name" "the research database in ${rns} has no lake.snapshot, vault.reservation or vault.reserved_rows_in yet (./apps/research/deploy.sh)"
+        return
+    fi
+    line="$(grep -m1 '^snap|' <<<"$out")"
+    IFS='|' read -r _tag sid sepoch <<<"$line"
+    reserved="$(grep -m1 '^reserved|' <<<"$out" | cut -d'|' -f2)"
+    nres="$(grep -m1 '^reservations|' <<<"$out" | cut -d'|' -f2)"
+    if [[ -z "$line" || ! "$nres" =~ ^[0-9]+$ ]] \
+        || { [[ -n "$sid" ]] && [[ ! "$sid" =~ ^[0-9]+$ || ! "$sepoch" =~ ^[0-9]+$ || ! "$reserved" =~ ^[0-9]+$ ]]; }; then
+        _record WARN "$name" "cannot read the newest snapshot or the reservations in ${rns}"
+        return
+    fi
+    if [[ -n "$sid" ]] && (( reserved > 0 )); then
+        fails+=("${reserved} measurement rows of snapshot ${sid} fall in a reservation: held-out data reached the lake (./apps/research/reserve.sh list)")
+    fi
+    res="$(rsexport_age_status "$(date -u +%s)" "$sepoch" "$created_epoch")"
+    status="${res%%|*}"
+    case "$status" in
+        FAIL) fails+=("${res#*|}") ;;
+        WARN) warns+=("${res#*|}") ;;
+        *)    oks+=("${res#*|}${sid:+ (snapshot ${sid}, no reserved rows in it)}") ;;
+    esac
+    if (( nres == 0 )); then
+        warns+=("no reservation yet: nothing is held out for validation (./apps/research/reserve.sh add --by <qa user> --unit U --from T --to T --reason R)")
+    else
+        oks+=("${nres} reservation(s)")
+    fi
+    local IFS=';'
+    if (( ${#fails[@]} )); then
+        _record FAIL "$name" "${fails[*]}"
+    elif (( ${#warns[@]} )); then
+        _record WARN "$name" "${warns[*]}"
+    elif [[ "$status" == SKIP ]]; then
+        _record SKIP "$name" "${oks[*]}"
+    else
+        _record OK "$name" "${oks[*]}"
+    fi
 }
 
 # =============================================================================
@@ -2583,6 +2727,111 @@ check_iamnetpol() {
 }
 
 # =============================================================================
+# Check: the research zone's NetworkPolicies (research sandbox Phase 2a) — read-only
+# target: NAMESPACE (the platform namespace; the research namespace is RESEARCH_NAMESPACE,
+# else NAMESPACE-research). The labelled policies (medcea/rs-netpol=true) in the research
+# namespace against `cli.py compile netpol --zone research` with the node's addresses (the
+# jsonpath pa_netpol reads), compared as {name: spec} in canonical JSON, the default deny
+# and the DNS exception included. A compiled policy missing or with another spec FAILs (the
+# zone admits more than the policy compiles). Every NetworkPolicy of the research namespace
+# is read, labelled or not: policies are additive, so any one not in the compiled set (the
+# Helm chart's own allow-all, a leftover labelled one, one made by hand) widens the zone
+# past its default deny and FAILs too, named. SKIP
+# without kubectl, while the sandbox is switched off and has no namespace, and while the
+# applied policy has no research zone (commit A, before the skeleton version); WARN when
+# switched off with the namespace left, when enabled without it, and when anything cannot
+# be read.
+# =============================================================================
+check_rsnetpol() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" rns out rc=0 exists live want ip ips=() res kind names
+    local fails=() count=""
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    rns="${RESEARCH_NAMESPACE:-${ns}-research}"
+    out="$(timeout "$TIMEOUT" $KUBECTL get namespace "$rns" -o name 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        exists=yes
+    elif grep -q 'NotFound' <<<"$out"; then
+        exists=no
+    else
+        _record WARN "$name" "cannot read namespace $rns: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+    fi
+    if [[ "${RESEARCH_ENABLED:-false}" != true ]]; then
+        if [[ $exists == yes ]]; then
+            _record WARN "$name" "RESEARCH_ENABLED is not true, yet namespace $rns exists: set RESEARCH_ENABLED=true and run ./deploy-infra.sh, or remove it with microk8s kubectl delete namespace $rns (this deletes the research database)"
+        else
+            _record SKIP "$name" "the research sandbox is switched off (RESEARCH_ENABLED is not true)"
+        fi
+        return
+    fi
+    rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone research >/dev/null 2>&1 || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        _record SKIP "$name" "the applied access policy has no research zone yet"; return
+    elif [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot tell whether the applied access policy has a research zone (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    if [[ $exists == no ]]; then
+        _record WARN "$name" "RESEARCH_ENABLED=true, but namespace $rns does not exist (./deploy-infra.sh)"; return
+    fi
+    rc=0
+    live="$(timeout "$TIMEOUT" $KUBECTL get netpol -n "$rns" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the NetworkPolicies in $rns: $(tail -n1 <<<"$live" | cut -c1-120)"; return
+    fi
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the node addresses: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+    fi
+    for ip in $out; do ips+=(--node-ip "${ip%/*}"); done
+    if ! want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --zone research --namespace "$rns" \
+            --platform-namespace "$ns" "${ips[@]}" 2>/dev/null)"; then
+        _record WARN "$name" "the research NetworkPolicies do not compile (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    res="$(WANT="$want" python3 -c '
+import json, os, sys
+try:
+    items = json.load(sys.stdin).get("items") or []
+    live = {i["metadata"]["name"]: i.get("spec") for i in items}
+    labelled = {i["metadata"]["name"] for i in items
+                if (i["metadata"].get("labels") or {}).get("medcea/rs-netpol") == "true"}
+    want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
+except Exception:
+    print("error|")
+    sys.exit(0)
+canon = lambda d: json.dumps(d, sort_keys=True)
+print("count|%d" % len(want))
+print("missing|" + " ".join(sorted(n for n in want if n not in live)))
+print("differ|" + " ".join(sorted(n for n in want if n in live and canon(live[n]) != canon(want[n]))))
+print("extra|" + " ".join(sorted(n for n in live if n not in want and n in labelled)))
+print("foreign|" + " ".join(sorted(n for n in live if n not in want and n not in labelled)))' <<<"$live" 2>/dev/null)"
+    while IFS='|' read -r kind names; do
+        case "$kind" in
+            count)   count="$names" ;;
+            missing) [[ -n "$names" ]] && fails+=("missing: $names (./deploy-infra.sh)") ;;
+            differ)  [[ -n "$names" ]] && fails+=("spec differs: $names (./deploy-infra.sh)") ;;
+            extra)   [[ -n "$names" ]] && fails+=("labelled but not compiled: $names (./deploy-infra.sh deletes them)") ;;
+            foreign) [[ -n "$names" ]] && fails+=("not the zone's, no medcea/rs-netpol=true label: $names, which widens the zone past its default deny (microk8s kubectl delete networkpolicy -n $rns <name>)") ;;
+            error)   _record WARN "$name" "cannot parse the live or compiled research NetworkPolicies"; return ;;
+        esac
+    done <<<"$res"
+    if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+        _record WARN "$name" "cannot compare the research NetworkPolicies with the compile"; return
+    fi
+    if (( count == 0 )); then
+        _record WARN "$name" "the applied policy has a research zone but compiles no research NetworkPolicy (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    if (( ${#fails[@]} )); then
+        local joined f
+        joined="${fails[0]}"
+        for f in "${fails[@]:1}"; do joined+="; $f"; done
+        _record FAIL "$name" "the research zone admits more than the policy compiles: $joined"
+    else
+        _record OK "$name" "$count research NetworkPolicies, the compiled set (default deny included)"
+    fi
+}
+
+# =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
 # =============================================================================
@@ -2800,6 +3049,8 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         jwks)         check_jwks "$name" "$target" ;;
         kcscopes)     check_kcscopes "$name" "$target" ;;
         iamnetpol)    check_iamnetpol "$name" "$target" ;;
+        rsnetpol)     check_rsnetpol "$name" "$target" ;;
+        rsexport)     check_rsexport "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

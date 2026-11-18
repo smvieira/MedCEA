@@ -64,8 +64,9 @@
 #      (1a: schema iam must also have iam._changed_since, IAM 4.1: the compiled grants name it)
 #   2  medcea_db_ddl.sql (no ON_ERROR_STOP; "already exists" filtered, as before)
 #   3  medcea_db_migrations.sql with -v deploy_nonce; 008b, 008c (IAM 4.1, the
-#      access policy's versions) and 010 (feedback control's loops) must all have
-#      committed it
+#      access policy's versions), 010 (feedback control's loops), 011 (recipe
+#      types), 012 (the limit columns dropped) and 013 (the research sandbox's
+#      inert read functions) must all have committed it
 #   3a recipe_recipe_id_seq fix (was deploy.sh step 4)
 #   4  medcea_db_owner.sql (iam too, IAM 2.7)       (-1, ON_ERROR_STOP)
 #   4a the policy's compiled functions              (-1, ON_ERROR_STOP)
@@ -247,6 +248,14 @@ SQL
     got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '012:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$got" != "$nonce" ]]; then
         echo "ERROR: migration 012 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
+        return 1
+    fi
+    # 013 (the research sandbox's read functions medcea.research_*(), inert: owned
+    # by medcea_owner, nobody may execute them until the policy names them) is a
+    # sixth transaction
+    got="$(_dba_psql "$CEA_DB" -tAq -c "SELECT value FROM medcea.platform_setting WHERE key = '013:last_nonce'" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$got" != "$nonce" ]]; then
+        echo "ERROR: migration 013 did not commit (its nonce is '${got:-none}', not $nonce); the errors are above" >&2
         return 1
     fi
 

@@ -1,0 +1,23 @@
+# k8s/research/limitrange.yaml — defaults for a container that states nothing (plan §5).
+# Applied by infra/deploy-research-namespace.sh. Render list: RESEARCH_NAMESPACE
+#
+# The quota counts requests.cpu, requests.memory and limits.memory, so every container
+# (init and hook containers included) must state them or the API refuses the pod: these
+# defaults fill in what a chart leaves out. A default memory limit and no default CPU
+# limit, on purpose: a CPU limit only throttles on one PC (deploy-infra.sh's PostgreSQL
+# has none either), and a LimitRange `default.cpu` would impose one on every container.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: research-limits
+  namespace: ${RESEARCH_NAMESPACE}
+  labels:
+    medcea/zone: research
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        memory: 512Mi

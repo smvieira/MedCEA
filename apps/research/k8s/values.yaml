@@ -1,0 +1,51 @@
+# Helm values of research-postgresql (bitnamicharts/postgresql 18.4.0), the research
+# sandbox's own PostgreSQL in $RESEARCH_NAMESPACE (research sandbox Phase 2a).
+# Render list: RESEARCH_DB_STORAGE
+# Rendered by apps/research/deploy.sh into a mktemp file (mode 600) for `helm -f`.
+# No password here: the superuser's comes from Secret research-postgresql-auth
+# (k8s/auth-secret.yaml), mounted as a file ($POSTGRES_PASSWORD_FILE in the pod).
+#
+# fullnameOverride: StatefulSet and pod research-postgresql(-0), Service
+# research-postgresql:5432, PVC data-research-postgresql-0.
+#
+# The chart's own NetworkPolicies are off. Chart 18.4.0 has no top-level networkPolicy
+# key (helm ignores one silently): its switches are primary.networkPolicy.enabled and
+# readReplicas.networkPolicy.enabled, both true by default with allowExternal and
+# allowExternalEgress true, i.e. an allow-all policy research-postgresql that would void
+# the zone's default-deny (policies are additive). The research zone's policies are
+# compiled from the access policy (rs-default-deny, rs-dns, rs-research-postgresql;
+# infra/deploy-research-namespace.sh), and deploy.sh refuses any other NetworkPolicy in
+# the namespace after the install. tests/test_research_db.py checks these paths
+# against the chart's own values.yaml.
+fullnameOverride: research-postgresql
+architecture: standalone
+auth:
+  enablePostgresUser: true
+  existingSecret: research-postgresql-auth
+  secretKeys:
+    adminPasswordKey: postgres-password
+primary:
+  networkPolicy:
+    enabled: false
+  priorityClassName: medcea-research-low
+  # Explicit, or Bitnami falls back to its "nano" preset (192Mi / 150m). No CPU limit
+  # on purpose (as rdbms: on one PC a limit only throttles); a memory limit so a runaway
+  # research query cannot starve the host. Sized as k8s/research/quota.yaml's row.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  persistence:
+    enabled: true
+    size: ${RESEARCH_DB_STORAGE}
+readReplicas:
+  networkPolicy:
+    enabled: false
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi

@@ -21,6 +21,16 @@ I5_ALLOWED = {"measurements": {"R"}}
 SERVICE_APPROVERS = {("svc_access", "iam_users"), ("svc_access", "zones")}
 # I12 (IAM 4.1): the levels that make a role a maker of each approval-guarded group.
 I12_MAKER_LEVELS = {"iam_policy": {"C", "U"}, "iam_users": {"K"}}
+# I18 (research sandbox): a group with `zone: research` is a research group. The production
+# roles hold nothing there; engineer holds at most R (operational only in research: it is
+# not a developer of the chamber model, owner decision of 17 Nov 2026), except on the
+# promotion group (C: it imports a promoted candidate, Phase 6), which a later phase adds
+# under this name. admin's K on research_workbench comes from I2/I13 and is not
+# constrained here; the scientists and qa are not either.
+GROUP_ZONES = ("research",)
+I18_NONE = ("operator", "production_manager", "qp", "maintenance", "qc")
+I18_PROMOTION_GROUP = "research_promotion"
+I18_ENGINEER = {I18_PROMOTION_GROUP: {"R", "C"}}
 
 
 def _member_keys(m):
@@ -73,6 +83,8 @@ def _structure(p, err):
                     for x in _route_levels(lv):
                         if x not in p.levels:
                             err(f"group {g}: route {route} level {x} unknown")
+        if "zone" in gd and gd["zone"] not in GROUP_ZONES:
+            err(f"group {g}: zone {gd['zone']!r} unknown (known: {', '.join(GROUP_ZONES)})")
         if gd.get("tool") and not any(m["type"] == "ui" for m in gd["members"]):
             err(f"group {g}: a tool block on a group without a ui member")
         for tg in (gd.get("reaches") or {}):
@@ -208,6 +220,11 @@ def _matrix_invariants(p, err, note):
                 err(f"I6 {r} holds {sorted(lv)} on research_workbench")
             if r == "engineer" and g == "research_workbench" and lv - {"R"}:
                 err(f"I6 engineer holds {sorted(lv)} on research_workbench")
+            if p.groups[g].get("zone") == "research":
+                if r in I18_NONE and lv:
+                    err(f"I18 {r} holds {sorted(lv)} on research group {g}")
+                if r == "engineer" and lv - I18_ENGINEER.get(g, {"R"}):
+                    err(f"I18 engineer holds {sorted(lv)} on research group {g}")
             if r == "qp" and lv & PRODUCER:
                 err(f"I7 qp holds {sorted(lv & PRODUCER)} on {g}")
             if r != "admin" and lv & {"K", "D"}:

@@ -17,7 +17,7 @@
 # names on disk); the --by username is remembered for the session.
 #
 # IAM switches (IAM_GATES, IAM_NETPOL, IAM_ENFORCE, IAM_POSTGREST_JWT,
-# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES, IAM_MQTT_PERSON) and WORKBENCH_ENABLED: shows the current value (the
+# IAM_DB_SERVICE_ROLES, IAM_DB_ROLES, IAM_MQTT_PERSON), WORKBENCH_ENABLED and RESEARCH_ENABLED: shows the current value (the
 # one active line in config.env; zero or several active lines are refused), the ordered
 # recipe for enabling or rolling back with its preconditions, then sets the value (that
 # one line, a backup config.env.guide-<timestamp>.bak next to it, the diff shown) and runs
@@ -1265,6 +1265,17 @@ a_infra_help() {
     EFFECT="nothing (prints the usage)"
     plan_run
 }
+# Research sandbox (Phase 2a): the zone's namespace; ./deploy-infra.sh runs it too.
+a_research_namespace() {
+    CMD=(./infra/deploy-research-namespace.sh)
+    EFFECT="cluster: namespace RESEARCH_NAMESPACE (label medcea/zone=research), PriorityClass medcea-research-low, ResourceQuota research-quota, LimitRange research-limits and the zone's NetworkPolicies (default-deny, DNS, the compiled hops)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (one line, nothing changed) while RESEARCH_ENABLED is not true or the applied access policy has no research zone (an approved skeleton version: ./apps/iam/apply.sh --status)."
+           "RESEARCH_ENABLED=false with the namespace still there: a warning naming how to remove it; nothing is removed."
+           "Only the network policies, when they drifted: ./infra/deploy-research-namespace.sh --policy-only (Policy → Re-render the policy artefacts runs it through ./deploy-infra.sh --policy-only).")
+    plan_run
+}
+a_research_switch() { switch_flow RESEARCH_ENABLED; }
 
 # ── Applications ──
 a_apps_menu() {
@@ -1383,6 +1394,75 @@ a_superset_uninstall() {
     LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
     superset_uninstall_plan
     NOTES+=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
+# Research sandbox (Phase 2a): its database (apps/research), the nightly snapshot export
+# (apps/research-export) and qa's held-out reservations (apps/research/reserve.sh). Each
+# deploy skips with one line (exit 0) while RESEARCH_ENABLED is not true, the applied
+# policy has no research zone, or no policy version is applied.
+RS_TIME_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(Z|[+-][0-9]{2}:[0-9]{2})?)?$'
+RS_TIME_HINT="a date such as 2026-11-01, or a time such as 2026-11-01T06:00Z"
+a_research_deploy() {
+    CMD=(./apps/research/deploy.sh)
+    EFFECT="research namespace: the research-postgresql release (database medcea_research, its roles and schemas), Secrets research-export-writer and research-backup in the platform namespace"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true, the applied access policy has no research zone, or no policy version is applied."
+           "Needs the research namespace first (./deploy-infra.sh, or Infrastructure → Deploy the research namespace).")
+    plan_run
+}
+a_research_uninstall() {
+    CMD=(./apps/research/uninstall.sh)
+    EFFECT="removes the research-postgresql release and its Secrets; keeps its volume (database medcea_research: every snapshot and reservation)"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Uninstall the research export first: it writes into this database every night.")
+    if ask_yn "Also DROP database medcea_research and its roles: every snapshot and every held-out reservation (--purge-data)?" n; then
+        CMD+=(--purge-data)
+        EFFECT="removes the research-postgresql release and its Secrets, then DROPS database medcea_research and its roles (every snapshot and reservation)"
+        purge_word
+    fi
+    NOTES+=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
+a_research_export_deploy() {
+    CMD=(./apps/research-export/deploy.sh)
+    EFFECT="platform namespace: CronJob research-export (03:00 UTC) and ConfigMap research-export-script"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0) as the research database's deploy is."
+           "Needs ./apps/database/deploy.sh first (svc_research_export's password and Secret db-svc-research-export) and ./apps/research/deploy.sh (the database it writes into)."
+           "Reserve the held-out ranges before the first export: a range already exported can no longer be held out.")
+    plan_run
+}
+a_research_export_uninstall() {
+    CMD=(./apps/research-export/uninstall.sh)
+    EFFECT="removes CronJob research-export, its Jobs and its ConfigMap; the research database keeps every snapshot"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
+a_research_reserve() {
+    local unit zone from to
+    ask_match "Unit code" "$UNIT_RE" "$UNIT_HINT"; unit="$ANSWER"
+    ask_match "Zone code (Enter = every zone of the unit)" "$UNIT_RE" "$UNIT_HINT" "" optional; zone="$ANSWER"
+    ask_match "From (UTC)" "$RS_TIME_RE" "$RS_TIME_HINT"; from="$ANSWER"
+    ask_match "To (UTC)" "$RS_TIME_RE" "$RS_TIME_HINT"; to="$ANSWER"
+    ask_match "Reason to record" "$POLICY_REASON_RE" "a reason is required and does not start with -"
+    local reason="$ANSWER"
+    echo "  --by is YOUR Keycloak username: an enabled account that holds qa, recorded with the reservation."
+    ask_match "Your Keycloak username (--by)" "$USER_RE" "$USER_HINT" "$BY_USER"
+    $ASK_CANCELLED || BY_USER="$ANSWER"
+    CMD=(env MEDCEA_CONFIRMED=1 ./apps/research/reserve.sh add --by "$BY_USER" --unit "$unit")
+    [[ -n "$zone" ]] && CMD+=(--zone "$zone")
+    CMD+=(--from "$from" --to "$to" --reason "$reason")
+    EFFECT="research database: a PERMANENT held-out reservation (vault.reservation, append-only): no later snapshot holds the readings of unit $unit${zone:+ zone $zone} in that range"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Refused for a range already exported (it is no longer held out) and for a range ending more than a year ahead."
+           "Your typed yes here is reserve.sh's confirmation (MEDCEA_CONFIRMED=1), so it does not ask again.")
+    plan_run
+}
+a_research_reservations() {
+    CMD=(./apps/research/reserve.sh list)
+    EFFECT="nothing (lists the held-out reservations)"
+    LOCK=yes; SUDO=mk8s; CFG_NEEDED=yes
     plan_run
 }
 
@@ -1613,6 +1693,17 @@ recipe() {
         WORKBENCH_ENABLED:rollback)
             STEPS=("set WORKBENCH_ENABLED false" "run ./deploy-infra.sh")
             AFTER=("This does not remove a workbench that is already running; later deploys only skip it.") ;;
+        RESEARCH_ENABLED:enable)
+            PRE=("The applied access policy has the research zone (an approved skeleton version: ./apps/iam/apply.sh --status); without it every step below says skipped and changes nothing."
+                 "No run is being started meanwhile: ./deploy-infra.sh redeploys the platform's services.")
+            STEPS=("set RESEARCH_ENABLED true" "run ./deploy-infra.sh" "run ./apps/database/deploy.sh" "run ./apps/research/deploy.sh" "run ./apps/backup/deploy.sh" "run ./apps/research-export/deploy.sh")
+            AFTER=("The order: ./deploy-infra.sh (the namespace and its policies), ./apps/database/deploy.sh (svc_research_export's password and Secret db-svc-research-export, which the export needs), ./apps/research/deploy.sh (the research database, Secret research-backup), ./apps/backup/deploy.sh (the nightly backup dumps medcea_research from now on), ./apps/research-export/deploy.sh."
+                   "Before the first nightly export (03:00 UTC), have qa reserve the held-out ranges: Applications → Reserve a held-out range. A range already exported can no longer be held out."
+                   "Verify: ./health-check.sh (Research network policies, Research export); ./apps/backup/backups.sh now, then verify: its MANIFEST lists medcea_research under # databases.") ;;
+        RESEARCH_ENABLED:rollback)
+            STEPS=("set RESEARCH_ENABLED false" "run ./apps/research-export/uninstall.sh" "run ./apps/research/uninstall.sh")
+            AFTER=("The export stops and the research database is removed; its volume (every snapshot and reservation) and the research namespace stay. ./deploy-infra.sh says how to remove the namespace while it is there."
+                   "To drop the data too: Applications → Uninstall the research database with --purge-data.") ;;
         *) REFUSE="no recipe for $key $dir" ;;
     esac
 }
@@ -1627,6 +1718,7 @@ switch_purpose() {
         IAM_DB_ROLES)         echo "The database enforces per-role grants, RLS and guard triggers (Phase 2a)." ;;
         IAM_MQTT_PERSON)      echo "The MQTT Explorer connects with a short-lived personal credential, on the broker's WebSocket listener only (false: the Explorer has no credential and says so)." ;;
         WORKBENCH_ENABLED)    echo "deploy-infra.sh also deploys the AI workbench (JupyterHub)." ;;
+        RESEARCH_ENABLED)     echo "The research sandbox: deploy-infra.sh creates its namespace, and its database and nightly snapshot export can be deployed (each only once the applied access policy has the research zone)." ;;
     esac
 }
 
@@ -2858,6 +2950,8 @@ AREA_INFRA=(
     "a_infra_uninstall|Remove MicroK8s entirely|./deploy-infra.sh --uninstall: all cluster data."
     "a_infra_help|Show deploy-infra.sh's help|Read-only."
     "a_manual_publish|Publish the manual to the portal|./infra/publish-manual.sh: build docs/manual and serve it at /manual/; nothing else."
+    "a_research_namespace|Deploy the research namespace|./infra/deploy-research-namespace.sh: the research zone's namespace, quota, limits and network policies."
+    "a_research_switch|Turn the research sandbox on or off|RESEARCH_ENABLED in config.env, then the deploys."
 )
 AREA_APPS=(
     "a_apps_menu|Pick components from a menu|./deploy-apps.sh (its own checkbox menu)."
@@ -2869,6 +2963,12 @@ AREA_APPS=(
     "a_superset_deploy|Install Superset|./apps/superset/deploy.sh, then the health check; skipped until the applied policy gives roles a setting."
     "a_superset_gate|Re-render Superset's gate|./apps/superset/deploy.sh --gate-only: only the role mapping, only when it drifted."
     "a_superset_uninstall|Uninstall Superset|./apps/superset/uninstall.sh: its data kept unless purged."
+    "a_research_deploy|Install the research database|./apps/research/deploy.sh: research-postgresql in the research namespace; skipped until research is on and in the policy."
+    "a_research_uninstall|Uninstall the research database|./apps/research/uninstall.sh: its data kept unless purged."
+    "a_research_export_deploy|Install the nightly research export|./apps/research-export/deploy.sh: snapshots of platform data into the research database."
+    "a_research_export_uninstall|Uninstall the research export|./apps/research-export/uninstall.sh: the snapshots stay."
+    "a_research_reserve|Reserve a held-out range (qa)|./apps/research/reserve.sh add: readings no snapshot will hold; permanent."
+    "a_research_reservations|List the held-out reservations|./apps/research/reserve.sh list."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."

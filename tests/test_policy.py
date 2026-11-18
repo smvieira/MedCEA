@@ -133,6 +133,21 @@ def _superset(*mutations):
     return apply
 
 
+def _research(*mutations):
+    """A mutation of the policy with the research zone fixture first (research sandbox Phase
+    2a; commit B adds the real keys): research_workbench marked `zone: research`, and a
+    research_promotion group (one data member) whose engineer cell is I18's exception."""
+    def apply(d):
+        d["resource_groups"]["research_workbench"]["zone"] = "research"
+        g = {k: v for k, v in copy.deepcopy(d["resource_groups"]["research_workbench"]).items() if k != "tool"}
+        g["members"] = [{"type": "data", "object": "medcea.rs_promotion_fixture"}]
+        d["resource_groups"]["research_promotion"] = g
+        d["matrix"]["research_promotion"] = {"engineer": ["R", "C"], "bio_scientist": ["R", "C"]}
+        for m in mutations:
+            m(d)
+    return apply
+
+
 # Each case must make the checker fail. The expected text is a fragment of the first
 # matching error, so a case that fails for the wrong reason is caught too.
 MUTATIONS = {
@@ -302,6 +317,18 @@ MUTATIONS = {
     "Superset reads runs for the scientists": (_superset(_set(["service_identities", "svc_superset", "ceiling", "runs"], ["R"]),
                                                          _set(["resource_groups", "analysis", "reaches", "runs"], ["R"])),
                                                "I5"),
+    # Research sandbox Phase 2a: I18 on the research zone fixture (_research)
+    "maintenance reads a research group": (_research(_set(["matrix", "research_workbench", "maintenance"], ["R"])), "I18 maintenance"),
+    "qc reads a research group": (_research(_set(["matrix", "research_workbench", "qc"], ["R"])), "I18 qc"),
+    "qp reads a research group": (_research(_set(["matrix", "research_workbench", "qp"], ["R"])), "I18 qp"),
+    "operator on a research group": (_research(_set(["matrix", "research_promotion", "operator"], ["R"])), "I18 operator"),
+    "production manager on a research group": (_research(_set(["matrix", "research_promotion", "production_manager"], ["R"])),
+                                               "I18 production_manager"),
+    "engineer creates in the workbench (research)": (_research(_set(["matrix", "research_workbench", "engineer"], ["R", "C"])),
+                                                     "I18 engineer"),
+    "engineer changes a promotion": (_research(_set(["matrix", "research_promotion", "engineer"], ["R", "C", "U"])),
+                                     "I18 engineer"),
+    "a group in an unknown zone": (_research(_set(["resource_groups", "research_promotion", "zone"], "lab")), "zone 'lab' unknown"),
 }
 
 
@@ -1588,11 +1615,16 @@ class WiringTest(unittest.TestCase):
         self.assertEqual((tail_11.count("BEGIN;"), tail_11.count("COMMIT;")), (1, 1))
         self.assertIn("'011:last_nonce', :'deploy_nonce'", tail_11)
         self.assertIn("key = '011:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
-        # 012 (the limit columns dropped) the same, last
-        tail_12 = migrations[migrations.index("── Migration 012"):]
+        # 012 (the limit columns dropped) the same
+        tail_12 = migrations[migrations.index("── Migration 012"):migrations.index("── Migration 013")]
         self.assertEqual((tail_12.count("BEGIN;"), tail_12.count("COMMIT;")), (1, 1))
         self.assertIn("'012:last_nonce', :'deploy_nonce'", tail_12)
         self.assertIn("key = '012:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
+        # 013 (the research sandbox's read functions) the same, last
+        tail_13 = migrations[migrations.index("── Migration 013"):]
+        self.assertEqual((tail_13.count("BEGIN;"), tail_13.count("COMMIT;")), (1, 1))
+        self.assertIn("'013:last_nonce', :'deploy_nonce'", tail_13)
+        self.assertIn("key = '013:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         self.assertIn("'008c:last_nonce', :'deploy_nonce'", tail_c)
         self.assertIn("key = '008c:last_nonce'", self.read("apps/database/lib-db-apply.sh"))
         # the mode files run inside the bundle's transaction: no BEGIN/COMMIT of their own

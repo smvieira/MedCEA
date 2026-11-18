@@ -1,0 +1,115 @@
+# apps/research-export/k8s/cronjob.yaml — the nightly research export (apps/research-export/deploy.sh).
+# Render list: NAMESPACE RESEARCH_NAMESPACE EXPORT_IMAGE POSTGRES_DB OP_DB_USER OP_SECRET OP_SECRET_KEY
+#
+# One pod per run, in the platform namespace, from the image research-postgresql runs
+# (psql of the research server's version, already on the node: nothing new is pulled),
+# running apps/research-export/export-job.sh from ConfigMap research-export-script. It
+# reads the operational database only through medcea.research_*() as svc_research_export
+# and writes one snapshot into medcea_research as rs_export_writer (research sandbox
+# Phase 2a). Both passwords reach the pod only through secretKeyRef; the pod mounts no
+# other Secret, no service account token and no host path.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: research-export
+  namespace: ${NAMESPACE}
+  labels:
+    app: research-export
+spec:
+  # 03:00 UTC: after the nightly backup (02:30 UTC), so a backup never holds half a snapshot.
+  schedule: "0 3 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  # Explicit, so a deploy resumes a CronJob suspended by hand (backups.sh restore-help B3).
+  suspend: false
+  # A host that was off at 03:00 runs the night's export when it is back within 6 h.
+  startingDeadlineSeconds: 21600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: research-export
+    spec:
+      # No retry: a failed run writes nothing (one research transaction), the health
+      # check rsexport says how old the newest snapshot is, and the next night runs again.
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: research-export
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: export
+            image: ${EXPORT_IMAGE}
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "/scripts/export-job.sh"]
+            env:
+            - name: PGHOST_OP
+              value: rdbms-postgresql
+            - name: OP_PORT
+              value: "5432"
+            - name: OP_DB
+              value: "${POSTGRES_DB}"
+            - name: OP_USER
+              value: "${OP_DB_USER}"
+            - name: OP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${OP_SECRET}
+                  key: ${OP_SECRET_KEY}
+            - name: RS_HOST
+              value: research-postgresql.${RESEARCH_NAMESPACE}
+            - name: RS_PORT
+              value: "5432"
+            - name: RS_DB
+              value: medcea_research
+            - name: RS_USER
+              value: rs_export_writer
+            - name: RS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: research-export-writer
+                  key: password
+            - name: PGCONNECT_TIMEOUT
+              value: "30"
+            - name: HOME
+              value: /tmp
+            - name: TMPDIR
+              value: /tmp
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                memory: 512Mi
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: script
+            configMap:
+              name: research-export-script
+              defaultMode: 0444
+          # The night's files: a measurement row is ~100 bytes, so 1 GiB holds ~10 million.
+          - name: tmp
+            emptyDir:
+              sizeLimit: 1Gi

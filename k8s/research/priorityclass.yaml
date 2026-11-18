@@ -1,0 +1,17 @@
+# k8s/research/priorityclass.yaml — the research sandbox's pods yield to production
+# (plan, cross-cutting design §5). Cluster-scoped: a namespace delete leaves it, so
+# deploy-infra.sh --reset deletes it by name. Applied by infra/deploy-research-namespace.sh.
+# Render list: (none)
+# value -100: below every platform pod (they run at the default 0), so under memory
+# pressure the scheduler evicts research pods first. globalDefault false: no pod gets it
+# unless its spec names it. Never preempts a platform pod.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: medcea-research-low
+  labels:
+    medcea/zone: research
+value: -100
+globalDefault: false
+preemptionPolicy: Never
+description: "MedCEA research sandbox: lower than every platform pod, never preempts one."

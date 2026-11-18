@@ -105,6 +105,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  - every AI workbench home (each person's notebooks) and Grafana's volume (the"
     echo "    dashboards Editors made in the browser); only the nightly backup in BACKUP_DIR,"
     echo "    if deployed, keeps a copy, and this does not delete it"
+    echo "  - the research sandbox (its namespace, its database and their volumes), if deployed"
     echo ""
     # install.sh --uninstall-all has already listed everything and asked.
     if [[ "${MEDCEA_CONFIRMED:-}" != "1" ]]; then
@@ -183,6 +184,8 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo "    homes with each person's notebooks and Grafana's volume with the dashboards"
     echo "    Editors made in the browser included; only the nightly backup in"
     echo "    BACKUP_DIR, if deployed, keeps a copy, and this does not delete it)"
+    echo "  - the research sandbox, if deployed: its Helm releases (the research database),"
+    echo "    its namespace with every volume in it, and PriorityClass medcea-research-low"
     echo "  - MicroK8s itself is KEPT, so images stay cached and the rebuild is fast"
     [[ "${2:-}" == "--secrets" ]] && echo "  - the generated secrets in config.env (--secrets)"
     echo ""
@@ -193,6 +196,31 @@ if [[ "${1:-}" == "--reset" ]]; then
         read -p "Type 'reset' to confirm: " _CONFIRM
         [[ "$_CONFIRM" == "reset" ]] || { echo "Aborted."; exit 0; }
     fi
+
+    # The research sandbox first (Phase 2a): its releases, its namespace and the
+    # cluster-scoped PriorityClass, which a namespace delete leaves behind. Only a
+    # namespace this platform labelled as the research zone is deleted, never one a
+    # mistyped RESEARCH_NAMESPACE happens to name.
+    _RNS="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    if [[ "$_RNS" =~ ^[a-z][a-z0-9-]{1,52}$ && "$_RNS" != "$NAMESPACE" ]] \
+       && [[ "$($MK8S kubectl get namespace "$_RNS" -o jsonpath='{.metadata.labels.medcea/zone}' 2>/dev/null || true)" == research ]]; then
+        echo -e "${YELLOW}Removing the research sandbox (namespace '$_RNS')...${NC}"
+        for _rel in $($MK8S helm3 list -n "$_RNS" -q 2>/dev/null); do
+            echo "  - $_rel"
+            $MK8S helm3 uninstall "$_rel" -n "$_RNS" --wait --timeout 3m >/dev/null 2>&1 || true
+        done
+        $MK8S kubectl delete namespace "$_RNS" --ignore-not-found --timeout=5m || true
+        for _i in $(seq 1 60); do
+            $MK8S kubectl get namespace "$_RNS" >/dev/null 2>&1 || break
+            sleep 5
+        done
+        if $MK8S kubectl get namespace "$_RNS" >/dev/null 2>&1; then
+            echo -e "${RED}Namespace '$_RNS' is still terminating. Check for stuck finalizers:${NC}"
+            echo "  kubectl get all -n $_RNS"
+            exit 1
+        fi
+    fi
+    $MK8S kubectl delete priorityclass medcea-research-low --ignore-not-found >/dev/null 2>&1 || true
 
     echo -e "${YELLOW}Uninstalling Helm releases...${NC}"
     for _rel in $($MK8S helm3 list -n "$NAMESPACE" -q 2>/dev/null); do
@@ -341,6 +369,15 @@ esac
 if [[ ! "$PROJECT_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]]; then
     echo -e "${RED}ERROR: PROJECT_NAME='$PROJECT_NAME' must match ^[a-z][a-z0-9-]{1,30}\$ (it is the MQTT topic root, namespace and realm).${NC}"
     exit 1
+fi
+# The research sandbox's namespace (Phase 2a), only when it is switched on: a namespace
+# name of its own, never the platform's.
+if [[ "${RESEARCH_ENABLED:-false}" == "true" ]]; then
+    RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    if [[ ! "$RESEARCH_NAMESPACE" =~ ^[a-z][a-z0-9-]{1,52}$ || "$RESEARCH_NAMESPACE" == "$NAMESPACE" ]]; then
+        echo -e "${RED}ERROR: RESEARCH_NAMESPACE='$RESEARCH_NAMESPACE' must match ^[a-z][a-z0-9-]{1,52}\$ and differ from NAMESPACE='$NAMESPACE' (config.env; the default is \"\${NAMESPACE}-research\").${NC}"
+        exit 1
+    fi
 fi
 
 # =============================================================================
@@ -609,6 +646,13 @@ policy_source_init "$NAMESPACE" || exit $?
 # settings) and the application pods' NetworkPolicies, infra/lib-policy-artefacts.sh.
 pa_iam_lib full
 pa_netpol full
+# The research sandbox's zone (Phase 2a): its namespace, PriorityClass, quota, limits and
+# network policies, only while RESEARCH_ENABLED is true and the applied policy has the
+# research zone (else one "skipped" line). A failure leaves the platform deploy going.
+if ! "$SCRIPT_DIR/infra/deploy-research-namespace.sh"; then
+    echo -e "${RED}The research namespace failed to deploy (above). The platform deploy goes on;${NC}"
+    echo -e "${RED}re-run ./infra/deploy-research-namespace.sh once the cause is fixed.${NC}"
+fi
 
 
 # Keycloak's own database. It used to share medcea_db (tables in public), so

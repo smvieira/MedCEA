@@ -76,6 +76,13 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    [svc_scheduler], written_by functions): widening with exactly svc_scheduler's
                    three SELECTs; no person role's reach moves, qa may approve it; only the
                    grants forms move
+  PhaseRS2aADelta  against PRE_RS (fb15e42): research sandbox Phase 2a, commit A (the zone form of
+                   compile netpol, has-zone, I18, apply_check's research target, migration 013):
+                   code only; defaults.yaml unchanged, every artefact and the hosts listing
+                   byte-identical, check the same, skeleton-gate --against-git fb15e42 equal,
+                   apply_check.targets() the same, and the factory policy has no research zone
+                   (an empty zone List, has-zone 1); PRE_RS's defaults.yaml (ref_tree(PRE_RS)),
+                   since commit B moves the policy
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -168,6 +175,8 @@ PRE_2A = "d8a91f8"   # feedback control's policy 2a (master_data gains medcea.co
 PRE_2C = "af5c1ad"   # feedback control's policy 2c (applied as version 5; 2704a22 has the same
                      # defaults.yaml): the recipe types add the three catalogue tables for
                      # svc_scheduler (PhaseRecipeTypesDelta)
+PRE_RS = "fb15e42"   # main before research sandbox Phase 2a: its commit A adds code only (the
+                     # zone compiler, I18, migration 013's inert functions, the research deploys)
 
 def as_of_fc(key, out):
     """An older commit's output with feedback control commit C2's one compiler change applied:
@@ -310,7 +319,17 @@ def artefacts(p, label="defaults.yaml"):
     for s in ("allowed_groups", "admin_groups"):
         out["jupyterhub-" + s] = proxies.toml_list(tools.jupyterhub_groups(p, s)) + "\n"
     for c in sorted((p.data["network"].get("clients") or {})):
-        out["egress-" + c] = json.dumps(netpol.egress(p, c), sort_keys=True, separators=(",", ":")) + "\n"
+        # a client whose hops cross zones (research sandbox Phase 2a) compiles with fixed
+        # placeholder namespaces, and its key names the zone so cli_argv can pass them
+        zs = [z for z in netpol.egress_zones(p, c) if z is not None]
+        if len(zs) > 1:
+            raise ValueError(f"client {c} crosses into {zs}: cli.py compile egress takes one zone")
+        if zs:
+            ns = {None: "medcea", zs[0]: "medcea-" + zs[0]}
+            out[f"egress-{c}@{zs[0]}"] = json.dumps(netpol.egress(p, c, ns), sort_keys=True,
+                                                    separators=(",", ":")) + "\n"
+        else:
+            out["egress-" + c] = json.dumps(netpol.egress(p, c), sort_keys=True, separators=(",", ":")) + "\n"
     for h in p.hosts:
         out["proxy-" + h] = proxies.toml_list(proxies.admitted(p, h)) + "\n"
     for mode in ("additive", "enforce", "verify"):
@@ -351,7 +370,11 @@ def cli_argv(key):
     if key.startswith("jupyterhub-"):
         return ["compile", "jupyterhub", "--setting", key[len("jupyterhub-"):]]
     if key.startswith("egress-"):
-        return ["compile", "egress", key[len("egress-"):]]
+        client, _, zone = key[len("egress-"):].partition("@")
+        if zone:   # a client whose hops cross zones: artefacts()' placeholder namespaces
+            return ["compile", "egress", client, "--zone", zone, "--namespace", "medcea-" + zone,
+                    "--platform-namespace", "medcea"]
+        return ["compile", "egress", client]
     if key.startswith("proxy-"):
         return ["compile", "proxy", key[len("proxy-"):]]
     if key == "grants-additive-logins":
@@ -1824,14 +1847,17 @@ def read(rel):
 # lib-policy-tools.sh or lib-db-apply.sh's db_apply), and how they call the init.
 WRITERS = ["deploy-infra.sh", "infra/deploy-workbench.sh", "infra/deploy-policy.sh"] + [
     f"apps/{c}/deploy.sh" for c in ("access", "database", "edge-wizard", "frontend", "iam", "monitor",
-                                    "mqtt-explorer", "scheduler", "superset")]
+                                    "mqtt-explorer", "research", "research-export", "scheduler",
+                                    "superset")] + [
+    # research sandbox Phase 2a: reads the applied policy (has-zone) under its own init
+    "infra/deploy-research-namespace.sh"]
 READERS = ["health-check.sh", "tests/iam-hosts.sh", "tests/iam-schema.sh", "tests/iam-signin.sh",
            "tests/iam-mqtt.sh", "tests/iam-access.sh"]
 # Fixture-only: they compile the factory policy (--defaults / db_apply on medcea-iamtest).
 FIXTURE = ["tests/iam-runner.sh", "tests/iam-db-fixture.sh", "tests/iam-postgrest.sh"]
 # --defaults on the fixture namespace, the read-only init on any other.
 EITHER = ["tests/iam-db.sh"]
-COMPILES = re.compile(r"cli\.py\"? (compile|check|hosts)|\$CLI\"? (\"\$\{SRC\[@\]\}\" )?compile|"
+COMPILES = re.compile(r"cli\.py\"? (compile|check|hosts|has-zone)|\$CLI\"? (\"\$\{SRC\[@\]\}\" )?compile|"
                       r"\bpolicy_(groups|grafana|workbench|workbench_egress|tool)\b [A-Za-z\"$]|^\s*db_apply |"
                       r"\bdb_apply \"")
 
@@ -1876,7 +1902,8 @@ class Wiring(unittest.TestCase):
 
     def test_every_writer_ends_with_finish(self):
         # review 4.2a: break_glass_ended needs policy_source_finish at the end of each success path
-        comps = {"deploy-infra.sh": "infra", "infra/deploy-workbench.sh": "workbench", "infra/deploy-policy.sh": "infra"}
+        comps = {"deploy-infra.sh": "infra", "infra/deploy-workbench.sh": "workbench", "infra/deploy-policy.sh": "infra",
+                 "infra/deploy-research-namespace.sh": "deploy-research-namespace"}
         for p in WRITERS:
             comp = comps.get(p) or p.split("/")[1]
             t = code(read(p))
@@ -3687,6 +3714,90 @@ class Phase42aDelta(unittest.TestCase):
         self.assertIn(f"IS 'policy {new_digest}';", self.want["grants-additive-functions"])
         self.assertIn(f"IS 'policy {old_digest}';", self.old_out("grants-additive-functions"))
 
+
+
+class PhaseRS2aADelta(unittest.TestCase):
+    """Research sandbox Phase 2a, commit A (18 Nov 2026): the zone form of `compile netpol`
+    (--zone/--platform-namespace), `has-zone`, invariant I18, apply_check's research netpol
+    target (only while a zone exists) and migration 013's inert read functions. Code only:
+    PRE_RS's defaults.yaml, every artefact and the hosts listing byte for byte as PRE_RS's
+    cli.py compiles them, check the same, the skeleton gate against PRE_RS equal, the same
+    apply targets, and no research zone in the factory policy."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RS, "medcea-prers-")
+        cls.ref = ref_tree(PRE_RS)   # the factory policy as commit A has it, this tree's compiler
+        cls.p = cls.ref[2]
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RS}: {self.old_cli}")
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        for key, want in self.want.items():
+            rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+            self.assertEqual(rc, 0, f"{key} ({PRE_RS}): {err}")
+            self.assertEqual(out, want, key)
+
+    def test_check_output_identical(self):
+        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
+        rc, out, err = run_cli(["check"], cli=self.ref[1])
+        self.assertEqual((rc, out), (rc_old, out_old), err)
+
+    def test_policy_file_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_text = f.read()
+        with open(os.path.join(self.ref[0], "apps", "iam", "policy", "defaults.yaml")) as f:
+            self.assertEqual(f.read(), old_text)
+
+    def test_skeleton_gate_against_prers_is_equal(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_RS, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_RS}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+
+    def test_apply_targets_unchanged(self):
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_RS}:apps/iam/apply_check.py"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = ("import json, sys, yaml; sys.path.insert(0, sys.argv[1]); import apply_check; "
+                "from compiler import model; "
+                "print(json.dumps(apply_check.targets(model.Policy(yaml.safe_load(open(sys.argv[2]).read())))))")
+        dy = os.path.join(self.ref[0], "apps", "iam", "policy", "defaults.yaml")
+        r = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(self.old, "apps", "iam"), dy],
+                           capture_output=True, text=True, env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        import apply_check
+        self.assertEqual(json.loads(r.stdout), [[n, a] for n, a in apply_check.targets(self.p)])
+        self.assertNotIn("netpol-research", [n for n, _ in apply_check.targets(self.p)])
+
+    def test_no_research_zone_yet(self):
+        rc, out, err = run_cli(["--defaults", "has-zone", "research"], cli=self.ref[1])
+        self.assertEqual(rc, 1, err)
+        rc, out, err = run_cli(["--defaults", "compile", "netpol", "--zone", "research", "--namespace",
+                                "medcea-research", "--platform-namespace", "medcea"], cli=self.ref[1])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["items"], [])
 
 if __name__ == "__main__":
     unittest.main()

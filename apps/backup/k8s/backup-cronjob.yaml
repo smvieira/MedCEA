@@ -1,6 +1,6 @@
 # apps/backup/k8s/backup-cronjob.yaml — the nightly backup (apps/backup/deploy.sh).
 # Render list: NAMESPACE BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_IMAGE BACKUP_UID BACKUP_GID
-#              STORAGE_DIR POSTGRES_DB
+#              STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST
 #
 # One pod per run, from the image rdbms-postgresql runs (pg_dump of the server's own
 # version, already on the node), running apps/backup/backup-job.sh from ConfigMap
@@ -8,7 +8,8 @@
 # (hostPath, read-write) and reads the volumes from microk8s-hostpath's PV directory
 # (hostPath, read-only): the parent directory and not each volume, because a workbench
 # home appears at a person's first start and the job must find it without a redeploy.
-# The postgres password reaches the pod only as PGPASSWORD from the Secret.
+# The postgres password reaches the pod only as PGPASSWORD from the Secret; the research
+# database's (rs_backup) only as RESEARCH_PGPASSWORD from Secret research-backup, optional.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -61,6 +62,22 @@ spec:
             # Superset's metadata (dashboards, charts, its users), on installs with Superset.
             - name: OPTIONAL_DATABASES
               value: "superset"
+            # The research sandbox's database (Phase 2a), on its own server: always set,
+            # whatever RESEARCH_ENABLED says. Dumped as rs_backup (pg_read_all_data) only when
+            # Secret research-backup exists and the database is there.
+            # pg_dump of this image matches it: both releases are postgresql chart 18.4.0.
+            - name: RESEARCH_DB_HOST
+              value: "${RESEARCH_DB_HOST}"
+            - name: RESEARCH_DB
+              value: medcea_research
+            - name: RESEARCH_PGUSER
+              value: rs_backup
+            - name: RESEARCH_PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: research-backup
+                  key: password
+                  optional: true
             # The AI workbench homes, Node-RED's /data and Grafana's database. Not
             # PostgreSQL's own volume (dumped above), the broker's or the hub's.
             - name: VOLUMES

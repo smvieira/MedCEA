@@ -12,6 +12,8 @@
 #                    when the MQTT digest moved, and the person credentials of the old
 #                    digest end, as a full deploy does)
 #   netpol           the application pods' NetworkPolicies
+#   rsnetpol         the research zone's NetworkPolicies (only while RESEARCH_ENABLED is
+#                    true and the applied policy has the zone; Phase 2a)
 #   node-red-auth    Node-RED's editor rights (a directory mount: no restart)
 #   grafana          Grafana's role path — on a drift the whole Grafana section
 #   NODE_RED_DOMAIN  Node-RED's gate (helm, no forced restart)
@@ -84,6 +86,13 @@ if [[ "$PA_MQTT_CHANGED" == 1 ]]; then
     fi
 fi
 pa_netpol scoped
+# The research zone's NetworkPolicies (research sandbox, Phase 2a): only while
+# RESEARCH_ENABLED is true and the applied policy has the zone; the namespace itself is
+# a full ./deploy-infra.sh's (infra/deploy-research-namespace.sh), so "not deployed" until then.
+if [[ "${RESEARCH_ENABLED:-false}" == "true" ]]; then
+    RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    if _pa_rs_zone; then pa_rsnetpol scoped; else _pa_line rsnetpol "not deployed"; fi
+fi
 pa_node_red_auth scoped
 policy_grafana || { echo -e "${RED}ERROR: cannot compile Grafana's role setting from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }
 pa_grafana scoped

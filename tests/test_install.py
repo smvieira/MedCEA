@@ -331,6 +331,52 @@ class Install(unittest.TestCase):
                 finally:
                     t.close()
 
+    def test_the_research_hint(self):
+        """Research sandbox (Phase 2a): RESEARCH_ENABLED true and the newest deploy-infra log
+        holds deploy-research-namespace.sh's skip line → one "Still to do" line; switched
+        off, a log without the line, or only a reset log → none."""
+        skip = "\033[0;32m[research-namespace]\033[0m skipped: the applied access policy has no research zone yet; ...\n"
+        hint = "Still to do: RESEARCH_ENABLED is true, but the research sandbox was skipped"
+        for switch, logs, mode, want in (
+                ("true", {"deploy-infra-20261118-120000.log": skip}, (), True),
+                ("true", {"deploy-infra-20261118-120000.log": skip}, ("--infra-only",), True),
+                ('"false"', {"deploy-infra-20261118-120000.log": skip}, (), False),
+                ("true", {"deploy-infra-20261118-120000.log": "nothing skipped\n"}, (), False),
+                ("true", {"deploy-infra-reset-20261118-120000.log": skip}, (), False),
+                ("true", {"deploy-apps-20261118-120000.log": skip.replace("research-namespace", "research-export")},
+                 ("--apps-only",), True)):
+            with self.subTest(switch=switch, logs=list(logs), mode=mode):
+                t = Tree(CONFIG + "RESEARCH_ENABLED=%s\n" % switch)
+                try:
+                    os.makedirs(t.path("logs"))
+                    for n, text in logs.items():
+                        with open(t.path("logs", n), "w") as f:
+                            f.write(text)
+                    p = t.run(*mode)
+                    self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+                    self.assertEqual(hint in p.stdout, want, p.stdout[-1500:])
+                    if want:
+                        self.assertIn("./apps/iam/apply.sh --status), run ./deploy-infra.sh", p.stdout)
+                finally:
+                    t.close()
+        with open(os.path.join(REPO, "infra", "deploy-research-namespace.sh")) as f:
+            self.assertIn("skipped: the applied access policy has no research zone yet", f.read())
+
+    def test_a_research_no_version_skip_is_not_superset(self):
+        """The research components skip on no applied version with Superset's opening words:
+        the Superset hint names only Superset's own line."""
+        t = Tree(CONFIG + 'IAM_DB_SERVICE_ROLES="true"\n')
+        try:
+            os.makedirs(t.path("logs"))
+            with open(t.path("logs", "deploy-apps-20261118-120000.log"), "w") as f:
+                f.write("[research-export] skipped: no version of the access policy is applied yet (state empty): "
+                        "run ./apps/research-export/deploy.sh once ./apps/iam/deploy.sh has applied version 1\n")
+            p = t.run()
+            self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+            self.assertNotIn("Superset was skipped", p.stdout)
+        finally:
+            t.close()
+
     def test_apps_only_says_to_run_deploy_infra_under_true(self):
         """--apps-only runs no infrastructure: under true it names the second deploy-infra the
         full install would run; under false it says nothing about it."""

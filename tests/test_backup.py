@@ -24,6 +24,16 @@
   restore-help (runs no kubectl, names every part), now (a Job from the CronJob, its log),
   an unknown command.
 - uninstall.sh leaves BACKUP_DIR; config.env.example and health-checks.conf carry it.
+- The research sandbox's database (Phase 2a): RESEARCH_DB_HOST in the render list, rendered
+  whatever RESEARCH_ENABLED says (research-postgresql.<RESEARCH_NAMESPACE, default
+  NAMESPACE-research>), so research enabled later is backed up without a backup redeploy;
+  rs_backup's password only by an optional secretKeyRef; the job dumps medcea_research on its own
+  server as rs_backup only when the host is set, the password is there and the database exists.
+  Without the Secret: "skipped … (no research database on this install: no Secret
+  research-backup)" and its own MANIFEST line; a server that answers without the database: the
+  "skipped (absent)" line; a server that does not answer leaves the platform's backup complete with
+  "# databases not reached"; the password only in pg_dump's and psql's environment; rdbms and
+  research-postgresql on the same chart version, so pg_dump matches both servers.
 
 Run: python3 tests/test_backup.py
 """
@@ -106,6 +116,67 @@ class CronJobRender(unittest.TestCase):
         self.assertEqual(env["DATABASES"]["value"], "medcea_db keycloak")
         self.assertEqual(env["OPTIONAL_DATABASES"]["value"], "superset")
         self.assertEqual(env["VOLUMES"]["value"], "claim-* node-red grafana")
+        # the research sandbox's database (Phase 2a): its host empty here only because this test
+        # renders with RESEARCH_DB_HOST unset (the deploy always sets it),
+        # rs_backup's password only by an optional reference (the Secret comes with apps/research)
+        self.assertEqual(env["RESEARCH_DB_HOST"]["value"], "")
+        self.assertEqual(env["RESEARCH_DB"]["value"], "medcea_research")
+        self.assertEqual(env["RESEARCH_PGUSER"]["value"], "rs_backup")
+        self.assertEqual(env["RESEARCH_PGPASSWORD"]["valueFrom"]["secretKeyRef"],
+                         {"name": "research-backup", "key": "password", "optional": True})
+        self.assertNotIn("value", env["RESEARCH_PGPASSWORD"])
+
+    def research_host(self, **env):
+        # the deploy's own block, run under bash with a stub die
+        deploy = read("apps/backup/deploy.sh")
+        block = deploy[deploy.index('RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-'):deploy.index("# 3. The CronJob")]
+        e = {"PATH": os.environ["PATH"], "NAMESPACE": "medcea"}
+        e.update(env)
+        return subprocess.run(["bash", "-c", 'die() { echo "DIE $*" >&2; exit 1; }\n' + block +
+                               '\nprintf "%s" "$RESEARCH_DB_HOST"'],
+                              capture_output=True, text=True, env=e)
+
+    def test_research_host_is_rendered_whatever_the_switch(self):
+        # enabling research after the backup deploy must not leave medcea_research out
+        deploy = read("apps/backup/deploy.sh")
+        self.assertNotIn('RESEARCH_DB_HOST=""', deploy)
+        self.assertNotRegex(deploy, r'if \[\[ "\$\{RESEARCH_ENABLED')
+        for switch in ("false", "true", ""):
+            p = self.research_host(RESEARCH_ENABLED=switch)
+            self.assertEqual((p.returncode, p.stdout), (0, "research-postgresql.medcea-research"), p.stderr)
+        p = self.research_host(RESEARCH_NAMESPACE="lab-rs")
+        self.assertEqual(p.stdout, "research-postgresql.lab-rs")
+        p = self.research_host(RESEARCH_NAMESPACE="Bad_NS")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("is not a Kubernetes namespace name", p.stderr)
+
+    def test_research_host_reaches_the_cronjob(self):
+        env = dict(os.environ, RESEARCH_DB_HOST="research-postgresql.medcea-research", **self.VALUES)
+        text = subprocess.run(
+            ["bash", "-c", 'source "$1/infra/lib-render.sh"; shift; render "$@"', "-", ROOT,
+             os.path.join(APP, "k8s", "backup-cronjob.yaml"), *self.render_list],
+            capture_output=True, text=True, env=env, check=True).stdout
+        c = yaml.safe_load(text)["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual({e["name"]: e.get("value") for e in c["env"]}["RESEARCH_DB_HOST"],
+                         "research-postgresql.medcea-research")
+
+    def test_same_chart_as_research(self):
+        # pg_dump of the rdbms image dumps the research server too only while both releases
+        # are the same bitnamicharts/postgresql version (said in deploy.sh and the template)
+        infra = read("deploy-infra.sh")
+        m = re.search(r"upgrade --install rdbms \\\n\s*oci://registry-1\.docker\.io/bitnamicharts/postgresql \\\n"
+                      r"\s*--version ([0-9.]+)", infra)
+        self.assertIsNotNone(m)
+        self.assertIn(f"bitnamicharts/postgresql {m.group(1)}", read("apps/backup/deploy.sh"))
+        self.assertIn(f"postgresql chart {m.group(1)}", read("apps/backup/k8s/backup-cronjob.yaml"))
+        research = os.path.join(ROOT, "apps", "research", "deploy.sh")
+        if not os.path.exists(research):
+            self.skipTest("apps/research/deploy.sh is not in this tree")
+        r = read("apps/research/deploy.sh")
+        self.assertIn("bitnamicharts/postgresql", r)
+        self.assertIn(m.group(1), r, "research-postgresql must use rdbms's chart version")
+        versions = set(re.findall(r"--version[ =]\"?([0-9]+\.[0-9]+\.[0-9]+)", r))
+        self.assertLessEqual(versions, {m.group(1)}, "research-postgresql must use rdbms's chart version")
 
     def test_mounts(self):
         mounts = {m["name"]: m for m in self.c["volumeMounts"]}
@@ -137,6 +208,7 @@ class JobRun(unittest.TestCase):
         self.log = os.path.join(self.tmp, "fake.log")
         os.makedirs(self.out)
         fake = ('#!/bin/sh\necho "$(basename "$0") $*" >> "$FAKE_LOG"\n'
+                'echo "$(basename "$0") host=${PGHOST:-} user=${PGUSER:-} pw=${PGPASSWORD:-}" >> "$FAKE_LOG.env"\n'
                 '[ -n "${FAKE_FAIL:-}" ] && case "$*" in *"$FAKE_FAIL"*) echo "fake: connection refused" >&2; exit 1 ;; esac\n'
                 'for a in "$@"; do case "$a" in --file=*) f="${a#--file=}" ;; esac; done\n'
                 'printf "PGDMP %s\\n" "$*" > "$f"\n')
@@ -145,6 +217,11 @@ class JobRun(unittest.TestCase):
         # psql answers the chain-head query (stdin, kept for the test) as FAKE_PSQL says
         write(os.path.join(self.bin, "psql"),
               '#!/bin/sh\necho "psql $*" >> "$FAKE_LOG"\ncat > "$FAKE_LOG.in"\n'
+              'echo "psql host=${PGHOST:-} user=${PGUSER:-} pw=${PGPASSWORD:-}" >> "$FAKE_LOG.env"\n'
+              # the research server's existence question: FAKE_RS_EXISTS (t, f, or anything: no answer)
+              'if [ "${PGHOST:-}" = "${FAKE_RS_HOST:-none}" ]; then\n'
+              '  case "${FAKE_RS_EXISTS:-t}" in t|f) echo "${FAKE_RS_EXISTS:-t}"; exit 0 ;; *) echo "psql: could not translate host name" >&2; exit 2 ;; esac\n'
+              'fi\n'
               # the existence question of OPTIONAL_DATABASES: answered from FAKE_EXISTS
               'if grep -q pg_database "$FAKE_LOG.in"; then cat "$FAKE_LOG.in" >> "$FAKE_LOG.exists.sql"\n'
               '  case "${FAKE_EXISTS:-t}" in t|f) echo "${FAKE_EXISTS:-t}"; exit 0 ;; *) echo "psql: error" >&2; exit 2 ;; esac\n'
@@ -303,6 +380,100 @@ class JobRun(unittest.TestCase):
 
     def test_an_optional_database_name_is_checked(self):
         p, d, _, calls = self.optional_run(OPTIONAL_DATABASES="x';drop")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("is not a plain database name", p.stderr)
+
+    RS_HOST = "research-postgresql.medcea-research"
+    RS_SENTINEL = "s3ntinel-RS-backup-pass"
+
+    def research_run(self, **extra):
+        env = {"BACKUP_NOW": "1793586600", "OPTIONAL_DATABASES": "superset", "FAKE_EXISTS": "f",
+               "RESEARCH_DB": "medcea_research", "RESEARCH_PGUSER": "rs_backup", "FAKE_RS_HOST": self.RS_HOST}
+        env.update(extra)
+        p, d, manifest, calls = self.optional_run(**env)
+        envlog = ""
+        if os.path.exists(self.log + ".env"):
+            with open(self.log + ".env") as fh:
+                envlog = fh.read()
+        return p, d, manifest, calls, envlog
+
+    NOSECRET_LOG = "backup: skipped medcea_research (no research database on this install: no Secret research-backup)"
+    NOSECRET_MANIFEST = "# databases skipped (no Secret research-backup, no research database on this install): medcea_research\n"
+
+    def test_research_database_without_a_host_is_skipped(self):
+        # an older CronJob rendered with an empty host: nothing is asked
+        p, d, manifest, calls, envlog = self.research_run(RESEARCH_DB_HOST="", RESEARCH_PGPASSWORD=self.RS_SENTINEL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        self.assertIn(self.NOSECRET_LOG, p.stdout)
+        self.assertIn(self.NOSECRET_MANIFEST, manifest)
+        self.assertIn("# databases skipped (absent): superset\n", manifest)
+        self.assertNotIn("medcea_research", calls)
+        self.assertNotIn(self.RS_HOST, envlog)
+
+    def test_research_database_without_its_secret_is_skipped(self):
+        # research not installed, or ./apps/research/deploy.sh not run yet: the optional Secret is
+        # absent. Worded apart from a server that does not answer: nothing is "not reached".
+        p, d, manifest, calls, envlog = self.research_run(RESEARCH_DB_HOST=self.RS_HOST)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        self.assertIn(self.NOSECRET_LOG, p.stdout)
+        self.assertIn(self.NOSECRET_MANIFEST, manifest)
+        self.assertIn("# databases skipped (absent): superset\n", manifest)
+        self.assertNotIn("not reached", manifest)
+        self.assertNotIn("did not answer", p.stdout)
+        self.assertNotIn(self.RS_HOST, envlog)
+
+    def test_an_absent_research_database_is_skipped(self):
+        p, d, manifest, calls, envlog = self.research_run(RESEARCH_DB_HOST=self.RS_HOST,
+                                                          RESEARCH_PGPASSWORD=self.RS_SENTINEL, FAKE_RS_EXISTS="f")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("# databases skipped (absent): superset medcea_research\n", manifest)
+        self.assertIn(f"backup: skipped medcea_research ({self.RS_HOST} answered: no such database on it)", p.stdout)
+        self.assertNotIn("no Secret research-backup", manifest)
+        self.assertIn(f"psql host={self.RS_HOST} user=rs_backup pw={self.RS_SENTINEL}", envlog)
+        self.assertFalse(os.path.exists(os.path.join(d, "db", "medcea_research.dump")))
+
+    def test_a_present_research_database_is_dumped_as_rs_backup(self):
+        p, d, manifest, calls, envlog = self.research_run(RESEARCH_DB_HOST=self.RS_HOST,
+                                                          RESEARCH_PGPASSWORD=self.RS_SENTINEL, FAKE_RS_EXISTS="t")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        self.assertTrue(os.path.exists(os.path.join(d, "db", "medcea_research.dump")))
+        self.assertIn("# databases: medcea_db keycloak medcea_research\n", manifest)
+        self.assertIn("# databases skipped (absent): superset\n", manifest)
+        self.assertIn("\tdb/medcea_research.dump\n", manifest)
+        self.assertIn("--dbname=medcea_research", calls)
+        self.assertIn(f"pg_dump host={self.RS_HOST} user=rs_backup pw={self.RS_SENTINEL}", envlog)
+        # the platform's dumps keep the platform's server and login
+        self.assertIn(f"pg_dump host= user= pw={SENTINEL}", envlog)
+        # the research password: in no argument and no output; the platform's never reaches research
+        self.assertNotIn(self.RS_SENTINEL, calls + p.stdout + p.stderr)
+        self.assertNotIn(f"host={self.RS_HOST} user=rs_backup pw={SENTINEL}", envlog)
+        v = subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=d, capture_output=True, text=True)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+
+    def test_an_unreached_research_server_leaves_the_backup_complete(self):
+        p, d, manifest, calls, envlog = self.research_run(RESEARCH_DB_HOST=self.RS_HOST,
+                                                          RESEARCH_PGPASSWORD=self.RS_SENTINEL, FAKE_RS_EXISTS="down")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(d, "OK")))
+        self.assertIn("# databases not reached: medcea_research\n", manifest)
+        self.assertIn("did not answer although Secret research-backup exists", p.stdout)
+        self.assertNotIn("no Secret research-backup", manifest)
+        self.assertNotIn("skipped medcea_research", p.stdout)
+        self.assertFalse(os.path.exists(os.path.join(d, "db", "medcea_research.dump")))
+
+    def test_a_failed_research_dump_fails_the_run(self):
+        p, d, manifest, calls, envlog = self.research_run(RESEARCH_DB_HOST=self.RS_HOST, RESEARCH_PGPASSWORD=self.RS_SENTINEL,
+                                                          FAKE_RS_EXISTS="t", FAKE_FAIL="--dbname=medcea_research")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("pg_dump of medcea_research failed", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(d, "OK")))
+
+    def test_a_bad_research_database_name_is_refused(self):
+        p, d, _, _, _ = self.research_run(RESEARCH_DB="x';drop", RESEARCH_DB_HOST=self.RS_HOST,
+                                          RESEARCH_PGPASSWORD=self.RS_SENTINEL)
         self.assertEqual(p.returncode, 1)
         self.assertIn("is not a plain database name", p.stderr)
 
@@ -620,7 +791,9 @@ class HostCommand(unittest.TestCase):
         for part in ("A. The platform database (medcea_db)", "B. Keycloak", "C. One person's AI workbench home",
                      "D. Node-RED", "E. Grafana", f"{self.dir}/{self.name}/db/medcea_db.dump",
                      "DROP DATABASE IF EXISTS keycloak WITH (FORCE)", "./apps/database/deploy.sh",
-                     'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"'):
+                     'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"',
+                     "B3. The research sandbox's database", "research-postgresql-0",
+                     f"{self.dir}/{self.name}/db/medcea_research.dump", "./apps/research/deploy.sh"):
             self.assertIn(part, out)
         self.assertIn("This command runs none of them.", out)
         # IAM 4.2a (ops-2): step 2a moves the host's policy file aside, between the restore

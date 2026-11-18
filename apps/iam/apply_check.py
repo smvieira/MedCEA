@@ -143,7 +143,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from compiler import explain, model, source, tools  # noqa: E402
+from compiler import explain, model, netpol, source, tools  # noqa: E402
 
 # Host → the command that owns its gate (design §6.7). The scoped modes (--policy-only,
 # --gate-only, IAM 4.2b) re-render only what drifted; apply.sh --resume runs them all
@@ -177,6 +177,35 @@ TARGET_OWNER = {
     "grants": "./apps/database/deploy.sh",
 }
 NETPOL_ARGS = ["--namespace", "medcea", "--node-ip", "192.0.2.1"]   # a fixed placeholder, both sides
+# Targets that exist only while the policy has a zone (research sandbox Phase 2a): a policy
+# without network.zones.research compiles, digests and rolls out exactly what it did before,
+# so every version applied before audits as recorded (the Superset F3 pattern).
+ZONE_TARGETS = {"research": "netpol-research"}
+ZONE_TARGET_OWNER = {"netpol-research": "./infra/deploy-research-namespace.sh --policy-only"}
+NETPOL_RESEARCH_ARGS = ["--zone", "research", "--namespace", "medcea-research", "--platform-namespace", "medcea",
+                        "--node-ip", "192.0.2.1"]
+
+
+def _policy_zones():
+    """The zones of the git tree's policy and of the applied one (whichever can be read): the
+    zone owners take part in a rollout while either has the zone (a version that drops it
+    is rolled out by the owner too, which then removes what it rendered)."""
+    found = set()
+    try:
+        found.update(netpol.zones(source.factory()))
+    except Exception:  # noqa: BLE001 - an unreadable git policy adds nothing
+        pass
+    try:
+        found.update(netpol.zones(model.load()))
+    except Exception:  # noqa: BLE001 - nor does an unreadable applied one (break-glass, no state)
+        pass
+    return found
+
+
+def target_owners(zones=None):
+    """TARGET_OWNER plus the owners of the zone targets of `zones` (default _policy_zones())."""
+    zs = _policy_zones() if zones is None else set(zones)
+    return {**TARGET_OWNER, **{t: ZONE_TARGET_OWNER[t] for z, t in ZONE_TARGETS.items() if z in zs}}
 ROUTES_UNCOMPARED = ("source", "applied_version")
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 ACTORS = ("system:apply",)
@@ -230,9 +259,10 @@ def _cached_read_yaml(path, what):
 source._read_yaml = _cached_read_yaml
 
 
-def full_deploys():
+def full_deploys(zones=None):
     """The full deploys owning every target, deploy-infra first (design §14.4.9 step 8)."""
-    cmds = {re.sub(r" --(policy|gate)-only$", "", c) for c in list(HOST_OWNER.values()) + list(TARGET_OWNER.values())}
+    owners = target_owners(zones)
+    cmds = {re.sub(r" --(policy|gate)-only$", "", c) for c in list(HOST_OWNER.values()) + list(owners.values())}
     first = ["./deploy-infra.sh", "./infra/deploy-workbench.sh", "./apps/database/deploy.sh"]
     return [c for c in first if c in cmds] + sorted(cmds - set(first))
 
@@ -531,11 +561,12 @@ def deferred_payload(state, target, reason, command):
             "os_user": os_user()}
 
 
-def scoped_commands():
+def scoped_commands(zones=None):
     """Every scoped mode, once, in the order apply.sh --resume runs them: deploy-infra's,
-    the workbench's, then the apps' (alphabetical). grants has none (the bundle applies it)."""
+    the infra/ ones (the workbench's; the research namespace's while a policy has the zone),
+    then the apps' (alphabetical). grants has none (the bundle applies it)."""
     seen, out = set(), []
-    cmds = list(TARGET_OWNER.values()) + list(HOST_OWNER.values())
+    cmds = list(target_owners(zones).values()) + list(HOST_OWNER.values())
     rank = lambda c: (0 if c.startswith("./deploy-infra") else 1 if c.startswith("./infra/") else 2, c)
     for c in sorted(cmds, key=rank):
         if (c.endswith("--policy-only") or c.endswith("--gate-only")) and c not in seen:
@@ -1263,7 +1294,7 @@ def _changed_detail(prev, staged, changed):
                 ra, rb = rows(a, r), rows(b, r)
                 for sign, ts in (("+", sorted(rb - ra, key=str)), ("-", sorted(ra - rb, key=str))):
                     out += [f"  mqtt {r}: {sign} {acc} {top}" + (f" ({con})" if con else "") for acc, top, con in ts]
-        elif n == "netpol":
+        elif n == "netpol" or n.startswith("netpol-"):
             a, b = load(prev, n) or {}, load(staged, n) or {}
             pol = lambda d: {(i.get("metadata") or {}).get("name"): i for i in d.get("items") or []}
             pa, pb = pol(a), pol(b)
@@ -1836,6 +1867,10 @@ def targets(p):
     # before, so versions 1-14 audit as recorded (F3)
     if tools.groups(p, "superset") and tools.admits_anyone(p, "superset"):
         t.append(("superset", ["compile", "superset"]))
+    # the research zone's NetworkPolicies (research sandbox Phase 2a) only while the policy
+    # has the zone
+    if netpol.has_zone(p, "research"):
+        t.append((ZONE_TARGETS["research"], ["compile", "netpol"] + NETPOL_RESEARCH_ARGS))
     t += [(f"proxy-{h}", ["compile", "proxy", h]) for h in p.hosts]
     for iam in ([], ["--without-iam"]):
         tag = "-without-iam" if iam else ""
@@ -1960,7 +1995,8 @@ def digests_of(outs, commit=None, skeleton_digest=None):
             "tools": {"grafana": h("grafana"), "jupyterhub_allowed": h("jupyterhub-allowed"),
                       "jupyterhub_admin": h("jupyterhub-admin"), "node_red": h("node-red"),
                       "edge_wizard": h("edge-wizard"), "pgadmin": h("pgadmin"),
-                      **({"superset": h("superset")} if "superset" in outs else {})}}
+                      **({"superset": h("superset")} if "superset" in outs else {})},
+            **({"netpol_research": h("netpol-research")} if "netpol-research" in outs else {})}
 
 
 def strip_policy_env():
@@ -2845,7 +2881,7 @@ def main(argv=None):
                 return 0
             for k, v in sorted(HOST_OWNER.items()):
                 print(f"{k}\t{v}")
-            for k, v in sorted(TARGET_OWNER.items()):
+            for k, v in sorted(target_owners().items()):
                 print(f"{k}\t{v}")
             return 0
     except source.SourceError as e:

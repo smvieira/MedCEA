@@ -1,0 +1,33 @@
+# k8s/research/quota.yaml — what the research namespace may hold in all (plan §5).
+# Applied by infra/deploy-research-namespace.sh. Render list: RESEARCH_NAMESPACE
+#
+# Sizing (requests / memory limit; no CPU limit anywhere: on one PC a CPU limit only
+# throttles, the request guarantees the share, as for the platform's PostgreSQL):
+#
+#   what                               cpu req   mem req   mem limit   PVCs  storage
+#   research-postgresql (2a)           250m      512Mi     2Gi         1     10Gi (RESEARCH_DB_STORAGE)
+#   JupyterHub hub + proxy (2b)        300m      768Mi     2Gi         1     1Gi  (hub-db-dir)
+#   user-scheduler, 2 replicas (2b)    100m      256Mi     512Mi       -     -
+#   notebooks, 4 at a time (2b)        4 x 500m  4 x 1Gi   4 x 4Gi     8     8 x 10Gi (homes, kept)
+#   simulation / agent Jobs (3+)       later phases widen this file with their own row
+#   ------------------------------------------------------------------------------------------
+#   sum                                2650m     5.5Gi     20.5Gi      10    91Gi
+#
+# Rounded up for headroom (a pod being replaced counts twice for a moment, and the chart's
+# hook and init containers count too). A pod that would cross a line is refused by the API
+# with "exceeded quota", never started.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: research-quota
+  namespace: ${RESEARCH_NAMESPACE}
+  labels:
+    medcea/zone: research
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.memory: 24Gi
+    pods: "20"
+    persistentvolumeclaims: "12"
+    requests.storage: 120Gi

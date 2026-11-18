@@ -187,6 +187,15 @@ B2. Superset (its own database; only when $f/db/superset.dump exists)
   3. ./apps/superset/deploy.sh (the owner's password and the MedCEA connection back to this
      config.env; it starts Superset). Dashboards and charts made since $FOLDER are lost.
 
+B3. The research sandbox's database (medcea_research; only when $f/db/medcea_research.dump exists)
+  It lives on its own server, research-postgresql-0 in namespace ${RESEARCH_NAMESPACE:-$ns-research}.
+  1. microk8s kubectl -n $ns patch cronjob research-export -p '{"spec":{"suspend":true}}'
+  2. microk8s kubectl -n ${RESEARCH_NAMESPACE:-$ns-research} exec -i research-postgresql-0 -- sh -c '$pw exec psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS medcea_research WITH (FORCE)"'
+     microk8s kubectl -n ${RESEARCH_NAMESPACE:-$ns-research} exec -i research-postgresql-0 -- sh -c '$pw exec pg_restore -U postgres -d postgres --create --exit-on-error' < $f/db/medcea_research.dump
+  3. ./apps/research/deploy.sh (roles, grants and passwords back to this config.env), then
+     ./apps/research-export/deploy.sh (the CronJob, no longer suspended). Snapshots taken since
+     $FOLDER are lost; the next export continues from the restored database's latest cut.
+
 C. One person's AI workbench home (claim-<name>; the list: ls $f/volumes)
   1. The person's server is stopped (they sign out, or AI Workbench admin page → Stop). After a
      reinstall they sign in once first, so the new home exists, and stop it again.

@@ -30,10 +30,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHAPTERS = ['overview', 'access', 'apps', 'devices', 'research', 'compliance', 'admin', 'training', 'reference', 'revisions']
 EDITION = {
-    'EDITION': '15',
-    'COVERS': 'IAM phases 0 to 5 complete; boards over TLS; onboarding with a WiFi check, Back and Cancel; SENSE wiring on screen; health and test messages; Superset installed by default; AppArmor rules for newer kernels; medcea.sh dialog boxes; health checks that prove the applied policy is in force; feedback control Phases 1 and 2: the sensor in every reading, and each zone\'s control loops chosen in onboarding; recipe types (Plants, Fungi) with setpoints per quantity, and loops bound board by board; full enforcement back after the recipe types build; research sandbox Phase 1: chamber model, simulation harness, coupling contract; MPC\'s command sign fixed and controller libraries in the scheduler; the portal by data zone, the manual in the user menu, Grafana standard reports; no containerd restart by the deploy, and the AppArmor check naming the pods to restart',
-    'DATE': '17 Nov 2026',
-    'COMMIT': 'fix/containerd-restart',
+    'EDITION': '16',
+    'COVERS': 'IAM phases 0 to 5 complete; boards over TLS; onboarding with a WiFi check, Back and Cancel; SENSE wiring on screen; health and test messages; Superset installed by default; AppArmor rules for newer kernels; medcea.sh dialog boxes; health checks that prove the applied policy is in force; feedback control Phases 1 and 2: the sensor in every reading, and each zone\'s control loops chosen in onboarding; recipe types (Plants, Fungi) with setpoints per quantity, and loops bound board by board; full enforcement back after the recipe types build; research sandbox Phase 1: chamber model, simulation harness, coupling contract; MPC\'s command sign fixed and controller libraries in the scheduler; the portal by data zone, the manual in the user menu, Grafana standard reports; no containerd restart by the deploy, and the AppArmor check naming the pods to restart; research sandbox Phase 2a (built, not deployed): the research zone, the research database, held-out reservations and the nightly snapshot export',
+    'DATE': '18 Nov 2026',
+    'COMMIT': 'research/phase-2a',
 }
 
 # What --standalone puts before shell.html's own <title>, <link> and <style> (which the

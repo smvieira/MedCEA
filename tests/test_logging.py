@@ -24,9 +24,12 @@ def read(rel):
 
 ENTRY = (sorted(glob.glob("apps/*/deploy.sh", root_dir=ROOT)) + sorted(glob.glob("apps/*/uninstall.sh", root_dir=ROOT))
          + ["apps/iam/units.sh", "apps/iam/apply.sh", "apps/backup/backups.sh", "infra/deploy-workbench.sh", "infra/publish-manual.sh", "health-check.sh",
+            "infra/deploy-research-namespace.sh",
             "tests/iam-db-fixture.sh"]
          + [f"tests/iam-{n}.sh" for n in ("signin", "workbench", "mqtt", "access", "network", "hosts", "check",
-                                          "schema", "runner", "postgrest", "db", "policy")])
+                                          "schema", "runner", "postgrest", "db", "policy")]
+         # research sandbox (Phase 2a): host commands written alongside this list
+         + [p for p in ("apps/research/reserve.sh", "tests/iam-research.sh") if os.path.exists(os.path.join(ROOT, p))])
 
 
 class EntryScriptsLog(unittest.TestCase):
