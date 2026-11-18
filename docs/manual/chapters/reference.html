@@ -295,7 +295,7 @@
 <tr><td><code>SUPERSET_WHEEL_DIR</code></td><td><code>/var/lib/$PROJECT_NAME/superset-wheels</code> (when empty)</td><td>Superset's wheel cache on the host: the three hash-pinned packages its pods install at every start, downloaded once from PyPI by the full <code>./apps/superset/deploy.sh</code>, so a restart needs no internet. The folder is created by <code>./deploy-infra.sh</code> (since 8 November 2026; the Superset deploy creates it if it is still missing), mode 700 for the deploying account; never inside the volumes' directory, which both refuse; removed by <code>./install.sh --uninstall-all</code> (see <a href="#admin-superset">Superset</a>).</td></tr>
 <tr><td><code>EDGE_WIZARD_PORT</code></td><td><code>8088</code></td><td>Port of the onboarding wizard on the host. Must match the redirect addresses registered in Keycloak.</td></tr>
 <tr><td><code>EDGE_WIZARD_ROLE</code></td><td>empty</td><td>Used only with <code>IAM_GATES=false</code>: the role a person must hold to provision boards; empty means any signed-in account. With <code>IAM_GATES=true</code> the access policy decides and this value is ignored with a warning.</td></tr>
-<tr><td><code>DOCKERHUB_USER</code></td><td>empty</td><td>Docker Hub account, for chart pulls and to avoid pull limits.</td></tr>
+<tr><td><code>DOCKERHUB_USER</code></td><td>empty</td><td>Docker Hub account, for Helm's chart pulls (<code>helm registry login</code>). <code>./deploy-infra.sh</code> also writes it into MicroK8s's <code>certs.d/docker.io/hosts.toml</code>, but the containerd in MicroK8s 1.29 ignores credentials there, so container images from docker.io are pulled anonymously, within Docker Hub's anonymous pull limit (17 November 2026).</td></tr>
 </tbody>
 </table></div>
 <h4>Secrets</h4>

@@ -17,7 +17,9 @@
 # /etc/apparmor.d/cri-containerd.apparmor.d and reloads AppArmor at every containerd
 # start; containerd itself keeps a profile of that name once one is loaded. So this
 # rebuilds the file from MicroK8s's (whatever a refresh put there) plus RULES, and
-# loads it; replacing a loaded profile applies to the running containers at once.
+# loads it; replacing a loaded profile applies to the running containers at once, except,
+# on kernel 7.0.0-43, those that ran while MicroK8s's stock profile was loaded at a
+# containerd start: they keep it until restarted (17 Nov 2026; health names them).
 #
 # Also: a host profile that attaches by path (Ubuntu's apparmor package ships
 # /etc/apparmor.d/mosquitto for /usr/sbin/mosquitto) attaches inside a container

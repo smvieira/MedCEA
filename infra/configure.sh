@@ -591,7 +591,7 @@ fi
 if wanted DOCKERHUB_USER || wanted DOCKERHUB_PAT; then
     section "Docker Hub"
     info "Needed to pull the Bitnami Helm charts (PostgreSQL, OAuth2 Proxy), which Docker Hub"
-    info "only serves to logged-in users, and to stay under the anonymous image-pull rate limit."
+    info "only serves to logged-in users. (Container images are pulled anonymously.)"
     info "A free account is enough."
     echo ""
     info "1. No account yet? Sign up (free):"

@@ -283,10 +283,12 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 # =============================================================================
 # REGISTRY & CHART STRATEGY (verified via Artifact Hub, March 2025)
 #
-# Runtime images — Docker Hub auth configured by bootstrap-infra.sh (avoids 429):
-#   Postgres:     docker.io/postgres:<tag>          (Docker Hub — needs auth for rate limit)
+# Runtime images — pulled anonymously from Docker Hub (containerd 1.6 ignores the auth
+# table of certs.d/docker.io/hosts.toml; 17 Nov 2026), so they count against its
+# anonymous rate limit:
+#   Postgres:     docker.io/postgres:<tag>          (Docker Hub — anonymous rate limit)
 #   Keycloak:     quay.io/keycloak/keycloak:<tag>   (Red Hat Quay — no auth needed)
-#   Grafana:      docker.io/grafana/grafana:<tag>   (Docker Hub — needs auth for rate limit)
+#   Grafana:      docker.io/grafana/grafana:<tag>   (Docker Hub — anonymous rate limit)
 #   Node-RED:     ghcr.io/node-red/node-red:<tag>   (GitHub Container Registry — no auth needed)
 #   OAuth2 Proxy: quay.io/oauth2-proxy/oauth2-proxy:<tag> (Quay — no auth needed)
 #
@@ -297,9 +299,9 @@ export DOCKERHUB_USER DOCKERHUB_PASS
 #   node-red:     node-red/node-red (0.40.0) — schwarzit
 #   oauth2-proxy: oci://registry-1.docker.io/bitnamicharts/oauth2-proxy (8.0.2)
 #
-# Docker Hub login (DOCKERHUB_USER/PAT from config.env) handles both:
-#   - Helm OCI chart pulls (bitnamicharts)
-#   - docker.io image pulls (avoids 429 rate limit)
+# Docker Hub login (DOCKERHUB_USER/PAT from config.env) is used for Helm OCI chart pulls
+# (bitnamicharts) only: docker.io image pulls are anonymous (see the Docker Hub credentials
+# file step: containerd 1.6 ignores its auth table).
 # =============================================================================
 
 # =============================================================================
@@ -374,40 +376,26 @@ KUBECTL="$MK8S kubectl"
 policy_source_init "$NAMESPACE" --precheck || exit $?
 
 # =============================================================================
-# DOCKER HUB AUTH
-# Runs every deploy — avoids 429 rate limits on all docker.io image pulls
-# (postgres, grafana, mosquitto) and Helm OCI chart pulls (bitnamicharts).
+# DOCKER HUB CREDENTIALS FILE (infra/lib-dockerhub.sh)
+# certs.d/docker.io/hosts.toml, written only when its content differs, and never followed
+# by a containerd restart (17 Nov 2026). containerd 1.6 reads hosts.toml afresh at every
+# pull ("Updates under this directory do not require restarting the containerd daemon",
+# its docs/hosts.md), and it does not read the file's [host.….auth] table at all, so image
+# pulls from docker.io are anonymous whatever this file says; Helm's OCI chart pulls log
+# in below (helm registry login) and in every app deploy (helm_dockerhub_login). The
+# restart this step used to make (also after a mistyped sudo password, which read as
+# "the credentials differ") left the running pods on MicroK8s's stock AppArmor profile on
+# kernels from 7.0.0-41, their signals denied until each was restarted (17 Nov 2026).
 # =============================================================================
-echo -e "${YELLOW}Configuring Docker Hub credentials for image + OCI chart pulls...${NC}"
-DOCKER_CERTS_DIR="/var/snap/microk8s/current/args/certs.d/docker.io"
-# Writing this file is one of the few genuinely root-only steps, and it is
-# followed by a containerd restart that briefly disrupts every running pod. Skip
-# both when the credentials are already in place: re-running the deployment
-# should not cost an outage for a file that is not changing.
-#
-# The directory is root-only, so the check itself needs sudo: a plain [ -r ]
-# test always failed, which re-wrote the file and restarted containerd on every
-# run — and stopped at a bare password prompt that never reaches the log. The
-# custom prompt says why the password is wanted.
-_SUDO_PROMPT="[sudo] password for %u (MicroK8s registry credentials): "
-if sudo -p "$_SUDO_PROMPT" grep -qsF "username = \"${DOCKERHUB_USER}\"" "$DOCKER_CERTS_DIR/hosts.toml" && \
-   sudo -p "$_SUDO_PROMPT" grep -qsF "password = \"${DOCKERHUB_PASS}\"" "$DOCKER_CERTS_DIR/hosts.toml"; then
-    echo -e "${GREEN}  Docker Hub credentials already configured — skipping (no containerd restart).${NC}"
-else
-sudo -p "$_SUDO_PROMPT" mkdir -p "$DOCKER_CERTS_DIR"
-sudo tee "$DOCKER_CERTS_DIR/hosts.toml" > /dev/null <<EOF
-server = "https://registry-1.docker.io"
-
-[host."https://registry-1.docker.io"]
-  capabilities = ["pull", "resolve"]
-  [host."https://registry-1.docker.io".auth]
-    username = "$DOCKERHUB_USER"
-    password = "$DOCKERHUB_PASS"
-EOF
-sudo systemctl restart snap.microk8s.daemon-containerd
-# Give containerd a moment to come back up before any image pulls
-sleep 5
-fi
+echo -e "${YELLOW}Docker Hub credentials file for containerd...${NC}"
+source "$SCRIPT_DIR/infra/lib-dockerhub.sh"
+_dh_rc=0
+dockerhub_hosts_sync "[sudo] password for %u (MicroK8s registry credentials): " || _dh_rc=$?
+case "$_dh_rc" in
+    0)  echo -e "${GREEN}  Already in place — unchanged.${NC}" ;;
+    10) echo -e "${GREEN}  Written (containerd reads it at the next pull; no restart).${NC}" ;;
+    *)  echo -e "${YELLOW}  WARNING: could not check or write ${DOCKERHUB_HOSTS_DIR}/hosts.toml (sudo refused or no credentials); left as it is. Nothing was restarted.${NC}" ;;
+esac
 
 # =============================================================================
 # SUPERSET WHEEL CACHE (owner decision of 8 Nov 2026: Superset installed by default)
@@ -1749,7 +1737,7 @@ $MK8S helm3 repo update
 # =============================================================================
 # 6. NODE-RED
 #    Chart:  schwarzit/node-red 0.40.0 (HTTP repo — no auth)
-#    Image:  docker.io/nodered/node-red:3.1.9 (Docker Hub official — auth configured)
+#    Image:  docker.io/nodered/node-red:3.1.9 (Docker Hub official — anonymous pull)
 # =============================================================================
 echo -e "\n${GREEN}[5/10] Deploying Node-RED...${NC}"
 # The editor signs people in a second time (adminAuth, k8s/node-red/settings.js, IAM 3.3):
@@ -1848,7 +1836,7 @@ pa_node_red_proxy full
 # =============================================================================
 # 8. pgAdmin
 #    Image: docker.io/dpage/pgadmin4:9.19.0, pinned by digest in
-#    k8s/pgadmin/pgadmin.yaml (Docker Hub — auth configured)
+#    k8s/pgadmin/pgadmin.yaml (Docker Hub — anonymous pull)
 #    Pre-configured with IoT Postgres connection via servers.json + pgpassfile.
 # =============================================================================
 pa_pgadmin full

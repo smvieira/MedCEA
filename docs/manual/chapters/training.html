@@ -48,6 +48,7 @@
 <tr><td><a href="#training-e38">E38 Bind a zone's loops board by board</a></td><td><span class="role">engineer</span>, host operator</td><td>Each board's onboarding binds its own half of the zone's loops, in either order; a half-bound loop is shown as such and runs on the default map's other half until the other board binds it.</td><td>Deferred by the owner on 16 Nov 2026 to the end of the plan</td></tr>
 <tr><td><a href="#training-e39">E39 Run a controller comparison campaign</a></td><td>host operator, for the <span class="role">control_scientist</span></td><td>A campaign runs production's own controllers on the chamber model, gives the same result digest when it is run again, shows PID's dependence on the clock, marks an FLC or MPC run that fell back invalid, and refuses an unknown controller, a changed contract source and a campaign over its CPU cap.</td><td>17 Nov 2026</td></tr>
 <tr><td><a href="#training-e40">E40 Controller libraries in the scheduler</a></td><td>host operator, <span class="role">engineer</span>, <span class="role">qa</span></td><td>The scheduler pod has GEKKO and scikit-fuzzy, a run with MPC uses its own code (no fallback line) and drives the reading towards its band.</td><td>17 Nov 2026 (steps 1–2)</td></tr>
+<tr><td><a href="#training-e41">E41 Pods left on the old AppArmor profile</a></td><td>host operator</td><td><code>./deploy-infra.sh</code> no longer restarts containerd; after a containerd restart the health check names the pods still on MicroK8s's own profile, and restarting them clears it.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -1014,6 +1015,7 @@ echo "SELECT has_table_privilege('rr_maintenance','medcea.device_slot_history','
 <li>Step 2: <strong>Container AppArmor</strong> OK, naming the kernel, <code>restrict_unprivileged_unconfined=1</code>, "no signal denials since" and "host profile(s) off: mosquitto"; the path unit active; the four rules after the marker line.</li>
 <li>Step 3: the unit ran again ("wrote /etc/apparmor.d/cri-containerd.apparmor.d (MicroK8s's profile + the stacked-peer rules)", "loaded cri-containerd.apparmor.d with the stacked-peer rules"), and the rules are in the file again although MicroK8s copied its own over it.</li>
 <li>Step 4: "AppArmor rules for containers already in place", no <code>sudo</code> prompt for this step.</li>
+<li>After step 3, on a kernel from 7.0.0-41 (step 3 is the containerd restart the platform otherwise avoids): <strong>Container AppArmor</strong> may FAIL naming pods that kept MicroK8s's profile; restart them as <a href="#training-e41">E41</a> describes.</li>
 <li>Step 6: the newer kernel; the checkpointer labelled <code>cri-containerd.apparmor.d//&amp;unconfined (enforce)</code> (the stacked label, which the rules now cover); 0 refused signals besides <code>check-status</code> lines from before the rules loaded; every health check OK, <strong>Container AppArmor</strong> first.</li>
 </ul>
 <div class="record"><p>The logs: <code>logs/deploy-infra-&lt;time&gt;.log</code> (steps 1 and 4), <code>logs/health-check-&lt;time&gt;.log</code> (steps 2 and 6); the unit's own runs in the journal (<code>journalctl -u &lt;project&gt;-containerd-apparmor.service</code>), the kernel's refusals in <code>journalctl -k</code>. Nothing is recorded in the platform database. Write the date, the commit, both kernel versions, the refusal count of step 6 and the health result under <strong>Last done</strong>, and the result in the decision record's row.</p></div>
@@ -1412,6 +1414,30 @@ for line in open(sys.argv[1]):
 </ul>
 <p><strong>Afterwards.</strong> Set the test unit back to its previous algorithm (another draft, approved), or keep MPC if that is the plan for the unit.</p>
 <p><strong>Last done.</strong> Steps 1 and 2 on 17 November 2026, commit <code>a175c52</code>, with no run active: <code>./apps/scheduler/deploy.sh</code>, then <code>./health-check.sh</code>, all 66 checks OK, Controller libraries "pod scheduler-5c5fc958bd-rp95s: gekko 1.3.3, scikit-fuzzy 0.5.0 (the pinned versions)". In the pod, one MPC and one FLC built from production's own modules answered 18 °C → UP and 29 °C → DOWN for the band 22–25 °C with no fallback. Steps 3 and 4 not yet run: they need a test unit with a CONTROL board, which this install does not have yet.</p>
+
+<h3 id="training-e41">E41 Pods left on the old AppArmor profile</h3>
+<p><strong>Goal.</strong> See that <code>./deploy-infra.sh</code> leaves containerd running, also when <code>sudo</code> is refused at its Docker Hub step, and that after a containerd restart <strong>Container AppArmor</strong> names the pods that keep MicroK8s's own profile, which a restart of each clears. The exercise proves the decision of 17 November 2026 "No containerd restart on a running cluster" (see the <a href="#compliance-decisions">decision record</a>).</p>
+<p><strong>Accounts and roles.</strong> The host operator (the OS account that deploys, with <code>sudo</code>). No platform account.</p>
+<p><strong>Before you start.</strong> The host runs a kernel from 7.0.0-41 with the rules installed (<a href="#training-e29">E29</a>); <code>./health-check.sh</code> passes. No onboarding run, recipe run or other deploy is active. Steps 1 to 3 need no more; the refusal at the end restarts containerd and is for a quiet moment.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Host operator: <code>sudo -k</code>, then <code>./deploy-infra.sh</code>; at the prompt "[sudo] password for &lt;you&gt; (MicroK8s registry credentials):" type a wrong password three times.</li>
+<li>Host operator: <code>journalctl -u snap.microk8s.daemon-containerd --since "-30 min" | grep -E 'Stopping|Started'</code>.</li>
+<li>Host operator: <code>./deploy-infra.sh</code> again, with the right password; then <code>./health-check.sh</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: after the three attempts, "WARNING: could not check or write …/certs.d/docker.io/hosts.toml (sudo refused or no credentials); left as it is. Nothing was restarted." and the deploy goes on (later steps that need <code>sudo</code> ask again).</li>
+<li>Step 2: no Stopping or Started line from the deploy's time: containerd was not restarted.</li>
+<li>Step 3: "Docker Hub credentials file for containerd..." then "Already in place — unchanged." (or, the first time after 17 November 2026 if the file differed, "Written (containerd reads it at the next pull; no restart)."); all checks OK.</li>
+</ul>
+<div class="record"><p>Nothing is written to the policy history. The deploys are in <code>logs/deploy-infra-&lt;time&gt;.log</code>, the health check in <code>logs/health-check-&lt;time&gt;.log</code>, containerd's starts and the refused signals in the journal (<code>journalctl -u snap.microk8s.daemon-containerd</code>, <code>journalctl -k -b | grep 'DENIED.*signal'</code>), <code>sudo</code>'s refusals in the auth log.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li>At a quiet moment, restart containerd by hand (<code>sudo systemctl restart snap.microk8s.daemon-containerd</code>), wait a few minutes, run <code>./health-check.sh</code>: <strong>Container AppArmor</strong> FAILs "… signal denial(s) inside containers since the rules were loaded (…), sent from N pod(s) still running since before the rules were put back (a containerd restart): &lt;kind&gt;/&lt;name&gt; -n &lt;namespace&gt;, …; restart them (microk8s kubectl rollout restart &lt;kind&gt;/&lt;name&gt; -n &lt;namespace&gt;), then sudo systemctl start &lt;project&gt;-containerd-apparmor.service". Restart each as named (<a href="#admin-troubleshooting-kernel">After a kernel update nothing starts</a>, "After a containerd restart"), start the unit, run the health check again: OK. A pod that sends no signal is not named, although it may keep the old profile until its next restart.</li>
+</ul>
+<p><strong>Afterwards.</strong> Nothing to undo.</p>
+<p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>

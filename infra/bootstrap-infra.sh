@@ -133,24 +133,20 @@ while true; do
     sleep 10
 done
 
-# --- 5. DOCKER HUB AUTH (before addon/image pulls) ---
-# Calico, MetalLB, and Juju all pull from docker.io during addon enablement.
-# Credentials must be in place before enabling addons to avoid 429 rate limits.
+# --- 5. DOCKER HUB CREDENTIALS FILE ---
+# certs.d/docker.io/hosts.toml, written only when it differs (infra/lib-dockerhub.sh). No
+# containerd restart: containerd 1.6 reads hosts.toml at every pull, and it ignores the
+# file's auth table, so the addon images (Calico, MetalLB) are pulled anonymously either
+# way (deploy-infra.sh's comment at the same step, 17 Nov 2026).
 if [[ -n "${DOCKERHUB_USER:-}" && -n "${DOCKERHUB_PASS:-}" ]]; then
-    echo -e "${YELLOW}Configuring Docker Hub credentials for containerd...${NC}"
-    DOCKER_CERTS_DIR="/var/snap/microk8s/current/args/certs.d/docker.io"
-    sudo mkdir -p "$DOCKER_CERTS_DIR"
-    sudo tee "$DOCKER_CERTS_DIR/hosts.toml" > /dev/null <<EOF
-server = "https://registry-1.docker.io"
-
-[host."https://registry-1.docker.io"]
-  capabilities = ["pull", "resolve"]
-  [host."https://registry-1.docker.io".auth]
-    username = "$DOCKERHUB_USER"
-    password = "$DOCKERHUB_PASS"
-EOF
-    sudo systemctl restart snap.microk8s.daemon-containerd
-    sleep 5
+    echo -e "${YELLOW}Docker Hub credentials file for containerd...${NC}"
+    source "$REPO_ROOT/infra/lib-dockerhub.sh"
+    _dh_rc=0
+    dockerhub_hosts_sync "[sudo] password for %u (MicroK8s registry credentials): " || _dh_rc=$?
+    case "$_dh_rc" in
+        0|10) ;;
+        *) echo -e "${YELLOW}  WARNING: could not write ${DOCKERHUB_HOSTS_DIR}/hosts.toml; going on without it.${NC}" ;;
+    esac
 fi
 
 # --- 6. ENABLE ADDONS ---

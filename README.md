@@ -45,7 +45,7 @@ Re-running either deploy script is safe — work already done is detected and sk
 - 100 GB disk
 - Internet access
 - Nothing else needs to be installed beforehand. Both `./deploy-infra.sh` and `./deploy-apps.sh` first check for the host packages a clean Ubuntu may lack: `curl` (missing on 24.04 desktop), `ca-certificates`, `openssl`, `python3`, `python3-venv` (needed by `edge/flash-device.sh`), `iproute2` and `snapd`. They list what is missing and why, and offer to `apt-get install` it.
-- A free [Docker Hub](https://hub.docker.com) account — needed to pull the Bitnami Helm charts and avoid Docker Hub rate limits. You don't need to prepare anything: the installer links to sign-up and token creation, says which permission to pick, and checks the token.
+- A free [Docker Hub](https://hub.docker.com) account — needed to pull the Bitnami Helm charts. (Container images from docker.io are pulled anonymously: the containerd in MicroK8s ignores the credentials file the installer writes.) You don't need to prepare anything: the installer links to sign-up and token creation, says which permission to pick, and checks the token.
 - (Optional, recommended) [Tailscale](https://tailscale.com) — a fixed address reachable from any of your devices, at home or away, with no DNS or router setup. The installer checks for it on every run, prints the steps if it is missing, stopped or not logged in, and can run them for you. You can also continue LAN-only.
 
 ---
@@ -1037,7 +1037,7 @@ E-mail (Gmail account, app password, templates) is **not** in `config.env`: it i
 - **Keycloak uses HTTPS** — production mode sets `SameSite=None; Secure` on cookies. Its ingress uses the platform certificate (signed by the platform CA). Services talk to Keycloak inside the cluster over plain HTTP, by its service name.
 - **Keycloak image** — uses `quay.io/keycloak/keycloak:26.0` (official, free). The Bitnami Keycloak chart has been behind a paywall since August 2025.
 - **The AI workbench** is JupyterHub, deployed by `infra/deploy-workbench.sh` from `deploy-infra.sh`. It authenticates against Keycloak with `GenericOAuthenticator` — no Dex, no service mesh. Per-user notebook pods are culled when idle.
-- **Docker Hub credentials** are required only for Helm OCI chart pulls (`bitnamicharts`) and to avoid the anonymous image pull rate limit. Runtime images for Keycloak (Quay), Node-RED (GHCR), OAuth2 Proxy (Quay), and Mosquitto (Docker Hub Official) do not require auth.
+- **Docker Hub credentials** are required only for Helm OCI chart pulls (`bitnamicharts`). Container images from docker.io are pulled anonymously, within Docker Hub's anonymous rate limit: MicroK8s 1.29's containerd ignores the `auth` table of the `certs.d/docker.io/hosts.toml` that `deploy-infra.sh` writes, and the deploy never restarts containerd for it (17 Nov 2026). Runtime images for Keycloak (Quay), Node-RED (GHCR), OAuth2 Proxy (Quay), and Mosquitto (Docker Hub Official) do not require auth.
 - **App content lifecycle** — `apps/` is intentionally decoupled from `deploy-infra.sh`. Infrastructure and application content can be versioned and deployed independently.
 
 ## Reinstalling

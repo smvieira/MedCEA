@@ -412,7 +412,7 @@ check_pvc() {
 # =============================================================================
 check_apparmor() {
     local name="$1" res
-    res="$(aa_status)"
+    res="$(AA_KUBECTL="$KUBECTL" aa_status)"
     _record "${res%%|*}" "$name" "${res#*|}"
 }
 

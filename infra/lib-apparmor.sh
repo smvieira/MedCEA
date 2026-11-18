@@ -146,6 +146,64 @@ _aa_collisions() {
     done | sort -u
 }
 
+# Who sent the denied signals (the kernel log's pid=), for aa_status: ", sent from …".
+# A sender that still runs started before the rules were last put back: a containerd
+# restart makes MicroK8s load its stock profile, and on kernel 7.0.0-43 the containers
+# running then keep it although the reapply unit loads ours a few seconds later (17 Nov
+# 2026); only a restart of its pod moves it to the rules. A pid counts as that sender only
+# while it is in a pod (kubepods cgroup), carries a cri-containerd label and started no
+# later than its last denial (/proc/<pid>/stat's start time against btime; a reused pid
+# started later); anything else counts as ended. Pods are named by their workload through
+# AA_KUBECTL (health-check passes $KUBECTL; read-only `get pods`), else by uid. An ended
+# sender's pod may still carry the stock profile: it is named once it sends again.
+_aa_denial_senders() {
+    local lines="$1" proc="${AA_PROC:-/proc}" pid when uid label start btime tck pods=() ended=0 pod_map="" p
+    local -A seen=() last=()
+    while read -r when pid; do
+        [[ -n "$pid" ]] || continue
+        (( when > ${last[$pid]:-0} )) && last[$pid]="$when"
+        [[ -n "${last[$pid]:-}" ]] || last[$pid]=0
+    done < <(sed -n 's/.*audit(\([0-9]*\)[.0-9]*:[0-9]*).* pid=\([0-9]*\) .*/\1 \2/p; t; s/.* pid=\([0-9]*\) .*/0 \1/p' <<<"$lines")
+    btime="$(awk '$1 == "btime" {print $2}' "$proc/stat" 2>/dev/null)"
+    tck="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+    for pid in $(printf '%s\n' "${!last[@]}" | sort -n); do
+        label="$(cat "$proc/$pid/attr/apparmor/current" 2>/dev/null)"
+        uid="$(grep -o 'kubepods[^ ]*pod[0-9a-f_-]\{36\}' "$proc/$pid/cgroup" 2>/dev/null | head -1)"
+        if [[ "$label" != cri-containerd.apparmor.d* || -z "$uid" ]]; then ended=$((ended + 1)); continue; fi
+        if [[ -n "$btime" && "${last[$pid]}" != 0 && -r "$proc/$pid/stat" ]]; then
+            start="$(sed 's/.*) //' "$proc/$pid/stat" | awk '{print $20}')"
+            if [[ "$start" =~ ^[0-9]+$ ]] && (( btime + start / tck > ${last[$pid]} )); then
+                ended=$((ended + 1)); continue
+            fi
+        fi
+        uid="${uid##*pod}"; uid="${uid//_/-}"
+        [[ -n "${seen[$uid]:-}" ]] && continue
+        seen[$uid]=1; pods+=("$uid")
+    done
+    if ((${#pods[@]})) && [[ -n "${AA_KUBECTL:-}" ]]; then
+        pod_map="$($AA_KUBECTL get pods -A --request-timeout=10s --no-headers \
+            -o custom-columns=UID:.metadata.uid,NS:.metadata.namespace,NAME:.metadata.name,KIND:.metadata.ownerReferences[0].kind,OWNER:.metadata.ownerReferences[0].name 2>/dev/null)" || pod_map=""
+    fi
+    local names=() n
+    for p in "${pods[@]}"; do
+        n=""
+        [[ -n "$pod_map" ]] && n="$(awk -v u="$p" '$1 == u {
+                k = tolower($4); o = $5
+                if (k == "replicaset") { k = "deployment"; sub(/-[^-]+$/, "", o) }
+                else if (k != "daemonset" && k != "statefulset") { k = "pod"; o = $3 }
+                print k "/" o " -n " $2; exit }' <<<"$pod_map")"
+        names+=("${n:-pod uid $p}")
+    done
+    if ((${#names[@]})); then
+        local IFS=,
+        printf ', sent from %s pod(s) still running since before the rules were put back (a containerd restart): %s; restart %s (microk8s kubectl rollout restart <kind>/<name> -n <namespace>), then sudo systemctl start %s.service' \
+            "${#names[@]}" "$(sed 's/,/, /g' <<<"${names[*]}")" "$( ((${#names[@]} > 1)) && echo them || echo it)" "$AA_UNIT"
+        ((ended)) && printf ' (%s more from processes that have ended)' "$ended"
+    elif ((ended)); then
+        printf ', all from processes that have ended: sudo systemctl start %s.service restarts the count (a pod still on the old profile is named here once it sends again)' "$AA_UNIT"
+    fi
+}
+
 # One line "STATUS|message" for health check "Container AppArmor"; read-only, no sudo.
 aa_status() {
     aa_names
@@ -168,8 +226,10 @@ aa_status() {
     since_epoch="$(date -d "$since" +%s 2>/dev/null)" || since_epoch=""
     if [[ -n "$since_epoch" ]]; then
         if denials="$(${AA_JOURNALCTL:-journalctl} -k -b --no-pager -q --since "@$since_epoch" 2>/dev/null)"; then
-            denials="$(grep -c 'apparmor="DENIED" operation="signal".*profile="cri-containerd\.apparmor\.d' <<<"$denials" || true)"
-            (( denials > 0 )) && problems+=("$denials signal denial(s) inside containers since the rules were loaded ($since): journalctl -k -b | grep 'DENIED.*signal'")
+            local lines
+            lines="$(grep 'apparmor="DENIED" operation="signal".*profile="cri-containerd\.apparmor\.d' <<<"$denials" || true)"
+            denials="$(grep -c . <<<"$lines" || true)"
+            (( denials > 0 )) && problems+=("$denials signal denial(s) inside containers since the rules were loaded ($since)$(_aa_denial_senders "$lines")")
         else
             denials="?"
         fi

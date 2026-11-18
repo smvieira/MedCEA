@@ -21,7 +21,8 @@ signals inside a container are denied (8 Nov 2026, containerd#14485).
   a disabled host profile back and removes what it installed.
 - aa_status: SKIP without AppArmor or MicroK8s; FAIL when not installed, when the profile
   lacks the rules, when the last run failed, on a signal denial since the run (the kernel
-  log), and on a host profile stacked on a container process (a fake /proc); OK otherwise,
+  log; its senders named: the pods still running by their cgroup's uid and AA_KUBECTL, the
+  ended ones counted), and on a host profile stacked on a container process (a fake /proc); OK otherwise,
   and a stacked "unconfined" (probes, exec) is not a collision.
 - Wiring: deploy-infra.sh installs it before the bootstrap and removes it in --uninstall
   after MicroK8s; health-checks.conf runs it first; lib-prereqs knows apparmor_parser.
@@ -337,6 +338,55 @@ class Lib(Scratch):
         self.installed(result="exit-code")
         self.assertIn("its last run ended 'exit-code'", self.status())
 
+
+    def test_status_names_the_senders(self):
+        # 17 Nov 2026: a containerd restart left running pods on the stock profile; the
+        # FAIL names them by workload (pod uid from /proc/<pid>/cgroup, owner via AA_KUBECTL).
+        def denial(pid, epoch=2000):
+            return (f'Nov 17 16:40:00 h kernel: audit: type=1400 audit({epoch}.107:7): apparmor="DENIED" operation="signal" '
+                    f'class="signal" profile="cri-containerd.apparmor.d" pid={pid} comm="x" requested_mask="send" '
+                    'denied_mask="send" signal=urg peer="cri-containerd.apparmor.d//&unconfined"')
+        uid_a = "12f28bce-30e8-4ffe-b1cd-5e52caf032f0"
+        uid_b = "92cd626a-ca83-40e7-b458-a8be729d1977"
+        uid_c = "33333333-30e8-4ffe-b1cd-5e52caf032f0"
+        self.installed()
+        procdir = os.path.join(self.t, "proc")
+        write(os.path.join(procdir, "stat"), "cpu 1 2 3\nbtime 1000\n")
+        def stat(pid, start_ticks):
+            write(os.path.join(procdir, str(pid), "stat"),
+                  f"{pid} (x y) S 1 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start_ticks} 0 0\n")
+        self.proc(30, "cri-containerd.apparmor.d (enforce)", cgroup=f"0::/kubepods/burstable/pod{uid_a}/abc")
+        self.proc(31, "cri-containerd.apparmor.d (enforce)", cgroup=f"0::/kubepods/burstable/pod{uid_a}/def")
+        # the systemd cgroup driver writes the uid with underscores
+        self.proc(32, "cri-containerd.apparmor.d (enforce)",
+                  cgroup="0::/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod%s.slice/cri-containerd-x.scope"
+                  % uid_b.replace("-", "_"))
+        self.proc(33, "cri-containerd.apparmor.d (enforce)", cgroup=f"0::/kubepods/pod{uid_c}/ghi")
+        stat(30, 100)                     # started at btime+1: before its denial
+        stat(33, 5000 * 100)              # started after its denial: a reused pid
+        self.proc(34, "unconfined", cgroup="0::/init.scope", comm="systemd")   # no pod
+        kubectl = os.path.join(self.bin, "kubectl")
+        write(kubectl, "#!/bin/sh\necho '%s medcea config-oauth2-proxy-5d8f9c7b6-x2k4q ReplicaSet config-oauth2-proxy-5d8f9c7b6'\n"
+              "echo '%s ingress nginx-ingress-microk8s-controller-8g4mt DaemonSet nginx-ingress-microk8s-controller'\n"
+              % (uid_a, uid_b), 0o755)
+        journal = "\n".join([denial(30, 1500), denial(31), denial(31), denial(32), denial(33), denial(34), denial(99)])
+        s = self.status(journal=journal, AA_KUBECTL=kubectl)
+        self.assertTrue(s.startswith("FAIL|7 signal denial(s)"), s)
+        self.assertIn("sent from 2 pod(s) still running", s)
+        self.assertIn("deployment/config-oauth2-proxy -n medcea, daemonset/nginx-ingress-microk8s-controller -n ingress", s)
+        self.assertIn("restart them (microk8s kubectl rollout restart <kind>/<name> -n <namespace>), "
+                      "then sudo systemctl start medcea-containerd-apparmor.service", s)
+        self.assertIn("(3 more from processes that have ended)", s)   # 33 reused, 34 no pod, 99 gone
+        # a sender's latest denial counts, not the last line
+        s = self.status(journal="\n".join([denial(30, 1500), denial(30, 900)]), AA_KUBECTL=kubectl)
+        self.assertIn("deployment/config-oauth2-proxy -n medcea", s)
+        # without kubectl: the uid
+        s = self.status(journal=denial(31))
+        self.assertIn(f"(a containerd restart): pod uid {uid_a}; restart it", s)
+        # every sender gone: only the count to restart
+        s = self.status(journal=denial(98))
+        self.assertIn("all from processes that have ended: sudo systemctl start medcea-containerd-apparmor.service "
+                      "restarts the count (a pod still on the old profile is named here once it sends again)", s)
 
 class Wiring(unittest.TestCase):
     def test_deploy_infra(self):

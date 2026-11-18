@@ -1894,7 +1894,7 @@ class Wiring(unittest.TestCase):
         pre = t.index('policy_source_init "$NAMESPACE" --precheck || exit $?')
         self.assertLess(api, pre)
         self.assertLess(t.index('KUBECTL="$MK8S kubectl"\npolicy_source_init'), pre + 1)
-        self.assertLess(pre, t.index("DOCKER_CERTS_DIR="))
+        self.assertLess(pre, t.index("dockerhub_hosts_sync"))
         rdbms = t.index("helm3 upgrade --install rdbms")
         full = t.index('policy_source_init "$NAMESPACE" || exit $?')
         self.assertLess(rdbms, full)
