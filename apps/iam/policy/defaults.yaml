@@ -314,6 +314,12 @@ network:
     MQTTX_DOMAIN:     mqttx-oauth2-proxy
     NODE_RED_DOMAIN:  oauth2-proxy
     POLICY_DOMAIN:    iam-oauth2-proxy
+  # Zones (research sandbox Phase 2a): a pod or client saying `zone: research` runs in the
+  # research namespace (RESEARCH_NAMESPACE), which denies all ingress and egress but DNS by
+  # default (compile netpol --zone research: rs-default-deny, rs-dns, rs-<pod>). Without
+  # `zone:` a pod or client is in the platform namespace (NAMESPACE).
+  zones:
+    research: {}
   pods:
     scheduler:
       selector: {app: scheduler}
@@ -366,6 +372,15 @@ network:
       carries: {}
       ingress:
         - {port: 8088, from: [ingress, node], why: "Superset signs people in itself (no oauth2-proxy): ingress-nginx for SUPERSET_DOMAIN; kubelet probes on /health. The selector also matches the pods of the Jobs superset-init and superset-wheels, which listen on nothing; the policy is Ingress-only, so their egress (database, PyPI) is untouched"}
+    research-postgresql:
+      # The research sandbox's own PostgreSQL (apps/research: helm release research-postgresql,
+      # the chart's own NetworkPolicy off), database medcea_research. No egress hop: it
+      # opens no connection.
+      zone: research
+      selector: {app.kubernetes.io/instance: research-postgresql, app.kubernetes.io/name: postgresql}
+      carries: {}
+      ingress:
+        - {port: 5432, from: ["client:research-export", "client:backup", node], why: "the nightly exporter (rs_export_writer), the nightly backup (rs_backup, pg_read_all_data), kubelet probes and the host's psql (reserve.sh runs inside the pod)"}
   clients:
     notebooks:
       # The AI workbench's notebook servers (KubeSpawner's labels; release = the helm
@@ -395,6 +410,22 @@ network:
       egress:
         - {pod: config-api, port: 3000, why: "PostgREST with the qa person's own token: the database applies rr_qa and medcea_auth._approver"}
       why: "Approving, returning, confirming and disputing access-policy versions (IAM Phase 4)"
+    research-export:
+      # The CronJob research-export (apps/research-export) in the platform namespace: it reads
+      # medcea.research_*() as svc_research_export (through Service rdbms-postgresql, which
+      # no NetworkPolicy covers) and writes the research database's staging tables as
+      # rs_export_writer.
+      selector: {app: research-export}
+      egress:
+        - {pod: research-postgresql, port: 5432, why: "the snapshot: staging inserts and lake.close_snapshot() in one transaction"}
+      why: "The research sandbox's nightly snapshot export (research sandbox Phase 2a)"
+    backup:
+      # The nightly backup's pods (apps/backup, CronJob medcea-backup) in the platform
+      # namespace: they dump medcea_research while the research database exists.
+      selector: {app: medcea-backup}
+      egress:
+        - {pod: research-postgresql, port: 5432, why: "pg_dump of medcea_research as rs_backup (pg_read_all_data)"}
+      why: "The nightly backup of the research database (research sandbox Phase 2a)"
 
 # Functions every authenticated path needs. Granted by rule, not by the matrix (plan
 # Appendix B, step 5); the catalog check I15 verifies exactly these grants. `execute`
@@ -666,6 +697,18 @@ service_identities:
     db_role: iam_svc
     db_password: IAM_SVC_DB_PASS
     ceiling: {iam_policy: [R, C, U], iam_users: [R], mqtt_explorer: [R, C, U], audit_histories: [R, C]}
+  svc_research_export:
+    label: research-export (the research sandbox's nightly exporter)
+    description: >
+      The CronJob research-export (apps/research-export) copies the research_export functions'
+      rows into the research database's lake (research sandbox Phase 2a, owner decision F of
+      18 Nov 2026). It executes those eleven owner-run read functions and nothing else: no
+      table, view or other function of the platform database, and it writes nothing there.
+      What the functions return carries no person (owner decision P), no free text and no
+      device identifier.
+    db_role: svc_research_export
+    db_password: SVC_RESEARCH_EXPORT_DB_PASS
+    ceiling: {research_export: [R]}
 
 # ── Resource groups ──────────────────────────────────────────────────────────────────
 # Every table in medcea, iam and iam_policy is a member of exactly one group (I14, I15).
@@ -1309,6 +1352,7 @@ resource_groups:
   research_workbench:
     label: AI Workbench (JupyterHub)
     class: config
+    zone: research
     description: Notebooks for analysis and algorithm development.
     why_this_class: Research environment, outside the production record.
     risk: >
@@ -1339,6 +1383,41 @@ resource_groups:
         server or notebook, mint a token or share a server (no tokens, access:servers or
         shares scope), and removing a hub user keeps the home volume (delete_pvc false). JupyterHub has no read-only mode, so
         R admits to a full notebook server.
+
+  research_export:
+    label: Research export (the sandbox's snapshot source)
+    class: regulated
+    zone: research
+    description: >
+      The read functions the nightly exporter copies into the research database's lake
+      (research sandbox Phase 2a, migration 013): telemetry ingested in a window, units,
+      zones, approved and retired recipes with their lines, runs and cycles, the active
+      control loops, the approved parameter sets and the quantity catalogue. Owner-run
+      (SECURITY DEFINER), executed only by svc_research_export; no person holds a level here.
+    why_this_class: >
+      A derived, person-free copy of regulated records: the readings and runs are the
+      production record, so the copy is held to the same rule (created once, never changed
+      or deleted; the lake is append-only and a snapshot is a high-water mark). It carries no
+      person, so it is not personal; it is not a trail, so not history.
+    risk: >
+      Whoever holds the exporter's password reads every unit's telemetry, runs and recipes
+      through these functions (the same rows the lake receives), never a person, a note or a
+      device identifier, and changes nothing in the platform database. The rows reach the
+      research zone's database, which only the exporter, the nightly backup and the node
+      reach (network.pods.research-postgresql); a range qa reserves (vault.reservation) is
+      left out of every snapshot by the research database itself, not by these functions.
+    members:
+      - {type: data, function: "medcea.research_contract_version()", level: R, service_only: [svc_research_export], note: "the research contract version the functions implement (1); the exporter records it with each snapshot"}
+      - {type: data, function: "medcea.research_measurements(timestamptz, timestamptz)", level: R, service_only: [svc_research_export], note: "AP readings ingested in (p_after, p_upto]: unit, zone, tag, sensor, value, UoM; no message, device, address or person"}
+      - {type: data, function: "medcea.research_units()", level: R, service_only: [svc_research_export], note: "every unit's code, recipe type, area, height and state"}
+      - {type: data, function: "medcea.research_zones()", level: R, service_only: [svc_research_export], note: "every zone's unit code, zone code and state"}
+      - {type: data, function: "medcea.research_recipes()", level: R, service_only: [svc_research_export], note: "the approved and retired recipes: id, recipe type, status (no name or description)"}
+      - {type: data, function: "medcea.research_recipe_lines()", level: R, service_only: [svc_research_export], note: "the lines of those recipes: cycle, light, setpoints (no name or notes)"}
+      - {type: data, function: "medcea.research_runs()", level: R, service_only: [svc_research_export], note: "every run: id, recipe, unit code, start, end, status (no actor)"}
+      - {type: data, function: "medcea.research_cycles()", level: R, service_only: [svc_research_export], note: "every cycle: the algorithm code, its numeric and boolean parameters and the loop map rebuilt from known keys (never the raw run_params)"}
+      - {type: data, function: "medcea.research_control_loops()", level: R, service_only: [svc_research_export], note: "the active control loops: unit, zone, loop code, input, output"}
+      - {type: data, function: "medcea.research_param_sets()", level: R, service_only: [svc_research_export], note: "the approved parameter sets: id, algorithm code, unit code, parameters"}
+      - {type: data, function: "medcea.research_catalogue()", level: R, service_only: [svc_research_export], note: "the quantity catalogue (control_quantity, recipe_type, recipe_type_quantity) as rows"}
 
   platform_admin:
     label: Platform administration
@@ -1520,6 +1599,8 @@ matrix:
     qa: [R, C]
     qp: [R, X]
     auditor: [R, X]
+  # research_export: no cell. Only svc_research_export reads it (its ceiling); no person
+  # holds a level there (research sandbox Phase 2a: a skeleton version, no change version).
   research_workbench:
     qa: [R]
     engineer: [R]
@@ -1633,6 +1714,7 @@ invariants:
   - {code: I5, kind: matrix, rule: "bio_scientist and control_scientist hold N on runs, schedules, mqtt_sense, mqtt_control and controllers_state, and at most R (never X, C or U) on measurements, including through tools.", rationale: "Research stays outside the production record until the research sandbox exists. Reading telemetry in a notebook with the person's own token is allowed by decision (IAM 3.2b, 2026-10-31); exporting it or writing it is not.", cites: "MedCEA concept, research/production separation"}
   - {code: I6, kind: matrix, rule: "operator and production_manager hold N on research_workbench; engineer holds at most R there.", rationale: "Production roles do not run unvalidated code.", cites: "Annex 11 §4"}
   - {code: I7, kind: matrix, rule: "qp holds no C, U or O anywhere, and holds A on runs.", rationale: "The QP releases and does nothing else.", cites: "EU GMP Annex 16"}
+  - {code: I18, kind: matrix, rule: "On a group with zone research, operator, production_manager, qp, maintenance and qc hold nothing, and engineer holds at most R, but R and C on research_promotion; admin's K on research_workbench is allowed (I2 and I13 bound it).", rationale: "The research zone is outside the production record: production roles do not take part in it, and the engineer operates it without developing the chamber model; a promoted candidate comes back to production only as an approved draft.", cites: "MedCEA concept, research/production separation; Annex 11 §4"}
   - {code: I11, kind: matrix, rule: "A tool cannot widen a role's access: for each group a tool reaches, the role must hold the reached levels on that group directly and without a constraint, unless waiver covers it. A mirroring tool acts with the person's own cells and cannot widen by construction.", rationale: "Access through Grafana, Node-RED or an export is still access to the data.", cites: "Annex 11 §12"}
   - {code: I12, kind: matrix, rule: "At least one role other than admin holds A on iam_policy and on iam_users, and at least one role holding A on each that holds no C, U or K there is not `availability: later`; admin never holds A on either.", rationale: "The policy cannot be changed so that nobody independent can approve it.", cites: "Annex 11 §12"}
   - {code: I13, kind: matrix, rule: "Only admin holds K or D; D only on platform_admin.", rationale: "Administration and removal stay with one accountable role.", cites: "MHRA §6.16"}

@@ -11,7 +11,7 @@ each call with its stdin. Nothing reaches a cluster or the repository's state/.
                   own allow-all), the compiled set), against
                   a stub cli.py in the scratch tree (it logs its argv; the zone's compile is the
                   compiler's own business, tests/test_research_netpol.py)
-  RsNetpolRealCli the scratch tree's real cli.py on defaults.yaml (commit A: no research zone)
+  RsNetpolRealCli the scratch tree's real cli.py on commit A's defaults.yaml (no research zone)
                   SKIPs
   RsExportAge     rsexport_age_status alone: OK / WARN past 26 h / FAIL past 72 h, no snapshot
                   SKIP on the first day, WARN then FAIL later
@@ -267,12 +267,19 @@ class RsNetpol(unittest.TestCase):
 
 
 class RsNetpolRealCli(unittest.TestCase):
-    """The scratch tree's own cli.py on its defaults.yaml (no state/: commit A's policy)."""
+    """The scratch tree's own cli.py on commit A's defaults.yaml (no state/; since commit B
+    the tree's own defaults.yaml has the zone, so commit A's is written over it)."""
 
     def test_commit_a_skips(self):
         t = h5.Tree()
         try:
             cli = t.path("apps", "iam", "compiler", "cli.py")
+            g = subprocess.run(["git", "-C", REPO, "show", "5c892a3:apps/iam/policy/defaults.yaml"],
+                               capture_output=True, text=True)
+            if g.returncode != 0:
+                self.skipTest(f"no git revision 5c892a3: {g.stderr.strip()}")
+            with open(t.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
+                f.write(g.stdout)
             p = subprocess.run([sys.executable, cli, "has-zone", "research"], capture_output=True, text=True,
                                env=clean_env())
             if p.returncode == 2 and "invalid choice" in p.stderr:

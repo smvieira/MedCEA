@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """tests/test_research_netpol.py — the research zone in the policy compiler (research sandbox
-Phase 2a, commit A; no defaults.yaml change).
+Phase 2a, commit A's code; commit B puts the zone into defaults.yaml).
 
-The fixture is a deep copy of defaults.yaml plus what commit B adds to `network:`: zone
+The fixture is a deep copy of defaults.yaml with commit B's `network:` (re)written: zone
 research, the pod research-postgresql (zone research, 5432 from client:research-export,
-client:backup and node) and the two platform clients with their hop to it.
+client:backup and node) and the two platform clients with their hop to it. Since commit B
+the factory policy has them itself, so the "no zone" cases use without_research(): the
+factory policy with every zone key, zone pod and zone-bound client taken out.
 
   Check       netpol.check's zone rules (unknown zone, a pod or client in a zone the
               section lacks, a platform pod admitting a zone source, egress on a platform
@@ -60,6 +62,24 @@ def research(d=None):
                                          "egress": [{"pod": "research-postgresql", "port": 5432}]}
     net["clients"]["backup"] = {"selector": {"app": "medcea-backup"},
                                 "egress": [{"pod": "research-postgresql", "port": 5432}]}
+    return d
+
+
+def without_research(d=None):
+    """defaults.yaml (or d) with no research zone: network.zones, the zone pods, the clients
+    whose hops reach one and every group's `zone` key taken out (the policy before commit B,
+    as far as these tests read it)."""
+    d = d or defaults()
+    net = d["network"]
+    zoned = {n for n, pd in net.get("pods", {}).items() if pd.get("zone")}
+    net.pop("zones", None)
+    for n in zoned:
+        del net["pods"][n]
+    for c in [c for c, cd in net.get("clients", {}).items()
+              if any(h.get("pod") in zoned for h in cd.get("egress") or [])]:
+        del net["clients"][c]
+    for gd in d["resource_groups"].values():
+        gd.pop("zone", None)
     return d
 
 
@@ -218,11 +238,13 @@ class Compile(unittest.TestCase):
         netpol.compile(model.Policy(d), NS, [])
 
     def test_empty_without_the_zone(self):
-        self.assertEqual(netpol.compile_zone(model.load_defaults(), "research", RNS, NS, []),
+        bare = model.Policy(without_research())
+        self.assertEqual(netpol.compile_zone(bare, "research", RNS, NS, []),
                          {"apiVersion": "v1", "kind": "List", "items": []})
-        self.assertFalse(netpol.has_zone(model.load_defaults(), "research"))
+        self.assertFalse(netpol.has_zone(bare, "research"))
         self.assertTrue(netpol.has_zone(self.d, "research"))
-        self.assertEqual(netpol.zones(model.load_defaults()), [])
+        self.assertTrue(netpol.has_zone(model.load_defaults(), "research"))   # commit B
+        self.assertEqual(netpol.zones(bare), [])
 
     def test_unknown_zone_name(self):
         with self.assertRaises(ValueError):
@@ -311,8 +333,9 @@ class Artefacts(unittest.TestCase):
                          netpol.egress(self.p, "research-export", {None: NS, "research": RNS}))
 
     def test_defaults_keys_unchanged(self):
-        d = self.tps.artefacts(model.load_defaults())
-        self.assertFalse([k for k in d if "@" in k])
+        d = self.tps.artefacts(model.Policy(without_research()))
+        self.assertFalse([k for k in d if "@" in k or k == "netpol-research"])
+        self.assertEqual(set(self.tps.artefacts(model.load_defaults())), set(self.want))   # commit B
 
     def test_every_key_compiles_through_the_cli(self):
         bad = []
@@ -389,6 +412,9 @@ class Cli(unittest.TestCase):
         cls.broken = os.path.join(cls.root, "broken.yaml")
         with open(cls.broken, "w", encoding="utf-8") as f:
             yaml.safe_dump(broken, f, sort_keys=False, allow_unicode=True, width=1000)
+        cls.bare = os.path.join(cls.root, "bare.yaml")
+        with open(cls.bare, "w", encoding="utf-8") as f:
+            yaml.safe_dump(without_research(), f, sort_keys=False, allow_unicode=True, width=1000)
 
     @classmethod
     def tearDownClass(cls):
@@ -402,8 +428,10 @@ class Cli(unittest.TestCase):
     def test_has_zone(self):
         r = self.run_cli("--file", self.fx, "has-zone", "research")
         self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
-        r = self.run_cli("--defaults", "has-zone", "research")
+        r = self.run_cli("--file", self.bare, "has-zone", "research")
         self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+        r = self.run_cli("--defaults", "has-zone", "research")   # commit B
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
         r = self.run_cli("--file", self.fx, "has-zone", "lab")
         self.assertEqual(r.returncode, 2)
         self.assertIn("unknown zone lab", r.stderr)
@@ -419,7 +447,7 @@ class Cli(unittest.TestCase):
         self.assertEqual(r.stdout, json.dumps(want, indent=1) + "\n")
 
     def test_compile_zone_absent(self):
-        r = self.run_cli("--defaults", "compile", "netpol", "--zone", "research", "--namespace", RNS,
+        r = self.run_cli("--file", self.bare, "compile", "netpol", "--zone", "research", "--namespace", RNS,
                          "--platform-namespace", NS, "--node-ip", "192.0.2.1")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), {"apiVersion": "v1", "kind": "List", "items": []})
@@ -448,8 +476,9 @@ class Cli(unittest.TestCase):
 
 class ApplyCheck(unittest.TestCase):
     def test_targets_only_with_the_zone(self):
-        base = apply_check.targets(model.load_defaults())
+        base = apply_check.targets(model.Policy(without_research()))
         self.assertNotIn("netpol-research", [n for n, _ in base])
+        self.assertIn("netpol-research", [n for n, _ in apply_check.targets(model.load_defaults())])   # commit B
         with_zone = apply_check.targets(model.Policy(research()))
         self.assertEqual([t for t in with_zone if t[0] != "netpol-research"], base)
         argv = dict(with_zone)["netpol-research"]
@@ -523,7 +552,8 @@ class I18(unittest.TestCase):
                 self.assertTrue(any(e.startswith("I18 engineer holds") for e in errors_of(d)), errors_of(d)[:3])
 
     def test_no_zone_no_i18(self):
-        d = defaults()
+        d = without_research()
+        d["matrix"]["research_workbench"]["maintenance"] = ["R"]   # I6 allows it; I18 needs the zone
         self.assertFalse([e for e in errors_of(d) if "I18" in e])
 
     def test_zone_value_validated(self):

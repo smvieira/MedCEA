@@ -156,7 +156,7 @@ WHOLE_SECTIONS = ("break_glass", "db_roles", "levels", "resource_types", "classe
 ENTITY_MAPS = frozenset((
     "levels", "resource_types", "classes", "hosts", "db_roles", "roles", "service_identities",
     "resource_groups", "constraints", "network.unproxied", "network.proxies", "network.pods",
-    "network.clients", "network.pods.*.carries", "network.pods.*.selector", "network.clients.*.selector",
+    "network.clients", "network.zones", "network.pods.*.carries", "network.pods.*.selector", "network.clients.*.selector",
     "network.clients.*.egress[].selector", "service_identities.*.ceiling", "resource_groups.*.members[].routes",
     "resource_groups.*.reaches", "constraints.*.rls.using",
 ))
@@ -190,11 +190,16 @@ PROSE_PATHS = frozenset((
 RESIDUE_PATHS = frozenset((
     "network.ingress_namespace", "network.no_shared_upstreams", "network.proxies.*",
     "network.pods.*.selector.*", "network.pods.*.carries.*",
+    # research sandbox Phase 2a: a pod's zone names the namespace its selector and its
+    # sources' peers are read in (moving it changes what they match, and a zone pod gets a
+    # default deny the platform namespace lacks); a group's zone switches I18 on for it, so
+    # taking it away or changing it is a widening
+    "network.pods.*.zone",
     "network.clients.*.selector.*", "network.clients.*.only_rpc",
     "roles.*.db_role", "roles.*.availability", "roles.*.spec_role",
     "service_identities.*.db_role", "service_identities.*.db_password", "service_identities.*.managed_by",
     "service_identities.*.mqtt_user",
-    "resource_groups.*.class", "resource_groups.*.risk", "resource_groups.*.mirrors",
+    "resource_groups.*.class", "resource_groups.*.risk", "resource_groups.*.mirrors", "resource_groups.*.zone",
     "resource_groups.*.approval.record", "resource_groups.*.approval.effect",
     "resource_groups.*.credential.listener", "resource_groups.*.credential.max_active",
     "resource_groups.*.credential.ttl_hours",

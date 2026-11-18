@@ -135,8 +135,9 @@ def _superset(*mutations):
 
 def _research(*mutations):
     """A mutation of the policy with the research zone fixture first (research sandbox Phase
-    2a; commit B adds the real keys): research_workbench marked `zone: research`, and a
-    research_promotion group (one data member) whose engineer cell is I18's exception."""
+    2a): research_workbench marked `zone: research` (since commit B defaults.yaml says so
+    itself; kept so the fixture holds on any policy), and a research_promotion group (one
+    data member) whose engineer cell is I18's exception (a later phase adds the real one)."""
     def apply(d):
         d["resource_groups"]["research_workbench"]["zone"] = "research"
         g = {k: v for k, v in copy.deepcopy(d["resource_groups"]["research_workbench"]).items() if k != "tool"}
@@ -367,7 +368,7 @@ class PolicyTest(unittest.TestCase):
     def test_counts(self):
         p = self.policy
         self.assertEqual(len(p.roles), 11)
-        self.assertEqual(len(p.groups), 28)        # policy_page (IAM 4.1), analysis (Superset stage C)
+        self.assertEqual(len(p.groups), 29)        # policy_page (IAM 4.1), analysis (Superset stage C), research_export (research sandbox 2a)
 
     def test_mutations_are_caught(self):
         for name, (mutate, expected) in MUTATIONS.items():
@@ -960,7 +961,11 @@ class NetpolTest(unittest.TestCase):
         return rule["from"]
 
     def test_one_labelled_policy_per_pod(self):
-        self.assertEqual(set(self.by), {f"iam-{n}" for n in self.policy.data["network"]["pods"]})
+        # the platform zone's pods: a zone pod (research-postgresql, research sandbox 2a) is
+        # compiled into its own namespace's List (netpol.compile_zone, tests/test_research_policy.py)
+        self.assertEqual(set(self.by), {f"iam-{n}" for n, pd in self.policy.data["network"]["pods"].items()
+                                        if not pd.get("zone")})
+        self.assertIn("research-postgresql", self.policy.data["network"]["pods"])
         for i in self.doc["items"]:
             self.assertEqual(i["metadata"]["labels"], {netpol.LABEL: "true"})
             self.assertEqual(i["spec"]["policyTypes"], ["Ingress"])

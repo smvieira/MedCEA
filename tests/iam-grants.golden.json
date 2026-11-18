@@ -3741,6 +3741,78 @@
    "SELECT"
   ],
   [
+   "svc_research_export",
+   "function",
+   "medcea.research_catalogue()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_contract_version()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_control_loops()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_cycles()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_measurements(timestamp with time zone,timestamp with time zone)",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_param_sets()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_recipe_lines()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_recipes()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_runs()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_units()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "function",
+   "medcea.research_zones()",
+   "EXECUTE"
+  ],
+  [
+   "svc_research_export",
+   "schema",
+   "medcea",
+   "USAGE"
+  ],
+  [
    "svc_scheduler",
    "function",
    "medcea.finish_run(integer,text)",

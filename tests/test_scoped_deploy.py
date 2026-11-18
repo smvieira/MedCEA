@@ -590,10 +590,13 @@ class Resume(unittest.TestCase):
         cmds = r.stdout.split()
         lines = r.stdout.splitlines()
         self.assertEqual(lines[0], "./deploy-infra.sh --policy-only")
-        self.assertEqual(lines[1], "./infra/deploy-workbench.sh --policy-only")
+        # the research zone's NetworkPolicies right after deploy-infra (research sandbox 2a,
+        # commit B: the factory policy has the zone, apply_check.target_owners)
+        self.assertEqual(lines[1], "./infra/deploy-research-namespace.sh --policy-only")
+        self.assertEqual(lines[2], "./infra/deploy-workbench.sh --policy-only")
         self.assertEqual(len(lines), len(set(lines)))
         self.assertNotIn("./apps/database/deploy.sh", cmds)
-        for line in lines[2:]:
+        for line in lines[3:]:
             self.assertRegex(line, r"^\./apps/[a-z-]+/deploy\.sh --gate-only$")
 
     def test_deferred_record(self):

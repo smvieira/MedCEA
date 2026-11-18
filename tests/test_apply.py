@@ -499,7 +499,9 @@ class Tree:
         # (the iam deploy is the real one: its --gate-only says "no gate before slice 4.3"); IAM
         # 4.5's fault injection, offline only: FAKE_SCOPED="<rel>=<rc>[:<n>];…" fails the first
         # n runs of <rel> (all without :n) with exit rc
-        for rel in ("deploy-infra.sh", "infra/deploy-workbench.sh") + tuple(
+        # (infra/deploy-research-namespace.sh since research sandbox 2a's commit B: the factory
+        # policy has the research zone, so apply_check.target_owners names it)
+        for rel in ("deploy-infra.sh", "infra/deploy-research-namespace.sh", "infra/deploy-workbench.sh") + tuple(
                 f"apps/{c}/deploy.sh" for c in ("access", "edge-wizard", "frontend", "monitor", "mqtt-explorer",
                                                  "scheduler", "superset")):
             dst = os.path.join(self.root, rel)
@@ -947,12 +949,14 @@ class AfterCommit(unittest.TestCase):
             payload = json.loads(b64var(f.read(), "payload"))
         self.assertEqual(payload["artefacts"]["routes"], V1)
         self.assertEqual(self.t.read_state()["last_apply_event"]["event"], "bootstrap_applied")
-        # step 8 (IAM 4.2b): every scoped mode, deploy-infra's first, the workbench's next
+        # step 8 (IAM 4.2b): every scoped mode, deploy-infra's first, the research zone's next
+        # (research sandbox 2a, commit B), then the workbench's
         with open(os.path.join(self.t.fd, "scoped.log")) as f:
             ran = f.read().splitlines()
-        self.assertEqual(ran[:2], ["deploy-infra.sh --policy-only", "infra/deploy-workbench.sh --policy-only"])
-        self.assertEqual(len(ran), 9)   # superset's --gate-only since stage C
-        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[2:]), ran)
+        self.assertEqual(ran[:3], ["deploy-infra.sh --policy-only", "infra/deploy-research-namespace.sh --policy-only",
+                                   "infra/deploy-workbench.sh --policy-only"])
+        self.assertEqual(len(ran), 10)   # superset's --gate-only since stage C, the research zone's since 2a
+        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[3:]), ran)
 
     def test_a_signal_after_the_commit_is_exit_3(self):
         # the trap knows the phase: after the COMMIT an interrupt is 3 and names --resume
@@ -2781,7 +2785,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("is not approved any more", sql)
         self.assertIn("is not applied with the staged entries", sql)
         # every scoped mode once, then the record with 4.5's fields
-        self.assertEqual(len(self.scoped()), 9)   # 8 stubs before Superset stage C
+        self.assertEqual(len(self.scoped()), 10)   # 8 stubs before Superset stage C, 9 before research 2a (commit B)
         recs = self.records()
         self.assertEqual([r["event"] for r in recs], ["applied"])
         pl = recs[0]["payload"]

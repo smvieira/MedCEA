@@ -83,6 +83,17 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    apply_check.targets() the same, and the factory policy has no research zone
                    (an empty zone List, has-zone 1); PRE_RS's defaults.yaml (ref_tree(PRE_RS)),
                    since commit B moves the policy
+  PhaseRS2aBDelta  against PRE_RSA (5c892a3, commit A): research sandbox Phase 2a, commit B, the
+                   policy (service identity svc_research_export with ceiling research_export R;
+                   group research_export, zone research, the eleven migration 013 functions at
+                   R, service_only, no cell; zone research on research_workbench; I18; network
+                   zone research, pod research-postgresql, clients research-export and backup):
+                   skeleton-gate --against-git 5c892a3 says widening (exit 3) with exactly the
+                   pinned system tuples and residue sections; no person role's reach moves under
+                   commit A's matrix, so nobody is barred from approving it (qa and auditor
+                   included); the matrix untouched, the checker clean; only the grants forms (by
+                   svc_research_export's lines), the three db-roles listings and check's counts
+                   move, and netpol-research and the two egress-<client>@research keys appear
   SourceRule       --file/--defaults/MEDCEA_POLICY_FILE/host file in order; the refusals
                    (exit 2) and labels; db-roles and describe-gate need no source
   Cells            cells_to_yaml's three spellings read back as model.cell() reads the YAML
@@ -177,6 +188,9 @@ PRE_2C = "af5c1ad"   # feedback control's policy 2c (applied as version 5; 2704a
                      # svc_scheduler (PhaseRecipeTypesDelta)
 PRE_RS = "fb15e42"   # main before research sandbox Phase 2a: its commit A adds code only (the
                      # zone compiler, I18, migration 013's inert functions, the research deploys)
+PRE_RSA = "5c892a3"  # research sandbox Phase 2a, commit A (code only, PRE_RS's defaults.yaml):
+                     # commit B changes the policy (svc_research_export, group research_export,
+                     # the research zone in network:; PhaseRS2aBDelta)
 
 def as_of_fc(key, out):
     """An older commit's output with feedback control commit C2's one compiler change applied:
@@ -314,6 +328,9 @@ def artefacts(p, label="defaults.yaml"):
         "grants-json": json.dumps(grants.document(p, False, False), indent=1, sort_keys=True) + "\n",
         "grants-json-smoke-without-iam": json.dumps(grants.document(p, True, True), indent=1, sort_keys=True) + "\n",
     }
+    if netpol.has_zone(p, "research"):   # research sandbox Phase 2a, commit B (apply_check.targets)
+        out["netpol-research"] = json.dumps(netpol.compile_zone(p, "research", "medcea-research", "medcea",
+                                                                ["10.0.0.5"]), indent=1) + "\n"
     if tools.groups(p, "superset") and tools.admits_anyone(p, "superset"):   # stage C (apply_check.targets)
         out["superset"] = json.dumps(tools.superset_roles_mapping(p), sort_keys=True) + "\n"
     for s in ("allowed_groups", "admin_groups"):
@@ -363,6 +380,9 @@ def cli_argv(key):
         return ["describe-gate", key[len("describe-gate-"):], '["admin"]']
     if key == "netpol":
         return ["compile", "netpol", "--namespace", "medcea", "--node-ip", "10.0.0.5"]
+    if key == "netpol-research":
+        return ["compile", "netpol", "--zone", "research", "--namespace", "medcea-research",
+                "--platform-namespace", "medcea", "--node-ip", "10.0.0.5"]
     if key == "grants-json":
         return ["compile", "grants", "--format", "json"]
     if key == "grants-json-smoke-without-iam":
@@ -1046,6 +1066,15 @@ class Gate(unittest.TestCase):
             "service_identities.svc_ingest.db_role": lambda d: d["service_identities"]["svc_ingest"].__setitem__(
                 "db_role", "svc_other"),
             "roles.qc.db_role": lambda d: d["roles"]["qc"].__setitem__("db_role", "rr_other"),
+            # research sandbox Phase 2a: a group's zone switches I18 on, a pod's zone names the
+            # namespace its selector and its peers are read in
+            "resource_groups.research_workbench.zone": lambda d: d["resource_groups"]["research_workbench"].pop("zone"),
+            "resource_groups.research_export.zone": lambda d: d["resource_groups"]["research_export"].pop("zone"),
+            "network.pods.research-postgresql.zone": lambda d: d["network"]["pods"]["research-postgresql"].pop("zone"),
+            "network.pods.research-postgresql.selector.app.kubernetes.io/name": lambda d: d["network"]["pods"][
+                "research-postgresql"]["selector"].__setitem__("app.kubernetes.io/name", "other"),
+            "network.clients.backup.selector.app": lambda d: d["network"]["clients"]["backup"][
+                "selector"].__setitem__("app", "other"),
         }
         for path, change in cases.items():
             with self.subTest(path):
@@ -1071,6 +1100,9 @@ class Gate(unittest.TestCase):
             self.assertEqual(sorted(reg - found), [], "a registered path the policy no longer has")
         self.assertFalse(explain.REACH_PATHS & explain.RESIDUE_PATHS or explain.REACH_PATHS & explain.PROSE_PATHS
                          or explain.PROSE_PATHS & explain.RESIDUE_PATHS)
+        # a setting under a zone (none so far) is a key nobody classified: residue
+        g = self.widening(lambda d: d["network"]["zones"]["research"].__setitem__("egress", "open"), "_sections")
+        self.assertIn(["section", "network.zones.research.egress"], g["added"]["_sections"])
         # an unknown key anywhere is a widening
         g = self.widening(lambda d: d["network"]["pods"]["iam"].__setitem__("hostNetwork", True), "_sections")
         self.assertIn(["section", "network.pods.iam.hostNetwork"], g["added"]["_sections"])
@@ -3105,8 +3137,9 @@ class PhaseRecipeTypesDelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_2C, "medcea-pre2c-")
         cls.a = ref_tree(PRE_2C)[2]
-        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
-            cls.p = model.Policy(yaml.safe_load(f))
+        # the recipe types' defaults.yaml, which PRE_RS still has (research sandbox Phase 2a's
+        # commit B moves the policy again; PhaseRS2aBDelta pins that step)
+        cls.p = ref_tree(PRE_RS)[2]
         cls.want = artefacts(cls.p)
         cls.was = artefacts(cls.a)
         cls.rows = source.entries_and_waivers(cls.a.data)   # 2c's factory matrix
@@ -3126,8 +3159,11 @@ class PhaseRecipeTypesDelta(unittest.TestCase):
         import argparse
         import contextlib
         import io
+        from unittest import mock
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # git's side is the recipe types' policy (ref_tree(PRE_RS)), not the working tree's
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
             try:
                 rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_2C, state=None, check=True))
             except source.SourceError as e:
@@ -3798,6 +3834,227 @@ class PhaseRS2aADelta(unittest.TestCase):
                                 "medcea-research", "--platform-namespace", "medcea"], cli=self.ref[1])
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["items"], [])
+
+def _sql_without_rs2a(text):
+    """A compiled grants SQL file with research sandbox 2a commit B's own lines taken out:
+    svc_research_export's role, LOGIN and password block, its privilege rows, its name in the
+    role lists and the eleven research functions in the asserted function list. Every sha256
+    is a placeholder and a line's trailing `,`/`)` is dropped. What is left must equal the
+    same file compiled from commit A's policy (PhaseRS2aBDelta)."""
+    lines, out, i = text.splitlines(), [], 0
+    while i < len(lines):
+        line = lines[i]
+        if line == r"\if :{?pw_svc_research_export}":   # \if, ALTER ROLE … PASSWORD, \endif
+            i += 3
+            continue
+        s = line.lstrip()
+        if s.startswith("('svc_research_export'") or "ROLE svc_research_export" in line \
+                or "rolname = 'svc_research_export'" in line:
+            i += 1
+            continue
+        line = line.replace("'svc_research_export', ", "").replace(", 'svc_research_export'", "")
+        line = re.sub(r"'medcea\.research_[a-z_]+\([^)]*\)', ", "", line)
+        line = re.sub(r", 'medcea\.research_[a-z_]+\([^)]*\)'", "", line)
+        out.append(_SHA256.sub("<sha256>", line).rstrip(",)"))
+        i += 1
+    return out
+
+
+class PhaseRS2aBDelta(unittest.TestCase):
+    """Research sandbox Phase 2a, commit B (18 Nov 2026): the policy, proposed as a skeleton
+    version with apply.sh --propose-skeleton --from-git <B>; no change version (no person
+    cell). defaults.yaml gains the service identity svc_research_export (ceiling
+    research_export R), the group research_export (zone research, class regulated, the
+    eleven read functions of migration 013 at R, service_only [svc_research_export], no
+    matrix row), zone research on research_workbench, invariant I18, and in network: the
+    zone research, the zone pod research-postgresql (5432 from client:research-export,
+    client:backup and node) and the platform clients research-export and backup with their
+    hop to it (owner decisions P/F/S of 18 Nov 2026). Against PRE_RSA (5c892a3, commit A,
+    whose defaults.yaml is PRE_RS's): the skeleton gate says widening with exactly the pinned
+    system tuples (svc_research_export's EXECUTE and USAGE, the zone pod's ingress, the two
+    clients' hops) and residue sections; no person role's reach moves under commit A's
+    matrix, so qa and auditor may approve it; the matrix is commit A's; the checker passes on
+    commit A's rows; only the declared artefacts move."""
+
+    FUNCTIONS = ("medcea.research_catalogue()", "medcea.research_contract_version()",
+                 "medcea.research_control_loops()", "medcea.research_cycles()",
+                 "medcea.research_measurements(timestamp with time zone,timestamp with time zone)",
+                 "medcea.research_param_sets()", "medcea.research_recipe_lines()", "medcea.research_recipes()",
+                 "medcea.research_runs()", "medcea.research_units()", "medcea.research_zones()")
+    SYSTEM = sorted(
+        [["client", c, "egress", "research-postgresql", 5432] for c in ("backup", "research-export")]
+        + [["client", c, "writes"] for c in ("backup", "research-export")]
+        + [["ingress", "research-postgresql", 5432, s] for s in ("client:backup", "client:research-export", "node")]
+        + [["svc", "svc_research_export", "function", f, "EXECUTE"] for f in FUNCTIONS]
+        + [["svc", "svc_research_export", "schema", "medcea", "USAGE"]],
+        key=lambda t: source.canonical(t))
+    SECTIONS = [["section", x] for x in (
+        "network.clients.backup.selector.app",
+        "network.clients.research-export.selector.app",
+        "network.pods.research-postgresql.selector.app.kubernetes.io/instance",
+        "network.pods.research-postgresql.selector.app.kubernetes.io/name",
+        "network.pods.research-postgresql.zone",
+        "resource_groups.research_export.class",
+        "resource_groups.research_export.risk",
+        "resource_groups.research_export.zone",
+        "resource_groups.research_workbench.zone",
+        "service_identities.svc_research_export.db_password",
+        "service_identities.svc_research_export.db_role")]
+    NEW = {"netpol-research", "egress-research-export@research", "egress-backup@research"}
+    CHANGED = {"db-roles-names", "db-roles-logins", "db-roles-passwords"}   # plus every grants- form
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RSA, "medcea-prersa-")
+        cls.a = ref_tree(PRE_RSA)[2]
+        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.want = artefacts(cls.p)
+        cls.was = artefacts(cls.a)
+        cls.rows = source.entries_and_waivers(cls.a.data)   # commit A's factory matrix (the applied rows)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RSA}: {self.old_cli}")
+
+    def test_skeleton_gate_against_commit_a_widens(self):
+        """`cli.py skeleton-gate --against-git 5c892a3 --check` (in-process): widening, exit 3,
+        exactly the pinned tuples and sections, nothing narrowed, every person role unchanged."""
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_RSA, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_RSA}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(sorted(g["unchanged"]), sorted(self.p.roles))
+        self.assertEqual(len(g["unchanged"]), 11)
+        self.assertEqual(g["accepted_digest"], source.skeleton_digest(self.a.data))
+        self.assertEqual(g["git_digest"], source.skeleton_digest(self.p.data))
+        self.assertIn("--propose-skeleton", err.getvalue())
+        self.assertIn("Nothing was changed.", err.getvalue())
+
+    def test_gate_and_checker_under_commit_a_rows(self):
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        self.assertEqual(g["verdict"], "widening")
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+
+    def test_qa_may_approve_the_proposal(self):
+        """barred_approvers is empty: no person role widens, so qa (the only role holding A on
+        iam_policy) may approve it; the diff and person_widening_problems agree."""
+        import apply_check
+        roles = self.p.data["roles"]
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        self.assertEqual(apply_check.barred_approvers(roles, g["added"]), [])
+        p_old, p_new, *_ = apply_check._composed(self.a.data, self.p.data, self.rows)
+        diff_roles = explain.diff(p_old, p_new)["roles"]
+        for r in sorted(roles):
+            with self.subTest(r):
+                self.assertFalse((diff_roles.get(r) or {}).get("added"))
+                self.assertFalse(model.widening_between(p_old, p_new, r))
+
+    def test_no_role_reach_moves(self):
+        composed = model.Policy(source.compose(source.skeleton(self.p.data), self.rows))
+        self.assertEqual(invariants.check(composed)[0], [])
+        for role in sorted(self.p.roles):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(composed, role), explain.reach(self.a, role))
+
+    def test_matrix_untouched(self):
+        self.assertEqual(self.p.data["matrix"], self.a.data["matrix"])
+        self.assertEqual(self.p.data["waivers"], self.a.data["waivers"])
+        self.assertEqual(source.entries_and_waivers(self.p.data), self.rows)
+        self.assertNotIn("research_export", self.p.matrix)
+
+    def test_the_skeleton_keys(self):
+        d = self.p.data
+        self.assertEqual(d["service_identities"]["svc_research_export"]["ceiling"], {"research_export": ["R"]})
+        g = d["resource_groups"]["research_export"]
+        self.assertEqual((g["class"], g["zone"]), ("regulated", "research"))
+        self.assertEqual(sorted(grants.norm_sig(m["function"]) for m in g["members"]), sorted(self.FUNCTIONS))
+        for m in g["members"]:
+            self.assertEqual((m["type"], m["level"], m["service_only"]), ("data", "R", ["svc_research_export"]))
+        self.assertEqual(d["resource_groups"]["research_workbench"]["zone"], "research")
+        self.assertEqual([i["code"] for i in d["invariants"] if i["code"] not in
+                          {x["code"] for x in self.a.data["invariants"]}], ["I18"])
+        self.assertEqual(d["network"]["zones"], {"research": {}})
+        self.assertTrue(netpol.has_zone(self.p, "research"))
+        self.assertFalse(netpol.has_zone(self.a, "research"))
+
+    def test_check_output(self):
+        """check moves only by its counts: one group and one invariant more (scratch trees, so
+        no state/ of this host)."""
+        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)   # commit A's code and policy
+        root = scratch_tree()
+        try:
+            rc, out, err = run_cli(["check"], cli=os.path.join(root, "apps", "iam", "compiler", "cli.py"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual((rc, rc_old), (0, 0), err)
+        self.assertEqual(out_old.replace("28 groups, 123 cells, 17 invariants", "29 groups, 123 cells, 18 invariants"),
+                         out)
+        self.assertNotEqual(out, out_old)
+
+    def test_exactly_the_declared_artefacts_move(self):
+        self.assertEqual(set(self.want) - set(self.was), self.NEW)
+        self.assertEqual(set(self.was) - set(self.want), set())
+        moved = {k for k in self.was if self.was[k] != self.want[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, self.CHANGED)
+        for key, want in self.want.items():
+            if key in self.CHANGED or key in self.NEW or key.startswith("grants-"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)   # commit A's code and policy
+                self.assertEqual(rc, 0, f"{key} ({PRE_RSA}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_listings(self):
+        for key, line in (("db-roles-names", "svc_research_export"), ("db-roles-logins", "svc_research_export"),
+                          ("db-roles-passwords", "svc_research_export SVC_RESEARCH_EXPORT_DB_PASS")):
+            with self.subTest(key):
+                self.assertEqual([x for x in self.want[key].splitlines() if x != line], self.was[key].splitlines())
+                self.assertIn(line, self.want[key].splitlines())
+
+    def test_the_new_zone_artefacts(self):
+        items = json.loads(self.want["netpol-research"])["items"]
+        self.assertEqual([i["metadata"]["name"] for i in items], ["rs-default-deny", "rs-dns", "rs-research-postgresql"])
+        for c in ("research-export", "backup"):
+            with self.subTest(c):
+                rules = json.loads(self.want[f"egress-{c}@research"])
+                self.assertEqual(rules, [{"to": [{"namespaceSelector": {"matchLabels": {
+                    "kubernetes.io/metadata.name": "medcea-research"}}, "podSelector": {"matchLabels": {
+                        "app.kubernetes.io/instance": "research-postgresql", "app.kubernetes.io/name": "postgresql"}}}],
+                    "ports": [{"port": 5432, "protocol": "TCP"}]}])
+
+    def test_the_grants(self):
+        go, gn = json.loads(self.was["grants-json"]), json.loads(self.want["grants-json"])
+        self.assertEqual({k for k in set(go) | set(gn) if go.get(k) != gn.get(k)}, {"privileges", "digest"})
+        self.assertEqual([x for x in go["privileges"] if x not in gn["privileges"]], [])
+        self.assertEqual(sorted(tuple(x) for x in gn["privileges"] if x not in go["privileges"]),
+                         sorted(tuple(t[1:]) for t in self.SYSTEM if t[0] == "svc"))
+        sql_keys = [k for k in self.want if k.startswith("grants-") and not k.startswith("grants-json")]
+        self.assertEqual(len(sql_keys), 16)
+        for key in sql_keys:
+            with self.subTest(key):
+                self.assertEqual(_sql_without_rs2a(self.want[key]), _sql_without_rs2a(self.was[key]))
+                self.assertNotIn("research", "\n".join(_sql_without_rs2a(self.want[key])).replace(
+                    "research_workbench", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
