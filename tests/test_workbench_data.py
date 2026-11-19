@@ -23,8 +23,10 @@
   - the example notebooks: md.connect() (both modes), one chart line per sensor; valid nbformat 4, no outputs or execution counts (what
     nbstripout would leave), ConfigMap-safe names, under 200 KiB (kubectl apply copies
     the ConfigMap into an annotation, and an object's annotations hold 256 KiB).
-  - the policy: scientists hold R (not X) on measurements; config-api accepts the
-    workbench-notebook client (pre_request's azp list) and admits the notebook pods.
+  - the policy: on version 7, scientists hold R (not X) on measurements; config-api accepts
+    the workbench-notebook client (pre_request's azp list) and admits the notebook pods;
+    on the factory file since research sandbox 2b's commit B, none of it (the notebooks are
+    a research zone pod reaching lake-api).
   - infra/lib-data-volumes.sh against a fake kubectl: lists each claim-<name> and Grafana's
     volume with its directory and how to keep it, says nothing without them, warns when it
     cannot ask.
@@ -667,22 +669,35 @@ class ExamplesTest(unittest.TestCase):
 
 
 class PolicyTest(unittest.TestCase):
+    """The platform path (IAM 3.2b) on version 7's policy (tests/rs2b_fixture.py v7_policy),
+    which the live host runs until research sandbox Phase 2b's skeleton version; and the
+    factory file since commit B: no notebooks client, the scientists' telemetry gone
+    (the change version's cells), the notebooks a research zone pod reaching lake-api."""
+
     @classmethod
     def setUpClass(cls):
-        cls.p = model.load_defaults()
+        sys.path.insert(0, os.path.join(REPO, "tests"))
+        import rs2b_fixture
+        cls.p = model.Policy(rs2b_fixture.v7_policy())
+        cls.b = model.load_defaults()
 
     def test_scientists_read_telemetry(self):
         for r in ("bio_scientist", "control_scientist"):
             self.assertEqual(self.p.effective("measurements", r), {"R"}, r)
+            self.assertEqual(self.b.effective("measurements", r), set(), r)   # commit B's factory cells
 
     def test_config_api_accepts_notebooks(self):
         self.assertIn(CLIENT, grants.token_clients(self.p))
         self.assertIn("'workbench-notebook'", grants.compiled_functions(self.p))
-        np = netpol.compile(self.p, "medcea", ["10.0.0.1"])
-        api = next(i for i in np["items"] if i["metadata"]["name"] == "iam-config-api")
-        peers = [peer for rule in api["spec"]["ingress"] for peer in rule["from"]]
-        self.assertIn({"podSelector": {"matchLabels": {"app": "jupyterhub", "component": "singleuser-server",
-                                                       "release": "workbench"}}}, peers)
+        nb = {"podSelector": {"matchLabels": {"app": "jupyterhub", "component": "singleuser-server",
+                                              "release": "workbench"}}}
+        for p, there in ((self.p, True), (self.b, False)):
+            np = netpol.compile(p, "medcea", ["10.0.0.1"])
+            api = next(i for i in np["items"] if i["metadata"]["name"] == "iam-config-api")
+            peers = [peer for rule in api["spec"]["ingress"] for peer in rule["from"]]
+            self.assertEqual(nb in peers, there)
+        self.assertNotIn(CLIENT, grants.token_clients(self.b))
+        self.assertNotIn("'workbench-notebook'", grants.compiled_functions(self.b))
 
     def test_egress_is_the_two_hops(self):
         self.assertEqual(netpol.egress(self.p, "notebooks"), [
@@ -690,6 +705,15 @@ class PolicyTest(unittest.TestCase):
             {"to": [{"podSelector": {"matchLabels": {"app": "keycloak"}}}], "ports": [{"protocol": "TCP", "port": 8080}]}])
         with self.assertRaises(ValueError):
             netpol.egress(self.p, "nobody")
+        with self.assertRaises(ValueError):   # commit B: no notebooks client
+            netpol.egress(self.b, "notebooks")
+
+    def test_commit_b_notebooks_reach_the_lake(self):
+        pod = self.b.data["network"]["pods"]["notebooks"]
+        self.assertEqual(pod["zone"], "research")
+        self.assertIn({"pod": "lake-api", "port": 3000}, [{k: v for k, v in h.items() if k != "why"}
+                                                          for h in pod["egress"]])
+        self.assertNotIn("config-api", json.dumps(pod))
 
 
 class HomesTest(unittest.TestCase):

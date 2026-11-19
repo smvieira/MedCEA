@@ -151,9 +151,11 @@ def _gate_def(text):
 class Env:
     """a scratch tree, its fake bin directory and its fake cluster"""
 
-    def __init__(self, rev=None, policy_at=None):
+    def __init__(self, rev=None, policy_at=None, policy=None):
         """rev: a git archive of that commit, else the working tree; policy_at: defaults.yaml
-        from that commit instead (Transcript compares code, so both sides compile one policy)"""
+        from that commit instead (Transcript compares code, so both sides compile one policy);
+        policy: a policy document written as defaults.yaml instead (research sandbox 2b:
+        tests/rs2b_fixture.py v7_policy, version 7 rebuilt from the factory file)"""
         self.root = tempfile.mkdtemp(prefix="medcea-scoped-")
         self.tree = os.path.join(self.root, "tree")
         os.makedirs(self.tree)
@@ -174,6 +176,10 @@ class Env:
                                   check=True, capture_output=True).stdout
             with open(os.path.join(self.tree, "apps", "iam", "policy", "defaults.yaml"), "wb") as f:
                 f.write(text)
+        if policy is not None:
+            import yaml
+            with open(os.path.join(self.tree, "apps", "iam", "policy", "defaults.yaml"), "w") as f:
+                yaml.safe_dump(policy, f, sort_keys=False)
         with open(os.path.join(self.tree, "config.env"), "w") as f:
             f.write(CONFIG)
         self.bin = os.path.join(self.root, "bin")
@@ -384,11 +390,19 @@ SCOPED = [
 ]
 
 
+def _v7():
+    """version 7's policy (the live one until research sandbox 2b's skeleton version): the
+    factory file is commit B's since, and these cases seed the platform placement"""
+    sys.path.insert(0, HERE)
+    import rs2b_fixture
+    return rs2b_fixture.v7_policy()
+
+
 class Scoped(unittest.TestCase):
-    """the scoped modes act on drift only (§14.5.6)"""
+    """the scoped modes act on drift only (§14.5.6), on version 7's policy"""
 
     def setUp(self):
-        self.e = Env()
+        self.e = Env(policy=_v7())
         self.e.put({})
         r = self.e.bash(SEED)
         self.assertEqual(r.returncode, 0, r.stdout[-1500:] + r.stderr[-1500:])
@@ -532,10 +546,11 @@ class Arguments(unittest.TestCase):
 
 
 class WorkbenchPlacement(unittest.TestCase):
-    """research Phase 2b: where the workbench's release is, against where the policy places it"""
+    """research Phase 2b: where the workbench's release is, against where the policy places it
+    (version 7's policy: platform placement; the research cases write commit B's shapes)"""
 
     def setUp(self):
-        self.e = Env()
+        self.e = Env(policy=_v7())
         self.e.put({})
         # helm list answers from $FAKE_WB_RELEASE_NS (tests/fake_cluster.py lists nothing); the
         # fake itself, which picks its role from argv[0], runs as microk8s outside bin/

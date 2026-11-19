@@ -1007,12 +1007,16 @@ class SupersetRoles(unittest.TestCase):
 
     def test_the_real_library_today(self):
         """The real policy_tool in a scratch tree: commit A's policy (no superset tool) FAILs a
-        deployed Superset; the factory policy since stage C's commit B gives the six roles
-        their mapping (N1, N2), and a Secret holding it is OK."""
+        deployed Superset; version 7's cells (the factory policy from stage C's commit B to
+        research sandbox 2b's commit B, tests/rs2b_fixture.py with_v7_cells) give the six
+        roles their mapping (N1, N2), and a Secret holding it is OK; the factory policy since
+        research sandbox 2b's commit B gives no role a setting (O12), so a Superset still
+        deployed FAILs until its --gate-only stops it."""
         sys.path.insert(0, HERE)
+        import rs2b_fixture
         import test_policy
         from compiler import model, tools
-        factory = model.load_defaults()
+        factory = model.Policy(rs2b_fixture.with_v7_cells(model.load_defaults().data))
         root = scratch_repo("medcea-ss-")
         try:
             self.put_lib(root)
@@ -1027,11 +1031,22 @@ class SupersetRoles(unittest.TestCase):
         root = scratch_repo("medcea-ss-")
         try:
             self.put_lib(root)
+            with open(os.path.join(root, "apps", "iam", "policy", "defaults.yaml"), "w") as f:
+                yaml.safe_dump(json.loads(json.dumps(factory.data)), f)
             mapping = tools.superset_roles_mapping(factory)
             self.cluster(ss_deploy(), ss_secret(mapping=mapping))
             status, msg = self.run_check(stub=False, root=root, IAM_GATES="true")
             self.assertEqual(status, "OK", msg)
             self.assertIn("maps bio_scientist, control_scientist, engineer, production_manager, qc, qp", msg)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        root = scratch_repo("medcea-ss-")   # the factory file itself: no cell (research 2b, O12)
+        try:
+            self.put_lib(root)
+            self.cluster(ss_deploy(), ss_secret(mapping=mapping))
+            status, msg = self.run_check(stub=False, root=root, IAM_GATES="true")
+            self.assertEqual(status, "FAIL", msg)
+            self.assertIn("no role is given a setting", msg)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

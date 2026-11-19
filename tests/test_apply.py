@@ -672,10 +672,11 @@ class Bootstrap(unittest.TestCase):
         self.assertIn(f"\\set v1_by_sub '{ADMIN}'", sql)
         digests = json.loads(b64var(sql, "v1_digests"))
         self.assertEqual(digests["routes"], V1)
-        # superset since Superset stage C's commit B: the factory file's analysis group gives
-        # six roles a setting (apply_check.digests_of, F3)
+        # superset from Superset stage C's commit B (the factory file's analysis group gave six
+        # roles a setting) until research sandbox 2b's commit B, whose factory file gives none
+        # (O12), so apply_check.digests_of leaves it out again (F3)
         self.assertEqual(set(digests["tools"]), {"grafana", "jupyterhub_allowed", "jupyterhub_admin", "node_red",
-                                                 "edge_wizard", "pgadmin", "superset"})
+                                                 "edge_wizard", "pgadmin"})
         self.assertIn("v1_want", sql)
         want = re.search(r"\\set v1_want '([0-9a-f]{64})'", sql).group(1)
         self.assertEqual(want, source.policy_entries_digest(source.factory(), "bootstrap"))
@@ -1193,10 +1194,16 @@ class FreshInstallOrder(unittest.TestCase):
         stub cluster is tests/test_superset_render.py's test_full_path)."""
         with open(os.path.join(REPO, "config.env.example")) as f:
             self.assertIn('IAM_DB_SERVICE_ROLES="true"', f.read().splitlines())
-        factory = model.load_defaults()
-        if not (tools.groups(factory, "superset") and tools.admits_anyone(factory, "superset")):
-            self.skipTest("the factory policy gives no role a Superset setting")
+        # version 7's cells (research sandbox 2b's commit B leaves the factory file without
+        # any Superset cell, O12: test_the_factory_has_no_superset)
+        import yaml
+        sys.path.insert(0, os.path.join(REPO, "tests"))
+        import rs2b_fixture
+        cells = rs2b_fixture.with_v7_cells(model.load_defaults().data)
+        self.assertTrue(tools.admits_anyone(model.Policy(cells), "superset"))
         t = self.tree("true")
+        with open(t.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            yaml.safe_dump(cells, f, sort_keys=False)
         try:
             p = t.run("--all", script="deploy-apps.sh", MEDCEA_POLICY_BOOTSTRAP_BY="admin")
             self.assertIn("version 1 (bootstrap) applied", p.stdout + p.stderr)
@@ -1213,11 +1220,39 @@ class FreshInstallOrder(unittest.TestCase):
         finally:
             t.close()
 
+    def test_the_factory_has_no_superset(self):
+        """Research sandbox 2b's commit B (O12): the factory file gives no role a Superset
+        setting, so a fresh install under IAM_DB_SERVICE_ROLES=true (config.env.example's
+        default) sees version 1 and skips Superset with exit 0, writing nothing for it; no
+        component fails."""
+        factory = model.load_defaults()
+        self.assertTrue(tools.groups(factory, "superset"))
+        self.assertFalse(tools.admits_anyone(factory, "superset"))
+        t = self.tree("true")
+        try:
+            p = t.run("--all", script="deploy-apps.sh", MEDCEA_POLICY_BOOTSTRAP_BY="admin")
+            self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+            self.assertIn("version 1 (bootstrap) applied", p.stdout + p.stderr)
+            out = self.superset_out(p)
+            self.assertIn(self.SKIP_NOT_IN_POLICY, out)
+            self.assertNotIn(self.FULL_PATH, out)
+            self.assertNotIn("ERROR", out)
+            self.assertNoSupersetWrite(t)
+        finally:
+            t.close()
+
     def test_without_an_applied_version_superset_skips(self):
         """The version guard: the iam bootstrap waits (here: --by names nobody Keycloak has,
         apply.sh exit 2), so the state stays empty; Superset skips, exit 0, and says to run
-        ./apps/superset/deploy.sh after the bootstrap."""
+        ./apps/superset/deploy.sh after the bootstrap. With version 7's cells: the factory file
+        gives no role a setting since research sandbox 2b's commit B, so the policy check, which
+        comes first, would skip already (test_the_factory_has_no_superset)."""
+        import yaml
+        sys.path.insert(0, os.path.join(REPO, "tests"))
+        import rs2b_fixture
         t = self.tree("true")
+        with open(t.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            yaml.safe_dump(rs2b_fixture.with_v7_cells(model.load_defaults().data), f, sort_keys=False)
         try:
             p = t.run("--all", script="deploy-apps.sh", MEDCEA_POLICY_BOOTSTRAP_BY="nobody")
             self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
@@ -2418,8 +2453,10 @@ class SupersetTargets(unittest.TestCase):
     def setUpClass(cls):
         import test_policy
         # defaults: the policy of versions 1-14 (commit A's, without_superset); full: the
-        # factory file since stage C's commit B; skel: the skeleton version alone
-        cls.full = model.load_defaults()
+        # factory file from stage C's commit B to research sandbox 2b's commit B (version 7's
+        # cells, tests/rs2b_fixture.py with_v7_cells); skel: the skeleton version alone
+        import rs2b_fixture
+        cls.full = model.Policy(rs2b_fixture.with_v7_cells(model.load_defaults().data))
         cls.defaults = model.Policy(test_policy.without_superset(copy.deepcopy(cls.full.data)))
         d = copy.deepcopy(cls.full.data)
         del d["matrix"]["analysis"]
@@ -2430,6 +2467,8 @@ class SupersetTargets(unittest.TestCase):
         self.assertNotIn("superset", names(self.defaults))
         self.assertNotIn("superset", names(self.skel))
         self.assertIn(("superset", ["compile", "superset"]), apply_check.targets(self.full))
+        # the factory file since research sandbox 2b's commit B: the block, an empty row (O12)
+        self.assertNotIn("superset", names(model.load_defaults()))
         # the skeleton version adds its host's proxy target, and nothing else of Superset's
         self.assertEqual(set(names(self.skel)) - set(names(self.defaults)), {"proxy-SUPERSET_DOMAIN"})
         self.assertEqual(set(names(self.full)) - set(names(self.skel)), {"superset"})
@@ -3214,7 +3253,7 @@ class RS2bTargets(unittest.TestCase):
     def setUpClass(cls):
         import rs2b_fixture
         cls.fx = rs2b_fixture
-        cls.v7 = model.load_defaults()
+        cls.v7 = model.Policy(rs2b_fixture.v7_policy())   # the factory file is commit B's since
         cls.b = model.Policy(rs2b_fixture.b_policy())
 
     def names(self, p):

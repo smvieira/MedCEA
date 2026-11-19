@@ -384,6 +384,18 @@ def kc_doc(drop_scope=None, clients=None, groups_mapper=True, aud=True, aud_id="
 
 
 class KcScopes(Base):
+    """kcscopes with version 7's policy (tests/rs2b_fixture.py v7_policy), which names
+    workbench-notebook as a token client: today's rules for it. Commit B's factory file
+    retires it (KcScopesRetired)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        import rs2b_fixture
+        super().setUpClass()
+        with open(cls.t.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            yaml.safe_dump(rs2b_fixture.v7_policy(), f, sort_keys=False)
+
     def run_check(self, doc, rc=0):
         out = "" if doc is False else json.dumps(doc) + "\n"
         self.t.scenario([rule(r"rdbms-postgresql-0", out, rc, stdin="client_scope")])
@@ -448,7 +460,8 @@ class KcScopes(Base):
 class KcScopesRetired(unittest.TestCase):
     """Research sandbox Phase 2b (D2): workbench-notebook exists only while the applied
     policy names it as a token client (KC_POLICY_TOKEN_CLIENTS). The scratch tree's
-    defaults.yaml is commit B's (tests/rs2b_fixture.py b_policy): it names no such client,
+    defaults.yaml is commit B's (tests/rs2b_fixture.py b_policy, as the factory file since
+    commit B): it names no such client,
     so kcscopes treats it as retired: enabled FAILs, absent or disabled is OK, and its scope
     rules are not applied; an unreadable policy WARNs and keeps today's rules."""
 

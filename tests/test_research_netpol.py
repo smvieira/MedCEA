@@ -52,7 +52,11 @@ PG_SEL = {"app.kubernetes.io/instance": "research-postgresql", "app.kubernetes.i
 
 
 def defaults():
-    return copy.deepcopy(model.load_defaults().data)
+    """Version 7's policy (commit A's factory file): the base these tests were written on.
+    Commit B changed the factory file, so it is rebuilt from it (tests/rs2b_fixture.py
+    v7_policy, byte for byte)."""
+    import rs2b_fixture
+    return rs2b_fixture.v7_policy()
 
 
 def research(d=None):
@@ -182,7 +186,7 @@ class Compile(unittest.TestCase):
         cls.items = by_name(cls.lst)
 
     def test_platform_list_unchanged(self):
-        base = netpol.compile(model.load_defaults(), NS, ["192.0.2.1"])
+        base = netpol.compile(model.Policy(defaults()), NS, ["192.0.2.1"])
         self.assertEqual(netpol.compile(model.Policy(self.d), NS, ["192.0.2.1"]), base)
 
     def test_names_order_labels_namespace(self):
@@ -294,7 +298,7 @@ class Egress(unittest.TestCase):
 
     def test_notebooks_unchanged(self):
         self.assertEqual(netpol.egress(model.Policy(research()), "notebooks"),
-                         netpol.egress(model.load_defaults(), "notebooks"))
+                         netpol.egress(model.Policy(defaults()), "notebooks"))
 
     def test_egress_zones(self):
         p = model.Policy(research())
@@ -341,7 +345,7 @@ class Artefacts(unittest.TestCase):
     def test_defaults_keys_unchanged(self):
         d = self.tps.artefacts(model.Policy(without_research()))
         self.assertFalse([k for k in d if "@" in k or k == "netpol-research"])
-        self.assertEqual(set(self.tps.artefacts(model.load_defaults())), set(self.want))   # commit B
+        self.assertEqual(set(self.tps.artefacts(model.Policy(defaults()))), set(self.want))   # version 7
 
     def test_every_key_compiles_through_the_cli(self):
         bad = []
@@ -362,6 +366,9 @@ class CliEgress(unittest.TestCase):
         cls.fx = os.path.join(cls.root, "research.yaml")
         with open(cls.fx, "w", encoding="utf-8") as f:
             yaml.safe_dump(research(), f, sort_keys=False, allow_unicode=True, width=1000)
+        cls.v7 = os.path.join(cls.root, "v7.yaml")   # version 7's policy (commit B changed the factory file)
+        with open(cls.v7, "w", encoding="utf-8") as f:
+            yaml.safe_dump(defaults(), f, sort_keys=False, allow_unicode=True, width=1000)
 
     @classmethod
     def tearDownClass(cls):
@@ -373,12 +380,12 @@ class CliEgress(unittest.TestCase):
                               cwd=self.root)
 
     def test_notebooks_byte_identical(self):
-        a = self.run_cli("--defaults", "compile", "egress", "notebooks")
+        a = self.run_cli("--file", self.v7, "compile", "egress", "notebooks")
         b = self.run_cli("--file", self.fx, "compile", "egress", "notebooks")
         c = self.run_cli("--file", self.fx, "compile", "egress", "notebooks", "--zone", "research",
                          "--namespace", RNS, "--platform-namespace", NS)
         self.assertEqual((a.returncode, b.returncode, c.returncode), (0, 0, 0), a.stderr + b.stderr + c.stderr)
-        self.assertEqual(a.stdout, json.dumps(netpol.egress(model.load_defaults(), "notebooks"),
+        self.assertEqual(a.stdout, json.dumps(netpol.egress(model.Policy(defaults()), "notebooks"),
                                               sort_keys=True, separators=(",", ":")) + "\n")
         self.assertEqual(b.stdout, a.stdout)
         self.assertEqual(c.stdout, a.stdout)
@@ -413,6 +420,9 @@ class Cli(unittest.TestCase):
         cls.fx = os.path.join(cls.root, "research.yaml")
         with open(cls.fx, "w", encoding="utf-8") as f:
             yaml.safe_dump(research(), f, sort_keys=False, allow_unicode=True, width=1000)
+        cls.v7 = os.path.join(cls.root, "v7.yaml")   # version 7's policy (commit B changed the factory file)
+        with open(cls.v7, "w", encoding="utf-8") as f:
+            yaml.safe_dump(defaults(), f, sort_keys=False, allow_unicode=True, width=1000)
         broken = research()
         broken["network"]["zones"]["lab"] = {}
         cls.broken = os.path.join(cls.root, "broken.yaml")
@@ -459,7 +469,7 @@ class Cli(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), {"apiVersion": "v1", "kind": "List", "items": []})
 
     def test_compile_platform_unchanged_by_the_zone(self):
-        a = self.run_cli("--defaults", "compile", "netpol", "--namespace", NS, "--node-ip", "192.0.2.1")
+        a = self.run_cli("--file", self.v7, "compile", "netpol", "--namespace", NS, "--node-ip", "192.0.2.1")
         b = self.run_cli("--file", self.fx, "compile", "netpol", "--namespace", NS, "--node-ip", "192.0.2.1")
         self.assertEqual((a.returncode, b.returncode), (0, 0))
         self.assertEqual(a.stdout, b.stdout)

@@ -247,8 +247,10 @@ class TableQueriesTest(unittest.TestCase):
     def test_widening(self):
         w = self.iam.widening("operator", "production_manager")
         self.assertEqual(w, [list(x) for x in self.policy.widening("operator", "production_manager")])
-        self.assertEqual(len(w), 13)   # 12, and (analysis, R) since Superset stage C (N2)
-        self.assertIn(["analysis", "R"], w)
+        # 12: (analysis, R) came with Superset stage C (N2) and went with research sandbox
+        # 2b's commit B, whose factory file has no analysis cell (O12)
+        self.assertEqual(len(w), 12)
+        self.assertNotIn(["analysis", "R"], w)
         self.assertEqual(self.iam.widening("production_manager", "operator"), [])
         self.assertEqual(len(self.iam.widening(None, "operator")), 9)
         self.assertEqual(self.iam.widening("qa", "qa"), [])

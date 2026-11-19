@@ -177,6 +177,8 @@ ENTITY_MAPS = frozenset((
     "network.clients", "network.zones", "network.pods.*.carries", "network.pods.*.selector", "network.clients.*.selector",
     "network.clients.*.egress[].selector", "service_identities.*.ceiling", "resource_groups.*.members[].routes",
     "resource_groups.*.reaches", "constraints.*.rls.using",
+    # research sandbox Phase 2b: a zone pod's platform hop names a platform pod by its labels
+    "network.pods.*.egress[].platform",
 ))
 REACH_PATHS = frozenset((
     "hosts.*.serves", "hosts.*.client",
@@ -213,6 +215,19 @@ RESIDUE_PATHS = frozenset((
     # default deny the platform namespace lacks); a group's zone switches I18 on for it, so
     # taking it away or changing it is a widening
     "network.pods.*.zone",
+    # research sandbox Phase 2b: the ranges a zone's internet hop must not reach are not in
+    # the pod-egress tuple ("internet", "", port), so dropping one widens as residue
+    "network.zones.*.internet_except",
+    # research sandbox Phase 2b: a zone pod's egress hops. system_reach counts them as
+    # pod-egress tuples too, but they stay residue (any change is a widening, a removed hop
+    # included) on purpose: a skeleton version's diff lists its residue sections, and
+    # apply.sh N recomputes that diff with the compiler checked out then. Skeleton version
+    # 2b is proposed from commit A, whose explain.py had these paths unclassified (= residue);
+    # registering them as reach in commit B would move the sections between the proposal and
+    # the apply, and diff-check would refuse the approved version. Narrowing them to reach is
+    # for a later code-only commit (no skeleton version in flight).
+    "network.pods.*.egress[].pod", "network.pods.*.egress[].port", "network.pods.*.egress[].node",
+    "network.pods.*.egress[].internet", "network.pods.*.egress[].ports", "network.pods.*.egress[].platform.*",
     "network.clients.*.selector.*", "network.clients.*.only_rpc",
     "roles.*.db_role", "roles.*.availability", "roles.*.spec_role",
     "service_identities.*.db_role", "service_identities.*.db_password", "service_identities.*.managed_by",

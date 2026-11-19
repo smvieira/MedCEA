@@ -235,8 +235,11 @@ class Tree:
             shutil.copy(os.path.join(REPO, rel), self.path(rel))
         shutil.copytree(os.path.join(REPO, "k8s", "research"), self.path("k8s", "research"))
         p = self.path("apps", "iam", "policy", "defaults.yaml")
-        with open(p) as f:
-            d = yaml.safe_load(f)
+        # version 7 (commit B's factory file rebuilt as it was before; tests/rs2b_fixture.py):
+        # its research zone without the Phase 2b pods, so the cases see the 2a shapes
+        sys.path.insert(0, os.path.join(REPO, "tests"))
+        import rs2b_fixture
+        d = rs2b_fixture.v7_policy()
         with open(p, "w") as f:
             yaml.safe_dump(research_zone(d) if zone else no_research_zone(d), f, sort_keys=False)
         cfg = "".join(f'{k}="{v}"\n' for k, v in SECRETS.items())

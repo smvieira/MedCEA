@@ -3,7 +3,7 @@
 research zone (research sandbox Phase 2b, commit A), offline.
 
 infra/deploy-workbench.sh runs in a scratch tree (tests/_scratch.py) with the real compiler on
-the factory policy (v7: placement platform) or on commit B's shapes (tests/rs2b_fixture.py
+version 7's policy (tests/rs2b_fixture.py v7_policy: placement platform) or on commit B's shapes (tests/rs2b_fixture.py
 b_policy: placement research, no network.clients.notebooks, no token client
 workbench-notebook), under a lock and a verified policy source as deploy-infra or apply.sh
 hold them, with a stateful fake microk8s (kubectl and helm3), sudo, curl (wait_for_http and
@@ -374,9 +374,10 @@ class Tree:
         shutil.copytree(os.path.join(REPO, "k8s", "workbench"), self.path("k8s", "workbench"))
         os.makedirs(self.path("apps", "backup"), exist_ok=True)
         shutil.copy(os.path.join(REPO, "apps", "backup", "lib-backup.sh"), self.path("apps", "backup", "lib-backup.sh"))
-        if research:
-            with open(self.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
-                yaml.safe_dump(rs2b_fixture.b_policy(), f, sort_keys=False)
+        # commit B's shapes, or version 7 (both rebuilt from the factory file, which is
+        # commit B's since research sandbox 2b's commit B: tests/rs2b_fixture.py)
+        with open(self.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            yaml.safe_dump(rs2b_fixture.b_policy() if research else rs2b_fixture.v7_policy(), f, sort_keys=False)
         with open(self.path("config.env"), "w") as f:
             f.write(CONFIG + f'RESEARCH_ENABLED="{enabled}"\n' + extra)
         self.fake = self.path(".fake")

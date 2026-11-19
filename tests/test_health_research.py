@@ -849,7 +849,8 @@ class IamWorkbench(unittest.TestCase):
         import yaml
         import rs2b_fixture
         cls.trees = {}
-        for place, data in (("platform", None), ("research", rs2b_fixture.b_policy())):
+        # version 7 rebuilt from the factory file, which commit B changed (rs2b_fixture.v7_policy)
+        for place, data in (("platform", rs2b_fixture.v7_policy()), ("research", rs2b_fixture.b_policy())):
             t = h5.Tree()
             if data is not None:
                 with open(t.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:

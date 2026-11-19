@@ -273,17 +273,18 @@ def cases(mode, base, d, name, nginx=None):
               and row.get("updated_by_source") == "token" and row.get("updated_by_sub") == claims["sub"],
               "production_manager + operator: stamped as production_manager (source token)", "%s %s" % (st, b))
 
-    # P17: a notebook token (azp workbench-notebook, IAM 3.2b) only reads: a role that may
-    # write master data is refused a PATCH and an RPC by POST, and still reads
+    # P17: a notebook token (azp workbench-notebook). IAM 3.2b served it for reads only;
+    # research sandbox Phase 2b's commit B removed network.clients.notebooks (decision D2:
+    # notebooks read snapshots through lake-api), so pre_request no longer lists the client
+    # and refuses every request of it, a read included, before any role is taken
     if enforcing and writer:
         tok, _ = s.token((writer,), azp="workbench-notebook")
-        st, b = req(base, "/cea_unit?unit_code=eq.%s" % UNIT, tok, method="PATCH", body={"description": "x"})
-        check("P17", st == 403 and "may only read" in message(b),
-              "notebook token, %s: PATCH 403 'may only read'" % writer, "%s %s" % (st, b))
-        st, b = req(base, "/rpc/iamtest_whoami", tok, method="POST", body={})
-        check("P17", st == 403 and "may only read" in message(b), "notebook token: POST /rpc 403", "%s %s" % (st, b))
         st, b = req(base, q, tok)
-        check("P17", st == 200, "notebook token: GET served", "%s %s" % (st, str(b)[:80]))
+        check("P17", st == 403 and "may not use the API" in message(b),
+              "retired notebook client: GET 403 'may not use the API'", "%s %s" % (st, str(b)[:120]))
+        st, b = req(base, "/cea_unit?unit_code=eq.%s" % UNIT, tok, method="PATCH", body={"description": "x"})
+        check("P17", st == 403 and "may not use the API" in message(b),
+              "retired notebook client, %s: PATCH 403" % writer, "%s %s" % (st, b))
 
     # P15: the readiness probe's anonymous GET / is answered in both modes
     st, b = req(base, "/")

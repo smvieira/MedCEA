@@ -62,14 +62,20 @@ from _scratch import clean_env, scratch_repo  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Every compile runs in a scratch copy (design v4 §14.4.15): on the live host the
 # repository's state/policy-applied.yaml exists once a version is applied, and the
-# repository's cli.py would read it. The scratch tree has no state/, so it compiles the
-# factory defaults.yaml; MEDCEA_POLICY_* is stripped from every child's environment.
+# repository's cli.py would read it. The scratch tree has no state/, so it compiles its
+# own defaults.yaml (version 7's policy); MEDCEA_POLICY_* is stripped from every child's
+# environment.
 SCRATCH = None
 
 
 def setUpModule():
     global SCRATCH
     SCRATCH = scratch_repo("medcea-wb-render-")
+    # version 7's policy (the platform placement these cases render), rebuilt from the
+    # factory file, which research sandbox 2b's commit B changed (tests/rs2b_fixture.py)
+    import rs2b_fixture
+    with open(os.path.join(SCRATCH, "apps", "iam", "policy", "defaults.yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump(rs2b_fixture.v7_policy(), f, sort_keys=False, allow_unicode=True, width=1000)
 
 
 def tearDownModule():

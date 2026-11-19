@@ -46,7 +46,9 @@ def readf(path):
 
 
 def v7():
-    return copy.deepcopy(model.load_defaults().data)
+    """Version 7's policy (commit A's factory file), rebuilt from the factory file since
+    commit B changed it (tests/rs2b_fixture.py v7_policy, byte for byte)."""
+    return rs2b_fixture.v7_policy()
 
 
 def hub_without_zone():

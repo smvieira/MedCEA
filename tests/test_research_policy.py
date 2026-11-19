@@ -18,6 +18,13 @@ against commit A).
               platform clients (namespaceSelector AND podSelector) and the node addresses;
               the platform NetworkPolicies are byte for byte commit A's
   Approval    apply_check.barred_approvers is empty for this change: qa and auditor may approve
+  Phase2b     research sandbox Phase 2b, commit B (owner decisions of 19 Nov 2026): the zone
+              pods hub, workbench-proxy, notebooks and lake-api with their hops, the internet
+              hop's excluded ranges, lake-api admitted by research-postgresql, the notebooks
+              client gone (no workbench-notebook azp), I19 in the block, the factory matrix
+              carrying the change version's cells (measurements without the two scientists,
+              analysis {}); barred_approvers empty for the skeleton version (against ad420b0)
+              and for the change version (qa and auditor may approve both)
 
 Run from the repository root:  python3 tests/test_research_policy.py
 Offline; cli.py runs in a scratch copy (tests/_scratch.py), so no state/ of this host.
@@ -41,6 +48,7 @@ sys.path.insert(0, os.path.join(REPO, "tests"))
 from _scratch import clean_env, scratch_repo  # noqa: E402
 
 COMMIT_A = "5c892a3"   # research sandbox Phase 2a, commit A: code only, the policy before B
+COMMIT_2B_A = "ad420b0"   # research sandbox Phase 2b, commit A: code only, version 7's policy
 NS, RNS = "medcea", "medcea-research"
 IPS = ["10.1.110.128", "192.168.1.200"]
 PG_SEL = {"app.kubernetes.io/instance": "research-postgresql", "app.kubernetes.io/name": "postgresql"}
@@ -171,7 +179,8 @@ class Zone(unittest.TestCase):
         lst = json.loads(r.stdout)
         items = {i["metadata"]["name"]: i for i in lst["items"]}
         self.assertEqual([i["metadata"]["name"] for i in lst["items"]],
-                         ["rs-default-deny", "rs-dns", "rs-research-postgresql"])
+                         ["rs-default-deny", "rs-dns", "rs-research-postgresql",
+                          "rs-hub", "rs-workbench-proxy", "rs-notebooks", "rs-lake-api"])   # + Phase 2b
         for i in lst["items"]:
             self.assertEqual(i["metadata"]["namespace"], RNS)
             self.assertEqual(i["metadata"]["labels"], {"medcea/rs-netpol": "true"})
@@ -185,7 +194,8 @@ class Zone(unittest.TestCase):
         self.assertEqual(spec["ingress"], [{
             "ports": [{"protocol": "TCP", "port": 5432}],
             "from": [{"namespaceSelector": ns, "podSelector": {"matchLabels": {"app": "research-export"}}},
-                     {"namespaceSelector": ns, "podSelector": {"matchLabels": {"app": "medcea-backup"}}}]
+                     {"namespaceSelector": ns, "podSelector": {"matchLabels": {"app": "medcea-backup"}}},
+                     {"podSelector": {"matchLabels": {"app": "lake-api"}}}]   # Phase 2b: same zone, no namespaceSelector
             + [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in IPS]}])
         self.assertEqual(lst, netpol.compile_zone(factory(), "research", RNS, NS, IPS))
 
@@ -211,8 +221,19 @@ class Zone(unittest.TestCase):
             a = self.run_cli(*argv, cli=os.path.join(old, "apps", "iam", "compiler", "cli.py"))
             b = self.run_cli("--defaults", *argv)
             self.assertEqual((a.returncode, b.returncode), (0, 0), a.stderr + b.stderr)
-            self.assertEqual(b.stdout, a.stdout)
             self.assertNotIn("research", b.stdout)
+            # Phase 2b, commit B: the one difference is config-api's port 3000 losing the
+            # notebooks peer (network.clients.notebooks removed, decision D2)
+            old_list, new_list = json.loads(a.stdout), json.loads(b.stdout)
+            nb = {"podSelector": {"matchLabels": {"app": "jupyterhub", "component": "singleuser-server",
+                                                  "release": "workbench"}}}
+            for item in old_list["items"]:
+                if item["metadata"]["name"] == "iam-config-api":
+                    for rule in item["spec"]["ingress"]:
+                        self.assertIn(nb, rule["from"])
+                        rule["from"].remove(nb)
+            self.assertEqual(new_list, old_list)
+            self.assertNotIn("singleuser-server", b.stdout)
         finally:
             shutil.rmtree(old, ignore_errors=True)
 
@@ -234,6 +255,86 @@ class Approval(unittest.TestCase):
         self.assertEqual(g["verdict"], "widening")
         self.assertEqual(set(g["added"]), {"_system", "_sections"})
         self.assertEqual(apply_check.barred_approvers(p["roles"], g["added"]), [])
+
+
+
+class Phase2b(unittest.TestCase):
+    """Research sandbox Phase 2b, commit B (the skeleton version) and the factory matrix's
+    change version (owner decisions of 17 and 19 Nov 2026)."""
+
+    def test_the_zone_pods(self):
+        net = factory().data["network"]
+        self.assertEqual(net["zones"]["research"]["internet_except"],
+                         ["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"])
+        pods = net["pods"]
+        self.assertEqual(sorted(n for n, pd in pods.items() if pd.get("zone") == "research"),
+                         ["hub", "lake-api", "notebooks", "research-postgresql", "workbench-proxy"])
+        hops = {n: [{k: v for k, v in h.items() if k != "why"} for h in pods[n]["egress"]]
+                for n in ("hub", "workbench-proxy", "notebooks", "lake-api")}
+        self.assertEqual(hops, {
+            "hub": [{"pod": "workbench-proxy", "port": 8001}, {"pod": "notebooks", "port": 8888},
+                    {"platform": {"app": "keycloak"}, "port": 8080}, {"node": True, "port": 16443}],
+            "workbench-proxy": [{"pod": "hub", "port": 8081}, {"pod": "notebooks", "port": 8888}],
+            "notebooks": [{"pod": "hub", "port": 8081}, {"pod": "lake-api", "port": 3000},
+                          {"internet": True, "ports": [443]}],
+            "lake-api": [{"pod": "research-postgresql", "port": 5432}]})
+        self.assertEqual(pods["lake-api"]["ingress"][0]["from"], ["pod:notebooks", "node"])
+        self.assertIn("pod:lake-api", pods["research-postgresql"]["ingress"][0]["from"])
+        for n in ("hub", "workbench-proxy", "notebooks", "lake-api"):
+            self.assertEqual(pods[n]["carries"], {}, n)   # no route-table service in the zone (O2)
+
+    def test_the_notebooks_client_is_gone(self):
+        p = factory()
+        self.assertNotIn("notebooks", p.data["network"]["clients"])
+        self.assertNotIn("client:notebooks", json.dumps(p.data["network"]))
+        self.assertNotIn("workbench-notebook", grants.token_clients(p))
+        self.assertEqual(grants.read_only_clients(p), [])
+
+    def test_i19(self):
+        inv = {i["code"]: i for i in factory().data["invariants"]}
+        self.assertEqual(inv["I19"]["kind"], "matrix")
+        self.assertIn("admin holds nothing, except K on research_workbench", inv["I19"]["rule"])
+        self.assertEqual(factory().matrix["research_workbench"]["admin"], ["K"])
+        d = copy.deepcopy(factory().data)
+        d["matrix"]["research_workbench"]["admin"] = ["K", "R"]
+        self.assertIn("I19 admin holds ['K', 'R'] on research group research_workbench",
+                      invariants.check(model.Policy(d))[0])
+
+    def test_the_factory_cells(self):
+        m = factory().data["matrix"]
+        self.assertEqual(m["analysis"], {})
+        for r in ("bio_scientist", "control_scientist"):
+            self.assertNotIn(r, m["measurements"])
+        self.assertEqual(m["research_workbench"], {"qa": ["R"], "engineer": ["R"], "bio_scientist": ["R", "C", "U"],
+                                                   "control_scientist": ["R", "C", "U"], "admin": ["K"]})
+
+    def _v7(self):
+        r = subprocess.run(["git", "-C", REPO, "show", f"{COMMIT_2B_A}:apps/iam/policy/defaults.yaml"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {COMMIT_2B_A}: {r.stderr.strip()}")
+        import yaml
+        return yaml.safe_load(r.stdout)
+
+    def test_nobody_barred_from_the_skeleton_version(self):
+        a, p = self._v7(), factory().data
+        g = json.loads(json.dumps(explain.gate(a, p, source.entries_and_waivers(a))))
+        self.assertEqual(g["verdict"], "widening")
+        self.assertEqual(set(g["added"]), {"_system", "_sections"})
+        barred = apply_check.barred_approvers(p["roles"], g["added"])
+        self.assertEqual(barred, [])
+        self.assertNotIn("qa", barred)
+        self.assertNotIn("auditor", barred)
+
+    def test_nobody_barred_from_the_change_version(self):
+        a, p = self._v7(), factory()
+        s = model.Policy(source.compose(source.skeleton(p.data), source.entries_and_waivers(a)))
+        roles = explain.diff(s, p)["roles"]
+        added = {r: v["added"] for r, v in roles.items() if v.get("added")}
+        self.assertEqual(added, {})
+        self.assertEqual(apply_check.barred_approvers(p.data["roles"], added), [])
+        for r in sorted(p.roles):
+            self.assertFalse(model.widening_between(s, p, r), r)
 
 
 if __name__ == "__main__":

@@ -117,16 +117,22 @@ def add_superset(d):
     SUPERSET_DOMAIN, group analysis (Alpha from U, Gamma from R), service identity
     svc_superset reading master_data and measurements only (no runs: I5 unchanged), the pod
     superset (8088 from ingress and the node), builders bio_scientist, control_scientist and
-    engineer, viewers qp, qc and production_manager (no qa, no auditor)."""
-    factory = model.load_defaults().data
+    engineer, viewers qp, qc and production_manager (no qa, no auditor). The cells are v7's
+    (tests/rs2b_fixture.py with_v7_cells): the factory file carries none since research
+    sandbox Phase 2b's commit B (owner O12)."""
+    import rs2b_fixture
+    factory = rs2b_fixture.with_v7_cells(model.load_defaults().data)
     for path in STAGE_C:
         _at(d, path)[path[-1]] = copy.deepcopy(_at(factory, path)[path[-1]])
     return d
 
 
 def _superset(*mutations):
-    """A mutation of the policy with the Superset fixture added first."""
+    """A mutation of the policy with the Superset fixture added first (v7's cells: the
+    scientists' measurements R too, which Superset's reach needs, I11)."""
     def apply(d):
+        import rs2b_fixture
+        rs2b_fixture.put_v7_cells(d)
         add_superset(d)
         for m in mutations:
             m(d)
@@ -426,6 +432,9 @@ class PolicyTest(unittest.TestCase):
         self.assertNotIn("operator", proxies.admitted(p, "GRAFANA_DOMAIN"))    # own_unit
         self.assertEqual(proxies.admitted(p, "ACCESS_DOMAIN"), ["admin", "auditor", "qa", "qp"])
         for host in p.hosts:
+            if host == "SUPERSET_DOMAIN":   # no analysis cell since research sandbox 2b's commit B (O12)
+                self.assertEqual(proxies.admitted(p, host), [])
+                continue
             self.assertTrue(proxies.admitted(p, host), f"{host} admits nobody")
 
 
@@ -535,17 +544,36 @@ class ToolsTest(unittest.TestCase):
 class SupersetToolTest(unittest.TestCase):
     """Superset stage B (6 Nov 2026): the superset tool kind and AUTH_ROLES_MAPPING; stage C
     (7 Nov 2026, commit B): defaults.yaml's group analysis carries it, with the six factory
-    cells (N1, N2). `absent` is the policy as commit A had it (without_superset)."""
+    cells (N1, N2), until research sandbox Phase 2b's commit B (owner O12, 19 Nov 2026): the
+    factory file keeps the group, the host, svc_superset and the pod, with no cell, so
+    Superset admits nobody. `p` is the factory file with v7's cells
+    (tests/rs2b_fixture.py with_v7_cells), `factory` the file itself, `absent` the policy as
+    stage C's commit A had it (without_superset)."""
 
     @classmethod
     def setUpClass(cls):
-        cls.p = model.load_defaults()
+        import rs2b_fixture
+        cls.factory = model.load_defaults()
+        cls.p = model.Policy(rs2b_fixture.with_v7_cells(cls.factory.data))
         cls.absent = model.Policy(without_superset(copy.deepcopy(cls.p.data)))
 
     def test_defaults_pass_the_checker(self):
-        errors, _ = invariants.check(self.p)
-        self.assertEqual(errors, [], "\n" + "\n".join(errors))
-        self.assertEqual(invariants.check(self.absent)[0], [])
+        for p in (self.factory, self.p, self.absent):
+            errors, _ = invariants.check(p)
+            self.assertEqual(errors, [], "\n" + "\n".join(errors))
+
+    def test_the_factory_admits_nobody(self):
+        """Research sandbox Phase 2b, commit B (owner O12): the analysis row is an empty
+        mapping (never YAML null), the tool block stays, so has-tool --admitting is 3 and
+        policy_tool's rc 5 makes ./apps/superset/deploy.sh skip (a fresh install) or stop it
+        (--gate-only, the change version)."""
+        self.assertEqual(self.factory.data["matrix"]["analysis"], {})
+        self.assertIn("tool", self.factory.groups["analysis"])
+        self.assertTrue(tools.groups(self.factory, "superset"))
+        self.assertFalse(tools.admits_anyone(self.factory, "superset"))
+        self.assertEqual(proxies.admitted(self.factory, "SUPERSET_DOMAIN"), [])
+        with self.assertRaisesRegex(ValueError, "admit nobody"):
+            tools.superset_roles_mapping(self.factory)
 
     def test_the_fixtures(self):
         """add_superset is a no-op on the defaults and undoes without_superset."""
@@ -583,6 +611,8 @@ class SupersetToolTest(unittest.TestCase):
         self.assertEqual(self.p.data["matrix"]["analysis"],
                          {"production_manager": ["R"], "qc": ["R"], "qp": ["R"],
                           "engineer": ["R", "C", "U"], "bio_scientist": ["R", "C", "U"], "control_scientist": ["R", "C", "U"]})
+        self.assertEqual(self.factory.data["matrix"]["analysis"], {})   # research sandbox 2b, commit B
+        self.assertEqual(self.factory.groups["analysis"], g)   # the group itself stays
         self.assertEqual(proxies.ENFORCEMENT["SUPERSET_DOMAIN"], "tool (Superset AUTH_ROLES_MAPPING)")
         self.assertIn("iam-superset", {i["metadata"]["name"] for i in netpol.compile(self.p, "medcea", ["10.0.0.5"])["items"]})
 
@@ -643,7 +673,7 @@ class SupersetToolTest(unittest.TestCase):
         defaults = [sys.executable, cli_py, "--defaults"]   # the factory file, never the host's
         with_file = [sys.executable, cli_py, "--file"]
         r = subprocess.run(defaults + ["has-tool", "superset", "--admitting"], capture_output=True, text=True)
-        self.assertEqual((r.returncode, r.stdout), (0, ""))   # N2: the factory cells
+        self.assertEqual((r.returncode, r.stdout), (3, ""))   # research sandbox 2b, commit B: no cell (O12)
         with tempfile.TemporaryDirectory() as tmp:
             for name, data, want in (("absent", self.absent.data, (1, 1)), ("skel", d, (0, 3)),
                                      ("full", self.p.data, (0, 0))):
@@ -684,7 +714,16 @@ class SupersetToolTest(unittest.TestCase):
         cli_py = os.path.join(REPO, "apps", "iam", "compiler", "cli.py")
         defaults = [sys.executable, cli_py, "--defaults"]   # the factory file, never the host's
         with_file = [sys.executable, cli_py, "--file"]
+        # the factory file admits nobody since research sandbox 2b's commit B (O12)
         out = subprocess.run(defaults + ["compile", "superset"], capture_output=True, text=True)
+        self.assertEqual((out.returncode, out.stdout), (1, ""))
+        self.assertIn("Superset would admit nobody", out.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            f = os.path.join(tmp, "v7cells.yaml")
+            with open(f, "w") as fh:
+                yaml.safe_dump(self.p.data, fh)
+            out = subprocess.run(with_file + [f, "--label", "v7cells", "compile", "superset"],
+                                 capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout, json.dumps(tools.superset_roles_mapping(self.p), sort_keys=True) + "\n")
         self.assertEqual(subprocess.run(defaults + ["has-tool", "superset"], capture_output=True).returncode, 0)
@@ -901,8 +940,10 @@ class WideningTest(unittest.TestCase):
     def test_widening_values(self):
         p = self.policy
         w = p.widening("operator", "production_manager")
-        self.assertEqual(len(w), 13)
-        self.assertIn(("analysis", "R"), w)   # Superset's viewer (stage C, N1)
+        self.assertEqual(len(w), 12)
+        # Superset's viewer (stage C, N1) until research sandbox 2b's commit B: the factory
+        # file has no analysis cell since (owner O12)
+        self.assertNotIn(("analysis", "R"), w)
         # operator held runs R under own_unit and O under assigned_run; production_manager holds both free
         self.assertIn(("runs", "R"), w)
         self.assertIn(("runs", "O"), w)
@@ -1102,9 +1143,17 @@ class GrantsTest(unittest.TestCase):
             self.assertIn(f"WHEN '{r}' THEN '{d}'", grants.compiled_functions(self.policy))
 
     def test_notebook_tokens_only_read(self):
-        # IAM 3.2b review: notebook code is unvalidated; its tokens read, never write
-        self.assertEqual(grants.read_only_clients(self.policy), ["workbench-notebook"])
-        fn = grants.compiled_functions(self.policy)
+        # IAM 3.2b review: notebook code is unvalidated; its tokens read, never write. The
+        # factory file has no notebooks client since research sandbox 2b's commit B (D2:
+        # notebooks read snapshots through lake-api), so pre_request lists no read-only client
+        # and no notebook azp; the rule is kept for v7's client (tests/rs2b_fixture.py)
+        import rs2b_fixture
+        self.assertEqual(grants.read_only_clients(self.policy), [])
+        self.assertNotIn("workbench-notebook", grants.token_clients(self.policy))
+        self.assertNotIn("workbench-notebook", grants.compiled_functions(self.policy))
+        policy = model.Policy(rs2b_fixture.with_notebooks_client(self.policy.data))
+        self.assertEqual(grants.read_only_clients(policy), ["workbench-notebook"])
+        fn = grants.compiled_functions(policy)
         pre = fn[fn.index("FUNCTION medcea_auth.pre_request()"):fn.index("$pre$;")]
         self.assertIn("(c ->> 'azp') = ANY (ARRAY['workbench-notebook']::text[])", pre)
         self.assertIn("NOT IN ('GET', 'HEAD')", pre)
@@ -1112,9 +1161,9 @@ class GrantsTest(unittest.TestCase):
         self.assertIn("SET LOCAL transaction_read_only = on;", pre)
         # checked before the role is taken, so no write runs as the person's role
         self.assertLess(pre.index("may only read"), pre.index("SET LOCAL ROLE"))
-        for c in grants.token_clients(self.policy):
+        for c in grants.token_clients(policy):
             if c != "workbench-notebook":
-                self.assertNotIn(c, grants.read_only_clients(self.policy))
+                self.assertNotIn(c, grants.read_only_clients(policy))
 
     def test_golden(self):
         body = {"privileges": self.doc["privileges"], "memberships": self.doc["memberships"], "rls": self.doc["rls"]}
@@ -2311,8 +2360,9 @@ class WiringTest(unittest.TestCase):
     def test_policy_tool_superset_shell(self):
         """Superset stage B: rc 5 while the policy has no superset tool, and (stage C, F1) while
         its group gives no role a setting, 3 under IAM_GATES=false, 1 on a broken policy, the
-        compiled mapping once a group carries the tool and its cells (the factory file since
-        stage C's commit B); never a word on stdout but the mapping."""
+        compiled mapping once a group carries the tool and its cells (the factory file from
+        stage C's commit B until research sandbox 2b's commit B, which leaves no cell: rc 5,
+        owner O12); never a word on stdout but the mapping."""
         import shutil
         import subprocess
         import yaml
@@ -2323,8 +2373,8 @@ class WiringTest(unittest.TestCase):
             return subprocess.run(["bash", "-c", f'source "{root}/infra/lib-policy-tools.sh"; policy_tool superset'],
                                   capture_output=True, text=True, env=e)
         r = run(scratch_root(), {"IAM_GATES": "true"})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), tools.superset_roles_mapping(model.load_defaults()))
+        self.assertEqual((r.returncode, r.stdout), (5, ""), r.stderr)   # the factory file: no cell (O12)
+        self.assertIn("gives no role a setting", r.stderr)
         r = run(scratch_root(), {"IAM_GATES": "false"})
         self.assertEqual((r.returncode, r.stdout), (3, ""))
         self.assertIn("IAM_GATES=false", r.stderr)
@@ -2334,7 +2384,8 @@ class WiringTest(unittest.TestCase):
         self.assertIn("MEDCEA_POLICY_FILE is set", r.stderr)
         root = scratch_repo("medcea-test-superset-")
         try:
-            data = copy.deepcopy(model.load_defaults().data)
+            import rs2b_fixture
+            data = rs2b_fixture.with_v7_cells(model.load_defaults().data)   # v7's cells
             target = os.path.join(root, "apps", "iam", "policy", "defaults.yaml")
             with open(target, "w") as fh:   # commit A's policy: no tool
                 yaml.safe_dump(without_superset(copy.deepcopy(data)), fh)
@@ -3863,7 +3914,8 @@ class StagedResolutionTest(unittest.TestCase):
             sha = hashlib.sha256(text.encode()).hexdigest()
             src = source.resolve(staged=path, env={"MEDCEA_POLICY_STAGED_SHA256": sha})
             self.assertEqual((src.kind, src.version, source.label(src)), ("staged", 9, "version-9"))
-            self.assertEqual(src.data["matrix"], f["matrix"])
+            # an empty row (analysis: {} since research sandbox 2b's commit B) has no entry
+            self.assertEqual(src.data["matrix"], {g: r for g, r in f["matrix"].items() if r})
             for env in ({}, {"MEDCEA_POLICY_STAGED_SHA256": sha.replace(sha[0], "f" if sha[0] != "f" else "e", 1)}):
                 with self.assertRaises(source.SourceError):
                     source.resolve(staged=path, env=env)
@@ -3942,8 +3994,10 @@ class Phase2bCheckerTest(unittest.TestCase):
         self.assertIn("1 violation(s)", r.stdout)
 
     def test_i19_is_inert_without_its_code(self):
+        # the factory file names I19 since research sandbox 2b's commit B: drop its line
         d = copy.deepcopy(model.load_defaults().data)
-        self.assertNotIn("I19", [i["code"] for i in d["invariants"]])
+        self.assertIn("I19", [i["code"] for i in d["invariants"]])
+        d["invariants"] = [i for i in d["invariants"] if i["code"] != "I19"]
         d["matrix"].setdefault("research_export", {})["admin"] = ["R"]
         errors = invariants.check(model.Policy(d))[0]
         self.assertFalse([e for e in errors if e.startswith("I19")], errors)
