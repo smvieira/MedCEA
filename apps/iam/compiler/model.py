@@ -21,7 +21,16 @@ class Policy:
         self.types = data["resource_types"]
         self.classes = data["classes"]
         self.constraints = data["constraints"]
-        self.matrix = data["matrix"]
+        # A matrix row that is not a mapping (YAML `analysis:` with nothing after it is None)
+        # is read as {} here, so nothing downstream meets a TypeError, and named in
+        # bad_matrix_rows, which invariants._structure reports (research sandbox Phase 2b).
+        # A well-formed matrix is used as it is (the same object).
+        matrix = data["matrix"]
+        self.bad_matrix_rows = [g for g, row in matrix.items() if not isinstance(row, dict)] \
+            if isinstance(matrix, dict) else []
+        if self.bad_matrix_rows:
+            matrix = {g: (row if isinstance(row, dict) else {}) for g, row in matrix.items()}
+        self.matrix = matrix
         self.hosts = data["hosts"]
         self.waivers = data.get("waivers", [])
         self.services = data.get("service_identities", {})

@@ -2,9 +2,20 @@
 # Applied by infra/deploy-research-namespace.sh. Render list: RESEARCH_NAMESPACE
 # The label marks the zone; network policies select namespaces by the automatic
 # kubernetes.io/metadata.name label, never by this one.
+#
+# Pod Security Admission, baseline (research sandbox Phase 2b, owner decision C): the AI
+# workbench's hub may create pods here (Role medcea-hub, k8s/workbench/hub-rbac.yaml), so the
+# API server itself refuses a privileged pod, a hostPath volume, host namespaces or added
+# capabilities beyond the baseline set, whoever asks: that is the control against "pods create
+# = node root". research-postgresql (the chart's defaults) and the workbench's pods pass it;
+# the chart's cloud-metadata init container (NET_ADMIN, root) would not and is off there
+# (k8s/workbench/values-research.yaml). warn: the same level, so kubectl names a violation.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ${RESEARCH_NAMESPACE}
   labels:
     medcea/zone: research
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: baseline

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # apps/research/uninstall.sh — the inverse of apps/research/deploy.sh.
 #
-#   ./apps/research/uninstall.sh                removes Secrets research-export-writer and
+#   ./apps/research/uninstall.sh                runs ./apps/lake-api/uninstall.sh first
+#                                               (the snapshot reader logs in to this
+#                                               database), then removes Secrets research-export-writer and
 #                                               research-backup from $NAMESPACE (first, so
 #                                               the exporter and the backup stop connecting)
 #                                               and the Helm release research-postgresql; its
@@ -11,7 +13,10 @@
 #   ./apps/research/uninstall.sh --purge-data   also deletes the volume
 #                                               (data-research-postgresql-0) and Secret
 #                                               research-postgresql-auth: every snapshot and
-#                                               every reservation is gone
+#                                               every reservation is gone, and with
+#                                               the volume every role of the research
+#                                               PostgreSQL (rs_owner, rs_export_writer,
+#                                               rs_backup, rs_lake_api, rs_lake_reader)
 #
 # deploy-apps.sh --uninstall --purge-data passes the flag to the database component only,
 # so it never reaches here: purging the research data is this script's own flag. Never
@@ -40,6 +45,9 @@ RS_RELEASE=research-postgresql
 
 GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[research]${NC} $*"; }
+
+# The snapshot reader first: it logs in to the database removed below.
+bash "$REPO_ROOT/apps/lake-api/uninstall.sh"
 
 log "Removing Secrets research-export-writer and research-backup from $NAMESPACE..."
 $KUBECTL delete secret research-export-writer research-backup -n "$NAMESPACE" --ignore-not-found >/dev/null

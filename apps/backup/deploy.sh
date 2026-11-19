@@ -14,8 +14,10 @@
 #      and medcea_research, the research sandbox's database, whenever Secret research-backup
 #      and the database exist: dumped as rs_backup through Service research-postgresql), the roles without their
 #      passwords, and a tar of every AI workbench home (claim-*), Node-RED's /data
-#      and Grafana's volume; one dated folder per run with MANIFEST, SHA256SUMS and a
-#      final OK; folders older than BACKUP_KEEP_DAYS (default 14) are deleted.
+#      and Grafana's volume (and, in RESEARCH_NAMESPACE, the workbench's homes and hub
+#      database once it lives in the research zone: volumes/research-<claim>); one
+#      dated folder per run with MANIFEST, SHA256SUMS and a final OK; folders older
+#      than BACKUP_KEEP_DAYS (default 14) are deleted.
 #
 # It needs the infrastructure first: the image and Secret of rdbms-postgresql (the
 # job runs pg_dump from the server's own image, already on the node). No portal
@@ -119,13 +121,16 @@ RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-$NAMESPACE-research}"
 [[ "$RESEARCH_NAMESPACE" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
     || die "RESEARCH_NAMESPACE='$RESEARCH_NAMESPACE' is not a Kubernetes namespace name (config.env)"
 RESEARCH_DB_HOST="research-postgresql.$RESEARCH_NAMESPACE"
+# The AI workbench's volumes in the research namespace (research Phase 2b), copied as
+# volumes/research-<claim>.tar.gz once the access policy places the workbench there.
+RESEARCH_VOLUMES="claim-* hub-db-dir"
 
 # =============================================================================
 # 3. The CronJob
 # =============================================================================
 log "Deploying CronJob medcea-backup (daily 02:30 UTC, image $BACKUP_IMAGE)..."
 render "$SCRIPT_DIR/k8s/backup-cronjob.yaml" NAMESPACE BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_IMAGE \
-    BACKUP_UID BACKUP_GID STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST \
+    BACKUP_UID BACKUP_GID STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST RESEARCH_NAMESPACE RESEARCH_VOLUMES \
   | $KUBECTL apply -f -
 
 log ""

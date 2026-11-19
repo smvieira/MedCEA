@@ -43,6 +43,19 @@
   cli.py has-zone Z [--file F]          exit 0 when the policy has network.zones.Z, 1 when not, 2 when
                                         Z is unknown or the policy fails its checks; prints nothing
                                         on stdout (the research deploys' skip)
+  cli.py pod-zone NAME [--file F]       network.pods.NAME's zone: prints `research` (or another zone's
+                                        name) or `platform` (a pod without `zone`); exit 0 when the pod
+                                        exists, 1 when not (nothing printed), 2 when the policy fails its
+                                        checks (research sandbox Phase 2b: the workbench's placement,
+                                        `pod-zone hub`; lake-api's skip)
+  cli.py has-client NAME [--file F]     exit 0 when network.clients.NAME exists, 1 when not, 2 when the
+                                        policy fails its checks; prints nothing (`has-client notebooks`:
+                                        the workbench's egress hops, Phase 2b)
+  cli.py has-token-client NAME [--file F]
+                                        exit 0 when some network.clients.*.token_client is NAME, 1 when
+                                        none is, 2 when the policy fails its checks; prints nothing
+                                        (`has-token-client workbench-notebook`: deploy-infra keeps the
+                                        Keycloak client only while the policy names it, Phase 2b)
   cli.py compile mqtt [--file F]        the MQTT Explorer's per-person credential rows (mqtt.json of ConfigMap
                                         medcea-iam-lib, read by iam-api; IAM 3.5), canonical, one line
   cli.py compile grants --mode additive|enforce|verify [--format sql|json] [--part body|assert|all|functions] [--smoke]
@@ -600,6 +613,12 @@ def main(argv=None):
     ht.add_argument("--admitting", action="store_true", help="exit 3 when the tool's group gives no role a setting")
     hz = sub.add_parser("has-zone")
     hz.add_argument("zone")
+    pz = sub.add_parser("pod-zone")
+    pz.add_argument("name")
+    hc = sub.add_parser("has-client")
+    hc.add_argument("name")
+    htc = sub.add_parser("has-token-client")
+    htc.add_argument("name")
     desc = sub.add_parser("describe-gate")
     desc.add_argument("host")
     desc.add_argument("roles")
@@ -708,6 +727,23 @@ def main(argv=None):
             print(f"refusing to answer: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
             return 2
         return 0 if netpol.has_zone(p, args.zone) else 1
+
+    if args.cmd in ("pod-zone", "has-client", "has-token-client"):
+        errors, _ = invariants.check(p)
+        if errors:
+            print(f"refusing to answer: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
+            return 2
+        net = p.data.get("network") or {}
+        if args.cmd == "pod-zone":
+            pd = (net.get("pods") or {}).get(args.name)
+            if pd is None:
+                return 1
+            print(pd.get("zone") or "platform")
+            return 0
+        clients = net.get("clients") or {}
+        if args.cmd == "has-client":
+            return 0 if args.name in clients else 1
+        return 0 if any(cd.get("token_client") == args.name for cd in clients.values()) else 1
 
     if args.cmd == "hosts":
         for h in p.hosts:

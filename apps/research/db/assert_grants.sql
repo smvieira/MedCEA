@@ -6,17 +6,37 @@
 --   lake.latest_cut, no column privilege, no membership, owns nothing, no attribute;
 --   rs_backup is a member of pg_read_all_data and of nothing else;
 --   PUBLIC holds nothing on the database, the six schemas, their relations or functions;
---   rs_owner cannot log in and owns every relation and function of the five schemas.
+--   rs_owner cannot log in and owns every relation and function of the six schemas;
+--   rs_lake_api (Phase 2b) is LOGIN NOINHERIT, CONNECTION LIMIT 10, a member of
+--   rs_lake_reader and of nothing else, with its three settings (statement_timeout 30s,
+--   default_transaction_read_only on, temp_file_limit 256MB), CONNECT only;
+--   rs_lake_reader cannot log in, holds nothing on any table, sequence or column,
+--   USAGE on schema lake_api only and EXECUTE only on the lake_api functions (all of
+--   them); every lake_api function is SECURITY DEFINER with search_path
+--   pg_catalog, pg_temp (and, as above, owned by rs_owner, not executable by PUBLIC).
 BEGIN READ ONLY;
 WITH sch AS (
     SELECT n.oid, n.nspname FROM pg_catalog.pg_namespace n
-     WHERE n.nspname IN ('public', 'lake', 'vault', 'sim', 'agent_trace', 'registry')
+     WHERE n.nspname IN ('public', 'lake', 'vault', 'sim', 'agent_trace', 'registry', 'lake_api')
 ), w AS (
     SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rs_export_writer'
 ), b AS (
     SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rs_backup'
 ), o AS (
     SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rs_owner'
+), la AS (
+    SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rs_lake_api'
+), lr AS (
+    SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rs_lake_reader'
+), lake_roles AS (
+    SELECT r.oid, r.rolname FROM pg_catalog.pg_roles r WHERE r.rolname IN ('rs_lake_api', 'rs_lake_reader')
+), want_setting(setting) AS (
+    VALUES ('statement_timeout=30s'), ('default_transaction_read_only=on'), ('temp_file_limit=256MB')
+), lake_fn AS (
+    SELECT p.oid, 'lake_api.' || p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS sig,
+           p.prosecdef, p.proconfig, p.proacl
+      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'lake_api'
 ), want_rel(relname) AS (
     SELECT 'stage_' || x FROM pg_catalog.unnest(ARRAY['measurements', 'units', 'zones', 'recipes', 'recipe_lines',
                                                       'runs', 'cycles', 'control_loops', 'param_sets', 'catalogue']) x
@@ -133,8 +153,84 @@ WITH sch AS (
      WHERE s.nspname <> 'public' AND n.nspowner IS DISTINCT FROM (SELECT oid FROM o)
     UNION ALL
     SELECT 'schema ' || x || ' is missing'
-      FROM pg_catalog.unnest(ARRAY['lake', 'vault', 'sim', 'agent_trace', 'registry']) x
+      FROM pg_catalog.unnest(ARRAY['lake', 'vault', 'sim', 'agent_trace', 'registry', 'lake_api']) x
      WHERE NOT EXISTS (SELECT 1 FROM sch s WHERE s.nspname = x)
+    UNION ALL
+    -- ── the snapshot reader (Phase 2b) ──
+    SELECT 'role ' || x || ' is missing'
+      FROM pg_catalog.unnest(ARRAY['rs_lake_api', 'rs_lake_reader']) x
+     WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = x)
+    UNION ALL
+    SELECT 'rs_lake_api is not LOGIN NOINHERIT'
+      FROM pg_catalog.pg_roles r WHERE r.rolname = 'rs_lake_api' AND (NOT r.rolcanlogin OR r.rolinherit)
+    UNION ALL
+    SELECT 'rs_lake_api has connection limit ' || r.rolconnlimit || ', not 10'
+      FROM pg_catalog.pg_roles r WHERE r.rolname = 'rs_lake_api' AND r.rolconnlimit <> 10
+    UNION ALL
+    SELECT 'rs_lake_reader can log in' FROM pg_catalog.pg_roles r WHERE r.rolname = 'rs_lake_reader' AND r.rolcanlogin
+    UNION ALL
+    SELECT r.rolname || ' has a superuser, createdb, createrole, replication or bypassrls attribute'
+      FROM pg_catalog.pg_roles r
+     WHERE r.rolname IN ('rs_lake_api', 'rs_lake_reader')
+       AND (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
+    UNION ALL
+    SELECT 'rs_lake_api is a member of ' || r.rolname
+      FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid = m.roleid
+     WHERE m.member = (SELECT oid FROM la) AND r.rolname <> 'rs_lake_reader'
+    UNION ALL
+    SELECT 'rs_lake_api is not a member of rs_lake_reader'
+     WHERE EXISTS (SELECT 1 FROM la) AND EXISTS (SELECT 1 FROM lr)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m
+                        WHERE m.member = (SELECT oid FROM la) AND m.roleid = (SELECT oid FROM lr))
+    UNION ALL
+    SELECT 'rs_lake_reader is a member of ' || r.rolname
+      FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid = m.roleid
+     WHERE m.member = (SELECT oid FROM lr)
+    UNION ALL
+    SELECT 'rs_lake_api lacks its setting ' || x.setting
+      FROM want_setting x
+     WHERE EXISTS (SELECT 1 FROM la)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting d, LATERAL pg_catalog.unnest(d.setconfig) c
+                        WHERE d.setrole = (SELECT oid FROM la) AND d.setdatabase = 0 AND c = x.setting)
+    UNION ALL
+    -- anything on any relation or column of this database (not only the six schemas)
+    SELECT lk.rolname || ' holds ' || a.privilege_type || ' on ' || n.nspname || '.' || c.relname
+      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace,
+           LATERAL pg_catalog.aclexplode(c.relacl) a JOIN lake_roles lk ON lk.oid = a.grantee
+    UNION ALL
+    SELECT lk.rolname || ' holds column privilege ' || a.privilege_type || ' on ' || c.relname || '.' || att.attname
+      FROM pg_catalog.pg_attribute att JOIN pg_catalog.pg_class c ON c.oid = att.attrelid,
+           LATERAL pg_catalog.aclexplode(att.attacl) a JOIN lake_roles lk ON lk.oid = a.grantee
+    UNION ALL
+    SELECT lk.rolname || ' holds ' || a.privilege_type || ' on schema ' || n.nspname
+      FROM pg_catalog.pg_namespace n, LATERAL pg_catalog.aclexplode(n.nspacl) a JOIN lake_roles lk ON lk.oid = a.grantee
+     WHERE NOT (lk.rolname = 'rs_lake_reader' AND n.nspname = 'lake_api' AND a.privilege_type = 'USAGE')
+    UNION ALL
+    SELECT 'rs_lake_reader lacks USAGE on schema lake_api'
+     WHERE EXISTS (SELECT 1 FROM lr) AND EXISTS (SELECT 1 FROM sch WHERE nspname = 'lake_api')
+       AND NOT pg_catalog.has_schema_privilege('rs_lake_reader', 'lake_api', 'USAGE')
+    UNION ALL
+    SELECT lk.rolname || ' holds ' || a.privilege_type || ' on ' || n.nspname || '.' || p.proname
+           || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')'
+      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace,
+           LATERAL pg_catalog.aclexplode(p.proacl) a JOIN lake_roles lk ON lk.oid = a.grantee
+     WHERE NOT (lk.rolname = 'rs_lake_reader' AND n.nspname = 'lake_api' AND a.privilege_type = 'EXECUTE')
+    UNION ALL
+    SELECT 'rs_lake_reader lacks EXECUTE on ' || f.sig
+      FROM lake_fn f
+     WHERE EXISTS (SELECT 1 FROM lr)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(f.proacl) a
+                        WHERE a.grantee = (SELECT oid FROM lr) AND a.privilege_type = 'EXECUTE')
+    UNION ALL
+    SELECT lk.rolname || ' holds ' || a.privilege_type || ' on database ' || d.datname
+      FROM pg_catalog.pg_database d, LATERAL pg_catalog.aclexplode(d.datacl) a JOIN lake_roles lk ON lk.oid = a.grantee
+     WHERE d.datname = pg_catalog.current_database()
+       AND NOT (lk.rolname = 'rs_lake_api' AND a.privilege_type = 'CONNECT')
+    UNION ALL
+    SELECT f.sig || ' is not SECURITY DEFINER' FROM lake_fn f WHERE NOT f.prosecdef
+    UNION ALL
+    SELECT f.sig || ' does not pin search_path = pg_catalog, pg_temp'
+      FROM lake_fn f WHERE NOT ('search_path=pg_catalog, pg_temp' = ANY (coalesce(f.proconfig, '{}')))
 )
 SELECT line FROM problems ORDER BY line;
 COMMIT;

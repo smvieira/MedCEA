@@ -84,3 +84,37 @@ policy_tool() {
     fi
     echo "$out"
 }
+
+# ── where the AI workbench runs (research sandbox Phase 2b) ──────────────────────────────
+#
+#   workbench_placement   prints `research` when the access policy names the hub as a pod of
+#                         the research zone (network.pods.hub, zone: research: commit B),
+#                         `platform` otherwise (no hub pod, or one without a zone); returns 1
+#                         and prints nothing when the policy cannot be read (cli.py pod-zone
+#                         exit 2). Placement is skeleton: IAM_GATES does not change it, and it
+#                         never keys on research_workbench's zone (the 2a policy has that).
+#   workbench_namespace   the namespace of that placement: ${RESEARCH_NAMESPACE:-<NAMESPACE>-research}
+#                         for research, $NAMESPACE for platform; returns 1 likewise.
+#
+# Like _pa_rs_zone, no MEDCEA_POLICY_FILE guard: the answer is the skeleton's, which a
+# break-glass file may not change (policy_source_init refuses one whose skeleton differs).
+workbench_placement() {
+    local _out _rc=0
+    _out="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" pod-zone hub)" || _rc=$?
+    case "$_rc" in
+        0) if [[ "$_out" == research ]]; then echo research; else echo platform; fi ;;
+        1) echo platform ;;
+        *) echo "workbench_placement: cannot read the access policy (python3 apps/iam/compiler/cli.py pod-zone hub exited $_rc)" >&2
+           return 1 ;;
+    esac
+}
+
+workbench_namespace() {
+    local _pl
+    _pl="$(workbench_placement)" || return 1
+    if [[ "$_pl" == research ]]; then
+        echo "${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    else
+        echo "$NAMESPACE"
+    fi
+}

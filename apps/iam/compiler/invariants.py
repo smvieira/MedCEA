@@ -31,6 +31,15 @@ GROUP_ZONES = ("research",)
 I18_NONE = ("operator", "production_manager", "qp", "maintenance", "qc")
 I18_PROMOTION_GROUP = "research_promotion"
 I18_ENGINEER = {I18_PROMOTION_GROUP: {"R", "C"}}
+# I19 (research sandbox Phase 2b, SoD-3): on a research group admin holds nothing, except K
+# on research_workbench (it administers the hub, which gives no workspace). Checked only
+# while the policy's own `invariants:` list names I19 (commit B adds the line), so a policy
+# from before it compiles as it did.
+I19_ADMIN = {"research_workbench": {"K"}}
+
+
+def _has_invariant(p, code):
+    return any(isinstance(i, dict) and i.get("code") == code for i in p.data.get("invariants") or [])
 
 
 def _member_keys(m):
@@ -61,9 +70,13 @@ def _structure(p, err):
     for k in ("levels", "roles", "resource_groups", "matrix", "invariants", "constraints", "classes", "hosts"):
         if k not in d:
             err(f"missing top-level key {k}")
+    bad_rows = set(getattr(p, "bad_matrix_rows", []))
     for g, row in p.matrix.items():
         if g not in p.groups:
             err(f"matrix row {g} is not a resource group")
+            continue
+        if g in bad_rows:
+            err(f'matrix row {g} is empty or not a mapping: write "{g}: {{}}" for a group no role holds')
             continue
         for r in row:
             if r not in p.roles:
@@ -202,6 +215,7 @@ def _waived_i11(p, role, tool, target, levels):
 
 def _matrix_invariants(p, err, note):
     approval = {g for g, gd in p.groups.items() if "approval" in gd}
+    i19 = _has_invariant(p, "I19")
     for r in p.roles:
         for g in p.groups:
             lv = p.effective(g, r)
@@ -225,6 +239,8 @@ def _matrix_invariants(p, err, note):
                     err(f"I18 {r} holds {sorted(lv)} on research group {g}")
                 if r == "engineer" and lv - I18_ENGINEER.get(g, {"R"}):
                     err(f"I18 engineer holds {sorted(lv)} on research group {g}")
+                if i19 and r == "admin" and lv - I19_ADMIN.get(g, set()):
+                    err(f"I19 admin holds {sorted(lv)} on research group {g}")
             if r == "qp" and lv & PRODUCER:
                 err(f"I7 qp holds {sorted(lv & PRODUCER)} on {g}")
             if r != "admin" and lv & {"K", "D"}:

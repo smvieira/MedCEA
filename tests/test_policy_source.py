@@ -191,6 +191,9 @@ PRE_RS = "fb15e42"   # main before research sandbox Phase 2a: its commit A adds 
 PRE_RSA = "5c892a3"  # research sandbox Phase 2a, commit A (code only, PRE_RS's defaults.yaml):
                      # commit B changes the policy (svc_research_export, group research_export,
                      # the research zone in network:; PhaseRS2aBDelta)
+PRE_RS2B = "5504958"  # main after research sandbox Phase 2a (applied as version 7): Phase 2b's
+                      # commit A adds code only (hop forms, pod-zone/has-client/has-token-client,
+                      # I19 keyed on its YAML line, the workbench's placement; PhaseRS2bADelta)
 
 def as_of_fc(key, out):
     """An older commit's output with feedback control commit C2's one compiler change applied:
@@ -938,10 +941,18 @@ class Gate(unittest.TestCase):
         cls.f = model.load_defaults().data
         cls.ew = source.entries_and_waivers(cls.f)
 
-    def gate(self, change):
-        d = copy.deepcopy(self.f)
+    def gate(self, change, base=None):
+        """The gate from `base` (default: the factory file) to base with `change` made."""
+        base = self.f if base is None else base
+        d = copy.deepcopy(base)
         change(d)
-        return explain.gate(self.f, d, self.ew)
+        return explain.gate(base, d, self.ew)
+
+    def nb(self):
+        """The factory file with v7's network.clients.notebooks (research sandbox Phase 2b's
+        commit B removes it; tests/rs2b_fixture.py with_notebooks_client is identity on v7)."""
+        import rs2b_fixture
+        return rs2b_fixture.with_notebooks_client(self.f)
 
     def api_member(self, d, group="audit_histories"):
         return next(m for m in d["resource_groups"][group]["members"] if m["type"] == "api")
@@ -957,8 +968,8 @@ class Gate(unittest.TestCase):
         self.assertEqual(g["verdict"], "narrowing")
         self.assertIn("qa", g["narrowed"])
 
-    def widening(self, change, key=None):
-        g = self.gate(change)
+    def widening(self, change, key=None, base=None):
+        g = self.gate(change, base)
         self.assertEqual(g["verdict"], "widening", g)
         if key:
             self.assertIn(key, g["added"], g["added"])
@@ -1031,7 +1042,8 @@ class Gate(unittest.TestCase):
         self.assertIn(["ingress", "iam", 8085, "ingress"], g["added"]["_system"])
         self.widening(lambda d: d["network"]["unproxied"].__setitem__("MONITOR_DOMAIN", "node"), "_system")
         self.widening(lambda d: d["network"]["clients"]["iam-approvals"]["only_rpc"].append("approve_change"), "_system")
-        self.widening(lambda d: d["network"]["clients"]["notebooks"].__setitem__("read_only", False), "_system")
+        self.widening(lambda d: d["network"]["clients"]["notebooks"].__setitem__("read_only", False), "_system",
+                      base=self.nb())
         self.widening(lambda d: d["service_identities"]["svc_ingest"]["ceiling"]["devices"].append("C"))
 
     def test_sections(self):
@@ -1057,8 +1069,6 @@ class Gate(unittest.TestCase):
                 "selector", {"app": "nomatch"}),
             "network.pods.scheduler.carries.scheduler": lambda d: d["network"]["pods"]["scheduler"].__setitem__(
                 "carries", {}),
-            "network.clients.notebooks.selector.component": lambda d: d["network"]["clients"]["notebooks"][
-                "selector"].pop("component"),
             "network.clients.iam-approvals.only_rpc": lambda d: d["network"]["clients"]["iam-approvals"][
                 "only_rpc"].pop(),
             "service_identities.svc_monitor.mqtt_user": lambda d: d["service_identities"]["svc_monitor"].__setitem__(
@@ -1076,19 +1086,24 @@ class Gate(unittest.TestCase):
             "network.clients.backup.selector.app": lambda d: d["network"]["clients"]["backup"][
                 "selector"].__setitem__("app", "other"),
         }
-        for path, change in cases.items():
+        # the notebooks client's cases from a base that has it (tests/rs2b_fixture.py)
+        nb_cases = {"network.clients.notebooks.selector.component": lambda d: d["network"]["clients"]["notebooks"][
+            "selector"].pop("component")}
+        for path, change, base in ([(p, c, None) for p, c in cases.items()]
+                                   + [(p, c, self.nb()) for p, c in nb_cases.items()]):
             with self.subTest(path):
-                g = self.widening(change, "_sections")
+                g = self.widening(change, "_sections", base=base)
                 self.assertIn(["section", path], g["added"]["_sections"])
                 self.assertIn(f"section {path} changed", explain.gate_message(g))
         # removing a source, a rule, a hop or an unproxied host still only narrows; prose too
         for change in (lambda d: d["network"]["pods"]["iam"]["ingress"][0]["from"].remove("node"),
                        lambda d: d["network"]["pods"]["iam"]["ingress"].pop(1),
                        lambda d: d["network"]["unproxied"].pop("ONBOARD_DOMAIN"),
-                       lambda d: d["network"]["clients"]["notebooks"]["egress"].pop(0),
                        lambda d: d["network"]["pods"]["iam"]["ingress"][0].__setitem__("why", "other words"),
                        lambda d: d["roles"]["qc"].__setitem__("responsibilities", "other words")):
             self.assertEqual(self.gate(change)["verdict"], "narrowing")
+        self.assertEqual(self.gate(lambda d: d["network"]["clients"]["notebooks"]["egress"].pop(0),
+                                   base=self.nb())["verdict"], "narrowing")
 
     def test_every_skeleton_key_is_classified(self):
         # the pin: a key added to defaults.yaml needs a decision in explain.py (REACH_PATHS,
@@ -1880,16 +1895,21 @@ def read(rel):
 WRITERS = ["deploy-infra.sh", "infra/deploy-workbench.sh", "infra/deploy-policy.sh"] + [
     f"apps/{c}/deploy.sh" for c in ("access", "database", "edge-wizard", "frontend", "iam", "monitor",
                                     "mqtt-explorer", "research", "research-export", "scheduler",
-                                    "superset")] + [
+                                    "superset",
+                                    # research sandbox Phase 2b: skips on cli.py pod-zone lake-api
+                                    "lake-api")] + [
     # research sandbox Phase 2a: reads the applied policy (has-zone) under its own init
     "infra/deploy-research-namespace.sh"]
 READERS = ["health-check.sh", "tests/iam-hosts.sh", "tests/iam-schema.sh", "tests/iam-signin.sh",
-           "tests/iam-mqtt.sh", "tests/iam-access.sh"]
+           "tests/iam-mqtt.sh", "tests/iam-access.sh",
+           # research sandbox Phase 2b: the live check of the zone (logs iam-research), and the
+           # workbench's live test, which reads the hub's placement (workbench_namespace)
+           "tests/iam-research.sh", "tests/iam-workbench.sh"]
 # Fixture-only: they compile the factory policy (--defaults / db_apply on medcea-iamtest).
 FIXTURE = ["tests/iam-runner.sh", "tests/iam-db-fixture.sh", "tests/iam-postgrest.sh"]
 # --defaults on the fixture namespace, the read-only init on any other.
 EITHER = ["tests/iam-db.sh"]
-COMPILES = re.compile(r"cli\.py\"? (compile|check|hosts|has-zone)|\$CLI\"? (\"\$\{SRC\[@\]\}\" )?compile|"
+COMPILES = re.compile(r"cli\.py\"? (compile|check|hosts|has-zone|pod-zone|has-client|has-token-client)|\$CLI\"? (\"\$\{SRC\[@\]\}\" )?compile|"
                       r"\bpolicy_(groups|grafana|workbench|workbench_egress|tool)\b [A-Za-z\"$]|^\s*db_apply |"
                       r"\bdb_apply \"")
 
@@ -2091,6 +2111,7 @@ class Wiring(unittest.TestCase):
     # A shell library that compiles, pointed at the repository itself.
     REPO_LIB = re.compile(r'(REPO_ROOT|SCRIPT_DIR)=("?\{(REPO|ROOT)\}|(REPO|ROOT)\b)')
     LIB_COMPILES = re.compile(r'\b(policy_(tool|groups|workbench|workbench_egress|grafana)|workbench_egress_close'
+                              r'|workbench_(placement|namespace)'
                               r'|check_(onboardroles|pgadminroles|iamworkbench|grafanarole))\b')
 
     @staticmethod
@@ -4054,6 +4075,119 @@ class PhaseRS2aBDelta(unittest.TestCase):
                 self.assertEqual(_sql_without_rs2a(self.want[key]), _sql_without_rs2a(self.was[key]))
                 self.assertNotIn("research", "\n".join(_sql_without_rs2a(self.want[key])).replace(
                     "research_workbench", ""))
+
+
+class PhaseRS2bADelta(unittest.TestCase):
+    """Research sandbox Phase 2b, commit A (19 Nov 2026): the zone pods' hop forms ({platform},
+    {node: true}, {internet: true}, network.zones.<z>.internet_except), cli.py pod-zone,
+    has-client and has-token-client, the None-row checker error, I19 active only while the
+    policy's invariants name it, egress-notebooks only while network.clients.notebooks exists,
+    the deploy-workbench deferral and step 9's tenth check (rsnetpol). Code only: every new
+    behaviour keys on YAML commit B adds, so under PRE_RS2B's defaults.yaml (version 7) every
+    artefact and the hosts listing are byte for byte as PRE_RS2B's cli.py compiles them, check
+    says the same, the skeleton gate against PRE_RS2B is equal, and apply_check's targets,
+    full deploys, scoped commands and target owners are the same.
+    Declared differences that are no compiled artefact: compiler_digest moves (code), so
+    ./apps/iam/deploy.sh restarts iam-api after commit A; VERIFY_CHECKS gains rsnetpol."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RS2B, "medcea-prers2b-")
+        cls.ref = ref_tree(PRE_RS2B)   # PRE_RS2B's defaults.yaml, this tree's compiler
+        cls.p = cls.ref[2]
+        cls.want = artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RS2B}: {self.old_cli}")
+
+    def test_policy_file_unchanged(self):
+        with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
+            old_text = f.read()
+        with open(os.path.join(REPO, "apps", "iam", "policy", "defaults.yaml")) as f:
+            self.assertEqual(f.read(), old_text)
+
+    def test_every_artefact_byte_identical(self):
+        self.assertIn("hosts", self.want)
+        self.assertIn("netpol-research", self.want)
+        self.assertIn("egress-notebooks", self.want)
+        for key, want in self.want.items():
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+                self.assertEqual(rc, 0, f"{key} ({PRE_RS2B}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_every_apply_target_byte_identical(self):
+        # apply_check.targets() through both cli.py, the factory file (version 7's skeleton)
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        import apply_check
+        names = [n for n, _ in apply_check.targets(self.p)]
+        self.assertIn("egress-notebooks", names)
+        for name, argv in apply_check.targets(self.p):
+            with self.subTest(name):
+                a = run_cli(["--defaults"] + argv, cli=self.old_cli)
+                b = run_cli(["--defaults"] + argv, cli=self.ref[1])
+                self.assertEqual(a[:2], b[:2], f"{name}: {b[2][-500:]}")
+
+    def test_check_output_identical(self):
+        rc_old, out_old, _ = run_cli(["check"], cli=self.old_cli)
+        rc, out, err = run_cli(["check"], cli=self.ref[1])
+        self.assertEqual((rc, out), (rc_old, out_old), err)
+
+    def test_skeleton_gate_against_pre_rs2b_is_equal(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_RS2B, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_RS2B}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (0, "equal"), err.getvalue())
+        self.assertFalse([t for t in explain.system_reach(self.p) if t[0] == "pod-egress"])
+
+    def test_apply_targets_and_owners_unchanged(self):
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_RS2B}:apps/iam/apply_check.py"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = ("import json, sys, yaml; sys.path.insert(0, sys.argv[1]); import apply_check; "
+                "from compiler import model; "
+                "p = model.Policy(yaml.safe_load(open(sys.argv[2]).read())); "
+                "print(json.dumps({'targets': apply_check.targets(p), 'scoped': apply_check.scoped_commands(), "
+                "'deploys': apply_check.full_deploys(), 'owners': apply_check.target_owners()}))")
+        dy = os.path.join(self.ref[0], "apps", "iam", "policy", "defaults.yaml")
+        runs = []
+        for tree in (self.old, self.ref[0]):
+            if tree == self.ref[0]:
+                shutil.copy(os.path.join(REPO, "apps", "iam", "apply_check.py"),
+                            os.path.join(tree, "apps", "iam", "apply_check.py"))
+            r = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(tree, "apps", "iam"), dy],
+                               capture_output=True, text=True, env=clean_env(), cwd=tree)
+            self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+            runs.append(json.loads(r.stdout))
+        self.assertEqual(runs[0], runs[1])
+        self.assertIn("./infra/deploy-workbench.sh --policy-only", runs[1]["scoped"])
+
+    def test_what_commit_b_switches_on_is_off(self):
+        rc, out, _ = run_cli(["--defaults", "pod-zone", "hub"], cli=self.ref[1])
+        self.assertEqual((rc, out), (1, ""))
+        rc, out, _ = run_cli(["--defaults", "pod-zone", "lake-api"], cli=self.ref[1])
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(run_cli(["--defaults", "has-client", "notebooks"], cli=self.ref[1])[0], 0)
+        self.assertEqual(run_cli(["--defaults", "has-token-client", "workbench-notebook"], cli=self.ref[1])[0], 0)
+        self.assertNotIn("I19", [i["code"] for i in self.p.data["invariants"]])
+        self.assertNotIn("internet_except", self.p.data["network"]["zones"]["research"] or {})
 
 
 if __name__ == "__main__":

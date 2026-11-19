@@ -11,7 +11,16 @@
     without the column, 42703, says to run the database deploy). Tokens are unsigned JWT-shaped strings: the helper reads
     them for display only, config-api verifies them. The DataFrame helpers run when
     pandas is installed (it is in the workbench image), and are skipped otherwise.
-  - the example notebooks: one chart line per sensor; valid nbformat 4, no outputs or execution counts (what
+  - the lake mode (research sandbox Phase 2b, MEDCEA_LAKE set): medcea_data.py against a
+    fake lake-api (PostgREST): mode(), the kept names (sign_in/sign_out a deprecation line,
+    whoami without a role), connect() pinning the newest snapshot once, use_snapshot with
+    expect= refusing another lineage, the lineage recomputed with the database's rule and a
+    snapshot whose lineage does not recompute refused, the measurement window counted back
+    from the snapshot's cut (one warning) or start=/end=, the RPC query strings
+    (percent-encoded, never quoted), the refusals (22023 says its message, unreachable names
+    the lake-api deploy), and with pandas the DataFrames: kept columns plus ingested_at and
+    snapshot_id, oldest first, truncated, provenance in attrs["medcea"].
+  - the example notebooks: md.connect() (both modes), one chart line per sensor; valid nbformat 4, no outputs or execution counts (what
     nbstripout would leave), ConfigMap-safe names, under 200 KiB (kubectl apply copies
     the ConfigMap into an annotation, and an object's annotations hold 256 KiB).
   - the policy: scientists hold R (not X) on measurements; config-api accepts the
@@ -24,6 +33,7 @@
 """
 import base64
 import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -342,6 +352,261 @@ class HelperTest(unittest.TestCase):
             self.assertIsNone(re.search(needle, src), needle)
 
 
+# ------------------------------------------------------------------------------ lake ----
+SNAPS = [
+    {"snapshot_id": 1, "cut_at": "2026-11-18T03:00:00+00:00", "previous_cut_at": None,
+     "created_at": "2026-11-18T03:00:05.12+00:00", "contract_version": 1, "rows": {"measurement": 2},
+     "digests": {"measurement": "a" * 64, "units": "1" * 64, "zones": "2" * 64}},
+    {"snapshot_id": 2, "cut_at": "2026-11-19T03:00:00+00:00", "previous_cut_at": "2026-11-18T03:00:00+00:00",
+     "created_at": "2026-11-19T03:00:04+00:00", "contract_version": 1, "rows": {"measurement": 3},
+     "digests": {"measurement": "b" * 64, "units": "3" * 64, "zones": "4" * 64}},
+]
+
+
+def with_lineage(snaps, tamper=None):
+    """The rows lake_api.snapshots() answers: each with the database's lineage."""
+    out, prev = [], ""
+    for r in snaps:
+        prev = hashlib.sha256((prev + "\n" + r["digests"]["measurement"]).encode()).hexdigest()
+        out.append(dict(r, lineage=prev if r["snapshot_id"] != tamper else "f" * 64))
+    return out
+
+
+LAKE_ROW = {"snapshot_id": 2, "ingested_at": "2026-11-18T10:00:01+00:00", "measured_at": "2026-11-18T10:00:00+00:00",
+            "unit_code": "UNIT01", "zone_code": "ZONE01", "tag": "air_temperature", "sensor": "sht45_1",
+            "value": 21.5, "uom": "C"}
+
+
+class LakeHelperTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = Fake()
+        self.srv = make_server(self.fake)
+        self.base = "http://127.0.0.1:%d/lake" % self.srv.server_address[1]
+        self.fake.queue("/lake/rpc/snapshots", (200, with_lineage(SNAPS)))
+        self.s = md.LakeSession(lake=self.base)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def gets(self, fn):
+        return [c["path"] for c in self.fake.calls if c["path"].split("?")[0] == "/lake/rpc/" + fn]
+
+    def test_mode_follows_the_environment(self):
+        old = os.environ.get("MEDCEA_LAKE")
+        try:
+            os.environ["MEDCEA_LAKE"] = self.base
+            self.assertEqual(md.mode(), "lake")
+            os.environ["MEDCEA_LAKE"] = " "
+            self.assertEqual(md.mode(), "platform")
+            del os.environ["MEDCEA_LAKE"]
+            self.assertEqual(md.mode(), "platform")
+        finally:
+            if old is not None:
+                os.environ["MEDCEA_LAKE"] = old
+
+    def test_module_session_follows_the_mode(self):
+        old_env, old_session = os.environ.get("MEDCEA_LAKE"), md._session
+        try:
+            os.environ["MEDCEA_LAKE"] = self.base
+            md._session = None
+            self.assertIsInstance(md.session(), md.LakeSession)
+            self.assertEqual(md.whoami()["role"], None)
+            os.environ.pop("MEDCEA_LAKE")
+            md._session = None
+            self.assertIsInstance(md.session(), md.Session)
+            with self.assertRaises(md.AccessError):
+                md.snapshots()   # lake-only names refuse on the platform
+            with self.assertRaises(ValueError):
+                md.measurements("U", "Z", start="2026-11-18")
+        finally:
+            md._session = old_session
+            if old_env is not None:
+                os.environ["MEDCEA_LAKE"] = old_env
+
+    def test_kept_names(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertIsNone(self.s.sign_in())
+            self.s.sign_out()
+        self.assertEqual(len(buf.getvalue().strip().splitlines()), 2)
+        self.assertIn("not needed", buf.getvalue())
+        self.assertEqual(self.fake.calls, [])   # no Keycloak, nothing asked
+        who = self.s.whoami()
+        self.assertEqual((who["role"], who["snapshot"]), (None, None))
+        self.assertTrue(issubclass(md.SignInError, Exception))
+
+    def test_connect_pins_the_newest_once(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doc = self.s.connect()
+            self.s.connect()
+        self.assertEqual(doc["snapshot_id"], 2)
+        self.assertTrue(doc["lineage_verified"])
+        self.assertIn("Snapshot 2, cut 2026-11-19T03:00:00+00:00 (contract 1), lineage %s (verified)"
+                      % with_lineage(SNAPS)[1]["lineage"], buf.getvalue())
+        self.assertEqual(len(self.gets("snapshots")), 1)   # resolved once, then kept
+        self.assertEqual(self.s.whoami()["snapshot"], 2)
+        # a newer snapshot later does not move the pin
+        self.fake.set("/lake/rpc/snapshots", (200, with_lineage(SNAPS + [dict(SNAPS[1], snapshot_id=3)])))
+        self.assertEqual(self.s.snapshot()["snapshot_id"], 2)
+
+    def test_use_snapshot_and_expect(self):
+        lin1 = with_lineage(SNAPS)[0]["lineage"]
+        self.assertEqual(self.s.use_snapshot(1, expect=lin1.upper())["snapshot_id"], 1)
+        self.assertEqual(self.s.whoami()["snapshot"], 1)
+        with self.assertRaises(md.AccessError) as cm:
+            self.s.use_snapshot(2, expect=lin1)
+        self.assertIn("not the same data", str(cm.exception))
+        self.assertEqual(self.s.whoami()["snapshot"], 1)   # a refusal keeps the pin
+        with self.assertRaises(md.AccessError) as cm:
+            self.s.use_snapshot(9)
+        self.assertIn("no snapshot 9", str(cm.exception))
+
+    def test_a_lineage_that_does_not_recompute_is_refused(self):
+        self.fake.set("/lake/rpc/snapshots", (200, with_lineage(SNAPS, tamper=2)))
+        with self.assertRaises(md.AccessError) as cm:
+            self.s.connect()
+        self.assertIn("lineage does not recompute", str(cm.exception))
+        with self.assertRaises(md.AccessError):
+            self.s.use_snapshot(2)
+        self.assertEqual(self.s.use_snapshot(1)["snapshot_id"], 1)
+
+    def test_lineage_rule(self):
+        chain = md.lineage_chain(list(reversed(SNAPS)))
+        prev = ""
+        for r in SNAPS:
+            prev = hashlib.sha256((prev + "\n" + r["digests"]["measurement"]).encode()).hexdigest()
+            self.assertEqual(chain[r["snapshot_id"]], prev)
+
+    def test_no_snapshot_yet(self):
+        self.fake.set("/lake/rpc/snapshots", (200, []))
+        with self.assertRaises(md.AccessError) as cm:
+            self.s.connect()
+        self.assertIn("no snapshot yet", str(cm.exception))
+
+    def test_window_counts_back_from_the_cut(self):
+        with self.assertWarnsRegex(UserWarning, "count back from the snapshot's cut"):
+            doc, params = self.s.measurement_params("UNIT 01", "Z\"1", minutes=90)
+        q = dict(params)
+        self.assertEqual(q["p_snapshot"], 2)
+        self.assertEqual(q["p_to"], "2026-11-19T03:00:00+00:00")
+        self.assertEqual(q["p_from"], "2026-11-19T01:30:00+00:00")
+        qs = md.query_string([(k, v) for k, v in params if v is not None])
+        self.assertIn("p_unit=UNIT%2001", qs)
+        self.assertIn("p_zone=Z%221", qs)                 # a quote is a value, never PostgREST quoting
+        self.assertIn("p_to=2026-11-19T03%3A00%3A00%2B00%3A00", qs)   # '+' never a space
+        self.assertIn("p_tag=air_temperature", qs)
+        self.assertIn("p_limit=50000", qs)
+        self.assertNotIn("p_sensor", qs)
+        import warnings as w
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            self.s.measurement_params("U", "Z", minutes=5)
+        self.assertEqual([c for c in caught if "cut" in str(c.message)], [])   # once per kernel
+        # start/end instead: start exclusive, end inclusive, either may be left out
+        _, params = self.s.measurement_params("U", "Z", start="2026-11-01", end="2026-11-02T12:00Z", sensor="s1")
+        q = dict(params)
+        self.assertEqual((q["p_from"], q["p_to"], q["p_sensor"]),
+                         ("2026-11-01T00:00:00+00:00", "2026-11-02T12:00:00+00:00", "s1"))
+        _, params = self.s.measurement_params("U", "Z", start="2026-11-01T00:00:00+02:00")
+        self.assertEqual((dict(params)["p_from"], dict(params)["p_to"]), ("2026-11-01T00:00:00+02:00", None))
+        _, params = self.s.measurement_params("U", "Z", snapshot=1, minutes=60)
+        self.assertEqual(dict(params)["p_snapshot"], 1)
+        self.assertEqual(dict(params)["p_to"], "2026-11-18T03:00:00+00:00")
+        for bad in ({"unit": ""}, {"minutes": 0}, {"limit": 0}, {"limit": 50001}):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                self.s.measurement_params(**dict({"unit": "U", "zone": "Z"}, **bad))
+
+    def test_rpc_and_refusals(self):
+        self.fake.queue("/lake/rpc/holds", (200, [{"unit_code": "UNIT01", "zone_code": None,
+                                                   "from_at": "2026-12-01T10:00:00+00:00",
+                                                   "to_at": "2026-12-01T11:00:00+00:00"}]))
+        rows, raw = self.s.rpc("holds")
+        self.assertEqual(rows[0]["unit_code"], "UNIT01")
+        self.assertEqual(json.loads(raw), rows)
+        call = [c for c in self.fake.calls if c["path"] == "/lake/rpc/holds"][0]
+        self.assertIsNone(call["auth"])   # no identity, no token
+        self.assertEqual(call["method"], "GET")
+        self.fake.queue("/lake/rpc/units", (200, []))
+        self.s.rpc("units", [("p_snapshot", 2), ("p_x", None)])
+        self.assertEqual(self.gets("units")[-1], "/lake/rpc/units?p_snapshot=2")   # None never sent
+        for answer, words in (((400, {"code": "22023", "message": "no snapshot 9"}), "no snapshot 9"),
+                              ((500, {"code": "57014", "message": "canceling statement due to statement timeout"}),
+                               "after 30 s"),
+                              ((404, {"code": "PGRST202", "message": "Could not find the function"}),
+                               "answered 404")):
+            with self.subTest(answer):
+                self.fake.set("/lake/rpc/measurements", answer)
+                with self.assertRaises(md.AccessError) as cm:
+                    self.s.rpc("measurements", [("p_snapshot", 9)])
+                self.assertIn(words, str(cm.exception))
+                self.assertEqual(cm.exception.status, answer[0])
+
+    def test_unreachable_and_not_configured(self):
+        s = md.LakeSession(lake="http://127.0.0.1:9")
+        with self.assertRaises(md.AccessError) as cm:
+            s.connect()
+        self.assertEqual(str(cm.exception), "the lake reader is not reachable (./apps/lake-api/deploy.sh)")
+        s = md.LakeSession(lake="")
+        s.lake = ""
+        with self.assertRaises(md.AccessError) as cm:
+            s.rpc("holds")
+        self.assertIn("MEDCEA_LAKE", str(cm.exception))
+
+    @unittest.skipUnless(HAVE_PANDAS, "pandas is not installed here (it is in the workbench image)")
+    def test_measurements_dataframe(self):
+        older = dict(LAKE_ROW, snapshot_id=1, measured_at="2026-11-18T09:00:00+00:00",
+                     ingested_at="2026-11-18T09:00:01+00:00", value=20.0)
+        self.fake.queue("/lake/rpc/measurements", (200, [LAKE_ROW, older]))
+        with warnings_ok():
+            df = self.s.measurements("UNIT01", "ZONE01", minutes=60 * 24, limit=2)
+        self.assertEqual(list(df.columns), list(md.MEASUREMENT_COLUMNS) + ["ingested_at", "snapshot_id"])
+        self.assertEqual(df["value"].tolist(), [20.0, 21.5])   # oldest first
+        self.assertEqual(df["unit_of_measurement"].tolist(), ["C", "C"])
+        self.assertTrue(df.attrs["truncated"])
+        p = md.provenance(df)
+        self.assertEqual((p["snapshot_id"], p["contract_version"], p["set"], p["set_digest"]),
+                         (2, 1, "measurement", "b" * 64))
+        self.assertEqual(p["lineage"], with_lineage(SNAPS)[1]["lineage"])
+        self.assertTrue(p["lineage_verified"])
+        self.assertEqual(p["query"]["function"], "measurements")
+        self.assertEqual(p["query"]["params"]["p_unit"], "UNIT01")
+        raw = json.dumps([LAKE_ROW, older]).encode()   # what the fake sent, byte for byte
+        self.assertEqual(p["response_sha256"], hashlib.sha256(raw).hexdigest())
+
+    @unittest.skipUnless(HAVE_PANDAS, "pandas is not installed here (it is in the workbench image)")
+    def test_units_and_zones_lose_their_ids(self):
+        self.fake.queue("/lake/rpc/units", (200, [{"snapshot_id": 2, "unit_code": "UNIT01", "recipe_type": "FUNGI",
+                                                   "area": 1.5, "height": 2, "is_active": "Y"}]))
+        self.fake.queue("/lake/rpc/zones", (200, [{"snapshot_id": 2, "unit_code": "UNIT01", "zone_code": "ZONE01",
+                                                   "is_active": "Y"}]))
+        with self.assertWarnsRegex(UserWarning, "not the platform's ids"):
+            u = self.s.units()
+        self.assertNotIn("unit_id", u.columns)
+        self.assertEqual(u["recipe_type"].tolist(), ["FUNGI"])
+        z = self.s.zones()
+        self.assertEqual(list(z.columns), ["unit_code", "zone_code", "is_active", "snapshot_id"])
+        self.assertEqual(md.provenance(z)["set_digest"], "4" * 64)
+        self.assertEqual(self.gets("zones")[-1], "/lake/rpc/zones?p_snapshot=2")
+
+
+def warnings_ok():
+    """Warnings off for one block (a capped window warns)."""
+    import contextlib
+    import warnings as w
+
+    @contextlib.contextmanager
+    def ctx():
+        with w.catch_warnings():
+            w.simplefilter("ignore")
+            yield
+    return ctx()
+
 class ExamplesTest(unittest.TestCase):
     def test_notebooks_are_stripped(self):
         names = sorted(os.listdir(EXAMPLES))
@@ -366,6 +631,24 @@ class ExamplesTest(unittest.TestCase):
         # deploy-workbench applies the ConfigMap client-side, which copies it into the
         # last-applied annotation: all annotations together may hold 256 KiB
         self.assertLess(total, 200 * 1024)
+
+    def test_notebooks_connect_in_both_modes(self):
+        for n in ("01-connect.ipynb", "02-air-temperature.ipynb"):
+            with open(os.path.join(EXAMPLES, n)) as f:
+                code = "\n".join("".join(c["source"]) for c in json.load(f)["cells"] if c["cell_type"] == "code")
+            self.assertIn("md.connect()", code, n)
+            self.assertNotIn("md.sign_in()", code, n)   # connect() signs in on the platform
+        with open(os.path.join(EXAMPLES, "01-connect.ipynb")) as f:
+            code = "\n".join("".join(c["source"]) for c in json.load(f)["cells"] if c["cell_type"] == "code")
+        self.assertIn("md.units()", code)
+        with open(os.path.join(EXAMPLES, "02-air-temperature.ipynb")) as f:
+            code = "\n".join("".join(c["source"]) for c in json.load(f)["cells"] if c["cell_type"] == "code")
+        self.assertIn("prov = md.provenance(df)", code)   # the title names the snapshot in the lake
+        self.assertIn("snapshot {prov['snapshot_id']}", code)
+        with open(os.path.join(EXAMPLES, "SAVE_TO_GIT.md")) as f:
+            text = f.read()
+        self.assertIn("person-free snapshots", text)
+        self.assertIn("you hold read access, not export", text)
 
     def test_chart_settings_on_top(self):
         with open(os.path.join(EXAMPLES, "02-air-temperature.ipynb")) as f:

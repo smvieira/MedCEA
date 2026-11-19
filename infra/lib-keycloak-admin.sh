@@ -13,6 +13,9 @@
 #   kc_claim_emails REALM CLAIMS FALLBACK
 #                         the e-mails of the enabled accounts a tool's claims admit
 #                         (FALLBACK and exit 1 when Keycloak cannot be read)
+#   kc_client_disable REALM CLIENT_ID
+#                         read-modify-write enabled:false on a client; prints absent,
+#                         disabled or already-disabled; never creates or deletes one
 #
 # Three master-realm identities, tried in this order:
 #   1. client medcea-deployer (client credentials, KC_DEPLOYER_SECRET) — what the
@@ -351,4 +354,58 @@ print(",".join(sorted(mails)))' "$tmp")"; then
     echo "  WARNING: cannot read the role holders in realm '$realm'." >&2
     printf '%s\n' "$fallback"
     return 1
+}
+
+# kc_client_disable REALM CLIENT_ID — turn a client off without removing it (research
+# Phase 2b, D2: workbench-notebook once the applied access policy no longer names it as a
+# token client). Read-modify-write: the full representation is read and PUT back with only
+# `enabled` changed, so serviceAccountsEnabled and every other field stay as read (a PUT
+# without serviceAccountsEnabled would recreate the service account). Prints one word:
+# absent (no such client: nothing created), disabled (it was enabled), already-disabled.
+# Returns 1, with a message on stderr, when Keycloak cannot be read or refuses the PUT.
+# Never creates and never deletes a client: its past events keep resolving. The body goes
+# on stdin and the token as a header from a pipe (_kc_get/_kc_send). Needs kc_admin_select
+# (or a caller's kc_admin_token) and KC_URL.
+kc_client_disable() {
+    local realm="$1" cid="$2" list uuid body code
+    [[ "$realm" =~ ^[A-Za-z0-9_-]+$ && "$cid" =~ ^[A-Za-z0-9_.-]+$ ]] \
+        || { echo "  ERROR: kc_client_disable: bad realm or client id" >&2; return 1; }
+    list="$(_kc_get "realms/$realm/clients?clientId=$cid")" \
+        || { echo "  ERROR: cannot read client '$cid' in realm '$realm'." >&2; return 1; }
+    uuid="$(python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+print(next((c["id"] for c in d if isinstance(c, dict) and c.get("clientId") == sys.argv[1]), ""))' "$cid" <<<"$list")" \
+        || { echo "  ERROR: cannot read client '$cid' in realm '$realm'." >&2; return 1; }
+    if [[ -z "$uuid" ]]; then
+        echo absent
+        return 0
+    fi
+    body="$(_kc_get "realms/$realm/clients/$uuid" | python3 -c '
+import json, sys
+try:
+    c = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(c, dict) or c.get("clientId") != sys.argv[1]:
+    sys.exit(1)
+if c.get("enabled") is False:
+    print("already-disabled")
+    sys.exit(0)
+c["enabled"] = False
+print(json.dumps(c))' "$cid")" \
+        || { echo "  ERROR: cannot read client '$cid' in realm '$realm'." >&2; return 1; }
+    if [[ "$body" == already-disabled ]]; then
+        echo already-disabled
+        return 0
+    fi
+    code="$(_kc_send PUT "realms/$realm/clients/$uuid" "$body")"
+    if [[ "$code" != 204 ]]; then
+        echo "  ERROR: could not disable client '$cid' in realm '$realm' (HTTP $code)." >&2
+        return 1
+    fi
+    echo disabled
 }

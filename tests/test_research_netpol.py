@@ -22,6 +22,12 @@ factory policy with every zone key, zone pod and zone-bound client taken out.
   Cli         has-zone's exit codes and compile netpol --zone in a scratch copy
   ApplyCheck  the netpol-research target, its digest and owner only while the zone exists
   I18         the invariant on a group marked zone: research
+  HopForms    Phase 2b: a zone pod's {platform}, {node: true} and {internet: true} hops (exact
+              JSON, list order, every checker error, internet_except, _needs_node, ingress and
+              node sources on a zone pod), and a zone without them compiled as 5504958 did
+  SystemReach explain.system_reach's pod-egress tuples (none under v7)
+  Questions   cli.py pod-zone, has-client, has-token-client (exit 0/1/2) on v7, commit B's
+              shapes (tests/rs2b_fixture.py b_policy) and a broken policy
 """
 import copy
 import json
@@ -564,3 +570,303 @@ class I18(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── research sandbox Phase 2b, commit A: the zone pods' hop forms and the three questions ──
+sys.path.insert(0, os.path.join(REPO, "tests"))
+import rs2b_fixture  # noqa: E402
+
+from compiler import explain  # noqa: E402
+
+KC = {"app": "keycloak"}
+EXCEPT = list(rs2b_fixture.INTERNET_EXCEPT)
+
+
+def hops(*h, except_=True):
+    """research() with research-postgresql's egress = h (and the zone's internet_except)."""
+    d = research()
+    if except_:
+        d["network"]["zones"]["research"] = {"internet_except": list(EXCEPT)}
+    d["network"]["pods"]["research-postgresql"]["egress"] = list(h)
+    return d
+
+
+def pg_egress(d, ips=("192.0.2.2", "192.0.2.1", "192.0.2.1")):
+    return by_name(zone_list(d, ips))["rs-research-postgresql"]["spec"].get("egress")
+
+
+def old_netpol():
+    """netpol.py of PRE_RS2B (5504958) as a module of its own (it imports only re)."""
+    import importlib.util
+    text = subprocess.run(["git", "-C", REPO, "show", "5504958:apps/iam/compiler/netpol.py"],
+                          capture_output=True, text=True, check=True).stdout
+    spec = importlib.util.spec_from_loader("netpol_pre_rs2b", loader=None)
+    mod = importlib.util.module_from_spec(spec)
+    exec(compile(text, "netpol_pre_rs2b.py", "exec"), mod.__dict__)
+    return mod
+
+
+class HopForms(unittest.TestCase):
+    """netpol's zone-pod hop forms {pod}, {platform}, {node: true} and {internet: true}."""
+
+    def assertCaught(self, d, fragment):
+        errs = errors_of(d)
+        self.assertTrue(any(fragment in e for e in errs), f"not caught by {fragment!r}: {errs[:4]}")
+
+    def test_each_form_passes_the_checker(self):
+        d = hops({"platform": dict(KC), "port": 8080, "why": "x"}, {"node": True, "port": 16443},
+                 {"internet": True, "ports": [443, 80], "why": "y"})
+        self.assertEqual(errors_of(d), [])
+        self.assertEqual(errors_of(rs2b_fixture.b_policy()), [])
+        self.assertEqual(errors_of(rs2b_fixture.with_notebooks_client(rs2b_fixture.b_policy())), [])
+
+    def test_platform_hop_compiles(self):
+        self.assertEqual(pg_egress(hops({"platform": dict(KC), "port": 8080})), [
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": NS}},
+                     "podSelector": {"matchLabels": KC}}],
+             "ports": [{"protocol": "TCP", "port": 8080}]}])
+
+    def test_node_hop_compiles(self):
+        self.assertEqual(pg_egress(hops({"node": True, "port": 16443})), [
+            {"to": [{"ipBlock": {"cidr": "192.0.2.1/32"}}, {"ipBlock": {"cidr": "192.0.2.2/32"}}],
+             "ports": [{"protocol": "TCP", "port": 16443}]}])
+
+    def test_internet_hop_compiles(self):
+        self.assertEqual(pg_egress(hops({"internet": True, "ports": [443, 80]})), [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": EXCEPT}}],
+             "ports": [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 80}]}])
+
+    def test_internet_except_keeps_yaml_order(self):
+        d = hops({"internet": True, "ports": [443]})
+        d["network"]["zones"]["research"]["internet_except"] = ["192.168.0.0/16", "10.0.0.0/8"]
+        self.assertEqual(pg_egress(d)[0]["to"][0]["ipBlock"]["except"], ["192.168.0.0/16", "10.0.0.0/8"])
+
+    def test_hops_in_list_order(self):
+        d = rs2b_fixture.b_policy()
+        hub = by_name(zone_list(d))["rs-hub"]["spec"]["egress"]
+        self.assertEqual([list(r["to"][0])[0] for r in hub], ["podSelector", "podSelector", "namespaceSelector", "ipBlock"])
+        self.assertEqual([r["ports"][0]["port"] for r in hub], [8001, 8888, 8080, 16443])
+        self.assertEqual(by_name(zone_list(d))["rs-lake-api"]["spec"]["egress"], [
+            {"to": [{"podSelector": {"matchLabels": PG_SEL}}], "ports": [{"protocol": "TCP", "port": 5432}]}])
+
+    def test_b_policy_names(self):
+        self.assertEqual(sorted(by_name(zone_list(rs2b_fixture.b_policy()))),
+                         ["rs-default-deny", "rs-dns", "rs-hub", "rs-lake-api", "rs-notebooks",
+                          "rs-research-postgresql", "rs-workbench-proxy"])
+
+    def test_no_new_form_is_byte_identical(self):
+        # a zone whose pods use only {pod, port} hops compiles as 5504958 compiled it
+        old = old_netpol()
+        b = rs2b_fixture.b_policy()
+        for pd in b["network"]["pods"].values():
+            if pd.get("egress"):
+                pd["egress"] = [h for h in pd["egress"] if "pod" in h]
+        del b["network"]["zones"]["research"]["internet_except"]
+        for d in (research(), b, defaults()):
+            p = model.Policy(d)
+            for args in (("research", RNS, NS, ["192.0.2.1"]),):
+                self.assertEqual(json.dumps(netpol.compile_zone(p, *args), sort_keys=False),
+                                 json.dumps(old.compile_zone(p, *args), sort_keys=False))
+            self.assertEqual(json.dumps(netpol.compile(p, NS, ["192.0.2.1"])),
+                             json.dumps(old.compile(p, NS, ["192.0.2.1"])))
+            self.assertEqual(old.check(p), netpol.check(p))
+
+    def test_needs_node_counts_node_hops(self):
+        d = hops({"node": True, "port": 16443})
+        d["network"]["pods"]["research-postgresql"]["ingress"][0]["from"].remove("node")
+        self.assertEqual(errors_of(d), [])
+        self.assertTrue(netpol._needs_node(d["network"], "research"))
+        with self.assertRaisesRegex(ValueError, "no node address"):
+            zone_list(d, ())
+        d2 = copy.deepcopy(d)
+        d2["network"]["pods"]["research-postgresql"]["egress"] = [{"internet": True, "ports": [443]}]
+        self.assertFalse(netpol._needs_node(d2["network"], "research"))
+        self.assertEqual(len(zone_list(d2, ())["items"]), 3)
+
+    def test_ingress_and_node_sources_on_a_zone_pod(self):
+        d = research()
+        d["network"]["pods"]["research-postgresql"]["ingress"].append({"port": 8000, "from": ["ingress", "node"]})
+        self.assertEqual(errors_of(d), [])
+        rules = by_name(zone_list(d))["rs-research-postgresql"]["spec"]["ingress"]
+        self.assertEqual(rules[-1]["from"], [
+            {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name":
+                                                   d["network"]["ingress_namespace"]}}},
+            {"ipBlock": {"cidr": "192.0.2.1/32"}}])
+
+    # each checker error, one distinct message
+    SHAPE = "a zone pod's hop is {pod, port}, {platform, port}, {node: true, port} or {internet: true, ports}"
+
+    def test_shape(self):
+        for h in ("x", {"port": 1}, {"pod": "research-postgresql", "node": True, "port": 1},
+                  {"platform": dict(KC), "port": 1, "pods": 1}, {"node": True, "port": 1, "ports": [1]},
+                  {"internet": True, "ports": [443], "selector": {}}):
+            with self.subTest(h=h):
+                self.assertCaught(hops(h), self.SHAPE)
+                self.assertCaught(hops(h), "a zone pod's hop is {pod, port}")
+
+    def test_port_not_an_integer(self):
+        for h in ({"platform": dict(KC), "port": "8080"}, {"node": True}, {"node": True, "port": True},
+                  {"platform": dict(KC), "port": 0}, {"node": True, "port": 65536}):
+            with self.subTest(h=h):
+                self.assertCaught(hops(h), "is not an integer")
+
+    def test_platform_selector(self):
+        for sel in ({}, None, "keycloak", {"app": 1}, [["app", "keycloak"]]):
+            with self.subTest(sel=sel):
+                self.assertCaught(hops({"platform": sel, "port": 8080}),
+                                  "a platform hop names a non-empty selector")
+
+    def test_platform_hop_selecting_a_network_pod(self):
+        d = hops({"platform": {"app": "config-api"}, "port": 3000})
+        self.assertCaught(d, "platform hop {'app': 'config-api'} selects network pod config-api; "
+                             "a network pod admits only sources of its own zone")
+        self.assertCaught(hops({"platform": dict(PG_SEL), "port": 5432}), "selects network pod research-postgresql")
+
+    def test_node_value(self):
+        for v in (False, "true", 1, {}):
+            with self.subTest(v=v):
+                self.assertCaught(hops({"node": v, "port": 1}), "a node hop is {node: true, port}")
+
+    def test_internet_shape(self):
+        msg = "an internet hop is {internet: true, ports: [..]} (TCP ports, no port key)"
+        for h in ({"internet": 1, "ports": [443]}, {"internet": True, "ports": [443], "port": 443},
+                  {"internet": True}, {"internet": True, "ports": []}, {"internet": True, "ports": 443},
+                  {"internet": True, "ports": [0]}, {"internet": True, "ports": [65536]},
+                  {"internet": True, "ports": ["443"]}, {"internet": True, "ports": [True]}):
+            with self.subTest(h=h):
+                self.assertCaught(hops(h), msg)
+
+    def test_internet_needs_except(self):
+        self.assertCaught(hops({"internet": True, "ports": [443]}, except_=False),
+                          "an internet hop needs network.zones.research.internet_except "
+                          "(the private ranges it must not reach)")
+
+    def test_internet_except_validated(self):
+        msg = "network: zone research: internet_except must be a non-empty list of IPv4 networks"
+        for ex in ([], "10.0.0.0/8", ["10.0.0.1/8"], ["::/0"], [10], ["10.0.0.0/8", "nope"], None):
+            with self.subTest(ex=ex):
+                d = research()
+                d["network"]["zones"]["research"] = {"internet_except": ex}
+                self.assertCaught(d, msg)
+        d = research()
+        d["network"]["zones"]["research"] = {"internet_except": list(EXCEPT)}
+        self.assertEqual(errors_of(d), [])   # without any internet hop, a valid list alone is fine
+
+    def test_internet_except_must_cover_the_private_ranges(self):
+        """Review of commit A: a syntactically valid list that leaves a private range reachable
+        (an internet hop on 5432 would reach rdbms and the LAN) is refused, not only reviewed."""
+        for ex, missing in ((["192.0.2.0/32"], "10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16"),
+                            ([x for x in EXCEPT if x != "100.64.0.0/10"], "100.64.0.0/10"),
+                            (["10.0.0.0/9", "10.128.0.0/9", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12"],
+                             "10.0.0.0/8, 192.168.0.0/16")):
+            with self.subTest(ex=ex):
+                d = research()
+                d["network"]["zones"]["research"] = {"internet_except": ex}
+                self.assertCaught(d, "internet_except must cover 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, "
+                                     "172.16.0.0/12, 192.168.0.0/16 (the cluster's and the LAN's private ranges, "
+                                     "CGNAT and link-local); missing: " + missing)
+        for ex in (["0.0.0.0/0"], ["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12",
+                                   "192.168.0.0/16", "203.0.113.7/32"]):
+            d = research()
+            d["network"]["zones"]["research"] = {"internet_except": ex}
+            self.assertEqual(errors_of(d), [], ex)   # wider, or more, is fine
+
+    def test_pod_rules_only_for_the_pod_form(self):
+        # a platform/node/internet hop is never read as "a hop to a pod that does not admit it"
+        errs = errors_of(hops({"platform": dict(KC), "port": 8080}, {"node": True, "port": 16443},
+                              {"internet": True, "ports": [443]}))
+        self.assertFalse([e for e in errs if "does not admit" in e or "unknown pod" in e], errs)
+
+    def test_compile_refuses_an_internet_hop_without_except(self):
+        with self.assertRaisesRegex(ValueError, "internet_except"):
+            zone_list(hops({"internet": True, "ports": [443]}, except_=False))
+
+
+class SystemReach(unittest.TestCase):
+    """explain.system_reach's pod-egress tuples (no path registration in commit A)."""
+
+    def tuples(self, d):
+        return sorted(t for t in explain.system_reach(model.Policy(d)) if t[0] == "pod-egress")
+
+    def test_none_under_v7(self):
+        self.assertEqual(self.tuples(defaults()), [])
+        self.assertEqual(self.tuples(research()), [])
+
+    def test_each_form(self):
+        d = hops({"pod": "config-api", "port": 3000}, {"platform": dict(KC), "port": 8080},
+                 {"node": True, "port": 16443}, {"internet": True, "ports": [443, 80]})
+        self.assertEqual(self.tuples(d), sorted([
+            ("pod-egress", "research-postgresql", "pod", "config-api", 3000),
+            ("pod-egress", "research-postgresql", "platform", '{"app":"keycloak"}', 8080),
+            ("pod-egress", "research-postgresql", "node", "", 16443),
+            ("pod-egress", "research-postgresql", "internet", "", 443),
+            ("pod-egress", "research-postgresql", "internet", "", 80)]))
+
+    def test_b_policy(self):
+        t = self.tuples(rs2b_fixture.b_policy())
+        self.assertIn(("pod-egress", "hub", "platform", '{"app":"keycloak"}', 8080), t)
+        self.assertIn(("pod-egress", "hub", "node", "", 16443), t)
+        self.assertIn(("pod-egress", "notebooks", "internet", "", 443), t)
+        self.assertIn(("pod-egress", "lake-api", "pod", "research-postgresql", 5432), t)
+        self.assertEqual(len(t), 10)
+
+    def test_a_new_hop_widens(self):
+        a = rs2b_fixture.b_policy()
+        b = copy.deepcopy(a)
+        b["network"]["pods"]["notebooks"]["egress"][-1]["ports"] = [443, 22]
+        self.assertEqual(explain.system_reach(model.Policy(b)) - explain.system_reach(model.Policy(a)),
+                         {("pod-egress", "notebooks", "internet", "", 22)})
+
+
+class Questions(unittest.TestCase):
+    """cli.py pod-zone / has-client / has-token-client: exit 0, 1, 2; stdout only pod-zone's word."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = scratch_repo()
+        cls.cli = os.path.join(cls.root, "apps", "iam", "compiler", "cli.py")
+        cls.files = {}
+        broken = research()
+        broken["network"]["zones"]["lab"] = {}
+        for name, d in (("v7", defaults()), ("b", rs2b_fixture.b_policy()), ("broken", broken)):
+            cls.files[name] = os.path.join(cls.root, f"{name}.yaml")
+            with open(cls.files[name], "w", encoding="utf-8") as f:
+                yaml.safe_dump(d, f, sort_keys=False, allow_unicode=True, width=1000)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def ask(self, which, *argv):
+        r = subprocess.run([sys.executable, self.cli, "--file", self.files[which], *argv], capture_output=True,
+                           text=True, env=clean_env(), cwd=self.root)
+        return r.returncode, r.stdout
+
+    def test_pod_zone(self):
+        self.assertEqual(self.ask("v7", "pod-zone", "research-postgresql"), (0, "research\n"))
+        self.assertEqual(self.ask("v7", "pod-zone", "config-api"), (0, "platform\n"))
+        self.assertEqual(self.ask("v7", "pod-zone", "hub"), (1, ""))
+        self.assertEqual(self.ask("v7", "pod-zone", "lake-api"), (1, ""))
+        self.assertEqual(self.ask("b", "pod-zone", "hub"), (0, "research\n"))
+        self.assertEqual(self.ask("b", "pod-zone", "lake-api"), (0, "research\n"))
+        self.assertEqual(self.ask("broken", "pod-zone", "config-api"), (2, ""))
+
+    def test_has_client(self):
+        self.assertEqual(self.ask("v7", "has-client", "notebooks"), (0, ""))
+        self.assertEqual(self.ask("v7", "has-client", "backup"), (0, ""))
+        self.assertEqual(self.ask("b", "has-client", "notebooks"), (1, ""))
+        self.assertEqual(self.ask("v7", "has-client", "nobody"), (1, ""))
+        self.assertEqual(self.ask("broken", "has-client", "notebooks"), (2, ""))
+
+    def test_has_token_client(self):
+        self.assertEqual(self.ask("v7", "has-token-client", "workbench-notebook"), (0, ""))
+        self.assertEqual(self.ask("v7", "has-token-client", "notebooks"), (1, ""))   # the client's name is no azp
+        self.assertEqual(self.ask("b", "has-token-client", "workbench-notebook"), (1, ""))
+        self.assertEqual(self.ask("broken", "has-token-client", "workbench-notebook"), (2, ""))
+
+    def test_documented(self):
+        from compiler import cli
+        for c in ("pod-zone NAME", "has-client NAME", "has-token-client NAME"):
+            self.assertIn(f"cli.py {c}", cli.__doc__)
+        self.assertFalse({"pod-zone", "has-client", "has-token-client"} & set(cli.OWN_SOURCE + cli.SKELETON_ONLY))

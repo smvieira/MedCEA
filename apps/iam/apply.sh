@@ -26,7 +26,7 @@
 # §14.8.4.1). A step-9 check FAILing before the apply refuses it (exit 2: fix it first).
 # Then one transaction commits the version with its grants and functions compiled from it;
 # after the COMMIT the host file is rewritten, every scoped mode re-renders what drifted
-# (IAM 4.2b) and step 9's nine checks run against that baseline, up to 3 attempts 20 s
+# (IAM 4.2b) and step 9's ten checks run against that baseline, up to 3 attempts 20 s
 # apart. A change or rollback version whose rollout still fails is reverted (a second
 # bundle puts the previous version back, files partial_apply {reverting} under it, re-renders
 # it, then partial_apply {reverted} under N and applied {reverted_from} under the previous:
@@ -543,7 +543,7 @@ host_file_first() {   # §14.8.4 step 2.3: the host file is the applied version'
         || die 1 "cannot write state/policy-applied.yaml (above): nothing was changed"
     [[ -z "$out" || "$out" == *unchanged ]] || log "$out"
 }
-verify_run() {   # OUT [--drop=T]... — step 9's conf (nine checks) through health-check.sh; the results into OUT
+verify_run() {   # OUT [--drop=T]... — step 9's conf (ten checks) through health-check.sh; the results into OUT
     local out="$1"
     shift
     py "$CHECK" verify-conf --out "$STAGE/verify9.conf" "$@" || return 1
@@ -689,7 +689,7 @@ json.dump({"version": v, "kind": kind, "outcome": outcome, "attempts": int(sys.a
           open(sys.argv[7], "w"))' "$VERSION" "$KIND_B" "$1" "${2:-$ATTEMPTS}" "$A" "$STAGE/failed.txt" "$STAGE/pa.json"
 }
 defer_records() {   # each deferral after the applied record (open until the next applied record)
-    local cmd id why=()
+    local cmd id target why=()
     for cmd in "${DEFERRED[@]}"; do
         # the reason, then when --resume closes it; read in full first, so a broken
         # deferred-reason never records an apply_deferred without a reason
@@ -697,7 +697,12 @@ defer_records() {   # each deferral after the applied record (open until the nex
         mapfile -t why <<<"$why"
         [[ ${#why[@]} -eq 2 && -n "${why[0]}" && -n "${why[1]}" ]] \
             || fail3 "cannot tell why $cmd deferred (apply_check.py deferred-reason, above)"
-        py "$CHECK" deferred-record --state "$STATE" --target "$(basename "$(dirname "${cmd%% *}")")" \
+        # the target it names (research sandbox Phase 2b: ./infra/deploy-workbench.sh is
+        # `workbench`, not its folder's name)
+        target="$(py "$CHECK" deferred-target --command "$cmd")" || target=""
+        [[ "$target" =~ ^[a-z][a-z0-9-]*$ ]] \
+            || fail3 "cannot tell which target $cmd deferred (apply_check.py deferred-target, above)"
+        py "$CHECK" deferred-record --state "$STATE" --target "$target" \
             --reason "${why[0]}" --command "$cmd" --out "$STAGE/deferred.sql" \
             || fail3 "cannot build the apply_deferred record (above)"
         id="$(q -1 < "$STAGE/deferred.sql" | tr -d '[:space:]')" || id=""

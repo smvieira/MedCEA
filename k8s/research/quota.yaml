@@ -2,20 +2,26 @@
 # Applied by infra/deploy-research-namespace.sh. Render list: RESEARCH_NAMESPACE
 #
 # Sizing (requests / memory limit; no CPU limit anywhere: on one PC a CPU limit only
-# throttles, the request guarantees the share, as for the platform's PostgreSQL):
+# throttles, the request guarantees the share, as for the platform's PostgreSQL). Phase 2b
+# (the AI workbench in the zone): no user-scheduler and no placeholders (one PC, O14); each
+# notebook requests 100m and 512M and may use 4G (k8s/workbench/values.yaml); the hub and the
+# proxy state theirs (k8s/workbench/values-research.yaml); homes are kept, so the claims and
+# the storage are sized for about 20 of them, not for the servers running.
 #
 #   what                               cpu req   mem req   mem limit   PVCs  storage
 #   research-postgresql (2a)           250m      512Mi     2Gi         1     10Gi (RESEARCH_DB_STORAGE)
-#   JupyterHub hub + proxy (2b)        300m      768Mi     2Gi         1     1Gi  (hub-db-dir)
-#   user-scheduler, 2 replicas (2b)    100m      256Mi     512Mi       -     -
-#   notebooks, 4 at a time (2b)        4 x 500m  4 x 1Gi   4 x 4Gi     8     8 x 10Gi (homes, kept)
+#   JupyterHub hub + proxy (2b)        250m      640Mi     1.25Gi      1     1Gi  (hub-db-dir)
+#   lake-api (2b)                      100m      64Mi      128Mi       -     -
+#   notebooks, 4 at a time (2b)        4 x 100m  4 x 512M  4 x 4G      20    20 x 10Gi (homes, kept)
 #   simulation / agent Jobs (3+)       later phases widen this file with their own row
 #   ------------------------------------------------------------------------------------------
-#   sum                                2650m     5.5Gi     20.5Gi      10    91Gi
+#   sum                                1000m     3.1Gi     18.3Gi      22    211Gi
 #
 # Rounded up for headroom (a pod being replaced counts twice for a moment, and the chart's
-# hook and init containers count too). A pod that would cross a line is refused by the API
-# with "exceeded quota", never started.
+# hook and init containers count too; a container that states nothing gets the LimitRange's
+# defaults). A pod that would cross a line is refused by the API with "exceeded quota", never
+# started: a fifth or sixth running notebook can be refused by limits.memory before any other
+# line.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -29,5 +35,5 @@ spec:
     requests.memory: 8Gi
     limits.memory: 24Gi
     pods: "20"
-    persistentvolumeclaims: "12"
-    requests.storage: 120Gi
+    persistentvolumeclaims: "22"
+    requests.storage: 220Gi

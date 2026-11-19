@@ -1,0 +1,53 @@
+# k8s/workbench/hub-rbac.yaml — what the hub may do in the research zone (research
+# sandbox Phase 2b, owner decision O5(a)). Render list: WB_NS
+#
+# Applied by infra/deploy-workbench.sh before helm, only while the access policy places the
+# workbench in the research zone (the overlay k8s/workbench/values-research.yaml sets the
+# chart's rbac.create false; in the platform namespace the chart's own Role stays). The hub
+# (ServiceAccount hub) starts and stops each person's server: KubeSpawner creates, reads,
+# watches and deletes its pod and its home claim (claim-<name>, never deleted: delete_pvc
+# false), and reads events for the spawn page.
+#
+# No `services` (review of commit A, 19 Nov 2026): KubeSpawner creates one only with
+# services_enabled or internal_ssl, both off here, and a hub that could create a NodePort
+# Service could open lake-api (which admits `node`) to the LAN. Health rsgrants FAILs on any
+# NodePort, LoadBalancer or externalIPs Service in the zone.
+#
+# No `secrets`: KubeSpawner needs them only for internal_ssl, which is off here, and a hub
+# that could read Secrets in the zone would read research-postgresql-auth and lake-api-auth.
+# Whether KubeSpawner 7 really needs none is verified live in exercise E43 by spawning a
+# throwaway server: a 403 on secrets in the hub's log goes to the owner, never silently
+# added back here. `pods create` is bounded by the namespace's Pod Security Admission
+# (baseline: no privileged or hostPath pod; k8s/research/namespace.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: medcea-hub
+  namespace: ${WB_NS}
+  labels:
+    app: jupyterhub
+    medcea/zone: research
+rules:
+  - apiGroups: [""]
+    resources: [pods, persistentvolumeclaims]
+    verbs: [get, watch, list, create, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, watch, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: medcea-hub
+  namespace: ${WB_NS}
+  labels:
+    app: jupyterhub
+    medcea/zone: research
+subjects:
+  - kind: ServiceAccount
+    name: hub
+    namespace: ${WB_NS}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: medcea-hub

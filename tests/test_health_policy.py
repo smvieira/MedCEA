@@ -1050,11 +1050,15 @@ class Wiring(unittest.TestCase):
         # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5's iamloaded, jwks, kcscopes, iamnetpol;
         # 64 with Phase 5 round 2's iamdrift, iamanchor, iamcatalog; 65 with feedback control's controlloops;
         # 66 with the research sandbox's controllers (Phase 1, 17 Nov 2026);
-        # 68 with its rsnetpol and rsexport (Phase 2a, 18 Nov 2026)
-        self.assertEqual(len(lines), 68)
+        # 68 with its rsnetpol and rsexport (Phase 2a, 18 Nov 2026);
+        # 71 with its wbaccounts, rsgrants and rslake (Phase 2b)
+        self.assertEqual(len(lines), 71)
         types = [l.split("|")[1].strip() for l in lines]
-        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog"):
+        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog",
+                  "wbaccounts", "rsgrants", "rslake"):
             self.assertEqual(types.count(t), 1, t)
+        self.assertEqual(types[types.index("iamworkbench") + 1], "wbaccounts")
+        self.assertEqual(types[types.index("rsexport") + 1:types.index("rsexport") + 3], ["rsgrants", "rslake"])
         self.assertEqual(types[types.index("iamartefacts") + 1], "iamloaded")
         self.assertEqual(types[types.index("iampending") + 1], "iamdrift")
         self.assertEqual(types[types.index("iamchain") + 1], "iamanchor")
@@ -1072,7 +1076,8 @@ class Wiring(unittest.TestCase):
         self.assertIn("${CYAN}iamartefacts${NC}", src)
         self.assertIn('supersetroles) check_supersetroles "$name" "$target" ;;', src)
         self.assertIn("${CYAN}supersetroles${NC}", src)
-        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog"):
+        for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog",
+                  "wbaccounts", "rsgrants", "rslake"):
             self.assertRegex(src, r"(?m)^        %s\)\s+check_%s \"\$name\" \"\$target\" ;;$" % (t, t))
             self.assertIn("${CYAN}%s${NC}" % t, src)
         # the state document's directory is removed at exit

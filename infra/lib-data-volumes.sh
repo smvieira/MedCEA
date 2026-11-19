@@ -33,6 +33,14 @@
 # reservations. It is named whenever that claim exists, whatever RESEARCH_ENABLED says,
 # since --reset deletes that namespace too and --uninstall the whole cluster.
 #
+# The AI workbench may live in the research zone (research sandbox Phase 2b, where the access
+# policy places it): its homes (claim-<name>) and the hub's database (hub-db-dir) in
+# RESEARCH_NAMESPACE are listed too, after the research database. A home moved by
+# ./infra/deploy-workbench.sh --move has a volume kept with Retain (its directory outlives the
+# claim and the namespace: said so, with how to remove it by hand), and the claim it was
+# copied from stays, labelled medcea/moved-to=<namespace> (said so: the copy there is the
+# live one).
+#
 # Needs $KUBECTL (e.g. "microk8s kubectl"). Read-only. BACKUP_DIR comes from the
 # caller's config.env; the newest complete backup in it is named when there is one.
 data_volumes_warn() {
@@ -50,6 +58,7 @@ data_volumes_warn() {
         echo -e "\033[0;31mWith Superset installed, its dashboards and charts (database superset, inside PostgreSQL) go too.\033[0m"
         echo ""
         _dv_research "$ns" "$backed1"
+        _dv_research_homes "$ns" "$backed"
         return 0
     fi
     rows="$(python3 -c '
@@ -61,21 +70,22 @@ except ValueError:
 for i in items:
     name = i["metadata"]["name"]
     if name.startswith("claim-") or name == "grafana":
-        print("%s\t%s\t%s" % (name, (i.get("spec") or {}).get("volumeName") or "-",
-                              ((i.get("status") or {}).get("capacity") or {}).get("storage") or "?"))
+        print("%s\t%s\t%s\t%s" % (name, (i.get("spec") or {}).get("volumeName") or "-",
+                                  ((i.get("status") or {}).get("capacity") or {}).get("storage") or "?",
+                                  (i["metadata"].get("labels") or {}).get("medcea/moved-to") or "-"))
 ' <<<"$json" 2>/dev/null)" || rows=""
-    local line claim pv size path homes=() grafana="" superset=""
+    local line claim pv size path moved homes=() grafana="" superset=""
     # -o name, compared exactly: anything else (no such deployment, no answer) is "not installed"
     [[ "$(timeout 10 ${KUBECTL:-microk8s kubectl} get deployment superset -n "$ns" -o name 2>/dev/null </dev/null || true)" \
         == deployment.apps/superset ]] && superset=yes
-    [[ -n "$rows" || -n "$superset" ]] || { _dv_research "$ns" "$backed1"; return 0; }
+    [[ -n "$rows" || -n "$superset" ]] || { _dv_research "$ns" "$backed1"; _dv_research_homes "$ns" "$backed"; return 0; }
     [[ -n "$rows" ]] && while IFS= read -r line; do
-        IFS=$'\t' read -r claim pv size <<<"$line"
+        IFS=$'\t' read -r claim pv size moved <<<"$line"
         path="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pv "$pv" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null </dev/null || true)"
         if [[ "$claim" == grafana ]]; then
             grafana="$claim ($size)${path:+, on this host in $path}"
         else
-            homes+=("${claim#claim-}: $claim ($size)${path:+, on this host in $path}")
+            homes+=("${claim#claim-}: $claim ($size)${path:+, on this host in $path}$(_dv_notes "$pv" "$moved")")
         fi
     done <<<"$rows"
     if (( ${#homes[@]} )); then
@@ -118,6 +128,19 @@ for i in items:
         echo ""
     fi
     _dv_research "$ns" "$backed1"
+    _dv_research_homes "$ns" "$backed"
+}
+
+# _dv_notes PV MOVED_TO — what a home's line adds (research Phase 2b): its volume is kept
+# with Retain, and/or the claim is what a move left behind (MOVED_TO is its medcea/moved-to
+# label, "-" for none). Nothing when the volume cannot be read.
+_dv_notes() {
+    local pv="$1" moved="${2:--}" policy
+    [[ "$moved" != "-" && -n "$moved" ]] && printf '; left behind by the move to %s (the copy there is the live one)' "$moved"
+    [[ -n "$pv" && "$pv" != "-" ]] || return 0
+    policy="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pv "$pv" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}' 2>/dev/null </dev/null || true)"
+    [[ "$policy" == Retain ]] && printf '; kept on this host after the claim goes (Retain): remove its directory by hand when no longer needed'
+    return 0
 }
 
 # _dv_research NS BACKED — the research database's volume (Phase 2a), in RESEARCH_NAMESPACE
@@ -138,6 +161,46 @@ _dv_research() {
     echo "  the research record (what each campaign read) and the reservations are not exported again."
     echo "  To keep it, answer no now and first copy the directory above off the volume, e.g."
     echo "        sudo cp -a <directory> ~/research-db-backup/"
+    echo ""
+    return 0
+}
+
+# _dv_research_homes NS BACKED — the AI workbench's homes and hub database in RESEARCH_NAMESPACE
+# (research Phase 2b), when that names a namespace other than NS; nothing when there are none
+# or the cluster does not answer.
+_dv_research_homes() {
+    local ns="$1" backed="$2" rns="${RESEARCH_NAMESPACE:-}" json rows line claim pv size moved path out=()
+    [[ -n "$rns" && "$rns" != "$ns" && "$rns" =~ ^[a-z][a-z0-9-]{1,62}$ ]] || return 0
+    json="$(timeout 20 ${KUBECTL:-microk8s kubectl} get pvc -n "$rns" -o json 2>/dev/null </dev/null)" || return 0
+    rows="$(python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items") or []
+except ValueError:
+    sys.exit(0)
+for i in items:
+    name = i["metadata"]["name"]
+    if name.startswith("claim-") or name == "hub-db-dir":
+        print("%s\t%s\t%s\t%s" % (name, (i.get("spec") or {}).get("volumeName") or "-",
+                                  ((i.get("status") or {}).get("capacity") or {}).get("storage") or "?",
+                                  (i["metadata"].get("labels") or {}).get("medcea/moved-to") or "-"))
+' <<<"$json" 2>/dev/null)" || rows=""
+    [[ -n "$rows" ]] || return 0
+    while IFS= read -r line; do
+        IFS=$'\t' read -r claim pv size moved <<<"$line"
+        path="$(timeout 10 ${KUBECTL:-microk8s kubectl} get pv "$pv" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null </dev/null || true)"
+        if [[ "$claim" == hub-db-dir ]]; then
+            out+=("the hub's database: $claim ($size)${path:+, on this host in $path}$(_dv_notes "$pv" "$moved")")
+        else
+            out+=("${claim#claim-}: $claim ($size)${path:+, on this host in $path}$(_dv_notes "$pv" "$moved")")
+        fi
+    done <<<"$rows"
+    echo -e "\033[0;31m\033[1mAI workbench homes in the research namespace $rns that this deletes ($backed):\033[0m"
+    for line in "${out[@]}"; do echo "  - $line"; done
+    echo "  To keep them, answer no now and first have each person commit and push their notebooks"
+    echo "  (~/medcea-examples/SAVE_TO_GIT.md), or copy each directory above off the volume, e.g."
+    echo "        sudo cp -a <directory> ~/workbench-homes-backup/"
+    echo "  The hub's database holds the hub users and their API tokens only: a new one is made at install."
     echo ""
     return 0
 }

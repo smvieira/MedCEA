@@ -145,7 +145,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         audience and person_id. FAIL for a scope or mapper missing in the realm, and for a missing"
     echo -e "         client or scope on a client whose tokens reach a platform API (KC_API_CLIENTS); WARN on a"
     echo -e "         tool-only client, an optional-only scope, full_scope_allowed=false, an audience in the ID"
-    echo -e "         token, a client-level mapper writing groups/person_id/aud, an unreadable database"
+    echo -e "         token, a client-level mapper writing groups/person_id/aud, an unreadable database."
+    echo -e "         A client of KC_POLICY_TOKEN_CLIENTS (workbench-notebook) the applied policy no longer"
+    echo -e "         names as a token client is retired: FAIL while it is enabled, OK when absent or disabled"
     echo ""
     echo -e "  ${CYAN}iamnetpol${NC} the application pods' NetworkPolicies (IAM_NETPOL): NAMESPACE"
     echo -e "         true: every compiled iam-<pod> policy present (else FAIL), a stale labelled one WARNs;"
@@ -222,7 +224,17 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         admin_users, admin role members), allow_all is set, delete_pvc or auth_state is"
     echo -e "         on, the notebooks' NetworkPolicy allows private addresses, or the hub pod runs"
     echo -e "         older values (./infra/deploy-workbench.sh); WARN while IAM_GATES=false; SKIP"
-    echo -e "         while WORKBENCH_ENABLED is not true or there is no hub"
+    echo -e "         while WORKBENCH_ENABLED is not true or there is no hub. The hub's namespace is the"
+    echo -e "         access policy's (workbench_namespace): a release only in the other one WARNs (deferred:"
+    echo -e "         ./infra/deploy-workbench.sh --move), in both FAILs. In the research zone also FAIL on the"
+    echo -e "         chart's own NetworkPolicy, blockWithIptables, a missing medcea-a2 hook, a Role on secrets"
+    echo -e "         or a hub pod without priorityClassName medcea-research-low (no platform egress rule there)"
+    echo ""
+    echo -e "  ${CYAN}wbaccounts${NC} the AI workbench's hub users (research sandbox Phase 2b): NAMESPACE"
+    echo -e "         read-only kubectl exec into the hub (its sqlite opened mode=ro, names only) against"
+    echo -e "         the realm's enabled accounts (read-only psql in Keycloak's database); WARN (never FAIL)"
+    echo -e "         naming hub users without one: remove them in /hub/admin, their own hub API tokens"
+    echo -e "         outlive the account; SKIP while WORKBENCH_ENABLED is not true or no hub runs"
     echo ""
     echo -e "  ${CYAN}onboardroles${NC} the onboarding wizard admits the access policy's roles (IAM 3.4): -"
     echo -e "         FAIL when the running daemon's --required-role differs from policy_tool edge-wizard"
@@ -251,6 +263,19 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         26 h old, WARN beyond, FAIL beyond 72 h; FAIL when rows of it fall in a held-out"
     echo -e "         reservation (vault.reserved_rows_in); WARN with no reservation or unreadable;"
     echo -e "         SKIP without CronJob research-export, and on its first day"
+    echo ""
+    echo -e "  ${CYAN}rsgrants${NC} Secrets and grants of the research zone (research sandbox Phase 2b): NAMESPACE"
+    echo -e "         FAIL when a pod or pod template in the research namespace names a Secret outside its"
+    echo -e "         allow-list (research-postgresql-auth, lake-api-auth, hub for the hub and its proxy,"
+    echo -e "         singleuser for notebooks, none for anything else), a Role there grants secrets or *, a"
+    echo -e "         RoleBinding binds a ClusterRole, or apps/research/db/assert_grants.sql (read-only) prints a"
+    echo -e "         line; WARN when unreadable; SKIP while switched off without the namespace or with no zone"
+    echo ""
+    echo -e "  ${CYAN}rslake${NC} the snapshot reader lake-api (research sandbox Phase 2b): NAMESPACE"
+    echo -e "         SKIP without deployment/lake-api; FAIL when rs_lake_api or rs_lake_reader break"
+    echo -e "         assert_grants.sql's rules; WARN when no pod runs, http://<podIP>:3000/ does not answer"
+    echo -e "         200 from the host, or lake.snapshot_digest_check(<newest>) finds a digest that does not"
+    echo -e "         recompute"
     echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
@@ -1752,16 +1777,59 @@ check_grafanarole() {
 
 # =============================================================================
 # Check: the AI workbench's gate is the policy's (IAM 3.2) — read-only
-# target: NAMESPACE. Reads the values helm deployed (Secret hub, values.yaml) on
-# stdin — they hold the client secret, so only the verdict fields are printed —
-# and compares them with policy_workbench (infra/lib-oauth2-proxy.sh).
+# target: NAMESPACE (the platform namespace; the conf line never moves). Where the hub lives
+# is the access policy's (research sandbox Phase 2b): workbench_placement /
+# workbench_namespace (infra/lib-policy-tools.sh) print research and the research namespace
+# while the policy has pod hub in the research zone, else platform and NAMESPACE. Reads the
+# values helm deployed (Secret hub, values.yaml) on stdin — they hold the client secret, so
+# only the verdict fields are printed — and compares them with policy_workbench
+# (infra/lib-oauth2-proxy.sh). A hub Secret only in the other namespace WARNs (deferred:
+# ./infra/deploy-workbench.sh --move); in both FAILs. Platform placement: today's rules,
+# the notebooks' NetworkPolicy and egress hops included. Research placement: the gate
+# rules, plus FAIL on the chart's own NetworkPolicy (hub, proxy, singleuser) in that
+# namespace or singleuser.networkPolicy.enabled not false (the zone's rs-* policies are the
+# only ones), cloudMetadata.blockWithIptables not false (its NET_ADMIN init container
+# breaks PSA baseline), the hook hub.extraConfig.medcea-a2 missing (hub administration
+# gives no workspace), a Role there granting secrets, or a hub pod without
+# priorityClassName medcea-research-low; the platform's egress rule is not checked there.
 # =============================================================================
+# _wb_hub_secret NS → 0 Secret hub present, 1 absent (NotFound), 2 unreadable
+_wb_hub_secret() {
+    local out rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get secret hub -n "$1" -o name 2>&1)" || rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    grep -q 'NotFound' <<<"$out" && return 1
+    return 2
+}
 check_iamworkbench() {
-    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" live problems=()
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" live problems=() warns=() place wbns other rc_here rc_other
     if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then
         _record SKIP "$name" "WORKBENCH_ENABLED is not true"; return
     fi
-    live="$(timeout "$TIMEOUT" $KUBECTL get secret hub -n "$ns" -o jsonpath='{.data.values\.yaml}' 2>/dev/null \
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-policy-tools.sh"; then
+        _record FAIL "$name" "cannot read infra/lib-policy-tools.sh"; return
+    fi
+    if ! place="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" workbench_placement 2>/dev/null)" \
+            || ! wbns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" workbench_namespace 2>/dev/null)" \
+            || [[ -z "$wbns" || ! "$place" =~ ^(research|platform)$ ]]; then
+        _record FAIL "$name" "cannot tell where the access policy places the AI workbench (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    if [[ "$place" == research ]]; then other="$ns"; else other="${RESEARCH_NAMESPACE:-${ns}-research}"; fi
+    rc_here=0; _wb_hub_secret "$wbns" || rc_here=$?
+    rc_other=1
+    [[ "$other" != "$wbns" ]] && { rc_other=0; _wb_hub_secret "$other" || rc_other=$?; }
+    if [[ $rc_here -eq 0 && $rc_other -eq 0 ]]; then
+        _record FAIL "$name" "the workbench release is in two namespaces, $wbns and $other: remove the one the access policy does not place it in ($place) by hand"
+        return
+    elif [[ $rc_here -eq 1 && $rc_other -eq 0 ]]; then
+        if [[ "$place" == research ]]; then
+            _record WARN "$name" "deferred: ./infra/deploy-workbench.sh --move (the access policy places the AI workbench in the research zone, namespace $wbns; its hub still runs in $other)"
+        else
+            _record WARN "$name" "deferred: ./infra/deploy-workbench.sh --move (the access policy places the AI workbench in the platform namespace $wbns; its hub still runs in the research zone, $other)"
+        fi
+        return
+    fi
+    live="$(timeout "$TIMEOUT" $KUBECTL get secret hub -n "$wbns" -o jsonpath='{.data.values\.yaml}' 2>/dev/null \
         | base64 -d 2>/dev/null | python3 -c '
 import json, sys, yaml
 try:
@@ -1770,12 +1838,15 @@ except Exception:
     sys.exit(1)
 if not isinstance(v, dict):
     sys.exit(1)
-c = (v.get("hub") or {}).get("config") or {}
+hub = v.get("hub") or {}
+c = hub.get("config") or {}
 a, g = c.get("Authenticator") or {}, c.get("GenericOAuthenticator") or {}
-lr = (v.get("hub") or {}).get("loadRoles") or {}
+lr = hub.get("loadRoles") or {}
 wa, ad = lr.get("workbench-admin") or {}, lr.get("admin") or {}
-np = ((v.get("singleuser") or {}).get("networkPolicy") or {})
+su = v.get("singleuser") or {}
+np = su.get("networkPolicy") or {}
 eg = np.get("egressAllowRules") or {}
+hook = (hub.get("extraConfig") or {}).get("medcea-a2")
 out = {"allow_all": a.get("allow_all"), "admin_users": sorted(a.get("admin_users") or []),
        "existing": a.get("allow_existing_users"), "auth_state": a.get("enable_auth_state"),
        "allowed": sorted(g.get("allowed_groups") or []), "admin_groups": sorted(g.get("admin_groups") or []),
@@ -1785,9 +1856,11 @@ out = {"allow_all": a.get("allow_all"), "admin_users": sorted(a.get("admin_users
        "builtin_admins": ad.get("users") if isinstance(ad.get("users"), list) else "unpinned",
        "delete_pvc": (c.get("KubeSpawner") or {}).get("delete_pvc"),
        "netpol": np.get("enabled"), "private": eg.get("privateIPs"), "metadata": eg.get("cloudMetadataServer"),
+       "imds": (su.get("cloudMetadata") or {}).get("blockWithIptables"),
+       "hook": isinstance(hook, str) and "c.KubeSpawner.pre_spawn_hook = _medcea_a2" in hook,
        "egress": json.dumps(np.get("egress") or [], sort_keys=True, separators=(",", ":"))}
 for k, x in out.items():
-    print(f"{k}\t{json.dumps(x)}")')" || { _record SKIP "$name" "no hub Secret in $ns (workbench not deployed)"; return; }
+    print(f"{k}\t{json.dumps(x)}")')" || { _record SKIP "$name" "no hub Secret in $wbns (workbench not deployed)"; return; }
     declare -A L=()
     local k x
     while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
@@ -1812,21 +1885,25 @@ print(" ".join(s for s in json.loads(sys.argv[1]) if s.split("!")[0] in bad))' "
     [[ "${L[delete_pvc]}" == false ]] || problems+=("delete_pvc is ${L[delete_pvc]}: removing a hub user deletes the home")
     [[ "${L[auth_state]}" != true ]] || problems+=("enable_auth_state is true: a hub admin can read people's Keycloak tokens")
     [[ "${L[existing]}" != true ]] || problems+=("allow_existing_users is true: every user in the hub database gets in")
-    [[ "${L[netpol]}" == true && "${L[private]}" == false && "${L[metadata]}" == false ]] \
-        || problems+=("the notebooks' NetworkPolicy is off or allows private addresses")
-    # The notebooks' platform hops (IAM 3.2b): exactly the compiled ones, and none
-    # unless IAM_POSTGREST_JWT and IAM_DB_ROLES are true (policy_workbench_egress).
-    local WORKBENCH_EGRESS="" want_egress
-    if REPO_ROOT="$SCRIPT_DIR" policy_workbench_egress 2>/dev/null; then
-        want_egress="$(python3 -c 'import json, sys; print(json.dumps(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":"))))' "$WORKBENCH_EGRESS")"
-        [[ "${L[egress]}" == "$want_egress" ]] \
-            || problems+=("the notebooks' egress hops are not the compiled ones for this IAM_POSTGREST_JWT/IAM_DB_ROLES (./infra/deploy-workbench.sh)")
+    if [[ "$place" == platform ]]; then
+        [[ "${L[netpol]}" == true && "${L[private]}" == false && "${L[metadata]}" == false ]] \
+            || problems+=("the notebooks' NetworkPolicy is off or allows private addresses")
+        # The notebooks' platform hops (IAM 3.2b): exactly the compiled ones, and none
+        # unless IAM_POSTGREST_JWT and IAM_DB_ROLES are true (policy_workbench_egress).
+        local WORKBENCH_EGRESS="" want_egress
+        if REPO_ROOT="$SCRIPT_DIR" policy_workbench_egress 2>/dev/null; then
+            want_egress="$(python3 -c 'import json, sys; print(json.dumps(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":"))))' "$WORKBENCH_EGRESS")"
+            [[ "${L[egress]}" == "$want_egress" ]] \
+                || problems+=("the notebooks' egress hops are not the compiled ones for this IAM_POSTGREST_JWT/IAM_DB_ROLES (./infra/deploy-workbench.sh)")
+        else
+            problems+=("cannot compile the notebooks' egress hops (python3 apps/iam/compiler/cli.py check)")
+        fi
     else
-        problems+=("cannot compile the notebooks' egress hops (python3 apps/iam/compiler/cli.py check)")
+        _wb_research_rules "$wbns"
     fi
     local tmpl pod
-    tmpl="$($KUBECTL get deployment hub -n "$ns" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
-    pod="$($KUBECTL get pods -n "$ns" -l component=hub --field-selector=status.phase=Running \
+    tmpl="$($KUBECTL get deployment hub -n "$wbns" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
+    pod="$($KUBECTL get pods -n "$wbns" -l component=hub --field-selector=status.phase=Running \
         -o jsonpath='{range .items[*]}{.metadata.annotations.checksum/secret}{"\n"}{end}' 2>/dev/null | sort -u)"
     [[ -n "$tmpl" && "$pod" == "$tmpl" ]] || problems+=("the running hub pod does not carry the deployed values (rollout pending?)")
     # workbench-admin's members are policy_workbench's in either mode: the compiled admin
@@ -1837,16 +1914,18 @@ print(" ".join(s for s in json.loads(sys.argv[1]) if s.split("!")[0] in bad))' "
         return
     fi
     local sorted_json='import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))'
-    local want_admins want_hubadmins
+    local want_admins want_hubadmins where=""
+    [[ "$place" == research ]] && where="; in the research zone (namespace $wbns: no chart NetworkPolicy, no Role on secrets, the hub preemptible)"
     want_admins="$(python3 -c "$sorted_json" "$WORKBENCH_ADMIN_GROUPS")"
     want_hubadmins="$(python3 -c "$sorted_json" "$WORKBENCH_HUBADMIN_USERS")"
     [[ "${L[role_groups]}" == "$want_admins" ]] || problems+=("workbench-admin's groups ${L[role_groups]} are not the compiled $want_admins")
     [[ "${L[role_users]}" == "$want_hubadmins" ]] || problems+=("workbench-admin's users ${L[role_users]} are not $want_hubadmins")
+    local IFS=';'
     if [[ "${IAM_GATES:-true}" == "false" ]]; then
         if [[ ${#problems[@]} -eq 0 ]]; then
-            _record WARN "$name" "IAM_GATES=false: the workbench admits any realm account (pre-3.2 sign-in); hub administrator $want_hubadmins (workbench-admin)"
+            _record WARN "$name" "IAM_GATES=false: the workbench admits any realm account (pre-3.2 sign-in); hub administrator $want_hubadmins (workbench-admin)${warns[*]:+; ${warns[*]}}"
         else
-            local IFS=';'; _record FAIL "$name" "${problems[*]}"
+            _record FAIL "$name" "${problems[*]}"
         fi
         return
     fi
@@ -1855,10 +1934,58 @@ print(" ".join(s for s in json.loads(sys.argv[1]) if s.split("!")[0] in bad))' "
     [[ "${L[allow_all]}" == false ]] || problems+=("allow_all is ${L[allow_all]}")
     [[ "${L[allowed]}" == "$want_allowed" ]] || problems+=("allowed_groups ${L[allowed]} is not the compiled $want_allowed (./infra/deploy-workbench.sh)")
     [[ "${L[key]}" == '"oauth_user.groups"' ]] || problems+=("auth_state_groups_key is ${L[key]}")
-    if [[ ${#problems[@]} -eq 0 ]]; then
-        _record OK "$name" "admits $want_allowed from the access policy; hub administrators $want_admins hold workbench-admin (no tokens, no access:servers), nobody the built-in admin role"
+    if [[ ${#problems[@]} -gt 0 ]]; then
+        _record FAIL "$name" "${problems[*]}"
+    elif [[ ${#warns[@]} -gt 0 ]]; then
+        _record WARN "$name" "${warns[*]}"
     else
-        local IFS=';'; _record FAIL "$name" "${problems[*]}"
+        _record OK "$name" "admits $want_allowed from the access policy; hub administrators $want_admins hold workbench-admin (no tokens, no access:servers), nobody the built-in admin role$where"
+    fi
+}
+# _wb_research_rules WB_NS: the research placement's own rules, into the caller's
+# problems/warns and L (check_iamworkbench); read-only.
+_wb_research_rules() {
+    local wbns="$1" out rc=0 x
+    [[ "${L[netpol]}" == false ]] \
+        || problems+=("singleuser.networkPolicy.enabled is ${L[netpol]}, not false: the chart's own policy is an allow-all in the research zone (./infra/deploy-workbench.sh)")
+    [[ "${L[imds]}" == false ]] \
+        || problems+=("singleuser.cloudMetadata.blockWithIptables is ${L[imds]}, not false: its NET_ADMIN init container breaks the namespace's PSA baseline (./infra/deploy-workbench.sh)")
+    [[ "${L[hook]}" == true ]] \
+        || problems+=("the hook hub.extraConfig.medcea-a2 is missing: hub administration would give a workspace (./infra/deploy-workbench.sh)")
+    out="$(timeout "$TIMEOUT" $KUBECTL get netpol -n "$wbns" -o jsonpath='{.items[*].metadata.name}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warns+=("cannot read the NetworkPolicies in $wbns: $(tail -n1 <<<"$out" | cut -c1-100)")
+    else
+        x="$(tr ' ' '\n' <<<"$out" | grep -xE 'hub|proxy|singleuser' | sort | paste -sd ' ')"
+        [[ -z "$x" ]] || problems+=("the chart's own NetworkPolicy $x is in $wbns: it widens the research zone (microk8s kubectl delete networkpolicy -n $wbns <name>; ./infra/deploy-workbench.sh)")
+    fi
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get roles -n "$wbns" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warns+=("cannot read the Roles in $wbns: $(tail -n1 <<<"$out" | cut -c1-100)")
+    else
+        x="$(python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items") or []
+except Exception:
+    print("?"); sys.exit()
+print(" ".join(sorted(i["metadata"]["name"] for i in items
+                      if any(set(r.get("resources") or []) & {"secrets", "*"} for r in i.get("rules") or []))))' <<<"$out")"
+        if [[ "$x" == "?" ]]; then
+            warns+=("cannot parse the Roles in $wbns")
+        elif [[ -n "$x" ]]; then
+            problems+=("Role(s) $x in $wbns grant secrets: the hub (or whoever holds them) can read every Secret of the research zone")
+        fi
+    fi
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$wbns" -l component=hub --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.metadata.name}={.spec.priorityClassName}{"\n"}{end}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warns+=("cannot read the hub pod in $wbns: $(tail -n1 <<<"$out" | cut -c1-100)")
+    else
+        x="$(grep . <<<"$out" | grep -v '=medcea-research-low$' | cut -d= -f1 | paste -sd ' ')"
+        [[ -z "$x" ]] || problems+=("hub pod $x runs without priorityClassName medcea-research-low: it could preempt the research database (./infra/deploy-workbench.sh)")
     fi
 }
 
@@ -2575,6 +2702,21 @@ check_kcscopes() {
     if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
     # shellcheck source=/dev/null
     source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh" || { _record FAIL "$name" "cannot read infra/lib-keycloak-clients.sh"; return; }
+    # Clients that exist only while the applied policy names them as a token_client
+    # (KC_POLICY_TOKEN_CLIENTS, research sandbox Phase 2b): named → today's rules; not named
+    # → retired: present and enabled FAILs, absent or disabled is OK, its scopes unchecked.
+    local c rc retired=() unsure=()
+    if [[ -n "${KC_POLICY_TOKEN_CLIENTS+x}" ]]; then
+        for c in "${KC_POLICY_TOKEN_CLIENTS[@]}"; do
+            rc=0
+            python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-token-client "$c" >/dev/null 2>&1 || rc=$?
+            case $rc in
+                0) ;;
+                1) retired+=("$c") ;;
+                *) unsure+=("$c") ;;
+            esac
+        done
+    fi
     out="$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$ns" rdbms-postgresql-0 -- \
         env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
         'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -v realm="$0" -v clients="$1"' \
@@ -2588,6 +2730,7 @@ SELECT coalesce((
                                 FROM protocol_mapper m WHERE m.client_scope_id = s.id))), '{}'::json)
                  FROM client_scope s WHERE s.realm_id = r.id AND s.name IN ('groups', 'medcea-identity')),
     'clients', (SELECT coalesce(json_object_agg(c.client_id, json_build_object(
+                  'enabled', c.enabled,
                   'full_scope', c.full_scope_allowed,
                   'default', (SELECT coalesce(json_agg(s.name), '[]'::json) FROM client_scope_client d
                                 JOIN client_scope s ON s.id = d.scope_id
@@ -2611,6 +2754,9 @@ try:
 except Exception:
     print("WARN|cannot read Keycloak database keycloak: the client scopes are not checked"); sys.exit()
 realm, wanted, api = sys.argv[1], sys.argv[2].split(), set(sys.argv[3].split())
+retired, unsure = sys.argv[4].split(), sys.argv[5].split()
+wanted = [c for c in wanted if c not in retired]
+api -= set(retired)
 if doc is None:
     print("FAIL|realm %s is not in Keycloak database keycloak (./deploy-infra.sh)" % realm); sys.exit()
 cfg = lambda m: m.get("config") or {}
@@ -2668,9 +2814,19 @@ if fullscope:
     print("WARN|full_scope_allowed is false on %s: the groups claim holds only the client role mappings" % ", ".join(fullscope))
 if own:
     print("WARN|client-level mapper(s) writing a platform claim: %s; the scopes are its one source" % ", ".join(own))
+for c in unsure:
+    print("WARN|cannot tell whether the applied access policy still names %s as a token client (python3 apps/iam/compiler/cli.py check): checked as named" % c)
+gone = []
+for c in retired:
+    if c in clients and clients[c].get("enabled") is not False:
+        print("FAIL|client %s is enabled, yet the applied access policy names it as no token client: its tokens still reach the platform APIs that admit it (./deploy-infra.sh disables it)" % c)
+    else:
+        gone.append("%s (%s)" % (c, "disabled" if c in clients else "absent"))
 n = len([c for c in wanted if c in clients])
-print("OK|%d clients: groups and medcea-identity default on each (%d of them reach a platform API)" % (n, len([c for c in wanted if c in clients and c in api])))
-' "$realm" "${KC_SCOPE_CLIENTS[*]}" "${KC_API_CLIENTS[*]}" <<<"${out:-}" 2>&1)" \
+print("OK|%d clients: groups and medcea-identity default on each (%d of them reach a platform API)%s" % (
+    n, len([c for c in wanted if c in clients and c in api]),
+    "; retired by the access policy: " + ", ".join(gone) if gone else ""))
+' "$realm" "${KC_SCOPE_CLIENTS[*]}" "${KC_API_CLIENTS[*]}" "${retired[*]}" "${unsure[*]}" <<<"${out:-}" 2>&1)" \
         || out="FAIL|cannot judge the client scopes: $(tail -n1 <<<"$out" | cut -c1-120)"
     while IFS='|' read -r lvl msg; do
         case "$lvl" in
@@ -2828,6 +2984,389 @@ print("foreign|" + " ".join(sorted(n for n in live if n not in want and n not in
         _record FAIL "$name" "the research zone admits more than the policy compiles: $joined"
     else
         _record OK "$name" "$count research NetworkPolicies, the compiled set (default deny included)"
+    fi
+}
+
+# =============================================================================
+# Check: the AI workbench's hub users are enabled realm accounts (research sandbox Phase 2b)
+# — read-only, WARN only. target: NAMESPACE. The hub's namespace is workbench_namespace's
+# (infra/lib-policy-tools.sh). One kubectl exec into the Running hub pod (container hub):
+# python3 reads /srv/jupyterhub/jupyterhub.sqlite with mode=ro and prints the user names
+# only; the realm's enabled accounts from Keycloak's database (read-only psql in
+# rdbms-postgresql-0, as kcscopes). A hub user without an enabled account WARNs, named:
+# offboarding is removing the hub user too (/hub/admin), since a person's own hub API
+# tokens outlive the account. SKIP while WORKBENCH_ENABLED is not true or no hub runs;
+# WARN when anything cannot be read. Never FAIL.
+# =============================================================================
+check_wbaccounts() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" realm="${KEYCLOAK_REALM:-medcea}" wbns pod out rc=0 hub kc
+    if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then
+        _record SKIP "$name" "WORKBENCH_ENABLED is not true"; return
+    fi
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    if ! REPO_ROOT="$SCRIPT_DIR" source "$SCRIPT_DIR/infra/lib-policy-tools.sh" \
+            || ! wbns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" workbench_namespace 2>/dev/null)" || [[ -z "$wbns" ]]; then
+        _record WARN "$name" "cannot tell where the access policy places the AI workbench (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    out="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$wbns" -l app=jupyterhub,component=hub --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the hub pod in $wbns: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+    fi
+    pod="$(grep -m1 . <<<"$out")"
+    if [[ -z "$pod" ]]; then
+        _record SKIP "$name" "no running hub in $wbns"; return
+    fi
+    rc=0
+    hub="$(timeout "$TIMEOUT" $KUBECTL exec -n "$wbns" "$pod" -c hub -- python3 -c '
+import re, sqlite3
+db = sqlite3.connect("file:/srv/jupyterhub/jupyterhub.sqlite?mode=ro", uri=True)
+for (n,) in db.execute("SELECT name FROM users ORDER BY name"):
+    print("user|" + re.sub(r"[^A-Za-z0-9._@-]", "?", n or "")[:64])
+print("end|")' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]] || ! grep -q '^end|$' <<<"$hub"; then
+        _record WARN "$name" "cannot read the hub's users in $pod: $(grep -v '^user|' <<<"$hub" | tail -n1 | cut -c1-120)"; return
+    fi
+    rc=0
+    kc="$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$ns" rdbms-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -v realm="$0"' \
+        "$realm" 2>&1 <<'SQL'
+SELECT 'realm|' || count(*) FROM realm r WHERE r.name = :'realm';
+SELECT 'account|' || lower(u.username)
+  FROM user_entity u JOIN realm r ON r.id = u.realm_id
+ WHERE r.name = :'realm' AND u.enabled AND u.service_account_client_link IS NULL;
+SQL
+)" || rc=$?
+    if [[ $rc -ne 0 ]] || ! grep -q '^realm|1$' <<<"$kc"; then
+        _record WARN "$name" "cannot read realm ${realm}'s accounts from Keycloak database keycloak: $(grep -m1 -E 'ERROR|error|realm\|0' <<<"$kc" | cut -c1-120)"; return
+    fi
+    local users stale n
+    users="$(sed -n 's/^user|//p' <<<"$hub")"
+    n="$(grep -c . <<<"$users")"
+    stale="$(comm -23 <(grep . <<<"$users" | tr 'A-Z' 'a-z' | sort -u) <(sed -n 's/^account|//p' <<<"$kc" | sort -u) | paste -sd ' ')"
+    if [[ -n "$stale" ]]; then
+        _record WARN "$name" "hub user(s) without an enabled account in realm ${realm}: $stale — remove them in https://${WORKBENCH_DOMAIN:-workbench}/hub/admin (their own hub API tokens outlive the account)"
+    else
+        _record OK "$name" "$n hub user(s) in $wbns, each an enabled account of realm $realm"
+    fi
+}
+
+# =============================================================================
+# Helpers of the research zone's checks (rsgrants, rslake) — read-only
+# _rs_zone_ns NAME NS: the research namespace in RS_NS, 0 to go on; 1 after recording a
+# SKIP or WARN (switched off without the namespace, no research zone, a broken policy,
+# the namespace missing or unreadable).
+# _rs_assert_grants RNS: apps/research/db/assert_grants.sql as postgres in
+# research-postgresql-0, read-only (PGOPTIONS, SQL on stdin), its lines on stdout; status 1
+# when psql fails (its last error line on stdout).
+# =============================================================================
+_rs_zone_ns() {
+    local name="$1" ns="$2" out rc=0 exists
+    RS_NS="${RESEARCH_NAMESPACE:-${ns}-research}"
+    out="$(timeout "$TIMEOUT" $KUBECTL get namespace "$RS_NS" -o name 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        exists=yes
+    elif grep -q 'NotFound' <<<"$out"; then
+        exists=no
+    else
+        _record WARN "$name" "cannot read namespace $RS_NS: $(tail -n1 <<<"$out" | cut -c1-120)"; return 1
+    fi
+    if [[ "${RESEARCH_ENABLED:-false}" != true && $exists == no ]]; then
+        _record SKIP "$name" "the research sandbox is switched off (RESEARCH_ENABLED is not true)"; return 1
+    fi
+    rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone research >/dev/null 2>&1 || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        _record SKIP "$name" "the applied access policy has no research zone yet"; return 1
+    elif [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot tell whether the applied access policy has a research zone (python3 apps/iam/compiler/cli.py check)"; return 1
+    fi
+    if [[ $exists == no ]]; then
+        _record SKIP "$name" "namespace $RS_NS does not exist (Research network policies reports it)"; return 1
+    fi
+    return 0
+}
+_rs_assert_grants() {
+    local out rc=0
+    [[ -r "$SCRIPT_DIR/apps/research/db/assert_grants.sql" ]] || { echo "cannot read apps/research/db/assert_grants.sql"; return 1; }
+    out="$(timeout "$((TIMEOUT * 2))" $KUBECTL exec -i -n "$1" research-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA' medcea_research \
+        <"$SCRIPT_DIR/apps/research/db/assert_grants.sql" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        local why
+        why="$(grep -m1 -E 'ERROR|error|NotFound|FATAL' <<<"$out")" || why="$(tail -n1 <<<"$out")"
+        cut -c1-120 <<<"${why:-psql exit $rc}"
+        return 1
+    fi
+    grep -v '^[[:space:]]*$' <<<"$out"
+    return 0
+}
+
+# =============================================================================
+# Check: Secrets and grants of the research zone (research sandbox Phase 2b) — read-only
+# target: NAMESPACE (the research namespace is RESEARCH_NAMESPACE, else NAMESPACE-research).
+# FAIL when a pod or pod template there (secretKeyRef, envFrom, a secret volume, projected
+# secret sources, imagePullSecrets) names a Secret outside its allow-list, which keys on the
+# workload controlling it (its controller ownerReferences, matched by uid to the listed
+# objects; labels alone never grant one, since the hub may create pods with any label):
+# StatefulSet research-postgresql → research-postgresql-auth; Deployment lake-api →
+# lake-api-auth; Deployments hub and proxy → hub; a pod with no controller labelled
+# component=singleuser-server (KubeSpawner's) → singleuser; the probe
+# (medcea/probe=iam-research), a forged owner and anything else → none. FAIL when a Role
+# there grants secrets or *, a RoleBinding there binds a ClusterRole, a Service there is a
+# NodePort or LoadBalancer or has externalIPs (the zone's pods admit `node`), or
+# apps/research/db/assert_grants.sql (run read-only) prints a line.
+# WARN when anything cannot be read; SKIP while switched off without the namespace and while
+# the applied policy has no research zone. PSA baseline stops privileged pods; this detects
+# what it cannot (a pod mounting another Secret of the zone).
+# =============================================================================
+check_rsgrants() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" RS_NS out rc=0 res kind msg fails=() warns=() oks=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    _rs_zone_ns "$name" "$ns" || return
+    out="$(timeout "$TIMEOUT" $KUBECTL get pods,deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,roles,rolebindings,services \
+        -n "$RS_NS" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the workloads and Roles in $RS_NS: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+    fi
+    res="$(python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items") or []
+except Exception:
+    print("error|"); sys.exit()
+# The allow-list keys on the workload that controls an object, followed through its
+# controller ownerReferences by uid among the objects listed here (a pod the hub creates can
+# carry any label, and any ownerReference: a reference whose uid is not the listed workload
+# of that kind and name is no owner), never on labels alone (review of commit A, 19 Nov 2026).
+WORKLOADS = ("StatefulSet", "ReplicaSet", "Deployment", "Job", "CronJob", "DaemonSet")
+by_uid = {(i.get("metadata") or {}).get("uid"): i for i in items
+          if i.get("kind") in WORKLOADS and (i.get("metadata") or {}).get("uid")}
+def owner_of(i):
+    for r in (i.get("metadata") or {}).get("ownerReferences") or []:
+        if r.get("controller"):
+            o = by_uid.get(r.get("uid"))
+            if o is not None and o.get("kind") == r.get("kind") and o["metadata"].get("name") == r.get("name"):
+                return o
+            return False
+    return None
+def top(i, depth=0):
+    o = owner_of(i) if i.get("kind") in ("Pod", "ReplicaSet", "Job") else None
+    if o is False or depth > 3:
+        return ("forged", None)
+    if o is None:
+        return (i.get("kind"), (i.get("metadata") or {}).get("name"))
+    return top(o, depth + 1)
+def allowed(i, labels):
+    if labels.get("medcea/probe") == "iam-research":
+        return set()
+    w = top(i)
+    if w == ("StatefulSet", "research-postgresql"):
+        return {"research-postgresql-auth"}
+    if w == ("Deployment", "lake-api"):
+        return {"lake-api-auth"}
+    if w in (("Deployment", "hub"), ("Deployment", "proxy")):
+        return {"hub"}
+    if w[0] == "Pod" and labels.get("component") == "singleuser-server":
+        return {"singleuser"}
+    return set()
+def spec_of(i):
+    k, s = i.get("kind"), i.get("spec") or {}
+    if k == "Pod":
+        return (i.get("metadata") or {}).get("labels") or {}, s
+    if k == "CronJob":
+        t = ((s.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}
+    else:
+        t = s.get("template") or {}
+    return (t.get("metadata") or {}).get("labels") or {}, t.get("spec") or {}
+def secrets(ps):
+    out = set()
+    for ctr in (ps.get("containers") or []) + (ps.get("initContainers") or []) + (ps.get("ephemeralContainers") or []):
+        for e in ctr.get("env") or []:
+            ref = ((e.get("valueFrom") or {}).get("secretKeyRef") or {}).get("name")
+            if ref:
+                out.add(ref)
+        for e in ctr.get("envFrom") or []:
+            ref = (e.get("secretRef") or {}).get("name")
+            if ref:
+                out.add(ref)
+    for v in ps.get("volumes") or []:
+        if (v.get("secret") or {}).get("secretName"):
+            out.add(v["secret"]["secretName"])
+        for src in (v.get("projected") or {}).get("sources") or []:
+            if (src.get("secret") or {}).get("name"):
+                out.add(src["secret"]["name"])
+    for r in ps.get("imagePullSecrets") or []:
+        if r.get("name"):
+            out.add(r["name"])
+    return out
+bad, roles, binds, exposed, n = [], [], [], [], 0
+for i in items:
+    k, nm = i.get("kind"), (i.get("metadata") or {}).get("name")
+    if k == "Service":
+        sp = i.get("spec") or {}
+        if sp.get("type") in ("NodePort", "LoadBalancer") or sp.get("externalIPs"):
+            exposed.append("%s (%s)" % (nm, "externalIPs" if sp.get("externalIPs") else sp.get("type")))
+        continue
+    if k == "Role":
+        if any(set(r.get("resources") or []) & {"secrets", "*"} for r in i.get("rules") or []):
+            roles.append(nm)
+        continue
+    if k == "RoleBinding":
+        if ((i.get("roleRef") or {}).get("kind")) == "ClusterRole":
+            binds.append("%s (%s)" % (nm, i["roleRef"].get("name")))
+        continue
+    labels, ps = spec_of(i)
+    n += 1
+    extra = sorted(secrets(ps) - allowed(i, labels))
+    if extra:
+        bad.append("%s/%s: %s" % (k.lower(), nm, ",".join(extra)))
+print("count|%d" % n)
+if bad:
+    print("FAIL|Secrets outside the allow-list: " + "; ".join(sorted(bad)[:5]) + (" (and %d more)" % (len(bad) - 5) if len(bad) > 5 else ""))
+if roles:
+    print("FAIL|Role(s) granting secrets or *: " + " ".join(sorted(roles)))
+if binds:
+    print("FAIL|RoleBinding(s) binding a ClusterRole: " + " ".join(sorted(binds)))
+if exposed:
+    print("FAIL|Service(s) reachable from outside the cluster (the zone admits node: a NodePort would open lake-api to the LAN): " + " ".join(sorted(exposed)))
+' <<<"$out" 2>/dev/null)"
+    local count=""
+    while IFS='|' read -r kind msg; do
+        case "$kind" in
+            count) count="$msg" ;;
+            FAIL)  fails+=("$msg") ;;
+            error) _record WARN "$name" "cannot parse the workloads and Roles in $RS_NS"; return ;;
+        esac
+    done <<<"$res"
+    [[ "$count" =~ ^[0-9]+$ ]] || { _record WARN "$name" "cannot judge the workloads in $RS_NS"; return; }
+    oks+=("$count pod spec(s) in $RS_NS name only their own Secrets; no Role on secrets, no ClusterRole bound, no Service exposed")
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get statefulset research-postgresql -n "$RS_NS" -o name 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'NotFound' <<<"$out"; then
+            oks+=("no research database yet")
+        else
+            warns+=("cannot read StatefulSet research-postgresql in $RS_NS: $(tail -n1 <<<"$out" | cut -c1-100)")
+        fi
+    else
+        rc=0
+        out="$(_rs_assert_grants "$RS_NS")" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            warns+=("cannot check the research database's grants: $out")
+        elif [[ -n "$out" ]]; then
+            fails+=("the research database's grants are not db/grants.sql's ($(grep -c . <<<"$out") problem(s)): $(head -n3 <<<"$out" | paste -sd ';' | sed 's/;/; /g' | cut -c1-200) (./apps/research/deploy.sh)")
+        else
+            oks+=("the research database's grants are db/grants.sql's")
+        fi
+    fi
+    local IFS=';'
+    if (( ${#fails[@]} )); then
+        _record FAIL "$name" "${fails[*]}"
+    elif (( ${#warns[@]} )); then
+        _record WARN "$name" "${warns[*]}"
+    else
+        _record OK "$name" "${oks[*]}"
+    fi
+}
+
+# =============================================================================
+# Check: the research lake reader (lake-api, research sandbox Phase 2b) — read-only
+# target: NAMESPACE (Deployment lake-api lives in the research namespace). SKIP without
+# deployment/lake-api (and while switched off or the policy has no research zone). FAIL when
+# apps/research/db/assert_grants.sql (read-only, the same queries as the deploy) prints a
+# line about rs_lake_api, rs_lake_reader or schema lake_api. WARN when no lake-api pod is
+# Running, its root (curl -m TIMEOUT http://<podIP>:3000/ from the host, which the zone's
+# rs-lake-api admits as node) does not answer 200, lake.snapshot_digest_check(<newest>)
+# reports a set whose recorded digest is not the one its rows give, or anything cannot be
+# read.
+# =============================================================================
+check_rslake() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" RS_NS out rc=0 line ip phase pod code fails=() warns=() oks=()
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    _rs_zone_ns "$name" "$ns" || return
+    out="$(timeout "$TIMEOUT" $KUBECTL get deployment lake-api -n "$RS_NS" -o name 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'NotFound' <<<"$out"; then
+            _record SKIP "$name" "no deployment lake-api in $RS_NS (./apps/lake-api/deploy.sh, once the policy has its pod)"
+        else
+            _record WARN "$name" "cannot read deployment lake-api in $RS_NS: $(tail -n1 <<<"$out" | cut -c1-120)"
+        fi
+        return
+    fi
+    rc=0
+    out="$(_rs_assert_grants "$RS_NS")" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warns+=("cannot check the lake reader's roles: $out")
+    else
+        line="$(grep -E 'rs_lake_api|rs_lake_reader|lake_api' <<<"$out")"
+        if [[ -n "$line" ]]; then
+            fails+=("rs_lake_api / rs_lake_reader break the lake reader's rules ($(grep -c . <<<"$line") problem(s)): $(head -n3 <<<"$line" | paste -sd ';' | sed 's/;/; /g' | cut -c1-200) (./apps/research/deploy.sh)")
+        else
+            oks+=("rs_lake_api reads only through lake_api")
+        fi
+    fi
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$RS_NS" -l app=lake-api \
+        -o jsonpath='{range .items[*]}{.metadata.name} {.status.phase} {.status.podIP}{"\n"}{end}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warns+=("cannot read the lake-api pods: $(tail -n1 <<<"$out" | cut -c1-100)")
+    else
+        read -r pod phase ip <<<"$(grep -m1 ' Running ' <<<"$out")"
+        if [[ -z "$pod" || -z "$ip" ]]; then
+            warns+=("no lake-api pod is Running in $RS_NS (microk8s kubectl -n $RS_NS describe deployment lake-api)")
+        else
+            code="$(curl -s -o /dev/null -m "$TIMEOUT" -w '%{http_code}' "http://$ip:3000/" 2>/dev/null)"
+            if [[ "$code" == 200 ]]; then
+                oks+=("$pod answers on :3000")
+            else
+                warns+=("$pod at $ip:3000 answered ${code:-nothing} from the host, not 200 (the snapshot reader is down, or rs-lake-api does not admit the node)")
+            fi
+        fi
+    fi
+    rc=0
+    out="$(timeout "$((TIMEOUT * 4))" $KUBECTL exec -i -n "$RS_NS" research-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' medcea_research 2>&1 <<'SQL'
+SELECT pg_catalog.to_regprocedure('lake.snapshot_digest_check(bigint)') IS NOT NULL AS has_check \gset
+\if :has_check
+SELECT 'newest|' || coalesce((SELECT max(snapshot_id)::text FROM lake.snapshot), '-');
+SELECT CASE WHEN d.ok IS TRUE THEN 'good|' ELSE 'bad|' END || d."set"
+  FROM lake.snapshot_digest_check((SELECT max(snapshot_id) FROM lake.snapshot)) d
+ WHERE EXISTS (SELECT 1 FROM lake.snapshot);
+\else
+SELECT 'state|nocheck';
+\endif
+SQL
+)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warns+=("cannot recompute the newest snapshot's digests: $(grep -m1 -E 'ERROR|error|NotFound|FATAL' <<<"$out" | cut -c1-100)")
+    elif grep -q '^state|nocheck$' <<<"$out"; then
+        warns+=("the research database has no lake.snapshot_digest_check yet (./apps/research/deploy.sh)")
+    else
+        local newest bad sets
+        newest="$(sed -n 's/^newest|//p' <<<"$out" | head -n1)"
+        bad="$(sed -n 's/^bad|//p' <<<"$out" | paste -sd ' ')"
+        sets="$(grep -cE '^(good|bad)\|' <<<"$out")"
+        if [[ "$newest" == "-" ]]; then
+            oks+=("no snapshot yet")
+        elif [[ ! "$newest" =~ ^[0-9]+$ ]] || (( sets == 0 )); then
+            warns+=("cannot read the newest snapshot's digest check")
+        elif [[ -n "$bad" ]]; then
+            warns+=("snapshot $newest: the recorded digest of $bad is not the one its lake rows give (lake.snapshot_digest_check($newest)): the lake changed after the export, or the digest rule did")
+        else
+            oks+=("snapshot $newest: its $sets set digest(s) recompute")
+        fi
+    fi
+    local IFS=';'
+    if (( ${#fails[@]} )); then
+        _record FAIL "$name" "${fails[*]}"
+    elif (( ${#warns[@]} )); then
+        _record WARN "$name" "${warns[*]}"
+    else
+        _record OK "$name" "${oks[*]}"
     fi
 }
 
@@ -3051,6 +3590,9 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         iamnetpol)    check_iamnetpol "$name" "$target" ;;
         rsnetpol)     check_rsnetpol "$name" "$target" ;;
         rsexport)     check_rsexport "$name" "$target" ;;
+        rsgrants)     check_rsgrants "$name" "$target" ;;
+        rslake)       check_rslake "$name" "$target" ;;
+        wbaccounts)   check_wbaccounts "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
     esac

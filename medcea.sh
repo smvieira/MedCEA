@@ -1229,7 +1229,8 @@ a_workbench() {
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Needs WORKBENCH_SECRET in config.env (written by ./deploy-infra.sh)."
            "Notebooks reach Keycloak and config-api (each person's own sign-in) only while IAM_POSTGREST_JWT and IAM_DB_ROLES are true. WORKBENCH_NOTEBOOK_REPO (OWNER/REPO) is the research repository the git guide names; WORKBENCH_IMAGE is pinned."
-           "Who may sign in, and who is hub administrator, come from the access policy (IAM_GATES=false: any realm account); a policy that does not compile stops the deploy and leaves the running hub as it is.")
+           "Who may sign in, and who is hub administrator, come from the access policy (IAM_GATES=false: any realm account); a policy that does not compile stops the deploy and leaves the running hub as it is."
+           "Where it runs is the access policy's too (research Phase 2b): the platform namespace, or the research zone once a skeleton version places the hub there. While its release is in the other namespace it changes nothing and exits 4 naming Infrastructure → Move the AI workbench; in the research zone with RESEARCH_ENABLED not true it is skipped and a running hub is left as it is.")
     plan_run
 }
 a_workbench_switch() { switch_flow WORKBENCH_ENABLED; }
@@ -1276,6 +1277,20 @@ a_research_namespace() {
     plan_run
 }
 a_research_switch() { switch_flow RESEARCH_ENABLED; }
+# Research sandbox Phase 2b: the AI workbench lives where the applied access policy places it
+# (pod hub in the research zone: the research namespace; else the platform namespace).
+# --move copies the homes to the other namespace with sudo and reinstalls the hub there.
+a_wb_move() {
+    CMD=(env MEDCEA_CONFIRMED=1 ./infra/deploy-workbench.sh --move)
+    EFFECT="the JupyterHub release moves to the namespace the access policy places it in: hub and proxy stopped, every home volume set to Retain, the release uninstalled, each home copied (sudo cp -a) into a new volume there, the hub reinstalled; a fresh hub database (hub users and their API tokens are dropped); the old homes and their directories are kept"
+    LOCK=yes; LEVEL=destroy; SUDO="yes (cp -a of each home into the target namespace's volume directory)"; CFG_NEEDED=yes
+    NOTES=("Refused while a notebook server runs, while WORKBENCH_ENABLED is not true, into the research zone while RESEARCH_ENABLED is not true or the zone's network policies are not live, and when the target namespace does not exist."
+           "The direction is the applied policy's: into the research zone once a skeleton version places the hub there (Policy → Research Phase 2b runs it in its chain), back to the platform after a version that undoes it."
+           "ADMIN_USER's own home is not copied (hub administration gives no workspace in the research zone). Nothing is deleted on disk: it prints the old claims and directories, and how to remove each once checked."
+           "Your typed yes here is the move's confirmation (MEDCEA_CONFIRMED=1), so it does not ask again; sudo asks for your password for each copy."
+           "deploy-workbench.sh exits 4 with 'the AI workbench moves with ./infra/deploy-workbench.sh --move' while the release and the policy disagree; ./deploy-infra.sh then lists it under Still to do.")
+    plan_run
+}
 
 # ── Applications ──
 a_apps_menu() {
@@ -1457,6 +1472,25 @@ a_research_reserve() {
     LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Refused for a range already exported (it is no longer held out) and for a range ending more than a year ahead."
            "Your typed yes here is reserve.sh's confirmation (MEDCEA_CONFIRMED=1), so it does not ask again.")
+    plan_run
+}
+# Research sandbox Phase 2b: the snapshot reader (apps/lake-api), read-only PostgREST over the
+# research database's lake_api functions, reachable only from the notebooks (network-gated).
+a_lake_api_deploy() {
+    CMD=(./apps/lake-api/deploy.sh)
+    EFFECT="research namespace: Secret lake-api-auth, Deployment and Service lake-api (PostgREST, read-only, as rs_lake_api)"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true, the applied access policy has no lake-api pod, no policy version is applied, the research namespace or the research database does not exist yet."
+           "Refused while the zone's network policy for it (rs-lake-api) is not live: it is never an open pod."
+           "./apps/research/deploy.sh runs it as its last step; on its own after a policy change. Health: Research lake reader.")
+    plan_run
+}
+a_lake_api_uninstall() {
+    CMD=(./apps/lake-api/uninstall.sh)
+    EFFECT="removes Deployment, Service and Secret lake-api (label app=lake-api); the research database and its snapshots stay"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Notebooks lose the lake (medcea_data.connect() says the lake reader is not reachable) until it is deployed again."
+           "No confirmation of its own: medcea.sh's is the only one.")
     plan_run
 }
 a_research_reservations() {
@@ -1697,12 +1731,13 @@ recipe() {
             PRE=("The applied access policy has the research zone (an approved skeleton version: ./apps/iam/apply.sh --status); without it every step below says skipped and changes nothing."
                  "No run is being started meanwhile: ./deploy-infra.sh redeploys the platform's services.")
             STEPS=("set RESEARCH_ENABLED true" "run ./deploy-infra.sh" "run ./apps/database/deploy.sh" "run ./apps/research/deploy.sh" "run ./apps/backup/deploy.sh" "run ./apps/research-export/deploy.sh")
-            AFTER=("The order: ./deploy-infra.sh (the namespace and its policies), ./apps/database/deploy.sh (svc_research_export's password and Secret db-svc-research-export, which the export needs), ./apps/research/deploy.sh (the research database, Secret research-backup), ./apps/backup/deploy.sh (the nightly backup dumps medcea_research from now on), ./apps/research-export/deploy.sh."
+            AFTER=("The order: ./deploy-infra.sh (the namespace and its policies), ./apps/database/deploy.sh (svc_research_export's password and Secret db-svc-research-export, which the export needs), ./apps/research/deploy.sh (the research database, Secret research-backup, then the lake reader once the policy has its pod), ./apps/backup/deploy.sh (the nightly backup dumps medcea_research from now on), ./apps/research-export/deploy.sh."
                    "Before the first nightly export (03:00 UTC), have qa reserve the held-out ranges: Applications → Reserve a held-out range. A range already exported can no longer be held out."
                    "Verify: ./health-check.sh (Research network policies, Research export); ./apps/backup/backups.sh now, then verify: its MANIFEST lists medcea_research under # databases.") ;;
         RESEARCH_ENABLED:rollback)
-            STEPS=("set RESEARCH_ENABLED false" "run ./apps/research-export/uninstall.sh" "run ./apps/research/uninstall.sh")
-            AFTER=("The export stops and the research database is removed; its volume (every snapshot and reservation) and the research namespace stay. ./deploy-infra.sh says how to remove the namespace while it is there."
+            PRE=("The AI workbench lives in the research zone while the policy places it there: it is left running and unmanaged, and its notebooks lose the lake.")
+            STEPS=("set RESEARCH_ENABLED false" "run ./apps/research-export/uninstall.sh" "run ./apps/lake-api/uninstall.sh" "run ./apps/research/uninstall.sh")
+            AFTER=("The export stops, the lake reader and the research database are removed; the database's volume (every snapshot and reservation) and the research namespace stay. ./deploy-infra.sh says how to remove the namespace while it is there."
                    "To drop the data too: Applications → Uninstall the research database with --purge-data.") ;;
         *) REFUSE="no recipe for $key $dir" ;;
     esac
@@ -2406,7 +2441,7 @@ a_policy_apply() {
     CMD=(./apps/iam/apply.sh "$v" --check-only --by "$BY_USER")
     EFFECT="nothing (--check-only: no lock, no file, read-only transactions; Keycloak and the realm's keys read through a port-forward; the health baseline)"
     SUDO=mk8s; CFG_NEEDED=yes
-    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the nine checks apply.sh verifies against FAILs now."
+    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the ten checks apply.sh verifies against FAILs now."
            "It prints what the version changes per target and per role; the apply itself is offered after it.")
     plan_run
     [[ "$PLAN_GO" == yes ]] || return 0
@@ -2494,6 +2529,27 @@ a_policy_superset_install() {
     NOTES=("Only after the change version with Superset's cells is applied (./apps/iam/apply.sh N): its rollout printed 'not deployed' for Superset, so this is the first install."
            "The first install pulls the image and waits for the init Job (up to ~20 minutes). Each step runs only if the one before it succeeded."
            "Expected: Superset roles OK in the health check; superset:8088 times out from the probe pod; every role the policy maps signs in, the others are refused with \"No access to Superset\"; the backup lists db/superset.dump.")
+    plan_run
+}
+# Research sandbox Phase 2b (SPEC §7 step 5): the skeleton version that moves the workbench
+# into the research zone, applied and followed by the move, the lake reader and the resume
+# that closes apply.sh's deferral, under one lock.
+a_policy_rs2b_switch() {
+    local v
+    ask_policy_version "The approved skeleton version of research Phase 2b (apply.sh --status)"
+    v="$ANSWER"
+    ask_policy_by
+    CMD=(./apps/iam/apply.sh "$v" --by "$BY_USER" "&&" env MEDCEA_CONFIRMED=1 ./infra/deploy-workbench.sh --move
+         "&&" ./apps/lake-api/deploy.sh "&&" env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --resume --by "$BY_USER"
+         "&&" ./health-check.sh)
+    EFFECT="database: version $v applied (a permanent record; notebooks' token client workbench-notebook leaves pre_request); the NetworkPolicies re-rendered (config-api's, the research zone's with the hub, its proxy, the notebooks and lake-api); the AI workbench moved into the research zone (homes copied with sudo, a fresh hub database, Keycloak client workbench-notebook disabled); the lake reader installed; the workbench's deferral closed; then the health check (read-only)"
+    LOCK="yes, held by medcea.sh for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=destroy; SUDO="yes (the move's cp -a of each home)"; CFG_NEEDED=yes
+    NOTES=("Before: no notebook server may run (the move refuses), and the engineer's Superset dashboard is exported (the change version that follows stops Superset)."
+           "Run it from a checkout of the skeleton version's commit (git checkout <commit B>): between that checkout and the end of apply.sh $v every compiling deploy exits 2 (the skeleton gate); run nothing else in between."
+           "apply.sh $v asks its own [y/N] and records the workbench as deferred (apply_deferred: it moves with --move); your typed yes here is the move's and the resume's confirmation (MEDCEA_CONFIRMED=1)."
+           "Each step runs only if the one before it succeeded. A stop after the apply leaves the deferral open (health FAILs it): run the remaining steps, or this again from the move."
+           "Afterwards: ./apps/iam/deploy.sh (the Policy UI still ships the old skeleton until then; health Access policy version WARNs on its digest), ./deploy-infra.sh once more, then tests/iam-research.sh, tests/iam-workbench.sh and tests/iam-hosts.sh; the change version with the cells is drafted from defaults in the Policy UI.")
     plan_run
 }
 a_policy_export() {
@@ -2601,6 +2657,21 @@ a_iam_network() {
     NOTES=("Meaningful only with IAM_NETPOL=true.")
     plan_run
 }
+a_iam_research() {
+    local wan=""
+    echo "  Optional: the router's public (WAN) address, to check that notebooks cannot reach the platform"
+    echo "  back through it on 443 (hairpin). Never looked up from an outside service; Enter = skip."
+    ask_match "WAN address (Enter = skip)" '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' "an IPv4 address such as 203.0.113.7" "" optional
+    wan="$ANSWER"
+    CMD=(tests/iam-research.sh)
+    [[ -n "$wan" ]] && CMD+=(--wan-ip "$wan")
+    EFFECT="cluster: a busybox probe pod in the research namespace labelled as a notebook, deleted on exit"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Refused (exit 2) unless the applied access policy places the AI workbench in the research zone."
+           "It must time out on config-api, the broker, PostgreSQL, the scheduler, the research database, the ingress controller, the node and the host's Tailscale address; it must reach lake-api and one internet host on 443."
+           "A WAN address that answers is a hairpin: add it as a /32 to the zone's internet_except by a skeleton version.")
+    plan_run
+}
 a_iam_access() {
     CMD=(tests/iam-access.sh)
     EFFECT="Keycloak: 4 throwaway accounts, deleted on exit; database: their decisions stay in append-only iam.account_decision"
@@ -2647,7 +2718,7 @@ a_iam_policy() {
     esac
     NOTES=("Needs IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true, run after Deploy IAM 4.4. Refused while a change or skeleton version is open."
            "If it stops half-way it withdraws its version (in the Policy UI, else apply.sh --withdraw-open) before deleting the accounts.")
-    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the nine checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
+    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the ten checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
                              "If it stops after its apply it finishes it (--resume)$([[ "$m" == --change ]] && echo ", rolls it back and has the rollback confirmed") before deleting the accounts.")
     plan_run
 }
@@ -2952,6 +3023,7 @@ AREA_INFRA=(
     "a_manual_publish|Publish the manual to the portal|./infra/publish-manual.sh: build docs/manual and serve it at /manual/; nothing else."
     "a_research_namespace|Deploy the research namespace|./infra/deploy-research-namespace.sh: the research zone's namespace, quota, limits and network policies."
     "a_research_switch|Turn the research sandbox on or off|RESEARCH_ENABLED in config.env, then the deploys."
+    "a_wb_move|Move the AI workbench between the platform and the research zone|./infra/deploy-workbench.sh --move: where the access policy places it; homes copied with sudo, a fresh hub database."
 )
 AREA_APPS=(
     "a_apps_menu|Pick components from a menu|./deploy-apps.sh (its own checkbox menu)."
@@ -2969,6 +3041,8 @@ AREA_APPS=(
     "a_research_export_uninstall|Uninstall the research export|./apps/research-export/uninstall.sh: the snapshots stay."
     "a_research_reserve|Reserve a held-out range (qa)|./apps/research/reserve.sh add: readings no snapshot will hold; permanent."
     "a_research_reservations|List the held-out reservations|./apps/research/reserve.sh list."
+    "a_lake_api_deploy|Install the lake reader|./apps/lake-api/deploy.sh: notebooks read person-free snapshots; skipped until the policy has its pod."
+    "a_lake_api_uninstall|Uninstall the lake reader|./apps/lake-api/uninstall.sh: the snapshots stay."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."
@@ -3005,6 +3079,7 @@ AREA_HEALTH=(
     "a_iam_workbench|Workbench: admin cannot open others' servers|tests/iam-workbench.sh: throwaway accounts, takes the deploy lock."
     "a_iam_mqtt|MQTT Explorer personal credentials test|tests/iam-mqtt.sh: throwaway accounts, takes the deploy lock."
     "a_iam_policy|Policy drafting, approval and apply test (IAM 4.4, 4.5)|tests/iam-policy.sh: throwaway accounts; a version withdrawn, or applied for real (--apply, --change)."
+    "a_iam_research|Research zone network test (Phase 2b)|tests/iam-research.sh: a throwaway probe pod as a notebook; what it must not reach, and lake-api and 443."
 )
 AREA_EDGE=(
     "a_flash|Flash and register a board|./edge/flash-device.sh: an ESP32 over USB into a unit/zone slot."
@@ -3042,6 +3117,7 @@ AREA_POLICY=(
     "a_policy_audit|Audit an applied version|./apps/iam/apply.sh --audit N (read-only)."
     "a_policy_superset_skeleton|Superset stage C: after the skeleton version|The database and iam deploys, then health, under one lock: svc_superset's password and the Policy UI's skeleton."
     "a_policy_superset_install|Superset stage C: install Superset|After the change version: the Superset deploy, health, the live gate, network and sign-in tests, a backup, under one lock."
+    "a_policy_rs2b_switch|Research Phase 2b: apply the skeleton version and move the workbench|apply.sh N, the workbench's move into the research zone, the lake reader, the resume, health, under one lock."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."
@@ -3057,7 +3133,7 @@ AREAS=(
     "AREA_SWITCHES|IAM switches (enable / roll back)|Turn an IAM phase on or back off, or every one still off at once, in the documented order."
     "AREA_HEALTH|Health and tests|Health check, IAM checks and tests."
     "AREA_EDGE|Edge devices|Flash and register ESP32 boards; the onboarding wizard."
-    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, the IAM 4.1, 4.2a and 4.3 deploys, the IAM 4.4 deploy, skeleton proposals and the host withdraw, and the IAM 4.5 deploy, applying, rolling back and auditing versions, and Superset stage C."
+    "AREA_POLICY|Policy|What the access policy compiles to (read-only), its versions, re-rendering what drifted, break-glass, the Policy UI, the IAM 4.1, 4.2a and 4.3 deploys, the IAM 4.4 deploy, skeleton proposals and the host withdraw, and the IAM 4.5 deploy, applying, rolling back and auditing versions, Superset stage C, and research Phase 2b (the skeleton version and the workbench's move)."
     "AREA_BACKUP|Backups|The nightly backup: run one now, list, check, how to restore."
 )
 

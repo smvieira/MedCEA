@@ -33,7 +33,12 @@
 #   live     the running hub pod carries the Deployment's checksum/secret
 #   notebooks (IAM 3.2b) the singleuser egress equals `policy_workbench_egress` (Keycloak
 #            and config-api only while IAM_POSTGREST_JWT and IAM_DB_ROLES are true, else
-#            none), private addresses still closed, and the pod environment names no secret
+#            none), private addresses still closed, and the pod environment names no secret.
+#            Research placement (Phase 2b: the policy has pod hub in the research zone; the
+#            hub's namespace is `workbench_namespace`): the chart's own NetworkPolicy off,
+#            blockWithIptables false, the hook hub.extraConfig.medcea-a2 present, the lake
+#            reader's address in the environment and still no secret there; a release only in
+#            the other namespace FAILs (./infra/deploy-workbench.sh --move)
 #   sign-in  /hub/login (auto_login → /hub/oauth_login) reaches Keycloak's login page
 #   reach    some enabled account holds a role the hub admits
 # The onboarding wizard and pgAdmin [tool (…)] (ONBOARD_DOMAIN, PGADMIN_DOMAIN, IAM 3.4):
@@ -65,7 +70,9 @@
 # Then the edge-wizard client (IAM 1.5): device authorization grant on, no service
 # account, and the realm's discovery document lists device_authorization_endpoint; and
 # the workbench-notebook client (IAM 3.2b): public, device grant only (no browser flow,
-# no password grant, no service account), default scopes groups and medcea-identity; and
+# no password grant, no service account), default scopes groups and medcea-identity, while
+# the applied policy names it as a token client (cli.py has-token-client); once it does not
+# (research Phase 2b, D2) it must be absent or disabled; and
 # the superset client (stage C, created by ./deploy-infra.sh whether or not Superset is in
 # the policy yet): enabled, its redirect URIs admit Superset's callback and nothing off its
 # host, its post-logout URIs admit the one-hop sign-out's return (the running pod's
@@ -79,7 +86,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,73p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -204,8 +211,21 @@ check_workbench() {
     local WORKBENCH_ALLOW_ALL WORKBENCH_HUBADMIN_USERS WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS WORKBENCH_403_MESSAGE WORKBENCH_EGRESS
     if [[ "${WORKBENCH_ENABLED:-true}" != "true" ]]; then skip gate "WORKBENCH_ENABLED is not true"; return; fi
     policy_workbench 2>/dev/null || { fail gate "policy_workbench failed (cli.py check)"; return; }
+    # where the policy places the hub (research sandbox Phase 2b)
+    local place wbns other
+    place="$(workbench_placement 2>/dev/null)" && wbns="$(workbench_namespace 2>/dev/null)" \
+        || { fail gate "cannot tell where the access policy places the hub (cli.py pod-zone hub)"; return; }
+    if [[ "$place" == research ]]; then other="$NAMESPACE"; else other="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"; fi
+    if $KUBECTL get secret hub -n "$other" -o name >/dev/null 2>&1; then
+        if $KUBECTL get secret hub -n "$wbns" -o name >/dev/null 2>&1; then
+            fail gate "the workbench release is in two namespaces, $wbns and $other"
+        else
+            fail gate "the hub runs in $other, the access policy places it in $wbns ($place): ./infra/deploy-workbench.sh --move"
+        fi
+        return
+    fi
     # the values hold the client secret: parsed on stdin, only the gate's fields printed
-    live="$($KUBECTL get secret hub -n "$NAMESPACE" -o jsonpath='{.data.values\.yaml}' 2>/dev/null | base64 -d 2>/dev/null \
+    live="$($KUBECTL get secret hub -n "$wbns" -o jsonpath='{.data.values\.yaml}' 2>/dev/null | base64 -d 2>/dev/null \
         | python3 -c '
 import json, sys, yaml
 v = yaml.safe_load(sys.stdin)
@@ -229,10 +249,15 @@ np = s.get("networkPolicy") or {}
 eg = np.get("egressAllowRules") or {}
 print("egress\t" + json.dumps(np.get("egress") or [], sort_keys=True, separators=(",", ":")))
 print("closed\t" + json.dumps(np.get("enabled") is True and eg.get("privateIPs") is False))
+hook = (v["hub"].get("extraConfig") or {}).get("medcea-a2")
+print("zone\t" + json.dumps(np.get("enabled") is False
+                            and (s.get("cloudMetadata") or {}).get("blockWithIptables") is False
+                            and isinstance(hook, str) and "c.KubeSpawner.pre_spawn_hook = _medcea_a2" in hook))
 env = s.get("extraEnv") or {}
 names = list(env) if isinstance(env, dict) else [e.get("name", "") for e in env]
+print("lake\t" + json.dumps("MEDCEA_LAKE" in names))
 print("envsecret\t" + json.dumps(sorted(n for n in names if any(w in n.upper() for w in ("SECRET", "PASS", "TOKEN")))))')" \
-        || { fail gate "no hub Secret in $NAMESPACE"; return; }
+        || { fail gate "no hub Secret in $wbns"; return; }
     declare -A L=()
     while IFS=$'\t' read -r k x; do L[$k]="$x"; done <<<"$live"
     local sorted_list='import json, sys; print(json.dumps(sorted(json.loads(sys.argv[1]))))'
@@ -257,17 +282,27 @@ print("envsecret\t" + json.dumps(sorted(n for n in names if any(w in n.upper() f
     fi
 
     local tmpl pod
-    tmpl="$($KUBECTL get deployment hub -n "$NAMESPACE" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
-    pod="$($KUBECTL get pods -n "$NAMESPACE" -l component=hub --field-selector=status.phase=Running \
+    tmpl="$($KUBECTL get deployment hub -n "$wbns" -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}' 2>/dev/null)"
+    pod="$($KUBECTL get pods -n "$wbns" -l component=hub --field-selector=status.phase=Running \
         -o jsonpath='{range .items[*]}{.metadata.annotations.checksum/secret}{"\n"}{end}' 2>/dev/null | sort -u)"
     if [[ -n "$tmpl" && "$pod" == "$tmpl" ]]; then
-        pass live "the hub pod runs the deployed values"
+        pass live "the hub pod runs the deployed values ($wbns)"
     else
         fail live "the running hub pod does not carry the Deployment's checksum/secret (rollout pending?)"
     fi
 
     local want_egress
-    if ! policy_workbench_egress 2>/dev/null; then
+    if [[ "$place" == research ]]; then
+        if [[ "${L[zone]}" != true ]]; then
+            fail notebooks "in the research zone the chart's NetworkPolicy must be off, blockWithIptables false and the medcea-a2 hook present (./infra/deploy-workbench.sh)"
+        elif [[ "${L[envsecret]}" != "[]" ]]; then
+            fail notebooks "the notebook environment names ${L[envsecret]}: no credential may reach a notebook pod"
+        elif [[ "${L[lake]}" != true ]]; then
+            fail notebooks "the notebook environment lacks MEDCEA_LAKE: notebooks cannot find the snapshot reader (./infra/deploy-workbench.sh)"
+        else
+            pass notebooks "research zone: the zone's own policies only, the snapshot reader, no credential"
+        fi
+    elif ! policy_workbench_egress 2>/dev/null; then
         fail notebooks "policy_workbench_egress failed (cli.py check)"
     else
         want_egress="$(python3 -c 'import json, sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":")))' "$WORKBENCH_EGRESS")"
@@ -711,6 +746,8 @@ fi
 # k8s/workbench/examples/medcea_data.py): public, device grant only.
 echo ""
 echo -e "${BOLD}workbench-notebook client${NC}  (device sign-in from a notebook)"
+# Research sandbox Phase 2b (D2): it exists only while the applied policy names it as a token client.
+_wn_named=0; python3 apps/iam/compiler/cli.py has-token-client workbench-notebook >/dev/null 2>&1 || _wn_named=$?
 _wn="$($KUBECTL exec -i -n "$NAMESPACE" rdbms-postgresql-0 -- sh -c \
     'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -F " " -v realm="$0"' \
     "$KEYCLOAK_REALM" 2>/dev/null <<'SQL'
@@ -718,13 +755,22 @@ SELECT c.public_client, c.standard_flow_enabled, c.direct_access_grants_enabled,
        coalesce((SELECT a.value FROM client_attributes a
                   WHERE a.client_id = c.id AND a.name = 'oauth2.device.authorization.grant.enabled'), '-'),
        (SELECT count(*) FROM client_scope_client d JOIN client_scope s ON s.id = d.scope_id
-         WHERE d.client_id = c.id AND d.default_scope AND s.name IN ('groups', 'medcea-identity'))
+         WHERE d.client_id = c.id AND d.default_scope AND s.name IN ('groups', 'medcea-identity')),
+       c.enabled
   FROM client c JOIN realm r ON r.id = c.realm_id AND r.name = :'realm'
  WHERE c.client_id = 'workbench-notebook';
 SQL
 )" || _wn=""
-read -r _wn_pub _wn_std _wn_pw _wn_sa _wn_dev _wn_scopes <<<"$_wn"
-if [[ -z "$_wn" ]]; then
+read -r _wn_pub _wn_std _wn_pw _wn_sa _wn_dev _wn_scopes _wn_on <<<"$_wn"
+if [[ $_wn_named -eq 1 ]]; then
+    if [[ -n "$_wn" && "$_wn_on" != "f" ]]; then
+        fail client "workbench-notebook is enabled, yet the applied policy names it as no token client — run ./deploy-infra.sh (it disables it)"
+    else
+        pass client "retired by the access policy: ${_wn:+disabled}${_wn:-absent} (notebooks read the lake, with no identity)"
+    fi
+elif [[ $_wn_named -ne 0 ]]; then
+    fail client "cannot tell whether the applied policy names workbench-notebook (python3 apps/iam/compiler/cli.py check)"
+elif [[ -z "$_wn" ]]; then
     fail client "workbench-notebook not found in Keycloak's database (or it is not readable) — run ./deploy-infra.sh"
 elif [[ "$_wn_pub" != "t" || "$_wn_std" != "f" || "$_wn_pw" != "f" || "$_wn_sa" != "f" ]]; then
     fail client "workbench-notebook is not public device-only (public=$_wn_pub standard=$_wn_std password=$_wn_pw service=$_wn_sa) — run ./deploy-infra.sh"

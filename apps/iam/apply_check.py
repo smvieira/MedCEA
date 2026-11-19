@@ -112,7 +112,7 @@ IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
         §14.8.7 step 3 and the bound (OA-c): K is a rollback target and today's skeleton with
         its rows grants no role more than the skeleton it was approved under
   rollback-diff --state S --stage DIR    the rollback's diff against the applied version
-  verify-conf --out F [--drop T]   step 9's conf (nine checks)
+  verify-conf --out F [--drop T]   step 9's conf (ten checks)
   classify-sql [--without-iam]     health-check iamgrants' tail after the verify SQL (Phase 5,
         G4): the assertion set that ran, and under IAM_DB_ROLES=false I15's classification as a
         read-only query (a WARN there); never part of a compiled target or a bundle
@@ -122,6 +122,7 @@ IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
   verify-host --reference DIR      the written host file compiles to exactly DIR
   deferred-check --command C       the step-9 check a deferred scoped command drops
   deferred-reason --command C      why it deferred (line 1) and when --resume closes it (line 2)
+  deferred-target --command C      the target apply_deferred names (DEFER_TARGET, else the script's folder)
   bundle-sql --kind change|skeleton|rollback --stage DIR --doc D ... | --kind revert --stage DIR
         step 7's PRE and POST, and the revert bundle's (§14.8.6)
 """
@@ -772,15 +773,32 @@ SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
 # Step 9 (design §14.8.6): the checks of what a version changes, through health-check.sh -c
 VERIFY_CHECKS = (("iamgrants", "$POSTGRES_DB"), ("iamenforce", "$NAMESPACE"), ("grafanarole", "$NAMESPACE"),
                  ("iamworkbench", "$NAMESPACE"), ("onboardroles", ""), ("pgadminroles", "$NAMESPACE"),
-                 ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"), ("supersetroles", "$NAMESPACE"))
+                 ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"), ("supersetroles", "$NAMESPACE"),
+                 # research sandbox Phase 2b: an apply that re-renders the research zone sees its drift
+                 ("rsnetpol", "$NAMESPACE"))
 # A scoped command's exit 4 (deferred) drops the check that would FAIL on the old setting
 DEFER_CHECK = {"./apps/edge-wizard/deploy.sh --gate-only": "onboardroles",
-               "./apps/superset/deploy.sh --gate-only": "supersetroles"}
+               "./apps/superset/deploy.sh --gate-only": "supersetroles",
+               "./infra/deploy-workbench.sh --policy-only": "iamworkbench"}
 # ... and why it deferred (apply_deferred's reason), and when --resume can close it
 DEFER_REASON = {"./apps/edge-wizard/deploy.sh --gate-only":
                 ("an onboarding run is in progress", "once the onboarding run has finished"),
                 "./apps/superset/deploy.sh --gate-only":
-                ("Superset's wheel cache is incomplete", "once ./apps/superset/deploy.sh has filled the wheel cache")}
+                ("Superset's wheel cache is incomplete", "once ./apps/superset/deploy.sh has filled the wheel cache"),
+                "./infra/deploy-workbench.sh --policy-only":
+                ("the AI workbench moves into the research zone", "once ./infra/deploy-workbench.sh --move has run")}
+# ... and the target apply_deferred names (research sandbox Phase 2b): the full command is the
+# key; any other command's target is its script's folder (./apps/superset/deploy.sh → superset),
+# which would name ./infra/* `infra`
+DEFER_TARGET = {"./infra/deploy-workbench.sh --policy-only": "workbench"}
+
+
+def deferred_target(command):
+    """The target name apply_deferred records for a deferring scoped command."""
+    if command in DEFER_TARGET:
+        return DEFER_TARGET[command]
+    first = (command.split() or [""])[0]
+    return os.path.basename(os.path.dirname(first))
 RESULT = re.compile(r"\[\s*(OK|WARN|FAIL|SKIP)\s*\]\s+step9:([a-z]+)")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -1856,12 +1874,16 @@ def targets(p):
     """[(name, cli argv)] of every target, describe-gate excluded (it needs the proxy list)."""
     t = [("routes", ["compile", "routes"]), ("mqtt", ["compile", "mqtt"]),
          ("netpol", ["compile", "netpol"] + NETPOL_ARGS),
-         ("egress-notebooks", ["compile", "egress", "notebooks"]),
          ("grafana", ["compile", "grafana"]),
          ("jupyterhub-allowed", ["compile", "jupyterhub", "--setting", "allowed_groups"]),
          ("jupyterhub-admin", ["compile", "jupyterhub", "--setting", "admin_groups"]),
          ("node-red", ["compile", "node-red"]), ("edge-wizard", ["compile", "edge-wizard"]),
          ("pgadmin", ["compile", "pgadmin"])]
+    # the notebooks' egress hops (IAM 3.2b) only while the policy has the client: research
+    # sandbox Phase 2b removes it (D2), and a version without it compiles no such target
+    # (no digest key: digests_of never read it, so the audits of versions 1-7 are unchanged)
+    if "notebooks" in ((p.data.get("network") or {}).get("clients") or {}):
+        t.insert(3, ("egress-notebooks", ["compile", "egress", "notebooks"]))
     # Superset (stage C) only while its group gives some role a setting: a policy without the
     # tool, or with the block but no cell, compiles exactly the targets (and digests) it did
     # before, so versions 1-14 audit as recorded (F3)
@@ -2518,6 +2540,8 @@ def main(argv=None):
     c.add_argument("--command", required=True)
     c = sub.add_parser("deferred-reason")
     c.add_argument("--command", required=True)
+    c = sub.add_parser("deferred-target")
+    c.add_argument("--command", required=True)
     c = sub.add_parser("apply-extra")
     c.add_argument("--doc", required=True)
     c.add_argument("--stage", required=True)
@@ -2789,6 +2813,9 @@ def main(argv=None):
             c = DEFER_CHECK.get(a.command)
             if c:
                 print(c)
+            return 0
+        if a.cmd == "deferred-target":
+            print(deferred_target(a.command))
             return 0
         if a.cmd == "deferred-reason":
             print("\n".join(DEFER_REASON.get(a.command, ("its scoped mode deferred it (exit 4)",

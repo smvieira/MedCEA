@@ -149,6 +149,33 @@ def _research(*mutations):
     return apply
 
 
+def _nb(*mutations):
+    """A mutation of network.clients.notebooks: v7's client (and config-api's
+    client:notebooks source) put back first when absent (tests/rs2b_fixture.py
+    with_notebooks_client; research sandbox Phase 2b's commit B removes it), so these cases
+    hold on either side of B."""
+    def apply(d):
+        import rs2b_fixture
+        restored = rs2b_fixture.with_notebooks_client(d)
+        d.clear()
+        d.update(restored)
+        for m in mutations:
+            m(d)
+    return apply
+
+
+def _i19(*mutations):
+    """A mutation with the invariant I19 named in the policy's `invariants:` list first (commit
+    B of research sandbox Phase 2b adds the line; without it the check is inert)."""
+    def apply(d):
+        import rs2b_fixture
+        if not any(i.get("code") == "I19" for i in d["invariants"]):
+            d["invariants"].append(copy.deepcopy(rs2b_fixture.I19))
+        for m in mutations:
+            m(d)
+    return apply
+
+
 # Each case must make the checker fail. The expected text is a fragment of the first
 # matching error, so a case that fails for the wrong reason is caught too.
 MUTATIONS = {
@@ -192,13 +219,13 @@ MUTATIONS = {
                                        "ONBOARD_DOMAIN serves config-api"),
     "scientist exports telemetry": (_set(["matrix", "measurements", "bio_scientist"], ["R", "X"]), "I5"),
     "notebooks reach config-api, which does not admit them": (
-        _set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui", "node"]),
+        _nb(_set(["network", "pods", "config-api", "ingress", 0, "from"], ["pod:config-ui", "node"])),
         "which does not admit client:notebooks"),
     "config-api admits notebooks without their egress hop": (
-        lambda d: d["network"]["clients"]["notebooks"]["egress"].pop(0), "which has no egress hop there"),
-    "notebook token client is a host's client": (_set(["network", "clients", "notebooks", "token_client"], "config"),
+        _nb(lambda d: d["network"]["clients"]["notebooks"]["egress"].pop(0)), "which has no egress hop there"),
+    "notebook token client is a host's client": (_nb(_set(["network", "clients", "notebooks", "token_client"], "config")),
                                                  "is a host's client"),
-    "notebook token client without read_only": (_pop(["network", "clients", "notebooks", "read_only"]),
+    "notebook token client without read_only": (_nb(_pop(["network", "clients", "notebooks", "read_only"])),
                                                 "needs read_only: true or false"),
     # IAM 4.1: the one exception to "never a host's client" (only_rpc), and I12's availability rule
     "host client as token_client without only_rpc": (_pop(["network", "clients", "iam-approvals", "only_rpc"]),
@@ -214,7 +241,7 @@ MUTATIONS = {
     "I12 approver only at availability later": (_set(["roles", "qa", "availability"], "later"),
                                                 "I12 every role holding A on iam_policy"),
     "notebook hop with pod and selector": (
-        lambda d: d["network"]["clients"]["notebooks"]["egress"][1].__setitem__("pod", "config-api"),
+        _nb(lambda d: d["network"]["clients"]["notebooks"]["egress"][1].__setitem__("pod", "config-api")),
         "names either pod or selector"),
     "unknown per-level constraint": (_set(["matrix", "runs", "operator", "constraint"], {"R": "own_unit", "O": "nope"}),
                                      "unknown constraint nope"),
@@ -330,6 +357,14 @@ MUTATIONS = {
     "engineer changes a promotion": (_research(_set(["matrix", "research_promotion", "engineer"], ["R", "C", "U"])),
                                      "I18 engineer"),
     "a group in an unknown zone": (_research(_set(["resource_groups", "research_promotion", "zone"], "lab")), "zone 'lab' unknown"),
+    # Research sandbox Phase 2b: a matrix row that is no mapping, and I19 (SoD-3) once named
+    "a matrix row left empty (YAML None)": (_set(["matrix", "analysis"], None),
+                                            'matrix row analysis is empty or not a mapping: write "analysis: {}"'),
+    "a matrix row that is a list": (_set(["matrix", "dashboards"], ["R"]), "matrix row dashboards is empty or not a mapping"),
+    "admin reads the research export (I19)": (_i19(lambda d: d["matrix"].setdefault("research_export", {}).__setitem__("admin", ["R"])),
+                                              "I19 admin holds ['R'] on research group research_export"),
+    "admin works in the workbench (I19)": (_i19(_set(["matrix", "research_workbench", "admin"], ["K", "R"])),
+                                           "I19 admin holds ['K', 'R'] on research group research_workbench"),
 }
 
 
@@ -3863,6 +3898,76 @@ class AppGateTest(unittest.TestCase):
             with open(os.path.join(REPO, script)) as f:
                 raw = f.read()
             self.assertEqual(raw.count("app_gate "), len(APP_GATE.findall(raw)), script)
+
+
+class Phase2bCheckerTest(unittest.TestCase):
+    """Research sandbox Phase 2b, commit A: a matrix row that is no mapping is a checker error,
+    never a TypeError (cli.py check counts cells), and I19 (SoD-3) acts only while the
+    policy's invariants list names it (commit B adds the line)."""
+
+    def test_a_well_formed_matrix_is_kept_as_it_is(self):
+        d = copy.deepcopy(model.load_defaults().data)
+        p = model.Policy(d)
+        self.assertIs(p.matrix, d["matrix"])
+        self.assertEqual(p.bad_matrix_rows, [])
+
+    def test_an_empty_row_is_fine_and_none_is_an_error(self):
+        d = copy.deepcopy(model.load_defaults().data)
+        d["matrix"]["analysis"] = {}
+        self.assertEqual(invariants.check(model.Policy(d))[0], [])
+        d["matrix"]["analysis"] = None
+        p = model.Policy(d)
+        self.assertEqual(p.bad_matrix_rows, ["analysis"])
+        self.assertEqual(p.matrix["analysis"], {})
+        self.assertIsNone(d["matrix"]["analysis"])          # the data itself is not rewritten
+        self.assertEqual(invariants.check(p)[0],
+                         ['matrix row analysis is empty or not a mapping: write "analysis: {}" for a group no role holds'])
+        self.assertIsNone(p.cell("analysis", "engineer"))
+        self.assertEqual(p.effective("analysis", "engineer"), set())
+
+    def test_cli_check_counts_cells_without_a_type_error(self):
+        import subprocess
+        import yaml
+        root = scratch_root()
+        d = copy.deepcopy(model.load_defaults().data)
+        d["matrix"]["analysis"] = None
+        fx = os.path.join(root, "none-row.yaml")
+        with open(fx, "w", encoding="utf-8") as f:
+            yaml.safe_dump(d, f, sort_keys=False, allow_unicode=True, width=1000)
+        r = subprocess.run([sys.executable, os.path.join(root, "apps/iam/compiler/cli.py"), "--file", fx, "check"],
+                           capture_output=True, text=True, env=clean_env(), cwd=root)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn('FAIL: matrix row analysis is empty or not a mapping: write "analysis: {}"', r.stdout)
+        self.assertIn("1 violation(s)", r.stdout)
+
+    def test_i19_is_inert_without_its_code(self):
+        d = copy.deepcopy(model.load_defaults().data)
+        self.assertNotIn("I19", [i["code"] for i in d["invariants"]])
+        d["matrix"].setdefault("research_export", {})["admin"] = ["R"]
+        errors = invariants.check(model.Policy(d))[0]
+        self.assertFalse([e for e in errors if e.startswith("I19")], errors)
+
+    def test_i19_on_commit_b_shapes(self):
+        import rs2b_fixture
+        b = rs2b_fixture.b_policy()
+        self.assertEqual([i["code"] for i in b["invariants"]].count("I19"), 1)
+        self.assertEqual(invariants.check(model.Policy(b))[0], [])         # admin's K on research_workbench
+        b["matrix"]["research_workbench"]["admin"] = ["R"]
+        self.assertIn("I19 admin holds ['R'] on research group research_workbench", invariants.check(model.Policy(b))[0])
+        b["matrix"]["research_workbench"].pop("admin")
+        self.assertEqual(invariants.check(model.Policy(b))[0], [])         # holding nothing there is fine too
+
+    def test_invariant_texts_unchanged(self):
+        # I5 and I18 keep their words (a rewording is a skeleton change, design §0.12)
+        import subprocess
+        import yaml
+        old = yaml.safe_load(subprocess.run(["git", "-C", REPO, "show", "5504958:apps/iam/policy/defaults.yaml"],
+                                            capture_output=True, text=True, check=True).stdout)
+        now = model.load_defaults().data
+        for code in ("I5", "I18"):
+            self.assertEqual([i for i in now["invariants"] if i["code"] == code],
+                             [i for i in old["invariants"] if i["code"] == code])
 
 
 if __name__ == "__main__":

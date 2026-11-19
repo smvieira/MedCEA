@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """tests/test_research_namespace.py — the research sandbox's zone (Phase 2a, commit A). Offline.
 
-  Render      k8s/research/*.yaml: the namespace's label, PriorityClass medcea-research-low
-              (-100, not the global default, never preempts), the quota's keys, the
+  Render      k8s/research/*.yaml: the namespace's label and (Phase 2b) its Pod Security
+              Admission labels (enforce and warn baseline), PriorityClass medcea-research-low
+              (-100, not the global default, never preempts), the quota's keys and (Phase 2b)
+              its numbers and sizing table (the AI workbench's rows, homes kept), the
               LimitRange's defaults without a CPU limit; nothing left unrendered.
   Script      infra/deploy-research-namespace.sh in a scratch tree (tests/_scratch.py) with a
               fake microk8s/kubectl first on PATH and the real compiler on a scratch
@@ -12,7 +14,8 @@
               namespace left), no research zone, a bad RESEARCH_NAMESPACE; the full path (the
               four manifests, the zone's policies with the node's addresses, a stale one
               deleted in the research namespace only); --policy-only unchanged / re-rendered /
-              not deployed; no password in any argv.
+              not deployed; no password in any argv; switched off with a hub left in the
+              namespace, the warning names the AI workbench (Phase 2b).
   Wiring      deploy-infra.sh (validation, the call after pa_netpol full, --reset), deploy-policy.sh
               and lib-policy-artefacts.sh (pa_rsnetpol never touches the platform's label).
 
@@ -66,7 +69,10 @@ class Render(unittest.TestCase):
     def test_namespace(self):
         d = self.load("namespace.yaml", RESEARCH_NAMESPACE=RNS)
         self.assertEqual((d["kind"], d["metadata"]["name"]), ("Namespace", RNS))
-        self.assertEqual(d["metadata"]["labels"], {"medcea/zone": "research"})
+        self.assertEqual(d["metadata"]["labels"], {"medcea/zone": "research",
+                                                   "pod-security.kubernetes.io/enforce": "baseline",
+                                                   "pod-security.kubernetes.io/enforce-version": "latest",
+                                                   "pod-security.kubernetes.io/warn": "baseline"})
 
     def test_priority_class(self):
         d = self.load("priorityclass.yaml")
@@ -87,6 +93,12 @@ class Render(unittest.TestCase):
         # the sizing table is in the file, and its sums fit under the lines
         text = read("k8s/research/quota.yaml")
         self.assertIn("research-postgresql (2a)", text)
+        # Phase 2b: the AI workbench's rows, no user-scheduler, the decided lines
+        self.assertIn("JupyterHub hub + proxy (2b)", text)
+        self.assertIn("lake-api (2b)", text)
+        self.assertNotIn("user-scheduler,", text)
+        self.assertEqual(d["spec"]["hard"], {"requests.cpu": "4", "requests.memory": "8Gi", "limits.memory": "24Gi",
+                                "pods": "20", "persistentvolumeclaims": "22", "requests.storage": "220Gi"})
         m = re.search(r"#   sum\s+(\d+)m\s+([\d.]+)Gi\s+([\d.]+)Gi\s+(\d+)\s+(\d+)Gi", text)
         cpu_m, req_gi, lim_gi, pvcs, storage = m.groups()
         hard = d["spec"]["hard"]
@@ -158,6 +170,10 @@ if a[:2] == ["get", "namespace"]:
     elif o and o.startswith("jsonpath={.metadata.labels.medcea/zone}"):
         print(st["ns"][n].get("medcea/zone", ""), end="")
     sys.exit(0)
+if a[:3] == ["get", "deployment", "hub"]:
+    if os.environ.get("FAKE_HUB_NS") and opt("-n") == os.environ["FAKE_HUB_NS"]:
+        print("deployment.apps/hub"); sys.exit(0)
+    print('Error from server (NotFound): deployments.apps "hub" not found', file=sys.stderr); sys.exit(1)
 if a[:2] == ["get", "nodes"]:
     print(os.environ.get("FAKE_NODE_IPS", ""), end=""); sys.exit(0)
 if a[:2] == ["get", "netpol"]:
@@ -195,18 +211,34 @@ def research_zone(d):
     return d
 
 
+def no_research_zone(d):
+    """the policy before research Phase 2a's commit B: the factory file has the zone since
+    then, so the 'no zone yet' cases take it out (zones, zone pods, the clients hopping to
+    them, the groups' zone key)"""
+    net = d["network"]
+    net.pop("zones", None)
+    zp = [p for p, v in net["pods"].items() if v.get("zone")]
+    for p in zp:
+        net["pods"].pop(p)
+    for c in list(net.get("clients") or {}):
+        if any(h.get("pod") in zp for h in net["clients"][c].get("egress") or []):
+            net["clients"].pop(c)
+    for g in (d.get("resource_groups") or {}).values():
+        g.pop("zone", None)
+    return d
+
+
 class Tree:
     def __init__(self, zone=False, enabled="true", extra=""):
         self.root = scratch_repo(prefix="medcea-rsns-")
         for rel in ("infra/deploy-research-namespace.sh",):
             shutil.copy(os.path.join(REPO, rel), self.path(rel))
         shutil.copytree(os.path.join(REPO, "k8s", "research"), self.path("k8s", "research"))
-        if zone:
-            p = self.path("apps", "iam", "policy", "defaults.yaml")
-            with open(p) as f:
-                d = yaml.safe_load(f)
-            with open(p, "w") as f:
-                yaml.safe_dump(research_zone(d), f, sort_keys=False)
+        p = self.path("apps", "iam", "policy", "defaults.yaml")
+        with open(p) as f:
+            d = yaml.safe_load(f)
+        with open(p, "w") as f:
+            yaml.safe_dump(research_zone(d) if zone else no_research_zone(d), f, sort_keys=False)
         cfg = "".join(f'{k}="{v}"\n' for k, v in SECRETS.items())
         with open(self.path("config.env"), "w") as f:
             f.write(f'PROJECT_NAME="medcea"\nNAMESPACE="{NS}"\nRESEARCH_NAMESPACE="${{NAMESPACE}}-research"\n'
@@ -243,13 +275,13 @@ class Tree:
         except FileNotFoundError:
             return []
 
-    def run(self, *args, locked=True):
+    def run(self, *args, locked=True, **extra):
         script = "./infra/deploy-research-namespace.sh " + " ".join(args)
         if locked:   # deploy-infra's lock and its verified policy source, inherited
             script = ('exec 9>>"$PWD/.medcea.lock"; flock -n 9 || exit 99\n'
                       'export MEDCEA_LOCK_HELD=$$ MEDCEA_POLICY_SOURCE_DONE=$$\n' + script + "\nexit $?\n")
         env = clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], FAKE_STATE=self.state, FAKE_LOG=self.log,
-                        FAKE_NODE_IPS=NODE_IPS, MEDCEA_NO_LOG="1", HOME=self.root)
+                        FAKE_NODE_IPS=NODE_IPS, MEDCEA_NO_LOG="1", HOME=self.root, **extra)
         env.pop("MEDCEA_LOG_FILE", None)
         for k in list(env):
             if k.startswith(("RESEARCH_", "NAMESPACE", "KUBECONFIG")):
@@ -304,6 +336,18 @@ class Script(unittest.TestCase):
         self.assertEqual(self.writes(t), [])
         self.assertIn(RNS, t.st()["ns"])
 
+    def test_switched_off_with_a_hub_left(self):
+        """Phase 2b: the warning names the AI workbench when its hub runs in the namespace."""
+        t = self.tree(zone=True, enabled="false")
+        t.seed(ns=[RNS])
+        r = t.run(locked=False)
+        self.assertNotIn("AI workbench", r.stderr)
+        r = t.run(locked=False, FAKE_HUB_NS=RNS)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("the AI workbench runs in medcea-research too", r.stderr)
+        self.assertIn("./infra/deploy-workbench.sh --move", r.stderr)
+        self.assertEqual(self.writes(t), [])
+
     def test_no_research_zone_yet(self):
         t = self.tree(zone=False)
         r = t.run()
@@ -333,7 +377,10 @@ class Script(unittest.TestCase):
         r = t.run()
         self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
         st = t.st()
-        self.assertEqual(st["ns"][RNS], {"medcea/zone": "research"})
+        self.assertEqual(st["ns"][RNS], {"medcea/zone": "research",
+                                         "pod-security.kubernetes.io/enforce": "baseline",
+                                         "pod-security.kubernetes.io/enforce-version": "latest",
+                                         "pod-security.kubernetes.io/warn": "baseline"})
         self.assertEqual(set(st["objs"]), {"PriorityClass//medcea-research-low", "ResourceQuota/medcea-research/research-quota",
                                            "LimitRange/medcea-research/research-limits"})
         pols = st["netpol"][RNS]

@@ -966,9 +966,30 @@ echo -e "${YELLOW}  Creating client 'workbench'...${NC}"
 # The portal is a post-logout URI too: the hub's logout_redirect_url (Sign out, File >
 # Log Out) ends the Keycloak session for client workbench and lands on the portal.
 _WORKBENCH_SECRET=$(_create_client "workbench" "https://${WORKBENCH_DOMAIN}/hub/oauth_callback" false "" "https://${PORTAL_DOMAIN}/*")
-echo -e "${YELLOW}  Creating public client 'workbench-notebook' (device sign-in from a notebook)...${NC}"
-_create_public_device_client "workbench-notebook" \
-    || echo -e "${RED}  Notebooks cannot sign in to read platform data until this client exists.${NC}" >&2
+# The policy's token clients (research Phase 2b, D2; KC_POLICY_TOKEN_CLIENTS in
+# infra/lib-keycloak-clients.sh): created, or brought back to their body, only while the
+# applied access policy names them as a network.clients token_client (cli.py
+# has-token-client; under v7 workbench-notebook is network.clients.notebooks'). Once the
+# policy no longer names one, an existing client is disabled (read-modify-write,
+# kc_client_disable) and a missing one is never created (a fresh install); none is ever
+# deleted. A policy that cannot be read changes nothing.
+for _c in "${KC_POLICY_TOKEN_CLIENTS[@]}"; do
+    _TC_RC=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-token-client "$_c" >/dev/null || _TC_RC=$?
+    case "$_TC_RC" in
+        0)  echo -e "${YELLOW}  Creating public client '$_c' (device sign-in from a notebook)...${NC}"
+            _create_public_device_client "$_c" \
+                || echo -e "${RED}  Notebooks cannot sign in to read platform data until this client exists.${NC}" >&2 ;;
+        1)  _TC_STATE="$(kc_client_disable "$KEYCLOAK_REALM" "$_c")" || _TC_STATE="error"
+            case "$_TC_STATE" in
+                absent)           echo -e "${YELLOW}  Client '$_c': not in the access policy, not created.${NC}" ;;
+                disabled)         echo -e "${YELLOW}  Client '$_c': not in the access policy any more, disabled (kept, never deleted).${NC}" ;;
+                already-disabled) echo -e "${YELLOW}  Client '$_c': not in the access policy, disabled.${NC}" ;;
+                *)                echo -e "${RED}  WARNING: client '$_c' is not in the access policy, but could not be disabled; re-run ./deploy-infra.sh.${NC}" >&2 ;;
+            esac ;;
+        *)  echo -e "${RED}  WARNING: cannot tell whether the access policy names client '$_c' (python3 apps/iam/compiler/cli.py has-token-client $_c exited $_TC_RC): left as it is.${NC}" >&2 ;;
+    esac
+done
 echo -e "${YELLOW}  Creating client 'portal'...${NC}"
 _PORTAL_SECRET=$(_create_client "portal" "https://${PORTAL_DOMAIN}/oauth2/callback" false "" "$_HUB_LOGOUT_URI")
 echo -e "${YELLOW}  Creating client 'config'...${NC}"
@@ -2074,10 +2095,21 @@ $MK8S kubectl rollout status deployment/portal-oauth2-proxy \
 # without a workbench, which is exactly what happened once.
 if [[ "${WORKBENCH_ENABLED:-true}" == "true" ]]; then
     echo -e "\n${GREEN}[Deploying AI Workbench]${NC}"
-    if ! "$SCRIPT_DIR/infra/deploy-workbench.sh"; then
+    # Exit 4 (research Phase 2b): the access policy places the workbench in the other zone
+    # than its release; deploy-workbench printed the --move line, which is a step still to
+    # do, not a failure. Its output is copied to a private file to find that line (tee
+    # without fd 9, so the lock is never held by it).
+    _WB_OUT="$(mktemp)"
+    "$SCRIPT_DIR/infra/deploy-workbench.sh" | { exec 9>&-; tee "$_WB_OUT"; }
+    _WB_RC=${PIPESTATUS[0]}
+    if [[ "$_WB_RC" == 4 ]]; then
+        _WB_TODO="$(sed 's/\x1b\[[0-9;]*m//g' "$_WB_OUT" | grep -o 'the AI workbench moves \(back \)\{0,1\}with ./infra/deploy-workbench.sh --move' | tail -n 1)"
+        echo -e "${YELLOW}Still to do: ${_WB_TODO:-the AI workbench moves with ./infra/deploy-workbench.sh --move}${NC}"
+    elif [[ "$_WB_RC" != 0 ]]; then
         echo -e "${RED}The workbench failed to deploy. The rest of the platform is up;${NC}"
         echo -e "${RED}re-run ./infra/deploy-workbench.sh once the cause is fixed.${NC}"
     fi
+    rm -f "$_WB_OUT"
 else
     echo -e "\n${YELLOW}AI Workbench skipped (WORKBENCH_ENABLED is not \"true\").${NC}"
 fi

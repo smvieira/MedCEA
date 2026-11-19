@@ -17,6 +17,11 @@ cluster, its lock or its state/.
                exactly that target, with no rollout restart; Superset's (stage C) says
                "not deployed" on a cluster without it.
   Arguments    an unknown option exits 2 and runs nothing.
+  WorkbenchPlacement  research sandbox Phase 2b: ./infra/deploy-workbench.sh --policy-only with
+               its release in the other namespace than the policy places it exits 4 ("deferred",
+               the --move line) before the gate is compiled and writes nothing; placed in the
+               research zone (commit B's shapes, tests/rs2b_fixture.py) with no release there it
+               says "not deployed".
   Wizard       a drift with a flash in the unit's cgroup exits 4 and restarts nothing.
   Resume       owners --scoped, the apply_deferred record, and health counting only the
                deferrals after the version's last applied record.
@@ -524,6 +529,56 @@ class Arguments(unittest.TestCase):
                 self.assertIn("unknown arguments", r.stderr)
                 self.assertEqual(self.e.calls(), [])
                 self.assertFalse(os.path.exists(os.path.join(self.e.tree, ".medcea.lock")))
+
+
+class WorkbenchPlacement(unittest.TestCase):
+    """research Phase 2b: where the workbench's release is, against where the policy places it"""
+
+    def setUp(self):
+        self.e = Env()
+        self.e.put({})
+        # helm list answers from $FAKE_WB_RELEASE_NS (tests/fake_cluster.py lists nothing); the
+        # fake itself, which picks its role from argv[0], runs as microk8s outside bin/
+        os.symlink(FAKE, os.path.join(self.e.root, "microk8s"))
+        shim = os.path.join(self.e.bin, "microk8s")
+        os.remove(shim)
+        with open(shim, "w") as f:
+            f.write('#!/bin/bash\nif [[ "$1 $2" == "helm3 list" && -n "${FAKE_WB_RELEASE_NS:-}" ]]; then\n'
+                    '    printf \'[{"name": "workbench", "namespace": "%s"}]\\n\' "$FAKE_WB_RELEASE_NS"; exit 0\nfi\n'
+                    f'exec "{os.path.join(self.e.root, "microk8s")}" "$@"\n')
+        os.chmod(shim, 0o755)
+
+    def tearDown(self):
+        self.e.cleanup()
+
+    def test_release_in_the_other_namespace_defers(self):
+        r = self.e.bash("./infra/deploy-workbench.sh --policy-only", locked=True, FAKE_WB_RELEASE_NS="medcea-research")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("WORKBENCH_DOMAIN (workbench): deferred (the AI workbench moves back with "
+                      "./infra/deploy-workbench.sh --move)", r.stdout)
+        self.assertNotIn("Gate:", r.stdout)   # before the gate is compiled
+        self.assertEqual(writes(self.e.calls()), [])
+        r = self.e.bash("./infra/deploy-workbench.sh", locked=True, FAKE_WB_RELEASE_NS="medcea-research")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("the AI workbench moves back with ./infra/deploy-workbench.sh --move", r.stdout)
+        self.assertEqual(writes(self.e.calls()), [])
+
+    def test_research_placement_not_deployed(self):
+        import yaml
+        sys.path.insert(0, HERE)
+        import rs2b_fixture
+        with open(os.path.join(self.e.tree, "apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            yaml.safe_dump(rs2b_fixture.b_policy(), f, sort_keys=False)
+        with open(os.path.join(self.e.tree, "config.env"), "a") as f:
+            f.write('RESEARCH_ENABLED="true"\nRESEARCH_NAMESPACE="medcea-research"\n')
+        r = self.e.bash("./infra/deploy-workbench.sh --policy-only", locked=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WORKBENCH_DOMAIN (workbench): not deployed", r.stdout)
+        self.assertEqual(writes(self.e.calls()), [])
+        r = self.e.bash("./infra/deploy-workbench.sh --policy-only", locked=True, FAKE_WB_RELEASE_NS="medcea")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("deferred (the AI workbench moves with ./infra/deploy-workbench.sh --move)", r.stdout)
+        self.assertEqual(writes(self.e.calls()), [])
 
 
 class Wizard(unittest.TestCase):

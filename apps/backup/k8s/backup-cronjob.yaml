@@ -1,6 +1,6 @@
 # apps/backup/k8s/backup-cronjob.yaml — the nightly backup (apps/backup/deploy.sh).
 # Render list: NAMESPACE BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_IMAGE BACKUP_UID BACKUP_GID
-#              STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST
+#              STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST RESEARCH_NAMESPACE RESEARCH_VOLUMES
 #
 # One pod per run, from the image rdbms-postgresql runs (pg_dump of the server's own
 # version, already on the node), running apps/backup/backup-job.sh from ConfigMap
@@ -82,6 +82,13 @@ spec:
             # PostgreSQL's own volume (dumped above), the broker's or the hub's.
             - name: VOLUMES
               value: "claim-* node-red grafana"
+            # The research sandbox's namespace (Phase 2b): the AI workbench's homes and its hub
+            # database once the access policy places the workbench there (volumes/research-<claim>).
+            # Always rendered: nothing is copied while the namespace holds no such volume.
+            - name: RESEARCH_NAMESPACE
+              value: "${RESEARCH_NAMESPACE}"
+            - name: RESEARCH_VOLUMES
+              value: "${RESEARCH_VOLUMES}"
             - name: KEEP_DAYS
               value: "${BACKUP_KEEP_DAYS}"
             - name: OWNER_UID

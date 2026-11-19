@@ -264,6 +264,24 @@ research_skip_hint() {
     return 0
 }
 
+# One line when the newest infrastructure log says the AI workbench is to move between the
+# platform and the research zone (research sandbox Phase 2b): infra/deploy-workbench.sh
+# moves it only with --move (homes copied with sudo, under the lock, with no notebook
+# server running), never inside an install. Read from the newest deploy-infra log (not a
+# reset's or a --policy-only's), which holds deploy-workbench.sh's line. Never fails the
+# install.
+workbench_move_hint() {
+    local log
+    log="$(ls -t logs/deploy-infra-[0-9]*.log 2>/dev/null | head -1)"
+    [[ -n "$log" ]] || return 0
+    if grep -qF "the AI workbench moves back with ./infra/deploy-workbench.sh --move" "$log" 2>/dev/null; then
+        echo -e "${YELLOW}Still to do: the AI workbench is still in the research zone, but the applied access policy puts it back on the platform. With no notebook server running, run ./infra/deploy-workbench.sh --move (./medcea.sh → Infrastructure), then ./apps/iam/apply.sh --resume if an apply is waiting for it (./apps/iam/apply.sh --status).${NC}"
+    elif grep -qF "the AI workbench moves with ./infra/deploy-workbench.sh --move" "$log" 2>/dev/null; then
+        echo -e "${YELLOW}Still to do: the applied access policy puts the AI workbench in the research zone, and it has not moved yet. With no notebook server running, run ./infra/deploy-workbench.sh --move (./medcea.sh → Infrastructure), then ./apps/lake-api/deploy.sh and ./apps/iam/apply.sh --resume if an apply is waiting for it (./apps/iam/apply.sh --status).${NC}"
+    fi
+    return 0
+}
+
 # --apps-only under IAM_DB_SERVICE_ROLES=true: the full install runs deploy-infra once more
 # after the applications (Grafana and pgAdmin onto their roles); this mode does not run the
 # infrastructure, so it says so instead. Never fails.
@@ -343,6 +361,7 @@ install)
     iam_switches_hint || true      # before the box, which stays the last thing on screen
     superset_skip_hint || true
     research_skip_hint || true
+    workbench_move_hint || true
     usb_group_hint || true
     finish_with_credentials
     ;;
@@ -350,6 +369,7 @@ infra)
     run_stage "Infrastructure" deploy-infra ./deploy-infra.sh $CONFIGURE
     echo -e "${YELLOW}The applications are not installed yet: ./install.sh --apps-only${NC}"
     research_skip_hint || true
+    workbench_move_hint || true
     finish_with_credentials
     ;;
 apps)

@@ -114,7 +114,7 @@ class Default(unittest.TestCase):
         """configure.sh's rebase of an existing config.env, from its own source text."""
         src = read("infra/configure.sh")
         start = src.index("    _KEPT_OFF=()\n")
-        end = src.index("    fi\n", src.index("had no IAM_DB_SERVICE_ROLES line")) + len("    fi\n")
+        end = src.index("    fi\n", src.index("had no RESEARCH_ENABLED line")) + len("    fi\n")
         d = tempfile.mkdtemp(prefix="medcea-install-")
         try:
             cfg = os.path.join(d, "config.env")
@@ -141,6 +141,20 @@ class Default(unittest.TestCase):
                 self.assertIn("had no IAM_DB_SERVICE_ROLES line; it is set to false", p.stdout)
                 self.assertNotIn("Kept from the previous config.env", "\n".join(lines))
                 self.assertIn('PROJECT_NAME=', "\n".join(lines))
+
+    def test_an_existing_config_without_research_enabled_keeps_false(self):
+        """RESEARCH_ENABLED became true for a new config.env on 19 Nov 2026; a config.env from
+        before Phase 2a has no line and gets false, said once (review of commit A)."""
+        p, lines = self.merge('PROJECT_NAME=medcea\nIAM_DB_SERVICE_ROLES="true"\n')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([l for l in lines if l.startswith("RESEARCH_ENABLED=")], ['RESEARCH_ENABLED="false"'])
+        self.assertIn("had no RESEARCH_ENABLED line; it is set to false", p.stdout)
+        self.assertNotIn("had no IAM_DB_SERVICE_ROLES line", p.stdout)
+        self.assertNotIn("Kept from the previous config.env", "\n".join(lines))
+        for v in ("true", "false"):
+            p, lines = self.merge('IAM_DB_SERVICE_ROLES="true"\nRESEARCH_ENABLED="%s"\n' % v)
+            self.assertEqual([l for l in lines if l.startswith("RESEARCH_ENABLED=")], ['RESEARCH_ENABLED="%s"' % v])
+            self.assertNotIn("had no RESEARCH_ENABLED line", p.stdout)
 
     def test_an_existing_line_is_kept_and_nothing_is_said(self):
         for v in ("true", "false"):
@@ -361,6 +375,41 @@ class Install(unittest.TestCase):
                     t.close()
         with open(os.path.join(REPO, "infra", "deploy-research-namespace.sh")) as f:
             self.assertIn("skipped: the applied access policy has no research zone yet", f.read())
+
+    def test_the_workbench_move_hint(self):
+        """Research sandbox Phase 2b: the newest deploy-infra log holds deploy-workbench.sh's
+        "moves with --move" line (or "moves back") → one "Still to do" line before the
+        credentials box; a log without it, only an older log with it, or a reset log → none."""
+        moves = "[workbench] the AI workbench moves with ./infra/deploy-workbench.sh --move (homes copied)\n"
+        back = "[workbench] the AI workbench moves back with ./infra/deploy-workbench.sh --move\n"
+        to = "Still to do: the applied access policy puts the AI workbench in the research zone"
+        fro = "Still to do: the AI workbench is still in the research zone"
+        for logs, mode, want in (
+                ({"deploy-infra-20261119-120000.log": moves}, (), to),
+                ({"deploy-infra-20261119-120000.log": moves}, ("--infra-only",), to),
+                ({"deploy-infra-20261119-120000.log": back}, (), fro),
+                ({"deploy-infra-20261119-120000.log": "nothing to move\n"}, (), None),
+                ({"deploy-infra-20261119-110000.log": moves, "deploy-infra-20261119-120000.log": "moved\n"}, (), None),
+                ({"deploy-infra-reset-20261119-120000.log": moves}, (), None)):
+            with self.subTest(logs=list(logs), mode=mode):
+                t = Tree(CONFIG)
+                try:
+                    os.makedirs(t.path("logs"))
+                    for i, (n, text) in enumerate(sorted(logs.items())):
+                        with open(t.path("logs", n), "w") as f:
+                            f.write(text)
+                        os.utime(t.path("logs", n), (1_800_000_000 + i, 1_800_000_000 + i))   # newest by mtime
+                    p = t.run(*mode)
+                    self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+                    for line in (to, fro):
+                        self.assertEqual(line in p.stdout, line == want, (line, p.stdout[-1500:]))
+                    if want:
+                        self.assertIn("run ./infra/deploy-workbench.sh --move", p.stdout)
+                        self.assertNotIn("installed.", p.stdout[p.stdout.index(want):])   # after the summary line
+                finally:
+                    t.close()
+        ins = read("install.sh")
+        self.assertEqual(ins.count("workbench_move_hint || true"), 2)   # the full install and --infra-only
 
     def test_a_research_no_version_skip_is_not_superset(self):
         """The research components skip on no applied version with Superset's opening words:

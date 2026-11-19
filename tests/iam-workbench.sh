@@ -16,9 +16,14 @@
 #   refuses (403 or 404: the hub's 404 when the admin holds the scope only for itself)
 #   to show bio's tokens and shares; W9 bio's user model shows the admin no stored token;
 #   W5 admin stops bio's server; W6 admin removes hub user bio, and its home volume is kept.
+# W10 (research sandbox Phase 2b, only while the applied policy places the hub in the
+# research zone): the pure admin's own spawn is refused by the hook hub.extraConfig.medcea-a2
+# ("Administration of the AI workbench gives no workspace"), while /hub/admin still works.
 # Then W7: bio's realm role is removed and a fresh sign-in gets the hub's 403 naming the
 # roles; W8: bio's account is disabled and a fresh sign-in does not get in. (A session
 # already open lasts until the hub cookie's 5 minutes run out: cookie_max_age_days.)
+# The hub's namespace (bio's home volume) is workbench_namespace's (infra/lib-policy-tools.sh);
+# Keycloak's port-forward stays in the platform namespace.
 #
 # Cleanup also deletes bio's home volume (the one PVC W1 created, found by the hub's
 # username annotation). The throwaway admin stays a hub user without a home: a hub admin
@@ -28,7 +33,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -51,6 +56,10 @@ if [[ "${IAM_GATES:-true}" == "false" ]]; then
     echo "IAM_GATES=false: the workbench admits any account; W2 and W7 assume the policy's gate." >&2
     exit 2
 fi
+source infra/lib-policy-source.sh; policy_source_init "${NAMESPACE:-medcea}" --read-only   # the applied placement
+source infra/lib-policy-tools.sh
+PLACE="$(workbench_placement)" && WB_NS="$(workbench_namespace)" \
+    || { echo "Cannot read the access policy (python3 apps/iam/compiler/cli.py check)." >&2; exit 2; }
 source infra/lib-lock.sh; medcea_lock
 source infra/lib-mk8s.sh
 
@@ -72,7 +81,7 @@ cleanup() {
     [[ ${#CREATED[@]} -gt 0 ]] && echo "Deleted $n of ${#CREATED[@]} test account(s)."
     if [[ -n "$BIO_NAME" ]]; then
         for pvc in $(bio_pvcs); do
-            $KUBECTL delete pvc "$pvc" -n "$NAMESPACE" --wait=false >/dev/null && echo "Deleted the test home volume $pvc."
+            $KUBECTL delete pvc "$pvc" -n "$WB_NS" --wait=false >/dev/null && echo "Deleted the test home volume $pvc."
         done
     fi
     kc_admin_done
@@ -83,7 +92,7 @@ trap 'exit 130' INT TERM
 
 # PVCs KubeSpawner made for BIO_NAME (annotation hub.jupyter.org/username)
 bio_pvcs() {
-    $KUBECTL get pvc -n "$NAMESPACE" -o json 2>/dev/null | U="$BIO_NAME" python3 -c '
+    $KUBECTL get pvc -n "$WB_NS" -o json 2>/dev/null | U="$BIO_NAME" python3 -c '
 import json, os, sys
 for i in json.load(sys.stdin).get("items", []):
     m = i["metadata"]
@@ -103,7 +112,7 @@ if [[ -z "$KC_ADMIN_MODE" ]]; then
     exit 2
 fi
 
-echo -e "${BOLD}AI workbench administration${NC} (https://$WORKBENCH_DOMAIN, realm $R)"
+echo -e "${BOLD}AI workbench administration${NC} (https://$WORKBENCH_DOMAIN, realm $R, hub in $WB_NS: $PLACE placement)"
 SUFFIX="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
 declare -A IDS=()
 ACCOUNTS="{"
@@ -147,6 +156,38 @@ if [[ -n "$pvcs" ]]; then
     echo -e "  PASS   W6 the home volume of the removed hub user is kept: $pvcs"
 else
     echo -e "  FAIL   W6 no home volume left for $BIO_NAME (delete_pvc false?)"; rc=1
+fi
+
+# W10: in the research zone hub administration gives no workspace (the medcea-a2 hook)
+if [[ "$PLACE" == research ]]; then
+    read -r -d '' W10_PY <<'PY'
+import json, os, sys, urllib.parse
+sys.path.insert(0, "tests")
+import iam_workbench_flow as f
+
+data = json.load(sys.stdin)
+domain = os.environ["WORKBENCH_DOMAIN"]
+a, name = f.opener(data.get("cacert")), data["admin"]["username"]
+if not f.signed_in(a, domain, data["admin"]):
+    f.check("W10", False, "admin signs in to /hub/home")
+else:
+    status, url, _ = f.fetch(a, f"https://{domain}/hub/admin")
+    f.check("W10", status == 200 and urllib.parse.urlsplit(url).path.startswith("/hub/admin"),
+            f"admin still opens /hub/admin ({status})")
+    code, body = f.api(a, domain, "POST", f"/users/{name}/server", {})
+    text = json.dumps(body) if not isinstance(body, str) else body
+    # the hook raises at once: the API answers its 403; a 202 (slow spawn) must end with no server
+    refused = code >= 400 and "gives no workspace" in text
+    if code == 202:
+        refused = f.wait_server(a, domain, name, False, timeout=60)
+    f.check("W10", refused, f"admin's own spawn is refused by the hook ({code}: {text[:100]})")
+    if code in (201, 202):
+        f.api(a, domain, "DELETE", f"/users/{name}/server")
+sys.exit(1 if f.FAILS else 0)
+PY
+    python3 -c "$W10_PY" <<<"$ACCOUNTS" || rc=1
+else
+    echo -e "  ${YELLOW}SKIP${NC}   W10 the hub is on the platform ($PLACE placement): the medcea-a2 hook is the research zone's"
 fi
 
 code="$(_kc_send DELETE "realms/$R/users/${IDS[bio]}/role-mappings/realm" "[$(_kc_get "realms/$R/roles/bio_scientist")]")"

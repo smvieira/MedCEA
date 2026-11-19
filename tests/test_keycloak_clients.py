@@ -17,6 +17,14 @@ cluster or Keycloak; no access policy is compiled.
                  every secret is written through _config_env_set (awk's environment, never argv)
   InstallHint    install.sh's "Still to do" line names IAM_DB_SERVICE_ROLES when the newest
                  deploy-apps log holds Superset's skip for it, and says nothing otherwise
+  PolicyTokenClients  research Phase 2b (D2): KC_POLICY_TOKEN_CLIENTS is workbench-notebook and
+                 the two lists keep it, in their order; deploy-infra creates (or brings back) it
+                 only while `cli.py has-token-client` says 0, disables an existing one by
+                 read-modify-write when it says 1 (a missing one is never created), changes
+                 nothing when the policy cannot be read; kc_client_disable PUTs back exactly what
+                 it read but enabled (serviceAccountsEnabled as read), says absent or
+                 already-disabled without a write, and fails on a refused PUT; deploy-infra
+                 reports deploy-workbench's exit 4 as "Still to do", not as a failure
 
     python3 tests/test_keycloak_clients.py
 """
@@ -290,6 +298,154 @@ class InstallHint(unittest.TestCase):
         self.assertIn("Still to do: Superset was skipped, it needs IAM_DB_SERVICE_ROLES=true", out)
         self.assertEqual(self.hint("[superset] skipped: Superset is not in the applied access policy\n"), "")
         self.assertEqual(self.hint(None), "")
+
+
+# a fake curl for the token clients: records METHOD URL BODY (the body read from stdin for
+# --data-binary @-), answers the client list from $KC_EXISTS (1: present) and the client's
+# representation from $KC_REP, prints -w's code ($KC_PUT_CODE for a PUT, else 200/201)
+TC_CURL = r'''
+curl() {
+    local m=GET url="" body="" w="" a
+    while (( $# )); do
+        case "$1" in
+            -X) m="$2"; shift ;;
+            -d|--data) body="$2"; shift ;;
+            --data-binary) [[ "$2" == "@-" ]] && body="$(cat)" || body="$2"; shift ;;
+            -w) w=1; shift ;;
+            -H|-o) shift ;;
+            http*) url="$1" ;;
+        esac
+        shift
+    done
+    python3 -c 'import json, sys; print(json.dumps({"m": sys.argv[1], "url": sys.argv[2], "body": sys.argv[3]}))' \
+        "$m" "$url" "$body" >>"$CURL_LOG"
+    case "$m $url" in
+        "GET "*"/clients?clientId="*) if [[ "$KC_EXISTS" == 1 ]]; then echo "[{\"id\": \"uuid-1\", \"clientId\": \"${url##*clientId=}\"}]"; else echo '[]'; fi ;;
+        "GET "*"/clients/uuid-1") printf '%s' "$KC_REP" ;;
+        "PUT "*) [[ -n "$w" ]] && printf '%s' "${KC_PUT_CODE:-204}" ;;
+        *) [[ -n "$w" ]] && printf 201 ;;
+    esac
+}
+'''
+REP = {"id": "uuid-1", "clientId": "workbench-notebook", "enabled": True, "publicClient": True,
+       "serviceAccountsEnabled": False, "standardFlowEnabled": False,
+       "attributes": {"oauth2.device.authorization.grant.enabled": "true"}, "redirectUris": []}
+
+
+def token_client_block():
+    """deploy-infra.sh's loop over KC_POLICY_TOKEN_CLIENTS (up to its done)"""
+    i = SRC.index('for _c in "${KC_POLICY_TOKEN_CLIENTS[@]}"; do')
+    return SRC[i:SRC.index("\ndone\n", i) + 6]
+
+
+class PolicyTokenClients(unittest.TestCase):
+
+    def test_the_lists(self):
+        self.assertEqual(lib_array("KC_POLICY_TOKEN_CLIENTS"), ["workbench-notebook"])
+        self.assertIn("workbench-notebook", lib_array("KC_SCOPE_CLIENTS"))
+        self.assertIn("workbench-notebook", lib_array("KC_API_CLIENTS"))
+
+    def run_block(self, cli_rc, exists, rep=None, put_code="204"):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "curl.log")
+            os.makedirs(os.path.join(d, "apps", "iam", "compiler"))
+            with open(os.path.join(d, "apps", "iam", "compiler", "cli.py"), "w") as f:
+                f.write("import sys\nopen(%r, 'a').write(' '.join(sys.argv[1:]) + '\\n')\nsys.exit(%d)\n"
+                        % (os.path.join(d, "cli.log"), cli_rc))
+            script = ("RED= YELLOW= NC=\n" + TC_CURL + function_text("_create_public_device_client")
+                      + 'source "$LIB/infra/lib-keycloak-admin.sh"\nsource "$LIB/infra/lib-keycloak-clients.sh"\n'
+                      + "kc_admin_token() { echo tok; }\n_kc_token() { echo tok; }\n" + token_client_block())
+            e = dict(os.environ, CURL_LOG=log, KEYCLOAK_REALM="medcea", SCRIPT_DIR=d, LIB=REPO, KC_EXISTS=exists,
+                     KC_REP=json.dumps(rep or REP), KC_PUT_CODE=put_code)
+            r = subprocess.run(["bash", "-c", "set -e\n" + script], capture_output=True, text=True, env=e)
+            calls = []
+            if os.path.exists(log):
+                with open(log) as f:
+                    calls = [json.loads(line) for line in f]
+            with open(os.path.join(d, "cli.log")) as f:
+                asked = f.read()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(asked, "has-token-client workbench-notebook\n")
+        return r, calls
+
+    def test_named_by_the_policy_it_is_created(self):
+        r, calls = self.run_block(0, "1")
+        writes = [c for c in calls if c["m"] in ("POST", "PUT")]
+        self.assertEqual([c["m"] for c in writes], ["POST", "PUT"])
+        body = json.loads(writes[0]["body"])
+        self.assertEqual((body["clientId"], body["enabled"], body["publicClient"]), ("workbench-notebook", True, True))
+        self.assertEqual(body["attributes"], {"oauth2.device.authorization.grant.enabled": "true"})
+        self.assertIn("Creating public client 'workbench-notebook'", r.stdout)
+
+    def test_not_named_an_existing_one_is_disabled(self):
+        r, calls = self.run_block(1, "1")
+        self.assertFalse([c for c in calls if c["m"] == "POST"], "never created")
+        puts = [c for c in calls if c["m"] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertTrue(puts[0]["url"].endswith("/admin/realms/medcea/clients/uuid-1"))
+        self.assertEqual(json.loads(puts[0]["body"]), dict(REP, enabled=False))   # read-modify-write
+        self.assertIn("not in the access policy any more, disabled", r.stdout)
+        self.assertFalse([c for c in calls if c["m"] == "DELETE"])
+
+    def test_not_named_a_fresh_install_creates_nothing(self):
+        r, calls = self.run_block(1, "0")
+        self.assertEqual([c["m"] for c in calls], ["GET"])
+        self.assertIn("not in the access policy, not created", r.stdout)
+
+    def test_already_disabled_writes_nothing(self):
+        r, calls = self.run_block(1, "1", rep=dict(REP, enabled=False))
+        self.assertFalse([c for c in calls if c["m"] != "GET"])
+        self.assertIn("not in the access policy, disabled", r.stdout)
+
+    def test_a_refused_put_is_a_warning(self):
+        r, calls = self.run_block(1, "1", put_code="403")
+        self.assertIn("could not be disabled", r.stderr)
+        self.assertIn("HTTP 403", r.stderr)
+
+    def test_a_broken_policy_changes_nothing(self):
+        r, calls = self.run_block(2, "1")
+        self.assertEqual(calls, [])
+        self.assertIn("cannot tell whether the access policy names client 'workbench-notebook'", r.stderr)
+
+    def test_the_old_unconditional_create_is_gone(self):
+        code = "\n".join(l for l in SRC.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotRegex(code, r'(?m)^_create_public_device_client "workbench-notebook"')
+        self.assertLess(SRC.index('source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh"'), SRC.index(token_client_block()))
+
+
+class WorkbenchStillToDo(unittest.TestCase):
+    """deploy-infra's workbench section: exit 4 of deploy-workbench is a step still to do"""
+
+    def section(self):
+        i = SRC.index('    _WB_OUT="$(mktemp)"')
+        return SRC[i:SRC.index('    rm -f "$_WB_OUT"\n', i) + len('    rm -f "$_WB_OUT"\n')]
+
+    def run_section(self, rc, line):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "infra"))
+            stub = os.path.join(d, "infra", "deploy-workbench.sh")
+            with open(stub, "w") as f:
+                f.write(f'#!/bin/bash\necho -e "\\033[0;32m[workbench]\\033[0m {line}"\nexit {rc}\n')
+            os.chmod(stub, 0o755)
+            r = subprocess.run(["bash", "-c", "set -e\nRED= YELLOW= NC=\nexec 9>/dev/null\n" + self.section() + "echo END"],
+                               capture_output=True, text=True, env=dict(os.environ, SCRIPT_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.rstrip().endswith("END"))
+        return r
+
+    def test_exit_4(self):
+        for line in ("the AI workbench moves with ./infra/deploy-workbench.sh --move",
+                     "the AI workbench moves back with ./infra/deploy-workbench.sh --move"):
+            r = self.run_section(4, line)
+            self.assertIn("Still to do: " + line, r.stdout)
+            self.assertNotIn("failed", r.stdout + r.stderr)
+
+    def test_other_exits(self):
+        r = self.run_section(1, "boom")
+        self.assertIn("The workbench failed to deploy", r.stdout)
+        r = self.run_section(0, "fine")
+        self.assertNotIn("Still to do", r.stdout)
+        self.assertNotIn("failed", r.stdout)
 
 
 if __name__ == "__main__":

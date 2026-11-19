@@ -42,6 +42,13 @@
 #   POLICY_DB      the platform database whose access-policy hash chain head goes into
 #                  MANIFEST (default: the first of DATABASES)
 #   VOLUMES        claim name patterns to copy, e.g. "claim-* node-red grafana"
+#   RESEARCH_NAMESPACE  the research sandbox's namespace (research Phase 2b: the AI workbench
+#                  lives there once the access policy places it in the research zone). Its
+#                  directories are never taken for the platform's (a research namespace named
+#                  <NAMESPACE>-research would otherwise look like one of the platform's)
+#   RESEARCH_VOLUMES    claim name patterns to copy from RESEARCH_NAMESPACE, e.g.
+#                  "claim-* hub-db-dir"; each is volumes/research-<claim>.tar.gz. Empty, or
+#                  RESEARCH_NAMESPACE empty: no research volume is copied
 #   PGHOST PGUSER  libpq's own variables; PGPASSWORD comes from Secret
 #   PGPASSWORD     rdbms-postgresql (secretKeyRef), so libpq reads it from the
 #                  environment: it reaches no command line, and nothing here prints it
@@ -95,14 +102,56 @@ owner() {   # owner PATH: hand PATH (recursively) to the host account
 
 # wanted CLAIM: status 0 when CLAIM matches a pattern in VOLUMES. Globbing is off
 # while the list is split, or "claim-*" would expand against the working directory.
-wanted() {
+wanted() {   # wanted CLAIM [PATTERNS]: PATTERNS default to VOLUMES
     _hit=1
+    _pats="${2-$VOLUMES}"
     set -f
-    for _p in $VOLUMES; do
+    for _p in $_pats; do
         case "$1" in $_p) _hit=0 ;; esac
     done
     set +f
     return "$_hit"
+}
+
+# copy_volumes NAMESPACE PATTERNS PREFIX — tar every provisioner directory
+# <NAMESPACE>-<claim>-pvc-<uid> whose claim matches PATTERNS into volumes/<PREFIX><claim>.tar.gz;
+# adds to _count and one line "volumes/<archive> <directory> <newest file's epoch|->" to
+# $DIR/.volume-sources (MANIFEST's "# volume" lines). For the platform (PREFIX empty) a
+# directory of RESEARCH_NAMESPACE is skipped.
+copy_volumes() {
+    _cns="$1"; _cpats="$2"; _cpre="$3"
+    for _v in "$STORAGE/$_cns"-*; do
+        [ -d "$_v" ] && [ ! -L "$_v" ] || continue
+        _base="${_v##*/}"
+        if [ -z "$_cpre" ] && [ -n "${RESEARCH_NAMESPACE:-}" ] && [ "$RESEARCH_NAMESPACE" != "$_cns" ]; then
+            case "$_base" in "$RESEARCH_NAMESPACE"-*) continue ;; esac
+        fi
+        _rest="${_base#"$_cns"-}"
+        _claim="$(printf '%s\n' "$_rest" | sed -E 's/-pvc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$//')"
+        [ "$_claim" != "$_rest" ] || continue      # not a provisioner directory
+        wanted "$_claim" "$_cpats" || continue
+        _out="$DIR/volumes/$_cpre$_claim.tar.gz"
+        # Two directories for one claim (a volume left behind by an older install, or by a
+        # move: its Retain volume stays until removed by hand): keep both, the second named
+        # by its volume.
+        [ -e "$_out" ] && _out="$DIR/volumes/$_cpre$_claim.${_base##*-pvc-}.tar.gz"
+        say "tar $_cpre$_claim"
+        _rc=0
+        tar --create --gzip --numeric-owner --one-file-system \
+            --file="$_out" --directory="$_v" . || _rc=$?
+        case "$_rc" in
+            0) ;;
+            1) say "note: files of $_cpre$_claim changed while they were read (tar exit 1); the copy is kept" ;;
+            *) die "tar of $_cpre$_claim failed (exit $_rc)" ;;
+        esac
+        # Which directory the archive holds, and when its newest file changed: with two
+        # directories for one claim (a move's Retain copy beside the live one) restore-help
+        # picks by these MANIFEST lines, never by the archive's name.
+        _newest="$(find "$_v" -xdev -type f -printf '%T@\n' 2>/dev/null | LC_ALL=C sort -n | tail -n 1 | cut -d. -f1)"
+        case "$_newest" in ''|*[!0-9]*) _newest="" ;; esac
+        printf '%s %s %s\n' "volumes/${_out##*/}" "$_base" "${_newest:--}" >> "$DIR/.volume-sources"
+        _count=$((_count + 1))
+    done
 }
 
 # chain_head: one line for MANIFEST, never fails. psql reads the query on stdin; the
@@ -281,28 +330,17 @@ run() {
 
     # --- volumes -------------------------------------------------------------
     _count=0
-    for _v in "$STORAGE/$NAMESPACE"-*; do
-        [ -d "$_v" ] && [ ! -L "$_v" ] || continue
-        _base="${_v##*/}"
-        _rest="${_base#"$NAMESPACE"-}"
-        _claim="$(printf '%s\n' "$_rest" | sed -E 's/-pvc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$//')"
-        [ "$_claim" != "$_rest" ] || continue      # not a provisioner directory
-        wanted "$_claim" || continue
-        _out="$DIR/volumes/$_claim.tar.gz"
-        # Two directories for one claim (a volume left behind by an older install):
-        # keep both, the second named by its volume.
-        [ -e "$_out" ] && _out="$DIR/volumes/$_claim.${_base##*-pvc-}.tar.gz"
-        say "tar $_claim"
-        _rc=0
-        tar --create --gzip --numeric-owner --one-file-system \
-            --file="$_out" --directory="$_v" . || _rc=$?
-        case "$_rc" in
-            0) ;;
-            1) say "note: files of $_claim changed while they were read (tar exit 1); the copy is kept" ;;
-            *) die "tar of $_claim failed (exit $_rc)" ;;
-        esac
-        _count=$((_count + 1))
-    done
+    copy_volumes "$NAMESPACE" "$VOLUMES" ""
+    # The research sandbox's namespace (Phase 2b): the AI workbench's homes and hub database
+    # once the access policy places the workbench there; a home the move copied is
+    # <RESEARCH_NAMESPACE>-<claim>-pvc-<uuid>, as the provisioner names its own.
+    _rs_pats=""
+    case "${RESEARCH_NAMESPACE:-}" in
+        ''|*[!a-z0-9-]*) ;;
+        "$NAMESPACE") ;;
+        *) _rs_pats="${RESEARCH_VOLUMES:-}"
+           [ -z "$_rs_pats" ] || copy_volumes "$RESEARCH_NAMESPACE" "$_rs_pats" "research-" ;;
+    esac
     say "$_count volume(s) copied"
 
     # --- manifest and checksums ----------------------------------------------
@@ -319,7 +357,16 @@ run() {
             [ -z "$_nosecret" ] || echo "# databases skipped (no Secret research-backup, no research database on this install): $_nosecret"
             [ -z "$_unreached" ] || echo "# databases not reached: $_unreached"
             echo "# volume patterns: $VOLUMES"
+            [ -z "$_rs_pats" ] \
+                || echo "# research volume patterns ($RESEARCH_NAMESPACE, as volumes/research-<claim>): $_rs_pats"
             echo "$_head"
+            # one line per volume archive: the directory it holds and its newest file's time
+            if [ -f .volume-sources ]; then
+                while read -r _a _src _t; do
+                    if [ "$_t" = "-" ]; then _t="unknown"; else _t="$(iso_of "$_t")"; fi
+                    echo "# volume $_a from $_src newest file $_t"
+                done < .volume-sources
+            fi
             echo "# bytes	sha256	path"
             _total=0
             while read -r _sum _f; do
@@ -329,6 +376,7 @@ run() {
             done < SHA256SUMS
             echo "# total bytes: $_total"
         } > MANIFEST
+        rm -f .volume-sources
     )
     chmod -R go-rwx "$DIR"
     owner "$DIR"

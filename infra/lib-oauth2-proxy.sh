@@ -169,7 +169,25 @@ superset_logout_return() {
 # IAM_POSTGREST_JWT and IAM_DB_ROLES are both true: before that a verified token
 # runs as anon, which still holds the legacy grants on medcea. Otherwise '[]' (no
 # platform hop, as before). A policy that does not compile returns 1.
+# Research sandbox Phase 2b: '[]' too when the policy has no network.clients.notebooks
+# (`cli.py has-client notebooks` exit 1, asked before any compile; commit B removes it) or
+# the workbench lives in the research zone (workbench_placement, infra/lib-policy-tools.sh,
+# sourced here when the caller has not): there the zone's own NetworkPolicies (rs-notebooks)
+# say where notebooks go, never the chart's. has-client exit 2 (a broken policy) returns 1.
 policy_workbench_egress() {
+    local _hc=0 _pl
+    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" has-client notebooks || _hc=$?
+    case "$_hc" in
+        0) ;;
+        1) WORKBENCH_EGRESS='[]'; return 0 ;;
+        *) return 1 ;;
+    esac
+    declare -F workbench_placement >/dev/null || source "$REPO_ROOT/infra/lib-policy-tools.sh"
+    _pl="$(workbench_placement)" || return 1
+    if [[ "$_pl" == research ]]; then
+        WORKBENCH_EGRESS='[]'
+        return 0
+    fi
     if [[ "${IAM_POSTGREST_JWT:-false}" == "true" && "${IAM_DB_ROLES:-false}" == "true" ]]; then
         WORKBENCH_EGRESS="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile egress notebooks)" || return 1
         [[ "$WORKBENCH_EGRESS" == \[*\] ]] || return 1
@@ -190,8 +208,17 @@ policy_workbench_egress() {
 # grants. The chart's values keep the hops until ./infra/deploy-workbench.sh renders []
 # (health-check iamworkbench FAILs until then). Returns 1 when the NetworkPolicy or the
 # policy cannot be read, or the patch fails. Needs $KUBECTL and REPO_ROOT.
+# Research sandbox Phase 2b: prints 0 and returns 0 at once when the policy has no
+# network.clients.notebooks (`cli.py has-client notebooks` exit 1, before the compile):
+# there is no hop of that client to close; exit 2 (a broken policy) returns 1.
 workbench_egress_close() {
-    local ns="$1" live hops ops
+    local ns="$1" live hops ops _hc=0
+    python3 "$REPO_ROOT/apps/iam/compiler/cli.py" has-client notebooks || _hc=$?
+    case "$_hc" in
+        0) ;;
+        1) echo 0; return 0 ;;
+        *) return 1 ;;
+    esac
     live="$($KUBECTL get networkpolicy singleuser -n "$ns" --ignore-not-found -o json </dev/null)" || return 1
     if [[ -z "$live" ]]; then echo 0; return 0; fi
     hops="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile egress notebooks)" || return 1

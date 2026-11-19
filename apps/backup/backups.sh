@@ -15,6 +15,8 @@
 # verify and restore-help read them without sudo. Nothing here prints a secret: the
 # Job's log names files and sizes only.
 #
+# restore-help asks the cluster one read-only question (where the AI workbench's hub runs:
+# the platform namespace or the research zone) and changes nothing.
 # The restore is shown, not run: it stops services and drops databases, and which
 # parts to restore (one person's home, or everything after a reinstall) is a decision
 # this script cannot take. ./medcea.sh → Backups asks for each of these.
@@ -141,7 +143,19 @@ cmd_now() {
 cmd_restore_help() {
     need_dir
     folder_arg "${1:-}"
-    local f="$DIR/$FOLDER" ns="$NAMESPACE" db="$POSTGRES_DB" k="microk8s kubectl -n $NAMESPACE" head
+    local f="$DIR/$FOLDER" ns="$NAMESPACE" db="$POSTGRES_DB" k="microk8s kubectl -n $NAMESPACE" head hubns kh arch
+    # Where the AI workbench's hub runs now (research Phase 2b: the platform namespace, or the
+    # research zone once the access policy places it there), asked read-only, never compiled;
+    # unknown (no cluster answer, no group membership: no sudo here) means the platform's.
+    hubns="$(timeout 10 microk8s kubectl get deploy -A -l app=jupyterhub,component=hub \
+               -o jsonpath='{.items[0].metadata.namespace}' </dev/null 2>/dev/null || true)"
+    [[ "$hubns" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || hubns="$ns"
+    kh="microk8s kubectl -n $hubns"
+    if [[ "$hubns" == "$ns" ]]; then
+        arch="volumes/claim-<name>.tar.gz"
+    else
+        arch="volumes/research-claim-<name>.tar.gz"
+    fi
     head="$(grep -m1 '^# policy chain head' "$f/MANIFEST" 2>/dev/null | sed 's/^# //')" || true
     head="${head:-policy chain head: not recorded (a backup from before IAM 4.5)}"
     # shellcheck disable=SC2016  # $(cat …), $POSTGRES_PASSWORD_FILE, $PV and $D are printed for the reader's shell or the pod's
@@ -197,26 +211,37 @@ B3. The research sandbox's database (medcea_research; only when $f/db/medcea_res
      $FOLDER are lost; the next export continues from the restored database's latest cut.
 
 C. One person's AI workbench home (claim-<name>; the list: ls $f/volumes)
+  The hub runs in namespace $hubns now; a home copied there is $arch
+  (a home of the platform namespace is volumes/claim-<name>.tar.gz, one of the research zone
+  volumes/research-claim-<name>.tar.gz; a person can have two directories, the copy a move kept
+  beside the live one, and each archive's MANIFEST line "# volume …" names the directory it holds
+  and when its newest file changed: never pick by the archive's name alone).
   1. The person's server is stopped (they sign out, or AI Workbench admin page → Stop). After a
      reinstall they sign in once first, so the new home exists, and stop it again.
   2. Its directory on this host:
-       PV=\$($k get pvc claim-<name> -o jsonpath='{.spec.volumeName}')
+       PV=\$($kh get pvc claim-<name> -o jsonpath='{.spec.volumeName}')
        D=\$(microk8s kubectl get pv "\$PV" -o jsonpath='{.spec.hostPath.path}'); echo "\$D"
-  3. Put the copy back over what is there (newer files of the same name are overwritten):
-       sudo tar -C "\$D" -xzpf $f/volumes/claim-<name>.tar.gz --numeric-owner
-     One file only: tar -tzf $f/volumes/claim-<name>.tar.gz lists them; name it after the archive
+  3. The archive of that same volume:
+       A=\$(sed -n "s|^# volume \\(volumes/[^ ]*\\) from [^ ]*-\$PV newest file .*|\\1|p" $f/MANIFEST); echo "\$A"
+     Empty (the volume is newer than this backup: a reinstall, or a move since): list the person's
+     archives and set A to the one whose newest file is the latest:
+       grep '^# volume volumes/\\(research-\\)\\{0,1\\}claim-<name>[.]' $f/MANIFEST
+     (a backup without "# volume" lines, from before 19 Nov 2026: A=$arch)
+  4. Put the copy back over what is there (newer files of the same name are overwritten):
+       sudo tar -C "\$D" -xzpf $f/\$A --numeric-owner
+     One file only: tar -tzf $f/\$A lists them; name it after the archive
      (e.g. ./notebooks/a.ipynb) in the same tar -x command.
 
 D. Node-RED (/data: flows, flows_cred.json and its key, palette modules)
   1. $k scale deployment node-red --replicas=0
-  2. D as in C.2 with pvc node-red, then replace its content:
+  2. D as in C.2 with pvc node-red in namespace $ns ($k), then replace its content:
        test -n "\$D" && sudo find "\$D" -mindepth 1 -delete && sudo tar -C "\$D" -xzpf $f/volumes/node-red.tar.gz --numeric-owner
   3. $k scale deployment node-red --replicas=1, then ./deploy-infra.sh and ./apps/node-red/deploy.sh
      (settings, credentials and the repository's flows); ./health-check.sh names flows only the backup had.
 
 E. Grafana (grafana.db: Editors' dashboards, folders, annotations, alert rules)
   1. $k scale deployment grafana --replicas=0
-  2. D as in C.2 with pvc grafana, then replace its content:
+  2. D as in C.2 with pvc grafana in namespace $ns ($k), then replace its content:
        test -n "\$D" && sudo find "\$D" -mindepth 1 -delete && sudo tar -C "\$D" -xzpf $f/volumes/grafana.tar.gz --numeric-owner && sudo chmod 0700 "\$D"
      (tar -p brings back the 0777 of '.'; Grafana's init container closes it again at each start)
   3. $k scale deployment grafana --replicas=1, then ./deploy-infra.sh (Grafana's break-glass password)

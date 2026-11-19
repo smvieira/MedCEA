@@ -1,9 +1,10 @@
 # Save your notebooks to git
 
-Your home folder is kept when your server stops, and the platform copies it every night
-into a backup on the same machine, kept for two weeks by default. That copy is for
-disasters, restored by an administrator, not a history of your work: keep the work that
-matters in the research repository on GitHub, committed under your own name.
+Your home folder is kept when your server stops (and when the workbench moves into the
+research zone, it moves with it), and the platform copies it every night into a backup on
+the same machine, kept for two weeks by default. That copy is for disasters, restored by
+an administrator, not a history of your work: keep the work that matters in the research
+repository on GitHub, committed under your own name.
 
 The repository is the one your administrator set for this platform. Open a **Terminal**
 (File → New → Terminal) and print it:
@@ -53,7 +54,7 @@ If that prints nothing, ask an administrator which repository to use (for exampl
 
 Every server has **nbstripout** set up as a git filter: when a notebook is committed, its
 cell outputs (tables, charts, printed values) are removed from what git stores. Your
-notebook on disk keeps them. So telemetry you read here does not reach GitHub through an
+notebook on disk keeps them. So data you read here does not reach GitHub through an
 output.
 
 Behind the filter, a check refuses any commit whose notebooks still hold outputs (for
@@ -62,6 +63,10 @@ server started): the commit fails with "Commit refused" and the file names. Clea
 outputs (Edit → Clear Outputs of All Cells), save, stage the file again and commit.
 
 It does not check code or text cells: **do not paste values, tables or tokens into a cell
-or a markdown file.** Telemetry is regulated data; you hold read access, not export.
+or a markdown file.** In the research zone your notebooks read person-free snapshots of the
+platform's telemetry, not the platform itself; the rules stay the same: the readings are
+the platform's data, you hold read access, not export. To say which data a result came
+from, commit its provenance instead (`md.provenance(df)`: snapshot, cut, lineage, a hash of
+the answer), which holds no reading.
 
 To check what a commit will store, run in the terminal: `git diff --cached`.

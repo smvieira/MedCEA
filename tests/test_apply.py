@@ -2451,12 +2451,12 @@ class SupersetTargets(unittest.TestCase):
         self.assertIn("superset", apply_check.TOOL_TARGETS)
         self.assertEqual(apply_check.scoped_commands().count("./apps/superset/deploy.sh --gate-only"), 1)
         self.assertIn("./apps/superset/deploy.sh", apply_check.full_deploys())
-        self.assertEqual(len(apply_check.VERIFY_CHECKS), 9)
-        self.assertEqual(apply_check.VERIFY_CHECKS[-1], ("supersetroles", "$NAMESPACE"))
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 10)              # rsnetpol since research 2b
+        self.assertEqual(apply_check.VERIFY_CHECKS[-2], ("supersetroles", "$NAMESPACE"))
         self.assertIn("step9:supersetroles | supersetroles | $NAMESPACE |", apply_check.verify_conf().splitlines())
-        self.assertIn("step 9's conf (nine checks)", apply_check.__doc__)
-        self.assertIn("step 9's conf (nine checks)", read_repo("apps/iam/apply.sh"))
-        self.assertNotIn("eight checks", read_repo("apps/iam/apply.sh"))
+        self.assertIn("step 9's conf (ten checks)", apply_check.__doc__)
+        self.assertIn("step 9's conf (ten checks)", read_repo("apps/iam/apply.sh"))
+        self.assertNotIn("nine checks", read_repo("apps/iam/apply.sh"))
 
     def test_an_incomplete_wheel_cache_is_a_deferral(self):
         # --gate-only exits 4 when a re-render would restart the pod without its wheels (N10):
@@ -2797,12 +2797,12 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("routes", pl["changed"])
         self.assertEqual(pl["reason"], "version 2 (change) applied, approved by quinn")
         self.assertIn("chain head before the apply: 41:" + "ab" * 32, p.stdout)
-        # step 9's nine checks (supersetroles since stage C); iampolicy never inside it
+        # step 9's ten checks (supersetroles since stage C, rsnetpol since research 2b); iampolicy never inside it
         confs = [c["conf"] for c in calls if c["kind"] == "health" and any(l.startswith("step9:") for l in c["conf"])]
         self.assertEqual(len(confs), 2)              # the baseline and one verify
         self.assertEqual([l.split("|")[1].strip() for l in confs[1]],
                          ["iamgrants", "iamenforce", "grafanarole", "iamworkbench", "onboardroles", "pgadminroles",
-                          "noderedauth", "iamartefacts", "supersetroles"])
+                          "noderedauth", "iamartefacts", "supersetroles", "rsnetpol"])
         self.assertFalse(any("iampolicy" in l for c in confs for l in c))
         self.assertEqual([w for w in writes(calls) if w[0] != "psql"], [])
 
@@ -3153,17 +3153,24 @@ class DeferRecords(unittest.TestCase):
     or prints nothing is exit 3 (committed; --resume finishes it), never apply_deferred
     {reason: ""}; a good one passes its first line as --reason and its second to the hint."""
 
-    def run_fn(self, reason_rc, reason_out):
+    def run_fn(self, reason_rc, reason_out, cmd="./apps/superset/deploy.sh --gate-only", target=None):
         with open(os.path.join(REPO, "apps", "iam", "apply.sh")) as f:
             src = f.read()
         fn = re.search(r"^defer_records\(\) \{.*?^\}\n", src, re.S | re.M).group(0)
+        # deferred-target runs the real apply_check.py (research sandbox Phase 2b), unless
+        # TARGET_RC/TARGET_OUT stand in for it
         stubs = ('py() { shift; if [[ "$1" == deferred-reason ]]; then printf "%s" "$REASON_OUT"; return "$REASON_RC"; fi; '
+                 'if [[ "$1" == deferred-target ]]; then if [[ -n "${TARGET_RC:-}" ]]; then printf "%s" "$TARGET_OUT"; '
+                 'return "$TARGET_RC"; fi; python3 "$APPLY_CHECK" "$@"; return; fi; '
                  'echo "record $*" >&2; }\n'
                  'q() { echo 42; }\nwarn() { echo "WARN $*" >&2; }\nfail3() { echo "FAIL3 $*" >&2; exit 3; }\n'
                  'CHECK=x STATE=s STAGE="$(mktemp -d)"; : >"$STAGE/deferred.sql"; trap \'rm -rf "$STAGE"\' EXIT\n'
-                 'DEFERRED=("./apps/superset/deploy.sh --gate-only")\n')
-        return subprocess.run(["bash", "-c", stubs + fn + "defer_records"], capture_output=True, text=True,
-                              env=dict(os.environ, REASON_RC=str(reason_rc), REASON_OUT=reason_out))
+                 'DEFERRED=("$DEFER_CMD")\n')
+        env = dict(os.environ, REASON_RC=str(reason_rc), REASON_OUT=reason_out, DEFER_CMD=cmd,
+                   APPLY_CHECK=os.path.join(REPO, "apps", "iam", "apply_check.py"))
+        if target is not None:
+            env.update(TARGET_RC=str(target[0]), TARGET_OUT=target[1])
+        return subprocess.run(["bash", "-c", stubs + fn + "defer_records"], capture_output=True, text=True, env=env)
 
     def test_reason_and_hint(self):
         p = self.run_fn(0, "the cache is incomplete\nonce it is full\n")
@@ -3179,6 +3186,90 @@ class DeferRecords(unittest.TestCase):
                 self.assertEqual(p.returncode, 3, p.stderr)
                 self.assertIn("FAIL3 cannot tell why ./apps/superset/deploy.sh --gate-only deferred", p.stderr)
                 self.assertNotIn("record ", p.stderr)
+
+    def test_the_workbench_is_its_own_target(self):
+        # research sandbox Phase 2b (critique 8): ./infra/deploy-workbench.sh is `workbench`, never `infra`
+        p = self.run_fn(0, "the AI workbench moves into the research zone\nonce --move has run\n",
+                        cmd="./infra/deploy-workbench.sh --policy-only")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--target workbench --reason the AI workbench moves into the research zone --command", p.stderr)
+        self.assertNotIn("--target infra", p.stderr)
+
+    def test_no_target_is_not_recorded(self):
+        for rc, out in ((2, ""), (0, ""), (0, "Infra Bad\n")):
+            with self.subTest(rc=rc, out=out):
+                p = self.run_fn(0, "a reason\nand when\n", target=(rc, out))
+                self.assertEqual(p.returncode, 3, p.stderr)
+                self.assertIn("FAIL3 cannot tell which target ./apps/superset/deploy.sh --gate-only deferred", p.stderr)
+                self.assertNotIn("record ", p.stderr)
+
+
+class RS2bTargets(unittest.TestCase):
+    """Research sandbox Phase 2b, commit A (apply_check.py): egress-notebooks only while
+    network.clients.notebooks exists (critique 25; no digest key, so versions 1-7 audit as
+    recorded), deploy-workbench's deferral (DEFER_CHECK, DEFER_REASON, DEFER_TARGET and
+    deferred-target, critique 8), and step 9's tenth check rsnetpol."""
+
+    @classmethod
+    def setUpClass(cls):
+        import rs2b_fixture
+        cls.fx = rs2b_fixture
+        cls.v7 = model.load_defaults()
+        cls.b = model.Policy(rs2b_fixture.b_policy())
+
+    def names(self, p):
+        return [n for n, _ in apply_check.targets(p)]
+
+    def test_egress_notebooks_only_with_the_client(self):
+        self.assertIn(("egress-notebooks", ["compile", "egress", "notebooks"]), apply_check.targets(self.v7))
+        self.assertEqual(self.names(self.v7)[3], "egress-notebooks")          # where it always was
+        self.assertNotIn("egress-notebooks", self.names(self.b))
+        back = model.Policy(self.fx.with_notebooks_client(self.b.data))
+        self.assertEqual(set(self.names(back)) - set(self.names(self.b)), {"egress-notebooks"})
+        # a policy without the client compiles; the static owner map keeps the entry
+        self.assertEqual(apply_check.TARGET_OWNER["egress-notebooks"], "./infra/deploy-workbench.sh --policy-only")
+
+    def test_no_digest_key(self):
+        outs = {"routes": (0, json.dumps({"digest": "r" * 64}), ""), "mqtt": (0, json.dumps({"digest": "m" * 64}), "")}
+        a = apply_check.digests_of(outs, "c0ffee", "s" * 64)
+        b = apply_check.digests_of(dict(outs, **{"egress-notebooks": (0, "[]\n", "")}), "c0ffee", "s" * 64)
+        self.assertEqual(a, b)
+
+    def test_a_vanished_target_counts_as_changed(self):
+        base = {"grafana": (0, "x\n", ""), "egress-notebooks": (0, "[]\n", "")}
+        other = {"grafana": (0, "x\n", "")}
+        self.assertEqual(apply_check.compare_all(base, other), ["egress-notebooks"])
+        self.assertEqual(apply_check.compare(base, other), ("egress-notebooks", "compiled from one source only"))
+
+    def test_the_workbench_deferral(self):
+        cmd = "./infra/deploy-workbench.sh --policy-only"
+        self.assertEqual(apply_check.DEFER_CHECK[cmd], "iamworkbench")
+        self.assertEqual(apply_check.DEFER_REASON[cmd], ("the AI workbench moves into the research zone",
+                                                         "once ./infra/deploy-workbench.sh --move has run"))
+        self.assertEqual(apply_check.DEFER_TARGET, {cmd: "workbench"})
+        self.assertEqual(set(apply_check.DEFER_REASON), set(apply_check.DEFER_CHECK))
+        self.assertIn(cmd, apply_check.scoped_commands())
+
+    def test_deferred_target(self):
+        def run(cmd):
+            p = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "apply_check.py"),
+                                "deferred-target", "--command", cmd], capture_output=True, text=True)
+            return p.returncode, p.stdout
+        self.assertEqual(run("./infra/deploy-workbench.sh --policy-only"), (0, "workbench\n"))
+        self.assertEqual(run("./apps/superset/deploy.sh --gate-only"), (0, "superset\n"))
+        self.assertEqual(run("./apps/edge-wizard/deploy.sh --gate-only"), (0, "edge-wizard\n"))
+        p = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "apply_check.py"), "deferred-target"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("deferred-target --command C", apply_check.__doc__)
+        self.assertIn('deferred-target --command "$cmd"', read_repo("apps/iam/apply.sh"))
+        self.assertNotIn('basename "$(dirname "${cmd%% *}")"', read_repo("apps/iam/apply.sh"))
+
+    def test_verify_checks(self):
+        self.assertEqual(apply_check.VERIFY_CHECKS[-1], ("rsnetpol", "$NAMESPACE"))
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 10)
+        self.assertIn("step9:rsnetpol | rsnetpol | $NAMESPACE |", apply_check.verify_conf().splitlines())
+        self.assertIn("'Research network policies | rsnetpol    | $NAMESPACE   |'", read_repo("tests/iam-policy.sh"))
 
 
 SKEL_WIDE = ('routes: {"POST /_mqtt-credential": R}}',

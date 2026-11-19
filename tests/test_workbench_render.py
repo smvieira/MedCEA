@@ -34,6 +34,14 @@ the prompt (~/.bashrc from /etc/skel when missing, the block appended once, a pe
 lines kept). workbench_egress_close (the database and frontend deploys, on a switch to
 false) removes exactly the compiled hops from the live NetworkPolicy.
 
+Research sandbox Phase 2b (PlacementTest): the platform placement renders
+k8s/workbench/values.yaml exactly as 5504958 did (tests/golden/workbench-values-platform.yaml,
+fixed inputs); the research placement adds k8s/workbench/values-research.yaml (its render list
+is deploy-workbench's, every key the spec names), the base's three platform endpoints taken out
+line by line (_research_base: Helm 3.9 keeps an overlay's null for a key the chart lacks, which
+helm template here proves when helm and the cached chart are on this host), the A2 pre-spawn
+hook run under both IAM_GATES modes with a stub spawner, and the hub Role without Secrets.
+
   python3 tests/test_workbench_render.py
 """
 import json
@@ -615,6 +623,258 @@ class RenderTest(unittest.TestCase):
         self.assertLess(src.index("policy_workbench_egress || die"), src.index("$HELM upgrade --install workbench"))
         self.assertLess(src.index("create configmap workbench-examples"), src.index("$HELM upgrade --install workbench"))
         self.assertEqual(set(VARS) - set(render_list()), set())
+
+
+# ── research sandbox Phase 2b: the two placements ─────────────────────────────────────
+OVERLAY = os.path.join(REPO, "k8s", "workbench", "values-research.yaml")
+RBAC = os.path.join(REPO, "k8s", "workbench", "hub-rbac.yaml")
+GOLDEN = os.path.join(REPO, "tests", "golden", "workbench-values-platform.yaml")
+CHART = os.path.expanduser("~/.cache/helm/repository/jupyterhub-4.4.4.tgz")
+# the fixed inputs tests/golden/workbench-values-platform.yaml was rendered with (from 5504958's template)
+GOLDEN_INPUTS = {
+    "WORKBENCH_SECRET": "golden-client-secret", "WORKBENCH_DOMAIN": "ai-workbench.medcea",
+    "KEYCLOAK_DOMAIN": "keycloak.medcea", "KEYCLOAK_REALM": "medcea", "NAMESPACE": "medcea",
+    "WORKBENCH_IMAGE_NAME": "quay.io/jupyter/scipy-notebook",
+    "WORKBENCH_IMAGE_TAG": "latest@sha256:d416eea5c12a44981c2fcb56520649dbd92f7ae5983f4e68e14d1d0ebdf0c2ce",
+    "WORKBENCH_STORAGE": "10Gi", "WORKBENCH_NOTEBOOK_REPO": "smvieira/medcea-notebooks", "WORKBENCH_EGRESS": "[]",
+    "WORKBENCH_ALLOW_ALL": "false", "WORKBENCH_HUBADMIN_USERS": "[]",
+    "WORKBENCH_ALLOWED_GROUPS": '["admin", "bio_scientist", "control_scientist", "engineer", "qa"]',
+    "WORKBENCH_ADMIN_GROUPS": '["admin"]', "WORKBENCH_403_MESSAGE": '"No access to AI Workbench."',
+    "WORKBENCH_LOGOUT_URL": "https://keycloak.medcea/realms/medcea/protocol/openid-connect/logout?client_id=workbench"
+                            "&post_logout_redirect_uri=https%3A%2F%2Fportal.medcea%2Foauth2%2Fsign_out%3Frd%3D%252F"}
+OVERLAY_INPUTS = {"RESEARCH_NAMESPACE": "medcea-research", "WORKBENCH_DOMAIN": "ai-workbench.medcea",
+                  "WORKBENCH_ALLOWED_GROUPS": GOLDEN_INPUTS["WORKBENCH_ALLOWED_GROUPS"],
+                  "WORKBENCH_ADMIN_GROUPS": '["admin"]', "WORKBENCH_HUBADMIN_USERS": "[]",
+                  "WORKBENCH_A2_ALLOW_ALL": "False"}
+
+
+def render_file(path, names, values):
+    env = {"PATH": os.environ["PATH"], **values}
+    r = subprocess.run(["bash", "-c", f'source "{REPO}/infra/lib-render.sh"; render "$0" "$@"', path, *names],
+                       env=env, capture_output=True, text=True, check=True)
+    return r.stdout
+
+
+def overlay_render_list():
+    with open(DEPLOY) as f:
+        src = f.read()
+    call = re.search(r'render "\$REPO_ROOT/k8s/workbench/values-research.yaml"(.*?)>', src, re.S).group(1)
+    return call.replace("\\", " ").split()
+
+
+def research_base_fn():
+    with open(DEPLOY) as f:
+        src = f.read()
+    return re.search(r"(?ms)^_research_base\(\) \{.*?^\}\n", src).group(0)
+
+
+def helm_merge(a, b):
+    """Helm's merge of two user values files (a mapping key by key, anything else replaced)."""
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = helm_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+class PlacementTest(unittest.TestCase):
+    def platform(self, **over):
+        return render_file(os.path.join(REPO, "k8s", "workbench", "values.yaml"), render_list(),
+                           dict(GOLDEN_INPUTS, **over))
+
+    def research(self, **over):
+        """(base with the endpoints taken out, overlay) as deploy-workbench renders them"""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        base = os.path.join(d, "base.yaml")
+        with open(base, "w") as f:
+            f.write(self.platform())
+        r = subprocess.run(["bash", "-c", "die() { echo \"$*\" >&2; exit 1; }\n" + research_base_fn() + '_research_base "$0"', base],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(base) as f:
+            btext = f.read()
+        otext = render_file(OVERLAY, overlay_render_list(), dict(OVERLAY_INPUTS, **over))
+        return btext, otext
+
+    def test_platform_is_the_golden(self):
+        """Commit A: the platform placement renders values.yaml exactly as 5504958 (values.yaml
+        is not changed; the research settings are a second file)."""
+        with open(GOLDEN) as f:
+            self.assertEqual(self.platform(), f.read())
+
+    def test_overlay_render_list(self):
+        names = overlay_render_list()
+        self.assertEqual(names, ["RESEARCH_NAMESPACE", "WORKBENCH_DOMAIN", "WORKBENCH_ALLOWED_GROUPS",
+                                 "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_A2_ALLOW_ALL"])
+        with open(OVERLAY) as f:
+            text = f.read()
+        self.assertEqual(set(re.findall(r"\$\{([A-Z0-9_]+)\}", text)), set(names))
+        code = "\n".join(l.split("#")[0] for l in text.splitlines())
+        self.assertNotIn("null", code, "Helm 3.9 keeps a null for a key the chart lacks (None in the hub)")
+        _, otext = self.research()
+        self.assertNotIn("${", otext)
+        self.assertNotIn("$", yaml.safe_load(otext)["hub"]["extraConfig"]["medcea-a2"])
+
+    def test_research_values(self):
+        btext, otext = self.research()
+        base, over = yaml.safe_load(btext), yaml.safe_load(otext)
+        v = helm_merge(base, over)
+        self.assertIs(v["hub"]["networkPolicy"]["enabled"], False)
+        self.assertIs(v["proxy"]["chp"]["networkPolicy"]["enabled"], False)
+        self.assertIs(v["singleuser"]["networkPolicy"]["enabled"], False)
+        self.assertIs(v["singleuser"]["cloudMetadata"]["blockWithIptables"], False)
+        for k in ("userScheduler", "userPlaceholder", "podPriority"):
+            self.assertIs(v["scheduling"][k]["enabled"], False, k)
+        self.assertIs(v["rbac"]["create"], False)
+        self.assertEqual(v["hub"]["extraPodSpec"], {"priorityClassName": "medcea-research-low"})
+        self.assertEqual(v["proxy"]["chp"]["extraPodSpec"],
+                         {"priorityClassName": "medcea-research-low", "automountServiceAccountToken": False})
+        self.assertEqual(v["hub"]["config"]["KubeSpawner"]["priority_class_name"], "medcea-research-low")
+        self.assertEqual(v["hub"]["resources"], {"requests": {"cpu": "200m", "memory": "512Mi"}, "limits": {"memory": "1Gi"}})
+        self.assertEqual(v["proxy"]["chp"]["resources"], {"requests": {"cpu": "50m", "memory": "128Mi"},
+                                                         "limits": {"memory": "256Mi"}})
+        self.assertEqual(v["ingress"]["tls"], [{"hosts": ["ai-workbench.medcea"], "secretName": "workbench-tls"}])
+        self.assertNotIn("cea-tls", "\n".join(l.split("#")[0] for l in otext.splitlines()))
+        env = v["singleuser"]["extraEnv"]
+        self.assertEqual(env["MEDCEA_LAKE"], "http://lake-api.medcea-research.svc.cluster.local:3000")
+        for k in ("MEDCEA_KEYCLOAK", "MEDCEA_API", "MEDCEA_CLIENT_ID"):
+            self.assertNotIn(k, env)
+        self.assertEqual(env["PYTHONPATH"], "/home/jovyan/medcea-examples")   # the rest of the base stays
+        # the base lost exactly three lines; everything else is the platform's, byte for byte
+        plat = self.platform().splitlines(keepends=True)
+        self.assertEqual([l for l in plat if l not in btext.splitlines(keepends=True)],
+                         [l for l in plat if re.match(r"    MEDCEA_(KEYCLOAK|API|CLIENT_ID): ", l)])
+        self.assertEqual(len(plat) - len(btext.splitlines()), 3)
+        # the gate itself is the base's: allow_all, the groups, the roles, delete_pvc
+        self.assertEqual(v["hub"]["config"]["GenericOAuthenticator"]["allowed_groups"],
+                         json.loads(GOLDEN_INPUTS["WORKBENCH_ALLOWED_GROUPS"]))
+        self.assertIs(v["hub"]["config"]["KubeSpawner"]["delete_pvc"], False)
+
+    def test_research_base_refuses_another_shape(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "v.yaml")
+        with open(p, "w") as f:
+            f.write("singleuser:\n  extraEnv:\n    MEDCEA_API: x\n")
+        r = subprocess.run(["bash", "-c", research_base_fn() + '_research_base "$0"', p], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        with open(p) as f:
+            self.assertIn("MEDCEA_API", f.read())   # unchanged
+
+    def hook(self, allow_all, allowed, admin, hubadmins):
+        _, otext = self.research(WORKBENCH_A2_ALLOW_ALL=allow_all, WORKBENCH_ALLOWED_GROUPS=allowed,
+                                 WORKBENCH_ADMIN_GROUPS=admin, WORKBENCH_HUBADMIN_USERS=hubadmins)
+        code = yaml.safe_load(otext)["hub"]["extraConfig"]["medcea-a2"]
+        import types
+        from unittest import mock
+
+        class HTTPError(Exception):
+            def __init__(self, status, msg=""):
+                super().__init__(msg)
+                self.status_code = status
+        web = types.ModuleType("tornado.web")
+        web.HTTPError = HTTPError
+        tornado = types.ModuleType("tornado")
+        tornado.web = web
+        c = types.SimpleNamespace(KubeSpawner=types.SimpleNamespace())
+        with mock.patch.dict(sys.modules, {"tornado": tornado, "tornado.web": web}):
+            exec(compile(code, "medcea-a2", "exec"), {"c": c})
+        hook = c.KubeSpawner.pre_spawn_hook
+
+        def spawn(name, groups):
+            user = types.SimpleNamespace(name=name, groups=[types.SimpleNamespace(name=g) for g in groups])
+            try:
+                hook(types.SimpleNamespace(user=user))
+                return "admitted"
+            except HTTPError as e:
+                self.assertEqual(e.status_code, 403)
+                self.assertIn("Administration of the AI workbench gives no workspace", str(e))
+                return "refused"
+        return spawn
+
+    def test_a2_hook_gated(self):
+        spawn = self.hook("False", '["admin", "bio_scientist", "control_scientist", "engineer", "qa"]', '["admin"]', "[]")
+        self.assertEqual(spawn("alice", ["admin"]), "refused")                 # a pure admin
+        self.assertEqual(spawn("bob", ["bio_scientist"]), "admitted")          # a scientist
+        self.assertEqual(spawn("carol", ["admin", "engineer"]), "admitted")    # any using group admits
+        self.assertEqual(spawn("dan", []), "refused")
+        self.assertEqual(spawn("erin", ["operator"]), "refused")               # not a workbench group
+        spawn = self.hook("False", '["admin", "ops"]', '["admin", "ops"]', "[]")
+        self.assertEqual(spawn("frank", ["ops", "admin"]), "refused")          # an admin-only group set
+
+    def test_a2_hook_pre_policy(self):
+        # IAM_GATES=false: both lists empty, the hub administrator is ADMIN_USER by name
+        spawn = self.hook("True", "[]", "[]", '["boss"]')
+        self.assertEqual(spawn("boss", ["admin"]), "refused")
+        self.assertEqual(spawn("bob", []), "admitted")
+        self.assertEqual(spawn("bob", ["bio_scientist"]), "admitted")
+
+    def test_a2_allow_all_follows_the_gate(self):
+        with open(DEPLOY) as f:
+            src = f.read()
+        self.assertIn('if [[ "$WORKBENCH_ALLOW_ALL" == "true" ]]; then WORKBENCH_A2_ALLOW_ALL=True; else WORKBENCH_A2_ALLOW_ALL=False; fi', src)
+        self.assertLess(src.index("policy_workbench || die"), src.index("WORKBENCH_A2_ALLOW_ALL=True"))
+
+    def test_hub_role_has_no_secrets(self):
+        docs = list(yaml.safe_load_all(render_file(RBAC, ["WB_NS"], {"WB_NS": "medcea-research"})))
+        role = next(d for d in docs if d["kind"] == "Role")
+        binding = next(d for d in docs if d["kind"] == "RoleBinding")
+        self.assertEqual((role["metadata"]["name"], role["metadata"]["namespace"]), ("medcea-hub", "medcea-research"))
+        resources = {r for rule in role["rules"] for r in rule["resources"]}
+        self.assertNotIn("secrets", resources)
+        self.assertEqual(resources, {"pods", "persistentvolumeclaims", "events"})   # no services: review of commit A
+        ev = next(r for r in role["rules"] if "events" in r["resources"])
+        self.assertEqual(sorted(ev["verbs"]), ["get", "list", "watch"])
+        self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "hub", "namespace": "medcea-research"}])
+        self.assertEqual(binding["roleRef"]["name"], "medcea-hub")
+
+    @unittest.skipUnless(shutil.which("helm") and os.path.exists(CHART), "helm and the cached chart jupyterhub-4.4.4")
+    def test_helm_template(self):
+        """The chart itself, offline: in research placement the hub's Secret has no platform
+        endpoint and MEDCEA_LAKE, no NetworkPolicy, Role, user-scheduler or placeholder is
+        rendered, the hub and the proxy carry the research PriorityClass and the proxy no
+        token; the platform placement still renders the chart's own policies and Role."""
+        import base64
+        btext, otext = self.research()
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        files = []
+        for name, text in (("base.yaml", btext), ("research.yaml", otext)):
+            files.append(os.path.join(d, name))
+            with open(files[-1], "w") as f:
+                f.write(text)
+
+        def template(*vals):
+            args = ["helm", "template", "workbench", CHART, "--kube-version", "1.29.0", "--namespace", "medcea-research"]
+            for v in vals:
+                args += ["-f", v]
+            r = subprocess.run(args, capture_output=True, text=True, env=dict(os.environ, HOME=d))
+            if r.returncode != 0 and "snap" in (r.stderr or ""):
+                self.skipTest("helm cannot run here: " + r.stderr[-200:])
+            self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+            return [x for x in yaml.safe_load_all(r.stdout) if x]
+        docs = template(*files)
+        kinds = {(x["kind"], x["metadata"]["name"]) for x in docs}
+        self.assertFalse({k for k in kinds if k[0] in ("NetworkPolicy", "Role", "RoleBinding", "PodDisruptionBudget")}, kinds)
+        self.assertNotIn(("Deployment", "user-scheduler"), kinds)
+        self.assertNotIn(("StatefulSet", "user-placeholder"), kinds)
+        secret = next(x for x in docs if x["kind"] == "Secret" and x["metadata"]["name"] == "hub")
+        stored = yaml.safe_load(base64.b64decode(secret["data"]["values.yaml"]))
+        env = stored["singleuser"]["extraEnv"]
+        self.assertEqual(sorted(env), ["MEDCEA_LAKE", "MEDCEA_NOTEBOOK_REPO", "PYTHONPATH"])
+        self.assertIn("medcea-a2", stored["hub"]["extraConfig"])
+        dep = {x["metadata"]["name"]: x["spec"]["template"]["spec"] for x in docs if x["kind"] == "Deployment"}
+        self.assertEqual(dep["hub"]["priorityClassName"], "medcea-research-low")
+        self.assertEqual(dep["proxy"]["priorityClassName"], "medcea-research-low")
+        self.assertIs(dep["proxy"]["automountServiceAccountToken"], False)
+        ing = next(x for x in docs if x["kind"] == "Ingress")
+        self.assertEqual(ing["spec"]["tls"], [{"hosts": ["ai-workbench.medcea"], "secretName": "workbench-tls"}])
+        # the platform placement (the base alone, unfiltered): the chart's own policies and Role
+        with open(files[0], "w") as f:
+            f.write(self.platform())
+        kinds = {(x["kind"], x["metadata"]["name"]) for x in template(files[0])}
+        self.assertIn(("NetworkPolicy", "singleuser"), kinds)
+        self.assertIn(("Role", "hub"), kinds)
 
 
 if __name__ == "__main__":

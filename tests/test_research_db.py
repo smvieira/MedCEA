@@ -7,6 +7,12 @@ Offline (stdlib unittest):
              staging ones, and vault.reservation, is append-only through ENABLE ALWAYS
              triggers; every SECURITY DEFINER function pins its search_path and loses
              PUBLIC's EXECUTE; grants.sql grants exactly what the interface says.
+  LakeApiSql db/lake_api.sql as text (Phase 2b): the two roles and rs_lake_api's three
+             settings and connection limit, every lake_api function STABLE, SECURITY
+             DEFINER, search_path pg_catalog, pg_temp, PUBLIC's EXECUTE revoked; no column
+             that names a person; measurements reads snapshot_id <= the snapshot and
+             refuses (22023) what it must; holds() only ranges; the lineage rule; the
+             digest check uses _set_digest's text rules; the asserts cover the reader.
   Deploy     apps/research/deploy.sh and uninstall.sh in a scratch tree against a fake
              kubectl/helm, policy source and cli.py: the unknown-option refusal, each
              skip line, the full path in order, no secret in any argv (the fakes log argv),
@@ -41,6 +47,7 @@ APP = os.path.join(REPO, "apps", "research")
 DDL = os.path.join(APP, "db", "medcea_research_ddl.sql")
 GRANTS = os.path.join(APP, "db", "grants.sql")
 ASSERT = os.path.join(APP, "db", "assert_grants.sql")
+LAKE_API = os.path.join(APP, "db", "lake_api.sql")
 
 # The interface (INTERFACES.md, migration 013): function → columns and types.
 STAGES = {
@@ -69,7 +76,7 @@ LAKE = {"measurements": "measurement"}   # every other set keeps its name
 APPEND_ONLY = ["lake.snapshot"] + ["lake." + LAKE.get(s, s) for s in STAGES] + ["vault.reservation"]
 
 SECRETS = {"RESEARCH_DB_PASS": "rsSuperPass0123456789", "RS_EXPORT_WRITER_DB_PASS": "rsWriterPass0123456789",
-           "RS_BACKUP_DB_PASS": "rsBackupPass0123456789"}
+           "RS_BACKUP_DB_PASS": "rsBackupPass0123456789", "RS_LAKE_API_DB_PASS": "rsLakeApiPass0123456789"}
 DOCKERHUB = {"DOCKERHUB_USER": "someone", "DOCKERHUB_PAT": "dckr_pat_SECRET0123456789"}
 KC_SECRET = "kcDeployerSecret0123456789"
 
@@ -198,21 +205,225 @@ class Sql(unittest.TestCase):
         stage = ", ".join("lake.stage_" + s for s in STAGES)
         self.assertEqual(grants, [
             "GRANT CONNECT ON DATABASE medcea_research TO rs_export_writer, rs_backup;",
+            "GRANT CONNECT ON DATABASE medcea_research TO rs_lake_api;",
             "GRANT USAGE ON SCHEMA lake TO rs_export_writer;",
             "GRANT INSERT ON %s TO rs_export_writer;" % stage,
             "GRANT EXECUTE ON FUNCTION lake.close_snapshot(timestamptz, timestamptz, integer), lake.latest_cut() "
             "TO rs_export_writer;",
-            "GRANT pg_read_all_data TO rs_backup;"])
+            "GRANT pg_read_all_data TO rs_backup;",
+            "GRANT USAGE ON SCHEMA lake_api TO rs_lake_reader;",
+            "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA lake_api TO rs_lake_reader;",
+            "GRANT rs_lake_reader TO rs_lake_api;"])
         self.assertNotRegex(self.grants, r"TO\s+PUBLIC")
+        flat = " ".join(self.grants.split())
         for line in ("REVOKE ALL ON DATABASE medcea_research FROM PUBLIC;",
-                     "REVOKE ALL ON SCHEMA public, lake, vault, sim, agent_trace, registry FROM PUBLIC"):
-            self.assertIn(line, self.grants)
+                     "REVOKE ALL ON DATABASE medcea_research FROM rs_export_writer, rs_backup, rs_lake_api, "
+                     "rs_lake_reader;",
+                     "REVOKE ALL ON SCHEMA public, lake, vault, sim, agent_trace, registry, lake_api FROM PUBLIC, "
+                     "rs_export_writer, rs_backup, rs_lake_api, rs_lake_reader;"):
+            self.assertIn(line, flat)
+        for kind in ("TABLES", "SEQUENCES", "FUNCTIONS"):
+            self.assertIn("REVOKE ALL ON ALL %s IN SCHEMA public, lake, vault, sim, agent_trace, registry, lake_api "
+                          "FROM PUBLIC, rs_export_writer, rs_backup, rs_lake_api, rs_lake_reader;" % kind, flat)
         self.assertNotRegex(self.ddl, r"\bGRANT\b")   # the DDL grants nothing
+        self.assertNotRegex(sql_code(read(LAKE_API)), r"\bGRANT\b")   # nor lake_api.sql
+        # only the reader's schema and its functions; the lake's own grant lines are unchanged
+        self.assertLess(self.grants.index("GRANT pg_read_all_data TO rs_backup;"),
+                        self.grants.index("GRANT USAGE ON SCHEMA lake_api TO rs_lake_reader;"))
 
     def test_assert_is_read_only(self):
         a = re.sub(r"'[^']*'", "''", sql_code(read(ASSERT)))
         self.assertIn("BEGIN READ ONLY;", a)
         self.assertNotRegex(a, r"\b(INSERT|UPDATE|DELETE|GRANT|REVOKE|ALTER|CREATE|DROP)\b")
+
+
+
+# The reader's interface (S4 of the Phase 2b spec): function → (arguments, columns).
+LAKE_API_FUNCTIONS = {
+    "lake_api.snapshots": ("", ["snapshot_id", "cut_at", "previous_cut_at", "created_at", "contract_version",
+                                '"rows"', "digests", "lineage"]),
+    "lake_api.measurements": ("p_snapshot bigint, p_unit text, p_zone text, p_tag text DEFAULT NULL, "
+                              "p_from timestamptz DEFAULT NULL, p_to timestamptz DEFAULT NULL, "
+                              "p_sensor text DEFAULT NULL, p_limit integer DEFAULT 50000",
+                              ["snapshot_id", "ingested_at", "measured_at", "unit_code", "zone_code", "tag",
+                               "sensor", "value", "uom"]),
+    "lake_api.units": ("p_snapshot bigint", ["snapshot_id", "unit_code", "recipe_type", "area", "height", "is_active"]),
+    "lake_api.zones": ("p_snapshot bigint", ["snapshot_id", "unit_code", "zone_code", "is_active"]),
+    "lake_api.recipes": ("p_snapshot bigint", ["snapshot_id", "recipe_id", "recipe_type", "status"]),
+    "lake_api.recipe_lines": ("p_snapshot bigint", ["snapshot_id", "recipe_id", "seq", "cycle_number", "light_type",
+                                                    "light_on_minutes", "light_off_minutes", "setpoints"]),
+    "lake_api.catalogue": ("p_snapshot bigint", ["snapshot_id", "kind", "code", "doc"]),
+    "lake_api.holds": ("", ["unit_code", "zone_code", "from_at", "to_at"]),
+}
+# Words that would name a person (decision P): no column, parameter or reference of the reader.
+PERSON_WORDS = ("by_username", "by_sub", "reason", "username", "email", "person", "created_by", "updated_by",
+                "executed_by", "description", "note", "name", "ip_address", "mac", "serial", "device")
+
+
+def lineage(measurement_digests):
+    """The lineage rule, written once more from the spec: L_0 = '',
+    L_N = sha256_hex(L_{N-1} + '\n' + digests.measurement)."""
+    out, prev = [], ""
+    for d in measurement_digests:
+        prev = hashlib.sha256((prev + "\n" + d).encode()).hexdigest()
+        out.append(prev)
+    return out
+
+
+class LakeApiSql(unittest.TestCase):
+    def setUp(self):
+        self.raw = read(LAKE_API)
+        self.sql = sql_code(self.raw)
+        self.fns = dict(functions(self.sql))
+
+    def body(self, name):
+        h = self.fns[name]
+        rest = self.sql[self.sql.index(h) + len(h):]
+        return rest[:rest.index("$$")]
+
+    def test_roles_and_settings(self):
+        self.assertIn("CREATE ROLE rs_lake_reader NOLOGIN NOINHERIT;", self.sql)
+        self.assertIn("CREATE ROLE rs_lake_api LOGIN NOINHERIT;", self.sql)
+        flat = " ".join(self.sql.split())
+        self.assertIn("ALTER ROLE rs_lake_reader NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
+                      "NOBYPASSRLS;", flat)
+        self.assertIn("ALTER ROLE rs_lake_api LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
+                      "NOBYPASSRLS CONNECTION LIMIT 10;", flat)
+        for setting in ("statement_timeout = '30s'", "default_transaction_read_only = on", "temp_file_limit = '256MB'"):
+            self.assertIn("ALTER ROLE rs_lake_api SET %s;" % setting, self.sql)
+        # and what the asserts look for is exactly how PostgreSQL stores them
+        assert_sql = read(ASSERT)
+        for stored in ("statement_timeout=30s", "default_transaction_read_only=on", "temp_file_limit=256MB"):
+            self.assertIn("'%s'" % stored, assert_sql)
+        self.assertNotRegex(self.sql, r"\bPASSWORD\b")   # deploy.sh sets it, as a SCRAM verifier
+
+    def test_schema_owned_and_made_by_rs_owner(self):
+        self.assertIn("CREATE SCHEMA IF NOT EXISTS lake_api AUTHORIZATION rs_owner;", self.sql)
+        self.assertIn("ALTER SCHEMA lake_api OWNER TO rs_owner;", self.sql)
+        self.assertLess(self.sql.index("SET ROLE rs_owner;"), self.sql.index("CREATE OR REPLACE FUNCTION"))
+        self.assertTrue(self.sql.rstrip().endswith("RESET ROLE;"))
+        self.assertNotIn("\\connect", self.sql)   # deploy.sh connects it to medcea_research
+
+    def test_the_interface(self):
+        got = {n: h for n, h in self.fns.items() if n.startswith("lake_api.")}
+        self.assertEqual(set(got), set(LAKE_API_FUNCTIONS))
+        for name, (args, cols) in LAKE_API_FUNCTIONS.items():
+            with self.subTest(name):
+                h = " ".join(got[name].split())
+                self.assertIn("FUNCTION %s(%s)" % (name, args), h)
+                m = re.search(r"RETURNS TABLE \((.*?)\) LANGUAGE", h)
+                self.assertEqual([c.split()[0] for c in m.group(1).split(", ")], cols)
+        # runs, cycles, control loops and parameter sets are not exposed (O3)
+        for t in ("lake.runs", "lake.cycles", "lake.control_loops", "lake.param_sets"):
+            self.assertNotIn(t, self.sql)
+
+    def test_every_function_is_a_pinned_stable_definer(self):
+        for name, header in self.fns.items():
+            with self.subTest(name):
+                h = " ".join(header.split())
+                self.assertIn("STABLE SECURITY DEFINER", h)
+                self.assertIn("SET search_path = pg_catalog, pg_temp", h)
+                self.assertRegex(self.sql, r"REVOKE ALL ON FUNCTION %s\([^)]*\) FROM PUBLIC;" % re.escape(name))
+                body = self.body(name)
+                # every relation qualified: lake., vault. or pg_catalog. only
+                for rel in re.findall(r"(?<!DISTINCT )\b(?:FROM|JOIN)\s+([a-z_][a-z_.]*)", body):
+                    if rel in ("o", "chain", "lake", "vault"):
+                        continue
+                    self.assertRegex(rel, r"^(lake|vault|pg_catalog)\.", (name, rel))
+
+    def test_no_person(self):
+        code = re.sub(r"'[^']*'", "''", self.sql)   # messages may say anything
+        for w in PERSON_WORDS:
+            self.assertNotRegex(code, r"\b%s\b" % w, w)
+        holds = self.body("lake_api.holds")
+        self.assertIn("SELECT r.unit_code, r.zone_code, r.from_at, r.to_at", holds)
+
+    def test_measurements(self):
+        b = self.body("lake_api.measurements")
+        self.assertIn("m.snapshot_id <= p_snapshot", b)
+        self.assertIn("pg_catalog.lower(m.unit_code) = pg_catalog.lower(p_unit)", b)   # the index
+        self.assertIn("pg_catalog.lower(m.zone_code) = pg_catalog.lower(p_zone)", b)
+        self.assertIn("(p_from IS NULL OR m.measured_at > p_from)", b)
+        self.assertIn("(p_to IS NULL OR m.measured_at <= p_to)", b)
+        self.assertIn("ORDER BY m.measured_at DESC", b)
+        self.assertIn("LIMIT p_limit", b)
+        self.assertEqual(b.count("RAISE EXCEPTION"), 3)
+        self.assertEqual(b.count("ERRCODE = '22023'"), 3)
+        self.assertIn("RAISE EXCEPTION 'no snapshot %'", b)
+        self.assertIn("p_limit < 1 OR p_limit > 50000", b)
+        self.assertIn("p_unit IS NULL OR p_zone IS NULL", b)
+        # the index it relies on
+        self.assertIn("ON lake.measurement (pg_catalog.lower(unit_code), pg_catalog.lower(zone_code), measured_at)",
+                      read(DDL))
+
+    def test_small_sets_read_exactly_one_snapshot(self):
+        for n in ("units", "zones", "recipes", "recipe_lines", "catalogue"):
+            b = self.body("lake_api." + n)
+            self.assertRegex(b, r"FROM lake\.%s [a-z] WHERE [a-z]\.snapshot_id = p_snapshot" % n, n)
+
+    def test_lineage(self):
+        b = self.body("lake_api.snapshots")
+        self.assertIn("WITH RECURSIVE", b)
+        self.assertIn("pg_catalog.row_number() OVER (ORDER BY s.snapshot_id)", b)
+        self.assertIn("coalesce(s.digests ->> 'measurement', '') AS md", b)
+        self.assertIn("pg_catalog.convert_to('' || E'\\n' || o.md, 'UTF8')", b)          # L_0 = ''
+        self.assertIn("pg_catalog.convert_to(chain.lin || E'\\n' || o.md, 'UTF8')", b)   # L_N
+        self.assertIn("ORDER BY s.snapshot_id", b)
+        self.assertIn("L_N = hex(sha256(utf8(L_{N-1} || E'\\n' || digests->>'measurement')))", self.raw)
+        # the notebook helper recomputes it with the same rule
+        sys.path.insert(0, os.path.join(REPO, "k8s", "workbench", "examples"))
+        import medcea_data
+        rows = [{"snapshot_id": 3, "digests": {"measurement": "c" * 64}},
+                {"snapshot_id": 1, "digests": {"measurement": hashlib.sha256(b"").hexdigest()}},
+                {"snapshot_id": 2, "digests": {"measurement": "b" * 64}}]
+        want = lineage([hashlib.sha256(b"").hexdigest(), "b" * 64, "c" * 64])
+        self.assertEqual(medcea_data.lineage_chain(rows), {1: want[0], 2: want[1], 3: want[2]})
+        self.assertEqual(want[0], hashlib.sha256(("\n" + hashlib.sha256(b"").hexdigest()).encode()).hexdigest())
+
+    def test_the_digest_check_uses_the_digests_rules(self):
+        h = " ".join(self.fns["lake.snapshot_digest_check"].split())
+        self.assertIn('RETURNS TABLE ("set" text, recorded text, recomputed text, ok boolean)', h)
+        self.assertIn("SET TimeZone = 'UTC' SET DateStyle = 'ISO, YMD'", h)
+        b = self.body("lake.snapshot_digest_check")
+        ddl = sql_code(read(DDL))
+        # the same sets in the same order as close_snapshot's
+        cs = ddl[ddl.index("FUNCTION lake.close_snapshot"):]
+        for arr in ("sets CONSTANT text[] := ARRAY[", "stages CONSTANT text[] := ARRAY["):
+            want = cs[cs.index(arr):cs.index("];", cs.index(arr))]
+            got = b[b.index(arr):b.index("];", b.index(arr))]
+            self.assertEqual(" ".join(got.split()), " ".join(want.split()))
+        # a row's text is the staging columns' record form, in attnum order, snapshot_id left out
+        self.assertIn("pg_catalog.format('x.%I', a.attname), ', ' ORDER BY a.attnum", b)
+        self.assertIn("a.attrelid = pg_catalog.to_regclass('lake.' || stages[i]) AND a.attnum > 0 AND NOT "
+                      "a.attisdropped", " ".join(b.split()))
+        self.assertEqual(b.count("SELECT ROW(%s)::text AS t"), 2)
+        self.assertEqual(b.count("ORDER BY r.t COLLATE \"C\""), 2)
+        # per hour of ingest, the line format of _set_digest
+        sd = ddl[ddl.index("FUNCTION lake._set_digest"):]
+        for piece in ("pg_catalog.date_trunc('hour', m.ingested_at) AS hour, pg_catalog.count(*) AS c",
+                      "GROUP BY 1 ORDER BY 1 NULLS LAST LOOP",
+                      "coalesce(pg_catalog.to_char(h.hour, 'YYYY-MM-DD\"T\"HH24\":00:00Z\"'), 'none')",
+                      "|| '|' || h.c::text || '|' ||"):
+            self.assertIn(piece, " ".join(sd.split()))
+            self.assertIn(piece, " ".join(b.split()))
+        self.assertIn("ok := recorded IS NOT DISTINCT FROM recomputed;", b)
+        self.assertIn("RAISE EXCEPTION 'no snapshot %'", b)
+
+    def test_asserts_cover_the_reader(self):
+        a = read(ASSERT)
+        for line in ("'rs_lake_api is not LOGIN NOINHERIT'", "', not 10'", "'rs_lake_reader can log in'",
+                     "'rs_lake_api is a member of '", "'rs_lake_api is not a member of rs_lake_reader'",
+                     "'rs_lake_api lacks its setting '", "' holds column privilege '",
+                     "'rs_lake_reader lacks USAGE on schema lake_api'", "'rs_lake_reader lacks EXECUTE on '",
+                     "' is not SECURITY DEFINER'", "' does not pin search_path = pg_catalog, pg_temp'",
+                     "'search_path=pg_catalog, pg_temp'"):
+            self.assertIn(line, a)
+        self.assertIn("'registry', 'lake_api')", a)   # in the six-schema checks (PUBLIC, ownership)
+        # the reader holds nothing on any relation of the database, nothing outside lake_api
+        self.assertIn("WHERE NOT (lk.rolname = 'rs_lake_reader' AND n.nspname = 'lake_api' AND a.privilege_type = "
+                      "'EXECUTE')", " ".join(a.split()))
+        self.assertIn("WHERE NOT (lk.rolname = 'rs_lake_reader' AND n.nspname = 'lake_api' AND a.privilege_type = "
+                      "'USAGE')", " ".join(a.split()))
 
 
 # ── fakes ─────────────────────────────────────────────────────────────────────
@@ -312,8 +523,15 @@ class Tree(unittest.TestCase):
             f.write('policy_source_init() { echo "init $*" >> "$STUB_LOG"; }\n'
                     'policy_source_finish() { echo "finish $*" >> "$STUB_LOG"; }\n'
                     'policy_db_state() { echo "policy_db_state $1" >> "$STUB_LOG"; echo "${STUB_PS_STATE:-version-3}"; }\n')
+        # the snapshot reader (Phase 2b), run by deploy.sh last and by uninstall.sh first
+        shutil.copytree(os.path.join(REPO, "apps", "lake-api"), os.path.join(self.root, "apps", "lake-api"))
+        os.makedirs(os.path.join(self.root, "apps", "research", "db"), exist_ok=True)
         with open(os.path.join(self.root, "apps", "iam", "compiler", "cli.py"), "w") as f:
             f.write('import os, sys\nopen(os.environ["STUB_LOG"], "a").write("cli " + " ".join(sys.argv[1:]) + "\\n")\n'
+                    'if sys.argv[1:2] == ["pod-zone"]:\n'
+                    '    z = os.environ.get("STUB_POD_ZONE", "")\n'
+                    '    print(z) if z else None\n'
+                    '    sys.exit(0 if z else int(os.environ.get("STUB_POD_ZONE_RC", "1")))\n'
                     'sys.exit(int(os.environ.get("STUB_ZONE_RC", "0")))\n')
         self.write_config()
 
@@ -416,16 +634,31 @@ class Deploy(Tree):
         self.assertFalse([c for c in calls if c.startswith("helm3") or c.startswith("kubectl apply")])
 
     def test_missing_password(self):
-        self.write_config(RS_BACKUP_DB_PASS="")
-        r, calls = self.run_script("deploy.sh")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("RS_BACKUP_DB_PASS is empty in config.env", r.out)
-        self.assertFalse([c for c in calls if c.startswith("helm3")])
+        for k in ("RS_BACKUP_DB_PASS", "RS_LAKE_API_DB_PASS"):
+            self.write_config(**{k: ""})
+            r, calls = self.run_script("deploy.sh")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("%s is empty in config.env" % k, r.out)
+            self.assertFalse([c for c in calls if c.startswith("helm3")])
+
+    def test_the_reader_fails_the_deploy(self):
+        # lake-api's exit code is the research deploy's, and research's finish waits for it
+        r, calls = self.run_script("deploy.sh", STUB_POD_ZONE="platform")
+        self.assertEqual(r.returncode, 1, r.out)
+        self.assertIn("it lives only in the research zone", r.out)
+        self.assertNotIn("finish medcea research", calls)
+        self.assertNotIn("finish medcea lake-api", calls)
 
     def test_full_path(self):
         r, calls = self.run_script("deploy.sh")
         self.assertEqual(r.returncode, 0, r.out)
         self.assertEqual(calls[-1], "finish medcea research")
+        # the snapshot reader last, under this log and lock: it skips until the policy has its pod
+        self.assertEqual(calls[-5:-1], ["init medcea", "cli pod-zone lake-api",
+                                        "kubectl get deployment lake-api -n medcea-research", "finish medcea lake-api"])
+        self.assertIn("[lake-api]", r.stdout)
+        self.assertIn("skipped: the applied access policy has no lake-api pod yet", r.stdout)
+        self.assertEqual(len([f for f in os.listdir(os.path.join(self.root, "logs"))]), 1)   # one log
         helm = [c for c in calls if c.startswith("helm3")]
         self.assertTrue(helm[0].startswith("helm3 registry login registry-1.docker.io -u someone --password-stdin"))
         up = helm[1]
@@ -441,12 +674,12 @@ class Deploy(Tree):
             self.assertIn(s, values)
         self.assertNotIn("${", values)
         self.assertNotIn("cpu: 1", values.split("limits:")[1].split("persistence")[0])   # no CPU limit
-        # order: auth Secret → helm → DDL → passwords → grants → role Secrets → assert
+        # order: auth Secret → helm → DDL → lake_api.sql → passwords → grants → role Secrets → assert
         order = [c for c in calls if c.startswith(("helm3 upgrade", "kubectl apply", "kubectl exec"))]
         kinds = []
         for c in order:
             kinds.append("helm" if c.startswith("helm3") else c.split()[1])
-        self.assertEqual(kinds, ["apply", "helm", "exec", "exec", "exec", "apply", "apply", "exec"])
+        self.assertEqual(kinds, ["apply", "helm", "exec", "exec", "exec", "exec", "apply", "apply", "exec"])
         self.assertIn("kubectl apply -n medcea-research -f -", calls)
         self.assertEqual(calls.count("kubectl apply -n medcea -f -"), 2)
         applies = self.inputs("apply")
@@ -460,20 +693,25 @@ class Deploy(Tree):
             self.assertNotIn("medcea/db-role", sql_code(a.replace("#", "--")))   # never deleted by the database purge
         execs = self.inputs("exec")
         self.assertIn("CREATE DATABASE medcea_research", execs[0])
-        pw = execs[1]
+        self.assertEqual(execs[1], read(LAKE_API))
+        pw = execs[2]
         self.assertTrue(pw.startswith("SET log_statement = 'none';"), pw)
-        self.assertEqual(len(re.findall(r"\\set pw 'SCRAM-SHA-256\$4096:", pw)), 2)
+        self.assertEqual(len(re.findall(r"\\set pw 'SCRAM-SHA-256\$4096:", pw)), 3)
         self.assertIn("ALTER ROLE rs_export_writer PASSWORD :'pw';", pw)
         self.assertIn("ALTER ROLE rs_backup PASSWORD :'pw';", pw)
+        self.assertIn("ALTER ROLE rs_lake_api PASSWORD :'pw';", pw)
         for v in SECRETS.values():
             self.assertNotIn(v, "\n".join(execs))
-        self.assertIn("GRANT pg_read_all_data TO rs_backup", execs[2])
-        self.assertIn("assert_grants.sql", execs[3])
+        self.assertIn("GRANT pg_read_all_data TO rs_backup", execs[3])
+        self.assertIn("GRANT rs_lake_reader TO rs_lake_api", execs[3])
+        self.assertIn("assert_grants.sql", execs[4])
         ex = [c for c in calls if c.startswith("kubectl exec")]
         self.assertTrue(all(" -n medcea-research research-postgresql-0 " in c for c in ex), ex)
         self.assertIn(" postgres -q -v ON_ERROR_STOP=1 -f -", ex[0])
-        self.assertIn(" medcea_research -q", ex[2])
-        self.assertIn(" medcea_research -qtA", ex[3])
+        self.assertIn(" medcea_research -q -v ON_ERROR_STOP=1 -f -", ex[1])   # lake_api.sql in the database
+        self.assertIn(" postgres -q", ex[2])
+        self.assertIn(" medcea_research -q", ex[3])
+        self.assertIn(" medcea_research -qtA", ex[4])
 
     def test_the_chart_networkpolicy_is_off(self):
         # chart 18.4.0 has no top-level networkPolicy key: the switches are per component
@@ -520,6 +758,11 @@ class Deploy(Tree):
     def test_uninstall(self):
         r, calls = self.run_script("uninstall.sh", STUB_RELEASE="1")
         self.assertEqual(r.returncode, 0, r.out)
+        # the snapshot reader first (it logs in to the database removed below)
+        rm = "kubectl delete deployment,service,secret -n medcea-research -l app=lake-api --ignore-not-found"
+        self.assertIn(rm, calls)
+        self.assertLess(calls.index(rm), calls.index("kubectl delete secret research-export-writer research-backup "
+                                                     "-n medcea --ignore-not-found"))
         self.assertIn("kubectl delete secret research-export-writer research-backup -n medcea --ignore-not-found", calls)
         self.assertIn("helm3 uninstall research-postgresql -n medcea-research --wait", calls)
         self.assertFalse([c for c in calls if "pvc" in c])
@@ -748,6 +991,7 @@ class RealPostgres(unittest.TestCase):
                         "start"], check=True, capture_output=True)
         for _ in range(2):   # re-run safe
             cls.psql("postgres", read(DDL), check=True)
+            cls.psql("medcea_research", read(LAKE_API), check=True)
             cls.psql("medcea_research", read(GRANTS), check=True)
 
     @classmethod
@@ -916,6 +1160,70 @@ COMMIT;"""
         enabled = self.q("SELECT string_agg(DISTINCT tgenabled::text, '') FROM pg_trigger WHERE tgname LIKE 'append_only_%'")
         self.assertEqual(enabled, "A")
         self.assertEqual(self.q("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'append_only_%'"), str(2 * len(APPEND_ONLY)))
+
+    def test_04_the_snapshot_reader(self):
+        """After test_02's snapshots: lineage, the digest check's parity with close_snapshot,
+        the reader's rights and refusals (Phase 2b)."""
+        api = "rs_lake_api"
+        read_as = "SET ROLE rs_lake_reader; "
+        snaps = [l.split("|") for l in self.q(read_as + "SELECT snapshot_id, digests->>'measurement', lineage "
+                                              "FROM lake_api.snapshots()", user=api).splitlines()]
+        self.assertGreaterEqual(len(snaps), 4)
+        self.assertEqual([x[2] for x in snaps], lineage([x[1] for x in snaps]))
+        sys.path.insert(0, os.path.join(REPO, "k8s", "workbench", "examples"))
+        import medcea_data
+        chain = medcea_data.lineage_chain([{"snapshot_id": int(x[0]), "digests": {"measurement": x[1]}} for x in snaps])
+        self.assertEqual([chain[int(x[0])] for x in snaps], [x[2] for x in snaps])
+        # every snapshot's digests recompute from the lake rows with close_snapshot's rules,
+        # whatever the session's TimeZone and DateStyle
+        for sid, _, _ in snaps:
+            out = self.q("SET TimeZone = 'Asia/Kolkata'; SET DateStyle = 'SQL, DMY'; "
+                         "SELECT \"set\", ok FROM lake.snapshot_digest_check(%s)" % sid)
+            got = dict(l.split("|") for l in out.splitlines())
+            self.assertEqual(sorted(got), sorted(LAKE.get(x, x) for x in STAGES))
+            self.assertEqual(set(got.values()), {"t"}, (sid, out))
+        self.refused("SELECT * FROM lake.snapshot_digest_check(999999)", "no snapshot 999999")
+        # measurements: up to the snapshot, case-insensitive unit and zone, the window, the limit
+        first, last = snaps[0][0], snaps[-1][0]
+        n_first = self.q(read_as + "SELECT count(*) FROM lake_api.measurements(%s, 'unit02', 'z1')" % first, user=api)
+        n_last = self.q(read_as + "SELECT count(*) FROM lake_api.measurements(%s, 'unit02', 'z1')" % last, user=api)
+        self.assertEqual(n_first, "1")
+        self.assertGreater(int(n_last), int(n_first))
+        self.assertEqual(self.q(read_as + "SELECT count(*) FROM lake_api.measurements(%s, 'UNIT02', 'Z1', 'co2', "
+                                          "'2026-12-02 00:05Z', '2026-12-02 02:00Z')" % last, user=api), "2")
+        self.assertEqual(self.q(read_as + "SELECT max(snapshot_id) <= %s FROM lake_api.measurements(%s, 'UNIT02', "
+                                          "'Z1')" % (first, first), user=api), "t")
+        self.assertEqual(self.q(read_as + "SELECT count(*) FROM lake_api.measurements(%s, 'UNIT02', 'Z1', p_limit => 1)"
+                                % last, user=api), "1")
+        for call, want in (("999999, 'UNIT02', 'Z1'", "no snapshot 999999"),
+                           ("%s, NULL, 'Z1'" % last, "a unit and a zone are required"),
+                           ("%s, 'UNIT02', 'Z1', p_limit => 0" % last, "between 1 and 50000"),
+                           ("%s, 'UNIT02', 'Z1', p_limit => 50001" % last, "between 1 and 50000")):
+            self.refused(read_as + "SELECT * FROM lake_api.measurements(%s)" % call, want, user=api)
+        # the held-out range never reached the reader
+        self.assertEqual(self.q(read_as + "SELECT count(*) FROM lake_api.measurements(%s, 'UNIT01', 'Z1', NULL, "
+                                          "'2026-12-01 10:00Z', '2026-12-01 10:59:59Z')" % last, user=api), "0")
+        self.assertEqual(self.q(read_as + "SELECT count(*) FROM lake_api.zones(%s)" % first, user=api), "1")
+        holds = self.q(read_as + "SELECT * FROM lake_api.holds() LIMIT 1", user=api)
+        self.assertEqual(len(holds.split("|")), 4)
+        self.assertNotIn("qa1", self.q(read_as + "SELECT * FROM lake_api.holds()", user=api))
+        # rights: NOINHERIT, so nothing without the role; the reader no table; read-only, bounded
+        self.refused("SELECT * FROM lake_api.holds()", "permission denied", user=api)
+        self.refused(read_as + "SELECT count(*) FROM lake.measurement", "permission denied", user=api)
+        self.refused(read_as + "SELECT count(*) FROM vault.reservation", "permission denied", user=api)
+        self.refused(read_as + "SELECT * FROM lake.snapshot_digest_check(1)", "permission denied", user=api)
+        self.refused(read_as + "SELECT lake.latest_cut()", "permission denied", user=api)
+        self.refused("CREATE TABLE lake_api.x (a int)", "read-only transaction", user=api)
+        self.assertEqual(self.q("SHOW statement_timeout; SHOW default_transaction_read_only; SHOW temp_file_limit",
+                                user=api).split(), ["30s", "on", "256MB"])
+        # a drift is what the asserts report
+        self.q("GRANT SELECT ON lake.measurement TO rs_lake_reader")
+        self.assertIn("rs_lake_reader holds SELECT on lake.measurement", self.q(read(ASSERT)))
+        self.q("REVOKE SELECT ON lake.measurement FROM rs_lake_reader")
+        self.q("ALTER ROLE rs_lake_api RESET temp_file_limit")
+        self.assertIn("rs_lake_api lacks its setting temp_file_limit=256MB", self.q(read(ASSERT)))
+        self.q("ALTER ROLE rs_lake_api SET temp_file_limit = '256MB'")
+        self.assertEqual(self.q(read(ASSERT)), "")
 
 
 if __name__ == "__main__":

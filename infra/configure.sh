@@ -325,8 +325,12 @@ else
     # before Phase 2.5 has no line for it and ran with false, so it gets false, said once
     # below: turning it on moves pgAdmin onto rr_admin's grants and is the owner's
     # decision (./medcea.sh → IAM switches).
+    # The same for RESEARCH_ENABLED (review of commit A, 19 Nov 2026): true for a new
+    # config.env since 19 Nov 2026, but a config.env from before Phase 2a (18 Nov 2026) has no
+    # line and ran with nothing research: it gets false, said once below.
     _KEPT_OFF=()
     grep -q '^IAM_DB_SERVICE_ROLES=' "$CONFIG_FILE" || _KEPT_OFF+=('IAM_DB_SERVICE_ROLES="false"')
+    grep -q '^RESEARCH_ENABLED=' "$CONFIG_FILE" || _KEPT_OFF+=('RESEARCH_ENABLED="false"')
     awk '
         FNR == NR { if (match($0, /^[A-Za-z_][A-Za-z0-9_]*=/)) { k = substr($0, 1, RLENGTH - 1); if (!(k in old)) { old[k] = $0; order[++n] = k } } next }
         match($0, /^[A-Za-z_][A-Za-z0-9_]*=/) { k = substr($0, 1, RLENGTH - 1); seen[k] = 1; print ((k in old) ? old[k] : $0); next }
@@ -346,8 +350,11 @@ else
         rm -f "$CONFIG_FILE.merged"
         echo -e "${GREEN}Rebased $CONFIG_FILE on config.env.example, keeping your values${NC} (previous copy: $CONFIG_FILE.bak)."
     fi
-    if (( ${#_KEPT_OFF[@]} )); then
+    if [[ " ${_KEPT_OFF[*]} " == *' IAM_DB_SERVICE_ROLES='* ]]; then
         echo -e "${YELLOW}Note: $CONFIG_FILE had no IAM_DB_SERVICE_ROLES line; it is set to false, as this install has run (a new config.env has true). To turn it on: ./medcea.sh → IAM switches → IAM_DB_SERVICE_ROLES.${NC}"
+    fi
+    if [[ " ${_KEPT_OFF[*]} " == *' RESEARCH_ENABLED='* ]]; then
+        echo -e "${YELLOW}Note: $CONFIG_FILE had no RESEARCH_ENABLED line; it is set to false, as this install has run without the research sandbox (a new config.env has true). To turn it on: ./medcea.sh → Infrastructure → Turn the research sandbox on or off.${NC}"
     fi
 fi
 # It is about to hold every platform password.
@@ -372,14 +379,16 @@ check_tailscale
 # The database roles' passwords (IAM plan 3.6; apps/database/deploy.sh writes them
 # into Secrets db-<role>). Generated, never asked, never shown.
 # SVC_SUPERSET_DB_PASS is Superset's connection role (svc_superset), used once the applied
-# access policy gives a role a Superset setting. The research sandbox's four (Phase 2a):
-# research-postgresql's superuser, its rs_export_writer and rs_backup logins, and the
-# export's svc_research_export on the platform database; generated whether or not
-# RESEARCH_ENABLED is true, so switching it on asks nothing.
+# access policy gives a role a Superset setting. The research sandbox's five (Phase 2a,
+# 2b): research-postgresql's superuser, its rs_export_writer, rs_backup and rs_lake_api
+# (the snapshot reader, lake-api) logins, and the export's svc_research_export on the
+# platform database; generated whether or not RESEARCH_ENABLED is true, so switching it
+# on asks nothing.
 for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
           SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS \
           SVC_SUPERSET_DB_PASS SUPERSET_META_DB_PASS \
-          RESEARCH_DB_PASS RS_EXPORT_WRITER_DB_PASS RS_BACKUP_DB_PASS SVC_RESEARCH_EXPORT_DB_PASS; do
+          RESEARCH_DB_PASS RS_EXPORT_WRITER_DB_PASS RS_BACKUP_DB_PASS RS_LAKE_API_DB_PASS \
+          SVC_RESEARCH_EXPORT_DB_PASS; do
     [[ -n "$(cfg_get "$_v")" ]] || cfg_set "$_v" "$(gen_password)"
 done
 # Superset's session-signing and connection-encryption key (apps/superset): hex, so

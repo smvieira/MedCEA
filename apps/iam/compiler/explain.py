@@ -111,6 +111,24 @@ def system_reach(p):
         for ing in pd.get("ingress") or []:
             for src in ing.get("from") or []:
                 out.add(("ingress", pod, ing.get("port"), src))
+    # research sandbox Phase 2b: a zone pod's egress hops (netpol.HOP_FORMS). No zone pod has
+    # one under the 2a policy, so no tuple; the paths are registered with the YAML (commit B).
+    for pod, pd in (net.get("pods") or {}).items():
+        hops = pd.get("egress")
+        if pd.get("zone") is None or not isinstance(hops, list):
+            continue
+        for hop in hops:
+            if not isinstance(hop, dict):
+                continue
+            if "pod" in hop:
+                out.add(("pod-egress", pod, "pod", hop["pod"], hop.get("port")))
+            elif "platform" in hop:
+                out.add(("pod-egress", pod, "platform", source.canonical(hop["platform"]).decode(), hop.get("port")))
+            elif "node" in hop:
+                out.add(("pod-egress", pod, "node", "", hop.get("port")))
+            elif "internet" in hop:
+                for port in hop.get("ports") if isinstance(hop.get("ports"), list) else []:
+                    out.add(("pod-egress", pod, "internet", "", port))
     for host, src in (net.get("unproxied") or {}).items():
         out.add(("unproxied", host, src if isinstance(src, str) else source.canonical(src).decode()))
     for name, cd in (net.get("clients") or {}).items():

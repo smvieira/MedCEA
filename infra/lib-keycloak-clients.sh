@@ -14,7 +14,18 @@
 #                   or mapper there breaks token verification or the gate, so kcscopes FAILs.
 #                   The others (grafana, pgadmin, superset, node-red, workbench) sign people
 #                   in to a tool only: kcscopes WARNs for them.
+# KC_POLICY_TOKEN_CLIENTS  the clients that exist only while the applied access policy
+#                   names them as some network.clients entry's token_client (research
+#                   Phase 2b, D2): deploy-infra.sh creates (or brings back) each one while
+#                   `cli.py has-token-client NAME` says 0, and otherwise disables an existing
+#                   one (read-modify-write, enabled false; never created, never deleted);
+#                   infra/deploy-workbench.sh --move disables it too (kc_client_disable).
+#                   Every one is a public device-sign-in client (_create_public_device_client).
+#                   The two lists above keep them (their order is pinned): a disabled client
+#                   found by the scope loop still gets its scopes, which is harmless.
 # shellcheck disable=SC2034  # read by the scripts that source it
 KC_SCOPE_CLIENTS=(portal access policy config monitor scheduler dbmgmt mqtt-explorer pgadmin edge-wizard node-red workbench grafana superset workbench-notebook)
 # shellcheck disable=SC2034
 KC_API_CLIENTS=(portal access policy config monitor scheduler dbmgmt mqtt-explorer edge-wizard workbench-notebook)
+# shellcheck disable=SC2034
+KC_POLICY_TOKEN_CLIENTS=(workbench-notebook)

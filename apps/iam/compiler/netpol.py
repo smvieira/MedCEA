@@ -51,6 +51,22 @@ the platform zone, the namespace `compile` is given. Each zone has a namespace o
       clients:
         research-export: {selector: {app: research-export}, egress: [{pod: research-postgresql, port: 5432}]}
 
+Hop forms (research sandbox Phase 2b). A zone pod's `egress` item is exactly one of
+(each may carry `why`, prose):
+
+    {pod: P, port: N}                 a pod of the section (any zone) that admits pod:<it>
+    {platform: {label: value}, port: N}
+                                      pods of the platform namespace that are no network pod
+                                      (Keycloak): namespaceSelector + podSelector, AND
+    {node: true, port: N}             the node's addresses as /32 ipBlocks (the Kubernetes API:
+                                      Calico matches after DNAT of the kubernetes Service)
+    {internet: true, ports: [N, ..]}  0.0.0.0/0 except network.zones.<zone>.internet_except
+                                      (the private ranges, in YAML order), on those TCP ports
+
+`network.zones.<zone>.internet_except` is a non-empty list of IPv4 networks (strict). A
+platform hop may not select a network pod (that pod admits only sources of its own zone).
+A zone without a new-form hop compiles byte for byte as before.
+
 A `pod:`/`client:` source in another zone than the pod it reaches resolves to ONE peer
 carrying both a namespaceSelector (kubernetes.io/metadata.name = that zone's namespace) and
 the podSelector, so both must match (AND); a `proxy:` source is a platform pod. A platform
@@ -64,10 +80,11 @@ node_ips) returns the zone's List, labelled medcea/<prefix>-netpol=true (researc
 <prefix>-default-deny (every pod, Ingress and Egress, nothing allowed), <prefix>-dns (every
 pod may reach kube-system's k8s-app=kube-dns on UDP and TCP 53; Calico matches egress after
 DNAT, so the pods, not the ClusterIP) and <prefix>-<pod> per zone pod (Ingress from its
-sources, Egress to its hops; the `egress` key only when it has hops, since the API server
+sources, Egress to its hops in list order; the `egress` key only when it has hops, since the API server
 drops an empty list). An empty List while the policy has no such zone.
 """
 
+import ipaddress
 import re
 
 LABEL = "medcea/iam-netpol"
@@ -98,6 +115,68 @@ def has_zone(data, zone):
     return zone in zones(data)
 
 
+# A zone pod's egress hop is exactly one of these forms (research sandbox Phase 2b), each
+# with its own keys besides an optional `why` (prose). `port` on an internet hop is let
+# through here so that its own check can say what is wrong with it.
+HOP_FORMS = {
+    "pod": {"pod", "port", "why"},
+    "platform": {"platform", "port", "why"},
+    "node": {"node", "port", "why"},
+    "internet": {"internet", "ports", "port", "why"},
+}
+
+
+def _hop_form(hop):
+    """The form of a zone pod's hop (pod, platform, node or internet), None when the hop is
+    not a mapping, names none or several of them, or carries a key its form does not take."""
+    if not isinstance(hop, dict):
+        return None
+    forms = [f for f in HOP_FORMS if f in hop]
+    if len(forms) != 1 or set(hop) - HOP_FORMS[forms[0]]:
+        return None
+    return forms[0]
+
+
+def _ports_ok(ports):
+    return (isinstance(ports, list) and bool(ports)
+            and all(isinstance(x, int) and not isinstance(x, bool) and 1 <= x <= 65535 for x in ports))
+
+
+def _internet_except(zd):
+    """The zone's internet_except list when it is a non-empty list of strict IPv4 networks,
+    else None (absent or malformed: an internet hop then has nothing safe to compile to)."""
+    if not isinstance(zd, dict):
+        return None
+    ex = zd.get("internet_except")
+    if not isinstance(ex, list) or not ex:
+        return None
+    for x in ex:
+        if not isinstance(x, str):
+            return None
+        try:
+            ipaddress.IPv4Network(x, strict=True)
+        except ValueError:
+            return None
+    return list(ex)
+
+
+# What an internet hop must never reach, whatever else internet_except lists (review of research
+# Phase 2b commit A, 19 Nov 2026): the private ranges (the cluster's pod and service networks
+# are in 10/8 on MicroK8s, the LAN in 192.168/16), shared CGNAT space (Tailscale's 100.64/10)
+# and link-local (cloud metadata). A list that misses one is refused, not just reviewed.
+INTERNET_EXCEPT_REQUIRED = ("10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16")
+
+
+def _except_missing(ex):
+    nets = [ipaddress.IPv4Network(x) for x in ex]
+    return [r for r in INTERNET_EXCEPT_REQUIRED
+            if not any(ipaddress.IPv4Network(r).subnet_of(n) for n in nets)]
+
+
+def _port_ok(p):
+    return isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535
+
+
 def _zone_of(net, src):
     """The zone of a source (None: the platform zone; a proxy, ingress or node is platform)."""
     if src.startswith("pod:"):
@@ -118,6 +197,12 @@ def _zone_check(net, errors):
             errors.append(f"network: unknown zone {z!r} (known: {', '.join(ZONES)})")
         if zd is not None and not isinstance(zd, dict):
             errors.append(f"network: zone {z}: settings must be a mapping")
+        elif isinstance(zd, dict) and "internet_except" in zd and _internet_except(zd) is None:
+            errors.append(f"network: zone {z}: internet_except must be a non-empty list of IPv4 networks")
+        elif isinstance(zd, dict) and "internet_except" in zd and _except_missing(zd["internet_except"]):
+            errors.append(f"network: zone {z}: internet_except must cover {', '.join(INTERNET_EXCEPT_REQUIRED)} "
+                          f"(the cluster's and the LAN's private ranges, CGNAT and link-local); missing: "
+                          f"{', '.join(_except_missing(zd['internet_except']))}")
     pods = net.get("pods") or {}
     clients = net.get("clients") or {}
     for kind, entries in (("pod", pods), ("client", clients)):
@@ -139,11 +224,37 @@ def _zone_check(net, errors):
             errors.append(f"network: pod {name}: egress must be a list of hops")
             continue
         for hop in hops:
-            if not isinstance(hop, dict) or "pod" not in hop or set(hop) - {"pod", "port", "why"}:
-                errors.append(f"network: pod {name}: a zone pod's hop is {{pod, port}}")
+            form = _hop_form(hop)
+            if form is None:
+                errors.append(f"network: pod {name}: a zone pod's hop is {{pod, port}}, {{platform, port}}, "
+                              f"{{node: true, port}} or {{internet: true, ports}}")
                 continue
-            if not isinstance(hop.get("port"), int):
-                errors.append(f"network: pod {name}: hop port {hop.get('port')!r} is not an integer")
+            if form == "internet":
+                if hop["internet"] is not True or "port" in hop or not _ports_ok(hop.get("ports")):
+                    errors.append(f"network: pod {name}: an internet hop is {{internet: true, ports: [..]}} "
+                                  f"(TCP ports, no port key)")
+                if _internet_except(zs.get(pd["zone"])) is None:
+                    errors.append(f"network: pod {name}: an internet hop needs network.zones.{pd['zone']}"
+                                  f".internet_except (the private ranges it must not reach)")
+                continue
+            if not _port_ok(hop.get("port")):
+                errors.append(f"network: pod {name}: hop port {hop.get('port')!r} is not an integer from 1 to 65535")
+            if form == "platform":
+                sel = hop["platform"]
+                if not isinstance(sel, dict) or not sel or not all(
+                        isinstance(k, str) and isinstance(v, str) for k, v in sel.items()):
+                    errors.append(f"network: pod {name}: a platform hop names a non-empty selector")
+                    continue
+                for other, od in pods.items():
+                    if isinstance(od, dict) and od.get("selector") == sel:
+                        errors.append(f"network: pod {name}: platform hop {sel} selects network pod {other}; "
+                                      f"a network pod admits only sources of its own zone, so name it with a "
+                                      f"zone pod or not at all")
+                continue
+            if form == "node":
+                if hop["node"] is not True:
+                    errors.append(f"network: pod {name}: a node hop is {{node: true, port}}")
+                continue
             if hop["pod"] not in pods:
                 errors.append(f"network: pod {name}: hop to unknown pod {hop['pod']}")
             elif not any(f"pod:{name}" in (r.get("from") or []) and r.get("port") == hop.get("port")
@@ -327,7 +438,12 @@ def _ingress_rules(net, pd, node_ips, here=None, namespaces=None):
 
 
 def _needs_node(net, zone):
-    return any(src == "node" for name, _, src in _sources(net) if net["pods"][name].get("zone") == zone)
+    """True when a pod of `zone` admits `node` or (a zone pod) has a {node: true} hop."""
+    if any(src == "node" for name, _, src in _sources(net) if net["pods"][name].get("zone") == zone):
+        return True
+    return any(isinstance(h, dict) and h.get("node") is True
+               for pd in (net.get("pods") or {}).values() if zone is not None and pd.get("zone") == zone
+               for h in pd.get("egress") or [])
 
 
 def compile(p, namespace, node_ips):
@@ -391,13 +507,30 @@ def compile_zone(p, zone, namespace, platform_namespace, node_ips):
             continue
         spec = {"podSelector": {"matchLabels": dict(pd["selector"])}, "policyTypes": ["Ingress", "Egress"],
                 "ingress": _ingress_rules(net, pd, node_ips, zone, namespaces)}
-        hops = [{"to": [_in({"podSelector": {"matchLabels": dict(net["pods"][h["pod"]]["selector"])}},
-                            net["pods"][h["pod"]].get("zone"), zone, namespaces)],
-                 "ports": [{"protocol": "TCP", "port": h["port"]}]} for h in pd.get("egress") or []]
+        hops = [_zone_hop(net, h, zone, namespaces, node_ips) for h in pd.get("egress") or []]
         if hops:
             spec["egress"] = hops
         items.append(item(name, f"network.pods.{name}", spec))
     return {"apiVersion": "v1", "kind": "List", "items": items}
+
+
+def _zone_hop(net, h, zone, namespaces, node_ips):
+    """One NetworkPolicyEgressRule of a zone pod's hop (HOP_FORMS), TCP only."""
+    if "platform" in h:
+        to = [{"namespaceSelector": _ns_selector(namespaces[None]),
+               "podSelector": {"matchLabels": dict(h["platform"])}}]
+    elif "node" in h:
+        to = [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted(set(node_ips))]
+    elif "internet" in h:
+        ex = _internet_except((net.get("zones") or {}).get(zone))
+        if ex is None:
+            raise ValueError(f"zone {zone}: an internet hop needs network.zones.{zone}.internet_except")
+        return {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ex}}],
+                "ports": [{"protocol": "TCP", "port": x} for x in h["ports"]]}
+    else:
+        pd = net["pods"][h["pod"]]
+        to = [_in({"podSelector": {"matchLabels": dict(pd["selector"])}}, pd.get("zone"), zone, namespaces)]
+    return {"to": to, "ports": [{"protocol": "TCP", "port": h["port"]}]}
 
 
 def egress(p, client, namespaces=None):

@@ -154,6 +154,18 @@
 #  70  Applications → Reserve a held-out range: unit, optional zone, times and a reason checked
 #      (a leading - and a bad time re-asked), --by remembered; the typed word yes (y cancels);
 #      reserve.sh gets MEDCEA_CONFIRMED=1; List the reservations is read-only
+#  71  Infrastructure → Move the AI workbench (research Phase 2b): deploy-workbench.sh --move with
+#      MEDCEA_CONFIRMED=1 after the typed word yes (y cancels), sudo and the fresh hub database
+#      named; real: it takes its own lock
+#  72  Policy → Research Phase 2b: the version (0 and -1 re-asked) and --by asked; apply.sh N,
+#      the move, the lake reader, apply.sh --resume, health in that order under the guide's one
+#      lock after the typed word yes; MEDCEA_CONFIRMED=1 reaches the move and the resume only;
+#      a failure stops the chain
+#  73  Applications → the lake reader: install ([y/N]) and uninstall (the typed word yes), dry and
+#      real (each takes its own lock)
+#  74  RESEARCH_ENABLED rollback: a checklist naming the workbench left in the zone, then the
+#      export's, the lake reader's and the database's uninstalls in that order; Health → the
+#      research zone network test, with and without --wan-ip (a bad address re-asked)
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1178,7 +1190,7 @@ has   "--change (dry)" "[dry run] not executed: tests/iam-policy.sh --change"
 has   "five accounts" "5 throwaway accounts"
 has   "--apply leaves its version applied" "it becomes the applied version"
 has   "--change rolls back in its trap" "rolls it back and has the rollback confirmed"
-has   "the precondition" "Refused (exit 2) while one of the nine checks"
+has   "the precondition" "Refused (exit 2) while one of the ten checks"
 [[ "$(grep -c 'Run it? \[y/N\]' <<<"$OUT")" == 2 ]] && pass "two [y/N], b goes back without a plan" || fail "b planned something"
 no_stub
 real $'6\n17\n3\ny\nq\n'
@@ -1447,6 +1459,8 @@ has   "real: the script ran" "STUB infra/deploy-research-namespace.sh"
 
 echo "68 RESEARCH_ENABLED: enable and roll back"
 mkcfg true true
+# the template says true since research Phase 2b (an existing config.env keeps its value)
+sed -i 's/^RESEARCH_ENABLED=.*/RESEARCH_ENABLED="false"/' "$T/config.env"
 guide $'2\n11\n1\ny\ny\nq\n'
 rc_is "quits with 0" 0
 has   "the purpose" "RESEARCH_ENABLED: The research sandbox"
@@ -1466,15 +1480,17 @@ no_stub
 guide $'2\n11\n1\nn\nq\n'
 has   "the checklist answered no stops" "Do those first. Nothing was changed."
 hasnt "no step ran" "[dry run] would"
-guide $'2\n11\n2\ny\nq\n'
+guide $'2\n11\n2\ny\ny\nq\n'
 rc_is "rollback: quits with 0" 0
 has   "rollback: step 1 sets the switch back" '1. config.env: RESEARCH_ENABLED="false"'
 has   "rollback: step 2 stops the export" '2. ./apps/research-export/uninstall.sh'
-has   "rollback: step 3 removes the research database" '3. ./apps/research/uninstall.sh'
-has   "rollback: the data and the namespace stay" "its volume (every snapshot and reservation) and the research namespace stay"
+has   "rollback: step 3 removes the lake reader" '3. ./apps/lake-api/uninstall.sh'
+has   "rollback: step 4 removes the research database" '4. ./apps/research/uninstall.sh'
+has   "rollback: the data and the namespace stay" "volume (every snapshot and reservation) and the research namespace stay"
 hasnt "rollback: no purge" "uninstall.sh --purge-data"
 no_stub
-cp "$REPO/config.env.example" "$S/config.env"; chmod 600 "$S/config.env"
+sed 's/^RESEARCH_ENABLED=.*/RESEARCH_ENABLED="false"/' "$REPO/config.env.example" >"$S/config.env"; chmod 600 "$S/config.env"
+cp "$S/config.env" "$T/config.env.before"
 real $'2\n11\n1\ny\ny\n\nq\n'
 rc_is "real: quits with 0" 0
 python3 - "$OUT" <<'PY2' && pass "real: infra, database, research, backup, export in that order" || fail "real: wrong order"
@@ -1492,7 +1508,7 @@ PY2
 lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
 [[ "$(grep -c '^RESEARCH_ENABLED=' "$S/config.env")" == 1 ]] && grep -q '^RESEARCH_ENABLED="true"$' "$S/config.env" \
     && pass "real: exactly that line set" || fail "real: RESEARCH_ENABLED not replaced"
-[[ "$(diff "$S/config.env.example" "$S/config.env" | grep -c '^[<>]')" == 2 ]] \
+[[ "$(diff "$T/config.env.before" "$S/config.env" | grep -c '^[<>]')" == 2 ]] \
     && pass "real: nothing else changed" || fail "real: other lines changed"
 rm -f "$S"/config.env.guide-*.bak
 
@@ -1554,6 +1570,112 @@ rc_is "real: quits with 0" 0
 has   "real: reserve.sh got the zone" "STUB apps/research/reserve.sh add --by qa1 --unit UNIT01 --zone ZONE_2 --from 2026-11-01 --to 2026-11-02 --reason why"
 has   "real: MEDCEA_CONFIRMED=1" "ENV_CONFIRMED=1"
 [[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: reserve.sh takes its own lock" || fail "real: ran under the guide's lock"
+
+echo "71 move the AI workbench (Infrastructure)"
+mkcfg true true
+guide $'2\n12\ny\nb\n12\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "y is not yes" "Cancelled; nothing was run."
+has   "yes runs it (dry)" "[dry run] not executed: env MEDCEA_CONFIRMED=1 ./infra/deploy-workbench.sh --move"
+[[ "$(grep -c 'not executed: env MEDCEA_CONFIRMED=1 ./infra/deploy-workbench.sh --move' <<<"$OUT")" == 1 ]] \
+    && pass "the cancelled one did not run" || fail "the cancelled move was planned"
+has   "sudo named" "cp -a of each home"
+has   "a fresh hub database" "a fresh hub database (hub users and their API tokens are dropped)"
+has   "the old homes kept" "the old homes and their directories are kept"
+has   "refused while a server runs" "Refused while a notebook server runs"
+has   "the guide's yes is the move's" "MEDCEA_CONFIRMED=1), so it does not ask again"
+no_stub
+real $'2\n12\nyes\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the move ran" "STUB infra/deploy-workbench.sh --move"
+has   "real: MEDCEA_CONFIRMED=1" "ENV_CONFIRMED=1"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: the script takes its own lock" \
+    || fail "real: ran under the guide's lock"
+
+echo "72 research Phase 2b: apply the skeleton version and move the workbench (Policy)"
+mkcfg true true
+guide $'8\n28\n0\n-1\n21\n-me\nadmin\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "0 is re-asked" "'0': a version number"
+has   "-1 is re-asked" "'-1': a version number"
+has   "a --by starting with - is re-asked" "'-me':"
+has   "the chain (dry)" "[dry run] not executed: ./apps/iam/apply.sh 21 --by admin && env MEDCEA_CONFIRMED=1 ./infra/deploy-workbench.sh --move && ./apps/lake-api/deploy.sh && env MEDCEA_CONFIRMED=1 ./apps/iam/apply.sh --resume --by admin && ./health-check.sh"
+has   "one lock" "held by medcea.sh for all of them"
+has   "no notebook server" "no notebook server may run"
+has   "the dashboard exported first" "the engineer's Superset dashboard is exported"
+has   "the skeleton gate's window" "every compiling deploy exits 2"
+has   "the deferral named" "records the workbench as deferred"
+has   "what follows" "./deploy-infra.sh once more"
+has   "the Policy UI redeployed afterwards" "./apps/iam/deploy.sh (the Policy UI still ships the old skeleton"
+no_stub
+lock_free && pass "a dry run takes no lock" || fail "a dry run left the lock held"
+guide $'8\n28\n21\nadmin\ny\nq\n'
+has   "y is not yes" "Cancelled; nothing was run."
+hasnt "the cancelled chain did not run" "not executed: ./apps/iam/apply.sh 21"
+real $'8\n28\n21\nadmin\nyes\nq\n'
+rc_is "real: quits with 0" 0
+python3 - "$OUT" <<'PY2' && pass "real: apply, move, lake reader, resume, health in that order" || fail "real: wrong order"
+import sys
+o = sys.argv[1]
+steps = ("STUB apps/iam/apply.sh 21 --by admin", "STUB infra/deploy-workbench.sh --move", "STUB apps/lake-api/deploy.sh",
+         "STUB apps/iam/apply.sh --resume --by admin", "STUB health-check.sh")
+if any(o.count(x) != 1 for x in steps):
+    sys.exit(1)
+i = [o.index(x) for x in steps]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+[[ "$(grep -c '^ENV_BY= ENV_CONFIRMED=1$' <<<"$OUT")" == 2 ]] \
+    && pass "real: MEDCEA_CONFIRMED=1 reaches the move and the resume only" || fail "real: MEDCEA_CONFIRMED not as planned"
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 5 && "$(grep -cE '^LOCK_HELD=[0-9]+$' <<<"$OUT")" == 5 ]] \
+    && pass "real: all five under the guide's lock" || fail "real: a step ran without the guide's lock"
+lock_free && pass "real: the lock is free afterwards" || fail "real: the lock is still held"
+OUT="$(printf '8\n28\n21\nadmin\nyes\nq\n' | NO_COLOR=1 STUB_RC=1 "$S/medcea.sh" 2>&1)"
+has   "a failure stops the chain" "STUB apps/iam/apply.sh 21 --by admin"
+hasnt "the move did not run" "STUB infra/deploy-workbench.sh"
+
+echo "73 the lake reader (Applications)"
+mkcfg true true
+guide $'3\n16\ny\nb\n17\ny\nb\n17\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "deploy (dry)" "[dry run] not executed: ./apps/lake-api/deploy.sh"
+has   "deploy is a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true, the applied access policy has no lake-api pod"
+has   "never an open pod" "it is never an open pod"
+has   "uninstall: y is not yes" "Cancelled; nothing was run."
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/lake-api/uninstall.sh"
+has   "uninstall: the snapshots stay" "the research database and its snapshots stay"
+no_stub
+real $'3\n16\ny\nb\n17\nyes\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the deploy ran" "STUB apps/lake-api/deploy.sh"
+has   "real: the uninstall ran" "STUB apps/lake-api/uninstall.sh"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 2 ]] && pass "real: each takes its own lock" || fail "real: ran under the guide's lock"
+
+echo "74 RESEARCH_ENABLED rollback with the lake reader; the research zone network test (Health)"
+mkcfg true true
+guide $'2\n11\n2\nn\nq\n'
+has   "the checklist names the workbench" "[ ] The AI workbench lives in the research zone while the policy places it there: it is left running and unmanaged, and its notebooks lose the lake."
+has   "the checklist answered no stops" "Do those first. Nothing was changed."
+hasnt "no step ran" "[dry run] would"
+guide $'2\n11\n2\ny\ny\nq\n'
+python3 - "$OUT" <<'PY2' && pass "export, lake reader, database: in that order" || fail "rollback: wrong order"
+import sys
+o = sys.argv[1]
+i = [o.index(x) for x in ("2. ./apps/research-export/uninstall.sh", "3. ./apps/lake-api/uninstall.sh",
+                          "4. ./apps/research/uninstall.sh")]
+sys.exit(0 if i == sorted(i) else 1)
+PY2
+guide $'2\n11\n1\ny\ny\nq\n'
+has   "enable: the research deploy runs the lake reader itself" "then the lake reader once the policy has its pod"
+hasnt "enable: no separate lake-api step" "./apps/lake-api/deploy.sh"
+guide $'6\n18\n203.0.113\n203.0.113.7\ny\nb\n18\n\ny\nq\n'
+rc_is "network test: quits with 0" 0
+has   "a bad WAN address is re-asked" "'203.0.113': an IPv4 address"
+has   "with --wan-ip (dry)" "[dry run] not executed: tests/iam-research.sh --wan-ip 203.0.113.7"
+has   "without (dry)" "[dry run] not executed: tests/iam-research.sh"
+has   "the refusal named" "Refused (exit 2) unless the applied access policy places the AI workbench in the research zone"
+has   "the hairpin advice" "add it as a /32 to the zone's internet_except"
+no_stub
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false

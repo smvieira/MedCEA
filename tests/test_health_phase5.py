@@ -16,6 +16,8 @@ state/.
                     when the realm does not answer), jwks-sig.json = signing_keys(jwks.json);
                     postgrest no longer compares key ids
   KcScopes          G2: Keycloak's database, read-only; FAIL on API clients, WARN on tools
+  KcScopesRetired   research sandbox Phase 2b: a KC_POLICY_TOKEN_CLIENTS client the applied policy
+                    no longer names is retired (enabled FAILs, absent or disabled OK)
   IamLoaded         G5: per pod routes digest, the 120 s window, enforcing services, absent ones
   IamMqttDigest     G7: every iam-api pod's mqtt_digest against the ConfigMap
   NodeRedFlowsGit   G9: an uncommitted flow file WARNs
@@ -441,6 +443,74 @@ class KcScopes(Base):
         self.assertTrue(self.run_check(False, rc=2).startswith("WARN|Keycloak client scopes|cannot read Keycloak database"))
         self.assertEqual(self.run_check(None), "FAIL|Keycloak client scopes|realm medcea is not in Keycloak database "
                                                "keycloak (./deploy-infra.sh)")
+
+
+class KcScopesRetired(unittest.TestCase):
+    """Research sandbox Phase 2b (D2): workbench-notebook exists only while the applied
+    policy names it as a token client (KC_POLICY_TOKEN_CLIENTS). The scratch tree's
+    defaults.yaml is commit B's (tests/rs2b_fixture.py b_policy): it names no such client,
+    so kcscopes treats it as retired: enabled FAILs, absent or disabled is OK, and its scope
+    rules are not applied; an unreadable policy WARNs and keeps today's rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        import rs2b_fixture
+        cls.t = Tree()
+        with open(cls.t.path("apps", "iam", "policy", "defaults.yaml"), "w") as f:
+            yaml.safe_dump(rs2b_fixture.b_policy(), f, sort_keys=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.t.close()
+
+    def run_check(self, doc):
+        self.t.scenario([rule(r"rdbms-postgresql-0", json.dumps(doc) + "\n", stdin="client_scope")])
+        return self.t.fn("check_kcscopes", 'check_kcscopes "Keycloak client scopes" medcea', helpers=())
+
+    def test_the_policy_names_no_token_client(self):
+        p = subprocess.run([sys.executable, self.t.path("apps", "iam", "compiler", "cli.py"), "has-token-client",
+                            "workbench-notebook"], capture_output=True, text=True, env=clean_env())
+        self.assertEqual(p.returncode, 1, p.stderr)
+
+    def test_the_sql_reads_enabled(self):
+        with open(os.path.join(REPO, "health-check.sh")) as f:
+            fn = body("check_kcscopes", f.read())
+        self.assertIn("'enabled', c.enabled", fn)
+        self.assertIn("KC_POLICY_TOKEN_CLIENTS", fn)
+
+    def test_absent_or_disabled_is_ok(self):
+        r = self.run_check(kc_doc(clients={"workbench-notebook": None}))
+        self.assertEqual(r, "OK|Keycloak client scopes|14 clients: groups and medcea-identity default on each "
+                            "(9 of them reach a platform API); retired by the access policy: workbench-notebook (absent)")
+        # disabled, and without its scopes: they are no longer checked
+        r = self.run_check(kc_doc(clients={"workbench-notebook": {"enabled": False, "default": []}}))
+        self.assertEqual(r, "OK|Keycloak client scopes|14 clients: groups and medcea-identity default on each "
+                            "(9 of them reach a platform API); retired by the access policy: workbench-notebook (disabled)")
+
+    def test_enabled_fails(self):
+        for d in ({"enabled": True}, {}):          # a missing enabled reads as enabled
+            r = self.run_check(kc_doc(clients={"workbench-notebook": d}))
+            self.assertEqual(r, "FAIL|Keycloak client scopes|client workbench-notebook is enabled, yet the applied "
+                                "access policy names it as no token client: its tokens still reach the platform APIs "
+                                "that admit it (./deploy-infra.sh disables it)")
+
+    def test_a_broken_policy_warns_and_keeps_the_rules(self):
+        path = self.t.path("apps", "iam", "policy", "defaults.yaml")
+        with open(path) as f:
+            keep = f.read()
+        try:
+            with open(path, "w") as f:
+                f.write("roles: [unclosed\n")
+            r = self.run_check(kc_doc())
+            self.assertTrue(r.startswith("WARN|Keycloak client scopes|cannot tell whether the applied access policy "
+                                         "still names workbench-notebook as a token client"), r)
+            r = self.run_check(kc_doc(clients={"workbench-notebook": None}))
+            self.assertTrue(r.startswith("FAIL|"), r)
+            self.assertIn("client(s) missing in realm medcea: workbench-notebook", r)
+        finally:
+            with open(path, "w") as f:
+                f.write(keep)
 
 
 # ── G5: iamloaded, G7: iammqtt ─────────────────────────────────────────────────────────

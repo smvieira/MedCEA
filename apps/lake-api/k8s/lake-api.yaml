@@ -1,0 +1,122 @@
+# lake-api: the research sandbox's snapshot reader (Phase 2b). PostgREST over schema
+# lake_api of medcea_research, read functions only; notebooks call it at
+# http://lake-api.<research namespace>.svc.cluster.local:3000/rpc/<function>.
+# Render list: RESEARCH_NAMESPACE LAKE_AUTH_VERSION LAKE_SCHEMA_SHA256
+#   render apps/lake-api/k8s/lake-api.yaml RESEARCH_NAMESPACE LAKE_AUTH_VERSION LAKE_SCHEMA_SHA256 | kubectl apply -f -
+#
+# No identity (owner decision O2): no PGRST_JWT_SECRET, so every request runs as the
+# anonymous role rs_lake_reader, which may only EXECUTE the lake_api functions. Who may
+# connect is the research zone's NetworkPolicy rs-lake-api (notebooks, and the node for
+# the kubelet's probes and health), compiled from the access policy; the deploy refuses
+# to start it until that policy is live.
+#
+# The image is pinned by digest (the one config-api's node already holds:
+# IfNotPresent, no anonymous Docker Hub pull). PGRST_DB_PASS comes from Secret
+# lake-api-auth and is listed first: Kubernetes expands $(VAR) only from variables listed
+# earlier. medcea/auth-secret-version (the Secret's resourceVersion) restarts the pod
+# when the password changes, since a secretKeyRef is read only at container start;
+# medcea/schema-sha256 (sha256 of apps/research/db/lake_api.sql) restarts it when the
+# functions change, since PostgREST reads its schema cache at start (no reload channel).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lake-api
+  namespace: ${RESEARCH_NAMESPACE}
+  labels:
+    app: lake-api
+    app.kubernetes.io/part-of: medcea-research
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: lake-api
+  template:
+    metadata:
+      labels:
+        app: lake-api
+        app.kubernetes.io/part-of: medcea-research
+      annotations:
+        medcea/auth-secret-version: "${LAKE_AUTH_VERSION}"
+        medcea/schema-sha256: "${LAKE_SCHEMA_SHA256}"
+    spec:
+      priorityClassName: medcea-research-low
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: postgrest
+        image: postgrest/postgrest:v12.2.3@sha256:729bf65c733b73f5b52777f0e4b853f22ed73aa67a22d38269d289779b0a8401
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: PGRST_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: lake-api-auth
+              key: password
+        - name: PGRST_DB_URI
+          value: "postgres://rs_lake_api:$(PGRST_DB_PASS)@research-postgresql.${RESEARCH_NAMESPACE}.svc.cluster.local:5432/medcea_research"
+        - name: PGRST_DB_SCHEMAS
+          value: "lake_api"
+        - name: PGRST_DB_ANON_ROLE
+          value: "rs_lake_reader"
+        - name: PGRST_DB_MAX_ROWS
+          value: "50000"
+        - name: PGRST_DB_POOL
+          value: "5"
+        # no schema-reload channel (LISTEN): the pod restarts on a changed lake_api.sql
+        # (medcea/schema-sha256), and rs_lake_api's sessions are read-only
+        - name: PGRST_DB_CHANNEL_ENABLED
+          value: "false"
+        - name: PGRST_SERVER_PORT
+          value: "3000"
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lake-api
+  namespace: ${RESEARCH_NAMESPACE}
+  labels:
+    app: lake-api
+    app.kubernetes.io/part-of: medcea-research
+spec:
+  selector:
+    app: lake-api
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+    protocol: TCP

@@ -75,6 +75,10 @@ if [[ "${RESEARCH_ENABLED:-false}" != "true" ]]; then
         warn "RESEARCH_ENABLED is not true, but namespace $RESEARCH_NAMESPACE is still there and is left as it is (its network policies stay as they were). To remove it and everything in it, the research database and its volume included (./apps/research/uninstall.sh first, if it is deployed):
        $KUBECTL delete namespace $RESEARCH_NAMESPACE
        $KUBECTL delete priorityclass medcea-research-low"
+        # research Phase 2b: the AI workbench may live there (the access policy places it)
+        if [[ "$($KUBECTL get deployment hub -n "$RESEARCH_NAMESPACE" -o name 2>/dev/null || true)" == deployment.apps/hub ]]; then
+            warn "the AI workbench runs in $RESEARCH_NAMESPACE too (its hub and people's homes, claim-<name>): it keeps running, and deleting the namespace takes it with it. Move it back first (an access policy that places it in the platform namespace, then ./infra/deploy-workbench.sh --move), or copy the homes off (./apps/backup/backups.sh restore-help, part C)."
+        fi
     fi
     exit 0
 fi

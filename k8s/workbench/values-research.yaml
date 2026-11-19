@@ -1,0 +1,110 @@
+# k8s/workbench/values-research.yaml — the AI workbench in the research zone (research
+# sandbox Phase 2b). A second --values after k8s/workbench/values.yaml, passed by
+# infra/deploy-workbench.sh only while the access policy places the hub in the research zone
+# (network.pods.hub with zone: research, commit B; workbench_placement in
+# infra/lib-policy-tools.sh). In the platform namespace values.yaml alone renders, byte for byte
+# as before (tests/golden/workbench-values-platform.yaml).
+#
+# Render list: RESEARCH_NAMESPACE WORKBENCH_DOMAIN WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS
+#              WORKBENCH_HUBADMIN_USERS WORKBENCH_A2_ALLOW_ALL
+# Helm merges this over the base: a mapping is merged key by key, a list or a scalar replaces
+# the base's (the hub's Secret stores the merged values). No null here: see extraEnv below.
+
+hub:
+  # The zone's own NetworkPolicies (rs-hub, rs-workbench-proxy, rs-notebooks, compiled from the
+  # access policy by pa_rsnetpol) say who reaches what. The chart's would add allow rules, and
+  # policies are additive: health rsnetpol FAILs on any foreign policy in the namespace.
+  networkPolicy:
+    enabled: false
+  # The research PriorityClass (-100, never preempts): evicted before any platform pod.
+  extraPodSpec:
+    priorityClassName: medcea-research-low
+  # Stated, so the namespace's LimitRange default (512Mi) is not taken silently.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  config:
+    KubeSpawner:
+      # Every person's server in the research PriorityClass too (O21).
+      priority_class_name: medcea-research-low
+  extraConfig:
+    # D1 = A2 (owner decision of 19 Nov 2026): administering the AI workbench gives no
+    # workspace. A person whose only workbench groups are its administration groups (the
+    # policy's admin_groups: K, administration, not research) is refused a server, with this
+    # text; any group that uses the workbench admits. Under IAM_GATES=false both lists are
+    # empty (any realm account signs in), so the pre-policy hub administrator, ADMIN_USER by
+    # name (WORKBENCH_HUBADMIN_USERS), is the one refused. Research placement only: it goes
+    # live with the move; the platform placement stays as it was.
+    medcea-a2: |
+      # medcea-a2 (k8s/workbench/values-research.yaml; D1 = A2): hub administration gives no workspace.
+      from tornado import web
+      _MEDCEA_ALLOW_ALL = ${WORKBENCH_A2_ALLOW_ALL}       # True|False (Python), set from WORKBENCH_ALLOW_ALL
+      _MEDCEA_ALLOWED = set(${WORKBENCH_ALLOWED_GROUPS})
+      _MEDCEA_ADMIN = set(${WORKBENCH_ADMIN_GROUPS})
+      _MEDCEA_HUBADMINS = set(${WORKBENCH_HUBADMIN_USERS})
+      def _medcea_a2(spawner):
+          user = spawner.user
+          if _MEDCEA_ALLOW_ALL:                            # IAM_GATES=false: the pre-policy hub admin is ADMIN_USER by name
+              refuse = user.name in _MEDCEA_HUBADMINS
+          else:
+              groups = {g.name for g in user.groups}
+              refuse = not ((groups & _MEDCEA_ALLOWED) - _MEDCEA_ADMIN)
+          if refuse:
+              raise web.HTTPError(403, "Administration of the AI workbench gives no workspace: "
+                                       "sign in with an account whose role uses the workbench.")
+      c.KubeSpawner.pre_spawn_hook = _medcea_a2
+
+proxy:
+  chp:
+    networkPolicy:
+      enabled: false
+    # The proxy needs no Kubernetes API: no token mounted (the chart sets neither key itself).
+    extraPodSpec:
+      priorityClassName: medcea-research-low
+      automountServiceAccountToken: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
+
+singleuser:
+  networkPolicy:
+    enabled: false
+  # Its NET_ADMIN root init container would break the namespace's Pod Security (baseline);
+  # rs-notebooks' internet hop already excludes 169.254.0.0/16 (internet_except).
+  cloudMetadata:
+    blockWithIptables: false
+  # The snapshot reader (lake-api) instead of Keycloak and config-api: a notebook in the zone
+  # reads person-free snapshots, signs nobody in and reaches no platform service. The base's
+  # MEDCEA_KEYCLOAK, MEDCEA_API and MEDCEA_CLIENT_ID are taken out of the rendered base by
+  # infra/deploy-workbench.sh (_research_base), not nulled here: Helm 3.9 keeps a null set by
+  # one values file over another when the chart's defaults lack the key, and the hub would get
+  # None for them (tests/test_workbench_render.py runs helm template to hold this).
+  extraEnv:
+    MEDCEA_LAKE: "http://lake-api.${RESEARCH_NAMESPACE}.svc.cluster.local:3000"
+
+# Our own Role (k8s/workbench/hub-rbac.yaml, no Secrets), applied before helm.
+rbac:
+  create: false
+
+# One PC, one scheduler: no user-scheduler, no placeholders, no chart PriorityClasses (O14).
+scheduling:
+  userScheduler:
+    enabled: false
+  userPlaceholder:
+    enabled: false
+  podPriority:
+    enabled: false
+
+# A certificate for this host only (Secret workbench-tls in this namespace, issued by
+# infra/deploy-workbench.sh from the platform CA), never a copy of cea-tls, whose names
+# cover every host of the platform.
+ingress:
+  tls:
+    - hosts: ["${WORKBENCH_DOMAIN}"]
+      secretName: workbench-tls

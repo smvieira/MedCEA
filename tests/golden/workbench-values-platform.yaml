@@ -1,0 +1,326 @@
+hub:
+  # Hub administration (IAM 3.2: K is administration, not content) is the custom role
+  # workbench-admin, never JupyterHub's built-in `admin` role: that one carries tokens
+  # (mint a token for any user, which opens their server), access:servers and shares,
+  # and its scopes cannot be changed. hub.loadRoles, not hub.config.JupyterHub.load_roles:
+  # the chart appends these to its own list, which holds the idle culler's role.
+  loadRoles:
+    workbench-admin:
+      description: "Hub administration (IAM 3.2, K): admin page, list users, start and stop servers, remove hub users; never open a server"
+      # Exactly these (health-check iamworkbench, tests/iam-hosts.sh and
+      # tests/test_workbench_render.py compare them with WORKBENCH_ADMIN_ROLE_SCOPES in
+      # infra/lib-oauth2-proxy.sh). Never tokens, access:servers, shares, admin:users
+      # (it could PATCH itself admin), groups or admin:auth_state. `servers` starts and
+      # stops; a start's user_options are ignored (KubeSpawner has no profile_list here).
+      scopes: [admin-ui, list:users, read:users, servers, delete:users]
+      # The policy's compiled admin groups (IAM_GATES=true; hub groups follow the
+      # Keycloak groups claim at every sign-in, manage_groups) or, IAM_GATES=false,
+      # [ADMIN_USER] (policy_workbench in infra/lib-oauth2-proxy.sh).
+      groups: ["admin"]
+      users: []
+    admin:
+      # The built-in role, its scopes unchanged: nobody holds it. An exact (empty) member
+      # list makes the hub strip a stored admin=True from every user at start.
+      users: []
+  config:
+    JupyterHub:
+      authenticator_class: generic-oauth
+      # DEPRECATED since JupyterHub 2.0 and without effect: the scopes of a user's roles
+      # decide (workbench-admin above). Kept false only so no reader takes it for on.
+      admin_access: false
+      # Short sessions (decision of 1 Nov 2026, "short sessions + one-hop sign-out"): the
+      # hub's own sign-in lasts 5 minutes (0.003472 days = 300 s, counted from sign-in, not
+      # extended by use). Then the next hub page runs the sign-in again through Keycloak
+      # (auto_login: silent while the Keycloak session lives) as whoever is signed in to
+      # Keycloak in that browser now, and the groups are checked again. So after a Sign out,
+      # an account switch or an SSO expiry the hub follows the Keycloak person within
+      # 5 minutes, and a role removal or a deactivation reaches it as fast. Until then it was
+      # an hour, and the next person in the same browser got the previous one's hub.
+      cookie_max_age_days: 0.003472
+      # The token an open JupyterLab tab carries (cookie jupyterhub-user-<name>, path
+      # /user/<name>/): 5 minutes too; the server caches the hub's answer for up to 5 more
+      # (HubAuth cache_max_age 300 s). Then the tab's API calls (save, open, start a kernel)
+      # answer 403 "Forbidden" until any workbench page is loaded again: JupyterLab does not
+      # re-authenticate by itself. Reloading the tab, or opening the workbench in another
+      # tab, fetches a new token silently through the hub and Keycloak; unsaved edits stay
+      # in the open tab and save once the token is back. Kernels keep running, an open
+      # kernel connection stays up, and the idle culler and the server's activity reports
+      # (its own JUPYTERHUB_API_TOKEN) are not affected. If Keycloak now has another person,
+      # that person is refused /user/<name>/ (403 at the hub's authorize and at the server:
+      # access:servers!server=<name>/ is only the owner's), so the earlier person's server
+      # is never shown to the new one.
+      oauth_token_expires_in: 300
+    Authenticator:
+      # The gate (infra/lib-oauth2-proxy.sh policy_workbench): IAM_GATES=true renders
+      # allow_all false and the groups compiled from the access policy; IAM_GATES=false
+      # the pre-policy sign-in (any realm account, ADMIN_USER holds workbench-admin).
+      allow_all: false
+      # Always empty in both modes: admin_users would be admitted whatever the groups say
+      # and would get the built-in admin role.
+      admin_users: []
+      # Never true: it would admit every user already in the hub's database.
+      allow_existing_users: false
+      # No auth_state is stored: with it, anyone holding admin:auth_state could read every
+      # person's Keycloak tokens (workbench-admin does not). The groups are checked at
+      # each sign-in instead.
+      enable_auth_state: false
+      # No "Sign in with Keycloak" page: straight to the platform login.
+      auto_login: true
+    GenericOAuthenticator:
+      client_id: workbench
+      client_secret: "golden-client-secret"
+      oauth_callback_url: https://ai-workbench.medcea/hub/oauth_callback
+      authorize_url: https://keycloak.medcea/realms/medcea/protocol/openid-connect/auth
+      token_url: http://keycloak.medcea.svc.cluster.local/realms/medcea/protocol/openid-connect/token
+      userdata_url: http://keycloak.medcea.svc.cluster.local/realms/medcea/protocol/openid-connect/userinfo
+      login_service: "Keycloak"
+      username_claim: preferred_username
+      # `groups` is a default client scope of client workbench, so the claim arrives
+      # in the userinfo response without being requested.
+      scope: ["openid", "profile", "email"]
+      # OAuthenticator 17 (hub image k8s-hub 4.4.4): allowed_groups and
+      # auth_state_groups_key need manage_groups. The groups come from this sign-in's
+      # auth_model (in memory), so enable_auth_state stays false. No admin_groups: it
+      # would give the built-in admin role (workbench-admin above is held by group).
+      manage_groups: true
+      auth_state_groups_key: "oauth_user.groups"
+      allowed_groups: ["admin", "bio_scientist", "control_scientist", "engineer", "qa"]
+      custom_403_message: "No access to AI Workbench."
+      # One-hop sign-out (1 Nov 2026): /hub/logout (the user menu's Sign out when the
+      # workbench is deployed, JupyterLab's File > Log Out, the hub's Logout button) ends
+      # the hub session (with a live hub cookie it also deletes this browser session's
+      # server tokens) and then always goes here, with or without a hub session:
+      # Keycloak's end-session for client workbench (it shows its "Do you want to log
+      # out?" page while a Keycloak session exists: no id_token_hint, so no token in any
+      # URL), which returns to the portal's proxy sign-out and the portal. A fixed URL
+      # rendered by infra/deploy-workbench.sh (WORKBENCH_LOGOUT_URL); the hub reads no
+      # parameter for it, so it is no open redirect. The portal's origin is registered as
+      # a post-logout URI of client workbench (deploy-infra.sh _create_client).
+      logout_redirect_url: "https://keycloak.medcea/realms/medcea/protocol/openid-connect/logout?client_id=workbench&post_logout_redirect_uri=https%3A%2F%2Fportal.medcea%2Foauth2%2Fsign_out%3Frd%3D%252F"
+    KubeSpawner:
+      # Removing a hub user (admin page) keeps the person's home volume claim-<name>
+      # (KubeSpawner's default would delete it: K is not D).
+      delete_pvc: false
+      # How long the hub waits for a started server to answer (default 30 s). The home
+      # setup (singleuser.extraFiles) runs inside the container's command, before the
+      # server: on a new home its installs are bounded at 780 s in all (pip 300,
+      # code-server 60 + 300, nbstripout 120), so 900 leaves room for the server start.
+      # A server that never answers is given up after 15 minutes.
+      http_timeout: 900
+
+proxy:
+  service:
+    type: ClusterIP          # the nginx ingress fronts this; no LoadBalancer, no MetalLB
+
+singleuser:
+  image:
+    # Pinned (WORKBENCH_IMAGE): JupyterLab 4.6 with the git panel (@jupyterlab/git 0.55)
+    # and nbdime come with the image; a moving tag would change them under people.
+    name: quay.io/jupyter/scipy-notebook
+    tag: latest@sha256:d416eea5c12a44981c2fcb56520649dbd92f7ae5983f4e68e14d1d0ebdf0c2ce
+  storage:
+    # claim-<name> keeps the person's home across server restarts and hub-user removals
+    # (delete_pvc false). Deleting the namespace deletes it: every uninstall path warns
+    # first (infra/lib-data-volumes.sh). Copied nightly by apps/backup into BACKUP_DIR.
+    capacity: 10Gi
+    # The example notebooks, read-only inside the home (ConfigMap workbench-examples,
+    # from k8s/workbench/examples/): a person copies one to change it.
+    extraVolumes:
+      - name: medcea-examples
+        configMap:
+          name: workbench-examples
+    extraVolumeMounts:
+      - name: medcea-examples
+        mountPath: /home/jovyan/medcea-examples
+        readOnly: true
+  # Where a notebook signs its person in and reads platform data (medcea_data.py, IAM
+  # 3.2b). Endpoints only: no secret, no token, no database password in the pod.
+  extraEnv:
+    MEDCEA_KEYCLOAK: "http://keycloak.medcea.svc.cluster.local/realms/medcea"
+    MEDCEA_API: "http://config-api.medcea.svc.cluster.local:3000"
+    MEDCEA_CLIENT_ID: "workbench-notebook"
+    MEDCEA_NOTEBOOK_REPO: "smvieira/medcea-notebooks"
+    PYTHONPATH: "/home/jovyan/medcea-examples"
+  networkPolicy:
+    enabled: true
+    # No private address (no platform service, no database) and no cloud metadata, as
+    # the chart's defaults, stated so health-check iamworkbench can compare them; the
+    # internet stays reachable (pip, GitHub).
+    egressAllowRules:
+      privateIPs: false
+      cloudMetadataServer: false
+      nonPrivateIPs: true
+    # The only platform hops: Keycloak (device sign-in) and config-api (PostgREST with the
+    # person's own token), compiled from the access policy's network.clients.notebooks by
+    # policy_workbench_egress; [] unless IAM_POSTGREST_JWT and IAM_DB_ROLES are true.
+    egress: []
+  memory: { guarantee: 512M, limit: 4G }
+  cpu: { guarantee: 0.1, limit: 2 }
+  defaultUrl: "/lab"
+  # A first start pulls the notebook image (about 2 GB) before the container runs:
+  # KubeSpawner's start_timeout (default 300 s) bounds that wait.
+  startTimeout: 600
+  # The home setup, run BEFORE the notebook server starts (docker-stacks' start.sh runs
+  # every executable in /usr/local/bin/before-notebook.d, then execs the server). Until
+  # 1 Nov 2026 this was a postStart hook, which Kubernetes runs at the same time as the
+  # container's command: on a new home the server loaded its extensions before pip had
+  # installed jupyter-collaboration, the browser still loaded the collaboration lab
+  # extension and asked /api/collaboration/* for every document (404), so nothing
+  # opened, not even medcea-examples, until a restart.
+  # Installed into the person's home, so only the first start pays for it (the hub
+  # waits up to hub.config.KubeSpawner.http_timeout for the server meanwhile). Baking
+  # these into an image is the better answer at scale (infra/workbench.Dockerfile; a
+  # baked code-server is found on PATH and skipped), but this keeps the deployment to
+  # one Helm release with no registry to run.
+  # Every start (idempotent) also makes nbstripout the global git filter for *.ipynb,
+  # so a commit never stores cell outputs (telemetry values), and sets git's credential
+  # store (the person's GitHub token stays in their home) unless they chose another
+  # helper. Fail closed (IAM 3.2b): the filter's attribute, its clean command and
+  # `required` are written even when the pip install fails, so git then refuses to
+  # stage a notebook rather than store it whole; and the global core.hooksPath (unless
+  # the person set one) runs medcea-examples/nb_output_guard.py as pre-commit, which
+  # refuses a staged notebook still holding outputs — a repository's own .gitattributes
+  # can turn the filter off, not that hook. The container runs as jovyan (uid 1000, the
+  # image's account); the git author name and the terminal prompt show the person
+  # ($JUPYTERHUB_USER) instead. A failure never stops the server (always exit 0).
+  # The chart puts the file in Secret `singleuser` and mounts it by subPath, so the
+  # image's own hooks in that folder stay; a running server sees a change only after a
+  # restart. Plain POSIX sh, and no dollar-brace anywhere: this file goes through render.
+  extraFiles:
+    medcea-home-setup:
+      mountPath: /usr/local/bin/before-notebook.d/50-medcea-home-setup
+      mode: 493                # 0755: no .sh, so run-hooks.sh runs it as its own process
+      stringData: |
+        #!/bin/sh
+        # medcea-home-setup (k8s/workbench/values.yaml): the person's home, before the
+        # notebook server starts. Output goes to the pod log.
+        log() { echo "medcea-home-setup: $*"; }
+        # limited SECONDS CMD...: bounded, so the hub's http_timeout is never outrun.
+        limited() {
+            secs="$1"; shift
+            if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+        }
+        log "start ($JUPYTERHUB_USER)"
+
+        # (a) Real-time collaboration and the VS Code launcher, into ~/.local.
+        if ! python3 -c 'import jupyter_collaboration, jupyter_vscode_proxy' 2>/dev/null; then
+            if limited 300 pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy; then
+                log "installed jupyter-collaboration and jupyter-vscode-proxy"
+            else
+                log "WARNING: pip could not install jupyter-collaboration and jupyter-vscode-proxy; the next start tries again"
+            fi
+        fi
+
+        # (b) code-server (VS Code), unless the image or an earlier start has it. Downloaded
+        # to a file and checked first: curl | sh would run an empty script and succeed.
+        if ! command -v code-server >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/code-server" ]; then
+            inst="$(mktemp 2>/dev/null)"; ilog="$(mktemp 2>/dev/null)"
+            if [ -n "$inst" ] && [ -n "$ilog" ] &&
+               limited 60 curl -fsSL https://code-server.dev/install.sh -o "$inst" && [ -s "$inst" ] &&
+               limited 300 sh "$inst" --method=standalone --prefix="$HOME/.local" >"$ilog" 2>&1 &&
+               [ -x "$HOME/.local/bin/code-server" ]; then
+                log "installed code-server into ~/.local"
+            else
+                log "WARNING: code-server could not be installed (no VS Code until a later start installs it)"
+                [ -n "$ilog" ] && tail -n 5 "$ilog" 2>/dev/null | sed 's/^/medcea-home-setup:   /'
+            fi
+            rm -f "$inst" "$ilog"
+        fi
+
+        # (c) nbstripout, into ~/.local.
+        python3 -c 'import nbstripout' 2>/dev/null ||
+            limited 120 pip install --quiet --user nbstripout ||
+            log "WARNING: pip could not install nbstripout; git refuses to commit notebooks until it is installed"
+        # (d) nbstripout as the global git filter.
+        python3 -m nbstripout --is-installed --global ||
+            python3 -m nbstripout --install --global
+        # (e) Fail closed: the clean command and `required`, even when pip failed.
+        git config --global --get filter.nbstripout.clean >/dev/null ||
+            git config --global filter.nbstripout.clean "python3 -m nbstripout"
+        git config --global filter.nbstripout.required true
+        # (f) The attribute that applies the filter to every notebook.
+        ATTRS="$(git config --global --path --get core.attributesFile)"
+        if [ -z "$ATTRS" ]; then
+            ATTRS="$HOME/.config/git/attributes"
+            git config --global core.attributesFile "$ATTRS"
+        fi
+        mkdir -p "$(dirname "$ATTRS")"
+        grep -qx '*.ipynb filter=nbstripout' "$ATTRS" 2>/dev/null ||
+            echo '*.ipynb filter=nbstripout' >> "$ATTRS"
+        # (g) The pre-commit output guard, unless the person chose their own hooks folder.
+        HOOKS="$HOME/.config/git/hooks"
+        git config --global --get core.hooksPath >/dev/null ||
+            git config --global core.hooksPath "$HOOKS"
+        if [ "$(git config --global --path --get core.hooksPath)" = "$HOOKS" ]; then
+            mkdir -p "$HOOKS" &&
+            printf '#!/bin/sh\nexec python3 /home/jovyan/medcea-examples/nb_output_guard.py\n' > "$HOOKS/pre-commit" &&
+            chmod +x "$HOOKS/pre-commit"
+        fi
+        # (h) The GitHub token stays in the home, unless the person chose another helper.
+        git config --global --get credential.helper >/dev/null ||
+            git config --global credential.helper store
+
+        # (i) Show the person, not jovyan: the git author name (never overwritten) and,
+        # in an appended block, the prompt and the terminal title. The e-mail is the
+        # person's to set (SAVE_TO_GIT.md).
+        if [ -n "$JUPYTERHUB_USER" ]; then
+            git config --global --get user.name >/dev/null ||
+                { git config --global user.name "$JUPYTERHUB_USER" && log "git author name set to $JUPYTERHUB_USER"; }
+        fi
+        git config --global --get user.email >/dev/null ||
+            log "git has no user.email: set it once with git config --global user.email (medcea-examples/SAVE_TO_GIT.md)"
+        # A new home has no shell start files (the volume hides the image's home). A
+        # Jupyter terminal is a login shell, which reads ~/.profile, which reads ~/.bashrc.
+        if [ ! -e "$HOME/.bashrc" ] && [ -f /etc/skel/.bashrc ]; then
+            cp /etc/skel/.bashrc "$HOME/.bashrc" && log "created ~/.bashrc from /etc/skel"
+        fi
+        if [ ! -e "$HOME/.profile" ] && [ ! -e "$HOME/.bash_profile" ] && [ ! -e "$HOME/.bash_login" ] &&
+           [ -f /etc/skel/.profile ]; then
+            cp /etc/skel/.profile "$HOME/.profile" && log "created ~/.profile from /etc/skel"
+        fi
+        # Appended once; a .bashrc is never rewritten.
+        if ! grep -qxF '# >>> medcea workbench prompt >>>' "$HOME/.bashrc" 2>/dev/null; then
+            cat >> "$HOME/.bashrc" <<'EOF'
+
+        # >>> medcea workbench prompt >>>
+        # Added by the workbench (medcea-home-setup): the prompt and the terminal title
+        # show your workbench name instead of the container's account, jovyan. To use
+        # your own prompt, set PS1 below this block (a deleted block comes back).
+        if [ -n "$JUPYTERHUB_USER" ]; then
+            PS1='\[\e]0;$JUPYTERHUB_USER@workbench: \w\a\]$JUPYTERHUB_USER@workbench:\w\$ '
+        fi
+        # <<< medcea workbench prompt <<<
+        EOF
+            log "added the workbench prompt to ~/.bashrc"
+        fi
+
+        log "done"
+        exit 0
+
+# No pre-pull hook: with it (the chart's default) helm waits, inside its --timeout,
+# until every node has pulled the ~2 GB notebook image, so a fresh host on a slow link
+# failed the whole workbench deploy at 10 minutes and the platform came up without a
+# hub. Without it the first server start pays the pull (startTimeout 600 s above,
+# http_timeout 900 s), and a person waits a few minutes once.
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false
+
+cull:
+  enabled: true
+  timeout: 3600            # reclaim a user pod after an hour idle
+  every: 300
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts: ["ai-workbench.medcea"]
+  tls:
+    - hosts: ["ai-workbench.medcea"]
+      secretName: cea-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"

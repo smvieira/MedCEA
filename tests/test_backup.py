@@ -34,6 +34,12 @@
   "skipped (absent)" line; a server that does not answer leaves the platform's backup complete with
   "# databases not reached"; the password only in pg_dump's and psql's environment; rdbms and
   research-postgresql on the same chart version, so pg_dump matches both servers.
+- The AI workbench in the research zone (Phase 2b): RESEARCH_NAMESPACE and RESEARCH_VOLUMES
+  ("claim-* hub-db-dir") in the render list and the pod's environment; the job copies those
+  claims of the research namespace as volumes/research-<claim>.tar.gz (MANIFEST names the
+  patterns), never takes a research directory for the platform's, and copies nothing more
+  while the research namespace holds no such volume; restore-help asks only where the hub
+  runs (read-only) and points part C at that namespace and its archive name.
 
 Run: python3 tests/test_backup.py
 """
@@ -125,6 +131,21 @@ class CronJobRender(unittest.TestCase):
         self.assertEqual(env["RESEARCH_PGPASSWORD"]["valueFrom"]["secretKeyRef"],
                          {"name": "research-backup", "key": "password", "optional": True})
         self.assertNotIn("value", env["RESEARCH_PGPASSWORD"])
+
+    def test_research_volumes_reach_the_pod(self):
+        self.assertIn("RESEARCH_NAMESPACE", self.render_list)
+        self.assertIn("RESEARCH_VOLUMES", self.render_list)
+        self.assertIn('RESEARCH_VOLUMES="claim-* hub-db-dir"', read("apps/backup/deploy.sh"))
+        env = dict(os.environ, RESEARCH_NAMESPACE="medcea-research", RESEARCH_VOLUMES="claim-* hub-db-dir", **self.VALUES)
+        text = subprocess.run(
+            ["bash", "-c", 'source "$1/infra/lib-render.sh"; shift; render "$@"', "-", ROOT,
+             os.path.join(APP, "k8s", "backup-cronjob.yaml"), *self.render_list],
+            capture_output=True, text=True, env=env, check=True).stdout
+        c = yaml.safe_load(text)["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        e = {x["name"]: x.get("value") for x in c["env"]}
+        self.assertEqual(e["RESEARCH_NAMESPACE"], "medcea-research")
+        self.assertEqual(e["RESEARCH_VOLUMES"], "claim-* hub-db-dir")
+        self.assertEqual(e["VOLUMES"], "claim-* node-red grafana")   # the platform's, unchanged
 
     def research_host(self, **env):
         # the deploy's own block, run under bash with a stub die
@@ -477,6 +498,86 @@ class JobRun(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn("is not a plain database name", p.stderr)
 
+    def test_research_volumes(self):
+        """research Phase 2b: the workbench's homes and hub database in the research namespace,
+        as volumes/research-<claim>; the research database's own volume is not copied (pg_dump)"""
+        for claim in ("claim-alice", "hub-db-dir", "data-research-postgresql-0"):
+            write(os.path.join(self.st, f"medcea-research-{claim}-pvc-{UID}", "f.txt"), f"rs {claim}\n")
+        p = self.run_job(BACKUP_NOW="1793586600", RESEARCH_NAMESPACE="medcea-research",
+                         RESEARCH_VOLUMES="claim-* hub-db-dir")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        d = os.path.join(self.out, "20261102-023000Z")
+        vols = sorted(os.listdir(os.path.join(d, "volumes")))
+        self.assertEqual(vols, ["claim-alice.tar.gz", "claim-bob-2esmith.tar.gz", "grafana.tar.gz", "node-red.tar.gz",
+                                "research-claim-alice.tar.gz", "research-hub-db-dir.tar.gz"])
+        t = subprocess.run(["tar", "-xzOf", os.path.join(d, "volumes", "research-claim-alice.tar.gz"), "./f.txt"],
+                           capture_output=True, text=True)
+        self.assertEqual(t.stdout, "rs claim-alice\n")
+        v = subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=d, capture_output=True, text=True)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        with open(os.path.join(d, "MANIFEST")) as fh:
+            m = fh.read()
+        self.assertIn("# research volume patterns (medcea-research, as volumes/research-<claim>): claim-* hub-db-dir\n", m)
+        self.assertIn("volumes/research-hub-db-dir.tar.gz", m)
+        self.assertIn("backup: 6 volume(s) copied", p.stdout)
+        # each archive names the directory it holds (review of commit A: restore-help picks by it)
+        self.assertRegex(m, r"(?m)^# volume volumes/research-claim-alice\.tar\.gz from medcea-research-claim-alice-pvc-"
+                         + UID + r" newest file \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertFalse(os.path.exists(os.path.join(d, ".volume-sources")))
+
+    def test_two_directories_of_one_claim_are_told_apart(self):
+        """A move's kept copy beside the live home: both archived, each MANIFEST line names its
+        directory and its newest file's time; restore-help's sed picks the live volume's."""
+        uid2 = "0123abcd-0000-1111-2222-999999999999"
+        uid1 = "0123abcd-0000-1111-2222-888888888888"   # every fixture directory has UID
+        old_dir = os.path.join(self.st, f"medcea-research-claim-zed-pvc-{uid1}")
+        new_dir = os.path.join(self.st, f"medcea-research-claim-zed-pvc-{uid2}")
+        write(os.path.join(old_dir, "f.txt"), "old\n")
+        write(os.path.join(new_dir, "f.txt"), "new\n")
+        os.utime(os.path.join(old_dir, "f.txt"), (1700000000, 1700000000))
+        os.utime(os.path.join(new_dir, "f.txt"), (1790000000, 1790000000))
+        p = self.run_job(BACKUP_NOW="1793586600", RESEARCH_NAMESPACE="medcea-research", RESEARCH_VOLUMES="claim-*")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        d = os.path.join(self.out, "20261102-023000Z")
+        with open(os.path.join(d, "MANIFEST")) as fh:
+            m = fh.read()
+        lines = [l for l in m.splitlines() if l.startswith("# volume volumes/research-claim-zed")]
+        self.assertEqual(len(lines), 2, m)
+        self.assertIn(f"from medcea-research-claim-zed-pvc-{uid2} newest file 2026-09-21T14:13:20Z", m)
+        self.assertIn(f"from medcea-research-claim-zed-pvc-{uid1} newest file 2023-11-14T22:13:20Z", m)
+        # restore-help C.3's command, for each volume
+        for uid, want in ((uid2, "new\n"), (uid1, "old\n")):
+            a = subprocess.run(["sed", "-n", r"s|^# volume \(volumes/[^ ]*\) from [^ ]*-pvc-" + uid
+                                + r" newest file .*|\1|p", os.path.join(d, "MANIFEST")],
+                               capture_output=True, text=True, check=True).stdout.strip()
+            t = subprocess.run(["tar", "-xzOf", os.path.join(d, a), "./f.txt"], capture_output=True, text=True)
+            self.assertEqual(t.stdout, want, a)
+
+    def test_no_research_volume_without_the_namespace(self):
+        """A research directory is never taken for a platform claim, with the namespace named
+        or not; under v7 (no home there) nothing more is copied."""
+        write(os.path.join(self.st, f"medcea-research-claim-zed-pvc-{UID}", "f.txt"), "rs\n")
+        for extra in ({}, {"RESEARCH_NAMESPACE": "medcea-research", "RESEARCH_VOLUMES": ""},
+                      {"RESEARCH_NAMESPACE": "medcea", "RESEARCH_VOLUMES": "claim-*"}):
+            with self.subTest(extra=extra):
+                p = self.run_job(BACKUP_NOW="1793586600", **extra)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                d = os.path.join(self.out, "20261102-023000Z")
+                self.assertEqual(sorted(os.listdir(os.path.join(d, "volumes"))),
+                                 ["claim-alice.tar.gz", "claim-bob-2esmith.tar.gz", "grafana.tar.gz", "node-red.tar.gz"])
+                with open(os.path.join(d, "MANIFEST")) as fh:
+                    self.assertNotIn("research volume patterns", fh.read())
+                shutil.rmtree(d)
+        # the platform's own claim pattern would match a research directory's claim if the
+        # research namespace were a prefix of NAMESPACE's names: the skip holds it off
+        write(os.path.join(self.st, f"medcea-research-pvc-claim-pvc-{UID}", "f.txt"), "x\n")
+        p = self.run_job(BACKUP_NOW="1793586600", RESEARCH_NAMESPACE="medcea-research", RESEARCH_VOLUMES="claim-*",
+                         VOLUMES="claim-* node-red grafana research-*")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        d = os.path.join(self.out, "20261102-023000Z")
+        self.assertNotIn("research-pvc-claim.tar.gz", os.listdir(os.path.join(d, "volumes")))
+        self.assertIn("research-claim-zed.tar.gz", os.listdir(os.path.join(d, "volumes")))
+
     def test_a_failed_dump_leaves_no_ok_and_deletes_nothing(self):
         old = os.path.join(self.out, "20200101-023000Z")
         write(os.path.join(old, "OK"), "1577845800 x\n")
@@ -783,10 +884,15 @@ class HostCommand(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn("is not a backup folder name", p.stderr)
 
+    HUB_QUERY = "kubectl get deploy -A -l app=jupyterhub,component=hub -o jsonpath={.items[0].metadata.namespace}\n"
+
     def test_restore_help_runs_nothing(self):
         p = self.run_cmd("restore-help")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(self.kubectl_calls(), "")
+        # research Phase 2b: one read-only question, where the hub runs (unanswered: the platform)
+        self.assertEqual(self.kubectl_calls(), self.HUB_QUERY)
+        self.assertIn("The hub runs in namespace medcea now; a home copied there is volumes/claim-<name>.tar.gz", p.stdout)
+        self.assertIn("PV=$(microk8s kubectl -n medcea get pvc claim-<name>", p.stdout)
         out = p.stdout
         for part in ("A. The platform database (medcea_db)", "B. Keycloak", "C. One person's AI workbench home",
                      "D. Node-RED", "E. Grafana", f"{self.dir}/{self.name}/db/medcea_db.dump",
@@ -809,6 +915,27 @@ class HostCommand(unittest.TestCase):
         self.assertLess(a5, out.index("B. Keycloak"))
         self.assertIn(f"({self.head})", out[a5:])
         self.assertIn("iam_policy.verify_chain()", out[a5:])
+
+    def test_restore_help_finds_the_hub_in_the_research_zone(self):
+        with open(os.path.join(self.bin, "microk8s")) as fh:
+            fake = fh.read()
+        write(os.path.join(self.bin, "microk8s"),
+              fake.replace("  *) exit 9 ;;", '  "kubectl get deploy -A"*) printf medcea-research ;;\n  *) exit 9 ;;'), 0o755)
+        p = self.run_cmd("restore-help")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.kubectl_calls(), self.HUB_QUERY)
+        out = p.stdout
+        c = out[out.index("C. One person's AI workbench home"):out.index("D. Node-RED")]
+        self.assertIn("The hub runs in namespace medcea-research now; a home copied there is "
+                      "volumes/research-claim-<name>.tar.gz", c)
+        self.assertIn("PV=$(microk8s kubectl -n medcea-research get pvc claim-<name>", c)
+        # the archive is picked by the volume MANIFEST names (review of commit A), never by name
+        self.assertIn(f"sudo tar -C \"$D\" -xzpf {self.dir}/{self.name}/$A --numeric-owner", c)
+        self.assertIn('A=$(sed -n "s|^# volume \\(volumes/[^ ]*\\) from [^ ]*-$PV newest file .*|\\1|p" '
+                      f"{self.dir}/{self.name}/MANIFEST)", c)
+        self.assertIn("A=volumes/research-claim-<name>.tar.gz)", c)
+        # Node-RED and Grafana stay the platform's
+        self.assertIn("D as in C.2 with pvc node-red in namespace medcea (microk8s kubectl -n medcea)", out)
 
     def test_now(self):
         p = self.run_cmd("now", "--timeout", "10")
