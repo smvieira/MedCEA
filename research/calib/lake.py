@@ -23,6 +23,7 @@ The function, parameter and column names below are the reviewed form of lake_api
 from __future__ import annotations
 
 import hashlib
+import http.client
 import re
 import socket
 import urllib.error
@@ -106,6 +107,12 @@ def _int(v, what):
         raise LakeError("the lake reader answered %r for %s, not a whole number" % (v, what)) from None
 
 
+# A network failure, including a response cut short (http.client.IncompleteRead and
+# BadStatusLine are HTTPExceptions, not OSErrors: lake-api killed for memory mid-page),
+# is "not reachable", never a traceback (edge_auth.NET_ERRORS' rule).
+NET_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, socket.timeout)
+
+
 class LakeClient:
     def __init__(self, base_url, timeout=TIMEOUT_S):
         base = (base_url or "").strip().rstrip("/")
@@ -136,8 +143,12 @@ class LakeClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 raw = r.read()
         except urllib.error.HTTPError as e:
-            body_raw = e.read()
-            e.close()
+            try:
+                body_raw = e.read()
+            except NET_ERRORS:
+                body_raw = b""         # a truncated error body: the status still says what happened
+            finally:
+                e.close()
             try:
                 body = pgtext.loads_raw(body_raw) if body_raw.strip() else {}
             except ValueError:
@@ -150,9 +161,9 @@ class LakeClient:
                 raise LakeError("the lake reader stopped the query after its 30 s statement timeout (%s)" % fn,
                                 code, e.code) from None
             raise LakeError("the lake reader answered %d %s" % (e.code, msg or code or ""), code, e.code) from None
-        except (urllib.error.URLError, OSError, socket.timeout) as e:
+        except NET_ERRORS as e:
             raise LakeError("the lake reader at %s is not reachable (%s): ./apps/lake-api/deploy.sh"
-                            % (self.base, getattr(e, "reason", e))) from None
+                            % (self.base, getattr(e, "reason", None) or e)) from None
         try:
             rows = pgtext.loads_raw(raw)
         except ValueError:

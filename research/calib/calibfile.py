@@ -51,11 +51,23 @@ class CalibError(ValueError):
 
 
 # ── code state ──────────────────────────────────────────────────────────────────────
+def is_code(rel):
+    """True for a path of the code a fit records (CODE_DIRS' *.py): the files whose blobs
+    code_state() writes. A calibration or extract file written under research/calib is data."""
+    return rel.startswith(tuple(d + "/" for d in CODE_DIRS)) and rel.endswith(".py")
+
+
 def code_state(allow_dirty=False):
-    """{commit, dirty, dirty_files, python, blobs} of the sandbox's own code (research/),
-    refused (CalibError) when research/ differs from HEAD unless allow_dirty (R10)."""
+    """{commit, dirty, dirty_files, python, blobs} of the code a fit runs and records
+    (CODE_DIRS' *.py), refused (CalibError) when any of it differs from HEAD unless
+    allow_dirty (R10). Other changes under research/ (the calibration a fit just wrote into
+    research/calib/calibrations/, an extract copied into research/calib/extracts/) are not
+    code and do not make the fit dirty."""
     root = algorithms_loader.SANDBOX_ROOT
     st = algorithms_loader.sandbox_state(root)
+    dirty_files = [f for f in st["dirty_files"]
+                   if f.startswith("(") or is_code(f[len("sandbox:"):] if f.startswith("sandbox:") else f)]
+    st = dict(st, dirty=bool(dirty_files), dirty_files=dirty_files)
     if st["dirty"] and not allow_dirty:
         raise CalibError("research/ differs from HEAD (%s): commit it, or pass --allow-dirty to record it as dirty"
                          % ", ".join(st["dirty_files"]))

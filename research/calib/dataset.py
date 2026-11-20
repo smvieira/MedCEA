@@ -21,6 +21,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import tempfile
 
 from . import DATASET_SCHEMA, CALIB_VERSION, pgtext
@@ -29,6 +30,7 @@ from .lake import PAGE_SIZE, LakeError
 COLUMNS = ("measured_at", "ingested_at", "unit_code", "zone_code", "tag", "sensor", "value", "uom", "snapshot_id")
 FILE = "dataset.jsonl"
 FETCH_LOG = "fetch-log.json"
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class DatasetError(Exception):
@@ -182,6 +184,40 @@ def write_fetch_log(path, base_url, header, holds):
     _atomic_write(path, (json.dumps(log, sort_keys=True, indent=1) + "\n").encode("utf-8"))
 
 
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def check_header(header, where):
+    """The header's shape beyond what content_sha256 covers (it covers only the rows): the
+    lake block, its snapshots and the query, as fetch() writes them. DatasetError, never a
+    KeyError, on a malformed or hand-edited header."""
+    if not isinstance(header.get("content_sha256"), str) or not _HEX64.match(header["content_sha256"]):
+        raise DatasetError("%s: the header's content_sha256 is not 64 hex digits" % where)
+    if not _is_int(header.get("rows")) or not isinstance(header.get("series"), dict):
+        raise DatasetError("%s: the header needs rows (a whole number) and series (a mapping)" % where)
+    lk = header.get("lake")
+    if not isinstance(lk, dict):
+        raise DatasetError("%s: the header has no lake block" % where)
+    if not _is_int(lk.get("snapshot_id")) or not _is_int(lk.get("contract_version")) \
+            or not _HEX64.match(str(lk.get("lineage", ""))) or not isinstance(lk.get("cut_at"), str):
+        raise DatasetError("%s: the header's lake block needs snapshot_id, contract_version, a 64-hex lineage "
+                           "and cut_at" % where)
+    snaps = lk.get("snapshots")
+    if not isinstance(snaps, list):
+        raise DatasetError("%s: the header's lake.snapshots is not a list" % where)
+    for s in snaps:
+        if not isinstance(s, dict) or not all(_is_int(s.get(k)) for k in ("id", "rows_fetched", "rows_measurement")) \
+                or not isinstance(s.get("complete"), bool):
+            raise DatasetError("%s: a lake.snapshots entry needs id, rows_fetched, rows_measurement (whole numbers) "
+                               "and complete (true or false)" % where)
+        if s["complete"] and not _HEX64.match(str(s.get("digest_measurement") or "")):
+            raise DatasetError("%s: complete snapshot %d has no 64-hex digest_measurement" % (where, s["id"]))
+    q = header.get("query")
+    if not isinstance(q, dict) or not isinstance(q.get("p_unit"), str) or not isinstance(q.get("p_zone"), str):
+        raise DatasetError("%s: the header's query needs p_unit and p_zone" % where)
+
+
 def read(path, holds=None):
     """(header, rows) of a dataset file, refused (DatasetError) unless its schema, columns,
     row count, order and content_sha256 hold and, when HOLDS is given, no row lies in one."""
@@ -207,6 +243,7 @@ def read(path, holds=None):
         raise DatasetError("%s is not a medcea dataset of schema %d" % (path, DATASET_SCHEMA))
     if header.get("columns") != list(COLUMNS):
         raise DatasetError("%s: columns %r, not %r" % (path, header.get("columns"), list(COLUMNS)))
+    check_header(header, path)
     h = hashlib.sha256()
     for line in lines[1:]:
         h.update((line + "\n").encode("utf-8"))

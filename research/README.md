@@ -97,9 +97,11 @@ python3 -m research.calib verify ~/calib/s1.yaml                 # also a datase
 lake-api's address for `snapshots` and `fetch`; every other subcommand passes
 straight to `python3 -m research.calib`. Exit codes: 0, 2 (refused or usage),
 3 (`fit-plant`: nothing identifiable; nothing written). A fetch never overwrites
-a file, and `fit-sensors` refuses a `research/` that differs from HEAD unless
-`--allow-dirty`, which the file records. The dataset (about 8 MB) is not
-committed: a fetch with the same lineage gives the same bytes.
+a file, and `fit-sensors` and `fit-plant` refuse while the code they run and
+record (`calib/*.py`, `twin_plant/*.py`) differs from HEAD unless
+`--allow-dirty`, which the file records; a calibration or extract written under
+`calib/calibrations/` or `calib/extracts/` is data and does not count. The dataset
+(about 10 MB) is not committed: a fetch with the same lineage gives the same bytes.
 
 Committed: the extract `calib/extracts/snapshot-1-096015bc225c.yaml` and the
 calibration `calib/calibrations/unit01-zone01-s1.yaml` (snapshot 1, lineage

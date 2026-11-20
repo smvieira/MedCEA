@@ -93,11 +93,15 @@ class File(unittest.TestCase):
         self.assertEqual(set(sht["noise_sd"]), {"air_temperature", "air_humidity"})
         self.assertEqual(sht["bias_sd"], {"air_temperature": 0.05, "air_humidity": 0.5})
         scd = ov["sensors"]["scd30"]
-        self.assertNotIn("co2", scd["noise_sd"])                       # refused: filtered
+        # not separable (filtered), and the datasheet's 15 ppm + 1.5 % exceeds the data's bound:
+        # the bound applies, with no relative part
+        self.assertLess(scd["noise_sd"]["co2"], 15.0)
+        self.assertEqual(scd["noise_rel_sd"], {"co2": 0.0})
         self.assertNotIn("self_heating_c", scd)                        # constant_offset
         self.assertAlmostEqual(scd["bias"]["air_temperature"], 2.04, delta=0.02)
         self.assertNotIn("ds18b20", ov["sensors"])
-        self.assertIn("scd30.noise_sd.co2", [n["field"] for n in ov["not_applied"]])
+        self.assertIn("scd30.noise_sd.co2", ov["applied"])
+        self.assertIn("scd30.noise_rel_sd.co2", ov["applied"])
         self.assertIn("sht45.latency_s", ov["applied"])
         removed = calibfile.to_overrides(self.doc, remove=["scd30"])
         self.assertEqual(set(removed["sensors"]), {"sht45"})
@@ -141,6 +145,8 @@ class File(unittest.TestCase):
 class CodeState(unittest.TestCase):
     def test_dirty_needs_the_flag(self):
         st = algorithms_loader.sandbox_state(algorithms_loader.SANDBOX_ROOT)
+        st = dict(st, dirty_files=[f for f in st["dirty_files"] if calibfile.is_code(f)])
+        st["dirty"] = bool(st["dirty_files"])
         code = calibfile.code_state(allow_dirty=True)
         self.assertEqual(code["dirty"], st["dirty"])
         self.assertEqual(code["commit"], st["commit"])
@@ -153,6 +159,32 @@ class CodeState(unittest.TestCase):
                 calibfile.code_state()
         else:
             self.assertEqual(calibfile.code_state(), code)
+
+    def _state(self, files):
+        real = algorithms_loader.sandbox_state
+
+        def fake(root):
+            st = real(root)
+            return dict(st, dirty=bool(files), dirty_files=list(files))
+        algorithms_loader.sandbox_state = fake
+        self.addCleanup(setattr, algorithms_loader, "sandbox_state", real)
+
+    def test_data_written_under_research_is_not_code(self):
+        """A fit's own output (calibrations/), an extract and anything not a CODE_DIRS *.py
+        leave the next fit clean; a changed fit module still refuses."""
+        self._state(["research/calib/calibrations/unit01-zone01-s1.yaml",
+                     "research/calib/extracts/snapshot-1-096015bc225c.yaml", "research/README.md"])
+        code = calibfile.code_state()
+        self.assertFalse(code["dirty"])
+        self.assertEqual(code["dirty_files"], [])
+        for f in ("research/calib/sensor_fit.py", "research/twin_plant/sensors.py", "sandbox:research/calib/stats.py",
+                  "(git status failed)"):
+            self._state(["research/calib/calibrations/x.yaml", f])
+            with self.assertRaisesRegex(calibfile.CalibError, "--allow-dirty"):
+                calibfile.code_state()
+            self.assertEqual(calibfile.code_state(allow_dirty=True)["dirty_files"], [f])
+        self.assertFalse(calibfile.is_code("research/calib/calibrations/a.py.yaml"))
+        self.assertFalse(calibfile.is_code("research/calibx/a.py"))
 
 
 if __name__ == "__main__":

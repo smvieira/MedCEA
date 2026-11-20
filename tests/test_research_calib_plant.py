@@ -110,8 +110,8 @@ class ExactFirstOrder(unittest.TestCase):
 
     def test_with_the_live_process_term_and_the_protocols_step(self):
         """The AR(1) term at the live magnitude wanders enough that a 2-h step gives tau to
-        about 10 % only (and the residual bootstrap's interval under-covers): the step-test
-        protocol's 5-h heater step (design §6) brings it back within 2 %."""
+        about 10 % only (Coverage: such a fit is refused or its interval says so): the
+        step-test protocol's 5-h heater step (design §6) brings it back within 2 %."""
         for tau in (3600.0, 8760.0, 14400.0):
             for seed in (1, 2, 3):
                 self.check(tau, 30.0, seed, step_s=18000, resamples=40, ar_sd=0.045)
@@ -121,6 +121,42 @@ class ExactFirstOrder(unittest.TestCase):
         a = plant_fit.fit_step(t, y, 900.0, "air_heater", ambient=AMBIENT, seed_key="d")
         b = plant_fit.fit_step(t, y, 900.0, "air_heater", ambient=AMBIENT, seed_key="d")
         self.assertEqual(a, b)
+
+
+class Coverage(unittest.TestCase):
+    """Review of 20 Nov 2026: with the live process term (AR(1), 0.045 C, 600 s) on 2-h
+    steps the residual bootstrap alone accepted intervals that missed tau a third of the
+    time. Every accepted interval must now cover the true tau at about the nominal rate
+    (here: at most one miss), and the rest be refused, never a confident wrong number."""
+
+    def test_two_hour_steps_under_the_process_term(self):
+        accepted, misses, refused = 0, [], []
+        for tau in (3600.0, 8760.0):
+            for seed in range(1, 9):
+                p, t, y = step_data(tau, 30.0, seed, step_s=7200, ar_sd=0.045)
+                r = plant_fit.fit_step(t, y, 900.0, "air_heater", power_w=p.heater_w, ambient=AMBIENT,
+                                       seed_key="c:%s:%s" % (tau, seed), resamples=60)
+                if isinstance(r, plant_fit.Refusal):
+                    refused.append((tau, seed, r.code))
+                    continue
+                accepted += 1
+                if not r.ci95[0] <= tau <= r.ci95[1]:
+                    misses.append((tau, seed, r.tau_s, r.ci95))
+        self.assertGreaterEqual(accepted, 6, refused)
+        self.assertLessEqual(len(misses), 1, misses)
+        self.assertTrue(all(code in ("WIDE_CI", "BASELINE") for _, _, code in refused), refused)
+
+    def test_white_residuals_are_not_widened(self):
+        self.assertAlmostEqual(plant_fit._vif([30.0 * i for i in range(200)],
+                                              [(-1) ** i * 0.05 for i in range(200)]), 1.0)
+        t = [30.0 * i for i in range(400)]
+        x, e = 0.0, []
+        import random as _r
+        g = _r.Random(3)
+        for _ in t:
+            x = 0.9 * x + g.random() - 0.5
+            e.append(x)
+        self.assertGreater(plant_fit._vif(t, e), 5.0)
 
 
 class ModelStructure(unittest.TestCase):

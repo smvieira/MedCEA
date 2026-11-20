@@ -32,7 +32,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _rs_synth as S  # noqa: E402
-from research.calib import dataset, segments, sensor_fit, stats  # noqa: E402
+from research.calib import calibfile, dataset, segments, sensor_fit, stats  # noqa: E402
 from research.harness import algorithms_loader  # noqa: E402
 
 MAP = {"sht45": "sht45_1", "scd30": "scd30_1"}
@@ -109,15 +109,34 @@ class RoundTrip(unittest.TestCase):
             self.assertEqual(len(e["v_k"]), 4)
             self.assertLessEqual(e["relative_residual"], sensor_fit.REL_RESID_MAX)
 
-    def test_co2_noise_refused_as_filtered(self):
+    def test_co2_noise_not_separable_gives_its_upper_bound(self):
+        """Filtered CO2 noise is not separable, but sqrt(Var(d1) / 2) bounds it; the
+        datasheet's 15 ppm + 1.5 % x 700 ppm (25.5) is above that bound, so the bound applies
+        (with no relative part) and the conflict is recorded."""
         e = self.s["scd30"]["noise_sd"]["co2"]
-        self.assertFalse(e["applied"])
-        self.assertEqual(e["source"], "not_identifiable")
-        self.assertIn("not separable from filtered process variation", e["why"])
+        self.assertTrue(e["applied"], e)
+        self.assertEqual(e["source"], "upper_bound")
         self.assertGreater(e["d1_autocorrelation"], 0)
-        self.assertNotIn("value", e)
+        self.assertGreaterEqual(e["value"], 4.0)                      # the generator's white noise: a bound
+        self.assertLess(e["value"], e["datasheet_at_median"])
+        self.assertAlmostEqual(e["datasheet_at_median"], 15.0 + 0.015 * 700, delta=1.0)
+        self.assertIn("exceeds what the data allows", e["why"])
         rel = self.s["scd30"]["noise_rel_sd"]["co2"]
-        self.assertFalse(rel["applied"])
+        self.assertEqual((rel["value"], rel["source"], rel["applied"]), (0.0, "upper_bound", True))
+        u = [x for x in self.r["unmodelled"] if x["what"].startswith("noise below the data's upper bound")]
+        self.assertEqual([(x["sensor"], x["tag"]) for x in u], [("scd30", "co2")])
+
+    def test_a_default_within_the_bound_stays(self):
+        spec = sensor_fit.default_specs()["scd30"]
+        refusal = dict(sensor_fit.refused("not_identifiable", "not separable"), upper_bound=40.0,
+                       d1_autocorrelation=0.2)
+        un = []
+        self.assertIsNone(sensor_fit._bounded("scd30", "co2", spec, refusal, [70000] * 10, un))
+        self.assertEqual(un, [])
+        refusal["upper_bound"] = 0.5
+        e = sensor_fit._bounded("scd30", "co2", spec, refusal, [70000] * 10, un)
+        self.assertEqual((e["value"], e["source"], e["applied"]), (0.5, "upper_bound", True))
+        self.assertEqual(len(un), 1)
 
     def test_relative_offsets(self):
         b = self.s["scd30"]["bias"]
@@ -181,6 +200,52 @@ class RoundTrip(unittest.TestCase):
         self.assertIn(("publish jitter", "sht45"), whats)
         self.assertIn(("skipped cycles", "scd30"), whats)
         self.assertIn(("fast process variation not in the model", "sht45"), whats)
+
+
+class DeliveryStalls(unittest.TestCase):
+    """Review of 20 Nov 2026: the platform sometimes receives a run of cycles late and then in
+    a burst (a 40 s ingest gap, then gaps of a few ms), every measured_at 3 s apart. The
+    interval, the skipped cycles and the outages are the board's, on measured_at: a stall
+    is no skipped cycle and does not pull the interval low."""
+
+    @classmethod
+    def setUpClass(cls):
+        rows = S.make_rows(hours=3.0, interval=3.0, seed=4)
+        stall = 40.0
+        starts = [600.0 + 300.0 * k for k in range(30)] + [5000.0]   # the last: a 70 s stall, no outage
+        out = []
+        for r in rows:
+            i = segments.parse_us(r["ingested_at"]) / 1e6 - segments.parse_us(S._ts(0.0)) / 1e6
+            for t0 in starts:
+                length = 70.0 if t0 == 5000.0 else stall
+                if t0 <= i < t0 + length:
+                    i = t0 + length + (i - t0) * 1e-3
+                    break
+            out.append(dict(r, ingested_at=S._ts(i)))
+        out.sort(key=dataset._key)
+        cls.rows = out
+        cls.h = S.header_for(out)
+        cls.r = sensor_fit.fit(cls.h, out, MAP)
+
+    def test_the_interval_is_the_boards(self):
+        board = segments.Board(self.rows, list(MAP.values()))
+        ms = [c["m"] / 1e6 for c in board.cycles]
+        true = (ms[-1] - ms[0]) / (len(ms) - 1)
+        for m in ("sht45", "scd30"):
+            e = self.r["sensors"][m]["publish_interval_s"]
+            self.assertTrue(e["applied"], e)
+            self.assertAlmostEqual(e["value"], true, delta=0.002, msg=m)
+            self.assertLessEqual(e["ci95"][0], 3.0)
+            self.assertGreaterEqual(e["ci95"][1], 3.0)
+
+    def test_a_stall_is_no_skipped_cycle_and_no_outage(self):
+        self.assertEqual(self.r["outages"], [])
+        self.assertEqual(len(self.r["segments"]), 1)
+        u = {(x["what"], x["sensor"]): x for x in self.r["unmodelled"]}
+        for m in ("sht45", "scd30"):
+            self.assertEqual(u[("skipped cycles", m)]["skipped"], 0)
+            self.assertEqual(u[("delivery stalls", m)]["stalls"], 31)
+            self.assertAlmostEqual(u[("delivery stalls", m)]["longest_s"], 70.0, delta=3.5)
 
 
 class Lattice(unittest.TestCase):
@@ -475,9 +540,9 @@ class Cli(unittest.TestCase):
             self.assertTrue(p.stderr.startswith("calib: "))
 
     def test_a_dirty_research_tree_needs_the_flag(self):
-        st = algorithms_loader.sandbox_state(algorithms_loader.SANDBOX_ROOT)
+        st = calibfile.code_state(allow_dirty=True)
         if not st["dirty"]:
-            self.skipTest("research/ is clean in this checkout")
+            self.skipTest("the fit's code is clean in this checkout")
         out = os.path.join(self.tmp, "dirty.yaml")
         p = self.calib("fit-sensors", self.ds, "--map", "sht45=sht45_1,scd30=scd30_1", "--name", "x", "--out", out)
         self.assertEqual(p.returncode, 2)

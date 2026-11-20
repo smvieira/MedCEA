@@ -10,8 +10,10 @@ in a scenario's plant.overrides.
 
 fit_step(t, y, t_step, actuator, ...) fits y = y0 + K (1 - exp(-(t - t0) / tau)) after a
 step at t0 by variable projection (closed-form least squares of y0 and K for each tau, a
-golden-section search over log tau on the residual sum of squares), with a residual
-block-bootstrap interval for tau (10-minute blocks, R12). It returns a StepFit or a
+golden-section search over log tau on the residual sum of squares), with an interval for
+tau from a residual block bootstrap (10-minute blocks, R12), widened to a delete-a-block
+jackknife's and by the residuals' autocorrelation (review of 20 Nov 2026: the bootstrap
+alone under-covers when the readings wander). It returns a StepFit or a
 Refusal, never a number it cannot stand behind:
 
 - no step inside the data;
@@ -86,6 +88,7 @@ MAX_CI_HALF = 0.2
 DRIFT_FACTOR = 20.0
 TAU_MIN_S = 10.0
 GOLDEN_ITERS = 60
+JACKKNIFE_BLOCKS = 2        # the jackknife deletes 2 bootstrap blocks (20 minutes) at a time
 
 
 class Verdict(NamedTuple):
@@ -204,6 +207,63 @@ def _golden(t, y, t0, lo, hi, grid=24, tol=1e-7):
     return math.exp((a + b) / 2)
 
 
+# t(0.975, df) for df = 1..30; beyond, 1.96 + 2.4 / df is within 0.002.
+_T975 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131,
+         2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042)
+
+
+def _t975(df):
+    return _T975[df - 1] if df <= len(_T975) else 1.96 + 2.4 / df
+
+
+def _vif(t, resid, max_lag=60):
+    """1 + 2 sum rho_k over the residuals' autocorrelation at whole sampling steps (the
+    median step), summed while it stays positive: the variance inflation a correlated
+    residual gives an estimate made from it. 1 for white residuals."""
+    n = len(t)
+    steps = sorted(b - a for a, b in zip(t, t[1:]))
+    dt = steps[len(steps) // 2] if steps else 0
+    var = math.fsum(r * r for r in resid) / n if n else 0
+    if dt <= 0 or var <= 0:
+        return 1.0
+    total = 0.0
+    for k in range(1, max_lag + 1):
+        num, m, j = 0.0, 0, 0
+        for i in range(n):
+            while j < n and t[j] - t[i] < k * dt - dt / 2:
+                j += 1
+            if j < n and abs(t[j] - t[i] - k * dt) <= dt / 2:
+                num += resid[i] * resid[j]
+                m += 1
+        if m < 10:
+            break
+        rho = num / m / var
+        if rho <= 0:
+            break
+        total += rho
+    return 1.0 + 2.0 * total
+
+
+def _jackknife(t, y, t_step, blocks, order, lo_b, hi_b):
+    """The half-width t(0.975, g-1) sd_jack of tau's delete-a-block jackknife over the G
+    blocks (None under 3 blocks). A deleted block that leaves no reading after the step, or
+    fewer than 10 readings, is skipped."""
+    est = []
+    for b in order:
+        drop = set(blocks[b])
+        tt = [ti for i, ti in enumerate(t) if i not in drop]
+        yy = [yi for i, yi in enumerate(y) if i not in drop]
+        if len(tt) < 10 or tt[-1] <= t_step or tt[0] >= t_step:
+            continue
+        est.append(_golden(tt, yy, t_step, lo_b, hi_b, grid=8, tol=1e-5))
+    g = len(est)
+    if g < 3:
+        return None
+    m = math.fsum(est) / g
+    sd = math.sqrt((g - 1) / g * math.fsum((e - m) ** 2 for e in est))
+    return _t975(g - 1) * sd
+
+
 def fit_step(t, y, t_step, actuator, power_w=None, ambient=None, disturbances=None, sigma_noise=None,
              seed_key="fit_step", resamples=100, block_s=stats.BLOCK_S):
     """The first-order step fit of the module docstring. T and Y are equal-length sequences
@@ -262,6 +322,26 @@ def fit_step(t, y, t_step, actuator, power_w=None, ambient=None, disturbances=No
         ys = [f + pool[i % len(pool)] for i, f in enumerate(fitted)]
         taus.append(_golden(t, ys, t_step, lo_b, hi_b, grid=8, tol=1e-5))
     lo, hi = stats.percentile_ci(taus)
+    # The residual bootstrap redraws residuals around this fit, which has already absorbed
+    # the slow part of a wandering process term, so alone its interval is too narrow when
+    # the readings wander (review of 20 Nov 2026: with the live AR(1) magnitude, 5 of 15
+    # accepted 2-h fits missed tau). Two corrections, both 1 on white residuals:
+    # - the delete-a-block jackknife (JACKKNIFE_BLOCKS x 10-min blocks) refits the readings
+    #   themselves without each block, so a stretch whose wander pulled tau shows; the
+    #   interval is the union of the bootstrap's and tau +- t(0.975, g-1) sd_jack;
+    # - its half-widths are then scaled by sqrt(1 + 2 sum rho_k) of the residuals'
+    #   autocorrelation (the variance inflation of a correlated residual).
+    # On simulated 2-h steps with the live process term about 96 % of the accepted
+    # intervals cover tau and a third are refused WIDE_CI; the protocol's 5-h step is
+    # accepted (tests/test_research_calib_plant.py Coverage).
+    jblocks = {}
+    for i, ti in enumerate(t):
+        jblocks.setdefault(int((ti - t[0]) // (JACKKNIFE_BLOCKS * block_s)), []).append(i)
+    jk = _jackknife(t, y, t_step, jblocks, sorted(jblocks), lo_b, hi_b)
+    if jk is not None:
+        lo, hi = min(lo, tau - jk), max(hi, tau + jk)
+    f = math.sqrt(_vif(t, resid))
+    lo, hi = tau - f * (tau - lo), tau + f * (hi - tau)
     if (hi - lo) / 2 > MAX_CI_HALF * tau:
         return Refusal("WIDE_CI", "tau's 95 %% interval [%.0f, %.0f] s is wider than +-%d %% of %.0f s"
                        % (lo, hi, int(MAX_CI_HALF * 100), tau))

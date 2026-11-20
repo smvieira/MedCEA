@@ -39,6 +39,7 @@ import yaml
 
 from ..calib import calibfile, extract, pgtext, sensor_fit
 from . import algorithms_loader
+from ..twin_plant.chamber import ChamberParams
 
 CALIBRATION_KEYS = {"path", "sha256", "extrapolate"}
 LINE_FROM_KEYS = {"extract", "sha256", "snapshot_id", "lineage", "recipe_id", "seq", "light"}
@@ -174,8 +175,40 @@ def _check_catalogue(doc, repo_root):
                 raise PinError("the snapshot's catalogue differs from git's for %s: %s %s, git %s" % (code, k, a, b))
 
 
+# The room's key for a tag the chamber starts from when the scenario gives no initial value
+# (Chamber: initial.get(tag, p.ambient_<key>)), and that an ambient disturbance changes.
+AMBIENT_OF = {"air_humidity": "humidity", "air_temperature": "temperature", "co2": "co2"}
+
+
+def _start_and_ambient(sc, tag):
+    """[(what, value)] of TAG's start value as the chamber takes it (initial, else the
+    room's ambient: scenario ambient, plant.overrides.ambient_*, ChamberParams' default)
+    and of every ambient disturbance that sets the room's value."""
+    out = []
+    key = AMBIENT_OF.get(tag)
+    initial = sc.get("initial") or {}
+    if tag in initial:
+        out.append(("initial %s" % tag, initial[tag]))
+    elif key is not None:
+        amb = sc.get("ambient") or {}
+        ov = (sc.get("plant") or {}).get("overrides") or {}
+        if isinstance(amb, dict) and key in amb:
+            out.append(("initial %s (ambient.%s)" % (tag, key), amb[key]))
+        elif isinstance(ov, dict) and "ambient_" + key in ov:
+            out.append(("initial %s (plant.overrides.ambient_%s)" % (tag, key), ov["ambient_" + key]))
+        else:
+            out.append(("initial %s (the model's ambient_%s)" % (tag, key),
+                        getattr(ChamberParams(), "ambient_" + key)))
+    if key is not None:
+        for d in sc.get("disturbances") or []:
+            if isinstance(d, dict) and d.get("kind") == "ambient" and key in d:
+                out.append(("ambient disturbance at %s h %s" % (d.get("at_h"), key), d[key]))
+    return out
+
+
 def _validity(sc, validity, extrapolate):
-    """Refuse scenario humidity (setpoints, initial) outside the calibration's range unless
+    """Refuse scenario humidity (setpoints, the start value as the chamber takes it, the
+    room's value after an ambient disturbance) outside the calibration's range unless
     extrapolate gives a reason (R7)."""
     used = {}
     for tag, rng in sorted(validity.items()):
@@ -184,8 +217,7 @@ def _validity(sc, validity, extrapolate):
         sp = ((sc.get("recipe_line") or {}).get("setpoints") or {}).get(tag)
         if isinstance(sp, dict):
             vals += [("setpoint %s.%s" % (tag, k), sp.get(k)) for k in ("lower", "upper")]
-        if tag in (sc.get("initial") or {}):
-            vals.append(("initial %s" % tag, sc["initial"][tag]))
+        vals += _start_and_ambient(sc, tag)
         outside = [(w, v) for w, v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)
                    and not lo <= v <= hi]
         if not outside:

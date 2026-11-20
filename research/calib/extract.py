@@ -103,8 +103,9 @@ def verify_doc(doc, where="extract"):
     """Schema and every digest of an extract document. Returns the summary lines."""
     if not isinstance(doc, dict) or doc.get("medcea_extract") != EXTRACT_SCHEMA:
         raise ExtractError("%s is not a snapshot extract of schema %d" % (where, EXTRACT_SCHEMA))
-    lake = doc.get("lake") or {}
-    if not isinstance(lake.get("snapshot_id"), int) or not _HEX64.match(str(lake.get("lineage", ""))):
+    lake = doc.get("lake")
+    if not isinstance(lake, dict) or not isinstance(lake.get("snapshot_id"), int) \
+            or not _HEX64.match(str(lake.get("lineage", ""))):
         raise ExtractError("%s: lake.snapshot_id and a 64-hex lake.lineage are required" % where)
     expected_keys = ["medcea_extract", "lake", "digests"] + list(SETS)
     if list(doc) != expected_keys:
@@ -129,10 +130,8 @@ def verify_doc(doc, where="extract"):
 
 def verify(path):
     doc = load(path)
-    return ["extract %s: snapshot %s, lineage %s" % (path, (doc.get("lake") or {}).get("snapshot_id")
-                                                     if isinstance(doc, dict) else "?",
-                                                     (doc.get("lake") or {}).get("lineage")
-                                                     if isinstance(doc, dict) else "?")] + verify_doc(doc, path)
+    lines = verify_doc(doc, path)       # refuses a malformed document before it is read below
+    return ["extract %s: snapshot %s, lineage %s" % (path, doc["lake"]["snapshot_id"], doc["lake"]["lineage"])] + lines
 
 
 __all__ = ["ExtractError", "LakeError", "fetch", "write", "load", "verify", "file_name", "SETS"]

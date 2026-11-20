@@ -39,8 +39,9 @@ Each series is repeated twice, with at least 2 τ of rest between steps
    the gain K, `C_a = P·τ/K` (the heater's power measured with a plug meter)
    and UA. A 2-h step is not enough: with process variation of the magnitude
    measured in snapshot 1 (about 2·10⁻⁵ °C² per 3-s cycle on the SHT45), a 2-h
-   step gives τ only to about 10 % and its bootstrap interval under-covers; the
-   5-h step gives τ to about 1–2 % and C_a to about 3 %
+   step gives τ only to about 10 %, and the fit refuses about a third of such
+   steps as too uncertain (`WIDE_CI`); the 5-h step gives τ to about 1–2 % and
+   C_a to about 3 %
    (`tests/test_research_calib_plant.py`).
 3. **air_flow_fan**: on for 2 h. Gives `fan_air_exchange_per_h` from the change
    in τ and the CO2 decay, and `fan_mixing_factor` once the substrate is

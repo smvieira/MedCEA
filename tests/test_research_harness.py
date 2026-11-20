@@ -877,8 +877,8 @@ class Pins(unittest.TestCase):
         self.assertEqual(res["source"]["dataset_content_sha256"], self.cal_doc["source"]["dataset_content_sha256"])
         self.assertEqual(res["extrapolate"], EXTRAPOLATE)
         ov = sc["sensors"]["overrides"]
-        self.assertNotIn("noise_rel_sd", ov["scd30"])                        # not applied: untouched
-        self.assertEqual(ov["scd30"]["noise_sd"]["co2"], 15.0)               # refused in the file: the default,
+        self.assertEqual(ov["scd30"]["noise_rel_sd"], {"co2": 0.0})          # the upper bound holds it all
+        self.assertLess(ov["scd30"]["noise_sd"]["co2"], 15.0)                # the data's bound, not the datasheet
         self.assertEqual(set(ov["scd30"]["noise_sd"]), {"co2", "air_temperature", "air_humidity"})  # per tag
         self.assertAlmostEqual(ov["sht45"]["noise_sd"]["air_temperature"], 0.012, delta=0.002)
         outs = []
@@ -893,7 +893,7 @@ class Pins(unittest.TestCase):
             prov = m["provenance"]["smoke_air_temperature"]["calibration"]
             self.assertEqual((prov["path"], prov["sha256"], prov["name"]), ("cal.yaml", self.cal_sha, "cal"))
             self.assertIn("sht45.noise_sd.air_temperature", prov["applied"])
-            self.assertIn("scd30.noise_sd.co2", [x["field"] for x in prov["not_applied"]])
+            self.assertIn("scd30.noise_sd.co2", prov["applied"])
             self.assertEqual(prov["extrapolate"], EXTRAPOLATE)
             self.assertEqual(m["runs"], 8)
         self.assertEqual(outs[0], outs[1])
@@ -939,6 +939,48 @@ class Pins(unittest.TestCase):
         self.assertTrue(campaign.resolve_spec(spec, self.scen_dir, allow_dirty=True)["scenarios"][0]
                         ["calibration"]["resolved"]["code"]["dirty"])
         self.assertTrue(os.path.exists(dirty))
+
+    def test_validity_covers_the_start_value_and_the_room(self):
+        """R7: the start humidity is initial.air_humidity, else the room's (ambient.humidity,
+        plant.overrides.ambient_humidity, ChamberParams' 50); an ambient disturbance sets the
+        room's from then on. Each is checked against validity like a setpoint."""
+        lo, hi = self.cal_doc["validity"]["air_humidity"]
+        mid = round((lo + hi) / 2, 2)
+        inside = {"air_humidity": {"lower": lo, "upper": hi}, "air_temperature": {"lower": 18, "upper": 22},
+                  "co2": {"lower": 500, "upper": 5000}}
+        nox = {"path": "cal.yaml", "sha256": self.cal_sha}
+
+        def sc(**kw):
+            s = self.scenario(calibration=dict(nox), recipe_line=dict(smoke()["recipe_line"], setpoints=inside),
+                              initial={"air_temperature": 16, "co2": 800},
+                              ambient={"temperature": 20, "humidity": mid, "co2": 420})
+            for k, v in kw.items():
+                if v is None:
+                    s.pop(k, None)
+                else:
+                    s[k] = v
+            return s
+
+        ok = campaign.resolve_spec({"scenarios": [sc()], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]},
+                                   self.scen_dir)
+        self.assertNotIn("extrapolate", ok["scenarios"][0]["calibration"]["resolved"])
+        for bad, why in ((sc(ambient={"temperature": 20, "humidity": 20, "co2": 420}),
+                          r"initial air_humidity \(ambient.humidity\) 20"),
+                         (sc(ambient=None), r"the model's ambient_humidity\) 50"),
+                         (sc(ambient=None, plant={"overrides": {"ambient_humidity": 90}}),
+                          r"plant.overrides.ambient_humidity\) 90"),
+                         (sc(initial={"air_humidity": 90}), "initial air_humidity 90"),
+                         (sc(disturbances=[{"at_h": 0.05, "kind": "ambient", "humidity": 95}]),
+                          "ambient disturbance at 0.05 h humidity 95")):
+            self.refused(bad, why, inline=True)
+            bad["calibration"]["extrapolate"] = dict(EXTRAPOLATE)
+            r = campaign.resolve_spec({"scenarios": [bad], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]},
+                                      self.scen_dir)
+            self.assertEqual(r["scenarios"][0]["calibration"]["resolved"]["extrapolate"], EXTRAPOLATE)
+        # an initial value inside the range wins over a room outside it
+        campaign.resolve_spec({"scenarios": [sc(initial={"air_humidity": mid},
+                                                ambient={"temperature": 20, "humidity": 20, "co2": 420})],
+                               "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]}, self.scen_dir)
 
     def test_tampered_calibration_files(self):
         for name, fn, why in (("fitted", lambda d: d["plant"]["tau_air_s"].update(source="fitted"), "later phase"),

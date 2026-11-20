@@ -543,6 +543,63 @@ class Cli(Base):
         rc, _, err = self.cli("verify", os.path.join(d, "nothing.yaml"))
         self.assertEqual(rc, 2)
 
+    def test_a_malformed_header_or_extract_is_exit_2_not_a_traceback(self):
+        d = self.tmp()
+        p = os.path.join(d, "dataset.jsonl")
+        header = {"medcea_dataset": dataset.DATASET_SCHEMA, "columns": list(dataset.COLUMNS), "rows": 0,
+                  "series": {}, "content_sha256": hashlib.sha256(b"").hexdigest()}
+        variants = [dict(header), dict(header, lake=[1]),
+                    dict(header, lake={"snapshot_id": 1, "contract_version": 1, "lineage": "a" * 64,
+                                       "cut_at": "x", "snapshots": [{"id": 1}]}, query={"p_unit": "U", "p_zone": "Z"})]
+        for h in variants:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(dataset.canonical(h) + "\n")
+            rc, _, err = self.cli("verify", p)
+            self.assertEqual(rc, 2, err)
+            self.assertTrue(err.startswith("calib: "), err)
+            self.assertNotIn("Traceback", err)
+        q = os.path.join(d, "extract.yaml")
+        for lk in ("[1]", "x", "{snapshot_id: 1}"):
+            with open(q, "w", encoding="utf-8") as f:
+                f.write("medcea_extract: 1\nlake: %s\n" % lk)
+            rc, _, err = self.cli("verify", q)
+            self.assertEqual(rc, 2, err)
+            self.assertIn("lake.snapshot_id", err)
+
+    def test_a_truncated_answer_is_not_reachable_with_exit_2(self):
+        """lake-api killed mid-answer: Content-Length promises more than arrives
+        (http.client.IncompleteRead, not an OSError), on a 200 and on an error body."""
+        for status in (200, 503):
+            class H(BaseHTTPRequestHandler):
+                code = status
+
+                def do_GET(self):
+                    self.send_response(self.code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    self.wfile.write(b'[{"snapshot_id": 1')
+                    self.wfile.flush()
+                    self.close_connection = True
+
+                def log_message(self, *a):
+                    pass
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            t.start()
+            self.addCleanup(httpd.server_close)
+            self.addCleanup(httpd.shutdown)
+            url = "http://127.0.0.1:%d" % httpd.server_address[1]
+            rc, out, err = self.cli("snapshots", "--lake", url)
+            self.assertEqual(rc, 2, (status, err))
+            self.assertTrue(err.startswith("calib: "), err)
+            self.assertNotIn("Traceback", err)
+            if status == 200:
+                self.assertIn("not reachable", err)
+                self.assertIn("IncompleteRead", err)
+            else:
+                self.assertIn("answered 503", err)
+
     def test_snapshots_lists_lineage_and_verified(self):
         self.serve()
         rc, out, err = self.cli("snapshots", "--lake", self.url)

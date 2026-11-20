@@ -7,7 +7,7 @@ twin_plant.sensors.default_specs() id), one entry per SensorSpec field:
     {value, source, applied, ...}       an estimate (applied: it changes the model)
     {source, applied: false, why}       a refusal: the default stays
 
-Sources: fitted | fitted_confounded | chosen | datasheet | not_identifiable |
+Sources: fitted | fitted_confounded | upper_bound | chosen | datasheet | not_identifiable |
 not_enough_data. Every number is rounded to 6 significant digits (stats.sig6) before it is
 compared or written, and every interval comes from a block bootstrap (10-minute blocks,
 200 resamples) seeded from sha256(<content_sha256>:<field>), so the same dataset gives
@@ -17,8 +17,9 @@ The rules, in short (the design says why):
 - cycles are keyed by measured_at (R1); the cadence, segments and outages come from
   segments.Board (R2); a field needs a segment of 1 h or more and 1000 cycles of its
   sensor (500 pairs for an offset), or it is refused not_enough_data;
-- publish_interval_s: the mean of the normal differences of the sensor's cycle times
-  (refused when their coefficient of variation is over 0.5); jitter, skipped cycles and
+- publish_interval_s: the mean of the normal differences of the sensor's cycle times,
+  which are measured_at (R1: a delivery stall is not a skipped cycle; refused when their
+  coefficient of variation is over 0.5); jitter, delivery stalls, skipped cycles and
   reboots go under unmodelled;
 - start_offset_s: 0 for every sensor, chosen (R4: one cycle, one timestamp);
 - latency_s: median(ingested_at - measured_at) - 0.5 s (measured_at is truncated to the
@@ -31,7 +32,10 @@ The rules, in short (the design says why):
   the lag-1 autocorrelation of the first differences is positive beyond sampling error
   (white noise plus a slow process gives -0.5..0: a positive one is filtered noise, not
   separable from process variation), when the fit is poor (relative residual > 0.25), or
-  when the intercept's interval reaches 0; c goes under unmodelled; a significant excess
+  when the intercept's interval reaches 0; c goes under unmodelled; a refusal as not
+  separable records the data's upper bound sqrt(Var(d1) / 2) and v_1, and when the
+  model's default noise at the observed median exceeds that bound the bound is applied
+  (source upper_bound, noise_rel_sd 0): the data contradicts the default; a significant excess
   of repeated values (binomial test, p < 0.001) and a non-uniform last digit (chi-square,
   p < 0.001) are recorded, never acted on;
 - noise_rel_sd: 0 (the fitted noise_sd holds the whole noise) unless the per-decile noise
@@ -71,8 +75,8 @@ REL_RESID_MAX = 0.25
 P_FLAG = 0.001
 RH_POINTS = (50, 70, 85, 95)
 HUMIDITY_MODELS = ("constant_offset", "self_heating")
-SOURCES = ("fitted", "fitted_confounded", "chosen", "datasheet", "assumed", "spec", "not_identifiable",
-           "not_enough_data")
+SOURCES = ("fitted", "fitted_confounded", "upper_bound", "chosen", "datasheet", "assumed", "spec",
+           "not_identifiable", "not_enough_data")
 DICT_FIELDS = ("quantisation", "noise_sd", "noise_rel_sd", "bias", "bias_sd")
 SCALAR_FIELDS = ("publish_interval_s", "start_offset_s", "latency_s", "dropout_p", "self_heating_c")
 LATENCY_NOTE = "includes the board clock's offset; not separable without a trusted publish time"
@@ -168,7 +172,7 @@ def _boot(ctx, field, blocks, stat):
     return stats.percentile_ci(out)
 
 
-def _cycle_time(c, sensor):
+def _ingest_time(c, sensor):
     return min(v[1] for v in c["s"][sensor].values())
 
 
@@ -182,18 +186,24 @@ def _sensor_cycles(ctx, sensor):
 
 
 def _fit_interval(ctx, model, sensor, cycles, unmodelled):
+    """The mean of the normal differences of the sensor's measured_at cycle times (R1,
+    R2); the ingested_at differences of the same pairs give the delivery jitter and the
+    stalls, recorded under unmodelled."""
     diffs = []
     skipped = []
+    ingest = []
     prev = None
     for k, c in cycles:
-        t = _cycle_time(c, sensor)
+        t = c["t"]
+        ti = _ingest_time(c, sensor)
         if prev is not None and prev[0] == k:
             d = t - prev[1]
             if d <= ctx.limit:
                 diffs.append((k, t, d))
+                ingest.append(ti - prev[2])
             else:
                 skipped.append(d)
-        prev = (k, t)
+        prev = (k, t, ti)
     if len(diffs) < MIN_EVENTS:
         return refused("not_enough_data", "%d normal cycle differences, %d needed" % (len(diffs), MIN_EVENTS))
     ds = [d for _, _, d in diffs]
@@ -212,8 +222,16 @@ def _fit_interval(ctx, model, sensor, cycles, unmodelled):
                lambda bs: math.fsum(b[1] for b in bs) / sum(b[0] for b in bs))
     srt = sorted(ds)
     med = stats.median(srt, True)
+    stalls = [d for d in ingest if d > ctx.limit]
     unmodelled.append({"what": "publish jitter", "sensor": model, "median_s": stats.sig6(med),
-                       "sd_s": stats.sig6(1.4826 * stats.mad(ds)), "mean_s": stats.sig6(m)})
+                       "sd_s": stats.sig6(1.4826 * stats.mad(ds)), "mean_s": stats.sig6(m),
+                       "ingest_sd_s": stats.sig6(1.4826 * stats.mad(ingest)),
+                       "note": "on measured_at (whole seconds); ingest_sd_s is the same pairs on ingested_at"})
+    unmodelled.append({"what": "delivery stalls", "sensor": model, "stalls": len(stalls), "of": len(ingest),
+                       "longest_s": stats.sig6(max(stalls)) if stalls else 0.0,
+                       "note": "normal board cycles (by measured_at) that reached the platform more than %s s "
+                               "apart, then arrived in a burst; the model delivers every reading on time"
+                       % stats.sig6(ctx.limit)})
     total = len(diffs) + len(skipped)
     reboots = sum(1 for d in skipped if d >= segments.REBOOT_MIN_S)
     unmodelled.append({"what": "skipped cycles", "sensor": model, "rate": stats.sig6(len(skipped) / total),
@@ -327,6 +345,11 @@ def _fit_noise(ctx, model, sensor, tag, q_h, unmodelled):
                     "noise not separable from filtered process variation: the first differences' lag-1 "
                     "autocorrelation is %+.3g (white noise plus a slow process gives -0.5..0)" % r1)
         e["d1_autocorrelation"] = stats.sig6(r1)
+        # What the data still bounds: white noise adds 2 sigma^2 to Var(d1), so sigma <=
+        # sqrt(Var(d1) / 2); v_1 = Var(d2_1) / 6 is the structure function's first point.
+        e["upper_bound"] = stats.sig6(math.sqrt(stats.variance(d1) / 2.0))
+        e["v_1"] = stats.sig6(stats.variance(d2[1]) / 6.0)
+        e["n"] = len(d1)
         return e, None
     bounds = {k: stats.trim_bounds(d2[k], 2 * q) for k in LAGS}
     trimmed = {k: 0 for k in LAGS}
@@ -387,6 +410,31 @@ def _fit_noise(ctx, model, sensor, tag, q_h, unmodelled):
                            "of": len(d1), "p": stats.sig6(p)})
     e = entry(sigma, "fitted", ci95=_ci(math.sqrt(ci[0]), math.sqrt(ci[1])), **info)
     return _weak(e), (centres, d2[1], blist, sn2)
+
+
+def _bounded(model, tag, spec, ne, values, unmodelled):
+    """A noise_sd refused as not separable still has an upper bound in the data. When the
+    model's default noise at the observed median (noise_sd + noise_rel_sd x |median|) is
+    above it, the data contradicts the default: the bound is applied instead (source
+    upper_bound, the largest white noise the readings allow), and recorded under
+    unmodelled. Otherwise None: the default is consistent with the data and stays."""
+    bound = ne.get("upper_bound")
+    if ne.get("applied") or bound is None or not values:
+        return None
+    med = abs(stats.median(values)) / 100.0
+    default = spec.noise_sd.get(tag, 0.0) + spec.noise_rel_sd.get(tag, 0.0) * med
+    if default <= bound:
+        return None
+    unmodelled.append({"what": "noise below the data's upper bound is not separable from filtered process "
+                               "variation", "sensor": model, "tag": tag, "upper_bound": bound,
+                       "datasheet_at_median": stats.sig6(default), "median": stats.sig6(med),
+                       "note": "noise_sd is the bound (the most the readings allow), not a fit; the true white "
+                               "noise may be smaller"})
+    extra = {k: ne[k] for k in ("d1_autocorrelation", "v_1", "n") if k in ne}
+    return entry(bound, "upper_bound", datasheet_at_median=stats.sig6(default),
+                 why="the datasheet noise at the observed median (%s) exceeds what the data allows: white noise "
+                     "adds 2 sd^2 to the first differences' variance, so sd <= sqrt(Var(d1) / 2) = %s"
+                 % (stats.sig6(default), bound), **extra)
 
 
 def _fit_rel_noise(ctx, model, tag, noise_entry, raw):
@@ -597,9 +645,16 @@ def fit(header, rows, sensor_map, reference="sht45", humidity_model="constant_of
             if q_h == 1:
                 _lattice(model, tag, values, unmodelled)
             ne, raw[tag] = _fit_noise(ctx, model, sensor, tag, q_h, unmodelled)
+            bounded = _bounded(model, tag, spec, ne, values, unmodelled)
+            if bounded:
+                ne = bounded
             r["noise_sd"][tag] = ne
             if tag in spec.noise_rel_sd:
-                r["noise_rel_sd"][tag] = _fit_rel_noise(ctx, model, tag, ne, raw.get(tag))
+                if bounded:
+                    r["noise_rel_sd"][tag] = entry(0.0, "upper_bound", why="the upper bound of noise_sd holds the "
+                                                   "whole noise; the datasheet's relative part would exceed it")
+                else:
+                    r["noise_rel_sd"][tag] = _fit_rel_noise(ctx, model, tag, ne, raw.get(tag))
         if model == reference:
             for tag in tags:
                 r["bias"][tag] = entry(0.0, "chosen", why="the reference: offsets are relative to it; its "

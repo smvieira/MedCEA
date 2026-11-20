@@ -1,9 +1,14 @@
 """From dataset rows to board cycles, cadence and segments (design §2.1, §9 R1-R3).
 
 R1. A board cycle is keyed by measured_at: the SENSE board stamps one measured_at per
-loop pass and every tag of every sensor of that pass carries it. ingested_at (the
-platform's receive time, microsecond-resolved) is used only for the latency and the
-long-run cadence: a cycle's time is its earliest ingested_at.
+loop pass and every tag of every sensor of that pass carries it. A cycle's time is its
+measured_at (the board's clock, whole seconds): the cadence, the gaps, the segments and
+the bootstrap blocks are the board's own. ingested_at (the platform's receive time,
+microsecond-resolved) is used only for the latency and for the delivery stalls it shows:
+the platform sometimes receives a run of cycles late and then at once (a 46 s ingest gap
+followed by gaps of 0.01-2 s, every measured_at 3 s apart), so classifying on ingested_at
+would call a stall a skipped cycle, keep the catch-up in the normal differences, and bias
+the interval low (review of 20 Nov 2026: 2.987 s against the board's 3.0007 s).
 
 R2. Gaps. The nominal interval is the mode of the cycle-time differences, rounded to
 0.1 s. A difference up to 3 x nominal is normal; a larger one under 60 s is a skipped
@@ -71,9 +76,10 @@ def hundredths(text):
 class Board:
     """The board cycles of the mapped sensors.
 
-    cycles: [{"m": measured_us, "t": seconds (earliest ingested_at, relative to origin),
+    cycles: [{"m": measured_us, "t": seconds (measured_at, relative to origin),
+              "i": seconds (earliest ingested_at, relative to origin),
               "s": {sensor: {tag: (hundredths, ingested seconds, raw text)}}}] in measured_at
-    order. origin_us: the first cycle's earliest ingested_at."""
+    order. origin_us: the earliest ingested_at (so every ingested second is >= 0)."""
 
     def __init__(self, rows, sensors):
         sensors = list(sensors)
@@ -100,7 +106,8 @@ class Board:
             c = by[m]
             s = {sid: {tag: (h, (iu - self.origin_us) / 1e6, raw) for tag, (h, iu, raw) in tags.items()}
                  for sid, tags in c["s"].items()}
-            self.cycles.append({"m": m, "t": (c["i"] - self.origin_us) / 1e6, "s": s})
+            self.cycles.append({"m": m, "t": (m - self.origin_us) / 1e6, "i": (c["i"] - self.origin_us) / 1e6,
+                                "s": s})
         self.cadence = cadence([c["t"] for c in self.cycles])
         self.segments = self.cadence["segments"]
 
