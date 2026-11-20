@@ -11,11 +11,11 @@
 #   what                               cpu req   mem req   mem limit   PVCs  storage
 #   research-postgresql (2a)           250m      512Mi     2Gi         1     10Gi (RESEARCH_DB_STORAGE)
 #   JupyterHub hub + proxy (2b)        250m      640Mi     1.25Gi      1     1Gi  (hub-db-dir)
-#   lake-api (2b)                      100m      64Mi      128Mi       -     -
+#   lake-api (2b)                      100m      128Mi     512Mi       -     -
 #   notebooks, 4 at a time (2b)        4 x 100m  4 x 512M  4 x 4G      20    20 x 10Gi (homes, kept)
 #   simulation / agent Jobs (3+)       later phases widen this file with their own row
 #   ------------------------------------------------------------------------------------------
-#   sum                                1000m     3.1Gi     18.3Gi      22    211Gi
+#   sum                                1000m     3.2Gi     18.7Gi      22    211Gi
 #
 # Rounded up for headroom (a pod being replaced counts twice for a moment, and the chart's
 # hook and init containers count too; a container that states nothing gets the LimitRange's

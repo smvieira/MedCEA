@@ -5,6 +5,8 @@
 --
 --   1. an index for the own_unit filter: (zone_id, measure_timestamp); an
 --      INVALID one left by an interrupted build is dropped and rebuilt;
+--   1b. a partial index for a device's newest health or test message (the online
+--      check's last reported address), rebuilt the same way;
 --   2. backfill, once (marker 008b:measurement_zone_backfilled), the zone of
 --      rows stored before measurement_zone_trg existed. A row's board is
 --      device.serial_number = device_id, else dns_name = device_dns; its zone:
@@ -31,6 +33,23 @@ END $$;
 -- 5 s lock_timeout every other statement runs with.
 SET lock_timeout = '120s';
 CREATE INDEX CONCURRENTLY IF NOT EXISTS measurement_zone_ts_idx ON medcea.measurement (zone_id, measure_timestamp);
+RESET lock_timeout;
+
+-- 1b. (20 Nov 2026) the Configuration page's online check falls back to the address a
+-- board last reported (health and test messages carry "ip") when the router cannot
+-- resolve its name: newest HB/TS row of one device_dns. Partial, so it stays small.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+                WHERE c.relname = 'measurement_status_idx' AND c.relnamespace = 'medcea'::regnamespace
+                  AND NOT i.indisvalid) THEN
+        RAISE WARNING 'dropping the invalid index medcea.measurement_status_idx (an interrupted build) to rebuild it';
+        DROP INDEX medcea.measurement_status_idx;
+    END IF;
+END $$;
+SET lock_timeout = '120s';
+CREATE INDEX CONCURRENTLY IF NOT EXISTS measurement_status_idx ON medcea.measurement (device_dns, "timestamp")
+    WHERE msg_type IN ('HB', 'TS');
 RESET lock_timeout;
 
 SELECT medcea_auth.enforcing() AS iam_enforcing \gset

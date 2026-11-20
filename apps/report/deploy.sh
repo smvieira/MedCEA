@@ -38,6 +38,9 @@ GRAFANA_URL="https://${GRAFANA_DOMAIN:-grafana.$DOMAIN}"
 # Grafana is behind TLS from the platform CA now; every curl below must trust it
 # or the dashboard push fails on certificate verification rather than on content.
 CA_ARGS=(); [[ -f "$REPO_ROOT/.ca/ca.crt" ]] && CA_ARGS=(--cacert "$REPO_ROOT/.ca/ca.crt")
+# The dashboard checks below connect to PLATFORM_IP, as wait_for_http does, whatever this
+# machine's DNS says about the name (infra/lib-wait.sh platform_resolve).
+resolve=(); platform_resolve "$GRAFANA_URL"; CA_ARGS+=("${resolve[@]}")
 DASHBOARDS_DIR="$SCRIPT_DIR/dashboards"
 
 GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'

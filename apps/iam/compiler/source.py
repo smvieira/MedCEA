@@ -761,7 +761,14 @@ def _ppid(pid):
 def verify_lock(env=None, lock_file=None):
     """The Python twin of infra/lib-lock.sh medcea_lock_verify (without its flock probe,
     which bash has run): MEDCEA_LOCK_HELD names a live process that is this one or an
-    ancestor and has the lock file open on fd 9. SourceError otherwise."""
+    ancestor and has the lock file open on fd 9. SourceError otherwise.
+
+    When the holder's fd 9 exists but reading it is denied (PermissionError: a gid change
+    such as install.sh's `sg microk8s` apps stage closes its fd table to us), this process's
+    own fd 9 decides instead: it must be the lock file, and /proc/self/fdinfo/9 must list a
+    FLOCK lock. We inherited that descriptor from the holder, and the kernel lists a lock
+    there only when it belongs to that very open file description (fs/locks.c
+    show_fd_locks); a fresh open of the file shows none, POSIX/OFD locks never say FLOCK."""
     env = os.environ if env is None else env
     lock_file = os.path.realpath(lock_file or LOCK_FILE)
     held = env.get("MEDCEA_LOCK_HELD", "")
@@ -774,11 +781,33 @@ def verify_lock(env=None, lock_file=None):
             if p <= 1:
                 raise SourceError(why + ": not an ancestor of this process")
             p = _ppid(p)
-        fd9 = os.readlink(f"/proc/{pid}/fd/9")
+        try:
+            fd9 = os.readlink(f"/proc/{pid}/fd/9")
+        except PermissionError:
+            if not os.path.isdir(f"/proc/{pid}"):
+                raise
+            if not _own_fd9_holds(lock_file):
+                raise SourceError(why + f": its fd 9 cannot be read, and this process's fd 9 "
+                                  f"does not carry the flock of {lock_file}") from None
+            return
     except (OSError, ValueError, IndexError):
         raise SourceError(why + ": no live holder of " + lock_file) from None
     if os.path.realpath(fd9) != lock_file:
         raise SourceError(why + f": its fd 9 is not {lock_file}")
+
+
+_FLOCK_LINE = re.compile(r"^lock:.*\sFLOCK\s", re.M)
+
+
+def _own_fd9_holds(lock_file):
+    """This process's fd 9 is lock_file and its open file description holds a flock."""
+    try:
+        if os.path.realpath(os.readlink("/proc/self/fd/9")) != lock_file:
+            return False
+        with open("/proc/self/fdinfo/9") as f:
+            return bool(_FLOCK_LINE.search(f.read()))
+    except OSError:
+        return False
 
 
 def _state_dir(d=None, create=True):

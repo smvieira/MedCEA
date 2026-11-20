@@ -84,12 +84,16 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
+        # PostgREST holds a whole answer (the database result, then its JSON) and its garbage
+        # collector copies: a full page of measurements (PGRST_DB_MAX_ROWS, about 11 MB of
+        # JSON) needs several times that. 128Mi was OOM-killed on such reads (20 Nov 2026,
+        # 22 kills during the Phase 3 snapshot fetches); 512Mi is the namespace's default limit.
         resources:
           requests:
             cpu: 100m
-            memory: 64Mi
-          limits:
             memory: 128Mi
+          limits:
+            memory: 512Mi
         readinessProbe:
           httpGet:
             path: /
