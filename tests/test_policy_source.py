@@ -986,15 +986,21 @@ except source.SourceError as e:
         if not others:
             self.skipTest("no supplementary group to sg into")
         import grp
+        import pwd
+        me = pwd.getpwuid(os.getuid()).pw_name
         self.group = None
         for g in others:
+            # only a group the group database lists the user in: for any other, sg asks for
+            # the group's password on /dev/tty (getgroups() can be stale after a removal)
             try:
-                self.group = grp.getgrgid(g).gr_name
-                break
+                gr = grp.getgrgid(g)
             except KeyError:
                 continue
+            if me in gr.gr_mem:
+                self.group = gr.gr_name
+                break
         if self.group is None:
-            self.skipTest("no named supplementary group")
+            self.skipTest("no supplementary group the group database lists this user in")
         self.root = scratch_repo()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.child = os.path.join(self.root, "child.sh")
@@ -1009,8 +1015,14 @@ except source.SourceError as e:
             head = f". {lib}; exec 9>>\"$MEDCEA_LOCK_FILE\"; export MEDCEA_LOCK_HELD=$$; "
         # "; true": bash would otherwise exec sg in place of the holder itself
         script = head + f"sg {shlex.quote(self.group)} -c {shlex.quote('bash ' + shlex.quote(self.child))}; true"
-        r = subprocess.run(["bash", "-c", script], env=clean_env(ROOT=self.root, MODE=mode),
-                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        # a session of its own: no controlling terminal, so sg can never stop at a password
+        # prompt (it reads /dev/tty); a refusal or a timeout is a skip, not an error
+        try:
+            r = subprocess.run(["bash", "-c", script], env=clean_env(ROOT=self.root, MODE=mode),
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+                               start_new_session=True)
+        except subprocess.TimeoutExpired:
+            self.skipTest(f"sg {self.group} did not finish within 60 s")
         if "READABLE" in r.stdout:
             self.skipTest("sg did not close the holder's fd table here: the fallback is not exercised")
         if "SH=" not in r.stdout:

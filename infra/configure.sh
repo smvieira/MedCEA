@@ -212,6 +212,14 @@ domain_dns() {
     if [[ "$v" == *.nip.io ]]; then
         cfg_set LOCAL_DNS "false"
         [[ -n "$ts" && "$v" == "${ts}.nip.io" ]] && via=tailscale || via=lan
+        # The LAN line takes the default route's address; a host with two LAN addresses
+        # may have chosen the other one for its nip.io name, and DOMAIN may be the
+        # expression "${PLATFORM_IP}.nip.io": switch the line only when it gives this one.
+        if [[ "$via" == lan && "$(bash -c "$PLATFORM_IP_LAN_LINE"'; printf %s "$PLATFORM_IP"' 2>/dev/null)" != "${v%.nip.io}" ]]; then
+            cfg_set USE_TAILSCALE "false"
+            info "${YELLOW}PLATFORM_IP is left as it is: this machine's default-route address is not ${v%.nip.io}.${NC}"
+            return 0
+        fi
     elif [[ -n "$ts" && "$v" == "$name" ]]; then
         cfg_set LOCAL_DNS "true"; via=tailscale
     else

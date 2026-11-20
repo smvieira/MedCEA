@@ -139,6 +139,12 @@ echo "Other:"
 '''
 
 
+IP = r'''#!/usr/bin/env bash
+# "ip route get 8.8.8.8": the default route's source address
+echo "8.8.8.8 via 192.168.1.1 dev eth0 src ${STUB_LAN_IP:-192.168.1.99} uid 1000"
+'''
+
+
 class NamesCheck(Scratch):
     def check(self, getent, route="", local_dns="false", dnsq_rc=1, timeout="5"):
         write(os.path.join(self.bin, "getent"), GETENT)
@@ -197,18 +203,19 @@ class NamesCheck(Scratch):
 class DomainDns(Scratch):
     """domain_dns from configure.sh's own text, with its helpers."""
 
-    def run_dd(self, config, args, answers="", route="", ts_ip=""):
+    def run_dd(self, config, args, answers="", route="", ts_ip="", lan_ip="192.168.1.99"):
         src = read("infra/configure.sh")
         block = src[src.index("PLATFORM_IP_TS_LINE="):src.index("EOF_LAN\n") + len("EOF_LAN\n")]
         funcs = "".join(function_text(src, n) for n in (
             "die", "cfg_get", "cfg_set", "cfg_set_line", "ask", "info", "platform_ip_follow", "domain_dns"))
         write(os.path.join(self.bin, "tailscale"), TAILSCALE)
+        write(os.path.join(self.bin, "ip"), IP)
         cfg = os.path.join(self.d, "config.env")
         write(cfg, config, 0o600)
         script = ('RED= YELLOW= GREEN= CYAN= BOLD= NC=\nCONFIG_FILE=config.env\nEXAMPLE_FILE="%s/config.env.example"\n'
                   'source "%s/infra/lib-dns.sh"\n%s%s\ndomain_dns "$@"\n' % (REPO, REPO, funcs, block))
         e = clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], HOME=self.d, STUB_ROUTE=route,
-                      STUB_TS_IP=ts_ip)
+                      STUB_TS_IP=ts_ip, STUB_LAN_IP=lan_ip)
         p = subprocess.run(["bash", "-c", script, "configure", *args], input=answers, capture_output=True,
                            text=True, env=e, cwd=self.d, timeout=60)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -282,6 +289,15 @@ class DomainDns(Scratch):
         _, v = self.run_dd(self.base(), ["medcea", "", "medcea", "100.103.255.4", "192.168.1.99"])
         self.assertEqual((v["LOCAL_DNS"], v["USE_TAILSCALE"]), ('"true"', '"true"'))
 
+    def test_a_lan_nip_io_name_of_another_address_keeps_the_line(self):
+        # two LAN addresses: the nip.io name was made from the one the default route does
+        # not use; the LAN line would move PLATFORM_IP (and an expression DOMAIN) off it
+        out, v = self.run_dd(self.base(), ["192.168.1.99.nip.io", "", "medcea", "100.103.255.4", "192.168.1.99"],
+                             lan_ip="10.0.0.5")
+        self.assertEqual(v["USE_TAILSCALE"], '"false"')
+        self.assertEqual("PLATFORM_IP=" + v["PLATFORM_IP"], self.TS_LINE)
+        self.assertIn("PLATFORM_IP is left as it is", out)
+
     def test_back_to_tailscale_restores_the_template_line_and_a_hand_set_one_stays(self):
         src = read("infra/configure.sh")
         lan = re.search(r"^PLATFORM_IP=.*ip route get.*$", src, re.M).group(0)
@@ -292,6 +308,46 @@ class DomainDns(Scratch):
                              ["192.168.1.99.nip.io", "", "medcea", "100.103.255.4", "192.168.1.99"])
         self.assertEqual(v["PLATFORM_IP"], '"10.1.2.3"')
         self.assertIn("PLATFORM_IP is set by hand", out)
+
+
+class DomainNotes(Scratch):
+    """configure.sh domain_notes, from its own text: notes only, never a change."""
+
+    def notes(self, config, getent="", ts_ip="100.103.255.4"):
+        src = read("infra/configure.sh")
+        funcs = "".join(function_text(src, n) for n in ("cfg_get", "domain_notes"))
+        for name, text in (("tailscale", TAILSCALE), ("getent", GETENT)):
+            write(os.path.join(self.bin, name), text)
+        cfg = os.path.join(self.d, "config.env")
+        write(cfg, config, 0o600)
+        script = ('RED= YELLOW= GREEN= CYAN= BOLD= NC=\nCONFIG_FILE=config.env\n'
+                  'source "%s/infra/lib-dns.sh"\n%sdomain_notes\n' % (REPO, funcs))
+        p = self.bash(script, STUB_TS_IP=ts_ip, STUB_GETENT=getent, DNS_OWN_ADDRS="192.168.1.99 100.103.255.4")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(cfg) as f:
+            self.assertEqual(f.read(), config)          # never a change
+        return p.stdout
+
+    def test_tailscale_address_with_use_tailscale_false(self):
+        out = self.notes('DOMAIN="medcea.ai"\nPLATFORM_IP="100.103.255.4"\nUSE_TAILSCALE="false"\n'
+                         'LOCAL_DNS="true"\n')
+        self.assertIn("PLATFORM_IP is this machine's Tailscale address (100.103.255.4)", out)
+        self.assertNotIn("does not resolve", out)
+
+    def test_a_custom_domain_that_does_not_resolve(self):
+        out = self.notes('DOMAIN="medcea.ai"\nPLATFORM_IP="192.168.1.99"\nUSE_TAILSCALE="false"\n'
+                         'LOCAL_DNS="false"\n')
+        self.assertIn("portal.medcea.ai does not resolve to this server", out)
+        self.assertNotIn("Tailscale address", out)
+
+    def test_silent_when_all_is_well(self):
+        for cfg, getent in (
+                ('DOMAIN="192.168.1.99.nip.io"\nPLATFORM_IP="192.168.1.99"\nUSE_TAILSCALE="false"\nLOCAL_DNS="false"\n', ""),
+                ('DOMAIN="medcea.ai"\nPLATFORM_IP="192.168.1.99"\nUSE_TAILSCALE="false"\nLOCAL_DNS="true"\n', ""),
+                ('DOMAIN="medcea.ai"\nPLATFORM_IP="192.168.1.99"\nUSE_TAILSCALE="false"\nLOCAL_DNS="false"\n',
+                 "portal.medcea.ai 192.168.1.99")):
+            with self.subTest(cfg=cfg):
+                self.assertEqual(self.notes(cfg, getent).strip(), "")
 
 
 class Verdict(unittest.TestCase):
