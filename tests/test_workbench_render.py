@@ -25,7 +25,7 @@ The home setup (1 Nov 2026) is singleuser.extraFiles medcea-home-setup, an execu
 docker-stacks' before-notebook.d, so it runs BEFORE the server starts (a postStart ran
 concurrently, and a new home's server started without the collaboration extension); the
 hub's http_timeout covers its bounded installs. Run under sh with stub python3/pip/git/curl
-it installs jupyter-collaboration, jupyter-vscode-proxy and code-server once (a second run
+it installs jupyter-collaboration, jupyter-server-proxy, jupyter-vscode-proxy and code-server once (a second run
 calls neither pip nor curl), makes nbstripout the global git filter idempotently, fails
 closed when pip and curl fail (attribute, clean command, `required` and the pre-commit
 output guard still written; nb_output_guard.py is tried against a real git repository),
@@ -35,7 +35,7 @@ lines kept). workbench_egress_close (the database and frontend deploys, on a swi
 false) removes exactly the compiled hops from the live NetworkPolicy.
 
 Research sandbox Phase 2b (PlacementTest): the platform placement renders
-k8s/workbench/values.yaml exactly as 5504958 did (tests/golden/workbench-values-platform.yaml,
+k8s/workbench/values.yaml exactly as 5504958 did, plus the VS Code fix of 20 Nov 2026 (tests/golden/workbench-values-platform.yaml,
 fixed inputs); the research placement adds k8s/workbench/values-research.yaml (its render list
 is deploy-workbench's, every key the spec names), the base's three platform endpoints taken out
 line by line (_research_base: Helm 3.9 keeps an overlay's null for a key the chart lacks, which
@@ -90,8 +90,8 @@ VARS = ["WORKBENCH_ALLOW_ALL", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_ALLOWED_GR
         "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_403_MESSAGE"]
 # The decided abilities of the hub administrator (decision record, compliance chapter).
 ADMIN_SCOPES = ["admin-ui", "delete:users", "list:users", "read:users", "servers"]
-# The home setup script's own shell variables: none is on the render list, so render keeps them.
-SCRIPT_VARS = {"$HOME", "$ATTRS", "$HOOKS", "$JUPYTERHUB_USER", "$inst", "$ilog", "$secs"}
+# The home setup's and the PATH hook's own shell variables: none is on the render list, so render keeps them.
+SCRIPT_VARS = {"$HOME", "$PATH", "$ATTRS", "$HOOKS", "$JUPYTERHUB_USER", "$inst", "$ilog", "$secs"}
 SETUP_DIR = "/usr/local/bin/before-notebook.d/"
 NEVER = {"tokens", "read:tokens", "access:servers", "shares", "users:shares", "admin:users",
          "groups", "admin:groups", "admin:auth_state", "admin:servers", "admin:server_state"}
@@ -301,7 +301,7 @@ class RenderTest(unittest.TestCase):
         v = yaml.safe_load(out)
         su = v["singleuser"]
         self.assertNotIn("lifecycleHooks", su)
-        self.assertEqual(set(su["extraFiles"]), {"medcea-home-setup"})
+        self.assertEqual(set(su["extraFiles"]), {"medcea-home-setup", "medcea-local-path"})
         f = su["extraFiles"]["medcea-home-setup"]
         self.assertTrue(f["mountPath"].startswith(SETUP_DIR), f["mountPath"])
         self.assertNotIn("/", f["mountPath"][len(SETUP_DIR):])
@@ -400,7 +400,7 @@ class RenderTest(unittest.TestCase):
         home, env = self.hook_home()
         out = self.run_setup(env)
         first = self.calls(env)
-        self.assertIn("medcea-home-setup: installed jupyter-collaboration and jupyter-vscode-proxy", out)
+        self.assertIn("medcea-home-setup: installed jupyter-collaboration, jupyter-server-proxy and jupyter-vscode-proxy", out)
         self.assertIn("medcea-home-setup: installed code-server into ~/.local", out)
         self.assertTrue(os.access(os.path.join(home, ".local", "bin", "code-server"), os.X_OK))
         self.assertTrue(all(l.startswith("medcea-home-setup: ") for l in out.splitlines()), out)
@@ -408,7 +408,7 @@ class RenderTest(unittest.TestCase):
         second = self.calls(env)[len(first):]
         attrs = os.path.join(home, ".config", "git", "attributes")
         hooks = os.path.join(home, ".config", "git", "hooks")
-        self.assertEqual(first[0], "pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy")
+        self.assertEqual(first[0], "pip install --quiet --user jupyter-collaboration jupyter-server-proxy jupyter-vscode-proxy")
         self.assertTrue(first[1].startswith("curl -fsSL https://code-server.dev/install.sh -o "), first[1])
         self.assertEqual(first[2:], ["pip install --quiet --user nbstripout",
                                      "install -m nbstripout --install --global",
@@ -424,6 +424,45 @@ class RenderTest(unittest.TestCase):
         with open(os.path.join(hooks, "pre-commit")) as f:
             self.assertIn("nb_output_guard.py", f.read())
         self.assertTrue(os.access(os.path.join(hooks, "pre-commit"), os.X_OK))
+
+    def test_local_bin_reaches_the_server(self):
+        """code-server is installed into ~/.local/bin, which is not on the image's PATH, and
+        jupyter-vscode-proxy finds it only on PATH (until 20 Nov 2026 VS Code never
+        appeared). A .sh hook in before-notebook.d is sourced by start.sh, so its export
+        reaches the server start.sh then execs; it never fails, never exits, and adds the
+        folder once."""
+        su = yaml.safe_load(run("true")[1])["singleuser"]
+        f = su["extraFiles"]["medcea-local-path"]
+        self.assertTrue(f["mountPath"].startswith(SETUP_DIR), f["mountPath"])
+        self.assertTrue(f["mountPath"].endswith(".sh"), "only a .sh hook is sourced into start.sh's shell")
+        self.assertEqual(f["mode"], 0o644, "sourced, never executed")
+        self.assertEqual(set(f) - {"mountPath", "mode", "stringData"}, set())
+        hook = f["stringData"]
+        self.assertNotIn("${", hook, "the hook goes through render")
+        code = "\n".join(l for l in hook.splitlines() if not l.strip().startswith("#"))
+        for word in ("exit", "set -e", "set -u", "return"):
+            self.assertNotIn(word, code, "a sourced hook shares start.sh's shell")
+        # Sourced the way run-hooks.sh does, by bash with errexit on (start.sh's `set -e`).
+        home = tempfile.mkdtemp()
+        try:
+            cmd = ('set -e; source "$1"; source "$1"; printf %s "$PATH"; echo; '
+                   'command -v code-server')
+            path = os.path.join(home, "hook.sh")
+            with open(path, "w") as fh:
+                fh.write(hook)
+            os.makedirs(os.path.join(home, ".local", "bin"))
+            cs = os.path.join(home, ".local", "bin", "code-server")
+            with open(cs, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(cs, 0o755)
+            r = subprocess.run(["bash", "-c", cmd, "bash", path], capture_output=True, text=True,
+                               env={"HOME": home, "PATH": "/opt/conda/bin:/usr/bin:/bin"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            got_path, found = r.stdout.splitlines()[:2]
+            self.assertEqual(got_path, home + "/.local/bin:/opt/conda/bin:/usr/bin:/bin", "first, and once")
+            self.assertEqual(found, cs)
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
     def test_setup_skips_a_code_server_it_has(self):
         home, env = self.hook_home(code_server=True)
@@ -636,7 +675,8 @@ OVERLAY = os.path.join(REPO, "k8s", "workbench", "values-research.yaml")
 RBAC = os.path.join(REPO, "k8s", "workbench", "hub-rbac.yaml")
 GOLDEN = os.path.join(REPO, "tests", "golden", "workbench-values-platform.yaml")
 CHART = os.path.expanduser("~/.cache/helm/repository/jupyterhub-4.4.4.tgz")
-# the fixed inputs tests/golden/workbench-values-platform.yaml was rendered with (from 5504958's template)
+# the fixed inputs tests/golden/workbench-values-platform.yaml was rendered with (5504958's template; re-rendered
+# on 20 Nov 2026 for the VS Code fix: jupyter-server-proxy and the medcea-local-path hook, nothing else)
 GOLDEN_INPUTS = {
     "WORKBENCH_SECRET": "golden-client-secret", "WORKBENCH_DOMAIN": "ai-workbench.medcea",
     "KEYCLOAK_DOMAIN": "keycloak.medcea", "KEYCLOAK_REALM": "medcea", "NAMESPACE": "medcea",
@@ -704,7 +744,8 @@ class PlacementTest(unittest.TestCase):
 
     def test_platform_is_the_golden(self):
         """Commit A: the platform placement renders values.yaml exactly as 5504958 (values.yaml
-        is not changed; the research settings are a second file)."""
+        is not changed; the research settings are a second file), plus the VS Code fix of
+        20 Nov 2026, the golden's only change since."""
         with open(GOLDEN) as f:
             self.assertEqual(self.platform(), f.read())
 

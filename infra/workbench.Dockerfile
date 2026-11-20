@@ -1,4 +1,5 @@
 # Optional: bake VS Code and the collaboration extension into the notebook image
+# (jupyter-server-proxy makes the VS Code tile; jupyter-vscode-proxy does not declare it)
 # instead of installing them into each user's home on first start.
 #
 # The deploy script works without this — a before-notebook script
@@ -21,6 +22,7 @@ USER ${NB_UID}
 
 RUN pip install --no-cache-dir \
       jupyter-collaboration \
+      jupyter-server-proxy \
       jupyter-vscode-proxy \
       paho-mqtt \
       psycopg2-binary \

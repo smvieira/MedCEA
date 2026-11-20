@@ -203,11 +203,15 @@ singleuser:
         log "start ($JUPYTERHUB_USER)"
 
         # (a) Real-time collaboration and the VS Code launcher, into ~/.local.
-        if ! python3 -c 'import jupyter_collaboration, jupyter_vscode_proxy' 2>/dev/null; then
-            if limited 300 pip install --quiet --user jupyter-collaboration jupyter-vscode-proxy; then
-                log "installed jupyter-collaboration and jupyter-vscode-proxy"
+        # jupyter-vscode-proxy only describes how to start code-server; the launcher tile
+        # and the /vscode/ address are jupyter-server-proxy's, which jupyter-vscode-proxy
+        # does not declare as a dependency (until 20 Nov 2026 it was not installed, so
+        # VS Code never appeared).
+        if ! python3 -c 'import jupyter_collaboration, jupyter_vscode_proxy, jupyter_server_proxy' 2>/dev/null; then
+            if limited 300 pip install --quiet --user jupyter-collaboration jupyter-server-proxy jupyter-vscode-proxy; then
+                log "installed jupyter-collaboration, jupyter-server-proxy and jupyter-vscode-proxy"
             else
-                log "WARNING: pip could not install jupyter-collaboration and jupyter-vscode-proxy; the next start tries again"
+                log "WARNING: pip could not install jupyter-collaboration, jupyter-server-proxy and jupyter-vscode-proxy; the next start tries again"
             fi
         fi
 
@@ -296,6 +300,20 @@ singleuser:
 
         log "done"
         exit 0
+
+    # ~/.local/bin first on the server's PATH, where the setup above installs code-server
+    # (jupyter-vscode-proxy finds it only on PATH) and pip puts its scripts. A .sh file in
+    # before-notebook.d is sourced by start.sh, so the export reaches the server it execs
+    # (the setup is a separate process, whose environment ends with it). Read-only 0644.
+    medcea-local-path:
+      mountPath: /usr/local/bin/before-notebook.d/60-medcea-local-path.sh
+      mode: 420                # 0644: sourced, never executed
+      stringData: |
+        # medcea-local-path (k8s/workbench/values.yaml): sourced by start.sh.
+        case ":$PATH:" in
+            *":$HOME/.local/bin:"*) ;;
+            *) export PATH="$HOME/.local/bin:$PATH" ;;
+        esac
 
 # No pre-pull hook: with it (the chart's default) helm waits, inside its --timeout,
 # until every node has pulled the ~2 GB notebook image, so a fresh host on a slow link
