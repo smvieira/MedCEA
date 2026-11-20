@@ -166,6 +166,10 @@
 #  74  RESEARCH_ENABLED rollback: a checklist naming the workbench left in the zone, then the
 #      export's, the lake reader's and the database's uninstalls in that order; Health → the
 #      research zone network test, with and without --wan-ip (a bad address re-asked)
+#  75  Applications → Calibrate the sensor model from a snapshot (research Phase 3): list
+#      (read-only, [Y/n], no lock) and fetch with the snapshot, a 64-hex lineage, unit and
+#      zone (defaults UNIT01/ZONE01) and a folder checked (0, a short lineage, a unit or a
+#      folder starting with - re-asked); real: the wrapper runs without the guide's lock
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1676,6 +1680,26 @@ has   "without (dry)" "[dry run] not executed: tests/iam-research.sh"
 has   "the refusal named" "Refused (exit 2) unless the applied access policy places the AI workbench in the research zone"
 has   "the hairpin advice" "add it as a /32 to the zone's internet_except"
 no_stub
+
+echo "75 research calibration from a snapshot (Applications)"
+mkcfg true true
+guide $'3\n18\n1\n\nb\n18\n2\n0\n1\nabc\n'"096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f"$'\n-x\n\n\n-o\n~/e45\n/tmp/e45/s1\n\nq\n'
+rc_is "quits with 0" 0
+has   "list (dry)" "[dry run] not executed: ./apps/research/calibrate.sh snapshots"
+has   "read-only: [Y/n]" "Run it? [Y/n]"
+has   "no lock" "Deploy lock: no"
+has   "0 is re-asked" "'0': a snapshot id is a whole number from 1"
+has   "a short lineage is re-asked" "'abc': a lineage is 64 hexadecimal digits"
+has   "a unit starting with - is re-asked" "'-x': a unit code is letters"
+has   "a folder starting with - is re-asked" "'-o': a folder path"
+has   "a folder starting with ~ is re-asked" "'~/e45': a folder path"
+has   "fetch (dry), defaults UNIT01/ZONE01" "[dry run] not executed: ./apps/research/calibrate.sh fetch --snapshot 1 --expect-lineage 096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f --unit UNIT01 --zone ZONE01 --out /tmp/e45/s1"
+has   "the refusal explained" "Refused (exit 2) while RESEARCH_ENABLED is not true or the lake reader is not running"
+no_stub
+real $'3\n18\n1\n\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the wrapper ran" "STUB apps/research/calibrate.sh snapshots"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: without the guide's lock" || fail "real: ran under the guide's lock"
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false

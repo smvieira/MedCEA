@@ -10,6 +10,8 @@ The coupling contract's metadata is read from the same tree, never copied:
 - apps/database/recipe_types.yaml   the quantity catalogue (loop codes, tags, ranges,
                                     commands, command_map, phase, loopable);
 - edge/templates/esp32-control.json the actuator command semantics of the relay board.
+- apps/research/db/lake_api.sql     lake-api's read functions (Phase 3), pinned like the
+                                    rest: a dirty copy refuses a campaign.
 
 load() records the git blob SHA (`git hash-object`, the bytes actually loaded) of every
 file it reads and HEAD's commit, and refuses a tree whose contract sources differ from
@@ -42,8 +44,10 @@ LOOP_RESOLVER = "schd/cea/loop_resolver.py"
 CATALOGUE = "apps/database/recipe_types.yaml"
 CONTROL_TEMPLATE = "edge/templates/esp32-control.json"
 CONTROL_DRIVER = "relay8"
+# lake-api's read functions (Phase 3: research/calib reads snapshots through them).
+LAKE_API = "apps/research/db/lake_api.sql"
 # Paths whose working copy must equal HEAD unless allow_dirty.
-DIRTY_PATHS = ("schd/cea", CATALOGUE, CONTROL_TEMPLATE)
+DIRTY_PATHS = ("schd/cea", CATALOGUE, CONTROL_TEMPLATE, LAKE_API)
 # The sandbox's own tree (the checkout this module runs from) and its pinned paths.
 SANDBOX_ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SANDBOX_DIR = "research"

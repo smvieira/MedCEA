@@ -25,6 +25,11 @@ here until both move in the same commit:
   import or getattr rebinds a process or import primitive (which the call-name checks
   would miss); a run in a clean interpreter that refuses those imports loads only
   research/ and the two contract code paths.
+- Lake (Phase 3, contract version 2): contract.LAKE = lake_api.sql's lake_api.*()
+  functions (parameters, columns and types, parsed here), its 50,000-row limit and its
+  lineage rule; research/calib/lake.py keeps the same constants; the small sets' columns
+  are the staging tables' (what lake._set_digest hashes); lake_api.sql is a pinned
+  source (SOURCES, DIRTY_PATHS: a dirty copy refuses a campaign).
 - research/README.md states the four interfaces.
 
 Offline, deterministic, standard library + PyYAML. Run:
@@ -620,6 +625,101 @@ print(json.dumps({"files": files, "modules": sorted(sys.modules), "valid": r["va
         self.assertEqual(set(contract.SOURCES) - set(L.blobs), set())
         for path in contract.SOURCES:
             self.assertTrue(os.path.isfile(os.path.join(REPO, path)), path)
+
+
+# ── interface 2 as the sandbox reads it: lake-api (Phase 3) ──────────────────────────
+LAKE_API_SQL = os.path.join(REPO, "apps", "research", "db", "lake_api.sql")
+
+
+def lake_api_functions():
+    """{name: {"params": [...], "columns": [[name, type], ...]}} of every lake_api.*()
+    function in lake_api.sql (parsed here, never in research/)."""
+    with open(LAKE_API_SQL, encoding="utf-8") as f:
+        sql = f.read()
+    out = {}
+    for m in re.finditer(r"CREATE OR REPLACE FUNCTION lake_api\.(\w+)\((.*?)\)\s*RETURNS TABLE \((.*?)\)\s*LANGUAGE",
+                         sql, re.S):
+        name, params, cols = m.group(1), m.group(2), m.group(3)
+        ps = [p.split()[0] for p in params.split(",") if p.strip()]
+        cs = []
+        for c in cols.split(","):
+            n, t = c.split(None, 1)
+            cs.append([n.strip('"'), t.strip()])
+        out[name] = {"params": ps, "columns": cs}
+    return sql, out
+
+
+class LakeContract(unittest.TestCase):
+    def test_the_reviewed_form_is_lake_api_sql(self):
+        sql, fns = lake_api_functions()
+        self.assertEqual(fns, contract.LAKE["functions"])
+        self.assertIn("p_limit > %d" % contract.LAKE["max_limit"], sql)
+        self.assertIn("between 1 and %d" % contract.LAKE["max_limit"], sql)
+
+    def test_the_lineage_rule_is_the_one_the_sql_computes(self):
+        sql, _ = lake_api_functions()
+        rule = contract.LAKE["lineage"]
+        ln = rule.split(", in snapshot_id order")[0].split(", ", 1)[1]
+        self.assertIn(ln, sql)                       # the comment
+        self.assertIn("L_0 = ''", sql)
+        body = sql[sql.index("CREATE OR REPLACE FUNCTION lake_api.snapshots()"):]
+        body = body[:body.index("$$;")]
+        for piece in ("coalesce(s.digests ->> 'measurement', '')", "convert_to('' || E'\\n' || o.md, 'UTF8')",
+                      "convert_to(chain.lin || E'\\n' || o.md, 'UTF8')", "ORDER BY s.snapshot_id"):
+            self.assertIn(piece, body)
+
+    def test_calib_lake_keeps_the_same_constants(self):
+        from research.calib import lake
+        got = {n: {"params": list(d["params"]), "columns": [list(c) for c in d["columns"]]}
+               for n, d in lake.FUNCTIONS.items()}
+        self.assertEqual(got, contract.LAKE["functions"])
+        self.assertEqual(lake.MAX_LIMIT, contract.LAKE["max_limit"])
+        self.assertEqual(lake.LINEAGE_RULE, contract.LAKE["lineage"])
+        self.assertLessEqual(set(lake.SMALL_SETS), set(lake.FUNCTIONS))
+
+    def test_the_small_sets_columns_are_the_staging_tables(self):
+        """lake._set_digest digests the staging columns in attnum order; lake-api returns
+        snapshot_id first and then exactly those."""
+        with open(os.path.join(REPO, "apps", "research", "db", "medcea_research_ddl.sql"), encoding="utf-8") as f:
+            ddl = f.read()
+        stage = {"measurements": "stage_measurements", "units": "stage_units", "zones": "stage_zones",
+                 "recipes": "stage_recipes", "recipe_lines": "stage_recipe_lines", "catalogue": "stage_catalogue"}
+        for fn, table in stage.items():
+            m = re.search(r"CREATE TABLE IF NOT EXISTS lake\.%s \((.*?)\);" % table, ddl, re.S)
+            self.assertIsNotNone(m, table)
+            cols = [c.split()[:2] for c in m.group(1).split(",")]
+            want = [c for c in contract.LAKE["functions"][fn]["columns"] if c[0] != "snapshot_id"]
+            self.assertEqual(cols, want, table)
+
+    def test_contract_version_2_names_lake_api(self):
+        self.assertEqual(contract.CONTRACT_VERSION, 2)
+        self.assertIn("lake_api.*()", dict(contract.INTERFACES)["data"])
+        self.assertIn("lineage", dict(contract.INTERFACES)["data"])
+
+    def test_lake_api_sql_is_a_pinned_source(self):
+        rel_sql = "apps/research/db/lake_api.sql"
+        self.assertIn(rel_sql, contract.SOURCES)
+        self.assertIn(rel_sql, algorithms_loader.DIRTY_PATHS)
+        self.assertIn(rel_sql, loaded().blobs)
+
+    def test_a_dirty_lake_api_sql_refuses(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        tmp = tempfile.mkdtemp(prefix="rs-contract-")
+        self.addCleanup(shutil.rmtree, tmp)
+        rel_sql = "apps/research/db/lake_api.sql"
+        os.makedirs(os.path.join(tmp, os.path.dirname(rel_sql)))
+        shutil.copy(LAKE_API_SQL, os.path.join(tmp, rel_sql))
+        git = ["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.org", "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "x"], check=True)
+        self.assertFalse(algorithms_loader.git_state(tmp)["dirty"])
+        with open(os.path.join(tmp, rel_sql), "a", encoding="utf-8") as f:
+            f.write("\n-- edited\n")
+        st = algorithms_loader.git_state(tmp)
+        self.assertTrue(st["dirty"])
+        self.assertEqual(st["dirty_files"], [rel_sql])
 
 
 # ── research/README.md ────────────────────────────────────────────────────────────────

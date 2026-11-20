@@ -29,7 +29,9 @@ ENTRY = (sorted(glob.glob("apps/*/deploy.sh", root_dir=ROOT)) + sorted(glob.glob
          + [f"tests/iam-{n}.sh" for n in ("signin", "workbench", "mqtt", "access", "network", "hosts", "check",
                                           "schema", "runner", "postgrest", "db", "policy")]
          # research sandbox (Phase 2a): host commands written alongside this list
-         + [p for p in ("apps/research/reserve.sh", "tests/iam-research.sh") if os.path.exists(os.path.join(ROOT, p))])
+         + [p for p in ("apps/research/reserve.sh", "tests/iam-research.sh") if os.path.exists(os.path.join(ROOT, p))]
+         # research sandbox (Phase 3): the calibration's host wrapper (logs, takes no lock)
+         + ["apps/research/calibrate.sh"])
 
 
 class EntryScriptsLog(unittest.TestCase):

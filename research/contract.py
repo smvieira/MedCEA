@@ -13,7 +13,8 @@ Standard library only (plus a Loaded object from algorithms_loader, passed in).
 from __future__ import annotations
 
 # Bumped whenever the reviewed form below changes; a campaign manifest can name it.
-CONTRACT_VERSION = 1
+# 2 (research Phase 3): the sandbox reads the lake through lake-api (LAKE below).
+CONTRACT_VERSION = 2
 
 # The four interfaces (README.md states them; nothing else is shared).
 INTERFACES = (
@@ -22,7 +23,9 @@ INTERFACES = (
              "owner-run read functions medcea.research_*() (EXECUTE only, no view over the base "
              "tables, no person column) and writes append-only snapshots up to a high-water mark "
              "into the research database medcea_research, minus the held-out ranges; "
-             "medcea.research_contract_version() is the contract version (Phase 2a)"),
+             "medcea.research_contract_version() is the contract version (Phase 2a); the sandbox "
+             "reads snapshots only through lake-api's lake_api.*() functions, pinned by snapshot id "
+             "and lineage (Phase 3)"),
     ("metadata", "recipe_types.yaml, recipe format 2, the controller contract, loop_resolver, "
                  "esp32-control.json, read at a pinned commit"),
     ("candidates", "one gateway running production's validators, writing only a draft (Phase 6)"),
@@ -39,6 +42,9 @@ SOURCES = (
     # recipe_line_setpoints_guard (migration 011): the setpoint rules the runner applies to
     # a scenario's recipe line, with the same texts (tests/test_research_contract.py).
     "apps/database/medcea_db_migrations.sql",
+    # lake-api's read functions (Phase 3): what research/calib/lake.py asks for, and how
+    # a snapshot's lineage is computed (LAKE below).
+    "apps/research/db/lake_api.sql",
 )
 
 # The controller codes the harness accepts (= ALGORITHM_NAMES) and params.py's schema version.
@@ -85,6 +91,48 @@ LIGHT_TYPES = {
     "RED": {"ON": {"light_uv": 0, "light_red": 1, "light_blue": 0}, "OFF": {"light_red": 0}},
     "BLUE": {"ON": {"light_uv": 0, "light_red": 0, "light_blue": 1}, "OFF": {"light_blue": 0}},
     "UV": {"ON": {"light_uv": 1, "light_red": 0, "light_blue": 0}, "OFF": {"light_uv": 0}},
+}
+
+# Interface 2 as the sandbox reads it (Phase 3): lake-api's functions (apps/research/db/
+# lake_api.sql), their parameters and columns (with PostgreSQL's types: the digests are
+# recomputed from their text forms), the largest page measurements() accepts and the
+# lineage rule. A reviewed literal only: tests/test_research_contract.py parses
+# lake_api.sql and compares it with LAKE and with research/calib/lake.py's own constants.
+LAKE = {
+    "functions": {
+        "snapshots": {"params": [],
+                      "columns": [["snapshot_id", "bigint"], ["cut_at", "timestamptz"],
+                                  ["previous_cut_at", "timestamptz"], ["created_at", "timestamptz"],
+                                  ["contract_version", "integer"], ["rows", "jsonb"], ["digests", "jsonb"],
+                                  ["lineage", "text"]]},
+        "measurements": {"params": ["p_snapshot", "p_unit", "p_zone", "p_tag", "p_from", "p_to", "p_sensor",
+                                    "p_limit"],
+                         "columns": [["snapshot_id", "bigint"], ["ingested_at", "timestamptz"],
+                                     ["measured_at", "timestamptz"], ["unit_code", "text"], ["zone_code", "text"],
+                                     ["tag", "text"], ["sensor", "text"], ["value", "numeric"], ["uom", "text"]]},
+        "units": {"params": ["p_snapshot"],
+                  "columns": [["snapshot_id", "bigint"], ["unit_code", "text"], ["recipe_type", "text"],
+                              ["area", "numeric"], ["height", "numeric"], ["is_active", "text"]]},
+        "zones": {"params": ["p_snapshot"],
+                  "columns": [["snapshot_id", "bigint"], ["unit_code", "text"], ["zone_code", "text"],
+                              ["is_active", "text"]]},
+        "recipes": {"params": ["p_snapshot"],
+                    "columns": [["snapshot_id", "bigint"], ["recipe_id", "integer"], ["recipe_type", "text"],
+                                ["status", "text"]]},
+        "recipe_lines": {"params": ["p_snapshot"],
+                         "columns": [["snapshot_id", "bigint"], ["recipe_id", "integer"], ["seq", "integer"],
+                                     ["cycle_number", "integer"], ["light_type", "text"],
+                                     ["light_on_minutes", "integer"], ["light_off_minutes", "integer"],
+                                     ["setpoints", "jsonb"]]},
+        "catalogue": {"params": ["p_snapshot"],
+                      "columns": [["snapshot_id", "bigint"], ["kind", "text"], ["code", "text"], ["doc", "jsonb"]]},
+        "holds": {"params": [],
+                  "columns": [["unit_code", "text"], ["zone_code", "text"], ["from_at", "timestamptz"],
+                              ["to_at", "timestamptz"]]},
+    },
+    "max_limit": 50000,
+    "lineage": "L_0 = '', L_N = hex(sha256(utf8(L_{N-1} || E'\\n' || digests->>'measurement'))), "
+               "in snapshot_id order",
 }
 
 # Relays more than one actuator sets: the last message of a tick wins on the board.

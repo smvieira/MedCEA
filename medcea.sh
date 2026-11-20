@@ -1493,6 +1493,36 @@ a_lake_api_uninstall() {
            "No confirmation of its own: medcea.sh's is the only one.")
     plan_run
 }
+# Research sandbox Phase 3: calibrating the sandbox's models from the lake's snapshots
+# (apps/research/calibrate.sh → python3 -m research.calib; codeplan/rs3-design.md). It
+# reads lake-api only and writes only the folder named; no deploy lock.
+RS_LINEAGE_RE='^[0-9a-fA-F]{64}$'
+RS_DIR_RE='^[A-Za-z0-9_./][A-Za-z0-9_./+-]*$'   # a folder: no leading -, no ~ (not expanded here)
+a_research_calibrate() {
+    menu "Calibrate the sensor model from a snapshot" \
+        "List the lake's snapshots|Each one's cut, readings, contract and lineage (note the lineage to pin)." \
+        "Fetch one unit and zone, pinned by its lineage|The readings into a dataset file, and the snapshot's recipes and catalogue into an extract."
+    [[ "$PICK" == b ]] && return 10
+    if [[ "$PICK" == 1 ]]; then
+        CMD=(./apps/research/calibrate.sh snapshots)
+        EFFECT="nothing (reads lake-api's snapshot list)"
+    else
+        local snap lin unit zone out
+        ask_match "Snapshot id" "$POLICY_VERSION_RE" "a snapshot id is a whole number from 1"; snap="$ANSWER"
+        ask_match "Its lineage (64 hex, from the list)" "$RS_LINEAGE_RE" "a lineage is 64 hexadecimal digits"; lin="$ANSWER"
+        ask_match "Unit code" "$UNIT_RE" "$UNIT_HINT" "UNIT01"; unit="$ANSWER"
+        ask_match "Zone code" "$UNIT_RE" "$UNIT_HINT" "ZONE01"; zone="$ANSWER"
+        ask_match "Output folder (absolute, or relative to the repository; a new one)" "$RS_DIR_RE" \
+            "a folder path: letters, digits, _ . / + -, not starting with - or ~"; out="$ANSWER"
+        CMD=(./apps/research/calibrate.sh fetch --snapshot "$snap" --expect-lineage "$lin" --unit "$unit" --zone "$zone" --out "$out")
+        EFFECT="writes $out/dataset.jsonl, extract.yaml and fetch-log.json (refused when they exist); reads lake-api only"
+    fi
+    LOCK=no; LEVEL=read; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Refused (exit 2) while RESEARCH_ENABLED is not true or the lake reader is not running (Applications → Install the lake reader)."
+           "A fetch refuses a lineage other than the one you give, a snapshot whose readings or digests do not recompute, and a reading inside a held-out range."
+           "Fitting the sensor model and the campaigns run from a worktree: python3 -m research.calib, research/README.md.")
+    plan_run
+}
 a_research_reservations() {
     CMD=(./apps/research/reserve.sh list)
     EFFECT="nothing (lists the held-out reservations)"
@@ -3043,6 +3073,7 @@ AREA_APPS=(
     "a_research_reservations|List the held-out reservations|./apps/research/reserve.sh list."
     "a_lake_api_deploy|Install the lake reader|./apps/lake-api/deploy.sh: notebooks read person-free snapshots; skipped until the policy has its pod."
     "a_lake_api_uninstall|Uninstall the lake reader|./apps/lake-api/uninstall.sh: the snapshots stay."
+    "a_research_calibrate|Calibrate the sensor model from a snapshot|research: list the lake's snapshots and fetch one pinned by its lineage; reads lake-api, writes only the folder you name."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."
