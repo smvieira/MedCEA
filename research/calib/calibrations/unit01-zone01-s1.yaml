@@ -1,0 +1,828 @@
+calib_version: 1
+code:
+  blobs:
+    research/calib/__init__.py: ba421dc18f4a4aa6191124d331aca9e7a10ee36a
+    research/calib/__main__.py: f3c1c6f2a9281fe7de42cfb8a73c04d1c510a5dc
+    research/calib/calibfile.py: 7583ed49a3b5d9cc06e99e7ccfbc8f890e5ae626
+    research/calib/cli.py: 987e8fc9a34ba82f2f72117e069e1b386115c181
+    research/calib/dataset.py: ef5f006ded7e563d4b06e576251ab05d428e97ec
+    research/calib/extract.py: d85abacbcb1de6c634c20486292a863ad8ffa88c
+    research/calib/lake.py: 5dcb1e175b4e1c23265aa26466af4941b7a386b8
+    research/calib/pgtext.py: 2ca62da8bec917499722004f30e89b3d410af400
+    research/calib/plant_fit.py: e0a55f2ba00612dda634c4cc40368e644e30ee7d
+    research/calib/segments.py: 86f75599a20e25def3590fd10bf09ed49cb72e3c
+    research/calib/sensor_fit.py: c7d776151fa89bf1ae85e52a98364074a804ab2f
+    research/calib/stats.py: 8a9cece92b296af0d585965290d2310521685781
+    research/twin_plant/__init__.py: 137fb7b8e2612598da17526b5f9a7c8afaa5a3ae
+    research/twin_plant/chamber.py: e52c01b4aef3c18816a8ef7b0b0dbaf67c9add28
+    research/twin_plant/sensors.py: 28f560be52d2b57a9f1ad3d4d8b658f7d0d89cbc
+  commit: 2a344bad8e18cc2cfb0f9952e90571f2528f1786
+  dirty: false
+  dirty_files: []
+  python: '3.14'
+medcea_calibration: 1
+name: unit01-zone01-s1
+plant:
+  air_flow_fan_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 3.0
+  air_heat_capacity_j_per_k:
+    class: coupled_thermal
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 60000.0
+  ambient_co2:
+    class: ambient
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 420.0
+  ambient_humidity:
+    class: ambient
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 50.0
+  ambient_temperature:
+    class: ambient
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 20.0
+  co2_fan_ach_per_h:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 30.0
+  co2_fan_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 5.0
+  co2_production_ml_per_h:
+    class: conditional
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - CONDITIONAL_REFUSED
+    source: assumed
+    value: 110.0
+  co2_steriliser_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 8.0
+  cooler_cop:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 0.5
+  cooler_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 60.0
+  door_open_ach_per_h:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 60.0
+  door_open_extra_heat_w:
+    class: disturbance
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 0.0
+  fan_air_exchange_per_h:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 2.0
+  fan_mixing_factor:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 4.0
+  fungi_heat_w:
+    class: biology
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - LITERATURE
+    source: assumed
+    value: 0.5
+  fungi_q10:
+    class: biology
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - LITERATURE
+    source: assumed
+    value: 2.0
+  fungi_ref_temperature:
+    class: biology
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - LITERATURE
+    source: assumed
+    value: 20.0
+  fungi_water_g_per_h:
+    class: conditional
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - CONDITIONAL_REFUSED
+    source: assumed
+    value: 1.0
+  heater_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 100.0
+  humidifier_g_per_h:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 10.0
+  humidifier_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 15.0
+  lamp_heat_fraction:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 1.0
+  leak_ach_per_h:
+    class: coupled_thermal
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 0.5
+  light_blue_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 10.0
+  light_red_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 10.0
+  light_uv_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 5.0
+  substrate_air_w_per_k:
+    class: coupled_thermal
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 0.3
+  substrate_ambient_w_per_k:
+    class: substrate
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - NOT_OBSERVED
+    source: assumed
+    value: 0.2
+  substrate_heat_capacity_j_per_k:
+    class: substrate
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    - NOT_OBSERVED
+    source: assumed
+    value: 6000.0
+  substrate_heater_w:
+    class: excitation
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 30.0
+  tau_air_s:
+    class: coupled_thermal
+    refused:
+    - NO_ACTUATOR_DATA
+    - NO_EXCITATION
+    - NO_AMBIENT
+    source: assumed
+    value: 8760.0
+  volume_m3:
+    class: spec
+    source: spec
+    value: 0.216
+reference:
+  sensor: sht45
+  why: 'better datasheet accuracy; the SCD30 self-heats (a lamp and an MCU on its board); the loops'' reference (the SCD30 is their fallback). Absolute accuracy unknown: only offsets relative to it are identifiable'
+relative:
+  scd30:
+    dRH:
+      ci95:
+      - -7.07
+      - -6.95975
+      value: -7.03
+    dT:
+      ci95:
+      - 2.03
+      - 2.04
+      value: 2.04
+    humidity_model: constant_offset
+    pairs: 16670
+    predicted_offset_at_rh:
+      constant_offset:
+        '50': -7.03
+        '70': -7.03
+        '85': -7.03
+        '95': -7.03
+      self_heating:
+        '50': -6.54537
+        '70': -8.67942
+        '85': -10.28
+        '95': -11.347
+      temperature: 26.14
+    relative_to: sht45
+    residual_median:
+      constant_offset: 0.0
+      self_heating: -1.21024
+    slope_dRH_vs_RH:
+      constant_offset: 0.0
+      observed: -0.296646
+      self_heating: -0.106703
+sensor_map:
+  scd30: scd30_1
+  sht45: sht45_1
+sensor_model_version: 2
+sensors:
+  ds18b20:
+    note: 'not observed: the model''s defaults, unchanged'
+    source: datasheet
+  scd30:
+    bias:
+      air_humidity:
+        applied: true
+        ci95:
+        - -7.07
+        - -6.95975
+        n: 16670
+        relative_to: sht45
+        source: fitted
+        value: -7.03
+      air_temperature:
+        applied: true
+        ci95: &id001
+        - 2.03
+        - 2.04
+        n: 16670
+        relative_to: sht45
+        source: fitted
+        value: 2.04
+      co2:
+        applied: true
+        source: not_identifiable
+        value: 0.0
+        why: no second sensor publishes co2, so its offset cannot be seen
+    bias_sd:
+      co2:
+        applied: true
+        at_ppm: 703.53
+        source: datasheet
+        value: 25.5529
+        why: SCD30 +-(30 ppm + 3 %) at the observed median, as a/2 (R6)
+    dropout_p:
+      applied: false
+      ci95:
+      - 1.09667e-05
+      - 0.00014581
+      misses: 2
+      of: 50013
+      source: fitted
+      value: 3.99896e-05
+      weak: true
+      why: 'weak: the 95 % interval [1.09667e-05, 0.00014581] is wider than the value; the default stays'
+    humidity_model:
+      source: chosen
+      value: constant_offset
+      why: 'R7: both models are recorded; self-heating explains only part of the slope of dRH against RH, so the choice is the user''s'
+    latency_s:
+      applied: true
+      note: includes the board clock's offset; not separable without a trusted publish time
+      p5: 0.883511
+      p50: 1.16109
+      p95: 2.47041
+      source: fitted_confounded
+      value: 0.661091
+    noise_rel_sd:
+      co2:
+        applied: false
+        source: not_identifiable
+        why: 'noise_sd co2 was not applied: the datasheet noise stays'
+    noise_sd:
+      air_humidity:
+        applied: true
+        ci95:
+        - 0.020274
+        - 0.0209236
+        d1_autocorrelation: -0.48586
+        lag_ratio:
+        - 1.0
+        - 1.00951
+        - 1.01518
+        - 1.03013
+        n: 16646
+        relative_residual: 0.00658345
+        repeats:
+          expected: 2232.77
+          observed: 2428
+          of: 16667
+        source: fitted
+        trimmed:
+        - 0
+        - 0
+        - 0
+        - 0
+        v_k:
+        - 0.000439753
+        - 0.000448154
+        - 0.000453205
+        - 0.000466648
+        value: 0.0205492
+      air_temperature:
+        applied: true
+        ci95:
+        - 0.0117517
+        - 0.0122863
+        d1_autocorrelation: -0.486081
+        lag_ratio:
+        - 1.0
+        - 1.01796
+        - 1.01147
+        - 1.0167
+        n: 16646
+        relative_residual: 0.0170697
+        repeats:
+          expected: 3768.29
+          observed: 5359
+          of: 16667
+        source: fitted
+        trimmed:
+        - 0
+        - 0
+        - 0
+        - 0
+        v_k:
+        - 0.000153448
+        - 0.000159009
+        - 0.00015699
+        - 0.000158615
+        value: 0.0120501
+      co2:
+        applied: false
+        d1_autocorrelation: 0.171969
+        source: not_identifiable
+        why: 'noise not separable from filtered process variation: the first differences'' lag-1 autocorrelation is +0.172 (white noise plus a slow process gives -0.5..0)'
+    publish_interval_s:
+      applied: true
+      ci95:
+      - 2.97725
+      - 2.99596
+      cv: 0.202196
+      n: 16635
+      source: fitted
+      value: 2.98677
+    quantisation:
+      air_humidity:
+        applied: true
+        n: 16670
+        source: fitted
+        value: 0.01
+      air_temperature:
+        applied: true
+        n: 16670
+        source: fitted
+        value: 0.01
+      co2:
+        applied: true
+        n: 16671
+        source: fitted
+        value: 0.01
+    self_heating_c:
+      applied: false
+      ci95: *id001
+      rh_residual: -1.21024
+      source: fitted
+      value: 2.04
+      why: 'humidity_model constant_offset: the offsets are in bias'
+    start_offset_s:
+      applied: true
+      source: chosen
+      value: 0.0
+      why: 'R4: every sensor of the board shares one cycle and one measured_at; the whole delay is in latency_s'
+  sht45:
+    bias:
+      air_humidity:
+        applied: true
+        source: chosen
+        value: 0.0
+        why: 'the reference: offsets are relative to it; its absolute accuracy is unknown (no reference instrument)'
+      air_temperature:
+        applied: true
+        source: chosen
+        value: 0.0
+        why: 'the reference: offsets are relative to it; its absolute accuracy is unknown (no reference instrument)'
+    bias_sd:
+      air_humidity:
+        applied: true
+        source: datasheet
+        value: 0.5
+        why: the datasheet accuracy a as a/2 (R6)
+      air_temperature:
+        applied: true
+        source: datasheet
+        value: 0.05
+        why: the datasheet accuracy a as a/2 (R6)
+    dropout_p:
+      applied: true
+      ci95:
+      - 0.0
+      - 0.000115201
+      misses: 0
+      of: 33342
+      source: fitted
+      value: 0.0
+    latency_s:
+      applied: true
+      note: includes the board clock's offset; not separable without a trusted publish time
+      p5: 0.626648
+      p50: 0.847836
+      p95: 1.18524
+      source: fitted_confounded
+      value: 0.347836
+    noise_rel_sd: {}
+    noise_sd:
+      air_humidity:
+        applied: true
+        ci95:
+        - 0.0160023
+        - 0.0168458
+        d1_autocorrelation: -0.381519
+        lag_ratio:
+        - 1.0
+        - 1.086
+        - 1.17823
+        - 1.25156
+        n: 16647
+        relative_residual: 0.0073819
+        repeats:
+          expected: 2421.58
+          observed: 2475
+          of: 16668
+        source: fitted
+        trimmed:
+        - 0
+        - 0
+        - 0
+        - 0
+        v_k:
+        - 0.00034498
+        - 0.000406867
+        - 0.000478913
+        - 0.000540376
+        value: 0.016432
+      air_temperature:
+        applied: true
+        ci95:
+        - 0.0120768
+        - 0.0125047
+        d1_autocorrelation: -0.469979
+        lag_ratio:
+        - 1.0
+        - 1.02472
+        - 1.04296
+        - 1.06006
+        n: 16647
+        relative_residual: 0.00500043
+        repeats:
+          expected: 3612.81
+          observed: 3837
+          of: 16668
+        source: fitted
+        trimmed:
+        - 0
+        - 0
+        - 0
+        - 0
+        v_k:
+        - 0.00016531
+        - 0.000173585
+        - 0.000179818
+        - 0.000185763
+        value: 0.0122797
+    publish_interval_s:
+      applied: true
+      ci95:
+      - 2.97591
+      - 2.99544
+      cv: 0.111517
+      n: 16635
+      source: fitted
+      value: 2.98698
+    quantisation:
+      air_humidity:
+        applied: true
+        n: 16671
+        source: fitted
+        value: 0.01
+      air_temperature:
+        applied: true
+        n: 16671
+        source: fitted
+        value: 0.01
+    start_offset_s:
+      applied: true
+      source: chosen
+      value: 0.0
+      why: 'R4: every sensor of the board shares one cycle and one measured_at; the whole delay is in latency_s'
+source:
+  cadence:
+    nominal_s: 3.0
+    outage_hist:
+    - from_s: 60.0
+      n: 2
+      to_s: 600.0
+    - from_s: 600.0
+      n: 0
+      to_s: 3600.0
+    - from_s: 3600.0
+      n: 0
+      to_s: null
+    skipped_hist:
+    - from_s: 9.0
+      n: 3
+      to_s: 10.0
+    - from_s: 10.0
+      n: 13
+      to_s: 30.0
+    - from_s: 30.0
+      n: 17
+      to_s: 60.0
+  dataset_content_sha256: c8c0c6bea99f45f73aa81a8e27f01c73744c1bdab43c7014c4c6b60b34ae27c8
+  lake:
+    contract_version: 1
+    cut_at: '2026-11-19T09:10:33.868995Z'
+    digest_measurement:
+      '1': 2729928d95b4bb4fd40b07bb951e442b4da7d970a4ae192e1e50bb4a72f4b4b1
+    digest_verified: true
+    lineage: 096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f
+    snapshot_id: 1
+  outages:
+  - from: '2026-11-15T06:22:48.276856Z'
+    seconds: 61.311
+    to: '2026-11-15T06:23:49.587848Z'
+    why: gap in the data
+  - from: '2026-11-15T06:32:49.267038Z'
+    seconds: 114.139
+    to: '2026-11-15T06:34:43.406049Z'
+    why: gap in the data
+  - from: '2026-11-15T09:59:58.885387Z'
+    seconds: 342634.984
+    to: '2026-11-19T09:10:33.868995Z'
+    why: end of the data before the snapshot's cut
+  segments:
+  - events:
+      scd30_1: 12439
+      sht45_1: 12439
+    from: '2026-11-14T19:52:45.362301Z'
+    to: '2026-11-15T06:22:48.276856Z'
+  - events:
+      scd30_1: 132
+      sht45_1: 132
+    from: '2026-11-15T06:23:49.587848Z'
+    to: '2026-11-15T06:32:49.267038Z'
+  - events:
+      scd30_1: 4100
+      sht45_1: 4100
+    from: '2026-11-15T06:34:43.406049Z'
+    to: '2026-11-15T09:59:58.885387Z'
+  unit: UNIT01
+  window:
+    from: '2026-11-14T19:52:44.000000Z'
+    to: '2026-11-15T09:59:58.000000Z'
+  zone: ZONE01
+unmodelled:
+- mean_s: 2.98698
+  median_s: 3.01036
+  sd_s: 0.0249596
+  sensor: sht45
+  what: publish jitter
+- of: 16668
+  rate: 0.00197984
+  reboot_signature:
+    gaps_30_60_s: 17
+    note: a board restart shows as one gap of 30-60 s
+  sensor: sht45
+  skipped: 33
+  what: skipped cycles
+- chi2: 865.22
+  df: 9
+  last_digit_counts:
+  - 1197
+  - 1408
+  - 1332
+  - 1481
+  - 1213
+  - 1947
+  - 2272
+  - 2238
+  - 1795
+  - 1788
+  p: 1.92307e-180
+  sensor: sht45
+  tag: air_temperature
+  what: the sensor's own resolution is not a clean 0.01 lattice
+- sensor: sht45
+  tag: air_temperature
+  variance_per_cycle: 2.03905e-05
+  what: fast process variation not in the model
+- expected: 3612.81
+  observed: 3837
+  of: 16668
+  p: 1.30503e-05
+  sensor: sht45
+  tag: air_temperature
+  what: repeated values beyond what the noise and the lattice explain
+- chi2: 32.98
+  df: 9
+  last_digit_counts:
+  - 1698
+  - 1714
+  - 1746
+  - 1729
+  - 1669
+  - 1527
+  - 1692
+  - 1526
+  - 1707
+  - 1663
+  p: 0.000134629
+  sensor: sht45
+  tag: air_humidity
+  what: the sensor's own resolution is not a clean 0.01 lattice
+- sensor: sht45
+  tag: air_humidity
+  variance_per_cycle: 0.000197287
+  what: fast process variation not in the model
+- mean_s: 2.98677
+  median_s: 3.02098
+  sd_s: 0.0937878
+  sensor: scd30
+  what: publish jitter
+- of: 16668
+  rate: 0.00197984
+  reboot_signature:
+    gaps_30_60_s: 17
+    note: a board restart shows as one gap of 30-60 s
+  sensor: scd30
+  skipped: 33
+  what: skipped cycles
+- chi2: 3830.79
+  df: 9
+  last_digit_counts:
+  - 2141
+  - 698
+  - 2914
+  - 2089
+  - 264
+  - 1735
+  - 1253
+  - 995
+  - 2050
+  - 2531
+  p: 0.0
+  sensor: scd30
+  tag: air_temperature
+  what: the sensor's own resolution is not a clean 0.01 lattice
+- sensor: scd30
+  tag: air_temperature
+  variance_per_cycle: 4.13468e-06
+  what: fast process variation not in the model
+- expected: 3768.29
+  observed: 5359
+  of: 16667
+  p: 6.9249e-191
+  sensor: scd30
+  tag: air_temperature
+  what: repeated values beyond what the noise and the lattice explain
+- chi2: 74.1224
+  df: 9
+  last_digit_counts:
+  - 1590
+  - 1584
+  - 1861
+  - 1612
+  - 1778
+  - 1852
+  - 1603
+  - 1589
+  - 1648
+  - 1553
+  p: 2.35461e-12
+  sensor: scd30
+  tag: air_humidity
+  what: the sensor's own resolution is not a clean 0.01 lattice
+- sensor: scd30
+  tag: air_humidity
+  variance_per_cycle: 2.55842e-05
+  what: fast process variation not in the model
+- expected: 2232.77
+  observed: 2428
+  of: 16667
+  p: 4.74946e-06
+  sensor: scd30
+  tag: air_humidity
+  what: repeated values beyond what the noise and the lattice explain
+- note: a sensor's absolute temperature and humidity error is correlated with the reference's through the fitted relative offset; not modelled (R6)
+  sensor: scd30
+  what: correlated absolute error
+validity:
+  air_humidity:
+  - 51.35
+  - 55.33

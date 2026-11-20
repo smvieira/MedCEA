@@ -1,0 +1,88 @@
+medcea_extract: 1
+lake:
+  contract_version: 1
+  snapshot_id: 1
+  cut_at: '2026-11-19T09:10:33.868995Z'
+  lineage: 096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f
+digests:
+  recipes: e2a913ba017988ac3bafe55a04a6695e5e98dbd30cf528f2b56049f1bd59b102
+  recipe_lines: 3fd2250a0afb92542e33156509b705c8f3ab7813e6878103f953e7e973983e99
+  catalogue: b649e39156dd07b7b74128c47181414a943d60df310ab0f64c191dcb3661b6a7
+recipes:
+- recipe_id: '2'
+  recipe_type: FUNGI
+  status: approved
+recipe_lines:
+- recipe_id: '2'
+  seq: '1'
+  cycle_number: '2'
+  light_type: DARK
+  light_on_minutes: '1'
+  light_off_minutes: '1'
+  setpoints: '{"co2": {"lower": 1000, "upper": 5000}, "air_humidity": {"lower": 90, "upper": 95}, "air_temperature": {"lower": 20, "upper": 25}, "substrate_temperature": {"lower": 21, "upper": 24}}'
+- recipe_id: '2'
+  seq: '2'
+  cycle_number: '4'
+  light_type: BLUE
+  light_on_minutes: '1'
+  light_off_minutes: '1'
+  setpoints: '{"co2": {"lower": 500, "upper": 1000}, "air_humidity": {"lower": 85, "upper": 90}, "air_temperature": {"lower": 10, "upper": 18}, "substrate_temperature": {"lower": 13, "upper": 16}}'
+- recipe_id: '2'
+  seq: '3'
+  cycle_number: '8'
+  light_type: RED
+  light_on_minutes: '1'
+  light_off_minutes: '1'
+  setpoints: '{"co2": {"lower": 500, "upper": 1000}, "air_humidity": {"lower": 80, "upper": 85}, "air_temperature": {"lower": 10, "upper": 21}, "substrate_temperature": {"lower": 16, "upper": 18}}'
+catalogue:
+- kind: quantity
+  code: air_humidity
+  doc: '{"max": 100, "min": 0, "unit": "%RH", "phase": "always", "ordinal": 2, "commands": ["DOWN", "OFF", "UP"], "loopable": true, "sense_uoms": ["RH%"], "command_map": null, "default_tag": "air_humidity"}'
+- kind: quantity
+  code: air_temperature
+  doc: '{"max": 60, "min": -10, "unit": "°C", "phase": "always", "ordinal": 1, "commands": ["DOWN", "OFF", "UP"], "loopable": true, "sense_uoms": ["C"], "command_map": null, "default_tag": "air_temperature"}'
+- kind: quantity
+  code: co2
+  doc: '{"max": 40000, "min": 0, "unit": "ppm", "phase": "always", "ordinal": 3, "commands": ["OFF", "UP"], "loopable": true, "sense_uoms": ["ppm"], "command_map": {"UP": "OFF", "OFF": "OFF", "DOWN": "UP"}, "default_tag": "co2"}'
+- kind: quantity
+  code: light_intensity
+  doc: '{"max": 200000, "min": 0, "unit": "lx", "phase": "light_on", "ordinal": 5, "commands": ["DOWN", "OFF", "UP"], "loopable": false, "sense_uoms": ["lx"], "command_map": null, "default_tag": "light_intensity"}'
+- kind: quantity
+  code: substrate_temperature
+  doc: '{"max": 60, "min": -10, "unit": "°C", "phase": "always", "ordinal": 4, "commands": ["DOWN", "OFF", "UP"], "loopable": true, "sense_uoms": ["C"], "command_map": null, "default_tag": "ground_temperature"}'
+- kind: recipe_type
+  code: FUNGI
+  doc: '{"ordinal": 2, "is_default": false}'
+- kind: recipe_type
+  code: PLANT
+  doc: '{"ordinal": 1, "is_default": true}'
+- kind: recipe_type_quantity
+  code: FUNGI/air_humidity
+  doc: '{"ordinal": 2, "quantity": "air_humidity", "required": true, "recipe_type": "FUNGI"}'
+- kind: recipe_type_quantity
+  code: FUNGI/air_temperature
+  doc: '{"ordinal": 1, "quantity": "air_temperature", "required": true, "recipe_type": "FUNGI"}'
+- kind: recipe_type_quantity
+  code: FUNGI/co2
+  doc: '{"ordinal": 3, "quantity": "co2", "required": true, "recipe_type": "FUNGI"}'
+- kind: recipe_type_quantity
+  code: FUNGI/light_intensity
+  doc: '{"ordinal": 5, "quantity": "light_intensity", "required": false, "recipe_type": "FUNGI"}'
+- kind: recipe_type_quantity
+  code: FUNGI/substrate_temperature
+  doc: '{"ordinal": 4, "quantity": "substrate_temperature", "required": false, "recipe_type": "FUNGI"}'
+- kind: recipe_type_quantity
+  code: PLANT/air_humidity
+  doc: '{"ordinal": 2, "quantity": "air_humidity", "required": true, "recipe_type": "PLANT"}'
+- kind: recipe_type_quantity
+  code: PLANT/air_temperature
+  doc: '{"ordinal": 1, "quantity": "air_temperature", "required": true, "recipe_type": "PLANT"}'
+- kind: recipe_type_quantity
+  code: PLANT/co2
+  doc: '{"ordinal": 3, "quantity": "co2", "required": true, "recipe_type": "PLANT"}'
+- kind: recipe_type_quantity
+  code: PLANT/light_intensity
+  doc: '{"ordinal": 5, "quantity": "light_intensity", "required": false, "recipe_type": "PLANT"}'
+- kind: recipe_type_quantity
+  code: PLANT/substrate_temperature
+  doc: '{"ordinal": 4, "quantity": "substrate_temperature", "required": false, "recipe_type": "PLANT"}'

@@ -538,7 +538,8 @@ class Campaign(unittest.TestCase):
 
     def test_shipped_specs_resolve(self):
         L = loaded()
-        for name, runs in (("smoke.yaml", 36), ("fruiting_compare.yaml", 45)):
+        for name, runs in (("smoke.yaml", 36), ("fruiting_compare.yaml", 45), ("e39_compare.yaml", 30),
+                           ("e39_compare_calibrated.yaml", 30), ("fruiting_compare_calibrated.yaml", 45)):
             spec = campaign.load_spec(os.path.join(CAMPAIGNS, name))
             self.assertEqual(len(campaign.expand(spec)), runs, name)
             self.assertEqual({c["code"] for c in spec["controllers"]}, set(L.codes()), name)
@@ -560,6 +561,16 @@ SPEC_DIGESTS = {
     "fruiting_compare.yaml": "819d7d198e16604d343e4515e02be4d308e39bb548bfc610ce8890d91b755afb",
     "e39_compare.yaml": "0b5556d5d43902bc3f6e7365913f054e8475ae280e84f355db5706eb80d64428",
 }
+# research Phase 3 commit D: the calibrated specs, pinned to research/calib/calibrations/
+# unit01-zone01-s1.yaml (lake snapshot 1) and, for the fruiting one, to recipe 2 seq 3 of
+# research/calib/extracts/snapshot-1-096015bc225c.yaml. The digest covers the pins and the
+# values they resolved to, so it moves only when a pinned file or the resolver does.
+CALIBRATED_SPEC_DIGESTS = {
+    "e39_compare_calibrated.yaml": "06fa282875cfa1b95c5158347ec1e2c4f5405cb4d0e53dc996ed72f862ce5bb1",
+    "fruiting_compare_calibrated.yaml": "520e8855457b88eda7fd07248ca2f1e80523708fac6d7ddcf29401e19a0176c5",
+}
+CALIBRATION_FILE = "unit01-zone01-s1.yaml"
+SNAPSHOT1_LINEAGE = "096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f"
 E39_HOST_DIGEST = "b6007996f0c56bca082975f5aae76fe1c600d50cc507a5623794fb8da5f4c381"
 E39_VENV_DIGEST = "a96b20d15d6c57ba72eb5f1acf73edf9835f3921cc30846919156e441787a79f"
 
@@ -576,6 +587,30 @@ class Digests(unittest.TestCase):
         with open(os.path.join(CAMPAIGNS, "e39_compare.yaml"), encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         self.assertEqual(raw["scenarios"], ["../scenarios/smoke_air_temperature.yaml"])
+
+    def test_calibrated_specs(self):
+        for name, want in CALIBRATED_SPEC_DIGESTS.items():
+            spec = campaign.load_spec(os.path.join(CAMPAIGNS, name))
+            self.assertEqual(hashlib.sha256(campaign.canonical(spec).encode()).hexdigest(), want, name)
+            self.assertEqual([c["code"] for c in spec["controllers"]], ["IF_THEN_ELSE", "PID", "Q_LEARNING", "FLC", "MPC"])
+            (sc,) = spec["scenarios"]
+            cal = sc["calibration"]
+            self.assertEqual(os.path.basename(cal["path"]), CALIBRATION_FILE, name)
+            self.assertEqual(cal["resolved"]["source"]["lineage"], SNAPSHOT1_LINEAGE, name)
+            self.assertIn("air_humidity", cal["extrapolate"], name)   # fitted on 51-55 %RH only
+        # the uncalibrated pair's grid, so each pair differs only in the scenario
+        for cal, plain in (("e39_compare_calibrated.yaml", "e39_compare.yaml"),
+                           ("fruiting_compare_calibrated.yaml", "fruiting_compare.yaml")):
+            a, b = (campaign.load_spec(os.path.join(CAMPAIGNS, n)) for n in (cal, plain))
+            for k in ("controllers", "seeds", "clock_offsets_s"):
+                self.assertEqual(a[k], b[k], (cal, k))
+        fr = campaign.load_spec(os.path.join(CAMPAIGNS, "fruiting_compare_calibrated.yaml"))["scenarios"][0]
+        plain = campaign.load_spec(os.path.join(CAMPAIGNS, "fruiting_compare.yaml"))["scenarios"][0]
+        line = fr["recipe_line_from"]
+        self.assertEqual((line["snapshot_id"], line["lineage"], line["recipe_id"], line["seq"]), (1, SNAPSHOT1_LINEAGE, 2, 3))
+        # snapshot 1's approved FUNGI line holds exactly the inline Fruiting step's setpoints
+        self.assertEqual(fr["recipe_line"], plain["recipe_line"])
+        self.assertEqual(fr["recipe_type"], plain["recipe_type"])
 
     def test_e39_result_digest_with_this_interpreter(self):
         libs = loaded().libraries

@@ -1,0 +1,53 @@
+# The Pleurotus ostreatus fruiting scenario (fungi_pleurotus_fruiting.yaml) on the
+# calibrated sensor model, with its setpoints taken from the lake rather than written
+# inline: recipe 2, line seq 3 of snapshot 1 (approved FUNGI, RED; air 10-21 C, RH 80-85 %,
+# CO2 500-1000 ppm, substrate 16-18 C, the same values as the inline Fruiting step), read
+# from the committed extract research/calib/extracts/snapshot-1-096015bc225c.yaml.
+# Sensors: research/calib/calibrations/unit01-zone01-s1.yaml (lake snapshot 1, UNIT01/ZONE01;
+# research Phase 3). Plant constants stay the model's assumptions (fit-plant refuses them).
+#
+# The recipe line's photoperiod is the recipe file's 1 min / 1 min placeholder, so the pin
+# sets the scenario's 12 h / 12 h with its reason. The calibration was fitted on
+# 51.35-55.33 %RH; the band (80-85 %RH) and the initial 70 %RH lie outside it.
+name: fungi_pleurotus_fruiting_calibrated
+description: the Pleurotus fruiting scenario on the sensor model and recipe line of lake snapshot 1
+duration_h: 48
+metrics_from_h: 2
+recipe_line_from:
+  extract: ../../calib/extracts/snapshot-1-096015bc225c.yaml
+  sha256: 79be22b9e8d65fa07c2d933d73be8ca8965e3fccc6a62272191c5276db521dcd
+  snapshot_id: 1
+  lineage: 096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f
+  recipe_id: 2
+  seq: 3
+  light:
+    light_on_minutes: 720
+    light_off_minutes: 720
+    why: the recipe file's 1/1 is a placeholder (every cycle, and every controller restart, would last 2 minutes)
+calibration:
+  path: ../../calib/calibrations/unit01-zone01-s1.yaml
+  sha256: 4d1a710d622f6a1752417678045ce2a5f35e066674f7c5f88dd773f0843750da
+  extrapolate:
+    air_humidity: >-
+      the snapshot's humidity was 51-55 %RH; the noise and the
+      SHT45-SCD30 offset are assumed to hold at 70-85 %RH (constant_offset model)
+loops:
+  # control_loop rows as the onboarding wizard saves them: the SHT45 is the reference for
+  # air temperature and humidity, the SCD30 its fallback (both publish both tags; without
+  # a row the default map's 'single' rule would see two sensors and hold).
+  air_temperature:
+    input: {tag: air_temperature, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+  air_humidity:
+    input: {tag: air_humidity, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+initial:
+  air_temperature: 22
+  air_humidity: 70
+  co2: 900
+  ground_temperature: 22
+ambient:
+  temperature: 22
+  humidity: 55
+  co2: 420
+disturbances:
+  - {at_h: 24, kind: door_open, duration_min: 5}
+  - {at_h: 30, kind: ambient, temperature: 25}

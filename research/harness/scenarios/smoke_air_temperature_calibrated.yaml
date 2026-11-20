@@ -1,0 +1,46 @@
+# The smoke scenario (smoke_air_temperature.yaml) on the calibrated sensor model: the same
+# chamber, setpoints, loops and conditions, with the sensors' publish interval, latency,
+# noise, quantisation, dropout, SCD30 offsets and per-run absolute bias taken from
+# research/calib/calibrations/unit01-zone01-s1.yaml (fitted on lake snapshot 1, lineage
+# 096015bc225c…, UNIT01/ZONE01, 14-15 Nov 2026; research Phase 3). The plant constants stay
+# the model's assumptions: the snapshot holds no actuator step (fit-plant refuses them).
+# Only what the controllers see changes; the metrics are computed on the chamber truth.
+#
+# The calibration was fitted on 51.35-55.33 %RH; the humidity band (80-95 %RH) and the
+# initial 85 %RH lie outside it, so the pin says why it is used there anyway.
+name: smoke_air_temperature_calibrated
+description: the smoke scenario on the sensor model fitted to lake snapshot 1
+calibration:
+  path: ../../calib/calibrations/unit01-zone01-s1.yaml
+  sha256: 4d1a710d622f6a1752417678045ce2a5f35e066674f7c5f88dd773f0843750da
+  extrapolate:
+    air_humidity: >-
+      the snapshot's humidity was 51-55 %RH; the noise and the
+      SHT45-SCD30 offset are assumed to hold at 80-95 %RH (constant_offset model)
+duration_h: 1
+metrics_from_h: 0.5
+recipe_type: FUNGI
+recipe_line:
+  setpoints:
+    air_temperature: {lower: 18, upper: 22}
+    air_humidity: {lower: 80, upper: 95}
+    co2: {lower: 500, upper: 5000}
+  light_type: DARK
+  light_on_minutes: 0
+  light_off_minutes: 0
+loops:
+  # control_loop rows as the onboarding wizard saves them: the SHT45 is the reference for
+  # air temperature and humidity, the SCD30 its fallback (both publish both tags; without
+  # a row the default map's 'single' rule would see two sensors and hold).
+  air_temperature:
+    input: {tag: air_temperature, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+  air_humidity:
+    input: {tag: air_humidity, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+initial:
+  air_temperature: 16
+  air_humidity: 85
+  co2: 800
+ambient:
+  temperature: 20
+  humidity: 50
+  co2: 420

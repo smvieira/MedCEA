@@ -1,0 +1,19 @@
+# E39's comparison (e39_compare.yaml) on the calibrated smoke scenario: the five
+# controllers at their defaults, two seeds, three clock offsets: 5 x 2 x 3 = 30 runs, the
+# same grid as the uncalibrated half, so the pairs differ only in the sensor model
+# (research Phase 3, research/calib/calibrations/unit01-zone01-s1.yaml). The manifest's
+# provenance names the calibration, its snapshot and lineage. The result digest is the
+# same at --jobs 1 and the default.
+#
+#   research/.venv/bin/python -m research.harness.campaign research/harness/campaigns/e39_compare_calibrated.yaml
+description: E39 controller comparison, calibrated smoke scenario
+scenarios:
+  - ../scenarios/smoke_air_temperature_calibrated.yaml
+controllers:
+  - {code: IF_THEN_ELSE}
+  - {code: PID}
+  - {code: Q_LEARNING}
+  - {code: FLC}
+  - {code: MPC}
+seeds: [1, 2]
+clock_offsets_s: [0, 5, 9.99]

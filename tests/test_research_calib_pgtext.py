@@ -6,8 +6,8 @@
   ": ", escape_json), and the small-set and per-hour measurement digests.
 - Known answers captured read-only from the live lake (snapshot 1, 20 Nov 2026) are
   pinned inline where they are short (the recipes set's digest).
-- tests/fixtures/research/*.json, when present (research Phase 3 commit D captures them),
-  are recomputed in full: each file is a JSON object
+- tests/fixtures/research/*.json (research Phase 3 commit D captured snapshot1.json) are
+  recomputed in full: each file is a JSON object
 
       {"snapshot_id": 1, "lineage": "<hex>",
        "digests": {"<set>": "<hex>", ...},                 lake.snapshot.digests as recorded
@@ -15,7 +15,7 @@
        "measurement_hour": {"hour": "YYYY-MM-DDTHH:00:00Z", "line": "<hour>|<n>|<hex>",
                             "rows": [<lake-api measurement rows of that ingested_at hour, verbatim>]}}
 
-  read with pgtext.loads_raw, so numbers keep their text. Without them those tests skip.
+  read with pgtext.loads_raw, so numbers keep their text.
 
 Offline, standard library + PyYAML. Run:
     python3 -m unittest tests.test_research_calib_pgtext
@@ -165,8 +165,24 @@ class Digests(unittest.TestCase):
         self.assertEqual(pgtext.measurement_digest([]), sha(""))
 
 
-@unittest.skipUnless(FIXTURES, "no live-captured fixtures in tests/fixtures/research/ (commit D)")
 class LiveFixtures(unittest.TestCase):
+    """tests/fixtures/research/snapshot1.json: captured read-only as postgres in
+    research-postgresql-0 on 20 Nov 2026 (research Phase 3 commit D, R16). The small sets
+    are lake_api.<set>(1) through json_agg; the hour is every lake.measurement row of
+    snapshot 1 ingested in 2026-11-14T19:00Z, its line computed in SQL by _set_digest's
+    own per-hour rule; the same line recomputes from lake-api's rows of that hour."""
+
+    def test_snapshot_1_is_captured(self):
+        names = [os.path.basename(p) for p in FIXTURES]
+        self.assertIn("snapshot1.json", names)
+        fx = dict(self.load())[os.path.join(REPO, "tests", "fixtures", "research", "snapshot1.json")]
+        self.assertEqual(sorted(fx["sets"]), sorted(SMALL_SETS))
+        self.assertEqual(fx["lineage"], "096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f")
+        self.assertEqual(fx["digests"]["measurement"],
+                         "2729928d95b4bb4fd40b07bb951e442b4da7d970a4ae192e1e50bb4a72f4b4b1")
+        self.assertEqual(fx["measurement_hour"]["line"],
+                         "2026-11-14T19:00:00Z|605|d36954722392f7a6106b454db5159d348e1555d38b8d746e0e2c15be61bd05ba")
+
     def load(self):
         out = []
         for p in FIXTURES:
