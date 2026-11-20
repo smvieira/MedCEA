@@ -18,6 +18,14 @@
 # wait_for_http treats any HTTP response as success, including 401/403/302 — a
 # service behind oauth2-proxy answering 403 is up and serving. Only a connection
 # failure or a 5xx counts as not-ready, because those are what the race produces.
+#
+# A platform name (the URL's host is $DOMAIN or ends in .$DOMAIN, with PLATFORM_IP
+# an IPv4 address) is connected to at PLATFORM_IP directly (curl --resolve, the
+# URL's port, else 443 and 80), so the wait asks whether the service answers, not
+# whether this machine's DNS knows the name: a custom domain whose names did not
+# resolve made healthy services look dead (fresh install, 20 Nov 2026). Whether
+# the names resolve is deploy-infra's own check (dns_names_check, infra/lib-dns.sh).
+# The certificate is still verified against the name and the platform CA.
 
 wait_for_http() {
     local url="$1" timeout="${2:-120}" label="${3:-$1}"
@@ -29,12 +37,14 @@ wait_for_http() {
     local -a ca=()
     local _root="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     [[ -f "$_root/.ca/ca.crt" ]] && ca=(--cacert "$_root/.ca/ca.crt")
+    local -a resolve=()
+    platform_resolve "$url"
     while [ "$SECONDS" -lt "$deadline" ]; do
         # NOT `|| echo 000`: curl -w already prints 000 on failure, so the
         # fallback appends a second one and $code becomes "000\n000", which
         # matches neither branch below and reports a dead endpoint as ready.
         # Same trap as `grep -c ... || echo 0` in CLAUDE.md. Assign, don't echo.
-        code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "${ca[@]}" "$url" 2>/dev/null) || code=000
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "${ca[@]}" "${resolve[@]}" "$url" 2>/dev/null) || code=000
         case "$code" in
             000|5??) ;;                       # unreachable or still starting
             *) return 0 ;;                    # anything else means it is serving
@@ -43,6 +53,21 @@ wait_for_http() {
     done
     echo "  ✗ ${label} did not answer within ${timeout}s (last HTTP ${code:-000}): ${url}" >&2
     return 1
+}
+
+# platform_resolve URL — fills the caller's array `resolve` with the curl --resolve
+# arguments wait_for_http uses (see there); empty for any other host. Also for a
+# deploy's own later curl to a platform name (apps/report).
+platform_resolve() {
+    local url="$1" host port d ip="${PLATFORM_IP:-}" p
+    d="${DOMAIN:-}"; d="${d,,}"; d="${d%.}"
+    [[ -n "$d" && "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 0
+    [[ "$url" =~ ^(https?)://([^/:?#]+)(:([0-9]+))? ]] || return 0
+    host="${BASH_REMATCH[2],,}"; port="${BASH_REMATCH[4]}"
+    [[ "$host" == "$d" || "$host" == *".$d" ]] || return 0
+    for p in ${port:-443 80}; do
+        resolve+=(--resolve "${host}:${p}:${ip}")
+    done
 }
 
 wait_for_rollout() {

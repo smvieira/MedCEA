@@ -244,7 +244,7 @@
 <tr><td><code>K8S_CHANNEL</code></td><td><code>1.29/stable</code></td><td>MicroK8s Kubernetes version.</td></tr>
 <tr><td><code>PLATFORM_IP</code></td><td>this machine's Tailscale IPv4 address, else its first LAN address</td><td>The address every service name points to.</td></tr>
 <tr><td><code>DOMAIN</code></td><td><code>${PLATFORM_IP}.nip.io</code></td><td>Base domain: every service is <code>&lt;name&gt;.$DOMAIN</code>. Can be IP-based (no DNS setup), a short name the platform answers DNS for, or your own DNS domain.</td></tr>
-<tr><td><code>LOCAL_DNS</code></td><td><code>false</code></td><td><code>true</code>: the platform runs a DNS server for <code>$DOMAIN</code> on port 53 and maps the names in this machine's <code>/etc/hosts</code>.</td></tr>
+<tr><td><code>LOCAL_DNS</code></td><td><code>false</code></td><td><code>true</code>: the platform runs a DNS server for <code>$DOMAIN</code> on port 53 and maps the names in this machine's <code>/etc/hosts</code>. Set by configuration for the name-based domain and for a domain of your own whose DNS the platform answers.</td></tr>
 <tr><td><code>ALIAS_DOMAIN</code></td><td><code>${PLATFORM_IP}.nip.io</code></td><td>A previous domain kept as permanent redirects to <code>$DOMAIN</code>, so old links still work. Inactive when equal to <code>DOMAIN</code> or empty.</td></tr>
 <tr><td><code>USE_TAILSCALE</code></td><td>empty</td><td><code>true</code>: a deploy stops if Tailscale is not up. <code>false</code>: LAN only. Empty: not decided yet.</td></tr>
 <tr><td><code>*_DOMAIN</code></td><td>see <a href="#reference-addresses">Web addresses</a></td><td>The address of each application.</td></tr>

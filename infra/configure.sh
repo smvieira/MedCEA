@@ -58,6 +58,21 @@ cfg_set() {
     fi
 }
 
+# cfg_set_line KEY LINE — replace KEY's first line with LINE verbatim (an expression,
+# unlike cfg_set's quoted literal), or append it. Nothing is written when it is already so.
+cfg_set_line() {
+    local key="$1" line="$2"
+    [[ "$(grep -m1 "^${key}=" "$CONFIG_FILE")" == "$line" ]] && return 0
+    if grep -q "^${key}=" "$CONFIG_FILE"; then
+        CFG_KEY="$key" CFG_LINE="$line" awk '
+            !done && index($0, ENVIRON["CFG_KEY"] "=") == 1 { print ENVIRON["CFG_LINE"]; done = 1; next }
+            { print }' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && cat "$CONFIG_FILE.tmp" > "$CONFIG_FILE"
+        rm -f "$CONFIG_FILE.tmp"
+    else
+        printf '%s\n' "$line" >> "$CONFIG_FILE"
+    fi
+}
+
 # Write only when the answer differs from what the line already evaluates to,
 # so accepting a default never flattens an expression into a literal.
 cfg_update() {
@@ -145,6 +160,114 @@ ask_password() {
 # --- Host tools ---------------------------------------------------------------
 # check_prereqs: the packages a clean Ubuntu may lack (curl, python3-venv, ...).
 source "$SCRIPT_DIR/lib-prereqs.sh"
+# split_dns_target, dns_names_check: the domain's DNS (infra/lib-dns.sh; functions only).
+source "$SCRIPT_DIR/lib-dns.sh"
+
+# --- Which address, and who answers DNS ----------------------------------------
+# PLATFORM_IP is one line, an expression. The template's prefers the Tailscale address
+# whenever Tailscale is up, whatever USE_TAILSCALE says; that is right while the domain
+# depends on Tailscale (name-dns must bind where split DNS sends the lookups) and wrong
+# for an install that is LAN only on purpose, where Tailscale coming up later (or being
+# up already) would move every name, name-dns and the hosts block onto an address the
+# LAN cannot reach. So the domain question writes one of two lines: the template's when
+# the platform is reached through Tailscale, PLATFORM_IP_LAN_LINE (the LAN address,
+# as _LAN_IP is found) when it is not. A PLATFORM_IP line that is neither (set by hand)
+# is never rewritten.
+PLATFORM_IP_TS_LINE="$(grep -m1 '^PLATFORM_IP=' "$EXAMPLE_FILE")"
+read -r PLATFORM_IP_LAN_LINE <<'EOF_LAN'
+PLATFORM_IP="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' | grep . || hostname -I | awk '{print $1}')"
+EOF_LAN
+
+# platform_ip_follow tailscale|lan — USE_TAILSCALE and the PLATFORM_IP line that goes with it.
+platform_ip_follow() {
+    local cur
+    cur="$(grep -m1 '^PLATFORM_IP=' "$CONFIG_FILE")"
+    if [[ "$1" == tailscale ]]; then
+        cfg_set USE_TAILSCALE "true"
+        [[ "$cur" == "$PLATFORM_IP_LAN_LINE" ]] && cfg_set_line PLATFORM_IP "$PLATFORM_IP_TS_LINE"
+    else
+        cfg_set USE_TAILSCALE "false"
+        [[ -z "$cur" || "$cur" == "$PLATFORM_IP_TS_LINE" ]] && cfg_set_line PLATFORM_IP "$PLATFORM_IP_LAN_LINE"
+    fi
+    if [[ -n "$cur" && "$cur" != "$PLATFORM_IP_TS_LINE" && "$cur" != "$PLATFORM_IP_LAN_LINE" ]]; then
+        info "${YELLOW}PLATFORM_IP is set by hand ($(cfg_get PLATFORM_IP)); it is left as it is.${NC}"
+    fi
+    return 0
+}
+
+# domain_dns DOMAIN CURRENT PROJECT_NAME TS_IP LAN_IP — after the domain question: LOCAL_DNS
+# (does the platform answer DNS for the domain itself?), USE_TAILSCALE and PLATFORM_IP.
+#   *.nip.io                  LOCAL_DNS false (public DNS answers); Tailscale when it is
+#                             the Tailscale IP's nip.io name, else LAN
+#   the project name          LOCAL_DNS true, Tailscale (split DNS; offered only with it)
+#   any other (custom) domain who answers DNS for it:
+#     Tailscale split DNS already sends it to this server's Tailscale IP: the platform
+#       must answer, so LOCAL_DNS true and Tailscale, without asking (fresh install of
+#       20 Nov 2026: that route with nothing on port 53 made every lookup hang);
+#     else asked: 1) this platform, on this server (default) → LOCAL_DNS true; 2) a DNS
+#       server elsewhere with an A record per name → LOCAL_DNS false; then, when Tailscale
+#       is up, which address other devices use (Tailscale default, or the LAN).
+domain_dns() {
+    local v="$1" cur="$2" name="$3" ts="$4" lan="$5" route via who def
+    if [[ "$v" == *.nip.io ]]; then
+        cfg_set LOCAL_DNS "false"
+        [[ -n "$ts" && "$v" == "${ts}.nip.io" ]] && via=tailscale || via=lan
+    elif [[ -n "$ts" && "$v" == "$name" ]]; then
+        cfg_set LOCAL_DNS "true"; via=tailscale
+    else
+        route="$(split_dns_target "$v" | paste -sd ' ')"
+        if [[ -n "$ts" && " $route " == *" $ts "* ]]; then
+            info "Tailscale split DNS already sends '$v' to this server ($ts): the platform answers DNS"
+            info "for it there and maps its names in this machine's /etc/hosts (LOCAL_DNS=true)."
+            cfg_set LOCAL_DNS "true"; via=tailscale
+        else
+            if [[ -n "$route" ]]; then
+                info "${YELLOW}Tailscale split DNS sends '$v' to $route, which is not this server${ts:+ ($ts)}.${NC}"
+                info "${YELLOW}If this server replaces that one, change it at https://login.tailscale.com/admin/dns after the install.${NC}"
+            fi
+            echo ""
+            info "Who answers DNS for *.${v} (portal.${v}, keycloak.${v}, ...)?"
+            info "  1) this platform, on this server: Tailscale split DNS or your LAN router sends"
+            info "     lookups for ${v} here, or nothing is set up yet (until it is, only this"
+            info "     machine resolves the names, through /etc/hosts)"
+            info "  2) a DNS server elsewhere that already has an A record for every <service>.${v}"
+            info "     (or a wildcard *.${v}) pointing at this server"
+            def=1
+            [[ "$v" == "$cur" && "$(cfg_get LOCAL_DNS)" == "false" ]] && def=2
+            while true; do
+                ask who "Choice" "$def"
+                [[ "$who" == 1 || "$who" == 2 ]] && break
+            done
+            [[ "$who" == 1 ]] && cfg_set LOCAL_DNS "true" || cfg_set LOCAL_DNS "false"
+            if [[ -n "$ts" ]]; then
+                echo ""
+                info "Which address of this server do other devices use for ${v}?"
+                info "  1) the Tailscale address ${ts}: every device on your tailnet"
+                info "  2) the LAN address ${lan:-(none found)}: the local network only"
+                def=1
+                [[ "$v" == "$cur" && "$(cfg_get USE_TAILSCALE)" == "false" ]] && def=2
+                while true; do
+                    ask who "Choice" "$def"
+                    [[ "$who" == 1 || "$who" == 2 ]] && break
+                done
+                [[ "$who" == 1 ]] && via=tailscale || via=lan
+            else
+                via=lan
+            fi
+        fi
+    fi
+    platform_ip_follow "$via"
+    if [[ "$(cfg_get LOCAL_DNS)" == "true" && "$v" != *.nip.io && "$v" != "$name" ]]; then
+        if [[ "$via" == tailscale ]]; then
+            info "Other devices: Tailscale split DNS sends ${v} to ${ts} (the steps are shown at the end of the install)."
+        else
+            info "Other devices: the LAN router must send lookups for ${v} to $(cfg_get PLATFORM_IP) (shown at the end of the install)."
+        fi
+    elif [[ "$(cfg_get LOCAL_DNS)" == "false" && "$v" != *.nip.io ]]; then
+        info "Make every <service>.${v} (or *.${v}) resolve to $(cfg_get PLATFORM_IP); the install checks it."
+    fi
+    return 0
+}
 
 # --- Tailscale ----------------------------------------------------------------
 
@@ -366,6 +489,24 @@ grep -q '^MQTT_EXPLORER_PASS=' "$CONFIG_FILE" \
 check_prereqs
 check_tailscale
 
+# Two notes on an existing config.env, never a change (a complete file exits below
+# without a question): review them with ./deploy-infra.sh --configure.
+domain_notes() {
+    local ts dom ip
+    dom="$(cfg_get DOMAIN)"; ip="$(cfg_get PLATFORM_IP)"
+    [[ -n "$dom" && -n "$ip" ]] || return 0
+    ts="$(tailscale ip -4 2>/dev/null | head -1)"
+    if [[ "$(cfg_get USE_TAILSCALE)" == "false" && -n "$ts" && "$ip" == "$ts" ]]; then
+        echo -e "${YELLOW}Note: PLATFORM_IP is this machine's Tailscale address ($ts) although USE_TAILSCALE is false: the names, name-dns and the onboarding wizard use it. If the platform is reached through Tailscale, or should be on the LAN only, answer the domain questions again: ./deploy-infra.sh --configure${NC}"
+    fi
+    if [[ "$dom" != *.nip.io && "$(cfg_get LOCAL_DNS)" != "true" ]] \
+       && ! DNS_CHECK_TIMEOUT=3 LOCAL_DNS=false dns_names_check "$dom" "$ip" "portal.$dom" >/dev/null 2>&1; then
+        echo -e "${YELLOW}Note: portal.$dom does not resolve to this server and LOCAL_DNS is not true: ${DNS_CHECK_TODO:-set LOCAL_DNS=\"true\", or create the A records}${NC}"
+    fi
+    return 0
+}
+domain_notes
+
 # Generated, never asked — so filled before the early exit below, on every run:
 # the qa person's initial password (shown once in the credentials box, replaced
 # at first sign-in) and Keycloak's break-glass console account (its own name and
@@ -456,7 +597,7 @@ if wanted DOMAIN || [[ -n "$FORCE_DOMAIN" ]]; then
     [[ -n "$_cur" ]]    && { _opts+=("keep current      ${_cur}");       _vals+=("$_cur"); }
     [[ -n "$_ts_ip"  && "${_ts_ip}.nip.io"  != "$_cur" ]] && { _opts+=("Tailscale IP      ${_ts_ip}.nip.io"); _vals+=("${_ts_ip}.nip.io"); }
     [[ -n "$_lan_ip" && "${_lan_ip}.nip.io" != "$_cur" ]] && { _opts+=("LAN IP            ${_lan_ip}.nip.io (local network only)"); _vals+=("${_lan_ip}.nip.io"); }
-    _opts+=("custom domain     (you provide DNS or /etc/hosts entries)"); _vals+=("")
+    _opts+=("custom domain     (a domain of your own; the platform can answer its DNS)"); _vals+=("")
     for i in "${!_opts[@]}"; do info "  $((i+1))) ${_opts[$i]}"; done
     while true; do
         ask _c "Choice" "1"
@@ -467,17 +608,8 @@ if wanted DOMAIN || [[ -n "$FORCE_DOMAIN" ]]; then
         ask _v "Domain (e.g. medcea.lab.example.org)" ""
     done
     cfg_update DOMAIN "$_v"
-    # LOCAL_DNS: the platform serves DNS for a name of our own, on the Tailscale IP.
-    if [[ -n "$_ts_ip" && "$_v" == "$_name" ]]; then
-        cfg_set LOCAL_DNS "true"
-    elif [[ "$_v" != "$_cur" ]]; then
-        cfg_set LOCAL_DNS "false"
-    fi
-    if [[ -n "$_ts_ip" && ( "$(cfg_get DOMAIN)" == "${_ts_ip}.nip.io" || "$(cfg_get LOCAL_DNS)" == "true" ) ]]; then
-        cfg_set USE_TAILSCALE "true"
-    else
-        cfg_set USE_TAILSCALE "false"
-    fi
+    # LOCAL_DNS, USE_TAILSCALE and the PLATFORM_IP line (domain_dns, above).
+    domain_dns "$_v" "$_cur" "$_name" "$_ts_ip" "$_lan_ip"
     if [[ "$(cfg_get LOCAL_DNS)" == "true" ]]; then
         info "Open services as ${BOLD}https://ai-workbench.$(cfg_get DOMAIN)${NC} — type the https:// the first time;"
         info "browsers treat a one-word ending as a search until they have visited it."

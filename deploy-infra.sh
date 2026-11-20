@@ -569,6 +569,9 @@ $MK8S kubectl create secret tls mosquitto-tls -n "$NAMESPACE" \
 # cluster rather than as a host package: nothing to apt-get, --reset removes it,
 # and kubelet restarts it if Tailscale comes up after it.
 source "$SCRIPT_DIR/infra/lib-dns.sh"
+# What this run could not finish but went on past: listed instead of SUCCESS at the end,
+# one "Problem: …" line each, which install.sh reads back from this log (infra_problems_hint).
+_PROBLEMS=()
 if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
     echo -e "\n${GREEN}[DNS] Name server for '$DOMAIN' on $PLATFORM_IP:53...${NC}"
     # $(…) drops the file's trailing newline, so the string — and its checksum,
@@ -584,6 +587,7 @@ if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
     else
         echo -e "${RED}  name-dns is running but did not answer for portal.$DOMAIN on $PLATFORM_IP:53.${NC}"
         echo "  Check: $MK8S kubectl logs -n $NAMESPACE deploy/name-dns"
+        _PROBLEMS+=("name-dns did not answer for portal.$DOMAIN on $PLATFORM_IP:53, so other devices cannot resolve *.$DOMAIN: $MK8S kubectl logs -n $NAMESPACE deploy/name-dns")
     fi
     echo -e "${YELLOW}  Mapping $DOMAIN names to $PLATFORM_IP in /etc/hosts (this machine)...${NC}"
     hosts_block "$DOMAIN" "${_SVC_DOMAINS[@]}" "$PLATFORM_IP"
@@ -600,6 +604,18 @@ else
     # the managed hosts entries out, so nothing answers for a stale name.
     $MK8S kubectl delete deployment,configmap name-dns -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
     hosts_block
+fi
+# Does this machine resolve the platform's names to itself? Every later readiness wait
+# connects to PLATFORM_IP directly (wait_for_http), so a name that does not resolve no
+# longer stops the deploy; it is said here and listed at the end, since nobody can open
+# the platform by name until it is fixed. Never fails the deploy: DNS records may be made
+# afterwards. Each lookup is bounded (a DNS route to a server that does not answer hangs).
+echo -e "\n${GREEN}[DNS] Do the platform's names resolve on this machine?${NC}"
+if dns_names_check "$DOMAIN" "$PLATFORM_IP" "$PORTAL_DOMAIN" "$KEYCLOAK_DOMAIN"; then
+    echo -e "${GREEN}  yes, to this server${NC}"
+else
+    echo -e "${RED}  $DNS_CHECK_TODO${NC}"
+    _PROBLEMS+=("$DNS_CHECK_TODO")
 fi
 
 echo -e "\n${GREEN}--- Deploying MedCEA to $NAMESPACE ---${NC}"
@@ -2108,6 +2124,7 @@ if [[ "${WORKBENCH_ENABLED:-true}" == "true" ]]; then
     elif [[ "$_WB_RC" != 0 ]]; then
         echo -e "${RED}The workbench failed to deploy. The rest of the platform is up;${NC}"
         echo -e "${RED}re-run ./infra/deploy-workbench.sh once the cause is fixed.${NC}"
+        _PROBLEMS+=("the AI workbench failed to deploy (exit $_WB_RC, output above): re-run ./infra/deploy-workbench.sh once the cause is fixed")
     fi
     rm -f "$_WB_OUT"
 else
@@ -2148,9 +2165,16 @@ policy_source_finish "$NAMESPACE" infra
 # =============================================================================
 # SUMMARY
 # =============================================================================
-echo -e "\n${GREEN}=================================================${NC}"
-echo -e "${GREEN} SUCCESS: $NAMESPACE is live!${NC}"
-echo -e "${GREEN}=================================================${NC}"
+if [[ ${#_PROBLEMS[@]} -eq 0 ]]; then
+    echo -e "\n${GREEN}=================================================${NC}"
+    echo -e "${GREEN} SUCCESS: $NAMESPACE is live!${NC}"
+    echo -e "${GREEN}=================================================${NC}"
+else
+    echo -e "\n${RED}=================================================${NC}"
+    echo -e "${RED} FINISHED WITH PROBLEMS: $NAMESPACE is deployed, but${NC}"
+    echo -e "${RED}=================================================${NC}"
+    for _p in "${_PROBLEMS[@]}"; do echo -e "${RED}Problem: ${_p}${NC}"; done
+fi
 echo ""
 echo -e "${GREEN}  START HERE${NC}"
 echo -e "${GREEN}  ----------${NC}"
@@ -2212,7 +2236,21 @@ echo ""
 # =============================================================================
 # 100.100.100.100 is Tailscale's resolver on this node: if it already answers
 # for $DOMAIN, the admin console setting is in place for every device.
-if [[ "${LOCAL_DNS:-false}" == "true" ]]; then
+if [[ "${LOCAL_DNS:-false}" == "true" && "${USE_TAILSCALE:-}" == "false" ]]; then
+    # LAN only on purpose (infra/configure.sh): the router, not Tailscale, sends other
+    # devices' lookups for $DOMAIN here.
+    echo ""
+    echo -e "${YELLOW}=================================================${NC}"
+    echo -e "${YELLOW} ONE STEP LEFT: make *.$DOMAIN work on your other devices${NC}"
+    echo -e "${YELLOW}=================================================${NC}"
+    echo "  This machine already resolves the names (/etc/hosts). For laptops and phones on"
+    echo "  the local network, have the LAN router send lookups for '$DOMAIN' to this server:"
+    echo "  in its DNS settings, a conditional forward (or a DNS server for that domain only)"
+    echo "  for '$DOMAIN' → $PLATFORM_IP. Without that, give each device $PLATFORM_IP as its"
+    echo "  DNS server, or map the names in its own hosts file."
+    echo ""
+    echo "  Test from any device:  nslookup portal.$DOMAIN   → $PLATFORM_IP"
+elif [[ "${LOCAL_DNS:-false}" == "true" ]]; then
     echo ""
     if [[ "$(dns_query 100.100.100.100 "portal.$DOMAIN" 2>/dev/null)" == "$PLATFORM_IP" ]]; then
         echo -e "${GREEN}  ✓ Tailscale split DNS is active: every tailnet device resolves *.$DOMAIN.${NC}"

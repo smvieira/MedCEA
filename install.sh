@@ -282,6 +282,39 @@ workbench_move_hint() {
     return 0
 }
 
+# infra_problems — the "Problem: …" lines of the newest infrastructure log (not a reset's
+# or a --policy-only's), colours stripped: what deploy-infra.sh went on past (the platform's
+# names not resolving on this machine, name-dns not answering, a failed workbench) and listed
+# instead of its SUCCESS banner. Nothing when there is no log or no problem.
+infra_problems() {
+    local log
+    log="$(ls -t logs/deploy-infra-[0-9]*.log 2>/dev/null | head -1)"
+    [[ -n "$log" ]] || return 0
+    sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null | sed -n 's/^Problem: //p'
+    return 0
+}
+
+# install_verdict HEALTH_RC — the closing line of an install: "MedCEA is installed." only
+# when the newest infrastructure log lists no problem and the health check found no
+# failure; otherwise "Finished with problems" and each one as a "Still to do" line. The
+# stages that stop the install (run_stage) never get here; these are the ones that went on.
+install_verdict() {
+    local health_rc="$1" portal problems line
+    portal="$( (source ./config.env; echo "$PORTAL_DOMAIN") 2>/dev/null)"
+    problems="$(infra_problems)"
+    if [[ -z "$problems" && "$health_rc" == 0 ]]; then
+        echo -e "${GREEN}${BOLD}MedCEA is installed.${NC} Start at the service portal: https://$portal"
+        return 0
+    fi
+    echo -e "${RED}${BOLD}Finished with problems.${NC} The platform is deployed, but:"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && echo -e "${YELLOW}Still to do: $line${NC}"
+    done <<<"$problems"
+    [[ "$health_rc" == 0 ]] || echo -e "${YELLOW}Still to do: the health check found failures (above): fix them and run ./health-check.sh${NC}"
+    echo "  Service portal, once the above is done: https://$portal"
+    return 0
+}
+
 # --apps-only under IAM_DB_SERVICE_ROLES=true: the full install runs deploy-infra once more
 # after the applications (Grafana and pgAdmin onto their roles); this mode does not run the
 # infrastructure, so it says so instead. Never fails.
@@ -355,9 +388,11 @@ install)
         run_stage "2/3  Infrastructure again (Grafana and pgAdmin onto their database roles)" deploy-infra with_mk8s_group ./deploy-infra.sh
     fi
     stage "3/3  Health check"
-    with_mk8s_group ./health-check.sh || echo -e "${YELLOW}Some checks failed — see above. Services that are still starting usually pass a minute later: ./health-check.sh${NC}"
+    _health_rc=0
+    with_mk8s_group ./health-check.sh || _health_rc=$?
+    [[ $_health_rc -eq 0 ]] || echo -e "${YELLOW}Some checks failed — see above. Services that are still starting usually pass a minute later: ./health-check.sh${NC}"
     echo ""
-    echo -e "${GREEN}${BOLD}MedCEA is installed.${NC} Start at the service portal: https://$( (source ./config.env; echo "$PORTAL_DOMAIN") 2>/dev/null)"
+    install_verdict "$_health_rc"
     iam_switches_hint || true      # before the box, which stays the last thing on screen
     superset_skip_hint || true
     research_skip_hint || true
@@ -367,6 +402,9 @@ install)
     ;;
 infra)
     run_stage "Infrastructure" deploy-infra ./deploy-infra.sh $CONFIGURE
+    while IFS= read -r _line; do
+        [[ -n "$_line" ]] && echo -e "${YELLOW}Still to do: $_line${NC}"
+    done <<<"$(infra_problems)"
     echo -e "${YELLOW}The applications are not installed yet: ./install.sh --apps-only${NC}"
     research_skip_hint || true
     workbench_move_hint || true
