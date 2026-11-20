@@ -1,0 +1,19 @@
+# E39's own comparison (manual, exercise E39): the five controllers at their defaults on
+# the one-hour smoke scenario, two seeds, three clock offsets: 5 x 2 x 3 = 30 runs. It is
+# the uncalibrated half of research Phase 3's comparison (e39_compare_calibrated.yaml is
+# the other) and reproduces E39's result digests: with the host's Python (FLC and MPC
+# fall back, 12 invalid) b6007996f0c56bca…, in research/.venv a96b20d15d6c57ba…, and E39's
+# spec digest 0b5556d5d439… (the scenario is inlined, so the path's spelling is not hashed).
+#
+#   research/.venv/bin/python -m research.harness.campaign research/harness/campaigns/e39_compare.yaml
+description: E39 controller comparison, smoke scenario
+scenarios:
+  - ../scenarios/smoke_air_temperature.yaml
+controllers:
+  - {code: IF_THEN_ELSE}
+  - {code: PID}
+  - {code: Q_LEARNING}
+  - {code: FLC}
+  - {code: MPC}
+seeds: [1, 2]
+clock_offsets_s: [0, 5, 9.99]

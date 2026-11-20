@@ -17,6 +17,10 @@
   tick, and MPC (after the sign fix) heats a chamber below the band.
 - Campaign: grid expansion, byte-identical results.jsonl for one and two workers, the
   CPU-hour cap, the manifest.
+- Digests (research Phase 3, sensor model v2): the shipped specs' digests are those of
+  42417c3, and e39_compare.yaml reproduces E39's result digest with the host's Python
+  (always) and in research/.venv (skipped without it); the manifest's code block names
+  sensor_model_version; scenarios may override self_heating_c and bias_sd.
 
 Run: cd <repo> && python3 -m unittest tests.test_research_harness
 """
@@ -547,6 +551,88 @@ class Campaign(unittest.TestCase):
                         if x is not None:
                             p[next(iter(c["params_grid"]))] = x
                         L.check(c["code"], p)
+
+
+# Captured at 42417c3 (before research Phase 3), E39's spec with the scenario path written
+# absolute (spec digest 0b5556d5…): the host's Python (FLC and MPC fall back) and research/.venv.
+SPEC_DIGESTS = {
+    "smoke.yaml": "4ad2a2d5af586c58b2c947485d110903f73a8efd90692cc628eb5fcc0c55f596",
+    "fruiting_compare.yaml": "819d7d198e16604d343e4515e02be4d308e39bb548bfc610ce8890d91b755afb",
+    "e39_compare.yaml": "0b5556d5d43902bc3f6e7365913f054e8475ae280e84f355db5706eb80d64428",
+}
+E39_HOST_DIGEST = "b6007996f0c56bca082975f5aae76fe1c600d50cc507a5623794fb8da5f4c381"
+E39_VENV_DIGEST = "a96b20d15d6c57ba72eb5f1acf73edf9835f3921cc30846919156e441787a79f"
+
+
+class Digests(unittest.TestCase):
+    def test_existing_specs_digests_unchanged(self):
+        for name, want in SPEC_DIGESTS.items():
+            spec = campaign.load_spec(os.path.join(CAMPAIGNS, name))
+            self.assertEqual(hashlib.sha256(campaign.canonical(spec).encode()).hexdigest(), want, name)
+        spec = campaign.load_spec(os.path.join(CAMPAIGNS, "e39_compare.yaml"))
+        self.assertEqual(len(campaign.expand(spec)), 30)
+        self.assertEqual([c["code"] for c in spec["controllers"]], ["IF_THEN_ELSE", "PID", "Q_LEARNING", "FLC", "MPC"])
+        self.assertTrue(all(not c["params"] and not c["params_grid"] for c in spec["controllers"]))
+        with open(os.path.join(CAMPAIGNS, "e39_compare.yaml"), encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+        self.assertEqual(raw["scenarios"], ["../scenarios/smoke_air_temperature.yaml"])
+
+    def test_e39_result_digest_with_this_interpreter(self):
+        libs = loaded().libraries
+        present = [libs[c]["present"] for c in ("FLC", "MPC")]
+        if any(present) and not all(present):
+            self.skipTest("only one of FLC's and MPC's libraries is installed: neither baseline applies")
+        want = E39_VENV_DIGEST if all(present) else E39_HOST_DIGEST
+        d = tempfile.mkdtemp(prefix="rs-e39-")
+        self.addCleanup(shutil.rmtree, d)
+        m = campaign.run_campaign(campaign.load_spec(os.path.join(CAMPAIGNS, "e39_compare.yaml")), d,
+                                  repo_root=REPO, allow_dirty=True)
+        self.assertEqual(m["runs"], 30)
+        self.assertEqual(m["result_digest"], want)
+        self.assertEqual(m["spec_digest"], SPEC_DIGESTS["e39_compare.yaml"])
+        self.assertEqual(m["code"]["sensor_model_version"], 2)
+
+    def test_e39_result_digest_in_the_venv(self):
+        if not os.path.exists(VENV_PY):
+            self.skipTest("research/.venv does not exist (source research/lib-venv.sh && ensure_research_venv)")
+        tmp = tempfile.mkdtemp(prefix="rs-e39-venv-")
+        self.addCleanup(shutil.rmtree, tmp)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        env["TMPDIR"] = tmp
+        p = subprocess.run([VENV_PY, "-m", "research.harness.campaign", os.path.join(CAMPAIGNS, "e39_compare.yaml"),
+                            "--out", os.path.join(tmp, "out"), "--allow-dirty"],
+                           cwd=REPO, capture_output=True, text=True, env=env, timeout=1800)
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        with open(os.path.join(tmp, "out", "manifest.json"), encoding="utf-8") as f:
+            m = json.load(f)
+        self.assertEqual(m["invalid_runs"], 0)
+        self.assertEqual(m["result_digest"], E39_VENV_DIGEST)
+
+    def test_manifest_names_the_sensor_model(self):
+        from research.twin_plant import sensors
+        self.assertEqual(loaded().manifest()["sensor_model_version"], sensors.SENSOR_MODEL_VERSION)
+
+    def test_scenario_sets_the_v2_fields(self):
+        self.assertIn("self_heating_c", runner.SENSOR_FIELDS)
+        self.assertIn("bias_sd", runner.SENSOR_FIELDS)
+        base = smoke(duration_h=0.1, metrics_from_h=0)
+        sc = smoke(duration_h=0.1, metrics_from_h=0,
+                   sensors={"overrides": {"sht45": {"self_heating_c": 2.0,       # the loops' reference
+                                                    "bias_sd": {"air_humidity": 1.0, "air_temperature": 0.2}}}})
+        s = runner.normalise(copy.deepcopy(sc), loaded())
+        spec = {x.sensor_id: x for x in s["_sensor_specs"]}["sht45"]
+        self.assertEqual(spec.self_heating_c, 2.0)
+        self.assertEqual(spec.bias_sd, {"air_humidity": 1.0, "air_temperature": 0.2})
+        self.assertEqual(digest(run(sc)), digest(run(sc)))
+        self.assertNotEqual(digest(run(sc)), digest(run(base)))
+        for bad in (float("nan"), True, "2"):
+            with self.assertRaises(runner.ScenarioError):
+                runner.normalise(smoke(sensors={"overrides": {"scd30": {"self_heating_c": bad}}}), loaded())
+        with self.assertRaises(runner.ScenarioError):
+            runner.normalise(smoke(sensors={"overrides": {"sht45": {"bias_sd": {"co2": 1.0}}}}), loaded())
+        with self.assertRaises(runner.ScenarioError):
+            runner.normalise(smoke(disturbances=[{"at_h": 0.1, "kind": "ambient", "temperature": float("nan")}]),
+                             loaded())
 
 
 class Manifest(unittest.TestCase):

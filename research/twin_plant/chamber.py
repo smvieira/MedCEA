@@ -80,6 +80,13 @@ def vapour_density(t_c: float, rh: float) -> float:
     return saturation_density(t_c) * max(0.0, min(100.0, rh)) / 100.0
 
 
+def _check_number(what: str, v) -> None:
+    """ValueError unless v is a finite int or float (a bool is refused): a NaN state would
+    propagate silently through every balance."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError("%s must be a finite number, not %r" % (what, v))
+
+
 @dataclass
 class ChamberParams:
     """Every physical parameter of the chamber. Units in each comment.
@@ -222,6 +229,8 @@ class Chamber:
         unknown = sorted(k for k in initial if k not in TRUTH_KEYS)
         if unknown:
             raise ValueError("unknown initial state key(s): " + ", ".join(unknown))
+        for k, v in initial.items():
+            _check_number("initial %s" % k, v)
         p = params
         self.t_air = float(initial.get("air_temperature", p.ambient_temperature))
         self.t_sub = float(initial.get("ground_temperature", p.ambient_temperature))
@@ -355,6 +364,7 @@ class Chamber:
         if unknown:
             raise ValueError("unknown ambient key(s): " + ", ".join(unknown))
         for k, v in ambient.items():
+            _check_number("ambient %s" % k, v)
             out[k] = float(v)
         out["humidity"] = max(0.0, min(100.0, out["humidity"]))
         out["co2"] = max(0.0, out["co2"])
@@ -366,5 +376,9 @@ class Chamber:
         unknown = sorted(k for k in dist if k not in DISTURBANCE_KEYS)
         if unknown:
             raise ValueError("unknown disturbance(s): " + ", ".join(unknown))
-        return {"door_open": bool(dist.get("door_open", False)),
-                "extra_heat_w": float(dist.get("extra_heat_w", 0.0))}
+        door = dist.get("door_open", False)
+        if not isinstance(door, bool):
+            raise ValueError("disturbance door_open must be true or false, not %r" % (door,))
+        heat = dist.get("extra_heat_w", 0.0)
+        _check_number("disturbance extra_heat_w", heat)
+        return {"door_open": door, "extra_heat_w": float(heat)}

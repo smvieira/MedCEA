@@ -13,13 +13,23 @@
   arrival_t; dropout drops about dropout_p of the messages without shifting later noise;
   publish times follow interval and offset; quantisation; RH clipped.
 - Static: both modules import only the standard library.
+- Hardening (sensor model v2): a bool, a non-number or a non-finite value in a SensorSpec,
+  in a Chamber's initial state, ambient or disturbances is a ValueError, never a TypeError.
+- ModelV2: readings_due is byte-identical to 42417c3's sensors.py (loaded from git show)
+  over a long trajectory; self_heating_c raises T and recomputes RH at the same vapour
+  density without touching the stream; bias_sd draws one constant per (sensor, tag) from a
+  stream of its own, deterministic per seed, and leaves the message stream unchanged.
 
 Run: python3 -m unittest tests.test_research_plant
 """
 import ast
+import importlib.util
 import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -349,6 +359,198 @@ class Sensors(unittest.TestCase):
     def test_absent_tag_not_published(self):
         spec = sn.SensorSpec("lux", "sen0562", ("light_intensity",))
         self.assertEqual(collect(sn.SensorBank([spec]), 300), [])
+
+
+class Hardening(unittest.TestCase):
+    BAD = (True, False, "1", None, float("nan"), float("inf"), -float("inf"), [1])
+
+    def test_spec_numbers(self):
+        for field in ("publish_interval_s", "latency_s", "dropout_p", "start_offset_s", "self_heating_c"):
+            for bad in self.BAD:
+                s = sn.SensorSpec("x", "sht45", ("air_temperature",))
+                setattr(s, field, bad)
+                with self.assertRaises(ValueError, msg="%s=%r" % (field, bad)):
+                    s.validate()
+        for field in ("noise_sd", "noise_rel_sd", "quantisation", "bias", "bias_sd"):
+            for bad in self.BAD:
+                s = sn.SensorSpec("x", "sht45", ("air_temperature",))
+                setattr(s, field, {"air_temperature": bad})
+                with self.assertRaises(ValueError, msg="%s=%r" % (field, bad)):
+                    s.validate()
+            s = sn.SensorSpec("x", "sht45", ("air_temperature",))
+            setattr(s, field, [("air_temperature", 1.0)])
+            with self.assertRaises(ValueError):
+                s.validate()
+        with self.assertRaises(ValueError):
+            sn.SensorSpec("x", "sht45", ("air_temperature",), bias_sd={"co2": 1}).validate()
+        with self.assertRaises(ValueError):
+            sn.SensorSpec("x", "sht45", ("air_temperature",), bias_sd={"air_temperature": -1}).validate()
+        with self.assertRaises(ValueError):
+            sn.SensorSpec("x", "sht45", ("air_temperature",), self_heating_c=25).validate()
+        # A NaN interval would make readings_due loop forever: refused before any bank exists
+        with self.assertRaises(ValueError):
+            sn.SensorBank([sn.SensorSpec("x", "sht45", ("air_temperature",), publish_interval_s=float("nan"))])
+        sn.SensorSpec("x", "sht45", ("air_temperature",), bias={"air_temperature": -0.5},
+                      self_heating_c=-1.0, bias_sd={"air_temperature": 0.1}).validate()
+
+    def test_chamber_inputs(self):
+        for bad in self.BAD:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ch.Chamber(ch.ChamberParams(), initial={"air_temperature": bad})
+            c = ch.Chamber(ch.ChamberParams())
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                c.step(10, {}, False, ambient={"temperature": bad})
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                c.step(10, {}, False, disturbances={"extra_heat_w": bad})
+        for bad in (1, "yes", None, float("nan")):
+            with self.assertRaises(ValueError):
+                ch.Chamber(ch.ChamberParams()).step(10, {}, False, disturbances={"door_open": bad})
+        c = ch.Chamber(ch.ChamberParams(), initial={"air_temperature": 18, "co2": 900.5})
+        c.step(10, {}, False, ambient={"temperature": 21, "humidity": 40, "co2": 410},
+               disturbances={"door_open": False, "extra_heat_w": 5})
+
+
+BASE_COMMIT = "42417c3"
+
+
+def old_sensors_module(test):
+    """42417c3's research/twin_plant/sensors.py, loaded from git show (skip without it)."""
+    if shutil.which("git") is None:
+        test.skipTest("git is not installed")
+    p = subprocess.run(["git", "-C", ROOT, "show", "%s:research/twin_plant/sensors.py" % BASE_COMMIT],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        test.skipTest("commit %s is not in this checkout" % BASE_COMMIT)
+    tmp = tempfile.mkdtemp(prefix="rs-sensors-v1-")
+    test.addCleanup(shutil.rmtree, tmp)
+    path = os.path.join(tmp, "sensors_v1.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(p.stdout)
+    spec = importlib.util.spec_from_file_location("sensors_v1_%s" % BASE_COMMIT, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod                 # dataclasses look the module up while defining
+    test.addCleanup(sys.modules.pop, spec.name, None)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def specs_of(mod):
+    out = mod.default_specs()
+    out.append(mod.SensorSpec("lossy", "scd30", ("co2", "air_temperature", "air_humidity"),
+                              noise_sd={"co2": 7.0, "air_temperature": 0.3, "air_humidity": 2.0},
+                              noise_rel_sd={"co2": 0.02}, quantisation={"co2": 1.0},
+                              bias={"air_temperature": 1.5, "air_humidity": -4.0},
+                              publish_interval_s=3.02, latency_s=1.2, dropout_p=0.07, start_offset_s=0.4))
+    out.append(mod.SensorSpec("fast", "sht45", ("air_temperature", "air_humidity"),
+                              noise_sd={"air_temperature": 0.02, "air_humidity": 0.3},
+                              quantisation={"air_temperature": 0.01, "air_humidity": 0.01},
+                              publish_interval_s=2.988, latency_s=0.8))
+    return out
+
+
+def trajectory(mod, seed, seconds=6 * 3600):
+    """Every message of a bank sampling a moving chamber, 1-s plant steps, a heater and a
+    humidifier switched on and off."""
+    c = ch.Chamber(ch.ChamberParams(), initial={"air_temperature": 16, "air_humidity": 92, "co2": 1500})
+    bank = mod.SensorBank(specs_of(mod), seed=seed)
+    out = list(bank.readings_due(0.0, c.truth()))
+    t = 0
+    while t < seconds:
+        relays = {"air_heater": int((t // 1800) % 2 == 0), "air_humidifier": int((t // 2700) % 2 == 1),
+                  "co2_fan": int((t // 3600) % 3 == 2)}
+        c.step(1.0, relays, False)
+        t += 1
+        out.extend(bank.readings_due(float(t), c.truth()))
+    return out
+
+
+class ModelV2(unittest.TestCase):
+    def test_version(self):
+        self.assertEqual(sn.SENSOR_MODEL_VERSION, 2)
+        self.assertIn("self_heating_c", sn.SensorSpec.__dataclass_fields__)
+        self.assertIn("bias_sd", sn.SensorSpec.__dataclass_fields__)
+
+    def test_readings_due_byte_identical_to_version_1(self):
+        old = old_sensors_module(self)
+        self.assertFalse(hasattr(old, "SENSOR_MODEL_VERSION"))
+        for seed in (0, 1, 7):
+            a = trajectory(old, seed)
+            b = trajectory(sn, seed)
+            self.assertGreater(len(a), 20000)
+            self.assertEqual(repr(a).encode(), repr(b).encode(), "seed %d" % seed)
+
+    def _one(self, **kw):
+        spec = sn.SensorSpec("s", "scd30", ("air_temperature", "air_humidity", "co2"), **kw)
+        return sn.SensorBank([spec], seed=3)
+
+    def test_self_heating_humidity_physics(self):
+        truth = {"air_temperature": 20.0, "air_humidity": 53.0, "co2": 800.0}
+        msgs = {m[0]: m[2] for m in self._one(self_heating_c=2.1).readings_due(0.0, truth)}
+        self.assertEqual(msgs["air_temperature"], 22.1)
+        rh = 53.0 * ch.saturation_density(20.0) / ch.saturation_density(22.1)
+        self.assertEqual(msgs["air_humidity"], round(rh, 2))
+        self.assertEqual(msgs["co2"], 800.0)
+        # Same water vapour density as the air, only warmer: about -6.6 %RH at 53 %RH
+        self.assertAlmostEqual(ch.vapour_density(22.1, rh), ch.vapour_density(20.0, 53.0), places=9)
+        self.assertLess(rh - 53.0, -6.0)
+        self.assertGreater(rh - 53.0, -7.0)
+        # The dependence on RH: proportional, so the offset grows with the humidity
+        hi = 90.0 * ch.saturation_density(20.0) / ch.saturation_density(22.1) - 90.0
+        self.assertLess(hi, rh - 53.0)
+        # Applied before clipping: a negative self-heating near saturation is clipped at 100
+        msgs = {m[0]: m[2] for m in self._one(self_heating_c=-3.0).readings_due(0.0, dict(truth, air_humidity=95.0))}
+        self.assertEqual(msgs["air_humidity"], 100.0)
+        # Humidity without temperature in the truth cannot be corrected: refused
+        with self.assertRaises(ValueError):
+            sn.SensorBank([sn.SensorSpec("h", "sht45", ("air_humidity",), self_heating_c=1.0)]).readings_due(
+                0.0, {"air_humidity": 50.0})
+
+    def test_self_heating_draws_nothing(self):
+        noise = {"air_temperature": 0.2, "air_humidity": 1.0, "co2": 10.0}
+        truth = {"air_temperature": 20.0, "air_humidity": 53.0, "co2": 800.0}
+        a = collect(self._one(noise_sd=noise), 3000, truth=truth)
+        b = collect(self._one(noise_sd=noise, self_heating_c=2.0), 3000, truth=truth)
+        self.assertEqual(len(a), len(b))
+        for x, y in zip(a, b):
+            self.assertEqual((x[0], x[1], x[3]), (y[0], y[1], y[3]))
+            if x[0] == "air_temperature":
+                self.assertAlmostEqual(y[2] - x[2], 2.0, delta=0.011)
+            if x[0] == "co2":
+                self.assertEqual(x[2], y[2])
+
+    def test_bias_sd_deterministic_and_independent(self):
+        noise = {"air_temperature": 0.2, "air_humidity": 1.0, "co2": 10.0}
+        bsd = {"air_temperature": 0.1, "co2": 20.0}
+        truth = {"air_temperature": 20.0, "air_humidity": 53.0, "co2": 800.0}
+
+        def bank(seed, **kw):
+            specs = [sn.SensorSpec("s", "scd30", ("air_temperature", "air_humidity", "co2"),
+                                   noise_sd=noise, dropout_p=0.2, **kw),
+                     sn.SensorSpec("t", "sht45", ("air_temperature",), noise_sd={"air_temperature": 0.05})]
+            return sn.SensorBank(specs, seed=seed)
+
+        b1, b1b, b2 = bank(1, bias_sd=bsd), bank(1, bias_sd=bsd), bank(2, bias_sd=bsd)
+        self.assertEqual(b1.drawn_bias(), b1b.drawn_bias())
+        self.assertNotEqual(b1.drawn_bias(), b2.drawn_bias())
+        self.assertEqual(set(b1.drawn_bias()), {"s"})
+        self.assertEqual(set(b1.drawn_bias()["s"]), {"air_temperature", "co2"})
+        self.assertEqual(b1.drawn_bias()["s"]["co2"], sn.bias_draw(1, "s", "co2", 20.0))
+        # A zero sd draws nothing, like no entry
+        self.assertEqual(bank(1, bias_sd={"co2": 0.0}).drawn_bias(), {})
+
+        plain = collect(bank(1), 3000, truth=truth)
+        biased = collect(b1, 3000, truth=truth)
+        self.assertEqual(collect(bank(1, bias_sd=bsd), 3000, truth=truth), biased)
+        # The message stream (dropouts, noise draws, times) is unchanged; only the constant moves
+        self.assertEqual([(m[0], m[1], m[3]) for m in plain], [(m[0], m[1], m[3]) for m in biased])
+        drawn = b1.drawn_bias()["s"]
+        for x, y in zip(plain, biased):
+            if x[1] == "s" and x[0] in drawn:
+                self.assertAlmostEqual(y[2] - x[2], drawn[x[0]], delta=0.011)
+            else:
+                self.assertEqual(x[2], y[2])
+        # Equal to the version-1 stream when bias_sd is absent
+        self.assertEqual(collect(bank(1, bias_sd={}), 3000, truth=truth), plain)
 
 
 class Static(unittest.TestCase):

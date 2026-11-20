@@ -34,6 +34,7 @@ import types
 import yaml
 
 from .. import contract
+from ..twin_plant import sensors
 
 # The contract's sources, relative to the repository root (plan, "Coupling contract" 3).
 ALGORITHMS_DIR = "schd/cea/algorithms"
@@ -212,6 +213,7 @@ class Loaded:
                 "dirty_files": self.git["dirty_files"], "blobs": dict(sorted(self.blobs.items())),
                 "libraries": library_versions(), "controller_libraries": self.libraries,
                 "python": sys.version.split()[0], "contract_version": contract.CONTRACT_VERSION,
+                "sensor_model_version": sensors.SENSOR_MODEL_VERSION,
                 "sandbox": dict(self.sandbox)}
 
 

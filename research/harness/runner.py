@@ -72,6 +72,7 @@ from __future__ import annotations
 import contextlib
 import heapq
 import io
+import math
 import os
 
 from ..twin_plant.chamber import RELAYS, TRUTH_KEYS, Chamber, ChamberParams
@@ -91,7 +92,7 @@ DISTURBANCE_KINDS = {"door_open": {"at_h", "kind", "duration_min"},
                      "extra_heat": {"at_h", "kind", "duration_min", "watts"},
                      "ambient": {"at_h", "kind", "temperature", "humidity", "co2"}}
 SENSOR_FIELDS = {"noise_sd", "noise_rel_sd", "quantisation", "bias", "publish_interval_s",
-                 "latency_s", "dropout_p", "start_offset_s"}
+                 "latency_s", "dropout_p", "start_offset_s", "self_heating_c", "bias_sd"}
 LIGHT = "light"
 
 DEFAULT_REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -103,6 +104,10 @@ class ScenarioError(ValueError):
 
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _finite(v):
+    return _num(v) and math.isfinite(v)
 
 
 # ── the scenario ─────────────────────────────────────────────────────────────────
@@ -224,8 +229,10 @@ def normalise(scenario, loaded):
             raise ScenarioError("disturbance %s needs at_h >= 0" % kind)
         if kind in ("door_open", "extra_heat") and (not _num(d.get("duration_min")) or d["duration_min"] <= 0):
             raise ScenarioError("disturbance %s needs duration_min > 0" % kind)
-        if kind == "extra_heat" and not _num(d.get("watts")):
+        if kind == "extra_heat" and not _finite(d.get("watts")):
             raise ScenarioError("disturbance extra_heat needs watts")
+        if kind == "ambient" and any(not _finite(d[k]) for k in ("temperature", "humidity", "co2") if k in d):
+            raise ScenarioError("disturbance ambient: temperature, humidity and co2 must be finite numbers")
         dist.append(dict(d))
     s["_disturbances"] = sorted(dist, key=lambda d: d["at_h"])
     s["_warnings"] = warnings
