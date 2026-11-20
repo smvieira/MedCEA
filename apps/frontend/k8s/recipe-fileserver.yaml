@@ -50,20 +50,47 @@ data:
                 return RECIPES_DIR, None, False  # invalid
             return RECIPES_DIR, fname, False
 
+    _NO_NAME = {getattr(socket, n) for n in ('EAI_NONAME', 'EAI_NODATA') if hasattr(socket, n)}
+
+    def resolve_bounded(host, timeout):
+        """None when host resolves (IPv4), 'unresolved' for a definite no-such-name
+        answer, 'timeout' when the lookup does not finish within timeout seconds or
+        fails any other way. The lookup runs in a daemon thread, so a stuck resolver
+        never holds the caller longer than timeout."""
+        import threading
+        box = {}
+        def look():
+            try:
+                socket.getaddrinfo(host, None, socket.AF_INET)
+                box['ok'] = True
+            except socket.gaierror as e:
+                box['err'] = e.errno
+            except Exception:
+                box['err'] = None
+        t = threading.Thread(target=look, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            return 'timeout'
+        if box.get('ok'):
+            return None
+        return 'unresolved' if box.get('err') in _NO_NAME else 'timeout'
+
     def check_host(host, port=None, timeout=3):
         """ICMP ping via subprocess. Returns (online, latency_ms, error).
 
         A name the cluster's DNS (the router's) cannot resolve answers the error
         'unresolved', apart from a host that does not answer: the Configuration page
         then tries the board's last reported address (a router still holding a
-        board's old DHCP name, 20 Nov 2026)."""
+        board's old DHCP name, 20 Nov 2026). The lookup is bounded by `timeout`
+        (this server answers one request at a time, so an unbounded lookup against
+        a router that stops answering would hold every file route): only a definite
+        "no such name" is 'unresolved'; a lookup that times out or fails otherwise
+        is 'timeout'."""
         import subprocess
-        try:
-            socket.getaddrinfo(host, None, socket.AF_INET)
-        except socket.gaierror:
-            return False, None, 'unresolved'
-        except Exception:
-            pass
+        verdict = resolve_bounded(host, timeout)
+        if verdict is not None:
+            return False, None, verdict
         t0 = time.monotonic()
         try:
             r = subprocess.run(

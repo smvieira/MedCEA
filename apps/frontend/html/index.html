@@ -2586,7 +2586,8 @@
         cell.innerHTML = '<span style="color:' + ONLINE_COLOURS[v.colour] + ';font-size:1rem">●</span>';
         cell.title = v.title;
       } catch(e) {
-        cell.innerHTML = '<span style="color:#f59e0b;font-size:1rem">●</span>';
+        // grey, not amber: amber means "answers at its last reported address"
+        cell.innerHTML = '<span style="color:#94a3b8;font-size:1rem">●</span>';
         cell.title = 'Check failed: ' + e.message;
       }
     }

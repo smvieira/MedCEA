@@ -8,8 +8,9 @@ address (20 Nov 2026), offline.
 - Static: checkDeviceOnline asks for the last address only after an 'unresolved' answer,
   through api() (a refused read gives no fallback); the query matches the partial index
   in medcea_db_008b_index.sql (device_dns, newest timestamp, msg_type HB/TS).
-- platform-api's check_host (from the recipe-fileserver ConfigMap) answers 'unresolved'
-  for a name that does not resolve, before it pings.
+- platform-api's check_host (from the recipe-fileserver ConfigMap), with the resolver
+  replaced: a definite no-such-name answer is 'unresolved', a resolver failure is
+  'timeout', and a stuck lookup returns within the check's timeout.
 
 Run: python3 tests/test_config_ui_online.py
 """
@@ -93,6 +94,13 @@ class Logic(unittest.TestCase):
 
 
 class Static(unittest.TestCase):
+    def test_a_failed_check_is_grey_not_amber(self):
+        text = read(INDEX)
+        fn = text[text.index("async function checkDeviceOnline("):text.index("async function checkAllDevicesOnline(")]
+        catch = fn[fn.index("} catch(e) {"):]
+        self.assertIn("#94a3b8", catch)
+        self.assertNotIn("#f59e0b", catch)
+
     def test_fallback_only_after_unresolved(self):
         text = read(INDEX)
         fn = text[text.index("async function checkDeviceOnline("):text.index("async function checkAllDevicesOnline(")]
@@ -109,15 +117,57 @@ class Static(unittest.TestCase):
 
 
 class Server(unittest.TestCase):
-    def test_unresolved_name(self):
+    """check_host with the resolver replaced, so no test depends on the host's DNS."""
+
+    @staticmethod
+    def load(getaddrinfo):
+        import socket as real
+        import time
+        import types
         doc = yaml.safe_load(read(SERVER))
         src = doc["data"]["server.py"]
         src = src[:src.index("class H(")]   # check_host and helpers, no server start
+        fake = types.SimpleNamespace(**{k: getattr(real, k) for k in dir(real) if not k.startswith("__")})
+        fake.getaddrinfo = getaddrinfo
         ns = {}
-        exec(compile(src.replace("import os, sys, json, socket, time, importlib.util",
-                                 "import os, sys, json, socket, time, importlib.util"), "server.py", "exec"), ns)
-        online, ms, err = ns["check_host"]("no-such-board.invalid", 80, timeout=1)
-        self.assertEqual((online, ms, err), (False, None, "unresolved"))
+        exec(compile(src, "server.py", "exec"), ns)
+        ns["socket"] = fake
+        ns["_NO_NAME"] = {getattr(real, n) for n in ("EAI_NONAME", "EAI_NODATA") if hasattr(real, n)}
+        ns["time"] = time
+        return ns
+
+    def test_no_such_name_is_unresolved(self):
+        import socket
+
+        def gai(*a, **k):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        ns = self.load(gai)
+        self.assertEqual(ns["check_host"]("unit01-c-zone01", 80, timeout=1), (False, None, "unresolved"))
+
+    def test_resolver_failure_is_a_timeout_not_unresolved(self):
+        import socket
+
+        def gai(*a, **k):
+            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        ns = self.load(gai)
+        self.assertEqual(ns["check_host"]("unit01-c-zone01", 80, timeout=1), (False, None, "timeout"))
+
+    def test_a_stuck_resolver_is_bounded(self):
+        import threading
+        import time
+        release = threading.Event()
+
+        def gai(*a, **k):
+            release.wait(30)
+            return []
+        ns = self.load(gai)
+        t0 = time.monotonic()
+        try:
+            got = ns["check_host"]("unit01-c-zone01", 80, timeout=1)
+        finally:
+            release.set()
+        self.assertEqual(got, (False, None, "timeout"))
+        self.assertLess(time.monotonic() - t0, 3.0)
 
 
 if __name__ == "__main__":
