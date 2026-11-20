@@ -2520,6 +2520,55 @@
     // ── Device Online Check (server-side TCP — works on LAN) ─────
     // Pings dns_name: the device's DHCP hostname (unit02-c-zone02), which the
     // router's DNS answers for pods. A hand-added row may hold an IP instead.
+    // When the router cannot resolve the name (it may still hold a board's old
+    // DHCP name), the check falls back to the address the board itself last
+    // reported in a health or test message (HB/TS carry "ip"; a test message sent
+    // from the host carries "sent_from" and is skipped). A board that answers
+    // there is shown amber, never green: the address may since belong to another
+    // machine. A role that may not read measurements gets no fallback.
+
+    /* online-logic:begin */
+    function isIPv4(s) {
+      if (typeof s !== 'string') return false;
+      const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+      return !!m && m.slice(1).every(p => Number(p) <= 255 && String(Number(p)) === p);
+    }
+    function lastAddressQuery(dnsName) {
+      return '/measurement?select=timestamp,ip:msg->>ip'
+        + '&device_dns=eq.' + encodeURIComponent(dnsName)
+        + '&msg_type=in.(HB,TS)&msg->>ip=not.is.null&msg->>sent_from=is.null'
+        + '&order=timestamp.desc&limit=1';
+    }
+    function lastAddressFrom(rows) {
+      const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+      if (!row || !isIPv4(row.ip)) return null;
+      return { ip: row.ip, at: row.timestamp || null };
+    }
+    function onlineView(result, fallback, fallbackResult) {
+      if (result.online) {
+        return { colour: 'green', title: 'Online' + (result.ms != null ? ' ' + result.ms + 'ms' : '') };
+      }
+      if (result.error !== 'unresolved') {
+        return { colour: 'red', title: result.error === 'timeout' ? 'Timeout' : (result.error || 'Unreachable') };
+      }
+      const name = 'Its name does not resolve (the router has no entry, or an old one, for it)';
+      if (!fallback) return { colour: 'red', title: name + '; no last reported address to try (the board sent none, or your role does not read its messages)' };
+      const when = fallback.at ? ' (reported ' + fallback.at + ')' : '';
+      if (fallbackResult && fallbackResult.online) {
+        return { colour: 'amber', title: name + '. Answers at its last reported address ' + fallback.ip + when
+          + ': fix its name on the router' };
+      }
+      return { colour: 'red', title: name + '. No answer at its last reported address ' + fallback.ip + when };
+    }
+    /* online-logic:end */
+
+    const ONLINE_COLOURS = { green: '#22c55e', amber: '#f59e0b', red: '#ef4444' };
+
+    async function pingCheck(host) {
+      const r = await fetch('/platform-api/check/' + encodeURIComponent(host));
+      if (!r.ok) throw new Error('sidecar error ' + r.status);
+      return r.json();
+    }
 
     async function checkDeviceOnline(deviceId, dnsName) {
       const cell = document.getElementById('online-' + deviceId);
@@ -2527,18 +2576,15 @@
       cell.innerHTML = '<span style="color:#94a3b8;animation:spin 1s linear infinite;display:inline-block">⟳</span>';
       cell.title = 'Checking…';
       try {
-        const r = await fetch('/platform-api/check/' + encodeURIComponent(dnsName));
-        if (!r.ok) throw new Error('sidecar error ' + r.status);
-        const result = await r.json();
-        if (result.online) {
-          const ms = result.ms != null ? ' ' + result.ms + 'ms' : '';
-          cell.innerHTML = '<span style="color:#22c55e;font-size:1rem">●</span>';
-          cell.title = 'Online' + ms;
-        } else {
-          const label = result.error === 'timeout' ? 'Timeout' : (result.error || 'Unreachable');
-          cell.innerHTML = '<span style="color:#ef4444;font-size:1rem">●</span>';
-          cell.title = label;
+        const result = await pingCheck(dnsName);
+        let fallback = null, fallbackResult = null;
+        if (!result.online && result.error === 'unresolved') {
+          try { fallback = lastAddressFrom(await api('GET', lastAddressQuery(dnsName))); } catch(_) { fallback = null; }
+          if (fallback) fallbackResult = await pingCheck(fallback.ip);
         }
+        const v = onlineView(result, fallback, fallbackResult);
+        cell.innerHTML = '<span style="color:' + ONLINE_COLOURS[v.colour] + ';font-size:1rem">●</span>';
+        cell.title = v.title;
       } catch(e) {
         cell.innerHTML = '<span style="color:#f59e0b;font-size:1rem">●</span>';
         cell.title = 'Check failed: ' + e.message;

@@ -51,8 +51,19 @@ data:
             return RECIPES_DIR, fname, False
 
     def check_host(host, port=None, timeout=3):
-        """ICMP ping via subprocess. Returns (online, latency_ms, error)."""
+        """ICMP ping via subprocess. Returns (online, latency_ms, error).
+
+        A name the cluster's DNS (the router's) cannot resolve answers the error
+        'unresolved', apart from a host that does not answer: the Configuration page
+        then tries the board's last reported address (a router still holding a
+        board's old DHCP name, 20 Nov 2026)."""
         import subprocess
+        try:
+            socket.getaddrinfo(host, None, socket.AF_INET)
+        except socket.gaierror:
+            return False, None, 'unresolved'
+        except Exception:
+            pass
         t0 = time.monotonic()
         try:
             r = subprocess.run(
