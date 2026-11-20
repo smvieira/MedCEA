@@ -26,14 +26,17 @@
 # Keycloak's port-forward stays in the platform namespace.
 #
 # Cleanup also deletes bio's home volume (the one PVC W1 created, found by the hub's
-# username annotation). The throwaway admin stays a hub user without a home: a hub admin
-# cannot remove itself. Takes the deploy lock (it creates accounts and deletes a PVC).
+# username annotation), and then removes the throwaway admin from the hub, which a hub
+# admin cannot do itself: tests/lib-hub-cleanup.sh deletes test-<role>-<hex> hub users
+# without a realm account through the hub's database and restarts the hub (about a
+# minute; running workspaces keep running). Takes the deploy lock (it creates accounts,
+# deletes a PVC and restarts the hub).
 # Run from the repository root:  tests/iam-workbench.sh      Exit 1 on any failure.
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -66,6 +69,7 @@ source infra/lib-mk8s.sh
 KC_PORT=18092
 KC_URL="http://localhost:$KC_PORT"
 source infra/lib-keycloak-admin.sh
+source tests/lib-hub-cleanup.sh   # hub_sweep_test_users
 R="$KEYCLOAK_REALM"
 
 CREATED=()        # Keycloak user ids, deleted on exit
@@ -84,6 +88,7 @@ cleanup() {
             $KUBECTL delete pvc "$pvc" -n "$WB_NS" --wait=false >/dev/null && echo "Deleted the test home volume $pvc."
         done
     fi
+    [[ -n "$KC_ADMIN_MODE" ]] && hub_sweep_test_users "$WB_NS" "$R"   # the admin, which cannot remove itself
     kc_admin_done
     [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null
 }

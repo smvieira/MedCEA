@@ -19,7 +19,9 @@
 # included (IAM 3.1: an enabled account without a role no longer reaches it); Grafana's
 # role and Explore are checked against the policy (iam_signin_flow.py). The AI workbench
 # (IAM 3.2) is signed in at /hub/login?next=/hub/home, so no server is spawned; the
-# throwaway admin then removes the hub users the sign-ins created (not itself). The
+# throwaway admin then removes the hub users the sign-ins created, and on exit
+# tests/lib-hub-cleanup.sh removes the admin itself through the hub's database (it
+# restarts the hub, about a minute; running workspaces keep running). The
 # onboarding wizard and pgAdmin (IAM 3.4) are signed in too: the wizard admits engineer
 # and maintenance and shows its own 403 to the rest; pgAdmin admits admin, through its
 # own MedCEA sign-in button. Superset (stage C) once deployed: the builders and viewers
@@ -30,15 +32,15 @@
 # reference the row, so it is not deleted). 12 accounts × 12 hosts = 144 sign-ins,
 # 13 hosts = 156 with Superset.
 #
-# Takes the deploy lock (it creates accounts). Calls the Keycloak admin API as the deploy
-# scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a Keycloak login event in the
-# test account's name. Run from the repository root:  tests/iam-signin.sh
+# Takes the deploy lock (it creates accounts and may restart the hub). Calls the Keycloak
+# admin API as the deploy scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a
+# Keycloak login event in the test account's name. Run from the repository root:  tests/iam-signin.sh
 # Exit 1 on any mismatch.
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -56,10 +58,14 @@ set +a
 source infra/lib-lock.sh; medcea_lock
 source infra/lib-mk8s.sh
 source infra/lib-policy-source.sh; policy_source_init "${NAMESPACE:-medcea}" --read-only   # compile what the deploys compiled
+source infra/lib-policy-tools.sh   # workbench_namespace: where the hub runs
+WB_NS=""
+[[ "${WORKBENCH_ENABLED:-true}" == "true" ]] && WB_NS="$(workbench_namespace 2>/dev/null)" || WB_NS=""
 
 KC_PORT=18089
 KC_URL="http://localhost:$KC_PORT"
 source infra/lib-keycloak-admin.sh
+source tests/lib-hub-cleanup.sh   # hub_sweep_test_users
 R="$KEYCLOAK_REALM"
 
 CREATED=()        # Keycloak user ids, deleted on exit
@@ -97,6 +103,8 @@ cleanup() {
             || echo -e "${RED}  could not delete test account $id (HTTP $code) — remove it in the User Manager${NC}" >&2
     done
     [[ ${#CREATED[@]} -gt 0 ]] && echo "Deleted $n of ${#CREATED[@]} test account(s)."
+    # the throwaway admin stays a hub user (a hub admin cannot remove itself)
+    [[ -n "$KC_ADMIN_MODE" && -n "$WB_NS" && ${#CREATED[@]} -gt 0 ]] && hub_sweep_test_users "$WB_NS" "$R"
     kc_admin_done
     [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null
 }
