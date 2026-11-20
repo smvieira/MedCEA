@@ -26,7 +26,7 @@ recipe_line_from:
     why: the recipe file's 1/1 is a placeholder (every cycle, and every controller restart, would last 2 minutes)
 calibration:
   path: ../../calib/calibrations/unit01-zone01-s1.yaml
-  sha256: 4d1a710d622f6a1752417678045ce2a5f35e066674f7c5f88dd773f0843750da
+  sha256: 791540a3a260fc0e9af2e2671a95e4891240e347a1fefa6a0419624e613a9cee
   extrapolate:
     air_humidity: >-
       the snapshot's humidity was 51-55 %RH; the noise and the

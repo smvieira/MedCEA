@@ -3,20 +3,20 @@ code:
   blobs:
     research/calib/__init__.py: ba421dc18f4a4aa6191124d331aca9e7a10ee36a
     research/calib/__main__.py: f3c1c6f2a9281fe7de42cfb8a73c04d1c510a5dc
-    research/calib/calibfile.py: 7583ed49a3b5d9cc06e99e7ccfbc8f890e5ae626
+    research/calib/calibfile.py: 94e3f735a5a576f29fc312b54449cf847fdd9db9
     research/calib/cli.py: 987e8fc9a34ba82f2f72117e069e1b386115c181
-    research/calib/dataset.py: ef5f006ded7e563d4b06e576251ab05d428e97ec
-    research/calib/extract.py: d85abacbcb1de6c634c20486292a863ad8ffa88c
-    research/calib/lake.py: 5dcb1e175b4e1c23265aa26466af4941b7a386b8
+    research/calib/dataset.py: 4f075e7d76a4d3fd8a5417c2fe66e198cdfc4c8a
+    research/calib/extract.py: 048b37d4d1ac2587a824f12b51ad2ca6f85b97e1
+    research/calib/lake.py: 2d31153c18e4c16f4cfd6ee064d1ce684a7dbf51
     research/calib/pgtext.py: 2ca62da8bec917499722004f30e89b3d410af400
-    research/calib/plant_fit.py: e0a55f2ba00612dda634c4cc40368e644e30ee7d
-    research/calib/segments.py: 86f75599a20e25def3590fd10bf09ed49cb72e3c
-    research/calib/sensor_fit.py: c7d776151fa89bf1ae85e52a98364074a804ab2f
+    research/calib/plant_fit.py: 360535e986509a1b68e352ff5a93a4a609cacda1
+    research/calib/segments.py: 3dace9a6ab3e1fe34cd95d9005deaa17341b7994
+    research/calib/sensor_fit.py: a6ca39af9643e58689ff804b2c017a656ef3f0c6
     research/calib/stats.py: 8a9cece92b296af0d585965290d2310521685781
     research/twin_plant/__init__.py: 137fb7b8e2612598da17526b5f9a7c8afaa5a3ae
     research/twin_plant/chamber.py: e52c01b4aef3c18816a8ef7b0b0dbaf67c9add28
     research/twin_plant/sensors.py: 28f560be52d2b57a9f1ad3d4d8b658f7d0d89cbc
-  commit: 2a344bad8e18cc2cfb0f9952e90571f2528f1786
+  commit: b8da1d47ca25d4b1edb903d26026a7431109dbda
   dirty: false
   dirty_files: []
   python: '3.14'
@@ -392,27 +392,28 @@ sensors:
       value: 0.661091
     noise_rel_sd:
       co2:
-        applied: false
-        source: not_identifiable
-        why: 'noise_sd co2 was not applied: the datasheet noise stays'
+        applied: true
+        source: upper_bound
+        value: 0.0
+        why: the upper bound of noise_sd holds the whole noise; the datasheet's relative part would exceed it
     noise_sd:
       air_humidity:
         applied: true
         ci95:
-        - 0.020274
-        - 0.0209236
-        d1_autocorrelation: -0.48586
+        - 0.0202854
+        - 0.020928
+        d1_autocorrelation: -0.485996
         lag_ratio:
         - 1.0
-        - 1.00951
-        - 1.01518
-        - 1.03013
-        n: 16646
-        relative_residual: 0.00658345
+        - 1.00954
+        - 1.01499
+        - 1.03001
+        n: 16654
+        relative_residual: 0.00676355
         repeats:
-          expected: 2232.77
+          expected: 2232.0
           observed: 2428
-          of: 16667
+          of: 16668
         source: fitted
         trimmed:
         - 0
@@ -420,28 +421,28 @@ sensors:
         - 0
         - 0
         v_k:
-        - 0.000439753
-        - 0.000448154
-        - 0.000453205
-        - 0.000466648
-        value: 0.0205492
+        - 0.000440121
+        - 0.000448557
+        - 0.000453415
+        - 0.000466931
+        value: 0.0205597
       air_temperature:
         applied: true
         ci95:
-        - 0.0117517
-        - 0.0122863
-        d1_autocorrelation: -0.486081
+        - 0.0117485
+        - 0.0122814
+        d1_autocorrelation: -0.486083
         lag_ratio:
         - 1.0
-        - 1.01796
-        - 1.01147
-        - 1.0167
-        n: 16646
-        relative_residual: 0.0170697
+        - 1.01815
+        - 1.0116
+        - 1.01676
+        n: 16654
+        relative_residual: 0.0172772
         repeats:
-          expected: 3768.29
+          expected: 3768.86
           observed: 5359
-          of: 16667
+          of: 16668
         source: fitted
         trimmed:
         - 0
@@ -449,25 +450,29 @@ sensors:
         - 0
         - 0
         v_k:
-        - 0.000153448
-        - 0.000159009
-        - 0.00015699
-        - 0.000158615
-        value: 0.0120501
+        - 0.000153396
+        - 0.000159015
+        - 0.000156976
+        - 0.000158582
+        value: 0.0120486
       co2:
-        applied: false
-        d1_autocorrelation: 0.171969
-        source: not_identifiable
-        why: 'noise not separable from filtered process variation: the first differences'' lag-1 autocorrelation is +0.172 (white noise plus a slow process gives -0.5..0)'
+        applied: true
+        d1_autocorrelation: 0.171961
+        datasheet_at_median: 25.5529
+        n: 16669
+        source: upper_bound
+        v_1: 0.0288619
+        value: 0.496792
+        why: 'the datasheet noise at the observed median (25.5529) exceeds what the data allows: white noise adds 2 sd^2 to the first differences'' variance, so sd <= sqrt(Var(d1) / 2) = 0.496792'
     publish_interval_s:
       applied: true
       ci95:
-      - 2.97725
-      - 2.99596
-      cv: 0.202196
-      n: 16635
+      - 3.00024
+      - 3.00219
+      cv: 0.0208185
+      n: 16649
       source: fitted
-      value: 2.98677
+      value: 3.00102
     quantisation:
       air_humidity:
         applied: true
@@ -541,20 +546,20 @@ sensors:
       air_humidity:
         applied: true
         ci95:
-        - 0.0160023
-        - 0.0168458
-        d1_autocorrelation: -0.381519
+        - 0.0159952
+        - 0.0168461
+        d1_autocorrelation: -0.381518
         lag_ratio:
         - 1.0
-        - 1.086
-        - 1.17823
-        - 1.25156
-        n: 16647
-        relative_residual: 0.0073819
+        - 1.08599
+        - 1.17822
+        - 1.25153
+        n: 16655
+        relative_residual: 0.00738357
         repeats:
-          expected: 2421.58
-          observed: 2475
-          of: 16668
+          expected: 2422.15
+          observed: 2476
+          of: 16669
         source: fitted
         trimmed:
         - 0
@@ -562,28 +567,28 @@ sensors:
         - 0
         - 0
         v_k:
-        - 0.00034498
-        - 0.000406867
-        - 0.000478913
-        - 0.000540376
-        value: 0.016432
+        - 0.000344862
+        - 0.00040672
+        - 0.000478739
+        - 0.000540167
+        value: 0.0164294
       air_temperature:
         applied: true
         ci95:
-        - 0.0120768
-        - 0.0125047
-        d1_autocorrelation: -0.469979
+        - 0.0120793
+        - 0.0125074
+        d1_autocorrelation: -0.470016
         lag_ratio:
         - 1.0
-        - 1.02472
-        - 1.04296
-        - 1.06006
-        n: 16647
-        relative_residual: 0.00500043
+        - 1.02475
+        - 1.04282
+        - 1.05991
+        n: 16655
+        relative_residual: 0.00512
         repeats:
-          expected: 3612.81
+          expected: 3613.03
           observed: 3837
-          of: 16668
+          of: 16669
         source: fitted
         trimmed:
         - 0
@@ -591,20 +596,20 @@ sensors:
         - 0
         - 0
         v_k:
-        - 0.00016531
-        - 0.000173585
-        - 0.000179818
-        - 0.000185763
-        value: 0.0122797
+        - 0.000165312
+        - 0.000173595
+        - 0.000179771
+        - 0.000185713
+        value: 0.0122809
     publish_interval_s:
       applied: true
       ci95:
-      - 2.97591
-      - 2.99544
-      cv: 0.111517
-      n: 16635
+      - 3.00018
+      - 3.00215
+      cv: 0.0208185
+      n: 16649
       source: fitted
-      value: 2.98698
+      value: 3.00102
     quantisation:
       air_humidity:
         applied: true
@@ -626,7 +631,7 @@ source:
     nominal_s: 3.0
     outage_hist:
     - from_s: 60.0
-      n: 2
+      n: 1
       to_s: 600.0
     - from_s: 600.0
       n: 0
@@ -636,10 +641,10 @@ source:
       to_s: null
     skipped_hist:
     - from_s: 9.0
-      n: 3
+      n: 0
       to_s: 10.0
     - from_s: 10.0
-      n: 13
+      n: 3
       to_s: 30.0
     - from_s: 30.0
       n: 17
@@ -654,52 +659,51 @@ source:
     lineage: 096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f
     snapshot_id: 1
   outages:
-  - from: '2026-11-15T06:22:48.276856Z'
-    seconds: 61.311
-    to: '2026-11-15T06:23:49.587848Z'
+  - from: '2026-11-15T06:32:48.000000Z'
+    seconds: 114.0
+    to: '2026-11-15T06:34:42.000000Z'
     why: gap in the data
-  - from: '2026-11-15T06:32:49.267038Z'
-    seconds: 114.139
-    to: '2026-11-15T06:34:43.406049Z'
-    why: gap in the data
-  - from: '2026-11-15T09:59:58.885387Z'
-    seconds: 342634.984
+  - from: '2026-11-15T09:59:58.000000Z'
+    seconds: 342635.869
     to: '2026-11-19T09:10:33.868995Z'
     why: end of the data before the snapshot's cut
   segments:
   - events:
-      scd30_1: 12439
-      sht45_1: 12439
-    from: '2026-11-14T19:52:45.362301Z'
-    to: '2026-11-15T06:22:48.276856Z'
-  - events:
-      scd30_1: 132
-      sht45_1: 132
-    from: '2026-11-15T06:23:49.587848Z'
-    to: '2026-11-15T06:32:49.267038Z'
+      scd30_1: 12571
+      sht45_1: 12571
+    from: '2026-11-14T19:52:44.000000Z'
+    to: '2026-11-15T06:32:48.000000Z'
   - events:
       scd30_1: 4100
       sht45_1: 4100
-    from: '2026-11-15T06:34:43.406049Z'
-    to: '2026-11-15T09:59:58.885387Z'
+    from: '2026-11-15T06:34:42.000000Z'
+    to: '2026-11-15T09:59:58.000000Z'
   unit: UNIT01
   window:
     from: '2026-11-14T19:52:44.000000Z'
     to: '2026-11-15T09:59:58.000000Z'
   zone: ZONE01
 unmodelled:
-- mean_s: 2.98698
-  median_s: 3.01036
-  sd_s: 0.0249596
+- ingest_sd_s: 0.0249996
+  mean_s: 3.00102
+  median_s: 3.0
+  note: on measured_at (whole seconds); ingest_sd_s is the same pairs on ingested_at
+  sd_s: 0.0
   sensor: sht45
   what: publish jitter
-- of: 16668
-  rate: 0.00197984
+- longest_s: 61.311
+  note: normal board cycles (by measured_at) that reached the platform more than 9.0 s apart, then arrived in a burst; the model delivers every reading on time
+  of: 16649
+  sensor: sht45
+  stalls: 33
+  what: delivery stalls
+- of: 16669
+  rate: 0.00119983
   reboot_signature:
     gaps_30_60_s: 17
     note: a board restart shows as one gap of 30-60 s
   sensor: sht45
-  skipped: 33
+  skipped: 20
   what: skipped cycles
 - chi2: 865.22
   df: 9
@@ -720,12 +724,12 @@ unmodelled:
   what: the sensor's own resolution is not a clean 0.01 lattice
 - sensor: sht45
   tag: air_temperature
-  variance_per_cycle: 2.03905e-05
+  variance_per_cycle: 2.03273e-05
   what: fast process variation not in the model
-- expected: 3612.81
+- expected: 3613.03
   observed: 3837
-  of: 16668
-  p: 1.30503e-05
+  of: 16669
+  p: 1.33018e-05
   sensor: sht45
   tag: air_temperature
   what: repeated values beyond what the noise and the lattice explain
@@ -748,21 +752,36 @@ unmodelled:
   what: the sensor's own resolution is not a clean 0.01 lattice
 - sensor: sht45
   tag: air_humidity
-  variance_per_cycle: 0.000197287
+  variance_per_cycle: 0.000197198
   what: fast process variation not in the model
-- mean_s: 2.98677
-  median_s: 3.02098
-  sd_s: 0.0937878
+- ingest_sd_s: 0.0948108
+  mean_s: 3.00102
+  median_s: 3.0
+  note: on measured_at (whole seconds); ingest_sd_s is the same pairs on ingested_at
+  sd_s: 0.0
   sensor: scd30
   what: publish jitter
-- of: 16668
-  rate: 0.00197984
+- longest_s: 61.3181
+  note: normal board cycles (by measured_at) that reached the platform more than 9.0 s apart, then arrived in a burst; the model delivers every reading on time
+  of: 16649
+  sensor: scd30
+  stalls: 33
+  what: delivery stalls
+- of: 16669
+  rate: 0.00119983
   reboot_signature:
     gaps_30_60_s: 17
     note: a board restart shows as one gap of 30-60 s
   sensor: scd30
-  skipped: 33
+  skipped: 20
   what: skipped cycles
+- datasheet_at_median: 25.5529
+  median: 703.53
+  note: noise_sd is the bound (the most the readings allow), not a fit; the true white noise may be smaller
+  sensor: scd30
+  tag: co2
+  upper_bound: 0.496792
+  what: noise below the data's upper bound is not separable from filtered process variation
 - chi2: 3830.79
   df: 9
   last_digit_counts:
@@ -782,12 +801,12 @@ unmodelled:
   what: the sensor's own resolution is not a clean 0.01 lattice
 - sensor: scd30
   tag: air_temperature
-  variance_per_cycle: 4.13468e-06
+  variance_per_cycle: 4.14823e-06
   what: fast process variation not in the model
-- expected: 3768.29
+- expected: 3768.86
   observed: 5359
-  of: 16667
-  p: 6.9249e-191
+  of: 16668
+  p: 9.99692e-191
   sensor: scd30
   tag: air_temperature
   what: repeated values beyond what the noise and the lattice explain
@@ -810,12 +829,12 @@ unmodelled:
   what: the sensor's own resolution is not a clean 0.01 lattice
 - sensor: scd30
   tag: air_humidity
-  variance_per_cycle: 2.55842e-05
+  variance_per_cycle: 2.54483e-05
   what: fast process variation not in the model
-- expected: 2232.77
+- expected: 2232.0
   observed: 2428
-  of: 16667
-  p: 4.74946e-06
+  of: 16668
+  p: 4.36413e-06
   sensor: scd30
   tag: air_humidity
   what: repeated values beyond what the noise and the lattice explain

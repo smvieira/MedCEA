@@ -566,8 +566,8 @@ SPEC_DIGESTS = {
 # research/calib/extracts/snapshot-1-096015bc225c.yaml. The digest covers the pins and the
 # values they resolved to, so it moves only when a pinned file or the resolver does.
 CALIBRATED_SPEC_DIGESTS = {
-    "e39_compare_calibrated.yaml": "06fa282875cfa1b95c5158347ec1e2c4f5405cb4d0e53dc996ed72f862ce5bb1",
-    "fruiting_compare_calibrated.yaml": "520e8855457b88eda7fd07248ca2f1e80523708fac6d7ddcf29401e19a0176c5",
+    "e39_compare_calibrated.yaml": "b3fa1dcb072466b587de90e70495fabd1e06bff9e061f14f486bbf1c365addac",
+    "fruiting_compare_calibrated.yaml": "4160eca98c0ca0f27e31ba510628eb0f0370fa73e77d3294793941433bf00156",
 }
 CALIBRATION_FILE = "unit01-zone01-s1.yaml"
 SNAPSHOT1_LINEAGE = "096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f"

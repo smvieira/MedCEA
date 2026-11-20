@@ -6,17 +6,19 @@
 # the model's assumptions: the snapshot holds no actuator step (fit-plant refuses them).
 # Only what the controllers see changes; the metrics are computed on the chamber truth.
 #
-# The calibration was fitted on 51.35-55.33 %RH; the humidity band (80-95 %RH) and the
-# initial 85 %RH lie outside it, so the pin says why it is used there anyway.
+# The calibration was fitted on 51.35-55.33 %RH; the humidity band (80-95 %RH), the
+# initial 85 %RH and the room's 50 %RH lie outside it, so the pin says why it is used
+# there anyway.
 name: smoke_air_temperature_calibrated
 description: the smoke scenario on the sensor model fitted to lake snapshot 1
 calibration:
   path: ../../calib/calibrations/unit01-zone01-s1.yaml
-  sha256: 4d1a710d622f6a1752417678045ce2a5f35e066674f7c5f88dd773f0843750da
+  sha256: 791540a3a260fc0e9af2e2671a95e4891240e347a1fefa6a0419624e613a9cee
   extrapolate:
     air_humidity: >-
       the snapshot's humidity was 51-55 %RH; the noise and the
-      SHT45-SCD30 offset are assumed to hold at 80-95 %RH (constant_offset model)
+      SHT45-SCD30 offset are assumed to hold at 50-95 %RH (the room 50, the band
+      80-95; constant_offset model)
 duration_h: 1
 metrics_from_h: 0.5
 recipe_type: FUNGI
