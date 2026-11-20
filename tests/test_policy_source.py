@@ -113,6 +113,9 @@ slice 4.0: compiler/source.py, cli.py's source rule, infra/lib-policy-source.sh)
                    MEDCEA_LOCK_HELD, a 755 state/ refused), written_at alone no rewrite, edits
                    and a consistent forgery refused, an unreadable state/ an error, dropped rows,
                    the git key order, waiver rows, export-applied
+  LockAcrossGroupChange  medcea_lock_verify and source.verify_lock() under `sg <group>`
+                   (install.sh's apps stage): the inherited locked fd 9 verifies, a fresh
+                   descriptor of the file or a lock nobody holds does not
   Gate             (4.2a) the skeleton gate: equal, narrowing, person and system widening, the
                    sections, the prose keys, cli.py's exit codes, --check, --against-git;
                    (4.4) the refusal's --propose-skeleton line; (4.5) both texts of its way
@@ -953,6 +956,82 @@ def broken_narrowing(data):
     ms = git["resource_groups"]["master_data"]["members"]
     ms.remove(next(m for m in ms if m.get("function", "").startswith("medcea.approve_change(")))
     return git
+
+
+class LockAcrossGroupChange(unittest.TestCase):
+    """infra/lib-lock.sh medcea_lock_verify and source.verify_lock() under `sg <group>`, as
+    install.sh's apps stage runs (with_mk8s_group): a gid change closes the holder's
+    /proc/<pid>/fd to the child, so the child's own inherited fd 9 (its fdinfo's FLOCK line)
+    decides. A fresh descriptor of the file, or a lock nobody holds, is still refused."""
+
+    CHILD = r"""
+. "$ROOT/infra/lib-lock.sh"
+if readlink "/proc/$MEDCEA_LOCK_HELD/fd/9" >/dev/null 2>&1; then echo READABLE; fi
+if [ "${MODE:-}" = fresh ]; then exec 9>&-; exec 9>>"$MEDCEA_LOCK_FILE"; fi
+medcea_lock_verify && echo SH=ok || echo SH=fail
+python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import source
+try:
+    source.verify_lock(); print("PY=ok")
+except source.SourceError as e:
+    print("PY=fail", e)' "$ROOT/apps/iam/compiler"
+"""
+
+    def setUp(self):
+        if shutil.which("sg") is None or shutil.which("flock") is None:
+            self.skipTest("no sg or flock")
+        if os.getuid() == 0:
+            self.skipTest("root reads every fd table")
+        primary = os.getgid()
+        others = [g for g in os.getgroups() if g != primary]
+        if not others:
+            self.skipTest("no supplementary group to sg into")
+        import grp
+        self.group = None
+        for g in others:
+            try:
+                self.group = grp.getgrgid(g).gr_name
+                break
+            except KeyError:
+                continue
+        if self.group is None:
+            self.skipTest("no named supplementary group")
+        self.root = scratch_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.child = os.path.join(self.root, "child.sh")
+        with open(self.child, "w") as f:
+            f.write(self.CHILD)
+
+    def run_parent(self, take_lock=True, mode=""):
+        lib = shlex.quote(os.path.join(self.root, "infra", "lib-lock.sh"))
+        if take_lock:
+            head = f". {lib}; medcea_lock; "
+        else:   # fd 9 on the lock file and MEDCEA_LOCK_HELD, but no flock
+            head = f". {lib}; exec 9>>\"$MEDCEA_LOCK_FILE\"; export MEDCEA_LOCK_HELD=$$; "
+        # "; true": bash would otherwise exec sg in place of the holder itself
+        script = head + f"sg {shlex.quote(self.group)} -c {shlex.quote('bash ' + shlex.quote(self.child))}; true"
+        r = subprocess.run(["bash", "-c", script], env=clean_env(ROOT=self.root, MODE=mode),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        if "READABLE" in r.stdout:
+            self.skipTest("sg did not close the holder's fd table here: the fallback is not exercised")
+        if "SH=" not in r.stdout:
+            self.skipTest(f"sg {self.group} did not run the child: {r.stderr.strip()[:200]}")
+        return r.stdout
+
+    def test_the_inherited_locked_fd_9_verifies(self):
+        out = self.run_parent()
+        self.assertIn("SH=ok", out)
+        self.assertIn("PY=ok", out)
+
+    def test_a_fresh_descriptor_of_the_file_does_not(self):
+        out = self.run_parent(mode="fresh")
+        self.assertIn("SH=fail", out)
+        self.assertIn("PY=fail", out)
+        self.assertIn("does not carry the flock", out)
+
+    def test_a_lock_nobody_holds_does_not(self):
+        out = self.run_parent(take_lock=False)
+        self.assertIn("SH=fail", out)
+        self.assertIn("PY=fail", out)
 
 
 class Gate(unittest.TestCase):
