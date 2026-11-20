@@ -112,7 +112,9 @@ $KUBECTL get statefulset research-postgresql -n "$RESEARCH_NAMESPACE" >/dev/null
 # Never an open pod: the zone's compiled policy for lake-api must be live, and every
 # compiled zone policy equal to the live one (infra/deploy-research-namespace.sh, which
 # ./deploy-infra.sh and the policy rollout run, applies them).
-$KUBECTL get networkpolicy rs-lake-api -n "$RESEARCH_NAMESPACE" -l medcea/rs-netpol=true -o name >/dev/null 2>&1 \
+# (kubectl refuses a name together with -l: read the label off the named object.)
+[[ "$($KUBECTL get networkpolicy rs-lake-api -n "$RESEARCH_NAMESPACE" \
+        -o 'jsonpath={.metadata.labels.medcea/rs-netpol}' 2>/dev/null)" == "true" ]] \
     || die "the research zone's NetworkPolicy rs-lake-api is not in $RESEARCH_NAMESPACE: run ./infra/deploy-research-namespace.sh (or ./deploy-infra.sh), then this again"
 _nrc=0
 ( SCRIPT_DIR="$REPO_ROOT"; source "$REPO_ROOT/infra/lib-policy-artefacts.sh"; _pa_rsnetpol_equal ) || _nrc=$?

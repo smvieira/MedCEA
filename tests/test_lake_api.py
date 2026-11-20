@@ -148,7 +148,8 @@ case "$*" in
   "get namespace "*) [[ -z "${STUB_NO_NS:-}" ]]; exit $? ;;
   "get deployment lake-api "*) [[ -n "${STUB_DEPLOYED:-}" ]]; exit $? ;;
   "get statefulset research-postgresql "*) [[ -z "${STUB_NO_STS:-}" ]]; exit $? ;;
-  "get networkpolicy rs-lake-api "*) [[ -z "${STUB_NO_NETPOL:-}" ]] && echo networkpolicy/rs-lake-api; [[ -z "${STUB_NO_NETPOL:-}" ]]; exit $? ;;
+  "get networkpolicy rs-lake-api "*" -l "*) echo "error: name cannot be provided when a selector is specified" >&2; exit 1 ;;
+  "get networkpolicy rs-lake-api "*) [[ -z "${STUB_NO_NETPOL:-}" ]] || exit 1; printf %s "${STUB_NETPOL_LABEL-true}" ;;
   "get secret lake-api-auth "*) printf 4711 ;;
   "get pod "*) printf %s "${STUB_POD_IP-10.1.2.3}" ;;
   "rollout status "*) exit "${STUB_ROLLOUT_RC:-0}" ;;
@@ -296,6 +297,7 @@ class Deploy(Tree):
 
     def test_never_an_open_pod(self):
         for env, want in (({"STUB_NO_NETPOL": "1"}, "NetworkPolicy rs-lake-api is not in %s" % RNS),
+                          ({"STUB_NETPOL_LABEL": ""}, "NetworkPolicy rs-lake-api is not in %s" % RNS),
                           ({"STUB_RSNP_RC": "1"}, "are not the compiled ones"),
                           ({"STUB_RSNP_RC": "2"}, "cannot compare")):
             r, calls = self.run_script("deploy.sh", **env)
@@ -305,7 +307,7 @@ class Deploy(Tree):
             self.assertNotIn("finish medcea lake-api", calls)
         r, calls = self.run_script("deploy.sh")
         self.assertIn("rsnetpol_equal SCRIPT_DIR=%s" % self.root, calls)   # the repository, in a subshell
-        nl = calls.index("kubectl get networkpolicy rs-lake-api -n %s -l medcea/rs-netpol=true -o name" % RNS)
+        nl = calls.index("kubectl get networkpolicy rs-lake-api -n %s -o jsonpath={.metadata.labels.medcea/rs-netpol}" % RNS)
         self.assertLess(nl, calls.index("rsnetpol_equal SCRIPT_DIR=%s" % self.root))
 
     def test_missing_password(self):
