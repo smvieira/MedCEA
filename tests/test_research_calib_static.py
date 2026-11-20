@@ -31,7 +31,8 @@ class Static(unittest.TestCase):
     def test_the_package_exists(self):
         names = {os.path.basename(p) for p in calib_py()}
         self.assertLessEqual({"__init__.py", "__main__.py", "cli.py", "lake.py", "pgtext.py", "dataset.py",
-                              "extract.py"}, names)
+                              "extract.py", "segments.py", "stats.py", "sensor_fit.py", "plant_fit.py",
+                              "calibfile.py"}, names)
 
     def test_stdlib_and_yaml_only(self):
         allowed = set(sys.stdlib_module_names) | {"__future__", "yaml"}
@@ -58,12 +59,13 @@ class Static(unittest.TestCase):
                 if isinstance(node, ast.ImportFrom) and node.level:
                     self.assertLessEqual(node.level, 2, "%s:%d leaves research/" % (path, node.lineno))
 
-    def test_no_subprocess_in_commit_b(self):
-        """The lake access needs no process at all (git comes with the fits, through
-        research/harness/algorithms_loader)."""
-        for name in ("lake.py", "pgtext.py", "dataset.py", "extract.py", "cli.py"):
-            with open(os.path.join(CALIB, name), encoding="utf-8") as fh:
+    def test_no_subprocess(self):
+        """research/calib starts no process: the lake is HTTP, and the git state a
+        calibration file records comes through research/harness/algorithms_loader."""
+        for path in calib_py():
+            with open(path, encoding="utf-8") as fh:
                 tree = ast.parse(fh.read())
+            name = os.path.basename(path)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     self.assertNotIn("subprocess", [a.name for a in node.names], name)

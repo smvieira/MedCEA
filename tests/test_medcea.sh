@@ -169,7 +169,9 @@
 #  75  Applications → Calibrate the sensor model from a snapshot (research Phase 3): list
 #      (read-only, [Y/n], no lock) and fetch with the snapshot, a 64-hex lineage, unit and
 #      zone (defaults UNIT01/ZONE01) and a folder checked (0, a short lineage, a unit or a
-#      folder starting with - re-asked); real: the wrapper runs without the guide's lock
+#      folder starting with - re-asked); fit-sensors with the dataset, the name (default
+#      unit01-zone01-s1) and the output checked and --humidity-model self_heating on a yes;
+#      real: the wrapper runs without the guide's lock
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1683,7 +1685,7 @@ no_stub
 
 echo "75 research calibration from a snapshot (Applications)"
 mkcfg true true
-guide $'3\n18\n1\n\nb\n18\n2\n0\n1\nabc\n'"096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f"$'\n-x\n\n\n-o\n~/e45\n/tmp/e45/s1\n\nq\n'
+guide $'3\n18\n1\n\nb\n18\n2\n0\n1\nabc\n'"096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f"$'\n-x\n\n\n-o\n~/e45\n/tmp/e45/s1\n\nb\n18\n3\n-d\n/tmp/e45/s1/dataset.jsonl\n-n\n\n/tmp/e45/e45.yaml\ny\n\nq\n'
 rc_is "quits with 0" 0
 has   "list (dry)" "[dry run] not executed: ./apps/research/calibrate.sh snapshots"
 has   "read-only: [Y/n]" "Run it? [Y/n]"
@@ -1695,6 +1697,10 @@ has   "a folder starting with - is re-asked" "'-o': a folder path"
 has   "a folder starting with ~ is re-asked" "'~/e45': a folder path"
 has   "fetch (dry), defaults UNIT01/ZONE01" "[dry run] not executed: ./apps/research/calibrate.sh fetch --snapshot 1 --expect-lineage 096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f --unit UNIT01 --zone ZONE01 --out /tmp/e45/s1"
 has   "the refusal explained" "Refused (exit 2) while RESEARCH_ENABLED is not true or the lake reader is not running"
+has   "a dataset path starting with - is re-asked" "'-d': a file path"
+has   "a name starting with - is re-asked" "'-n': a name is letters"
+has   "fit-sensors (dry), default name, self-heating chosen" "[dry run] not executed: ./apps/research/calibrate.sh fit-sensors /tmp/e45/s1/dataset.jsonl --map sht45=sht45_1\\,scd30=scd30_1 --name unit01-zone01-s1 --out /tmp/e45/e45.yaml --humidity-model self_heating"
+has   "fit: exit 3 explained" "Exit 3: every fitted value of a sensor was refused"
 no_stub
 real $'3\n18\n1\n\nq\n'
 rc_is "real: quits with 0" 0

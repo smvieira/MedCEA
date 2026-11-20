@@ -65,7 +65,10 @@ Scenario (dict):
                      the default tag, which gives no_data (ambiguous_source) as soon as two
                      sensors publish the tag (SHT45 and SCD30 both publish air_temperature
                      and air_humidity), exactly as in production,
-    zone             (default Z1), metrics_from_h (default 0), cycle_restart (default true).
+    zone             (default Z1), metrics_from_h (default 0), cycle_restart (default true),
+    calibration, recipe_line_from: snapshot pins (pins.py), resolved by campaign.resolve_spec
+                     before the run; a pin without its `resolved` block is refused, and
+                     the values it resolved must be the ones in effect.
 """
 from __future__ import annotations
 
@@ -86,7 +89,7 @@ STATEFUL = ("PID", "Q_LEARNING")   # run_agent.py _STATEFUL_ALGORITHMS: state ke
 
 SCENARIO_KEYS = {"name", "duration_h", "recipe_type", "recipe_line", "initial", "ambient",
                  "disturbances", "plant", "sensors", "actuators", "zone", "metrics_from_h",
-                 "cycle_restart", "description", "loops"}
+                 "cycle_restart", "description", "loops", "calibration", "recipe_line_from"}
 LINE_KEYS = {"setpoints", "light_type", "light_on_minutes", "light_off_minutes"}
 DISTURBANCE_KINDS = {"door_open": {"at_h", "kind", "duration_min"},
                      "extra_heat": {"at_h", "kind", "duration_min", "watts"},
@@ -123,6 +126,7 @@ def normalise(scenario, loaded):
         raise ScenarioError("a scenario needs a name")
     if not _num(s.get("duration_h")) or s["duration_h"] <= 0:
         raise ScenarioError("duration_h must be a number > 0")
+    _check_line_pin(s)
     s.setdefault("recipe_type", loaded.catalogue.get("default_type"))
     quantities = loaded.quantities(s["recipe_type"])
     s.setdefault("zone", "Z1")
@@ -216,6 +220,7 @@ def normalise(scenario, loaded):
             spec.validate()
         except ValueError as e:
             raise ScenarioError(str(e)) from None
+    _check_calibration_pin(s, specs)
 
     dist = []
     for d in s.get("disturbances") or []:
@@ -238,6 +243,40 @@ def normalise(scenario, loaded):
     s["_warnings"] = warnings
     s["_quantities"] = quantities
     return s
+
+
+def _resolved(s, key):
+    pin = s.get(key)
+    if not isinstance(pin, dict) or not isinstance(pin.get("resolved"), dict):
+        raise ScenarioError("%s is a pin: resolve it with campaign.resolve_spec (it has no resolved block)" % key)
+    return pin["resolved"]
+
+
+def _check_line_pin(s):
+    """recipe_line_from: the line and recipe type in effect are the ones it resolved."""
+    if "recipe_line_from" not in s:
+        return
+    r = _resolved(s, "recipe_line_from")
+    if s.get("recipe_line") != r.get("recipe_line") or s.get("recipe_type") != r.get("recipe_type"):
+        raise ScenarioError("recipe_line_from: the recipe line or type in effect is not the one the pin resolved")
+
+
+def _check_calibration_pin(s, specs):
+    """calibration: every value it resolved is the one in effect on its sensor."""
+    if "calibration" not in s:
+        return
+    r = _resolved(s, "calibration")
+    for sid, fields in (r.get("sensors") or {}).items():
+        if sid not in specs:
+            raise ScenarioError("calibration: sensor %s is not configured" % sid)
+        for field, v in fields.items():
+            have = getattr(specs[sid], field, None)
+            pairs = [(field + "." + t, x, (have or {}).get(t)) for t, x in v.items()] if isinstance(v, dict) \
+                else [(field, v, have)]
+            for name, want, got in pairs:
+                if got != want:
+                    raise ScenarioError("calibration: sensors.%s.%s is %r in effect, the pin resolved %r"
+                                        % (sid, name, got, want))
 
 
 def _disturbance_at(disturbances, t):

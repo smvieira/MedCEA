@@ -1501,11 +1501,31 @@ RS_DIR_RE='^[A-Za-z0-9_./][A-Za-z0-9_./+-]*$'   # a folder: no leading -, no ~ (
 a_research_calibrate() {
     menu "Calibrate the sensor model from a snapshot" \
         "List the lake's snapshots|Each one's cut, readings, contract and lineage (note the lineage to pin)." \
-        "Fetch one unit and zone, pinned by its lineage|The readings into a dataset file, and the snapshot's recipes and catalogue into an extract."
+        "Fetch one unit and zone, pinned by its lineage|The readings into a dataset file, and the snapshot's recipes and catalogue into an extract." \
+        "Fit the sensor model to a fetched dataset|The calibration file: each sensor value with its source, and what the fit refused (no lake needed)."
     [[ "$PICK" == b ]] && return 10
     if [[ "$PICK" == 1 ]]; then
         CMD=(./apps/research/calibrate.sh snapshots)
         EFFECT="nothing (reads lake-api's snapshot list)"
+    elif [[ "$PICK" == 3 ]]; then
+        local ds name out
+        ask_match "The dataset file (DIR/dataset.jsonl from a fetch)" "$RS_DIR_RE" \
+            "a file path: letters, digits, _ . / + -, not starting with - or ~"; ds="$ANSWER"
+        ask_match "The calibration's name" "$UNIT_RE" "a name is letters, digits, _ and -, not starting with -" \
+            "unit01-zone01-s1"; name="$ANSWER"
+        ask_match "The calibration file to write (a new one)" "$RS_DIR_RE" \
+            "a file path: letters, digits, _ . / + -, not starting with - or ~"; out="$ANSWER"
+        CMD=(./apps/research/calibrate.sh fit-sensors "$ds" --map sht45=sht45_1,scd30=scd30_1 --name "$name" --out "$out")
+        if ask_yn "Model the SCD30's humidity offset as self-heating (default: a constant offset)?" n; then
+            CMD+=(--humidity-model self_heating)
+        fi
+        EFFECT="writes $out (refused when it exists); reads only the dataset file"
+        LOCK=no; LEVEL=read; SUDO=no; CFG_NEEDED=no
+        NOTES=("Exit 3: every fitted value of a sensor was refused (too little data); every reason is printed and nothing is written."
+               "Refused (exit 2) while research/ differs from HEAD: fit from a commit (a worktree), or run python3 -m research.calib fit-sensors … --allow-dirty, which records it as dirty."
+               "The plant constants stay assumptions: python3 -m research.calib fit-plant DATASET says why (exit 3).")
+        plan_run
+        return
     else
         local snap lin unit zone out
         ask_match "Snapshot id" "$POLICY_VERSION_RE" "a snapshot id is a whole number from 1"; snap="$ANSWER"
@@ -1520,7 +1540,7 @@ a_research_calibrate() {
     LOCK=no; LEVEL=read; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Refused (exit 2) while RESEARCH_ENABLED is not true or the lake reader is not running (Applications → Install the lake reader)."
            "A fetch refuses a lineage other than the one you give, a snapshot whose readings or digests do not recompute, and a reading inside a held-out range."
-           "Fitting the sensor model and the campaigns run from a worktree: python3 -m research.calib, research/README.md.")
+           "Then fit the sensor model (this menu's third entry); the campaigns run from a worktree: research/README.md.")
     plan_run
 }
 a_research_reservations() {
@@ -3073,7 +3093,7 @@ AREA_APPS=(
     "a_research_reservations|List the held-out reservations|./apps/research/reserve.sh list."
     "a_lake_api_deploy|Install the lake reader|./apps/lake-api/deploy.sh: notebooks read person-free snapshots; skipped until the policy has its pod."
     "a_lake_api_uninstall|Uninstall the lake reader|./apps/lake-api/uninstall.sh: the snapshots stay."
-    "a_research_calibrate|Calibrate the sensor model from a snapshot|research: list the lake's snapshots and fetch one pinned by its lineage; reads lake-api, writes only the folder you name."
+    "a_research_calibrate|Calibrate the sensor model from a snapshot|research: list the lake's snapshots, fetch one pinned by its lineage and fit the sensor model; reads lake-api, writes only the files you name."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."

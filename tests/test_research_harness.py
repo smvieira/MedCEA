@@ -777,3 +777,228 @@ class Production(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── research Phase 3, commit C: snapshot pins ─────────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _rs_synth as SYN  # noqa: E402
+from research.harness import pins  # noqa: E402
+
+EXTRAPOLATE = {"air_humidity": "the smoke scenario's humidity lies above the calibration's 51-55 %RH"}
+
+
+def _sha(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+class Pins(unittest.TestCase):
+    """calibration and recipe_line_from (design §4.2, §9 R7, R8), resolved in resolve_spec."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="rs-pins-")
+        cls.scen_dir = os.path.join(cls.tmp, "scen")
+        os.makedirs(cls.scen_dir)
+        cls.cal, cls.cal_sha, cls.cal_doc = SYN.make_calibration(cls.scen_dir, name="cal")
+        cls.ext = os.path.join(cls.scen_dir, "extract.yaml")
+        with open(cls.ext, "w", encoding="utf-8") as f:
+            f.write(yaml.safe_dump(SYN.make_extract(), sort_keys=False))
+        cls.ext_sha = _sha(cls.ext)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def scenario(self, **changes):
+        sc = smoke(duration_h=0.1, metrics_from_h=0)
+        sc["calibration"] = {"path": "cal.yaml", "sha256": self.cal_sha, "extrapolate": dict(EXTRAPOLATE)}
+        sc.update(changes)
+        return sc
+
+    def write_spec(self, sc, name="spec.yaml"):
+        with open(os.path.join(self.scen_dir, "sc.yaml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump(sc, f)
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump({"scenarios": ["scen/sc.yaml"], "controllers": [{"code": "IF_THEN_ELSE"},
+                                                                         {"code": "PID"}],
+                            "seeds": [1, 2], "clock_offsets_s": [0, 5]}, f)
+        return path
+
+    def refused(self, sc, why, inline=False):
+        with self.assertRaisesRegex(campaign.CampaignError, why):
+            if inline:
+                campaign.resolve_spec({"scenarios": [sc], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]},
+                                      self.scen_dir)
+            else:
+                campaign.load_spec(self.write_spec(sc))
+
+    def test_calibrated_campaign_byte_identical_with_provenance(self):
+        spec = campaign.load_spec(self.write_spec(self.scenario()))
+        sc = spec["scenarios"][0]
+        self.assertEqual(sc["calibration"]["path"], "cal.yaml")              # kept as written
+        res = sc["calibration"]["resolved"]
+        self.assertEqual(res["source"]["dataset_content_sha256"], self.cal_doc["source"]["dataset_content_sha256"])
+        self.assertEqual(res["extrapolate"], EXTRAPOLATE)
+        ov = sc["sensors"]["overrides"]
+        self.assertNotIn("noise_rel_sd", ov["scd30"])                        # not applied: untouched
+        self.assertEqual(ov["scd30"]["noise_sd"]["co2"], 15.0)               # refused in the file: the default,
+        self.assertEqual(set(ov["scd30"]["noise_sd"]), {"co2", "air_temperature", "air_humidity"})  # per tag
+        self.assertAlmostEqual(ov["sht45"]["noise_sd"]["air_temperature"], 0.012, delta=0.002)
+        outs = []
+        for jobs in (1, 2):
+            d = tempfile.mkdtemp(prefix="rs-pins-run-")
+            self.addCleanup(shutil.rmtree, d)
+            m = campaign.run_campaign(spec, d, repo_root=REPO, jobs=jobs, allow_dirty=True)
+            with open(os.path.join(d, "results.jsonl"), "rb") as f:
+                outs.append(f.read())
+            with open(os.path.join(d, "spec.json"), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), m["spec_digest"])
+            prov = m["provenance"]["smoke_air_temperature"]["calibration"]
+            self.assertEqual((prov["path"], prov["sha256"], prov["name"]), ("cal.yaml", self.cal_sha, "cal"))
+            self.assertIn("sht45.noise_sd.air_temperature", prov["applied"])
+            self.assertIn("scd30.noise_sd.co2", [x["field"] for x in prov["not_applied"]])
+            self.assertEqual(prov["extrapolate"], EXTRAPOLATE)
+            self.assertEqual(m["runs"], 8)
+        self.assertEqual(outs[0], outs[1])
+        plain = campaign.resolve_spec({"scenarios": [smoke(duration_h=0.1, metrics_from_h=0)],
+                                       "controllers": [{"code": "IF_THEN_ELSE"}, {"code": "PID"}],
+                                       "seeds": [1, 2], "clock_offsets_s": [0, 5]})
+        d = tempfile.mkdtemp(prefix="rs-pins-plain-")
+        self.addCleanup(shutil.rmtree, d)
+        m = campaign.run_campaign(plain, d, repo_root=REPO, jobs=1, allow_dirty=True)
+        self.assertNotIn("provenance", m)
+        with open(os.path.join(d, "results.jsonl"), "rb") as f:
+            self.assertNotEqual(f.read(), outs[0])                  # the sensors changed what the loops saw
+
+    def test_a_pin_path_is_relative_to_its_file(self):
+        sc = self.scenario()
+        spec = campaign.resolve_spec({"scenarios": [sc], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]},
+                                     self.scen_dir)
+        self.assertIn("resolved", spec["scenarios"][0]["calibration"])
+        with self.assertRaisesRegex(campaign.CampaignError, "No such file"):
+            campaign.resolve_spec({"scenarios": [self.scenario()], "controllers": [{"code": "IF_THEN_ELSE"}],
+                                   "seeds": [1]}, self.tmp)
+
+    def test_calibration_refusals(self):
+        cal = lambda **kw: dict({"path": "cal.yaml", "sha256": self.cal_sha, "extrapolate": dict(EXTRAPOLATE)}, **kw)
+        self.refused(self.scenario(calibration=cal(sha256="0" * 64)), "sha256 differs")
+        self.refused(self.scenario(calibration=cal(resolved={})), "written by campaign.resolve_spec")
+        self.refused(self.scenario(calibration=cal(colour=1)), "unknown")
+        nox = cal()
+        del nox["extrapolate"]
+        self.refused(self.scenario(calibration=nox), "validity air_humidity")
+        self.refused(self.scenario(calibration=cal(extrapolate={"air_humidity": "x", "co2": "y"})),
+                     "no validity range for co2")
+        self.refused(self.scenario(sensors={"overrides": {"sht45": {"latency_s": 1.0}}}),
+                     "set in both the calibration and the scenario")
+        self.refused(self.scenario(sensors={"overrides": {"sht45": {"noise_sd": {"air_humidity": 0.1}}}}),
+                     r"noise_sd\.air_humidity is set in both")
+        dirty = os.path.join(self.scen_dir, "dirty.yaml")
+        path, sha, _ = SYN.make_calibration(self.scen_dir, name="dirty",
+                                            code=dict(SYN.CODE, dirty=True, dirty_files=["research/x.py"]))
+        self.refused(self.scenario(calibration=cal(path="dirty.yaml", sha256=sha)), "dirty research/")
+        spec = {"scenarios": [self.scenario(calibration=cal(path="dirty.yaml", sha256=sha))],
+                "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]}
+        self.assertTrue(campaign.resolve_spec(spec, self.scen_dir, allow_dirty=True)["scenarios"][0]
+                        ["calibration"]["resolved"]["code"]["dirty"])
+        self.assertTrue(os.path.exists(dirty))
+
+    def test_tampered_calibration_files(self):
+        for name, fn, why in (("fitted", lambda d: d["plant"]["tau_air_s"].update(source="fitted"), "later phase"),
+                              ("assumed", lambda d: d["plant"]["heater_w"].update(value=150.0), "plant.overrides")):
+            d = copy.deepcopy(self.cal_doc)
+            fn(d)
+            path = os.path.join(self.scen_dir, name + ".yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(yaml.safe_dump(d, sort_keys=True))
+            self.refused(self.scenario(calibration={"path": name + ".yaml", "sha256": _sha(path),
+                                                    "extrapolate": dict(EXTRAPOLATE)}), why)
+
+    def test_a_removed_sensor_is_skipped(self):
+        spec = campaign.resolve_spec({"scenarios": [self.scenario(sensors={"remove": ["scd30"]})],
+                                      "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]}, self.scen_dir)
+        sc = spec["scenarios"][0]
+        self.assertNotIn("scd30", sc["sensors"]["overrides"])
+        self.assertIn({"field": "scd30", "why": "the scenario removes this sensor"},
+                      sc["calibration"]["resolved"]["not_applied"])
+
+    def test_the_runner_refuses_an_unresolved_or_altered_pin(self):
+        with self.assertRaisesRegex(runner.ScenarioError, "resolve it with campaign.resolve_spec"):
+            runner.normalise(self.scenario(), loaded())
+        spec = campaign.resolve_spec({"scenarios": [self.scenario()], "controllers": [{"code": "IF_THEN_ELSE"}],
+                                      "seeds": [1]}, self.scen_dir)
+        sc = spec["scenarios"][0]
+        runner.normalise(copy.deepcopy(sc), loaded())
+        sc["sensors"]["overrides"]["sht45"]["latency_s"] = 5.0
+        with self.assertRaisesRegex(runner.ScenarioError, "latency_s is 5.0 in effect"):
+            runner.normalise(copy.deepcopy(sc), loaded())
+
+    def line_scenario(self, **pin):
+        sc = smoke(duration_h=0.1, metrics_from_h=0)
+        del sc["recipe_line"]
+        p = {"extract": "extract.yaml", "sha256": self.ext_sha, "snapshot_id": 1, "lineage": SYN.LINEAGE,
+             "recipe_id": 2, "seq": 3,
+             "light": {"light_on_minutes": 720, "light_off_minutes": 720, "why": "the recipe's 1/1 is a placeholder"}}
+        p.update(pin)
+        sc["recipe_line_from"] = {k: v for k, v in p.items() if v is not None}
+        return sc
+
+    def test_recipe_line_from(self):
+        spec = campaign.load_spec(self.write_spec(self.line_scenario()))
+        sc = spec["scenarios"][0]
+        self.assertEqual(sc["recipe_type"], "FUNGI")
+        self.assertEqual(sc["recipe_line"], {"setpoints": {"co2": {"lower": 500, "upper": 1000},
+                                                           "air_humidity": {"lower": 80, "upper": 85},
+                                                           "air_temperature": {"lower": 10, "upper": 21},
+                                                           "substrate_temperature": {"lower": 16, "upper": 18}},
+                                             "light_type": "RED", "light_on_minutes": 720, "light_off_minutes": 720})
+        r = sc["recipe_line_from"]["resolved"]
+        self.assertEqual(r["light_override"]["from"], {"light_on_minutes": 1, "light_off_minutes": 1})
+        runner.normalise(copy.deepcopy(sc), loaded())
+        prov = pins.provenance(sc)["setpoints"]
+        self.assertEqual((prov["recipe_id"], prov["seq"], prov["snapshot_id"]), (2, 3, 1))
+        self.assertEqual(set(prov["digests"]), {"recipe_lines", "catalogue"})
+        tampered = copy.deepcopy(sc)
+        tampered["recipe_line"]["light_type"] = "BLUE"
+        with self.assertRaisesRegex(runner.ScenarioError, "not the one the pin resolved"):
+            runner.normalise(tampered, loaded())
+
+    def test_recipe_line_from_refusals(self):
+        self.refused(self.line_scenario(light=None), "placeholder")
+        self.refused(self.line_scenario(light={"light_on_minutes": 720, "light_off_minutes": 720, "why": ""}),
+                     "needs a why")
+        self.refused(self.line_scenario(lineage="b" * 64), "lineage")
+        self.refused(self.line_scenario(snapshot_id=2), "the extract is snapshot 1")
+        self.refused(self.line_scenario(seq=9), "no line seq 9")
+        self.refused(self.line_scenario(sha256="0" * 64), "sha256 differs")
+        both = self.line_scenario()
+        both["recipe_line"] = smoke()["recipe_line"]
+        self.refused(both, "recipe_line and recipe_line_from both given")
+        plant = self.line_scenario()
+        plant["recipe_type"] = "PLANT"
+        self.refused(plant, "is a FUNGI recipe")
+        changed = os.path.join(self.scen_dir, "changed.yaml")
+        with open(changed, "w", encoding="utf-8") as f:
+            f.write(yaml.safe_dump(SYN.make_extract(catalogue_change=("co2", "max", 50000)), sort_keys=False))
+        self.refused(self.line_scenario(extract="changed.yaml", sha256=_sha(changed)),
+                     "catalogue differs from git's for co2")
+
+    def test_both_pins_and_validity_against_the_line(self):
+        sc = self.line_scenario()
+        sc["calibration"] = {"path": "cal.yaml", "sha256": self.cal_sha}
+        self.refused(sc, "setpoint air_humidity.lower 80")
+        sc["calibration"]["extrapolate"] = dict(EXTRAPOLATE)
+        sc["initial"] = dict(sc["initial"], air_humidity=53.0)
+        spec = campaign.load_spec(self.write_spec(sc))
+        prov = pins.provenance(spec["scenarios"][0])
+        self.assertEqual(set(prov), {"calibration", "setpoints"})
+
+    def test_cpu_rate_per_scenario(self):
+        a = smoke(duration_h=0.1, metrics_from_h=0)
+        b = smoke(duration_h=0.1, metrics_from_h=0, name="smoke_fast",
+                  sensors={"overrides": {"sht45": {"publish_interval_s": 3.0}, "scd30": {"publish_interval_s": 3.0}}})
+        spec = campaign.resolve_spec({"scenarios": [a, b], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]})
+        rates = campaign.calibrate(spec, loaded())
+        self.assertEqual(set(rates), {("smoke_air_temperature", "IF_THEN_ELSE"), ("smoke_fast", "IF_THEN_ELSE")})

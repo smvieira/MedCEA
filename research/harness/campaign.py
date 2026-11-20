@@ -11,18 +11,24 @@ Spec (YAML):
     clock_offsets_s:  [number, ...]       (default [0.0])
     jitter_s:         number               (default 0.0)
 
+A scenario may pin a calibration file and a recipe line of a snapshot (pins.py: keys
+`calibration` and `recipe_line_from`); resolve_spec resolves both here, before any run, and
+the resolved values stay in the spec next to their pins, so spec_digest covers both.
+
 Each params_grid is expanded to its cartesian product (keys sorted), over params' fixed
 values. Every run is one line of results.jsonl, canonical JSON (sorted keys, no spaces),
 in the sorted order of (scenario, code, params, seed, clock offset), so the same spec,
 code and seeds give a byte-identical file whatever --jobs is. manifest.json names the
 code (commit, dirty files, blob SHAs of every contract file read and of the sandbox's own
 code, contract.CONTRACT_VERSION), the spec's digest,
-the grid, METRICS_VERSION, the library versions and the sha256 of results.jsonl.
+the grid, METRICS_VERSION, the library versions and the sha256 of results.jsonl, plus,
+when a scenario has a pin, `provenance` (what each pin applied). spec.json beside it holds
+the resolved spec: the exact bytes spec_digest hashes.
 
-CPU budget: before anything runs, one short calibration run per controller code (the
-first scenario cut to CALIBRATION_H) measures CPU seconds (with child processes: GEKKO's
-solver) per simulated hour; the
-estimate is the sum over runs of that rate x the run's duration. A campaign over
+CPU budget: before anything runs, one short calibration run per (scenario, controller
+code) (the scenario cut to CALIBRATION_H) measures CPU seconds (with child processes:
+GEKKO's solver) per simulated hour (a scenario's sensors set its message rate, so each is
+measured); the estimate is the sum over runs of its (scenario, code) rate x its duration. A campaign over
 --max-cpu-hours (default 4) is refused, nothing written. Pool size: --jobs, never above
 the CPU limit (the cgroup's /sys/fs/cgroup/cpu.max quota when there is one, else half of
 os.cpu_count()), never above the number of runs.
@@ -41,7 +47,7 @@ import sys
 
 import yaml
 
-from . import algorithms_loader, metrics, runner
+from . import algorithms_loader, metrics, pins, runner
 
 CALIBRATION_H = 0.05           # 3 simulated minutes per controller code
 DEFAULT_MAX_CPU_HOURS = 4.0
@@ -56,14 +62,15 @@ def canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
-def load_spec(path):
+def load_spec(path, allow_dirty=False, repo_root=None):
     with open(path, encoding="utf-8") as f:
         spec = yaml.safe_load(f)
-    return resolve_spec(spec, os.path.dirname(os.path.abspath(path)))
+    return resolve_spec(spec, os.path.dirname(os.path.abspath(path)), allow_dirty=allow_dirty, repo_root=repo_root)
 
 
-def resolve_spec(spec, base_dir="."):
-    """The spec with scenario files inlined and defaults filled in (what the digest covers)."""
+def resolve_spec(spec, base_dir=".", allow_dirty=False, repo_root=None):
+    """The spec with scenario files inlined, pins resolved (pins.py: a pin's path is
+    relative to the file holding it) and defaults filled in (what the digest covers)."""
     if not isinstance(spec, dict):
         raise CampaignError("the spec must be a mapping")
     bad = sorted(set(spec) - SPEC_KEYS)
@@ -71,11 +78,18 @@ def resolve_spec(spec, base_dir="."):
         raise CampaignError("unknown spec key(s): " + ", ".join(bad))
     out = {"scenarios": [], "controllers": [], "seeds": [], "clock_offsets_s": [0.0], "jitter_s": 0.0}
     for sc in spec.get("scenarios") or []:
+        sc_dir = base_dir
         if isinstance(sc, str):
-            with open(os.path.join(base_dir, sc), encoding="utf-8") as f:
+            path = os.path.join(base_dir, sc)
+            sc_dir = os.path.dirname(path)
+            with open(path, encoding="utf-8") as f:
                 sc = yaml.safe_load(f)
         if not isinstance(sc, dict) or not sc.get("name"):
             raise CampaignError("a scenario must be a mapping with a name")
+        try:
+            sc = pins.resolve_pins(sc, sc_dir, repo_root or runner.DEFAULT_REPO, allow_dirty=allow_dirty)
+        except pins.PinError as e:
+            raise CampaignError("scenario %s: %s" % (sc["name"], e)) from None
         out["scenarios"].append(sc)
     if not out["scenarios"]:
         raise CampaignError("the spec names no scenario")
@@ -163,19 +177,22 @@ def _run(run):
 
 
 def calibrate(spec, loaded):
-    """CPU seconds per simulated hour, per controller code (one short run each)."""
-    sc = copy.deepcopy(spec["scenarios"][0])
-    sc["duration_h"] = min(sc["duration_h"], CALIBRATION_H)
-    sc["metrics_from_h"] = 0
+    """CPU seconds per simulated hour, per (scenario name, controller code): one short run
+    each, since a scenario's sensors (a 3-s publish interval) set its message rate."""
     rates = {}
-    for c in spec["controllers"]:
-        if c["code"] in rates:
-            continue
-        loaded.check(c["code"], c["params"])
-        t0 = cpu_seconds()
-        runner.run_scenario(copy.deepcopy(sc), {"code": c["code"], "params": c["params"]},
-                            spec["seeds"][0], spec["clock_offsets_s"][0], spec["jitter_s"], loaded=loaded)
-        rates[c["code"]] = (cpu_seconds() - t0) / sc["duration_h"]
+    for scenario in spec["scenarios"]:
+        sc = copy.deepcopy(scenario)
+        sc["duration_h"] = min(sc["duration_h"], CALIBRATION_H)
+        sc["metrics_from_h"] = 0
+        for c in spec["controllers"]:
+            key = (scenario["name"], c["code"])
+            if key in rates:
+                continue
+            loaded.check(c["code"], c["params"])
+            t0 = cpu_seconds()
+            runner.run_scenario(copy.deepcopy(sc), {"code": c["code"], "params": c["params"]},
+                                spec["seeds"][0], spec["clock_offsets_s"][0], spec["jitter_s"], loaded=loaded)
+            rates[key] = (cpu_seconds() - t0) / sc["duration_h"]
     return rates
 
 
@@ -195,7 +212,7 @@ def run_campaign(spec, out_dir, repo_root=None, jobs=None, allow_dirty=False,
     for sc in spec["scenarios"]:
         runner.normalise(copy.deepcopy(sc), loaded)
     rates = calibrate(spec, loaded)
-    estimate_h = sum(rates[code] * durations[name] for name, code, _, _, _ in runs) / 3600.0
+    estimate_h = sum(rates[(name, code)] * durations[name] for name, code, _, _, _ in runs) / 3600.0
     if estimate_h > max_cpu_hours:
         raise CampaignError("estimated %.3g CPU-hours for %d runs, over the cap of %.3g "
                             "(--max-cpu-hours)" % (estimate_h, len(runs), max_cpu_hours))
@@ -215,10 +232,13 @@ def run_campaign(spec, out_dir, repo_root=None, jobs=None, allow_dirty=False,
     with open(os.path.join(out_dir, "results.jsonl"), "wb") as f:
         f.write(body)
     results = [json.loads(line) for line in lines]
+    spec_bytes = canonical(spec).encode("utf-8")
+    with open(os.path.join(out_dir, "spec.json"), "wb") as f:
+        f.write(spec_bytes)
     manifest = {
         "metrics_version": metrics.METRICS_VERSION,
         "code": loaded.manifest(),
-        "spec_digest": hashlib.sha256(canonical(spec).encode("utf-8")).hexdigest(),
+        "spec_digest": hashlib.sha256(spec_bytes).hexdigest(),
         "scenarios": sorted(durations),
         "controllers": spec["controllers"],
         "seeds": spec["seeds"],
@@ -230,6 +250,9 @@ def run_campaign(spec, out_dir, repo_root=None, jobs=None, allow_dirty=False,
         "max_cpu_hours": max_cpu_hours,
         "result_digest": hashlib.sha256(body).hexdigest(),
     }
+    prov = {sc["name"]: p for sc in spec["scenarios"] for p in [pins.provenance(sc)] if p}
+    if prov:
+        manifest["provenance"] = prov
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         f.write(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
     return manifest
@@ -252,7 +275,7 @@ def main(argv=None):
     out = a.out or os.path.join(runner.DEFAULT_REPO, "research", "runs",
                                 os.path.splitext(os.path.basename(a.spec))[0])
     try:
-        spec = load_spec(a.spec)
+        spec = load_spec(a.spec, allow_dirty=a.allow_dirty)
         m = run_campaign(spec, out, jobs=a.jobs, allow_dirty=a.allow_dirty, max_cpu_hours=a.max_cpu_hours)
     except (CampaignError, algorithms_loader.LoaderError, runner.ScenarioError, OSError, yaml.YAMLError) as e:
         print("campaign: %s" % e, file=sys.stderr)
