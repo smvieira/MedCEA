@@ -111,12 +111,15 @@ split_dns_target() {
 # while nothing listens on its port 53) systemd-resolved waits, and getent with
 # it. An address counts as this server's when it is PLATFORM_IP or one of
 # `hostname -I` (DNS_OWN_ADDRS overrides, for tests): the ingress answers on all.
-# Prints "  ✓ NAME → ADDR" or "  ✗ NAME: why" per name; on any failure sets
-# DNS_CHECK_TODO (one line: the cause and the fix) and returns 1. Reads LOCAL_DNS.
+# Prints "  ✓ NAME → ADDR", "  ! NAME: resolves to ADDR …" or "  ✗ NAME: why" per name;
+# on any failure sets DNS_CHECK_TODO (one line: the cause and the fix) and returns 1.
+# Returns 2 (DNS_CHECK_TODO set, a warning, not a problem) when, with LOCAL_DNS not true
+# and no Tailscale route for the domain, every name resolves but not to this server: a
+# public address that forwards here looks like that. Reads LOCAL_DNS.
 DNS_CHECK_TODO=""
 dns_names_check() {
     local domain="$1" ip="$2"; shift 2
-    local t="${DNS_CHECK_TIMEOUT:-5}" name out addr rc own hung="" bad=0 route
+    local t="${DNS_CHECK_TIMEOUT:-5}" name out addr rc own hung="" bad=0 missing=0 elsewhere="" route
     own=" $ip ${DNS_OWN_ADDRS-$(hostname -I 2>/dev/null)} "
     DNS_CHECK_TODO=""
     for name in "$@"; do
@@ -125,13 +128,13 @@ dns_names_check() {
         addr="$(awk 'NR == 1 { print $1 }' <<<"$out")"
         if [[ $rc -eq 124 ]]; then
             echo "  ✗ $name: the lookup did not finish within ${t}s"
-            hung=1; bad=1
+            hung=1; bad=1; missing=1
         elif [[ -z "$addr" ]]; then
             echo "  ✗ $name: does not resolve on this machine"
-            bad=1
+            bad=1; missing=1
         elif [[ "$own" != *" $addr "* ]]; then
-            echo "  ✗ $name: resolves to $addr, not to this server ($ip)"
-            bad=1
+            echo "  ! $name: resolves to $addr, not to an address of this server ($ip)"
+            bad=1; elsewhere+=" $addr"
         else
             echo "  ✓ $name → $addr"
         fi
@@ -149,6 +152,12 @@ dns_names_check() {
         fi
     elif [[ -n "$route" ]]; then
         DNS_CHECK_TODO="Tailscale split DNS sends '$domain' to $route, not to this server ($ip): change it at https://login.tailscale.com/admin/dns (Nameservers → the entry for '$domain'), or set LOCAL_DNS=\"true\" and run ./deploy-infra.sh"
+    elif [[ $missing -eq 0 && "${LOCAL_DNS:-false}" != "true" ]]; then
+        # Every name resolves, only not to an address of this server: DNS records that
+        # point at the site's public address (the router forwards 443 here) look like
+        # this, so it is said, never counted as a problem (rc 2).
+        DNS_CHECK_TODO="*.$domain resolves to${elsewhere}, which is not an address of this server ($ip). That is right only if it forwards to this server (a public address with port forwarding); otherwise point the A records at $ip, or set LOCAL_DNS=\"true\" and run ./deploy-infra.sh"
+        return 2
     elif [[ "${LOCAL_DNS:-false}" == "true" ]]; then
         DNS_CHECK_TODO="*.$domain does not resolve to this server although LOCAL_DNS is true: check the managed block in /etc/hosts and that /etc/nsswitch.conf lists files before dns on its hosts: line, then run ./deploy-infra.sh"
     else

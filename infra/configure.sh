@@ -244,8 +244,12 @@ domain_dns() {
                 info "Which address of this server do other devices use for ${v}?"
                 info "  1) the Tailscale address ${ts}: every device on your tailnet"
                 info "  2) the LAN address ${lan:-(none found)}: the local network only"
+                # A kept domain defaults to the address PLATFORM_IP gives today, not to
+                # USE_TAILSCALE: configure before 21 Nov 2026 wrote USE_TAILSCALE=false for
+                # every custom domain while the template line still gave the Tailscale
+                # address, so Enter must not move such an install onto the LAN.
                 def=1
-                [[ "$v" == "$cur" && "$(cfg_get USE_TAILSCALE)" == "false" ]] && def=2
+                [[ "$v" == "$cur" && "$(cfg_get PLATFORM_IP)" != "$ts" ]] && def=2
                 while true; do
                     ask who "Choice" "$def"
                     [[ "$who" == 1 || "$who" == 2 ]] && break

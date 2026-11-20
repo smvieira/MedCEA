@@ -131,6 +131,7 @@ exit 2
 '''
 
 TAILSCALE = r'''#!/usr/bin/env bash
+if [[ "$1 $2" == "ip -4" && -n "${STUB_TS_IP:-}" ]]; then echo "$STUB_TS_IP"; exit 0; fi
 [[ "$1 $2" == "dns status" ]] || exit 1
 echo "Split DNS Routes:"
 [[ -n "${STUB_ROUTE:-}" ]] && echo "  - ${STUB_ROUTE}"
@@ -144,8 +145,8 @@ class NamesCheck(Scratch):
         write(os.path.join(self.bin, "tailscale"), TAILSCALE)
         script = ('source "%s/infra/lib-dns.sh"\n'
                   'dns_query() { return "$STUB_DNSQ_RC"; }\n'
-                  'if dns_names_check medcea.ai 100.103.255.4 portal.medcea.ai keycloak.medcea.ai; then echo RC=0; '
-                  'else echo RC=1; fi\necho "TODO=$DNS_CHECK_TODO"\n' % REPO)
+                  'dns_names_check medcea.ai 100.103.255.4 portal.medcea.ai keycloak.medcea.ai; '
+                  'echo RC=$?\necho "TODO=$DNS_CHECK_TODO"\n' % REPO)
         p = self.bash(script, STUB_GETENT=getent, STUB_ROUTE=route, LOCAL_DNS=local_dns,
                       STUB_DNSQ_RC=str(dnsq_rc), DNS_OWN_ADDRS="192.168.1.99 100.103.255.4",
                       DNS_CHECK_TIMEOUT=timeout)
@@ -178,7 +179,13 @@ class NamesCheck(Scratch):
     def test_split_dns_elsewhere_nothing_and_local_dns_true(self):
         rc, todo, _ = self.check("", route="medcea.ai -> 100.64.0.9")
         self.assertIn("to 100.64.0.9, not to this server", todo)
-        rc, todo, _ = self.check("portal.medcea.ai 203.0.113.7")
+        # every name resolves, to another address (a public address forwarding here):
+        # a warning, rc 2, never a problem
+        rc, todo, _ = self.check("portal.medcea.ai 203.0.113.7\nkeycloak.medcea.ai 203.0.113.7")
+        self.assertEqual(rc, "2")
+        self.assertIn("resolves to 203.0.113.7", todo)
+        self.assertIn("port forwarding", todo)
+        rc, todo, _ = self.check("")
         self.assertEqual(rc, "1")
         self.assertIn('either set LOCAL_DNS="true"', todo)
         self.assertIn("create an A record for every <service>.medcea.ai", todo)
@@ -190,7 +197,7 @@ class NamesCheck(Scratch):
 class DomainDns(Scratch):
     """domain_dns from configure.sh's own text, with its helpers."""
 
-    def run_dd(self, config, args, answers="", route=""):
+    def run_dd(self, config, args, answers="", route="", ts_ip=""):
         src = read("infra/configure.sh")
         block = src[src.index("PLATFORM_IP_TS_LINE="):src.index("EOF_LAN\n") + len("EOF_LAN\n")]
         funcs = "".join(function_text(src, n) for n in (
@@ -200,7 +207,8 @@ class DomainDns(Scratch):
         write(cfg, config, 0o600)
         script = ('RED= YELLOW= GREEN= CYAN= BOLD= NC=\nCONFIG_FILE=config.env\nEXAMPLE_FILE="%s/config.env.example"\n'
                   'source "%s/infra/lib-dns.sh"\n%s%s\ndomain_dns "$@"\n' % (REPO, REPO, funcs, block))
-        e = clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], HOME=self.d, STUB_ROUTE=route)
+        e = clean_env(PATH=self.bin + os.pathsep + os.environ["PATH"], HOME=self.d, STUB_ROUTE=route,
+                      STUB_TS_IP=ts_ip)
         p = subprocess.run(["bash", "-c", script, "configure", *args], input=answers, capture_output=True,
                            text=True, env=e, cwd=self.d, timeout=60)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -254,6 +262,15 @@ class DomainDns(Scratch):
         cfg = self.base(LOCAL_DNS='"false"', USE_TAILSCALE='"false"')
         out, v = self.run_dd(cfg, ["medcea.ai", "medcea.ai", "medcea", "100.103.255.4", "192.168.1.99"], answers="\n\n")
         self.assertEqual((v["LOCAL_DNS"], v["USE_TAILSCALE"]), ('"false"', '"false"'))
+
+    def test_keeping_a_domain_whose_platform_ip_is_tailscale_stays_on_tailscale(self):
+        # configure before 21 Nov 2026 wrote USE_TAILSCALE=false for every custom domain
+        # while the template line gave the Tailscale address: Enter must keep that address.
+        cfg = self.base(LOCAL_DNS='"false"', USE_TAILSCALE='"false"')
+        out, v = self.run_dd(cfg, ["medcea.ai", "medcea.ai", "medcea", "100.103.255.4", "192.168.1.99"],
+                             answers="\n\n", ts_ip="100.103.255.4")
+        self.assertEqual((v["LOCAL_DNS"], v["USE_TAILSCALE"]), ('"false"', '"true"'))
+        self.assertEqual("PLATFORM_IP=" + v["PLATFORM_IP"], self.TS_LINE)
 
     def test_nip_io_and_the_project_name(self):
         _, v = self.run_dd(self.base(), ["100.103.255.4.nip.io", "", "medcea", "100.103.255.4", "192.168.1.99"])

@@ -611,8 +611,12 @@ fi
 # the platform by name until it is fixed. Never fails the deploy: DNS records may be made
 # afterwards. Each lookup is bounded (a DNS route to a server that does not answer hangs).
 echo -e "\n${GREEN}[DNS] Do the platform's names resolve on this machine?${NC}"
-if dns_names_check "$DOMAIN" "$PLATFORM_IP" "$PORTAL_DOMAIN" "$KEYCLOAK_DOMAIN"; then
+_dns_rc=0
+dns_names_check "$DOMAIN" "$PLATFORM_IP" "$PORTAL_DOMAIN" "$KEYCLOAK_DOMAIN" || _dns_rc=$?
+if [[ $_dns_rc -eq 0 ]]; then
     echo -e "${GREEN}  yes, to this server${NC}"
+elif [[ $_dns_rc -eq 2 ]]; then
+    echo -e "${YELLOW}  $DNS_CHECK_TODO${NC}"     # resolves, to another address: said, not a problem
 else
     echo -e "${RED}  $DNS_CHECK_TODO${NC}"
     _PROBLEMS+=("$DNS_CHECK_TODO")
@@ -668,6 +672,7 @@ pa_netpol full
 if ! "$SCRIPT_DIR/infra/deploy-research-namespace.sh"; then
     echo -e "${RED}The research namespace failed to deploy (above). The platform deploy goes on;${NC}"
     echo -e "${RED}re-run ./infra/deploy-research-namespace.sh once the cause is fixed.${NC}"
+    _PROBLEMS+=("the research namespace failed to deploy (output above): re-run ./infra/deploy-research-namespace.sh once the cause is fixed")
 fi
 
 
