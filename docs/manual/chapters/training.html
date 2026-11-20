@@ -1584,7 +1584,7 @@ SQL</code></pre></li>
 <p><strong>Last done.</strong> Not run yet.</p>
 
 <h3 id="training-e47">E47 A domain of your own on a fresh install</h3>
-<p><strong>Goal.</strong> See configuration ask who answers DNS for a domain of your own, see <code>./deploy-infra.sh</code> check that the platform's names resolve on the host, and see a deploy whose names do not resolve end with "FINISHED WITH PROBLEMS", never "SUCCESS". Proves the decision "A domain of your own: who answers its DNS, and which address the platform uses" in the <a href="#compliance-decisions">decision record</a>; the setup is described in <a href="#admin-dns-own">A domain of your own</a>.</p>
+<p><strong>Goal.</strong> See configuration ask who answers DNS for a domain of your own, see <code>./deploy-infra.sh</code> check that the platform's names resolve on the host, and see a deploy whose names do not resolve end with "FINISHED WITH PROBLEMS", never "SUCCESS". Proves the decision "A custom domain without DNS records gets the platform's own name service" in the <a href="#compliance-decisions">decision record</a>; the setup is described in <a href="#admin-dns-own">A domain of your own</a>.</p>
 <p><strong>Accounts and roles.</strong> The host operator (a shell on the server, in the <code>microk8s</code> group). No platform account.</p>
 <p><strong>Before you start.</strong> A server to install, or an install you may redeploy, with Tailscale up. Note its Tailscale and LAN addresses (<code>tailscale ip -4</code>, <code>hostname -I</code>). Pick a domain you own or one nobody resolves (for example <code>medcea.ai</code> on a host where no public record points at it). No run, flash or notebook server active.</p>
 <p><strong>Steps.</strong></p>
@@ -1606,7 +1606,7 @@ SQL</code></pre></li>
 <div class="record"><p>Nothing is recorded in the platform: the check only reads. The deploy log <code>logs/deploy-infra-*.log</code> holds the check's lines and any "Problem:" line. Write the date, the commit, the domain and what each step printed under <strong>Last done</strong>.</p></div>
 <p><strong>Refusals worth trying.</strong> None: the check never stops a deploy, on purpose (records may be made afterwards).</p>
 <p><strong>Afterwards.</strong> Leave <code>LOCAL_DNS</code>, <code>USE_TAILSCALE</code> and <code>PLATFORM_IP</code> as the install needs them, and run <code>./deploy-infra.sh</code> once more if you changed them in step 5.</p>
-<p><strong>Last done.</strong> Not run yet.</p>
+<p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
