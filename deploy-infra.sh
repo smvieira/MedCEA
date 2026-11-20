@@ -739,7 +739,14 @@ rm -rf "$_KC_THEME_TMP"
 $MK8S kubectl create secret generic keycloak-bootstrap -n "$NAMESPACE" --dry-run=client -o yaml \
   --from-literal=username="$KC_BREAKGLASS_USER" --from-literal=password="$KC_BREAKGLASS_PASS" \
   | $MK8S kubectl apply -f - >/dev/null
-render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN _KC_THEME_SUM | $MK8S kubectl apply -n "$NAMESPACE" -f -
+# Keycloak's memory limit (k8s/keycloak/keycloak.yaml; the heap is a share of it).
+# An older config.env without the key gets the default.
+KEYCLOAK_MEMORY_LIMIT="${KEYCLOAK_MEMORY_LIMIT:-3Gi}"
+if [[ ! "$KEYCLOAK_MEMORY_LIMIT" =~ ^[1-9][0-9]*(Mi|Gi)$ ]]; then
+    echo -e "${RED}ERROR: KEYCLOAK_MEMORY_LIMIT='$KEYCLOAK_MEMORY_LIMIT' must be a size such as 3Gi (Mi or Gi).${NC}" >&2
+    exit 1
+fi
+render "$SCRIPT_DIR/k8s/keycloak/keycloak.yaml" NAMESPACE POSTGRES_USER POSTGRES_PASS KEYCLOAK_DOMAIN _KC_THEME_SUM KEYCLOAK_MEMORY_LIMIT | $MK8S kubectl apply -n "$NAMESPACE" -f -
 
 echo -e "${YELLOW}Waiting for Keycloak to be ready (up to 10 min)...${NC}"
 $MK8S kubectl rollout status deployment/keycloak -n "$NAMESPACE" --timeout=10m

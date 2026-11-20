@@ -76,6 +76,12 @@ spec:
           value: "false"
         - name: KC_HEALTH_ENABLED
           value: "true"
+        # Heap from the limit, below Keycloak's own 70 %: a plain `start` runs the
+        # build step in a second JVM before the server's, both under one memory
+        # limit, and at 70 % each on a 24-CPU host they went past 2Gi and were
+        # OOM-killed at every start (20 Nov 2026). The limit is KEYCLOAK_MEMORY_LIMIT.
+        - name: JAVA_OPTS_KC_HEAP
+          value: "-XX:MaxRAMPercentage=50 -XX:InitialRAMPercentage=25"
         ports:
         - containerPort: 8080
           name: http
@@ -102,7 +108,7 @@ spec:
             memory: "1Gi"
             cpu: "250m"
           limits:
-            memory: "2Gi"
+            memory: "${KEYCLOAK_MEMORY_LIMIT}"
             cpu: "1000m"
 ---
 apiVersion: v1
