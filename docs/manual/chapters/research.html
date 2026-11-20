@@ -144,7 +144,7 @@ research/.venv/bin/python -m research.harness.campaign SPEC.yaml [--out DIR] [--
 <tbody>
 <tr><td>Research database (2a)</td><td>250m</td><td>512Mi</td><td>2Gi</td><td>1, <code>RESEARCH_DB_STORAGE</code> (10Gi)</td></tr>
 <tr><td>AI Workbench hub and its proxy (2b)</td><td>250m</td><td>640Mi</td><td>1.25Gi</td><td>1 (<code>hub-db-dir</code>, 1Gi)</td></tr>
-<tr><td>Snapshot reader <code>lake-api</code> (2b)</td><td>100m</td><td>64Mi</td><td>128Mi</td><td>none</td></tr>
+<tr><td>Snapshot reader <code>lake-api</code> (2b)</td><td>100m</td><td>128Mi</td><td>512Mi</td><td>none</td></tr>
 <tr><td>Notebooks, four at a time (2b)</td><td>4 × 100m</td><td>4 × 512M</td><td>4 × 4G</td><td>one home each, 10Gi, kept</td></tr>
 <tr><td><strong>Quota</strong> (rounded up for headroom)</td><td><strong>4</strong></td><td><strong>8Gi</strong></td><td><strong>24Gi</strong></td><td><strong>22 claims, 220Gi (about 20 homes); 20 pods</strong></td></tr>
 </tbody>

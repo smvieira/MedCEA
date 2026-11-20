@@ -1782,7 +1782,7 @@ research/.venv/bin/python -m research.harness.campaign SPEC.yaml [--out DIR] [--
 <tbody>
 <tr><td>Research database (2a)</td><td>250m</td><td>512Mi</td><td>2Gi</td><td>1, <code>RESEARCH_DB_STORAGE</code> (10Gi)</td></tr>
 <tr><td>AI Workbench hub and its proxy (2b)</td><td>250m</td><td>640Mi</td><td>1.25Gi</td><td>1 (<code>hub-db-dir</code>, 1Gi)</td></tr>
-<tr><td>Snapshot reader <code>lake-api</code> (2b)</td><td>100m</td><td>64Mi</td><td>128Mi</td><td>none</td></tr>
+<tr><td>Snapshot reader <code>lake-api</code> (2b)</td><td>100m</td><td>128Mi</td><td>512Mi</td><td>none</td></tr>
 <tr><td>Notebooks, four at a time (2b)</td><td>4 × 100m</td><td>4 × 512M</td><td>4 × 4G</td><td>one home each, 10Gi, kept</td></tr>
 <tr><td><strong>Quota</strong> (rounded up for headroom)</td><td><strong>4</strong></td><td><strong>8Gi</strong></td><td><strong>24Gi</strong></td><td><strong>22 claims, 220Gi (about 20 homes); 20 pods</strong></td></tr>
 </tbody>
@@ -3344,6 +3344,10 @@ sudo tar -C "$D" -xzpf F/volumes/claim-&lt;name&gt;.tar.gz --numeric-owner</code
 <p>Symptom: the host console or <code>sudo journalctl -k</code> shows lines such as <code>Memory cgroup out of memory: Killed process … (java) … anon-rss:2086828kB … UID:1000</code>, the Keycloak pod's restart count rises, and sign-ins fail everywhere for a few minutes.</p>
 <p>Cause: Keycloak hit its container memory limit. Each start of Keycloak runs a build step in one Java process and then the server in another, under one limit. Installs before 20 November 2026 had a fixed 2Gi limit and Keycloak's own heap size, which together went past it on a host with many CPUs.</p>
 <p>Fix: run <code>./deploy-infra.sh</code>. It sets the limit from <code>KEYCLOAK_MEMORY_LIMIT</code> in <code>config.env</code> (3Gi by default) and caps the heap at half of it, then restarts Keycloak. If it still happens, raise <code>KEYCLOAK_MEMORY_LIMIT</code> (for example to <code>4Gi</code>) and run <code>./deploy-infra.sh</code> again. The pod's <code>memory.events</code> under <code>/sys/fs/cgroup/kubepods/</code> counts the kills (<code>oom_kill</code>).</p>
+<h4 id="admin-troubleshooting-lake-api-oom">A snapshot fetch or a notebook's read fails, and lake-api's restart count rises</h4>
+<p>Symptom: <code>./apps/research/calibrate.sh fetch</code> stops with "not reachable", or a notebook's <code>measurements(…)</code> fails part-way, and <code>microk8s kubectl -n &lt;project&gt;-research get pod -l app=lake-api</code> shows restarts with last state <code>OOMKilled</code>.</p>
+<p>Cause: the snapshot reader hit its memory limit. It builds each answer whole (up to 50,000 readings, about 11 MB of JSON) and needs several times that while it does. Installs before 21 November 2026 gave it 128Mi, which a full page of readings went past.</p>
+<p>Fix: run <code>./apps/lake-api/deploy.sh</code> (or <code>./apps/research/deploy.sh</code>, which runs it last). It sets 512Mi and restarts lake-api; nothing in the lake changes. The pod's <code>memory.events</code> under <code>/sys/fs/cgroup/kubepods/</code> counts the kills (<code>oom_kill</code>).</p>
 <h4 id="admin-troubleshooting-online">A board sends readings but its Online dot is amber or red</h4>
 <p>Symptom: in the Configuration page's Devices tab, a board that is connected (its readings arrive, or the broker log shows it logged in) has an amber or red Online dot, and the tooltip says its name does not resolve.</p>
 <p>Cause: the online check asks for the board by its hostname (<code>unit01-c-zone01</code>), and the cluster asks the router for names. A router can keep the name a board had at an earlier onboarding, before the naming scheme changed (for example <code>u01-c-z01</code>), often as a saved device name or a DHCP reservation. Check from the Config UI pod: <code>microk8s kubectl -n medcea exec deploy/config-ui -c recipe-fileserver -- getent hosts &lt;address&gt;</code> prints the name the router gives that address.</p>

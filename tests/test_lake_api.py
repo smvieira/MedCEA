@@ -116,7 +116,7 @@ class Render(unittest.TestCase):
         (c,) = spec["containers"]
         self.assertEqual(c["securityContext"], {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
                                                 "capabilities": {"drop": ["ALL"]}})
-        self.assertEqual(c["resources"], {"requests": {"cpu": "100m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}})
+        self.assertEqual(c["resources"], {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}})
         ann = self.docs["Deployment"]["spec"]["template"]["metadata"]["annotations"]
         self.assertEqual(ann, {"medcea/auth-secret-version": "4711", "medcea/schema-sha256": "ab" * 32})
         self.assertEqual(self.docs["Deployment"]["spec"]["template"]["metadata"]["labels"]["app"], "lake-api")
