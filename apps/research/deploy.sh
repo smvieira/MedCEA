@@ -242,4 +242,10 @@ log "Done: $RS_RELEASE.$RESEARCH_NAMESPACE:5432, database $RS_DB. Before the fir
 _lrc=0
 bash "$REPO_ROOT/apps/lake-api/deploy.sh" || _lrc=$?
 [[ $_lrc == 0 ]] || exit $_lrc
+
+# ── 10. The agent machinery, after lake-api (research Phase 4a, R3: deploy-apps.sh sorts
+#       research-agents before research, so it is chained here; it keeps its own skip contract) ──
+_arc=0
+bash "$REPO_ROOT/apps/research-agents/deploy.sh" || _arc=$?
+[[ $_arc == 0 ]] || exit $_arc
 policy_source_finish "$NAMESPACE" research

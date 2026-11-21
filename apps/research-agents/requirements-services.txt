@@ -1,0 +1,12 @@
+# Research Phase 4a: the third-party wheels the agent machinery's pods install (an init container,
+# --no-index --find-links /wheels --require-hashes --no-deps --target /opt/extra), for the python:3.14
+# image (cp314 / abi3 / any, manylinux x86_64; every file older than two weeks on 21 Nov 2026).
+#   psycopg2-binary   research-session's PostgreSQL login (rs_session)
+#   PyYAML            the orchestrator's profiles and the harness's specs (as research/requirements.txt)
+#   PyJWT, cryptography, cffi, pycparser   medcea_iam.py verifies the person's RS256 token
+psycopg2-binary==2.9.11 --hash=sha256:47f212c1d3be608a12937cc131bd85502954398aaa1320cb4c14421a0ffccf4c
+PyYAML==6.0.3 --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5
+PyJWT==2.15.1 --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193
+cryptography==50.0.2 --hash=sha256:630ebfea3bf689d075f82316324ff7433dc447fe6bc1bfc76524b74b4a9567d2
+cffi==2.1.1 --hash=sha256:b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96
+pycparser==3.12 --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e

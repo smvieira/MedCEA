@@ -118,3 +118,33 @@ workbench_namespace() {
         echo "$NAMESPACE"
     fi
 }
+
+# ── the research zones' namespaces and their NetworkPolicy arguments (research Phase 4a, R2/R18) ──
+#
+#   zone_namespace ZONE    the namespace of a research zone: research, research-gw or research-agents
+#                          (RESEARCH_NAMESPACE, RESEARCH_GW_NAMESPACE, RESEARCH_AGENTS_NAMESPACE, each
+#                          defaulting to ${RESEARCH_NAMESPACE:-${NAMESPACE}-research} plus -gw / -agents).
+#   zone_netpol_args ZONE  prints, one per line, what `cli.py compile netpol` needs for that zone:
+#                          --zone Z --namespace NS --platform-namespace $NAMESPACE and a
+#                          --zone-namespace pair for each of the other two zones. The caller adds its
+#                          --node-ip arguments. (research Phase 4a stage 6b1: the two new zones' scripts
+#                          use it; pa_rsnetpol keeps its own argument list until commit B moves it, since
+#                          the tests pin that argv.)
+zone_namespace() {
+    local _rns="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    case "$1" in
+        research)        echo "$_rns" ;;
+        research-gw)     echo "${RESEARCH_GW_NAMESPACE:-${_rns}-gw}" ;;
+        research-agents) echo "${RESEARCH_AGENTS_NAMESPACE:-${_rns}-agents}" ;;
+        *) echo "zone_namespace: unknown zone '$1'" >&2; return 2 ;;
+    esac
+}
+
+zone_netpol_args() {
+    local _z="$1" _o
+    zone_namespace "$_z" >/dev/null || return 2
+    printf '%s\n' --zone "$_z" --namespace "$(zone_namespace "$_z")" --platform-namespace "$NAMESPACE"
+    for _o in research research-gw research-agents; do
+        [[ "$_o" == "$_z" ]] || printf '%s\n' --zone-namespace "$_o=$(zone_namespace "$_o")"
+    done
+}

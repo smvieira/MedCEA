@@ -544,6 +544,13 @@ for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFA
           SVC_RESEARCH_EXPORT_DB_PASS; do
     [[ -n "$(cfg_get "$_v")" ]] || cfg_set "$_v" "$(gen_password)"
 done
+# research-session's token-signing key (research Phase 4a): hex, 64 characters.
+if [[ -z "$(cfg_get RS_SESSION_HMAC_KEY)" ]]; then
+    _k="$(openssl rand -hex 32 2>/dev/null)" || _k=""
+    [[ "$_k" =~ ^[0-9a-f]{64}$ ]] || die "openssl rand -hex 32 gave no key for RS_SESSION_HMAC_KEY"
+    cfg_set RS_SESSION_HMAC_KEY "$_k"
+    unset _k
+fi
 # Superset's session-signing and connection-encryption key (apps/superset): hex, so
 # it stays inside the password charset; Superset refuses to start on its default.
 if [[ -z "$(cfg_get SUPERSET_SECRET_KEY)" ]]; then

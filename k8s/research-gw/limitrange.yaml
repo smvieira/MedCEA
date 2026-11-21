@@ -1,0 +1,20 @@
+# k8s/research-gw/limitrange.yaml — defaults for a container that states nothing (research Phase 4a).
+# Applied by infra/deploy-research-gw-namespace.sh. Render list: RESEARCH_GW_NAMESPACE
+# Like k8s/research/limitrange.yaml: a default memory limit and no default CPU limit (on one PC a CPU
+# limit only throttles); the quota counts requests.cpu, requests.memory and limits.memory, so every
+# container states them or the API refuses the pod.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: research-gw-limits
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    medcea/zone: research-gw
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        memory: 512Mi

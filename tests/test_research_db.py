@@ -535,6 +535,12 @@ class Tree(unittest.TestCase):
                     'policy_db_state() { echo "policy_db_state $1" >> "$STUB_LOG"; echo "${STUB_PS_STATE:-version-3}"; }\n')
         # the snapshot reader (Phase 2b), run by deploy.sh last and by uninstall.sh first
         shutil.copytree(os.path.join(REPO, "apps", "lake-api"), os.path.join(self.root, "apps", "lake-api"))
+        # the agent machinery (Phase 4a, 6b1): chained after lake-api and removed before it; its own tests
+        # are tests/test_research_agents_deploy.py, here a stub that logs the call
+        os.makedirs(os.path.join(self.root, "apps", "research-agents"))
+        for _s, _l in (("deploy.sh", "agents-deploy"), ("uninstall.sh", "agents-uninstall")):
+            with open(os.path.join(self.root, "apps", "research-agents", _s), "w") as f:
+                f.write('echo "%s" >> "$STUB_LOG"\n' % _l)
         os.makedirs(os.path.join(self.root, "apps", "research", "db"), exist_ok=True)
         with open(os.path.join(self.root, "apps", "iam", "compiler", "cli.py"), "w") as f:
             f.write('import os, sys\nopen(os.environ["STUB_LOG"], "a").write("cli " + " ".join(sys.argv[1:]) + "\\n")\n'
@@ -664,8 +670,9 @@ class Deploy(Tree):
         self.assertEqual(r.returncode, 0, r.out)
         self.assertEqual(calls[-1], "finish medcea research")
         # the snapshot reader last, under this log and lock: it skips until the policy has its pod
-        self.assertEqual(calls[-5:-1], ["init medcea", "cli pod-zone lake-api",
+        self.assertEqual(calls[-6:-2], ["init medcea", "cli pod-zone lake-api",
                                         "kubectl get deployment lake-api -n medcea-research", "finish medcea lake-api"])
+        self.assertEqual(calls[-2], "agents-deploy")   # chained after lake-api (design R3)
         self.assertIn("[lake-api]", r.stdout)
         self.assertIn("skipped: the applied access policy has no lake-api pod yet", r.stdout)
         self.assertEqual(len([f for f in os.listdir(os.path.join(self.root, "logs"))]), 1)   # one log
@@ -774,6 +781,7 @@ class Deploy(Tree):
         # the snapshot reader first (it logs in to the database removed below)
         rm = "kubectl delete deployment,service,secret -n medcea-research -l app=lake-api --ignore-not-found"
         self.assertIn(rm, calls)
+        self.assertLess(calls.index("agents-uninstall"), calls.index(rm))   # the sessions stop first (R3)
         self.assertLess(calls.index(rm), calls.index("kubectl delete secret research-export-writer research-backup "
                                                      "-n medcea --ignore-not-found"))
         self.assertIn("kubectl delete secret research-export-writer research-backup -n medcea --ignore-not-found", calls)
@@ -1173,7 +1181,7 @@ COMMIT;"""
         self.assertNotEqual(n, "0")
         enabled = self.q("SELECT string_agg(DISTINCT tgenabled::text, '') FROM pg_trigger WHERE tgname LIKE 'append_only_%'")
         self.assertEqual(enabled, "A")
-        self.assertEqual(self.q("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'append_only_%'"), str(2 * (len(APPEND_ONLY) + 7)))   # + agent_trace's seven
+        self.assertEqual(self.q("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'append_only_%'"), str(2 * (len(APPEND_ONLY) + 8)))   # + agent_trace's eight
 
     def test_04_the_snapshot_reader(self):
         """After test_02's snapshots: lineage, the digest check's parity with close_snapshot,

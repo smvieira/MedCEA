@@ -2013,7 +2013,7 @@ def read(rel):
 # lib-policy-tools.sh or lib-db-apply.sh's db_apply), and how they call the init.
 WRITERS = ["deploy-infra.sh", "infra/deploy-workbench.sh", "infra/deploy-policy.sh"] + [
     f"apps/{c}/deploy.sh" for c in ("access", "database", "edge-wizard", "frontend", "iam", "monitor",
-                                    "mqtt-explorer", "research", "research-export", "scheduler",
+                                    "mqtt-explorer", "research", "research-agents", "research-export", "scheduler",
                                     "superset",
                                     # research sandbox Phase 2b: skips on cli.py pod-zone lake-api
                                     "lake-api")] + [

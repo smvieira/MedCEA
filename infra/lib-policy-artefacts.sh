@@ -298,6 +298,93 @@ canon = lambda d: json.dumps(d, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
 }
 
+#   _pa_zone_has ZONE
+#
+# 0 when the applied access policy has that zone (cli.py has-zone ZONE), 1 when it has not;
+# a policy that does not compile is fatal (research Phase 4a: research-gw, research-agents).
+_pa_zone_has() {
+    local _rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone "$1" >/dev/null || _rc=$?
+    case $_rc in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) echo -e "${RED:-}ERROR: cannot tell whether the access policy has the $1 zone (python3 apps/iam/compiler/cli.py has-zone $1 exited $_rc).${NC:-}" >&2
+           exit 1 ;;
+    esac
+}
+
+#   pa_zonenetpol ZONE [full|scoped]
+#
+# The NetworkPolicies of research-gw (label medcea/gw-netpol, names gw-*) or research-agents
+# (medcea/ra-netpol, ra-*) in that zone's namespace, compiled with `compile netpol` and the
+# arguments zone_netpol_args builds; the same shape as pa_rsnetpol, which stays the research
+# zone's. Scoped prints `gwnetpol:` / `ranetpol:` unchanged|re-rendered|not deployed.
+pa_zonenetpol() {
+    local _z="$1" _pa_mode="${2:-full}" _key _lbl _ns _rc=0 _ip _np _want _names
+    local _ips=() _args=()
+    _pa_zone_keys "$_z" || return 2
+    _key="$PA_ZONE_KEY"; _lbl="$PA_ZONE_LABEL"; _ns="$(zone_namespace "$_z")"
+    if [[ "$_pa_mode" == scoped ]]; then
+        if [[ "$($MK8S kubectl get namespace "$_ns" -o name 2>/dev/null || true)" != "namespace/$_ns" ]]; then
+            _pa_line "$_key" "not deployed"
+            return 0
+        fi
+        _pa_zonenetpol_equal "$_z" || _rc=$?
+        if [[ $_rc == 0 ]]; then _pa_line "$_key" unchanged; return 0; fi
+        [[ $_rc == 1 ]] || { echo -e "${RED:-}ERROR: cannot compare the $_z zone's NetworkPolicies with the compile.${NC:-}" >&2; exit 1; }
+    fi
+    _pa_node_ips _ips
+    mapfile -t _args < <(zone_netpol_args "$_z")
+    if ! _want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol "${_args[@]}" "${_ips[@]}")"; then
+        echo -e "${RED:-}ERROR: the $_z zone's network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC:-}" >&2
+        exit 1
+    fi
+    echo -e "\n${GREEN:-}[Research] Network policies of the $_z zone ($_ns)...${NC:-}"
+    _names="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_want")"
+    if [[ -n "$_names" ]]; then $MK8S kubectl apply -f - <<<"$_want"; fi
+    for _np in $($MK8S kubectl get netpol -n "$_ns" -l "$_lbl=true" -o jsonpath='{.items[*].metadata.name}'); do
+        [[ " $_names " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$_ns" "$_np"
+    done
+    [[ "$_pa_mode" == scoped ]] && _pa_line "$_key" re-rendered
+    return 0
+}
+
+# PA_ZONE_KEY / PA_ZONE_LABEL for a research zone's policy set (gwnetpol / ranetpol); 1 for another zone
+_pa_zone_keys() {
+    case "$1" in
+        research-gw)     PA_ZONE_KEY=gwnetpol; PA_ZONE_LABEL=medcea/gw-netpol ;;
+        research-agents) PA_ZONE_KEY=ranetpol; PA_ZONE_LABEL=medcea/ra-netpol ;;
+        *) echo "pa_zonenetpol: unknown zone '$1'" >&2; return 1 ;;
+    esac
+}
+
+# _pa_node_ips ARRAYNAME: --node-ip arguments for every address kubelet probes and host traffic arrive from
+_pa_node_ips() {
+    local -n _out="$1"; local _ip
+    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
+        _out+=(--node-ip "${_ip%/*}")
+    done
+}
+
+# _pa_zonenetpol_equal ZONE: 0 the labelled live set equals the compile, 1 different, 2 cannot tell
+_pa_zonenetpol_equal() {
+    local _z="$1" _live _want _ips=() _args=()
+    _pa_zone_keys "$_z" || return 2
+    _live="$($MK8S kubectl get netpol -n "$(zone_namespace "$_z")" -l "$PA_ZONE_LABEL=true" -o json 2>/dev/null)" || return 2
+    _pa_node_ips _ips
+    mapfile -t _args < <(zone_netpol_args "$_z")
+    _want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol "${_args[@]}" "${_ips[@]}")" || return 2
+    WANT="$_want" python3 -c '
+import json, os, sys
+try:
+    live = {i["metadata"]["name"]: i.get("spec") for i in json.load(sys.stdin).get("items") or []}
+    want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
+except (ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(2)
+canon = lambda d: json.dumps(d, sort_keys=True)
+sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$_live"
+}
+
 #   pa_node_red_auth [full|scoped]
 #
 # ConfigMap node-red-auth (permissions.json, cli.py compile node-red). A directory

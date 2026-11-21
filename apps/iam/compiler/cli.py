@@ -311,7 +311,7 @@ def cmd_bootstrap_targets(args):
 #   audit_findings   audit_versions()' rows for the version; chain: {ok} of verify_chain()
 #   issuer           https://<KEYCLOAK_DOMAIN>/realms/<KEYCLOAK_REALM>
 ARTEFACT_KEYS = ("routes", "mqtt", "grants_document", "netpol", "proxy", "tools")
-OPTIONAL_ARTEFACT_KEYS = ("netpol_research",)   # apply_check.digests_of: only while the policy has the zone
+OPTIONAL_ARTEFACT_KEYS = ("netpol_research", "netpol_research_gw", "netpol_research_agents")   # apply_check.digests_of: only while the policy has the zone
 LEEWAY = 30                                   # medcea_iam.LEEWAY, seconds
 _SEG = re.compile(r"[A-Za-z0-9_-]+")
 _SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")

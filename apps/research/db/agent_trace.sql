@@ -507,8 +507,8 @@ CREATE OR REPLACE FUNCTION agent_trace.session_state(p_sid text)
                    sup_person text, sup_role text, sup_username text, profile text, profile_sha256 text,
                    tools text[], budget jsonb, backend text, expect text, claimed boolean)
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-    SELECT s.token_sha256, s.claim_sha256, pg_catalog.extract(epoch FROM s.created_at)::bigint,
-           pg_catalog.extract(epoch FROM s.exp)::bigint, s.sup_sub, s.sup_person, s.sup_role, s.sup_username,
+    SELECT s.token_sha256, s.claim_sha256, pg_catalog.date_part('epoch', s.created_at)::bigint,
+           pg_catalog.date_part('epoch', s.exp)::bigint, s.sup_sub, s.sup_person, s.sup_role, s.sup_username,
            s.profile, s.profile_sha256, s.tools, s.budget, s.backend,
            (SELECT pg_catalog.host(x.peer) FROM agent_trace.expect x WHERE x.sid = s.sid),
            EXISTS (SELECT 1 FROM agent_trace.claim_use c WHERE c.sid = s.sid)

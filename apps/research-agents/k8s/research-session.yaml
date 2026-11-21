@@ -1,0 +1,158 @@
+# apps/research-agents/k8s/research-session.yaml — research-session, the session key and trace writer, in research-gw
+# (research Phase 4a stage 6b1, design rs4 R2/R4/OD11). Rendered by apps/research-agents/deploy.sh; the
+# code bundle comes from a git commit. Render list: RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SESSION_AUTH_VERSION
+# Every pod: priorityClassName medcea-research-low, no service links, non-root 65534, read-only root,
+# all capabilities dropped, RuntimeDefault seccomp, explicit requests and memory limit, image by digest,
+# and no network beyond what the zone's compiled NetworkPolicy admits; ClusterIP Services only.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: research-session
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: research-session
+    app.kubernetes.io/part-of: medcea-research
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: research-session
+  template:
+    metadata:
+      labels:
+        app: research-session
+        app.kubernetes.io/part-of: medcea-research
+      annotations:
+        medcea/code-commit: "${RS_CODE_COMMIT}"
+        medcea/code-sha256: "${RS_BUNDLE_SHA256}"
+        medcea/auth-secret-version: "${RS_SESSION_AUTH_VERSION}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # The code bundle (ConfigMap research-code, built by apps/research-agents/deploy.sh from a git
+      # commit) and the hash-checked wheels (static PV, read-only) are unpacked into emptyDirs: the
+      # container's root stays read-only and nothing is fetched from the network.
+      - name: unpack
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "set -e; tar xzf /bundle/code.tgz -C /opt/medcea; python3 -m pip install -q --no-cache-dir --disable-pip-version-check --no-index --find-links /wheels --require-hashes --no-deps --target /opt/extra -r /opt/medcea/apps/research-agents/requirements-services.txt"]
+        env:
+        - {name: HOME, value: /tmp}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        volumeMounts:
+        - {name: bundle, mountPath: /bundle, readOnly: true}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
+        - {name: code, mountPath: /opt/medcea}
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+      containers:
+      - name: research-session
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/opt/medcea/apps/research-agents/session.py"]
+        workingDir: /opt/medcea
+        env:
+        - {name: PYTHONPATH, value: /opt/extra}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - name: RS_SESSION_KEY_FILE
+          value: "/auth/key/key"
+        - name: RS_SESSION_DB_PASS_FILE
+          value: "/auth/db/password"
+        - name: RS_DB_HOST
+          value: "research-postgresql.${RESEARCH_NAMESPACE}.svc.cluster.local"
+        - name: RS_DB_NAME
+          value: "medcea_research"
+        ports:
+        - name: person
+          containerPort: 8100
+          protocol: TCP
+        - name: agent
+          containerPort: 8101
+          protocol: TCP
+        - name: server
+          containerPort: 8102
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {memory: 256Mi}
+        # exec probes (R21): no `node` source on the token ports
+        readinessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3)"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3)"]
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - {name: code, mountPath: /opt/medcea, readOnly: true}
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: iam, mountPath: /iam, readOnly: true}
+        - {name: jwks, mountPath: /jwks, readOnly: true}
+        - {name: auth-key, mountPath: /auth/key, readOnly: true}
+        - {name: auth-db, mountPath: /auth/db, readOnly: true}
+      volumes:
+      - name: bundle
+        configMap: {name: research-code}
+      - name: wheels
+        persistentVolumeClaim:
+          claimName: research-wheels
+          readOnly: true
+      - name: code
+        emptyDir: {sizeLimit: 64Mi}
+      - name: extra
+        emptyDir: {sizeLimit: 128Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 64Mi}
+      - name: iam
+        configMap: {name: medcea-iam-lib}
+      - name: jwks
+        configMap: {name: medcea-jwks}
+      - name: auth-key
+        secret: {secretName: research-session-key}
+      - name: auth-db
+        secret: {secretName: research-session-db}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: research-session
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: research-session
+spec:
+  type: ClusterIP
+  selector:
+    app: research-session
+  ports:
+  - {name: person, port: 8100, targetPort: 8100, protocol: TCP}
+  - {name: agent, port: 8101, targetPort: 8101, protocol: TCP}
+  - {name: server, port: 8102, targetPort: 8102, protocol: TCP}

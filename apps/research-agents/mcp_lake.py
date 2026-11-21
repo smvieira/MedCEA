@@ -80,3 +80,20 @@ class LakeServer:
         rows = [{clean_text(k, 40): (clean_code(v, n) if isinstance(v, str) else v) for k, v in r.items()}
                 for r in self.lake.small_set("catalogue", snap)][:SET_ROWS]
         return {"snapshot": snap, "rows": rows, "replaced": n[0]}
+
+
+def main():
+    """The mcp-lake pod (research Phase 4a, 6b1): RS_SESSION_SERVER_URL, MEDCEA_LAKE (lake-api, no
+    credential), RS_MCP_PORT (8111)."""
+    from mcp_common import Session, make_http_server
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, root)
+    from research.calib.lake import LakeClient
+    srv = LakeServer(Session(os.environ["RS_SESSION_SERVER_URL"], "mcp-lake"), LakeClient(os.environ["MEDCEA_LAKE"]))
+    port = int(os.environ.get("RS_MCP_PORT", "8111"))
+    sys.stderr.write("mcp-lake: port %d\n" % port)
+    make_http_server(srv.app, port=port).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

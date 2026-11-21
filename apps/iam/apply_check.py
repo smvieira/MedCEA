@@ -181,8 +181,16 @@ NETPOL_ARGS = ["--namespace", "medcea", "--node-ip", "192.0.2.1"]   # a fixed pl
 # Targets that exist only while the policy has a zone (research sandbox Phase 2a): a policy
 # without network.zones.research compiles, digests and rolls out exactly what it did before,
 # so every version applied before audits as recorded (the Superset F3 pattern).
-ZONE_TARGETS = {"research": "netpol-research"}
-ZONE_TARGET_OWNER = {"netpol-research": "./infra/deploy-research-namespace.sh --policy-only"}
+# research Phase 4a (stage 6b1, design rs4 R2): the same for the agent machinery's two zones, each with its own
+# namespace script; their compile carries the other zones' namespaces (--zone-namespace), like
+# infra/lib-policy-tools.sh zone_netpol_args, with the same fixed placeholders on both sides.
+ZONE_TARGETS = {"research": "netpol-research", "research-gw": "netpol-research-gw",
+                "research-agents": "netpol-research-agents"}
+ZONE_TARGET_OWNER = {"netpol-research": "./infra/deploy-research-namespace.sh --policy-only",
+                     "netpol-research-gw": "./infra/deploy-research-gw-namespace.sh --policy-only",
+                     "netpol-research-agents": "./infra/deploy-research-agents-namespace.sh --policy-only"}
+ZONE_PLACEHOLDER_NS = {"research": "medcea-research", "research-gw": "medcea-research-gw",
+                       "research-agents": "medcea-research-agents"}
 NETPOL_RESEARCH_ARGS = ["--zone", "research", "--namespace", "medcea-research", "--platform-namespace", "medcea",
                         "--node-ip", "192.0.2.1"]
 
@@ -207,6 +215,17 @@ def target_owners(zones=None):
     """TARGET_OWNER plus the owners of the zone targets of `zones` (default _policy_zones())."""
     zs = _policy_zones() if zones is None else set(zones)
     return {**TARGET_OWNER, **{t: ZONE_TARGET_OWNER[t] for z, t in ZONE_TARGETS.items() if z in zs}}
+
+
+def netpol_zone_args(zone):
+    """compile netpol's arguments for a new zone (research-gw, research-agents) with placeholder namespaces."""
+    args = ["--zone", zone, "--namespace", ZONE_PLACEHOLDER_NS[zone], "--platform-namespace", "medcea"]
+    for other in ("research", "research-gw", "research-agents"):
+        if other != zone:
+            args += ["--zone-namespace", "%s=%s" % (other, ZONE_PLACEHOLDER_NS[other])]
+    return args + ["--node-ip", "192.0.2.1"]
+
+
 ROUTES_UNCOMPARED = ("source", "applied_version")
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 ACTORS = ("system:apply",)
@@ -1893,6 +1912,9 @@ def targets(p):
     # has the zone
     if netpol.has_zone(p, "research"):
         t.append((ZONE_TARGETS["research"], ["compile", "netpol"] + NETPOL_RESEARCH_ARGS))
+    for zone in ("research-gw", "research-agents"):   # research Phase 4a: only while the policy has the zone
+        if netpol.has_zone(p, zone):
+            t.append((ZONE_TARGETS[zone], ["compile", "netpol"] + netpol_zone_args(zone)))
     t += [(f"proxy-{h}", ["compile", "proxy", h]) for h in p.hosts]
     for iam in ([], ["--without-iam"]):
         tag = "-without-iam" if iam else ""
@@ -2018,7 +2040,9 @@ def digests_of(outs, commit=None, skeleton_digest=None):
                       "jupyterhub_admin": h("jupyterhub-admin"), "node_red": h("node-red"),
                       "edge_wizard": h("edge-wizard"), "pgadmin": h("pgadmin"),
                       **({"superset": h("superset")} if "superset" in outs else {})},
-            **({"netpol_research": h("netpol-research")} if "netpol-research" in outs else {})}
+            **({"netpol_research": h("netpol-research")} if "netpol-research" in outs else {}),
+            **({"netpol_research_gw": h("netpol-research-gw")} if "netpol-research-gw" in outs else {}),
+            **({"netpol_research_agents": h("netpol-research-agents")} if "netpol-research-agents" in outs else {})}
 
 
 def strip_policy_env():

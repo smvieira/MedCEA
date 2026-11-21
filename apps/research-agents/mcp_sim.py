@@ -212,3 +212,21 @@ class SimServer:
         return {"cid": cid, "state": "done", "runs": m.get("runs"), "invalid_runs": m.get("invalid_runs"),
                 "result_digest": m.get("result_digest"), "spec_digest": m.get("spec_digest"),
                 "cpu_hours": out.get("cpu_hours"), "top": clean_obj(rows)}
+
+
+def main():
+    """The mcp-sim pod (research Phase 4a, 6b1): RS_SESSION_SERVER_URL (research-session :8102),
+    RS_ORCH_SIM_URL (the orchestrator's sim port :8091), RS_SIM_POOL, RS_MCP_PORT (8110). The code
+    bundle's root is two levels above this file."""
+    from orchestrator import Http
+    from mcp_common import Session, make_http_server
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    srv = SimServer(Session(os.environ["RS_SESSION_SERVER_URL"], "mcp-sim"), LocalEstimator(root),
+                    RemoteRunner(Http(os.environ["RS_ORCH_SIM_URL"]), pool=int(os.environ.get("RS_SIM_POOL", "2"))))
+    port = int(os.environ.get("RS_MCP_PORT", "8110"))
+    sys.stderr.write("mcp-sim: port %d\n" % port)
+    make_http_server(srv.app, port=port).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

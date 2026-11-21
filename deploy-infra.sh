@@ -185,7 +185,8 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo "    Editors made in the browser included; only the nightly backup in"
     echo "    BACKUP_DIR, if deployed, keeps a copy, and this does not delete it)"
     echo "  - the research sandbox, if deployed: its Helm releases (the research database),"
-    echo "    its namespace with every volume in it, and PriorityClass medcea-research-low"
+    echo "    its namespace with every volume in it, the research-gw and research-agents namespaces (the agent"
+    echo "    campaigns, if deployed), and PriorityClass medcea-research-low"
     echo "  - MicroK8s itself is KEPT, so images stay cached and the rebuild is fast"
     [[ "${2:-}" == "--secrets" ]] && echo "  - the generated secrets in config.env (--secrets)"
     echo ""
@@ -220,6 +221,15 @@ if [[ "${1:-}" == "--reset" ]]; then
             exit 1
         fi
     fi
+    # research Phase 4a: the two agent zones' namespaces, only when this platform labelled them
+    for _zl in research-agents research-gw; do
+        if [[ "$_zl" == research-gw ]]; then _ZNS="${RESEARCH_GW_NAMESPACE:-${_RNS}-gw}"; else _ZNS="${RESEARCH_AGENTS_NAMESPACE:-${_RNS}-agents}"; fi
+        if [[ "$_ZNS" =~ ^[a-z][a-z0-9-]{1,52}$ && "$_ZNS" != "$NAMESPACE" && "$_ZNS" != "$_RNS" ]] \
+           && [[ "$($MK8S kubectl get namespace "$_ZNS" -o jsonpath='{.metadata.labels.medcea/zone}' 2>/dev/null || true)" == "$_zl" ]]; then
+            echo -e "${YELLOW}Removing the $_zl zone (namespace '$_ZNS')...${NC}"
+            $MK8S kubectl delete namespace "$_ZNS" --ignore-not-found --timeout=5m || true
+        fi
+    done
     $MK8S kubectl delete priorityclass medcea-research-low --ignore-not-found >/dev/null 2>&1 || true
 
     echo -e "${YELLOW}Uninstalling Helm releases...${NC}"
@@ -378,6 +388,16 @@ if [[ "${RESEARCH_ENABLED:-false}" == "true" ]]; then
         echo -e "${RED}ERROR: RESEARCH_NAMESPACE='$RESEARCH_NAMESPACE' must match ^[a-z][a-z0-9-]{1,52}\$ and differ from NAMESPACE='$NAMESPACE' (config.env; the default is \"\${NAMESPACE}-research\").${NC}"
         exit 1
     fi
+    # research Phase 4a: the two agent zones' namespaces, distinct from each other and from the others
+    RESEARCH_GW_NAMESPACE="${RESEARCH_GW_NAMESPACE:-${RESEARCH_NAMESPACE}-gw}"
+    RESEARCH_AGENTS_NAMESPACE="${RESEARCH_AGENTS_NAMESPACE:-${RESEARCH_NAMESPACE}-agents}"
+    for _zv in RESEARCH_GW_NAMESPACE RESEARCH_AGENTS_NAMESPACE; do
+        if [[ ! "${!_zv}" =~ ^[a-z][a-z0-9-]{1,52}$ || "${!_zv}" == "$NAMESPACE" || "${!_zv}" == "$RESEARCH_NAMESPACE" \
+              || "$RESEARCH_GW_NAMESPACE" == "$RESEARCH_AGENTS_NAMESPACE" ]]; then
+            echo -e "${RED}ERROR: $_zv='${!_zv}' must match ^[a-z][a-z0-9-]{1,52}\$ and differ from NAMESPACE, RESEARCH_NAMESPACE and the other research namespace (config.env; the defaults are \"\${RESEARCH_NAMESPACE}-gw\" and \"-agents\").${NC}"
+            exit 1
+        fi
+    done
 fi
 
 # =============================================================================
@@ -674,6 +694,16 @@ if ! "$SCRIPT_DIR/infra/deploy-research-namespace.sh"; then
     echo -e "${RED}re-run ./infra/deploy-research-namespace.sh once the cause is fixed.${NC}"
     _PROBLEMS+=("the research namespace failed to deploy (output above): re-run ./infra/deploy-research-namespace.sh once the cause is fixed")
 fi
+# The agent campaigns' two zones (research Phase 4a), after the research namespace: the session key
+# holder (research-gw) and the orchestrator's namespace (research-agents). Each skips with one line
+# while the applied policy lacks its zone; a failure is reported and the platform deploy goes on.
+for _rz in gw agents; do
+    if ! "$SCRIPT_DIR/infra/deploy-research-$_rz-namespace.sh"; then
+        echo -e "${RED}The research-$_rz namespace failed to deploy (above). The platform deploy goes on;${NC}"
+        echo -e "${RED}re-run ./infra/deploy-research-$_rz-namespace.sh once the cause is fixed.${NC}"
+        _PROBLEMS+=("the research-$_rz namespace failed to deploy (output above): re-run ./infra/deploy-research-$_rz-namespace.sh once the cause is fixed")
+    fi
+done
 
 
 # Keycloak's own database. It used to share medcea_db (tables in public), so

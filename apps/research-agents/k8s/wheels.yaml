@@ -1,0 +1,35 @@
+# apps/research-agents/k8s/wheels.yaml — one zone's wheel cache as a static, read-only volume (research
+# Phase 4a, design R4: each zone has its own host folder, none is shared). A hostPath volume in a pod spec
+# is refused by Pod Security baseline; a PersistentVolume that points at the folder is not.
+# Applied by apps/research-agents/deploy.sh once per zone. Render list: WHEEL_NS WHEEL_PV WHEEL_PATH
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ${WHEEL_PV}
+  labels:
+    medcea/research-wheels: ${WHEEL_NS}
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadOnlyMany"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: ${WHEEL_NS}
+    name: research-wheels
+  hostPath:
+    path: ${WHEEL_PATH}
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: research-wheels
+  namespace: ${WHEEL_NS}
+spec:
+  accessModes: ["ReadOnlyMany"]
+  storageClassName: ""
+  volumeName: ${WHEEL_PV}
+  resources:
+    requests:
+      storage: 1Gi
