@@ -268,7 +268,7 @@ class ControlLoopsTest(unittest.TestCase):
     def test_bounds_come_from_the_cycles_recorded_parameters(self):
         flat = " ".join(sum(self.sql.values(), []))
         self.assertIn("FROM medcea.recipe_line_cycle_run c", flat)
-        self.assertIn("->'setpoints'->'$quantity'->>'lower'", flat)
+        self.assertIn("->'setpoints'->'${quantity:raw}'->>'lower'", flat)
         self.assertNotIn("run_history", flat)
 
     def test_every_sensor_and_the_value_used_are_separate_series(self):
@@ -277,6 +277,17 @@ class ControlLoopsTest(unittest.TestCase):
         self.assertIn("concat_ws(' / ', zone_code, sensor) AS metric", names[0])
         self.assertIn("'Value the loop used' AS metric", names[1])
         self.assertIn('"Recipe lower bound"', names[2])
+
+    def test_a_multi_value_variable_is_never_quoted_by_hand(self):
+        # Grafana quotes a multi-value (or All) variable itself: '$quantity' became
+        # ''air_temperature'', a syntax error in every panel (21 Nov 2026); inside our own
+        # quotes the value must be ${var:raw}
+        multi = [v["name"] for v in self.doc["templating"]["list"] if v.get("multi") or v.get("includeAll")]
+        for title, sqls in self.sql.items():
+            for sql in sqls:
+                for name in multi:
+                    self.assertNotIn("'$%s'" % name, sql, title)
+                    self.assertNotIn("'${%s}'" % name, sql, title)
 
     def test_commands_say_what_they_do(self):
         flat = " ".join(sum(self.sql.values(), []))
