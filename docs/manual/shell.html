@@ -102,6 +102,19 @@ pre { background: var(--code-bg); border: 1px solid var(--line); padding: 10px 1
 pre code { background: none; padding: 0; font-size: .86rem; overflow-wrap: normal; white-space: pre; }
 kbd { font: .85em var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 .3em; background: var(--paper); }
 .role { font-weight: 700; color: var(--accent); }
+/* Figures drawn as inline SVG (research-agents-design, 21 Nov 2026): every color from a token */
+.dg-figure { overflow-x: auto; margin: 0 0 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.dg-figure svg { display: block; min-width: 980px; width: 100%; height: auto; }
+.dg-zr { fill: var(--accent-soft); } .dg-za { fill: var(--record-bg); } .dg-zg { fill: var(--warn-bg); } .dg-zp { fill: var(--code-bg); }
+.dg-zl { font: 700 13px var(--body); fill: var(--muted); letter-spacing: .03em; }
+.dg-zn { font: 400 11px var(--mono); fill: var(--muted); }
+.dg-box { fill: var(--paper); stroke-width: 2; }
+.dg-built { stroke: var(--lg-leaf); } .dg-planned { stroke: var(--muted); stroke-dasharray: 6 4; } .dg-later { stroke: var(--warn); stroke-dasharray: 6 4; }
+.dg-bt { font: 700 14px var(--body); fill: var(--ink); } .dg-bs { font: 400 12px var(--body); fill: var(--muted); }
+.dg-edge { fill: none; stroke: var(--muted); stroke-width: 1.8; } .dg-dash { stroke-dasharray: 5 4; } .dg-trace { stroke: var(--accent-2); }
+.dg-ah { fill: var(--muted); } .dg-trace-ah { fill: var(--accent-2); }
+.dg-num { fill: var(--accent-2); } .dg-numt { font: 700 12px var(--mono); fill: var(--paper); text-anchor: middle; dominant-baseline: central; }
+.dg-el { font: 400 12px var(--body); fill: var(--ink); }
 .table-wrap { overflow-x: auto; margin: 0 0 16px; }
 table { border-collapse: collapse; width: 100%; font-size: .92rem; }
 th, td { text-align: left; vertical-align: top; padding: 6px 10px; border: 1px solid var(--line); }
