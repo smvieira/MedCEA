@@ -62,6 +62,8 @@ with open(os.path.join(FD, "cli.log"), "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 a = sys.argv[1:]
 if a[:1] == ["has-zone"] and len(a) == 2:
+    if a[1] != "research" and "other_zones" in sc:     # the agent zones (R18, zone_other_args): only those the case lists
+        sys.exit(0 if a[1] in sc["other_zones"] else 1)
     sys.exit(sc.get("has_zone", 1))
 if a[:1] == ["pod-zone"] and len(a) == 2:
     if sc.get("pod_zone_rc"):
@@ -161,9 +163,9 @@ class RsNetpol(unittest.TestCase):
     def tearDownClass(cls):
         cls.t.close()
 
-    def run_check(self, rules, enabled="true", has_zone=0, items=WANT, compile_rc=0, call=None, **env):
+    def run_check(self, rules, enabled="true", has_zone=0, items=WANT, compile_rc=0, call=None, other_zones=(), **env):
         self.t.scenario(rules)
-        self.t.cli(has_zone=has_zone, items=items, compile_rc=compile_rc)
+        self.t.cli(has_zone=has_zone, items=items, compile_rc=compile_rc, other_zones=other_zones)
         if enabled is not None:
             env["RESEARCH_ENABLED"] = enabled
         r = self.t.fn("check_rsnetpol", call or f'check_rsnetpol "{self.NAME}" medcea', helpers=(), **env)
@@ -174,6 +176,12 @@ class RsNetpol(unittest.TestCase):
     def full(self, live, **kw):
         return self.run_check([NS_OK, NODES, rule(r"^get netpol -n medcea-research -o json$",
                                                   live_doc(live))], **kw)
+
+    def test_other_zones_add_their_namespaces_only_when_the_policy_has_them(self):
+        # R18 (stage 7a): the argv is unchanged without the agent zones, gains one pair per zone it has
+        self.full([], other_zones=["research-gw"])
+        self.assertEqual(self.t.cli_calls()[-1][8:10], ["--zone-namespace", "research-gw=medcea-research-gw"])
+        self.assertNotIn("research-agents=medcea-research-agents", self.t.cli_calls()[-1])
 
     def test_no_kubectl_skips(self):
         r = self.run_check([], call=f'KUBECTL=no-such-kubectl-x check_rsnetpol "{self.NAME}" medcea')
