@@ -45,5 +45,33 @@ class Cancel(unittest.TestCase):
         self.assertIn("<strong>■ Cancel</strong>", read("docs", "manual", "chapters", "apps.html"))
 
 
+class RunNow(unittest.TestCase):
+    """Run Now: only an R or S run blocks the unit (as the API's _active_run); with
+    IAM_DB_ROLES=true it sends an approved parameter set and no inline algorithm."""
+
+    def setUp(self):
+        self.page = read("apps", "scheduler", "html", "scheduler.html")
+
+    def fn(self, name):
+        i = self.page.index("async function %s(" % name)
+        j = self.page.index("\nasync function ", i + 1)
+        return self.page[i:j]
+
+    def test_only_running_or_queued_runs_block(self):
+        f = self.fn("loadRnUnits")
+        self.assertIn("r.recipe_run_status === 'R' || r.recipe_run_status === 'S'", f)
+        api = read("apps", "scheduler", "scheduler-api.py")
+        self.assertIn("recipe_run_status IN ('S','R')", api)
+
+    def test_a_parameter_set_under_iam_db_roles(self):
+        f = self.fn("submitRunNow")
+        self.assertIn("if (_iamDbRoles)", f)
+        self.assertIn("JSON.stringify({unit_id, recipe_id, params_id})", f)
+        enforced = f[f.index("if (_iamDbRoles)"):f.index("return;\n  }")]
+        self.assertNotIn("control_algorithm", enforced)
+        self.assertIn("x.status === 'approved'", self.fn("loadRnParamSets"))
+        self.assertIn('id="rn-params-id"', self.page)
+
+
 if __name__ == "__main__":
     unittest.main()

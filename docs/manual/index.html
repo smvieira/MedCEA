@@ -852,8 +852,8 @@ footer { color: var(--muted); font-size: .85rem; }
 <h4>Starting a run now</h4>
 <ol class="steps">
 <li>Click <strong>Run Now</strong> at the top right.</li>
-<li>Choose the <strong>Production Unit</strong>, then a <strong>Recipe</strong>. The list offers only the recipes allowed on that unit. If the unit already has an active run, a warning asks you to finish or cancel it first, and a new run is refused.</li>
-<li>Optionally choose an <strong>Algorithm</strong> and enter <strong>Param Overrides (JSON)</strong>. Once the database enforces roles, leave these empty: the run uses the approved parameter set of the recipe's assignment, and typed parameters are refused.</li>
+<li>Choose the <strong>Production Unit</strong>, then a <strong>Recipe</strong>. The list offers only the recipes allowed on that unit. If the unit already has a running or queued run, a warning asks you to let it finish, or stop or cancel it first, and a new run is refused. A failed or cancelled run does not block the unit: it stays in the list as history, for <strong>Retry</strong>.</li>
+<li>Once the database enforces roles (<code>IAM_DB_ROLES=true</code>), choose a <strong>Parameter set</strong>: the approved sets of that unit are offered, and the run uses the one you choose (its algorithm and parameters). Before that, the dialog shows <strong>Algorithm</strong> and <strong>Param Overrides (JSON)</strong> instead, both optional. Until 21 November 2026 the dialog had no parameter set and counted a failed run as active, so with <code>IAM_DB_ROLES=true</code> Run Now could not start a run.</li>
 <li>Click <strong>Start Run</strong>. The run is created and executed in one go and appears under <strong>Current Runs</strong>.</li>
 </ol>
 <p>If the run is created but cannot start, the message begins "Run created but not started", and the run waits as Queued.</p>
