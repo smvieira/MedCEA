@@ -551,8 +551,10 @@ def _bench_entry(parsed, plan_runs):
             "llama_bench_flags": parsed.get("help"), "taskset": parsed.get("taskset"),
             "complete": bool(parsed.get("done")) and not parsed.get("fatal"),
             "fatal": parsed.get("fatal"), "stopped": parsed.get("stopped"), "skipped": parsed.get("skipped", []),
+            "during_run": parsed.get("during_run"),     # --during-run: the recipe runs active at its start
             "seconds": {r["name"]: r.get("seconds") for r in parsed.get("runs", [])},
-            "rows": bench_rows(parsed, plan_runs)}
+            "rows": [dict(row, during_run=True) if parsed.get("during_run") else row
+                     for row in bench_rows(parsed, plan_runs)]}
 
 
 def merge_bench(existing, benches):

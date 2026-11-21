@@ -468,6 +468,12 @@ class BenchScript(unittest.TestCase):
         doc = json.load(open(os.path.join(self.tree, "logs", parsed[0])))
         self.assertEqual(doc["during_run"], "run 7 status R")
         self.assertTrue(doc["runs"] and all(r.get("during_run") is True for r in doc["runs"]))
+        # and the day's report keeps it, per bench and per row
+        rep = [f for f in os.listdir(os.path.join(self.tree, "research", "agents", "bench")) if f.endswith(".json")]
+        day = json.load(open(os.path.join(self.tree, "research", "agents", "bench", rep[0])))
+        (entry,) = day["bench"]["runs"].values()
+        self.assertEqual(entry["during_run"], "run 7 status R")
+        self.assertTrue(entry["rows"] and all(r.get("during_run") is True for r in entry["rows"]))
 
     def test_during_run_stops_when_the_host_is_loaded(self):
         import threading
