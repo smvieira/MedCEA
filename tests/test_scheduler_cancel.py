@@ -73,5 +73,55 @@ class RunNow(unittest.TestCase):
         self.assertIn('id="rn-params-id"', self.page)
 
 
+class Decommission(unittest.TestCase):
+    """Rerun (a new run) and Decommission (F -> is_active 'N', confirmed by the run's number)."""
+
+    def setUp(self):
+        self.page = read("apps", "scheduler", "html", "scheduler.html")
+        self.api = read("apps", "scheduler", "scheduler-api.py")
+        self.mig = read("apps", "database", "medcea_db_migrations.sql")
+
+    def body(self, head):
+        i = self.mig.index(head)
+        return self.mig[i:self.mig.index("END $$;", i)]
+
+    def test_the_database_transition(self):
+        srs = self.body("FUNCTION medcea.set_run_status(")
+        self.assertIn("('F', 'D')", srs)
+        self.assertIn("UPDATE medcea.recipe_run SET is_active = 'N'", srs)
+        # a decommissioned run refuses everything, before the transition check
+        self.assertLess(srs.index("IF r.is_active = 'N' THEN"), srs.index("is not a transition"))
+        self.assertLess(srs.index("_check_assigned_run"), srs.index("IF r.is_active = 'N' THEN"))
+        # the D write sits inside the owner-write window, after _unit_schedulable (test_policy pins the order)
+        self.assertLess(srs.index("_owner_write(true)"), srs.index("IF p_status = 'D' THEN"))
+        self.assertLess(srs.index("IF p_status = 'D' THEN"), srs.index("_owner_write(false)"))
+        sr = self.body("FUNCTION medcea.start_run(")
+        self.assertLess(sr.index("IF r.is_active = 'N' THEN"), sr.index("IF r.recipe_run_status <> 'S' THEN"))
+        self.assertIn("is decommissioned", sr)
+
+    def test_the_api_needs_the_number_and_a_failed_run(self):
+        i = self.api.index("def set_run_status(run_id):")
+        fn = self.api[i:self.api.index("@app.route", i)]
+        self.assertIn("if current['is_active'] == 'N':", fn)
+        self.assertIn("str(d.get('confirm', '')).strip() != str(run_id)", fn)
+        self.assertIn("if st != 'F':", fn)
+        self.assertLess(fn.index("str(d.get('confirm'"), fn.index("SELECT medcea.set_run_status(%s, 'D')"))
+        self.assertIn("rr.recipe_run_status != 'C' AND rr.is_active = 'Y'", self.api)
+        self.assertIn("(rr.recipe_run_status = 'C' OR rr.is_active = 'N')", self.api)
+        self.assertIn("rr.recipe_run_status <> 'C' AND rr.is_active = 'Y'", read("apps", "monitor", "monitor-api.py"))
+
+    def test_the_page(self):
+        f = self.page[self.page.index("if (r.recipe_run_status === 'F') {"):]
+        f = f[:f.index("// Log button")]
+        self.assertIn("openDecomModal(${r.recipe_run_id})", f)
+        self.assertIn("rerunRun(${r.unit_id}, ${r.recipe_id})", f)
+        self.assertIn("if (!_iamDbRoles || r.params_id)", f)
+        sub = self.page[self.page.index("async function submitDecom("):self.page.index("async function openRetryModal(")]
+        self.assertIn("if (typed !== String(runId)) return;", sub)
+        self.assertIn("JSON.stringify({status: 'D', confirm: typed})", sub)
+        self.assertIn('id="decom-submit" onclick="submitDecom()" disabled', self.page)
+        self.assertIn("r.is_active === 'N' ? 'D'", self.page)
+
+
 if __name__ == "__main__":
     unittest.main()

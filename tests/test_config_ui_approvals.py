@@ -553,7 +553,7 @@ class ApprovalsStatic(unittest.TestCase):
         # the Released badge (who, when) on the completed runs and the run detail, from
         # run_release through the scheduler's own run reads; the page releases nothing
         sched = read(os.path.join(ROOT, "apps", "scheduler", "html", "scheduler.html"))
-        self.assertIn("${statusBadge(r.recipe_run_status)}${releasedBadge(r)}", sched)
+        self.assertIn("${statusBadge(runStatus(r))}${releasedBadge(r)}", sched)   # runStatus: Decommissioned (21 Nov 2026)
         self.assertIn("statusBadge(r.recipe_run_status) + releasedBadge(r)", sched)
         badge = sched[sched.index("function releasedBadge("):]
         badge = badge[:badge.index("\n}\n")]

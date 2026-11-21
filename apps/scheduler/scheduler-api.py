@@ -17,14 +17,15 @@ Endpoints:
   POST /api/schedules/<id>/trigger     — run immediately (background thread)
   GET  /api/runs?limit=N               — recent completed recipe_run rows (+ released_at,
                                          released_by_name/_role from run_release, or null)
-  GET  /api/runs/active                — runs with status != C
+  GET  /api/runs/active                — runs with status != C, not decommissioned
   GET  /api/runs/<id>                  — single run (+ its release, as above) + full log
                                          content (log null and log_withheld for a role
                                          without R on run_logs)
   GET  /api/runs/<id>/log?offset=N     — incremental log tail (live polling)
   POST /api/runs/<id>/execute          — start execution of a queued run (medcea.start_run)
   POST /api/runs/<id>/stop             — stop a run (medcea.set_run_status F, then SIGTERM)
-  PATCH /api/runs/<id>/status          — reset run to S (retry)
+  PATCH /api/runs/<id>/status          — reset run to S (retry), or decommission a failed run
+                                         ({"status": "D", "confirm": <id>}: kept as a record, never run again)
   GET  /api/config/logs                — log management thresholds + stats
   PUT  /api/config/logs                — save thresholds (IAM_DB_ROLES=true: a proposal for qa, 202)
 Run logs are compressed by the scheduler's own job sys_log_retention (daily 03:15 UTC,
@@ -1002,7 +1003,7 @@ def trigger_schedule(sid):
 # ---------------------------------------------------------------------------
 # Routes — runs
 # ---------------------------------------------------------------------------
-_RUN_COLS = """rr.recipe_run_id, rr.recipe_run_status,
+_RUN_COLS = """rr.recipe_run_id, rr.recipe_run_status, rr.is_active,
                rr.recipe_run_start, rr.recipe_run_end,
                rr.params_id, rr.schedule_id,
                rr.created_by_name, rr.executed_by_name"""
@@ -1030,7 +1031,7 @@ def list_active_runs():
         FROM medcea.recipe_run rr
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
-        WHERE rr.recipe_run_status != 'C'
+        WHERE rr.recipe_run_status != 'C' AND rr.is_active = 'Y'
         """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n        " if sub else "") + """ORDER BY rr.recipe_run_id DESC
     """, (sub,) if sub else None)
     _fmt_runs(rows)
@@ -1052,7 +1053,7 @@ def list_runs():
         JOIN medcea.cea_unit  u ON rr.unit_id   = u.unit_id
         JOIN medcea.recipe    r ON rr.recipe_id = r.recipe_id
         {_RELEASE_JOIN}
-        WHERE rr.recipe_run_status = 'C'
+        WHERE (rr.recipe_run_status = 'C' OR rr.is_active = 'N')
         """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n        " if sub else "") + """ORDER BY rr.recipe_run_id DESC
         LIMIT %s
     """, (sub, limit) if sub else (limit,))
@@ -1089,16 +1090,29 @@ def create_run():
 def set_run_status(run_id):
     """Reset a run to S (retry). S: nothing to do. R: 409. F: medcea.set_run_status.
     C: reopening a completed run is refused once it is released or under
-    IAM_DB_ROLES=true; before that it is a direct update, reported as a warning."""
+    IAM_DB_ROLES=true; before that it is a direct update, reported as a warning.
+    {"status": "D", "confirm": <run id>}: decommission a failed run (medcea.set_run_status
+    F -> D: is_active 'N', kept as a record, never run again); "confirm" must repeat the
+    run's id, so a stray request cannot do it. A decommissioned run refuses everything."""
     d = _body()
-    if d.get('status') != 'S':
-        return jsonify({'error': 'Only reset to S is supported'}), 400
+    if d.get('status') not in ('S', 'D'):
+        return jsonify({'error': 'Only reset to S, or decommission (D), is supported'}), 400
     with tx() as cur:
-        cur.execute("SELECT recipe_run_status AS s FROM medcea.recipe_run WHERE recipe_run_id=%s", (run_id,))
+        cur.execute("SELECT recipe_run_status AS s, is_active FROM medcea.recipe_run WHERE recipe_run_id=%s", (run_id,))
         current = cur.fetchone()
         if not current:
             return jsonify({'error': 'not found'}), 404
         st = current['s']
+        if current['is_active'] == 'N':
+            return jsonify({'error': f'run {run_id} is decommissioned: it is kept as a record and never runs again'}), 409
+        if d['status'] == 'D':
+            if str(d.get('confirm', '')).strip() != str(run_id):
+                return jsonify({'error': f'to decommission run {run_id}, confirm with its number ({run_id})'}), 400
+            if st != 'F':
+                return jsonify({'error': f'only a failed or stopped run is decommissioned (run {run_id} is {st})'}), 409
+            _act_person(cur, need_fn=True)
+            cur.execute("SELECT medcea.set_run_status(%s, 'D')", (run_id,))
+            return jsonify({'updated': run_id, 'status': 'F', 'decommissioned': True})
         if st == 'S':
             return jsonify({'updated': run_id, 'status': 'S'})
         if st == 'R':

@@ -53,6 +53,7 @@
     .st-C { background: #1e3a5f33; color: #60a5fa; border: 1px solid #1e3a5f; }
     .st-F { background: #7f1d1d33; color: #f87171; border: 1px solid #7f1d1d; }
     .st-S { background: #78350f33; color: #fbbf24; border: 1px solid #78350f; }
+    .st-D { background: #1e293b; color: #94a3b8; border: 1px solid #475569; }
     .st-on  { background: #14532d33; color: #4ade80; border: 1px solid #14532d; }
     .st-off { background: #1e293b; color: #64748b; border: 1px solid #334155; }
     .st-rel { background: #312e8133; color: #a5b4fc; border: 1px solid #3730a3; margin-left: 6px; }
@@ -318,6 +319,23 @@
   </div>
 </div>
 
+<!-- Decommission Modal: permanent, so the run's number must be typed -->
+<div class="modal-bg" id="decom-modal">
+  <div class="modal">
+    <h2 id="decom-title">Decommission run</h2>
+    <input type="hidden" id="decom-run-id">
+    <p style="color:#cbd5e1;font-size:.9rem;line-height:1.5">This is <strong>permanent</strong>. The run is kept as a record (its log, cycles and who did what), leaves <strong>Current Runs</strong> and can never be retried or executed again. To run the same recipe again, use <strong>⟳ Rerun</strong> instead.</p>
+    <div class="form-row">
+      <label id="decom-label">Type the run number to confirm</label>
+      <input id="decom-confirm" autocomplete="off" oninput="onDecomInput()">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDecomModal()">Cancel</button>
+      <button class="btn btn-danger" id="decom-submit" onclick="submitDecom()" disabled>⊘ Decommission permanently</button>
+    </div>
+  </div>
+</div>
+
 <!-- Retry Modal -->
 <div class="modal-bg" id="retry-modal">
   <div class="modal">
@@ -530,8 +548,11 @@ async function apiFail(res, prefix) {
 }
 
 // ---- Status helpers -------------------------------------------------------
-const STATUS_LABEL = {R:'Running', C:'Completed', F:'Failed', S:'Queued'};
-const STATUS_DOT   = {R:'dot-green', C:'dot-blue', F:'dot-red', S:'dot-yellow'};
+const STATUS_LABEL = {R:'Running', C:'Completed', F:'Failed', S:'Queued', D:'Decommissioned'};
+const STATUS_DOT   = {R:'dot-green', C:'dot-blue', F:'dot-red', S:'dot-yellow', D:''};
+
+// a decommissioned run (is_active 'N') is shown as its own status; it stays F in the database
+function runStatus(r) { return r.is_active === 'N' ? 'D' : r.recipe_run_status; }
 
 function statusBadge(s) {
   return `<span class="st st-${s}"><span class="dot ${STATUS_DOT[s]||''}"></span>${STATUS_LABEL[s]||s}</span>`;
@@ -555,7 +576,19 @@ function releasedBadge(r) {
 }
 
 // ---- Current Runs ---------------------------------------------------------
+// The database's mode (X-Medcea-Iam-Db-Roles of /api/param-sets), asked once before the
+// first Current Runs render: it decides whether a failed run without a parameter set can Retry.
+let _iamModeKnown = false;
+async function ensureIamMode() {
+  if (_iamModeKnown) return;
+  try {
+    const res = await fetch(`${API}/param-sets`);
+    if (res.ok) { _iamDbRoles = res.headers.get('X-Medcea-Iam-Db-Roles') === 'true'; _iamModeKnown = true; }
+  } catch (e) { /* asked again at the next refresh */ }
+}
+
 async function loadActive() {
+  await ensureIamMode();
   const res = await fetch(`${API}/runs/active`);
   const rows = await res.json();
   const badge = document.getElementById('active-count');
@@ -577,7 +610,13 @@ async function loadActive() {
       actions.push(`<button class="btn btn-sm btn-danger" onclick="stopRun(${r.recipe_run_id})">■ Stop</button>`);
     }
     if (r.recipe_run_status === 'F') {
-      actions.push(`<button class="btn btn-sm" onclick="openRetryModal(${r.recipe_run_id})">↺ Retry</button>`);
+      // Retry re-executes this run: with IAM_DB_ROLES=true only a run that carries a
+      // parameter set can start, so a run without one offers Rerun (a new run) instead
+      if (!_iamDbRoles || r.params_id) {
+        actions.push(`<button class="btn btn-sm" onclick="openRetryModal(${r.recipe_run_id})">↺ Retry</button>`);
+      }
+      actions.push(`<button class="btn btn-sm" onclick="rerunRun(${r.unit_id}, ${r.recipe_id})">⟳ Rerun</button>`);
+      actions.push(`<button class="btn btn-sm btn-danger" onclick="openDecomModal(${r.recipe_run_id})">⊘ Decommission</button>`);
     }
     // Log button always shown for all statuses
     const isLive = r.recipe_run_status === 'R';
@@ -616,6 +655,53 @@ async function resetRun(runId) {
   });
   if (res.ok) { await apiOk(res); toast('Run reset to Queued'); loadActive(); }
   else await apiFail(res);
+}
+
+// ---- Rerun: a new run of the same recipe on the same unit (Run Now, prefilled) ----
+async function rerunRun(unitId, recipeId) {
+  await openRunNowModal();
+  const u = document.getElementById('rn-unit');
+  u.value = String(unitId);
+  await onRnUnitChange();
+  const rc = document.getElementById('rn-recipe');
+  if ([...rc.options].some(o => o.value === String(recipeId))) rc.value = String(recipeId);
+}
+
+// ---- Decommission: permanent, confirmed by typing the run number ----
+function openDecomModal(runId) {
+  document.getElementById('decom-run-id').value = runId;
+  document.getElementById('decom-title').textContent = `Decommission run #${runId}`;
+  document.getElementById('decom-label').textContent = `Type ${runId} to confirm`;
+  document.getElementById('decom-confirm').value = '';
+  document.getElementById('decom-submit').disabled = true;
+  document.getElementById('decom-modal').classList.add('open');
+  document.getElementById('decom-confirm').focus();
+}
+
+function closeDecomModal() { document.getElementById('decom-modal').classList.remove('open'); }
+
+function onDecomInput() {
+  const id = document.getElementById('decom-run-id').value;
+  document.getElementById('decom-submit').disabled = document.getElementById('decom-confirm').value.trim() !== id;
+}
+
+async function submitDecom() {
+  const runId = parseInt(document.getElementById('decom-run-id').value);
+  const typed = document.getElementById('decom-confirm').value.trim();
+  if (typed !== String(runId)) return;
+  const res = await fetch(`${API}/runs/${runId}/status`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({status: 'D', confirm: typed})
+  });
+  if (res.ok) {
+    await apiOk(res);
+    toast(`Run #${runId} decommissioned`);
+    closeDecomModal();
+    loadActive();
+    loadRuns();
+  } else {
+    await apiFail(res);
+  }
 }
 
 async function openRetryModal(runId) {
@@ -1118,7 +1204,7 @@ async function loadRuns() {
       <td><code style="color:#a5b4fc">#${r.recipe_run_id}</code></td>
       <td>${r.unit_code}</td>
       <td>${r.recipe_name}</td>
-      <td>${statusBadge(r.recipe_run_status)}${releasedBadge(r)}</td>
+      <td>${statusBadge(runStatus(r))}${releasedBadge(r)}</td>
       <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_start)}</td>
       <td style="font-size:.8rem;color:#94a3b8">${fmtTime(r.recipe_run_end)}</td>
       <td><button class="btn btn-sm" onclick="openLog(${r.recipe_run_id}, false)">View Log</button></td>

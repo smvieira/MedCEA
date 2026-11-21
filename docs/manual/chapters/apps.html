@@ -275,8 +275,8 @@
 <tbody>
 <tr><td>See current and completed runs</td><td><span class="role">production_manager</span>, <span class="role">maintenance</span>, <span class="role">qc</span>, <span class="role">qa</span>, <span class="role">qp</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">operator</span> for their own units only</td></tr>
 <tr><td>Read a run's log</td><td><span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">engineer</span>, <span class="role">auditor</span>; <span class="role">operator</span> for their own units only. Not <span class="role">maintenance</span>, <span class="role">qc</span> or <span class="role">qp</span>.</td></tr>
-<tr><td>Create a run (<strong>Run Now</strong> in the header)</td><td><span class="role">production_manager</span></td></tr>
-<tr><td>Execute, stop or retry a run, or start a schedule with <strong>▶ Run Now</strong></td><td><span class="role">production_manager</span>; <span class="role">operator</span> for a run a production manager prepared in one of their units</td></tr>
+<tr><td>Create a run (<strong>Run Now</strong> in the header, or <strong>⟳ Rerun</strong> on a failed run)</td><td><span class="role">production_manager</span></td></tr>
+<tr><td>Execute, stop, cancel, retry or decommission a run, or start a schedule with <strong>▶ Run Now</strong></td><td><span class="role">production_manager</span>; <span class="role">operator</span> for a run a production manager prepared in one of their units</td></tr>
 <tr><td>See schedules</td><td><span class="role">operator</span>, <span class="role">production_manager</span>, <span class="role">qa</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
 <tr><td>Create, edit or retire a schedule</td><td><span class="role">production_manager</span></td></tr>
 <tr><td>See log settings</td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">engineer</span>, <span class="role">auditor</span></td></tr>
@@ -288,7 +288,8 @@
 <li><strong>Queued</strong>: created, not yet started.</li>
 <li><strong>Running</strong></li>
 <li><strong>Completed</strong></li>
-<li><strong>Failed</strong>: the run failed or was stopped.</li>
+<li><strong>Failed</strong>: the run failed, was stopped, or was cancelled before it started.</li>
+<li><strong>Decommissioned</strong>: a failed run taken out of use for good. It is kept as a record (log, cycles, who did what) and shown under <strong>Completed Runs</strong>, and nothing can retry or execute it again. In the database it stays Failed, with <code>is_active</code> set to <code>N</code>.</li>
 </ul>
 <p>A completed run that a <span class="role">qp</span> person has released shows a <strong>Released</strong> badge next to its status in <strong>Completed Runs</strong>, with who released it and when (UTC); so does the run's window with <strong>Full log</strong> ticked. The Scheduler only shows it; runs are released in the Configuration UI (see <a href="#apps-config-release">releasing a completed run</a>). An <span class="role">operator</span> still sees only their own units' runs.</p>
 
@@ -306,7 +307,9 @@
 <ul>
 <li><strong>▶ Execute</strong> on a Queued run, and <strong>■ Cancel</strong>, which marks it Failed without running anything (it can be retried later). Until 21 November 2026 a queued run could not be cancelled from the page.</li>
 <li><strong>■ Stop</strong> on a Running run. Stopping marks the run Failed, then ends the process.</li>
-<li><strong>↺ Retry</strong> on a Failed run. Retrying sets the run back to Queued and executes it again, optionally with another algorithm.</li>
+<li><strong>↺ Retry</strong> on a Failed run. Retrying sets the run back to Queued and executes it again, optionally with another algorithm. Once the database enforces roles (<code>IAM_DB_ROLES=true</code>) a run keeps the parameter set it was created with, so Retry is offered only for a run that has one.</li>
+<li><strong>⟳ Rerun</strong> on a Failed run: a <em>new</em> run of the same recipe on the same unit. It opens <strong>Run Now</strong> with the unit and recipe filled in, where you choose the parameter set. The failed run stays as it was.</li>
+<li><strong>⊘ Decommission</strong> on a Failed run, for one that should never run again. It is permanent, so the window asks you to type the run's number before the button is enabled, and the scheduler refuses the request unless it repeats that number. The run moves from <strong>Current Runs</strong> to <strong>Completed Runs</strong> with the status Decommissioned. Who did it and when is in the run's change history (<code>medcea.row_change</code>). Added on 21 November 2026, with Rerun.</li>
 <li><strong>📋 Log</strong> on every run.</li>
 </ul>
 <p>The arrow at the left of a row expands the cycles of the run, with each cycle's step, start and end times, status and parameters.</p>
