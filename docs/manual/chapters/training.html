@@ -55,6 +55,7 @@
 <tr><td><a href="#training-e45">E45 Calibrate the sensor model from a snapshot and compare the controllers on it</a></td><td>host operator, for the <span class="role">control_scientist</span></td><td>A snapshot fetched by its lineage gives the same files twice and recomputes its recorded digest; the sensor model is fitted to it with the values the data supports, every plant constant is refused, and the comparisons on the calibrated model name the snapshot in their manifests and give the same result digest at one or several processes.</td><td>20 Nov 2026 (in the session's scratch folder and the platform's checkout, not a worktree)</td></tr>
 <tr><td><a href="#training-e46">E46 A board whose name the router does not know</a></td><td><span class="role">engineer</span>, <span class="role">admin</span></td><td>A connected board whose hostname does not resolve shows amber with its last reported address for a role that reads its messages, red with the reason for one that does not, and green once the router knows its name.</td><td>20 Nov 2026 (steps 1–3)</td></tr>
 <tr><td><a href="#training-e47">E47 A domain of your own on a fresh install</a></td><td>host operator</td><td>A custom domain is configured so that its names resolve on the host, the deploy says so, and a domain whose names do not resolve is reported as a problem, never as SUCCESS.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e51">E51 Measure the local model before anything is built on it</a></td><td>host operator</td><td>The bench and the offline tool-call eval run only while no recipe run is running or scheduled, stay within a cap checked against the pessimistic estimate, stop and delete their Job or Pod when interrupted or when a run starts, and leave one day's report holding every measurement and a recommendation made on both throughput and the graded eval.</td><td>Not yet</td></tr>
 </tbody>
 </table></div>
 
@@ -1646,6 +1647,41 @@ SQL</code></pre></li>
 <div class="record"><p>Nothing is recorded in the platform: the check only reads. The deploy log <code>logs/deploy-infra-*.log</code> holds the check's lines and any "Problem:" line. Write the date, the commit, the domain and what each step printed under <strong>Last done</strong>.</p></div>
 <p><strong>Refusals worth trying.</strong> None: the check never stops a deploy, on purpose (records may be made afterwards).</p>
 <p><strong>Afterwards.</strong> Leave <code>LOCAL_DNS</code>, <code>USE_TAILSCALE</code> and <code>PLATFORM_IP</code> as the install needs them, and run <code>./deploy-infra.sh</code> once more if you changed them in step 5.</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
+<h3 id="training-e51">E51 Measure the local model before anything is built on it</h3>
+<p>Numbered after E48 to E50, which the Phase 4 design reserves for its sub-phases; it is research Phase 4's step 0 and runs first (<a href="#research-model-bench">Measuring the local model</a>).</p>
+<p><strong>Goal.</strong> Measure Qwen3-8B and Qwen3-4B-Instruct-2507 on this host and decide between them on both their speed and how they call tools. The exercise proves that the bench never competes with a recipe run (it refuses while one is running or scheduled and stops when one starts), that its runtime cap holds at the pessimistic end of the estimate, that an interrupted run leaves nothing running without the deploy lock, and that the day's report keeps every measurement it was given.</p>
+<p><strong>Accounts and roles.</strong> The host operator (the deploying account, not root) runs every command. No platform account signs in; nothing on the platform changes but the Jobs and Pods the script creates and removes in the platform namespace.</p>
+<p><strong>Before you start.</strong> No recipe run is running or scheduled, and the chamber is idle for the next hours. About 8 GB free for the model folder (<code>/var/lib/&lt;project&gt;/research-models</code> by default). The checkout is clean.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li><code>./apps/research-model/bench.sh plan</code>, then <code>./apps/research-model/bench.sh plan --models 8b</code> and <code>… plan --models 4b</code>.</li>
+<li><code>./apps/research-model/bench.sh fetch</code>.</li>
+<li><code>./apps/research-model/bench.sh bench --models 8b</code>. While its Job runs, press Ctrl-C once, then run <code>microk8s kubectl get job,pod -n &lt;namespace&gt; -l app=research-llm-bench</code>.</li>
+<li><code>./apps/research-model/bench.sh bench --models 8b</code> again, to the end; then <code>./apps/research-model/bench.sh bench --models 4b</code>.</li>
+<li><code>./apps/research-model/bench.sh eval</code>.</li>
+<li><code>./apps/research-model/bench.sh report</code>, and read <code>research/agents/bench/&lt;date&gt;.json</code>: <code>bench.avx_check</code>, <code>bench.runs</code>, <code>bench.best</code>, <code>eval.&lt;model&gt;.scores</code>, <code>eval.&lt;model&gt;.transcript.verdict</code> and <code>recommendation</code>.</li>
+<li><code>git status --short research/</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: the plan, R26's depth runs first and the thread and NUMA sweep last, then "Estimated runtime: … h expected, … h pessimistic (…; no F16C here: the context part counted 2.0x); the cap is 4.0 h (--max-hours), checked against the pessimistic figure." Both models together are refused: "Refused: the pessimistic runtime is over the 4.0 h cap … Measure one model at a time (--models 8b, then --models 4b: the day's report merges them) …". Each model alone is accepted.</li>
+<li>Step 2: each model downloaded (or resumed) and "Fetched and verified".</li>
+<li>Step 3: "No recipe run is R or S.", the Job started; after Ctrl-C "Stopped before Job research-llm-bench finished: it was deleted (bench.sh cleanup removes anything left)." and exit code 130 (medcea.sh: Failed: exit code 130); the <code>get</code> shows no Job, or one terminating.</li>
+<li>Step 4: "Bench done." twice. The report's <code>bench.avx_check</code> is <code>pass</code> (the server's <code>AVX = 1 | AVX2 = 0</code> line), the depth runs' rows say <code>"affinity": "pinned"</code>, sweep rows under <code>isolate</code> say <code>"node affinity"</code>.</li>
+<li>Step 5: per model 16 conversations, each pass or FAIL with its reason, and the transcript's five turns, then "eval 8b: …/16 passed, … prefix reuse" or "… broken".</li>
+<li>Step 6: <code>bench.runs</code> lists both bench runs of steps 3 to 4 (the stopped one marked incomplete) and <code>bench.best</code> both models; the recommendation names a model and its reasons, or none with what is missing.</li>
+<li>Step 7: the report file is new (untracked); a campaign or a calibration would still run (the sandbox's dirty check leaves this file out).</li>
+</ul>
+<div class="record"><p>Nothing is recorded on the platform. Each command logs to <code>logs/research-llm-bench-&lt;time&gt;.log</code>; the raw and parsed results are <code>logs/research-llm-bench-&lt;time&gt;.{out,plan.json,parsed.json}</code>, <code>logs/research-llm-eval-&lt;time&gt;-&lt;model&gt;.json</code> and <code>….server.log</code> (mode 600); the day's evidence is <code>research/agents/bench/&lt;date&gt;.json</code>, to commit. Write the date, the commit, both models' best prompt and generation rates, the depth-12288 rates, the eval scores, the prefix-reuse verdicts and the recommendation under <strong>Last done</strong>, and the owner's choice in the <a href="#compliance-decisions">decision record</a>.</p></div>
+<p><strong>Refusals worth trying.</strong></p>
+<ul>
+<li><code>bench.sh bench --models 8b --max-hours 1</code>: the plan, then "Refused: the pessimistic runtime is over the 1.0 h cap …", exit 2, nothing started.</li>
+<li>While a recipe run is running or scheduled (only when one is anyway; never start one for this): <code>bench</code> and <code>eval</code> list it and refuse with "Refused while a recipe run is R or S …", exit 1. A run that starts while the bench runs stops it within five minutes: "stopped: run N started (status R). Job research-llm-bench was deleted; what it measured is in the report".</li>
+<li><code>bench.sh bench --threads 13</code>: "--threads: 1 to 12 (R25: at most 12, on one socket)", exit 2, before the log and the lock.</li>
+</ul>
+<p><strong>Afterwards.</strong> <code>./apps/research-model/bench.sh cleanup</code> (removes anything labelled <code>app=research-llm-bench</code>; the models stay). Commit <code>research/agents/bench/&lt;date&gt;.json</code>. The model folder is kept for Phase 4b; remove it by hand only if the local model is abandoned.</p>
 <p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>

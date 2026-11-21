@@ -21,7 +21,7 @@
       "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
       "licence": "Apache-2.0",
       "thinking": "hybrid: off through chat_template_kwargs.enable_thinking=false",
-      "arch": {"params_b": 8.2, "layers": 36, "kv_heads": 8, "head_dim": 128, "hidden": 4096},
+      "arch": {"params_b": 8.2, "layers": 36, "heads": 32, "kv_heads": 8, "head_dim": 128, "hidden": 4096},
       "estimate_tok_s": {"prompt": [4, 10], "gen": [2, 4]},
       "bench_memory_gi": 10,
       "server_memory_gi": 12
@@ -36,7 +36,7 @@
       "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
       "licence": "Apache-2.0",
       "thinking": "none (instruct-only)",
-      "arch": {"params_b": 4.0, "layers": 36, "kv_heads": 8, "head_dim": 128, "hidden": 2560},
+      "arch": {"params_b": 4.0, "layers": 36, "heads": 32, "kv_heads": 8, "head_dim": 128, "hidden": 2560},
       "estimate_tok_s": {"prompt": [8, 20], "gen": [4, 7]},
       "bench_memory_gi": 7,
       "server_memory_gi": 8

@@ -8,9 +8,9 @@
 #   apps/research-model/bench.sh plan    [bench options]   print what bench would measure and its runtime
 #   apps/research-model/bench.sh fetch   [--models 8b,4b] [--verify-only]
 #   apps/research-model/bench.sh bench   [--models 8b,4b] [--threads 6,12] [--numa none,isolate]
-#                                        [--depths 0,4096,12288] [--depth-threads 6] [--depth-numa isolate]
-#                                        [--socket 0] [--max-hours 3.5]
-#   apps/research-model/bench.sh eval    [--models 8b,4b] [--eval-threads 6] [--ctx 24576] [--socket 0] [--max-hours 3.5]
+#                                        [--depths 0,4096,12288] [--depth-threads 6] [--depth-numa none]
+#                                        [--socket 0] [--max-hours 4]
+#   apps/research-model/bench.sh eval    [--models 8b,4b] [--eval-threads 6] [--ctx 24576] [--socket 0] [--max-hours 4]
 #   apps/research-model/bench.sh report  [--date YYYY-MM-DD]
 #   apps/research-model/bench.sh cleanup
 #
@@ -23,30 +23,44 @@
 #         About 7.5 GB for both models. --verify-only re-hashes what is there.
 # bench   Job research-llm-bench (the pinned llama.cpp full image): first a llama-server start
 #         that prints system_info (the check AVX = 1 | AVX2 = 0: the sandybridge CPU variant),
-#         then llama-bench (-r 1, -o json) per plan line: pp512 + tg128 at depth 0 for every
-#         thread count and NUMA mode (the sweep), pp4096 at depth 0, then pp512 + tg128 at each
-#         depth, all pinned to one socket (one hardware thread per physical core for -t 6,
-#         the socket's hyper-threads too for -t 12; R24) under nice 19. It prints the plan and
-#         its estimated runtime FIRST (the design's throughput ranges) and refuses (exit 2)
-#         above --max-hours (default 3.5: the full plan is about 3 h expected, 5 h pessimistic).
+#         then llama-bench (-r 1, -o json) per plan line: per model pp512 + pp4096 + tg128 at
+#         depth 0, then pp512 + tg128 at each depth (R26's measurements, --depth-numa none: a
+#         NUMA strategy resets ggml's workers to the whole node), and last the optional sweep
+#         (pp512 + tg128 at depth 0 for the other thread counts and NUMA modes), all pinned to
+#         one socket (one hardware thread per physical core for -t 6, the socket's
+#         hyper-threads too for -t 12; R24) under nice 19. It prints the plan and its estimated
+#         runtime FIRST (the design's throughput ranges, the context part doubled without
+#         F16C) and refuses (exit 2) when the PESSIMISTIC runtime is above --max-hours
+#         (default 4: one model per run fits; both models together are about 3.7 h expected
+#         and 6.4 h pessimistic, so run --models 8b, then --models 4b: the report merges them).
 # eval    Per model, Pod research-llm-eval-<model> (the pinned llama.cpp server image,
 #         --jinja, -np 1, greedy, --api-key-file from a one-time Secret) answers the fixture
 #         conversations of research/agents/evals/fixtures (no lake data, no session), graded on
 #         the host (research/agents/evals/grader.py: valid tool calls against the declared
 #         schemas, specs the harness accepts, CPU-hour budgets, no undeclared tool, prompt
 #         injection resisted), plus a 5-turn transcript measuring prefix reuse. The Pod and the
-#         key are deleted at the end. Runtime printed first, refused above --max-hours.
-# report  Merges the newest bench and eval results (logs/research-llm-*.json) into
+#         key are deleted at the end. Runtime printed first, refused above --max-hours; one end
+#         time for the whole eval (now + --max-hours + 30 min): each Pod's deadline is what is
+#         left of it, and run_eval stops between conversations once it has passed.
+# report  Merges every bench and eval result of the date (logs/research-llm-*) into
 #         research/agents/bench/<date>.json with the machine's facts, the pins and the
-#         recommendation: 4B when 8B generates below 1.5 tok/s, processes prompts below
-#         3 tok/s, or its tool-call validity is clearly worse (15 points). bench and eval run it.
+#         recommendation, never dropping an earlier run's rows: 4B when 8B generates below
+#         1.5 tok/s or processes prompts below 3 tok/s, or is clearly worse (15 points) on a
+#         graded outcome of the eval (pass rate, valid calls, valid specs, budgets, refusals,
+#         injections); none until both the bench and the eval are in. bench and eval run it.
+#         The file is evidence, not code: the sandbox's dirty check leaves it out
+#         (research/harness/algorithms_loader.py), so campaigns still run before it is committed.
 # cleanup Deletes this script's Jobs, Pods, ConfigMaps and Secrets (label
 #         app=research-llm-bench); never the model folder.
 #
 # fetch, bench, eval and cleanup take the deploy lock (bench holds it for its runtime, so no
-# deploy disturbs the measurement). bench and eval refuse while a recipe run is R or S (one
-# read-only psql in rdbms-postgresql-0 on medcea.recipe_run, as health-check.sh reads) and
-# while the host has less memory available than the Job needs plus 2 GiB. A Job's CPU request
+# deploy disturbs the measurement). Stopped (Ctrl-C, SIGTERM, a closed terminal), bench and
+# fetch delete their Job and eval its Pod before they exit, so nothing runs on without the
+# lock. bench and eval refuse while a recipe run is R or S (one read-only psql in
+# rdbms-postgresql-0 on medcea.recipe_run, as health-check.sh reads), and look again every
+# 5 minutes while they run: a run that starts stops the Job or the Pod (exit 1, "stopped:
+# run N started", the partial results kept in the report). They also refuse while the host
+# has less memory available than the Job needs plus 2 GiB. A Job's CPU request
 # is 100m with no CPU limit and nice 19: it yields to every Burstable or Guaranteed pod; the
 # BestEffort production pods (owner decision OD24, not built yet) still share the CPUs with
 # it, hence the refusal while a run is active. Logs: logs/research-llm-bench-<ts>.log; the
@@ -72,7 +86,7 @@ usage() { die 2 "$*  (apps/research-model/bench.sh --help)"; }
 # ── Arguments (before the log and the lock, so a usage error needs neither) ──────
 CMD="$1"; shift
 MODELS="8b,4b"; THREADS="6,12"; NUMA="none,isolate"; DEPTHS="0,4096,12288"
-DEPTH_THREADS=6; DEPTH_NUMA=isolate; SOCKET=0; MAX_HOURS=3.5; EVAL_THREADS=6; CTX=24576
+DEPTH_THREADS=6; DEPTH_NUMA=none; SOCKET=0; MAX_HOURS=4; EVAL_THREADS=6; CTX=24576
 DATE=""; VERIFY_ONLY=0
 case "$CMD" in
     plan|fetch|bench|eval|report|cleanup) ;;
@@ -142,9 +156,23 @@ STAMP="$(date -u +%Y%m%d-%H%M%S)"
 OUTDIR="$REPO_ROOT/logs"
 mkdir -p "$OUTDIR"; chmod 700 "$OUTDIR" 2>/dev/null || true
 TMPD="$(mktemp -d)"; chmod 700 "$TMPD"
+POLL="${MEDCEA_BENCH_POLL:-30}"          # seconds between looks at a Job or the eval (tests: 1)
+RECHECK="${MEDCEA_BENCH_RECHECK:-300}"   # seconds between looks at medcea.recipe_run while it runs
 EVAL_PODS=()
+BENCH_JOB=""        # the Job this invocation created and has not collected yet (bench, fetch)
+EVAL_PID=""         # run_eval while it runs
+SLEEP_PID=""
 _cleanup() {
     local p
+    trap '' PIPE                         # a Ctrl-C also ends the log's tee
+    [[ -n "$SLEEP_PID" ]] && kill "$SLEEP_PID" 2>/dev/null
+    [[ -n "$EVAL_PID" ]] && kill "$EVAL_PID" 2>/dev/null
+    if [[ -n "$BENCH_JOB" ]]; then
+        # an interrupted bench or fetch: its Job must not run on without the lock and the run
+        # guard (propagationPolicy Background removes its pod too)
+        $KUBECTL delete job "$BENCH_JOB" -n "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        echo "[bench] Stopped before Job $BENCH_JOB finished: it was deleted (bench.sh cleanup removes anything left)." >&2 || true
+    fi
     for p in "${EVAL_PODS[@]}"; do
         $KUBECTL delete pod "$p" -n "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
     done
@@ -154,6 +182,16 @@ _cleanup() {
     rm -rf "$TMPD"
 }
 trap _cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+nap() {   # nap SECONDS: a sleep a signal interrupts at once (bash runs a trap only between commands)
+    sleep "$1" >/dev/null 2>&1 9>&- &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null || true
+    SLEEP_PID=""
+}
 
 pin() {   # pin KEY FIELD → a value of pins.json's model KEY (or llama_cpp/python_image)
     python3 - "$PINS" "$@" <<'PY'
@@ -208,8 +246,9 @@ models_fetched() {
     done
 }
 
-runs_active() {   # refuse while a recipe run is R or S (read-only psql, as health-check.sh)
+runs_query() {   # → 0 no run R or S, 1 some (RUNS_FOUND: "run N status X" lines), 2 unreadable (RUNS_ERR)
     local out rc=0
+    RUNS_FOUND=""; RUNS_ERR=""
     out=$($KUBECTL exec --request-timeout=60s -i -n "$NAMESPACE" rdbms-postgresql-0 -- \
         env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
         'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$0" -tA -F "|"' "$POSTGRES_DB" 2>&1 <<'SQL'
@@ -219,14 +258,53 @@ SELECT 'checked|ok';
 SQL
 ) || rc=$?
     if [[ "$rc" != 0 ]] || ! grep -q '^checked|ok$' <<<"$out"; then
-        die 1 "Cannot read medcea.recipe_run (read-only psql in rdbms-postgresql-0): refused, the bench never runs unchecked. $(tail -n1 <<<"$out" | cut -c1-160)"
+        RUNS_ERR="$(tail -n1 <<<"$out" | cut -c1-160)"
+        return 2
     fi
     if grep -q '^run|' <<<"$out"; then
+        RUNS_FOUND="$(grep '^run|' <<<"$out" | awk -F'|' '{printf "run %s status %s\n", $2, $3}')"
+        return 1
+    fi
+    return 0
+}
+
+runs_active() {   # refuse while a recipe run is R or S (read-only psql, as health-check.sh)
+    local rc=0
+    runs_query || rc=$?
+    if [[ "$rc" == 2 ]]; then
+        die 1 "Cannot read medcea.recipe_run (read-only psql in rdbms-postgresql-0): refused, the bench never runs unchecked. $RUNS_ERR"
+    fi
+    if [[ "$rc" == 1 ]]; then
         echo "Recipe runs running (R) or scheduled (S):" >&2
-        grep '^run|' <<<"$out" | awk -F'|' '{printf "  run %s  status %s\n", $2, $3}' >&2
+        sed 's/^run \([^ ]*\) status /  run \1  status /' <<<"$RUNS_FOUND" >&2
         die 1 "Refused while a recipe run is R or S: the bench would take CPU from the scheduler's control loops (R25). Run it when no run is active or scheduled."
     fi
     log "No recipe run is R or S."
+    LAST_CHECK="$(date +%s)"; CHECK_FAILS=0
+}
+
+STOP_WHY=""
+guard_tick() {   # while a Job or the eval runs: every RECHECK s look again → 0 go on, 3 stop (STOP_WHY)
+    local now rc=0
+    now="$(date +%s)"
+    (( now - ${LAST_CHECK:-0} >= RECHECK )) || return 0
+    LAST_CHECK="$now"
+    runs_query || rc=$?
+    if [[ "$rc" == 1 ]]; then
+        STOP_WHY="$(head -n1 <<<"$RUNS_FOUND" | awk '{print "run " $2 " started (status " $4 ")"}')"
+        return 3
+    fi
+    if [[ "$rc" == 2 ]]; then
+        CHECK_FAILS=$(( ${CHECK_FAILS:-0} + 1 ))
+        warn "Could not read medcea.recipe_run ($CHECK_FAILS in a row): $RUNS_ERR"
+        if (( CHECK_FAILS >= 2 )); then
+            STOP_WHY="medcea.recipe_run could not be read twice in a row (the bench never runs unchecked)"
+            return 3
+        fi
+        return 0
+    fi
+    CHECK_FAILS=0
+    return 0
 }
 
 memory_ok() {   # memory_ok GIB: MemAvailable must exceed the Job's memory + 2 GiB
@@ -248,18 +326,21 @@ apply_cm() {   # apply_cm NAME KEY=FILE...: a labelled ConfigMap (no secret in i
         | $KUBECTL label --local -f - "$LABEL" -o yaml | $KUBECTL apply -f - >/dev/null
 }
 
-wait_job() {   # wait_job NAME DEADLINE_S → 0 succeeded, 1 failed or out of time
-    local name="$1" deadline=$(( $(date +%s) + $2 + 120 )) st last=0
+wait_job() {   # wait_job NAME DEADLINE_S [guard] → 0 succeeded, 1 failed or out of time, 3 stopped by guard_tick
+    local name="$1" deadline=$(( $(date +%s) + $2 + 120 )) guard="${3:-}" st last=0
     while :; do
         st="$($KUBECTL get job "$name" -n "$NAMESPACE" -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null || echo "?/?")"
         [[ "$st" == 1/* ]] && return 0
         [[ "$st" == */1 ]] && return 1
         (( $(date +%s) < deadline )) || return 1
+        if [[ "$guard" == guard ]]; then
+            guard_tick || return 3
+        fi
         if (( $(date +%s) - last >= 300 )); then
             last="$(date +%s)"
             log "$name: running ($(date -u +%H:%M:%SZ)); last line: $($KUBECTL logs "job/$name" -n "$NAMESPACE" --tail=1 2>/dev/null | cut -c1-140)"
         fi
-        sleep 30
+        nap "$POLL"
     done
 }
 
@@ -272,11 +353,11 @@ report() {   # report [extra benchlib report args...]: merge into research/agent
     python3 "$LIB" report --out "$out" --date "$date" --machine "$machine" "$@"
 }
 
-newest() { ls -1t $1 2>/dev/null | head -n1 || true; }
-
 # ── plan ─────────────────────────────────────────────────────────────────────────
+PROC="${MEDCEA_BENCH_PROC:-/proc}"       # /proc/cpuinfo's F16C flag feeds the estimate (tests: a fake)
 plan_args=(--models "$MODELS" --threads "$THREADS" --numa "$NUMA" --depths "$DEPTHS"
-           --depth-threads "$DEPTH_THREADS" --depth-numa "$DEPTH_NUMA" --socket "$SOCKET" --max-hours "$MAX_HOURS")
+           --depth-threads "$DEPTH_THREADS" --depth-numa "$DEPTH_NUMA" --socket "$SOCKET" --max-hours "$MAX_HOURS"
+           --proc "$PROC")
 if [[ "$CMD" == plan ]]; then
     rc=0; python3 "$LIB" plan "${plan_args[@]}" || rc=$?
     exit "$rc"
@@ -291,17 +372,17 @@ fi
 
 # ── report ───────────────────────────────────────────────────────────────────────
 if [[ "$CMD" == report ]]; then
+    # every result of the date, oldest first (stamps are UTC), so a split or repeated bench
+    # never replaces an earlier one's rows and the newest eval per model wins
+    day="${DATE:-$(date -u +%Y-%m-%d)}"; compact="${day//-/}"
     args=()
-    b="$(newest "$OUTDIR/research-llm-bench-*.parsed.json")"
-    if [[ -n "$b" ]]; then
-        args+=(--bench "$b")
-        [[ -f "${b%.parsed.json}.plan.json" ]] && args+=(--plan "${b%.parsed.json}.plan.json")
-    fi
-    for m in 8b 4b; do
-        e="$(newest "$OUTDIR/research-llm-eval-*-$m.json")"
-        [[ -n "$e" ]] && args+=(--eval "$e")
+    shopt -s nullglob
+    for b in "$OUTDIR"/research-llm-bench-"$compact"-*.parsed.json; do args+=(--bench "$b"); done
+    for e in "$OUTDIR"/research-llm-eval-"$compact"-*-8b.json "$OUTDIR"/research-llm-eval-"$compact"-*-4b.json; do
+        args+=(--eval "$e")
     done
-    [[ ${#args[@]} -gt 0 ]] || die 2 "No bench or eval results in logs/: run bench.sh bench or eval first."
+    shopt -u nullglob
+    [[ ${#args[@]} -gt 0 ]] || die 2 "No bench or eval results of $day in logs/: run bench.sh bench or eval first (or --date)."
     report "${args[@]}"
     exit 0
 fi
@@ -328,9 +409,12 @@ PY
     render "$HERE/k8s/fetch-job.yaml" NAMESPACE PYTHON_IMAGE MODEL_DIR MODEL_UID MODEL_GID FETCH_DEADLINE_S PRIORITY_CLASS \
         >"$TMPD/job.yaml"
     [[ "$VERIFY_ONLY" == 1 ]] && sed -i 's#"/script/models.json"\]#"/script/models.json", "--verify-only"]#' "$TMPD/job.yaml"
+    BENCH_JOB=research-model-fetch
     $KUBECTL apply -f "$TMPD/job.yaml" >/dev/null
     rc=0; wait_job research-model-fetch 10800 || rc=$?
     $KUBECTL logs job/research-model-fetch -n "$NAMESPACE" 2>&1 | tee "$OUTDIR/research-llm-fetch-$STAMP.out" || true
+    [[ "$rc" == 0 ]] || $KUBECTL delete job research-model-fetch -n "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    BENCH_JOB=""
     [[ "$rc" == 0 ]] || die 1 "The fetch did not finish (its log is above): run bench.sh fetch again, it resumes."
     ls -l "$MODEL_DIR"
     log "Fetched and verified: $MODELS. Next: apps/research-model/bench.sh bench"
@@ -352,16 +436,21 @@ if [[ "$CMD" == bench ]]; then
     $KUBECTL delete job research-llm-bench -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null
     LLAMA_IMAGE_FULL="$(pin llama_cpp image_full)"; BENCH_DEADLINE_S="$DEADLINE"; BENCH_MEMORY="${MEM}Gi"
     PRIORITY_CLASS="$(priority_class)"; SYSINFO_MODEL="/models/$(pin "$first" sha256).gguf"
+    BENCH_JOB=research-llm-bench
     render "$HERE/k8s/bench-job.yaml" NAMESPACE LLAMA_IMAGE_FULL MODEL_DIR MODEL_UID MODEL_GID BENCH_DEADLINE_S \
         BENCH_MEMORY PRIORITY_CLASS SYSINFO_MODEL | $KUBECTL apply -f - >/dev/null
-    log "Job research-llm-bench started ($(date -u +%H:%M:%SZ)); it stops by itself after $(( DEADLINE / 60 )) min at most. The deploy lock is held until it ends."
-    rc=0; wait_job research-llm-bench "$DEADLINE" || rc=$?
+    log "Job research-llm-bench started ($(date -u +%H:%M:%SZ)); it stops by itself after $(( DEADLINE / 60 )) min at most. The deploy lock is held until it ends; medcea.recipe_run is read again every $(( RECHECK / 60 )) min."
+    rc=0; wait_job research-llm-bench "$DEADLINE" guard || rc=$?
     RAW="$OUTDIR/research-llm-bench-$STAMP.out"
     $KUBECTL logs job/research-llm-bench -n "$NAMESPACE" >"$RAW" 2>&1 || true
     chmod 600 "$RAW"
+    [[ "$rc" == 0 ]] || $KUBECTL delete job research-llm-bench -n "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    BENCH_JOB=""
     cp "$TMPD/plan.json" "$OUTDIR/research-llm-bench-$STAMP.plan.json"
-    prc=0; python3 "$LIB" parse-bench "$RAW" "$OUTDIR/research-llm-bench-$STAMP.parsed.json" || prc=$?
-    report --bench "$OUTDIR/research-llm-bench-$STAMP.parsed.json" --plan "$OUTDIR/research-llm-bench-$STAMP.plan.json"
+    stopped=(); [[ "$rc" == 3 ]] && stopped=(--stopped "$STOP_WHY")
+    prc=0; python3 "$LIB" parse-bench "$RAW" "$OUTDIR/research-llm-bench-$STAMP.parsed.json" "${stopped[@]}" || prc=$?
+    report --bench "$OUTDIR/research-llm-bench-$STAMP.parsed.json"
+    [[ "$rc" == 3 ]] && die 1 "stopped: $STOP_WHY. Job research-llm-bench was deleted; what it measured is in the report (raw log: $RAW)."
     [[ "$rc" == 0 && "$prc" == 0 ]] || die 1 "The bench did not finish every run (raw log: $RAW); what it measured is in the report."
     log "Bench done. Next: apps/research-model/bench.sh eval"
     exit 0
@@ -371,7 +460,7 @@ fi
 if [[ "$CMD" == eval ]]; then
     model_dir_ok 0
     models_fetched
-    rc=0; python3 "$LIB" eval-estimate --models "$MODELS" --fixtures "$FIXTURES" --max-hours "$MAX_HOURS" || rc=$?
+    rc=0; python3 "$LIB" eval-estimate --models "$MODELS" --fixtures "$FIXTURES" --max-hours "$MAX_HOURS" --proc "$PROC" || rc=$?
     [[ "$rc" == 0 ]] || exit "$rc"
     runs_active
     TOPO="$(python3 "$LIB" topology)"
@@ -390,14 +479,27 @@ PY
     $KUBECTL create secret generic research-llm-bench-key -n "$NAMESPACE" --from-file=key="$TMPD/key" --dry-run=client -o yaml \
         | $KUBECTL label --local -f - "$LABEL" -o yaml | $KUBECTL apply -f - >/dev/null
     apply_cm research-llm-eval-script "serve.sh=$HERE/container/serve.sh"
-    DEADLINE="$(python3 -c 'import sys; print(int(float(sys.argv[1]) * 3600) + 1800)' "$MAX_HOURS")"
+    # one end time for the whole eval: every Pod's deadline is what is left of it
+    END="$(python3 -c 'import sys; print(int(sys.argv[2]) + int(float(sys.argv[1]) * 3600) + 1800)' "$MAX_HOURS" "$(date +%s)")"
     results=()
+    eval_stop() {   # eval_stop WHY: merge what was graded, then stop (the trap removes the Pod and the key)
+        [[ ${#results[@]} -gt 0 ]] && report "${results[@]}"
+        die 1 "$1"
+    }
     for m in ${MODELS//,/ }; do
+        left=$(( END - $(date +%s) ))
+        (( left >= 600 )) || eval_stop "Out of time before the eval of $m (the end time from --max-hours $MAX_HOURS has passed or is under 10 min away); what was graded is in the report."
+        if [[ ${#results[@]} -gt 0 ]]; then   # the runs again before the next model (the first was checked above)
+            qrc=0; runs_query || qrc=$?
+            [[ "$qrc" == 1 ]] && eval_stop "stopped: $(head -n1 <<<"$RUNS_FOUND") before the eval of $m; what was graded is in the report."
+            [[ "$qrc" == 2 ]] && eval_stop "Cannot read medcea.recipe_run before the eval of $m (the bench never runs unchecked): $RUNS_ERR"
+            LAST_CHECK="$(date +%s)"
+        fi
         memory_ok "$(pin "$m" server_memory_gi)"
         pod="research-llm-eval-$m"
         EVAL_PODS+=("$pod")
         $KUBECTL delete pod "$pod" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null
-        LLAMA_IMAGE_SERVER="$(pin llama_cpp image_server)"; EVAL_DEADLINE_S="$DEADLINE"
+        LLAMA_IMAGE_SERVER="$(pin llama_cpp image_server)"; EVAL_DEADLINE_S="$left"
         SERVER_MEMORY="$(pin "$m" server_memory_gi)Gi"; PRIORITY_CLASS="$(priority_class)"
         MODEL_KEY="$m"; MODEL_FILE="$(pin "$m" sha256).gguf"; MODEL_ALIAS="$(pin "$m" file)"
         LLM_THREADS="$EVAL_THREADS"; LLM_CTX="$CTX"
@@ -411,7 +513,8 @@ PY
             [[ "$ready" == True ]] && break
             phase="$($KUBECTL get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
             [[ "$phase" == Failed || "$phase" == Succeeded ]] && break
-            sleep 10
+            guard_tick || eval_stop "stopped: $STOP_WHY, while llama-server for $m was loading; Pod $pod was deleted."
+            nap 10
         done
         SLOG="$OUTDIR/research-llm-eval-$STAMP-$m.server.log"
         if [[ "$ready" != True ]]; then
@@ -423,9 +526,26 @@ PY
         OUT="$OUTDIR/research-llm-eval-$STAMP-$m.json"
         erc=0
         python3 -m research.agents.evals.run_eval --url "http://$ip:8080" --key-file "$TMPD/key" \
-            --model-key "$m" --alias "$(pin "$m" file)" --out "$OUT" || erc=$?
+            --model-key "$m" --alias "$(pin "$m" file)" --out "$OUT" --deadline "$(( END - 60 ))" 9>&- &
+        EVAL_PID=$!
+        while kill -0 "$EVAL_PID" 2>/dev/null; do
+            if ! guard_tick; then
+                kill "$EVAL_PID" 2>/dev/null; wait "$EVAL_PID" 2>/dev/null; EVAL_PID=""
+                $KUBECTL logs "$pod" -n "$NAMESPACE" >"$SLOG" 2>&1 || true
+                chmod 600 "$SLOG"
+                [[ -f "$OUT" ]] && { chmod 600 "$OUT"; results+=(--eval "$OUT"); }
+                eval_stop "stopped: $STOP_WHY, during the eval of $m; Pod $pod was deleted, what was graded is in the report."
+            fi
+            nap "$POLL"
+        done
+        wait "$EVAL_PID" || erc=$?
+        EVAL_PID=""
         $KUBECTL logs "$pod" -n "$NAMESPACE" >"$SLOG" 2>&1 || true
         chmod 600 "$SLOG"
+        if [[ "$erc" == 3 ]]; then
+            [[ -f "$OUT" ]] && { chmod 600 "$OUT"; results+=(--eval "$OUT"); }
+            eval_stop "Out of time during the eval of $m (--max-hours $MAX_HOURS); what was graded is in the report."
+        fi
         [[ "$erc" == 0 ]] || die 1 "The eval of $m failed (server log: $SLOG)."
         python3 - "$OUT" "$SLOG" <<'PY'
 import json, re, sys

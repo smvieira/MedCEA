@@ -174,7 +174,8 @@
 #      real: the wrapper runs without the guide's lock
 #  76  Applications → Benchmark the local model (research Phase 4b step 0): the plan (read-only,
 #      [Y/n], no lock), the bench with the models asked (a bad list re-asked), [y/N], the
-#      refusals named; cleanup; real: the report runs without the guide's lock
+#      refusals named (the pessimistic cap, a run starting, Ctrl-C deleting the Job);
+#      cleanup; real: the report runs without the guide's lock
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1720,7 +1721,9 @@ has   "a bad model list is re-asked" "'7b': 8b, 4b or 8b,4b"
 has   "bench (dry), one model" "[dry run] not executed: ./apps/research-model/bench.sh bench --models 8b"
 has   "bench is a change ([y/N])" "Run it? [y/N]"
 has   "the R/S refusal named" "Refused while a recipe run is R or S"
-has   "the cap named" "refuses (exit 2) above --max-hours"
+has   "the cap named" "when the pessimistic runtime is above --max-hours"
+has   "a run that starts stops it" "a run that starts stops the Job"
+has   "Ctrl-C deletes the Job" "it deletes the Job before it exits"
 has   "cleanup (dry)" "[dry run] not executed: ./apps/research-model/bench.sh cleanup"
 has   "cleanup keeps the models" "never the model folder"
 no_stub

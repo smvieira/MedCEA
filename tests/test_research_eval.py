@@ -14,8 +14,10 @@
   are not JSON, a schema violation, an invalid spec, a start over budget or over the cap, a
   call to an undeclared tool, obeying an injection, a tool call written as text, an answer cut
   by max_tokens and a missing required call each fail, and the scores count them.
-- prefix_reuse: reuse when each request's cached part covers the previous prompt, broken
-  otherwise.
+- prefix_reuse: reuse when each request's cached part covers the previous prompt and the
+  model's own completion (a slack of 8 tokens), broken when the completion is re-processed.
+- run_eval's --deadline: nothing sent past it, a stop between conversations, the partial
+  file kept with "complete": false (exit 3).
 - run_eval against a fake llama-server on 127.0.0.1: the key only as a Bearer header,
   greedy sampling, thinking off, cache_prompt, every conversation graded, the 5-turn
   transcript appended turn by turn, the output's scores and verdict.
@@ -224,14 +226,34 @@ class Grade(unittest.TestCase):
 class PrefixReuse(unittest.TestCase):
     def test_verdicts(self):
         ok = [{"prompt_tokens": 1400, "prompt_n": 1400, "completion_tokens": 40},
-              {"prompt_tokens": 1600, "prompt_n": 160}, {"prompt_tokens": 1800, "prompt_n": 150}]
+              {"prompt_tokens": 1600, "prompt_n": 160, "completion_tokens": 30},
+              {"prompt_tokens": 1800, "prompt_n": 172}]
         r = grader.prefix_reuse(ok)
         self.assertEqual(r["verdict"], "reuse")
-        self.assertEqual(r["turns"][1]["appended"], 200)
+        self.assertEqual(r["slack"], 8)
+        self.assertEqual(r["turns"][1]["new"], 160)            # 1600 - (1400 + 40)
         self.assertEqual(r["turns"][1]["cached"], 1440)
+        self.assertEqual(r["turns"][1]["completion_reprocessed"], 0)
         broken = ok[:2] + [{"prompt_tokens": 1800, "prompt_n": 1700}]
         self.assertEqual(grader.prefix_reuse(broken)["verdict"], "broken")
         self.assertEqual(grader.prefix_reuse(ok[:1])["verdict"], "unmeasured")
+
+    def test_a_reprocessed_completion_is_broken(self):
+        # the review's case: 150 completion tokens re-processed with the 100 appended ones;
+        # the previous prompt (2500) is cached, its completion is not
+        turns = [{"prompt_tokens": 2500, "prompt_n": 2500, "completion_tokens": 150},
+                 {"prompt_tokens": 2750, "prompt_n": 250}]
+        r = grader.prefix_reuse(turns)
+        self.assertEqual(r["verdict"], "broken")
+        t = r["turns"][1]
+        self.assertEqual((t["new"], t["cached"], t["reprocessed"]), (100, 2500, 150))
+        self.assertEqual((t["prompt_reprocessed"], t["completion_reprocessed"]), (0, 150))
+        # real reuse: only the 100 new tokens (plus a few boundary tokens) are processed
+        good = [turns[0], {"prompt_tokens": 2750, "prompt_n": 104}]
+        self.assertEqual(grader.prefix_reuse(good)["verdict"], "reuse")
+        # the old 32-token slack hid a re-rendered boundary of 20 tokens
+        edge = [turns[0], {"prompt_tokens": 2750, "prompt_n": 120}]
+        self.assertEqual(grader.prefix_reuse(edge)["verdict"], "broken")
 
 
 # ── run_eval against a fake llama-server ─────────────────────────────────────────
@@ -307,6 +329,7 @@ class RunEval(unittest.TestCase):
         self.assertEqual(rc, 0)
         d = json.load(open(out))
         self.assertEqual(d["model_key"], "8b")
+        self.assertIs(d["complete"], True)
         self.assertEqual(d["scores"]["conversations"], len(FX["conversations"]))
         self.assertTrue(d["props"]["chat_template_has_tools"])
         self.assertEqual(len(d["grades"]), len(FX["conversations"]))
@@ -325,6 +348,36 @@ class RunEval(unittest.TestCase):
             self.assertEqual(b["messages"][:len(a["messages"])], a["messages"])
         # the first transcript answer called lake_snapshots: its recorded result follows, wrapped
         self.assertTrue(tr[1]["messages"][-1]["content"].startswith('<tool_result tool="lake.snapshots"'))
+
+    def test_a_passed_deadline_keeps_the_partial_file(self):
+        keyf = os.path.join(self.tmp, "key")
+        with open(keyf, "w") as f:
+            f.write(KEY + "\n")
+        out = os.path.join(self.tmp, "out.json")
+        rc = run_eval.main(["--url", self.url, "--key-file", keyf, "--model-key", "4b", "--alias", "m",
+                            "--out", out, "--deadline", "1"])
+        self.assertEqual(rc, 3)
+        d = json.load(open(out))
+        self.assertIs(d["complete"], False)
+        self.assertIn("end time", d["stopped"])
+        self.assertEqual(d["model_key"], "4b")
+        self.assertEqual(self.srv.bodies, [])                  # nothing was sent past the deadline
+
+    def test_stops_between_conversations_at_the_deadline(self):
+        fx = grader.load_fixtures()
+        now = [1000.0]
+
+        def clock():
+            now[0] += 1.0                                       # one second per look at the clock
+            return now[0]
+        client = run_eval.Client(self.url, KEY, 30, deadline=1012.0, clock=clock)
+        saved = []
+        out = run_eval.run(client, fx, "m", log=lambda *a: None, save=lambda o: saved.append(len(o["grades"])))
+        self.assertIs(out["complete"], False)
+        self.assertGreater(len(out["grades"]), 0)
+        self.assertLess(len(out["grades"]), len(fx["conversations"]))
+        self.assertNotIn("transcript", out)
+        self.assertEqual(saved[-1], len(out["grades"]))         # saved after the last graded one
 
     def test_wrong_key(self):
         keyf = os.path.join(self.tmp, "key")

@@ -4,7 +4,7 @@ the grader; no lake data, no session, no cluster call: apps/research-model/bench
 the server and gives its address.
 
     python3 -m research.agents.evals.run_eval --url http://<pod ip>:8080 --key-file F
-        --model-key 8b --alias <name> --out FILE [--fixtures DIR] [--timeout S]
+        --model-key 8b --alias <name> --out FILE [--fixtures DIR] [--timeout S] [--deadline EPOCH]
 
 1. GET /props (the chat template, so a "Generic" fallback is seen) and one request with
    only the standing prefix (its token count, and the prefix cached for what follows).
@@ -12,12 +12,17 @@ the server and gives its address.
    (chat_template_kwargs.enable_thinking false), max_tokens 400, cache_prompt true; graded.
 3. The 5-turn transcript: each request the previous one plus the model's answer and one
    recorded tool result; timings.prompt_n against the tokens appended (prefix reuse).
-The output JSON holds the scores, every grade, and each raw answer with its timings.
+The output JSON holds the scores, every grade, and each raw answer with its timings. It is
+written after every conversation with "complete": false, so a run that is stopped (a recipe
+run starting: bench.sh kills it; the deadline) keeps what it graded; "complete": true only
+at the end. --deadline (epoch seconds, bench.sh's one end time for the whole eval) bounds
+every request and stops between conversations once passed (exit 3, the partial file kept).
 The API key is read from the file and sent as a header; it is never printed.
 """
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -32,20 +37,39 @@ class ServerError(Exception):
     pass
 
 
+class OutOfTime(Exception):
+    pass
+
+
 class Client:
-    def __init__(self, url, key, timeout):
+    def __init__(self, url, key, timeout, deadline=None, clock=time.time):
         self.url = url.rstrip("/")
         self.key = key
         self.timeout = timeout
+        self.deadline = deadline
+        self.clock = clock
+
+    def left(self):
+        return None if self.deadline is None else self.deadline - self.clock()
+
+    def check_time(self):
+        left = self.left()
+        if left is not None and left <= 0:
+            raise OutOfTime("the eval's end time has passed")
 
     def call(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
         req = urllib.request.Request(self.url + path, data=data, method=method,
                                      headers={"Content-Type": "application/json",
                                               "Authorization": "Bearer " + self.key})
+        self.check_time()
+        timeout = self.timeout
+        left = self.left()
+        if left is not None:
+            timeout = max(1.0, min(timeout, left))
         t0 = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
         except urllib.error.HTTPError as e:
             raise ServerError("%s %s: HTTP %d %s" % (method, path, e.code, e.read()[:200].decode("utf-8", "replace"))) from None
@@ -72,8 +96,22 @@ def _timings(resp, wall):
             "completion_tokens": u.get("completion_tokens"), "wall_s": round(wall, 2)}
 
 
-def run(client, fx, alias, log=print):
-    out = {"alias": alias}
+def run(client, fx, alias, log=print, save=None):
+    """Every conversation, then the transcript. SAVE(out) is called after each step with
+    out["complete"] False; OutOfTime stops between steps (out["stopped"] says so)."""
+    out = {"alias": alias, "complete": False, "grades": [], "answers": [], "scores": grader.scores([])}
+    try:
+        _run(client, fx, alias, log, save, out)
+    except OutOfTime as e:
+        out["stopped"] = str(e)
+        log("stopped: %s" % e)
+        return out
+    out["complete"] = True
+    return out
+
+
+def _run(client, fx, alias, log, save, out):
+    save = save or (lambda o: None)
     try:
         props, _ = client.call("GET", "/props")
         tmpl = props.get("chat_template") or ""
@@ -90,7 +128,11 @@ def run(client, fx, alias, log=print):
     log("standing prefix: %s tokens in %.0f s" % (out["standing_prefix"]["prompt_tokens"], wall))
 
     grades, answers = [], []
+    out["grades"], out["answers"] = grades, answers
+    out["scores"] = grader.scores(grades)
+    save(out)
     for conv in fx["conversations"]:
+        client.check_time()
         body = request_body(fx, grader.build_messages(fx, conv["messages"]), alias)
         try:
             resp, wall = client.call("POST", "/v1/chat/completions", body)
@@ -99,12 +141,11 @@ def run(client, fx, alias, log=print):
         g = grader.grade(fx, conv, resp)
         grades.append(g)
         answers.append({"id": conv["id"], "response": resp, "timings": _timings(resp, wall)})
+        out["scores"] = grader.scores(grades)
+        save(out)
         log("%-28s %s  %s" % (conv["id"], "pass" if g["passed"] else "FAIL", "; ".join(g["problems"])[:160]))
-    out["grades"] = grades
-    out["answers"] = answers
-    out["scores"] = grader.scores(grades)
     out["transcript"] = transcript(client, fx, alias, log)
-    return out
+    save(out)
 
 
 def transcript(client, fx, alias, log=print):
@@ -112,6 +153,7 @@ def transcript(client, fx, alias, log=print):
     messages = [{"role": "system", "content": fx["standing"]}, {"role": "user", "content": tr["first_user"]}]
     turns = []
     for n in range(tr["turns"]):
+        client.check_time()
         try:
             resp, wall = client.call("POST", "/v1/chat/completions", request_body(fx, messages, alias))
         except ServerError as e:
@@ -143,26 +185,32 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--fixtures", default=grader.FIXTURES)
     ap.add_argument("--timeout", type=float, default=1800)
+    ap.add_argument("--deadline", type=float, help="epoch seconds: no request runs past it")
     a = ap.parse_args(argv)
     with open(a.key_file, encoding="ascii") as f:
         key = f.read().strip()
     fx = grader.load_fixtures(a.fixtures)
     t0 = time.monotonic()
+    fixtures = sorted(c["id"] for c in fx["conversations"])
+
+    def save(o):
+        doc = dict(o, model_key=a.model_key, seconds=round(time.monotonic() - t0, 1), fixtures=fixtures)
+        tmp = a.out + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc, indent=1, sort_keys=True) + "\n")
+        os.replace(tmp, a.out)
     try:
-        out = run(Client(a.url, key, a.timeout), fx, a.alias)
+        out = run(Client(a.url, key, a.timeout, a.deadline), fx, a.alias, save=save)
     except ServerError as e:
         print("eval: %s" % e, file=sys.stderr)
         return 2
-    out["model_key"] = a.model_key
-    out["seconds"] = round(time.monotonic() - t0, 1)
-    out["fixtures"] = sorted(c["id"] for c in fx["conversations"])
-    with open(a.out, "w", encoding="utf-8") as f:
-        f.write(json.dumps(out, indent=1, sort_keys=True) + "\n")
+    save(out)
     s = out["scores"]
-    print("eval %s: %d/%d passed, tool-call validity %s, spec validity %s, injection resisted %s, prefix %s"
+    print("eval %s: %d/%d passed, tool-call validity %s, spec validity %s, injection resisted %s, prefix %s%s"
           % (a.model_key, s["passed"], s["conversations"], s["tool_call_validity"], s["spec_validity"],
-             s["injection_resisted"], out["transcript"]["verdict"]))
-    return 0
+             s["injection_resisted"], (out.get("transcript") or {}).get("verdict", "unmeasured"),
+             "" if out["complete"] else " (stopped: %s)" % out.get("stopped")))
+    return 0 if out["complete"] else 3
 
 
 if __name__ == "__main__":

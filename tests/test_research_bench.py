@@ -8,12 +8,18 @@ but a local HTTP server, no model.
   log and the lock (no logs/ written).
 - benchlib.py plan on a two-socket topology like the host's: one hardware thread per physical
   core of socket 0 for -t 6 (mask 0x555), the socket's hyper-threads for -t 12, more refused;
-  the cheapest runs first and the deepest last; the runtime estimate from the design's ranges
-  (the full plan about 3 h expected) and the refusal (exit 2) above --max-hours.
+  R26's depth runs first (--depth-numa none by default), the optional sweep last; the
+  runtime estimate from the design's ranges (attention over every query head, the context
+  part doubled without F16C) and the refusal (exit 2) when the PESSIMISTIC runtime is above
+  --max-hours (the Job's deadline is --max-hours + 30 min).
 - bench.sh bench against a fake microk8s: refused (exit 1, no Job applied) while a recipe
   run is R or S and when medcea.recipe_run cannot be read (the psql is read-only: PGOPTIONS
   default_transaction_read_only=on, SQL on stdin); with no run it applies the ConfigMap and
-  the Job, parses the canned log and writes research/agents/bench/<date>.json.
+  the Job, parses the canned log and writes research/agents/bench/<date>.json; a SIGTERM
+  while it waits deletes the Job (bench and fetch); a run that starts while the Job runs
+  stops it (exit 1, "stopped: run N started", the log read first, the partial report kept);
+  the eval's Pod gets what is left of one end time and is deleted when a run starts while
+  it loads.
 - The manifests: every ${VAR} in the render list the header names and bench.sh passes,
   nothing left after render, the pinned images by digest, no service account token or
   service links, non-root, read-only root, every capability dropped, a memory request equal
@@ -26,9 +32,11 @@ but a local HTTP server, no model.
   (also across a redirect), a server that ignores Range (restarted), a sha256 mismatch
   (exit 1, the partial removed), a file already there verified, never renamed before its
   hash matches.
-- The report: parse-bench on a canned log (the AVX check), the merge keeps earlier keys, and
-  the recommendation's thresholds (8B below 1.5 tok/s generation or 3 tok/s prompt, or
-  clearly worse tool-call validity → 4B).
+- The report: parse-bench on a canned log (the AVX check), the merge keeps earlier keys and
+  every earlier bench invocation's rows (an 8B-only bench, then a 4B-only one), bench.sh
+  report merges every bench of the date, rows under a NUMA strategy marked "node affinity",
+  and the recommendation (none until both the throughput and the evals are in; 8B below
+  1.5 tok/s generation or 3 tok/s prompt, or clearly worse on any graded outcome → 4B).
 
 Run: python3 tests/test_research_bench.py
 """
@@ -102,17 +110,20 @@ class Plan(unittest.TestCase):
     def test_the_full_plan(self):
         runs = benchlib.build_plan(PINS, self.topo, ["8b", "4b"], [6, 12], ["none", "isolate"], [0, 4096, 12288])
         names = [r["name"] for r in runs]
-        self.assertEqual(names[0], "warmup-8b")
-        self.assertEqual(names[-2:], ["depth-8b-d12288", "depth-4b-d12288"])
-        self.assertLess(names.index("depth-4b-d0"), names.index("depth-8b-d4096"))
+        self.assertEqual(names[:4], ["warmup-8b", "depth-8b-d0", "warmup-4b", "depth-4b-d0"])
+        # R26's measurements first, the deepest last among them, the optional sweep after
+        self.assertEqual(names[4:8], ["depth-8b-d4096", "depth-4b-d4096", "depth-8b-d12288", "depth-4b-d12288"])
+        self.assertTrue(all(n.startswith("sweep-") for n in names[8:]))
         self.assertTrue(all(not r["discard"] for r in runs if not r["name"].startswith("warmup")))
         sweep = [r for r in runs if r["name"].startswith("sweep-")]
-        self.assertEqual(len(sweep), 8)
+        self.assertEqual(len(sweep), 6)                        # 2 x 2 per model, less the depth configuration
+        self.assertNotIn("sweep-8b-t6-none", names)
         self.assertTrue(all(r["numa_required"] for r in sweep))
         d = [r for r in runs if r["name"] == "depth-8b-d12288"][0]
         self.assertEqual(d["args"][d["args"].index("-d") + 1], "12288")
         self.assertEqual(d["mask"], "0x555")
-        self.assertEqual(d["numa"], "isolate")
+        self.assertEqual(d["numa"], "none")                     # isolate would reset the pin to the node
+        self.assertEqual([r["numa"] for r in runs if r["name"].startswith("depth-")], ["none"] * 6)
         tests = {t for r in runs for t in r["tests"] if not r["discard"]}
         for t in [("pp", 512, 0), ("tg", 128, 0), ("pp", 4096, 0), ("pp", 512, 4096), ("tg", 128, 4096),
                   ("pp", 512, 12288), ("tg", 128, 12288)]:
@@ -123,16 +134,31 @@ class Plan(unittest.TestCase):
             f = line.split("\t")
             self.assertEqual(len(f), 6)
             self.assertTrue(all(benchlib.TOKEN_RE.match(a) for a in f[5].split(" ")), line)
-        est = benchlib.plan_estimate(PINS, runs)
-        h = est["expected"]["total_s"] / 3600
-        self.assertTrue(2.5 < h < 3.5, h)
-        self.assertGreater(est["pessimistic"]["total_s"], est["expected"]["total_s"])
+        est = benchlib.plan_estimate(PINS, runs)                # no F16C, as on the host
+        self.assertTrue(3.3 < est["expected"]["total_s"] / 3600 < 4.2, est["expected"]["total_s"] / 3600)
+        self.assertTrue(5.8 < est["pessimistic"]["total_s"] / 3600 < 7.0, est["pessimistic"]["total_s"] / 3600)
+        self.assertFalse(est["f16c"])
 
-    def test_depth_config_outside_the_sweep_measures_depth_0_itself(self):
-        runs = benchlib.build_plan(PINS, self.topo, ["8b"], [12], ["none"], [0, 4096])
-        d0 = [r for r in runs if r["name"] == "depth-8b-d0"][0]
-        self.assertIn(("tg", 128, 0), d0["tests"])
-        self.assertIn("512,4096", d0["args"])
+    def test_depth_0_is_always_measured_by_its_own_run(self):
+        for threads, numa in (([12], ["none"]), ([6], ["none"])):
+            runs = benchlib.build_plan(PINS, self.topo, ["8b"], threads, numa, [0, 4096])
+            d0 = [r for r in runs if r["name"] == "depth-8b-d0"][0]
+            self.assertEqual(d0["tests"], [("pp", 512, 0), ("pp", 4096, 0), ("tg", 128, 0)])
+            self.assertIn("512,4096", d0["args"])
+
+    def test_the_cost_model(self):
+        m8, m4 = PINS["models"]["8b"], PINS["models"]["4b"]
+        # attention width = heads x head_dim (4096 for both), not 4B's hidden size of 2560
+        self.assertEqual(m4["arch"]["heads"] * m4["arch"]["head_dim"], 4096)
+        self.assertAlmostEqual(benchlib._attn_ratio(m4) / benchlib._attn_ratio(m8), 8.2 / 4.0)
+        # without F16C the context part costs F16_SCALAR_FACTOR times more; depth 0 is untouched
+        self.assertGreater(benchlib.pp_seconds(m8, 512, 12288, 5, f16c=False),
+                           benchlib.pp_seconds(m8, 512, 12288, 5, f16c=True) * 1.25)
+        self.assertAlmostEqual(benchlib.tg_seconds(m8, 1, 0, 3, f16c=False), benchlib.tg_seconds(m8, 1, 0, 3, f16c=True),
+                               places=2)
+        runs = benchlib.build_plan(PINS, self.topo, ["8b"], [6], ["none"], [0, 4096, 12288])
+        self.assertGreater(benchlib.plan_estimate(PINS, runs, False)["pessimistic"]["total_s"],
+                           benchlib.plan_estimate(PINS, runs, True)["pessimistic"]["total_s"])
 
     def test_refusals(self):
         for bad in (dict(models=["7b"]), dict(numa_modes=["interleave"]), dict(depths=[4096])):
@@ -141,29 +167,38 @@ class Plan(unittest.TestCase):
             with self.assertRaises(benchlib.PlanError, msg=bad):
                 benchlib.build_plan(PINS, self.topo, kw["models"], kw["threads"], kw["numa_modes"], kw["depths"])
 
-    def run_plan(self, *args):
-        return subprocess.run([sys.executable, os.path.join(APP, "benchlib.py"), "plan", "--sys", self.sys] + list(args),
-                              capture_output=True, text=True)
+    def run_plan(self, *args, f16c=False):
+        proc = os.path.join(self.tmp, "proc-%s" % f16c)
+        os.makedirs(proc, exist_ok=True)
+        with open(os.path.join(proc, "cpuinfo"), "w") as f:
+            f.write("processor\t: 0\nflags\t\t: fpu avx%s\n" % (" f16c" if f16c else ""))
+        return subprocess.run([sys.executable, os.path.join(APP, "benchlib.py"), "plan", "--sys", self.sys,
+                               "--proc", proc] + list(args), capture_output=True, text=True)
 
     def test_cli_prints_first_and_refuses_over_the_cap(self):
+        # both models: ~3.7 h expected, ~6.4 h pessimistic: refused at the 4 h default,
+        # although the expected figure would have passed the old 3.5 h rule
         p = self.run_plan()
-        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.returncode, 2, p.stderr)
         self.assertIn("Estimated runtime:", p.stdout)
-        self.assertIn("cap is 3.5 h", p.stdout)
-        p = self.run_plan("--max-hours", "1")
-        self.assertEqual(p.returncode, 2)
-        self.assertIn("Estimated runtime:", p.stdout)
-        self.assertIn("Refused: the expected runtime is over the 1.0 h cap", p.stderr)
-        p = self.run_plan("--models", "8b", "--threads", "6", "--numa", "none", "--depths", "0,4096", "--max-hours", "1")
+        self.assertIn("cap is 4.0 h (--max-hours), checked against the pessimistic figure", p.stdout)
+        self.assertIn("no F16C here", p.stdout)
+        self.assertIn("Refused: the pessimistic runtime is over the 4.0 h cap", p.stderr)
+        self.assertIn("--models 8b, then --models 4b", p.stderr)
+        for m in ("8b", "4b"):                                   # one model per run fits
+            p = self.run_plan("--models", m)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        p = self.run_plan("--models", "8b", "--threads", "6", "--numa", "none", "--depths", "0,4096", "--max-hours", "1.5")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.run_plan("--threads", "6,6").returncode, 2)
+        self.assertNotIn("no F16C", self.run_plan("--models", "4b", f16c=True).stdout)
 
     def test_eval_estimate(self):
         fx = os.path.join(ROOT, "research", "agents", "evals", "fixtures")
-        s8 = benchlib.eval_seconds(PINS, "8b", fx)
-        s4 = benchlib.eval_seconds(PINS, "4b", fx)
+        s8 = benchlib.eval_seconds(PINS, "8b", fx, "pessimistic")
+        s4 = benchlib.eval_seconds(PINS, "4b", fx, "pessimistic")
         self.assertGreater(s8, s4)
-        self.assertLess((s8 + s4) / 3600, 3.5)
+        self.assertLess((s8 + s4) / 3600, 4.0)                  # both models fit the default cap, pessimistic
 
 
 # ── bench.sh against a fake microk8s ─────────────────────────────────────────────
@@ -186,7 +221,13 @@ j = " ".join(k)
 if k[:1] == ["exec"]:
     if os.environ.get("FAKE_PSQL_FAIL"):
         print("psql: error: connection refused"); sys.exit(2)
-    for r in os.environ.get("FAKE_RUNS", "").split():
+    cnt = log + ".exec"
+    n = int(open(cnt).read()) + 1 if os.path.exists(cnt) else 1
+    open(cnt, "w").write(str(n))
+    runs = os.environ.get("FAKE_RUNS", "").split()
+    if os.environ.get("FAKE_RUNS_AFTER") and n > int(os.environ["FAKE_RUNS_AFTER"]):
+        runs = os.environ.get("FAKE_RUNS_LATE", "").split()
+    for r in runs:
         print("run|" + r)
     print("checked|ok"); sys.exit(0)
 if k[:2] == ["get", "storageclass"]:
@@ -196,7 +237,13 @@ if k[:2] == ["get", "priorityclass"]:
 if k[:2] == ["get", "namespace"]:
     sys.exit(0)
 if k[:2] == ["get", "job"]:
-    print("1/"); sys.exit(0)
+    print("/" if os.environ.get("FAKE_JOB_RUNNING") else "1/"); sys.exit(0)
+if k[:2] == ["get", "pod"]:
+    if "Ready" in j:
+        print(os.environ.get("FAKE_POD_READY", "False"))
+    elif "phase" in j:
+        print("Pending")
+    sys.exit(0)
 if k[:1] == ["logs"]:
     sys.stdout.write(open(os.environ["FAKE_BENCH_LOG"]).read()); sys.exit(0)
 if k[:2] == ["create", "configmap"] or k[:3] == ["create", "secret", "generic"]:
@@ -251,6 +298,10 @@ class BenchScript(unittest.TestCase):
         os.makedirs(self.models, mode=0o700)
         for k in ("8b", "4b"):
             open(os.path.join(self.models, PINS["models"][k]["sha256"] + ".gguf"), "w").close()
+        self.proc = os.path.join(self.t, "proc")
+        os.makedirs(self.proc)
+        with open(os.path.join(self.proc, "cpuinfo"), "w") as f:
+            f.write("processor\t: 0\nflags\t\t: fpu sse4_2 avx\n")
         self.meminfo = os.path.join(self.t, "meminfo")
         with open(self.meminfo, "w") as f:
             f.write("MemTotal:       31457280 kB\nMemAvailable:   23068672 kB\n")
@@ -272,7 +323,8 @@ class BenchScript(unittest.TestCase):
             self.config()
         e = {k: v for k, v in os.environ.items() if not k.startswith("MEDCEA_")}
         e.update({"PATH": self.bin + ":" + os.environ["PATH"], "FAKE_LOG": self.flog, "FAKE_BENCH_LOG": self.blog,
-                  "MEDCEA_BENCH_MEMINFO": self.meminfo})
+                  "MEDCEA_BENCH_MEMINFO": self.meminfo, "MEDCEA_BENCH_PROC": self.proc,
+                  "MEDCEA_BENCH_POLL": "1"})
         e.update(env or {})
         return subprocess.run(["bash", os.path.join(self.tree, "apps", "research-model", "bench.sh")] + list(args),
                               capture_output=True, text=True, env=e, cwd=self.t, timeout=300,
@@ -298,7 +350,7 @@ class BenchScript(unittest.TestCase):
         self.assertNotIn("Run from anywhere", p.stdout.split("\n")[0])
 
     def test_refused_while_a_run_is_r_or_s(self):
-        p = self.run_bench("bench", "--max-hours", "4", env={"FAKE_RUNS": "7|R 9|S"})
+        p = self.run_bench("bench", "--max-hours", "8", env={"FAKE_RUNS": "7|R 9|S"})
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("Refused while a recipe run is R or S", p.stdout + p.stderr)
         self.assertIn("run 7  status R", p.stdout + p.stderr)
@@ -310,7 +362,7 @@ class BenchScript(unittest.TestCase):
         self.assertIn("rdbms-postgresql-0", log)
 
     def test_refused_when_the_runs_cannot_be_read(self):
-        p = self.run_bench("bench", "--max-hours", "4", env={"FAKE_PSQL_FAIL": "1"})
+        p = self.run_bench("bench", "--max-hours", "8", env={"FAKE_PSQL_FAIL": "1"})
         self.assertEqual(p.returncode, 1)
         self.assertIn("never runs unchecked", p.stdout + p.stderr)
         self.assertNotIn("APPLIED", self.fake_log())
@@ -324,19 +376,19 @@ class BenchScript(unittest.TestCase):
     def test_refused_with_too_little_memory(self):
         with open(self.meminfo, "w") as f:
             f.write("MemAvailable:   4194304 kB\n")
-        p = self.run_bench("bench", "--max-hours", "4")
+        p = self.run_bench("bench", "--max-hours", "8")
         self.assertEqual(p.returncode, 1)
         self.assertIn("of memory available", p.stdout + p.stderr)
         self.assertNotIn("APPLIED", self.fake_log())
 
     def test_unfetched_models(self):
         os.remove(os.path.join(self.models, PINS["models"]["4b"]["sha256"] + ".gguf"))
-        p = self.run_bench("bench", "--max-hours", "4")
+        p = self.run_bench("bench", "--max-hours", "8")
         self.assertEqual(p.returncode, 2)
         self.assertIn("bench.sh fetch --models 4b", p.stdout + p.stderr)
 
     def test_bench_runs_and_reports(self):
-        p = self.run_bench("bench", "--max-hours", "4", "--depths", "0,4096")
+        p = self.run_bench("bench", "--max-hours", "8", "--depths", "0,4096")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         log = self.fake_log()
         self.assertIn("kind: Job", log)
@@ -352,12 +404,109 @@ class BenchScript(unittest.TestCase):
         rep = json.load(open(os.path.join(self.tree, "research", "agents", "bench", dated[0])))
         self.assertEqual(rep["bench"]["avx_check"], "pass")
         self.assertEqual(rep["bench"]["best"]["8b"]["gen_tok_s"], 2.6)
-        self.assertEqual(rep["recommendation"]["model"], "8b")
+        self.assertIsNone(rep["recommendation"]["model"])          # R26: not before the eval
+        self.assertIn("has not finished yet", rep["recommendation"]["why"][0])
         self.assertIn("machine", rep)
         logs = os.listdir(os.path.join(self.tree, "logs"))
         self.assertTrue(any(l.startswith("research-llm-bench-") and l.endswith(".log") for l in logs), logs)
         raw = [l for l in logs if l.endswith(".out")][0]
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.tree, "logs", raw)).st_mode), 0o600)
+
+    def start_bench(self, *args, env=None):
+        self.config()
+        e = {k: v for k, v in os.environ.items() if not k.startswith("MEDCEA_")}
+        e.update({"PATH": self.bin + ":" + os.environ["PATH"], "FAKE_LOG": self.flog, "FAKE_BENCH_LOG": self.blog,
+                  "MEDCEA_BENCH_MEMINFO": self.meminfo, "MEDCEA_BENCH_PROC": self.proc, "MEDCEA_BENCH_POLL": "1"})
+        e.update(env or {})
+        return subprocess.Popen(["bash", os.path.join(self.tree, "apps", "research-model", "bench.sh")] + list(args),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e, cwd=self.t,
+                                stdin=subprocess.DEVNULL)
+
+    def wait_for(self, text, timeout=60):
+        import time
+        end = time.time() + timeout
+        while time.time() < end:
+            if text in self.fake_log():
+                return
+            time.sleep(0.2)
+        self.fail("never saw %r in the fake kubectl's log" % text)
+
+    def test_a_sigterm_while_waiting_deletes_the_job(self):
+        import signal
+        for args, job in ((["bench", "--models", "8b"], "research-llm-bench"), (["fetch"], "research-model-fetch")):
+            with self.subTest(job):
+                if os.path.exists(self.flog):
+                    os.remove(self.flog)
+                p = self.start_bench(*args, env={"FAKE_JOB_RUNNING": "1"})
+                self.wait_for("get job %s" % job)               # it is polling the Job
+                p.send_signal(signal.SIGTERM)
+                out, err = p.communicate(timeout=60)
+                self.assertEqual(p.returncode, 143, out + err)
+                log = self.fake_log()
+                self.assertIn("delete job %s -n medcea --ignore-not-found --wait=false" % job, log)
+                self.assertIn("Stopped before Job %s finished: it was deleted" % job, out + err)
+
+    def test_a_run_that_starts_stops_the_bench(self):
+        p = self.run_bench("bench", "--models", "8b", env={"FAKE_JOB_RUNNING": "1", "FAKE_RUNS_AFTER": "1",
+                                                           "FAKE_RUNS_LATE": "12|R", "MEDCEA_BENCH_RECHECK": "0"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("stopped: run 12 started (status R)", p.stdout + p.stderr)
+        log = self.fake_log()
+        # its log read first, then the Job deleted; the trap has nothing left to delete
+        self.assertLess(log.index("ARGV kubectl logs job/research-llm-bench -n medcea\n"),
+                        log.index("delete job research-llm-bench -n medcea --ignore-not-found --wait=false"))
+        self.assertEqual(log.count("delete job research-llm-bench -n medcea --ignore-not-found --wait=false"), 1)
+        self.assertNotIn("Stopped before Job", p.stdout + p.stderr)
+        parsed = [f for f in os.listdir(os.path.join(self.tree, "logs")) if f.endswith(".parsed.json")]
+        self.assertEqual(json.load(open(os.path.join(self.tree, "logs", parsed[0])))["stopped"], "run 12 started (status R)")
+        rep = [f for f in os.listdir(os.path.join(self.tree, "research", "agents", "bench")) if f.endswith(".json")]
+        self.assertEqual(len(rep), 1)
+        doc = json.load(open(os.path.join(self.tree, "research", "agents", "bench", rep[0])))
+        (run,) = doc["bench"]["runs"].values()
+        self.assertEqual(run["stopped"], "run 12 started (status R)")
+
+    def test_an_unreadable_check_twice_stops_the_bench(self):
+        # the first look (at the start) is fine; the next two cannot be read
+        wrapper = os.path.join(self.bin, "microk8s")
+        real = open(wrapper).read()
+        with open(wrapper, "w") as f:
+            f.write(real.replace('if os.environ.get("FAKE_PSQL_FAIL"):',
+                                 'if os.environ.get("FAKE_PSQL_FAIL") or (k[:1] == ["exec"] and os.path.exists(log + ".exec")):'))
+        p = self.run_bench("bench", "--models", "8b", env={"FAKE_JOB_RUNNING": "1", "MEDCEA_BENCH_RECHECK": "0"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("could not be read twice in a row", p.stdout + p.stderr)
+        self.assertIn("delete job research-llm-bench", self.fake_log())
+
+    def test_eval_pods_share_one_end_time_and_stop_for_a_run(self):
+        p = self.run_bench("eval", "--models", "4b", "--max-hours", "2",
+                           env={"FAKE_RUNS_AFTER": "2", "FAKE_RUNS_LATE": "14|S", "MEDCEA_BENCH_RECHECK": "0"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("stopped: run 14 started (status S), while llama-server for 4b was loading", p.stdout + p.stderr)
+        log = self.fake_log()
+        m = re.search(r"activeDeadlineSeconds: (\d+)", log)
+        self.assertTrue(m, log)
+        self.assertLessEqual(int(m.group(1)), 2 * 3600 + 1800)
+        self.assertGreater(int(m.group(1)), 2 * 3600 + 1800 - 120)
+        self.assertIn("delete pod research-llm-eval-4b", log)
+        self.assertIn("delete secret research-llm-bench-key", log)
+
+    def test_report_merges_every_bench_of_the_date(self):
+        logs = os.path.join(self.tree, "logs")
+        os.makedirs(logs)
+        day = "2026-11-22"
+        p8 = benchlib.parse_bench(canned_log())
+        p8["runs"] = [r for r in p8["runs"] if "-8b" in r["name"]]
+        p4 = benchlib.parse_bench(canned_log())
+        p4["runs"] = [r for r in p4["runs"] if "-4b" in r["name"]]
+        for stamp, parsed in (("20261122-010000", p8), ("20261122-060000", p4), ("20261121-230000", p4)):
+            with open(os.path.join(logs, "research-llm-bench-%s.parsed.json" % stamp), "w") as f:
+                json.dump(parsed, f)
+        p = self.run_bench("report", "--date", day)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        doc = json.load(open(os.path.join(self.tree, "research", "agents", "bench", day + ".json")))
+        self.assertEqual(sorted(doc["bench"]["runs"]), ["research-llm-bench-20261122-010000",
+                                                         "research-llm-bench-20261122-060000"])
+        self.assertEqual(sorted(doc["bench"]["best"]), ["4b", "8b"])
 
     def test_cleanup_never_touches_the_models(self):
         p = self.run_bench("cleanup")
@@ -664,7 +813,7 @@ class Report(unittest.TestCase):
         self.assertFalse(any(r["run"].startswith("warmup") for r in rows))
         best = benchlib.best_rates(rows, "8b")
         self.assertEqual(best["prompt_tok_s"], 7.1)
-        self.assertEqual(best["prompt_config"], {"threads": 12, "numa": None})
+        self.assertEqual(best["prompt_config"], {"threads": 12, "numa": None, "affinity": None})
         self.assertEqual(best["gen_tok_s"], 2.6)
 
     def test_an_incomplete_log(self):
@@ -673,22 +822,95 @@ class Report(unittest.TestCase):
         self.assertFalse(parsed["done"])
         self.assertEqual(len(parsed["runs"]), 5)
 
+    GOOD = {"pass_rate": 0.94, "tool_call_validity": 0.9, "spec_validity": 1.0, "budget_respected": 1.0,
+            "refusals_respected": 1.0, "injection_resisted": 1.0}
+
+    def ev(self, key=None, **scores):
+        e = {"scores": dict(self.GOOD, **scores), "complete": True}
+        if key:
+            e["model_key"] = key
+        return e
+
     def test_recommendation(self):
         r = lambda g, p: {"gen_tok_s": g, "prompt_tok_s": p}
-        ev = lambda v: {"scores": {"tool_call_validity": v}}
-        self.assertEqual(benchlib.recommend({"8b": r(2.5, 6)}, {})[0], "8b")
-        self.assertEqual(benchlib.recommend({"8b": r(1.4, 6)}, {})[0], "4b")
-        self.assertEqual(benchlib.recommend({"8b": r(2.5, 2.9)}, {})[0], "4b")
-        self.assertEqual(benchlib.recommend({"8b": r(2.5, 6)}, {"8b": ev(0.70), "4b": ev(0.90)})[0], "4b")
-        self.assertEqual(benchlib.recommend({"8b": r(2.5, 6)}, {"8b": ev(0.80), "4b": ev(0.90)})[0], "8b")
-        self.assertIsNone(benchlib.recommend({}, {})[0])
+        both = {"8b": self.ev(), "4b": self.ev()}
+        self.assertEqual(benchlib.recommend({"8b": r(2.5, 6)}, both)[0], "8b")
+        self.assertEqual(benchlib.recommend({"8b": r(1.4, 6)}, both)[0], "4b")
+        self.assertEqual(benchlib.recommend({"8b": r(2.5, 2.9)}, both)[0], "4b")
+        self.assertEqual(benchlib.recommend({"8b": r(2.5, 6)}, {"8b": self.ev(tool_call_validity=0.70),
+                                                                "4b": self.ev()})[0], "4b")
+        self.assertEqual(benchlib.recommend({"8b": r(2.5, 6)}, {"8b": self.ev(tool_call_validity=0.80),
+                                                                "4b": self.ev()})[0], "8b")
+        self.assertIsNone(benchlib.recommend({}, both)[0])
+
+    def test_nothing_is_recommended_before_both_measurements(self):
+        r = {"8b": {"gen_tok_s": 2.5, "prompt_tok_s": 6}}
+        choice, why = benchlib.recommend(r, {})                 # throughput alone (R26: both)
+        self.assertIsNone(choice)
+        self.assertIn("8B and 4B", why[0])
+        self.assertIsNone(benchlib.recommend(r, {"8b": self.ev()})[0])
+        partial = dict(self.ev(), complete=False)               # an eval stopped early does not count
+        self.assertIsNone(benchlib.recommend(r, {"8b": self.ev(), "4b": partial})[0])
+        slow = {"8b": {"gen_tok_s": 1.2, "prompt_tok_s": 6}}
+        choice, why = benchlib.recommend(slow, {"8b": self.ev()})
+        self.assertIsNone(choice)
+        self.assertIn("4B's tool-call eval has not finished", why[-1])
+        self.assertEqual(benchlib.recommend(slow, {"4b": self.ev()})[0], "4b")
+
+    def test_graded_outcomes_decide_not_validity_alone(self):
+        # the review's case: 8B's calls are well formed but it ignores budgets and obeys
+        # injections; 4B behaves; 8B must not be chosen
+        r = {"8b": {"gen_tok_s": 2.5, "prompt_tok_s": 6}}
+        bad8 = self.ev(tool_call_validity=1.0, pass_rate=0.25, budget_respected=0.0, injection_resisted=0.0)
+        good4 = self.ev(tool_call_validity=0.9, pass_rate=0.94)
+        choice, why = benchlib.recommend(r, {"8b": bad8, "4b": good4})
+        self.assertEqual(choice, "4b")
+        text = " ".join(why)
+        for k in ("pass_rate", "budget_respected", "injection_resisted"):
+            self.assertIn(k, text)
+        self.assertNotIn("tool_call_validity", text)
+
+    def test_an_8b_only_then_a_4b_only_bench_keeps_both(self):
+        p8 = benchlib.parse_bench(canned_log())
+        p8["runs"] = [r for r in p8["runs"] if "-8b" in r["name"]]
+        p4 = benchlib.parse_bench(canned_log())
+        p4["runs"] = [r for r in p4["runs"] if "-4b" in r["name"]]
+        evs = [self.ev("8b"), self.ev("4b")]
+        rep = benchlib.merge_report({}, PINS, benches=[("b1", p8, None)], evals=evs, today="2026-11-22")
+        self.assertEqual(rep["recommendation"]["model"], "8b")
+        rep = benchlib.merge_report(rep, PINS, benches=[("b2", p4, None)])
+        self.assertEqual(sorted(rep["bench"]["best"]), ["4b", "8b"])
+        self.assertEqual(rep["bench"]["best"]["8b"]["gen_tok_s"], 2.6)
+        self.assertEqual(rep["recommendation"]["model"], "8b")
+        self.assertEqual(sorted(rep["bench"]["runs"]), ["b1", "b2"])
+        # re-merging the same invocation replaces it, never duplicates rows
+        n = len(rep["bench"]["rows"])
+        rep = benchlib.merge_report(rep, PINS, benches=[("b2", p4, None)])
+        self.assertEqual(len(rep["bench"]["rows"]), n)
+        # a later re-run of one depth replaces only that row
+        rerun = benchlib.parse_bench(canned_log())
+        rerun["runs"] = [r for r in rerun["runs"] if r["name"] == "depth-8b-d12288"]
+        rerun["runs"][0]["results"][1]["avg_ts"] = 1.7
+        rep = benchlib.merge_report(rep, PINS, benches=[("b3", rerun, None)])
+        tg = [r for r in rep["bench"]["rows"] if r["run"] == "depth-8b-d12288" and r["test"] == "tg128"]
+        self.assertEqual([(r["tok_s"], r["bench"]) for r in tg], [(1.7, "b3")])
+        self.assertEqual(len(rep["bench"]["rows"]), n)
+
+    def test_affinity_of_rows(self):
+        topo = benchlib.topology(fake_sys(tempfile.mkdtemp()))
+        plan = benchlib.build_plan(PINS, topo, ["8b"], [6, 12], ["none", "isolate"], [0, 12288])
+        log = canned_log().replace("sweep-8b-t6-none", "depth-8b-d0")
+        rows = benchlib.bench_rows(benchlib.parse_bench(log), plan)
+        aff = {r["run"]: r["affinity"] for r in rows}
+        self.assertEqual(aff["depth-8b-d0"], "pinned")
+        self.assertEqual(aff["sweep-8b-t12-isolate"], "node affinity")
 
     def test_merge_keeps_earlier_parts(self):
         bench = benchlib.parse_bench(canned_log())
         rep = benchlib.merge_report({}, PINS, machine={"cpu_model": "x"}, bench=bench, today="2026-11-21")
-        self.assertEqual(rep["recommendation"]["model"], "8b")
-        ev = {"model_key": "8b", "scores": {"tool_call_validity": 0.5}}
-        ev4 = {"model_key": "4b", "scores": {"tool_call_validity": 0.95}}
+        self.assertIsNone(rep["recommendation"]["model"])          # no eval yet
+        ev = self.ev("8b", tool_call_validity=0.5)
+        ev4 = self.ev("4b", tool_call_validity=0.95)
         rep2 = benchlib.merge_report(rep, PINS, evals=[ev, ev4])
         self.assertEqual(rep2["machine"], {"cpu_model": "x"})
         self.assertIn("bench", rep2)

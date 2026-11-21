@@ -1551,14 +1551,16 @@ a_llm_bench() {
     menu "Benchmark the local model (research Phase 4 step 0)" \
         "Show the plan and its runtime|What bench measures, the estimated hours and the cap; nothing runs." \
         "Fetch the models|The pinned GGUF files (about 7.5 GB) into the model folder, resumable, checked by sha256." \
-        "Run the bench|llama-bench over the models, thread counts, NUMA modes and depths (about 3 h)." \
+        "Run the bench|llama-bench at depths 0, 4096 and 12288, then the thread/NUMA sweep; one model per run (up to 4 h)." \
         "Run the tool-call eval|llama-server answers the fixture conversations; graded on this host (about 1-2 h)." \
-        "Write the report|research/agents/bench/<date>.json: the numbers, the scores, 8B or 4B." \
+        "Write the report|research/agents/bench/<date>.json: every bench and eval of the day, the scores, 8B or 4B." \
         "Remove the bench's Jobs and Pods|Label app=research-llm-bench; the model folder stays."
     [[ "$PICK" == b ]] && return 10
-    local models=""
+    local models="" mdefault="8b,4b"
+    # the bench fits the 4 h cap one model at a time (pessimistic estimate); the report merges them
+    [[ "$PICK" == 3 ]] && mdefault="8b"
     if [[ "$PICK" =~ ^[234]$ ]]; then
-        ask_match "Models (8b, 4b or 8b,4b)" "$LLM_MODELS_RE" "8b, 4b or 8b,4b" "8b,4b"; models="$ANSWER"
+        ask_match "Models (8b, 4b or 8b,4b)" "$LLM_MODELS_RE" "8b, 4b or 8b,4b" "$mdefault"; models="$ANSWER"
     fi
     LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes; NOTES=()
     case "$PICK" in
@@ -1571,16 +1573,18 @@ a_llm_bench() {
            NOTES=("Resumes a broken download; a file whose sha256 is not the pin's is removed, never renamed into place."
                   "Run it again any time: a verified file is kept.") ;;
         3) CMD=(./apps/research-model/bench.sh bench --models "$models")
-           EFFECT="Job research-llm-bench in the platform namespace for up to the cap (default 3.5 h): CPU on one socket, up to 10 GiB of memory; the results into logs/ and research/agents/bench/<date>.json"
-           NOTES=("Prints the plan and its runtime first and refuses (exit 2) above --max-hours (3.5 h by default)."
-                  "Refused while a recipe run is R or S, and with less memory available than the Job needs plus 2 GiB."
-                  "Holds the deploy lock until it ends, so no deploy disturbs the measurement.") ;;
+           EFFECT="Job research-llm-bench in the platform namespace for up to the cap (default 4 h, + 30 min): CPU on one socket, up to 10 GiB of memory; the results into logs/ and research/agents/bench/<date>.json"
+           NOTES=("Prints the plan and its runtime first and refuses (exit 2) when the pessimistic runtime is above --max-hours (4 h by default): one model per run; run 8b, then 4b, and the day's report merges them."
+                  "Refused while a recipe run is R or S, and with less memory available than the Job needs plus 2 GiB; medcea.recipe_run is read again every 5 minutes, and a run that starts stops the Job (exit 1, what was measured kept)."
+                  "Holds the deploy lock until it ends, so no deploy disturbs the measurement; stopped (Ctrl-C), it deletes the Job before it exits."
+                  "research/agents/bench/<date>.json is evidence to commit; campaigns and calibration still run before it is (the sandbox's dirty check leaves it out).") ;;
         4) CMD=(./apps/research-model/bench.sh eval --models "$models")
            EFFECT="Pod research-llm-eval-<model> per model in the platform namespace (12 GiB for 8B), a one-time key Secret; both removed at the end; the scores into logs/ and research/agents/bench/<date>.json"
            NOTES=("No lake data and no session: fixture conversations only (research/agents/evals/fixtures)."
-                  "Refused while a recipe run is R or S, and above --max-hours.") ;;
+                  "Refused while a recipe run is R or S, and above --max-hours (pessimistic); one end time for all models: each Pod gets what is left of it."
+                  "A run that starts while a model is evaluated stops the eval (exit 1); what was graded stays in the report.") ;;
         5) CMD=(./apps/research-model/bench.sh report)
-           EFFECT="writes research/agents/bench/<today>.json from the newest results in logs/"
+           EFFECT="writes research/agents/bench/<today>.json from every bench and eval result of today in logs/ (none is dropped)"
            LOCK=no ;;
         6) CMD=(./apps/research-model/bench.sh cleanup)
            EFFECT="deletes the Jobs, Pods, ConfigMaps and Secrets labelled app=research-llm-bench; never the model folder" ;;

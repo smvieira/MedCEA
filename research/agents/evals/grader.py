@@ -325,19 +325,30 @@ def scores(grades):
 
 
 # ── prefix reuse (the 5-turn transcript) ─────────────────────────────────────────
-def prefix_reuse(turns, slack=32):
-    """turns: [{prompt_tokens, prompt_n, completion_tokens}] in order. The cached part of
-    each request (prompt_tokens - prompt_n) must cover the previous request's whole prompt
-    (less SLACK tokens), or the template re-renders history and the cache breaks."""
+def prefix_reuse(turns, slack=8):
+    """turns: [{prompt_tokens, prompt_n, completion_tokens}] in order. After turn i-1 the
+    server's cache holds that request's prompt AND its own completion, so the cached part of
+    turn i (prompt_tokens - prompt_n) must cover both, less SLACK tokens (the end-of-turn
+    marker and the generation-prompt boundary, a few tokens). A template that re-renders the
+    assistant turn differently (re-serialised tool-call arguments, a dropped think block)
+    re-processes the previous completion and is "broken", even when the previous prompt
+    itself was reused. Per turn: "new" = the tokens truly appended (tool results, a user
+    message), "reprocessed" = prompt_n - new, and the part of it that was the previous
+    completion ("completion_reprocessed")."""
     rows, ok = [], True
     for i, t in enumerate(turns):
         row = {"turn": i + 1, "prompt_tokens": t.get("prompt_tokens"), "prompt_n": t.get("prompt_n"),
                "completion_tokens": t.get("completion_tokens")}
-        if i > 0 and None not in (t.get("prompt_tokens"), t.get("prompt_n"), turns[i - 1].get("prompt_tokens")):
-            prev = turns[i - 1]["prompt_tokens"]
-            row["appended"] = t["prompt_tokens"] - prev
+        p = turns[i - 1] if i > 0 else {}
+        if i > 0 and None not in (t.get("prompt_tokens"), t.get("prompt_n"), p.get("prompt_tokens")):
+            prev_prompt, prev_completion = p["prompt_tokens"], p.get("completion_tokens") or 0
+            held = prev_prompt + prev_completion
             row["cached"] = t["prompt_tokens"] - t["prompt_n"]
-            row["reused"] = row["cached"] >= prev - slack
+            row["new"] = t["prompt_tokens"] - held
+            row["reprocessed"] = max(0, t["prompt_n"] - max(row["new"], 0))
+            row["prompt_reprocessed"] = max(0, prev_prompt - row["cached"])
+            row["completion_reprocessed"] = max(0, min(prev_completion, held - row["cached"]))
+            row["reused"] = row["cached"] >= held - slack
             ok = ok and row["reused"]
         rows.append(row)
     measured = [r for r in rows if "reused" in r]

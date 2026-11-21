@@ -707,6 +707,15 @@ class Manifest(unittest.TestCase):
         st = algorithms_loader.sandbox_state(tmp)
         self.assertFalse(st["dirty"], st)                       # .venv and runs never count
         self.assertEqual(algorithms_loader.sandbox_files(tmp), ["research/harness/runner.py"])
+        # the bench's daily report is evidence, not code: untracked or edited, it never counts
+        os.makedirs(os.path.join(tmp, "research", "agents", "bench"))
+        with open(os.path.join(tmp, "research/agents/bench/2026-11-22.json"), "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        self.assertFalse(algorithms_loader.sandbox_state(tmp)["dirty"])
+        with open(os.path.join(tmp, "research/agents/bench/README.md"), "w", encoding="utf-8") as f:
+            f.write("x\n")                                     # anything else there still does
+        self.assertEqual(algorithms_loader.sandbox_state(tmp)["dirty_files"], ["research/agents/bench/README.md"])
+        os.remove(os.path.join(tmp, "research/agents/bench/README.md"))
         with open(os.path.join(tmp, "research/harness/runner.py"), "a", encoding="utf-8") as f:
             f.write("# edited\n")
         st = algorithms_loader.sandbox_state(tmp)

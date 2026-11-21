@@ -52,7 +52,13 @@ DIRTY_PATHS = ("schd/cea", CATALOGUE, CONTROL_TEMPLATE, LAKE_API)
 SANDBOX_ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SANDBOX_DIR = "research"
 SANDBOX_SKIP = (".venv", "runs", "__pycache__")
-SANDBOX_PATHS = (SANDBOX_DIR,) + tuple(":(exclude)%s/%s" % (SANDBOX_DIR, d) for d in SANDBOX_SKIP[:2])
+# Evidence written into research/ that shapes no result: the local model's daily bench
+# report (apps/research-model/bench.sh, research Phase 4b step 0). Left out of the dirty
+# check so a bench on the live checkout does not make every campaign and calibration
+# refuse until it is committed; its README (and any other file there) still counts.
+SANDBOX_EVIDENCE = ("agents/bench/*.json",)
+SANDBOX_PATHS = ((SANDBOX_DIR,) + tuple(":(exclude)%s/%s" % (SANDBOX_DIR, d) for d in SANDBOX_SKIP[:2])
+                 + tuple(":(exclude,glob)%s/%s" % (SANDBOX_DIR, g) for g in SANDBOX_EVIDENCE))
 SANDBOX_SUFFIXES = (".py", ".yaml", ".txt", ".sh")
 
 # The libraries whose versions a manifest names (distribution names).
