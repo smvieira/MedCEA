@@ -17,8 +17,10 @@ session's cid is "no such campaign". The runner is an interface (stage 6 supplie
   status(cid) -> {state running|done|failed, cpu_hours, manifest?, rows?, error?}
   pool                                           -> worker count (int)
 An Estimator has estimate(spec) -> {cpu_hours, calibration_h, runs, inprocess}."""
+import importlib.util
 import math
 import os
+import re
 import sys
 import threading
 
@@ -31,6 +33,22 @@ SESSION_DEFAULT_H = 16.0
 CHEAP = ("IF_THEN_ELSE", "PID", "Q_LEARNING")
 SPEC_SCHEMA = {"type": "object", "properties": {"spec": {"type": "object"}}, "required": ["spec"]}
 CID_SCHEMA = {"type": "object", "properties": {"cid": {"type": "string"}, "top": {"type": "integer"}}, "required": ["cid"]}
+
+
+PROPOSE_SCHEMA = {"type": "object", "properties": {
+    "algorithm_code": {"type": "string"}, "params": {"type": "object"},
+    "evidence": {"type": "array", "items": {"type": "string"}}, "rationale": {"type": "string"}},
+    "required": ["algorithm_code", "params", "evidence"]}
+CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,30}$")
+
+
+def _load_params(repo_root):
+    """schd/cea/algorithms/params.py by path (stdlib only, imports no algorithm; never `import cea`)."""
+    path = os.path.join(repo_root, "schd", "cea", "algorithms", "params.py")
+    spec = importlib.util.spec_from_file_location("medcea_algorithm_params", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class LocalEstimator:
@@ -81,15 +99,18 @@ class RemoteRunner:
 
 
 class SimServer:
-    def __init__(self, session, estimator, runner):
+    def __init__(self, session, estimator, runner, repo_root=None):
         self.session, self.estimator, self.runner = session, estimator, runner
+        self.repo_root = repo_root
         self.camps = {}                  # cid -> {sid, spec, est, cap_h, state, gid?}
         self.lock = threading.Lock()
         self.app = McpServer("mcp-sim", "mcp-sim", session, [
             Tool("sim.estimate", "Estimate the CPU-hours of a campaign spec (recomputed by the server).", SPEC_SCHEMA, self.t_estimate),
             Tool("sim.run", "Run a campaign spec; above 2 CPU-hours the supervisor must approve.", SPEC_SCHEMA, self.t_run),
             Tool("sim.status", "State of a campaign handle.", CID_SCHEMA, self.t_status),
-            Tool("sim.results", "Metrics and result digest of a finished campaign.", CID_SCHEMA, self.t_results)])
+            Tool("sim.results", "Metrics and result digest of a finished campaign.", CID_SCHEMA, self.t_results),
+            Tool("propose.parameter_set", "Propose a controller parameter set, backed by finished campaigns; "
+                 "the supervisor accepts or discards it.", PROPOSE_SCHEMA, self.t_propose)])
 
     # ── helpers
     def _spec(self, args):
@@ -213,6 +234,40 @@ class SimServer:
                 "result_digest": m.get("result_digest"), "spec_digest": m.get("spec_digest"),
                 "cpu_hours": out.get("cpu_hours"), "top": clean_obj(rows)}
 
+    def t_propose(self, ctx, args):
+        """A candidate parameter set (research Phase 4a stage 7a). Nothing is written to production: the
+        result is the proposal document; the agent loop traces the `proposal` event with its digest and the
+        supervisor decides (accept/discard) through the orchestrator. The parameters are validated with
+        schd/cea/algorithms/params.py (the controller part of the coupling contract), the evidence must be
+        finished campaigns of this session, and their spec and result digests are part of the document."""
+        code = args.get("algorithm_code")
+        params = args.get("params")
+        ev = args.get("evidence")
+        if not isinstance(code, str) or not CODE_RE.match(code):
+            raise ToolRefused("algorithm_code must be an algorithm code such as PID")
+        if not isinstance(params, dict):
+            raise ToolRefused("params must be an object")
+        if not isinstance(ev, list) or not 1 <= len(ev) <= 5 or not all(isinstance(x, str) for x in ev):
+            raise ToolRefused("evidence must name 1 to 5 finished campaigns of this session")
+        if not self.repo_root:
+            raise ToolRefused("this deployment cannot validate parameter sets")
+        problems = _load_params(self.repo_root).validate_params(code, params)
+        if problems:
+            raise ToolRefused("parameter set refused: %s" % "; ".join(problems)[:300])
+        docs = []
+        for cid in ev:
+            c = self._own(ctx, cid)
+            if self._progress(ctx, cid, c)["state"] != "done":
+                raise ToolRefused("campaign %s is not done" % cid)
+            m = c["final"].get("manifest") or {}
+            if not m.get("result_digest") or not m.get("spec_digest"):
+                raise ToolRefused("campaign %s has no result digest" % cid)
+            docs.append({"cid": cid, "spec_digest": m["spec_digest"], "result_digest": m["result_digest"]})
+        rationale = args.get("rationale")
+        doc = {"kind": "parameter_set", "algorithm_code": code, "params": clean_obj(params),
+               "evidence": docs, "rationale": str(rationale)[:500] if rationale else ""}
+        return {"proposal": doc, "proposal_sha256": sha(canonical(doc)), "status": "proposed: waiting for the supervisor"}
+
 
 def main():
     """The mcp-sim pod (research Phase 4a, 6b1): RS_SESSION_SERVER_URL (research-session :8102),
@@ -222,7 +277,8 @@ def main():
     from mcp_common import Session, make_http_server
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     srv = SimServer(Session(os.environ["RS_SESSION_SERVER_URL"], "mcp-sim"), LocalEstimator(root),
-                    RemoteRunner(Http(os.environ["RS_ORCH_SIM_URL"]), pool=int(os.environ.get("RS_SIM_POOL", "2"))))
+                    RemoteRunner(Http(os.environ["RS_ORCH_SIM_URL"]), pool=int(os.environ.get("RS_SIM_POOL", "2"))),
+                    repo_root=root)
     port = int(os.environ.get("RS_MCP_PORT", "8110"))
     sys.stderr.write("mcp-sim: port %d\n" % port)
     make_http_server(srv.app, port=port).serve_forever()

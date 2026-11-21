@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_fakes import FakeSession, SID, call, http_post, payload, rpc, serve  # noqa: E402
 import mcp_sim  # noqa: E402
 
-TOOLS = ["sim.estimate", "sim.run", "sim.status", "sim.results"]
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOLS = ["sim.estimate", "sim.run", "sim.status", "sim.results", "propose.parameter_set"]
 
 
 class FakeEstimator:
@@ -35,7 +36,7 @@ class FakeRunner:
 def setup(budget=None):
     s = FakeSession(TOOLS, budget)
     r = FakeRunner()
-    return s, r, mcp_sim.SimServer(s, FakeEstimator(), r).app
+    return s, r, mcp_sim.SimServer(s, FakeEstimator(), r, repo_root=ROOT_DIR).app
 
 
 class SimTest(unittest.TestCase):
@@ -54,7 +55,7 @@ class SimTest(unittest.TestCase):
         try:
             port = srv.server_address[1]
             code, resp = http_post(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-            self.assertEqual((code, len(resp["result"]["tools"])), (200, 4))
+            self.assertEqual((code, len(resp["result"]["tools"])), (200, 5))
             self.assertEqual(http_post(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, token="bad")[0], 401)
             code, resp = http_post(port, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers={"MCP-Protocol-Version": "1999-01-01"})
             self.assertEqual((code, resp["error"]["code"]), (400, -32022))
@@ -291,6 +292,45 @@ class SimJobTest(unittest.TestCase):
             sim_job.cpu_seconds = real
         self.assertEqual(codes[:1], [3])
         self.assertEqual((r["state"], r["error"]), ("failed", "cpu_cap_exceeded"))
+
+
+class ProposeTest(unittest.TestCase):
+    """propose.parameter_set (research Phase 4a stage 7a): validated with params.py, backed by this session's
+    finished campaigns, nothing written but the document the loop traces."""
+
+    def done(self):
+        s, r, app = setup()
+        cid = payload(call(app, "sim.run", {"spec": {"runs": 1}})[1])["cid"]          # 0.5 h: starts at once
+        r.final = {"state": "done", "cpu_hours": 0.4, "manifest": {"runs": 1, "result_digest": "d" * 64, "spec_digest": "s" * 64}}
+        return s, app, cid
+
+    def args(self, cid, **kw):
+        return dict({"algorithm_code": "PID", "params": {"cycle_time": 10.0}, "evidence": [cid], "rationale": "shorter"}, **kw)
+
+    def test_a_proposal(self):
+        s, app, cid = self.done()
+        code, resp = call(app, "propose.parameter_set", self.args(cid))
+        p = payload(resp)
+        self.assertEqual(code, 200)
+        self.assertEqual(p["proposal"]["evidence"], [{"cid": cid, "spec_digest": "s" * 64, "result_digest": "d" * 64}])
+        self.assertEqual(p["proposal"]["params"], {"cycle_time": 10.0})
+        self.assertRegex(p["proposal_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload(call(app, "propose.parameter_set", self.args(cid))[1])["proposal_sha256"], p["proposal_sha256"])
+
+    def test_refusals(self):
+        s, app, cid = self.done()
+        for bad in (self.args(cid, params={"cycle_time": -1}), self.args(cid, params={"nosuch": 1}),
+                    self.args(cid, algorithm_code="NOSUCH"), self.args(cid, evidence=[]),
+                    self.args(cid, evidence=["cdeadbeefdeadbeefdead"]), self.args(cid, params=[1])):
+            code, resp = call(app, "propose.parameter_set", bad)
+            self.assertTrue(resp["result"]["isError"] if "result" in resp else True, bad)
+
+    def test_running_campaign_is_no_evidence(self):
+        s, r, app = setup()
+        cid = payload(call(app, "sim.run", {"spec": {"runs": 1}})[1])["cid"]
+        code, resp = call(app, "propose.parameter_set", self.args(cid))
+        self.assertIn("isError", str(resp["result"]) if "result" in resp else "isError")
+        self.assertNotIn("proposal", str(resp))
 
 
 class ProfileTools(unittest.TestCase):

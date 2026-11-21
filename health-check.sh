@@ -2594,6 +2594,33 @@ else:
             fi
         done
     done
+    # research Phase 4a (stage 7a, R37): the copies of the route table in the two agent zones. A zone without
+    # the Deployment (policy without the zone, not installed) adds nothing; a pod that answers another digest
+    # is a stale route table in a service that always enforces.
+    local zdc zns zdep zctr zk
+    for zdc in research-gw:research-session:research-session research-agents:research-orchestrator:research-orchestrator; do
+        IFS=: read -r zk zdep zctr <<<"$zdc"
+        zns="$(NAMESPACE="$ns" bash -c 'source "$1/infra/lib-policy-tools.sh"; zone_namespace "$2"' _ "$SCRIPT_DIR" "$zk" 2>/dev/null)" || continue
+        [[ -n "$zns" ]] || continue
+        rc=0; pods="$(_running_pods "$zns" "$zdep")" || rc=$?
+        [[ $rc -eq 0 && -n "$pods" ]] || continue
+        services=$((services + 1))
+        for pod in $pods; do
+            n=$((n + 1))
+            got="$(timeout "$TIMEOUT" $KUBECTL exec -n "$zns" "$pod" -c "$zctr" -- python3 -c "$probe" 2>/dev/null | tail -n1)" || got=""
+            read -r dig ver <<<"$got"
+            if [[ -z "$dig" ]]; then warns+=("cannot read /iam/routes.json in pod $pod ($zns)")
+            elif [[ "$dig" == missing || "$dig" == unreadable || "$dig" == "-" ]]; then
+                probs+=("pod $pod ($zns) has no usable /iam/routes.json: it refuses every request (./apps/research-agents/deploy.sh)")
+            elif [[ "$dig" != "$want" ]]; then
+                if [[ "$age" =~ ^[0-9]+$ ]] && (( age < 120 )); then
+                    warns+=("pod $pod ($zns) loads routes ${dig:0:12}, the platform's ConfigMap holds ${want:0:12} since ${age} s")
+                else
+                    probs+=("pod $pod ($zns) loads routes ${dig:0:12}, the platform's ConfigMap holds ${want:0:12}: ./deploy-infra.sh or ./infra/deploy-policy.sh refreshes the copy")
+                fi
+            fi
+        done
+    done
     local tail_=""
     ((${#absent[@]})) && tail_+="; ${#absent[@]} not deployed (${absent[*]})"
     ((${#norun[@]})) && tail_+="; no Running pod: ${norun[*]}"
@@ -2954,8 +2981,10 @@ check_rsnetpol() {
         _record WARN "$name" "cannot read the node addresses: $(tail -n1 <<<"$out" | cut -c1-120)"; return
     fi
     for ip in $out; do ips+=(--node-ip "${ip%/*}"); done
+    local _other=()
+    mapfile -t _other < <(NAMESPACE="$ns" RESEARCH_NAMESPACE="$rns" SCRIPT_DIR="$SCRIPT_DIR" bash -c 'source "$SCRIPT_DIR/infra/lib-policy-tools.sh"; zone_other_args research' 2>/dev/null)
     if ! want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --zone research --namespace "$rns" \
-            --platform-namespace "$ns" "${ips[@]}" 2>/dev/null)"; then
+            --platform-namespace "$ns" "${_other[@]}" "${ips[@]}" 2>/dev/null)"; then
         _record WARN "$name" "the research NetworkPolicies do not compile (python3 apps/iam/compiler/cli.py check)"; return
     fi
     res="$(WANT="$want" python3 -c '

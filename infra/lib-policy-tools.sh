@@ -140,6 +140,19 @@ zone_namespace() {
     esac
 }
 
+# zone_other_args ZONE  (research Phase 4a stage 7a, R18) prints the --zone-namespace pairs of the OTHER
+# research zones the applied policy actually has (cli.py has-zone, run from SCRIPT_DIR or REPO_ROOT): none
+# while it has only the research zone, so the research zone's argv is what it was before the two agent zones.
+zone_other_args() {
+    local _z="$1" _o _root="${SCRIPT_DIR:-${REPO_ROOT:-.}}"
+    for _o in research research-gw research-agents; do
+        [[ "$_o" == "$_z" ]] && continue
+        if python3 "$_root/apps/iam/compiler/cli.py" has-zone "$_o" >/dev/null 2>&1; then
+            printf '%s\n' --zone-namespace "$_o=$(zone_namespace "$_o")"
+        fi
+    done
+}
+
 zone_netpol_args() {
     local _z="$1" _o
     zone_namespace "$_z" >/dev/null || return 2

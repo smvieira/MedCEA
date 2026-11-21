@@ -1200,7 +1200,7 @@ has   "--change (dry)" "[dry run] not executed: tests/iam-policy.sh --change"
 has   "five accounts" "5 throwaway accounts"
 has   "--apply leaves its version applied" "it becomes the applied version"
 has   "--change rolls back in its trap" "rolls it back and has the rollback confirmed"
-has   "the precondition" "Refused (exit 2) while one of the ten checks"
+has   "the precondition" "Refused (exit 2) while one of the twelve checks"
 [[ "$(grep -c 'Run it? \[y/N\]' <<<"$OUT")" == 2 ]] && pass "two [y/N], b goes back without a plan" || fail "b planned something"
 no_stub
 real $'6\n17\n3\ny\nq\n'

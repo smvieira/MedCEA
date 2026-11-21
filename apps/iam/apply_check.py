@@ -112,7 +112,7 @@ IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
         §14.8.7 step 3 and the bound (OA-c): K is a rollback target and today's skeleton with
         its rows grants no role more than the skeleton it was approved under
   rollback-diff --state S --stage DIR    the rollback's diff against the applied version
-  verify-conf --out F [--drop T]   step 9's conf (ten checks)
+  verify-conf --out F [--drop T]   step 9's conf (twelve checks)
   classify-sql [--without-iam]     health-check iamgrants' tail after the verify SQL (Phase 5,
         G4): the assertion set that ran, and under IAM_DB_ROLES=false I15's classification as a
         read-only query (a WARN there); never part of a compiled target or a bundle
@@ -794,7 +794,9 @@ VERIFY_CHECKS = (("iamgrants", "$POSTGRES_DB"), ("iamenforce", "$NAMESPACE"), ("
                  ("iamworkbench", "$NAMESPACE"), ("onboardroles", ""), ("pgadminroles", "$NAMESPACE"),
                  ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"), ("supersetroles", "$NAMESPACE"),
                  # research sandbox Phase 2b: an apply that re-renders the research zone sees its drift
-                 ("rsnetpol", "$NAMESPACE"))
+                 ("rsnetpol", "$NAMESPACE"),
+                 # research Phase 4a stage 7a: the two agent zones (SKIP while the policy has no such zone)
+                 ("gwnetpol", "$NAMESPACE"), ("ranetpol", "$NAMESPACE"))
 # A scoped command's exit 4 (deferred) drops the check that would FAIL on the old setting
 DEFER_CHECK = {"./apps/edge-wizard/deploy.sh --gate-only": "onboardroles",
                "./apps/superset/deploy.sh --gate-only": "supersetroles",

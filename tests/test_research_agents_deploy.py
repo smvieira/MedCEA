@@ -693,9 +693,12 @@ class Wiring(unittest.TestCase):
         self.assertIn("RESEARCH_GW_NAMESPACE RESEARCH_AGENTS_NAMESPACE", t)
         self.assertIn('== "$_zl" ]]', t)
 
-    def test_policy_only_rollout_is_not_wired_yet(self):
-        # 6b2: deploy-policy.sh runs the zones' scoped modes with commit B
-        self.assertNotIn("pa_zonenetpol", code(read("infra/deploy-policy.sh")))
+    def test_deploy_policy_runs_the_zones_scoped(self):
+        # 7a: deploy-policy.sh runs the zones' scoped modes while RESEARCH_ENABLED, "not deployed" without the zone
+        t = code(read("infra/deploy-policy.sh"))
+        self.assertIn('pa_zonenetpol "$_z" scoped', t)
+        self.assertIn("for _z in research-gw research-agents", t)
+        self.assertLess(t.index("pa_rsnetpol scoped"), t.index('pa_zonenetpol "$_z" scoped'))
 
 
 class JobManifests(unittest.TestCase):

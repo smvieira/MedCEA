@@ -51,7 +51,7 @@ SERVER_EVENTS = ("tool_result", "gate_pending", "sim_started", "sim_finished", "
 SERVERS = ("mcp-sim", "mcp-lake", "orchestrator", "model-gateway")
 CLIENT_ID = "research-agent"
 SCOPE = "openid groups medcea-identity"
-TOOL_SERVER = {"lake": "mcp-lake", "sim": "mcp-sim", "propose": "research-session"}
+TOOL_SERVER = {"lake": "mcp-lake", "sim": "mcp-sim", "propose": "mcp-sim"}
 
 
 class Conflict(Exception):

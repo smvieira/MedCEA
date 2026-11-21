@@ -2572,7 +2572,7 @@ a_policy_apply() {
     CMD=(./apps/iam/apply.sh "$v" --check-only --by "$BY_USER")
     EFFECT="nothing (--check-only: no lock, no file, read-only transactions; Keycloak and the realm's keys read through a port-forward; the health baseline)"
     SUDO=mk8s; CFG_NEEDED=yes
-    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the ten checks apply.sh verifies against FAILs now."
+    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the twelve checks apply.sh verifies against FAILs now."
            "It prints what the version changes per target and per role; the apply itself is offered after it.")
     plan_run
     [[ "$PLAN_GO" == yes ]] || return 0
@@ -2849,7 +2849,7 @@ a_iam_policy() {
     esac
     NOTES=("Needs IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true, run after Deploy IAM 4.4. Refused while a change or skeleton version is open."
            "If it stops half-way it withdraws its version (in the Policy UI, else apply.sh --withdraw-open) before deleting the accounts.")
-    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the ten checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
+    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the twelve checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
                              "If it stops after its apply it finishes it (--resume)$([[ "$m" == --change ]] && echo ", rolls it back and has the rollback confirmed") before deleting the accounts.")
     plan_run
 }

@@ -56,7 +56,8 @@ class HttpTools:
         return out
 
     def _call(self, name, args):
-        url = self.servers.get(name.split(".")[0])
+        prefix = name.split(".")[0]
+        url = self.servers.get(prefix) or self.servers.get({"propose": "sim"}.get(prefix, ""))
         if url is None:
             raise ToolError("no server for this tool")
         res = self._rpc(url, "tools/call", {"name": name, "arguments": args})

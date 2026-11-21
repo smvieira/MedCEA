@@ -2490,11 +2490,11 @@ class SupersetTargets(unittest.TestCase):
         self.assertIn("superset", apply_check.TOOL_TARGETS)
         self.assertEqual(apply_check.scoped_commands().count("./apps/superset/deploy.sh --gate-only"), 1)
         self.assertIn("./apps/superset/deploy.sh", apply_check.full_deploys())
-        self.assertEqual(len(apply_check.VERIFY_CHECKS), 10)              # rsnetpol since research 2b
-        self.assertEqual(apply_check.VERIFY_CHECKS[-2], ("supersetroles", "$NAMESPACE"))
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 12)              # rsnetpol since research 2b, gwnetpol/ranetpol 4a
+        self.assertEqual(apply_check.VERIFY_CHECKS[-4], ("supersetroles", "$NAMESPACE"))
         self.assertIn("step9:supersetroles | supersetroles | $NAMESPACE |", apply_check.verify_conf().splitlines())
-        self.assertIn("step 9's conf (ten checks)", apply_check.__doc__)
-        self.assertIn("step 9's conf (ten checks)", read_repo("apps/iam/apply.sh"))
+        self.assertIn("step 9's conf (twelve checks)", apply_check.__doc__)
+        self.assertIn("step 9's conf (twelve checks)", read_repo("apps/iam/apply.sh"))
         self.assertNotIn("nine checks", read_repo("apps/iam/apply.sh"))
 
     def test_an_incomplete_wheel_cache_is_a_deferral(self):
@@ -2841,7 +2841,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertEqual(len(confs), 2)              # the baseline and one verify
         self.assertEqual([l.split("|")[1].strip() for l in confs[1]],
                          ["iamgrants", "iamenforce", "grafanarole", "iamworkbench", "onboardroles", "pgadminroles",
-                          "noderedauth", "iamartefacts", "supersetroles", "rsnetpol"])
+                          "noderedauth", "iamartefacts", "supersetroles", "rsnetpol", "gwnetpol", "ranetpol"])
         self.assertFalse(any("iampolicy" in l for c in confs for l in c))
         self.assertEqual([w for w in writes(calls) if w[0] != "psql"], [])
 
@@ -3305,10 +3305,12 @@ class RS2bTargets(unittest.TestCase):
         self.assertNotIn('basename "$(dirname "${cmd%% *}")"', read_repo("apps/iam/apply.sh"))
 
     def test_verify_checks(self):
-        self.assertEqual(apply_check.VERIFY_CHECKS[-1], ("rsnetpol", "$NAMESPACE"))
-        self.assertEqual(len(apply_check.VERIFY_CHECKS), 10)
+        self.assertEqual(apply_check.VERIFY_CHECKS[-3], ("rsnetpol", "$NAMESPACE"))
+        self.assertEqual(apply_check.VERIFY_CHECKS[-2:], (("gwnetpol", "$NAMESPACE"), ("ranetpol", "$NAMESPACE")))
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 12)
         self.assertIn("step9:rsnetpol | rsnetpol | $NAMESPACE |", apply_check.verify_conf().splitlines())
         self.assertIn("'Research network policies | rsnetpol    | $NAMESPACE   |'", read_repo("tests/iam-policy.sh"))
+        self.assertIn("'Research gateway network policies | gwnetpol | $NAMESPACE |'", read_repo("tests/iam-policy.sh"))
 
 
 SKEL_WIDE = ('routes: {"POST /_mqtt-credential": R}}',

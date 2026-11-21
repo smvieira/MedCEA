@@ -704,6 +704,9 @@ for _rz in gw agents; do
         _PROBLEMS+=("the research-$_rz namespace failed to deploy (output above): re-run ./infra/deploy-research-$_rz-namespace.sh once the cause is fixed")
     fi
 done
+# R37 (stage 7a): the route table and the realm's public keys in the two zones' namespaces, kept equal to the
+# platform's (no-op while the applied policy lacks the zones or RESEARCH_ENABLED is not true).
+pa_zone_iam_copies full
 
 
 # Keycloak's own database. It used to share medcea_db (tables in public), so
