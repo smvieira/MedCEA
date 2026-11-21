@@ -47,7 +47,8 @@ def v7():
 
 def three_zones():
     """Version 7 with the two new zones and a 4a-like cross-zone shape."""
-    d = copy.deepcopy(model.load_defaults().data)     # the factory policy (Phase 2b's commit B)
+    import rs2b_fixture
+    d = rs2b_fixture.v9_policy()     # the factory policy before Phase 4a's commit B (Phase 2b's)
     net = d["network"]
     net["zones"]["research-agents"] = {}
     net["zones"]["research-gw"] = {}
@@ -83,7 +84,7 @@ class Zones(unittest.TestCase):
         self.assertEqual(netpol.zone_label("research-gw"), "medcea/gw-netpol")
 
     def test_policies_without_the_new_zones_compile_as_before(self):
-        for d in (v7(), model.load_defaults().data):
+        for d in (v7(), __import__('rs2b_fixture').v9_policy()):
             p = model.Policy(d)
             self.assertEqual(netpol.compile_zone(p, "research", RNS, NS, IPS),
                              netpol.compile_zone(p, "research", RNS, NS, IPS, {"research-agents": ANS}))

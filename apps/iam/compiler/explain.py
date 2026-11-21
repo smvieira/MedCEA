@@ -236,6 +236,9 @@ RESIDUE_PATHS = frozenset((
     # for a later code-only commit (no skeleton version in flight).
     "network.pods.*.egress[].pod", "network.pods.*.egress[].port", "network.pods.*.egress[].node",
     "network.pods.*.egress[].internet", "network.pods.*.egress[].ports", "network.pods.*.egress[].platform.*",
+    # research Phase 4a: a zone service's token client and audience and a pod's DNS egress are
+    # tuples too (pod-token-client, pod-dns); residue on purpose, for the reason above
+    "network.pods.*.token_clients[].client", "network.pods.*.token_clients[].audience", "network.pods.*.dns",
     "network.clients.*.selector.*", "network.clients.*.only_rpc",
     "roles.*.db_role", "roles.*.availability", "roles.*.spec_role",
     "service_identities.*.db_role", "service_identities.*.db_password", "service_identities.*.managed_by",

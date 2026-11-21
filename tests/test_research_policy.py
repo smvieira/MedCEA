@@ -56,7 +56,10 @@ MIGRATIONS = os.path.join(REPO, "apps", "database", "medcea_db_migrations.sql")
 
 
 def factory():
-    return model.load_defaults()
+    """Version 9's policy (Phase 2b's factory file): research Phase 4a's commit B added zones and
+    pods after these tests were written, so it is undone (tests/rs2b_fixture.py v9_policy)."""
+    import rs2b_fixture
+    return model.Policy(rs2b_fixture.v9_policy())
 
 
 def migration_013():
@@ -171,7 +174,8 @@ class Zone(unittest.TestCase):
 
     def test_zone_netpol(self):
         argv = ["--defaults", "compile", "netpol", "--zone", "research", "--namespace", RNS,
-                "--platform-namespace", NS]
+                "--platform-namespace", NS, "--zone-namespace", "research-gw=" + RNS + "-gw",
+                "--zone-namespace", "research-agents=" + RNS + "-agents"]
         for ip in IPS:
             argv += ["--node-ip", ip]
         r = self.run_cli(*argv)
@@ -195,9 +199,12 @@ class Zone(unittest.TestCase):
             "ports": [{"protocol": "TCP", "port": 5432}],
             "from": [{"namespaceSelector": ns, "podSelector": {"matchLabels": {"app": "research-export"}}},
                      {"namespaceSelector": ns, "podSelector": {"matchLabels": {"app": "medcea-backup"}}},
-                     {"podSelector": {"matchLabels": {"app": "lake-api"}}}]   # Phase 2b: same zone, no namespaceSelector
+                     {"podSelector": {"matchLabels": {"app": "lake-api"}}},   # Phase 2b: same zone, no namespaceSelector
+                 {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": RNS + "-gw"}},
+                  "podSelector": {"matchLabels": {"app": "research-session"}}}]   # Phase 4a: another zone
             + [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in IPS]}])
-        self.assertEqual(lst, netpol.compile_zone(factory(), "research", RNS, NS, IPS))
+        self.assertEqual(lst, netpol.compile_zone(model.load_defaults(), "research", RNS, NS, IPS,
+                                                  {"research-gw": RNS + "-gw", "research-agents": RNS + "-agents"}))
 
     def test_client_egress(self):
         for c in ("research-export", "backup"):

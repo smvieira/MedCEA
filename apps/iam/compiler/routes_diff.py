@@ -45,6 +45,29 @@ SOURCES = {
                        "cls": "H", "resolver": "_resolve", "resolves": {"GET": ("list", "file"), "PUT": ("file",)}},
     "iam-mqttx":      {"kind": "http", "file": "apps/iam/iam-api.py", "cls": "MqttCredential"},
     "iam":            {"kind": "http", "file": "apps/iam/policy_api.py", "cls": "PolicyAdmin"},
+    # research Phase 4a: these handlers are closures dispatching on a port (r_person, r_sim, ...),
+    # which the do_<METHOD> scan cannot read, so their routes are declared here and the test
+    # checks each declared path's literal text is still in the file (a rename fails it).
+    "research-orchestrator":     {"kind": "declared", "file": "apps/research-agents/orchestrator.py", "routes": [
+        ("GET", "/api/sessions"), ("POST", "/api/sessions"), ("GET", "/api/sessions/<sid>"),
+        ("GET", "/api/sessions/<sid>/events"), ("POST", "/api/sessions/<sid>/stop"),
+        ("POST", "/api/sessions/<sid>/replay"), ("POST", "/api/sessions/<sid>/gates/<gid>"),
+        ("POST", "/api/sessions/<sid>/proposals/<pid>"), ("POST", "/api/signin/start"),
+        ("POST", "/api/signin/poll"), ("POST", "/api/signin/refresh")]},
+    "research-orchestrator-sim": {"kind": "declared", "file": "apps/research-agents/orchestrator.py", "routes": [
+        ("POST", "/internal/sims"), ("GET", "/internal/sims/<cid>")]},
+    "research-session":          {"kind": "declared", "file": "apps/research-agents/session.py", "routes": [
+        ("POST", "/mint"), ("POST", "/revoke"), ("POST", "/sessions/<sid>/gates/<gid>"),
+        ("POST", "/sessions/<sid>/proposals/<pid>")]},
+    "research-session-agent":    {"kind": "declared", "file": "apps/research-agents/session.py", "routes": [
+        ("POST", "/claim"), ("POST", "/trace")]},
+    "research-session-server":   {"kind": "declared", "file": "apps/research-agents/session.py", "routes": [
+        ("POST", "/introspect"), ("POST", "/trace"), ("GET", "/events/<sid>"), ("GET", "/gates/<gid>"),
+        ("GET", "/sessions/<sid>"), ("POST", "/sessions/<sid>/revoke"), ("POST", "/signin/start"),
+        ("POST", "/signin/poll"), ("POST", "/signin/refresh"), ("PUT", "/claims/<sid>/expect"),
+        ("POST", "/claims/<sid>/expect")]},
+    "mcp-sim":                   {"kind": "declared", "file": "apps/research-agents/mcp_common.py", "routes": [("POST", "/mcp")]},
+    "mcp-lake":                  {"kind": "declared", "file": "apps/research-agents/mcp_common.py", "routes": [("POST", "/mcp")]},
 }
 
 REMOVED = {}

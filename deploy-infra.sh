@@ -1598,6 +1598,71 @@ if [[ -n "$_IS_ID" ]]; then
 else
     echo -e "${RED}  Could not create the 'medcea-identity' client scope.${NC}" >&2
 fi
+
+# Research Phase 4a (design rs4 §3.7, R12/R13): the client research-agent signs a scientist in
+# to the agent campaigns (device grant, consent shown), and its tokens carry the audience
+# medcea-research, never medcea-api, so a platform service refuses them and a research
+# service refuses a platform token. It exists only while the applied access policy names it
+# as a pod's token client (cli.py has-token-client, 0): created here with `groups` and the
+# scope medcea-research (person_id and the audience mapper, access token only) and without
+# medcea-identity; otherwise an existing one is disabled (never created on a fresh install,
+# never deleted). The list is KC_RESEARCH_CLIENTS (infra/lib-keycloak-clients.sh). A policy
+# that cannot be read changes nothing. health kcscopes does not read this client yet.
+for _c in "${KC_RESEARCH_CLIENTS[@]}"; do
+    _RC_RC=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-token-client "$_c" >/dev/null || _RC_RC=$?
+    case "$_RC_RC" in
+        0)  echo -e "${YELLOW}  Creating public client '$_c' (device sign-in for agent campaigns)...${NC}"
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"medcea-research","protocol":"openid-connect","description":"person_id claim and the medcea-research audience (agent campaigns)",
+                   "attributes":{"include.in.token.scope":"false","display.on.consent.screen":"false"}}' || true
+            _RS_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+              | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='medcea-research'))" 2>/dev/null || echo "")
+            if [[ -z "$_RS_ID" ]] || ! _create_public_device_client "$_c"; then
+                echo -e "${RED}  Agent campaigns cannot sign anyone in until client '$_c' and scope 'medcea-research' exist.${NC}" >&2
+                continue
+            fi
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_RS_ID}/protocol-mappers/models" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"person_id","protocol":"openid-connect","protocolMapper":"oidc-usermodel-attribute-mapper",
+                   "config":{"user.attribute":"person_id","claim.name":"person_id","jsonType.label":"String",
+                             "id.token.claim":"false","access.token.claim":"true","userinfo.token.claim":"false"}}' || true
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_RS_ID}/protocol-mappers/models" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"medcea-research-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper",
+                   "config":{"included.custom.audience":"medcea-research","access.token.claim":"true","id.token.claim":"false"}}' || true
+            _RC_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
+              -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
+            if [[ -n "$_RC_UUID" ]]; then
+                # consent is shown to the person (OD4); the client keeps groups and medcea-research only
+                _RC_REP=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}" \
+                  -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; d=json.load(sys.stdin); d['consentRequired']=True; print(json.dumps(d))" 2>/dev/null || echo "")
+                [[ -n "$_RC_REP" ]] && printf '%s' "$_RC_REP" | curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}" \
+                  -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" --data-binary @- || true
+                # the `groups` scope exists from earlier runs (the scope loop below creates it on a first one)
+                _RG_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+                  | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='groups'))" 2>/dev/null || echo "")
+                [[ -n "$_RG_ID" ]] && curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}/default-client-scopes/${_RG_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+                curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}/default-client-scopes/${_RS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+                [[ -n "${_IS_ID:-}" ]] && curl -s -o /dev/null -X DELETE \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}/default-client-scopes/${_IS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+            fi ;;
+        1)  _RC_STATE="$(kc_client_disable "$KEYCLOAK_REALM" "$_c")" || _RC_STATE="error"
+            case "$_RC_STATE" in
+                absent)           echo -e "${YELLOW}  Client '$_c': not in the access policy, not created.${NC}" ;;
+                disabled|already-disabled) echo -e "${YELLOW}  Client '$_c': not in the access policy, disabled (kept, never deleted).${NC}" ;;
+                *)                echo -e "${RED}  WARNING: client '$_c' is not in the access policy, but could not be disabled; re-run ./deploy-infra.sh.${NC}" >&2 ;;
+            esac ;;
+        *)  echo -e "${RED}  WARNING: cannot tell whether the access policy names client '$_c' (exit $_RC_RC): left as it is.${NC}" >&2 ;;
+    esac
+done
 if [[ -n "$_GS_ID" ]]; then
     curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_GS_ID}/protocol-mappers/models" \
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \

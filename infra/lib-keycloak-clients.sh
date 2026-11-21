@@ -29,3 +29,12 @@ KC_SCOPE_CLIENTS=(portal access policy config monitor scheduler dbmgmt mqtt-expl
 KC_API_CLIENTS=(portal access policy config monitor scheduler dbmgmt mqtt-explorer edge-wizard workbench-notebook)
 # shellcheck disable=SC2034
 KC_POLICY_TOKEN_CLIENTS=(workbench-notebook)
+# KC_RESEARCH_CLIENTS  the clients of the agent campaigns (research Phase 4a): research-agent
+#                   is a public device-grant client whose tokens carry `groups` and the
+#                   scope medcea-research (audience medcea-research, never medcea-api) and
+#                   not medcea-identity. deploy-infra.sh creates it only while
+#                   `cli.py has-token-client NAME` says 0 (a pod's token_clients entry in
+#                   the applied policy), else disables an existing one. Outside the three
+#                   lists above on purpose: the scope loop would give it medcea-identity.
+# shellcheck disable=SC2034
+KC_RESEARCH_CLIENTS=(research-agent)

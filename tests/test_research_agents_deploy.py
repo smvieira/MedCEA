@@ -441,13 +441,15 @@ class Helpers(unittest.TestCase):
         sys.path.insert(0, os.path.join(REPO, "apps", "iam", "compiler"))
         import apply_check
         import netpol  # noqa: F401
-        # no zone in the factory policy: compile prints an empty List, exit 0
+        # the factory policy (4a's commit B) has the research-agents zone: its policies compile
         rc, out, err = bash_fn("zone_netpol_args research-agents")
         args = out.split() + ["--node-ip", "192.0.2.1"]
         r = subprocess.run([sys.executable, os.path.join(REPO, "apps", "iam", "compiler", "cli.py"), "--defaults",
                             "compile", "netpol"] + args, capture_output=True, text=True, env=clean_env())
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout)["items"], [])
+        names = [i["metadata"]["name"] for i in json.loads(r.stdout)["items"]]
+        self.assertEqual(names[0], "ra-default-deny")
+        self.assertIn("ra-mcp-sim", names)
         self.assertEqual(apply_check.netpol_zone_args("research-agents")[:6], args[:6])
 
     def test_apply_check_zone_targets(self):
@@ -461,9 +463,14 @@ class Helpers(unittest.TestCase):
         self.assertEqual(apply_check.target_owners({"research-agents"})["netpol-research-agents"],
                          "./infra/deploy-research-agents-namespace.sh --policy-only")
         self.assertNotIn("netpol-research-gw", apply_check.target_owners(set()))
-        # the factory policy has neither zone: no target, no digest key (versions 1-9 audit as recorded)
-        names = [n for n, _ in apply_check.targets(model.load_defaults())]
+        # version 9's policy has neither zone: no target, no digest key (versions 1-9 audit as recorded)
+        sys.path.insert(0, os.path.join(REPO, "tests"))
+        import rs2b_fixture
+        names = [n for n, _ in apply_check.targets(model.Policy(rs2b_fixture.v9_policy()))]
         self.assertFalse([n for n in names if n.startswith("netpol-research-")])
+        names = [n for n, _ in apply_check.targets(model.load_defaults())]   # 4a's commit B names both
+        self.assertIn("netpol-research-gw", names)
+        self.assertIn("netpol-research-agents", names)
         outs = {"routes": (0, '{"digest": "d"}', ""), "mqtt": (0, '{"digest": "m"}', ""), "netpol-research-gw": (0, "g", ""),
                 "netpol-research-agents": (0, "a", "")}
         d = apply_check.digests_of(outs)

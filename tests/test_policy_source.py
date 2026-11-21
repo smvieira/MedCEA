@@ -343,6 +343,12 @@ def host_file_text(data, version=3, kind="change", skeleton_digest=None):
     return text
 
 
+def _zone_namespaces(p, zone):
+    """The other agent zones' placeholder namespaces, only for the zones the policy has."""
+    return {z: ("medcea-research" if z == "research" else "medcea-" + z)
+            for z in ("research", "research-gw", "research-agents") if z != zone and netpol.has_zone(p, z)}
+
+
 def artefacts(p, label="defaults.yaml"):
     """Every compiled artefact of a Policy, as cli.py prints it (stdout text)."""
     out = {
@@ -358,7 +364,11 @@ def artefacts(p, label="defaults.yaml"):
     }
     if netpol.has_zone(p, "research"):   # research sandbox Phase 2a, commit B (apply_check.targets)
         out["netpol-research"] = json.dumps(netpol.compile_zone(p, "research", "medcea-research", "medcea",
-                                                                ["10.0.0.5"]), indent=1) + "\n"
+                                                                ["10.0.0.5"], _zone_namespaces(p, "research")), indent=1) + "\n"
+    for z in ("research-gw", "research-agents"):   # research Phase 4a, commit B
+        if netpol.has_zone(p, z):
+            out["netpol-" + z] = json.dumps(netpol.compile_zone(p, z, "medcea-" + z, "medcea", ["10.0.0.5"],
+                                                                _zone_namespaces(p, z)), indent=1) + "\n"
     if tools.groups(p, "superset") and tools.admits_anyone(p, "superset"):   # stage C (apply_check.targets)
         out["superset"] = json.dumps(tools.superset_roles_mapping(p), sort_keys=True) + "\n"
     for s in ("allowed_groups", "admin_groups"):
@@ -410,7 +420,14 @@ def cli_argv(key):
         return ["compile", "netpol", "--namespace", "medcea", "--node-ip", "10.0.0.5"]
     if key == "netpol-research":
         return ["compile", "netpol", "--zone", "research", "--namespace", "medcea-research",
-                "--platform-namespace", "medcea", "--node-ip", "10.0.0.5"]
+                "--platform-namespace", "medcea", "--zone-namespace", "research-gw=medcea-research-gw",
+                "--zone-namespace", "research-agents=medcea-research-agents", "--node-ip", "10.0.0.5"]
+    if key in ("netpol-research-gw", "netpol-research-agents"):
+        z = key[len("netpol-"):]
+        return ["compile", "netpol", "--zone", z, "--namespace", "medcea-" + z, "--platform-namespace", "medcea",
+                "--zone-namespace", "research=medcea-research",
+                "--zone-namespace", "%s=medcea-%s" % (("research-gw", "research-agents") if z == "research-agents"
+                                                       else ("research-agents", "research-gw")) , "--node-ip", "10.0.0.5"]
     if key == "grants-json":
         return ["compile", "grants", "--format", "json"]
     if key == "grants-json-smoke-without-iam":
@@ -4387,8 +4404,7 @@ class PhaseRS2bBDelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_RS2BA, "medcea-prers2ba-")
         cls.a = ref_tree(PRE_RS2BA)[2]   # version 7's defaults.yaml, this compiler
-        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree(PRE_RS4A)[2]   # 2b's commit B (version 9's file): research Phase 4a's commit B re-pinned it to its parent
         cls.rows = source.entries_and_waivers(cls.a.data)   # version 7's rows (commit A's factory matrix)
         # the skeleton version as apply.sh N composes it: B's skeleton, version 7's rows
         cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
@@ -4634,6 +4650,321 @@ class PhaseRS2bBDelta(unittest.TestCase):
                          ["rr_bio_scientist", "rr_control_scientist"])
         self.assertEqual(apply_check._widening_roles(json.loads(self.skel["routes"]), json.loads(self.want["routes"])),
                          self.NARROWED)
+
+
+PRE_RS4A = "4110b14"  # research Phase 4a, commit A' (compiler only, PRE_RS2BA's defaults.yaml = version 9's):
+                      # commit B changes the policy (PhaseRS4BDelta)
+
+
+class PhaseRS4BDelta(unittest.TestCase):
+    """Research Phase 4a, commit B (21 Nov 2026): the skeleton version, proposed with
+    apply.sh --propose-skeleton --from-git <B> and never reverted (as 2b's), and the factory
+    matrix's change version. defaults.yaml gains the zones research-agents and research-gw,
+    the pods research-orchestrator, research-session, mcp-sim, mcp-lake and agent with their
+    ports, sources, hops, `dns: true` and `token_clients` (research-agent, audience
+    medcea-research), the notebooks' hop to the orchestrator, pod:mcp-lake on lake-api and
+    pod:research-session on research-postgresql, the public session-token routes, and the
+    group research_campaigns (zone research, the orchestrator's and session service's person
+    routes). Against PRE_RS4A with version 9's rows: widening with exactly the pinned system
+    tuples and residue sections; nothing narrowed; no person role's reach moves; the checker
+    passes; barred_approvers is empty (qa may approve). The change version (OD8: the two
+    scientists R, C, U and the engineer R on research_campaigns) only widens those three roles,
+    so nobody but them is barred from approving it."""
+
+    SYSTEM = [
+            ["ingress", "lake-api", 3000, "pod:mcp-lake"],
+            ["ingress", "mcp-lake", 8111, "pod:agent"],
+            ["ingress", "mcp-sim", 8110, "pod:agent"],
+            ["ingress", "research-orchestrator", 8090, "pod:notebooks"],
+            ["ingress", "research-orchestrator", 8091, "pod:mcp-sim"],
+            ["ingress", "research-postgresql", 5432, "pod:research-session"],
+            ["ingress", "research-session", 8100, "pod:research-orchestrator"],
+            ["ingress", "research-session", 8101, "pod:agent"],
+            ["ingress", "research-session", 8102, "pod:mcp-lake"],
+            ["ingress", "research-session", 8102, "pod:mcp-sim"],
+            ["ingress", "research-session", 8102, "pod:research-orchestrator"],
+            ["pod-dns", "agent"],
+            ["pod-dns", "mcp-lake"],
+            ["pod-dns", "mcp-sim"],
+            ["pod-dns", "research-orchestrator"],
+            ["pod-dns", "research-session"],
+            ["pod-egress", "agent", "pod", "mcp-lake", 8111],
+            ["pod-egress", "agent", "pod", "mcp-sim", 8110],
+            ["pod-egress", "agent", "pod", "research-session", 8101],
+            ["pod-egress", "mcp-lake", "pod", "lake-api", 3000],
+            ["pod-egress", "mcp-lake", "pod", "research-session", 8102],
+            ["pod-egress", "mcp-sim", "pod", "research-orchestrator", 8091],
+            ["pod-egress", "mcp-sim", "pod", "research-session", 8102],
+            ["pod-egress", "notebooks", "pod", "research-orchestrator", 8090],
+            ["pod-egress", "research-orchestrator", "node", "", 16443],
+            ["pod-egress", "research-orchestrator", "pod", "research-session", 8100],
+            ["pod-egress", "research-orchestrator", "pod", "research-session", 8102],
+            ["pod-egress", "research-session", "platform", "{\"app\":\"keycloak\"}", 8080],
+            ["pod-egress", "research-session", "pod", "research-postgresql", 5432],
+            ["pod-token-client", "research-orchestrator", "research-orchestrator", "research-agent", "medcea-research"],
+            ["pod-token-client", "research-orchestrator", "research-orchestrator-sim", "research-agent", "medcea-research"],
+            ["pod-token-client", "research-session", "research-session", "research-agent", "medcea-research"],
+            ["pod-token-client", "research-session", "research-session-agent", "research-agent", "medcea-research"],
+            ["pod-token-client", "research-session", "research-session-server", "research-agent", "medcea-research"],
+            ["public", "mcp-lake", "POST /mcp"],
+            ["public", "mcp-sim", "POST /mcp"],
+            ["public", "research-orchestrator", "POST /api/signin/poll"],
+            ["public", "research-orchestrator", "POST /api/signin/refresh"],
+            ["public", "research-orchestrator", "POST /api/signin/start"],
+            ["public", "research-orchestrator-sim", "GET /internal/sims/<cid>"],
+            ["public", "research-orchestrator-sim", "POST /internal/sims"],
+            ["public", "research-session-agent", "POST /claim"],
+            ["public", "research-session-agent", "POST /trace"],
+            ["public", "research-session-server", "GET /events/<sid>"],
+            ["public", "research-session-server", "GET /gates/<gid>"],
+            ["public", "research-session-server", "GET /sessions/<sid>"],
+            ["public", "research-session-server", "POST /claims/<sid>/expect"],
+            ["public", "research-session-server", "POST /introspect"],
+            ["public", "research-session-server", "POST /sessions/<sid>/revoke"],
+            ["public", "research-session-server", "POST /signin/poll"],
+            ["public", "research-session-server", "POST /signin/refresh"],
+            ["public", "research-session-server", "POST /signin/start"],
+            ["public", "research-session-server", "POST /trace"],
+            ["public", "research-session-server", "PUT /claims/<sid>/expect"],
+    ]
+    SECTIONS = [["section", x] for x in (
+        "network.pods.agent.dns",
+        "network.pods.agent.egress[].pod",
+        "network.pods.agent.egress[].port",
+        "network.pods.agent.selector.app",
+        "network.pods.agent.zone",
+        "network.pods.mcp-lake.carries.mcp-lake",
+        "network.pods.mcp-lake.dns",
+        "network.pods.mcp-lake.egress[].pod",
+        "network.pods.mcp-lake.egress[].port",
+        "network.pods.mcp-lake.selector.app",
+        "network.pods.mcp-lake.zone",
+        "network.pods.mcp-sim.carries.mcp-sim",
+        "network.pods.mcp-sim.dns",
+        "network.pods.mcp-sim.egress[].pod",
+        "network.pods.mcp-sim.egress[].port",
+        "network.pods.mcp-sim.selector.app",
+        "network.pods.mcp-sim.zone",
+        "network.pods.notebooks.egress[].pod",
+        "network.pods.notebooks.egress[].port",
+        "network.pods.research-orchestrator.carries.research-orchestrator",
+        "network.pods.research-orchestrator.carries.research-orchestrator-sim",
+        "network.pods.research-orchestrator.dns",
+        "network.pods.research-orchestrator.egress[].node",
+        "network.pods.research-orchestrator.egress[].pod",
+        "network.pods.research-orchestrator.egress[].port",
+        "network.pods.research-orchestrator.selector.app",
+        "network.pods.research-orchestrator.token_clients[].audience",
+        "network.pods.research-orchestrator.token_clients[].client",
+        "network.pods.research-orchestrator.zone",
+        "network.pods.research-session.carries.research-session",
+        "network.pods.research-session.carries.research-session-agent",
+        "network.pods.research-session.carries.research-session-server",
+        "network.pods.research-session.dns",
+        "network.pods.research-session.egress[].platform.app",
+        "network.pods.research-session.egress[].pod",
+        "network.pods.research-session.egress[].port",
+        "network.pods.research-session.selector.app",
+        "network.pods.research-session.token_clients[].audience",
+        "network.pods.research-session.token_clients[].client",
+        "network.pods.research-session.zone",
+        "resource_groups.research_campaigns.class",
+        "resource_groups.research_campaigns.risk",
+        "resource_groups.research_campaigns.zone",
+    )]
+    WIDENED = ["bio_scientist", "control_scientist", "engineer"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RS4A, "medcea-prers4a-")
+        cls.a = ref_tree(PRE_RS4A)[2]   # version 9's defaults.yaml, this compiler
+        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.rows = source.entries_and_waivers(cls.a.data)   # version 9's rows
+        cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
+        cls.was, cls.skel, cls.want = artefacts(cls.a), artefacts(cls.s), artefacts(cls.p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RS4A}: {self.old_cli}")
+
+    def test_the_inverse_fixture_is_version_9(self):
+        """tests/rs2b_fixture.v9_policy undoes exactly B: it gives the parent's file back."""
+        import rs2b_fixture
+        self.assertEqual(rs2b_fixture.v9_policy(self.p.data), self.a.data)
+
+    def test_skeleton_gate_against_commit_a_widens(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_RS4A, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_RS4A}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(len(self.SYSTEM), 54)
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(sorted(g["unchanged"]), sorted(self.p.roles))
+        self.assertIn("--propose-skeleton", err.getvalue())
+
+    def test_gate_and_checker_under_version_9_rows(self):
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+        self.assertEqual(invariants.check(self.s)[0], [])
+        self.assertEqual(invariants.check(self.p)[0], [])
+
+    def test_keeps_the_proposals_sections(self):
+        """The proposal runs from commit A' (the tree's compiler), apply.sh N from B, whose
+        diff-check recomputes the skeleton diff and refuses on any other digest. So A''s
+        explain.py and apply_check.py must give the same sections and diff digest as B's: B's
+        registrations of its new paths (residue) change nothing."""
+        import apply_check
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_RS4A}:apps/iam/apply_check.py"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {PRE_RS4A}: {r.stderr.strip()}")
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = (
+            "import json, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import apply_check\n"
+            "from compiler import explain, source\n"
+            "a = json.load(sys.stdin)\n"
+            "p_old, p_new, acc, git = apply_check._composed(a['acc'], a['git'], a['rows'])\n"
+            "secs = explain.sections(acc, git)\n"
+            "skel = {'from': source.skeleton_digest(a['acc']), 'to': source.skeleton_digest(a['git']), 'sections': secs}\n"
+            "doc = explain.diff_document('skeleton', 10, 9, 'e' * 64, p_old, p_new, skeleton=skel)\n"
+            "print(json.dumps({'sections': secs, 'digest': explain.diff_digest(doc)}))\n")
+        inp = json.dumps({"acc": source.skeleton(self.a.data), "git": self.p.data, "rows": self.rows})
+        o = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(self.old, "apps", "iam")],
+                           input=inp, capture_output=True, text=True, env=clean_env())
+        self.assertEqual(o.returncode, 0, o.stderr)
+        old = json.loads(o.stdout)
+        p_old, p_new, acc, git = apply_check._composed(source.skeleton(self.a.data), self.p.data, self.rows)
+        secs = explain.sections(acc, git)
+        skel = {"from": source.skeleton_digest(source.skeleton(self.a.data)), "to": source.skeleton_digest(self.p.data),
+                "sections": secs}
+        doc = explain.diff_document("skeleton", 10, 9, "e" * 64, p_old, p_new, skeleton=skel)
+        self.assertEqual(json.loads(json.dumps(secs)), old["sections"])
+        self.assertEqual([list(x) for x in secs], self.SECTIONS)
+        self.assertEqual(explain.diff_digest(doc), old["digest"])
+
+    def test_qa_may_approve_the_proposal(self):
+        import apply_check
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        barred = apply_check.barred_approvers(self.p.data["roles"], g["added"])
+        self.assertEqual(barred, [])
+        self.assertNotIn("qa", barred)
+        self.assertNotIn("auditor", barred)
+
+    def test_no_role_reach_moves(self):
+        for role in sorted(self.p.roles):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(self.s, role), explain.reach(self.a, role))
+
+    def test_exactly_the_declared_artefacts_move(self):
+        """The skeleton version against commit A': the two new zones' policies appear, the
+        research zone's (rs-notebooks, rs-lake-api, rs-research-postgresql), routes (new
+        services, empty role lists, audience) and every grants form (role_widening()'s COMMENT
+        carries the routes digest) move; nothing else, byte for byte as A''s cli.py compiles it."""
+        self.assertEqual(set(self.skel) - set(self.was), {"netpol-research-gw", "netpol-research-agents"})
+        self.assertEqual(set(self.was) - set(self.skel), set())
+        moved = {k for k in self.skel if k in self.was and self.was[k] != self.skel[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, {"routes", "netpol-research"})
+        self.assertNotIn("netpol", moved)
+        self.assertEqual(self.was["hosts"], self.skel["hosts"])
+        for key, want in self.skel.items():
+            if key in ("routes", "netpol-research", "netpol-research-gw", "netpol-research-agents") \
+                    or key.startswith("grants-"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+                self.assertEqual(rc, 0, f"{key} ({PRE_RS4A}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_grants(self):
+        """No privilege, membership or RLS moves; the SQL forms differ by role_widening()'s COMMENT (the routes digest)."""
+        go, gs = json.loads(self.was["grants-json"]), json.loads(self.skel["grants-json"])
+        self.assertEqual(go, gs)   # the JSON document is the privileges: unchanged
+        for key in (k for k in self.skel if k.startswith("grants-") and not k.startswith("grants-json")):
+            with self.subTest(key):
+                self.assertNotEqual(self.skel[key], self.was[key])
+                self.assertEqual(len(self.skel[key].splitlines()), len(self.was[key].splitlines()))
+
+    def test_the_zone_artefacts(self):
+        gw = json.loads(self.skel["netpol-research-gw"])["items"]
+        self.assertEqual([i["metadata"]["name"] for i in gw],
+                         ["gw-default-deny", "gw-dns-research-session", "gw-research-session"])
+        ra = json.loads(self.skel["netpol-research-agents"])["items"]
+        self.assertEqual([i["metadata"]["name"] for i in ra],
+                         ["ra-default-deny", "ra-dns-research-orchestrator", "ra-dns-mcp-sim", "ra-dns-mcp-lake",
+                          "ra-dns-agent", "ra-research-orchestrator", "ra-mcp-sim", "ra-mcp-lake", "ra-agent"])
+        rs = [i["metadata"]["name"] for i in json.loads(self.skel["netpol-research"])["items"]]
+        self.assertEqual(rs, ["rs-default-deny", "rs-dns", "rs-research-postgresql", "rs-hub",
+                              "rs-workbench-proxy", "rs-notebooks", "rs-lake-api"])
+        # no sim, estimate or replay Job has a policy of its own: the default deny leaves them nothing
+        self.assertFalse([n for n in (i["metadata"]["name"] for i in ra) if "sim-" in n or "estimate" in n or "replay" in n])
+        # the agent resolves names but admits nothing
+        agent = next(i for i in ra if i["metadata"]["name"] == "ra-agent")["spec"]
+        self.assertEqual(agent["ingress"], [])
+
+    def test_the_routes(self):
+        doc = json.loads(self.skel["routes"])
+        for svc in ("research-orchestrator", "research-session"):
+            self.assertEqual(doc["services"][svc]["clients"], ["research-agent"])
+            self.assertEqual(doc["services"][svc]["audience"], "medcea-research")
+            self.assertTrue(all(not r["roles"] for r in doc["services"][svc]["routes"].values()), svc)
+        self.assertEqual(sorted(s for s, v in doc["services"].items() if "audience" in v),
+                         ["research-orchestrator", "research-session"])
+        self.assertEqual(sorted(doc["public"]), ["*", "access-public", "mcp-lake", "mcp-sim", "research-orchestrator",
+                                                 "research-orchestrator-sim", "research-session-agent",
+                                                 "research-session-server"])
+
+    def test_the_change_version(self):
+        """Drafted "from defaults" once B is applied (OD8): research_campaigns bio_scientist
+        and control_scientist [R, C, U], engineer [R], nobody else. Only those three roles
+        widen, qa and auditor are not barred from approving it (the barred list is the three),
+        the artefacts that move are routes' role lists, the hosts-free role listings and the
+        grants forms (role_widening()'s widening rows)."""
+        import apply_check
+        m = self.p.data["matrix"]["research_campaigns"]
+        self.assertEqual(m, {"bio_scientist": ["R", "C", "U"], "control_scientist": ["R", "C", "U"], "engineer": ["R"]})
+        a = self.a.data["matrix"]
+        self.assertEqual({g: r for g, r in self.p.data["matrix"].items() if g != "research_campaigns"}, a)
+        diff_roles = explain.diff(self.s, self.p)["roles"]
+        self.assertEqual(sorted(r for r, v in diff_roles.items() if v.get("added")), self.WIDENED)
+        self.assertEqual([r for r, v in diff_roles.items() if v.get("removed")], [])
+        added = {r: v["added"] for r, v in diff_roles.items() if v.get("added")}
+        self.assertEqual(apply_check.barred_approvers(self.p.data["roles"], added), self.WIDENED)
+        for r in ("qa", "auditor", "admin"):
+            self.assertFalse(model.widening_between(self.s, self.p, r), r)
+        self.assertEqual(invariants.check(self.p)[0], [])
+        self.assertEqual(set(self.skel) ^ set(self.want), set())
+        moved = {k for k in self.want if self.skel[k] != self.want[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, {"routes"})
+        routes_s, routes_w = json.loads(self.skel["routes"]), json.loads(self.want["routes"])
+        for svc, route in (("research-orchestrator", "POST /api/sessions"), ("research-session", "POST /mint")):
+            self.assertEqual(sorted(routes_s["services"][svc]["routes"][route]["roles"]), [])
+            self.assertEqual(sorted(routes_w["services"][svc]["routes"][route]["roles"]),
+                             ["bio_scientist", "control_scientist"])
+        self.assertEqual(sorted(routes_w["services"]["research-orchestrator"]["routes"]["GET /api/sessions"]["roles"]),
+                         ["bio_scientist", "control_scientist", "engineer"])
+        gs, gw = json.loads(self.skel["grants-json"]), json.loads(self.want["grants-json"])
+        self.assertEqual(gs["privileges"], gw["privileges"])
+        self.assertEqual(apply_check._widening_roles(routes_s, routes_w), self.WIDENED)
 
 
 if __name__ == "__main__":
