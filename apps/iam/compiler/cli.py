@@ -12,7 +12,9 @@
                                         zone Z's NetworkPolicies in its namespace ZNS (research
                                         sandbox Phase 2a: rs-default-deny, rs-dns, rs-<pod>,
                                         labelled medcea/rs-netpol=true); an empty List while the
-                                        policy has no zone Z
+                                        policy has no zone Z. --zone-namespace ZONE=NS (repeatable,
+                                        research Phase 4a) gives another zone's namespace, needed
+                                        for a peer or hop in that zone
   cli.py compile egress CLIENT [--zone Z --namespace ZNS --platform-namespace NS] [--file F]
                                         the egress hops of network.clients.CLIENT, a JSON list of
                                         NetworkPolicyEgressRules on one line (the workbench chart's
@@ -599,6 +601,22 @@ def source_label(src, given=None):
     return source.label(src, given, warn=lambda m: print(m, file=sys.stderr))
 
 
+
+_NS_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+
+
+def _zone_namespaces(pairs):
+    """--zone-namespace ZONE=NS ... → {zone: ns}; None (after an ERROR line) on a bad pair."""
+    out = {}
+    for pair in pairs or []:
+        zone, sep, ns = pair.partition("=")
+        if not sep or zone not in netpol.ZONES or not _NS_RE.match(ns):
+            print(f"ERROR: --zone-namespace {pair!r}: ZONE=NAMESPACE with a known zone "
+                  f"({', '.join(netpol.ZONES)})", file=sys.stderr)
+            return None
+        out[zone] = ns
+    return out
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cli.py", description=__doc__.splitlines()[0])
     ap.add_argument("--file", help="an offline policy file (never in a deploy script)")
@@ -630,6 +648,9 @@ def main(argv=None):
     comp.add_argument("--zone", help="compile netpol: a zone of network.zones (research), not the platform zone; "
                                       "compile egress: the zone whose namespace --namespace names")
     comp.add_argument("--platform-namespace", help="compile netpol --zone / egress --zone: the platform zone's namespace")
+    comp.add_argument("--zone-namespace", action="append", default=[], metavar="ZONE=NS",
+                      help="compile netpol --zone / egress --zone: another zone's namespace, for a peer or hop "
+                           "in that zone (research Phase 4a); repeatable")
     comp.add_argument("--setting", choices=["allowed_groups", "admin_groups"], help="compile jupyterhub: which list")
     comp.add_argument("--node-ip", action="append", default=[])
     comp.add_argument("--mode", choices=["additive", "enforce", "verify"])
@@ -784,15 +805,18 @@ def main(argv=None):
         if args.zone is not None and not args.platform_namespace:
             print("ERROR: compile netpol --zone needs --platform-namespace", file=sys.stderr)
             return 2
-        if args.zone is None and args.platform_namespace:
-            print("ERROR: --platform-namespace goes only with --zone", file=sys.stderr)
+        if args.zone is None and (args.platform_namespace or args.zone_namespace):
+            print("ERROR: --platform-namespace and --zone-namespace go only with --zone", file=sys.stderr)
+            return 2
+        others = _zone_namespaces(args.zone_namespace)
+        if others is None:
             return 2
         try:
             if args.zone is None:
                 print(json.dumps(netpol.compile(p, args.namespace, args.node_ip), indent=1))
             else:
                 print(json.dumps(netpol.compile_zone(p, args.zone, args.namespace, args.platform_namespace,
-                                                     args.node_ip), indent=1))
+                                                     args.node_ip, others or None), indent=1))
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -806,7 +830,10 @@ def main(argv=None):
             if not args.namespace or not args.platform_namespace:
                 print("ERROR: compile egress --zone needs --namespace and --platform-namespace", file=sys.stderr)
                 return 2
-            namespaces = {None: args.platform_namespace, args.zone: args.namespace}
+            others = _zone_namespaces(args.zone_namespace)
+            if others is None:
+                return 2
+            namespaces = {**others, None: args.platform_namespace, args.zone: args.namespace}
         elif args.namespace or args.platform_namespace:
             print("ERROR: compile egress: --namespace and --platform-namespace go only with --zone", file=sys.stderr)
             return 2

@@ -91,7 +91,14 @@ LABEL = "medcea/iam-netpol"
 _RPC = re.compile(r"^[a-z_][a-z0-9_]*$")
 KINDS = ("proxy:", "pod:", "client:")
 # zone → (name prefix, label key). A zone name not listed here is an error.
-ZONES = {"research": ("rs", "medcea/rs-netpol")}
+ZONES = {"research": ("rs", "medcea/rs-netpol"),
+         # research Phase 4a (design rs4 R2): the agent machinery, in a namespace the notebook
+         # hub cannot create pods in, and the key and trace holder beside it
+         "research-agents": ("ra", "medcea/ra-netpol"),
+         "research-gw": ("gw", "medcea/gw-netpol")}
+# A research-gw pod (the session key, the trace writer) admits only these zones' pods (R2),
+# and the node (kubelet probes); never the research zone, the platform, a proxy or ingress.
+GW_ADMITS = ("research-agents", "research-gw")
 SOURCE = "apps/iam/policy/defaults.yaml"
 DNS_NAMESPACE = "kube-system"
 DNS_SELECTOR = {"k8s-app": "kube-dns"}
@@ -210,6 +217,10 @@ def _zone_check(net, errors):
             if "zone" in d and (not isinstance(d["zone"], str) or d["zone"] not in zs):
                 errors.append(f"network: {kind} {name}: zone {d['zone']!r} is not in network.zones")
     for name, rule, src in _sources(net):
+        if pods[name].get("zone") == "research-gw" and src != "node" and _zone_of(net, src) not in GW_ADMITS:
+            errors.append(f"network: pod {name} port {rule.get('port')}: source {src} is not a pod of "
+                          f"{' or '.join(GW_ADMITS)}; a research-gw pod admits only those (and the node)")
+    for name, rule, src in _sources(net):
         if pods[name].get("zone") is None and _zone_of(net, src) is not None:
             errors.append(f"network: pod {name} port {rule.get('port')}: source {src} is in zone "
                           f"{_zone_of(net, src)}; a platform pod admits only platform sources")
@@ -287,7 +298,8 @@ def check(p):
     for name, pd in pods.items():
         if not pd.get("selector"):
             errors.append(f"network: pod {name} has no selector")
-        if not pd.get("ingress"):
+        if not pd.get("ingress") and not (pd.get("zone") and pd.get("egress")):
+            # a zone pod that only sends (the agent Jobs, rs4 R2) may admit nothing
             errors.append(f"network: pod {name} admits nothing (no ingress rules)")
         for rule in pd.get("ingress") or []:
             if not isinstance(rule.get("port"), int):
@@ -431,7 +443,7 @@ def _peer(net, src, node_ips, here=None, namespaces=None):
 
 def _ingress_rules(net, pd, node_ips, here=None, namespaces=None):
     rules = []
-    for rule in pd["ingress"]:
+    for rule in pd.get("ingress") or []:
         peers = [peer for src in rule["from"] for peer in _peer(net, src, sorted(set(node_ips)), here, namespaces)]
         rules.append({"from": peers, "ports": [{"protocol": "TCP", "port": rule["port"]}]})
     return rules
@@ -474,9 +486,11 @@ def zone_label(zone):
     return ZONES[zone][1]
 
 
-def compile_zone(p, zone, namespace, platform_namespace, node_ips):
+def compile_zone(p, zone, namespace, platform_namespace, node_ips, zone_namespaces=None):
     """The Kubernetes List of zone `zone`'s NetworkPolicies in `namespace`: the default deny,
-    the DNS allow and one per zone pod; empty while the policy has no such zone."""
+    the DNS allow and one per zone pod; empty while the policy has no such zone.
+    zone_namespaces: {other zone: its namespace}, needed only for a peer or hop in another
+    zone (research Phase 4a); without it such a peer raises."""
     label = zone_label(zone)
     prefix = ZONES[zone][0]
     if not has_zone(p, zone):
@@ -486,8 +500,8 @@ def compile_zone(p, zone, namespace, platform_namespace, node_ips):
     net = p.data["network"]
     if not node_ips and _needs_node(net, zone):
         raise ValueError(f"zone {zone} admits `node`, but no node address was given")
-    # another zone's namespace is not known here: a peer between two zones raises
-    namespaces = {None: platform_namespace, zone: namespace}
+    # another zone's namespace comes from zone_namespaces; a peer in a zone not given raises
+    namespaces = {**(zone_namespaces or {}), None: platform_namespace, zone: namespace}
 
     def item(name, src, spec):
         return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
