@@ -175,7 +175,7 @@ class JobRunnerTest(unittest.TestCase):
         self.assertEqual(j["spec"]["activeDeadlineSeconds"], 700)
         self.assertEqual(j["spec"]["backoffLimit"], 0)
         self.assertEqual(c["command"][-6:], ["--out", "/runs/campaigns/" + self.CID, "--jobs", "3", "--max-cpu-hours", "1.5"][-6:])
-        self.assertEqual(json.loads(base64.b64decode(c["env"][0]["value"])), {"scenarios": []})
+        self.assertEqual(json.loads(base64.b64decode(next(e for e in c["env"] if e["name"] == "MEDCEA_SIM_SPEC")["value"])), {"scenarios": []})
         with self.assertRaises(ValueError):
             self.r.start("bad", {}, 1, 10)
         with self.assertRaises(ValueError):
