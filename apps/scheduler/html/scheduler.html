@@ -565,6 +565,8 @@ async function loadActive() {
     const actions = [];
     if (r.recipe_run_status === 'S') {
       actions.push(`<button class="btn btn-sm btn-green" onclick="executeRun(${r.recipe_run_id})">▶ Execute</button>`);
+      // a queued run can be cancelled too: the same stop route sets S -> F (medcea.set_run_status, level O)
+      actions.push(`<button class="btn btn-sm btn-danger" onclick="stopRun(${r.recipe_run_id}, true)">■ Cancel</button>`);
     }
     if (r.recipe_run_status === 'R') {
       actions.push(`<button class="btn btn-sm btn-danger" onclick="stopRun(${r.recipe_run_id})">■ Stop</button>`);
@@ -657,12 +659,15 @@ async function submitRetry() {
   loadActive();
 }
 
-async function stopRun(runId) {
-  if (!confirm(`Stop run #${runId}? The process will be terminated and the run marked as Failed.`)) return;
+async function stopRun(runId, queued) {
+  const ask = queued
+    ? `Cancel queued run #${runId}? Nothing is running yet; the run is marked as Failed and can be retried later.`
+    : `Stop run #${runId}? The process will be terminated and the run marked as Failed.`;
+  if (!confirm(ask)) return;
   const res = await fetch(`${API}/runs/${runId}/stop`, {method:'POST'});
   if (res.ok) {
     const d = await apiOk(res);
-    toast(d.pid ? `Run #${runId} stopped (pid ${d.pid})` : `Run #${runId} stopped`);
+    toast(d.pid ? `Run #${runId} stopped (pid ${d.pid})` : (queued ? `Run #${runId} cancelled` : `Run #${runId} stopped`));
     loadActive();
     loadRuns();
   } else {
