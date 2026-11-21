@@ -3366,6 +3366,9 @@ BEGIN
     -- policy before structure: assigned_run (the unit first) precedes every
     -- status, transition, running-run and parameter check
     PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
+    IF r.is_active = 'N' THEN
+        RAISE EXCEPTION 'start_run: run % is decommissioned: it is kept as a record and never runs again', p_run_id USING ERRCODE = '22023';
+    END IF;
     IF r.recipe_run_status <> 'S' THEN
         RAISE EXCEPTION 'start_run: run % is %, not S', p_run_id, r.recipe_run_status USING ERRCODE = '22023';
     END IF;
@@ -3397,7 +3400,9 @@ BEGIN
     PERFORM medcea_auth._owner_write(false);
 END $$;
 
--- set_run_status(run, status): S -> F, R -> F (ends it), F -> S. Level O.
+-- set_run_status(run, status): S -> F, R -> F (ends it), F -> S, and F -> D (decommission,
+-- 21 Nov 2026): the run stays F and is_active becomes 'N', kept as a record, never run again.
+-- A decommissioned run refuses every later transition, and start_run refuses it. Level O.
 CREATE OR REPLACE FUNCTION medcea.set_run_status(p_run_id integer, p_status text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = medcea, pg_temp AS $$
 DECLARE
@@ -3418,16 +3423,23 @@ BEGIN
     -- policy before structure: assigned_run (the unit first) precedes every
     -- status, transition, running-run and parameter check
     PERFORM medcea._check_assigned_run(r, a.sub, a.person, a.role);
-    IF NOT ((r.recipe_run_status, p_status) IN (('S', 'F'), ('R', 'F'), ('F', 'S'))) THEN
+    IF r.is_active = 'N' THEN
+        RAISE EXCEPTION 'set_run_status: run % is decommissioned: it is kept as a record and never runs again', p_run_id USING ERRCODE = '22023';
+    END IF;
+    IF NOT ((r.recipe_run_status, p_status) IN (('S', 'F'), ('R', 'F'), ('F', 'S'), ('F', 'D'))) THEN
         RAISE EXCEPTION 'set_run_status: % -> % is not a transition', r.recipe_run_status, p_status USING ERRCODE = '22023';
     END IF;
     IF p_status = 'S' THEN
         PERFORM medcea._unit_schedulable(r.unit_id);
     END IF;
     PERFORM medcea_auth._owner_write(true);
-    UPDATE medcea.recipe_run SET recipe_run_status = p_status, timestamp_upd = now(),
-           recipe_run_end = CASE WHEN p_status = 'F' THEN now() WHEN p_status = 'S' THEN NULL ELSE recipe_run_end END
-     WHERE recipe_run_id = p_run_id;
+    IF p_status = 'D' THEN
+        UPDATE medcea.recipe_run SET is_active = 'N', timestamp_upd = now() WHERE recipe_run_id = p_run_id;
+    ELSE
+        UPDATE medcea.recipe_run SET recipe_run_status = p_status, timestamp_upd = now(),
+               recipe_run_end = CASE WHEN p_status = 'F' THEN now() WHEN p_status = 'S' THEN NULL ELSE recipe_run_end END
+         WHERE recipe_run_id = p_run_id;
+    END IF;
     PERFORM medcea_auth._owner_write(false);
 END $$;
 

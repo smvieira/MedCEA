@@ -146,7 +146,7 @@ def get_runs():
             FROM medcea.recipe_run rr
             JOIN medcea.cea_unit u ON u.unit_id = rr.unit_id
             JOIN medcea.recipe rc ON rc.recipe_id = rr.recipe_id
-            WHERE rr.recipe_run_status <> 'C'
+            WHERE rr.recipe_run_status <> 'C' AND rr.is_active = 'Y'
             """ + ("AND rr.unit_id IN " + _MY_UNITS + "\n            " if sub else "") + """ORDER BY u.unit_code
         """
         if sub:
