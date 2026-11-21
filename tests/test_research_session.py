@@ -252,7 +252,9 @@ class SessionTest(unittest.TestCase):
         q = {"token": tok, "audience": "mcp-sim", "peer": "127.0.0.1"}
         st, r = self.call(2, "POST", "/introspect", q)
         self.assertTrue(r["active"])
-        self.assertEqual(r["tools"], ["sim.run"])                  # only this audience's tools
+        # only this audience's tools: since stage 7a mcp-sim also serves propose.* (TOOL_SERVER)
+        self.assertEqual(r["tools"], ["sim.run", "propose"])
+        self.assertNotIn("lake.query", r["tools"])
         self.assertEqual(r["budget_left"]["turns"], 7)
         self.assertEqual(self.call(2, "POST", "/introspect", dict(q, peer="10.0.0.5"))[1], {"active": False})
         self.assertEqual(self.call(2, "POST", "/introspect", dict(q, audience="mcp-other"))[1], {"active": False})
