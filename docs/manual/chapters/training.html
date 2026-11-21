@@ -54,6 +54,7 @@
 <tr><td><a href="#training-e44">E44 The scientists' live data and Superset end</a></td><td><span class="role">admin</span>, <span class="role">qa</span>, <span class="role">bio_scientist</span>, <span class="role">engineer</span></td><td>The change version narrows exactly the decided cells: the scientists lose the Run Monitor, Superset is stopped and its card greyed out, the exported dashboards survive.</td><td>20 Nov 2026 (nothing to export; steps 4–5 reported by the owner)</td></tr>
 <tr><td><a href="#training-e45">E45 Calibrate the sensor model from a snapshot and compare the controllers on it</a></td><td>host operator, for the <span class="role">control_scientist</span></td><td>A snapshot fetched by its lineage gives the same files twice and recomputes its recorded digest; the sensor model is fitted to it with the values the data supports, every plant constant is refused, and the comparisons on the calibrated model name the snapshot in their manifests and give the same result digest at one or several processes.</td><td>20 Nov 2026 (in the session's scratch folder and the platform's checkout, not a worktree)</td></tr>
 <tr><td><a href="#training-e46">E46 A board whose name the router does not know</a></td><td><span class="role">engineer</span>, <span class="role">admin</span></td><td>A connected board whose hostname does not resolve shows amber with its last reported address for a role that reads its messages, red with the reason for one that does not, and green once the router knows its name.</td><td>20 Nov 2026 (steps 1–3)</td></tr>
+<tr><td><a href="#training-e53">E53 Read a control loop in Grafana</a></td><td>any role that opens Grafana's reports, for example <span class="role">engineer</span> or <span class="role">production_manager</span></td><td>For each quantity of a running zone, the report shows every sensor, the value the loop's rule used, the recipe step's bounds and the command sent, with what it does.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e52">E52 Rerun or decommission a failed run</a></td><td><span class="role">production_manager</span></td><td>A failed run is run again as a new run with a parameter set, or decommissioned for good only after its number is typed; a decommissioned run refuses every later action.</td><td>21 Nov 2026 (steps 1–3)</td></tr>
 <tr><td><a href="#training-e47">E47 A domain of your own on a fresh install</a></td><td>host operator</td><td>A custom domain is configured so that its names resolve on the host, the deploy says so, and a domain whose names do not resolve is reported as a problem, never as SUCCESS.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e51">E51 Measure the local model before anything is built on it</a></td><td>host operator</td><td>The bench and the offline tool-call eval run only while no recipe run is running or scheduled, stay within a cap checked against the pessimistic estimate, stop and delete their Job or Pod when interrupted or when a run starts, and leave one day's report holding every measurement and a recommendation made on both throughput and the graded eval.</td><td>Not yet</td></tr>
@@ -1704,6 +1705,30 @@ SQL</code></pre></li>
 <p><strong>Refusals worth trying.</strong> A request without the run's number, <code>PATCH /api/runs/&lt;N&gt;/status</code> with <code>{"status": "D"}</code>: "to decommission run N, confirm with its number". Decommissioning a Queued or Running run: "only a failed or stopped run is decommissioned". Retrying or executing a decommissioned run: "run N is decommissioned: it is kept as a record and never runs again" (the scheduler and the database both refuse). As an operator, a run no production manager prepared for one of your units: refused as for Stop.</p>
 <p><strong>Afterwards.</strong> Nothing to undo: a decommissioned run stays a record.</p>
 <p><strong>Last done.</strong> 21 November 2026, commit <code>9c7a85d</code> (database, scheduler and monitor deploys of that day), by the owner as <code>pm_user</code>: run #1 on UNIT01 (created 16 November, no parameter set, Failed) was decommissioned at 09:56 UTC (status F, <code>is_active</code> N, <code>updated_by</code> pm_user) and the recipe rerun as run #2 with parameter set #2 (PID), Running from 09:57 UTC. Step 4 (the lists and the Monitor) and the refusals were not written down.</p>
+
+<h3 id="training-e53">E53 Read a control loop in Grafana</h3>
+<p><strong>Goal.</strong> Follow one quantity of a running zone from its sensors to the command its loop sent, and check it against the recipe and the run. Proves the report described in <a href="#apps-grafana-loops">Reading the Control Loops report</a>.</p>
+<p><strong>Accounts and roles.</strong> An account that opens Grafana's reports (<span class="role">engineer</span>, or <span class="role">production_manager</span> as a Viewer).</p>
+<p><strong>Before you start.</strong> <code>./apps/report/deploy.sh</code> has run with this change, and a run is running on the unit, or ran within the last 3 hours.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>Portal → Reports → Standard reports → folder MedCEA → <strong>Control Loops: Sensors, Recipe Bounds and Commands</strong>; choose the unit and zone.</li>
+<li>In the <strong>Air humidity</strong> block, read the table: the rule, the sensors it may use, the bounds now, the value used and the last command.</li>
+<li>In the chart, compare the two sensor lines with the thick white line, and the white line with the dashed bounds.</li>
+<li>In the bar under the chart, find where the command changes, and check that it fits the value and the bounds at that moment.</li>
+<li>In the <strong>CO<sub>2</sub></strong> block, check what UP does.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 2: a rule in words, for example "Uses sht45_1; falls back to scd30_1 when it is stale · readings older than 20 s are ignored", and the bounds of the recipe step now running, with its step and cycle.</li>
+<li>Step 3: the white line on the reference sensor's line (on the fallback's while the reference is stale); the dashed bounds stepping at each recipe step.</li>
+<li>Step 4: below the band, UP; above it, DOWN (for temperature, cooling); held where a reading was missing.</li>
+<li>Step 5: "UP: fresh-air fan on (lowers CO₂)".</li>
+</ul>
+<div class="record"><p>Nothing is recorded: the report reads the readings, the commands the run sent and the cycles' recorded parameters, as Grafana's read-only database account. Write the date, the commit, the run and what you saw under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong> An account whose role Grafana does not admit (an <span class="role">operator</span>) is refused at Grafana's sign-in.</p>
+<p><strong>Afterwards.</strong> Nothing to undo.</p>
+<p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>
 <p>Every change a user would notice gets an exercise in this chapter, in the same piece of work as the change: a new screen, button, rule or refusal. Extend an exercise when the change belongs to it; add a new one (E9, E10 and so on) when it does not.</p>
