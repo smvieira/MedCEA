@@ -650,6 +650,7 @@ def main(argv=None):
     b.add_argument("raw")
     b.add_argument("out")
     b.add_argument("--stopped", help="why the host stopped the Job early (recorded in the parsed file)")
+    b.add_argument("--during-run", help="the recipe runs active while it measured (--during-run): every row is marked")
     mc = sub.add_parser("machine")
     mc.add_argument("--proc", default="/proc")
     mc.add_argument("--sys", default="/sys")
@@ -720,6 +721,12 @@ def main(argv=None):
                 parsed = parse_bench(f.read())
             if a.stopped:
                 parsed["stopped"] = a.stopped
+            if a.during_run:
+                # taken beside an active recipe run (owner decision of 21 Nov 2026): kept apart
+                # from a quiet host's numbers in every row
+                parsed["during_run"] = a.during_run
+                for r in parsed.get("runs", []):
+                    r["during_run"] = True
             write_json(a.out, parsed)
             print("parsed %d runs, %d skipped, avx check %s%s" % (
                 len(parsed["runs"]), len(parsed["skipped"]), parsed["avx_check"],

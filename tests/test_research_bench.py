@@ -288,6 +288,12 @@ class BenchScript(unittest.TestCase):
                         ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(os.path.join(ROOT, "research"), os.path.join(self.tree, "research"),
                         ignore=shutil.ignore_patterns("__pycache__", ".venv", "runs"))
+        # a real bench's report of today (research/agents/bench/<date>.json) must not leak in:
+        # report merges every bench of the date, so the scratch tree starts with none
+        bench_dir = os.path.join(self.tree, "research", "agents", "bench")
+        for f in os.listdir(bench_dir) if os.path.isdir(bench_dir) else []:
+            if re.match(r"^\d{4}-\d{2}-\d{2}\.json$", f):
+                os.unlink(os.path.join(bench_dir, f))
         self.bin = os.path.join(self.t, "bin")
         os.makedirs(self.bin)
         p = os.path.join(self.bin, "microk8s")
@@ -445,6 +451,55 @@ class BenchScript(unittest.TestCase):
                 log = self.fake_log()
                 self.assertIn("delete job %s -n medcea --ignore-not-found --wait=false" % job, log)
                 self.assertIn("Stopped before Job %s finished: it was deleted" % job, out + err)
+
+    def loadavg(self, one):
+        path = os.path.join(self.t, "loadavg")
+        with open(path, "w") as f:
+            f.write("%s 1.00 1.00 2/900 12345\n" % one)
+        return path
+
+    def test_during_run_goes_on_beside_a_run_and_marks_the_rows(self):
+        # owner decision of 21 Nov 2026: a fruiting run lasts days, so the bench may run beside one
+        p = self.run_bench("bench", "--models", "8b", "--during-run",
+                           env={"FAKE_RUNS": "7|R", "MEDCEA_BENCH_LOADAVG": self.loadavg("2.5"), "MEDCEA_BENCH_NPROC": "24"})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("--during-run: going on beside these runs", p.stdout + p.stderr)
+        parsed = [f for f in os.listdir(os.path.join(self.tree, "logs")) if f.endswith(".parsed.json")]
+        doc = json.load(open(os.path.join(self.tree, "logs", parsed[0])))
+        self.assertEqual(doc["during_run"], "run 7 status R")
+        self.assertTrue(doc["runs"] and all(r.get("during_run") is True for r in doc["runs"]))
+
+    def test_during_run_stops_when_the_host_is_loaded(self):
+        import threading
+        load = self.loadavg("2.0")
+        def busy():
+            with open(load, "w") as f:
+                f.write("30.0 1.00 1.00 2/900 12345\n")
+        t = threading.Timer(3.0, busy)
+        t.start()
+        try:
+            p = self.run_bench("bench", "--models", "8b", "--during-run",
+                               env={"FAKE_JOB_RUNNING": "1", "FAKE_RUNS": "7|R", "MEDCEA_BENCH_RECHECK": "0",
+                                    "MEDCEA_BENCH_LOADAVG": load, "MEDCEA_BENCH_NPROC": "24"})
+        finally:
+            t.cancel()
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("stopped: the 1-minute load is 30 on 24 CPUs beside an active run", p.stdout + p.stderr)
+        self.assertIn("delete job research-llm-bench -n medcea --ignore-not-found --wait=false", self.fake_log())
+
+    def test_during_run_refused_on_a_loaded_host_and_only_for_bench_and_eval(self):
+        p = self.run_bench("bench", "--models", "8b", "--during-run",
+                           env={"FAKE_RUNS": "7|R", "MEDCEA_BENCH_LOADAVG": self.loadavg("30.0"), "MEDCEA_BENCH_NPROC": "24"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("the 1-minute load is 30 on 24 CPUs beside an active run (at most 22): refused", p.stdout + p.stderr)
+        self.assertNotIn("ARGV kubectl apply", self.fake_log())
+        for args in (["fetch", "--during-run"], ["report", "--during-run"]):
+            with self.subTest(args):
+                self.assertEqual(self.run_bench(*args).returncode, 2)
+        # without the option a run still refuses
+        p = self.run_bench("bench", "--models", "8b", env={"FAKE_RUNS": "7|R"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("Refused while a recipe run is R or S", p.stdout + p.stderr)
 
     def test_a_run_that_starts_stops_the_bench(self):
         p = self.run_bench("bench", "--models", "8b", env={"FAKE_JOB_RUNNING": "1", "FAKE_RUNS_AFTER": "1",

@@ -9,8 +9,8 @@
 #   apps/research-model/bench.sh fetch   [--models 8b,4b] [--verify-only]
 #   apps/research-model/bench.sh bench   [--models 8b,4b] [--threads 6,12] [--numa none,isolate]
 #                                        [--depths 0,4096,12288] [--depth-threads 6] [--depth-numa none]
-#                                        [--socket 0] [--max-hours 4]
-#   apps/research-model/bench.sh eval    [--models 8b,4b] [--eval-threads 6] [--ctx 24576] [--socket 0] [--max-hours 4]
+#                                        [--socket 0] [--max-hours 4] [--during-run]
+#   apps/research-model/bench.sh eval    [--models 8b,4b] [--eval-threads 6] [--ctx 24576] [--socket 0] [--max-hours 4] [--during-run]
 #   apps/research-model/bench.sh report  [--date YYYY-MM-DD]
 #   apps/research-model/bench.sh cleanup
 #
@@ -63,7 +63,12 @@
 # has less memory available than the Job needs plus 2 GiB. A Job's CPU request
 # is 100m with no CPU limit and nice 19: it yields to every Burstable or Guaranteed pod; the
 # BestEffort production pods (owner decision OD24, not built yet) still share the CPUs with
-# it, hence the refusal while a run is active. Logs: logs/research-llm-bench-<ts>.log; the
+# it, hence the refusal while a run is active. --during-run (owner decision of 21 Nov 2026: a
+# fruiting run lasts days) lets bench and eval run beside an active run: the runs are listed
+# and the measurements are marked as taken during one; instead of the run check, every 5 min
+# the host must keep MemAvailable >= 3 GiB and a 1-minute load below the CPU count minus 2,
+# or the Job or Pod is stopped (exit 1, partial results kept). medcea.recipe_run must still
+# be readable. Logs: logs/research-llm-bench-<ts>.log; the
 # raw and parsed results: logs/research-llm-{bench,eval}-<ts>*.
 #
 # Exit 0 done; 1 refused (a run R or S, the folder, too little memory, a held lock, a Job
@@ -85,6 +90,7 @@ usage() { die 2 "$*  (apps/research-model/bench.sh --help)"; }
 
 # ── Arguments (before the log and the lock, so a usage error needs neither) ──────
 CMD="$1"; shift
+DURING_RUN=0; RUNS_AT_START=""
 MODELS="8b,4b"; THREADS="6,12"; NUMA="none,isolate"; DEPTHS="0,4096,12288"
 DEPTH_THREADS=6; DEPTH_NUMA=none; SOCKET=0; MAX_HOURS=4; EVAL_THREADS=6; CTX=24576
 DATE=""; VERIFY_ONLY=0
@@ -100,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     OPT="$1"
     case "$1" in
         --verify-only)   _only fetch; VERIFY_ONLY=1; shift; continue ;;
+        --during-run)    _only bench eval; DURING_RUN=1; shift; continue ;;
         --models)        _only plan fetch bench eval; _value "$@"; MODELS="$2" ;;
         --threads)       _only plan bench; _value "$@"; THREADS="$2" ;;
         --numa)          _only plan bench; _value "$@"; NUMA="$2" ;;
@@ -277,6 +284,13 @@ runs_active() {   # refuse while a recipe run is R or S (read-only psql, as heal
     if [[ "$rc" == 1 ]]; then
         echo "Recipe runs running (R) or scheduled (S):" >&2
         sed 's/^run \([^ ]*\) status /  run \1  status /' <<<"$RUNS_FOUND" >&2
+        if [[ "$DURING_RUN" == 1 ]]; then
+            RUNS_AT_START="$(paste -sd ';' <<<"$RUNS_FOUND")"
+            warn "--during-run: going on beside these runs (owner decision of 21 Nov 2026); the numbers are taken during a run, and the host's memory and load are watched every $(( RECHECK / 60 )) min instead."
+            host_ok || die 1 "$STOP_WHY: refused."
+            LAST_CHECK="$(date +%s)"; CHECK_FAILS=0
+            return 0
+        fi
         die 1 "Refused while a recipe run is R or S: the bench would take CPU from the scheduler's control loops (R25). Run it when no run is active or scheduled."
     fi
     log "No recipe run is R or S."
@@ -290,6 +304,10 @@ guard_tick() {   # while a Job or the eval runs: every RECHECK s look again → 
     (( now - ${LAST_CHECK:-0} >= RECHECK )) || return 0
     LAST_CHECK="$now"
     runs_query || rc=$?
+    if [[ "$rc" == 1 && "$DURING_RUN" == 1 ]]; then
+        host_ok || return 3
+        rc=0
+    fi
     if [[ "$rc" == 1 ]]; then
         STOP_WHY="$(head -n1 <<<"$RUNS_FOUND" | awk '{print "run " $2 " started (status " $4 ")"}')"
         return 3
@@ -304,6 +322,16 @@ guard_tick() {   # while a Job or the eval runs: every RECHECK s look again → 
         return 0
     fi
     CHECK_FAILS=0
+    return 0
+}
+
+host_ok() {   # --during-run's guard: MemAvailable >= 3 GiB and the 1-min load below nproc - 2 (else STOP_WHY, 1)
+    local avail load cpus
+    avail="$(awk '/^MemAvailable:/ {printf "%d", $2/1048576}' "${MEDCEA_BENCH_MEMINFO:-/proc/meminfo}")"
+    load="$(awk '{printf "%d", $1}' "${MEDCEA_BENCH_LOADAVG:-/proc/loadavg}")"
+    cpus="${MEDCEA_BENCH_NPROC:-$(nproc)}"
+    if (( avail < 3 )); then STOP_WHY="only $avail GiB of memory available beside an active run (3 GiB kept free)"; return 1; fi
+    if (( load > cpus - 2 )); then STOP_WHY="the 1-minute load is $load on $cpus CPUs beside an active run (at most $(( cpus - 2 )))"; return 1; fi
     return 0
 }
 
@@ -448,6 +476,7 @@ if [[ "$CMD" == bench ]]; then
     BENCH_JOB=""
     cp "$TMPD/plan.json" "$OUTDIR/research-llm-bench-$STAMP.plan.json"
     stopped=(); [[ "$rc" == 3 ]] && stopped=(--stopped "$STOP_WHY")
+    [[ "$DURING_RUN" == 1 && -n "$RUNS_AT_START" ]] && stopped+=(--during-run "$RUNS_AT_START")
     prc=0; python3 "$LIB" parse-bench "$RAW" "$OUTDIR/research-llm-bench-$STAMP.parsed.json" "${stopped[@]}" || prc=$?
     report --bench "$OUTDIR/research-llm-bench-$STAMP.parsed.json"
     [[ "$rc" == 3 ]] && die 1 "stopped: $STOP_WHY. Job research-llm-bench was deleted; what it measured is in the report (raw log: $RAW)."
@@ -491,6 +520,7 @@ PY
         (( left >= 600 )) || eval_stop "Out of time before the eval of $m (the end time from --max-hours $MAX_HOURS has passed or is under 10 min away); what was graded is in the report."
         if [[ ${#results[@]} -gt 0 ]]; then   # the runs again before the next model (the first was checked above)
             qrc=0; runs_query || qrc=$?
+            if [[ "$qrc" == 1 && "$DURING_RUN" == 1 ]]; then host_ok || eval_stop "stopped: $STOP_WHY, before the eval of $m; what was graded is in the report."; qrc=0; fi
             [[ "$qrc" == 1 ]] && eval_stop "stopped: $(head -n1 <<<"$RUNS_FOUND") before the eval of $m; what was graded is in the report."
             [[ "$qrc" == 2 ]] && eval_stop "Cannot read medcea.recipe_run before the eval of $m (the bench never runs unchecked): $RUNS_ERR"
             LAST_CHECK="$(date +%s)"
