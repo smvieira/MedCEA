@@ -94,6 +94,7 @@ REPORTS = {   # file → uid, the standard report set of 17 Nov 2026
     "run-history.json": "medcea-run-history",
     "release-status.json": "medcea-release-status",
     "device-zone-health.json": "medcea-device-zone-health",
+    "control-loops.json": "medcea-control-loops",       # 21 Nov 2026
 }
 # Granted to svc_grafana but security_invoker views over tables it may not read.
 UNREADABLE_VIEWS = {"medcea.run_history", "medcea.run_watch"}
@@ -245,6 +246,44 @@ class StandardReportsTest(unittest.TestCase):
         provider = read(os.path.join("apps", "report", "k8s", "dashboard-provider.yaml"))
         self.assertIn("allowUiUpdates: false", provider)
         self.assertIn("folder: MedCEA", provider)
+
+
+class ControlLoopsTest(unittest.TestCase):
+    """Control Loops (21 Nov 2026): per quantity, each sensor, the value the loop used, the
+    bounds of the recipe step from the cycle's recorded run_params (run_history is not
+    readable by svc_grafana), and the command sent with what it does."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = load(os.path.join(ROOT, "apps", "report", "dashboards", "control-loops.json"))
+        cls.sql = {p.get("title"): [t["rawSql"] for t in p.get("targets", [])] for p in panels(cls.doc)}
+
+    def test_one_block_per_quantity(self):
+        (row,) = [p for p in panels(self.doc) if p.get("repeat")]
+        self.assertEqual(row["repeat"], "quantity")
+        q = [v for v in self.doc["templating"]["list"] if v["name"] == "quantity"][0]
+        for code in ("air_temperature", "air_humidity", "co2", "substrate_temperature"):
+            self.assertIn(": " + code, q["query"])
+
+    def test_bounds_come_from_the_cycles_recorded_parameters(self):
+        flat = " ".join(sum(self.sql.values(), []))
+        self.assertIn("FROM medcea.recipe_line_cycle_run c", flat)
+        self.assertIn("->'setpoints'->'$quantity'->>'lower'", flat)
+        self.assertNotIn("run_history", flat)
+
+    def test_every_sensor_and_the_value_used_are_separate_series(self):
+        (ts,) = [p for p in panels(self.doc) if p.get("type") == "timeseries"]
+        names = [t["rawSql"] for t in ts["targets"]]
+        self.assertIn("concat_ws(' / ', zone_code, sensor) AS metric", names[0])
+        self.assertIn("'Value the loop used' AS metric", names[1])
+        self.assertIn('"Recipe lower bound"', names[2])
+
+    def test_commands_say_what_they_do(self):
+        flat = " ".join(sum(self.sql.values(), []))
+        self.assertIn("UP: fresh-air fan on (lowers CO₂)", flat)       # co2's command map: UP lowers it
+        self.assertIn("UP: humidifier on (raises humidity)", flat)
+        self.assertIn("DOWN: cooling on", flat)
+        self.assertIn("(held: no fresh reading)", flat)
 
 
 if __name__ == "__main__":

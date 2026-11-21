@@ -1,0 +1,694 @@
+{
+  "title": "Control Loops: Sensors, Recipe Bounds and Commands",
+  "uid": "medcea-control-loops",
+  "description": "Per quantity of a zone: each sensor, the value the loop's rule used, the bounds of the recipe step running, and the command sent (UP, DOWN, OFF) with what it does.",
+  "tags": [
+    "report",
+    "control",
+    "runs"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "schemaVersion": 38,
+  "graphTooltip": 1,
+  "editable": false,
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Overview",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "text",
+      "id": 2,
+      "title": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 14,
+        "h": 9
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**How to read this report.** One block per quantity of the selected unit and zone, for the runs in the time range.\n\n1. **Sensors**: a zone may have more than one sensor for a quantity (the SHT45 and the SCD30 both measure air temperature and humidity). Each is drawn on its own (thin lines, *zone / sensor*).\n2. **Rule**: the loop's rule decides which reading it uses: *reference* (one sensor, with a fallback when it goes stale), or the average, lowest or highest of the fresh sensors. Readings older than the loop's limit are ignored. The value it used is the **thick white line**.\n3. **Recipe bounds**: the recipe step running at that moment sets a lower and an upper bound (dashed blue and red, the band between them shaded). They change at every step.\n4. **Command**: from the value used and the bounds, the run's control algorithm decides **UP**, **DOWN** or **OFF**; the bar under the chart shows what was sent and what it does. For CO₂ the command drives the fresh-air fan, so **UP lowers CO₂**. *(held)* means no fresh reading: the last command is kept.\n\nThe table on top of each block is the latest state; *Within the bounds* is the share of the loop's decisions in the time range whose value was inside the recipe's bounds."
+      }
+    },
+    {
+      "type": "state-timeline",
+      "id": 3,
+      "title": "Light (the recipe step's light, on and off)",
+      "description": "What the run sent to the zone's lights: ON with the light type of the recipe step (RED, BLUE, WHITE, DARK…), or OFF.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 1,
+        "w": 10,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT x.measure_timestamp AS time,\n       CASE x.command WHEN 'ON' THEN 'ON: ' || COALESCE(x.msg->>'value', '') ELSE 'OFF' END AS \"Light\"\n  FROM medcea.v_ct_measurements x\n WHERE $__timeFilter(x.measure_timestamp) AND x.unit_code = '$unit' AND x.zone_code = '$zone' AND x.tag = 'light'\n ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#475569"
+          },
+          "mappings": [
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^ON.*",
+                "result": {
+                  "color": "#eab308",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^OFF.*",
+                "result": {
+                  "color": "#334155",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 4,
+      "title": "${quantity:text}",
+      "repeat": "quantity",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "table",
+      "id": 5,
+      "title": "${quantity:text}: the loop now",
+      "description": "The latest decision of this quantity's loop in the zone: its rule and the sensors it may use (from the run's recorded loop map), the bounds of the recipe step now running, the value it used, whether that is inside the bounds, and the command it sent.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 24,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  CASE WHEN l.l IS NULL THEN 'no run of $unit in the time range' ELSE\n    CASE l.l->'input'->>'rule'\n      WHEN 'reference' THEN 'Uses ' || (l.l->'input'->>'reference')\n           || COALESCE('; falls back to ' || (l.l->'input'->>'fallback') || ' when it is stale', '; holds the last command when it is stale')\n      WHEN 'mean' THEN 'Average of the fresh sensors'\n      WHEN 'min'  THEN 'Lowest of the fresh sensors'\n      WHEN 'max'  THEN 'Highest of the fresh sensors'\n      WHEN 'single' THEN 'The one fresh sensor (two fresh ones: no decision, alarm)'\n      ELSE COALESCE(l.l->'input'->>'rule', 'default map') END\n    || COALESCE(' · readings older than ' || (l.l->'input'->>'max_age_s') || ' s are ignored', '') END AS \"Rule\",\n  CASE jsonb_typeof(l.l->'input'->'sources') WHEN 'array'\n       THEN (SELECT string_agg(s, ', ') FROM jsonb_array_elements_text(l.l->'input'->'sources') s)\n       ELSE l.l->'input'->>'sources' END AS \"Sensors it may use\",\n  (k.p->'setpoints'->'$quantity'->>'lower') || ' – ' || (k.p->'setpoints'->'$quantity'->>'upper')\n     || CASE '$quantity' WHEN 'co2' THEN ' ppm' WHEN 'air_humidity' THEN ' %RH' ELSE ' °C' END AS \"Recipe bounds now\",\n  'step ' || k.step || ', cycle ' || k.cyc || ' of run ' || k.recipe_run_id AS \"Recipe step\",\n  (c.msg->>'process_value')::numeric AS \"Value used\",\n  CASE WHEN (c.msg->>'process_value') IS NULL THEN NULL\n       WHEN (c.msg->>'process_value')::numeric < (k.p->'setpoints'->'$quantity'->>'lower')::numeric THEN 'below the bounds'\n       WHEN (c.msg->>'process_value')::numeric > (k.p->'setpoints'->'$quantity'->>'upper')::numeric THEN 'above the bounds'\n       ELSE 'within the bounds' END AS \"Value vs bounds\",\n  (SELECT CASE '$quantity'\n    WHEN 'co2' THEN CASE x.command WHEN 'UP' THEN 'UP: fresh-air fan on (lowers CO₂)' WHEN 'OFF' THEN 'OFF: fan off (CO₂ rises)' ELSE x.command END\n    WHEN 'air_humidity' THEN CASE x.command WHEN 'UP' THEN 'UP: humidifier on (raises humidity)' WHEN 'DOWN' THEN 'DOWN: dry the air (lowers humidity)' WHEN 'OFF' THEN 'OFF: nothing on' ELSE x.command END\n    ELSE CASE x.command WHEN 'UP' THEN 'UP: heating on' WHEN 'DOWN' THEN 'DOWN: cooling on' WHEN 'OFF' THEN 'OFF: nothing on' ELSE x.command END\n  END FROM (SELECT c.command) x) AS \"Last command\",\n  c.msg->>'state' AS \"Loop state\",\n  c.measure_timestamp AS \"At\"\nFROM (SELECT 1) one\nLEFT JOIN (SELECT * FROM (SELECT c.recipe_line_seq_cycle_run_start AS t0,\n               COALESCE(c.recipe_line_seq_cycle_run_end, now()) AS t1,\n               c.recipe_run_id, c.recipe_item_seq_id AS step, c.recipe_item_seq_cycle_num AS cyc,\n               (CASE WHEN json_typeof(c.run_params) = 'array' THEN c.run_params->0 END) AS p\n          FROM medcea.recipe_line_cycle_run c\n          JOIN medcea.recipe_run r ON r.recipe_run_id = c.recipe_run_id\n          JOIN medcea.cea_unit u ON u.unit_id = r.unit_id\n         WHERE u.unit_code = '$unit'\n           AND c.recipe_line_seq_cycle_run_start < $__timeTo()\n           AND COALESCE(c.recipe_line_seq_cycle_run_end, now()) > $__timeFrom()) k0 ORDER BY k0.t0 DESC LIMIT 1) k ON true\nLEFT JOIN LATERAL (SELECT e AS l FROM jsonb_array_elements(CASE jsonb_typeof(k.p::jsonb->'control_loops') WHEN 'array' THEN k.p::jsonb->'control_loops' ELSE '[]'::jsonb END) e\n                    WHERE e->>'loop_code' = '$quantity' AND e->>'zone_code' = '$zone') l ON true\nLEFT JOIN LATERAL (SELECT x.measure_timestamp, x.command, x.msg FROM medcea.v_ct_measurements x\n                    WHERE $__timeFilter(x.measure_timestamp) AND x.unit_code = '$unit' AND x.zone_code = '$zone'\n                      AND x.msg->>'loop' = '$quantity' ORDER BY x.measure_timestamp DESC LIMIT 1) c ON true"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value vs bounds"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "within the bounds": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "below the bounds": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "above the bounds": {
+                        "color": "orange",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Loop state"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "ok: fresh reading",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "fallback": {
+                        "text": "fallback sensor in use",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "hold": {
+                        "text": "held: no fresh reading",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "At"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Rule"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Within the bounds",
+      "description": "Share of the loop's decisions in the time range whose value was inside the recipe step's bounds at that moment.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 4,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 100.0 * avg(CASE WHEN v.x BETWEEN (k.p->'setpoints'->'$quantity'->>'lower')::numeric\n                                       AND (k.p->'setpoints'->'$quantity'->>'upper')::numeric THEN 1 ELSE 0 END) AS \"Within the bounds\"\n  FROM (SELECT x.measure_timestamp AS t, (x.msg->>'process_value')::numeric AS x\n          FROM medcea.v_ct_measurements x\n         WHERE $__timeFilter(x.measure_timestamp) AND x.unit_code = '$unit' AND x.zone_code = '$zone'\n           AND x.msg->>'loop' = '$quantity' AND x.msg->>'process_value' IS NOT NULL) v\n  JOIN (SELECT c.recipe_line_seq_cycle_run_start AS t0,\n               COALESCE(c.recipe_line_seq_cycle_run_end, now()) AS t1,\n               c.recipe_run_id, c.recipe_item_seq_id AS step, c.recipe_item_seq_cycle_num AS cyc,\n               (CASE WHEN json_typeof(c.run_params) = 'array' THEN c.run_params->0 END) AS p\n          FROM medcea.recipe_line_cycle_run c\n          JOIN medcea.recipe_run r ON r.recipe_run_id = c.recipe_run_id\n          JOIN medcea.cea_unit u ON u.unit_id = r.unit_id\n         WHERE u.unit_code = '$unit'\n           AND c.recipe_line_seq_cycle_run_start < $__timeTo()\n           AND COALESCE(c.recipe_line_seq_cycle_run_end, now()) > $__timeFrom()) k ON v.t >= k.t0 AND v.t < k.t1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "noValue": "no decision in the range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "${quantity:text}: each sensor, the value the loop used, and the recipe's bounds",
+      "description": "Thin lines: every sensor of this quantity in the zone (zone / sensor). Thick white line: the value the loop used after its rule. Dashed lines: the recipe step's lower (blue) and upper (red) bound while a run's step was active; no band where no run was running.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 15,
+        "w": 20,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(measure_timestamp, $__interval), concat_ws(' / ', zone_code, sensor) AS metric, avg(value) AS value\n  FROM medcea.v_ap_measurements\n WHERE $__timeFilter(measure_timestamp) AND unit_code = '$unit' AND zone_code = '$zone'\n   AND tag = CASE '$quantity' WHEN 'substrate_temperature' THEN 'ground_temperature' ELSE '$quantity' END\n GROUP BY 1, zone_code, sensor\n ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(x.measure_timestamp, $__interval), 'Value the loop used' AS metric,\n       avg((x.msg->>'process_value')::numeric) AS value\n  FROM medcea.v_ct_measurements x\n WHERE $__timeFilter(x.measure_timestamp) AND x.unit_code = '$unit' AND x.zone_code = '$zone'\n   AND x.msg->>'loop' = '$quantity' AND x.msg->>'process_value' IS NOT NULL\n GROUP BY 1\n ORDER BY 1"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT b.time, b.lower AS \"Recipe lower bound\", b.upper AS \"Recipe upper bound\"\n  FROM (SELECT k.t0 AS time, (k.p->'setpoints'->'$quantity'->>'lower')::numeric AS lower,\n               (k.p->'setpoints'->'$quantity'->>'upper')::numeric AS upper FROM (SELECT c.recipe_line_seq_cycle_run_start AS t0,\n               COALESCE(c.recipe_line_seq_cycle_run_end, now()) AS t1,\n               c.recipe_run_id, c.recipe_item_seq_id AS step, c.recipe_item_seq_cycle_num AS cyc,\n               (CASE WHEN json_typeof(c.run_params) = 'array' THEN c.run_params->0 END) AS p\n          FROM medcea.recipe_line_cycle_run c\n          JOIN medcea.recipe_run r ON r.recipe_run_id = c.recipe_run_id\n          JOIN medcea.cea_unit u ON u.unit_id = r.unit_id\n         WHERE u.unit_code = '$unit'\n           AND c.recipe_line_seq_cycle_run_start < $__timeTo()\n           AND COALESCE(c.recipe_line_seq_cycle_run_end, now()) > $__timeFrom()) k\n        UNION ALL\n        SELECT k.t1, (k.p->'setpoints'->'$quantity'->>'lower')::numeric,\n               (k.p->'setpoints'->'$quantity'->>'upper')::numeric FROM (SELECT c.recipe_line_seq_cycle_run_start AS t0,\n               COALESCE(c.recipe_line_seq_cycle_run_end, now()) AS t1,\n               c.recipe_run_id, c.recipe_item_seq_id AS step, c.recipe_item_seq_cycle_num AS cyc,\n               (CASE WHEN json_typeof(c.run_params) = 'array' THEN c.run_params->0 END) AS p\n          FROM medcea.recipe_line_cycle_run c\n          JOIN medcea.recipe_run r ON r.recipe_run_id = c.recipe_run_id\n          JOIN medcea.cea_unit u ON u.unit_id = r.unit_id\n         WHERE u.unit_code = '$unit'\n           AND c.recipe_line_seq_cycle_run_start < $__timeTo()\n           AND COALESCE(c.recipe_line_seq_cycle_run_end, now()) > $__timeFrom()) k\n        UNION ALL\n        SELECT k.t1 + interval '1 second', NULL, NULL FROM (SELECT c.recipe_line_seq_cycle_run_start AS t0,\n               COALESCE(c.recipe_line_seq_cycle_run_end, now()) AS t1,\n               c.recipe_run_id, c.recipe_item_seq_id AS step, c.recipe_item_seq_cycle_num AS cyc,\n               (CASE WHEN json_typeof(c.run_params) = 'array' THEN c.run_params->0 END) AS p\n          FROM medcea.recipe_line_cycle_run c\n          JOIN medcea.recipe_run r ON r.recipe_run_id = c.recipe_run_id\n          JOIN medcea.cea_unit u ON u.unit_id = r.unit_id\n         WHERE u.unit_code = '$unit'\n           AND c.recipe_line_seq_cycle_run_start < $__timeTo()\n           AND COALESCE(c.recipe_line_seq_cycle_run_end, now()) > $__timeFrom()) k\n         WHERE NOT EXISTS (SELECT 1 FROM medcea.recipe_line_cycle_run n\n                            WHERE n.recipe_run_id = k.recipe_run_id\n                              AND n.recipe_line_seq_cycle_run_start BETWEEN k.t1 - interval '5 seconds' AND k.t1 + interval '60 seconds'\n                              AND (n.recipe_item_seq_id, n.recipe_item_seq_cycle_num) <> (k.step, k.cyc))) b\n ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "spanNulls": false,
+            "showPoints": "never",
+            "fillOpacity": 0,
+            "lineInterpolation": "linear"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value the loop used"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#f8fafc"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Recipe lower bound"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3b82f6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Recipe upper bound"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ef4444"
+                }
+              },
+              {
+                "id": "custom.fillBelowTo",
+                "value": "Recipe lower bound"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 8
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "state-timeline",
+      "id": 8,
+      "title": "${quantity:text}: command sent, and what it does",
+      "description": "Every command the loop sent to the zone's actuator, after the quantity's command map. For CO₂ the actuator is the fresh-air fan: UP lowers CO₂. (held) means no fresh reading, so the last command was kept.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PA68174188487FD5C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PA68174188487FD5C"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT x.measure_timestamp AS time,\n       CASE '$quantity'\n    WHEN 'co2' THEN CASE x.command WHEN 'UP' THEN 'UP: fresh-air fan on (lowers CO₂)' WHEN 'OFF' THEN 'OFF: fan off (CO₂ rises)' ELSE x.command END\n    WHEN 'air_humidity' THEN CASE x.command WHEN 'UP' THEN 'UP: humidifier on (raises humidity)' WHEN 'DOWN' THEN 'DOWN: dry the air (lowers humidity)' WHEN 'OFF' THEN 'OFF: nothing on' ELSE x.command END\n    ELSE CASE x.command WHEN 'UP' THEN 'UP: heating on' WHEN 'DOWN' THEN 'DOWN: cooling on' WHEN 'OFF' THEN 'OFF: nothing on' ELSE x.command END\n  END || CASE WHEN x.msg->>'state' = 'hold' THEN ' (held: no fresh reading)' ELSE '' END AS \"Command sent\"\n  FROM medcea.v_ct_measurements x\n WHERE $__timeFilter(x.measure_timestamp) AND x.unit_code = '$unit' AND x.zone_code = '$zone'\n   AND x.msg->>'loop' = '$quantity'\n ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#475569"
+          },
+          "mappings": [
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^UP: heating.*",
+                "result": {
+                  "color": "#ef4444",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^DOWN: cooling.*",
+                "result": {
+                  "color": "#3b82f6",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^UP: humidifier.*",
+                "result": {
+                  "color": "#06b6d4",
+                  "index": 2
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^DOWN: dry.*",
+                "result": {
+                  "color": "#f59e0b",
+                  "index": 3
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^UP: fresh-air.*",
+                "result": {
+                  "color": "#22c55e",
+                  "index": 4
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^OFF.*",
+                "result": {
+                  "color": "#334155",
+                  "index": 5
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "unit",
+        "label": "Unit",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT unit_code FROM medcea.cea_unit WHERE is_active = 'Y' ORDER BY unit_code",
+        "definition": "SELECT unit_code FROM medcea.cea_unit WHERE is_active = 'Y' ORDER BY unit_code",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "sort": 0,
+        "current": {}
+      },
+      {
+        "name": "zone",
+        "label": "Zone",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "PA68174188487FD5C"
+        },
+        "query": "SELECT z.zone_code FROM medcea.cea_zone z JOIN medcea.cea_unit u ON u.unit_id = z.unit_id WHERE u.unit_code = '$unit' AND z.is_active = 'Y' ORDER BY z.zone_code",
+        "definition": "SELECT z.zone_code FROM medcea.cea_zone z JOIN medcea.cea_unit u ON u.unit_id = z.unit_id WHERE u.unit_code = '$unit' AND z.is_active = 'Y' ORDER BY z.zone_code",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "sort": 0,
+        "current": {}
+      },
+      {
+        "name": "quantity",
+        "label": "Quantity",
+        "type": "custom",
+        "query": "Air temperature : air_temperature,Air humidity : air_humidity,CO₂ : co2,Substrate temperature : substrate_temperature",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": []
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  }
+}
