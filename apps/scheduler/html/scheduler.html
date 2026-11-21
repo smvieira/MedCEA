@@ -294,7 +294,12 @@
       <label>Recipe</label>
       <select id="rn-recipe" onchange="onRnRecipeChange()"><option value="">— select unit first —</option></select>
     </div>
-    <div class="form-row">
+    <div class="form-row" id="rn-set-row" style="display:none">
+      <label>Parameter set</label>
+      <select id="rn-params-id"><option value="">— select unit first —</option></select>
+      <div class="param-hint">Required: the run uses this approved parameter set (its algorithm and parameters).</div>
+    </div>
+    <div class="form-row" id="rn-algo-row">
       <label>Algorithm</label>
       <select id="rn-algorithm-id" onchange="onRnAlgoChange()"><option value="">— default from recipe/unit —</option></select>
       <div class="param-hint" id="rn-algo-hint"></div>
@@ -682,6 +687,8 @@ async function openRunNowModal() {
   document.getElementById('rn-submit').disabled = false;
   document.getElementById('rn-algo-params').value = '';
   document.getElementById('rn-params-row').style.display = 'none';
+  document.getElementById('rn-set-row').style.display = 'none';
+  document.getElementById('rn-algo-row').style.display = '';
   document.getElementById('rn-algo-hint').textContent = 'Effective: IF_THEN_ELSE (system default)';
   await Promise.all([loadRnUnits(), _ensureAlgorithms()]);
   _populateAlgoSelect('rn-algorithm-id', '');
@@ -696,14 +703,17 @@ async function loadRnUnits() {
   ]);
   const units  = await unitRes.json();
   const active = await activeRes.json();
-  const busyUnits = new Set(active.map(r => r.unit_id));
+  // only a running or queued run blocks the unit (start_run refuses a second R);
+  // a failed or cancelled run (F) is history and stays in the list for Retry
+  const busyUnits = new Set(active.filter(r => r.recipe_run_status === 'R' || r.recipe_run_status === 'S')
+                                  .map(r => r.unit_id));
 
   const sel = document.getElementById('rn-unit');
   sel.innerHTML = '<option value="">— select unit —</option>'
     + units.map(u => {
         const busy = busyUnits.has(u.unit_id);
         return `<option value="${u.unit_id}" data-busy="${busy}" ${busy ? 'style="color:#f87171"' : ''}>
-          ${u.unit_code}${busy ? ' (active run)' : ''}
+          ${u.unit_code}${busy ? ' (running or queued run)' : ''}
         </option>`;
       }).join('');
 }
@@ -716,7 +726,7 @@ async function onRnUnitChange() {
   const submit = document.getElementById('rn-submit');
 
   if (busy) {
-    conflict.textContent = '⚠ This unit already has an active run. Finish or cancel it first.';
+    conflict.textContent = '⚠ This unit already has a running or queued run. Let it finish, or stop or cancel it first.';
     conflict.style.display = 'block';
     submit.disabled = true;
     document.getElementById('rn-recipe').innerHTML = '<option value="">—</option>';
@@ -731,15 +741,53 @@ async function onRnUnitChange() {
     const recipes = await res.json();
     document.getElementById('rn-recipe').innerHTML = '<option value="">— select recipe —</option>'
       + recipes.map(r => `<option value="${r.recipe_id}">${r.recipe_name}</option>`).join('');
+    await loadRnParamSets(uid);
   } else {
     document.getElementById('rn-recipe').innerHTML = '<option value="">— select unit first —</option>';
   }
+}
+
+// Once the database enforces approvals (IAM_DB_ROLES=true, header of /api/param-sets) a run
+// needs an approved parameter set: the dialog asks for one and sends no inline algorithm.
+async function loadRnParamSets(unitId) {
+  const sel = document.getElementById('rn-params-id');
+  let sets = [];
+  try {
+    const res = await fetch(`${API}/param-sets?unit_id=${unitId}`);
+    if (res.ok) {
+      _iamDbRoles = res.headers.get('X-Medcea-Iam-Db-Roles') === 'true';
+      sets = (await res.json()).filter(x => x.status === 'approved');
+    }
+  } catch (e) { /* the selector stays empty */ }
+  sel.innerHTML = `<option value="">${sets.length ? '— choose an approved set —' : '— no approved parameter set for this unit —'}</option>`
+    + sets.map(x => `<option value="${x.params_id}">${x.name} · ${x.algorithm_code}</option>`).join('');
+  document.getElementById('rn-set-row').style.display = _iamDbRoles ? '' : 'none';
+  document.getElementById('rn-algo-row').style.display = _iamDbRoles ? 'none' : '';
+  if (_iamDbRoles) document.getElementById('rn-params-row').style.display = 'none';
 }
 
 async function submitRunNow() {
   const unit_id   = parseInt(document.getElementById('rn-unit').value);
   const recipe_id = parseInt(document.getElementById('rn-recipe').value);
   if (!unit_id || !recipe_id) { toast('Select a unit and recipe', true); return; }
+  if (_iamDbRoles) {
+    const params_id = parseInt(document.getElementById('rn-params-id').value) || null;
+    if (!params_id) { toast('Choose an approved parameter set', true); return; }
+    const cRes = await fetch(`${API}/runs`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({unit_id, recipe_id, params_id})
+    });
+    if (!cRes.ok) { await apiFail(cRes); return; }
+    const created = await apiOk(cRes);
+    const eRes = await fetch(`${API}/runs/${created.recipe_run_id}/execute`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'
+    });
+    if (eRes.ok) { await apiOk(eRes); toast('Run started!'); }
+    else { await apiFail(eRes, 'Run created but not started — check Current Runs'); }
+    closeRunNowModal();
+    loadActive();
+    return;
+  }
 
   const algoId  = parseInt(document.getElementById('rn-algorithm-id').value) || null;
   const algoRaw = document.getElementById('rn-algo-params').value.trim();
