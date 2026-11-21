@@ -16,7 +16,7 @@
 --                     nothing of its own).
 --   rs_lake_reader    USAGE on schema lake_api; EXECUTE on the lake_api functions (each
 --                     SECURITY DEFINER, owned by rs_owner). Nothing on any table.
---   rs_session        CONNECT; USAGE on schema agent_trace; EXECUTE on the eight agent_trace
+--   rs_session        CONNECT; USAGE on schema agent_trace; EXECUTE on the eleven agent_trace
 --                     writers and readers (open_session, append_event, put_blob, checkpoint,
 --                     use_claim, revoke, session_status, events), nothing on any table;
 --                     verify_chain, head and the internals have no grantee (research Phase 4a).
@@ -65,5 +65,8 @@ GRANT EXECUTE ON FUNCTION
     agent_trace.use_claim(text, inet),
     agent_trace.revoke(text, text, uuid),
     agent_trace.session_status(text),
-    agent_trace.events(text, bigint)
+    agent_trace.events(text, bigint),
+    agent_trace.set_expect(text, inet),
+    agent_trace.session_state(text),
+    agent_trace.active_sessions()
    TO rs_session;

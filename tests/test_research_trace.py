@@ -26,7 +26,7 @@ LAKE_API = os.path.join(APP, "db", "lake_api.sql")
 GRANTS = os.path.join(APP, "db", "grants.sql")
 ASSERT = os.path.join(APP, "db", "assert_grants.sql")
 TABLES = ["session", "revocation", "claim_use", "blob", "blob_ref", "state", "event"]
-GRANTED = ["open_session", "append_event", "put_blob", "checkpoint", "use_claim", "revoke", "session_status", "events"]
+GRANTED = ["open_session", "append_event", "put_blob", "checkpoint", "use_claim", "revoke", "session_status", "events", "set_expect", "session_state", "active_sessions"]
 
 
 def read(p):

@@ -221,7 +221,9 @@ class Sql(unittest.TestCase):
             "text, text[], jsonb, text, text, timestamptz), agent_trace.append_event(text, text, text, text, jsonb, "
             "text), agent_trace.put_blob(text, text, bytea), agent_trace.checkpoint(text, jsonb), "
             "agent_trace.use_claim(text, inet), agent_trace.revoke(text, text, uuid), "
-            "agent_trace.session_status(text), agent_trace.events(text, bigint) TO rs_session;"])
+            "agent_trace.session_status(text), agent_trace.events(text, bigint), "
+            "agent_trace.set_expect(text, inet), agent_trace.session_state(text), "
+            "agent_trace.active_sessions() TO rs_session;"])
         self.assertNotRegex(self.grants, r"TO\s+PUBLIC")
         flat = " ".join(self.grants.split())
         for line in ("REVOKE ALL ON DATABASE medcea_research FROM PUBLIC;",

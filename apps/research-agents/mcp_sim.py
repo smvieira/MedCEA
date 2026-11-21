@@ -63,6 +63,23 @@ class LocalEstimator:
         return {"cpu_hours": est, "calibration_h": cal, "runs": len(runs), "inprocess": True}
 
 
+class RemoteRunner:
+    """The runner interface over the orchestrator's sim port (8091): mcp-sim holds no Kubernetes
+    rights, the orchestrator creates the sim-<cid> Job. `http` has request(method, path, body)."""
+    def __init__(self, http, pool=2):
+        self.http, self.pool = http, pool
+
+    def start(self, cid, spec, cap_h, deadline_s, sid=None):
+        st, r = self.http.request("POST", "/internal/sims", {"sid": sid, "cid": cid, "spec": spec,
+                                                             "cap_h": cap_h, "deadline_s": deadline_s})
+        if st != 200:
+            raise ToolRefused("the simulation could not be started (%s)" % (r or {}).get("error", st))
+
+    def status(self, cid):
+        st, r = self.http.request("GET", "/internal/sims/" + cid)
+        return r if st == 200 else {"state": "failed", "error": "the orchestrator did not answer"}
+
+
 class SimServer:
     def __init__(self, session, estimator, runner):
         self.session, self.estimator, self.runner = session, estimator, runner
@@ -106,7 +123,7 @@ class SimServer:
         pool = max(1, int(getattr(self.runner, "pool", 1)))
         deadline = math.ceil(cap_h * 3600 / pool * 1.5)
         c.update(cap_h=cap_h, state="started", deadline_s=deadline)
-        self.runner.start(cid, c["spec"], cap_h, deadline)
+        self.runner.start(cid, c["spec"], cap_h, deadline, sid=ctx["sid"])
         self.session.trace(ctx["sid"], "sim_started", {"cid": cid, "spec_sha256": c["spec_sha"], "estimate_h": round(c["est"]["cpu_hours"], 6),
                                                        "cap_h": round(cap_h, 6), "deadline_s": deadline})
 

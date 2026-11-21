@@ -11,13 +11,15 @@ declared server name checked by the database's allow-list), never a body field.
   8101 agent   POST /claim (one-time claim -> the session token, bound to the registered pod
                IP) and /trace (agent event types, the session token in the body).
   8102 server  POST /introspect, /trace; PUT/POST /claims/<sid>/expect; GET /events/<sid>,
-               /gates/<gid>?sid=.  Callers are network-gated (mcp-sim, mcp-lake, orchestrator).
+               /gates/<gid>?sid=, /sessions/<sid>; POST /sessions/<sid>/revoke (the orchestrator,
+               Job ended), /signin/start|poll|refresh (device-code relay for client research-agent, R12).  Callers are network-gated (mcp-sim, mcp-lake, orchestrator).
 
 Token: rst1.<kid>.<sid>.<exp>.<mac>, mac = b64url(HMAC-SHA256(K_tok, "medcea-research-session|rst1|kid|sid|exp")),
 K_tok = HMAC-SHA256(master, b"medcea research session token v1"). Only sha256(token) is stored.
 Active iff mac, kid, exp, no revocation, sha256 = the row's, exp = the row's, peer = the registered
-pod IP. Per-session metadata and the claim/peer registrations are held in memory: a restart makes
-every earlier token inactive (introspect fails closed), as the design's "a restart revokes" asks.
+pod IP. Everything about a session (hashes, metadata, the registered pod IP, the claim state) is read
+from the database (session_state); at start the service revokes every still-active session
+(reason service_restart, R10), so a restart fails closed.
 Never logs a token, a claim or the key. DB access goes through the Db adapter (PgDb for production).
 """
 import base64
@@ -47,6 +49,8 @@ AGENT_EVENTS = ("turn_request", "turn_response", "tool_call", "tool_result", "ch
 SERVER_EVENTS = ("tool_result", "gate_pending", "sim_started", "sim_finished", "replay_result",
                  "turn_request", "turn_response")
 SERVERS = ("mcp-sim", "mcp-lake", "orchestrator", "model-gateway")
+CLIENT_ID = "research-agent"
+SCOPE = "openid groups medcea-identity"
 TOOL_SERVER = {"lake": "mcp-lake", "sim": "mcp-sim", "propose": "research-session"}
 
 
@@ -95,6 +99,30 @@ class Keys:
         if not hmac.compare_digest(p[4], self.mac(p[2], exp)):
             return None, "bad mac"
         return (p[2], exp), None
+
+
+class KeycloakRelay:
+    """The realm's form-encoded POSTs for the sign-in relay; post(path, form) -> (status, object). Bodies never logged."""
+
+    def __init__(self, realm_url, timeout=10):
+        self.base, self.timeout = realm_url.rstrip("/"), timeout
+
+    def post(self, path, form):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        req = urllib.request.Request(self.base + path, urllib.parse.urlencode(form).encode(),
+                                     {"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                return e.code, {}
+        except (OSError, ValueError):
+            return 0, {}
 
 
 class PgDb:
@@ -157,6 +185,22 @@ class PgDb:
         a, rv, exp, backend, budget, spent = r[0]
         return {"active": a, "revoked": rv, "exp": int(exp), "backend": backend, "budget": budget, "spent": spent}
 
+    def set_expect(self, sid, peer):
+        return self._run("SELECT agent_trace.set_expect(%s, %s::inet)", (sid, peer))[0][0]
+
+    def session_state(self, sid):
+        r = self._run("SELECT token_sha256, claim_sha256, created_at, exp, sup_sub::text, sup_person, sup_role, "
+                      "sup_username, profile, profile_sha256, tools, budget, backend, expect, claimed "
+                      "FROM agent_trace.session_state(%s)", (sid,))
+        if not r:
+            raise NotFound("no session")
+        k = ("token_sha256", "claim_sha256", "created_at", "exp", "sup_sub", "sup_person", "sup_role",
+             "sup_username", "profile", "profile_sha256", "tools", "budget", "backend", "expect", "claimed")
+        return dict(zip(k, r[0]))
+
+    def active_sessions(self):
+        return [r[0] for r in self._run("SELECT sid FROM agent_trace.active_sessions()")]
+
     def events(self, sid, after=0):
         rows = self._run("SELECT event_id, at, actor, event, payload, prev_hash, hash FROM agent_trace.events(%s,%s)",
                          (sid, after))
@@ -170,8 +214,27 @@ class Service:
     def __init__(self, keys, db, iam, clock=time.time):
         self.keys, self.db, self.iam, self.clock = keys, db, iam, clock
         self.lock = threading.Lock()
-        self.sess = {}           # sid -> dict(meta, claim_sha, claim_until, expect, peer, claimed)
+        self.kc = None           # KeycloakRelay (R12) or None
+        self.signin_hits = {}
         self.last_anchor = None  # (event_id, hash) the service last wrote: /healthz, R11
+
+    def revoke_all_active(self):
+        """At start: every session still active is revoked (R10), so a restart fails closed."""
+        n = 0
+        for sid in self.db.active_sessions():
+            try:
+                if self.db.revoke(sid, "service_restart", None):
+                    n += 1
+            except NotFound:
+                pass
+        return n
+
+    def _rec(self, sid):
+        """The session's database state, or None."""
+        try:
+            return self.db.session_state(sid)
+        except NotFound:
+            return None
 
     # ── helpers
     def note(self, sid, eid):
@@ -186,10 +249,9 @@ class Service:
 
     def _meta_active(self, sid, token, peer):
         """The R9 rule; (record, None) or (None, reason)."""
-        with self.lock:
-            rec = self.sess.get(sid)
+        rec = self._rec(sid)
         if rec is None:
-            return None, "unknown session (not minted by this process)"
+            return None, "no such session"
         parsed, why = self.keys.parse(token)
         if parsed is None:
             return None, why
@@ -236,17 +298,10 @@ class Service:
                                  code_commit=commit, exp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)))
         except Conflict as e:
             return 409, {"error": str(e)}
-        with self.lock:
-            self.sess[sid] = {"token_sha256": sha256_hex(token), "exp": exp, "claim_sha": sha256_hex(claim),
-                              "claim_until": self.clock() + CLAIM_TTL, "expect": None, "claimed": False,
-                              "sup_sub": who["sub"], "sup_person": who["person_id"], "sup_role": roles[0],
-                              "profile": profile, "profile_sha256": psha, "tools": list(tools), "budget": budget,
-                              "backend": backend}
         return 201, {"sid": sid, "claim": claim, "claim_valid_s": CLAIM_TTL, "exp": exp}
 
     def _own(self, who, sid):
-        with self.lock:
-            rec = self.sess.get(sid)
+        rec = self._rec(sid)
         if rec is None or rec["sup_person"] != who["person_id"]:
             return None
         return rec
@@ -286,13 +341,12 @@ class Service:
             ip = str(ipaddress.ip_address(ip))
         except (ValueError, TypeError):
             return 400, {"error": "peer must be an IP address"}
-        with self.lock:
-            rec = self.sess.get(sid)
-            if rec is None:
-                return 404, {"error": "no such session"}
-            if rec["claimed"] or rec["expect"] not in (None, ip):
-                return 409, {"error": "a pod is already registered for this session"}
-            rec["expect"] = ip
+        try:
+            r = self.db.set_expect(sid, ip)
+        except NotFound:
+            return 404, {"error": "no such session"}
+        if r != "ok":
+            return 409, {"error": "a pod is already registered for this session"}
         return 200, {"expect": ip}
 
     def claim(self, peer, body):
@@ -300,25 +354,22 @@ class Service:
         claim = body.get("claim") if isinstance(body, dict) else None
         if not (isinstance(sid, str) and SID.match(sid) and isinstance(claim, str) and B64.match(claim)):
             return 400, {"error": "sid and claim are required"}
-        with self.lock:
-            rec = self.sess.get(sid)
+        rec = self._rec(sid)
         if rec is None:
             return 403, {"error": "refused"}
         if rec["expect"] is None or peer != rec["expect"]:
             return 403, {"error": "refused"}
-        if rec["claimed"] or self.clock() > rec["claim_until"]:
+        if rec["claimed"] or self.clock() > rec["created_at"] + CLAIM_TTL:
             # a second use of a claim: the database records it and revokes the session
             try:
                 self.db.use_claim(sid, peer)
             except NotFound:
                 pass
             return 403, {"error": "refused"}
-        if not hmac.compare_digest(sha256_hex(claim), rec["claim_sha"]):
+        if not hmac.compare_digest(sha256_hex(claim), rec["claim_sha256"]):
             return 403, {"error": "refused"}
         if not self.db.use_claim(sid, peer):
             return 403, {"error": "refused"}
-        with self.lock:
-            rec["claimed"] = True
         return 200, {"token": self.keys.token(sid, rec["exp"]), "exp": rec["exp"]}
 
     def trace(self, port, peer, body):
@@ -366,6 +417,61 @@ class Service:
                      "sup_role": rec["sup_role"], "profile": rec["profile"], "profile_sha256": rec["profile_sha256"],
                      "tools": [t for t in rec["tools"] if TOOL_SERVER.get(t.split(".")[0]) == aud or aud in ("orchestrator", "model-gateway")],
                      "backend": rec["backend"], "budget_left": left, "exp": rec["exp"]}
+
+    def info(self, sid):
+        """GET /sessions/<sid> (server port): what the orchestrator needs to check ownership and lifecycle."""
+        rec = self._rec(sid) if SID.match(sid or "") else None
+        if rec is None:
+            return 404, {"error": "no such session"}
+        st = self.db.session_status(sid)
+        return 200, {"sid": sid, "sup_person": rec["sup_person"], "sup_sub": rec["sup_sub"], "profile": rec["profile"],
+                     "backend": rec["backend"], "exp": rec["exp"], "claimed": rec["claimed"], "expect": rec["expect"],
+                     "active": st["active"], "revoked": st["revoked"], "budget": st["budget"], "spent": st["spent"]}
+
+    def revoke_by_orchestrator(self, sid, body):
+        """POST /sessions/<sid>/revoke (server port): the orchestrator ends a session whose Job ended (R10)."""
+        if not SID.match(sid or "") or self._rec(sid) is None:
+            return 404, {"error": "no such session"}
+        reason = str((body or {}).get("reason") or "job ended")[:200] if isinstance(body, dict) else "job ended"
+        return 200, {"revoked": bool(self.db.revoke(sid, reason, None))}
+
+    # ── device sign-in relay (R12): the only code that talks to Keycloak
+    def signin(self, op, peer, body):
+        kc = self.kc
+        if kc is None:
+            return 503, {"error": "sign-in is not configured"}
+        if not isinstance(body, dict):
+            return 400, {"error": "a JSON object is required"}
+        now = self.clock()
+        if op == "start":
+            with self.lock:
+                hits = [t for t in self.signin_hits.get(peer, []) if now - t < 60]
+                if len(hits) >= 10:
+                    return 429, {"error": "too many sign-in starts"}
+                self.signin_hits[peer] = hits + [now]
+            st, r = kc.post("/protocol/openid-connect/auth/device", {"client_id": CLIENT_ID, "scope": SCOPE})
+            keep = ("device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in", "interval")
+            return (200, {k: r[k] for k in keep if k in r}) if st == 200 else (502, {"error": "Keycloak refused the device request"})
+        if op == "poll":
+            dc = body.get("device_code")
+            if not isinstance(dc, str) or not 8 <= len(dc) <= 512:
+                return 400, {"error": "device_code is required"}
+            st, r = kc.post("/protocol/openid-connect/token", {
+                "client_id": CLIENT_ID, "grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": dc})
+        elif op == "refresh":
+            rt = body.get("refresh_token")
+            if not isinstance(rt, str) or not 8 <= len(rt) <= 4096:
+                return 400, {"error": "refresh_token is required"}
+            st, r = kc.post("/protocol/openid-connect/token", {
+                "client_id": CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt})
+        else:
+            return 404, {"error": "not found"}
+        if st == 200:
+            return 200, {k: r[k] for k in ("access_token", "refresh_token", "expires_in", "refresh_expires_in") if k in r}
+        if isinstance(r, dict) and r.get("error") in ("authorization_pending", "slow_down", "expired_token", "access_denied",
+                                                       "invalid_grant"):
+            return 400, {"error": r["error"]}
+        return 502, {"error": "Keycloak refused the request"}
 
     def events_of(self, sid, after):
         if not SID.match(sid):
@@ -486,7 +592,18 @@ def _handler(svc, port_name):
                 m = re.match(r"^/gates/([^/]+)$", path)
                 if m:
                     return self.send(*svc.gate((q.get("sid") or [""])[0], m.group(1)))
+                m = re.match(r"^/sessions/([^/]+)$", path)
+                if m:
+                    return self.send(*svc.info(m.group(1)))
                 return self.send(404, {"error": "not found"})
+            m = re.match(r"^/sessions/([^/]+)/revoke$", path)
+            if m and self.command == "POST":
+                b = self.body()
+                return None if b is None else self.send(*svc.revoke_by_orchestrator(m.group(1), b))
+            m = re.match(r"^/signin/(start|poll|refresh)$", path)
+            if m and self.command == "POST":
+                b = self.body()
+                return None if b is None else self.send(*svc.signin(m.group(1), self.client_address[0], b))
             m = re.match(r"^/claims/([^/]+)/expect$", path)
             if m and self.command in ("PUT", "POST"):
                 b = self.body()
@@ -520,6 +637,9 @@ def main():
     db = PgDb(dict(host=os.environ["RS_DB_HOST"], dbname=os.environ.get("RS_DB_NAME", "medcea_research"),
                    user="rs_session", password=pw, connect_timeout=5))
     svc = Service(keys, db, _load_iam(os.environ.get("MEDCEA_IAM_LIB", "/iam/medcea_iam.py")))
+    if os.environ.get("RS_KEYCLOAK_REALM_URL"):
+        svc.kc = KeycloakRelay(os.environ["RS_KEYCLOAK_REALM_URL"])
+    sys.stderr.write("research-session: revoked %d active session(s) at start\n" % svc.revoke_all_active())
     srvs = make_servers(svc)
     for s in srvs[1:]:
         threading.Thread(target=s.serve_forever, daemon=True).start()

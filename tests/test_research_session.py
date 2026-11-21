@@ -40,11 +40,12 @@ class FakeDb:
     def __init__(self, ses):
         self.s = ses
         self.rows, self.events_, self.revoked, self.claims, self.expired = {}, [], set(), set(), set()
+        self.expects, self.clock = {}, time.time
 
     def open_session(self, **k):
         if sum(1 for r in self.rows.values() if r["sup_person"] == k["sup_person"] and r["sid"] not in self.revoked) >= 2:
             raise self.s.Conflict("agent_trace: person already has 2 active sessions (max_active)")
-        self.rows[k["sid"]] = k
+        self.rows[k["sid"]] = dict(k, created_at=int(self.clock()))
         return self._add(k["sid"], "research-session", "session_minted")
 
     def _add(self, sid, actor, ev, pay=None):
@@ -87,6 +88,34 @@ class FakeDb:
         self._add(sid, "research-session", "session_revoked")
         return True
 
+    def set_expect(self, sid, peer):
+        if sid not in self.rows:
+            raise self.s.NotFound("no")
+        if sid in self.claims:
+            return "claimed"
+        if self.expects.setdefault(sid, peer) != peer:
+            return "conflict"
+        return "ok"
+
+    def session_state(self, sid):
+        if sid not in self.rows:
+            raise self.s.NotFound("no")
+        r = self.rows[sid]
+        return {"token_sha256": r["token_sha256"], "claim_sha256": r["claim_sha256"], "created_at": r["created_at"],
+                "exp": r["exp"] if isinstance(r["exp"], int) else self.exp_epoch(r["exp"]), "sup_sub": r["sup_sub"],
+                "sup_person": r["sup_person"], "sup_role": r["sup_role"], "sup_username": r["sup_username"],
+                "profile": r["profile"], "profile_sha256": r["profile_sha256"], "tools": r["tools"],
+                "budget": r["budget"], "backend": r["backend"], "expect": self.expects.get(sid),
+                "claimed": sid in self.claims}
+
+    @staticmethod
+    def exp_epoch(iso):
+        import calendar
+        return calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
+
+    def active_sessions(self):
+        return [sid for sid in self.rows if self.active(sid)]
+
     def session_status(self, sid):
         if sid not in self.rows:
             raise self.s.NotFound("no")
@@ -124,6 +153,7 @@ class SessionTest(unittest.TestCase):
         self.db = FakeDb(self.s)
         self.keys = self.s.Keys("ab" * 32)
         self.now = [time.time()]
+        self.db.clock = lambda: self.now[0]
         self.svc = self.s.Service(self.keys, self.db, self.iam, clock=lambda: self.now[0])
         self.log = io.StringIO()
         self.srvs = self.s.make_servers(self.svc, "127.0.0.1", (0, 0, 0))
@@ -204,7 +234,7 @@ class SessionTest(unittest.TestCase):
         self.call(2, "PUT", "/claims/%s/expect" % sid, {"peer": "10.9.9.9"})
         self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": r["claim"]})[0], 403)  # wrong peer
         self.assertTrue(self.db.active(sid))                       # a stranger cannot revoke it
-        self.svc.sess[sid]["expect"] = "127.0.0.1"
+        self.db.expects[sid] = "127.0.0.1"
         self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": "x" * 43})[0], 403)  # wrong claim
         self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": r["claim"]})[0], 200)
         self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": r["claim"]})[0], 403)  # reuse
@@ -231,6 +261,63 @@ class SessionTest(unittest.TestCase):
         self.db.revoked.clear()
         self.now[0] += 3 * 3600
         self.assertEqual(self.call(2, "POST", "/introspect", q)[1], {"active": False})
+
+    def test_state_is_in_the_database_not_the_process(self):
+        sid, tok, _ = self.claimed()
+        q = {"token": tok, "audience": "mcp-sim", "peer": "127.0.0.1"}
+        self.svc.__init__(self.keys, self.db, self.iam, clock=lambda: self.now[0])   # a fresh process, same database
+        self.assertTrue(self.call(2, "POST", "/introspect", q)[1]["active"])
+        self.assertEqual(self.call(2, "PUT", "/claims/%s/expect" % sid, {"peer": "10.1.1.1"})[0], 409)
+
+    def test_expect_conflict_and_same_peer(self):
+        st, r = self.mint()
+        p = "/claims/%s/expect" % r["sid"]
+        self.assertEqual(self.call(2, "PUT", p, {"peer": "10.1.1.1"})[0], 200)
+        self.assertEqual(self.call(2, "PUT", p, {"peer": "10.1.1.1"})[0], 200)
+        self.assertEqual(self.call(2, "PUT", p, {"peer": "10.1.1.2"})[0], 409)
+        self.assertEqual(self.call(2, "PUT", "/claims/%s/expect" % ("A" * 22), {"peer": "10.1.1.1"})[0], 404)
+
+    def test_revoke_all_at_start(self):
+        a = self.mint()[1]["sid"]
+        b = self.mint()[1]["sid"]
+        self.db.revoked.add(b)
+        self.assertEqual(self.svc.revoke_all_active(), 1)
+        self.assertFalse(self.db.active(a))
+        self.assertEqual(self.svc.revoke_all_active(), 0)
+
+    def test_info_and_orchestrator_revoke(self):
+        sid, tok, _ = self.claimed()
+        st, r = self.call(2, "GET", "/sessions/%s" % sid)
+        self.assertEqual((st, r["sup_person"], r["active"], r["claimed"]), (200, "p-1", True, True))
+        self.assertEqual(self.call(2, "GET", "/sessions/%s" % ("A" * 22))[0], 404)
+        self.assertEqual(self.call(2, "POST", "/sessions/%s/revoke" % sid, {"reason": "job ended"})[1], {"revoked": True})
+        self.assertFalse(self.db.active(sid))
+
+    def test_signin_relay(self):
+        posts = []
+
+        class Kc:
+            def post(s, path, form):
+                posts.append((path, form))
+                if path.endswith("/device"):
+                    return 200, {"device_code": "d" * 20, "user_code": "ABCD", "verification_uri": "https://k/x",
+                                 "expires_in": 600, "interval": 5, "extra": "dropped"}
+                if form.get("device_code") == "p" * 20:
+                    return 400, {"error": "authorization_pending", "error_description": "secret detail"}
+                return 200, {"access_token": "a", "refresh_token": "r", "expires_in": 300, "id_token": "dropped"}
+        self.svc.kc = Kc()
+        st, r = self.call(2, "POST", "/signin/start", {})
+        self.assertEqual((st, sorted(r)), (200, ["device_code", "expires_in", "interval", "user_code", "verification_uri"]))
+        self.assertEqual(posts[0][1], {"client_id": "research-agent", "scope": "openid groups medcea-identity"})
+        self.assertEqual(self.call(2, "POST", "/signin/poll", {"device_code": "p" * 20}), (400, {"error": "authorization_pending"}))
+        st, r = self.call(2, "POST", "/signin/refresh", {"refresh_token": "r" * 20})
+        self.assertEqual((st, sorted(r)), (200, ["access_token", "expires_in", "refresh_token"]))
+        self.assertEqual(self.call(2, "POST", "/signin/poll", {})[0], 400)
+        for _ in range(10):
+            st = self.call(2, "POST", "/signin/start", {})[0]
+        self.assertEqual(st, 429)
+        self.svc.kc = None
+        self.assertEqual(self.call(2, "POST", "/signin/start", {})[0], 503)
 
     def test_hmac_tamper_refused(self):
         sid, tok, _ = self.claimed()

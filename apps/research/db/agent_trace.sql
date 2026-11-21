@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS agent_trace.claim_use (
     at    timestamptz NOT NULL DEFAULT now(),
     peer  inet
 );
+CREATE TABLE IF NOT EXISTS agent_trace.expect (
+    sid   text PRIMARY KEY REFERENCES agent_trace.session (sid),
+    at    timestamptz NOT NULL DEFAULT now(),
+    peer  inet NOT NULL
+);
 CREATE TABLE IF NOT EXISTS agent_trace.blob (
     sha256      text PRIMARY KEY CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     media       text NOT NULL,
@@ -137,7 +142,7 @@ DO $$
 DECLARE t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY['agent_trace.session', 'agent_trace.revocation', 'agent_trace.claim_use',
-                             'agent_trace.blob', 'agent_trace.blob_ref', 'agent_trace.state',
+                             'agent_trace.expect', 'agent_trace.blob', 'agent_trace.blob_ref', 'agent_trace.state',
                              'agent_trace.event'] LOOP
         EXECUTE pg_catalog.format('CREATE OR REPLACE TRIGGER append_only_row BEFORE UPDATE OR DELETE ON %s '
                                   'FOR EACH ROW EXECUTE FUNCTION agent_trace.refuse_change()', t);
@@ -471,6 +476,53 @@ CREATE OR REPLACE FUNCTION agent_trace.events(p_sid text, p_after bigint DEFAULT
      ORDER BY e.event_id LIMIT 1000
 $$;
 REVOKE ALL ON FUNCTION agent_trace.events(text, bigint) FROM PUBLIC;
+
+-- set_expect: the orchestrator registers the pod IP a session's claim may come from (once;
+-- the same IP again is fine). 'ok' | 'claimed' (the claim is used) | 'conflict' (another IP).
+CREATE OR REPLACE FUNCTION agent_trace.set_expect(p_sid text, p_peer inet) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    v_n integer;
+    v_old inet;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM agent_trace.session WHERE sid = p_sid) THEN
+        RAISE EXCEPTION 'agent_trace: no session %', p_sid USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (SELECT 1 FROM agent_trace.claim_use WHERE sid = p_sid) THEN
+        RETURN 'claimed';
+    END IF;
+    INSERT INTO agent_trace.expect (sid, peer) VALUES (p_sid, p_peer) ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    IF v_n = 1 THEN
+        RETURN 'ok';
+    END IF;
+    SELECT peer INTO v_old FROM agent_trace.expect WHERE sid = p_sid;
+    RETURN CASE WHEN v_old = p_peer THEN 'ok' ELSE 'conflict' END;
+END $$;
+REVOKE ALL ON FUNCTION agent_trace.set_expect(text, inet) FROM PUBLIC;
+
+-- session_state: what research-session needs to judge a token or a claim (hashes only, never a token).
+CREATE OR REPLACE FUNCTION agent_trace.session_state(p_sid text)
+    RETURNS TABLE (token_sha256 text, claim_sha256 text, created_at bigint, exp bigint, sup_sub uuid,
+                   sup_person text, sup_role text, sup_username text, profile text, profile_sha256 text,
+                   tools text[], budget jsonb, backend text, expect text, claimed boolean)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT s.token_sha256, s.claim_sha256, pg_catalog.extract(epoch FROM s.created_at)::bigint,
+           pg_catalog.extract(epoch FROM s.exp)::bigint, s.sup_sub, s.sup_person, s.sup_role, s.sup_username,
+           s.profile, s.profile_sha256, s.tools, s.budget, s.backend,
+           (SELECT pg_catalog.host(x.peer) FROM agent_trace.expect x WHERE x.sid = s.sid),
+           EXISTS (SELECT 1 FROM agent_trace.claim_use c WHERE c.sid = s.sid)
+      FROM agent_trace.session s WHERE s.sid = p_sid
+$$;
+REVOKE ALL ON FUNCTION agent_trace.session_state(text) FROM PUBLIC;
+
+-- active_sessions: the sids still active, for the revoke-all at service start (R10).
+CREATE OR REPLACE FUNCTION agent_trace.active_sessions() RETURNS TABLE (sid text, sup_person text)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT s.sid, s.sup_person FROM agent_trace.session s WHERE agent_trace._active(s.sid)
+     ORDER BY s.created_at LIMIT 1000
+$$;
+REVOKE ALL ON FUNCTION agent_trace.active_sessions() FROM PUBLIC;
 
 -- ── No grant: health runs these as postgres ───────────────────────────────────
 -- verify_chain(): recomputes every hash and every prev_hash link, oldest first. Does not

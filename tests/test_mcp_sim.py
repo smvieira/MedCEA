@@ -1,7 +1,10 @@
 """mcp-sim: the protocol subset, token and tool checks, the CPU gate's bands (stage 5)."""
+import base64
+import json
 import math
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +25,7 @@ class FakeRunner:
     def __init__(self):
         self.started, self.final = [], {"state": "running"}
 
-    def start(self, cid, spec, cap_h, deadline_s):
+    def start(self, cid, spec, cap_h, deadline_s, sid=None):
         self.started.append((cid, cap_h, deadline_s))
 
     def status(self, cid):
@@ -145,6 +148,149 @@ class SimTest(unittest.TestCase):
     def test_bad_arguments(self):
         s, r, app = setup()
         self.assertTrue(call(app, "sim.run", {"spec": "x"})[1]["result"]["isError"])
+
+
+class JobRunnerTest(unittest.TestCase):
+    """The Job-backed runner (stage 6a) and the sim_job entrypoint, with a fake Kubernetes."""
+    CID = "c" + "d" * 20
+    CFG = {"image": "img", "code_commit": "abc1234"}
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "apps", "research-agents"))
+        import jobs
+        from test_research_orchestrator import FakeKube
+        self.jobs, self.k = jobs, FakeKube()
+        self.r = jobs.JobSimRunner(self.k, self.CFG, pool=3)
+
+    def result(self, **kw):
+        return self.jobs.SIM_MARK + json.dumps(dict({"state": "done", "cpu_hours": 0.25,
+                                                     "manifest": {"runs": 2, "result_digest": "d" * 64},
+                                                     "rows": [{"scenario": "s", "code": "PID", "seed": 1, "valid": True,
+                                                               "metrics": {"x": 1}}]}, **kw))
+
+    def test_start_builds_the_job(self):
+        self.r.start(self.CID, {"scenarios": []}, 1.5, 700, sid="A" * 22)
+        j = self.k.jobs["sim-" + self.CID]
+        c = j["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(j["spec"]["activeDeadlineSeconds"], 700)
+        self.assertEqual(j["spec"]["backoffLimit"], 0)
+        self.assertEqual(c["command"][-6:], ["--out", "/runs/campaigns/" + self.CID, "--jobs", "3", "--max-cpu-hours", "1.5"][-6:])
+        self.assertEqual(json.loads(base64.b64decode(c["env"][0]["value"])), {"scenarios": []})
+        with self.assertRaises(ValueError):
+            self.r.start("bad", {}, 1, 10)
+        with self.assertRaises(ValueError):
+            self.r.start(self.CID, {}, 99, 10)
+
+    def test_status_running_done_cached(self):
+        self.r.start(self.CID, {}, 1, 60)
+        self.assertEqual(self.r.status(self.CID), {"state": "running"})
+        n = "sim-" + self.CID
+        self.k.status[n] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        self.k.pods[n] = {"name": "pod1", "phase": "Succeeded", "ip": ""}
+        self.k.logs["pod1"] = "noise\n" + self.result() + "\n"
+        s = self.r.status(self.CID)
+        self.assertEqual((s["state"], s["cpu_hours"], s["manifest"]["result_digest"]), ("done", 0.25, "d" * 64))
+        self.k.logs.clear()                                       # cached: the log is read once
+        self.assertEqual(self.r.status(self.CID)["state"], "done")
+
+    def test_failures(self):
+        self.r.start(self.CID, {}, 1, 60)
+        n = "sim-" + self.CID
+        self.k.status[n] = {"active": 0, "succeeded": 0, "failed": 1, "reason": "DeadlineExceeded"}
+        self.assertEqual(self.r.status(self.CID), {"state": "failed", "error": "deadline"})
+        r2 = self.jobs.JobSimRunner(self.k, self.CFG)
+        self.assertEqual(r2.status("c" + "e" * 20)["state"], "failed")          # no such Job
+        self.k.status[n] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        self.k.pods[n] = {"name": "p", "phase": "Succeeded", "ip": ""}
+        self.k.logs["p"] = "no result line"
+        self.assertEqual(r2.status(self.CID)["error"], "the Job ended without a result")
+        r3 = self.jobs.JobSimRunner(self.k, self.CFG)
+        self.k.logs["p"] = self.result(state="failed", error="cpu_cap_exceeded")
+        self.k.status[n] = {"active": 0, "succeeded": 0, "failed": 1, "reason": "BackoffLimitExceeded"}
+        self.assertEqual(r3.status(self.CID)["error"], "cpu_cap_exceeded")
+
+    def test_runs_through_mcp_sim(self):
+        s = FakeSession(TOOLS)
+        app = mcp_sim.SimServer(s, FakeEstimator(), self.r).app
+        c, resp = call(app, "sim.run", {"spec": {"runs": 2}})
+        self.assertEqual(payload(resp)["state"], "started")
+        self.assertEqual(len(self.k.jobs), 1)
+        n = next(iter(self.k.jobs))
+        self.k.status[n] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        self.k.pods[n] = {"name": "p", "phase": "Succeeded", "ip": ""}
+        self.k.logs["p"] = self.result()
+        cid = payload(resp)["cid"]
+        out = payload(call(app, "sim.results", {"cid": cid})[1])
+        self.assertEqual((out["state"], out["result_digest"]), ("done", "d" * 64))
+        self.assertEqual(s.of("sim_finished")[0]["result_digest"], "d" * 64)
+
+    def test_remote_runner(self):
+        calls = []
+
+        class H:
+            def request(self, m, path, body=None):
+                calls.append((m, path, body))
+                return (200, {"state": "running"}) if m == "GET" else (200, {})
+        rr = mcp_sim.RemoteRunner(H(), pool=2)
+        rr.start(self.CID, {"a": 1}, 1.0, 60, sid="A" * 22)
+        self.assertEqual(calls[0][1:], ("/internal/sims", {"sid": "A" * 22, "cid": self.CID, "spec": {"a": 1}, "cap_h": 1.0, "deadline_s": 60}))
+        self.assertEqual(rr.status(self.CID), {"state": "running"})
+        rr.http = type("H2", (), {"request": lambda s, *a, **k: (502, {"error": "x"})})()
+        with self.assertRaises(mcp_sim.ToolRefused):
+            rr.start(self.CID, {}, 1, 60)
+        self.assertEqual(rr.status(self.CID)["state"], "failed")
+
+
+class SimJobTest(unittest.TestCase):
+    def run_job(self, runner, **kw):
+        import contextlib
+        import io
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from research.agents import sim_job
+        d = tempfile.mkdtemp()
+        specf = os.path.join(d, "spec.json")
+        json.dump({"a": 1}, open(specf, "w"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = sim_job.main(["--out", d, "--jobs", "2", "--max-cpu-hours", "1", "--spec", specf], runner=runner, **kw)
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.startswith(sim_job.MARK)]
+        line = lines[0] if "exit_fn" in kw else lines[-1]      # a real exit ends the process at the first line
+        return rc, json.loads(line[len(sim_job.MARK):]), d
+
+    def test_done_prints_one_result_line_with_rows(self):
+        def runner(spec, out, jobs, cap):
+            with open(os.path.join(out, "results.jsonl"), "w") as f:
+                f.write('{"scenario":"s","valid":true}\n' * 3)
+            return {"runs": 3, "result_digest": "f" * 64}
+        rc, r, _ = self.run_job(runner)
+        self.assertEqual((rc, r["state"], len(r["rows"]), r["manifest"]["runs"]), (0, "done", 3, 3))
+
+    def test_campaign_error_is_a_failed_result(self):
+        def runner(spec, out, jobs, cap):
+            raise ValueError("spec refused")
+        rc, r, _ = self.run_job(runner)
+        self.assertEqual((rc, r["state"], r["error"]), (1, "failed", "ValueError: spec refused"))
+
+    def test_watchdog_stops_at_the_cap(self):
+        from research.agents import sim_job
+        codes = []
+        real = sim_job.cpu_seconds
+        calls = []
+
+        def fake():                                              # the first read is the baseline; later ones: +5 CPU-hours
+            calls.append(1)
+            return real() + (5 * 3600 if len(calls) > 1 else 0)
+        sim_job.cpu_seconds = fake
+        try:
+            def runner(spec, out, jobs, cap):
+                import time
+                time.sleep(0.4)
+                return {"runs": 0}
+            rc, r, _ = self.run_job(runner, poll=0.05, exit_fn=codes.append)
+        finally:
+            sim_job.cpu_seconds = real
+        self.assertEqual(codes[:1], [3])
+        self.assertEqual((r["state"], r["error"]), ("failed", "cpu_cap_exceeded"))
 
 
 if __name__ == "__main__":

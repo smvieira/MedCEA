@@ -1,0 +1,108 @@
+"""research/agents/sim_job.py (design R6): the entrypoint of a sim-<cid> Job (python3 -m research.agents.sim_job, cwd = the code bundle root). Runs one campaign
+spec (MEDCEA_SIM_SPEC, base64 JSON, or --spec FILE) into --out with the harness, with a CPU
+watchdog: process + children CPU seconds, cross-checked against the cgroup's usage_usec when
+readable, stop at the cap (cpu_cap_exceeded). Prints exactly one final line
+
+    SIM_RESULT {json}
+
+with {state: done|failed, cpu_hours, cpu_hours_cgroup, manifest, rows (first 50 lines of
+results.jsonl, as parsed), error?}; the full results.jsonl stays in --out (a results volume in
+the cluster) and manifest.result_digest is the digest of it, so the log copy is checkable
+against the volume. Stdlib + the harness."""
+import argparse
+import base64
+import json
+import os
+import resource
+import sys
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MARK = "SIM_RESULT "
+ROWS_MAX = 50
+
+
+def cpu_seconds():
+    me, ch = resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)
+    return me.ru_utime + me.ru_stime + ch.ru_utime + ch.ru_stime
+
+
+def cgroup_seconds(path="/sys/fs/cgroup/cpu.stat"):
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("usage_usec "):
+                    return int(line.split()[1]) / 1e6
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def emit(obj):
+    sys.stdout.write(MARK + json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def spent_hours(base_cg, base_proc):
+    p = (cpu_seconds() - base_proc) / 3600.0
+    c = cgroup_seconds()
+    return p, (None if c is None or base_cg is None else (c - base_cg) / 3600.0)
+
+
+def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exit):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--jobs", type=int, default=1)
+    ap.add_argument("--max-cpu-hours", type=float, required=True)
+    ap.add_argument("--spec", default=None)
+    a = ap.parse_args(argv)
+    if a.spec:
+        with open(a.spec, "rb") as f:
+            raw = f.read()
+    else:
+        raw = base64.b64decode(os.environ["MEDCEA_SIM_SPEC"])
+    spec = json.loads(raw)
+    if runner is None:
+        from research.harness import campaign
+
+        def runner(spec, out, jobs, cap):
+            s = campaign.resolve_spec(spec, repo_root=ROOT)
+            return campaign.run_campaign(s, out, repo_root=ROOT, jobs=jobs, max_cpu_hours=cap)
+    base_p, base_c = cpu_seconds(), cgroup_seconds()
+    done = threading.Event()
+
+    def watchdog():
+        while not done.wait(poll):
+            p, c = spent_hours(base_c, base_p)
+            if max(p, c or 0.0) > a.max_cpu_hours:
+                emit({"state": "failed", "error": "cpu_cap_exceeded", "cpu_hours": round(max(p, c or 0.0), 6),
+                      "cpu_hours_cgroup": None if c is None else round(c, 6)})
+                exit_fn(3)
+                return
+    threading.Thread(target=watchdog, daemon=True).start()
+    try:
+        m = runner(spec, a.out, a.jobs, a.max_cpu_hours)
+    except Exception as e:                       # the campaign's own refusals included
+        done.set()
+        emit({"state": "failed", "error": ("%s: %s" % (type(e).__name__, e))[:200],
+              "cpu_hours": round(spent_hours(base_c, base_p)[0], 6)})
+        return 1
+    done.set()
+    p, c = spent_hours(base_c, base_p)
+    rows = []
+    try:
+        with open(os.path.join(a.out, "results.jsonl"), encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= ROWS_MAX:
+                    break
+                rows.append(json.loads(line))
+    except OSError:
+        pass
+    emit({"state": "done", "manifest": m, "rows": rows, "cpu_hours": round(max(p, c or 0.0), 6),
+          "cpu_hours_cgroup": None if c is None else round(c, 6), "cpu_hours_process": round(p, 6)})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
