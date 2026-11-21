@@ -13,7 +13,12 @@
 --   rs_lake_reader cannot log in, holds nothing on any table, sequence or column,
 --   USAGE on schema lake_api only and EXECUTE only on the lake_api functions (all of
 --   them); every lake_api function is SECURITY DEFINER with search_path
---   pg_catalog, pg_temp (and, as above, owned by rs_owner, not executable by PUBLIC).
+--   pg_catalog, pg_temp (and, as above, owned by rs_owner, not executable by PUBLIC);
+--   rs_session (research Phase 4a) is LOGIN NOINHERIT, CONNECTION LIMIT 5, statement_timeout
+--   10s, a member of nothing, CONNECT only, USAGE on schema agent_trace only, EXECUTE on
+--   exactly the eight agent_trace writers and readers and on nothing else, no privilege on
+--   any relation or column; every agent_trace function is SECURITY DEFINER with search_path
+--   pg_catalog, pg_temp, and nobody but rs_owner and rs_session holds EXECUTE on one.
 BEGIN READ ONLY;
 WITH sch AS (
     SELECT n.oid, n.nspname FROM pg_catalog.pg_namespace n
@@ -37,6 +42,16 @@ WITH sch AS (
            p.prosecdef, p.proconfig, p.proacl
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'lake_api'
+), ss AS (
+    SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rs_session'
+), at_fn AS (
+    SELECT p.oid, 'agent_trace.' || p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' AS sig,
+           p.proname, p.prosecdef, p.proconfig, p.proacl
+      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'agent_trace'
+), want_ss(proname) AS (
+    VALUES ('open_session'), ('append_event'), ('put_blob'), ('checkpoint'), ('use_claim'), ('revoke'),
+           ('session_status'), ('events')
 ), want_rel(relname) AS (
     SELECT 'stage_' || x FROM pg_catalog.unnest(ARRAY['measurements', 'units', 'zones', 'recipes', 'recipe_lines',
                                                       'runs', 'cycles', 'control_loops', 'param_sets', 'catalogue']) x
@@ -231,6 +246,81 @@ WITH sch AS (
     UNION ALL
     SELECT f.sig || ' does not pin search_path = pg_catalog, pg_temp'
       FROM lake_fn f WHERE NOT ('search_path=pg_catalog, pg_temp' = ANY (coalesce(f.proconfig, '{}')))
+    UNION ALL
+    -- ── the agent trace (research Phase 4a) ──
+    SELECT 'role rs_session is missing' WHERE NOT EXISTS (SELECT 1 FROM ss)
+    UNION ALL
+    SELECT 'rs_session is not LOGIN NOINHERIT'
+      FROM pg_catalog.pg_roles r WHERE r.rolname = 'rs_session' AND (NOT r.rolcanlogin OR r.rolinherit)
+    UNION ALL
+    SELECT 'rs_session has connection limit ' || r.rolconnlimit || ', not 5'
+      FROM pg_catalog.pg_roles r WHERE r.rolname = 'rs_session' AND r.rolconnlimit <> 5
+    UNION ALL
+    SELECT 'rs_session has a superuser, createdb, createrole, replication or bypassrls attribute'
+      FROM pg_catalog.pg_roles r
+     WHERE r.rolname = 'rs_session'
+       AND (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
+    UNION ALL
+    SELECT 'rs_session is a member of ' || r.rolname
+      FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid = m.roleid
+     WHERE m.member = (SELECT oid FROM ss)
+    UNION ALL
+    SELECT 'rs_session lacks its setting statement_timeout=10s'
+     WHERE EXISTS (SELECT 1 FROM ss)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting d, LATERAL pg_catalog.unnest(d.setconfig) c
+                        WHERE d.setrole = (SELECT oid FROM ss) AND d.setdatabase = 0 AND c = 'statement_timeout=10s')
+    UNION ALL
+    SELECT 'rs_session holds ' || a.privilege_type || ' on ' || n.nspname || '.' || c.relname
+      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace,
+           LATERAL pg_catalog.aclexplode(c.relacl) a
+     WHERE a.grantee = (SELECT oid FROM ss)
+    UNION ALL
+    SELECT 'rs_session holds column privilege ' || a.privilege_type || ' on ' || c.relname || '.' || att.attname
+      FROM pg_catalog.pg_attribute att JOIN pg_catalog.pg_class c ON c.oid = att.attrelid,
+           LATERAL pg_catalog.aclexplode(att.attacl) a
+     WHERE a.grantee = (SELECT oid FROM ss)
+    UNION ALL
+    SELECT 'rs_session holds ' || a.privilege_type || ' on schema ' || n.nspname
+      FROM pg_catalog.pg_namespace n, LATERAL pg_catalog.aclexplode(n.nspacl) a
+     WHERE a.grantee = (SELECT oid FROM ss) AND NOT (n.nspname = 'agent_trace' AND a.privilege_type = 'USAGE')
+    UNION ALL
+    SELECT 'rs_session lacks USAGE on schema agent_trace'
+     WHERE EXISTS (SELECT 1 FROM ss) AND EXISTS (SELECT 1 FROM sch WHERE nspname = 'agent_trace')
+       AND NOT pg_catalog.has_schema_privilege('rs_session', 'agent_trace', 'USAGE')
+    UNION ALL
+    SELECT 'rs_session holds ' || a.privilege_type || ' on database ' || d.datname
+      FROM pg_catalog.pg_database d, LATERAL pg_catalog.aclexplode(d.datacl) a
+     WHERE d.datname = pg_catalog.current_database() AND a.grantee = (SELECT oid FROM ss)
+       AND a.privilege_type <> 'CONNECT'
+    UNION ALL
+    SELECT 'rs_session holds ' || a.privilege_type || ' on ' || n.nspname || '.' || p.proname
+           || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')'
+      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace,
+           LATERAL pg_catalog.aclexplode(p.proacl) a
+     WHERE a.grantee = (SELECT oid FROM ss)
+       AND NOT (n.nspname = 'agent_trace' AND a.privilege_type = 'EXECUTE'
+                AND p.proname IN (SELECT proname FROM want_ss))
+    UNION ALL
+    SELECT 'rs_session lacks EXECUTE on agent_trace.' || w.proname
+      FROM want_ss w
+     WHERE EXISTS (SELECT 1 FROM ss)
+       AND NOT EXISTS (SELECT 1 FROM at_fn f, LATERAL pg_catalog.aclexplode(f.proacl) a
+                        WHERE f.proname = w.proname AND a.grantee = (SELECT oid FROM ss)
+                          AND a.privilege_type = 'EXECUTE')
+    UNION ALL
+    SELECT f.sig || ' is held by ' || pg_catalog.pg_get_userbyid(a.grantee)
+      FROM at_fn f, LATERAL pg_catalog.aclexplode(f.proacl) a
+     WHERE a.grantee <> 0 AND a.grantee <> (SELECT oid FROM ss) AND a.grantee <> (SELECT oid FROM o)
+    UNION ALL
+    SELECT f.sig || ' is not SECURITY DEFINER' FROM at_fn f WHERE NOT f.prosecdef
+    UNION ALL
+    SELECT f.sig || ' does not pin search_path = pg_catalog, pg_temp'
+      FROM at_fn f WHERE NOT ('search_path=pg_catalog, pg_temp' = ANY (coalesce(f.proconfig, '{}')))
+    UNION ALL
+    SELECT 'agent_trace.' || x || ' is missing'
+      FROM pg_catalog.unnest(ARRAY['append_event', 'verify_chain', 'head']) x
+     WHERE EXISTS (SELECT 1 FROM sch WHERE nspname = 'agent_trace')
+       AND NOT EXISTS (SELECT 1 FROM at_fn f WHERE f.proname = x)
 )
 SELECT line FROM problems ORDER BY line;
 COMMIT;

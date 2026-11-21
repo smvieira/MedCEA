@@ -76,7 +76,8 @@ LAKE = {"measurements": "measurement"}   # every other set keeps its name
 APPEND_ONLY = ["lake.snapshot"] + ["lake." + LAKE.get(s, s) for s in STAGES] + ["vault.reservation"]
 
 SECRETS = {"RESEARCH_DB_PASS": "rsSuperPass0123456789", "RS_EXPORT_WRITER_DB_PASS": "rsWriterPass0123456789",
-           "RS_BACKUP_DB_PASS": "rsBackupPass0123456789", "RS_LAKE_API_DB_PASS": "rsLakeApiPass0123456789"}
+           "RS_BACKUP_DB_PASS": "rsBackupPass0123456789", "RS_LAKE_API_DB_PASS": "rsLakeApiPass0123456789",
+           "RS_SESSION_DB_PASS": "rsSessionPass0123456789"}
 DOCKERHUB = {"DOCKERHUB_USER": "someone", "DOCKERHUB_PAT": "dckr_pat_SECRET0123456789"}
 KC_SECRET = "kcDeployerSecret0123456789"
 
@@ -206,6 +207,7 @@ class Sql(unittest.TestCase):
         self.assertEqual(grants, [
             "GRANT CONNECT ON DATABASE medcea_research TO rs_export_writer, rs_backup;",
             "GRANT CONNECT ON DATABASE medcea_research TO rs_lake_api;",
+            "GRANT CONNECT ON DATABASE medcea_research TO rs_session;",
             "GRANT USAGE ON SCHEMA lake TO rs_export_writer;",
             "GRANT INSERT ON %s TO rs_export_writer;" % stage,
             "GRANT EXECUTE ON FUNCTION lake.close_snapshot(timestamptz, timestamptz, integer), lake.latest_cut() "
@@ -213,18 +215,24 @@ class Sql(unittest.TestCase):
             "GRANT pg_read_all_data TO rs_backup;",
             "GRANT USAGE ON SCHEMA lake_api TO rs_lake_reader;",
             "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA lake_api TO rs_lake_reader;",
-            "GRANT rs_lake_reader TO rs_lake_api;"])
+            "GRANT rs_lake_reader TO rs_lake_api;",
+            "GRANT USAGE ON SCHEMA agent_trace TO rs_session;",
+            "GRANT EXECUTE ON FUNCTION agent_trace.open_session(text, text, text, text, uuid, text, text, text, text, "
+            "text, text[], jsonb, text, text, timestamptz), agent_trace.append_event(text, text, text, text, jsonb, "
+            "text), agent_trace.put_blob(text, text, bytea), agent_trace.checkpoint(text, jsonb), "
+            "agent_trace.use_claim(text, inet), agent_trace.revoke(text, text, uuid), "
+            "agent_trace.session_status(text), agent_trace.events(text, bigint) TO rs_session;"])
         self.assertNotRegex(self.grants, r"TO\s+PUBLIC")
         flat = " ".join(self.grants.split())
         for line in ("REVOKE ALL ON DATABASE medcea_research FROM PUBLIC;",
                      "REVOKE ALL ON DATABASE medcea_research FROM rs_export_writer, rs_backup, rs_lake_api, "
-                     "rs_lake_reader;",
+                     "rs_lake_reader, rs_session;",
                      "REVOKE ALL ON SCHEMA public, lake, vault, sim, agent_trace, registry, lake_api FROM PUBLIC, "
-                     "rs_export_writer, rs_backup, rs_lake_api, rs_lake_reader;"):
+                     "rs_export_writer, rs_backup, rs_lake_api, rs_lake_reader, rs_session;"):
             self.assertIn(line, flat)
         for kind in ("TABLES", "SEQUENCES", "FUNCTIONS"):
             self.assertIn("REVOKE ALL ON ALL %s IN SCHEMA public, lake, vault, sim, agent_trace, registry, lake_api "
-                          "FROM PUBLIC, rs_export_writer, rs_backup, rs_lake_api, rs_lake_reader;" % kind, flat)
+                          "FROM PUBLIC, rs_export_writer, rs_backup, rs_lake_api, rs_lake_reader, rs_session;" % kind, flat)
         self.assertNotRegex(self.ddl, r"\bGRANT\b")   # the DDL grants nothing
         self.assertNotRegex(sql_code(read(LAKE_API)), r"\bGRANT\b")   # nor lake_api.sql
         # only the reader's schema and its functions; the lake's own grant lines are unchanged
@@ -634,7 +642,7 @@ class Deploy(Tree):
         self.assertFalse([c for c in calls if c.startswith("helm3") or c.startswith("kubectl apply")])
 
     def test_missing_password(self):
-        for k in ("RS_BACKUP_DB_PASS", "RS_LAKE_API_DB_PASS"):
+        for k in ("RS_BACKUP_DB_PASS", "RS_LAKE_API_DB_PASS", "RS_SESSION_DB_PASS"):
             self.write_config(**{k: ""})
             r, calls = self.run_script("deploy.sh")
             self.assertEqual(r.returncode, 1)
@@ -674,12 +682,12 @@ class Deploy(Tree):
             self.assertIn(s, values)
         self.assertNotIn("${", values)
         self.assertNotIn("cpu: 1", values.split("limits:")[1].split("persistence")[0])   # no CPU limit
-        # order: auth Secret → helm → DDL → lake_api.sql → passwords → grants → role Secrets → assert
+        # order: auth Secret → helm → DDL → lake_api.sql → agent_trace.sql → passwords → grants → role Secrets → assert
         order = [c for c in calls if c.startswith(("helm3 upgrade", "kubectl apply", "kubectl exec"))]
         kinds = []
         for c in order:
             kinds.append("helm" if c.startswith("helm3") else c.split()[1])
-        self.assertEqual(kinds, ["apply", "helm", "exec", "exec", "exec", "exec", "apply", "apply", "exec"])
+        self.assertEqual(kinds, ["apply", "helm", "exec", "exec", "exec", "exec", "exec", "apply", "apply", "exec"])
         self.assertIn("kubectl apply -n medcea-research -f -", calls)
         self.assertEqual(calls.count("kubectl apply -n medcea -f -"), 2)
         applies = self.inputs("apply")
@@ -694,24 +702,27 @@ class Deploy(Tree):
         execs = self.inputs("exec")
         self.assertIn("CREATE DATABASE medcea_research", execs[0])
         self.assertEqual(execs[1], read(LAKE_API))
-        pw = execs[2]
+        self.assertEqual(execs[2], read(os.path.join(APP, "db", "agent_trace.sql")))
+        pw = execs[3]
         self.assertTrue(pw.startswith("SET log_statement = 'none';"), pw)
-        self.assertEqual(len(re.findall(r"\\set pw 'SCRAM-SHA-256\$4096:", pw)), 3)
+        self.assertEqual(len(re.findall(r"\\set pw 'SCRAM-SHA-256\$4096:", pw)), 4)
         self.assertIn("ALTER ROLE rs_export_writer PASSWORD :'pw';", pw)
         self.assertIn("ALTER ROLE rs_backup PASSWORD :'pw';", pw)
         self.assertIn("ALTER ROLE rs_lake_api PASSWORD :'pw';", pw)
         for v in SECRETS.values():
             self.assertNotIn(v, "\n".join(execs))
-        self.assertIn("GRANT pg_read_all_data TO rs_backup", execs[3])
-        self.assertIn("GRANT rs_lake_reader TO rs_lake_api", execs[3])
-        self.assertIn("assert_grants.sql", execs[4])
+        self.assertIn("ALTER ROLE rs_session PASSWORD :'pw';", pw)
+        self.assertIn("GRANT pg_read_all_data TO rs_backup", execs[4])
+        self.assertIn("GRANT rs_lake_reader TO rs_lake_api", execs[4])
+        self.assertIn("assert_grants.sql", execs[5])
         ex = [c for c in calls if c.startswith("kubectl exec")]
         self.assertTrue(all(" -n medcea-research research-postgresql-0 " in c for c in ex), ex)
         self.assertIn(" postgres -q -v ON_ERROR_STOP=1 -f -", ex[0])
         self.assertIn(" medcea_research -q -v ON_ERROR_STOP=1 -f -", ex[1])   # lake_api.sql in the database
-        self.assertIn(" postgres -q", ex[2])
-        self.assertIn(" medcea_research -q", ex[3])
-        self.assertIn(" medcea_research -qtA", ex[4])
+        self.assertIn(" medcea_research -q -v ON_ERROR_STOP=1 -f -", ex[2])   # agent_trace.sql
+        self.assertIn(" postgres -q", ex[3])
+        self.assertIn(" medcea_research -q", ex[4])
+        self.assertIn(" medcea_research -qtA", ex[5])
 
     def test_the_chart_networkpolicy_is_off(self):
         # chart 18.4.0 has no top-level networkPolicy key: the switches are per component
@@ -992,6 +1003,7 @@ class RealPostgres(unittest.TestCase):
         for _ in range(2):   # re-run safe
             cls.psql("postgres", read(DDL), check=True)
             cls.psql("medcea_research", read(LAKE_API), check=True)
+            cls.psql("medcea_research", read(os.path.join(APP, "db", "agent_trace.sql")), check=True)
             cls.psql("medcea_research", read(GRANTS), check=True)
 
     @classmethod
@@ -1159,7 +1171,7 @@ COMMIT;"""
         self.assertNotEqual(n, "0")
         enabled = self.q("SELECT string_agg(DISTINCT tgenabled::text, '') FROM pg_trigger WHERE tgname LIKE 'append_only_%'")
         self.assertEqual(enabled, "A")
-        self.assertEqual(self.q("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'append_only_%'"), str(2 * len(APPEND_ONLY)))
+        self.assertEqual(self.q("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'append_only_%'"), str(2 * (len(APPEND_ONLY) + 7)))   # + agent_trace's seven
 
     def test_04_the_snapshot_reader(self):
         """After test_02's snapshots: lineage, the digest check's parity with close_snapshot,
