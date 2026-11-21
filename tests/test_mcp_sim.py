@@ -293,5 +293,42 @@ class SimJobTest(unittest.TestCase):
         self.assertEqual((r["state"], r["error"]), ("failed", "cpu_cap_exceeded"))
 
 
+class ProfileTools(unittest.TestCase):
+    """Every tool the shipped profile names, and every tool its script calls, is served by mcp-sim or
+    mcp-lake (research Phase 4a stage 6b2); the script's sim.estimate runs through the real
+    in-process estimator."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        import mcp_lake
+        from research.agents import loop
+        cls.root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cls.p = loop.load_profile(os.path.join(cls.root, "research", "agents", "profiles", "compare_controllers.yaml"))
+        s, _, sim = setup()
+        served = {t["name"] for t in rpc(sim, "tools/list")[1]["result"]["tools"]}
+        lake = mcp_lake.LakeServer(FakeSession(["lake.snapshots", "lake.summary", "lake.catalogue"]), None).app
+        served |= {t["name"] for t in rpc(lake, "tools/list")[1]["result"]["tools"]}
+        cls.served = served
+
+    def test_every_profile_tool_is_served(self):
+        self.assertEqual(sorted(set(self.p["tools"]) - self.served), [])
+        for step in self.p["script"]:
+            if step.get("tool"):
+                self.assertIn(step["tool"], self.p["tools"])
+
+    def test_the_scripted_spec_estimates(self):
+        step = next(s for s in self.p["script"] if s.get("tool") == "sim.estimate")
+        est = mcp_sim.LocalEstimator(self.root)
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        try:
+            r = est.estimate(step["args"]["spec"])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(r["runs"], 3)
+        self.assertLess(r["cpu_hours"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

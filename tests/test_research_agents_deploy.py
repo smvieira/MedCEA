@@ -698,5 +698,49 @@ class Wiring(unittest.TestCase):
         self.assertNotIn("pa_zonenetpol", code(read("infra/deploy-policy.sh")))
 
 
+class JobManifests(unittest.TestCase):
+    """Stage 6b2: agent and sim Jobs carry what the Deployments of agents.yaml carry."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(REPO, "apps", "research-agents"))
+        import jobs
+        cfg = {"image": "img@sha256:" + "a" * 64, "code_commit": "abc", "session_url": "http://s", "mcp_sim_url": "http://m",
+               "mcp_lake_url": "http://l"}
+        cls.agent = jobs.agent_job(cfg, "A" * 22, "c" * 43, "compare_controllers", 1)
+        cls.sim = jobs.sim_job(cfg, "c" + "0" * 20, {"x": 1}, 1, 3600, 2)
+
+    def test_pod_hardening(self):
+        for j in (self.agent, self.sim):
+            ps = j["spec"]["template"]["spec"]
+            self.assertFalse(ps["automountServiceAccountToken"])
+            self.assertEqual(ps["priorityClassName"], "medcea-research-low")
+            self.assertEqual(ps["securityContext"]["runAsUser"], 65534)
+            self.assertIn("activeDeadlineSeconds", j["spec"])
+            self.assertNotIn("ownerReferences", j["metadata"])
+            for c in ps["initContainers"] + ps["containers"]:
+                sc = c["securityContext"]
+                self.assertTrue(sc["readOnlyRootFilesystem"])
+                self.assertFalse(sc["allowPrivilegeEscalation"])
+                self.assertEqual(sc["capabilities"], {"drop": ["ALL"]})
+                self.assertIn("memory", c["resources"]["limits"])
+
+    def test_unpack_matches_the_deployments(self):
+        text = open(os.path.join(REPO, "apps", "research-agents", "k8s", "agents.yaml")).read()
+        for j in (self.agent, self.sim):
+            cmd = j["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+            self.assertIn(cmd, text.replace('\\"', '"'))
+
+    def test_volumes(self):
+        names = lambda j: {v["name"] for v in j["spec"]["template"]["spec"]["volumes"]}
+        self.assertNotIn("runs", names(self.agent))
+        self.assertIn("runs", names(self.sim))
+        m = self.sim["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+        self.assertIn({"name": "runs", "mountPath": "/runs"}, m)
+        for j in (self.agent, self.sim):
+            secrets = [v for v in j["spec"]["template"]["spec"]["volumes"] if "secret" in v]
+            self.assertEqual(secrets, [])
+
+
 if __name__ == "__main__":
     unittest.main()

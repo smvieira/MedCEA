@@ -277,6 +277,20 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         200 from the host, or lake.snapshot_digest_check(<newest>) finds a digest that does not"
     echo -e "         recompute"
     echo ""
+    echo -e "  ${CYAN}gwnetpol${NC} / ${CYAN}ranetpol${NC} the research-gw and research-agents zones' NetworkPolicies (Phase 4a): NAMESPACE"
+    echo -e "         as rsnetpol, against cli.py compile netpol with zone_netpol_args; SKIP without the zone"
+    echo ""
+    echo -e "  ${CYAN}rschain${NC} the agent trace's hash chain (Phase 4a): NAMESPACE"
+    echo -e "         agent_trace.verify_chain() and an independent recomputation; FAIL on a break; SKIP without the table"
+    echo ""
+    echo -e "  ${CYAN}rsanchor${NC} the agent trace's head anchored in the newest nightly backup (Phase 4a): NAMESPACE"
+    echo -e "         FAIL when the event is missing or its hash differs on the same database identity;"
+    echo -e "         WARN when the backup is of another database (predates it), too old or has no head line"
+    echo ""
+    echo -e "  ${CYAN}rsagent${NC} research-session and the agents' services (Phase 4a): NAMESPACE"
+    echo -e "         FAIL when the live anchor research-session reports differs from the database;"
+    echo -e "         WARN when a pod is not Running, /healthz does not answer or its key id is not the Secret's"
+    echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
     echo -e "         docs/manual/build.py --out --standalone (a temp file); WARN when it lags or is missing (./medcea.sh"
@@ -3126,10 +3140,19 @@ check_rsgrants() {
     local name="$1" ns="${2:-${NAMESPACE:-medcea}}" RS_NS out rc=0 res kind msg fails=() warns=() oks=()
     if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
     _rs_zone_ns "$name" "$ns" || return
+    # The two Phase 4a zones' namespaces are scanned too, when they exist (research-gw, research-agents).
+    local scan_ns scan_list=("$RS_NS") z zns count=0 total_ns=1 c1
+    for z in research-gw research-agents; do
+        zns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_namespace "$1"' _ "$z" 2>/dev/null)" || zns=""
+        [[ -n "$zns" ]] || continue
+        if timeout "$TIMEOUT" $KUBECTL get namespace "$zns" -o name >/dev/null 2>&1; then scan_list+=("$zns"); fi
+    done
+    for scan_ns in "${scan_list[@]}"; do
+    rc=0
     out="$(timeout "$TIMEOUT" $KUBECTL get pods,deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,roles,rolebindings,services \
-        -n "$RS_NS" -o json 2>&1)" || rc=$?
+        -n "$scan_ns" -o json 2>&1)" || rc=$?
     if [[ $rc -ne 0 ]]; then
-        _record WARN "$name" "cannot read the workloads and Roles in $RS_NS: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+        _record WARN "$name" "cannot read the workloads and Roles in $scan_ns: $(tail -n1 <<<"$out" | cut -c1-120)"; return
     fi
     res="$(python3 -c '
 import json, sys
@@ -3169,6 +3192,8 @@ def allowed(i, labels):
         return {"lake-api-auth"}
     if w in (("Deployment", "hub"), ("Deployment", "proxy")):
         return {"hub"}
+    if w == ("Deployment", "research-session"):
+        return {"research-session-key", "research-session-db"}
     if w[0] == "Pod" and labels.get("component") == "singleuser-server":
         return {"singleuser"}
     return set()
@@ -3202,7 +3227,7 @@ def secrets(ps):
         if r.get("name"):
             out.add(r["name"])
     return out
-bad, roles, binds, exposed, n = [], [], [], [], 0
+bad, roles, binds, exposed, forged, n = [], [], [], [], [], 0
 for i in items:
     k, nm = i.get("kind"), (i.get("metadata") or {}).get("name")
     if k == "Service":
@@ -3220,12 +3245,24 @@ for i in items:
         continue
     labels, ps = spec_of(i)
     n += 1
+    # Phase 4a: a pod that claims one of the agent machinery identities (its label, or the
+    # orchestrator ServiceAccount) must be controlled by that Deployment (uid-matched), whoever
+    # created it: the hub may create pods in the research zone with any label or account.
+    if k == "Pod":
+        app = labels.get("app")
+        want = ("Deployment", app) if app in ("research-orchestrator", "mcp-sim", "mcp-lake", "research-session") else None
+        if (ps.get("serviceAccountName") == "research-orchestrator") and want is None:
+            want = ("Deployment", "research-orchestrator")
+        if want is not None and top(i) != want:
+            forged.append(nm)
     extra = sorted(secrets(ps) - allowed(i, labels))
     if extra:
         bad.append("%s/%s: %s" % (k.lower(), nm, ",".join(extra)))
 print("count|%d" % n)
 if bad:
     print("FAIL|Secrets outside the allow-list: " + "; ".join(sorted(bad)[:5]) + (" (and %d more)" % (len(bad) - 5) if len(bad) > 5 else ""))
+if forged:
+    print("FAIL|pod(s) using an agent service label or the orchestrator ServiceAccount without being the controlled Deployment: " + " ".join(sorted(forged)))
 if roles:
     print("FAIL|Role(s) granting secrets or *: " + " ".join(sorted(roles)))
 if binds:
@@ -3233,16 +3270,18 @@ if binds:
 if exposed:
     print("FAIL|Service(s) reachable from outside the cluster (the zone admits node: a NodePort would open lake-api to the LAN): " + " ".join(sorted(exposed)))
 ' <<<"$out" 2>/dev/null)"
-    local count=""
+    c1=""
     while IFS='|' read -r kind msg; do
         case "$kind" in
-            count) count="$msg" ;;
-            FAIL)  fails+=("$msg") ;;
-            error) _record WARN "$name" "cannot parse the workloads and Roles in $RS_NS"; return ;;
+            count) c1="$msg" ;;
+            FAIL)  fails+=("$([[ "$scan_ns" == "$RS_NS" ]] || echo "$scan_ns: ")$msg") ;;
+            error) _record WARN "$name" "cannot parse the workloads and Roles in $scan_ns"; return ;;
         esac
     done <<<"$res"
-    [[ "$count" =~ ^[0-9]+$ ]] || { _record WARN "$name" "cannot judge the workloads in $RS_NS"; return; }
-    oks+=("$count pod spec(s) in $RS_NS name only their own Secrets; no Role on secrets, no ClusterRole bound, no Service exposed")
+    [[ "$c1" =~ ^[0-9]+$ ]] || { _record WARN "$name" "cannot judge the workloads in $scan_ns"; return; }
+    count=$((count + c1))
+    done
+    oks+=("$count pod spec(s) in ${scan_list[*]} name only their own Secrets; no Role on secrets, no ClusterRole bound, no Service exposed")
     rc=0
     out="$(timeout "$TIMEOUT" $KUBECTL get statefulset research-postgresql -n "$RS_NS" -o name 2>&1)" || rc=$?
     if [[ $rc -ne 0 ]]; then
@@ -3368,6 +3407,371 @@ SQL
     else
         _record OK "$name" "${oks[*]}"
     fi
+}
+
+# =============================================================================
+# Check: the research gateway's and the agents' NetworkPolicies (research Phase 4a, R38)
+# — read-only. gwnetpol and ranetpol are thin wrappers over check_zonenetpol ZONE.
+# target: NAMESPACE. The labelled policies of the zone's namespace (zone_namespace, as
+# infra/lib-policy-tools.sh) against `cli.py compile netpol` with zone_netpol_args (the other
+# zones' namespaces are named for the cross-zone peers), compared as {name: spec} in canonical
+# JSON, default deny and DNS included, as rsnetpol does: FAIL when a compiled one is missing or
+# differs or any other NetworkPolicy is there (labelled or not: policies are additive). SKIP
+# without kubectl, while the sandbox is switched off without the namespace, and while the applied
+# policy has no such zone (before the skeleton version of Phase 4a); WARN when switched off with
+# the namespace left, when enabled without it, and when anything cannot be read.
+# =============================================================================
+check_zonenetpol() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" zone="$3" zns out rc=0 exists live want ip ips=() res kind names
+    local fails=() count="" label key args=()
+    case "$zone" in
+        research-gw)     label="gw-netpol"; key=gw ;;
+        research-agents) label="ra-netpol"; key=ra ;;
+        *) _record WARN "$name" "unknown research zone $zone"; return ;;
+    esac
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    zns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_namespace "$1"' _ "$zone" 2>/dev/null)" || zns=""
+    [[ -n "$zns" ]] || { _record WARN "$name" "cannot tell the namespace of zone $zone"; return; }
+    out="$(timeout "$TIMEOUT" $KUBECTL get namespace "$zns" -o name 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]]; then exists=yes
+    elif grep -q 'NotFound' <<<"$out"; then exists=no
+    else _record WARN "$name" "cannot read namespace $zns: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+    fi
+    if [[ "${RESEARCH_ENABLED:-false}" != true ]]; then
+        if [[ $exists == yes ]]; then
+            _record WARN "$name" "RESEARCH_ENABLED is not true, yet namespace $zns exists (./apps/research-agents/uninstall.sh, then microk8s kubectl delete namespace $zns)"
+        else
+            _record SKIP "$name" "the research sandbox is switched off (RESEARCH_ENABLED is not true)"
+        fi
+        return
+    fi
+    rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone "$zone" >/dev/null 2>&1 || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        _record SKIP "$name" "the applied access policy has no $zone zone yet"; return
+    elif [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot tell whether the applied access policy has a $zone zone (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    if [[ $exists == no ]]; then
+        _record WARN "$name" "RESEARCH_ENABLED=true, but namespace $zns does not exist (./deploy-infra.sh)"; return
+    fi
+    rc=0
+    live="$(timeout "$TIMEOUT" $KUBECTL get netpol -n "$zns" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the NetworkPolicies in $zns: $(tail -n1 <<<"$live" | cut -c1-120)"; return
+    fi
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read the node addresses: $(tail -n1 <<<"$out" | cut -c1-120)"; return
+    fi
+    for ip in $out; do ips+=(--node-ip "${ip%/*}"); done
+    mapfile -t args < <(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_netpol_args "$1"' _ "$zone" 2>/dev/null)
+    if (( ${#args[@]} == 0 )) || ! want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol "${args[@]}" "${ips[@]}" 2>/dev/null)"; then
+        _record WARN "$name" "the $zone NetworkPolicies do not compile (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    res="$(WANT="$want" LABEL="medcea/$label" python3 -c '
+import json, os, sys
+try:
+    items = json.load(sys.stdin).get("items") or []
+    live = {i["metadata"]["name"]: i.get("spec") for i in items}
+    labelled = {i["metadata"]["name"] for i in items
+                if (i["metadata"].get("labels") or {}).get(os.environ["LABEL"]) == "true"}
+    want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
+except Exception:
+    print("error|")
+    sys.exit(0)
+canon = lambda d: json.dumps(d, sort_keys=True)
+print("count|%d" % len(want))
+print("missing|" + " ".join(sorted(n for n in want if n not in live)))
+print("differ|" + " ".join(sorted(n for n in want if n in live and canon(live[n]) != canon(want[n]))))
+print("extra|" + " ".join(sorted(n for n in live if n not in want and n in labelled)))
+print("foreign|" + " ".join(sorted(n for n in live if n not in want and n not in labelled)))' <<<"$live" 2>/dev/null)"
+    while IFS='|' read -r kind names; do
+        case "$kind" in
+            count)   count="$names" ;;
+            missing) [[ -n "$names" ]] && fails+=("missing: $names (./deploy-infra.sh)") ;;
+            differ)  [[ -n "$names" ]] && fails+=("spec differs: $names (./deploy-infra.sh)") ;;
+            extra)   [[ -n "$names" ]] && fails+=("labelled but not compiled: $names (./deploy-infra.sh deletes them)") ;;
+            foreign) [[ -n "$names" ]] && fails+=("not the zone's, no medcea/$label=true label: $names, which widens the zone past its default deny (microk8s kubectl delete networkpolicy -n $zns <name>)") ;;
+            error)   _record WARN "$name" "cannot parse the live or compiled $zone NetworkPolicies"; return ;;
+        esac
+    done <<<"$res"
+    if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+        _record WARN "$name" "cannot compare the $zone NetworkPolicies with the compile"; return
+    fi
+    if (( count == 0 )); then
+        _record WARN "$name" "the applied policy has a $zone zone but compiles no NetworkPolicy for it (python3 apps/iam/compiler/cli.py check)"; return
+    fi
+    if (( ${#fails[@]} )); then
+        local joined f
+        joined="${fails[0]}"
+        for f in "${fails[@]:1}"; do joined+="; $f"; done
+        _record FAIL "$name" "the $zone zone admits more than the policy compiles: $joined"
+    else
+        _record OK "$name" "$count $zone NetworkPolicies, the compiled set (default deny included)"
+    fi
+}
+check_gwnetpol() { check_zonenetpol "$1" "${2:-}" research-gw; }
+check_ranetpol() { check_zonenetpol "$1" "${2:-}" research-agents; }
+
+# =============================================================================
+# The agent trace (research Phase 4a, R11) — read-only. _rs_trace_psql RNS [PSQL ARGS...]: one
+# psql as postgres in research-postgresql-0, read-only session, SQL on stdin, `-tA -F '|'`;
+# its status is psql's. _rs_trace_ready NAME NS: sets RS_NS, returns 1 after a SKIP/WARN when
+# research is off, the zone is missing, there is no research database or no agent_trace.event.
+# =============================================================================
+_rs_trace_psql() {
+    local rns="$1"; shift
+    timeout "$((TIMEOUT * 2))" $KUBECTL exec -i -n "$rns" research-postgresql-0 -- \
+        env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
+        'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d medcea_research -tA -F "|" "$@"' psql "$@" 2>&1
+}
+_rs_trace_ready() {
+    local name="$1" ns="$2" out rc=0
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return 1; fi
+    _rs_zone_ns "$name" "$ns" || return 1
+    out="$(timeout "$TIMEOUT" $KUBECTL get statefulset research-postgresql -n "$RS_NS" -o name 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'NotFound' <<<"$out"; then
+            _record SKIP "$name" "no research database yet (./apps/research/deploy.sh)"
+        else
+            _record WARN "$name" "cannot read StatefulSet research-postgresql in $RS_NS: $(tail -n1 <<<"$out" | cut -c1-100)"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# =============================================================================
+# Check: the agent trace's hash chain (research Phase 4a, R11). target: NAMESPACE. Two
+# recomputations in one read-only session: agent_trace.verify_chain() (ok, events, first bad
+# event) and an independent pass of the chain's own SQL over the rows (every hash against
+# sha256 of event_record(...), every prev_hash against the previous row's hash, window
+# functions rather than verify_chain's loop). FAIL when either finds a break, or verify_chain
+# is missing while the table exists. SKIP without the table (the Phase 4a SQL not applied) and
+# without a research database; WARN when unreadable. It does not see a tail cut off by a
+# superuser: rsanchor and the live anchor (rsagent) do.
+# =============================================================================
+check_rschain() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" RS_NS out rc=0 line a b c d
+    _rs_trace_ready "$name" "$ns" || return
+    out="$(_rs_trace_psql "$RS_NS" <<'SQL'
+SELECT pg_catalog.to_regclass('agent_trace.event') IS NOT NULL AS has_event,
+       pg_catalog.to_regprocedure('agent_trace.verify_chain()') IS NOT NULL AS has_fn \gset
+\if :has_event
+\if :has_fn
+SELECT 'chain', vc.ok, vc.events, coalesce(vc.first_bad_event::text, '-') FROM agent_trace.verify_chain() vc;
+SELECT 'recompute', count(*) FILTER (WHERE e.hash <> pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+           agent_trace.event_record(e.event_id, e.at, e.sid, e.sup_sub, e.sup_person, e.sup_role, e.actor, e.event,
+                                    e.payload, e.prev_hash), 'UTF8')), 'hex')),
+       count(*) FILTER (WHERE e.prev_hash <> coalesce(e.prev_row_hash, pg_catalog.repeat('0', 64))),
+       count(*)
+  FROM (SELECT x.*, pg_catalog.lag(x.hash) OVER (ORDER BY x.event_id) AS prev_row_hash FROM agent_trace.event x) e;
+\else
+SELECT 'nofn';
+\endif
+\else
+SELECT 'notable';
+\endif
+SQL
+)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _record WARN "$name" "cannot read agent_trace: $(grep -m1 -E 'ERROR|error|NotFound' <<<"$out" | cut -c1-120)"; return
+    fi
+    if grep -q '^notable$' <<<"$out"; then
+        _record SKIP "$name" "no agent_trace.event yet (the Phase 4a research database SQL: ./apps/research/deploy.sh)"; return
+    fi
+    if grep -q '^nofn$' <<<"$out"; then
+        _record FAIL "$name" "agent_trace.event exists but agent_trace.verify_chain() does not (./apps/research/deploy.sh)"; return
+    fi
+    local vc rec
+    vc="$(grep -m1 '^chain|' <<<"$out")"; rec="$(grep -m1 '^recompute|' <<<"$out")"
+    if [[ -z "$vc" || -z "$rec" ]]; then
+        _record WARN "$name" "agent_trace answered in an unexpected form"; return
+    fi
+    local pbad n
+    IFS='|' read -r _ a b c <<<"$vc"
+    IFS='|' read -r _ d pbad n <<<"$rec"      # recompute: hash mismatches | prev_hash mismatches | rows
+    if [[ "$a" != t ]]; then
+        _record FAIL "$name" "agent_trace.verify_chain() is not ok: the chain breaks at event ${c} (${b} events checked)"
+    elif [[ "$d" != 0 || "$pbad" != 0 ]]; then
+        _record FAIL "$name" "the recomputation finds ${d} row(s) whose hash does not match and ${pbad} whose prev_hash does not follow: the trace was edited"
+    else
+        _record OK "$name" "${b} event(s), every hash and link recomputed (verify_chain and an independent pass agree)"
+    fi
+}
+
+# =============================================================================
+# Check: the agent trace's anchor in the newest backup (research Phase 4a, R11). target:
+# NAMESPACE. Mirrors iamanchor with backup_rs_chain_head (apps/backup/lib-backup.sh: the
+# MANIFEST line `# agent_trace chain head (read before the dump): <id> <hash> db=<sysid>/<oid>`):
+# that event must still be in agent_trace.event with the recorded hash (one read-only psql,
+# the id as -v anchor_id=). The live database's identity (pg_control_system().system_identifier
+# / the database's oid) is compared with the line's: a different one means the backup is of an
+# earlier database (a new install, or --purge-data and a redeploy; BACKUP_DIR outlives both) and
+# only WARNs "predates this database"; the same identity with the event missing or its hash
+# different is a FAIL (the trace was cut or rewritten after the backup). WARN: no BACKUP_DIR, no
+# complete backup, no or unavailable head line, a backup older than ANCHOR_MAX_H (48) h, an
+# unreadable database. SKIP without a research database, without the table, and while the trace
+# is still empty.
+# =============================================================================
+check_rsanchor() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" max_h="${ANCHOR_MAX_H:-48}" RS_NS dir newest bname ok_epoch rec kind id hash ident
+    local age h out rc=0 line got since live nev
+    _rs_trace_ready "$name" "$ns" || return
+    dir="$(backup_dir)"
+    if [[ ! -d "$dir" ]]; then
+        _record WARN "$name" "no anchor: ${dir} (BACKUP_DIR) does not exist (./apps/backup/deploy.sh)"; return
+    fi
+    if [[ ! -r "$dir" || ! -x "$dir" ]]; then
+        _record WARN "$name" "no anchor: cannot read ${dir} (BACKUP_DIR, mode 700): run this as the account that ran ./apps/backup/deploy.sh"; return
+    fi
+    newest="$(backup_newest_ok "$dir")"
+    if [[ -z "$newest" ]]; then
+        _record WARN "$name" "no anchor: no complete backup in ${dir} yet (./apps/backup/backups.sh now)"; return
+    fi
+    bname="${newest%% *}"; ok_epoch="${newest#* }"
+    # The live side first: no events yet means nothing to anchor.
+    out="$(_rs_trace_psql "$RS_NS" <<'SQL'
+SELECT pg_catalog.to_regclass('agent_trace.event') IS NOT NULL AS has_event \gset
+\if :has_event
+SELECT 'live', (SELECT count(*) FROM agent_trace.event),
+       (SELECT system_identifier FROM pg_catalog.pg_control_system()) || '/' ||
+       (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database());
+\else
+SELECT 'notable';
+\endif
+SQL
+)" || rc=$?
+    line="$(grep -m1 -E '^(live\||notable$)' <<<"$out")"
+    if [[ $rc -ne 0 || -z "$line" ]]; then
+        _record WARN "$name" "cannot read agent_trace: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"; return
+    fi
+    if [[ "$line" == notable ]]; then _record SKIP "$name" "no agent_trace.event yet (./apps/research/deploy.sh)"; return; fi
+    IFS='|' read -r _ nev live <<<"$line"
+    if [[ "$nev" == 0 ]]; then _record SKIP "$name" "no agent session has been recorded yet"; return; fi
+    if ! rec="$(backup_rs_chain_head "$dir/$bname")"; then
+        _record WARN "$name" "no anchor: cannot read the MANIFEST of backup ${bname}"; return
+    fi
+    case "$rec" in
+        none) _record WARN "$name" "no anchor: backup ${bname} records no agent_trace head (a backup from before Phase 4a, or ./apps/backup/deploy.sh has not run since)"; return ;;
+        unavailable*) _record WARN "$name" "no anchor: backup ${bname} could not read the agent_trace head ${rec#unavailable }"; return ;;
+    esac
+    read -r kind id hash ident <<<"$rec"
+    age=$(( $(date -u +%s) - ok_epoch )); (( age < 0 )) && age=0; h=$(( age / 3600 ))
+    if [[ "$ident" != "$live" ]]; then
+        _record WARN "$name" "no anchor: backup ${bname} predates this database (its identity ${ident} is not the live ${live}: a new install or a purged database): no anchor until the next nightly backup"; return
+    fi
+    rc=0
+    out="$(_rs_trace_psql "$RS_NS" -v "anchor_id=$id" <<'SQL'
+SELECT 'anchor', coalesce((SELECT e.hash FROM agent_trace.event e WHERE e.event_id = :anchor_id), '-'),
+       (SELECT count(*) FROM agent_trace.event e WHERE e.event_id > :anchor_id);
+SQL
+)" || rc=$?
+    line="$(grep -m1 '^anchor|' <<<"$out")"
+    if [[ $rc -ne 0 || -z "$line" ]]; then
+        _record WARN "$name" "cannot read agent_trace to compare with backup ${bname}: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-120)"; return
+    fi
+    IFS='|' read -r _ got since <<<"$line"
+    if [[ "$got" == "-" ]]; then
+        _record FAIL "$name" "event ${id}, the trace head backup ${bname} recorded for this database, is missing from agent_trace.event: the trace was cut after that backup"
+    elif [[ "$got" != "$hash" ]]; then
+        _record FAIL "$name" "event ${id}'s hash is ${got:0:12}..., backup ${bname} recorded ${hash:0:12}...: the trace was rewritten after that backup"
+    elif (( age > max_h * 3600 )); then
+        _record WARN "$name" "event ${id} has the hash backup ${bname} recorded, but that backup is ${h} h old (over ${max_h} h: ./apps/backup/backups.sh list)"
+    else
+        _record OK "$name" "event ${id} has the hash backup ${bname} recorded (${h} h old), ${since} event(s) since"
+    fi
+}
+
+# =============================================================================
+# Check: the agent sessions' services (research Phase 4a, R11/R38). target: NAMESPACE.
+# SKIP while switched off, without the research-gw zone or without Deployment research-session.
+# WARN when a pod of research-orchestrator, mcp-sim or mcp-lake (research-agents) is not Running,
+# research-session's pod does not answer http://<podIP>:8100/healthz from the host within
+# `curl -m`, its `kid` differs from annotation medcea/session-key-kid on Secret
+# research-session-key (the key itself is never read), or the database cannot be read. FAIL when
+# the live anchor research-session reports (the last event it wrote, `anchor.event_id`/`hash`)
+# is missing from agent_trace.event or has another hash there: the trace was rewritten under a
+# running service. Not built yet: orphan Jobs and the profile-inventory drift (4b).
+# =============================================================================
+check_rsagent() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" gwns agns rc=0 out ip code body info kid want_kid eid ehash line got
+    local warns=() fails=() oks=() d pods
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    if [[ "${RESEARCH_ENABLED:-false}" != true ]]; then _record SKIP "$name" "the research sandbox is switched off (RESEARCH_ENABLED is not true)"; return; fi
+    rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone research-gw >/dev/null 2>&1 || rc=$?
+    if [[ $rc -eq 1 ]]; then _record SKIP "$name" "the applied access policy has no research-gw zone yet"; return
+    elif [[ $rc -ne 0 ]]; then _record WARN "$name" "cannot tell whether the applied access policy has a research-gw zone"; return; fi
+    gwns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_namespace research-gw' 2>/dev/null)"
+    agns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_namespace research-agents' 2>/dev/null)"
+    rc=0
+    out="$(timeout "$TIMEOUT" $KUBECTL get deployment research-session -n "$gwns" -o name 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'NotFound' <<<"$out"; then _record SKIP "$name" "no deployment research-session in $gwns (./apps/research-agents/deploy.sh)"
+        else _record WARN "$name" "cannot read deployment research-session in $gwns: $(tail -n1 <<<"$out" | cut -c1-120)"; fi
+        return
+    fi
+    for d in research-orchestrator mcp-sim mcp-lake; do
+        rc=0
+        pods="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$agns" -l "app=$d" --field-selector=status.phase=Running -o name 2>&1)" || rc=$?
+        if [[ $rc -ne 0 ]]; then warns+=("cannot read the pods of $d in $agns"); continue; fi
+        grep -q . <<<"$pods" || warns+=("no Running pod of $d in $agns")
+    done
+    rc=0
+    ip="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$gwns" -l app=research-session --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].status.podIP}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 || ! "$ip" =~ ^[0-9.]+$ ]]; then
+        warns+=("no Running research-session pod with an address in $gwns")
+    else
+        rc=0
+        body="$(curl -s -m "$TIMEOUT" "http://${ip}:8100/healthz" 2>/dev/null)" || rc=$?
+        info="$(python3 -c '
+import json, re, sys
+try:
+    d = json.load(sys.stdin)
+    kid = d.get("kid") or ""
+    a = d.get("anchor") or {}
+    print("%s|%s|%s" % (kid if re.fullmatch(r"[0-9a-f]{8}", kid) else "", a.get("event_id", "") if isinstance(a.get("event_id", ""), int) else "",
+                        a.get("hash", "") if re.fullmatch(r"[0-9a-f]{64}", a.get("hash", "") or "") else ""))
+except Exception:
+    print("error")' <<<"$body" 2>/dev/null)"
+        if [[ $rc -ne 0 || -z "$body" || "$info" == error ]]; then
+            warns+=("research-session does not answer /healthz from the host (curl -m $TIMEOUT http://${ip}:8100/healthz)")
+        else
+            IFS='|' read -r kid eid ehash <<<"$info"
+            want_kid="$(timeout "$TIMEOUT" $KUBECTL get secret research-session-key -n "$gwns" \
+                -o jsonpath='{.metadata.annotations.medcea/session-key-kid}' 2>/dev/null)" || want_kid=""
+            if [[ -z "$kid" ]]; then warns+=("research-session reports no key id")
+            elif [[ -z "$want_kid" ]]; then warns+=("Secret research-session-key has no medcea/session-key-kid annotation (./apps/research-agents/deploy.sh)")
+            elif [[ "$kid" != "$want_kid" ]]; then warns+=("research-session runs key ${kid}, Secret research-session-key says ${want_kid}: restart it (./apps/research-agents/deploy.sh)")
+            else oks+=("key ${kid} is the Secret's"); fi
+            if [[ -n "$eid" && -n "$ehash" ]]; then
+                rc=0
+                out="$(_rs_trace_psql "${RESEARCH_NAMESPACE:-${ns}-research}" -v "anchor_id=$eid" <<'SQL'
+SELECT 'anchor', coalesce((SELECT e.hash FROM agent_trace.event e WHERE e.event_id = :anchor_id), '-');
+SQL
+)" || rc=$?
+                line="$(grep -m1 '^anchor|' <<<"$out")"
+                if [[ $rc -ne 0 || -z "$line" ]]; then
+                    warns+=("cannot read agent_trace to check the live anchor: $(grep -m1 -E 'ERROR|error' <<<"$out" | cut -c1-100)")
+                else
+                    got="${line#anchor|}"
+                    if [[ "$got" == "-" ]]; then fails+=("the live anchor, event ${eid}, is missing from agent_trace.event: the trace was cut under a running service")
+                    elif [[ "$got" != "$ehash" ]]; then fails+=("the live anchor, event ${eid}, has hash ${got:0:12}... in the database, research-session wrote ${ehash:0:12}...: the trace was rewritten")
+                    else oks+=("live anchor event ${eid} matches the database"); fi
+                fi
+            else
+                oks+=("no event written since the service started")
+            fi
+        fi
+    fi
+    local IFS=';'
+    if (( ${#fails[@]} )); then _record FAIL "$name" "${fails[*]}"
+    elif (( ${#warns[@]} )); then _record WARN "$name" "${warns[*]}"
+    else _record OK "$name" "research-session and the agents' services run; ${oks[*]}"; fi
 }
 
 # =============================================================================
@@ -3592,6 +3996,11 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         rsexport)     check_rsexport "$name" "$target" ;;
         rsgrants)     check_rsgrants "$name" "$target" ;;
         rslake)       check_rslake "$name" "$target" ;;
+        gwnetpol)     check_gwnetpol "$name" "$target" ;;
+        ranetpol)     check_ranetpol "$name" "$target" ;;
+        rschain)      check_rschain "$name" "$target" ;;
+        rsanchor)     check_rsanchor "$name" "$target" ;;
+        rsagent)      check_rsagent "$name" "$target" ;;
         wbaccounts)   check_wbaccounts "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;

@@ -13,6 +13,8 @@
 #                                  WARN beyond, FAIL beyond BACKUP_FAIL_H (72). Without
 #                                  any OK, the CronJob's age stands in, and SKIP while
 #                                  it is younger than the WARN limit (the first night).
+#   backup_rs_chain_head DIR/NAME  the research database's agent_trace head (4a, R11, rsanchor): "head ID HASH SYSID/OID",
+#                                  "unavailable REASON", "none", status 1 unreadable.
 #   backup_chain_head DIR/NAME     the access policy's chain head MANIFEST records (Phase 5,
 #                                  health-check iamanchor): "head EVENT_ID HASH VERIFY" (VERIFY
 #                                  t or f) when the line is well formed; "unavailable REASON"
@@ -80,6 +82,22 @@ backup_age_status() {
         return
     fi
     echo "$status|newest complete backup ${name:-?} is ${h} h old (over ${limit} h: ./apps/backup/backups.sh list; microk8s kubectl -n ${NAMESPACE:-medcea} get jobs -l app=medcea-backup)"
+}
+
+# backup_rs_chain_head DIR/NAME: the research database's agent_trace head (R11): `head ID HASH IDENT`
+# (IDENT = system_identifier/oid), `unavailable REASON`, `none` (no line), status 1 unreadable.
+backup_rs_chain_head() {
+    local m="$1/MANIFEST" line rest
+    [[ -f "$m" && -r "$m" ]] || return 1
+    line="$(grep -m1 '^# agent_trace chain head' "$m" 2>/dev/null)" || { echo none; return 0; }
+    if [[ "$line" =~ ^#\ agent_trace\ chain\ head\ \(read\ before\ the\ dump\):\ ([0-9]+)\ ([0-9a-f]+)\ db=([0-9]+/[0-9]+)$ ]]; then
+        echo "head ${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+    elif [[ "$line" == "# agent_trace chain head: unavailable"* ]]; then
+        rest="${line#\# agent_trace chain head: unavailable}"; rest="${rest# }"
+        echo "unavailable $(printf '%s' "${rest:0:160}" | tr -c '[:alnum:] ().:_/-' ' ')"
+    else
+        echo "unavailable (an unexpected agent_trace chain head line in MANIFEST)"
+    fi
 }
 
 backup_chain_head() {

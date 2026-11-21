@@ -224,7 +224,12 @@ render "$APP_DIR/k8s/runs.yaml" RESEARCH_AGENTS_NAMESPACE | $KUBECTL apply -f - 
 
 # ── 3. research-session's Secrets (research-gw only; values on stdin) ─────────
 log "Secrets research-session-key and research-session-db in $GW_NS..."
-render "$APP_DIR/k8s/session-secrets.yaml" RESEARCH_GW_NAMESPACE RS_SESSION_HMAC_KEY RS_SESSION_DB_PASS \
+# The key's id (what research-session reports on /healthz as kid), as an annotation: health rsagent compares
+# the two and never reads the key. The key reaches python through the environment, not argv.
+RS_SESSION_KID="$(RS_SESSION_HMAC_KEY="$RS_SESSION_HMAC_KEY" python3 -c 'import hashlib, os; print(hashlib.sha256(bytes.fromhex(os.environ["RS_SESSION_HMAC_KEY"])).hexdigest()[:8])')"
+[[ "$RS_SESSION_KID" =~ ^[0-9a-f]{8}$ ]] || die "cannot derive the session key id"
+export RS_SESSION_KID
+render "$APP_DIR/k8s/session-secrets.yaml" RESEARCH_GW_NAMESPACE RS_SESSION_HMAC_KEY RS_SESSION_DB_PASS RS_SESSION_KID \
     | $KUBECTL apply -f - >/dev/null
 RS_SESSION_AUTH_VERSION="$($KUBECTL get secret research-session-key research-session-db -n "$GW_NS" \
                               -o jsonpath='{range .items[*]}{.metadata.resourceVersion}{"-"}{end}')"

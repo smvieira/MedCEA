@@ -548,6 +548,27 @@ recipe_line_from:
 </ul>
 <p>Names are the design's (<code>codeplan/rs4-design.md</code>, with its revisions after review) and may change while it is built. Before 4a is built, step 0 measures the local model on this host (Qwen3-8B and Qwen3-4B on llama.cpp, processors with AVX only).</p>
 
+<h3 id="research-agent-sessions">Agent sessions (Phase 4a)</h3>
+<p>Built on branch <code>research/phase-4</code> and not deployed. Everything that runs on the cluster waits for the skeleton version of the access policy (the two zones, their pods and hops, the group <span class="role">research_campaigns</span>, the Keycloak client <code>research-agent</code>), which <span class="role">qa</span> must approve first; until it is applied each new deploy script prints one skip line and changes nothing.</p>
+<p><strong>What is built.</strong></p>
+<ul>
+<li><strong>Two namespaces.</strong> <code>research-gw</code> holds <code>research-session</code>: it mints and checks session tokens and is the only writer of the <code>agent_trace</code> hash chain. <code>research-agents</code> holds <code>research-orchestrator</code> (starts and stops sessions, creates the Jobs), <code>mcp-sim</code> and <code>mcp-lake</code> (the agent's only tools), the <code>research-runs</code> volume and the Jobs <code>agent-*</code> and <code>sim-*</code>. Neither can be reached from the notebook hub's namespace except through the compiled hops; the Jobs have no service account, no Secret and no internet.</li>
+<li><strong>The tools.</strong> <code>sim.estimate</code>, <code>sim.run</code>, <code>sim.status</code>, <code>sim.results</code> and <code>lake.snapshots</code>, <code>lake.summary</code>, <code>lake.catalogue</code>. <code>sim.run</code> is the gate: mcp-sim recomputes the estimate itself, runs a campaign below 2 CPU-hours at once, makes it wait for the supervisor above that, and refuses one above 24. FLC and MPC campaigns wait for an estimate Job that is not built yet. There is no <code>propose</code> tool yet, so a scripted session ends without a proposal.</li>
+<li><strong>The trace.</strong> Every turn, tool call, result, gate decision and checkpoint is an event in <code>agent_trace.event</code>, hash-chained over all sessions, written only through one function whose allowed events depend on the network port the call arrived on. Strict replay of a finished session checks each recorded step.</li>
+<li><strong>The backup.</strong> The nightly backup records the chain's newest event, its hash and the database's identity in its MANIFEST (<code># agent_trace chain head</code>) and also copies the <code>research-runs</code> volume (<code>volumes/research-agents-research-runs.tar.gz</code>).</li>
+</ul>
+<p><strong>The commands.</strong> From a notebook, <code>medcea_agent.py</code> (a byte-for-byte copy of <code>research/agents/cli.py</code>, delivered with the examples) is <code>from medcea_agent import Client</code>; from a terminal that has the repository it is <code>python3 research/agents/cli.py</code>:</p>
+<pre><code>medcea-agent signin                              # device code, through the orchestrator's relay
+medcea-agent start compare_controllers           # prints the session id
+medcea-agent watch SID                           # follow the trace until the agent stops
+medcea-agent approve SID GID [--cap-h H]         # the gate: only the supervisor who started it
+medcea-agent deny SID GID
+medcea-agent stop SID                            # revokes the session, deletes its Jobs
+medcea-agent replay SID                          # strict replay verdict</code></pre>
+<p>Your tokens stay in the process's memory. The gate id <code>GID</code> is printed by <code>watch</code> when a campaign waits. Only the person who started a session may approve or deny at its gate, and approving sets the CPU-hour cap for that campaign (never more than 24).</p>
+<p><strong>The health checks.</strong> Five were added (76 in all): <em>Research gateway network policies</em> and <em>Research agent network policies</em> (the two zones' policies equal the compile), <em>Agent trace chain</em> (<code>verify_chain()</code> and an independent recomputation), <em>Agent trace anchor</em> (the newest backup's head is still in the chain with the same hash; a backup of another database only warns) and <em>Agent sessions</em> (the services run, the key id is the Secret's, and the last event <code>research-session</code> wrote is in the database with the same hash; a mismatch is a FAIL). <em>Research grants and Secrets</em> also scans both new namespaces.</p>
+<p><strong>Not yet live.</strong> The policy version (qa approval), the first deploy of <code>./apps/research-agents/deploy.sh</code>, the local model (Phase 4b), the <code>propose</code> tool and the estimate Job. Exercise <a href="#training-e48">E48</a> is written for the day they are.</p>
+
 <h3 id="research-later">Not built yet</h3>
 <div class="table-wrap"><table>
 <thead><tr><th>Phase</th><th>What it adds</th></tr></thead>

@@ -57,6 +57,7 @@
 <tr><td><a href="#training-e53">E53 Read a control loop in Grafana</a></td><td>any role that opens Grafana's reports, for example <span class="role">engineer</span> or <span class="role">production_manager</span></td><td>For each quantity of a running zone, the report shows every sensor, the value the loop's rule used, the recipe step's bounds and the command sent, with what it does.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e52">E52 Rerun or decommission a failed run</a></td><td><span class="role">production_manager</span></td><td>A failed run is run again as a new run with a parameter set, or decommissioned for good only after its number is typed; a decommissioned run refuses every later action.</td><td>21 Nov 2026 (steps 1–3)</td></tr>
 <tr><td><a href="#training-e47">E47 A domain of your own on a fresh install</a></td><td>host operator</td><td>A custom domain is configured so that its names resolve on the host, the deploy says so, and a domain whose names do not resolve is reported as a problem, never as SUCCESS.</td><td>Not yet</td></tr>
+<tr><td><a href="#training-e48">E48 Supervise and replay a scripted agent campaign</a></td><td><span class="role">control_scientist</span>, <span class="role">qa</span>, <span class="role">engineer</span></td><td>A scripted session runs a simulation campaign within its budget, waits at the gate for its supervisor, and leaves a hash-chained trace that replays to the same results and is anchored by the nightly backup; other roles and other people are refused at every step.</td><td>Not yet</td></tr>
 <tr><td><a href="#training-e51">E51 Measure the local model before anything is built on it</a></td><td>host operator</td><td>The bench and the offline tool-call eval run only while no recipe run is running or scheduled, stay within a cap checked against the pessimistic estimate, stop and delete their Job or Pod when interrupted or when a run starts, and leave one day's report holding every measurement and a recommendation made on both throughput and the graded eval.</td><td>21 Nov 2026 (bench only)</td></tr>
 </tbody>
 </table></div>
@@ -1728,6 +1729,31 @@ SQL</code></pre></li>
 <div class="record"><p>Nothing is recorded: the report reads the readings, the commands the run sent and the cycles' recorded parameters, as Grafana's read-only database account. Write the date, the commit, the run and what you saw under <strong>Last done</strong>.</p></div>
 <p><strong>Refusals worth trying.</strong> An account whose role Grafana does not admit (an <span class="role">operator</span>) is refused at Grafana's sign-in.</p>
 <p><strong>Afterwards.</strong> Nothing to undo.</p>
+<p><strong>Last done.</strong> Not yet.</p>
+
+<h3 id="training-e48">E48 Supervise and replay a scripted agent campaign</h3>
+<p><strong>Goal.</strong> Run the scripted agent profile <code>compare_controllers</code> from a notebook, approve its campaign at the gate, read its result, replay it, and see the trace anchored by a backup. Proves <a href="#research-agent-sessions">Agent sessions</a>.</p>
+<p><strong>Accounts and roles.</strong> A <span class="role">control_scientist</span> with a person id of its own (create it first, then have <span class="role">qa</span> confirm the grant), a <span class="role">qa</span> account (holds no cell on the agent group), an <span class="role">engineer</span> (reads only). Also a <span class="role">bio_scientist</span> to try the second refusal.</p>
+<p><strong>Before you start.</strong> The access policy version that adds the zones and the group <span class="role">research_campaigns</span> is applied; <code>./deploy-infra.sh</code> has created the two namespaces and the Keycloak client <code>research-agent</code>; <code>./apps/database/deploy.sh</code>, <code>./apps/research/deploy.sh</code> and <code>./apps/research-agents/deploy.sh</code> have run; <code>./apps/backup/deploy.sh</code> has run since; health shows 76 checks with the five new ones OK or SKIP. No recipe run is starting.</p>
+<p><strong>Steps.</strong></p>
+<ol class="steps">
+<li>As the control scientist, in the AI Workbench open a notebook and run <code>from medcea_agent import Client; c = Client(); c.signin()</code>, and complete the device code in the browser.</li>
+<li><code>sid = c.start("compare_controllers")</code>, then <code>c.watch(sid)</code>.</li>
+<li>When the campaign waits ("waiting for the supervisor"), note the estimate and the gate id, then <code>c.approve(sid, gid)</code>.</li>
+<li>Keep watching until the session stops with the reason <code>finished</code>.</li>
+<li><code>c.replay(sid)</code>.</li>
+<li>On the host, <code>./apps/backup/backups.sh now</code>, then <code>./health-check.sh</code>.</li>
+</ol>
+<p><strong>What you should see.</strong></p>
+<ul>
+<li>Step 1: your name after sign-in, never a token. Step 2: a session id; the first events are the lake listing and the estimate.</li>
+<li>Step 3: an estimate in CPU-hours and a gate waiting; after approval the campaign starts as Job <code>sim-&lt;id&gt;</code> in the agents namespace.</li>
+<li>Step 5: replay verdict <code>ok</code>.</li>
+<li>Step 6: <strong>Agent trace chain</strong> OK, <strong>Agent trace anchor</strong> OK naming the event the backup recorded, <strong>Agent sessions</strong> OK.</li>
+</ul>
+<div class="record"><p>Every turn, call, result, gate decision and the stop is an event in <code>agent_trace.event</code> of database <code>medcea_research</code> (the person's sub and role on each), chained by hash; the backup's MANIFEST has the line <code># agent_trace chain head (read before the dump): &lt;event&gt; &lt;hash&gt; db=&lt;system id&gt;/&lt;oid&gt;</code>. Write the date, the commit, the session id and the event numbers under <strong>Last done</strong>.</p></div>
+<p><strong>Refusals worth trying.</strong> The engineer's <code>c.start(...)</code> is refused (403). The bio scientist approving the control scientist's gate is refused (403). A revoked session token at mcp-sim answers 401, and a claim token used twice is refused. A campaign above the session's budget never starts.</p>
+<p><strong>Afterwards.</strong> <code>c.stop(sid)</code> if the session is still active; remove old code bundles with the deploy's own option when that exists. The trace stays.</p>
 <p><strong>Last done.</strong> Not yet.</p>
 
 <h3 id="training-adding">Adding an exercise</h3>

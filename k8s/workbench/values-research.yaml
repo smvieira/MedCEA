@@ -6,7 +6,7 @@
 # as before (tests/golden/workbench-values-platform.yaml).
 #
 # Render list: RESEARCH_NAMESPACE WORKBENCH_DOMAIN WORKBENCH_ALLOWED_GROUPS WORKBENCH_ADMIN_GROUPS
-#              WORKBENCH_HUBADMIN_USERS WORKBENCH_A2_ALLOW_ALL
+#              WORKBENCH_HUBADMIN_USERS WORKBENCH_A2_ALLOW_ALL RESEARCH_AGENTS_NAMESPACE
 # Helm merges this over the base: a mapping is merged key by key, a list or a scalar replaces
 # the base's (the hub's Secret stores the merged values). No null here: see extraEnv below.
 
@@ -87,6 +87,8 @@ singleuser:
   # None for them (tests/test_workbench_render.py runs helm template to hold this).
   extraEnv:
     MEDCEA_LAKE: "http://lake-api.${RESEARCH_NAMESPACE}.svc.cluster.local:3000"
+    # medcea_agent.py (research Phase 4a): the orchestrator's person port, in the agents zone.
+    MEDCEA_ORCHESTRATOR: "http://research-orchestrator.${RESEARCH_AGENTS_NAMESPACE}.svc.cluster.local:8090"
 
 # Our own Role (k8s/workbench/hub-rbac.yaml, no Secrets), applied before helm.
 rbac:

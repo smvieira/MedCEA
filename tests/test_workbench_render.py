@@ -691,7 +691,7 @@ GOLDEN_INPUTS = {
 OVERLAY_INPUTS = {"RESEARCH_NAMESPACE": "medcea-research", "WORKBENCH_DOMAIN": "ai-workbench.medcea",
                   "WORKBENCH_ALLOWED_GROUPS": GOLDEN_INPUTS["WORKBENCH_ALLOWED_GROUPS"],
                   "WORKBENCH_ADMIN_GROUPS": '["admin"]', "WORKBENCH_HUBADMIN_USERS": "[]",
-                  "WORKBENCH_A2_ALLOW_ALL": "False"}
+                  "WORKBENCH_A2_ALLOW_ALL": "False", "RESEARCH_AGENTS_NAMESPACE": "medcea-research-agents"}
 
 
 def render_file(path, names, values):
@@ -749,10 +749,15 @@ class PlacementTest(unittest.TestCase):
         with open(GOLDEN) as f:
             self.assertEqual(self.platform(), f.read())
 
+    def test_the_orchestrator_address(self):
+        _, otext = self.research()
+        self.assertIn('MEDCEA_ORCHESTRATOR: "http://research-orchestrator.medcea-research-agents.svc.cluster.local:8090"', otext)
+
     def test_overlay_render_list(self):
         names = overlay_render_list()
         self.assertEqual(names, ["RESEARCH_NAMESPACE", "WORKBENCH_DOMAIN", "WORKBENCH_ALLOWED_GROUPS",
-                                 "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_A2_ALLOW_ALL"])
+                                 "WORKBENCH_ADMIN_GROUPS", "WORKBENCH_HUBADMIN_USERS", "WORKBENCH_A2_ALLOW_ALL",
+                                 "RESEARCH_AGENTS_NAMESPACE"])
         with open(OVERLAY) as f:
             text = f.read()
         self.assertEqual(set(re.findall(r"\$\{([A-Z0-9_]+)\}", text)), set(names))
@@ -908,7 +913,7 @@ class PlacementTest(unittest.TestCase):
         secret = next(x for x in docs if x["kind"] == "Secret" and x["metadata"]["name"] == "hub")
         stored = yaml.safe_load(base64.b64decode(secret["data"]["values.yaml"]))
         env = stored["singleuser"]["extraEnv"]
-        self.assertEqual(sorted(env), ["MEDCEA_LAKE", "MEDCEA_NOTEBOOK_REPO", "PYTHONPATH"])
+        self.assertEqual(sorted(env), ["MEDCEA_LAKE", "MEDCEA_NOTEBOOK_REPO", "MEDCEA_ORCHESTRATOR", "PYTHONPATH"])
         self.assertIn("medcea-a2", stored["hub"]["extraConfig"])
         dep = {x["metadata"]["name"]: x["spec"]["template"]["spec"] for x in docs if x["kind"] == "Deployment"}
         self.assertEqual(dep["hub"]["priorityClassName"], "medcea-research-low")

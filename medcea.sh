@@ -1493,6 +1493,39 @@ a_lake_api_uninstall() {
            "No confirmation of its own: medcea.sh's is the only one.")
     plan_run
 }
+# Research Phase 4a: the two zones that hold the agent machinery (research-gw: the session
+# key and the trace writer; research-agents: orchestrator, simulation tools, agent and
+# simulation Jobs) and the application that runs in them (apps/research-agents).
+a_research_zones() {
+    CMD=(./infra/deploy-research-gw-namespace.sh '&&' ./infra/deploy-research-agents-namespace.sh)
+    EFFECT="cluster: namespaces RESEARCH_GW_NAMESPACE and RESEARCH_AGENTS_NAMESPACE (labels medcea/zone), PriorityClass medcea-research-low, quota, limits, the zones' NetworkPolicies and the zone copies of the policy library"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Each script skips (one line, exit 0) while RESEARCH_ENABLED is not true or the applied access policy has no such zone (an approved skeleton version of research Phase 4a)."
+           "./deploy-infra.sh runs both after the research namespace; --policy-only re-renders only their NetworkPolicies (Policy → Re-render the policy artefacts).")
+    plan_run
+}
+a_research_agents_deploy() {
+    CMD=(./apps/research-agents/deploy.sh)
+    EFFECT="research-gw: research-session (the session tokens and the trace writer); research-agents: research-orchestrator, mcp-sim, mcp-lake, the research-runs volume, the code bundle (ConfigMap research-code) and the wheel cache"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true, the applied access policy has no research-gw and research-agents zones, or no policy version is applied."
+           "Needs the two namespaces first (Infrastructure → Deploy the research gateway and agents namespaces, or ./deploy-infra.sh) and the research database (./apps/research/deploy.sh). The code bundle is built from a git commit and refused while the tree is dirty."
+           "No agent starts by itself: a person starts a session from a notebook (medcea-agent start). Health: Agent sessions.")
+    plan_run
+}
+a_research_agents_uninstall() {
+    CMD=(./apps/research-agents/uninstall.sh)
+    EFFECT="removes research-session, the orchestrator, mcp-sim, mcp-lake, every agent and simulation Job and the code bundle; keeps the research-runs volume and every recorded session (agent_trace)"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=()
+    if ask_yn "Also delete the research-runs volume (campaign outputs, session traces) and everything recorded in agent_trace (--purge-data)?" n; then
+        CMD+=(--purge-data)
+        EFFECT="removes the agent machinery, then DELETES the research-runs volume and every recorded session (agent_trace)"
+        purge_word
+    fi
+    NOTES+=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
 # Research sandbox Phase 3: calibrating the sandbox's models from the lake's snapshots
 # (apps/research/calibrate.sh → python3 -m research.calib; codeplan/rs3-design.md). It
 # reads lake-api only and writes only the folder named; no deploy lock.
@@ -3122,6 +3155,7 @@ AREA_INFRA=(
     "a_research_namespace|Deploy the research namespace|./infra/deploy-research-namespace.sh: the research zone's namespace, quota, limits and network policies."
     "a_research_switch|Turn the research sandbox on or off|RESEARCH_ENABLED in config.env, then the deploys."
     "a_wb_move|Move the AI workbench between the platform and the research zone|./infra/deploy-workbench.sh --move: where the access policy places it; homes copied with sudo, a fresh hub database."
+    "a_research_zones|Deploy the research gateway and agents namespaces|./infra/deploy-research-gw-namespace.sh and ./infra/deploy-research-agents-namespace.sh: the zones of the agent machinery, with their network policies."
 )
 AREA_APPS=(
     "a_apps_menu|Pick components from a menu|./deploy-apps.sh (its own checkbox menu)."
@@ -3143,6 +3177,8 @@ AREA_APPS=(
     "a_lake_api_uninstall|Uninstall the lake reader|./apps/lake-api/uninstall.sh: the snapshots stay."
     "a_research_calibrate|Calibrate the sensor model from a snapshot|research: list the lake's snapshots, fetch one pinned by its lineage and fit the sensor model; reads lake-api, writes only the files you name."
     "a_llm_bench|Benchmark the local model (research Phase 4 step 0)|./apps/research-model/bench.sh: fetch the pinned models, llama-bench, the offline tool-call eval, the report (8B or 4B)."
+    "a_research_agents_deploy|Install the research agent machinery|./apps/research-agents/deploy.sh: research-session, the orchestrator and the simulation and lake tools; skipped until the policy has the zones."
+    "a_research_agents_uninstall|Uninstall the research agent machinery|./apps/research-agents/uninstall.sh: recorded sessions and the runs volume stay unless purged."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."

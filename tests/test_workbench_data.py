@@ -613,7 +613,7 @@ class ExamplesTest(unittest.TestCase):
     def test_notebooks_are_stripped(self):
         names = sorted(os.listdir(EXAMPLES))
         self.assertEqual([n for n in names if not n.startswith("__")],
-                         ["01-connect.ipynb", "02-air-temperature.ipynb", "SAVE_TO_GIT.md", "medcea_data.py",
+                         ["01-connect.ipynb", "02-air-temperature.ipynb", "SAVE_TO_GIT.md", "medcea_agent.py", "medcea_data.py",
                           "nb_output_guard.py"])
         total = 0
         for n in names:

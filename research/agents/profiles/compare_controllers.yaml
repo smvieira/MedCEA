@@ -1,6 +1,7 @@
+# The propose tool is not served by any MCP server yet (a later stage of 4a/4b), so the script ends without a proposal.
 name: compare_controllers
 backend: scripted
-tools: [sim.estimate, sim.run, lake.query, propose.candidate]
+tools: [sim.estimate, sim.run, sim.status, sim.results, lake.snapshots, lake.summary, lake.catalogue]
 caps:
   turns: 12
   prompt_tokens: 12000
@@ -11,8 +12,8 @@ caps:
   context_tokens: 4000
 checkpoint_every: 4
 script:
-  - {text: "Plan: estimate the campaign first.", tool: sim.estimate, args: {spec: fruiting_compare}}
-  - {text: "Plan: run the campaign.", tool: sim.run, args: {spec: fruiting_compare}}
-  - {text: "Plan: read the ranked summary.", tool: lake.query, args: {top: 3}}
-  - {text: "Plan: propose the best controller.", tool: propose.candidate, args: {controller: pid}}
+  - {text: "Plan: look at what the lake holds.", tool: lake.snapshots, args: {}}
+  - {text: "Plan: estimate the campaign first.", tool: sim.estimate, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
+  - {text: "Plan: run the campaign (a gate asks the supervisor above the cap).", tool: sim.run, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
+  - {text: "Plan: read its progress; the same call returns the result once it is done.", tool: sim.run, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
   - {text: "The plan is complete."}

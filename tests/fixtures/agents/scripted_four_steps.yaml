@@ -1,0 +1,19 @@
+# Test fixture: the first compare_controllers profile (stage 4), kept for the loop tests written against it.
+name: compare_controllers
+backend: scripted
+tools: [sim.estimate, sim.run, lake.query, propose.candidate]
+caps:
+  turns: 12
+  prompt_tokens: 12000
+  output_tokens: 1500
+  cpu_hours: 2
+  wall_h: 1
+  turn_timeout_s: 30
+  context_tokens: 4000
+checkpoint_every: 4
+script:
+  - {text: "Plan: estimate the campaign first.", tool: sim.estimate, args: {spec: fruiting_compare}}
+  - {text: "Plan: run the campaign.", tool: sim.run, args: {spec: fruiting_compare}}
+  - {text: "Plan: read the ranked summary.", tool: lake.query, args: {top: 3}}
+  - {text: "Plan: propose the best controller.", tool: propose.candidate, args: {controller: pid}}
+  - {text: "The plan is complete."}

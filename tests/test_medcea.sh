@@ -1732,6 +1732,31 @@ rc_is "real: quits with 0" 0
 has   "real: the report ran" "STUB apps/research-model/bench.sh report"
 [[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: without the guide's lock" || fail "real: ran under the guide's lock"
 
+echo "77 the research agent machinery (Infrastructure, Applications; research Phase 4a)"
+mkcfg true true
+guide $'2\n13\ny\nq\n'
+rc_is "zones: quits with 0" 0
+has   "zones: both scripts chained (dry)" "[dry run] not executed: ./infra/deploy-research-gw-namespace.sh && ./infra/deploy-research-agents-namespace.sh"
+has   "zones: the skip explained" "Each script skips (one line, exit 0) while RESEARCH_ENABLED is not true"
+no_stub
+guide $'3\n20\ny\nb\n21\nn\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "deploy (dry)" "[dry run] not executed: ./apps/research-agents/deploy.sh"
+has   "deploy is a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true"
+has   "no agent starts by itself" "No agent starts by itself"
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/research-agents/uninstall.sh"
+has   "uninstall: the data is kept" "keeps the research-runs volume and every recorded session"
+hasnt "uninstall: no --purge-data unasked" "uninstall.sh --purge-data"
+no_stub
+guide $'3\n21\ny\nyes\nmedcea\nq\n'
+has   "purge: the name runs it (dry)" "[dry run] not executed: ./apps/research-agents/uninstall.sh --purge-data"
+has   "purge: says what goes" "DELETES the research-runs volume"
+no_stub
+real $'2\n13\ny\nb\nb\n3\n20\ny\nq\n'
+has   "real: both zone scripts ran" "STUB infra/deploy-research-agents-namespace.sh"
+has   "real: the deploy ran" "STUB apps/research-agents/deploy.sh"
+
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false
 tui $'0|6\n0|2\n0|\n0|\n1|\n1|\n' ''

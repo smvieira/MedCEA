@@ -135,6 +135,7 @@ WB_PLACEMENT="$(workbench_placement)" \
     || die "cannot tell where the access policy places the AI workbench (python3 apps/iam/compiler/cli.py pod-zone hub)"
 WB_NS="$(workbench_namespace)" || die "cannot tell the AI workbench's namespace from the access policy"
 RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+RESEARCH_AGENTS_NAMESPACE="${RESEARCH_AGENTS_NAMESPACE:-${RESEARCH_NAMESPACE}-agents}"   # medcea_agent.py reaches the orchestrator there (Phase 4a)
 _rc=0; _LIVE_NS="$(workbench_release_ns)" || _rc=$?
 case "$_rc" in
     0) ;;
@@ -620,7 +621,7 @@ if [[ "$WB_PLACEMENT" == research ]]; then
     _research_base "$VALUES" || die "cannot take the platform endpoints out of the workbench's values"
     VALUES_RS=$(mktemp /tmp/workbench-values-research-XXXXXX.yaml)
     render "$REPO_ROOT/k8s/workbench/values-research.yaml" RESEARCH_NAMESPACE WORKBENCH_DOMAIN WORKBENCH_ALLOWED_GROUPS \
-        WORKBENCH_ADMIN_GROUPS WORKBENCH_HUBADMIN_USERS WORKBENCH_A2_ALLOW_ALL > "$VALUES_RS"
+        WORKBENCH_ADMIN_GROUPS WORKBENCH_HUBADMIN_USERS WORKBENCH_A2_ALLOW_ALL RESEARCH_AGENTS_NAMESPACE > "$VALUES_RS"
     _VALUES_ARGS+=(--values "$VALUES_RS")
 fi
 

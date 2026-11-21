@@ -243,5 +243,24 @@ class RunAgentTest(unittest.TestCase):
         self.assertEqual(run_agent.main(dict(self.ENV, MEDCEA_PROFILE="../x"), transport=FakeSessionAgentPort()), 2)
 
 
+class WorkbenchDelivery(unittest.TestCase):
+    """R34: the workbench-examples ConfigMap delivers medcea_agent.py, byte-equal to the CLI."""
+
+    EX = os.path.join(ROOT, "k8s", "workbench", "examples")
+
+    def test_byte_equal(self):
+        with open(CLI, "rb") as a, open(os.path.join(self.EX, "medcea_agent.py"), "rb") as b:
+            self.assertEqual(a.read(), b.read(), "cp research/agents/cli.py k8s/workbench/examples/medcea_agent.py")
+
+    def test_examples_stay_small_and_flat(self):
+        names = [n for n in os.listdir(self.EX) if not n.startswith("__")]
+        total = sum(os.path.getsize(os.path.join(self.EX, n)) for n in names)
+        self.assertLess(total, 200 * 1024)
+
+    def test_orchestrator_default_and_env(self):
+        with open(os.path.join(ROOT, "k8s", "workbench", "values-research.yaml")) as f:
+            self.assertIn("MEDCEA_ORCHESTRATOR:", f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

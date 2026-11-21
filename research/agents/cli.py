@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """medcea-agent (research Phase 4a, stage 6a; design AH.11, R12, R34). Stdlib only, and byte-equal
-to the medcea_agent.py the workbench-examples ConfigMap delivers to notebooks (stage 6b), so it
+to the medcea_agent.py the workbench-examples ConfigMap delivers to notebooks (research Phase 4a), so it
 imports nothing from this repository.
 
   medcea-agent start PROFILE [--budget k=v ...] [--ttl-s N]   start a session; prints its id
