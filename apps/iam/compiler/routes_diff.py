@@ -188,6 +188,13 @@ def _http(tree, src):
 def served(service):
     """(routes, prefixes, catch-all methods) the service's code answers."""
     src = SOURCES[service]
+    if src["kind"] == "declared":
+        text = _source(src)
+        for _m, path in src["routes"]:
+            for seg in (x for x in path.split("/") if x and not x.startswith("<")):
+                if seg not in text:
+                    raise ValueError(f"{src['file']}: the declared route {path} names {seg!r}, which the file no longer has")
+        return {tuple(r) for r in src["routes"]}, set(), set()
     tree = ast.parse(_source(src))
     return _flask(tree) if src["kind"] == "flask" else _http(tree, src)
 

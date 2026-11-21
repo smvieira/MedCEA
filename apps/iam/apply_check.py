@@ -1913,7 +1913,12 @@ def targets(p):
     # the research zone's NetworkPolicies (research sandbox Phase 2a) only while the policy
     # has the zone
     if netpol.has_zone(p, "research"):
-        t.append((ZONE_TARGETS["research"], ["compile", "netpol"] + NETPOL_RESEARCH_ARGS))
+        # the research zone's peers in the two agent zones need their namespaces (R1: only while the
+        # policy has those zones, so the argument list of versions 7-9 is passed unchanged)
+        other = [a for z in ("research-gw", "research-agents") if netpol.has_zone(p, z)
+                 for a in ("--zone-namespace", "%s=%s" % (z, ZONE_PLACEHOLDER_NS[z]))]
+        t.append((ZONE_TARGETS["research"], ["compile", "netpol"] + NETPOL_RESEARCH_ARGS[:-2] + other
+                  + NETPOL_RESEARCH_ARGS[-2:]))
     for zone in ("research-gw", "research-agents"):   # research Phase 4a: only while the policy has the zone
         if netpol.has_zone(p, zone):
             t.append((ZONE_TARGETS[zone], ["compile", "netpol"] + netpol_zone_args(zone)))

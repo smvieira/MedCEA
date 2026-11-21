@@ -191,8 +191,9 @@ def _key(jwt, kid):
     return None, f"no realm key with id {kid}"
 
 
-def verify(token, clients):
-    """(claims, None) or (None, reason)."""
+def verify(token, clients, audience=None):
+    """(claims, None) or (None, reason). `audience` is the service's own (routes.json
+    services[svc].audience, research Phase 4a), else settings.json's."""
     try:
         import jwt  # PyJWT
     except ImportError:
@@ -208,7 +209,7 @@ def verify(token, clients):
     if key is None:
         return None, why
     try:
-        claims = jwt.decode(token, key, algorithms=["RS256"], audience=s.get("audience", "medcea-api"),
+        claims = jwt.decode(token, key, algorithms=["RS256"], audience=audience or s.get("audience", "medcea-api"),
                             issuer=s["issuer"], leeway=LEEWAY, options={"require": ["exp", "iat", "iss", "aud", "sub"]})
     except jwt.PyJWTError as e:
         return None, f"token refused: {e}"
@@ -244,7 +245,7 @@ def _check(service, method, path, headers):
     token = _token(headers)
     if not token:
         return Decision(False, 401, "no access token")
-    claims, why = verify(token, set(svc.get("clients", [])))
+    claims, why = verify(token, set(svc.get("clients", [])), svc.get("audience"))
     if claims is None:
         return Decision(False, 503 if isinstance(why, _Unavailable) else 401, str(why))
     platform = set(table.get("roles", []))

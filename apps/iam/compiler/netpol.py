@@ -284,6 +284,60 @@ def _zone_check(net, errors):
                           f"with no egress hop there (its egress is denied by default)")
 
 
+TOKEN_AUDIENCE = "medcea-research"   # the one audience a zone service's own token client may carry (rs4 §2.1)
+DNS_ZONES = ("research-agents", "research-gw")   # the zones whose DNS is per pod (rs4 R20)
+
+
+def _pod_keys_check(p, net, errors):
+    """`token_clients` and `dns` on a pod (research Phase 4a): a pod that carries a service may
+    name the Keycloak client whose tokens that service accepts, and the audience those tokens
+    must have; `dns: true` gives a pod of the research-gw or research-agents zone DNS egress."""
+    host_clients = {hd["client"] for hd in p.hosts.values()}
+    for name, pd in (net.get("pods") or {}).items():
+        if "dns" in pd:
+            if not isinstance(pd["dns"], bool):
+                errors.append(f"network: pod {name}: dns must be true or false")
+            elif pd.get("zone") not in DNS_ZONES:
+                errors.append(f"network: pod {name}: dns is per pod only in the zones {' and '.join(DNS_ZONES)}")
+        if "token_clients" not in pd:
+            continue
+        tcs = pd["token_clients"]
+        if not pd.get("carries"):
+            errors.append(f"network: pod {name}: token_clients needs a pod that carries a service")
+        if not pd.get("zone"):
+            errors.append(f"network: pod {name}: token_clients is for a zone pod")
+        if not isinstance(tcs, list) or not tcs:
+            errors.append(f"network: pod {name}: token_clients must be a non-empty list of {{client, audience}}")
+            continue
+        seen = set()
+        for tc in tcs:
+            if not (isinstance(tc, dict) and set(tc) == {"client", "audience"}
+                    and isinstance(tc["client"], str) and isinstance(tc["audience"], str)):
+                errors.append(f"network: pod {name}: a token client is {{client, audience}}")
+                continue
+            if tc["client"] in host_clients:
+                errors.append(f"network: pod {name}: token client {tc['client']} is a host's client")
+            if tc["audience"] != TOKEN_AUDIENCE:
+                errors.append(f"network: pod {name}: token client {tc['client']}: the audience is {TOKEN_AUDIENCE}, "
+                              f"not {tc['audience']!r}")
+            if tc["client"] in seen:
+                errors.append(f"network: pod {name}: token client {tc['client']} is listed twice")
+            seen.add(tc["client"])
+        if len({tc.get("audience") for tc in tcs if isinstance(tc, dict)}) > 1:
+            errors.append(f"network: pod {name}: two audiences for one service")
+
+
+def pod_token_clients(p):
+    """{service: (sorted client names, audience)} for every service a pod carries with token_clients."""
+    out = {}
+    for pd in ((p.data.get("network") or {}).get("pods") or {}).values():
+        tcs = [tc for tc in pd.get("token_clients") or [] if isinstance(tc, dict)]
+        if tcs:
+            for svc in pd.get("carries") or {}:
+                out[svc] = (sorted({tc["client"] for tc in tcs}), tcs[0]["audience"])
+    return out
+
+
 def check(p):
     errors = []
     net = p.data.get("network")
@@ -295,6 +349,7 @@ def check(p):
         if h not in p.hosts:
             errors.append(f"network: proxy for unknown host {h}")
     _zone_check(net, errors)
+    _pod_keys_check(p, net, errors)
     for name, pd in pods.items():
         if not pd.get("selector"):
             errors.append(f"network: pod {name} has no selector")
@@ -510,12 +565,21 @@ def compile_zone(p, zone, namespace, platform_namespace, node_ips, zone_namespac
                 "spec": spec}
     items = [
         item("default-deny", f"network.zones.{zone}", {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]}),
-        item("dns", f"network.zones.{zone}", {
-            "podSelector": {}, "policyTypes": ["Egress"],
-            "egress": [{"to": [{"namespaceSelector": _ns_selector(DNS_NAMESPACE),
-                                "podSelector": {"matchLabels": dict(DNS_SELECTOR)}}],
-                        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]}]}),
     ]
+    dns_rule = [{"to": [{"namespaceSelector": _ns_selector(DNS_NAMESPACE),
+                         "podSelector": {"matchLabels": dict(DNS_SELECTOR)}}],
+                 "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]}]
+    zone_pods = {n: d for n, d in net["pods"].items() if d.get("zone") == zone}
+    if any("dns" in d for d in zone_pods.values()):
+        # per pod (rs4 R20): only a pod saying `dns: true` resolves names; Jobs with no entry do not
+        for name, pd in zone_pods.items():
+            if pd.get("dns") is True:
+                items.append(item(f"dns-{name}", f"network.pods.{name}.dns", {
+                    "podSelector": {"matchLabels": dict(pd["selector"])}, "policyTypes": ["Egress"],
+                    "egress": dns_rule}))
+    else:
+        items.append(item("dns", f"network.zones.{zone}", {
+            "podSelector": {}, "policyTypes": ["Egress"], "egress": dns_rule}))
     for name, pd in net["pods"].items():
         if pd.get("zone") != zone:
             continue

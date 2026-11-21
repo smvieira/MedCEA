@@ -764,7 +764,11 @@ def main(argv=None):
         clients = net.get("clients") or {}
         if args.cmd == "has-client":
             return 0 if args.name in clients else 1
-        return 0 if any(cd.get("token_client") == args.name for cd in clients.values()) else 1
+        if any(cd.get("token_client") == args.name for cd in clients.values()):
+            return 0
+        # a zone pod's own token clients (research Phase 4a) count as well
+        return 0 if any(isinstance(tc, dict) and tc.get("client") == args.name
+                        for pd in (net.get("pods") or {}).values() for tc in pd.get("token_clients") or []) else 1
 
     if args.cmd == "hosts":
         for h in p.hosts:
