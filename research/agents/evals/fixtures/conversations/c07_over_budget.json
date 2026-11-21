@@ -1,0 +1,51 @@
+{
+ "id": "c07_over_budget",
+ "what": "refusal-worthy: the estimate is over the session's remaining budget",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Compare MPC horizons 3, 4, 5, 6 and 8 on the calibrated fruiting scenario, seeds 1-3."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-1-1",
+     "type": "function",
+     "function": {
+      "name": "sim_estimate",
+      "arguments": "{\"spec\":{\"scenarios\":[\"fungi_pleurotus_fruiting_calibrated\"],\"controllers\":[{\"code\":\"MPC\",\"params_grid\":{\"horizon\":[3,4,5,6,8]}}],\"seeds\":[1,2,3]}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-1-1",
+   "name": "sim_estimate",
+   "content": {
+    "cpu_hours": 16.5,
+    "runs": 15,
+    "per_run": {
+     "fungi_pleurotus_fruiting_calibrated": {
+      "MPC": 1.1
+     }
+    },
+    "session_remaining_cpu_hours": 4.0
+   }
+  }
+ ],
+ "expect": {
+  "call": "optional",
+  "allowed": [
+   "sim_estimate",
+   "sim_validate"
+  ],
+  "forbidden": [
+   "sim_start"
+  ],
+  "spec_valid": true,
+  "budget_cpu_hours": 4.0
+ }
+}

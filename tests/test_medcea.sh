@@ -172,6 +172,9 @@
 #      folder starting with - re-asked); fit-sensors with the dataset, the name (default
 #      unit01-zone01-s1) and the output checked and --humidity-model self_heating on a yes;
 #      real: the wrapper runs without the guide's lock
+#  76  Applications → Benchmark the local model (research Phase 4b step 0): the plan (read-only,
+#      [Y/n], no lock), the bench with the models asked (a bad list re-asked), [y/N], the
+#      refusals named; cleanup; real: the report runs without the guide's lock
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1705,6 +1708,25 @@ no_stub
 real $'3\n18\n1\n\nq\n'
 rc_is "real: quits with 0" 0
 has   "real: the wrapper ran" "STUB apps/research/calibrate.sh snapshots"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: without the guide's lock" || fail "real: ran under the guide's lock"
+
+echo "76 the local model's bench (Applications, research Phase 4b step 0)"
+mkcfg true true
+guide $'3\n19\n1\n\nb\n19\n3\n7b\n8b\ny\nb\n19\n6\ny\nq\n'
+rc_is "quits with 0" 0
+has   "plan (dry)" "[dry run] not executed: ./apps/research-model/bench.sh plan"
+has   "plan is read-only: [Y/n]" "Run it? [Y/n]"
+has   "a bad model list is re-asked" "'7b': 8b, 4b or 8b,4b"
+has   "bench (dry), one model" "[dry run] not executed: ./apps/research-model/bench.sh bench --models 8b"
+has   "bench is a change ([y/N])" "Run it? [y/N]"
+has   "the R/S refusal named" "Refused while a recipe run is R or S"
+has   "the cap named" "refuses (exit 2) above --max-hours"
+has   "cleanup (dry)" "[dry run] not executed: ./apps/research-model/bench.sh cleanup"
+has   "cleanup keeps the models" "never the model folder"
+no_stub
+real $'3\n19\n5\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the report ran" "STUB apps/research-model/bench.sh report"
 [[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: without the guide's lock" || fail "real: ran under the guide's lock"
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"

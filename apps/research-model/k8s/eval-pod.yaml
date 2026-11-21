@@ -1,0 +1,66 @@
+# Pod research-llm-eval-<model> (research Phase 4b step 0's offline tool-call eval,
+# codeplan/rs4-design.md R26): llama-server answering the fixture conversations, outside
+# the zones, reached by bench.sh from the host at its pod IP with the key of Secret
+# research-llm-bench-key (no lake data, no session). Rendered by bench.sh eval with
+#   render eval-pod.yaml NAMESPACE LLAMA_IMAGE_SERVER MODEL_DIR MODEL_UID MODEL_GID EVAL_DEADLINE_S SERVER_MEMORY PRIORITY_CLASS MODEL_KEY MODEL_FILE MODEL_ALIAS LLM_THREADS LLM_CPUS LLM_MASK LLM_CTX
+apiVersion: v1
+kind: Pod
+metadata:
+  name: research-llm-eval-${MODEL_KEY}
+  namespace: ${NAMESPACE}
+  labels:
+    app: research-llm-bench
+    medcea/bench-kind: eval
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: ${EVAL_DEADLINE_S}
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  priorityClassName: "${PRIORITY_CLASS}"
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: ${MODEL_UID}
+    runAsGroup: ${MODEL_GID}
+    fsGroup: ${MODEL_GID}
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: llm
+      image: ${LLAMA_IMAGE_SERVER}
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "/script/serve.sh"]
+      env:
+        - {name: HOME, value: /tmp}
+        - {name: MODEL, value: "/models/${MODEL_FILE}"}
+        - {name: ALIAS, value: "${MODEL_ALIAS}"}
+        - {name: THREADS, value: "${LLM_THREADS}"}
+        - {name: CPUS, value: "${LLM_CPUS}"}
+        - {name: MASK, value: "${LLM_MASK}"}
+        - {name: CTX, value: "${LLM_CTX}"}
+      ports:
+        - {name: http, containerPort: 8080}
+      readinessProbe:
+        httpGet: {path: /health, port: 8080}
+        periodSeconds: 10
+        failureThreshold: 3
+      resources:
+        requests: {cpu: 100m, memory: ${SERVER_MEMORY}}
+        limits: {memory: ${SERVER_MEMORY}}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        - {name: script, mountPath: /script, readOnly: true}
+        - {name: keys, mountPath: /keys, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - name: models
+      hostPath: {path: ${MODEL_DIR}, type: Directory}
+    - name: script
+      configMap: {name: research-llm-eval-script}
+    - name: keys
+      secret: {secretName: research-llm-bench-key, defaultMode: 0440}
+    - name: tmp
+      emptyDir: {sizeLimit: 256Mi}

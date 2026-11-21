@@ -1,0 +1,181 @@
+{
+ "id": "c15_still_running",
+ "what": "correct use: a running campaign is waited for, not restarted",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Tune PID for the fruiting chamber: a grid of kp 0.1, 0.2, 0.4 and ki 0.02, 0.05 on the calibrated fruiting scenario, seeds 1 and 2. Session budget: 16 CPU-hours."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-1-1",
+     "type": "function",
+     "function": {
+      "name": "lake_snapshots",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-1-1",
+   "name": "lake_snapshots",
+   "content": {
+    "snapshots": [
+     {
+      "snapshot_id": 1,
+      "cut_at": "2026-11-15T23:58:00Z",
+      "lineage": "096015bc225c7dbcc342b0a5f2027bbdaf2c4f94f06282a8335ae9147a74752f"
+     },
+     {
+      "snapshot_id": 2,
+      "cut_at": "2026-11-19T03:00:00Z",
+      "lineage": "5d1f0c3e9b7a46d2a8e4f1c0b3d5e7f9a1c3e5f7092b4d6f8a0c2e4f6a8b0c2d"
+     }
+    ]
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-2-1",
+     "type": "function",
+     "function": {
+      "name": "lake_pin",
+      "arguments": "{\"snapshot_id\":2,\"expect_lineage\":\"5d1f0c3e9b7a46d2a8e4f1c0b3d5e7f9a1c3e5f7092b4d6f8a0c2e4f6a8b0c2d\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-2-1",
+   "name": "lake_pin",
+   "content": {
+    "pinned": 2,
+    "lineage": "5d1f0c3e9b7a46d2a8e4f1c0b3d5e7f9a1c3e5f7092b4d6f8a0c2e4f6a8b0c2d",
+    "ok": true
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-3-1",
+     "type": "function",
+     "function": {
+      "name": "sim_validate",
+      "arguments": "{\"spec\":{\"scenarios\":[\"fungi_pleurotus_fruiting_calibrated\"],\"controllers\":[{\"code\":\"PID\",\"params_grid\":{\"kp\":[0.1,0.2,0.4],\"ki\":[0.02,0.05]}}],\"seeds\":[1,2]}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-3-1",
+   "name": "sim_validate",
+   "content": {
+    "ok": true,
+    "runs": 12,
+    "scenarios": [
+     "fungi_pleurotus_fruiting_calibrated"
+    ]
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-4-1",
+     "type": "function",
+     "function": {
+      "name": "sim_estimate",
+      "arguments": "{\"spec\":{\"scenarios\":[\"fungi_pleurotus_fruiting_calibrated\"],\"controllers\":[{\"code\":\"PID\",\"params_grid\":{\"kp\":[0.1,0.2,0.4],\"ki\":[0.02,0.05]}}],\"seeds\":[1,2]}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-4-1",
+   "name": "sim_estimate",
+   "content": {
+    "cpu_hours": 0.6,
+    "runs": 12,
+    "per_run": {
+     "fungi_pleurotus_fruiting_calibrated": {
+      "PID": 0.05
+     }
+    },
+    "session_remaining_cpu_hours": 16
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-5-1",
+     "type": "function",
+     "function": {
+      "name": "sim_start",
+      "arguments": "{\"spec\":{\"scenarios\":[\"fungi_pleurotus_fruiting_calibrated\"],\"controllers\":[{\"code\":\"PID\",\"params_grid\":{\"kp\":[0.1,0.2,0.4],\"ki\":[0.02,0.05]}}],\"seeds\":[1,2]}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-5-1",
+   "name": "sim_start",
+   "content": {
+    "cid": "c-1a2b3c4d",
+    "state": "running",
+    "cpu_hours_reserved": 0.75
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call-6-1",
+     "type": "function",
+     "function": {
+      "name": "sim_status",
+      "arguments": "{\"cid\":\"c-1a2b3c4d\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call-6-1",
+   "name": "sim_status",
+   "content": {
+    "cid": "c-1a2b3c4d",
+    "state": "running",
+    "progress": 0.4
+   }
+  }
+ ],
+ "expect": {
+  "call": "optional",
+  "allowed": [
+   "sim_status"
+  ],
+  "forbidden": [
+   "sim_start",
+   "propose",
+   "sim_results"
+  ]
+ }
+}

@@ -1543,6 +1543,50 @@ a_research_calibrate() {
            "Then fit the sensor model (this menu's third entry); the campaigns run from a worktree: research/README.md.")
     plan_run
 }
+# Research Phase 4b step 0 (codeplan/rs4-design.md §5.1, R24-R28): measure the local model
+# (apps/research-model/bench.sh) before anything is built around it. Outside the zones, low
+# priority; refused while a recipe run is R or S.
+LLM_MODELS_RE='^(8b|4b)(,(8b|4b))?$'
+a_llm_bench() {
+    menu "Benchmark the local model (research Phase 4 step 0)" \
+        "Show the plan and its runtime|What bench measures, the estimated hours and the cap; nothing runs." \
+        "Fetch the models|The pinned GGUF files (about 7.5 GB) into the model folder, resumable, checked by sha256." \
+        "Run the bench|llama-bench over the models, thread counts, NUMA modes and depths (about 3 h)." \
+        "Run the tool-call eval|llama-server answers the fixture conversations; graded on this host (about 1-2 h)." \
+        "Write the report|research/agents/bench/<date>.json: the numbers, the scores, 8B or 4B." \
+        "Remove the bench's Jobs and Pods|Label app=research-llm-bench; the model folder stays."
+    [[ "$PICK" == b ]] && return 10
+    local models=""
+    if [[ "$PICK" =~ ^[234]$ ]]; then
+        ask_match "Models (8b, 4b or 8b,4b)" "$LLM_MODELS_RE" "8b, 4b or 8b,4b" "8b,4b"; models="$ANSWER"
+    fi
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes; NOTES=()
+    case "$PICK" in
+        1) CMD=(./apps/research-model/bench.sh plan)
+           EFFECT="nothing (prints the plan, its estimated runtime and the cap)"
+           LOCK=no; LEVEL=read ;;
+        2) CMD=(./apps/research-model/bench.sh fetch --models "$models")
+           EFFECT="the model folder (RESEARCH_MODEL_DIR, default /var/lib/<project>/research-models, created mode 700) gets <sha256>.gguf per model; Job research-model-fetch in the platform namespace"
+           SUDO="yes (only to create the model folder when its parent is not yours)"
+           NOTES=("Resumes a broken download; a file whose sha256 is not the pin's is removed, never renamed into place."
+                  "Run it again any time: a verified file is kept.") ;;
+        3) CMD=(./apps/research-model/bench.sh bench --models "$models")
+           EFFECT="Job research-llm-bench in the platform namespace for up to the cap (default 3.5 h): CPU on one socket, up to 10 GiB of memory; the results into logs/ and research/agents/bench/<date>.json"
+           NOTES=("Prints the plan and its runtime first and refuses (exit 2) above --max-hours (3.5 h by default)."
+                  "Refused while a recipe run is R or S, and with less memory available than the Job needs plus 2 GiB."
+                  "Holds the deploy lock until it ends, so no deploy disturbs the measurement.") ;;
+        4) CMD=(./apps/research-model/bench.sh eval --models "$models")
+           EFFECT="Pod research-llm-eval-<model> per model in the platform namespace (12 GiB for 8B), a one-time key Secret; both removed at the end; the scores into logs/ and research/agents/bench/<date>.json"
+           NOTES=("No lake data and no session: fixture conversations only (research/agents/evals/fixtures)."
+                  "Refused while a recipe run is R or S, and above --max-hours.") ;;
+        5) CMD=(./apps/research-model/bench.sh report)
+           EFFECT="writes research/agents/bench/<today>.json from the newest results in logs/"
+           LOCK=no ;;
+        6) CMD=(./apps/research-model/bench.sh cleanup)
+           EFFECT="deletes the Jobs, Pods, ConfigMaps and Secrets labelled app=research-llm-bench; never the model folder" ;;
+    esac
+    plan_run
+}
 a_research_reservations() {
     CMD=(./apps/research/reserve.sh list)
     EFFECT="nothing (lists the held-out reservations)"
@@ -3094,6 +3138,7 @@ AREA_APPS=(
     "a_lake_api_deploy|Install the lake reader|./apps/lake-api/deploy.sh: notebooks read person-free snapshots; skipped until the policy has its pod."
     "a_lake_api_uninstall|Uninstall the lake reader|./apps/lake-api/uninstall.sh: the snapshots stay."
     "a_research_calibrate|Calibrate the sensor model from a snapshot|research: list the lake's snapshots, fetch one pinned by its lineage and fit the sensor model; reads lake-api, writes only the files you name."
+    "a_llm_bench|Benchmark the local model (research Phase 4 step 0)|./apps/research-model/bench.sh: fetch the pinned models, llama-bench, the offline tool-call eval, the report (8B or 4B)."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."

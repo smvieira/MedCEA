@@ -31,7 +31,9 @@ ENTRY = (sorted(glob.glob("apps/*/deploy.sh", root_dir=ROOT)) + sorted(glob.glob
          # research sandbox (Phase 2a): host commands written alongside this list
          + [p for p in ("apps/research/reserve.sh", "tests/iam-research.sh") if os.path.exists(os.path.join(ROOT, p))]
          # research sandbox (Phase 3): the calibration's host wrapper (logs, takes no lock)
-         + ["apps/research/calibrate.sh"])
+         + ["apps/research/calibrate.sh"]
+         # research sandbox (Phase 4b step 0): the local model's bench, fetch and eval
+         + ["apps/research-model/bench.sh"])
 
 
 class EntryScriptsLog(unittest.TestCase):
