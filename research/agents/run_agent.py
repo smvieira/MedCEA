@@ -24,7 +24,7 @@ def main(env=None, transport=None, tool_transport=None, sleep=None):
     skill = os.path.join(a, "skills", profile.get("skill", "controller_campaign") + ".md")
     tc = TraceClient(transport or HttpTransport(env["MEDCEA_SESSION_URL"]), env["MEDCEA_SID"])
     try:
-        tc.claim(env["MEDCEA_CLAIM"])
+        tc.claim(env["MEDCEA_CLAIM"], **({"sleep": sleep} if sleep else {}))
         kw = {"sleep": sleep} if sleep else {}
         tools = HttpTools({"sim": env["MEDCEA_MCP_SIM"], "lake": env["MEDCEA_MCP_LAKE"]}, tc.token,
                           transport=tool_transport, **kw)

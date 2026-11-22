@@ -230,7 +230,8 @@ class SessionTest(unittest.TestCase):
     def test_claim_wrong_peer_and_reuse(self):
         st, r = self.mint()
         sid = r["sid"]
-        self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": r["claim"]})[0], 403)  # no pod registered
+        self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": r["claim"]})[0], 409)  # no pod registered yet: retry, nothing used
+        self.assertTrue(self.db.active(sid))
         self.call(2, "PUT", "/claims/%s/expect" % sid, {"peer": "10.9.9.9"})
         self.assertEqual(self.call(1, "POST", "/claim", {"sid": sid, "claim": r["claim"]})[0], 403)  # wrong peer
         self.assertTrue(self.db.active(sid))                       # a stranger cannot revoke it

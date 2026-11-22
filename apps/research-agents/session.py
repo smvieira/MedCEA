@@ -358,7 +358,11 @@ class Service:
         rec = self._rec(sid)
         if rec is None:
             return 403, {"error": "refused"}
-        if rec["expect"] is None or peer != rec["expect"]:
+        if rec["expect"] is None:
+            # the orchestrator registers the pod's address once it sees the pod Running, which can be after
+            # the agent's first claim: the agent retries; nothing is used or revoked (E48, 22 Nov 2026)
+            return 409, {"error": "not expected yet"}
+        if peer != rec["expect"]:
             return 403, {"error": "refused"}
         if rec["claimed"] or self.clock() > rec["created_at"] + CLAIM_TTL:
             # a second use of a claim: the database records it and revokes the session

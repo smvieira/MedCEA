@@ -172,6 +172,24 @@ class Scripted(unittest.TestCase):
         with self.assertRaises(TraceRefused):
             TraceClient(s, "S" * 22).claim("c")      # a second use of the claim
 
+    def test_the_claim_waits_until_the_pod_is_registered(self):
+        # research-session answers 409 until the orchestrator has registered the pod (E48, 22 Nov 2026)
+        answers = [(409, {"error": "not expected yet"})] * 2 + [(200, {"token": "T"})]
+        class T:
+            def post(self, path, body):
+                return answers.pop(0)
+        naps = []
+        t = TraceClient(T(), "S" * 22)
+        t.claim("c", sleep=naps.append)
+        self.assertEqual((t.token, naps), ("T", [2, 2]))
+        now = [0]
+        class Never:
+            def post(self, path, body):
+                return 409, {}
+        with self.assertRaises(TraceRefused):
+            TraceClient(Never(), "S" * 22).claim("c", wait_s=10, sleep=lambda s: now.__setitem__(0, now[0] + s),
+                                                 clock=lambda: now[0])
+
 
 if __name__ == "__main__":
     unittest.main()

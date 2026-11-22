@@ -31,8 +31,16 @@ class TraceClient:
     def __init__(self, transport, sid):
         self.t, self.sid, self.token = transport, sid, None
 
-    def claim(self, claim):
-        st, obj = self.t.post("/claim", {"sid": self.sid, "claim": claim})
+    def claim(self, claim, wait_s=90, sleep=None, clock=None):
+        """409 "not expected yet": the orchestrator has not registered this pod yet; try again until wait_s."""
+        import time
+        sleep, clock = sleep or time.sleep, clock or time.monotonic
+        end = clock() + wait_s
+        while True:
+            st, obj = self.t.post("/claim", {"sid": self.sid, "claim": claim})
+            if st != 409 or clock() >= end:
+                break
+            sleep(2)
         if st != 200 or "token" not in obj:
             raise TraceRefused("claim refused (%s)" % st)
         self.token = obj["token"]
