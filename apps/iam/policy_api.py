@@ -85,6 +85,12 @@ SELECT DISTINCT ON (h.version) h.version, h.event, h.payload ->> 'outcome' AS ou
   FROM iam_policy.history h
  WHERE h.version IS NOT NULL AND h.event IN (%s)
  ORDER BY h.version, h.event_id DESC""" % ', '.join("'%s'" % e for e in APPLY_EVENTS)
+# The newest apply event of any version, with apply_deferred: what `apply.sh --resume` converges
+APPLY_LAST = """
+SELECT h.version, h.event, h.payload ->> 'outcome' AS outcome
+  FROM iam_policy.history h
+ WHERE h.version IS NOT NULL AND h.event IN (%s)
+ ORDER BY h.event_id DESC LIMIT 1""" % ', '.join("'%s'" % e for e in APPLY_EVENTS + ('apply_deferred',))
 VERSION_COLS = ('version', 'kind', 'status', 'reason', 'based_on', 'rollback_of', 'created_at', 'created_by_name',
                 'submitted_at', 'submitted_by_name', 'approved_at', 'approved_by_name', 'applied_at',
                 'confirmed_at', 'confirm_note', 'disputed_at', 'dispute_note', 'withdrawn_at', 'superseded_at',
@@ -618,8 +624,26 @@ def versions(cur, actor=None):
         d['apply_state'] = apply_state(a.get('event'), a.get('outcome'), v['status'])
         out.append(d)
     return 200, {'versions': out, 'applied': applied_version(cur), 'open': open_v,
+                 'apply_pending': apply_pending(cur, out),
                  'accepted_skeleton_digest': accepted_skeleton(cur),
                  'skeleton_digest': _COMPILER.get('skeleton_digest')}
+
+
+def apply_pending(cur, out):
+    """What the host operator still owes the policy, read only: None, or {version, kind, state}.
+    'unfinished': the newest apply event is apply_started, apply_deferred or a partial_apply that is
+    not reverted (`apply.sh --resume`); 'approved': an approved version nobody has applied
+    (`apply.sh N`). Applying stays a host command: it holds the deploy lock and rolls out."""
+    kinds = {d['version']: d['kind'] for d in out}
+    last = rows(cur, APPLY_LAST)
+    if last:
+        n, ev, oc = last[0]['version'], last[0]['event'], last[0]['outcome']
+        if ev in ('apply_started', 'apply_deferred') or (ev == 'partial_apply' and oc != 'reverted'):
+            return {'version': n, 'kind': kinds.get(n), 'state': 'unfinished'}
+    for d in reversed(out):   # lowest approved first
+        if d['status'] == 'approved':
+            return {'version': d['version'], 'kind': d['kind'], 'state': 'approved'}
+    return None
 
 
 def authors(cur, v):
