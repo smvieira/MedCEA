@@ -82,9 +82,9 @@ spec:
         - name: RS_DB_NAME
           value: "medcea_research"
         # the device-code sign-in relay (client research-agent): Keycloak's in-cluster Service, never the
-        # public name (the zone resolves no platform DNS name; the policy's hop is keycloak:8080)
+        # public name; the Service is port 80, the policy names the pod port 8080
         - name: RS_KEYCLOAK_REALM_URL
-          value: "http://keycloak.${NAMESPACE}.svc.cluster.local:8080/realms/${KEYCLOAK_REALM}"
+          value: "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}"
         ports:
         - name: person
           containerPort: 8100
