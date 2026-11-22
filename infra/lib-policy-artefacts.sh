@@ -135,38 +135,44 @@ pa_zone_iam_copies() {
         [[ "$_pa_mode" == scoped ]] && _pa_line zone-iam-lib "not deployed"
         return 0
     fi
+    # the ConfigMap is larger than one environment variable may be (128 KiB): files, never env or argv
+    local _tmp; _tmp="$(mktemp -d)"
+    printf '%s' "$_src_cm" > "$_tmp/cm.json"; printf '%s' "$_src_jwks" > "$_tmp/jwks.json"
     for _ns in "${_todo[@]}"; do
+        python3 -c '
+import base64, json, sys
+d, ns = sys.argv[1], sys.argv[2]
+cm, jw = json.load(open(d + "/cm.json")), json.load(open(d + "/jwks.json"))
+lab = {"app.kubernetes.io/part-of": "medcea-research"}
+out = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "medcea-iam-lib", "namespace": ns, "labels": lab},
+       "data": cm.get("data") or {}}
+if cm.get("binaryData"):
+    out["binaryData"] = cm["binaryData"]
+json.dump(out, open(d + "/want-cm.json", "w"))
+json.dump({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "medcea-jwks", "namespace": ns, "labels": lab},
+           "data": {k: base64.b64decode(v).decode("utf-8") for k, v in (jw.get("data") or {}).items()}},
+          open(d + "/want-jw.json", "w"))' "$_tmp" "$_ns"
         if [[ "$_pa_mode" == scoped ]]; then
-            _live="$($MK8S kubectl get configmap medcea-iam-lib medcea-jwks -n "$_ns" -o json 2>/dev/null)" || _live=""
-            [[ -n "$_live" ]] || _live='{"items": []}'
+            $MK8S kubectl get configmap medcea-iam-lib medcea-jwks -n "$_ns" -o json > "$_tmp/live.json" 2>/dev/null \
+                || echo '{"items": []}' > "$_tmp/live.json"
             _rc=0
-            CM="$_src_cm" JW="$_src_jwks" python3 -c '
-import base64, json, os, sys
-cm, jw = json.loads(os.environ["CM"]), json.loads(os.environ["JW"])
-live = {i["metadata"]["name"]: i for i in json.load(sys.stdin).get("items") or []}
-want_jw = {k: base64.b64decode(v).decode("utf-8") for k, v in (jw.get("data") or {}).items()}
-ok = (live.get("medcea-iam-lib", {}).get("data") == (cm.get("data") or {})
-      and live.get("medcea-iam-lib", {}).get("binaryData") == (cm.get("binaryData") or None)
-      and live.get("medcea-jwks", {}).get("data") == want_jw)
-sys.exit(0 if ok else 1)' <<<"$_live" 2>/dev/null || _rc=$?
+            python3 -c '
+import json, sys
+d = sys.argv[1]
+live = {i["metadata"]["name"]: i for i in json.load(open(d + "/live.json")).get("items") or []}
+cm, jw = json.load(open(d + "/want-cm.json")), json.load(open(d + "/want-jw.json"))
+ok = (live.get("medcea-iam-lib", {}).get("data") == cm["data"]
+      and live.get("medcea-iam-lib", {}).get("binaryData") == cm.get("binaryData")
+      and live.get("medcea-jwks", {}).get("data") == jw["data"])
+sys.exit(0 if ok else 1)' "$_tmp" 2>/dev/null || _rc=$?
             [[ $_rc == 0 ]] && continue
         fi
         _changed=1
-        CM="$_src_cm" python3 -c '
-import json, os, sys
-src = json.loads(os.environ["CM"])
-out = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "medcea-iam-lib", "namespace": sys.argv[1],
-       "labels": {"app.kubernetes.io/part-of": "medcea-research"}}, "data": src.get("data") or {}}
-if src.get("binaryData"):
-    out["binaryData"] = src["binaryData"]
-print(json.dumps(out))' "$_ns" | $MK8S kubectl apply -f - >/dev/null
-        JW="$_src_jwks" python3 -c '
-import base64, json, os, sys
-src = json.loads(os.environ["JW"])
-data = {k: base64.b64decode(v).decode("utf-8") for k, v in (src.get("data") or {}).items()}
-print(json.dumps({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "medcea-jwks", "namespace": sys.argv[1],
-      "labels": {"app.kubernetes.io/part-of": "medcea-research"}}, "data": data}))' "$_ns" | $MK8S kubectl apply -f - >/dev/null
+        # server-side: a client-side apply would copy the library into the 256 KiB last-applied annotation
+        $MK8S kubectl apply --server-side --force-conflicts --field-manager medcea-zone-iam -f "$_tmp/want-cm.json" >/dev/null
+        $MK8S kubectl apply --server-side --force-conflicts --field-manager medcea-zone-iam -f "$_tmp/want-jw.json" >/dev/null
     done
+    rm -rf "$_tmp"
     if [[ "$_pa_mode" == scoped ]]; then
         if ((_changed)); then _pa_line zone-iam-lib re-rendered; else _pa_line zone-iam-lib unchanged; fi
     fi

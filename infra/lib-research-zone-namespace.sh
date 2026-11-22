@@ -59,7 +59,10 @@ rzn_run() {
         log "namespace $_ns (zone $_z), quota and limits"
         local _f
         for _f in namespace quota limitrange; do
-            render "$REPO_ROOT/k8s/$_z/$_f.yaml" "$_var" | $KUBECTL apply -f -
+            # a new namespace's default ServiceAccount is made by the controller while we apply ours:
+            # AlreadyExists on the first try is that race, so try once more (22 Nov 2026)
+            render "$REPO_ROOT/k8s/$_z/$_f.yaml" "$_var" | $KUBECTL apply -f - \
+                || { sleep 2; render "$REPO_ROOT/k8s/$_z/$_f.yaml" "$_var" | $KUBECTL apply -f -; }
         done
         pa_zonenetpol "$_z" full
     fi
