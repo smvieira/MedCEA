@@ -406,6 +406,16 @@ def artefacts(p, label="defaults.yaml"):
     return out
 
 
+def cli_argv_now(key):
+    """cli_argv for a policy that has the research-gw and research-agents zones (research Phase 4a's
+    commit B and later): the research zone's compile then carries their namespaces."""
+    argv = cli_argv(key)
+    if key == "netpol-research":
+        argv = argv[:-2] + ["--zone-namespace", "research-gw=medcea-research-gw",
+                            "--zone-namespace", "research-agents=medcea-research-agents"] + argv[-2:]
+    return argv
+
+
 def cli_argv(key):
     """The cli.py arguments that print artefacts()[key]."""
     if key in ("routes", "mqtt", "grafana", "node-red", "edge-wizard", "pgadmin", "superset"):
@@ -420,14 +430,13 @@ def cli_argv(key):
         return ["compile", "netpol", "--namespace", "medcea", "--node-ip", "10.0.0.5"]
     if key == "netpol-research":
         return ["compile", "netpol", "--zone", "research", "--namespace", "medcea-research",
-                "--platform-namespace", "medcea", "--zone-namespace", "research-gw=medcea-research-gw",
-                "--zone-namespace", "research-agents=medcea-research-agents", "--node-ip", "10.0.0.5"]
+                "--platform-namespace", "medcea", "--node-ip", "10.0.0.5"]
     if key in ("netpol-research-gw", "netpol-research-agents"):
         z = key[len("netpol-"):]
         return ["compile", "netpol", "--zone", z, "--namespace", "medcea-" + z, "--platform-namespace", "medcea",
                 "--zone-namespace", "research=medcea-research",
-                "--zone-namespace", "%s=medcea-%s" % (("research-gw", "research-agents") if z == "research-agents"
-                                                       else ("research-agents", "research-gw")) , "--node-ip", "10.0.0.5"]
+                "--zone-namespace", "%s=medcea-%s" % ((o := "research-agents" if z == "research-gw" else "research-gw"), o),
+                "--node-ip", "10.0.0.5"]
     if key == "grants-json":
         return ["compile", "grants", "--format", "json"]
     if key == "grants-json-smoke-without-iam":
@@ -468,7 +477,7 @@ class SourceIdentity(unittest.TestCase):
     def test_every_target_byte_identical(self):
         self.assertGreater(len(self.want), 55)
         for key, want in self.want.items():
-            rc, out, err = run_cli(cli_argv(key), cli=self.cli)
+            rc, out, err = run_cli(cli_argv_now(key), cli=self.cli)
             self.assertEqual(rc, 0, f"{key}: {err}")
             self.assertEqual(out, want, key)
             self.assertNotIn("label from file name", err, key)
@@ -4554,7 +4563,7 @@ class PhaseRS2bBDelta(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
         self.assertEqual((rc, rc_old), (0, 0), err)
-        self.assertEqual(out_old.replace("29 groups, 123 cells, 18 invariants", "29 groups, 115 cells, 19 invariants"),
+        self.assertEqual(out_old.replace("29 groups, 123 cells, 18 invariants", "30 groups, 118 cells, 19 invariants"),   # + research_campaigns (4a B)
                          out)
         self.assertNotEqual(out, out_old)
 

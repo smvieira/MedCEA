@@ -501,7 +501,8 @@ class Tree:
         # n runs of <rel> (all without :n) with exit rc
         # (infra/deploy-research-namespace.sh since research sandbox 2a's commit B: the factory
         # policy has the research zone, so apply_check.target_owners names it)
-        for rel in ("deploy-infra.sh", "infra/deploy-research-namespace.sh", "infra/deploy-workbench.sh") + tuple(
+        for rel in ("deploy-infra.sh", "infra/deploy-research-namespace.sh", "infra/deploy-research-gw-namespace.sh",
+                    "infra/deploy-research-agents-namespace.sh", "infra/deploy-workbench.sh") + tuple(
                 f"apps/{c}/deploy.sh" for c in ("access", "edge-wizard", "frontend", "monitor", "mqtt-explorer",
                                                  "scheduler", "superset")):
             dst = os.path.join(self.root, rel)
