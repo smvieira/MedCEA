@@ -27,7 +27,7 @@ def sim_job_name(cid):
 
 
 _SEC = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
-_UNPACK = ("set -e; tar xzf /bundle/code.tgz -C /opt/medcea; python3 -m pip install -q --no-cache-dir "
+_UNPACK = ("set -e; tar xzf /bundle/code.tgz -C /opt/medcea -m --no-overwrite-dir; python3 -m pip install -q --no-cache-dir "
            "--disable-pip-version-check --no-index --find-links /wheels --require-hashes --no-deps "
            "--target /opt/extra -r /opt/medcea/apps/research-agents/requirements-services.txt")
 
