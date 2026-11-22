@@ -91,9 +91,15 @@ class SimTest(unittest.TestCase):
         self.assertEqual(p["state"], "started")
         cid, cap, deadline = r.started[0]
         self.assertAlmostEqual(cap, 1.25 * 1.0 + 0.05)
-        self.assertEqual(deadline, math.ceil(cap * 3600 / 4 * 1.5))
+        self.assertEqual(deadline, max(mcp_sim.DEADLINE_FLOOR_S, math.ceil(cap * 3600 / 4 * 1.5)))
         self.assertEqual(len(s.of("sim_started")), 1)
         self.assertEqual(s.of("gate_pending"), [])
+
+    def test_a_tiny_campaign_still_has_time_to_start(self):
+        # E48 (22 Nov 2026): a 0.0003 CPU-h cap gave a 1-s deadline and the Job failed "deadline"
+        s, r, app = setup()
+        call(app, "sim.run", {"spec": {"runs": 0}})   # only the 0.05 h calibration: 68 s without the floor
+        self.assertEqual(r.started[0][2], mcp_sim.DEADLINE_FLOOR_S)
 
     def test_gate_asks_then_approves(self):
         s, r, app = setup()

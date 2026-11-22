@@ -11,7 +11,7 @@ Gate for sim.run, on the recomputed estimate E (CPU-hours) and the session's rem
                               the same sim.run (or sim.status) reads /gates/<gid>: approved -> start,
                               denied -> refused.
 cap_h = min(1.25 E + calibration, remaining, approved_cap_h of the decision); the runner gets the cap
-and deadline_s = ceil(cap_h x 3600 / pool x 1.5). A handle (cid) is bound to its session: another
+and deadline_s = max(DEADLINE_FLOOR_S, ceil(cap_h x 3600 / pool x 1.5)). A handle (cid) is bound to its session: another
 session's cid is "no such campaign". The runner is an interface (stage 6 supplies the Job runner):
   start(cid, spec, cap_h, deadline_s)            -> None
   status(cid) -> {state running|done|failed, cpu_hours, manifest?, rows?, error?}
@@ -50,6 +50,11 @@ def _load_params(repo_root):
     spec.loader.exec_module(mod)
     return mod
 
+
+# A Job needs time to start (unpack the bundle, install the wheels) before it computes anything: a small
+# campaign's deadline from its cap alone was 1 s, and E48's first run failed "deadline" (22 Nov 2026).
+# The CPU cap is enforced by sim_job's watchdog against the cgroup's CPU time, not by this wall clock.
+DEADLINE_FLOOR_S = 300
 
 class LocalEstimator:
     """In-process estimate (R7) for PID / bang-bang / Q-learning specs with research/harness/campaign.py;
@@ -142,7 +147,7 @@ class SimServer:
 
     def _start(self, ctx, cid, c, cap_h):
         pool = max(1, int(getattr(self.runner, "pool", 1)))
-        deadline = math.ceil(cap_h * 3600 / pool * 1.5)
+        deadline = max(DEADLINE_FLOOR_S, math.ceil(cap_h * 3600 / pool * 1.5))
         c.update(cap_h=cap_h, state="started", deadline_s=deadline)
         self.runner.start(cid, c["spec"], cap_h, deadline, sid=ctx["sid"])
         self.session.trace(ctx["sid"], "sim_started", {"cid": cid, "spec_sha256": c["spec_sha"], "estimate_h": round(c["est"]["cpu_hours"], 6),
