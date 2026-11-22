@@ -1173,7 +1173,7 @@ class Phase4aWiring(unittest.TestCase):
         types = [l.split("|")[1].strip() for l in lines]
         i = types.index("rslake")
         self.assertEqual(types[i + 1:i + 6], ["gwnetpol", "ranetpol", "rschain", "rsanchor", "rsagent"])
-        self.assertEqual(len(types), 76)
+        self.assertEqual(len(types), 77)
         with open(os.path.join(REPO, "health-check.sh")) as f:
             src = f.read()
         for t in ("gwnetpol", "ranetpol", "rschain", "rsanchor", "rsagent"):

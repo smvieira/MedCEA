@@ -177,6 +177,9 @@
 #      refusals named (the pessimistic cap, a run starting, Ctrl-C deleting the Job);
 #      cleanup; real: the report runs without the guide's lock
 #
+#  78  Applications → the local model (research Phase 4b stage 1): install ([y/N]) and uninstall
+#      (the typed word yes), dry; RESEARCH_LOCAL_MODEL enable (set, deploy, health) and rollback
+#
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
 set -uo pipefail
@@ -1756,6 +1759,32 @@ no_stub
 real $'2\n13\ny\nb\nb\n3\n20\ny\nq\n'
 has   "real: both zone scripts ran" "STUB infra/deploy-research-agents-namespace.sh"
 has   "real: the deploy ran" "STUB apps/research-agents/deploy.sh"
+
+echo "78 the local model (Applications, research Phase 4b stage 1)"
+mkcfg true true
+guide $'3\n22\ny\nb\n23\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "deploy (dry)" "[dry run] not executed: ./apps/research-model/deploy.sh"
+has   "deploy is a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "Skipped (exit 0, nothing installed) while RESEARCH_ENABLED or RESEARCH_LOCAL_MODEL is not true"
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/research-model/uninstall.sh"
+has   "uninstall: the model file is kept" "the model file in RESEARCH_MODEL_DIR is kept"
+no_stub
+sed -i 's/^RESEARCH_LOCAL_MODEL=.*/RESEARCH_LOCAL_MODEL="false"/' "$T/config.env"
+guide $'3\n24\n1\ny\ny\nq\n'
+rc_is "switch: quits with 0" 0
+has   "switch: the purpose" "RESEARCH_LOCAL_MODEL: The local language model"
+has   "switch: the current value" 'Now: RESEARCH_LOCAL_MODEL="false"'
+has   "switch: step 1 sets it" '1. config.env: RESEARCH_LOCAL_MODEL="true"'
+has   "switch: step 2 deploys it" '2. ./apps/research-model/deploy.sh'
+has   "switch: step 3 is the health check" '3. ./health-check.sh'
+has   "switch: the download is named" "downloads the model (about 2.5 GB"
+no_stub
+guide $'3\n24\n2\ny\nq\n'
+has   "rollback: sets it false" '1. config.env: RESEARCH_LOCAL_MODEL="false"'
+has   "rollback: removes the server" '2. ./apps/research-model/uninstall.sh'
+has   "rollback: the file stays" "the model file stays in RESEARCH_MODEL_DIR"
+no_stub
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false

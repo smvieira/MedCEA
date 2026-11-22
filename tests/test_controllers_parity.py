@@ -650,7 +650,7 @@ class HealthCheck(unittest.TestCase):
         names = [l.split("|")[0].strip() for l in lines]
         i = names.index("Control loops")
         self.assertEqual([x.strip() for x in lines[i + 1].split("|")[:3]], [self.NAME, "controllers", "$NAMESPACE"])
-        self.assertEqual(len(lines), 76)  # 68 since rsnetpol and rsexport (research sandbox Phase 2a); 71 with wbaccounts, rsgrants, rslake (Phase 2b)
+        self.assertEqual(len(lines), 77)  # 68 since rsnetpol and rsexport (research sandbox Phase 2a); 71 with wbaccounts, rsgrants, rslake (Phase 2b)
         src = read("health-check.sh")
         self.assertRegex(src, r'(?m)^        controllers\)  check_controllers "\$name" "\$target" ;;$')
         self.assertIn("${CYAN}controllers${NC}", src)

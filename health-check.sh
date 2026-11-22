@@ -291,6 +291,10 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         FAIL when the live anchor research-session reports differs from the database;"
     echo -e "         WARN when a pod is not Running, /healthz does not answer or its key id is not the Secret's"
     echo ""
+    echo -e "  ${CYAN}rsllm${NC} the local model research-llm (Phase 4b): NAMESPACE (SKIP while RESEARCH_LOCAL_MODEL is not true)"
+    echo -e "         FAIL when the Deployment's or /props' model is not the pin in apps/research-model/pins.json;"
+    echo -e "         WARN when the pod is not Ready, /health or /props do not answer, the context is not 4096 or generation is below half the bench's; it generates nothing"
+    echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
     echo -e "         docs/manual/build.py --out --standalone (a temp file); WARN when it lags or is missing (./medcea.sh"
@@ -3805,6 +3809,101 @@ SQL
     else _record OK "$name" "research-session and the agents' services run; ${oks[*]}"; fi
 }
 
+# rsllm (Local model; research Phase 4b stage 1, design rs4 5.4): research-llm, the local model's server in
+# research-gw. Read-only and it generates nothing: Deployment env pin = apps/research-model/pins.json, the pod
+# Ready, /health, /props (alias carrying the pin, context 4096, a chat template), and /metrics against the
+# bench's baseline (WARN below half of it). SKIP while RESEARCH_LOCAL_MODEL is not true.
+check_rsllm() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" gwns rc=0 out pin want_sha want_alias want_ctx base_gen
+    local warns=() fails=() oks=() line phase ip ready got_sha body info metrics rate predicted
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    if [[ "${RESEARCH_LOCAL_MODEL:-false}" != true ]]; then _record SKIP "$name" "the local model is switched off (RESEARCH_LOCAL_MODEL is not true)"; return; fi
+    if [[ "${RESEARCH_ENABLED:-false}" != true ]]; then _record SKIP "$name" "the research sandbox is switched off (RESEARCH_ENABLED is not true)"; return; fi
+    gwns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_namespace research-gw' 2>/dev/null)"
+    pin="$(python3 - "$SCRIPT_DIR/apps/research-model/pins.json" "$SCRIPT_DIR/research/agents/bench" <<'PY' 2>/dev/null
+import glob, json, sys
+p = json.load(open(sys.argv[1]))["models"]["4b"]
+base = ""
+for f in sorted(glob.glob(sys.argv[2] + "/*.json"), reverse=True):
+    try:
+        g = json.load(open(f))["bench"]["best"]["4b"]["gen_tok_s"]
+        base = "%g" % g
+        break
+    except Exception:
+        continue
+print("%s|%s-%s|4096|%s" % (p["sha256"], p["file"][:-5].lower(), p["sha256"][:12], base))
+PY
+)"
+    IFS='|' read -r want_sha want_alias want_ctx base_gen <<<"$pin"
+    if [[ ! "$want_sha" =~ ^[0-9a-f]{64}$ ]]; then _record WARN "$name" "cannot read the model pin from apps/research-model/pins.json"; return; fi
+    rc=0
+    got_sha="$(timeout "$TIMEOUT" $KUBECTL get deployment research-llm -n "$gwns" \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LLM_MODEL_SHA256")].value}' 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'NotFound' <<<"$got_sha"; then
+            _record WARN "$name" "RESEARCH_LOCAL_MODEL is true but there is no deployment research-llm in $gwns (./apps/research-model/deploy.sh; it skips until the applied access policy has the research-llm pod)"
+        else
+            _record WARN "$name" "cannot read deployment research-llm in $gwns: $(tail -n1 <<<"$got_sha" | cut -c1-120)"
+        fi
+        return
+    fi
+    if [[ "$got_sha" != "$want_sha" ]]; then
+        fails+=("research-llm runs model ${got_sha:0:12}..., the pin is ${want_sha:0:12}...: ./apps/research-model/deploy.sh")
+    else oks+=("model pin ${want_sha:0:12} matches"); fi
+    rc=0
+    line="$(timeout "$TIMEOUT" $KUBECTL get pods -n "$gwns" -l app=research-llm \
+        -o jsonpath='{range .items[*]}{.status.phase}|{.status.podIP}|{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>&1 | head -n1)" || rc=$?
+    IFS='|' read -r phase ip ready <<<"$line"
+    if [[ $rc -ne 0 || "$phase" != Running || "$ready" != True || ! "$ip" =~ ^[0-9.]+$ ]]; then
+        warns+=("the research-llm pod is not Ready (${phase:-no pod}): microk8s kubectl -n $gwns describe pod -l app=research-llm")
+    else
+        rc=0
+        body="$(curl -s -m "$TIMEOUT" "http://${ip}:8080/health" 2>/dev/null)" || rc=$?
+        if [[ $rc -ne 0 ]] || ! python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("status") == "ok" else 1)' <<<"$body" 2>/dev/null; then
+            warns+=("research-llm does not answer /health ok from the host (curl -m $TIMEOUT http://${ip}:8080/health)")
+        else
+            oks+=("/health ok")
+            rc=0
+            body="$(curl -s -m "$TIMEOUT" "http://${ip}:8080/props" 2>/dev/null)" || rc=$?
+            info="$(python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    g = d.get("default_generation_settings") or {}
+    n = g.get("n_ctx", (g.get("params") or {}).get("n_ctx", ""))
+    print("%s|%s|%s" % (d.get("model_alias", ""), n, "t" if (d.get("chat_template") or "").strip() else "f"))
+except Exception:
+    print("error")' <<<"$body" 2>/dev/null)"
+            if [[ $rc -ne 0 || "$info" == error || -z "$info" ]]; then
+                warns+=("research-llm /props does not answer or is not JSON")
+            else
+                local alias n_ctx tpl
+                IFS='|' read -r alias n_ctx tpl <<<"$info"
+                if [[ "$alias" != "$want_alias" ]]; then fails+=("research-llm answers as model '${alias:0:80}', the pin is '$want_alias'")
+                else oks+=("alias is the pin's"); fi
+                if [[ -n "$n_ctx" && "$n_ctx" != "$want_ctx" ]]; then warns+=("the context is $n_ctx tokens, the decision is $want_ctx")
+                else oks+=("context ${n_ctx:-?}"); fi
+                [[ "$tpl" == t ]] || warns+=("research-llm reports no chat template: tool calls would not parse")
+            fi
+            rc=0
+            metrics="$(curl -s -m "$TIMEOUT" "http://${ip}:8080/metrics" 2>/dev/null)" || rc=$?
+            if [[ $rc -eq 0 && -n "$metrics" ]]; then
+                rate="$(awk '$1 == "llamacpp:predicted_tokens_seconds" {print $2}' <<<"$metrics" | head -n1)"
+                predicted="$(awk '$1 == "llamacpp:tokens_predicted_total" {print $2}' <<<"$metrics" | head -n1)"
+                if [[ -n "$rate" && -n "$base_gen" && "${predicted%.*}" =~ ^[0-9]+$ && "${predicted%.*}" -gt 0 ]]; then
+                    if awk -v r="$rate" -v b="$base_gen" 'BEGIN { exit !(r + 0 < 0.5 * b) }'; then
+                        warns+=("generation runs at $rate tok/s, below half of the bench's $base_gen tok/s")
+                    else oks+=("generation $rate tok/s (bench $base_gen)"); fi
+                fi
+            fi
+        fi
+    fi
+    local IFS=';'
+    if (( ${#fails[@]} )); then _record FAIL "$name" "${fails[*]}"
+    elif (( ${#warns[@]} )); then _record WARN "$name" "${warns[*]}"
+    else _record OK "$name" "research-llm runs the pinned model; ${oks[*]}"; fi
+}
+
 # =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
@@ -4032,6 +4131,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         rschain)      check_rschain "$name" "$target" ;;
         rsanchor)     check_rsanchor "$name" "$target" ;;
         rsagent)      check_rsagent "$name" "$target" ;;
+        rsllm)        check_rsllm "$name" "$target" ;;
         wbaccounts)   check_wbaccounts "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;
