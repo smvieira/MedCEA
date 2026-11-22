@@ -607,9 +607,11 @@ class Deploy(Tree):
         self.assertEqual(cms[0]["metadata"]["annotations"]["medcea/code-commit"], commit)
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
             names = tf.getnames()
-            bundle = json.loads(tf.extractfile("./BUNDLE.json").read())
-        for want in ("./schd/cea/a.py", "./research/b.py", "./apps/research-agents/session.py", "./apps/database/recipe_types.yaml",
-                     "./edge/templates/esp32-control.json", "./apps/research/db/lake_api.sql"):
+            bundle = json.loads(tf.extractfile("BUNDLE.json").read())
+        self.assertNotIn(".", names)
+        self.assertNotIn("./", names)
+        for want in ("schd/cea/a.py", "research/b.py", "apps/research-agents/session.py", "apps/database/recipe_types.yaml",
+                     "edge/templates/esp32-control.json", "apps/research/db/lake_api.sql"):
             self.assertIn(want, names)
         self.assertEqual((bundle["commit"], bundle["dirty"]), (commit, False))
         self.assertEqual(bundle["files"]["schd/cea/a.py"], subprocess.run(

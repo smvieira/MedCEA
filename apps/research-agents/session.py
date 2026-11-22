@@ -148,6 +148,11 @@ class PgDb:
                         rows = cur.fetchall() if cur.description else []
                     self.conn.commit()
                     return rows
+                # OperationalError first: it is also a psycopg2.Error, and a refused connect leaves conn None
+                except self.pg.OperationalError:
+                    self.conn = None
+                    if attempt:
+                        raise
                 except self.pg.errors.Error as e:  # a statement error: the connection is fine
                     self.conn.rollback()
                     if getattr(e, "pgcode", None) == "53400":
@@ -155,10 +160,6 @@ class PgDb:
                     if getattr(e, "pgcode", None) == "22023":
                         raise NotFound(str(e).splitlines()[0])
                     raise
-                except self.pg.OperationalError:
-                    self.conn = None
-                    if attempt:
-                        raise
 
     def open_session(self, **k):
         return self._run("SELECT agent_trace.open_session(%s,%s,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s::text[],%s::jsonb,%s,%s,%s)",
