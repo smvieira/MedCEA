@@ -370,5 +370,16 @@ class ProfileTools(unittest.TestCase):
         self.assertLess(r["cpu_hours"], 2)
 
 
+class ProtocolParity(unittest.TestCase):
+    def test_client_and_servers_speak_one_version(self):
+        # the agent's client and the MCP servers each had their own constant, and E48's first run got 400
+        import re
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        def ver(rel):
+            with open(os.path.join(here, rel)) as f:
+                return re.search(r'^PROTOCOL = "([^"]+)"', f.read(), re.M).group(1)
+        self.assertEqual(ver("research/agents/http_tools.py"), ver("apps/research-agents/mcp_common.py"))
+
+
 if __name__ == "__main__":
     unittest.main()

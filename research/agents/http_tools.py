@@ -12,7 +12,7 @@ import urllib.request
 
 from .loop import ToolError
 
-PROTOCOL = "2025-06-18"
+PROTOCOL = "2026-07-28"   # = apps/research-agents/mcp_common.PROTOCOL (tests/test_mcp_sim.py pins both)
 
 
 class HttpTransport:
