@@ -288,7 +288,9 @@ _pa_netpol_equal() {
 import json, os, sys
 live = {i["metadata"]["name"]: i.get("spec") for i in json.load(sys.stdin).get("items") or []}
 want = {i["metadata"]["name"]: i.get("spec") for i in (json.loads(os.environ["WANT"])["items"] if os.environ["WANT"] else [])}
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda d: json.dumps({k: {f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}
+                              for k, s in d.items()}, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
 }
 
@@ -371,7 +373,9 @@ try:
     want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
 except (ValueError, KeyError, TypeError, AttributeError):
     sys.exit(2)
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda d: json.dumps({k: {f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}
+                              for k, s in d.items()}, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
 }
 
@@ -458,7 +462,9 @@ try:
     want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
 except (ValueError, KeyError, TypeError, AttributeError):
     sys.exit(2)
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda d: json.dumps({k: {f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}
+                              for k, s in d.items()}, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$_live"
 }
 

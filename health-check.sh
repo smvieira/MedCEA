@@ -2998,7 +2998,8 @@ try:
 except Exception:
     print("error|")
     sys.exit(0)
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda s: json.dumps({f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}, sort_keys=True)
 print("count|%d" % len(want))
 print("missing|" + " ".join(sorted(n for n in want if n not in live)))
 print("differ|" + " ".join(sorted(n for n in want if n in live and canon(live[n]) != canon(want[n]))))
@@ -3510,7 +3511,8 @@ try:
 except Exception:
     print("error|")
     sys.exit(0)
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda s: json.dumps({f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}, sort_keys=True)
 print("count|%d" % len(want))
 print("missing|" + " ".join(sorted(n for n in want if n not in live)))
 print("differ|" + " ".join(sorted(n for n in want if n in live and canon(live[n]) != canon(want[n]))))
