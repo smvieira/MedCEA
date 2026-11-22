@@ -53,8 +53,20 @@ class _Tools:
 
 def replay(events, profile, standing, skill, tool_listing):
     rec = [{"event": e["event"], "payload": e["payload"]} for e in events if e.get("actor") == "agent" and e["event"] in AGENT]
-    server = {e["payload"].get("call"): e["payload"].get("result_sha256") for e in events
-              if e["event"] == "tool_result" and e.get("actor") != "agent" and isinstance(e.get("payload"), dict)}
+    # The servers' own tool_result records, per agent call: those between the agent's tool_call and its
+    # tool_result, in trace order. A server numbers its calls itself (mcp-lake's call 1 and mcp-sim's call 1
+    # are two calls), and the agent's client polls sim.status while a run waits, so one agent call can have
+    # several server records; the agent's result must be one of them (E48, 22 Nov 2026).
+    server, open_call = {}, None
+    for e in events:
+        pl = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+        if e.get("actor") == "agent" and e["event"] == "tool_call":
+            open_call = pl.get("call")
+            server[open_call] = set()
+        elif e.get("actor") == "agent" and e["event"] == "tool_result":
+            open_call = None
+        elif e["event"] == "tool_result" and open_call is not None:
+            server[open_call].add(pl.get("result_sha256"))
     responses = [r["payload"]["response"] for r in rec if r["event"] == "turn_response"]
     results = [r["payload"] for r in rec if r["event"] == "tool_result"]
     for n, r in enumerate(results):
@@ -62,8 +74,8 @@ def replay(events, profile, standing, skill, tool_listing):
         if r["recorded_complete"] and sha(r["result"]) != r["result_sha256"]:
             return _bad(idx, "tool_result", "result_sha256", r["result_sha256"], sha(r["result"]))
         sv = server.get(r["call"])
-        if sv is not None and sv != r["result_sha256"]:
-            return _bad(idx, "tool_result", "server_result_sha256", sv, r["result_sha256"])
+        if sv and r["result_sha256"] not in sv:
+            return _bad(idx, "tool_result", "server_result_sha256", sorted(sv)[0], r["result_sha256"])
     backend = next((r["payload"]["backend"] for r in rec if r["event"] == "turn_request"), None)
     sink = _Sink(rec)
     try:

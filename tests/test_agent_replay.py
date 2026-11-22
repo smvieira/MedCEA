@@ -27,11 +27,25 @@ class Replay(unittest.TestCase):
     def test_server_side_events_are_ignored_unless_they_disagree(self):
         ev, p = rec()
         first = [e for e in ev if e["event"] == "tool_result"][0]["payload"]
+        # a server records its tool_result between the agent's tool_call and the agent's tool_result
+        at = next(i for i, e in enumerate(ev) if e["event"] == "tool_result")
         srv = {"actor": "mcp-sim", "event": "tool_result", "payload": {"call": 1, "result_sha256": first["result_sha256"]}}
-        self.assertTrue(replay(ev + [srv], p, STANDING, SKILL, LISTING)["ok"])
+        self.assertTrue(replay(ev[:at] + [srv] + ev[at:], p, STANDING, SKILL, LISTING)["ok"])
         srv["payload"]["result_sha256"] = "0" * 64
-        v = replay(ev + [srv], p, STANDING, SKILL, LISTING)
+        v = replay(ev[:at] + [srv] + ev[at:], p, STANDING, SKILL, LISTING)
         self.assertEqual(v["first_mismatch"]["field"], "server_result_sha256")
+
+    def test_servers_number_their_own_calls_and_polls_add_records(self):
+        # E48 (22 Nov 2026): mcp-lake's call 1 and mcp-sim's call 1 were different agent calls, and a
+        # sim.run that waits records the sim.status polls too: each agent result is matched inside its window
+        ev, p = rec()
+        res = [i for i, e in enumerate(ev) if e["event"] == "tool_result"]
+        out = list(ev)
+        for k, i in reversed(list(enumerate(res))):
+            sha = ev[i]["payload"]["result_sha256"]
+            out[i:i] = [{"actor": "mcp-x", "event": "tool_result", "payload": {"call": 1, "result_sha256": "f" * 64}},
+                        {"actor": "mcp-x", "event": "tool_result", "payload": {"call": 1, "result_sha256": sha}}]
+        self.assertTrue(replay(out, p, STANDING, SKILL, LISTING)["ok"])
 
     def test_a_tampered_tool_result_is_a_divergence(self):
         ev, p = rec()
