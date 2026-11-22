@@ -293,7 +293,7 @@ log "Code bundle of commit ${RS_CODE_COMMIT:0:12} (sha256 ${RS_BUNDLE_SHA256:0:1
 
 # ── 6. The pods ───────────────────────────────────────────────────────────────
 log "research-session in $GW_NS..."
-render "$APP_DIR/k8s/research-session.yaml" RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE RS_CODE_COMMIT \
+render "$APP_DIR/k8s/research-session.yaml" NAMESPACE KEYCLOAK_REALM RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE RS_CODE_COMMIT \
     RS_BUNDLE_SHA256 RS_SESSION_AUTH_VERSION | $KUBECTL apply -f -
 $KUBECTL rollout status deployment/research-session -n "$GW_NS" --timeout=5m \
     || die "research-session did not become ready: microk8s kubectl -n $GW_NS logs deployment/research-session"
