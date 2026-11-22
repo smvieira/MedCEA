@@ -2345,7 +2345,7 @@ class V1HostFile(unittest.TestCase):
             for key in keys:
                 if key == "check":
                     continue
-                argv = cli_argv(key)
+                argv = cli_argv_now(key)   # the research zone's compile carries the other zones' namespaces
                 rc, host_out, err = run_cli(argv, cli=cli)
                 self.assertEqual((rc, err), (0, ""), key)
                 rc, def_out, _ = run_cli(["--defaults"] + argv, cli=cli)
