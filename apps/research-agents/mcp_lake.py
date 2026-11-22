@@ -3,6 +3,7 @@ queries through research/calib/lake.py LakeClient (design 4.5, R30). No credenti
 (O2); no raw measurement page reaches the model: `summary` returns at most 200 hourly rows. Every
 tag, sensor, uom and code that is not ^[A-Za-z0-9_.%-]{1,48}$ is replaced by '?' and counted."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +33,17 @@ def _code(v, what, required=True):
     return v
 
 
+LINEAGE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _lineage(v, counter):
+    """A lineage is a sha256 hex (64 characters), longer than a code: clean_code made every one '?'."""
+    if isinstance(v, str) and LINEAGE.match(v):
+        return v
+    counter[0] += 1
+    return "?"
+
+
 class LakeServer:
     def __init__(self, session, lake):
         self.session, self.lake = session, lake
@@ -43,7 +55,7 @@ class LakeServer:
     def t_snapshots(self, ctx, args):
         n = [0]
         rows = [{"snapshot_id": r["snapshot_id"], "cut_at": clean_text(r.get("cut_at"), 40),
-                 "lineage": clean_code(r.get("lineage"), n), "lineage_verified": bool(r.get("lineage_verified")),
+                 "lineage": _lineage(r.get("lineage"), n), "lineage_verified": bool(r.get("lineage_verified")),
                  "rows": (r.get("rows") or {}).get("measurement") if isinstance(r.get("rows"), dict) else None}
                 for r in self.lake.snapshots()][-SET_ROWS:]
         return {"snapshots": rows, "replaced": n[0]}

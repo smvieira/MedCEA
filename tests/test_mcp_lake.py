@@ -39,6 +39,9 @@ class LakeTest(unittest.TestCase):
     def test_snapshots(self):
         p = payload(call(self.app, "lake.snapshots", {})[1])
         self.assertEqual(p["snapshots"][0]["rows"], 3)
+        # a lineage is 64 hex: E48 (22 Nov 2026) showed every one as "?" (clean_code allows 48)
+        self.assertEqual(p["snapshots"][0]["lineage"], "a" * 64)
+        self.assertEqual(p["replaced"], 0)
 
     def test_summary_hourly_and_sanitised(self):
         r = call(self.app, "lake.summary", {"snapshot": 1, "unit": "UNIT01", "zone": "ZONE01", "tag": "air_temperature"})[1]

@@ -299,6 +299,21 @@ class SimJobTest(unittest.TestCase):
         self.assertEqual(codes[:1], [3])
         self.assertEqual((r["state"], r["error"]), ("failed", "cpu_cap_exceeded"))
 
+    def test_a_run_that_ends_between_two_looks_is_still_checked(self):
+        # E48 (22 Nov 2026): the run ended before the watchdog's first look and was reported done over its cap
+        from research.agents import sim_job
+        real, calls = sim_job.cpu_seconds, []
+
+        def fake():
+            calls.append(1)
+            return real() + (5 * 3600 if len(calls) > 1 else 0)
+        sim_job.cpu_seconds = fake
+        try:
+            rc, r, _ = self.run_job(lambda spec, out, jobs, cap: {"runs": 0}, poll=3600)
+        finally:
+            sim_job.cpu_seconds = real
+        self.assertEqual((rc, r["state"], r["error"]), (3, "failed", "cpu_cap_exceeded"))
+
 
 class ProposeTest(unittest.TestCase):
     """propose.parameter_set (research Phase 4a stage 7a): validated with params.py, backed by this session's

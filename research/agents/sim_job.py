@@ -90,6 +90,12 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
         return 1
     done.set()
     p, c = spent_hours(base_c, base_p)
+    if max(p, c or 0.0) > a.max_cpu_hours:
+        # the watchdog looks every `poll` seconds: a run that ends between two looks is checked here, and a
+        # result over its cap is never reported as done (E48, 22 Nov 2026: 0.001 against 0.0002 was "done")
+        emit({"state": "failed", "error": "cpu_cap_exceeded", "cpu_hours": round(max(p, c or 0.0), 6),
+              "cpu_hours_cgroup": None if c is None else round(c, 6)})
+        return 3
     rows = []
     try:
         with open(os.path.join(a.out, "results.jsonl"), encoding="utf-8") as f:

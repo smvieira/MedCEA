@@ -10,7 +10,7 @@ Gate for sim.run, on the recomputed estimate E (CPU-hours) and the session's rem
   2 <= E <= 24                gate_pending is traced and the call answers "waiting for the supervisor";
                               the same sim.run (or sim.status) reads /gates/<gid>: approved -> start,
                               denied -> refused.
-cap_h = min(1.25 E + calibration, remaining, approved_cap_h of the decision); the runner gets the cap
+cap_h = min(max(1.25 E + calibration, CAP_FLOOR_H), remaining, approved_cap_h of the decision); the runner gets the cap
 and deadline_s = max(DEADLINE_FLOOR_S, ceil(cap_h x 3600 / pool x 1.5)). A handle (cid) is bound to its session: another
 session's cid is "no such campaign". The runner is an interface (stage 6 supplies the Job runner):
   start(cid, spec, cap_h, deadline_s)            -> None
@@ -55,6 +55,9 @@ def _load_params(repo_root):
 # campaign's deadline from its cap alone was 1 s, and E48's first run failed "deadline" (22 Nov 2026).
 # The CPU cap is enforced by sim_job's watchdog against the cgroup's CPU time, not by this wall clock.
 DEADLINE_FLOOR_S = 300
+# The Job's own process start (the interpreter, the harness imports) costs CPU the estimate does not
+# count: a 3-run campaign estimated 0.0002 CPU-hours and spent 0.001 (E48). The cap never goes below this.
+CAP_FLOOR_H = 0.01
 
 class LocalEstimator:
     """In-process estimate (R7) for PID / bang-bang / Q-learning specs with research/harness/campaign.py;
@@ -174,7 +177,7 @@ class SimServer:
         remaining = self._remaining(ctx)
         if e + cal > remaining:
             raise ToolRefused("estimate %.3g CPU-hours (with calibration) exceeds the session's remaining %.3g" % (e + cal, remaining))
-        cap = min(1.25 * e + cal, remaining)
+        cap = min(max(1.25 * e + cal, CAP_FLOOR_H), remaining)
         c = {"sid": ctx["sid"], "spec": spec, "spec_sha": digest, "est": est, "cap_h": cap, "state": "pending"}
         with self.lock:
             self.camps[cid] = c
