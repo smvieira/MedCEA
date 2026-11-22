@@ -274,7 +274,9 @@ for line in sys.stdin:
     meta, path = line.rstrip("\n").split("\t", 1)
     files[path] = meta.split()[2]
 print(json.dumps({"commit": sys.argv[1], "dirty": False, "files": files}, sort_keys=True, indent=1))' "$RS_CODE_COMMIT" > "$_BD/stage/BUNDLE.json"
-tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$_BD/stage" . | gzip -n > "$_BD/code.tgz"
+# the top-level names, never ".": a "./" member makes a non-root tar chmod the emptyDir it unpacks into
+mapfile -t _top < <(cd "$_BD/stage" && LC_ALL=C ls -A)
+tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$_BD/stage" "${_top[@]}" | gzip -n > "$_BD/code.tgz"
 RS_BUNDLE_SHA256="$(sha256sum "$_BD/code.tgz" | cut -d' ' -f1)"
 [[ "$(stat -c %s "$_BD/code.tgz")" -le 900000 ]] || die "the code bundle is over 900000 bytes: a ConfigMap holds 1 MiB"
 for _ns in "$GW_NS" "$AG_NS"; do
