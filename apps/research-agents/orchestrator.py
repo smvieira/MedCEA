@@ -69,7 +69,7 @@ class Http:
 
 class Orchestrator:
     def __init__(self, cfg, kube, person_http, server_http, iam=None, replayer=None, clock=time.time):
-        """cfg: image, code_commit, session_url, mcp_sim_url, mcp_lake_url, profiles_dir, pool.
+        """cfg: image, code_commit, session_url, mcp_sim_url, mcp_lake_url, profiles_dir, pool, model_gateway_url (empty: no local model).
         person_http -> research-session 8100 (person routes, /mint), server_http -> 8102."""
         self.cfg, self.kube, self.ph, self.sh, self.iam = cfg, kube, person_http, server_http, iam
         self.replayer, self.clock = replayer, clock
@@ -98,6 +98,9 @@ class Orchestrator:
         if got is None:
             return 400, {"error": "unknown profile"}
         prof, psha = got
+        if prof["backend"] == "local" and not self.cfg.get("model_gateway_url"):
+            return 409, {"error": "this profile uses the local model, which is not available: no model gateway is configured "
+                                  "(RESEARCH_LOCAL_MODEL is not true, or ./apps/research-agents/deploy.sh has not run since the model was deployed)"}
         budget = {k: prof["caps"][k] for k in BUDGET_KEYS if k in prof["caps"]}
         want = body.get("budget") or {}
         if not isinstance(want, dict):
@@ -107,7 +110,7 @@ class Orchestrator:
                 return 400, {"error": "budget.%s must be a positive number within the profile's cap" % k}
             budget[k] = v
         mint = {"profile": prof["name"], "profile_sha256": psha, "tools": list(prof["tools"]), "budget": budget,
-                "backend": "scripted", "code_commit": self.cfg["code_commit"]}
+                "backend": prof["backend"], "code_commit": self.cfg["code_commit"]}
         if "ttl_s" in body:
             mint["ttl_s"] = body["ttl_s"]
         st, m = self.ph.request("POST", "/mint", mint, {"X-Forwarded-Access-Token": token})
@@ -350,7 +353,8 @@ def main():
            "session_url": os.environ["RS_SESSION_AGENT_URL"], "mcp_sim_url": os.environ["RS_MCP_SIM_URL"],
            "mcp_lake_url": os.environ["RS_MCP_LAKE_URL"], "profiles_dir": os.environ.get(
                "RS_PROFILES_DIR", os.path.join(ROOT, "research", "agents", "profiles")),
-           "pool": int(os.environ.get("RS_SIM_POOL", "2"))}
+           "pool": int(os.environ.get("RS_SIM_POOL", "2")),
+           "model_gateway_url": os.environ.get("RS_MODEL_GATEWAY_URL", "")}
     orch = Orchestrator(cfg, KubeClient(os.environ["RS_AGENTS_NAMESPACE"]),
                         Http(os.environ["RS_SESSION_PERSON_URL"]), Http(os.environ["RS_SESSION_SERVER_URL"]), iam)
 

@@ -10,12 +10,17 @@ import time
 import yaml
 
 from .context import Context, canonical, sha, wrap_result
-from .model import ScriptedModel
+from .model import ModelError, ScriptedModel
 
 TEXT_MAX = 2000
 ARGS_MAX = 2000
 RECORD_MAX = 6000
+LOCAL_CONTEXT_MAX = 4096     # owner decision of 21 Nov 2026: a local session is about 4k tokens of context
+BACKENDS = ("scripted", "local")
 CAPS = ("turns", "prompt_tokens", "output_tokens", "cpu_hours", "wall_h", "turn_timeout_s", "context_tokens")
+
+
+MALFORMED = "invalid_call"
 
 
 class ToolError(Exception):
@@ -25,14 +30,20 @@ class ToolError(Exception):
 def load_profile(path):
     with open(path, encoding="utf-8") as f:
         p = yaml.safe_load(f)
-    if not isinstance(p, dict) or p.get("backend") != "scripted":
-        raise ValueError("profile: a mapping with backend scripted is required")
+    if not isinstance(p, dict) or p.get("backend") not in BACKENDS:
+        raise ValueError("profile: a mapping with backend scripted or local is required")
     caps = p.get("caps") or {}
     for k in CAPS:
         if not isinstance(caps.get(k), (int, float)) or isinstance(caps.get(k), bool) or caps[k] <= 0:
             raise ValueError("profile: caps.%s must be a positive number" % k)
     if not p.get("tools") or not all(isinstance(t, str) for t in p["tools"]):
         raise ValueError("profile: tools must be a list of names")
+    if p["backend"] == "local" and caps["context_tokens"] > LOCAL_CONTEXT_MAX:
+        raise ValueError("profile: a local session's caps.context_tokens is at most %d" % LOCAL_CONTEXT_MAX)
+    if p["backend"] == "local" and not (isinstance(p.get("task"), str) and 0 < len(p["task"]) <= 2000):
+        raise ValueError("profile: a local profile needs a task (the first user message, at most 2000 characters)")
+    if p["backend"] == "scripted" and not isinstance(p.get("script"), list):
+        raise ValueError("profile: a scripted profile needs a script")
     return p
 
 
@@ -55,8 +66,14 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
     caps = profile["caps"]
     allowed = list(profile["tools"])
     listed = {t["name"]: t for t in tools.list_tools()}
+    local = profile.get("backend") == "local"
     spec = [{"name": n, "description": listed[n].get("description", "")} for n in allowed if n in listed]
+    if local:       # the gateway builds function tools from this: the schema is part of the request (and its sha)
+        for t in spec:
+            t["inputSchema"] = listed[t["name"]].get("inputSchema") or {"type": "object", "properties": {}}
     ctx = Context(standing, skill, spec)
+    if profile.get("task"):     # a local model needs a first user message; part of the request, so of its sha
+        ctx.add("user", profile["task"])
     ids = {"profile_sha256": sha(canonical(profile)), "standing_sha256": sha(standing),
            "skill_sha256": sha(skill), "tools_sha256": sha(canonical(spec))}
     backend = backend_id or model.id
@@ -87,18 +104,30 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
             return stop("context_full", turn)
         turn += 1
         req = ctx.request()
-        trace.post("turn_request", dict(ids, turn=turn, backend=backend, est_prompt_tokens=est,
-                                        request_sha256=sha(ctx.request_bytes())))
+        if not local:       # a local backend's turn_request/turn_response are the model-gateway's records
+            trace.post("turn_request", dict(ids, turn=turn, backend=backend, est_prompt_tokens=est,
+                                            request_sha256=sha(ctx.request_bytes())))
         t0 = clock()
-        resp = model.respond(req)
+        try:
+            resp = model.respond(req)
+        except ModelError as e:
+            return stop(e.reason, turn)
         if clock() - t0 > caps["turn_timeout_s"]:
             return stop("turn_timeout", turn)
+        usage, bad = resp.get("usage"), resp.get("tool_error")
         resp = {"text": str(resp.get("text", ""))[:TEXT_MAX], "tool": resp.get("tool")}
+        if bad and not resp["tool"]:    # a call the model wrote that could not be read: a refused call, never an exception
+            resp["tool"] = {"name": MALFORMED, "args": {}}
         out_tokens = (len(canonical(resp)) + 3) // 4
-        spent["prompt_tokens"] += est
-        spent["output_tokens"] += out_tokens
-        trace.post("turn_response", {"turn": turn, "response": resp, "response_sha256": sha(canonical(resp)),
-                                     "usage": {"prompt_tokens": est, "output_tokens": out_tokens, "estimated": True}})
+        if local and isinstance(usage, dict):
+            spent["prompt_tokens"] += int(usage.get("prompt_tokens", est))
+            spent["output_tokens"] += int(usage.get("output_tokens", out_tokens))
+        else:
+            spent["prompt_tokens"] += est
+            spent["output_tokens"] += out_tokens
+        if not local:
+            trace.post("turn_response", {"turn": turn, "response": resp, "response_sha256": sha(canonical(resp)),
+                                         "usage": {"prompt_tokens": est, "output_tokens": out_tokens, "estimated": True}})
         ctx.add("assistant", resp["text"], tool_call=resp["tool"])
         why = over()
         if why:
@@ -111,7 +140,9 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
         trace.post("tool_call", dict({"turn": turn, "call": call, "tool": name, "args_sha256": sha(ab)},
                                      **({"args": args} if len(ab) <= ARGS_MAX else {})))
         err = False
-        if name not in listed or name not in allowed:
+        if name == MALFORMED:
+            result, err = {"error": "malformed tool call: %s" % str(bad)[:150]}, True
+        elif name not in listed or name not in allowed:
             result, err = {"error": "tool not allowed"}, True
         else:
             try:
@@ -139,10 +170,14 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
             return stop(why, turn)
 
 
-def run_profile(path, standing_path, skill_path, tools, trace, **kw):
+def run_profile(path, standing_path, skill_path, tools, trace, model=None, **kw):
     p = load_profile(path)
     with open(standing_path, encoding="utf-8") as f:
         standing = f.read()
     with open(skill_path, encoding="utf-8") as f:
         skill = f.read()
-    return run(p, standing, skill, ScriptedModel(p["script"]), tools, trace, **kw)
+    if model is None:
+        if p["backend"] != "scripted":
+            raise ValueError("a local profile needs a model (GatewayModel)")
+        model = ScriptedModel(p["script"])
+    return run(p, standing, skill, model, tools, trace, **kw)

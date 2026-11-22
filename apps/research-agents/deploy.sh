@@ -130,6 +130,10 @@ $KUBECTL get statefulset research-postgresql -n "$RESEARCH_NAMESPACE" >/dev/null
     || die "RS_SESSION_DB_PASS is empty or holds characters outside [A-Za-z0-9._~-] in config.env: run ./deploy-infra.sh, then ./apps/research/deploy.sh"
 RS_SIM_POOL="${RS_SIM_POOL:-2}"
 [[ "$RS_SIM_POOL" =~ ^[1-9][0-9]?$ ]] || die "RS_SIM_POOL='$RS_SIM_POOL' is not a small positive integer"
+# The local model's gateway (apps/research-model, 4b): configured only while RESEARCH_LOCAL_MODEL is true; empty
+# makes the orchestrator refuse a profile with backend local, and the agent Jobs carry no gateway address.
+RS_MODEL_GATEWAY_URL=""
+[[ "${RESEARCH_LOCAL_MODEL:-false}" == "true" ]] && RS_MODEL_GATEWAY_URL="http://model-gateway.${GW_NS}.svc.cluster.local:8120"
 
 # Never an open pod: both zones' compiled policies live and equal to the compile.
 for _z in research-gw research-agents; do
@@ -300,7 +304,7 @@ $KUBECTL rollout status deployment/research-session -n "$GW_NS" --timeout=5m \
 
 log "research-orchestrator, mcp-sim and mcp-lake in $AG_NS..."
 render "$APP_DIR/k8s/agents.yaml" RESEARCH_AGENTS_NAMESPACE RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE \
-    RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL | $KUBECTL apply -f -
+    RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL RS_MODEL_GATEWAY_URL | $KUBECTL apply -f -
 for _d in research-orchestrator mcp-sim mcp-lake; do
     $KUBECTL rollout status "deployment/$_d" -n "$AG_NS" --timeout=5m \
         || die "$_d did not become ready: microk8s kubectl -n $AG_NS logs deployment/$_d"

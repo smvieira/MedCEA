@@ -130,6 +130,61 @@ class Manifest(unittest.TestCase):
         self.assertTrue([m for m in self.main["volumeMounts"] if m["mountPath"] == "/slots"])
 
 
+class GatewayManifest(unittest.TestCase):
+    """k8s/gateway.yaml (stage 2): the model gateway's pod and Service."""
+    def render(self):
+        import yaml
+        r = subprocess.run(["bash", "-c", 'source infra/lib-render.sh; render apps/research-model/k8s/gateway.yaml '
+                            'RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256'],
+                           cwd=REPO, capture_output=True, text=True,
+                           env=dict(clean_env(), RESEARCH_GW_NAMESPACE=GW, GATEWAY_IMAGE=PINS["python_image"], MODEL_ALIAS=ALIAS,
+                                    MODEL_SHA256=SHA, LLM_CTX="4096", GATEWAY_CODE_SHA256="ab" * 32))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("${", r.stdout)
+        return [d for d in yaml.safe_load_all(r.stdout) if d]
+
+    def test_render_list_is_complete(self):
+        head = [l for l in read("apps/research-model/k8s/gateway.yaml").splitlines() if l.startswith("# Render list:")][0]
+        listed = set(head.split(":", 1)[1].split())
+        used = set(re.findall(r"\$\{([A-Z0-9_]+)\}", read("apps/research-model/k8s/gateway.yaml")))
+        self.assertEqual(listed, used)
+        self.assertIn("RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256", read("apps/research-model/deploy.sh"))
+
+    def test_pod(self):
+        dep, svc = self.render()
+        spec = dep["spec"]["template"]["spec"]
+        c = spec["containers"][0]
+        self.assertEqual(dep["metadata"]["namespace"], GW)
+        self.assertRegex(c["image"], r"@sha256:[0-9a-f]{64}$")
+        self.assertEqual(c["image"], PINS["python_image"])
+        self.assertEqual(spec["priorityClassName"], "medcea-research-low")
+        self.assertIs(spec["automountServiceAccountToken"], False)
+        self.assertIs(spec["enableServiceLinks"], False)
+        self.assertEqual(spec["securityContext"]["runAsUser"], 65534)
+        self.assertTrue(spec["securityContext"]["runAsNonRoot"])
+        self.assertIs(c["securityContext"]["readOnlyRootFilesystem"], True)
+        self.assertEqual(c["securityContext"]["capabilities"], {"drop": ["ALL"]})
+        self.assertIn("memory", c["resources"]["limits"])
+        self.assertEqual(dep["spec"]["template"]["metadata"]["annotations"]["medcea/code-sha256"], "ab" * 32)
+        env = {e["name"]: e.get("value") for e in c["env"]}
+        self.assertEqual(env["RS_SESSION_SERVER_URL"], "http://research-session.%s.svc.cluster.local:8102" % GW)
+        self.assertEqual(env["RS_LLM_URL"], "http://research-llm.%s.svc.cluster.local:8080" % GW)
+        self.assertEqual(env["MODEL_ALIAS"], ALIAS)
+
+    def test_no_secret_no_hostpath_no_pv(self):
+        docs = self.render()
+        text = json.dumps(docs)
+        for bad in ("secretKeyRef", "\"secret\"", "hostPath", "PersistentVolume", "NodePort", "LoadBalancer", "hostNetwork"):
+            self.assertNotIn(bad, text)
+        self.assertEqual([v["name"] for v in docs[0]["spec"]["template"]["spec"]["volumes"]], ["code"])
+
+    def test_service_is_clusterip_8120(self):
+        svc = self.render()[1]
+        self.assertEqual(svc["spec"]["type"], "ClusterIP")
+        self.assertEqual(svc["spec"]["ports"][0]["port"], 8120)
+        self.assertEqual(svc["spec"]["selector"], {"app": "model-gateway"})
+
+
 class Serve(unittest.TestCase):
     def run_serve(self, help_text):
         d = __import__("tempfile").mkdtemp()
@@ -187,6 +242,8 @@ class Tree(unittest.TestCase):
         self.root = scratch_repo("medcea-rmodel-")
         r = self.root
         shutil.copytree(APP, os.path.join(r, "apps", "research-model"), ignore=shutil.ignore_patterns("__pycache__"))
+        os.makedirs(os.path.join(r, "apps", "research-agents"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "apps", "research-agents", "mcp_common.py"), os.path.join(r, "apps", "research-agents"))
         self.bin = os.path.join(r, "bin")
         self.stub = os.path.join(r, "stub")
         self.models = os.path.join(r, "models")
@@ -328,10 +385,15 @@ class Deploy(Tree):
         kinds = [(d["kind"], d["metadata"]["name"]) for d in self.applies()]
         self.assertEqual(kinds, [("ConfigMap", "research-llm-script"), ("PersistentVolume", GW + "-research-models"),
                                  ("PersistentVolumeClaim", "research-models"), ("Deployment", "research-llm"),
-                                 ("Service", "research-llm")])
+                                 ("Service", "research-llm"), ("ConfigMap", "model-gateway-code"),
+                                 ("Deployment", "model-gateway"), ("Service", "model-gateway")])
+        gcm = [d for d in self.applies() if d["metadata"]["name"] == "model-gateway-code"][0]
+        self.assertEqual(gcm["data"]["gateway.py"], read("apps/research-model/gateway.py"))
+        self.assertEqual(gcm["data"]["mcp_common.py"], read("apps/research-agents/mcp_common.py"))
+        self.assertIn("kubectl rollout status deployment/model-gateway -n %s --timeout=5m" % GW, calls)
         cm = self.applies()[0]
         self.assertEqual(cm["data"]["llm-serve.sh"], read("apps/research-model/container/llm-serve.sh"))
-        dep = [d for d in self.applies() if d["kind"] == "Deployment"][0]
+        dep = [d for d in self.applies() if d["kind"] == "Deployment" and d["metadata"]["name"] == "research-llm"][0]
         main = dep["spec"]["template"]["spec"]["containers"][0]
         env = {e["name"]: e.get("value") for e in main["env"]}
         self.assertEqual((env["CTX"], env["ALIAS"], env["LLM_MODEL_SHA256"]), ("4096", ALIAS, SHA))
@@ -368,6 +430,9 @@ class Uninstall(Tree):
         self.assertEqual(r.returncode, 0, r.out)
         text = "\n".join(calls)
         self.assertIn("kubectl delete deployment,service research-llm -n %s" % GW, text)
+        self.assertIn("kubectl delete deployment,service model-gateway -n %s" % GW, text)
+        self.assertIn("kubectl delete configmap model-gateway-code -n %s" % GW, text)
+        self.assertLess(text.index("delete deployment,service model-gateway"), text.index("delete deployment,service research-llm"))
         self.assertIn("kubectl delete pvc research-models -n %s" % GW, text)
         self.assertIn("kubectl delete pv %s-research-models" % GW, text)
         self.assertNotIn("delete namespace", text)

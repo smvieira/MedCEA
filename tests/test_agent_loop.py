@@ -191,5 +191,169 @@ class Scripted(unittest.TestCase):
                                                  clock=lambda: now[0])
 
 
+LOCAL = os.path.join(A, "profiles", "compare_controllers_local.yaml")
+
+
+class GatewayStub:
+    """Stands in for GatewayModel: records the requests it was asked, answers from a list, and (like the
+    real gateway) writes the turn_request/turn_response of a local session itself, as actor model-gateway."""
+    def __init__(self, answers, events=None):
+        self.answers, self.requests, self.events = list(answers), [], events if events is not None else []
+        self.id = "gateway"
+
+    def respond(self, request):
+        self.requests.append(request)
+        a = self.answers.pop(0)
+        if isinstance(a, Exception):
+            self.events.append({"actor": "model-gateway", "event": "turn_request", "payload": {
+                "turn": len(self.requests), "request_sha256": context.sha(context.canonical(request))}})
+            self.events.append({"actor": "model-gateway", "event": "turn_response",
+                                "payload": {"turn": len(self.requests), "error": a.reason}})
+            raise a
+        self.events.append({"actor": "model-gateway", "event": "turn_request", "payload": {
+            "turn": len(self.requests), "request_sha256": context.sha(context.canonical(request))}})
+        resp = {k: a.get(k) for k in ("text", "tool", "tool_error") if a.get(k) is not None or k != "tool_error"}
+        usage = a.get("usage", {"prompt_tokens": 100, "output_tokens": 10})
+        self.events.append({"actor": "model-gateway", "event": "turn_response", "payload": {
+            "turn": len(self.requests), "response": resp, "usage": usage}})
+        return dict(resp, usage=usage)
+
+
+def go_local(answers, profile=None, tools=None):
+    p = profile or loop.load_profile(LOCAL)
+    s = FakeSession()
+    t = TraceClient(s, "S" * 22)
+    t.claim("c")
+    with open(os.path.join(A, "skills", p["skill"] + ".md"), encoding="utf-8") as f:
+        skill = f.read()
+    gw = GatewayStub(answers, [])
+    reason = loop.run(p, STANDING, skill, gw, tools or FakeTools(), t)
+    return reason, s.events, p, gw, skill
+
+
+class Local(unittest.TestCase):
+    def test_the_profile(self):
+        p = loop.load_profile(LOCAL)
+        self.assertEqual(p["backend"], "local")
+        self.assertLessEqual(p["caps"]["context_tokens"], 4096)
+        self.assertEqual((p["caps"]["turns"], p["caps"]["wall_h"]), (8, 2))
+        sc = loop.load_profile(os.path.join(A, "profiles", "compare_controllers.yaml"))
+        self.assertEqual(p["tools"], sc["tools"])
+        self.assertEqual(p["caps"]["cpu_hours"], sc["caps"]["cpu_hours"])
+
+    def test_profile_validation(self):
+        import tempfile
+        import yaml
+        p = loop.load_profile(LOCAL)
+
+        def bad(**kw):
+            q = copy.deepcopy(p)
+            for k, v in kw.items():
+                if k == "context":
+                    q["caps"]["context_tokens"] = v
+                elif v is None:
+                    q.pop(k)
+                else:
+                    q[k] = v
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+                yaml.safe_dump(q, f)
+            with self.assertRaises(ValueError):
+                loop.load_profile(f.name)
+            os.unlink(f.name)
+        bad(context=4097)
+        bad(task=None)
+        bad(task="")
+        bad(backend="remote")
+
+    def test_the_loop_does_not_post_the_models_records(self):
+        reason, ev, p, gw, _ = go_local([{"text": "Plan.", "tool": {"name": "sim.run", "args": {}}}, {"text": "The plan is complete."}])
+        names = [e["event"] for e in ev]
+        self.assertEqual(reason, "finished")
+        self.assertNotIn("turn_request", names)
+        self.assertNotIn("turn_response", names)
+        self.assertEqual(names, ["tool_call", "tool_result", "stop"])
+        self.assertEqual([e["event"] for e in gw.events], ["turn_request", "turn_response"] * 2)
+
+    def test_the_request_carries_the_task_and_the_tool_schemas(self):
+        _, _, p, gw, _ = go_local([{"text": "done"}])
+        r = gw.requests[0]
+        self.assertEqual(r["messages"][:1], [{"role": "user", "content": p["task"]}])
+        self.assertTrue(all(t["inputSchema"] == {"type": "object", "properties": {}} for t in r["tools"]))
+        # a scripted request has no schemas and no task (its bytes are unchanged)
+        sess = FakeSession()
+        t = TraceClient(sess, "S" * 22)
+        t.claim("c")
+        seen = []
+
+        class M(ScriptedModel):
+            def respond(self, request):
+                seen.append(request)
+                return super().respond(request)
+        sp = loop.load_profile(PROFILE)
+        loop.run(sp, STANDING, SKILL, M(sp["script"]), FakeTools(), t)
+        self.assertNotIn("inputSchema", seen[0]["tools"][0])
+        self.assertEqual(seen[0]["messages"][:1], [{"role": "assistant", "content": seen[0]["messages"][0]["content"], "tool_call": seen[0]["messages"][0]["tool_call"]}])
+
+    def test_usage_is_the_models_own(self):
+        a = {"text": "a", "tool": {"name": "sim.run", "args": {}}, "usage": {"prompt_tokens": 20000, "output_tokens": 5}}
+        reason, ev, p, gw, _ = go_local([a, a, a])
+        self.assertEqual(reason, "prompt_tokens")       # 2 x 20000 is over the profile's 32000, the estimate (< 4000 a turn) is not
+        self.assertEqual(ev[-1]["payload"]["prompt_tokens"], 40000)
+        self.assertEqual(len(gw.requests), 2)
+
+    def test_a_malformed_call_is_a_refused_call(self):
+        answers = [{"text": "I will call it.", "tool": None, "tool_error": "the arguments are not a JSON object"},
+                   {"text": "done"}]
+        tools = FakeTools()
+        reason, ev, p, gw, _ = go_local(answers, tools=tools)
+        self.assertEqual(reason, "finished")
+        self.assertEqual(tools.calls, [])
+        res = [e for e in ev if e["event"] == "tool_result"][0]["payload"]
+        self.assertTrue(res["error"])
+        self.assertIn("malformed tool call: the arguments are not a JSON object", res["result"])
+        self.assertEqual([e["payload"]["tool"] for e in ev if e["event"] == "tool_call"], [loop.MALFORMED])
+        # the model sees the refusal and tries again
+        self.assertEqual(gw.requests[1]["messages"][2]["role"], "tool")
+
+    def test_a_model_error_stops_with_its_reason(self):
+        from research.agents.model import ModelError
+        for reason in ("context_full", "model_error", "model_busy"):
+            r, ev, *_ = go_local([ModelError(reason)])
+            self.assertEqual(r, reason)
+            self.assertEqual([e["event"] for e in ev], ["stop"])
+
+    def test_turns_cap(self):
+        answers = [{"text": "x", "tool": {"name": "lake.query", "args": {}}}] * 20
+        r, ev, *_ = go_local(answers)
+        self.assertEqual(r, "turns")
+
+    def test_the_gateway_model(self):
+        from research.agents.model import GatewayModel, ModelError
+        calls, naps = [], []
+        answers = [(429, {"error": "busy"}), (429, {}), (200, {"text": "hi", "tool": None, "usage": {}})]
+
+        def post(url, token, body, timeout):
+            calls.append((url, token, body))
+            return answers.pop(0)
+        req = {"system": "s", "tools": [], "messages": [{"role": "user", "content": "t"}, {"role": "assistant", "content": "a"}]}
+        m = GatewayModel("http://gw:8120/", "TOK", "SID", post=post, sleep=naps.append, clock=lambda: 0)
+        self.assertEqual(m.respond(req)["text"], "hi")
+        self.assertEqual(calls[0][0], "http://gw:8120/v1/turn")
+        self.assertEqual((calls[0][1], calls[0][2]["sid"], calls[0][2]["turn"]), ("TOK", "SID", 2))
+        self.assertEqual(naps, [2, 4])
+        for st, reason in ((413, "context_full"), (401, "model_refused"), (403, "model_refused"), (502, "model_error"), (0, "model_error")):
+            with self.assertRaises(ModelError) as e:
+                GatewayModel("http://g", "T", "S", post=lambda *a, st=st: (st, {}), sleep=naps.append).respond(req)
+            self.assertEqual(e.exception.reason, reason)
+        # busy for longer than the wait: model_busy; the wait is the loop's wall time (the clock moves with the naps)
+        t = [0]
+        with self.assertRaises(ModelError) as e:
+            GatewayModel("http://g", "T", "S", post=lambda *a: (429, {}), sleep=lambda s: t.__setitem__(0, t[0] + s),
+                         clock=lambda: t[0], busy_wait_s=60).respond(req)
+        self.assertEqual(e.exception.reason, "model_busy")
+        self.assertGreaterEqual(t[0], 60)
+
+
+
 if __name__ == "__main__":
     unittest.main()

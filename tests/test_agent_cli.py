@@ -235,6 +235,36 @@ class RunAgentTest(unittest.TestCase):
         self.assertEqual(sess.events[-1], "stop")
         self.assertIn("turn_request", sess.events)
 
+    def test_a_local_profile_goes_through_the_gateway(self):
+        env = dict(self.ENV, MEDCEA_PROFILE="compare_controllers_local", MEDCEA_MODEL_GATEWAY="http://model-gateway:8120")
+        asked = []
+        answers = [{"text": "Plan.", "tool": {"name": "sim.run", "args": {}}, "usage": {"prompt_tokens": 10, "output_tokens": 5}},
+                   {"text": "The plan is complete.", "tool": None}]
+
+        def gw(url, token, body, timeout):
+            asked.append((url, token, body["sid"], body["turn"], sorted(body["request"]), body["request"]["tools"][0]["inputSchema"]))
+            return 200, answers.pop(0)
+
+        class Mcp:
+            def post(self, url, token, msg):
+                if msg["method"] == "tools/list":
+                    names = ["sim.estimate", "sim.run"] if "sim" in url else ["lake.snapshots"]
+                    return 200, {"result": {"tools": [{"name": n, "description": "", "inputSchema": {"type": "object", "properties": {"x": {"type": "integer"}}}} for n in names]}}
+                return 200, FakeMcp.ok({"state": "done", "cpu_hours": 0})
+        sess = FakeSessionAgentPort()
+        rc = run_agent.main(env, transport=sess, tool_transport=Mcp(), sleep=lambda s: None, gateway_post=gw)
+        self.assertEqual(rc, 0)
+        self.assertEqual([a[:4] for a in asked], [("http://model-gateway:8120/v1/turn", "tok", "S" * 22, 1),
+                                                 ("http://model-gateway:8120/v1/turn", "tok", "S" * 22, 2)])
+        self.assertEqual(asked[0][5], {"type": "object", "properties": {"x": {"type": "integer"}}})
+        # the agent wrote no turn_request/turn_response: the gateway does
+        self.assertEqual(sess.events, ["tool_call", "tool_result", "stop"])
+
+    def test_a_local_profile_without_a_gateway_exits_2(self):
+        sess = FakeSessionAgentPort()
+        env = dict(self.ENV, MEDCEA_PROFILE="compare_controllers_local")
+        self.assertEqual(run_agent.main(env, transport=sess), 2)
+
     def test_refused_claim_exits_1(self):
         sess = FakeSessionAgentPort()
         rc = run_agent.main(dict(self.ENV, MEDCEA_CLAIM="x" * 43), transport=sess)

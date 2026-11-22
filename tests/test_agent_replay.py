@@ -94,5 +94,103 @@ class Replay(unittest.TestCase):
         self.assertFalse(v["ok"])
 
 
+# ── a local session: the model's records are the gateway's (actor model-gateway), the agent's are the rest
+from test_agent_loop import GatewayStub, LOCAL  # noqa: E402
+from research.agents.model import ModelError  # noqa: E402
+
+
+def rec_local(answers):
+    from test_agent_loop import go_local
+    _, ev, p, gw, skill = go_local(answers)
+    # interleave as the session would have: the gateway's pair comes before the agent's events of that turn
+    out, g = [], list(gw.events)
+    pending = []
+    for e in ev:
+        out.append(e)
+    merged, gi = [], 0
+    turns = 0
+    for e in ev:
+        if e["event"] == "tool_call":
+            merged += g[gi:gi + 2]
+            gi += 2
+        merged.append(e)
+    merged += g[gi:]
+    # the last turn has no tool call: its pair precedes the stop
+    stop = [e for e in merged if e["event"] == "stop"]
+    merged = [e for e in merged if e["event"] != "stop"] + stop
+    return merged, p, skill
+
+
+LOCAL_ANSWERS = [{"text": "Plan.", "tool": {"name": "sim.run", "args": {"spec": {}}}}, {"text": "The plan is complete."}]
+
+
+class ReplayLocal(unittest.TestCase):
+    def setUp(self):
+        self.ev, self.p, self.skill = rec_local(LOCAL_ANSWERS)
+
+    def run_replay(self, ev=None, p=None):
+        return replay(ev or self.ev, p or self.p, STANDING, self.skill, LISTING)
+
+    def test_it_reproduces_from_the_gateways_records(self):
+        self.assertEqual([e["actor"] for e in self.ev if e["event"] == "turn_response"], ["model-gateway"] * 2)
+        v = self.run_replay()
+        self.assertEqual(v["ok"], True, v)
+
+    def test_a_changed_request_is_a_divergence_at_the_gateways_sha(self):
+        ev = copy.deepcopy(self.ev)
+        [e for e in ev if e["event"] == "turn_request"][1]["payload"]["request_sha256"] = "0" * 64
+        v = self.run_replay(ev)
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["first_mismatch"]["field"], "request_sha256")
+
+    def test_a_changed_response_is_a_divergence(self):
+        ev = copy.deepcopy(self.ev)
+        [e for e in ev if e["event"] == "turn_response"][0]["payload"]["response"]["tool"]["args"] = {"spec": {"x": 1}}
+        self.assertFalse(self.run_replay(ev)["ok"])
+
+    def test_usage_is_replayed(self):
+        ev = copy.deepcopy(self.ev)
+        [e for e in ev if e["event"] == "turn_response"][0]["payload"]["usage"] = {"prompt_tokens": 99999, "output_tokens": 1}
+        # the recorded stop says 110 prompt tokens were spent: a different usage is a different stop payload
+        v = self.run_replay(ev)
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["first_mismatch"]["event"], "stop")
+
+    def test_a_model_error_stop_is_reproduced(self):
+        from test_agent_loop import go_local
+        _, ev, p, gw, skill = go_local([{"text": "a", "tool": {"name": "sim.run", "args": {}}}, ModelError("context_full")])
+        merged = []
+        g = list(gw.events)
+        for e in ev:
+            if e["event"] == "tool_call":
+                merged += g[:2]
+                g = g[2:]
+            if e["event"] == "stop":
+                merged += g
+            merged.append(e)
+        v = replay(merged, p, STANDING, skill, LISTING)
+        self.assertTrue(v["ok"], v)
+        self.assertEqual(merged[-1]["payload"]["reason"], "context_full")
+
+    def test_a_malformed_call_replays_without_the_tools(self):
+        from test_agent_loop import go_local
+        _, ev, p, gw, skill = go_local([{"text": "I call it.", "tool": None, "tool_error": "no such tool"},
+                                        {"text": "x", "tool": {"name": "sim.run", "args": {}}}, {"text": "done"}])
+        merged, g = [], list(gw.events)
+        for e in ev:
+            if e["event"] == "tool_call":
+                merged += g[:2]
+                g = g[2:]
+            merged.append(e)
+        merged = [e for e in merged if e["event"] != "stop"] + g + [e for e in ev if e["event"] == "stop"]
+        v = replay(merged, p, STANDING, skill, LISTING)
+        self.assertTrue(v["ok"], v)
+
+    def test_scripted_replay_is_unchanged_by_a_gateway_event(self):
+        ev, p = rec()
+        noise = {"actor": "model-gateway", "event": "turn_request", "payload": {"request_sha256": "0" * 64}}
+        self.assertTrue(replay(ev[:1] + [noise] + ev[1:], p, STANDING, SKILL, LISTING)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -72,6 +72,8 @@ def agent_job(cfg, sid, claim, profile, wall_h):
     env = [("MEDCEA_SID", sid), ("MEDCEA_CLAIM", claim), ("MEDCEA_PROFILE", profile),
            ("MEDCEA_SESSION_URL", cfg["session_url"]), ("MEDCEA_MCP_SIM", cfg["mcp_sim_url"]),
            ("MEDCEA_MCP_LAKE", cfg["mcp_lake_url"]), ("MEDCEA_CODE_COMMIT", cfg["code_commit"])]
+    if cfg.get("model_gateway_url"):
+        env.append(("MEDCEA_MODEL_GATEWAY", cfg["model_gateway_url"]))
     c = {"name": "agent", "image": cfg["image"], "workingDir": cfg.get("code_dir", "/opt/medcea"), "command": ["python3", "-m", "research.agents.run_agent"],
          "env": [{"name": k, "value": v} for k, v in env]}
     return _job(cfg, agent_job_name(sid), {"app": "agent", "medcea/sid-sha": hashlib.sha256(sid.encode()).hexdigest()[:20]},

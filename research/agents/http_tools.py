@@ -52,7 +52,7 @@ class HttpTools:
     def list_tools(self):
         out = []
         for url in self.servers.values():
-            out += [{"name": t["name"], "description": t.get("description", "")} for t in self._rpc(url, "tools/list", {})["tools"]]
+            out += [{"name": t["name"], "description": t.get("description", ""), "inputSchema": t.get("inputSchema")} for t in self._rpc(url, "tools/list", {})["tools"]]
         return out
 
     def _call(self, name, args):

@@ -1,10 +1,22 @@
 """research/agents/model.py (AH.2): one request shape, one response shape
 {text, tool: {name, args} | None}. Backend `scripted` (4a): a rule-based driver that follows a
-script of steps, one per assistant message so far; deterministic, no network. The local
-backend (4b) goes through the gateway and is not here."""
+script of steps, one per assistant message so far; deterministic, no network. Backend `local`
+(4b stage 2): GatewayModel asks the model-gateway (apps/research-model/gateway.py), which writes
+the turn_request/turn_response records itself."""
+import json
 import re
+import time
+import urllib.error
+import urllib.request
 
 from .context import canonical, sha
+
+class ModelError(Exception):
+    """The model could not answer this turn; `reason` becomes the stop reason of the session."""
+    def __init__(self, reason, message=""):
+        super().__init__(message or reason)
+        self.reason = reason
+
 
 _CID = re.compile(r'"cid"\s*:\s*"(c[0-9a-f]{20})"')
 
@@ -49,3 +61,52 @@ class RecordedModel:
     def respond(self, request):
         n = sum(1 for m in request["messages"] if m["role"] == "assistant")
         return self.responses[n]
+
+
+class GatewayModel:
+    """Backend `local`: POST {sid, turn, request} to the model-gateway with the session token (stdlib
+    urllib; the token goes in a header, never in a URL or a log). 429 `busy` (one slot) is retried with
+    a growing pause until `busy_wait_s`; the wait is wall time, counted by the loop's own clock.
+    Anything else that is not 200 raises ModelError: 413 -> context_full, 401/403 -> model_refused,
+    the rest model_error. `post(url, token, body, timeout)` -> (status, object) is injectable."""
+    id = "gateway"
+
+    def __init__(self, url, token, sid, post=None, sleep=time.sleep, clock=time.monotonic,
+                 busy_wait_s=600, timeout=600):
+        self.url, self.token, self.sid = url.rstrip("/") + "/v1/turn", token, sid
+        self.post, self.sleep, self.clock = post or self._post, sleep, clock
+        self.busy_wait_s, self.timeout = busy_wait_s, timeout
+
+    def _post(self, url, token, body, timeout):
+        req = urllib.request.Request(url, json.dumps(body).encode(),
+                                     {"Content-Type": "application/json", "Authorization": "Bearer " + token})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                return e.code, {}
+        except (OSError, ValueError):
+            return 0, {}
+
+    def respond(self, request):
+        turn = sum(1 for m in request["messages"] if m["role"] == "assistant") + 1
+        end, pause = self.clock() + self.busy_wait_s, 2
+        while True:
+            st, obj = self.post(self.url, self.token, {"sid": self.sid, "turn": turn, "request": request}, self.timeout)
+            if st == 429 and self.clock() < end:
+                self.sleep(pause)
+                pause = min(pause * 2, 30)
+                continue
+            break
+        if st == 200 and isinstance(obj, dict) and "text" in obj:
+            return obj
+        if st == 413:
+            raise ModelError("context_full", "the model's context is full")
+        if st in (401, 403):
+            raise ModelError("model_refused", "the model gateway refused the session (%s)" % st)
+        if st == 429:
+            raise ModelError("model_busy", "the model stayed busy")
+        raise ModelError("model_error", "the model gateway answered %s" % st)

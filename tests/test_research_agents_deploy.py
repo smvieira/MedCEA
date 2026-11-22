@@ -596,6 +596,21 @@ class Deploy(Tree):
         self.assertEqual(r.returncode, 0, r.out)
         self.assertFalse([c for c in calls if c.startswith("pip ")])
 
+    def test_the_gateway_address_follows_the_local_model_switch(self):
+        def orch_env():
+            for t in self.applies():
+                for d in docs(t):
+                    if d["kind"] == "Deployment" and d["metadata"]["name"] == "research-orchestrator":
+                        return {e["name"]: e.get("value") for e in d["spec"]["template"]["spec"]["containers"][0]["env"]}
+        r, calls = self.run_script(self.DEPLOY)
+        self.assertEqual(r.returncode, 0, r.out)
+        self.assertEqual(orch_env()["RS_MODEL_GATEWAY_URL"], "")          # no local model: the orchestrator refuses local profiles
+        self.clear_applies()
+        self.write_config(RESEARCH_LOCAL_MODEL="true")
+        r, calls = self.run_script(self.DEPLOY)
+        self.assertEqual(r.returncode, 0, r.out)
+        self.assertEqual(orch_env()["RS_MODEL_GATEWAY_URL"], "http://model-gateway.%s.svc.cluster.local:8120" % GW)
+
     def test_the_bundle(self):
         r, calls = self.run_script(self.DEPLOY)
         self.assertEqual(r.returncode, 0, r.out)

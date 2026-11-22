@@ -6,7 +6,7 @@
 #   ./apps/research-model/deploy.sh          ./deploy-apps.sh --all runs it (it skips unless switched on)
 #   ./apps/research-model/deploy.sh --help
 #
-# Deploys Deployment and Service research-llm into $RESEARCH_GW_NAMESPACE: llama-server on CPU, one slot,
+# Then model-gateway (stage 2; gateway.py, ConfigMap model-gateway-code, k8s/gateway.yaml). Deploys Deployment and Service research-llm into $RESEARCH_GW_NAMESPACE: llama-server on CPU, one slot,
 # greedy, thinking-free instruct model, no secret and no internet. The model file lives in
 # RESEARCH_MODEL_DIR (default /var/lib/<project>/research-models, mode 700 for the deploying account) and
 # reaches the pod as a static read-only PersistentVolume; if it is not there yet, this script fetches it
@@ -156,5 +156,19 @@ render "$APP_DIR/k8s/llm.yaml" RESEARCH_GW_NAMESPACE LLAMA_IMAGE_SERVER MODEL_PV
 $KUBECTL rollout status deployment/research-llm -n "$GW_NS" --timeout=10m \
     || die "research-llm did not become ready: microk8s kubectl -n $GW_NS logs deployment/research-llm (init container: -c verify)"
 
-log "Done: research-llm runs $MODEL_ALIAS in $GW_NS (Service research-llm:8080, admitted only to the pods the policy names)."
+# ── The model gateway (stage 2): the one way a session reaches the model ──────
+GATEWAY_IMAGE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["python_image"])' "$PINS")"
+[[ "$GATEWAY_IMAGE" =~ ^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$ ]] || die "apps/research-model/pins.json has no python image pinned by digest"
+GATEWAY_CODE_SHA256="$(cat "$APP_DIR/gateway.py" "$REPO_ROOT/apps/research-agents/mcp_common.py" | sha256sum | cut -d' ' -f1)"
+log "ConfigMap model-gateway-code and model-gateway in $GW_NS..."
+python3 -c '
+import json, sys
+print(json.dumps({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "model-gateway-code", "namespace": sys.argv[1],
+      "labels": {"app": "model-gateway"}}, "data": {"gateway.py": open(sys.argv[2]).read(), "mcp_common.py": open(sys.argv[3]).read()}}))' \
+    "$GW_NS" "$APP_DIR/gateway.py" "$REPO_ROOT/apps/research-agents/mcp_common.py" | $KUBECTL apply -f - >/dev/null
+render "$APP_DIR/k8s/gateway.yaml" RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 | $KUBECTL apply -f - >/dev/null
+$KUBECTL rollout status deployment/model-gateway -n "$GW_NS" --timeout=5m \
+    || die "model-gateway did not become ready: microk8s kubectl -n $GW_NS logs deployment/model-gateway"
+
+log "Done: research-llm runs $MODEL_ALIAS in $GW_NS (Service research-llm:8080) behind model-gateway (Service :8120), both admitted only to the pods the policy names."
 policy_source_finish "$NAMESPACE" research-model

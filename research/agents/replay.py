@@ -5,12 +5,21 @@ name and args, result digests, checkpoint, stop). Also checks that each recorded
 hashes to its recorded digest and, where a server recorded a tool_result for the same call,
 that both digests agree. Verdict {ok, first_mismatch, events}; the first divergence ends it.
 A stop caused by the clock (wall_h, turn_timeout) is not reproducible by design: the replay
-clock never advances."""
+clock never advances.
+
+A scripted session's turn_request/turn_response are the agent's own events. A LOCAL session (4b stage 2,
+profile backend local) has none from the agent: the model-gateway (actor `model-gateway`, server port)
+records them, so replay takes the model's responses (and usage) from the gateway's turn_response events,
+and checks each rebuilt request's sha256 against the gateway's turn_request of the same turn. A gateway
+turn_response that records an error (context_full, model_error) makes the replayed model raise the same
+ModelError, so the stop reason is reproduced. The agent-side comparison of everything else is unchanged;
+live re-generation is not replay (llama.cpp is not batch-invariant)."""
 import json
 
 from . import loop
 from .context import sha
-from .model import RecordedModel
+from .context import canonical
+from .model import ModelError, RecordedModel
 
 AGENT = ("turn_request", "turn_response", "tool_call", "tool_result", "checkpoint", "proposal", "stop")
 
@@ -34,6 +43,29 @@ class _Sink:
             if r["payload"].get(k) != payload.get(k):
                 raise Divergence(self.i, event, k, r["payload"].get(k), payload.get(k))
         self.i += 1
+
+
+class _GatewayModel:
+    """Replay of a local session: the gateway's recorded responses, after checking the request's sha."""
+    def __init__(self, pairs, sink):
+        self.pairs, self.sink, self.id = pairs, sink, None
+
+    def respond(self, request):
+        n = sum(1 for m in request["messages"] if m["role"] == "assistant")
+        if n >= len(self.pairs):
+            raise Divergence(self.sink.i, "turn_request", "gateway_turn", None, n + 1)
+        rq, rs = self.pairs[n]
+        got = sha(canonical(request))
+        if rq["request_sha256"] != got:
+            raise Divergence(self.sink.i, "turn_request", "request_sha256", rq["request_sha256"], got)
+        if rs is None:
+            raise ModelError("model_error", "no recorded response")
+        if "error" in rs:
+            raise ModelError(rs["error"])
+        out = dict(rs["response"])
+        if "usage" in rs:
+            out["usage"] = rs["usage"]
+        return out
 
 
 class _Tools:
@@ -67,9 +99,20 @@ def replay(events, profile, standing, skill, tool_listing):
             open_call = None
         elif e["event"] == "tool_result" and open_call is not None:
             server[open_call].add(pl.get("result_sha256"))
+    local = profile.get("backend") == "local"
+    gw_pairs = []
+    if local:
+        for e in events:
+            if e.get("actor") != "model-gateway":
+                continue
+            if e["event"] == "turn_request":
+                gw_pairs.append([e["payload"], None])
+            elif e["event"] == "turn_response" and gw_pairs and gw_pairs[-1][1] is None:
+                gw_pairs[-1][1] = e["payload"]
     responses = [r["payload"]["response"] for r in rec if r["event"] == "turn_response"]
-    results = [r["payload"] for r in rec if r["event"] == "tool_result"]
-    for n, r in enumerate(results):
+    # a refused call (not allowed, malformed) never reaches the tools: the replayed loop does not call them either
+    results = [r["payload"] for r in rec if r["event"] == "tool_result" and not _refused(r["payload"])]
+    for r in [r["payload"] for r in rec if r["event"] == "tool_result"]:
         idx = next(i for i, x in enumerate(rec) if x["payload"] is r)
         if r["recorded_complete"] and sha(r["result"]) != r["result_sha256"]:
             return _bad(idx, "tool_result", "result_sha256", r["result_sha256"], sha(r["result"]))
@@ -79,8 +122,8 @@ def replay(events, profile, standing, skill, tool_listing):
     backend = next((r["payload"]["backend"] for r in rec if r["event"] == "turn_request"), None)
     sink = _Sink(rec)
     try:
-        loop.run(profile, standing, skill, RecordedModel(responses), _Tools(tool_listing, results), sink,
-                 clock=lambda: 0.0, backend_id=backend)
+        model = _GatewayModel(gw_pairs, sink) if local else RecordedModel(responses)
+        loop.run(profile, standing, skill, model, _Tools(tool_listing, results), sink, clock=lambda: 0.0, backend_id=backend)
         if sink.i != len(rec):
             raise Divergence(sink.i, rec[sink.i]["event"], "event", rec[sink.i]["event"], None)
     except Divergence as d:
@@ -89,6 +132,13 @@ def replay(events, profile, standing, skill, tool_listing):
         return {"ok": False, "first_mismatch": {"index": sink.i, "event": None, "field": "recorded",
                                                 "recorded": None, "replayed": repr(e)}, "events": sink.i}
     return {"ok": True, "first_mismatch": None, "events": sink.i}
+
+
+def _refused(p):
+    if not p.get("error") or not p.get("recorded_complete"):
+        return False
+    msg = str(json.loads(p["result"]).get("error", ""))
+    return msg == "tool not allowed" or msg.startswith("malformed tool call")
 
 
 def _bad(index, event, field, recorded, replayed):

@@ -1,0 +1,20 @@
+# The same task and tools as compare_controllers, driven by the local model through the model-gateway
+# (4b stage 2). A local session is capped at about 4k tokens of context (owner decision of 21 Nov 2026):
+# the standing text, the tool schemas and every wrapped result must fit, or the session stops with
+# context_full. Thinking is off and sampling is greedy (the gateway fixes both).
+name: compare_controllers_local
+backend: local
+skill: controller_campaign_local
+tools: [sim.estimate, sim.run, sim.status, sim.results, lake.snapshots, lake.summary, lake.catalogue, propose.parameter_set]
+task: >-
+  Compare IF_THEN_ELSE with PID (cycle_time 10.0 and 30.0) on research/harness/scenarios/smoke_air_temperature.yaml,
+  seed 1, clock offset 0. Estimate it, run it, and propose the PID setting that did better, with the campaign as evidence.
+caps:
+  turns: 8
+  prompt_tokens: 32000
+  output_tokens: 3000
+  cpu_hours: 2
+  wall_h: 2
+  turn_timeout_s: 600
+  context_tokens: 4000
+checkpoint_every: 4

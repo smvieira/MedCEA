@@ -104,6 +104,39 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(o.start(WHO, "T", {"profile": "compare_controllers"})[0], 409)
         self.assertEqual(k.jobs, {})
 
+    def test_a_local_profile_is_refused_without_a_gateway(self):
+        o, k, ph, sh = make()
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_local"})
+        self.assertEqual(st, 409)
+        self.assertIn("local model", r["error"])
+        self.assertIn("no model gateway is configured", r["error"])
+        self.assertEqual((ph.calls, k.jobs), ([], {}))       # nothing minted, no Job
+
+    def test_a_local_profile_with_a_gateway(self):
+        gw = "http://model-gateway.medcea-research-gw.svc.cluster.local:8120"
+        o, k, ph, sh = make()
+        o.cfg = dict(o.cfg, model_gateway_url=gw)
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_local"})
+        self.assertEqual(st, 201)
+        mint = ph.calls[0][2]
+        self.assertEqual((mint["backend"], mint["profile"]), ("local", "compare_controllers_local"))
+        job = k.jobs[jobs.agent_job_name(SID)]
+        env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["MEDCEA_MODEL_GATEWAY"], gw)
+        self.assertEqual(env["MEDCEA_PROFILE"], "compare_controllers_local")
+
+    def test_a_scripted_session_is_unchanged_by_a_gateway(self):
+        o, k, ph, sh = make()
+        o.cfg = dict(o.cfg, model_gateway_url="http://g:8120")
+        o.start(WHO, "T", {"profile": "compare_controllers"})
+        self.assertEqual(ph.calls[0][2]["backend"], "scripted")
+
+    def test_no_gateway_address_in_a_job_without_one(self):
+        o, k, ph, sh = make()
+        o.start(WHO, "T", {"profile": "compare_controllers"})
+        env = {e["name"] for e in k.jobs[jobs.agent_job_name(SID)]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertNotIn("MEDCEA_MODEL_GATEWAY", env)
+
     def test_job_failure_revokes(self):
         o, k, ph, sh = make()
         k.fail_create = True
