@@ -241,6 +241,8 @@ if k[:2] == ["get", "job"]:
 if k[:2] == ["get", "pod"]:
     if "Ready" in j:
         print(os.environ.get("FAKE_POD_READY", "False"))
+    elif "podIP" in j:
+        print("10.1.2.3")
     elif "phase" in j:
         print("Pending")
     sys.exit(0)
@@ -548,6 +550,23 @@ class BenchScript(unittest.TestCase):
         self.assertTrue(m, log)
         self.assertLessEqual(int(m.group(1)), 2 * 3600 + 1800)
         self.assertGreater(int(m.group(1)), 2 * 3600 + 1800 - 120)
+        self.assertIn("delete pod research-llm-eval-4b", log)
+        self.assertIn("delete secret research-llm-bench-key", log)
+
+    def test_a_run_that_starts_during_the_eval_stops_it_and_the_trap_cleans_up(self):
+        # 22 Nov 2026: run_eval exits 1 on SIGTERM; under set -e that ended the script before its message,
+        # and the trap's kill of the ended run_eval ended the trap before the Pod and the key were deleted
+        ev = os.path.join(self.tree, "research", "agents", "evals", "run_eval.py")
+        with open(ev, "w") as f:
+            f.write("import signal, sys, time\n"
+                    "signal.signal(signal.SIGTERM, lambda *a: sys.exit(1))\n"
+                    "time.sleep(60)\n")
+        p = self.run_bench("eval", "--models", "4b", "--max-hours", "2",
+                           env={"FAKE_POD_READY": "True", "FAKE_RUNS_AFTER": "2", "FAKE_RUNS_LATE": "5|R",
+                                "MEDCEA_BENCH_RECHECK": "0"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("stopped: run 5 started (status R), during the eval of 4b", p.stdout + p.stderr)
+        log = self.fake_log()
         self.assertIn("delete pod research-llm-eval-4b", log)
         self.assertIn("delete secret research-llm-bench-key", log)
 

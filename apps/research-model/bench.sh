@@ -171,6 +171,10 @@ EVAL_PID=""         # run_eval while it runs
 SLEEP_PID=""
 _cleanup() {
     local p
+    # never set -e here: a kill of a process that has already ended fails, and as the last command of
+    # an && list it ended the trap before the Pod and the key were deleted (22 Nov 2026: an eval
+    # stopped for a recipe run left its Pod serving beside the run)
+    set +e
     trap '' PIPE                         # a Ctrl-C also ends the log's tee
     [[ -n "$SLEEP_PID" ]] && kill "$SLEEP_PID" 2>/dev/null
     [[ -n "$EVAL_PID" ]] && kill "$EVAL_PID" 2>/dev/null
@@ -560,7 +564,7 @@ PY
         EVAL_PID=$!
         while kill -0 "$EVAL_PID" 2>/dev/null; do
             if ! guard_tick; then
-                kill "$EVAL_PID" 2>/dev/null; wait "$EVAL_PID" 2>/dev/null; EVAL_PID=""
+                kill "$EVAL_PID" 2>/dev/null || true; wait "$EVAL_PID" 2>/dev/null || true; EVAL_PID=""   # run_eval exits 1 on SIGTERM
                 $KUBECTL logs "$pod" -n "$NAMESPACE" >"$SLOG" 2>&1 || true
                 chmod 600 "$SLOG"
                 [[ -f "$OUT" ]] && { chmod 600 "$OUT"; results+=(--eval "$OUT"); }
