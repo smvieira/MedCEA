@@ -26,6 +26,9 @@ class KubeClient:
                  ca_file=SA + "/ca.crt", timeout=15):
         self.ns, self.base, self.token_file, self.timeout = namespace, base.rstrip("/"), token_file, timeout
         self.ctx = ssl.create_default_context(cafile=ca_file)
+        # MicroK8s's cluster CA has no keyUsage extension, which Python 3.13+'s strict verification refuses;
+        # the chain and the host name are still verified (as tests/iam_signin_flow.py does for the platform CA)
+        self.ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
 
     def _req(self, method, path, body=None, raw=False):
         with open(self.token_file) as f:           # re-read: the token is rotated
@@ -38,14 +41,17 @@ class KubeClient:
                 b = r.read()
                 return r.status, (b.decode("utf-8", "replace") if raw else json.loads(b or b"{}"))
         except urllib.error.HTTPError as e:
-            return e.code, {}
+            try:      # the API's Status object: its message names the refusal, never a token
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                return e.code, {}
         except (OSError, ValueError) as e:
             raise KubeError("the Kubernetes API is not reachable (%s)" % type(e).__name__)
 
     def create_job(self, manifest):
-        st, _ = self._req("POST", "/apis/batch/v1/namespaces/%s/jobs" % self.ns, manifest)
+        st, r = self._req("POST", "/apis/batch/v1/namespaces/%s/jobs" % self.ns, manifest)
         if st not in (200, 201):
-            raise KubeError("create job refused (%s)" % st)
+            raise KubeError("create job refused (%s): %s" % (st, str((r or {}).get("message", ""))[:300]))
 
     def job_status(self, name):
         st, j = self._req("GET", "/apis/batch/v1/namespaces/%s/jobs/%s" % (self.ns, urllib.parse.quote(name)))

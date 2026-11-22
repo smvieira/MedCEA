@@ -116,7 +116,8 @@ class Orchestrator:
         sid = m["sid"]
         try:
             self.kube.create_job(jobs.agent_job(self.cfg, sid, m["claim"], prof["name"], prof["caps"]["wall_h"]))
-        except Exception:
+        except Exception as e:     # KubeError carries the API's status, never a token
+            sys.stderr.write("research-orchestrator: agent Job for a session not created: %s\n" % e)
             self.sh.request("POST", "/sessions/%s/revoke" % sid, {"reason": "agent Job could not be created"})
             return 502, {"error": "the agent Job could not be created"}
         with self.lock:
@@ -228,7 +229,8 @@ class Orchestrator:
             self.runner.start(cid, body["spec"], cap, dl, sid=sid)
         except ValueError as e:
             return 400, {"error": str(e)}
-        except Exception:
+        except Exception as e:
+            sys.stderr.write("research-orchestrator: simulation Job %s not created: %s\n" % (cid, e))
             return 502, {"error": "the simulation Job could not be created"}
         return 200, {"cid": cid}
 
