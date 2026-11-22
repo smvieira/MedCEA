@@ -55,6 +55,11 @@ class Transport:
             raise CliError("the orchestrator is not reachable (%s)" % type(e).__name__)
 
 
+def _sid(x):
+    """A session id, or what start() returned ({"sid": ..., "exp": ..., "job": ...})."""
+    return x["sid"] if isinstance(x, dict) else x
+
+
 class Client:
     def __init__(self, transport=None, sleep=time.sleep, clock=time.time, out=None):
         if transport is None:
@@ -116,21 +121,26 @@ class Client:
         return self._call("POST", "/api/sessions", body)
 
     def info(self, sid):
+        sid = _sid(sid)
         return self._call("GET", "/api/sessions/" + sid)
 
     def events(self, sid, after=0):
+        sid = _sid(sid)
         return self._call("GET", "/api/sessions/%s/events?after=%d" % (sid, after))["events"]
 
     def answer(self, sid, kind, xid, decision, note="", cap_h=None):
+        sid = _sid(sid)
         body = {"decision": decision, "note": note}
         if cap_h is not None:
             body["approved_cap_h"] = cap_h
         return self._call("POST", "/api/sessions/%s/%s/%s" % (sid, kind, urllib.parse.quote(xid)), body)
 
     def stop(self, sid):
+        sid = _sid(sid)
         return self._call("POST", "/api/sessions/%s/stop" % sid, {})
 
     def replay(self, sid):
+        sid = _sid(sid)
         return self._call("POST", "/api/sessions/%s/replay" % sid, {})
 
     @staticmethod
@@ -144,6 +154,7 @@ class Client:
         return "%5d  %-18s %-16s %s" % (e["event_id"], e["event"], e.get("actor", ""), detail)
 
     def watch(self, sid, poll_s=3, max_s=8 * 3600):
+        sid = _sid(sid)
         after, end = 0, self.clock() + max_s
         while self.clock() < end:
             batch = self.events(sid, after)

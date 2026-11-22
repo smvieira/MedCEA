@@ -79,6 +79,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r["sid"], "S" * 22)
         m, path, body, tok = o.calls[-1]
         self.assertEqual((m, path, body, tok), ("POST", "/api/sessions", {"profile": "compare_controllers", "budget": {"turns": 3}}, "A2"))
+        c.info(r)        # what start() returned works wherever a session id does (E48, 22 Nov 2026)
+        self.assertEqual(o.calls[-1][1], "/api/sessions/" + "S" * 22)
 
     def test_refresh_before_expiry(self):
         c, o, out, clk = client()
