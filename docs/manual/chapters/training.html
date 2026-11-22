@@ -1766,7 +1766,7 @@ SQL</code></pre></li>
 <li><code>sid = c.start("compare_controllers")</code>, then <code>c.watch(sid)</code>.</li>
 <li>When the campaign waits ("waiting for the supervisor"), note the estimate and the gate id, then <code>c.approve(sid, gid)</code>.</li>
 <li>Keep watching until the session stops with the reason <code>finished</code>.</li>
-<li><code>c.replay(sid)</code>.</li>
+<li><code>c.replay(sid)</code> once the session has stopped: the orchestrator runs Job <code>replay-&lt;id&gt;</code> and the call returns its verdict.</li>
 <li>On the host, <code>./apps/backup/backups.sh now</code>, then <code>./health-check.sh</code>.</li>
 </ol>
 <p><strong>What you should see.</strong></p>

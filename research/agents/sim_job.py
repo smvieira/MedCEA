@@ -8,7 +8,14 @@ readable, stop at the cap (cpu_cap_exceeded). Prints exactly one final line
 with {state: done|failed, cpu_hours, cpu_hours_cgroup, manifest, rows (first 50 lines of
 results.jsonl, as parsed), error?}; the full results.jsonl stays in --out (a results volume in
 the cluster) and manifest.result_digest is the digest of it, so the log copy is checkable
-against the volume. Stdlib + the harness."""
+against the volume. Stdlib + the harness.
+
+--estimate (stage 3 of 4b, design R7): the estimate-<id> Job. Reads the spec the same way, runs
+research.agents.estimate.estimate_spec (FLC and MPC allowed: this image has their libraries) and prints
+
+    ESTIMATE_RESULT {state: done|failed, cpu_hours, calibration_h, runs, error?, controller_libraries}
+
+under the same watchdog (--max-cpu-hours, default 0.1: the calibration slices are short)."""
 import argparse
 import base64
 import json
@@ -20,6 +27,8 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MARK = "SIM_RESULT "
+EST_MARK = "ESTIMATE_RESULT "
+EST_CAP_H = 0.1
 ROWS_MAX = 50
 
 
@@ -39,8 +48,8 @@ def cgroup_seconds(path="/sys/fs/cgroup/cpu.stat"):
     return None
 
 
-def emit(obj):
-    sys.stdout.write(MARK + json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n")
+def emit(obj, mark=MARK):
+    sys.stdout.write(mark + json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
 
@@ -52,18 +61,30 @@ def spent_hours(base_cg, base_proc):
 
 def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exit):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default=None)
     ap.add_argument("--jobs", type=int, default=1)
-    ap.add_argument("--max-cpu-hours", type=float, required=True)
+    ap.add_argument("--max-cpu-hours", type=float, default=None)
     ap.add_argument("--spec", default=None)
+    ap.add_argument("--estimate", action="store_true")
     a = ap.parse_args(argv)
+    if a.estimate:
+        if a.max_cpu_hours is None:
+            a.max_cpu_hours = EST_CAP_H
+    elif a.out is None or a.max_cpu_hours is None:
+        ap.error("--out and --max-cpu-hours are required")
+    mark = EST_MARK if a.estimate else MARK
     if a.spec:
         with open(a.spec, "rb") as f:
             raw = f.read()
     else:
         raw = base64.b64decode(os.environ["MEDCEA_SIM_SPEC"])
     spec = json.loads(raw)
-    if runner is None:
+    if a.estimate:
+        if runner is None:
+            def runner(spec, out, jobs, cap):
+                from research.agents import estimate
+                return estimate.estimate_spec(spec, ROOT)
+    elif runner is None:
         from research.harness import campaign
 
         def runner(spec, out, jobs, cap):
@@ -77,7 +98,7 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
             p, c = spent_hours(base_c, base_p)
             if max(p, c or 0.0) > a.max_cpu_hours:
                 emit({"state": "failed", "error": "cpu_cap_exceeded", "cpu_hours": round(max(p, c or 0.0), 6),
-                      "cpu_hours_cgroup": None if c is None else round(c, 6)})
+                      "cpu_hours_cgroup": None if c is None else round(c, 6)}, mark)
                 exit_fn(3)
                 return
     threading.Thread(target=watchdog, daemon=True).start()
@@ -86,7 +107,7 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
     except Exception as e:                       # the campaign's own refusals included
         done.set()
         emit({"state": "failed", "error": ("%s: %s" % (type(e).__name__, e))[:200],
-              "cpu_hours": round(spent_hours(base_c, base_p)[0], 6)})
+              "cpu_hours": round(spent_hours(base_c, base_p)[0], 6)}, mark)
         return 1
     done.set()
     p, c = spent_hours(base_c, base_p)
@@ -94,8 +115,12 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
         # the watchdog looks every `poll` seconds: a run that ends between two looks is checked here, and a
         # result over its cap is never reported as done (E48, 22 Nov 2026: 0.001 against 0.0002 was "done")
         emit({"state": "failed", "error": "cpu_cap_exceeded", "cpu_hours": round(max(p, c or 0.0), 6),
-              "cpu_hours_cgroup": None if c is None else round(c, 6)})
+              "cpu_hours_cgroup": None if c is None else round(c, 6)}, mark)
         return 3
+    if a.estimate:
+        emit({"state": "done", "cpu_hours": m["cpu_hours"], "calibration_h": m["calibration_h"], "runs": m["runs"],
+              "controller_libraries": m.get("controller_libraries", {})}, mark)
+        return 0
     rows = []
     try:
         with open(os.path.join(a.out, "results.jsonl"), encoding="utf-8") as f:

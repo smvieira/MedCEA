@@ -16,7 +16,7 @@ TOOLS = ["sim.estimate", "sim.run", "sim.status", "sim.results", "propose.parame
 
 
 class FakeEstimator:
-    def estimate(self, spec):          # from the runs, never from spec["claimed_h"]
+    def estimate(self, spec, sid=None):          # from the runs, never from spec["claimed_h"]
         return {"cpu_hours": spec["runs"] * 0.5, "calibration_h": 0.05, "runs": spec["runs"]}
 
 

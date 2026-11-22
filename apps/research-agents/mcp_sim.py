@@ -16,13 +16,14 @@ session's cid is "no such campaign". The runner is an interface (stage 6 supplie
   start(cid, spec, cap_h, deadline_s)            -> None
   status(cid) -> {state running|done|failed, cpu_hours, manifest?, rows?, error?}
   pool                                           -> worker count (int)
-An Estimator has estimate(spec) -> {cpu_hours, calibration_h, runs, inprocess}."""
+An Estimator has estimate(spec, sid=None) -> {cpu_hours, calibration_h, runs, inprocess}."""
 import importlib.util
 import math
 import os
 import re
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_common import McpServer, Tool, ToolRefused, canonical, sha, clean_obj  # noqa: E402
@@ -61,32 +62,57 @@ CAP_FLOOR_H = 0.01
 
 class LocalEstimator:
     """In-process estimate (R7) for PID / bang-bang / Q-learning specs with research/harness/campaign.py;
-    FLC and MPC import their libraries and cost far more, so they go to an estimate Job (stage 6)."""
+    FLC and MPC import their libraries and cost far more, so they go to an estimate Job (RemoteEstimator)."""
     def __init__(self, repo_root):
         self.repo_root = repo_root
 
-    def estimate(self, spec):
+    def estimate(self, spec, sid=None):
         if self.repo_root not in sys.path:
             sys.path.insert(0, self.repo_root)
-        from research.harness import algorithms_loader, campaign, runner
-        import copy
+        from research.agents import estimate
         try:
-            spec = campaign.resolve_spec(copy.deepcopy(spec), repo_root=self.repo_root)
-        except campaign.CampaignError as e:
-            raise ToolRefused("spec refused: %s" % e)
-        codes = {c["code"] for c in spec["controllers"]}
-        if not codes <= set(CHEAP):
-            raise ToolRefused("a spec with %s needs an estimate Job: not available in this deployment"
-                              % ", ".join(sorted(codes - set(CHEAP))))
-        loaded = algorithms_loader.load(self.repo_root)
-        runs = campaign.expand(spec)
-        for sc in spec["scenarios"]:
-            runner.normalise(copy.deepcopy(sc), loaded)
-        rates = campaign.calibrate(spec, loaded)
-        dur = {sc["name"]: sc["duration_h"] for sc in spec["scenarios"]}
-        est = sum(rates[(n, c)] * dur[n] for n, c, _, _, _ in runs) / 3600.0
-        cal = sum(r * min(dur[n], campaign.CALIBRATION_H) for (n, _), r in rates.items()) / 3600.0
-        return {"cpu_hours": est, "calibration_h": cal, "runs": len(runs), "inprocess": True}
+            out = estimate.estimate_spec(spec, self.repo_root, allow_codes=CHEAP)
+        except estimate.EstimateRefused as exc:
+            raise ToolRefused(str(exc))
+        return dict(out, inprocess=True)
+
+
+class RemoteEstimator:
+    """The estimate Job (R7), through the orchestrator's sim port (8091): POST /internal/estimates, then
+    poll GET /internal/estimates/<eid> until done, failed or `timeout_s` (300 s: the tool's timeout).
+    `http` has request(method, path, body) -> (status, object)."""
+    def __init__(self, http, timeout_s=300, poll_s=3, sleep=time.sleep, clock=time.monotonic):
+        self.http, self.timeout_s, self.poll_s, self.sleep, self.clock = http, timeout_s, poll_s, sleep, clock
+
+    def estimate(self, spec, sid=None):
+        st, r = self.http.request("POST", "/internal/estimates", {"sid": sid, "spec": spec})
+        if st != 200 or not isinstance(r, dict) or not r.get("eid"):
+            raise ToolRefused("the estimate could not be started (%s)" % (r or {}).get("error", st))
+        eid, t0 = r["eid"], self.clock()
+        while True:
+            st, r = self.http.request("GET", "/internal/estimates/" + eid)
+            r = r if st == 200 and isinstance(r, dict) else {"state": "failed", "error": "the orchestrator did not answer"}
+            if r.get("state") == "done":
+                return {"cpu_hours": r["cpu_hours"], "calibration_h": r.get("calibration_h", 0), "runs": r.get("runs", 0),
+                        "inprocess": False}
+            if r.get("state") == "failed":
+                raise ToolRefused("estimate refused: %s" % str(r.get("error", "failed"))[:200])
+            if self.clock() - t0 > self.timeout_s:
+                raise ToolRefused("the estimate Job did not finish within %d s: try a smaller spec" % self.timeout_s)
+            self.sleep(self.poll_s)
+
+
+class SplitEstimator:
+    """Stdlib controllers in-process, FLC and MPC (anything else) by the estimate Job."""
+    def __init__(self, local, remote):
+        self.local, self.remote = local, remote
+
+    def estimate(self, spec, sid=None):
+        from research.agents import estimate
+        codes = estimate.spec_codes(spec) if isinstance(spec, dict) else None
+        if codes is not None and not codes <= set(CHEAP):
+            return self.remote.estimate(spec, sid=sid)
+        return self.local.estimate(spec, sid=sid)
 
 
 class RemoteRunner:
@@ -127,8 +153,8 @@ class SimServer:
             raise ToolRefused("spec must be an object")
         return spec
 
-    def _est(self, spec):
-        e = self.estimator.estimate(spec)
+    def _est(self, spec, sid=None):
+        e = self.estimator.estimate(spec, sid=sid)
         return {"cpu_hours": float(e["cpu_hours"]), "calibration_h": float(e.get("calibration_h", 0)),
                 "runs": int(e.get("runs", 0))}
 
@@ -158,7 +184,7 @@ class SimServer:
 
     # ── tools
     def t_estimate(self, ctx, args):
-        e = self._est(self._spec(args))
+        e = self._est(self._spec(args), ctx["sid"])
         return {"cpu_hours": round(e["cpu_hours"], 4), "calibration_h": round(e["calibration_h"], 4), "runs": e["runs"],
                 "gate": "auto" if e["cpu_hours"] < AUTO_BELOW_H else ("ask" if e["cpu_hours"] <= MAX_CAMPAIGN_H else "refused")}
 
@@ -170,7 +196,7 @@ class SimServer:
             known = self.camps.get(cid)
         if known:
             return self._progress(ctx, cid, known)
-        est = self._est(spec)
+        est = self._est(spec, ctx["sid"])
         e, cal = est["cpu_hours"], est["calibration_h"]
         if e > MAX_CAMPAIGN_H:
             raise ToolRefused("campaign estimate %.3g CPU-hours is over the %g maximum" % (e, MAX_CAMPAIGN_H))
@@ -284,9 +310,10 @@ def main():
     from orchestrator import Http
     from mcp_common import Session, make_http_server
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    srv = SimServer(Session(os.environ["RS_SESSION_SERVER_URL"], "mcp-sim"), LocalEstimator(root),
-                    RemoteRunner(Http(os.environ["RS_ORCH_SIM_URL"]), pool=int(os.environ.get("RS_SIM_POOL", "2"))),
-                    repo_root=root)
+    orch = Http(os.environ["RS_ORCH_SIM_URL"], timeout=30)
+    srv = SimServer(Session(os.environ["RS_SESSION_SERVER_URL"], "mcp-sim"),
+                    SplitEstimator(LocalEstimator(root), RemoteEstimator(orch)),
+                    RemoteRunner(orch, pool=int(os.environ.get("RS_SIM_POOL", "2"))), repo_root=root)
     port = int(os.environ.get("RS_MCP_PORT", "8110"))
     sys.stderr.write("mcp-sim: port %d\n" % port)
     make_http_server(srv.app, port=port).serve_forever()

@@ -191,11 +191,19 @@ class Manifests(unittest.TestCase):
                 self.assertIn(name, have, pod)
 
     def test_wheel_requirements_are_hash_pinned(self):
-        lines = [l for l in read("apps/research-agents/requirements-services.txt").splitlines()
-                 if l.strip() and not l.startswith("#")]
-        self.assertGreaterEqual(len(lines), 6)
-        for l in lines:
-            self.assertRegex(l, r"^[A-Za-z0-9._-]+==[0-9.]+ --hash=sha256:[0-9a-f]{64}$")
+        for f, n in (("requirements-services.txt", 6), ("requirements-controllers.txt", 6)):
+            lines = [l for l in read("apps/research-agents/" + f).splitlines() if l.strip() and not l.startswith("#")]
+            self.assertGreaterEqual(len(lines), n, f)
+            for l in lines:
+                self.assertRegex(l, r"^[A-Za-z0-9._-]+==[0-9.]+ --hash=sha256:[0-9a-f]{64}$", f)
+
+    def test_the_controller_pins_are_the_hosts_and_name_every_library(self):
+        """FLC and MPC need these six; the host venv (research/requirements.txt) runs the same controllers on python 3.14."""
+        pins = lambda f: {l.split(" ")[0] for l in read(f).splitlines() if l.strip() and not l.startswith("#")}
+        ctrl = pins("apps/research-agents/requirements-controllers.txt")
+        self.assertEqual({p.split("==")[0] for p in ctrl}, {"gekko", "networkx", "numpy", "packaging", "scikit-fuzzy", "scipy"})
+        self.assertLessEqual(ctrl, pins("research/requirements.txt"))
+        self.assertFalse(ctrl & pins("apps/research-agents/requirements-services.txt"))
 
     def test_wheel_volume(self):
         pv, pvc = docs(render(os.path.join(REPO, "apps/research-agents/k8s/wheels.yaml"),
@@ -225,7 +233,7 @@ exit 0
 STUB_PIP = r"""#!/usr/bin/env bash
 echo "pip $*" >> "$STUB_LOG"
 d=""; while [ $# -gt 0 ]; do [ "$1" = "-d" ] && d="$2"; shift; done
-mkdir -p "$d"; printf 'wheel-one' > "$d/one-1-py3-none-any.whl"; printf 'wheel-two' > "$d/two-2-py3-none-any.whl"
+mkdir -p "$d"; printf 'wheel-one' > "$d/one-1-py3-none-any.whl"; printf 'wheel-two' > "$d/two-2-py3-none-any.whl"; printf 'wheel-ctrl' > "$d/ctrl-3-py3-none-any.whl"
 """
 
 
@@ -259,6 +267,8 @@ class Tree(unittest.TestCase):
         with open(os.path.join(r, "apps", "research-agents", "requirements-services.txt"), "w") as f:
             for n, body in (("one", b"wheel-one"), ("two", b"wheel-two")):
                 f.write("%s==1 --hash=sha256:%s\n" % (n, hashlib.sha256(body).hexdigest()))
+        with open(os.path.join(r, "apps", "research-agents", "requirements-controllers.txt"), "w") as f:
+            f.write("ctrl==3 --hash=sha256:%s\n" % hashlib.sha256(b"wheel-ctrl").hexdigest())
         self.git("init", "-q")
         self.git("add", "-A")
         self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")
@@ -560,10 +570,10 @@ class Deploy(Tree):
         self.assertIn("zonenetpol_equal research-gw SCRIPT_DIR=%s" % self.root, calls)
         self.assertIn("zonenetpol_equal research-agents SCRIPT_DIR=%s" % self.root, calls)
         # the wheels came first, once per zone, from the pinned hashes
-        self.assertEqual([c for c in calls if c.startswith("pip ")].__len__(), 2)
+        self.assertEqual([c for c in calls if c.startswith("pip ")].__len__(), 4)   # two zones, two requirement files
         for zd in ("gw", "agents"):
             self.assertEqual(sorted(os.listdir(os.path.join(self.wheels, zd))),
-                             ["one-1-py3-none-any.whl", "two-2-py3-none-any.whl"])
+                             ["ctrl-3-py3-none-any.whl", "one-1-py3-none-any.whl", "two-2-py3-none-any.whl"])
         kinds = []
         for t in self.applies():
             for d in docs(t):
@@ -736,9 +746,11 @@ class JobManifests(unittest.TestCase):
                "mcp_lake_url": "http://l"}
         cls.agent = jobs.agent_job(cfg, "A" * 22, "c" * 43, "compare_controllers", 1)
         cls.sim = jobs.sim_job(cfg, "c" + "0" * 20, {"x": 1}, 1, 3600, 2)
+        cls.est = jobs.estimate_job(cfg, "e" + "0" * 20, {"x": 1})
+        cls.rep = jobs.replay_job(cfg, "A" * 22, "compare_controllers", [{"event_id": 1, "event": "stop", "actor": "agent", "payload": {}}])
 
     def test_pod_hardening(self):
-        for j in (self.agent, self.sim):
+        for j in (self.agent, self.sim, self.est, self.rep):
             ps = j["spec"]["template"]["spec"]
             self.assertFalse(ps["automountServiceAccountToken"])
             self.assertEqual(ps["priorityClassName"], "medcea-research-low")
@@ -754,9 +766,15 @@ class JobManifests(unittest.TestCase):
 
     def test_unpack_matches_the_deployments(self):
         text = open(os.path.join(REPO, "apps", "research-agents", "k8s", "agents.yaml")).read()
-        for j in (self.agent, self.sim):
+        text = text.replace('\\"', '"')
+        for j in (self.agent, self.sim, self.est, self.rep):
             cmd = j["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
-            self.assertIn(cmd, text.replace('\\"', '"'))
+            base = cmd.split("; python3 -m pip install", 1)
+            self.assertIn(base[0] + "; python3 -m pip install" + base[1].split("; python3")[0], text)
+        # only the sim and estimate Jobs install the controller wheels, and never a Deployment
+        has = lambda j: "requirements-controllers.txt" in j["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+        self.assertEqual([has(j) for j in (self.agent, self.sim, self.est, self.rep)], [False, True, True, False])
+        self.assertNotIn("requirements-controllers", text)
 
     def test_volumes(self):
         names = lambda j: {v["name"] for v in j["spec"]["template"]["spec"]["volumes"]}
@@ -764,9 +782,37 @@ class JobManifests(unittest.TestCase):
         self.assertIn("runs", names(self.sim))
         m = self.sim["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
         self.assertIn({"name": "runs", "mountPath": "/runs"}, m)
-        for j in (self.agent, self.sim):
+        for j in (self.agent, self.sim, self.est, self.rep):
             secrets = [v for v in j["spec"]["template"]["spec"]["volumes"] if "secret" in v]
             self.assertEqual(secrets, [])
+
+
+    def test_estimate_and_replay_jobs(self):
+        import jobs
+        self.assertEqual(self.est["metadata"]["name"], "estimate-e" + "0" * 20)
+        self.assertEqual(self.est["spec"]["activeDeadlineSeconds"], 600)
+        c = self.est["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(c["command"], ["python3", "-m", "research.agents.sim_job", "--estimate"])
+        self.assertEqual(c["resources"], {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": "1Gi"}})
+        self.assertNotIn("runs", {v["name"] for v in self.est["spec"]["template"]["spec"]["volumes"]})
+        r = self.rep["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(self.rep["metadata"]["name"], jobs.replay_job_name("A" * 22))
+        self.assertRegex(self.rep["metadata"]["name"], r"^replay-[0-9a-f]{20}$")
+        self.assertEqual(r["command"], ["python3", "apps/research-agents/replay_main.py"])
+        env = {e["name"]: e["value"] for e in r["env"]}
+        self.assertEqual(env["MEDCEA_EVENTS_N"], "1")
+        self.assertTrue(all(len(v) <= jobs.EVENT_CHUNK for k, v in env.items() if k.startswith("MEDCEA_EVENTS_")))
+        self.assertEqual(jobs.EVENT_CHUNK + 20, 90020)   # one environment string stays under Linux's 128 KiB
+
+    def test_events_pack_in_chunks_and_refuse_a_huge_trace(self):
+        import jobs, random
+        rnd = random.Random(1)
+        big = [{"event_id": i, "payload": {"x": "%032x" % rnd.getrandbits(128)}} for i in range(60000)]
+        with self.assertRaisesRegex(ValueError, "too large to replay as a Job"):
+            jobs.pack_events(big)
+        mid = jobs.pack_events(big[:12000])
+        self.assertGreater(len(mid), 1)
+        self.assertTrue(all(len(c) <= jobs.EVENT_CHUNK for c in mid))
 
 
 if __name__ == "__main__":

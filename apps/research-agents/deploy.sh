@@ -158,12 +158,14 @@ RS_IMAGE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["py
 WHEEL_ROOT="${RESEARCH_WHEEL_DIR:-/var/lib/${PROJECT_NAME:-medcea}/research-wheels}"
 [[ "$WHEEL_ROOT" == /* && "$WHEEL_ROOT" =~ ^[A-Za-z0-9._/-]+$ && "$WHEEL_ROOT" != *..* ]] \
     || die "RESEARCH_WHEEL_DIR='$WHEEL_ROOT' must be an absolute path of [A-Za-z0-9._/-] without '..'"
-REQS="$APP_DIR/requirements-services.txt"
+# requirements-services.txt: every pod; requirements-controllers.txt: the sim and estimate Jobs (FLC, MPC).
+# One wheel folder per zone holds both sets (a pod installs only the files it names with -r).
+REQS=("$APP_DIR/requirements-services.txt" "$APP_DIR/requirements-controllers.txt")
 
 _wheels_missing() {   # DIR: the requirements no *.whl of DIR has the pinned sha256 for (one name per line)
-    python3 - "$REQS" "$1" <<'PY'
+    python3 - "$1" "${REQS[@]}" <<'PY'
 import glob, hashlib, re, sys
-req, d = sys.argv[1], sys.argv[2]
+d, reqs = sys.argv[1], sys.argv[2:]
 have = set()
 for f in glob.glob(d + "/*.whl"):
     h = hashlib.sha256()
@@ -171,15 +173,16 @@ for f in glob.glob(d + "/*.whl"):
         for b in iter(lambda: fh.read(1 << 20), b""):
             h.update(b)
     have.add(h.hexdigest())
-for line in open(req):
-    line = line.strip()
-    if not line or line.startswith("#"):
-        continue
-    m = re.match(r"^([A-Za-z0-9._-]+)==\S+\s+--hash=sha256:([0-9a-f]{64})$", line)
-    if not m:
-        print("unparsable:" + line)
-    elif m.group(2) not in have:
-        print(m.group(1))
+for req in reqs:
+    for line in open(req):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-z0-9._-]+)==\S+\s+--hash=sha256:([0-9a-f]{64})$", line)
+        if not m:
+            print("unparsable:" + line)
+        elif m.group(2) not in have:
+            print(m.group(1))
 PY
 }
 
@@ -197,10 +200,13 @@ _fetch_wheels() {   # DIR: pip download into DIR on this host (the pods have no 
         python3 -m venv "$_tmp/v" || { rm -rf "$_tmp"; die "python3 -m venv failed (apt install python3-venv)"; }
         _pip="$_tmp/v/bin/pip"
     fi
-    "$_pip" download -q --require-hashes --only-binary=:all: --no-deps --python-version 3.14 --implementation cp \
-        --abi cp314 --abi abi3 --abi none --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 \
-        --platform manylinux_2_28_x86_64 --platform any -r "$REQS" -d "$1" \
-        || { rm -rf "$_tmp"; die "pip download of the research wheels failed (this host needs internet once)"; }
+    local _r
+    for _r in "${REQS[@]}"; do
+        "$_pip" download -q --require-hashes --only-binary=:all: --no-deps --python-version 3.14 --implementation cp \
+            --abi cp314 --abi abi3 --abi none --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 \
+            --platform manylinux_2_28_x86_64 --platform any -r "$_r" -d "$1" \
+            || { rm -rf "$_tmp"; die "pip download of the research wheels failed (this host needs internet once)"; }
+    done
     rm -rf "$_tmp"
     chmod 644 "$1"/*.whl
 }
@@ -210,10 +216,10 @@ for _zd in gw agents; do
     _make_dir "$WHEEL_ROOT/$_zd"
     _miss="$(_wheels_missing "$WHEEL_ROOT/$_zd")"
     if [[ -n "$_miss" ]]; then
-        [[ "$_miss" != unparsable:* ]] || die "cannot parse $REQS ($_miss)"
+        [[ "$_miss" != unparsable:* ]] || die "cannot parse ${REQS[*]} ($_miss)"
         log "Downloading the wheels for $_zd ($(echo $_miss | tr '\n' ' '))..."
         _fetch_wheels "$WHEEL_ROOT/$_zd"
-        [[ -z "$(_wheels_missing "$WHEEL_ROOT/$_zd")" ]] || die "the downloaded wheels do not match the pinned hashes in $REQS"
+        [[ -z "$(_wheels_missing "$WHEEL_ROOT/$_zd")" ]] || die "the downloaded wheels do not match the pinned hashes in ${REQS[*]}"
     fi
 done
 

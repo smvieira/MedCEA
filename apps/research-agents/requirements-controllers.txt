@@ -1,0 +1,11 @@
+# Research Phase 4b stage 3: the controller libraries FLC (scikit-fuzzy) and MPC (gekko) need, for the sim and estimate
+# Jobs only (jobs.py appends a second pip install to their unpack init container; no Deployment installs these).
+# Python 3.14 (cp314 manylinux x86_64 / any), the same pins as research/requirements.txt, whose host venv
+# runs the same controllers; apps/scheduler/requirements-controllers.txt is the python 3.11 set of the scheduler pod.
+# Downloaded by apps/research-agents/deploy.sh into the same wheel folders as requirements-services.txt.
+gekko==1.3.3 --hash=sha256:70552837864e2bf864322fe4ac5522f1e8ae20965c772dffc0ee545c386e183e
+networkx==3.7 --hash=sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0
+numpy==2.5.5 --hash=sha256:c48960d420e90cf305cb1fde0d4e6082cc90512cda87a9acf0b6e04e91cf4abe
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+scikit-fuzzy==0.5.0 --hash=sha256:e456c365146bc5c58d9f593f4127ac783112e2daf89f87b12c6ef3c38e4087dd
+scipy==1.18.1 --hash=sha256:ac0333bdf38309aa3dcbe7e3fa7ea29e7a2c37c6ea306a757b700ded8e4596ad

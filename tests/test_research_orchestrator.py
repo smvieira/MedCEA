@@ -211,9 +211,10 @@ class LifecycleTest(unittest.TestCase):
         o.decide(WHO, "T", "gates", SID, "g1", {"decision": "deny"})
         self.assertNotIn("approved_cap_h", ph.calls[-1][2])
 
-    def test_replay_is_501_until_6b(self):
-        o, *_ = make()
-        self.assertEqual(o.replay(WHO, SID)[0], 501)
+    def test_replay_of_a_running_session_is_refused(self):
+        o, k, *_ = make()
+        self.assertEqual(o.replay(WHO, SID)[0], 409)
+        self.assertEqual(k.jobs, {})
 
 
 class SimApiTest(unittest.TestCase):
@@ -291,7 +292,7 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(self.call(0, "GET", "/api/sessions/%s/events?after=3" % SID)[0], 200)
         self.assertIn(("GET", "/events/%s?after=3" % SID), [c[:2] for c in self.sh.calls])
         self.assertEqual(self.call(0, "POST", "/api/sessions/%s/stop" % SID, {})[0], 200)
-        self.assertEqual(self.call(0, "POST", "/api/sessions/%s/replay" % SID, {})[0], 501)
+        self.assertEqual(self.call(0, "POST", "/api/sessions/%s/replay" % SID, {})[0], 409)   # routed and owned; the fake session is still active
         self.assertEqual(self.call(0, "GET", "/api/nothing")[0], 404)
 
     def test_signin_relay_is_public_and_forwarded(self):

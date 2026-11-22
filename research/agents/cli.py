@@ -9,7 +9,7 @@ imports nothing from this repository.
   medcea-agent deny SID GID [--note T]
   medcea-agent accept SID PID | discard SID PID [--note T]    decide a proposal
   medcea-agent stop SID                                       revoke the session, delete its Jobs
-  medcea-agent replay SID                                     strict replay verdict
+  medcea-agent replay SID                                     strict replay verdict (a Job; waits for it)
   medcea-agent signin                                         device sign-in only
 
 The person signs in with a device code through the orchestrator's relay (the notebook has no
@@ -139,9 +139,18 @@ class Client:
         sid = _sid(sid)
         return self._call("POST", "/api/sessions/%s/stop" % sid, {})
 
-    def replay(self, sid):
+    def replay(self, sid, wait_s=600, poll_s=5):
+        """Strict replay, run by the orchestrator as a Job: asks, then asks again every poll_s seconds until the verdict
+        {ok, first_mismatch, events} is there (the answer is 202 {state: running} until then)."""
         sid = _sid(sid)
-        return self._call("POST", "/api/sessions/%s/replay" % sid, {})
+        t0 = self.clock()
+        while True:
+            r = self._call("POST", "/api/sessions/%s/replay" % sid, {})
+            if not (isinstance(r, dict) and r.get("state") == "running"):
+                return r
+            if self.clock() - t0 > wait_s:
+                raise CliError("the replay Job is still running after %d s: ask again later" % wait_s)
+            self.sleep(poll_s)
 
     @staticmethod
     def line(e):

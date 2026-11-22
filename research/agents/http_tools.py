@@ -16,7 +16,8 @@ PROTOCOL = "2026-07-28"   # = apps/research-agents/mcp_common.PROTOCOL (tests/te
 
 
 class HttpTransport:
-    def __init__(self, timeout=30):
+    # 330 s: sim.estimate of an FLC or MPC spec waits for the estimate Job (up to 300 s, design R7); every other call is quick
+    def __init__(self, timeout=330):
         self.timeout = timeout
 
     def post(self, url, token, msg):

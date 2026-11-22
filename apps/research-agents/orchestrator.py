@@ -11,8 +11,11 @@ service research-orchestrator):
   POST /api/sessions/<sid>/gates/<gid>     U   approve|deny (forwarded with the person's token)
   POST /api/sessions/<sid>/proposals/<pid> U   accept|discard (same)
   POST /api/sessions/<sid>/stop            U   revoke, delete agent and sim Jobs
-  POST /api/sessions/<sid>/replay          R   501 until the replay Job exists (6b)
-Port 8091 (sim API, mcp-sim only, network-gated): POST /internal/sims, GET /internal/sims/<cid>.
+  POST /api/sessions/<sid>/replay          R   strict replay as Job replay-<h(sid)>: 202 {state: running} until it ends,
+                                               then 200 with the verdict {ok, first_mismatch, events} (re-POST to poll);
+                                               409 while the session is still active
+Port 8091 (sim API, mcp-sim only, network-gated): POST /internal/sims, GET /internal/sims/<cid>,
+  POST /internal/estimates {sid, spec} -> {eid}, GET /internal/estimates/<eid> (Job estimate-<eid>, FLC/MPC specs, R7).
 
 Lifecycle (R10): tick() registers the agent pod's IP with research-session when the pod is
 Running (the claim can then be exchanged from that IP only) and revokes the session when the
@@ -75,6 +78,8 @@ class Orchestrator:
         self.replayer, self.clock = replayer, clock
         self.runner = jobs.JobSimRunner(kube, cfg, cfg.get("pool", 2))
         self.track = {}
+        self.replays = {}                 # sid -> {"job", "final"}
+        self.estimates = {}               # eid -> {"sid", "final"}
         self.lock = threading.Lock()
 
     # ── profile
@@ -178,12 +183,90 @@ class Orchestrator:
         return 200, {"revoked": r.get("revoked", True)}
 
     def replay(self, who, sid):
-        if self._own(who, sid) is None:
+        """Strict replay (design 4.7) as a Job. The events come from research-session's server port here and travel
+        in the Job's environment (policy-neutral: the Job reaches nothing). The verdict is read from the Job's log
+        (REPLAY_RESULT), traced as `replay_result` by this server (the allowed actor), and cached until a restart."""
+        i = self._own(who, sid)
+        if i is None:
             return 404, {"error": "no such session"}
-        if self.replayer is None:
-            return 501, {"error": "replay runs as a Job in the next stage"}
-        st, r = self.sh.request("GET", "/events/%s?after=0" % sid)
-        return 200, self.replayer(sid, r.get("events", []))
+        if self.replayer is not None:                      # tests and a host run may inject one
+            st, r = self.sh.request("GET", "/events/%s?after=0" % sid)
+            return 200, self.replayer(sid, r.get("events", []))
+        with self.lock:
+            rec = self.replays.get(sid)
+        if rec and rec.get("final"):
+            return 200, rec["final"]
+        name = jobs.replay_job_name(sid)
+        if rec is None:
+            if i.get("active"):
+                return 409, {"error": "the session is still running: replay it after it has stopped"}
+            events, after = [], 0
+            while True:
+                st, r = self.sh.request("GET", "/events/%s?after=%d" % (sid, after))
+                if st != 200:
+                    return 502, {"error": "the session service did not answer"}
+                got = r.get("events", [])
+                if not got:
+                    break
+                events += got
+                after = got[-1]["event_id"]
+                if len(events) > 100000:
+                    return 413, {"error": "the session's trace is too large to replay"}
+            try:
+                if self.kube.job_status(name) is None:         # an earlier Job (lifetime 1 h) is adopted, not repeated
+                    self.kube.create_job(jobs.replay_job(self.cfg, sid, i["profile"], events))
+            except ValueError as e:
+                return 413, {"error": str(e)}
+            except Exception as e:
+                sys.stderr.write("research-orchestrator: replay Job for a session not created: %s\n" % e)
+                return 502, {"error": "the replay Job could not be created"}
+            with self.lock:
+                self.replays[sid] = rec = {"job": name, "final": None}
+        res = self._job_result(name, jobs.REPLAY_MARK)
+        if res is None:
+            return 202, {"state": "running"}
+        v = res if res.get("state") != "failed" else {"ok": False, "first_mismatch": None, "events": 0,
+                                                    "error": str(res.get("error", "the replay Job failed"))[:200]}
+        out = {"ok": bool(v.get("ok")), "first_mismatch": v.get("first_mismatch"), "events": v.get("events", 0)}
+        if v.get("error"):
+            out["error"] = v["error"]
+        self.sh.request("POST", "/trace", {"server": "orchestrator", "sid": sid, "event": "replay_result",
+                                           "payload": self._trim({"ok": out["ok"], "events": out["events"],
+                                                                  "first_mismatch": out["first_mismatch"],
+                                                                  "code_commit": self.cfg["code_commit"]})})
+        with self.lock:
+            rec["final"] = out
+        self.kube.delete_job(name)
+        return 200, out
+
+    @staticmethod
+    def _trim(obj, n=300):
+        """Strings cut to n characters (the payload limit is 16 KiB; a mismatch can hold a whole request sha or text)."""
+        if isinstance(obj, str):
+            return obj[:n]
+        if isinstance(obj, dict):
+            return {k: Orchestrator._trim(v, n) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [Orchestrator._trim(v, n) for v in obj[:20]]
+        return obj
+
+    def _job_result(self, name, mark):
+        """The parsed `mark` line of a finished Job, a failure object when it ended without one, None while it runs."""
+        js = self.kube.job_status(name)
+        if js is None:
+            return {"state": "failed", "error": "the Job is gone"}
+        if not (js["succeeded"] or js["failed"]):
+            return None
+        pod = self.kube.pod_of_job(name)
+        res = None
+        if pod:
+            try:
+                res = jobs.parse_result(self.kube.pod_log(pod["name"], jobs.LOG_MAX), mark)
+            except Exception:
+                res = None
+        if res is not None:
+            return res
+        return {"state": "failed", "error": "deadline" if js.get("reason") == "DeadlineExceeded" else "the Job ended without a result"}
 
     # ── lifecycle (R10)
     def _cleanup(self, sid):
@@ -195,6 +278,10 @@ class Orchestrator:
             if s == sid:
                 self.runner.delete(cid)
                 self.runner.owner.pop(cid, None)
+        for eid, e in list(self.estimates.items()):
+            if e["sid"] == sid:
+                self.estimates.pop(eid, None)
+                self.kube.delete_job(jobs.estimate_job_name(eid))
 
     def tick(self):
         now = self.clock()
@@ -241,6 +328,58 @@ class Orchestrator:
         if not jobs.CID.match(cid or ""):
             return 404, {"error": "no such campaign"}
         return 200, self.runner.status(cid)
+
+    def estimate_start(self, body):
+        """R7: an estimate Job for a spec with FLC or MPC. The id is the session's and the spec's, so asking again
+        for the same spec adopts the Job (or its cached answer) instead of starting another."""
+        if not isinstance(body, dict) or not isinstance(body.get("spec"), dict):
+            return 400, {"error": "spec is required"}
+        sid = body.get("sid")
+        if not SID.match(sid or ""):
+            return 400, {"error": "sid is required"}
+        st, i = self.sh.request("GET", "/sessions/" + sid)
+        if st != 200 or not i.get("active"):
+            return 403, {"error": "the session is not active"}
+        sys.path.insert(0, ROOT)
+        from research.agents.context import canonical, sha
+        eid = "e" + sha(sid + sha(canonical(body["spec"])))[:20]
+        with self.lock:
+            known = eid in self.estimates
+            self.estimates.setdefault(eid, {"sid": sid, "final": None})
+        if not known:
+            try:
+                self.kube.create_job(jobs.estimate_job(self.cfg, eid, body["spec"]))
+            except ValueError as e:
+                with self.lock:
+                    self.estimates.pop(eid, None)
+                return 400, {"error": str(e)}
+            except Exception as e:
+                with self.lock:
+                    self.estimates.pop(eid, None)
+                sys.stderr.write("research-orchestrator: estimate Job %s not created: %s\n" % (eid, e))
+                msg = str(e)
+                return 502, {"error": "busy: the research-agents quota is full, try again in a minute" if "exceeded quota" in msg
+                             else "the estimate Job could not be created"}
+        return 200, {"eid": eid}
+
+    def estimate_status(self, eid):
+        if not jobs.EID.match(eid or ""):
+            return 404, {"error": "no such estimate"}
+        with self.lock:
+            e = self.estimates.get(eid)
+        if e is None:
+            return 404, {"error": "no such estimate"}
+        if e["final"]:
+            return 200, e["final"]
+        res = self._job_result(jobs.estimate_job_name(eid), jobs.EST_MARK)
+        if res is None:
+            return 200, {"state": "running"}
+        out = {k: res[k] for k in ("state", "cpu_hours", "calibration_h", "runs", "error", "controller_libraries") if k in res}
+        if out.get("state") not in ("done", "failed"):
+            out = {"state": "failed", "error": "the estimate Job ended without a result"}
+        e["final"] = out
+        self.kube.delete_job(jobs.estimate_job_name(eid))
+        return 200, out
 
     def healthz(self):
         with self.lock:
@@ -333,9 +472,15 @@ def _handler(orch, port_name):
             if self.command == "POST" and path == "/internal/sims":
                 b = self.body()
                 return None if not isinstance(b, dict) else self.send(*orch.sim_start(b))
+            if self.command == "POST" and path == "/internal/estimates":
+                b = self.body()
+                return None if not isinstance(b, dict) else self.send(*orch.estimate_start(b))
             m = re.match(r"^/internal/sims/([^/]+)$", path)
             if m and self.command == "GET":
                 return self.send(*orch.sim_status(m.group(1)))
+            m = re.match(r"^/internal/estimates/([^/]+)$", path)
+            if m and self.command == "GET":
+                return self.send(*orch.estimate_status(m.group(1)))
             self.send(404, {"error": "not found"})
     return H
 
