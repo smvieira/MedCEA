@@ -496,6 +496,24 @@ _superset_wheel_cache() {
 echo -e "${YELLOW}Superset's wheel cache folder...${NC}"
 _superset_wheel_cache || exit 1
 
+# The research agents' wheel folder (research Phase 4a): created here with the sudo deploy-infra already
+# needs, so ./apps/research-agents/deploy.sh (run by deploy-apps, unattended under install.sh) needs none.
+# Never fails the deploy: that script creates it itself as the fallback (22 Nov 2026, E48 needed a terminal).
+_research_wheel_dir() {
+    local d="${RESEARCH_WHEEL_DIR:-/var/lib/${PROJECT_NAME:-medcea}/research-wheels}"
+    [[ "${RESEARCH_ENABLED:-false}" == "true" ]] || return 0
+    (( $(id -u) != 0 )) || return 0
+    [[ "$d" == /* && "$d" =~ ^[A-Za-z0-9._/-]+$ && "$d" != *..* ]] \
+        || { echo -e "${YELLOW}  RESEARCH_WHEEL_DIR='$d' is not an absolute plain path: ./apps/research-agents/deploy.sh refuses it.${NC}"; return 0; }
+    [[ -d "$d" ]] && return 0
+    echo "  Creating $d (mode 755, owner $(id -un))..."
+    install -d -m 755 "$d" 2>/dev/null \
+        || sudo -p "[sudo] password for %u (to create $d for the research agents' wheels): " \
+               install -d -m 755 -o "$(id -u)" -g "$(id -g)" "$d" \
+        || echo -e "${YELLOW}  Could not create $d: ./apps/research-agents/deploy.sh tries again (it asks for sudo itself).${NC}"
+}
+_research_wheel_dir
+
 echo -e "${YELLOW}Logging Helm into Docker Hub for OCI chart pulls...${NC}"
 echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \
   -u "$DOCKERHUB_USER" --password-stdin
