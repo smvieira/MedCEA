@@ -955,10 +955,15 @@ class AfterCommit(unittest.TestCase):
         # (research sandbox 2a, commit B), then the workbench's
         with open(os.path.join(self.t.fd, "scoped.log")) as f:
             ran = f.read().splitlines()
-        self.assertEqual(ran[:3], ["deploy-infra.sh --policy-only", "infra/deploy-research-namespace.sh --policy-only",
-                                   "infra/deploy-workbench.sh --policy-only"])
-        self.assertEqual(len(ran), 10)   # superset's --gate-only since stage C, the research zone's since 2a
-        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[3:]), ran)
+        # (since research 4a commit B also the research-gw and research-agents zones' namespaces)
+        self.assertEqual(ran[0], "deploy-infra.sh --policy-only")
+        for c in ("infra/deploy-research-namespace.sh --policy-only",
+                  "infra/deploy-research-gw-namespace.sh --policy-only",
+                  "infra/deploy-research-agents-namespace.sh --policy-only",
+                  "infra/deploy-workbench.sh --policy-only"):
+            self.assertIn(c, ran[:5])
+        self.assertEqual(len(ran), 12)   # superset's --gate-only since stage C, the research zone's since 2a
+        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[5:]), ran)
 
     def test_a_signal_after_the_commit_is_exit_3(self):
         # the trap knows the phase: after the COMMIT an interrupt is 3 and names --resume
@@ -2825,7 +2830,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("is not approved any more", sql)
         self.assertIn("is not applied with the staged entries", sql)
         # every scoped mode once, then the record with 4.5's fields
-        self.assertEqual(len(self.scoped()), 10)   # 8 stubs before Superset stage C, 9 before research 2a (commit B)
+        self.assertEqual(len(self.scoped()), 12)   # 10 before research 4a commit B (the gw and agents namespaces), 8 stubs before Superset stage C, 9 before research 2a (commit B)
         recs = self.records()
         self.assertEqual([r["event"] for r in recs], ["applied"])
         pl = recs[0]["payload"]
