@@ -15,6 +15,10 @@
 # variables (SCRIPT_DIR = the repository, MK8S, KUBECTL, NAMESPACE, config.env, the
 # colours) and the libraries it sourced; deploy-policy.sh sets the same.
 
+# zone_namespace / zone_other_args (research Phase 4a): lib-policy-tools.sh, functions only. Sourced
+# here when the caller has not, or pa_rsnetpol dies "command not found" (apply.sh 10, 22 Nov 2026).
+declare -F zone_other_args >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/lib-policy-tools.sh"
+
 _pa_line() { echo -e "  ${GREEN:-}[policy-only]${NC:-} $1: $2"; }
 
 #   pa_iam_lib [full|scoped]
