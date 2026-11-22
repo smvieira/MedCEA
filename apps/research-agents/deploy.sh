@@ -316,5 +316,5 @@ for _d in research-orchestrator mcp-sim mcp-lake; do
         || die "$_d did not become ready: microk8s kubectl -n $AG_NS logs deployment/$_d"
 done
 
-log "Done: research-session ($GW_NS), research-orchestrator, mcp-sim and mcp-lake ($AG_NS) run commit ${RS_CODE_COMMIT:0:12}. The agent, simulation and replay Jobs come with the next stage."
+log "Done: research-session ($GW_NS), research-orchestrator, mcp-sim and mcp-lake ($AG_NS) run commit ${RS_CODE_COMMIT:0:12}. The orchestrator starts the agent, simulation, estimate and replay Jobs on request."
 policy_source_finish "$NAMESPACE" research-agents
