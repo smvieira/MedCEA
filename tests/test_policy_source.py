@@ -4661,8 +4661,179 @@ class PhaseRS2bBDelta(unittest.TestCase):
                          self.NARROWED)
 
 
+PRE_RS4BB = "1689950"  # research Phase 4b stage 3 (the parent of Phase 4b's commit B): the policy is 4a B's
+
+
+class PhaseRS4BBDelta(unittest.TestCase):
+    """Research Phase 4b, commit B (22 Nov 2026): a skeleton-only version admitting the local
+    model's pods. defaults.yaml gains pods model-gateway (research-gw: 8120 from pod:agent and
+    node, hops to research-llm 8080 and to research-session's SERVER port 8102, dns) and
+    research-llm (research-gw: 8080 from pod:model-gateway and node, no egress, no dns), the
+    agent's hop to the gateway, pod:model-gateway on research-session 8102 and the public
+    route POST /v1/turn. No group, no cell, no Keycloak client. Against PRE_RS4BB with the
+    applied rows (version 11's: the factory matrix is the same file's): widening with exactly
+    the pinned system tuples and residue sections, nothing narrowed, no person role's reach
+    moves, the checker passes, qa may approve (barred_approvers is empty)."""
+
+    SYSTEM = [
+        ["ingress", "model-gateway", 8120, "node"],
+        ["ingress", "model-gateway", 8120, "pod:agent"],
+        ["ingress", "research-llm", 8080, "node"],
+        ["ingress", "research-llm", 8080, "pod:model-gateway"],
+        ["ingress", "research-session", 8102, "pod:model-gateway"],
+        ["pod-dns", "model-gateway"],
+        ["pod-egress", "agent", "pod", "model-gateway", 8120],
+        ["pod-egress", "model-gateway", "pod", "research-llm", 8080],
+        ["pod-egress", "model-gateway", "pod", "research-session", 8102],
+        ["public", "model-gateway", "POST /v1/turn"],
+    ]
+    SECTIONS = [["section", x] for x in (
+        "network.pods.agent.egress[].pod",
+        "network.pods.agent.egress[].port",
+        "network.pods.model-gateway.carries.model-gateway",
+        "network.pods.model-gateway.dns",
+        "network.pods.model-gateway.egress[].pod",
+        "network.pods.model-gateway.egress[].port",
+        "network.pods.model-gateway.selector.app",
+        "network.pods.model-gateway.zone",
+        "network.pods.research-llm.selector.app",
+        "network.pods.research-llm.zone",
+    )]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RS4BB, "medcea-prers4bb-")
+        cls.a = ref_tree(PRE_RS4BB)[2]
+        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.rows = source.entries_and_waivers(cls.a.data)
+        cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
+        cls.was, cls.skel = artefacts(cls.a), artefacts(cls.s)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RS4BB}: {self.old_cli}")
+
+    def test_skeleton_gate_widens(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_RS4BB, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_RS4BB}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual((len(self.SYSTEM), len(self.SECTIONS)), (10, 10))
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(sorted(g["unchanged"]), sorted(self.p.roles))
+        self.assertIn("--propose-skeleton", err.getvalue())
+
+    def test_gate_checker_and_approvers(self):
+        import apply_check
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+        self.assertEqual(invariants.check(self.s)[0], [])
+        self.assertEqual(invariants.check(self.p)[0], [])
+        self.assertEqual(apply_check.barred_approvers(self.p.data["roles"], g["added"]), [])
+
+    def test_no_group_cell_or_client(self):
+        self.assertEqual(self.p.data["matrix"], self.a.data["matrix"])
+        self.assertEqual(sorted(self.p.data["resource_groups"]), sorted(self.a.data["resource_groups"]))
+        self.assertEqual(self.p.data["network"].get("clients"), self.a.data["network"].get("clients"))
+        self.assertEqual(source.entries_and_waivers(self.p.data), self.rows)
+
+    def test_keeps_the_proposals_sections(self):
+        """The proposal runs from the parent's tree, apply.sh N from this one: both must compute
+        the same sections and diff digest (every new path is already classified in explain.py)."""
+        import apply_check
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_RS4BB}:apps/iam/apply_check.py"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {PRE_RS4BB}: {r.stderr.strip()}")
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = (
+            "import json, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import apply_check\n"
+            "from compiler import explain, source\n"
+            "a = json.load(sys.stdin)\n"
+            "p_old, p_new, acc, git = apply_check._composed(a['acc'], a['git'], a['rows'])\n"
+            "secs = explain.sections(acc, git)\n"
+            "skel = {'from': source.skeleton_digest(a['acc']), 'to': source.skeleton_digest(a['git']), 'sections': secs}\n"
+            "doc = explain.diff_document('skeleton', 12, 11, 'e' * 64, p_old, p_new, skeleton=skel)\n"
+            "print(json.dumps({'sections': secs, 'digest': explain.diff_digest(doc)}))\n")
+        inp = json.dumps({"acc": source.skeleton(self.a.data), "git": self.p.data, "rows": self.rows})
+        o = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(self.old, "apps", "iam")],
+                           input=inp, capture_output=True, text=True, env=clean_env())
+        self.assertEqual(o.returncode, 0, o.stderr)
+        old = json.loads(o.stdout)
+        p_old, p_new, acc, git = apply_check._composed(source.skeleton(self.a.data), self.p.data, self.rows)
+        secs = explain.sections(acc, git)
+        skel = {"from": source.skeleton_digest(source.skeleton(self.a.data)), "to": source.skeleton_digest(self.p.data),
+                "sections": secs}
+        doc = explain.diff_document("skeleton", 12, 11, "e" * 64, p_old, p_new, skeleton=skel)
+        self.assertEqual(json.loads(json.dumps(secs)), old["sections"])
+        self.assertEqual([list(x) for x in secs], self.SECTIONS)
+        self.assertEqual(explain.diff_digest(doc), old["digest"])
+
+    def test_no_role_reach_moves(self):
+        for role in sorted(self.p.roles):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(self.s, role), explain.reach(self.a, role))
+
+    def test_exactly_the_declared_artefacts_move(self):
+        """Against the parent's compiler: the two research-gw/-agents policies (model-gateway and
+        research-llm appear in the gw zone, the agent's egress in the agents zone) and routes
+        (a new service and a public route) move, and every grants SQL form through
+        role_widening()'s COMMENT (the routes digest); the privilege document, hosts and
+        everything else are byte-identical."""
+        self.assertEqual(set(self.skel), set(self.was))
+        moved = {k for k in self.skel if self.was[k] != self.skel[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")},
+                         {"routes", "netpol-research-gw", "netpol-research-agents"})
+        self.assertEqual(self.was["grants-json"], self.skel["grants-json"])
+        for key, want in self.skel.items():
+            # netpol-research needs the other zones' namespaces on the command line (artefacts() passes
+            # them); it is compared above through artefacts(), which moved nothing
+            if key in ("routes", "netpol-research", "netpol-research-gw", "netpol-research-agents") \
+                    or key.startswith("grants-"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+                self.assertEqual(rc, 0, f"{key} ({PRE_RS4BB}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_zone_artefacts(self):
+        gw = [i["metadata"]["name"] for i in json.loads(self.skel["netpol-research-gw"])["items"]]
+        self.assertEqual(gw, ["gw-default-deny", "gw-dns-research-session", "gw-dns-model-gateway",
+                              "gw-research-session", "gw-model-gateway", "gw-research-llm"])
+        llm = next(i for i in json.loads(self.skel["netpol-research-gw"])["items"]
+                   if i["metadata"]["name"] == "gw-research-llm")["spec"]
+        self.assertEqual(llm.get("egress", []), [])   # no egress rule: the default deny leaves it none
+        self.assertEqual(sorted(llm["policyTypes"]), ["Egress", "Ingress"])
+        doc = json.loads(self.skel["routes"])
+        self.assertIn("model-gateway", doc["public"])
+        self.assertNotIn("model-gateway", doc["services"])   # no person route: session token only
+
+
 PRE_RS4A = "4110b14"  # research Phase 4a, commit A' (compiler only, PRE_RS2BA's defaults.yaml = version 9's):
                       # commit B changes the policy (PhaseRS4BDelta)
+
+
+RS4B_COMMIT = "b4786f1"  # research Phase 4a, commit B (PhaseRS4BDelta reads its defaults.yaml)
 
 
 class PhaseRS4BDelta(unittest.TestCase):
@@ -4787,8 +4958,7 @@ class PhaseRS4BDelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_RS4A, "medcea-prers4a-")
         cls.a = ref_tree(PRE_RS4A)[2]   # version 9's defaults.yaml, this compiler
-        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree(RS4B_COMMIT)[2]   # commit B's own file (re-pinned by Phase 4b's commit B)
         cls.rows = source.entries_and_waivers(cls.a.data)   # version 9's rows
         cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
         cls.was, cls.skel, cls.want = artefacts(cls.a), artefacts(cls.s), artefacts(cls.p)

@@ -84,9 +84,10 @@ V9_LAKE_WHY = "notebooks; kubelet probe and health rslake from the host"
 V9_PG_WHY = ("the nightly exporter (rs_export_writer), the nightly backup (rs_backup, pg_read_all_data), the "
              "snapshot reader (rs_lake_api, research sandbox Phase 2b), kubelet probes and the host's psql "
              "(reserve.sh runs inside the pod)")
-RS4_PODS = ("research-orchestrator", "research-session", "mcp-sim", "mcp-lake", "agent")
+RS4_PODS = ("research-orchestrator", "research-session", "mcp-sim", "mcp-lake", "agent",
+           "model-gateway", "research-llm")   # the last two: Phase 4b's commit B
 RS4_SERVICES = ("research-orchestrator", "research-orchestrator-sim", "research-session-agent",
-                "research-session-server", "mcp-sim", "mcp-lake")
+                "research-session-server", "mcp-sim", "mcp-lake", "model-gateway")
 
 
 def v9_policy(data=None):

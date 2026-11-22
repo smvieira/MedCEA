@@ -68,6 +68,7 @@ SOURCES = {
         ("POST", "/claims/<sid>/expect")]},
     "mcp-sim":                   {"kind": "declared", "file": "apps/research-agents/mcp_common.py", "routes": [("POST", "/mcp")]},
     "mcp-lake":                  {"kind": "declared", "file": "apps/research-agents/mcp_common.py", "routes": [("POST", "/mcp")]},
+    "model-gateway":             {"kind": "declared", "file": "apps/research-model/gateway.py", "routes": [("POST", "/v1/turn")]},
 }
 
 REMOVED = {}

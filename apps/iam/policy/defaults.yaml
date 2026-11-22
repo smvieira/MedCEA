@@ -283,6 +283,7 @@ public_routes:
   - {service: research-session-server, route: "POST /claims/<sid>/expect", why: "as above"}
   - {service: mcp-sim, route: "POST /mcp", why: "MCP, session token checked on every tools/call through /introspect"}
   - {service: mcp-lake, route: "POST /mcp", why: "MCP, session token checked on every tools/call through /introspect"}
+  - {service: model-gateway, route: "POST /v1/turn", why: "one model turn for an agent Job; the session token is checked through research-session /introspect (research Phase 4b)"}
 
 # ── Network ──────────────────────────────────────────────────────────────────────────
 # Who may open a connection to each application pod (IAM plan 1.4). compiler/netpol.py
@@ -488,7 +489,7 @@ network:
       ingress:
         - {port: 8100, from: ["pod:research-orchestrator"], why: "person routes forwarded by the orchestrator"}
         - {port: 8101, from: ["pod:agent"], why: "claim and trace append from the agent Job"}
-        - {port: 8102, from: ["pod:research-orchestrator", "pod:mcp-sim", "pod:mcp-lake"], why: "introspect, events, gates, trace from the servers"}
+        - {port: 8102, from: ["pod:research-orchestrator", "pod:mcp-sim", "pod:mcp-lake", "pod:model-gateway"], why: "introspect, events, gates, trace from the servers and the model gateway"}
       egress:
         - {pod: research-postgresql, port: 5432, why: "rs_session: the agent_trace writer"}
         - {platform: {app: keycloak}, port: 8080, why: "the device-code sign-in and refresh relay for research-agent"}
@@ -523,6 +524,25 @@ network:
         - {pod: mcp-sim, port: 8110, why: "tools"}
         - {pod: mcp-lake, port: 8111, why: "tools"}
         - {pod: research-session, port: 8101, why: "claim exchange and trace"}
+        - {pod: model-gateway, port: 8120, why: "a turn of the local model (research Phase 4b)"}
+    model-gateway:
+      # research Phase 4b: the one place the local model is reached from a session. It introspects
+      # and traces on research-session's SERVER port (8102), and talks to research-llm only.
+      zone: research-gw
+      selector: {app: model-gateway}
+      carries: {model-gateway: 8120}
+      dns: true
+      ingress:
+        - {port: 8120, from: ["pod:agent", node], why: "an agent Job's turn request; the host's health probe"}
+      egress:
+        - {pod: research-llm, port: 8080, why: "the llama.cpp server"}
+        - {pod: research-session, port: 8102, why: "introspect and trace (server port)"}
+    research-llm:
+      zone: research-gw
+      selector: {app: research-llm}
+      carries: {}
+      ingress:
+        - {port: 8080, from: ["pod:model-gateway", node], why: "the gateway; health rsllm curls the pod IP from the host"}
   clients:
     # notebooks (IAM 3.2b: notebooks read config-api with the person's own token on the
     # public client workbench-notebook) is gone with research sandbox Phase 2b (decision D2):
