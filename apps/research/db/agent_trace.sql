@@ -443,7 +443,8 @@ REVOKE ALL ON FUNCTION agent_trace.use_claim(text, inet) FROM PUBLIC;
 
 -- ── Readers (EXECUTE for rs_session) ──────────────────────────────────────────
 -- session_status: active, revocation, exp, backend, the budget and what the events say
--- was spent (turns from turn_request, tokens from turn_response, cpu_hours from
+-- was spent (turns from turn_request, tokens from turn_response's usage (both backends
+-- record them there; a top-level count is still read), cpu_hours from
 -- sim_finished, trace_bytes).
 CREATE OR REPLACE FUNCTION agent_trace.session_status(p_sid text)
     RETURNS TABLE (active boolean, revoked boolean, exp timestamptz, backend text, budget jsonb, spent jsonb)
@@ -453,11 +454,11 @@ CREATE OR REPLACE FUNCTION agent_trace.session_status(p_sid text)
            s.exp, s.backend, s.budget,
            pg_catalog.jsonb_build_object(
              'turns', (SELECT pg_catalog.count(*) FROM agent_trace.event e WHERE e.sid = s.sid AND e.event = 'turn_request'),
-             'prompt_tokens', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(e.payload -> 'prompt_tokens') = 'number'
-                                      THEN (e.payload ->> 'prompt_tokens')::numeric END), 0)
+             'prompt_tokens', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(coalesce(e.payload -> 'usage', e.payload) -> 'prompt_tokens') = 'number'
+                                      THEN (coalesce(e.payload -> 'usage', e.payload) ->> 'prompt_tokens')::numeric END), 0)
                                  FROM agent_trace.event e WHERE e.sid = s.sid AND e.event = 'turn_response'),
-             'output_tokens', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(e.payload -> 'output_tokens') = 'number'
-                                      THEN (e.payload ->> 'output_tokens')::numeric END), 0)
+             'output_tokens', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(coalesce(e.payload -> 'usage', e.payload) -> 'output_tokens') = 'number'
+                                      THEN (coalesce(e.payload -> 'usage', e.payload) ->> 'output_tokens')::numeric END), 0)
                                  FROM agent_trace.event e WHERE e.sid = s.sid AND e.event = 'turn_response'),
              'cpu_hours', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(e.payload -> 'cpu_hours') = 'number'
                                       THEN (e.payload ->> 'cpu_hours')::numeric END), 0)

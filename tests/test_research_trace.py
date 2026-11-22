@@ -246,6 +246,18 @@ class RealPostgres(unittest.TestCase):
                                                   exp="now() + interval '9 hours'"))
         self.assertIn("session_exp_chk", r.stderr)
 
+    def test_05a_token_spend_is_read_from_usage(self):
+        # E48 (22 Nov 2026): both backends nest the counts under usage; a top-level sum read 0 and left
+        # the session's token budget unenforced
+        sid = "G" * 22
+        self.q(open_sql(sid, person="p5", token=H("9"), claim=H("8"), backend="local"))
+        for p, o in ((1127, 66), (960, 62)):
+            self.assertIsNotNone(self.ev("server", sid, "model-gateway", "turn_response",
+                                         '{"usage":{"prompt_tokens":%d,"output_tokens":%d,"estimated":false}}' % (p, o))[0])
+        self.assertIsNotNone(self.ev("server", sid, "model-gateway", "turn_response", '{"prompt_tokens":13}')[0])
+        self.assertEqual(self.q("SELECT (spent->>'prompt_tokens') || '/' || (spent->>'output_tokens') "
+                                "FROM agent_trace.session_status('%s')" % sid), "2100/128")
+
     def test_05_blob_and_checkpoint(self):
         sha = self.q("SELECT agent_trace.put_blob('%s','text/plain','\\x68690a'::bytea)" % SID)
         self.assertEqual(len(sha), 64)
