@@ -45,7 +45,8 @@ class FakeTools:
 
     def call(self, name, args):
         self.calls.append((name, args))
-        r = self.results.get(name, {"ok": True, "cpu_hours": 0.25 if name == "sim.run" else 0})
+        r = self.results.get(name, {"ok": True, "cid": "c1", "state": "done", "cpu_hours": 0.25} if name == "sim.run"
+                             else {"ok": True, "cpu_hours": 0})
         if isinstance(r, Exception):
             raise r
         return r
@@ -78,6 +79,18 @@ class Scripted(unittest.TestCase):
         self.assertEqual(ev[-1]["payload"]["reason"], "finished")
         self.assertEqual(ev[-1]["payload"]["turns"], 5)
         self.assertEqual(ev[-1]["payload"]["cpu_hours"], 0.25)
+
+    def test_cpu_spent_counts_each_finished_campaign_once(self):
+        # E48, 23 Nov 2026: the estimate's forecast and repeated reads of one campaign were summed as spent
+        script = [{"text": "e", "tool": "sim.estimate", "args": {}}, {"text": "r", "tool": "sim.run", "args": {}},
+                  {"text": "r", "tool": "sim.run", "args": {}}, {"text": "done"}]
+        tools = FakeTools({"sim.estimate": {"cpu_hours": 6.0, "runs": 6, "gate": "ask"},
+                           "sim.run": {"cid": "c1", "state": "done", "cpu_hours": 0.002}})
+        _, ev, _ = go(tools=tools, script=script)
+        self.assertEqual(ev[-1]["payload"]["cpu_hours"], 0.002)
+        tools = FakeTools({"sim.run": {"cid": "c1", "state": "running", "cpu_hours": 0.5}})
+        _, ev, _ = go(tools=tools, script=script)
+        self.assertEqual(ev[-1]["payload"]["cpu_hours"], 0.0)
 
     def test_the_run_is_deterministic(self):
         self.assertEqual(go()[1], go()[1])

@@ -272,6 +272,25 @@ class SimJobTest(unittest.TestCase):
         rc, r, _ = self.run_job(runner)
         self.assertEqual((rc, r["state"], len(r["rows"]), r["manifest"]["runs"]), (0, "done", 3, 3))
 
+    def test_the_cap_is_the_watchdogs_not_an_up_front_refusal(self):
+        # E48, 23 Nov 2026: approved with cap 0.05 against an estimate of 3, the harness refused before any run
+        from unittest import mock
+        from research.agents import sim_job
+        from research.harness import campaign
+        seen = {}
+
+        def run_campaign(s, out, **kw):
+            seen.update(kw)
+            with open(os.path.join(out, "results.jsonl"), "w") as f:
+                f.write('{"valid":true}\n')
+            return {"runs": 1, "result_digest": "f" * 64}
+        with mock.patch.object(campaign, "resolve_spec", lambda s, repo_root=None: s), \
+                mock.patch.object(campaign, "run_campaign", run_campaign):
+            rc, r, _ = self.run_job(None)
+        self.assertEqual((rc, r["state"]), (0, "done"))
+        self.assertEqual(seen["max_cpu_hours"], sim_job.CAMPAIGN_CEILING_H)
+        self.assertEqual(sim_job.CAMPAIGN_CEILING_H, mcp_sim.MAX_CAMPAIGN_H)
+
     def test_campaign_error_is_a_failed_result(self):
         def runner(spec, out, jobs, cap):
             raise ValueError("spec refused")

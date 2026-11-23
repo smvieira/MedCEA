@@ -79,6 +79,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
     backend = backend_id or model.id
     t_start = clock()
     spent = {"prompt_tokens": 0, "output_tokens": 0, "cpu_hours": 0.0}
+    counted = set()
     call = 0
     every = int(profile.get("checkpoint_every", 4))
 
@@ -156,8 +157,13 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
                                    "shown_sha256": sha(shown), "recorded_complete": len(text) <= RECORD_MAX,
                                    "result": text[:RECORD_MAX]})
         if not err:
+            # CPU spent = each campaign's final figure, once: an estimate is a forecast and a status or a repeated
+            # sim.run of the same campaign reports it again (E48, 23 Nov 2026: 6.002 spent for 0.002 run)
             c = result.get("cpu_hours", 0) if isinstance(result, dict) else 0
-            if isinstance(c, (int, float)) and not isinstance(c, bool):
+            cid = result.get("cid") if isinstance(result, dict) else None
+            if (isinstance(c, (int, float)) and not isinstance(c, bool) and isinstance(cid, str)
+                    and result.get("state") in ("done", "failed") and cid not in counted):
+                counted.add(cid)
                 spent["cpu_hours"] += c
             if name.startswith("propose."):
                 trace.post("proposal", {"turn": turn, "call": call, "tool": name, "result_sha256": full})

@@ -28,6 +28,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MARK = "SIM_RESULT "
 EST_MARK = "ESTIMATE_RESULT "
+CAMPAIGN_CEILING_H = 24.0                # = mcp_sim.MAX_CAMPAIGN_H
 EST_CAP_H = 0.1
 ROWS_MAX = 50
 
@@ -89,7 +90,11 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
 
         def runner(spec, out, jobs, cap):
             s = campaign.resolve_spec(spec, repo_root=ROOT)
-            return campaign.run_campaign(s, out, repo_root=ROOT, jobs=jobs, max_cpu_hours=cap)
+            # the supervisor's cap is the watchdog's, not the harness's up-front estimate check: a campaign
+            # approved for less than its estimate runs and is stopped at the cap (cpu_cap_exceeded). Passing the
+            # cap there refused it before any run (E48, 23 Nov 2026); CAMPAIGN_CEILING_H is mcp-sim's maximum
+            return campaign.run_campaign(s, out, repo_root=ROOT, jobs=jobs,
+                                         max_cpu_hours=max(cap, CAMPAIGN_CEILING_H))
     base_p, base_c = cpu_seconds(), cgroup_seconds()
     done = threading.Event()
 
