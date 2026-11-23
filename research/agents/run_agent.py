@@ -26,8 +26,11 @@ def main(env=None, transport=None, tool_transport=None, sleep=None, gateway_post
     try:
         tc.claim(env["MEDCEA_CLAIM"], **({"sleep": sleep} if sleep else {}))
         kw = {"sleep": sleep} if sleep else {}
-        tools = HttpTools({"sim": env["MEDCEA_MCP_SIM"], "lake": env["MEDCEA_MCP_LAKE"]}, tc.token,
-                          transport=tool_transport, **kw)
+        # only the servers the profile's tools are on: a session token is refused by a server none of its
+        # tools belongs to (wrong audience), and gate_check (sim tools only) died on mcp-lake's 401 (E48, 23 Nov 2026)
+        wanted = {{"propose": "sim"}.get(t.split(".")[0], t.split(".")[0]) for t in profile["tools"]}
+        urls = {"sim": env["MEDCEA_MCP_SIM"], "lake": env["MEDCEA_MCP_LAKE"]}
+        tools = HttpTools({k: v for k, v in urls.items() if k in wanted}, tc.token, transport=tool_transport, **kw)
         model = None
         if profile["backend"] == "local":
             gw = env.get("MEDCEA_MODEL_GATEWAY")
@@ -39,6 +42,9 @@ def main(env=None, transport=None, tool_transport=None, sleep=None, gateway_post
         reason = loop.run_profile(path, os.path.join(a, "policy", "standing.md"), skill, tools, tc, model=model)
     except TraceRefused as e:
         print("run_agent: refused (%s)" % e, file=sys.stderr)
+        return 1
+    except loop.ToolError as e:                     # e.g. a tool server refusing the token at the tool listing
+        print("run_agent: the tool servers could not be used (%s)" % e, file=sys.stderr)
         return 1
     print("run_agent: stopped (%s)" % reason)
     return 0

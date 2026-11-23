@@ -297,11 +297,30 @@ class Orchestrator:
                 js = self.kube.job_status(t["job"])
                 ended = js is None or js["succeeded"] or js["failed"]
                 if ended or (not t["registered"] and now - t["started"] > START_GRACE_S and not (pod and pod.get("phase") == "Running")):
+                    failed = bool(js and js["failed"])
+                    if failed and pod:
+                        self._log_failed(t["job"], pod["name"])
                     self.sh.request("POST", "/sessions/%s/revoke" % sid,
-                                    {"reason": "job ended" if ended else "pod did not start"})
+                                    {"reason": ("job failed" if failed else "job ended") if ended else "pod did not start"})
                     self._cleanup(sid)
             except Exception as e:                          # one session's failure never stops the others
                 sys.stderr.write("tick %s\n" % type(e).__name__)
+
+    def _log_failed(self, job, pod):
+        """The last lines of a failed agent Job's log into this pod's log, before the cleanup deletes the Job:
+        an agent that died at start left nothing to read (E48, 23 Nov 2026). run_agent never prints a token
+        or claim; each line is cut to 300 characters."""
+        try:
+            text = self.kube.pod_log(pod, limit=8192)
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", "replace")
+            lines = [ln[:300] for ln in str(text).splitlines() if ln.strip()][-20:]
+        except Exception as e:
+            lines = ["(its log could not be read: %s)" % type(e).__name__]
+        sys.stderr.write("research-orchestrator: agent Job %s failed; the end of its log:\n" % job)
+        for ln in lines:
+            sys.stderr.write("  | %s\n" % ln)
+        sys.stderr.flush()
 
     # ── sim API (mcp-sim)
     def sim_start(self, body):

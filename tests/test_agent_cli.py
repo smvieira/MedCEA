@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import contextlib
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -259,6 +260,37 @@ class RunAgentTest(unittest.TestCase):
         self.assertEqual(asked[0][5], {"type": "object", "properties": {"x": {"type": "integer"}}})
         # the agent wrote no turn_request/turn_response: the gateway does
         self.assertEqual(sess.events, ["tool_call", "tool_result", "stop"])
+
+    def test_a_profile_asks_only_its_own_servers(self):
+        # gate_check names sim tools only: mcp-lake refuses its token (another audience), and listing it
+        # killed the agent before its first turn (E48, 23 Nov 2026)
+        asked = []
+
+        class Mcp:
+            def post(self, url, token, msg):
+                asked.append(url)
+                if "lake" in url:
+                    return 401, None
+                if msg["method"] == "tools/list":
+                    return 200, {"result": {"tools": [{"name": n, "description": ""} for n in
+                                                      ("sim.estimate", "sim.run", "sim.status", "sim.results")]}}
+                return 200, FakeMcp.ok({"state": "done", "cpu_hours": 0})
+        sess = FakeSessionAgentPort()
+        rc = run_agent.main(dict(self.ENV, MEDCEA_PROFILE="gate_check"), transport=sess, tool_transport=Mcp(),
+                            sleep=lambda s: None)
+        self.assertEqual(rc, 0)
+        self.assertFalse([u for u in asked if "lake" in u])
+        self.assertEqual(sess.events[-1], "stop")
+
+    def test_a_refused_tool_listing_exits_1_with_a_message(self):
+        class Mcp:
+            def post(self, url, token, msg):
+                return 401, None
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = run_agent.main(self.ENV, transport=FakeSessionAgentPort(), tool_transport=Mcp(), sleep=lambda s: None)
+        self.assertEqual(rc, 1)
+        self.assertIn("the tool servers could not be used", err.getvalue())
 
     def test_a_local_profile_without_a_gateway_exits_2(self):
         sess = FakeSessionAgentPort()

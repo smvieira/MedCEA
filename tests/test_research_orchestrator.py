@@ -162,6 +162,26 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn(name, k.deleted)
         self.assertEqual(o.track, {})
 
+    def test_a_failed_agent_job_leaves_its_log_tail(self):
+        # E48 (23 Nov 2026): an agent that died at start was revoked "job ended" and its Job deleted with its log
+        import contextlib
+        import io
+        o, k, ph, sh = make()
+        o.start(WHO, "T", {"profile": "compare_controllers"})
+        name = jobs.agent_job_name(SID)
+        k.pods[name] = {"name": "agentpod", "phase": "Failed", "ip": "10.1.2.3"}
+        k.logs["agentpod"] = "Traceback (most recent call last):\n" + "x" * 500 + "\nToolError: refused\n"
+        k.status[name] = {"active": 0, "succeeded": 0, "failed": 1, "reason": "BackoffLimitExceeded"}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            o.tick()
+        self.assertEqual(sh.calls[-1][2], {"reason": "job failed"})
+        out = err.getvalue()
+        self.assertIn("agent Job %s failed" % name, out)
+        self.assertIn("  | ToolError: refused", out)
+        self.assertNotIn("x" * 301, out)
+        self.assertIn(name, k.deleted)
+
     def test_pod_that_never_runs_is_stopped(self):
         now = [1000.0]
         o, k, ph, sh = make(clock=lambda: now[0])
