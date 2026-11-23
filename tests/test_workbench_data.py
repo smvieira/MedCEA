@@ -613,7 +613,8 @@ class ExamplesTest(unittest.TestCase):
     def test_notebooks_are_stripped(self):
         names = sorted(os.listdir(EXAMPLES))
         self.assertEqual([n for n in names if not n.startswith("__")],
-                         ["01-connect.ipynb", "02-air-temperature.ipynb", "SAVE_TO_GIT.md", "medcea_agent.py", "medcea_data.py",
+                         ["01-connect.ipynb", "02-air-temperature.ipynb", "03-agent-campaign.ipynb", "04-agent-other-session.ipynb",
+                          "SAVE_TO_GIT.md", "medcea_agent.py", "medcea_data.py",
                           "nb_output_guard.py"])
         total = 0
         for n in names:
@@ -633,6 +634,22 @@ class ExamplesTest(unittest.TestCase):
         # deploy-workbench applies the ConfigMap client-side, which copies it into the
         # last-applied annotation: all annotations together may hold 256 KiB
         self.assertLess(total, 200 * 1024)
+
+    def test_agent_notebooks_use_the_client_as_it_is(self):
+        # 03/04 (exercise E48): every Client method they call exists, and their code compiles
+        import ast
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("nb_medcea_agent", os.path.join(EXAMPLES, "medcea_agent.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for n in ("03-agent-campaign.ipynb", "04-agent-other-session.ipynb"):
+            with open(os.path.join(EXAMPLES, n)) as f:
+                code = "\n".join("".join(c["source"]) for c in json.load(f)["cells"] if c["cell_type"] == "code")
+            tree = ast.parse(code)
+            used = {x.attr for x in ast.walk(tree) if isinstance(x, ast.Attribute)
+                    and isinstance(x.value, ast.Name) and x.value.id in ("c", "Client")}
+            self.assertTrue(used)
+            self.assertEqual(sorted(m for m in used if not hasattr(mod.Client, m)), [], n)
 
     def test_notebooks_connect_in_both_modes(self):
         for n in ("01-connect.ipynb", "02-air-temperature.ipynb"):

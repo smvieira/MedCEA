@@ -1762,7 +1762,7 @@ SQL</code></pre></li>
 <p><strong>Before you start.</strong> The access policy version that adds the zones and the group <span class="role">research_campaigns</span> is applied; <code>./deploy-infra.sh</code> has created the two namespaces and the Keycloak client <code>research-agent</code>; <code>./apps/database/deploy.sh</code>, <code>./apps/research/deploy.sh</code> and <code>./apps/research-agents/deploy.sh</code> have run; <code>./apps/backup/deploy.sh</code> has run since; health shows 76 checks with the five new ones OK or SKIP. No recipe run is starting.</p>
 <p><strong>Steps.</strong></p>
 <ol class="steps">
-<li>As the control scientist, in the AI Workbench open a notebook and run <code>from medcea_agent import Client; c = Client(); c.signin()</code>, and complete the device code in the browser.</li>
+<li>As the control scientist, in the AI Workbench copy <code>medcea-examples/03-agent-campaign.ipynb</code> to your home folder (the bio scientist uses <code>04-agent-other-session.ipynb</code>), or open a notebook and run <code>from medcea_agent import Client; c = Client(); c.signin()</code>, and complete the device code in the browser.</li>
 <li><code>sid = c.start("compare_controllers")</code>, then <code>c.watch(sid)</code>.</li>
 <li>The campaign of <code>compare_controllers</code> is small (under 2 CPU-hours) and starts without asking. Keep watching.</li>
 <li>Keep watching until the session stops with the reason <code>finished</code>.</li>
