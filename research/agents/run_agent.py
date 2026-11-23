@@ -32,7 +32,7 @@ def main(env=None, transport=None, tool_transport=None, sleep=None, gateway_post
         urls = {"sim": env["MEDCEA_MCP_SIM"], "lake": env["MEDCEA_MCP_LAKE"]}
         tools = HttpTools({k: v for k, v in urls.items() if k in wanted}, tc.token, transport=tool_transport, **kw)
         model = None
-        if profile["backend"] == "local":
+        if loop.through_gateway(profile):
             gw = env.get("MEDCEA_MODEL_GATEWAY")
             if not gw:
                 print("run_agent: a local profile needs MEDCEA_MODEL_GATEWAY", file=sys.stderr)

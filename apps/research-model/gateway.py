@@ -122,8 +122,10 @@ class Llm:
     def __init__(self, base, timeout):
         self.base, self.timeout = base.rstrip("/"), timeout
 
-    def post(self, path, body):
-        req = urllib.request.Request(self.base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    def post(self, path, body, headers=None):
+        h = {"Content-Type": "application/json"}
+        h.update(headers or {})
+        req = urllib.request.Request(self.base + path, json.dumps(body).encode(), h)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.status, json.loads(r.read() or b"{}")
@@ -136,10 +138,98 @@ class Llm:
             return 0, {}
 
 
+class LlamaBackend:
+    """The model on this host (llama-server): today's request, byte for byte (endpoint 'local')."""
+    kind = "llama"
+
+    def __init__(self, llm, alias, model_sha256="", ctx=4096, name="local"):
+        self.llm, self.alias, self.model_sha256, self.ctx, self.name = llm, alias, model_sha256, ctx, name
+        self.flags = dict(FLAGS)
+
+    def body(self, msgs, tools, max_tokens):
+        b = {"model": self.alias, "messages": msgs, "max_tokens": max_tokens, "cache_prompt": True, "stream": False,
+             "chat_template_kwargs": {"enable_thinking": False}}
+        b.update(SAMPLER)
+        if tools:
+            b["tools"], b["tool_choice"] = tools, "auto"
+        return b
+
+    @staticmethod
+    def context_full(st, raw):
+        return st == 400 and "exceed_context_size" in json.dumps(raw)
+
+
+class OpenAIBackend:
+    """An OpenAI-compatible server (vLLM, Ollama, llama.cpp elsewhere; research Phase 4d): Chat Completions with
+    function tools, temperature 0, a seed only where the endpoint says it is deterministic, the API key (if any)
+    read from a file mounted into this pod only. Never sends llama-server's own fields."""
+    kind = "openai"
+
+    def __init__(self, llm, name, model, ctx, max_output=MAX_TOKENS_CAP, deterministic=False, key_file=None):
+        self.llm, self.name, self.alias, self.ctx = llm, name, model, ctx
+        self.model_sha256, self.max_output, self.deterministic, self.key_file = "", max_output, deterministic, key_file
+        self.flags = {"sampler": dict({"temperature": 0}, **({"seed": 1} if deterministic else {})),
+                      "tool_choice": "auto", "slots": 1, "endpoint_kind": "openai"}
+
+    def headers(self):
+        if not self.key_file:
+            return {}
+        with open(self.key_file, encoding="utf-8") as f:
+            return {"Authorization": "Bearer " + f.read().strip()}
+
+    def body(self, msgs, tools, max_tokens):
+        b = {"model": self.alias, "messages": msgs, "max_tokens": max_tokens, "stream": False, "temperature": 0}
+        if self.deterministic:
+            b["seed"] = 1
+        if tools:
+            b["tools"], b["tool_choice"] = tools, "auto"
+        return b
+
+    @staticmethod
+    def context_full(st, raw):
+        return st == 400 and "context_length_exceeded" in json.dumps(raw)
+
+
+ENDPOINT_KINDS = ("llama", "openai")
+
+
+def load_endpoints(path, enabled, local=None, llm_factory=None, key_dir="/keys"):
+    """endpoints.json -> {name: backend} for the names in `enabled` (RS_ENDPOINTS). 'local' is the given
+    LlamaBackend (its url and pin come from the deploy's environment); every other entry is
+    {kind: openai, url, model, context, max_output?, deterministic?, key: none|secret}. A name enabled but not in
+    the file, or of a kind not built yet (anthropic: Phase 5), stops the gateway at start."""
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    eps, out = doc.get("endpoints") or {}, {}
+    for name in enabled:
+        e = eps.get(name)
+        if not isinstance(e, dict):
+            raise ValueError("endpoint %s is enabled but not in %s" % (name, path))
+        if name == "local":
+            if local is None:
+                raise ValueError("endpoint local needs the model on this host (RS_LLM_URL, MODEL_ALIAS)")
+            out[name] = local
+            continue
+        if e.get("kind") not in ENDPOINT_KINDS or e.get("kind") == "llama":
+            raise ValueError("endpoint %s: kind %r is not available here" % (name, e.get("kind")))
+        if not (isinstance(e.get("url"), str) and e["url"].startswith(("http://", "https://"))
+                and isinstance(e.get("model"), str) and isinstance(e.get("context"), int)):
+            raise ValueError("endpoint %s needs url, model and context" % name)
+        key = os.path.join(key_dir, name, "api-key") if e.get("key") == "secret" else None
+        llm = (llm_factory or (lambda u: Llm(u, 540)))(e["url"])
+        out[name] = OpenAIBackend(llm, name, e["model"], e["context"], int(e.get("max_output", MAX_TOKENS_CAP)),
+                                  bool(e.get("deterministic")), key)
+    return out
+
+
 class Gateway:
-    def __init__(self, session, llm, alias, model_sha256="", ctx=4096):
-        self.session, self.llm, self.alias, self.model_sha256, self.ctx = session, llm, alias, model_sha256, ctx
-        self.slot = threading.Lock()
+    def __init__(self, session, llm=None, alias=None, model_sha256="", ctx=4096, backends=None):
+        """backends {endpoint name: backend}; the older form (llm, alias, model_sha256, ctx) is the one local model."""
+        self.session = session
+        self.backends = backends if backends is not None else {"local": LlamaBackend(llm, alias, model_sha256, ctx)}
+        first = next(iter(self.backends.values()))
+        self.alias = first.alias
+        self.slots = {n: threading.Lock() for n in self.backends}
 
     def turn(self, token, peer, body):
         """-> (http status, object)."""
@@ -161,37 +251,36 @@ class Gateway:
         info = self.session.introspect(token, AUDIENCE, peer) if token else None
         if info is None:
             return 401, {}
-        if info.get("sid") != sid or info.get("backend") != "local":
-            return 403, {"error": "this session does not use the local model"}
+        backend = self.backends.get(info.get("backend"))
+        if info.get("sid") != sid or backend is None:
+            return 403, {"error": "this session does not use a model endpoint this gateway serves"}
         left = info.get("budget_left") or {}
         for k in ("prompt_tokens", "output_tokens"):
             if isinstance(left.get(k), (int, float)) and left[k] <= 0:
                 return 403, {"error": "the session's %s budget is spent" % k}
-        if not self.slot.acquire(blocking=False):
+        slot = self.slots[info["backend"]]
+        if not slot.acquire(blocking=False):
             return 429, {"error": "busy"}
         try:
-            return self._turn(sid, turn, req, left)
+            return self._turn(sid, turn, req, left, backend)
         finally:
-            self.slot.release()
+            slot.release()
 
-    def _turn(self, sid, turn, req, left):
+    def _turn(self, sid, turn, req, left, backend):
         msgs, tools, names = translate(req)
         out_left = left.get("output_tokens")
         max_tokens = MAX_TOKENS_DEFAULT if not isinstance(out_left, (int, float)) else int(max(16, min(out_left, MAX_TOKENS_CAP)))
-        max_tokens = min(max_tokens, MAX_TOKENS_CAP)
+        max_tokens = min(max_tokens, MAX_TOKENS_CAP, getattr(backend, "max_output", MAX_TOKENS_CAP))
         st, b = self.session.trace(sid, "turn_request", {
-            "turn": turn, "backend": "local", "model": self.alias, "model_sha256": self.model_sha256,
-            "request_sha256": sha(canonical_bytes(req)), "flags": dict(FLAGS, max_tokens=max_tokens, ctx=self.ctx)})
+            "turn": turn, "backend": backend.name, "model": backend.alias, "model_sha256": backend.model_sha256,
+            "request_sha256": sha(canonical_bytes(req)), "flags": dict(backend.flags, max_tokens=max_tokens, ctx=backend.ctx)})
         if st != 200:
             return (403 if st == 403 else 503), {"error": "the trace did not accept the turn"}
-        body = {"model": self.alias, "messages": msgs, "max_tokens": max_tokens, "cache_prompt": True, "stream": False,
-                "chat_template_kwargs": {"enable_thinking": False}}
-        body.update(SAMPLER)
-        if tools:
-            body["tools"], body["tool_choice"] = tools, "auto"
-        st, raw = self.llm.post("/v1/chat/completions", body)
+        body = backend.body(msgs, tools, max_tokens)
+        hdr = backend.headers() if hasattr(backend, "headers") else {}
+        st, raw = backend.llm.post("/v1/chat/completions", body, hdr) if hdr else backend.llm.post("/v1/chat/completions", body)
         if st != 200:
-            ctxfull = st == 400 and "exceed_context_size" in json.dumps(raw)
+            ctxfull = backend.context_full(st, raw)
             why = "context_full" if ctxfull else "model_error"
             self.session.trace(sid, "turn_response", {"turn": turn, "error": why, "status": st})
             return (413 if ctxfull else 502), {"error": why}
@@ -244,11 +333,16 @@ def make_http_server(gw, host="0.0.0.0", port=0):
 
 
 def main():
-    gw = Gateway(mcp_common.Session(os.environ["RS_SESSION_SERVER_URL"], "model-gateway"),
-                 Llm(os.environ.get("RS_LLM_URL", "http://research-llm:8080"), float(os.environ.get("RS_LLM_TIMEOUT", "540"))),
-                 os.environ["MODEL_ALIAS"], os.environ.get("MODEL_SHA256", ""), int(os.environ.get("LLM_CTX", "4096")))
+    timeout = float(os.environ.get("RS_LLM_TIMEOUT", "540"))
+    local = LlamaBackend(Llm(os.environ.get("RS_LLM_URL", "http://research-llm:8080"), timeout),
+                         os.environ["MODEL_ALIAS"], os.environ.get("MODEL_SHA256", ""), int(os.environ.get("LLM_CTX", "4096")))
+    enabled = [e for e in os.environ.get("RS_ENDPOINTS", "local").split() if e]
+    path = os.environ.get("RS_ENDPOINTS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "endpoints.json"))
+    backends = load_endpoints(path, enabled, local, lambda u: Llm(u, timeout))
+    gw = Gateway(mcp_common.Session(os.environ["RS_SESSION_SERVER_URL"], "model-gateway"), backends=backends)
     srv = make_http_server(gw, port=int(os.environ.get("RS_GATEWAY_PORT", "8120")))
-    sys.stderr.write("model-gateway: port %d, model %s\n" % (srv.server_address[1], gw.alias))
+    sys.stderr.write("model-gateway: port %d, endpoints %s\n" % (srv.server_address[1], " ".join(
+        "%s=%s" % (n, b.alias) for n, b in sorted(backends.items()))))
     srv.serve_forever()
 
 

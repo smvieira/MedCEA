@@ -69,12 +69,16 @@ CREATE TABLE IF NOT EXISTS agent_trace.session (
     profile_sha256 text NOT NULL CHECK (profile_sha256 ~ '^[0-9a-f]{64}$'),
     tools          text[] NOT NULL,
     budget         jsonb NOT NULL CHECK (jsonb_typeof(budget) = 'object'),
-    backend        text NOT NULL CHECK (backend IN ('scripted', 'local')),
+    backend        text NOT NULL CONSTRAINT session_backend_check CHECK (backend ~ '^[a-z][a-z0-9-]{0,30}$'),
     code_commit    text NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now(),
     exp            timestamptz NOT NULL,
     CONSTRAINT session_exp_chk CHECK (exp > created_at AND exp <= created_at + interval '8 hours')
 );
+-- research Phase 4d: backend is 'scripted' or the name of a model endpoint (apps/research-model/endpoints.yaml;
+-- 'local' is the model on this host). A database created before keeps its older CHECK until this runs.
+ALTER TABLE agent_trace.session DROP CONSTRAINT IF EXISTS session_backend_check;
+ALTER TABLE agent_trace.session ADD CONSTRAINT session_backend_check CHECK (backend ~ '^[a-z][a-z0-9-]{0,30}$');
 CREATE TABLE IF NOT EXISTS agent_trace.revocation (
     sid     text PRIMARY KEY REFERENCES agent_trace.session (sid),
     at      timestamptz NOT NULL DEFAULT now(),
@@ -310,8 +314,8 @@ BEGIN
     ELSIF p_port = 'agent' AND p_event = 'turn_response' AND s.backend <> 'scripted' THEN
         v_why := 'turn_response from the agent port is for a scripted backend only';
     ELSIF p_port = 'server' AND p_event IN ('turn_request', 'turn_response')
-          AND (p_actor <> 'model-gateway' OR s.backend <> 'local') THEN
-        v_why := p_event || ' on the server port is the model-gateway''s, for a local backend only';
+          AND (p_actor <> 'model-gateway' OR s.backend = 'scripted') THEN
+        v_why := p_event || ' on the server port is the model-gateway''s, for a model backend only';
     ELSIF p_port = 'server' AND NOT (
             (p_event = 'tool_result' AND p_actor IN ('mcp-sim', 'mcp-lake'))
          OR (p_event IN ('gate_pending', 'sim_started', 'sim_finished') AND p_actor = 'mcp-sim')

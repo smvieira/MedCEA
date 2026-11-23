@@ -5,6 +5,7 @@ stop is traced. The loop knows nothing of HTTP: `trace` has post(event, payload)
 has list_tools() -> [{name, description}] and call(name, args) -> dict (raising ToolError),
 `model` has respond(request) -> {text, tool}. Strict replay (replay.py) drives this same
 function with recorded responses and results."""
+import re
 import time
 
 import yaml
@@ -16,7 +17,14 @@ TEXT_MAX = 2000
 ARGS_MAX = 2000
 RECORD_MAX = 6000
 LOCAL_CONTEXT_MAX = 4096     # owner decision of 21 Nov 2026: a local session is about 4k tokens of context
-BACKENDS = ("scripted", "local")
+BACKENDS = ("scripted", "local")         # local = the endpoint on this host; any endpoint name works the same way
+ENDPOINT_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+
+
+def through_gateway(profile):
+    """True when the profile's answers come from a model endpoint through the model-gateway: any backend but
+    'scripted' (research Phase 4d: the backend names an endpoint of apps/research-model/endpoints.yaml)."""
+    return profile.get("backend") != "scripted"
 CAPS = ("turns", "prompt_tokens", "output_tokens", "cpu_hours", "wall_h", "turn_timeout_s", "context_tokens")
 
 
@@ -30,8 +38,8 @@ class ToolError(Exception):
 def load_profile(path):
     with open(path, encoding="utf-8") as f:
         p = yaml.safe_load(f)
-    if not isinstance(p, dict) or p.get("backend") not in BACKENDS:
-        raise ValueError("profile: a mapping with backend scripted or local is required")
+    if not isinstance(p, dict) or not isinstance(p.get("backend"), str) or not ENDPOINT_RE.match(p["backend"]):
+        raise ValueError("profile: a mapping with backend scripted or an endpoint name (local, ...) is required")
     caps = p.get("caps") or {}
     for k in CAPS:
         if not isinstance(caps.get(k), (int, float)) or isinstance(caps.get(k), bool) or caps[k] <= 0:
@@ -40,8 +48,8 @@ def load_profile(path):
         raise ValueError("profile: tools must be a list of names")
     if p["backend"] == "local" and caps["context_tokens"] > LOCAL_CONTEXT_MAX:
         raise ValueError("profile: a local session's caps.context_tokens is at most %d" % LOCAL_CONTEXT_MAX)
-    if p["backend"] == "local" and not (isinstance(p.get("task"), str) and 0 < len(p["task"]) <= 2000):
-        raise ValueError("profile: a local profile needs a task (the first user message, at most 2000 characters)")
+    if through_gateway(p) and not (isinstance(p.get("task"), str) and 0 < len(p["task"]) <= 2000):
+        raise ValueError("profile: a model profile needs a task (the first user message, at most 2000 characters)")
     if p["backend"] == "scripted" and not isinstance(p.get("script"), list):
         raise ValueError("profile: a scripted profile needs a script")
     return p
@@ -66,7 +74,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
     caps = profile["caps"]
     allowed = list(profile["tools"])
     listed = {t["name"]: t for t in tools.list_tools()}
-    local = profile.get("backend") == "local"
+    local = through_gateway(profile)
     spec = [{"name": n, "description": listed[n].get("description", "")} for n in allowed if n in listed]
     if local:       # the gateway builds function tools from this: the schema is part of the request (and its sha)
         for t in spec:

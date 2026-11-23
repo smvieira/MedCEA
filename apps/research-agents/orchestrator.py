@@ -82,6 +82,11 @@ class Orchestrator:
         self.estimates = {}               # eid -> {"sid", "final"}
         self.lock = threading.Lock()
 
+    def endpoints(self):
+        """The model endpoints this install enables (RESEARCH_ENDPOINTS, research Phase 4d); 'local' alone by default."""
+        e = self.cfg.get("endpoints")
+        return set(e) if e is not None else {"local"}
+
     # ── profile
     def _profile(self, name):
         if not isinstance(name, str) or not NAME.match(name):
@@ -103,9 +108,12 @@ class Orchestrator:
         if got is None:
             return 400, {"error": "unknown profile"}
         prof, psha = got
-        if prof["backend"] == "local" and not self.cfg.get("model_gateway_url"):
+        if prof["backend"] != "scripted" and not self.cfg.get("model_gateway_url"):
             return 409, {"error": "this profile uses the local model, which is not available: no model gateway is configured "
                                   "(RESEARCH_LOCAL_MODEL is not true, or ./apps/research-agents/deploy.sh has not run since the model was deployed)"}
+        if prof["backend"] != "scripted" and prof["backend"] not in self.endpoints():
+            return 409, {"error": "this profile uses the endpoint %s, which is not enabled on this install (RESEARCH_ENDPOINTS)"
+                                  % prof["backend"]}
         budget = {k: prof["caps"][k] for k in BUDGET_KEYS if k in prof["caps"]}
         want = body.get("budget") or {}
         if not isinstance(want, dict):
@@ -518,7 +526,8 @@ def main():
            "mcp_lake_url": os.environ["RS_MCP_LAKE_URL"], "profiles_dir": os.environ.get(
                "RS_PROFILES_DIR", os.path.join(ROOT, "research", "agents", "profiles")),
            "pool": int(os.environ.get("RS_SIM_POOL", "2")),
-           "model_gateway_url": os.environ.get("RS_MODEL_GATEWAY_URL", "")}
+           "model_gateway_url": os.environ.get("RS_MODEL_GATEWAY_URL", ""),
+           "endpoints": [e for e in os.environ.get("RS_ENDPOINTS", "local").split() if e]}
     orch = Orchestrator(cfg, KubeClient(os.environ["RS_AGENTS_NAMESPACE"]),
                         Http(os.environ["RS_SESSION_PERSON_URL"]), Http(os.environ["RS_SESSION_SERVER_URL"]), iam)
 

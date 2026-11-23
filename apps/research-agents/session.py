@@ -281,7 +281,7 @@ class Service:
         tools, budget = body.get("tools"), body.get("budget") or {}
         psha, commit = body.get("profile_sha256"), body.get("code_commit")
         ttl = body.get("ttl_s", 7200)
-        if not (isinstance(profile, str) and NAME.match(profile) and backend in ("scripted", "local")
+        if not (isinstance(profile, str) and NAME.match(profile) and isinstance(backend, str) and re.match(r"^[a-z][a-z0-9-]{0,30}$", backend)
                 and isinstance(tools, list) and tools and all(isinstance(t, str) and re.match(r"^[a-z]+\.[a-z_]+$|^propose$", t) for t in tools)
                 and isinstance(budget, dict) and isinstance(psha, str) and re.match(r"^[0-9a-f]{64}$", psha)
                 and isinstance(commit, str) and re.match(r"^[0-9a-f]{7,40}$", commit)

@@ -135,10 +135,11 @@ class GatewayManifest(unittest.TestCase):
     def render(self):
         import yaml
         r = subprocess.run(["bash", "-c", 'source infra/lib-render.sh; render apps/research-model/k8s/gateway.yaml '
-                            'RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256'],
+                            'RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS'],
                            cwd=REPO, capture_output=True, text=True,
                            env=dict(clean_env(), RESEARCH_GW_NAMESPACE=GW, GATEWAY_IMAGE=PINS["python_image"], MODEL_ALIAS=ALIAS,
-                                    MODEL_SHA256=SHA, LLM_CTX="4096", GATEWAY_CODE_SHA256="ab" * 32))
+                                    MODEL_SHA256=SHA, LLM_CTX="4096", GATEWAY_CODE_SHA256="ab" * 32,
+                                    RS_ENDPOINTS="local"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("${", r.stdout)
         return [d for d in yaml.safe_load_all(r.stdout) if d]

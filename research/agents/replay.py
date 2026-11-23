@@ -99,7 +99,7 @@ def replay(events, profile, standing, skill, tool_listing):
             open_call = None
         elif e["event"] == "tool_result" and open_call is not None:
             server[open_call].add(pl.get("result_sha256"))
-    local = profile.get("backend") == "local"
+    local = loop.through_gateway(profile)
     gw_pairs = []
     if local:
         for e in events:

@@ -19,6 +19,7 @@ import os
 import sys
 import threading
 import unittest
+import tempfile
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -79,6 +80,7 @@ class FakeSession:
 class FakeLlama:
     def __init__(self):
         self.requests, self.answer, self.status, self.gate = [], None, 200, None
+        self.headers = []
         me = self
 
         class H(BaseHTTPRequestHandler):
@@ -88,6 +90,7 @@ class FakeLlama:
             def do_POST(self):
                 b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 me.requests.append((self.path, b))
+                me.headers.append(dict(self.headers))
                 if me.gate:
                     me.gate.wait(5)
                 out = me.answer if me.answer is not None else text_answer("done")
@@ -293,7 +296,7 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(self.sess.events[-1]["payload"]["error"], "context_full")
 
     def test_an_unreachable_model_is_a_502(self):
-        self.gw.llm = gateway.Llm("http://127.0.0.1:1", 1)
+        self.gw.backends["local"].llm = gateway.Llm("http://127.0.0.1:1", 1)
         self.assertEqual(self.turn()[0], 502)
 
     # ── the HTTP face and secrets
@@ -328,3 +331,80 @@ class GatewayTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndpointTest(unittest.TestCase):
+    """Research Phase 4d: a session names its endpoint; the gateway serves only those it was given."""
+    def setUp(self):
+        self.sess, self.llm, self.remote = FakeSession(), FakeLlama(), FakeLlama()
+        d = tempfile.mkdtemp()
+        self.key = os.path.join(d, "api-key")
+        with open(self.key, "w") as f:
+            f.write("k-123\n")
+        self.gw = gateway.Gateway(mcp_common.Session(self.sess.url, "model-gateway"), backends={
+            "local": gateway.LlamaBackend(gateway.Llm(self.llm.url, 5), "alias-1", "ab" * 32, 4096),
+            "gpu-lab": gateway.OpenAIBackend(gateway.Llm(self.remote.url, 5), "gpu-lab", "Qwen/Qwen3-32B", 32768, 2048,
+                                             deterministic=True, key_file=self.key)})
+
+    def tearDown(self):
+        for s in (self.sess.srv, self.llm.srv, self.remote.srv):
+            s.shutdown()
+            s.server_close()
+
+    def turn(self):
+        return self.gw.turn(TOKEN, "10.0.0.7", {"sid": SID, "turn": 1, "request": REQ})
+
+    def test_an_openai_endpoint_gets_a_plain_request_and_its_key(self):
+        self.sess.info["backend"] = "gpu-lab"
+        self.assertEqual(self.turn()[0], 200)
+        self.assertEqual(self.llm.requests, [])
+        path, body = self.remote.requests[0]
+        self.assertEqual(path, "/v1/chat/completions")
+        self.assertEqual((body["model"], body["temperature"], body["seed"], body["tool_choice"]), ("Qwen/Qwen3-32B", 0, 1, "auto"))
+        for k in ("top_k", "cache_prompt", "chat_template_kwargs"):
+            self.assertNotIn(k, body)
+        self.assertEqual(self.remote.headers[0].get("Authorization"), "Bearer k-123")
+        req = next(e for e in self.sess.events if e["event"] == "turn_request")["payload"]
+        self.assertEqual((req["backend"], req["model"]), ("gpu-lab", "Qwen/Qwen3-32B"))
+        self.assertNotIn("k-123", json.dumps(self.sess.events))
+
+    def test_a_non_deterministic_endpoint_gets_no_seed(self):
+        self.gw.backends["gpu-lab"].deterministic = False
+        self.sess.info["backend"] = "gpu-lab"
+        self.turn()
+        self.assertNotIn("seed", self.remote.requests[0][1])
+
+    def test_the_local_request_is_unchanged(self):
+        self.assertEqual(self.turn()[0], 200)
+        body = self.llm.requests[0][1]
+        self.assertEqual((body["top_k"], body["cache_prompt"], body["seed"]), (1, True, 1))
+        self.assertNotIn("Authorization", self.llm.headers[0])
+
+    def test_a_session_of_an_endpoint_not_served_is_refused(self):
+        self.sess.info["backend"] = "claude"
+        self.assertEqual(self.turn()[0], 403)
+        self.sess.info["backend"] = "scripted"
+        self.assertEqual(self.turn()[0], 403)
+
+    def test_load_endpoints(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "endpoints.json")
+        with open(p, "w") as f:
+            json.dump({"endpoints": {"local": {"kind": "llama"},
+                                     "gpu-lab": {"kind": "openai", "url": "http://192.168.1.50:8000", "model": "m", "context": 32768,
+                                                 "key": "secret"},
+                                     "claude": {"kind": "anthropic", "model": "x", "context": 1}}}, f)
+        local = self.gw.backends["local"]
+        b = gateway.load_endpoints(p, ["local", "gpu-lab"], local, key_dir="/k")
+        self.assertIs(b["local"], local)
+        self.assertEqual((b["gpu-lab"].alias, b["gpu-lab"].key_file, b["gpu-lab"].deterministic), ("m", "/k/gpu-lab/api-key", False))
+        for enabled in (["nope"], ["claude"]):
+            with self.assertRaises(ValueError):
+                gateway.load_endpoints(p, enabled, local)
+
+    def test_the_shipped_file_enables_only_the_local_model(self):
+        p = os.path.join(ROOT, "apps", "research-model", "endpoints.json")
+        with open(p) as f:
+            self.assertEqual(sorted(json.load(f)["endpoints"]), ["local"])
+        self.assertEqual(list(gateway.load_endpoints(p, ["local"], self.gw.backends["local"])), ["local"])
+

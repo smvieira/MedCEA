@@ -276,7 +276,8 @@ class Local(unittest.TestCase):
         bad(context=4097)
         bad(task=None)
         bad(task="")
-        bad(backend="remote")
+        bad(backend="Remote!")       # an endpoint name is lower-case letters, digits and '-'
+        bad(backend=None)
 
     def test_the_loop_does_not_post_the_models_records(self):
         reason, ev, p, gw, _ = go_local([{"text": "Plan.", "tool": {"name": "sim.run", "args": {}}}, {"text": "The plan is complete."}])

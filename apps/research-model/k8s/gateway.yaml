@@ -2,7 +2,7 @@
 # research-gw (research Phase 4b stage 2; design rs4 5.3). Rendered by apps/research-model/deploy.sh after
 # research-llm. The code (gateway.py and mcp_common.py) comes from ConfigMap model-gateway-code, so the pod
 # fetches nothing: the image is the pinned python image, stdlib only.
-# Render list: RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256
+# Render list: RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS
 # Same conventions as the other research pods: medcea-research-low, no service links, no ServiceAccount token,
 # non-root 65534, read-only root, all capabilities dropped, RuntimeDefault seccomp, no Secret (the session token
 # is the caller's, checked at research-session), no internet, ClusterIP Service only; the compiled NetworkPolicy
@@ -57,6 +57,8 @@ spec:
         - {name: MODEL_ALIAS, value: "${MODEL_ALIAS}"}
         - {name: MODEL_SHA256, value: "${MODEL_SHA256}"}
         - {name: LLM_CTX, value: "${LLM_CTX}"}
+        - {name: RS_ENDPOINTS, value: "${RS_ENDPOINTS}"}
+        - {name: RS_ENDPOINTS_FILE, value: /app/endpoints.json}
         ports:
         - {name: http, containerPort: 8120, protocol: TCP}
         securityContext:
