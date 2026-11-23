@@ -1804,12 +1804,12 @@ SQL</code></pre></li>
 <p><strong>What you should see.</strong></p>
 <ul>
 <li>Step 2: turns of the model through the gateway, each <code>turn_request</code> and <code>turn_response</code> written by <code>model-gateway</code>; tool calls to the lake and to the simulation; the session stops with a reason (<code>finished</code>, or a cap such as <code>turns</code>). Whatever the model asks for that is not one of the profile's tools is refused and recorded, never called.</li>
-<li>Step 3: the first turn is the slowest (it reads the standing text, cold); later turns reuse it (warm). Tokens spent are the model's own counts, not estimates.</li>
+<li>Step 3: a turn takes about half a minute to a minute, mostly the answer being written (about 2 tokens a second) plus the prompt tokens new since the last turn (about 9 a second): the server's prompt cache keeps the rest. Only the first session after the model server starts reads the whole standing text and tool list (about 960 tokens), so its first turn is the slow one; otherwise turn 1 is the quickest. Tokens spent are the model's own counts, not estimates.</li>
 <li>Step 4: <code>rate</code> 1.0 over the turns compared: sent the same request, the model gives the same answer. The comparison stops at the first request that differs (<code>ended</code>): an estimate is timed, so a tool result may change, and from there the two are different conversations. This is a measurement, not evidence; the replay is the evidence.</li>
 <li>Step 5: verdict <code>ok</code>, checked from the record alone without asking the model.</li>
 <li>Step 6: <strong>Local model</strong> OK (the pinned model, context 4096, a chat template).</li>
 </ul>
-<div class="record"><p>Every turn and call is an event in <code>agent_trace.event</code> of database <code>medcea_research</code>, chained by hash, the gateway's records with the model's pin. Write the date, the commit, both session ids, the turn times (cold and warm), the tokens, the re-execution rate and where it ended, and the replay verdict under <strong>Last done</strong>.</p></div>
+<div class="record"><p>Every turn and call is an event in <code>agent_trace.event</code> of database <code>medcea_research</code>, chained by hash, the gateway's records with the model's pin. Write the date, the commit, both session ids, the turn times, the tokens (prompt, reused from the cache, output), the re-execution rate and where it ended, and the replay verdict under <strong>Last done</strong>.</p></div>
 <p><strong>Refusals worth trying.</strong> A session started as an <span class="role">engineer</span> (403: engineers read only). <code>c.reexecute</code> of a scripted session (refused: its answers are the profile's, there is nothing to re-execute).</p>
 <p><strong>Afterwards.</strong> Nothing to clean up: the sessions end themselves and their Jobs are deleted.</p>
 <p><strong>Last done.</strong> Not yet.</p>
