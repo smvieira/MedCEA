@@ -144,6 +144,36 @@ class CliTest(unittest.TestCase):
         self.assertEqual(cli.main(["stop", "S" * 22], c), 1)
 
 
+def _gw(turn, req, resp, t0, t1):
+    return [{"event_id": turn * 10, "at": "2026-11-23T10:00:%02d+00:00" % t0, "actor": "model-gateway", "event": "turn_request",
+             "payload": {"turn": turn, "request_sha256": req}},
+            {"event_id": turn * 10 + 1, "at": "2026-11-23T10:00:%02d+00:00" % t1, "actor": "model-gateway",
+             "event": "turn_response", "payload": {"turn": turn, "response_sha256": resp}}]
+
+
+class ReexecuteTest(unittest.TestCase):
+    """E49's re-execution measurement: answers compared only while the requests are the same."""
+    def test_same_requests_same_answers(self):
+        a = _gw(1, "r1", "a1", 0, 5) + _gw(2, "r2", "a2", 6, 9)
+        r = cli.Client.compare_turns(a, list(a))
+        self.assertEqual((r["turns_compared"], r["same_answers"], r["rate"], r["ended"]), (2, 2, 1.0, None))
+        self.assertEqual(r["seconds"]["first"], [5.0, 3.0])
+
+    def test_a_different_answer_to_the_same_request(self):
+        r = cli.Client.compare_turns(_gw(1, "r1", "a1", 0, 1) + _gw(2, "r2", "a2", 2, 3),
+                                     _gw(1, "r1", "a1", 0, 1) + _gw(2, "r2", "XX", 2, 3))
+        self.assertEqual((r["same_answers"], r["rate"], r["first_different_answer"]), (1, 0.5, 2))
+
+    def test_a_changed_request_ends_the_comparison(self):
+        r = cli.Client.compare_turns(_gw(1, "r1", "a1", 0, 1) + _gw(2, "r2", "a2", 2, 3),
+                                     _gw(1, "r1", "a1", 0, 1) + _gw(2, "rX", "a2", 2, 3))
+        self.assertEqual((r["turns_compared"], r["ended"]["turn"]), (1, 2))
+
+    def test_agent_events_are_not_the_models(self):
+        ev = [{"event_id": 1, "actor": "agent", "event": "turn_request", "payload": {"turn": 1, "request_sha256": "x"}}]
+        self.assertEqual(cli.Client.compare_turns(ev, ev)["turns_compared"], 0)
+
+
 class FakeMcp:
     def __init__(self):
         self.calls, self.status_seq = [], []

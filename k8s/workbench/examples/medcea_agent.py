@@ -10,6 +10,7 @@ imports nothing from this repository.
   medcea-agent accept SID PID | discard SID PID [--note T]    decide a proposal
   medcea-agent stop SID                                       revoke the session, delete its Jobs
   medcea-agent replay SID                                     strict replay verdict (a Job; waits for it)
+  medcea-agent reexecute SID                                  run the session's profile again and compare the model's answers
   medcea-agent signin                                         device sign-in only
 
 The person signs in with a device code through the orchestrator's relay (the notebook has no
@@ -53,6 +54,12 @@ class Transport:
                 return e.code, {}
         except (OSError, ValueError) as e:
             raise CliError("the orchestrator is not reachable (%s)" % type(e).__name__)
+
+
+def _epoch(ts):
+    """An event's 'at' (ISO 8601, as the orchestrator returns it) as seconds since the epoch."""
+    from datetime import datetime
+    return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
 
 
 def _sid(x):
@@ -153,6 +160,67 @@ class Client:
             self.sleep(poll_s)
 
     @staticmethod
+    def turns(events):
+        """{turn: (request_sha256, response_sha256 or None, seconds or None)} from the model-gateway's records of a
+        local session (a scripted session has none: its answers are the profile's)."""
+        out, at = {}, {}
+        for e in events:
+            p = e.get("payload") or {}
+            if e.get("actor") != "model-gateway" or not isinstance(p.get("turn"), int):
+                continue
+            t = p["turn"]
+            if e["event"] == "turn_request":
+                out[t], at[t] = (p.get("request_sha256"), None, None), e.get("at")
+            elif e["event"] == "turn_response" and t in out:
+                secs = None
+                if at.get(t) and e.get("at"):
+                    try:
+                        secs = round(_epoch(e["at"]) - _epoch(at[t]), 3)
+                    except ValueError:
+                        secs = None
+                out[t] = (out[t][0], p.get("response_sha256"), secs)
+        return out
+
+    @classmethod
+    def compare_turns(cls, first, second):
+        """E49's re-execution check (design 5.4: not evidence, a measurement). Turn by turn, while both sessions sent
+        the model the same request, its answers must be the same (greedy, one slot, the same seed and pin). The
+        first request that differs (a tool result changed, e.g. a timing-based estimate) ends the comparison:
+        what follows is a different conversation. rate = same answers / turns compared."""
+        a, b = cls.turns(first), cls.turns(second)
+        compared, same, first_diff, ended = 0, 0, None, None
+        for t in sorted(set(a) & set(b)):
+            if a[t][0] != b[t][0]:
+                ended = {"turn": t, "why": "the requests differ (an earlier tool result changed)"}
+                break
+            if a[t][1] is None or b[t][1] is None:
+                ended = {"turn": t, "why": "a turn has no answer"}
+                break
+            compared += 1
+            if a[t][1] == b[t][1]:
+                same += 1
+            elif first_diff is None:
+                first_diff = t
+        return {"turns_compared": compared, "same_answers": same,
+                "rate": round(same / compared, 4) if compared else None,
+                "first_different_answer": first_diff, "ended": ended,
+                "seconds": {"first": [a[t][2] for t in sorted(a)], "second": [b[t][2] for t in sorted(b)]}}
+
+    def reexecute(self, sid, watch=True):
+        """Start a new session with SID's profile and compare the model's answers turn by turn (compare_turns).
+        The new session runs like any other (its gate, its budget); returns the comparison and both ids."""
+        sid = _sid(sid)
+        info = self.info(sid)
+        if info.get("backend") != "local":
+            raise CliError("session %s is not a local-model session: nothing to re-execute" % sid)
+        new = self.start(info["profile"])["sid"]
+        if watch:
+            self.watch(new)
+        r = self.compare_turns(self.events(sid), self.events(new))
+        r.update(first=sid, second=new, profile=info["profile"])
+        return r
+
+    @staticmethod
     def line(e):
         p = e.get("payload") or {}
         detail = {"gate_pending": "gate %s: estimate %s CPU-h, cap %s (medcea-agent approve|deny SID %s)" % (
@@ -186,7 +254,7 @@ def main(argv=None, client=None):
     s.add_argument("profile")
     s.add_argument("--budget", nargs="*", default=[], metavar="KEY=VALUE")
     s.add_argument("--ttl-s", type=int)
-    for n in ("watch", "stop", "replay"):
+    for n in ("watch", "stop", "replay", "reexecute"):
         sub.add_parser(n).add_argument("sid")
     for n in ("approve", "deny", "accept", "discard"):
         p = sub.add_parser(n)
@@ -221,6 +289,8 @@ def main(argv=None, client=None):
             c.out("stopped")
         elif a.cmd == "replay":
             c.out(json.dumps(c.replay(a.sid), sort_keys=True))
+        elif a.cmd == "reexecute":
+            c.out(json.dumps(c.reexecute(a.sid), sort_keys=True))
     except CliError as e:
         print("medcea-agent: %s" % e, file=sys.stderr)
         return 1

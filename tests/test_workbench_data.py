@@ -614,7 +614,7 @@ class ExamplesTest(unittest.TestCase):
         names = sorted(os.listdir(EXAMPLES))
         self.assertEqual([n for n in names if not n.startswith("__")],
                          ["01-connect.ipynb", "02-air-temperature.ipynb", "03-agent-campaign.ipynb", "04-agent-other-session.ipynb",
-                          "SAVE_TO_GIT.md", "medcea_agent.py", "medcea_data.py",
+                          "05-local-model.ipynb", "SAVE_TO_GIT.md", "medcea_agent.py", "medcea_data.py",
                           "nb_output_guard.py"])
         total = 0
         for n in names:
@@ -642,7 +642,7 @@ class ExamplesTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("nb_medcea_agent", os.path.join(EXAMPLES, "medcea_agent.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        for n in ("03-agent-campaign.ipynb", "04-agent-other-session.ipynb"):
+        for n in ("03-agent-campaign.ipynb", "04-agent-other-session.ipynb", "05-local-model.ipynb"):
             with open(os.path.join(EXAMPLES, n)) as f:
                 code = "\n".join("".join(c["source"]) for c in json.load(f)["cells"] if c["cell_type"] == "code")
             tree = ast.parse(code)

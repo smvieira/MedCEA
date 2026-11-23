@@ -648,6 +648,7 @@ The snapshot never changes afterwards.</li>
 <li><code>02-air-temperature.ipynb</code>: a line chart of one zone's air temperature over the last minutes. The unit, the zone and the number of minutes are set at the top.</li>
 <li><code>03-agent-campaign.ipynb</code> (a scientist): sign in to the research orchestrator, run a scripted agent session, replay it, then start <code>gate_check</code>, wait for its CPU gate and approve it with a small cap (<a href="#research-agent-sessions">Agent sessions</a>, exercise E48).</li>
 <li><code>04-agent-other-session.ipynb</code> (a second scientist): tries to read, approve and stop another person's session and is refused with 404 "no such session" each time.</li>
+<li><code>05-local-model.ipynb</code> (control scientist): a session planned by the platform's own model, its turn times, a re-execution (<code>c.reexecute</code>: the same profile again, compared turn by turn) and the replay; exercise <a href="#training-e49">E49</a>.</li>
 <li><code>SAVE_TO_GIT.md</code>: how to keep your notebooks in the research repository (below).</li>
 <li><code>medcea_data.py</code>: the small library the notebooks use (<code>import medcea_data as md</code> works in any notebook).</li>
 <li><code>nb_output_guard.py</code>: the check git runs before each commit (see <a href="#apps-workbench-git">Saving your notebooks to git</a>); you do not run it yourself.</li>
