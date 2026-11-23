@@ -985,6 +985,23 @@ class Report(unittest.TestCase):
         self.assertEqual(aff["depth-8b-d0"], "pinned")
         self.assertEqual(aff["sweep-8b-t12-isolate"], "node affinity")
 
+    def test_the_recommendation_uses_earlier_days(self):
+        # bench on 21 Nov, the 4B eval on 22 Nov, the 8B eval on 23 Nov: the 23rd's report alone said
+        # "no 8B throughput measured yet"; it now takes the newest earlier inputs and names their dates
+        d21 = benchlib.merge_report({}, PINS, bench=benchlib.parse_bench(canned_log()), today="2026-11-21")
+        d22 = benchlib.merge_report({}, PINS, evals=[self.ev("4b", tool_call_validity=0.9)], today="2026-11-22")
+        d23 = benchlib.merge_report({}, PINS, evals=[self.ev("8b", tool_call_validity=1.0)], today="2026-11-23",
+                                    earlier=[d21, d22])
+        self.assertNotIn("bench", d23)
+        self.assertEqual(sorted(d23["eval"]), ["8b"])
+        self.assertEqual(d23["recommendation"]["inputs"],
+                         {"bench": "2026-11-21", "eval": {"8b": "2026-11-23", "4b": "2026-11-22"}})
+        alone = benchlib.merge_report({}, PINS, evals=[self.ev("8b", tool_call_validity=1.0)], today="2026-11-23")
+        self.assertEqual(alone["recommendation"]["why"], ["no 8B throughput measured yet"])
+        later = dict(d21, date="2026-11-24")          # never a later day's
+        self.assertEqual(benchlib.merge_report({}, PINS, evals=[self.ev("8b")], today="2026-11-23",
+                                               earlier=[later])["recommendation"]["inputs"]["bench"], None)
+
     def test_merge_keeps_earlier_parts(self):
         bench = benchlib.parse_bench(canned_log())
         rep = benchlib.merge_report({}, PINS, machine={"cpu_model": "x"}, bench=bench, today="2026-11-21")

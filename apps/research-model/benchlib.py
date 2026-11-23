@@ -583,11 +583,14 @@ def merge_bench(existing, benches):
 
 
 def merge_report(existing, pins, machine=None, bench=None, evals=None, plan_runs=None, today=None,
-                 benches=None):
+                 benches=None, earlier=None):
     """EXISTING (a report from an earlier call the same day, or {}) with what is given
     added: bench invocations merged by id (merge_bench), evals per model; the
     recommendation recomputed from everything now in it. BENCH/PLAN_RUNS is one invocation
-    (id "bench"); BENCHES a list of (id, parsed, plan_runs)."""
+    (id "bench"); BENCHES a list of (id, parsed, plan_runs). EARLIER: reports of earlier dates; the
+    recommendation takes the newest earlier day's throughput when this day measured none, and the newest
+    earlier eval of a model this day did not evaluate (bench and eval run on different days: 21-23 Nov
+    2026), naming the dates it used under recommendation.inputs. Nothing is copied into this report."""
     rep = dict(existing or {})
     rep["schema"] = 2
     rep["date"] = today or rep.get("date") or datetime.date.today().isoformat()
@@ -608,8 +611,17 @@ def merge_report(existing, pins, machine=None, bench=None, evals=None, plan_runs
             ev[e["model_key"]] = e
         rep["eval"] = ev
     rates = (rep.get("bench") or {}).get("best") or {}
-    choice, why = recommend(rates, rep.get("eval") or {})
-    rep["recommendation"] = {"model": choice, "why": why,
+    used = {"bench": rep["date"] if rates else None, "eval": {m: rep["date"] for m in (rep.get("eval") or {})}}
+    evs = dict(rep.get("eval") or {})
+    for old in sorted((e for e in (earlier or []) if str(e.get("date", "")) < rep["date"]),
+                      key=lambda e: e["date"], reverse=True):
+        if not rates and (old.get("bench") or {}).get("best"):
+            rates, used["bench"] = old["bench"]["best"], old["date"]
+        for m, e in (old.get("eval") or {}).items():
+            if m not in evs:
+                evs[m], used["eval"][m] = e, old["date"]
+    choice, why = recommend(rates, evs)
+    rep["recommendation"] = {"model": choice, "why": why, "inputs": used,
                              "thresholds": {"min_gen_tok_s": MIN_GEN, "min_prompt_tok_s": MIN_PROMPT,
                                             "clearly_worse_by": CLEARLY_WORSE, "graded": list(GRADED)}}
     return rep
@@ -762,7 +774,16 @@ def main(argv=None):
             for path in a.eval:
                 with open(path, encoding="utf-8") as f:
                     evals.append(json.load(f))
-            rep = merge_report(existing, pins, machine, evals=evals, today=a.date, benches=benches)
+            earlier = []
+            for name in sorted(os.listdir(os.path.dirname(os.path.abspath(a.out)))):
+                path = os.path.join(os.path.dirname(os.path.abspath(a.out)), name)
+                if re.match(r"^\d{4}-\d{2}-\d{2}\.json$", name) and os.path.abspath(path) != os.path.abspath(a.out):
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            earlier.append(json.load(f))
+                    except (OSError, ValueError):
+                        pass
+            rep = merge_report(existing, pins, machine, evals=evals, today=a.date, benches=benches, earlier=earlier)
             write_json(a.out, rep)
             rec = rep["recommendation"]
             print("report: %s; recommendation: %s (%s)" % (a.out, rec["model"] or "none yet", "; ".join(rec["why"])))
