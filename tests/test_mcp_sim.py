@@ -391,6 +391,32 @@ class ProfileTools(unittest.TestCase):
         self.assertLess(r["cpu_hours"], 2)
 
 
+class GateCheckProfile(unittest.TestCase):
+    """E48's gate_check profile: its tools are served, and its campaign estimates at or above the gate
+    (AUTO_BELOW_H) yet within the profile's CPU budget and MAX_CAMPAIGN_H, so sim.run waits for the
+    supervisor instead of starting or being refused."""
+
+    def test_the_campaign_waits_at_the_gate(self):
+        from research.agents import loop
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        p = loop.load_profile(os.path.join(root, "research", "agents", "profiles", "gate_check.yaml"))
+        self.assertLessEqual(set(p["tools"]), {"sim.estimate", "sim.run", "sim.status", "sim.results"})
+        step = next(s for s in p["script"] if s.get("tool") == "sim.estimate")
+        run = next(s for s in p["script"] if s.get("tool") == "sim.run")
+        self.assertEqual(step["args"], run["args"])
+        cwd = os.getcwd()
+        os.chdir(root)
+        try:
+            r = mcp_sim.LocalEstimator(root).estimate(step["args"]["spec"])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(r["runs"], 6)
+        # the pod's CPU differs from the host's: keep a margin on both sides
+        self.assertGreaterEqual(r["cpu_hours"], 1.25 * mcp_sim.AUTO_BELOW_H)
+        self.assertLessEqual(r["cpu_hours"] + r["calibration_h"], p["caps"]["cpu_hours"] / 2)
+        self.assertLess(p["caps"]["cpu_hours"], mcp_sim.MAX_CAMPAIGN_H)
+
+
 class ProtocolParity(unittest.TestCase):
     def test_client_and_servers_speak_one_version(self):
         # the agent's client and the MCP servers each had their own constant, and E48's first run got 400

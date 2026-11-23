@@ -1,0 +1,49 @@
+# Exercise E48: fungi_pleurotus_fruiting.yaml unchanged but its name and duration (9000 h), so that a
+# campaign of a few runs estimates above mcp-sim's 2 CPU-hour gate and waits for the supervisor.
+#
+# Pleurotus ostreatus fruiting, 48 simulated hours in one 60 x 60 x 60 cm chamber.
+#
+# Setpoints: the "Fruiting" step of apps/frontend/recipes/Pleurotus_ostreatus.json
+# (air 10-21 C, RH 80-85 %, CO2 500-1000 ppm, substrate 16-18 C), unchanged.
+# Photoperiod: 12 h RED on / 12 h off. Assumption: the recipe file's 1 min / 1 min is a
+# placeholder; with it every recipe cycle (and so every controller restart) would last
+# 2 minutes.
+# Room: 22 C, 55 %RH, 420 ppm (assumed summer lab), so the air sits above the band's
+# upper edge without cooling, and the fungi's respiration pushes CO2 up (twin_plant
+# defaults: ~110 mL/h at 20 C, to calibrate in Phase 3).
+# Disturbances (assumptions, to show recovery): a 5-minute door opening at 24 h for
+# harvest, and the room warming to 25 C from 30 h.
+name: fungi_pleurotus_fruiting_long
+description: The fruiting scenario run for 9000 simulated hours, so a small campaign estimates above the 2 CPU-hour gate (exercise E48)
+duration_h: 9000
+metrics_from_h: 2
+recipe_type: FUNGI
+recipe_line:
+  setpoints:
+    air_temperature: {lower: 10, upper: 21}
+    air_humidity: {lower: 80, upper: 85}
+    co2: {lower: 500, upper: 1000}
+    substrate_temperature: {lower: 16, upper: 18}
+  light_type: RED
+  light_on_minutes: 720
+  light_off_minutes: 720
+loops:
+  # control_loop rows as the onboarding wizard saves them: the SHT45 is the reference for
+  # air temperature and humidity, the SCD30 its fallback (both publish both tags; without
+  # a row the default map's 'single' rule would see two sensors and hold).
+  air_temperature:
+    input: {tag: air_temperature, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+  air_humidity:
+    input: {tag: air_humidity, sources: [sht45, scd30], rule: reference, reference: sht45, fallback: scd30}
+initial:
+  air_temperature: 22
+  air_humidity: 70
+  co2: 900
+  ground_temperature: 22
+ambient:
+  temperature: 22
+  humidity: 55
+  co2: 420
+disturbances:
+  - {at_h: 24, kind: door_open, duration_min: 5}
+  - {at_h: 30, kind: ambient, temperature: 25}
