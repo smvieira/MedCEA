@@ -43,8 +43,8 @@ def estimate_spec(spec, repo_root, allow_codes=None):
     rates = campaign.calibrate(spec, loaded)
     dur = {sc["name"]: sc["duration_h"] for sc in spec["scenarios"]}
     est = sum(rates[(n, c)] * dur[n] for n, c, _, _, _ in runs) / 3600.0
-    # the calibration repeats each slice until it has used CALIBRATION_MIN_CPU_S (campaign.calibrate)
-    cal = sum(max(campaign.CALIBRATION_MIN_CPU_S, r * min(dur[n], campaign.CALIBRATION_H))
+    # the calibration runs each slice once untimed, then repeats it until it has used CALIBRATION_MIN_CPU_S
+    cal = sum(max(campaign.CALIBRATION_MIN_CPU_S, r * min(dur[n], campaign.CALIBRATION_H)) + r * min(dur[n], campaign.CALIBRATION_H)
               for (n, _), r in rates.items()) / 3600.0
     return {"cpu_hours": est, "calibration_h": cal, "runs": len(runs),
             "controller_libraries": {k: bool(v.get("present")) for k, v in libs.items()}}

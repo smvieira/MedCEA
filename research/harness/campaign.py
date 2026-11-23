@@ -194,6 +194,10 @@ def calibrate(spec, loaded):
             # os.times() counts in clock ticks (10 ms): one slice costs a tick or two, so a single
             # measurement was off by up to 2x (E48, 23 Nov 2026: 6.0 and 3.0 CPU-hours for one campaign).
             # The slice is repeated until it has used CALIBRATION_MIN_CPU_S, at most CALIBRATION_MAX_REPS times.
+            # one untimed run first: a fresh process's first slice is slower (imports, caches), which made two
+            # processes estimate the same campaign 25 % apart
+            runner.run_scenario(copy.deepcopy(sc), {"code": c["code"], "params": c["params"]},
+                                spec["seeds"][0], spec["clock_offsets_s"][0], spec["jitter_s"], loaded=loaded)
             t0, reps = cpu_seconds(), 0
             while True:
                 runner.run_scenario(copy.deepcopy(sc), {"code": c["code"], "params": c["params"]},
