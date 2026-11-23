@@ -1,5 +1,5 @@
 # Exercise E48: a scripted session whose campaign estimates above mcp-sim's 2 CPU-hour gate
-# (6 runs of the 9000-hour fruiting scenario, about 3 CPU-hours), so sim.run answers "waiting for
+# (6 runs of the 9000-hour fruiting scenario: about 3 CPU-hours on the host, 6 in the mcp-sim pod), so sim.run answers "waiting for
 # the supervisor" until the person who started the session approves or denies gate <cid>.
 # Approve with a small cap (c.answer(sid, "gates", gid, "approve", cap_h=0.05)) to see the
 # simulation Job stopped at its CPU cap; deny to see the refusal reach the agent.
@@ -10,7 +10,7 @@ caps:
   turns: 6
   prompt_tokens: 8000
   output_tokens: 800
-  cpu_hours: 8
+  cpu_hours: 16
   wall_h: 2
   turn_timeout_s: 30
   context_tokens: 4000

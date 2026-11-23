@@ -108,8 +108,12 @@ class SplitEstimator:
         self.local, self.remote = local, remote
 
     def estimate(self, spec, sid=None):
-        from research.agents import estimate
-        codes = estimate.spec_codes(spec) if isinstance(spec, dict) else None
+        # the codes inline (= research.agents.estimate.spec_codes): this runs before LocalEstimator puts the
+        # bundle root on sys.path, and importing research here failed every estimate (E48, 23 Nov 2026)
+        try:
+            codes = {c["code"] for c in spec["controllers"]}
+        except (KeyError, TypeError):
+            codes = None
         if codes is not None and not codes <= set(CHEAP):
             return self.remote.estimate(spec, sid=sid)
         return self.local.estimate(spec, sid=sid)

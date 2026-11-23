@@ -9,6 +9,7 @@ the server records tool_result on the session's trace (server port, actor = this
 import hashlib
 import json
 import re
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -150,6 +151,10 @@ class McpServer:
             out, err = {"error": clean_text(e, 300)}, True
         except Exception as e:                           # a tool bug is an error result, never a crash
             out, err = {"error": "tool failed: %s" % type(e).__name__}, True
+            # and a line in the server's log (no arguments, no token): E48's ModuleNotFoundError left none
+            first = (str(e).splitlines() or [""])[0][:200]
+            sys.stderr.write("%s: tool %s failed: %s: %s\n" % (self.name, name, type(e).__name__, first))
+            sys.stderr.flush()
         return 200, self._ok(rid, self._result(sid, name, n, out, err))
 
     def _result(self, sid, name, n, out, err):

@@ -274,6 +274,30 @@ class Remote(unittest.TestCase):
         self.assertFalse(s.estimate(mk("MPC"))["inprocess"])
         self.assertTrue(s.estimate({"nonsense": 1})["inprocess"])         # malformed: the local one refuses it in words
 
+    def test_the_estimate_works_as_the_pod_runs_it(self):
+        # mcp-sim runs as `python3 <bundle>/apps/research-agents/mcp_sim.py`: only that folder is on sys.path,
+        # never the bundle root. SplitEstimator imported research.agents there and every estimate failed
+        # ModuleNotFoundError (E48, 23 Nov 2026); this test ran with the repository root importable.
+        import subprocess
+        code = (
+            "import sys, json\n"
+            "sys.path[:] = [p for p in sys.path if p not in ('', %r)]\n"
+            "sys.path.insert(0, %r)\n"
+            "import mcp_sim\n"
+            "e = mcp_sim.SplitEstimator(mcp_sim.LocalEstimator(%r), None)\n"
+            "spec = {'scenarios': ['research/harness/scenarios/smoke_air_temperature.yaml'],\n"
+            "        'controllers': [{'code': 'PID'}], 'seeds': [1], 'clock_offsets_s': [0]}\n"
+            "try:\n"
+            "    print(json.dumps({'ok': e.estimate(spec, sid='x')['runs']}))\n"
+            "except Exception as x:\n"
+            "    print(json.dumps({'error': type(x).__name__, 'message': str(x)[:200]}))\n"
+        ) % (ROOT, os.path.join(ROOT, "apps", "research-agents"), ROOT)
+        out = subprocess.run([sys.executable, "-I", "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
+        r = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertNotIn(r.get("error"), ("ModuleNotFoundError", "ImportError"), r)
+        if "error" not in r or "differ from HEAD" not in r.get("message", ""):   # a dirty working tree is refused, fine
+            self.assertEqual(r, {"ok": 1})
+
     def test_the_local_estimator_still_refuses_flc_and_mpc_in_words(self):
         spec = {"controllers": [{"code": "FLC", "params": {}}], "scenarios": [], "seeds": [1], "clock_offsets_s": [0]}
         with self.assertRaises(ToolRefused) as c:

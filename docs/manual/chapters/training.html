@@ -1768,7 +1768,7 @@ SQL</code></pre></li>
 <li>Keep watching until the session stops with the reason <code>finished</code>.</li>
 <li><code>c.replay(sid)</code> once the session has stopped: the orchestrator runs Job <code>replay-&lt;id&gt;</code> and the call returns its verdict.</li>
 <li>On the host, <code>./apps/backup/backups.sh now</code>, then <code>./health-check.sh</code>.</li>
-<li>The gate: <code>sid2 = c.start("gate_check")</code>, then <code>c.watch(sid2)</code>. Its campaign (six runs of a 9,000-hour fruiting scenario) estimates about 3 CPU-hours, so it waits. Note the gate id the watch prints.</li>
+<li>The gate: <code>sid2 = c.start("gate_check")</code>, then <code>c.watch(sid2)</code>. Its campaign (six runs of a 9,000-hour fruiting scenario) estimates about 3 to 6 CPU-hours, so it waits. Note the gate id the watch prints.</li>
 <li>As the bio scientist, in their own notebook: <code>c.answer("&lt;sid2&gt;", "gates", "&lt;gid&gt;", "approve")</code>.</li>
 <li>As the control scientist: <code>c.answer(sid2, "gates", gid, "approve", cap_h=0.05)</code>, and keep watching until the session stops.</li>
 </ol>
