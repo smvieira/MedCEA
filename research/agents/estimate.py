@@ -25,7 +25,8 @@ def estimate_spec(spec, repo_root, allow_codes=None):
     try:
         spec = campaign.resolve_spec(copy.deepcopy(spec), repo_root=repo_root)
     except campaign.CampaignError as e:
-        raise EstimateRefused("spec refused: %s" % e)
+        raise EstimateRefused("spec refused: %s (a spec is {scenarios: [file], controllers: [{code, params_grid?}], "
+                              "seeds: [int], clock_offsets_s?: [number]})" % e)
     codes = {c["code"] for c in spec["controllers"]}
     if allow_codes is not None and not codes <= set(allow_codes):
         raise EstimateRefused("a spec with %s needs an estimate Job: not available in this deployment"

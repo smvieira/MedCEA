@@ -410,6 +410,59 @@ class ProfileTools(unittest.TestCase):
         self.assertLess(r["cpu_hours"], 2)
 
 
+class SpecSchema(unittest.TestCase):
+    """The spec schema a model sees is the campaign spec's real shape (E49, 23 Nov 2026: with a bare
+    {"type": "object"} the local model sent a flat spec, refused twice)."""
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_codes_are_the_parameter_schemas(self):
+        params = mcp_sim._load_params(self.root)
+        self.assertEqual(sorted(mcp_sim.CODES), sorted(params.PARAMS))
+
+    def test_keys_are_resolve_specs(self):
+        sys.path.insert(0, self.root)
+        from research.harness import campaign
+        self.assertEqual(set(mcp_sim.CAMPAIGN_SPEC["properties"]), campaign.SPEC_KEYS)
+
+    def test_the_scripted_specs_fit_the_schema(self):
+        sys.path.insert(0, self.root)
+        from research.agents import loop
+        p = loop.load_profile(os.path.join(self.root, "research", "agents", "profiles", "compare_controllers.yaml"))
+        props = mcp_sim.CAMPAIGN_SPEC["properties"]
+        ctrl = props["controllers"]["items"]
+        for step in p["script"]:
+            spec = (step.get("args") or {}).get("spec")
+            if spec is None:
+                continue
+            self.assertLessEqual(set(spec), set(props))
+            self.assertLessEqual(set(mcp_sim.CAMPAIGN_SPEC["required"]), set(spec))
+            for c in spec["controllers"]:
+                self.assertLessEqual(set(c), set(ctrl["properties"]))
+                self.assertIn(c["code"], ctrl["properties"]["code"]["enum"])
+
+    def test_the_local_profile_still_starts_well_inside_its_context(self):
+        sys.path.insert(0, self.root)
+        from research.agents import loop
+        from research.agents.context import Context
+        a = os.path.join(self.root, "research", "agents")
+        p = loop.load_profile(os.path.join(a, "profiles", "compare_controllers_local.yaml"))
+        s, _, sim = setup()
+        import mcp_lake
+        listed = {t["name"]: t for t in rpc(sim, "tools/list")[1]["result"]["tools"]}
+        lake = mcp_lake.LakeServer(FakeSession(["lake.snapshots", "lake.summary", "lake.catalogue"]), None).app
+        listed.update({t["name"]: t for t in rpc(lake, "tools/list")[1]["result"]["tools"]})
+        spec = [{"name": n, "description": listed[n].get("description", ""), "inputSchema": listed[n]["inputSchema"]}
+                for n in p["tools"] if n in listed]
+        with open(os.path.join(a, "policy", "standing.md"), encoding="utf-8") as f:
+            standing = f.read()
+        with open(os.path.join(a, "skills", "controller_campaign_local.md"), encoding="utf-8") as f:
+            skill = f.read()
+        ctx = Context(standing, skill, spec)
+        ctx.add("user", p["task"])
+        self.assertLess(ctx.est_tokens(), p["caps"]["context_tokens"] // 2)
+
+
 class GateCheckProfile(unittest.TestCase):
     """E48's gate_check profile: its tools are served, and its campaign estimates at or above the gate
     (AUTO_BELOW_H) yet within the profile's CPU budget and MAX_CAMPAIGN_H, so sim.run waits for the

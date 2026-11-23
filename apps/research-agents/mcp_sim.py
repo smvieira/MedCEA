@@ -32,7 +32,24 @@ AUTO_BELOW_H = 2.0
 MAX_CAMPAIGN_H = 24.0
 SESSION_DEFAULT_H = 16.0
 CHEAP = ("IF_THEN_ELSE", "PID", "Q_LEARNING")
-SPEC_SCHEMA = {"type": "object", "properties": {"spec": {"type": "object"}}, "required": ["spec"]}
+# The campaign spec's shape (research/harness/campaign.py resolve_spec): a model sees only this, so it is
+# written out in full (E49, 23 Nov 2026: with {"type": "object"} the local model guessed a flat spec)
+CODES = ("IF_THEN_ELSE", "PID", "FLC", "MPC", "Q_LEARNING")     # = params.PARAMS (test)
+CAMPAIGN_SPEC = {
+    "type": "object", "additionalProperties": False, "required": ["scenarios", "controllers", "seeds"],
+    "properties": {
+        "scenarios": {"type": "array", "minItems": 1, "items": {"type": "string"},
+                      "description": "scenario files, e.g. research/harness/scenarios/smoke_air_temperature.yaml"},
+        "controllers": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": False, "required": ["code"],
+            "properties": {"code": {"type": "string", "enum": list(CODES)},
+                           "params": {"type": "object", "description": "fixed parameters"},
+                           "params_grid": {"type": "object", "description": "parameter -> list of values to try"}}}},
+        "seeds": {"type": "array", "minItems": 1, "items": {"type": "integer"}},
+        "clock_offsets_s": {"type": "array", "minItems": 1, "items": {"type": "number"}},
+        "jitter_s": {"type": "number"},
+        "description": {"type": "string"}}}
+SPEC_SCHEMA = {"type": "object", "properties": {"spec": CAMPAIGN_SPEC}, "required": ["spec"]}
 CID_SCHEMA = {"type": "object", "properties": {"cid": {"type": "string"}, "top": {"type": "integer"}}, "required": ["cid"]}
 
 
