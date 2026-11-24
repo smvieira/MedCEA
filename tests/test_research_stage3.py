@@ -369,6 +369,16 @@ class EstimateMode(unittest.TestCase):
         with self.assertRaises(estimate.EstimateRefused):
             estimate.estimate_spec(spec, ROOT)
 
+    def test_the_estimate_checks_every_grid_value(self):
+        """E49 (24 Nov 2026): a params_grid key the algorithm does not take passed the estimate and failed the Job."""
+        from research.agents import estimate
+        spec = {"scenarios": ["research/harness/scenarios/smoke_air_temperature.yaml"], "seeds": [1],
+                "controllers": [{"code": "IF_THEN_ELSE", "params_grid": {"cycle_time": [10.0, 30.0]}}]}
+        with self.assertRaises(estimate.EstimateRefused) as cm:
+            estimate.estimate_spec(spec, ROOT)
+        self.assertIn("IF_THEN_ELSE", str(cm.exception))
+        self.assertIn("cycle_time", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

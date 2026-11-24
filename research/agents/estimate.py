@@ -5,6 +5,7 @@ harness's own: resolve the spec, check every scenario, run one short calibration
 controller) and extrapolate by the scenario's duration. Raises EstimateRefused with a message fit for a
 tool result. Needs the code bundle's root (research/, schd/cea/algorithms/)."""
 import copy
+import json
 
 
 class EstimateRefused(Exception):
@@ -39,6 +40,13 @@ def estimate_spec(spec, repo_root, allow_codes=None):
             raise EstimateRefused("%s's libraries are not installed here (%s): the estimate would be bang-bang's"
                                   % (code, str(libs[code].get("reason"))[:100]))
     runs = campaign.expand(spec)
+    # every expanded parameter set, not only a controller's fixed params: a params_grid key the algorithm does not
+    # take passed the estimate and failed the campaign Job a minute later (E49, 24 Nov 2026)
+    for code, params in sorted({(c, p) for _, c, p, _, _ in runs}):
+        try:
+            loaded.check(code, json.loads(params))
+        except algorithms_loader.LoaderError as e:
+            raise EstimateRefused("spec refused: %s: %s" % (code, str(e)[:200]))
     for sc in spec["scenarios"]:
         runner.normalise(copy.deepcopy(sc), loaded)
     rates = campaign.calibrate(spec, loaded)

@@ -117,10 +117,15 @@ class SimTest(unittest.TestCase):
         self.assertEqual(r.started[0][1], 6.0)                                         # min(1.25*5+.05, 6)
         self.assertEqual(len(r.started), 1)
         r.final = {"state": "done", "cpu_hours": 4.2, "manifest": {"runs": 10, "invalid_runs": 0, "result_digest": "d" * 64, "spec_digest": "s" * 64},
-                   "rows": [{"scenario": "a", "code": "PID", "seed": 1, "valid": True, "metrics": {"rmse": 0.5, "trace": [1, 2]}}]}
+                   "rows": [{"scenario": "a", "controller": {"code": "PID", "params": {"kp": 1.234567}}, "seed": 1,
+                             "valid": True, "energy_total_wh": 12.0,
+                             "loops": {"air_temperature": {"rmsd_mid": 0.5, "samples": 360, "tag": "x"}}}]}
         p = payload(call(app, "sim.results", {"cid": gid})[1])
         self.assertEqual(p["result_digest"], "d" * 64)
-        self.assertEqual(p["top"][0]["metrics"], {"rmse": 0.5})
+        self.assertEqual(p["top"][0]["code"], "PID")
+        self.assertEqual(p["top"][0]["params"], {"kp": 1.235})
+        self.assertEqual(p["top"][0]["loops"], {"air_temperature": [0.5, None, None]})
+        self.assertEqual(p["loop_metrics"], ["rmsd_mid", "out_of_band", "boundary_hugging"])
         self.assertEqual(s.of("sim_finished")[0]["result_digest"], "d" * 64)
 
     def test_gate_denied(self):
@@ -502,3 +507,34 @@ class ProtocolParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResultsShape(unittest.TestCase):
+    """sim.results shows what the harness writes (E49, 24 Nov 2026: it read keys no row has, metrics {})."""
+
+    def test_a_real_row(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, repo)
+        import copy
+        import yaml
+        from research.harness import algorithms_loader, runner
+        with open(os.path.join(repo, "research/harness/scenarios/smoke_air_temperature.yaml"), encoding="utf-8") as f:
+            sc = yaml.safe_load(f)
+        row = runner.run_scenario(copy.deepcopy(sc), {"code": "PID", "params": {"cycle_time": 30.0}}, 1,
+                                  loaded=algorithms_loader.load(repo, allow_dirty=True))
+        out = mcp_sim.summarise_row(row)
+        self.assertEqual(out["code"], "PID")
+        self.assertEqual(out["params"], {"cycle_time": 30.0})
+        self.assertTrue(out["valid"])
+        self.assertIn("energy_wh", out)
+        self.assertTrue(out["loops"])
+        for m in out["loops"].values():
+            self.assertEqual(len(m), len(mcp_sim.LOOP_METRICS))
+            self.assertIsInstance(m[0], float)
+        self.assertNotIn("clock_offset_s", out)                 # 0 is left out
+        # an agent sees the first 1000 characters of a result: three rows and the header fit
+        from mcp_common import canonical
+        shown = canonical({"cid": "c" * 21, "state": "done", "runs": 3, "invalid_runs": 0, "result_digest": "d" * 64,
+                           "spec_digest": "s" * 64, "cpu_hours": 0.0058, "loop_metrics": list(mcp_sim.LOOP_METRICS),
+                           "top": [out] * 3})
+        self.assertLess(len(shown), 1000, shown)

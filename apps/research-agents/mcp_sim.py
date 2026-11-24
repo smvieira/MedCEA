@@ -77,6 +77,35 @@ DEADLINE_FLOOR_S = 300
 # count: a 3-run campaign estimated 0.0002 CPU-hours and spent 0.001 (E48). The cap never goes below this.
 CAP_FLOOR_H = 0.01
 
+
+LOOP_METRICS = ("rmsd_mid", "out_of_band", "boundary_hugging")     # each loop's array, in this order
+
+
+def _num(v):
+    """A metric as the model sees it: 4 significant digits; None (no samples) stays None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return v if isinstance(v, int) else float("%.4g" % v)
+
+
+def summarise_row(r):
+    """One result row of research/harness/runner.run_scenario as sim.results shows it: the controller and its
+    parameters, the run's seed (and clock offset when not 0), validity, total energy and each active loop's
+    metrics as [rmsd_mid, out_of_band, boundary_hugging]: compact, because an agent sees only the first 1000
+    characters of a tool result (research/agents/context.py SHOWN_MAX). Until
+    24 Nov 2026 this read top-level `code`/`metrics` keys the runner never writes, so a model got metrics {}
+    (E49's second session)."""
+    ctl = r.get("controller") if isinstance(r.get("controller"), dict) else {}
+    out = {"scenario": r.get("scenario"), "code": ctl.get("code", r.get("code")),
+           "params": {k: _num(v) for k, v in (ctl.get("params") or {}).items()},
+           "seed": r.get("seed"), "clock_offset_s": _num(r.get("clock_offset_s")) or None, "valid": r.get("valid")}
+    if r.get("invalid_reasons"):
+        out["invalid_reasons"] = [str(x)[:120] for x in r["invalid_reasons"][:2]]
+    out["energy_wh"] = _num(r.get("energy_total_wh"))
+    out["loops"] = {str(k): [_num(v.get(m)) for m in LOOP_METRICS]
+                    for k, v in sorted((r.get("loops") or {}).items()) if isinstance(v, dict)}
+    return {k: v for k, v in out.items() if v is not None}
+
 class LocalEstimator:
     """In-process estimate (R7) for PID / bang-bang / Q-learning specs with research/harness/campaign.py;
     FLC and MPC import their libraries and cost far more, so they go to an estimate Job (RemoteEstimator)."""
@@ -279,15 +308,10 @@ class SimServer:
         top = args.get("top", 10)
         top = top if isinstance(top, int) and not isinstance(top, bool) and 1 <= top <= 10 else 10
         m = c["final"].get("manifest") or {}
-        rows = []
-        for r in (c["final"].get("rows") or [])[:top]:
-            if isinstance(r, dict):
-                rows.append({k: r[k] for k in ("scenario", "code", "seed", "valid") if k in r}
-                            | {"metrics": {k: v for k, v in (r.get("metrics") or {}).items()
-                                           if isinstance(v, (int, float)) and not isinstance(v, bool)}})
+        rows = [summarise_row(r) for r in (c["final"].get("rows") or [])[:top] if isinstance(r, dict)]
         return {"cid": cid, "state": "done", "runs": m.get("runs"), "invalid_runs": m.get("invalid_runs"),
                 "result_digest": m.get("result_digest"), "spec_digest": m.get("spec_digest"),
-                "cpu_hours": out.get("cpu_hours"), "top": clean_obj(rows)}
+                "cpu_hours": out.get("cpu_hours"), "loop_metrics": list(LOOP_METRICS), "top": clean_obj(rows)}
 
     def t_propose(self, ctx, args):
         """A candidate parameter set (research Phase 4a stage 7a). Nothing is written to production: the
