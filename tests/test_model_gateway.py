@@ -164,12 +164,15 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(m[2]["tool_calls"][0]["function"]["arguments"], "{}")
         self.assertEqual(m[3], {"role": "tool", "tool_call_id": m[2]["tool_calls"][0]["id"], "content": "<tool_result>x</tool_result>"})
 
-    def test_max_tokens_is_bounded_by_the_session_and_1024(self):
+    def test_max_tokens_is_bounded_by_the_session_and_the_local_limit(self):
         self.turn()
-        self.assertEqual(self.llm.requests[-1][1]["max_tokens"], 800)
+        self.assertEqual(self.llm.requests[-1][1]["max_tokens"], gateway.LOCAL_MAX_OUTPUT)      # 800 left
         self.sess.info["budget_left"]["output_tokens"] = 5000
         self.turn()
-        self.assertEqual(self.llm.requests[-1][1]["max_tokens"], 1024)
+        self.assertEqual(self.llm.requests[-1][1]["max_tokens"], 400)
+        self.sess.info["budget_left"]["output_tokens"] = 250
+        self.turn()
+        self.assertEqual(self.llm.requests[-1][1]["max_tokens"], 250)
         self.sess.info["budget_left"]["output_tokens"] = 3
         self.turn()
         self.assertEqual(self.llm.requests[-1][1]["max_tokens"], 16)
@@ -203,6 +206,20 @@ class GatewayTest(unittest.TestCase):
                 self.assertIsNone(out["tool"])
                 self.assertTrue(out["tool_error"])
                 self.assertIn("text", out)
+
+    def test_an_answer_cut_at_the_limit_is_a_refused_call(self):
+        """E49, 24 Nov 2026: a runaway answer must come back as something the model can retry, not model_error."""
+        self.llm.answer = text_answer("I will now " * 50, finish="length")
+        st, out = self.turn()
+        self.assertEqual(st, 200)
+        self.assertIsNone(out["tool"])
+        self.assertIn("cut off", out["tool_error"])
+        self.llm.answer = text_answer("", [call("sim_run", {"spec": {}})], finish="length")
+        st, out = self.turn()
+        self.assertEqual(out["tool"], {"name": "sim.run", "args": {"spec": {}}})                # a whole call stands
+        self.assertNotIn("tool_error", out)
+        self.llm.answer = text_answer("All done.", finish="stop")
+        self.assertNotIn("tool_error", self.turn()[1])
 
     def test_text_is_cut(self):
         self.llm.answer = text_answer("x" * 5000)

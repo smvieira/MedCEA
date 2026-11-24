@@ -48,6 +48,10 @@ MAX_TOKENS_DEFAULT = 400
 SAMPLER = {"temperature": 0, "top_k": 1, "seed": 1}        # the fixed greedy set, nothing else is ever sent
 FLAGS = {"sampler": SAMPLER, "enable_thinking": False, "cache_prompt": True, "tool_choice": "auto", "slots": 1}
 MALFORMED_TEXT = ("<tool_call>",)
+# a local turn is one tool call (the longest seen, E49: 120 tokens); at 1.2-1.4 tokens/s a runaway answer under the
+# 1024 cap ran into the 540-s timeout and ended the session with model_error (24 Nov 2026), so the local model stops
+# at 400 (about 5 min) and a cut answer comes back as a refused call the model can retry
+LOCAL_MAX_OUTPUT = 400
 
 
 def canonical_bytes(obj):
@@ -114,7 +118,11 @@ def read_answer(raw, names):
             out["tool"] = {"name": name, "args": args}
     elif any(x in text for x in MALFORMED_TEXT):
         out["tool_error"] = "a tool call was written as text"
-    return out, choice.get("finish_reason")
+    finish = choice.get("finish_reason")
+    if finish == "length" and out["tool"] is None and "tool_error" not in out:
+        out["tool_error"] = ("the answer was cut off at the output limit without a tool call: "
+                             "answer with one tool call, or a short final answer")
+    return out, finish
 
 
 class Llm:
@@ -145,6 +153,7 @@ class LlamaBackend:
     def __init__(self, llm, alias, model_sha256="", ctx=4096, name="local"):
         self.llm, self.alias, self.model_sha256, self.ctx, self.name = llm, alias, model_sha256, ctx, name
         self.flags = dict(FLAGS)
+        self.max_output = LOCAL_MAX_OUTPUT
 
     def body(self, msgs, tools, max_tokens):
         b = {"model": self.alias, "messages": msgs, "max_tokens": max_tokens, "cache_prompt": True, "stream": False,
