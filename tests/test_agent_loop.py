@@ -41,7 +41,8 @@ class FakeTools:
         self.calls = []
 
     def list_tools(self):
-        return [{"name": n, "description": n} for n in ("sim.estimate", "sim.run", "lake.query", "propose.candidate", "admin.drop")]
+        return [{"name": n, "description": n} for n in ("sim.estimate", "sim.run", "lake.query", "propose.candidate", "admin.drop",
+                                                          "propose.parameter_set")]
 
     def call(self, name, args):
         self.calls.append((name, args))
@@ -215,7 +216,7 @@ class GatewayStub:
         self.id = "gateway"
 
     def respond(self, request):
-        self.requests.append(request)
+        self.requests.append(copy.deepcopy(request))     # the loop's request holds its live message list
         a = self.answers.pop(0)
         if isinstance(a, Exception):
             self.events.append({"actor": "model-gateway", "event": "turn_request", "payload": {
@@ -232,8 +233,11 @@ class GatewayStub:
         return dict(resp, usage=usage)
 
 
-def go_local(answers, profile=None, tools=None):
+def go_local(answers, profile=None, tools=None, nudge=False):
+    """nudge=False takes finish_after out of the local profile (the older tests end on a text answer)."""
     p = profile or loop.load_profile(LOCAL)
+    if not nudge and profile is None:
+        p.pop("finish_after", None)
     s = FakeSession()
     t = TraceClient(s, "S" * 22)
     t.claim("c")
@@ -332,6 +336,42 @@ class Local(unittest.TestCase):
         reason, _, _, gw, _ = go_local([dict(call, usage={"prompt_tokens": 1000, "output_tokens": 5}),
                                         {"text": "done", "usage": {"prompt_tokens": 1100, "output_tokens": 1}}])
         self.assertEqual((reason, len(gw.requests)), ("finished", 2))
+
+    def test_a_text_answer_before_the_proposal_is_nudged(self):
+        """E49 (25 Nov 2026): 'I cannot make multiple tool calls' on turn 2 ended the session as finished."""
+        p = loop.load_profile(LOCAL)
+        self.assertEqual((p["finish_after"], p["nudges"]), (["propose.parameter_set"], 1))
+        run = {"text": "", "tool": {"name": "sim.run", "args": {}}}
+        prop = {"text": "", "tool": {"name": "propose.parameter_set", "args": {}}}
+        # nudged once, then the model goes on and proposes, then a text answer finishes
+        reason, ev, _, gw, _ = go_local([{"text": "I cannot."}, run, prop, {"text": "The plan is complete."}], nudge=True)
+        self.assertEqual(reason, "finished")
+        self.assertEqual(len(gw.requests), 4)
+        nudge = gw.requests[1]["messages"][-1]
+        self.assertEqual(nudge, {"role": "user", "content": loop.NUDGE % "propose.parameter_set"})
+        self.assertEqual(gw.requests[1]["messages"][-2], {"role": "assistant", "content": "I cannot.", "tool_call": None})
+        # a second text answer before the proposal stops the session, not as finished
+        reason, ev, _, gw, _ = go_local([{"text": "I cannot."}, {"text": "Still no."}], nudge=True)
+        self.assertEqual(reason, "no_tool_call")
+        self.assertEqual(ev[-1]["payload"]["turns"], 2)
+        # a refused proposal does not count
+        bad = FakeTools()
+        reason, _, _, _, _ = go_local([{"text": "", "tool": {"name": "nope", "args": {}}}, {"text": "done"}, {"text": "done"}],
+                                      tools=bad, nudge=True)
+        self.assertEqual(reason, "no_tool_call")
+
+    def test_finish_after_and_nudges_are_checked(self):
+        import tempfile
+        import yaml
+        for k, v in (("finish_after", ["lake.nope"]), ("finish_after", "propose.parameter_set"), ("nudges", 4),
+                     ("nudges", -1), ("nudges", True)):
+            q = copy.deepcopy(loop.load_profile(LOCAL))
+            q[k] = v
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+                yaml.safe_dump(q, f)
+            with self.assertRaises(ValueError, msg=(k, v)):
+                loop.load_profile(f.name)
+            os.unlink(f.name)
 
     def test_reserve_tokens_is_checked(self):
         import tempfile

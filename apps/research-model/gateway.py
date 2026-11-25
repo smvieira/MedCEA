@@ -46,7 +46,11 @@ TEXT_MAX = 2000
 MAX_TOKENS_CAP = 1024
 MAX_TOKENS_DEFAULT = 400
 SAMPLER = {"temperature": 0, "top_k": 1, "seed": 1}        # the fixed greedy set, nothing else is ever sent
-FLAGS = {"sampler": SAMPLER, "enable_thinking": False, "cache_prompt": True, "tool_choice": "auto", "slots": 1}
+FLAGS = {"sampler": SAMPLER, "enable_thinking": False, "cache_prompt": True, "tool_choice": "auto",
+         "parallel_tool_calls": False, "slots": 1}
+# one call per answer: the loop runs one tool per turn. E49 (25 Nov 2026): the local model wrote several calls in
+# one answer until the output limit, twice; parallel_tool_calls false asks the server for one, and if an answer
+# still holds several, the first well-formed one is taken and the count of the others is recorded (dropped_calls)
 MALFORMED_TEXT = ("<tool_call>",)
 # a local turn is one tool call (the longest seen, E49: 120 tokens); at 1.2-1.4 tokens/s a runaway answer under the
 # 1024 cap ran into the 540-s timeout and ended the session with model_error (24 Nov 2026), so the local model stops
@@ -92,7 +96,9 @@ def translate(request):
 
 
 def read_answer(raw, names):
-    """The llama-server answer -> ({text, tool, tool_error?}, finish_reason). Never raises."""
+    """The llama-server answer -> ({text, tool, tool_error?}, finish_reason). Never raises. Of several calls the
+    first is read and the others are counted in the internal key '_dropped' (the gateway records it beside the
+    response, never in it)."""
     try:
         choice = raw["choices"][0]
         msg = choice.get("message") or {}
@@ -101,8 +107,8 @@ def read_answer(raw, names):
     text = str(msg.get("content") or "")[:TEXT_MAX]
     out, calls = {"text": text, "tool": None}, msg.get("tool_calls") or []
     if len(calls) > 1:
-        out["tool_error"] = "only one tool call per turn is allowed"
-    elif calls:
+        out["_dropped"] = len(calls) - 1
+    if calls:
         f = (calls[0] or {}).get("function") or {}
         name = names.get(f.get("name"))
         args = f.get("arguments")
@@ -160,7 +166,7 @@ class LlamaBackend:
              "chat_template_kwargs": {"enable_thinking": False}}
         b.update(SAMPLER)
         if tools:
-            b["tools"], b["tool_choice"] = tools, "auto"
+            b["tools"], b["tool_choice"], b["parallel_tool_calls"] = tools, "auto", False
         return b
 
     @staticmethod
@@ -178,7 +184,7 @@ class OpenAIBackend:
         self.llm, self.name, self.alias, self.ctx = llm, name, model, ctx
         self.model_sha256, self.max_output, self.deterministic, self.key_file = "", max_output, deterministic, key_file
         self.flags = {"sampler": dict({"temperature": 0}, **({"seed": 1} if deterministic else {})),
-                      "tool_choice": "auto", "slots": 1, "endpoint_kind": "openai"}
+                      "tool_choice": "auto", "parallel_tool_calls": False, "slots": 1, "endpoint_kind": "openai"}
 
     def headers(self):
         if not self.key_file:
@@ -191,7 +197,7 @@ class OpenAIBackend:
         if self.deterministic:
             b["seed"] = 1
         if tools:
-            b["tools"], b["tool_choice"] = tools, "auto"
+            b["tools"], b["tool_choice"], b["parallel_tool_calls"] = tools, "auto", False
         return b
 
     @staticmethod
@@ -294,6 +300,7 @@ class Gateway:
             self.session.trace(sid, "turn_response", {"turn": turn, "error": why, "status": st})
             return (413 if ctxfull else 502), {"error": why}
         resp, finish = read_answer(raw, names)
+        dropped = resp.pop("_dropped", 0)
         u, tm = raw.get("usage") or {}, raw.get("timings") or {}
         usage = {"prompt_tokens": int(u.get("prompt_tokens") or 0), "output_tokens": int(u.get("completion_tokens") or 0),
                  "estimated": False}
@@ -301,7 +308,8 @@ class Gateway:
             usage["cache_n"] = tm["cache_n"]
         st, b = self.session.trace(sid, "turn_response", {
             "turn": turn, "response": resp, "response_sha256": sha(canonical_bytes(resp)),
-            "raw_response_sha256": sha(canonical_bytes(raw)), "finish_reason": finish, "usage": usage})
+            "raw_response_sha256": sha(canonical_bytes(raw)), "finish_reason": finish, "usage": usage,
+            **({"dropped_calls": dropped} if dropped else {})})
         if st != 200:
             return (403 if st == 403 else 503), {"error": "the trace did not accept the answer"}
         return 200, dict(resp, usage=usage)

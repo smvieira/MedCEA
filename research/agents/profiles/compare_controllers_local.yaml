@@ -20,3 +20,5 @@ caps:
   context_tokens: 4000
   reserve_tokens: 300
 checkpoint_every: 4
+finish_after: [propose.parameter_set]     # a text answer before a proposal is nudged once (loop.NUDGE)
+nudges: 1

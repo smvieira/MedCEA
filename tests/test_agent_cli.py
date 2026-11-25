@@ -270,7 +270,8 @@ class RunAgentTest(unittest.TestCase):
         env = dict(self.ENV, MEDCEA_PROFILE="compare_controllers_local", MEDCEA_MODEL_GATEWAY="http://model-gateway:8120")
         asked = []
         answers = [{"text": "Plan.", "tool": {"name": "sim.run", "args": {}}, "usage": {"prompt_tokens": 10, "output_tokens": 5}},
-                   {"text": "The plan is complete.", "tool": None}]
+                   {"text": "The plan is complete.", "tool": None},
+                   {"text": "Still complete.", "tool": None}]       # nudged once (finish_after), then no_tool_call
 
         def gw(url, token, body, timeout):
             asked.append((url, token, body["sid"], body["turn"], sorted(body["request"]), body["request"]["tools"][0]["inputSchema"]))
@@ -286,7 +287,8 @@ class RunAgentTest(unittest.TestCase):
         rc = run_agent.main(env, transport=sess, tool_transport=Mcp(), sleep=lambda s: None, gateway_post=gw)
         self.assertEqual(rc, 0)
         self.assertEqual([a[:4] for a in asked], [("http://model-gateway:8120/v1/turn", "tok", "S" * 22, 1),
-                                                 ("http://model-gateway:8120/v1/turn", "tok", "S" * 22, 2)])
+                                                 ("http://model-gateway:8120/v1/turn", "tok", "S" * 22, 2),
+                                                 ("http://model-gateway:8120/v1/turn", "tok", "S" * 22, 3)])
         self.assertEqual(asked[0][5], {"type": "object", "properties": {"x": {"type": "integer"}}})
         # the agent wrote no turn_request/turn_response: the gateway does
         self.assertEqual(sess.events, ["tool_call", "tool_result", "stop"])

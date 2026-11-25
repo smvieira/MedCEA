@@ -149,7 +149,8 @@ class GatewayTest(unittest.TestCase):
         self.assertIs(b["cache_prompt"], True)
         # nothing in the body but the fixed greedy set, the model, the messages and the caps
         self.assertEqual(set(b) - {"model", "messages", "tools", "tool_choice", "max_tokens", "cache_prompt", "stream",
-                                   "chat_template_kwargs"}, {"temperature", "top_k", "seed"})
+                                   "chat_template_kwargs", "parallel_tool_calls"}, {"temperature", "top_k", "seed"})
+        self.assertIs(b["parallel_tool_calls"], False)
         self.assertEqual((b["temperature"], b["top_k"], b["seed"]), (0, 1, 1))
         self.assertEqual(b["model"], "alias-1")
         self.assertEqual(b["messages"], [{"role": "system", "content": "SYS"}, {"role": "user", "content": "Do it."}])
@@ -196,7 +197,6 @@ class GatewayTest(unittest.TestCase):
         for name, ans in (("unknown tool", text_answer("", [call("nope", {})])),
                           ("arguments not JSON", text_answer("", [call("sim_run", "{broken")])),
                           ("arguments not an object", text_answer("", [call("sim_run", "[1]")])),
-                          ("two calls", text_answer("", [call("sim_run", {}), call("lake_snapshots", {})])),
                           ("written as text", text_answer('<tool_call>{"name": "sim_run"}</tool_call>')),
                           ("no choices", {"error": "x"})):
             with self.subTest(name):
@@ -206,6 +206,29 @@ class GatewayTest(unittest.TestCase):
                 self.assertIsNone(out["tool"])
                 self.assertTrue(out["tool_error"])
                 self.assertIn("text", out)
+
+    def test_of_several_calls_the_first_is_taken(self):
+        """E49, 25 Nov 2026: the local model wrote several calls in one answer; one is asked for
+        (parallel_tool_calls false), and of several the first is read and the rest counted in the record."""
+        self.llm.answer = text_answer("", [call("sim_run", {"spec": {}}), call("lake_snapshots", {})], finish="length")
+        st, out = self.turn()
+        self.assertEqual(st, 200)
+        self.assertEqual(out["tool"], {"name": "sim.run", "args": {"spec": {}}})
+        self.assertNotIn("tool_error", out)
+        self.assertNotIn("_dropped", out)
+        rec = [e for e in self.sess.events if e["event"] == "turn_response"][-1]["payload"]
+        self.assertEqual(rec["dropped_calls"], 1)
+        self.assertNotIn("_dropped", rec["response"])
+        self.assertIs(self.llm.requests[-1][1]["parallel_tool_calls"], False)
+        req = [e for e in self.sess.events if e["event"] == "turn_request"][-1]["payload"]
+        self.assertIs(req["flags"]["parallel_tool_calls"], False)
+        # a bad first call is still a refused call
+        self.llm.answer = text_answer("", [call("nope", {}), call("sim_run", {})])
+        self.assertTrue(self.turn()[1]["tool_error"])
+        self.llm.answer = text_answer("", [call("sim_run", {})])
+        self.turn()
+        rec = [e for e in self.sess.events if e["event"] == "turn_response"][-1]["payload"]
+        self.assertNotIn("dropped_calls", rec)
 
     def test_an_answer_cut_at_the_limit_is_a_refused_call(self):
         """E49, 24 Nov 2026: a runaway answer must come back as something the model can retry, not model_error."""

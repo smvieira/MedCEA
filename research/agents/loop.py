@@ -32,6 +32,12 @@ CAPS = ("turns", "prompt_tokens", "output_tokens", "cpu_hours", "wall_h", "turn_
 
 
 MALFORMED = "invalid_call"
+# profile.finish_after: tools of which one must have succeeded before an answer without a tool call ends the session.
+# Earlier, such an answer is answered with NUDGE (a user message, part of the next request and its sha) at most
+# profile.nudges times (default 1), then the session stops with reason no_tool_call. E49 (25 Nov 2026): the local
+# model said "I cannot make multiple tool calls" on turn 2 and the session counted as finished with nothing run.
+NUDGE = ("The task is not finished: no %s has succeeded yet. Continue with exactly one tool call; "
+         "a refused call can be corrected and tried again.")
 
 
 class ToolError(Exception):
@@ -56,6 +62,12 @@ def load_profile(path):
         raise ValueError("profile: a local session's caps.context_tokens is at most %d" % LOCAL_CONTEXT_MAX)
     if through_gateway(p) and not (isinstance(p.get("task"), str) and 0 < len(p["task"]) <= 2000):
         raise ValueError("profile: a model profile needs a task (the first user message, at most 2000 characters)")
+    fa = p.get("finish_after", [])
+    if not isinstance(fa, list) or not all(isinstance(t, str) and t in p["tools"] for t in fa):
+        raise ValueError("profile: finish_after must list tools of the profile")
+    n = p.get("nudges", 1)
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 3:
+        raise ValueError("profile: nudges is a whole number from 0 to 3")
     if p["backend"] == "scripted" and not isinstance(p.get("script"), list):
         raise ValueError("profile: a scripted profile needs a script")
     return p
@@ -97,6 +109,9 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
     ratio = None        # the model's prompt tokens per estimated token, from the last turn's usage (gateway only)
     call = 0
     every = int(profile.get("checkpoint_every", 4))
+    finish_after = set(profile.get("finish_after", []))
+    nudges = int(profile.get("nudges", 1))
+    done_tools = set()
 
     def stop(reason, turn):
         trace.post("stop", {"reason": reason, "turns": turn, "prompt_tokens": spent["prompt_tokens"],
@@ -154,7 +169,13 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
         if why:
             return stop(why, turn)
         if not resp["tool"]:
-            return stop("finished", turn)
+            if not finish_after or finish_after & done_tools:
+                return stop("finished", turn)
+            if nudges <= 0:
+                return stop("no_tool_call", turn)
+            nudges -= 1
+            ctx.add("user", NUDGE % " or ".join(sorted(finish_after)))
+            continue
         call += 1
         name, args = resp["tool"]["name"], resp["tool"].get("args", {})
         ab = canonical(args)
@@ -177,6 +198,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
                                    "shown_sha256": sha(shown), "recorded_complete": len(text) <= RECORD_MAX,
                                    "result": text[:RECORD_MAX]})
         if not err:
+            done_tools.add(name)
             # CPU spent = each campaign's final figure, once: an estimate is a forecast and a status or a repeated
             # sim.run of the same campaign reports it again (E48, 23 Nov 2026: 6.002 spent for 0.002 run)
             c = result.get("cpu_hours", 0) if isinstance(result, dict) else 0

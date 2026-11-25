@@ -99,9 +99,9 @@ from test_agent_loop import GatewayStub, LOCAL  # noqa: E402
 from research.agents.model import ModelError  # noqa: E402
 
 
-def rec_local(answers):
+def rec_local(answers, nudge=False):
     from test_agent_loop import go_local
-    _, ev, p, gw, skill = go_local(answers)
+    _, ev, p, gw, skill = go_local(answers, nudge=nudge)
     # interleave as the session would have: the gateway's pair comes before the agent's events of that turn
     out, g = [], list(gw.events)
     pending = []
@@ -134,6 +134,13 @@ class ReplayLocal(unittest.TestCase):
     def test_it_reproduces_from_the_gateways_records(self):
         self.assertEqual([e["actor"] for e in self.ev if e["event"] == "turn_response"], ["model-gateway"] * 2)
         v = self.run_replay()
+        self.assertEqual(v["ok"], True, v)
+
+    def test_a_nudged_session_reproduces(self):
+        ev, p, skill = rec_local([{"text": "I cannot."}, {"text": "", "tool": {"name": "propose.parameter_set", "args": {}}},
+                                  {"text": "The plan is complete."}], nudge=True)
+        self.assertIn("finish_after", p)
+        v = replay(ev, p, STANDING, skill, LISTING)
         self.assertEqual(v["ok"], True, v)
 
     def test_a_changed_request_is_a_divergence_at_the_gateways_sha(self):
