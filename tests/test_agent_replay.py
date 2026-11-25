@@ -99,9 +99,13 @@ from test_agent_loop import GatewayStub, LOCAL  # noqa: E402
 from research.agents.model import ModelError  # noqa: E402
 
 
-def rec_local(answers, nudge=False):
+def rec_local(answers, nudge=False, **runkw):
     from test_agent_loop import go_local
-    _, ev, p, gw, skill = go_local(answers, nudge=nudge)
+    _, ev, p, gw, skill = go_local(answers, nudge=nudge, **runkw)
+    if runkw.get("endpoint"):         # the gateway records the session's endpoint and its context (flags.ctx)
+        for e in gw.events:
+            if e["event"] == "turn_request":
+                e["payload"].update(backend=runkw["endpoint"], flags={"ctx": runkw["endpoint_context"]})
     # interleave as the session would have: the gateway's pair comes before the agent's events of that turn
     out, g = [], list(gw.events)
     pending = []
@@ -142,6 +146,18 @@ class ReplayLocal(unittest.TestCase):
         self.assertIn("finish_after", p)
         v = replay(ev, p, STANDING, skill, LISTING)
         self.assertEqual(v["ok"], True, v)
+
+    def test_a_session_on_a_chosen_endpoint_reproduces(self):
+        """The model picker: replay takes the endpoint and its context from the gateway's record, so a request the
+        profile's own 4000 would stop replays as it ran (on 12,288)."""
+        big = {"text": "", "tool": {"name": "sim.run", "args": {"spec": {"x": "y" * 20000}}}}
+        ev, p, skill = rec_local([big, {"text": "done"}], endpoint="gpu", endpoint_context=12288)
+        self.assertIn("tool_call", [e["event"] for e in ev])
+        self.assertEqual(replay(ev, p, STANDING, skill, LISTING)["ok"], True)
+        for e in ev:                  # without the record's endpoint the profile's cap stops it at once: a divergence
+            if e["event"] == "turn_request":
+                e["payload"].pop("backend")
+        self.assertFalse(replay(ev, p, STANDING, skill, LISTING)["ok"])
 
     def test_a_changed_request_is_a_divergence_at_the_gateways_sha(self):
         ev = copy.deepcopy(self.ev)

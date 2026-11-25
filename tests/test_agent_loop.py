@@ -233,7 +233,7 @@ class GatewayStub:
         return dict(resp, usage=usage)
 
 
-def go_local(answers, profile=None, tools=None, nudge=False):
+def go_local(answers, profile=None, tools=None, nudge=False, **runkw):
     """nudge=False takes finish_after out of the local profile (the older tests end on a text answer)."""
     p = profile or loop.load_profile(LOCAL)
     if not nudge and profile is None:
@@ -244,7 +244,7 @@ def go_local(answers, profile=None, tools=None, nudge=False):
     with open(os.path.join(A, "skills", p["skill"] + ".md"), encoding="utf-8") as f:
         skill = f.read()
     gw = GatewayStub(answers, [])
-    reason = loop.run(p, STANDING, skill, gw, tools or FakeTools(), t)
+    reason = loop.run(p, STANDING, skill, gw, tools or FakeTools(), t, **runkw)
     return reason, s.events, p, gw, skill
 
 
@@ -372,6 +372,29 @@ class Local(unittest.TestCase):
             with self.assertRaises(ValueError, msg=(k, v)):
                 loop.load_profile(f.name)
             os.unlink(f.name)
+
+    def test_the_context_cap_follows_the_chosen_endpoint(self):
+        """The model picker: on another endpoint the cap is its context less the margin; on its own, the profile's."""
+        p = loop.load_profile(LOCAL)
+        self.assertEqual(loop.context_cap(p), 4000)
+        self.assertEqual(loop.context_cap(p, "local", 4096), 4000)
+        self.assertEqual(loop.context_cap(p, "gpu", 12288), 12288 - loop.CONTEXT_MARGIN)
+        self.assertEqual(loop.context_cap(p, "gpu", None), 4000)
+        q = dict(p, backend="gpu")
+        self.assertEqual(loop.context_cap(q, "local", 8192), loop.LOCAL_CONTEXT_MAX)
+        # a request the 4000 cap stops runs on the bigger endpoint
+        big = {"text": "", "tool": {"name": "sim.run", "args": {"spec": {"x": "y" * 20000}}}}
+        reason, _, _, gw, _ = go_local([big, {"text": "done"}])
+        self.assertEqual((reason, len(gw.requests)), ("context_full", 1))
+        s = FakeSession()
+        t = TraceClient(s, "S" * 22)
+        t.claim("c")
+        gw = GatewayStub([big, {"text": "done"}])
+        p2 = loop.load_profile(LOCAL)
+        p2.pop("finish_after")
+        with open(os.path.join(A, "skills", p2["skill"] + ".md"), encoding="utf-8") as f:
+            sk = f.read()
+        self.assertEqual(loop.run(p2, STANDING, sk, gw, FakeTools(), t, endpoint="gpu", endpoint_context=12288), "finished")
 
     def test_reserve_tokens_is_checked(self):
         import tempfile

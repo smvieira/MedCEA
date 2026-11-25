@@ -87,6 +87,12 @@ class Orchestrator:
         e = self.cfg.get("endpoints")
         return set(e) if e is not None else {"local"}
 
+    def inventory(self):
+        """The model picker's list (RS_ENDPOINTS_INVENTORY: name, model, context, deterministic, tools, where; never a
+        URL or a key), only the enabled endpoints, in their configured order."""
+        en = self.endpoints()
+        return [dict(i) for i in self.cfg.get("inventory") or [] if isinstance(i, dict) and i.get("name") in en]
+
     # ── profile
     def _profile(self, name):
         if not isinstance(name, str) or not NAME.match(name):
@@ -108,12 +114,24 @@ class Orchestrator:
         if got is None:
             return 400, {"error": "unknown profile"}
         prof, psha = got
-        if prof["backend"] != "scripted" and not self.cfg.get("model_gateway_url"):
+        chosen = body.get("endpoint")             # the model picker: an enabled endpoint instead of the profile's own
+        if chosen is not None:
+            if prof["backend"] == "scripted":
+                return 400, {"error": "a scripted profile has no model to choose"}
+            if not isinstance(chosen, str) or chosen not in self.endpoints():
+                return 409, {"error": "the endpoint %s is not enabled on this install (RESEARCH_ENDPOINTS); choose one of %s"
+                                      % (str(chosen)[:40], ", ".join(i["name"] for i in self.inventory()) or "none")}
+            ep = next((i for i in self.inventory() if i["name"] == chosen), None)
+            if ep is None or not isinstance(ep.get("context"), int):
+                return 409, {"error": "the endpoint %s is enabled but not in the model inventory: run ./apps/research-agents/deploy.sh"
+                                      % chosen}
+        backend = chosen or prof["backend"]
+        if backend != "scripted" and not self.cfg.get("model_gateway_url"):
             return 409, {"error": "this profile uses the local model, which is not available: no model gateway is configured "
                                   "(RESEARCH_LOCAL_MODEL is not true, or ./apps/research-agents/deploy.sh has not run since the model was deployed)"}
-        if prof["backend"] != "scripted" and prof["backend"] not in self.endpoints():
+        if backend != "scripted" and backend not in self.endpoints():
             return 409, {"error": "this profile uses the endpoint %s, which is not enabled on this install (RESEARCH_ENDPOINTS)"
-                                  % prof["backend"]}
+                                  % backend}
         budget = {k: prof["caps"][k] for k in BUDGET_KEYS if k in prof["caps"]}
         want = body.get("budget") or {}
         if not isinstance(want, dict):
@@ -123,7 +141,7 @@ class Orchestrator:
                 return 400, {"error": "budget.%s must be a positive number within the profile's cap" % k}
             budget[k] = v
         mint = {"profile": prof["name"], "profile_sha256": psha, "tools": list(prof["tools"]), "budget": budget,
-                "backend": prof["backend"], "code_commit": self.cfg["code_commit"]}
+                "backend": backend, "code_commit": self.cfg["code_commit"]}
         if "ttl_s" in body:
             mint["ttl_s"] = body["ttl_s"]
         st, m = self.ph.request("POST", "/mint", mint, {"X-Forwarded-Access-Token": token})
@@ -131,7 +149,8 @@ class Orchestrator:
             return (st if st in (400, 403, 409) else 502), {"error": (m or {}).get("error", "the session service refused")}
         sid = m["sid"]
         try:
-            self.kube.create_job(jobs.agent_job(self.cfg, sid, m["claim"], prof["name"], prof["caps"]["wall_h"]))
+            self.kube.create_job(jobs.agent_job(self.cfg, sid, m["claim"], prof["name"], prof["caps"]["wall_h"],
+                                                {"name": ep["name"], "context": ep["context"]} if chosen else None))
         except Exception as e:     # KubeError carries the API's status, never a token
             sys.stderr.write("research-orchestrator: agent Job for a session not created: %s\n" % e)
             self.sh.request("POST", "/sessions/%s/revoke" % sid, {"reason": "agent Job could not be created"})
@@ -139,7 +158,7 @@ class Orchestrator:
         with self.lock:
             self.track[sid] = {"person": who["person_id"], "job": jobs.agent_job_name(sid), "registered": False,
                                "started": self.clock(), "profile": prof["name"]}
-        return 201, {"sid": sid, "exp": m["exp"], "job": jobs.agent_job_name(sid)}
+        return 201, {"sid": sid, "exp": m["exp"], "job": jobs.agent_job_name(sid), "endpoint": backend}
 
     def _own(self, who, sid):
         if not SID.match(sid or ""):
@@ -152,7 +171,8 @@ class Orchestrator:
     def listing(self, who):
         with self.lock:
             sids = [s for s, t in self.track.items() if t["person"] == who["person_id"]]
-        return 200, {"sessions": [{"sid": s, "profile": self.track[s]["profile"]} for s in sids if s in self.track]}
+        return 200, {"sessions": [{"sid": s, "profile": self.track[s]["profile"]} for s in sids if s in self.track],
+                     "endpoints": self.inventory()}
 
     def info(self, who, sid):
         i = self._own(who, sid)
@@ -512,6 +532,17 @@ def _handler(orch, port_name):
     return H
 
 
+def _inventory(b64):
+    """RS_ENDPOINTS_INVENTORY (base64 JSON list) -> list; empty or unreadable -> [] (the picker then lists nothing)."""
+    import base64
+    try:
+        v = json.loads(base64.b64decode(b64.encode(), validate=True).decode()) if b64 else []
+    except (ValueError, UnicodeDecodeError):
+        sys.stderr.write("research-orchestrator: RS_ENDPOINTS_INVENTORY is unreadable\n")
+        return []
+    return v if isinstance(v, list) else []
+
+
 def make_servers(orch, host="0.0.0.0", ports=(8090, 8091)):
     return [ThreadingHTTPServer((host, p), _handler(orch, n)) for p, n in zip(ports, ("person", "sim"))]
 
@@ -527,7 +558,8 @@ def main():
                "RS_PROFILES_DIR", os.path.join(ROOT, "research", "agents", "profiles")),
            "pool": int(os.environ.get("RS_SIM_POOL", "2")),
            "model_gateway_url": os.environ.get("RS_MODEL_GATEWAY_URL", ""),
-           "endpoints": [e for e in os.environ.get("RS_ENDPOINTS", "local").split() if e]}
+           "endpoints": [e for e in os.environ.get("RS_ENDPOINTS", "local").split() if e],
+           "inventory": _inventory(os.environ.get("RS_ENDPOINTS_INVENTORY", ""))}
     orch = Orchestrator(cfg, KubeClient(os.environ["RS_AGENTS_NAMESPACE"]),
                         Http(os.environ["RS_SESSION_PERSON_URL"]), Http(os.environ["RS_SESSION_SERVER_URL"]), iam)
 

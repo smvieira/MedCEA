@@ -123,7 +123,11 @@ def replay(events, profile, standing, skill, tool_listing):
     sink = _Sink(rec)
     try:
         model = _GatewayModel(gw_pairs, sink) if local else RecordedModel(responses)
-        loop.run(profile, standing, skill, model, _Tools(tool_listing, results), sink, clock=lambda: 0.0, backend_id=backend)
+        # the endpoint the session ran on and its context, from the gateway's first record (the model picker)
+        first = gw_pairs[0][0] if local and gw_pairs else {}
+        ep, ctx = first.get("backend"), (first.get("flags") or {}).get("ctx")
+        loop.run(profile, standing, skill, model, _Tools(tool_listing, results), sink, clock=lambda: 0.0, backend_id=backend,
+                 **({"endpoint": ep, "endpoint_context": ctx} if ep else {}))
         if sink.i != len(rec):
             raise Divergence(sink.i, rec[sink.i]["event"], "event", rec[sink.i]["event"], None)
     except Divergence as d:

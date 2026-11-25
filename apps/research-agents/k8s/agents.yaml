@@ -1,6 +1,6 @@
 # apps/research-agents/k8s/agents.yaml — the orchestrator, mcp-sim and mcp-lake, in research-agents
 # (research Phase 4a stage 6b1, design rs4 R2/R4/OD11). Rendered by apps/research-agents/deploy.sh; the
-# code bundle comes from a git commit. Render list: RESEARCH_AGENTS_NAMESPACE RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL RS_MODEL_GATEWAY_URL RS_ENDPOINTS
+# code bundle comes from a git commit. Render list: RESEARCH_AGENTS_NAMESPACE RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL RS_MODEL_GATEWAY_URL RS_ENDPOINTS RS_ENDPOINTS_INVENTORY
 # Every pod: priorityClassName medcea-research-low, no service links, non-root 65534, read-only root,
 # all capabilities dropped, RuntimeDefault seccomp, explicit requests and memory limit, image by digest,
 # and no network beyond what the zone's compiled NetworkPolicy admits; ClusterIP Services only.
@@ -129,6 +129,8 @@ spec:
           value: "${RS_MODEL_GATEWAY_URL}"
         - name: RS_ENDPOINTS
           value: "${RS_ENDPOINTS}"
+        - name: RS_ENDPOINTS_INVENTORY
+          value: "${RS_ENDPOINTS_INVENTORY}"
         - name: RS_AGENTS_NAMESPACE
           value: "${RESEARCH_AGENTS_NAMESPACE}"
         - name: RS_SIM_POOL

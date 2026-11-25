@@ -65,6 +65,37 @@ class Document(unittest.TestCase):
         self.assertNotIn("thinking", e)
 
 
+PINS = os.path.join(ROOT, "apps", "research-model", "pins.json")
+
+
+class Inventory(unittest.TestCase):
+    """The model picker's list: what a scientist chooses from; never a URL, address or key."""
+    def test_local_and_a_configured_endpoint(self):
+        inv = ec.inventory(BASE, GPU, ["local", "gpu"], PINS)
+        self.assertEqual([i["name"] for i in inv], ["local", "gpu"])
+        with open(PINS) as f:
+            m = json.load(f)["models"]["4b"]
+        self.assertEqual(inv[0]["model"], m["file"][:-5].lower() + "-" + m["sha256"][:12])     # the deploy's alias
+        self.assertEqual((inv[0]["context"], inv[0]["where"]), (4096, "this host (CPU)"))
+        self.assertEqual(inv[1], {"name": "gpu", "kind": "openai", "model": "Qwen/Qwen3-14B-AWQ", "context": 12288,
+                                  "deterministic": True, "tools": "text", "thinking": False, "where": "another server"})
+        text = json.dumps(inv)
+        for secret in (KEY, "100.71.228.99", "http"):
+            self.assertNotIn(secret, text)
+
+    def test_only_the_enabled_in_their_order(self):
+        self.assertEqual([i["name"] for i in ec.inventory(BASE, GPU, ["gpu"], PINS)], ["gpu"])
+        self.assertEqual([i["name"] for i in ec.inventory(BASE, GPU, ["gpu", "local"], PINS)], ["gpu", "local"])
+        with self.assertRaises(ec.ConfigError):
+            ec.inventory(BASE, {}, ["gpu"], PINS)
+
+    def test_cli_prints_base64_json(self):
+        import base64
+        r = Cli.run_cli(None, "inventory", BASE, "local gpu", PINS, env=GPU)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([i["name"] for i in json.loads(base64.b64decode(r.stdout))], ["local", "gpu"])
+
+
 class SecretDoc(unittest.TestCase):
     def test_the_secret_holds_only_keys(self):
         s = ec.secret("ns-gw", dict(GPU, RESEARCH_ENDPOINT_OPEN_URL="http://h:1"))

@@ -17,6 +17,9 @@ only; it reads them from its environment, never from argv, and never prints a ke
 
     python3 endpoints_config.py doc BASE ENABLED   the endpoints document (stdout), checked; exit 1 with a message
     python3 endpoints_config.py secret NAMESPACE   Secret model-gateway-keys as JSON (stdout), for kubectl apply -f -
+    python3 endpoints_config.py inventory BASE ENABLED PINS
+                                                   the enabled endpoints as the scientist's model picker shows them
+                                                   (name, model, context, ...; never a URL or a key), base64 JSON
 """
 import json
 import os
@@ -98,6 +101,38 @@ def document(base, env, enabled):
     return {"_comment": doc.get("_comment", ""), "endpoints": eps}
 
 
+LOCAL_MODEL_KEY = "4b"      # apps/research-model/deploy.sh MODEL_KEY
+LOCAL_CONTEXT = 4096        # apps/research-model/deploy.sh LLM_CTX (owner decision of 21 Nov 2026)
+
+
+def local_alias(pins_path):
+    """The local model's alias exactly as apps/research-model/deploy.sh makes it (<file stem lower-cased>-<sha12>)."""
+    with open(pins_path, encoding="utf-8") as f:
+        m = json.load(f)["models"][LOCAL_MODEL_KEY]
+    stem = m["file"][:-5] if m["file"].endswith(".gguf") else m["file"]
+    return "%s-%s" % (stem.lower(), m["sha256"][:12])
+
+
+def inventory(base, env, enabled, pins_path):
+    """[{name, kind, model, context, deterministic, tools, thinking?, where}] for the enabled endpoints, in the order
+    RESEARCH_ENDPOINTS names them: what a scientist chooses from. No URL, address or key: where says only whether
+    the model runs on this host."""
+    eps = document(base, env, enabled)["endpoints"]
+    out = []
+    for n in enabled:
+        e = eps[n]
+        if n == "local":
+            out.append({"name": n, "kind": "llama", "model": local_alias(pins_path), "context": LOCAL_CONTEXT,
+                        "deterministic": True, "tools": "native", "where": "this host (CPU)"})
+            continue
+        i = {"name": n, "kind": e["kind"], "model": e["model"], "context": e["context"],
+             "deterministic": e["deterministic"], "tools": e.get("tools", "native"), "where": "another server"}
+        if "thinking" in e:
+            i["thinking"] = e["thinking"]
+        out.append(i)
+    return out
+
+
 def secret(ns, env):
     data = {name: c["KEY"] for name, c in configured(env).items() if c["KEY"]}
     for name, k in data.items():
@@ -114,6 +149,10 @@ def main(argv, env):
             print(json.dumps(document(argv[1], env, argv[2].split()), indent=1, sort_keys=True))
         elif len(argv) == 2 and argv[0] == "secret":
             print(json.dumps(secret(argv[1], env)))
+        elif len(argv) == 4 and argv[0] == "inventory":
+            import base64
+            doc = json.dumps(inventory(argv[1], env, argv[2].split(), argv[3]), separators=(",", ":"), sort_keys=True)
+            print(base64.b64encode(doc.encode()).decode())
         else:
             print(__doc__.strip().splitlines()[-2:], file=sys.stderr)
             return 2

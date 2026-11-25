@@ -125,6 +125,57 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(env["MEDCEA_MODEL_GATEWAY"], gw)
         self.assertEqual(env["MEDCEA_PROFILE"], "compare_controllers_local")
 
+    INVENTORY = [{"name": "local", "kind": "llama", "model": "qwen3-4b", "context": 4096, "deterministic": True,
+                  "tools": "native", "where": "this host (CPU)"},
+                 {"name": "gpu", "kind": "openai", "model": "Qwen/Qwen3-14B-AWQ", "context": 12288, "deterministic": True,
+                  "tools": "text", "thinking": False, "where": "another server"},
+                 {"name": "spare", "kind": "openai", "model": "m", "context": 8192, "deterministic": False,
+                  "tools": "native", "where": "another server"}]
+
+    def picker(self):
+        o, k, ph, sh = make()
+        o.cfg = dict(o.cfg, model_gateway_url="http://g:8120", endpoints=["local", "gpu"], inventory=self.INVENTORY)
+        return o, k, ph, sh
+
+    def test_the_model_picker_lists_the_enabled_endpoints(self):
+        """Research Phase 4d: GET /api/sessions carries the inventory (no route of its own: no policy change)."""
+        o, *_ = self.picker()
+        st, r = o.listing(WHO)
+        self.assertEqual(st, 200)
+        self.assertEqual([e["name"] for e in r["endpoints"]], ["local", "gpu"])     # 'spare' is not enabled
+        self.assertNotIn("url", json.dumps(r))
+        self.assertEqual(orch._inventory(""), [])
+        self.assertEqual(orch._inventory("not base64!"), [])
+        import base64
+        self.assertEqual(orch._inventory(base64.b64encode(json.dumps(self.INVENTORY).encode()).decode()), self.INVENTORY)
+
+    def test_start_on_a_chosen_endpoint(self):
+        o, k, ph, sh = self.picker()
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_local", "endpoint": "gpu"})
+        self.assertEqual((st, r["endpoint"]), (201, "gpu"))
+        self.assertEqual(ph.calls[0][2]["backend"], "gpu")          # the session's backend: the gateway serves it
+        env = {e["name"]: e["value"] for e in k.jobs[jobs.agent_job_name(SID)]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual((env["MEDCEA_ENDPOINT"], env["MEDCEA_ENDPOINT_CONTEXT"]), ("gpu", "12288"))
+        # without a choice, the profile's own model and no endpoint in the Job
+        o, k, ph, sh = self.picker()
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_local"})
+        self.assertEqual((st, r["endpoint"], ph.calls[0][2]["backend"]), (201, "local", "local"))
+        env = {e["name"]: e["value"] for e in k.jobs[jobs.agent_job_name(SID)]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertNotIn("MEDCEA_ENDPOINT", env)
+
+    def test_a_choice_that_is_refused(self):
+        o, k, ph, sh = self.picker()
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_local", "endpoint": "spare"})
+        self.assertEqual(st, 409)
+        self.assertIn("choose one of local, gpu", r["error"])
+        self.assertEqual(o.start(WHO, "T", {"profile": "compare_controllers", "endpoint": "gpu"})[0], 400)   # scripted
+        self.assertEqual(o.start(WHO, "T", {"profile": "compare_controllers_local", "endpoint": 7})[0], 409)
+        o.cfg = dict(o.cfg, inventory=[])                                # enabled, but no inventory (an older deploy)
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_local", "endpoint": "gpu"})
+        self.assertEqual(st, 409)
+        self.assertIn("./apps/research-agents/deploy.sh", r["error"])
+        self.assertEqual((ph.calls, k.jobs), ([], {}))
+
     def test_a_scripted_session_is_unchanged_by_a_gateway(self):
         o, k, ph, sh = make()
         o.cfg = dict(o.cfg, model_gateway_url="http://g:8120")

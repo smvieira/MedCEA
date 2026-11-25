@@ -3,7 +3,9 @@
 to the medcea_agent.py the workbench-examples ConfigMap delivers to notebooks (research Phase 4a), so it
 imports nothing from this repository.
 
-  medcea-agent start PROFILE [--budget k=v ...] [--ttl-s N]   start a session; prints its id
+  medcea-agent endpoints                                      the model picker: the models this install offers
+  medcea-agent start PROFILE [--budget k=v ...] [--ttl-s N] [--endpoint NAME]
+                                                              start a session (on NAME's model); prints its id
   medcea-agent watch SID                                      follow the trace until the agent stops
   medcea-agent approve SID GID [--note T] [--cap-h H]         approve a gate (the supervisor only)
   medcea-agent deny SID GID [--note T]
@@ -119,8 +121,16 @@ class Client:
         return r
 
     # ── commands
-    def start(self, profile, budget=None, ttl_s=None):
+    def endpoints(self):
+        """The model picker: the model endpoints this install offers, [{name, model, context, deterministic, tools,
+        where}]. Pass a name as start(profile, endpoint=name)."""
+        return self._call("GET", "/api/sessions").get("endpoints", [])
+
+    def start(self, profile, budget=None, ttl_s=None, endpoint=None):
+        """endpoint: one of endpoints()' names, instead of the profile's own model (a model profile only)."""
         body = {"profile": profile}
+        if endpoint:
+            body["endpoint"] = endpoint
         if budget:
             body["budget"] = budget
         if ttl_s:
@@ -211,9 +221,9 @@ class Client:
         The new session runs like any other (its gate, its budget); returns the comparison and both ids."""
         sid = _sid(sid)
         info = self.info(sid)
-        if info.get("backend") != "local":
-            raise CliError("session %s is not a local-model session: nothing to re-execute" % sid)
-        new = self.start(info["profile"])["sid"]
+        if info.get("backend") in (None, "scripted"):
+            raise CliError("session %s is not a model session: nothing to re-execute" % sid)
+        new = self.start(info["profile"], endpoint=info["backend"])["sid"]      # on the model it ran on
         if watch:
             self.watch(new)
         r = self.compare_turns(self.events(sid), self.events(new))
@@ -254,6 +264,8 @@ def main(argv=None, client=None):
     s.add_argument("profile")
     s.add_argument("--budget", nargs="*", default=[], metavar="KEY=VALUE")
     s.add_argument("--ttl-s", type=int)
+    s.add_argument("--endpoint", help="a model endpoint of `medcea-agent endpoints` instead of the profile's own")
+    sub.add_parser("endpoints")
     for n in ("watch", "stop", "replay", "reexecute"):
         sub.add_parser(n).add_argument("sid")
     for n in ("approve", "deny", "accept", "discard"):
@@ -274,8 +286,12 @@ def main(argv=None, client=None):
             for kv in a.budget:
                 k, _, v = kv.partition("=")
                 budget[k] = float(v) if "." in v else int(v)
-            r = c.start(a.profile, budget, a.ttl_s)
-            c.out("session %s started" % r["sid"])
+            r = c.start(a.profile, budget, a.ttl_s, a.endpoint)
+            c.out("session %s started on %s" % (r["sid"], r.get("endpoint", "its profile's model")))
+        elif a.cmd == "endpoints":
+            for e in c.endpoints():
+                c.out("%-12s %-46s %6s tokens  %s%s" % (e.get("name"), e.get("model"), e.get("context"), e.get("where", ""),
+                                                        "" if e.get("deterministic") else "  (not deterministic)"))
         elif a.cmd == "watch":
             c.out("ended: %s" % c.watch(a.sid))
         elif a.cmd in ("approve", "deny"):

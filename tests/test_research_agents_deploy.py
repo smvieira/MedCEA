@@ -256,6 +256,8 @@ class Tree(unittest.TestCase):
             shutil.copy(os.path.join(REPO, "infra", f), os.path.join(r, "infra", f))
         os.makedirs(os.path.join(r, "apps", "research-model"))
         shutil.copy(os.path.join(REPO, "apps", "research-model", "pins.json"), os.path.join(r, "apps", "research-model", "pins.json"))
+        for f in ("endpoints.json", "endpoints_config.py"):      # the model picker's inventory (research Phase 4d)
+            shutil.copy(os.path.join(REPO, "apps", "research-model", f), os.path.join(r, "apps", "research-model", f))
         for rel, text in (("schd/cea/a.py", "A = 1\n"), ("research/b.py", "B = 2\n"),
                           ("apps/database/recipe_types.yaml", "x: 1\n"), ("edge/templates/esp32-control.json", "{}\n"),
                           ("apps/research/db/lake_api.sql", "select 1;\n")):

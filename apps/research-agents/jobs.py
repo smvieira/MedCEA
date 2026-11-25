@@ -91,10 +91,13 @@ def _job(cfg, name, labels, container, deadline_s, runs=False, controllers=False
                                   "spec": _podspec(cfg, container, runs, controllers, resources)}}}
 
 
-def agent_job(cfg, sid, claim, profile, wall_h):
+def agent_job(cfg, sid, claim, profile, wall_h, endpoint=None):
+    """endpoint: {name, context} of the model endpoint the scientist chose (the model picker), else None."""
     env = [("MEDCEA_SID", sid), ("MEDCEA_CLAIM", claim), ("MEDCEA_PROFILE", profile),
            ("MEDCEA_SESSION_URL", cfg["session_url"]), ("MEDCEA_MCP_SIM", cfg["mcp_sim_url"]),
            ("MEDCEA_MCP_LAKE", cfg["mcp_lake_url"]), ("MEDCEA_CODE_COMMIT", cfg["code_commit"])]
+    if endpoint:
+        env += [("MEDCEA_ENDPOINT", endpoint["name"]), ("MEDCEA_ENDPOINT_CONTEXT", str(int(endpoint["context"])))]
     if cfg.get("model_gateway_url"):
         env.append(("MEDCEA_MODEL_GATEWAY", cfg["model_gateway_url"]))
     c = {"name": "agent", "image": cfg["image"], "workingDir": cfg.get("code_dir", "/opt/medcea"), "command": ["python3", "-m", "research.agents.run_agent"],

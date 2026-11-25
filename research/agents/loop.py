@@ -73,6 +73,19 @@ def load_profile(path):
     return p
 
 
+CONTEXT_MARGIN = 96    # the local profile's 4000 of llama-server's 4096: room for the chat template's own tokens
+
+
+def context_cap(profile, endpoint=None, endpoint_context=None):
+    """The context cap of a session (the model picker, research Phase 4d): the profile's caps.context_tokens on its own
+    endpoint; on another endpoint the scientist chose, that endpoint's context less CONTEXT_MARGIN (at most 4096 for
+    local). Replay computes it from the gateway's record (backend, flags.ctx) with this same function."""
+    if endpoint is None or endpoint == profile.get("backend") or not isinstance(endpoint_context, int):
+        return profile["caps"]["context_tokens"]
+    cap = max(512, endpoint_context - CONTEXT_MARGIN)
+    return min(cap, LOCAL_CONTEXT_MAX) if endpoint == "local" else cap
+
+
 def child_profile(parent, want):
     """AH.9: a sub-agent's profile is the parent's, narrowed by `want` ({tools, caps}); never wider."""
     c = dict(parent)
@@ -88,8 +101,9 @@ def child_profile(parent, want):
     return c
 
 
-def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, backend_id=None):
-    caps = profile["caps"]
+def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, backend_id=None, endpoint=None,
+        endpoint_context=None):
+    caps = dict(profile["caps"], context_tokens=context_cap(profile, endpoint, endpoint_context))
     allowed = list(profile["tools"])
     listed = {t["name"]: t for t in tools.list_tools()}
     local = through_gateway(profile)

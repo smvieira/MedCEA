@@ -1,6 +1,7 @@
 """research/agents/run_agent.py (stage 6a): the entrypoint of an agent-<h(sid)> Job (python3 -m research.agents.run_agent, cwd = the code bundle root). Environment:
 MEDCEA_SID, MEDCEA_CLAIM (one-time), MEDCEA_PROFILE, MEDCEA_SESSION_URL (research-session agent
-port 8101), MEDCEA_MCP_SIM, MEDCEA_MCP_LAKE, and for a profile with backend local MEDCEA_MODEL_GATEWAY. Claims the session token (refused unless this
+port 8101), MEDCEA_MCP_SIM, MEDCEA_MCP_LAKE, and for a profile with backend local MEDCEA_MODEL_GATEWAY (and, when the
+scientist chose another endpoint, MEDCEA_ENDPOINT and MEDCEA_ENDPOINT_CONTEXT). Claims the session token (refused unless this
 pod's IP is the one the orchestrator registered), runs the scripted loop with the HTTP tool
 client, exits 0 on a stop, 1 on a refusal. Never prints the claim or the token."""
 import os
@@ -39,7 +40,10 @@ def main(env=None, transport=None, tool_transport=None, sleep=None, gateway_post
                 return 2
             from research.agents.model import GatewayModel
             model = GatewayModel(gw, tc.token, env["MEDCEA_SID"], post=gateway_post, **({"sleep": sleep} if sleep else {}))
-        reason = loop.run_profile(path, os.path.join(a, "policy", "standing.md"), skill, tools, tc, model=model)
+        # the model picker (research Phase 4d): the endpoint the scientist chose and its context
+        ep, ctx = env.get("MEDCEA_ENDPOINT"), env.get("MEDCEA_ENDPOINT_CONTEXT", "")
+        epkw = {"endpoint": ep, "endpoint_context": int(ctx)} if ep and ctx.isdigit() else {}
+        reason = loop.run_profile(path, os.path.join(a, "policy", "standing.md"), skill, tools, tc, model=model, **epkw)
     except TraceRefused as e:
         print("run_agent: refused (%s)" % e, file=sys.stderr)
         return 1

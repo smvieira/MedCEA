@@ -30,7 +30,11 @@ class FakeOrch:
         if path == "/api/signin/refresh":
             return 200, {"access_token": "A-refreshed", "expires_in": 300}
         if path == "/api/sessions" and method == "POST":
-            return 201, {"sid": "S" * 22}
+            return 201, {"sid": "S" * 22, "endpoint": (body or {}).get("endpoint", "local")}
+        if path == "/api/sessions" and method == "GET":
+            return 200, {"sessions": [], "endpoints": [
+                {"name": "local", "model": "qwen3-4b", "context": 4096, "deterministic": True, "where": "this host (CPU)"},
+                {"name": "gpu", "model": "Qwen/Qwen3-14B-AWQ", "context": 12288, "deterministic": True, "where": "another server"}]}
         if "/events" in path:
             after = int(path.rsplit("=", 1)[1])
             return 200, {"events": [e for e in self.events if e["event_id"] > after]}
@@ -82,6 +86,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual((m, path, body, tok), ("POST", "/api/sessions", {"profile": "compare_controllers", "budget": {"turns": 3}}, "A2"))
         c.info(r)        # what start() returned works wherever a session id does (E48, 22 Nov 2026)
         self.assertEqual(o.calls[-1][1], "/api/sessions/" + "S" * 22)
+
+    def test_the_model_picker(self):
+        """Research Phase 4d: endpoints() lists the models; start(profile, endpoint=) asks for one."""
+        c, o, out, clk = client()
+        c.signin()
+        self.assertEqual([e["name"] for e in c.endpoints()], ["local", "gpu"])
+        r = c.start("compare_controllers_local", endpoint="gpu")
+        self.assertEqual(o.calls[-1][2], {"profile": "compare_controllers_local", "endpoint": "gpu"})
+        self.assertEqual(r["endpoint"], "gpu")
+        c.start("compare_controllers_local")
+        self.assertNotIn("endpoint", o.calls[-1][2])
+        c2, o2, out2, _ = client()
+        cli.main(["endpoints"], client=c2)
+        self.assertTrue(any(l.startswith("gpu ") and "Qwen/Qwen3-14B-AWQ" in l and "12288 tokens" in l for l in out2), out2)
+        c3, o3, out3, _ = client()
+        cli.main(["start", "compare_controllers_local", "--endpoint", "gpu"], client=c3)
+        self.assertEqual(o3.calls[-1][2]["endpoint"], "gpu")
+        self.assertIn("started on gpu", out3[-1])
 
     def test_refresh_before_expiry(self):
         c, o, out, clk = client()

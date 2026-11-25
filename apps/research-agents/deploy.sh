@@ -138,6 +138,12 @@ RS_MODEL_GATEWAY_URL=""
 RS_ENDPOINTS="${RESEARCH_ENDPOINTS:-local}"
 [[ "$RS_ENDPOINTS" =~ ^[a-z][a-z0-9-]{0,30}( [a-z][a-z0-9-]{0,30})*$ ]] \
     || die "RESEARCH_ENDPOINTS='$RS_ENDPOINTS' is not a space-separated list of endpoint names"
+# the model picker's inventory (apps/research-model/endpoints_config.py inventory: name, model, context, ...; never a
+# URL or a key), base64 JSON for the orchestrator. The RESEARCH_ENDPOINT_* lines reach the helper by its environment.
+RS_ENDPOINTS_INVENTORY="$( ( for _v in $(compgen -v RESEARCH_ENDPOINT_); do export "$_v"; done
+    exec python3 "$REPO_ROOT/apps/research-model/endpoints_config.py" inventory "$REPO_ROOT/apps/research-model/endpoints.json" \
+        "$RS_ENDPOINTS" "$REPO_ROOT/apps/research-model/pins.json" ) )" \
+    || die "the model endpoints are not configured right (config.env RESEARCH_ENDPOINTS, RESEARCH_ENDPOINT_*)"
 
 # Never an open pod: both zones' compiled policies live and equal to the compile.
 for _z in research-gw research-agents; do
@@ -314,7 +320,7 @@ $KUBECTL rollout status deployment/research-session -n "$GW_NS" --timeout=5m \
 
 log "research-orchestrator, mcp-sim and mcp-lake in $AG_NS..."
 render "$APP_DIR/k8s/agents.yaml" RESEARCH_AGENTS_NAMESPACE RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE \
-    RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL RS_MODEL_GATEWAY_URL RS_ENDPOINTS | $KUBECTL apply -f -
+    RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL RS_MODEL_GATEWAY_URL RS_ENDPOINTS RS_ENDPOINTS_INVENTORY | $KUBECTL apply -f -
 for _d in research-orchestrator mcp-sim mcp-lake; do
     $KUBECTL rollout status "deployment/$_d" -n "$AG_NS" --timeout=5m \
         || die "$_d did not become ready: microk8s kubectl -n $AG_NS logs deployment/$_d"
