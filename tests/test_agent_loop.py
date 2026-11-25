@@ -309,11 +309,41 @@ class Local(unittest.TestCase):
         self.assertEqual(seen[0]["messages"][:1], [{"role": "assistant", "content": seen[0]["messages"][0]["content"], "tool_call": seen[0]["messages"][0]["tool_call"]}])
 
     def test_usage_is_the_models_own(self):
-        a = {"text": "a", "tool": {"name": "sim.run", "args": {}}, "usage": {"prompt_tokens": 20000, "output_tokens": 5}}
-        reason, ev, p, gw, _ = go_local([a, a, a])
-        self.assertEqual(reason, "prompt_tokens")       # 2 x 20000 is over the profile's 32000, the estimate (< 4000 a turn) is not
-        self.assertEqual(ev[-1]["payload"]["prompt_tokens"], 40000)
+        a = {"text": "a", "tool": {"name": "sim.run", "args": {}}, "usage": {"prompt_tokens": 2000, "output_tokens": 5}}
+        p = loop.load_profile(LOCAL)
+        p["caps"]["prompt_tokens"] = 3000
+        reason, ev, p, gw, _ = go_local([a, a, a], profile=p)
+        self.assertEqual(reason, "prompt_tokens")       # 2 x 2000 is over 3000; the estimates alone are not
+        self.assertEqual(ev[-1]["payload"]["prompt_tokens"], 4000)
         self.assertEqual(len(gw.requests), 2)
+
+    def test_the_next_request_is_projected_in_the_models_tokens(self):
+        """E49 (25 Nov 2026): the estimate (bytes / 4) passed while the model's own count left no room for the answer,
+        and the proposal was cut off by the end of the context. The last turn's usage scales the next estimate."""
+        p = loop.load_profile(LOCAL)
+        self.assertEqual(p["caps"]["reserve_tokens"], 300)
+        call = {"text": "a", "tool": {"name": "sim.run", "args": {}}}
+        # the model counts twice the estimate: the second request (est > 1850) projects past 4000 - 300
+        reason, ev, _, gw, _ = go_local([dict(call, usage={"prompt_tokens": 3600, "output_tokens": 5}), call, call])
+        self.assertEqual(reason, "context_full")
+        self.assertEqual(len(gw.requests), 1)
+        self.assertEqual(ev[-1]["payload"]["turns"], 1)
+        # a count close to the estimate lets the session go on
+        reason, _, _, gw, _ = go_local([dict(call, usage={"prompt_tokens": 1000, "output_tokens": 5}),
+                                        {"text": "done", "usage": {"prompt_tokens": 1100, "output_tokens": 1}}])
+        self.assertEqual((reason, len(gw.requests)), ("finished", 2))
+
+    def test_reserve_tokens_is_checked(self):
+        import tempfile
+        import yaml
+        for v in (-1, 4000, 1.5, True):
+            q = copy.deepcopy(loop.load_profile(LOCAL))
+            q["caps"]["reserve_tokens"] = v
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+                yaml.safe_dump(q, f)
+            with self.assertRaises(ValueError):
+                loop.load_profile(f.name)
+            os.unlink(f.name)
 
     def test_a_malformed_call_is_a_refused_call(self):
         answers = [{"text": "I will call it.", "tool": None, "tool_error": "the arguments are not a JSON object"},

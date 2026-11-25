@@ -26,6 +26,9 @@ def through_gateway(profile):
     'scripted' (research Phase 4d: the backend names an endpoint of apps/research-model/endpoints.yaml)."""
     return profile.get("backend") != "scripted"
 CAPS = ("turns", "prompt_tokens", "output_tokens", "cpu_hours", "wall_h", "turn_timeout_s", "context_tokens")
+# optional caps.reserve_tokens: room kept for the answer. Through the gateway the next request is projected in the
+# model's own tokens (its last prompt_tokens over the loop's estimate for that request), so a turn whose answer would
+# run into the end of the context is not started (E49, 25 Nov 2026: a proposal cut off by the context end)
 
 
 MALFORMED = "invalid_call"
@@ -46,6 +49,9 @@ def load_profile(path):
             raise ValueError("profile: caps.%s must be a positive number" % k)
     if not p.get("tools") or not all(isinstance(t, str) for t in p["tools"]):
         raise ValueError("profile: tools must be a list of names")
+    r = caps.get("reserve_tokens", 0)
+    if not isinstance(r, int) or isinstance(r, bool) or not 0 <= r < caps["context_tokens"]:
+        raise ValueError("profile: caps.reserve_tokens must be a whole number below caps.context_tokens")
     if p["backend"] == "local" and caps["context_tokens"] > LOCAL_CONTEXT_MAX:
         raise ValueError("profile: a local session's caps.context_tokens is at most %d" % LOCAL_CONTEXT_MAX)
     if through_gateway(p) and not (isinstance(p.get("task"), str) and 0 < len(p["task"]) <= 2000):
@@ -88,6 +94,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
     t_start = clock()
     spent = {"prompt_tokens": 0, "output_tokens": 0, "cpu_hours": 0.0}
     counted = set()
+    ratio = None        # the model's prompt tokens per estimated token, from the last turn's usage (gateway only)
     call = 0
     every = int(profile.get("checkpoint_every", 4))
 
@@ -111,6 +118,8 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
         est = ctx.est_tokens()
         if est > caps["context_tokens"]:
             return stop("context_full", turn)
+        if ratio is not None and -(-est * ratio // 1) + caps.get("reserve_tokens", 0) > caps["context_tokens"]:
+            return stop("context_full", turn)
         turn += 1
         req = ctx.request()
         if not local:       # a local backend's turn_request/turn_response are the model-gateway's records
@@ -131,6 +140,9 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
         if local and isinstance(usage, dict):
             spent["prompt_tokens"] += int(usage.get("prompt_tokens", est))
             spent["output_tokens"] += int(usage.get("output_tokens", out_tokens))
+            pt = usage.get("prompt_tokens")
+            if isinstance(pt, int) and not isinstance(pt, bool) and pt > 0 and est > 0:
+                ratio = pt / est
         else:
             spent["prompt_tokens"] += est
             spent["output_tokens"] += out_tokens

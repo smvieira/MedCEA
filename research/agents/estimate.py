@@ -46,7 +46,10 @@ def estimate_spec(spec, repo_root, allow_codes=None):
         try:
             loaded.check(code, json.loads(params))
         except algorithms_loader.LoaderError as e:
-            raise EstimateRefused("spec refused: %s: %s" % (code, str(e)[:200]))
+            msg = str(e)[:200]
+            if "(known: none)" in msg:     # E49, 24-25 Nov 2026: the local model gave IF_THEN_ELSE a cycle_time twice
+                msg += "; %s takes no parameters: give it params {} and no params_grid" % code
+            raise EstimateRefused("spec refused: %s: %s" % (code, msg))
     for sc in spec["scenarios"]:
         runner.normalise(copy.deepcopy(sc), loaded)
     rates = campaign.calibrate(spec, loaded)

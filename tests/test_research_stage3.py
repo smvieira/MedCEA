@@ -378,6 +378,7 @@ class EstimateMode(unittest.TestCase):
             estimate.estimate_spec(spec, ROOT)
         self.assertIn("IF_THEN_ELSE", str(cm.exception))
         self.assertIn("cycle_time", str(cm.exception))
+        self.assertIn("IF_THEN_ELSE takes no parameters: give it params {} and no params_grid", str(cm.exception))
 
 
 if __name__ == "__main__":

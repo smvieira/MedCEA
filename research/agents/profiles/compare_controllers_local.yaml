@@ -7,8 +7,9 @@ backend: local
 skill: controller_campaign_local
 tools: [sim.estimate, sim.run, sim.status, sim.results, lake.snapshots, lake.summary, lake.catalogue, propose.parameter_set]
 task: >-
-  Compare IF_THEN_ELSE with PID (cycle_time 10.0 and 30.0) on research/harness/scenarios/smoke_air_temperature.yaml,
-  seed 1, clock offset 0. Estimate it, run it, and propose the PID setting that did better, with the campaign as evidence.
+  Compare IF_THEN_ELSE (no parameters) with PID at cycle_time 10.0 and 30.0 on
+  research/harness/scenarios/smoke_air_temperature.yaml, seed 1, clock offset 0. Estimate it, run it, read its results,
+  and propose the PID setting that did better, with the campaign as evidence.
 caps:
   turns: 8
   prompt_tokens: 32000
@@ -17,4 +18,5 @@ caps:
   wall_h: 2
   turn_timeout_s: 600
   context_tokens: 4000
+  reserve_tokens: 300
 checkpoint_every: 4
