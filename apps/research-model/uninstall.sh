@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # apps/research-model/uninstall.sh — the inverse of apps/research-model/deploy.sh (research Phase 4b, stage 1):
-# removes Deployments and Services model-gateway and research-llm, ConfigMap model-gateway-code, its script ConfigMap, the claim and the static volume from
+# removes Deployments and Services model-gateway and research-llm, ConfigMap model-gateway-code, Secret model-gateway-keys, its script ConfigMap, the claim and the static volume from
 # $RESEARCH_GW_NAMESPACE. Kept: the model file in RESEARCH_MODEL_DIR (about 2.5 GB; remove it by hand, or
 # ./install.sh --uninstall-all), the namespace and its NetworkPolicies. Idempotent.
 #
@@ -31,6 +31,7 @@ if $KUBECTL get namespace "$GW_NS" >/dev/null 2>&1; then
     log "Removing model-gateway and research-llm from $GW_NS..."
     $KUBECTL delete deployment,service model-gateway -n "$GW_NS" --ignore-not-found
     $KUBECTL delete configmap model-gateway-code -n "$GW_NS" --ignore-not-found
+    $KUBECTL delete secret model-gateway-keys -n "$GW_NS" --ignore-not-found
     $KUBECTL delete deployment,service research-llm -n "$GW_NS" --ignore-not-found
     $KUBECTL delete configmap research-llm-script -n "$GW_NS" --ignore-not-found
     $KUBECTL delete pvc research-models -n "$GW_NS" --ignore-not-found

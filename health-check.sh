@@ -266,7 +266,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo ""
     echo -e "  ${CYAN}rsgrants${NC} Secrets and grants of the research zone (research sandbox Phase 2b): NAMESPACE"
     echo -e "         FAIL when a pod or pod template in the research namespace names a Secret outside its"
-    echo -e "         allow-list (research-postgresql-auth, lake-api-auth, hub for the hub and its proxy,"
+    echo -e "         allow-list (research-postgresql-auth, lake-api-auth, model-gateway-keys, hub for the hub and its proxy,"
     echo -e "         singleuser for notebooks, none for anything else), a Role there grants secrets or *, a"
     echo -e "         RoleBinding binds a ClusterRole, or apps/research/db/assert_grants.sql (read-only) prints a"
     echo -e "         line; WARN when unreadable; SKIP while switched off without the namespace or with no zone"
@@ -3224,6 +3224,8 @@ def allowed(i, labels):
         return {"research-postgresql-auth"}
     if w == ("Deployment", "lake-api"):
         return {"lake-api-auth"}
+    if w == ("Deployment", "model-gateway"):
+        return {"model-gateway-keys"}
     if w in (("Deployment", "hub"), ("Deployment", "proxy")):
         return {"hub"}
     if w == ("Deployment", "research-session"):

@@ -420,6 +420,67 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual((body["top_k"], body["cache_prompt"], body["seed"]), (1, True, 1))
         self.assertNotIn("Authorization", self.llm.headers[0])
 
+    def text_backend(self):
+        b = gateway.OpenAIBackend(gateway.Llm(self.remote.url, 5), "gpu", "Qwen/Qwen3-14B-AWQ", 12288, 1024,
+                                  deterministic=True, key_file=self.key, thinking=False, tools="text")
+        self.gw.backends["gpu"] = b
+        self.gw.slots["gpu"] = __import__("threading").Lock()
+        self.sess.info["backend"] = "gpu"
+        return b
+
+    def test_thinking_off_and_tools_as_text(self):
+        """A vLLM server without native tool calls (tools: text) and Qwen3's thinking switched off (thinking: false)."""
+        self.text_backend()
+        self.remote.answer = text_answer('Estimating.\n<tool_call>\n{"name": "sim_run", "arguments": {"spec": {"a": 1}}}\n</tool_call>')
+        req = dict(REQ, messages=REQ["messages"] + [
+            {"role": "assistant", "content": "First.", "tool_call": {"name": "lake.snapshots", "args": {}}},
+            {"role": "tool", "content": "<tool_result>[]</tool_result>"}])
+        st, out = self.gw.turn(TOKEN, "10.0.0.7", {"sid": SID, "turn": 2, "request": req})
+        self.assertEqual(st, 200, out)
+        self.assertEqual(out["tool"], {"name": "sim.run", "args": {"spec": {"a": 1}}})
+        self.assertEqual(out["text"], "Estimating.")
+        body = self.remote.requests[-1][1]
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        for k in ("tools", "tool_choice", "parallel_tool_calls", "top_k", "cache_prompt"):
+            self.assertNotIn(k, body)
+        m = body["messages"]
+        self.assertTrue(m[0]["content"].startswith("SYS\n\n# Tools"))
+        self.assertIn('"name":"sim_run"', m[0]["content"])
+        self.assertEqual(m[2], {"role": "assistant", "content": 'First.\n<tool_call>\n{"arguments":{},"name":"lake_snapshots"}\n</tool_call>'})
+        self.assertEqual(m[3], {"role": "user", "content": "<tool_response>\n<tool_result>[]</tool_result>\n</tool_response>"})
+        self.assertEqual(self.remote.headers[-1].get("Authorization"), "Bearer k-123")
+        rq = [e for e in self.sess.events if e["event"] == "turn_request"][-1]["payload"]
+        self.assertEqual((rq["flags"]["tools"], rq["flags"]["enable_thinking"]), ("text", False))
+
+    def test_text_calls_that_cannot_be_read(self):
+        self.text_backend()
+        for name, content, want in (
+                ("no closing tag", '<tool_call>\n{"name": "sim_run", "argu', "could not be read"),
+                ("not JSON", "<tool_call>\n{name: sim_run}\n</tool_call>", "could not be read"),
+                ("unknown tool", '<tool_call>{"name": "nope", "arguments": {}}</tool_call>', "no such tool"),
+                ("arguments not an object", '<tool_call>{"name": "sim_run", "arguments": [1]}</tool_call>', "not a JSON object")):
+            with self.subTest(name):
+                self.remote.answer = text_answer(content)
+                st, out = self.turn()
+                self.assertEqual(st, 200)
+                self.assertIsNone(out["tool"])
+                self.assertIn(want, out["tool_error"])
+        self.remote.answer = text_answer('<tool_call>{"name": "sim_run", "arguments": {}}</tool_call>'
+                                         '<tool_call>{"name": "lake_snapshots", "arguments": {}}</tool_call>')
+        st, out = self.turn()
+        self.assertEqual(out["tool"], {"name": "sim.run", "args": {}})
+        self.assertEqual([e for e in self.sess.events if e["event"] == "turn_response"][-1]["payload"]["dropped_calls"], 1)
+        self.remote.answer = text_answer("The plan is complete.")
+        st, out = self.turn()
+        self.assertEqual((out["tool"], out.get("tool_error"), out["text"]), (None, None, "The plan is complete."))
+
+    def test_a_vllm_context_overflow_is_context_full(self):
+        """vLLM answers 400 'This model's maximum context length is …' (checked against the server on 25 Nov 2026)."""
+        b = self.text_backend()
+        self.assertTrue(b.context_full(400, {"error": {"message": "This model's maximum context length is 12288 tokens. However, "
+                                                       "your prompt contains at least 12289 input tokens", "code": 400}}))
+        self.assertFalse(b.context_full(400, {"error": {"message": "\"auto\" tool choice requires --enable-auto-tool-choice"}}))
+
     def test_a_session_of_an_endpoint_not_served_is_refused(self):
         self.sess.info["backend"] = "claude"
         self.assertEqual(self.turn()[0], 403)
@@ -435,9 +496,15 @@ class EndpointTest(unittest.TestCase):
                                                  "key": "secret"},
                                      "claude": {"kind": "anthropic", "model": "x", "context": 1}}}, f)
         local = self.gw.backends["local"]
-        b = gateway.load_endpoints(p, ["local", "gpu-lab"], local, key_dir="/k")
+        k = tempfile.mkdtemp()
+        with self.assertRaises(ValueError):                  # a secret key that is not mounted stops the gateway
+            gateway.load_endpoints(p, ["local", "gpu-lab"], local, key_dir=k)
+        with open(os.path.join(k, "gpu-lab"), "w") as f:
+            f.write("k-1\n")
+        b = gateway.load_endpoints(p, ["local", "gpu-lab"], local, key_dir=k)
         self.assertIs(b["local"], local)
-        self.assertEqual((b["gpu-lab"].alias, b["gpu-lab"].key_file, b["gpu-lab"].deterministic), ("m", "/k/gpu-lab/api-key", False))
+        self.assertEqual((b["gpu-lab"].alias, b["gpu-lab"].key_file, b["gpu-lab"].deterministic, b["gpu-lab"].tools,
+                          b["gpu-lab"].thinking), ("m", os.path.join(k, "gpu-lab"), False, "native", None))
         for enabled in (["nope"], ["claude"]):
             with self.assertRaises(ValueError):
                 gateway.load_endpoints(p, enabled, local)

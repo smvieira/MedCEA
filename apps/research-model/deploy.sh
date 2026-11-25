@@ -159,19 +159,29 @@ $KUBECTL rollout status deployment/research-llm -n "$GW_NS" --timeout=10m \
 # ── The model gateway (stage 2): the one way a session reaches the model ──────
 GATEWAY_IMAGE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["python_image"])' "$PINS")"
 [[ "$GATEWAY_IMAGE" =~ ^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$ ]] || die "apps/research-model/pins.json has no python image pinned by digest"
-GATEWAY_CODE_SHA256="$(cat "$APP_DIR/gateway.py" "$REPO_ROOT/apps/research-agents/mcp_common.py" "$APP_DIR/endpoints.json" | sha256sum | cut -d' ' -f1)"
-# research Phase 4d: the endpoints the gateway serves (names of endpoints.json; local alone by default)
+# research Phase 4d: the endpoints the gateway serves (RESEARCH_ENDPOINTS; local alone by default). local is
+# endpoints.json's; every other one is config.env's RESEARCH_ENDPOINT_<NAME>_* (endpoints_config.py), its key
+# only in Secret model-gateway-keys. The variables reach the helper through its environment, never argv.
 RS_ENDPOINTS="${RESEARCH_ENDPOINTS:-local}"
 [[ "$RS_ENDPOINTS" =~ ^[a-z][a-z0-9-]{0,30}( [a-z][a-z0-9-]{0,30})*$ ]] \
     || die "RESEARCH_ENDPOINTS='$RS_ENDPOINTS' is not a space-separated list of endpoint names"
-log "ConfigMap model-gateway-code and model-gateway in $GW_NS..."
+_ep_helper() { ( for _v in $(compgen -v RESEARCH_ENDPOINT_); do export "$_v"; done
+                 exec python3 "$APP_DIR/endpoints_config.py" "$@" ) }
+EP_DOC="$(mktemp)"; trap 'rm -f "$EP_DOC"' EXIT
+_ep_helper doc "$APP_DIR/endpoints.json" "$RS_ENDPOINTS" > "$EP_DOC" || die "the model endpoints are not configured right (config.env RESEARCH_ENDPOINT_*)"
+log "Secret model-gateway-keys in $GW_NS (the keys of the configured endpoints; none are printed)..."
+_ep_helper secret "$GW_NS" | $KUBECTL apply -f - >/dev/null || die "Secret model-gateway-keys could not be written"
+GATEWAY_KEYS_VERSION="$($KUBECTL get secret model-gateway-keys -n "$GW_NS" -o jsonpath='{.metadata.resourceVersion}')"
+GATEWAY_CODE_SHA256="$(cat "$APP_DIR/gateway.py" "$REPO_ROOT/apps/research-agents/mcp_common.py" "$EP_DOC" | sha256sum | cut -d' ' -f1)"
+log "ConfigMap model-gateway-code and model-gateway in $GW_NS (endpoints: $RS_ENDPOINTS)..."
 python3 -c '
 import json, sys
 print(json.dumps({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "model-gateway-code", "namespace": sys.argv[1],
       "labels": {"app": "model-gateway"}}, "data": {"gateway.py": open(sys.argv[2]).read(), "mcp_common.py": open(sys.argv[3]).read(),
       "endpoints.json": open(sys.argv[4]).read()}}))' \
-    "$GW_NS" "$APP_DIR/gateway.py" "$REPO_ROOT/apps/research-agents/mcp_common.py" "$APP_DIR/endpoints.json" | $KUBECTL apply -f - >/dev/null
-render "$APP_DIR/k8s/gateway.yaml" RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS | $KUBECTL apply -f - >/dev/null
+    "$GW_NS" "$APP_DIR/gateway.py" "$REPO_ROOT/apps/research-agents/mcp_common.py" "$EP_DOC" | $KUBECTL apply -f - >/dev/null
+render "$APP_DIR/k8s/gateway.yaml" RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS \
+    GATEWAY_KEYS_VERSION | $KUBECTL apply -f - >/dev/null
 $KUBECTL rollout status deployment/model-gateway -n "$GW_NS" --timeout=5m \
     || die "model-gateway did not become ready: microk8s kubectl -n $GW_NS logs deployment/model-gateway"
 

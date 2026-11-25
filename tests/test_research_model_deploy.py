@@ -135,11 +135,12 @@ class GatewayManifest(unittest.TestCase):
     def render(self):
         import yaml
         r = subprocess.run(["bash", "-c", 'source infra/lib-render.sh; render apps/research-model/k8s/gateway.yaml '
-                            'RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS'],
+                            'RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS '
+                            'GATEWAY_KEYS_VERSION'],
                            cwd=REPO, capture_output=True, text=True,
                            env=dict(clean_env(), RESEARCH_GW_NAMESPACE=GW, GATEWAY_IMAGE=PINS["python_image"], MODEL_ALIAS=ALIAS,
                                     MODEL_SHA256=SHA, LLM_CTX="4096", GATEWAY_CODE_SHA256="ab" * 32,
-                                    RS_ENDPOINTS="local"))
+                                    RS_ENDPOINTS="local", GATEWAY_KEYS_VERSION="4711"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("${", r.stdout)
         return [d for d in yaml.safe_load_all(r.stdout) if d]
@@ -172,12 +173,18 @@ class GatewayManifest(unittest.TestCase):
         self.assertEqual(env["RS_LLM_URL"], "http://research-llm.%s.svc.cluster.local:8080" % GW)
         self.assertEqual(env["MODEL_ALIAS"], ALIAS)
 
-    def test_no_secret_no_hostpath_no_pv(self):
+    def test_one_secret_no_hostpath_no_pv(self):
+        """Its one Secret is model-gateway-keys (the endpoints' API keys, research Phase 4d), optional, group-readable."""
         docs = self.render()
         text = json.dumps(docs)
-        for bad in ("secretKeyRef", "\"secret\"", "hostPath", "PersistentVolume", "NodePort", "LoadBalancer", "hostNetwork"):
+        for bad in ("secretKeyRef", "hostPath", "PersistentVolume", "NodePort", "LoadBalancer", "hostNetwork", "envFrom"):
             self.assertNotIn(bad, text)
-        self.assertEqual([v["name"] for v in docs[0]["spec"]["template"]["spec"]["volumes"]], ["code"])
+        spec = docs[0]["spec"]["template"]["spec"]
+        self.assertEqual([v["name"] for v in spec["volumes"]], ["code", "keys"])
+        self.assertEqual(spec["volumes"][1]["secret"], {"secretName": "model-gateway-keys", "defaultMode": 0o440, "optional": True})
+        self.assertEqual(spec["securityContext"]["fsGroup"], 65534)
+        self.assertIn({"name": "keys", "mountPath": "/keys", "readOnly": True}, spec["containers"][0]["volumeMounts"])
+        self.assertEqual(docs[0]["spec"]["template"]["metadata"]["annotations"]["medcea/keys-version"], "4711")
 
     def test_service_is_clusterip_8120(self):
         svc = self.render()[1]
@@ -227,6 +234,7 @@ case "$*" in
   "get deployment research-llm "*) [[ -z "${STUB_DEPLOYED:-}" ]] || echo deployment.apps/research-llm ;;
   "get networkpolicy -n "*) [[ -n "${STUB_NO_NETPOL:-}" ]] || echo networkpolicy.networking.k8s.io/gw-default-deny ;;
   "rollout status "*) exit "${STUB_ROLLOUT_RC:-0}" ;;
+  "get secret model-gateway-keys "*) echo 4711 ;;
   "apply "*) cat > "$STUB_DIR/in-$(printf %03d "$n")-apply" ;;
 esac
 exit 0
@@ -376,6 +384,33 @@ class Deploy(Tree):
         self.assertIn("the fetch did not finish", r.out)
         self.assertEqual(self.applies(), [])
 
+    def test_an_endpoint_from_config_env(self):
+        """Research Phase 4d: an endpoint is config.env's; its key reaches only Secret model-gateway-keys, never argv,
+        the ConfigMap or the log."""
+        self.have_model()
+        key = "sk-local-TESTKEYTESTKEY1234"
+        self.write_config(RESEARCH_ENDPOINTS="local gpu", RESEARCH_ENDPOINT_GPU_URL="http://100.71.228.99:8000",
+                          RESEARCH_ENDPOINT_GPU_MODEL="Qwen/Qwen3-14B-AWQ", RESEARCH_ENDPOINT_GPU_CONTEXT="12288",
+                          RESEARCH_ENDPOINT_GPU_DETERMINISTIC="true", RESEARCH_ENDPOINT_GPU_THINKING="false",
+                          RESEARCH_ENDPOINT_GPU_TOOLS="text", RESEARCH_ENDPOINT_GPU_KEY=key)
+        r, calls = self.run_script(self.DEPLOY)
+        self.assertEqual(r.returncode, 0, r.out)
+        sec = [d for d in self.applies() if d["kind"] == "Secret"][0]
+        self.assertEqual(sec["stringData"], {"gpu": key})
+        cm = [d for d in self.applies() if d["metadata"]["name"] == "model-gateway-code"][0]
+        eps = json.loads(cm["data"]["endpoints.json"])["endpoints"]
+        self.assertEqual((eps["gpu"]["url"], eps["gpu"]["tools"], eps["gpu"]["key"]), ("http://100.71.228.99:8000", "text", "secret"))
+        self.assertNotIn(key, cm["data"]["endpoints.json"])
+        dep = [d for d in self.applies() if d["kind"] == "Deployment" and d["metadata"]["name"] == "model-gateway"][0]
+        env = {e["name"]: e.get("value") for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["RS_ENDPOINTS"], "local gpu")
+        self.assertNotIn(key, "\n".join(calls) + r.out)
+        # an endpoint named but not configured stops the deploy before anything of the gateway is applied
+        self.write_config(RESEARCH_ENDPOINTS="local gpu")
+        r, _ = self.run_script(self.DEPLOY)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("neither endpoints.json nor config.env", r.out)
+
     def test_full_path(self):
         self.have_model()
         r, calls = self.run_script(self.DEPLOY)
@@ -386,7 +421,7 @@ class Deploy(Tree):
         kinds = [(d["kind"], d["metadata"]["name"]) for d in self.applies()]
         self.assertEqual(kinds, [("ConfigMap", "research-llm-script"), ("PersistentVolume", GW + "-research-models"),
                                  ("PersistentVolumeClaim", "research-models"), ("Deployment", "research-llm"),
-                                 ("Service", "research-llm"), ("ConfigMap", "model-gateway-code"),
+                                 ("Service", "research-llm"), ("Secret", "model-gateway-keys"), ("ConfigMap", "model-gateway-code"),
                                  ("Deployment", "model-gateway"), ("Service", "model-gateway")])
         gcm = [d for d in self.applies() if d["metadata"]["name"] == "model-gateway-code"][0]
         self.assertEqual(gcm["data"]["gateway.py"], read("apps/research-model/gateway.py"))

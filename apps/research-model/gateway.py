@@ -95,6 +95,65 @@ def translate(request):
     return msgs, tools, names
 
 
+# Tools as text (an endpoint's `tools: text`, research Phase 4d): for an OpenAI-compatible server without native tool
+# calls (vLLM without --enable-auto-tool-choice). The tools go into the system message in the Hermes form Qwen's own
+# chat template writes, a call is the text <tool_call>{"name": .., "arguments": {..}}</tool_call>, and a tool result
+# goes back as a user message <tool_response>..</tool_response>, as that template renders a tool message.
+TOOLS_TEXT = ("\n\n# Tools\n\nYou may call one function per answer.\n\nYou are provided with function signatures within "
+              "<tools></tools> XML tags:\n<tools>\n%s\n</tools>\n\nFor the function call, return a json object with the "
+              "function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n"
+              "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>")
+
+
+def translate_text(request):
+    """-> (messages, None, names): the request with its tools written into the system message (TOOLS_TEXT)."""
+    msgs, tools, names = translate(request)
+    out = [dict(msgs[0])]
+    if tools:
+        out[0]["content"] += TOOLS_TEXT % "\n".join(json.dumps(t, separators=(",", ":"), sort_keys=True) for t in tools)
+    for m in msgs[1:]:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            f = m["tool_calls"][0]["function"]
+            call = json.dumps({"name": f["name"], "arguments": json.loads(f["arguments"])}, separators=(",", ":"), sort_keys=True)
+            text = (m.get("content") or "").strip()
+            out.append({"role": "assistant", "content": (text + "\n" if text else "") + "<tool_call>\n%s\n</tool_call>" % call})
+        elif m["role"] == "tool":
+            out.append({"role": "user", "content": "<tool_response>\n%s\n</tool_response>" % m["content"]})
+        else:
+            out.append(m)
+    return out, None, names
+
+
+def read_text_answer(raw, names):
+    """read_answer for `tools: text`: the <tool_call> blocks of the text become tool calls (the first is taken, the
+    others counted), the text outside them stays text. Never raises."""
+    import re
+    try:
+        msg = raw["choices"][0].get("message") or {}
+        content = str(msg.get("content") or "")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return read_answer(raw, names)
+    blocks = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.S)
+    calls = []
+    for b in blocks:
+        try:
+            d = json.loads(b)
+        except ValueError:
+            d = None
+        if isinstance(d, dict):
+            calls.append({"function": {"name": d.get("name"), "arguments": d.get("arguments")}})
+        else:
+            calls.append({"function": {"name": None, "arguments": None}})
+    text = re.sub(r"<tool_call>.*?(</tool_call>|$)", "", content, flags=re.S).strip()
+    if "<tool_call>" in content and not blocks:          # opened, never closed: cut off at the limit
+        calls = [{"function": {"name": None, "arguments": None}}]
+    fake = dict(raw, choices=[dict(raw["choices"][0], message={"content": text, "tool_calls": calls})])
+    out, finish = read_answer(fake, names)
+    if calls and out.get("tool") is None and out.get("tool_error") == "no such tool" and calls[0]["function"]["name"] is None:
+        out["tool_error"] = "the tool call could not be read (<tool_call> must hold {\"name\": .., \"arguments\": {..}})"
+    return out, finish
+
+
 def read_answer(raw, names):
     """The llama-server answer -> ({text, tool, tool_error?}, finish_reason). Never raises. Of several calls the
     first is read and the others are counted in the internal key '_dropped' (the gateway records it beside the
@@ -180,11 +239,18 @@ class OpenAIBackend:
     read from a file mounted into this pod only. Never sends llama-server's own fields."""
     kind = "openai"
 
-    def __init__(self, llm, name, model, ctx, max_output=MAX_TOKENS_CAP, deterministic=False, key_file=None):
+    def __init__(self, llm, name, model, ctx, max_output=MAX_TOKENS_CAP, deterministic=False, key_file=None,
+                 thinking=None, tools="native"):
         self.llm, self.name, self.alias, self.ctx = llm, name, model, ctx
         self.model_sha256, self.max_output, self.deterministic, self.key_file = "", max_output, deterministic, key_file
+        self.thinking, self.tools = thinking, tools
         self.flags = {"sampler": dict({"temperature": 0}, **({"seed": 1} if deterministic else {})),
-                      "tool_choice": "auto", "parallel_tool_calls": False, "slots": 1, "endpoint_kind": "openai"}
+                      "tool_choice": "auto", "parallel_tool_calls": False, "slots": 1, "endpoint_kind": "openai",
+                      "tools": tools}
+        if thinking is not None:
+            self.flags["enable_thinking"] = thinking
+        if tools == "text":
+            self.translate, self.read = translate_text, read_text_answer
 
     def headers(self):
         if not self.key_file:
@@ -196,13 +262,16 @@ class OpenAIBackend:
         b = {"model": self.alias, "messages": msgs, "max_tokens": max_tokens, "stream": False, "temperature": 0}
         if self.deterministic:
             b["seed"] = 1
+        if self.thinking is not None:      # Qwen3 on vLLM thinks unless told (its chat template's switch)
+            b["chat_template_kwargs"] = {"enable_thinking": self.thinking}
         if tools:
             b["tools"], b["tool_choice"], b["parallel_tool_calls"] = tools, "auto", False
         return b
 
     @staticmethod
     def context_full(st, raw):
-        return st == 400 and "context_length_exceeded" in json.dumps(raw)
+        t = json.dumps(raw)
+        return st == 400 and ("context_length_exceeded" in t or "maximum context length" in t)   # OpenAI / vLLM
 
 
 ENDPOINT_KINDS = ("llama", "openai")
@@ -230,10 +299,14 @@ def load_endpoints(path, enabled, local=None, llm_factory=None, key_dir="/keys")
         if not (isinstance(e.get("url"), str) and e["url"].startswith(("http://", "https://"))
                 and isinstance(e.get("model"), str) and isinstance(e.get("context"), int)):
             raise ValueError("endpoint %s needs url, model and context" % name)
-        key = os.path.join(key_dir, name, "api-key") if e.get("key") == "secret" else None
+        if e.get("tools", "native") not in ("native", "text") or e.get("thinking") not in (None, True, False):
+            raise ValueError("endpoint %s: tools is native or text, thinking true, false or absent" % name)
+        key = os.path.join(key_dir, name) if e.get("key") == "secret" else None
+        if key and not os.path.isfile(key):
+            raise ValueError("endpoint %s needs its key at %s (Secret model-gateway-keys)" % (name, key))
         llm = (llm_factory or (lambda u: Llm(u, 540)))(e["url"])
         out[name] = OpenAIBackend(llm, name, e["model"], e["context"], int(e.get("max_output", MAX_TOKENS_CAP)),
-                                  bool(e.get("deterministic")), key)
+                                  bool(e.get("deterministic")), key, e.get("thinking"), e.get("tools", "native"))
     return out
 
 
@@ -282,7 +355,7 @@ class Gateway:
             slot.release()
 
     def _turn(self, sid, turn, req, left, backend):
-        msgs, tools, names = translate(req)
+        msgs, tools, names = getattr(backend, "translate", translate)(req)
         out_left = left.get("output_tokens")
         max_tokens = MAX_TOKENS_DEFAULT if not isinstance(out_left, (int, float)) else int(max(16, min(out_left, MAX_TOKENS_CAP)))
         max_tokens = min(max_tokens, MAX_TOKENS_CAP, getattr(backend, "max_output", MAX_TOKENS_CAP))
@@ -299,7 +372,7 @@ class Gateway:
             why = "context_full" if ctxfull else "model_error"
             self.session.trace(sid, "turn_response", {"turn": turn, "error": why, "status": st})
             return (413 if ctxfull else 502), {"error": why}
-        resp, finish = read_answer(raw, names)
+        resp, finish = getattr(backend, "read", read_answer)(raw, names)
         dropped = resp.pop("_dropped", 0)
         u, tm = raw.get("usage") or {}, raw.get("timings") or {}
         usage = {"prompt_tokens": int(u.get("prompt_tokens") or 0), "output_tokens": int(u.get("completion_tokens") or 0),
