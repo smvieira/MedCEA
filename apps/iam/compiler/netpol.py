@@ -62,6 +62,10 @@ Hop forms (research sandbox Phase 2b). A zone pod's `egress` item is exactly one
                                       Calico matches after DNAT of the kubernetes Service)
     {internet: true, ports: [N, ..]}  0.0.0.0/0 except network.zones.<zone>.internet_except
                                       (the private ranges, in YAML order), on those TCP ports
+    {address: A.B.C.D/32, port: N}    one host outside the cluster, by its address (research Phase 4d:
+                                      a model server on the LAN or the tailnet, which internet_except
+                                      keeps out of an internet hop); a single IPv4 host, never
+                                      loopback, link-local, multicast or 0/8
 
 `network.zones.<zone>.internet_except` is a non-empty list of IPv4 networks (strict). A
 platform hop may not select a network pod (that pod admits only sources of its own zone).
@@ -130,11 +134,28 @@ HOP_FORMS = {
     "platform": {"platform", "port", "why"},
     "node": {"node", "port", "why"},
     "internet": {"internet", "ports", "port", "why"},
+    "address": {"address", "port", "why"},
 }
+# An address hop names one host (/32), and never one of these: loopback, "this network", link-local (cloud
+# metadata, the node's own link addresses), multicast and reserved space. A private address is the point.
+ADDRESS_REFUSED = ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
+
+
+def _address_ok(a):
+    """The /32 network of an address hop, or None when it is not one host in an allowed range."""
+    if not isinstance(a, str) or not a.endswith("/32"):
+        return None
+    try:
+        n = ipaddress.IPv4Network(a, strict=True)
+    except ValueError:
+        return None
+    if any(n.subnet_of(ipaddress.IPv4Network(r)) for r in ADDRESS_REFUSED):
+        return None
+    return n
 
 
 def _hop_form(hop):
-    """The form of a zone pod's hop (pod, platform, node or internet), None when the hop is
+    """The form of a zone pod's hop (pod, platform, node, internet or address), None when the hop is
     not a mapping, names none or several of them, or carries a key its form does not take."""
     if not isinstance(hop, dict):
         return None
@@ -238,7 +259,7 @@ def _zone_check(net, errors):
             form = _hop_form(hop)
             if form is None:
                 errors.append(f"network: pod {name}: a zone pod's hop is {{pod, port}}, {{platform, port}}, "
-                              f"{{node: true, port}} or {{internet: true, ports}}")
+                              f"{{node: true, port}}, {{internet: true, ports}} or {{address, port}}")
                 continue
             if form == "internet":
                 if hop["internet"] is not True or "port" in hop or not _ports_ok(hop.get("ports")):
@@ -265,6 +286,11 @@ def _zone_check(net, errors):
             if form == "node":
                 if hop["node"] is not True:
                     errors.append(f"network: pod {name}: a node hop is {{node: true, port}}")
+                continue
+            if form == "address":
+                if _address_ok(hop["address"]) is None:
+                    errors.append(f"network: pod {name}: an address hop names one IPv4 host as A.B.C.D/32, not "
+                                  f"loopback, link-local, multicast or 0/8 (got {hop['address']!r})")
                 continue
             if hop["pod"] not in pods:
                 errors.append(f"network: pod {name}: hop to unknown pod {hop['pod']}")
@@ -599,6 +625,8 @@ def _zone_hop(net, h, zone, namespaces, node_ips):
                "podSelector": {"matchLabels": dict(h["platform"])}}]
     elif "node" in h:
         to = [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted(set(node_ips))]
+    elif "address" in h:
+        to = [{"ipBlock": {"cidr": h["address"]}}]
     elif "internet" in h:
         ex = _internet_except((net.get("zones") or {}).get(zone))
         if ex is None:

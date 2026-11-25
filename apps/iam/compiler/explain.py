@@ -129,6 +129,8 @@ def system_reach(p):
             elif "internet" in hop:
                 for port in hop.get("ports") if isinstance(hop.get("ports"), list) else []:
                     out.add(("pod-egress", pod, "internet", "", port))
+            elif "address" in hop:      # research Phase 4d: one host outside the cluster
+                out.add(("pod-egress", pod, "address", str(hop["address"]), hop.get("port")))
     # research Phase 4a: a zone service's own token client (and its audience), and a pod's DNS egress
     for pod, pd in (net.get("pods") or {}).items():
         for tc in pd.get("token_clients") or []:
