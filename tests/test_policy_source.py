@@ -4661,6 +4661,7 @@ class PhaseRS2bBDelta(unittest.TestCase):
                          self.NARROWED)
 
 
+RS4BB_COMMIT = "4fabbf8"  # research Phase 4b, commit B (PhaseRS4BBDelta reads its defaults.yaml)
 PRE_RS4BB = "1689950"  # research Phase 4b stage 3 (the parent of Phase 4b's commit B): the policy is 4a B's
 
 
@@ -4704,8 +4705,7 @@ class PhaseRS4BBDelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_RS4BB, "medcea-prers4bb-")
         cls.a = ref_tree(PRE_RS4BB)[2]
-        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its parent
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree(RS4BB_COMMIT)[2]   # commit B's own file (re-pinned by the private endpoint's commit B)
         cls.rows = source.entries_and_waivers(cls.a.data)
         cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
         cls.was, cls.skel = artefacts(cls.a), artefacts(cls.s)
@@ -5144,6 +5144,111 @@ class PhaseRS4BDelta(unittest.TestCase):
         gs, gw = json.loads(self.skel["grants-json"]), json.loads(self.want["grants-json"])
         self.assertEqual(gs["privileges"], gw["privileges"])
         self.assertEqual(apply_check._widening_roles(routes_s, routes_w), self.WIDENED)
+
+
+PRE_RS4DE = "bb3c370"  # research Phase 4d, commit A of the private endpoint (the address hop form), parent of its B
+
+
+class PhaseRS4DEndpointDelta(unittest.TestCase):
+    """Research Phase 4d, the private endpoint's commit B (owner decision of 25 Nov 2026): a skeleton-only version giving
+    model-gateway one address hop, {address: 100.71.228.99/32, port: 8000} (the vLLM server "gpu" on the owner's
+    tailnet; its URL, model and key are config.env's). Against PRE_RS4DE with the applied rows: widening with exactly
+    that pod-egress tuple and the two residue sections, nothing narrowed, no person role's reach moves, the checker
+    passes, qa may approve; only the research-gw zone's NetworkPolicies move."""
+
+    SYSTEM = [["pod-egress", "model-gateway", "address", "100.71.228.99/32", 8000]]
+    SECTIONS = [["section", "network.pods.model-gateway.egress[].address"],
+                ["section", "network.pods.model-gateway.egress[].port"]]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RS4DE, "medcea-prers4de-")
+        cls.a = ref_tree(PRE_RS4DE)[2]
+        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its own commit
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.rows = source.entries_and_waivers(cls.a.data)
+        cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
+        cls.was, cls.skel = artefacts(cls.a), artefacts(cls.s)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RS4DE}: {self.old_cli}")
+
+    def test_gate_checker_and_approvers(self):
+        import apply_check
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        self.assertEqual(g["added"], {"_system": self.SYSTEM, "_sections": self.SECTIONS})
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+        self.assertEqual(invariants.check(self.s)[0], [])
+        self.assertEqual(apply_check.barred_approvers(self.p.data["roles"], g["added"]), [])
+
+    def test_only_the_hop(self):
+        a, p = copy.deepcopy(self.a.data), copy.deepcopy(self.p.data)
+        hop = p["network"]["pods"]["model-gateway"]["egress"].pop()
+        self.assertEqual(hop, {"address": "100.71.228.99/32", "port": 8000,
+                               "why": "the private model endpoint gpu (vLLM, tailnet)"})
+        self.assertEqual(source.skeleton(p), source.skeleton(a))
+        self.assertEqual(source.entries_and_waivers(self.p.data), self.rows)
+
+    def test_no_role_reach_moves(self):
+        for role in sorted(self.p.roles):
+            with self.subTest(role):
+                self.assertEqual(explain.reach(self.s, role), explain.reach(self.a, role))
+
+    def test_keeps_the_proposals_sections(self):
+        """The proposal runs from commit A's tree (the address path unclassified: residue), apply.sh N from this one
+        (registered residue): both compute the same sections and diff digest."""
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_RS4DE}:apps/iam/apply_check.py"], capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {PRE_RS4DE}: {r.stderr.strip()}")
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = ("import json, sys\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "import apply_check\n"
+                "from compiler import explain, source\n"
+                "a = json.load(sys.stdin)\n"
+                "p_old, p_new, acc, git = apply_check._composed(a['acc'], a['git'], a['rows'])\n"
+                "secs = explain.sections(acc, git)\n"
+                "skel = {'from': source.skeleton_digest(a['acc']), 'to': source.skeleton_digest(a['git']), 'sections': secs}\n"
+                "doc = explain.diff_document('skeleton', 14, 13, 'e' * 64, p_old, p_new, skeleton=skel)\n"
+                "print(json.dumps({'sections': secs, 'digest': explain.diff_digest(doc)}))\n")
+        inp = json.dumps({"acc": source.skeleton(self.a.data), "git": self.p.data, "rows": self.rows})
+        o = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(self.old, "apps", "iam")],
+                           input=inp, capture_output=True, text=True, env=clean_env())
+        self.assertEqual(o.returncode, 0, o.stderr)
+        old = json.loads(o.stdout)
+        import apply_check
+        p_old, p_new, acc, git = apply_check._composed(source.skeleton(self.a.data), self.p.data, self.rows)
+        secs = explain.sections(acc, git)
+        skel = {"from": source.skeleton_digest(source.skeleton(self.a.data)), "to": source.skeleton_digest(self.p.data),
+                "sections": secs}
+        doc = explain.diff_document("skeleton", 14, 13, "e" * 64, p_old, p_new, skeleton=skel)
+        self.assertEqual(json.loads(json.dumps(secs)), old["sections"])
+        self.assertEqual([list(x) for x in secs], self.SECTIONS)
+        self.assertEqual(explain.diff_digest(doc), old["digest"])
+
+    def test_exactly_the_research_gw_policies_move(self):
+        self.assertEqual(set(self.skel), set(self.was))
+        moved = {k for k in self.skel if self.was[k] != self.skel[k]}
+        self.assertEqual(moved, {"netpol-research-gw"})
+        gw = next(i for i in json.loads(self.skel["netpol-research-gw"])["items"]
+                  if i["metadata"]["name"] == "gw-model-gateway")["spec"]
+        self.assertEqual(gw["egress"][-1], {"to": [{"ipBlock": {"cidr": "100.71.228.99/32"}}],
+                                            "ports": [{"protocol": "TCP", "port": 8000}]})
+        for key, want in self.skel.items():
+            if key.startswith("netpol-research") or key.startswith("grants-"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+                self.assertEqual(rc, 0, f"{key} ({PRE_RS4DE}): {err}")
+                self.assertEqual(out, want, key)
 
 
 if __name__ == "__main__":

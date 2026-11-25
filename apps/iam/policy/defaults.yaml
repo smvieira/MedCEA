@@ -537,6 +537,11 @@ network:
       egress:
         - {pod: research-llm, port: 8080, why: "the llama.cpp server"}
         - {pod: research-session, port: 8102, why: "introspect and trace (server port)"}
+        # research Phase 4d (owner decision of 25 Nov 2026): the private model endpoint "gpu", a vLLM server
+        # (Qwen3-14B-AWQ) on the owner's tailnet. Its URL, model and key are config.env's
+        # (RESEARCH_ENDPOINT_GPU_*); only the address the firewall admits is written here, and a change of it is a
+        # skeleton version.
+        - {address: "100.71.228.99/32", port: 8000, why: "the private model endpoint gpu (vLLM, tailnet)"}
     research-llm:
       zone: research-gw
       selector: {app: research-llm}

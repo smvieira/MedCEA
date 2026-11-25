@@ -238,6 +238,9 @@ RESIDUE_PATHS = frozenset((
     # for a later code-only commit (no skeleton version in flight).
     "network.pods.*.egress[].pod", "network.pods.*.egress[].port", "network.pods.*.egress[].node",
     "network.pods.*.egress[].internet", "network.pods.*.egress[].ports", "network.pods.*.egress[].platform.*",
+    # research Phase 4d: an address hop (one host outside the cluster); residue for the same reason (commit A had it
+    # unclassified, which is residue too, so the proposal and the apply compute the same sections)
+    "network.pods.*.egress[].address",
     # research Phase 4a: a zone service's token client and audience and a pod's DNS egress are
     # tuples too (pod-token-client, pod-dns); residue on purpose, for the reason above
     "network.pods.*.token_clients[].client", "network.pods.*.token_clients[].audience", "network.pods.*.dns",
