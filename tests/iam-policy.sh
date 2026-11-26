@@ -36,9 +36,9 @@
 #       accepted skeleton
 #   11  the chain holds `approved` with its evidence, and verifies
 #   12  admin withdraws → withdrawn (default mode only)
-# --apply and --change, before any account is created: the ten checks apply.sh verifies
+# --apply and --change, before any account is created: the twelve checks apply.sh verifies
 # against (iamgrants, iamenforce, grafanarole, iamworkbench, onboardroles, pgadminroles,
-# noderedauth, iamartefacts, supersetroles, rsnetpol) must not FAIL (apply.sh N refuses an apply onto a failing
+# noderedauth, iamartefacts, supersetroles, rsnetpol, gwnetpol, ranetpol) must not FAIL (apply.sh N refuses an apply onto a failing
 # platform), else exit 2 naming them; under --change the applied version must be one
 # --rollback-to may return to (a bootstrap or rollback version confirmed and not disputed).
 # Before step 1 the flow's guard compiles the version that would be applied and stops with
@@ -256,11 +256,13 @@ printf '%s\n' '# tests/iam-policy.sh: the checks of apply.sh step 9' \
     'Node-RED editor rights   | noderedauth  | $NAMESPACE   |' \
     'Policy artefacts         | iamartefacts | $NAMESPACE   |' \
     'Superset roles           | supersetroles | $NAMESPACE  |' \
-    'Research network policies | rsnetpol    | $NAMESPACE   |' > "$HC8"
+    'Research network policies | rsnetpol    | $NAMESPACE   |' \
+    'Research gateway network policies | gwnetpol | $NAMESPACE |' \
+    'Research agent network policies | ranetpol | $NAMESPACE |' > "$HC8"
 if [[ "$MODE" != default ]]; then
     tail -n +2 "$HC8" | grep -vF 'Database grants' | grep -vF 'Policy artefacts' >> "$HC"
     HC_NAMES+=("Service enforcement" "Grafana roles" "AI Workbench gate" "Onboarding roles" "pgAdmin roles" "Node-RED editor rights"
-               "Superset roles" "Research network policies")
+               "Superset roles" "Research network policies" "Research gateway network policies" "Research agent network policies")
 fi
 health_fails() {   # CONF NAME… → the names of the FAILing checks, one per line, sorted
     local conf="$1" out name

@@ -1,0 +1,473 @@
+# apps/research-agents/k8s/agents.yaml — the orchestrator, mcp-sim and mcp-lake, in research-agents
+# (research Phase 4a stage 6b1, design rs4 R2/R4/OD11). Rendered by apps/research-agents/deploy.sh; the
+# code bundle comes from a git commit. Render list: RESEARCH_AGENTS_NAMESPACE RESEARCH_GW_NAMESPACE RESEARCH_NAMESPACE RS_IMAGE RS_CODE_COMMIT RS_BUNDLE_SHA256 RS_SIM_POOL RS_MODEL_GATEWAY_URL RS_ENDPOINTS RS_ENDPOINTS_INVENTORY
+# Every pod: priorityClassName medcea-research-low, no service links, non-root 65534, read-only root,
+# all capabilities dropped, RuntimeDefault seccomp, explicit requests and memory limit, image by digest,
+# and no network beyond what the zone's compiled NetworkPolicy admits; ClusterIP Services only.
+---
+# The orchestrator's rights: Jobs and the pods and logs of its own namespace, nothing else (R2: no secrets,
+# no services, no `*`, never a ClusterRole). Jobs carry no controller ownerReference to the orchestrator.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: research-orchestrator
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: research-orchestrator
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: research-orchestrator
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+rules:
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: research-orchestrator
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: research-orchestrator
+subjects:
+- kind: ServiceAccount
+  name: research-orchestrator
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: research-orchestrator
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: research-orchestrator
+    app.kubernetes.io/part-of: medcea-research
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: research-orchestrator
+  template:
+    metadata:
+      labels:
+        app: research-orchestrator
+        app.kubernetes.io/part-of: medcea-research
+      annotations:
+        medcea/code-commit: "${RS_CODE_COMMIT}"
+        medcea/code-sha256: "${RS_BUNDLE_SHA256}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: true
+      serviceAccountName: research-orchestrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # The code bundle (ConfigMap research-code, built by apps/research-agents/deploy.sh from a git
+      # commit) and the hash-checked wheels (static PV, read-only) are unpacked into emptyDirs: the
+      # container's root stays read-only and nothing is fetched from the network.
+      - name: unpack
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "set -e; tar xzf /bundle/code.tgz -C /opt/medcea -m --no-overwrite-dir; python3 -m pip install -q --no-cache-dir --disable-pip-version-check --no-index --find-links /wheels --require-hashes --no-deps --target /opt/extra -r /opt/medcea/apps/research-agents/requirements-services.txt"]
+        env:
+        - {name: HOME, value: /tmp}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        volumeMounts:
+        - {name: bundle, mountPath: /bundle, readOnly: true}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
+        - {name: code, mountPath: /opt/medcea}
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+      containers:
+      - name: research-orchestrator
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/opt/medcea/apps/research-agents/orchestrator.py"]
+        workingDir: /opt/medcea
+        env:
+        - {name: PYTHONPATH, value: /opt/extra}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - name: RS_AGENT_IMAGE
+          value: "${RS_IMAGE}"
+        - name: RS_CODE_COMMIT
+          value: "${RS_CODE_COMMIT}"
+        - name: RS_SESSION_AGENT_URL
+          value: "http://research-session.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8101"
+        - name: RS_SESSION_PERSON_URL
+          value: "http://research-session.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8100"
+        - name: RS_SESSION_SERVER_URL
+          value: "http://research-session.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8102"
+        - name: RS_MCP_SIM_URL
+          value: "http://mcp-sim.${RESEARCH_AGENTS_NAMESPACE}.svc.cluster.local:8110"
+        - name: RS_MCP_LAKE_URL
+          value: "http://mcp-lake.${RESEARCH_AGENTS_NAMESPACE}.svc.cluster.local:8111"
+        - name: RS_MODEL_GATEWAY_URL
+          value: "${RS_MODEL_GATEWAY_URL}"
+        - name: RS_ENDPOINTS
+          value: "${RS_ENDPOINTS}"
+        - name: RS_ENDPOINTS_INVENTORY
+          value: "${RS_ENDPOINTS_INVENTORY}"
+        - name: RS_AGENTS_NAMESPACE
+          value: "${RESEARCH_AGENTS_NAMESPACE}"
+        - name: RS_SIM_POOL
+          value: "${RS_SIM_POOL}"
+        - name: MEDCEA_IAM_LIB
+          value: "/iam/medcea_iam.py"
+        ports:
+        - name: person
+          containerPort: 8090
+          protocol: TCP
+        - name: sim
+          containerPort: 8091
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {memory: 256Mi}
+        # exec probes (R21): no `node` source on the token ports
+        readinessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - {name: code, mountPath: /opt/medcea, readOnly: true}
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: iam, mountPath: /iam, readOnly: true}
+        - {name: jwks, mountPath: /jwks, readOnly: true}
+        - {name: runs, mountPath: /runs}
+      volumes:
+      - name: bundle
+        configMap: {name: research-code}
+      - name: wheels
+        persistentVolumeClaim:
+          claimName: research-wheels
+          readOnly: true
+      - name: code
+        emptyDir: {sizeLimit: 64Mi}
+      - name: extra
+        emptyDir: {sizeLimit: 128Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 64Mi}
+      - name: iam
+        configMap: {name: medcea-iam-lib}
+      - name: jwks
+        configMap: {name: medcea-jwks}
+      - name: runs
+        persistentVolumeClaim:
+          claimName: research-runs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: research-orchestrator
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: research-orchestrator
+spec:
+  type: ClusterIP
+  selector:
+    app: research-orchestrator
+  ports:
+  - {name: person, port: 8090, targetPort: 8090, protocol: TCP}
+  - {name: sim, port: 8091, targetPort: 8091, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-sim
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: mcp-sim
+    app.kubernetes.io/part-of: medcea-research
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: mcp-sim
+  template:
+    metadata:
+      labels:
+        app: mcp-sim
+        app.kubernetes.io/part-of: medcea-research
+      annotations:
+        medcea/code-commit: "${RS_CODE_COMMIT}"
+        medcea/code-sha256: "${RS_BUNDLE_SHA256}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # The code bundle (ConfigMap research-code, built by apps/research-agents/deploy.sh from a git
+      # commit) and the hash-checked wheels (static PV, read-only) are unpacked into emptyDirs: the
+      # container's root stays read-only and nothing is fetched from the network.
+      - name: unpack
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "set -e; tar xzf /bundle/code.tgz -C /opt/medcea -m --no-overwrite-dir; python3 -m pip install -q --no-cache-dir --disable-pip-version-check --no-index --find-links /wheels --require-hashes --no-deps --target /opt/extra -r /opt/medcea/apps/research-agents/requirements-services.txt"]
+        env:
+        - {name: HOME, value: /tmp}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        volumeMounts:
+        - {name: bundle, mountPath: /bundle, readOnly: true}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
+        - {name: code, mountPath: /opt/medcea}
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+      containers:
+      - name: mcp-sim
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/opt/medcea/apps/research-agents/mcp_sim.py"]
+        workingDir: /opt/medcea
+        env:
+        - {name: PYTHONPATH, value: /opt/extra}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - name: RS_SESSION_SERVER_URL
+          value: "http://research-session.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8102"
+        - name: RS_ORCH_SIM_URL
+          value: "http://research-orchestrator.${RESEARCH_AGENTS_NAMESPACE}.svc.cluster.local:8091"
+        - name: RS_SIM_POOL
+          value: "${RS_SIM_POOL}"
+        - name: RS_MCP_PORT
+          value: "8110"
+        ports:
+        - name: mcp
+          containerPort: 8110
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        # exec probes (R21): no `node` source on the token ports
+        readinessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8110/healthz', timeout=3)"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8110/healthz', timeout=3)"]
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - {name: code, mountPath: /opt/medcea, readOnly: true}
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: runs, mountPath: /runs, readOnly: true}
+      volumes:
+      - name: bundle
+        configMap: {name: research-code}
+      - name: wheels
+        persistentVolumeClaim:
+          claimName: research-wheels
+          readOnly: true
+      - name: code
+        emptyDir: {sizeLimit: 64Mi}
+      - name: extra
+        emptyDir: {sizeLimit: 128Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 64Mi}
+      - name: runs
+        persistentVolumeClaim:
+          claimName: research-runs
+          readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-sim
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: mcp-sim
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-sim
+  ports:
+  - {name: mcp, port: 8110, targetPort: 8110, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-lake
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: mcp-lake
+    app.kubernetes.io/part-of: medcea-research
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: mcp-lake
+  template:
+    metadata:
+      labels:
+        app: mcp-lake
+        app.kubernetes.io/part-of: medcea-research
+      annotations:
+        medcea/code-commit: "${RS_CODE_COMMIT}"
+        medcea/code-sha256: "${RS_BUNDLE_SHA256}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # The code bundle (ConfigMap research-code, built by apps/research-agents/deploy.sh from a git
+      # commit) and the hash-checked wheels (static PV, read-only) are unpacked into emptyDirs: the
+      # container's root stays read-only and nothing is fetched from the network.
+      - name: unpack
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "set -e; tar xzf /bundle/code.tgz -C /opt/medcea -m --no-overwrite-dir; python3 -m pip install -q --no-cache-dir --disable-pip-version-check --no-index --find-links /wheels --require-hashes --no-deps --target /opt/extra -r /opt/medcea/apps/research-agents/requirements-services.txt"]
+        env:
+        - {name: HOME, value: /tmp}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        volumeMounts:
+        - {name: bundle, mountPath: /bundle, readOnly: true}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
+        - {name: code, mountPath: /opt/medcea}
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+      containers:
+      - name: mcp-lake
+        image: ${RS_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/opt/medcea/apps/research-agents/mcp_lake.py"]
+        workingDir: /opt/medcea
+        env:
+        - {name: PYTHONPATH, value: /opt/extra}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - name: RS_SESSION_SERVER_URL
+          value: "http://research-session.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8102"
+        - name: MEDCEA_LAKE
+          value: "http://lake-api.${RESEARCH_NAMESPACE}.svc.cluster.local:3000"
+        - name: RS_MCP_PORT
+          value: "8111"
+        ports:
+        - name: mcp
+          containerPort: 8111
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        # exec probes (R21): no `node` source on the token ports
+        readinessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8111/healthz', timeout=3)"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8111/healthz', timeout=3)"]
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - {name: code, mountPath: /opt/medcea, readOnly: true}
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: bundle
+        configMap: {name: research-code}
+      - name: wheels
+        persistentVolumeClaim:
+          claimName: research-wheels
+          readOnly: true
+      - name: code
+        emptyDir: {sizeLimit: 64Mi}
+      - name: extra
+        emptyDir: {sizeLimit: 128Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-lake
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: mcp-lake
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-lake
+  ports:
+  - {name: mcp, port: 8111, targetPort: 8111, protocol: TCP}

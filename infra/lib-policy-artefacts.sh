@@ -15,6 +15,10 @@
 # variables (SCRIPT_DIR = the repository, MK8S, KUBECTL, NAMESPACE, config.env, the
 # colours) and the libraries it sourced; deploy-policy.sh sets the same.
 
+# zone_namespace / zone_other_args (research Phase 4a): lib-policy-tools.sh, functions only. Sourced
+# here when the caller has not, or pa_rsnetpol dies "command not found" (apply.sh 10, 22 Nov 2026).
+declare -F zone_other_args >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/lib-policy-tools.sh"
+
 _pa_line() { echo -e "  ${GREEN:-}[policy-only]${NC:-} $1: $2"; }
 
 #   pa_iam_lib [full|scoped]
@@ -101,6 +105,77 @@ else
 fi
     if [[ -n "${_OLD_MQTT_DIGEST:-}" && "$_OLD_MQTT_DIGEST" != "${IAM_MQTT_DIGEST:-}" ]]; then PA_MQTT_CHANGED=1; fi
     [[ "$_pa_mode" == scoped ]] && _pa_line medcea-iam-lib re-rendered
+    return 0
+}
+
+#   pa_zone_iam_copies [full|scoped]
+#
+# (research Phase 4a stage 7a, R37) ConfigMap medcea-iam-lib and the realm's public keys, copied from the
+# platform namespace into research-gw and research-agents (the keys as ConfigMap medcea-jwks: a Secret in
+# -agents would be one more thing for an agent pod to read), while RESEARCH_ENABLED is true and the applied
+# policy has the zone and its namespace exists. The research-session and orchestrator pods read the route
+# table from it, so a route-table change must reach the copies in the same rollout as the original:
+# deploy-infra (after pa_iam_lib), deploy-policy and apps/research-agents/deploy.sh call it. Scoped prints
+# `zone-iam-lib: unchanged|re-rendered|not deployed`; it writes nothing when the copies equal the source.
+pa_zone_iam_copies() {
+    local _pa_mode="${1:-full}" _z _ns _todo=() _rc
+    [[ "${RESEARCH_ENABLED:-false}" == "true" ]] || { [[ "$_pa_mode" == scoped ]] && _pa_line zone-iam-lib "not deployed"; return 0; }
+    for _z in research-gw research-agents; do
+        _pa_zone_has "$_z" || continue
+        _ns="$(zone_namespace "$_z")"
+        [[ "$($MK8S kubectl get namespace "$_ns" -o name 2>/dev/null || true)" == "namespace/$_ns" ]] || continue
+        _todo+=("$_ns")
+    done
+    if ((${#_todo[@]} == 0)); then [[ "$_pa_mode" == scoped ]] && _pa_line zone-iam-lib "not deployed"; return 0; fi
+    local _src_cm _src_jwks _changed=0 _live
+    if ! _src_cm="$($MK8S kubectl get configmap medcea-iam-lib -n "$NAMESPACE" -o json 2>/dev/null)" \
+       || ! _src_jwks="$($MK8S kubectl get secret medcea-jwks -n "$NAMESPACE" -o json 2>/dev/null)"; then
+        # a fresh install writes the keys after this point: apps/research-agents/deploy.sh copies them then
+        echo -e "${YELLOW:-}note: medcea-iam-lib or medcea-jwks is not in $NAMESPACE yet; the research zones' copies wait for ./apps/research-agents/deploy.sh.${NC:-}" >&2
+        [[ "$_pa_mode" == scoped ]] && _pa_line zone-iam-lib "not deployed"
+        return 0
+    fi
+    # the ConfigMap is larger than one environment variable may be (128 KiB): files, never env or argv
+    local _tmp; _tmp="$(mktemp -d)"
+    printf '%s' "$_src_cm" > "$_tmp/cm.json"; printf '%s' "$_src_jwks" > "$_tmp/jwks.json"
+    for _ns in "${_todo[@]}"; do
+        python3 -c '
+import base64, json, sys
+d, ns = sys.argv[1], sys.argv[2]
+cm, jw = json.load(open(d + "/cm.json")), json.load(open(d + "/jwks.json"))
+lab = {"app.kubernetes.io/part-of": "medcea-research"}
+out = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "medcea-iam-lib", "namespace": ns, "labels": lab},
+       "data": cm.get("data") or {}}
+if cm.get("binaryData"):
+    out["binaryData"] = cm["binaryData"]
+json.dump(out, open(d + "/want-cm.json", "w"))
+json.dump({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "medcea-jwks", "namespace": ns, "labels": lab},
+           "data": {k: base64.b64decode(v).decode("utf-8") for k, v in (jw.get("data") or {}).items()}},
+          open(d + "/want-jw.json", "w"))' "$_tmp" "$_ns"
+        if [[ "$_pa_mode" == scoped ]]; then
+            $MK8S kubectl get configmap medcea-iam-lib medcea-jwks -n "$_ns" -o json > "$_tmp/live.json" 2>/dev/null \
+                || echo '{"items": []}' > "$_tmp/live.json"
+            _rc=0
+            python3 -c '
+import json, sys
+d = sys.argv[1]
+live = {i["metadata"]["name"]: i for i in json.load(open(d + "/live.json")).get("items") or []}
+cm, jw = json.load(open(d + "/want-cm.json")), json.load(open(d + "/want-jw.json"))
+ok = (live.get("medcea-iam-lib", {}).get("data") == cm["data"]
+      and live.get("medcea-iam-lib", {}).get("binaryData") == cm.get("binaryData")
+      and live.get("medcea-jwks", {}).get("data") == jw["data"])
+sys.exit(0 if ok else 1)' "$_tmp" 2>/dev/null || _rc=$?
+            [[ $_rc == 0 ]] && continue
+        fi
+        _changed=1
+        # server-side: a client-side apply would copy the library into the 256 KiB last-applied annotation
+        $MK8S kubectl apply --server-side --force-conflicts --field-manager medcea-zone-iam -f "$_tmp/want-cm.json" >/dev/null
+        $MK8S kubectl apply --server-side --force-conflicts --field-manager medcea-zone-iam -f "$_tmp/want-jw.json" >/dev/null
+    done
+    rm -rf "$_tmp"
+    if [[ "$_pa_mode" == scoped ]]; then
+        if ((_changed)); then _pa_line zone-iam-lib re-rendered; else _pa_line zone-iam-lib unchanged; fi
+    fi
     return 0
 }
 
@@ -213,7 +288,9 @@ _pa_netpol_equal() {
 import json, os, sys
 live = {i["metadata"]["name"]: i.get("spec") for i in json.load(sys.stdin).get("items") or []}
 want = {i["metadata"]["name"]: i.get("spec") for i in (json.loads(os.environ["WANT"])["items"] if os.environ["WANT"] else [])}
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda d: json.dumps({k: {f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}
+                              for k, s in d.items()}, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
 }
 
@@ -249,7 +326,8 @@ _pa_rs_zone() {
 # exactly the compiled names and specs.
 pa_rsnetpol() {
     local _pa_mode="${1:-full}" _rns="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}" _rc=0 _ip _np
-    local _rs_ips=() _rs_netpol _rs_want
+    local _rs_ips=() _rs_netpol _rs_want _rs_other=()
+    mapfile -t _rs_other < <(zone_other_args research)
     if [[ "$_pa_mode" == scoped ]]; then
         if [[ "$($MK8S kubectl get namespace "$_rns" -o name 2>/dev/null || true)" != "namespace/$_rns" ]]; then
             _pa_line rsnetpol "not deployed"
@@ -264,7 +342,7 @@ pa_rsnetpol() {
         _rs_ips+=(--node-ip "${_ip%/*}")
     done
     if ! _rs_netpol="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --zone research \
-                         --namespace "$_rns" --platform-namespace "$NAMESPACE" "${_rs_ips[@]}")"; then
+                         --namespace "$_rns" --platform-namespace "$NAMESPACE" "${_rs_other[@]}" "${_rs_ips[@]}")"; then
         echo -e "${RED:-}ERROR: the research zone's network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC:-}" >&2
         exit 1
     fi
@@ -280,13 +358,14 @@ pa_rsnetpol() {
 
 # 0 equal, 1 different, 2 cannot tell
 _pa_rsnetpol_equal() {
-    local live want ips=() ip rns="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
+    local live want ips=() ip rns="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}" other=()
+    mapfile -t other < <(zone_other_args research)
     live="$($MK8S kubectl get netpol -n "$rns" -l medcea/rs-netpol=true -o json 2>/dev/null)" || return 2
     for ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
         ips+=(--node-ip "${ip%/*}")
     done
     want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol --zone research \
-              --namespace "$rns" --platform-namespace "$NAMESPACE" "${ips[@]}")" || return 2
+              --namespace "$rns" --platform-namespace "$NAMESPACE" "${other[@]}" "${ips[@]}")" || return 2
     WANT="$want" python3 -c '
 import json, os, sys
 try:
@@ -294,8 +373,99 @@ try:
     want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
 except (ValueError, KeyError, TypeError, AttributeError):
     sys.exit(2)
-canon = lambda d: json.dumps(d, sort_keys=True)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda d: json.dumps({k: {f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}
+                              for k, s in d.items()}, sort_keys=True)
 sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$live"
+}
+
+#   _pa_zone_has ZONE
+#
+# 0 when the applied access policy has that zone (cli.py has-zone ZONE), 1 when it has not;
+# a policy that does not compile is fatal (research Phase 4a: research-gw, research-agents).
+_pa_zone_has() {
+    local _rc=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-zone "$1" >/dev/null || _rc=$?
+    case $_rc in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) echo -e "${RED:-}ERROR: cannot tell whether the access policy has the $1 zone (python3 apps/iam/compiler/cli.py has-zone $1 exited $_rc).${NC:-}" >&2
+           exit 1 ;;
+    esac
+}
+
+#   pa_zonenetpol ZONE [full|scoped]
+#
+# The NetworkPolicies of research-gw (label medcea/gw-netpol, names gw-*) or research-agents
+# (medcea/ra-netpol, ra-*) in that zone's namespace, compiled with `compile netpol` and the
+# arguments zone_netpol_args builds; the same shape as pa_rsnetpol, which stays the research
+# zone's. Scoped prints `gwnetpol:` / `ranetpol:` unchanged|re-rendered|not deployed.
+pa_zonenetpol() {
+    local _z="$1" _pa_mode="${2:-full}" _key _lbl _ns _rc=0 _ip _np _want _names
+    local _ips=() _args=()
+    _pa_zone_keys "$_z" || return 2
+    _key="$PA_ZONE_KEY"; _lbl="$PA_ZONE_LABEL"; _ns="$(zone_namespace "$_z")"
+    if [[ "$_pa_mode" == scoped ]]; then
+        if [[ "$($MK8S kubectl get namespace "$_ns" -o name 2>/dev/null || true)" != "namespace/$_ns" ]]; then
+            _pa_line "$_key" "not deployed"
+            return 0
+        fi
+        _pa_zonenetpol_equal "$_z" || _rc=$?
+        if [[ $_rc == 0 ]]; then _pa_line "$_key" unchanged; return 0; fi
+        [[ $_rc == 1 ]] || { echo -e "${RED:-}ERROR: cannot compare the $_z zone's NetworkPolicies with the compile.${NC:-}" >&2; exit 1; }
+    fi
+    _pa_node_ips _ips
+    mapfile -t _args < <(zone_netpol_args "$_z")
+    if ! _want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol "${_args[@]}" "${_ips[@]}")"; then
+        echo -e "${RED:-}ERROR: the $_z zone's network policies did not compile (python3 apps/iam/compiler/cli.py check).${NC:-}" >&2
+        exit 1
+    fi
+    echo -e "\n${GREEN:-}[Research] Network policies of the $_z zone ($_ns)...${NC:-}"
+    _names="$(python3 -c 'import json, sys; print(" ".join(i["metadata"]["name"] for i in json.load(sys.stdin)["items"]))' <<<"$_want")"
+    if [[ -n "$_names" ]]; then $MK8S kubectl apply -f - <<<"$_want"; fi
+    for _np in $($MK8S kubectl get netpol -n "$_ns" -l "$_lbl=true" -o jsonpath='{.items[*].metadata.name}'); do
+        [[ " $_names " == *" $_np "* ]] || $MK8S kubectl delete netpol -n "$_ns" "$_np"
+    done
+    [[ "$_pa_mode" == scoped ]] && _pa_line "$_key" re-rendered
+    return 0
+}
+
+# PA_ZONE_KEY / PA_ZONE_LABEL for a research zone's policy set (gwnetpol / ranetpol); 1 for another zone
+_pa_zone_keys() {
+    case "$1" in
+        research-gw)     PA_ZONE_KEY=gwnetpol; PA_ZONE_LABEL=medcea/gw-netpol ;;
+        research-agents) PA_ZONE_KEY=ranetpol; PA_ZONE_LABEL=medcea/ra-netpol ;;
+        *) echo "pa_zonenetpol: unknown zone '$1'" >&2; return 1 ;;
+    esac
+}
+
+# _pa_node_ips ARRAYNAME: --node-ip arguments for every address kubelet probes and host traffic arrive from
+_pa_node_ips() {
+    local -n _out="$1"; local _ip
+    for _ip in $($MK8S kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{.metadata.annotations.projectcalico\.org/IPv4Address}{" "}{.metadata.annotations.projectcalico\.org/IPv4VXLANTunnelAddr}{" "}{.metadata.annotations.projectcalico\.org/IPv4IPIPTunnelAddr}{" "}{end}'); do
+        _out+=(--node-ip "${_ip%/*}")
+    done
+}
+
+# _pa_zonenetpol_equal ZONE: 0 the labelled live set equals the compile, 1 different, 2 cannot tell
+_pa_zonenetpol_equal() {
+    local _z="$1" _live _want _ips=() _args=()
+    _pa_zone_keys "$_z" || return 2
+    _live="$($MK8S kubectl get netpol -n "$(zone_namespace "$_z")" -l "$PA_ZONE_LABEL=true" -o json 2>/dev/null)" || return 2
+    _pa_node_ips _ips
+    mapfile -t _args < <(zone_netpol_args "$_z")
+    _want="$(python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" compile netpol "${_args[@]}" "${_ips[@]}")" || return 2
+    WANT="$_want" python3 -c '
+import json, os, sys
+try:
+    live = {i["metadata"]["name"]: i.get("spec") for i in json.load(sys.stdin).get("items") or []}
+    want = {i["metadata"]["name"]: i.get("spec") for i in json.loads(os.environ["WANT"]).get("items") or []}
+except (ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(2)
+# the API server drops an empty ingress/egress list (omitempty): a send-only pod compiles "ingress": []
+canon = lambda d: json.dumps({k: {f: v for f, v in (s or {}).items() if not (f in ("ingress", "egress") and v == [])}
+                              for k, s in d.items()}, sort_keys=True)
+sys.exit(0 if canon(live) == canon(want) else 1)' <<<"$_live"
 }
 
 #   pa_node_red_auth [full|scoped]

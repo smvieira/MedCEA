@@ -501,7 +501,8 @@ class Tree:
         # n runs of <rel> (all without :n) with exit rc
         # (infra/deploy-research-namespace.sh since research sandbox 2a's commit B: the factory
         # policy has the research zone, so apply_check.target_owners names it)
-        for rel in ("deploy-infra.sh", "infra/deploy-research-namespace.sh", "infra/deploy-workbench.sh") + tuple(
+        for rel in ("deploy-infra.sh", "infra/deploy-research-namespace.sh", "infra/deploy-research-gw-namespace.sh",
+                    "infra/deploy-research-agents-namespace.sh", "infra/deploy-workbench.sh") + tuple(
                 f"apps/{c}/deploy.sh" for c in ("access", "edge-wizard", "frontend", "monitor", "mqtt-explorer",
                                                  "scheduler", "superset")):
             dst = os.path.join(self.root, rel)
@@ -954,10 +955,15 @@ class AfterCommit(unittest.TestCase):
         # (research sandbox 2a, commit B), then the workbench's
         with open(os.path.join(self.t.fd, "scoped.log")) as f:
             ran = f.read().splitlines()
-        self.assertEqual(ran[:3], ["deploy-infra.sh --policy-only", "infra/deploy-research-namespace.sh --policy-only",
-                                   "infra/deploy-workbench.sh --policy-only"])
-        self.assertEqual(len(ran), 10)   # superset's --gate-only since stage C, the research zone's since 2a
-        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[3:]), ran)
+        # (since research 4a commit B also the research-gw and research-agents zones' namespaces)
+        self.assertEqual(ran[0], "deploy-infra.sh --policy-only")
+        for c in ("infra/deploy-research-namespace.sh --policy-only",
+                  "infra/deploy-research-gw-namespace.sh --policy-only",
+                  "infra/deploy-research-agents-namespace.sh --policy-only",
+                  "infra/deploy-workbench.sh --policy-only"):
+            self.assertIn(c, ran[:5])
+        self.assertEqual(len(ran), 12)   # superset's --gate-only since stage C, the research zone's since 2a
+        self.assertTrue(all(r.endswith(" --gate-only") for r in ran[5:]), ran)
 
     def test_a_signal_after_the_commit_is_exit_3(self):
         # the trap knows the phase: after the COMMIT an interrupt is 3 and names --resume
@@ -2490,11 +2496,11 @@ class SupersetTargets(unittest.TestCase):
         self.assertIn("superset", apply_check.TOOL_TARGETS)
         self.assertEqual(apply_check.scoped_commands().count("./apps/superset/deploy.sh --gate-only"), 1)
         self.assertIn("./apps/superset/deploy.sh", apply_check.full_deploys())
-        self.assertEqual(len(apply_check.VERIFY_CHECKS), 10)              # rsnetpol since research 2b
-        self.assertEqual(apply_check.VERIFY_CHECKS[-2], ("supersetroles", "$NAMESPACE"))
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 12)              # rsnetpol since research 2b, gwnetpol/ranetpol 4a
+        self.assertEqual(apply_check.VERIFY_CHECKS[-4], ("supersetroles", "$NAMESPACE"))
         self.assertIn("step9:supersetroles | supersetroles | $NAMESPACE |", apply_check.verify_conf().splitlines())
-        self.assertIn("step 9's conf (ten checks)", apply_check.__doc__)
-        self.assertIn("step 9's conf (ten checks)", read_repo("apps/iam/apply.sh"))
+        self.assertIn("step 9's conf (twelve checks)", apply_check.__doc__)
+        self.assertIn("step 9's conf (twelve checks)", read_repo("apps/iam/apply.sh"))
         self.assertNotIn("nine checks", read_repo("apps/iam/apply.sh"))
 
     def test_an_incomplete_wheel_cache_is_a_deferral(self):
@@ -2824,7 +2830,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("is not approved any more", sql)
         self.assertIn("is not applied with the staged entries", sql)
         # every scoped mode once, then the record with 4.5's fields
-        self.assertEqual(len(self.scoped()), 10)   # 8 stubs before Superset stage C, 9 before research 2a (commit B)
+        self.assertEqual(len(self.scoped()), 12)   # 10 before research 4a commit B (the gw and agents namespaces), 8 stubs before Superset stage C, 9 before research 2a (commit B)
         recs = self.records()
         self.assertEqual([r["event"] for r in recs], ["applied"])
         pl = recs[0]["payload"]
@@ -2841,7 +2847,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertEqual(len(confs), 2)              # the baseline and one verify
         self.assertEqual([l.split("|")[1].strip() for l in confs[1]],
                          ["iamgrants", "iamenforce", "grafanarole", "iamworkbench", "onboardroles", "pgadminroles",
-                          "noderedauth", "iamartefacts", "supersetroles", "rsnetpol"])
+                          "noderedauth", "iamartefacts", "supersetroles", "rsnetpol", "gwnetpol", "ranetpol"])
         self.assertFalse(any("iampolicy" in l for c in confs for l in c))
         self.assertEqual([w for w in writes(calls) if w[0] != "psql"], [])
 
@@ -3305,10 +3311,12 @@ class RS2bTargets(unittest.TestCase):
         self.assertNotIn('basename "$(dirname "${cmd%% *}")"', read_repo("apps/iam/apply.sh"))
 
     def test_verify_checks(self):
-        self.assertEqual(apply_check.VERIFY_CHECKS[-1], ("rsnetpol", "$NAMESPACE"))
-        self.assertEqual(len(apply_check.VERIFY_CHECKS), 10)
+        self.assertEqual(apply_check.VERIFY_CHECKS[-3], ("rsnetpol", "$NAMESPACE"))
+        self.assertEqual(apply_check.VERIFY_CHECKS[-2:], (("gwnetpol", "$NAMESPACE"), ("ranetpol", "$NAMESPACE")))
+        self.assertEqual(len(apply_check.VERIFY_CHECKS), 12)
         self.assertIn("step9:rsnetpol | rsnetpol | $NAMESPACE |", apply_check.verify_conf().splitlines())
         self.assertIn("'Research network policies | rsnetpol    | $NAMESPACE   |'", read_repo("tests/iam-policy.sh"))
+        self.assertIn("'Research gateway network policies | gwnetpol | $NAMESPACE |'", read_repo("tests/iam-policy.sh"))
 
 
 SKEL_WIDE = ('routes: {"POST /_mqtt-credential": R}}',

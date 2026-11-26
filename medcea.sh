@@ -1277,6 +1277,23 @@ a_research_namespace() {
     plan_run
 }
 a_research_switch() { switch_flow RESEARCH_ENABLED; }
+# Research Phase 4b stage 1: the local model (apps/research-model).
+a_research_model_deploy() {
+    CMD=(./apps/research-model/deploy.sh)
+    EFFECT="research-gw: Deployment and Service research-llm (llama-server, Qwen3-4B-Instruct-2507 Q4_K_M, 6 CPUs, 6 GiB), the read-only model volume and its script ConfigMap; the model file (about 2.5 GB) is downloaded into RESEARCH_MODEL_DIR when missing"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while RESEARCH_ENABLED or RESEARCH_LOCAL_MODEL is not true, the applied access policy has no research-llm pod, or no policy version is applied."
+           "Run it as your own account, not root: the model folder belongs to it. Needs the research-gw namespace (Infrastructure → Deploy the research gateway and agents namespaces).")
+    plan_run
+}
+a_research_model_uninstall() {
+    CMD=(./apps/research-model/uninstall.sh)
+    EFFECT="removes research-llm, its volume claim and script from research-gw; the model file in RESEARCH_MODEL_DIR is kept"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=()
+    plan_run
+}
+a_research_model_switch() { switch_flow RESEARCH_LOCAL_MODEL; }
 # Research sandbox Phase 2b: the AI workbench lives where the applied access policy places it
 # (pod hub in the research zone: the research namespace; else the platform namespace).
 # --move copies the homes to the other namespace with sudo and reinstalls the hub there.
@@ -1493,6 +1510,39 @@ a_lake_api_uninstall() {
            "No confirmation of its own: medcea.sh's is the only one.")
     plan_run
 }
+# Research Phase 4a: the two zones that hold the agent machinery (research-gw: the session
+# key and the trace writer; research-agents: orchestrator, simulation tools, agent and
+# simulation Jobs) and the application that runs in them (apps/research-agents).
+a_research_zones() {
+    CMD=(./infra/deploy-research-gw-namespace.sh '&&' ./infra/deploy-research-agents-namespace.sh)
+    EFFECT="cluster: namespaces RESEARCH_GW_NAMESPACE and RESEARCH_AGENTS_NAMESPACE (labels medcea/zone), PriorityClass medcea-research-low, quota, limits, the zones' NetworkPolicies and the zone copies of the policy library"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Each script skips (one line, exit 0) while RESEARCH_ENABLED is not true or the applied access policy has no such zone (an approved skeleton version of research Phase 4a)."
+           "./deploy-infra.sh runs both after the research namespace; --policy-only re-renders only their NetworkPolicies (Policy → Re-render the policy artefacts).")
+    plan_run
+}
+a_research_agents_deploy() {
+    CMD=(./apps/research-agents/deploy.sh)
+    EFFECT="research-gw: research-session (the session tokens and the trace writer); research-agents: research-orchestrator, mcp-sim, mcp-lake, the research-runs volume, the code bundle (ConfigMap research-code) and the wheel cache"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true, the applied access policy has no research-gw and research-agents zones, or no policy version is applied."
+           "Needs the two namespaces first (Infrastructure → Deploy the research gateway and agents namespaces, or ./deploy-infra.sh) and the research database (./apps/research/deploy.sh). The code bundle is built from a git commit and refused while the tree is dirty."
+           "No agent starts by itself: a person starts a session from a notebook (medcea-agent start). Health: Agent sessions.")
+    plan_run
+}
+a_research_agents_uninstall() {
+    CMD=(./apps/research-agents/uninstall.sh)
+    EFFECT="removes research-session, the orchestrator, mcp-sim, mcp-lake, every agent and simulation Job and the code bundle; keeps the research-runs volume and every recorded session (agent_trace)"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=()
+    if ask_yn "Also delete the research-runs volume (campaign outputs, session traces) and everything recorded in agent_trace (--purge-data)?" n; then
+        CMD+=(--purge-data)
+        EFFECT="removes the agent machinery, then DELETES the research-runs volume and every recorded session (agent_trace)"
+        purge_word
+    fi
+    NOTES+=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
 # Research sandbox Phase 3: calibrating the sandbox's models from the lake's snapshots
 # (apps/research/calibrate.sh → python3 -m research.calib; codeplan/rs3-design.md). It
 # reads lake-api only and writes only the folder named; no deploy lock.
@@ -1541,6 +1591,54 @@ a_research_calibrate() {
     NOTES=("Refused (exit 2) while RESEARCH_ENABLED is not true or the lake reader is not running (Applications → Install the lake reader)."
            "A fetch refuses a lineage other than the one you give, a snapshot whose readings or digests do not recompute, and a reading inside a held-out range."
            "Then fit the sensor model (this menu's third entry); the campaigns run from a worktree: research/README.md.")
+    plan_run
+}
+# Research Phase 4b step 0 (codeplan/rs4-design.md §5.1, R24-R28): measure the local model
+# (apps/research-model/bench.sh) before anything is built around it. Outside the zones, low
+# priority; refused while a recipe run is R or S.
+LLM_MODELS_RE='^(8b|4b)(,(8b|4b))?$'
+a_llm_bench() {
+    menu "Benchmark the local model (research Phase 4 step 0)" \
+        "Show the plan and its runtime|What bench measures, the estimated hours and the cap; nothing runs." \
+        "Fetch the models|The pinned GGUF files (about 7.5 GB) into the model folder, resumable, checked by sha256." \
+        "Run the bench|llama-bench at depths 0, 4096 and 12288, then the thread/NUMA sweep; one model per run (up to 4 h)." \
+        "Run the tool-call eval|llama-server answers the fixture conversations; graded on this host (about 1-2 h)." \
+        "Write the report|research/agents/bench/<date>.json: every bench and eval of the day, the scores, 8B or 4B." \
+        "Remove the bench's Jobs and Pods|Label app=research-llm-bench; the model folder stays."
+    [[ "$PICK" == b ]] && return 10
+    local models="" mdefault="8b,4b"
+    # the bench fits the 4 h cap one model at a time (pessimistic estimate); the report merges them
+    [[ "$PICK" == 3 ]] && mdefault="8b"
+    if [[ "$PICK" =~ ^[234]$ ]]; then
+        ask_match "Models (8b, 4b or 8b,4b)" "$LLM_MODELS_RE" "8b, 4b or 8b,4b" "$mdefault"; models="$ANSWER"
+    fi
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes; NOTES=()
+    case "$PICK" in
+        1) CMD=(./apps/research-model/bench.sh plan)
+           EFFECT="nothing (prints the plan, its estimated runtime and the cap)"
+           LOCK=no; LEVEL=read ;;
+        2) CMD=(./apps/research-model/bench.sh fetch --models "$models")
+           EFFECT="the model folder (RESEARCH_MODEL_DIR, default /var/lib/<project>/research-models, created mode 700) gets <sha256>.gguf per model; Job research-model-fetch in the platform namespace"
+           SUDO="yes (only to create the model folder when its parent is not yours)"
+           NOTES=("Resumes a broken download; a file whose sha256 is not the pin's is removed, never renamed into place."
+                  "Run it again any time: a verified file is kept.") ;;
+        3) CMD=(./apps/research-model/bench.sh bench --models "$models")
+           EFFECT="Job research-llm-bench in the platform namespace for up to the cap (default 4 h, + 30 min): CPU on one socket, up to 10 GiB of memory; the results into logs/ and research/agents/bench/<date>.json"
+           NOTES=("Prints the plan and its runtime first and refuses (exit 2) when the pessimistic runtime is above --max-hours (4 h by default): one model per run; run 8b, then 4b, and the day's report merges them."
+                  "Refused while a recipe run is R or S, and with less memory available than the Job needs plus 2 GiB; medcea.recipe_run is read again every 5 minutes, and a run that starts stops the Job (exit 1, what was measured kept)."
+                  "Holds the deploy lock until it ends, so no deploy disturbs the measurement; stopped (Ctrl-C), it deletes the Job before it exits."
+                  "research/agents/bench/<date>.json is evidence to commit; campaigns and calibration still run before it is (the sandbox's dirty check leaves it out).") ;;
+        4) CMD=(./apps/research-model/bench.sh eval --models "$models")
+           EFFECT="Pod research-llm-eval-<model> per model in the platform namespace (12 GiB for 8B), a one-time key Secret; both removed at the end; the scores into logs/ and research/agents/bench/<date>.json"
+           NOTES=("No lake data and no session: fixture conversations only (research/agents/evals/fixtures)."
+                  "Refused while a recipe run is R or S, and above --max-hours (pessimistic); one end time for all models: each Pod gets what is left of it."
+                  "A run that starts while a model is evaluated stops the eval (exit 1); what was graded stays in the report.") ;;
+        5) CMD=(./apps/research-model/bench.sh report)
+           EFFECT="writes research/agents/bench/<today>.json from every bench and eval result of today in logs/ (none is dropped)"
+           LOCK=no ;;
+        6) CMD=(./apps/research-model/bench.sh cleanup)
+           EFFECT="deletes the Jobs, Pods, ConfigMaps and Secrets labelled app=research-llm-bench; never the model folder" ;;
+    esac
     plan_run
 }
 a_research_reservations() {
@@ -1789,6 +1887,15 @@ recipe() {
             STEPS=("set RESEARCH_ENABLED false" "run ./apps/research-export/uninstall.sh" "run ./apps/lake-api/uninstall.sh" "run ./apps/research/uninstall.sh")
             AFTER=("The export stops, the lake reader and the research database are removed; the database's volume (every snapshot and reservation) and the research namespace stay. ./deploy-infra.sh says how to remove the namespace while it is there."
                    "To drop the data too: Applications → Uninstall the research database with --purge-data.") ;;
+        RESEARCH_LOCAL_MODEL:enable)
+            PRE=("RESEARCH_ENABLED is true and the applied access policy has the research-llm pod (research Phase 4b policy); without them the deploy says skipped and changes nothing."
+                 "No recipe run is active or about to start: the model takes 6 CPUs (low priority, no limit) and about 6 GiB of memory while it runs.")
+            STEPS=("set RESEARCH_LOCAL_MODEL true" "run ./apps/research-model/deploy.sh" "run ./health-check.sh")
+            AFTER=("The first deploy downloads the model (about 2.5 GB, Qwen3-4B-Instruct-2507 Q4_K_M) into RESEARCH_MODEL_DIR and checks its pinned sha256; an interrupted download resumes with the same command."
+                   "Verify: ./health-check.sh (Local model). It reads the server's /health and /props and generates nothing.") ;;
+        RESEARCH_LOCAL_MODEL:rollback)
+            STEPS=("set RESEARCH_LOCAL_MODEL false" "run ./apps/research-model/uninstall.sh")
+            AFTER=("The model server is removed; the model file stays in RESEARCH_MODEL_DIR until ./install.sh --uninstall-all or you delete it.") ;;
         *) REFUSE="no recipe for $key $dir" ;;
     esac
 }
@@ -1803,6 +1910,7 @@ switch_purpose() {
         IAM_DB_ROLES)         echo "The database enforces per-role grants, RLS and guard triggers (Phase 2a)." ;;
         IAM_MQTT_PERSON)      echo "The MQTT Explorer connects with a short-lived personal credential, on the broker's WebSocket listener only (false: the Explorer has no credential and says so)." ;;
         WORKBENCH_ENABLED)    echo "deploy-infra.sh also deploys the AI workbench (JupyterHub)." ;;
+        RESEARCH_LOCAL_MODEL) echo "The local language model for agent sessions (research-llm, CPU only, context 4096) is installed in the research-gw zone." ;;
         RESEARCH_ENABLED)     echo "The research sandbox: deploy-infra.sh creates its namespace, and its database and nightly snapshot export can be deployed (each only once the applied access policy has the research zone)." ;;
     esac
 }
@@ -2491,7 +2599,7 @@ a_policy_apply() {
     CMD=(./apps/iam/apply.sh "$v" --check-only --by "$BY_USER")
     EFFECT="nothing (--check-only: no lock, no file, read-only transactions; Keycloak and the realm's keys read through a port-forward; the health baseline)"
     SUDO=mk8s; CFG_NEEDED=yes
-    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the ten checks apply.sh verifies against FAILs now."
+    NOTES=("Checks the qa approval (the token's signature, the approver still eligible in Keycloak, I17), that the diff is the one qa approved, the compile of the version, and that none of the twelve checks apply.sh verifies against FAILs now."
            "It prints what the version changes per target and per role; the apply itself is offered after it.")
     plan_run
     [[ "$PLAN_GO" == yes ]] || return 0
@@ -2768,7 +2876,7 @@ a_iam_policy() {
     esac
     NOTES=("Needs IAM_POSTGREST_JWT=true and IAM_DB_ROLES=true, run after Deploy IAM 4.4. Refused while a change or skeleton version is open."
            "If it stops half-way it withdraws its version (in the Policy UI, else apply.sh --withdraw-open) before deleting the accounts.")
-    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the ten checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
+    [[ -n "$m" ]] && NOTES+=("Run after Deploy IAM 4.5. Refused (exit 2) while one of the twelve checks apply.sh verifies against FAILs, and when its cell would move anything but the route table and the grants."
                              "If it stops after its apply it finishes it (--resume)$([[ "$m" == --change ]] && echo ", rolls it back and has the rollback confirmed") before deleting the accounts.")
     plan_run
 }
@@ -3074,6 +3182,7 @@ AREA_INFRA=(
     "a_research_namespace|Deploy the research namespace|./infra/deploy-research-namespace.sh: the research zone's namespace, quota, limits and network policies."
     "a_research_switch|Turn the research sandbox on or off|RESEARCH_ENABLED in config.env, then the deploys."
     "a_wb_move|Move the AI workbench between the platform and the research zone|./infra/deploy-workbench.sh --move: where the access policy places it; homes copied with sudo, a fresh hub database."
+    "a_research_zones|Deploy the research gateway and agents namespaces|./infra/deploy-research-gw-namespace.sh and ./infra/deploy-research-agents-namespace.sh: the zones of the agent machinery, with their network policies."
 )
 AREA_APPS=(
     "a_apps_menu|Pick components from a menu|./deploy-apps.sh (its own checkbox menu)."
@@ -3094,6 +3203,12 @@ AREA_APPS=(
     "a_lake_api_deploy|Install the lake reader|./apps/lake-api/deploy.sh: notebooks read person-free snapshots; skipped until the policy has its pod."
     "a_lake_api_uninstall|Uninstall the lake reader|./apps/lake-api/uninstall.sh: the snapshots stay."
     "a_research_calibrate|Calibrate the sensor model from a snapshot|research: list the lake's snapshots, fetch one pinned by its lineage and fit the sensor model; reads lake-api, writes only the files you name."
+    "a_llm_bench|Benchmark the local model (research Phase 4 step 0)|./apps/research-model/bench.sh: fetch the pinned models, llama-bench, the offline tool-call eval, the report (8B or 4B)."
+    "a_research_agents_deploy|Install the research agent machinery|./apps/research-agents/deploy.sh: research-session, the orchestrator and the simulation and lake tools; skipped until the policy has the zones."
+    "a_research_agents_uninstall|Uninstall the research agent machinery|./apps/research-agents/uninstall.sh: recorded sessions and the runs volume stay unless purged."
+    "a_research_model_deploy|Install the local model|./apps/research-model/deploy.sh: research-llm (Qwen3-4B-Instruct-2507, CPU) in research-gw; skipped until RESEARCH_LOCAL_MODEL is true and the policy has the pod."
+    "a_research_model_uninstall|Uninstall the local model|./apps/research-model/uninstall.sh: the model file stays."
+    "a_research_model_switch|Turn the local model on or off|RESEARCH_LOCAL_MODEL in config.env, then the deploy."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."

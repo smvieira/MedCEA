@@ -508,6 +508,9 @@ The snapshot never changes afterwards.</li>
 </ol>
 <p>The confirmation goes to the database with your own sign-in token, and the database checks it: it refuses a person who ran <code>apply.sh</code> for that version ("You applied version N yourself"), a missing note or statement, a version already confirmed or disputed, and a request that did not come through the Policy UI's sign-in. A confirmation is an attributable record (your account, your person, the time, your note), not an electronic signature. It needs <code>IAM_POSTGREST_JWT</code> and <code>IAM_DB_ROLES</code> to be <code>true</code>; otherwise the page says confirming is not possible yet.</p>
 
+<h4 id="apps-policy-waiting">Waiting for you</h4>
+<p>At the top of the Policy UI a panel lists what the policy process waits for from the person signed in, so nobody has to ask on the host. An <span class="role">admin</span> sees each draft to submit and each returned version to edit or withdraw; a <span class="role">qa</span> person sees each submitted version to approve (or, when the database bars them, that another qa person must, with the reason), and each bootstrap or rollback version to confirm. For an <span class="role">admin</span> or <span class="role">qa</span> it also shows an approved version nobody has applied, or an apply that is not finished, with the host command to run (<code>./apps/iam/apply.sh N --by &lt;you&gt;</code>, or <code>./apps/iam/apply.sh --resume --by &lt;you&gt;</code>) and a Copy button. Applying stays a host command by design: it takes the deploy lock and rolls the change out across the cluster. A click on an entry opens its tab; with nothing waiting the panel is hidden. The panel only reads: it adds no route and changes no right.</p>
+
 <h4 id="apps-policy-edit">Drafting a change (admin)</h4>
 <ol class="steps">
 <li>In <strong>Changes</strong>, under <strong>New draft</strong>, choose what it starts from (the applied version, the factory file or an earlier version), write the reason and press <strong>Create the draft</strong>. Only one change or skeleton version can be open at a time: "version N is still open: take it through or withdraw it first".</li>
@@ -643,6 +646,9 @@ The snapshot never changes afterwards.</li>
 <ul>
 <li><code>01-connect.ipynb</code>: signs you in and lists the units and zones your role may see.</li>
 <li><code>02-air-temperature.ipynb</code>: a line chart of one zone's air temperature over the last minutes. The unit, the zone and the number of minutes are set at the top.</li>
+<li><code>03-agent-campaign.ipynb</code> (a scientist): sign in to the research orchestrator, run a scripted agent session, replay it, then start <code>gate_check</code>, wait for its CPU gate and approve it with a small cap (<a href="#research-agent-sessions">Agent sessions</a>, exercise E48).</li>
+<li><code>04-agent-other-session.ipynb</code> (a second scientist): tries to read, approve and stop another person's session and is refused with 404 "no such session" each time.</li>
+<li><code>05-local-model.ipynb</code> (control scientist): a session planned by the platform's own model, its turn times, a re-execution (<code>c.reexecute</code>: the same profile again, compared turn by turn) and the replay; exercise <a href="#training-e49">E49</a>.</li>
 <li><code>SAVE_TO_GIT.md</code>: how to keep your notebooks in the research repository (below).</li>
 <li><code>medcea_data.py</code>: the small library the notebooks use (<code>import medcea_data as md</code> works in any notebook).</li>
 <li><code>nb_output_guard.py</code>: the check git runs before each commit (see <a href="#apps-workbench-git">Saving your notebooks to git</a>); you do not run it yourself.</li>

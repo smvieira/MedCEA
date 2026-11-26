@@ -1,0 +1,6 @@
+{
+  "_comment": "Model endpoints the gateway may serve (research Phase 4d). Enabled by name in config.env RESEARCH_ENDPOINTS (default: local). local is the model on this host (its url and pin come from apps/research-model/pins.json at deploy). Another endpoint is {kind: openai, url, model, context, max_output, deterministic, key: none|secret}; a private one also needs its address in the access policy (a skeleton version) before the gateway can reach it. Hosted endpoints (kind anthropic) come with Phase 5.",
+  "endpoints": {
+    "local": {"kind": "llama"}
+  }
+}

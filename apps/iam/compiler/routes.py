@@ -39,6 +39,8 @@ import hashlib
 import json
 import re
 
+from compiler import netpol
+
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 _ROUTE = re.compile(r"^(%s) (/[^\s]*)$" % "|".join(METHODS))
 SCHEMA = 1
@@ -88,6 +90,8 @@ def _clients(p):
     every = {hd["client"] for hd in p.hosts.values()}
     for u in p.data.get("shared_upstreams", []):
         clients[u["service"]] = set(every)
+    for svc, (cl, _aud) in netpol.pod_token_clients(p).items():   # a zone service's own client (Phase 4a)
+        clients.setdefault(svc, set()).update(cl)
     return clients
 
 
@@ -180,6 +184,7 @@ def compile(p, source="defaults.yaml", applied_version=None):
                 raise RouteError(f"{s} {pr['route']} is public and in group {table[pr['route']]['group']}")
 
     clients = _clients(p)
+    aud = netpol.pod_token_clients(p)   # audience only where a pod says so: v1-v9 routes.json unchanged
     body = {
         "schema": SCHEMA,
         "policy_version": p.data.get("policy_version"),
@@ -187,7 +192,8 @@ def compile(p, source="defaults.yaml", applied_version=None):
         "applied_version": applied_version,
         "roles": sorted(p.roles),
         "role_includes": {r: sorted(p.effective_roles(r) - {r}) for r in sorted(p.roles)},
-        "services": {s: {"clients": sorted(clients.get(s, ())), "routes": t} for s, t in services.items()},
+        "services": {s: dict({"clients": sorted(clients.get(s, ())), "routes": t},
+                             **({"audience": aud[s][1]} if s in aud else {})) for s, t in services.items()},
         "public": {s: sorted(r) for s, r in public.items()},
         "widening": widening_table(p),
         "waivers": [{"id": w["id"], "invariant": w["invariant"], "subject": w["subject"], "target": w["target"],

@@ -222,6 +222,7 @@ KC_PORT=18092                                    # its own port (units.sh uses 1
 KC_URL="http://localhost:$KC_PORT"
 source "$REPO_ROOT/infra/lib-keycloak-admin.sh"
 source "$REPO_ROOT/infra/lib-policy-source.sh"  # policy_db_state, _ps_host_present, _ps_flush_seed_facts
+source "$REPO_ROOT/infra/lib-policy-tools.sh"   # zone_namespace (wait_routes: the research zones' copies)
 
 STAGE="$(mktemp -d)"; chmod 700 "$STAGE"
 PF_PID=""
@@ -543,7 +544,7 @@ host_file_first() {   # §14.8.4 step 2.3: the host file is the applied version'
         || die 1 "cannot write state/policy-applied.yaml (above): nothing was changed"
     [[ -z "$out" || "$out" == *unchanged ]] || log "$out"
 }
-verify_run() {   # OUT [--drop=T]... — step 9's conf (ten checks) through health-check.sh; the results into OUT
+verify_run() {   # OUT [--drop=T]... — step 9's conf (twelve checks) through health-check.sh; the results into OUT
     local out="$1"
     shift
     py "$CHECK" verify-conf --out "$STAGE/verify9.conf" "$@" || return 1
@@ -557,13 +558,20 @@ wait_routes() {   # DIGEST — every Ready pod of each service that checks route
     # answers NotFound for is skipped: any other error (the API down, a refusal) lags, so the
     # wait never passes unasked. Polled every 5 s up to MEDCEA_APPLY_ROUTES_WAIT (150) seconds;
     # 1 names the laggards.
-    local want="$1" dc dep ctr js sel pods pod got n tries lag=() err="$STAGE/wait-routes.err"
+    local want="$1" dc dep ctr js sel pods pod got n tries lag=() err="$STAGE/wait-routes.err" dns zk
     tries=$(( ${MEDCEA_APPLY_ROUTES_WAIT:-150} / 5 ))
     for ((n = 0; n <= tries; n++)); do
         lag=()
-        for dc in scheduler:api monitor:api dbmgmt:api config-ui:recipe-fileserver access:api iam-api:iam-api; do
-            dep="${dc%%:*}" ctr="${dc#*:}"
-            if ! js="$($KUBECTL get deployment "$dep" -n "$NAMESPACE" -o json 2>"$err")"; then
+        # research Phase 4a (stage 7a, R37): the two agent zones' route-checking Deployments, a third field
+        # naming the zone; absent (policy without the zone, not installed) they are NotFound and skipped
+        for dc in scheduler:api monitor:api dbmgmt:api config-ui:recipe-fileserver access:api iam-api:iam-api \
+                  research-session:research-session:research-gw research-orchestrator:research-orchestrator:research-agents; do
+            IFS=: read -r dep ctr zk <<<"$dc"
+            dns="$NAMESPACE"
+            if [[ -n "$zk" ]]; then
+                dns="$(zone_namespace "$zk" 2>/dev/null)" || dns="$NAMESPACE-$zk"
+            fi
+            if ! js="$($KUBECTL get deployment "$dep" -n "$dns" -o json 2>"$err")"; then
                 grep -q 'NotFound' "$err" 2>/dev/null || lag+=("$dep (unreadable)")
                 continue
             fi
@@ -571,7 +579,7 @@ wait_routes() {   # DIGEST — every Ready pod of each service that checks route
 m = (json.load(sys.stdin).get("spec") or {}).get("selector", {}).get("matchLabels") or {}
 print(",".join(f"{k}={v}" for k, v in sorted(m.items())))' <<<"$js" 2>/dev/null)" || sel=""
             [[ -n "$sel" ]] || { lag+=("$dep (unreadable)"); continue; }
-            if ! pods="$($KUBECTL get pods -n "$NAMESPACE" -l "$sel" -o json 2>/dev/null | python3 -c 'import json, sys
+            if ! pods="$($KUBECTL get pods -n "$dns" -l "$sel" -o json 2>/dev/null | python3 -c 'import json, sys
 for p in json.load(sys.stdin).get("items") or []:
     if any(c.get("type") == "Ready" and c.get("status") == "True" for c in (p.get("status") or {}).get("conditions") or []):
         print(p["metadata"]["name"])' 2>/dev/null)"; then
@@ -579,7 +587,7 @@ for p in json.load(sys.stdin).get("items") or []:
                 continue
             fi
             for pod in $pods; do
-                got="$($KUBECTL exec -n "$NAMESPACE" -c "$ctr" "$pod" -- cat /iam/routes.json 2>/dev/null \
+                got="$($KUBECTL exec -n "$dns" -c "$ctr" "$pod" -- cat /iam/routes.json 2>/dev/null \
                          | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])' 2>/dev/null)" || got=""
                 [[ "$got" == "$want" ]] || lag+=("$pod")
             done

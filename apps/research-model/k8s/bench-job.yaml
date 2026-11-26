@@ -1,0 +1,59 @@
+# Job research-llm-bench (research Phase 4b step 0, codeplan/rs4-design.md §5.1, R24-R26):
+# llama-bench over the pinned models, outside the zones, at low priority (nice 19, a small
+# CPU request, no CPU limit: the namespace's rule), the CPUs pinned per plan line (R24).
+# Rendered by apps/research-model/bench.sh bench with
+#   render bench-job.yaml NAMESPACE LLAMA_IMAGE_FULL MODEL_DIR MODEL_UID MODEL_GID BENCH_DEADLINE_S BENCH_MEMORY PRIORITY_CLASS SYSINFO_MODEL
+# The script and the plan (no secret) are ConfigMap research-llm-bench-script.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: research-llm-bench
+  namespace: ${NAMESPACE}
+  labels:
+    app: research-llm-bench
+    medcea/bench-kind: bench
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: ${BENCH_DEADLINE_S}
+  template:
+    metadata:
+      labels:
+        app: research-llm-bench
+        medcea/bench-kind: bench
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: "${PRIORITY_CLASS}"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: ${MODEL_UID}
+        runAsGroup: ${MODEL_GID}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bench
+          image: ${LLAMA_IMAGE_FULL}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/script/bench-run.sh"]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: SYSINFO_MODEL, value: "${SYSINFO_MODEL}"}
+          resources:
+            requests: {cpu: 100m, memory: ${BENCH_MEMORY}}
+            limits: {memory: ${BENCH_MEMORY}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: models, mountPath: /models, readOnly: true}
+            - {name: script, mountPath: /script, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: models
+          hostPath: {path: ${MODEL_DIR}, type: Directory}
+        - name: script
+          configMap: {name: research-llm-bench-script}
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}

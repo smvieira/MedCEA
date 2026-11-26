@@ -1,0 +1,26 @@
+# k8s/research-gw/quota.yaml — what the research-gw namespace may hold (research Phase 4a, OD11/R19).
+# Applied by infra/deploy-research-gw-namespace.sh. Render list: RESEARCH_GW_NAMESPACE
+#
+#   what                               cpu req   mem req   mem limit   PVCs
+#   research-session (4a)              100m      128Mi     256Mi       1 (static wheel PV)
+#   model-gateway (4b)                 100m      128Mi     256Mi       -
+#   research-llm (4b)                  6         12Gi      12Gi        1 (static model PV)
+#   ------------------------------------------------------------------------------------------
+#   sum                                6200m     12.25Gi   12.5Gi      2
+#
+# The hard line is the 4b sizing (OD11: requests.cpu 7, requests.memory 13Gi, limits.memory 13Gi),
+# so 4b changes no file here; 4a's one pod uses a twentieth of it.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: research-gw-quota
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    medcea/zone: research-gw
+spec:
+  hard:
+    requests.cpu: "7"
+    requests.memory: 13Gi
+    limits.memory: 13Gi
+    pods: "6"
+    persistentvolumeclaims: "3"

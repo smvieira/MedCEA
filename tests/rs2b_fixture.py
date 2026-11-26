@@ -80,8 +80,43 @@ RISK = ("Notebooks run code. They run in the research zone (research sandbox Pha
         "person's home volume.\n")   # commit B's text, byte for byte (a folded scalar ends in a newline)
 
 
+V9_LAKE_WHY = "notebooks; kubelet probe and health rslake from the host"
+V9_PG_WHY = ("the nightly exporter (rs_export_writer), the nightly backup (rs_backup, pg_read_all_data), the "
+             "snapshot reader (rs_lake_api, research sandbox Phase 2b), kubelet probes and the host's psql "
+             "(reserve.sh runs inside the pod)")
+RS4_PODS = ("research-orchestrator", "research-session", "mcp-sim", "mcp-lake", "agent",
+           "model-gateway", "research-llm")   # the last two: Phase 4b's commit B
+RS4_SERVICES = ("research-orchestrator", "research-orchestrator-sim", "research-session-agent",
+                "research-session-server", "mcp-sim", "mcp-lake", "model-gateway")
+
+
+def v9_policy(data=None):
+    """Version 9's policy (Phase 2b's factory file, before research Phase 4a's commit B) from
+    the factory file or a copy of `data`: every 4a-B change undone, in version 9's order and words."""
+    d = copy.deepcopy(data) if data is not None else copy.deepcopy(model.load_defaults().data)
+    net = d["network"]
+    for z in ("research-agents", "research-gw"):
+        net["zones"].pop(z, None)
+    for pod in RS4_PODS:
+        net["pods"].pop(pod, None)
+    nb = net["pods"]["notebooks"]
+    nb["egress"] = [h for h in nb["egress"] if h.get("pod") != "research-orchestrator"]
+    lake = net["pods"]["lake-api"]["ingress"][0]
+    if "pod:mcp-lake" in lake["from"]:
+        lake["from"] = ["pod:notebooks", "node"]
+        lake["why"] = V9_LAKE_WHY
+    pg = net["pods"]["research-postgresql"]["ingress"][0]
+    if "pod:research-session" in pg["from"]:
+        pg["from"].remove("pod:research-session")
+        pg["why"] = V9_PG_WHY
+    d["public_routes"] = [r for r in d["public_routes"] if r.get("service") not in RS4_SERVICES]
+    d["resource_groups"].pop("research_campaigns", None)
+    d["matrix"].pop("research_campaigns", None)
+    return d
+
+
 def _factory():
-    return copy.deepcopy(model.load_defaults().data)
+    return v9_policy()
 
 
 def _config_api_rule(net):

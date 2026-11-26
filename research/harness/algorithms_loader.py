@@ -52,7 +52,13 @@ DIRTY_PATHS = ("schd/cea", CATALOGUE, CONTROL_TEMPLATE, LAKE_API)
 SANDBOX_ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SANDBOX_DIR = "research"
 SANDBOX_SKIP = (".venv", "runs", "__pycache__")
-SANDBOX_PATHS = (SANDBOX_DIR,) + tuple(":(exclude)%s/%s" % (SANDBOX_DIR, d) for d in SANDBOX_SKIP[:2])
+# Evidence written into research/ that shapes no result: the local model's daily bench
+# report (apps/research-model/bench.sh, research Phase 4b step 0). Left out of the dirty
+# check so a bench on the live checkout does not make every campaign and calibration
+# refuse until it is committed; its README (and any other file there) still counts.
+SANDBOX_EVIDENCE = ("agents/bench/*.json",)
+SANDBOX_PATHS = ((SANDBOX_DIR,) + tuple(":(exclude)%s/%s" % (SANDBOX_DIR, d) for d in SANDBOX_SKIP[:2])
+                 + tuple(":(exclude,glob)%s/%s" % (SANDBOX_DIR, g) for g in SANDBOX_EVIDENCE))
 SANDBOX_SUFFIXES = (".py", ".yaml", ".txt", ".sh")
 
 # The libraries whose versions a manifest names (distribution names).
@@ -87,12 +93,56 @@ def git_state(repo_root, paths=DIRTY_PATHS):
     True: nothing pins the code)."""
     head = _git(repo_root, "rev-parse", "HEAD")
     if head is None:
+        bundle = bundle_state(repo_root, paths)
+        if bundle is not None:
+            return bundle
         return {"commit": None, "dirty": True, "dirty_files": ["(not a git repository)"]}
     status = _git(repo_root, "status", "--porcelain", "--untracked-files=all", "--", *paths)
     if status is None:
         return {"commit": head.strip(), "dirty": True, "dirty_files": ["(git status failed)"]}
     files = sorted(line[3:] for line in status.splitlines() if line.strip())
     return {"commit": head.strip(), "dirty": bool(files), "dirty_files": files}
+
+
+def bundle_state(repo_root, paths=DIRTY_PATHS):
+    """git_state of an unpacked code bundle (apps/research-agents/deploy.sh: `git archive` of a commit plus
+    BUNDLE.json {commit, dirty, files: {path: blob sha}}), for the pods, which have no git: every bundled
+    file under PATHS must still have its recorded blob, and no other file may be there. None without a
+    BUNDLE.json. Exclude pathspecs (":(exclude)…") are git's; here SANDBOX_SKIP and the evidence globs."""
+    import fnmatch
+    try:
+        with open(os.path.join(repo_root, "BUNDLE.json")) as f:
+            b = json.load(f)
+        commit, files = b["commit"], b["files"]
+        if not (isinstance(commit, str) and isinstance(files, dict)):
+            raise ValueError("BUNDLE.json")
+    except (OSError, ValueError, KeyError):
+        return None
+    roots = [p for p in paths if not p.startswith(":")]
+    skip = lambda rel: (any(part in SANDBOX_SKIP for part in rel.split("/"))
+                        or any(fnmatch.fnmatch(rel, SANDBOX_DIR + "/" + g) for g in SANDBOX_EVIDENCE))
+    under = lambda rel: any(rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots) and not skip(rel)
+    dirty = set()
+    for rel, sha in files.items():
+        if under(rel):
+            try:
+                if blob_sha(repo_root, rel) != sha:
+                    dirty.add(rel)
+            except OSError:
+                dirty.add(rel)
+    for r in roots:
+        base = os.path.join(repo_root, r)
+        if os.path.isfile(base):
+            continue
+        for dirpath, dirs, names in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in SANDBOX_SKIP]
+            for n in names:
+                rel = os.path.relpath(os.path.join(dirpath, n), repo_root)
+                if under(rel) and rel not in files:
+                    dirty.add(rel)
+    if b.get("dirty"):
+        dirty.add("(the bundle was made from a dirty tree)")
+    return {"commit": commit, "dirty": bool(dirty), "dirty_files": sorted(dirty)}
 
 
 def sandbox_files(root=SANDBOX_ROOT):

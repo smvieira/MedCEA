@@ -185,7 +185,8 @@ if [[ "${1:-}" == "--reset" ]]; then
     echo "    Editors made in the browser included; only the nightly backup in"
     echo "    BACKUP_DIR, if deployed, keeps a copy, and this does not delete it)"
     echo "  - the research sandbox, if deployed: its Helm releases (the research database),"
-    echo "    its namespace with every volume in it, and PriorityClass medcea-research-low"
+    echo "    its namespace with every volume in it, the research-gw and research-agents namespaces (the agent"
+    echo "    campaigns, if deployed), and PriorityClass medcea-research-low"
     echo "  - MicroK8s itself is KEPT, so images stay cached and the rebuild is fast"
     [[ "${2:-}" == "--secrets" ]] && echo "  - the generated secrets in config.env (--secrets)"
     echo ""
@@ -220,6 +221,15 @@ if [[ "${1:-}" == "--reset" ]]; then
             exit 1
         fi
     fi
+    # research Phase 4a: the two agent zones' namespaces, only when this platform labelled them
+    for _zl in research-agents research-gw; do
+        if [[ "$_zl" == research-gw ]]; then _ZNS="${RESEARCH_GW_NAMESPACE:-${_RNS}-gw}"; else _ZNS="${RESEARCH_AGENTS_NAMESPACE:-${_RNS}-agents}"; fi
+        if [[ "$_ZNS" =~ ^[a-z][a-z0-9-]{1,52}$ && "$_ZNS" != "$NAMESPACE" && "$_ZNS" != "$_RNS" ]] \
+           && [[ "$($MK8S kubectl get namespace "$_ZNS" -o jsonpath='{.metadata.labels.medcea/zone}' 2>/dev/null || true)" == "$_zl" ]]; then
+            echo -e "${YELLOW}Removing the $_zl zone (namespace '$_ZNS')...${NC}"
+            $MK8S kubectl delete namespace "$_ZNS" --ignore-not-found --timeout=5m || true
+        fi
+    done
     $MK8S kubectl delete priorityclass medcea-research-low --ignore-not-found >/dev/null 2>&1 || true
 
     echo -e "${YELLOW}Uninstalling Helm releases...${NC}"
@@ -378,6 +388,16 @@ if [[ "${RESEARCH_ENABLED:-false}" == "true" ]]; then
         echo -e "${RED}ERROR: RESEARCH_NAMESPACE='$RESEARCH_NAMESPACE' must match ^[a-z][a-z0-9-]{1,52}\$ and differ from NAMESPACE='$NAMESPACE' (config.env; the default is \"\${NAMESPACE}-research\").${NC}"
         exit 1
     fi
+    # research Phase 4a: the two agent zones' namespaces, distinct from each other and from the others
+    RESEARCH_GW_NAMESPACE="${RESEARCH_GW_NAMESPACE:-${RESEARCH_NAMESPACE}-gw}"
+    RESEARCH_AGENTS_NAMESPACE="${RESEARCH_AGENTS_NAMESPACE:-${RESEARCH_NAMESPACE}-agents}"
+    for _zv in RESEARCH_GW_NAMESPACE RESEARCH_AGENTS_NAMESPACE; do
+        if [[ ! "${!_zv}" =~ ^[a-z][a-z0-9-]{1,52}$ || "${!_zv}" == "$NAMESPACE" || "${!_zv}" == "$RESEARCH_NAMESPACE" \
+              || "$RESEARCH_GW_NAMESPACE" == "$RESEARCH_AGENTS_NAMESPACE" ]]; then
+            echo -e "${RED}ERROR: $_zv='${!_zv}' must match ^[a-z][a-z0-9-]{1,52}\$ and differ from NAMESPACE, RESEARCH_NAMESPACE and the other research namespace (config.env; the defaults are \"\${RESEARCH_NAMESPACE}-gw\" and \"-agents\").${NC}"
+            exit 1
+        fi
+    done
 fi
 
 # =============================================================================
@@ -475,6 +495,24 @@ _superset_wheel_cache() {
 }
 echo -e "${YELLOW}Superset's wheel cache folder...${NC}"
 _superset_wheel_cache || exit 1
+
+# The research agents' wheel folder (research Phase 4a): created here with the sudo deploy-infra already
+# needs, so ./apps/research-agents/deploy.sh (run by deploy-apps, unattended under install.sh) needs none.
+# Never fails the deploy: that script creates it itself as the fallback (22 Nov 2026, E48 needed a terminal).
+_research_wheel_dir() {
+    local d="${RESEARCH_WHEEL_DIR:-/var/lib/${PROJECT_NAME:-medcea}/research-wheels}"
+    [[ "${RESEARCH_ENABLED:-false}" == "true" ]] || return 0
+    (( $(id -u) != 0 )) || return 0
+    [[ "$d" == /* && "$d" =~ ^[A-Za-z0-9._/-]+$ && "$d" != *..* ]] \
+        || { echo -e "${YELLOW}  RESEARCH_WHEEL_DIR='$d' is not an absolute plain path: ./apps/research-agents/deploy.sh refuses it.${NC}"; return 0; }
+    [[ -d "$d" ]] && return 0
+    echo "  Creating $d (mode 755, owner $(id -un))..."
+    install -d -m 755 "$d" 2>/dev/null \
+        || sudo -p "[sudo] password for %u (to create $d for the research agents' wheels): " \
+               install -d -m 755 -o "$(id -u)" -g "$(id -g)" "$d" \
+        || echo -e "${YELLOW}  Could not create $d: ./apps/research-agents/deploy.sh tries again (it asks for sudo itself).${NC}"
+}
+_research_wheel_dir
 
 echo -e "${YELLOW}Logging Helm into Docker Hub for OCI chart pulls...${NC}"
 echo "$DOCKERHUB_PASS" | $MK8S helm3 registry login registry-1.docker.io \
@@ -674,6 +712,19 @@ if ! "$SCRIPT_DIR/infra/deploy-research-namespace.sh"; then
     echo -e "${RED}re-run ./infra/deploy-research-namespace.sh once the cause is fixed.${NC}"
     _PROBLEMS+=("the research namespace failed to deploy (output above): re-run ./infra/deploy-research-namespace.sh once the cause is fixed")
 fi
+# The agent campaigns' two zones (research Phase 4a), after the research namespace: the session key
+# holder (research-gw) and the orchestrator's namespace (research-agents). Each skips with one line
+# while the applied policy lacks its zone; a failure is reported and the platform deploy goes on.
+for _rz in gw agents; do
+    if ! "$SCRIPT_DIR/infra/deploy-research-$_rz-namespace.sh"; then
+        echo -e "${RED}The research-$_rz namespace failed to deploy (above). The platform deploy goes on;${NC}"
+        echo -e "${RED}re-run ./infra/deploy-research-$_rz-namespace.sh once the cause is fixed.${NC}"
+        _PROBLEMS+=("the research-$_rz namespace failed to deploy (output above): re-run ./infra/deploy-research-$_rz-namespace.sh once the cause is fixed")
+    fi
+done
+# R37 (stage 7a): the route table and the realm's public keys in the two zones' namespaces, kept equal to the
+# platform's (no-op while the applied policy lacks the zones or RESEARCH_ENABLED is not true).
+pa_zone_iam_copies full
 
 
 # Keycloak's own database. It used to share medcea_db (tables in public), so
@@ -1565,6 +1616,71 @@ if [[ -n "$_IS_ID" ]]; then
 else
     echo -e "${RED}  Could not create the 'medcea-identity' client scope.${NC}" >&2
 fi
+
+# Research Phase 4a (design rs4 §3.7, R12/R13): the client research-agent signs a scientist in
+# to the agent campaigns (device grant, consent shown), and its tokens carry the audience
+# medcea-research, never medcea-api, so a platform service refuses them and a research
+# service refuses a platform token. It exists only while the applied access policy names it
+# as a pod's token client (cli.py has-token-client, 0): created here with `groups` and the
+# scope medcea-research (person_id and the audience mapper, access token only) and without
+# medcea-identity; otherwise an existing one is disabled (never created on a fresh install,
+# never deleted). The list is KC_RESEARCH_CLIENTS (infra/lib-keycloak-clients.sh). A policy
+# that cannot be read changes nothing. health kcscopes does not read this client yet.
+for _c in "${KC_RESEARCH_CLIENTS[@]}"; do
+    _RC_RC=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-token-client "$_c" >/dev/null || _RC_RC=$?
+    case "$_RC_RC" in
+        0)  echo -e "${YELLOW}  Creating public client '$_c' (device sign-in for agent campaigns)...${NC}"
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"medcea-research","protocol":"openid-connect","description":"person_id claim and the medcea-research audience (agent campaigns)",
+                   "attributes":{"include.in.token.scope":"false","display.on.consent.screen":"false"}}' || true
+            _RS_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+              | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='medcea-research'))" 2>/dev/null || echo "")
+            if [[ -z "$_RS_ID" ]] || ! _create_public_device_client "$_c"; then
+                echo -e "${RED}  Agent campaigns cannot sign anyone in until client '$_c' and scope 'medcea-research' exist.${NC}" >&2
+                continue
+            fi
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_RS_ID}/protocol-mappers/models" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"person_id","protocol":"openid-connect","protocolMapper":"oidc-usermodel-attribute-mapper",
+                   "config":{"user.attribute":"person_id","claim.name":"person_id","jsonType.label":"String",
+                             "id.token.claim":"false","access.token.claim":"true","userinfo.token.claim":"false"}}' || true
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_RS_ID}/protocol-mappers/models" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"medcea-research-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper",
+                   "config":{"included.custom.audience":"medcea-research","access.token.claim":"true","id.token.claim":"false"}}' || true
+            _RC_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
+              -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
+            if [[ -n "$_RC_UUID" ]]; then
+                # consent is shown to the person (OD4); the client keeps groups and medcea-research only
+                _RC_REP=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}" \
+                  -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; d=json.load(sys.stdin); d['consentRequired']=True; print(json.dumps(d))" 2>/dev/null || echo "")
+                [[ -n "$_RC_REP" ]] && printf '%s' "$_RC_REP" | curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}" \
+                  -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" --data-binary @- || true
+                # the `groups` scope exists from earlier runs (the scope loop below creates it on a first one)
+                _RG_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+                  | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='groups'))" 2>/dev/null || echo "")
+                [[ -n "$_RG_ID" ]] && curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}/default-client-scopes/${_RG_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+                curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}/default-client-scopes/${_RS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+                [[ -n "${_IS_ID:-}" ]] && curl -s -o /dev/null -X DELETE \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RC_UUID}/default-client-scopes/${_IS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+            fi ;;
+        1)  _RC_STATE="$(kc_client_disable "$KEYCLOAK_REALM" "$_c")" || _RC_STATE="error"
+            case "$_RC_STATE" in
+                absent)           echo -e "${YELLOW}  Client '$_c': not in the access policy, not created.${NC}" ;;
+                disabled|already-disabled) echo -e "${YELLOW}  Client '$_c': not in the access policy, disabled (kept, never deleted).${NC}" ;;
+                *)                echo -e "${RED}  WARNING: client '$_c' is not in the access policy, but could not be disabled; re-run ./deploy-infra.sh.${NC}" >&2 ;;
+            esac ;;
+        *)  echo -e "${RED}  WARNING: cannot tell whether the access policy names client '$_c' (exit $_RC_RC): left as it is.${NC}" >&2 ;;
+    esac
+done
 if [[ -n "$_GS_ID" ]]; then
     curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_GS_ID}/protocol-mappers/models" \
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \

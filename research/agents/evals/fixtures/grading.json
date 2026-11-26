@@ -1,0 +1,20 @@
+{
+ "comment": "CPU-hours per run (scenario, controller code) the fixtures' sim_estimate results assume; the grader prices a model's sim_start spec with it.",
+ "cpu_hours_per_run": {
+  "fungi_pleurotus_fruiting_calibrated": {
+   "IF_THEN_ELSE": 0.02,
+   "PID": 0.05,
+   "Q_LEARNING": 0.06,
+   "FLC": 0.3,
+   "MPC": 1.1
+  },
+  "smoke_air_temperature_calibrated": {
+   "IF_THEN_ELSE": 0.002,
+   "PID": 0.004,
+   "Q_LEARNING": 0.005,
+   "FLC": 0.02,
+   "MPC": 0.06
+  }
+ },
+ "campaign_cap_cpu_hours": 24
+}

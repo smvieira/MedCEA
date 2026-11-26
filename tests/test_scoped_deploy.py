@@ -293,6 +293,10 @@ class Transcript(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old, cls.new = Env(PRE_42B), Env(policy_at=PRE_SCB)
+        # the transcript compares code, not the library it ships: A' of research 4a (4110b14) changed
+        # medcea_iam.py (a service's audience), so the old tree gets today's copy of that one file
+        shutil.copyfile(os.path.join(REPO, "apps/iam/lib/medcea_iam.py"),
+                        os.path.join(cls.old.tree, "apps/iam/lib/medcea_iam.py"))
 
     @classmethod
     def tearDownClass(cls):
@@ -662,11 +666,14 @@ class Resume(unittest.TestCase):
         self.assertEqual(lines[0], "./deploy-infra.sh --policy-only")
         # the research zone's NetworkPolicies right after deploy-infra (research sandbox 2a,
         # commit B: the factory policy has the zone, apply_check.target_owners)
-        self.assertEqual(lines[1], "./infra/deploy-research-namespace.sh --policy-only")
-        self.assertEqual(lines[2], "./infra/deploy-workbench.sh --policy-only")
+        # (research 4a commit B: the research-gw and research-agents zones' namespaces too)
+        self.assertEqual(set(lines[1:5]), {"./infra/deploy-research-namespace.sh --policy-only",
+                                           "./infra/deploy-research-gw-namespace.sh --policy-only",
+                                           "./infra/deploy-research-agents-namespace.sh --policy-only",
+                                           "./infra/deploy-workbench.sh --policy-only"})
         self.assertEqual(len(lines), len(set(lines)))
         self.assertNotIn("./apps/database/deploy.sh", cmds)
-        for line in lines[3:]:
+        for line in lines[5:]:
             self.assertRegex(line, r"^\./apps/[a-z-]+/deploy\.sh --gate-only$")
 
     def test_deferred_record(self):

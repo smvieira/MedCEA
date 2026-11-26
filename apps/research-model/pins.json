@@ -1,0 +1,45 @@
+{
+  "comment": "Research Phase 4b step 0: the pins the bench, the fetch and the offline tool-call eval use. Every pin was checked against its registry or the Hugging Face API on 21 Nov 2026 (read-only). The images are OCI image indexes; the linux/amd64 manifest of each is named beside it. b12182 (git fd27b2034905, built 2026-11-07T09:32:28Z) is the newest daily build with both full- and server- tags that is two weeks old on 21 Nov 2026; server-b12407 (built 15 Nov) was rejected by that rule.",
+  "llama_cpp": {
+    "build": "b12182",
+    "revision": "fd27b2034905f8dadd8bd6d2cc44595f4929d391",
+    "built": "2026-11-07T09:32:28Z",
+    "image_full": "ghcr.io/ggml-org/llama.cpp:full-b12182@sha256:6d6fd378ce6e8ffd07073f9cb237fb259ee889b59515a480ad31614399120009",
+    "image_full_amd64": "sha256:ab6ca8864f423da23d7e79098c592be603b91c7d71cbf7aa70283c75a693dad4",
+    "image_server": "ghcr.io/ggml-org/llama.cpp:server-b12182@sha256:6d581c788abba2dfa23ff78dba37ea0abfc7d838c49bcc98f4be2103df9772b3",
+    "image_server_amd64": "sha256:b1f91bfd0c6117bbd780c7d13dca1badf839a3a9e9719f16d9819d11abc37455"
+  },
+  "python_image": "python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727",
+  "models": {
+    "8b": {
+      "name": "Qwen3-8B Q4_K_M",
+      "role": "primary",
+      "repo": "Qwen/Qwen3-8B-GGUF",
+      "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "file": "Qwen3-8B-Q4_K_M.gguf",
+      "size_bytes": 5027783488,
+      "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+      "licence": "Apache-2.0",
+      "thinking": "hybrid: off through chat_template_kwargs.enable_thinking=false",
+      "arch": {"params_b": 8.2, "layers": 36, "heads": 32, "kv_heads": 8, "head_dim": 128, "hidden": 4096},
+      "estimate_tok_s": {"prompt": [4, 10], "gen": [2, 4]},
+      "bench_memory_gi": 10,
+      "server_memory_gi": 12
+    },
+    "4b": {
+      "name": "Qwen3-4B-Instruct-2507 Q4_K_M",
+      "role": "fallback",
+      "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+      "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+      "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "size_bytes": 2497281120,
+      "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+      "licence": "Apache-2.0",
+      "thinking": "none (instruct-only)",
+      "arch": {"params_b": 4.0, "layers": 36, "heads": 32, "kv_heads": 8, "head_dim": 128, "hidden": 2560},
+      "estimate_tok_s": {"prompt": [8, 20], "gen": [4, 7]},
+      "bench_memory_gi": 7,
+      "server_memory_gi": 8
+    }
+  }
+}

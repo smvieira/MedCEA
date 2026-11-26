@@ -704,7 +704,8 @@ class HopForms(unittest.TestCase):
             {"ipBlock": {"cidr": "192.0.2.1/32"}}])
 
     # each checker error, one distinct message
-    SHAPE = "a zone pod's hop is {pod, port}, {platform, port}, {node: true, port} or {internet: true, ports}"
+    SHAPE = ("a zone pod's hop is {pod, port}, {platform, port}, {node: true, port}, {internet: true, ports} "
+             "or {address, port}")
 
     def test_shape(self):
         for h in ("x", {"port": 1}, {"pod": "research-postgresql", "node": True, "port": 1},
@@ -781,6 +782,22 @@ class HopForms(unittest.TestCase):
             d["network"]["zones"]["research"] = {"internet_except": ex}
             self.assertEqual(errors_of(d), [], ex)   # wider, or more, is fine
 
+    def test_address_hop(self):
+        """Research Phase 4d: one host outside the cluster (a model server on the tailnet), by its /32."""
+        d = hops({"address": "100.71.228.99/32", "port": 8000, "why": "the GPU model server"})
+        self.assertEqual(errors_of(d), [])
+        self.assertEqual(pg_egress(d), [{"to": [{"ipBlock": {"cidr": "100.71.228.99/32"}}],
+                                         "ports": [{"protocol": "TCP", "port": 8000}]}])
+        self.assertEqual(errors_of(hops({"address": "192.168.1.50/32", "port": 11434})), [])
+        msg = "an address hop names one IPv4 host as A.B.C.D/32"
+        for a in ("100.71.228.99", "100.71.228.0/24", "100.71.228.99/31", "0.0.0.0/32", "127.0.0.1/32",
+                  "169.254.169.254/32", "224.0.0.1/32", "255.255.255.255/32", "::1/128", "host:8000", 1, None):
+            with self.subTest(a=a):
+                self.assertCaught(hops({"address": a, "port": 8000}), msg)
+        for h in ({"address": "100.71.228.99/32"}, {"address": "100.71.228.99/32", "port": "8000"}):
+            self.assertCaught(hops(h), "is not an integer")
+        self.assertCaught(hops({"address": "100.71.228.99/32", "port": 8000, "ports": [1]}), self.SHAPE)
+
     def test_pod_rules_only_for_the_pod_form(self):
         # a platform/node/internet hop is never read as "a hop to a pod that does not admit it"
         errs = errors_of(hops({"platform": dict(KC), "port": 8080}, {"node": True, "port": 16443},
@@ -811,6 +828,10 @@ class SystemReach(unittest.TestCase):
             ("pod-egress", "research-postgresql", "node", "", 16443),
             ("pod-egress", "research-postgresql", "internet", "", 443),
             ("pod-egress", "research-postgresql", "internet", "", 80)]))
+
+    def test_an_address_hop(self):
+        self.assertEqual(self.tuples(hops({"address": "100.71.228.99/32", "port": 8000})),
+                         [("pod-egress", "research-postgresql", "address", "100.71.228.99/32", 8000)])
 
     def test_b_policy(self):
         t = self.tuples(rs2b_fixture.b_policy())

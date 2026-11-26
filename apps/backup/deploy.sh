@@ -124,13 +124,14 @@ RESEARCH_DB_HOST="research-postgresql.$RESEARCH_NAMESPACE"
 # The AI workbench's volumes in the research namespace (research Phase 2b), copied as
 # volumes/research-<claim>.tar.gz once the access policy places the workbench there.
 RESEARCH_VOLUMES="claim-* hub-db-dir"
+RESEARCH_AGENTS_NAMESPACE="${RESEARCH_AGENTS_NAMESPACE:-$RESEARCH_NAMESPACE-agents}"
 
 # =============================================================================
 # 3. The CronJob
 # =============================================================================
 log "Deploying CronJob medcea-backup (daily 02:30 UTC, image $BACKUP_IMAGE)..."
 render "$SCRIPT_DIR/k8s/backup-cronjob.yaml" NAMESPACE BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_IMAGE \
-    BACKUP_UID BACKUP_GID STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST RESEARCH_NAMESPACE RESEARCH_VOLUMES \
+    BACKUP_UID BACKUP_GID STORAGE_DIR POSTGRES_DB RESEARCH_DB_HOST RESEARCH_NAMESPACE RESEARCH_VOLUMES RESEARCH_AGENTS_NAMESPACE \
   | $KUBECTL apply -f -
 
 log ""

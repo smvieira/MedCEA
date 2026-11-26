@@ -1,0 +1,58 @@
+# Job research-model-fetch (research Phase 4b step 0, codeplan/rs4-design.md R28): fetch the
+# pinned GGUF files into the model folder on the host, outside the zones (hostPath allowed
+# in the platform namespace). Rendered by apps/research-model/bench.sh fetch with
+#   render fetch-job.yaml NAMESPACE PYTHON_IMAGE MODEL_DIR MODEL_UID MODEL_GID FETCH_DEADLINE_S PRIORITY_CLASS
+# The script and the pins (no secret) are ConfigMap research-model-fetch-script.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: research-model-fetch
+  namespace: ${NAMESPACE}
+  labels:
+    app: research-llm-bench
+    medcea/bench-kind: fetch
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: ${FETCH_DEADLINE_S}
+  template:
+    metadata:
+      labels:
+        app: research-llm-bench
+        medcea/bench-kind: fetch
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: "${PRIORITY_CLASS}"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: ${MODEL_UID}
+        runAsGroup: ${MODEL_GID}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fetch
+          image: ${PYTHON_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-I", "/script/fetch_model.py", "--dir", "/models", "--pins", "/script/models.json"]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: script, mountPath: /script, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: models
+          hostPath: {path: ${MODEL_DIR}, type: Directory}
+        - name: script
+          configMap: {name: research-model-fetch-script}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}

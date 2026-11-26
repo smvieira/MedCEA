@@ -1,0 +1,162 @@
+# apps/research-model/k8s/llm.yaml — research-llm, the local model's server, in research-gw (research Phase 4b
+# stage 1; design rs4 5.2 as overridden by the owner on 21 Nov 2026: Qwen3-4B-Instruct-2507 Q4_K_M, -c 4096,
+# local sessions of about 4k tokens). Rendered by apps/research-model/deploy.sh.
+# Render list: RESEARCH_GW_NAMESPACE LLAMA_IMAGE_SERVER MODEL_PV MODEL_DIR MODEL_UID MODEL_GID MODEL_SHA256 MODEL_FILE MODEL_ALIAS LLM_CTX LLM_SCRIPT_SHA256
+#
+# Sizing. CPU: request 6, no limit (OD10); the server's threads are that request through the downward
+# API. Memory request = limit = 6Gi: the 4B Q4_K_M weights are 2.5 GB (mmap, page cache charged to the
+# cgroup), the f16 KV cache at 4096 tokens is 36 layers x 8 kv heads x 128 x 2 (K and V) x 2 bytes x 4096
+# = 0.6 GB, compute and prompt buffers about 0.5 GB: about 3.7 GB in use, so 6Gi leaves room for a
+# longer prompt batch without a kill and stays far below the namespace quota (13Gi with the gateway).
+# The pod runs as the model folder's owner (MODEL_UID/GID, never root): the folder is mode 700 for the
+# deploying account (apps/research-model/bench.sh), so 65534 could not read it. The static PV is read-only
+# (Pod Security baseline refuses hostPath in a pod spec, not a PV).
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ${MODEL_PV}
+  labels:
+    medcea/research-models: ${RESEARCH_GW_NAMESPACE}
+spec:
+  capacity:
+    storage: 8Gi
+  accessModes: ["ReadOnlyMany"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: ${RESEARCH_GW_NAMESPACE}
+    name: research-models
+  hostPath:
+    path: ${MODEL_DIR}
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: research-models
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: research-llm
+spec:
+  accessModes: ["ReadOnlyMany"]
+  storageClassName: ""
+  volumeName: ${MODEL_PV}
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: research-llm
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: research-llm
+    app.kubernetes.io/part-of: medcea-research-llm
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: research-llm
+  template:
+    metadata:
+      labels:
+        app: research-llm
+        app.kubernetes.io/part-of: medcea-research-llm
+      annotations:
+        medcea/model-sha256: "${MODEL_SHA256}"
+        medcea/model-alias: "${MODEL_ALIAS}"
+        medcea/script-sha256: "${LLM_SCRIPT_SHA256}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: ${MODEL_UID}
+        runAsGroup: ${MODEL_GID}
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # The pin is checked at every start: a file that is not the pinned GGUF never starts a server. The
+      # CPU must have AVX (the build in use is the sandybridge variant; no F16C, no AVX2 here).
+      - name: verify
+        image: ${LLAMA_IMAGE_SERVER}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "set -e; grep -qw avx /proc/cpuinfo || { echo 'verify: this CPU has no AVX' >&2; exit 1; }; echo \"${MODEL_SHA256}  /models/${MODEL_SHA256}.gguf\" | sha256sum -c -"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 100m, memory: 64Mi}
+          limits: {memory: 128Mi}
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+      containers:
+      - name: research-llm
+        image: ${LLAMA_IMAGE_SERVER}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "/script/llm-serve.sh"]
+        env:
+        - {name: MODEL, value: "/models/${MODEL_SHA256}.gguf"}
+        - {name: ALIAS, value: "${MODEL_ALIAS}"}
+        - {name: CTX, value: "${LLM_CTX}"}
+        - {name: LLM_MODEL_SHA256, value: "${MODEL_SHA256}"}
+        - {name: LLM_MODEL_FILE, value: "${MODEL_FILE}"}
+        - name: THREADS
+          valueFrom:
+            resourceFieldRef: {containerName: research-llm, resource: requests.cpu, divisor: "1"}
+        - {name: HOME, value: /tmp}
+        ports:
+        - {name: http, containerPort: 8080, protocol: TCP}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: "6", memory: 6Gi}
+          limits: {memory: 6Gi}
+        readinessProbe:
+          httpGet: {path: /health, port: 8080}
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          httpGet: {path: /health, port: 8080}
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        - {name: script, mountPath: /script, readOnly: true}
+        - {name: slots, mountPath: /slots}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: models
+        persistentVolumeClaim: {claimName: research-models, readOnly: true}
+      - name: script
+        configMap: {name: research-llm-script}
+      - name: slots
+        emptyDir: {sizeLimit: 1Gi}
+      - name: tmp
+        emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: research-llm
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: research-llm
+spec:
+  type: ClusterIP
+  selector:
+    app: research-llm
+  ports:
+  - {name: http, port: 8080, targetPort: 8080, protocol: TCP}

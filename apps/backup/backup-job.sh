@@ -227,6 +227,48 @@ SQL
     esac
 }
 
+# research_chain_head: one MANIFEST line for the research database's agent_trace chain (research
+# Phase 4a, design R11), never fails: `# agent_trace chain head (read before the dump): <id> <hash>
+# db=<system_identifier>/<oid>`, or `# agent_trace chain head: unavailable (...)`. Read as
+# RESEARCH_PGUSER (pg_read_all_data: SELECT on agent_trace.event; pg_control_system() is open to any
+# role). The database identity lets rsanchor tell a purged or rebuilt database from a cut chain.
+research_chain_head() {
+    _rrc=0
+    _rans="$(PGHOST="$RESEARCH_DB_HOST" PGPORT="${RESEARCH_PGPORT:-5432}" PGUSER="${RESEARCH_PGUSER:-rs_backup}" \
+        PGPASSWORD="$RESEARCH_PGPASSWORD" \
+        psql --no-password --no-psqlrc -X -q -tA -v ON_ERROR_STOP=1 --dbname="$RESEARCH_DB" 2>&1 <<'SQL'
+BEGIN TRANSACTION READ ONLY;
+SELECT pg_catalog.to_regclass('agent_trace.event') IS NOT NULL AS has_chain \gset
+\if :has_chain
+SELECT 'head ' || coalesce((SELECT e.event_id || ' ' || e.hash FROM agent_trace.event e ORDER BY e.event_id DESC LIMIT 1), 'none -')
+       || ' ' || (SELECT system_identifier FROM pg_catalog.pg_control_system())
+       || '/' || (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database());
+\else
+SELECT 'no-schema';
+\endif
+COMMIT;
+SQL
+)" || _rrc=$?
+    _rone="$(printf '%s\n' "$_rans" | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 1 | tr -c '[:print:]\n' ' ' | cut -c1-200)"
+    if [ "$_rrc" -ne 0 ]; then
+        echo "# agent_trace chain head: unavailable (psql exit $_rrc: ${_rone:-no message})"; return 0
+    fi
+    set -f; set -- $_rone; set +f
+    case "${1:-}" in
+        no-schema) echo "# agent_trace chain head: unavailable (no agent_trace schema in $RESEARCH_DB)"; return 0 ;;
+        head) ;;
+        *) echo "# agent_trace chain head: unavailable (unexpected answer from psql)"; return 0 ;;
+    esac
+    if [ "${2:-}" = none ]; then
+        echo "# agent_trace chain head: unavailable (agent_trace.event is empty)"; return 0
+    fi
+    case "${2:-}" in ''|*[!0-9]*) echo "# agent_trace chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    case "${3:-}" in ''|*[!0-9a-f]*) echo "# agent_trace chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    case "${4:-}" in [0-9]*/[0-9]*) ;; *) echo "# agent_trace chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    case "${4:-}" in *[!0-9/]*) echo "# agent_trace chain head: unavailable (unexpected answer from psql)"; return 0 ;; esac
+    echo "# agent_trace chain head (read before the dump): $2 $3 db=$4"
+}
+
 prune() {
     _keep="${KEEP_DAYS:-14}"
     case "$_keep" in ''|*[!0-9]*) die "KEEP_DAYS '$_keep' is not a whole number of days" ;; esac
@@ -299,6 +341,7 @@ run() {
     # answers without the database, and a server that does not answer.
     _unreached=""
     _nosecret=""
+    _rhead=""
     if [ -n "${RESEARCH_DB:-}" ]; then
         case "$RESEARCH_DB" in *[!a-z0-9_]*) die "RESEARCH_DB: '$RESEARCH_DB' is not a plain database name" ;; esac
         _e=nosecret
@@ -314,7 +357,9 @@ run() {
             unreached)
                 say "warning: $RESEARCH_DB_HOST did not answer although Secret research-backup exists: $RESEARCH_DB is not in this backup (the platform's databases are)"
                 _unreached="$RESEARCH_DB" ;;
-            t)  say "pg_dump $RESEARCH_DB ($RESEARCH_DB_HOST)"
+            t)  _rhead="$(research_chain_head)"
+                say "${_rhead#\# }"
+                say "pg_dump $RESEARCH_DB ($RESEARCH_DB_HOST)"
                 PGHOST="$RESEARCH_DB_HOST" PGPORT="${RESEARCH_PGPORT:-5432}" PGUSER="${RESEARCH_PGUSER:-rs_backup}" \
                     PGPASSWORD="$RESEARCH_PGPASSWORD" \
                     pg_dump --no-password --format=custom --file="$DIR/db/$RESEARCH_DB.dump" --dbname="$RESEARCH_DB" \
@@ -341,6 +386,13 @@ run() {
         *) _rs_pats="${RESEARCH_VOLUMES:-}"
            [ -z "$_rs_pats" ] || copy_volumes "$RESEARCH_NAMESPACE" "$_rs_pats" "research-" ;;
     esac
+    # The research agents' namespace (Phase 4a): the campaigns' outputs and the session traces
+    # on PVC research-runs, as volumes/research-agents-research-runs.tar.gz.
+    case "${RESEARCH_AGENTS_NAMESPACE:-}" in
+        ''|*[!a-z0-9-]*) ;;
+        "$NAMESPACE"|"${RESEARCH_NAMESPACE:-}") ;;
+        *) copy_volumes "$RESEARCH_AGENTS_NAMESPACE" "research-runs" "research-agents-" ;;
+    esac
     say "$_count volume(s) copied"
 
     # --- manifest and checksums ----------------------------------------------
@@ -360,6 +412,7 @@ run() {
             [ -z "$_rs_pats" ] \
                 || echo "# research volume patterns ($RESEARCH_NAMESPACE, as volumes/research-<claim>): $_rs_pats"
             echo "$_head"
+            [ -z "$_rhead" ] || echo "$_rhead"
             # one line per volume archive: the directory it holds and its newest file's time
             if [ -f .volume-sources ]; then
                 while read -r _a _src _t; do

@@ -1,0 +1,369 @@
+{
+ "comment": "The tools the planned mcp-sim/mcp-lake servers declare to a controller-campaign profile (codeplan/rs4-design.md \u00a74.1, \u00a74.5; lake.recipe_line left out to keep the standing prefix under 1,500 tokens), as OpenAI function tools. Function names use _ where the MCP names use . (the gateway maps them: dots are outside the function-name pattern of OpenAI-style tools).",
+ "mcp_names": {
+  "lake_snapshots": "lake.snapshots",
+  "lake_pin": "lake.pin",
+  "lake_summary": "lake.summary",
+  "sim_validate": "sim.validate",
+  "sim_estimate": "sim.estimate",
+  "sim_start": "sim.start",
+  "sim_status": "sim.status",
+  "sim_results": "sim.results",
+  "propose": "propose"
+ },
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "lake_snapshots",
+    "description": "List snapshots (id, cut, lineage).",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "lake_pin",
+    "description": "Pin a snapshot; its lineage must match.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "snapshot_id": {
+       "type": "integer"
+      },
+      "expect_lineage": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "snapshot_id",
+      "expect_lineage"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "lake_summary",
+    "description": "Hourly n/mean/min/max/sd of a tag in the pinned snapshot.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "unit": {
+       "type": "string"
+      },
+      "zone": {
+       "type": "string"
+      },
+      "tag": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "unit",
+      "zone",
+      "tag"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "sim_validate",
+    "description": "Check a campaign spec.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "spec": {
+       "type": "object",
+       "required": [
+        "scenarios",
+        "controllers",
+        "seeds"
+       ],
+       "properties": {
+        "scenarios": {
+         "type": "array",
+         "items": {
+          "enum": [
+           "fungi_pleurotus_fruiting_calibrated",
+           "smoke_air_temperature_calibrated"
+          ]
+         }
+        },
+        "controllers": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "required": [
+           "code"
+          ],
+          "properties": {
+           "code": {
+            "enum": [
+             "IF_THEN_ELSE",
+             "PID",
+             "Q_LEARNING",
+             "FLC",
+             "MPC"
+            ]
+           },
+           "params": {
+            "type": "object"
+           },
+           "params_grid": {
+            "type": "object"
+           }
+          }
+         }
+        },
+        "seeds": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        },
+        "clock_offsets_s": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         }
+        }
+       }
+      }
+     },
+     "required": [
+      "spec"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "sim_estimate",
+    "description": "Estimate a spec's CPU-hours.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "spec": {
+       "type": "object",
+       "required": [
+        "scenarios",
+        "controllers",
+        "seeds"
+       ],
+       "properties": {
+        "scenarios": {
+         "type": "array",
+         "items": {
+          "enum": [
+           "fungi_pleurotus_fruiting_calibrated",
+           "smoke_air_temperature_calibrated"
+          ]
+         }
+        },
+        "controllers": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "required": [
+           "code"
+          ],
+          "properties": {
+           "code": {
+            "enum": [
+             "IF_THEN_ELSE",
+             "PID",
+             "Q_LEARNING",
+             "FLC",
+             "MPC"
+            ]
+           },
+           "params": {
+            "type": "object"
+           },
+           "params_grid": {
+            "type": "object"
+           }
+          }
+         }
+        },
+        "seeds": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        },
+        "clock_offsets_s": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         }
+        }
+       }
+      }
+     },
+     "required": [
+      "spec"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "sim_start",
+    "description": "Start a campaign (over 2 CPU-h: waits for approval).",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "spec": {
+       "type": "object",
+       "required": [
+        "scenarios",
+        "controllers",
+        "seeds"
+       ],
+       "properties": {
+        "scenarios": {
+         "type": "array",
+         "items": {
+          "enum": [
+           "fungi_pleurotus_fruiting_calibrated",
+           "smoke_air_temperature_calibrated"
+          ]
+         }
+        },
+        "controllers": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "required": [
+           "code"
+          ],
+          "properties": {
+           "code": {
+            "enum": [
+             "IF_THEN_ELSE",
+             "PID",
+             "Q_LEARNING",
+             "FLC",
+             "MPC"
+            ]
+           },
+           "params": {
+            "type": "object"
+           },
+           "params_grid": {
+            "type": "object"
+           }
+          }
+         }
+        },
+        "seeds": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        },
+        "clock_offsets_s": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         }
+        }
+       }
+      }
+     },
+     "required": [
+      "spec"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "sim_status",
+    "description": "Status of a campaign.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "cid": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "cid"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "sim_results",
+    "description": "Ranked runs of a finished campaign.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "cid": {
+       "type": "string"
+      },
+      "top": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "cid"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "propose",
+    "description": "Propose a parameter set for review, then stop.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "algorithm": {
+       "enum": [
+        "IF_THEN_ELSE",
+        "PID",
+        "Q_LEARNING",
+        "FLC",
+        "MPC"
+       ]
+      },
+      "params": {
+       "type": "object"
+      },
+      "evidence": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "rationale": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "algorithm",
+      "params",
+      "evidence",
+      "rationale"
+     ]
+    }
+   }
+  }
+ ]
+}

@@ -265,6 +265,38 @@ class Logic(unittest.TestCase):
         self.assertTrue(self._approve(skv, skd, "looked at it", True, qa)["ok"])
         self.assertFalse(self._approve(skv, skd, "looked at it", "true", qa)["ok"])
 
+    def _waiting(self, me, policy):
+        return run_node("waitingFor(%s, %s)" % (json.dumps(me), json.dumps(policy)))
+
+    def test_waiting_for_you(self):
+        admin = {"user": "adam", "role": "admin", "can": {"changes": True}, "acts": {"submit": True, "edit": True}}
+        qa = {"user": "quinn", "role": "qa", "can": {"approval": True, "confirm": True}, "acts": {}}
+        draft = {"version": 11, "kind": "change", "status": "draft"}
+        got = self._waiting(admin, {"versions": [draft]})
+        self.assertEqual([(i["kind"], i["version"], i["tab"]) for i in got], [("draft", 11, "changes")])
+        self.assertIn("submit it", got[0]["text"])
+        got = self._waiting(admin, {"versions": [dict(draft, returned_at="2026-11-22T10:00:00")]})
+        self.assertEqual(got[0]["kind"], "returned")
+        sub = {"version": 11, "kind": "change", "status": "submitted", "why_not": {"may_approve": True}}
+        got = self._waiting(qa, {"versions": [sub]})
+        self.assertEqual([(i["kind"], i["tab"]) for i in got], [("approve", "approval")])
+        self.assertEqual(self._waiting(admin, {"versions": [sub]}), [])
+        barred = dict(sub, why_not={"may_approve": False, "why_not_code": "own_author"})
+        got = self._waiting(qa, {"versions": [barred]})
+        self.assertEqual(got[0]["kind"], "approve-other")
+        self.assertIn("another qa person", got[0]["text"])
+        self.assertNotIn("own_author", got[0]["text"])
+        got = self._waiting(qa, {"versions": [{"version": 1, "kind": "bootstrap", "status": "applied", "needs_confirmation": True}]})
+        self.assertEqual([(i["kind"], i["tab"]) for i in got], [("confirm", "confirm")])
+        got = self._waiting(qa, {"versions": [], "apply_pending": {"version": 12, "kind": "change", "state": "approved"}})
+        self.assertEqual(got[0]["command"], "./apps/iam/apply.sh 12 --by quinn")
+        got = self._waiting(admin, {"versions": [], "apply_pending": {"version": 12, "kind": "change", "state": "unfinished"}})
+        self.assertEqual(got[0]["command"], "./apps/iam/apply.sh --resume --by adam")
+        other = {"user": "aud", "role": "auditor", "can": {}, "acts": {}}
+        self.assertEqual(self._waiting(other, {"versions": [draft, sub],
+                                               "apply_pending": {"version": 1, "state": "approved"}}), [])
+        self.assertEqual(self._waiting(admin, {"versions": []}), [])
+
     def test_why_not_words(self):
         codes = ["no_token", "no_person", "not_approver", "changed_since", "no_version", "not_submitted", "no_applied",
                  "stale_base", "own_author", "entries_changed", "break_glass_open", "stale_skeleton", "own_widening"]

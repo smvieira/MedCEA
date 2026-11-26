@@ -534,16 +534,23 @@ domain_notes
 # SVC_SUPERSET_DB_PASS is Superset's connection role (svc_superset), used once the applied
 # access policy gives a role a Superset setting. The research sandbox's five (Phase 2a,
 # 2b): research-postgresql's superuser, its rs_export_writer, rs_backup and rs_lake_api
-# (the snapshot reader, lake-api) logins, and the export's svc_research_export on the
+# (the snapshot reader, lake-api) and rs_session (research-session, Phase 4a) logins, and the export's svc_research_export on the
 # platform database; generated whether or not RESEARCH_ENABLED is true, so switching it
 # on asks nothing.
 for _v in SVC_INGEST_DB_PASS SVC_SCHEDULER_DB_PASS SVC_MONITOR_DB_PASS SVC_GRAFANA_DB_PASS \
           SVC_DBEXPORT_DB_PASS IAM_SVC_DB_PASS RR_ADMIN_LOGIN_DB_PASS AUTHENTICATOR_DB_PASS \
           SVC_SUPERSET_DB_PASS SUPERSET_META_DB_PASS \
-          RESEARCH_DB_PASS RS_EXPORT_WRITER_DB_PASS RS_BACKUP_DB_PASS RS_LAKE_API_DB_PASS \
+          RESEARCH_DB_PASS RS_EXPORT_WRITER_DB_PASS RS_BACKUP_DB_PASS RS_LAKE_API_DB_PASS RS_SESSION_DB_PASS \
           SVC_RESEARCH_EXPORT_DB_PASS; do
     [[ -n "$(cfg_get "$_v")" ]] || cfg_set "$_v" "$(gen_password)"
 done
+# research-session's token-signing key (research Phase 4a): hex, 64 characters.
+if [[ -z "$(cfg_get RS_SESSION_HMAC_KEY)" ]]; then
+    _k="$(openssl rand -hex 32 2>/dev/null)" || _k=""
+    [[ "$_k" =~ ^[0-9a-f]{64}$ ]] || die "openssl rand -hex 32 gave no key for RS_SESSION_HMAC_KEY"
+    cfg_set RS_SESSION_HMAC_KEY "$_k"
+    unset _k
+fi
 # Superset's session-signing and connection-encryption key (apps/superset): hex, so
 # it stays inside the password charset; Superset refuses to start on its default.
 if [[ -z "$(cfg_get SUPERSET_SECRET_KEY)" ]]; then

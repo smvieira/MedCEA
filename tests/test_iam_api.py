@@ -334,6 +334,9 @@ class PolicyCursor:
             cols, rows = ["x"], [("",)]
         elif "iam_policy.why_not(" in q:
             cols, rows = ["may_approve", "why_not_code", "needs_token_path"], [(True, None, True)]
+        elif "ORDER BY h.event_id DESC LIMIT 1" in q and "apply_deferred" in q:
+            cols = ["version", "event", "outcome"]
+            rows = [(d.apply_last[0], d.apply_last[1], d.apply_last[2])] if d.apply_last else []
         elif q.startswith("SELECT DISTINCT ON (h.version) h.version, h.event"):
             cols = ["version", "event", "outcome"]
             rows = [(n, e, o) for n, (e, o) in sorted(d.apply_events.items())]
@@ -384,6 +387,7 @@ class PolicyDB(FakeDB):
         self.fail, self.fail_fn, self.vdiff, self.bg_open = {}, {}, {}, []
         self.corrupt_save, self.submit_digest = False, None
         self.apply_events = {1: ("bootstrap_applied", None)}   # {version: (latest apply event, outcome)}
+        self.apply_last = None   # (version, event, outcome) of the newest apply event, or None
 
     def digest(self, n):
         v = self.versions[n]
@@ -967,6 +971,30 @@ class PolicyAdminTest(IamApiTest):
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", q.split(" IN (", 1)[1])), set(self.pa.APPLY_EVENTS))
         self.assertEqual(set(self.pa.APPLY_EVENTS),
                          {"apply_started", "applied", "bootstrap_applied", "partial_apply", "apply_reverted"})
+        self.assertFalse(self.pdb.committed)
+
+    def test_apply_pending(self):
+        """GET /api/policy's apply_pending: null, approved (apply.sh N) or unfinished (--resume)."""
+        d = self.pdb
+        tok = self.ptoken(["admin"], person="p-admin")
+        status, body, _ = self.req("/api/policy", tok)
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(body["apply_pending"])
+        d.versions[2] = dict(version=2, kind="change", status="approved", reason="t", based_on=1,
+                             groups=d.versions[1]["groups"], roles=d.versions[1]["roles"])
+        d.entries[2] = d.entries[1]
+        _, body, _ = self.req("/api/policy", tok)
+        self.assertEqual(body["apply_pending"], {"version": 2, "kind": "change", "state": "approved"})
+        for last, want in (((2, "apply_started", None), "unfinished"), ((2, "apply_deferred", None), "unfinished"),
+                           ((2, "partial_apply", "mixed"), "unfinished"), ((2, "applied", None), "approved"),
+                           ((2, "partial_apply", "reverted"), "approved")):
+            d.apply_last = last
+            _, body, _ = self.req("/api/policy", tok)
+            self.assertEqual(body["apply_pending"]["state"], want, last)
+        d.versions[2]["status"] = "applied"
+        d.apply_last = (2, "applied", None)
+        _, body, _ = self.req("/api/policy", tok)
+        self.assertIsNone(body["apply_pending"])
         self.assertFalse(self.pdb.committed)
 
     def test_apply_state_events_are_the_sources(self):

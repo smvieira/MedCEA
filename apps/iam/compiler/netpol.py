@@ -62,6 +62,10 @@ Hop forms (research sandbox Phase 2b). A zone pod's `egress` item is exactly one
                                       Calico matches after DNAT of the kubernetes Service)
     {internet: true, ports: [N, ..]}  0.0.0.0/0 except network.zones.<zone>.internet_except
                                       (the private ranges, in YAML order), on those TCP ports
+    {address: A.B.C.D/32, port: N}    one host outside the cluster, by its address (research Phase 4d:
+                                      a model server on the LAN or the tailnet, which internet_except
+                                      keeps out of an internet hop); a single IPv4 host, never
+                                      loopback, link-local, multicast or 0/8
 
 `network.zones.<zone>.internet_except` is a non-empty list of IPv4 networks (strict). A
 platform hop may not select a network pod (that pod admits only sources of its own zone).
@@ -91,7 +95,14 @@ LABEL = "medcea/iam-netpol"
 _RPC = re.compile(r"^[a-z_][a-z0-9_]*$")
 KINDS = ("proxy:", "pod:", "client:")
 # zone → (name prefix, label key). A zone name not listed here is an error.
-ZONES = {"research": ("rs", "medcea/rs-netpol")}
+ZONES = {"research": ("rs", "medcea/rs-netpol"),
+         # research Phase 4a (design rs4 R2): the agent machinery, in a namespace the notebook
+         # hub cannot create pods in, and the key and trace holder beside it
+         "research-agents": ("ra", "medcea/ra-netpol"),
+         "research-gw": ("gw", "medcea/gw-netpol")}
+# A research-gw pod (the session key, the trace writer) admits only these zones' pods (R2),
+# and the node (kubelet probes); never the research zone, the platform, a proxy or ingress.
+GW_ADMITS = ("research-agents", "research-gw")
 SOURCE = "apps/iam/policy/defaults.yaml"
 DNS_NAMESPACE = "kube-system"
 DNS_SELECTOR = {"k8s-app": "kube-dns"}
@@ -123,11 +134,28 @@ HOP_FORMS = {
     "platform": {"platform", "port", "why"},
     "node": {"node", "port", "why"},
     "internet": {"internet", "ports", "port", "why"},
+    "address": {"address", "port", "why"},
 }
+# An address hop names one host (/32), and never one of these: loopback, "this network", link-local (cloud
+# metadata, the node's own link addresses), multicast and reserved space. A private address is the point.
+ADDRESS_REFUSED = ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
+
+
+def _address_ok(a):
+    """The /32 network of an address hop, or None when it is not one host in an allowed range."""
+    if not isinstance(a, str) or not a.endswith("/32"):
+        return None
+    try:
+        n = ipaddress.IPv4Network(a, strict=True)
+    except ValueError:
+        return None
+    if any(n.subnet_of(ipaddress.IPv4Network(r)) for r in ADDRESS_REFUSED):
+        return None
+    return n
 
 
 def _hop_form(hop):
-    """The form of a zone pod's hop (pod, platform, node or internet), None when the hop is
+    """The form of a zone pod's hop (pod, platform, node, internet or address), None when the hop is
     not a mapping, names none or several of them, or carries a key its form does not take."""
     if not isinstance(hop, dict):
         return None
@@ -210,6 +238,10 @@ def _zone_check(net, errors):
             if "zone" in d and (not isinstance(d["zone"], str) or d["zone"] not in zs):
                 errors.append(f"network: {kind} {name}: zone {d['zone']!r} is not in network.zones")
     for name, rule, src in _sources(net):
+        if pods[name].get("zone") == "research-gw" and src != "node" and _zone_of(net, src) not in GW_ADMITS:
+            errors.append(f"network: pod {name} port {rule.get('port')}: source {src} is not a pod of "
+                          f"{' or '.join(GW_ADMITS)}; a research-gw pod admits only those (and the node)")
+    for name, rule, src in _sources(net):
         if pods[name].get("zone") is None and _zone_of(net, src) is not None:
             errors.append(f"network: pod {name} port {rule.get('port')}: source {src} is in zone "
                           f"{_zone_of(net, src)}; a platform pod admits only platform sources")
@@ -227,7 +259,7 @@ def _zone_check(net, errors):
             form = _hop_form(hop)
             if form is None:
                 errors.append(f"network: pod {name}: a zone pod's hop is {{pod, port}}, {{platform, port}}, "
-                              f"{{node: true, port}} or {{internet: true, ports}}")
+                              f"{{node: true, port}}, {{internet: true, ports}} or {{address, port}}")
                 continue
             if form == "internet":
                 if hop["internet"] is not True or "port" in hop or not _ports_ok(hop.get("ports")):
@@ -255,6 +287,11 @@ def _zone_check(net, errors):
                 if hop["node"] is not True:
                     errors.append(f"network: pod {name}: a node hop is {{node: true, port}}")
                 continue
+            if form == "address":
+                if _address_ok(hop["address"]) is None:
+                    errors.append(f"network: pod {name}: an address hop names one IPv4 host as A.B.C.D/32, not "
+                                  f"loopback, link-local, multicast or 0/8 (got {hop['address']!r})")
+                continue
             if hop["pod"] not in pods:
                 errors.append(f"network: pod {name}: hop to unknown pod {hop['pod']}")
             elif not any(f"pod:{name}" in (r.get("from") or []) and r.get("port") == hop.get("port")
@@ -273,6 +310,60 @@ def _zone_check(net, errors):
                           f"with no egress hop there (its egress is denied by default)")
 
 
+TOKEN_AUDIENCE = "medcea-research"   # the one audience a zone service's own token client may carry (rs4 §2.1)
+DNS_ZONES = ("research-agents", "research-gw")   # the zones whose DNS is per pod (rs4 R20)
+
+
+def _pod_keys_check(p, net, errors):
+    """`token_clients` and `dns` on a pod (research Phase 4a): a pod that carries a service may
+    name the Keycloak client whose tokens that service accepts, and the audience those tokens
+    must have; `dns: true` gives a pod of the research-gw or research-agents zone DNS egress."""
+    host_clients = {hd["client"] for hd in p.hosts.values()}
+    for name, pd in (net.get("pods") or {}).items():
+        if "dns" in pd:
+            if not isinstance(pd["dns"], bool):
+                errors.append(f"network: pod {name}: dns must be true or false")
+            elif pd.get("zone") not in DNS_ZONES:
+                errors.append(f"network: pod {name}: dns is per pod only in the zones {' and '.join(DNS_ZONES)}")
+        if "token_clients" not in pd:
+            continue
+        tcs = pd["token_clients"]
+        if not pd.get("carries"):
+            errors.append(f"network: pod {name}: token_clients needs a pod that carries a service")
+        if not pd.get("zone"):
+            errors.append(f"network: pod {name}: token_clients is for a zone pod")
+        if not isinstance(tcs, list) or not tcs:
+            errors.append(f"network: pod {name}: token_clients must be a non-empty list of {{client, audience}}")
+            continue
+        seen = set()
+        for tc in tcs:
+            if not (isinstance(tc, dict) and set(tc) == {"client", "audience"}
+                    and isinstance(tc["client"], str) and isinstance(tc["audience"], str)):
+                errors.append(f"network: pod {name}: a token client is {{client, audience}}")
+                continue
+            if tc["client"] in host_clients:
+                errors.append(f"network: pod {name}: token client {tc['client']} is a host's client")
+            if tc["audience"] != TOKEN_AUDIENCE:
+                errors.append(f"network: pod {name}: token client {tc['client']}: the audience is {TOKEN_AUDIENCE}, "
+                              f"not {tc['audience']!r}")
+            if tc["client"] in seen:
+                errors.append(f"network: pod {name}: token client {tc['client']} is listed twice")
+            seen.add(tc["client"])
+        if len({tc.get("audience") for tc in tcs if isinstance(tc, dict)}) > 1:
+            errors.append(f"network: pod {name}: two audiences for one service")
+
+
+def pod_token_clients(p):
+    """{service: (sorted client names, audience)} for every service a pod carries with token_clients."""
+    out = {}
+    for pd in ((p.data.get("network") or {}).get("pods") or {}).values():
+        tcs = [tc for tc in pd.get("token_clients") or [] if isinstance(tc, dict)]
+        if tcs:
+            for svc in pd.get("carries") or {}:
+                out[svc] = (sorted({tc["client"] for tc in tcs}), tcs[0]["audience"])
+    return out
+
+
 def check(p):
     errors = []
     net = p.data.get("network")
@@ -284,10 +375,12 @@ def check(p):
         if h not in p.hosts:
             errors.append(f"network: proxy for unknown host {h}")
     _zone_check(net, errors)
+    _pod_keys_check(p, net, errors)
     for name, pd in pods.items():
         if not pd.get("selector"):
             errors.append(f"network: pod {name} has no selector")
-        if not pd.get("ingress"):
+        if not pd.get("ingress") and not (pd.get("zone") and pd.get("egress")):
+            # a zone pod that only sends (the agent Jobs, rs4 R2) may admit nothing
             errors.append(f"network: pod {name} admits nothing (no ingress rules)")
         for rule in pd.get("ingress") or []:
             if not isinstance(rule.get("port"), int):
@@ -431,7 +524,7 @@ def _peer(net, src, node_ips, here=None, namespaces=None):
 
 def _ingress_rules(net, pd, node_ips, here=None, namespaces=None):
     rules = []
-    for rule in pd["ingress"]:
+    for rule in pd.get("ingress") or []:
         peers = [peer for src in rule["from"] for peer in _peer(net, src, sorted(set(node_ips)), here, namespaces)]
         rules.append({"from": peers, "ports": [{"protocol": "TCP", "port": rule["port"]}]})
     return rules
@@ -474,9 +567,11 @@ def zone_label(zone):
     return ZONES[zone][1]
 
 
-def compile_zone(p, zone, namespace, platform_namespace, node_ips):
+def compile_zone(p, zone, namespace, platform_namespace, node_ips, zone_namespaces=None):
     """The Kubernetes List of zone `zone`'s NetworkPolicies in `namespace`: the default deny,
-    the DNS allow and one per zone pod; empty while the policy has no such zone."""
+    the DNS allow and one per zone pod; empty while the policy has no such zone.
+    zone_namespaces: {other zone: its namespace}, needed only for a peer or hop in another
+    zone (research Phase 4a); without it such a peer raises."""
     label = zone_label(zone)
     prefix = ZONES[zone][0]
     if not has_zone(p, zone):
@@ -486,8 +581,8 @@ def compile_zone(p, zone, namespace, platform_namespace, node_ips):
     net = p.data["network"]
     if not node_ips and _needs_node(net, zone):
         raise ValueError(f"zone {zone} admits `node`, but no node address was given")
-    # another zone's namespace is not known here: a peer between two zones raises
-    namespaces = {None: platform_namespace, zone: namespace}
+    # another zone's namespace comes from zone_namespaces; a peer in a zone not given raises
+    namespaces = {**(zone_namespaces or {}), None: platform_namespace, zone: namespace}
 
     def item(name, src, spec):
         return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
@@ -496,12 +591,21 @@ def compile_zone(p, zone, namespace, platform_namespace, node_ips):
                 "spec": spec}
     items = [
         item("default-deny", f"network.zones.{zone}", {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]}),
-        item("dns", f"network.zones.{zone}", {
-            "podSelector": {}, "policyTypes": ["Egress"],
-            "egress": [{"to": [{"namespaceSelector": _ns_selector(DNS_NAMESPACE),
-                                "podSelector": {"matchLabels": dict(DNS_SELECTOR)}}],
-                        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]}]}),
     ]
+    dns_rule = [{"to": [{"namespaceSelector": _ns_selector(DNS_NAMESPACE),
+                         "podSelector": {"matchLabels": dict(DNS_SELECTOR)}}],
+                 "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]}]
+    zone_pods = {n: d for n, d in net["pods"].items() if d.get("zone") == zone}
+    if any("dns" in d for d in zone_pods.values()):
+        # per pod (rs4 R20): only a pod saying `dns: true` resolves names; Jobs with no entry do not
+        for name, pd in zone_pods.items():
+            if pd.get("dns") is True:
+                items.append(item(f"dns-{name}", f"network.pods.{name}.dns", {
+                    "podSelector": {"matchLabels": dict(pd["selector"])}, "policyTypes": ["Egress"],
+                    "egress": dns_rule}))
+    else:
+        items.append(item("dns", f"network.zones.{zone}", {
+            "podSelector": {}, "policyTypes": ["Egress"], "egress": dns_rule}))
     for name, pd in net["pods"].items():
         if pd.get("zone") != zone:
             continue
@@ -521,6 +625,8 @@ def _zone_hop(net, h, zone, namespaces, node_ips):
                "podSelector": {"matchLabels": dict(h["platform"])}}]
     elif "node" in h:
         to = [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted(set(node_ips))]
+    elif "address" in h:
+        to = [{"ipBlock": {"cidr": h["address"]}}]
     elif "internet" in h:
         ex = _internet_except((net.get("zones") or {}).get(zone))
         if ex is None:

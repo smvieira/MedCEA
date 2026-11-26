@@ -1,0 +1,25 @@
+# k8s/research-agents/namespace.yaml — the research sandbox's research-agents zone (research Phase 4a, design rs4 R2).
+# Applied by infra/deploy-research-agents-namespace.sh. Render list: RESEARCH_AGENTS_NAMESPACE
+# The agent machinery: orchestrator, mcp-sim, mcp-lake and the agent, simulation and replay Jobs. The AI workbench's hub has no Role here.
+# Label medcea/zone marks the zone (network policies select namespaces by the automatic
+# kubernetes.io/metadata.name label, never by this one). Pod Security Admission baseline: no
+# hostPath volume, no host namespace, no added capability. The namespace's default ServiceAccount
+# mounts no token; the one pod that needs the API (the orchestrator, in research-agents) names its own.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    medcea/zone: research-agents
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    medcea/zone: research-agents
+automountServiceAccountToken: false

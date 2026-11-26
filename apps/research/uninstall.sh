@@ -46,7 +46,9 @@ RS_RELEASE=research-postgresql
 GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[research]${NC} $*"; }
 
-# The snapshot reader first: it logs in to the database removed below.
+# The agent machinery first (research Phase 4a, R3): its sessions stop before the database goes;
+# then the snapshot reader, which logs in to the database removed below.
+bash "$REPO_ROOT/apps/research-agents/uninstall.sh"
 bash "$REPO_ROOT/apps/lake-api/uninstall.sh"
 
 log "Removing Secrets research-export-writer and research-backup from $NAMESPACE..."

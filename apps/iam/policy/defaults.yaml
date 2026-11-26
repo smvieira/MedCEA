@@ -260,6 +260,30 @@ public_routes:
   - {service: access-public, route: "GET /api/register/roles", why: roles a person may request}
   - {service: access-public, route: "POST /api/register", why: creates a disabled account and a pending request (CORS from the Keycloak origin only)}
   - {service: access-public, route: "OPTIONS /api/register", why: the browser's CORS preflight for the POST above; it carries no credentials and changes nothing}
+  # research sandbox Phase 4a (agent campaigns): routes the services answer without a person's
+  # route-table check. The sign-in relay is the notebooks' device-code sign-in; the rest are
+  # network-gated session-token routes whose token the service itself verifies (/introspect).
+  - {service: research-orchestrator, route: "POST /api/signin/start", why: "device-code relay for research-agent; reachable from the notebooks only"}
+  - {service: research-orchestrator, route: "POST /api/signin/poll", why: "device-code relay; reachable from the notebooks only"}
+  - {service: research-orchestrator, route: "POST /api/signin/refresh", why: "refresh relay; reachable from the notebooks only"}
+  - {service: research-orchestrator-sim, route: "POST /internal/sims", why: "session token checked through research-session; reachable from mcp-sim only"}
+  - {service: research-orchestrator-sim, route: "GET /internal/sims/<cid>", why: "as above"}
+  - {service: research-session-agent, route: "POST /claim", why: "one-time claim, peer-bound; agent Jobs only"}
+  - {service: research-session-agent, route: "POST /trace", why: "session token; the agent's own event kinds only"}
+  - {service: research-session-server, route: "POST /introspect", why: "session tokens; the MCP servers and the orchestrator only"}
+  - {service: research-session-server, route: "POST /trace", why: "session token; the server's own event kinds only"}
+  - {service: research-session-server, route: "GET /events/<sid>", why: "orchestrator and MCP servers read a session's events"}
+  - {service: research-session-server, route: "GET /gates/<gid>", why: "gate state, read from the recorded decisions"}
+  - {service: research-session-server, route: "GET /sessions/<sid>", why: "the session's owner and state, for the orchestrator"}
+  - {service: research-session-server, route: "POST /sessions/<sid>/revoke", why: "the orchestrator stops a session"}
+  - {service: research-session-server, route: "POST /signin/start", why: "the orchestrator relays the device-code sign-in"}
+  - {service: research-session-server, route: "POST /signin/poll", why: "as above"}
+  - {service: research-session-server, route: "POST /signin/refresh", why: "as above"}
+  - {service: research-session-server, route: "PUT /claims/<sid>/expect", why: "the orchestrator registers the Job's expected peer"}
+  - {service: research-session-server, route: "POST /claims/<sid>/expect", why: "as above"}
+  - {service: mcp-sim, route: "POST /mcp", why: "MCP, session token checked on every tools/call through /introspect"}
+  - {service: mcp-lake, route: "POST /mcp", why: "MCP, session token checked on every tools/call through /introspect"}
+  - {service: model-gateway, route: "POST /v1/turn", why: "one model turn for an agent Job; the session token is checked through research-session /introspect (research Phase 4b)"}
 
 # ── Network ──────────────────────────────────────────────────────────────────────────
 # Who may open a connection to each application pod (IAM plan 1.4). compiler/netpol.py
@@ -325,6 +349,10 @@ network:
       # address); ipBlock 0.0.0.0/0 is IPv4 only, so nothing reaches IPv6 (owner decision of
       # 19 Nov 2026: the list is policy, changed only by a skeleton version)
       internet_except: [10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16]
+    # research Phase 4a (design rs4 R2): the agent machinery and the session key and trace
+    # writer each have a namespace the notebook hub cannot create pods in
+    research-agents: {}
+    research-gw: {}
   pods:
     scheduler:
       selector: {app: scheduler}
@@ -385,7 +413,7 @@ network:
       selector: {app.kubernetes.io/instance: research-postgresql, app.kubernetes.io/name: postgresql}
       carries: {}
       ingress:
-        - {port: 5432, from: ["client:research-export", "client:backup", "pod:lake-api", node], why: "the nightly exporter (rs_export_writer), the nightly backup (rs_backup, pg_read_all_data), the snapshot reader (rs_lake_api, research sandbox Phase 2b), kubelet probes and the host's psql (reserve.sh runs inside the pod)"}
+        - {port: 5432, from: ["client:research-export", "client:backup", "pod:lake-api", "pod:research-session", node], why: "the nightly exporter (rs_export_writer), the nightly backup (rs_backup, pg_read_all_data), the snapshot reader (rs_lake_api, research sandbox Phase 2b), research-session (rs_session, the agent trace; Phase 4a), kubelet probes and the host's psql (reserve.sh runs inside the pod)"}
     # research sandbox Phase 2b (owner decisions of 19 Nov 2026): the AI workbench runs in the
     # research zone (helm release workbench in RESEARCH_NAMESPACE, the chart's own
     # NetworkPolicies off; infra/deploy-workbench.sh places it where `hub` says). Its notebooks
@@ -421,6 +449,7 @@ network:
       egress:
         - {pod: hub, port: 8081, why: "the hub API (activity, auth)"}
         - {pod: lake-api, port: 3000, why: "the snapshot reader"}
+        - {pod: research-orchestrator, port: 8090, why: "the medcea-agent CLI starts and watches agent sessions (person token)"}
         - {internet: true, ports: [443], why: "pip, GitHub over https, the code-server download"}
     lake-api:
       # apps/lake-api: PostgREST over the research database's schema lake_api (read
@@ -430,9 +459,95 @@ network:
       selector: {app: lake-api}
       carries: {}
       ingress:
-        - {port: 3000, from: ["pod:notebooks", node], why: "notebooks; kubelet probe and health rslake from the host"}
+        - {port: 3000, from: ["pod:notebooks", "pod:mcp-lake", node], why: "notebooks and the agent campaigns' lake tool (mcp-lake); kubelet probe and health rslake from the host"}
       egress:
         - {pod: research-postgresql, port: 5432, why: "rs_lake_api"}
+    # ── research Phase 4a: agent campaigns (design rs4 §6.1 with R2, R8, R12, R20, R21) ──────────
+    # Supervised AI agent sessions. The orchestrator, the two MCP servers and the agent Jobs are
+    # in the research-agents zone, the session service (token key, trace writer) in research-gw.
+    # No token port admits `node`: probes are exec probes. A pod saying `dns: true` may resolve
+    # names; sim, estimate and replay Jobs have no entry here and so no network at all.
+    research-orchestrator:
+      zone: research-agents
+      selector: {app: research-orchestrator}
+      carries: {research-orchestrator: 8090, research-orchestrator-sim: 8091}
+      token_clients: [{client: research-agent, audience: medcea-research}]
+      dns: true
+      ingress:
+        - {port: 8090, from: ["pod:notebooks"], why: "the medcea-agent CLI, with the person's research-agent token"}
+        - {port: 8091, from: ["pod:mcp-sim"], why: "simulation requests carrying a session token (network-gated, no person)"}
+      egress:
+        - {pod: research-session, port: 8100, why: "mint, revoke, gate and proposal decisions (person token forwarded)"}
+        - {pod: research-session, port: 8102, why: "events, gate state, introspect, revoke and the sign-in relay"}
+        - {node: true, port: 16443, why: "the Kubernetes API (Jobs); Calico matches after DNAT of the kubernetes Service"}
+    research-session:
+      zone: research-gw
+      selector: {app: research-session}
+      carries: {research-session: 8100, research-session-agent: 8101, research-session-server: 8102}
+      token_clients: [{client: research-agent, audience: medcea-research}]
+      dns: true
+      ingress:
+        - {port: 8100, from: ["pod:research-orchestrator"], why: "person routes forwarded by the orchestrator"}
+        - {port: 8101, from: ["pod:agent"], why: "claim and trace append from the agent Job"}
+        - {port: 8102, from: ["pod:research-orchestrator", "pod:mcp-sim", "pod:mcp-lake", "pod:model-gateway"], why: "introspect, events, gates, trace from the servers and the model gateway"}
+      egress:
+        - {pod: research-postgresql, port: 5432, why: "rs_session: the agent_trace writer"}
+        - {platform: {app: keycloak}, port: 8080, why: "the device-code sign-in and refresh relay for research-agent"}
+    mcp-sim:
+      zone: research-agents
+      selector: {app: mcp-sim}
+      carries: {mcp-sim: 8110}
+      dns: true
+      ingress:
+        - {port: 8110, from: ["pod:agent"], why: "agent tool calls"}
+      egress:
+        - {pod: research-orchestrator, port: 8091, why: "start a simulation Job"}
+        - {pod: research-session, port: 8102, why: "introspect, trace, gate state"}
+    mcp-lake:
+      zone: research-agents
+      selector: {app: mcp-lake}
+      carries: {mcp-lake: 8111}
+      dns: true
+      ingress:
+        - {port: 8111, from: ["pod:agent"], why: "agent tool calls"}
+      egress:
+        - {pod: lake-api, port: 3000, why: "the snapshot reader"}
+        - {pod: research-session, port: 8102, why: "introspect, trace"}
+    agent:
+      # Job agent-<sid>: listens on nothing (egress-only). It resolves the Service names the
+      # orchestrator hands it; the residual DNS risk is recorded in the manual (rs4 R20).
+      zone: research-agents
+      selector: {app: agent}
+      carries: {}
+      dns: true
+      egress:
+        - {pod: mcp-sim, port: 8110, why: "tools"}
+        - {pod: mcp-lake, port: 8111, why: "tools"}
+        - {pod: research-session, port: 8101, why: "claim exchange and trace"}
+        - {pod: model-gateway, port: 8120, why: "a turn of the local model (research Phase 4b)"}
+    model-gateway:
+      # research Phase 4b: the one place the local model is reached from a session. It introspects
+      # and traces on research-session's SERVER port (8102), and talks to research-llm only.
+      zone: research-gw
+      selector: {app: model-gateway}
+      carries: {model-gateway: 8120}
+      dns: true
+      ingress:
+        - {port: 8120, from: ["pod:agent", node], why: "an agent Job's turn request; the host's health probe"}
+      egress:
+        - {pod: research-llm, port: 8080, why: "the llama.cpp server"}
+        - {pod: research-session, port: 8102, why: "introspect and trace (server port)"}
+        # research Phase 4d (owner decision of 25 Nov 2026): the private model endpoint "gpu", a vLLM server
+        # (Qwen3-14B-AWQ) on the owner's tailnet. Its URL, model and key are config.env's
+        # (RESEARCH_ENDPOINT_GPU_*); only the address the firewall admits is written here, and a change of it is a
+        # skeleton version.
+        - {address: "100.71.228.99/32", port: 8000, why: "the private model endpoint gpu (vLLM, tailnet)"}
+    research-llm:
+      zone: research-gw
+      selector: {app: research-llm}
+      carries: {}
+      ingress:
+        - {port: 8080, from: ["pod:model-gateway", node], why: "the gateway; health rsllm curls the pod IP from the host"}
   clients:
     # notebooks (IAM 3.2b: notebooks read config-api with the person's own token on the
     # public client workbench-notebook) is gone with research sandbox Phase 2b (decision D2):
@@ -1479,6 +1594,33 @@ resource_groups:
         sign-in: someone who loses it keeps an open pgAdmin session until it ends or pgAdmin
         restarts. Inside, it connects with the administrator's own database login.
 
+  research_campaigns:
+    label: Agent campaigns (research sandbox)
+    class: config
+    zone: research
+    description: Supervised AI agent sessions that run simulation campaigns and propose controller parameter sets.
+    why_this_class: Research environment, outside the production record; proposals reach production only through a later gateway, as drafts.
+    risk: >
+      A session runs a scripted or LLM-driven agent that can only call the simulation and
+      snapshot tools its profile names; its output is a proposal, never an operational
+      change. Every model turn and tool call is recorded in the research database's agent
+      trace under the supervising scientist's identity, and every R holder (engineer
+      included) sees every session's prompts and tool calls. The agent's own token is a
+      short-lived session token bound to one pod and one profile, never a person's token;
+      the person's research-agent token (audience medcea-research, never medcea-api) opens
+      only these routes. The session key and the trace writer sit in their own namespace,
+      which only the agent machinery and the key holder's own pods can reach. A pod the
+      notebook hub could create in the research namespace reaches none of them.
+    members:
+      - {type: api, service: research-orchestrator, routes: {
+          "GET /api/sessions": R, "GET /api/sessions/<sid>": R, "GET /api/sessions/<sid>/events": R,
+          "POST /api/sessions/<sid>/replay": R, "POST /api/sessions": C,
+          "POST /api/sessions/<sid>/stop": U, "POST /api/sessions/<sid>/gates/<gid>": U,
+          "POST /api/sessions/<sid>/proposals/<pid>": U}}
+      - {type: api, service: research-session, routes: {
+          "POST /mint": C, "POST /revoke": U, "POST /sessions/<sid>/gates/<gid>": U,
+          "POST /sessions/<sid>/proposals/<pid>": U}}
+
 # Identities that sit outside the matrix on purpose. In the prototype the admin person also
 # operates the host, so their host access reaches every one of these: that is stated here,
 # not hidden, and every use is logged. Separating the host operator from the admin role is
@@ -1644,6 +1786,13 @@ matrix:
     bio_scientist: [R, C, U]
     control_scientist: [R, C, U]
     admin: [K]
+  # research_campaigns (Phase 4a, owner decision OD8): the scientists run sessions, the
+  # engineer reads them; qa, auditor and admin hold nothing (I18, I19; a session's decisions
+  # are the supervising scientist's, never an approver's)
+  research_campaigns:
+    bio_scientist: [R, C, U]
+    control_scientist: [R, C, U]
+    engineer: [R]
   platform_admin:
     admin: [K, D]
 

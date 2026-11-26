@@ -1,0 +1,31 @@
+# k8s/research-agents/quota.yaml — what the research-agents namespace may hold (research Phase 4a, OD11/R19).
+# Applied by infra/deploy-research-agents-namespace.sh. Render list: RESEARCH_AGENTS_NAMESPACE
+#
+#   what                               cpu req   mem req   mem limit   PVCs  storage
+#   research-orchestrator              100m      128Mi     256Mi       -     -
+#   mcp-sim + mcp-lake                 2 x 50m   2 x 64Mi  2 x 256Mi   -     -
+#   agent Jobs, 2 at a time            2 x 100m  2 x 128Mi 2 x 512Mi   -     -
+#   sim Job, 1                         4         2Gi       6Gi         -     -
+#   estimate Job, 1                    250m      512Mi     1Gi         -     -
+#   replay Job, 1                      100m      128Mi     512Mi       -     -
+#   runs PVC + the static wheel PVC    -         -         -           2     11Gi (research-runs 10Gi)
+#   ------------------------------------------------------------------------------------------
+#   sum  4750m                         4750m     3.1Gi     9.3Gi       2     11Gi
+#
+# Rounded up for headroom (a Job pod being replaced counts twice for a moment). Quota refuses a pod
+# that would cross a line ("exceeded quota"); nothing starts and nothing is evicted.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: research-agents-quota
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    medcea/zone: research-agents
+spec:
+  hard:
+    requests.cpu: "5"
+    requests.memory: 4Gi
+    limits.memory: 12Gi
+    pods: "10"
+    persistentvolumeclaims: "4"
+    requests.storage: 12Gi

@@ -698,6 +698,35 @@ class LibAge(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class LibRsChainHead(unittest.TestCase):
+    """backup_rs_chain_head: the research agent_trace head with its database identity (4a, R11)."""
+
+    def head(self, line):
+        d = tempfile.mkdtemp()
+        try:
+            write(os.path.join(d, "MANIFEST"), "# MedCEA backup x\n" + (line + "\n" if line is not None else "") + "# bytes\n")
+            r = lib(f'backup_rs_chain_head "{d}"')
+            return r.returncode, r.stdout.strip()
+        finally:
+            shutil.rmtree(d)
+
+    def test_lines(self):
+        h = "cd" * 32
+        self.assertEqual(self.head(f"# agent_trace chain head (read before the dump): 9 {h} db=7710681915517299039/16384"),
+                         (0, f"head 9 {h} 7710681915517299039/16384"))
+        self.assertEqual(self.head("# agent_trace chain head: unavailable (agent_trace.event is empty)"),
+                         (0, "unavailable (agent_trace.event is empty)"))
+        self.assertEqual(self.head(None), (0, "none"))
+        for bad in (f"# agent_trace chain head (read before the dump): 9 {h}",
+                    f"# agent_trace chain head (read before the dump): 9 {h} db=1/2; rm"):
+            self.assertEqual(self.head(bad), (0, "unavailable (an unexpected agent_trace chain head line in MANIFEST)"))
+
+    def test_the_job_reads_it_before_the_dump(self):
+        t = read("apps/backup/backup-job.sh")
+        self.assertLess(t.index('_rhead="$(research_chain_head)"'), t.index('say "pg_dump $RESEARCH_DB ('))
+        self.assertIn('RESEARCH_AGENTS_NAMESPACE', read("apps/backup/k8s/backup-cronjob.yaml"))
+
+
 class LibChainHead(unittest.TestCase):
     """backup_chain_head: what health-check iamanchor reads from a MANIFEST (Phase 5, G12)."""
 

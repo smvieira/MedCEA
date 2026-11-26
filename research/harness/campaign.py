@@ -26,7 +26,7 @@ when a scenario has a pin, `provenance` (what each pin applied). spec.json besid
 the resolved spec: the exact bytes spec_digest hashes.
 
 CPU budget: before anything runs, one short calibration run per (scenario, controller
-code) (the scenario cut to CALIBRATION_H) measures CPU seconds (with child processes:
+code) (the scenario cut to CALIBRATION_H, repeated until it has used CALIBRATION_MIN_CPU_S) measures CPU seconds (with child processes:
 GEKKO's solver) per simulated hour (a scenario's sensors set its message rate, so each is
 measured); the estimate is the sum over runs of its (scenario, code) rate x its duration. A campaign over
 --max-cpu-hours (default 4) is refused, nothing written. Pool size: --jobs, never above
@@ -50,6 +50,8 @@ import yaml
 from . import algorithms_loader, metrics, pins, runner
 
 CALIBRATION_H = 0.05           # 3 simulated minutes per controller code
+CALIBRATION_MIN_CPU_S = 0.5    # repeat the slice until it has used this much CPU (50 clock ticks)
+CALIBRATION_MAX_REPS = 200     # ... or this many times
 DEFAULT_MAX_CPU_HOURS = 4.0
 SPEC_KEYS = {"scenarios", "controllers", "seeds", "clock_offsets_s", "jitter_s", "description"}
 
@@ -189,10 +191,22 @@ def calibrate(spec, loaded):
             if key in rates:
                 continue
             loaded.check(c["code"], c["params"])
-            t0 = cpu_seconds()
+            # os.times() counts in clock ticks (10 ms): one slice costs a tick or two, so a single
+            # measurement was off by up to 2x (E48, 23 Nov 2026: 6.0 and 3.0 CPU-hours for one campaign).
+            # The slice is repeated until it has used CALIBRATION_MIN_CPU_S, at most CALIBRATION_MAX_REPS times.
+            # one untimed run first: a fresh process's first slice is slower (imports, caches), which made two
+            # processes estimate the same campaign 25 % apart
             runner.run_scenario(copy.deepcopy(sc), {"code": c["code"], "params": c["params"]},
                                 spec["seeds"][0], spec["clock_offsets_s"][0], spec["jitter_s"], loaded=loaded)
-            rates[key] = (cpu_seconds() - t0) / sc["duration_h"]
+            t0, reps = cpu_seconds(), 0
+            while True:
+                runner.run_scenario(copy.deepcopy(sc), {"code": c["code"], "params": c["params"]},
+                                    spec["seeds"][0], spec["clock_offsets_s"][0], spec["jitter_s"], loaded=loaded)
+                reps += 1
+                spent = cpu_seconds() - t0
+                if spent >= CALIBRATION_MIN_CPU_S or reps >= CALIBRATION_MAX_REPS:
+                    break
+            rates[key] = spent / (reps * sc["duration_h"])
     return rates
 
 

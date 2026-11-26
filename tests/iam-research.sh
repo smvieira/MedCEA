@@ -183,6 +183,6 @@ if [[ $FAILS -eq 0 ]]; then
     echo -e "${GREEN}${BOLD}A notebook reaches the snapshot reader and the internet on 443, nothing of the platform.${NC}"
 else
     echo -e "${RED}${BOLD}${FAILS} check(s) failed.${NC}  The zone's policies: ./health-check.sh (Research network policies),"
-    echo "python3 apps/iam/compiler/cli.py compile netpol --zone research --namespace $RNS --platform-namespace $NS"
+    echo "python3 apps/iam/compiler/cli.py compile netpol --zone research --namespace $RNS --platform-namespace $NS (plus --zone-namespace for each other research zone: zone_other_args research)"
     exit 1
 fi

@@ -409,7 +409,7 @@ class PolicyTest(unittest.TestCase):
     def test_counts(self):
         p = self.policy
         self.assertEqual(len(p.roles), 11)
-        self.assertEqual(len(p.groups), 29)        # policy_page (IAM 4.1), analysis (Superset stage C), research_export (research sandbox 2a)
+        self.assertEqual(len(p.groups), 30)        # policy_page (IAM 4.1), analysis (Superset stage C), research_export (research sandbox 2a), research_campaigns (research Phase 4a)
 
     def test_mutations_are_caught(self):
         for name, (mutate, expected) in MUTATIONS.items():

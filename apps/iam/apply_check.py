@@ -112,7 +112,7 @@ IAM 4.5 (design §14.8: apply.sh <N>, --rollback-to K, --audit N):
         §14.8.7 step 3 and the bound (OA-c): K is a rollback target and today's skeleton with
         its rows grants no role more than the skeleton it was approved under
   rollback-diff --state S --stage DIR    the rollback's diff against the applied version
-  verify-conf --out F [--drop T]   step 9's conf (ten checks)
+  verify-conf --out F [--drop T]   step 9's conf (twelve checks)
   classify-sql [--without-iam]     health-check iamgrants' tail after the verify SQL (Phase 5,
         G4): the assertion set that ran, and under IAM_DB_ROLES=false I15's classification as a
         read-only query (a WARN there); never part of a compiled target or a bundle
@@ -181,8 +181,16 @@ NETPOL_ARGS = ["--namespace", "medcea", "--node-ip", "192.0.2.1"]   # a fixed pl
 # Targets that exist only while the policy has a zone (research sandbox Phase 2a): a policy
 # without network.zones.research compiles, digests and rolls out exactly what it did before,
 # so every version applied before audits as recorded (the Superset F3 pattern).
-ZONE_TARGETS = {"research": "netpol-research"}
-ZONE_TARGET_OWNER = {"netpol-research": "./infra/deploy-research-namespace.sh --policy-only"}
+# research Phase 4a (stage 6b1, design rs4 R2): the same for the agent machinery's two zones, each with its own
+# namespace script; their compile carries the other zones' namespaces (--zone-namespace), like
+# infra/lib-policy-tools.sh zone_netpol_args, with the same fixed placeholders on both sides.
+ZONE_TARGETS = {"research": "netpol-research", "research-gw": "netpol-research-gw",
+                "research-agents": "netpol-research-agents"}
+ZONE_TARGET_OWNER = {"netpol-research": "./infra/deploy-research-namespace.sh --policy-only",
+                     "netpol-research-gw": "./infra/deploy-research-gw-namespace.sh --policy-only",
+                     "netpol-research-agents": "./infra/deploy-research-agents-namespace.sh --policy-only"}
+ZONE_PLACEHOLDER_NS = {"research": "medcea-research", "research-gw": "medcea-research-gw",
+                       "research-agents": "medcea-research-agents"}
 NETPOL_RESEARCH_ARGS = ["--zone", "research", "--namespace", "medcea-research", "--platform-namespace", "medcea",
                         "--node-ip", "192.0.2.1"]
 
@@ -207,6 +215,17 @@ def target_owners(zones=None):
     """TARGET_OWNER plus the owners of the zone targets of `zones` (default _policy_zones())."""
     zs = _policy_zones() if zones is None else set(zones)
     return {**TARGET_OWNER, **{t: ZONE_TARGET_OWNER[t] for z, t in ZONE_TARGETS.items() if z in zs}}
+
+
+def netpol_zone_args(zone):
+    """compile netpol's arguments for a new zone (research-gw, research-agents) with placeholder namespaces."""
+    args = ["--zone", zone, "--namespace", ZONE_PLACEHOLDER_NS[zone], "--platform-namespace", "medcea"]
+    for other in ("research", "research-gw", "research-agents"):
+        if other != zone:
+            args += ["--zone-namespace", "%s=%s" % (other, ZONE_PLACEHOLDER_NS[other])]
+    return args + ["--node-ip", "192.0.2.1"]
+
+
 ROUTES_UNCOMPARED = ("source", "applied_version")
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 ACTORS = ("system:apply",)
@@ -775,7 +794,9 @@ VERIFY_CHECKS = (("iamgrants", "$POSTGRES_DB"), ("iamenforce", "$NAMESPACE"), ("
                  ("iamworkbench", "$NAMESPACE"), ("onboardroles", ""), ("pgadminroles", "$NAMESPACE"),
                  ("noderedauth", "$NAMESPACE"), ("iamartefacts", "$NAMESPACE"), ("supersetroles", "$NAMESPACE"),
                  # research sandbox Phase 2b: an apply that re-renders the research zone sees its drift
-                 ("rsnetpol", "$NAMESPACE"))
+                 ("rsnetpol", "$NAMESPACE"),
+                 # research Phase 4a stage 7a: the two agent zones (SKIP while the policy has no such zone)
+                 ("gwnetpol", "$NAMESPACE"), ("ranetpol", "$NAMESPACE"))
 # A scoped command's exit 4 (deferred) drops the check that would FAIL on the old setting
 DEFER_CHECK = {"./apps/edge-wizard/deploy.sh --gate-only": "onboardroles",
                "./apps/superset/deploy.sh --gate-only": "supersetroles",
@@ -1892,7 +1913,15 @@ def targets(p):
     # the research zone's NetworkPolicies (research sandbox Phase 2a) only while the policy
     # has the zone
     if netpol.has_zone(p, "research"):
-        t.append((ZONE_TARGETS["research"], ["compile", "netpol"] + NETPOL_RESEARCH_ARGS))
+        # the research zone's peers in the two agent zones need their namespaces (R1: only while the
+        # policy has those zones, so the argument list of versions 7-9 is passed unchanged)
+        other = [a for z in ("research-gw", "research-agents") if netpol.has_zone(p, z)
+                 for a in ("--zone-namespace", "%s=%s" % (z, ZONE_PLACEHOLDER_NS[z]))]
+        t.append((ZONE_TARGETS["research"], ["compile", "netpol"] + NETPOL_RESEARCH_ARGS[:-2] + other
+                  + NETPOL_RESEARCH_ARGS[-2:]))
+    for zone in ("research-gw", "research-agents"):   # research Phase 4a: only while the policy has the zone
+        if netpol.has_zone(p, zone):
+            t.append((ZONE_TARGETS[zone], ["compile", "netpol"] + netpol_zone_args(zone)))
     t += [(f"proxy-{h}", ["compile", "proxy", h]) for h in p.hosts]
     for iam in ([], ["--without-iam"]):
         tag = "-without-iam" if iam else ""
@@ -2018,7 +2047,9 @@ def digests_of(outs, commit=None, skeleton_digest=None):
                       "jupyterhub_admin": h("jupyterhub-admin"), "node_red": h("node-red"),
                       "edge_wizard": h("edge-wizard"), "pgadmin": h("pgadmin"),
                       **({"superset": h("superset")} if "superset" in outs else {})},
-            **({"netpol_research": h("netpol-research")} if "netpol-research" in outs else {})}
+            **({"netpol_research": h("netpol-research")} if "netpol-research" in outs else {}),
+            **({"netpol_research_gw": h("netpol-research-gw")} if "netpol-research-gw" in outs else {}),
+            **({"netpol_research_agents": h("netpol-research-agents")} if "netpol-research-agents" in outs else {})}
 
 
 def strip_policy_env():

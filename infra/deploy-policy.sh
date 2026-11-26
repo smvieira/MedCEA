@@ -14,6 +14,7 @@
 #   netpol           the application pods' NetworkPolicies
 #   rsnetpol         the research zone's NetworkPolicies (only while RESEARCH_ENABLED is
 #                    true and the applied policy has the zone; Phase 2a)
+#   gwnetpol / ranetpol  the research-gw and research-agents zones' NetworkPolicies, the same way (Phase 4a)
 #   node-red-auth    Node-RED's editor rights (a directory mount: no restart)
 #   grafana          Grafana's role path — on a drift the whole Grafana section
 #   NODE_RED_DOMAIN  Node-RED's gate (helm, no forced restart)
@@ -92,6 +93,12 @@ pa_netpol scoped
 if [[ "${RESEARCH_ENABLED:-false}" == "true" ]]; then
     RESEARCH_NAMESPACE="${RESEARCH_NAMESPACE:-${NAMESPACE}-research}"
     if _pa_rs_zone; then pa_rsnetpol scoped; else _pa_line rsnetpol "not deployed"; fi
+    # research Phase 4a (stage 7a): the gateway and agent zones, the same way (gwnetpol, ranetpol)
+    for _z in research-gw research-agents; do
+        if _pa_zone_has "$_z"; then pa_zonenetpol "$_z" scoped
+        else _pa_line "$([[ $_z == research-gw ]] && echo gwnetpol || echo ranetpol)" "not deployed"; fi
+    done
+    pa_zone_iam_copies scoped
 fi
 pa_node_red_auth scoped
 policy_grafana || { echo -e "${RED}ERROR: cannot compile Grafana's role setting from the access policy (python3 apps/iam/compiler/cli.py check).${NC}" >&2; exit 1; }

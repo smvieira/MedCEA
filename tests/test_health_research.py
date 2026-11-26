@@ -61,7 +61,9 @@ sc = json.load(open(os.path.join(FD, "cli.json")))
 with open(os.path.join(FD, "cli.log"), "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 a = sys.argv[1:]
-if a[:2] == ["has-zone", "research"]:
+if a[:1] == ["has-zone"] and len(a) == 2:
+    if a[1] != "research" and "other_zones" in sc:     # the agent zones (R18, zone_other_args): only those the case lists
+        sys.exit(0 if a[1] in sc["other_zones"] else 1)
     sys.exit(sc.get("has_zone", 1))
 if a[:1] == ["pod-zone"] and len(a) == 2:
     if sc.get("pod_zone_rc"):
@@ -161,9 +163,9 @@ class RsNetpol(unittest.TestCase):
     def tearDownClass(cls):
         cls.t.close()
 
-    def run_check(self, rules, enabled="true", has_zone=0, items=WANT, compile_rc=0, call=None, **env):
+    def run_check(self, rules, enabled="true", has_zone=0, items=WANT, compile_rc=0, call=None, other_zones=(), **env):
         self.t.scenario(rules)
-        self.t.cli(has_zone=has_zone, items=items, compile_rc=compile_rc)
+        self.t.cli(has_zone=has_zone, items=items, compile_rc=compile_rc, other_zones=other_zones)
         if enabled is not None:
             env["RESEARCH_ENABLED"] = enabled
         r = self.t.fn("check_rsnetpol", call or f'check_rsnetpol "{self.NAME}" medcea', helpers=(), **env)
@@ -174,6 +176,12 @@ class RsNetpol(unittest.TestCase):
     def full(self, live, **kw):
         return self.run_check([NS_OK, NODES, rule(r"^get netpol -n medcea-research -o json$",
                                                   live_doc(live))], **kw)
+
+    def test_other_zones_add_their_namespaces_only_when_the_policy_has_them(self):
+        # R18 (stage 7a): the argv is unchanged without the agent zones, gains one pair per zone it has
+        self.full([], other_zones=["research-gw"])
+        self.assertEqual(self.t.cli_calls()[-1][8:10], ["--zone-namespace", "research-gw=medcea-research-gw"])
+        self.assertNotIn("research-agents=medcea-research-agents", self.t.cli_calls()[-1])
 
     def test_no_kubectl_skips(self):
         r = self.run_check([], call=f'KUBECTL=no-such-kubectl-x check_rsnetpol "{self.NAME}" medcea')
@@ -987,6 +995,193 @@ class IamWorkbench(unittest.TestCase):
     def test_research_namespace_from_config(self):
         r = self.run_check("research", self.rules("lab-zone", self.values("research")), RESEARCH_NAMESPACE="lab-zone")
         self.assertTrue(r.startswith(f"OK|{self.NAME}|"), r)
+
+
+HEX = "ab" * 32
+RS_STS = rule(r"^get statefulset research-postgresql -n medcea-research -o name$", "statefulset.apps/research-postgresql\n")
+RS_PSQL = r"^exec -i -n medcea-research research-postgresql-0 -- "
+
+
+class Phase4aChecks(unittest.TestCase):
+    """rschain, rsanchor and rsagent (research Phase 4a, R11): the read-only psql, every branch."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.t = StubTree()
+        os.makedirs(cls.t.path("apps", "backup"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "apps", "backup", "lib-backup.sh"), cls.t.path("apps", "backup", "lib-backup.sh"))
+        os.makedirs(cls.t.path("infra"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "infra", "lib-policy-tools.sh"), cls.t.path("infra", "lib-policy-tools.sh"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.t.close()
+
+    def ro(self):
+        for c in self.t.calls():
+            if c["tool"] != "curl":
+                self.assertIn(c["argv"][0], ("get", "exec", "version"), c)
+
+    def chain(self, out, rc=0, enabled="true"):
+        self.t.scenario([NS_OK, RS_STS, rule(RS_PSQL, out, rc, stdin=r"verify_chain")])
+        self.t.cli(has_zone=0)
+        r = self.t.fn("check_rschain", 'check_rschain "Agent trace chain" medcea',
+                      helpers=("_rs_zone_ns", "_rs_trace_psql", "_rs_trace_ready"), RESEARCH_ENABLED=enabled)
+        self.ro()
+        return r
+
+    def test_rschain(self):
+        self.assertEqual(self.chain("chain|t|12|-\nrecompute|0|0|12\n"),
+                         "OK|Agent trace chain|12 event(s), every hash and link recomputed (verify_chain and an independent pass agree)")
+        self.assertIn("breaks at event 5", self.chain("chain|f|5|5\nrecompute|1|0|12\n"))
+        self.assertTrue(self.chain("chain|t|12|-\nrecompute|2|1|12\n").startswith("FAIL|Agent trace chain|the recomputation finds 2 row(s)"))
+        self.assertTrue(self.chain("nofn\n").startswith("FAIL|"))
+        self.assertTrue(self.chain("notable\n").startswith("SKIP|"))
+        self.assertTrue(self.chain("ERROR: boom\n", rc=1).startswith("WARN|Agent trace chain|cannot read agent_trace"))
+        c = [c for c in self.t.calls() if c["argv"][0] == "exec"]
+        self.assertIn("default_transaction_read_only=on", " ".join(c[0]["argv"]))
+
+    def anchor(self, live, rec_line, hours_ago=3, mid="id"):
+        import tempfile
+        d = tempfile.mkdtemp(dir=self.t.root)
+        os.chmod(d, 0o700)
+        e = int(time.time()) - hours_ago * 3600
+        b = os.path.join(d, time.strftime("%Y%m%d-%H%M%SZ", time.gmtime(e)))
+        os.makedirs(b)
+        with open(os.path.join(b, "MANIFEST"), "w") as f:
+            f.write("# MedCEA backup\n" + (rec_line + "\n" if rec_line else "") + "# bytes\n")
+        with open(os.path.join(b, "OK"), "w") as f:
+            f.write(f"{e} x\n")
+        rules = [NS_OK, RS_STS, rule(RS_PSQL, live[0], 0, stdin=r"'live'")]
+        if len(live) > 1:
+            rules.append(rule(RS_PSQL, live[1], 0, stdin=r"anchor_id"))
+        self.t.scenario(rules)
+        self.t.cli(has_zone=0)
+        r = self.t.fn("check_rsanchor", 'source "%s/apps/backup/lib-backup.sh"\ncheck_rsanchor "Agent trace anchor" medcea' % self.t.root,
+                      helpers=("_rs_zone_ns", "_rs_trace_psql", "_rs_trace_ready"), RESEARCH_ENABLED="true", BACKUP_DIR=d)
+        self.ro()
+        shutil.rmtree(d)
+        return r
+
+    def test_rsanchor(self):
+        line = f"# agent_trace chain head (read before the dump): 9 {HEX} db=77/16384"
+        live = "live|20|77/16384\n"
+        r = self.anchor([live, f"anchor|{HEX}|11\n"], line)
+        self.assertRegex(r, r"^OK\|Agent trace anchor\|event 9 has the hash backup \S+ recorded \(3 h old\), 11 event\(s\) since$")
+        call = [c for c in self.t.calls() if "anchor_id" in c["stdin"]][0]
+        self.assertEqual(call["argv"][-2:], ["-v", "anchor_id=9"])
+        self.assertNotIn(HEX, call["stdin"])
+        self.assertTrue(self.anchor([live, "anchor|-|0\n"], line).startswith("FAIL|Agent trace anchor|event 9, the trace head"))
+        self.assertIn("was rewritten", self.anchor([live, "anchor|" + "cd" * 32 + "|0\n"], line))
+        # another database identity: only a WARN, and the event is not even looked up
+        r = self.anchor(["live|20|78/16384\n"], line)
+        self.assertTrue(r.startswith("WARN|Agent trace anchor|no anchor: backup ") and "predates this database" in r, r)
+        self.assertIn("is 60 h old", self.anchor([live, f"anchor|{HEX}|0\n"], line, hours_ago=60))
+        self.assertIn("records no agent_trace head", self.anchor([live], None))
+        self.assertIn("could not read the agent_trace head", self.anchor([live], "# agent_trace chain head: unavailable (agent_trace.event is empty)"))
+        self.assertTrue(self.anchor(["live|0|77/16384\n"], line).startswith("SKIP|Agent trace anchor|no agent session"))
+
+    def agent(self, healthz, secret_kid="deadbeef", db="anchor|%s\n" % HEX, pods="Running", kid_rc=0):
+        rules = [rule(r"^get deployment research-session -n medcea-research-gw -o name$", "deployment.apps/research-session\n"),
+                 rule(r"^get pods -n medcea-research-agents -l app=", "pod/x\n" if pods == "Running" else ""),
+                 rule(r"^get pods -n medcea-research-gw -l app=research-session ", "10.1.2.3"),
+                 rule(r"^get secret research-session-key -n medcea-research-gw ", secret_kid),
+                 rule(RS_PSQL, db, 0, stdin=r"anchor_id")]
+        self.t.scenario(rules, realm=healthz)
+        self.t.cli(has_zone=0)
+        r = self.t.fn("check_rsagent", 'check_rsagent "Agent sessions" medcea', helpers=("_rs_trace_psql",), RESEARCH_ENABLED="true")
+        self.ro()
+        return r
+
+    def test_rsagent(self):
+        import json as j
+        ok = j.dumps({"ok": True, "kid": "deadbeef", "anchor": {"event_id": 4, "hash": HEX}})
+        self.assertEqual(self.agent(ok), "OK|Agent sessions|research-session and the agents' services run; key deadbeef is the Secret's;live anchor event 4 matches the database")
+        self.assertTrue(self.agent(ok, db="anchor|" + "cd" * 32 + "\n").startswith("FAIL|Agent sessions|the live anchor, event 4, has hash"))
+        self.assertTrue(self.agent(ok, db="anchor|-\n").startswith("FAIL|Agent sessions|the live anchor, event 4, is missing"))
+        self.assertIn("runs key deadbeef, Secret research-session-key says 00112233", self.agent(ok, secret_kid="00112233"))
+        self.assertTrue(self.agent(ok, pods="none").startswith("WARN|Agent sessions|no Running pod of research-orchestrator"))
+        self.assertIn("no event written since", self.agent(j.dumps({"ok": True, "kid": "deadbeef", "anchor": None})))
+        self.assertIn("does not answer /healthz", self.agent(None))
+    def zone(self, call, live_items, want_items, has_zone=0):
+        ns = {"check_gwnetpol": "medcea-research-gw", "check_ranetpol": "medcea-research-agents"}[call]
+        self.t.scenario([rule(rf"^get namespace {ns} -o name$", f"namespace/{ns}\n"),
+                         rule(rf"^get netpol -n {ns} -o json$", live_doc(live_items)), NODES])
+        self.t.cli(has_zone=has_zone, items=want_items)
+        r = self.t.fn("check_zonenetpol", 'check_zonenetpol "Z" medcea '
+                      + ("research-gw" if call == "check_gwnetpol" else "research-agents"),
+                      helpers=(), RESEARCH_ENABLED="true")
+        self.ro()
+        return r
+
+    def test_zone_netpol(self):
+        gw = [dict(np("gw-default-deny", DENY), metadata={"name": "gw-default-deny", "labels": {"medcea/gw-netpol": "true"}})]
+        self.assertTrue(self.zone("check_gwnetpol", gw, gw).startswith("OK|Z|1 research-gw NetworkPolicies, the compiled set"))
+        self.assertIn("missing: gw-default-deny", self.zone("check_gwnetpol", [], gw))
+        foreign = [dict(gw[0], metadata={"name": "allow-all", "labels": {}})]
+        self.assertIn("not the zone's", self.zone("check_gwnetpol", gw + foreign, gw))
+        self.assertTrue(self.zone("check_gwnetpol", gw, gw, has_zone=1).startswith("SKIP|Z|the applied access policy has no research-gw zone"))
+
+    def test_zone_netpol_arguments(self):
+        gw = [dict(np("gw-default-deny", DENY), metadata={"name": "gw-default-deny", "labels": {"medcea/gw-netpol": "true"}})]
+        self.zone("check_gwnetpol", gw, gw)
+        a = [a for a in self.t.cli_calls() if a[:2] == ["compile", "netpol"]][0]
+        for want in ("--zone", "research-gw", "--zone-namespace", "research=medcea-research", "research-agents=medcea-research-agents"):
+            self.assertIn(want, a)
+    def grants(self, agents_items, gw_items=()):
+        get = lambda ns: r"^get pods,deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,roles,rolebindings,services -n %s -o json$" % ns
+        self.t.scenario([NS_OK, zone(ZONE_OK),
+                         rule(r"^get namespace medcea-research-gw -o name$", "namespace/medcea-research-gw\n"),
+                         rule(r"^get namespace medcea-research-agents -o name$", "namespace/medcea-research-agents\n"),
+                         rule(get("medcea-research-gw"), json.dumps({"kind": "List", "items": list(gw_items)})),
+                         rule(get("medcea-research-agents"), json.dumps({"kind": "List", "items": list(agents_items)})),
+                         PG_SS, assert_rule()])
+        self.t.cli(has_zone=0)
+        r = self.t.fn("check_rsgrants", 'check_rsgrants "G" medcea', helpers=("_rs_zone_ns", "_rs_assert_grants"), RESEARCH_ENABLED="true")
+        self.ro()
+        return r
+
+    def test_rsgrants_scans_the_new_namespaces(self):
+        L = {"app": "research-orchestrator"}
+        orch = [pod("research-orchestrator", L, {"containers": [{"name": "o"}], "serviceAccountName": "research-orchestrator"},
+                    kind="Deployment", uid="u-o"),
+                pod("research-orchestrator-1", L, {"containers": [{"name": "o"}], "serviceAccountName": "research-orchestrator"},
+                    kind="ReplicaSet", uid="u-ors", owner=("Deployment", "research-orchestrator", "u-o")),
+                pod("research-orchestrator-1-x", L, {"containers": [{"name": "o"}], "serviceAccountName": "research-orchestrator"},
+                    owner=("ReplicaSet", "research-orchestrator-1", "u-ors"))]
+        sess = [pod("research-session", {"app": "research-session"}, {"containers": [{"name": "s"}], "volumes": [
+                    {"name": "k", "secret": {"secretName": "research-session-key"}}, {"name": "d", "secret": {"secretName": "research-session-db"}}]},
+                    kind="Deployment", uid="u-s")]
+        r = self.grants(orch, sess)
+        self.assertTrue(r.startswith("OK|G|") and "medcea-research-gw medcea-research-agents" in r, r)
+        # a Secret in the agents namespace, a pod made by hand with the orchestrator ServiceAccount, one with a mcp label
+        leak = [pod("mcp-sim", {"app": "mcp-sim"}, env_secret("research-postgresql-auth"), kind="Deployment", uid="u-m")]
+        r = self.grants(orch + leak)
+        self.assertTrue(r.startswith("FAIL|G|medcea-research-agents: Secrets outside the allow-list: deployment/mcp-sim"), r)
+        hand = [pod("evil", {"app": "mcp-lake"}, {"containers": [{"name": "e"}], "serviceAccountName": "research-orchestrator"})]
+        r = self.grants(hand)
+        self.assertIn("medcea-research-agents: pod(s) using an agent service label or the orchestrator ServiceAccount", r)
+        self.assertIn("evil", r)
+        r = self.grants([], [pod("research-session", {"app": "research-session"}, env_secret("research-postgresql-auth"), kind="Deployment", uid="u-s")])
+        self.assertIn("medcea-research-gw: Secrets outside the allow-list: deployment/research-session", r)
+
+
+class Phase4aWiring(unittest.TestCase):
+    def test_conf_dispatch_help_read_only(self):
+        with open(os.path.join(REPO, "health-checks.conf")) as f:
+            lines = [l for l in f.read().splitlines() if l.strip() and not l.startswith("#")]
+        types = [l.split("|")[1].strip() for l in lines]
+        i = types.index("rslake")
+        self.assertEqual(types[i + 1:i + 6], ["gwnetpol", "ranetpol", "rschain", "rsanchor", "rsagent"])
+        self.assertEqual(len(types), 77)
+        with open(os.path.join(REPO, "health-check.sh")) as f:
+            src = f.read()
+        for t in ("gwnetpol", "ranetpol", "rschain", "rsanchor", "rsagent"):
+            self.assertRegex(src, r"(?m)^        %s\)\s+check_%s \"\$name\" \"\$target\" ;;$" % (t, t))
+            self.assertIn("${CYAN}%s${NC}" % t, src)
+        for fn in ("check_zonenetpol", "check_rschain", "check_rsanchor", "check_rsagent", "_rs_trace_psql", "_rs_trace_ready"):
+            self.assertNotRegex(h5.body(fn, src), r"\$KUBECTL (apply|delete|create|patch|edit|set|scale|rollout|label)\b", fn)
+        self.assertIn("default_transaction_read_only=on", h5.body("_rs_trace_psql", src))
 
 
 class Wiring(unittest.TestCase):

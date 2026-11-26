@@ -172,6 +172,13 @@
 #      folder starting with - re-asked); fit-sensors with the dataset, the name (default
 #      unit01-zone01-s1) and the output checked and --humidity-model self_heating on a yes;
 #      real: the wrapper runs without the guide's lock
+#  76  Applications → Benchmark the local model (research Phase 4b step 0): the plan (read-only,
+#      [Y/n], no lock), the bench with the models asked (a bad list re-asked), [y/N], the
+#      refusals named (the pessimistic cap, a run starting, Ctrl-C deleting the Job);
+#      cleanup; real: the report runs without the guide's lock
+#
+#  78  Applications → the local model (research Phase 4b stage 1): install ([y/N]) and uninstall
+#      (the typed word yes), dry; RESEARCH_LOCAL_MODEL enable (set, deploy, health) and rollback
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -1196,7 +1203,7 @@ has   "--change (dry)" "[dry run] not executed: tests/iam-policy.sh --change"
 has   "five accounts" "5 throwaway accounts"
 has   "--apply leaves its version applied" "it becomes the applied version"
 has   "--change rolls back in its trap" "rolls it back and has the rollback confirmed"
-has   "the precondition" "Refused (exit 2) while one of the ten checks"
+has   "the precondition" "Refused (exit 2) while one of the twelve checks"
 [[ "$(grep -c 'Run it? \[y/N\]' <<<"$OUT")" == 2 ]] && pass "two [y/N], b goes back without a plan" || fail "b planned something"
 no_stub
 real $'6\n17\n3\ny\nq\n'
@@ -1706,6 +1713,78 @@ real $'3\n18\n1\n\nq\n'
 rc_is "real: quits with 0" 0
 has   "real: the wrapper ran" "STUB apps/research/calibrate.sh snapshots"
 [[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: without the guide's lock" || fail "real: ran under the guide's lock"
+
+echo "76 the local model's bench (Applications, research Phase 4b step 0)"
+mkcfg true true
+guide $'3\n19\n1\n\nb\n19\n3\n7b\n8b\ny\nb\n19\n6\ny\nq\n'
+rc_is "quits with 0" 0
+has   "plan (dry)" "[dry run] not executed: ./apps/research-model/bench.sh plan"
+has   "plan is read-only: [Y/n]" "Run it? [Y/n]"
+has   "a bad model list is re-asked" "'7b': 8b, 4b or 8b,4b"
+has   "bench (dry), one model" "[dry run] not executed: ./apps/research-model/bench.sh bench --models 8b"
+has   "bench is a change ([y/N])" "Run it? [y/N]"
+has   "the R/S refusal named" "Refused while a recipe run is R or S"
+has   "the cap named" "when the pessimistic runtime is above --max-hours"
+has   "a run that starts stops it" "a run that starts stops the Job"
+has   "Ctrl-C deletes the Job" "it deletes the Job before it exits"
+has   "cleanup (dry)" "[dry run] not executed: ./apps/research-model/bench.sh cleanup"
+has   "cleanup keeps the models" "never the model folder"
+no_stub
+real $'3\n19\n5\ny\nq\n'
+rc_is "real: quits with 0" 0
+has   "real: the report ran" "STUB apps/research-model/bench.sh report"
+[[ "$(grep -c '^LOCK_HELD=$' <<<"$OUT")" == 1 ]] && pass "real: without the guide's lock" || fail "real: ran under the guide's lock"
+
+echo "77 the research agent machinery (Infrastructure, Applications; research Phase 4a)"
+mkcfg true true
+guide $'2\n13\ny\nq\n'
+rc_is "zones: quits with 0" 0
+has   "zones: both scripts chained (dry)" "[dry run] not executed: ./infra/deploy-research-gw-namespace.sh && ./infra/deploy-research-agents-namespace.sh"
+has   "zones: the skip explained" "Each script skips (one line, exit 0) while RESEARCH_ENABLED is not true"
+no_stub
+guide $'3\n20\ny\nb\n21\nn\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "deploy (dry)" "[dry run] not executed: ./apps/research-agents/deploy.sh"
+has   "deploy is a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true"
+has   "no agent starts by itself" "No agent starts by itself"
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/research-agents/uninstall.sh"
+has   "uninstall: the data is kept" "keeps the research-runs volume and every recorded session"
+hasnt "uninstall: no --purge-data unasked" "uninstall.sh --purge-data"
+no_stub
+guide $'3\n21\ny\nyes\nmedcea\nq\n'
+has   "purge: the name runs it (dry)" "[dry run] not executed: ./apps/research-agents/uninstall.sh --purge-data"
+has   "purge: says what goes" "DELETES the research-runs volume"
+no_stub
+real $'2\n13\ny\nb\nb\n3\n20\ny\nq\n'
+has   "real: both zone scripts ran" "STUB infra/deploy-research-agents-namespace.sh"
+has   "real: the deploy ran" "STUB apps/research-agents/deploy.sh"
+
+echo "78 the local model (Applications, research Phase 4b stage 1)"
+mkcfg true true
+guide $'3\n22\ny\nb\n23\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "deploy (dry)" "[dry run] not executed: ./apps/research-model/deploy.sh"
+has   "deploy is a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "Skipped (exit 0, nothing installed) while RESEARCH_ENABLED or RESEARCH_LOCAL_MODEL is not true"
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/research-model/uninstall.sh"
+has   "uninstall: the model file is kept" "the model file in RESEARCH_MODEL_DIR is kept"
+no_stub
+sed -i 's/^RESEARCH_LOCAL_MODEL=.*/RESEARCH_LOCAL_MODEL="false"/' "$T/config.env"
+guide $'3\n24\n1\ny\ny\nq\n'
+rc_is "switch: quits with 0" 0
+has   "switch: the purpose" "RESEARCH_LOCAL_MODEL: The local language model"
+has   "switch: the current value" 'Now: RESEARCH_LOCAL_MODEL="false"'
+has   "switch: step 1 sets it" '1. config.env: RESEARCH_LOCAL_MODEL="true"'
+has   "switch: step 2 deploys it" '2. ./apps/research-model/deploy.sh'
+has   "switch: step 3 is the health check" '3. ./health-check.sh'
+has   "switch: the download is named" "downloads the model (about 2.5 GB"
+no_stub
+guide $'3\n24\n2\ny\nq\n'
+has   "rollback: sets it false" '1. config.env: RESEARCH_LOCAL_MODEL="false"'
+has   "rollback: removes the server" '2. ./apps/research-model/uninstall.sh'
+has   "rollback: the file stays" "the model file stays in RESEARCH_MODEL_DIR"
+no_stub
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false

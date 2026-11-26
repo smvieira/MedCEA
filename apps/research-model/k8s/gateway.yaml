@@ -1,0 +1,101 @@
+# apps/research-model/k8s/gateway.yaml — model-gateway, the one way a session reaches the local model, in
+# research-gw (research Phase 4b stage 2; design rs4 5.3). Rendered by apps/research-model/deploy.sh after
+# research-llm. The code (gateway.py and mcp_common.py) comes from ConfigMap model-gateway-code, so the pod
+# fetches nothing: the image is the pinned python image, stdlib only.
+# Render list: RESEARCH_GW_NAMESPACE GATEWAY_IMAGE MODEL_ALIAS MODEL_SHA256 LLM_CTX GATEWAY_CODE_SHA256 RS_ENDPOINTS GATEWAY_KEYS_VERSION
+# Same conventions as the other research pods: medcea-research-low, no service links, no ServiceAccount token,
+# non-root 65534, read-only root, all capabilities dropped, RuntimeDefault seccomp; its one Secret is
+# model-gateway-keys, the API keys of config.env's endpoints (research Phase 4d; empty without one), mounted at /keys
+# (0440, group 65534); the session token is the caller's, checked at research-session; no internet, ClusterIP Service only; the compiled NetworkPolicy
+# admits the agent pods and the node on 8120 and lets it reach research-llm:8080 and research-session:8102.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-gateway
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: model-gateway
+    app.kubernetes.io/part-of: medcea-research-llm
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: model-gateway
+  template:
+    metadata:
+      labels:
+        app: model-gateway
+        app.kubernetes.io/part-of: medcea-research-llm
+      annotations:
+        medcea/code-sha256: "${GATEWAY_CODE_SHA256}"
+        medcea/model-alias: "${MODEL_ALIAS}"
+        medcea/keys-version: "${GATEWAY_KEYS_VERSION}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: model-gateway
+        image: ${GATEWAY_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/app/gateway.py"]
+        env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - {name: PYTHONPATH, value: /app}
+        - {name: RS_SESSION_SERVER_URL, value: "http://research-session.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8102"}
+        - {name: RS_LLM_URL, value: "http://research-llm.${RESEARCH_GW_NAMESPACE}.svc.cluster.local:8080"}
+        - {name: RS_LLM_TIMEOUT, value: "540"}
+        - {name: RS_GATEWAY_PORT, value: "8120"}
+        - {name: MODEL_ALIAS, value: "${MODEL_ALIAS}"}
+        - {name: MODEL_SHA256, value: "${MODEL_SHA256}"}
+        - {name: LLM_CTX, value: "${LLM_CTX}"}
+        - {name: RS_ENDPOINTS, value: "${RS_ENDPOINTS}"}
+        - {name: RS_ENDPOINTS_FILE, value: /app/endpoints.json}
+        ports:
+        - {name: http, containerPort: 8120, protocol: TCP}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        readinessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8120/healthz', timeout=3).status == 200 else 1)"]
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        volumeMounts:
+        - {name: code, mountPath: /app, readOnly: true}
+        - {name: keys, mountPath: /keys, readOnly: true}
+      volumes:
+      - name: code
+        configMap: {name: model-gateway-code}
+      - name: keys
+        secret: {secretName: model-gateway-keys, defaultMode: 0440, optional: true}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-gateway
+  namespace: ${RESEARCH_GW_NAMESPACE}
+  labels:
+    app: model-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: model-gateway
+  ports:
+  - {name: http, port: 8120, targetPort: 8120, protocol: TCP}

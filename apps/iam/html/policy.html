@@ -36,6 +36,10 @@ main { padding: 16px; }
 .view[hidden] { display: none; }
 .bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
 select, textarea, input[type=text] { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+#waiting ul { list-style: none; margin: 0; padding: 0; }
+#waiting li { margin: 4px 0; }
+#waiting button.item { font: inherit; background: none; border: 0; color: var(--link); cursor: pointer; text-align: left; padding: 0; }
+#waiting code { font-family: var(--mono); background: var(--bg); border: 1px solid var(--line); padding: 1px 4px; border-radius: 3px; user-select: all; }
 .note { background: var(--panel); border-left: 4px solid var(--accent-2); padding: 8px 12px; margin: 8px 0 12px; }
 .error { background: var(--red-bg); color: var(--red); border-left: 4px solid var(--red); padding: 8px 12px; margin: 8px 0; }
 .ok { background: var(--ok-bg); color: var(--ok); border-left: 4px solid var(--ok); padding: 8px 12px; margin: 8px 0; }
@@ -99,6 +103,7 @@ details pre { white-space: pre-wrap; font: 12px var(--mono); margin: 4px 0; }
 </nav>
 <main>
   <div id="msg"></div>
+  <div class="note" id="waiting" hidden aria-live="polite"></div>
 
   <section class="view" id="view-matrix" hidden>
     <div class="bar">
@@ -439,6 +444,43 @@ function rollbackTarget(v, versions) {
   const k = (versions || []).find(x => x.version === v.rollback_of);
   return { version: v.rollback_of, reason: k ? k.reason : null };
 }
+
+// ── What the policy process waits for from this person (the "Waiting for you" panel) ──
+// Items {kind, version, text, tab?, command?}. Applying is a host command by design: it holds
+// the deploy lock and rolls out across the cluster, so the page shows the command, never runs it.
+function waitingFor(me, policy) {
+  const out = [];
+  if (!me || !policy) return out;
+  const can = me.can || {}, acts = me.acts || {};
+  const vs = policy.versions || [];
+  const user = me.user || '<your username>';
+  const open = v => v.status === 'draft' || v.status === 'submitted' || v.status === 'approved';
+  for (const v of vs.filter(open)) {
+    if (v.status === 'draft' && (acts.submit || acts.edit) && (v.kind === 'change' || v.kind === 'skeleton')) {
+      if (v.returned_at) out.push({ kind: 'returned', version: v.version, tab: 'changes',
+        text: `Version ${v.version} was returned: edit it and submit it again, or withdraw it.` });
+      else out.push({ kind: 'draft', version: v.version, tab: 'changes',
+        text: `Version ${v.version} is a draft: submit it for qa's approval.` });
+    }
+    if (v.status === 'submitted' && can.approval) {
+      const w = v.why_not || {};
+      if (w.may_approve === true || (!w.why_not_code && w.may_approve !== false))
+        out.push({ kind: 'approve', version: v.version, tab: 'approval', text: `Version ${v.version} waits for your approval.` });
+      else out.push({ kind: 'approve-other', version: v.version, tab: 'approval',
+        text: `Version ${v.version} waits for another qa person's approval (you: ${whyNotText(w.why_not_code)}).` });
+    }
+  }
+  if (can.confirm) for (const v of pendingVersions(vs))
+    out.push({ kind: 'confirm', version: v.version, tab: 'confirm', text: `Confirm version ${v.version}.` });
+  const ap = policy.apply_pending;
+  if (ap && (me.role === 'admin' || me.role === 'qa')) {
+    if (ap.state === 'approved') out.push({ kind: 'apply', version: ap.version,
+      text: `Version ${ap.version} is approved: on the host, run`, command: `./apps/iam/apply.sh ${ap.version} --by ${user}` });
+    else if (ap.state === 'unfinished') out.push({ kind: 'resume', version: ap.version,
+      text: `Version ${ap.version} is not fully applied: on the host, run`, command: `./apps/iam/apply.sh --resume --by ${user}` });
+  }
+  return out;
+}
 /* policy-logic:end */
 
 const $ = id => document.getElementById(id);
@@ -515,6 +557,7 @@ function editing() { const m = metaOf(DOC && DOC.version); return !!(ME.acts && 
 async function refreshVersions() {
   LIST = await api('/api/policy');
   VERSIONS = LIST.versions || [];
+  if (typeof renderWaiting === 'function' && ME) renderWaiting();
   const cur = $('ver').value;
   $('ver').innerHTML = VERSIONS.map(v =>
     `<option value="${v.version}"${(cur ? String(v.version) === cur : v.status === 'applied') ? ' selected' : ''}>${v.version} (${esc(v.kind)}, ${esc(statusText(v))})</option>`).join('');
@@ -910,6 +953,26 @@ async function act(v, verb, body) {
     await loadPending();
     show('ok', `Version ${v} ${verb === 'confirm' ? 'confirmed' : 'disputed'}. It is in the history.`);
   } catch (e) { show('error', friendlyRefusal(e.message)); }
+}
+
+function renderWaiting() {
+  const box = $('waiting');
+  const items = waitingFor(ME, LIST);
+  if (!items.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.innerHTML = '<strong>Waiting for you</strong><ul>' + items.map((it, i) => it.command
+    ? `<li>${esc(it.text)} <code>${esc(it.command)}</code> <button class="btn secondary" data-copy="${i}">Copy</button></li>`
+    : (it.tab && ME.can[it.tab] ? `<li><button class="item" data-go="${i}">${esc(it.text)}</button></li>` : `<li>${esc(it.text)}</li>`)).join('') + '</ul>'
+    + (items.some(it => it.command) ? '<div>Applying is a host command by design: it takes the deploy lock and rolls the change out across the cluster.</div>' : '');
+  box.hidden = false;
+  box.onclick = ev => {
+    const g = ev.target.closest('[data-go]'), c = ev.target.closest('[data-copy]');
+    if (g) { const it = items[+g.dataset.go]; select(it.tab, it.tab === 'approval' ? String(it.version) : undefined); }
+    if (c) {
+      const code = c.parentNode.querySelector('code'), text = items[+c.dataset.copy].command;
+      const fallback = () => { const r = document.createRange(); r.selectNodeContents(code); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); };
+      try { navigator.clipboard.writeText(text).then(() => { c.textContent = 'Copied'; }, fallback); } catch (e) { fallback(); }
+    }
+  };
 }
 
 async function init() {

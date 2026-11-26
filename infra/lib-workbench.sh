@@ -82,8 +82,10 @@ workbench_zone_ready() {
         return 1
     fi
     # the names only: a placeholder node address compiles them (the specs were compared above)
+    local _wo=()
+    mapfile -t _wo < <(SCRIPT_DIR="$REPO_ROOT" RESEARCH_NAMESPACE="$rns" bash -c 'source "$SCRIPT_DIR/infra/lib-policy-tools.sh"; zone_other_args research' 2>/dev/null)
     want="$(python3 "$REPO_ROOT/apps/iam/compiler/cli.py" compile netpol --zone research \
-              --namespace "$rns" --platform-namespace "$NAMESPACE" --node-ip 192.0.2.1)" \
+              --namespace "$rns" --platform-namespace "$NAMESPACE" "${_wo[@]}" --node-ip 192.0.2.1)" \
         || { echo "the research zone's network policies do not compile (python3 apps/iam/compiler/cli.py check)" >&2; return 1; }
     missing="$(python3 -c '
 import json, sys

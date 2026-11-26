@@ -129,6 +129,16 @@ def system_reach(p):
             elif "internet" in hop:
                 for port in hop.get("ports") if isinstance(hop.get("ports"), list) else []:
                     out.add(("pod-egress", pod, "internet", "", port))
+            elif "address" in hop:      # research Phase 4d: one host outside the cluster
+                out.add(("pod-egress", pod, "address", str(hop["address"]), hop.get("port")))
+    # research Phase 4a: a zone service's own token client (and its audience), and a pod's DNS egress
+    for pod, pd in (net.get("pods") or {}).items():
+        for tc in pd.get("token_clients") or []:
+            if isinstance(tc, dict):
+                for svc in pd.get("carries") or {}:
+                    out.add(("pod-token-client", pod, svc, tc.get("client"), tc.get("audience")))
+        if pd.get("dns") is True:
+            out.add(("pod-dns", pod))
     for host, src in (net.get("unproxied") or {}).items():
         out.add(("unproxied", host, src if isinstance(src, str) else source.canonical(src).decode()))
     for name, cd in (net.get("clients") or {}).items():
@@ -228,6 +238,12 @@ RESIDUE_PATHS = frozenset((
     # for a later code-only commit (no skeleton version in flight).
     "network.pods.*.egress[].pod", "network.pods.*.egress[].port", "network.pods.*.egress[].node",
     "network.pods.*.egress[].internet", "network.pods.*.egress[].ports", "network.pods.*.egress[].platform.*",
+    # research Phase 4d: an address hop (one host outside the cluster); residue for the same reason (commit A had it
+    # unclassified, which is residue too, so the proposal and the apply compute the same sections)
+    "network.pods.*.egress[].address",
+    # research Phase 4a: a zone service's token client and audience and a pod's DNS egress are
+    # tuples too (pod-token-client, pod-dns); residue on purpose, for the reason above
+    "network.pods.*.token_clients[].client", "network.pods.*.token_clients[].audience", "network.pods.*.dns",
     "network.clients.*.selector.*", "network.clients.*.only_rpc",
     "roles.*.db_role", "roles.*.availability", "roles.*.spec_role",
     "service_identities.*.db_role", "service_identities.*.db_password", "service_identities.*.managed_by",

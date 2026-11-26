@@ -707,6 +707,15 @@ class Manifest(unittest.TestCase):
         st = algorithms_loader.sandbox_state(tmp)
         self.assertFalse(st["dirty"], st)                       # .venv and runs never count
         self.assertEqual(algorithms_loader.sandbox_files(tmp), ["research/harness/runner.py"])
+        # the bench's daily report is evidence, not code: untracked or edited, it never counts
+        os.makedirs(os.path.join(tmp, "research", "agents", "bench"))
+        with open(os.path.join(tmp, "research/agents/bench/2026-11-22.json"), "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        self.assertFalse(algorithms_loader.sandbox_state(tmp)["dirty"])
+        with open(os.path.join(tmp, "research/agents/bench/README.md"), "w", encoding="utf-8") as f:
+            f.write("x\n")                                     # anything else there still does
+        self.assertEqual(algorithms_loader.sandbox_state(tmp)["dirty_files"], ["research/agents/bench/README.md"])
+        os.remove(os.path.join(tmp, "research/agents/bench/README.md"))
         with open(os.path.join(tmp, "research/harness/runner.py"), "a", encoding="utf-8") as f:
             f.write("# edited\n")
         st = algorithms_loader.sandbox_state(tmp)
@@ -1071,6 +1080,22 @@ class Pins(unittest.TestCase):
         spec = campaign.load_spec(self.write_spec(sc))
         prov = pins.provenance(spec["scenarios"][0])
         self.assertEqual(set(prov), {"calibration", "setpoints"})
+
+    def test_the_rate_is_measured_over_many_clock_ticks(self):
+        # E48, 23 Nov 2026: one slice cost a clock tick or two (os.times() counts 10 ms ticks), so the same
+        # campaign estimated 6.0 and 3.0 CPU-hours. A slice that truly costs 4 ms must come out near 4 ms.
+        from unittest import mock
+        spec = campaign.resolve_spec({"scenarios": [smoke(duration_h=0.1, metrics_from_h=0)],
+                                      "controllers": [{"code": "PID"}], "seeds": [1]})
+        true = {"t": 0.0}
+
+        def run_scenario(*a, **k):
+            true["t"] += 0.004
+        ticks = lambda: int(true["t"] / 0.01) * 0.01                     # noqa: E731
+        with mock.patch.object(campaign.runner, "run_scenario", run_scenario), \
+                mock.patch.object(campaign, "cpu_seconds", ticks):
+            rate = list(campaign.calibrate(spec, loaded()).values())[0]
+        self.assertAlmostEqual(rate * campaign.CALIBRATION_H, 0.004, delta=0.0002)
 
     def test_cpu_rate_per_scenario(self):
         a = smoke(duration_h=0.1, metrics_from_h=0)
