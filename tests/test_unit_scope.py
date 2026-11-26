@@ -129,7 +129,7 @@ def _load(name, path):
 
 
 LIB = _load('medcea_iam', os.path.join(REPO, 'apps', 'iam', 'lib', 'medcea_iam.py'))
-LIB.verify = lambda token, clients: (json.loads(token), None)
+LIB.verify = lambda token, clients, audience=None: (json.loads(token), None)   # verify() takes the service's audience since research 4a (4110b14)
 ENFORCE = {'v': False}
 LIB.enforcing = lambda: ENFORCE['v']
 sys.path.insert(0, os.path.join(REPO, 'apps', 'scheduler'))
