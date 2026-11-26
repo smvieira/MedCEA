@@ -1,0 +1,1079 @@
+{
+"about": "E58's campaign c82ccd4a4f946f7924597 (26 Nov 2026, session -lQyM5aSeOkK64rd-x0YcA): its 36 result rows, trimmed to what sim.results and the proposal check read (research-runs volume, results.jsonl)",
+"manifest": {
+"invalid_runs": 0,
+"result_digest": "a2aec7eebdfdb01f48dcda7998c5923a9605dd4539235358fb7b4f8f85749631",
+"runs": 36,
+"spec_digest": "c95ccc615280ae02c060c1912d5f3341982bc29acfad8c6485ddf8b4bf6db0ff"
+},
+"rows": [
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "FLC",
+"params": {}
+},
+"energy_total_wh": 92.60555555555555,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.828382319058212
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11512546803050926
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2096.0567062477267
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "FLC",
+"params": {}
+},
+"energy_total_wh": 92.60555555555555,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.828382319058212
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11512546803050926
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2096.0567062477267
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "FLC",
+"params": {}
+},
+"energy_total_wh": 91.80555555555556,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.7804538260570171
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.112643903305276
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2097.405548727265
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "FLC",
+"params": {}
+},
+"energy_total_wh": 91.80555555555556,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.7804538260570171
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.112643903305276
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2097.405548727265
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "FLC",
+"params": {}
+},
+"energy_total_wh": 91.525,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.9344112679784362
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11259128959863123
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2100.0494940216217
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "FLC",
+"params": {}
+},
+"energy_total_wh": 91.525,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.9344112679784362
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11259128959863123
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2100.0494940216217
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "IF_THEN_ELSE",
+"params": {}
+},
+"energy_total_wh": 28.333333333333332,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2.131831359712633
+},
+"air_temperature": {
+"boundary_hugging": 0.49444444444444446,
+"out_of_band": 0.0,
+"rmsd_mid": 1.603638051074516
+},
+"co2": {
+"boundary_hugging": 0.09444444444444444,
+"out_of_band": 0.0,
+"rmsd_mid": 1755.7330770715505
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "IF_THEN_ELSE",
+"params": {}
+},
+"energy_total_wh": 28.333333333333332,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2.131831359712633
+},
+"air_temperature": {
+"boundary_hugging": 0.49444444444444446,
+"out_of_band": 0.0,
+"rmsd_mid": 1.603638051074516
+},
+"co2": {
+"boundary_hugging": 0.09444444444444444,
+"out_of_band": 0.0,
+"rmsd_mid": 1755.7330770715505
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "IF_THEN_ELSE",
+"params": {}
+},
+"energy_total_wh": 28.333333333333332,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2.1329923522844423
+},
+"air_temperature": {
+"boundary_hugging": 0.49444444444444446,
+"out_of_band": 0.0,
+"rmsd_mid": 1.603354698007756
+},
+"co2": {
+"boundary_hugging": 0.09444444444444444,
+"out_of_band": 0.0,
+"rmsd_mid": 1755.7348367625013
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "IF_THEN_ELSE",
+"params": {}
+},
+"energy_total_wh": 28.333333333333332,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2.1329923522844423
+},
+"air_temperature": {
+"boundary_hugging": 0.49444444444444446,
+"out_of_band": 0.0,
+"rmsd_mid": 1.603354698007756
+},
+"co2": {
+"boundary_hugging": 0.09444444444444444,
+"out_of_band": 0.0,
+"rmsd_mid": 1755.7348367625013
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "IF_THEN_ELSE",
+"params": {}
+},
+"energy_total_wh": 28.333333333333332,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2.130670822860126
+},
+"air_temperature": {
+"boundary_hugging": 0.49444444444444446,
+"out_of_band": 0.0,
+"rmsd_mid": 1.603921400639706
+},
+"co2": {
+"boundary_hugging": 0.09444444444444444,
+"out_of_band": 0.0,
+"rmsd_mid": 1755.7313170703453
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "IF_THEN_ELSE",
+"params": {}
+},
+"energy_total_wh": 28.333333333333332,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2.130670822860126
+},
+"air_temperature": {
+"boundary_hugging": 0.49444444444444446,
+"out_of_band": 0.0,
+"rmsd_mid": 1.603921400639706
+},
+"co2": {
+"boundary_hugging": 0.09444444444444444,
+"out_of_band": 0.0,
+"rmsd_mid": 1755.7313170703453
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "MPC",
+"params": {}
+},
+"energy_total_wh": 81.80833333333334,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.8509285727149173
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11203029024311295
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2092.829684622347
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "MPC",
+"params": {}
+},
+"energy_total_wh": 81.80833333333334,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.8509285727149173
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11203029024311295
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2092.829684622347
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "MPC",
+"params": {}
+},
+"energy_total_wh": 84.64166666666667,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.8886426469730978
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.1110872847513935
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2093.395352694456
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "MPC",
+"params": {}
+},
+"energy_total_wh": 84.64166666666667,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.8886426469730978
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.1110872847513935
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2093.395352694456
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "MPC",
+"params": {}
+},
+"energy_total_wh": 84.61666666666667,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.7777324332095558
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11291296902521887
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2092.689411594915
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "MPC",
+"params": {}
+},
+"energy_total_wh": 84.61666666666667,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.7777324332095558
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.11291296902521887
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2092.689411594915
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 10.0
+}
+},
+"energy_total_wh": 85.13333333333334,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.326115711758419
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.28846659585918843
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2065.2964236980342
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 10.0
+}
+},
+"energy_total_wh": 83.83611111111111,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.2592559883468224
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.27644459933427157
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2058.5029157278755
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 10.0
+}
+},
+"energy_total_wh": 89.45555555555556,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.298904026065437
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.3093611889605416
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2067.432318976188
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 10.0
+}
+},
+"energy_total_wh": 87.63333333333334,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.3875370689022604
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.29455688240208305
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2054.4141983278987
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 10.0
+}
+},
+"energy_total_wh": 84.46944444444445,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.3186688615004238
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.29702434316120996
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2073.905674648867
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 10.0
+}
+},
+"energy_total_wh": 83.19722222222222,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.1699963291666318
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.28551875355168405
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2060.28929550865
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 30.0
+}
+},
+"energy_total_wh": 84.06944444444444,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.1377878411717548
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.2774954762433336
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2067.978782410972
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 30.0
+}
+},
+"energy_total_wh": 84.02777777777779,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.363032475702578
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.2786415227274069
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2071.4668024915286
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 30.0
+}
+},
+"energy_total_wh": 88.3861111111111,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.2173253142370704
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.30008288526890314
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2063.063049269358
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 30.0
+}
+},
+"energy_total_wh": 87.325,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.5311918334868968
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.29850096489539524
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2050.3196283701377
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 30.0
+}
+},
+"energy_total_wh": 83.53888888888889,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.3129523684976243
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.2835871094040481
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2071.7196444358497
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "PID",
+"params": {
+"cycle_time": 30.0
+}
+},
+"energy_total_wh": 83.43055555555556,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 1.2288083120391122
+},
+"air_temperature": {
+"boundary_hugging": 0.0,
+"out_of_band": 0.0,
+"rmsd_mid": 0.2831122057267449
+},
+"co2": {
+"boundary_hugging": 1.0,
+"out_of_band": 0.0,
+"rmsd_mid": 2061.2658772065183
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "Q_LEARNING",
+"params": {}
+},
+"energy_total_wh": 63.63055555555556,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 20.95103808611093
+},
+"air_temperature": {
+"boundary_hugging": 0.5779816513761468,
+"out_of_band": 0.39444444444444443,
+"rmsd_mid": 1.91445397633315
+},
+"co2": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 2289.2739450888607
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "Q_LEARNING",
+"params": {}
+},
+"energy_total_wh": 63.63055555555556,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 20.95103808611093
+},
+"air_temperature": {
+"boundary_hugging": 0.5779816513761468,
+"out_of_band": 0.39444444444444443,
+"rmsd_mid": 1.91445397633315
+},
+"co2": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 2289.2739450888607
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 1,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "Q_LEARNING",
+"params": {}
+},
+"energy_total_wh": 64.55833333333334,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 20.68325056171555
+},
+"air_temperature": {
+"boundary_hugging": 0.5961538461538461,
+"out_of_band": 0.4222222222222222,
+"rmsd_mid": 1.9402262157850603
+},
+"co2": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 2289.262022860434
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "Q_LEARNING",
+"params": {}
+},
+"energy_total_wh": 64.55833333333334,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 20.68325056171555
+},
+"air_temperature": {
+"boundary_hugging": 0.5961538461538461,
+"out_of_band": 0.4222222222222222,
+"rmsd_mid": 1.9402262157850603
+},
+"co2": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 2289.262022860434
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 2,
+"valid": true
+},
+{
+"clock_offset_s": 0.0,
+"controller": {
+"code": "Q_LEARNING",
+"params": {}
+},
+"energy_total_wh": 64.7,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 21.03883678869339
+},
+"air_temperature": {
+"boundary_hugging": 0.5546218487394958,
+"out_of_band": 0.3388888888888889,
+"rmsd_mid": 1.8592836519206595
+},
+"co2": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 2289.2247016237075
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+},
+{
+"clock_offset_s": 5.0,
+"controller": {
+"code": "Q_LEARNING",
+"params": {}
+},
+"energy_total_wh": 64.7,
+"jitter_s": 0.0,
+"loops": {
+"air_humidity": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 21.03883678869339
+},
+"air_temperature": {
+"boundary_hugging": 0.5546218487394958,
+"out_of_band": 0.3388888888888889,
+"rmsd_mid": 1.8592836519206595
+},
+"co2": {
+"boundary_hugging": null,
+"out_of_band": 1.0,
+"rmsd_mid": 2289.2247016237075
+}
+},
+"scenario": "smoke_air_temperature",
+"seed": 3,
+"valid": true
+}
+]
+}

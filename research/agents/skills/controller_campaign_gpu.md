@@ -7,7 +7,8 @@ without params runs with its defaults.
 
 1. sim.estimate with the spec, then sim.run with the same spec. Call sim.run again with the same spec to read its
    progress until it is done.
-2. sim.results with the campaign's cid. It shows a few runs, not all of them.
+2. sim.results with the campaign's cid and sort set to your criterion. by_setting has one row per setting, in
+   its columns' order, with the mean over its valid runs, best first; take every number you quote from it.
 3. propose.parameter_set with the setting you judge best, the campaign's cid as evidence and the criterion you
    judged it on (lower is better). mcp-sim compares your setting with every other setting of the campaign on the
    runs they share and refuses a proposal that another setting beats on that criterion; its refusal names that

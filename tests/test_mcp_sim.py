@@ -122,6 +122,9 @@ class SimTest(unittest.TestCase):
                              "loops": {"air_temperature": {"rmsd_mid": 0.5, "samples": 360, "tag": "x"}}}]}
         p = payload(call(app, "sim.results", {"cid": gid})[1])
         self.assertEqual(p["result_digest"], "d" * 64)
+        self.assertNotIn("top", p)                                     # the individual runs only when asked
+        self.assertEqual(p["by_setting"]["settings"], [["PID", {"kp": 1.235}, 1, 1, 12.0, 0.5, None, None]])
+        p = payload(call(app, "sim.results", {"cid": gid, "top": 5})[1])
         self.assertEqual(p["top"][0]["code"], "PID")
         self.assertEqual(p["top"][0]["params"], {"kp": 1.235})
         self.assertEqual(p["top"][0]["loops"], {"air_temperature": [0.5, None, None]})
@@ -723,3 +726,100 @@ class ResultsShape(unittest.TestCase):
                            "spec_digest": "s" * 64, "cpu_hours": 0.0058, "loop_metrics": list(mcp_sim.LOOP_METRICS),
                            "top": [out] * 3})
         self.assertLess(len(shown), 1000, shown)
+
+
+class BySetting(unittest.TestCase):
+    """sim.results' per-setting table (26 Nov 2026, E58: the model saw the campaign's first five runs, all FLC's)."""
+    FIX = os.path.join(ROOT_DIR, "tests", "fixtures", "research", "e58_campaign.json")
+
+    def setUp(self):
+        with open(self.FIX, encoding="utf-8") as f:
+            self.doc = json.load(f)
+        self.s, self.r, self.app = setup()
+        self.cid = payload(call(self.app, "sim.run", {"spec": {"runs": 1}})[1])["cid"]
+        self.r.final = {"state": "done", "cpu_hours": 0.1214, "manifest": self.doc["manifest"], "rows": self.doc["rows"]}
+
+    def results(self, **args):
+        code, resp = call(self.app, "sim.results", dict(args, cid=self.cid))
+        return code, resp
+
+    def test_every_setting_within_what_the_model_sees(self):
+        from mcp_common import canonical
+        for sort in (None, "air_temperature.rmsd_mid", "energy_wh", "co2.boundary_hugging"):
+            args = {"sort": sort} if sort else {}
+            p = payload(self.results(**args)[1])
+            t = p["by_setting"]
+            self.assertEqual(t["count"], {"shown": 6, "total": 6})
+            self.assertEqual(sorted((r[0], canonical(r[1])) for r in t["settings"]),
+                             sorted([("FLC", canonical({})), ("IF_THEN_ELSE", canonical({})), ("MPC", canonical({})),
+                                     ("PID", canonical({"cycle_time": 10.0})), ("PID", canonical({"cycle_time": 30.0})),
+                                     ("Q_LEARNING", canonical({}))]))
+            text = canonical(p)
+            text = text.decode() if isinstance(text, bytes) else text
+            shown = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:1000]
+            for r in t["settings"]:                          # every row inside the 1000 characters an agent sees
+                self.assertIn(canonical(r).decode() if isinstance(canonical(r), bytes) else canonical(r), shown, sort)
+
+    def test_the_numbers_are_the_checks(self):
+        p = payload(self.results(sort="air_temperature.rmsd_mid")[1])
+        t = p["by_setting"]
+        col = t["columns"].index("air_temperature.rmsd_mid")
+        e = t["columns"].index("energy_wh")
+        best = t["settings"][0]
+        self.assertEqual((best[0], best[col], best[2], best[3]), ("MPC", 0.112, 6, 6))
+        self.assertEqual(t["settings"][1][:2] + [t["settings"][1][col]], ["FLC", {}, 0.1135])
+        self.assertEqual(best[e], 83.69)                     # MPC's own energy (E58's rationale quoted FLC's 92.61)
+        pm = mcp_sim._load_params(ROOT_DIR)
+        check = mcp_sim.compare_evidence(self.doc["rows"], "MPC", {}, "air_temperature.rmsd_mid", pm.defaults)
+        self.assertEqual(check["proposed_mean"], best[col])
+        means = {(c["code"], json.dumps(c["params"], sort_keys=True)): c["other"] for c in check["compared"]}
+        for r in t["settings"][1:]:
+            key = (r[0], json.dumps(r[1], sort_keys=True))
+            self.assertEqual(means[key], r[col], key)      # one grid: each setting's runs are the shared runs
+        e_sorted = payload(self.results(sort="energy_wh")[1])["by_setting"]["settings"]
+        self.assertEqual([r[0] for r in e_sorted][:2], ["IF_THEN_ELSE", "Q_LEARNING"])
+        self.assertEqual(payload(self.results()[1])["by_setting"]["order"], "the campaign's")
+
+    def test_defaults_join_a_setting_and_invalid_runs_count_but_do_not_average(self):
+        rows = [{"controller": {"code": "PID", "params": {}}, "seed": 1, "valid": True, "energy_total_wh": 10.0,
+                 "loops": {"air_temperature": {"rmsd_mid": 1.0}}},
+                {"controller": {"code": "PID", "params": {"cycle_time": 10.0}}, "seed": 2, "valid": True,
+                 "energy_total_wh": 20.0, "loops": {"air_temperature": {"rmsd_mid": 3.0}}},
+                {"controller": {"code": "PID", "params": {"cycle_time": 10.0}}, "seed": 3, "valid": False,
+                 "energy_total_wh": 999.0, "loops": {"air_temperature": {"rmsd_mid": 999.0}}},
+                {"controller": {"code": "FLC", "params": {}}, "seed": 1, "valid": False, "loops": {}}]
+        self.r.final = {"state": "done", "cpu_hours": 0.1, "manifest": {"runs": 4}, "rows": rows}
+        t = payload(self.results()[1])["by_setting"]
+        self.assertEqual(t["settings"], [["PID", {}, 3, 2, 15.0, 2.0, None, None],
+                                         ["FLC", {}, 1, 0, None, None, None, None]])
+        t = payload(self.results(sort="air_temperature.rmsd_mid")[1])["by_setting"]
+        self.assertEqual([r[0] for r in t["settings"]], ["PID", "FLC"])     # no value sorts last
+
+    def test_a_sort_that_is_no_criterion_is_refused(self):
+        for bad in ("air_temperature.mean", "substrate_temperature.rmsd_mid", 3, ""):
+            code, resp = self.results(sort=bad)
+            self.assertTrue(resp["result"]["isError"], bad)
+            self.assertIn("sort must be one of this campaign's criteria", resp["result"]["content"][0]["text"])
+
+    def test_a_long_table_keeps_its_header(self):
+        rows = [{"controller": {"code": "PID", "params": {"cycle_time": float(c)}}, "seed": 1, "valid": True,
+                 "energy_total_wh": 100.0 - c,
+                 "loops": {k: {"rmsd_mid": c / 7, "out_of_band": 0.0, "boundary_hugging": 0.0}
+                           for k in ("air_temperature", "air_humidity", "co2")}} for c in range(1, 31)]
+        self.r.final = {"state": "done", "cpu_hours": 0.1, "manifest": {"runs": 30}, "rows": rows}
+        from mcp_common import canonical
+        p = payload(self.results(sort="energy_wh")[1])
+        t = p["by_setting"]
+        self.assertEqual(t["count"], {"shown": mcp_sim.SETTINGS_MAX, "total": 30})
+        text = canonical(p)
+        text = (text.decode() if isinstance(text, bytes) else text)[:1000]
+        for k in ("columns", "count", "means_of", "order"):
+            self.assertIn('"%s":' % k, text)
+        self.assertIn('["PID",{"cycle_time":30.0},1,1,70.0', text)        # the best one first
+
+    def test_the_tool_listing(self):
+        tools = {t["name"]: t for t in rpc(self.app, "tools/list")[1]["result"]["tools"]}
+        props = tools["sim.results"]["inputSchema"]["properties"]
+        self.assertEqual(set(props), {"cid", "sort", "top"})
+        self.assertEqual(tools["sim.status"]["inputSchema"], mcp_sim.CID_SCHEMA)
+

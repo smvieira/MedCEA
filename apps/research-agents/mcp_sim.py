@@ -1,7 +1,7 @@
 """apps/research-agents/mcp_sim.py (research Phase 4a, stage 5): mcp-sim, the simulation tools and the
 CPU gate (design R6, R7, OD12).
 
-Tools (names as in the profile): sim.estimate(spec), sim.run(spec), sim.status(cid), sim.results(cid, top).
+Tools (names as in the profile): sim.estimate(spec), sim.run(spec), sim.status(cid), sim.results(cid, sort, top).
 The server recomputes the estimate itself from the spec (the agent's figure is not an input).
 Gate for sim.run, on the recomputed estimate E (CPU-hours) and the session's remaining budget:
   E > 24                      refused (hard maximum per campaign);
@@ -52,6 +52,12 @@ CAMPAIGN_SPEC = {
         "description": {"type": "string"}}}
 SPEC_SCHEMA = {"type": "object", "properties": {"spec": CAMPAIGN_SPEC}, "required": ["spec"]}
 CID_SCHEMA = {"type": "object", "properties": {"cid": {"type": "string"}, "top": {"type": "integer"}}, "required": ["cid"]}
+RESULTS_SCHEMA = {"type": "object", "required": ["cid"], "properties": {
+    "cid": {"type": "string"},
+    "sort": {"type": "string", "description": "a criterion to order by_setting by, best (lowest) first: energy_wh, or "
+             "<loop>.rmsd_mid, <loop>.out_of_band or <loop>.boundary_hugging, e.g. air_temperature.rmsd_mid"},
+    "top": {"type": "integer", "description": "also show this many individual runs, in the campaign's order (0 to 10, "
+            "default 0)"}}}
 
 
 PROPOSE_SCHEMA = {"type": "object", "properties": {
@@ -214,6 +220,59 @@ def compare_evidence(rows, code, params, criterion, defaults_of):
             "compared_total": len(compared), "by": "mcp-sim (the rationale is the model's own words)"}
 
 
+# sim.results' per-setting table (26 Nov 2026, E58: the model was shown the campaign's first five runs, all FLC's, so it
+# never saw MPC's numbers, proposed FLC, and quoted an FLC energy in MPC's rationale). One row per setting (the check's
+# own setting key: code + parameters with their defaults), the mean of each metric over the setting's valid runs, in the
+# campaign's order or sorted by a criterion, best first. An agent sees the first 1000 characters of a result
+# (research/agents/context.py SHOWN_MAX) and the result's keys are sorted, so it is `by_setting` (before `cid`) and its
+# own keys sort columns, count, means_of, order, then the settings: a long table loses rows at the cut, never its header.
+# The means are over each setting's own valid runs; the proposal check compares on the runs two settings share.
+SETTINGS_MAX = 20
+
+
+def summarise_settings(rows, defaults_of, sort=None):
+    """runner rows -> {columns, count {shown, total}, means_of, order, settings: [[code, params, runs, valid, energy_wh,
+    <loop>.<metric>...]]}; raises ToolRefused for a sort that is not a criterion of this campaign."""
+    loops = sorted({str(k) for r in rows if r.get("valid") is True for k in (r.get("loops") or {})
+                    if isinstance((r.get("loops") or {}).get(k), dict)})
+    metrics = ["energy_wh"] + ["%s.%s" % (k, m) for k in loops for m in LOOP_METRICS]
+    groups, order = {}, []
+    for r in rows:
+        ctl = r.get("controller") if isinstance(r.get("controller"), dict) else {}
+        if not isinstance(ctl.get("code"), str):
+            continue
+        key = _setting_key(ctl["code"], ctl.get("params") or {}, defaults_of(ctl["code"]))
+        if key not in groups:
+            groups[key] = {"code": ctl["code"], "params": ctl.get("params") or {}, "runs": 0, "valid": 0,
+                           "vals": {c: [] for c in metrics}}
+            order.append(key)
+        g = groups[key]
+        g["runs"] += 1
+        if r.get("valid") is not True:
+            continue
+        g["valid"] += 1
+        for c in metrics:
+            v = _criterion_value(r, c)
+            if v is not None:
+                g["vals"][c].append(v)
+    table = []
+    for key in order:
+        g = groups[key]
+        means = [_num(sum(v) / len(v)) if v else None for v in (g["vals"][c] for c in metrics)]
+        table.append(([g["code"], {k: _num(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+                                   for k, v in sorted(g["params"].items())}, g["runs"], g["valid"]] + means))
+    if sort is not None:
+        if not isinstance(sort, str) or sort not in metrics:
+            raise ToolRefused("sort must be one of this campaign's criteria: %s" % ", ".join(metrics)[:240])
+        i = 4 + metrics.index(sort)
+        table.sort(key=lambda row: (row[i] is None, row[i] if row[i] is not None else 0.0))   # stable: ties keep order
+    return {"columns": ["code", "params", "runs", "valid"] + metrics,
+            "count": {"shown": min(len(table), SETTINGS_MAX), "total": len(table)},
+            "means_of": "each setting's valid runs; lower is better",
+            "order": ("by %s, best first" % sort) if sort else "the campaign's",
+            "settings": table[:SETTINGS_MAX]}
+
+
 class LocalEstimator:
     """In-process estimate (R7) for PID / bang-bang / Q-learning specs with research/harness/campaign.py;
     FLC and MPC import their libraries and cost far more, so they go to an estimate Job (RemoteEstimator)."""
@@ -300,7 +359,9 @@ class SimServer:
             Tool("sim.estimate", "Estimate the CPU-hours of a campaign spec (recomputed by the server).", SPEC_SCHEMA, self.t_estimate),
             Tool("sim.run", "Run a campaign spec; above 2 CPU-hours the supervisor must approve.", SPEC_SCHEMA, self.t_run),
             Tool("sim.status", "State of a campaign handle.", CID_SCHEMA, self.t_status),
-            Tool("sim.results", "Metrics and result digest of a finished campaign.", CID_SCHEMA, self.t_results),
+            Tool("sim.results", "A finished campaign's results: by_setting has one row per setting (controller and "
+                 "parameters) with the mean of each metric over its valid runs, lower is better for every metric.",
+                 RESULTS_SCHEMA, self.t_results),
             Tool("propose.parameter_set", "Propose a controller parameter set, backed by finished campaigns; "
                  "the supervisor accepts or discards it.", PROPOSE_SCHEMA, self.t_propose)])
 
@@ -413,13 +474,20 @@ class SimServer:
         out = self._progress(ctx, cid, c)
         if c["state"] != "done":
             raise ToolRefused("the campaign is %s, not done" % out["state"])
-        top = args.get("top", 10)
-        top = top if isinstance(top, int) and not isinstance(top, bool) and 1 <= top <= 10 else 10
+        top = args.get("top", 0)
+        top = top if isinstance(top, int) and not isinstance(top, bool) and 0 <= top <= 10 else 0
         m = c["final"].get("manifest") or {}
-        rows = [summarise_row(r) for r in (c["final"].get("rows") or [])[:top] if isinstance(r, dict)]
-        return {"cid": cid, "state": "done", "runs": m.get("runs"), "invalid_runs": m.get("invalid_runs"),
-                "result_digest": m.get("result_digest"), "spec_digest": m.get("spec_digest"),
-                "cpu_hours": out.get("cpu_hours"), "loop_metrics": list(LOOP_METRICS), "top": clean_obj(rows)}
+        all_rows = [r for r in (c["final"].get("rows") or []) if isinstance(r, dict)]
+        pmod = _load_params(self.repo_root) if self.repo_root else None
+        table = summarise_settings(all_rows, (lambda c: pmod.defaults(c) if c in pmod.PARAMS else {}) if pmod
+                                   else (lambda c: {}), args.get("sort"))
+        res = {"by_setting": clean_obj(table), "cid": cid, "state": "done", "runs": m.get("runs"),
+               "invalid_runs": m.get("invalid_runs"), "result_digest": m.get("result_digest"),
+               "spec_digest": m.get("spec_digest"), "cpu_hours": out.get("cpu_hours")}
+        if top:
+            res["loop_metrics"] = list(LOOP_METRICS)
+            res["top"] = clean_obj([summarise_row(r) for r in all_rows[:top]])
+        return res
 
     def _scenario_ids(self, c):
         """name -> identity (sha256) of each scenario a campaign ran: the scenario as campaign.resolve_spec resolves it
