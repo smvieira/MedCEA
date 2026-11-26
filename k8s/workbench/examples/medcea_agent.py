@@ -284,6 +284,15 @@ class Client:
                         ck.get("proposed_mean"), ck.get("proposed_runs"), others)
                 elif isinstance(obj, dict) and set(obj) == {"error"}:
                     detail = "%s refused: %s" % (tool, sh(obj["error"], 140))
+                elif isinstance(obj, dict) and isinstance(obj.get("by_setting"), dict):
+                    bs = obj["by_setting"]
+                    cols, cnt, order = bs.get("columns") or [], bs.get("count") or {}, str(bs.get("order") or "")
+                    col = next((c for c in cols[4:] if order.startswith("by %s," % c)), "energy_wh")
+                    i = cols.index(col) if col in cols else None
+                    rows = "; ".join("%s %s %s" % (r[0], sh(r[1], 30), r[i] if i is not None and i < len(r) else "?")
+                                     for r in (bs.get("settings") or [])[:8] if isinstance(r, list) and len(r) > 1)
+                    detail = "%s: %s of %s setting(s), %s; %s: %s" % (
+                        tool, cnt.get("shown"), cnt.get("total"), order, col, rows)
                 else:
                     detail = "%s -> %s" % (tool, sh(res, 140))
             else:

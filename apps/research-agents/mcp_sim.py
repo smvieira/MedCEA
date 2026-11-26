@@ -107,7 +107,7 @@ def summarise_row(r):
     (E49's second session)."""
     ctl = r.get("controller") if isinstance(r.get("controller"), dict) else {}
     out = {"scenario": r.get("scenario"), "code": ctl.get("code", r.get("code")),
-           "params": {k: _num(v) for k, v in (ctl.get("params") or {}).items()},
+           "params": clean_obj(ctl.get("params") or {}),     # as run: the check matches parameters exactly
            "seed": r.get("seed"), "clock_offset_s": _num(r.get("clock_offset_s")) or None, "valid": r.get("valid")}
     if r.get("invalid_reasons"):
         out["invalid_reasons"] = [str(x)[:120] for x in r["invalid_reasons"][:2]]
@@ -227,7 +227,29 @@ def compare_evidence(rows, code, params, criterion, defaults_of):
 # (research/agents/context.py SHOWN_MAX) and the result's keys are sorted, so it is `by_setting` (before `cid`) and its
 # own keys sort columns, count, means_of, order, then the settings: a long table loses rows at the cut, never its header.
 # The means are over each setting's own valid runs; the proposal check compares on the runs two settings share.
+# t_results keeps only the rows that fit inside what an agent sees and says so in count.shown (review of 26 Nov 2026:
+# with three loops about seven settings fit, and a count of every row told the model it saw rows it never saw).
 SETTINGS_MAX = 20
+AGENT_SHOWN_MAX = 1000       # = research/agents/context.py SHOWN_MAX (test)
+
+
+def _agent_sees(text):
+    """How long a result text is in the agent's context: context.wrap_result escapes & < > before its cut."""
+    return len(text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def fit_table(table):
+    """Drop by_setting's last rows until all of it is inside the first AGENT_SHOWN_MAX characters of the result
+    ({"by_setting": … sorts first); count.shown is the rows kept."""
+    rows = table["settings"]
+    while rows:
+        t = canonical({"by_setting": table})
+        t = t.decode() if isinstance(t, bytes) else t
+        if _agent_sees(t[:-1]) + 1 <= AGENT_SHOWN_MAX:       # its closing brace stands for the "," that follows
+            break
+        rows.pop()
+        table["count"]["shown"] = len(rows)
+    return table
 
 
 def summarise_settings(rows, defaults_of, sort=None):
@@ -259,8 +281,8 @@ def summarise_settings(rows, defaults_of, sort=None):
     for key in order:
         g = groups[key]
         means = [_num(sum(v) / len(v)) if v else None for v in (g["vals"][c] for c in metrics)]
-        table.append(([g["code"], {k: _num(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-                                   for k, v in sorted(g["params"].items())}, g["runs"], g["valid"]] + means))
+        # the parameters as run, never rounded: the proposal check matches them exactly (review of 26 Nov 2026)
+        table.append([g["code"], clean_obj(g["params"]), g["runs"], g["valid"]] + means)
     if sort is not None:
         if not isinstance(sort, str) or sort not in metrics:
             raise ToolRefused("sort must be one of this campaign's criteria: %s" % ", ".join(metrics)[:240])
@@ -269,7 +291,7 @@ def summarise_settings(rows, defaults_of, sort=None):
     return {"columns": ["code", "params", "runs", "valid"] + metrics,
             "count": {"shown": min(len(table), SETTINGS_MAX), "total": len(table)},
             "means_of": "each setting's valid runs; lower is better",
-            "order": ("by %s, best first" % sort) if sort else "the campaign's",
+            "order": ("by %s, best first" % sort) if sort else "the campaign's order",
             "settings": table[:SETTINGS_MAX]}
 
 
@@ -481,7 +503,7 @@ class SimServer:
         pmod = _load_params(self.repo_root) if self.repo_root else None
         table = summarise_settings(all_rows, (lambda c: pmod.defaults(c) if c in pmod.PARAMS else {}) if pmod
                                    else (lambda c: {}), args.get("sort"))
-        res = {"by_setting": clean_obj(table), "cid": cid, "state": "done", "runs": m.get("runs"),
+        res = {"by_setting": fit_table(clean_obj(table)), "cid": cid, "state": "done", "runs": m.get("runs"),
                "invalid_runs": m.get("invalid_runs"), "result_digest": m.get("result_digest"),
                "spec_digest": m.get("spec_digest"), "cpu_hours": out.get("cpu_hours")}
         if top:
