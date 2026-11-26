@@ -184,6 +184,33 @@ class CliTest(unittest.TestCase):
         c.stop("S" * 22)
         self.assertEqual(c.replay("S" * 22)["ok"], True)
 
+    def test_replay_waits_out_the_moment_between_the_stop_and_the_job_end(self):
+        # E58, 26 Nov 2026: watch returns at the agent's stop, the orchestrator counts the session as running until it
+        # sees the Job end, and the replay asked in between was refused with 409.
+        c, o, out, clk = client()
+        c.signin()
+        base, left = o.request, [2]
+
+        def req(m, p, b=None, t=None):
+            if p.endswith("/replay") and left[0]:
+                left[0] -= 1
+                return 409, {"error": "the session is still running: replay it after it has stopped"}
+            return base(m, p, b, t)
+        o.request = req
+        o.events = [{"event_id": 9, "event": "stop", "actor": "agent", "payload": {"reason": "finished"}}]
+        self.assertEqual(c.replay("S" * 22, poll_s=2)["ok"], True)
+        self.assertEqual(left[0], 0)
+        # without a stop in the record the session is really at work: refused at once, no waiting
+        c, o, out, clk = client()
+        c.signin()
+        o.request = lambda m, p, b=None, t=None: ((409, {"error": "the session is still running: replay it after it has stopped"})
+                                                  if p.endswith("/replay") else FakeOrch.request(o, m, p, b, t))
+        t0 = clk.t
+        with self.assertRaises(cli.CliError) as e:
+            c.replay("S" * 22)
+        self.assertIn("still running", str(e.exception))
+        self.assertEqual(clk.t, t0)
+
     def test_main_commands(self):
         for argv, want in ((["start", "compare_controllers", "--budget", "turns=3"], "started"),
                            (["approve", "S" * 22, "g1", "--cap-h", "2"], "approve recorded"),

@@ -158,11 +158,19 @@ class Client:
 
     def replay(self, sid, wait_s=600, poll_s=5):
         """Strict replay, run by the orchestrator as a Job: asks, then asks again every poll_s seconds until the verdict
-        {ok, first_mismatch, events} is there (the answer is 202 {state: running} until then)."""
+        {ok, first_mismatch, events} is there (the answer is 202 {state: running} until then). Right after the agent's
+        stop the orchestrator still counts the session as running until it sees the Job end (a few seconds): that 409
+        is waited out while the record holds a stop; a session still at work is refused at once."""
         sid = _sid(sid)
         t0 = self.clock()
         while True:
-            r = self._call("POST", "/api/sessions/%s/replay" % sid, {})
+            st, r = self.t.request("POST", "/api/sessions/%s/replay" % sid, {}, self.token())
+            if st == 409 and "still running" in str((r or {}).get("error", "")) \
+                    and any(e["event"] == "stop" for e in self.events(sid)) and self.clock() - t0 <= wait_s:
+                self.sleep(poll_s)
+                continue
+            if st >= 400:
+                raise CliError("%s (%s)" % ((r or {}).get("error", "refused"), st))
             if not (isinstance(r, dict) and r.get("state") == "running"):
                 return r
             if self.clock() - t0 > wait_s:
