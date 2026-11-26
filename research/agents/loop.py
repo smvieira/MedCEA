@@ -16,6 +16,10 @@ from .model import ModelError, ScriptedModel
 TEXT_MAX = 2000
 ARGS_MAX = 2000
 RECORD_MAX = 6000
+# A tool's refusal as the agent keeps it: the same length mcp-sim records (mcp_common clean_text(e, 300)), so the agent's
+# tool_result and the server's hash the same text and replay matches them (until 26 Nov 2026 the agent kept 200: a
+# longer refusal, such as the proposal check's, failed replay on server_result_sha256 and lost its end)
+ERROR_MAX = 300
 LOCAL_CONTEXT_MAX = 4096     # owner decision of 21 Nov 2026: a local session is about 4k tokens of context
 BACKENDS = ("scripted", "local")         # local = the endpoint on this host; any endpoint name works the same way
 ENDPOINT_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
@@ -204,7 +208,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
             try:
                 result = tools.call(name, args)
             except ToolError as e:
-                result, err = {"error": str(e)[:200]}, True
+                result, err = {"error": str(e)[:ERROR_MAX]}, True
         text = canonical(result).decode("utf-8")
         wrapped, full, shown, trunc = wrap_result(name, call, text)
         trace.post("tool_result", {"turn": turn, "call": call, "tool": name, "result_sha256": full,

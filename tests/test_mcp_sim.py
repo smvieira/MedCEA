@@ -506,6 +506,37 @@ class ProposeTest(unittest.TestCase):
         runner.finals[ite]["manifest"]["code"] = {"commit": "e" * 40}
         self.assertIn("runs no other setting", self.refused(app, self.args(pid, evidence=[pid, ite])))
 
+    def test_the_agent_and_mcp_sim_hash_a_long_refusal_alike(self):
+        """Review round 2 (26 Nov 2026): mcp-sim records a refusal up to 300 characters, the agent kept 200, so a longer
+        refusal hashed differently on the two sides and replay failed on server_result_sha256. Through the agent's own
+        client (HttpTools) and loop's error result (loop.ERROR_MAX), each refusal's text must hash as mcp-sim's does."""
+        from research.agents import http_tools, loop
+        from research.agents.context import canonical as acanon, sha as asha
+        many = lambda r: dict(r, loops=dict(r["loops"], **{"substrate_temperature_reference_probe_%d" % i:
+                                                            r["loops"]["air_temperature"] for i in range(6)}))
+        rows = [many(r) for r in self.ROWS + [self.row("PID", {"cycle_time": 30.0, "kp": 2.0, "ki": 0.5, "kd": 0.1}, 1, 10.0, 0.01)]]
+        s, app, cid = self.done(rows=rows)
+
+        class T:
+            def post(self, url, token, msg):
+                return app.handle(msg, token, "10.0.0.1")
+
+        tools = http_tools.HttpTools({"sim": "http://sim"}, "tok", transport=T())
+        for args in (self.args(cid, criterion="air_temp.rmsd_mid"), self.args(cid, criterion="energy_wh"),
+                     self.args(cid, params={"cycle_time": 30.0, "kp": 2.0, "ki": 0.5}),
+                     self.args(cid, params={"cycle_time": 10.0}),
+                     self.args(cid, params={"cycle_time": 10.0}, criterion="substrate_temperature_reference_probe_5.rmsd_mid")):
+            n = len(s.of("tool_result"))
+            with self.assertRaises(loop.ToolError) as cm:
+                tools.call("propose.parameter_set", args)
+            server = s.of("tool_result")[n]
+            mine = acanon({"error": str(cm.exception)[:loop.ERROR_MAX]})
+            mine = mine.decode("utf-8") if isinstance(mine, bytes) else mine
+            self.assertTrue(server["error"])
+            self.assertEqual(asha(mine.encode("utf-8")), server["result_sha256"], str(cm.exception))
+        long_one = str(cm.exception)
+        self.assertGreater(len(long_one), 200)        # the case the old 200 lost
+
     def test_running_campaign_is_no_evidence(self):
         s, r, app = setup()
         cid = payload(call(app, "sim.run", {"spec": {"runs": 1}})[1])["cid"]

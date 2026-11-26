@@ -153,9 +153,11 @@ def compare_evidence(rows, code, params, criterion, defaults_of):
     if not isinstance(criterion, str) or not CRITERION_RE.match(criterion):
         raise ToolRefused("criterion must be energy_wh or <loop>.<%s>, e.g. air_temperature.rmsd_mid"
                           % "|".join(CRITERION_METRICS))
-    known = {"energy_wh"} | {"%s.%s" % (k, m) for r in rows for k in (r.get("loops") or {}) for m in CRITERION_METRICS}
+    loops = sorted({str(k) for r in rows for k in (r.get("loops") or {})})
+    known = {"energy_wh"} | {"%s.%s" % (k, m) for k in loops for m in CRITERION_METRICS}
     if criterion not in known:
-        raise ToolRefused("the evidence has no %s; it has %s" % (criterion, ", ".join(sorted(known))[:300]))
+        raise ToolRefused("the evidence has no %s: energy_wh, or <loop>.<metric> for loop %s"
+                          % (criterion, ", ".join(loops)[:120] or "(none)"))
     want = _setting_key(code, params, defaults_of(code))
     by = {}                                          # setting -> {cell: [values]}
     shown = {}

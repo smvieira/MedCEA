@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .loop import ToolError
+from .loop import ERROR_MAX, ToolError
 
 PROTOCOL = "2026-07-28"   # = apps/research-agents/mcp_common.PROTOCOL (tests/test_mcp_sim.py pins both)
 
@@ -47,7 +47,7 @@ class HttpTools:
         if st != 200 or not isinstance(r, dict):
             raise ToolError("the tool server did not answer (%s)" % st)
         if "error" in r:
-            raise ToolError(str((r["error"] or {}).get("message", "error"))[:200])
+            raise ToolError(str((r["error"] or {}).get("message", "error"))[:ERROR_MAX])
         return r["result"]
 
     def list_tools(self):
@@ -67,7 +67,7 @@ class HttpTools:
                 msg = json.loads(res["content"][0]["text"]).get("error", "")
             except (ValueError, KeyError, IndexError, AttributeError):
                 msg = "tool error"
-            raise ToolError(str(msg)[:200])
+            raise ToolError(str(msg)[:ERROR_MAX])
         if isinstance(res.get("structuredContent"), dict) and not res["structuredContent"].get("truncated"):
             return res["structuredContent"]
         try:
