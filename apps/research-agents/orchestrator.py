@@ -132,6 +132,19 @@ class Orchestrator:
         if backend != "scripted" and backend not in self.endpoints():
             return 409, {"error": "this profile uses the endpoint %s, which is not enabled on this install (RESEARCH_ENDPOINTS)"
                                   % backend}
+        if backend != "scripted" and chosen is None:
+            # a profile on its own endpoint keeps its caps.context_tokens (loop.context_cap): refuse one this install's
+            # endpoint cannot hold (e.g. compare_controllers_gpu on an endpoint named gpu with a smaller context)
+            own = next((i for i in self.inventory() if i["name"] == backend), None)
+            ctx = own.get("context") if own else None
+            if isinstance(ctx, int) and not isinstance(ctx, bool):
+                from research.agents import loop
+                room = ctx - loop.CONTEXT_MARGIN
+                if prof["caps"]["context_tokens"] > room:
+                    return 409, {"error": "the profile %s needs %d tokens of context and the endpoint %s holds %d (%d less "
+                                          "the chat template's %d): choose another profile, or this one with an endpoint "
+                                          "that holds more" % (prof["name"], prof["caps"]["context_tokens"], backend, room,
+                                                               ctx, loop.CONTEXT_MARGIN)}
         budget = {k: prof["caps"][k] for k in BUDGET_KEYS if k in prof["caps"]}
         want = body.get("budget") or {}
         if not isinstance(want, dict):

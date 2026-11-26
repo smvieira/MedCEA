@@ -1,4 +1,5 @@
-# The last step proposes the PID parameter set the campaign ran (propose.parameter_set, served by mcp-sim);
+# The last step proposes the PID parameter set the campaign ran (propose.parameter_set, served by mcp-sim, which checks
+# it against the campaign on air_temperature.rmsd_mid: cycle_time 30 beats 10 and IF_THEN_ELSE on seed 1);
 # "@last_cid" is the newest campaign handle a tool result showed.
 name: compare_controllers
 backend: scripted
@@ -17,5 +18,5 @@ script:
   - {text: "Plan: estimate the campaign first.", tool: sim.estimate, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
   - {text: "Plan: run the campaign (a gate asks the supervisor above the cap).", tool: sim.run, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
   - {text: "Plan: read its progress; the same call returns the result once it is done.", tool: sim.run, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
-  - {text: "Plan: propose the PID setting that the campaign ran, with the campaign as evidence.", tool: propose.parameter_set, args: {algorithm_code: PID, params: {cycle_time: 10.0}, evidence: ["@last_cid"], rationale: "Ran with the shorter cycle in the campaign."}}
+  - {text: "Plan: propose the PID setting that kept the air temperature nearest the band's middle, with the campaign as evidence.", tool: propose.parameter_set, args: {algorithm_code: PID, params: {cycle_time: 30.0}, evidence: ["@last_cid"], criterion: air_temperature.rmsd_mid, rationale: "The longer cycle kept the air temperature nearer the middle of its band."}}
   - {text: "The plan is complete."}

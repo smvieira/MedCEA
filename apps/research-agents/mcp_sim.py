@@ -55,8 +55,11 @@ CID_SCHEMA = {"type": "object", "properties": {"cid": {"type": "string"}, "top":
 
 PROPOSE_SCHEMA = {"type": "object", "properties": {
     "algorithm_code": {"type": "string"}, "params": {"type": "object"},
-    "evidence": {"type": "array", "items": {"type": "string"}}, "rationale": {"type": "string"}},
-    "required": ["algorithm_code", "params", "evidence"]}
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "criterion": {"type": "string", "description": "what it does better, lower is better: energy_wh, or <loop>.rmsd_mid, "
+                  "<loop>.out_of_band or <loop>.boundary_hugging, e.g. air_temperature.rmsd_mid"},
+    "rationale": {"type": "string"}},
+    "required": ["algorithm_code", "params", "evidence", "criterion"]}
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,30}$")
 
 
@@ -105,6 +108,103 @@ def summarise_row(r):
     out["loops"] = {str(k): [_num(v.get(m)) for m in LOOP_METRICS]
                     for k, v in sorted((r.get("loops") or {}).items()) if isinstance(v, dict)}
     return {k: v for k, v in out.items() if v is not None}
+
+# The proposal check (26 Nov 2026, E57: a proposal's rationale said PID used less energy than IF_THEN_ELSE while its own
+# evidence read 84.07 Wh against 28.33). A proposal names its criterion and mcp-sim, not the model, compares: the
+# proposed setting against every other setting of its evidence on the runs they share (scenario, seed, clock offset,
+# jitter; valid runs only), mean of the criterion, lower is better for all four. It is refused when it was not run,
+# has no valid run, shares no run with another setting, another setting does better on the shared runs, or it only
+# ties (better than none). The comparison is part of the proposal document, so the supervisor reads the server's
+# numbers; the rationale stays the model's own words.
+CRITERION_METRICS = LOOP_METRICS
+CRITERION_RE = re.compile(r"^(energy_wh|[a-z][a-z0-9_@-]{0,47}\.(%s))$" % "|".join(LOOP_METRICS))
+CHECK_REL_TOL = 1e-9         # a mean within this (relative) of the best counts as tied, never as worse
+CHECK_MAX_COMPARED = 20
+
+
+def _setting_key(code, params, defaults):
+    """A setting as code + every parameter with the defaults filled in (a result row holds only the spec's own)."""
+    full = dict(defaults or {})
+    full.update(params or {})
+    return code, canonical({k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+                            for k, v in sorted(full.items())})
+
+
+def _criterion_value(row, criterion):
+    if criterion == "energy_wh":
+        v = row.get("energy_total_wh")
+    else:
+        loop_key, metric = criterion.rsplit(".", 1)
+        v = ((row.get("loops") or {}).get(loop_key) or {}).get(metric) if isinstance(row.get("loops"), dict) else None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return float(v)
+
+
+def compare_evidence(rows, code, params, criterion, defaults_of):
+    """The proposal check over the evidence's result rows (runner rows: controller {code, params}, scenario, seed,
+    clock_offset_s, jitter_s, valid, energy_total_wh, loops {key: {metric: value}}). defaults_of(code) -> the
+    algorithm's default parameters. Returns the check document; raises ToolRefused with the reason."""
+    if not isinstance(criterion, str) or not CRITERION_RE.match(criterion):
+        raise ToolRefused("criterion must be energy_wh or <loop>.<%s>, e.g. air_temperature.rmsd_mid"
+                          % "|".join(CRITERION_METRICS))
+    known = {"energy_wh"} | {"%s.%s" % (k, m) for r in rows for k in (r.get("loops") or {}) for m in CRITERION_METRICS}
+    if criterion not in known:
+        raise ToolRefused("the evidence has no %s; it has %s" % (criterion, ", ".join(sorted(known))[:300]))
+    want = _setting_key(code, params, defaults_of(code))
+    by = {}                                          # setting -> {cell: [values]}
+    shown = {}
+    for r in rows:
+        ctl = r.get("controller") if isinstance(r.get("controller"), dict) else {}
+        if not isinstance(ctl.get("code"), str) or r.get("valid") is not True:
+            continue
+        v = _criterion_value(r, criterion)
+        if v is None:
+            continue
+        key = _setting_key(ctl["code"], ctl.get("params") or {}, defaults_of(ctl["code"]))
+        cell = canonical([r.get("scenario"), r.get("seed"), r.get("clock_offset_s") or 0, r.get("jitter_s") or 0])
+        by.setdefault(key, {}).setdefault(cell, []).append(v)
+        shown[key] = {"code": ctl["code"], "params": clean_obj(ctl.get("params") or {})}
+    ran = any(_setting_key((r.get("controller") or {}).get("code"), (r.get("controller") or {}).get("params") or {},
+                           defaults_of((r.get("controller") or {}).get("code"))) == want
+              for r in rows if isinstance(r.get("controller"), dict) and isinstance(r["controller"].get("code"), str))
+    if not ran:
+        raise ToolRefused("%s %s was not run in the evidence: propose a setting the campaigns ran" % (code, canonical(params)))
+    mine = by.get(want)
+    if not mine:
+        raise ToolRefused("%s %s has no valid run with %s in the evidence" % (code, canonical(params), criterion))
+    mean = lambda vals: sum(vals) / len(vals)
+    cell_mean = {k: {c: mean(v) for c, v in cells.items()} for k, cells in by.items()}
+    compared, worse = [], []
+    for key in sorted(by, key=lambda k: (k[0], k[1])):
+        if key == want:
+            continue
+        common = sorted(set(cell_mean[want]) & set(cell_mean[key]))
+        if not common:
+            continue
+        a = mean([cell_mean[want][c] for c in common])
+        b = mean([cell_mean[key][c] for c in common])
+        tol = CHECK_REL_TOL * max(abs(a), abs(b), 1e-12)
+        outcome = "better" if a < b - tol else ("worse" if a > b + tol else "tied")
+        entry = dict(shown[key], runs=len(common), proposed=_num(a), other=_num(b), outcome=outcome)
+        compared.append(entry)
+        if outcome == "worse":
+            worse.append(entry)
+    if not compared:
+        raise ToolRefused("the evidence runs no other setting on the same scenario, seed and clock offset as %s %s: "
+                          "nothing shows it does better" % (code, canonical(params)))
+    if worse:
+        w = min(worse, key=lambda e: e["other"])
+        raise ToolRefused("%s %s does not do better on %s (lower is better): %s %s has %s against its %s on the %d "
+                          "run(s) they share" % (code, canonical(params), criterion, w["code"], canonical(w["params"]),
+                                                 w["other"], w["proposed"], w["runs"]))
+    if not any(e["outcome"] == "better" for e in compared):
+        raise ToolRefused("%s %s ties every other setting on %s (%s): nothing shows it does better; choose a criterion "
+                          "on which the campaigns differ" % (code, canonical(params), criterion, compared[0]["proposed"]))
+    return {"criterion": criterion, "lower_is_better": True, "proposed_mean": _num(mean(list(cell_mean[want].values()))),
+            "proposed_runs": len(cell_mean[want]), "compared": compared[:CHECK_MAX_COMPARED],
+            "compared_total": len(compared), "by": "mcp-sim (the rationale is the model's own words)"}
+
 
 class LocalEstimator:
     """In-process estimate (R7) for PID / bang-bang / Q-learning specs with research/harness/campaign.py;
@@ -330,10 +430,13 @@ class SimServer:
             raise ToolRefused("evidence must name 1 to 5 finished campaigns of this session")
         if not self.repo_root:
             raise ToolRefused("this deployment cannot validate parameter sets")
-        problems = _load_params(self.repo_root).validate_params(code, params)
+        pmod = _load_params(self.repo_root)
+        problems = pmod.validate_params(code, params)
         if problems:
             raise ToolRefused("parameter set refused: %s" % "; ".join(problems)[:300])
-        docs = []
+        docs, rows = [], []
+        if len(set(ev)) != len(ev):
+            raise ToolRefused("evidence names a campaign twice")
         for cid in ev:
             c = self._own(ctx, cid)
             if self._progress(ctx, cid, c)["state"] != "done":
@@ -341,10 +444,17 @@ class SimServer:
             m = c["final"].get("manifest") or {}
             if not m.get("result_digest") or not m.get("spec_digest"):
                 raise ToolRefused("campaign %s has no result digest" % cid)
+            got = [r for r in (c["final"].get("rows") or []) if isinstance(r, dict)]
+            if not isinstance(m.get("runs"), int) or len(got) != m["runs"]:
+                raise ToolRefused("campaign %s: the server holds %d of its %s runs, and a proposal is compared on all "
+                                  "of them (at most 50 runs per campaign)" % (cid, len(got), m.get("runs")))
+            rows += got
             docs.append({"cid": cid, "spec_digest": m["spec_digest"], "result_digest": m["result_digest"]})
+        check = compare_evidence(rows, code, params, args.get("criterion"),
+                                 lambda c: pmod.defaults(c) if c in pmod.PARAMS else {})
         rationale = args.get("rationale")
         doc = {"kind": "parameter_set", "algorithm_code": code, "params": clean_obj(params),
-               "evidence": docs, "rationale": str(rationale)[:500] if rationale else ""}
+               "evidence": docs, "check": clean_obj(check), "rationale": str(rationale)[:500] if rationale else ""}
         return {"proposal": doc, "proposal_sha256": sha(canonical(doc)), "status": "proposed: waiting for the supervisor"}
 
 

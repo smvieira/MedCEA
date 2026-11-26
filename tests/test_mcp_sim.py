@@ -343,14 +343,37 @@ class ProposeTest(unittest.TestCase):
     """propose.parameter_set (research Phase 4a stage 7a): validated with params.py, backed by this session's
     finished campaigns, nothing written but the document the loop traces."""
 
-    def done(self):
+    @staticmethod
+    def row(code, params, seed, energy, rmsd, valid=True, offset=0.0):
+        """A runner row as research/harness/runner.run_scenario writes it (the spec's own params only)."""
+        return {"scenario": "research/harness/scenarios/smoke_air_temperature.yaml", "controller": {"code": code, "params": params},
+                "seed": seed, "clock_offset_s": offset, "jitter_s": 0.0, "valid": valid, "energy_total_wh": energy,
+                "loops": {"air_temperature": {"rmsd_mid": rmsd, "out_of_band": 0.0, "boundary_hugging": 0.0}}}
+
+    # the smoke campaign of 26 Nov 2026 (IF_THEN_ELSE, PID 10 and 30, seeds 1 and 2): PID 30 nearest the middle,
+    # IF_THEN_ELSE cheapest
+    ROWS = [row.__func__("IF_THEN_ELSE", {}, 1, 28.33, 1.6036), row.__func__("IF_THEN_ELSE", {}, 2, 28.33, 1.6034),
+            row.__func__("PID", {"cycle_time": 10.0}, 1, 85.13, 0.2885), row.__func__("PID", {"cycle_time": 10.0}, 2, 89.46, 0.3094),
+            row.__func__("PID", {"cycle_time": 30.0}, 1, 84.07, 0.2775), row.__func__("PID", {"cycle_time": 30.0}, 2, 88.39, 0.3001)]
+
+    def done(self, rows=None, runs=None):
         s, r, app = setup()
         cid = payload(call(app, "sim.run", {"spec": {"runs": 1}})[1])["cid"]          # 0.5 h: starts at once
-        r.final = {"state": "done", "cpu_hours": 0.4, "manifest": {"runs": 1, "result_digest": "d" * 64, "spec_digest": "s" * 64}}
+        rows = self.ROWS if rows is None else rows
+        r.final = {"state": "done", "cpu_hours": 0.4, "rows": rows,
+                   "manifest": {"runs": len(rows) if runs is None else runs, "result_digest": "d" * 64, "spec_digest": "s" * 64}}
         return s, app, cid
 
     def args(self, cid, **kw):
-        return dict({"algorithm_code": "PID", "params": {"cycle_time": 10.0}, "evidence": [cid], "rationale": "shorter"}, **kw)
+        return dict({"algorithm_code": "PID", "params": {"cycle_time": 30.0}, "evidence": [cid],
+                     "criterion": "air_temperature.rmsd_mid", "rationale": "longer"}, **kw)
+
+    def refused(self, app, args):
+        code, resp = call(app, "propose.parameter_set", args)
+        res = resp.get("result") or {}
+        self.assertTrue(res.get("isError"), resp)
+        self.assertNotIn("proposal_sha256", str(resp))
+        return json.loads(res["content"][0]["text"])["error"]
 
     def test_a_proposal(self):
         s, app, cid = self.done()
@@ -358,7 +381,13 @@ class ProposeTest(unittest.TestCase):
         p = payload(resp)
         self.assertEqual(code, 200)
         self.assertEqual(p["proposal"]["evidence"], [{"cid": cid, "spec_digest": "s" * 64, "result_digest": "d" * 64}])
-        self.assertEqual(p["proposal"]["params"], {"cycle_time": 10.0})
+        self.assertEqual(p["proposal"]["params"], {"cycle_time": 30.0})
+        chk = p["proposal"]["check"]
+        self.assertEqual((chk["criterion"], chk["lower_is_better"], chk["proposed_runs"], chk["compared_total"]),
+                         ("air_temperature.rmsd_mid", True, 2, 2))
+        self.assertEqual([(e["code"], e["params"], e["outcome"], e["runs"]) for e in chk["compared"]],
+                         [("IF_THEN_ELSE", {}, "better", 2), ("PID", {"cycle_time": 10.0}, "better", 2)])
+        self.assertEqual(chk["proposed_mean"], 0.2888)
         self.assertRegex(p["proposal_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload(call(app, "propose.parameter_set", self.args(cid))[1])["proposal_sha256"], p["proposal_sha256"])
 
@@ -369,6 +398,63 @@ class ProposeTest(unittest.TestCase):
                     self.args(cid, evidence=["cdeadbeefdeadbeefdead"]), self.args(cid, params=[1])):
             code, resp = call(app, "propose.parameter_set", bad)
             self.assertTrue(resp["result"]["isError"] if "result" in resp else True, bad)
+
+    def test_the_check_refuses_what_the_evidence_contradicts(self):
+        """E57 (26 Nov 2026): the rationale backed PID on energy while IF_THEN_ELSE used a third of it."""
+        s, app, cid = self.done()
+        t = self.refused(app, self.args(cid, criterion="energy_wh"))
+        self.assertIn('PID {"cycle_time":30.0} does not do better on energy_wh (lower is better): IF_THEN_ELSE {} has 28.33 '
+                      "against its 86.23 on the 2 run(s) they share", t)
+        t = self.refused(app, self.args(cid, params={"cycle_time": 10.0}))
+        self.assertIn('PID {"cycle_time":30.0} has 0.2888 against its 0.2989', t)
+        # the cheapest setting on energy passes, and an int and a float of the same value are one setting
+        p = payload(call(app, "propose.parameter_set", self.args(cid, algorithm_code="IF_THEN_ELSE", params={}, criterion="energy_wh"))[1])
+        self.assertEqual([e["outcome"] for e in p["proposal"]["check"]["compared"]], ["better", "better"])
+        self.assertIn("proposal", payload(call(app, "propose.parameter_set", self.args(cid, params={"cycle_time": 30}))[1]))
+
+    def test_the_check_needs_a_setting_the_evidence_ran_and_compared(self):
+        s, app, cid = self.done()
+        self.assertIn("was not run in the evidence", self.refused(app, self.args(cid, params={"cycle_time": 20.0})))
+        self.assertIn("criterion must be", self.refused(app, self.args(cid, criterion="rmsd")))
+        self.assertIn("criterion must be", self.refused(app, dict(self.args(cid), criterion=None)))
+        self.assertIn("the evidence has no co2.rmsd_mid", self.refused(app, self.args(cid, criterion="co2.rmsd_mid")))
+        self.assertIn("ties every other setting on air_temperature.out_of_band",
+                      self.refused(app, self.args(cid, criterion="air_temperature.out_of_band")))
+        s, app, cid = self.done(rows=[r for r in self.ROWS if r["controller"]["code"] == "PID" and r["controller"]["params"]["cycle_time"] == 30.0])
+        self.assertIn("runs no other setting on the same scenario, seed and clock offset", self.refused(app, self.args(cid)))
+        # runs on other seeds share nothing: no comparison
+        other = [dict(r, seed=r["seed"] + 10) for r in self.ROWS if r["controller"]["code"] == "IF_THEN_ELSE"]
+        s, app, cid = self.done(rows=[r for r in self.ROWS if r["controller"]["code"] == "PID" and r["controller"]["params"]["cycle_time"] == 30.0] + other)
+        self.assertIn("runs no other setting", self.refused(app, self.args(cid)))
+
+    def test_invalid_runs_do_not_count(self):
+        rows = [dict(r, valid=False) if r["controller"]["params"].get("cycle_time") == 30.0 else r for r in self.ROWS]
+        s, app, cid = self.done(rows=rows)
+        self.assertIn("has no valid run with air_temperature.rmsd_mid", self.refused(app, self.args(cid)))
+        # an invalid better run of another setting is no comparison: only the shared valid runs are
+        rows = [dict(r, valid=False, loops={"air_temperature": {"rmsd_mid": 0.0}}) if r["controller"]["params"].get("cycle_time") == 10.0
+                else r for r in self.ROWS]
+        s, app, cid = self.done(rows=rows)
+        chk = payload(call(app, "propose.parameter_set", self.args(cid))[1])["proposal"]["check"]
+        self.assertEqual([e["code"] for e in chk["compared"]], ["IF_THEN_ELSE"])
+
+    def test_the_check_reads_every_run(self):
+        s, app, cid = self.done(runs=60)                 # sim_job keeps the first 50 rows of a campaign
+        self.assertIn("the server holds 6 of its 60 runs", self.refused(app, self.args(cid)))
+        s, app, cid = self.done()
+        self.assertIn("names a campaign twice", self.refused(app, self.args(cid, evidence=[cid, cid])))
+
+    def test_defaults_fill_a_row_s_parameters(self):
+        """A row holds only the spec's own parameters: PID {} is PID with every default, cycle_time 10 included."""
+        rows = [self.row("PID", {}, 1, 80.0, 0.2), self.row("PID", {"cycle_time": 30.0}, 1, 84.0, 0.3)]
+        s, app, cid = self.done(rows=rows)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("p", os.path.join(ROOT_DIR, "schd", "cea", "algorithms", "params.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        full = m.defaults("PID")
+        p = payload(call(app, "propose.parameter_set", self.args(cid, params=full))[1])
+        self.assertEqual(p["proposal"]["check"]["compared"][0]["params"], {"cycle_time": 30.0})
 
     def test_running_campaign_is_no_evidence(self):
         s, r, app = setup()
@@ -401,6 +487,24 @@ class ProfileTools(unittest.TestCase):
         for step in self.p["script"]:
             if step.get("tool"):
                 self.assertIn(step["tool"], self.p["tools"])
+
+    def test_every_shipped_profile_loads_and_has_its_skill(self):
+        from research.agents import loop
+        a = os.path.join(self.root, "research", "agents")
+        names = sorted(f[:-5] for f in os.listdir(os.path.join(a, "profiles")) if f.endswith(".yaml"))
+        self.assertIn("compare_controllers_gpu", names)
+        for n in names:
+            p = loop.load_profile(os.path.join(a, "profiles", n + ".yaml"))
+            self.assertEqual(p["name"], n)
+            self.assertEqual(sorted(set(p["tools"]) - self.served), [], n)
+            self.assertTrue(os.path.isfile(os.path.join(a, "skills", p.get("skill", "controller_campaign") + ".md")), n)
+        gpu = loop.load_profile(os.path.join(a, "profiles", "compare_controllers_gpu.yaml"))
+        self.assertEqual((gpu["backend"], gpu["caps"]["context_tokens"]), ("gpu", 12000))
+        self.assertEqual(gpu["finish_after"], ["propose.parameter_set"])
+
+    def test_the_scripted_proposal_names_a_criterion(self):
+        step = next(s for s in self.p["script"] if s.get("tool") == "propose.parameter_set")
+        self.assertEqual((step["args"]["params"], step["args"]["criterion"]), ({"cycle_time": 30.0}, "air_temperature.rmsd_mid"))
 
     def test_the_scripted_spec_estimates(self):
         step = next(s for s in self.p["script"] if s.get("tool") == "sim.estimate")

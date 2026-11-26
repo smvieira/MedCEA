@@ -9,7 +9,7 @@ tools: [sim.estimate, sim.run, sim.status, sim.results, lake.snapshots, lake.sum
 task: >-
   Compare IF_THEN_ELSE (no parameters) with PID at cycle_time 10.0 and 30.0 on
   research/harness/scenarios/smoke_air_temperature.yaml, seed 1, clock offset 0. Estimate it, run it, read its results,
-  and propose the PID setting that did better, with the campaign as evidence.
+  and propose the PID setting that did better on air_temperature.rmsd_mid, with the campaign as evidence.
 caps:
   turns: 8
   prompt_tokens: 32000

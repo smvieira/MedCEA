@@ -176,6 +176,32 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn("./apps/research-agents/deploy.sh", r["error"])
         self.assertEqual((ph.calls, k.jobs), ([], {}))
 
+    def test_the_gpu_profile_on_its_own_endpoint(self):
+        """compare_controllers_gpu (26 Nov 2026): 12000 tokens of context on the endpoint named gpu; refused where gpu
+        is not enabled or holds less than its caps.context_tokens + loop.CONTEXT_MARGIN (96)."""
+        o, k, ph, sh = self.picker()
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_gpu"})
+        self.assertEqual((st, r["endpoint"], ph.calls[0][2]["backend"]), (201, "gpu", "gpu"))
+        self.assertEqual(ph.calls[0][2]["profile"], "compare_controllers_gpu")
+        o, k, ph, sh = self.picker()
+        o.cfg = dict(o.cfg, endpoints=["local"])
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_gpu"})
+        self.assertEqual(st, 409)
+        self.assertIn("uses the endpoint gpu, which is not enabled", r["error"])
+        small = [dict(i, context=8192) if i["name"] == "gpu" else i for i in self.INVENTORY]
+        o.cfg = dict(o.cfg, endpoints=["local", "gpu"], inventory=small)
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_gpu"})
+        self.assertEqual(st, 409)
+        self.assertEqual(r["error"], "the profile compare_controllers_gpu needs 12000 tokens of context and the endpoint gpu "
+                                     "holds 8096 (8192 less the chat template's 96): choose another profile, or this one "
+                                     "with an endpoint that holds more")
+        self.assertEqual((ph.calls, k.jobs), ([], {}))
+        # the local profile fits the local model exactly (4000 = 4096 - 96); the picker's choice is the loop's to cap
+        o, k, ph, sh = self.picker()
+        self.assertEqual(o.start(WHO, "T", {"profile": "compare_controllers_local"})[0], 201)
+        o, k, ph, sh = self.picker()
+        self.assertEqual(o.start(WHO, "T", {"profile": "compare_controllers_gpu", "endpoint": "local"})[0], 201)
+
     def test_a_scripted_session_is_unchanged_by_a_gateway(self):
         o, k, ph, sh = make()
         o.cfg = dict(o.cfg, model_gateway_url="http://g:8120")

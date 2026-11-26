@@ -1,0 +1,27 @@
+# The full controller comparison for an endpoint with a larger context (research Phase 4d, 26 Nov 2026): the five
+# controllers on the smoke scenario over three seeds and two clock offsets (36 runs, about 0.1 CPU-hours: no gate),
+# then one proposal that mcp-sim checks against the campaign on the criterion it names. Its endpoint is called gpu
+# (RESEARCH_ENDPOINTS, config.env): the orchestrator refuses this profile where no endpoint of that name is enabled,
+# or where it holds fewer than caps.context_tokens + 96 tokens. Another endpoint can be chosen with the model picker.
+name: compare_controllers_gpu
+backend: gpu
+skill: controller_campaign_gpu
+tools: [sim.estimate, sim.run, sim.status, sim.results, lake.snapshots, lake.summary, lake.catalogue, propose.parameter_set]
+task: >-
+  Compare IF_THEN_ELSE (no parameters), PID at cycle_time 10.0 and 30.0, FLC, MPC and Q_LEARNING (their default
+  parameters) on research/harness/scenarios/smoke_air_temperature.yaml with seeds 1, 2 and 3 and clock offsets 0
+  and 5 seconds, in one campaign. Estimate it, run it, read its results, then propose the setting that keeps the
+  air temperature closest to the middle of its band (criterion air_temperature.rmsd_mid), with the campaign as
+  evidence. In the rationale, say how that setting compares on energy_wh, with the numbers from the results.
+caps:
+  turns: 14
+  prompt_tokens: 150000
+  output_tokens: 8000
+  cpu_hours: 2
+  wall_h: 1
+  turn_timeout_s: 300
+  context_tokens: 12000
+  reserve_tokens: 1000
+checkpoint_every: 4
+finish_after: [propose.parameter_set]
+nudges: 1
