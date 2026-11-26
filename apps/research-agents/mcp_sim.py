@@ -17,6 +17,7 @@ session's cid is "no such campaign". The runner is an interface (stage 6 supplie
   status(cid) -> {state running|done|failed, cpu_hours, manifest?, rows?, error?}
   pool                                           -> worker count (int)
 An Estimator has estimate(spec, sid=None) -> {cpu_hours, calibration_h, runs, inprocess}."""
+import copy
 import importlib.util
 import math
 import os
@@ -112,7 +113,10 @@ def summarise_row(r):
 # The proposal check (26 Nov 2026, E57: a proposal's rationale said PID used less energy than IF_THEN_ELSE while its own
 # evidence read 84.07 Wh against 28.33). A proposal names its criterion and mcp-sim, not the model, compares: the
 # proposed setting against every other setting of its evidence on the runs they share (scenario, seed, clock offset,
-# jitter; valid runs only), mean of the criterion, lower is better for all four. It is refused when it was not run,
+# jitter; valid runs only), mean of the criterion, lower is better for all four. A run's scenario is its identity, not
+# its name: the resolved scenario (campaign.resolve_spec, as the Job ran it) and the campaign's code (manifest.code),
+# so two campaigns' runs meet only on the same scenario under the same code; a campaign whose scenarios cannot be
+# resolved is compared within itself (two inline scenarios may share a name across campaigns). It is refused when it was not run,
 # has no valid run, shares no run with another setting, another setting does better on the shared runs, or it only
 # ties (better than none). The comparison is part of the proposal document, so the supervisor reads the server's
 # numbers; the rationale stays the model's own words.
@@ -143,7 +147,8 @@ def _criterion_value(row, criterion):
 
 def compare_evidence(rows, code, params, criterion, defaults_of):
     """The proposal check over the evidence's result rows (runner rows: controller {code, params}, scenario, seed,
-    clock_offset_s, jitter_s, valid, energy_total_wh, loops {key: {metric: value}}). defaults_of(code) -> the
+    clock_offset_s, jitter_s, valid, energy_total_wh, loops {key: {metric: value}}; t_propose adds scenario_id, the
+    scenario's identity, which the cells use in place of the name). defaults_of(code) -> the
     algorithm's default parameters. Returns the check document; raises ToolRefused with the reason."""
     if not isinstance(criterion, str) or not CRITERION_RE.match(criterion):
         raise ToolRefused("criterion must be energy_wh or <loop>.<%s>, e.g. air_temperature.rmsd_mid"
@@ -162,7 +167,8 @@ def compare_evidence(rows, code, params, criterion, defaults_of):
         if v is None:
             continue
         key = _setting_key(ctl["code"], ctl.get("params") or {}, defaults_of(ctl["code"]))
-        cell = canonical([r.get("scenario"), r.get("seed"), r.get("clock_offset_s") or 0, r.get("jitter_s") or 0])
+        cell = canonical([r.get("scenario_id", r.get("scenario")), r.get("seed"), r.get("clock_offset_s") or 0,
+                          r.get("jitter_s") or 0])
         by.setdefault(key, {}).setdefault(cell, []).append(v)
         shown[key] = {"code": ctl["code"], "params": clean_obj(ctl.get("params") or {})}
     ran = any(_setting_key((r.get("controller") or {}).get("code"), (r.get("controller") or {}).get("params") or {},
@@ -413,6 +419,22 @@ class SimServer:
                 "result_digest": m.get("result_digest"), "spec_digest": m.get("spec_digest"),
                 "cpu_hours": out.get("cpu_hours"), "loop_metrics": list(LOOP_METRICS), "top": clean_obj(rows)}
 
+    def _scenario_ids(self, c):
+        """name -> identity (sha256) of each scenario a campaign ran: the scenario as campaign.resolve_spec resolves it
+        (files inlined, pins resolved) with the campaign's code (manifest.code); None when it cannot be resolved."""
+        try:
+            if self.repo_root not in sys.path:
+                sys.path.insert(0, self.repo_root)
+            from research.harness import campaign
+            s = campaign.resolve_spec(copy.deepcopy(c["spec"]), base_dir=self.repo_root, allow_dirty=True,
+                                      repo_root=self.repo_root)
+            code = sha(canonical((c["final"].get("manifest") or {}).get("code") or {}))
+            return {sc["name"]: sha(canonical([sc, code])) for sc in s["scenarios"]}
+        except Exception as e:      # compared within the campaign only; the reason is logged, never the spec
+            sys.stderr.write("mcp-sim: a campaign's scenarios are not resolved (%s: %s): its runs are compared "
+                             "within it only\n" % (type(e).__name__, str(e)[:200]))
+            return None
+
     def t_propose(self, ctx, args):
         """A candidate parameter set (research Phase 4a stage 7a). Nothing is written to production: the
         result is the proposal document; the agent loop traces the `proposal` event with its digest and the
@@ -444,7 +466,9 @@ class SimServer:
             m = c["final"].get("manifest") or {}
             if not m.get("result_digest") or not m.get("spec_digest"):
                 raise ToolRefused("campaign %s has no result digest" % cid)
-            got = [r for r in (c["final"].get("rows") or []) if isinstance(r, dict)]
+            ids = self._scenario_ids(c)
+            got = [dict(r, scenario_id=(ids or {}).get(r.get("scenario")) or "campaign:%s:%s" % (cid, r.get("scenario")))
+                   for r in (c["final"].get("rows") or []) if isinstance(r, dict)]
             if not isinstance(m.get("runs"), int) or len(got) != m["runs"]:
                 raise ToolRefused("campaign %s: the server holds %d of its %s runs, and a proposal is compared on all "
                                   "of them (at most 50 runs per campaign)" % (cid, len(got), m.get("runs")))

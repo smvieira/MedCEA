@@ -132,9 +132,10 @@ class Orchestrator:
         if backend != "scripted" and backend not in self.endpoints():
             return 409, {"error": "this profile uses the endpoint %s, which is not enabled on this install (RESEARCH_ENDPOINTS)"
                                   % backend}
-        if backend != "scripted" and chosen is None:
-            # a profile on its own endpoint keeps its caps.context_tokens (loop.context_cap): refuse one this install's
-            # endpoint cannot hold (e.g. compare_controllers_gpu on an endpoint named gpu with a smaller context)
+        if backend != "scripted" and backend == prof["backend"]:
+            # a profile on its own endpoint, left out or named (the picker, reexecute), keeps its caps.context_tokens
+            # (loop.context_cap): refuse one this install's endpoint cannot hold (e.g. compare_controllers_gpu on an
+            # endpoint named gpu with a smaller context)
             own = next((i for i in self.inventory() if i["name"] == backend), None)
             ctx = own.get("context") if own else None
             if isinstance(ctx, int) and not isinstance(ctx, bool):

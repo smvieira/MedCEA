@@ -196,6 +196,11 @@ class LifecycleTest(unittest.TestCase):
                                      "holds 8096 (8192 less the chat template's 96): choose another profile, or this one "
                                      "with an endpoint that holds more")
         self.assertEqual((ph.calls, k.jobs), ([], {}))
+        # naming the profile's own endpoint (the picker, reexecute) is checked the same way (review of 26 Nov 2026)
+        st, r = o.start(WHO, "T", {"profile": "compare_controllers_gpu", "endpoint": "gpu"})
+        self.assertEqual(st, 409)
+        self.assertIn("needs 12000 tokens of context and the endpoint gpu holds 8096", r["error"])
+        self.assertEqual((ph.calls, k.jobs), ([], {}))
         # the local profile fits the local model exactly (4000 = 4096 - 96); the picker's choice is the loop's to cap
         o, k, ph, sh = self.picker()
         self.assertEqual(o.start(WHO, "T", {"profile": "compare_controllers_local"})[0], 201)

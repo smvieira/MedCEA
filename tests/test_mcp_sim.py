@@ -346,7 +346,7 @@ class ProposeTest(unittest.TestCase):
     @staticmethod
     def row(code, params, seed, energy, rmsd, valid=True, offset=0.0):
         """A runner row as research/harness/runner.run_scenario writes it (the spec's own params only)."""
-        return {"scenario": "research/harness/scenarios/smoke_air_temperature.yaml", "controller": {"code": code, "params": params},
+        return {"scenario": "smoke_air_temperature", "controller": {"code": code, "params": params},
                 "seed": seed, "clock_offset_s": offset, "jitter_s": 0.0, "valid": valid, "energy_total_wh": energy,
                 "loops": {"air_temperature": {"rmsd_mid": rmsd, "out_of_band": 0.0, "boundary_hugging": 0.0}}}
 
@@ -455,6 +455,56 @@ class ProposeTest(unittest.TestCase):
         full = m.defaults("PID")
         p = payload(call(app, "propose.parameter_set", self.args(cid, params=full))[1])
         self.assertEqual(p["proposal"]["check"]["compared"][0]["params"], {"cycle_time": 30.0})
+
+    def test_runs_of_two_campaigns_meet_only_on_the_same_scenario(self):
+        """Review of 26 Nov 2026: the cells were keyed on the scenario's name, so a campaign's inline scenario of
+        another length under the same name counted as the same runs. A scenario is now its resolved content and the
+        campaign's code: the same file in two campaigns compares, an inline variant under its name does not."""
+        import yaml
+
+        class Est:
+            def estimate(self, spec, sid=None):
+                return {"cpu_hours": 0.1, "calibration_h": 0.01, "runs": 1}
+
+        class Runner:
+            pool, finals = 4, {}
+
+            def start(self, cid, spec, cap_h, deadline_s, sid=None):
+                pass
+
+            def status(self, cid):
+                return self.finals[cid]
+
+        sess, runner = FakeSession(TOOLS), Runner()
+        app = mcp_sim.SimServer(sess, Est(), runner, repo_root=ROOT_DIR).app
+        path = "research/harness/scenarios/smoke_air_temperature.yaml"
+        with open(os.path.join(ROOT_DIR, path)) as f:
+            inline = dict(yaml.safe_load(f), duration_h=24)
+        code = {"commit": "c" * 40}
+
+        def camp(spec, rows):
+            cid = payload(call(app, "sim.run", {"spec": spec})[1])["cid"]
+            runner.finals[cid] = {"state": "done", "cpu_hours": 0.1, "rows": rows, "manifest": {
+                "runs": len(rows), "result_digest": "d" * 64, "spec_digest": cid.ljust(64, "s"), "code": code}}
+            return cid
+
+        def ctl(c, p=None):
+            return {"scenarios": [path], "controllers": [dict({"code": c}, **({"params": p} if p else {}))], "seeds": [1]}
+
+        pid = camp(ctl("PID", {"cycle_time": 30.0}), [self.row("PID", {"cycle_time": 30.0}, 1, 84.07, 0.2775)])
+        ite = camp(ctl("IF_THEN_ELSE"), [self.row("IF_THEN_ELSE", {}, 1, 28.33, 1.6036)])
+        longer = camp({"scenarios": [inline], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]},
+                      [self.row("IF_THEN_ELSE", {}, 1, 600.0, 9.0)])
+        chk = payload(call(app, "propose.parameter_set", self.args(pid, evidence=[pid, ite]))[1])["proposal"]["check"]
+        self.assertEqual([(e["code"], e["runs"], e["other"]) for e in chk["compared"]], [("IF_THEN_ELSE", 1, 1.604)])
+        self.assertIn("runs no other setting", self.refused(app, self.args(pid, evidence=[pid, longer])))
+        # a campaign whose scenarios cannot be resolved is compared within itself only
+        bad = camp({"scenarios": ["nosuch.yaml"], "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]},
+                   [self.row("IF_THEN_ELSE", {}, 1, 28.33, 1.6036)])
+        self.assertIn("runs no other setting", self.refused(app, self.args(pid, evidence=[pid, bad])))
+        # another code under the same file is another scenario too
+        runner.finals[ite]["manifest"]["code"] = {"commit": "e" * 40}
+        self.assertIn("runs no other setting", self.refused(app, self.args(pid, evidence=[pid, ite])))
 
     def test_running_campaign_is_no_evidence(self):
         s, r, app = setup()
