@@ -293,7 +293,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo ""
     echo -e "  ${CYAN}rsllm${NC} the local model research-llm (Phase 4b): NAMESPACE (SKIP while RESEARCH_LOCAL_MODEL is not true)"
     echo -e "         FAIL when the Deployment's or /props' model is not the pin in apps/research-model/pins.json;"
-    echo -e "         WARN when the pod is not Ready, /health or /props do not answer, the context is not 4096 or generation is below half the bench's; it generates nothing"
+    echo -e "         WARN when the pod is not Ready, /health or /props do not answer, the context is not 4096 or generation since start averages below half the bench's rate at 4096 tokens of context; it generates nothing"
     echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
@@ -3814,7 +3814,12 @@ SQL
 # rsllm (Local model; research Phase 4b stage 1, design rs4 5.4): research-llm, the local model's server in
 # research-gw. Read-only and it generates nothing: Deployment env pin = apps/research-model/pins.json, the pod
 # Ready, /health, /props (alias carrying the pin, context 4096, a chat template), and /metrics against the
-# bench's baseline (WARN below half of it). SKIP while RESEARCH_LOCAL_MODEL is not true.
+# bench (WARN when generation since the server started averages below half the bench's tg128 rate at the deployed
+# context). The rate is tokens_predicted_total / tokens_predicted_seconds_total: llama-server's
+# predicted_tokens_seconds covers only the time since the previous /metrics read, so it is 0 whenever nothing was
+# generated in between (it made this check WARN "0 tok/s", 26 Nov 2026). The bench's empty-context rate is no
+# baseline either: a session runs with thousands of tokens of context, which slows generation severalfold.
+# SKIP while RESEARCH_LOCAL_MODEL is not true.
 check_rsllm() {
     local name="$1" ns="${2:-${NAMESPACE:-medcea}}" gwns rc=0 out pin want_sha want_alias want_ctx base_gen
     local warns=() fails=() oks=() line phase ip ready got_sha body info metrics rate predicted
@@ -3824,16 +3829,21 @@ check_rsllm() {
     gwns="$(NAMESPACE="$ns" REPO_ROOT="$SCRIPT_DIR" bash -c 'source "$REPO_ROOT/infra/lib-policy-tools.sh"; zone_namespace research-gw' 2>/dev/null)"
     pin="$(python3 - "$SCRIPT_DIR/apps/research-model/pins.json" "$SCRIPT_DIR/research/agents/bench" <<'PY' 2>/dev/null
 import glob, json, sys
+CTX = 4096
 p = json.load(open(sys.argv[1]))["models"]["4b"]
 base = ""
+# the bench's best generation rate (tg*) of the 4b model at the deployed context, from the newest file that has one
 for f in sorted(glob.glob(sys.argv[2] + "/*.json"), reverse=True):
     try:
-        g = json.load(open(f))["bench"]["best"]["4b"]["gen_tok_s"]
-        base = "%g" % g
-        break
+        rows = json.load(open(f))["bench"]["rows"]
+        g = [float(r["tok_s"]) for r in rows if r.get("model") == "4b" and str(r.get("test", "")).startswith("tg")
+             and r.get("depth") == CTX and float(r.get("tok_s") or 0) > 0]
     except Exception:
         continue
-print("%s|%s-%s|4096|%s" % (p["sha256"], p["file"][:-5].lower(), p["sha256"][:12], base))
+    if g:
+        base = "%g" % max(g)
+        break
+print("%s|%s-%s|%d|%s" % (p["sha256"], p["file"][:-5].lower(), p["sha256"][:12], CTX, base))
 PY
 )"
     IFS='|' read -r want_sha want_alias want_ctx base_gen <<<"$pin"
@@ -3890,12 +3900,19 @@ except Exception:
             rc=0
             metrics="$(curl -s -m "$TIMEOUT" "http://${ip}:8080/metrics" 2>/dev/null)" || rc=$?
             if [[ $rc -eq 0 && -n "$metrics" ]]; then
-                rate="$(awk '$1 == "llamacpp:predicted_tokens_seconds" {print $2}' <<<"$metrics" | head -n1)"
+                local gen_s
                 predicted="$(awk '$1 == "llamacpp:tokens_predicted_total" {print $2}' <<<"$metrics" | head -n1)"
-                if [[ -n "$rate" && -n "$base_gen" && "${predicted%.*}" =~ ^[0-9]+$ && "${predicted%.*}" -gt 0 ]]; then
-                    if awk -v r="$rate" -v b="$base_gen" 'BEGIN { exit !(r + 0 < 0.5 * b) }'; then
-                        warns+=("generation runs at $rate tok/s, below half of the bench's $base_gen tok/s")
-                    else oks+=("generation $rate tok/s (bench $base_gen)"); fi
+                gen_s="$(awk '$1 == "llamacpp:tokens_predicted_seconds_total" {print $2}' <<<"$metrics" | head -n1)"
+                if [[ "$predicted" =~ ^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ && "$gen_s" =~ ^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] \
+                   && awk -v n="$predicted" -v t="$gen_s" 'BEGIN { exit !(n + 0 > 0 && t + 0 > 0) }'; then
+                    rate="$(awk -v n="$predicted" -v t="$gen_s" 'BEGIN { printf "%.2f", n / t }')"
+                    if [[ -z "$base_gen" ]]; then
+                        oks+=("generation $rate tok/s since start (no bench rate at $want_ctx tokens of context to compare)")
+                    elif awk -v r="$rate" -v b="$base_gen" 'BEGIN { exit !(r + 0 < 0.5 * b) }'; then
+                        warns+=("generation has averaged $rate tok/s since the model server started, below half of the bench's $base_gen tok/s at $want_ctx tokens of context")
+                    else oks+=("generation $rate tok/s since start (bench $base_gen at $want_ctx tokens of context)"); fi
+                else
+                    oks+=("no generation since start")
                 fi
             fi
         fi

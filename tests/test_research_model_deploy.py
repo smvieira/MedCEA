@@ -532,7 +532,8 @@ if v is None:
 sys.stdout.write(v)
 '''
 PROPS = json.dumps({"model_alias": ALIAS, "chat_template": "{% if tools %}x{% endif %}", "default_generation_settings": {"n_ctx": 4096}})
-METRICS = "llamacpp:predicted_tokens_seconds 3.2\nllamacpp:tokens_predicted_total 900\n"
+# predicted_tokens_seconds is the rate since the previous /metrics read (0 when nothing ran since): never used
+METRICS = "llamacpp:predicted_tokens_seconds 0\nllamacpp:tokens_predicted_total 900\nllamacpp:tokens_predicted_seconds_total 900\n"
 
 
 class Health(unittest.TestCase):
@@ -547,7 +548,14 @@ class Health(unittest.TestCase):
         os.makedirs(cls.t.path("apps", "research-model"), exist_ok=True)
         shutil.copy(os.path.join(APP, "pins.json"), cls.t.path("apps", "research-model", "pins.json"))
         os.makedirs(cls.t.path("research", "agents", "bench"), exist_ok=True)
-        json.dump({"bench": {"best": {"4b": {"gen_tok_s": 3.8}}}}, open(cls.t.path("research", "agents", "bench", "2026-11-21.json"), "w"))
+        rows = [{"model": "4b", "test": "tg128", "depth": 0, "tok_s": 3.8},
+                {"model": "4b", "test": "tg128", "depth": 4096, "tok_s": 0.7},
+                {"model": "4b", "test": "tg128", "depth": 4096, "tok_s": 0.74},
+                {"model": "8b", "test": "tg128", "depth": 4096, "tok_s": 0.6},
+                {"model": "4b", "test": "pp512", "depth": 4096, "tok_s": 11.0}]
+        json.dump({"bench": {"best": {"4b": {"gen_tok_s": 3.8}}, "rows": rows}}, open(cls.t.path("research", "agents", "bench", "2026-11-21.json"), "w"))
+        # a newer report without bench rows (an eval report) is passed over
+        json.dump({"eval": {}}, open(cls.t.path("research", "agents", "bench", "2026-11-23.json"), "w"))
 
     @classmethod
     def tearDownClass(cls):
@@ -571,7 +579,7 @@ class Health(unittest.TestCase):
         return r
 
     def test_ok(self):
-        self.assertEqual(self.check(), "OK|Local model|research-llm runs the pinned model; model pin %s matches;/health ok;alias is the pin's;context 4096;generation 3.2 tok/s (bench 3.8)" % SHA[:12])
+        self.assertEqual(self.check(), "OK|Local model|research-llm runs the pinned model; model pin %s matches;/health ok;alias is the pin's;context 4096;generation 1.00 tok/s since start (bench 0.74 at 4096 tokens of context)" % SHA[:12])
 
     def test_skips(self):
         self.assertTrue(self.check(local="false").startswith("SKIP|Local model|the local model is switched off"))
@@ -595,9 +603,35 @@ class Health(unittest.TestCase):
         self.assertTrue(r.startswith("WARN|"), r)
         self.assertIn("the context is 16384 tokens, the decision is 4096", r)
         self.assertIn("no chat template", r)
-        self.assertIn("below half of the bench's 3.8 tok/s", self.check(urls={"/metrics": "llamacpp:predicted_tokens_seconds 1.0\nllamacpp:tokens_predicted_total 50\n"}))
+        r = self.check(urls={"/metrics": "llamacpp:predicted_tokens_seconds 5.0\nllamacpp:tokens_predicted_total 50\nllamacpp:tokens_predicted_seconds_total 200\n"})
+        self.assertTrue(r.startswith("WARN|"), r)
+        self.assertIn("generation has averaged 0.25 tok/s since the model server started, below half of the bench's 0.74 tok/s at 4096 tokens of context", r)
         # no generation yet: nothing to judge
-        self.assertTrue(self.check(urls={"/metrics": "llamacpp:predicted_tokens_seconds 0\nllamacpp:tokens_predicted_total 0\n"}).startswith("OK|"))
+        r = self.check(urls={"/metrics": "llamacpp:predicted_tokens_seconds 0\nllamacpp:tokens_predicted_total 0\nllamacpp:tokens_predicted_seconds_total 0\n"})
+        self.assertTrue(r.startswith("OK|"), r)
+        self.assertIn("no generation since start", r)
+
+    def test_rate_is_the_average_since_start_not_the_last_scrape(self):
+        # 26 Nov 2026: 4261 tokens in 3273.74 s, and 0 since the previous /metrics read
+        r = self.check(urls={"/metrics": "llamacpp:predicted_tokens_seconds 0\nllamacpp:tokens_predicted_total 4261\nllamacpp:tokens_predicted_seconds_total 3273.74\n"})
+        self.assertTrue(r.startswith("OK|"), r)
+        self.assertIn("generation 1.30 tok/s since start (bench 0.74 at 4096 tokens of context)", r)
+        r = self.check(urls={"/metrics": "llamacpp:tokens_predicted_total 4.261e+03\nllamacpp:tokens_predicted_seconds_total 3.27374e+03\n"})
+        self.assertIn("generation 1.30 tok/s since start", r)
+
+    def test_rate_without_a_bench_row_at_the_context(self):
+        p = self.t.path("research", "agents", "bench", "2026-11-21.json")
+        with open(p) as f:
+            keep = f.read()
+        try:
+            with open(p, "w") as f:
+                json.dump({"bench": {"best": {"4b": {"gen_tok_s": 3.8}}, "rows": [{"model": "4b", "test": "tg128", "depth": 0, "tok_s": 3.8}]}}, f)
+            r = self.check(urls={"/metrics": "llamacpp:tokens_predicted_total 50\nllamacpp:tokens_predicted_seconds_total 200\n"})
+            self.assertTrue(r.startswith("OK|"), r)
+            self.assertIn("generation 0.25 tok/s since start (no bench rate at 4096 tokens of context to compare)", r)
+        finally:
+            with open(p, "w") as f:
+                f.write(keep)
 
 
 if __name__ == "__main__":
