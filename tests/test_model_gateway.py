@@ -446,17 +446,29 @@ class EndpointTest(unittest.TestCase):
         m = body["messages"]
         self.assertTrue(m[0]["content"].startswith("SYS\n\n# Tools"))
         self.assertIn('"name":"sim_run"', m[0]["content"])
-        self.assertEqual(m[2], {"role": "assistant", "content": 'First.\n<tool_call>\n{"arguments":{},"name":"lake_snapshots"}\n</tool_call>'})
+        self.assertEqual(m[2], {"role": "assistant", "content": 'First.\n<tool_call>\n{"name":"lake_snapshots","arguments":{}}\n</tool_call>'})
         self.assertEqual(m[3], {"role": "user", "content": "<tool_response>\n<tool_result>[]</tool_result>\n</tool_response>"})
         self.assertEqual(self.remote.headers[-1].get("Authorization"), "Bearer k-123")
         rq = [e for e in self.sess.events if e["event"] == "turn_request"][-1]["payload"]
         self.assertEqual((rq["flags"]["tools"], rq["flags"]["enable_thinking"]), ("text", False))
+
+    def test_an_unreadable_call_is_quoted_within_the_agents_limit(self):
+        long = '{"name": "sim_run", "arguments": {"spec": ' + '{"code": "PID", "params": {}}, ' * 20
+        e = gateway.unreadable_call(long)
+        self.assertIn("you wrote: {\"name\": \"sim_run\"", e)
+        self.assertTrue(e.endswith("\u2026"))
+        self.assertLessEqual(len("malformed tool call: " + e), 300)       # loop.ERROR_MAX: never cut
 
     def test_text_calls_that_cannot_be_read(self):
         self.text_backend()
         for name, content, want in (
                 ("no closing tag", '<tool_call>\n{"name": "sim_run", "argu', "could not be read"),
                 ("not JSON", "<tool_call>\n{name: sim_run}\n</tool_call>", "could not be read"),
+                # E58, 26 Nov 2026: Qwen3-14B's answer, name inside the arguments (its history read name last)
+                ("name inside the arguments",
+                 '<tool_call>\n{"arguments":{"cid":"c76a9a5d7577ed723c3a3","name":"sim_results"}\n}\n</tool_call>',
+                 'beside the arguments, not inside them; <tool_call> must hold {"name": .., "arguments": {..}}; '
+                 'you wrote: {"arguments":{"cid":"c76a9a5d7577ed723c3a3","name":"sim_results"} }'),
                 ("unknown tool", '<tool_call>{"name": "nope", "arguments": {}}</tool_call>', "no such tool"),
                 ("arguments not an object", '<tool_call>{"name": "sim_run", "arguments": [1]}</tool_call>', "not a JSON object")):
             with self.subTest(name):

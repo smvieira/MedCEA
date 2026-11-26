@@ -140,6 +140,39 @@ class CliTest(unittest.TestCase):
         self.assertIn("gate g1", out[2])
         self.assertIn("finished", out[3])
 
+    def test_watch_says_what_the_model_chose_and_collapses_the_status_checks(self):
+        c, o, out, clk = client()
+        c.signin()
+        status = lambda i: {"event_id": i, "event": "tool_result", "actor": "mcp-sim", "payload": {"tool": "sim.status"}}
+        o.events = [{"event_id": 1, "event": "turn_response", "actor": "model-gateway",
+                     "payload": {"turn": 1, "response": {"tool": {"name": "sim.run", "args": {}}},
+                                 "usage": {"prompt_tokens": 10, "output_tokens": 2}}},
+                    {"event_id": 2, "event": "tool_call", "actor": "agent", "payload": {"tool": "sim.run", "args": {"spec": {}}}},
+                    {"event_id": 3, "event": "tool_result", "actor": "mcp-sim", "payload": {"tool": "sim.run"}},
+                    status(4), status(5),
+                    {"event_id": 6, "event": "sim_finished", "actor": "mcp-sim", "payload": {"state": "done", "cpu_hours": 0.1}},
+                    status(7),
+                    {"event_id": 8, "event": "tool_result", "actor": "agent",
+                     "payload": {"tool": "propose.parameter_set", "result": '{"error":"FLC {} does not do better"}'}},
+                    {"event_id": 9, "event": "tool_result", "actor": "agent", "payload": {
+                        "tool": "propose.parameter_set", "result": json.dumps({"proposal": {
+                            "algorithm_code": "MPC", "params": {}, "check": {
+                                "criterion": "air_temperature.rmsd_mid", "proposed_mean": 0.112, "proposed_runs": 6,
+                                "compared": [{"code": "FLC", "params": {}, "other": 0.1135, "outcome": "better"}]}}})}},
+                    {"event_id": 10, "event": "stop", "actor": "agent", "payload": {"reason": "finished", "turns": 3}}]
+        self.assertEqual(c.watch("S" * 22), "stop")
+        text = "\n".join(out)
+        self.assertIn("turn 1: calls sim.run  [10 prompt, 2 out tokens]", text)
+        self.assertIn('sim.run {"spec":{}}', text)
+        self.assertIn("... 3 status check(s)", text)
+        self.assertNotIn("(mcp-sim's record", text)
+        self.assertIn("propose.parameter_set refused: FLC {} does not do better", text)
+        self.assertIn("accepted: MPC {} on air_temperature.rmsd_mid, mean 0.112 over 6 run(s); compared: FLC {} 0.1135 (better)", text)
+        before = len(out)
+        o.events = o.events[2:5]
+        c.watch("S" * 22, verbose=True)
+        self.assertEqual(sum("mcp-sim" in line for line in out[before:]), 3)
+
     def test_decide_stop_replay(self):
         c, o, out, clk = client()
         c.signin()

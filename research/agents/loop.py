@@ -201,7 +201,8 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
                                      **({"args": args} if len(ab) <= ARGS_MAX else {})))
         err = False
         if name == MALFORMED:
-            result, err = {"error": "malformed tool call: %s" % str(bad)[:150]}, True
+            # the whole refusal within ERROR_MAX: the gateway's reason quotes what the model wrote (26 Nov 2026)
+            result, err = {"error": "malformed tool call: %s" % str(bad)[:ERROR_MAX - len("malformed tool call: ")]}, True
         elif name not in listed or name not in allowed:
             result, err = {"error": "tool not allowed"}, True
         else:

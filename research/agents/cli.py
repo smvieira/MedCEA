@@ -231,23 +231,95 @@ class Client:
         return r
 
     @staticmethod
-    def line(e):
-        p = e.get("payload") or {}
-        detail = {"gate_pending": "gate %s: estimate %s CPU-h, cap %s (medcea-agent approve|deny SID %s)" % (
-                      p.get("gid"), p.get("estimate_h"), p.get("cap_h"), p.get("gid")),
-                  "stop": "reason %s after %s turns" % (p.get("reason"), p.get("turns")),
-                  "tool_call": "%s" % p.get("tool"), "proposal": "%s" % p.get("tool"),
-                  "sim_finished": "%s, %s CPU-h" % (p.get("state"), p.get("cpu_hours"))}.get(e["event"], "")
-        return "%5d  %-18s %-16s %s" % (e["event_id"], e["event"], e.get("actor", ""), detail)
+    def _short(x, n=110):
+        """One line of at most n characters: a string as it is, anything else as compact JSON."""
+        s = x if isinstance(x, str) else json.dumps(x, separators=(",", ":"), sort_keys=True)
+        s = " ".join(str(s).split())
+        return s if len(s) <= n else s[:n - 1] + "\u2026"
 
-    def watch(self, sid, poll_s=3, max_s=8 * 3600):
+    @classmethod
+    def line(cls, e):
+        """One readable line per trace event: what the model chose, what each tool answered, what it cost."""
+        p, ev = e.get("payload") or {}, e["event"]
+        tool, sh = p.get("tool"), cls._short
+        if ev == "session_minted":
+            detail = "%s on %s" % (p.get("profile"), p.get("backend"))
+        elif ev == "turn_request":
+            detail = "turn %s: asking %s" % (p.get("turn"), p.get("model") or p.get("backend") or "the model")
+        elif ev == "turn_response":
+            r, u = p.get("response") or {}, p.get("usage") or {}
+            cost = "  [%s prompt, %s out tokens]" % (u.get("prompt_tokens"), u.get("output_tokens")) if u else ""
+            if p.get("error"):
+                detail = "turn %s: %s" % (p.get("turn"), p["error"])
+            elif r.get("tool"):
+                detail = "turn %s: calls %s%s" % (p.get("turn"), (r["tool"] or {}).get("name"), cost)
+            elif r.get("tool_error"):
+                detail = "turn %s: a call it could not write: %s%s" % (p.get("turn"), sh(r["tool_error"], 70), cost)
+            else:
+                detail = 'turn %s: says "%s"%s' % (p.get("turn"), sh(r.get("text") or "", 70), cost)
+        elif ev == "tool_call":
+            detail = "%s %s" % (tool, sh(p["args"], 90)) if "args" in p else "%s" % tool
+        elif ev == "tool_result":
+            if "result" in p:
+                res = p["result"]
+                try:
+                    obj = json.loads(res)
+                except (TypeError, ValueError):
+                    obj = None
+                prop = obj.get("proposal") if isinstance(obj, dict) else None
+                if isinstance(prop, dict) and isinstance(prop.get("check"), dict):
+                    ck = prop["check"]
+                    others = ", ".join("%s %s %s (%s)" % (o.get("code"), sh(o.get("params") or {}, 30), o.get("other"),
+                                                          o.get("outcome")) for o in ck.get("compared") or [])
+                    detail = "%s accepted: %s %s on %s, mean %s over %s run(s); compared: %s" % (
+                        tool, prop.get("algorithm_code"), sh(prop.get("params") or {}, 40), ck.get("criterion"),
+                        ck.get("proposed_mean"), ck.get("proposed_runs"), others)
+                elif isinstance(obj, dict) and set(obj) == {"error"}:
+                    detail = "%s refused: %s" % (tool, sh(obj["error"], 140))
+                else:
+                    detail = "%s -> %s" % (tool, sh(res, 140))
+            else:
+                detail = "%s (%s's record%s)" % (tool, e.get("actor", ""), ", error" if p.get("error") else "")
+        elif ev == "sim_started":
+            detail = "campaign %s: estimate %s CPU-h, cap %s" % (p.get("cid"), p.get("estimate_h"), p.get("cap_h"))
+        elif ev == "gate_pending":
+            detail = "gate %s: estimate %s CPU-h, cap %s (medcea-agent approve|deny SID %s)" % (
+                p.get("gid"), p.get("estimate_h"), p.get("cap_h"), p.get("gid"))
+        elif ev == "stop":
+            detail = "reason %s after %s turns" % (p.get("reason"), p.get("turns"))
+        elif ev == "proposal":
+            detail = "%s, document %s" % (tool, str(p.get("result_sha256", ""))[:12])
+        elif ev == "sim_finished":
+            detail = "%s, %s CPU-h" % (p.get("state"), p.get("cpu_hours"))
+        elif ev == "checkpoint":
+            detail = "after turn %s" % p.get("turn")
+        else:
+            detail = ""
+        return "%5d  %-18s %-16s %s" % (e["event_id"], ev, e.get("actor", ""), detail)
+
+    def watch(self, sid, poll_s=3, max_s=8 * 3600, verbose=False):
+        """Print the session's events until it stops. A tool server's own record of a call the agent records too is
+        left out, and the agent's sim.status checks while a campaign runs (every 10 s) are one waiting line; verbose=True
+        prints every event as it is."""
         sid = _sid(sid)
-        after, end = 0, self.clock() + max_s
+        after, end, waiting = 0, self.clock() + max_s, 0
         while self.clock() < end:
             batch = self.events(sid, after)
             for e in batch:
-                self.out(self.line(e))
                 after = e["event_id"]
+                p = e.get("payload") or {}
+                server_record = e["event"] == "tool_result" and e.get("actor") in ("mcp-sim", "mcp-lake")
+                if not verbose and server_record and p.get("tool") == "sim.status":
+                    if not waiting:
+                        self.out("%5s  %s" % ("", "... the campaign runs; the agent checks sim.status every 10 s"))
+                    waiting += 1
+                    continue
+                if waiting and not (e["event"] == "sim_finished" and not verbose):
+                    self.out("%5s  %s" % ("", "... %d status check(s)" % waiting))
+                    waiting = 0
+                if not verbose and server_record:
+                    continue
+                self.out(self.line(e))
                 if e["event"] in ("stop", "session_revoked"):
                     return e["event"]
             if not batch and not self.info(sid).get("active"):

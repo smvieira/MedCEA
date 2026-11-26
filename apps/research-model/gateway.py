@@ -114,7 +114,11 @@ def translate_text(request):
     for m in msgs[1:]:
         if m["role"] == "assistant" and m.get("tool_calls"):
             f = m["tool_calls"][0]["function"]
-            call = json.dumps({"name": f["name"], "arguments": json.loads(f["arguments"])}, separators=(",", ":"), sort_keys=True)
+            # name first, as the instructions show and Qwen's template writes it: with sort_keys the history read
+            # {"arguments": {..}, "name": ..}, and Qwen3-14B copied that and closed the name inside the arguments
+            # (E58, 26 Nov 2026: twelve unreadable calls in a row). The arguments keep their sorted, compact form.
+            call = '{"name":%s,"arguments":%s}' % (json.dumps(f["name"]), json.dumps(json.loads(f["arguments"]),
+                                                                                  separators=(",", ":"), sort_keys=True))
             text = (m.get("content") or "").strip()
             out.append({"role": "assistant", "content": (text + "\n" if text else "") + "<tool_call>\n%s\n</tool_call>" % call})
         elif m["role"] == "tool":
@@ -150,8 +154,25 @@ def read_text_answer(raw, names):
     fake = dict(raw, choices=[dict(raw["choices"][0], message={"content": text, "tool_calls": calls})])
     out, finish = read_answer(fake, names)
     if calls and out.get("tool") is None and out.get("tool_error") == "no such tool" and calls[0]["function"]["name"] is None:
-        out["tool_error"] = "the tool call could not be read (<tool_call> must hold {\"name\": .., \"arguments\": {..}})"
+        out["tool_error"] = unreadable_call(blocks[0] if blocks else content)
     return out, finish
+
+
+def unreadable_call(written):
+    """The refusal of a call the gateway cannot read, quoting what the model wrote (120 characters), so that it can
+    correct itself: told only "could not be read", Qwen3-14B wrote the same call twelve times (E58, 26 Nov 2026)."""
+    hint = ""
+    try:
+        d = json.loads(written)
+    except ValueError:
+        d = None
+    if isinstance(d, dict) and "name" not in d and isinstance(d.get("arguments"), dict) and "name" in d["arguments"]:
+        hint = "the name goes beside the arguments, not inside them; "
+    seen = " ".join(str(written).split())
+    seen = seen if len(seen) <= 120 else seen[:119] + "…"
+    return ("the tool call could not be read: %s<tool_call> must hold {\"name\": .., \"arguments\": {..}}; you wrote: %s"
+            % (hint, seen))
+
 
 
 def read_answer(raw, names):
