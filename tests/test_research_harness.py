@@ -21,6 +21,9 @@
   42417c3, and e39_compare.yaml reproduces E39's result digest with the host's Python
   (always) and in research/.venv (skipped without it); the manifest's code block names
   sensor_model_version; scenarios may override self_heating_c and bias_sd.
+- Series (research Phase 4e): with each run's chamber series on, results.jsonl, spec.json and
+  every pinned digest are unchanged; the series files are the same bytes for one and four
+  workers, one per row, named by the row; the manifest gains `series` only when it is on.
 
 Run: cd <repo> && python3 -m unittest tests.test_research_harness
 """
@@ -39,7 +42,7 @@ sys.path.insert(0, REPO)
 
 import yaml  # noqa: E402
 
-from research.harness import algorithms_loader, campaign, metrics, runner  # noqa: E402
+from research.harness import algorithms_loader, campaign, metrics, runner, series  # noqa: E402
 from research.harness.simclock import SimClock  # noqa: E402
 
 SCEN_DIR = os.path.join(REPO, "research", "harness", "scenarios")
@@ -668,6 +671,111 @@ class Digests(unittest.TestCase):
         with self.assertRaises(runner.ScenarioError):
             runner.normalise(smoke(disturbances=[{"at_h": 0.1, "kind": "ambient", "temperature": float("nan")}]),
                              loaded())
+
+
+class Series(unittest.TestCase):
+    """research Phase 4e (design rs4e 2.3): a run's chamber series is outside every digest."""
+
+    def spec(self):
+        return Campaign.spec(self)
+
+    def run_c(self, spec, jobs=1, every=None, out=None):
+        d = out or tempfile.mkdtemp(prefix="rs-series-")
+        if out is None:
+            self.addCleanup(shutil.rmtree, d)
+        m = campaign.run_campaign(spec, d, repo_root=REPO, jobs=jobs, allow_dirty=True, series_every_s=every)
+        with open(os.path.join(d, "results.jsonl"), "rb") as f:
+            body = f.read()
+        with open(os.path.join(d, "spec.json"), "rb") as f:
+            spec_bytes = f.read()
+        return m, d, body, spec_bytes
+
+    def test_e39_digests_unchanged_with_series_on(self):
+        libs = loaded().libraries
+        present = [libs[c]["present"] for c in ("FLC", "MPC")]
+        if any(present) and not all(present):
+            self.skipTest("only one of FLC's and MPC's libraries is installed: neither baseline applies")
+        want = E39_VENV_DIGEST if all(present) else E39_HOST_DIGEST
+        m, d, _, _ = self.run_c(campaign.load_spec(os.path.join(CAMPAIGNS, "e39_compare.yaml")), jobs=4, every=60)
+        self.assertEqual((m["result_digest"], m["spec_digest"]), (want, SPEC_DIGESTS["e39_compare.yaml"]))
+        sr = m["series"]
+        self.assertEqual((sr["every_s"], sr["max_points"]), (60.0, series.MAX_POINTS))
+        self.assertEqual(sr["files"], ["series/%d.json.gz" % n for n in range(30)])
+        shas = []
+        for rel in sr["files"]:
+            with open(os.path.join(d, rel), "rb") as f:
+                shas.append(hashlib.sha256(f.read()).hexdigest())
+        self.assertEqual(sr["digest"], series.files_digest(shas))
+        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["series"], sr)
+        doc = series.read(os.path.join(d, sr["files"][0]))
+        self.assertEqual(len(doc["columns"]["t"]), 60)           # one simulated hour at 60 s
+
+    def test_results_identical_and_series_identical_across_jobs(self):
+        spec = self.spec()
+        m0, d0, body0, spec0 = self.run_c(spec)
+        self.assertNotIn("series", m0)
+        self.assertFalse(os.path.exists(os.path.join(d0, "series")))
+        outs = []
+        for jobs in (1, 4):
+            m, d, body, spec_b = self.run_c(spec, jobs=jobs, every=60)
+            self.assertEqual((body, spec_b), (body0, spec0))
+            self.assertEqual((m["result_digest"], m["spec_digest"]), (m0["result_digest"], m0["spec_digest"]))
+            self.assertEqual(set(m) - set(m0), {"series"})
+            files = {}
+            for rel in m["series"]["files"]:
+                with open(os.path.join(d, rel), "rb") as f:
+                    files[rel] = f.read()
+            self.assertEqual(sorted(os.listdir(os.path.join(d, "series"))),
+                             sorted("%d.json.gz" % n for n in range(12)))
+            outs.append((m["series"]["digest"], files))
+            # each file is its row's run, and no row carries a series
+            for n, line in enumerate(body.decode().splitlines()):
+                row = json.loads(line)
+                h = series.read(os.path.join(d, "series", "%d.json.gz" % n))["header"]
+                self.assertEqual((h["run"], h["scenario"], h["code"], h["params"], h["seed"], h["clock_offset_s"]),
+                                 (n, row["scenario"], row["controller"]["code"], row["controller"]["params"],
+                                  row["seed"], row["clock_offset_s"]))
+                self.assertNotIn("series", row)
+        self.assertEqual(outs[0], outs[1])
+
+    def test_a_reused_out_keeps_no_earlier_series(self):
+        d = tempfile.mkdtemp(prefix="rs-series-")
+        self.addCleanup(shutil.rmtree, d)
+        os.makedirs(os.path.join(d, "series"))
+        for stale in ("99.json.gz", "98.json.gz.tmp", "notes.txt"):
+            with open(os.path.join(d, "series", stale), "w") as f:
+                f.write("x")
+        spec = self.spec()
+        spec["controllers"] = spec["controllers"][:1]
+        spec["seeds"], spec["clock_offsets_s"] = [1], [0.0]
+        m, _, _, _ = self.run_c(spec, every=60, out=d)
+        self.assertEqual(sorted(os.listdir(os.path.join(d, "series"))), ["0.json.gz", "notes.txt"])
+        self.assertEqual(m["series"]["files"], ["series/0.json.gz"])
+
+    def test_bad_interval_refused(self):
+        with self.assertRaisesRegex(campaign.CampaignError, "series interval"):
+            campaign.run_campaign(self.spec(), os.path.join(tempfile.gettempdir(), "rs-never-written"),
+                                  repo_root=REPO, allow_dirty=True, series_every_s=-5)
+        self.assertFalse(os.path.exists(os.path.join(tempfile.gettempdir(), "rs-never-written")))
+
+    def test_the_cli_flag(self):
+        d = tempfile.mkdtemp(prefix="rs-series-")
+        self.addCleanup(shutil.rmtree, d)
+        spec = os.path.join(d, "spec.yaml")
+        with open(spec, "w", encoding="utf-8") as f:
+            yaml.safe_dump({"scenarios": [dict(smoke(duration_h=0.05, metrics_from_h=0))],
+                            "controllers": [{"code": "IF_THEN_ELSE"}], "seeds": [1]}, f)
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(campaign.main([spec, "--out", os.path.join(d, "on"), "--allow-dirty",
+                                            "--series-every", "60"]), 0)
+            self.assertEqual(campaign.main([spec, "--out", os.path.join(d, "off"), "--allow-dirty"]), 0)
+            with self.assertRaises(SystemExit):
+                campaign.main([spec, "--out", os.path.join(d, "x"), "--allow-dirty", "--series-every", "-1"])
+        self.assertTrue(os.path.exists(os.path.join(d, "on", "series", "0.json.gz")))
+        self.assertFalse(os.path.exists(os.path.join(d, "off", "series")))
 
 
 class Manifest(unittest.TestCase):

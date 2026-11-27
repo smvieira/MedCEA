@@ -9,7 +9,7 @@ imports nothing from this repository.
   medcea-agent watch SID                                      follow the trace until the agent stops
   medcea-agent approve SID GID [--note T] [--cap-h H]         approve a gate (the supervisor only)
   medcea-agent deny SID GID [--note T]
-  medcea-agent accept SID PID | discard SID PID [--note T]    decide a proposal
+  medcea-agent accept SID PID | discard SID PID [--note T]    decide a proposal (PID: p<n> as watch prints it)
   medcea-agent stop SID                                       revoke the session, delete its Jobs
   medcea-agent replay SID                                     strict replay verdict (a Job; waits for it)
   medcea-agent reexecute SID                                  run the session's profile again and compare the model's answers
@@ -180,11 +180,12 @@ class Client:
     @staticmethod
     def turns(events):
         """{turn: (request_sha256, response_sha256 or None, seconds or None)} from the model-gateway's records of a
-        local session (a scripted session has none: its answers are the profile's)."""
+        local session (a scripted session has none: its answers are the profile's). The lead agent's turns only
+        (a record without an agent is the lead's): a sub-agent counts its own turns from 1."""
         out, at = {}, {}
         for e in events:
             p = e.get("payload") or {}
-            if e.get("actor") != "model-gateway" or not isinstance(p.get("turn"), int):
+            if e.get("actor") != "model-gateway" or not isinstance(p.get("turn"), int) or p.get("agent", "a0") != "a0":
                 continue
             t = p["turn"]
             if e["event"] == "turn_request":
@@ -305,13 +306,24 @@ class Client:
         elif ev == "stop":
             detail = "reason %s after %s turns" % (p.get("reason"), p.get("turns"))
         elif ev == "proposal":
-            detail = "%s, document %s" % (tool, str(p.get("result_sha256", ""))[:12])
+            detail = "%s, document %s (medcea-agent accept|discard SID p%s)" % (
+                tool, str(p.get("result_sha256", ""))[:12], e.get("event_id"))
+        elif ev == "proposal_decided":
+            detail = "%s %s by %s" % (p.get("pid"), {"approve": "accepted", "deny": "discarded"}.get(p.get("decision"),
+                                                                                         p.get("decision")), p.get("by_username"))
+        elif ev == "agent_spawned":
+            detail = "%s starts %s: %s" % (p.get("parent"), p.get("profile_name"), sh(p.get("task") or "", 80))
+        elif ev == "agent_returned":
+            detail = "back to %s: %s after %s turns" % (p.get("parent"), p.get("stop_reason"), p.get("turns"))
         elif ev == "sim_finished":
             detail = "%s, %s CPU-h" % (p.get("state"), p.get("cpu_hours"))
         elif ev == "checkpoint":
             detail = "after turn %s" % p.get("turn")
         else:
             detail = ""
+        ag = p.get("agent")
+        if isinstance(ag, str) and ag != "a0":      # a sub-agent's event (research Phase 4e); the lead's unmarked
+            detail = "[%s] %s" % (ag, detail)
         return "%5d  %-18s %-16s %s" % (e["event_id"], ev, e.get("actor", ""), detail)
 
     def watch(self, sid, poll_s=3, max_s=8 * 3600, verbose=False):

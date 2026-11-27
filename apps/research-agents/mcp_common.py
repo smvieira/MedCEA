@@ -5,7 +5,8 @@ Methods: initialize, ping, tools/list, tools/call; anything else is -32601. The 
 Bearer; every tools/call is checked by research-session's /introspect (audience = this server, peer =
 the caller's address) and the tool must be in the session's tool list. A refused token is HTTP 401
 with no detail. Tool results are canonical JSON text, control characters and < > replaced, size-limited;
-the server records tool_result on the session's trace (server port, actor = this server)."""
+the server records tool_result on the session's trace (server port, actor = this server), with the
+agent's key of the call (params._meta {agent, call} -> agent, agent_call; research Phase 4e) when sent."""
 import hashlib
 import json
 import re
@@ -21,6 +22,7 @@ RESULT_MAX = 8000
 BODY_MAX = 64 * 1024
 CODE = re.compile(r"^[A-Za-z0-9_.%-]{1,48}$")
 CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f  ]")
+AGENT = re.compile(r"^a0(\.[1-9][0-9]{0,2}){0,3}$")   # = research/agents/loop.AGENT_RE (an agent id, AH.9)
 
 
 def canonical(obj):
@@ -53,6 +55,20 @@ def clean_obj(o):
     if isinstance(o, (list, tuple)):
         return [clean_obj(v) for v in o]
     return o
+
+
+def agent_meta(params):
+    """The agent's key of a call from params._meta (research Phase 4e): {agent, agent_call} with whatever of
+    the two is valid; a value failing the agent-id rule or not a whole number 1..10**6 is dropped."""
+    m = params.get("_meta") if isinstance(params, dict) else None
+    out = {}
+    if isinstance(m, dict):
+        a, c = m.get("agent"), m.get("call")
+        if isinstance(a, str) and AGENT.match(a):
+            out["agent"] = a
+        if isinstance(c, int) and not isinstance(c, bool) and 1 <= c <= 10 ** 6:
+            out["agent_call"] = c
+    return out
 
 
 class ToolRefused(Exception):
@@ -141,10 +157,11 @@ class McpServer:
         if not isinstance(name, str) or not isinstance(args, dict):
             return 200, self._err(rid, -32602, "name and arguments are required")
         sid = info["sid"]
+        key = agent_meta(params)
         with self.lock:
             n = self.calls[sid] = self.calls.get(sid, 0) + 1
         if name not in self.tools or name not in (info.get("tools") or []):
-            return 200, self._ok(rid, self._result(sid, name, n, {"error": "tool not allowed"}, True))
+            return 200, self._ok(rid, self._result(sid, name, n, {"error": "tool not allowed"}, True, key))
         try:
             out, err = self.tools[name].fn({"sid": sid, "info": info}, args), False
         except ToolRefused as e:
@@ -155,12 +172,13 @@ class McpServer:
             first = (str(e).splitlines() or [""])[0][:200]
             sys.stderr.write("%s: tool %s failed: %s: %s\n" % (self.name, name, type(e).__name__, first))
             sys.stderr.flush()
-        return 200, self._ok(rid, self._result(sid, name, n, out, err))
+        return 200, self._ok(rid, self._result(sid, name, n, out, err, key))
 
-    def _result(self, sid, name, n, out, err):
+    def _result(self, sid, name, n, out, err, key=None):
+        """`call` is this server's own count; `agent`/`agent_call` the agent's key of the call (when it sent one)."""
         text = clean_text(canonical(out))
-        self.session.trace(sid, "tool_result", {"tool": name, "call": n, "result_sha256": sha(text),
-                                                "bytes": len(text.encode("utf-8")), "error": err})
+        self.session.trace(sid, "tool_result", dict({"tool": name, "call": n, "result_sha256": sha(text),
+                                                     "bytes": len(text.encode("utf-8")), "error": err}, **(key or {})))
         res = {"content": [{"type": "text", "text": text}], "isError": err}
         if isinstance(out, dict):
             res["structuredContent"] = json.loads(text) if len(text) < RESULT_MAX else {"truncated": True}

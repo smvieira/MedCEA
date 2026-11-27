@@ -2,7 +2,7 @@
 clock offsets, each one runner.run_scenario, written as results.jsonl and manifest.json.
 
     python -m research.harness.campaign SPEC.yaml [--out DIR] [--jobs N] [--allow-dirty]
-                                                  [--max-cpu-hours H]
+                                                  [--max-cpu-hours H] [--series-every S]
 
 Spec (YAML):
     scenarios:        [path (relative to the spec file) | inline scenario mapping]
@@ -32,6 +32,13 @@ measured); the estimate is the sum over runs of its (scenario, code) rate x its 
 --max-cpu-hours (default 4) is refused, nothing written. Pool size: --jobs, never above
 the CPU limit (the cgroup's /sys/fs/cgroup/cpu.max quota when there is one, else half of
 os.cpu_count()), never above the number of runs.
+
+Series (research Phase 4e, design rs4e 2.3): --series-every S (seconds, 0 = off, the default here;
+the cluster's sim Jobs get 60) has each worker record its run's chamber time series
+(series.py) into series/<n>.json.gz, n the run's line in results.jsonl. It is outside every
+digest: results.jsonl, spec.json, spec_digest and result_digest are the same bytes with or
+without it; manifest.json gains `series: {every_s, max_points, files, digest}` only when it is
+on (digest = series.files_digest of the files' sha256 in run order).
 """
 from __future__ import annotations
 
@@ -47,7 +54,7 @@ import sys
 
 import yaml
 
-from . import algorithms_loader, metrics, pins, runner
+from . import algorithms_loader, metrics, pins, runner, series
 
 CALIBRATION_H = 0.05           # 3 simulated minutes per controller code
 CALIBRATION_MIN_CPU_S = 0.5    # repeat the slice until it has used this much CPU (50 clock ticks)
@@ -165,17 +172,39 @@ def cpu_seconds():
 _W = {}
 
 
-def _init(repo_root, allow_dirty, spec):
+def _init(repo_root, allow_dirty, spec, series_dir=None, series_every=None):
     _W["loaded"] = algorithms_loader.load(repo_root, allow_dirty=allow_dirty)
     _W["scenarios"] = {sc["name"]: sc for sc in spec["scenarios"]}
     _W["jitter"] = spec["jitter_s"]
+    _W["series_dir"], _W["series_every"] = series_dir, series_every
 
 
-def _run(run):
-    name, code, params, seed, off = run
+def _run(item):
+    """item: (n, run), n the run's line in results.jsonl. Returns only the canonical result line: the series
+    (when on) goes to its own file, never into the row or pool.map's results."""
+    n, (name, code, params, seed, off) = item
+    rec = None
+    if _W.get("series_dir"):
+        rec = series.SeriesRecorder(_W["series_every"], header={
+            "run": n, "scenario": name, "code": code, "params": json.loads(params), "seed": seed,
+            "clock_offset_s": off, "jitter_s": _W["jitter"]})
     r = runner.run_scenario(copy.deepcopy(_W["scenarios"][name]), {"code": code, "params": json.loads(params)},
-                            seed, off, _W["jitter"], loaded=_W["loaded"])
+                            seed, off, _W["jitter"], loaded=_W["loaded"], series=rec)
+    if rec is not None:
+        rec.write(os.path.join(_W["series_dir"], series.file_name(n)))
     return canonical(r)
+
+
+def _clear_series(series_dir):
+    """A reused --out keeps no series file of an earlier campaign (only <n>.json.gz and their .tmp)."""
+    try:
+        names = os.listdir(series_dir)
+    except OSError:
+        return
+    for f in names:
+        base = f[:-4] if f.endswith(".tmp") else f
+        if base.endswith(".json.gz") and base[:-8].isdigit():
+            os.remove(os.path.join(series_dir, f))
 
 
 def calibrate(spec, loaded):
@@ -211,9 +240,14 @@ def calibrate(spec, loaded):
 
 
 def run_campaign(spec, out_dir, repo_root=None, jobs=None, allow_dirty=False,
-                 max_cpu_hours=DEFAULT_MAX_CPU_HOURS):
-    """Run SPEC (already resolved) into OUT_DIR; returns the manifest."""
+                 max_cpu_hours=DEFAULT_MAX_CPU_HOURS, series_every_s=None):
+    """Run SPEC (already resolved) into OUT_DIR; returns the manifest. series_every_s: None or 0 records no
+    series; else each run's chamber series at that interval (series.py), outside every digest."""
     repo_root = repo_root or runner.DEFAULT_REPO
+    try:
+        series_every = series.requested_every(series_every_s)
+    except series.SeriesError as e:
+        raise CampaignError(str(e)) from None
     loaded = algorithms_loader.load(repo_root, allow_dirty=allow_dirty)
     runs = expand(spec)
     durations = {sc["name"]: sc["duration_h"] for sc in spec["scenarios"]}
@@ -232,14 +266,21 @@ def run_campaign(spec, out_dir, repo_root=None, jobs=None, allow_dirty=False,
                             "(--max-cpu-hours)" % (estimate_h, len(runs), max_cpu_hours))
     limit = cpu_limit()
     pool_size = max(1, min(jobs or limit, limit, len(runs)))
+    series_dir = None
+    if series_every:
+        series_dir = os.path.join(out_dir, "series")
+        os.makedirs(series_dir, exist_ok=True)
+        _clear_series(series_dir)
+    items = list(enumerate(runs))
 
     if pool_size == 1:
-        _init(repo_root, allow_dirty, spec)
-        lines = [_run(r) for r in runs]
+        _init(repo_root, allow_dirty, spec, series_dir, series_every)
+        lines = [_run(r) for r in items]
     else:
         with multiprocessing.get_context("spawn").Pool(pool_size, initializer=_init,
-                                                       initargs=(repo_root, allow_dirty, spec)) as pool:
-            lines = pool.map(_run, runs, chunksize=1)
+                                                       initargs=(repo_root, allow_dirty, spec, series_dir,
+                                                                 series_every)) as pool:
+            lines = pool.map(_run, items, chunksize=1)
 
     body = "".join(line + "\n" for line in lines).encode("utf-8")
     os.makedirs(out_dir, exist_ok=True)
@@ -264,6 +305,15 @@ def run_campaign(spec, out_dir, repo_root=None, jobs=None, allow_dirty=False,
         "max_cpu_hours": max_cpu_hours,
         "result_digest": hashlib.sha256(body).hexdigest(),
     }
+    if series_dir:
+        files, shas = [], []
+        for n in range(len(runs)):
+            rel = "series/" + series.file_name(n)
+            with open(os.path.join(out_dir, rel), "rb") as f:
+                shas.append(hashlib.sha256(f.read()).hexdigest())
+            files.append(rel)
+        manifest["series"] = {"every_s": series_every, "max_points": series.MAX_POINTS, "files": files,
+                              "digest": series.files_digest(shas)}
     prov = {sc["name"]: p for sc in spec["scenarios"] for p in [pins.provenance(sc)] if p}
     if prov:
         manifest["provenance"] = prov
@@ -281,16 +331,21 @@ def main(argv=None):
     ap.add_argument("--allow-dirty", action="store_true",
                     help="run although the contract sources or research/ differ from HEAD (recorded in the manifest)")
     ap.add_argument("--max-cpu-hours", type=float, default=DEFAULT_MAX_CPU_HOURS)
+    ap.add_argument("--series-every", type=float, default=0.0,
+                    help="record each run's chamber series every S simulated seconds into series/ (0 = off)")
     a = ap.parse_args(argv)
     if a.jobs is not None and a.jobs < 1:
         ap.error("--jobs must be >= 1")
     if not math.isfinite(a.max_cpu_hours) or a.max_cpu_hours <= 0:
         ap.error("--max-cpu-hours must be > 0")
+    if not math.isfinite(a.series_every) or a.series_every < 0:
+        ap.error("--series-every must be >= 0 (0 = off)")
     out = a.out or os.path.join(runner.DEFAULT_REPO, "research", "runs",
                                 os.path.splitext(os.path.basename(a.spec))[0])
     try:
         spec = load_spec(a.spec, allow_dirty=a.allow_dirty)
-        m = run_campaign(spec, out, jobs=a.jobs, allow_dirty=a.allow_dirty, max_cpu_hours=a.max_cpu_hours)
+        m = run_campaign(spec, out, jobs=a.jobs, allow_dirty=a.allow_dirty, max_cpu_hours=a.max_cpu_hours,
+                         series_every_s=a.series_every)
     except (CampaignError, algorithms_loader.LoaderError, runner.ScenarioError, OSError, yaml.YAMLError) as e:
         print("campaign: %s" % e, file=sys.stderr)
         return 2

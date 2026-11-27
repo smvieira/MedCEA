@@ -16,9 +16,10 @@
 --                     nothing of its own).
 --   rs_lake_reader    USAGE on schema lake_api; EXECUTE on the lake_api functions (each
 --                     SECURITY DEFINER, owned by rs_owner). Nothing on any table.
---   rs_session        CONNECT; USAGE on schema agent_trace; EXECUTE on the eleven agent_trace
---                     writers and readers (open_session, append_event, put_blob, checkpoint,
---                     use_claim, revoke, session_status, events), nothing on any table;
+--   rs_session        CONNECT; USAGE on schema agent_trace; EXECUTE on the agent_trace writers
+--                     and readers listed below (open_session in both forms, append_event,
+--                     put_blob, checkpoint, use_claim, revoke, session_status, events,
+--                     set_expect, session_state, active_sessions, sessions_of), nothing on any table;
 --                     verify_chain, head and the internals have no grantee (research Phase 4a).
 --   rs_owner          owns everything (no grant needed); vault.reserve runs as it.
 --   PUBLIC            nothing: no CONNECT or TEMP, nothing on any schema (public
@@ -59,6 +60,7 @@ GRANT rs_lake_reader TO rs_lake_api;
 GRANT USAGE ON SCHEMA agent_trace TO rs_session;
 GRANT EXECUTE ON FUNCTION
     agent_trace.open_session(text, text, text, text, uuid, text, text, text, text, text, text[], jsonb, text, text, timestamptz),
+    agent_trace.open_session(text, text, text, text, uuid, text, text, text, text, text, text[], jsonb, text, text, timestamptz, text),
     agent_trace.append_event(text, text, text, text, jsonb, text),
     agent_trace.put_blob(text, text, bytea),
     agent_trace.checkpoint(text, jsonb),
@@ -68,5 +70,6 @@ GRANT EXECUTE ON FUNCTION
     agent_trace.events(text, bigint),
     agent_trace.set_expect(text, inet),
     agent_trace.session_state(text),
-    agent_trace.active_sessions()
+    agent_trace.active_sessions(),
+    agent_trace.sessions_of(text, bigint, integer)
    TO rs_session;

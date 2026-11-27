@@ -26,7 +26,9 @@ LAKE_API = os.path.join(APP, "db", "lake_api.sql")
 GRANTS = os.path.join(APP, "db", "grants.sql")
 ASSERT = os.path.join(APP, "db", "assert_grants.sql")
 TABLES = ["session", "revocation", "claim_use", "blob", "blob_ref", "state", "event"]
-GRANTED = ["open_session", "append_event", "put_blob", "checkpoint", "use_claim", "revoke", "session_status", "events", "set_expect", "session_state", "active_sessions"]
+GRANTED = ["open_session", "append_event", "put_blob", "checkpoint", "use_claim", "revoke", "session_status", "events",
+           "set_expect", "session_state", "active_sessions", "sessions_of"]
+AGENT_RE = r"^a0(\.[1-9][0-9]{0,2}){0,3}$"
 
 
 def read(p):
@@ -75,7 +77,9 @@ class AsText(unittest.TestCase):
             self.assertIn(ev, lists["person"])
             self.assertNotIn(ev, lists["agent"] + lists["server"])      # R8: research-session only
         self.assertEqual(set(lists["agent"]), {"turn_request", "turn_response", "tool_call", "tool_result",
-                                               "checkpoint", "proposal", "stop"})
+                                               "checkpoint", "proposal", "stop", "agent_spawned", "agent_returned"})
+        for ev in ("agent_spawned", "agent_returned"):      # research Phase 4e: the agent port's alone
+            self.assertNotIn(ev, lists["person"] + lists["server"])
         self.assertNotIn("sim_finished", lists["agent"])
         self.assertIn("sim_finished", lists["server"])
         self.assertIn("replay_result", lists["server"])
@@ -105,6 +109,45 @@ class AsText(unittest.TestCase):
             self.assertIn(s, a)
         for f in GRANTED:
             self.assertIn("('%s')" % f, a)
+
+    def test_agent_ids_phase_4e(self):
+        # design 2.1: the agent port checks agent/parent; the regex is the loop's and mcp_common's
+        m = re.search(r"FUNCTION agent_trace\._agent_problem\(.*?\$\$(.*?)\$\$;", self.sql, re.S)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("'%s'" % AGENT_RE, body)
+        self.assertIn("'agent_spawned', 'agent_returned'", body)
+        self.assertIn("2000", body)
+        self.assertIn("p_port = 'agent' AND agent_trace._agent_problem(p_event, p_payload) IS NOT NULL", self.sql)
+        sys.path.insert(0, REPO)
+        from research.agents import loop
+        self.assertEqual(loop.AGENT_RE.pattern, AGENT_RE)
+        mc = read(os.path.join(REPO, "apps", "research-agents", "mcp_common.py"))
+        self.assertIn('AGENT = re.compile(r"%s")' % AGENT_RE, mc)
+
+    def test_open_session_forms_and_reexecutes(self):
+        heads = re.findall(r"CREATE OR REPLACE FUNCTION agent_trace\.open_session\((.*?)\)\s*RETURNS", self.sql, re.S)
+        self.assertEqual(len(heads), 2)
+        sixteen = [h for h in heads if "p_reexecutes" in h]
+        self.assertEqual(len(sixteen), 1)
+        self.assertNotIn("DEFAULT", sixteen[0])     # a fifteen-argument call is never ambiguous
+        self.assertIn("'reexecutes', p_reexecutes", self.sql)
+        self.assertIn("reexecutes must name a session of the same person", self.sql)
+
+    def test_cpu_once_per_campaign_and_sessions_of(self):
+        self.assertIn("DISTINCT ON (coalesce(e.payload ->> 'cid', 'event:' || e.event_id::text))", self.sql)
+        m = re.search(r"FUNCTION agent_trace\.sessions_of\(p_person text, p_before bigint, p_limit integer\)(.*?)\$\$;",
+                      self.sql, re.S)
+        self.assertIsNotNone(m)
+        for col in ("sid text", "mint_event_id bigint", "reexecutes text", "revoke_reason text", "spent jsonb"):
+            self.assertIn(col, m.group(1))
+        self.assertIn("least(coalesce(p_limit, 50), 200)", m.group(1))
+        self.assertIn("agent_trace.session_status(s.sid)", m.group(1))
+        g = code(read(GRANTS))
+        self.assertIn("agent_trace.sessions_of(text, bigint, integer)", g)
+        self.assertIn("timestamptz, text),", " ".join(g.split()))      # the sixteen-argument open_session
+        self.assertIn("('sessions_of')", code(read(ASSERT)))
+        self.assertIn("'rs_session lacks EXECUTE on ' || f.sig", code(read(ASSERT)))   # every overload
 
     def test_role(self):
         self.assertIn("CREATE ROLE rs_session LOGIN NOINHERIT", self.sql)
@@ -271,6 +314,66 @@ class RealPostgres(unittest.TestCase):
         r = self.psql("medcea_research", "SELECT * FROM agent_trace.verify_chain()", user="rs_session")
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(self.q("SELECT count(*) FROM agent_trace.events('%s')" % SID, user="rs_session") != "", True)
+
+    def test_06a_agent_ids(self):
+        sid = "H" * 22
+        tok = H("e")
+        self.q(open_sql(sid, person="p6", token=tok, claim=H("f")))
+        ok = lambda p, ev="tool_call": self.ev("agent", sid, "agent", ev, p, token=tok)
+        self.assertIsNotNone(ok('{"call":1}')[0])                               # absent = a0
+        self.assertIsNotNone(ok('{"agent":"a0","call":1}')[0])
+        self.assertIsNotNone(ok('{"agent":"a0.1","parent":"a0","call":1}')[0])
+        self.assertIsNotNone(ok('{"agent":"a0.1.12","parent":"a0.1"}')[0])
+        self.assertIsNotNone(ok('{"agent":"a0.2","parent":"a0","task":"t"}', "agent_spawned")[0])
+        self.assertIsNotNone(ok('{"agent":"a0.2","parent":"a0","result":"r"}', "agent_returned")[0])
+        for bad, why in (('{"agent":"a1"}', "agent id"), ('{"agent":"a0.0"}', "agent id"),
+                         ('{"agent":"a0.1.1.1.1","parent":"a0.1.1.1"}', "agent id"), ('{"agent":7}', "agent id"),
+                         ('{"agent":"a0.1"}', "names its parent"), ('{"agent":"a0","parent":"a0"}', "one level"),
+                         ('{"agent":"a0.1.2","parent":"a0"}', "one level"), ('{"parent":"x"}', "parent is not")):
+            eid, w = ok(bad)
+            self.assertIsNone(eid, bad)
+            self.assertIn(why, w, bad)
+        eid, w = ok('{"agent":"a0"}', "agent_spawned")
+        self.assertIn("never the lead", w)
+        eid, w = ok('{"agent":"a0.1","parent":"a0","task":"%s"}' % ("x" * 2001), "agent_spawned")
+        self.assertIn("2000", w)
+        for port, actor in (("server", "mcp-sim"), ("person", "x")):           # the agent port's alone
+            self.assertIsNone(self.ev(port, sid, actor, "agent_spawned", '{"agent":"a0.1","parent":"a0"}')[0])
+        # the server port may name an agent and an agent_call (mcp_common records them) without the agent check
+        self.assertIsNotNone(self.ev("server", sid, "mcp-sim", "tool_result", '{"agent":"a0.1","agent_call":2}')[0])
+
+    def test_06b_cpu_once_per_campaign(self):
+        sid = "J" * 22
+        self.q(open_sql(sid, person="p7", token=H("2"), claim=H("3")))
+        self.assertIsNotNone(self.ev("server", sid, "mcp-sim", "sim_finished", '{"cid":"c1","cpu_hours":0.5}')[0])
+        self.assertIsNotNone(self.ev("server", sid, "orchestrator", "sim_finished", '{"cid":"c1","cpu_hours":0.5}')[0])
+        self.assertIsNotNone(self.ev("server", sid, "orchestrator", "sim_finished", '{"cid":"c2","cpu_hours":0.25}')[0])
+        self.assertIsNotNone(self.ev("server", sid, "mcp-sim", "sim_finished", '{"cid":"c2","cpu_hours":0.25}')[0])
+        self.assertEqual(self.q("SELECT (spent->>'cpu_hours')::numeric FROM agent_trace.session_status('%s')" % sid),
+                         "0.75")
+
+    def test_06c_sessions_of_and_reexecutes(self):
+        a, b = "K" * 22, "L" * 22
+        self.q(open_sql(a, person="p8", token=H("4"), claim=H("5")))
+        self.q("SELECT agent_trace.open_session('%s','k1','%s','%s','%s','p8','control_scientist','sci','scripted-v1',"
+               "'%s',ARRAY['sim_run'],'{}'::jsonb,'scripted','abc123',now() + interval '1 hour','%s')"
+               % (b, H("6"), H("7"), SUB, H("c"), a))
+        r = self.psql("medcea_research", "SELECT agent_trace.open_session('%s','k1','%s','%s','%s','p9','x','y','z',"
+                      "'%s',ARRAY['sim_run'],'{}'::jsonb,'scripted','abc123',now() + interval '1 hour','%s')"
+                      % ("M" * 22, H("8"), H("9"), SUB, H("c"), a))
+        self.assertIn("same person", r.stderr)                                  # another person's session
+        self.assertEqual(self.q("SELECT payload->>'reexecutes' FROM agent_trace.event WHERE sid = '%s' "
+                                "AND event = 'session_minted'" % b), a)
+        self.assertEqual(self.q("SELECT count(*) FROM agent_trace.event WHERE sid = '%s' AND event = 'session_minted' "
+                                "AND payload ? 'reexecutes'" % a), "0")         # NULL: the payload as before
+        self.q("SELECT agent_trace.revoke('%s','done',NULL)" % a)
+        rows = self.q("SELECT sid || '|' || coalesce(reexecutes, '-') || '|' || revoked || '|' || coalesce(revoke_reason, '-')"
+                      " FROM agent_trace.sessions_of('p8', NULL, 10)", user="rs_session").splitlines()
+        self.assertEqual(rows, ["%s|%s|false|-" % (b, a), "%s|-|true|done" % a])
+        first = self.q("SELECT mint_event_id FROM agent_trace.sessions_of('p8', NULL, 1)")
+        self.assertEqual(self.q("SELECT sid FROM agent_trace.sessions_of('p8', %s, 10)" % first), a)
+        self.assertEqual(self.q("SELECT count(*) FROM agent_trace.sessions_of('p8', NULL, 0)"), "1")   # held to 1..200
+        self.assertEqual(self.q("SELECT count(*) FROM agent_trace.sessions_of('nobody', NULL, 10)"), "0")
 
     def test_07_append_only_then_tamper(self):
         for sql in ("UPDATE agent_trace.event SET actor='z'", "DELETE FROM agent_trace.event",

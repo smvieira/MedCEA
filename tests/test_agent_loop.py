@@ -462,5 +462,73 @@ class Local(unittest.TestCase):
 
 
 
+class AgentIds(unittest.TestCase):
+    """Research Phase 4e (design 2.1): a sub-agent's payloads name it and its parent; the lead's name neither
+    (absent reads as a0), so a one-agent session's trace is the trace the code before A1a wrote and replays there;
+    the model request names no agent."""
+
+    def test_the_lead_writes_no_agent_key(self):
+        _, ev, _ = go()
+        self.assertTrue(ev)
+        for e in ev:
+            self.assertNotIn("agent", e["payload"], e["event"])
+            self.assertNotIn("parent", e["payload"])
+
+    def test_a_sub_agent_writes_its_parent_and_the_same_requests(self):
+        p = loop.load_profile(PROFILE)
+        s = FakeSession()
+        t = TraceClient(s, "S" * 22)
+        t.claim("c")
+        loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FakeTools(), t, agent="a0.2", parent="a0")
+        self.assertTrue(all(e["payload"]["agent"] == "a0.2" and e["payload"]["parent"] == "a0" for e in s.events))
+        lead = [e["payload"]["request_sha256"] for e in go()[1] if e["event"] == "turn_request"]
+        child = [e["payload"]["request_sha256"] for e in s.events if e["event"] == "turn_request"]
+        self.assertEqual(lead, child)          # the id is not in the request: its digest does not move
+
+    def test_invalid_ids_are_refused(self):
+        p = loop.load_profile(PROFILE)
+        for agent, parent in (("a1", None), ("a0", "a0"), ("a0.1", None), ("a0.1.2", "a0"), ("a0.1.2.3.4", "a0.1.2.3"),
+                              ("a0.0", "a0")):
+            with self.assertRaises(ValueError):
+                loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FakeTools(), FakeSession(), agent=agent, parent=parent)
+        self.assertTrue(loop.agent_ok("a0.12.3", "a0.12"))
+
+    def test_tools_that_take_the_key_get_agent_and_call(self):
+        class MetaTools(FakeTools):
+            accepts_meta = True
+
+            def call(self, name, args, meta=None):
+                self.metas = getattr(self, "metas", []) + [meta]
+                return FakeTools.call(self, name, args)
+        tools = MetaTools()
+        _, ev, _ = go(tools=tools)
+        calls = [e["payload"]["call"] for e in ev if e["event"] == "tool_call"]
+        self.assertEqual(tools.metas, [{"agent": "a0", "call": c} for c in calls])
+
+    def test_a_model_that_serves_several_agents_is_told_which_asks(self):
+        asked = []
+
+        class Multi(ScriptedModel):
+            accepts_agent = True
+
+            def respond(self, request, agent="a0"):
+                asked.append(agent)
+                return ScriptedModel.respond(self, request)
+        p = loop.load_profile(PROFILE)
+        s = FakeSession()
+        t = TraceClient(s, "S" * 22)
+        t.claim("c")
+        loop.run(p, STANDING, SKILL, Multi(p["script"]), FakeTools(), t, agent="a0.1", parent="a0")
+        self.assertEqual(set(asked), {"a0.1"})
+
+    def test_the_gateway_model_names_the_agent_in_its_body(self):
+        from research.agents.model import GatewayModel
+        bodies = []
+        m = GatewayModel("http://gw", "tok", "S" * 22, post=lambda u, t, b, to: (bodies.append(b), (200, {"text": "x"}))[1])
+        m.respond({"messages": []})
+        m.respond({"messages": []}, agent="a0.3")
+        self.assertEqual([b["agent"] for b in bodies], ["a0", "a0.3"])
+
+
 if __name__ == "__main__":
     unittest.main()

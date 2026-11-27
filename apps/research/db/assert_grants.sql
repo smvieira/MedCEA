@@ -16,7 +16,8 @@
 --   pg_catalog, pg_temp (and, as above, owned by rs_owner, not executable by PUBLIC);
 --   rs_session (research Phase 4a) is LOGIN NOINHERIT, CONNECTION LIMIT 5, statement_timeout
 --   10s, a member of nothing, CONNECT only, USAGE on schema agent_trace only, EXECUTE on
---   exactly the eleven agent_trace writers and readers and on nothing else, no privilege on
+--   exactly the agent_trace writers and readers of want_ss (every overload of each: both
+--   open_session forms; sessions_of since research Phase 4e) and on nothing else, no privilege on
 --   any relation or column; every agent_trace function is SECURITY DEFINER with search_path
 --   pg_catalog, pg_temp, and nobody but rs_owner and rs_session holds EXECUTE on one.
 BEGIN READ ONLY;
@@ -51,7 +52,7 @@ WITH sch AS (
      WHERE n.nspname = 'agent_trace'
 ), want_ss(proname) AS (
     VALUES ('open_session'), ('append_event'), ('put_blob'), ('checkpoint'), ('use_claim'), ('revoke'),
-           ('session_status'), ('events'), ('set_expect'), ('session_state'), ('active_sessions')
+           ('session_status'), ('events'), ('set_expect'), ('session_state'), ('active_sessions'), ('sessions_of')
 ), want_rel(relname) AS (
     SELECT 'stage_' || x FROM pg_catalog.unnest(ARRAY['measurements', 'units', 'zones', 'recipes', 'recipe_lines',
                                                       'runs', 'cycles', 'control_loops', 'param_sets', 'catalogue']) x
@@ -307,6 +308,12 @@ WITH sch AS (
        AND NOT EXISTS (SELECT 1 FROM at_fn f, LATERAL pg_catalog.aclexplode(f.proacl) a
                         WHERE f.proname = w.proname AND a.grantee = (SELECT oid FROM ss)
                           AND a.privilege_type = 'EXECUTE')
+    UNION ALL
+    SELECT 'rs_session lacks EXECUTE on ' || f.sig
+      FROM at_fn f
+     WHERE EXISTS (SELECT 1 FROM ss) AND f.proname IN (SELECT proname FROM want_ss)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(f.proacl) a
+                        WHERE a.grantee = (SELECT oid FROM ss) AND a.privilege_type = 'EXECUTE')
     UNION ALL
     SELECT f.sig || ' is held by ' || pg_catalog.pg_get_userbyid(a.grantee)
       FROM at_fn f, LATERAL pg_catalog.aclexplode(f.proacl) a

@@ -4,7 +4,10 @@ token>) to the servers named by tool prefix (sim. -> mcp-sim, lake. -> mcp-lake)
 loop's `tools` interface: list_tools() and call(name, args), raising loop.ToolError.
 A sim.run that answers "waiting for the supervisor" (the CPU gate) or "running" is followed
 with sim.status every `poll_s` until it is done, failed or `wait_s` has passed; the polling
-is wall time, never turns. Stdlib only."""
+is wall time, never turns. Each tools/call carries params._meta = {agent, call}, the agent loop's
+key of the call (research Phase 4e): the servers record it beside their own count, so replay pairs
+their records with the agent's call exactly (the sim.status polls of one sim.run carry the same key).
+Stdlib only."""
 import json
 import time
 import urllib.error
@@ -34,6 +37,8 @@ class HttpTransport:
 
 
 class HttpTools:
+    accepts_meta = True       # loop.run passes meta={agent, call}
+
     def __init__(self, servers, token, transport=None, sleep=time.sleep, clock=time.monotonic, poll_s=10, wait_s=3600):
         self.servers, self.token = dict(servers), token
         self.t, self.sleep, self.clock, self.poll_s, self.wait_s = transport or HttpTransport(), sleep, clock, poll_s, wait_s
@@ -56,12 +61,15 @@ class HttpTools:
             out += [{"name": t["name"], "description": t.get("description", ""), "inputSchema": t.get("inputSchema")} for t in self._rpc(url, "tools/list", {})["tools"]]
         return out
 
-    def _call(self, name, args):
+    def _call(self, name, args, meta=None):
         prefix = name.split(".")[0]
         url = self.servers.get(prefix) or self.servers.get({"propose": "sim"}.get(prefix, ""))
         if url is None:
             raise ToolError("no server for this tool")
-        res = self._rpc(url, "tools/call", {"name": name, "arguments": args})
+        params = {"name": name, "arguments": args}
+        if meta:
+            params["_meta"] = dict(meta)
+        res = self._rpc(url, "tools/call", params)
         if res.get("isError"):
             try:
                 msg = json.loads(res["content"][0]["text"]).get("error", "")
@@ -75,12 +83,12 @@ class HttpTools:
         except (ValueError, KeyError, IndexError):
             raise ToolError("the tool answered with something that is not JSON")
 
-    def call(self, name, args):
-        r = self._call(name, args)
+    def call(self, name, args, meta=None):
+        r = self._call(name, args, meta)
         if name != "sim.run" or not isinstance(r, dict):
             return r
         cid, deadline = r.get("cid"), self.clock() + self.wait_s
         while r.get("state") in ("waiting for the supervisor", "started", "running") and self.clock() < deadline:
             self.sleep(self.poll_s)
-            r = self._call("sim.status", {"cid": cid})
+            r = self._call("sim.status", {"cid": cid}, meta)
         return r

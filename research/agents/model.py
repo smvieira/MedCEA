@@ -54,13 +54,17 @@ class ScriptedModel:
 
 
 class RecordedModel:
-    """Replay: the recorded responses, in order."""
-    def __init__(self, responses):
-        self.responses, self.id = list(responses), None
+    """Replay: the recorded responses, in order, per agent ({agent: [response, ...]}; a list is the lead's)."""
+    accepts_agent = True
 
-    def respond(self, request):
+    def __init__(self, responses):
+        self.responses = ({a: list(r) for a, r in responses.items()} if isinstance(responses, dict)
+                          else {"a0": list(responses)})
+        self.id = None
+
+    def respond(self, request, agent="a0"):
         n = sum(1 for m in request["messages"] if m["role"] == "assistant")
-        return self.responses[n]
+        return self.responses.get(agent, [])[n]
 
 
 class GatewayModel:
@@ -68,8 +72,10 @@ class GatewayModel:
     urllib; the token goes in a header, never in a URL or a log). 429 `busy` (one slot) is retried with
     a growing pause until `busy_wait_s`; the wait is wall time, counted by the loop's own clock.
     Anything else that is not 200 raises ModelError: 413 -> context_full, 401/403 -> model_refused,
-    the rest model_error. `post(url, token, body, timeout)` -> (status, object) is injectable."""
+    the rest model_error. `post(url, token, body, timeout)` -> (status, object) is injectable.
+    The body names the asking agent (`agent`, research Phase 4e): the gateway records it on its turns."""
     id = "gateway"
+    accepts_agent = True
 
     def __init__(self, url, token, sid, post=None, sleep=time.sleep, clock=time.monotonic,
                  busy_wait_s=600, timeout=600):
@@ -91,11 +97,12 @@ class GatewayModel:
         except (OSError, ValueError):
             return 0, {}
 
-    def respond(self, request):
+    def respond(self, request, agent="a0"):
         turn = sum(1 for m in request["messages"] if m["role"] == "assistant") + 1
         end, pause = self.clock() + self.busy_wait_s, 2
         while True:
-            st, obj = self.post(self.url, self.token, {"sid": self.sid, "turn": turn, "request": request}, self.timeout)
+            st, obj = self.post(self.url, self.token, {"sid": self.sid, "agent": agent, "turn": turn, "request": request},
+                                self.timeout)
             if st == 429 and self.clock() < end:
                 self.sleep(pause)
                 pause = min(pause * 2, 30)

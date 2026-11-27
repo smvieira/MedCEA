@@ -19,7 +19,9 @@ Port 8091 (sim API, mcp-sim only, network-gated): POST /internal/sims, GET /inte
 
 Lifecycle (R10): tick() registers the agent pod's IP with research-session when the pod is
 Running (the claim can then be exchanged from that IP only) and revokes the session when the
-Job ends; a pod that never ran within START_GRACE_S is stopped. Holds no secret that can mint
+Job ends; a pod that never ran within START_GRACE_S is stopped. When a simulation Job ends, tick()
+writes its sim_finished as actor orchestrator (research Phase 4e; session_status counts one per
+campaign, whichever of mcp-sim and the orchestrator wrote it). Holds no secret that can mint
 or attribute: the person's token is only forwarded. Never logs a token or a body."""
 import hashlib
 import importlib.util
@@ -80,6 +82,8 @@ class Orchestrator:
         self.track = {}
         self.replays = {}                 # sid -> {"job", "final"}
         self.estimates = {}               # eid -> {"sid", "final"}
+        self.sim_caps = {}                # cid -> the cap the campaign was started with
+        self.sims_reported = set()        # cids whose sim_finished this process wrote
         self.lock = threading.Lock()
 
     def endpoints(self):
@@ -318,15 +322,63 @@ class Orchestrator:
             self.kube.delete_job(t["job"])
         for cid, s in list(self.runner.owner.items()):
             if s == sid:
+                self._report_stopped(cid, sid)
                 self.runner.delete(cid)
                 self.runner.owner.pop(cid, None)
+                self.sim_caps.pop(cid, None)
+                self.sims_reported.discard(cid)
         for eid, e in list(self.estimates.items()):
             if e["sid"] == sid:
                 self.estimates.pop(eid, None)
                 self.kube.delete_job(jobs.estimate_job_name(eid))
 
+    def _report_sims(self):
+        """sim_finished, as actor orchestrator, when a simulation Job ends (research Phase 4e, design 2.2): the
+        campaign's CPU is then on the trace even when the agent never asks sim.status again. mcp-sim may write its
+        own; session_status counts one per cid, whichever order. A refused record (403) is not retried."""
+        for cid, sid in list(self.runner.owner.items()):
+            if cid not in self.sims_reported:
+                self._report_sim(cid, sid)
+
+    def _report_sim(self, cid, sid, stopping=False):
+        """One campaign's sim_finished once its Job ended. stopping: the session's end is about to delete the Job, so
+        a campaign still running is recorded as failed with its CPU unknown (cpu_hours null: session_status counts
+        it as 0, as it did before) and the trace never leaves it running."""
+        s = self.runner.status(cid)
+        if isinstance(s, dict) and s.get("state") in ("done", "failed"):
+            try:
+                cpu = round(float(s.get("cpu_hours") or 0), 6)
+            except (TypeError, ValueError):
+                cpu = 0.0
+            pay = {"cid": cid, "state": s["state"], "cpu_hours": cpu,
+                   "result_digest": (s.get("manifest") or {}).get("result_digest") if isinstance(s.get("manifest"), dict) else None}
+        elif stopping:
+            pay = {"cid": cid, "state": "failed", "cpu_hours": None, "result_digest": None,
+                   "error": "stopped with the session before the Job finished"}
+        else:
+            return
+        if isinstance(self.sim_caps.get(cid), (int, float)):
+            pay["cap_h"] = round(self.sim_caps[cid], 6)
+        st, _ = self.sh.request("POST", "/trace", {"server": "orchestrator", "sid": sid, "event": "sim_finished",
+                                                   "payload": pay})
+        if st in (200, 403):
+            self.sims_reported.add(cid)
+
+    def _report_stopped(self, cid, sid):
+        """Before the session's cleanup deletes a campaign's Job: one attempt, since the Job then goes."""
+        if cid in self.sims_reported:
+            return
+        try:
+            self._report_sim(cid, sid, stopping=True)
+        except Exception as e:                              # never stops the cleanup
+            sys.stderr.write("cleanup sims %s\n" % type(e).__name__)
+
     def tick(self):
         now = self.clock()
+        try:
+            self._report_sims()
+        except Exception as e:                              # never stops the session lifecycle below
+            sys.stderr.write("tick sims %s\n" % type(e).__name__)
         with self.lock:
             items = list(self.track.items())
         for sid, t in items:
@@ -378,6 +430,7 @@ class Orchestrator:
             return 403, {"error": "the session is not active"}
         try:
             self.runner.start(cid, body["spec"], cap, dl, sid=sid)
+            self.sim_caps[cid] = cap
         except ValueError as e:
             return 400, {"error": str(e)}
         except Exception as e:
@@ -571,6 +624,7 @@ def main():
            "mcp_lake_url": os.environ["RS_MCP_LAKE_URL"], "profiles_dir": os.environ.get(
                "RS_PROFILES_DIR", os.path.join(ROOT, "research", "agents", "profiles")),
            "pool": int(os.environ.get("RS_SIM_POOL", "2")),
+           "series_every": float(os.environ.get("RS_SIM_SERIES_EVERY", "60")),
            "model_gateway_url": os.environ.get("RS_MODEL_GATEWAY_URL", ""),
            "endpoints": [e for e in os.environ.get("RS_ENDPOINTS", "local").split() if e],
            "inventory": _inventory(os.environ.get("RS_ENDPOINTS_INVENTORY", ""))}

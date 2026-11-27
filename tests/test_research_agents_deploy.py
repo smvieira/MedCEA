@@ -623,6 +623,30 @@ class Deploy(Tree):
         self.assertEqual(r.returncode, 0, r.out)
         self.assertEqual(orch_env()["RS_MODEL_GATEWAY_URL"], "http://model-gateway.%s.svc.cluster.local:8120" % GW)
 
+    def test_the_series_interval(self):
+        # research Phase 4e (design rs4e 2.3): RS_SIM_SERIES_EVERY reaches the orchestrator, 60 by default
+        def orch_env():
+            for t in self.applies():
+                for d in docs(t):
+                    if d["kind"] == "Deployment" and d["metadata"]["name"] == "research-orchestrator":
+                        return {e["name"]: e.get("value") for e in d["spec"]["template"]["spec"]["containers"][0]["env"]}
+        r, calls = self.run_script(self.DEPLOY)
+        self.assertEqual(r.returncode, 0, r.out)
+        self.assertEqual(orch_env()["RS_SIM_SERIES_EVERY"], "60")
+        for v in ("0", "300"):
+            self.clear_applies()
+            self.write_config(RS_SIM_SERIES_EVERY=v)
+            r, calls = self.run_script(self.DEPLOY)
+            self.assertEqual(r.returncode, 0, r.out)
+            self.assertEqual(orch_env()["RS_SIM_SERIES_EVERY"], v)
+        for bad in ("-1", "1.5", "abc", "86401", "060"):
+            self.clear_applies()
+            self.write_config(RS_SIM_SERIES_EVERY=bad)
+            r, calls = self.run_script(self.DEPLOY)
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn("RS_SIM_SERIES_EVERY", r.out)
+            self.assertEqual(self.applies(), [], bad)
+
     def test_the_bundle(self):
         r, calls = self.run_script(self.DEPLOY)
         self.assertEqual(r.returncode, 0, r.out)
@@ -788,6 +812,14 @@ class JobManifests(unittest.TestCase):
             secrets = [v for v in j["spec"]["template"]["spec"]["volumes"] if "secret" in v]
             self.assertEqual(secrets, [])
 
+
+    def test_the_sim_job_records_its_series(self):
+        # research Phase 4e (design rs4e 2.3): the run series go to /runs/campaigns/<cid>/series, 60 s by default
+        cmd = self.sim["spec"]["template"]["spec"]["containers"][0]["command"]
+        self.assertEqual(cmd[cmd.index("--out") + 1], "/runs/campaigns/c" + "0" * 20)
+        self.assertEqual(cmd[cmd.index("--series-every") + 1], "60")
+        for j in (self.agent, self.est, self.rep):
+            self.assertNotIn("--series-every", j["spec"]["template"]["spec"]["containers"][0]["command"])
 
     def test_estimate_and_replay_jobs(self):
         import jobs

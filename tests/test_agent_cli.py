@@ -173,6 +173,28 @@ class CliTest(unittest.TestCase):
         c.watch("S" * 22, verbose=True)
         self.assertEqual(sum("mcp-sim" in line for line in out[before:]), 3)
 
+    def test_line_names_the_proposal_id_and_a_sub_agent(self):
+        # research Phase 4e (design 2.2): accept/discard take p<event_id>, which watch prints next to the proposal
+        line = cli.Client.line({"event_id": 42, "event": "proposal", "actor": "agent",
+                                "payload": {"agent": "a0", "tool": "propose.parameter_set", "result_sha256": "ab" * 32}})
+        self.assertIn("(medcea-agent accept|discard SID p42)", line)
+        self.assertNotIn("[a0]", line)
+        line = cli.Client.line({"event_id": 43, "event": "proposal_decided", "actor": "research-session",
+                                "payload": {"pid": "p42", "decision": "approve", "by_username": "bio"}})
+        self.assertIn("p42 accepted by bio", line)
+        line = cli.Client.line({"event_id": 44, "event": "tool_call", "actor": "agent",
+                                "payload": {"agent": "a0.1", "parent": "a0", "tool": "sim.run"}})
+        self.assertIn("[a0.1] sim.run", line)
+        line = cli.Client.line({"event_id": 45, "event": "agent_spawned", "actor": "agent",
+                                "payload": {"agent": "a0.1", "parent": "a0", "profile_name": "analyst", "task": "t"}})
+        self.assertIn("[a0.1] a0 starts analyst: t", line)
+
+    def test_turns_are_the_leads(self):
+        ev = [{"actor": "model-gateway", "event": "turn_request", "payload": {"turn": 1, "request_sha256": "a"}},
+              {"actor": "model-gateway", "event": "turn_request", "payload": {"agent": "a0.1", "turn": 1, "request_sha256": "b"}},
+              {"actor": "model-gateway", "event": "turn_response", "payload": {"agent": "a0", "turn": 1, "response_sha256": "r"}}]
+        self.assertEqual(cli.Client.turns(ev), {1: ("a", "r", None)})
+
     def test_decide_stop_replay(self):
         c, o, out, clk = client()
         c.signin()

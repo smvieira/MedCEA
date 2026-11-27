@@ -21,6 +21,11 @@ pod IP. Everything about a session (hashes, metadata, the registered pod IP, the
 from the database (session_state); at start the service revokes every still-active session
 (reason service_restart, R10), so a restart fails closed.
 Never logs a token, a claim or the key. DB access goes through the Db adapter (PgDb for production).
+
+Decisions (research Phase 4e, design 2.2): a gate decision needs a gate_pending of that gid and no
+gate_decided for it (404 / 409); a proposal decision names the agent's proposal event as p<event_id>
+(or, the CLI's form, a 12-40 hex prefix of its result_sha256, recorded as p<event_id>) with no earlier
+proposal_decided for it. Lookups read every page of the session's events (up to EVENTS_CAP).
 """
 import base64
 import hashlib
@@ -45,13 +50,20 @@ SID = re.compile(r"^[A-Za-z0-9_-]{22}$")
 B64 = re.compile(r"^[A-Za-z0-9_-]{43}$")
 KID = re.compile(r"^[0-9a-f]{8}$")
 NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,39}$")
-AGENT_EVENTS = ("turn_request", "turn_response", "tool_call", "tool_result", "checkpoint", "proposal", "stop")
+AGENT_EVENTS = ("turn_request", "turn_response", "tool_call", "tool_result", "checkpoint", "proposal", "stop",
+                "agent_spawned", "agent_returned")
 SERVER_EVENTS = ("tool_result", "gate_pending", "sim_started", "sim_finished", "replay_result",
                  "turn_request", "turn_response")
 SERVERS = ("mcp-sim", "mcp-lake", "orchestrator", "model-gateway")
 CLIENT_ID = "research-agent"
 SCOPE = "openid groups medcea-identity"
 TOOL_SERVER = {"lake": "mcp-lake", "sim": "mcp-sim", "propose": "mcp-sim"}
+PAGE = 1000              # agent_trace.events() answers at most this many events per call
+EVENTS_CAP = 100000      # a session's events read for a gate or proposal lookup (as replay)
+PID = re.compile(r"^p([1-9][0-9]{0,17})$")      # a proposal id: p<event_id of the agent's proposal event>
+PID_HEX = re.compile(r"^[0-9a-f]{12,40}$")      # or a prefix of its result_sha256 (the CLI's form; ids are <= 40;
+                                                # 12 is what the watch printed before p<event_id>)
+OLD_PID_HEX = re.compile(r"^[0-9a-f]{8,64}$")  # an earlier decision's pid that names a proposal by its digest
 
 
 class Conflict(Exception):
@@ -162,10 +174,14 @@ class PgDb:
                     raise
 
     def open_session(self, **k):
+        args = (k["sid"], k["kid"], k["token_sha256"], k["claim_sha256"], k["sup_sub"], k["sup_person"],
+                k["sup_role"], k["sup_username"], k["profile"], k["profile_sha256"], list(k["tools"]),
+                json.dumps(k["budget"]), k["backend"], k["code_commit"], k["exp"])
+        if k.get("reexecutes"):     # the sixteen-argument form (research Phase 4e): recorded in session_minted
+            return self._run("SELECT agent_trace.open_session(%s,%s,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s::text[],%s::jsonb,"
+                             "%s,%s,%s,%s::text)", args + (k["reexecutes"],))[0][0]
         return self._run("SELECT agent_trace.open_session(%s,%s,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s::text[],%s::jsonb,%s,%s,%s)",
-                         (k["sid"], k["kid"], k["token_sha256"], k["claim_sha256"], k["sup_sub"], k["sup_person"],
-                          k["sup_role"], k["sup_username"], k["profile"], k["profile_sha256"], list(k["tools"]),
-                          json.dumps(k["budget"]), k["backend"], k["code_commit"], k["exp"]))[0][0]
+                         args)[0][0]
 
     def append_event(self, port, sid, actor, event, payload, token_sha256=None):
         r = self._run("SELECT event_id, refused FROM agent_trace.append_event(%s,%s,%s,%s,%s::jsonb,%s)",
@@ -208,6 +224,21 @@ class PgDb:
         return [{"event_id": r[0], "at": r[1].isoformat(), "actor": r[2], "event": r[3], "payload": r[4],
                  "prev_hash": r[5], "hash": r[6]} for r in rows]
 
+    def sessions_of(self, person, before=None, limit=50):
+        rows = self._run("SELECT sid, mint_event_id, created_at, exp, profile, backend, code_commit, reexecutes, active, "
+                         "revoked, revoke_reason, last_event_id, last_at, spent "
+                         "FROM agent_trace.sessions_of(%s,%s,%s)", (person, before, limit))
+        k = ("sid", "mint_event_id", "created_at", "exp", "profile", "backend", "code_commit", "reexecutes", "active",
+             "revoked", "revoke_reason", "last_event_id", "last_at", "spent")
+        out = []
+        for r in rows:
+            d = dict(zip(k, r))
+            for t in ("created_at", "exp", "last_at"):
+                if d[t] is not None:
+                    d[t] = d[t].isoformat()
+            out.append(d)
+        return out
+
 
 class Service:
     """State and rules; the three handler classes only parse HTTP and call this."""
@@ -215,6 +246,7 @@ class Service:
     def __init__(self, keys, db, iam, clock=time.time):
         self.keys, self.db, self.iam, self.clock = keys, db, iam, clock
         self.lock = threading.Lock()
+        self.decide_lock = threading.Lock()   # one decision per gate or proposal: the check and the append together
         self.kc = None           # KeycloakRelay (R12) or None
         self.signin_hits = {}
         self.last_anchor = None  # (event_id, hash) the service last wrote: /healthz, R11
@@ -281,6 +313,9 @@ class Service:
         tools, budget = body.get("tools"), body.get("budget") or {}
         psha, commit = body.get("profile_sha256"), body.get("code_commit")
         ttl = body.get("ttl_s", 7200)
+        rx = body.get("reexecutes")
+        if rx is not None and not (isinstance(rx, str) and SID.match(rx) and self._own(who, rx) is not None):
+            return 400, {"error": "reexecutes must name one of your sessions"}
         if not (isinstance(profile, str) and NAME.match(profile) and isinstance(backend, str) and re.match(r"^[a-z][a-z0-9-]{0,30}$", backend)
                 and isinstance(tools, list) and tools and all(isinstance(t, str) and re.match(r"^[a-z]+\.[a-z_]+$|^propose$", t) for t in tools)
                 and isinstance(budget, dict) and isinstance(psha, str) and re.match(r"^[0-9a-f]{64}$", psha)
@@ -296,9 +331,12 @@ class Service:
                                  claim_sha256=sha256_hex(claim), sup_sub=who["sub"], sup_person=who["person_id"],
                                  sup_role=roles[0], sup_username=who.get("username") or "", profile=profile,
                                  profile_sha256=psha, tools=tools, budget=budget, backend=backend,
-                                 code_commit=commit, exp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)))
+                                 code_commit=commit, exp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)),
+                                 **({"reexecutes": rx} if rx else {}))
         except Conflict as e:
             return 409, {"error": str(e)}
+        except NotFound:
+            return 400, {"error": "reexecutes must name one of your sessions"}
         return 201, {"sid": sid, "claim": claim, "claim_valid_s": CLAIM_TTL, "exp": exp}
 
     def _own(self, who, sid):
@@ -314,8 +352,40 @@ class Service:
         reason = (body.get("reason") or "revoked by the supervisor")
         return 200, {"revoked": bool(self.db.revoke(sid, str(reason)[:200], who["sub"]))}
 
+    def all_events(self, sid):
+        """Every event of the session, page by page (agent_trace.events answers PAGE at most), up to EVENTS_CAP:
+        a gate or proposal past the first 1000 events is found (research Phase 4e, design 2.2)."""
+        out, after = [], 0
+        while len(out) < EVENTS_CAP:
+            page = self.db.events(sid, after)
+            out += page
+            if len(page) < PAGE or page[-1]["event_id"] <= after:
+                break
+            after = page[-1]["event_id"]
+        return out[:EVENTS_CAP]
+
+    @staticmethod
+    def _proposal_of(events, xid):
+        """The agent's proposal event named by xid (p<event_id>, or a 12-40 hex prefix of its result_sha256):
+        (event, None), or (None, (status, error))."""
+        props = [e for e in events if e["event"] == "proposal" and e.get("actor") == "agent"]
+        m = PID.match(xid)
+        if m:
+            hit = [e for e in props if e["event_id"] == int(m.group(1))]
+        elif PID_HEX.match(xid):
+            hit = [e for e in props if str((e.get("payload") or {}).get("result_sha256") or "").startswith(xid)]
+        else:
+            hit = []
+        if not hit:
+            return None, (404, {"error": "no such proposal"})
+        if len(hit) > 1:
+            return None, (409, {"error": "the prefix names %d proposals: use one of %s"
+                                % (len(hit), ", ".join("p%d" % e["event_id"] for e in hit[:5]))})
+        return hit[0], None
+
     def decide(self, who, kind, sid, xid, body):
-        """gate_decided / proposal_decided, attributed to the person."""
+        """gate_decided / proposal_decided, attributed to the person. The gate (a gate_pending with that gid) or
+        the proposal (the agent's proposal event, p<event_id>) must exist in this session and be undecided."""
         if not SID.match(sid) or self._own(who, sid) is None:
             return 404, {"error": "no such session"}
         d = (body or {}).get("decision") if isinstance(body, dict) else None
@@ -328,8 +398,28 @@ class Service:
             if not isinstance(cap, (int, float)) or isinstance(cap, bool) or not 0 < cap <= 100:
                 return 400, {"error": "approved_cap_h is required to approve a gate"}
             pay["approved_cap_h"] = cap
-        eid, why = self.db.append_event("person", sid, "research-session",
-                                        "gate_decided" if kind == "gate" else "proposal_decided", pay)
+        with self.decide_lock:   # research-session is one replica: two overlapping requests cannot both decide
+            events = self.all_events(sid)
+            if kind == "gate":
+                if not any(e["event"] == "gate_pending" and (e.get("payload") or {}).get("gid") == xid
+                           for e in events):
+                    return 404, {"error": "no such gate"}
+                if any(e["event"] == "gate_decided" and (e.get("payload") or {}).get("gid") == xid for e in events):
+                    return 409, {"error": "this gate is already decided"}
+            else:
+                prop, err = self._proposal_of(events, xid)
+                if err:
+                    return err
+                pid = "p%d" % prop["event_id"]
+                sha = str((prop.get("payload") or {}).get("result_sha256") or "")
+                for e in events:     # an earlier decision names it by its id or by a prefix of its digest (any
+                    if e["event"] == "proposal_decided":   # length the CLI ever printed, 12 hex before p<event_id>)
+                        named = str((e.get("payload") or {}).get("pid") or "")
+                        if named == pid or (OLD_PID_HEX.match(named) and sha.startswith(named)):
+                            return 409, {"error": "this proposal is already decided"}
+                pay["pid"] = pid
+            eid, why = self.db.append_event("person", sid, "research-session",
+                                            "gate_decided" if kind == "gate" else "proposal_decided", pay)
         if why:
             return 403, {"error": why}
         self.note(sid, eid)
@@ -431,7 +521,23 @@ class Service:
         st = self.db.session_status(sid)
         return 200, {"sid": sid, "sup_person": rec["sup_person"], "sup_sub": rec["sup_sub"], "profile": rec["profile"],
                      "backend": rec["backend"], "exp": rec["exp"], "claimed": rec["claimed"], "expect": rec["expect"],
-                     "active": st["active"], "revoked": st["revoked"], "budget": st["budget"], "spent": st["spent"]}
+                     "active": st["active"], "revoked": st["revoked"], "budget": st["budget"], "spent": st["spent"],
+                     "sup_username": rec.get("sup_username"), "sup_role": rec.get("sup_role"),
+                     "created_at": rec.get("created_at")}
+
+    def sessions_of(self, person, before=None, limit=50):
+        """A person's sessions, newest first (agent_trace.sessions_of; research Phase 4e, design 2.2). The person
+        comes from the caller (the orchestrator, from the verified token). The HTTP route that serves it on the
+        server port comes with the access-policy version that names it (design 5.2, rule 1)."""
+        if not isinstance(person, str) or not person or len(person) > 200:
+            return 400, {"error": "a person is required"}
+        if before is not None and not (isinstance(before, int) and not isinstance(before, bool) and before > 0):
+            return 400, {"error": "before must be a positive event id"}
+        if not (isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 200):
+            return 400, {"error": "limit is 1 to 200"}
+        rows = self.db.sessions_of(person, before, limit)
+        nxt = rows[-1]["mint_event_id"] if len(rows) == limit else None
+        return 200, {"sessions": rows, "next_before": nxt}
 
     def revoke_by_orchestrator(self, sid, body):
         """POST /sessions/<sid>/revoke (server port): the orchestrator ends a session whose Job ended (R10)."""
@@ -490,7 +596,7 @@ class Service:
         if not SID.match(sid or "") or not re.match(r"^[A-Za-z0-9_.-]{1,40}$", gid):
             return 404, {"error": "no such gate"}
         pending, decided = None, None
-        for e in self.db.events(sid, 0):
+        for e in self.all_events(sid):
             if e["payload"].get("gid") == gid:
                 if e["event"] == "gate_pending" and pending is None:
                     pending = e

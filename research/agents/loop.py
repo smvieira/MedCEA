@@ -2,8 +2,10 @@
 model -> turn_response -> [tool_call -> tool_result [-> proposal]] -> [checkpoint]; the loop
 ends with exactly one `stop {reason}`. Every cap of the profile is enforced here and the
 stop is traced. The loop knows nothing of HTTP: `trace` has post(event, payload), `tools`
-has list_tools() -> [{name, description}] and call(name, args) -> dict (raising ToolError),
-`model` has respond(request) -> {text, tool}. Strict replay (replay.py) drives this same
+has list_tools() -> [{name, description}] and call(name, args) -> dict (raising ToolError;
+call(name, args, meta={agent, call}) when it says accepts_meta), `model` has respond(request)
+-> {text, tool} (respond(request, agent=...) when it says accepts_agent). Every payload the loop
+writes carries the agent id (research Phase 4e). Strict replay (replay.py) drives this same
 function with recorded responses and results."""
 import re
 import time
@@ -23,6 +25,21 @@ ERROR_MAX = 300
 LOCAL_CONTEXT_MAX = 4096     # owner decision of 21 Nov 2026: a local session is about 4k tokens of context
 BACKENDS = ("scripted", "local")         # local = the endpoint on this host; any endpoint name works the same way
 ENDPOINT_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+# Agent ids (research Phase 4e, design 2.1, AH.9): the lead is a0, its sub-agents a0.1, a0.2, theirs a0.1.1; depth at
+# most 3. Every agent-port payload carries `agent` (and a sub-agent's also `parent`); a payload without it, as every
+# trace recorded before, reads as a0. `turn` and `call` count per agent: (agent, call) is a call's key. The id is never
+# part of the model request, so request digests do not move.
+AGENT_RE = re.compile(r"^a0(\.[1-9][0-9]{0,2}){0,3}$")
+LEAD = "a0"
+
+
+def agent_ok(agent, parent=None):
+    """True for a valid (agent, parent) pair: the lead without a parent, a sub-agent with the agent one level up."""
+    if not isinstance(agent, str) or not AGENT_RE.match(agent):
+        return False
+    if agent == LEAD:
+        return parent is None
+    return isinstance(parent, str) and AGENT_RE.match(parent) is not None and agent.rsplit(".", 1)[0] == parent
 
 
 def through_gateway(profile):
@@ -105,8 +122,23 @@ def child_profile(parent, want):
     return c
 
 
+class _AgentTrace:
+    """The trace as one agent writes it: a sub-agent's payloads gain `agent` and `parent`. The lead's payloads
+    carry neither (absent reads as a0 everywhere), so a one-agent session replays under the code before A1a too."""
+    def __init__(self, trace, agent, parent):
+        self.t = trace
+        self.extra = {} if agent == LEAD else dict({"agent": agent},
+                                                    **({"parent": parent} if parent is not None else {}))
+
+    def post(self, event, payload):
+        return self.t.post(event, dict(payload, **self.extra))
+
+
 def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, backend_id=None, endpoint=None,
-        endpoint_context=None):
+        endpoint_context=None, agent=LEAD, parent=None):
+    if not agent_ok(agent, parent):
+        raise ValueError("agent %r with parent %r is not a valid agent id" % (agent, parent))
+    trace = _AgentTrace(trace, agent, parent)
     caps = dict(profile["caps"], context_tokens=context_cap(profile, endpoint, endpoint_context))
     allowed = list(profile["tools"])
     listed = {t["name"]: t for t in tools.list_tools()}
@@ -160,7 +192,8 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
                                             request_sha256=sha(ctx.request_bytes())))
         t0 = clock()
         try:
-            resp = model.respond(req)
+            # a model client that serves several agents (the gateway's, replay's) is told which one asks
+            resp = model.respond(req, agent=agent) if getattr(model, "accepts_agent", False) else model.respond(req)
         except ModelError as e:
             return stop(e.reason, turn)
         if clock() - t0 > caps["turn_timeout_s"]:
@@ -207,7 +240,9 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
             result, err = {"error": "tool not allowed"}, True
         else:
             try:
-                result = tools.call(name, args)
+                # the MCP client sends (agent, call) as _meta; the servers record it beside their own count (design 2.1)
+                result = (tools.call(name, args, meta={"agent": agent, "call": call})
+                          if getattr(tools, "accepts_meta", False) else tools.call(name, args))
             except ToolError as e:
                 result, err = {"error": str(e)[:ERROR_MAX]}, True
         text = canonical(result).decode("utf-8")

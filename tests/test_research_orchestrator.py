@@ -332,6 +332,83 @@ class SimApiTest(unittest.TestCase):
         self.assertIn("--max-cpu-hours", cmd)
         self.assertEqual(o.sim_status(self.CID), (200, {"state": "running"}))
 
+    def test_sim_finished_is_written_when_the_job_ends(self):
+        # research Phase 4e (design 2.2): the orchestrator records the campaign's end itself, once; session_status
+        # counts one sim_finished per cid, so mcp-sim's own record does not double it
+        o, k, ph, sh = make()
+        o.sim_start({"sid": SID, "cid": self.CID, "spec": {"a": 1}, "cap_h": 1.5, "deadline_s": 900})
+        traces = lambda: [c for c in sh.calls if c[:2] == ("POST", "/trace")]
+        o.tick()
+        self.assertEqual(traces(), [])                                   # still running: nothing
+        name = "sim-" + self.CID
+        k.status[name] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        k.pods[name] = {"name": "simpod", "phase": "Succeeded", "ip": ""}
+        k.logs["simpod"] = 'x\nSIM_RESULT {"state": "done", "cpu_hours": 0.4, "manifest": {"result_digest": "dd"}}\n'
+        o.tick()
+        o.tick()
+        self.assertEqual(len(traces()), 1)
+        body = traces()[0][2]
+        self.assertEqual((body["server"], body["sid"], body["event"]), ("orchestrator", SID, "sim_finished"))
+        self.assertEqual(body["payload"], {"cid": self.CID, "state": "done", "cpu_hours": 0.4, "result_digest": "dd",
+                                           "cap_h": 1.5})
+        # a failed Job without a result line is recorded as failed, with no CPU
+        cid2 = "c" + "e" * 20
+        o.sim_start({"sid": SID, "cid": cid2, "spec": {"a": 1}, "cap_h": 1, "deadline_s": 900})
+        k.status["sim-" + cid2] = {"active": 0, "succeeded": 0, "failed": 1, "reason": "DeadlineExceeded"}
+        o.tick()
+        self.assertEqual(traces()[-1][2]["payload"], {"cid": cid2, "state": "failed", "cpu_hours": 0.0,
+                                                      "result_digest": None, "cap_h": 1})
+
+    def test_a_campaign_running_at_the_sessions_end_is_recorded_once_as_stopped(self):
+        # the session's end deletes the sim Job: the trace must not leave the campaign running; its CPU is unknown
+        o, k, ph, sh = make()
+        o.start(WHO, "T", {"profile": "compare_controllers"})
+        o.sim_start({"sid": SID, "cid": self.CID, "spec": {"a": 1}, "cap_h": 1.5, "deadline_s": 900})
+        k.status[jobs.agent_job_name(SID)] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        o.tick()
+        o.tick()
+        fin = [c[2] for c in sh.calls if c[:2] == ("POST", "/trace") and c[2]["event"] == "sim_finished"]
+        self.assertEqual(fin, [{"server": "orchestrator", "sid": SID, "event": "sim_finished", "payload": {
+            "cid": self.CID, "state": "failed", "cpu_hours": None, "result_digest": None, "cap_h": 1.5,
+            "error": "stopped with the session before the Job finished"}}])
+        self.assertIn("sim-" + self.CID, k.deleted)
+        self.assertEqual((o.runner.owner, o.sim_caps, o.sims_reported), ({}, {}, set()))
+
+    def test_a_campaign_that_ended_with_the_session_is_reported_with_its_result(self):
+        o, k, ph, sh = make()
+        o.start(WHO, "T", {"profile": "compare_controllers"})
+        o.sim_start({"sid": SID, "cid": self.CID, "spec": {"a": 1}, "cap_h": 1, "deadline_s": 900})
+        name = "sim-" + self.CID
+        k.status[name] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        k.pods[name] = {"name": "simpod", "phase": "Succeeded", "ip": ""}
+        k.logs["simpod"] = 'SIM_RESULT {"state": "done", "cpu_hours": 0.2, "manifest": {"result_digest": "ee"}}\n'
+        k.status[jobs.agent_job_name(SID)] = {"active": 0, "succeeded": 1, "failed": 0, "reason": ""}
+        o.tick()
+        fin = [c[2]["payload"] for c in sh.calls if c[:2] == ("POST", "/trace") and c[2]["event"] == "sim_finished"]
+        self.assertEqual(fin, [{"cid": self.CID, "state": "done", "cpu_hours": 0.2, "result_digest": "ee", "cap_h": 1}])
+
+    def test_the_series_interval_reaches_the_sim_job(self):
+        # research Phase 4e: RS_SIM_SERIES_EVERY (cfg series_every), 60 s when unset
+        for cfg, want in ((CFG, "60"), (dict(CFG, series_every=0.0), "0"), (dict(CFG, series_every=120.0), "120")):
+            k, ph, sh = FakeKube(), FakeHttp(), FakeHttp()
+            sh.sessions[SID] = info()
+            o = orch.Orchestrator(cfg, k, ph, sh, clock=lambda: 1000.0)
+            self.assertEqual(o.sim_start({"sid": SID, "cid": self.CID, "spec": {"a": 1}, "cap_h": 1,
+                                          "deadline_s": 900})[0], 200)
+            cmd = k.jobs["sim-" + self.CID]["spec"]["template"]["spec"]["containers"][0]["command"]
+            self.assertEqual(cmd[cmd.index("--series-every") + 1], want)
+
+    def test_sim_finished_is_retried_until_the_session_answers(self):
+        o, k, ph, sh = make()
+        o.sim_start({"sid": SID, "cid": self.CID, "spec": {"a": 1}, "cap_h": 1.5, "deadline_s": 900})
+        k.status["sim-" + self.CID] = {"active": 0, "succeeded": 0, "failed": 1, "reason": ""}
+        sh.answers[("POST", "/trace")] = (0, {})                          # research-session unreachable
+        o.tick()
+        sh.answers.pop(("POST", "/trace"))
+        o.tick()
+        o.tick()
+        self.assertEqual(len([c for c in sh.calls if c[:2] == ("POST", "/trace")]), 2)
+
     def test_sim_start_refusals(self):
         o, k, ph, sh = make()
         base = {"sid": SID, "cid": self.CID, "spec": {}, "cap_h": 1, "deadline_s": 10}
