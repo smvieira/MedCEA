@@ -269,6 +269,89 @@ class CliTest(unittest.TestCase):
         self.assertEqual(cli.main(["stop", "S" * 22], c), 1)
 
 
+class OtelTest(unittest.TestCase):
+    """Client.otel and `medcea-agent otel SID` (research Phase 4e commit A3, design 4.5): GET
+    /api/sessions/<sid>/otel[?content=1]; until the route exists (it comes with the console's policy version) a clear
+    message, whether the orchestrator answers 404 (route unknown) or 403 (route not in its table)."""
+    DOC = {"resourceSpans": [{"resource": {"attributes": []}, "scopeSpans": [], "schemaUrl": "s"}]}
+
+    def answering(self, status, body):
+        c, o, out, clk = client()
+        real = o.request
+
+        def request(method, path, b=None, token=None):
+            if "/otel" in path:
+                o.calls.append((method, path, b, token))
+                return status, body
+            return real(method, path, b, token)
+        o.request = request
+        c.signin()
+        return c, o, out
+
+    def test_the_route_and_the_content_choice(self):
+        c, o, out = self.answering(200, self.DOC)
+        self.assertEqual(c.otel({"sid": "S" * 22}), self.DOC)
+        c.otel("S" * 22, content=True)
+        paths = [(m, p) for m, p, b, t in o.calls if "/otel" in p]
+        self.assertEqual(paths, [("GET", "/api/sessions/%s/otel" % ("S" * 22)),
+                                 ("GET", "/api/sessions/%s/otel?content=1" % ("S" * 22))])
+        self.assertTrue(all(t for m, p, b, t in o.calls if "/otel" in p), "with the person's token")
+
+    def test_before_the_route_exists(self):
+        for status, body in ((404, {"error": "not found"}),
+                             (403, {"error": "GET /api/sessions/%s/otel is not in research-orchestrator's route table"
+                                    % ("S" * 22)})):
+            c, o, out = self.answering(status, body)
+            with self.assertRaises(cli.CliError) as e:
+                c.otel("S" * 22)
+            self.assertIn("does not serve the OpenTelemetry export yet", str(e.exception))
+            self.assertIn("(%d)" % status, str(e.exception))
+
+    def test_a_session_that_is_not_yours(self):
+        c, o, out = self.answering(404, {"error": "no such session"})
+        with self.assertRaises(cli.CliError) as e:
+            c.otel("S" * 22)
+        self.assertEqual(str(e.exception), "no such session (404)")
+
+    def test_main_writes_the_json_to_stdout(self):
+        c, o, out = self.answering(200, self.DOC)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["otel", "S" * 22, "--content"], c), 0)
+        self.assertEqual(json.loads(buf.getvalue()), self.DOC)
+        self.assertTrue(any(p.endswith("/otel?content=1") for m, p, b, t in o.calls))
+        self.assertFalse(any("resourceSpans" in x for x in out), "the document is not mixed with the prompts")
+        c, o, out = self.answering(404, {"error": "not found"})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as so:
+            self.assertEqual(cli.main(["otel", "S" * 22], c), 1)
+        self.assertEqual(so.getvalue(), "")
+        self.assertIn("OpenTelemetry export yet", err.getvalue())
+
+    def test_the_default_client_prompts_on_stderr(self):
+        """`medcea-agent otel SID > file.json`: the device-code prompt must not land in the file."""
+        prompts = []
+
+        class Stop(Exception):
+            pass
+
+        def fake_client(**kw):
+            prompts.append(kw)
+            raise Stop()
+        real = cli.Client
+        cli.Client = fake_client
+        try:
+            with self.assertRaises(Stop):
+                cli.main(["otel", "S" * 22])
+        finally:
+            cli.Client = real
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as so:
+            prompts[0]["out"]("Open https://k/d and enter the code WXYZ")
+        self.assertEqual(so.getvalue(), "")
+        self.assertIn("WXYZ", err.getvalue())
+
+
 def _gw(turn, req, resp, t0, t1):
     return [{"event_id": turn * 10, "at": "2026-11-23T10:00:%02d+00:00" % t0, "actor": "model-gateway", "event": "turn_request",
              "payload": {"turn": turn, "request_sha256": req}},

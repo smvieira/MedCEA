@@ -14,6 +14,8 @@ imports nothing from this repository.
   medcea-agent stop SID                                       revoke the session, delete its Jobs
   medcea-agent replay SID                                     strict replay verdict (a Job; waits for it)
   medcea-agent reexecute SID                                  run the session's profile again and compare the model's answers
+  medcea-agent otel SID [--content] > FILE.json               the session as OpenTelemetry (OTLP/JSON) for Jaeger or Tempo;
+                                                              digests only unless --content (prompts go to stderr)
   medcea-agent signin                                         device sign-in only
 
 The person signs in with a device code through the orchestrator's relay (the notebook has no
@@ -177,6 +179,22 @@ class Client:
             if self.clock() - t0 > wait_s:
                 raise CliError("the replay Job is still running after %d s: ask again later" % wait_s)
             self.sleep(poll_s)
+
+    def otel(self, sid, content=False):
+        """The session as an OpenTelemetry export (research Phase 4e, design 4.5): an OTLP/JSON ExportTraceServiceRequest
+        made by the orchestrator from the trace (research/agents/otel.py), for Jaeger's JSON upload or Grafana Tempo.
+        content=True asks for the model's text, the tools' arguments and results as the trace holds them (an explicit
+        choice; without it, digests and sizes only). An orchestrator without the export route (it comes with the
+        research console's access policy version) is told apart from a session that is not yours."""
+        sid = _sid(sid)
+        st, r = self.t.request("GET", "/api/sessions/%s/otel%s" % (sid, "?content=1" if content else ""), None, self.token())
+        err = str((r or {}).get("error", "")) if isinstance(r, dict) else ""
+        if (st == 404 and err == "not found") or (st == 403 and "/otel is not in" in err):
+            raise CliError("this orchestrator does not serve the OpenTelemetry export yet (GET /api/sessions/<sid>/otel "
+                           "comes with the research console's access policy version) (%s)" % st)
+        if st >= 400:
+            raise CliError("%s (%s)" % (err or "refused", st))
+        return r
 
     @staticmethod
     def turns(events):
@@ -408,6 +426,9 @@ def main(argv=None, client=None):
     sub.add_parser("endpoints")
     for n in ("watch", "stop", "replay", "reexecute"):
         sub.add_parser(n).add_argument("sid")
+    o = sub.add_parser("otel", help="the session as OpenTelemetry (OTLP/JSON) on stdout")
+    o.add_argument("sid")
+    o.add_argument("--content", action="store_true", help="include the model's text, tool arguments and results")
     for n in ("approve", "deny", "accept", "discard"):
         p = sub.add_parser(n)
         p.add_argument("sid")
@@ -416,7 +437,8 @@ def main(argv=None, client=None):
         if n == "approve":
             p.add_argument("--cap-h", type=float)
     a = ap.parse_args(argv)
-    c = client or Client()
+    # otel writes its JSON to stdout (medcea-agent otel SID > file.json): the sign-in prompt goes to stderr then
+    c = client or (Client(out=lambda s: print(s, file=sys.stderr, flush=True)) if a.cmd == "otel" else Client())
     try:
         c.signin()
         if a.cmd == "signin":
@@ -447,6 +469,9 @@ def main(argv=None, client=None):
             c.out(json.dumps(c.replay(a.sid), sort_keys=True))
         elif a.cmd == "reexecute":
             c.out(json.dumps(c.reexecute(a.sid), sort_keys=True))
+        elif a.cmd == "otel":
+            sys.stdout.write(json.dumps(c.otel(a.sid, a.content), sort_keys=True, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
     except CliError as e:
         print("medcea-agent: %s" % e, file=sys.stderr)
         return 1
