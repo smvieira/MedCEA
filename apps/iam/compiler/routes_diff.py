@@ -53,7 +53,12 @@ SOURCES = {
         ("GET", "/api/sessions/<sid>/events"), ("POST", "/api/sessions/<sid>/stop"),
         ("POST", "/api/sessions/<sid>/replay"), ("POST", "/api/sessions/<sid>/gates/<gid>"),
         ("POST", "/api/sessions/<sid>/proposals/<pid>"), ("POST", "/api/signin/start"),
-        ("POST", "/api/signin/poll"), ("POST", "/api/signin/refresh")]},
+        ("POST", "/api/signin/poll"), ("POST", "/api/signin/refresh"),
+        # research Phase 4e (the research console, design rs4e 3.1)
+        ("GET", "/api/me"), ("GET", "/api/profiles"), ("GET", "/api/sessions/<sid>/campaigns"),
+        ("GET", "/api/sessions/<sid>/campaigns/<cid>"), ("GET", "/api/sessions/<sid>/campaigns/<cid>/runs/<n>"),
+        ("GET", "/api/sessions/<sid>/campaigns/<cid>/runs/<n>/series"), ("GET", "/api/sessions/<sid>/otel"),
+        ("POST", "/api/sessions/<sid>/reexecute")]},
     "research-orchestrator-sim": {"kind": "declared", "file": "apps/research-agents/orchestrator.py", "routes": [
         ("POST", "/internal/sims"), ("GET", "/internal/sims/<cid>")]},
     "research-session":          {"kind": "declared", "file": "apps/research-agents/session.py", "routes": [
@@ -65,7 +70,9 @@ SOURCES = {
         ("POST", "/introspect"), ("POST", "/trace"), ("GET", "/events/<sid>"), ("GET", "/gates/<gid>"),
         ("GET", "/sessions/<sid>"), ("POST", "/sessions/<sid>/revoke"), ("POST", "/signin/start"),
         ("POST", "/signin/poll"), ("POST", "/signin/refresh"), ("PUT", "/claims/<sid>/expect"),
-        ("POST", "/claims/<sid>/expect")]},
+        ("POST", "/claims/<sid>/expect"), ("GET", "/persons/<person_id>/sessions")]},
+    "research-console":          {"kind": "declared", "file": "apps/research-console/console.py", "routes": [
+        ("GET", "/"), ("GET", "/static/<file>"), ("GET", "/static/<dir>/<file>")]},
     "mcp-sim":                   {"kind": "declared", "file": "apps/research-agents/mcp_common.py", "routes": [("POST", "/mcp")]},
     "mcp-lake":                  {"kind": "declared", "file": "apps/research-agents/mcp_common.py", "routes": [("POST", "/mcp")]},
     "model-gateway":             {"kind": "declared", "file": "apps/research-model/gateway.py", "routes": [("POST", "/v1/turn")]},

@@ -85,7 +85,8 @@ V9_PG_WHY = ("the nightly exporter (rs_export_writer), the nightly backup (rs_ba
              "snapshot reader (rs_lake_api, research sandbox Phase 2b), kubelet probes and the host's psql "
              "(reserve.sh runs inside the pod)")
 RS4_PODS = ("research-orchestrator", "research-session", "mcp-sim", "mcp-lake", "agent",
-           "model-gateway", "research-llm")   # the last two: Phase 4b's commit B
+           "model-gateway", "research-llm",   # these two: Phase 4b's commit B
+           "research-console")                # research Phase 4e's commit B
 RS4_SERVICES = ("research-orchestrator", "research-orchestrator-sim", "research-session-agent",
                 "research-session-server", "mcp-sim", "mcp-lake", "model-gateway")
 
@@ -110,6 +111,10 @@ def v9_policy(data=None):
         pg["from"].remove("pod:research-session")
         pg["why"] = V9_PG_WHY
     d["public_routes"] = [r for r in d["public_routes"] if r.get("service") not in RS4_SERVICES]
+    # research Phase 4e's commit B: the research console's host and proxy
+    d["hosts"].pop("RESEARCH_CONSOLE_DOMAIN", None)
+    net["proxies"].pop("RESEARCH_CONSOLE_DOMAIN", None)
+    net["no_shared_upstreams"] = [h for h in net.get("no_shared_upstreams") or [] if h != "RESEARCH_CONSOLE_DOMAIN"]
     d["resource_groups"].pop("research_campaigns", None)
     d["matrix"].pop("research_campaigns", None)
     return d

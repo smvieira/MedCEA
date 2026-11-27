@@ -61,11 +61,11 @@ const EVENT_KINDS = {
   trace_refused:    {ports: ['database'], label: 'A trace write was refused'},
 };
 
-// The orchestrator's person API as the page calls it. `b: true` = added by the access policy version
-// that brings the console (commit B); the page copes with a 404 from each until then.
+// The orchestrator's person API as the page calls it (every path is in its route table since the access policy
+// version that brings the console, research Phase 4e commit B; the page still copes with a 404 from an older one).
 const API = {
-  me:        {method: 'GET',  path: '/api/me', b: true},
-  profiles:  {method: 'GET',  path: '/api/profiles', b: true},
+  me:        {method: 'GET',  path: '/api/me'},
+  profiles:  {method: 'GET',  path: '/api/profiles'},
   sessions:  {method: 'GET',  path: '/api/sessions'},
   start:     {method: 'POST', path: '/api/sessions'},
   session:   {method: 'GET',  path: '/api/sessions/<sid>'},
@@ -74,11 +74,11 @@ const API = {
   replay:    {method: 'POST', path: '/api/sessions/<sid>/replay'},
   gate:      {method: 'POST', path: '/api/sessions/<sid>/gates/<gid>'},
   proposal:  {method: 'POST', path: '/api/sessions/<sid>/proposals/<pid>'},
-  reexecute: {method: 'POST', path: '/api/sessions/<sid>/reexecute', b: true},
-  campaign:  {method: 'GET',  path: '/api/sessions/<sid>/campaigns/<cid>', b: true},
-  run:       {method: 'GET',  path: '/api/sessions/<sid>/campaigns/<cid>/runs/<n>', b: true},
-  series:    {method: 'GET',  path: '/api/sessions/<sid>/campaigns/<cid>/runs/<n>/series', b: true},
-  otel:      {method: 'GET',  path: '/api/sessions/<sid>/otel', b: true},
+  reexecute: {method: 'POST', path: '/api/sessions/<sid>/reexecute'},
+  campaign:  {method: 'GET',  path: '/api/sessions/<sid>/campaigns/<cid>'},
+  run:       {method: 'GET',  path: '/api/sessions/<sid>/campaigns/<cid>/runs/<n>'},
+  series:    {method: 'GET',  path: '/api/sessions/<sid>/campaigns/<cid>/runs/<n>/series'},
+  otel:      {method: 'GET',  path: '/api/sessions/<sid>/otel'},
 };
 
 const SID_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -1803,7 +1803,10 @@ function routeHash(r) {
     let table = null, runs = null, series = null;
     const after = [];
     if (cr.status === 200 && isObj(cr.body)) {
-      if (cr.body.state === 'running') nodes.push(el('p', {cls: 'muted', text: 'The campaign is still running.'}));
+      const pending = {running: 'The campaign is still running.',
+                       approved: 'The gate is approved; the simulation has not started yet.',
+                       waiting: 'The gate waits for the supervisor.'}[cr.body.state];
+      if (pending) nodes.push(el('p', {cls: 'muted', text: pending}));
       table = isObj(cr.body.by_setting) ? cr.body.by_setting : null;
       runs = isObj(cr.body.runs) ? cr.body.runs : null;
       series = cr.body.series || null;

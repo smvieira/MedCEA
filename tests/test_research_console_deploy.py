@@ -638,8 +638,11 @@ class Health(unittest.TestCase):
                             "token (401); no Secret, no token")
 
     def test_skips(self):
-        with open(self.policy, "w") as f:
-            f.write(self.factory)
+        import test_policy
+        sys.path.insert(0, os.path.join(REPO, "apps", "iam"))
+        from compiler import model
+        with open(self.policy, "w") as f:   # commit A2's policy: no console host (commit B's factory policy has it)
+            yaml.safe_dump(test_policy.without_console(model.load_defaults().data), f, sort_keys=False)
         self.assertEqual(self.check(), "SKIP|Research console|the applied access policy has no research console yet "
                                        "(RESEARCH_CONSOLE_DOMAIN)")
         self.setUp()

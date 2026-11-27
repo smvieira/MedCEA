@@ -1,9 +1,16 @@
 """research orchestrator (stage 6a): lifecycle, person routes, sign-in relay, sim API, against a
 fake Kubernetes interface and a fake research-session. No cluster, no network beyond local ports."""
+import contextlib
+import gzip
+import hashlib
 import importlib.util
+import io
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -528,6 +535,371 @@ class HttpTest(unittest.TestCase):
             self.call(0, "POST", "/api/sessions", {"profile": "compare_controllers"})
         self.assertNotIn("TOK", buf.getvalue())
         self.assertNotIn("c" * 43, buf.getvalue())
+
+
+class ConsoleRoutes(unittest.TestCase):
+    """Research Phase 4e commit B (design rs4e 3.1): the research console's routes over real local ports, a fake check()
+    whose decision carries the person's roles, a fake research-session holding a trace, and a temporary runs volume."""
+
+    OTHER = "B" * 22
+    CID = "c" + "1" * 20
+
+    class Dec:
+        def __init__(self, allow, status=200, reason="", who=None):
+            self.allow, self.status, self.reason, self.who = allow, status, reason, who
+
+    class Iam:
+        ROUTES_FILE = "routes.json"
+
+        def __init__(self, roles=("bio_scientist",), table=None):
+            self.roles, self.table, self.seen = list(roles), table, []
+
+        def check(self, service, method, path, headers):
+            self.seen.append((service, method, path))
+            if headers.get("X-Forwarded-Access-Token") is None:
+                return ConsoleRoutes.Dec(False, 401, "no token")
+            return ConsoleRoutes.Dec(True, who=dict(WHO, roles=list(self.roles)))
+
+        def actor_role(self, d):
+            return d.who["roles"][0] if len(d.who["roles"]) == 1 else None
+
+        def _load(self, path):
+            return self.table
+
+    class Session(FakeHttp):
+        """research-session's server port: sessions, events (pages of 1000) and the person's history."""
+
+        def __init__(self):
+            super().__init__()
+            self.trace = {}
+
+        def request(self, method, path, body=None, headers=None):
+            m = re.match(r"^/events/([^/?]+)\?after=(\d+)$", path)
+            if method == "GET" and m and (method, path) not in self.answers:
+                self.calls.append((method, path, body, headers))
+                return 200, {"events": [e for e in self.trace.get(m.group(1), []) if e["event_id"] > int(m.group(2))][:1000]}
+            return super().request(method, path, body, headers)
+
+    def setUp(self):
+        self.o, self.k, self.ph, self.sh = make()
+        self.sh = self.o.sh = self.Session()
+        self.sh.sessions[SID] = dict(info(), sup_username="bio", sup_role="bio_scientist", created_at=900)
+        self.sh.sessions[self.OTHER] = dict(info(person="p-2"), sid=self.OTHER)
+        self.runs = tempfile.mkdtemp()
+        self.o.cfg = dict(self.o.cfg, runs_root=self.runs, console_origin="https://agents.medcea")
+        self.o.iam = self.Iam(table=self.route_table())
+        self.srvs = orch.make_servers(self.o, "127.0.0.1", (0, 0))
+        self.port = self.srvs[0].server_address[1]
+        for srv in self.srvs:
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        for srv in self.srvs:
+            srv.shutdown()
+            srv.server_close()
+        shutil.rmtree(self.runs, ignore_errors=True)
+
+    @staticmethod
+    def route_table():
+        sys.path.insert(0, os.path.join(ROOT, "apps", "iam"))
+        from compiler import model, routes
+        return routes.compile(model.load_defaults())
+
+    def call(self, method, path, body=None, token="TOK", origin=None, gz=False):
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["X-Forwarded-Access-Token"] = token
+        if origin is not None:
+            h["Origin"] = origin
+        if gz:
+            h["Accept-Encoding"] = "gzip"
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path),
+                                     None if body is None else json.dumps(body).encode(), h, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+                if r.headers.get("Content-Encoding") == "gzip":
+                    raw = gzip.decompress(raw)
+                return r.status, json.loads(raw)
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def campaign_trace(self, digest):
+        def ev(i, event, payload, actor="mcp-sim"):
+            return {"event_id": i, "at": "2026-11-27T10:00:%02dZ" % i, "actor": actor, "event": event, "payload": payload}
+        return [ev(1, "session_minted", {"profile": "compare_controllers", "code_commit": "abc1234", "reexecutes": None},
+                   "research-session"),
+                ev(2, "gate_pending", {"gid": self.CID, "estimate_h": 3.0, "cap_h": 3.75, "runs": 36, "spec_sha256": "a" * 64}),
+                ev(3, "gate_decided", {"gid": self.CID, "decision": "approve", "approved_cap_h": 3.0, "by_username": "bio"},
+                   "research-session"),
+                ev(4, "sim_started", {"cid": self.CID, "spec_sha256": "a" * 64, "estimate_h": 3.0, "cap_h": 3.0}),
+                ev(5, "sim_finished", {"cid": self.CID, "state": "done", "cpu_hours": 0.1, "result_digest": digest}),
+                ev(6, "agent_spawned", {"agent": "a0.1", "parent": "a0", "profile_name": "campaign"}, "agent"),
+                ev(7, "session_revoked", {"reason": "job ended"}, "research-session")]
+
+    def put_campaign(self, series=True):
+        with open(os.path.join(ROOT, "tests", "fixtures", "research", "e58_campaign.json")) as f:
+            rows = json.load(f)["rows"]
+        d = os.path.join(self.runs, "campaigns", self.CID)
+        os.makedirs(os.path.join(d, "series"))
+        body = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows).encode()
+        digest = hashlib.sha256(body).hexdigest()
+        with open(os.path.join(d, "results.jsonl"), "wb") as f:
+            f.write(body)
+        man = {"runs": len(rows), "result_digest": digest}
+        if series:
+            man["series"] = {"every_s": 60.0, "files": ["series/%d.json.gz" % i for i in range(len(rows))], "digest": "d" * 64}
+            n = 3000
+            doc = {"header": {"schema": 1, "every_s": 60.0, "loops": []}, "changes": [[60.0, "light", 0, 1]],
+                   "columns": {"t": [i * 60.0 for i in range(n)], "air_temperature": [20 + i % 9 for i in range(n)]}}
+            with open(os.path.join(d, "series", "0.json.gz"), "wb") as f:
+                f.write(gzip.compress(json.dumps(doc).encode(), mtime=0))
+        with open(os.path.join(d, "manifest.json"), "w") as f:
+            json.dump(man, f)
+        self.sh.trace[SID] = self.campaign_trace(digest)
+        return rows, d
+
+    # ── /api/me and /api/profiles
+    def test_me(self):
+        st, r = self.call("GET", "/api/me")
+        self.assertEqual((st, r["username"], r["role"]), (200, "bio", "bio_scientist"))
+        self.assertEqual(r["can"], {"start": True, "decide": True, "stop": True, "replay": True, "reexecute": True})
+        self.o.iam.roles = ["engineer"]
+        self.assertEqual(self.call("GET", "/api/me")[1]["can"],
+                         {"start": False, "decide": False, "stop": False, "replay": True, "reexecute": False})
+        self.o.iam.table = None                     # no route table: the page shows the buttons, the server decides
+        self.assertIsNone(self.call("GET", "/api/me")[1]["can"])
+
+    def test_profiles(self):
+        st, r = self.call("GET", "/api/profiles")
+        self.assertEqual(st, 200)
+        names = [p["name"] for p in r["profiles"]]
+        self.assertEqual(names, sorted(f[:-5] for f in os.listdir(CFG["profiles_dir"]) if f.endswith(".yaml")))
+        team = next(p for p in r["profiles"] if p["name"] == "compare_controllers_team")
+        self.assertEqual(team["team"], ["campaign", "tuning"])
+        self.assertEqual(set(team), {"name", "backend", "caps", "tools", "skill", "team"})
+        self.assertEqual(r["endpoints"], [])
+
+    # ── sessions: history and the session's own facts
+    def test_listing_has_the_history(self):
+        self.sh.answers[("GET", "/persons/p-1/sessions?before=99&limit=2")] = (200, {"sessions": [{"sid": SID}], "next_before": 7})
+        st, r = self.call("GET", "/api/sessions?before=99&limit=2")
+        self.assertEqual((st, r["history"], r["next_before"], r["sessions"]), (200, [{"sid": SID}], 7, []))
+        self.assertEqual(self.call("GET", "/api/sessions?before=x")[0], 400)
+        self.assertEqual(self.call("GET", "/api/sessions?limit=500")[0], 400)
+        self.sh.answers[("GET", "/persons/p-1/sessions")] = (0, {})
+        st, r = self.call("GET", "/api/sessions")
+        self.assertEqual((st, r["history"]), (200, []))
+        self.assertIn("history_error", r)
+        self.o.start(WHO, "TOK", {"profile": "compare_controllers"})
+        run = self.call("GET", "/api/sessions")[1]["sessions"][0]
+        self.assertEqual((run["sid"], run["state"], run["backend"], run["exp"]), (SID, "starting", "scripted", 99))
+
+    def test_the_person_comes_from_the_token(self):
+        self.call("GET", "/api/sessions?person=p-2")
+        self.assertIn("/persons/p-1/sessions", [c[1].split("?")[0] for c in self.sh.calls])
+        self.assertNotIn("/persons/p-2/sessions", [c[1].split("?")[0] for c in self.sh.calls])
+
+    def test_info_gains_the_traces_facts(self):
+        self.put_campaign()
+        st, r = self.call("GET", "/api/sessions/" + SID)
+        self.assertEqual(st, 200)
+        self.assertEqual((r["sup_username"], r["sup_role"], r["created_at"], r["code_commit"], r["revoke_reason"]),
+                         ("bio", "bio_scientist", 900, "abc1234", "job ended"))
+        self.assertEqual(r["agents"], [{"id": "a0", "parent": None}, {"id": "a0.1", "parent": "a0", "profile": "campaign"}])
+        self.assertNotIn("reexecutes", r)
+        n = len(self.sh.calls)
+        self.call("GET", "/api/sessions/" + SID)          # read incrementally: one page after the last event seen
+        self.assertEqual([c[1] for c in self.sh.calls[n:] if c[1].startswith("/events/")], ["/events/%s?after=7" % SID])
+
+    # ── long-poll
+    def test_long_poll_waits_and_returns_on_an_event(self):
+        t = [1000.0]
+        self.o.clock = lambda: t[0]
+
+        def sleep(d):
+            t[0] += d
+            if t[0] >= 1003:
+                self.sh.trace[SID] = [{"event_id": 1, "event": "x", "payload": {}}]
+        self.o.sleep = sleep
+        st, r = self.o.events(WHO, SID, 0, wait=20)
+        self.assertEqual((st, len(r["events"]), t[0]), (200, 1, 1003.0))
+
+    def test_long_poll_is_bounded_by_wait_and_the_token(self):
+        t = [1000.0]
+        self.o.clock = lambda: t[0]
+        self.o.sleep = lambda d: t.__setitem__(0, t[0] + d)
+        self.assertEqual(self.o.events(WHO, SID, 0, wait=99), (200, {"events": []}))
+        self.assertEqual(t[0], 1020.0)                     # at most 20 s
+        t[0] = 1000.0
+        self.o.events(WHO, SID, 0, wait=20, token_exp=1008)
+        self.assertEqual(t[0], 1003.0)                     # the token's exp - 5 s
+        t[0] = 1000.0
+        self.o.events(WHO, SID, 0)
+        self.assertEqual(t[0], 1000.0)                     # without wait: as before
+
+    def test_token_exp(self):
+        import base64
+        tok = "h." + base64.urlsafe_b64encode(json.dumps({"exp": 1234}).encode()).decode().rstrip("=") + ".s"
+        self.assertEqual(orch._token_exp(tok), 1234)
+        self.assertIsNone(orch._token_exp("nonsense"))
+
+    # ── campaigns
+    def test_campaigns_and_a_campaign(self):
+        rows, _ = self.put_campaign()
+        st, r = self.call("GET", "/api/sessions/%s/campaigns" % SID)
+        self.assertEqual((st, [c["cid"] for c in r["campaigns"]]), (200, [self.CID]))
+        st, r = self.call("GET", "/api/sessions/%s/campaigns/%s?limit=5&offset=2" % (SID, self.CID))
+        self.assertEqual(st, 200)
+        self.assertEqual((r["runs"]["offset"], r["runs"]["total"], len(r["runs"]["rows"])), (2, 36, 5))
+        self.assertEqual(r["series"], {"every_s": 60.0, "runs": 36})
+        self.assertEqual(r["by_setting"]["count"]["total"], r["by_setting"]["count"]["shown"])
+        st, r = self.call("GET", "/api/sessions/%s/campaigns/%s/runs/4" % (SID, self.CID))
+        self.assertEqual((st, r), (200, rows[4]))
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s/runs/40" % (SID, self.CID))[0], 404)
+
+    def test_a_campaign_of_another_session_is_not_found(self):
+        self.put_campaign()
+        self.sh.trace[SID] = [e for e in self.sh.trace[SID] if e["event"] in ("session_minted",)]
+        for path in ("/campaigns/%s", "/campaigns/%s/runs/0", "/campaigns/%s/runs/0/series"):
+            st, r = self.call("GET", "/api/sessions/%s%s" % (SID, path % self.CID))
+            self.assertEqual((st, r), (404, {"error": "no such campaign"}), path)
+
+    def test_digest_mismatch_gone_and_series(self):
+        _, d = self.put_campaign()
+        st, r = self.call("GET", "/api/sessions/%s/campaigns/%s/runs/0/series?points=500" % (SID, self.CID), gz=True)
+        self.assertEqual((st, len(r["columns"]["t"]), r["decimated"]["from"]), (200, 500, 3000))
+        self.assertEqual(r["changes"], [[60.0, "light", 0, 1]])
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s/runs/0/series?points=5000" % (SID, self.CID))[0], 400)
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s/runs/1/series" % (SID, self.CID))[0], 410)
+        with open(os.path.join(d, "results.jsonl"), "ab") as f:
+            f.write(b"{}\n")
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s" % (SID, self.CID)),
+                         (409, {"error": "results do not match the trace"}))
+        shutil.rmtree(d)
+        st, r = self.call("GET", "/api/sessions/%s/campaigns/%s" % (SID, self.CID))
+        self.assertEqual((st, r["state"]), (410, "gone"))
+
+    def test_a_campaign_without_series(self):
+        self.put_campaign(series=False)
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s/runs/0/series" % (SID, self.CID)),
+                         (404, {"error": "no series recorded for this campaign"}))
+
+    def test_a_running_campaign(self):
+        self.put_campaign()
+        self.sh.trace[SID] = [e for e in self.sh.trace[SID] if e["event"] != "sim_finished"]
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s" % (SID, self.CID)),
+                         (200, {"state": "running", "cid": self.CID}))
+
+    def test_an_approved_campaign_not_started(self):
+        self.put_campaign()
+        self.sh.trace[SID] = [e for e in self.sh.trace[SID] if e["event"] not in ("sim_started", "sim_finished")]
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s" % (SID, self.CID)),
+                         (200, {"state": "approved", "cid": self.CID}))
+        self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns" % SID)[1]["campaigns"][0]["state"], "approved")
+
+    def test_too_large(self):
+        import campaigns
+        self.put_campaign()
+        old = campaigns.RESULTS_MAX
+        campaigns.RESULTS_MAX = 10
+        try:
+            self.assertEqual(self.call("GET", "/api/sessions/%s/campaigns/%s" % (SID, self.CID))[0], 413)
+        finally:
+            campaigns.RESULTS_MAX = old
+
+    # ── another person's session: 404 on every route
+    def test_another_persons_session(self):
+        self.put_campaign()
+        self.sh.trace[self.OTHER] = self.sh.trace[SID]
+        for method, path in (("GET", ""), ("GET", "/events"), ("GET", "/events?wait=2"), ("GET", "/campaigns"),
+                             ("GET", "/campaigns/%s" % self.CID), ("GET", "/campaigns/%s/runs/0" % self.CID),
+                             ("GET", "/campaigns/%s/runs/0/series" % self.CID), ("GET", "/otel"),
+                             ("POST", "/reexecute"), ("POST", "/stop"), ("POST", "/replay")):
+            with self.subTest(path):
+                st, r = self.call(method, "/api/sessions/" + self.OTHER + path, {} if method == "POST" else None)
+                self.assertEqual((st, r), (404, {"error": "no such session"}))
+
+    # ── re-execution
+    def test_reexecute(self):
+        self.sh.sessions[SID] = dict(self.sh.sessions[SID], backend="gpu", profile="compare_controllers_gpu", active=False)
+        self.o.cfg = dict(self.o.cfg, model_gateway_url="http://g:8120", endpoints=["local", "gpu"],
+                          inventory=LifecycleTest.INVENTORY)
+        st, r = self.call("POST", "/api/sessions/%s/reexecute" % SID, {}, origin="https://agents.medcea")
+        self.assertEqual((st, r["reexecutes"], r["endpoint"]), (201, SID, "gpu"))
+        mint = [c for c in self.ph.calls if c[1] == "/mint"][-1][2]
+        self.assertEqual((mint["reexecutes"], mint["backend"], mint["profile"]), (SID, "gpu", "compare_controllers_gpu"))
+        self.assertEqual(self.o.iam.seen[-1], ("research-orchestrator", "POST", "/api/sessions/%s/reexecute" % SID))
+
+    def test_reexecute_refusals(self):
+        st, r = self.call("POST", "/api/sessions/%s/reexecute" % SID, {})
+        self.assertEqual((st, r), (409, {"error": "the session is not a model session: nothing to re-execute"}))
+        self.sh.sessions[SID] = dict(self.sh.sessions[SID], backend="gpu", profile="compare_controllers_gpu")
+        st, r = self.call("POST", "/api/sessions/%s/reexecute" % SID, {})     # gpu not enabled: start's 409
+        self.assertEqual(st, 409)
+        self.assertIn("RESEARCH_ENDPOINTS", r["error"])
+        self.assertEqual(self.call("POST", "/api/sessions/%s/reexecute" % SID, {}, origin="https://evil.example"),
+                         (403, {"error": "wrong origin"}))
+        self.assertEqual(self.call("POST", "/api/sessions/%s/reexecute" % SID, None)[0], 400)
+        self.assertEqual([c for c in self.ph.calls if c[1] == "/mint"], [])
+
+    # ── OpenTelemetry export
+    def test_otel(self):
+        self.put_campaign()
+        st, r = self.call("GET", "/api/sessions/%s/otel" % SID)
+        self.assertEqual(st, 200)
+        res = r["resourceSpans"][0]
+        attrs = {a["key"]: a["value"] for a in res["resource"]["attributes"]}
+        self.assertEqual(attrs["medcea.session.id"], {"stringValue": SID})
+        self.assertNotIn(WHO["sub"], json.dumps(r))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.call("GET", "/api/sessions/%s/otel?content=1" % SID)[0], 200)
+        # design rs4e 4.5: an export with content is recorded, naming the session and the person (review of commit B)
+        line = [l for l in err.getvalue().splitlines() if "OpenTelemetry export with content" in l]
+        self.assertEqual(len(line), 1, err.getvalue())
+        self.assertIn(SID, line[0])
+        self.assertIn(" for bio", line[0])
+        self.assertNotIn(WHO["sub"], err.getvalue())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.call("GET", "/api/sessions/%s/otel" % SID)[0], 200)
+        self.assertNotIn("OpenTelemetry export", err.getvalue())
+
+    def test_handlers_add_root_to_sys_path_once(self):
+        """Review of commit B: profiles, campaign and otel ran sys.path.insert(0, ROOT) on every request."""
+        self.put_campaign()
+        self.call("GET", "/api/profiles")
+        n = len(sys.path)
+        for _ in range(3):
+            self.call("GET", "/api/profiles")
+            self.call("GET", "/api/sessions/%s/campaigns/%s" % (SID, self.CID))
+            self.call("GET", "/api/sessions/%s/otel" % SID)
+        self.assertEqual(len(sys.path), n)
+
+    # ── the router serves every declared route (routes_diff.SOURCES cannot see the handlers)
+    def test_every_declared_route_is_routed(self):
+        sys.path.insert(0, os.path.join(ROOT, "apps", "iam"))
+        from compiler import routes_diff
+        self.put_campaign()
+        ids = {"<sid>": SID, "<gid>": self.CID, "<pid>": "p5", "<cid>": self.CID, "<n>": "0"}
+        for method, path in routes_diff.SOURCES["research-orchestrator"]["routes"]:
+            with self.subTest(path):
+                for k, v in ids.items():
+                    path = path.replace(k, v)
+                st, r = self.call(method, path, {} if method == "POST" else None)
+                self.assertNotIn((st, r.get("error")), ((404, "not found"), (405, "method not allowed")), path)
+        for path in ("/api/nothing", "/api/sessions/%s/campaigns/%s/runs" % (SID, self.CID),
+                     "/api/sessions/%s/campaigns/%s/runs/0/series/x" % (SID, self.CID)):
+            self.assertEqual(self.call("GET", path), (404, {"error": "not found"}), path)
+
+    def test_every_declared_route_is_in_the_route_table(self):
+        sys.path.insert(0, os.path.join(ROOT, "apps", "iam"))
+        from compiler import routes_diff
+        t = self.route_table()
+        table = set(t["services"]["research-orchestrator"]["routes"]) | set(t["public"]["research-orchestrator"])
+        declared = {"%s %s" % r for r in routes_diff.SOURCES["research-orchestrator"]["routes"]}
+        self.assertEqual(declared, table)
 
 
 if __name__ == "__main__":

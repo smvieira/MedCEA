@@ -5151,6 +5151,7 @@ class PhaseRS4BDelta(unittest.TestCase):
 
 
 PRE_RS4DE = "bb3c370"  # research Phase 4d, commit A of the private endpoint (the address hop form), parent of its B
+RS4DE_COMMIT = "737cd05"  # research Phase 4d, the private endpoint's commit B (PhaseRS4DEndpointDelta reads its defaults.yaml)
 
 
 class PhaseRS4DEndpointDelta(unittest.TestCase):
@@ -5168,8 +5169,7 @@ class PhaseRS4DEndpointDelta(unittest.TestCase):
     def setUpClass(cls):
         cls.old, cls.old_cli = archive_cli(PRE_RS4DE, "medcea-prers4de-")
         cls.a = ref_tree(PRE_RS4DE)[2]
-        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its own commit
-            cls.p = model.Policy(yaml.safe_load(f))
+        cls.p = ref_tree(RS4DE_COMMIT)[2]   # commit B's own file (re-pinned by research Phase 4e's commit B)
         cls.rows = source.entries_and_waivers(cls.a.data)
         cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
         cls.was, cls.skel = artefacts(cls.a), artefacts(cls.s)
@@ -5256,6 +5256,7 @@ class PhaseRS4DEndpointDelta(unittest.TestCase):
 
 
 PRE_RS4EA = "b1c0b4e"  # research Phase 4e commit A3, the parent of commit A2 (the console code; defaults.yaml untouched)
+RS4EA_COMMIT = "3c88ee3"  # research Phase 4e commit A2 (PhaseRS4EADelta reads its defaults.yaml since commit B)
 
 
 class PhaseRS4EADelta(unittest.TestCase):
@@ -5288,8 +5289,11 @@ class PhaseRS4EADelta(unittest.TestCase):
     def test_policy_file_unchanged(self):
         with open(os.path.join(self.old, "apps", "iam", "policy", "defaults.yaml")) as f:
             old_text = f.read()
-        with open(DEFAULTS) as f:
-            self.assertEqual(f.read(), old_text)   # commit A2 does not touch it; commit B does
+        r = subprocess.run(["git", "-C", REPO, "show", f"{RS4EA_COMMIT}:apps/iam/policy/defaults.yaml"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {RS4EA_COMMIT}: {r.stderr.strip()}")
+        self.assertEqual(r.stdout, old_text)   # commit A2 does not touch it; commit B does (PhaseRS4EDelta)
 
     def test_every_artefact_byte_identical(self):
         self.assertIn("hosts", self.want)
@@ -5374,6 +5378,195 @@ class PhaseRS4EADelta(unittest.TestCase):
                              capture_output=True, text=True, env=clean_env())
         self.assertEqual(old.returncode, 0, old.stderr)
         self.assertNotEqual(old.stdout.strip(), source.compiler_digest())   # ./apps/iam/deploy.sh after A2
+
+
+
+PRE_RS4E = "3c88ee3"  # research Phase 4e commit A2 (the console's code, inert), the parent of commit B
+
+
+class PhaseRS4EDelta(unittest.TestCase):
+    """Research Phase 4e, commit B (design rs4e §5.2): a skeleton-only version naming the research console. The host
+    RESEARCH_CONSOLE_DOMAIN (client research-console; serves research-console, research-orchestrator and
+    research-session, all three of audience medcea-research), its proxy research-console-oauth2-proxy (in
+    no_shared_upstreams: one audience, no /_account/), the pod research-console (research-agents: 8080 from that proxy
+    only; no egress, no DNS; `audience: medcea-research`), the proxy as a second source of the orchestrator's 8090,
+    research-session's server route GET /persons/<person_id>/sessions (public: the orchestrator's network-gated call),
+    the research_campaigns risk rewritten (each session visible only to the person who started it, OD-4e-3), and the
+    group's new members: the ui host, the console's three static routes and the orchestrator's new routes (R; the
+    reexecute route C). No cell, so no change version. Against PRE_RS4E with the applied rows: widening with exactly the
+    pinned system tuples and residue sections, nothing narrowed, bio_scientist, control_scientist and engineer widen
+    (and so may not approve it), qa may; the checker passes."""
+
+    SYSTEM = [
+        ["azp", "RESEARCH_CONSOLE_DOMAIN", "research-console"],
+        ["ingress", "research-console", 8080, "proxy:RESEARCH_CONSOLE_DOMAIN"],
+        ["ingress", "research-orchestrator", 8090, "proxy:RESEARCH_CONSOLE_DOMAIN"],
+        ["public", "research-session-server", "GET /persons/<person_id>/sessions"],
+        ["serves", "RESEARCH_CONSOLE_DOMAIN", "research-console"],
+        ["serves", "RESEARCH_CONSOLE_DOMAIN", "research-orchestrator"],
+        ["serves", "RESEARCH_CONSOLE_DOMAIN", "research-session"],
+    ]
+    SECTIONS = [["section", x] for x in (
+        "network.no_shared_upstreams",
+        "network.pods.research-console.audience",
+        "network.pods.research-console.carries.research-console",
+        "network.pods.research-console.selector.app",
+        "network.pods.research-console.zone",
+        "network.proxies.RESEARCH_CONSOLE_DOMAIN",
+        "resource_groups.research_campaigns.risk",
+    )]
+    READS = [("route", "research-console", r, None) for r in ("GET /", "GET /static/<file>", "GET /static/<dir>/<file>")] + \
+        [("route", "research-orchestrator", r, None) for r in (
+            "GET /api/me", "GET /api/profiles", "GET /api/sessions/<sid>/campaigns", "GET /api/sessions/<sid>/campaigns/<cid>",
+            "GET /api/sessions/<sid>/campaigns/<cid>/runs/<n>", "GET /api/sessions/<sid>/campaigns/<cid>/runs/<n>/series",
+            "GET /api/sessions/<sid>/otel")] + [("host", "RESEARCH_CONSOLE_DOMAIN", None)]
+    WIDENED = {"bio_scientist": READS + [("route", "research-orchestrator", "POST /api/sessions/<sid>/reexecute", None)],
+               "control_scientist": READS + [("route", "research-orchestrator", "POST /api/sessions/<sid>/reexecute", None)],
+               "engineer": READS}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old, cls.old_cli = archive_cli(PRE_RS4E, "medcea-prers4e-")
+        cls.a = ref_tree(PRE_RS4E)[2]
+        with open(DEFAULTS) as f:   # the next policy commit re-pins this to its own commit
+            cls.p = model.Policy(yaml.safe_load(f))
+        cls.rows = source.entries_and_waivers(cls.a.data)
+        cls.s = model.Policy(source.compose(source.skeleton(cls.p.data), cls.rows))
+        cls.was, cls.skel = artefacts(cls.a), artefacts(cls.s)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old:
+            shutil.rmtree(cls.old, ignore_errors=True)
+
+    def setUp(self):
+        if not self.old:
+            self.skipTest(f"no git archive of {PRE_RS4E}: {self.old_cli}")
+
+    def test_skeleton_gate_widens(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(source, "factory", lambda: copy.deepcopy(self.p.data)):
+            try:
+                rc = cli_mod.cmd_skeleton_gate(argparse.Namespace(against_git=PRE_RS4E, state=None, check=True))
+            except source.SourceError as e:
+                self.skipTest(f"no git revision {PRE_RS4E}: {e}")
+        g = json.loads(out.getvalue())
+        self.assertEqual((rc, g["verdict"]), (3, "widening"), err.getvalue())
+        self.assertEqual(g["added"]["_system"], self.SYSTEM)
+        self.assertEqual(g["added"]["_sections"], self.SECTIONS)
+        self.assertEqual(sorted(g["added"]), ["_sections", "_system", "bio_scientist", "control_scientist", "engineer"])
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(sorted(g["unchanged"]), sorted(set(self.p.roles) - set(self.WIDENED)))
+        self.assertIn("--propose-skeleton", err.getvalue())
+
+    def test_gate_checker_and_approvers(self):
+        import apply_check
+        g = json.loads(json.dumps(explain.gate(self.a.data, self.p.data, self.rows)))
+        self.assertEqual((g["added"]["_system"], g["added"]["_sections"]), (self.SYSTEM, self.SECTIONS))
+        self.assertEqual(g["narrowed"], [])
+        self.assertEqual(explain.checker_errors(self.p.data, self.rows), [])
+        self.assertEqual(invariants.check(self.s)[0], [])
+        self.assertEqual(invariants.check(self.p)[0], [])
+        # the three roles that widen may not approve it; qa (and auditor, which qa includes) may
+        self.assertEqual(apply_check.barred_approvers(self.p.data["roles"], g["added"]),
+                         ["bio_scientist", "control_scientist", "engineer"])
+
+    def test_person_reach(self):
+        """bio_scientist and control_scientist gain the host, the read routes and reexecute (C); engineer the host and
+        the read routes; no role loses anything, no other role moves."""
+        for role in sorted(self.p.roles):
+            with self.subTest(role):
+                ra, rs = explain.reach(self.a, role), explain.reach(self.s, role)
+                self.assertEqual(ra - rs, frozenset())
+                self.assertEqual(sorted(rs - ra, key=str), sorted(self.WIDENED.get(role, []), key=str))
+
+    def test_no_cell_no_change_version(self):
+        self.assertEqual(self.p.data["matrix"], self.a.data["matrix"])
+        self.assertEqual(sorted(self.p.data["resource_groups"]), sorted(self.a.data["resource_groups"]))
+        self.assertEqual(source.entries_and_waivers(self.p.data), self.rows)
+        self.assertEqual(self.p.data["network"].get("clients"), self.a.data["network"].get("clients"))
+
+    def test_keeps_the_proposals_sections(self):
+        """The proposal runs from A2's tree, apply.sh N from this one: both compute the same sections and diff digest
+        (network.pods.*.audience was registered residue by A2)."""
+        import apply_check
+        r = subprocess.run(["git", "-C", REPO, "show", f"{PRE_RS4E}:apps/iam/apply_check.py"], capture_output=True, text=True)
+        if r.returncode != 0:
+            self.skipTest(f"no git revision {PRE_RS4E}: {r.stderr.strip()}")
+        with open(os.path.join(self.old, "apps", "iam", "apply_check.py"), "w") as f:
+            f.write(r.stdout)
+        prog = ("import json, sys\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "import apply_check\n"
+                "from compiler import explain, source\n"
+                "a = json.load(sys.stdin)\n"
+                "p_old, p_new, acc, git = apply_check._composed(a['acc'], a['git'], a['rows'])\n"
+                "secs = explain.sections(acc, git)\n"
+                "skel = {'from': source.skeleton_digest(a['acc']), 'to': source.skeleton_digest(a['git']), 'sections': secs}\n"
+                "doc = explain.diff_document('skeleton', 15, 14, 'e' * 64, p_old, p_new, skeleton=skel)\n"
+                "print(json.dumps({'sections': secs, 'digest': explain.diff_digest(doc)}))\n")
+        inp = json.dumps({"acc": source.skeleton(self.a.data), "git": self.p.data, "rows": self.rows})
+        o = subprocess.run([sys.executable, "-I", "-c", prog, os.path.join(self.old, "apps", "iam")],
+                           input=inp, capture_output=True, text=True, env=clean_env())
+        self.assertEqual(o.returncode, 0, o.stderr)
+        old = json.loads(o.stdout)
+        p_old, p_new, acc, git = apply_check._composed(source.skeleton(self.a.data), self.p.data, self.rows)
+        secs = explain.sections(acc, git)
+        skel = {"from": source.skeleton_digest(source.skeleton(self.a.data)), "to": source.skeleton_digest(self.p.data),
+                "sections": secs}
+        doc = explain.diff_document("skeleton", 15, 14, "e" * 64, p_old, p_new, skeleton=skel)
+        self.assertEqual(json.loads(json.dumps(secs)), old["sections"])
+        self.assertEqual([list(x) for x in secs], self.SECTIONS)
+        self.assertEqual(explain.diff_digest(doc), old["digest"])
+
+    def test_exactly_the_declared_artefacts_move(self):
+        """Against A2's compiler: routes, hosts and the research-agents zone's policies move, the host's proxy list and
+        describe-gate appear, and every grants SQL form moves through role_widening()'s COMMENT (the routes digest);
+        the privilege document, the platform NetworkPolicies and everything else are byte-identical."""
+        self.assertEqual(set(self.skel) - set(self.was), {"proxy-RESEARCH_CONSOLE_DOMAIN", "describe-gate-RESEARCH_CONSOLE_DOMAIN"})
+        self.assertEqual(set(self.was) - set(self.skel), set())
+        moved = {k for k in self.was if self.was[k] != self.skel[k]}
+        self.assertEqual({k for k in moved if not k.startswith("grants-")}, {"routes", "hosts", "netpol-research-agents"})
+        self.assertEqual(self.was["grants-json"], self.skel["grants-json"])
+        self.assertEqual(self.was["netpol"], self.skel["netpol"])
+        for key, want in self.skel.items():
+            if key in ("routes", "hosts", "netpol-research", "netpol-research-gw", "netpol-research-agents") \
+                    or key.startswith("grants-") or key.endswith("RESEARCH_CONSOLE_DOMAIN"):
+                continue
+            with self.subTest(key):
+                rc, out, err = run_cli(cli_argv(key), cli=self.old_cli)
+                self.assertEqual(rc, 0, f"{key} ({PRE_RS4E}): {err}")
+                self.assertEqual(out, want, key)
+
+    def test_the_artefacts(self):
+        self.assertEqual(self.skel["proxy-RESEARCH_CONSOLE_DOMAIN"], '["bio_scientist", "control_scientist", "engineer"]\n')
+        doc = json.loads(self.skel["routes"])
+        con = doc["services"]["research-console"]
+        self.assertEqual((con["clients"], con["audience"]), (["research-console"], "medcea-research"))
+        self.assertEqual(sorted(con["routes"]), ["GET /", "GET /static/<dir>/<file>", "GET /static/<file>"])
+        for svc in ("research-orchestrator", "research-session"):
+            self.assertEqual((doc["services"][svc]["clients"], doc["services"][svc]["audience"]),
+                             (["research-agent", "research-console"], "medcea-research"), svc)
+        orch = doc["services"]["research-orchestrator"]["routes"]
+        self.assertEqual(orch["POST /api/sessions/<sid>/reexecute"]["levels"], ["C"])
+        self.assertEqual(orch["GET /api/sessions/<sid>/otel"]["levels"], ["R"])
+        self.assertIn("GET /persons/<person_id>/sessions", doc["public"]["research-session-server"])
+        items = {i["metadata"]["name"]: i["spec"] for i in json.loads(self.skel["netpol-research-agents"])["items"]}
+        self.assertNotIn("ra-dns-research-console", items)          # no DNS: it calls nothing
+        con = items["ra-research-console"]
+        self.assertEqual(con.get("egress", []), [])                    # no egress rule: the default deny leaves it none
+        proxy = {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "medcea"}},
+                 "podSelector": {"matchLabels": {"app.kubernetes.io/instance": "research-console-oauth2-proxy"}}}
+        self.assertEqual(con["ingress"], [{"from": [proxy], "ports": [{"protocol": "TCP", "port": 8080}]}])
+        o8090 = next(r for r in items["ra-research-orchestrator"]["ingress"] if r["ports"][0]["port"] == 8090)
+        self.assertEqual(o8090["from"][-1], proxy)
+        rc, out, _ = run_cli(["--defaults", "has-host", "RESEARCH_CONSOLE_DOMAIN"])
+        self.assertEqual((rc, out), (0, ""))
 
 
 if __name__ == "__main__":

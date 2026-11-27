@@ -539,7 +539,9 @@ class KcScopesResearchHost(unittest.TestCase):
         cls.t = Tree()
         cls.path = cls.t.path("apps", "iam", "policy", "defaults.yaml")
         with open(cls.path) as f:
-            cls.factory = f.read()
+            cls.original = f.read()
+        # commit A2's policy (no console host) and the console's shape (commit B's factory policy has it)
+        cls.factory = yaml.safe_dump(test_policy.without_console(model.load_defaults().data), sort_keys=False)
         cls.shape = yaml.safe_dump(test_policy.console_shape(model.load_defaults().data), sort_keys=False)
 
     @classmethod

@@ -1801,8 +1801,9 @@ has   "uninstall: the API and sessions stay" "every recorded session and Keycloa
 no_stub
 guide $'8\n29\n14\nadmin\ny\nq\n'
 rc_is "rs4e: quits with 0" 0
-has   "rs4e: the chain (dry)" "[dry run] not executed: ./apps/iam/apply.sh 14 --by admin && ./deploy-infra.sh && ./apps/research-agents/deploy.sh && ./apps/research-console/deploy.sh && ./apps/access/deploy.sh && ./health-check.sh"
+has   "rs4e: the chain (dry)" "[dry run] not executed: ./apps/iam/apply.sh 14 --by admin && env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh && ./deploy-infra.sh && ./apps/research-agents/deploy.sh && ./apps/research-console/deploy.sh && ./apps/access/deploy.sh && ./health-check.sh"
 has   "rs4e: one lock" "held by medcea.sh for all of them"
+has   "rs4e: the iam deploy ships the skeleton and compiler" "iam-api: ConfigMap iam-compiler with the applied skeleton"
 has   "rs4e: the 503 minute is named" "about a minute of 503"
 no_stub
 real $'3\n25\ny\nq\n'

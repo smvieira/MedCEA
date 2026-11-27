@@ -500,11 +500,12 @@ class Tree:
         # 4.5's fault injection, offline only: FAKE_SCOPED="<rel>=<rc>[:<n>];…" fails the first
         # n runs of <rel> (all without :n) with exit rc
         # (infra/deploy-research-namespace.sh since research sandbox 2a's commit B: the factory
-        # policy has the research zone, so apply_check.target_owners names it)
+        # policy has the research zone, so apply_check.target_owners names it; apps/research-console since
+        # research Phase 4e's commit B: the factory policy has the console's host)
         for rel in ("deploy-infra.sh", "infra/deploy-research-namespace.sh", "infra/deploy-research-gw-namespace.sh",
                     "infra/deploy-research-agents-namespace.sh", "infra/deploy-workbench.sh") + tuple(
                 f"apps/{c}/deploy.sh" for c in ("access", "edge-wizard", "frontend", "monitor", "mqtt-explorer",
-                                                 "scheduler", "superset")):
+                                                 "research-console", "scheduler", "superset")):
             dst = os.path.join(self.root, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(dst, "w") as f:
@@ -962,7 +963,9 @@ class AfterCommit(unittest.TestCase):
                   "infra/deploy-research-agents-namespace.sh --policy-only",
                   "infra/deploy-workbench.sh --policy-only"):
             self.assertIn(c, ran[:5])
-        self.assertEqual(len(ran), 12)   # superset's --gate-only since stage C, the research zone's since 2a
+        self.assertEqual(len(ran), 13)   # superset's --gate-only since stage C, the research zone's since 2a,
+        # the research console's since research Phase 4e's commit B
+        self.assertIn("apps/research-console/deploy.sh --gate-only", ran)
         self.assertTrue(all(r.endswith(" --gate-only") for r in ran[5:]), ran)
 
     def test_a_signal_after_the_commit_is_exit_3(self):
@@ -2830,7 +2833,7 @@ class ApplyVersion(unittest.TestCase):
         self.assertIn("is not approved any more", sql)
         self.assertIn("is not applied with the staged entries", sql)
         # every scoped mode once, then the record with 4.5's fields
-        self.assertEqual(len(self.scoped()), 12)   # 10 before research 4a commit B (the gw and agents namespaces), 8 stubs before Superset stage C, 9 before research 2a (commit B)
+        self.assertEqual(len(self.scoped()), 13)   # 12 before research 4e commit B (the console), 10 before research 4a commit B (the gw and agents namespaces), 8 stubs before Superset stage C, 9 before research 2a (commit B)
         recs = self.records()
         self.assertEqual([r["event"] for r in recs], ["applied"])
         pl = recs[0]["payload"]

@@ -11,7 +11,7 @@ declared server name checked by the database's allow-list), never a body field.
   8101 agent   POST /claim (one-time claim -> the session token, bound to the registered pod
                IP) and /trace (agent event types, the session token in the body).
   8102 server  POST /introspect, /trace; PUT/POST /claims/<sid>/expect; GET /events/<sid>,
-               /gates/<gid>?sid=, /sessions/<sid>; POST /sessions/<sid>/revoke (the orchestrator,
+               /gates/<gid>?sid=, /sessions/<sid>, /persons/<person_id>/sessions?before=&limit= (research Phase 4e); POST /sessions/<sid>/revoke (the orchestrator,
                Job ended), /signin/start|poll|refresh (device-code relay for client research-agent, R12).  Callers are network-gated (mcp-sim, mcp-lake, orchestrator).
 
 Token: rst1.<kid>.<sid>.<exp>.<mac>, mac = b64url(HMAC-SHA256(K_tok, "medcea-research-session|rst1|kid|sid|exp")),
@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, unquote
 
 SERVICE = "research-session"
 MAX_TTL = 8 * 3600
@@ -527,8 +527,8 @@ class Service:
 
     def sessions_of(self, person, before=None, limit=50):
         """A person's sessions, newest first (agent_trace.sessions_of; research Phase 4e, design 2.2). The person
-        comes from the caller (the orchestrator, from the verified token). The HTTP route that serves it on the
-        server port comes with the access-policy version that names it (design 5.2, rule 1)."""
+        comes from the caller (the orchestrator, from the verified token), served on the server port as
+        GET /persons/<person_id>/sessions?before=&limit= (design 3.2)."""
         if not isinstance(person, str) or not person or len(person) > 200:
             return 400, {"error": "a person is required"}
         if before is not None and not (isinstance(before, int) and not isinstance(before, bool) and before > 0):
@@ -706,6 +706,14 @@ def _handler(svc, port_name):
                 m = re.match(r"^/sessions/([^/]+)$", path)
                 if m:
                     return self.send(*svc.info(m.group(1)))
+                # research Phase 4e (design rs4e 3.2): the orchestrator asks for the person its verified token names
+                m = re.match(r"^/persons/([^/]+)/sessions$", path)
+                if m:
+                    before, limit = (q.get("before") or [""])[0], (q.get("limit") or [""])[0]
+                    if (before and not re.match(r"^[0-9]{1,18}$", before)) or (limit and not re.match(r"^[0-9]{1,3}$", limit)):
+                        return self.send(400, {"error": "before and limit are whole numbers"})
+                    return self.send(*svc.sessions_of(unquote(m.group(1)), int(before) if before else None,
+                                                      int(limit) if limit else 50))
                 return self.send(404, {"error": "not found"})
             m = re.match(r"^/sessions/([^/]+)/revoke$", path)
             if m and self.command == "POST":

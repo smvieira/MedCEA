@@ -2683,20 +2683,23 @@ a_policy_scoped() {
 # group and service identity is applied, the database deploy gives svc_superset its password
 # and Secret, and the iam deploy ships that skeleton to the Policy UI.
 # Research Phase 4e (design rs4e §9 steps 4-5): after the skeleton version that adds the research console's
-# host, proxy, pod and routes is approved: apply it, then the client, the orchestrator's handlers, the console
-# and the access deploy (the routes digest in role_widening()), health last, under one lock.
+# host, proxy, pod and routes is approved: apply it, the iam deploy (the Policy UI's skeleton and compiler), then the
+# client, the orchestrator's handlers, the console and the access deploy (the routes digest in role_widening()),
+# health last, under one lock.
 a_policy_rs4e_switch() {
     local v
     ask_policy_version "The approved skeleton version of research Phase 4e (apply.sh --status)"
     v="$ANSWER"
     ask_policy_by
-    CMD=(./apps/iam/apply.sh "$v" --by "$BY_USER" "&&" ./deploy-infra.sh "&&" ./apps/research-agents/deploy.sh
+    CMD=(./apps/iam/apply.sh "$v" --by "$BY_USER" "&&" env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh
+         "&&" ./deploy-infra.sh "&&" ./apps/research-agents/deploy.sh
          "&&" ./apps/research-console/deploy.sh "&&" ./apps/access/deploy.sh "&&" ./health-check.sh)
-    EFFECT="database: version $v applied (a permanent record); the research-agents zone's NetworkPolicies re-rendered (ra-research-console, the orchestrator's ingress); Keycloak client research-console and its secrets in config.env; the orchestrator's new routes; the research console installed (page, page server, its sign-in proxy, the portal card); the access deploy (about a minute of 503 on the User Manager and the Policy UI while role_widening() takes the new routes digest); then the health check (read-only)"
+    EFFECT="database: version $v applied (a permanent record); iam-api: ConfigMap iam-compiler with the applied skeleton and this commit's compiler (iam-api restarts: routes_diff.py moved the compiler digest); the research-agents zone's NetworkPolicies re-rendered (ra-research-console, the orchestrator's ingress); Keycloak client research-console and its secrets in config.env; the orchestrator's new routes; the research console installed (page, page server, its sign-in proxy, the portal card); the access deploy (about a minute of 503 on the User Manager and the Policy UI while role_widening() takes the new routes digest); then the health check (read-only)"
     LOCK="yes, held by medcea.sh for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
     LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
     NOTES=("Run it from a checkout of the skeleton version's commit (git checkout <commit B>), with no agent session running: between that checkout and the end of apply.sh $v every compiling deploy exits 2 (the skeleton gate)."
            "apply.sh $v asks its own [y/N]; its rollout says 'not deployed' for the console, which the later steps install. Each step runs only if the one before it succeeded."
+           "The iam deploy right after it (MEDCEA_CONFIRMED=1: it may finish an interrupted apply without asking) ships the new skeleton and compiler to the Policy UI; without it the health check WARNs (iampolicy: skeleton and compiler digests)."
            "Afterwards: tests/iam-signin.sh, tests/iam-hosts.sh and tests/iam-network.sh, then exercise E59.")
     plan_run
 }
@@ -3320,7 +3323,7 @@ AREA_POLICY=(
     "a_policy_superset_skeleton|Superset stage C: after the skeleton version|The database and iam deploys, then health, under one lock: svc_superset's password and the Policy UI's skeleton."
     "a_policy_superset_install|Superset stage C: install Superset|After the change version: the Superset deploy, health, the live gate, network and sign-in tests, a backup, under one lock."
     "a_policy_rs2b_switch|Research Phase 2b: apply the skeleton version and move the workbench|apply.sh N, the workbench's move into the research zone, the lake reader, the resume, health, under one lock."
-    "a_policy_rs4e_switch|Research Phase 4e: apply the skeleton version and install the console|apply.sh N, deploy-infra (the client), the agent machinery, the research console, the access deploy, health, under one lock."
+    "a_policy_rs4e_switch|Research Phase 4e: apply the skeleton version and install the console|apply.sh N, the iam deploy, deploy-infra (the client), the agent machinery, the research console, the access deploy, health, under one lock."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."

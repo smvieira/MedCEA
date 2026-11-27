@@ -155,16 +155,43 @@ class GatedHosts(unittest.TestCase):
                 if var in self.bare.hosts and (status == "compiled" or status.startswith("tool")):
                     self.assertIn(var, got, (gates, var))
 
-    def test_research_console_pending(self):
-        """research Phase 4e, commit A2: the console's host is in ENFORCEMENT, not in the policy: skipped, never a KeyError"""
+    def test_research_console(self):
+        """research Phase 4e: commit A2 put the console's host in ENFORCEMENT before any policy had it (skipped, never a
+        KeyError); commit B's policy names it, so it is a gated host like the others (one more sign-in leg)."""
         self.assertEqual(proxies.ENFORCEMENT["RESEARCH_CONSOLE_DOMAIN"], "compiled")
         environ = {v: v.lower().replace("_", "-") + ".example.org" for v in proxies.ENFORCEMENT}
         environ["IAM_GATES"] = "true"
-        skipped = []
-        with mock.patch.dict(os.environ, environ, clear=True):
-            out = flow.gated_hosts(self.factory, skipped)
-        self.assertNotIn("RESEARCH_CONSOLE_DOMAIN", [v for v, _, _, _ in out])
-        self.assertEqual(dict(skipped).get("RESEARCH_CONSOLE_DOMAIN"), "not in the applied access policy")
+        without = copy.deepcopy(self.factory.data)
+        without["hosts"].pop("RESEARCH_CONSOLE_DOMAIN")
+        without["network"]["proxies"].pop("RESEARCH_CONSOLE_DOMAIN")
+        for policy, gated in ((self.factory, True), (model.Policy(without), False)):
+            skipped = []
+            with mock.patch.dict(os.environ, environ, clear=True):
+                out = flow.gated_hosts(policy, skipped)
+            self.assertEqual("RESEARCH_CONSOLE_DOMAIN" in [v for v, _, _, _ in out], gated)
+            self.assertEqual(dict(skipped).get("RESEARCH_CONSOLE_DOMAIN"), None if gated else "not in the applied access policy")
+
+    def test_console_me(self):
+        """Design rs4e 6: an account the console admits reads /api/me through the proxy: 200 with its own username and
+        role and a `can`; a 401/403/503 there (the orchestrator's compiled clients or audience) fails."""
+        from compiler import routes
+        table = routes.compile(self.factory)
+        roles = sorted(table["services"]["research-orchestrator"]["routes"]["GET /api/me"]["roles"])
+        self.assertEqual(roles, ["bio_scientist", "control_scientist", "engineer"])
+        me = lambda u, r: json.dumps({"username": u, "role": r, "can": {"start": True}})
+        P = flow.console_me_problems
+        for role in roles:
+            self.assertEqual(P(table, role, "test-x", 200, me("test-x", role)), [], role)
+            for st in (401, 403, 503):
+                self.assertEqual(len(P(table, role, "test-x", st, '{"error": "x"}')), 1, (role, st))
+            self.assertEqual(len(P(table, role, "test-x", 200, me("someone", role))), 1)
+            self.assertEqual(len(P(table, role, "test-x", 200, json.dumps({"username": "test-x", "role": role}))), 1)
+            self.assertEqual(len(P(table, role, "test-x", 200, "<html>")), 1)
+        self.assertEqual(P(table, "operator", "test-x", 403, "{}"), [])
+        self.assertEqual(len(P(table, "operator", "test-x", 200, me("test-x", "operator"))), 1)
+        # the flow calls it for the console's host
+        with open(flow.__file__) as f:
+            self.assertIn('if var == "RESEARCH_CONSOLE_DOMAIN":\n                fails.extend(console_checks(', f.read())
 
     def test_superset_skipped_while_not_deployed(self):
         for env in ({}, {"SUPERSET_DEPLOYED": "false"}, {"SUPERSET_DEPLOYED": ""}):

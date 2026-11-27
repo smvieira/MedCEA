@@ -4036,12 +4036,30 @@ class Phase2bCheckerTest(unittest.TestCase):
                              [i for i in old["invariants"] if i["code"] == code])
 
 
+def without_console(d):
+    """research Phase 4e's commit B undone (the factory policy as commit A2 had it): no console host, proxy, pod or
+    members, the orchestrator's 8090 from the notebooks only."""
+    d = copy.deepcopy(d)
+    d["hosts"].pop("RESEARCH_CONSOLE_DOMAIN", None)
+    net = d["network"]
+    net["proxies"].pop("RESEARCH_CONSOLE_DOMAIN", None)
+    net["no_shared_upstreams"] = [h for h in net.get("no_shared_upstreams") or [] if h != "RESEARCH_CONSOLE_DOMAIN"]
+    net["pods"].pop("research-console", None)
+    for rule in net["pods"]["research-orchestrator"]["ingress"]:
+        rule["from"] = [x for x in rule["from"] if x != "proxy:RESEARCH_CONSOLE_DOMAIN"]
+    g = d["resource_groups"]["research_campaigns"]
+    g["members"] = [m for m in g["members"] if m.get("host") != "RESEARCH_CONSOLE_DOMAIN"
+                    and m.get("service") != "research-console"]
+    return d
+
+
 def console_shape(d):
     """research Phase 4e's commit B shape (design rs4e §5.2) on a policy that has the agent zones: the
     console's host serving the console, the orchestrator and research-session, its proxy in
     no_shared_upstreams, the console pod with its own audience, the orchestrator admitting the proxy,
-    and research_campaigns' ui and api members."""
-    d = copy.deepcopy(d)
+    and research_campaigns' ui and api members (applied to `d` without commit B's own, so the factory
+    policy since commit B gives the same fixture)."""
+    d = without_console(d)
     d["hosts"]["RESEARCH_CONSOLE_DOMAIN"] = {"label": "Research console", "client": "research-console",
                                              "serves": ["research-console", "research-orchestrator", "research-session"]}
     net = d["network"]
@@ -4059,15 +4077,26 @@ def console_shape(d):
 
 class ConsoleAudienceTest(unittest.TestCase):
     """research Phase 4e, commit A2 (design rs4e §5.1): a zone pod's `audience` key, the one-audience-per-host
-    rule and cli.py has-host. Inert under the factory policy (no pod says audience, no host serves two audiences)."""
+    rule and cli.py has-host. Inert under commit A2's policy (no pod says audience, no host serves two audiences);
+    the factory policy has the console since commit B."""
 
     @classmethod
     def setUpClass(cls):
-        cls.factory = model.load_defaults()
+        cls.real = model.load_defaults()
+        cls.factory = model.Policy(without_console(cls.real.data))     # commit A2's
         cls.shape = console_shape(cls.factory.data)
 
     def errors(self, d):
         return invariants.check(model.Policy(d))[0]
+
+    def test_the_factory_policy_is_the_console_shape(self):
+        """commit B wrote the shape into defaults.yaml: the factory policy passes and compiles the same services."""
+        self.assertEqual(invariants.check(self.real)[0], [])
+        real, shape = routes.compile(self.real)["services"], routes.compile(model.Policy(self.shape))["services"]
+        for svc in ("research-console", "research-orchestrator", "research-session"):
+            self.assertEqual((real[svc]["clients"], real[svc]["audience"]), (shape[svc]["clients"], shape[svc]["audience"]))
+        self.assertEqual(proxies.admitted(self.real, "RESEARCH_CONSOLE_DOMAIN"),
+                         proxies.admitted(model.Policy(self.shape), "RESEARCH_CONSOLE_DOMAIN"))
 
     def test_the_console_shape_passes(self):
         self.assertEqual(self.errors(self.shape), [])
@@ -4124,7 +4153,7 @@ class ConsoleAudienceTest(unittest.TestCase):
         cli = os.path.join(scratch_root(), "apps", "iam", "compiler", "cli.py")
         run = lambda *a: subprocess.run([sys.executable, cli] + list(a), capture_output=True, text=True, env=clean_env())
         r = run("--defaults", "has-host", "RESEARCH_CONSOLE_DOMAIN")
-        self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)          # commit B's factory policy
         r = run("--defaults", "has-host", "PORTAL_DOMAIN")
         self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
         self.assertEqual(run("--defaults", "has-host", "agents.medcea").returncode, 2)
@@ -4134,6 +4163,10 @@ class ConsoleAudienceTest(unittest.TestCase):
                 yaml.safe_dump(self.shape, fh, sort_keys=False)
             r = run("--file", f, "has-host", "RESEARCH_CONSOLE_DOMAIN")
             self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+            with open(f, "w") as fh:
+                yaml.safe_dump(self.factory.data, fh, sort_keys=False)
+            r = run("--file", f, "has-host", "RESEARCH_CONSOLE_DOMAIN")
+            self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)    # commit A2's
             broken = copy.deepcopy(self.shape)
             del broken["network"]["pods"]["research-console"]["audience"]
             with open(f, "w") as fh:

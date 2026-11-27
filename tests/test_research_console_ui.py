@@ -5,8 +5,8 @@ apps/research-console/html/{index.html, console.js, console.css, cytoscape-conta
   under node (skipped without node) and is checked against the servers' own code:
   - parity: EVENT_KINDS = agent_trace._port_events (+ trace_refused), AGENT_EVENTS = replay.AGENT, TOOL_SERVER =
     session.TOOL_SERVER, the agent id regex = the SQL's, CONTEXT_MARGIN, SHOWN_MAX, RECORD_MAX, MAX_CAMPAIGN_H,
-    LOOP_METRICS, BUDGET_KEYS; every API path the page calls is either routed by the orchestrator today or one of
-    the routes commit B adds; every KNOWN_ERRORS text is a literal of orchestrator.py, session.py or mcp_sim.py;
+    LOOP_METRICS, BUDGET_KEYS; every API path the page calls is a declared route of the orchestrator and in its compiled
+    route table (the routes came with commit B); every KNOWN_ERRORS text is a literal of orchestrator.py, session.py or mcp_sim.py;
   - foldEvents is incremental (fold(b, fold(a)) = fold(a + b) at every split point) on an E58-shaped trace and on
     the scripted team of A1b;
   - graphElements: one-agent and team traces (agents, specialists, servers, delegation and tool-use edges, the
@@ -196,31 +196,30 @@ class Parity(unittest.TestCase):
         self.assertIn("cap = min(max(%s * e + cal, CAP_FLOOR_H), remaining)" % got["CAP_FACTOR"],
                       read(os.path.join(ROOT, "apps", "research-agents", "mcp_sim.py")))
 
-    def test_every_api_path_is_routed_now_or_comes_with_commit_b(self):
-        src = read(os.path.join(ROOT, "apps", "research-agents", "orchestrator.py"))
-        sub = r'^/api/sessions/([^/]+)(?:/(events|stop|replay|(gates|proposals)/([^/]+)))?$'
-        self.assertIn('r"%s"' % sub, src)
-        self.assertIn('if path == "/api/sessions":', src)
+    def test_every_api_path_is_routed_and_in_the_route_table(self):
+        """Every API entry the page calls (research Phase 4e commit B: the routes come with the access policy
+        version, code and YAML together) is a declared route of the orchestrator (routes_diff.SOURCES, whose
+        literals iam-routes-diff checks in the file), matches a route of the compiled route table for service
+        research-orchestrator at the same method, and is answered by the orchestrator's router (not its "not
+        found"); the page calls every entry and fetches nothing else."""
+        sys.path.insert(0, os.path.join(ROOT, "apps", "iam"))
+        sys.path.insert(0, os.path.join(ROOT, "apps", "iam", "lib"))
+        from compiler import model, routes, routes_diff
+        import medcea_iam
+        table = routes.compile(model.load_defaults())["services"]["research-orchestrator"]["routes"]
+        declared = {tuple(r) for r in routes_diff.SOURCES["research-orchestrator"]["routes"]}
         api = js_value("API")
+        self.assertFalse(any("b" in a for a in api.values()), "a b mark left over from commit A2")
         ids = {"<sid>": "A" * 22, "<gid>": CID, "<pid>": "p12", "<cid>": CID, "<n>": "3"}
-        new = set()
         for name, a in api.items():
-            path = a["path"]
-            for k, v in ids.items():
-                path = path.replace(k, v)
-            routed = path == "/api/sessions" or re.match(sub, path) is not None
-            if a.get("b"):
-                self.assertFalse(routed, "%s is routed already: drop its b mark" % name)
-                new.add((a["method"], a["path"]))
-            else:
-                self.assertTrue(routed, name)
-        # the routes design §3.1 and §4.5 put into commit B (code and YAML together, rule 1) that the page calls;
-        # B's GET …/campaigns (the list) is not among them: the page reads the campaigns from the trace
-        self.assertEqual(new, {("GET", "/api/me"), ("GET", "/api/profiles"), ("POST", "/api/sessions/<sid>/reexecute"),
-                               ("GET", "/api/sessions/<sid>/campaigns/<cid>"),
-                               ("GET", "/api/sessions/<sid>/campaigns/<cid>/runs/<n>"),
-                               ("GET", "/api/sessions/<sid>/campaigns/<cid>/runs/<n>/series"),
-                               ("GET", "/api/sessions/<sid>/otel")})
+            with self.subTest(name):
+                key = medcea_iam.match(table, a["method"], a["path"])
+                self.assertEqual(key, "%s %s" % (a["method"], a["path"]))
+                self.assertIn((a["method"], a["path"]), declared)
+                path = a["path"]
+                for k, v in ids.items():
+                    path = path.replace(k, v)
+                self.assertEqual(medcea_iam.match(table, a["method"], path), key)
         page = read(JS).split("/* console-logic:end */", 1)[1]
         called = set(re.findall(r"\bapi\('([a-z]+)'", page))
         self.assertTrue(called <= set(api), called - set(api))
@@ -422,6 +421,17 @@ class Inspector(unittest.TestCase):
 
 @unittest.skipUnless(NODE, "node not installed")
 class CampaignViews(unittest.TestCase):
+    def test_every_state_before_a_result_has_its_own_words(self):
+        """Review of commit B: the campaign route answers the entry's own state (waiting, approved, running); the view
+        never calls an approved, not yet started campaign running."""
+        with open(JS, encoding="utf-8") as f:
+            src = f.read()
+        i = src.index("const pending = {running:")
+        block = src[i:src.index("}[cr.body.state]", i)]
+        for st in ("running", "approved", "waiting"):
+            self.assertRegex(block, r"\b%s: '" % st)
+        self.assertNotIn("still running", block.split("approved:")[1])
+
     @staticmethod
     def defaults(code):
         return {"PID": {"cycle_time": 10.0, "kp": 1.0}, "MPC": {"horizon": 6}}.get(code, {})

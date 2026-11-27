@@ -245,6 +245,11 @@ hosts:
   ONBOARD_DOMAIN:   {label: Device onboarding,       client: edge-wizard,   serves: [edge-wizard, config-api]}
   PGADMIN_DOMAIN:   {label: pgAdmin,                 client: pgadmin,       serves: [pgadmin]}
   SUPERSET_DOMAIN:  {label: Superset,                client: superset,      serves: [superset]}
+  # research Phase 4e (design rs4e §1, §5.2): the research console. Its proxy sends / to the console pod and
+  # /api/ to the orchestrator, which forwards the person's token to research-session; all three verify the
+  # audience medcea-research (one audience per host), the only one client research-console's tokens carry.
+  RESEARCH_CONSOLE_DOMAIN: {label: Research console, client: research-console,
+                            serves: [research-console, research-orchestrator, research-session]}
 
 # Upstreams mounted on every signed-in host. They never count towards a host's admission
 # (otherwise the profile, which every role may use, would open every host to every role),
@@ -263,9 +268,9 @@ public_routes:
   # research sandbox Phase 4a (agent campaigns): routes the services answer without a person's
   # route-table check. The sign-in relay is the notebooks' device-code sign-in; the rest are
   # network-gated session-token routes whose token the service itself verifies (/introspect).
-  - {service: research-orchestrator, route: "POST /api/signin/start", why: "device-code relay for research-agent; reachable from the notebooks only"}
-  - {service: research-orchestrator, route: "POST /api/signin/poll", why: "device-code relay; reachable from the notebooks only"}
-  - {service: research-orchestrator, route: "POST /api/signin/refresh", why: "refresh relay; reachable from the notebooks only"}
+  - {service: research-orchestrator, route: "POST /api/signin/start", why: "device-code relay for research-agent; reachable from the notebooks and through the research console's proxy (unused by it)"}
+  - {service: research-orchestrator, route: "POST /api/signin/poll", why: "device-code relay; reachable from the notebooks and through the research console's proxy (unused by it)"}
+  - {service: research-orchestrator, route: "POST /api/signin/refresh", why: "refresh relay; reachable from the notebooks and through the research console's proxy (unused by it)"}
   - {service: research-orchestrator-sim, route: "POST /internal/sims", why: "session token checked through research-session; reachable from mcp-sim only"}
   - {service: research-orchestrator-sim, route: "GET /internal/sims/<cid>", why: "as above"}
   - {service: research-session-agent, route: "POST /claim", why: "one-time claim, peer-bound; agent Jobs only"}
@@ -281,6 +286,7 @@ public_routes:
   - {service: research-session-server, route: "POST /signin/refresh", why: "as above"}
   - {service: research-session-server, route: "PUT /claims/<sid>/expect", why: "the orchestrator registers the Job's expected peer"}
   - {service: research-session-server, route: "POST /claims/<sid>/expect", why: "as above"}
+  - {service: research-session-server, route: "GET /persons/<person_id>/sessions", why: "a person's sessions, newest first, for the orchestrator only, which names the person its verified token carries (research Phase 4e)"}
   - {service: mcp-sim, route: "POST /mcp", why: "MCP, session token checked on every tools/call through /introspect"}
   - {service: mcp-lake, route: "POST /mcp", why: "MCP, session token checked on every tools/call through /introspect"}
   - {service: model-gateway, route: "POST /v1/turn", why: "one model turn for an agent Job; the session token is checked through research-session /introspect (research Phase 4b)"}
@@ -327,7 +333,7 @@ network:
   ingress_namespace: ingress
   unproxied:
     ONBOARD_DOMAIN: node
-  no_shared_upstreams: [NODE_RED_DOMAIN]
+  no_shared_upstreams: [NODE_RED_DOMAIN, RESEARCH_CONSOLE_DOMAIN]   # the console: one audience, no /_account/ (rs4e OD-4e-2)
   proxies:
     PORTAL_DOMAIN:    portal-oauth2-proxy
     CONFIG_DOMAIN:    config-oauth2-proxy
@@ -338,6 +344,7 @@ network:
     MQTTX_DOMAIN:     mqttx-oauth2-proxy
     NODE_RED_DOMAIN:  oauth2-proxy
     POLICY_DOMAIN:    iam-oauth2-proxy
+    RESEARCH_CONSOLE_DOMAIN: research-console-oauth2-proxy
   # Zones (research sandbox Phase 2a): a pod or client saying `zone: research` runs in the
   # research namespace (RESEARCH_NAMESPACE), which denies all ingress and egress but DNS by
   # default (compile netpol --zone research: rs-default-deny, rs-dns, rs-<pod>). Without
@@ -474,12 +481,21 @@ network:
       token_clients: [{client: research-agent, audience: medcea-research}]
       dns: true
       ingress:
-        - {port: 8090, from: ["pod:notebooks"], why: "the medcea-agent CLI, with the person's research-agent token"}
+        - {port: 8090, from: ["pod:notebooks", "proxy:RESEARCH_CONSOLE_DOMAIN"], why: "the medcea-agent CLI and the research console, with the person's token (research-agent or research-console)"}
         - {port: 8091, from: ["pod:mcp-sim"], why: "simulation requests carrying a session token (network-gated, no person)"}
       egress:
         - {pod: research-session, port: 8100, why: "mint, revoke, gate and proposal decisions (person token forwarded)"}
         - {pod: research-session, port: 8102, why: "events, gate state, introspect, revoke and the sign-in relay"}
         - {node: true, port: 16443, why: "the Kubernetes API (Jobs); Calico matches after DNAT of the kubernetes Service"}
+    research-console:
+      # research Phase 4e (design rs4e §1): the research console's static page (apps/research-console). No token,
+      # no Secret, no egress, no DNS; its own route-table service, verifying medcea-research (`audience`).
+      zone: research-agents
+      selector: {app: research-console}
+      carries: {research-console: 8080}
+      audience: medcea-research
+      ingress:
+        - {port: 8080, from: ["proxy:RESEARCH_CONSOLE_DOMAIN"], why: "the console page; static files only"}
     research-session:
       zone: research-gw
       selector: {app: research-session}
@@ -1604,19 +1620,29 @@ resource_groups:
       A session runs a scripted or LLM-driven agent that can only call the simulation and
       snapshot tools its profile names; its output is a proposal, never an operational
       change. Every model turn and tool call is recorded in the research database's agent
-      trace under the supervising scientist's identity, and every R holder (engineer
-      included) sees every session's prompts and tool calls. The agent's own token is a
+      trace under the supervising scientist's identity. Each session, its prompts, tool
+      calls, campaigns and results are visible only to the person who started it: an R
+      holder without C (engineer) sees none. The agent's own token is a
       short-lived session token bound to one pod and one profile, never a person's token;
-      the person's research-agent token (audience medcea-research, never medcea-api) opens
-      only these routes. The session key and the trace writer sit in their own namespace,
+      the person's research-agent or research-console token (audience medcea-research,
+      never medcea-api) opens only these routes; the research console's page is static and
+      its pod holds no token. The session key and the trace writer sit in their own namespace,
       which only the agent machinery and the key holder's own pods can reach. A pod the
       notebook hub could create in the research namespace reaches none of them.
     members:
+      - {type: ui, host: RESEARCH_CONSOLE_DOMAIN}
+      - {type: api, service: research-console, routes: {
+          "GET /": R, "GET /static/<file>": R, "GET /static/<dir>/<file>": R}}
       - {type: api, service: research-orchestrator, routes: {
           "GET /api/sessions": R, "GET /api/sessions/<sid>": R, "GET /api/sessions/<sid>/events": R,
           "POST /api/sessions/<sid>/replay": R, "POST /api/sessions": C,
           "POST /api/sessions/<sid>/stop": U, "POST /api/sessions/<sid>/gates/<gid>": U,
-          "POST /api/sessions/<sid>/proposals/<pid>": U}}
+          "POST /api/sessions/<sid>/proposals/<pid>": U,
+          "GET /api/me": R, "GET /api/profiles": R,
+          "GET /api/sessions/<sid>/campaigns": R, "GET /api/sessions/<sid>/campaigns/<cid>": R,
+          "GET /api/sessions/<sid>/campaigns/<cid>/runs/<n>": R,
+          "GET /api/sessions/<sid>/campaigns/<cid>/runs/<n>/series": R,
+          "GET /api/sessions/<sid>/otel": R, "POST /api/sessions/<sid>/reexecute": C}}
       - {type: api, service: research-session, routes: {
           "POST /mint": C, "POST /revoke": U, "POST /sessions/<sid>/gates/<gid>": U,
           "POST /sessions/<sid>/proposals/<pid>": U}}

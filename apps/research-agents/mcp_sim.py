@@ -252,9 +252,10 @@ def fit_table(table):
     return table
 
 
-def summarise_settings(rows, defaults_of, sort=None):
+def summarise_settings(rows, defaults_of, sort=None, max_rows=SETTINGS_MAX):
     """runner rows -> {columns, count {shown, total}, means_of, order, settings: [[code, params, runs, valid, energy_wh,
-    <loop>.<metric>...]]}; raises ToolRefused for a sort that is not a criterion of this campaign."""
+    <loop>.<metric>...]]}; raises ToolRefused for a sort that is not a criterion of this campaign. max_rows: the
+    settings kept (SETTINGS_MAX for an agent; the research console's campaign route asks for more, research Phase 4e)."""
     loops = sorted({str(k) for r in rows if r.get("valid") is True for k in (r.get("loops") or {})
                     if isinstance((r.get("loops") or {}).get(k), dict)})
     metrics = ["energy_wh"] + ["%s.%s" % (k, m) for k in loops for m in LOOP_METRICS]
@@ -289,10 +290,10 @@ def summarise_settings(rows, defaults_of, sort=None):
         i = 4 + metrics.index(sort)
         table.sort(key=lambda row: (row[i] is None, row[i] if row[i] is not None else 0.0))   # stable: ties keep order
     return {"columns": ["code", "params", "runs", "valid"] + metrics,
-            "count": {"shown": min(len(table), SETTINGS_MAX), "total": len(table)},
+            "count": {"shown": min(len(table), max_rows), "total": len(table)},
             "means_of": "each setting's valid runs; lower is better",
             "order": ("by %s, best first" % sort) if sort else "the campaign's order",
-            "settings": table[:SETTINGS_MAX]}
+            "settings": table[:max_rows]}
 
 
 class LocalEstimator:

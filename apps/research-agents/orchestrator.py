@@ -14,6 +14,17 @@ service research-orchestrator):
   POST /api/sessions/<sid>/replay          R   strict replay as Job replay-<h(sid)>: 202 {state: running} until it ends,
                                                then 200 with the verdict {ok, first_mismatch, events} (re-POST to poll);
                                                409 while the session is still active
+ research Phase 4e (the research console, design rs4e 3.1; with the access policy version that names its host):
+  GET  /api/me                             R   {username, role, can: {start, decide, stop, replay, reexecute}}
+  GET  /api/profiles                       R   {profiles: [{name, backend, caps, tools, skill, team?}], endpoints}
+  GET  /api/sessions?before=&limit=        R   also `history` (research-session's sessions_of) and next_before
+  GET  /api/sessions/<sid>/events?wait=S   R   long-poll: up to S (<= 20) s, also bounded by the token's exp - 5 s
+  GET  /api/sessions/<sid>/campaigns       R   the session's campaigns from its trace (campaigns.py)
+  GET  /api/sessions/<sid>/campaigns/<cid>[?sort=&offset=&limit=]           R   manifest, by_setting, a page of runs
+  GET  /api/sessions/<sid>/campaigns/<cid>/runs/<n>                         R   result row n
+  GET  /api/sessions/<sid>/campaigns/<cid>/runs/<n>/series?points=          R   the run's chamber series, decimated
+  GET  /api/sessions/<sid>/otel[?content=1]                                 R   the session as OpenTelemetry (otel.py)
+  POST /api/sessions/<sid>/reexecute       C   the same profile on the session's model, recorded as `reexecutes`
 Port 8091 (sim API, mcp-sim only, network-gated): POST /internal/sims, GET /internal/sims/<cid>,
   POST /internal/estimates {sid, spec} -> {eid}, GET /internal/estimates/<eid> (Job estimate-<eid>, FLC/MPC specs, R7).
 
@@ -23,6 +34,7 @@ Job ends; a pod that never ran within START_GRACE_S is stopped. When a simulatio
 writes its sim_finished as actor orchestrator (research Phase 4e; session_status counts one per
 campaign, whichever of mcp-sim and the orchestrator wrote it). Holds no secret that can mint
 or attribute: the person's token is only forwarded. Never logs a token or a body."""
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -39,6 +51,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+
+
+def _root_on_path():
+    """ROOT on sys.path once (research/ and the bundle's top level): handlers call it per request, so it never adds
+    a second copy."""
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+
+
+def _log_name(v):
+    """A username as the log may print it: [A-Za-z0-9._@-], at most 64 characters, else '?'."""
+    return v if isinstance(v, str) and re.match(r"^[A-Za-z0-9._@-]{1,64}$", v) else "?"
+
+
+import campaigns  # noqa: E402
 import jobs  # noqa: E402
 
 SERVICE = "research-orchestrator"
@@ -84,6 +111,8 @@ class Orchestrator:
         self.estimates = {}               # eid -> {"sid", "final"}
         self.sim_caps = {}                # cid -> the cap the campaign was started with
         self.sims_reported = set()        # cids whose sim_finished this process wrote
+        self.facts = {}                   # sid -> what the trace says of a session (_facts), read incrementally
+        self.sleep = time.sleep
         self.lock = threading.Lock()
 
     def endpoints(self):
@@ -104,14 +133,14 @@ class Orchestrator:
         path = os.path.join(self.cfg["profiles_dir"], name + ".yaml")
         if not os.path.isfile(path):
             return None
-        sys.path.insert(0, ROOT)
+        _root_on_path()
         from research.agents import loop
         from research.agents.context import canonical, sha
         p = loop.load_profile(path)
         return p, sha(canonical(p))
 
     # ── person routes
-    def start(self, who, token, body):
+    def start(self, who, token, body, reexecutes=None):
         if not isinstance(body, dict):
             return 400, {"error": "a JSON object is required"}
         got = self._profile(body.get("profile"))
@@ -162,6 +191,8 @@ class Orchestrator:
                 "backend": backend, "code_commit": self.cfg["code_commit"]}
         if "ttl_s" in body:
             mint["ttl_s"] = body["ttl_s"]
+        if reexecutes:
+            mint["reexecutes"] = reexecutes
         st, m = self.ph.request("POST", "/mint", mint, {"X-Forwarded-Access-Token": token})
         if st != 201:
             return (st if st in (400, 403, 409) else 502), {"error": (m or {}).get("error", "the session service refused")}
@@ -175,8 +206,11 @@ class Orchestrator:
             return 502, {"error": "the agent Job could not be created"}
         with self.lock:
             self.track[sid] = {"person": who["person_id"], "job": jobs.agent_job_name(sid), "registered": False,
-                               "started": self.clock(), "profile": prof["name"]}
-        return 201, {"sid": sid, "exp": m["exp"], "job": jobs.agent_job_name(sid), "endpoint": backend}
+                               "started": self.clock(), "profile": prof["name"], "backend": backend, "exp": m["exp"]}
+        out = {"sid": sid, "exp": m["exp"], "job": jobs.agent_job_name(sid), "endpoint": backend}
+        if reexecutes:
+            out["reexecutes"] = reexecutes
+        return 201, out
 
     def _own(self, who, sid):
         if not SID.match(sid or ""):
@@ -186,23 +220,224 @@ class Orchestrator:
             return None
         return i
 
-    def listing(self, who):
+    def listing(self, who, q=None):
+        """The sessions this process started for the person (running ones: state, backend, exp) and, research Phase 4e,
+        the person's history from research-session (agent_trace.sessions_of, newest first, keyset `before`). The person
+        is the verified token's, never a query parameter."""
+        q = q or {}
+        before, limit = (q.get("before") or [""])[0], (q.get("limit") or [""])[0]
+        if before and not re.match(r"^[1-9][0-9]{0,17}$", before):
+            return 400, {"error": "before must be a positive event id"}
+        if limit and not (re.match(r"^[0-9]{1,3}$", limit) and 1 <= int(limit) <= 200):
+            return 400, {"error": "limit is 1 to 200"}
         with self.lock:
-            sids = [s for s, t in self.track.items() if t["person"] == who["person_id"]]
-        return 200, {"sessions": [{"sid": s, "profile": self.track[s]["profile"]} for s in sids if s in self.track],
-                     "endpoints": self.inventory()}
+            run = [dict(sid=s, profile=t["profile"], state="running" if t["registered"] else "starting",
+                        backend=t.get("backend"), exp=t.get("exp"))
+                   for s, t in self.track.items() if t["person"] == who["person_id"]]
+        out = {"sessions": run, "endpoints": self.inventory(), "history": [], "next_before": None}
+        path = "/persons/%s/sessions" % urllib.parse.quote(str(who["person_id"]), safe="")
+        qs = "&".join(x for x in ("before=" + before if before else "", "limit=" + limit if limit else "") if x)
+        st, r = self.sh.request("GET", path + ("?" + qs if qs else ""))
+        if st == 200 and isinstance(r, dict) and isinstance(r.get("sessions"), list):
+            out["history"] = r["sessions"]
+            out["next_before"] = r.get("next_before")
+        else:
+            out["history_error"] = "the session history is not available (the session service did not answer)"
+        return 200, out
+
+    def _pages(self, sid, after=0, cap=100000):
+        """Events after `after`, page by page (research-session answers 1000 at most): (events, None) or (None, error)."""
+        out = []
+        while True:
+            st, r = self.sh.request("GET", "/events/%s?after=%d" % (sid, after))
+            if st != 200 or not isinstance(r, dict):
+                return None, (502, {"error": "the session service did not answer"})
+            got = r.get("events") or []
+            out += got
+            if len(got) < 1000 or not got:
+                return out, None
+            after = got[-1]["event_id"]
+            if len(out) > cap:
+                return None, (413, {"error": "the session's trace is longer than %d events" % cap})
+
+    def _facts(self, sid):
+        """What the trace says of a session that research-session's row does not: code_commit and reexecutes
+        (session_minted), revoke_reason (session_revoked) and the agents (lead and specialists, agent_spawned). Read
+        incrementally from the last event seen; callers have checked ownership first."""
+        with self.lock:
+            f = dict(self.facts.get(sid) or {"after": 0, "code_commit": None, "reexecutes": None,
+                                              "revoke_reason": None, "agents": [{"id": "a0", "parent": None}]})
+            f["agents"] = list(f["agents"])
+        got, err = self._pages(sid, f["after"])
+        if err:
+            return f
+        for e in got:
+            p = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+            if e.get("event") == "session_minted":
+                f["code_commit"], f["reexecutes"] = p.get("code_commit"), p.get("reexecutes")
+            elif e.get("event") == "session_revoked":
+                f["revoke_reason"] = p.get("reason")
+            elif e.get("event") == "agent_spawned" and isinstance(p.get("agent"), str) \
+                    and all(a["id"] != p["agent"] for a in f["agents"]):
+                f["agents"].append({"id": p["agent"], "parent": p.get("parent"), "profile": p.get("profile_name")})
+            f["after"] = max(f["after"], e.get("event_id") or 0)
+        with self.lock:
+            if len(self.facts) > 500 and sid not in self.facts:
+                self.facts.pop(next(iter(self.facts)))
+            self.facts[sid] = f
+        return f
 
     def info(self, who, sid):
         i = self._own(who, sid)
         if i is None:
             return 404, {"error": "no such session"}
-        return 200, {k: i[k] for k in ("sid", "profile", "backend", "exp", "claimed", "active", "revoked", "budget", "spent")}
+        out = {k: i[k] for k in ("sid", "profile", "backend", "exp", "claimed", "active", "revoked", "budget", "spent")}
+        out.update({k: i.get(k) for k in ("sup_username", "sup_role", "created_at")})
+        f = self._facts(sid)
+        out.update(code_commit=f["code_commit"], revoke_reason=f["revoke_reason"], agents=f["agents"])
+        if f["reexecutes"]:
+            out["reexecutes"] = f["reexecutes"]
+        return 200, out
 
-    def events(self, who, sid, after):
+    def events(self, who, sid, after, wait=0, token_exp=None):
+        """One page of events after `after`. wait (0..20 s, research Phase 4e): hold the answer until an event arrives
+        or the wait ends, re-reading every second; the wait never outlives the caller's token (exp - 5 s), so a person
+        whose role is taken away stops seeing new events at the token's end."""
         if self._own(who, sid) is None:
             return 404, {"error": "no such session"}
-        st, r = self.sh.request("GET", "/events/%s?after=%d" % (sid, after))
-        return (200, r) if st == 200 else (502, {"error": "the session service did not answer"})
+        end = self.clock() + max(0, min(int(wait or 0), 20))
+        if isinstance(token_exp, (int, float)) and not isinstance(token_exp, bool):
+            end = min(end, token_exp - 5)
+        while True:
+            st, r = self.sh.request("GET", "/events/%s?after=%d" % (sid, after))
+            if st != 200:
+                return 502, {"error": "the session service did not answer"}
+            left = end - self.clock()
+            if (isinstance(r, dict) and r.get("events")) or left <= 0:
+                return 200, r
+            self.sleep(min(1.0, left))
+
+    # ── research Phase 4e: the research console's reads (design rs4e 3.1)
+    CAN = {"start": "POST /api/sessions", "decide": "POST /api/sessions/<sid>/gates/<gid>",
+           "stop": "POST /api/sessions/<sid>/stop", "replay": "POST /api/sessions/<sid>/replay",
+           "reexecute": "POST /api/sessions/<sid>/reexecute"}
+
+    def me(self, d):
+        """{username, role, can}: can from a dry look-up of the orchestrator's own routes in routes.json (the routes the
+        buttons call), each true when one of the person's roles holds that route's level; null when the table cannot
+        be read (the page then shows every button and the server decides)."""
+        who = getattr(d, "who", None) or {}
+        role = self.iam.actor_role(d) if hasattr(self.iam, "actor_role") else None
+        table = self.iam._load(self.iam.ROUTES_FILE) if hasattr(self.iam, "_load") and hasattr(self.iam, "ROUTES_FILE") else None
+        routes = (((table or {}).get("services") or {}).get(SERVICE) or {}).get("routes") if isinstance(table, dict) else None
+        can = None
+        if isinstance(routes, dict):
+            roles = set(who.get("roles") or [])
+            can = {k: bool(isinstance(routes.get(key), dict) and roles & set(routes[key].get("roles") or {}))
+                   for k, key in self.CAN.items()}
+        return 200, {"username": who.get("username"), "role": role, "can": can}
+
+    def profiles(self):
+        """The bundle's profiles (research/agents/profiles/*.yaml) as the start form needs them; one that does not load
+        is left out (and named in the log)."""
+        _root_on_path()
+        from research.agents import loop
+        d, out = self.cfg["profiles_dir"], []
+        for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            name = fn[:-5]
+            if not fn.endswith(".yaml") or not NAME.match(name):
+                continue
+            try:
+                p = loop.load_profile(os.path.join(d, fn))
+            except Exception as e:
+                sys.stderr.write("research-orchestrator: profile %s does not load: %s\n" % (name, type(e).__name__))
+                continue
+            item = {"name": name, "backend": p["backend"], "caps": p["caps"], "tools": list(p["tools"]),
+                    "skill": p.get("skill")}
+            if isinstance(p.get("team"), dict):
+                item["team"] = sorted(p["team"])
+            out.append(item)
+        return 200, {"profiles": out, "endpoints": self.inventory()}
+
+    def _campaign_events(self, who, sid):
+        if self._own(who, sid) is None:
+            return None, (404, {"error": "no such session"})
+        return self._pages(sid)
+
+    def campaigns(self, who, sid):
+        evs, err = self._campaign_events(who, sid)
+        if err:
+            return err
+        return 200, {"campaigns": campaigns.campaigns_of(evs)}
+
+    def _campaign(self, who, sid, cid):
+        evs, err = self._campaign_events(who, sid)
+        if err:
+            return None, err
+        c = campaigns.campaign_of(evs, cid)
+        if c is None:
+            return None, (404, {"error": "no such campaign"})
+        return c, None
+
+    @staticmethod
+    def _defaults_of():
+        _root_on_path()
+        import mcp_sim
+        pmod = mcp_sim._load_params(ROOT)
+        return mcp_sim, (lambda code: pmod.defaults(code) if code in pmod.PARAMS else {})
+
+    def campaign(self, who, sid, cid, q):
+        c, err = self._campaign(who, sid, cid)
+        if err:
+            return err
+        ms, defaults_of = self._defaults_of()
+        return campaigns.read_campaign(self.cfg.get("runs_root", "/runs"), c, q, ms.summarise_settings,
+                                       ms.summarise_row, defaults_of)
+
+    def run(self, who, sid, cid, n):
+        c, err = self._campaign(who, sid, cid)
+        if err:
+            return err
+        return campaigns.read_run(self.cfg.get("runs_root", "/runs"), c, n)
+
+    def series(self, who, sid, cid, n, q):
+        c, err = self._campaign(who, sid, cid)
+        if err:
+            return err
+        return campaigns.read_series(self.cfg.get("runs_root", "/runs"), c, n, q)
+
+    def otel(self, who, sid, content=False):
+        """The session as an OTLP/JSON export (research/agents/otel.py; design rs4e 4.5): digests and sizes only unless
+        content is asked for; the session token, claim and person sub never appear."""
+        i = self._own(who, sid)
+        if i is None:
+            return 404, {"error": "no such session"}
+        evs, err = self._pages(sid)
+        if err:
+            return err
+        _root_on_path()
+        from research.agents import otel
+        f = self._facts(sid)
+        kind = next((e.get("kind") for e in self.cfg.get("inventory") or [] if isinstance(e, dict)
+                     and e.get("name") == i.get("backend")), None)
+        session = {"sid": sid, "profile": i.get("profile"), "backend": i.get("backend"), "code_commit": f["code_commit"],
+                   "sup_username": i.get("sup_username"), "sup_role": i.get("sup_role"), "endpoint_kind": kind}
+        if content:
+            # design rs4e 4.5: an export with content is a recorded choice; the trace has no event kind for it, so the
+            # orchestrator's log names the session and the person (never the token or the content)
+            sys.stderr.write("research-orchestrator: an OpenTelemetry export with content of session %s for %s\n"
+                             % (sid, _log_name(who.get("username"))))
+        return 200, otel.export(evs, session, content=bool(content))
+
+    def reexecute(self, who, token, sid):
+        """POST /api/sessions/<sid>/reexecute (OD-4e-8): the session's profile again, on the model it ran on, minted with
+        `reexecutes` = sid (recorded in the new session's session_minted); the same refusals as POST /api/sessions."""
+        i = self._own(who, sid)
+        if i is None:
+            return 404, {"error": "no such session"}
+        if i.get("backend") in (None, "scripted"):
+            return 409, {"error": "the session is not a model session: nothing to re-execute"}
+        return self.start(who, token, {"profile": i["profile"], "endpoint": i["backend"]}, reexecutes=sid)
 
     def decide(self, who, token, kind, sid, xid, body):
         if self._own(who, sid) is None or not XID.match(xid or ""):
@@ -454,7 +689,7 @@ class Orchestrator:
         st, i = self.sh.request("GET", "/sessions/" + sid)
         if st != 200 or not i.get("active"):
             return 403, {"error": "the session is not active"}
-        sys.path.insert(0, ROOT)
+        _root_on_path()
         from research.agents.context import canonical, sha
         eid = "e" + sha(sid + sha(canonical(body["spec"])))[:20]
         with self.lock:
@@ -508,10 +743,16 @@ def _handler(orch, port_name):
         def log_message(self, fmt, *args):
             sys.stderr.write("%s %s %s\n" % (port_name, self.command, urllib.parse.urlsplit(self.path).path[:60]))
 
-        def send(self, code, obj):
+        def send(self, code, obj, gz=False):
             b = json.dumps(obj).encode()
+            gz = gz and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+            if gz:
+                b = gzip.compress(b, 6, mtime=0)
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(b)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -562,12 +803,26 @@ def _handler(orch, port_name):
             if not UUID.match(str(who.get("sub") or "")) or not who.get("person_id"):
                 return self.send(403, {"error": "the token has no account uuid or person_id"})
             token = self.headers.get("X-Forwarded-Access-Token") or ""
+            if self.command == "GET" and path == "/api/me":
+                return self.send(*orch.me(d))
+            if self.command == "GET" and path == "/api/profiles":
+                return self.send(*orch.profiles())
             if path == "/api/sessions":
                 if self.command == "GET":
-                    return self.send(*orch.listing(who))
+                    return self.send(*orch.listing(who, q))
                 b = self.body()
                 return None if not isinstance(b, dict) else self.send(*orch.start(who, token, b))
-            m = re.match(r"^/api/sessions/([^/]+)(?:/(events|stop|replay|(gates|proposals)/([^/]+)))?$", path)
+            m = re.match(r"^/api/sessions/([^/]+)/campaigns(?:/([^/]+)(?:/runs/([^/]+)(/series)?)?)?$", path)
+            if m and self.command == "GET":
+                sid, cid, n = m.group(1), m.group(2), m.group(3)
+                if cid is None:
+                    return self.send(*orch.campaigns(who, sid))
+                if n is None:
+                    return self.send(*orch.campaign(who, sid, cid, q))
+                if m.group(4):
+                    return self.send(*orch.series(who, sid, cid, n, q), gz=True)
+                return self.send(*orch.run(who, sid, cid, n))
+            m = re.match(r"^/api/sessions/([^/]+)(?:/(events|stop|replay|reexecute|otel|(gates|proposals)/([^/]+)))?$", path)
             if not m:
                 return self.send(404, {"error": "not found"})
             sid, sub = m.group(1), m.group(2)
@@ -575,7 +830,11 @@ def _handler(orch, port_name):
                 return self.send(*orch.info(who, sid))
             if sub == "events" and self.command == "GET":
                 a = (q.get("after") or ["0"])[0]
-                return self.send(*orch.events(who, sid, int(a) if a.isdigit() else 0))
+                w = (q.get("wait") or ["0"])[0]
+                return self.send(*orch.events(who, sid, int(a) if a.isdigit() else 0,
+                                              int(w) if w.isdigit() and len(w) < 4 else 0, _token_exp(token)))
+            if sub == "otel" and self.command == "GET":
+                return self.send(*orch.otel(who, sid, (q.get("content") or ["0"])[0] in ("1", "true")))
             if self.command != "POST":
                 return self.send(405, {"error": "method not allowed"})
             b = self.body()
@@ -585,6 +844,8 @@ def _handler(orch, port_name):
                 return self.send(*orch.stop(who, token, sid))
             if sub == "replay":
                 return self.send(*orch.replay(who, sid))
+            if sub == "reexecute":
+                return self.send(*orch.reexecute(who, token, sid))
             if m.group(3):
                 return self.send(*orch.decide(who, token, m.group(3), sid, m.group(4), b))
             self.send(404, {"error": "not found"})
@@ -604,6 +865,18 @@ def _handler(orch, port_name):
                 return self.send(*orch.estimate_status(m.group(1)))
             self.send(404, {"error": "not found"})
     return H
+
+
+def _token_exp(token):
+    """The exp claim of the person's token (already verified by check()), or None: the long-poll's bound."""
+    import base64
+    try:
+        part = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        exp = claims.get("exp")
+        return exp if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+    except (IndexError, ValueError, AttributeError, TypeError):
+        return None
 
 
 def _inventory(b64):

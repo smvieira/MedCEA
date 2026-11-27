@@ -501,6 +501,20 @@ class SessionTest(unittest.TestCase):
         for bad in (("", None, 5), ("p-1", 0, 5), ("p-1", None, 0), ("p-1", None, 201), ("p-1", True, 5)):
             self.assertEqual(self.svc.sessions_of(*bad)[0], 400, bad)
 
+    def test_the_persons_sessions_on_the_server_port(self):
+        """GET /persons/<person_id>/sessions (research Phase 4e, design 3.2): the orchestrator's call, the person in the
+        path (percent-encoded), keyset before and limit; not on the person port."""
+        st, a = self.mint()
+        st, b = self.mint()
+        st, r = self.call(2, "GET", "/persons/p-1/sessions?limit=1")
+        self.assertEqual((st, [x["sid"] for x in r["sessions"]]), (200, [b["sid"]]))
+        st, r2 = self.call(2, "GET", "/persons/p-1/sessions?before=%d" % r["next_before"])
+        self.assertEqual(([x["sid"] for x in r2["sessions"]], r2["next_before"]), ([a["sid"]], None))
+        self.assertEqual(self.call(2, "GET", "/persons/p%2D2/sessions")[1], {"sessions": [], "next_before": None})
+        self.assertEqual(self.call(2, "GET", "/persons/p-1/sessions?before=x")[0], 400)
+        self.assertEqual(self.call(2, "GET", "/persons/p-1/sessions?limit=0")[0], 400)
+        self.assertEqual(self.call(0, "GET", "/persons/p-1/sessions", token=self.person_token())[0], 403)
+
     def test_healthz_and_anchor(self):
         st, r = self.call(0, "GET", "/healthz")
         self.assertEqual((st, r["kid"], r["anchor"]), (200, self.keys.kid, None))
