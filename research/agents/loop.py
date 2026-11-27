@@ -6,7 +6,12 @@ has list_tools() -> [{name, description}] and call(name, args) -> dict (raising 
 call(name, args, meta={agent, call}) when it says accepts_meta), `model` has respond(request)
 -> {text, tool} (respond(request, agent=...) when it says accepts_agent). Every payload the loop
 writes carries the agent id (research Phase 4e). Strict replay (replay.py) drives this same
-function with recorded responses and results."""
+function with recorded responses and results.
+
+Teams (research Phase 4e commit A1b, design 2.1, OD-4e-4, OD-4e-5): a profile with a `team:` key offers its model
+the tool team.delegate {specialist, task}; team.py runs the specialist as a sub-agent through this same function,
+sequentially, with the session's one budget (`shared`: every agent's spend is the session's, an agent's caps bound
+what it spends from its own start, and a sub-agent's caps are never above its parent's remaining)."""
 import re
 import time
 
@@ -91,6 +96,9 @@ def load_profile(path):
         raise ValueError("profile: nudges is a whole number from 0 to 3")
     if p["backend"] == "scripted" and not isinstance(p.get("script"), list):
         raise ValueError("profile: a scripted profile needs a script")
+    if "team" in p or TEAM_TOOL in p["tools"]:
+        from . import team
+        team.check_profile(p)
     return p
 
 
@@ -105,6 +113,27 @@ def context_cap(profile, endpoint=None, endpoint_context=None):
         return profile["caps"]["context_tokens"]
     cap = max(512, endpoint_context - CONTEXT_MARGIN)
     return min(cap, LOCAL_CONTEXT_MAX) if endpoint == "local" else cap
+
+
+TEAM_TOOL = "team.delegate"      # served by team.py inside this loop, never by an MCP server
+BUDGET_CAPS = ("prompt_tokens", "output_tokens", "cpu_hours")     # spent from the session's one budget
+
+
+def new_shared():
+    """The session's spend, shared by the lead and every sub-agent (OD-4e-5): tokens and CPU (`spent`), the campaigns
+    whose CPU is in (`counted`) and the turns every agent has taken (`turns`: the session's budget counts them all, so
+    the lead's caps.turns bounds its own turns and its specialists' together)."""
+    return {"spent": {"prompt_tokens": 0, "output_tokens": 0, "cpu_hours": 0.0}, "counted": set(), "turns": 0}
+
+
+def tool_spec(names, listed, schemas):
+    """The tools as the model's request lists them: the profile's order, the server's descriptions (and, through the
+    gateway, the input schemas). Their sha256 is the turn_request's tools_sha256 (and agent_spawned's)."""
+    spec = [{"name": n, "description": listed[n].get("description", "")} for n in names if n in listed]
+    if schemas:     # the gateway builds function tools from this: the schema is part of the request (and its sha)
+        for t in spec:
+            t["inputSchema"] = listed[t["name"]].get("inputSchema") or {"type": "object", "properties": {}}
+    return spec
 
 
 def child_profile(parent, want):
@@ -135,50 +164,70 @@ class _AgentTrace:
 
 
 def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, backend_id=None, endpoint=None,
-        endpoint_context=None, agent=LEAD, parent=None):
+        endpoint_context=None, agent=LEAD, parent=None, shared=None, deadline=None, report=None, skills=None):
+    """shared: the session's spend (new_shared(); team.py passes the lead's to its sub-agents). deadline: a clock
+    value after which the agent stops with wall_h (a sub-agent's is its parent's). report: a dict filled at the stop
+    with reason, turns, spent (this agent's, its sub-agents' included) and answer (its last text). skills: name ->
+    skill text for a team's specialists (team.py; default the skills/ folder beside this file)."""
     if not agent_ok(agent, parent):
         raise ValueError("agent %r with parent %r is not a valid agent id" % (agent, parent))
+    raw_trace = trace
     trace = _AgentTrace(trace, agent, parent)
     caps = dict(profile["caps"], context_tokens=context_cap(profile, endpoint, endpoint_context))
     allowed = list(profile["tools"])
-    listed = {t["name"]: t for t in tools.list_tools()}
     local = through_gateway(profile)
-    spec = [{"name": n, "description": listed[n].get("description", "")} for n in allowed if n in listed]
-    if local:       # the gateway builds function tools from this: the schema is part of the request (and its sha)
-        for t in spec:
-            t["inputSchema"] = listed[t["name"]].get("inputSchema") or {"type": "object", "properties": {}}
+    backend = backend_id or model.id
+    t_start = clock()
+    shared = shared if shared is not None else new_shared()
+    spent, counted = shared["spent"], shared["counted"]
+    base, base_turns = dict(spent), shared["turns"]
+
+    def own():
+        """What this agent has spent since it started (its sub-agents' spend included; the lead's = the session's)."""
+        return {k: spent[k] - base[k] for k in spent}
+
+    if profile.get("team"):     # team.delegate: the specialists run inside this loop (team.py)
+        from . import team
+        tools = team.Team(profile, tools, raw_trace, model, standing, agent=agent, caps=caps, shared=shared,
+                          remaining=lambda: dict({k: caps[k] - own()[k] for k in BUDGET_CAPS},
+                                                 turns=caps["turns"] - (shared["turns"] - base_turns)),
+                          deadline=min(x for x in (deadline, t_start + caps["wall_h"] * 3600) if x is not None),
+                          clock=clock, backend=backend, skills=skills)
+    listed = {t["name"]: t for t in tools.list_tools()}
+    spec = tool_spec(allowed, listed, local)
     ctx = Context(standing, skill, spec)
     if profile.get("task"):     # a local model needs a first user message; part of the request, so of its sha
         ctx.add("user", profile["task"])
     ids = {"profile_sha256": sha(canonical(profile)), "standing_sha256": sha(standing),
            "skill_sha256": sha(skill), "tools_sha256": sha(canonical(spec))}
-    backend = backend_id or model.id
-    t_start = clock()
-    spent = {"prompt_tokens": 0, "output_tokens": 0, "cpu_hours": 0.0}
-    counted = set()
     ratio = None        # the model's prompt tokens per estimated token, from the last turn's usage (gateway only)
     call = 0
     every = int(profile.get("checkpoint_every", 4))
     finish_after = set(profile.get("finish_after", []))
     nudges = int(profile.get("nudges", 1))
     done_tools = set()
+    last_text = ""
 
     def stop(reason, turn):
-        trace.post("stop", {"reason": reason, "turns": turn, "prompt_tokens": spent["prompt_tokens"],
-                            "output_tokens": spent["output_tokens"], "cpu_hours": round(spent["cpu_hours"], 6)})
+        o = own()
+        trace.post("stop", {"reason": reason, "turns": turn, "prompt_tokens": o["prompt_tokens"],
+                            "output_tokens": o["output_tokens"], "cpu_hours": round(o["cpu_hours"], 6)})
+        if report is not None:
+            report.update(reason=reason, turns=turn, spent=o, answer=last_text)
         return reason
 
     def over():
-        for k in ("prompt_tokens", "output_tokens", "cpu_hours"):
-            if spent[k] > caps[k]:
+        o = own()
+        for k in BUDGET_CAPS:
+            if o[k] > caps[k]:
                 return k
-        if clock() - t_start > caps["wall_h"] * 3600:
+        if clock() - t_start > caps["wall_h"] * 3600 or (deadline is not None and clock() > deadline):
             return "wall_h"
         return None
 
     turn = 0
     while True:
-        if turn >= caps["turns"]:
+        if shared["turns"] - base_turns >= caps["turns"]:      # this agent's turns and its specialists'
             return stop("turns", turn)
         est = ctx.est_tokens()
         if est > caps["context_tokens"]:
@@ -186,6 +235,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
         if ratio is not None and -(-est * ratio // 1) + caps.get("reserve_tokens", 0) > caps["context_tokens"]:
             return stop("context_full", turn)
         turn += 1
+        shared["turns"] += 1
         req = ctx.request()
         if not local:       # a local backend's turn_request/turn_response are the model-gateway's records
             trace.post("turn_request", dict(ids, turn=turn, backend=backend, est_prompt_tokens=est,
@@ -200,6 +250,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
             return stop("turn_timeout", turn)
         usage, bad = resp.get("usage"), resp.get("tool_error")
         resp = {"text": str(resp.get("text", ""))[:TEXT_MAX], "tool": resp.get("tool")}
+        last_text = resp["text"]
         if bad and not resp["tool"]:    # a call the model wrote that could not be read: a refused call, never an exception
             resp["tool"] = {"name": MALFORMED, "args": {}}
         out_tokens = (len(canonical(resp)) + 3) // 4
@@ -265,7 +316,7 @@ def run(profile, standing, skill, model, tools, trace, clock=time.monotonic, bac
                 trace.post("proposal", {"turn": turn, "call": call, "tool": name, "result_sha256": full})
         ctx.add("tool", wrapped)
         if every and turn % every == 0:
-            state = {"turn": turn, "call": call, "messages_sha256": sha(canonical(ctx.messages)), "spent": dict(spent)}
+            state = {"turn": turn, "call": call, "messages_sha256": sha(canonical(ctx.messages)), "spent": own()}
             trace.post("checkpoint", {"seq": turn // every, "turn": turn, "sha256": sha(canonical(state))})
         why = over()
         if why:

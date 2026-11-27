@@ -1,0 +1,44 @@
+# A scripted team (research Phase 4e commit A1b, OD-4e-4; design 2.1): compare_controllers done by a lead and two
+# specialists. The lead looks at the lake, hands the campaign to "campaign" (estimate, run, read until done) and the
+# proposal to "tuning" (propose.parameter_set on air_temperature.rmsd_mid, the campaign as evidence). Each specialist
+# runs as a sub-agent (a0.1, a0.2) with its own skill and script, one after the other, on this session's one budget:
+# its tools are the lead's, narrowed; its caps no larger than what the lead has left (team.py). "@last_cid" is the
+# newest campaign handle the agent saw: a tool result's, else the one its task names (the lead passes the campaign
+# handle the campaign specialist returned).
+name: compare_controllers_team
+backend: scripted
+skill: team_lead
+tools: [team.delegate, lake.snapshots, sim.estimate, sim.run, sim.status, sim.results, propose.parameter_set]
+caps:
+  turns: 14
+  prompt_tokens: 40000
+  output_tokens: 4000
+  cpu_hours: 2
+  wall_h: 1
+  turn_timeout_s: 30
+  context_tokens: 4000
+checkpoint_every: 4
+team:
+  campaign:
+    description: estimates a campaign spec and runs it until it is done, then names the campaign (cid) it ran
+    skill: team_campaign
+    tools: [sim.estimate, sim.run, sim.status, sim.results]
+    caps: {turns: 6, cpu_hours: 2}
+    script:
+      - {text: "Plan: estimate the campaign first.", tool: sim.estimate, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
+      - {text: "Plan: run the campaign (a gate asks the supervisor above the cap).", tool: sim.run, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
+      - {text: "Plan: read its progress; the same call returns the result once it is done.", tool: sim.run, args: {spec: {scenarios: [research/harness/scenarios/smoke_air_temperature.yaml], controllers: [{code: IF_THEN_ELSE}, {code: PID, params_grid: {cycle_time: [10.0, 30.0]}}], seeds: [1], clock_offsets_s: [0]}}}
+      - {text: "Campaign @last_cid ran IF_THEN_ELSE and PID with cycle_time 10 and 30 on the smoke air temperature scenario, seed 1."}
+  tuning:
+    description: proposes the parameter set a finished campaign supports best on a criterion, with the campaign as evidence
+    skill: team_tuning
+    tools: [propose.parameter_set]
+    caps: {turns: 3, cpu_hours: 1}
+    script:
+      - {text: "Plan: propose the PID setting that kept the air temperature nearest the band's middle, with the campaign as evidence.", tool: propose.parameter_set, args: {algorithm_code: PID, params: {cycle_time: 30.0}, evidence: ["@last_cid"], criterion: air_temperature.rmsd_mid, rationale: "The longer cycle kept the air temperature nearer the middle of its band."}}
+      - {text: "Proposed PID with cycle_time 30 on air_temperature.rmsd_mid, campaign @last_cid as evidence."}
+script:
+  - {text: "Plan: look at what the lake holds.", tool: lake.snapshots, args: {}}
+  - {text: "Plan: hand the campaign to the campaign specialist.", tool: team.delegate, args: {specialist: campaign, task: "Estimate and run this campaign: scenario research/harness/scenarios/smoke_air_temperature.yaml; IF_THEN_ELSE, and PID with cycle_time 10 and 30; seed 1; clock offset 0. Say which campaign (cid) you ran."}}
+  - {text: "Plan: hand the proposal to the tuning specialist.", tool: team.delegate, args: {specialist: tuning, task: "Propose the PID setting campaign @last_cid supports best on air_temperature.rmsd_mid (lower is better), with that campaign as evidence."}}
+  - {text: "The plan is complete."}

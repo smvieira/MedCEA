@@ -21,9 +21,13 @@ class ModelError(Exception):
 _CID = re.compile(r'"cid"\s*:\s*"(c[0-9a-f]{20})"')
 
 
+# A campaign handle named in the task (a team's specialist is told the campaign by its lead, research Phase 4e A1b)
+_HANDLE = re.compile(r"\b(c[0-9a-f]{20})\b")
+
+
 def _sub_last_cid(o, cid):
-    if o == "@last_cid":
-        return cid
+    if isinstance(o, str):          # the whole string, or inside one (a lead's task naming the campaign)
+        return o.replace("@last_cid", cid)
     if isinstance(o, list):
         return [_sub_last_cid(x, cid) for x in o]
     if isinstance(o, dict):
@@ -32,6 +36,8 @@ def _sub_last_cid(o, cid):
 
 
 class ScriptedModel:
+    """A team profile (research Phase 4e A1b) gives each specialist a script of its own: team.py answers a
+    sub-agent with ScriptedModel(<its script>), so a scripted team runs offline."""
     def __init__(self, script):
         self.script = [dict(s) for s in script]
         self.id = "scripted:" + sha(canonical(self.script))[:16]
@@ -41,16 +47,20 @@ class ScriptedModel:
         if n >= len(self.script):
             return {"text": "Nothing left to do.", "tool": None}
         s = self.script[n]
-        args = s.get("args", {})
-        if "@last_cid" in canonical(args).decode("utf-8"):
+        args, text = s.get("args", {}), s.get("text", "")
+        if "@last_cid" in canonical(args).decode("utf-8") or "@last_cid" in text:
             # a campaign handle is minted by the server (it depends on the session): the step names it as
-            # "@last_cid" and gets the newest one a tool result showed
+            # "@last_cid" and gets the newest one a tool result showed, else (a specialist that ran nothing yet)
+            # the newest one its task names
             found = [m_ for t in request["messages"] if t["role"] == "tool"
                      for m_ in _CID.findall(str(t.get("content", "")))]
+            if not found:
+                found = [m_ for t in request["messages"] if t["role"] == "user"
+                         for m_ in _HANDLE.findall(str(t.get("content", "")))]
             cid = found[-1] if found else ""
-            args = _sub_last_cid(args, cid)
+            args, text = _sub_last_cid(args, cid), text.replace("@last_cid", cid)
         tool = {"name": s["tool"], "args": args} if s.get("tool") else None
-        return {"text": s.get("text", ""), "tool": tool}
+        return {"text": text, "tool": tool}
 
 
 class RecordedModel:

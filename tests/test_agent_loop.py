@@ -530,5 +530,63 @@ class AgentIds(unittest.TestCase):
         self.assertEqual([b["agent"] for b in bodies], ["a0", "a0.3"])
 
 
+class SharedSpend(unittest.TestCase):
+    """Research Phase 4e A1b (OD-4e-5): the session's one budget. An agent's caps bound what it spends from its own
+    start; the shared counters hold every agent's; a deadline (its lead's hour) stops it with wall_h; report gets its
+    reason, turns, spend and last text."""
+
+    def test_a_second_agent_on_the_same_budget(self):
+        p = loop.load_profile(PROFILE)
+        shared = loop.new_shared()
+        s = FakeSession()
+        t = TraceClient(s, "S" * 22)
+        t.claim("c")
+        loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FakeTools(), t, shared=shared)
+        first = dict(shared["spent"], turns=shared["turns"])
+        report = {}
+        loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FakeTools(), t, shared=shared, agent="a0.1",
+                 parent="a0", report=report)
+        stops = [e["payload"] for e in s.events if e["event"] == "stop"]
+        # the second agent reports its own spend; the shared counters hold both (the same campaign c1 once)
+        self.assertEqual((stops[1]["prompt_tokens"], stops[1]["cpu_hours"]), (stops[0]["prompt_tokens"], 0.0))
+        self.assertEqual(shared["spent"]["prompt_tokens"], 2 * first["prompt_tokens"])
+        self.assertEqual((shared["spent"]["cpu_hours"], shared["turns"]), (0.25, 2 * first["turns"]))
+        self.assertEqual((report["reason"], report["turns"], report["answer"]), ("finished", 5, "The plan is complete."))
+        self.assertEqual(report["spent"]["prompt_tokens"], stops[1]["prompt_tokens"])
+
+    def test_an_agent_with_its_turns_spent_by_others_stops(self):
+        p = loop.load_profile(PROFILE)
+        shared = loop.new_shared()
+        shared["turns"] = 3
+        r = loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FakeTools(), FakeSession_(), shared=shared,
+                     agent="a0.1", parent="a0")
+        self.assertEqual(r, "finished")        # its own caps count from its own start
+        p["caps"]["turns"] = 2
+        self.assertEqual(loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FakeTools(), FakeSession_()), "turns")
+
+    def test_a_deadline_stops_with_wall_h(self):
+        p = loop.load_profile(PROFILE)
+        now = [0.0]
+
+        class Slow(FakeTools):
+            def call(self, name, args):
+                now[0] += 100
+                return FakeTools.call(self, name, args)
+        s = FakeSession_()
+        self.assertEqual(loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), Slow(), s, clock=lambda: now[0],
+                                  deadline=150), "wall_h")
+        self.assertEqual(s.events[-1][1]["reason"], "wall_h")
+
+
+class FakeSession_:
+    """A bare trace sink (event, payload) for the loop tests that need no claim."""
+    def __init__(self):
+        self.events = []
+
+    def post(self, event, payload):
+        self.events.append((event, payload))
+        return len(self.events)
+
+
 if __name__ == "__main__":
     unittest.main()

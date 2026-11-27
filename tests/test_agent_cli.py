@@ -189,6 +189,27 @@ class CliTest(unittest.TestCase):
                                 "payload": {"agent": "a0.1", "parent": "a0", "profile_name": "analyst", "task": "t"}})
         self.assertIn("[a0.1] a0 starts analyst: t", line)
 
+    def test_watch_shows_the_team(self):
+        # research Phase 4e A1b: a specialist's stop does not end the watch; its lines are indented; the team at the end
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from test_agent_team import run_team
+        _, ev, _ = run_team()
+        c, o, out, clk = client()
+        c.signin()
+        o.events = [dict(e, actor="agent") for e in ev]
+        self.assertEqual(c.watch("S" * 22), "stop")
+        text = "\n".join(out)
+        self.assertEqual(sum(1 for line in out if " stop " in line), 3)        # both specialists' stops and the lead's
+        self.assertTrue(out[-2].split()[1] == "stop" and "[a0." not in out[-2])
+        self.assertIn("  [a0.1] a0 starts campaign: Estimate and run fruiting_compare.", text)
+        self.assertIn('[a0.1] back to a0: finished after 3 turns, 0.25 CPU-h: "Campaign c0123456789abcdef0123 is done."', text)
+        self.assertEqual(out[-1].strip(), "team: a0 (lead); a0.1 campaign (finished after 3 turns, 0.25 CPU-h); "
+                                          "a0.2 tuning (finished after 2 turns, 0.0 CPU-h)")
+        self.assertEqual([m["specialist"] for m in cli.Client.team(ev)], ["campaign", "tuning"])
+        self.assertEqual(cli.Client.team([]), [])
+        self.assertTrue(cli.Client.lead_stopped({"event": "stop", "payload": {}}))
+        self.assertFalse(cli.Client.lead_stopped({"event": "stop", "payload": {"agent": "a0.1", "parent": "a0"}}))
+
     def test_turns_are_the_leads(self):
         ev = [{"actor": "model-gateway", "event": "turn_request", "payload": {"turn": 1, "request_sha256": "a"}},
               {"actor": "model-gateway", "event": "turn_request", "payload": {"agent": "a0.1", "turn": 1, "request_sha256": "b"}},

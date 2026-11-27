@@ -289,5 +289,44 @@ class ReplayLocal(unittest.TestCase):
         self.assertTrue(replay(ev[:1] + [noise] + ev[1:], p, STANDING, SKILL, LISTING)["ok"])
 
 
+class ReplayTeam(unittest.TestCase):
+    """Research Phase 4e A1b: a scripted team's trace replays; a mismatch inside a specialist names it."""
+
+    def rec(self):
+        from test_agent_team import run_team
+        return run_team()
+
+    def test_a_team_trace_replays(self):
+        _, ev, p = self.rec()
+        from test_agent_team import LEAD_SKILL
+        self.assertEqual(replay(ev, p, STANDING, LEAD_SKILL, LISTING), {"ok": True, "first_mismatch": None, "events": len(ev)})
+
+    def test_a_mismatch_inside_a_specialist_names_it(self):
+        _, ev, p = self.rec()
+        from test_agent_team import LEAD_SKILL
+        ev = copy.deepcopy(ev)
+        spawned = next(e for e in ev if e["event"] == "agent_spawned" and e["payload"]["agent"] == "a0.2")
+        spawned["payload"]["task"] = "Something else."
+        v = replay(ev, p, STANDING, LEAD_SKILL, LISTING)
+        self.assertEqual((v["ok"], v["first_mismatch"]["agent"], v["first_mismatch"]["event"]), (False, "a0.2", "agent_spawned"))
+
+    def test_the_delegations_result_is_never_handed_to_the_tools(self):
+        _, ev, p = self.rec()
+        from test_agent_team import LEAD_SKILL
+        from research.agents import replay as rp
+        seen = []
+        orig = rp._Tools.call
+
+        def call(self, name, args):
+            seen.append(name)
+            return orig(self, name, args)
+        rp._Tools.call = call
+        try:
+            self.assertTrue(replay(ev, p, STANDING, LEAD_SKILL, LISTING)["ok"])
+        finally:
+            rp._Tools.call = orig
+        self.assertEqual(seen, ["sim.estimate", "sim.run", "propose.candidate"])
+
+
 if __name__ == "__main__":
     unittest.main()

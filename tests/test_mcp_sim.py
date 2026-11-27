@@ -657,8 +657,11 @@ class ProfileTools(unittest.TestCase):
         for n in names:
             p = loop.load_profile(os.path.join(a, "profiles", n + ".yaml"))
             self.assertEqual(p["name"], n)
-            self.assertEqual(sorted(set(p["tools"]) - self.served), [], n)
+            # team.delegate is the agent loop's own tool (research Phase 4e A1b, team.py), never a server's
+            self.assertEqual(sorted(set(p["tools"]) - self.served - {loop.TEAM_TOOL}), [], n)
             self.assertTrue(os.path.isfile(os.path.join(a, "skills", p.get("skill", "controller_campaign") + ".md")), n)
+            for s in (p.get("team") or {}).values():
+                self.assertTrue(os.path.isfile(os.path.join(a, "skills", s["skill"] + ".md")), n)
         gpu = loop.load_profile(os.path.join(a, "profiles", "compare_controllers_gpu.yaml"))
         self.assertEqual((gpu["backend"], gpu["caps"]["context_tokens"]), ("gpu", 12000))
         self.assertEqual(gpu["finish_after"], ["propose.parameter_set"])

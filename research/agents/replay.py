@@ -21,7 +21,12 @@ as a one-agent session (the comparison reads an absent `agent` as a0 on both sid
 recorded now still replays under the code before. Model responses are taken per agent. A server's
 tool_result is paired with the agent's call by (agent, agent_call) when the server recorded the agent's key
 (params._meta), else by trace order (the records between the agent's tool_call and its tool_result). A
-mismatch names its agent (first_mismatch.agent)."""
+mismatch names its agent (first_mismatch.agent).
+
+Teams (research Phase 4e A1b): the lead's team.delegate is served by team.py inside the replayed loop, which runs the
+specialist again (sequentially, as recorded) with its recorded responses and results: its agent_spawned, every event
+of its own and its agent_returned are compared like the lead's, and the delegation's recorded result is never handed
+to the tools (it is the replayed specialist's answer)."""
 import json
 
 from . import loop
@@ -152,7 +157,9 @@ def replay(events, profile, standing, skill, tool_listing):
         if r["event"] == "turn_response":
             responses.setdefault(agent_of(r["payload"]), []).append(r["payload"]["response"])
     # a refused call (not allowed, malformed) never reaches the tools: the replayed loop does not call them either
-    results = [r["payload"] for r in rec if r["event"] == "tool_result" and not _refused(r["payload"])]
+    # nor does a delegation: team.py serves it by running the specialist again
+    results = [r["payload"] for r in rec if r["event"] == "tool_result" and not _refused(r["payload"])
+               and r["payload"].get("tool") != loop.TEAM_TOOL]
     for r in [r["payload"] for r in rec if r["event"] == "tool_result"]:
         idx = next(i for i, x in enumerate(rec) if x["payload"] is r)
         if r["recorded_complete"] and sha(r["result"]) != r["result_sha256"]:

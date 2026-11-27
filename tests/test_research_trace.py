@@ -8,6 +8,7 @@
   RealPostgres  on a throwaway PostgreSQL when initdb/pg_ctl/psql are found (PATH, or
               MEDCEA_TEST_PG_BIN; MEDCEA_TEST_PG_SHARE for initdb -L), else skipped
 """
+import json
 import os
 import re
 import shutil
@@ -341,6 +342,22 @@ class RealPostgres(unittest.TestCase):
             self.assertIsNone(self.ev(port, sid, actor, "agent_spawned", '{"agent":"a0.1","parent":"a0"}')[0])
         # the server port may name an agent and an agent_call (mcp_common records them) without the agent check
         self.assertIsNotNone(self.ev("server", sid, "mcp-sim", "tool_result", '{"agent":"a0.1","agent_call":2}')[0])
+
+    def test_06a2_a_team_trace_is_accepted_whole(self):
+        # research Phase 4e A1b: every agent-port event a scripted team writes (the lead's without an agent key, the
+        # specialists' with theirs and their parent, agent_spawned and agent_returned) is accepted, the chain verifies
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from test_agent_team import run_team
+        _, events, _ = run_team()
+        sid, tok = "M" * 22, "0" * 63 + "1"
+        self.q(open_sql(sid, person="p9", token=tok, claim="0" * 63 + "2"))
+        for e in events:
+            body = json.dumps(e["payload"], sort_keys=True).replace("'", "''")
+            eid, why = self.ev("agent", sid, "agent", e["event"], body, token=tok)
+            self.assertTrue(eid and not why, (e["event"], why))
+        self.assertEqual(self.q("SELECT count(*) FROM agent_trace.event WHERE sid = '%s' AND event = 'agent_spawned'" % sid),
+                         "2")
+        self.assertEqual(self.q("SELECT ok FROM agent_trace.verify_chain()"), "t")
 
     def test_06b_cpu_once_per_campaign(self):
         sid = "J" * 22
