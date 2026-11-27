@@ -1,8 +1,10 @@
 """apps/research-model/gateway.py (research Phase 4b stage 2; codeplan/rs4-design.md 5.3): the model gateway,
 stdlib, namespace research-gw, port 8120. The one place the local model is reached from a session.
 
-POST /v1/turn   Authorization: Bearer <session token>   body {sid, turn, request}
+POST /v1/turn   Authorization: Bearer <session token>   body {sid, agent?, turn, request}
   request = the agent loop's internal shape {system, tools: [{name, description, inputSchema}], messages}.
+  agent = the asking agent's id (research Phase 4e: a0 the lead, the default; a0.1 ... its sub-agents), copied
+  into both trace records; `turn` counts per agent.
   1. research-session's /introspect on the server port (audience model-gateway, peer = the caller's address);
      refused = 401 with no detail; the token's session must be the body's sid and a local-backend one.
   2. refuse (403) when the session's prompt or output tokens are spent.
@@ -41,6 +43,7 @@ except ImportError:                        # in the repository: apps/research-ag
     _spec.loader.exec_module(mcp_common)
 
 AUDIENCE = "model-gateway"
+AGENT = mcp_common.AGENT                 # the asking agent's id (research Phase 4e): a0 the lead, a0.1 ... its sub-agents
 BODY_MAX = 256 * 1024
 TEXT_MAX = 2000
 MAX_TOKENS_CAP = 1024
@@ -345,6 +348,9 @@ class Gateway:
         if not isinstance(body, dict):
             return 400, {"error": "a JSON object is required"}
         sid, turn, req = body.get("sid"), body.get("turn"), body.get("request")
+        agent = body.get("agent", "a0")     # the asking agent (research Phase 4e); absent: the lead
+        if not (isinstance(agent, str) and AGENT.match(agent)):
+            return 400, {"error": "agent must be an agent id (a0, a0.1, ...)"}
         if not (isinstance(sid, str) and isinstance(turn, int) and not isinstance(turn, bool) and turn >= 1
                 and isinstance(req, dict) and isinstance(req.get("system"), str)
                 and isinstance(req.get("messages"), list) and isinstance(req.get("tools", []), list)):
@@ -371,17 +377,17 @@ class Gateway:
         if not slot.acquire(blocking=False):
             return 429, {"error": "busy"}
         try:
-            return self._turn(sid, turn, req, left, backend)
+            return self._turn(sid, turn, req, left, backend, agent)
         finally:
             slot.release()
 
-    def _turn(self, sid, turn, req, left, backend):
+    def _turn(self, sid, turn, req, left, backend, agent="a0"):
         msgs, tools, names = getattr(backend, "translate", translate)(req)
         out_left = left.get("output_tokens")
         max_tokens = MAX_TOKENS_DEFAULT if not isinstance(out_left, (int, float)) else int(max(16, min(out_left, MAX_TOKENS_CAP)))
         max_tokens = min(max_tokens, MAX_TOKENS_CAP, getattr(backend, "max_output", MAX_TOKENS_CAP))
         st, b = self.session.trace(sid, "turn_request", {
-            "turn": turn, "backend": backend.name, "model": backend.alias, "model_sha256": backend.model_sha256,
+            "agent": agent, "turn": turn, "backend": backend.name, "model": backend.alias, "model_sha256": backend.model_sha256,
             "request_sha256": sha(canonical_bytes(req)), "flags": dict(backend.flags, max_tokens=max_tokens, ctx=backend.ctx)})
         if st != 200:
             return (403 if st == 403 else 503), {"error": "the trace did not accept the turn"}
@@ -391,7 +397,7 @@ class Gateway:
         if st != 200:
             ctxfull = backend.context_full(st, raw)
             why = "context_full" if ctxfull else "model_error"
-            self.session.trace(sid, "turn_response", {"turn": turn, "error": why, "status": st})
+            self.session.trace(sid, "turn_response", {"agent": agent, "turn": turn, "error": why, "status": st})
             return (413 if ctxfull else 502), {"error": why}
         resp, finish = getattr(backend, "read", read_answer)(raw, names)
         dropped = resp.pop("_dropped", 0)
@@ -401,7 +407,7 @@ class Gateway:
         if isinstance(tm.get("cache_n"), int):
             usage["cache_n"] = tm["cache_n"]
         st, b = self.session.trace(sid, "turn_response", {
-            "turn": turn, "response": resp, "response_sha256": sha(canonical_bytes(resp)),
+            "agent": agent, "turn": turn, "response": resp, "response_sha256": sha(canonical_bytes(resp)),
             "raw_response_sha256": sha(canonical_bytes(raw)), "finish_reason": finish, "usage": usage,
             **({"dropped_calls": dropped} if dropped else {})})
         if st != 200:

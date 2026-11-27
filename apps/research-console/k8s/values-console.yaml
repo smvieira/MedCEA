@@ -1,0 +1,46 @@
+# The research console's sign-in gate (research Phase 4e, codeplan/rs4e-design.md §1). Its own file, not
+# k8s/oauth2-proxy/values-app.yaml, whose upstreams are in ${NAMESPACE}: both of this host's upstreams are in
+# the research-agents zone. apps/research-console/deploy.sh renders RESEARCH_AGENTS_NAMESPACE first, then
+# app_gate (infra/lib-oauth2-proxy.sh) renders KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS and
+# passes it to deploy_oauth2_proxy after k8s/oauth2-proxy/values-common.yaml.
+#   /api/  → research-orchestrator:8090 (its person API; the orchestrator checks the token and owns the
+#            session, _own)
+#   /      → research-console:8080 (the static page)
+# One audience (OD-4e-2): client research-console carries groups and medcea-research only, so the access
+# token's audience is medcea-research, which every service this host serves verifies; no /_account/ (the
+# user menu would need medcea-identity: the host is in no_shared_upstreams and the page has its own Sign out).
+configuration:
+  content: |
+    provider = "oidc"
+    provider_display_name = "Keycloak"
+    email_domains = ["*"]
+    cookie_secure = true
+    # One of the three defences against a cross-site POST through the cookie (with the orchestrator's Origin
+    # rule and its 415 for anything but JSON; codeplan/rs4e-design.md §1, R4): oauth2-proxy's default is no
+    # SameSite attribute at all.
+    cookie_samesite = "lax"
+    ssl_insecure_skip_verify = true
+    # Re-checks the session (and re-reads groups) every 240 s, below the 300 s access token lifespan, so the
+    # token the proxy forwards is never one Keycloak has stopped issuing for longer than that.
+    cookie_refresh = "240s"
+    cookie_expire = "8h"
+    skip_provider_button = true
+    oidc_groups_claim = "groups"
+    # Compiled from the access policy for RESEARCH_CONSOLE_DOMAIN (policy_groups).
+    allowed_groups = ${ALLOWED_GROUPS}
+    # The ID token's audience is the client id; the access token's is medcea-research.
+    oidc_extra_audiences = ["medcea-research"]
+    # The 403 page (gate_error_page), as in k8s/oauth2-proxy/values-app.yaml.
+    custom_templates_dir = "/templates"
+    pass_basic_auth = false
+    pass_authorization_header = false
+    # X-Forwarded-Access-Token: the token research-console and the orchestrator verify (never Authorization).
+    pass_access_token = true
+    pass_user_headers = true
+    # Explicit URLs instead of discovery: pods use cluster DNS, which does not resolve a name-based domain.
+    skip_oidc_discovery = true
+    login_url = "https://${KEYCLOAK_DOMAIN}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+    redeem_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    oidc_jwks_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs"
+    profile_url = "http://keycloak.${NAMESPACE}.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+    upstreams = ["http://research-console.${RESEARCH_AGENTS_NAMESPACE}.svc.cluster.local:8080/", "http://research-orchestrator.${RESEARCH_AGENTS_NAMESPACE}.svc.cluster.local:8090/api/"]

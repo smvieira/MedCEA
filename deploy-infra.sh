@@ -267,7 +267,7 @@ if [[ "${1:-}" == "--reset" ]]; then
                   MONITOR_CLIENT_SECRET MONITOR_COOKIE_SECRET SCHEDULER_CLIENT_SECRET SCHEDULER_COOKIE_SECRET \
                   DBMGMT_CLIENT_SECRET DBMGMT_COOKIE_SECRET MQTTX_CLIENT_SECRET MQTTX_COOKIE_SECRET \
                   PGADMIN_OAUTH_SECRET MQTT_NODE_RED_PASS MQTT_SCHEDULER_PASS MQTT_AUTH_DB_PASS \
-                  WORKBENCH_SECRET EDGE_WIZARD_SECRET; do
+                  WORKBENCH_SECRET EDGE_WIZARD_SECRET RESEARCH_CONSOLE_CLIENT_SECRET RESEARCH_CONSOLE_COOKIE_SECRET; do
             sed -i "s|^${_v}=.*|${_v}=\"\"|" config.env
         done
         echo "  Blanked. User-set values (ADMIN_PASS, POSTGRES_PASS, DOCKERHUB_*) are untouched."
@@ -556,9 +556,12 @@ ONBOARD_DOMAIN="${ONBOARD_DOMAIN:-onboard-device.$DOMAIN}"   # older config.env 
 ACCESS_DOMAIN="${ACCESS_DOMAIN:-access.$DOMAIN}"             # likewise
 POLICY_DOMAIN="${POLICY_DOMAIN:-policy.$DOMAIN}"             # likewise (the Policy UI, IAM 4.3)
 SUPERSET_DOMAIN="${SUPERSET_DOMAIN:-superset.$DOMAIN}"       # likewise (Superset, the portal's dashboard chooser)
+# The research console (research Phase 4e, OD-4e-1): a SAN, a hosts line and an alias redirect from the
+# start (they cost nothing before the policy has the host); its client and proxy only once it has.
+RESEARCH_CONSOLE_DOMAIN="${RESEARCH_CONSOLE_DOMAIN:-agents.$DOMAIN}"
 for _v in KEYCLOAK_DOMAIN GRAFANA_DOMAIN NODE_RED_DOMAIN PGADMIN_DOMAIN DBMGMT_DOMAIN \
           SCHEDULER_DOMAIN MONITOR_DOMAIN CONFIG_DOMAIN MQTTX_DOMAIN PORTAL_DOMAIN WORKBENCH_DOMAIN \
-          ONBOARD_DOMAIN ACCESS_DOMAIN POLICY_DOMAIN SUPERSET_DOMAIN; do
+          ONBOARD_DOMAIN ACCESS_DOMAIN POLICY_DOMAIN SUPERSET_DOMAIN RESEARCH_CONSOLE_DOMAIN; do
     [[ -n "${!_v:-}" ]] && _SVC_DOMAINS+=("${!_v}")
 done
 _ALIAS_ON=false
@@ -1681,6 +1684,73 @@ for _c in "${KC_RESEARCH_CLIENTS[@]}"; do
         *)  echo -e "${RED}  WARNING: cannot tell whether the access policy names client '$_c' (exit $_RC_RC): left as it is.${NC}" >&2 ;;
     esac
 done
+
+# Research Phase 4e (design rs4e 5.1, OD-4e-2): the research console's sign-in client. Its host
+# RESEARCH_CONSOLE_DOMAIN serves only services that verify the audience medcea-research (the console
+# pod, the orchestrator, research-session), so the client carries `groups` and the scope
+# medcea-research and never medcea-identity (one audience per host; no user menu, the page has its
+# own Sign out). It exists only while the applied access policy has the host (cli.py has-host, 0):
+# created here (confidential, the proxy's callback; post-logout to the workbench's /hub/logout and the
+# portal, as superset), its secret read back and a cookie secret generated once, both written to
+# config.env below; otherwise an existing one is disabled (never created on a fresh install, never
+# deleted). The list is KC_RESEARCH_HOST_CLIENTS (infra/lib-keycloak-clients.sh); health kcscopes
+# checks it by the same answer. A policy that cannot be read changes nothing.
+_RCON_SECRET=""; _RCON_COOKIE_SECRET=""
+for _c in "${KC_RESEARCH_HOST_CLIENTS[@]}"; do
+    [[ "$_c" == research-console ]] || continue
+    _RH_RC=0
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-host RESEARCH_CONSOLE_DOMAIN >/dev/null || _RH_RC=$?
+    case "$_RH_RC" in
+        0)  echo -e "${YELLOW}  Creating client '$_c' (the research console's sign-in, ${RESEARCH_CONSOLE_DOMAIN})...${NC}"
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"medcea-research","protocol":"openid-connect","description":"person_id claim and the medcea-research audience (agent campaigns)",
+                   "attributes":{"include.in.token.scope":"false","display.on.consent.screen":"false"}}' || true
+            _RS_ID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes" -H "Authorization: Bearer $(_kc_token)" \
+              | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name']=='medcea-research'))" 2>/dev/null || echo "")
+            if [[ -z "$_RS_ID" ]]; then
+                echo -e "${RED}  The research console cannot sign anyone in until scope 'medcea-research' exists (re-run ./deploy-infra.sh).${NC}" >&2
+                continue
+            fi
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_RS_ID}/protocol-mappers/models" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"person_id","protocol":"openid-connect","protocolMapper":"oidc-usermodel-attribute-mapper",
+                   "config":{"user.attribute":"person_id","claim.name":"person_id","jsonType.label":"String",
+                             "id.token.claim":"false","access.token.claim":"true","userinfo.token.claim":"false"}}' || true
+            curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_RS_ID}/protocol-mappers/models" \
+              -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
+              -d '{"name":"medcea-research-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper",
+                   "config":{"included.custom.audience":"medcea-research","access.token.claim":"true","id.token.claim":"false"}}' || true
+            _RCON_SECRET=$(_create_client "research-console" "https://${RESEARCH_CONSOLE_DOMAIN}/oauth2/callback" false "" \
+                "${_HUB_LOGOUT_URI}##https://${PORTAL_DOMAIN}/*") || _RCON_SECRET=""
+            if [[ -z "$_RCON_SECRET" ]]; then
+                echo -e "${RED}  Client '$_c' could not be created or its secret read: the research console cannot sign anyone in (re-run ./deploy-infra.sh).${NC}" >&2
+                continue
+            fi
+            _RCON_COOKIE_SECRET="${RESEARCH_CONSOLE_COOKIE_SECRET:-$(openssl rand -base64 24)}"
+            _RCON_UUID=$(curl -sf "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients?clientId=${_c}" \
+              -H "Authorization: Bearer $(_kc_token)" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null || echo "")
+            if [[ -n "$_RCON_UUID" ]]; then
+                # groups and medcea-research as default scopes; medcea-identity never (OD-4e-2: one audience)
+                [[ -n "${_GS_ID:-}" ]] && curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RCON_UUID}/default-client-scopes/${_GS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+                curl -s -o /dev/null -X PUT \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RCON_UUID}/default-client-scopes/${_RS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+                [[ -n "${_IS_ID:-}" ]] && curl -s -o /dev/null -X DELETE \
+                  "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/clients/${_RCON_UUID}/default-client-scopes/${_IS_ID}" \
+                  -H "Authorization: Bearer $(_kc_token)" || true
+            fi ;;
+        1)  _RH_STATE="$(kc_client_disable "$KEYCLOAK_REALM" "$_c")" || _RH_STATE="error"
+            case "$_RH_STATE" in
+                absent)           echo -e "${YELLOW}  Client '$_c': the access policy has no research console yet, not created.${NC}" ;;
+                disabled|already-disabled) echo -e "${YELLOW}  Client '$_c': the access policy has no research console, disabled (kept, never deleted).${NC}" ;;
+                *)                echo -e "${RED}  WARNING: client '$_c' is not in the access policy, but could not be disabled; re-run ./deploy-infra.sh.${NC}" >&2 ;;
+            esac ;;
+        *)  echo -e "${RED}  WARNING: cannot tell whether the access policy has the research console (python3 apps/iam/compiler/cli.py has-host RESEARCH_CONSOLE_DOMAIN exited $_RH_RC): client '$_c' left as it is.${NC}" >&2 ;;
+    esac
+done
 if [[ -n "$_GS_ID" ]]; then
     curl -s -o /dev/null -X POST "http://localhost:18080/admin/realms/${KEYCLOAK_REALM}/client-scopes/${_GS_ID}/protocol-mappers/models" \
       -H "Authorization: Bearer $(_kc_token)" -H "Content-Type: application/json" \
@@ -1873,6 +1943,18 @@ if grep -q '^EDGE_WIZARD_SECRET=' config.env; then
 else
     printf '\n# Edge provisioning wizard (edge/flash-device.sh --ui) — Keycloak client\nEDGE_WIZARD_SECRET="%s"\nEDGE_WIZARD_PORT="%s"\nEDGE_WIZARD_ROLE=""\n' \
         "${_EDGE_WIZARD_SECRET}" "${_EW_PORT}" >> config.env
+fi
+# The research console's client and cookie secrets (research Phase 4e): only once the client exists
+# (the access policy has the host); an older config.env without the lines gets them appended.
+if [[ -n "$_RCON_SECRET" ]]; then
+    for _kv in "RESEARCH_CONSOLE_CLIENT_SECRET=${_RCON_SECRET}" "RESEARCH_CONSOLE_COOKIE_SECRET=${_RCON_COOKIE_SECRET}"; do
+        _k="${_kv%%=*}"
+        if grep -q "^${_k}=" config.env; then
+            _config_env_set "$_k" "${_kv#*=}" || exit 1
+        else
+            printf '%s="%s"\n' "$_k" "${_kv#*=}" >> config.env
+        fi
+    done
 fi
 echo -e "${GREEN}  Secrets written to config.env.${NC}"
 
@@ -2098,7 +2180,7 @@ KUBECTL="$MK8S kubectl" manual_publish "$NAMESPACE" --no-roll \
 # environment string, so render (envsubst) cannot carry it. It goes in through
 # a file and a placeholder instead.
 _PORTAL_BG_TMP="$(mktemp)"; printf '%s' "$_PORTAL_BG_STYLE" > "$_PORTAL_BG_TMP"
-render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN POLICY_DOMAIN SUPERSET_DOMAIN \
+render "$SCRIPT_DIR/k8s/portal/portal.yaml" NAMESPACE _PORTAL_LOGOUT_RD PORTAL_DOMAIN GRAFANA_DOMAIN WORKBENCH_DOMAIN NODE_RED_DOMAIN DBMGMT_DOMAIN MQTTX_DOMAIN CONFIG_DOMAIN SCHEDULER_DOMAIN MONITOR_DOMAIN ACCESS_DOMAIN PGADMIN_DOMAIN POLICY_DOMAIN SUPERSET_DOMAIN RESEARCH_CONSOLE_DOMAIN \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("__PORTAL_BG_STYLE__", open(sys.argv[1]).read(), 1))' "$_PORTAL_BG_TMP" \
   | $MK8S kubectl apply -n "$NAMESPACE" -f -
 rm -f "$_PORTAL_BG_TMP"
@@ -2108,6 +2190,12 @@ if $MK8S kubectl get deployment superset -n "$NAMESPACE" >/dev/null 2>&1; then
   source "$SCRIPT_DIR/infra/lib-portal.sh"
   # Its own restart left to the one below (two within a second: kubectl refuses the second).
   PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card enable "https://${SUPERSET_DOMAIN}"
+fi
+# Likewise the research console's Agent campaigns card (research Phase 4e): greyed out by the render,
+# enabled by apps/research-console/deploy.sh; its Deployment lives in the research-agents zone's namespace.
+if $MK8S kubectl get deployment research-console -n "$(zone_namespace research-agents)" >/dev/null 2>&1; then
+  source "$SCRIPT_DIR/infra/lib-portal.sh"
+  PORTAL_CARD_NO_RESTART=1 KUBECTL="$MK8S kubectl" portal_card enable "https://${RESEARCH_CONSOLE_DOMAIN}"
 fi
 # The page renders the Workbench's Notebooks card enabled; with WORKBENCH_ENABLED=false no
 # hub is deployed, so the card is greyed out ("Not installed yet") instead of a dead link.

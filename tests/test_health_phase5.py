@@ -526,6 +526,75 @@ class KcScopesRetired(unittest.TestCase):
                 f.write(keep)
 
 
+class KcScopesResearchHost(unittest.TestCase):
+    """Research Phase 4e: KC_RESEARCH_HOST_CLIENTS (research-console) is checked by cli.py has-host
+    RESEARCH_CONSOLE_DOMAIN: the host in the policy → present, enabled, groups and medcea-research default,
+    never medcea-identity; not in it → OK absent or disabled, FAIL present and enabled; the other clients' rules
+    and the OK text are unchanged."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        import test_policy
+        cls.t = Tree()
+        cls.path = cls.t.path("apps", "iam", "policy", "defaults.yaml")
+        with open(cls.path) as f:
+            cls.original = f.read()
+        # commit A2's policy (no console host) and the console's shape (commit B's factory policy has it)
+        cls.factory = yaml.safe_dump(test_policy.without_console(model.load_defaults().data), sort_keys=False)
+        cls.shape = yaml.safe_dump(test_policy.console_shape(model.load_defaults().data), sort_keys=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.t.close()
+
+    def run_check(self, doc, with_host=True):
+        with open(self.path, "w") as f:
+            f.write(self.shape if with_host else self.factory)
+        self.t.scenario([rule(r"rdbms-postgresql-0", json.dumps(doc) + "\n", stdin="client_scope")])
+        return self.t.fn("check_kcscopes", 'check_kcscopes "Keycloak client scopes" medcea', helpers=())
+
+    def doc(self, **console):
+        d = kc_doc(clients={"workbench-notebook": None})
+        if console.get("absent"):
+            return d
+        c = {"enabled": True, "full_scope": True, "default": ["groups", "medcea-research"], "optional": [], "mappers": []}
+        c.update(console)
+        d["clients"]["research-console"] = c
+        return d
+
+    def test_the_client_list_reaches_psql(self):
+        self.run_check(self.doc())
+        ex = [c for c in self.t.calls() if c["argv"][0] == "exec"][0]
+        self.assertIn(" ".join(LOOP) + " research-console", " ".join(ex["argv"]))
+        self.assertIn("'medcea-research'", ex["stdin"])
+
+    def test_with_the_host(self):
+        r = self.run_check(self.doc())
+        self.assertTrue(r.startswith("OK|"), r)
+        self.assertIn("; research host client(s) research-console: groups and medcea-research only", r)
+        r = self.run_check(self.doc(absent=True))
+        self.assertIn("FAIL|Keycloak client scopes|client research-console is missing in realm medcea", r)
+        r = self.run_check(self.doc(enabled=False))
+        self.assertIn("client research-console is disabled, yet the applied access policy has its host", r)
+        r = self.run_check(self.doc(default=["groups"]))
+        self.assertIn("medcea-research is not a default scope of research-console", r)
+        r = self.run_check(self.doc(default=["groups", "medcea-research", "medcea-identity"]))
+        self.assertIn("research-console carries medcea-identity: its tokens would carry two audiences", r)
+        self.assertTrue(r.startswith("FAIL|"), r)
+
+    def test_without_the_host(self):
+        r = self.run_check(self.doc(absent=True), with_host=False)
+        self.assertEqual(r, "OK|Keycloak client scopes|14 clients: groups and medcea-identity default on each "
+                            "(9 of them reach a platform API); retired by the access policy: workbench-notebook (absent)")
+        r = self.run_check(self.doc(enabled=False), with_host=False)
+        self.assertTrue(r.startswith("OK|"), r)
+        self.assertNotIn("research-console", r)
+        r = self.run_check(self.doc(), with_host=False)
+        self.assertEqual(r, "FAIL|Keycloak client scopes|client research-console is enabled, yet the applied access policy "
+                            "has no host for it (./deploy-infra.sh disables it)")
+
+
 # ── G5: iamloaded, G7: iammqtt ─────────────────────────────────────────────────────────
 WANT = "a" * 64
 MQ = "b" * 64

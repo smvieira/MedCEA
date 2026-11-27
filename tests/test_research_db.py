@@ -218,12 +218,14 @@ class Sql(unittest.TestCase):
             "GRANT rs_lake_reader TO rs_lake_api;",
             "GRANT USAGE ON SCHEMA agent_trace TO rs_session;",
             "GRANT EXECUTE ON FUNCTION agent_trace.open_session(text, text, text, text, uuid, text, text, text, text, "
-            "text, text[], jsonb, text, text, timestamptz), agent_trace.append_event(text, text, text, text, jsonb, "
+            "text, text[], jsonb, text, text, timestamptz), agent_trace.open_session(text, text, text, text, uuid, "
+            "text, text, text, text, text, text[], jsonb, text, text, timestamptz, text), "
+            "agent_trace.append_event(text, text, text, text, jsonb, "
             "text), agent_trace.put_blob(text, text, bytea), agent_trace.checkpoint(text, jsonb), "
             "agent_trace.use_claim(text, inet), agent_trace.revoke(text, text, uuid), "
             "agent_trace.session_status(text), agent_trace.events(text, bigint), "
             "agent_trace.set_expect(text, inet), agent_trace.session_state(text), "
-            "agent_trace.active_sessions() TO rs_session;"])
+            "agent_trace.active_sessions(), agent_trace.sessions_of(text, bigint, integer) TO rs_session;"])
         self.assertNotRegex(self.grants, r"TO\s+PUBLIC")
         flat = " ".join(self.grants.split())
         for line in ("REVOKE ALL ON DATABASE medcea_research FROM PUBLIC;",

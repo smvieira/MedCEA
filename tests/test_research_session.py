@@ -124,7 +124,14 @@ class FakeDb:
                 "budget": r["budget"], "spent": {"turns": 3, "cpu_hours": 0.5}}
 
     def events(self, sid, after=0):
-        return [e for e in self.events_ if e["sid"] == sid and e["event_id"] > after]
+        # agent_trace.events answers at most 1000 per call, oldest first
+        return [e for e in self.events_ if e["sid"] == sid and e["event_id"] > after][:1000]
+
+    def sessions_of(self, person, before=None, limit=50):
+        mine = [(e["event_id"], e["sid"]) for e in self.events_ if e["event"] == "session_minted"
+                and self.rows[e["sid"]]["sup_person"] == person and (before is None or e["event_id"] < before)]
+        return [{"sid": sid, "mint_event_id": eid, "reexecutes": self.rows[sid].get("reexecutes"),
+                 "revoked": sid in self.revoked} for eid, sid in sorted(mine, reverse=True)[:limit]]
 
 
 @unittest.skipUnless(HAVE_JWT, "PyJWT/cryptography not installed on this host")
@@ -373,6 +380,140 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.call(2, "POST", "/introspect", {"token": tok, "audience": "mcp-sim", "peer": "127.0.0.1"})[1],
                          {"active": False})
         self.assertEqual(self.call(2, "GET", "/events/%s" % sid)[0], 200)
+
+    def test_gate_decisions_need_a_pending_undecided_gate(self):
+        # research Phase 4e (design 2.2): 404 for a gate that was never pending, 409 once decided
+        sid, tok, _ = self.claimed()
+        t = self.person_token()
+        dec = lambda gid, d="deny": self.call(0, "POST", "/sessions/%s/gates/%s" % (sid, gid), {"decision": d, "note": "n"}, t)
+        self.assertEqual(dec("g9"), (404, {"error": "no such gate"}))
+        self.db._add(sid, "mcp-sim", "gate_pending", {"gid": "g2", "estimate_h": 1})
+        self.assertEqual(dec("g2")[0], 200)
+        self.assertEqual(dec("g2"), (409, {"error": "this gate is already decided"}))
+        st, r = self.call(0, "POST", "/sessions/%s/gates/g2" % sid, {"decision": "approve", "approved_cap_h": 1}, t)
+        self.assertEqual(st, 409)
+        self.assertEqual(sum(1 for e in self.db.events_ if e["event"] == "gate_decided"), 1)
+
+    def test_proposal_ids(self):
+        sid, tok, _ = self.claimed()
+        t = self.person_token()
+        dec = lambda pid, d="approve": self.call(0, "POST", "/sessions/%s/proposals/%s" % (sid, pid), {"decision": d}, t)
+        self.assertEqual(dec("p1")[0], 404)                                    # session_minted is no proposal
+        digest = "ab12cd34" * 8
+        eid = self.db._add(sid, "agent", "proposal", {"tool": "propose.parameter_set", "result_sha256": digest})
+        self.assertEqual(dec("p%d" % (eid + 50))[0], 404)
+        self.assertEqual(dec("x1"), (404, {"error": "no such proposal"}))
+        self.assertEqual(dec(digest[:16])[0], 200)                             # the CLI's 16-hex prefix
+        d = [e for e in self.db.events_ if e["event"] == "proposal_decided"][-1]["payload"]
+        self.assertEqual(d["pid"], "p%d" % eid)                                 # recorded as the event's id
+        self.assertEqual(dec("p%d" % eid, "deny"), (409, {"error": "this proposal is already decided"}))
+        self.assertEqual(dec(digest[:40])[0], 409)
+        # a decision recorded before under the digest prefix also counts
+        eid2 = self.db._add(sid, "agent", "proposal", {"result_sha256": "ef" * 32})
+        self.db._add(sid, "research-session", "proposal_decided", {"pid": ("ef" * 32)[:20], "decision": "deny"})
+        self.assertEqual(dec("p%d" % eid2)[0], 409)
+        # a prefix naming two proposals is refused with their ids
+        self.db._add(sid, "agent", "proposal", {"result_sha256": "77" * 32})
+        self.db._add(sid, "agent", "proposal", {"result_sha256": "77" * 32})
+        st, r = dec("77" * 8)
+        self.assertEqual(st, 409)
+        self.assertIn("names 2 proposals", r["error"])
+        # a server's event called proposal is not the agent's
+        eid3 = self.db._add(sid, "mcp-sim", "proposal", {"result_sha256": "99" * 32})
+        self.assertEqual(dec("p%d" % eid3)[0], 404)
+
+    def test_old_watch_ids(self):
+        # before p<event_id>, the watch printed 12 hex of the digest and decide() recorded what was typed
+        sid, tok, _ = self.claimed()
+        t = self.person_token()
+        dec = lambda pid, d="approve": self.call(0, "POST", "/sessions/%s/proposals/%s" % (sid, pid), {"decision": d}, t)
+        eid = self.db._add(sid, "agent", "proposal", {"result_sha256": "c3" * 32})
+        self.db._add(sid, "research-session", "proposal_decided", {"pid": ("c3" * 32)[:12], "decision": "deny"})
+        self.assertEqual(dec("p%d" % eid), (409, {"error": "this proposal is already decided"}))
+        self.assertEqual(dec(("c3" * 32)[:12]), (409, {"error": "this proposal is already decided"}))
+        eid2 = self.db._add(sid, "agent", "proposal", {"result_sha256": "d4" * 32})
+        self.assertEqual(dec(("d4" * 32)[:12])[0], 200)                       # the old 12-hex form still resolves
+        d = [e for e in self.db.events_ if e["event"] == "proposal_decided"][-1]["payload"]
+        self.assertEqual(d["pid"], "p%d" % eid2)
+        self.assertEqual(sum(1 for e in self.db.events_ if e["event"] == "proposal_decided"), 2)
+
+    def test_overlapping_decisions_record_one(self):
+        # two requests at the same time: the check and the append are one step, so one 200 and one 409
+        sid, tok, _ = self.claimed()
+        t = self.person_token()
+        self.db._add(sid, "mcp-sim", "gate_pending", {"gid": "g5", "estimate_h": 1})
+        pe = self.db._add(sid, "agent", "proposal", {"result_sha256": "e5" * 32})
+        orig = self.svc.all_events
+
+        def slow(sid_):
+            out = orig(sid_)
+            time.sleep(0.3)
+            return out
+        self.svc.all_events = slow
+        for path, bodies, ev in (("/sessions/%s/gates/g5" % sid,
+                                  ({"decision": "deny"}, {"decision": "approve", "approved_cap_h": 100}), "gate_decided"),
+                                 ("/sessions/%s/proposals/p%d" % (sid, pe),
+                                  ({"decision": "deny"}, {"decision": "approve"}), "proposal_decided")):
+            res = []
+            th = [threading.Thread(target=lambda b=b: res.append(self.call(0, "POST", path, b, t)[0])) for b in bodies]
+            for x in th:
+                x.start()
+            for x in th:
+                x.join()
+            self.assertEqual(sorted(res), [200, 409], path)
+            self.assertEqual(sum(1 for e in self.db.events_ if e["event"] == ev), 1, ev)
+
+    def test_lookups_read_past_the_first_page(self):
+        sid, tok, _ = self.claimed()
+        for i in range(1500):
+            self.db._add(sid, "agent", "tool_call", {"call": i})
+        self.db._add(sid, "mcp-sim", "gate_pending", {"gid": "late", "estimate_h": 1})
+        eid = self.db._add(sid, "agent", "proposal", {"result_sha256": "cd" * 32})
+        self.assertEqual(self.call(2, "GET", "/gates/late?sid=" + sid)[1]["state"], "pending")
+        t = self.person_token()
+        self.assertEqual(self.call(0, "POST", "/sessions/%s/gates/late" % sid,
+                                   {"decision": "approve", "approved_cap_h": 2}, t)[0], 200)
+        self.assertEqual(self.call(2, "GET", "/gates/late?sid=" + sid)[1]["state"], "approved")
+        self.assertEqual(self.call(0, "POST", "/sessions/%s/proposals/p%d" % (sid, eid), {"decision": "deny"}, t)[0], 200)
+        self.assertGreater(len(self.svc.all_events(sid)), 1000)
+
+    def test_info_names_the_supervisor(self):
+        sid, tok, _ = self.claimed()
+        r = self.call(2, "GET", "/sessions/%s" % sid)[1]
+        self.assertEqual((r["sup_username"], r["sup_role"]), ("bio", "bio_scientist"))
+        self.assertIsInstance(r["created_at"], int)
+
+    def test_mint_reexecutes_and_sessions_of(self):
+        st, a = self.mint()
+        b = dict(self.MINT, reexecutes=a["sid"])
+        st, r = self.call(0, "POST", "/mint", b, self.person_token())
+        self.assertEqual(st, 201, r)
+        self.assertEqual(self.db.rows[r["sid"]]["reexecutes"], a["sid"])
+        self.db.revoked.update((a["sid"], r["sid"]))
+        # another person's session, or no session at all, is not one to re-execute
+        self.assertEqual(self.call(0, "POST", "/mint", b, self.person_token(person_id="p-2"))[0], 400)
+        self.assertEqual(self.call(0, "POST", "/mint", dict(self.MINT, reexecutes="Z" * 22), self.person_token())[0], 400)
+        st, out = self.svc.sessions_of("p-1", None, 1)
+        self.assertEqual(st, 200)
+        self.assertEqual([x["sid"] for x in out["sessions"]], [r["sid"]])
+        st, out2 = self.svc.sessions_of("p-1", out["next_before"], 10)
+        self.assertEqual(([x["sid"] for x in out2["sessions"]], out2["next_before"]), ([a["sid"]], None))
+        for bad in (("", None, 5), ("p-1", 0, 5), ("p-1", None, 0), ("p-1", None, 201), ("p-1", True, 5)):
+            self.assertEqual(self.svc.sessions_of(*bad)[0], 400, bad)
+
+    def test_the_persons_sessions_on_the_server_port(self):
+        """GET /persons/<person_id>/sessions (research Phase 4e, design 3.2): the orchestrator's call, the person in the
+        path (percent-encoded), keyset before and limit; not on the person port."""
+        st, a = self.mint()
+        st, b = self.mint()
+        st, r = self.call(2, "GET", "/persons/p-1/sessions?limit=1")
+        self.assertEqual((st, [x["sid"] for x in r["sessions"]]), (200, [b["sid"]]))
+        st, r2 = self.call(2, "GET", "/persons/p-1/sessions?before=%d" % r["next_before"])
+        self.assertEqual(([x["sid"] for x in r2["sessions"]], r2["next_before"]), ([a["sid"]], None))
+        self.assertEqual(self.call(2, "GET", "/persons/p%2D2/sessions")[1], {"sessions": [], "next_before": None})
+        self.assertEqual(self.call(2, "GET", "/persons/p-1/sessions?before=x")[0], 400)
+        self.assertEqual(self.call(2, "GET", "/persons/p-1/sessions?limit=0")[0], 400)
+        self.assertEqual(self.call(0, "GET", "/persons/p-1/sessions", token=self.person_token())[0], 403)
 
     def test_healthz_and_anchor(self):
         st, r = self.call(0, "GET", "/healthz")

@@ -94,6 +94,68 @@ class Replay(unittest.TestCase):
         self.assertFalse(v["ok"])
 
 
+class ReplayAgents(unittest.TestCase):
+    """Research Phase 4e (design 2.1): agent ids in the trace, (agent, agent_call) pairing, old traces."""
+
+    def test_a_trace_recorded_before_agent_ids_still_replays(self):
+        ev, p = rec()
+        old = copy.deepcopy(ev)
+        for e in old:
+            e["payload"].pop("agent", None)
+        self.assertEqual(replay(old, p, STANDING, SKILL, LISTING), {"ok": True, "first_mismatch": None, "events": len(ev)})
+
+    def test_server_records_pair_by_the_agents_key(self):
+        ev, p = rec()
+        results = [e["payload"] for e in ev if e["event"] == "tool_result"]
+        # the servers' records come after everything (out of order): the key, not the order, pairs them
+        srv = [{"actor": "mcp-sim", "event": "tool_result",
+                "payload": {"call": 7, "agent": "a0", "agent_call": r["call"], "result_sha256": r["result_sha256"]}}
+               for r in results]
+        self.assertTrue(replay(ev + srv, p, STANDING, SKILL, LISTING)["ok"])
+        srv[1]["payload"]["result_sha256"] = "0" * 64
+        v = replay(ev + srv, p, STANDING, SKILL, LISTING)
+        self.assertEqual((v["first_mismatch"]["field"], v["first_mismatch"]["agent"]), ("server_result_sha256", "a0"))
+        # a record of another agent's call does not touch the lead's
+        srv[1]["payload"]["agent"] = "a0.1"
+        self.assertTrue(replay(ev + srv, p, STANDING, SKILL, LISTING)["ok"])
+
+    def test_a_record_without_the_key_keeps_the_order_rule(self):
+        ev, p = rec()
+        at = next(i for i, e in enumerate(ev) if e["event"] == "tool_result")
+        srv = {"actor": "mcp-sim", "event": "tool_result", "payload": {"call": 1, "result_sha256": "0" * 64}}
+        v = replay(ev[:at] + [srv] + ev[at:], p, STANDING, SKILL, LISTING)
+        self.assertEqual(v["first_mismatch"]["field"], "server_result_sha256")
+
+    def test_a_mismatch_names_its_agent(self):
+        ev, p = rec()
+        v = replay(ev, p, STANDING + "\nExtra rule.", SKILL, LISTING)
+        self.assertEqual(v["first_mismatch"]["agent"], "a0")
+        ev = copy.deepcopy(ev)
+        for e in ev:
+            e["payload"]["agent"], e["payload"]["parent"] = "a0.1", "a0"
+        v = replay(ev, p, STANDING, SKILL, LISTING)       # the lead's replay meets a sub-agent's records
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["first_mismatch"]["agent"], "a0.1")
+
+    def test_a_sub_agent_trace_replays_as_that_agent(self):
+        from test_agent_loop import FakeSession, FakeTools as FT
+        from research.agents.trace import TraceClient
+        from research.agents.model import ScriptedModel
+        p = loop.load_profile(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "agents",
+                                           "scripted_four_steps.yaml"))
+        s = FakeSession()
+        t = TraceClient(s, "S" * 22)
+        t.claim("c")
+        loop.run(p, STANDING, SKILL, ScriptedModel(p["script"]), FT(), t, agent="a0.1", parent="a0")
+        from research.agents import replay as rp
+        orig = rp.loop.run
+        try:
+            rp.loop.run = lambda *a, **k: orig(*a, **dict(k, agent="a0.1", parent="a0"))
+            self.assertTrue(rp.replay(s.events, p, STANDING, SKILL, LISTING)["ok"])
+        finally:
+            rp.loop.run = orig
+
+
 # ── a local session: the model's records are the gateway's (actor model-gateway), the agent's are the rest
 from test_agent_loop import GatewayStub, LOCAL  # noqa: E402
 from research.agents.model import ModelError  # noqa: E402
@@ -209,10 +271,61 @@ class ReplayLocal(unittest.TestCase):
         v = replay(merged, p, STANDING, skill, LISTING)
         self.assertTrue(v["ok"], v)
 
+    def test_gateway_records_without_an_agent_are_the_leads(self):
+        ev = copy.deepcopy(self.ev)
+        for e in ev:
+            e["payload"].pop("agent", None)
+        self.assertTrue(self.run_replay(ev)["ok"])
+        for e in ev:                    # a gateway pair of another agent is not the lead's answer
+            if e["actor"] == "model-gateway":
+                e["payload"]["agent"] = "a0.1"
+        v = self.run_replay(ev)
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["first_mismatch"]["field"], "gateway_turn")
+
     def test_scripted_replay_is_unchanged_by_a_gateway_event(self):
         ev, p = rec()
         noise = {"actor": "model-gateway", "event": "turn_request", "payload": {"request_sha256": "0" * 64}}
         self.assertTrue(replay(ev[:1] + [noise] + ev[1:], p, STANDING, SKILL, LISTING)["ok"])
+
+
+class ReplayTeam(unittest.TestCase):
+    """Research Phase 4e A1b: a scripted team's trace replays; a mismatch inside a specialist names it."""
+
+    def rec(self):
+        from test_agent_team import run_team
+        return run_team()
+
+    def test_a_team_trace_replays(self):
+        _, ev, p = self.rec()
+        from test_agent_team import LEAD_SKILL
+        self.assertEqual(replay(ev, p, STANDING, LEAD_SKILL, LISTING), {"ok": True, "first_mismatch": None, "events": len(ev)})
+
+    def test_a_mismatch_inside_a_specialist_names_it(self):
+        _, ev, p = self.rec()
+        from test_agent_team import LEAD_SKILL
+        ev = copy.deepcopy(ev)
+        spawned = next(e for e in ev if e["event"] == "agent_spawned" and e["payload"]["agent"] == "a0.2")
+        spawned["payload"]["task"] = "Something else."
+        v = replay(ev, p, STANDING, LEAD_SKILL, LISTING)
+        self.assertEqual((v["ok"], v["first_mismatch"]["agent"], v["first_mismatch"]["event"]), (False, "a0.2", "agent_spawned"))
+
+    def test_the_delegations_result_is_never_handed_to_the_tools(self):
+        _, ev, p = self.rec()
+        from test_agent_team import LEAD_SKILL
+        from research.agents import replay as rp
+        seen = []
+        orig = rp._Tools.call
+
+        def call(self, name, args):
+            seen.append(name)
+            return orig(self, name, args)
+        rp._Tools.call = call
+        try:
+            self.assertTrue(replay(ev, p, STANDING, LEAD_SKILL, LISTING)["ok"])
+        finally:
+            rp._Tools.call = orig
+        self.assertEqual(seen, ["sim.estimate", "sim.run", "propose.candidate"])
 
 
 if __name__ == "__main__":

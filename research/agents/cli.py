@@ -6,13 +6,16 @@ imports nothing from this repository.
   medcea-agent endpoints                                      the model picker: the models this install offers
   medcea-agent start PROFILE [--budget k=v ...] [--ttl-s N] [--endpoint NAME]
                                                               start a session (on NAME's model); prints its id
-  medcea-agent watch SID                                      follow the trace until the agent stops
+  medcea-agent watch SID                                      follow the trace until the agent stops (a team: its
+                                                              specialists' lines indented, the team at the end)
   medcea-agent approve SID GID [--note T] [--cap-h H]         approve a gate (the supervisor only)
   medcea-agent deny SID GID [--note T]
-  medcea-agent accept SID PID | discard SID PID [--note T]    decide a proposal
+  medcea-agent accept SID PID | discard SID PID [--note T]    decide a proposal (PID: p<n> as watch prints it)
   medcea-agent stop SID                                       revoke the session, delete its Jobs
   medcea-agent replay SID                                     strict replay verdict (a Job; waits for it)
   medcea-agent reexecute SID                                  run the session's profile again and compare the model's answers
+  medcea-agent otel SID [--content] > FILE.json               the session as OpenTelemetry (OTLP/JSON) for Jaeger or Tempo;
+                                                              digests only unless --content (prompts go to stderr)
   medcea-agent signin                                         device sign-in only
 
 The person signs in with a device code through the orchestrator's relay (the notebook has no
@@ -166,7 +169,7 @@ class Client:
         while True:
             st, r = self.t.request("POST", "/api/sessions/%s/replay" % sid, {}, self.token())
             if st == 409 and "still running" in str((r or {}).get("error", "")) \
-                    and any(e["event"] == "stop" for e in self.events(sid)) and self.clock() - t0 <= wait_s:
+                    and any(self.lead_stopped(e) for e in self.events(sid)) and self.clock() - t0 <= wait_s:
                 self.sleep(poll_s)
                 continue
             if st >= 400:
@@ -177,14 +180,31 @@ class Client:
                 raise CliError("the replay Job is still running after %d s: ask again later" % wait_s)
             self.sleep(poll_s)
 
+    def otel(self, sid, content=False):
+        """The session as an OpenTelemetry export (research Phase 4e, design 4.5): an OTLP/JSON ExportTraceServiceRequest
+        made by the orchestrator from the trace (research/agents/otel.py), for Jaeger's JSON upload or Grafana Tempo.
+        content=True asks for the model's text, the tools' arguments and results as the trace holds them (an explicit
+        choice; without it, digests and sizes only). An orchestrator without the export route (it comes with the
+        research console's access policy version) is told apart from a session that is not yours."""
+        sid = _sid(sid)
+        st, r = self.t.request("GET", "/api/sessions/%s/otel%s" % (sid, "?content=1" if content else ""), None, self.token())
+        err = str((r or {}).get("error", "")) if isinstance(r, dict) else ""
+        if (st == 404 and err == "not found") or (st == 403 and "/otel is not in" in err):
+            raise CliError("this orchestrator does not serve the OpenTelemetry export yet (GET /api/sessions/<sid>/otel "
+                           "comes with the research console's access policy version) (%s)" % st)
+        if st >= 400:
+            raise CliError("%s (%s)" % (err or "refused", st))
+        return r
+
     @staticmethod
     def turns(events):
         """{turn: (request_sha256, response_sha256 or None, seconds or None)} from the model-gateway's records of a
-        local session (a scripted session has none: its answers are the profile's)."""
+        local session (a scripted session has none: its answers are the profile's). The lead agent's turns only
+        (a record without an agent is the lead's): a sub-agent counts its own turns from 1."""
         out, at = {}, {}
         for e in events:
             p = e.get("payload") or {}
-            if e.get("actor") != "model-gateway" or not isinstance(p.get("turn"), int):
+            if e.get("actor") != "model-gateway" or not isinstance(p.get("turn"), int) or p.get("agent", "a0") != "a0":
                 continue
             t = p["turn"]
             if e["event"] == "turn_request":
@@ -237,6 +257,34 @@ class Client:
         r = self.compare_turns(self.events(sid), self.events(new))
         r.update(first=sid, second=new, profile=info["profile"])
         return r
+
+    @staticmethod
+    def lead_stopped(e):
+        """The session's end: the lead's stop (a specialist's stop ends only that specialist, research Phase 4e)."""
+        return e.get("event") == "stop" and (e.get("payload") or {}).get("agent", "a0") == "a0"
+
+    @staticmethod
+    def team(events):
+        """The session's team from its agent_spawned/agent_returned records (research Phase 4e): one entry per
+        specialist, in the order they were started, {agent, parent, specialist, task, stop_reason, turns, cpu_hours}
+        (stop_reason None while it runs). A one-agent session has none."""
+        out, by = [], {}
+        for e in events:
+            p = e.get("payload") or {}
+            if e.get("event") == "agent_spawned" and isinstance(p.get("agent"), str):
+                by[p["agent"]] = dict(agent=p["agent"], parent=p.get("parent"), specialist=p.get("profile_name"),
+                                      task=p.get("task"), stop_reason=None, turns=None, cpu_hours=None)
+                out.append(by[p["agent"]])
+            elif e.get("event") == "agent_returned" and p.get("agent") in by:
+                by[p["agent"]].update(stop_reason=p.get("stop_reason"), turns=p.get("turns"), cpu_hours=p.get("cpu_hours"))
+        return out
+
+    @classmethod
+    def team_line(cls, team):
+        """One line naming the team: the lead and each specialist with how it ended."""
+        return "team: a0 (lead); " + "; ".join(
+            "%s %s (%s)" % (m["agent"], m["specialist"], "running" if m["stop_reason"] is None else
+                            "%s after %s turns, %s CPU-h" % (m["stop_reason"], m["turns"], m["cpu_hours"])) for m in team)
 
     @staticmethod
     def _short(x, n=110):
@@ -305,13 +353,30 @@ class Client:
         elif ev == "stop":
             detail = "reason %s after %s turns" % (p.get("reason"), p.get("turns"))
         elif ev == "proposal":
-            detail = "%s, document %s" % (tool, str(p.get("result_sha256", ""))[:12])
+            detail = "%s, document %s (medcea-agent accept|discard SID p%s)" % (
+                tool, str(p.get("result_sha256", ""))[:12], e.get("event_id"))
+        elif ev == "proposal_decided":
+            detail = "%s %s by %s" % (p.get("pid"), {"approve": "accepted", "deny": "discarded"}.get(p.get("decision"),
+                                                                                         p.get("decision")), p.get("by_username"))
+        elif ev == "agent_spawned":
+            detail = "%s starts %s: %s" % (p.get("parent"), p.get("profile_name"), sh(p.get("task") or "", 80))
+        elif ev == "agent_returned":
+            try:
+                ans = (json.loads(p.get("result") or "{}") or {}).get("answer")
+            except (TypeError, ValueError, AttributeError):
+                ans = None
+            detail = "back to %s: %s after %s turns, %s CPU-h%s" % (
+                p.get("parent"), p.get("stop_reason"), p.get("turns"), p.get("cpu_hours"),
+                ': "%s"' % sh(ans, 70) if ans else "")
         elif ev == "sim_finished":
             detail = "%s, %s CPU-h" % (p.get("state"), p.get("cpu_hours"))
         elif ev == "checkpoint":
             detail = "after turn %s" % p.get("turn")
         else:
             detail = ""
+        ag = p.get("agent")
+        if isinstance(ag, str) and ag != "a0":      # a sub-agent's event (research Phase 4e); the lead's unmarked,
+            detail = "%s[%s] %s" % ("  " * ag.count("."), ag, detail)        # a specialist's indented by its depth
         return "%5d  %-18s %-16s %s" % (e["event_id"], ev, e.get("actor", ""), detail)
 
     def watch(self, sid, poll_s=3, max_s=8 * 3600, verbose=False):
@@ -319,7 +384,7 @@ class Client:
         left out, and the agent's sim.status checks while a campaign runs (every 10 s) are one waiting line; verbose=True
         prints every event as it is."""
         sid = _sid(sid)
-        after, end, waiting = 0, self.clock() + max_s, 0
+        after, end, waiting, members = 0, self.clock() + max_s, 0, []
         while self.clock() < end:
             batch = self.events(sid, after)
             for e in batch:
@@ -337,7 +402,11 @@ class Client:
                 if not verbose and server_record:
                     continue
                 self.out(self.line(e))
-                if e["event"] in ("stop", "session_revoked"):
+                if e["event"] in ("agent_spawned", "agent_returned"):
+                    members.append(e)
+                if self.lead_stopped(e) or e["event"] == "session_revoked":
+                    if members:         # a team: who was in it and how each ended
+                        self.out("%5s  %s" % ("", self.team_line(self.team(members))))
                     return e["event"]
             if not batch and not self.info(sid).get("active"):
                 return "inactive"
@@ -357,6 +426,9 @@ def main(argv=None, client=None):
     sub.add_parser("endpoints")
     for n in ("watch", "stop", "replay", "reexecute"):
         sub.add_parser(n).add_argument("sid")
+    o = sub.add_parser("otel", help="the session as OpenTelemetry (OTLP/JSON) on stdout")
+    o.add_argument("sid")
+    o.add_argument("--content", action="store_true", help="include the model's text, tool arguments and results")
     for n in ("approve", "deny", "accept", "discard"):
         p = sub.add_parser(n)
         p.add_argument("sid")
@@ -365,7 +437,8 @@ def main(argv=None, client=None):
         if n == "approve":
             p.add_argument("--cap-h", type=float)
     a = ap.parse_args(argv)
-    c = client or Client()
+    # otel writes its JSON to stdout (medcea-agent otel SID > file.json): the sign-in prompt goes to stderr then
+    c = client or (Client(out=lambda s: print(s, file=sys.stderr, flush=True)) if a.cmd == "otel" else Client())
     try:
         c.signin()
         if a.cmd == "signin":
@@ -396,6 +469,9 @@ def main(argv=None, client=None):
             c.out(json.dumps(c.replay(a.sid), sort_keys=True))
         elif a.cmd == "reexecute":
             c.out(json.dumps(c.reexecute(a.sid), sort_keys=True))
+        elif a.cmd == "otel":
+            sys.stdout.write(json.dumps(c.otel(a.sid, a.content), sort_keys=True, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
     except CliError as e:
         print("medcea-agent: %s" % e, file=sys.stderr)
         return 1

@@ -164,7 +164,14 @@ HOST_OWNER = {
     "POLICY_DOMAIN": "./apps/iam/deploy.sh --gate-only",
     "ONBOARD_DOMAIN": "./apps/edge-wizard/deploy.sh --gate-only",
     "SUPERSET_DOMAIN": "./apps/superset/deploy.sh --gate-only",   # Superset stage C
+    "RESEARCH_CONSOLE_DOMAIN": "./apps/research-console/deploy.sh --gate-only",   # research Phase 4e (POLICY_HOSTS)
 }
+# Hosts whose owner takes part only while the git or the applied policy has the host (research
+# Phase 4e, commit A2: the console's host comes with skeleton version B). Before that, every
+# rollout, full deploy and owners listing is what it was (the zone targets' pattern), and the
+# host's proxy target has its owner only then (HOST_TARGET_OWNER).
+POLICY_HOSTS = ("RESEARCH_CONSOLE_DOMAIN",)
+HOST_TARGET_OWNER = {"proxy-RESEARCH_CONSOLE_DOMAIN": "./apps/research-console/deploy.sh --gate-only"}
 # The other targets (not a host's gate) and their owners.
 TARGET_OWNER = {
     "routes": "./deploy-infra.sh --policy-only", "mqtt": "./deploy-infra.sh --policy-only",
@@ -211,10 +218,33 @@ def _policy_zones():
     return found
 
 
-def target_owners(zones=None):
-    """TARGET_OWNER plus the owners of the zone targets of `zones` (default _policy_zones())."""
+def _policy_hosts():
+    """The POLICY_HOSTS that the git tree's policy or the applied one has (whichever can be read)."""
+    found = set()
+    try:
+        found.update((source.factory().get("hosts") or {}).keys())
+    except Exception:  # noqa: BLE001 - an unreadable git policy adds nothing
+        pass
+    try:
+        found.update(model.load().hosts)
+    except Exception:  # noqa: BLE001 - nor does an unreadable applied one
+        pass
+    return found & set(POLICY_HOSTS)
+
+
+def host_owners(hosts=None):
+    """HOST_OWNER without the POLICY_HOSTS that `hosts` (default _policy_hosts()) lacks."""
+    hs = _policy_hosts() if hosts is None else set(hosts)
+    return {h: c for h, c in HOST_OWNER.items() if h not in POLICY_HOSTS or h in hs}
+
+
+def target_owners(zones=None, hosts=None):
+    """TARGET_OWNER plus the owners of the zone targets of `zones` (default _policy_zones())
+    and of the POLICY_HOSTS proxies of `hosts` (default _policy_hosts())."""
     zs = _policy_zones() if zones is None else set(zones)
-    return {**TARGET_OWNER, **{t: ZONE_TARGET_OWNER[t] for z, t in ZONE_TARGETS.items() if z in zs}}
+    hs = _policy_hosts() if hosts is None else set(hosts)
+    return {**TARGET_OWNER, **{t: ZONE_TARGET_OWNER[t] for z, t in ZONE_TARGETS.items() if z in zs},
+            **{t: c for t, c in HOST_TARGET_OWNER.items() if t[len("proxy-"):] in hs}}
 
 
 def netpol_zone_args(zone):
@@ -279,10 +309,10 @@ def _cached_read_yaml(path, what):
 source._read_yaml = _cached_read_yaml
 
 
-def full_deploys(zones=None):
+def full_deploys(zones=None, hosts=None):
     """The full deploys owning every target, deploy-infra first (design §14.4.9 step 8)."""
-    owners = target_owners(zones)
-    cmds = {re.sub(r" --(policy|gate)-only$", "", c) for c in list(HOST_OWNER.values()) + list(owners.values())}
+    owners = target_owners(zones, hosts)
+    cmds = {re.sub(r" --(policy|gate)-only$", "", c) for c in list(host_owners(hosts).values()) + list(owners.values())}
     first = ["./deploy-infra.sh", "./infra/deploy-workbench.sh", "./apps/database/deploy.sh"]
     return [c for c in first if c in cmds] + sorted(cmds - set(first))
 
@@ -581,12 +611,12 @@ def deferred_payload(state, target, reason, command):
             "os_user": os_user()}
 
 
-def scoped_commands(zones=None):
+def scoped_commands(zones=None, hosts=None):
     """Every scoped mode, once, in the order apply.sh --resume runs them: deploy-infra's,
     the infra/ ones (the workbench's; the research namespace's while a policy has the zone),
     then the apps' (alphabetical). grants has none (the bundle applies it)."""
     seen, out = set(), []
-    cmds = list(target_owners(zones).values()) + list(HOST_OWNER.values())
+    cmds = list(target_owners(zones, hosts).values()) + list(host_owners(hosts).values())
     rank = lambda c: (0 if c.startswith("./deploy-infra") else 1 if c.startswith("./infra/") else 2, c)
     for c in sorted(cmds, key=rank):
         if (c.endswith("--policy-only") or c.endswith("--gate-only")) and c not in seen:
@@ -2937,7 +2967,7 @@ def main(argv=None):
                 for cmd in scoped_commands():
                     print(cmd)
                 return 0
-            for k, v in sorted(HOST_OWNER.items()):
+            for k, v in sorted(host_owners().items()):
                 print(f"{k}\t{v}")
             for k, v in sorted(target_owners().items()):
                 print(f"{k}\t{v}")

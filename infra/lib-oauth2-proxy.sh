@@ -160,6 +160,25 @@ superset_logout_return() {
     fi
 }
 
+# research_console_logout_url — prints where the research console's own Sign out goes (research Phase 4e,
+# design rs4e §1, OD-4e-2: no user menu on that host). node_red_logout_url's chain: the console proxy's
+# sign-out (its cookie; deploy_oauth2_proxy whitelists KEYCLOAK_DOMAIN), Keycloak's end-session for client
+# research-console, then superset_logout_return's address (the workbench's /hub/logout under
+# WORKBENCH_ENABLED=true, else the portal's proxy sign-out). client_id and post_logout_redirect_uri only,
+# never id_token_hint; both return addresses are registered on client research-console by deploy-infra.sh.
+# Uses RESEARCH_CONSOLE_DOMAIN, KEYCLOAK_DOMAIN, KEYCLOAK_REALM and what superset_logout_return reads.
+research_console_logout_url() {
+    local back
+    back="$(superset_logout_return)" || return 1
+    python3 - "${RESEARCH_CONSOLE_DOMAIN:?}" "${KEYCLOAK_DOMAIN:?}" "${KEYCLOAK_REALM:?}" "$back" <<'PY' || return 1
+import sys, urllib.parse
+host, kc, realm, back = sys.argv[1:]
+q = lambda s: urllib.parse.quote(s, safe="")
+end = "https://%s/realms/%s/protocol/openid-connect/logout?client_id=research-console&post_logout_redirect_uri=%s" % (kc, realm, q(back))
+print("https://%s/oauth2/sign_out?rd=%s" % (host, q(end)))
+PY
+}
+
 #   policy_workbench_egress || exit 1
 #
 # The notebooks' platform hops (IAM 3.2b): WORKBENCH_EGRESS, the workbench chart's
@@ -412,7 +431,9 @@ for it in d.get("items") or ([d] if d.get("kind") == "ConfigMap" else []):
 # file, deploy_oauth2_proxy (which restarts). MODE scoped (--gate-only): nothing when
 # pa_gate_state says equal or the release is not deployed; else the same, without
 # the restart, then rollout status. Prints one line per gate in scoped mode.
-# Leaves ALLOWED_GROUPS set, as the inline blocks did.
+# Leaves ALLOWED_GROUPS set, as the inline blocks did. APP_GATE_VARS (research Phase 4e: the
+# research console's values name RESEARCH_AGENTS_NAMESPACE) adds variables to the template's
+# render list; unset, every call renders exactly what it did.
 app_gate() {
     local mode="$1" release="$2" client="$3" secret="$4" cookie="$5" host_var="$6" host="$7" tpl="$8" svc="${9:-}"
     local values rc=0
@@ -430,9 +451,10 @@ app_gate() {
     values=$(mktemp "/tmp/$release-values-XXXXXX.yaml")
     gate_error_page "$release" "$host_var" "$ALLOWED_GROUPS"
     if [[ -n "$svc" ]]; then
-        APP_SERVICE="$svc" render "$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS > "$values"
+        APP_SERVICE="$svc" render "$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE APP_SERVICE ALLOWED_GROUPS ${APP_GATE_VARS:-} > "$values"
     else
-        render "$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS > "$values"
+        # shellcheck disable=SC2086  # APP_GATE_VARS: a space-separated list of variable names
+        render "$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE ALLOWED_GROUPS ${APP_GATE_VARS:-} > "$values"
     fi
     if [[ "$mode" == scoped ]]; then
         OAUTH2_PROXY_NO_RESTART=1 deploy_oauth2_proxy "$release" "$client" "$secret" "$cookie" "$host" "$values"

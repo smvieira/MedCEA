@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # apps/research/uninstall.sh — the inverse of apps/research/deploy.sh.
 #
-#   ./apps/research/uninstall.sh                runs ./apps/lake-api/uninstall.sh first
+#   ./apps/research/uninstall.sh                runs ./apps/research-console/uninstall.sh,
+#                                               ./apps/research-agents/uninstall.sh and
+#                                               ./apps/lake-api/uninstall.sh first
 #                                               (the snapshot reader logs in to this
 #                                               database), then removes Secrets research-export-writer and
 #                                               research-backup from $NAMESPACE (first, so
@@ -46,8 +48,10 @@ RS_RELEASE=research-postgresql
 GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[research]${NC} $*"; }
 
-# The agent machinery first (research Phase 4a, R3): its sessions stop before the database goes;
-# then the snapshot reader, which logs in to the database removed below.
+# The research console first (research Phase 4e: its page and proxy reach the orchestrator), then the
+# agent machinery (research Phase 4a, R3): its sessions stop before the database goes; then the
+# snapshot reader, which logs in to the database removed below.
+bash "$REPO_ROOT/apps/research-console/uninstall.sh"
 bash "$REPO_ROOT/apps/research-agents/uninstall.sh"
 bash "$REPO_ROOT/apps/lake-api/uninstall.sh"
 

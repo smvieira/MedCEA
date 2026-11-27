@@ -9,6 +9,10 @@ Stage 3 of 4b adds the estimate Job (R7: estimate-<eid>, FLC and MPC specs; sim_
 needs no network at all). The sim and estimate Jobs also install the controller wheels
 (requirements-controllers.txt: numpy, scipy, scikit-fuzzy, gekko...), which no Deployment needs.
 
+Research Phase 4e (design rs4e 2.3): the sim Job's command carries --series-every (cfg series_every, the
+orchestrator's RS_SIM_SERIES_EVERY, default 60 s; 0 = off), so each run's chamber series is written to
+/runs/campaigns/<cid>/series/<n>.json.gz next to results.jsonl, outside every digest and never in the log.
+
 Names: a session id is mixed-case base64url, which a Kubernetes name cannot hold, so the agent
 Job is agent-<first 20 hex of sha256(sid)> (design said agent-<sid>); a campaign id is c+20 hex
 and keeps sim-<cid>."""
@@ -26,6 +30,7 @@ REPLAY_MARK = "REPLAY_RESULT "
 EVENT_CHUNK = 90000          # bytes of base64 per env var: Linux caps one environment string at 128 KiB
 EVENT_CHUNKS_MAX = 8         # about 720 KB of base64 in the pod spec, which etcd holds at 1.5 MB
 SPEC_MAX = 65536
+SERIES_EVERY_DEFAULT = 60.0  # design rs4e 2.3 (OD-4e-6): a sim Job's run series every 60 simulated seconds
 LOG_MAX = 1 << 20
 
 
@@ -106,13 +111,32 @@ def agent_job(cfg, sid, claim, profile, wall_h, endpoint=None):
                 c, int(wall_h * 3600) + 120)
 
 
+def series_every(cfg):
+    """The run series interval for sim Jobs (research Phase 4e, design rs4e 2.3): cfg["series_every"] (the
+    orchestrator's RS_SIM_SERIES_EVERY), default SERIES_EVERY_DEFAULT; 0 = off. Seconds, 0..86400."""
+    v = cfg.get("series_every", SERIES_EVERY_DEFAULT)
+    if isinstance(v, bool):
+        raise ValueError("the series interval must be a number of seconds")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("the series interval must be a number of seconds") from None
+    if not 0 <= v <= 86400:
+        raise ValueError("the series interval must be 0 (off) to 86400 seconds")
+    return v
+
+
 def sim_job(cfg, cid, spec, cap_h, deadline_s, pool):
+    """Each run's chamber series goes to /runs/campaigns/<cid>/series/<n>.json.gz next to results.jsonl
+    (--series-every, design rs4e 2.3); never into the log's SIM_RESULT."""
     raw = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
     if len(raw) > SPEC_MAX:
         raise ValueError("the spec is over %d bytes" % SPEC_MAX)
+    every = series_every(cfg)
     c = {"name": "sim", "image": cfg["image"], "workingDir": cfg.get("code_dir", "/opt/medcea"),
          "command": ["python3", "-m", "research.agents.sim_job", "--out", "/runs/campaigns/" + cid,
-                     "--jobs", str(int(pool)), "--max-cpu-hours", repr(round(float(cap_h), 6))],
+                     "--jobs", str(int(pool)), "--max-cpu-hours", repr(round(float(cap_h), 6)),
+                     "--series-every", ("%g" % every)],
          "env": [{"name": "MEDCEA_SIM_SPEC", "value": base64.b64encode(raw).decode()}]}
     return _job(cfg, sim_job_name(cid), {"app": "sim", "medcea/cid": cid}, c, deadline_s, runs=True, controllers=True,
                 resources={"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"memory": "2Gi"}})

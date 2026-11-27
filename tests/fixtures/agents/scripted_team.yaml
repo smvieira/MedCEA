@@ -1,0 +1,38 @@
+# Test fixture (research Phase 4e A1b): a scripted team on the loop tests' fake tools. The lead hands the campaign to
+# "campaign" and the proposal to "tuning"; "@last_cid" in a step is the newest campaign handle the agent saw (a tool
+# result, else its task).
+name: scripted_team
+backend: scripted
+skill: team_lead
+tools: [team.delegate, sim.estimate, sim.run, lake.query, propose.candidate]
+caps:
+  turns: 12
+  prompt_tokens: 40000
+  output_tokens: 4000
+  cpu_hours: 2
+  wall_h: 1
+  turn_timeout_s: 30
+  context_tokens: 4000
+checkpoint_every: 2
+team:
+  campaign:
+    description: estimates a campaign and runs it, then names the campaign it ran
+    skill: team_campaign
+    tools: [sim.estimate, sim.run]
+    caps: {turns: 4, cpu_hours: 1}
+    script:
+      - {text: "Plan: estimate the campaign.", tool: sim.estimate, args: {spec: fruiting_compare}}
+      - {text: "Plan: run it.", tool: sim.run, args: {spec: fruiting_compare}}
+      - {text: "Campaign @last_cid is done."}
+  tuning:
+    description: proposes a candidate from a finished campaign
+    skill: team_tuning
+    tools: [propose.candidate]
+    caps: {turns: 3}
+    script:
+      - {text: "Plan: propose the best controller.", tool: propose.candidate, args: {controller: pid, evidence: ["@last_cid"]}}
+      - {text: "Proposed pid from campaign @last_cid."}
+script:
+  - {text: "Plan: hand the campaign to the campaign specialist.", tool: team.delegate, args: {specialist: campaign, task: "Estimate and run fruiting_compare. Say which campaign you ran."}}
+  - {text: "Plan: hand the proposal to the tuning specialist.", tool: team.delegate, args: {specialist: tuning, task: "Propose the best controller of campaign @last_cid."}}
+  - {text: "The plan is complete."}

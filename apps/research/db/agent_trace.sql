@@ -9,8 +9,8 @@
 -- IF NOT EXISTS, every function CREATE OR REPLACE.
 --
 -- Role rs_session (cluster-wide, research PostgreSQL only): LOGIN NOINHERIT, CONNECTION
--- LIMIT 5, statement_timeout 10s. research-session logs in as it. EXECUTE on the eight
--- writers/readers below and nothing else: no table privilege. Its password is set by
+-- LIMIT 5, statement_timeout 10s. research-session logs in as it. EXECUTE on the
+-- writers/readers below (grants.sql lists them) and nothing else: no table privilege. Its password is set by
 -- deploy.sh as a SCRAM verifier (RS_SESSION_DB_PASS), never here.
 --
 -- Everything is owned by rs_owner; every function is SECURITY DEFINER with
@@ -23,8 +23,10 @@
 --   person  research-session's own routes: session_minted, claim_exchanged,
 --           claim_reused, gate_decided, proposal_decided, session_revoked
 --   agent   (agent port 8101) turn_request, turn_response (only while the session's
---           backend is 'scripted'), tool_call, tool_result, checkpoint, proposal, stop;
---           the token's sha256 must equal the session's (R9)
+--           backend is 'scripted'), tool_call, tool_result, checkpoint, proposal, stop,
+--           agent_spawned, agent_returned; the token's sha256 must equal the session's (R9);
+--           `agent`/`parent` in the payload, when present, are agent ids (research Phase 4e,
+--           AH.9: a0 the lead, a0.1 its first sub-agent, depth at most 3; absent = a0)
 --   server  (server port 8102) tool_result, gate_pending, sim_started, sim_finished,
 --           replay_result, turn_request, turn_response (the last two only for the
 --           model-gateway and only while the backend is 'local'); the actor is the
@@ -178,12 +180,58 @@ CREATE OR REPLACE FUNCTION agent_trace._port_events(p_port text) RETURNS text[]
         WHEN 'person' THEN ARRAY['session_minted', 'claim_exchanged', 'claim_reused', 'gate_decided',
                                  'proposal_decided', 'session_revoked']
         WHEN 'agent'  THEN ARRAY['turn_request', 'turn_response', 'tool_call', 'tool_result', 'checkpoint',
-                                 'proposal', 'stop']
+                                 'proposal', 'stop', 'agent_spawned', 'agent_returned']
         WHEN 'server' THEN ARRAY['tool_result', 'gate_pending', 'sim_started', 'sim_finished', 'replay_result',
                                  'turn_request', 'turn_response']
     END
 $$;
 REVOKE ALL ON FUNCTION agent_trace._port_events(text) FROM PUBLIC;
+
+-- Agent ids on the agent port (research Phase 4e, design 2.1, AH.9). `agent` is a dotted path:
+-- the lead a0, its sub-agents a0.1, a0.2, theirs a0.1.1 (depth at most 3); absent means a0, so
+-- every trace recorded before reads as a one-agent session. A sub-agent's payload names its
+-- `parent`, the agent one level up. agent_spawned/agent_returned always name a sub-agent; their
+-- task and result are at most 2000 characters. NULL = fine, else the reason.
+CREATE OR REPLACE FUNCTION agent_trace._agent_problem(p_event text, p_payload jsonb) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    v_re     CONSTANT text := '^a0(\.[1-9][0-9]{0,2}){0,3}$';
+    v_agent  text := 'a0';
+    v_parent text;
+BEGIN
+    IF p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object' THEN
+        RETURN NULL;                     -- append_event refuses a non-object payload itself
+    END IF;
+    IF p_payload ? 'agent' THEN
+        IF pg_catalog.jsonb_typeof(p_payload -> 'agent') <> 'string' OR NOT ((p_payload ->> 'agent') ~ v_re) THEN
+            RETURN 'agent is not an agent id (a0, a0.1, a0.1.2; depth at most 3)';
+        END IF;
+        v_agent := p_payload ->> 'agent';
+    END IF;
+    IF p_payload ? 'parent' THEN
+        IF pg_catalog.jsonb_typeof(p_payload -> 'parent') <> 'string' OR NOT ((p_payload ->> 'parent') ~ v_re) THEN
+            RETURN 'parent is not an agent id';
+        END IF;
+        v_parent := p_payload ->> 'parent';
+        IF pg_catalog.left(v_agent, pg_catalog.length(v_parent) + 1) <> v_parent || '.'
+           OR pg_catalog.strpos(pg_catalog.substr(v_agent, pg_catalog.length(v_parent) + 2), '.') > 0 THEN
+            RETURN 'parent is not the agent one level above agent';
+        END IF;
+    ELSIF v_agent <> 'a0' THEN
+        RETURN 'a sub-agent''s payload names its parent';
+    END IF;
+    IF p_event IN ('agent_spawned', 'agent_returned') THEN
+        IF v_agent = 'a0' THEN
+            RETURN p_event || ' names a sub-agent, never the lead';
+        END IF;
+        IF pg_catalog.length(coalesce(p_payload ->> 'task', '')) > 2000
+           OR pg_catalog.length(coalesce(p_payload ->> 'result', '')) > 2000 THEN
+            RETURN p_event || ': task and result are at most 2000 characters';
+        END IF;
+    END IF;
+    RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION agent_trace._agent_problem(text, jsonb) FROM PUBLIC;
 
 -- ── Internals ─────────────────────────────────────────────────────────────────
 -- A session is active iff it has no revocation and exp > now().
@@ -254,14 +302,23 @@ REVOKE ALL ON FUNCTION agent_trace._refuse(text, text, text, text) FROM PUBLIC;
 
 -- ── Writers (EXECUTE for rs_session) ──────────────────────────────────────────
 -- open_session: inserts the session and its session_minted event. A third active
--- session of one person is refused (max_active 2, R10).
+-- session of one person is refused (max_active 2, R10). p_reexecutes (research Phase 4e,
+-- design 2.2): the session this one re-executes, a session of the same person, recorded in
+-- session_minted as `reexecutes` (NULL: nothing recorded, the payload as before). The
+-- fifteen-argument form is the same call without it; the sixteenth argument has no DEFAULT
+-- on purpose, so a fifteen-argument call is never ambiguous (and code from before keeps its
+-- form after a revert).
 CREATE OR REPLACE FUNCTION agent_trace.open_session(
     p_sid text, p_kid text, p_token_sha256 text, p_claim_sha256 text, p_sup_sub uuid, p_sup_person text,
     p_sup_role text, p_sup_username text, p_profile text, p_profile_sha256 text, p_tools text[],
-    p_budget jsonb, p_backend text, p_code_commit text, p_exp timestamptz)
+    p_budget jsonb, p_backend text, p_code_commit text, p_exp timestamptz, p_reexecutes text)
     RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('medcea_research.agent_trace.mint'));
+    IF p_reexecutes IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM agent_trace.session x WHERE x.sid = p_reexecutes AND x.sup_person = p_sup_person) THEN
+        RAISE EXCEPTION 'agent_trace: reexecutes must name a session of the same person' USING ERRCODE = '22023';
+    END IF;
     IF (SELECT pg_catalog.count(*) FROM agent_trace.session s
          WHERE s.sup_person = p_sup_person AND agent_trace._active(s.sid)) >= 2 THEN
         RAISE EXCEPTION 'agent_trace: person already has 2 active sessions (max_active)' USING ERRCODE = '53400';
@@ -273,7 +330,22 @@ BEGIN
             p_profile, p_profile_sha256, p_tools, p_budget, p_backend, p_code_commit, pg_catalog.now(), p_exp);
     RETURN agent_trace._append(p_sid, 'research-session', 'session_minted',
         pg_catalog.jsonb_build_object('profile', p_profile, 'profile_sha256', p_profile_sha256, 'backend', p_backend,
-                                      'code_commit', p_code_commit, 'kid', p_kid, 'exp', p_exp));
+                                      'code_commit', p_code_commit, 'kid', p_kid, 'exp', p_exp)
+        || CASE WHEN p_reexecutes IS NULL THEN '{}'::jsonb
+                ELSE pg_catalog.jsonb_build_object('reexecutes', p_reexecutes) END);
+END $$;
+REVOKE ALL ON FUNCTION agent_trace.open_session(text, text, text, text, uuid, text, text, text, text, text, text[],
+    jsonb, text, text, timestamptz, text) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION agent_trace.open_session(
+    p_sid text, p_kid text, p_token_sha256 text, p_claim_sha256 text, p_sup_sub uuid, p_sup_person text,
+    p_sup_role text, p_sup_username text, p_profile text, p_profile_sha256 text, p_tools text[],
+    p_budget jsonb, p_backend text, p_code_commit text, p_exp timestamptz)
+    RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RETURN agent_trace.open_session(p_sid, p_kid, p_token_sha256, p_claim_sha256, p_sup_sub, p_sup_person,
+                                    p_sup_role, p_sup_username, p_profile, p_profile_sha256, p_tools, p_budget,
+                                    p_backend, p_code_commit, p_exp, NULL::text);
 END $$;
 REVOKE ALL ON FUNCTION agent_trace.open_session(text, text, text, text, uuid, text, text, text, text, text, text[],
     jsonb, text, text, timestamptz) FROM PUBLIC;
@@ -311,6 +383,8 @@ BEGIN
         v_why := 'the payload is over 16 KiB: put the content in a blob';
     ELSIF p_port = 'agent' AND p_token_sha256 IS DISTINCT FROM s.token_sha256 THEN
         v_why := 'the token is not the session''s';
+    ELSIF p_port = 'agent' AND agent_trace._agent_problem(p_event, p_payload) IS NOT NULL THEN
+        v_why := agent_trace._agent_problem(p_event, p_payload);
     ELSIF p_port = 'agent' AND p_event = 'turn_response' AND s.backend <> 'scripted' THEN
         v_why := 'turn_response from the agent port is for a scripted backend only';
     ELSIF p_port = 'server' AND p_event IN ('turn_request', 'turn_response')
@@ -448,8 +522,10 @@ REVOKE ALL ON FUNCTION agent_trace.use_claim(text, inet) FROM PUBLIC;
 -- ── Readers (EXECUTE for rs_session) ──────────────────────────────────────────
 -- session_status: active, revocation, exp, backend, the budget and what the events say
 -- was spent (turns from turn_request, tokens from turn_response's usage (both backends
--- record them there; a top-level count is still read), cpu_hours from
--- sim_finished, trace_bytes).
+-- record them there; a top-level count is still read), cpu_hours from sim_finished,
+-- once per campaign: the newest sim_finished of each cid counts (mcp-sim and, since research
+-- Phase 4e, the orchestrator both write one when a campaign ends; one without a cid counts
+-- alone), trace_bytes).
 CREATE OR REPLACE FUNCTION agent_trace.session_status(p_sid text)
     RETURNS TABLE (active boolean, revoked boolean, exp timestamptz, backend text, budget jsonb, spent jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -464,9 +540,11 @@ CREATE OR REPLACE FUNCTION agent_trace.session_status(p_sid text)
              'output_tokens', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(coalesce(e.payload -> 'usage', e.payload) -> 'output_tokens') = 'number'
                                       THEN (coalesce(e.payload -> 'usage', e.payload) ->> 'output_tokens')::numeric END), 0)
                                  FROM agent_trace.event e WHERE e.sid = s.sid AND e.event = 'turn_response'),
-             'cpu_hours', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(e.payload -> 'cpu_hours') = 'number'
-                                      THEN (e.payload ->> 'cpu_hours')::numeric END), 0)
-                                 FROM agent_trace.event e WHERE e.sid = s.sid AND e.event = 'sim_finished'),
+             'cpu_hours', (SELECT coalesce(pg_catalog.sum(CASE WHEN pg_catalog.jsonb_typeof(d.payload -> 'cpu_hours') = 'number'
+                                      THEN (d.payload ->> 'cpu_hours')::numeric END), 0)
+                             FROM (SELECT DISTINCT ON (coalesce(e.payload ->> 'cid', 'event:' || e.event_id::text)) e.payload
+                                     FROM agent_trace.event e WHERE e.sid = s.sid AND e.event = 'sim_finished'
+                                    ORDER BY coalesce(e.payload ->> 'cid', 'event:' || e.event_id::text), e.event_id DESC) d),
              'trace_bytes', agent_trace._bytes(s.sid))
       FROM agent_trace.session s WHERE s.sid = p_sid
 $$;
@@ -528,6 +606,33 @@ CREATE OR REPLACE FUNCTION agent_trace.active_sessions() RETURNS TABLE (sid text
      ORDER BY s.created_at LIMIT 1000
 $$;
 REVOKE ALL ON FUNCTION agent_trace.active_sessions() FROM PUBLIC;
+
+-- sessions_of: one person's sessions, newest first (research Phase 4e, design 2.2): the durable
+-- list behind the console's and the CLI's history, which a restart of the orchestrator does not
+-- lose. Keyset on the session_minted event_id (mint_event_id): p_before NULL = from the newest,
+-- else only sessions minted before that event; p_limit is held to 1..200 (NULL: 50). spent is
+-- session_status's. The person is the caller's verified one (research-session takes it from the
+-- orchestrator, which takes it from the token), never a query parameter of a browser.
+CREATE OR REPLACE FUNCTION agent_trace.sessions_of(p_person text, p_before bigint, p_limit integer)
+    RETURNS TABLE (sid text, mint_event_id bigint, created_at timestamptz, exp timestamptz, profile text,
+                   backend text, code_commit text, reexecutes text, active boolean, revoked boolean,
+                   revoke_reason text, last_event_id bigint, last_at timestamptz, spent jsonb)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT s.sid, m.event_id, s.created_at, s.exp, s.profile, s.backend, s.code_commit,
+           m.payload ->> 'reexecutes', agent_trace._active(s.sid), r.sid IS NOT NULL, r.reason,
+           l.event_id, l.at, (SELECT st.spent FROM agent_trace.session_status(s.sid) st)
+      FROM agent_trace.session s
+      JOIN LATERAL (SELECT e.event_id, e.payload FROM agent_trace.event e
+                     WHERE e.sid = s.sid AND e.event = 'session_minted'
+                     ORDER BY e.event_id LIMIT 1) m ON true
+      LEFT JOIN agent_trace.revocation r ON r.sid = s.sid
+      LEFT JOIN LATERAL (SELECT e.event_id, e.at FROM agent_trace.event e
+                          WHERE e.sid = s.sid ORDER BY e.event_id DESC LIMIT 1) l ON true
+     WHERE s.sup_person = p_person AND (p_before IS NULL OR m.event_id < p_before)
+     ORDER BY m.event_id DESC
+     LIMIT greatest(1, least(coalesce(p_limit, 50), 200))
+$$;
+REVOKE ALL ON FUNCTION agent_trace.sessions_of(text, bigint, integer) FROM PUBLIC;
 
 -- ── No grant: health runs these as postgres ───────────────────────────────────
 -- verify_chain(): recomputes every hash and every prev_hash link, oldest first. Does not

@@ -24,6 +24,9 @@ ENFORCEMENT = {
     # host is in the policy (Superset stage C): `cli.py hosts` iterates p.hosts, so an entry
     # for a host the policy lacks prints nothing.
     "SUPERSET_DOMAIN": "tool (Superset AUTH_ROLES_MAPPING)",
+    # The research console's oauth2-proxy (research Phase 4e, commit A2): listed before the
+    # policy has the host (commit B), as Superset was; absent from the policy, it prints nothing.
+    "RESEARCH_CONSOLE_DOMAIN": "compiled",
 }
 
 

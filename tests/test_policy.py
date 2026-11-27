@@ -1510,7 +1510,10 @@ class WiringTest(unittest.TestCase):
             self.assertNotIn("run_logs: would refuse", src)
 
     def test_every_host_has_an_enforcement_status(self):
-        self.assertEqual(set(proxies.ENFORCEMENT), set(self.policy.hosts))
+        # RESEARCH_CONSOLE_DOMAIN: listed by research Phase 4e's commit A2, before its commit B gives the policy
+        # the host (as Superset's commit A did); the allowance goes with commit B
+        pending = {"RESEARCH_CONSOLE_DOMAIN"} - set(self.policy.hosts)
+        self.assertEqual(set(proxies.ENFORCEMENT) - pending, set(self.policy.hosts))
 
     def test_compiled_gates_are_rendered_from_the_policy(self):
         # values template → (script that renders it, host variable it compiles)
@@ -1523,6 +1526,8 @@ class WiringTest(unittest.TestCase):
                                                  ("apps/monitor/deploy.sh", "MONITOR_DOMAIN"),
                                                  ("apps/scheduler/deploy.sh", "SCHEDULER_DOMAIN")],
             "apps/access/k8s/oauth2-proxy-values.yaml": [("apps/access/deploy.sh", "ACCESS_DOMAIN")],
+            # research Phase 4e: the research console's own values (its upstreams are in the research-agents zone)
+            "apps/research-console/k8s/values-console.yaml": [("apps/research-console/deploy.sh", "RESEARCH_CONSOLE_DOMAIN")],
         }
         wiring["k8s/oauth2-proxy/values-app.yaml"].append(("apps/iam/deploy.sh", "POLICY_DOMAIN"))   # IAM 4.3
         compiled = {h for h, st in proxies.ENFORCEMENT.items() if st == "compiled"}
@@ -1546,14 +1551,16 @@ class WiringTest(unittest.TestCase):
         # gets its page from gate_error_page with the list its gate is deployed with.
         for values in ("k8s/oauth2-proxy/values-portal.yaml", "k8s/oauth2-proxy/values-app.yaml",
                        "k8s/oauth2-proxy/values-node-red.yaml",
-                       "apps/mqtt-explorer/k8s/oauth2-proxy-values.yaml", "apps/access/k8s/oauth2-proxy-values.yaml"):
+                       "apps/mqtt-explorer/k8s/oauth2-proxy-values.yaml", "apps/access/k8s/oauth2-proxy-values.yaml",
+                       "apps/research-console/k8s/values-console.yaml"):
             self.assertIn('custom_templates_dir = "/templates"', self.read(values), values)
         pages = {"apps/frontend/deploy.sh": [("config-oauth2-proxy", "CONFIG_DOMAIN"), ("dbmgmt-oauth2-proxy", "DBMGMT_DOMAIN")],
                  "apps/monitor/deploy.sh": [("monitor-oauth2-proxy", "MONITOR_DOMAIN")],
                  "apps/scheduler/deploy.sh": [("scheduler-oauth2-proxy", "SCHEDULER_DOMAIN")],
                  "apps/mqtt-explorer/deploy.sh": [("mqttx-oauth2-proxy", "MQTTX_DOMAIN")],
                  "deploy-infra.sh": [("oauth2-proxy", "NODE_RED_DOMAIN")],
-                 "apps/access/deploy.sh": [("access-oauth2-proxy", "ACCESS_DOMAIN")]}
+                 "apps/access/deploy.sh": [("access-oauth2-proxy", "ACCESS_DOMAIN")],
+                 "apps/research-console/deploy.sh": [("\"$RELEASE\"", "RESEARCH_CONSOLE_DOMAIN")]}
         for script, gates in pages.items():
             src = self.read(script)
             for release, host in gates:
@@ -1564,6 +1571,9 @@ class WiringTest(unittest.TestCase):
         for script, releases in uninstalls.items():
             for release in releases:
                 self.assertIn(f"delete configmap {release}-templates", self.read(script), script)
+        console = self.read("apps/research-console/uninstall.sh")   # research Phase 4e: the release by its variable
+        self.assertIn("RELEASE=research-console-oauth2-proxy", console)
+        self.assertIn('delete configmap "$RELEASE-templates"', console)
 
     def test_gate_page_names_the_deployed_roles(self):
         p = self.policy
@@ -3942,11 +3952,13 @@ class AppGateTest(unittest.TestCase):
         body = body[:body.index("\n}\n")]
         self.assertIn('ALLOWED_GROUPS="$(policy_groups "$host_var")"', body)
         self.assertIn('gate_error_page "$release" "$host_var" "$ALLOWED_GROUPS"', body)
-        self.assertEqual(len(re.findall(r'render "\$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE (APP_SERVICE )?ALLOWED_GROUPS > "\$values"', body)), 2)
+        # research Phase 4e: APP_GATE_VARS adds names to the render list (the research console's namespace)
+        self.assertEqual(len(re.findall(r'render "\$tpl" KEYCLOAK_DOMAIN KEYCLOAK_REALM NAMESPACE (APP_SERVICE )?ALLOWED_GROUPS'
+                                        r' \$\{APP_GATE_VARS:-\} > "\$values"', body)), 2)
 
     def test_every_app_gate_call_is_expanded(self):
         for script in ("apps/frontend/deploy.sh", "apps/monitor/deploy.sh", "apps/scheduler/deploy.sh",
-                       "apps/mqtt-explorer/deploy.sh"):
+                       "apps/mqtt-explorer/deploy.sh", "apps/research-console/deploy.sh"):
             with open(os.path.join(REPO, script)) as f:
                 raw = f.read()
             self.assertEqual(raw.count("app_gate "), len(APP_GATE.findall(raw)), script)
@@ -4022,6 +4034,146 @@ class Phase2bCheckerTest(unittest.TestCase):
         for code in ("I5", "I18"):
             self.assertEqual([i for i in now["invariants"] if i["code"] == code],
                              [i for i in old["invariants"] if i["code"] == code])
+
+
+def without_console(d):
+    """research Phase 4e's commit B undone (the factory policy as commit A2 had it): no console host, proxy, pod or
+    members, the orchestrator's 8090 from the notebooks only."""
+    d = copy.deepcopy(d)
+    d["hosts"].pop("RESEARCH_CONSOLE_DOMAIN", None)
+    net = d["network"]
+    net["proxies"].pop("RESEARCH_CONSOLE_DOMAIN", None)
+    net["no_shared_upstreams"] = [h for h in net.get("no_shared_upstreams") or [] if h != "RESEARCH_CONSOLE_DOMAIN"]
+    net["pods"].pop("research-console", None)
+    for rule in net["pods"]["research-orchestrator"]["ingress"]:
+        rule["from"] = [x for x in rule["from"] if x != "proxy:RESEARCH_CONSOLE_DOMAIN"]
+    g = d["resource_groups"]["research_campaigns"]
+    g["members"] = [m for m in g["members"] if m.get("host") != "RESEARCH_CONSOLE_DOMAIN"
+                    and m.get("service") != "research-console"]
+    return d
+
+
+def console_shape(d):
+    """research Phase 4e's commit B shape (design rs4e §5.2) on a policy that has the agent zones: the
+    console's host serving the console, the orchestrator and research-session, its proxy in
+    no_shared_upstreams, the console pod with its own audience, the orchestrator admitting the proxy,
+    and research_campaigns' ui and api members (applied to `d` without commit B's own, so the factory
+    policy since commit B gives the same fixture)."""
+    d = without_console(d)
+    d["hosts"]["RESEARCH_CONSOLE_DOMAIN"] = {"label": "Research console", "client": "research-console",
+                                             "serves": ["research-console", "research-orchestrator", "research-session"]}
+    net = d["network"]
+    net["proxies"]["RESEARCH_CONSOLE_DOMAIN"] = "research-console-oauth2-proxy"
+    net["no_shared_upstreams"] = list(net.get("no_shared_upstreams") or []) + ["RESEARCH_CONSOLE_DOMAIN"]
+    net["pods"]["research-console"] = {
+        "zone": "research-agents", "selector": {"app": "research-console"}, "carries": {"research-console": 8080},
+        "audience": "medcea-research", "ingress": [{"port": 8080, "from": ["proxy:RESEARCH_CONSOLE_DOMAIN"]}]}
+    net["pods"]["research-orchestrator"]["ingress"][0]["from"].append("proxy:RESEARCH_CONSOLE_DOMAIN")
+    members = d["resource_groups"]["research_campaigns"]["members"]
+    members.append({"type": "ui", "host": "RESEARCH_CONSOLE_DOMAIN"})
+    members.append({"type": "api", "service": "research-console", "routes": {"GET /": "R", "GET /static/<file>": "R"}})
+    return d
+
+
+class ConsoleAudienceTest(unittest.TestCase):
+    """research Phase 4e, commit A2 (design rs4e §5.1): a zone pod's `audience` key, the one-audience-per-host
+    rule and cli.py has-host. Inert under commit A2's policy (no pod says audience, no host serves two audiences);
+    the factory policy has the console since commit B."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.real = model.load_defaults()
+        cls.factory = model.Policy(without_console(cls.real.data))     # commit A2's
+        cls.shape = console_shape(cls.factory.data)
+
+    def errors(self, d):
+        return invariants.check(model.Policy(d))[0]
+
+    def test_the_factory_policy_is_the_console_shape(self):
+        """commit B wrote the shape into defaults.yaml: the factory policy passes and compiles the same services."""
+        self.assertEqual(invariants.check(self.real)[0], [])
+        real, shape = routes.compile(self.real)["services"], routes.compile(model.Policy(self.shape))["services"]
+        for svc in ("research-console", "research-orchestrator", "research-session"):
+            self.assertEqual((real[svc]["clients"], real[svc]["audience"]), (shape[svc]["clients"], shape[svc]["audience"]))
+        self.assertEqual(proxies.admitted(self.real, "RESEARCH_CONSOLE_DOMAIN"),
+                         proxies.admitted(model.Policy(self.shape), "RESEARCH_CONSOLE_DOMAIN"))
+
+    def test_the_console_shape_passes(self):
+        self.assertEqual(self.errors(self.shape), [])
+        p = model.Policy(self.shape)
+        svc = routes.compile(p)["services"]
+        self.assertEqual(svc["research-console"]["audience"], "medcea-research")
+        self.assertEqual(svc["research-console"]["clients"], ["research-console"])
+        self.assertEqual(svc["research-orchestrator"]["clients"], ["research-agent", "research-console"])
+        self.assertEqual(svc["research-orchestrator"]["audience"], "medcea-research")
+        self.assertEqual(netpol.pod_audiences(p)["research-console"], "medcea-research")
+        self.assertEqual(proxies.admitted(p, "RESEARCH_CONSOLE_DOMAIN"), ["bio_scientist", "control_scientist", "engineer"])
+
+    def test_the_factory_policy_has_no_audience_key(self):
+        self.assertFalse([n for n, pd in self.factory.data["network"]["pods"].items() if "audience" in pd])
+        errs = []
+        netpol._host_audience_check(self.factory, errs)
+        self.assertEqual(errs, [])
+        # the audience routes.json gives a service: only the pods' token clients' (v1-v13 unchanged)
+        self.assertEqual(netpol.pod_audiences(self.factory),
+                         {s: a for s, (_c, a) in netpol.pod_token_clients(self.factory).items()})
+
+    def test_the_audience_key_rules(self):
+        def with_pod(mutate):
+            d = copy.deepcopy(self.shape)
+            mutate(d["network"]["pods"]["research-console"])
+            return self.errors(d)
+        self.assertIn("network: pod research-console: the audience is medcea-research, not 'medcea-api'",
+                      with_pod(lambda pd: pd.update(audience="medcea-api")))
+        self.assertIn("network: pod research-console: audience needs a pod that carries a service",
+                      with_pod(lambda pd: pd.update(carries={})))
+        self.assertIn("network: pod research-console: audience is for a zone pod",
+                      with_pod(lambda pd: pd.pop("zone")))
+        self.assertIn("network: pod research-console: audience and token_clients together (a token client already "
+                      "names its audience)",
+                      with_pod(lambda pd: pd.update(token_clients=[{"client": "x-agent", "audience": "medcea-research"}])))
+
+    def test_one_audience_per_host(self):
+        d = copy.deepcopy(self.shape)
+        del d["network"]["pods"]["research-console"]["audience"]
+        self.assertIn("host RESEARCH_CONSOLE_DOMAIN serves services of audiences medcea-api and medcea-research",
+                      self.errors(d))
+        d = copy.deepcopy(self.shape)
+        d["hosts"]["RESEARCH_CONSOLE_DOMAIN"]["serves"].append("scheduler")
+        self.assertIn("host RESEARCH_CONSOLE_DOMAIN serves services of audiences medcea-api and medcea-research",
+                      self.errors(d))
+        d = copy.deepcopy(self.factory.data)
+        d["hosts"]["SCHEDULER_DOMAIN"]["serves"].append("research-orchestrator")
+        self.assertIn("host SCHEDULER_DOMAIN serves services of audiences medcea-api and medcea-research", self.errors(d))
+
+    def test_has_host(self):
+        import subprocess
+        import tempfile
+        import yaml
+        cli = os.path.join(scratch_root(), "apps", "iam", "compiler", "cli.py")
+        run = lambda *a: subprocess.run([sys.executable, cli] + list(a), capture_output=True, text=True, env=clean_env())
+        r = run("--defaults", "has-host", "RESEARCH_CONSOLE_DOMAIN")
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)          # commit B's factory policy
+        r = run("--defaults", "has-host", "PORTAL_DOMAIN")
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertEqual(run("--defaults", "has-host", "agents.medcea").returncode, 2)
+        with tempfile.TemporaryDirectory() as t:
+            f = os.path.join(t, "p.yaml")
+            with open(f, "w") as fh:
+                yaml.safe_dump(self.shape, fh, sort_keys=False)
+            r = run("--file", f, "has-host", "RESEARCH_CONSOLE_DOMAIN")
+            self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+            with open(f, "w") as fh:
+                yaml.safe_dump(self.factory.data, fh, sort_keys=False)
+            r = run("--file", f, "has-host", "RESEARCH_CONSOLE_DOMAIN")
+            self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)    # commit A2's
+            broken = copy.deepcopy(self.shape)
+            del broken["network"]["pods"]["research-console"]["audience"]
+            with open(f, "w") as fh:
+                yaml.safe_dump(broken, fh, sort_keys=False)
+            r = run("--file", f, "has-host", "RESEARCH_CONSOLE_DOMAIN")
+            self.assertEqual((r.returncode, r.stdout), (2, ""), r.stderr)
+            self.assertIn("refusing to answer", r.stderr)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+/* The rule Cytoscape.js would otherwise insert as an inline <style> (blocked by the console's CSP):
+   index.html links this file with id __________cytoscape_stylesheet, so Cytoscape finds it and adds nothing. */
+.__________cytoscape_container { position: relative; }

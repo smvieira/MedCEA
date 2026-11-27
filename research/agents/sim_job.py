@@ -10,6 +10,12 @@ results.jsonl, as parsed), error?}; the full results.jsonl stays in --out (a res
 the cluster) and manifest.result_digest is the digest of it, so the log copy is checkable
 against the volume. Stdlib + the harness.
 
+--series-every S (research Phase 4e, design rs4e 2.3; 0 = off, the default): each run's chamber
+time series goes to --out/series/<n>.json.gz (research/harness/series.py), next to results.jsonl,
+outside every digest; SIM_RESULT carries only the manifest's `series` block (interval, point cap,
+file names, digest), never a series, and `rows` stays results.jsonl's. The orchestrator passes
+RS_SIM_SERIES_EVERY (60 by default).
+
 --estimate (stage 3 of 4b, design R7): the estimate-<id> Job. Reads the spec the same way, runs
 research.agents.estimate.estimate_spec (FLC and MPC allowed: this image has their libraries) and prints
 
@@ -67,7 +73,10 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
     ap.add_argument("--max-cpu-hours", type=float, default=None)
     ap.add_argument("--spec", default=None)
     ap.add_argument("--estimate", action="store_true")
+    ap.add_argument("--series-every", type=float, default=0.0)
     a = ap.parse_args(argv)
+    if not a.series_every >= 0 or a.series_every == float("inf"):
+        ap.error("--series-every must be a number of seconds >= 0 (0 = off)")
     if a.estimate:
         if a.max_cpu_hours is None:
             a.max_cpu_hours = EST_CAP_H
@@ -94,7 +103,8 @@ def main(argv=None, runner=None, clock=time.monotonic, poll=2.0, exit_fn=os._exi
             # approved for less than its estimate runs and is stopped at the cap (cpu_cap_exceeded). Passing the
             # cap there refused it before any run (E48, 23 Nov 2026); CAMPAIGN_CEILING_H is mcp-sim's maximum
             return campaign.run_campaign(s, out, repo_root=ROOT, jobs=jobs,
-                                         max_cpu_hours=max(cap, CAMPAIGN_CEILING_H))
+                                         max_cpu_hours=max(cap, CAMPAIGN_CEILING_H),
+                                         series_every_s=a.series_every or None)
     base_p, base_c = cpu_seconds(), cgroup_seconds()
     done = threading.Event()
 

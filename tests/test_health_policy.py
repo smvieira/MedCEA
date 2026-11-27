@@ -1066,8 +1066,8 @@ class Wiring(unittest.TestCase):
         # 64 with Phase 5 round 2's iamdrift, iamanchor, iamcatalog; 65 with feedback control's controlloops;
         # 66 with the research sandbox's controllers (Phase 1, 17 Nov 2026);
         # 68 with its rsnetpol and rsexport (Phase 2a, 18 Nov 2026);
-        # 71 with its wbaccounts, rsgrants and rslake (Phase 2b)
-        self.assertEqual(len(lines), 77)
+        # 71 with its wbaccounts, rsgrants and rslake (Phase 2b); 78 with rsconsole (Phase 4e)
+        self.assertEqual(len(lines), 78)
         types = [l.split("|")[1].strip() for l in lines]
         for t in ("iamloaded", "jwks", "kcscopes", "iamnetpol", "iamdrift", "iamanchor", "iamcatalog",
                   "wbaccounts", "rsgrants", "rslake"):

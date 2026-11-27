@@ -29,8 +29,9 @@
 # get its own 403; each admitted account leaves a Superset user, which the exit trap
 # deactivates (active = false, as postgres in the PostgreSQL pod, SQL on stdin, only this
 # run's test-<role>-<random> names; owner decision N7: Superset's logs and ownerships
-# reference the row, so it is not deleted). 12 accounts × 12 hosts = 144 sign-ins,
-# 13 hosts = 156 with Superset.
+# reference the row, so it is not deleted). 12 accounts × 13 hosts = 156 sign-ins (the
+# research console's host since research Phase 4e's commit B; an account it admits also reads
+# /api/me through it: 200 with its own username and role), 14 hosts = 168 with Superset.
 #
 # Takes the deploy lock (it creates accounts and may restart the hub). Calls the Keycloak
 # admin API as the deploy scripts do (infra/lib-keycloak-admin.sh). Each sign-in is a

@@ -378,12 +378,14 @@ class _Probe:
 
 # ── the run ──────────────────────────────────────────────────────────────────────
 def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, repo_root=None,
-                 allow_dirty=False, trace=False, loaded=None):
+                 allow_dirty=False, trace=False, loaded=None, series=None):
     """Run one scenario with one controller; returns the result dict (see campaign.py).
 
     controller: {code, params}. trace: False (summary only), True (one entry per tick:
     time, truth, each loop's resolved state and command, relays) or "readings" (also the
-    readings snapshot each tick decided on, for the parity test)."""
+    readings snapshot each tick decided on, for the parity test). series: a
+    series.SeriesRecorder or None (research Phase 4e): it is given what each tick already
+    computed and never changes the run or its result."""
     loaded = loaded or algorithms_loader.load(repo_root or DEFAULT_REPO, allow_dirty=allow_dirty)
     lr = loaded.lr
     code = controller.get("code")
@@ -429,6 +431,9 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
         if tag not in published:
             raise ScenarioError("loop %s: no configured sensor publishes %s" % (loop["loop_code"], tag))
         active.append((loop, lr.state_key(loop, False), lo, hi))
+    if series is not None:
+        series.start(s["duration_h"] * 3600.0, s["metrics_from_h"] * 3600.0,
+                     [(key, lo, hi) for _, key, lo, hi in active], RELAYS)
 
     clock = SimClock(clock_offset_s, jitter_s, seed)
     chamber = Chamber(s["_plant_params"], s.get("initial"), seed)
@@ -438,7 +443,7 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
     metrics_from = s["metrics_from_h"] * 3600.0
     on_s, period_s = line["light_on_minutes"] * 60.0, (line["light_on_minutes"] + line["light_off_minutes"]) * 60.0
 
-    series = {key: metrics.LoopSeries() for _, key, _, _ in active}
+    loop_series = {key: metrics.LoopSeries() for _, key, _, _ in active}
     relay_series = metrics.RelaySeries(RELAYS)
     branches = {key: {"library": 0, "fallback": 0, "not_computed": 0} for _, key, _, _ in active}
     commands = {key: {"UP": 0, "DOWN": 0, "OFF": 0, "hold": 0, "none": 0} for _, key, _, _ in active}
@@ -492,7 +497,7 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
             for tag, sensor, v, arrival in bank.readings_due(chamber.time_s, chamber.truth()):
                 heapq.heappush(pending, (arrival, sensor, tag, v))
 
-    def _tick_loop(loop, key, t, now, snap, light_on, entry):
+    def _tick_loop(loop, key, t, now, snap, light_on, entry, seen):
         """One loop's part of a tick, production's try block (control_logic_thread.py)."""
         if not lr.in_phase(loop, light_on):
             return
@@ -518,6 +523,8 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
         if entry is not None:
             entry["loops"][key] = {"state": r["state"], "value": r["value"], "used": r["used"],
                                    "cmd": cmd, "hold": hold}
+        if seen is not None:
+            seen[key] = (r["state"], r["value"], cmd)
         if not cmd:
             commands[key]["none"] += 1
             return
@@ -525,7 +532,7 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
         session["last_cmd"][key] = cmd
         commands[key]["hold" if hold else cmd] = commands[key].get("hold" if hold else cmd, 0) + 1
         if t >= metrics_from:
-            series[key].command(cmd)
+            loop_series[key].command(cmd)
 
     clock.install(loaded.pid, loaded.q_learning)
     try:
@@ -560,17 +567,30 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
                     entry["started_at"] = session["started_at"]
                     entry["readings"] = sorted([list(k) + list(v) for k, v in snap.items()])
 
+                seen = {} if series is not None else None
                 for loop, key, lo, hi in active:
                     if t >= metrics_from:
-                        series[key].sample(truth[loop["input"]["tag"]], lo, hi)
+                        loop_series[key].sample(truth[loop["input"]["tag"]], lo, hi)
                     try:
-                        _tick_loop(loop, key, t, now, snap, light_on, entry)
+                        _tick_loop(loop, key, t, now, snap, light_on, entry, seen)
                     except Exception as e:     # control_logic_thread: one loop never stops the others
                         errors[key] += 1
                         first_error.setdefault(key, "%s: %s" % (type(e).__name__, " ".join(str(e).split())[:200]))
                 board.apply(LIGHT, "ON" if light_on else "OFF", line["light_type"])
                 if t >= metrics_from:
                     relay_series.sample(board.relays)
+                if series is not None:
+                    try:
+                        cyc = int(t // period_s) if period_s > 0 else 0
+                        series.tick(t, {k: v[2] for k, v in seen.items()}, board.relays, light_on, cyc)
+                        if series.due(t):
+                            amb, dist = _disturbance_at(s["_disturbances"], t)
+                            series.sample(t, truth, seen, board.relays, light_on,
+                                          sum(chamber.energy_wh().values()), cyc, dist,
+                                          chamber._ambient(amb))   # the room step() uses (pure)
+                    except Exception as e:     # the series never stops or changes the run: it stops recording
+                        series.fail("%s: %s" % (type(e).__name__, " ".join(str(e).split())[:200]), t)
+                        series = None
                 if trace:
                     entry["light_on"] = light_on
                     entry["relays"] = dict(board.relays)
@@ -598,7 +618,7 @@ def run_scenario(scenario, controller, seed, clock_offset_s=0.0, jitter_s=0.0, r
     for loop, key, lo, hi in active:
         d = {"lower": lo, "upper": hi, "tag": loop["input"]["tag"], "actuator": loop["output"]["actuator"],
              "branches": branches[key], "commands": commands[key], "errors": errors[key]}
-        d.update(series[key].result())
+        d.update(loop_series[key].result())
         loops_out[key] = d
     messages = [ln for ln in stderr.getvalue().splitlines() if ln.strip()]
     result = {

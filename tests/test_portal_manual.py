@@ -172,10 +172,12 @@ class Render(unittest.TestCase):
         })
         # every URL lib-portal switches by is on the page exactly once
         html = self.docs[("ConfigMap", "portal-html")]["data"]["index.html"]
-        for host in sum(cards.values(), []) + ["superset_domain"]:
+        for host in sum(cards.values(), []) + ["superset_domain", "research_console_domain"]:
             self.assertEqual(len(re.findall(r'(?:href|data-href)="https://%s\.example"' % host, html)), 1, host)
-        # the agent campaigns placeholder has no URL, so portal_card never matches it
-        self.assertRegex(self.view("research"), r'<div class="card card-dis">\s*<div class="ci">')
+        # research Phase 4e: the Agent campaigns card opens the research console, in lib-portal's disabled form
+        # until apps/research-console/deploy.sh enables it (exactly what portal_card enable matches)
+        self.assertRegex(self.view("research"), r'(?s)<div class="card card-dis" data-href="https://research_console_domain\.example">'
+                                                r'.*?<div class="ct">Agent campaigns</div>.*?</div><!--/card-->')
         self.assertIn('<div id="bg" style="', html)       # apps/frontend/deploy.sh rewrites it
 
     def test_reports_view(self):
@@ -622,7 +624,7 @@ class Health(unittest.TestCase):
     def test_wiring(self):
         conf = read("health-checks.conf")
         lines = [l for l in conf.splitlines() if l.strip() and not l.startswith("#")]
-        self.assertEqual(len(lines), 77)  # 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5; 64 with round 2 (iamdrift, iamanchor, iamcatalog); 65 with controlloops (feedback control, 13 Nov 2026); 66 with controllers (research sandbox Phase 1, 17 Nov 2026); 68 with rsnetpol and rsexport (research sandbox Phase 2a, 18 Nov 2026); 71 with wbaccounts, rsgrants and rslake (Phase 2b)
+        self.assertEqual(len(lines), 78)  # 78 with rsconsole (research Phase 4e); 57 with Container AppArmor (8 Nov 2026); 61 with Phase 5; 64 with round 2 (iamdrift, iamanchor, iamcatalog); 65 with controlloops (feedback control, 13 Nov 2026); 66 with controllers (research sandbox Phase 1, 17 Nov 2026); 68 with rsnetpol and rsexport (research sandbox Phase 2a, 18 Nov 2026); 71 with wbaccounts, rsgrants and rslake (Phase 2b)
         row = [l for l in lines if l.split("|")[0].strip() == "Platform manual"]
         self.assertEqual(len(row), 1)
         self.assertEqual([x.strip() for x in row[0].split("|")[1:3]], ["manual", "$NAMESPACE"])

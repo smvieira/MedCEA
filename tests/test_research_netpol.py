@@ -511,15 +511,15 @@ class ApplyCheck(unittest.TestCase):
         self.assertEqual(d["netpol_research"], apply_check.sha("z"))
 
     def test_owners_only_with_the_zone(self):
-        self.assertEqual(apply_check.target_owners(set()), apply_check.TARGET_OWNER)
+        self.assertEqual(apply_check.target_owners(set(), set()), apply_check.TARGET_OWNER)   # no zone, no policy host
         self.assertNotIn("./infra/deploy-research-namespace.sh --policy-only", apply_check.scoped_commands(set()))
         self.assertNotIn("./infra/deploy-research-namespace.sh", apply_check.full_deploys(set()))
         self.assertEqual(apply_check.target_owners({"research"})["netpol-research"],
                          "./infra/deploy-research-namespace.sh --policy-only")
-        sc = apply_check.scoped_commands({"research"})
+        sc = apply_check.scoped_commands({"research"}, set())
         self.assertEqual(sc.count("./infra/deploy-research-namespace.sh --policy-only"), 1)
         self.assertEqual(sc[0], "./deploy-infra.sh --policy-only")
-        self.assertEqual([c for c in sc if "research" not in c], apply_check.scoped_commands(set()))
+        self.assertEqual([c for c in sc if "research" not in c], apply_check.scoped_commands(set(), set()))
         self.assertIn("./infra/deploy-research-namespace.sh", apply_check.full_deploys({"research"}))
 
     def test_changed_detail_names_zone_policies(self):

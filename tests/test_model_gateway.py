@@ -318,6 +318,19 @@ class GatewayTest(unittest.TestCase):
         self.assertRegex(rs["raw_response_sha256"], "^[0-9a-f]{64}$")
         self.assertEqual(out["usage"], rs["usage"])
 
+    def test_the_asking_agent_is_recorded_on_both_sides(self):
+        # research Phase 4e (design 2.1): absent = the lead a0; a sub-agent's id is copied; a malformed one is 400
+        self.turn()
+        self.assertEqual([e["payload"]["agent"] for e in self.sess.events], ["a0", "a0"])
+        st, _ = self.gw.turn(TOKEN, "10.0.0.7", {"sid": SID, "agent": "a0.2", "turn": 1, "request": REQ})
+        self.assertEqual(st, 200)
+        self.assertEqual([e["payload"]["agent"] for e in self.sess.events[2:]], ["a0.2", "a0.2"])
+        n = len(self.sess.events)
+        for bad in ("a1", "a0.0", "a0.1.2.3.4", 7, ""):
+            st, _ = self.gw.turn(TOKEN, "10.0.0.7", {"sid": SID, "agent": bad, "turn": 1, "request": REQ})
+            self.assertEqual(st, 400, bad)
+        self.assertEqual(len(self.sess.events), n)          # nothing recorded for a refused body
+
     def test_a_refused_request_record_refuses_the_turn(self):
         self.sess.refuse = {"turn_request"}
         self.assertEqual(self.turn()[0], 403)
@@ -330,7 +343,7 @@ class GatewayTest(unittest.TestCase):
     def test_a_model_failure_is_recorded_and_answered(self):
         self.llm.status, self.llm.answer = 500, {"error": "boom"}
         self.assertEqual(self.turn()[0], 502)
-        self.assertEqual(self.sess.events[-1]["payload"], {"turn": 1, "error": "model_error", "status": 500})
+        self.assertEqual(self.sess.events[-1]["payload"], {"agent": "a0", "turn": 1, "error": "model_error", "status": 500})
         self.llm.status, self.llm.answer = 400, {"error": {"type": "exceed_context_size_error"}}
         self.assertEqual(self.turn(turn=2)[0], 413)
         self.assertEqual(self.sess.events[-1]["payload"]["error"], "context_full")

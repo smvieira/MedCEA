@@ -3,6 +3,7 @@ import base64
 import json
 import math
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -189,12 +190,23 @@ class JobRunnerTest(unittest.TestCase):
         c = j["spec"]["template"]["spec"]["containers"][0]
         self.assertEqual(j["spec"]["activeDeadlineSeconds"], 700)
         self.assertEqual(j["spec"]["backoffLimit"], 0)
-        self.assertEqual(c["command"][-6:], ["--out", "/runs/campaigns/" + self.CID, "--jobs", "3", "--max-cpu-hours", "1.5"][-6:])
+        self.assertEqual(c["command"][3:], ["--out", "/runs/campaigns/" + self.CID, "--jobs", "3", "--max-cpu-hours", "1.5",
+                                            "--series-every", "60"])      # research Phase 4e: the run series, 60 s
         self.assertEqual(json.loads(base64.b64decode(next(e for e in c["env"] if e["name"] == "MEDCEA_SIM_SPEC")["value"])), {"scenarios": []})
         with self.assertRaises(ValueError):
             self.r.start("bad", {}, 1, 10)
         with self.assertRaises(ValueError):
             self.r.start(self.CID, {}, 99, 10)
+
+    def test_the_series_interval(self):
+        # research Phase 4e (design rs4e 2.3): RS_SIM_SERIES_EVERY reaches the Job's command; 0 turns it off
+        for every, want in ((30, "30"), (0, "0"), (2.5, "2.5"), ("90", "90")):
+            j = self.jobs.sim_job(dict(self.CFG, series_every=every), self.CID, {}, 1, 60, 2)
+            cmd = j["spec"]["template"]["spec"]["containers"][0]["command"]
+            self.assertEqual(cmd[cmd.index("--series-every") + 1], want)
+        for bad in (-1, 86401, "x", True, float("nan")):
+            with self.assertRaises(ValueError):
+                self.jobs.sim_job(dict(self.CFG, series_every=bad), self.CID, {}, 1, 60, 2)
 
     def test_status_running_done_cached(self):
         self.r.start(self.CID, {}, 1, 60)
@@ -298,6 +310,71 @@ class SimJobTest(unittest.TestCase):
         self.assertEqual((rc, r["state"]), (0, "done"))
         self.assertEqual(seen["max_cpu_hours"], sim_job.CAMPAIGN_CEILING_H)
         self.assertEqual(sim_job.CAMPAIGN_CEILING_H, mcp_sim.MAX_CAMPAIGN_H)
+
+    def test_the_series_flag_reaches_the_campaign(self):
+        # research Phase 4e (design rs4e 2.3): --series-every S; absent or 0 is off (None to the harness)
+        import contextlib
+        import io
+        from unittest import mock
+        from research.agents import sim_job
+        from research.harness import campaign
+        seen = []
+
+        def run_campaign(s, out, **kw):
+            seen.append(kw.get("series_every_s"))
+            with open(os.path.join(out, "results.jsonl"), "w") as f:
+                f.write('{"valid":true}\n')
+            return {"runs": 1, "result_digest": "f" * 64}
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        specf = os.path.join(d, "spec.json")
+        with open(specf, "w") as f:
+            json.dump({"a": 1}, f)
+        with mock.patch.object(campaign, "resolve_spec", lambda s, repo_root=None: s), \
+                mock.patch.object(campaign, "run_campaign", run_campaign), contextlib.redirect_stdout(io.StringIO()):
+            for extra in ([], ["--series-every", "0"], ["--series-every", "60"]):
+                self.assertEqual(sim_job.main(["--out", d, "--max-cpu-hours", "1", "--spec", specf] + extra), 0)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                sim_job.main(["--out", d, "--max-cpu-hours", "1", "--spec", specf, "--series-every", "-1"])
+        self.assertEqual(seen, [None, None, 60.0])
+
+    def test_a_real_campaign_writes_its_series_next_to_the_results(self):
+        # the harness end to end: series/<n>.json.gz beside results.jsonl; SIM_RESULT carries the manifest's
+        # series block, never a series, and rows are results.jsonl's lines
+        import yaml
+        from unittest import mock
+        from research.agents import sim_job
+        from research.harness import campaign
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(repo, "research", "harness", "scenarios", "smoke_air_temperature.yaml")) as f:
+            sc = yaml.safe_load(f)
+        sc.update(duration_h=0.05, metrics_from_h=0)
+        spec = {"scenarios": [sc], "controllers": [{"code": "IF_THEN_ELSE"}, {"code": "PID"}], "seeds": [1]}
+        real_resolve, real_run = campaign.resolve_spec, campaign.run_campaign
+        with mock.patch.object(campaign, "resolve_spec", lambda s, repo_root=None: real_resolve(s, repo_root=repo,
+                                                                                                allow_dirty=True)), \
+                mock.patch.object(campaign, "run_campaign", lambda *a, **kw: real_run(*a, allow_dirty=True, **kw)):
+            import contextlib
+            import io
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d)
+            specf = os.path.join(d, "spec.json")
+            with open(specf, "w") as f:
+                json.dump(spec, f)
+            out = os.path.join(d, "out")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = sim_job.main(["--out", out, "--jobs", "1", "--max-cpu-hours", "1", "--spec", specf,
+                                   "--series-every", "60"])
+        self.assertEqual(rc, 0)
+        line, = [ln for ln in buf.getvalue().splitlines() if ln.startswith(sim_job.MARK)]
+        r = json.loads(line[len(sim_job.MARK):])
+        self.assertEqual(sorted(os.listdir(out)), ["manifest.json", "results.jsonl", "series", "spec.json"])
+        self.assertEqual(sorted(os.listdir(os.path.join(out, "series"))), ["0.json.gz", "1.json.gz"])
+        self.assertEqual(r["manifest"]["series"]["files"], ["series/0.json.gz", "series/1.json.gz"])
+        with open(os.path.join(out, "results.jsonl")) as f:
+            self.assertEqual(r["rows"], [json.loads(x) for x in f])
+        self.assertNotIn("columns", line)
 
     def test_campaign_error_is_a_failed_result(self):
         def runner(spec, out, jobs, cap):
@@ -580,8 +657,11 @@ class ProfileTools(unittest.TestCase):
         for n in names:
             p = loop.load_profile(os.path.join(a, "profiles", n + ".yaml"))
             self.assertEqual(p["name"], n)
-            self.assertEqual(sorted(set(p["tools"]) - self.served), [], n)
+            # team.delegate is the agent loop's own tool (research Phase 4e A1b, team.py), never a server's
+            self.assertEqual(sorted(set(p["tools"]) - self.served - {loop.TEAM_TOOL}), [], n)
             self.assertTrue(os.path.isfile(os.path.join(a, "skills", p.get("skill", "controller_campaign") + ".md")), n)
+            for s in (p.get("team") or {}).values():
+                self.assertTrue(os.path.isfile(os.path.join(a, "skills", s["skill"] + ".md")), n)
         gpu = loop.load_profile(os.path.join(a, "profiles", "compare_controllers_gpu.yaml"))
         self.assertEqual((gpu["backend"], gpu["caps"]["context_tokens"]), ("gpu", 12000))
         self.assertEqual(gpu["finish_after"], ["propose.parameter_set"])
@@ -680,6 +760,43 @@ class GateCheckProfile(unittest.TestCase):
         self.assertGreaterEqual(r["cpu_hours"], 1.25 * mcp_sim.AUTO_BELOW_H)
         self.assertLessEqual(r["cpu_hours"] + r["calibration_h"], p["caps"]["cpu_hours"] / 2)
         self.assertLess(p["caps"]["cpu_hours"], mcp_sim.MAX_CAMPAIGN_H)
+
+
+class AgentKeyEcho(unittest.TestCase):
+    """Research Phase 4e (design 2.1): the agent's key of a call, params._meta {agent, call}, is recorded beside the
+    server's own count; an invalid value is dropped; a call without it is recorded as before."""
+
+    def test_the_key_through_the_agents_own_client(self):
+        from research.agents import http_tools
+        s, r, app = setup()
+
+        class T:
+            def post(self, url, token, msg):
+                return app.handle(msg, token, "10.0.0.1")
+
+        tools = http_tools.HttpTools({"sim": "http://sim"}, "tok", transport=T(), sleep=lambda x: None)
+        r.final = {"state": "done", "cpu_hours": 0.1, "manifest": {"result_digest": "d"}}
+        tools.call("sim.estimate", {"spec": {"runs": 1}}, meta={"agent": "a0.1", "call": 3})
+        tools.call("sim.run", {"spec": {"runs": 1}}, meta={"agent": "a0", "call": 4})
+        recs = s.of("tool_result")
+        # the sim.status poll that follows the started run carries the run's key: one agent call, two server records
+        self.assertEqual([(x["agent"], x["agent_call"], x["call"]) for x in recs],
+                         [("a0.1", 3, 1), ("a0", 4, 2), ("a0", 4, 3)])
+
+    def test_invalid_or_absent_keys(self):
+        s, r, app = setup()
+        call(app, "sim.estimate", {"spec": {"runs": 1}})
+        self.assertNotIn("agent", s.of("tool_result")[-1])
+        self.assertNotIn("agent_call", s.of("tool_result")[-1])
+        for meta, want in (({"agent": "a1", "call": 2}, {"agent_call": 2}), ({"agent": "a0.1", "call": True}, {"agent": "a0.1"}),
+                           ({"agent": "<x>", "call": "2"}, {}), ("nope", {}), ({"agent": "a0", "call": 0}, {"agent": "a0"})):
+            rpc(app, "tools/call", {"name": "sim.estimate", "arguments": {"spec": {"runs": 1}}, "_meta": meta})
+            got = {k: v for k, v in s.of("tool_result")[-1].items() if k in ("agent", "agent_call")}
+            self.assertEqual(got, want, meta)
+        # a refused tool is recorded with the key too
+        s.tools = ["sim.estimate"]
+        rpc(app, "tools/call", {"name": "sim.run", "arguments": {}, "_meta": {"agent": "a0", "call": 9}})
+        self.assertEqual((s.of("tool_result")[-1]["agent_call"], s.of("tool_result")[-1]["error"]), (9, True))
 
 
 class ProtocolParity(unittest.TestCase):

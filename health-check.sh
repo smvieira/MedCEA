@@ -295,6 +295,10 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo -e "         FAIL when the Deployment's or /props' model is not the pin in apps/research-model/pins.json;"
     echo -e "         WARN when the pod is not Ready, /health or /props do not answer, the context is not 4096 or generation since start averages below half the bench's rate at 4096 tokens of context; it generates nothing"
     echo ""
+    echo -e "  ${CYAN}rsconsole${NC} the research console's page server (Phase 4e): NAMESPACE (SKIP until the policy has RESEARCH_CONSOLE_DOMAIN)"
+    echo -e "         FAIL when the served page is not the ConfigMap's (after 120 s), / answers without a token, a vendor file"
+    echo -e "         is not its VERSION's or the pod carries a Secret or a ServiceAccount token; WARN when it does not answer"
+    echo ""
     echo -e "  ${CYAN}manual${NC} the portal serves the manual the repository builds now (/manual/): NAMESPACE"
     echo -e "         OK when ConfigMap portal-manual's medcea/manual-sha256 = its own content = a fresh"
     echo -e "         docs/manual/build.py --out --standalone (a temp file); WARN when it lags or is missing (./medcea.sh"
@@ -2602,7 +2606,9 @@ else:
     # the Deployment (policy without the zone, not installed) adds nothing; a pod that answers another digest
     # is a stale route table in a service that always enforces.
     local zdc zns zdep zctr zk
-    for zdc in research-gw:research-session:research-session research-agents:research-orchestrator:research-orchestrator; do
+    # research Phase 4e: the console (research-agents, container console) once ./apps/research-console/deploy.sh ran
+    for zdc in research-gw:research-session:research-session research-agents:research-orchestrator:research-orchestrator \
+               research-agents:research-console:console; do
         IFS=: read -r zk zdep zctr <<<"$zdc"
         zns="$(NAMESPACE="$ns" bash -c 'source "$1/infra/lib-policy-tools.sh"; zone_namespace "$2"' _ "$SCRIPT_DIR" "$zk" 2>/dev/null)" || continue
         [[ -n "$zns" ]] || continue
@@ -2762,10 +2768,17 @@ check_kcscopes() {
             esac
         done
     fi
+    # The research hosts' clients (KC_RESEARCH_HOST_CLIENTS, research Phase 4e): research-console exists only
+    # while the applied policy has RESEARCH_CONSOLE_DOMAIN (cli.py has-host): then groups and medcea-research
+    # default, never medcea-identity (one audience); otherwise present and enabled FAILs.
+    local hostrc=0 rhosts="${KC_RESEARCH_HOST_CLIENTS[*]:-}"
+    if [[ -n "$rhosts" ]]; then
+        python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-host RESEARCH_CONSOLE_DOMAIN >/dev/null 2>&1 || hostrc=$?
+    fi
     out="$(timeout "$TIMEOUT" $KUBECTL exec -i -n "$ns" rdbms-postgresql-0 -- \
         env PGOPTIONS="-c default_transaction_read_only=on -c client_min_messages=warning" sh -c \
         'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" exec psql -X -q -v ON_ERROR_STOP=1 -U postgres -d keycloak -tA -v realm="$0" -v clients="$1"' \
-        "$realm" "${KC_SCOPE_CLIENTS[*]}" 2>/dev/null <<'SQL'
+        "$realm" "${KC_SCOPE_CLIENTS[*]}${rhosts:+ $rhosts}" 2>/dev/null <<'SQL'
 SELECT coalesce((
   SELECT json_build_object(
     'scopes', (SELECT coalesce(json_object_agg(s.name, json_build_object(
@@ -2779,10 +2792,10 @@ SELECT coalesce((
                   'full_scope', c.full_scope_allowed,
                   'default', (SELECT coalesce(json_agg(s.name), '[]'::json) FROM client_scope_client d
                                 JOIN client_scope s ON s.id = d.scope_id
-                               WHERE d.client_id = c.id AND d.default_scope AND s.name IN ('groups', 'medcea-identity')),
+                               WHERE d.client_id = c.id AND d.default_scope AND s.name IN ('groups', 'medcea-identity', 'medcea-research')),
                   'optional', (SELECT coalesce(json_agg(s.name), '[]'::json) FROM client_scope_client d
                                  JOIN client_scope s ON s.id = d.scope_id
-                                WHERE d.client_id = c.id AND NOT d.default_scope AND s.name IN ('groups', 'medcea-identity')),
+                                WHERE d.client_id = c.id AND NOT d.default_scope AND s.name IN ('groups', 'medcea-identity', 'medcea-research')),
                   'mappers', (SELECT coalesce(json_agg(json_build_object('type', m.protocol_mapper_name, 'name', m.name,
                                   'config', (SELECT coalesce(json_object_agg(pc.name, pc.value), '{}'::json)
                                                FROM protocol_mapper_config pc WHERE pc.protocol_mapper_id = m.id))), '[]'::json)
@@ -2800,6 +2813,7 @@ except Exception:
     print("WARN|cannot read Keycloak database keycloak: the client scopes are not checked"); sys.exit()
 realm, wanted, api = sys.argv[1], sys.argv[2].split(), set(sys.argv[3].split())
 retired, unsure = sys.argv[4].split(), sys.argv[5].split()
+rhosts, hostrc = sys.argv[6].split(), sys.argv[7]
 wanted = [c for c in wanted if c not in retired]
 api -= set(retired)
 if doc is None:
@@ -2867,11 +2881,31 @@ for c in retired:
         print("FAIL|client %s is enabled, yet the applied access policy names it as no token client: its tokens still reach the platform APIs that admit it (./deploy-infra.sh disables it)" % c)
     else:
         gone.append("%s (%s)" % (c, "disabled" if c in clients else "absent"))
+rok = []
+for c in rhosts:
+    d = clients.get(c)
+    if hostrc == "0":
+        if d is None:
+            print("FAIL|client %s is missing in realm %s, yet the applied access policy has its host: nobody can sign in to it (./deploy-infra.sh)" % (c, realm)); continue
+        if d.get("enabled") is False:
+            print("FAIL|client %s is disabled, yet the applied access policy has its host (./deploy-infra.sh)" % c)
+        for s in ("groups", "medcea-research"):
+            if s not in (d.get("default") or []):
+                print("FAIL|%s is not a default scope of %s: the services of its host refuse its tokens (./deploy-infra.sh)" % (s, c))
+        if "medcea-identity" in (d.get("default") or []) + (d.get("optional") or []):
+            print("FAIL|%s carries medcea-identity: its tokens would carry two audiences, the research host has one (./deploy-infra.sh removes it)" % c)
+        rok.append(c)
+    elif hostrc == "1":
+        if d is not None and d.get("enabled") is not False:
+            print("FAIL|client %s is enabled, yet the applied access policy has no host for it (./deploy-infra.sh disables it)" % c)
+    else:
+        print("WARN|cannot tell whether the applied access policy has the host of %s (python3 apps/iam/compiler/cli.py check)" % c)
 n = len([c for c in wanted if c in clients])
-print("OK|%d clients: groups and medcea-identity default on each (%d of them reach a platform API)%s" % (
+print("OK|%d clients: groups and medcea-identity default on each (%d of them reach a platform API)%s%s" % (
     n, len([c for c in wanted if c in clients and c in api]),
-    "; retired by the access policy: " + ", ".join(gone) if gone else ""))
-' "$realm" "${KC_SCOPE_CLIENTS[*]}" "${KC_API_CLIENTS[*]}" "${retired[*]}" "${unsure[*]}" <<<"${out:-}" 2>&1)" \
+    "; retired by the access policy: " + ", ".join(gone) if gone else "",
+    "; research host client(s) %s: groups and medcea-research only" % ", ".join(rok) if rok else ""))
+' "$realm" "${KC_SCOPE_CLIENTS[*]}" "${KC_API_CLIENTS[*]}" "${retired[*]}" "${unsure[*]}" "$rhosts" "$hostrc" <<<"${out:-}" 2>&1)" \
         || out="FAIL|cannot judge the client scopes: $(tail -n1 <<<"$out" | cut -c1-120)"
     while IFS='|' read -r lvl msg; do
         case "$lvl" in
@@ -3286,7 +3320,9 @@ for i in items:
     # created it: the hub may create pods in the research zone with any label or account.
     if k == "Pod":
         app = labels.get("app")
-        want = ("Deployment", app) if app in ("research-orchestrator", "mcp-sim", "mcp-lake", "research-session") else None
+        # research Phase 4e: research-console too (its Deployment names no Secret: allowed() gives it none)
+        want = ("Deployment", app) if app in ("research-orchestrator", "mcp-sim", "mcp-lake", "research-session",
+                                              "research-console") else None
         if (ps.get("serviceAccountName") == "research-orchestrator") and want is None:
             want = ("Deployment", "research-orchestrator")
         if want is not None and top(i) != want:
@@ -3923,6 +3959,168 @@ except Exception:
     else _record OK "$name" "research-llm runs the pinned model; ${oks[*]}"; fi
 }
 
+# rsconsole (Research console; research Phase 4e, design rs4e §6): the console's page server in research-agents.
+# Read-only. SKIP while the applied access policy has no RESEARCH_CONSOLE_DOMAIN (cli.py has-host 1) or there is
+# no Deployment research-console. Read through `kubectl exec deploy/research-console -c console -- python3 -c`
+# (the zone admits no node source on 8080): /healthz, GET / without a token, /srv/MANIFEST.json's file digests.
+# FAIL when /healthz's manifest_sha256 differs from ConfigMap research-console-html's medcea/console-sha256 120 s
+# or more after the ConfigMap's last write (managedFields, as iamloaded; the kubelet syncs the mount within that),
+# when / answers anything but 401 without a token (the check proves the gate), when a vendor file's sha256 is not
+# the one its html/vendor/<lib>/VERSION records, when the Deployment or a Running pod mounts a Secret or carries a
+# ServiceAccount token. WARN: no Running pod, no answer, unreadable objects, a digest lag inside 120 s.
+check_rsconsole() {
+    local name="$1" ns="${2:-${NAMESPACE:-medcea}}" agns hrc=0 rc=0 dep pods cm probe d out lvl msg worst="" details=() ok=""
+    if ! _ps_kubectl_usable; then _record SKIP "$name" "no usable kubectl"; return; fi
+    python3 "$SCRIPT_DIR/apps/iam/compiler/cli.py" has-host RESEARCH_CONSOLE_DOMAIN >/dev/null 2>&1 || hrc=$?
+    case "$hrc" in
+        0) ;;
+        1) _record SKIP "$name" "the applied access policy has no research console yet (RESEARCH_CONSOLE_DOMAIN)"; return ;;
+        *) _record WARN "$name" "cannot tell whether the applied access policy has the research console (python3 apps/iam/compiler/cli.py check)"; return ;;
+    esac
+    agns="$(NAMESPACE="$ns" bash -c 'source "$1/infra/lib-policy-tools.sh"; zone_namespace research-agents' _ "$SCRIPT_DIR" 2>/dev/null)"
+    [[ -n "$agns" ]] || { _record WARN "$name" "cannot tell the research-agents namespace"; return; }
+    dep="$(timeout "$TIMEOUT" $KUBECTL get deployment research-console -n "$agns" -o json 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -qiE 'NotFound|not found' <<<"$dep"; then
+            _record SKIP "$name" "no deployment research-console in $agns (./apps/research-console/deploy.sh)"
+        else
+            _record WARN "$name" "cannot read deployment research-console in $agns: $(tail -n1 <<<"$dep" | cut -c1-120)"
+        fi
+        return
+    fi
+    d="$(mktemp -d)"; chmod 700 "$d"
+    printf '%s' "$dep" >"$d/dep.json"
+    timeout "$TIMEOUT" $KUBECTL get pods -n "$agns" -l app=research-console -o json >"$d/pods.json" 2>/dev/null || : >"$d/pods.json"
+    timeout "$TIMEOUT" $KUBECTL get configmap research-console-html -n "$agns" -o json --show-managed-fields >"$d/cm.json" 2>/dev/null || : >"$d/cm.json"
+    timeout "$TIMEOUT" $KUBECTL exec -n "$agns" deploy/research-console -c console -- python3 -c '
+import json, urllib.error, urllib.request
+out = {}
+try:
+    out["healthz"] = json.load(urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=3))
+except Exception:
+    out["healthz"] = None
+try:
+    urllib.request.urlopen("http://127.0.0.1:8080/", timeout=3)
+    out["root"] = 200
+except urllib.error.HTTPError as e:
+    out["root"] = e.code
+except Exception:
+    out["root"] = None
+try:
+    m = json.load(open("/srv/MANIFEST.json"))
+    out["files"] = {k: (v or {}).get("sha256") for k, v in (m.get("files") or {}).items()}
+except Exception:
+    out["files"] = None
+print(json.dumps(out))' 2>/dev/null | tail -n1 >"$d/probe.json" || : >"$d/probe.json"
+    out="$(python3 - "$d" "$SCRIPT_DIR/apps/research-console/html/vendor" "$(date +%s)" <<'PY' 2>&1
+import datetime, glob, json, os, re, sys
+d, vendor, now = sys.argv[1], sys.argv[2], int(sys.argv[3])
+def load(n):
+    try:
+        with open(os.path.join(d, n)) as f:
+            t = f.read().strip()
+        return json.loads(t.splitlines()[-1] if n == "probe.json" else t) if t else None
+    except (OSError, ValueError, IndexError):
+        return None
+dep, pods, cm, probe = load("dep.json"), load("pods.json"), load("cm.json"), load("probe.json")
+fails, warns = [], []
+def leaks(spec):
+    """what a pod spec carries that the console must not: a Secret (volume, projected, env, envFrom,
+    imagePullSecrets) or a ServiceAccount token (automount not false, a projected serviceAccountToken)"""
+    out = []
+    if spec.get("automountServiceAccountToken") is not False:
+        out.append("a ServiceAccount token (automountServiceAccountToken is not false)")
+    for v in spec.get("volumes") or []:
+        if v.get("secret"):
+            out.append("Secret volume %s" % (v["secret"].get("secretName") or "?"))
+        for s in (v.get("projected") or {}).get("sources") or []:
+            if s.get("secret"):
+                out.append("projected Secret %s" % (s["secret"].get("name") or "?"))
+            if s.get("serviceAccountToken"):
+                out.append("a projected ServiceAccount token")
+    for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+        for e in c.get("env") or []:
+            if ((e.get("valueFrom") or {}).get("secretKeyRef") or {}).get("name"):
+                out.append("Secret %s in env" % e["valueFrom"]["secretKeyRef"]["name"])
+        for e in c.get("envFrom") or []:
+            if (e.get("secretRef") or {}).get("name"):
+                out.append("Secret %s in envFrom" % e["secretRef"]["name"])
+    if spec.get("imagePullSecrets"):
+        out.append("imagePullSecrets")
+    return out
+tspec = (((dep or {}).get("spec") or {}).get("template") or {}).get("spec") or {}
+for x in leaks(tspec):
+    fails.append("the Deployment's pod carries %s" % x)
+running = [p for p in ((pods or {}).get("items") or []) if (p.get("status") or {}).get("phase") == "Running"
+           and not (p.get("metadata") or {}).get("deletionTimestamp")]
+for p in running:
+    for x in leaks(p.get("spec") or {}):
+        fails.append("pod %s carries %s" % ((p.get("metadata") or {}).get("name"), x))
+if not running:
+    warns.append("no Running research-console pod (microk8s kubectl -n <research-agents ns> describe pod -l app=research-console)")
+elif not isinstance(probe, dict) or not isinstance(probe.get("healthz"), dict):
+    warns.append("research-console does not answer /healthz in its pod (kubectl exec deploy/research-console -c console)")
+else:
+    live = probe["healthz"].get("manifest_sha256")
+    meta = (cm or {}).get("metadata") or {}
+    want = (meta.get("annotations") or {}).get("medcea/console-sha256")
+    times = [m.get("time") for m in meta.get("managedFields") or [] if m.get("time")]
+    age = None
+    if times:
+        try:
+            last = max(datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) for t in times)
+            age = int(now - last.timestamp())
+        except ValueError:
+            age = None
+    if cm is None or not want:
+        warns.append("cannot read ConfigMap research-console-html's medcea/console-sha256 (./apps/research-console/deploy.sh)")
+    elif live != want:
+        if age is not None and age < 120:
+            warns.append("the pod serves manifest %s, the ConfigMap holds %s since %d s (the kubelet syncs within 120 s)"
+                         % ((live or "-")[:12], want[:12], age))
+        else:
+            fails.append("the pod serves manifest %s, the ConfigMap holds %s %s (./apps/research-console/deploy.sh)"
+                         % ((live or "none")[:12], want[:12], "since %d s" % age if age is not None else "since an unknown time"))
+    if probe.get("root") != 401:
+        fails.append("GET / without a token answered %s, not 401: the console does not check the token" % probe.get("root"))
+    served = probe.get("files")
+    if not isinstance(served, dict):
+        warns.append("cannot read /srv/MANIFEST.json in the pod")
+    else:
+        for vf in sorted(glob.glob(os.path.join(vendor, "*", "VERSION"))):
+            lib = os.path.basename(os.path.dirname(vf))
+            with open(vf) as f:
+                for line in f:
+                    m = re.match(r"^([0-9a-f]{64})\s+(\S+)\s*$", line)
+                    if not m:
+                        continue
+                    nm = "%s/%s" % (lib, m.group(2))
+                    if served.get(nm) != m.group(1):
+                        fails.append("vendor file %s: served %s, VERSION records %s" % (nm, (served.get(nm) or "nothing")[:12], m.group(1)[:12]))
+for x in fails:
+    print("FAIL|" + x)
+for x in warns:
+    print("WARN|" + x)
+if isinstance(probe, dict) and isinstance(probe.get("healthz"), dict):
+    print("OK|research-console serves manifest %s (%s files); / refuses without a token (401); no Secret, no token"
+          % ((probe["healthz"].get("manifest_sha256") or "-")[:12], probe["healthz"].get("files")))
+PY
+)" || out="WARN|cannot judge the research console: $(tail -n1 <<<"$out" | cut -c1-120)"
+    rm -rf "$d"
+    while IFS='|' read -r lvl msg; do
+        case "$lvl" in
+            FAIL) worst=FAIL; details+=("$msg") ;;
+            WARN) [[ "$worst" == FAIL ]] || worst=WARN; details+=("$msg") ;;
+            OK)   ok="$msg" ;;
+        esac
+    done <<<"$out"
+    if [[ -n "$worst" ]]; then
+        local IFS=';'; _record "$worst" "$name" "${details[*]}"
+    else
+        _record OK "$name" "${ok:-research-console answers}"
+    fi
+}
+
 # =============================================================================
 # Check: TCP port reachability
 # target: HOST:PORT
@@ -4151,6 +4349,7 @@ while IFS='|' read -r name type target options || [[ -n "$name" ]]; do
         rsanchor)     check_rsanchor "$name" "$target" ;;
         rsagent)      check_rsagent "$name" "$target" ;;
         rsllm)        check_rsllm "$name" "$target" ;;
+        rsconsole)    check_rsconsole "$name" "$target" ;;
         wbaccounts)   check_wbaccounts "$name" "$target" ;;
         "")   continue ;;  # blank type (trailing whitespace only line)
         *)    _record WARN "$name" "Unknown check type '${type}'" ;;

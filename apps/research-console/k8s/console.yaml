@@ -1,0 +1,147 @@
+# apps/research-console/k8s/console.yaml — the research console's page server, in research-agents
+# (research Phase 4e, codeplan/rs4e-design.md §1, OD-4e-9: its own pod). Rendered by
+# apps/research-console/deploy.sh. Render list: RESEARCH_AGENTS_NAMESPACE CONSOLE_IMAGE CONSOLE_HTML_SHA256
+# RS_CODE_COMMIT RS_BUNDLE_SHA256
+# A static server (console.py from the research-code bundle, the page from ConfigMap research-console-html
+# mounted at /srv): no Kubernetes token, no Secret, no egress, no DNS (the compiled ra-research-console admits
+# only the console's oauth2-proxy on 8080). PyJWT (medcea_iam verifies the person's token) comes from the
+# agents zone's hash-pinned wheels, unpacked as research-agents' pods do. Labels part-of
+# medcea-research-console, never medcea-research: ./apps/research-agents/uninstall.sh removes that label in
+# this namespace. The page's directory mount updates in place: a page change restarts nothing
+# (medcea/html-sha256 is for health rsconsole).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: research-console
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: research-console
+    app.kubernetes.io/part-of: medcea-research-console
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app: research-console
+  template:
+    metadata:
+      labels:
+        app: research-console
+        app.kubernetes.io/part-of: medcea-research-console
+      annotations:
+        medcea/html-sha256: "${CONSOLE_HTML_SHA256}"
+        medcea/code-commit: "${RS_CODE_COMMIT}"
+        medcea/code-sha256: "${RS_BUNDLE_SHA256}"
+    spec:
+      priorityClassName: medcea-research-low
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # The code bundle (ConfigMap research-code, apps/research-agents/deploy.sh) and the hash-checked wheels
+      # (static PV research-wheels, read-only) unpacked into emptyDirs, exactly as research-agents' pods do.
+      - name: unpack
+        image: ${CONSOLE_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "set -e; tar xzf /bundle/code.tgz -C /opt/medcea -m --no-overwrite-dir; python3 -m pip install -q --no-cache-dir --disable-pip-version-check --no-index --find-links /wheels --require-hashes --no-deps --target /opt/extra -r /opt/medcea/apps/research-agents/requirements-services.txt"]
+        env:
+        - {name: HOME, value: /tmp}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        volumeMounts:
+        - {name: bundle, mountPath: /bundle, readOnly: true}
+        - {name: wheels, mountPath: /wheels, readOnly: true}
+        - {name: code, mountPath: /opt/medcea}
+        - {name: extra, mountPath: /opt/extra}
+        - {name: tmp, mountPath: /tmp}
+      containers:
+      - name: console
+        image: ${CONSOLE_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/opt/medcea/apps/research-console/console.py"]
+        workingDir: /opt/medcea
+        env:
+        - {name: PYTHONPATH, value: /opt/extra}
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - {name: RS_CONSOLE_DIR, value: /srv}
+        - {name: RS_CONSOLE_PORT, value: "8080"}
+        - {name: MEDCEA_IAM_LIB, value: /iam/medcea_iam.py}
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 50m, memory: 96Mi}
+          limits: {memory: 192Mi}
+        # exec probes: the zone admits no `node` source on 8080
+        readinessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+          initialDelaySeconds: 20
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - {name: code, mountPath: /opt/medcea, readOnly: true}
+        - {name: extra, mountPath: /opt/extra, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: html, mountPath: /srv, readOnly: true}
+        - {name: iam, mountPath: /iam, readOnly: true}
+        - {name: jwks, mountPath: /jwks, readOnly: true}
+      volumes:
+      - name: bundle
+        configMap: {name: research-code}
+      - name: wheels
+        persistentVolumeClaim:
+          claimName: research-wheels
+          readOnly: true
+      - name: code
+        emptyDir: {sizeLimit: 64Mi}
+      - name: extra
+        emptyDir: {sizeLimit: 128Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 16Mi}
+      - name: html
+        configMap: {name: research-console-html}
+      - name: iam
+        configMap: {name: medcea-iam-lib, optional: true}
+      - name: jwks
+        configMap: {name: medcea-jwks, optional: true}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: research-console
+  namespace: ${RESEARCH_AGENTS_NAMESPACE}
+  labels:
+    app: research-console
+    app.kubernetes.io/part-of: medcea-research-console
+spec:
+  type: ClusterIP
+  selector:
+    app: research-console
+  ports:
+  - {name: http, port: 8080, targetPort: 8080, protocol: TCP}

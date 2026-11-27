@@ -374,6 +374,35 @@ def node_red_revoke(op, domain, user_role, token, bearer, check_gone):
     return []
 
 
+def console_me_problems(table, user_role, username, status, body):
+    """Research Phase 4e (design rs4e 6): an account the console's gate admits reads /api/me through the proxy, so the
+    orchestrator verified the console's token (azp research-console, audience medcea-research): 200 with the
+    account's own username and role, never 401/403 (a client or audience the compiled table lacks) or 503."""
+    svc = table["services"].get("research-orchestrator") or {}
+    route = (svc.get("routes") or {}).get("GET /api/me") or {}
+    allowed = user_role in (route.get("roles") or {})
+    if not allowed:
+        return [] if status in (401, 403) else [f"{user_role:18} /api/me: the route table refuses it, but it answered {status}"]
+    if status != 200:
+        return [f"{user_role:18} /api/me: HTTP {status}, expected 200 (the orchestrator did not accept the console's "
+                f"token: its compiled clients or audience)"]
+    try:
+        me = json.loads(body)
+    except ValueError:
+        return [f"{user_role:18} /api/me: the answer is not JSON"]
+    out = []
+    if not isinstance(me, dict) or me.get("username") != username or me.get("role") != user_role:
+        out.append(f"{user_role:18} /api/me: answered someone else ({str(me)[:80]})")
+    elif not isinstance(me.get("can"), dict):
+        out.append(f"{user_role:18} /api/me: no `can` (the orchestrator could not read its route table)")
+    return out
+
+
+def console_checks(op, domain, table, user_role, username):
+    status, _, body = fetch(op, f"https://{domain}/api/me")
+    return console_me_problems(table, user_role, username, status, body)
+
+
 def superset_checks(op, domain, p, user_role):
     """Stage C: Superset gave the account exactly the FAB roles the compiled mapping gives
     its role, and SQL Lab opens for a builder (Alpha with sql_lab) only. A Gamma account's
@@ -533,6 +562,8 @@ def main():
             if var == "SUPERSET_DOMAIN":
                 fails.extend(superset_checks(op, domain, p, u["role"]))
                 continue
+            if var == "RESEARCH_CONSOLE_DOMAIN":
+                fails.extend(console_checks(op, domain, table, u["role"], u["username"]))
             if var == "NODE_RED_DOMAIN":
                 fails.extend(node_red_checks(op, domain, p, u["role"]))
             if var == "CONFIG_DOMAIN" and os.environ.get("IAM_POSTGREST_JWT", "false") == "true":

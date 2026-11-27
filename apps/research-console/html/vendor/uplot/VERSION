@@ -1,0 +1,11 @@
+uplot 1.6.32 (MIT, Copyright (c) 2022 Leon Sorokin; LICENSE)
+source: https://registry.npmjs.org/uplot/-/uplot-1.6.32.tgz
+tarball sha512 (= the registry's dist.integrity): sha512-KIMVnG68zvu5XXUbC4LQEPnhwOxBuLyW1AHtpm6IKTXImkbLgkMy+jabjLgSLMasNuGGzQm/ep3tOkyTxpiQIw==
+tarball sha256: 4b8a8191e425658e3ea8c8c1314b0fc679c861ee3a1af2b20c7b16ba50b5133d
+copied unmodified from package/dist/ and package/LICENSE:
+19c8d4c6ad88929a79f4ae49d6f7161566dfd0ba3d15cc495e974f787eb78f1f  uPlot.iife.min.js
+df630c6a8d6f8eeaff264b50f73ce5b114f646ffd9a0bb74f049b0a00135fa04  uPlot.min.css
+8f989229699b4fe2f1a0432d0e9edc338a8a911e250e2d1b01ecd770a5f5b1bd  LICENSE
+chosen on 27 Nov 2026: 1.6.32 (published 14 Mar 2025) is the newest 1.6.x at least two weeks old, so it
+replaces the design's 1.6.31. Under the console's CSP: no eval, no inline <style> (uPlot.min.css is a file);
+element styles through the CSSOM only.

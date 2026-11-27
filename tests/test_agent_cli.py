@@ -173,6 +173,49 @@ class CliTest(unittest.TestCase):
         c.watch("S" * 22, verbose=True)
         self.assertEqual(sum("mcp-sim" in line for line in out[before:]), 3)
 
+    def test_line_names_the_proposal_id_and_a_sub_agent(self):
+        # research Phase 4e (design 2.2): accept/discard take p<event_id>, which watch prints next to the proposal
+        line = cli.Client.line({"event_id": 42, "event": "proposal", "actor": "agent",
+                                "payload": {"agent": "a0", "tool": "propose.parameter_set", "result_sha256": "ab" * 32}})
+        self.assertIn("(medcea-agent accept|discard SID p42)", line)
+        self.assertNotIn("[a0]", line)
+        line = cli.Client.line({"event_id": 43, "event": "proposal_decided", "actor": "research-session",
+                                "payload": {"pid": "p42", "decision": "approve", "by_username": "bio"}})
+        self.assertIn("p42 accepted by bio", line)
+        line = cli.Client.line({"event_id": 44, "event": "tool_call", "actor": "agent",
+                                "payload": {"agent": "a0.1", "parent": "a0", "tool": "sim.run"}})
+        self.assertIn("[a0.1] sim.run", line)
+        line = cli.Client.line({"event_id": 45, "event": "agent_spawned", "actor": "agent",
+                                "payload": {"agent": "a0.1", "parent": "a0", "profile_name": "analyst", "task": "t"}})
+        self.assertIn("[a0.1] a0 starts analyst: t", line)
+
+    def test_watch_shows_the_team(self):
+        # research Phase 4e A1b: a specialist's stop does not end the watch; its lines are indented; the team at the end
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from test_agent_team import run_team
+        _, ev, _ = run_team()
+        c, o, out, clk = client()
+        c.signin()
+        o.events = [dict(e, actor="agent") for e in ev]
+        self.assertEqual(c.watch("S" * 22), "stop")
+        text = "\n".join(out)
+        self.assertEqual(sum(1 for line in out if " stop " in line), 3)        # both specialists' stops and the lead's
+        self.assertTrue(out[-2].split()[1] == "stop" and "[a0." not in out[-2])
+        self.assertIn("  [a0.1] a0 starts campaign: Estimate and run fruiting_compare.", text)
+        self.assertIn('[a0.1] back to a0: finished after 3 turns, 0.25 CPU-h: "Campaign c0123456789abcdef0123 is done."', text)
+        self.assertEqual(out[-1].strip(), "team: a0 (lead); a0.1 campaign (finished after 3 turns, 0.25 CPU-h); "
+                                          "a0.2 tuning (finished after 2 turns, 0.0 CPU-h)")
+        self.assertEqual([m["specialist"] for m in cli.Client.team(ev)], ["campaign", "tuning"])
+        self.assertEqual(cli.Client.team([]), [])
+        self.assertTrue(cli.Client.lead_stopped({"event": "stop", "payload": {}}))
+        self.assertFalse(cli.Client.lead_stopped({"event": "stop", "payload": {"agent": "a0.1", "parent": "a0"}}))
+
+    def test_turns_are_the_leads(self):
+        ev = [{"actor": "model-gateway", "event": "turn_request", "payload": {"turn": 1, "request_sha256": "a"}},
+              {"actor": "model-gateway", "event": "turn_request", "payload": {"agent": "a0.1", "turn": 1, "request_sha256": "b"}},
+              {"actor": "model-gateway", "event": "turn_response", "payload": {"agent": "a0", "turn": 1, "response_sha256": "r"}}]
+        self.assertEqual(cli.Client.turns(ev), {1: ("a", "r", None)})
+
     def test_decide_stop_replay(self):
         c, o, out, clk = client()
         c.signin()
@@ -224,6 +267,89 @@ class CliTest(unittest.TestCase):
         c, o, out, clk = client()
         o.request = lambda m, p, b=None, t=None: (500, {})
         self.assertEqual(cli.main(["stop", "S" * 22], c), 1)
+
+
+class OtelTest(unittest.TestCase):
+    """Client.otel and `medcea-agent otel SID` (research Phase 4e commit A3, design 4.5): GET
+    /api/sessions/<sid>/otel[?content=1]; until the route exists (it comes with the console's policy version) a clear
+    message, whether the orchestrator answers 404 (route unknown) or 403 (route not in its table)."""
+    DOC = {"resourceSpans": [{"resource": {"attributes": []}, "scopeSpans": [], "schemaUrl": "s"}]}
+
+    def answering(self, status, body):
+        c, o, out, clk = client()
+        real = o.request
+
+        def request(method, path, b=None, token=None):
+            if "/otel" in path:
+                o.calls.append((method, path, b, token))
+                return status, body
+            return real(method, path, b, token)
+        o.request = request
+        c.signin()
+        return c, o, out
+
+    def test_the_route_and_the_content_choice(self):
+        c, o, out = self.answering(200, self.DOC)
+        self.assertEqual(c.otel({"sid": "S" * 22}), self.DOC)
+        c.otel("S" * 22, content=True)
+        paths = [(m, p) for m, p, b, t in o.calls if "/otel" in p]
+        self.assertEqual(paths, [("GET", "/api/sessions/%s/otel" % ("S" * 22)),
+                                 ("GET", "/api/sessions/%s/otel?content=1" % ("S" * 22))])
+        self.assertTrue(all(t for m, p, b, t in o.calls if "/otel" in p), "with the person's token")
+
+    def test_before_the_route_exists(self):
+        for status, body in ((404, {"error": "not found"}),
+                             (403, {"error": "GET /api/sessions/%s/otel is not in research-orchestrator's route table"
+                                    % ("S" * 22)})):
+            c, o, out = self.answering(status, body)
+            with self.assertRaises(cli.CliError) as e:
+                c.otel("S" * 22)
+            self.assertIn("does not serve the OpenTelemetry export yet", str(e.exception))
+            self.assertIn("(%d)" % status, str(e.exception))
+
+    def test_a_session_that_is_not_yours(self):
+        c, o, out = self.answering(404, {"error": "no such session"})
+        with self.assertRaises(cli.CliError) as e:
+            c.otel("S" * 22)
+        self.assertEqual(str(e.exception), "no such session (404)")
+
+    def test_main_writes_the_json_to_stdout(self):
+        c, o, out = self.answering(200, self.DOC)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["otel", "S" * 22, "--content"], c), 0)
+        self.assertEqual(json.loads(buf.getvalue()), self.DOC)
+        self.assertTrue(any(p.endswith("/otel?content=1") for m, p, b, t in o.calls))
+        self.assertFalse(any("resourceSpans" in x for x in out), "the document is not mixed with the prompts")
+        c, o, out = self.answering(404, {"error": "not found"})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as so:
+            self.assertEqual(cli.main(["otel", "S" * 22], c), 1)
+        self.assertEqual(so.getvalue(), "")
+        self.assertIn("OpenTelemetry export yet", err.getvalue())
+
+    def test_the_default_client_prompts_on_stderr(self):
+        """`medcea-agent otel SID > file.json`: the device-code prompt must not land in the file."""
+        prompts = []
+
+        class Stop(Exception):
+            pass
+
+        def fake_client(**kw):
+            prompts.append(kw)
+            raise Stop()
+        real = cli.Client
+        cli.Client = fake_client
+        try:
+            with self.assertRaises(Stop):
+                cli.main(["otel", "S" * 22])
+        finally:
+            cli.Client = real
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as so:
+            prompts[0]["out"]("Open https://k/d and enter the code WXYZ")
+        self.assertEqual(so.getvalue(), "")
+        self.assertIn("WXYZ", err.getvalue())
 
 
 def _gw(turn, req, resp, t0, t1):
