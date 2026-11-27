@@ -514,6 +514,7 @@ def _handler(orch, port_name):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(b)
 
@@ -541,6 +542,12 @@ def _handler(orch, port_name):
         def r_person(self, path, q):
             if self.command == "GET" and path == "/healthz":
                 return self.send(200, orch.healthz())
+            # research Phase 4e (design rs4e §1, CSRF): a POST that carries an Origin must come from the
+            # research console's own origin (RS_CONSOLE_ORIGIN); the CLI's urllib sends none and passes.
+            # With the 415 JSON rule and the proxy's SameSite=Lax cookie, access-api's defence.
+            origin = self.headers.get("Origin")
+            if self.command == "POST" and origin is not None and origin != orch.cfg.get("console_origin"):
+                return self.send(403, {"error": "wrong origin"})
             m = re.match(r"^/api/signin/(start|poll|refresh)$", path)
             if m and self.command == "POST":
                 b = self.body()
@@ -625,6 +632,8 @@ def main():
                "RS_PROFILES_DIR", os.path.join(ROOT, "research", "agents", "profiles")),
            "pool": int(os.environ.get("RS_SIM_POOL", "2")),
            "series_every": float(os.environ.get("RS_SIM_SERIES_EVERY", "60")),
+           # research Phase 4e: the only Origin a browser POST may carry (empty: none may)
+           "console_origin": os.environ.get("RS_CONSOLE_ORIGIN", "") or None,
            "model_gateway_url": os.environ.get("RS_MODEL_GATEWAY_URL", ""),
            "endpoints": [e for e in os.environ.get("RS_ENDPOINTS", "local").split() if e],
            "inventory": _inventory(os.environ.get("RS_ENDPOINTS_INVENTORY", ""))}

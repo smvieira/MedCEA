@@ -325,6 +325,19 @@ def _pod_keys_check(p, net, errors):
                 errors.append(f"network: pod {name}: dns must be true or false")
             elif pd.get("zone") not in DNS_ZONES:
                 errors.append(f"network: pod {name}: dns is per pod only in the zones {' and '.join(DNS_ZONES)}")
+        if "audience" in pd:
+            # research Phase 4e (design rs4e 5.1): a zone pod whose service is reached through a
+            # host's proxy says which audience its tokens carry, so that service verifies the
+            # host client's tokens (medcea-research) instead of falling back to medcea-api
+            if pd["audience"] != TOKEN_AUDIENCE:
+                errors.append(f"network: pod {name}: the audience is {TOKEN_AUDIENCE}, not {pd['audience']!r}")
+            if not pd.get("carries"):
+                errors.append(f"network: pod {name}: audience needs a pod that carries a service")
+            if not pd.get("zone"):
+                errors.append(f"network: pod {name}: audience is for a zone pod")
+            if "token_clients" in pd:
+                errors.append(f"network: pod {name}: audience and token_clients together "
+                              f"(a token client already names its audience)")
         if "token_clients" not in pd:
             continue
         tcs = pd["token_clients"]
@@ -364,8 +377,40 @@ def pod_token_clients(p):
     return out
 
 
+def pod_audiences(p):
+    """{service: audience} for every service a pod carries with token_clients (their audience)
+    or an `audience` key (research Phase 4e); a service in neither verifies settings.json's
+    medcea-api. Services the pods do not name are left out (v1-v13 routes.json unchanged)."""
+    out = {}
+    for pd in ((p.data.get("network") or {}).get("pods") or {}).values():
+        if not isinstance(pd, dict) or not isinstance(pd.get("carries"), dict):
+            continue
+        tcs = [tc for tc in pd.get("token_clients") or [] if isinstance(tc, dict)] \
+            if isinstance(pd.get("token_clients"), list) else []
+        aud = tcs[0].get("audience") if tcs else (pd.get("audience") if "token_clients" not in pd else None)
+        if isinstance(aud, str):   # malformed keys are _pod_keys_check's to report, never a crash here
+            for svc in pd["carries"]:
+                out[svc] = aud
+    return out
+
+
+DEFAULT_AUDIENCE = "medcea-api"   # settings.json's: what a service no pod names verifies
+
+
+def _host_audience_check(p, errors):
+    """One audience per host (research Phase 4e, design rs4e 5.1): a host's client holds one
+    token, so every service the host serves must verify the same audience (none named =
+    medcea-api); otherwise some served service refuses every request through that host."""
+    aud = pod_audiences(p)
+    for host, hd in p.hosts.items():
+        found = sorted({aud.get(s, DEFAULT_AUDIENCE) for s in hd.get("serves") or []})
+        if len(found) > 1:
+            errors.append(f"host {host} serves services of audiences {' and '.join(found)}")
+
+
 def check(p):
     errors = []
+    _host_audience_check(p, errors)
     net = p.data.get("network")
     if not net:
         return errors

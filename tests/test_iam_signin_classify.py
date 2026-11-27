@@ -133,12 +133,16 @@ class GatedHosts(unittest.TestCase):
 
     def hosts(self, p, **env):
         """gated_hosts with SUPERSET_DOMAIN in ENFORCEMENT (whether or not A1 put it there),
-        every host variable set, and only `env` besides."""
+        every host variable set, and only `env` besides. RESEARCH_CONSOLE_DOMAIN (research Phase 4e's commit
+        A2 lists it before its commit B gives the policy the host) is left out while the policy lacks it:
+        test_research_console_pending checks its own skip."""
         enforcement = dict(proxies.ENFORCEMENT, SUPERSET_DOMAIN=SUPERSET_ENFORCEMENT)
+        if "RESEARCH_CONSOLE_DOMAIN" not in p.hosts:
+            enforcement.pop("RESEARCH_CONSOLE_DOMAIN", None)
         environ = {v: v.lower().replace("_", "-") + ".example.org" for v in enforcement}
         environ.update(env)
         skipped = []
-        with mock.patch.dict(proxies.ENFORCEMENT, enforcement), mock.patch.dict(os.environ, environ, clear=True):
+        with mock.patch.dict(proxies.ENFORCEMENT, enforcement, clear=True), mock.patch.dict(os.environ, environ, clear=True):
             out = flow.gated_hosts(p, skipped)
         return {var: (label, want) for var, _, label, want in out}, dict(skipped)
 
@@ -150,6 +154,17 @@ class GatedHosts(unittest.TestCase):
             for var, status in proxies.ENFORCEMENT.items():
                 if var in self.bare.hosts and (status == "compiled" or status.startswith("tool")):
                     self.assertIn(var, got, (gates, var))
+
+    def test_research_console_pending(self):
+        """research Phase 4e, commit A2: the console's host is in ENFORCEMENT, not in the policy: skipped, never a KeyError"""
+        self.assertEqual(proxies.ENFORCEMENT["RESEARCH_CONSOLE_DOMAIN"], "compiled")
+        environ = {v: v.lower().replace("_", "-") + ".example.org" for v in proxies.ENFORCEMENT}
+        environ["IAM_GATES"] = "true"
+        skipped = []
+        with mock.patch.dict(os.environ, environ, clear=True):
+            out = flow.gated_hosts(self.factory, skipped)
+        self.assertNotIn("RESEARCH_CONSOLE_DOMAIN", [v for v, _, _, _ in out])
+        self.assertEqual(dict(skipped).get("RESEARCH_CONSOLE_DOMAIN"), "not in the applied access policy")
 
     def test_superset_skipped_while_not_deployed(self):
         for env in ({}, {"SUPERSET_DEPLOYED": "false"}, {"SUPERSET_DEPLOYED": ""}):

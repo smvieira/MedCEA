@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research console</title>
+<link rel="stylesheet" href="/static/console.css">
+<link rel="stylesheet" href="/static/uplot/uPlot.min.css">
+<link rel="stylesheet" id="__________cytoscape_stylesheet" href="/static/cytoscape-container.css">
+<script src="/static/uplot/uPlot.iife.min.js" defer></script>
+<script src="/static/cytoscape/cytoscape.min.js" defer></script>
+<script src="/static/console.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <h1><a href="#/">Research console</a></h1>
+  <span class="who" id="who"></span>
+  <button type="button" id="theme" class="quiet">Theme: system</button>
+  <a id="signout" class="button quiet" href="/oauth2/sign_out">Sign out</a>
+</header>
+<main id="main">
+  <noscript><p>The research console needs JavaScript.</p></noscript>
+</main>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

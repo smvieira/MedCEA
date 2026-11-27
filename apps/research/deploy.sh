@@ -44,6 +44,8 @@
 #      access policy has a lake-api pod): deploy-apps.sh installs alphabetically, so
 #      lake-api, before research, would otherwise always skip on a fresh install. Its
 #      exit code is this deploy's.
+#  10. then ./apps/research-agents/deploy.sh and 11. ./apps/research-console/deploy.sh (research
+#      Phases 4a and 4e), for the same reason; each keeps its own skip contract.
 #
 # Needs config.env: RESEARCH_ENABLED, RESEARCH_NAMESPACE (default ${NAMESPACE}-research),
 # RESEARCH_DB_STORAGE (default 10Gi), RESEARCH_DB_PASS, RS_EXPORT_WRITER_DB_PASS,
@@ -248,4 +250,10 @@ bash "$REPO_ROOT/apps/lake-api/deploy.sh" || _lrc=$?
 _arc=0
 bash "$REPO_ROOT/apps/research-agents/deploy.sh" || _arc=$?
 [[ $_arc == 0 ]] || exit $_arc
+
+# ── 11. The research console, after the agent machinery (research Phase 4e: deploy-apps.sh sorts
+#       research-console before research too; it needs the orchestrator and its code bundle) ──
+_crc=0
+bash "$REPO_ROOT/apps/research-console/deploy.sh" || _crc=$?
+[[ $_crc == 0 ]] || exit $_crc
 policy_source_finish "$NAMESPACE" research

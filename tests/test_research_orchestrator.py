@@ -449,10 +449,12 @@ class HttpTest(unittest.TestCase):
             s.shutdown()
             s.server_close()
 
-    def call(self, i, method, path, body=None, token="TOK"):
+    def call(self, i, method, path, body=None, token="TOK", origin=None):
         h = {"Content-Type": "application/json"}
         if token:
             h["X-Forwarded-Access-Token"] = token
+        if origin is not None:
+            h["Origin"] = origin
         req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.ports[i], path),
                                      None if body is None else json.dumps(body).encode(), h, method=method)
         try:
@@ -484,6 +486,33 @@ class HttpTest(unittest.TestCase):
         self.sh.answers[("POST", "/signin/refresh")] = (0, {})
         self.assertEqual(self.call(0, "POST", "/api/signin/refresh", {"refresh_token": "x"}, token=None)[0], 502)
         self.assertEqual(self.o.iam.seen, [])                      # check() was never asked
+
+    def test_the_origin_rule(self):
+        """research Phase 4e (design rs4e §1, CSRF): a POST carrying an Origin must carry the console's own
+        (RS_CONSOLE_ORIGIN); without one (the CLI's urllib) it passes; GETs are not affected."""
+        self.o.cfg = dict(self.o.cfg, console_origin="https://agents.medcea")
+        body = {"profile": "compare_controllers"}
+        self.assertEqual(self.call(0, "POST", "/api/sessions", body, origin="https://evil.example"),
+                         (403, {"error": "wrong origin"}))
+        self.assertEqual(self.call(0, "POST", "/api/signin/start", {}, token=None, origin="https://evil.example")[0], 403)
+        self.assertEqual(self.call(0, "POST", "/api/sessions/%s/stop" % SID, {}, origin="null")[0], 403)
+        self.assertEqual(self.o.iam.seen, [])                      # refused before the token check
+        self.assertEqual(self.call(0, "POST", "/api/sessions", body, origin="https://agents.medcea")[0], 201)
+        self.assertEqual(self.call(0, "POST", "/api/sessions/%s/stop" % SID, {})[0], 200)           # no Origin: the CLI
+        self.assertEqual(self.call(0, "GET", "/api/sessions", origin="https://evil.example")[0], 200)
+        # unset (no console configured): any Origin on a POST is refused
+        self.o.cfg = dict(self.o.cfg, console_origin=None)
+        self.assertEqual(self.call(0, "POST", "/api/sessions", body, origin="https://agents.medcea")[0], 403)
+
+    def test_json_answers_carry_nosniff(self):
+        req = urllib.request.Request("http://127.0.0.1:%d/healthz" % self.ports[0])
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual((r.headers["X-Content-Type-Options"], r.headers["Cache-Control"]), ("nosniff", "no-store"))
+
+    def test_main_reads_the_console_origin(self):
+        with open(orch.__file__) as f:
+            src = f.read()
+        self.assertIn('"console_origin": os.environ.get("RS_CONSOLE_ORIGIN", "") or None', src)
 
     def test_sim_port_has_no_person_routes(self):
         self.assertEqual(self.call(1, "GET", "/api/sessions")[0], 404)

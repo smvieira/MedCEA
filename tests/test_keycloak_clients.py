@@ -172,7 +172,8 @@ class Scopes(unittest.TestCase):
         made = set(re.findall(r'_create_client(?:_multi)? "([a-z-]+)"', SRC))
         made |= set(re.findall(r'_create_public_device_client "([a-z-]+)"', SRC))
         self.assertIn("superset", made)
-        self.assertEqual(made - set(loop), set())
+        # research Phase 4e: research-console carries medcea-research, never medcea-identity (rule-3 deviation)
+        self.assertEqual(made - set(loop), set(lib_array("KC_RESEARCH_HOST_CLIENTS")))
 
 
 class SharedClientList(unittest.TestCase):
@@ -411,6 +412,137 @@ class PolicyTokenClients(unittest.TestCase):
         code = "\n".join(l for l in SRC.splitlines() if not l.lstrip().startswith("#"))
         self.assertNotRegex(code, r'(?m)^_create_public_device_client "workbench-notebook"')
         self.assertLess(SRC.index('source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh"'), SRC.index(token_client_block()))
+
+
+# a fake curl for the research console's client block: the scopes list, the client (present once POSTed or
+# when $KC_EXISTS is 1), its representation ($KC_REP), its secret; records METHOD URL BODY
+RC_CURL = r'''
+curl() {
+    local m=GET url="" body="" w="" a
+    while (( $# )); do
+        case "$1" in
+            -X) m="$2"; shift ;;
+            -d|--data) body="$2"; shift ;;
+            --data-binary) [[ "$2" == "@-" ]] && body="$(cat)" || body="$2"; shift ;;
+            -w) w=1; shift ;;
+            -H|-o) shift ;;
+            http*) url="$1" ;;
+        esac
+        shift
+    done
+    python3 -c 'import json, sys; print(json.dumps({"m": sys.argv[1], "url": sys.argv[2], "body": sys.argv[3]}))' \
+        "$m" "$url" "$body" >>"$CURL_LOG"
+    case "$m $url" in
+        "POST "*"/clients") touch "$KC_DIR/made" ;;
+        "GET "*"/client-scopes") echo '[{"id": "gs-1", "name": "groups"}, {"id": "rs-1", "name": "medcea-research"}]' ;;
+        "GET "*"/clients?clientId="*) if [[ "$KC_EXISTS" == 1 || -f "$KC_DIR/made" ]]; then echo "[{\"id\": \"uuid-1\", \"clientId\": \"${url##*clientId=}\"}]"; else echo '[]'; fi ;;
+        "GET "*"/client-secret") echo '{"type": "secret", "value": "read-back-secret"}' ;;
+        "GET "*"/clients/uuid-1") printf '%s' "$KC_REP" ;;
+        "PUT "*) [[ -n "$w" ]] && printf '%s' "${KC_PUT_CODE:-204}" ;;
+        *) [[ -n "$w" ]] && printf 201 ;;
+    esac
+}
+'''
+
+
+def research_host_block():
+    """deploy-infra.sh's loop over KC_RESEARCH_HOST_CLIENTS (up to its done)"""
+    i = SRC.index('for _c in "${KC_RESEARCH_HOST_CLIENTS[@]}"; do')
+    return SRC[i:SRC.index("\ndone\n", i) + 6]
+
+
+class ResearchHostClients(unittest.TestCase):
+    """Research Phase 4e (design rs4e §5.1, OD-4e-2): client research-console exists only while the applied
+    policy has RESEARCH_CONSOLE_DOMAIN (cli.py has-host): created with the console's callback, both post-logout
+    returns, groups and medcea-research as default scopes and medcea-identity removed, its secret read back and a
+    cookie secret generated once (written to config.env later, by _config_env_set); otherwise an existing one is
+    disabled (never created, never deleted); a policy that cannot be read changes nothing."""
+
+    def run_block(self, cli_rc, exists="0", cookie=""):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "curl.log")
+            os.makedirs(os.path.join(d, "apps", "iam", "compiler"))
+            with open(os.path.join(d, "apps", "iam", "compiler", "cli.py"), "w") as f:
+                f.write("import sys\nopen(%r, 'a').write(' '.join(sys.argv[1:]) + '\\n')\nsys.exit(%d)\n"
+                        % (os.path.join(d, "cli.log"), cli_rc))
+            script = ("RED= YELLOW= NC=\n" + RC_CURL + function_text("_create_client")
+                      + 'source "$LIB/infra/lib-keycloak-admin.sh"\nsource "$LIB/infra/lib-keycloak-clients.sh"\n'
+                      + "kc_admin_token() { echo tok; }\n_kc_token() { echo tok; }\n"
+                      + '_HUB_LOGOUT_URI="https://${WORKBENCH_DOMAIN}/hub/logout"\n_GS_ID=gs-1\n_IS_ID=is-1\n'
+                      + research_host_block()
+                      + 'printf "SECRET=%s COOKIE=%s\\n" "${_RCON_SECRET:+set}" "${_RCON_COOKIE_SECRET:+set}"\n')
+            e = dict(os.environ, CURL_LOG=log, KC_DIR=d, SCRIPT_DIR=d, LIB=REPO, KC_EXISTS=exists,
+                     KC_REP=json.dumps(dict(REP, clientId="research-console", publicClient=False)),
+                     RESEARCH_CONSOLE_DOMAIN="agents.medcea", RESEARCH_CONSOLE_COOKIE_SECRET=cookie, **DOMAINS)
+            r = subprocess.run(["bash", "-c", "set -e\n" + script], capture_output=True, text=True, env=e)
+            calls = []
+            if os.path.exists(log):
+                with open(log) as f:
+                    calls = [json.loads(line) for line in f]
+            with open(os.path.join(d, "cli.log")) as f:
+                asked = f.read()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(asked, "has-host RESEARCH_CONSOLE_DOMAIN\n")
+        return r, calls
+
+    def test_the_list(self):
+        self.assertEqual(lib_array("KC_RESEARCH_HOST_CLIENTS"), ["research-console"])
+        for arr in ("KC_SCOPE_CLIENTS", "KC_API_CLIENTS", "KC_POLICY_TOKEN_CLIENTS", "KC_RESEARCH_CLIENTS"):
+            self.assertNotIn("research-console", lib_array(arr), arr)
+        self.assertLess(SRC.index('source "$SCRIPT_DIR/infra/lib-keycloak-clients.sh"'), SRC.index(research_host_block()))
+
+    def test_the_host_in_the_policy_creates_it(self):
+        r, calls = self.run_block(0)
+        self.assertIn("SECRET=set COOKIE=set", r.stdout)
+        posts = [json.loads(c["body"]) for c in calls if c["m"] == "POST" and c["url"].endswith("/clients")]
+        self.assertEqual(len(posts), 1)
+        body = posts[0]
+        self.assertEqual((body["clientId"], body["publicClient"], body["serviceAccountsEnabled"]), ("research-console", False, False))
+        self.assertEqual(body["redirectUris"][0], "https://agents.medcea/oauth2/callback")
+        logout = body["attributes"]["post.logout.redirect.uris"].split("##")
+        self.assertEqual(logout, ["https://agents.medcea/*", "https://ai-workbench.medcea/hub/logout", "https://portal.medcea/*"])
+        scopes = [(c["m"], c["url"].rsplit("/", 1)[-1]) for c in calls if "/default-client-scopes/" in c["url"]]
+        self.assertEqual(scopes, [("PUT", "gs-1"), ("PUT", "rs-1"), ("DELETE", "is-1")])
+        # the scope medcea-research and its mappers (person_id, the medcea-research audience; access token only)
+        mappers = [json.loads(c["body"]) for c in calls if c["url"].endswith("/client-scopes/rs-1/protocol-mappers/models")]
+        self.assertEqual({m["name"] for m in mappers}, {"person_id", "medcea-research-audience"})
+        for m in mappers:
+            self.assertEqual(m["config"]["id.token.claim"], "false")
+        self.assertNotIn("read-back-secret", r.stdout + r.stderr)
+
+    def test_an_existing_cookie_secret_is_kept(self):
+        with tempfile.TemporaryDirectory():
+            r, calls = self.run_block(0, cookie="kept")
+        self.assertIn("COOKIE=set", r.stdout)
+        src = research_host_block()
+        self.assertIn('_RCON_COOKIE_SECRET="${RESEARCH_CONSOLE_COOKIE_SECRET:-$(openssl rand -base64 24)}"', src)
+
+    def test_not_in_the_policy_an_existing_one_is_disabled(self):
+        r, calls = self.run_block(1, exists="1")
+        self.assertFalse([c for c in calls if c["m"] == "POST"], "never created")
+        puts = [c for c in calls if c["m"] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(json.loads(puts[0]["body"])["enabled"], False)
+        self.assertIn("the access policy has no research console, disabled", r.stdout)
+        self.assertIn("SECRET= COOKIE=", r.stdout)
+        self.assertFalse([c for c in calls if c["m"] == "DELETE"])
+
+    def test_not_in_the_policy_a_fresh_install_creates_nothing(self):
+        r, calls = self.run_block(1, exists="0")
+        self.assertEqual([c["m"] for c in calls], ["GET"])
+        self.assertIn("the access policy has no research console yet, not created", r.stdout)
+
+    def test_a_broken_policy_changes_nothing(self):
+        r, calls = self.run_block(2)
+        self.assertEqual(calls, [])
+        self.assertIn("cannot tell whether the access policy has the research console", r.stderr)
+
+    def test_secrets_reach_config_env_through_config_env_set(self):
+        i = SRC.index('if [[ -n "$_RCON_SECRET" ]]; then')
+        blk = SRC[i:SRC.index("\nfi\n", i)]
+        self.assertIn('"RESEARCH_CONSOLE_CLIENT_SECRET=${_RCON_SECRET}" "RESEARCH_CONSOLE_COOKIE_SECRET=${_RCON_COOKIE_SECRET}"', blk)
+        self.assertIn('_config_env_set "$_k" "${_kv#*=}"', blk)
+        self.assertLess(SRC.index("_config_env_set() {"), i)
 
 
 class WorkbenchStillToDo(unittest.TestCase):

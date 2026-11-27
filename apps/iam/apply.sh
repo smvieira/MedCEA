@@ -565,7 +565,8 @@ wait_routes() {   # DIGEST — every Ready pod of each service that checks route
         # research Phase 4a (stage 7a, R37): the two agent zones' route-checking Deployments, a third field
         # naming the zone; absent (policy without the zone, not installed) they are NotFound and skipped
         for dc in scheduler:api monitor:api dbmgmt:api config-ui:recipe-fileserver access:api iam-api:iam-api \
-                  research-session:research-session:research-gw research-orchestrator:research-orchestrator:research-agents; do
+                  research-session:research-session:research-gw research-orchestrator:research-orchestrator:research-agents \
+                  research-console:console:research-agents; do
             IFS=: read -r dep ctr zk <<<"$dc"
             dns="$NAMESPACE"
             if [[ -n "$zk" ]]; then

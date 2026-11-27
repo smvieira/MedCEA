@@ -50,6 +50,10 @@
                                         exists, 1 when not (nothing printed), 2 when the policy fails its
                                         checks (research sandbox Phase 2b: the workbench's placement,
                                         `pod-zone hub`; lake-api's skip)
+  cli.py has-host HOST [--file F]       exit 0 when the policy has hosts.HOST, 1 when not, 2 when HOST is
+                                        not a host variable's name or the policy fails its checks; prints
+                                        nothing on stdout (research Phase 4e: the console deploy's skip,
+                                        deploy-infra's research-console client, health rsconsole/kcscopes)
   cli.py has-client NAME [--file F]     exit 0 when network.clients.NAME exists, 1 when not, 2 when the
                                         policy fails its checks; prints nothing (`has-client notebooks`:
                                         the workbench's egress hops, Phase 2b)
@@ -633,6 +637,8 @@ def main(argv=None):
     hz.add_argument("zone")
     pz = sub.add_parser("pod-zone")
     pz.add_argument("name")
+    hh = sub.add_parser("has-host")
+    hh.add_argument("host")
     hc = sub.add_parser("has-client")
     hc.add_argument("name")
     htc = sub.add_parser("has-token-client")
@@ -748,6 +754,16 @@ def main(argv=None):
             print(f"refusing to answer: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
             return 2
         return 0 if netpol.has_zone(p, args.zone) else 1
+
+    if args.cmd == "has-host":
+        if not re.match(r"^[A-Z][A-Z0-9_]{0,63}$", args.host):
+            print(f"ERROR: {args.host!r} is not a host variable's name (e.g. RESEARCH_CONSOLE_DOMAIN)", file=sys.stderr)
+            return 2
+        errors, _ = invariants.check(p)
+        if errors:
+            print(f"refusing to answer: the policy has {len(errors)} violation(s); run cli.py check", file=sys.stderr)
+            return 2
+        return 0 if args.host in p.hosts else 1
 
     if args.cmd in ("pod-zone", "has-client", "has-token-client"):
         errors, _ = invariants.check(p)

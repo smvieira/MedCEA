@@ -213,11 +213,12 @@ data:
                 <div class="cd">Notebooks and VS Code, each person in their own workspace. Notebooks read platform data with your own role's rights.</div>
                 <div class="ck">https://${WORKBENCH_DOMAIN} <span class="ck-a">&rarr;</span></div>
               </a>
-              <div class="card card-dis">
+              <div class="card card-dis" data-href="https://${RESEARCH_CONSOLE_DOMAIN}">
                 <div class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M9 13v2M15 13v2"/><path d="M2 14h2M20 14h2"/></svg></div>
                 <div class="cl">Research sandbox</div><div class="ct">Agent campaigns</div>
-                <div class="cd">Supervised AI agents that run controller campaigns on the chamber model and propose the results for review.</div>
-              </div>
+                <div class="cd">Supervised AI agents that run controller campaigns on the chamber model and propose the results for review: the research console.</div>
+                <div class="ck">https://${RESEARCH_CONSOLE_DOMAIN} <span class="ck-a">&rarr;</span></div>
+              </div><!--/card-->
             </div>
             <div class="pfooter">
               <p>MedCEA &mdash; Powered by Keycloak, JupyterHub &amp; MicroK8s</p>

@@ -38,3 +38,15 @@ KC_POLICY_TOKEN_CLIENTS=(workbench-notebook)
 #                   lists above on purpose: the scope loop would give it medcea-identity.
 # shellcheck disable=SC2034
 KC_RESEARCH_CLIENTS=(research-agent)
+# KC_RESEARCH_HOST_CLIENTS  the confidential clients of research hosts (research Phase 4e):
+#                   research-console signs a person in to the research console's oauth2-proxy
+#                   (RESEARCH_CONSOLE_DOMAIN). Its tokens carry `groups` and the scope
+#                   medcea-research (audience medcea-research) and never medcea-identity: every
+#                   service the host serves verifies medcea-research (one audience per host,
+#                   owner decision OD-4e-2). deploy-infra.sh creates it only while
+#                   `cli.py has-host RESEARCH_CONSOLE_DOMAIN` says 0, else disables an existing one
+#                   (never deleted); health kcscopes checks it by the same answer. Outside
+#                   KC_SCOPE_CLIENTS on purpose (that loop would give it medcea-identity): a
+#                   recorded deviation from rule 3.
+# shellcheck disable=SC2034
+KC_RESEARCH_HOST_CLIENTS=(research-console)

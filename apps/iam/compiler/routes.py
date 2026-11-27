@@ -184,7 +184,7 @@ def compile(p, source="defaults.yaml", applied_version=None):
                 raise RouteError(f"{s} {pr['route']} is public and in group {table[pr['route']]['group']}")
 
     clients = _clients(p)
-    aud = netpol.pod_token_clients(p)   # audience only where a pod says so: v1-v9 routes.json unchanged
+    aud = netpol.pod_audiences(p)   # audience only where a pod says so (token_clients or audience): v1-v13 routes.json unchanged
     body = {
         "schema": SCHEMA,
         "policy_version": p.data.get("policy_version"),
@@ -193,7 +193,7 @@ def compile(p, source="defaults.yaml", applied_version=None):
         "roles": sorted(p.roles),
         "role_includes": {r: sorted(p.effective_roles(r) - {r}) for r in sorted(p.roles)},
         "services": {s: dict({"clients": sorted(clients.get(s, ())), "routes": t},
-                             **({"audience": aud[s][1]} if s in aud else {})) for s, t in services.items()},
+                             **({"audience": aud[s]} if s in aud else {})) for s, t in services.items()},
         "public": {s: sorted(r) for s, r in public.items()},
         "widening": widening_table(p),
         "waivers": [{"id": w["id"], "invariant": w["invariant"], "subject": w["subject"], "target": w["target"],

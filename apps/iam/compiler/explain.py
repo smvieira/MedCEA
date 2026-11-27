@@ -244,6 +244,9 @@ RESIDUE_PATHS = frozenset((
     # research Phase 4a: a zone service's token client and audience and a pod's DNS egress are
     # tuples too (pod-token-client, pod-dns); residue on purpose, for the reason above
     "network.pods.*.token_clients[].client", "network.pods.*.token_clients[].audience", "network.pods.*.dns",
+    # research Phase 4e (commit A2): a zone pod's own audience (the console's service verifies the host
+    # client's medcea-research tokens); residue on purpose, for the same reason: B is proposed from A2
+    "network.pods.*.audience",
     "network.clients.*.selector.*", "network.clients.*.only_rpc",
     "roles.*.db_role", "roles.*.availability", "roles.*.spec_role",
     "service_identities.*.db_role", "service_identities.*.db_password", "service_identities.*.managed_by",

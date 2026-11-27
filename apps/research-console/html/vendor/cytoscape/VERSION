@@ -1,0 +1,12 @@
+cytoscape 3.35.0 (MIT, Copyright (c) 2016-2026, The Cytoscape Consortium; LICENSE)
+source: https://registry.npmjs.org/cytoscape/-/cytoscape-3.35.0.tgz
+tarball sha512 (= the registry's dist.integrity): sha512-sMvBIXiGMnhkCaWz2R06FwF/27MNlS+Tqvi17foO9UhnUg3XGZccKjxsvEqQFAQYMSSZmN5SxYzUYlQ0DOJJ3g==
+tarball sha256: 058a81a7534777ea68dc737e9b77bd5b701e00acd9bee246245a576eeeac32e6
+copied unmodified from package/dist/ and package/LICENSE:
+71fa9ebec21a7ca2c40cff6aacc30d1f6464e363662ad4b2c197e1adc770cd94  cytoscape.min.js
+eb319c6e6f233607f71e8e2f450391751883cfc0eeb3ca7ef574c13d1d9c2203  LICENSE
+chosen on 27 Nov 2026: the newest 3.x at least two weeks old (published 10 Nov 2026). Under the console's CSP
+(no unsafe-eval, style-src 'self'): its one Function("return this") is lodash's global probe after `self`,
+never reached in a browser; at start it adds a <style id="__________cytoscape_stylesheet"> unless an element
+with that id exists, so index.html links ../cytoscape-container.css with that id (the same rule) and nothing
+inline is ever inserted; element styles it sets go through the CSSOM, which the CSP allows.

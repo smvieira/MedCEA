@@ -1294,6 +1294,22 @@ a_research_model_uninstall() {
     plan_run
 }
 a_research_model_switch() { switch_flow RESEARCH_LOCAL_MODEL; }
+# Research Phase 4e: the research console (apps/research-console).
+a_research_console_deploy() {
+    CMD=(./apps/research-console/deploy.sh)
+    EFFECT="research-agents: ConfigMap research-console-html (the page) and Deployment and Service research-console (a static page server, no token, no Secret); the platform namespace: research-console-oauth2-proxy at RESEARCH_CONSOLE_DOMAIN (/ to the page, /api/ to the orchestrator) and its 403 page; the portal's Agent campaigns card enabled"
+    LOCK=yes; LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Skipped (exit 0, nothing installed) while RESEARCH_ENABLED is not true, the applied access policy has no research console (RESEARCH_CONSOLE_DOMAIN: an approved skeleton version of research Phase 4e), no policy version is applied or the orchestrator is not installed."
+           "Needs the agent machinery first (Applications → Install the research agent machinery: the code bundle holds console.py) and ./deploy-infra.sh since the policy has the host (Keycloak client research-console and its secrets). Health: Research console.")
+    plan_run
+}
+a_research_console_uninstall() {
+    CMD=(./apps/research-console/uninstall.sh)
+    EFFECT="removes research-console-oauth2-proxy, the page server and its ConfigMap, and greys out the portal card; the orchestrator's API (the medcea-agent CLI), every recorded session and Keycloak client research-console stay"
+    LOCK=yes; LEVEL=destroy; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("No confirmation of its own: medcea.sh's is the only one.")
+    plan_run
+}
 # Research sandbox Phase 2b: the AI workbench lives where the applied access policy places it
 # (pod hub in the research zone: the research namespace; else the platform namespace).
 # --move copies the homes to the other namespace with sudo and reinstalls the hub there.
@@ -2651,7 +2667,7 @@ a_policy_audit() {
 a_policy_scoped() {
     CMD=(./deploy-infra.sh --policy-only "&&" ./infra/deploy-workbench.sh --policy-only)
     local c
-    for c in access edge-wizard frontend iam monitor mqtt-explorer scheduler superset; do
+    for c in access edge-wizard frontend iam monitor mqtt-explorer research-console scheduler superset; do
         CMD+=("&&" "./apps/$c/deploy.sh" --gate-only)
     done
     EFFECT="only the policy artefacts that differ from the applied policy's compile (route table, NetworkPolicies, Node-RED's rights, Grafana's roles, pgAdmin's claims, every sign-in gate, the workbench's gate and hops, the wizard's roles, Superset's role mapping); unchanged ones are left alone"
@@ -2666,6 +2682,24 @@ a_policy_scoped() {
 # Superset stage C (plan §4 B-5, B-8): after the skeleton version that adds Superset's host,
 # group and service identity is applied, the database deploy gives svc_superset its password
 # and Secret, and the iam deploy ships that skeleton to the Policy UI.
+# Research Phase 4e (design rs4e §9 steps 4-5): after the skeleton version that adds the research console's
+# host, proxy, pod and routes is approved: apply it, then the client, the orchestrator's handlers, the console
+# and the access deploy (the routes digest in role_widening()), health last, under one lock.
+a_policy_rs4e_switch() {
+    local v
+    ask_policy_version "The approved skeleton version of research Phase 4e (apply.sh --status)"
+    v="$ANSWER"
+    ask_policy_by
+    CMD=(./apps/iam/apply.sh "$v" --by "$BY_USER" "&&" ./deploy-infra.sh "&&" ./apps/research-agents/deploy.sh
+         "&&" ./apps/research-console/deploy.sh "&&" ./apps/access/deploy.sh "&&" ./health-check.sh)
+    EFFECT="database: version $v applied (a permanent record); the research-agents zone's NetworkPolicies re-rendered (ra-research-console, the orchestrator's ingress); Keycloak client research-console and its secrets in config.env; the orchestrator's new routes; the research console installed (page, page server, its sign-in proxy, the portal card); the access deploy (about a minute of 503 on the User Manager and the Policy UI while role_widening() takes the new routes digest); then the health check (read-only)"
+    LOCK="yes, held by medcea.sh for all of them (MEDCEA_LOCK_HELD)"; HOLD_LOCK=yes
+    LEVEL=change; SUDO=mk8s; CFG_NEEDED=yes
+    NOTES=("Run it from a checkout of the skeleton version's commit (git checkout <commit B>), with no agent session running: between that checkout and the end of apply.sh $v every compiling deploy exits 2 (the skeleton gate)."
+           "apply.sh $v asks its own [y/N]; its rollout says 'not deployed' for the console, which the later steps install. Each step runs only if the one before it succeeded."
+           "Afterwards: tests/iam-signin.sh, tests/iam-hosts.sh and tests/iam-network.sh, then exercise E59.")
+    plan_run
+}
 a_policy_superset_skeleton() {
     CMD=(./apps/database/deploy.sh "&&" env MEDCEA_CONFIRMED=1 ./apps/iam/deploy.sh "&&" ./health-check.sh)
     EFFECT="database: svc_superset's password (a SCRAM verifier) and Secret db-svc-superset; iam-api: ConfigMap iam-compiler with the applied skeleton (iam-api restarts); then the health check (read-only)"
@@ -3209,6 +3243,8 @@ AREA_APPS=(
     "a_research_model_deploy|Install the local model|./apps/research-model/deploy.sh: research-llm (Qwen3-4B-Instruct-2507, CPU) in research-gw; skipped until RESEARCH_LOCAL_MODEL is true and the policy has the pod."
     "a_research_model_uninstall|Uninstall the local model|./apps/research-model/uninstall.sh: the model file stays."
     "a_research_model_switch|Turn the local model on or off|RESEARCH_LOCAL_MODEL in config.env, then the deploy."
+    "a_research_console_deploy|Install the research console|./apps/research-console/deploy.sh: the page for supervising agent sessions at RESEARCH_CONSOLE_DOMAIN; skipped until the policy has its host."
+    "a_research_console_uninstall|Uninstall the research console|./apps/research-console/uninstall.sh: the orchestrator's API and the recorded sessions stay."
 )
 AREA_UNITS=(
     "a_units_list|List operators and their units|Units in effect and units waiting for qa."
@@ -3284,6 +3320,7 @@ AREA_POLICY=(
     "a_policy_superset_skeleton|Superset stage C: after the skeleton version|The database and iam deploys, then health, under one lock: svc_superset's password and the Policy UI's skeleton."
     "a_policy_superset_install|Superset stage C: install Superset|After the change version: the Superset deploy, health, the live gate, network and sign-in tests, a backup, under one lock."
     "a_policy_rs2b_switch|Research Phase 2b: apply the skeleton version and move the workbench|apply.sh N, the workbench's move into the research zone, the lake reader, the resume, health, under one lock."
+    "a_policy_rs4e_switch|Research Phase 4e: apply the skeleton version and install the console|apply.sh N, deploy-infra (the client), the agent machinery, the research console, the access deploy, health, under one lock."
 )
 AREA_BACKUP=(
     "a_backup_now|Make a backup now|./apps/backup/backups.sh now: the nightly job, once, now."

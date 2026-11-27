@@ -179,6 +179,9 @@
 #
 #  78  Applications → the local model (research Phase 4b stage 1): install ([y/N]) and uninstall
 #      (the typed word yes), dry; RESEARCH_LOCAL_MODEL enable (set, deploy, health) and rollback
+#  79  Applications → the research console (research Phase 4e): install ([y/N]) and uninstall (the
+#      typed word yes), dry; Policy → Research Phase 4e: apply.sh N, deploy-infra, the agent machinery,
+#      the console, the access deploy and health under one lock, dry; real: the deploy ran
 #
 #   tests/test_medcea.sh     exit 1 on any FAIL
 
@@ -986,7 +989,7 @@ echo "38 re-render the policy artefacts (scoped)"
 mkcfg true true
 guide $'8\n16\ny\nq\n'
 rc_is "quits with 0" 0
-has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh --policy-only && ./infra/deploy-workbench.sh --policy-only && ./apps/access/deploy.sh --gate-only && ./apps/edge-wizard/deploy.sh --gate-only && ./apps/frontend/deploy.sh --gate-only && ./apps/iam/deploy.sh --gate-only && ./apps/monitor/deploy.sh --gate-only && ./apps/mqtt-explorer/deploy.sh --gate-only && ./apps/scheduler/deploy.sh --gate-only && ./apps/superset/deploy.sh --gate-only"
+has   "the chain (dry)" "[dry run] not executed: ./deploy-infra.sh --policy-only && ./infra/deploy-workbench.sh --policy-only && ./apps/access/deploy.sh --gate-only && ./apps/edge-wizard/deploy.sh --gate-only && ./apps/frontend/deploy.sh --gate-only && ./apps/iam/deploy.sh --gate-only && ./apps/monitor/deploy.sh --gate-only && ./apps/mqtt-explorer/deploy.sh --gate-only && ./apps/research-console/deploy.sh --gate-only && ./apps/scheduler/deploy.sh --gate-only && ./apps/superset/deploy.sh --gate-only"
 has   "a change ([y/N])" "Kind:        changes the platform"
 has   "one lock" "held by medcea.sh for all of them"
 has   "the deferral is explained" "never during an onboarding run"
@@ -996,7 +999,7 @@ real $'8\n16\ny\nq\n'
 rc_is "real: quits with 0" 0
 has   "real: deploy-infra --policy-only ran" "STUB deploy-infra.sh --policy-only"
 has   "real: the last gate ran" "STUB apps/superset/deploy.sh --gate-only"
-[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 10 ]] && pass "real: all ten under the guide's lock" \
+[[ "$(grep -c '^LOCK_PROBE=held$' <<<"$OUT")" == 11 ]] && pass "real: all eleven under the guide's lock" \
     || fail "real: a step ran without the guide's lock"
 OUT="$(printf '8\n16\ny\nq\n' | NO_COLOR=1 STUB_RC=4 "$S/medcea.sh" 2>&1)"
 has   "a deferral (exit 4) stops the chain" "STUB deploy-infra.sh --policy-only"
@@ -1785,6 +1788,25 @@ has   "rollback: sets it false" '1. config.env: RESEARCH_LOCAL_MODEL="false"'
 has   "rollback: removes the server" '2. ./apps/research-model/uninstall.sh'
 has   "rollback: the file stays" "the model file stays in RESEARCH_MODEL_DIR"
 no_stub
+
+echo "79 the research console (Applications, Policy; research Phase 4e)"
+mkcfg true true
+guide $'3\n25\ny\nb\n26\nyes\nq\n'
+rc_is "quits with 0" 0
+has   "deploy (dry)" "[dry run] not executed: ./apps/research-console/deploy.sh"
+has   "deploy is a change ([y/N])" "Run it? [y/N]"
+has   "the skip explained" "the applied access policy has no research console (RESEARCH_CONSOLE_DOMAIN"
+has   "uninstall: yes runs it (dry)" "[dry run] not executed: ./apps/research-console/uninstall.sh"
+has   "uninstall: the API and sessions stay" "every recorded session and Keycloak client research-console stay"
+no_stub
+guide $'8\n29\n14\nadmin\ny\nq\n'
+rc_is "rs4e: quits with 0" 0
+has   "rs4e: the chain (dry)" "[dry run] not executed: ./apps/iam/apply.sh 14 --by admin && ./deploy-infra.sh && ./apps/research-agents/deploy.sh && ./apps/research-console/deploy.sh && ./apps/access/deploy.sh && ./health-check.sh"
+has   "rs4e: one lock" "held by medcea.sh for all of them"
+has   "rs4e: the 503 minute is named" "about a minute of 503"
+no_stub
+real $'3\n25\ny\nq\n'
+has   "real: the deploy ran" "STUB apps/research-console/deploy.sh"
 
 echo "54 dialogs: menu, area, a read-only command, its confirmation, the dry-run box"
 mkcfg false false
